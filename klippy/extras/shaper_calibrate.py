@@ -86,22 +86,6 @@ CalibrationResult = collections.namedtuple(
 DEFAULT_TARGET_SMOOTHING = 0.12
 
 
-def get_shaper_offset(A, T):
-    return sum([a * t for a, t in zip(A, T)]) / sum(A)
-
-
-def get_smoother_offset(np, C, t_sm):
-    hst = t_sm * 0.5
-
-    n_t = 200
-    t, dt = np.linspace(-hst, hst, n_t, retstep=True)
-
-    w = np.zeros(shape=t.shape)
-    for c in C[::-1]:
-        w = w * (-t) + c
-
-    return -np.trapz(t * w, dx=dt)
-
 
 def step_response(np, t, omega, damping_ratio):
     t = np.maximum(t, 0.0)
@@ -399,7 +383,7 @@ class ShaperCalibrate:
         n = len(T)
         # Shaper centroid shift — subtracting ts leaves only shaper
         # distortion residual, per Singer & Seering 1990.
-        ts = sum([A[i] * T[i] for i in range(n)]) * inv_D
+        ts = shaper_defs.get_shaper_offset(A, T)
 
         # offset_180: shaper residual at the cusp of a 180° velocity
         # reversal, x(t) = (a/2)(t - ts)**2. Models U-turn overshoot
