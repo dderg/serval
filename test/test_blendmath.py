@@ -176,3 +176,29 @@ def test_blend_geometry_60deg_tolerance_radius():
     )
     assert result is not None
     assert result.R == pytest.approx(expected_R, rel=1e-9)
+
+
+def test_blend_geometry_midpoint_cap_binds_on_short_segment():
+    # 90 deg corner, but one adjacent segment is short.
+    # R_mid = min(L_prev, L_next) * cot(theta/2) = 0.5 * 1.0 = 0.5 mm
+    # R_tol should be much larger given the tolerance; verify R_mid wins.
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    corner_dev = 5.0  # absurdly loose tolerance so R_tol is the larger value
+    L_short = 0.5
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=L_short,
+        L_next=1000.0,
+        corner_deviation=corner_dev,
+        a_max=1.0,
+        j_eff=1e30,
+    )
+    assert result is not None
+    cos_half = math.sqrt(2) / 2
+    sin_half = math.sqrt(2) / 2
+    expected_R_mid = L_short * cos_half / sin_half  # = 0.5
+    assert result.R == pytest.approx(expected_R_mid, rel=1e-9)
+    # d_consumed should equal L_short (90 deg case: d = R).
+    assert result.d_consumed == pytest.approx(L_short, rel=1e-9)
