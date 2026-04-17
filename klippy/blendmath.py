@@ -134,15 +134,45 @@ def blend_geometry(
     # Placeholder v_cap; refined in later tasks.
     v_cap = float("inf")
 
+    # Tangent points on the adjacent rays. prev_dir points *toward* the
+    # vertex, so the entry tangent point sits at -d * prev_dir (upstream).
+    # next_dir points *away from* the vertex, so exit sits at +d * next_dir.
+    d = R * sin_half / cos_half
+    entry_pt = vscale(prev_dir, -d)
+    exit_pt = vscale(next_dir, d)
+
+    # Plane normal (ambiguous sign for collinear / reversal; safe here since
+    # those cases already returned). Choose prev x next for consistent
+    # right-handed orientation.
+    raw_normal = vcross(prev_dir, next_dir)
+    raw_norm_n = vnorm(raw_normal)
+    if raw_norm_n == 0.0:
+        plane_normal: Vec3 = (0.0, 0.0, 0.0)
+    else:
+        plane_normal = vscale(raw_normal, 1.0 / raw_norm_n)
+
+    # Arc center: perpendicular to prev_dir at entry_pt, offset by R toward
+    # the interior of the corner. The interior direction is
+    # normalize(next_dir - prev_dir * cos_theta) -- but it's simpler to
+    # compute via the inward perpendicular n_prev = plane_normal x prev_dir
+    # (with the sign chosen so that stepping from entry_pt by +R*n_prev
+    # lands on the arc center).
+    n_prev = vcross(plane_normal, prev_dir)
+    # Choose sign so n_prev points from entry_pt toward the corner interior.
+    # The interior is on the next_dir side; dot with next_dir should be >= 0.
+    if vdot(n_prev, next_dir) < 0.0:
+        n_prev = vscale(n_prev, -1.0)
+    center = vadd(entry_pt, vscale(n_prev, R))
+
     return BlendArc(
         R=R,
         theta=theta,
-        d_consumed=R * sin_half / cos_half,
+        d_consumed=d,
         v_cap=v_cap,
-        center=(0.0, 0.0, 0.0),
-        entry_pt=(0.0, 0.0, 0.0),
-        exit_pt=(0.0, 0.0, 0.0),
+        center=center,
+        entry_pt=entry_pt,
+        exit_pt=exit_pt,
         entry_tangent=prev_dir,
         exit_tangent=next_dir,
-        plane_normal=(0.0, 0.0, 0.0),
+        plane_normal=plane_normal,
     )

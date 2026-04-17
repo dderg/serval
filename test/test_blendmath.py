@@ -202,3 +202,43 @@ def test_blend_geometry_midpoint_cap_binds_on_short_segment():
     assert result.R == pytest.approx(expected_R_mid, rel=1e-9)
     # d_consumed should equal L_short (90 deg case: d = R).
     assert result.d_consumed == pytest.approx(L_short, rel=1e-9)
+
+
+def test_blend_geometry_90deg_geometry_positioning():
+    # Corner at origin: prev move ends at (0,0,0) heading +X,
+    # next move starts at (0,0,0) heading +Y.
+    # In this pure-geometry API we don't pass the vertex; entry/exit are
+    # expressed in a local frame relative to the corner vertex. Convention:
+    # corner vertex is the origin.
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    corner_dev = 0.02
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1000.0,
+        L_next=1000.0,
+        corner_deviation=corner_dev,
+        a_max=1.0,
+        j_eff=1e30,
+    )
+    assert result is not None
+    R = result.R
+    d = result.d_consumed  # should equal R for 90 deg
+    # Entry point sits distance d back along prev_dir from the vertex (origin).
+    # prev_dir is the direction the toolhead WAS heading, so the entry point
+    # lies at origin - d*prev_dir (upstream of the vertex along the incoming ray).
+    expected_entry = (-d, 0.0, 0.0)
+    expected_exit = (0.0, d, 0.0)
+    # Center sits on the angle bisector interior to the corner, distance
+    # R from each tangent point. For this 90 deg +X -> +Y corner it's at
+    # (-d, d, 0) i.e. (-R, R, 0) in the corner frame.
+    expected_center = (-R, R, 0.0)
+    # Plane normal: prev_dir x next_dir = (1,0,0) x (0,1,0) = (0,0,1).
+    expected_normal = (0.0, 0.0, 1.0)
+    assert result.entry_pt == pytest.approx(expected_entry, abs=1e-12)
+    assert result.exit_pt == pytest.approx(expected_exit, abs=1e-12)
+    assert result.center == pytest.approx(expected_center, abs=1e-12)
+    assert result.plane_normal == pytest.approx(expected_normal, abs=1e-12)
+    assert result.entry_tangent == prev_dir
+    assert result.exit_tangent == next_dir
