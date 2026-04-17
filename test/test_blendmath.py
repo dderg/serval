@@ -132,3 +132,47 @@ def test_blend_geometry_near_u_turn_returns_zero_arc():
     assert result is not None
     assert result.R == 0.0
     assert result.v_cap == 0.0
+
+
+def test_blend_geometry_90deg_tolerance_radius():
+    # 90 degree corner, X -> Y.
+    # theta = pi/2, so cos(theta/2) = sqrt(2)/2.
+    # R_tol = corner_deviation * (sqrt(2)/2) / (1 - sqrt(2)/2)
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    corner_dev = 0.02  # mm
+    # Adjacent segments much longer than the arc, jerk and accel loose:
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1000.0,
+        L_next=1000.0,
+        corner_deviation=corner_dev,
+        a_max=1.0,      # trivial acceleration → v_cap not the limiting factor here
+        j_eff=1e30,     # jerk floor effectively disabled
+    )
+    assert result is not None
+    expected_R = corner_dev * (math.sqrt(2) / 2) / (1 - math.sqrt(2) / 2)
+    assert result.R == pytest.approx(expected_R, rel=1e-9)
+    assert result.theta == pytest.approx(math.pi / 2, rel=1e-9)
+
+
+def test_blend_geometry_60deg_tolerance_radius():
+    # 60 degree deflection: prev along +X, next rotated 60 degrees counter-clockwise.
+    prev_dir = (1.0, 0.0, 0.0)
+    theta = math.pi / 3
+    next_dir = (math.cos(theta), math.sin(theta), 0.0)
+    corner_dev = 0.05
+    cos_half = math.cos(theta / 2)
+    expected_R = corner_dev * cos_half / (1 - cos_half)
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1000.0,
+        L_next=1000.0,
+        corner_deviation=corner_dev,
+        a_max=1.0,
+        j_eff=1e30,
+    )
+    assert result is not None
+    assert result.R == pytest.approx(expected_R, rel=1e-9)

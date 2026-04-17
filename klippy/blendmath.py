@@ -120,4 +120,29 @@ def blend_geometry(
             plane_normal=(0.0, 0.0, 0.0),
         )
 
-    raise NotImplementedError("general corner not handled yet")
+    # Deflection angle (rad).
+    theta = 2.0 * math.atan2(sin_half, cos_half)
+
+    # Tolerance-driven radius:
+    R_tol = corner_deviation * cos_half / (1.0 - cos_half)
+
+    # Midpoint / adjacent-segment cap. cot(theta/2) = cos_half / sin_half.
+    R_mid = min(L_prev, L_next) * cos_half / sin_half
+
+    R = min(R_tol, R_mid)
+
+    # Placeholder v_cap; refined in later tasks.
+    v_cap = float("inf")
+
+    return BlendArc(
+        R=R,
+        theta=theta,
+        d_consumed=R * sin_half / cos_half,
+        v_cap=v_cap,
+        center=(0.0, 0.0, 0.0),
+        entry_pt=(0.0, 0.0, 0.0),
+        exit_pt=(0.0, 0.0, 0.0),
+        entry_tangent=prev_dir,
+        exit_tangent=next_dir,
+        plane_normal=(0.0, 0.0, 0.0),
+    )
