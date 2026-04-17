@@ -16,6 +16,8 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from klippy import blendshaper
+
 Vec3 = Tuple[float, float, float]
 
 COLLINEAR_EPS = 1e-6
@@ -248,6 +250,52 @@ def _rotate(v: Vec3, axis: Vec3, angle: float) -> Vec3:
         v[1] * c + ax_cross_v[1] * s + axis[1] * ax_dot_v * (1.0 - c),
         v[2] * c + ax_cross_v[2] * s + axis[2] * ax_dot_v * (1.0 - c),
     )
+
+
+def _extract_shapers(toolhead):
+    """Pull per-axis shaper snapshots off a Kalico toolhead.
+
+    Returns an empty list if `toolhead` is None or no `input_shaper`
+    module is loaded. Unshaped axes (shaper_freq == 0) are included
+    with A_axis = 0 so the caller sees them and can still reason
+    about missing axes.
+    """
+    if toolhead is None:
+        return []
+    printer = getattr(toolhead, "printer", None)
+    if printer is None:
+        return []
+    is_obj = printer.lookup_object("input_shaper", None)
+    if is_obj is None:
+        return []
+
+    # Lazy-import ShaperCalibrate to avoid a hard dependency when
+    # blendmath is imported in a non-Kalico context (e.g. pytest).
+    from klippy.extras.shaper_calibrate import ShaperCalibrate
+    from klippy.extras import shaper_defs
+
+    sc = ShaperCalibrate(printer=None)
+    shaper_factory = {s.name: s.init_func for s in shaper_defs.INPUT_SHAPERS}
+
+    snaps = []
+    for axis_shaper in is_obj.get_shapers():
+        params = axis_shaper.params
+        freq = float(params.shaper_freq)
+        shaper_type = params.shaper_type
+        damping_ratio = float(params.damping_ratio)
+        if freq > 0.0 and shaper_type in shaper_factory:
+            impulses = shaper_factory[shaper_type](freq, damping_ratio)
+            A_axis = float(sc.find_shaper_max_accel(impulses, scv=0.0))
+        else:
+            A_axis = 0.0
+        snaps.append(blendshaper.AxisShaperSnapshot(
+            axis=axis_shaper.axis,
+            shaper_type=shaper_type,
+            shaper_freq=freq,
+            damping_ratio=damping_ratio,
+            A_axis=A_axis,
+        ))
+    return snaps
 
 
 def blend_from_moves(

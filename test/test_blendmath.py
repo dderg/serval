@@ -683,3 +683,92 @@ def test_segment_arc_zero_max_chord_err_raises():
         blendmath.segment_arc(arc, max_chord_err=0.0)
     with pytest.raises(ValueError, match="max_chord_err must be positive"):
         blendmath.segment_arc(arc, max_chord_err=-1e-3)
+
+
+class _FakeAxisInputShaper:
+    def __init__(self, axis, shaper_type, freq, damping_ratio=0.1):
+        self.axis = axis
+        self._type = shaper_type
+        self._freq = freq
+        self._damping = damping_ratio
+
+    class _Params:
+        def __init__(self, outer):
+            self.shaper_type = outer._type
+            self.shaper_freq = outer._freq
+            self.damping_ratio = outer._damping
+
+    @property
+    def params(self):
+        return self._Params(self)
+
+
+class _FakeInputShaper:
+    def __init__(self, shapers):
+        self._shapers = shapers
+
+    def get_shapers(self):
+        return list(self._shapers)
+
+
+class _FakePrinterObject:
+    def __init__(self, input_shaper):
+        self._is = input_shaper
+
+    def lookup_object(self, name, default=None):
+        if name == "input_shaper":
+            return self._is
+        return default
+
+
+class _FakeToolheadWithShapers:
+    def __init__(self, input_shaper):
+        self.printer = _FakePrinterObject(input_shaper)
+
+
+def test_extract_shapers_two_axes():
+    is_obj = _FakeInputShaper([
+        _FakeAxisInputShaper("x", "zv", 150.0),
+        _FakeAxisInputShaper("y", "zv", 80.0),
+    ])
+    toolhead = _FakeToolheadWithShapers(is_obj)
+    snaps = blendmath._extract_shapers(toolhead)
+    snaps_by_axis = {s.axis: s for s in snaps}
+    assert snaps_by_axis["x"].shaper_freq == 150.0
+    assert snaps_by_axis["x"].shaper_type == "zv"
+    assert snaps_by_axis["y"].shaper_freq == 80.0
+    # A_axis is populated from find_shaper_max_accel — positive for shaped axes.
+    assert snaps_by_axis["x"].A_axis > 0.0
+    assert snaps_by_axis["y"].A_axis > 0.0
+    # X should have larger A_axis (higher frequency, more accel budget).
+    assert snaps_by_axis["x"].A_axis > snaps_by_axis["y"].A_axis
+
+
+def test_extract_shapers_none_toolhead_returns_empty():
+    assert blendmath._extract_shapers(None) == []
+
+
+def test_extract_shapers_no_input_shaper_module_returns_empty():
+    class _FakePrinterObjectNoIS:
+        def lookup_object(self, name, default=None):
+            return default
+
+    class _FakeToolhead:
+        printer = _FakePrinterObjectNoIS()
+
+    assert blendmath._extract_shapers(_FakeToolhead()) == []
+
+
+def test_extract_shapers_unshaped_axis_has_zero_A():
+    # Axis with shaper_freq=0 is unshaped → snapshot carries A_axis=0.
+    is_obj = _FakeInputShaper([
+        _FakeAxisInputShaper("x", "zv", 0.0),
+        _FakeAxisInputShaper("y", "zv", 80.0),
+    ])
+    toolhead = _FakeToolheadWithShapers(is_obj)
+    snaps = blendmath._extract_shapers(toolhead)
+    snaps_by_axis = {s.axis: s for s in snaps}
+    assert snaps_by_axis["x"].shaper_freq == 0.0
+    assert snaps_by_axis["x"].A_axis == 0.0
+    # shaper_type is mirrored from params regardless of freq
+    assert snaps_by_axis["x"].shaper_type == "zv"
