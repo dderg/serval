@@ -144,3 +144,44 @@ def test_axis_in_plane_tilted():
     assert in_plane["x"] == pytest.approx(s, abs=1e-12)
     assert in_plane["y"] == pytest.approx(1.0, abs=1e-12)  # perpendicular to normal
     assert in_plane["z"] == pytest.approx(s, abs=1e-12)
+
+
+def test_compute_shaper_bounds_step_single_axis_x_projection():
+    # Contrived n̂ with |n̂·x̂|=1/√2 and |n̂·ŷ|=1/√2 so the single shaped axis
+    # (X) contributes to Bound (b). Unit test of the formula; n̂ here is a
+    # direct input, not derived from a corner.
+    # v_step_cap = √(A_x · R / (1/√2)) = √(A_x · R · √2)
+    snap_x = blendshaper.AxisShaperSnapshot(
+        axis="x",
+        shaper_type="zv",
+        shaper_freq=100.0,
+        damping_ratio=0.1,
+        A_axis=10000.0,
+    )
+    bounds = blendshaper.compute_shaper_bounds(
+        shapers=[snap_x],
+        R=0.5,
+        n_hat=(1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0), 0.0),
+        p_hat=(0.0, 0.0, 1.0),
+    )
+    expected_v_step = math.sqrt(10000.0 * 0.5 * math.sqrt(2.0))
+    assert bounds.v_step_cap == pytest.approx(expected_v_step, rel=1e-9)
+
+
+def test_compute_shaper_bounds_zero_A_axis_skipped():
+    # A shaper with freq > 0 but A_axis = 0 is a malformed snapshot;
+    # the function must skip it instead of returning v_step_cap = 0.
+    snap_bad = blendshaper.AxisShaperSnapshot(
+        axis="x",
+        shaper_type="zv",
+        shaper_freq=100.0,
+        damping_ratio=0.1,
+        A_axis=0.0,
+    )
+    bounds = blendshaper.compute_shaper_bounds(
+        shapers=[snap_bad],
+        R=0.5,
+        n_hat=(1.0, 0.0, 0.0),
+        p_hat=(0.0, 0.0, 1.0),
+    )
+    assert bounds.v_step_cap == float("inf")

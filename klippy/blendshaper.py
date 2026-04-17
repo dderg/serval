@@ -74,3 +74,36 @@ def axis_in_plane(p_hat: Vec3) -> dict:
     fully out-of-plane. Used by Bound (c) rotation jerk."""
     return {ax: math.sqrt(max(0.0, 1.0 - p_hat[i] * p_hat[i]))
             for i, ax in enumerate(_AXES)}
+
+
+def compute_shaper_bounds(
+    shapers: Iterable[AxisShaperSnapshot],
+    R: float,
+    n_hat: Vec3,
+    p_hat: Vec3,
+) -> ShaperBounds:
+    """Compute (j_eff, v_step_cap) for a blend arc.
+
+    shapers: per-axis shaper snapshots. Axes with shaper_freq <= 0
+             contribute no bound.
+    R:       arc radius (mm).
+    n_hat:   unit arc normal at entry (toward arc center).
+    p_hat:   unit arc plane normal.
+    """
+    n_projs = axis_projections(n_hat)
+
+    v_step_cap = float("inf")
+    for snap in shapers:
+        if snap.shaper_freq is None or snap.shaper_freq <= 0.0:
+            continue
+        if snap.A_axis <= 0.0:
+            continue
+        proj = n_projs.get(snap.axis, 0.0)
+        if proj < PROJECTION_EPS:
+            continue
+        v_axis = math.sqrt(snap.A_axis * R / proj)
+        if v_axis < v_step_cap:
+            v_step_cap = v_axis
+
+    # j_eff filled in a subsequent task.
+    return ShaperBounds(j_eff=float("inf"), v_step_cap=v_step_cap)
