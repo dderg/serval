@@ -105,4 +105,19 @@ def blend_geometry(
         # Collinear: no blend required.
         return None
 
-    raise NotImplementedError("only collinear branch handled so far")
+    if cos_half < REVERSAL_EPS:
+        # U-turn: no tangent arc exists. Caller must stop at the junction.
+        return BlendArc(
+            R=0.0,
+            theta=math.pi,
+            d_consumed=0.0,
+            v_cap=0.0,
+            center=(0.0, 0.0, 0.0),
+            entry_pt=(0.0, 0.0, 0.0),
+            exit_pt=(0.0, 0.0, 0.0),
+            entry_tangent=prev_dir,
+            exit_tangent=next_dir,
+            plane_normal=(0.0, 0.0, 0.0),
+        )
+
+    raise NotImplementedError("general corner not handled yet")

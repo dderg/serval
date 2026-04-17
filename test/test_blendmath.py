@@ -95,3 +95,40 @@ def test_blend_geometry_near_collinear_returns_none():
         j_eff=1e7,
     )
     assert result is None
+
+
+def test_blend_geometry_u_turn_returns_zero_arc():
+    # Anti-parallel directions: theta = pi.
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (-1.0, 0.0, 0.0)
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=10.0,
+        L_next=10.0,
+        corner_deviation=0.02,
+        a_max=50000.0,
+        j_eff=1e7,
+    )
+    assert result is not None
+    assert result.R == 0.0
+    assert result.v_cap == 0.0
+
+
+def test_blend_geometry_near_u_turn_returns_zero_arc():
+    prev_dir = (1.0, 0.0, 0.0)
+    # 1e-8 rad shy of U-turn
+    eps = 1e-8
+    next_dir = (-math.cos(eps), math.sin(eps), 0.0)
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=10.0,
+        L_next=10.0,
+        corner_deviation=0.02,
+        a_max=50000.0,
+        j_eff=1e7,
+    )
+    assert result is not None
+    assert result.R == 0.0
+    assert result.v_cap == 0.0
