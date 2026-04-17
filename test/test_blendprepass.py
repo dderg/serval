@@ -1,6 +1,8 @@
 # test/test_blendprepass.py
 import math
 
+import pytest
+
 from klippy import blendprepass
 
 
@@ -177,4 +179,46 @@ def test_flow_within_tolerance_does_not_break():
     # Gate (a) passes: speeds equal. Gate (b) passes: 0.1% < 1%.
     out = c.feed(m2)
     assert out == []
+    assert c._chain == [m1, m2]
+
+
+def test_two_collinear_moves_merge():
+    c = _collapser()
+    th = c._toolhead
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    c.feed(m1)
+    c.feed(m2)
+    out = c.flush()
+    assert len(out) == 1
+    merged = out[0]
+    assert merged is not m1 and merged is not m2
+    assert merged.start_pos == (0, 0, 0, 0)
+    assert merged.end_pos[:3] == (20.0, 0.0, 0.0)
+    assert merged.axes_d[3] == pytest.approx(1.0, abs=1e-12)
+    assert merged.move_d == pytest.approx(20.0, abs=1e-12)
+
+
+def test_non_collinear_moves_do_not_merge():
+    c = _collapser()
+    th = c._toolhead
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    # 1 mm perpendicular offset: well beyond 25 µm tolerance
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 1.0, 0, 1.0), speed=100.0)
+    assert c.feed(m1) == []
+    out = c.feed(m2)
+    assert out == [m1]
+    assert c._chain == [m2]
+
+
+def test_within_tolerance_offset_merges():
+    c = _collapser()
+    th = c._toolhead
+    # 20 µm perpendicular offset from the A-to-C chord — within 25 µm tolerance.
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 20e-3, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 20e-3, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    # Chord A(0,0,0)->C(20,0,0). Intermediate B=(10, 20e-3, 0). Perpendicular
+    # distance from B to chord = 20 µm.
+    assert c.feed(m1) == []
+    assert c.feed(m2) == []
     assert c._chain == [m1, m2]

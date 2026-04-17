@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import logging
+import math
+
+from . import blendmath
 
 
 class CollinearCollapser:
@@ -48,7 +51,21 @@ class CollinearCollapser:
         be = anchor.axes_r[3]
         if abs(ae - be) > self.epm_rel * max(abs(ae), abs(be), 1e-9):
             return False
-        # Gates (c) and (d) come in later tasks.
+        # Gate (c): perpendicular deviation of every buffered intermediate endpoint
+        # from the anchor-to-candidate chord stays within tolerance.
+        A = anchor.start_pos[:3]
+        B = candidate.end_pos[:3]
+        AB = blendmath.vsub(B, A)
+        ab_len = blendmath.vnorm(AB)
+        if ab_len < self.min_seg_len:
+            return False
+        for p_move in self._chain:
+            P = p_move.end_pos[:3]
+            AP = blendmath.vsub(P, A)
+            perp_dist = blendmath.vnorm(blendmath.vcross(AP, AB)) / ab_len
+            if perp_dist > self.tolerance:
+                return False
+        # Gate (d) comes in Task 6.
         return True
 
     def flush(self):
@@ -76,6 +93,10 @@ class CollinearCollapser:
         return result
 
     def _build_merged_move(self, chain):
-        # Real implementation arrives in Task 5; placeholder raises so any
-        # unexpected multi-move chain in earlier tasks is visible.
-        raise NotImplementedError("merged move construction not yet implemented")
+        start_pos = chain[0].start_pos
+        end_pos = chain[-1].end_pos
+        cruise_v = math.sqrt(chain[0].max_cruise_v2)
+        merged = self._move_cls(self._toolhead, start_pos, end_pos, cruise_v)
+        # Further preservation (junction_deviation, next_junction_v2,
+        # timing_callbacks, post-merge check_move) lands in Tasks 8-10.
+        return merged
