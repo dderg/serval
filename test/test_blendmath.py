@@ -581,3 +581,86 @@ def test_interpolate_extruder_through_arc():
         assert p1[3] >= p0[3] - 1e-12
     # Length of output matches polyline.
     assert len(points_xyze) == len(polyline)
+
+
+def test_regression_exact_collinear():
+    # Exactly parallel directions.
+    assert blendmath.blend_geometry(
+        prev_dir=(1.0, 0.0, 0.0),
+        next_dir=(1.0, 0.0, 0.0),
+        L_prev=10.0,
+        L_next=10.0,
+        corner_deviation=0.01,
+        a_max=1000.0,
+        j_eff=1e8,
+    ) is None
+
+
+def test_regression_exact_u_turn():
+    result = blendmath.blend_geometry(
+        prev_dir=(1.0, 0.0, 0.0),
+        next_dir=(-1.0, 0.0, 0.0),
+        L_prev=10.0,
+        L_next=10.0,
+        corner_deviation=0.01,
+        a_max=1000.0,
+        j_eff=1e8,
+    )
+    assert result is not None
+    assert result.R == 0.0
+    assert result.v_cap == 0.0
+
+
+def test_regression_collinear_threshold_boundary():
+    # sin_half = 1e-7 < COLLINEAR_EPS (1e-6), so should be treated as collinear.
+    prev_dir = (1.0, 0.0, 0.0)
+    # angle = 2 * asin(1e-7) rad
+    angle = 2.0 * math.asin(1e-7)
+    next_dir = (math.cos(angle), math.sin(angle), 0.0)
+    assert blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=10.0,
+        L_next=10.0,
+        corner_deviation=0.01,
+        a_max=1000.0,
+        j_eff=1e8,
+    ) is None
+
+
+def test_regression_reversal_threshold_boundary():
+    # cos_half = 1e-7 < REVERSAL_EPS (1e-6), so should be treated as U-turn.
+    prev_dir = (1.0, 0.0, 0.0)
+    # deflection of pi - 2e-7 rad
+    angle = math.pi - 2.0 * math.asin(1e-7)
+    next_dir = (math.cos(angle), math.sin(angle), 0.0)
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=10.0,
+        L_next=10.0,
+        corner_deviation=0.01,
+        a_max=1000.0,
+        j_eff=1e8,
+    )
+    assert result is not None
+    assert result.R == 0.0
+    assert result.v_cap == 0.0
+
+
+def test_regression_very_short_segment_produces_tiny_arc():
+    # Segment shorter than the tolerance-driven arc would want.
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=0.01,  # 10 microns
+        L_next=1000.0,
+        corner_deviation=0.5,
+        a_max=50000.0,
+        j_eff=1e8,
+    )
+    assert result is not None
+    assert result.R == pytest.approx(0.01, rel=1e-9)  # 90 deg: R = L
+    assert result.v_cap > 0.0
