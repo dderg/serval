@@ -133,3 +133,46 @@ class CollinearCollapser:
         if merged.axes_d[3]:
             self._toolhead.extruder.check_move(merged)
         return merged
+
+
+class PrepassLookAheadQueue:
+    """Transparent wrapper that drains a CollinearCollapser on every flush,
+    get_last, or queue access. ToolHead uses this in place of a raw
+    LookAheadQueue so no per-call-site prepass handling is required.
+    """
+
+    def __init__(self, prepass, lookahead):
+        self._prepass = prepass
+        self._lookahead = lookahead
+
+    def add_move(self, move):
+        for m in self._prepass.feed(move):
+            self._lookahead.add_move(m)
+
+    def flush(self, lazy=False):
+        for m in self._prepass.flush():
+            self._lookahead.add_move(m)
+        self._lookahead.flush(lazy=lazy)
+
+    def reset(self):
+        self._prepass.reset()
+        self._lookahead.reset()
+
+    def set_flush_time(self, flush_time):
+        self._lookahead.set_flush_time(flush_time)
+
+    def get_last(self):
+        # Drain prepass first so callers attaching timing_callbacks /
+        # next_junction_v2 via the returned Move land on the canonical
+        # queued move, not a transient chain constituent.
+        for m in self._prepass.flush():
+            self._lookahead.add_move(m)
+        return self._lookahead.get_last()
+
+    @property
+    def queue(self):
+        # check_busy and similar callers test emptiness/length; buffered
+        # chain counts as pending.
+        if self._prepass._chain:
+            return list(self._prepass._chain) + list(self._lookahead.queue)
+        return self._lookahead.queue

@@ -450,3 +450,120 @@ def test_feed_after_exception_starts_clean():
     m3 = _FakeMove(th, (20, 0, 0, 1.0), (30, 0, 0, 1.5), speed=100.0)
     assert c.feed(m3) == []
     assert c._chain == [m3]
+
+
+class _FakeInnerQueue:
+    def __init__(self):
+        self.queue = []
+        self.flush_calls = []
+        self.reset_calls = 0
+        self.set_flush_time_calls = []
+
+    def add_move(self, move):
+        self.queue.append(move)
+
+    def flush(self, lazy=False):
+        self.flush_calls.append(lazy)
+
+    def reset(self):
+        self.reset_calls += 1
+        self.queue = []
+
+    def set_flush_time(self, t):
+        self.set_flush_time_calls.append(t)
+
+    def get_last(self):
+        return self.queue[-1] if self.queue else None
+
+
+def test_adapter_add_move_routes_through_prepass():
+    th = _FakeToolhead()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    inner = _FakeInnerQueue()
+    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    adapter.add_move(m1)
+    adapter.add_move(m2)
+    # Buffered in prepass; inner queue still empty.
+    assert inner.queue == []
+    assert c._chain == [m1, m2]
+
+
+def test_adapter_flush_drains_and_forwards_lazy_flag():
+    th = _FakeToolhead()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    inner = _FakeInnerQueue()
+    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    adapter.add_move(m1)
+    adapter.add_move(m2)
+    adapter.flush(lazy=True)
+    # Chain emitted into inner queue, then inner flushed with lazy=True.
+    assert len(inner.queue) == 1
+    assert inner.flush_calls == [True]
+    assert c._chain == []
+
+
+def test_adapter_reset_discards_chain_and_resets_inner():
+    th = _FakeToolhead()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    inner = _FakeInnerQueue()
+    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    adapter.add_move(m)
+    adapter.reset()
+    assert c._chain == []
+    assert inner.reset_calls == 1
+
+
+def test_adapter_set_flush_time_passes_through():
+    th = _FakeToolhead()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    inner = _FakeInnerQueue()
+    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+
+    adapter.set_flush_time(2.0)
+    assert inner.set_flush_time_calls == [2.0]
+
+
+def test_adapter_get_last_flushes_prepass_first():
+    th = _FakeToolhead()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    inner = _FakeInnerQueue()
+    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    adapter.add_move(m1)
+    adapter.add_move(m2)
+    # Before get_last, chain is buffered, inner queue empty.
+    assert inner.queue == []
+    last = adapter.get_last()
+    # get_last drained the prepass; the inner queue now has the merged move.
+    assert len(inner.queue) == 1
+    assert last is inner.queue[0]
+    assert c._chain == []
+
+
+def test_adapter_queue_property_reports_buffered_moves():
+    th = _FakeToolhead()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    inner = _FakeInnerQueue()
+    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+
+    # Empty state: queue is empty.
+    assert not adapter.queue
+
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    adapter.add_move(m1)
+    adapter.add_move(m2)
+    # Buffered in prepass but inner still empty — queue property reflects
+    # buffered pending work.
+    assert adapter.queue
+    assert len(adapter.queue) == 2
