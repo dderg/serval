@@ -37,3 +37,24 @@ class AxisShaperSnapshot:
 class ShaperBounds:
     j_eff: float
     v_step_cap: float
+
+
+# Pulse-sequence span in units of the damped period, keyed by shaper name.
+# Values match klippy/extras/shaper_defs.py exactly (last T[i] of each).
+_SHAPER_SPAN_FACTOR = {
+    "zv": 0.5,
+    "mzv": 0.75,
+    "zvd": 1.0,
+    "ei": 1.0,
+    "2hump_ei": 1.5,
+    "3hump_ei": 2.0,
+}
+
+
+def shaper_span(shaper_type: str, shaper_freq: float, damping_ratio: float) -> float:
+    """Total pulse-sequence span in seconds for the given shaper configuration."""
+    if shaper_type not in _SHAPER_SPAN_FACTOR:
+        raise ValueError("unknown shaper type: %r" % (shaper_type,))
+    factor = _SHAPER_SPAN_FACTOR[shaper_type]
+    t_d = 1.0 / (shaper_freq * math.sqrt(1.0 - damping_ratio * damping_ratio))
+    return factor * t_d
