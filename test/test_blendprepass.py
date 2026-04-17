@@ -139,3 +139,42 @@ def test_reset_discards_chain():
     c.reset()
     assert c._chain == []
     assert c.flush() == []
+
+
+def test_speed_change_breaks_chain():
+    c = _collapser()
+    th = c._toolhead
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    # Speed differs by 1% (> f_rel=1e-6)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=101.0)
+    assert c.feed(m1) == []
+    out = c.feed(m2)
+    # Gate (a) rejects; chain flushes as singleton, m2 starts new chain.
+    assert out == [m1]
+    assert c._chain == [m2]
+
+
+def test_flow_change_breaks_chain():
+    c = _collapser()
+    th = c._toolhead
+    # Same speed, same direction; different E-per-mm (> epm_rel=1%)
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.1), speed=100.0)
+    assert c.feed(m1) == []
+    out = c.feed(m2)
+    assert out == [m1]
+    assert c._chain == [m2]
+
+
+def test_flow_within_tolerance_does_not_break():
+    c = _collapser()
+    th = c._toolhead
+    # 0.5 mm E vs 0.5005 mm E over same 10 mm XYZ -> 0.1% diff (< epm_rel)
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0005), speed=100.0)
+    out = c.feed(m1)
+    assert out == []
+    # Gate (a) passes: speeds equal. Gate (b) passes: 0.1% < 1%.
+    out = c.feed(m2)
+    assert out == []
+    assert c._chain == [m1, m2]

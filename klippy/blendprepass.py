@@ -30,9 +30,26 @@ class CollinearCollapser:
         if not self._chain:
             self._chain = [move]
             return []
-        # (gates / chain-cap come in later tasks)
-        self._chain = [move]
+        if not self._merge_gate_passes(move):
+            emitted = self._flush_chain()
+            self._chain = [move]
+            return emitted
+        self._chain.append(move)
         return []
+
+    def _merge_gate_passes(self, candidate):
+        anchor = self._chain[0]
+        # Gate (a): cruise velocity equality
+        max_cv2 = max(candidate.max_cruise_v2, anchor.max_cruise_v2)
+        if abs(candidate.max_cruise_v2 - anchor.max_cruise_v2) > self.f_rel * max_cv2:
+            return False
+        # Gate (b): E-per-XYZ-mm equality (signed; retract<->extrude reversal fails)
+        ae = candidate.axes_r[3]
+        be = anchor.axes_r[3]
+        if abs(ae - be) > self.epm_rel * max(abs(ae), abs(be), 1e-9):
+            return False
+        # Gates (c) and (d) come in later tasks.
+        return True
 
     def flush(self):
         if not self._chain:
