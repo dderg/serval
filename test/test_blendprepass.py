@@ -222,3 +222,39 @@ def test_within_tolerance_offset_merges():
     assert c.feed(m1) == []
     assert c.feed(m2) == []
     assert c._chain == [m1, m2]
+
+
+def test_uturn_rejected_by_projection_bounds():
+    c = _collapser()
+    th = c._toolhead
+    # A=(0,0,0) -> B=(10,0,0), candidate ends at (0,0,0): AB length 0 -> rejected.
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (0, 0, 0, 1.0), speed=100.0)
+    assert c.feed(m1) == []
+    out = c.feed(m2)
+    assert out == [m1]
+    assert c._chain == [m2]
+
+
+def test_overshoot_retrace_rejected():
+    c = _collapser()
+    th = c._toolhead
+    # Anchor A=(0,0,0); chain moves to B=(12,0,0) then candidate to C=(10,0,0).
+    # Projection t of B onto AC chord = 12/10 = 1.2 -> out of [0,1], reject.
+    m1 = _FakeMove(th, (0, 0, 0, 0), (12, 0, 0, 0.6), speed=100.0)
+    m2 = _FakeMove(th, (12, 0, 0, 0.6), (10, 0, 0, 0.5), speed=100.0)
+    assert c.feed(m1) == []
+    out = c.feed(m2)
+    assert out == [m1]
+    assert c._chain == [m2]
+
+
+def test_legitimate_extension_passes_projection():
+    c = _collapser()
+    th = c._toolhead
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    assert c.feed(m1) == []
+    assert c.feed(m2) == []
+    # Both buffered; gate (d) allowed the extension.
+    assert len(c._chain) == 2

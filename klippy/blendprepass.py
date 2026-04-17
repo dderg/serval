@@ -65,7 +65,15 @@ class CollinearCollapser:
             perp_dist = blendmath.vnorm(blendmath.vcross(AP, AB)) / ab_len
             if perp_dist > self.tolerance:
                 return False
-        # Gate (d) comes in Task 6.
+        # Gate (d): projection bounds — every intermediate endpoint must lie
+        # on the AB segment interior (0 <= t <= 1, with eps slack for float noise).
+        ab_dot_ab = blendmath.vdot(AB, AB)
+        for p_move in self._chain:
+            P = p_move.end_pos[:3]
+            AP = blendmath.vsub(P, A)
+            t = blendmath.vdot(AP, AB) / ab_dot_ab
+            if not (-self.t_eps <= t <= 1.0 + self.t_eps):
+                return False
         return True
 
     def flush(self):
