@@ -305,3 +305,84 @@ def test_blend_geometry_jerk_floor_loose_does_not_bind():
     assert result is not None
     expected_v_centripetal = math.sqrt((math.sqrt(3) / 2) * 50000.0 * result.R)
     assert result.v_cap == pytest.approx(expected_v_centripetal, rel=1e-9)
+
+
+import random
+
+
+def _rand_unit_vec(rng: random.Random) -> blendmath.Vec3:
+    # Uniform direction on the XY plane is enough for property tests.
+    phi = rng.uniform(0.0, 2.0 * math.pi)
+    return (math.cos(phi), math.sin(phi), 0.0)
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_blend_geometry_property_random_corners(seed):
+    rng = random.Random(seed)
+    # Random first direction.
+    prev_dir = _rand_unit_vec(rng)
+    # Random deflection in (0.01 rad, pi - 0.01 rad) to stay away from degenerates.
+    theta = rng.uniform(0.01, math.pi - 0.01)
+    # Rotate prev_dir by theta about +Z to get next_dir.
+    c, s = math.cos(theta), math.sin(theta)
+    next_dir = (
+        c * prev_dir[0] - s * prev_dir[1],
+        s * prev_dir[0] + c * prev_dir[1],
+        0.0,
+    )
+    L_prev = rng.uniform(0.5, 100.0)
+    L_next = rng.uniform(0.5, 100.0)
+    corner_dev = rng.uniform(0.001, 0.1)
+    a_max = rng.uniform(1000.0, 100000.0)
+    j_eff = rng.uniform(1e5, 1e9)
+
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=L_prev,
+        L_next=L_next,
+        corner_deviation=corner_dev,
+        a_max=a_max,
+        j_eff=j_eff,
+    )
+    assert result is not None
+    R = result.R
+    d = result.d_consumed
+
+    # 1. Consumed length fits inside both segments.
+    assert d <= L_prev + 1e-9
+    assert d <= L_next + 1e-9
+
+    # 2. Chord deviation of this single arc: epsilon = R*(1/cos(theta/2) - 1).
+    # Must not exceed corner_deviation (unless midpoint cap made R smaller,
+    # in which case epsilon <= corner_deviation trivially).
+    cos_half = math.cos(theta / 2)
+    eps_arc = R * (1.0 / cos_half - 1.0)
+    assert eps_arc <= corner_dev + 1e-9
+
+    # 3. v_cap respects centripetal bound.
+    a_n_max = (math.sqrt(3) / 2) * a_max
+    assert result.v_cap ** 2 <= a_n_max * R + 1e-6
+
+    # 4. v_cap respects jerk floor.
+    #    v^(3/2) <= R * sqrt(j_eff)
+    assert result.v_cap ** 1.5 <= R * math.sqrt(j_eff) + 1e-6
+
+    # 5. Tangent points lie on the adjacent rays.
+    #    entry_pt should be collinear with prev_dir (at -d * prev_dir).
+    assert result.entry_pt == pytest.approx(
+        (-d * prev_dir[0], -d * prev_dir[1], -d * prev_dir[2]), abs=1e-9
+    )
+    assert result.exit_pt == pytest.approx(
+        (d * next_dir[0], d * next_dir[1], d * next_dir[2]), abs=1e-9
+    )
+
+    # 6. Center is distance R from both tangent points.
+    from_entry = blendmath.vsub(result.center, result.entry_pt)
+    from_exit = blendmath.vsub(result.center, result.exit_pt)
+    assert blendmath.vnorm(from_entry) == pytest.approx(R, rel=1e-6)
+    assert blendmath.vnorm(from_exit) == pytest.approx(R, rel=1e-6)
+
+    # 7. Center lies on the interior side of the corner (dot with next_dir > 0 from entry_pt).
+    interior_check = blendmath.vdot(blendmath.vsub(result.center, result.entry_pt), next_dir)
+    assert interior_check > -1e-9
