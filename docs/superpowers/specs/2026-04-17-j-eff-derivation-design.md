@@ -257,17 +257,19 @@ def blend_from_moves(prev_move, next_move, corner_deviation, toolhead=None):
 4. **Integration tests** (in `test/test_blendmath.py` — extends existing fixtures):
    - End-to-end `blend_from_moves` with a mocked toolhead exposing realistic shapers; verify `v_cap` matches the expected min of the three bounds.
    - R/n_hat iteration: verify R is stable across the two-pass iteration.
-5. **Numeric sanity against user's hardware profile** (all quantities in Kalico's native units: mm, s, mm/s, mm/s², mm/s³):
-   - X = ZV @ 150 Hz, Y = ZV @ 80 Hz, ζ = 0.1, `max_accel = 50000 mm/s²`.
-   - `T_x = 0.5 / (150·√(1−0.01)) ≈ 3.35 ms`;  `T_y = 0.5 / (80·√(1−0.01)) ≈ 6.28 ms`.
-   - `A_x`, `A_y` come from `find_shaper_max_accel` — hypothetical illustrative values: `A_x = 12000`, `A_y = 6000` (Y is stricter because lower frequency).
-   - At a representative 90° corner with `R = 0.5 mm`: `|n̂·ê_x| = |n̂·ê_y| = 1/√2`; `axis_in_plane_x = axis_in_plane_y = 1`.
-   - Bound (a): `v_centripetal = √((√3/2) · 50000 · 0.5) = √21650 ≈ 147 mm/s`.
-   - Bound (b): `v_step_cap = min(√(A_x · 0.5 · √2), √(A_y · 0.5 · √2)) = min(√(8485), √(4243)) ≈ min(92, 65) = 65 mm/s`. Y binds.
-   - Bound (c): `j_eff = min(A_x/T_x, A_y/T_y) = min(3.58e6, 9.55e5) ≈ 9.55e5 mm/s³`; `v_jerk = (0.25 · 9.55e5)^(1/3) ≈ (2.39e5)^(1/3) ≈ 62 mm/s`. Y binds.
-   - **Final v_cap ≈ 62 mm/s at R=0.5mm**, set by rotation jerk on Y axis.
-   - Cross-check: this is well below current SCV=70's junction-velocity-at-90° of ~169 mm/s, which makes sense — we're deliberately trading some corner speed for smoothness at the 5% residual-vibration tolerance.
-   - These numbers are **illustrative** — real `A_x`/`A_y` come from calibration. The test suite performs the computation end-to-end and verifies the three bounds combine as expected.
+5. **Numeric sanity against user's hardware profile** (all quantities in Kalico's native units: mm, s, mm/s, mm/s², mm/s³). Computed against real `find_shaper_max_accel` output:
+   - X = ZV @ 150 Hz, Y = ZV @ 80 Hz, ζ = 0.1, `max_accel = 50000 mm/s²`, `scv = 0`.
+   - `t_d_x ≈ 6.700 ms`, `T_x = 0.5·t_d_x ≈ 3.350 ms`.
+   - `t_d_y ≈ 12.563 ms`, `T_y = 0.5·t_d_y ≈ 6.281 ms`.
+   - `A_x ≈ 87,685.6 mm/s²` (from `find_shaper_max_accel` with TARGET_SMOOTHING=0.12).
+   - `A_y ≈ 24,941.7 mm/s²` (Y is much stricter because of lower frequency).
+   - At a representative 90° corner with `R = 0.5 mm`: `|n̂·ê_x| = |n̂·ê_y| = 1/√2 ≈ 0.707`; `axis_in_plane_x = axis_in_plane_y = 1`.
+   - Bound (a): `v_centripetal = √((√3/2) · 50000 · 0.5) ≈ 147.1 mm/s`.
+   - Bound (b): `v_step_x ≈ √(87685.6 · 0.5 / 0.707) ≈ 249.0 mm/s`; `v_step_y ≈ √(24941.7 · 0.5 / 0.707) ≈ 132.8 mm/s`. `v_step_cap = 132.8 mm/s` (Y binds).
+   - Bound (c): `j_x = A_x/T_x ≈ 2.62e7 mm/s³`; `j_y = A_y/T_y ≈ 3.97e6 mm/s³`; `j_eff = min = 3.97e6 mm/s³` (Y binds). `v_jerk = (0.25 · 3.97e6)^(1/3) ≈ 99.8 mm/s`.
+   - **Final v_cap ≈ 99.8 mm/s at R=0.5 mm**, set by rotation jerk on Y axis (Bound c).
+   - Cross-check: current SCV=70 produces junction velocity at 90° of `70·√(sin(45°)/(1−sin(45°))) ≈ 108.8 mm/s`. The blend-arc-based v_cap is ~8% below that, so the cost of switching from SCV to real blending is small at this corner size and entirely accounted for by the rotation-jerk bound on the lower-frequency Y axis — exactly what we want, since Y is the axis whose shaper has the least spectral budget.
+   - These numbers are re-derived in the test suite; any divergence is a regression.
 6. **Monotonicity properties**:
    - Lower shaper frequency → lower `j_eff`.
    - Higher damping ratio → lower `j_eff` (t_d grows).
