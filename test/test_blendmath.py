@@ -772,3 +772,105 @@ def test_extract_shapers_unshaped_axis_has_zero_A():
     assert snaps_by_axis["x"].A_axis == 0.0
     # shaper_type is mirrored from params regardless of freq
     assert snaps_by_axis["x"].shaper_type == "zv"
+
+
+def test_blend_from_moves_with_toolhead_derives_j_eff():
+    # Set up a 90° XY corner with X=ZV@150Hz, Y=ZV@80Hz. Expect
+    # v_cap to match the spec's numeric sanity: ~99.8 mm/s at R=0.5mm.
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=50.0,
+        accel=50000.0, max_cruise_v2=1e12,
+    )
+    nxt = _FakeMove(
+        axes_r=[0.0, 1.0, 0.0, 0.0], move_d=50.0,
+        accel=50000.0, max_cruise_v2=1e12,
+    )
+    is_obj = _FakeInputShaper([
+        _FakeAxisInputShaper("x", "zv", 150.0),
+        _FakeAxisInputShaper("y", "zv", 80.0),
+    ])
+    toolhead = _FakeToolheadWithShapers(is_obj)
+    # corner_deviation is loose enough that R_tol is large; R_mid caps
+    # at min(L)·cot(45°) = 50, so R_tol binds. We still expect R ≈ 0.5mm
+    # if we set corner_deviation to produce that.
+    # R_tol = corner_deviation · cos(45°)/(1-cos(45°)) = corner_dev · 2.414
+    # Solving corner_deviation = 0.5/2.414 ≈ 0.207 mm:
+    corner_dev = 0.5 / (math.sqrt(2)/2 / (1 - math.sqrt(2)/2))
+    result = blendmath.blend_from_moves(
+        prev_move=prev,
+        next_move=nxt,
+        corner_deviation=corner_dev,
+        toolhead=toolhead,
+    )
+    assert result is not None
+    assert result.R == pytest.approx(0.5, rel=1e-6)
+    # Final v_cap ~ 99.8 mm/s per spec sanity section (Y rotation-jerk binds).
+    assert result.v_cap == pytest.approx(99.8, rel=0.05)
+
+
+def test_blend_from_moves_without_toolhead_preserves_old_behavior():
+    # Pass j_eff directly, no toolhead: identical to pre-change behavior.
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=50.0,
+        accel=50000.0, max_cruise_v2=1e6,
+    )
+    nxt = _FakeMove(
+        axes_r=[0.0, 1.0, 0.0, 0.0], move_d=50.0,
+        accel=50000.0, max_cruise_v2=1e6,
+    )
+    j_eff = 1e8
+    corner_dev = 0.02
+    adapter_result = blendmath.blend_from_moves(
+        prev_move=prev, next_move=nxt,
+        corner_deviation=corner_dev, j_eff=j_eff,
+    )
+    core_result = blendmath.blend_geometry(
+        prev_dir=(1.0, 0.0, 0.0), next_dir=(0.0, 1.0, 0.0),
+        L_prev=50.0, L_next=50.0,
+        corner_deviation=corner_dev, a_max=50000.0, j_eff=j_eff,
+    )
+    assert adapter_result.R == pytest.approx(core_result.R, rel=1e-12)
+    assert adapter_result.v_cap == pytest.approx(core_result.v_cap, rel=1e-12)
+
+
+def test_blend_from_moves_collinear_with_toolhead_returns_none():
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=10.0,
+        accel=50000.0, max_cruise_v2=1e6,
+    )
+    nxt = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=10.0,
+        accel=50000.0, max_cruise_v2=1e6,
+    )
+    is_obj = _FakeInputShaper([
+        _FakeAxisInputShaper("x", "zv", 150.0),
+        _FakeAxisInputShaper("y", "zv", 80.0),
+    ])
+    toolhead = _FakeToolheadWithShapers(is_obj)
+    result = blendmath.blend_from_moves(
+        prev_move=prev, next_move=nxt,
+        corner_deviation=0.02, toolhead=toolhead,
+    )
+    assert result is None
+
+
+def test_blend_from_moves_u_turn_with_toolhead_returns_zero_arc():
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=10.0,
+        accel=50000.0, max_cruise_v2=1e6,
+    )
+    nxt = _FakeMove(
+        axes_r=[-1.0, 0.0, 0.0, 0.0], move_d=10.0,
+        accel=50000.0, max_cruise_v2=1e6,
+    )
+    is_obj = _FakeInputShaper([
+        _FakeAxisInputShaper("x", "zv", 150.0),
+    ])
+    toolhead = _FakeToolheadWithShapers(is_obj)
+    result = blendmath.blend_from_moves(
+        prev_move=prev, next_move=nxt,
+        corner_deviation=0.02, toolhead=toolhead,
+    )
+    assert result is not None
+    assert result.R == 0.0
+    assert result.v_cap == 0.0

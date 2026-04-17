@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, Tuple
 
 from klippy import blendshaper
@@ -302,12 +302,21 @@ def blend_from_moves(
     prev_move,
     next_move,
     corner_deviation: float,
-    j_eff: float,
+    j_eff: float = float("inf"),
+    toolhead=None,
 ) -> Optional[BlendArc]:
     """Adapter: compute a blend arc from a pair of Kalico Move-like objects.
 
-    Skips the blend if either move is non-kinematic (E-only). The effective
-    a_max is the stricter of the two moves' accel values.
+    Skips the blend if either move is non-kinematic (E-only). The
+    effective a_max is the stricter of the two moves' accel values.
+
+    If `toolhead` is given, derives `j_eff` and an additional per-axis
+    entry-step velocity cap from the toolhead's input shaper module.
+    In that case any explicit `j_eff` argument is ignored.
+
+    If `toolhead` is None (default), `blend_geometry` is called once
+    with the given `j_eff` (default +inf) — preserves the pre-shaper
+    behavior used by existing tests.
     """
     if not getattr(prev_move, "is_kinematic_move", True):
         return None
@@ -324,17 +333,60 @@ def blend_from_moves(
         next_move.axes_r[1],
         next_move.axes_r[2],
     )
-
     a_max = min(prev_move.accel, next_move.accel)
-    return blend_geometry(
-        prev_dir=prev_dir,
-        next_dir=next_dir,
-        L_prev=prev_move.move_d,
-        L_next=next_move.move_d,
+
+    if toolhead is None:
+        return blend_geometry(
+            prev_dir=prev_dir, next_dir=next_dir,
+            L_prev=prev_move.move_d, L_next=next_move.move_d,
+            corner_deviation=corner_deviation,
+            a_max=a_max, j_eff=j_eff,
+        )
+
+    shapers = _extract_shapers(toolhead)
+
+    # First pass: no jerk constraint — we need R, entry_pt, center,
+    # plane_normal to compute per-axis bounds.
+    arc_0 = blend_geometry(
+        prev_dir=prev_dir, next_dir=next_dir,
+        L_prev=prev_move.move_d, L_next=next_move.move_d,
         corner_deviation=corner_deviation,
-        a_max=a_max,
-        j_eff=j_eff,
+        a_max=a_max, j_eff=float("inf"),
     )
+    if arc_0 is None or arc_0.R == 0.0 or not shapers:
+        return arc_0
+
+    n_hat = vnormalize(vsub(arc_0.center, arc_0.entry_pt))
+    bounds = blendshaper.compute_shaper_bounds(
+        shapers=shapers,
+        R=arc_0.R,
+        n_hat=n_hat,
+        p_hat=arc_0.plane_normal,
+    )
+
+    # Second pass: with the derived j_eff.
+    arc = blend_geometry(
+        prev_dir=prev_dir, next_dir=next_dir,
+        L_prev=prev_move.move_d, L_next=next_move.move_d,
+        corner_deviation=corner_deviation,
+        a_max=a_max, j_eff=bounds.j_eff,
+    )
+    if arc is None or arc.R == 0.0:
+        return arc
+
+    # Re-evaluate Bound (b) against the final R / n_hat (Bound (b) is
+    # mildly R-dependent; second evaluation is near-free and keeps the
+    # bound honest on corners where the second-pass R differs from R_0).
+    n_hat_final = vnormalize(vsub(arc.center, arc.entry_pt))
+    bounds_final = blendshaper.compute_shaper_bounds(
+        shapers=shapers,
+        R=arc.R,
+        n_hat=n_hat_final,
+        p_hat=arc.plane_normal,
+    )
+    v_cap = min(arc.v_cap, bounds_final.v_step_cap)
+    # BlendArc is frozen; return a copy with the capped v_cap.
+    return replace(arc, v_cap=v_cap)
 
 
 def interpolate_extruder(
