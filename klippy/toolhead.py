@@ -264,7 +264,12 @@ class ToolHead:
             m for n, m in self.printer.lookup_objects(module="mcu")
         ]
         self.mcu = self.all_mcus[0]
-        self.lookahead = LookAheadQueue(self)
+        from . import blendprepass
+        inner_queue = LookAheadQueue(self)
+        self.prepass = blendprepass.CollinearCollapser(self, move_cls=Move)
+        self.lookahead = blendprepass.PrepassLookAheadQueue(
+            self.prepass, inner_queue
+        )
         self.lookahead.set_flush_time(BUFFER_TIME_HIGH)
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
         # Velocity and acceleration control
