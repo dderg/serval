@@ -66,7 +66,17 @@ def vnormalize(a: Vec3) -> Vec3:
 
 @dataclass(frozen=True)
 class BlendArc:
-    """Tangent-arc blend geometry between two adjacent moves."""
+    """Tangent-arc blend geometry between two adjacent moves.
+
+    Coordinates: ``entry_pt``, ``exit_pt``, and ``center`` are in a
+    corner-local frame where the corner vertex is at the origin. Callers
+    must translate by the vertex position to obtain world coordinates.
+    ``entry_tangent``, ``exit_tangent``, and ``plane_normal`` are
+    direction vectors and frame-independent.
+
+    For degenerate corners (R = 0, returned for U-turns), entry_pt /
+    exit_pt / center are all (0, 0, 0) and plane_normal is (0, 0, 0).
+    """
 
     R: float
     theta: float
@@ -89,7 +99,10 @@ def blend_geometry(
     a_max: float,
     j_eff: float,
 ) -> Optional[BlendArc]:
-    """Compute the tangent-arc blend for a corner, or None if no blend needed."""
+    """Compute the tangent-arc blend for a corner, or None if no blend needed.
+
+    ``prev_dir`` and ``next_dir`` must be unit vectors.
+    """
     # Deflection angle theta: 0 = collinear, pi = U-turn.
     # With head-to-tail unit directions:
     #   cos(theta) = prev_dir . next_dir
@@ -192,6 +205,8 @@ def blend_geometry(
 
 def segment_arc(arc: BlendArc, max_chord_err: float = 1e-2) -> list:
     """Return a polyline approximating the arc, with chord error <= max_chord_err."""
+    if max_chord_err <= 0.0:
+        raise ValueError("max_chord_err must be positive")
     if arc.R <= 0.0:
         # Degenerate: single point at the (coincident) entry.
         return [arc.entry_pt]

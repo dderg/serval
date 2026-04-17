@@ -664,3 +664,22 @@ def test_regression_very_short_segment_produces_tiny_arc():
     assert result is not None
     assert result.R == pytest.approx(0.01, rel=1e-9)  # 90 deg: R = L
     assert result.v_cap > 0.0
+
+
+def test_segment_arc_zero_max_chord_err_raises():
+    arc = blendmath.BlendArc(
+        R=10.0,
+        theta=math.pi / 2,
+        d_consumed=10.0,
+        v_cap=100.0,
+        center=(-10.0, 10.0, 0.0),
+        entry_pt=(-10.0, 0.0, 0.0),
+        exit_pt=(0.0, 10.0, 0.0),
+        entry_tangent=(1.0, 0.0, 0.0),
+        exit_tangent=(0.0, 1.0, 0.0),
+        plane_normal=(0.0, 0.0, 1.0),
+    )
+    with pytest.raises(ValueError, match="max_chord_err must be positive"):
+        blendmath.segment_arc(arc, max_chord_err=0.0)
+    with pytest.raises(ValueError, match="max_chord_err must be positive"):
+        blendmath.segment_arc(arc, max_chord_err=-1e-3)
