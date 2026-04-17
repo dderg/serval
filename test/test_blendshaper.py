@@ -329,3 +329,113 @@ def test_compute_shaper_bounds_small_projection_axis_skipped_for_step():
     )
     assert bounds.v_step_cap == float("inf")  # no X-projected step
     assert bounds.j_eff == pytest.approx(10000.0 / T_x, rel=1e-9)  # X still in plane
+
+
+def _zv_A(f, zeta=0.1):
+    from klippy.extras.shaper_calibrate import ShaperCalibrate
+    from klippy.extras import shaper_defs
+    sc = ShaperCalibrate(printer=None)
+    shaper = shaper_defs.get_zv_shaper(f, zeta)
+    return sc.find_shaper_max_accel(shaper, scv=0.0)
+
+
+def test_numeric_sanity_user_regime_90deg_corner():
+    """Matches docs/superpowers/specs/2026-04-17-j-eff-derivation-design.md §Testing point 5.
+
+    Setup: X=ZV@150Hz, Y=ZV@80Hz, ζ=0.1. 90° +X→+Y corner at R=0.5mm.
+    Real n̂ at entry for this corner is (0, 1, 0) — pure Y direction
+    (centripetal accel appears entirely on Y as the toolhead starts
+    turning from +X into +Y). So X's entry-step is not triggered;
+    only Y contributes to Bound (b). Bound (c) binds.
+    """
+    f_x, f_y = 150.0, 80.0
+    zeta = 0.1
+    A_x = _zv_A(f_x, zeta)
+    A_y = _zv_A(f_y, zeta)
+    T_x = blendshaper.shaper_span("zv", f_x, zeta)
+    T_y = blendshaper.shaper_span("zv", f_y, zeta)
+
+    snaps = [
+        blendshaper.AxisShaperSnapshot("x", "zv", f_x, zeta, A_x),
+        blendshaper.AxisShaperSnapshot("y", "zv", f_y, zeta, A_y),
+    ]
+    R = 0.5
+    n_hat = (0.0, 1.0, 0.0)
+    p_hat = (0.0, 0.0, 1.0)
+    bounds = blendshaper.compute_shaper_bounds(snaps, R, n_hat, p_hat)
+
+    # j_eff expected to bind on Y: j_y = A_y / T_y.
+    assert bounds.j_eff == pytest.approx(A_y / T_y, rel=1e-9)
+
+    # v_step_cap expected on Y only (X has |n̂·x̂|=0): √(A_y · R).
+    expected_v_step = math.sqrt(A_y * R)
+    assert bounds.v_step_cap == pytest.approx(expected_v_step, rel=1e-9)
+
+    # End-to-end v_jerk from j_eff and this R.
+    v_jerk = (R * R * bounds.j_eff) ** (1.0 / 3.0)
+    # Centripetal cap.
+    a_max = 50000.0
+    v_centripetal = math.sqrt((math.sqrt(3) / 2) * a_max * R)
+    # Rotation jerk should bind: v_jerk < others.
+    assert v_jerk < v_centripetal
+    assert v_jerk < expected_v_step
+    # Cross-check: ~99.8 mm/s per the spec sanity section.
+    assert v_jerk == pytest.approx(99.8, rel=0.05)
+
+
+@pytest.mark.parametrize("f", [50.0, 80.0, 100.0, 150.0, 200.0])
+def test_j_eff_monotone_in_frequency(f):
+    """Higher shaper frequency → higher j_eff. All else equal."""
+    zeta = 0.1
+    A = 10000.0  # hold A constant so we isolate the T dependence
+    T_f = blendshaper.shaper_span("zv", f, zeta)
+    j_f = A / T_f
+    # A higher frequency gives a shorter T and thus larger j.
+    T_higher = blendshaper.shaper_span("zv", f * 1.5, zeta)
+    j_higher = A / T_higher
+    assert j_higher > j_f
+
+
+def test_j_eff_monotone_in_damping():
+    """Higher damping ratio → larger t_d → smaller j_eff."""
+    f = 100.0
+    T_low = blendshaper.shaper_span("zv", f, 0.05)
+    T_high = blendshaper.shaper_span("zv", f, 0.2)
+    # With A constant:
+    A = 10000.0
+    assert A / T_high < A / T_low
+
+
+def test_j_eff_monotone_in_shaper_type():
+    """ZV has shortest T → largest j_eff for given f; 3HUMP_EI longest T → smallest."""
+    f = 100.0
+    zeta = 0.1
+    A = 10000.0
+    t_zv = blendshaper.shaper_span("zv", f, zeta)
+    t_zvd = blendshaper.shaper_span("zvd", f, zeta)
+    t_3hump = blendshaper.shaper_span("3hump_ei", f, zeta)
+    assert A / t_zv > A / t_zvd > A / t_3hump
+
+
+@pytest.mark.parametrize("f_low,f_high", [(50.0, 100.0), (80.0, 150.0)])
+def test_compute_shaper_bounds_j_eff_monotone_in_frequency(f_low, f_high):
+    """Verifies monotonicity through the real compute_shaper_bounds path, not just the formula."""
+    A = 10000.0
+    zeta = 0.1
+    make = lambda f: blendshaper.AxisShaperSnapshot(
+        axis="x", shaper_type="zv", shaper_freq=f,
+        damping_ratio=zeta, A_axis=A,
+    )
+    b_low = blendshaper.compute_shaper_bounds(
+        shapers=[make(f_low)],
+        R=0.5,
+        n_hat=(0.0, 1.0, 0.0),
+        p_hat=(0.0, 0.0, 1.0),
+    )
+    b_high = blendshaper.compute_shaper_bounds(
+        shapers=[make(f_high)],
+        R=0.5,
+        n_hat=(0.0, 1.0, 0.0),
+        p_hat=(0.0, 0.0, 1.0),
+    )
+    assert b_high.j_eff > b_low.j_eff
