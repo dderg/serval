@@ -125,4 +125,11 @@ class CollinearCollapser:
         merged.timing_callbacks = [
             cb for m in chain for cb in m.timing_callbacks
         ]
+        # Aggregate-safety re-check. Per-constituent kin.check_move already
+        # validated each segment; this catches aggregate limits such as
+        # max_extrude_only_distance that can only be evaluated on the merge.
+        if merged.is_kinematic_move:
+            self._toolhead.kin.check_move(merged)
+        if merged.axes_d[3]:
+            self._toolhead.extruder.check_move(merged)
         return merged

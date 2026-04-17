@@ -367,3 +367,50 @@ def test_merged_concatenates_timing_callbacks():
     c.feed(m2)
     out = c.flush()
     assert out[0].timing_callbacks == [cb1, cb2]
+
+
+def test_post_merge_kin_check_move_runs():
+    c = _collapser()
+    th = c._toolhead
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    c.feed(m1)
+    c.feed(m2)
+    out = c.flush()
+    # Exactly one post-merge check: on the merged Move itself.
+    assert len(th.kin.calls) == 1
+    assert th.kin.calls[0] is out[0]
+
+
+def test_post_merge_extruder_check_runs_only_when_e_delta_nonzero():
+    c = _collapser()
+    th = c._toolhead
+    # Pure-travel chain: axes_d[3] == 0 on both, merged axes_d[3] == 0
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0), (20, 0, 0, 0), speed=100.0)
+    c.feed(m1)
+    c.feed(m2)
+    c.flush()
+    assert th.extruder.calls == []
+
+    # With extrusion:
+    th2 = _FakeToolhead()
+    c2 = blendprepass.CollinearCollapser(th2, move_cls=_FakeMove)
+    m3 = _FakeMove(th2, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m4 = _FakeMove(th2, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    c2.feed(m3)
+    c2.feed(m4)
+    c2.flush()
+    assert len(th2.extruder.calls) == 1
+
+
+def test_post_merge_check_skipped_for_singleton_chain():
+    # Singletons skip _build_merged_move entirely (pass through identity),
+    # so no post-merge check fires. This preserves per-move check_move behavior.
+    c = _collapser()
+    th = c._toolhead
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    c.feed(m)
+    c.flush()
+    assert th.kin.calls == []
+    assert th.extruder.calls == []
