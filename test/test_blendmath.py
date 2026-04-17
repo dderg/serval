@@ -386,3 +386,54 @@ def test_blend_geometry_property_random_corners(seed):
     # 7. Center lies on the interior side of the corner (dot with next_dir > 0 from entry_pt).
     interior_check = blendmath.vdot(blendmath.vsub(result.center, result.entry_pt), next_dir)
     assert interior_check > -1e-9
+
+
+def test_segment_arc_90deg_basic():
+    # Build a 90 deg arc with R=10, max_chord_err=0.01.
+    # Delta phi per segment: 2*acos(1 - 0.01/10) = 2*acos(0.999) rad ~= 0.0894 rad.
+    # Total arc angle (theta) = pi/2 rad. Expected segments ~= (pi/2)/0.0894 ~= 17.56, so 18.
+    arc = blendmath.BlendArc(
+        R=10.0,
+        theta=math.pi / 2,
+        d_consumed=10.0,
+        v_cap=100.0,
+        center=(-10.0, 10.0, 0.0),
+        entry_pt=(-10.0, 0.0, 0.0),
+        exit_pt=(0.0, 10.0, 0.0),
+        entry_tangent=(1.0, 0.0, 0.0),
+        exit_tangent=(0.0, 1.0, 0.0),
+        plane_normal=(0.0, 0.0, 1.0),
+    )
+    polyline = blendmath.segment_arc(arc, max_chord_err=0.01)
+
+    # First and last points are entry and exit.
+    assert polyline[0] == pytest.approx(arc.entry_pt, abs=1e-9)
+    assert polyline[-1] == pytest.approx(arc.exit_pt, abs=1e-9)
+
+    # Every point lies on the arc (distance R from center).
+    for pt in polyline:
+        d = blendmath.vnorm(blendmath.vsub(pt, arc.center))
+        assert d == pytest.approx(arc.R, rel=1e-9)
+
+    # Reasonable point count (theta / delta_phi + 1).
+    delta_phi_max = 2.0 * math.acos(1.0 - 0.01 / 10.0)
+    expected_segments = math.ceil(arc.theta / delta_phi_max)
+    assert len(polyline) == expected_segments + 1
+
+
+def test_segment_arc_zero_radius_returns_degenerate_polyline():
+    # R=0 (U-turn case): polyline is just [entry_pt, exit_pt] (both equal).
+    arc = blendmath.BlendArc(
+        R=0.0,
+        theta=math.pi,
+        d_consumed=0.0,
+        v_cap=0.0,
+        center=(0.0, 0.0, 0.0),
+        entry_pt=(0.0, 0.0, 0.0),
+        exit_pt=(0.0, 0.0, 0.0),
+        entry_tangent=(1.0, 0.0, 0.0),
+        exit_tangent=(-1.0, 0.0, 0.0),
+        plane_normal=(0.0, 0.0, 0.0),
+    )
+    polyline = blendmath.segment_arc(arc, max_chord_err=0.01)
+    assert polyline == [(0.0, 0.0, 0.0)]

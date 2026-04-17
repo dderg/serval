@@ -188,3 +188,48 @@ def blend_geometry(
         exit_tangent=next_dir,
         plane_normal=plane_normal,
     )
+
+
+def segment_arc(arc: BlendArc, max_chord_err: float = 1e-2) -> list:
+    """Return a polyline approximating the arc, with chord error <= max_chord_err."""
+    if arc.R <= 0.0:
+        # Degenerate: single point at the (coincident) entry.
+        return [arc.entry_pt]
+
+    # Step angle such that chord deviation from the arc is <= max_chord_err.
+    # chord error e = R * (1 - cos(dphi/2))  =>  dphi = 2 * acos(1 - e/R).
+    e_over_r = max_chord_err / arc.R
+    if e_over_r >= 1.0:
+        # Absurd tolerance: one segment is enough.
+        return [arc.entry_pt, arc.exit_pt]
+    dphi_max = 2.0 * math.acos(1.0 - e_over_r)
+
+    num_segments = max(1, math.ceil(arc.theta / dphi_max))
+    dphi = arc.theta / num_segments
+
+    # Direction of rotation: from (entry_pt - center) toward (exit_pt - center).
+    # Rodrigues' rotation around arc.plane_normal by angle phi, applied to
+    # the radial vector from center.
+    r0 = vsub(arc.entry_pt, arc.center)
+    axis = arc.plane_normal
+
+    points: list = [arc.entry_pt]
+    for i in range(1, num_segments):
+        phi = dphi * i
+        r = _rotate(r0, axis, phi)
+        points.append(vadd(arc.center, r))
+    points.append(arc.exit_pt)
+    return points
+
+
+def _rotate(v: Vec3, axis: Vec3, angle: float) -> Vec3:
+    """Rotate vector v around unit axis by angle (radians). Rodrigues."""
+    c = math.cos(angle)
+    s = math.sin(angle)
+    ax_dot_v = vdot(axis, v)
+    ax_cross_v = vcross(axis, v)
+    return (
+        v[0] * c + ax_cross_v[0] * s + axis[0] * ax_dot_v * (1.0 - c),
+        v[1] * c + ax_cross_v[1] * s + axis[1] * ax_dot_v * (1.0 - c),
+        v[2] * c + ax_cross_v[2] * s + axis[2] * ax_dot_v * (1.0 - c),
+    )
