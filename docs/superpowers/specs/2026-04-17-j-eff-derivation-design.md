@@ -263,9 +263,9 @@ def blend_from_moves(prev_move, next_move, corner_deviation, toolhead=None):
    - `t_d_y ≈ 12.563 ms`, `T_y = 0.5·t_d_y ≈ 6.281 ms`.
    - `A_x ≈ 87,685.6 mm/s²` (from `find_shaper_max_accel` with TARGET_SMOOTHING=0.12).
    - `A_y ≈ 24,941.7 mm/s²` (Y is much stricter because of lower frequency).
-   - At a representative 90° corner with `R = 0.5 mm`: `|n̂·ê_x| = |n̂·ê_y| = 1/√2 ≈ 0.707`; `axis_in_plane_x = axis_in_plane_y = 1`.
+   - At a representative 90° +X→+Y corner with `R = 0.5 mm`: the arc center is at `(-R, R, 0)` relative to the vertex, so `n̂` at entry is `(0, 1, 0)` — pure +Y (centripetal accel appears entirely on Y as the toolhead starts turning into +Y). `|n̂·ê_x| = 0`, `|n̂·ê_y| = 1`. `axis_in_plane_x = axis_in_plane_y = 1`.
    - Bound (a): `v_centripetal = √((√3/2) · 50000 · 0.5) ≈ 147.1 mm/s`.
-   - Bound (b): `v_step_x ≈ √(87685.6 · 0.5 / 0.707) ≈ 249.0 mm/s`; `v_step_y ≈ √(24941.7 · 0.5 / 0.707) ≈ 132.8 mm/s`. `v_step_cap = 132.8 mm/s` (Y binds).
+   - Bound (b): X has `|n̂·ê_x| = 0` and contributes nothing (no X-axis step at entry for this corner). `v_step_y = √(24941.7 · 0.5 / 1) ≈ 111.7 mm/s`. `v_step_cap = 111.7 mm/s`.
    - Bound (c): `j_x = A_x/T_x ≈ 2.62e7 mm/s³`; `j_y = A_y/T_y ≈ 3.97e6 mm/s³`; `j_eff = min = 3.97e6 mm/s³` (Y binds). `v_jerk = (0.25 · 3.97e6)^(1/3) ≈ 99.8 mm/s`.
    - **Final v_cap ≈ 99.8 mm/s at R=0.5 mm**, set by rotation jerk on Y axis (Bound c).
    - Cross-check: current SCV=70 produces junction velocity at 90° of `70·√(sin(45°)/(1−sin(45°))) ≈ 108.8 mm/s`. The blend-arc-based v_cap is ~8% below that, so the cost of switching from SCV to real blending is small at this corner size and entirely accounted for by the rotation-jerk bound on the lower-frequency Y axis — exactly what we want, since Y is the axis whose shaper has the least spectral budget.
