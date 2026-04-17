@@ -78,3 +78,31 @@ class BlendArc:
     entry_tangent: Vec3
     exit_tangent: Vec3
     plane_normal: Vec3
+
+
+def blend_geometry(
+    prev_dir: Vec3,
+    next_dir: Vec3,
+    L_prev: float,
+    L_next: float,
+    corner_deviation: float,
+    a_max: float,
+    j_eff: float,
+) -> Optional[BlendArc]:
+    """Compute the tangent-arc blend for a corner, or None if no blend needed."""
+    # Deflection angle theta: 0 = collinear, pi = U-turn.
+    # With head-to-tail unit directions:
+    #   cos(theta) = prev_dir . next_dir
+    #   cos(theta/2) = sqrt((1 + prev_dir.next_dir) / 2)
+    #   sin(theta/2) = sqrt((1 - prev_dir.next_dir) / 2)
+    dp = vdot(prev_dir, next_dir)
+    # Clamp for numerical safety; dp should lie in [-1, 1] for unit vectors.
+    dp = max(-1.0, min(1.0, dp))
+    cos_half = math.sqrt(max(0.0, (1.0 + dp) * 0.5))
+    sin_half = math.sqrt(max(0.0, (1.0 - dp) * 0.5))
+
+    if sin_half < COLLINEAR_EPS:
+        # Collinear: no blend required.
+        return None
+
+    raise NotImplementedError("only collinear branch handled so far")
