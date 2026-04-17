@@ -33,6 +33,10 @@ class CollinearCollapser:
         if not self._chain:
             self._chain = [move]
             return []
+        if len(self._chain) >= self.max_chain:
+            emitted = self._flush_chain()
+            self._chain = [move]
+            return emitted
         if not self._merge_gate_passes(move):
             emitted = self._flush_chain()
             self._chain = [move]

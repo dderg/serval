@@ -258,3 +258,27 @@ def test_legitimate_extension_passes_projection():
     assert c.feed(m2) == []
     # Both buffered; gate (d) allowed the extension.
     assert len(c._chain) == 2
+
+
+def _build_collinear_chain(toolhead, n, seg_len=1.0, e_per_mm=0.05, speed=100.0):
+    moves = []
+    for i in range(n):
+        start = (i * seg_len, 0, 0, i * seg_len * e_per_mm)
+        end = ((i + 1) * seg_len, 0, 0, (i + 1) * seg_len * e_per_mm)
+        moves.append(_FakeMove(toolhead, start, end, speed=speed))
+    return moves
+
+
+def test_chain_cap_flushes_at_max():
+    c = _collapser()
+    th = c._toolhead
+    moves = _build_collinear_chain(th, c.max_chain + 1)
+    for m in moves[:-1]:
+        assert c.feed(m) == []
+    assert len(c._chain) == c.max_chain
+    out = c.feed(moves[-1])
+    assert len(out) == 1
+    merged = out[0]
+    assert merged.start_pos == (0, 0, 0, 0)
+    assert merged.end_pos[:3] == pytest.approx((100.0, 0.0, 0.0), abs=1e-9)
+    assert c._chain == [moves[-1]]
