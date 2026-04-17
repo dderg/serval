@@ -58,3 +58,19 @@ def shaper_span(shaper_type: str, shaper_freq: float, damping_ratio: float) -> f
     factor = _SHAPER_SPAN_FACTOR[shaper_type]
     t_d = 1.0 / (shaper_freq * math.sqrt(1.0 - damping_ratio * damping_ratio))
     return factor * t_d
+
+
+_AXES = ("x", "y", "z")
+
+
+def axis_projections(n_hat: Vec3) -> dict:
+    """|n̂·ê_axis| per axis. Used by Bound (b) entry-step."""
+    return {ax: abs(n_hat[i]) for i, ax in enumerate(_AXES)}
+
+
+def axis_in_plane(p_hat: Vec3) -> dict:
+    """√(1 - |p̂·ê_axis|²) per axis — projection of each basis
+    axis onto the arc plane. 1 for fully in-plane axes, 0 for
+    fully out-of-plane. Used by Bound (c) rotation jerk."""
+    return {ax: math.sqrt(max(0.0, 1.0 - p_hat[i] * p_hat[i]))
+            for i, ax in enumerate(_AXES)}

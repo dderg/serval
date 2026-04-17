@@ -96,3 +96,51 @@ def test_shaper_span_damping_effect():
 def test_shaper_span_unknown_raises():
     with pytest.raises(ValueError):
         blendshaper.shaper_span("not_a_shaper", 100.0, 0.1)
+
+
+def test_axis_projections_unit_x():
+    projs = blendshaper.axis_projections((1.0, 0.0, 0.0))
+    assert projs["x"] == pytest.approx(1.0, abs=1e-12)
+    assert projs["y"] == pytest.approx(0.0, abs=1e-12)
+    assert projs["z"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_axis_projections_45_deg_xy():
+    s = 1.0 / math.sqrt(2.0)
+    projs = blendshaper.axis_projections((s, s, 0.0))
+    assert projs["x"] == pytest.approx(s, abs=1e-12)
+    assert projs["y"] == pytest.approx(s, abs=1e-12)
+    assert projs["z"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_axis_projections_negative_components_return_abs():
+    projs = blendshaper.axis_projections((-0.6, 0.8, 0.0))
+    assert projs["x"] == pytest.approx(0.6, abs=1e-12)
+    assert projs["y"] == pytest.approx(0.8, abs=1e-12)
+    assert projs["z"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_axis_in_plane_xy_plane():
+    # Arc plane normal along +Z: x and y lie fully in the plane.
+    in_plane = blendshaper.axis_in_plane((0.0, 0.0, 1.0))
+    assert in_plane["x"] == pytest.approx(1.0, abs=1e-12)
+    assert in_plane["y"] == pytest.approx(1.0, abs=1e-12)
+    assert in_plane["z"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_axis_in_plane_yz_plane():
+    # Arc plane normal along +X: y and z lie fully in the plane.
+    in_plane = blendshaper.axis_in_plane((1.0, 0.0, 0.0))
+    assert in_plane["x"] == pytest.approx(0.0, abs=1e-12)
+    assert in_plane["y"] == pytest.approx(1.0, abs=1e-12)
+    assert in_plane["z"] == pytest.approx(1.0, abs=1e-12)
+
+
+def test_axis_in_plane_tilted():
+    # Plane normal at 45° between X and Z: x and z partially in-plane.
+    s = 1.0 / math.sqrt(2.0)
+    in_plane = blendshaper.axis_in_plane((s, 0.0, s))
+    # sqrt(1 - (1/sqrt(2))^2) = sqrt(1 - 0.5) = sqrt(0.5) = 1/sqrt(2)
+    assert in_plane["x"] == pytest.approx(s, abs=1e-12)
+    assert in_plane["y"] == pytest.approx(1.0, abs=1e-12)  # perpendicular to normal
+    assert in_plane["z"] == pytest.approx(s, abs=1e-12)
