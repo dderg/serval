@@ -23,31 +23,42 @@ Not this spec:
 - Planner integration (wiring `blend_geometry` into `toolhead.py`). (Sub-spec #4.)
 - Removing SCV / `square_corner_velocity` / `_calc_junction_deviation`. (Sub-spec #5.)
 - Pressure-advance synchronization with input shaping. (Separate initiative; see **Prior art & future compatibility** below.)
-- User-tunable prepass tolerance. The tolerance is a `CollinearCollapser` class attribute for v1; add a `danger_options` override later if empirical tuning proves necessary.
+- User-tunable prepass tolerance. Tolerances are `CollinearCollapser` instance attributes (set in `__init__`) for v1; add a `danger_options` override later if empirical tuning proves necessary.
 
 ## Module layout
 
 File: `klippy/blendprepass.py`. Pure Python, standard library only. Independently unit-testable without a running toolhead.
 
-```
-klippy/blendprepass.py
-└─ class CollinearCollapser:
-      # Class attributes — tunables scoped to this collapser, not module globals.
-      TOLERANCE    = 25e-3        # perpendicular deviation cap, mm (25 µm)
-      MAX_CHAIN    = 100          # matches LinuxCNC
-      EPM_REL      = 1e-2         # E-per-XYZ-mm relative tolerance (1%)
-      F_REL        = 1e-6         # cruise-velocity equality (1 ppm)
-      MIN_SEG_LEN  = 1e-9         # XYZ-length floor to avoid div-by-zero, mm
+```python
+# klippy/blendprepass.py
+# Copyright (C) 2026
+# This file may be distributed under the terms of the GNU GPLv3 license.
+from __future__ import annotations
 
-      def __init__(self, toolhead)
-      def feed(self, move: Move) -> list[Move]
-      def flush(self)             -> list[Move]
-      def reset(self)             -> None      # discard buffered chain (shutdown path)
+# Naive-CAM collinearity prepass. See docs/superpowers/specs/
+# 2026-04-17-naive-cam-prepass-design.md for rationale.
+
+class CollinearCollapser:
+    def __init__(self, toolhead):
+        self._toolhead = toolhead
+        self._chain: list[Move] = []
+        # Instance-level tunables, consistent with LookAheadQueue's init
+        # style (toolhead.py:147-150). A future
+        # danger_options.naive_cam_tolerance override becomes a one-line
+        # read here; no class-attribute indirection needed.
+        self.tolerance   = 25e-3   # perpendicular deviation cap, mm (25 µm)
+        self.max_chain   = 100     # matches LinuxCNC
+        self.epm_rel     = 1e-2    # E-per-XYZ-mm relative tolerance (1%)
+        self.f_rel       = 1e-6    # cruise-velocity equality (1 ppm)
+        self.min_seg_len = 1e-9    # XYZ-length floor, mm
+        self.t_eps       = 1e-9    # float-noise eps for gate (d) projection
+
+    def feed(self, move)  -> list[Move]: ...
+    def flush(self)       -> list[Move]: ...
+    def reset(self)       -> None:       ...   # discard buffered chain
 ```
 
 `toolhead` is accepted so the collapser can construct replacement `Move` objects via the standard `Move(toolhead, start, end, speed)` constructor — it does not read mutable toolhead state beyond what `Move.__init__` reads.
-
-Class attributes (not module-level constants) so a future `danger_options.naive_cam_tolerance` override is a one-line instance-attribute assignment rather than global mutation. Matches the idiom used by `Move.junction_deviation` (sourced from toolhead at construction, overridable per-instance).
 
 ## Algorithm
 
@@ -58,14 +69,14 @@ Class attributes (not module-level constants) so a future `danger_options.naive_
 ### `feed(move)`
 
 ```
-1. If move.move_d < self.MIN_SEG_LEN:
+1. If move.move_d < self.min_seg_len:
        return [move]                                    # zero-length: pass through
 2. If not move.is_kinematic_move:
        return self._flush_chain() + [move]              # E-only / special: breaks chain
 3. If self._chain is empty:
        self._chain = [move]
        return []
-4. If len(self._chain) >= self.MAX_CHAIN:
+4. If len(self._chain) >= self.max_chain:
        emitted = self._flush_chain()
        self._chain = [move]
        return emitted
@@ -96,26 +107,28 @@ All four conditions must hold:
 
 ```
 |candidate.max_cruise_v2 − self._chain[0].max_cruise_v2|
-    <= self.F_REL · max(candidate.max_cruise_v2, self._chain[0].max_cruise_v2)
+    <= self.f_rel · max(candidate.max_cruise_v2, self._chain[0].max_cruise_v2)
 ```
 
 **(b) Extrusion-ratio equality** — same E-per-XYZ-mm:
 
 ```
 |candidate.axes_r[3] − self._chain[0].axes_r[3]|
-    <= self.EPM_REL · max(|candidate.axes_r[3]|, |self._chain[0].axes_r[3]|, 1e-9)
+    <= self.epm_rel · max(|candidate.axes_r[3]|, |self._chain[0].axes_r[3]|, 1e-9)
 ```
+
+`axes_r[3]` is signed (negative on retract, positive on extrude). A retract-to-extrude reversal has `|diff| = |retract| + |extrude|`, which exceeds `epm_rel · max(...)` for any realistic flow → gate correctly rejects. Two consecutive same-sign moves of equal magnitude pass. The 1% relative tolerance is deliberate: it absorbs slicer float-quantization noise within one `ExtrusionPath` but splits on any intentional flow change (Arachne sub-paths differ by 2–40%).
 
 **(c) Geometric collinearity** — every existing intermediate endpoint `P_k = self._chain[k].end_pos` (for `k < len(self._chain)`) lies within tolerance of the line from anchor `A = self._chain[0].start_pos` to the proposed new end `B = candidate.end_pos`. Using 3D cross product:
 
 ```
 AB = B - A                                # new proposed chord
-if |AB| < self.MIN_SEG_LEN:          # candidate ends at anchor (U-turn closure)
+if |AB| < self.min_seg_len:          # candidate ends at anchor (U-turn closure)
     return False                           # reject; pathological
 for each P_k:
     AP = P_k - A
     perp_dist = |AP × AB| / |AB|
-    if perp_dist > self.TOLERANCE:
+    if perp_dist > self.tolerance:
         return False
 ```
 
@@ -125,11 +138,11 @@ for each P_k:
 for each P_k:
     AP = P_k - A
     t_k = (AP · AB) / (AB · AB)
-    if not (0.0 <= t_k <= 1.0):
+    if not (-self.t_eps <= t_k <= 1.0 + self.t_eps):
         return False
 ```
 
-The projection check also enforces monotonic progress along the chord, which is what "collinear" physically means.
+The projection check also enforces monotonic progress along the chord, which is what "collinear" physically means. `t_eps = 1e-9` guards against subtractive-cancellation noise on legitimate chord-end extensions (e.g. a candidate endpoint numerically equal to the previous constituent's endpoint). Without the eps, a valid `t_k = 1 + 1·ulp` would falsely reject.
 
 ### `_flush_chain()`
 
@@ -144,46 +157,99 @@ return result
 
 ### `_build_merged_move(chain)`
 
-```
-start_pos = chain[0].start_pos
-end_pos   = chain[-1].end_pos
-# Use the shared cruise velocity (validated equal in gate (a))
-cruise_v  = math.sqrt(chain[0].max_cruise_v2)
-merged    = Move(self._toolhead, start_pos, end_pos, cruise_v)
-# Pin junction_deviation to chain[0] in case SET_VELOCITY_LIMIT was
-# called between constituent construction and this merge; Move.__init__
-# otherwise snapshots toolhead.junction_deviation at merge time.
-merged.junction_deviation = chain[0].junction_deviation
-# Preserve the narrowest accel seen across the chain; defensively
-# same as merged.accel unless a limit_speed() fired upstream.
-merged_accel = min(m.accel for m in chain)
-if merged_accel < merged.accel:
-    merged.limit_speed(cruise_v, merged_accel)
-return merged
+```python
+def _build_merged_move(self, chain):
+    start_pos = chain[0].start_pos
+    end_pos   = chain[-1].end_pos
+    cruise_v  = math.sqrt(chain[0].max_cruise_v2)
+    merged    = Move(self._toolhead, start_pos, end_pos, cruise_v)
+
+    # Pin fields that Move.__init__ would otherwise re-snapshot from a
+    # possibly-drifted toolhead state. SET_VELOCITY_LIMIT, M204, or
+    # SET_PRESSURE_ADVANCE could have fired between chain[0]'s
+    # construction and this call; we want the chain's head values.
+    merged.max_cruise_v2     = chain[0].max_cruise_v2
+    merged.junction_deviation = chain[0].junction_deviation
+
+    # Preserve the narrowest accel observed across the chain — a
+    # constituent kinematic check_move may have applied limit_speed
+    # (Z-ratio, slow-XY zones) which must propagate through the merge.
+    merged.limit_speed(cruise_v, min(m.accel for m in chain))
+
+    # Preserve the chain tail's next-junction cap; limit_next_junction_speed
+    # attaches to the caller-visible last move, which is chain[-1] because
+    # the adapter's get_last() flushes before exposing it (see Integration).
+    merged.next_junction_v2 = chain[-1].next_junction_v2
+
+    # Concatenate timing_callbacks across the chain. Under flush-on-get_last
+    # these should only ever be on chain[-1]; the list comprehension is
+    # defense in depth against future callers that bypass the adapter.
+    merged.timing_callbacks = [
+        cb for m in chain for cb in m.timing_callbacks
+    ]
+
+    # Re-run the kinematics and extruder check_move on the merged result.
+    # Per-constituent checks already passed, and axes_r is preserved to
+    # within TOLERANCE/min_seg_len (~25% in the worst case of 0.1 mm
+    # segments), so limits should continue to pass — but aggregate checks
+    # like max_extrude_only_distance would be bypassed otherwise. Safety
+    # net, not expected to fire in normal operation.
+    if merged.is_kinematic_move:
+        self._toolhead.kin.check_move(merged)
+    if merged.axes_d[3]:
+        self._toolhead.extruder.check_move(merged)
+    return merged
 ```
 
-`Move.__init__` recomputes `axes_d`, `axes_r`, `move_d`, `min_move_t`, `delta_v2`, `smooth_delta_v2`, `max_start_v2 = 0.0`, `next_junction_v2 = 999999999.9`. None of those are copies from any source move — they're recomputed from `start_pos`, `end_pos`, and `cruise_v`. The resulting merged Move is indistinguishable from one the caller would have produced natively, with `junction_deviation` explicitly pinned to the chain's head.
+`Move.__init__` recomputes `axes_d`, `axes_r`, `move_d`, `min_move_t`, `delta_v2`, `smooth_delta_v2`, `max_start_v2 = 0.0`. Fields explicitly pinned above override post-init snapshots: `max_cruise_v2`, `junction_deviation`, `accel` (via `limit_speed`), `next_junction_v2`, `timing_callbacks`. `is_kinematic_move` is True because gate step 2 flushed any non-kinematic input before chain building.
 
-**Material conservation check (testing only, not runtime):** `sum(m.axes_d[3] for m in chain)` must equal `merged.axes_d[3]` within float precision. Same for XYZ components. Conservation follows from telescoping (`chain[k].start_pos = chain[k-1].end_pos`); float error is bounded to 1–2 ulp of the coordinate magnitude (~2e-13 mm).
+**Material conservation:** `sum(m.axes_d[i] for m in chain) == merged.axes_d[i]` for i ∈ {0,1,2,3} within 1–2 ulp of coordinate magnitude (~2e-13 mm on mm-scale coords), by telescoping through `chain[k].start_pos == chain[k-1].end_pos`.
 
 ### Exception safety
 
-`_flush_chain` and `_build_merged_move` are wrapped so that any exception (e.g. `Move.__init__` raising) clears `self._chain` before propagating. This prevents a stale chain from corrupting the next `feed()` call during error-recovery paths.
+`_flush_chain` wraps the build in `try/finally` that unconditionally clears `self._chain` before returning or propagating:
+
+```python
+def _flush_chain(self):
+    try:
+        if len(self._chain) == 1:
+            result = self._chain
+        else:
+            result = [self._build_merged_move(self._chain)]
+    except Exception:
+        logging.warning(
+            "blendprepass: chain cleared after build error (len=%d)",
+            len(self._chain))
+        raise
+    finally:
+        self._chain = []
+    return result
+```
+
+An exception during `Move.__init__` or `check_move` clears the chain and propagates the error; subsequent `feed()` calls start with a clean buffer. The `logging.warning` makes field diagnosis possible without interfering with normal operation.
 
 ## Integration with `ToolHead`
 
 ### Wrapper adapter
 
-To avoid scattering "drain prepass before each lookahead.flush()" ceremony across every call site, introduce a thin adapter class in `klippy/blendprepass.py`:
+To avoid scattering "drain prepass before each lookahead.flush()" ceremony across every call site, introduce a thin adapter class in `klippy/blendprepass.py`. The adapter must mirror **every** `LookAheadQueue` surface accessed from `toolhead.py` and external callers — verified by grepping `klippy/` for `lookahead.` and `.lookahead.`:
+
+| `LookAheadQueue` surface | Consumed at | Adapter behavior |
+|---|---|---|
+| `add_move(move)` | `toolhead.py:624` | Feed prepass; push emitted moves to inner queue |
+| `flush(lazy=...)` | `toolhead.py:498, 514, 681, 698` | Drain prepass into inner queue, then inner flush |
+| `reset()` | `toolhead.py:700, 749` | Discard prepass chain, then inner reset |
+| `set_flush_time(t)` | `toolhead.py:150, 268, 445` | Pass through |
+| `get_last()` | `toolhead.py:611, 770`, `extras/trad_rack.py:1489` | **Flush prepass first**, then inner get_last (see below) |
+| `queue` (attribute) | `toolhead.py:725` | `@property` — return inner queue concatenated with buffered chain so truthy/length checks see buffered moves as "pending" |
 
 ```python
 class PrepassLookAheadQueue:
-    """Wraps a LookAheadQueue; drains a CollinearCollapser on every flush.
+    """Wraps a LookAheadQueue; drains a CollinearCollapser transparently.
 
-    Transparent to callers: exposes the same add_move/flush/reset/
-    set_flush_time/get_last surface as LookAheadQueue itself, so ToolHead
-    doesn't need to know the prepass exists on any call path except the
-    one entry point that feeds new moves.
+    Mirrors the full LookAheadQueue surface used elsewhere in Kalico so
+    ToolHead and extras don't need to know the prepass exists beyond the
+    add_move entry point.
     """
     def __init__(self, prepass, lookahead):
         self._prepass = prepass
@@ -206,8 +272,28 @@ class PrepassLookAheadQueue:
         self._lookahead.set_flush_time(flush_time)
 
     def get_last(self):
+        # Callers of get_last attach lookahead-critical state to the
+        # returned Move: register_lookahead_callback (toolhead.py:770)
+        # attaches timing_callbacks, limit_next_junction_speed
+        # (toolhead.py:611) attaches a speed cap. If we returned an
+        # unflushed chain tail, that state would land on a Move that
+        # _build_merged_move would then replace. Flushing first ensures
+        # callers see the actual queued Move.
+        for m in self._prepass.flush():
+            self._lookahead.add_move(m)
         return self._lookahead.get_last()
+
+    @property
+    def queue(self):
+        # check_busy and similar callers test emptiness/length; buffered
+        # chain counts as pending. Return a concatenation so list indexing
+        # remains consistent with arrival order.
+        if self._prepass._chain:
+            return list(self._prepass._chain) + list(self._lookahead.queue)
+        return self._lookahead.queue
 ```
+
+**Why flush-on-`get_last`:** `register_lookahead_callback` is invoked occasionally (per M106, per heater set, per SET_PIN — not per-move), and `limit_next_junction_speed` is rarer still (resonance_tester, tool-change macros). Flushing incomplete chains at these boundaries costs little; returning a stale tail would corrupt timing-callback semantics and silently drop junction caps. Belt-and-suspenders, `_build_merged_move` also preserves `timing_callbacks` and `next_junction_v2` from `chain[-1]` in case a future caller bypasses the adapter.
 
 ### Changes to `ToolHead`
 
@@ -224,9 +310,23 @@ self.lookahead.set_flush_time(BUFFER_TIME_HIGH)
 
 The four concrete `lookahead.flush()` / `lookahead.reset()` sites in the current `toolhead.py` (`_flush_lookahead` at line 498, `lookahead.flush()` at line 514 inside `get_last_move_time`, `lookahead.flush()` at lines 681 and 698 in `drip_move`, and `lookahead.reset()` at lines 700 and 749 in `drip_move` error path and `_handle_shutdown`) all go through the adapter — no per-site change needed.
 
-### Why `check_move` runs pre-merge
+### `check_move` runs both pre- and post-merge
 
-`check_move` (kinematics envelope, extruder) is invariant under consolidation of collinear moves: if every constituent satisfies the limits, the merged move does too. The merged `move_d` is the sum of constituent `move_d`s (gate (d) guarantees monotonic progress along the chord); `axes_d` is the vector sum; `max_cruise_v2` and `accel` are inherited. Gate (a) runs **after** `check_move`, so any `limit_speed` applied by kinematics (e.g. Z-ratio reduction, which is identical across the chain because collinear moves share `axes_r`) is already reflected in `max_cruise_v2`. No new check is required on the merged move.
+**Pre-merge (unchanged):** `ToolHead.move` continues to call `kin.check_move(move)` and `extruder.check_move(move)` on each raw constituent before feeding it to the prepass. This enforces the user's gcode envelope and catches any per-segment violation at its real line number.
+
+**Post-merge (added):** `_build_merged_move` re-runs `kin.check_move(merged)` and `extruder.check_move(merged)` on the merged result before returning it. Per-constituent checks already guarantee the per-segment limits; the post-merge re-run catches **aggregate** limits like `max_extrude_only_distance` that the strict gate's per-move checks cannot see (even though gate step 2 flushes on non-kinematic moves and should prevent pure-E merges reaching this limit, re-running is a cheap safety net against future gate changes).
+
+**`axes_r` drift under merging:** within the prepass tolerance, each constituent's `axes_r` can differ from the merged `axes_r` (which equals the true chord direction by telescoping) by up to `tolerance / min_constituent_d` — e.g. 25 µm / 0.1 mm = 25% in the worst case of 100 µm slicer chords. Kinematic limits keyed to `axes_r` (Z-ratio caps, CoreXY belt limits, deltesian slow-X zones) were applied to the constituents' noisier `axes_r`; `_build_merged_move` propagates the strictest via `merged.limit_speed(cruise_v, min(m.accel for m in chain))`. The post-merge `check_move` re-evaluates against the canonical merged direction, which may tighten or loosen limits slightly. This is acceptable because (a) merged `axes_r` is the "intended" direction the slicer meant to express, and (b) the constituent-derived `accel` floor is already a conservative bound. No case where the merged move would pass post-merge `check_move` but violate a physical limit.
+
+### Pipeline invariants (downstream contract)
+
+Documented because downstream code relies on them:
+
+- **Input shaper** (`kin_shaper.c`) is stateless across moves; a merged constant-velocity chain produces position output identical to the unmerged chain. Verified.
+- **Trapq** (`trapq.c`) is an append-only linked list with no per-move state beyond print_time bookkeeping. Verified.
+- **Pressure advance** (`kin_extruder.c:86-112`, `pa_range_integrate`): convolves over trapq moves; for a constant-velocity constant-flow chain the integrand is identical merged vs unmerged. Verified.
+- **`per_move_pressure_advance`** (`extruder.py:26-28, 342-346`): stores PA in each trapq move's `axes_r.y` slot. `SET_PRESSURE_ADVANCE` routes through `flush_step_generation` → `_flush_lookahead` → adapter `flush()` → prepass drain, so PA changes always break chains. Verified structurally; no test required.
+- **Extruder `calc_junction`** (`extruder.py:328-332`): uses `axes_r[3]` diff against previous move; gate (b) guarantees merged `axes_r[3]` matches constituents within 1%, so junction behavior between merged and surrounding moves is identical to unmerged behavior. The 1% interior flow drift is absorbed into a single averaged extrusion ratio — intentional (Rationale 1).
 
 ## Edge cases & degeneracies
 
@@ -248,7 +348,7 @@ The four concrete `lookahead.flush()` / `lookahead.reset()` sites in the current
 
 ## Testing (`test/test_blendprepass.py`)
 
-All tests use pytest, follow the existing `test_blendmath.py` / `test_blendshaper.py` conventions, and avoid loading the toolhead C module.
+All tests use pytest, follow the existing `test_blendmath.py` / `test_blendshaper.py` conventions, and avoid loading the toolhead C module. **No `hypothesis` dependency** — Kalico does not ship it (`scripts/requirements_dev.txt` only lists `pytest` + `pytest-xdist`). Randomized tests use the repo's established pattern: `@pytest.mark.parametrize("seed", range(N))` plus `random.Random(seed)` (seen at `test_blendmath.py:319, 442`).
 
 ### Fakes required
 
@@ -274,13 +374,27 @@ All tests use pytest, follow the existing `test_blendmath.py` / `test_blendshape
 15. **Fresh merged-Move invariants** — merged Move's `next_junction_v2 == 999999999.9`, `max_start_v2 == 0.0`, `max_smoothed_v2 == 0.0` (constructor defaults), confirming no lookahead state leaks from constituents through the merge.
 16. **junction_deviation pinned to chain[0]** — if `toolhead.junction_deviation` is mutated between a chain's first and last move, the merged Move still carries `chain[0].junction_deviation`, not the current toolhead value.
 17. **Adapter transparency** — `PrepassLookAheadQueue.flush()` drains the collapser, then calls the inner `lookahead.flush(lazy=...)`; `reset()` discards the chain without emitting. Test via a mock inner queue.
-18. **Exception safety** — injecting a `Move.__init__` failure during `_build_merged_move` leaves `self._chain` empty on the next `feed()` call.
+18. **Exception safety** — injecting a `Move.__init__` failure during `_build_merged_move` leaves `self._chain` empty on the next `feed()` call; a `logging.warning` is emitted before propagation.
+19. **Timing callbacks preserved** — attach a callback to `chain[-1]` via `limit_next_junction_speed` surrogate; after merge, callback is on the merged Move's `timing_callbacks` list.
+20. **`next_junction_v2` preserved from chain[-1]** — set `chain[-1].next_junction_v2 = 12345.0` pre-flush; merged Move carries `12345.0`, not the `999999999.9` sentinel.
+21. **Adapter `get_last` flushes** — when the collapser has a buffered chain, `PrepassLookAheadQueue.get_last()` first drains the prepass; subsequent inner-queue tail is the merged Move, not the pre-chain Move.
+22. **Adapter `queue` property reports buffered state** — `len(adapter.queue) == len(prepass._chain) + len(inner.queue)`; truthy when chain is buffered even if inner queue is empty.
+23. **Post-merge `check_move` re-runs** — mock kinematics that raises on moves over `max_extrude_only_distance`; a chain that individually passes but aggregates over the limit raises on merge (verifies aggregate-limit safety net).
+24. **`t_k` eps tolerance** — constituent endpoint numerically at `1 + 1·ulp` along chord (via subtractive cancellation) does NOT reject; one at `1 + 100·ulp` does.
+25. **Chain-cap flush produces collinear junction** — two successive 100-chain flushes should produce a `junction_cos_theta ≈ -1` junction (collinear passthrough), not a cornering penalty. Test by checking `calc_junction` output between the two merged moves.
 
-### Property tests (hypothesis)
+### Randomized tests (seed-parameterized)
 
-19. **Random collinear chains with per-step offset < tolerance** always merge. Generator: anchor, direction unit vector, N ∈ [2, 100] segments with lengths ∈ [0.01, 10] mm and perpendicular noise ∈ [-20 µm, 20 µm]. Assert: chain of N returns 1 merged move.
-20. **Random chains with one offset-violating step** always split at the violation. Assert: exactly two output moves (the chain up to violation, then the rest starting at the offending move).
-21. **Total displacement preserved** across random arbitrary valid chains: `sum(merged.axes_d[i]) == sum(all original axes_d[i])` within float precision.
+```python
+@pytest.mark.parametrize("seed", range(50))
+def test_random_collinear_chain_merges(seed):
+    rng = random.Random(seed)
+    ...
+```
+
+26. **Random collinear chains with per-step offset < tolerance always merge.** Generator: anchor, direction unit vector, N ∈ [2, 100] segments with lengths ∈ [0.01, 10] mm and perpendicular noise ∈ [-20 µm, 20 µm]. Assert: chain of N returns 1 merged move.
+27. **Random chains with one offset-violating step always split at the violation.** Assert: exactly two output moves (the chain up to violation, then the rest starting at the offending move).
+28. **Total displacement preserved** across random arbitrary valid chains: `sum(merged.axes_d[i]) == sum(all original axes_d[i])` within float precision.
 
 ### Regression fixtures
 
