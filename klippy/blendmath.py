@@ -131,8 +131,14 @@ def blend_geometry(
 
     R = min(R_tol, R_mid)
 
-    # Placeholder v_cap; refined in later tasks.
-    v_cap = float("inf")
+    # Velocity caps. LinuxCNC's Pythagorean split:
+    #   a_t <= 0.5 * a_max (tangential)
+    #   a_n <= (sqrt(3)/2) * a_max (normal)
+    # yielding a_t^2 + a_n^2 <= a_max^2 (total vector budget).
+    a_n_max = (math.sqrt(3.0) / 2.0) * a_max
+    v_centripetal = math.sqrt(a_n_max * R) if R > 0.0 else 0.0
+
+    v_cap = v_centripetal
 
     # Tangent points on the adjacent rays. prev_dir points *toward* the
     # vertex, so the entry tangent point sits at -d * prev_dir (upstream).

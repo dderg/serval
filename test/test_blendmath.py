@@ -242,3 +242,24 @@ def test_blend_geometry_90deg_geometry_positioning():
     assert result.plane_normal == pytest.approx(expected_normal, abs=1e-12)
     assert result.entry_tangent == prev_dir
     assert result.exit_tangent == next_dir
+
+
+def test_blend_geometry_centripetal_cap():
+    # 90 deg corner with tight accel budget; jerk floor effectively disabled.
+    # v_cap_centripetal = sqrt((sqrt(3)/2) * a_max * R)
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    corner_dev = 0.02
+    a_max = 50000.0
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1000.0,
+        L_next=1000.0,
+        corner_deviation=corner_dev,
+        a_max=a_max,
+        j_eff=1e30,
+    )
+    assert result is not None
+    expected_v = math.sqrt((math.sqrt(3) / 2) * a_max * result.R)
+    assert result.v_cap == pytest.approx(expected_v, rel=1e-9)
