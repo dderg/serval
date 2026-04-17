@@ -110,3 +110,32 @@ def test_feed_non_kinematic_flushes_and_passes():
     out = c.feed(eonly)
     assert out == [m1, eonly]
     assert c._chain == []
+
+
+def test_first_kinematic_move_starts_chain():
+    c = _collapser()
+    th = c._toolhead
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    out = c.feed(m)
+    assert out == []
+    assert c._chain == [m]
+
+
+def test_flush_singleton_returns_move_unchanged():
+    c = _collapser()
+    th = c._toolhead
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    c.feed(m)
+    out = c.flush()
+    assert out == [m]  # single-element chain: identity, not a built merge
+    assert c._chain == []
+
+
+def test_reset_discards_chain():
+    c = _collapser()
+    th = c._toolhead
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    c.feed(m)
+    c.reset()
+    assert c._chain == []
+    assert c.flush() == []
