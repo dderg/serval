@@ -285,20 +285,24 @@ def test_chain_cap_flushes_at_max():
 
 
 def test_merged_pins_max_cruise_v2_to_chain_head():
-    c = _collapser()
-    th = c._toolhead
+    # Start with headroom so m1/m2 can both be constructed at speed=100.
+    th = _FakeToolhead(max_velocity=1000.0)
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
     m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
     c.feed(m1)
     c.feed(m2)
-    # Simulate SET_VELOCITY_LIMIT: toolhead raises max_velocity mid-chain.
-    th.max_velocity = 1000.0
+    # Simulate SET_VELOCITY_LIMIT dropping max_velocity below the chain's
+    # cruise speed between feed() and flush().
+    th.max_velocity = 50.0
     out = c.flush()
     merged = out[0]
-    # Without pinning, Move.__init__ would clamp to min(100, 1000)=100, v2=1e4;
-    # with pinning, we keep chain[0].max_cruise_v2 (= 100**2 = 10000). Verify the
-    # pin doesn't drift even when toolhead.max_velocity changed.
+    # Without pinning, Move.__init__ would clamp cruise to 50, giving
+    # max_cruise_v2 = 2500. With pinning, chain[0].max_cruise_v2 = 10000.
     assert merged.max_cruise_v2 == pytest.approx(m1.max_cruise_v2, rel=1e-12)
+    # And min_move_t must reflect the pinned cruise, not the clamped one.
+    # merged.move_d = 20; cruise_v = sqrt(10000) = 100; min_move_t = 0.2
+    assert merged.min_move_t == pytest.approx(20.0 / 100.0, rel=1e-12)
 
 
 def test_merged_pins_junction_deviation_to_chain_head():
