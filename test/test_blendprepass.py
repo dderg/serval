@@ -333,3 +333,37 @@ def test_merged_preserves_minimum_accel_across_chain():
     out = c.flush()
     merged = out[0]
     assert merged.accel == pytest.approx(3000.0, rel=1e-12)
+
+
+def test_merged_preserves_next_junction_v2_from_chain_tail():
+    c = _collapser()
+    th = c._toolhead
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    m2.next_junction_v2 = 12345.0  # limit_next_junction_speed was called on tail
+    c.feed(m1)
+    c.feed(m2)
+    out = c.flush()
+    assert out[0].next_junction_v2 == pytest.approx(12345.0, rel=1e-12)
+
+
+def test_merged_concatenates_timing_callbacks():
+    c = _collapser()
+    th = c._toolhead
+
+    def cb1(t):
+        return None
+
+    def cb2(t):
+        return None
+
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    # Under flush-on-get_last, callbacks should only ever land on chain[-1].
+    # Defense in depth: also preserve if an earlier constituent carried them.
+    m1.timing_callbacks.append(cb1)
+    m2.timing_callbacks.append(cb2)
+    c.feed(m1)
+    c.feed(m2)
+    out = c.flush()
+    assert out[0].timing_callbacks == [cb1, cb2]

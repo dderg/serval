@@ -115,8 +115,14 @@ class CollinearCollapser:
         merged.min_move_t = merged.move_d / cruise_v
         merged.junction_deviation = chain[0].junction_deviation
         # Narrowest accel observed (may have been lowered by a constituent's
-        # kin.check_move via limit_speed). min() of the chain's accels
-        # propagates the most-restrictive floor; limit_speed additionally
-        # applies toolhead.max_accel_NEW if M204 was issued mid-chain.
+        # kin.check_move via limit_speed). limit_speed additionally applies
+        # toolhead.max_accel_NEW if M204 was issued mid-chain.
         merged.limit_speed(cruise_v, min(m.accel for m in chain))
+        # Preserve chain tail's next-junction cap and all constituent callbacks.
+        # Under flush-on-get_last (adapter in Task 12), callbacks only land on
+        # chain[-1]; the list-comprehension is defense in depth.
+        merged.next_junction_v2 = chain[-1].next_junction_v2
+        merged.timing_callbacks = [
+            cb for m in chain for cb in m.timing_callbacks
+        ]
         return merged
