@@ -412,7 +412,7 @@ def test_compute_shaper_bounds_step_single_axis_x_projection():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `.venv-test/bin/pytest test/test_blendshaper.py::test_compute_shaper_bounds_step_single_axis_90deg -v`
+Run: `.venv-test/bin/pytest test/test_blendshaper.py::test_compute_shaper_bounds_step_single_axis_x_projection -v`
 Expected: FAIL with `AttributeError: module 'klippy.blendshaper' has no attribute 'compute_shaper_bounds'`.
 
 - [ ] **Step 3: Implement minimal compute_shaper_bounds covering only Bound (b)**
@@ -500,6 +500,8 @@ def test_compute_shaper_bounds_jerk_axis_partially_in_plane():
     # Single shaped axis X, arc plane normal at 45° between X and Z:
     # axis_in_plane_x = sqrt(1 - 0.5) = 1/sqrt(2).
     # j_x_effective = A_x / (T_x · (1/sqrt(2))) = A_x · sqrt(2) / T_x.
+    # n_hat must be perpendicular to p_hat in real arc geometry; we use +Y
+    # which is perpendicular to any plane with a normal in the XZ plane.
     snap_x = blendshaper.AxisShaperSnapshot(
         axis="x",
         shaper_type="zv",
@@ -512,8 +514,8 @@ def test_compute_shaper_bounds_jerk_axis_partially_in_plane():
     bounds = blendshaper.compute_shaper_bounds(
         shapers=[snap_x],
         R=0.5,
-        n_hat=(s, 0.0, s),   # arbitrary unit vector
-        p_hat=(s, 0.0, s),   # plane normal at 45° in XZ
+        n_hat=(0.0, 1.0, 0.0),   # perpendicular to p_hat
+        p_hat=(s, 0.0, s),       # plane normal at 45° in XZ
     )
     expected_j = 10000.0 / (T_x * s)
     assert bounds.j_eff == pytest.approx(expected_j, rel=1e-9)
