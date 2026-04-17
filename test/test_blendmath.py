@@ -541,3 +541,43 @@ def test_blend_from_moves_non_kinematic_returns_none():
         prev_move=prev, next_move=nxt, corner_deviation=0.02, j_eff=1e8
     )
     assert result is None
+
+
+def test_interpolate_extruder_through_arc():
+    # Setup: a blend arc polyline, plus E-axis consumption rates per mm
+    # for prev and next moves. The adapter helper should produce a list of
+    # (x, y, z, e) points whose E increases monotonically from 0 to the
+    # total E consumption across the blend arc length.
+    polyline = [
+        (-1.0, 0.0, 0.0),
+        (-0.9, 0.1, 0.0),
+        (-0.5, 0.5, 0.0),
+        (-0.1, 0.9, 0.0),
+        (0.0, 1.0, 0.0),
+    ]
+    # Suppose e_per_mm_prev = 0.05, e_per_mm_next = 0.04, and the arc
+    # consumes d=1.0 from each side.
+    e_per_mm_prev = 0.05
+    e_per_mm_next = 0.04
+    d_consumed = 1.0
+
+    points_xyze = blendmath.interpolate_extruder(
+        polyline,
+        d_consumed=d_consumed,
+        e_per_mm_prev=e_per_mm_prev,
+        e_per_mm_next=e_per_mm_next,
+    )
+
+    # First point has E=0 (start of the blend).
+    assert points_xyze[0][3] == pytest.approx(0.0, abs=1e-12)
+    # Last point has total E = d_consumed * (prev_rate + next_rate) consumed over
+    # the two halves of the blend. The blend replaces the final d_consumed mm of
+    # the prev move (consuming d_consumed * e_per_mm_prev) plus the first
+    # d_consumed mm of the next move (consuming d_consumed * e_per_mm_next).
+    expected_total_e = d_consumed * (e_per_mm_prev + e_per_mm_next)
+    assert points_xyze[-1][3] == pytest.approx(expected_total_e, rel=1e-9)
+    # Monotonic non-decreasing.
+    for p0, p1 in zip(points_xyze, points_xyze[1:]):
+        assert p1[3] >= p0[3] - 1e-12
+    # Length of output matches polyline.
+    assert len(points_xyze) == len(polyline)

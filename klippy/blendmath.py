@@ -272,3 +272,42 @@ def blend_from_moves(
         a_max=a_max,
         j_eff=j_eff,
     )
+
+
+def interpolate_extruder(
+    polyline,
+    d_consumed: float,
+    e_per_mm_prev: float,
+    e_per_mm_next: float,
+) -> list:
+    """Attach an E coordinate to each polyline point.
+
+    The blend arc replaces the final `d_consumed` mm of the previous move and
+    the first `d_consumed` mm of the next move. Total E through the arc is
+    conserved: sum across the polyline equals
+    `d_consumed * (e_per_mm_prev + e_per_mm_next)`. E is distributed uniformly
+    over the polyline's arc-length parameterization.
+    """
+    if not polyline:
+        return []
+
+    total_e = d_consumed * (e_per_mm_prev + e_per_mm_next)
+
+    # Arc length along the polyline (piecewise-linear approximation).
+    seg_lens = []
+    total_len = 0.0
+    for p0, p1 in zip(polyline, polyline[1:]):
+        seg_len = vnorm(vsub(p1, p0))
+        seg_lens.append(seg_len)
+        total_len += seg_len
+
+    if total_len == 0.0:
+        # Degenerate polyline (single point or collapsed).
+        return [(p[0], p[1], p[2], 0.0) for p in polyline]
+
+    out = [(polyline[0][0], polyline[0][1], polyline[0][2], 0.0)]
+    e = 0.0
+    for seg_len, p1 in zip(seg_lens, polyline[1:]):
+        e += total_e * seg_len / total_len
+        out.append((p1[0], p1[1], p1[2], e))
+    return out
