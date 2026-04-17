@@ -437,3 +437,41 @@ def test_segment_arc_zero_radius_returns_degenerate_polyline():
     )
     polyline = blendmath.segment_arc(arc, max_chord_err=0.01)
     assert polyline == [(0.0, 0.0, 0.0)]
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_segment_arc_chord_error_bound(seed):
+    rng = random.Random(seed + 10_000)
+    # Build a valid arc from blend_geometry on a random corner.
+    prev_dir = _rand_unit_vec(rng)
+    theta = rng.uniform(0.05, math.pi - 0.05)
+    c, s = math.cos(theta), math.sin(theta)
+    next_dir = (
+        c * prev_dir[0] - s * prev_dir[1],
+        s * prev_dir[0] + c * prev_dir[1],
+        0.0,
+    )
+    arc = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=100.0,
+        L_next=100.0,
+        corner_deviation=rng.uniform(0.01, 0.2),
+        a_max=50000.0,
+        j_eff=1e8,
+    )
+    assert arc is not None
+
+    max_chord_err = rng.uniform(0.0005, 0.05)
+    polyline = blendmath.segment_arc(arc, max_chord_err=max_chord_err)
+
+    # Each consecutive pair: midpoint's deviation from the arc should be
+    # <= max_chord_err (with a small numeric slack).
+    for p0, p1 in zip(polyline, polyline[1:]):
+        midpoint = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2, (p0[2] + p1[2]) / 2)
+        # Deviation = R - |midpoint - center| (on arc side, midpoint is inside).
+        dist_from_center = blendmath.vnorm(blendmath.vsub(midpoint, arc.center))
+        chord_err = arc.R - dist_from_center
+        # chord_err should be in [0, max_chord_err + small slack]
+        assert chord_err >= -1e-9
+        assert chord_err <= max_chord_err + 1e-6
