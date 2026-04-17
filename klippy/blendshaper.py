@@ -91,19 +91,27 @@ def compute_shaper_bounds(
     p_hat:   unit arc plane normal.
     """
     n_projs = axis_projections(n_hat)
+    in_plane = axis_in_plane(p_hat)
 
     v_step_cap = float("inf")
+    j_eff = float("inf")
     for snap in shapers:
         if snap.shaper_freq is None or snap.shaper_freq <= 0.0:
             continue
         if snap.A_axis <= 0.0:
             continue
+        # Bound (b) entry-step.
         proj = n_projs.get(snap.axis, 0.0)
-        if proj < PROJECTION_EPS:
-            continue
-        v_axis = math.sqrt(snap.A_axis * R / proj)
-        if v_axis < v_step_cap:
-            v_step_cap = v_axis
+        if proj >= PROJECTION_EPS:
+            v_axis = math.sqrt(snap.A_axis * R / proj)
+            if v_axis < v_step_cap:
+                v_step_cap = v_axis
+        # Bound (c) rotation jerk.
+        ip = in_plane.get(snap.axis, 0.0)
+        if ip >= PROJECTION_EPS:
+            T_a = shaper_span(snap.shaper_type, snap.shaper_freq, snap.damping_ratio)
+            j_axis = snap.A_axis / (T_a * ip)
+            if j_axis < j_eff:
+                j_eff = j_axis
 
-    # j_eff filled in a subsequent task.
-    return ShaperBounds(j_eff=float("inf"), v_step_cap=v_step_cap)
+    return ShaperBounds(j_eff=j_eff, v_step_cap=v_step_cap)

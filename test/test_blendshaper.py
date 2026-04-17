@@ -185,3 +185,48 @@ def test_compute_shaper_bounds_zero_A_axis_skipped():
         p_hat=(0.0, 0.0, 1.0),
     )
     assert bounds.v_step_cap == float("inf")
+
+
+def test_compute_shaper_bounds_jerk_single_axis_in_plane():
+    # Single shaped axis X, arc in XY plane → axis_in_plane_x = 1.
+    # j_eff = A_x / T_x.
+    snap_x = blendshaper.AxisShaperSnapshot(
+        axis="x",
+        shaper_type="zv",
+        shaper_freq=100.0,
+        damping_ratio=0.1,
+        A_axis=10000.0,
+    )
+    T_x = blendshaper.shaper_span("zv", 100.0, 0.1)
+    bounds = blendshaper.compute_shaper_bounds(
+        shapers=[snap_x],
+        R=0.5,
+        n_hat=(1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0), 0.0),
+        p_hat=(0.0, 0.0, 1.0),
+    )
+    assert bounds.j_eff == pytest.approx(10000.0 / T_x, rel=1e-9)
+
+
+def test_compute_shaper_bounds_jerk_axis_partially_in_plane():
+    # Single shaped axis X, arc plane normal at 45° between X and Z:
+    # axis_in_plane_x = sqrt(1 - 0.5) = 1/sqrt(2).
+    # j_x_effective = A_x / (T_x · (1/sqrt(2))) = A_x · sqrt(2) / T_x.
+    # n_hat must be perpendicular to p_hat in real arc geometry; we use +Y
+    # which is perpendicular to any plane with a normal in the XZ plane.
+    snap_x = blendshaper.AxisShaperSnapshot(
+        axis="x",
+        shaper_type="zv",
+        shaper_freq=100.0,
+        damping_ratio=0.1,
+        A_axis=10000.0,
+    )
+    T_x = blendshaper.shaper_span("zv", 100.0, 0.1)
+    s = 1.0 / math.sqrt(2.0)
+    bounds = blendshaper.compute_shaper_bounds(
+        shapers=[snap_x],
+        R=0.5,
+        n_hat=(0.0, 1.0, 0.0),   # perpendicular to p_hat
+        p_hat=(s, 0.0, s),       # plane normal at 45° in XZ
+    )
+    expected_j = 10000.0 / (T_x * s)
+    assert bounds.j_eff == pytest.approx(expected_j, rel=1e-9)
