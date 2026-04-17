@@ -414,3 +414,39 @@ def test_post_merge_check_skipped_for_singleton_chain():
     c.flush()
     assert th.kin.calls == []
     assert th.extruder.calls == []
+
+
+class _RaisingKin:
+    def check_move(self, move):
+        raise RuntimeError("kin limit violation")
+
+
+def test_exception_in_merged_check_clears_chain(caplog):
+    th = _FakeToolhead()
+    th.kin = _RaisingKin()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    c.feed(m1)
+    c.feed(m2)
+    with caplog.at_level("WARNING"):
+        with pytest.raises(RuntimeError, match="kin limit violation"):
+            c.flush()
+    assert c._chain == []
+    assert any("blendprepass: chain cleared" in r.message for r in caplog.records)
+
+
+def test_feed_after_exception_starts_clean():
+    th = _FakeToolhead()
+    th.kin = _RaisingKin()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    c.feed(m1)
+    c.feed(m2)
+    with pytest.raises(RuntimeError):
+        c.flush()
+    # After exception, chain is empty; next feed starts a fresh chain of size 1.
+    m3 = _FakeMove(th, (20, 0, 0, 1.0), (30, 0, 0, 1.5), speed=100.0)
+    assert c.feed(m3) == []
+    assert c._chain == [m3]
