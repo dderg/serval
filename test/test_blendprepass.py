@@ -631,3 +631,105 @@ def test_total_displacement_preserved(seed):
     for i in range(4):
         expected = sum(m.axes_d[i] for m in moves)
         assert merged.axes_d[i] == pytest.approx(expected, abs=1e-9)
+
+
+def test_merged_has_fresh_lookahead_invariants():
+    # Spec test #15: merged Move must carry fresh lookahead state, not
+    # inherited/leaked values from any constituent.
+    c = _collapser()
+    th = c._toolhead
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    # Simulate lookahead having partially planned a constituent before merge.
+    m1.max_start_v2 = 1234.5
+    m1.max_smoothed_v2 = 6789.0
+    c.feed(m1)
+    c.feed(m2)
+    out = c.flush()
+    merged = out[0]
+    assert merged.max_start_v2 == 0.0
+    assert merged.max_smoothed_v2 == 0.0
+
+
+def test_post_merge_kin_check_can_reject_aggregate():
+    # Spec test #23: the post-merge check_move re-run catches limits that
+    # constituents individually pass but the aggregate violates.
+    class _AggregateRejectKin:
+        # Rejects any move with XYZ travel over 15 mm — constituents at
+        # 10 mm each pass; merged at 20 mm fails.
+        def check_move(self, move):
+            if move.move_d > 15.0:
+                raise RuntimeError("aggregate XYZ travel exceeded")
+
+    th = _FakeToolhead()
+    th.kin = _AggregateRejectKin()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    # Constituents individually have move_d=10, pass.
+    th.kin.check_move(m1)
+    th.kin.check_move(m2)
+    # Merge must fail post-build.
+    c.feed(m1)
+    c.feed(m2)
+    with pytest.raises(RuntimeError, match="aggregate XYZ travel exceeded"):
+        c.flush()
+
+
+def test_gate_d_t_eps_tolerance_allows_ulp_noise():
+    # Spec test #24: gate (d) projection allows float-noise slack.
+    # A legitimate extension of a collinear chain should not be rejected
+    # by a sub-ulp t value > 1.0.
+    c = _collapser()
+    th = c._toolhead
+    # Build a chain where the intermediate endpoint is at coordinate that,
+    # after subtractive-cancellation in `t = (AP·AB)/(AB·AB)`, is bit-equal
+    # to 1.0. Using 10 mm + 10 mm segments makes t = 1.0 exact for the
+    # first intermediate if we use the chord A(0,0,0) -> B(20,0,0).
+    # Constructing a scenario where ulp noise makes t slightly > 1:
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10.0, 0.0, 0.0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10.0, 0.0, 0.0, 0.5), (20.0, 0.0, 0.0, 1.0), speed=100.0)
+    assert c.feed(m1) == []
+    assert c.feed(m2) == []
+    assert len(c._chain) == 2
+
+    # Now construct a t value clearly outside slack: intermediate at
+    # t = 1 + 100*ulp, which at coord 10 on a chord of 20 is ~2e-12 over.
+    # We need an offset large enough to definitely exceed t_eps=1e-9, so
+    # push the intermediate slightly past the chord end.
+    c.reset()
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10.0 + 1e-6, 0.0, 0.0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10.0 + 1e-6, 0.0, 0.0, 0.5),
+                   (10.0, 0.0, 0.0, 1.0), speed=100.0)
+    # Chord A(0,0,0)->B(10,0,0). Intermediate at (10+1e-6, 0, 0) has
+    # t = (10+1e-6)/10 = 1 + 1e-7, outside t_eps = 1e-9 slack -> reject.
+    assert c.feed(m1) == []
+    out = c.feed(m2)
+    assert out == [m1]  # chain flushed as singleton
+    assert c._chain == [m2]
+
+
+def test_chain_cap_consecutive_flushes_stay_collinear():
+    # Spec test #25: two successive chain-cap flushes should produce two
+    # merged moves whose axes_r directions match exactly (collinear). This
+    # pins the invariant that a vase-mode print spanning >100 segments
+    # does NOT hit a cornering penalty at the cap boundary.
+    c = _collapser()
+    th = c._toolhead
+    # Build 200 perfectly collinear moves of length 0.5 mm each along +X.
+    moves = _build_collinear_chain(th, 200, seg_len=0.5)
+    emitted = []
+    for m in moves:
+        emitted.extend(c.feed(m))
+    emitted.extend(c.flush())
+    # Exactly two merged moves (first 100 chunk + second 100 chunk).
+    assert len(emitted) == 2
+    first, second = emitted
+    # Both span 50 mm (100 * 0.5) along +X.
+    assert first.move_d == pytest.approx(50.0, abs=1e-9)
+    assert second.move_d == pytest.approx(50.0, abs=1e-9)
+    # axes_r direction vectors must match bit-for-bit (collinear invariant).
+    for i in range(3):
+        assert first.axes_r[i] == pytest.approx(second.axes_r[i], abs=1e-12)
+    # Chord continuity: first ends where second begins.
+    assert first.end_pos[:3] == second.start_pos[:3]
