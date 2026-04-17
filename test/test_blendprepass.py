@@ -83,3 +83,30 @@ def _collapser(toolhead=None):
 def test_construct_and_flush_empty():
     c = _collapser()
     assert c.flush() == []
+
+
+def test_feed_zero_length_move_passes_through():
+    c = _collapser()
+    th = c._toolhead
+    # Construct a zero-length move directly; Move.__init__ flags it non-kinematic
+    # but also gives it move_d=0 which is the step-1 branch we want to exercise.
+    zero = _FakeMove(th, (0, 0, 0, 0), (0, 0, 0, 0), speed=100.0)
+    assert zero.move_d == 0.0
+    out = c.feed(zero)
+    assert out == [zero]
+    assert c._chain == []
+
+
+def test_feed_non_kinematic_flushes_and_passes():
+    c = _collapser()
+    th = c._toolhead
+    # Build a non-empty chain first
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    c.feed(m1)
+    assert c._chain == [m1]
+    # E-only move: XYZ identical, E delta present => is_kinematic_move=False
+    eonly = _FakeMove(th, (10, 0, 0, 0.5), (10, 0, 0, 1.5), speed=100.0)
+    assert eonly.is_kinematic_move is False
+    out = c.feed(eonly)
+    assert out == [m1, eonly]
+    assert c._chain == []
