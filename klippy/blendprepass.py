@@ -3,11 +3,6 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
-import logging
-import math
-
-from . import blendmath
-
 
 class CollinearCollapser:
     """Naive-CAM collinearity prepass. See

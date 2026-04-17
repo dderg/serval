@@ -1,8 +1,5 @@
 # test/test_blendprepass.py
 import math
-import random
-
-import pytest
 
 from klippy import blendprepass
 
