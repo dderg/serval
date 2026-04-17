@@ -230,3 +230,102 @@ def test_compute_shaper_bounds_jerk_axis_partially_in_plane():
     )
     expected_j = 10000.0 / (T_x * s)
     assert bounds.j_eff == pytest.approx(expected_j, rel=1e-9)
+
+
+def test_compute_shaper_bounds_y_binds_over_x():
+    # X at 150Hz, Y at 80Hz; Y has smaller A/T → Y binds on Bound (c).
+    snap_x = blendshaper.AxisShaperSnapshot(
+        axis="x", shaper_type="zv", shaper_freq=150.0,
+        damping_ratio=0.1, A_axis=87000.0,
+    )
+    snap_y = blendshaper.AxisShaperSnapshot(
+        axis="y", shaper_type="zv", shaper_freq=80.0,
+        damping_ratio=0.1, A_axis=25000.0,
+    )
+    T_x = blendshaper.shaper_span("zv", 150.0, 0.1)
+    T_y = blendshaper.shaper_span("zv", 80.0, 0.1)
+    assert 25000.0 / T_y < 87000.0 / T_x  # Y is stricter for jerk
+
+    bounds = blendshaper.compute_shaper_bounds(
+        shapers=[snap_x, snap_y],
+        R=0.5,
+        n_hat=(1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0), 0.0),
+        p_hat=(0.0, 0.0, 1.0),
+    )
+    assert bounds.j_eff == pytest.approx(25000.0 / T_y, rel=1e-9)
+    # Both axes project equally (n̂ at 45°), so v_step_cap binds on the
+    # tighter (Y) axis: sqrt(A_y · R / proj) < sqrt(A_x · R / proj).
+    proj = 1.0 / math.sqrt(2.0)
+    expected_v_step = math.sqrt(25000.0 * 0.5 / proj)
+    assert bounds.v_step_cap == pytest.approx(expected_v_step, rel=1e-9)
+
+
+def test_compute_shaper_bounds_no_shapers_returns_infinity():
+    bounds = blendshaper.compute_shaper_bounds(
+        shapers=[],
+        R=0.5,
+        n_hat=(1.0, 0.0, 0.0),
+        p_hat=(0.0, 0.0, 1.0),
+    )
+    assert bounds.j_eff == float("inf")
+    assert bounds.v_step_cap == float("inf")
+
+
+def test_compute_shaper_bounds_unshaped_axis_contributes_nothing():
+    # freq=0 means no shaper — axis is skipped.
+    snap_x = blendshaper.AxisShaperSnapshot(
+        axis="x", shaper_type=None, shaper_freq=0.0,
+        damping_ratio=0.1, A_axis=0.0,
+    )
+    snap_y = blendshaper.AxisShaperSnapshot(
+        axis="y", shaper_type="zv", shaper_freq=80.0,
+        damping_ratio=0.1, A_axis=25000.0,
+    )
+    bounds = blendshaper.compute_shaper_bounds(
+        shapers=[snap_x, snap_y],
+        R=0.5,
+        n_hat=(0.0, 1.0, 0.0),   # n̂ along +y
+        p_hat=(0.0, 0.0, 1.0),
+    )
+    # Only Y contributes.
+    T_y = blendshaper.shaper_span("zv", 80.0, 0.1)
+    assert bounds.j_eff == pytest.approx(25000.0 / T_y, rel=1e-9)
+    assert bounds.v_step_cap == pytest.approx(
+        math.sqrt(25000.0 * 0.5 / 1.0), rel=1e-9
+    )
+
+
+def test_compute_shaper_bounds_out_of_plane_shaper_contributes_nothing():
+    # XY arc, only Z shaped: axis_in_plane_z = 0, |n̂·ẑ| = 0.
+    # Z contributes to neither bound → both return infinity.
+    snap_z = blendshaper.AxisShaperSnapshot(
+        axis="z", shaper_type="zv", shaper_freq=50.0,
+        damping_ratio=0.1, A_axis=5000.0,
+    )
+    bounds = blendshaper.compute_shaper_bounds(
+        shapers=[snap_z],
+        R=0.5,
+        n_hat=(1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0), 0.0),
+        p_hat=(0.0, 0.0, 1.0),
+    )
+    assert bounds.j_eff == float("inf")
+    assert bounds.v_step_cap == float("inf")
+
+
+def test_compute_shaper_bounds_small_projection_axis_skipped_for_step():
+    # X shaped, but n̂ is (0, 1, 0) — no X projection for step bound.
+    # Bound (b) contributes nothing from X; Bound (c) still does
+    # (axis_in_plane_x = 1).
+    snap_x = blendshaper.AxisShaperSnapshot(
+        axis="x", shaper_type="zv", shaper_freq=100.0,
+        damping_ratio=0.1, A_axis=10000.0,
+    )
+    T_x = blendshaper.shaper_span("zv", 100.0, 0.1)
+    bounds = blendshaper.compute_shaper_bounds(
+        shapers=[snap_x],
+        R=0.5,
+        n_hat=(0.0, 1.0, 0.0),   # no X component
+        p_hat=(0.0, 0.0, 1.0),
+    )
+    assert bounds.v_step_cap == float("inf")  # no X-projected step
+    assert bounds.j_eff == pytest.approx(10000.0 / T_x, rel=1e-9)  # X still in plane
