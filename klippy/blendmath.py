@@ -318,6 +318,11 @@ def blend_from_moves(
     with the given `j_eff` (default +inf) — preserves the pre-shaper
     behavior used by existing tests.
     """
+    if toolhead is not None and j_eff != float("inf"):
+        raise ValueError(
+            "blend_from_moves: j_eff and toolhead are mutually exclusive "
+            "(toolhead derives j_eff from shaper state; passing both is ambiguous)"
+        )
     if not getattr(prev_move, "is_kinematic_move", True):
         return None
     if not getattr(next_move, "is_kinematic_move", True):

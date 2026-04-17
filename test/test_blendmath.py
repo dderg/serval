@@ -874,3 +874,27 @@ def test_blend_from_moves_u_turn_with_toolhead_returns_zero_arc():
     assert result is not None
     assert result.R == 0.0
     assert result.v_cap == 0.0
+
+
+def test_blend_from_moves_j_eff_and_toolhead_mutually_exclusive():
+    # Passing both j_eff and toolhead is ambiguous (toolhead derives j_eff
+    # internally; explicit j_eff would be silently ignored). Raise instead.
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=10.0,
+        accel=50000.0, max_cruise_v2=1e6,
+    )
+    nxt = _FakeMove(
+        axes_r=[0.0, 1.0, 0.0, 0.0], move_d=10.0,
+        accel=50000.0, max_cruise_v2=1e6,
+    )
+    is_obj = _FakeInputShaper([
+        _FakeAxisInputShaper("x", "zv", 150.0),
+    ])
+    toolhead = _FakeToolheadWithShapers(is_obj)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        blendmath.blend_from_moves(
+            prev_move=prev, next_move=nxt,
+            corner_deviation=0.02,
+            j_eff=1e8,
+            toolhead=toolhead,
+        )
