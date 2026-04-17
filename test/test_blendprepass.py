@@ -1,5 +1,6 @@
 # test/test_blendprepass.py
 import math
+import random
 
 import pytest
 
@@ -567,3 +568,66 @@ def test_adapter_queue_property_reports_buffered_moves():
     # buffered pending work.
     assert adapter.queue
     assert len(adapter.queue) == 2
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_random_collinear_chain_merges(seed):
+    rng = random.Random(seed)
+    th = _FakeToolhead()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    # Random unit direction in a plane (z=0 for simplicity of the noise model)
+    theta = rng.uniform(0.0, 2 * math.pi)
+    ux, uy = math.cos(theta), math.sin(theta)
+    # Perpendicular direction in the plane
+    px, py = -uy, ux
+    n = rng.randint(2, 100)
+    anchor = (0.0, 0.0, 0.0, 0.0)
+    cursor = anchor
+    for _ in range(n):
+        seg_len = rng.uniform(0.01, 10.0)
+        noise = rng.uniform(-20e-6, 20e-6)  # 20 µm well under 25 µm tolerance
+        nx = cursor[0] + ux * seg_len + px * noise
+        ny = cursor[1] + uy * seg_len + py * noise
+        e_delta = seg_len * 0.05
+        end = (nx, ny, 0.0, cursor[3] + e_delta)
+        m = _FakeMove(th, cursor, end, speed=100.0)
+        c.feed(m)
+        cursor = end
+    out = c.flush()
+    assert len(out) == 1, f"seed {seed}: expected 1 merged move, got {len(out)}"
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_random_chain_splits_at_violation(seed):
+    rng = random.Random(seed)
+    th = _FakeToolhead()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    n_before = rng.randint(2, 50)
+    moves = _build_collinear_chain(th, n_before)
+    for m in moves:
+        c.feed(m)
+    # Now an offset-violating move: 50 µm perpendicular offset > 25 µm tolerance.
+    last_end = moves[-1].end_pos
+    violator_end = (last_end[0] + 1.0, last_end[1] + 50e-3, 0.0, last_end[3] + 0.05)
+    violator = _FakeMove(th, last_end, violator_end, speed=100.0)
+    out = c.feed(violator)
+    # First output: the merged prior chain.
+    assert len(out) == 1
+    # Violator started a fresh chain.
+    assert c._chain == [violator]
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_total_displacement_preserved(seed):
+    rng = random.Random(seed)
+    th = _FakeToolhead()
+    c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    n = rng.randint(2, 50)
+    moves = _build_collinear_chain(th, n)
+    for m in moves:
+        c.feed(m)
+    out = c.flush()
+    merged = out[0]
+    for i in range(4):
+        expected = sum(m.axes_d[i] for m in moves)
+        assert merged.axes_d[i] == pytest.approx(expected, abs=1e-9)
