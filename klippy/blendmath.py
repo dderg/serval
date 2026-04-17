@@ -138,7 +138,13 @@ def blend_geometry(
     a_n_max = (math.sqrt(3.0) / 2.0) * a_max
     v_centripetal = math.sqrt(a_n_max * R) if R > 0.0 else 0.0
 
-    v_cap = v_centripetal
+    # Jerk floor: R >= v^(3/2) / sqrt(j_eff)  =>  v <= (R * sqrt(j_eff))^(2/3)
+    if R > 0.0 and j_eff > 0.0:
+        v_jerk = (R * math.sqrt(j_eff)) ** (2.0 / 3.0)
+    else:
+        v_jerk = 0.0
+
+    v_cap = min(v_centripetal, v_jerk)
 
     # Tangent points on the adjacent rays. prev_dir points *toward* the
     # vertex, so the entry tangent point sits at -d * prev_dir (upstream).

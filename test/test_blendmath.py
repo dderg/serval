@@ -263,3 +263,45 @@ def test_blend_geometry_centripetal_cap():
     assert result is not None
     expected_v = math.sqrt((math.sqrt(3) / 2) * a_max * result.R)
     assert result.v_cap == pytest.approx(expected_v, rel=1e-9)
+
+
+def test_blend_geometry_jerk_floor_dominates():
+    # Tight jerk budget: v_cap should drop to (R * sqrt(j))^(2/3).
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    corner_dev = 0.02
+    a_max = 50000.0
+    j_eff = 1e4  # very tight jerk → jerk cap should dominate
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1000.0,
+        L_next=1000.0,
+        corner_deviation=corner_dev,
+        a_max=a_max,
+        j_eff=j_eff,
+    )
+    assert result is not None
+    expected_v_jerk = (result.R * math.sqrt(j_eff)) ** (2.0 / 3.0)
+    expected_v_centripetal = math.sqrt((math.sqrt(3) / 2) * a_max * result.R)
+    # Jerk cap should win.
+    assert expected_v_jerk < expected_v_centripetal
+    assert result.v_cap == pytest.approx(expected_v_jerk, rel=1e-9)
+
+
+def test_blend_geometry_jerk_floor_loose_does_not_bind():
+    # Very loose jerk: centripetal should still dominate.
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    result = blendmath.blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1000.0,
+        L_next=1000.0,
+        corner_deviation=0.02,
+        a_max=50000.0,
+        j_eff=1e30,
+    )
+    assert result is not None
+    expected_v_centripetal = math.sqrt((math.sqrt(3) / 2) * 50000.0 * result.R)
+    assert result.v_cap == pytest.approx(expected_v_centripetal, rel=1e-9)
