@@ -475,3 +475,69 @@ def test_segment_arc_chord_error_bound(seed):
         # chord_err should be in [0, max_chord_err + small slack]
         assert chord_err >= -1e-9
         assert chord_err <= max_chord_err + 1e-6
+
+
+class _FakeMove:
+    """Minimal duck-typed stand-in for Kalico's Move class."""
+
+    def __init__(self, axes_r, move_d, accel, max_cruise_v2, is_kinematic_move=True):
+        # Kalico's Move.axes_r is a 4-vector [x, y, z, e]; only [:3] is used here.
+        self.axes_r = axes_r
+        self.move_d = move_d
+        self.accel = accel
+        self.max_cruise_v2 = max_cruise_v2
+        self.is_kinematic_move = is_kinematic_move
+
+
+def test_blend_from_moves_matches_pure_math():
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0],
+        move_d=50.0,
+        accel=50000.0,
+        max_cruise_v2=1e6,
+    )
+    nxt = _FakeMove(
+        axes_r=[0.0, 1.0, 0.0, 0.0],
+        move_d=50.0,
+        accel=50000.0,
+        max_cruise_v2=1e6,
+    )
+    corner_dev = 0.02
+    j_eff = 1e8
+
+    adapter_result = blendmath.blend_from_moves(
+        prev_move=prev,
+        next_move=nxt,
+        corner_deviation=corner_dev,
+        j_eff=j_eff,
+    )
+    core_result = blendmath.blend_geometry(
+        prev_dir=(1.0, 0.0, 0.0),
+        next_dir=(0.0, 1.0, 0.0),
+        L_prev=50.0,
+        L_next=50.0,
+        corner_deviation=corner_dev,
+        a_max=50000.0,  # min(prev.accel, nxt.accel)
+        j_eff=j_eff,
+    )
+    assert adapter_result is not None
+    assert core_result is not None
+    assert adapter_result.R == pytest.approx(core_result.R, rel=1e-12)
+    assert adapter_result.v_cap == pytest.approx(core_result.v_cap, rel=1e-12)
+
+
+def test_blend_from_moves_non_kinematic_returns_none():
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=1.0, accel=1.0, max_cruise_v2=1.0
+    )
+    nxt = _FakeMove(
+        axes_r=[0.0, 0.0, 0.0, 1.0],
+        move_d=1.0,
+        accel=1.0,
+        max_cruise_v2=1.0,
+        is_kinematic_move=False,
+    )
+    result = blendmath.blend_from_moves(
+        prev_move=prev, next_move=nxt, corner_deviation=0.02, j_eff=1e8
+    )
+    assert result is None

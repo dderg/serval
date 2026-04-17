@@ -233,3 +233,42 @@ def _rotate(v: Vec3, axis: Vec3, angle: float) -> Vec3:
         v[1] * c + ax_cross_v[1] * s + axis[1] * ax_dot_v * (1.0 - c),
         v[2] * c + ax_cross_v[2] * s + axis[2] * ax_dot_v * (1.0 - c),
     )
+
+
+def blend_from_moves(
+    prev_move,
+    next_move,
+    corner_deviation: float,
+    j_eff: float,
+) -> Optional[BlendArc]:
+    """Adapter: compute a blend arc from a pair of Kalico Move-like objects.
+
+    Skips the blend if either move is non-kinematic (E-only). The effective
+    a_max is the stricter of the two moves' accel values.
+    """
+    if not getattr(prev_move, "is_kinematic_move", True):
+        return None
+    if not getattr(next_move, "is_kinematic_move", True):
+        return None
+
+    prev_dir: Vec3 = (
+        prev_move.axes_r[0],
+        prev_move.axes_r[1],
+        prev_move.axes_r[2],
+    )
+    next_dir: Vec3 = (
+        next_move.axes_r[0],
+        next_move.axes_r[1],
+        next_move.axes_r[2],
+    )
+
+    a_max = min(prev_move.accel, next_move.accel)
+    return blend_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=prev_move.move_d,
+        L_next=next_move.move_d,
+        corner_deviation=corner_deviation,
+        a_max=a_max,
+        j_eff=j_eff,
+    )
