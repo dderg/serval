@@ -36,3 +36,28 @@ def test_vec_normalize():
 
     with pytest.raises(ValueError):
         blendmath.vnormalize((0.0, 0.0, 0.0))
+
+
+def test_blend_arc_dataclass_fields():
+    arc = blendmath.BlendArc(
+        R=5.0,
+        theta=math.pi / 2,
+        d_consumed=5.0,
+        v_cap=100.0,
+        center=(0.0, 5.0, 0.0),
+        entry_pt=(-5.0, 0.0, 0.0),
+        exit_pt=(0.0, 5.0, 0.0),
+        entry_tangent=(1.0, 0.0, 0.0),
+        exit_tangent=(0.0, 1.0, 0.0),
+        plane_normal=(0.0, 0.0, 1.0),
+    )
+    assert arc.R == 5.0
+    assert arc.theta == math.pi / 2
+    assert arc.d_consumed == 5.0
+    assert arc.v_cap == 100.0
+    assert arc.center == (0.0, 5.0, 0.0)
+    assert arc.entry_pt == (-5.0, 0.0, 0.0)
+    assert arc.exit_pt == (0.0, 5.0, 0.0)
+    assert arc.entry_tangent == (1.0, 0.0, 0.0)
+    assert arc.exit_tangent == (0.0, 1.0, 0.0)
+    assert arc.plane_normal == (0.0, 0.0, 1.0)

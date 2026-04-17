@@ -23,10 +23,12 @@ REVERSAL_EPS = 1e-6
 
 
 def vdot(a: Vec3, b: Vec3) -> float:
+    """Scalar dot product of two 3-vectors."""
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
 def vcross(a: Vec3, b: Vec3) -> Vec3:
+    """Cross product of two 3-vectors."""
     return (
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -35,23 +37,44 @@ def vcross(a: Vec3, b: Vec3) -> Vec3:
 
 
 def vnorm(a: Vec3) -> float:
+    """Euclidean length of a 3-vector."""
     return math.sqrt(vdot(a, a))
 
 
 def vscale(a: Vec3, s: float) -> Vec3:
+    """Multiply a 3-vector by a scalar."""
     return (a[0] * s, a[1] * s, a[2] * s)
 
 
 def vadd(a: Vec3, b: Vec3) -> Vec3:
+    """Component-wise sum of two 3-vectors."""
     return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
 
 def vsub(a: Vec3, b: Vec3) -> Vec3:
+    """Component-wise difference of two 3-vectors (a - b)."""
     return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
 
 
 def vnormalize(a: Vec3) -> Vec3:
+    """Return a unit vector in the direction of a; raise ValueError if zero."""
     n = vnorm(a)
     if n == 0.0:
         raise ValueError("cannot normalize zero vector")
     return vscale(a, 1.0 / n)
+
+
+@dataclass(frozen=True)
+class BlendArc:
+    """Tangent-arc blend geometry between two adjacent moves."""
+
+    R: float
+    theta: float
+    d_consumed: float
+    v_cap: float
+    center: Vec3
+    entry_pt: Vec3
+    exit_pt: Vec3
+    entry_tangent: Vec3
+    exit_tangent: Vec3
+    plane_normal: Vec3
