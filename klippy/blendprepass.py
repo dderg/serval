@@ -109,6 +109,11 @@ class CollinearCollapser:
         end_pos = chain[-1].end_pos
         cruise_v = math.sqrt(chain[0].max_cruise_v2)
         merged = self._move_cls(self._toolhead, start_pos, end_pos, cruise_v)
-        # Further preservation (junction_deviation, next_junction_v2,
-        # timing_callbacks, post-merge check_move) lands in Tasks 8-10.
+        # Pin head-of-chain values so SET_VELOCITY_LIMIT / M204 mid-chain does
+        # not leak into the merged Move via Move.__init__'s toolhead snapshot.
+        merged.max_cruise_v2 = chain[0].max_cruise_v2
+        merged.junction_deviation = chain[0].junction_deviation
+        # Narrowest accel observed (may have been lowered by a constituent's
+        # kin.check_move via limit_speed).
+        merged.limit_speed(cruise_v, min(m.accel for m in chain))
         return merged

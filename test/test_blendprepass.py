@@ -282,3 +282,50 @@ def test_chain_cap_flushes_at_max():
     assert merged.start_pos == (0, 0, 0, 0)
     assert merged.end_pos[:3] == pytest.approx((100.0, 0.0, 0.0), abs=1e-9)
     assert c._chain == [moves[-1]]
+
+
+def test_merged_pins_max_cruise_v2_to_chain_head():
+    c = _collapser()
+    th = c._toolhead
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    c.feed(m1)
+    c.feed(m2)
+    # Simulate SET_VELOCITY_LIMIT: toolhead raises max_velocity mid-chain.
+    th.max_velocity = 1000.0
+    out = c.flush()
+    merged = out[0]
+    # Without pinning, Move.__init__ would clamp to min(100, 1000)=100, v2=1e4;
+    # with pinning, we keep chain[0].max_cruise_v2 (= 100**2 = 10000). Verify the
+    # pin doesn't drift even when toolhead.max_velocity changed.
+    assert merged.max_cruise_v2 == pytest.approx(m1.max_cruise_v2, rel=1e-12)
+
+
+def test_merged_pins_junction_deviation_to_chain_head():
+    c = _collapser()
+    th = c._toolhead
+    th.junction_deviation = 0.005
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    th.junction_deviation = 0.02  # SET_VELOCITY_LIMIT between moves
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    c.feed(m1)
+    c.feed(m2)
+    th.junction_deviation = 0.05  # change again before merge
+    out = c.flush()
+    merged = out[0]
+    assert merged.junction_deviation == pytest.approx(0.005, rel=1e-12)
+
+
+def test_merged_preserves_minimum_accel_across_chain():
+    c = _collapser()
+    th = c._toolhead
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    # Simulate kinematics having applied limit_speed to m2.
+    m2.limit_speed(100.0, 3000.0)
+    assert m2.accel == 3000.0
+    c.feed(m1)
+    c.feed(m2)
+    out = c.flush()
+    merged = out[0]
+    assert merged.accel == pytest.approx(3000.0, rel=1e-12)
