@@ -144,44 +144,65 @@ class CollinearCollapser:
         return merged
 
 
-class PrepassLookAheadQueue:
-    """Transparent wrapper that drains a CollinearCollapser on every flush,
-    get_last, or queue access. ToolHead uses this in place of a raw
-    LookAheadQueue so no per-call-site prepass handling is required.
+class BlendPipelineLookAheadQueue:
+    """Generic ordered filter-chain adapter in front of a LookAheadQueue.
+
+    Each filter exposes feed(move) -> list[Move], flush() -> list[Move],
+    reset() -> None, peek_buffered() -> list[Move]. On add_move, the
+    incoming Move is piped through every filter in order; the survivors
+    reach the inner LookAheadQueue. On flush, a two-pass drain flows
+    each filter's flush() output through later filters' feed() before
+    delivering to the inner queue, then flush()es the inner queue.
+
+    get_last() does NOT drain filters - it peeks via peek_buffered() so
+    that callers mutating the returned Move (timing_callbacks,
+    limit_next_junction_speed) do not force a premature un-blended
+    emission. The emit-time path (_build_merged_move in the prepass,
+    _emit_arc in the blender) transfers caller-mutated state onto the
+    actually-queued Move so the mutation survives.
     """
 
-    def __init__(self, prepass, lookahead):
-        self._prepass = prepass
+    def __init__(self, filters, lookahead):
+        self._filters = list(filters)
         self._lookahead = lookahead
 
     def add_move(self, move):
-        for m in self._prepass.feed(move):
+        acc = [move]
+        for f in self._filters:
+            acc = [out for m in acc for out in f.feed(m)]
+        for m in acc:
             self._lookahead.add_move(m)
 
     def flush(self, lazy=False):
-        for m in self._prepass.flush():
+        acc = []
+        for f in self._filters:
+            # Pipe any already-drained moves from earlier filters through
+            # this filter's feed, then append this filter's own flush.
+            acc = [out for m in acc for out in f.feed(m)]
+            acc += f.flush()
+        for m in acc:
             self._lookahead.add_move(m)
         self._lookahead.flush(lazy=lazy)
 
     def reset(self):
-        self._prepass.reset()
+        for f in self._filters:
+            f.reset()
         self._lookahead.reset()
 
     def set_flush_time(self, flush_time):
         self._lookahead.set_flush_time(flush_time)
 
     def get_last(self):
-        # Drain prepass first so callers attaching timing_callbacks /
-        # next_junction_v2 via the returned Move land on the canonical
-        # queued move, not a transient chain constituent.
-        for m in self._prepass.flush():
-            self._lookahead.add_move(m)
+        for f in reversed(self._filters):
+            buf = f.peek_buffered()
+            if buf:
+                return buf[-1]
         return self._lookahead.get_last()
 
     @property
     def queue(self):
-        # check_busy and similar callers test emptiness/length; buffered
-        # chain counts as pending.
-        if self._prepass._chain:
-            return list(self._prepass._chain) + list(self._lookahead.queue)
-        return self._lookahead.queue
+        result = []
+        for f in self._filters:
+            result += f.peek_buffered()
+        result += list(self._lookahead.queue)
+        return result

@@ -264,17 +264,19 @@ class ToolHead:
             m for n, m in self.printer.lookup_objects(module="mcu")
         ]
         self.mcu = self.all_mcus[0]
-        from . import blendprepass
+        from . import blendprepass, blendplanner
         inner_queue = LookAheadQueue(self)
         self.prepass = blendprepass.CollinearCollapser(self, move_cls=Move)
-        self.lookahead = blendprepass.PrepassLookAheadQueue(
-            self.prepass, inner_queue
+        self.blender = blendplanner.CornerBlender(self, move_cls=Move)
+        self.lookahead = blendprepass.BlendPipelineLookAheadQueue(
+            [self.prepass, self.blender], inner_queue
         )
         self.lookahead.set_flush_time(BUFFER_TIME_HIGH)
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
         # Velocity and acceleration control
         self.max_velocity = config.getfloat("max_velocity", above=0.0)
         self.max_accel = config.getfloat("max_accel", above=0.0)
+        self.corner_deviation = config.getfloat("corner_deviation", above=0.0)
         min_cruise_ratio = 0.5
         if config.getfloat("minimum_cruise_ratio", None) is None:
             req_accel_to_decel = config.getfloat(
@@ -294,6 +296,7 @@ class ToolHead:
         self.orig_cfg = {}
         self.orig_cfg["max_velocity"] = self.max_velocity
         self.orig_cfg["max_accel"] = self.max_accel
+        self.orig_cfg["corner_deviation"] = self.corner_deviation
         self.orig_cfg["min_cruise_ratio"] = self.min_cruise_ratio
         self.orig_cfg["square_corner_velocity"] = self.square_corner_velocity
         self.junction_deviation = self.max_accel_to_decel = 0
@@ -719,10 +722,16 @@ class ToolHead:
         is_active = buffer_time > -60.0 or not self.special_queuing_state
         if self.special_queuing_state == "Drip":
             buffer_time = 0.0
-        return is_active, "print_time=%.3f buffer_time=%.3f print_stall=%d" % (
-            self.print_time,
-            max(buffer_time, 0.0),
-            self.print_stall,
+        return is_active, (
+            "print_time=%.3f buffer_time=%.3f print_stall=%d "
+            "blend_moves=%d blend_corners=%d"
+            % (
+                self.print_time,
+                max(buffer_time, 0.0),
+                self.print_stall,
+                self.blender.polyline_moves_emitted,
+                self.blender.blends_emitted,
+            )
         )
 
     def check_busy(self, eventtime):

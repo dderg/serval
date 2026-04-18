@@ -427,3 +427,73 @@ def test_property_random_3d_corners(seed):
     assert out[-1].end_pos[0] == pytest.approx(m_next.end_pos[0], abs=1e-9)
     assert out[-1].end_pos[1] == pytest.approx(m_next.end_pos[1], abs=1e-9)
     assert out[-1].end_pos[2] == pytest.approx(m_next.end_pos[2], abs=1e-9)
+
+
+class _FakeInnerQueue:
+    def __init__(self):
+        self.queue = []
+        self.flush_calls = []
+        self.reset_calls = 0
+        self.set_flush_time_calls = []
+
+    def add_move(self, move):
+        self.queue.append(move)
+
+    def flush(self, lazy=False):
+        self.flush_calls.append(lazy)
+
+    def reset(self):
+        self.reset_calls += 1
+        self.queue = []
+
+    def set_flush_time(self, t):
+        self.set_flush_time_calls.append(t)
+
+    def get_last(self):
+        return self.queue[-1] if self.queue else None
+
+
+def test_pipeline_composition_prepass_then_blender():
+    from klippy import blendprepass
+    th = _FakeToolhead(corner_deviation=50e-3)
+    prepass = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    blender = blendplanner.CornerBlender(
+        th, move_cls=_FakeMove, max_chord_err=20e-3
+    )
+    inner = _FakeInnerQueue()
+    adapter = blendprepass.BlendPipelineLookAheadQueue(
+        [prepass, blender], inner
+    )
+    # 10 short collinear +X moves, then a 90 degree turn into 10 short +Y moves.
+    pos = (0.0, 0.0, 0.0, 0.0)
+    for i in range(10):
+        nxt = (pos[0] + 1.0, pos[1], pos[2], pos[3] + 0.05)
+        adapter.add_move(_FakeMove(th, pos, nxt, speed=100.0))
+        pos = nxt
+    for i in range(10):
+        nxt = (pos[0], pos[1] + 1.0, pos[2], pos[3] + 0.05)
+        adapter.add_move(_FakeMove(th, pos, nxt, speed=100.0))
+        pos = nxt
+    adapter.flush()
+    # Prepass merged each side into a long move; blender produced one blend.
+    assert blender.blends_emitted == 1
+    assert blender.polyline_moves_emitted >= 2
+
+
+def test_pipeline_adapter_get_last_returns_blender_prev_when_buffered():
+    from klippy import blendprepass
+    th = _FakeToolhead(corner_deviation=50e-3)
+    prepass = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    blender = blendplanner.CornerBlender(
+        th, move_cls=_FakeMove, max_chord_err=20e-3
+    )
+    inner = _FakeInnerQueue()
+    adapter = blendprepass.BlendPipelineLookAheadQueue(
+        [prepass, blender], inner
+    )
+    # Feed one move. Prepass buffers it; get_last returns from prepass.
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    adapter.add_move(m)
+    assert adapter.get_last() is m
+    # Inner queue still empty - no flush side effect.
+    assert inner.queue == []

@@ -481,7 +481,7 @@ def test_adapter_add_move_routes_through_prepass():
     th = _FakeToolhead()
     c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
     inner = _FakeInnerQueue()
-    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+    adapter = blendprepass.BlendPipelineLookAheadQueue([c], inner)
 
     m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
@@ -496,7 +496,7 @@ def test_adapter_flush_drains_and_forwards_lazy_flag():
     th = _FakeToolhead()
     c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
     inner = _FakeInnerQueue()
-    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+    adapter = blendprepass.BlendPipelineLookAheadQueue([c], inner)
 
     m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
@@ -513,7 +513,7 @@ def test_adapter_reset_discards_chain_and_resets_inner():
     th = _FakeToolhead()
     c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
     inner = _FakeInnerQueue()
-    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+    adapter = blendprepass.BlendPipelineLookAheadQueue([c], inner)
 
     m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     adapter.add_move(m)
@@ -526,17 +526,17 @@ def test_adapter_set_flush_time_passes_through():
     th = _FakeToolhead()
     c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
     inner = _FakeInnerQueue()
-    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+    adapter = blendprepass.BlendPipelineLookAheadQueue([c], inner)
 
     adapter.set_flush_time(2.0)
     assert inner.set_flush_time_calls == [2.0]
 
 
-def test_adapter_get_last_flushes_prepass_first():
+def test_adapter_get_last_peeks_without_flushing_prepass():
     th = _FakeToolhead()
     c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
     inner = _FakeInnerQueue()
-    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+    adapter = blendprepass.BlendPipelineLookAheadQueue([c], inner)
 
     m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
@@ -545,17 +545,18 @@ def test_adapter_get_last_flushes_prepass_first():
     # Before get_last, chain is buffered, inner queue empty.
     assert inner.queue == []
     last = adapter.get_last()
-    # get_last drained the prepass; the inner queue now has the merged move.
-    assert len(inner.queue) == 1
-    assert last is inner.queue[0]
-    assert c._chain == []
+    # get_last peeks; the prepass chain is STILL buffered (not flushed).
+    assert inner.queue == []
+    assert c._chain == [m1, m2]
+    # Returned move is the tail of the buffered chain.
+    assert last is m2
 
 
 def test_adapter_queue_property_reports_buffered_moves():
     th = _FakeToolhead()
     c = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
     inner = _FakeInnerQueue()
-    adapter = blendprepass.PrepassLookAheadQueue(c, inner)
+    adapter = blendprepass.BlendPipelineLookAheadQueue([c], inner)
 
     # Empty state: queue is empty.
     assert not adapter.queue
