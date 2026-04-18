@@ -23,7 +23,6 @@ class Move:
         self.start_pos = tuple(start_pos)
         self.end_pos = tuple(end_pos)
         self.accel = toolhead.max_accel
-        self.junction_deviation = toolhead.junction_deviation
         self.timing_callbacks = []
         velocity = min(speed, toolhead.max_velocity)
         self.is_kinematic_move = True
@@ -293,8 +292,6 @@ class ToolHead:
         self.orig_cfg["corner_deviation"] = self.corner_deviation
         self.orig_cfg["min_cruise_ratio"] = self.min_cruise_ratio
         self.orig_cfg["square_corner_velocity"] = self.square_corner_velocity
-        self.junction_deviation = 0
-        self._calc_junction_deviation()
         # Input stall detection
         self.check_stall_time = 0.0
         self.print_stall = 0
@@ -798,10 +795,6 @@ class ToolHead:
         # SET_VELOCITY_LIMIT mutations are visible without an explicit recompute.
         return self.max_accel * (1.0 - self.min_cruise_ratio)
 
-    def _calc_junction_deviation(self):
-        scv2 = self.square_corner_velocity**2
-        self.junction_deviation = scv2 * (math.sqrt(2.0) - 1.0) / self.max_accel
-
     def cmd_G4(self, gcmd):
         # Dwell
         delay = gcmd.get_float("P", 0.0, minval=0.0) / 1000.0
@@ -884,7 +877,6 @@ class ToolHead:
                 self.kin.max_z_accel = max_z_accel
             msg.append("max_z_accel: %.6f" % self.kin.max_z_accel)
 
-        self._calc_junction_deviation()
         msg.extend(
             (
                 "minimum_cruise_ratio: %.6f" % self.min_cruise_ratio,
@@ -943,7 +935,6 @@ class ToolHead:
         self.square_corner_velocity = self.orig_cfg["square_corner_velocity"]
         self.min_cruise_ratio = self.orig_cfg["min_cruise_ratio"]
         self.corner_deviation = self.orig_cfg["corner_deviation"]
-        self._calc_junction_deviation()
         msg.extend(
             (
                 "minimum_cruise_ratio: %.6f" % self.min_cruise_ratio,
@@ -968,15 +959,12 @@ class ToolHead:
                 return
             accel = min(p, t)
         self.max_accel = accel
-        self._calc_junction_deviation()
 
     def set_accel(self, accel):
         self.max_accel = accel
-        self._calc_junction_deviation()
 
     def reset_accel(self):
         self.max_accel = self.orig_cfg["max_accel"]
-        self._calc_junction_deviation()
 
 
 def add_printer_objects(config):

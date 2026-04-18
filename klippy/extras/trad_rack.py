@@ -2361,7 +2361,6 @@ class TradRackToolHead(toolhead.ToolHead, object):
             "square_corner_velocity", 5.0, minval=0.0
         )
         self.junction_deviation = 0.0
-        self._calc_junction_deviation()
         # Input stall detection
         self.check_stall_time = 0.0
         self.print_stall = 0
