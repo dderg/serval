@@ -266,3 +266,41 @@ def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head()
     # Instrumentation.
     assert b.blends_emitted == 1
     assert b.polyline_moves_emitted == len(arc_moves)
+
+
+def test_e_conservation_through_blend():
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
+    b.feed(m_prev)
+    out = b.feed(m_next)
+    # Drain buffered trunc_next_head.
+    out += b.flush()
+    total_e = sum(am.axes_d[3] for am in out)
+    expected = m_prev.axes_d[3] + m_next.axes_d[3]
+    assert total_e == pytest.approx(expected, rel=1e-9, abs=1e-12)
+
+
+def test_asymmetric_segments_half_segment_rule_caps_consumption():
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    # 60° corner. Short segment = 2mm, long = 10mm. With LOOSE tolerance so
+    # R_tol >> R_mid and the midpoint cap binds.
+    # R_mid = 0.5 * min(2, 10) * cot(30°) = 0.5 * 2 * sqrt(3) = sqrt(3)
+    # d = R * tan(30°) = sqrt(3) * (1/sqrt(3)) = 1.0 (= L_short / 2)
+    th.corner_deviation = 10.0  # absurdly loose so R_tol does not bind
+    angle = math.radians(60.0)
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (2, 0, 0, 0.1), speed=100.0)
+    # Rotate next direction by 60° from +X.
+    next_end = (
+        2 + 10 * math.cos(angle),
+        0 + 10 * math.sin(angle),
+        0, 0.6,
+    )
+    m_next = _FakeMove(th, (2, 0, 0, 0.1), next_end, speed=100.0)
+    b.feed(m_prev)
+    out = b.feed(m_next)
+    trunc_prev = out[0]
+    # trunc_prev.move_d should equal 2 - 1 = 1 mm (half-segment consumption).
+    assert trunc_prev.move_d == pytest.approx(1.0, rel=1e-6)
