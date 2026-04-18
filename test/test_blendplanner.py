@@ -340,3 +340,28 @@ def test_aggregate_extruder_check_move_skipped_when_not_extruding():
     b.feed(m_prev)
     b.feed(m_next)
     assert len(th.extruder.calls) == 0
+
+
+def test_arc_polyline_smooth_delta_v2_equals_delta_v2():
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
+    b.feed(m_prev)
+    out = b.feed(m_next)
+    arc_moves = out[1:]
+    for am in arc_moves:
+        assert am.smooth_delta_v2 == pytest.approx(am.delta_v2, rel=1e-12)
+
+
+def test_arc_polyline_speed_continuity_1ppm():
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
+    b.feed(m_prev)
+    out = b.feed(m_next)
+    arc_moves = out[1:]
+    v2s = [am.max_cruise_v2 for am in arc_moves]
+    # All arc moves share the same cap to 1 ppm.
+    assert (max(v2s) - min(v2s)) / max(v2s) < 1e-6
