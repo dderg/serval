@@ -141,8 +141,11 @@ def blend_geometry(
     # Tolerance-driven radius:
     R_tol = corner_deviation * cos_half / (1.0 - cos_half)
 
-    # Midpoint / adjacent-segment cap. cot(theta/2) = cos_half / sin_half.
-    R_mid = min(L_prev, L_next) * cos_half / sin_half
+    # Midpoint / adjacent-segment cap (half-segment rule): each blend claims
+    # at most half the adjacent segment so two neighbouring corners meet at
+    # most at the segment midpoint. cot(theta/2) = cos_half / sin_half.
+    # d_consumed = R * tan(theta/2) <= 0.5 * min(L_prev, L_next) by construction.
+    R_mid = 0.5 * min(L_prev, L_next) * cos_half / sin_half
 
     R = min(R_tol, R_mid)
 

@@ -180,7 +180,8 @@ def test_blend_geometry_60deg_tolerance_radius():
 
 def test_blend_geometry_midpoint_cap_binds_on_short_segment():
     # 90 deg corner, but one adjacent segment is short.
-    # R_mid = min(L_prev, L_next) * cot(theta/2) = 0.5 * 1.0 = 0.5 mm
+    # Half-segment rule: R_mid = 0.5 * min(L_prev, L_next) * cot(theta/2)
+    #                         = 0.5 * 0.5 * 1.0 = 0.25 mm
     # R_tol should be much larger given the tolerance; verify R_mid wins.
     prev_dir = (1.0, 0.0, 0.0)
     next_dir = (0.0, 1.0, 0.0)
@@ -198,10 +199,10 @@ def test_blend_geometry_midpoint_cap_binds_on_short_segment():
     assert result is not None
     cos_half = math.sqrt(2) / 2
     sin_half = math.sqrt(2) / 2
-    expected_R_mid = L_short * cos_half / sin_half  # = 0.5
+    expected_R_mid = 0.5 * L_short * cos_half / sin_half  # = 0.25 (half-segment rule)
     assert result.R == pytest.approx(expected_R_mid, rel=1e-9)
-    # d_consumed should equal L_short (90 deg case: d = R).
-    assert result.d_consumed == pytest.approx(L_short, rel=1e-9)
+    # d_consumed = R * tan(theta/2) = R for 90 deg. At R=0.25, d=0.25 (= L_short/2).
+    assert result.d_consumed == pytest.approx(L_short * 0.5, rel=1e-9)
 
 
 def test_blend_geometry_90deg_geometry_positioning():
@@ -662,7 +663,7 @@ def test_regression_very_short_segment_produces_tiny_arc():
         j_eff=1e8,
     )
     assert result is not None
-    assert result.R == pytest.approx(0.01, rel=1e-9)  # 90 deg: R = L
+    assert result.R == pytest.approx(0.005, rel=1e-9)  # 90 deg: R = 0.5 * L (half-segment rule)
     assert result.v_cap > 0.0
 
 
