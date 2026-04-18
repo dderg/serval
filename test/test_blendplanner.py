@@ -611,3 +611,24 @@ def test_adapter_queue_reports_blender_buffered_move():
     adapter.add_move(m)
     # Prepass buffered the move; adapter.queue must reflect it.
     assert adapter.queue == [m]
+
+
+def test_max_accel_to_decel_is_property_tracking_min_cruise_ratio():
+    """max_accel_to_decel must be derived from min_cruise_ratio on every
+    read, not cached as a field set by _calc_junction_deviation."""
+    # Use a real ToolHead-like object via direct attribute manipulation.
+    # The contract is: max_accel_to_decel == max_accel * (1 - min_cruise_ratio)
+    # at any moment, with no recompute call required.
+    from klippy import toolhead as th_mod
+
+    class _Stub:
+        max_accel_to_decel = th_mod.ToolHead.max_accel_to_decel
+        max_accel = 5000.0
+        min_cruise_ratio = 0.5
+
+    s = _Stub()
+    assert s.max_accel_to_decel == 2500.0
+    s.min_cruise_ratio = 0.7
+    assert s.max_accel_to_decel == pytest.approx(1500.0, rel=1e-12)
+    s.max_accel = 10000.0
+    assert s.max_accel_to_decel == pytest.approx(3000.0, rel=1e-12)
