@@ -429,6 +429,25 @@ def test_property_random_3d_corners(seed):
     assert out[-1].end_pos[2] == pytest.approx(m_next.end_pos[2], abs=1e-9)
 
 
+def test_blender_degenerate_R_zero_forces_stop_at_prev():
+    """When CornerBlender produces R=0 (e.g. U-turn or extremely short neighbor),
+    the previous move must be limited to a full stop at its end junction.
+    This is the safety net that replaces the old JD constraint for the
+    blender-decline path. This test verifies the safety net is intact
+    before any JD deletion work."""
+    b = _blender()
+    th = b._toolhead
+    # Create a U-turn: +X then -X (180° reversal).
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (0, 0, 0, 1.0), speed=100.0)
+    assert b.feed(m1) == []  # buffered
+    out = b.feed(m2)
+    # U-turn: blender detects R=0 and v_cap=0, forces a stop at prev's junction.
+    assert out == [m1]
+    assert m1.next_junction_v2 == 0.0
+    assert b._prev is m2  # next is buffered for the next corner
+
+
 class _FakeInnerQueue:
     def __init__(self):
         self.queue = []
