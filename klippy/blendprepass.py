@@ -176,8 +176,10 @@ class BlendPipelineLookAheadQueue:
     def flush(self, lazy=False):
         acc = []
         for f in self._filters:
-            # Pipe any already-drained moves from earlier filters through
-            # this filter's feed, then append this filter's own flush.
+            # Invariant: earlier filters may flush moves that must still be
+            # seen by later filters' feed() before the later filter itself
+            # flushes. First pipe any previous-flush residue through this
+            # filter's feed, then append this filter's own flush output.
             acc = [out for m in acc for out in f.feed(m)]
             acc += f.flush()
         for m in acc:

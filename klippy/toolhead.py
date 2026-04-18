@@ -943,11 +943,13 @@ class ToolHead:
 
         self.square_corner_velocity = self.orig_cfg["square_corner_velocity"]
         self.min_cruise_ratio = self.orig_cfg["min_cruise_ratio"]
+        self.corner_deviation = self.orig_cfg["corner_deviation"]
         self._calc_junction_deviation()
         msg.extend(
             (
                 "minimum_cruise_ratio: %.6f" % self.min_cruise_ratio,
                 "square_corner_velocity: %.6f" % self.square_corner_velocity,
+                "corner_deviation: %.6f" % self.corner_deviation,
             )
         )
         if get_danger_options().log_velocity_limit_changes:
