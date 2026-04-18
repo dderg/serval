@@ -138,3 +138,17 @@ def test_feed_non_kinematic_flushes_and_passes():
     out = b.feed(eonly)
     assert out == [m_kin, eonly]
     assert b._prev is None
+
+
+def test_feed_collinear_pair_passes_through_with_rebuffer():
+    b = _blender()
+    th = b._toolhead
+    # Two exactly collinear moves along +X: blend_from_moves returns None.
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    assert b.feed(m1) == []
+    out = b.feed(m2)
+    # Collinear: emit prev unchanged, buffer next. No velocity cap imposed.
+    assert out == [m1]
+    assert b._prev is m2
+    assert m1.next_junction_v2 == 999999999.9  # unchanged
