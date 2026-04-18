@@ -77,10 +77,102 @@ class CornerBlender:
             emitted = [self._prev]
             self._prev = move
             return emitted
-        # Blend steps 6–8 (arc emission) come in Task 8.
-        emitted = [self._prev]
-        self._prev = move
-        return emitted
+        trunc_prev, arc_moves, trunc_next_head = self._emit_arc(
+            self._prev, move, arc
+        )
+        self._prev = trunc_next_head
+        self.blends_emitted += 1
+        self.polyline_moves_emitted += len(arc_moves)
+        return [trunc_prev] + arc_moves
+
+    def _resolve_chord_err(self):
+        """Return the polyline chord tolerance to use for the current blend.
+
+        If self.max_chord_err was set at construction time, that value wins.
+        Otherwise auto-scale as max(20e-3, 0.2 * toolhead.corner_deviation).
+        """
+        if self.max_chord_err is not None:
+            return self.max_chord_err
+        return max(20e-3, 0.2 * self._toolhead.corner_deviation)
+
+    def _emit_arc(self, prev, nxt, arc):
+        """Construct [trunc_prev, arc_moves...] and the trunc_next_head.
+
+        Returns (trunc_prev, arc_moves_list, trunc_next_head).
+        """
+        th = self._toolhead
+        move_cls = self._move_cls
+
+        prev_dir = prev.axes_r[:3]
+        next_dir = nxt.axes_r[:3]
+        vertex = prev.end_pos[:3]
+
+        # --- 1. Truncated prev ---
+        prev_cruise_v = math.sqrt(prev.max_cruise_v2)
+        trunc_prev_end_xyz = tuple(
+            vertex[i] - arc.d_consumed * prev_dir[i] for i in range(3)
+        )
+        # E carried proportional to the truncated fraction of prev.move_d.
+        frac_prev = 1.0 - arc.d_consumed / prev.move_d
+        trunc_prev_end_e = prev.start_pos[3] + frac_prev * prev.axes_d[3]
+        trunc_prev_end = (
+            trunc_prev_end_xyz[0], trunc_prev_end_xyz[1],
+            trunc_prev_end_xyz[2], trunc_prev_end_e,
+        )
+        trunc_prev = move_cls(th, prev.start_pos, trunc_prev_end, prev_cruise_v)
+        _copy_caller_state(prev, trunc_prev)
+
+        # --- 2. Arc polyline ---
+        chord_err = self._resolve_chord_err()
+        polyline_local = blendmath.segment_arc(arc, chord_err)
+        polyline_world = [
+            (p[0] + vertex[0], p[1] + vertex[1], p[2] + vertex[2])
+            for p in polyline_local
+        ]
+        points_4d = blendmath.interpolate_extruder(
+            polyline_world, arc.d_consumed,
+            prev.axes_r[3], nxt.axes_r[3],
+        )
+        # Offset the interpolate_extruder E (starts at 0) by trunc_prev_end_e
+        # so each polyline point's absolute E continues the global count.
+        points_4d = [
+            (p[0], p[1], p[2], p[3] + trunc_prev_end_e) for p in points_4d
+        ]
+        arc_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2, arc.v_cap ** 2)
+        arc_cap_v = math.sqrt(arc_cap_v2)
+        arc_accel = min(prev.accel, nxt.accel)
+        arc_jd = min(prev.junction_deviation, nxt.junction_deviation)
+        arc_moves = []
+        for p0, p1 in zip(points_4d, points_4d[1:]):
+            am = move_cls(th, p0, p1, arc_cap_v)
+            am.max_cruise_v2 = arc_cap_v2
+            am.junction_deviation = arc_jd
+            am.limit_speed(arc_cap_v, arc_accel)
+            # Cruise-through-arc: pin smooth_delta_v2 to delta_v2 so look-ahead
+            # smoothing does not ramp gently at the arc boundaries.
+            am.smooth_delta_v2 = am.delta_v2
+            am.min_move_t = am.move_d / arc_cap_v
+            arc_moves.append(am)
+
+        # --- 3. Truncated next head ---
+        trunc_next_head_start_xyz = tuple(
+            vertex[i] + arc.d_consumed * next_dir[i] for i in range(3)
+        )
+        # E carry for the truncated-next-head: fraction of next.move_d after
+        # the head is consumed.
+        frac_next = 1.0 - arc.d_consumed / nxt.move_d
+        trunc_next_head_start_e = nxt.end_pos[3] - frac_next * nxt.axes_d[3]
+        trunc_next_head_start = (
+            trunc_next_head_start_xyz[0], trunc_next_head_start_xyz[1],
+            trunc_next_head_start_xyz[2], trunc_next_head_start_e,
+        )
+        next_cruise_v = math.sqrt(nxt.max_cruise_v2)
+        trunc_next_head = move_cls(
+            th, trunc_next_head_start, nxt.end_pos, next_cruise_v
+        )
+        _copy_caller_state(nxt, trunc_next_head)
+
+        return trunc_prev, arc_moves, trunc_next_head
 
     def flush(self):
         if self._prev is None:

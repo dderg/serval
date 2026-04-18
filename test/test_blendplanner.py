@@ -220,3 +220,49 @@ def test_copy_caller_state_handles_zero_delta_v2():
     # Falls back to ratio=1.0 when src.delta_v2 is zero; dst.smooth_delta_v2
     # collapses to dst.delta_v2 via the min().
     assert dst.smooth_delta_v2 == pytest.approx(dst.delta_v2)
+
+
+def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head():
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    # Two 10mm moves meeting at a 90° corner at (10,0,0).
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
+    assert b.feed(m_prev) == []
+    out = b.feed(m_next)
+    # Emission: [trunc_prev, arc[0], ..., arc[N-1]]
+    assert len(out) >= 2
+    trunc_prev = out[0]
+    arc_moves = out[1:]
+    # trunc_prev shares start_pos with m_prev.
+    assert trunc_prev.start_pos[:3] == m_prev.start_pos[:3]
+    # trunc_prev ends before the vertex by arc.d_consumed along +X.
+    # R_mid = 0.5 * min(10,10) * cot(45°) = 5. R_tol binds much smaller:
+    # R_tol = 50e-3 * cos(45°)/(1-cos(45°)) ≈ 0.1207. So R = R_tol ≈ 0.1207,
+    # d = R * tan(45°) ≈ 0.1207.
+    d_expected = 50e-3 * (math.sqrt(2)/2) / (1 - math.sqrt(2)/2)
+    assert trunc_prev.end_pos[0] == pytest.approx(10.0 - d_expected, rel=1e-6)
+    assert trunc_prev.end_pos[1] == pytest.approx(0.0, abs=1e-9)
+    # buffered next_trunc_head starts where the arc ends.
+    assert b._prev is not None
+    assert b._prev is not m_next
+    nxt_head = b._prev
+    assert nxt_head.start_pos[0] == pytest.approx(10.0, abs=1e-9)
+    assert nxt_head.start_pos[1] == pytest.approx(d_expected, rel=1e-6)
+    assert nxt_head.end_pos[:3] == (10.0, 10.0, 0.0)
+    # Polyline points all lie on the arc within max_chord_err.
+    # Arc center: m_prev.end_pos + R*n_hat where n_hat bisects inward.
+    # At a 90° corner +X to +Y, center = vertex + R*(-1/sqrt2, 1/sqrt2) rotated;
+    # simpler check: every arc_move endpoint must be within R + chord_err of center.
+    # We compute center from arc.entry_pt + R in the direction (next-prev)/|...|.
+    # For simplicity just verify that arc spans from near (10-d,0) to (10,d).
+    first_pt = arc_moves[0].start_pos[:3]
+    last_pt = arc_moves[-1].end_pos[:3]
+    assert first_pt[0] == pytest.approx(10.0 - d_expected, rel=1e-6)
+    assert last_pt[1] == pytest.approx(d_expected, rel=1e-6)
+    # All arc moves share the same max_cruise_v2 (arc.v_cap^2 in this case).
+    v_caps = [am.max_cruise_v2 for am in arc_moves]
+    assert max(v_caps) - min(v_caps) < 1e-6
+    # Instrumentation.
+    assert b.blends_emitted == 1
+    assert b.polyline_moves_emitted == len(arc_moves)
