@@ -93,6 +93,8 @@ class CornerBlender:
         """
         if self.max_chord_err is not None:
             return self.max_chord_err
+        # 20 microns absolute floor; 20% of corner_deviation for a sensible
+        # auto-scale at loose tolerances.
         return max(20e-3, 0.2 * self._toolhead.corner_deviation)
 
     def _emit_arc(self, prev, nxt, arc):
@@ -138,6 +140,7 @@ class CornerBlender:
         points_4d = [
             (p[0], p[1], p[2], p[3] + trunc_prev_end_e) for p in points_4d
         ]
+        # Kalico stores squared velocities; arc.v_cap is a velocity so ** 2 converts.
         arc_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2, arc.v_cap ** 2)
         arc_cap_v = math.sqrt(arc_cap_v2)
         arc_accel = min(prev.accel, nxt.accel)
@@ -158,10 +161,10 @@ class CornerBlender:
         trunc_next_head_start_xyz = tuple(
             vertex[i] + arc.d_consumed * next_dir[i] for i in range(3)
         )
-        # E carry for the truncated-next-head: fraction of next.move_d after
-        # the head is consumed.
-        frac_next = 1.0 - arc.d_consumed / nxt.move_d
-        trunc_next_head_start_e = nxt.end_pos[3] - frac_next * nxt.axes_d[3]
+        # E at the truncated-next-head start: offset from nxt.start_pos by the
+        # consumed head fraction. Symmetric with trunc_prev's E formula.
+        frac_consumed_next = arc.d_consumed / nxt.move_d
+        trunc_next_head_start_e = nxt.start_pos[3] + frac_consumed_next * nxt.axes_d[3]
         trunc_next_head_start = (
             trunc_next_head_start_xyz[0], trunc_next_head_start_xyz[1],
             trunc_next_head_start_xyz[2], trunc_next_head_start_e,
