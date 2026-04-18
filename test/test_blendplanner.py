@@ -95,3 +95,46 @@ def test_construct_and_flush_empty():
     assert b.peek_buffered() == []
     assert b.polyline_moves_emitted == 0
     assert b.blends_emitted == 0
+
+
+def test_feed_first_move_buffers():
+    b = _blender()
+    th = b._toolhead
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    out = b.feed(m)
+    assert out == []
+    assert b._prev is m
+    assert b.peek_buffered() == [m]
+
+
+def test_flush_drains_buffered_prev():
+    b = _blender()
+    th = b._toolhead
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    b.feed(m)
+    out = b.flush()
+    assert out == [m]
+    assert b._prev is None
+
+
+def test_reset_drops_buffered_prev():
+    b = _blender()
+    th = b._toolhead
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    b.feed(m)
+    b.reset()
+    assert b._prev is None
+    assert b.flush() == []
+
+
+def test_feed_non_kinematic_flushes_and_passes():
+    b = _blender()
+    th = b._toolhead
+    m_kin = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    b.feed(m_kin)
+    # E-only: XYZ identical, E delta present
+    eonly = _FakeMove(th, (10, 0, 0, 0.5), (10, 0, 0, 1.5), speed=100.0)
+    assert eonly.is_kinematic_move is False
+    out = b.feed(eonly)
+    assert out == [m_kin, eonly]
+    assert b._prev is None

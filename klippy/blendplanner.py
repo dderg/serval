@@ -28,10 +28,24 @@ class CornerBlender:
         self.blends_emitted = 0
 
     def feed(self, move):
-        return []
+        if not move.is_kinematic_move:
+            return self.flush() + [move]
+        if self._prev is None:
+            self._prev = move
+            return []
+        # Blend steps 3–8 come in later tasks. For now, treat any second
+        # kinematic move as a temporary passthrough so downstream tasks can
+        # introduce gates one by one.
+        emitted = [self._prev]
+        self._prev = move
+        return emitted
 
     def flush(self):
-        return []
+        if self._prev is None:
+            return []
+        emitted = [self._prev]
+        self._prev = None
+        return emitted
 
     def reset(self):
         self._prev = None
