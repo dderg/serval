@@ -29,19 +29,27 @@ New file: `klippy/blendplanner.py`. Python 3. Depends on `klippy.blendmath` only
 
 ```
 klippy/blendplanner.py
-├─ CornerBlender (class)                       # stateful feed/flush/reset filter
-│    .tolerance              float    corner_deviation (mm), required, set by toolhead
-│    .max_chord_err          float    polyline chord tol (mm), auto = 0.2 * tolerance
-│    .polyline_moves_emitted int      instrumentation counter (cumulative)
-│    .feed(move)  -> list[Move]
-│    .flush()     -> list[Move]
-│    .reset()     -> None
-│    .peek_buffered() -> list[Move]    # filter-protocol addition: see below
+├─ CornerBlender                                # stateful feed/flush/reset filter
+│    __init__(toolhead, *, move_cls, max_chord_err=None)
+│        # toolhead     : Kalico toolhead (read access to .corner_deviation, .kin,
+│        #                .extruder, .max_accel_to_decel, etc.)
+│        # move_cls     : Move class, injected for testability (same as blendprepass)
+│        # max_chord_err: override polyline chord tolerance. None → auto-compute
+│        #                max(20e-3, 0.2 * toolhead.corner_deviation) per feed.
+│    .max_chord_err          float | None         # fixed override or None for auto
+│    .polyline_moves_emitted int                  # instrumentation counter
+│    .blends_emitted         int                  # instrumentation counter
+│    .feed(move)             -> list[Move]
+│    .flush()                -> list[Move]
+│    .reset()                -> None
+│    .peek_buffered()        -> list[Move]
 └─ BlendPipelineLookAheadQueue(filters, lookahead)
      # Replaces PrepassLookAheadQueue. Accepts any ordered list of filter
      # objects conforming to the filter protocol and composes them before
      # the inner LookAheadQueue. Empty filters list is valid (passthrough).
 ```
+
+**`corner_deviation` storage.** Single source of truth: `ToolHead.corner_deviation`. `CornerBlender` reads `self._toolhead.corner_deviation` per `feed()` call (not cached at construction), so a future `SET_VELOCITY_LIMIT CORNER_DEVIATION=` command that mutates `toolhead.corner_deviation` takes effect on the next corner without cross-object sync. The previous revision of this spec had the value mirrored onto `CornerBlender.tolerance`; lazy reading eliminates the anti-pattern.
 
 ### Filter protocol (extended from sub-spec #3)
 
@@ -122,7 +130,9 @@ ToolHead.move(newpos, speed)
             └─ LookAheadQueue.add_move(each)  → existing planner; no change
 ```
 
-Flush cascades through the same chain. `get_last` drains both filters before consulting the inner queue. The `queue` property reports buffered-filter contents concatenated with inner-queue contents so `check_busy` and similar emptiness probes see a faithful backlog.
+Flush cascades through the same chain via the two-pass drain described below. `get_last` does NOT flush filters — it peeks via `peek_buffered()` so callers that mutate the returned Move don't force an unwanted emission. The `queue` property reports buffered-filter contents concatenated with inner-queue contents so `check_busy` and similar emptiness probes see a faithful backlog.
+
+**Migration from sub-spec #3 `get_last` semantics.** The prepass adapter in sub-spec #3 flushed the prepass on `get_last` (blendprepass.py:164-170). This sub-spec changes the semantic to no-flush-on-get-last (peek instead) for both the prepass and the new blender. The sub-spec #3 test `test_adapter_get_last_flushes_prepass_first` (or equivalent) is renamed / rewritten to verify the new peek semantic: callers attaching `timing_callbacks` to a `get_last()` return value receive those callbacks back via `_copy_caller_state` at emit time (through `_build_merged_move` in prepass, `_emit_arc` in blender). Both mechanisms already preserve `timing_callbacks`; the migration is a test-semantic change, not a runtime behavior regression.
 
 ## Algorithm
 
@@ -174,17 +184,26 @@ self._prev = None
 
 Construct three pieces, preserving caller-mutated state.
 
-**Shared helper** — `_copy_caller_state(src, dst)`: copies mutable fields that an upstream caller may have set via `get_last()` mutation between buffer-time and emit-time:
+**Shared helper** — `_copy_caller_state(src, dst)`: copies mutable fields that an upstream caller may have set via `get_last()` mutation between buffer-time and emit-time, and recomputes length-derived fields from the new (shorter) `move_d`:
 
 ```
+# Caller-intent fields: pinned verbatim from parent.
 dst.timing_callbacks   = list(src.timing_callbacks)
 dst.next_junction_v2   = src.next_junction_v2
-dst.max_cruise_v2      = src.max_cruise_v2    # pin; SET_VELOCITY_LIMIT leak guard
+dst.max_cruise_v2      = src.max_cruise_v2       # SET_VELOCITY_LIMIT leak guard
 dst.junction_deviation = src.junction_deviation
+dst.accel              = src.accel               # M204-lowers-accel leak guard
+
+# Length-derived fields: recompute from NEW move_d and pinned accel.
+dst.delta_v2           = 2.0 * dst.move_d * dst.accel
+ratio = src.smooth_delta_v2 / src.delta_v2 if src.delta_v2 > 0.0 else 1.0
+dst.smooth_delta_v2    = min(dst.delta_v2, 2.0 * dst.move_d * dst.accel * ratio)
 dst.min_move_t         = dst.move_d / sqrt(dst.max_cruise_v2)
 ```
 
-Plus a narrowing `dst.limit_speed(sqrt(dst.max_cruise_v2), src.accel)` call to propagate `accel` and update `delta_v2` consistently. (Same pin idiom as `blendprepass.py:113-116`.)
+The `accel` pin is a DIRECT assignment rather than a `limit_speed(...)` call because `limit_speed` does `min(self.accel, accel)` (toolhead.py:67); if an intervening `M204` had lowered `toolhead.max_accel` between parent construction and emit, `Move.__init__`'s snapshot of the new (lower) value would win over `src.accel`. Direct pin avoids the leak.
+
+`smooth_delta_v2` preserves the parent's ratio of smoothed to full delta (equal to `max_accel_to_decel / accel` when unclamped, or tighter if a kinematic's `check_move` narrowed it via `limit_speed`). This keeps the truncated move's smoothing budget consistent with the parent's, scaled to the shorter length.
 
 **1. Truncated prev.** Start at `prev.start_pos`, end at `prev.end_pos - arc.d_consumed · prev_dir`. Constructed via `self._move_cls(toolhead, start, end, sqrt(prev.max_cruise_v2))`. After construction, call `_copy_caller_state(prev, trunc_prev)`. E is preserved by carrying the original per-mm rate: `end_pos[3] = start_pos[3] + (trunc_prev.move_d / prev.move_d) * prev.axes_d[3]`.
 
@@ -202,18 +221,35 @@ arc_move_k.min_move_t         = arc_move_k.move_d / sqrt(arc_move_k.max_cruise_v
 arc_move_k.limit_speed(sqrt(arc_move_k.max_cruise_v2), min(prev.accel, next.accel))
 ```
 
-Aggregate-safety re-check — per the sub-spec #3 precedent (`blendprepass.py:131-134`): run `kin.check_move(arc_move_k)` and, if it extrudes, `extruder.check_move(arc_move_k)` on **at least one** representative arc move per blend (the first is sufficient — all arc moves share accel, v_cap, and per-mm E rate). This catches extruder-max-velocity violations when `e_per_mm_prev + e_per_mm_next` exceeds the extruder's throughput on tight corners; bypassing `ToolHead.move`'s validation on emitted moves would hide them otherwise.
+Aggregate-safety re-check — per the sub-spec #3 precedent (`blendprepass.py:131-134`): run `kin.check_move(arc_move_k)` and, if it extrudes, `extruder.check_move(arc_move_k)` on **at least one** representative arc move per blend (the first is sufficient — all arc moves share accel, v_cap, and per-mm E rate; spatially the polyline is localized near the corner vertex so envelope checks evaluate at roughly the same coordinates across all points). This catches extruder-max-velocity violations when the arc's per-mm E rate exceeds the extruder's throughput, which is bypassed otherwise (emitted moves skip `ToolHead.move`'s validation).
 
-**3. Truncated next head.** Start at `next.start_pos + arc.d_consumed · next_dir`, end at `next.end_pos`. Constructed and state-copied analogously: `_copy_caller_state(next, trunc_next_head)`. Carries `next.next_junction_v2` (the tail of the original next) forward — `trunc_next_head` still terminates at the original `next.end_pos`, so end-of-move hooks fire at the correct physical point. E-per-mm preserved analogously.
+**3. Truncated next head.** Start at `next.start_pos + arc.d_consumed · next_dir`, end at `next.end_pos`. E-per-mm preserved: `end_pos[3] = start_pos[3] + (trunc_next_head.move_d / next.move_d) * next.axes_d[3]`. Constructed and state-copied analogously: `_copy_caller_state(next, trunc_next_head)`. Carries `next.next_junction_v2` (the tail of the original next) forward — `trunc_next_head` still terminates at the original `next.end_pos`, so end-of-move hooks fire at the correct physical point.
+
+### Extruder cap at arc boundaries
+
+`Move.calc_junction` at `toolhead.py:83` invokes `self.toolhead.extruder.calc_junction(prev_move, self)`, which returns `(instant_corner_v / abs(diff_r)) ** 2` when `diff_r = move.axes_r[3] - prev_move.axes_r[3] ≠ 0` (extruder.py:328-332). Within the arc polyline, `interpolate_extruder` distributes E uniformly by arc-length, so every polyline segment shares the same `axes_r[3] = total_e / total_len`. **Internal polyline junctions have `diff_r = 0` and are unaffected.** Only the two boundary junctions see a jump:
+
+- `trunc_prev → arc[0]`: `axes_r[3]` steps from `e_per_mm_prev` to `(tan(θ/2)/θ) · (e_per_mm_prev + e_per_mm_next)`.
+- `arc[-1] → trunc_next_head`: symmetrically, to `e_per_mm_next`.
+
+For equal-flow corners (`e_per_mm_prev ≈ e_per_mm_next`), the jump is `|e_per_mm − (2·tan(θ/2)/θ) · e_per_mm|`, which is ≈ 0 for small θ and rises to `0.27 · e_per_mm` at 90°. Combined with Klipper's default `instant_corner_v = 1 mm/s`, this yields a velocity cap of `(1/diff_r)²` that binds below `arc.v_cap` only on high-flow corners (`e_per_mm > 0.1`) with large deflections. Acceptable: correct extruder physics; the cap is genuinely the extruder-jerk budget.
+
+For variable-flow corners (Arachne segment boundaries), the jump can be larger and the extruder cap tighter. The prepass does not merge across flow changes (gate (b)), so these corners reach the blender intact. The resulting cap is again correct: physical extruder response, not a model artifact.
 
 ### Auto-scaling chord tolerance
 
-`CornerBlender.max_chord_err` defaults to `0.2 * self.tolerance` (i.e. 20% of `corner_deviation`) rather than a fixed 10 µm. Rationale: at large blend radii the polyline needs more segments to meet a tight absolute tolerance, inflating trapq traffic without perceptual benefit. Coupling to `corner_deviation` keeps the chord error a fixed fraction of the user's fidelity budget.
+`CornerBlender.max_chord_err` defaults to `max(20e-3, 0.2 * self.tolerance)` — **floor** at 20 µm, rising to 20% of `corner_deviation` for loose-tolerance users. Rationale:
 
-Concrete scaling at representative (R, tolerance):
-- R=1 mm, tol=50 µm → `max_chord_err=10 µm`, 90° needs ~6 polyline segments.
-- R=100 mm, tol=50 µm → `max_chord_err=10 µm`, 90° needs ~56 segments.
-- With auto-scaling at tol=50 µm → `max_chord_err=10 µm` (coincidence). At tol=200 µm → 40 µm chord, 90° at R=100 mm needs ~28 segments — half the count, same 0.2× fidelity ratio.
+- Pure `0.2 * tolerance` with no floor collapses to 10 µm at the common `tolerance = 50 µm` case (no improvement over a fixed 10 µm default).
+- Pure fixed 10 µm inflates trapq traffic at loose tolerance (200 µm corner_deviation should not demand 10 µm chord fidelity).
+- `max(20 µm, 0.2·tolerance)` gives the common 50 µm user 20 µm chord (2× fewer polyline segments than pure 10 µm) while still scaling for users who pick large tolerances.
+
+Concrete scaling at representative (R, tolerance) — all 90° corner segment counts:
+- tol=50 µm → chord=20 µm. R=1 mm → ~4 segments. R=100 mm → ~40 segments.
+- tol=200 µm → chord=40 µm. R=1 mm → ~3 segments. R=100 mm → ~28 segments.
+- tol=20 µm (tight) → chord=20 µm (floor binds). R=1 mm → ~4 segments. Same as tol=50 µm — we don't go below 20 µm.
+
+Override via `CornerBlender(toolhead, move_cls=Move, max_chord_err=…)` constructor kwarg for future tuning. Tests pass an explicit value to pin behavior.
 
 ### Micro-straight policy (option i) + instrumentation
 
@@ -257,13 +293,11 @@ This is the narrowest possible update. `BlendArc` struct, `blend_from_moves` API
 
 ## Corner-deviation parameter
 
-New config entry in the `[printer]` section: `corner_deviation` (placeholder name; sub-spec #7 may rename). Required. No default. Parsed with `config.getfloat("corner_deviation", above=0.0)`. Read once at `ToolHead.__init__`.
+New config entry in the `[printer]` section: `corner_deviation` (placeholder name; sub-spec #7 may rename). Required. No default. Parsed with `config.getfloat("corner_deviation", above=0.0)` — omitting the `default` kwarg makes the option required; `configfile.py:97-106` raises `config.error("Option 'corner_deviation' in section 'printer' must be specified")` automatically. No explicit `raise` needed.
 
-**Access path.** The parsed value is stored on **both** `ToolHead` (as `self.corner_deviation`, matching how `square_corner_velocity` lives today) and on the `CornerBlender.tolerance` attribute at construction time. `ToolHead` is the single source of truth; `CornerBlender.tolerance` is kept in sync when `ToolHead` mutates it (currently: never; sub-spec #7 may add a `SET_VELOCITY_LIMIT CORNER_DEVIATION=…` handler that writes to both). This mirrors the existing pattern for `square_corner_velocity` / `junction_deviation` (toolhead.py:291, 299).
+**Access path.** `ToolHead.corner_deviation` is the single source of truth. `CornerBlender` reads it lazily per `feed()` call via `self._toolhead.corner_deviation`. No mirroring onto the blender.
 
-Rationale for "required, no default": this is a blend-arc fork. The parameter replaces `square_corner_velocity` semantically; users migrating a config must make an explicit choice. Picking a default now without measurement risks picking a bad one. Sub-spec #7 may introduce a measured-sensible default once Stage 1 validation has data.
-
-If `corner_deviation` is missing from config, `ToolHead.__init__` raises `config.error` with a message naming the new parameter and pointing to docs (sub-spec #7 populates).
+Rationale for "required, no default": this is a blend-arc fork. The parameter replaces `square_corner_velocity` semantically; users migrating a config must make an explicit choice. Picking a default now without measurement risks picking a bad one. Sub-spec #7 may introduce a measured-sensible default once Stage 1 validation has data; at that point the docs-pointing error message gets wrapped around the `getfloat` call.
 
 ## Config interactions during the transitional period
 
@@ -351,21 +385,40 @@ The blend-arc model is end-to-end live after this sub-spec lands. Before merging
 
 ## Gap invariant between adjacent blends
 
-With the half-segment rule AND this sub-spec's recursive truncation (each blend sees the already-head-truncated prev), the straight between two adjacent arcs on a shared segment of length `L_BC` is always ≥ `0.25 · L_BC`:
+With the half-segment rule AND this sub-spec's recursive truncation (each blend sees the already-head-truncated prev), the straight between two adjacent arcs on a shared segment of length `L_BC` is always ≥ `0.25 · L_BC`.
+
+Proof. The first blend at corner B consumes `d_B = R_B · tan(θ_B/2) ≤ 0.5 · min(L_AB, L_BC)` from each adjacent segment (half-segment cap on the tolerance-or-midpoint-driven `R`). Therefore:
 
 ```
-d_B ≤ 0.5 · min(L_AB, L_BC)              (first blend's half-segment cap)
-truncated_BC = L_BC − d_B
-             ≥ 0.5 · L_BC                (when L_AB ≥ L_BC — d_B binds on L_BC)
-             > 0.5 · L_BC                (when L_AB <  L_BC — d_B binds on L_AB,
-                                           so truncated_BC is LARGER, not tighter)
-d_C ≤ 0.5 · truncated_BC ≤ 0.5 · L_BC   (second blend sees truncated prev)
-    but also                              (and truncated_BC ≥ 0.5 · L_BC above)
-d_C ≤ 0.5 · truncated_BC ≤ 0.25 · L_BC   (collapsing the two bounds)
-gap = truncated_BC − d_C ≥ 0.25 · L_BC
+truncated_BC = L_BC − d_B ≥ 0.5 · L_BC          (d_B ≤ 0.5·L_BC)
 ```
 
-No zero-length truncated straight unless `L_BC` itself was zero (which the prepass already filters).
+The second blend at corner C uses `truncated_BC` as its `L_prev` input to `blend_from_moves`, so `d_C = R_C · tan(θ_C/2) ≤ 0.5 · truncated_BC`. The straight piece between the two emitted arc polylines on segment BC is:
+
+```
+gap = truncated_BC − d_C
+    ≥ truncated_BC − 0.5 · truncated_BC
+    = 0.5 · truncated_BC
+    ≥ 0.5 · (0.5 · L_BC)
+    = 0.25 · L_BC.                              ∎
+```
+
+Two edge cases confirm the bound:
+
+- **Tolerance-binding `R`.** If `R_B = R_tol < R_mid`, then `d_B < 0.5 · min(L_AB, L_BC)` — strictly tighter than the cap. Proof chain survives.
+- **U-turn at either corner.** `blend_geometry` returns `R = 0, d_consumed = 0`, and `_emit_arc` is never called (feed() step 5 short-circuits). The segment is untouched by the U-turn corner; full `L_BC` preserved. The invariant trivially holds.
+
+No zero-length truncated straight unless `L_BC` itself was zero, which the prepass already filters via its `min_seg_len` gate.
+
+## Implementation chunking hints
+
+For the plan author. Two "must-land-together" groups that cannot be split across tasks without leaving the repo red:
+
+**Pair A — half-segment rule + its test fixtures.** `blendmath.py:145` factor-of-0.5 change breaks `test_blend_geometry_midpoint_cap_binds_on_short_segment` and any property test asserting `d_consumed ≤ L_prev` (tightens to `≤ 0.5 · L_prev`). One atomic task.
+
+**Pair B — `PrepassLookAheadQueue` rename + constructor signature change + `toolhead.py` call-site update + `blendprepass.py` tests.** Old signature: `PrepassLookAheadQueue(prepass, lookahead)`. New signature: `BlendPipelineLookAheadQueue(filters, lookahead)` with `filters` an ordered list. Both the class name and the constructor shape change; plus the `_chain` direct-read replaced by `peek_buffered()`. Plus `get_last` changes from "flush prepass first" to "peek without flushing." All sub-spec #3 tests referencing `PrepassLookAheadQueue` or `test_adapter_get_last_flushes_prepass_first` need updating in the same commit. One atomic task.
+
+Beyond these, the remaining work decomposes cleanly: scaffolding, feed state-machine branches (one per `feed` step), `_emit_arc` body, pipeline-composition tests, instrumentation, `ToolHead` wiring, stats patch, property/randomized tests. Target 15–18 tasks total, matching sub-spec #3's density.
 
 ## Forward compatibility (sub-spec #5 prep)
 
