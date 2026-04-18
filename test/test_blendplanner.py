@@ -304,3 +304,39 @@ def test_asymmetric_segments_half_segment_rule_caps_consumption():
     trunc_prev = out[0]
     # trunc_prev.move_d should equal 2 - 1 = 1 mm (half-segment consumption).
     assert trunc_prev.move_d == pytest.approx(1.0, rel=1e-6)
+
+
+def test_aggregate_kin_check_move_fires_on_representative_arc_move():
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
+    b.feed(m_prev)
+    out = b.feed(m_next)
+    # The representative arc move was passed to kin.check_move exactly once.
+    arc_moves = out[1:]
+    assert len(th.kin.calls) == 1
+    assert th.kin.calls[0] is arc_moves[0]
+
+
+def test_aggregate_extruder_check_move_fires_when_extruding():
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
+    b.feed(m_prev)
+    b.feed(m_next)
+    # Extruder check_move called once on the representative arc move (E delta
+    # is non-zero because both prev and next extrude).
+    assert len(th.extruder.calls) == 1
+
+
+def test_aggregate_extruder_check_move_skipped_when_not_extruding():
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    # E coordinate identical across prev and next (travel moves).
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=100.0)
+    m_next = _FakeMove(th, (10, 0, 0, 0), (10, 10, 0, 0), speed=100.0)
+    b.feed(m_prev)
+    b.feed(m_next)
+    assert len(th.extruder.calls) == 0

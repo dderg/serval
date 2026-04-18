@@ -175,6 +175,18 @@ class CornerBlender:
         )
         _copy_caller_state(nxt, trunc_next_head)
 
+        # Aggregate-safety re-check. check_move runs before lookahead.add_move
+        # in ToolHead.move, so emitted arc-polyline Moves bypass it otherwise.
+        # One representative is sufficient: all arc moves share accel, v_cap,
+        # and per-mm E rate; spatially the polyline is localized near the
+        # corner vertex so envelope checks evaluate at roughly the same
+        # coordinates across all points.
+        if arc_moves:
+            representative = arc_moves[0]
+            th.kin.check_move(representative)
+            if representative.axes_d[3]:
+                th.extruder.check_move(representative)
+
         return trunc_prev, arc_moves, trunc_next_head
 
     def flush(self):
