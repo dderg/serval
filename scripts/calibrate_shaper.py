@@ -241,14 +241,6 @@ def main():
         help="maximum shaper smoothing to allow",
     )
     opts.add_option(
-        "--scv",
-        "--square_corner_velocity",
-        type="float",
-        dest="scv",
-        default=5.0,
-        help="square corner velocity",
-    )
-    opts.add_option(
         "--shaper_freq",
         type="string",
         dest="shaper_freq",
