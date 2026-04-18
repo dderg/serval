@@ -365,3 +365,65 @@ def test_arc_polyline_speed_continuity_1ppm():
     v2s = [am.max_cruise_v2 for am in arc_moves]
     # All arc moves share the same cap to 1 ppm.
     assert (max(v2s) - min(v2s)) / max(v2s) < 1e-6
+
+
+def _random_unit_3d(rng):
+    while True:
+        v = (rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-1, 1))
+        n = math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
+        if n > 0.1:
+            return (v[0] / n, v[1] / n, v[2] / n)
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_property_random_3d_corners(seed):
+    rng = random.Random(seed)
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    th.corner_deviation = rng.uniform(20e-3, 200e-3)
+    d_prev = _random_unit_3d(rng)
+    d_next = _random_unit_3d(rng)
+    # Skip pathological near-collinear / near-reversal samples so the test
+    # exercises a real blend.
+    dot = d_prev[0] * d_next[0] + d_prev[1] * d_next[1] + d_prev[2] * d_next[2]
+    if abs(dot) > 0.95:
+        pytest.skip("near-collinear or near-reversal")
+    L_prev = rng.uniform(1.0, 20.0)
+    L_next = rng.uniform(1.0, 20.0)
+    vertex = (
+        rng.uniform(10, 90),
+        rng.uniform(10, 90),
+        rng.uniform(5, 20),
+    )
+    start = tuple(vertex[i] - L_prev * d_prev[i] for i in range(3))
+    end = tuple(vertex[i] + L_next * d_next[i] for i in range(3))
+    # E coordinates picked so prev and next share approximate flow so the
+    # extruder-boundary cap does not dominate the test.
+    prev_e_start = 0.0
+    prev_e_end = 0.05 * L_prev
+    next_e_end = prev_e_end + 0.05 * L_next
+    m_prev = _FakeMove(
+        th, (start[0], start[1], start[2], prev_e_start),
+        (vertex[0], vertex[1], vertex[2], prev_e_end),
+        speed=100.0,
+    )
+    m_next = _FakeMove(
+        th, (vertex[0], vertex[1], vertex[2], prev_e_end),
+        (end[0], end[1], end[2], next_e_end),
+        speed=100.0,
+    )
+    b.feed(m_prev)
+    out = b.feed(m_next) + b.flush()
+    # Invariant 1: E conservation.
+    total_e = sum(am.axes_d[3] for am in out)
+    expected_e = m_prev.axes_d[3] + m_next.axes_d[3]
+    assert total_e == pytest.approx(expected_e, rel=1e-9, abs=1e-12)
+    # Invariant 2: non-negative move_d on every emitted piece.
+    for am in out:
+        assert am.move_d >= -1e-12
+    # Invariant 3: first emitted piece starts at m_prev.start_pos.
+    assert out[0].start_pos[:3] == m_prev.start_pos[:3]
+    # Invariant 4: last emitted piece ends at m_next.end_pos (within float noise).
+    assert out[-1].end_pos[0] == pytest.approx(m_next.end_pos[0], abs=1e-9)
+    assert out[-1].end_pos[1] == pytest.approx(m_next.end_pos[1], abs=1e-9)
+    assert out[-1].end_pos[2] == pytest.approx(m_next.end_pos[2], abs=1e-9)
