@@ -497,3 +497,49 @@ def test_pipeline_adapter_get_last_returns_blender_prev_when_buffered():
     assert adapter.get_last() is m
     # Inner queue still empty - no flush side effect.
     assert inner.queue == []
+
+
+def test_get_last_no_forfeit_callback_transfers_to_trunc_prev():
+    # Verify that mutations applied to the move returned by get_last()
+    # (timing_callbacks, limit_next_junction_speed) survive into trunc_prev
+    # after the blend, and that get_last() does not cause a premature flush.
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    b.feed(m_prev)
+    # get_last via peek_buffered — no flush side effect.
+    assert b._prev is m_prev
+    marker = []
+    m_prev.timing_callbacks.append(lambda t: marker.append(t))
+    m_prev.limit_next_junction_speed(50.0)
+    # Feed the next move — should trigger a blend and transfer callback state.
+    m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
+    out = b.feed(m_next)
+    # Emission: [trunc_prev, arc[0], ..., arc[N-1]]
+    assert len(out) >= 2
+    trunc_prev = out[0]
+    assert trunc_prev is not m_prev  # new Move, not the original
+    # Callback transferred onto trunc_prev via _copy_caller_state.
+    assert trunc_prev.timing_callbacks != []
+    # limit_next_junction_speed was applied to m_prev (next_junction_v2 = 50^2)
+    # and transferred onto trunc_prev via _copy_caller_state.
+    assert trunc_prev.next_junction_v2 == 50.0 ** 2
+
+
+def test_set_velocity_limit_mid_blend_does_not_leak_lowered_accel():
+    b = _blender(max_chord_err=20e-3)
+    th = b._toolhead
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    # Original accel snapshotted on m_prev: 10000 (th.max_accel at ctor).
+    assert m_prev.accel == 10000.0
+    b.feed(m_prev)
+    # User issues an M204 that lowers accel.
+    th.max_accel = 3000.0
+    m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
+    assert m_next.accel == 3000.0
+    out = b.feed(m_next)
+    trunc_prev = out[0]
+    # trunc_prev must pin parent's accel (10000), NOT the lowered toolhead
+    # value. This is the critical anti-leak assertion — _copy_caller_state
+    # uses direct assignment, not limit_speed.
+    assert trunc_prev.accel == m_prev.accel  # 10000, not min(10000, 3000)
