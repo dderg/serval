@@ -24,21 +24,30 @@ def _zv_50hz():
     return shaper_defs.get_zv_shaper(shaper_freq=50.0, damping_ratio=0.1)
 
 
-def test_find_shaper_max_accel_baseline_preflight():
-    """Baseline regression pin — locks current (pre-6a) behavior.
-
-    Task 1 expects the OLD value (with scv=5.0 default) from the current
-    implementation. Tasks 2–3 replace this assertion with the closed-form
-    offset_180-only value.
-    """
+def test_find_shaper_max_accel_matches_offset_180_closed_form():
+    """After 6a Tasks 2-3: find_shaper_max_accel bisects offset_180 only.
+    Closed form: A = 0.24 / sigma2_T where sigma2_T = (T_d / 4)**2
+    for a symmetric ZV shaper.
+    For ZV @ 50Hz, damping=0.1: A ≈ 9505 mm/s**2. Assert in [9000, 10000]."""
     sc = shaper_calibrate.ShaperCalibrate(printer=None)
     shaper = _zv_50hz()
-    max_accel = sc.find_shaper_max_accel(shaper, scv=5.0)
-    # Old code: max(offset_90(scv=5), offset_180) ≤ 0.12 mm. At the
-    # bisection's upper end offset_180 slightly dominates, so the drift
-    # from the pure offset_180 answer (~9505) is small but nonzero.
-    # Pin to a ±3% band around the expected pre-6a value.
-    assert 9000.0 <= max_accel <= 9800.0
+    max_accel = sc.find_shaper_max_accel(shaper)
+    assert 9000.0 <= max_accel <= 10000.0
+
+
+def test_find_shaper_max_accel_signature_rejects_scv_positional():
+    """After 6a Task 3, find_shaper_max_accel does not accept the
+    legacy positional scv arg. Locks the signature."""
+    sc = shaper_calibrate.ShaperCalibrate(printer=None)
+    with pytest.raises(TypeError):
+        sc.find_shaper_max_accel(_zv_50hz(), 5.0)  # old positional scv
+
+
+def test_find_shaper_max_accel_signature_rejects_scv_kwarg():
+    """Same, but via kwarg."""
+    sc = shaper_calibrate.ShaperCalibrate(printer=None)
+    with pytest.raises(TypeError, match="scv"):
+        sc.find_shaper_max_accel(_zv_50hz(), scv=0.0)
 
 
 def test_get_shaper_smoothing_returns_offset_180_only_closed_form():

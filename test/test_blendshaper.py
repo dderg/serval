@@ -336,7 +336,7 @@ def _zv_A(f, zeta=0.1):
     from klippy.extras import shaper_defs
     sc = ShaperCalibrate(printer=None)
     shaper = shaper_defs.get_zv_shaper(f, zeta)
-    return sc.find_shaper_max_accel(shaper, scv=0.0)
+    return sc.find_shaper_max_accel(shaper)
 
 
 def test_numeric_sanity_user_regime_90deg_corner():

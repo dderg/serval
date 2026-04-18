@@ -306,7 +306,7 @@ class ShaperCalibrate:
                 shaper_vals = np.maximum(shaper_vals, vals)
                 if vibrations > shaper_vibrations:
                     shaper_vibrations = vibrations
-            max_accel = self.find_shaper_max_accel(shaper, scv)
+            max_accel = self.find_shaper_max_accel(shaper)
             # The score trying to minimize vibrations, but also accounting
             # the growth of smoothing. The formula itself does not have any
             # special meaning, it simply shows good results on real user data
@@ -353,7 +353,7 @@ class ShaperCalibrate:
                 right = middle
         return left
 
-    def find_shaper_max_accel(self, shaper, scv=None):  # scv kept for Task 3
+    def find_shaper_max_accel(self, shaper):
         # Just some empirically chosen value which produces good projections
         # for max_accel without much smoothing
         TARGET_SMOOTHING = 0.12

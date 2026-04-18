@@ -288,7 +288,7 @@ def _extract_shapers(toolhead):
         damping_ratio = float(params.damping_ratio)
         if freq > 0.0 and shaper_type in shaper_factory:
             impulses = shaper_factory[shaper_type](freq, damping_ratio)
-            A_axis = float(sc.find_shaper_max_accel(impulses, scv=0.0))
+            A_axis = float(sc.find_shaper_max_accel(impulses))
         else:
             A_axis = 0.0
         snaps.append(blendshaper.AxisShaperSnapshot(
