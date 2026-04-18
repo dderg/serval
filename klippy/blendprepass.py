@@ -29,7 +29,7 @@ class CollinearCollapser:
         if move.move_d < self.min_seg_len:
             return [move]
         if not move.is_kinematic_move:
-            return self._flush_chain() + [move]
+            return self.flush() + [move]
         if not self._chain:
             self._chain = [move]
             return []

@@ -113,6 +113,20 @@ def test_feed_non_kinematic_flushes_and_passes():
     assert c._chain == []
 
 
+def test_feed_non_kinematic_on_empty_chain_does_not_crash():
+    # Regression: a non-kinematic move arriving while the chain is empty
+    # (e.g. a pause/G10 E-only retract before any kinematic move has been
+    # buffered) must pass through without hitting _build_merged_move([]).
+    c = _collapser()
+    th = c._toolhead
+    eonly = _FakeMove(th, (10, 0, 0, 0.5), (10, 0, 0, 1.5), speed=100.0)
+    assert eonly.is_kinematic_move is False
+    assert c._chain == []
+    out = c.feed(eonly)
+    assert out == [eonly]
+    assert c._chain == []
+
+
 def test_first_kinematic_move_starts_chain():
     c = _collapser()
     th = c._toolhead
