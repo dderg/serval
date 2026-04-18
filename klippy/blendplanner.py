@@ -61,6 +61,9 @@ class CornerBlender:
         if self._prev is None:
             self._prev = move
             return []
+        # toolhead=... activates blend_from_moves' shaper-aware two-pass
+        # path: j_eff is derived from the live input-shaper state rather
+        # than held as a module constant.
         arc = blendmath.blend_from_moves(
             self._prev, move,
             self._toolhead.corner_deviation,
