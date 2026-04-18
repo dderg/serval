@@ -88,6 +88,15 @@ class CollinearCollapser:
     def reset(self):
         self._chain = []
 
+    def peek_buffered(self):
+        """Read-only view of the currently buffered chain.
+
+        Returns a fresh list copy so callers that mutate the result do not
+        corrupt internal state. Part of the filter protocol consumed by
+        BlendPipelineLookAheadQueue (sub-spec #4).
+        """
+        return list(self._chain)
+
     def _flush_chain(self):
         try:
             if len(self._chain) == 1:

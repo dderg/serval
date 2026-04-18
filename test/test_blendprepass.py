@@ -733,3 +733,22 @@ def test_chain_cap_consecutive_flushes_stay_collinear():
         assert first.axes_r[i] == pytest.approx(second.axes_r[i], abs=1e-12)
     # Chord continuity: first ends where second begins.
     assert first.end_pos[:3] == second.start_pos[:3]
+
+
+def test_peek_buffered_returns_chain_copy():
+    c = _collapser()
+    th = c._toolhead
+    assert c.peek_buffered() == []
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    c.feed(m1)
+    c.feed(m2)
+    buf = c.peek_buffered()
+    assert buf == [m1, m2]
+    # Mutation of the returned list must not affect internal state.
+    buf.append("garbage")
+    assert c._chain == [m1, m2]
+    # Subsequent feed must still work.
+    m3 = _FakeMove(th, (20, 0, 0, 1.0), (30, 0, 0, 1.5), speed=100.0)
+    assert c.feed(m3) == []
+    assert c._chain == [m1, m2, m3]
