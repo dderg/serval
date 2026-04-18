@@ -89,3 +89,20 @@ def test_get_shaper_smoothing_drops_offset_90_at_low_accel():
     # have been strictly larger than offset_180.
     old_offset_90_rough = math.sqrt(2.0) * 0.5 * (5.0 + 0.5 * accel * (T[1] - ts)) * (T[1] - ts) / D
     assert old_offset_90_rough > expected_offset_180 * 1.5
+
+
+def test_find_best_shaper_signature_rejects_scv_kwarg():
+    """After 6a Task 4, find_best_shaper does not accept scv."""
+    sc = shaper_calibrate.ShaperCalibrate(printer=None)
+    with pytest.raises(TypeError, match="scv"):
+        sc.find_best_shaper(calibration_data=None, scv=5.0)
+
+
+def test_fit_shaper_signature_rejects_scv_positional():
+    """After 6a Task 4, fit_shaper's scv positional arg is gone."""
+    sc = shaper_calibrate.ShaperCalibrate(printer=None)
+    # Call with enough positionals to reach the old `scv` slot (5th).
+    # A plain TypeError is expected (signature mismatch) before any
+    # method logic runs, so the other args can be any sentinels.
+    with pytest.raises(TypeError):
+        sc.fit_shaper(None, None, None, None, 5.0, None, None, None)

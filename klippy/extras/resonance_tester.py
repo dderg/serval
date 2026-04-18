@@ -566,15 +566,10 @@ class ResonanceTester:
                 % (axis_name,)
             )
             calibration_data[axis].normalize_to_frequencies()
-            systime = self.printer.get_reactor().monotonic()
-            # Sub-spec #6 will replace with shaper-tuning-aware corner-error
-            # budget. Hardcoded 5.0 preserves historical default.
-            scv = 5.0
             max_freq = self._get_max_calibration_freq()
             best_shaper, all_shapers = helper.find_best_shaper(
                 calibration_data[axis],
                 max_smoothing=max_smoothing,
-                scv=scv,
                 max_freq=max_freq,
                 logger=gcmd.respond_info,
             )
