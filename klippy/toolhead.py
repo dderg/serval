@@ -800,6 +800,8 @@ class ToolHead:
 
     @property
     def max_accel_to_decel(self):
+        # Derived live from min_cruise_ratio rather than cached, so M204 /
+        # SET_VELOCITY_LIMIT mutations are visible without an explicit recompute.
         return self.max_accel * (1.0 - self.min_cruise_ratio)
 
     def _calc_junction_deviation(self):
