@@ -33,9 +33,23 @@ class CornerBlender:
         if self._prev is None:
             self._prev = move
             return []
-        # Blend steps 3–8 come in later tasks. For now, treat any second
-        # kinematic move as a temporary passthrough so downstream tasks can
-        # introduce gates one by one.
+        arc = blendmath.blend_from_moves(
+            self._prev, move,
+            self._toolhead.corner_deviation,
+            toolhead=self._toolhead,
+        )
+        if arc is None:
+            # Collinear: prepass should have caught. Emit prev, buffer next.
+            emitted = [self._prev]
+            self._prev = move
+            return emitted
+        if arc.R == 0.0 or arc.v_cap == 0.0:
+            # U-turn / degenerate: force a stop at the junction.
+            self._prev.limit_next_junction_speed(0.0)
+            emitted = [self._prev]
+            self._prev = move
+            return emitted
+        # Blend steps 6–8 (arc emission) come in Task 8.
         emitted = [self._prev]
         self._prev = move
         return emitted

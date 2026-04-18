@@ -152,3 +152,17 @@ def test_feed_collinear_pair_passes_through_with_rebuffer():
     assert out == [m1]
     assert b._prev is m2
     assert m1.next_junction_v2 == 999999999.9  # unchanged
+
+
+def test_feed_uturn_emits_prev_with_zero_next_junction():
+    b = _blender()
+    th = b._toolhead
+    # 180° reversal: +X then -X
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (0, 0, 0, 1.0), speed=100.0)
+    assert b.feed(m1) == []
+    out = b.feed(m2)
+    # U-turn: emit prev with limit_next_junction_speed(0); buffer next.
+    assert out == [m1]
+    assert m1.next_junction_v2 == 0.0
+    assert b._prev is m2
