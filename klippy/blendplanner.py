@@ -11,6 +11,34 @@ import math
 from . import blendmath
 
 
+def _copy_caller_state(src, dst):
+    """Transfer caller-mutable Move state from src to the truncated dst.
+
+    Pins caller-intent fields verbatim (timing_callbacks, next_junction_v2,
+    max_cruise_v2, junction_deviation, accel) so that M204 / SET_VELOCITY_LIMIT
+    / register_lookahead_callback mutations applied upstream to src survive
+    the emit-time construction of dst. Recomputes length-derived fields
+    (delta_v2, smooth_delta_v2, min_move_t) from dst's NEW move_d and the
+    pinned accel.
+
+    The accel pin is a direct assignment (not via dst.limit_speed) because
+    limit_speed takes min(self.accel, accel); if an intervening M204 had
+    lowered toolhead.max_accel between src construction and emit, Move.__init__'s
+    snapshot of the new (lower) value would win over src.accel.
+    """
+    dst.timing_callbacks = list(src.timing_callbacks)
+    dst.next_junction_v2 = src.next_junction_v2
+    dst.max_cruise_v2 = src.max_cruise_v2
+    dst.junction_deviation = src.junction_deviation
+    dst.accel = src.accel
+    dst.delta_v2 = 2.0 * dst.move_d * dst.accel
+    ratio = src.smooth_delta_v2 / src.delta_v2 if src.delta_v2 > 0.0 else 1.0
+    dst.smooth_delta_v2 = min(
+        dst.delta_v2, 2.0 * dst.move_d * dst.accel * ratio
+    )
+    dst.min_move_t = dst.move_d / math.sqrt(dst.max_cruise_v2)
+
+
 class CornerBlender:
     """Second filter stage in the blend pipeline.
 

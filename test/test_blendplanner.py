@@ -166,3 +166,57 @@ def test_feed_uturn_emits_prev_with_zero_next_junction():
     assert out == [m1]
     assert m1.next_junction_v2 == 0.0
     assert b._prev is m2
+
+
+def _state_src_dst_pair():
+    """Build a (src, dst) pair where src is a 'full-length' parent and dst a
+    truncated child constructed via the Move ctor against the same toolhead."""
+    th = _FakeToolhead()
+    src = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 1.0), speed=200.0)
+    # Simulate caller mutations on src:
+    src.timing_callbacks.append(lambda t: None)
+    src.next_junction_v2 = 42.0
+    src.max_cruise_v2 = 150.0 ** 2
+    src.junction_deviation = 0.05
+    src.accel = 5000.0
+    src.delta_v2 = 2.0 * src.move_d * src.accel
+    src.smooth_delta_v2 = min(src.delta_v2, 2.0 * src.move_d * 2500.0)
+    dst = _FakeMove(th, (0, 0, 0, 0), (4, 0, 0, 0.4), speed=200.0)
+    return th, src, dst
+
+
+def test_copy_caller_state_transfers_caller_intent_fields():
+    th, src, dst = _state_src_dst_pair()
+    blendplanner._copy_caller_state(src, dst)
+    # Caller-intent fields pinned verbatim.
+    assert dst.timing_callbacks == src.timing_callbacks
+    assert dst.timing_callbacks is not src.timing_callbacks  # copy, not alias
+    assert dst.next_junction_v2 == 42.0
+    assert dst.max_cruise_v2 == 150.0 ** 2
+    assert dst.junction_deviation == 0.05
+    assert dst.accel == 5000.0
+
+
+def test_copy_caller_state_recomputes_length_derived_fields():
+    th, src, dst = _state_src_dst_pair()
+    blendplanner._copy_caller_state(src, dst)
+    # delta_v2 recomputed from NEW move_d (4 mm) and pinned accel (5000).
+    assert dst.delta_v2 == pytest.approx(2.0 * 4.0 * 5000.0)
+    # smooth_delta_v2 preserves the parent ratio; src had smooth/delta = 0.5
+    # (max_accel_to_decel/accel = 2500/5000), so dst should follow.
+    ratio = src.smooth_delta_v2 / src.delta_v2
+    assert dst.smooth_delta_v2 == pytest.approx(
+        min(dst.delta_v2, 2.0 * 4.0 * dst.accel * ratio)
+    )
+    # min_move_t = move_d / sqrt(max_cruise_v2) = 4 / 150 = 0.02667
+    assert dst.min_move_t == pytest.approx(4.0 / 150.0)
+
+
+def test_copy_caller_state_handles_zero_delta_v2():
+    th, src, dst = _state_src_dst_pair()
+    src.delta_v2 = 0.0
+    src.smooth_delta_v2 = 0.0
+    blendplanner._copy_caller_state(src, dst)
+    # Falls back to ratio=1.0 when src.delta_v2 is zero; dst.smooth_delta_v2
+    # collapses to dst.delta_v2 via the min().
+    assert dst.smooth_delta_v2 == pytest.approx(dst.delta_v2)
