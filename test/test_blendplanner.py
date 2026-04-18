@@ -563,3 +563,32 @@ def test_drip_mode_single_move_emits_unchanged():
     # Single move exits unblended (no corner to blend against).
     assert inner.queue == [m]
     assert blender.blends_emitted == 0
+
+
+def test_blender_peek_buffered():
+    b = _blender()
+    th = b._toolhead
+    assert b.peek_buffered() == []
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    b.feed(m)
+    assert b.peek_buffered() == [m]
+    # Peek must not mutate state.
+    b.peek_buffered()
+    assert b._prev is m
+
+
+def test_adapter_queue_reports_blender_buffered_move():
+    from klippy import blendprepass
+    th = _FakeToolhead(corner_deviation=50e-3)
+    prepass = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    blender = blendplanner.CornerBlender(
+        th, move_cls=_FakeMove, max_chord_err=20e-3
+    )
+    inner = _FakeInnerQueue()
+    adapter = blendprepass.BlendPipelineLookAheadQueue(
+        [prepass, blender], inner
+    )
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    adapter.add_move(m)
+    # Prepass buffered the move; adapter.queue must reflect it.
+    assert adapter.queue == [m]
