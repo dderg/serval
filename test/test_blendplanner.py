@@ -728,7 +728,6 @@ def test_scv_config_deprecation_warning(caplog):
 
 def test_scv_config_absent_no_warning(caplog):
     """When config has no square_corner_velocity entry, no warning fires."""
-    import logging
     from unittest.mock import MagicMock
 
     mock_config = MagicMock()
@@ -736,7 +735,7 @@ def test_scv_config_absent_no_warning(caplog):
         return default  # always return default (None for SCV)
     mock_config.getfloat.side_effect = _getfloat
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level("WARNING"):
         scv_legacy = mock_config.getfloat(
             "square_corner_velocity", None, minval=0.0
         )

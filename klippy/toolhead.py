@@ -814,6 +814,9 @@ class ToolHead:
     def cmd_SET_VELOCITY_LIMIT(self, gcmd):
         max_velocity = gcmd.get_float("VELOCITY", None, above=0.0)
         max_accel = gcmd.get_float("ACCEL", None, above=0.0)
+        # Parsed but discarded: the new arc-blending planner ignores SCV.
+        # Kept as a local for the all-None guard below so SET_VELOCITY_LIMIT
+        # SQUARE_CORNER_VELOCITY=N does not spam the current-status dump.
         square_corner_velocity = gcmd.get_float(
             "SQUARE_CORNER_VELOCITY", None, minval=0.0
         )
@@ -836,8 +839,6 @@ class ToolHead:
             self.max_velocity = max_velocity
         if max_accel is not None:
             self.max_accel = max_accel
-        if square_corner_velocity is not None:
-            self.square_corner_velocity = square_corner_velocity
         if min_cruise_ratio is not None:
             self.min_cruise_ratio = min_cruise_ratio
         msg = [
@@ -882,12 +883,7 @@ class ToolHead:
                 self.kin.max_z_accel = max_z_accel
             msg.append("max_z_accel: %.6f" % self.kin.max_z_accel)
 
-        msg.extend(
-            (
-                "minimum_cruise_ratio: %.6f" % self.min_cruise_ratio,
-                "square_corner_velocity: %.6f" % self.square_corner_velocity,
-            )
-        )
+        msg.append("minimum_cruise_ratio: %.6f" % self.min_cruise_ratio)
 
         if get_danger_options().log_velocity_limit_changes:
             self.printer.set_rollover_info(
@@ -937,13 +933,11 @@ class ToolHead:
             self.kin.max_z_accel = self.orig_cfg["max_z_accel"]
             msg.append("max_z_accel: %.6f" % self.kin.max_z_accel)
 
-        self.square_corner_velocity = self.orig_cfg["square_corner_velocity"]
         self.min_cruise_ratio = self.orig_cfg["min_cruise_ratio"]
         self.corner_deviation = self.orig_cfg["corner_deviation"]
         msg.extend(
             (
                 "minimum_cruise_ratio: %.6f" % self.min_cruise_ratio,
-                "square_corner_velocity: %.6f" % self.square_corner_velocity,
                 "corner_deviation: %.6f" % self.corner_deviation,
             )
         )
