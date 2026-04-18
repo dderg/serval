@@ -543,3 +543,23 @@ def test_set_velocity_limit_mid_blend_does_not_leak_lowered_accel():
     # value. This is the critical anti-leak assertion — _copy_caller_state
     # uses direct assignment, not limit_speed.
     assert trunc_prev.accel == m_prev.accel  # 10000, not min(10000, 3000)
+
+
+def test_drip_mode_single_move_emits_unchanged():
+    from klippy import blendprepass
+    th = _FakeToolhead(corner_deviation=50e-3)
+    prepass = blendprepass.CollinearCollapser(th, move_cls=_FakeMove)
+    blender = blendplanner.CornerBlender(
+        th, move_cls=_FakeMove, max_chord_err=20e-3
+    )
+    inner = _FakeInnerQueue()
+    adapter = blendprepass.BlendPipelineLookAheadQueue(
+        [prepass, blender], inner
+    )
+    # Mimic drip_move: one move arrives, then flush.
+    m = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    adapter.add_move(m)
+    adapter.flush()
+    # Single move exits unblended (no corner to blend against).
+    assert inner.queue == [m]
+    assert blender.blends_emitted == 0
