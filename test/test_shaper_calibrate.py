@@ -39,3 +39,44 @@ def test_find_shaper_max_accel_baseline_preflight():
     # from the pure offset_180 answer (~9505) is small but nonzero.
     # Pin to a ±3% band around the expected pre-6a value.
     assert 9000.0 <= max_accel <= 9800.0
+
+
+def test_get_shaper_smoothing_returns_offset_180_only_closed_form():
+    """After 6a, _get_shaper_smoothing returns exactly offset_180:
+        (accel / 2) * sigma2_T
+    where sigma2_T = sum_i A_i (T_i - ts)**2 / sum_i A_i.
+
+    For ZV @ 50Hz, damping 0.1: sigma2 ≈ 2.525e-5 s**2.
+    At accel=10000 mm/s**2: offset_180 ≈ 0.1262 mm.
+    """
+    sc = shaper_calibrate.ShaperCalibrate(printer=None)
+    A, T = _zv_50hz()
+    D = sum(A)
+    ts = sum(A_i * T_i for A_i, T_i in zip(A, T)) / D
+    sigma2 = sum(A_i * (T_i - ts) ** 2 for A_i, T_i in zip(A, T)) / D
+    accel = 10000.0
+    expected = 0.5 * accel * sigma2
+    actual = sc._get_shaper_smoothing(_zv_50hz(), accel=accel)
+    assert actual == pytest.approx(expected, rel=1e-9)
+
+
+def test_get_shaper_smoothing_drops_offset_90_at_low_accel():
+    """At low accel + nonzero scv the OLD code's offset_90 term dominated,
+    returning a larger number than pure offset_180. After 6a the function
+    has no way to see scv, so at the same accel the returned value equals
+    offset_180(accel). Picks accel=1000 where offset_90 (old scv=5.0)
+    would have been ~0.027 mm vs offset_180 = 0.0126 mm.
+    """
+    sc = shaper_calibrate.ShaperCalibrate(printer=None)
+    A, T = _zv_50hz()
+    D = sum(A)
+    ts = sum(A_i * T_i for A_i, T_i in zip(A, T)) / D
+    sigma2 = sum(A_i * (T_i - ts) ** 2 for A_i, T_i in zip(A, T)) / D
+    accel = 1000.0
+    expected_offset_180 = 0.5 * accel * sigma2   # ≈ 0.01262 mm
+    actual = sc._get_shaper_smoothing(_zv_50hz(), accel=accel)
+    assert actual == pytest.approx(expected_offset_180, rel=1e-9)
+    # Sanity: confirm we are in the regime where the OLD offset_90 would
+    # have been strictly larger than offset_180.
+    old_offset_90_rough = math.sqrt(2.0) * 0.5 * (5.0 + 0.5 * accel * (T[1] - ts)) * (T[1] - ts) / D
+    assert old_offset_90_rough > expected_offset_180 * 1.5

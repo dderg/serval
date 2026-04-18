@@ -237,27 +237,22 @@ class ShaperCalibrate:
         all_vibrations = self.numpy.maximum(psd - vibr_threshold, 0).sum()
         return (remaining_vibrations / all_vibrations, vals)
 
-    def _get_shaper_smoothing(self, shaper, accel=5000, scv=5.0):
+    def _get_shaper_smoothing(self, shaper, accel=5000):
         half_accel = accel * 0.5
-
         A, T = shaper
         inv_D = 1.0 / sum(A)
         n = len(T)
-        # Calculate input shaper shift
+        # Shaper centroid shift — subtracting ts leaves only shaper
+        # distortion residual, per Singer & Seering 1990.
         ts = sum([A[i] * T[i] for i in range(n)]) * inv_D
 
-        # Calculate offset for 90 and 180 degrees turn
-        offset_90 = offset_180 = 0.0
+        # offset_180: shaper residual at the cusp of a 180° velocity
+        # reversal, x(t) = (a/2)(t - ts)**2. Models U-turn overshoot
+        # at Kalico's blender-declined corners (next_junction_v2 = 0).
+        offset_180 = 0.0
         for i in range(n):
-            if T[i] >= ts:
-                # Calculate offset for one of the axes
-                offset_90 += (
-                    A[i] * (scv + half_accel * (T[i] - ts)) * (T[i] - ts)
-                )
             offset_180 += A[i] * half_accel * (T[i] - ts) ** 2
-        offset_90 *= inv_D * math.sqrt(2.0)
-        offset_180 *= inv_D
-        return max(offset_90, offset_180)
+        return offset_180 * inv_D
 
     def fit_shaper(
         self,
@@ -299,7 +294,7 @@ class ShaperCalibrate:
             shaper_vibrations = 0.0
             shaper_vals = np.zeros(shape=freq_bins.shape)
             shaper = shaper_cfg.init_func(test_freq, damping_ratio)
-            shaper_smoothing = self._get_shaper_smoothing(shaper, scv=scv)
+            shaper_smoothing = self._get_shaper_smoothing(shaper)
             if max_smoothing and shaper_smoothing > max_smoothing and best_res:
                 return best_res
             # Exact damping ratio of the printer is unknown, pessimizing
@@ -358,13 +353,13 @@ class ShaperCalibrate:
                 right = middle
         return left
 
-    def find_shaper_max_accel(self, shaper, scv):
+    def find_shaper_max_accel(self, shaper, scv=None):  # scv kept for Task 3
         # Just some empirically chosen value which produces good projections
         # for max_accel without much smoothing
         TARGET_SMOOTHING = 0.12
         max_accel = self._bisect(
             lambda test_accel: (
-                self._get_shaper_smoothing(shaper, test_accel, scv)
+                self._get_shaper_smoothing(shaper, test_accel)
                 <= TARGET_SMOOTHING
             )
         )
