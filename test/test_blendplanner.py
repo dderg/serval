@@ -23,7 +23,6 @@ class _FakeToolhead:
         self.max_velocity = overrides.get("max_velocity", 500.0)
         self.max_accel = overrides.get("max_accel", 10000.0)
         self.max_accel_to_decel = overrides.get("max_accel_to_decel", 10000.0)
-        self.junction_deviation = overrides.get("junction_deviation", 0.01)
         self.corner_deviation = overrides.get("corner_deviation", 50e-3)
         self.kin = _FakeCheckMove()
         self.extruder = _FakeCheckMove()
@@ -37,7 +36,6 @@ class _FakeMove:
         self.start_pos = tuple(start_pos)
         self.end_pos = tuple(end_pos)
         self.accel = toolhead.max_accel
-        self.junction_deviation = toolhead.junction_deviation
         self.timing_callbacks = []
         velocity = min(speed, toolhead.max_velocity)
         self.is_kinematic_move = True
@@ -177,7 +175,6 @@ def _state_src_dst_pair():
     src.timing_callbacks.append(lambda t: None)
     src.next_junction_v2 = 42.0
     src.max_cruise_v2 = 150.0 ** 2
-    src.junction_deviation = 0.05
     src.accel = 5000.0
     src.delta_v2 = 2.0 * src.move_d * src.accel
     src.smooth_delta_v2 = min(src.delta_v2, 2.0 * src.move_d * 2500.0)
@@ -193,7 +190,6 @@ def test_copy_caller_state_transfers_caller_intent_fields():
     assert dst.timing_callbacks is not src.timing_callbacks  # copy, not alias
     assert dst.next_junction_v2 == 42.0
     assert dst.max_cruise_v2 == 150.0 ** 2
-    assert dst.junction_deviation == 0.05
     assert dst.accel == 5000.0
 
 

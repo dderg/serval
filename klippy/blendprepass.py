@@ -122,7 +122,6 @@ class CollinearCollapser:
         # not leak into the merged Move via Move.__init__'s toolhead snapshot.
         merged.max_cruise_v2 = chain[0].max_cruise_v2
         merged.min_move_t = merged.move_d / cruise_v
-        merged.junction_deviation = chain[0].junction_deviation
         # Narrowest accel observed (may have been lowered by a constituent's
         # kin.check_move via limit_speed). limit_speed additionally applies
         # toolhead.max_accel_NEW if M204 was issued mid-chain.

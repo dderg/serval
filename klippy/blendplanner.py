@@ -15,7 +15,7 @@ def _copy_caller_state(src, dst):
     """Transfer caller-mutable Move state from src to the truncated dst.
 
     Pins caller-intent fields verbatim (timing_callbacks, next_junction_v2,
-    max_cruise_v2, junction_deviation, accel) so that M204 / SET_VELOCITY_LIMIT
+    max_cruise_v2, accel) so that M204 / SET_VELOCITY_LIMIT
     / register_lookahead_callback mutations applied upstream to src survive
     the emit-time construction of dst. Recomputes length-derived fields
     (delta_v2, smooth_delta_v2, min_move_t) from dst's NEW move_d and the
@@ -29,7 +29,6 @@ def _copy_caller_state(src, dst):
     dst.timing_callbacks = list(src.timing_callbacks)
     dst.next_junction_v2 = src.next_junction_v2
     dst.max_cruise_v2 = src.max_cruise_v2
-    dst.junction_deviation = src.junction_deviation
     dst.accel = src.accel
     dst.delta_v2 = 2.0 * dst.move_d * dst.accel
     ratio = src.smooth_delta_v2 / src.delta_v2 if src.delta_v2 > 0.0 else 1.0
@@ -147,12 +146,10 @@ class CornerBlender:
         arc_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2, arc.v_cap ** 2)
         arc_cap_v = math.sqrt(arc_cap_v2)
         arc_accel = min(prev.accel, nxt.accel)
-        arc_jd = min(prev.junction_deviation, nxt.junction_deviation)
         arc_moves = []
         for p0, p1 in zip(points_4d, points_4d[1:]):
             am = move_cls(th, p0, p1, arc_cap_v)
             am.max_cruise_v2 = arc_cap_v2
-            am.junction_deviation = arc_jd
             am.limit_speed(arc_cap_v, arc_accel)
             # Cruise-through-arc: pin smooth_delta_v2 to delta_v2 so look-ahead
             # smoothing does not ramp gently at the arc boundaries.

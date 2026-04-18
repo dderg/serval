@@ -23,7 +23,6 @@ class _FakeToolhead:
         self.max_velocity = overrides.get("max_velocity", 500.0)
         self.max_accel = overrides.get("max_accel", 10000.0)
         self.max_accel_to_decel = overrides.get("max_accel_to_decel", 10000.0)
-        self.junction_deviation = overrides.get("junction_deviation", 0.01)
         self.kin = _FakeCheckMove()
         self.extruder = _FakeCheckMove()
 
@@ -36,7 +35,6 @@ class _FakeMove:
         self.start_pos = tuple(start_pos)
         self.end_pos = tuple(end_pos)
         self.accel = toolhead.max_accel
-        self.junction_deviation = toolhead.junction_deviation
         self.timing_callbacks = []
         velocity = min(speed, toolhead.max_velocity)
         self.is_kinematic_move = True
@@ -304,21 +302,6 @@ def test_merged_pins_max_cruise_v2_to_chain_head():
     # And min_move_t must reflect the pinned cruise, not the clamped one.
     # merged.move_d = 20; cruise_v = sqrt(10000) = 100; min_move_t = 0.2
     assert merged.min_move_t == pytest.approx(20.0 / 100.0, rel=1e-12)
-
-
-def test_merged_pins_junction_deviation_to_chain_head():
-    c = _collapser()
-    th = c._toolhead
-    th.junction_deviation = 0.005
-    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
-    th.junction_deviation = 0.02  # SET_VELOCITY_LIMIT between moves
-    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
-    c.feed(m1)
-    c.feed(m2)
-    th.junction_deviation = 0.05  # change again before merge
-    out = c.flush()
-    merged = out[0]
-    assert merged.junction_deviation == pytest.approx(0.005, rel=1e-12)
 
 
 def test_merged_preserves_minimum_accel_across_chain():
