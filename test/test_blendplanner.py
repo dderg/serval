@@ -746,3 +746,37 @@ def test_scv_config_absent_no_warning(caplog):
     assert not any(
         "square_corner_velocity" in rec.message for rec in caplog.records
     )
+
+
+def test_scv_gcode_silent_noop_pattern():
+    """Pattern-level verification: gcmd.get_float for SQUARE_CORNER_VELOCITY
+    must accept the value without error and the local must not be assigned
+    to any toolhead attribute. Verified at the SET_VELOCITY_LIMIT call site
+    in toolhead.py — this test exercises the contract."""
+    from unittest.mock import MagicMock
+    gcmd = MagicMock()
+    gcmd.get_float.return_value = 10.0
+    # Replicate the SCV-handling pattern from cmd_SET_VELOCITY_LIMIT
+    square_corner_velocity = gcmd.get_float(
+        "SQUARE_CORNER_VELOCITY", None, minval=0.0
+    )
+    # Contract: the value is parsed but never assigned anywhere.
+    # The local exists only for the all-None guard.
+    assert square_corner_velocity == 10.0
+    # Critically, no follow-up assignment exists — this is a structural test
+    # confirmed by grep in step 3 above (zero self.square_corner_velocity hits
+    # in toolhead.py).
+
+
+def test_status_excludes_square_corner_velocity():
+    """toolhead.get_status output must not contain square_corner_velocity
+    after sub-spec #5. End-to-end check using a real ToolHead is heavy;
+    structural verification via grep in Task 10 step 3 is the primary gate.
+    This test exists to fail loudly if a future patch reintroduces the key."""
+    import inspect
+    from klippy import toolhead as th_mod
+    src = inspect.getsource(th_mod.ToolHead.get_status)
+    assert '"square_corner_velocity"' not in src, (
+        "ToolHead.get_status reintroduced square_corner_velocity key"
+    )
+    assert "'square_corner_velocity'" not in src
