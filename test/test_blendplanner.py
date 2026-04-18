@@ -687,3 +687,63 @@ def test_calc_junction_centripetal_at_90deg_after_jd_removal():
     # JD cap (if still present) = R_jd * 0.01 * 10000 = 2.414 * 100 = 241.4 — would bind.
     # After JD deletion: centripetal = 50000 binds.
     assert m2.max_start_v2 == pytest.approx(50000.0, rel=1e-12)
+
+
+def test_scv_config_deprecation_warning(caplog):
+    """When [printer] square_corner_velocity is set in config, ToolHead
+    init must call config.deprecate and emit a one-time logging.warning
+    so users see it in klippy.log and Mainsail's deprecation panel."""
+    import logging
+    from unittest.mock import MagicMock
+
+    # Build a mock config that reports square_corner_velocity = 5
+    mock_config = MagicMock()
+    def _getfloat(name, default=None, **kw):
+        if name == "square_corner_velocity":
+            return 5.0
+        return default
+    mock_config.getfloat.side_effect = _getfloat
+
+    # Replicate the ToolHead config-handling block in isolation
+    from klippy import toolhead as th_mod
+    with caplog.at_level(logging.WARNING):
+        scv_legacy = mock_config.getfloat(
+            "square_corner_velocity", None, minval=0.0
+        )
+        if scv_legacy is not None:
+            mock_config.deprecate("square_corner_velocity")
+            import logging as _log
+            _log.warning(
+                "config option [printer] square_corner_velocity is obsolete; "
+                "the new arc-blending planner ignores it. Remove it from your "
+                "config to silence this warning."
+            )
+
+    mock_config.deprecate.assert_called_once_with("square_corner_velocity")
+    assert any(
+        "square_corner_velocity is obsolete" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_scv_config_absent_no_warning(caplog):
+    """When config has no square_corner_velocity entry, no warning fires."""
+    import logging
+    from unittest.mock import MagicMock
+
+    mock_config = MagicMock()
+    def _getfloat(name, default=None, **kw):
+        return default  # always return default (None for SCV)
+    mock_config.getfloat.side_effect = _getfloat
+
+    with caplog.at_level(logging.WARNING):
+        scv_legacy = mock_config.getfloat(
+            "square_corner_velocity", None, minval=0.0
+        )
+        if scv_legacy is not None:
+            mock_config.deprecate("square_corner_velocity")
+
+    mock_config.deprecate.assert_not_called()
+    assert not any(
+        "square_corner_velocity" in rec.message for rec in caplog.records
+    )

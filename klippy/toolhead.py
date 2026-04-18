@@ -283,15 +283,21 @@ class ToolHead:
         self.min_cruise_ratio = config.getfloat(
             "minimum_cruise_ratio", min_cruise_ratio, below=1.0, minval=0.0
         )
-        self.square_corner_velocity = config.getfloat(
-            "square_corner_velocity", 5.0, minval=0.0
+        scv_legacy = config.getfloat(
+            "square_corner_velocity", None, minval=0.0
         )
+        if scv_legacy is not None:
+            config.deprecate("square_corner_velocity")
+            logging.warning(
+                "config option [printer] square_corner_velocity is obsolete; "
+                "the new arc-blending planner ignores it. Remove it from your "
+                "config to silence this warning."
+            )
         self.orig_cfg = {}
         self.orig_cfg["max_velocity"] = self.max_velocity
         self.orig_cfg["max_accel"] = self.max_accel
         self.orig_cfg["corner_deviation"] = self.corner_deviation
         self.orig_cfg["min_cruise_ratio"] = self.min_cruise_ratio
-        self.orig_cfg["square_corner_velocity"] = self.square_corner_velocity
         # Input stall detection
         self.check_stall_time = 0.0
         self.print_stall = 0
@@ -744,7 +750,6 @@ class ToolHead:
                 "max_velocity": self.max_velocity,
                 "max_accel": self.max_accel,
                 "minimum_cruise_ratio": self.min_cruise_ratio,
-                "square_corner_velocity": self.square_corner_velocity,
             }
         )
         return res
