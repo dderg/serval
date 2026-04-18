@@ -9,8 +9,9 @@ Closed-form for offset_180-only smoothing target (0.12 mm):
     sigma2 = (T_1 - ts)**2 = ts**2 ≈ 2.525e-5
     A = 0.24 / sigma2 ≈ 9505 mm/s**2          (accel where offset_180 = 0.12)
 
-Task 1 pins the OLD (pre-6a) value from the current implementation.
-Tasks 2 and 3 tighten this pin to the post-change closed form.
+`test_find_shaper_max_accel_matches_offset_180_closed_form` pins this
+analytical expectation. Sibling tests lock the signatures of the four
+scv-bearing APIs whose `scv` parameter was removed in sub-spec 6a.
 """
 import math
 
