@@ -628,3 +628,62 @@ def test_max_accel_to_decel_is_property_tracking_min_cruise_ratio():
     assert s.max_accel_to_decel == pytest.approx(1500.0, rel=1e-12)
     s.max_accel = 10000.0
     assert s.max_accel_to_decel == pytest.approx(3000.0, rel=1e-12)
+
+
+def test_calc_junction_skips_block_at_perfect_tangency():
+    """At a tangent (collinear) junction, cos_theta_d2 == 0 and the
+    centripetal/JD block must be skipped entirely. max_start_v2 is
+    therefore set by the pre-block min() — typically prev.max_start_v2
+    + prev.delta_v2."""
+    from klippy import toolhead as th_mod
+
+    class _StubExtruder:
+        def calc_junction(self, prev, nxt):
+            return 1e18
+
+    class _StubToolhead:
+        max_velocity = 1e6
+        max_accel = 10000.0
+        min_cruise_ratio = 0.5
+        max_accel_to_decel = th_mod.ToolHead.max_accel_to_decel
+        junction_deviation = 0.01  # ignored after deletion; still readable
+        extruder = _StubExtruder()
+
+    th = _StubToolhead()
+    m1 = th_mod.Move(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=200.0)
+    m2 = th_mod.Move(th, (10, 0, 0, 0), (20, 0, 0, 0), speed=200.0)
+    # Pre-state: m1.max_start_v2 starts at 0; m1.delta_v2 = 2*10*10000 = 200000.
+    m2.calc_junction(m1)
+    # Tangent: block skipped, max_start_v2 = min(extruder, cruise, prev_cruise,
+    #   prev.next_junction_v2, prev.max_start_v2 + prev.delta_v2)
+    # = min(1e18, 40000, 40000, 999999999.9, 200000) = 40000 (cruise cap binds).
+    assert m2.max_start_v2 == pytest.approx(40000.0, rel=1e-12)
+
+
+def test_calc_junction_centripetal_at_90deg_after_jd_removal():
+    """At a 90° corner with JD deleted, the centripetal mid-move cap
+    must be the binding term: v² ≤ 0.5 · d · a · tan(θ/2). With θ=π/2,
+    d=10, a=10000: cap = 0.5 · 10 · 10000 · 1 = 50000."""
+    from klippy import toolhead as th_mod
+
+    class _StubExtruder:
+        def calc_junction(self, prev, nxt):
+            return 1e18
+
+    class _StubToolhead:
+        max_velocity = 1e6
+        max_accel = 10000.0
+        min_cruise_ratio = 0.5
+        max_accel_to_decel = th_mod.ToolHead.max_accel_to_decel
+        junction_deviation = 0.01  # ignored after deletion
+        extruder = _StubExtruder()
+
+    th = _StubToolhead()
+    m1 = th_mod.Move(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=1000.0)
+    m2 = th_mod.Move(th, (10, 0, 0, 0), (10, 10, 0, 0), speed=1000.0)
+    m2.calc_junction(m1)
+    # delta_v2 = 2*10*10000 = 200000; quarter_tan(π/4) = 0.25;
+    # centripetal = 0.25 * 200000 = 50000. cruise cap = 1e6 (loose).
+    # JD cap (if still present) = R_jd * 0.01 * 10000 = 2.414 * 100 = 241.4 — would bind.
+    # After JD deletion: centripetal = 50000 binds.
+    assert m2.max_start_v2 == pytest.approx(50000.0, rel=1e-12)
