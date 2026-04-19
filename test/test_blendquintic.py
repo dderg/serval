@@ -391,3 +391,74 @@ def test_quintic_blend_dataclass_fields():
     assert q.kappa_peak == 0.5
     assert q.v_cap == 100.0
     assert q.plane_normal == (0.0, 0.0, 1.0)
+
+
+def test_quintic_geometry_collinear_returns_none():
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (1.0, 0.0, 0.0)
+    result = blendquintic.quintic_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=10.0,
+        L_next=10.0,
+        corner_deviation=0.02,
+        a_max=50000.0,
+    )
+    assert result is None
+
+
+def test_quintic_geometry_u_turn_returns_degenerate():
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (-1.0, 0.0, 0.0)
+    result = blendquintic.quintic_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=10.0,
+        L_next=10.0,
+        corner_deviation=0.02,
+        a_max=50000.0,
+    )
+    assert result is not None
+    assert result.v_cap == 0.0
+    assert result.d_consumed == 0.0
+
+
+def test_quintic_geometry_right_angle_basic():
+    # 90 deg corner, 1 mm segments, eps = 0.1 mm. Expect a QuinticBlend
+    # with theta = pi/2, r matches _shape_ratio(pi/2), d > 0, kappa_peak > 0.
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    result = blendquintic.quintic_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1.0,
+        L_next=1.0,
+        corner_deviation=0.1,
+        a_max=50000.0,
+    )
+    assert result is not None
+    assert result.theta == pytest.approx(math.pi / 2.0, abs=1e-9)
+    assert result.r == pytest.approx(blendquintic._shape_ratio(math.pi / 2.0))
+    assert result.d_consumed > 0.0
+    assert result.kappa_peak > 0.0
+    # Centripetal-only cap: v_cap^2 <= a_max / kappa_peak
+    assert result.v_cap * result.v_cap == pytest.approx(
+        50000.0 / result.kappa_peak, rel=1e-9
+    )
+    assert result.plane_normal == pytest.approx((0.0, 0.0, 1.0), abs=1e-12)
+
+
+def test_quintic_geometry_half_segment_cap_limits_d():
+    # Very loose corner_deviation should hit the L/2 cap.
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    result = blendquintic.quintic_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=2.0,
+        L_next=4.0,
+        corner_deviation=5.0,  # would demand d much bigger than L_prev/2
+        a_max=50000.0,
+    )
+    assert result is not None
+    assert result.d_consumed == pytest.approx(1.0, abs=1e-12)  # 0.5 * min(2, 4)

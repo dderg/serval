@@ -232,3 +232,88 @@ class QuinticBlend:
     entry_tangent: Vec3
     exit_tangent: Vec3
     plane_normal: Vec3
+
+
+def quintic_geometry(
+    prev_dir: Vec3,
+    next_dir: Vec3,
+    L_prev: float,
+    L_next: float,
+    corner_deviation: float,
+    a_max: float,
+) -> Optional[QuinticBlend]:
+    """Compute the quintic Bezier blend for a corner, or None if no
+    blend is needed. Centripetal bound only — shaper and rotation-jerk
+    bounds are added by `quintic_geometry_with_shaper` / `blend_from_
+    moves_quintic`.
+
+    ``prev_dir`` and ``next_dir`` must be unit vectors. Angle
+    convention: deflection theta, where 0 = collinear, pi = U-turn.
+    """
+    dp = vdot(prev_dir, next_dir)
+    dp = max(-1.0, min(1.0, dp))
+    cos_half = math.sqrt(max(0.0, (1.0 + dp) * 0.5))
+    sin_half = math.sqrt(max(0.0, (1.0 - dp) * 0.5))
+
+    if sin_half < COLLINEAR_EPS:
+        return None
+
+    if cos_half < REVERSAL_EPS:
+        return QuinticBlend(
+            Q=((0.0, 0.0, 0.0),) * 6,
+            theta=math.pi,
+            r=_R_CLAMP_MIN,
+            d_consumed=0.0,
+            kappa_peak=0.0,
+            v_cap=0.0,
+            entry_tangent=prev_dir,
+            exit_tangent=next_dir,
+            plane_normal=(0.0, 0.0, 0.0),
+        )
+
+    theta = 2.0 * math.atan2(sin_half, cos_half)
+    r = _shape_ratio(theta)
+
+    d_tol = _d_from_deviation(corner_deviation, r, sin_half)
+    d_mid = 0.5 * min(L_prev, L_next)
+    d = min(d_tol, d_mid)
+
+    # Build the 6 control points relative to the corner vertex (V at origin).
+    # Q0 = -d * prev_dir, Q5 = +d * next_dir.
+    Q = (
+        vscale(prev_dir, -d),
+        vscale(prev_dir, -r * d),
+        vscale(prev_dir, -r * d),
+        vscale(next_dir, r * d),
+        vscale(next_dir, r * d),
+        vscale(next_dir, d),
+    )
+
+    kappa_peak, _ = _peak_curvature(Q)
+
+    # Plane normal: right-handed, consistent with blendmath.
+    raw_normal = vcross(prev_dir, next_dir)
+    raw_norm_n = vnorm(raw_normal)
+    if raw_norm_n == 0.0:
+        plane_normal: Vec3 = (0.0, 0.0, 0.0)
+    else:
+        plane_normal = vscale(raw_normal, 1.0 / raw_norm_n)
+
+    # Centripetal bound.
+    if kappa_peak > 0.0:
+        v_cent = math.sqrt(a_max / kappa_peak)
+    else:
+        v_cent = 0.0
+    v_cap = v_cent
+
+    return QuinticBlend(
+        Q=Q,
+        theta=theta,
+        r=r,
+        d_consumed=d,
+        kappa_peak=kappa_peak,
+        v_cap=v_cap,
+        entry_tangent=prev_dir,
+        exit_tangent=next_dir,
+        plane_normal=plane_normal,
+    )
