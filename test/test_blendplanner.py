@@ -345,7 +345,15 @@ def test_aggregate_extruder_check_move_skipped_when_not_extruding():
     assert len(th.extruder.calls) == 0
 
 
-def test_arc_polyline_smooth_delta_v2_equals_delta_v2():
+def test_arc_polyline_smooth_delta_v2_not_pinned():
+    # Historical behaviour pinned smooth_delta_v2 to delta_v2 on every
+    # polyline move, disabling look-ahead tangential ramping. That pin
+    # was overreach: for the quintic it throws away the shape's
+    # variable-curvature advantage, and for the arc the natural
+    # smoothed ramp simply matches the flat per-segment cap anyway.
+    # Post-fix we leave smooth_delta_v2 at whatever Move.__init__ /
+    # limit_speed arrive at — tests assert it is no larger than
+    # delta_v2 (Kalico invariant) rather than equal to it.
     b = _blender(max_chord_err=20e-3)
     th = b._toolhead
     m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
@@ -354,7 +362,7 @@ def test_arc_polyline_smooth_delta_v2_equals_delta_v2():
     out = b.feed(m_next)
     arc_moves = out[1:]
     for am in arc_moves:
-        assert am.smooth_delta_v2 == pytest.approx(am.delta_v2, rel=1e-12)
+        assert am.smooth_delta_v2 <= am.delta_v2 + 1e-12
 
 
 def test_arc_polyline_speed_continuity_1ppm():

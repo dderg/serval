@@ -162,7 +162,15 @@ class CornerBlender:
 
         # --- 2. Arc polyline ---
         chord_err = self._resolve_chord_err()
-        polyline_local = blendemit.segment(blend, chord_err)
+        arc_accel = min(prev.accel, nxt.accel)
+        # Per-segment velocity caps from local curvature. For an arc the
+        # list is flat (equal to blend.v_cap everywhere) — identical to
+        # the historical flat-cap behaviour. For a quintic the endpoints
+        # get generous caps and the peak-curvature region keeps the tight
+        # centripetal bound; look-ahead ramps tangentially between them.
+        polyline_local, seg_v_caps = blendemit.per_segment_v_cap(
+            blend, chord_err, arc_accel,
+        )
         polyline_world = [
             (p[0] + vertex[0], p[1] + vertex[1], p[2] + vertex[2])
             for p in polyline_local
@@ -176,19 +184,26 @@ class CornerBlender:
         points_4d = [
             (p[0], p[1], p[2], p[3] + trunc_prev_end_e) for p in points_4d
         ]
-        # Kalico stores squared velocities; blend.v_cap is a velocity so ** 2 converts.
-        arc_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2, blend.v_cap ** 2)
-        arc_cap_v = math.sqrt(arc_cap_v2)
-        arc_accel = min(prev.accel, nxt.accel)
+        # Move.__init__ clamps to toolhead.max_velocity, so the widest cap we
+        # can construct a Move with is min(prev/nxt cruise ceilings). Per-
+        # segment caps then apply on top via limit_speed / max_cruise_v2.
+        neighbour_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2)
+        neighbour_cap_v = math.sqrt(neighbour_cap_v2)
         arc_moves = []
-        for p0, p1 in zip(points_4d, points_4d[1:]):
-            am = move_cls(th, p0, p1, arc_cap_v)
-            am.max_cruise_v2 = arc_cap_v2
-            am.limit_speed(arc_cap_v, arc_accel)
-            # Cruise-through-arc: pin smooth_delta_v2 to delta_v2 so look-ahead
-            # smoothing does not ramp gently at the arc boundaries.
-            am.smooth_delta_v2 = am.delta_v2
-            am.min_move_t = am.move_d / arc_cap_v
+        for (p0, p1), seg_v_cap in zip(
+            zip(points_4d, points_4d[1:]), seg_v_caps
+        ):
+            seg_cap_v2 = min(neighbour_cap_v2, seg_v_cap ** 2)
+            seg_cap_v = math.sqrt(seg_cap_v2)
+            am = move_cls(th, p0, p1, neighbour_cap_v)
+            am.max_cruise_v2 = seg_cap_v2
+            am.limit_speed(seg_cap_v, arc_accel)
+            # Look-ahead smoothing (smooth_delta_v2) is deliberately left
+            # untouched: for quintics it unlocks the tangential ramp that
+            # speeds up at low-curvature endpoints and decelerates into
+            # the peak; for arcs seg_v_cap is flat so the smoothed ramp
+            # is also flat in practice.
+            am.min_move_t = am.move_d / seg_cap_v
             arc_moves.append(am)
 
         # --- 3. Truncated next head ---

@@ -595,3 +595,34 @@ def segment_quintic(
     return out
 
 
+def segment_quintic_with_t(
+    blend: QuinticBlend,
+    max_chord_err: float = 1e-2,
+) -> List[Tuple[Vec3, float]]:
+    """Like `segment_quintic` but also returns the parameter value t
+    in [0, 1] at which each polyline point sits on the original curve.
+
+    Adaptive De Casteljau split at t=0.5 so every subdivision splits
+    the current t-interval in half; tracking (t_lo, t_hi) through
+    recursion yields exact t-values at each emitted vertex.
+    """
+    if max_chord_err <= 0.0:
+        raise ValueError("max_chord_err must be positive")
+    if blend.d_consumed == 0.0:
+        return [(blend.Q[0], 0.0)]
+
+    out: List[Tuple[Vec3, float]] = [(blend.Q[0], 0.0)]
+
+    def _recurse(Q, t_lo, t_hi, depth):
+        if depth >= _SUBDIVIDE_MAX_DEPTH or _quintic_flatness(Q) <= max_chord_err:
+            out.append((Q[5], t_hi))
+            return
+        left, right = _quintic_split(Q)
+        t_mid = 0.5 * (t_lo + t_hi)
+        _recurse(left, t_lo, t_mid, depth + 1)
+        _recurse(right, t_mid, t_hi, depth + 1)
+
+    _recurse(blend.Q, 0.0, 1.0, 0)
+    return out
+
+
