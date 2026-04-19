@@ -238,6 +238,9 @@ class InputShaper:
             "target_smoothing:%.6f" % self.target_smoothing
         )
 
+    def get_status(self, eventtime):
+        return {"target_smoothing": self.target_smoothing}
+
 
 def load_config(config):
     return InputShaper(config)

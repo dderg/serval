@@ -750,6 +750,7 @@ class ToolHead:
                 "max_velocity": self.max_velocity,
                 "max_accel": self.max_accel,
                 "minimum_cruise_ratio": self.min_cruise_ratio,
+                "corner_deviation": self.corner_deviation,
             }
         )
         return res
