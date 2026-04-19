@@ -127,3 +127,23 @@ def _d_from_deviation(eps: float, r: float, sin_half: float) -> float:
     if denom <= 0.0:
         raise ValueError("_d_from_deviation: non-positive denominator")
     return 16.0 * eps / denom
+
+
+def _curvature_at(Q, t: float) -> float:
+    """Curvature of the quintic at parameter t.
+
+    kappa(t) = |B'(t) x B''(t)| / |B'(t)|^3
+    Returns 0.0 if |B'(t)| is near zero (degenerate endpoint with
+    coincident control points — expected at t=0 and t=1 for symmetric
+    quintic blends).
+    """
+    d1 = _quintic_first_deriv(Q, t)
+    d2 = _quintic_second_deriv(Q, t)
+    d1_norm = vnorm(d1)
+    if d1_norm < 1e-12:
+        return 0.0
+    cx = d1[1] * d2[2] - d1[2] * d2[1]
+    cy = d1[2] * d2[0] - d1[0] * d2[2]
+    cz = d1[0] * d2[1] - d1[1] * d2[0]
+    cross_norm = math.sqrt(cx * cx + cy * cy + cz * cz)
+    return cross_norm / (d1_norm ** 3)

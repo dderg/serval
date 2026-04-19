@@ -229,3 +229,49 @@ def test_d_from_deviation_is_inverse_of_deviation():
                 B_mid = blendquintic._quintic_eval(Q, 0.5)
                 dev = math.sqrt(sum(c * c for c in B_mid))
                 assert dev == pytest.approx(eps, abs=1e-10)
+
+
+def test_curvature_zero_at_endpoints_of_symmetric_blend():
+    # By construction: Q1 = Q2 and Q3 = Q4 force B''(0) = B''(1) = 0.
+    V = (0.0, 0.0, 0.0)
+    e1 = (1.0, 0.0, 0.0)
+    e2 = (math.cos(1.2), math.sin(1.2), 0.0)
+    Q = _build_symmetric_Q(V, e1, e2, d=1.5, r=0.6)
+    assert blendquintic._curvature_at(Q, 0.0) == pytest.approx(0.0, abs=1e-9)
+    assert blendquintic._curvature_at(Q, 1.0) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_curvature_matches_finite_difference_reference():
+    # Reference: kappa(t) from centered finite differences of |B'|^3 and B'xB''.
+    V = (0.0, 0.0, 0.0)
+    e1 = (1.0, 0.0, 0.0)
+    theta = math.pi / 2.0
+    e2 = (math.cos(theta), math.sin(theta), 0.0)
+    Q = _build_symmetric_Q(V, e1, e2, d=1.0, r=0.6)
+    h = 1e-5
+    for t in (0.25, 0.5, 0.75):
+        # Finite-difference second derivative of position.
+        p_plus = blendquintic._quintic_eval(Q, t + h)
+        p_0 = blendquintic._quintic_eval(Q, t)
+        p_minus = blendquintic._quintic_eval(Q, t - h)
+        fd_first = (
+            (p_plus[0] - p_minus[0]) / (2.0 * h),
+            (p_plus[1] - p_minus[1]) / (2.0 * h),
+            (p_plus[2] - p_minus[2]) / (2.0 * h),
+        )
+        fd_second = (
+            (p_plus[0] - 2.0 * p_0[0] + p_minus[0]) / (h * h),
+            (p_plus[1] - 2.0 * p_0[1] + p_minus[1]) / (h * h),
+            (p_plus[2] - 2.0 * p_0[2] + p_minus[2]) / (h * h),
+        )
+        cross = (
+            fd_first[1] * fd_second[2] - fd_first[2] * fd_second[1],
+            fd_first[2] * fd_second[0] - fd_first[0] * fd_second[2],
+            fd_first[0] * fd_second[1] - fd_first[1] * fd_second[0],
+        )
+        cross_norm = math.sqrt(sum(c * c for c in cross))
+        first_norm = math.sqrt(sum(c * c for c in fd_first))
+        fd_kappa = cross_norm / (first_norm ** 3)
+
+        kappa = blendquintic._curvature_at(Q, t)
+        assert kappa == pytest.approx(fd_kappa, rel=1e-3)
