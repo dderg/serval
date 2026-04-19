@@ -270,6 +270,20 @@ class ToolHead:
         self.max_velocity = config.getfloat("max_velocity", above=0.0)
         self.max_accel = config.getfloat("max_accel", above=0.0)
         self.corner_deviation = config.getfloat("corner_deviation", above=0.0)
+        self.shape_switchover_low_deg = config.getfloat(
+            "shape_switchover_low", 35.0, above=0.0, below=180.0,
+        )
+        self.shape_switchover_high_deg = config.getfloat(
+            "shape_switchover_high", 150.0, above=0.0, below=180.0,
+        )
+        if self.shape_switchover_low_deg >= self.shape_switchover_high_deg:
+            raise config.error(
+                "shape_switchover_low (%.3f) must be strictly less than "
+                "shape_switchover_high (%.3f)" % (
+                    self.shape_switchover_low_deg,
+                    self.shape_switchover_high_deg,
+                )
+            )
         min_cruise_ratio = 0.5
         if config.getfloat("minimum_cruise_ratio", None) is None:
             req_accel_to_decel = config.getfloat(
@@ -297,6 +311,8 @@ class ToolHead:
         self.orig_cfg["max_velocity"] = self.max_velocity
         self.orig_cfg["max_accel"] = self.max_accel
         self.orig_cfg["corner_deviation"] = self.corner_deviation
+        self.orig_cfg["shape_switchover_low_deg"] = self.shape_switchover_low_deg
+        self.orig_cfg["shape_switchover_high_deg"] = self.shape_switchover_high_deg
         self.orig_cfg["min_cruise_ratio"] = self.min_cruise_ratio
         # Input stall detection
         self.check_stall_time = 0.0
@@ -935,10 +951,14 @@ class ToolHead:
 
         self.min_cruise_ratio = self.orig_cfg["min_cruise_ratio"]
         self.corner_deviation = self.orig_cfg["corner_deviation"]
+        self.shape_switchover_low_deg = self.orig_cfg["shape_switchover_low_deg"]
+        self.shape_switchover_high_deg = self.orig_cfg["shape_switchover_high_deg"]
         msg.extend(
             (
                 "minimum_cruise_ratio: %.6f" % self.min_cruise_ratio,
                 "corner_deviation: %.6f" % self.corner_deviation,
+                "shape_switchover_low: %.6f" % self.shape_switchover_low_deg,
+                "shape_switchover_high: %.6f" % self.shape_switchover_high_deg,
             )
         )
         if get_danger_options().log_velocity_limit_changes:
