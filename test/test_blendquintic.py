@@ -560,3 +560,42 @@ def test_quintic_shaper_bound_is_min_across_three_samples():
     # Three-point min should not exceed the dense-sampled min by more
     # than a small margin (the spec target is ~6% worst-case overshoot).
     assert three_point.v_cap <= dense * 1.10 + 1e-9
+
+
+def test_rotation_jerk_cap_applied():
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    base = blendquintic.quintic_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1.0,
+        L_next=1.0,
+        corner_deviation=0.1,
+        a_max=50000.0,
+    )
+    # Very small j_eff: rotation-jerk should dominate v_cap.
+    capped = blendquintic.quintic_geometry_with_shaper(
+        base=base,
+        shapers=[],
+        j_eff=1e4,
+    )
+    R_peak = 1.0 / base.kappa_peak
+    v_jerk_expected = (R_peak * math.sqrt(1e4)) ** (2.0 / 3.0)
+    # v_cap = min(v_cent, v_jerk). v_jerk is smaller at j_eff=1e4.
+    assert capped.v_cap == pytest.approx(min(base.v_cap, v_jerk_expected), rel=1e-9)
+
+
+def test_rotation_jerk_infinite_does_not_affect_v_cap():
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    base = blendquintic.quintic_geometry(
+        prev_dir=prev_dir, next_dir=next_dir,
+        L_prev=1.0, L_next=1.0,
+        corner_deviation=0.1, a_max=50000.0,
+    )
+    capped = blendquintic.quintic_geometry_with_shaper(
+        base=base,
+        shapers=[],
+        j_eff=float("inf"),
+    )
+    assert capped.v_cap == pytest.approx(base.v_cap)

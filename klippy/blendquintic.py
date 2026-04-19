@@ -406,15 +406,28 @@ def quintic_geometry_with_shaper(
     shapers,
     j_eff: float,
 ) -> Optional[QuinticBlend]:
-    """Apply shaper bounds on top of a base `QuinticBlend`.
+    """Apply shaper + rotation-jerk bounds on top of a base `QuinticBlend`.
 
-    Tightens v_cap by the min of the three-point shaper bound. Does
-    not yet include rotation-jerk bound (added in a subsequent task).
+    Tightens v_cap by:
+      - the three-point shaper entry-step bound, and
+      - the rotation-jerk bound v_jerk = (R_peak * sqrt(j_eff))^(2/3)
+        evaluated at the peak-curvature point.
+
+    Pass j_eff = +inf to disable the rotation-jerk bound (useful for
+    non-shaper callers and tests).
     """
     if base is None:
         return None
     if base.d_consumed == 0.0:
-        return base  # degenerate U-turn
+        return base
+
     v_shaper = _three_point_shaper_cap(base, shapers)
-    v_cap = min(base.v_cap, v_shaper)
+
+    if base.kappa_peak > 0.0 and j_eff > 0.0 and j_eff != float("inf"):
+        R_peak = 1.0 / base.kappa_peak
+        v_jerk = (R_peak * math.sqrt(j_eff)) ** (2.0 / 3.0)
+    else:
+        v_jerk = float("inf")
+
+    v_cap = min(base.v_cap, v_shaper, v_jerk)
     return replace(base, v_cap=v_cap)
