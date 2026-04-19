@@ -843,6 +843,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#control_mpc" class="md-nav__link">
+    <span class="md-ellipsis">
+      control_mpc
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#display_status" class="md-nav__link">
     <span class="md-ellipsis">
       display_status
@@ -1017,6 +1026,15 @@
   <a href="#load_cell" class="md-nav__link">
     <span class="md-ellipsis">
       load_cell
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#load_cell_probe" class="md-nav__link">
+    <span class="md-ellipsis">
+      load_cell_probe
     </span>
   </a>
   
@@ -2618,6 +2636,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#control_mpc" class="md-nav__link">
+    <span class="md-ellipsis">
+      control_mpc
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#display_status" class="md-nav__link">
     <span class="md-ellipsis">
       display_status
@@ -2792,6 +2819,15 @@
   <a href="#load_cell" class="md-nav__link">
     <span class="md-ellipsis">
       load_cell
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#load_cell_probe" class="md-nav__link">
+    <span class="md-ellipsis">
+      load_cell_probe
     </span>
   </a>
   
@@ -3168,6 +3204,16 @@ mcu is configured to use canbus):</p>
   field (both strings). Additional fields may be available depending
   on the type of warning.</li>
 </ul>
+<h2 id="control_mpc">control_mpc<a class="headerlink" href="#control_mpc" title="Permanent link">&para;</a></h2>
+<p>The following information is available in the <code>extruder.control_stats</code> object
+(this object is automatically available if control type for <a href="Config_Reference.html#extruder">extruder</a> config section is set to <a href="MPC.html">mpc</a>:</p>
+<ul>
+<li><code>loss_ambient</code>: The current/last ambient loss rate.</li>
+<li><code>loss_filament</code>: The current/last filament loss rate.</li>
+<li><code>filament_temp</code>: The current filament temperature.</li>
+<li><code>filament_heat_capacity</code>: The current specific heat capacity of filament in J/g/K.</li>
+<li><code>filament_density</code>: The current filament density in g/mm^3.</li>
+</ul>
 <h2 id="display_status">display_status<a class="headerlink" href="#display_status" title="Permanent link">&para;</a></h2>
 <p>The following information is available in the <code>display_status</code> object
 (this object is automatically available if a
@@ -3435,6 +3481,15 @@ is always available):</p>
 <li>'force_g': The force in grams, averaged over the last polling period.</li>
 <li>'min_force_g': The minimum force in grams, over the last polling period.</li>
 <li>'max_force_g': The maximum force in grams, over the last polling period.</li>
+</ul>
+<h2 id="load_cell_probe">load_cell_probe<a class="headerlink" href="#load_cell_probe" title="Permanent link">&para;</a></h2>
+<p>The following information is available for <code>[load_cell_probe]</code>:</p>
+<ul>
+<li>all items from <a href="Status_Reference.html#load_cell">load_cell</a></li>
+<li>all items from <a href="Status_Reference.html#probe">probe</a></li>
+<li>'endstop_tare_counts': the load cell probe keeps a tare value independent of
+the load cell. This re-set at the start of each probe.</li>
+<li>'last_trigger_time': timestamp of the last homing trigger</li>
 </ul>
 <h2 id="manual_probe">manual_probe<a class="headerlink" href="#manual_probe" title="Permanent link">&para;</a></h2>
 <p>The following information is available in the
