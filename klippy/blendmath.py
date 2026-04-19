@@ -277,7 +277,13 @@ def _extract_shapers(toolhead):
     from klippy.extras.shaper_calibrate import ShaperCalibrate
     from klippy.extras import shaper_defs
 
-    sc = ShaperCalibrate(printer=None)
+    # Pick up user-configured target_smoothing if the input_shaper
+    # object carries one — lets operators trade quality vs corner
+    # speed via the [input_shaper] target_smoothing config. A mock
+    # or older object without the attribute falls back to the
+    # ShaperCalibrate default (0.12 mm).
+    target = getattr(is_obj, "target_smoothing", None)
+    sc = ShaperCalibrate(printer=None, target_smoothing=target)
     shaper_factory = {s.name: s.init_func for s in shaper_defs.INPUT_SHAPERS}
 
     snaps = []

@@ -129,6 +129,16 @@ class InputShaper:
             AxisInputShaper("x", config),
             AxisInputShaper("y", config),
         ]
+        # Position cusp (mm) at a 180° reversal — pins the shaper-
+        # derived per-axis accel budget used by the corner blender.
+        # Smaller → tighter quality, slower corners; larger → looser
+        # quality, faster corners. Defaults to Klipper's historical
+        # 0.12 mm. Exposed so klippy/blendmath._extract_shapers can
+        # read it at runtime, and so SHAPER_CALIBRATE can thread it
+        # to find_shaper_max_accel for consistent projections.
+        self.target_smoothing = config.getfloat(
+            "target_smoothing", 0.12, above=0.0,
+        )
         self.input_shaper_stepper_kinematics = []
         self.orig_stepper_kinematics = []
         # Register gcode commands

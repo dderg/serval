@@ -78,10 +78,20 @@ CalibrationResult = collections.namedtuple(
 )
 
 
+DEFAULT_TARGET_SMOOTHING = 0.12
+
+
 class ShaperCalibrate:
-    def __init__(self, printer):
+    def __init__(self, printer, target_smoothing=None):
         self.printer = printer
         self.error = printer.command_error if printer else Exception
+        # Acceptable position cusp (mm) at a 180° reversal. Pins the
+        # relationship between shaper second-moment σ²_T and the
+        # per-axis acceleration budget: A_axis = 2·target / σ²_T.
+        self.target_smoothing = (
+            DEFAULT_TARGET_SMOOTHING if target_smoothing is None
+            else target_smoothing
+        )
         try:
             self.numpy = importlib.import_module("numpy")
         except ImportError:
@@ -352,14 +362,18 @@ class ShaperCalibrate:
                 right = middle
         return left
 
-    def find_shaper_max_accel(self, shaper):
-        # Just some empirically chosen value which produces good projections
-        # for max_accel without much smoothing
-        TARGET_SMOOTHING = 0.12
+    def find_shaper_max_accel(self, shaper, target_smoothing=None):
+        # Bisect on the largest accel whose shaper smoothing stays under
+        # self.target_smoothing (or an explicit caller override). The
+        # per-call override exists so Shake&Tune can probe alternative
+        # thresholds without mutating module state.
+        target = (
+            self.target_smoothing if target_smoothing is None
+            else target_smoothing
+        )
         max_accel = self._bisect(
             lambda test_accel: (
-                self._get_shaper_smoothing(shaper, test_accel)
-                <= TARGET_SMOOTHING
+                self._get_shaper_smoothing(shaper, test_accel) <= target
             )
         )
         return max_accel
