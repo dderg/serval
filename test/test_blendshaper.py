@@ -375,7 +375,7 @@ def test_numeric_sanity_user_regime_90deg_corner():
     v_jerk = (R * R * bounds.j_eff) ** (1.0 / 3.0)
     # Centripetal cap.
     a_max = 50000.0
-    v_centripetal = math.sqrt((math.sqrt(3) / 2) * a_max * R)
+    v_centripetal = math.sqrt(a_max * R)
     # Rotation jerk should bind: v_jerk < others.
     assert v_jerk < v_centripetal
     assert v_jerk < expected_v_step

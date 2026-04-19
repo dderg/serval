@@ -304,7 +304,7 @@ Rationale for "required, no default": this is a blend-arc fork. The parameter re
 `square_corner_velocity` / `junction_deviation` / `_calc_junction_deviation` remain in place (sub-spec #5 deletes them). During the interim:
 
 - `Move.__init__` continues to snapshot `toolhead.junction_deviation` into every constructed move, including the emitted arc-polyline and truncated pieces. Harmless: subagent-verified math confirms the JD check is never binding at near-tangent polyline junctions (`v² ≤ 8·JD·a·R²/s²`, loose by orders of magnitude in our operating envelope).
-- `calc_junction`'s centripetal term `v² ≤ a·R·(α/2)cot(α/2)` yields `v² ≤ a·R` at polyline-internal junctions, slightly looser than the arc's own cap `v² ≤ 0.866·a·R`. Binding is always on the arc cap first.
+- `calc_junction`'s centripetal term `v² ≤ a·R·(α/2)cot(α/2)` yields `v² ≤ a·R` at polyline-internal junctions, matching the arc's own cap `v² ≤ a·R`. Binding is still on the arc cap first at non-tangent junctions; at tangent polyline junctions the JD/centripetal short-circuit fires anyway.
 - At truncated-prev → first arc polyline junction: exactly tangent by construction. `cos(θ/2) = 0` in code's convention, so the entire JD/centripetal block short-circuits. No over-cap.
 - At last arc polyline → truncated-next-head: same tangent-by-construction behavior.
 

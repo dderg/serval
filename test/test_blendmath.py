@@ -247,7 +247,8 @@ def test_blend_geometry_90deg_geometry_positioning():
 
 def test_blend_geometry_centripetal_cap():
     # 90 deg corner with tight accel budget; jerk floor effectively disabled.
-    # v_cap_centripetal = sqrt((sqrt(3)/2) * a_max * R)
+    # v_cap_centripetal = sqrt(a_max * R) — full a_max for normal since
+    # steady-state arc cruise uses no tangential authority.
     prev_dir = (1.0, 0.0, 0.0)
     next_dir = (0.0, 1.0, 0.0)
     corner_dev = 0.02
@@ -262,7 +263,7 @@ def test_blend_geometry_centripetal_cap():
         j_eff=1e30,
     )
     assert result is not None
-    expected_v = math.sqrt((math.sqrt(3) / 2) * a_max * result.R)
+    expected_v = math.sqrt(a_max * result.R)
     assert result.v_cap == pytest.approx(expected_v, rel=1e-9)
 
 
@@ -284,7 +285,7 @@ def test_blend_geometry_jerk_floor_dominates():
     )
     assert result is not None
     expected_v_jerk = (result.R * math.sqrt(j_eff)) ** (2.0 / 3.0)
-    expected_v_centripetal = math.sqrt((math.sqrt(3) / 2) * a_max * result.R)
+    expected_v_centripetal = math.sqrt(a_max * result.R)
     # Jerk cap should win.
     assert expected_v_jerk < expected_v_centripetal
     assert result.v_cap == pytest.approx(expected_v_jerk, rel=1e-9)
@@ -304,7 +305,7 @@ def test_blend_geometry_jerk_floor_loose_does_not_bind():
         j_eff=1e30,
     )
     assert result is not None
-    expected_v_centripetal = math.sqrt((math.sqrt(3) / 2) * 50000.0 * result.R)
+    expected_v_centripetal = math.sqrt(50000.0 * result.R)
     assert result.v_cap == pytest.approx(expected_v_centripetal, rel=1e-9)
 
 
@@ -361,9 +362,8 @@ def test_blend_geometry_property_random_corners(seed):
     eps_arc = R * (1.0 / cos_half - 1.0)
     assert eps_arc <= corner_dev + 1e-9
 
-    # 3. v_cap respects centripetal bound.
-    a_n_max = (math.sqrt(3) / 2) * a_max
-    assert result.v_cap ** 2 <= a_n_max * R + 1e-6
+    # 3. v_cap respects centripetal bound (full a_max; no tangential reserve).
+    assert result.v_cap ** 2 <= a_max * R + 1e-6
 
     # 4. v_cap respects jerk floor.
     #    v^(3/2) <= R * sqrt(j_eff)

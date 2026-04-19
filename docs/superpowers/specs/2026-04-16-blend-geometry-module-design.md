@@ -115,15 +115,13 @@ d_consumed = R · tan(θ/2)
 
 Three bounds; take the minimum.
 
-**Centripetal** — LinuxCNC's Pythagorean acceleration split:
+**Centripetal** — full `a_max` for steady-state arc cruise:
 
 ```
-a_t_max = 0.5 · a_max
-a_n_max = (√3 / 2) · a_max ≈ 0.866 · a_max
-v_centripetal = √(a_n_max · R)
+v_centripetal = √(a_max · R)
 ```
 
-The fixed 50% tangential allocation is a design choice; the 86.6% normal falls out of `a_t² + a_n² ≤ a_max²` vector closure. Ensures the machine's total acceleration magnitude never exceeds `a_max` during corner traversal.
+LinuxCNC originally used a Pythagorean split (`a_t ≤ 0.5·a_max`, `a_n ≤ √3/2·a_max`) to leave tangential headroom for simultaneous decel-and-turn in one segment. Our blender instead splits concerns across the emitted move chain: decel/accel transitions happen on the truncated-linear segments on either side, and the arc itself is traversed at constant `v_cent` so `a_t = 0`. Reserving tangential headroom inside the arc is unused budget, so we take the full `a_max` — ~7.5% velocity gain on corners where centripetal (not shaper-jerk) binds.
 
 **Jerk floor** — protects the shaper's spectral design assumptions when entering a G¹ arc (where normal acceleration steps from 0 to v²/R):
 

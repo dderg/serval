@@ -149,12 +149,15 @@ def blend_geometry(
 
     R = min(R_tol, R_mid)
 
-    # Velocity caps. LinuxCNC's Pythagorean split:
-    #   a_t <= 0.5 * a_max (tangential)
-    #   a_n <= (sqrt(3)/2) * a_max (normal)
-    # yielding a_t^2 + a_n^2 <= a_max^2 (total vector budget).
-    a_n_max = (math.sqrt(3.0) / 2.0) * a_max
-    v_centripetal = math.sqrt(a_n_max * R) if R > 0.0 else 0.0
+    # Centripetal cap: v² <= a_max · R. During steady-state arc cruise
+    # tangential accel is identically zero (constant v_cent), so the
+    # full acceleration budget is available for centripetal. LinuxCNC's
+    # original Pythagorean split reserved 50% tangential (a_n ≤ √3/2 ·
+    # a_max) to handle simultaneous decel-and-turn in one segment; our
+    # pipeline instead hands decel/accel to the truncated-linear
+    # segments on either side of the arc, so reserving that headroom
+    # inside the arc is unused.
+    v_centripetal = math.sqrt(a_max * R) if R > 0.0 else 0.0
 
     # Jerk floor: R >= v^(3/2) / sqrt(j_eff)  =>  v <= (R * sqrt(j_eff))^(2/3)
     if R > 0.0 and j_eff > 0.0:
