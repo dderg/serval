@@ -317,3 +317,104 @@ def quintic_geometry(
         exit_tangent=next_dir,
         plane_normal=plane_normal,
     )
+
+
+_SHAPER_SAMPLE_TS = (0.25, 0.5, 0.75)
+
+
+def _point_frame(Q, t: float) -> Tuple[float, Vec3, Vec3]:
+    """Return (R_loc, tangent_hat, normal_hat) at parameter t.
+
+    R_loc = 1 / kappa(t). If the local curvature is near zero (endpoints
+    or a nearly-flat stretch), R_loc is +inf — use sparingly. tangent
+    and normal are unit vectors in 3D.
+    """
+    d1 = _quintic_first_deriv(Q, t)
+    d2 = _quintic_second_deriv(Q, t)
+    d1_norm = vnorm(d1)
+    if d1_norm < 1e-12:
+        return float("inf"), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+    tangent = vscale(d1, 1.0 / d1_norm)
+    # Kappa = |d1 x d2| / |d1|^3
+    cross = vcross(d1, d2)
+    cross_norm = vnorm(cross)
+    if cross_norm < 1e-12:
+        return float("inf"), tangent, (0.0, 0.0, 0.0)
+    kappa = cross_norm / (d1_norm ** 3)
+    R_loc = 1.0 / kappa
+    # Principal normal direction: component of d2 perpendicular to tangent.
+    # N = (d2 - (d2 . tangent) * tangent) normalized.
+    dot_d2_t = vdot(d2, tangent)
+    perp = vsub(d2, vscale(tangent, dot_d2_t))
+    perp_norm = vnorm(perp)
+    if perp_norm < 1e-12:
+        return R_loc, tangent, (0.0, 0.0, 0.0)
+    normal = vscale(perp, 1.0 / perp_norm)
+    return R_loc, tangent, normal
+
+
+def _three_point_shaper_cap(blend: QuinticBlend, shapers) -> float:
+    """Minimum of the shaper entry-step velocity cap evaluated at
+    t in {0.25, 0.5, 0.75}. Returns +inf if no shapers or no bound."""
+    if not shapers:
+        return float("inf")
+    p_hat = blend.plane_normal
+    cap = float("inf")
+    for t in _SHAPER_SAMPLE_TS:
+        R_loc, _tangent, normal = _point_frame(blend.Q, t)
+        if R_loc == float("inf"):
+            continue
+        bounds = blendshaper.compute_shaper_bounds(
+            shapers=shapers,
+            R=R_loc,
+            n_hat=normal,
+            p_hat=p_hat,
+        )
+        if bounds.v_step_cap < cap:
+            cap = bounds.v_step_cap
+    return cap
+
+
+def _dense_shaper_cap(blend: QuinticBlend, shapers, samples: int = 101) -> float:
+    """Reference: dense-sample minimum shaper cap along the blend.
+
+    Used by tests to verify the three-point approximation is close to
+    the true minimum. NOT called in production planning paths.
+    """
+    if not shapers:
+        return float("inf")
+    cap = float("inf")
+    p_hat = blend.plane_normal
+    for i in range(samples):
+        t = i / (samples - 1)
+        R_loc, _tangent, normal = _point_frame(blend.Q, t)
+        if R_loc == float("inf"):
+            continue
+        bounds = blendshaper.compute_shaper_bounds(
+            shapers=shapers,
+            R=R_loc,
+            n_hat=normal,
+            p_hat=p_hat,
+        )
+        if bounds.v_step_cap < cap:
+            cap = bounds.v_step_cap
+    return cap
+
+
+def quintic_geometry_with_shaper(
+    base: Optional[QuinticBlend],
+    shapers,
+    j_eff: float,
+) -> Optional[QuinticBlend]:
+    """Apply shaper bounds on top of a base `QuinticBlend`.
+
+    Tightens v_cap by the min of the three-point shaper bound. Does
+    not yet include rotation-jerk bound (added in a subsequent task).
+    """
+    if base is None:
+        return None
+    if base.d_consumed == 0.0:
+        return base  # degenerate U-turn
+    v_shaper = _three_point_shaper_cap(base, shapers)
+    v_cap = min(base.v_cap, v_shaper)
+    return replace(base, v_cap=v_cap)

@@ -4,6 +4,7 @@ import math
 import pytest
 
 from klippy import blendquintic
+from klippy.blendshaper import AxisShaperSnapshot
 
 
 def test_module_imports():
@@ -462,3 +463,100 @@ def test_quintic_geometry_half_segment_cap_limits_d():
     )
     assert result is not None
     assert result.d_consumed == pytest.approx(1.0, abs=1e-12)  # 0.5 * min(2, 4)
+
+
+def test_quintic_geometry_with_shaper_bound_matches_centripetal_when_no_shapers():
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    base = blendquintic.quintic_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1.0,
+        L_next=1.0,
+        corner_deviation=0.1,
+        a_max=50000.0,
+    )
+    capped = blendquintic.quintic_geometry_with_shaper(
+        base=base,
+        shapers=[],
+        j_eff=float("inf"),
+    )
+    assert capped.v_cap == pytest.approx(base.v_cap)
+
+
+def test_quintic_geometry_with_shaper_bound_tightens_v_cap():
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    base = blendquintic.quintic_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1.0,
+        L_next=1.0,
+        corner_deviation=0.1,
+        a_max=50000.0,
+    )
+    shapers = [
+        AxisShaperSnapshot(
+            axis="x",
+            shaper_type="mzv",
+            shaper_freq=60.0,
+            damping_ratio=0.1,
+            A_axis=10000.0,
+        ),
+        AxisShaperSnapshot(
+            axis="y",
+            shaper_type="mzv",
+            shaper_freq=60.0,
+            damping_ratio=0.1,
+            A_axis=10000.0,
+        ),
+    ]
+    capped = blendquintic.quintic_geometry_with_shaper(
+        base=base,
+        shapers=shapers,
+        j_eff=float("inf"),
+    )
+    assert capped.v_cap <= base.v_cap + 1e-9
+
+
+def test_quintic_shaper_bound_is_min_across_three_samples():
+    # With axis-rotated bisector, single-point evaluation at t=0.5 can
+    # overshoot true min; three-point min should be tighter than mid-only.
+    prev_dir = (1.0, 0.0, 0.0)
+    # 30 deg interior -> deflection 150 deg; rotated 45 deg about z axis
+    theta_defl = math.radians(150)
+    angle_rot = math.radians(45)
+    cos_r = math.cos(angle_rot)
+    sin_r = math.sin(angle_rot)
+    # Rotate both prev and next so the bisector is NOT aligned with an axis.
+    prev_dir = (cos_r, sin_r, 0.0)
+    # next_dir = R_rot(Rot_defl(prev_dir))
+    tx = math.cos(theta_defl) * cos_r - math.sin(theta_defl) * sin_r
+    ty = math.sin(theta_defl) * cos_r + math.cos(theta_defl) * sin_r
+    next_dir = (tx, ty, 0.0)
+    base = blendquintic.quintic_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=1.0,
+        L_next=1.0,
+        corner_deviation=0.2,
+        a_max=45000.0,
+    )
+    shapers = [
+        AxisShaperSnapshot(
+            axis="x", shaper_type="mzv", shaper_freq=60.0,
+            damping_ratio=0.1, A_axis=10000.0,
+        ),
+        AxisShaperSnapshot(
+            axis="y", shaper_type="mzv", shaper_freq=60.0,
+            damping_ratio=0.1, A_axis=10000.0,
+        ),
+    ]
+    three_point = blendquintic.quintic_geometry_with_shaper(
+        base=base, shapers=shapers, j_eff=float("inf"),
+    )
+    # Spot-check dense min over 100+ points along the blend.
+    dense = blendquintic._dense_shaper_cap(base, shapers, samples=101)
+    # Three-point min should not exceed the dense-sampled min by more
+    # than a small margin (the spec target is ~6% worst-case overshoot).
+    assert three_point.v_cap <= dense * 1.10 + 1e-9
