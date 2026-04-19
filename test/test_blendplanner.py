@@ -264,6 +264,44 @@ def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head()
     assert b.polyline_moves_emitted == len(arc_moves)
 
 
+def test_corner_deviation_mutation_affects_next_blend():
+    # Regression guard: the CornerBlender reads toolhead.corner_deviation
+    # live on every feed() call, so a mid-print mutation (as performed by
+    # cmd_SET_VELOCITY_LIMIT) must influence the very next blend's radius
+    # and arc length. This is the mechanism the
+    # "SET_VELOCITY_LIMIT CORNER_DEVIATION=N" UX depends on.
+    th = _FakeToolhead(corner_deviation=0.2)
+    b = blendplanner.CornerBlender(th, move_cls=_FakeMove, max_chord_err=20e-3)
+    # First blend at cd=0.2 on a 90° corner with long (10mm) neighbors.
+    # R_mid = 5mm; R_tol at cd=0.2 ~ 0.483mm; R_tol at cd=0.01 ~ 0.024mm;
+    # both well below R_mid so R_tol binds in each case.
+    m1_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=100.0)
+    m1_next = _FakeMove(th, (10, 0, 0, 0), (10, 10, 0, 0), speed=100.0)
+    b.feed(m1_prev)
+    out_loose = b.feed(m1_next)
+    arc_loose = out_loose[1:]
+    trunc_prev_loose = out_loose[0]
+    d_loose = 10.0 - trunc_prev_loose.end_pos[0]
+    # Mutate corner_deviation mid-stream, mimic cmd_SET_VELOCITY_LIMIT.
+    th.corner_deviation = 0.01
+    b.reset()  # clear the buffered next-head so a fresh blend is computed.
+    m2_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=100.0)
+    m2_next = _FakeMove(th, (10, 0, 0, 0), (10, 10, 0, 0), speed=100.0)
+    b.feed(m2_prev)
+    out_tight = b.feed(m2_next)
+    arc_tight = out_tight[1:]
+    trunc_prev_tight = out_tight[0]
+    d_tight = 10.0 - trunc_prev_tight.end_pos[0]
+    # 20x deviation shrink must produce roughly 20x shorter d_consumed
+    # (d_consumed = R * tan(theta/2); at 90° tan=1 so d == R, and R is
+    # linear in corner_deviation when R_tol binds).
+    assert d_loose > 10 * d_tight
+    # Arc cruise velocity caps must also shrink: v_cap = sqrt(a_max * R).
+    v_cap_loose = math.sqrt(arc_loose[0].max_cruise_v2)
+    v_cap_tight = math.sqrt(arc_tight[0].max_cruise_v2)
+    assert v_cap_loose > 4 * v_cap_tight  # sqrt(20) ~ 4.47
+
+
 def test_e_conservation_through_blend():
     b = _blender(max_chord_err=20e-3)
     th = b._toolhead
