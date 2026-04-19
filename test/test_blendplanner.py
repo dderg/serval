@@ -876,3 +876,112 @@ def test_select_blend_uturn_returns_degenerate_quintic_or_zero_arc():
     blend = b._select_blend(m_prev, m_next)
     assert blend is not None
     assert blend.d_consumed == 0.0
+
+
+def _discrete_curvatures(points):
+    """Return a list of discrete curvature estimates at interior vertices.
+    points: list of 3-tuples. Ignores degenerate zero-length segments.
+    """
+    out = []
+    for i in range(1, len(points) - 1):
+        a = points[i - 1]
+        b = points[i]
+        c = points[i + 1]
+        v1 = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+        v2 = (c[0] - b[0], c[1] - b[1], c[2] - b[2])
+        n1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2 + v1[2] ** 2)
+        n2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2 + v2[2] ** 2)
+        if n1 == 0.0 or n2 == 0.0:
+            continue
+        cx = v1[1] * v2[2] - v1[2] * v2[1]
+        cy = v1[2] * v2[0] - v1[0] * v2[2]
+        cz = v1[0] * v2[1] - v1[1] * v2[0]
+        cross_mag = math.sqrt(cx * cx + cy * cy + cz * cz)
+        out.append(cross_mag / (n1 * n2))
+    return out
+
+
+@pytest.mark.parametrize(
+    "angle_deg,expected_shape",
+    [
+        (15.0, "arc"),
+        (25.0, "arc"),
+        (34.0, "arc"),
+        (36.0, "quintic"),
+        (45.0, "quintic"),
+        (90.0, "quintic"),
+        (135.0, "quintic"),
+        (149.0, "quintic"),
+        (151.0, "arc"),
+        (170.0, "arc"),
+        (179.0, "arc"),
+    ],
+)
+def test_shape_selection_by_angle(angle_deg, expected_shape):
+    # Try 5e-3 first; if the resulting polyline is too short for the
+    # fingerprint (shallow corners produce few vertices at this chord
+    # tolerance), retry at 2e-3 before giving up. 179° is the one
+    # U-turn-adjacent case that remains <3 points even at 2e-3 and
+    # skips — this is expected per the sub-spec 6e plan.
+    for max_chord_err in (5e-3, 2e-3):
+        b = _blender(max_chord_err=max_chord_err)
+        th = b._toolhead
+        angle = math.radians(angle_deg)
+        m_prev = _fake_move_for_dir(
+            th, (0, 0, 0), (1.0, 0.0, 0.0), 10.0, speed=200.0,
+        )
+        next_dir = (math.cos(angle), math.sin(angle), 0.0)
+        m_next = _fake_move_for_dir(
+            th, m_prev.end_pos[:3], next_dir, 10.0, speed=200.0,
+        )
+        b.feed(m_prev)
+        out = b.feed(m_next)
+        # Drain buffered trunc_next_head.
+        out += b.flush()
+
+        # Pull the polyline back out of the emitted moves. The polyline
+        # consists of every emitted move's start point, plus the last
+        # move's end point.
+        poly = (
+            [m.start_pos[:3] for m in out] + [out[-1].end_pos[:3]]
+        )
+        # Strip trunc_prev (first point) and trunc_next_head (last
+        # point); what remains is the blend's polyline.
+        blend_poly = poly[1:-1]
+        if len(blend_poly) >= 3:
+            break
+    # Need at least 3 points (2 interior) for fingerprint discrimination.
+    if len(blend_poly) < 3:
+        pytest.skip("polyline too short to fingerprint at this angle")
+
+    curvatures = _discrete_curvatures(blend_poly)
+    assert curvatures, "no interior curvatures computed"
+    k_max = max(curvatures)
+    k_min = min(curvatures)
+    n = len(curvatures)
+
+    if expected_shape == "arc":
+        # Near-uniform curvature: max/min should be modest (< 2.0 with
+        # chord-error discretization; tighten if needed).
+        assert k_max > 0.0
+        assert k_max / max(k_min, 1e-12) < 2.0, (
+            "arc fingerprint expected at alpha=%.1f: k_max/k_min = %.3f"
+            % (angle_deg, k_max / max(k_min, 1e-12))
+        )
+    else:
+        # Quintic fingerprint: non-uniform curvature with a bathtub
+        # profile — the true kappa(t) has peaks at t≈r and t≈1-r
+        # (r ∈ [0.50, 0.86]) with a dip at t=0.5. The discrete
+        # sin(turn) vertex-fingerprint at chord-error discretization
+        # inherits this shape: endpoint-adjacent vertices are the
+        # polyline's sharpest bends, while the center vertex sits in
+        # the kappa dip. Ratio is angle-dependent (~1.7x at 36°,
+        # ~2.1x at 149°); 1.5x picks up the distinction from a flat
+        # arc profile with margin.
+        center_k = curvatures[n // 2]
+        edge_k = max(curvatures[0], curvatures[-1])
+        assert edge_k > 0.0
+        assert edge_k > center_k * 1.5, (
+            "quintic fingerprint expected at alpha=%.1f: center=%.4e "
+            "edge=%.4e" % (angle_deg, center_k, edge_k)
+        )
