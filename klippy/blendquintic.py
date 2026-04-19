@@ -169,3 +169,32 @@ def _peak_curvature(Q) -> Tuple[float, float]:
             best_k = k
             best_t = t
     return best_k, best_t
+
+
+# Quadratic fit coefficients for the minimum-traversal-time shape
+# parameter r as a function of the deflection angle theta (radians).
+# Derived from the 151-angle x 3-deviation subagent sweep dated
+# 2026-04-19; see subspec-6d design spec section "Shape parameter
+# r(theta)". Worst-case traversal-time penalty vs the per-angle
+# optimum is 0.21% at theta ~ 10 deg (near the validity edge).
+_R_FIT_C0 = 0.5085
+_R_FIT_C1 = -0.03785
+_R_FIT_C2 = 0.05715
+
+_R_CLAMP_MIN = 0.50
+_R_CLAMP_MAX = 0.86
+
+
+def _shape_ratio(theta: float) -> float:
+    """Shape parameter r for the quintic blend at deflection theta.
+
+    Quadratic fit (radians) clamped to the [0.50, 0.86] safety range.
+    Returns the r value used to place the inner control-point pair at
+    +/- r*d along each tangent ray.
+    """
+    r = _R_FIT_C0 + _R_FIT_C1 * theta + _R_FIT_C2 * theta * theta
+    if r < _R_CLAMP_MIN:
+        return _R_CLAMP_MIN
+    if r > _R_CLAMP_MAX:
+        return _R_CLAMP_MAX
+    return r

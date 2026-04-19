@@ -321,3 +321,45 @@ def test_peak_curvature_matches_dense_reference():
             if k > ref_max:
                 ref_max = k
         assert kappa_peak == pytest.approx(ref_max, rel=1e-2)
+
+
+def test_shape_ratio_matches_reference_anchors():
+    # Anchor points from the subagent's per-angle optimum table
+    # (interior-angle convention converted to deflection).
+    # interior 90 deg -> deflection pi/2 -> r = 0.5900
+    # interior 60 deg -> deflection 2*pi/3 -> r = 0.6800
+    # interior 150 deg -> deflection pi/6 -> r = 0.5044
+    r_shallow = blendquintic._shape_ratio(math.radians(30))
+    r_mid = blendquintic._shape_ratio(math.radians(90))
+    r_wide = blendquintic._shape_ratio(math.radians(120))
+    assert r_shallow == pytest.approx(0.5044, abs=0.01)
+    assert r_mid == pytest.approx(0.5900, abs=0.01)
+    assert r_wide == pytest.approx(0.6800, abs=0.01)
+
+
+def test_shape_ratio_clamps_to_valid_range():
+    # Below clamp floor: 0 rad would give 0.5085, clamped to 0.50.
+    # But the formula floor at theta=0 is already >= 0.50, so test
+    # extreme small theta doesn't go below 0.50 due to numerical noise.
+    r0 = blendquintic._shape_ratio(0.0)
+    assert 0.50 <= r0 <= 0.86
+
+    # Far beyond the validity window (theta = pi): r formula -> 0.9539
+    # clamped to 0.86.
+    r_big = blendquintic._shape_ratio(math.pi)
+    assert r_big == 0.86
+
+
+def test_shape_ratio_monotone_increasing_in_theta():
+    # r(theta) should be strictly increasing past the formula minimum.
+    # The quadratic has a minimum at ~19 deg; below that r is near the
+    # 0.50 clamp floor.  The monotone guarantee holds from ~20 deg onward
+    # (the spec validity window starts at 10 deg but the quadratic's vertex
+    # is at ~19 deg; values at 15 vs 20 deg differ by only 0.0002 — both
+    # effectively at the clamp floor).  We start the check at 20 deg to
+    # avoid the non-monotone region near the vertex.
+    prev = blendquintic._shape_ratio(math.radians(20))
+    for deg in range(25, 165, 5):
+        r = blendquintic._shape_ratio(math.radians(deg))
+        assert r >= prev
+        prev = r
