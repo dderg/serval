@@ -306,8 +306,8 @@ def test_peak_curvature_at_midpoint_for_small_r():
 
 
 def test_peak_curvature_matches_dense_reference():
-    # The implementation samples 22 points; reference samples 2001.
-    # Both should agree within 1%.
+    # The implementation samples _PEAK_KAPPA_SAMPLES points; reference
+    # samples 2001. Both should agree within 1%.
     V = (0.0, 0.0, 0.0)
     e1 = (1.0, 0.0, 0.0)
     for theta, r in [(0.5, 0.50), (1.0, 0.55), (math.pi / 2, 0.6), (2.5, 0.85)]:

@@ -158,6 +158,10 @@ def _peak_curvature(Q) -> Tuple[float, float]:
     curvature along the blend and the parameter value where it occurs.
     Endpoints always have kappa = 0 for a symmetric blend, so they are
     included but will not normally win.
+
+    For a fully-degenerate curve (all samples give kappa = 0) the
+    returned t_peak is 0.5 as a neutral-midpoint sentinel. Callers
+    must gate on kappa_peak > 0.0 before using t_peak.
     """
     best_k = 0.0
     best_t = 0.5
