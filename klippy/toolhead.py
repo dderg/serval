@@ -835,12 +835,17 @@ class ToolHead:
                 min_cruise_ratio = 1.0 - min(
                     1.0, (req_accel_to_decel / self.max_accel)
                 )
+        corner_deviation = gcmd.get_float(
+            "CORNER_DEVIATION", None, above=0.0
+        )
         if max_velocity is not None:
             self.max_velocity = max_velocity
         if max_accel is not None:
             self.max_accel = max_accel
         if min_cruise_ratio is not None:
             self.min_cruise_ratio = min_cruise_ratio
+        if corner_deviation is not None:
+            self.corner_deviation = corner_deviation
         msg = [
             "max_velocity: %.6f" % self.max_velocity,
             "max_accel: %.6f" % self.max_accel,
@@ -884,6 +889,7 @@ class ToolHead:
             msg.append("max_z_accel: %.6f" % self.kin.max_z_accel)
 
         msg.append("minimum_cruise_ratio: %.6f" % self.min_cruise_ratio)
+        msg.append("corner_deviation: %.6f" % self.corner_deviation)
 
         if get_danger_options().log_velocity_limit_changes:
             self.printer.set_rollover_info(
@@ -894,6 +900,7 @@ class ToolHead:
                 and max_accel is None
                 and square_corner_velocity is None
                 and min_cruise_ratio is None
+                and corner_deviation is None
             ):
                 gcmd.respond_info("\n".join(msg), log=False)
 
