@@ -270,11 +270,18 @@ class ToolHead:
         self.max_velocity = config.getfloat("max_velocity", above=0.0)
         self.max_accel = config.getfloat("max_accel", above=0.0)
         self.corner_deviation = config.getfloat("corner_deviation", above=0.0)
+        # Quintic corner-blend shape is disabled by default. Real-print
+        # sim (2026-04-19, Trident A4T Cowling, arc-fit + no-arc) showed
+        # quintic is 6-9% slower than arc at matched ringing on
+        # corner-dense geometry — the shape path-length penalty dominates
+        # the accel-ceiling win on realistic workloads. Users who print
+        # large-format, long-straight parts can opt in by setting
+        # shape_switchover_low=35 / shape_switchover_high=150 in config.
         self.shape_switchover_low_deg = config.getfloat(
-            "shape_switchover_low", 35.0, above=0.0, below=180.0,
+            "shape_switchover_low", 179.0, above=0.0, below=180.0,
         )
         self.shape_switchover_high_deg = config.getfloat(
-            "shape_switchover_high", 150.0, above=0.0, below=180.0,
+            "shape_switchover_high", 179.5, above=0.0, below=180.0,
         )
         if self.shape_switchover_low_deg >= self.shape_switchover_high_deg:
             raise config.error(
