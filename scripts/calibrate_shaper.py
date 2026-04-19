@@ -229,7 +229,7 @@ def main():
         "-f",
         "--max_freq",
         type="float",
-        default=200.0,
+        default=shaper_calibrate.MAX_FREQ,
         help="maximum frequency to plot",
     )
     opts.add_option(
