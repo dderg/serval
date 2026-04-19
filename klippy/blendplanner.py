@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from . import blendmath
+from . import blendemit, blendmath, blendquintic
 
 
 def _copy_caller_state(src, dst):
@@ -36,6 +36,13 @@ def _copy_caller_state(src, dst):
         dst.delta_v2, 2.0 * dst.move_d * dst.accel * ratio
     )
     dst.min_move_t = dst.move_d / math.sqrt(dst.max_cruise_v2)
+
+
+# Deflection-angle thresholds for the arc-vs-quintic selector, in degrees.
+# See docs/superpowers/specs/2026-04-19-subspec-6e-shape-selection-design.md.
+# Task 8 replaces these module constants with toolhead-config reads.
+_SHAPE_SWITCHOVER_LOW_DEG = 35.0
+_SHAPE_SWITCHOVER_HIGH_DEG = 150.0
 
 
 class CornerBlender:
@@ -98,6 +105,40 @@ class CornerBlender:
         # 20 microns absolute floor; 20% of corner_deviation for a sensible
         # auto-scale at loose tolerances.
         return max(20e-3, 0.2 * self._toolhead.corner_deviation)
+
+    def _select_blend(self, prev, nxt):
+        """Pick arc or quintic per the deflection-angle rule.
+
+        alpha < low -> arc; low <= alpha <= high -> quintic;
+        alpha > high -> arc. Thresholds read from module constants
+        for now; Task 8 wires them to toolhead config.
+        """
+        prev_dir = prev.axes_r[:3]
+        next_dir = nxt.axes_r[:3]
+        dot = (
+            prev_dir[0] * next_dir[0]
+            + prev_dir[1] * next_dir[1]
+            + prev_dir[2] * next_dir[2]
+        )
+        # Clamp for numerical safety before acos.
+        if dot > 1.0:
+            dot = 1.0
+        elif dot < -1.0:
+            dot = -1.0
+        alpha_deg = math.degrees(math.acos(dot))
+        low = _SHAPE_SWITCHOVER_LOW_DEG
+        high = _SHAPE_SWITCHOVER_HIGH_DEG
+        if low <= alpha_deg <= high:
+            return blendquintic.blend_from_moves_quintic(
+                prev, nxt,
+                self._toolhead.corner_deviation,
+                toolhead=self._toolhead,
+            )
+        return blendmath.blend_from_moves(
+            prev, nxt,
+            self._toolhead.corner_deviation,
+            toolhead=self._toolhead,
+        )
 
     def _emit_arc(self, prev, nxt, arc):
         """Construct [trunc_prev, arc_moves...] and the trunc_next_head.

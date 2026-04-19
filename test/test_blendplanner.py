@@ -817,3 +817,55 @@ def test_blendemit_segment_dispatches_to_quintic_for_quinticblend():
     expected = blendquintic.segment_quintic(q, 20e-3)
     got = blendemit.segment(q, 20e-3)
     assert got == expected
+
+
+def _fake_move_for_dir(th, start, direction, length, speed=100.0, e=0.0):
+    """Build a _FakeMove with start and a given unit-direction and length."""
+    start4 = (start[0], start[1], start[2], e)
+    end4 = (
+        start[0] + direction[0] * length,
+        start[1] + direction[1] * length,
+        start[2] + direction[2] * length,
+        e,
+    )
+    return _FakeMove(th, start4, end4, speed=speed)
+
+
+@pytest.mark.parametrize(
+    "angle_deg,expected_type_name",
+    [
+        (15.0, "BlendArc"),
+        (25.0, "BlendArc"),
+        (34.0, "BlendArc"),
+        (36.0, "QuinticBlend"),
+        (45.0, "QuinticBlend"),
+        (90.0, "QuinticBlend"),
+        (135.0, "QuinticBlend"),
+        (149.0, "QuinticBlend"),
+        (151.0, "BlendArc"),
+        (170.0, "BlendArc"),
+    ],
+)
+def test_select_blend_dispatches_by_angle(angle_deg, expected_type_name):
+    b = _blender()
+    th = b._toolhead
+    angle = math.radians(angle_deg)
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (math.cos(angle), math.sin(angle), 0.0)
+    m_prev = _fake_move_for_dir(th, (0, 0, 0), prev_dir, 10.0)
+    m_next = _fake_move_for_dir(th, m_prev.end_pos[:3], next_dir, 10.0)
+    blend = b._select_blend(m_prev, m_next)
+    assert blend is not None
+    assert type(blend).__name__ == expected_type_name
+
+
+def test_select_blend_uturn_returns_degenerate_quintic_or_zero_arc():
+    # α ≈ π: both regimes dispatch to arc by the > high-threshold rule.
+    # The arc module returns a degenerate BlendArc with R = d_consumed = 0.
+    b = _blender()
+    th = b._toolhead
+    m_prev = _fake_move_for_dir(th, (0, 0, 0), (1.0, 0.0, 0.0), 10.0)
+    m_next = _fake_move_for_dir(th, m_prev.end_pos[:3], (-1.0, 0.0, 0.0), 10.0)
+    blend = b._select_blend(m_prev, m_next)
+    assert blend is not None
+    assert blend.d_consumed == 0.0
