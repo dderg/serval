@@ -42,9 +42,10 @@ def _copy_caller_state(src, dst):
 class CornerBlender:
     """Second filter stage in the blend pipeline.
 
-    Buffers one move; on the next arriving move computes a tangent-arc
-    blend and emits [trunc_prev, arc_polyline_moves...] while buffering
-    the truncated-next-head as the new candidate prev.
+    Buffers one move; on the next arriving move computes a corner blend
+    (arc or quintic, chosen by deflection angle) and emits
+    [trunc_prev, blend_polyline_moves...] while buffering the
+    truncated-next-head as the new candidate prev.
     """
 
     def __init__(self, toolhead, *, move_cls, max_chord_err=None):
@@ -61,9 +62,9 @@ class CornerBlender:
         if self._prev is None:
             self._prev = move
             return []
-        # toolhead=... activates blend_from_moves' shaper-aware two-pass
-        # path: j_eff is derived from the live input-shaper state rather
-        # than held as a module constant.
+        # _select_blend passes toolhead=... into both shape adapters so
+        # their shaper-aware caps are derived from live input-shaper
+        # state per corner rather than a module constant.
         blend = self._select_blend(self._prev, move)
         if blend is None:
             # Collinear: prepass should have caught. Emit prev, buffer next.

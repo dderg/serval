@@ -157,7 +157,7 @@ class BlendPipelineLookAheadQueue:
     that callers mutating the returned Move (timing_callbacks,
     limit_next_junction_speed) do not force a premature un-blended
     emission. The emit-time path (_build_merged_move in the prepass,
-    _emit_arc in the blender) transfers caller-mutated state onto the
+    _emit_blend in the blender) transfers caller-mutated state onto the
     actually-queued Move so the mutation survives.
     """
 
