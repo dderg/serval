@@ -580,3 +580,41 @@ def segment_quintic(
 
     _recurse(blend.Q, 0)
     return out
+
+
+def interpolate_extruder_quintic(
+    polyline: List[Vec3],
+    d_consumed: float,
+    e_per_mm_prev: float,
+    e_per_mm_next: float,
+) -> List[Tuple[float, float, float, float]]:
+    """Attach an E coordinate to each polyline point.
+
+    The quintic blend replaces the final `d_consumed` mm of the prior
+    move and the first `d_consumed` mm of the next move. Total E through
+    the blend is conserved: sum across the polyline equals
+    `d_consumed * (e_per_mm_prev + e_per_mm_next)`. E is distributed
+    uniformly over the polyline's arc-length (piecewise-linear).
+    """
+    if not polyline:
+        return []
+    total_e = d_consumed * (e_per_mm_prev + e_per_mm_next)
+
+    seg_lens = []
+    total_len = 0.0
+    for p0, p1 in zip(polyline, polyline[1:]):
+        seg_len = vnorm(vsub(p1, p0))
+        seg_lens.append(seg_len)
+        total_len += seg_len
+
+    if total_len == 0.0:
+        return [(p[0], p[1], p[2], 0.0) for p in polyline]
+
+    out: List[Tuple[float, float, float, float]] = [
+        (polyline[0][0], polyline[0][1], polyline[0][2], 0.0),
+    ]
+    e = 0.0
+    for seg_len, p1 in zip(seg_lens, polyline[1:]):
+        e += total_e * seg_len / total_len
+        out.append((p1[0], p1[1], p1[2], e))
+    return out
