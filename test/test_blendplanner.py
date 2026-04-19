@@ -24,6 +24,12 @@ class _FakeToolhead:
         self.max_accel = overrides.get("max_accel", 10000.0)
         self.max_accel_to_decel = overrides.get("max_accel_to_decel", 10000.0)
         self.corner_deviation = overrides.get("corner_deviation", 50e-3)
+        self.shape_switchover_low_deg = overrides.get(
+            "shape_switchover_low_deg", 35.0,
+        )
+        self.shape_switchover_high_deg = overrides.get(
+            "shape_switchover_high_deg", 150.0,
+        )
         self.kin = _FakeCheckMove()
         self.extruder = _FakeCheckMove()
 
@@ -218,11 +224,9 @@ def test_copy_caller_state_handles_zero_delta_v2():
     assert dst.smooth_delta_v2 == pytest.approx(dst.delta_v2)
 
 
-def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head(
-    monkeypatch,
-):
-    monkeypatch.setattr(blendplanner, "_SHAPE_SWITCHOVER_LOW_DEG", 181.0)
+def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head():
     b = _blender(max_chord_err=20e-3)
+    b._toolhead.shape_switchover_low_deg = 181.0
     th = b._toolhead
     # Two 10mm moves meeting at a 90° corner at (10,0,0).
     m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)

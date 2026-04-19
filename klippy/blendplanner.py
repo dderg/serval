@@ -38,12 +38,6 @@ def _copy_caller_state(src, dst):
     dst.min_move_t = dst.move_d / math.sqrt(dst.max_cruise_v2)
 
 
-# Deflection-angle thresholds for the arc-vs-quintic selector, in degrees.
-# See docs/superpowers/specs/2026-04-19-subspec-6e-shape-selection-design.md.
-# Task 8 replaces these module constants with toolhead-config reads.
-_SHAPE_SWITCHOVER_LOW_DEG = 35.0
-_SHAPE_SWITCHOVER_HIGH_DEG = 150.0
-
 
 class CornerBlender:
     """Second filter stage in the blend pipeline.
@@ -106,8 +100,8 @@ class CornerBlender:
         """Pick arc or quintic per the deflection-angle rule.
 
         alpha < low -> arc; low <= alpha <= high -> quintic;
-        alpha > high -> arc. Thresholds read from module constants
-        for now; Task 8 wires them to toolhead config.
+        alpha > high -> arc. Thresholds come from the toolhead config
+        (shape_switchover_low_deg / shape_switchover_high_deg).
         """
         prev_dir = prev.axes_r[:3]
         next_dir = nxt.axes_r[:3]
@@ -122,8 +116,8 @@ class CornerBlender:
         elif dot < -1.0:
             dot = -1.0
         alpha_deg = math.degrees(math.acos(dot))
-        low = _SHAPE_SWITCHOVER_LOW_DEG
-        high = _SHAPE_SWITCHOVER_HIGH_DEG
+        low = self._toolhead.shape_switchover_low_deg
+        high = self._toolhead.shape_switchover_high_deg
         if low <= alpha_deg <= high:
             return blendquintic.blend_from_moves_quintic(
                 prev, nxt,
