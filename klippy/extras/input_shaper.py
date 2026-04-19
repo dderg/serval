@@ -218,12 +218,25 @@ class InputShaper:
     cmd_SET_INPUT_SHAPER_help = "Set cartesian parameters for input shaper"
 
     def cmd_SET_INPUT_SHAPER(self, gcmd):
-        if gcmd.get_command_parameters():
+        target_smoothing = gcmd.get_float(
+            "TARGET_SMOOTHING", None, above=0.0
+        )
+        if target_smoothing is not None:
+            self.target_smoothing = target_smoothing
+        params = gcmd.get_command_parameters()
+        # TARGET_SMOOTHING alone only updates the Python attribute
+        # (blendmath reads it live on each blend). Any shaper-specific
+        # parameter triggers the C-level rebuild via _update_input_shaping
+        # which flushes step generation - avoid doing that when not needed.
+        if any(k != "TARGET_SMOOTHING" for k in params):
             for shaper in self.shapers:
                 shaper.update(gcmd)
             self._update_input_shaping()
         for shaper in self.shapers:
             shaper.report(gcmd)
+        gcmd.respond_info(
+            "target_smoothing:%.6f" % self.target_smoothing
+        )
 
 
 def load_config(config):
