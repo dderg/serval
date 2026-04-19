@@ -786,3 +786,34 @@ def test_blendemit_module_imports():
     from klippy import blendemit
     assert blendemit is not None
     assert hasattr(blendemit, "segment")
+
+
+def test_blendemit_segment_dispatches_to_arc_for_blendarc():
+    from klippy import blendemit, blendmath
+    arc = blendmath.blend_geometry(
+        prev_dir=(1.0, 0.0, 0.0),
+        next_dir=(0.0, 1.0, 0.0),
+        L_prev=10.0, L_next=10.0,
+        corner_deviation=0.2,
+        a_max=10000.0,
+        j_eff=float("inf"),
+    )
+    assert arc is not None
+    expected = blendmath.segment_arc(arc, 20e-3)
+    got = blendemit.segment(arc, 20e-3)
+    assert got == expected
+
+
+def test_blendemit_segment_dispatches_to_quintic_for_quinticblend():
+    from klippy import blendemit, blendquintic
+    q = blendquintic.quintic_geometry(
+        prev_dir=(1.0, 0.0, 0.0),
+        next_dir=(0.0, 1.0, 0.0),
+        L_prev=10.0, L_next=10.0,
+        corner_deviation=0.2,
+        a_max=45000.0,
+    )
+    assert q is not None
+    expected = blendquintic.segment_quintic(q, 20e-3)
+    got = blendemit.segment(q, 20e-3)
+    assert got == expected
