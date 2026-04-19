@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 from klippy import blendshaper
 from klippy.blendmath import (
@@ -25,7 +25,6 @@ from klippy.blendmath import (
     vcross,
     vnorm,
     vscale,
-    vadd,
     vsub,
     vnormalize,
 )
@@ -221,7 +220,9 @@ class QuinticBlend:
         v_cap:          maximum traversal velocity (mm/s)
         entry_tangent:  unit vector, same as prev_dir into corner
         exit_tangent:   unit vector, same as next_dir out of corner
-        plane_normal:   unit vector orthogonal to the blend plane
+        plane_normal:   unit vector orthogonal to the blend plane, or
+                        (0, 0, 0) for degenerate (U-turn / collinear)
+                        corners where no single plane is defined
     """
     Q: Tuple[Vec3, Vec3, Vec3, Vec3, Vec3, Vec3]
     theta: float

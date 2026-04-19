@@ -561,6 +561,18 @@ def test_quintic_shaper_bound_is_min_across_three_samples():
     # than a small margin (the spec target is ~6% worst-case overshoot).
     assert three_point.v_cap <= dense * 1.10 + 1e-9
 
+    # Core claim of this test: three-point must be meaningfully tighter
+    # than evaluating the shaper bound only at the midpoint. At this
+    # axis-rotated shallow-deflection geometry the midpoint normal is
+    # near the bisector but the binding t shifts off-center; a midpoint-
+    # only evaluator therefore lets the corner run too fast.
+    R_mid = 1.0 / blendquintic._curvature_at(base.Q, 0.5)
+    _, _, n_mid = blendquintic._point_frame(base.Q, 0.5)
+    mid_only_bounds = blendquintic.blendshaper.compute_shaper_bounds(
+        shapers=shapers, R=R_mid, n_hat=n_mid, p_hat=base.plane_normal,
+    )
+    assert three_point.v_cap < mid_only_bounds.v_step_cap * 0.95
+
 
 def test_rotation_jerk_cap_applied():
     prev_dir = (1.0, 0.0, 0.0)
