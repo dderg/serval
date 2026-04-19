@@ -86,7 +86,7 @@ class CornerBlender:
             emitted = [self._prev]
             self._prev = move
             return emitted
-        trunc_prev, arc_moves, trunc_next_head = self._emit_arc(
+        trunc_prev, arc_moves, trunc_next_head = self._emit_blend(
             self._prev, move, arc
         )
         self._prev = trunc_next_head
@@ -140,10 +140,12 @@ class CornerBlender:
             toolhead=self._toolhead,
         )
 
-    def _emit_arc(self, prev, nxt, arc):
-        """Construct [trunc_prev, arc_moves...] and the trunc_next_head.
+    def _emit_blend(self, prev, nxt, blend):
+        """Construct [trunc_prev, blend_moves...] and the trunc_next_head.
 
-        Returns (trunc_prev, arc_moves_list, trunc_next_head).
+        Returns (trunc_prev, arc_moves_list, trunc_next_head). The
+        arc_moves_list name is historical; it holds polyline moves for
+        whichever shape (arc or quintic) the selector picked.
         """
         th = self._toolhead
         move_cls = self._move_cls
@@ -155,10 +157,10 @@ class CornerBlender:
         # --- 1. Truncated prev ---
         prev_cruise_v = math.sqrt(prev.max_cruise_v2)
         trunc_prev_end_xyz = tuple(
-            vertex[i] - arc.d_consumed * prev_dir[i] for i in range(3)
+            vertex[i] - blend.d_consumed * prev_dir[i] for i in range(3)
         )
         # E carried proportional to the truncated fraction of prev.move_d.
-        frac_prev = 1.0 - arc.d_consumed / prev.move_d
+        frac_prev = 1.0 - blend.d_consumed / prev.move_d
         trunc_prev_end_e = prev.start_pos[3] + frac_prev * prev.axes_d[3]
         trunc_prev_end = (
             trunc_prev_end_xyz[0], trunc_prev_end_xyz[1],
@@ -169,13 +171,13 @@ class CornerBlender:
 
         # --- 2. Arc polyline ---
         chord_err = self._resolve_chord_err()
-        polyline_local = blendmath.segment_arc(arc, chord_err)
+        polyline_local = blendemit.segment(blend, chord_err)
         polyline_world = [
             (p[0] + vertex[0], p[1] + vertex[1], p[2] + vertex[2])
             for p in polyline_local
         ]
         points_4d = blendmath.interpolate_extruder(
-            polyline_world, arc.d_consumed,
+            polyline_world, blend.d_consumed,
             prev.axes_r[3], nxt.axes_r[3],
         )
         # Offset the interpolate_extruder E (starts at 0) by trunc_prev_end_e
@@ -183,8 +185,8 @@ class CornerBlender:
         points_4d = [
             (p[0], p[1], p[2], p[3] + trunc_prev_end_e) for p in points_4d
         ]
-        # Kalico stores squared velocities; arc.v_cap is a velocity so ** 2 converts.
-        arc_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2, arc.v_cap ** 2)
+        # Kalico stores squared velocities; blend.v_cap is a velocity so ** 2 converts.
+        arc_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2, blend.v_cap ** 2)
         arc_cap_v = math.sqrt(arc_cap_v2)
         arc_accel = min(prev.accel, nxt.accel)
         arc_moves = []
@@ -200,11 +202,11 @@ class CornerBlender:
 
         # --- 3. Truncated next head ---
         trunc_next_head_start_xyz = tuple(
-            vertex[i] + arc.d_consumed * next_dir[i] for i in range(3)
+            vertex[i] + blend.d_consumed * next_dir[i] for i in range(3)
         )
         # E at the truncated-next-head start: offset from nxt.start_pos by the
         # consumed head fraction. Symmetric with trunc_prev's E formula.
-        frac_consumed_next = arc.d_consumed / nxt.move_d
+        frac_consumed_next = blend.d_consumed / nxt.move_d
         trunc_next_head_start_e = nxt.start_pos[3] + frac_consumed_next * nxt.axes_d[3]
         trunc_next_head_start = (
             trunc_next_head_start_xyz[0], trunc_next_head_start_xyz[1],
