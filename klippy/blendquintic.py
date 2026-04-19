@@ -102,3 +102,28 @@ def _quintic_second_deriv(Q, t: float) -> Vec3:
         for i in range(4)
     ]
     return _bezier_eval_general(DD, t)
+
+
+def _deviation_coeff(r: float) -> float:
+    """The chord-deviation prefactor (1 + 15*r)/16."""
+    return (1.0 + 15.0 * r) / 16.0
+
+
+def _deviation_closed_form(d: float, r: float, sin_half: float) -> float:
+    """Chord deviation of a symmetric quintic blend, closed form.
+
+    At the midpoint t=0.5:
+        |B(0.5) - V| = ((1 + 15*r) / 16) * d * sin(theta/2)
+    """
+    return _deviation_coeff(r) * d * sin_half
+
+
+def _d_from_deviation(eps: float, r: float, sin_half: float) -> float:
+    """Inverse: tangent length d required to achieve chord deviation eps.
+
+    d = 16 * eps / ((1 + 15*r) * sin(theta/2))
+    """
+    denom = (1.0 + 15.0 * r) * sin_half
+    if denom <= 0.0:
+        raise ValueError("_d_from_deviation: non-positive denominator")
+    return 16.0 * eps / denom

@@ -166,3 +166,66 @@ def test_quintic_derivatives_match_finite_difference():
         )
         d1 = blendquintic._quintic_first_deriv(Q, t)
         assert d1 == pytest.approx(fd, abs=1e-6)
+
+
+def _build_symmetric_Q(V, e1, e2, d, r):
+    return [
+        (V[0] - d * e1[0], V[1] - d * e1[1], V[2] - d * e1[2]),
+        (V[0] - r * d * e1[0], V[1] - r * d * e1[1], V[2] - r * d * e1[2]),
+        (V[0] - r * d * e1[0], V[1] - r * d * e1[1], V[2] - r * d * e1[2]),
+        (V[0] + r * d * e2[0], V[1] + r * d * e2[1], V[2] + r * d * e2[2]),
+        (V[0] + r * d * e2[0], V[1] + r * d * e2[1], V[2] + r * d * e2[2]),
+        (V[0] + d * e2[0], V[1] + d * e2[1], V[2] + d * e2[2]),
+    ]
+
+
+def test_deviation_matches_closed_form_at_r_four_fifths():
+    # Known sanity check: r = 0.8, coefficient (1 + 15*0.8)/16 = 13/16
+    V = (0.0, 0.0, 0.0)
+    e1 = (1.0, 0.0, 0.0)
+    e2 = (0.0, 1.0, 0.0)  # theta = pi/2, sin(theta/2) = sin(pi/4) = sqrt(2)/2
+    d = 1.0
+    r = 0.8
+    sin_half = math.sin(math.pi / 4.0)
+    expected = (13.0 / 16.0) * d * sin_half
+
+    Q = _build_symmetric_Q(V, e1, e2, d, r)
+    B_mid = blendquintic._quintic_eval(Q, 0.5)
+    got_numerical = math.sqrt(
+        B_mid[0] ** 2 + B_mid[1] ** 2 + B_mid[2] ** 2
+    )
+    got_closed = blendquintic._deviation_closed_form(d, r, sin_half)
+    assert got_numerical == pytest.approx(expected, abs=1e-12)
+    assert got_closed == pytest.approx(expected, abs=1e-12)
+
+
+def test_deviation_closed_form_matches_numerical_across_r_and_theta():
+    # Sweep (theta, r) and verify closed-form matches Bezier evaluation.
+    V = (0.0, 0.0, 0.0)
+    for theta in (0.2, 0.5, 1.0, 1.5708, 2.3, 2.9):
+        e1 = (1.0, 0.0, 0.0)
+        e2 = (math.cos(theta), math.sin(theta), 0.0)
+        sin_half = math.sin(theta / 2.0)
+        for r in (0.3, 0.5, 0.7, 0.85):
+            d = 1.5
+            Q = _build_symmetric_Q(V, e1, e2, d, r)
+            B_mid = blendquintic._quintic_eval(Q, 0.5)
+            dev_numerical = math.sqrt(sum(c * c for c in B_mid))
+            dev_closed = blendquintic._deviation_closed_form(d, r, sin_half)
+            assert dev_numerical == pytest.approx(dev_closed, abs=1e-10)
+
+
+def test_d_from_deviation_is_inverse_of_deviation():
+    # Pick (r, theta, eps), compute d, rebuild Q, confirm deviation matches.
+    V = (0.0, 0.0, 0.0)
+    for theta in (0.4, 1.0, 2.0, 2.6):
+        e1 = (1.0, 0.0, 0.0)
+        e2 = (math.cos(theta), math.sin(theta), 0.0)
+        sin_half = math.sin(theta / 2.0)
+        for r in (0.50, 0.65, 0.80):
+            for eps in (0.05, 0.2, 0.5):
+                d = blendquintic._d_from_deviation(eps, r, sin_half)
+                Q = _build_symmetric_Q(V, e1, e2, d, r)
+                B_mid = blendquintic._quintic_eval(Q, 0.5)
+                dev = math.sqrt(sum(c * c for c in B_mid))
+                assert dev == pytest.approx(eps, abs=1e-10)
