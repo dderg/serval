@@ -363,3 +363,31 @@ def test_shape_ratio_monotone_increasing_in_theta():
         r = blendquintic._shape_ratio(math.radians(deg))
         assert r >= prev
         prev = r
+
+
+def test_quintic_blend_dataclass_fields():
+    q = blendquintic.QuinticBlend(
+        Q=(
+            (-1.0, 0.0, 0.0),
+            (-0.5, 0.0, 0.0),
+            (-0.5, 0.0, 0.0),
+            (0.0, 0.5, 0.0),
+            (0.0, 0.5, 0.0),
+            (0.0, 1.0, 0.0),
+        ),
+        theta=math.pi / 2.0,
+        r=0.5900,
+        d_consumed=1.0,
+        kappa_peak=0.5,
+        v_cap=100.0,
+        entry_tangent=(1.0, 0.0, 0.0),
+        exit_tangent=(0.0, 1.0, 0.0),
+        plane_normal=(0.0, 0.0, 1.0),
+    )
+    assert len(q.Q) == 6
+    assert q.theta == pytest.approx(math.pi / 2.0)
+    assert q.r == pytest.approx(0.5900)
+    assert q.d_consumed == 1.0
+    assert q.kappa_peak == 0.5
+    assert q.v_cap == 100.0
+    assert q.plane_normal == (0.0, 0.0, 1.0)

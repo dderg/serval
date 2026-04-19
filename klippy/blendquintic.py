@@ -198,3 +198,37 @@ def _shape_ratio(theta: float) -> float:
     if r > _R_CLAMP_MAX:
         return _R_CLAMP_MAX
     return r
+
+
+@dataclass(frozen=True)
+class QuinticBlend:
+    """Symmetric quintic Bezier blend between two adjacent moves.
+
+    Coordinates: ``Q`` control points and ``entry_pt``/``exit_pt``
+    (derivable as ``Q[0]`` and ``Q[5]``) are in a corner-local frame
+    where the corner vertex is at the origin. Callers must translate
+    by the vertex position to obtain world coordinates.
+
+    For degenerate corners (returned for U-turns), ``kappa_peak`` is
+    0.0, ``v_cap`` is 0.0, and ``Q`` is six copies of (0, 0, 0).
+
+    Fields:
+        Q:              6 control points (Q0..Q5)
+        theta:          deflection angle (rad), 0 = straight, pi = U-turn
+        r:              shape parameter used (in [0.50, 0.86])
+        d_consumed:     tangent length along each ray (mm)
+        kappa_peak:     maximum curvature along the blend (1/mm)
+        v_cap:          maximum traversal velocity (mm/s)
+        entry_tangent:  unit vector, same as prev_dir into corner
+        exit_tangent:   unit vector, same as next_dir out of corner
+        plane_normal:   unit vector orthogonal to the blend plane
+    """
+    Q: Tuple[Vec3, Vec3, Vec3, Vec3, Vec3, Vec3]
+    theta: float
+    r: float
+    d_consumed: float
+    kappa_peak: float
+    v_cap: float
+    entry_tangent: Vec3
+    exit_tangent: Vec3
+    plane_normal: Vec3
