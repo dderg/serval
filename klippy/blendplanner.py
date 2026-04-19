@@ -70,24 +70,20 @@ class CornerBlender:
         # toolhead=... activates blend_from_moves' shaper-aware two-pass
         # path: j_eff is derived from the live input-shaper state rather
         # than held as a module constant.
-        arc = blendmath.blend_from_moves(
-            self._prev, move,
-            self._toolhead.corner_deviation,
-            toolhead=self._toolhead,
-        )
-        if arc is None:
+        blend = self._select_blend(self._prev, move)
+        if blend is None:
             # Collinear: prepass should have caught. Emit prev, buffer next.
             emitted = [self._prev]
             self._prev = move
             return emitted
-        if arc.R == 0.0 or arc.v_cap == 0.0:
+        if blend.d_consumed == 0.0 or blend.v_cap == 0.0:
             # U-turn / degenerate: force a stop at the junction.
             self._prev.limit_next_junction_speed(0.0)
             emitted = [self._prev]
             self._prev = move
             return emitted
         trunc_prev, arc_moves, trunc_next_head = self._emit_blend(
-            self._prev, move, arc
+            self._prev, move, blend
         )
         self._prev = trunc_next_head
         self.blends_emitted += 1

@@ -218,7 +218,10 @@ def test_copy_caller_state_handles_zero_delta_v2():
     assert dst.smooth_delta_v2 == pytest.approx(dst.delta_v2)
 
 
-def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head():
+def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head(
+    monkeypatch,
+):
+    monkeypatch.setattr(blendplanner, "_SHAPE_SWITCHOVER_LOW_DEG", 181.0)
     b = _blender(max_chord_err=20e-3)
     th = b._toolhead
     # Two 10mm moves meeting at a 90° corner at (10,0,0).
