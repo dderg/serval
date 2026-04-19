@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from klippy import blendshaper
 from klippy.blendmath import (
@@ -217,6 +217,9 @@ class QuinticBlend:
         r:              shape parameter used (in [0.50, 0.86])
         d_consumed:     tangent length along each ray (mm)
         kappa_peak:     maximum curvature along the blend (1/mm)
+        t_peak:         parameter value in [0, 1] at which kappa_peak
+                        occurs; off-center for the r values used in
+                        practice. 0.5 when the blend is degenerate.
         v_cap:          maximum traversal velocity (mm/s)
         entry_tangent:  unit vector, same as prev_dir into corner
         exit_tangent:   unit vector, same as next_dir out of corner
@@ -229,6 +232,7 @@ class QuinticBlend:
     r: float
     d_consumed: float
     kappa_peak: float
+    t_peak: float
     v_cap: float
     entry_tangent: Vec3
     exit_tangent: Vec3
@@ -266,6 +270,7 @@ def quintic_geometry(
             r=_R_CLAMP_MIN,
             d_consumed=0.0,
             kappa_peak=0.0,
+            t_peak=0.5,
             v_cap=0.0,
             entry_tangent=prev_dir,
             exit_tangent=next_dir,
@@ -290,7 +295,7 @@ def quintic_geometry(
         vscale(next_dir, d),
     )
 
-    kappa_peak, _ = _peak_curvature(Q)
+    kappa_peak, t_peak = _peak_curvature(Q)
 
     # Plane normal: right-handed, consistent with blendmath.
     raw_normal = vcross(prev_dir, next_dir)
@@ -313,6 +318,7 @@ def quintic_geometry(
         r=r,
         d_consumed=d,
         kappa_peak=kappa_peak,
+        t_peak=t_peak,
         v_cap=v_cap,
         entry_tangent=prev_dir,
         exit_tangent=next_dir,
@@ -498,7 +504,10 @@ def blend_from_moves_quintic(
     if base.kappa_peak > 0.0 and shapers:
         R_peak = 1.0 / base.kappa_peak
         # Use the normal at the peak-curvature point for j_eff derivation.
-        _, _, n_peak = _point_frame(base.Q, 0.5)  # midpoint normal proxy
+        # For the r values in production use (clamped to >= 0.5), t_peak is
+        # materially off-center — using the midpoint normal here would pair
+        # the peak R with a different point's normal and mis-size j_eff.
+        _, _, n_peak = _point_frame(base.Q, base.t_peak)
         bounds = blendshaper.compute_shaper_bounds(
             shapers=shapers,
             R=R_peak,

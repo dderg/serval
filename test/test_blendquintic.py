@@ -380,6 +380,7 @@ def test_quintic_blend_dataclass_fields():
         r=0.5900,
         d_consumed=1.0,
         kappa_peak=0.5,
+        t_peak=0.2,
         v_cap=100.0,
         entry_tangent=(1.0, 0.0, 0.0),
         exit_tangent=(0.0, 1.0, 0.0),
@@ -390,6 +391,7 @@ def test_quintic_blend_dataclass_fields():
     assert q.r == pytest.approx(0.5900)
     assert q.d_consumed == 1.0
     assert q.kappa_peak == 0.5
+    assert q.t_peak == pytest.approx(0.2)
     assert q.v_cap == 100.0
     assert q.plane_normal == (0.0, 0.0, 1.0)
 
