@@ -34,3 +34,25 @@ Vec3 = Tuple[float, float, float]
 
 COLLINEAR_EPS = 1e-6
 REVERSAL_EPS = 1e-6
+
+
+def _lerp(a: Vec3, b: Vec3, t: float) -> Vec3:
+    """Linear interpolation between two 3-vectors."""
+    return (
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    )
+
+
+def _quintic_eval(Q, t: float) -> Vec3:
+    """Evaluate a quintic Bezier at parameter t via De Casteljau.
+
+    Q is an indexable of 6 control points Q0..Q5. Returns the
+    position on the curve at parameter t in [0, 1].
+    """
+    p = [Q[i] for i in range(6)]
+    for level in range(5, 0, -1):
+        for i in range(level):
+            p[i] = _lerp(p[i], p[i + 1], t)
+    return p[0]
