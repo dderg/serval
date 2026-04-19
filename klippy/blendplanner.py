@@ -151,9 +151,6 @@ class CornerBlender:
             am = move_cls(th, p0, p1, arc_cap_v)
             am.max_cruise_v2 = arc_cap_v2
             am.limit_speed(arc_cap_v, arc_accel)
-            # Cruise-through-arc: pin smooth_delta_v2 to delta_v2 so look-ahead
-            # smoothing does not ramp gently at the arc boundaries.
-            am.smooth_delta_v2 = am.delta_v2
             am.min_move_t = am.move_d / arc_cap_v
             arc_moves.append(am)
 

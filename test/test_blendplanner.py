@@ -338,7 +338,10 @@ def test_aggregate_extruder_check_move_skipped_when_not_extruding():
     assert len(th.extruder.calls) == 0
 
 
-def test_arc_polyline_smooth_delta_v2_equals_delta_v2():
+def test_arc_polyline_smooth_delta_v2_not_pinned():
+    # The emit path no longer pins smooth_delta_v2 == delta_v2 — that
+    # was overreach. Kalico's Move invariant smooth_delta_v2 <= delta_v2
+    # must still hold on every emitted polyline move.
     b = _blender(max_chord_err=20e-3)
     th = b._toolhead
     m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
@@ -347,7 +350,7 @@ def test_arc_polyline_smooth_delta_v2_equals_delta_v2():
     out = b.feed(m_next)
     arc_moves = out[1:]
     for am in arc_moves:
-        assert am.smooth_delta_v2 == pytest.approx(am.delta_v2, rel=1e-12)
+        assert am.smooth_delta_v2 <= am.delta_v2 + 1e-12
 
 
 def test_arc_polyline_speed_continuity_1ppm():
