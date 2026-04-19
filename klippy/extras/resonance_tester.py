@@ -220,17 +220,39 @@ class SweepingVibrationsTestGenerator:
     def get_max_freq(self):
         return self.vibration_generator.get_max_freq()
 
+    def get_sweeping_accel(self):
+        return self.test_sweeping_accel if self.test_sweeping_period else 0.0
+
+    def get_sweeping_period(self):
+        return self.test_sweeping_period
+
 
 class ResonanceTestExecutor:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object("gcode")
 
-    def run_test(self, test_seq, axis, freq_end, accel_per_hz, gcmd):
+    def run_test(
+        self,
+        test_seq,
+        axis,
+        freq_end,
+        accel_per_hz,
+        sweeping_accel,
+        sweeping_period,
+        gcmd,
+    ):
+        # Peak velocity = pulse contribution (accel_per_hz * 0.25) plus sweep
+        # drift contribution. The sweep bias accel flips sign every
+        # sweeping_period/2, so velocity builds over that window.
+        pulse_peak = accel_per_hz * 0.25
+        sweep_peak = sweeping_accel * sweeping_period * 0.5
+        max_accel = freq_end * accel_per_hz + sweeping_accel + 10.0
+        max_velocity = pulse_peak + sweep_peak + 1.0
         with suspend_limits(
             self.printer,
-            freq_end * accel_per_hz + 10.0,
-            accel_per_hz * 0.25 + 1.0,
+            max_accel,
+            max_velocity,
             gcmd.get_int("INPUT_SHAPING", 0),
         ):
             self._run_test(test_seq, axis, gcmd)
@@ -408,6 +430,8 @@ class ResonanceTester:
                     axis,
                     self.generator.vibration_generator.freq_end,
                     self.generator.vibration_generator.accel_per_hz,
+                    self.generator.get_sweeping_accel(),
+                    self.generator.get_sweeping_period(),
                     gcmd,
                 )
                 for chip_axis, aclient, chip_name in raw_values:
