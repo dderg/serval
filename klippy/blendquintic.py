@@ -432,3 +432,83 @@ def quintic_geometry_with_shaper(
 
     v_cap = min(base.v_cap, v_shaper, v_jerk)
     return replace(base, v_cap=v_cap)
+
+
+def blend_from_moves_quintic(
+    prev_move,
+    next_move,
+    corner_deviation: float,
+    j_eff: float = float("inf"),
+    toolhead=None,
+) -> Optional[QuinticBlend]:
+    """Adapter: compute a quintic blend from a pair of Kalico Move-like
+    objects. Mirrors `blendmath.blend_from_moves`.
+
+    Skips the blend if either move is non-kinematic (E-only). The
+    effective a_max is the stricter of the two moves' accel values.
+
+    If `toolhead` is given, derives `j_eff` and the shaper velocity
+    bound from the toolhead's input shaper module. In that case any
+    explicit `j_eff` argument is ignored.
+    """
+    if toolhead is not None and j_eff != float("inf"):
+        raise ValueError(
+            "blend_from_moves_quintic: j_eff and toolhead are mutually "
+            "exclusive (toolhead derives j_eff from shaper state; "
+            "passing both is ambiguous)"
+        )
+    if not getattr(prev_move, "is_kinematic_move", True):
+        return None
+    if not getattr(next_move, "is_kinematic_move", True):
+        return None
+
+    prev_dir: Vec3 = (
+        prev_move.axes_r[0],
+        prev_move.axes_r[1],
+        prev_move.axes_r[2],
+    )
+    next_dir: Vec3 = (
+        next_move.axes_r[0],
+        next_move.axes_r[1],
+        next_move.axes_r[2],
+    )
+    a_max = min(prev_move.accel, next_move.accel)
+
+    base = quintic_geometry(
+        prev_dir=prev_dir,
+        next_dir=next_dir,
+        L_prev=prev_move.move_d,
+        L_next=next_move.move_d,
+        corner_deviation=corner_deviation,
+        a_max=a_max,
+    )
+    if base is None or base.d_consumed == 0.0:
+        return base
+
+    if toolhead is None:
+        return quintic_geometry_with_shaper(
+            base=base, shapers=[], j_eff=j_eff,
+        )
+
+    shapers = _extract_shapers(toolhead)
+
+    # First pass: derive j_eff from shaper state using the peak-curvature
+    # radius as the arc-like input (blendshaper.compute_shaper_bounds
+    # expects an R; use R = 1/kappa_peak).
+    if base.kappa_peak > 0.0 and shapers:
+        R_peak = 1.0 / base.kappa_peak
+        # Use the normal at the peak-curvature point for j_eff derivation.
+        _, _, n_peak = _point_frame(base.Q, 0.5)  # midpoint normal proxy
+        bounds = blendshaper.compute_shaper_bounds(
+            shapers=shapers,
+            R=R_peak,
+            n_hat=n_peak,
+            p_hat=base.plane_normal,
+        )
+        derived_j = bounds.j_eff
+    else:
+        derived_j = float("inf")
+
+    return quintic_geometry_with_shaper(
+        base=base, shapers=shapers, j_eff=derived_j,
+    )

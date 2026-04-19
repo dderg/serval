@@ -611,3 +611,53 @@ def test_rotation_jerk_infinite_does_not_affect_v_cap():
         j_eff=float("inf"),
     )
     assert capped.v_cap == pytest.approx(base.v_cap)
+
+
+class _FakeMove:
+    """Minimal Move stub for pure-math tests."""
+
+    def __init__(self, axes_r, move_d, accel, is_kinematic=True):
+        self.axes_r = axes_r
+        self.move_d = move_d
+        self.accel = accel
+        self.is_kinematic_move = is_kinematic
+
+
+def test_blend_from_moves_quintic_skips_non_kinematic():
+    prev = _FakeMove((1.0, 0.0, 0.0, 0.0), 10.0, 50000.0, is_kinematic=False)
+    nxt = _FakeMove((0.0, 1.0, 0.0, 0.0), 10.0, 50000.0, is_kinematic=True)
+    result = blendquintic.blend_from_moves_quintic(prev, nxt, 0.1)
+    assert result is None
+
+
+def test_blend_from_moves_quintic_returns_blend_for_right_angle():
+    prev = _FakeMove((1.0, 0.0, 0.0), 1.0, 50000.0)
+    nxt = _FakeMove((0.0, 1.0, 0.0), 1.0, 50000.0)
+    result = blendquintic.blend_from_moves_quintic(prev, nxt, 0.1)
+    assert result is not None
+    assert result.theta == pytest.approx(math.pi / 2.0, abs=1e-9)
+    assert result.d_consumed > 0.0
+
+
+def test_blend_from_moves_quintic_uses_stricter_accel():
+    prev = _FakeMove((1.0, 0.0, 0.0), 1.0, 30000.0)
+    nxt = _FakeMove((0.0, 1.0, 0.0), 1.0, 70000.0)
+    result = blendquintic.blend_from_moves_quintic(prev, nxt, 0.1)
+    assert result is not None
+    # v_cent^2 = a_max / kappa_peak with a_max = min(30000, 70000) = 30000
+    assert result.v_cap * result.v_cap == pytest.approx(
+        30000.0 / result.kappa_peak, rel=1e-9
+    )
+
+
+def test_blend_from_moves_quintic_rejects_both_j_eff_and_toolhead():
+    prev = _FakeMove((1.0, 0.0, 0.0), 1.0, 50000.0)
+    nxt = _FakeMove((0.0, 1.0, 0.0), 1.0, 50000.0)
+
+    class _DummyToolhead:
+        pass
+
+    with pytest.raises(ValueError):
+        blendquintic.blend_from_moves_quintic(
+            prev, nxt, 0.1, j_eff=1e7, toolhead=_DummyToolhead(),
+        )
