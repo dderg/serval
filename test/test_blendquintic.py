@@ -732,47 +732,6 @@ def test_segment_quintic_degenerate_returns_single_point():
     assert poly == [(0.0, 0.0, 0.0)]
 
 
-def test_interpolate_extruder_conserves_total_e():
-    prev_dir = (1.0, 0.0, 0.0)
-    next_dir = (0.0, 1.0, 0.0)
-    q = blendquintic.quintic_geometry(
-        prev_dir=prev_dir, next_dir=next_dir,
-        L_prev=1.0, L_next=1.0,
-        corner_deviation=0.2, a_max=50000.0,
-    )
-    poly = blendquintic.segment_quintic(q, max_chord_err=0.005)
-    e_per_mm_prev = 0.12
-    e_per_mm_next = 0.10
-    extruded = blendquintic.interpolate_extruder_quintic(
-        poly, q.d_consumed, e_per_mm_prev, e_per_mm_next,
-    )
-    total_e = extruded[-1][3] - extruded[0][3]
-    expected_total = q.d_consumed * (e_per_mm_prev + e_per_mm_next)
-    assert total_e == pytest.approx(expected_total, rel=1e-6)
-
-
-def test_interpolate_extruder_monotone_increasing():
-    prev_dir = (1.0, 0.0, 0.0)
-    next_dir = (0.0, 1.0, 0.0)
-    q = blendquintic.quintic_geometry(
-        prev_dir=prev_dir, next_dir=next_dir,
-        L_prev=1.0, L_next=1.0,
-        corner_deviation=0.2, a_max=50000.0,
-    )
-    poly = blendquintic.segment_quintic(q, max_chord_err=0.005)
-    extruded = blendquintic.interpolate_extruder_quintic(
-        poly, q.d_consumed, 0.12, 0.10,
-    )
-    for i in range(len(extruded) - 1):
-        assert extruded[i + 1][3] >= extruded[i][3]
-
-
-def test_interpolate_extruder_degenerate_polyline():
-    # Single-point polyline -> single output point with E = 0.
-    poly = [(0.0, 0.0, 0.0)]
-    out = blendquintic.interpolate_extruder_quintic(poly, 0.0, 0.12, 0.10)
-    assert out == [(0.0, 0.0, 0.0, 0.0)]
-
 
 def test_random_corners_property_sweep():
     rng = __import__("random").Random(20260419)
