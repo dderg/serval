@@ -772,3 +772,45 @@ def test_interpolate_extruder_degenerate_polyline():
     poly = [(0.0, 0.0, 0.0)]
     out = blendquintic.interpolate_extruder_quintic(poly, 0.0, 0.12, 0.10)
     assert out == [(0.0, 0.0, 0.0, 0.0)]
+
+
+def test_random_corners_property_sweep():
+    rng = __import__("random").Random(20260419)
+    for _ in range(50):
+        theta = rng.uniform(math.radians(15), math.radians(160))
+        # Random rotation in the XY plane.
+        phi = rng.uniform(0.0, 2.0 * math.pi)
+        prev_dir = (math.cos(phi), math.sin(phi), 0.0)
+        next_dir = (
+            math.cos(phi + theta),
+            math.sin(phi + theta),
+            0.0,
+        )
+        L_prev = rng.uniform(0.5, 5.0)
+        L_next = rng.uniform(0.5, 5.0)
+        corner_deviation = rng.uniform(0.02, 0.4)
+        a_max = rng.uniform(20000.0, 100000.0)
+        q = blendquintic.quintic_geometry(
+            prev_dir=prev_dir,
+            next_dir=next_dir,
+            L_prev=L_prev,
+            L_next=L_next,
+            corner_deviation=corner_deviation,
+            a_max=a_max,
+        )
+        assert q is not None
+        assert 0.50 <= q.r <= 0.86
+        # Deviation check: either the tolerance was binding (deviation
+        # matches corner_deviation) or the half-segment cap was binding
+        # (deviation below corner_deviation, d_consumed == 0.5*min(L)).
+        sin_half = math.sin(q.theta / 2.0)
+        achieved_dev = blendquintic._deviation_closed_form(
+            q.d_consumed, q.r, sin_half,
+        )
+        assert achieved_dev <= corner_deviation + 1e-9
+        # Velocity cap: v^2 * kappa_peak <= a_max
+        assert q.v_cap * q.v_cap * q.kappa_peak <= a_max * (1.0 + 1e-6)
+        # All control points finite.
+        for pt in q.Q:
+            for c in pt:
+                assert math.isfinite(c)
