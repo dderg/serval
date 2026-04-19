@@ -147,3 +147,25 @@ def _curvature_at(Q, t: float) -> float:
     cz = d1[0] * d2[1] - d1[1] * d2[0]
     cross_norm = math.sqrt(cx * cx + cy * cy + cz * cz)
     return cross_norm / (d1_norm ** 3)
+
+
+_PEAK_KAPPA_SAMPLES = 100  # dense-sample count for peak-curvature search
+
+
+def _peak_curvature(Q) -> Tuple[float, float]:
+    """Return (kappa_max, t_peak) along the quintic.
+
+    Dense sampling at _PEAK_KAPPA_SAMPLES points; returns the maximum
+    curvature along the blend and the parameter value where it occurs.
+    Endpoints always have kappa = 0 for a symmetric blend, so they are
+    included but will not normally win.
+    """
+    best_k = 0.0
+    best_t = 0.5
+    for i in range(_PEAK_KAPPA_SAMPLES):
+        t = i / (_PEAK_KAPPA_SAMPLES - 1)
+        k = _curvature_at(Q, t)
+        if k > best_k:
+            best_k = k
+            best_t = t
+    return best_k, best_t

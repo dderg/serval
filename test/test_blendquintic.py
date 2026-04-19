@@ -275,3 +275,49 @@ def test_curvature_matches_finite_difference_reference():
 
         kappa = blendquintic._curvature_at(Q, t)
         assert kappa == pytest.approx(fd_kappa, rel=1e-3)
+
+
+def test_peak_curvature_exceeds_midpoint_for_large_r():
+    # For r > ~0.3 at non-shallow angles, the true peak is off-center.
+    V = (0.0, 0.0, 0.0)
+    e1 = (1.0, 0.0, 0.0)
+    theta = math.pi / 2.0
+    e2 = (math.cos(theta), math.sin(theta), 0.0)
+    Q = _build_symmetric_Q(V, e1, e2, d=1.0, r=0.8)
+    kappa_peak, t_peak = blendquintic._peak_curvature(Q)
+    kappa_mid = blendquintic._curvature_at(Q, 0.5)
+    assert kappa_peak > kappa_mid * 1.5
+    # Peak should be off-center (not at t=0.5 for this r).
+    assert abs(t_peak - 0.5) > 1e-3
+
+
+def test_peak_curvature_at_midpoint_for_small_r():
+    # For r <= ~0.3 the peak is at the midpoint by symmetry.
+    V = (0.0, 0.0, 0.0)
+    e1 = (1.0, 0.0, 0.0)
+    theta = math.pi / 2.0
+    e2 = (math.cos(theta), math.sin(theta), 0.0)
+    Q = _build_symmetric_Q(V, e1, e2, d=1.0, r=0.2)
+    kappa_peak, t_peak = blendquintic._peak_curvature(Q)
+    kappa_mid = blendquintic._curvature_at(Q, 0.5)
+    assert kappa_peak == pytest.approx(kappa_mid, rel=1e-2)
+    assert t_peak == pytest.approx(0.5, abs=0.05)
+
+
+def test_peak_curvature_matches_dense_reference():
+    # The implementation samples 22 points; reference samples 2001.
+    # Both should agree within 1%.
+    V = (0.0, 0.0, 0.0)
+    e1 = (1.0, 0.0, 0.0)
+    for theta, r in [(0.5, 0.50), (1.0, 0.55), (math.pi / 2, 0.6), (2.5, 0.85)]:
+        e2 = (math.cos(theta), math.sin(theta), 0.0)
+        Q = _build_symmetric_Q(V, e1, e2, d=1.0, r=r)
+        kappa_peak, _ = blendquintic._peak_curvature(Q)
+        reference_samples = 2001
+        ref_max = 0.0
+        for i in range(reference_samples):
+            t = i / (reference_samples - 1)
+            k = blendquintic._curvature_at(Q, t)
+            if k > ref_max:
+                ref_max = k
+        assert kappa_peak == pytest.approx(ref_max, rel=1e-2)
