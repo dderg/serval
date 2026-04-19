@@ -56,3 +56,49 @@ def _quintic_eval(Q, t: float) -> Vec3:
         for i in range(level):
             p[i] = _lerp(p[i], p[i + 1], t)
     return p[0]
+
+
+def _bezier_eval_general(P, t: float) -> Vec3:
+    """De Casteljau for a Bezier curve of any degree. P is a list of
+    n+1 control points (tuples). Returns the point at parameter t."""
+    p = [P[i] for i in range(len(P))]
+    level = len(p) - 1
+    while level > 0:
+        for i in range(level):
+            p[i] = _lerp(p[i], p[i + 1], t)
+        level -= 1
+    return p[0]
+
+
+def _quintic_first_deriv(Q, t: float) -> Vec3:
+    """Evaluate B'(t) for a quintic Bezier at parameter t.
+
+    The derivative of a degree-5 Bezier with control points Q0..Q5
+    is a degree-4 Bezier with control points 5*(Q[i+1] - Q[i]).
+    """
+    D = [
+        (
+            5.0 * (Q[i + 1][0] - Q[i][0]),
+            5.0 * (Q[i + 1][1] - Q[i][1]),
+            5.0 * (Q[i + 1][2] - Q[i][2]),
+        )
+        for i in range(5)
+    ]
+    return _bezier_eval_general(D, t)
+
+
+def _quintic_second_deriv(Q, t: float) -> Vec3:
+    """Evaluate B''(t) for a quintic Bezier at parameter t.
+
+    The second derivative is a degree-3 Bezier with control points
+    20 * (Q[i+2] - 2*Q[i+1] + Q[i]).
+    """
+    DD = [
+        (
+            20.0 * (Q[i + 2][0] - 2.0 * Q[i + 1][0] + Q[i][0]),
+            20.0 * (Q[i + 2][1] - 2.0 * Q[i + 1][1] + Q[i][1]),
+            20.0 * (Q[i + 2][2] - 2.0 * Q[i + 1][2] + Q[i][2]),
+        )
+        for i in range(4)
+    ]
+    return _bezier_eval_general(DD, t)
