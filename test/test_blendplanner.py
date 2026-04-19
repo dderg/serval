@@ -780,3 +780,9 @@ def test_status_excludes_square_corner_velocity():
         "ToolHead.get_status reintroduced square_corner_velocity key"
     )
     assert "'square_corner_velocity'" not in src
+
+
+def test_blendemit_module_imports():
+    from klippy import blendemit
+    assert blendemit is not None
+    assert hasattr(blendemit, "segment")
