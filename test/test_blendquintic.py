@@ -661,3 +661,70 @@ def test_blend_from_moves_quintic_rejects_both_j_eff_and_toolhead():
         blendquintic.blend_from_moves_quintic(
             prev, nxt, 0.1, j_eff=1e7, toolhead=_DummyToolhead(),
         )
+
+
+def test_segment_quintic_max_chord_error_bound():
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    q = blendquintic.quintic_geometry(
+        prev_dir=prev_dir, next_dir=next_dir,
+        L_prev=1.0, L_next=1.0,
+        corner_deviation=0.2, a_max=50000.0,
+    )
+    tol = 0.005
+    poly = blendquintic.segment_quintic(q, max_chord_err=tol)
+    # Every consecutive pair is a segment: no point on the curve
+    # should be farther from its chord than tol.
+    # Sample many reference points along the curve and for each, find
+    # the closest chord; check distance <= tol + slack.
+    ref_samples = 201
+    ref_pts = [blendquintic._quintic_eval(q.Q, i / (ref_samples - 1))
+               for i in range(ref_samples)]
+    # For each reference point, find the min distance to any chord of
+    # the polyline. This is quadratic and fine for a unit test.
+
+    def _point_chord_dist(p, a, b):
+        ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+        ap = (p[0] - a[0], p[1] - a[1], p[2] - a[2])
+        len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]
+        if len2 == 0:
+            dx = p[0] - a[0]; dy = p[1] - a[1]; dz = p[2] - a[2]
+            return math.sqrt(dx * dx + dy * dy + dz * dz)
+        tt = (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / len2
+        tt = max(0.0, min(1.0, tt))
+        proj = (a[0] + ab[0] * tt, a[1] + ab[1] * tt, a[2] + ab[2] * tt)
+        dx = p[0] - proj[0]; dy = p[1] - proj[1]; dz = p[2] - proj[2]
+        return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+    for ref in ref_pts:
+        best = min(
+            _point_chord_dist(ref, poly[i], poly[i + 1])
+            for i in range(len(poly) - 1)
+        )
+        assert best <= tol * 1.5  # slack for sampling density
+
+
+def test_segment_quintic_emits_ordered_polyline():
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (0.0, 1.0, 0.0)
+    q = blendquintic.quintic_geometry(
+        prev_dir=prev_dir, next_dir=next_dir,
+        L_prev=1.0, L_next=1.0,
+        corner_deviation=0.2, a_max=50000.0,
+    )
+    poly = blendquintic.segment_quintic(q, max_chord_err=0.01)
+    assert len(poly) >= 3
+    assert poly[0] == pytest.approx(q.Q[0])
+    assert poly[-1] == pytest.approx(q.Q[5])
+
+
+def test_segment_quintic_degenerate_returns_single_point():
+    prev_dir = (1.0, 0.0, 0.0)
+    next_dir = (-1.0, 0.0, 0.0)
+    q = blendquintic.quintic_geometry(
+        prev_dir=prev_dir, next_dir=next_dir,
+        L_prev=1.0, L_next=1.0,
+        corner_deviation=0.2, a_max=50000.0,
+    )
+    poly = blendquintic.segment_quintic(q, max_chord_err=0.01)
+    assert poly == [(0.0, 0.0, 0.0)]

@@ -512,3 +512,71 @@ def blend_from_moves_quintic(
     return quintic_geometry_with_shaper(
         base=base, shapers=shapers, j_eff=derived_j,
     )
+
+
+_SUBDIVIDE_MAX_DEPTH = 12
+
+
+def _perp_distance(p: Vec3, a: Vec3, b: Vec3) -> float:
+    """Perpendicular distance from p to the infinite line through a and b."""
+    ab = vsub(b, a)
+    ab_len = vnorm(ab)
+    if ab_len < 1e-12:
+        return vnorm(vsub(p, a))
+    ap = vsub(p, a)
+    cross = vcross(ab, ap)
+    return vnorm(cross) / ab_len
+
+
+def _quintic_flatness(Q) -> float:
+    """Max perpendicular distance of Q1..Q4 from the chord Q0-Q5."""
+    chord_a = Q[0]
+    chord_b = Q[5]
+    return max(
+        _perp_distance(Q[1], chord_a, chord_b),
+        _perp_distance(Q[2], chord_a, chord_b),
+        _perp_distance(Q[3], chord_a, chord_b),
+        _perp_distance(Q[4], chord_a, chord_b),
+    )
+
+
+def _quintic_split(Q):
+    """Split quintic at t=0.5 via De Casteljau, return (left, right)
+    control-point tuples each with 6 points."""
+    # Level 0 -> 5 by repeated lerp at t=0.5. Capture outer points at each level.
+    p = [Q[i] for i in range(6)]
+    left = [p[0]]
+    right = [p[5]]
+    for level in range(5, 0, -1):
+        new_p = [_lerp(p[i], p[i + 1], 0.5) for i in range(level)]
+        left.append(new_p[0])
+        right.append(new_p[-1])
+        p = new_p
+    # left has 6 points (Q0 to midpoint); right is captured in reverse order.
+    right.reverse()
+    return tuple(left), tuple(right)
+
+
+def segment_quintic(
+    blend: QuinticBlend,
+    max_chord_err: float = 1e-2,
+) -> List[Vec3]:
+    """Return a polyline approximating the quintic blend with max chord
+    error <= max_chord_err. Adaptive De Casteljau subdivision."""
+    if max_chord_err <= 0.0:
+        raise ValueError("max_chord_err must be positive")
+    if blend.d_consumed == 0.0:
+        return [blend.Q[0]]
+
+    out: List[Vec3] = [blend.Q[0]]
+
+    def _recurse(Q, depth):
+        if depth >= _SUBDIVIDE_MAX_DEPTH or _quintic_flatness(Q) <= max_chord_err:
+            out.append(Q[5])
+            return
+        left, right = _quintic_split(Q)
+        _recurse(left, depth + 1)
+        _recurse(right, depth + 1)
+
+    _recurse(blend.Q, 0)
+    return out
