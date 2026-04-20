@@ -20,7 +20,7 @@ from klippy import blendshaper
 
 Vec3 = Tuple[float, float, float]
 
-COLLINEAR_EPS = 1e-6
+COLLINEAR_EPS = 1e-4
 REVERSAL_EPS = 1e-6
 
 
