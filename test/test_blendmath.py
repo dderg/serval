@@ -1116,3 +1116,95 @@ def test_blend_from_moves_with_target_smoothing_zero_still_suppresses():
     )
     # Suppression fires even at ts=0 — sigma_T is impulse-derived, not ts-derived.
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# suppressed_junction_v — companion to blend_from_moves
+# ---------------------------------------------------------------------------
+
+
+def test_suppressed_junction_v_collinear_returns_none():
+    """At a truly collinear junction there is no corner to cap."""
+    toolhead = _make_shaper_toolhead("zv", 80.0, target_smoothing=0.12)
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=50.0,
+        accel=50000.0, max_cruise_v2=500.0 ** 2,
+    )
+    nxt = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=50.0,
+        accel=50000.0, max_cruise_v2=500.0 ** 2,
+    )
+    assert blendmath.suppressed_junction_v(
+        prev, nxt, corner_deviation=0.1, toolhead=toolhead,
+    ) is None
+
+
+def test_suppressed_junction_v_no_shaper_returns_none():
+    """Without a shaper we cannot derive sigma_T; caller gets None."""
+    class _FakePrinterObjectNoIS:
+        def lookup_object(self, name, default=None):
+            return default
+
+    class _FakeToolheadNoShaper:
+        printer = _FakePrinterObjectNoIS()
+
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=50.0,
+        accel=50000.0, max_cruise_v2=500.0 ** 2,
+    )
+    nxt = _FakeMove(
+        axes_r=[0.0, 1.0, 0.0, 0.0], move_d=50.0,
+        accel=50000.0, max_cruise_v2=500.0 ** 2,
+    )
+    assert blendmath.suppressed_junction_v(
+        prev, nxt, corner_deviation=0.1,
+        toolhead=_FakeToolheadNoShaper(),
+    ) is None
+
+
+def test_suppressed_junction_v_90_degrees_matches_v_scv90():
+    """At 90° the per-corner cap equals v_scv90 = cd / (sqrt(2)·sigma_T)."""
+    toolhead = _make_shaper_toolhead("zv", 80.0, target_smoothing=0.12)
+    sigma_T = _sigma_T_from_impulses("zv", 80.0)
+
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0], move_d=50.0,
+        accel=50000.0, max_cruise_v2=500.0 ** 2,
+    )
+    nxt = _FakeMove(
+        axes_r=[0.0, 1.0, 0.0, 0.0], move_d=50.0,
+        accel=50000.0, max_cruise_v2=500.0 ** 2,
+    )
+    cd = 0.10
+    v_j = blendmath.suppressed_junction_v(
+        prev, nxt, corner_deviation=cd, toolhead=toolhead,
+    )
+    # Klipper identity: at 90°, (cos_half/(1-cos_half)) · (√2-1) = 1, so
+    # v_j = v_scv90 exactly.
+    v_scv90 = cd / (math.sqrt(2.0) * sigma_T)
+    assert v_j == pytest.approx(v_scv90, rel=1e-10)
+
+
+def test_suppressed_junction_v_shallow_corner_is_faster_than_sharp():
+    """Shallower corner → higher per-corner junction cap (monotonic in angle)."""
+    toolhead = _make_shaper_toolhead("zv", 80.0, target_smoothing=0.12)
+
+    def _v_at_angle(phi):
+        prev = _FakeMove(
+            axes_r=[1.0, 0.0, 0.0, 0.0], move_d=50.0,
+            accel=50000.0, max_cruise_v2=500.0 ** 2,
+        )
+        nxt = _FakeMove(
+            axes_r=[math.cos(phi), math.sin(phi), 0.0, 0.0],
+            move_d=50.0, accel=50000.0, max_cruise_v2=500.0 ** 2,
+        )
+        return blendmath.suppressed_junction_v(
+            prev, nxt, corner_deviation=0.1, toolhead=toolhead,
+        )
+
+    v_sharp = _v_at_angle(math.radians(90.0))
+    v_shallow = _v_at_angle(math.radians(20.0))
+    assert v_shallow > v_sharp
+    # And both finite+positive (corner exists, shaper present).
+    assert v_sharp > 0.0
+    assert v_shallow > 0.0
