@@ -775,6 +775,19 @@ def test_extract_shapers_unshaped_axis_has_zero_A():
     assert snaps_by_axis["x"].shaper_type == "zv"
 
 
+def test_extract_shapers_zero_target_smoothing_returns_empty():
+    # target_smoothing=0 is the sentinel to disable the shaper-derived
+    # velocity cap. _extract_shapers must return [] so compute_shaper_bounds
+    # produces (inf, inf) bounds — identical to "no input_shaper loaded".
+    is_obj = _FakeInputShaper([
+        _FakeAxisInputShaper("x", "zv", 150.0),
+        _FakeAxisInputShaper("y", "zv", 80.0),
+    ])
+    is_obj.target_smoothing = 0.0
+    toolhead = _FakeToolheadWithShapers(is_obj)
+    assert blendmath._extract_shapers(toolhead) == []
+
+
 def test_blend_from_moves_with_toolhead_derives_j_eff():
     # Set up a 90° XY corner with X=ZV@150Hz, Y=ZV@80Hz. Expect
     # v_cap to match the spec's numeric sanity: ~99.8 mm/s at R=0.5mm.

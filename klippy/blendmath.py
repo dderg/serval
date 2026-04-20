@@ -285,7 +285,14 @@ def _extract_shapers(toolhead):
     # speed via the [input_shaper] target_smoothing config. A mock
     # or older object without the attribute falls back to the
     # ShaperCalibrate default (0.12 mm).
+    #
+    # Sentinel: target_smoothing == 0 disables the shaper-derived
+    # velocity cap entirely (returns [] so compute_shaper_bounds
+    # produces inf bounds). Use SET_INPUT_SHAPER TARGET_SMOOTHING=0
+    # to isolate arc-planner cost from residual shaper-cap cost.
     target = getattr(is_obj, "target_smoothing", None)
+    if target is not None and target <= 0.0:
+        return []
     sc = ShaperCalibrate(printer=None, target_smoothing=target)
     shaper_factory = {s.name: s.init_func for s in shaper_defs.INPUT_SHAPERS}
 

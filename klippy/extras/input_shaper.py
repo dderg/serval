@@ -137,7 +137,7 @@ class InputShaper:
         # read it at runtime, and so SHAPER_CALIBRATE can thread it
         # to find_shaper_max_accel for consistent projections.
         self.target_smoothing = config.getfloat(
-            "target_smoothing", 0.12, above=0.0,
+            "target_smoothing", 0.12, minval=0.0,
         )
         self.input_shaper_stepper_kinematics = []
         self.orig_stepper_kinematics = []
@@ -219,7 +219,7 @@ class InputShaper:
 
     def cmd_SET_INPUT_SHAPER(self, gcmd):
         target_smoothing = gcmd.get_float(
-            "TARGET_SMOOTHING", None, above=0.0
+            "TARGET_SMOOTHING", None, minval=0.0
         )
         if target_smoothing is not None:
             self.target_smoothing = target_smoothing
