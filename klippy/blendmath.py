@@ -369,6 +369,63 @@ def blend_from_moves(
 
     shapers = _extract_shapers(toolhead)
 
+    # Shaper-aware arc suppression: if the input shaper alone can satisfy
+    # the corner_deviation post-shaper tolerance at max cruise speed, skip
+    # the arc — let the mainline sharp-V corner + shaper handle it.
+    #
+    # Formula:  eps_shaper = 2 * v * sin(phi/2) * sigma_T_max
+    # where sigma_T is the RMS spread of the shaper impulse times:
+    #   t_bar    = sum(w_i * t_i) / sum(w_i)       (weighted mean)
+    #   sigma_T² = sum(w_i * (t_i - t_bar)²) / sum(w_i)
+    #
+    # sigma_T is a property of the shaper impulse pattern — it is entirely
+    # independent of target_smoothing.  We derive it directly from the
+    # shaper_defs impulse sequences so that suppression fires correctly
+    # regardless of what target_smoothing is set to (including ts=0).
+    #
+    # Note: _extract_shapers() may return [] when target_smoothing=0 (its
+    # sentinel behaviour for the A_axis-derived *velocity cap*).  We do NOT
+    # use _extract_shapers() here; instead we reach into the input_shaper
+    # object directly so suppression is decoupled from that sentinel.
+    #
+    # When no input_shaper is loaded, or no axis has freq > 0, sigma_T_max
+    # stays 0 and we fall through to normal arc insertion.
+    _printer = getattr(toolhead, "printer", None)
+    _is_obj = _printer.lookup_object("input_shaper", None) if _printer else None
+    if _is_obj is not None:
+        from klippy.extras import shaper_defs as _shaper_defs
+        _shaper_factory = {s.name: s.init_func for s in _shaper_defs.INPUT_SHAPERS}
+        # Compute sigma_T for each shaped axis; keep the maximum (worst case).
+        sigma_T_max = 0.0
+        for _axis_shaper in _is_obj.get_shapers():
+            _params = _axis_shaper.params
+            _freq = float(_params.shaper_freq)
+            _stype = _params.shaper_type
+            _damp = float(_params.damping_ratio)
+            if _freq > 0.0 and _stype in _shaper_factory:
+                _A, _T = _shaper_factory[_stype](_freq, _damp)
+                _w_sum = sum(_A)
+                if _w_sum > 0.0:
+                    # Weighted mean time.
+                    _t_bar = sum(_a * _t for _a, _t in zip(_A, _T)) / _w_sum
+                    # Weighted variance of impulse times.
+                    _var = sum(
+                        _a * (_t - _t_bar) ** 2 for _a, _t in zip(_A, _T)
+                    ) / _w_sum
+                    _sigma_T = math.sqrt(max(0.0, _var))
+                    if _sigma_T > sigma_T_max:
+                        sigma_T_max = _sigma_T
+        if sigma_T_max > 0.0:
+            # Compute sin(phi/2) from the two direction vectors.
+            dp = vdot(prev_dir, next_dir)
+            dp = max(-1.0, min(1.0, dp))
+            sin_half = math.sqrt(max(0.0, (1.0 - dp) * 0.5))
+            max_v2 = min(prev_move.max_cruise_v2, next_move.max_cruise_v2)
+            max_v = math.sqrt(max_v2)
+            eps_shaper = 2.0 * max_v * sin_half * sigma_T_max
+            if eps_shaper <= corner_deviation:
+                return None
+
     # First pass: no jerk constraint — we need R, entry_pt, center,
     # plane_normal to compute per-axis bounds.
     arc_0 = blend_geometry(

@@ -912,3 +912,183 @@ def test_blend_from_moves_j_eff_and_toolhead_mutually_exclusive():
             j_eff=1e8,
             toolhead=toolhead,
         )
+
+
+# ---------------------------------------------------------------------------
+# Shaper-aware arc suppression tests
+# ---------------------------------------------------------------------------
+# These tests verify that blend_from_moves() skips arc insertion when the
+# input shaper's post-shaper deviation already satisfies corner_deviation,
+# and inserts an arc when it doesn't.
+#
+# The suppression formula is:
+#   eps_shaper = 2 * v * sin(phi/2) * sigma_T_max
+#
+# sigma_T is the RMS spread of the shaper impulse times around their weighted
+# mean — a property of the impulse pattern alone, independent of
+# target_smoothing.  The formula is:
+#   t_bar    = sum(w_i * t_i) / sum(w_i)
+#   sigma_T² = sum(w_i * (t_i - t_bar)²) / sum(w_i)
+#
+# Suppression therefore fires correctly whether target_smoothing is 0, 0.12,
+# or anything else.  (target_smoothing=0 only disables the A_axis-derived
+# velocity cap inside compute_shaper_bounds — it has no effect here.)
+#
+# Tests compute sigma_T directly from shaper_defs impulse sequences so they
+# mirror the production logic without hard-coding any derived values.
+# ---------------------------------------------------------------------------
+
+from klippy.extras import shaper_defs as _test_shaper_defs
+
+
+def _make_shaper_toolhead(shaper_type, freq, target_smoothing, damping_ratio=0.1):
+    """Return a fake toolhead with one X-axis shaper and given target_smoothing."""
+    is_obj = _FakeInputShaper([
+        _FakeAxisInputShaper("x", shaper_type, freq, damping_ratio=damping_ratio),
+    ])
+    is_obj.target_smoothing = target_smoothing
+    return _FakeToolheadWithShapers(is_obj)
+
+
+def _sigma_T_from_impulses(shaper_type, freq, damping_ratio=0.1):
+    """Compute sigma_T directly from shaper_defs impulse sequence.
+
+    This is the impulse-derived RMS time spread used by the production
+    suppression logic — independent of target_smoothing.
+    """
+    shaper_factory = {s.name: s.init_func for s in _test_shaper_defs.INPUT_SHAPERS}
+    A, T = shaper_factory[shaper_type](freq, damping_ratio)
+    w_sum = sum(A)
+    t_bar = sum(a * t for a, t in zip(A, T)) / w_sum
+    var = sum(a * (t - t_bar) ** 2 for a, t in zip(A, T)) / w_sum
+    return math.sqrt(max(0.0, var))
+
+
+def test_blend_from_moves_suppresses_arc_when_shaper_meets_budget():
+    """Arc is skipped when eps_shaper <= corner_deviation."""
+    # Small turn angle (10 degrees) and slow speed.  ZV@80Hz gives a larger
+    # sigma_T than ZV@150Hz — conservative (larger) eps_shaper estimate.
+    toolhead = _make_shaper_toolhead("zv", 80.0, target_smoothing=0.12)
+
+    # sigma_T from the impulse pattern — ts-independent.
+    sigma_T_max = _sigma_T_from_impulses("zv", 80.0)
+    assert sigma_T_max > 0.0, "ZV shaper must have non-zero impulse time spread"
+
+    # Turn angle: 10 degrees.
+    phi = math.radians(10.0)
+    sin_half = math.sin(phi / 2.0)
+
+    # Choose v such that eps_shaper = 0.7 * corner_deviation (comfortably below).
+    corner_deviation = 0.10  # 0.1 mm
+    eps_target = 0.7 * corner_deviation
+    max_v = eps_target / (2.0 * sin_half * sigma_T_max)
+
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0],
+        move_d=50.0,
+        accel=50000.0,
+        max_cruise_v2=max_v ** 2,
+    )
+    # Rotate prev_dir by phi about +Z.
+    nxt = _FakeMove(
+        axes_r=[math.cos(phi), math.sin(phi), 0.0, 0.0],
+        move_d=50.0,
+        accel=50000.0,
+        max_cruise_v2=max_v ** 2,
+    )
+
+    result = blendmath.blend_from_moves(
+        prev_move=prev,
+        next_move=nxt,
+        corner_deviation=corner_deviation,
+        toolhead=toolhead,
+    )
+    # Shaper handles it — no arc should be inserted.
+    assert result is None
+
+
+def test_blend_from_moves_inserts_arc_when_shaper_exceeds_budget():
+    """Arc is inserted when eps_shaper > corner_deviation."""
+    toolhead = _make_shaper_toolhead("zv", 80.0, target_smoothing=0.12)
+
+    sigma_T_max = _sigma_T_from_impulses("zv", 80.0)
+    assert sigma_T_max > 0.0
+
+    # 90 degree corner — large angle, large sin(phi/2) = sqrt(2)/2.
+    phi = math.pi / 2.0
+    sin_half = math.sin(phi / 2.0)
+
+    # Choose v such that eps_shaper = 3.0 * corner_deviation (clearly above budget).
+    corner_deviation = 0.02  # mm — tight tolerance
+    eps_target = 3.0 * corner_deviation
+    max_v = eps_target / (2.0 * sin_half * sigma_T_max)
+
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0],
+        move_d=50.0,
+        accel=50000.0,
+        max_cruise_v2=max_v ** 2,
+    )
+    nxt = _FakeMove(
+        axes_r=[0.0, 1.0, 0.0, 0.0],
+        move_d=50.0,
+        accel=50000.0,
+        max_cruise_v2=max_v ** 2,
+    )
+
+    result = blendmath.blend_from_moves(
+        prev_move=prev,
+        next_move=nxt,
+        corner_deviation=corner_deviation,
+        toolhead=toolhead,
+    )
+    # Shaper cannot handle it — arc must be inserted.
+    assert result is not None
+    assert result.R > 0.0
+
+
+def test_blend_from_moves_with_target_smoothing_zero_still_suppresses():
+    """target_smoothing=0 does NOT disable arc suppression.
+
+    The suppression check uses sigma_T derived from the impulse pattern —
+    a physical property of the shaper independent of target_smoothing.
+    target_smoothing=0 only disables the A_axis-derived velocity cap in
+    compute_shaper_bounds; it has no effect on suppression.
+
+    At very slow speed and small turn angle the shaper easily handles the
+    deviation, so the arc should be suppressed (result is None).
+    """
+    # ts=0 sentinel: _extract_shapers returns [] (velocity cap disabled),
+    # but the suppression block reads impulses directly and still fires.
+    toolhead = _make_shaper_toolhead("zv", 80.0, target_smoothing=0.0)
+
+    sigma_T_max = _sigma_T_from_impulses("zv", 80.0)
+
+    phi = math.radians(5.0)  # 5-degree turn — small angle
+    sin_half = math.sin(phi / 2.0)
+    corner_deviation = 0.10  # 0.1 mm
+
+    # Choose v well below the suppression threshold.
+    eps_target = 0.5 * corner_deviation
+    max_v = eps_target / (2.0 * sin_half * sigma_T_max)
+
+    prev = _FakeMove(
+        axes_r=[1.0, 0.0, 0.0, 0.0],
+        move_d=50.0,
+        accel=50000.0,
+        max_cruise_v2=max_v ** 2,
+    )
+    nxt = _FakeMove(
+        axes_r=[math.cos(phi), math.sin(phi), 0.0, 0.0],
+        move_d=50.0,
+        accel=50000.0,
+        max_cruise_v2=max_v ** 2,
+    )
+    result = blendmath.blend_from_moves(
+        prev_move=prev,
+        next_move=nxt,
+        corner_deviation=corner_deviation,
+        toolhead=toolhead,
+    )
+    # Suppression fires even at ts=0 — sigma_T is impulse-derived, not ts-derived.
+    assert result is None
