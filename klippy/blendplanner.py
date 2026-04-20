@@ -69,7 +69,25 @@ class CornerBlender:
             toolhead=self._toolhead,
         )
         if arc is None:
-            # Collinear: prepass should have caught. Emit prev, buffer next.
+            # blend_from_moves returns None for two reasons:
+            #   (a) the corner is truly collinear (prepass should have
+            #       caught this; no junction cap needed); or
+            #   (b) blendmath's shaper-aware / velocity-aware suppression
+            #       rules declined to insert an arc — the toolhead must
+            #       still traverse a non-collinear corner, and the fork's
+            #       calc_junction has no JD-based cap of its own, so we
+            #       must apply an SCV-equivalent cap here or the toolhead
+            #       will hit the corner at full cruise velocity and skip
+            #       steps.
+            # suppressed_junction_v returns None for case (a) and a finite
+            # velocity for case (b).
+            v_j = blendmath.suppressed_junction_v(
+                self._prev, move,
+                self._toolhead.corner_deviation,
+                self._toolhead,
+            )
+            if v_j is not None:
+                self._prev.limit_next_junction_speed(v_j)
             emitted = [self._prev]
             self._prev = move
             return emitted

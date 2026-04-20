@@ -166,6 +166,89 @@ def test_feed_uturn_emits_prev_with_zero_next_junction():
     assert b._prev is m2
 
 
+# ---------------------------------------------------------------------------
+# Regression: suppression returning None at non-collinear corners must
+# apply an SCV-equivalent junction cap via limit_next_junction_speed.
+# Without the cap the toolhead hits the corner at full cruise velocity and
+# skips steps — see `blend_from_moves` docstring for suppression rules.
+# ---------------------------------------------------------------------------
+
+
+class _FakeAxisIS:
+    def __init__(self, axis, stype, freq, damping=0.1):
+        self.axis = axis
+        class _P:
+            pass
+        self.params = _P()
+        self.params.shaper_type = stype
+        self.params.shaper_freq = freq
+        self.params.damping_ratio = damping
+
+
+class _FakeIS:
+    def __init__(self, shapers):
+        self._shapers = shapers
+    def get_shapers(self):
+        return list(self._shapers)
+
+
+class _FakePrinter:
+    def __init__(self, is_obj):
+        self._is = is_obj
+    def lookup_object(self, name, default=None):
+        if name == "input_shaper":
+            return self._is
+        return default
+
+
+class _FakeToolheadWithShaper(_FakeToolhead):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.printer = _FakePrinter(_FakeIS([
+            _FakeAxisIS("x", "zv", 80.0),
+            _FakeAxisIS("y", "zv", 80.0),
+        ]))
+
+
+def test_feed_suppressed_non_collinear_applies_junction_cap():
+    """Rule 2 suppression at a sharp 90° corner with short segments must
+    still apply an SCV-equivalent junction velocity cap to the emitted
+    prev move — otherwise the toolhead barrels through the corner at
+    full cruise velocity."""
+    th = _FakeToolheadWithShaper(
+        corner_deviation=0.2, max_accel=50000.0, max_velocity=500.0,
+    )
+    b = blendplanner.CornerBlender(th, move_cls=_FakeMove)
+    # 1 mm segments, 90° corner. R_tol = 0.483 mm (binds), v_arc ≈ 155;
+    # SCV-equivalent v_j ≈ 29 mm/s at this cd/sigma — fork_cost > main_cost
+    # → blend_from_moves returns None (velocity-aware rule).
+    m1 = _FakeMove(th, (0, 0, 0, 0), (1, 0, 0, 0.1), speed=500.0)
+    m2 = _FakeMove(th, (1, 0, 0, 0.1), (1, 1, 0, 0.2), speed=500.0)
+    assert b.feed(m1) == []
+    out = b.feed(m2)
+    # Prev was emitted (blend suppressed) and next buffered.
+    assert out == [m1]
+    assert b._prev is m2
+    # Cap was applied — next_junction_v2 dropped well below default sentinel.
+    assert m1.next_junction_v2 < 999999999.9
+    # Cap must be strictly positive (non-collinear, not a U-turn).
+    assert m1.next_junction_v2 > 0.0
+
+
+def test_feed_collinear_with_shaper_still_no_cap():
+    """Truly collinear corners must NOT gain a cap just because a shaper
+    is present — the suppressed-junction path only applies to real
+    non-collinear corners."""
+    th = _FakeToolheadWithShaper(corner_deviation=0.1)
+    b = blendplanner.CornerBlender(th, move_cls=_FakeMove)
+    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
+    b.feed(m1)
+    out = b.feed(m2)
+    assert out == [m1]
+    assert m1.next_junction_v2 == 999999999.9
+
+
 def _state_src_dst_pair():
     """Build a (src, dst) pair where src is a 'full-length' parent and dst a
     truncated child constructed via the Move ctor against the same toolhead."""

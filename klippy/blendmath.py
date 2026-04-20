@@ -258,6 +258,124 @@ def _rotate(v: Vec3, axis: Vec3, angle: float) -> Vec3:
     )
 
 
+def _sigma_T_max_from_toolhead(toolhead):
+    """Return the max RMS spread (seconds) across axis input shaper impulse
+    patterns, or 0.0 if no shaper is loaded or all axes are unshaped.
+
+    sigma_T is a property of the shaper impulse sequence alone — independent
+    of target_smoothing — so this is safe to use for suppression decisions
+    regardless of the target_smoothing=0 sentinel behaviour in
+    _extract_shapers().
+    """
+    if toolhead is None:
+        return 0.0
+    printer = getattr(toolhead, "printer", None)
+    if printer is None:
+        return 0.0
+    is_obj = printer.lookup_object("input_shaper", None)
+    if is_obj is None:
+        return 0.0
+    from klippy.extras import shaper_defs as _shaper_defs
+    factory = {s.name: s.init_func for s in _shaper_defs.INPUT_SHAPERS}
+    sigma_max = 0.0
+    for axis_shaper in is_obj.get_shapers():
+        params = axis_shaper.params
+        freq = float(params.shaper_freq)
+        stype = params.shaper_type
+        damp = float(params.damping_ratio)
+        if freq > 0.0 and stype in factory:
+            A, T = factory[stype](freq, damp)
+            w_sum = sum(A)
+            if w_sum > 0.0:
+                t_bar = sum(a * t for a, t in zip(A, T)) / w_sum
+                var = sum(
+                    a * (t - t_bar) ** 2 for a, t in zip(A, T)
+                ) / w_sum
+                sigma = math.sqrt(max(0.0, var))
+                if sigma > sigma_max:
+                    sigma_max = sigma
+    return sigma_max
+
+
+def _scv_equivalent_junction_v(
+    cos_half: float,
+    sin_half: float,
+    corner_deviation: float,
+    sigma_T_max: float,
+    a_max: float,
+) -> float:
+    """Klipper junction-deviation velocity cap equivalent to mainline SCV
+    at a shaper with RMS impulse spread sigma_T_max, evaluated at a corner
+    with the given half-angle geometry.
+
+    Derivation:
+      - SCV-equivalent at 90° matching corner_deviation under shaper smear:
+            v_scv90 = cd / (sqrt(2) * sigma_T)
+      - Klipper's JD formula (jd = SCV^2 * (sqrt(2) - 1) / a_max):
+            jd_eq = v_scv90^2 * (sqrt(2) - 1) / a_max
+      - Per-corner radius and velocity:
+            R_scv = jd_eq * cos(theta/2) / (1 - cos(theta/2))
+            v_j   = sqrt(R_scv * a_max)
+
+    Returns +inf for collinear (no cap needed) or when any input is
+    non-positive (no cap derivable).
+    """
+    one_minus_cos = 1.0 - cos_half
+    if sin_half <= COLLINEAR_EPS or one_minus_cos <= 1e-12:
+        return float("inf")
+    if sigma_T_max <= 0.0 or corner_deviation <= 0.0 or a_max <= 0.0:
+        return float("inf")
+    v_scv90 = corner_deviation / (math.sqrt(2.0) * sigma_T_max)
+    jd_eq = v_scv90 * v_scv90 * (math.sqrt(2.0) - 1.0) / a_max
+    R_scv = jd_eq * cos_half / one_minus_cos
+    return math.sqrt(R_scv * a_max)
+
+
+def suppressed_junction_v(
+    prev_move,
+    next_move,
+    corner_deviation: float,
+    toolhead,
+) -> Optional[float]:
+    """SCV-equivalent junction velocity to apply when blend_from_moves
+    returns None at a non-collinear corner.
+
+    Companion to blend_from_moves: when the arc is suppressed (either by
+    the shaper-aware or velocity-aware rule), the fork's calc_junction
+    has no built-in JD cap — so without this cap the toolhead would hit
+    sharp corners at full commanded velocity, causing step skipping.
+
+    Returns:
+        None  — truly collinear junction (no cap needed), or no shaper
+                 loaded (no cap derivable; mainline-Kalico calc_junction
+                 quarter-tan cap still applies as a lax safety net).
+        float — velocity cap to pass to prev.limit_next_junction_speed().
+    """
+    if toolhead is None:
+        return None
+    prev_dir: Vec3 = (
+        prev_move.axes_r[0], prev_move.axes_r[1], prev_move.axes_r[2],
+    )
+    next_dir: Vec3 = (
+        next_move.axes_r[0], next_move.axes_r[1], next_move.axes_r[2],
+    )
+    dp = max(-1.0, min(1.0, vdot(prev_dir, next_dir)))
+    cos_half = math.sqrt(max(0.0, (1.0 + dp) * 0.5))
+    sin_half = math.sqrt(max(0.0, (1.0 - dp) * 0.5))
+    if sin_half < COLLINEAR_EPS:
+        return None
+    sigma_T = _sigma_T_max_from_toolhead(toolhead)
+    if sigma_T <= 0.0:
+        return None
+    a_max = min(prev_move.accel, next_move.accel)
+    v_j = _scv_equivalent_junction_v(
+        cos_half, sin_half, corner_deviation, sigma_T, a_max,
+    )
+    if not math.isfinite(v_j):
+        return None
+    return v_j
+
+
 def _extract_shapers(toolhead):
     """Pull per-axis shaper snapshots off a Kalico toolhead.
 
@@ -372,110 +490,55 @@ def blend_from_moves(
     # Shaper-aware arc suppression: if the input shaper alone can satisfy
     # the corner_deviation post-shaper tolerance at max cruise speed, skip
     # the arc — let the mainline sharp-V corner + shaper handle it.
+    # Callers (blendplanner) must then ask suppressed_junction_v() for the
+    # SCV-equivalent junction cap and apply it to the outgoing move, since
+    # fork calc_junction has no JD-based cap of its own.
     #
-    # Formula:  eps_shaper = 2 * v * sin(phi/2) * sigma_T_max
-    # where sigma_T is the RMS spread of the shaper impulse times:
-    #   t_bar    = sum(w_i * t_i) / sum(w_i)       (weighted mean)
-    #   sigma_T² = sum(w_i * (t_i - t_bar)²) / sum(w_i)
-    #
-    # sigma_T is a property of the shaper impulse pattern — it is entirely
-    # independent of target_smoothing.  We derive it directly from the
-    # shaper_defs impulse sequences so that suppression fires correctly
-    # regardless of what target_smoothing is set to (including ts=0).
-    #
-    # Note: _extract_shapers() may return [] when target_smoothing=0 (its
-    # sentinel behaviour for the A_axis-derived *velocity cap*).  We do NOT
-    # use _extract_shapers() here; instead we reach into the input_shaper
-    # object directly so suppression is decoupled from that sentinel.
-    #
-    # When no input_shaper is loaded, or no axis has freq > 0, sigma_T_max
-    # stays 0 and we fall through to normal arc insertion.
-    _printer = getattr(toolhead, "printer", None)
-    _is_obj = _printer.lookup_object("input_shaper", None) if _printer else None
-    if _is_obj is not None:
-        from klippy.extras import shaper_defs as _shaper_defs
-        _shaper_factory = {s.name: s.init_func for s in _shaper_defs.INPUT_SHAPERS}
-        # Compute sigma_T for each shaped axis; keep the maximum (worst case).
-        sigma_T_max = 0.0
-        for _axis_shaper in _is_obj.get_shapers():
-            _params = _axis_shaper.params
-            _freq = float(_params.shaper_freq)
-            _stype = _params.shaper_type
-            _damp = float(_params.damping_ratio)
-            if _freq > 0.0 and _stype in _shaper_factory:
-                _A, _T = _shaper_factory[_stype](_freq, _damp)
-                _w_sum = sum(_A)
-                if _w_sum > 0.0:
-                    # Weighted mean time.
-                    _t_bar = sum(_a * _t for _a, _t in zip(_A, _T)) / _w_sum
-                    # Weighted variance of impulse times.
-                    _var = sum(
-                        _a * (_t - _t_bar) ** 2 for _a, _t in zip(_A, _T)
-                    ) / _w_sum
-                    _sigma_T = math.sqrt(max(0.0, _var))
-                    if _sigma_T > sigma_T_max:
-                        sigma_T_max = _sigma_T
-        if sigma_T_max > 0.0:
-            # Geometry shared across both suppression rules.
-            dp = vdot(prev_dir, next_dir)
-            dp = max(-1.0, min(1.0, dp))
-            cos_half = math.sqrt(max(0.0, (1.0 + dp) * 0.5))
-            sin_half = math.sqrt(max(0.0, (1.0 - dp) * 0.5))
-            one_minus_cos = 1.0 - cos_half
-            max_v2 = min(prev_move.max_cruise_v2, next_move.max_cruise_v2)
-            max_v = math.sqrt(max_v2)
+    # sigma_T is the RMS spread of the shaper impulse times and is a
+    # property of the impulse pattern alone — independent of
+    # target_smoothing, so suppression fires correctly even with ts=0.
+    sigma_T_max = _sigma_T_max_from_toolhead(toolhead)
+    if sigma_T_max > 0.0:
+        dp = max(-1.0, min(1.0, vdot(prev_dir, next_dir)))
+        cos_half = math.sqrt(max(0.0, (1.0 + dp) * 0.5))
+        sin_half = math.sqrt(max(0.0, (1.0 - dp) * 0.5))
+        one_minus_cos = 1.0 - cos_half
+        max_v2 = min(prev_move.max_cruise_v2, next_move.max_cruise_v2)
+        max_v = math.sqrt(max_v2)
 
-            # Rule 1 (shaper-aware): skip if the shaper alone keeps the
-            # corner inside the corner_deviation post-shaper budget.
-            #     eps_shaper = 2 * v * sin(phi/2) * sigma_T_max
-            eps_shaper = 2.0 * max_v * sin_half * sigma_T_max
-            if eps_shaper <= corner_deviation:
-                return None
+        # Rule 1 (shaper-aware): skip if the shaper alone keeps the
+        # corner inside the corner_deviation post-shaper budget.
+        #     eps_shaper = 2 * v * sin(phi/2) * sigma_T_max
+        eps_shaper = 2.0 * max_v * sin_half * sigma_T_max
+        if eps_shaper <= corner_deviation:
+            return None
 
-            # Rule 2 (velocity-aware): skip if an imaginary mainline-SCV
-            # junction at this same corner (sized so its *post-shaper*
-            # deviation matches corner_deviation) would be no slower
-            # than our arc.  This catches sharp corners with short
-            # adjoining segments where R clamps small and v_arc drops
-            # below cruise — the arc traversal time then exceeds the
-            # ramp savings relative to an SCV-equivalent sharp corner.
-            #
-            # SCV-equivalent velocity at 90° matching cd budget:
-            #     v_scv90 = cd / (sqrt(2) * sigma_T_max)
-            # at arbitrary angle, scaled by sin(phi/2) symmetry of the
-            # shaper smear (both fork and main see the 2·v·sin(phi/2)
-            # transverse velocity step).  We derive an effective
-            # junction-deviation from this reference velocity and a 90°
-            # anchor, then apply Klipper's standard corner-radius formula.
-            if sin_half > COLLINEAR_EPS and one_minus_cos > 1e-12:
-                _R_tol = corner_deviation * cos_half / one_minus_cos
-                _R_mid = 0.5 * min(
-                    prev_move.move_d, next_move.move_d
-                ) * cos_half / sin_half
-                _R_clamped = min(_R_tol, _R_mid)
-                if _R_clamped > 0.0:
-                    _v_arc = math.sqrt(_R_clamped * a_max)
-                    _theta = 2.0 * math.atan2(sin_half, cos_half)
-                    _L_arc = _R_clamped * _theta
-                    # SCV-equivalent at 90° that would match corner_deviation
-                    # under the shaper's own smearing budget.
-                    _v_scv90 = corner_deviation / (
-                        math.sqrt(2.0) * sigma_T_max
-                    )
-                    # jd equivalent (Klipper's formula):
-                    #     jd = SCV^2 * (sqrt(2) - 1) / a_max
-                    _jd_eq = _v_scv90 * _v_scv90 * (
-                        math.sqrt(2.0) - 1.0
-                    ) / a_max
-                    _R_scv = _jd_eq * cos_half / one_minus_cos
-                    _v_j_scv = math.sqrt(_R_scv * a_max)
-                    _v_arc_cap = min(_v_arc, max_v)
-                    _v_j_cap = min(_v_j_scv, max_v)
-                    _fork_cost = 2.0 * max(0.0, max_v - _v_arc_cap) / a_max \
-                        + (_L_arc / _v_arc_cap if _v_arc_cap > 0.0 else 0.0)
-                    _main_cost = 2.0 * max(0.0, max_v - _v_j_cap) / a_max
-                    if _fork_cost >= _main_cost:
-                        return None
+        # Rule 2 (velocity-aware): skip if an imaginary mainline-SCV
+        # junction at this same corner (sized so its post-shaper
+        # deviation matches corner_deviation) would be no slower than
+        # our arc.  Catches sharp corners with short adjoining segments
+        # where R clamps small and v_arc drops below cruise — arc
+        # traversal time then exceeds the ramp savings vs SCV-equivalent.
+        if sin_half > COLLINEAR_EPS and one_minus_cos > 1e-12:
+            _R_tol = corner_deviation * cos_half / one_minus_cos
+            _R_mid = 0.5 * min(
+                prev_move.move_d, next_move.move_d
+            ) * cos_half / sin_half
+            _R_clamped = min(_R_tol, _R_mid)
+            if _R_clamped > 0.0:
+                _v_arc = math.sqrt(_R_clamped * a_max)
+                _theta = 2.0 * math.atan2(sin_half, cos_half)
+                _L_arc = _R_clamped * _theta
+                _v_j_scv = _scv_equivalent_junction_v(
+                    cos_half, sin_half, corner_deviation, sigma_T_max, a_max,
+                )
+                _v_arc_cap = min(_v_arc, max_v)
+                _v_j_cap = min(_v_j_scv, max_v)
+                _fork_cost = 2.0 * max(0.0, max_v - _v_arc_cap) / a_max \
+                    + (_L_arc / _v_arc_cap if _v_arc_cap > 0.0 else 0.0)
+                _main_cost = 2.0 * max(0.0, max_v - _v_j_cap) / a_max
+                if _fork_cost >= _main_cost:
+                    return None
 
     # First pass: no jerk constraint — we need R, entry_pt, center,
     # plane_normal to compute per-axis bounds.
