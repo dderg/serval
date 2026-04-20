@@ -56,19 +56,6 @@ pa_move_integrate(struct move *m, int axis
         start = 0.;
     if (end > m->move_t)
         end = m->move_t;
-    // figure out what to use for pressure advance
-    // use_pa_from_trapq is passed in via the move's axes_r.z field
-    // if this is True (not 0), we use the pressure advance value in the axes_r.y
-    // otherwise, we use the one passed in as an arg to this function (the stored one)
-    int use_pa_from_trapq = m->axes_r.z != 0.;
-    if (use_pa_from_trapq) {
-        pressure_advance = m->axes_r.y;
-    }
-    else {
-        int can_pressure_advance = m->axes_r.y != 0.;
-        if (!can_pressure_advance)
-            pressure_advance = 0.;
-    }
     // Calculate base position and velocity with pressure advance
     int can_pressure_advance = m->axes_r.x > 0. || m->axes_r.y > 0.;
     double axis_r = m->axes_r.axis[axis - 'x'];
