@@ -1,5 +1,11 @@
 # Measuring Resonances
 
+> **Fork note:** This Kalico fork retains only `zv` and `mzv` as impulse
+> shapers and adds the six `smooth_*` variants. Example `Fitted shaper`
+> outputs below that list `ei`, `2hump_ei`, or `3hump_ei` reflect upstream
+> Klipper; on this fork `AXES_SHAPER_CALIBRATION` reports only the
+> retained shapers plus the smooth variants.
+
 Kalico has built-in support for the ADXL345, MPU-9250 and LIS2DW compatible
 accelerometers which can be used to measure resonance frequencies of the printer
 for different axes, and auto-tune [input shapers](Resonance_Compensation.md) to

@@ -69,7 +69,7 @@ def main():
         "--shaper",
         type="string",
         dest="shaper",
-        default="ei",
+        default="smooth_mzv",
         help="name of the shaper to plot",
     )
     opts.add_option(

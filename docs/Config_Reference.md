@@ -2153,8 +2153,9 @@ the [command reference](G-Codes.md#input_shaper).
 #   shaping for Y axis.
 #shaper_type: mzv
 #   A type of the input shaper to use for both X and Y axes. Supported
-#   shapers are zv, mzv, zvd, ei, 2hump_ei, and 3hump_ei. The default
-#   is mzv input shaper.
+#   impulse shapers are zv and mzv; smooth variants (smooth_zv,
+#   smooth_mzv, smooth_ei, smooth_2hump_ei, smooth_zvd_ei, smooth_si)
+#   are available as well -- see Bleeding_Edge.md. The default is mzv.
 #shaper_type_x:
 #shaper_type_y:
 #   If shaper_type is not set, these two parameters can be used to

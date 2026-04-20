@@ -45,7 +45,7 @@ enabled_extruders: extruder
 shaper_type:
 #   A type of the input shaper to use for both X and Y axes. Supported
 #   shapers are smooth_zv, smooth_mzv, smooth_ei, smooth_2hump_ei, smooth_zvd_ei,
-#   smooth_si, mzv, ei, 2hump_ei.
+#   smooth_si, zv, mzv.
 #shaper_type_x:
 #shaper_type_y:
 #   If shaper_type is not set, these two parameters can be used to

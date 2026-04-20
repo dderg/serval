@@ -18,10 +18,6 @@ EXTURDER_SMOOTHERS = {
     "default": ExtruderSmootherCfg(-1, (1.0, 1.0, 1)),
     "zv": ExtruderSmootherCfg(5, (0.98, 1.02, 5)),
     "mzv": ExtruderSmootherCfg(7, (0.95, 1.05, 11)),
-    "zvd": ExtruderSmootherCfg(7, (0.93, 1.06, 14)),
-    "ei": ExtruderSmootherCfg(7, (0.83, 0.89, 7)),
-    "2hump_ei": ExtruderSmootherCfg(9, (0.65, 0.75, 11)),
-    "3hump_ei": ExtruderSmootherCfg(10, (0.54, 0.66, 13)),
     "smooth_zv": ExtruderSmootherCfg(7, (0.98, 1.0, 3)),
     "smooth_mzv": ExtruderSmootherCfg(9, (0.95, 1.07, 20)),
     "smooth_ei": ExtruderSmootherCfg(9, (0.97, 1.07, 15)),
@@ -142,9 +138,6 @@ def _calc_extruder_smoother(np, shaper_name, t, velocities, n, t_sm):
         B[3, :] = np.power(-0.5, np.arange(n)) * np.arange(n)
         B[4, :] = np.power(0.5, np.arange(n)) * np.arange(n)
         f[3] = f[4] = 0.0
-    if shaper_name == "3hump_ei":
-        B[3, :] = np.power(0.5, np.arange(n)) * np.arange(n)
-        f[3] = 0.0
     C = np.linalg.solve(B, f)
     return C
 
