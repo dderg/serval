@@ -416,15 +416,66 @@ def blend_from_moves(
                     if _sigma_T > sigma_T_max:
                         sigma_T_max = _sigma_T
         if sigma_T_max > 0.0:
-            # Compute sin(phi/2) from the two direction vectors.
+            # Geometry shared across both suppression rules.
             dp = vdot(prev_dir, next_dir)
             dp = max(-1.0, min(1.0, dp))
+            cos_half = math.sqrt(max(0.0, (1.0 + dp) * 0.5))
             sin_half = math.sqrt(max(0.0, (1.0 - dp) * 0.5))
+            one_minus_cos = 1.0 - cos_half
             max_v2 = min(prev_move.max_cruise_v2, next_move.max_cruise_v2)
             max_v = math.sqrt(max_v2)
+
+            # Rule 1 (shaper-aware): skip if the shaper alone keeps the
+            # corner inside the corner_deviation post-shaper budget.
+            #     eps_shaper = 2 * v * sin(phi/2) * sigma_T_max
             eps_shaper = 2.0 * max_v * sin_half * sigma_T_max
             if eps_shaper <= corner_deviation:
                 return None
+
+            # Rule 2 (velocity-aware): skip if an imaginary mainline-SCV
+            # junction at this same corner (sized so its *post-shaper*
+            # deviation matches corner_deviation) would be no slower
+            # than our arc.  This catches sharp corners with short
+            # adjoining segments where R clamps small and v_arc drops
+            # below cruise — the arc traversal time then exceeds the
+            # ramp savings relative to an SCV-equivalent sharp corner.
+            #
+            # SCV-equivalent velocity at 90° matching cd budget:
+            #     v_scv90 = cd / (sqrt(2) * sigma_T_max)
+            # at arbitrary angle, scaled by sin(phi/2) symmetry of the
+            # shaper smear (both fork and main see the 2·v·sin(phi/2)
+            # transverse velocity step).  We derive an effective
+            # junction-deviation from this reference velocity and a 90°
+            # anchor, then apply Klipper's standard corner-radius formula.
+            if sin_half > COLLINEAR_EPS and one_minus_cos > 1e-12:
+                _R_tol = corner_deviation * cos_half / one_minus_cos
+                _R_mid = 0.5 * min(
+                    prev_move.move_d, next_move.move_d
+                ) * cos_half / sin_half
+                _R_clamped = min(_R_tol, _R_mid)
+                if _R_clamped > 0.0:
+                    _v_arc = math.sqrt(_R_clamped * a_max)
+                    _theta = 2.0 * math.atan2(sin_half, cos_half)
+                    _L_arc = _R_clamped * _theta
+                    # SCV-equivalent at 90° that would match corner_deviation
+                    # under the shaper's own smearing budget.
+                    _v_scv90 = corner_deviation / (
+                        math.sqrt(2.0) * sigma_T_max
+                    )
+                    # jd equivalent (Klipper's formula):
+                    #     jd = SCV^2 * (sqrt(2) - 1) / a_max
+                    _jd_eq = _v_scv90 * _v_scv90 * (
+                        math.sqrt(2.0) - 1.0
+                    ) / a_max
+                    _R_scv = _jd_eq * cos_half / one_minus_cos
+                    _v_j_scv = math.sqrt(_R_scv * a_max)
+                    _v_arc_cap = min(_v_arc, max_v)
+                    _v_j_cap = min(_v_j_scv, max_v)
+                    _fork_cost = 2.0 * max(0.0, max_v - _v_arc_cap) / a_max \
+                        + (_L_arc / _v_arc_cap if _v_arc_cap > 0.0 else 0.0)
+                    _main_cost = 2.0 * max(0.0, max_v - _v_j_cap) / a_max
+                    if _fork_cost >= _main_cost:
+                        return None
 
     # First pass: no jerk constraint — we need R, entry_pt, center,
     # plane_normal to compute per-axis bounds.
