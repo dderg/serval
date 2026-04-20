@@ -83,6 +83,20 @@ CalibrationResult = collections.namedtuple(
 DEFAULT_TARGET_SMOOTHING = 0.12
 
 
+def _is_smoother(obj):
+    """Structural discriminator: True iff obj is a smooth-family (C, t_sm) tuple.
+
+    Impulse shaper: ``(A, T)`` with both entries list-like.
+    Smoother:       ``(C, t_sm)`` with ``t_sm`` a bare scalar.
+
+    Used by ``ShaperCalibrate.find_shaper_max_accel`` to dispatch on family.
+    See docs/superpowers/specs/2026-04-20-target-smoothing-smooth-family.md §7.1.
+    """
+    if not isinstance(obj, tuple) or len(obj) != 2:
+        return False
+    return isinstance(obj[1], (int, float))
+
+
 
 def step_response(np, t, omega, damping_ratio):
     t = np.maximum(t, 0.0)
@@ -390,26 +404,34 @@ class ShaperCalibrate:
             offset_180 += A[i] * half_accel * (T[i] - ts) ** 2
         return offset_180 * inv_D
 
-    def _get_smoother_smoothing(self, smoother, accel=5000):
-        # Smooth-shaper analogue of `_get_shaper_smoothing`: integrates
-        # offset_180 (U-turn overshoot) for the smoother's weighting
-        # polynomial. SCV-free per sub-spec 6a — no offset_90 term.
-        # TARGET_SMOOTHING: family dispatch refined in Task 9.
-        np = self.numpy
-        half_accel = accel * 0.5
-
+    def _get_smoother_sigma2(self, smoother):
+        # Second central moment of the smoother's support polynomial.
+        # sigma^2 = M_2 / M_0 - (M_1 / M_0)^2 — closed form over the raw
+        # polynomial moments. Odd-power integrals over the symmetric
+        # interval [-t_sm/2, +t_sm/2] vanish, so only entries with matching
+        # parity contribute. See docs/superpowers/specs/
+        # 2026-04-20-target-smoothing-smooth-family.md §2.3.
         C, t_sm = smoother
         hst = 0.5 * t_sm
-        t, dt = np.linspace(-hst, hst, 100, retstep=True)
-        w = np.zeros(shape=t.shape)
-        for c in C[::-1]:
-            w = w * (-t) + c
-        inv_norm = 1.0 / np.trapz(w, dx=dt)
-        w *= inv_norm
-        t -= np.trapz(t * w, dx=dt)
 
-        offset_180 = np.trapz(half_accel * t**2 * w, dx=dt)
-        return abs(offset_180)
+        def raw_moment(k):
+            s = 0.0
+            for i, c in enumerate(C):
+                if (i + k) % 2 == 0:
+                    s += c * 2.0 * hst ** (i + k + 1) / (i + k + 1)
+            return s
+
+        M0 = raw_moment(0)
+        ts = raw_moment(1) / M0
+        return raw_moment(2) / M0 - ts * ts
+
+    def _get_smoother_smoothing(self, smoother, accel=5000):
+        # Smooth-shaper analogue of `_get_shaper_smoothing`: the shaper
+        # residual at a 180° velocity reversal is (a/2) * sigma^2 per the
+        # convolution derivation in docs/superpowers/specs/
+        # 2026-04-20-target-smoothing-smooth-family.md §2.2. SCV-free per
+        # sub-spec 6a — no offset_90 term.
+        return 0.5 * accel * self._get_smoother_sigma2(smoother)
 
     def fit_shaper(
         self,
@@ -524,14 +546,21 @@ class ShaperCalibrate:
         return left
 
     def find_shaper_max_accel(self, shaper, target_smoothing=None):
-        # Bisect on the largest accel whose shaper smoothing stays under
-        # self.target_smoothing (or an explicit caller override). The
-        # per-call override exists so Shake&Tune can probe alternative
-        # thresholds without mutating module state.
+        # Family dispatcher. Returns the largest accel whose shaper residual
+        # at a 180° velocity reversal stays under self.target_smoothing
+        # (or an explicit caller override). The per-call override exists so
+        # Shake&Tune can probe alternative thresholds without mutating
+        # module state.
+        #
+        # Impulse shapers: bisection on the sum-form offset_180 (sub-spec 6a).
+        # Smooth shapers: closed-form A_crit = 2 * target / sigma^2 per
+        # docs/superpowers/specs/2026-04-20-target-smoothing-smooth-family.md.
         target = (
             self.target_smoothing if target_smoothing is None
             else target_smoothing
         )
+        if _is_smoother(shaper):
+            return self.find_smoother_max_accel(shaper, target)
         max_accel = self._bisect(
             lambda test_accel: (
                 self._get_shaper_smoothing(shaper, test_accel) <= target
@@ -541,19 +570,22 @@ class ShaperCalibrate:
         return max_accel
 
     def find_smoother_max_accel(self, smoother, target_smoothing=None):
-        # Smooth-shaper analogue of `find_shaper_max_accel`. SCV-free per
-        # sub-spec 6a. TARGET_SMOOTHING: family dispatch refined in Task 9.
+        # Smooth-shaper analogue of `find_shaper_max_accel`. Closed-form
+        # inverse of `_get_smoother_smoothing`:
+        #     A_crit = 2 * target / sigma^2
+        # per docs/superpowers/specs/2026-04-20-target-smoothing-smooth-family.md
+        # §2.4. SCV-free per sub-spec 6a. No bisection is needed — the root
+        # is exact once sigma^2 is known in closed form.
         target = (
             self.target_smoothing if target_smoothing is None
             else target_smoothing
         )
-        max_accel = self._bisect(
-            lambda test_accel: (
-                self._get_smoother_smoothing(smoother, test_accel) <= target
-            ),
-            1e-2,
-        )
-        return max_accel
+        sigma2 = self._get_smoother_sigma2(smoother)
+        if sigma2 <= 0.0:
+            # Degenerate support (zero-width or numerical cancellation);
+            # no cap applies.
+            return float('inf')
+        return 2.0 * target / sigma2
 
     def find_best_shaper(
         self,
