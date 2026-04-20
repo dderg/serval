@@ -44,19 +44,29 @@ Files that will **remain untouched** by this plan:
 
 ---
 
+## Environment (reference)
+
+This fork uses the virtualenv at `/Users/daniladergachev/Developer/kalico/.venv-test` (shared across worktrees — the smooth-shapers worktree does NOT have its own venv). Every test/compile command in this plan assumes this venv is activated. Activate once per shell:
+
+```bash
+source /Users/daniladergachev/Developer/kalico/.venv-test/bin/activate
+```
+
+`chelper` (the C extension) is **built on first Python import** via `klippy/chelper/__init__.py:get_ffi()`. There is no Makefile. To force a rebuild check, run any pytest invocation — `test/conftest.py` calls `klippy.chelper.get_ffi()` automatically.
+
 ## Standard cherry-pick procedure (reference)
 
 Each cherry-pick task below uses this core sequence. Inlined verbatim in the first phase task; later phases reference it.
 
 ```bash
-# From ~/Developer/kalico-smooth-shapers
+# venv active, cwd = ~/Developer/kalico-smooth-shapers
 git cherry-pick <hash>            # initiate pick
 # If conflict: resolve in the listed files, then:
 #   git add <files>
 #   git cherry-pick --continue
-# After commit lands:
-make -C klippy/chelper             # rebuild c_helper.so
-python -m compileall klippy/       # ensure Python compiles
+# After commit lands, force chelper rebuild + Python compile-check:
+python -c "from klippy import chelper; ffi, lib = chelper.get_ffi(); print('chelper OK')"
+python -m compileall klippy/
 ```
 
 Then, at phase end only, run the test subset listed for that phase.
@@ -86,11 +96,13 @@ Expected: commit matching the base of `blend-arc` at plan creation (`04943583` o
 
 - [ ] **Step 3: Build chelper from scratch**
 
-Run:
+Delete any stale `.so` and force a rebuild via Python import:
 ```bash
-cd ~/Developer/kalico-smooth-shapers && make -C klippy/chelper clean && make -C klippy/chelper
+cd ~/Developer/kalico-smooth-shapers
+rm -f klippy/chelper/c_helper.so klippy/chelper/*.o
+python -c "from klippy import chelper; ffi, lib = chelper.get_ffi(); print('chelper OK')"
 ```
-Expected: no errors, `klippy/chelper/c_helper.so` produced.
+Expected: no errors, `klippy/chelper/c_helper.so` produced, "chelper OK" printed.
 
 - [ ] **Step 4: Run full host-side test suite**
 
@@ -213,21 +225,16 @@ git add <resolved files>
 git cherry-pick --continue
 ```
 
-- [ ] **Step 2: Rebuild chelper**
+- [ ] **Step 2: Rebuild chelper + compile check Python**
 
 ```bash
-cd ~/Developer/kalico-smooth-shapers && make -C klippy/chelper
+cd ~/Developer/kalico-smooth-shapers
+python -c "from klippy import chelper; ffi, lib = chelper.get_ffi(); print('chelper OK')"
+python -m compileall klippy/
 ```
-Expected: clean build.
+Expected: "chelper OK", no syntax errors.
 
-- [ ] **Step 3: Compile check Python**
-
-```bash
-cd ~/Developer/kalico-smooth-shapers && python -m compileall klippy/
-```
-Expected: no syntax errors.
-
-- [ ] **Step 4: Run extruder & blend-planner tests**
+- [ ] **Step 3: Run extruder & blend-planner tests**
 
 ```bash
 cd ~/Developer/kalico-smooth-shapers && python -m pytest test/test_extruder_overrides_simple.py test/test_blendmath.py test/test_blendplanner.py test/test_blendprepass.py test/test_blendshaper.py -x -q
@@ -280,9 +287,9 @@ git cherry-pick ee1181d4
 This is the biggest commit of the series (~543 lines across 10 files). Expect conflict again in `input_shaper.py` if Task 4 Step 1's resolution left stub markers. Resolve analogously. Rebuild chelper after the pick:
 
 ```bash
-make -C klippy/chelper
+python -c "from klippy import chelper; ffi, lib = chelper.get_ffi(); print('chelper OK')"
 ```
-Expected: clean build. Smooth-shaper types (`SmoothShaperClass`) should now be defined.
+Expected: "chelper OK". Smooth-shaper types (`SmoothShaperClass`) should now be defined.
 
 - [ ] **Step 3: Pick `dc649b48` and `0469a0ed`**
 
@@ -295,7 +302,7 @@ Both touch only chelper (`integrate.c/h`, `kin_shaper.c`, `kin_extruder.c`). Exp
 - [ ] **Step 4: Rebuild and compile check**
 
 ```bash
-make -C klippy/chelper
+python -c "from klippy import chelper; ffi, lib = chelper.get_ffi(); print('chelper OK')"
 python -m compileall klippy/
 ```
 
@@ -367,7 +374,7 @@ Repeat resolution strategy for each.
 - [ ] **Step 3: Rebuild + compile**
 
 ```bash
-make -C klippy/chelper
+python -c "from klippy import chelper; ffi, lib = chelper.get_ffi(); print('chelper OK')"
 python -m compileall klippy/
 ```
 
@@ -414,7 +421,7 @@ For each: resolve any `input_shaper.py` conflicts using the same strategy as Pha
 - [ ] **Step 2: Rebuild + compile**
 
 ```bash
-make -C klippy/chelper
+python -c "from klippy import chelper; ffi, lib = chelper.get_ffi(); print('chelper OK')"
 python -m compileall klippy/
 ```
 
