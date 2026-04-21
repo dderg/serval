@@ -89,13 +89,13 @@ class CornerBlender:
             emitted = [self._prev]
             self._prev = move
             return emitted
-        trunc_prev, arc_moves, trunc_next_head = self._emit_arc(
+        trunc_prev, blend_moves, trunc_next_head = self._emit_blend(
             self._prev, move, shape
         )
         self._prev = trunc_next_head
         self.blends_emitted += 1
-        self.polyline_moves_emitted += len(arc_moves)
-        return [trunc_prev] + arc_moves
+        self.polyline_moves_emitted += len(blend_moves)
+        return [trunc_prev] + blend_moves
 
     def _resolve_chord_err(self):
         """Return the polyline chord tolerance to use for the current blend.
@@ -109,11 +109,11 @@ class CornerBlender:
         # auto-scale at loose tolerances.
         return max(20e-3, 0.2 * self._toolhead.corner_deviation)
 
-    def _emit_arc(self, prev, nxt, shape):
+    def _emit_blend(self, prev, nxt, shape):
         """Construct [trunc_prev, polyline_moves...] and the trunc_next_head.
 
         `shape` is a QuinticShape (SmoothShape protocol). Returns
-        (trunc_prev, arc_moves_list, trunc_next_head).
+        (trunc_prev, blend_moves_list, trunc_next_head).
         """
         th = self._toolhead
         move_cls = self._move_cls
@@ -157,13 +157,13 @@ class CornerBlender:
         arc_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2, shape_mid_v ** 2)
         arc_cap_v = math.sqrt(arc_cap_v2)
         arc_accel = min(prev.accel, nxt.accel)
-        arc_moves = []
+        blend_moves = []
         for p0, p1 in zip(points_4d, points_4d[1:]):
             am = move_cls(th, p0, p1, arc_cap_v)
             am.max_cruise_v2 = arc_cap_v2
             am.limit_speed(arc_cap_v, arc_accel)
             am.min_move_t = am.move_d / arc_cap_v
-            arc_moves.append(am)
+            blend_moves.append(am)
 
         # --- 3. Truncated next head ---
         trunc_next_head_start_xyz = tuple(
@@ -185,17 +185,17 @@ class CornerBlender:
 
         # Aggregate-safety re-check. check_move runs before lookahead.add_move
         # in ToolHead.move, so emitted polyline Moves bypass it otherwise.
-        # One representative is sufficient: all arc moves share accel, v_cap,
+        # One representative is sufficient: all blend moves share accel, v_cap,
         # and per-mm E rate; spatially the polyline is localized near the
         # corner vertex so envelope checks evaluate at roughly the same
         # coordinates across all points.
-        if arc_moves:
-            representative = arc_moves[0]
+        if blend_moves:
+            representative = blend_moves[0]
             th.kin.check_move(representative)
             if representative.axes_d[3]:
                 th.extruder.check_move(representative)
 
-        return trunc_prev, arc_moves, trunc_next_head
+        return trunc_prev, blend_moves, trunc_next_head
 
     def flush(self):
         if self._prev is None:

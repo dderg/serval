@@ -141,7 +141,7 @@ def test_feed_non_kinematic_flushes_and_passes():
 def test_feed_collinear_pair_passes_through_with_rebuffer():
     b = _blender()
     th = b._toolhead
-    # Two exactly collinear moves along +X: blend_from_moves returns None.
+    # Two exactly collinear moves along +X: QuinticShape.from_moves returns None.
     m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
     assert b.feed(m1) == []
