@@ -710,3 +710,50 @@ def test_quintic_v_cap_smooth_vs_fir_same_order_of_magnitude():
         f"v_cap ratio smooth/FIR = {ratio:.3f} (v_sis={v_sis:.1f}, "
         f"v_fir={v_fir:.1f}); likely A_axis scale error in Smooth-IS derivation"
     )
+
+
+# === Plan 4 D5: v_cap_fn endpoint tests ===
+
+@pytest.mark.parametrize("angle_deg", [45, 90, 120, 170])
+def test_v_cap_fn_endpoints_finite_and_positive(angle_deg):
+    """v_cap_fn(0) and v_cap_fn(arc_length) must be finite and positive
+    for a representative range of corner angles.
+
+    At blend endpoints the quintic is tangent to the incoming/outgoing
+    straight move, so v_cap should logically equal the straight's
+    max_cruise_v (or higher). A blow-up here would mean numerical
+    degeneracy in _point_frame (blendquintic.py:196).
+    """
+    theta = math.radians(180.0 - angle_deg)  # interior angle
+    # 90° corner at (10,0,0) means prev goes +X, next goes in direction
+    # (cos(theta), sin(theta), 0) from there.
+    prev = _FakeMoveFactory((0.0, 0.0, 0.0), (10.0, 0.0, 0.0))
+    next_m = _FakeMoveFactory(
+        (10.0, 0.0, 0.0),
+        (10.0 + 10.0 * math.cos(theta), 10.0 * math.sin(theta), 0.0),
+    )
+    limits = _make_smooth_mzv_limits()  # from T6 helpers
+    shape = blendquintic.QuinticShape.from_moves(prev, next_m, 0.1, limits)
+    if shape is None:
+        pytest.skip("from_moves returned None for this angle; not in scope")
+    v0 = shape.v_cap_fn(0.0)
+    vN = shape.v_cap_fn(shape.arc_length)
+    assert math.isfinite(v0) and v0 > 0.0, f"v_cap_fn(0) = {v0}"
+    assert math.isfinite(vN) and vN > 0.0, f"v_cap_fn(arc_length) = {vN}"
+
+
+def test_v_cap_fn_endpoints_at_least_straight_cruise():
+    """At a blend endpoint the curve is tangent to the straight — the
+    cap should not be pathologically low (at least 10 mm/s on a 300 mm/s
+    straight).
+    """
+    prev = _FakeMoveFactory((0.0, 0.0, 0.0), (10.0, 0.0, 0.0))
+    next_m = _FakeMoveFactory((10.0, 0.0, 0.0), (10.0, 10.0, 0.0))
+    limits = _make_smooth_mzv_limits()
+    shape = blendquintic.QuinticShape.from_moves(prev, next_m, 0.1, limits)
+    if shape is None:
+        pytest.skip("from_moves returned None; not in scope")
+    v0 = shape.v_cap_fn(0.0)
+    vN = shape.v_cap_fn(shape.arc_length)
+    assert v0 >= 10.0, f"v_cap_fn(0) too low: {v0}"
+    assert vN >= 10.0, f"v_cap_fn(arc_length) too low: {vN}"
