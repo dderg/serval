@@ -11,6 +11,30 @@ import math
 from . import blendmath, blendquintic, blendshape
 
 
+def _extract_extruder_caps(toolhead):
+    """Pull the ExtruderLimits off the toolhead's extruder if configured.
+
+    Returns None when the extruder cap is disabled or no extruder is
+    present — the downstream shape-build code treats None as 'no cap'.
+
+    Plan 3 wires this; Plan 5 (pillar 2 unified v(s)) will consume it
+    as part of the continuous v(s) evaluation along the curve. For
+    now the per-move cap is applied at Move-level in Move.limit_speed
+    (see Task 11).
+    """
+    extruder = getattr(toolhead, "extruder", None)
+    if extruder is None:
+        return None
+    snap_fn = getattr(extruder, "extruder_limits_snapshot", None)
+    if snap_fn is None:
+        return None
+    snapshot = snap_fn()
+    if snapshot is None:
+        return None
+    _, limits = snapshot
+    return limits
+
+
 def _copy_caller_state(src, dst):
     """Transfer caller-mutable Move state from src to the truncated dst.
 
@@ -65,7 +89,7 @@ class CornerBlender:
             a_max=th.max_accel,
             v_max=th.max_velocity,
             jerk_max=None,       # plan 1: jerk cap disabled; plan 5 wires it
-            extruder_caps=None,  # plan 1: extruder cap disabled; plan 4 wires it
+            extruder_caps=_extract_extruder_caps(th),  # plan 3; consumed by plan 5
             shapers=blendmath._extract_shapers(th),
         )
         shape = blendquintic.QuinticShape.from_moves(
