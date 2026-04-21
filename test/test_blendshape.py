@@ -1,8 +1,4 @@
 # test/test_blendshape.py
-import math
-
-import pytest
-
 from klippy import blendshape
 
 
