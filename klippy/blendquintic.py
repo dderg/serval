@@ -14,10 +14,9 @@
 # overshoot at the worst angles).
 from __future__ import annotations
 
-import math
 from typing import Optional, Tuple
 
-from . import blendmath, blendshape
+from . import blendshape
 
 Vec3 = Tuple[float, float, float]
 
