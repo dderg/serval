@@ -268,3 +268,41 @@ def test_set_extruder_limits_omit_reports_current():
     es.cmd_SET_EXTRUDER_LIMITS(g)
     assert "5000" in g.last
     assert "200" in g.last
+
+
+def test_extruder_limits_snapshot_shape():
+    """snapshot returns (PAModelSnapshot, ExtruderLimits) or None."""
+    from klippy.kinematics.extruder import ExtruderStepper, PALinearModel
+
+    es = ExtruderStepper.__new__(ExtruderStepper)
+    es.max_extruder_accel = 5000.0
+    es.max_extruder_rpm = 200.0
+
+    pa = PALinearModel.__new__(PALinearModel)
+    pa.pressure_advance = 0.04
+    es.pressure_advance_model = pa
+
+    class _ExtSmoother:
+        def __init__(self, t):
+            self.smooth_time = t
+    es.smoother = _ExtSmoother(0.04)
+    es.rotation_distance = 4.78  # BMG-ish
+
+    snap = es.extruder_limits_snapshot()
+    assert snap is not None
+    pa_snap, limits = snap
+    assert pa_snap.kind == "linear"
+    assert pa_snap.params == (0.04,)
+    assert limits.a_E_max == 5000.0
+    # v_E_max = (200 / 60) * 4.78 ~= 15.933 mm/s
+    assert limits.v_E_max == pytest.approx((200.0 / 60.0) * 4.78, rel=1e-6)
+    assert limits.smooth_time == 0.04
+
+
+def test_extruder_limits_snapshot_disabled_returns_none():
+    """When both caps are 0, snapshot=None."""
+    from klippy.kinematics.extruder import ExtruderStepper
+    es = ExtruderStepper.__new__(ExtruderStepper)
+    es.max_extruder_accel = 0.0
+    es.max_extruder_rpm = 0.0
+    assert es.extruder_limits_snapshot() is None

@@ -234,6 +234,38 @@ class PAReciprModel(PANonLinearModel):
         return -2.0 * self.nonlinear_offset / (self.linearization_velocity ** 2) / (1.0 + r) ** 3
 
 
+def _pa_model_snapshot(pa):
+    """Produce a blendextruder.PAModelSnapshot from a live PA model.
+
+    Returns None if the model is not recognized (defensive; should not
+    happen in production).
+    """
+    from klippy import blendextruder
+    if isinstance(pa, PALinearModel):
+        return blendextruder.PAModelSnapshot(
+            kind="linear", params=(pa.pressure_advance,),
+        )
+    if isinstance(pa, PATanhModel):
+        return blendextruder.PAModelSnapshot(
+            kind="tanh",
+            params=(
+                pa.linear_advance,
+                pa.nonlinear_offset,
+                pa.linearization_velocity,
+            ),
+        )
+    if isinstance(pa, PAReciprModel):
+        return blendextruder.PAModelSnapshot(
+            kind="recipr",
+            params=(
+                pa.linear_advance,
+                pa.nonlinear_offset,
+                pa.linearization_velocity,
+            ),
+        )
+    return None
+
+
 class ExtruderStepper:
     pa_models = {
         PALinearModel.name: PALinearModel,
@@ -517,6 +549,34 @@ class ExtruderStepper:
             "EXTRUDER '%s': max_extruder_accel=%.1f, max_extruder_rpm=%.1f"
             % (self.name, self.max_extruder_accel, self.max_extruder_rpm)
         )
+
+    def extruder_limits_snapshot(self):
+        """Build (PAModelSnapshot, ExtruderLimits) or return None.
+
+        Returns None when both caps are disabled (user hasn't configured
+        max_extruder_accel or max_extruder_rpm). When active, the
+        snapshot is an immutable pair the planner can hand to
+        blendextruder.cap_move() per-move.
+        """
+        if self.max_extruder_accel <= 0.0 and self.max_extruder_rpm <= 0.0:
+            return None
+        pa_snap = _pa_model_snapshot(self.pressure_advance_model)
+        if pa_snap is None:
+            return None
+        v_E_max = (
+            (self.max_extruder_rpm / 60.0) * self.rotation_distance
+            if self.max_extruder_rpm > 0.0
+            else float("inf")
+        )
+        a_E_max = (
+            self.max_extruder_accel if self.max_extruder_accel > 0.0 else float("inf")
+        )
+        smooth_time = getattr(self.smoother, "smooth_time", 0.04)
+        from klippy import blendshape
+        limits = blendshape.ExtruderLimits(
+            a_E_max=a_E_max, v_E_max=v_E_max, smooth_time=smooth_time,
+        )
+        return (pa_snap, limits)
 
 
 # Tracking for hotend heater, extrusion motion queue, and extruder stepper
