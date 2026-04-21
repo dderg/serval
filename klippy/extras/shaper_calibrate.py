@@ -460,6 +460,7 @@ class ShaperCalibrate:
         estimate_shaper,
         get_shaper_smoothing,
         find_max_accel,
+        min_freq=None,
     ):
         np = self.numpy
 
@@ -490,9 +491,22 @@ class ShaperCalibrate:
 
         max_freq = max(max_freq or MAX_FREQ, test_freqs.max())
 
+        # Plot range — capped only at the top; used for the shaper-response
+        # curve drawn by scripts/calibrate_shaper.py.
         freq_bins = calibration_data.freq_bins
-        psd = calibration_data.psd_sum[freq_bins <= max_freq]
-        freq_bins = freq_bins[freq_bins <= max_freq]
+        top_mask = freq_bins <= max_freq
+        psd = calibration_data.psd_sum[top_mask]
+        freq_bins = freq_bins[top_mask]
+
+        # Scoring range — additionally drop anything below min_freq. Below
+        # the sweep's start frequency there is no driven response, so
+        # whatever the accelerometer records there is noise; including it
+        # inflates the threshold and the denominator of the vibration
+        # score and biases selection toward low-frequency smoothers.
+        lo = min_freq if min_freq is not None else 0.0
+        score_mask = freq_bins >= lo
+        score_freq_bins = freq_bins[score_mask]
+        score_psd = psd[score_mask]
 
         best_res = None
         results = []
@@ -505,7 +519,7 @@ class ShaperCalibrate:
                 freq_bins, test_freq_bins * test_freq, test_shaper_vals
             )
             shaper_vibrations = self._estimate_remaining_vibrations(
-                freq_bins, shaper_vals, psd
+                score_freq_bins, shaper_vals[score_mask], score_psd
             )
             max_accel = find_max_accel(shaper)
             # The score trying to minimize vibrations, but also accounting
@@ -611,6 +625,7 @@ class ShaperCalibrate:
         max_smoothing=None,
         test_damping_ratios=None,
         max_freq=None,
+        min_freq=None,
         logger=None,
     ):
         best_shaper = None
@@ -632,6 +647,7 @@ class ShaperCalibrate:
                     estimate_smoother,
                     self._get_smoother_smoothing,
                     self.find_smoother_max_accel,
+                    min_freq,
                 ),
             )
             if logger is not None:
@@ -680,6 +696,7 @@ class ShaperCalibrate:
                     estimate_shaper,
                     self._get_shaper_smoothing,
                     self.find_shaper_max_accel,
+                    min_freq,
                 ),
             )
             if logger is not None:

@@ -77,6 +77,7 @@ def calibrate_shaper(
     max_smoothing,
     test_damping_ratios,
     max_freq,
+    min_freq=None,
 ):
     helper = shaper_calibrate.ShaperCalibrate(printer=None)
     if isinstance(datas[0], shaper_calibrate.CalibrationData):
@@ -98,6 +99,7 @@ def calibrate_shaper(
         max_smoothing=max_smoothing,
         test_damping_ratios=test_damping_ratios,
         max_freq=max_freq,
+        min_freq=min_freq,
         logger=print,
     )
     if not shaper:
@@ -248,6 +250,16 @@ def main():
         help="maximum frequency to plot",
     )
     opts.add_option(
+        "--min_freq",
+        type="float",
+        default=None,
+        help=(
+            "minimum frequency for scoring (matches the resonance sweep's "
+            "FREQ_START); below this is treated as noise and excluded from "
+            "the vibration score. Default: 0 (no lower filter)."
+        ),
+    )
+    opts.add_option(
         "-s",
         "--max_smoothing",
         type="float",
@@ -358,6 +370,7 @@ def main():
         max_smoothing=options.max_smoothing,
         test_damping_ratios=test_damping_ratios,
         max_freq=max_freq,
+        min_freq=options.min_freq,
     )
     if selected_shaper is None:
         return
