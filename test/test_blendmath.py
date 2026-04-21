@@ -400,3 +400,76 @@ def test_compute_A_axis_smooth_is_zero_freq_returns_zero():
     A = blendmath._compute_A_axis_smooth_is("smooth_mzv", 0.0, 0.1,
                                              target_smoothing=0.12)
     assert A == 0.0
+
+
+def test_extract_shapers_smooth_is_produces_nonzero_A_axis():
+    """After D1, SIS axes must carry a finite positive A_axis, not 0.0.
+
+    This is the regression test for the P0 silent no-op that Plan 4
+    D1 fixes.
+    """
+    class MockShaperParams:
+        shaper_type = "smooth_mzv"
+        shaper_freq = 40.0
+        damping_ratio = 0.1
+
+    class MockAxisShaper:
+        def __init__(self, axis):
+            self._axis = axis
+            self.params = MockShaperParams()
+        def get_axis(self):
+            return self._axis
+
+    class MockInputShaper:
+        target_smoothing = None  # default
+        def get_shapers(self):
+            return [MockAxisShaper("x"), MockAxisShaper("y")]
+
+    class MockPrinter:
+        def lookup_object(self, name, default=None):
+            if name == "input_shaper":
+                return MockInputShaper()
+            return default
+
+    class MockToolhead:
+        printer = MockPrinter()
+
+    snaps = blendmath._extract_shapers(MockToolhead())
+    assert len(snaps) == 2
+    for s in snaps:
+        assert s.shaper_type == "smooth_mzv"
+        assert s.A_axis > 0.0
+        import math
+        assert math.isfinite(s.A_axis)
+
+
+def test_extract_shapers_fir_unchanged():
+    """FIR path must still produce A_axis via ShaperCalibrate.find_shaper_max_accel."""
+    class MockShaperParams:
+        shaper_type = "mzv"
+        shaper_freq = 40.0
+        damping_ratio = 0.1
+
+    class MockAxisShaper:
+        def __init__(self, axis):
+            self._axis = axis
+            self.params = MockShaperParams()
+        def get_axis(self):
+            return self._axis
+
+    class MockInputShaper:
+        target_smoothing = None
+        def get_shapers(self):
+            return [MockAxisShaper("x")]
+
+    class MockPrinter:
+        def lookup_object(self, name, default=None):
+            return MockInputShaper() if name == "input_shaper" else default
+
+    class MockToolhead:
+        printer = MockPrinter()
+
+    snaps = blendmath._extract_shapers(MockToolhead())
+    assert len(snaps) == 1
+    assert snaps[0].shaper_type == "mzv"
+    assert snaps[0].A_axis > 0.0

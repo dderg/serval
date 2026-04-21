@@ -257,15 +257,21 @@ def _extract_shapers(toolhead):
         params = axis_shaper.params
         # After the BE-v2 smooth-shapers port, axes can carry either
         # TypedInputShaperParams (impulse) or TypedInputSmootherParams
-        # (smooth). Arc-blending's velocity cap today only consumes the
-        # impulse family, so smooth-family axes are recorded with
-        # A_axis=0.0 (no contribution to the shaper-derived cap).
+        # (smooth). Both families now contribute an analytical A_axis to
+        # the shaper-derived velocity cap.
         freq = float(getattr(params, "shaper_freq", 0.0) or 0.0)
         shaper_type = getattr(params, "shaper_type", "") or ""
         damping_ratio = float(getattr(params, "damping_ratio", 0.0) or 0.0)
-        if freq > 0.0 and shaper_type in shaper_factory:
+        if freq <= 0.0 or not shaper_type:
+            A_axis = 0.0
+        elif shaper_type in shaper_factory:
+            # FIR: use ShaperCalibrate.find_shaper_max_accel.
             impulses = shaper_factory[shaper_type](freq, damping_ratio)
             A_axis = float(sc.find_shaper_max_accel(impulses))
+        elif shaper_type.startswith("smooth_"):
+            # SIS: analytical A_axis from the kernel.
+            A_axis = _compute_A_axis_smooth_is(shaper_type, freq, damping_ratio,
+                                               target_smoothing=target or 0.12)
         else:
             A_axis = 0.0
         snaps.append(blendshaper.AxisShaperSnapshot(
