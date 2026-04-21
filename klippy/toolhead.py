@@ -331,6 +331,10 @@ class ToolHead:
         gcode = self.printer.lookup_object("gcode")
         self.Coord = gcode.Coord
         self.extruder = extruder.DummyExtruder(self.printer)
+        # Plan 3: cached extruder-cap snapshot.
+        # Refreshed by SET_PRESSURE_ADVANCE / SET_EXTRUDER_LIMITS handlers
+        # and on Print Start. None when cap is disabled.
+        self.extruder_cap_snapshot = None
         kin_name = config.get("kinematics")
         try:
             mod = importlib.import_module("klippy.kinematics." + kin_name)
@@ -623,6 +627,15 @@ class ToolHead:
             return
         if move.is_kinematic_move:
             self.kin.check_move(move)
+        # Plan 3: extruder-cap (post-PA stepper budget).
+        snap = self.extruder_cap_snapshot
+        if snap is not None:
+            from klippy import blendextruder
+            import math as _m
+            pa_snap, limits = snap
+            v_cap, a_cap = blendextruder.cap_move(move, pa_snap, limits)
+            if _m.isfinite(v_cap) or _m.isfinite(a_cap):
+                move.limit_speed(v_cap, a_cap)
         if move.axes_d[3]:
             self.extruder.check_move(move)
         self.commanded_pos[:] = move.end_pos
@@ -657,9 +670,28 @@ class ToolHead:
     def set_extruder(self, extruder, extrude_pos):
         self.extruder = extruder
         self.commanded_pos[3] = extrude_pos
+        self._refresh_extruder_cap_snapshot()
 
     def get_extruder(self):
         return self.extruder
+
+    def _refresh_extruder_cap_snapshot(self):
+        """Refresh cached (PAModelSnapshot, ExtruderLimits). Called when
+        PA model or extruder limits change. Sets None if cap disabled."""
+        extruder = getattr(self, "extruder", None)
+        if extruder is None:
+            self.extruder_cap_snapshot = None
+            return
+        # Kalico extruder can delegate to its ExtruderStepper
+        snap_fn = getattr(extruder, "extruder_limits_snapshot", None)
+        if snap_fn is None:
+            stepper = getattr(extruder, "extruder_stepper", None)
+            if stepper is not None:
+                snap_fn = getattr(stepper, "extruder_limits_snapshot", None)
+        if snap_fn is None:
+            self.extruder_cap_snapshot = None
+            return
+        self.extruder_cap_snapshot = snap_fn()
 
     # Homing "drip move" handling
     def _update_drip_move_time(self, next_print_time):

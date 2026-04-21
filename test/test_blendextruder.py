@@ -280,13 +280,14 @@ def test_extruder_limits_snapshot_shape():
 
     pa = PALinearModel.__new__(PALinearModel)
     pa.pressure_advance = 0.04
-    es.pressure_advance_model = pa
+    es.pa_model = pa  # real attribute name in ExtruderStepper.__init__
 
     class _ExtSmoother:
         def __init__(self, t):
             self.smooth_time = t
     es.smoother = _ExtSmoother(0.04)
-    es.rotation_distance = 4.78  # BMG-ish
+    # get_rotation_distance() delegates to self.stepper; stub it directly.
+    es.get_rotation_distance = lambda: 4.78  # BMG-ish
 
     snap = es.extruder_limits_snapshot()
     assert snap is not None

@@ -485,6 +485,12 @@ class ExtruderStepper:
                 self.name, "%s: %s" % (self.name, (" ".join(msg)))
             )
             gcmd.respond_info("\n".join(msg), log=False)
+        # Plan 3: refresh the toolhead's cached extruder-cap snapshot.
+        printer = getattr(self, "printer", None)
+        if printer is not None:
+            th = printer.lookup_object("toolhead", None)
+            if th is not None and hasattr(th, "_refresh_extruder_cap_snapshot"):
+                th._refresh_extruder_cap_snapshot()
 
     cmd_SET_E_ROTATION_DISTANCE_help = "Set extruder rotation distance"
 
@@ -549,6 +555,12 @@ class ExtruderStepper:
             "EXTRUDER '%s': max_extruder_accel=%.1f, max_extruder_rpm=%.1f"
             % (self.name, self.max_extruder_accel, self.max_extruder_rpm)
         )
+        # Plan 3: refresh the toolhead's cached extruder-cap snapshot.
+        printer = getattr(self, "printer", None)
+        if printer is not None:
+            th = printer.lookup_object("toolhead", None)
+            if th is not None and hasattr(th, "_refresh_extruder_cap_snapshot"):
+                th._refresh_extruder_cap_snapshot()
 
     def extruder_limits_snapshot(self):
         """Build (PAModelSnapshot, ExtruderLimits) or return None.
@@ -560,11 +572,11 @@ class ExtruderStepper:
         """
         if self.max_extruder_accel <= 0.0 and self.max_extruder_rpm <= 0.0:
             return None
-        pa_snap = _pa_model_snapshot(self.pressure_advance_model)
+        pa_snap = _pa_model_snapshot(self.pa_model)
         if pa_snap is None:
             return None
         v_E_max = (
-            (self.max_extruder_rpm / 60.0) * self.rotation_distance
+            (self.max_extruder_rpm / 60.0) * self.get_rotation_distance()
             if self.max_extruder_rpm > 0.0
             else float("inf")
         )
