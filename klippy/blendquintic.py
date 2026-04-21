@@ -205,6 +205,9 @@ def _peak_curvature(Q, n_samples: int = 100) -> tuple[float, float]:
 _R_A = 0.5085
 _R_B = -0.03785
 _R_C = 0.05715
+# Lower clamp is a safety rail — with current coefficients the quadratic
+# minimum is 0.502 at theta=0.331 rad, so this clamp never fires in
+# practice. Kept to guard against future coefficient revisions.
 _R_CLAMP_LO = 0.50
 _R_CLAMP_HI = 0.86
 
