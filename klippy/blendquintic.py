@@ -150,7 +150,14 @@ def _quintic_flatness(Q) -> float:
 
 def _segment_quintic(Q, max_chord_err: float) -> list[Vec3]:
     """Adaptive De Casteljau subdivision — recursion terminates when
-    _quintic_flatness(sub_Q) <= max_chord_err or depth == limit."""
+    _quintic_flatness(sub_Q) <= max_chord_err or depth == limit.
+
+    If depth limit fires before flatness criterion, the returned segments
+    may exceed max_chord_err; callers must not rely on a hard tolerance
+    guarantee. Depth limit is _SUBDIVIDE_MAX_DEPTH (=12, giving 4096
+    leaves per blend worst case); not expected to fire for normal
+    chord_tol values (1e-4 to 1e-2 mm) on well-conditioned blends.
+    """
     if max_chord_err <= 0.0:
         raise ValueError("max_chord_err must be positive")
     out: list[Vec3] = [Q[0]]
