@@ -466,11 +466,56 @@ class QuinticShape:
         limits: blendshape.KinematicLimits,
     ) -> Optional["QuinticShape"]:
         """Construct a quintic blend for the corner between prev_move and
-        next_move. Returns None for degenerate corners. Full implementation
-        lands in Task 12."""
+        next_move. Returns None for degenerate corners (collinear,
+        near-reversal, chord budget infeasible). Caller (planner) falls
+        back to sharp-V when None is returned."""
         if prev_move is None or next_move is None:
             return None
-        return None
+        if prev_move.move_d <= 0.0 or next_move.move_d <= 0.0:
+            return None
+        # Unit tangents.
+        e1 = (
+            prev_move.axes_d[0] / prev_move.move_d,
+            prev_move.axes_d[1] / prev_move.move_d,
+            prev_move.axes_d[2] / prev_move.move_d,
+        )
+        e2 = (
+            next_move.axes_d[0] / next_move.move_d,
+            next_move.axes_d[1] / next_move.move_d,
+            next_move.axes_d[2] / next_move.move_d,
+        )
+        dp = e1[0] * e2[0] + e1[1] * e2[1] + e1[2] * e2[2]
+        dp = max(-1.0, min(1.0, dp))
+        # Deflection angle between tangents: 0 = collinear, pi = reversal.
+        theta = math.acos(dp)
+        if theta < COLLINEAR_EPS:
+            return None
+        if (math.pi - theta) < REVERSAL_EPS:
+            return None
+        sin_half = math.sin(theta / 2.0)
+        # Shape ratio and tangent length for the target chord deviation.
+        r = _r_of_theta(theta)
+        d = _d_from_deviation(corner_deviation, r, sin_half)
+        # Each move must have at least d of runway for the blend.
+        max_d = 0.5 * min(prev_move.move_d, next_move.move_d)
+        if d > max_d or d <= 0.0 or not math.isfinite(d):
+            return None
+        # Build control points. Corner apex at prev.end_pos == next.start_pos.
+        apex = next_move.start_pos
+        Q0 = (apex[0] - d * e1[0], apex[1] - d * e1[1], apex[2] - d * e1[2])
+        Q5 = (apex[0] + d * e2[0], apex[1] + d * e2[1], apex[2] + d * e2[2])
+        Q1 = (Q0[0] + d * (1.0 - r) * e1[0],
+              Q0[1] + d * (1.0 - r) * e1[1],
+              Q0[2] + d * (1.0 - r) * e1[2])
+        Q2 = Q1
+        Q3 = (Q5[0] - d * (1.0 - r) * e2[0],
+              Q5[1] - d * (1.0 - r) * e2[1],
+              Q5[2] - d * (1.0 - r) * e2[2])
+        Q4 = Q3
+        Q = (Q0, Q1, Q2, Q3, Q4, Q5)
+        shape = cls.__new__(cls)
+        shape._init_from_Q(Q, d_consumed=d, theta=theta, limits=limits)
+        return shape
 
     def position_at(self, s: float) -> Vec3:
         t = _s_to_t(self._s_tab, self._t_tab, s)

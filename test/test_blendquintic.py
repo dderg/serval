@@ -373,6 +373,59 @@ def test_v_cap_with_jerk_bound_tighter_than_without():
     assert v_yes <= v_no
 
 
+class _FakeMoveFactory:
+    """Minimal Move-like stub for factory tests. Real planner's Move
+    is in klippy/toolhead.py with far more state, but the factory only
+    reads start_pos, end_pos, move_d, axes_d."""
+    def __init__(self, start, end):
+        self.start_pos = start
+        self.end_pos = end
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        dz = end[2] - start[2]
+        self.move_d = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if self.move_d > 0.0:
+            self.axes_d = (dx, dy, dz)
+        else:
+            self.axes_d = (0.0, 0.0, 0.0)
+
+
+def _factory_limits():
+    return blendshape.KinematicLimits(
+        a_max=45000.0, v_max=500.0, jerk_max=None,
+        extruder_caps=None,
+    )
+
+
+def test_from_moves_builds_blend_for_right_angle_corner():
+    prev = _FakeMoveFactory((-10.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    nxt = _FakeMoveFactory((0.0, 0.0, 0.0), (0.0, 10.0, 0.0))
+    shape = blendquintic.QuinticShape.from_moves(prev, nxt, 0.1, _factory_limits())
+    assert shape is not None
+    assert shape.theta == pytest.approx(math.radians(90.0), rel=1e-6)
+    assert shape.d_consumed > 0.0
+    assert shape.arc_length > 0.0
+
+
+def test_from_moves_returns_none_for_collinear():
+    prev = _FakeMoveFactory((-10.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    nxt = _FakeMoveFactory((0.0, 0.0, 0.0), (10.0, 0.0, 0.0))
+    assert blendquintic.QuinticShape.from_moves(prev, nxt, 0.1, _factory_limits()) is None
+
+
+def test_from_moves_returns_none_for_near_reversal():
+    prev = _FakeMoveFactory((-10.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    nxt = _FakeMoveFactory((0.0, 0.0, 0.0), (-10.0, 0.0, 0.0))
+    assert blendquintic.QuinticShape.from_moves(prev, nxt, 0.1, _factory_limits()) is None
+
+
+def test_from_moves_returns_none_for_insufficient_edge_length():
+    # Tangent length d required would exceed available edge length.
+    prev = _FakeMoveFactory((-0.01, 0.0, 0.0), (0.0, 0.0, 0.0))
+    nxt = _FakeMoveFactory((0.0, 0.0, 0.0), (0.0, 0.01, 0.0))
+    assert blendquintic.QuinticShape.from_moves(prev, nxt, 1.0, _factory_limits()) is None
+
+
 from klippy import blendshaper
 
 
