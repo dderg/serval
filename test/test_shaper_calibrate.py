@@ -36,12 +36,17 @@ def test_find_shaper_max_accel_matches_offset_180_closed_form():
     assert 9000.0 <= max_accel <= 10000.0
 
 
-def test_find_shaper_max_accel_signature_rejects_scv_positional():
-    """After 6a Task 3, find_shaper_max_accel does not accept the
-    legacy positional scv arg. Locks the signature."""
+def test_find_shaper_max_accel_target_smoothing_positional():
+    """After smooth-shapers merge, find_shaper_max_accel accepts
+    target_smoothing as second positional (per-call override).
+    Verify it is ignored if not provided and used if provided."""
     sc = shaper_calibrate.ShaperCalibrate(printer=None)
-    with pytest.raises(TypeError):
-        sc.find_shaper_max_accel(_zv_50hz(), 5.0)  # old positional scv
+    # Without override, uses module default
+    accel_default = sc.find_shaper_max_accel(_zv_50hz())
+    # With override, finds accel for the tighter smoothing target
+    accel_tight = sc.find_shaper_max_accel(_zv_50hz(), 0.05)
+    # Tighter target should allow less accel
+    assert accel_tight < accel_default
 
 
 def test_find_shaper_max_accel_signature_rejects_scv_kwarg():

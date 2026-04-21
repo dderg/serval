@@ -21,6 +21,16 @@ can be enabled. Besides ringing, Input Shaping typically reduces the vibrations
 and shaking of the printer in general, and may also improve the reliability
 of the stealthChop mode of Trinamic stepper drivers.
 
+> **Fork note:** This Kalico fork retains only `zv` and `mzv` as impulse
+> shapers. The EI-family shapers (`zvd`, `ei`, `2hump_ei`, `3hump_ei`) have
+> been replaced by polynomial smooth-shaper variants (`smooth_zv`,
+> `smooth_mzv`, `smooth_ei`, `smooth_2hump_ei`, `smooth_zvd_ei`,
+> `smooth_si`) — see `Bleeding_Edge.md` for details. Prefer the smooth
+> variants when you would otherwise reach for EI-family shapers.
+> Sections below that refer to `ei`/`2hump_ei`/`3hump_ei` describe the
+> upstream Klipper behavior; on this fork the equivalent option is the
+> corresponding `smooth_*` shaper.
+
 ## Tuning
 
 Basic tuning requires measuring the ringing frequencies of the printer

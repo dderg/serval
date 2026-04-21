@@ -77,6 +77,7 @@ def calibrate_shaper(
     max_smoothing,
     test_damping_ratios,
     max_freq,
+    min_freq=None,
 ):
     helper = shaper_calibrate.ShaperCalibrate(printer=None)
     if isinstance(datas[0], shaper_calibrate.CalibrationData):
@@ -98,6 +99,7 @@ def calibrate_shaper(
         max_smoothing=max_smoothing,
         test_damping_ratios=test_damping_ratios,
         max_freq=max_freq,
+        min_freq=min_freq,
         logger=print,
     )
     if not shaper:
@@ -164,11 +166,23 @@ def plot_freq_response(
             shaper.smoothing,
             round(shaper.max_accel / 100.0) * 100.0,
         )
-        linestyle = "dotted"
+        linestyle = "dotted" if shaper.name.startswith("smooth") else "dashed"
+        linewidth = 1.0
         if shaper.name == selected_shaper:
             linestyle = "dashdot"
+            linewidth = 2.0
             best_shaper_vals = shaper.vals
-        ax2.plot(freqs, shaper.vals, label=label, linestyle=linestyle)
+        ax2.plot(
+            freqs,
+            shaper.vals,
+            label=label,
+            linestyle=linestyle,
+            linewidth=linewidth,
+        )
+    vibr_thresh = (psd[freqs > 0] / freqs[freqs > 0]).max() * (freqs + 5) / 33.3
+    ax.plot(
+        freqs, vibr_thresh, label="Acceptable\nvibrations", color="lightgrey"
+    )
     ax.plot(freqs, psd * best_shaper_vals, label="After\nshaper", color="cyan")
     # A hack to add a human-readable shaper recommendation to legend
     ax2.plot(
@@ -184,6 +198,9 @@ def plot_freq_response(
 
     ax.legend(loc="upper left", prop=fontP)
     ax2.legend(loc="upper right", prop=fontP)
+
+    ax.set_ylim(bottom=0)
+    ax2.set_ylim(bottom=0)
 
     fig.tight_layout()
     return fig
@@ -231,6 +248,16 @@ def main():
         type="float",
         default=shaper_calibrate.MAX_FREQ,
         help="maximum frequency to plot",
+    )
+    opts.add_option(
+        "--min_freq",
+        type="float",
+        default=None,
+        help=(
+            "minimum frequency for scoring (matches the resonance sweep's "
+            "FREQ_START); below this is treated as noise and excluded from "
+            "the vibration score. Default: 0 (no lower filter)."
+        ),
     )
     opts.add_option(
         "-s",
@@ -343,6 +370,7 @@ def main():
         max_smoothing=options.max_smoothing,
         test_damping_ratios=test_damping_ratios,
         max_freq=max_freq,
+        min_freq=options.min_freq,
     )
     if selected_shaper is None:
         return

@@ -167,6 +167,9 @@ class VibrationPulseTestGenerator:
     def get_max_freq(self):
         return self.freq_end
 
+    def get_min_freq(self):
+        return self.freq_start
+
     def get_accel_per_hz(self):
         return self.accel_per_hz
 
@@ -219,6 +222,9 @@ class SweepingVibrationsTestGenerator:
 
     def get_max_freq(self):
         return self.vibration_generator.get_max_freq()
+
+    def get_min_freq(self):
+        return self.vibration_generator.get_min_freq()
 
     def get_sweeping_accel(self):
         return self.test_sweeping_accel if self.test_sweeping_period else 0.0
@@ -475,6 +481,13 @@ class ResonanceTester:
     def _get_max_calibration_freq(self):
         return 1.5 * self.generator.get_max_freq()
 
+    def _get_min_calibration_freq(self):
+        # Anything below the sweep's start frequency is noise (no driven
+        # response at those frequencies). Passing this floor into
+        # find_best_shaper keeps sub-sweep accelerometer noise out of the
+        # vibration-score numerator and denominator.
+        return self.generator.get_min_freq()
+
     cmd_TEST_RESONANCES_help = "Runs the resonance test for a specifed axis"
 
     def cmd_TEST_RESONANCES(self, gcmd):
@@ -591,10 +604,12 @@ class ResonanceTester:
             )
             calibration_data[axis].normalize_to_frequencies()
             max_freq = self._get_max_calibration_freq()
+            min_freq = self._get_min_calibration_freq()
             best_shaper, all_shapers = helper.find_best_shaper(
                 calibration_data[axis],
                 max_smoothing=max_smoothing,
                 max_freq=max_freq,
+                min_freq=min_freq,
                 logger=gcmd.respond_info,
             )
             gcmd.respond_info(

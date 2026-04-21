@@ -567,3 +567,47 @@ def test_random_corner_sweep():
             assert shape.v_cap_fn(s) > 0.0
     # Sanity: at least half the random corners should yield valid shapes.
     assert n_valid >= 100, f"only {n_valid}/200 corners produced valid shapes"
+
+
+def test_v_cap_fn_degrades_gracefully_with_smooth_shaper_axis():
+    """When a smooth-family axis is passed in, _extract_shapers records
+    A_axis=0.0 (see test_blendmath.py::test_extract_shapers_smooth_family_axis_has_zero_A).
+    QuinticShape.v_cap_fn must not crash or return zero from that -- the
+    shaper term should drop out, leaving a_max / v_max bounds intact.
+    """
+    # Craft a KinematicLimits with one impulse axis (A_axis > 0) and one
+    # smooth axis (A_axis = 0).
+    shapers = [
+        blendshaper.AxisShaperSnapshot(
+            axis="x",
+            shaper_type="zv",
+            shaper_freq=50.0,
+            damping_ratio=0.1,
+            A_axis=30000.0,
+        ),
+        blendshaper.AxisShaperSnapshot(
+            axis="y",
+            shaper_type="smooth_mzv",
+            shaper_freq=0.0,
+            damping_ratio=0.0,
+            A_axis=0.0,
+        ),
+    ]
+    limits = blendshape.KinematicLimits(
+        a_max=50000.0, v_max=600.0, jerk_max=None,
+        extruder_caps=None, shapers=shapers,
+    )
+    # Right-angle corner to exercise both axes.
+    prev = _FakeMoveFactory((-5.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    nxt  = _FakeMoveFactory((0.0, 0.0, 0.0), (0.0, 5.0, 0.0))
+    shape = blendquintic.QuinticShape.from_moves(
+        prev, nxt, corner_deviation=0.2, limits=limits,
+    )
+    assert shape is not None
+    v_mid = shape.v_cap_fn(shape.arc_length / 2.0)
+    assert math.isfinite(v_mid)
+    assert v_mid > 0.0
+    # Sanity: without shaper involvement for y, the cap should be no
+    # tighter than a_max-derived centripetal * v_max bound; in particular
+    # it must not collapse to 0.
+    assert v_mid >= 50.0  # extremely lax lower bound

@@ -85,9 +85,11 @@ def _sigma_T_max_from_toolhead(toolhead):
     sigma_max = 0.0
     for axis_shaper in is_obj.get_shapers():
         params = axis_shaper.params
-        freq = float(params.shaper_freq)
-        stype = params.shaper_type
-        damp = float(params.damping_ratio)
+        # Smooth-family axes don't carry shaper_freq/shaper_type; their
+        # impulse-spread sigma_T is zero by construction, so skip them.
+        freq = float(getattr(params, "shaper_freq", 0.0) or 0.0)
+        stype = getattr(params, "shaper_type", "") or ""
+        damp = float(getattr(params, "damping_ratio", 0.0) or 0.0)
         if freq > 0.0 and stype in factory:
             A, T = factory[stype](freq, damp)
             w_sum = sum(A)
@@ -114,7 +116,7 @@ def _scv_equivalent_junction_v(
     with the given half-angle geometry.
 
     Derivation:
-      - SCV-equivalent at 90 deg matching corner_deviation under shaper smear:
+      - SCV-equivalent at 90° matching corner_deviation under shaper smear:
             v_scv90 = cd / (sqrt(2) * sigma_T)
       - Klipper's JD formula (jd = SCV^2 * (sqrt(2) - 1) / a_max):
             jd_eq = v_scv90^2 * (sqrt(2) - 1) / a_max
@@ -142,24 +144,19 @@ def suppressed_junction_v(
     corner_deviation: float,
     toolhead,
 ) -> Optional[float]:
-    """SCV-equivalent junction velocity to apply when the corner-blender
-    returns no shape at a non-collinear corner.
+    """SCV-equivalent junction velocity to apply when blend_from_moves
+    returns None at a non-collinear corner.
 
-    Companion to shape builders: when a blend is suppressed (shape is None
-    at a real corner, e.g. because adjacent segments are too short for
-    the blend to fit, or the corner geometry falls outside the primitive's
-    supported range), the fork's `calc_junction` has no JD cap of its own
-    - so without this cap the toolhead would enter sharp corners at full
-    commanded velocity, causing step skipping.
-
-    Shape-agnostic: depends only on the two move vectors + the toolhead's
-    shaper sigma_T spread + corner_deviation + a_max. No blend-shape state.
+    Companion to blend_from_moves: when the arc is suppressed (either by
+    the shaper-aware or velocity-aware rule), the fork's calc_junction
+    has no built-in JD cap — so without this cap the toolhead would hit
+    sharp corners at full commanded velocity, causing step skipping.
 
     Returns:
-        None  - truly collinear junction (no cap needed), or no shaper
+        None  — truly collinear junction (no cap needed), or no shaper
                  loaded (no cap derivable; mainline-Kalico calc_junction
                  quarter-tan cap still applies as a lax safety net).
-        float - velocity cap to pass to prev.limit_next_junction_speed().
+        float — velocity cap to pass to prev.limit_next_junction_speed().
     """
     if toolhead is None:
         return None
@@ -227,16 +224,21 @@ def _extract_shapers(toolhead):
     snaps = []
     for axis_shaper in is_obj.get_shapers():
         params = axis_shaper.params
-        freq = float(params.shaper_freq)
-        shaper_type = params.shaper_type
-        damping_ratio = float(params.damping_ratio)
+        # After the BE-v2 smooth-shapers port, axes can carry either
+        # TypedInputShaperParams (impulse) or TypedInputSmootherParams
+        # (smooth). Arc-blending's velocity cap today only consumes the
+        # impulse family, so smooth-family axes are recorded with
+        # A_axis=0.0 (no contribution to the shaper-derived cap).
+        freq = float(getattr(params, "shaper_freq", 0.0) or 0.0)
+        shaper_type = getattr(params, "shaper_type", "") or ""
+        damping_ratio = float(getattr(params, "damping_ratio", 0.0) or 0.0)
         if freq > 0.0 and shaper_type in shaper_factory:
             impulses = shaper_factory[shaper_type](freq, damping_ratio)
             A_axis = float(sc.find_shaper_max_accel(impulses))
         else:
             A_axis = 0.0
         snaps.append(blendshaper.AxisShaperSnapshot(
-            axis=axis_shaper.axis,
+            axis=axis_shaper.get_axis(),
             shaper_type=shaper_type,
             shaper_freq=freq,
             damping_ratio=damping_ratio,
