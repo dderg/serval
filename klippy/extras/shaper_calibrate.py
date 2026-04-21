@@ -12,7 +12,7 @@ import traceback
 from . import shaper_defs
 
 MIN_FREQ = 5.0
-MAX_FREQ = 275.0
+MAX_FREQ = 300.0
 WINDOW_T_SEC = 0.5
 MAX_SHAPER_FREQ = 250.0
 
