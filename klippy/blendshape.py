@@ -23,12 +23,18 @@ Vec3 = Tuple[float, float, float]
 
 @dataclass
 class ExtruderLimits:
-    """First-class extruder constraints (pillar 3).
+    """First-class extruder constraints (pillar 3, Plan 3).
 
-    Plan 1 leaves this as None everywhere; plan 4 threads it through.
+    Post-PA stepper output is bounded by (a_E_max, v_E_max). smooth_time
+    is the PA smoothing window and feeds the cap formula via
+    K_h = (15/8) / smooth_time.
+
+    Built by `klippy/extras/extruder.py::extruder_limits_snapshot()` and
+    read by `klippy/blendextruder.py::cap_move()`.
     """
-    accel_max: float   # mm/s^2 on the filament
-    rpm_max: float     # drive-pulley angular velocity
+    a_E_max: float       # mm/s^2 on filament (from config: max_extruder_accel)
+    v_E_max: float       # mm/s on filament (config: max_extruder_rpm * rotation_distance / 60)
+    smooth_time: float   # seconds — current pressure_advance_smooth_time
 
 
 @dataclass

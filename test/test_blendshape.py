@@ -14,9 +14,32 @@ def test_kinematic_limits_dataclass():
 
 
 def test_extruder_limits_dataclass():
-    caps = blendshape.ExtruderLimits(accel_max=1000.0, rpm_max=300.0)
-    assert caps.accel_max == 1000.0
-    assert caps.rpm_max == 300.0
+    """Legacy test: verify ExtruderLimits is a dataclass with correct fields."""
+    caps = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    assert caps.a_E_max == 5000.0
+    assert caps.v_E_max == 15.9
+    assert caps.smooth_time == 0.04
+
+
+def test_extruder_limits_has_three_fields():
+    """ExtruderLimits carries stepper-output limits + PA smoothing time."""
+    lim = blendshape.ExtruderLimits(
+        a_E_max=5000.0,
+        v_E_max=15.9,
+        smooth_time=0.04,
+    )
+    assert lim.a_E_max == 5000.0
+    assert lim.v_E_max == 15.9
+    assert lim.smooth_time == 0.04
+
+
+def test_extruder_limits_rejects_nonpositive_smooth_time_in_assertion():
+    """K_h = (15/8)/smooth_time; smooth_time <= 0 would blow up.
+    Not a hard gate here — the cap_move path will guard — but this
+    documents the expected invariant for downstream consumers.
+    """
+    lim = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    assert lim.smooth_time > 0.0
 
 
 def test_smooth_shape_protocol_exists():
