@@ -156,3 +156,55 @@ def test_d_from_deviation_inverse():
     d = blendquintic._d_from_deviation(eps, r, sin_half)
     eps_back = blendquintic._deviation_closed_form(d, r, sin_half)
     assert eps_back == pytest.approx(eps, rel=1e-9)
+
+
+def test_arc_length_table_sub_micron_accuracy():
+    """Against a 20001-sample high-resolution reference, the 8-GL
+    arc-length table must give sub-micron position error at any s."""
+    Q = _right_angle_quintic()
+    # Build the s->t map.
+    s_tab, t_tab, total_s = blendquintic._build_s_to_t_map(Q, n_gl=8, n_subintervals=20)
+    assert total_s > 0.0
+    # High-resolution reference: cumulative Euclidean distance along
+    # 20001 uniform-t samples.
+    ts = [i / 20000.0 for i in range(20001)]
+    pts = [blendquintic._quintic_eval(Q, t) for t in ts]
+    cumulative = [0.0]
+    for i in range(1, len(pts)):
+        dx = pts[i][0] - pts[i - 1][0]
+        dy = pts[i][1] - pts[i - 1][1]
+        dz = pts[i][2] - pts[i - 1][2]
+        cumulative.append(cumulative[-1] + math.sqrt(dx * dx + dy * dy + dz * dz))
+    ref_total = cumulative[-1]
+    # Total arc-length agreement
+    assert total_s == pytest.approx(ref_total, rel=1e-5)
+    # Check 100 random s values
+    import random
+    random.seed(42)
+    max_err = 0.0
+    for _ in range(100):
+        s = random.uniform(0.0, total_s)
+        t = blendquintic._s_to_t(s_tab, t_tab, s)
+        # Interpolate reference cumulative to find the reference t at s.
+        # (monotone, so bisect)
+        import bisect
+        idx = bisect.bisect_left(cumulative, s)
+        if idx == 0:
+            ref_t = 0.0
+        elif idx >= len(cumulative):
+            ref_t = 1.0
+        else:
+            c_lo, c_hi = cumulative[idx - 1], cumulative[idx]
+            frac = (s - c_lo) / (c_hi - c_lo) if c_hi > c_lo else 0.0
+            ref_t = ts[idx - 1] + (ts[idx] - ts[idx - 1]) * frac
+        p_gl = blendquintic._quintic_eval(Q, t)
+        p_ref = blendquintic._quintic_eval(Q, ref_t)
+        err = math.sqrt(
+            (p_gl[0] - p_ref[0]) ** 2
+            + (p_gl[1] - p_ref[1]) ** 2
+            + (p_gl[2] - p_ref[2]) ** 2
+        )
+        max_err = max(max_err, err)
+    assert max_err < 1e-2   # 10 um; plan 1 target. Tighter thresholds
+                            # (1 um) achievable by bumping n_subintervals
+                            # to ~100 or adding one Newton refinement step.

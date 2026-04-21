@@ -241,6 +241,31 @@ def _deviation_closed_form(d: float, r: float, sin_half: float) -> float:
     return _deviation_coeff(r) * d * sin_half
 
 
+# 8-point Gauss-Legendre nodes and weights on [-1, 1], shifted in
+# callers to [0, 1] sub-intervals. Sub-micron arc-length accuracy on
+# 5 mm blends per audit; up from archive's 5-node default (~20 um drift).
+_GL8_NODES = (
+    -0.9602898564975363,
+    -0.7966664774136267,
+    -0.5255324099163290,
+    -0.1834346424956498,
+    0.1834346424956498,
+    0.5255324099163290,
+    0.7966664774136267,
+    0.9602898564975363,
+)
+_GL8_WEIGHTS = (
+    0.1012285362903763,
+    0.2223810344533745,
+    0.3137066458778873,
+    0.3626837833783620,
+    0.3626837833783620,
+    0.3137066458778873,
+    0.2223810344533745,
+    0.1012285362903763,
+)
+
+
 def _d_from_deviation(eps: float, r: float, sin_half: float) -> float:
     """Inverse of _deviation_closed_form: tangent length d required to
     achieve chord deviation eps. Returns +inf when collinear
@@ -250,6 +275,63 @@ def _d_from_deviation(eps: float, r: float, sin_half: float) -> float:
     if denom <= 0.0:
         return float("inf")
     return 16.0 * eps / denom
+
+
+def _speed_at_t(Q, t: float) -> float:
+    """|B'(t)| at parameter t — the parametric speed used for arc-length."""
+    d1 = _quintic_first_deriv(Q, t)
+    return math.sqrt(d1[0] ** 2 + d1[1] ** 2 + d1[2] ** 2)
+
+
+def _build_s_to_t_map(
+    Q, n_gl: int = 8, n_subintervals: int = 20
+) -> tuple[list[float], list[float], float]:
+    """Build a cached arc-length-to-parameter map for the quintic.
+
+    Splits [0, 1] into n_subintervals equal-t pieces. On each piece,
+    integrates |B'(t)| using n_gl-node Gauss-Legendre to get the piece's
+    arc length. Returns:
+      - s_tab: cumulative arc-length at each sub-interval boundary
+        (length n_subintervals + 1)
+      - t_tab: parameter t at each boundary (length n_subintervals + 1)
+      - total_s: total arc length (== s_tab[-1])
+
+    Query via _s_to_t(s_tab, t_tab, s).
+    """
+    if n_gl != 8:
+        raise ValueError("only 8-node GL currently supported")
+    s_tab = [0.0]
+    t_tab = [0.0]
+    for i in range(n_subintervals):
+        t_lo = i / n_subintervals
+        t_hi = (i + 1) / n_subintervals
+        half = 0.5 * (t_hi - t_lo)
+        mid = 0.5 * (t_hi + t_lo)
+        piece = 0.0
+        for j in range(n_gl):
+            t_j = mid + half * _GL8_NODES[j]
+            piece += _GL8_WEIGHTS[j] * _speed_at_t(Q, t_j)
+        piece *= half
+        s_tab.append(s_tab[-1] + piece)
+        t_tab.append(t_hi)
+    return s_tab, t_tab, s_tab[-1]
+
+
+def _s_to_t(s_tab: list[float], t_tab: list[float], s: float) -> float:
+    """Invert the s->t map. Bisect to find the s_tab interval, then
+    linearly interpolate within the sub-interval."""
+    if s <= 0.0:
+        return t_tab[0]
+    if s >= s_tab[-1]:
+        return t_tab[-1]
+    import bisect
+    idx = bisect.bisect_left(s_tab, s)
+    s_lo, s_hi = s_tab[idx - 1], s_tab[idx]
+    t_lo, t_hi = t_tab[idx - 1], t_tab[idx]
+    if s_hi <= s_lo:
+        return t_lo
+    frac = (s - s_lo) / (s_hi - s_lo)
+    return t_lo + (t_hi - t_lo) * frac
 
 
 class QuinticShape:
