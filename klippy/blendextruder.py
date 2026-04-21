@@ -82,6 +82,21 @@ def cap_move(
     if extruder_limits.a_E_max <= 0.0:
         return (float("inf"), 0.0)
 
-    # Actual cap math is routed by PA model kind in Tasks 4-6.
-    # For now, fall through to no-cap (no-op) — Tasks 4-6 replace this.
+    K_h = (15.0 / 8.0) / extruder_limits.smooth_time
+    a_E_max = extruder_limits.a_E_max
+    v_E_max = extruder_limits.v_E_max
+
+    if pa_model.kind == "linear":
+        (pa,) = pa_model.params
+        # Accel cap (closed form; f' is constant).
+        a_E_cap = a_E_max / (1.0 + pa * K_h)
+        a_cap = a_E_cap / k
+        # Velocity cap: stepper_v peaks at v_E + PA * a_E_cap during
+        # accel-plateau. Solve: k * v_xy + PA * a_E_cap <= v_E_max.
+        v_from_accel = (v_E_max - pa * a_E_cap) / k
+        v_from_rpm = v_E_max / k
+        v_cap = min(v_from_rpm, max(0.0, v_from_accel))
+        return (v_cap, a_cap)
+
+    # NL PA branches (tanh, recipr) handled in Task 6.
     return (float("inf"), float("inf"))

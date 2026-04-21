@@ -68,3 +68,51 @@ def test_pa_model_snapshot_is_immutable():
     # Frozen dataclass or namedtuple — mutation should fail.
     with pytest.raises((AttributeError, TypeError, Exception)):
         snap.kind = "tanh"
+
+
+def test_cap_move_linear_a_cap_closed_form():
+    """a_E_cap = a_E_max / (1 + PA * K_h); a_cap = a_E_cap / k."""
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    pa = 0.04
+    snap = blendextruder.PAModelSnapshot(kind="linear", params=(pa,))
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    K_h = (15.0 / 8.0) / 0.04  # = 46.875
+    expected_a_E_cap = 5000.0 / (1.0 + pa * K_h)
+    _, a_cap = blendextruder.cap_move(move, snap, limits)
+    assert a_cap == pytest.approx(expected_a_E_cap / k, rel=1e-9)
+
+
+def test_cap_move_linear_v_cap_bounded_by_rpm_term():
+    """When (PA * a_E_cap) is small, v_cap ~= v_E_max / k."""
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    pa = 0.001  # tiny PA
+    snap = blendextruder.PAModelSnapshot(kind="linear", params=(pa,))
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    v_cap, _ = blendextruder.cap_move(move, snap, limits)
+    assert v_cap <= 15.9 / k + 1e-6
+    assert v_cap > 0.0
+
+
+def test_cap_move_linear_pa_zero_cap_is_simple_division():
+    """PA=0 => cap degenerates to (v_E_max/k, a_E_max/k)."""
+    k = 0.05
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    snap = blendextruder.PAModelSnapshot(kind="linear", params=(0.0,))
+    limits = blendshape.ExtruderLimits(a_E_max=6000.0, v_E_max=20.0, smooth_time=0.04)
+    v_cap, a_cap = blendextruder.cap_move(move, snap, limits)
+    assert v_cap == pytest.approx(20.0 / k, rel=1e-9)
+    assert a_cap == pytest.approx(6000.0 / k, rel=1e-9)
+
+
+def test_cap_move_linear_high_pa_tight_cap():
+    """PA = 0.08 at smooth_time=0.04: 1 + 0.08*46.875 = 4.75
+    => a_E_cap = a_E_max / 4.75 (79% reduction)."""
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    snap = blendextruder.PAModelSnapshot(kind="linear", params=(0.08,))
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    _, a_cap = blendextruder.cap_move(move, snap, limits)
+    expected = (5000.0 / 4.75) / k
+    assert a_cap == pytest.approx(expected, rel=1e-6)
