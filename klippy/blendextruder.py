@@ -50,6 +50,42 @@ def _f_prime(snap: PAModelSnapshot, v: float) -> float:
     raise ValueError("unknown PA model kind: " + repr(snap.kind))
 
 
+# --- Bisection helper for velocity cap inversion ---
+
+def _stepper_v_of_xy(snap: PAModelSnapshot, v_xy: float, k: float, a_E_cap: float) -> float:
+    """Peak stepper velocity during accel phase at XY target v_xy."""
+    V = k * v_xy
+    return V + _f_prime(snap, V) * a_E_cap
+
+
+def _solve_velocity_cap_bisection(
+    snap: PAModelSnapshot,
+    k: float,
+    a_E_cap: float,
+    v_E_max: float,
+) -> float:
+    """Find the largest v_xy such that _stepper_v_of_xy <= v_E_max.
+
+    The constraint is monotone increasing in v_xy (V increases; the
+    f'*a_E_cap term is bounded). 1-D bisection on [0, v_E_max/k]
+    converges in ~30 iterations for a 1e-6 mm/s tolerance.
+    """
+    # Short-circuit: a_E_cap = 0 means no PA term contributes.
+    if a_E_cap <= 0.0:
+        return v_E_max / k
+    lo = 0.0
+    hi = v_E_max / k
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if _stepper_v_of_xy(snap, mid, k, a_E_cap) <= v_E_max:
+            lo = mid
+        else:
+            hi = mid
+        if (hi - lo) < 1e-6:
+            break
+    return lo
+
+
 # --- Public API ---
 
 def cap_move(

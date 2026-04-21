@@ -116,3 +116,39 @@ def test_cap_move_linear_high_pa_tight_cap():
     _, a_cap = blendextruder.cap_move(move, snap, limits)
     expected = (5000.0 / 4.75) / k
     assert a_cap == pytest.approx(expected, rel=1e-6)
+
+
+def test_bisection_trivial_linear_degenerate_matches_closed_form():
+    """Linear PA (f' constant): bisection result matches closed form."""
+    pa = 0.001  # small PA so result is feasible
+    k = 0.04
+    a_E_cap = 1000.0
+    v_E_max = 15.9
+    snap = blendextruder.PAModelSnapshot(kind="linear", params=(pa,))
+    v_from_bisection = blendextruder._solve_velocity_cap_bisection(
+        snap, k, a_E_cap, v_E_max
+    )
+    expected = (v_E_max - pa * a_E_cap) / k
+    assert v_from_bisection == pytest.approx(expected, abs=1e-5)
+
+
+def test_bisection_tanh_monotone_finds_valid_v():
+    """At tanh snapshot: find v such that k*v + f'(k*v)*a_E_cap = v_E_max."""
+    snap = blendextruder.PAModelSnapshot(
+        kind="tanh", params=(0.0, 0.04, 100.0)
+    )
+    k = 0.04
+    a_E_cap = 1000.0
+    v_E_max = 15.9
+    v = blendextruder._solve_velocity_cap_bisection(snap, k, a_E_cap, v_E_max)
+    # Verify the result satisfies the constraint within tolerance.
+    stepper_v = k * v + blendextruder._f_prime(snap, k * v) * a_E_cap
+    assert stepper_v == pytest.approx(v_E_max, abs=1e-3)
+
+
+def test_bisection_clamps_at_rpm_bound():
+    """When a_E_cap=0, bisection should yield v_E_max / k exactly."""
+    snap = blendextruder.PAModelSnapshot(kind="tanh", params=(0.0, 0.04, 100.0))
+    k = 0.04
+    v = blendextruder._solve_velocity_cap_bisection(snap, k, 0.0, 15.9)
+    assert v == pytest.approx(15.9 / k, rel=1e-6)
