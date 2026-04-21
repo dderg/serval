@@ -134,5 +134,17 @@ def cap_move(
         v_cap = min(v_from_rpm, max(0.0, v_from_accel))
         return (v_cap, a_cap)
 
-    # NL PA branches (tanh, recipr) handled in Task 6.
-    return (float("inf"), float("inf"))
+    # Non-linear PA: tanh or recipr.
+    # Accel cap uses v_eval = k * move.max_cruise_v as pragmatic
+    # approximation of the binding-moment velocity. The spec's more
+    # rigorous v_eval = min(v_prev, v_next) requires lookahead state
+    # not reliably available at plan time; for NL params (NO=0.04,
+    # LV=100) this approximation is tight to ~1-2%, and Plan 5's
+    # continuous v(s) removes the approximation entirely.
+    v_eval = k * move.max_cruise_v
+    f_prime_eval = _f_prime(pa_model, v_eval)
+    a_E_cap = a_E_max / (1.0 + f_prime_eval * K_h)
+    a_cap = a_E_cap / k
+    # Velocity cap via bisection.
+    v_cap = _solve_velocity_cap_bisection(pa_model, k, a_E_cap, v_E_max)
+    return (v_cap, a_cap)

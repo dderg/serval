@@ -152,3 +152,56 @@ def test_bisection_clamps_at_rpm_bound():
     k = 0.04
     v = blendextruder._solve_velocity_cap_bisection(snap, k, 0.0, 15.9)
     assert v == pytest.approx(15.9 / k, rel=1e-6)
+
+
+def test_cap_move_tanh_near_zero_nonlinear_offset_matches_linear():
+    """When nonlinear_offset=0 for tanh, behavior matches linear LA."""
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    tanh_snap = blendextruder.PAModelSnapshot(kind="tanh", params=(0.04, 0.0, 100.0))
+    lin_snap = blendextruder.PAModelSnapshot(kind="linear", params=(0.04,))
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    v_t, a_t = blendextruder.cap_move(move, tanh_snap, limits)
+    v_l, a_l = blendextruder.cap_move(move, lin_snap, limits)
+    assert a_t == pytest.approx(a_l, rel=1e-6)
+    assert v_t == pytest.approx(v_l, abs=1e-3)
+
+
+def test_cap_move_tanh_realistic_cap_is_close_to_a_E_max_over_k():
+    """Realistic NL params: f'*K_h tiny (~0.02), so a_cap ~= a_E_max/k."""
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    # NO=0.04, LV=100, LA=0 => f'(0) = 4e-4, K_h = 46.875 => 1+f'*K_h = 1.01875
+    tanh_snap = blendextruder.PAModelSnapshot(kind="tanh", params=(0.0, 0.04, 100.0))
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    _, a_cap = blendextruder.cap_move(move, tanh_snap, limits)
+    naive = 5000.0 / k
+    assert 0.98 * naive < a_cap <= naive
+
+
+def test_cap_move_recipr_matches_pattern():
+    """Recipr NL cap is close to a_E_max/k at realistic params."""
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    recipr_snap = blendextruder.PAModelSnapshot(kind="recipr", params=(0.0, 0.04, 100.0))
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    _, a_cap = blendextruder.cap_move(move, recipr_snap, limits)
+    naive = 5000.0 / k
+    assert 0.98 * naive < a_cap <= naive
+
+
+def test_cap_move_tanh_v_cap_satisfies_constraint():
+    """The returned v_cap should satisfy the stepper_v constraint or be at v=0 when infeasible."""
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    # Use feasible params: LA=0.02, NO=0.02, LV=100 => f'(0) = 0.0202
+    # => max_a_E_cap = 15.9 / 0.0202 = 786.6
+    # And v_eval=12: f'(12) ~= 0.02 => a_E_cap = 5000/(1+0.02*46.875) = 1739
+    # Still infeasible at v=0. Let's use LA=0.001, NO=0.002, LV=100
+    snap = blendextruder.PAModelSnapshot(kind="tanh", params=(0.001, 0.002, 100.0))
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    v_cap, a_cap = blendextruder.cap_move(move, snap, limits)
+    # Verify stepper_v(v_cap) <= v_E_max within tolerance.
+    a_E_cap = a_cap * k
+    stepper_v = blendextruder._stepper_v_of_xy(snap, v_cap, k, a_E_cap)
+    assert stepper_v <= 15.9 + 1e-3
