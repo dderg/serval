@@ -78,15 +78,17 @@ was running with this silently disabled. Same class of P0 as Plan 3's
    the blend traversal time at the quintic midpoint `v_cap` would
    be slower than sharp-V ramp time."
 
-4. **Per-sub-move Plan 3 cap refinement.** Current blend emit at
-   `blendplanner.py:197-199` uses `min(prev.accel, nxt.accel)` and
+4. **[Optional] Per-sub-move Plan 3 cap refinement.** Current blend
+   emit at `blendplanner.py:197-199` uses
+   `min(prev.accel, nxt.accel)` and
    `min(prev.max_cruise_v2, nxt.max_cruise_v2, shape_mid_v²)` —
    conservative (picks tighter of two ends). Push to per-sub-move
    precision: each sub-move's flow ratio `k` is the linear
    interpolation of `prev.axes_r[3]`/`nxt.axes_r[3]`; its Plan 3
    `(v_cap, a_cap)` is `blendextruder.cap_move`-equivalent at that
-   `k`. Non-blocking, but unlocks throughput on asymmetric
-   flow-rate transitions.
+   `k`. Non-blocking; **skip if D1-D3 consume the budget**. Plan 5b
+   (unified v(s)) supersedes this by absorbing Plan 3's cap directly
+   into `v_cap_fn`, so D4 is strictly interim throughput.
 
 5. **Endpoint singularity tests.** `QuinticShape.v_cap_fn(0)` and
    `v_cap_fn(arc_length)` sit at control-point coincidences where
@@ -161,7 +163,7 @@ pick up:
   `klippy/chelper/kin_shaper.c` (query-rate ≫ Python can keep up).
   Python sets coefficients via FFI at shaper (re)config,
   mirroring the existing `input_shaper_set_smoother_params`
-  pattern (line 314).
+  pattern (line 315).
 
 - **Lookahead window**: composed operator support is ~2·T_sm ≈
   40-50 ms at 20 Hz shaper freq — extends step-gen lookahead by
@@ -220,9 +222,17 @@ Deliverable from the math subagent:
 
 - `blendmath.py::_extract_shapers`: branch on
   `TypedInputSmootherParams`, compute `A_axis` via new helper.
-- `blendshaper.py::_SHAPER_SPAN_FACTOR`: add smooth-* entries OR
-  route `shaper_span` through a type-aware dispatcher that reads
-  `T_sm` for smooth and the damped-period-factor for FIR.
+  Preserve the existing `target_smoothing<=0` sentinel (returns
+  empty list); SIS branch must respect it.
+- `blendshaper.py::shaper_span`: convert to a type-aware dispatcher.
+  FIR names (`zv`, `mzv`, `zvd`, `ei`, `2hump_ei`, `3hump_ei`) keep
+  the `_SHAPER_SPAN_FACTOR` lookup unchanged (no regression to FIR
+  path). Smooth names (`smooth_zv`, `smooth_mzv`, `smooth_ei`,
+  `smooth_2hump_ei`, `smooth_zvd_ei`, `smooth_si`) read `T_sm`
+  directly from `shaper_defs.INPUT_SMOOTHERS`. Rationale: SIS
+  kernels already carry their span explicitly; adding them to
+  `_SHAPER_SPAN_FACTOR` as damped-period factors would double-book
+  the concept.
 - `blendshaper.py::compute_shaper_bounds`: no change; once `A_axis
   > 0` and `shaper_span` returns a finite value for SIS, the
   existing math works.
@@ -266,25 +276,34 @@ peak-κ at a 45° corner with `cd = 0.1 mm` is roughly `0.03 mm⁻¹`,
 so required segment count is ~100 — segment length ~10 µm.
 
 **Trap: trapq floor is ~20 µm at 100 mm/s** (minimum-move-time ~250
-µs). Target segment length is below the floor. Subagent must
-confirm numbers and propose the trade-off policy:
+µs). Target segment length is below the floor. Math subagent
+returns **numbers only** (confirmed `Δκ_max(f_sh, T_sm, N, v)`
+formula + numerical verification); the policy decision below is
+pre-picked in this spec so plan-writing can proceed without a
+second user round.
 
-- (a) Accept floor at 20 µm; residual κ-step is above
-  rejection bandwidth — Pillar 1's shaper cannot fully cancel
-  segment-boundary content. Soft-fail: quality degrades slightly
-  at high speed.
-- (b) Relax chord tolerance locally at peak-κ (widen the quintic
-  curvature, lose corner fidelity) to reduce `Δκ_peak` per
-  segment. Quantitative trade: how much chord relaxation for
-  how much segment-count reduction?
-- (c) Velocity-limit the blend so `Δκ · v²` stays below the
-  bandwidth budget. Equivalent to lowering `v_cap_fn` — the
-  simplest fix, costs throughput.
+**Chosen policy: (c) velocity-limit the blend.** When the shaper
+bandwidth would require segments below the trapq floor, lower
+`v_cap_fn(s)` locally so `Δκ(s) · v(s)²` stays under the rejection
+budget at the floor segment length. Costs throughput at tight
+corners on the fastest shapers; preserves correctness. Simplest to
+reason about, simplest to test, and doesn't entangle with the
+quintic's chord tolerance.
 
-**Implementation.** `_resolve_chord_err` becomes a function of the
-active shaper parameters, not just `corner_deviation`. The
-formula and chosen trade-off policy ((a), (b), or (c)) go into the
-plan doc after subagent deliverable lands.
+Rejected alternatives:
+- (a) Accept floor + residual ringing: loses correctness guarantee
+  for Plan 5.
+- (b) Relax chord tolerance locally at peak-κ: widens quintic
+  curvature, loses corner fidelity — exactly what Pillar 2 exists
+  to fix.
+
+**Implementation.** `_resolve_chord_err` stays velocity-agnostic
+(returns a chord tolerance). A new `v_cap_from_bandwidth(shape,
+shapers, chord_err)` helper in `blendmath.py` returns a ceiling
+on `v_cap_fn` based on the bandwidth budget at the chosen chord
+tolerance. `CornerBlender._emit_blend` takes `min(shape_mid_v,
+v_cap_from_bandwidth)` at the point where it currently reads
+`shape.v_cap_fn(arc_length/2)`.
 
 **Tests.** Property test: for each smooth-IS config on a 45°
 corner, sub-seg boundary κ-step times `v²` is below the shaper's
@@ -359,7 +378,7 @@ math into a `cap_k(pa_snap, k, v_target)` helper.
 
 **Problem.** At `s = 0` and `s = arc_length`, the quintic's inner
 control points coincide with endpoints — local curvature frame
-(`_point_frame` at `blendquintic.py:~340`) can be degenerate.
+(`_point_frame` at `blendquintic.py:196`) can be degenerate.
 `v_cap_fn(0)` may return `inf` or blow up on tiny denominators.
 
 **Implementation.**
@@ -372,8 +391,9 @@ control points coincide with endpoints — local curvature frame
   `max_cruise_v` at endpoint (which is the right physical answer
   — at the blend boundary we're tangent to a straight move).
 
-**Tests.** Added to `test/test_blendquintic.py` under a new
-`TestEndpoints` class.
+**Tests.** Added to `test/test_blendquintic.py` as
+`def test_v_cap_fn_endpoints_*` functions, matching the project's
+pytest-function test style.
 
 ## Effort estimate
 
@@ -429,8 +449,22 @@ deliverables land:
    down across the blend (because flow ratio dips mid-corner for
    whatever reason), the `calc_junction` pass in the outer
    lookahead may struggle. Worth a regression test on pathological
-   flow-ratio profiles. If it bites, fall back to deliverable 4's
-   "use min across the blend" (deferred).
+   flow-ratio profiles. If it bites, skip D4 entirely — it's
+   optional scope.
+
+5. **`target_smoothing=0` sentinel must survive D1.** `_extract_shapers`
+   returns `[]` when `target_smoothing <= 0.0` (disables the
+   shaper-cap for A/B diagnostics — see `project_target_smoothing_sentinel.md`).
+   The SIS branch added in D1 runs inside that sentinel gate; must
+   not bypass it. Regression test: `target_smoothing=0` under a
+   smooth-IS config still yields no shaper cap.
+
+6. **FIR path regression from `shaper_span` dispatcher refactor.**
+   D1 converts `shaper_span` into a type-aware dispatcher. Every
+   existing FIR consumer (classic `zv`/`mzv`/etc.) must continue
+   to route through the unchanged `_SHAPER_SPAN_FACTOR` branch.
+   Pin with explicit parameterised tests for each FIR shaper name
+   before landing the refactor.
 
 ## Successor (planned)
 
