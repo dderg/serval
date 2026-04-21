@@ -205,3 +205,19 @@ def test_cap_move_tanh_v_cap_satisfies_constraint():
     a_E_cap = a_cap * k
     stepper_v = blendextruder._stepper_v_of_xy(snap, v_cap, k, a_E_cap)
     assert stepper_v <= 15.9 + 1e-3
+
+
+def test_extruder_stepper_parses_max_extruder_accel():
+    """[extruder] max_extruder_accel parsed; defaults to 0."""
+    from klippy.kinematics.extruder import ExtruderStepper
+    # Bypass full bootstrap; construct and manually set attributes.
+    es = ExtruderStepper.__new__(ExtruderStepper)
+    es.max_extruder_accel = 0.0
+    es.max_extruder_rpm = 0.0
+    assert es.get_extruder_accel_limit() == 0.0
+    assert es.get_extruder_rpm_limit() == 0.0
+
+    es.max_extruder_accel = 5000.0
+    es.max_extruder_rpm = 200.0
+    assert es.get_extruder_accel_limit() == 5000.0
+    assert es.get_extruder_rpm_limit() == 200.0

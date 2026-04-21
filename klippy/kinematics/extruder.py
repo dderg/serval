@@ -251,6 +251,15 @@ class ExtruderStepper:
         self.pressure_advance_time_offset = config.getfloat(
             "pressure_advance_time_offset", 0.0, minval=-0.2, maxval=0.2
         )
+        # Plan 3: first-class extruder cap (post-PA stepper budget).
+        # Both default to 0 (disabled); positive values activate the
+        # blendextruder.cap_move() planner constraint.
+        self.max_extruder_accel = config.getfloat(
+            "max_extruder_accel", 0.0, minval=0.0
+        )
+        self.max_extruder_rpm = config.getfloat(
+            "max_extruder_rpm", 0.0, minval=0.0
+        )
         # Setup stepper
         self.stepper = stepper.PrinterStepper(config)
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -344,6 +353,14 @@ class ExtruderStepper:
     def get_rotation_distance(self):
         _, rotation_dist = self.stepper.get_rotation_distance()
         return rotation_dist
+
+    def get_extruder_accel_limit(self):
+        """mm/s^2 on filament; 0.0 disables."""
+        return self.max_extruder_accel
+
+    def get_extruder_rpm_limit(self):
+        """RPM on drive pulley; 0.0 disables."""
+        return self.max_extruder_rpm
 
     def _update_pressure_advance(self, pa_model, time_offset):
         toolhead = self.printer.lookup_object("toolhead")
