@@ -230,12 +230,13 @@ def test_extract_shapers_uses_real_axis_input_shaper_api():
     assert snaps[0].A_axis > 0.0
 
 
-def test_extract_shapers_smooth_family_axis_has_zero_A():
-    """Smooth-family axes carry TypedInputSmootherParams (no shaper_freq
-    / shaper_type / damping_ratio fields). _extract_shapers must not
-    crash on them — it records A_axis=0.0 because the arc-blending
-    velocity cap only consumes the impulse family today.
+def test_extract_shapers_smooth_family_axis_has_nonzero_A():
+    """Smooth-family axes carry TypedInputSmootherParams (smoother_type /
+    smoother_freq, no shaper_* attributes). After the T4 attribute-name
+    fix, _extract_shapers must not crash on them AND must return a finite
+    positive A_axis (not 0.0 as the pre-T4 broken path produced).
     """
+    import math
     from klippy.extras import input_shaper as _is_mod
     params = _is_mod.TypedInputSmootherParams("x", "smooth_mzv", None)
     params.smoother_freq = 40.0
@@ -247,7 +248,8 @@ def test_extract_shapers_smooth_family_axis_has_zero_A():
     snaps = blendmath._extract_shapers(toolhead)
     assert len(snaps) == 1
     assert snaps[0].axis == "x"
-    assert snaps[0].A_axis == 0.0
+    assert snaps[0].A_axis > 0.0
+    assert math.isfinite(snaps[0].A_axis)
 
 
 def test_extract_shapers_zero_target_smoothing_returns_empty():
@@ -405,23 +407,25 @@ def test_compute_A_axis_smooth_is_zero_freq_returns_zero():
 def test_extract_shapers_smooth_is_produces_nonzero_A_axis():
     """After D1, SIS axes must carry a finite positive A_axis, not 0.0.
 
-    This is the regression test for the P0 silent no-op that Plan 4
-    D1 fixes.
+    Uses the REAL attribute names on TypedInputSmootherParams:
+    smoother_type / smoother_freq (NOT shaper_type / shaper_freq).
+    The previous mock used shaper_* names, which defeated the test —
+    getattr() returned a valid value even for the broken code path.
     """
-    class MockShaperParams:
-        shaper_type = "smooth_mzv"
-        shaper_freq = 40.0
-        damping_ratio = 0.1
+    class MockSmootherParams:
+        smoother_type = "smooth_mzv"
+        smoother_freq = 40.0
+        # No damping_ratio — SIS kernels are fixed-shape.
 
     class MockAxisShaper:
         def __init__(self, axis):
             self._axis = axis
-            self.params = MockShaperParams()
+            self.params = MockSmootherParams()
         def get_axis(self):
             return self._axis
 
     class MockInputShaper:
-        target_smoothing = None  # default
+        target_smoothing = None
         def get_shapers(self):
             return [MockAxisShaper("x"), MockAxisShaper("y")]
 
@@ -473,3 +477,49 @@ def test_extract_shapers_fir_unchanged():
     assert len(snaps) == 1
     assert snaps[0].shaper_type == "mzv"
     assert snaps[0].A_axis > 0.0
+
+
+def test_extract_shapers_dispatch_handles_both_attribute_conventions():
+    """_extract_shapers must handle both TypedInputShaperParams
+    (shaper_*) and TypedInputSmootherParams (smoother_*) attribute
+    conventions in a single call.
+    """
+    class FirParams:
+        shaper_type = "mzv"
+        shaper_freq = 40.0
+        damping_ratio = 0.1
+
+    class SisParams:
+        smoother_type = "smooth_mzv"
+        smoother_freq = 40.0
+
+    class MockAxisShaper:
+        def __init__(self, axis, params):
+            self._axis = axis
+            self.params = params
+        def get_axis(self):
+            return self._axis
+
+    class MockInputShaper:
+        target_smoothing = None
+        def get_shapers(self):
+            return [
+                MockAxisShaper("x", FirParams()),
+                MockAxisShaper("y", SisParams()),
+            ]
+
+    class MockPrinter:
+        def lookup_object(self, name, default=None):
+            return MockInputShaper() if name == "input_shaper" else default
+
+    class MockToolhead:
+        printer = MockPrinter()
+
+    snaps = blendmath._extract_shapers(MockToolhead())
+    assert len(snaps) == 2
+    fir = next(s for s in snaps if s.axis == "x")
+    sis = next(s for s in snaps if s.axis == "y")
+    assert fir.shaper_type == "mzv"
+    assert fir.A_axis > 0.0
+    assert sis.shaper_type == "smooth_mzv"
+    assert sis.A_axis > 0.0

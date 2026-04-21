@@ -259,8 +259,17 @@ def _extract_shapers(toolhead):
         # TypedInputShaperParams (impulse) or TypedInputSmootherParams
         # (smooth). Both families now contribute an analytical A_axis to
         # the shaper-derived velocity cap.
-        freq = float(getattr(params, "shaper_freq", 0.0) or 0.0)
-        shaper_type = getattr(params, "shaper_type", "") or ""
+        #
+        # TypedInputShaperParams uses shaper_type / shaper_freq.
+        # TypedInputSmootherParams uses smoother_type / smoother_freq.
+        # Try the shaper_* names first (FIR); fall back to smoother_* (SIS).
+        shaper_type = (getattr(params, "shaper_type", None)
+                       or getattr(params, "smoother_type", "")
+                       or "")
+        freq_raw = (getattr(params, "shaper_freq", None)
+                    if getattr(params, "shaper_type", None) is not None
+                    else getattr(params, "smoother_freq", 0.0))
+        freq = float(freq_raw or 0.0)
         damping_ratio = float(getattr(params, "damping_ratio", 0.0) or 0.0)
         if freq <= 0.0 or not shaper_type:
             A_axis = 0.0
