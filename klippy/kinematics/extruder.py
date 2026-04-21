@@ -306,6 +306,13 @@ class ExtruderStepper:
             self.cmd_SYNC_EXTRUDER_MOTION,
             desc=self.cmd_SYNC_EXTRUDER_MOTION_help,
         )
+        gcode.register_mux_command(
+            "SET_EXTRUDER_LIMITS",
+            "EXTRUDER",
+            self.name,
+            self.cmd_SET_EXTRUDER_LIMITS,
+            desc=self.cmd_SET_EXTRUDER_LIMITS_help,
+        )
 
     def _handle_connect(self):
         toolhead = self.printer.lookup_object("toolhead")
@@ -480,6 +487,35 @@ class ExtruderStepper:
         self.sync_to_extruder(ename)
         gcmd.respond_info(
             "Extruder '%s' now syncing with '%s'" % (self.name, ename)
+        )
+
+    cmd_SET_EXTRUDER_LIMITS_help = (
+        "Set per-move extruder stepper accel/RPM caps (Plan 3)"
+    )
+
+    def cmd_SET_EXTRUDER_LIMITS(self, gcmd):
+        """Runtime update of max_extruder_accel / max_extruder_rpm.
+
+        Parameters:
+          ACCEL=<mm/s^2>   new accel limit (0 disables)
+          RPM=<RPM>        new rpm limit (0 disables)
+        Omit both to report current values.
+        """
+        new_accel = gcmd.get_float("ACCEL", None, minval=0.0)
+        new_rpm = gcmd.get_float("RPM", None, minval=0.0)
+        if new_accel is None and new_rpm is None:
+            gcmd.respond_info(
+                "EXTRUDER '%s': max_extruder_accel=%.1f, max_extruder_rpm=%.1f"
+                % (self.name, self.max_extruder_accel, self.max_extruder_rpm)
+            )
+            return
+        if new_accel is not None:
+            self.max_extruder_accel = new_accel
+        if new_rpm is not None:
+            self.max_extruder_rpm = new_rpm
+        gcmd.respond_info(
+            "EXTRUDER '%s': max_extruder_accel=%.1f, max_extruder_rpm=%.1f"
+            % (self.name, self.max_extruder_accel, self.max_extruder_rpm)
         )
 
 

@@ -221,3 +221,50 @@ def test_extruder_stepper_parses_max_extruder_accel():
     es.max_extruder_rpm = 200.0
     assert es.get_extruder_accel_limit() == 5000.0
     assert es.get_extruder_rpm_limit() == 200.0
+
+
+def test_set_extruder_limits_updates_values():
+    """cmd_SET_EXTRUDER_LIMITS applies ACCEL and RPM to the stepper."""
+    from klippy.kinematics.extruder import ExtruderStepper
+    es = ExtruderStepper.__new__(ExtruderStepper)
+    es.max_extruder_accel = 0.0
+    es.max_extruder_rpm = 0.0
+    es.name = "extruder"
+
+    class _FakeGcmd:
+        def __init__(self, accel, rpm):
+            self._accel = accel
+            self._rpm = rpm
+        def get_float(self, key, default=None, **kw):
+            if key == "ACCEL":
+                return self._accel if self._accel is not None else default
+            if key == "RPM":
+                return self._rpm if self._rpm is not None else default
+            return default
+        def respond_info(self, msg):
+            self._last_msg = msg
+
+    g = _FakeGcmd(accel=5000.0, rpm=200.0)
+    es.cmd_SET_EXTRUDER_LIMITS(g)
+    assert es.max_extruder_accel == 5000.0
+    assert es.max_extruder_rpm == 200.0
+
+
+def test_set_extruder_limits_omit_reports_current():
+    """Calling with no ACCEL/RPM args reports current values."""
+    from klippy.kinematics.extruder import ExtruderStepper
+    es = ExtruderStepper.__new__(ExtruderStepper)
+    es.max_extruder_accel = 5000.0
+    es.max_extruder_rpm = 200.0
+    es.name = "extruder"
+
+    class _FakeGcmd:
+        def get_float(self, key, default=None, **kw):
+            return default
+        def respond_info(self, msg):
+            self.last = msg
+
+    g = _FakeGcmd()
+    es.cmd_SET_EXTRUDER_LIMITS(g)
+    assert "5000" in g.last
+    assert "200" in g.last
