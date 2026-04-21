@@ -999,3 +999,53 @@ def test_feed_suppressed_corner_no_shaper_falls_back_to_reversal_stop():
     _ = cb.feed(prev)
     _ = cb.feed(nxt)
     assert prev.next_junction_v_capped_to == 0.0
+
+
+# --- Task 4: narrow-wedge regression tests ---
+
+def test_feed_near_reversal_without_shaper_forces_stop():
+    """At theta ~ pi (near-reversal), from_moves returns None via the
+    REVERSAL_EPS guard. Without a shaper the dp <= -0.5 fallback fires
+    and stops the toolhead. Regression: narrow wedge of angles where
+    both from_moves and the blendplanner fallback could otherwise
+    disagree.
+    """
+    import math as _m
+    th = _make_toolhead_without_shapers(max_accel=50000.0,
+                                         corner_deviation=0.1)
+    prev = _make_move(th, start=(0, 0, 0, 0), end=(1.0, 0, 0, 0),
+                      cruise_v=300.0)
+    # theta = pi - 1e-7 radians -> from_moves returns None via REVERSAL_EPS
+    theta = _m.pi - 1e-7
+    nxt = _make_move(th, start=(1.0, 0, 0, 0),
+                     end=(1.0 + _m.cos(theta)*1.0, _m.sin(theta)*1.0, 0, 0),
+                     cruise_v=300.0)
+    cb = blendplanner.CornerBlender(th, move_cls=_FakeMove)
+    _ = cb.feed(prev)
+    _ = cb.feed(nxt)
+    assert prev.next_junction_v_capped_to == 0.0
+
+
+def test_feed_narrow_reversal_wedge_with_shaper_caps_finite():
+    """At theta within REVERSAL_EPS of pi with a shaper loaded, from_moves
+    returns None and suppressed_junction_v is called. It returns a very
+    small (near-zero but finite positive) cap. Confirms no gap between
+    REVERSAL_EPS and the `dp <= -0.5` fallback when a shaper is present.
+    """
+    import math as _m
+    th = _make_toolhead_with_zv_shapers(freq_x=50.0, freq_y=50.0,
+                                         max_accel=50000.0,
+                                         corner_deviation=0.1)
+    prev = _make_move(th, start=(0, 0, 0, 0), end=(1.0, 0, 0, 0),
+                      cruise_v=300.0)
+    # theta = pi - 5e-7 is within REVERSAL_EPS (1e-6), so from_moves
+    # returns None and suppressed_junction_v fires.
+    theta = _m.pi - 5e-7
+    nxt = _make_move(th, start=(1.0, 0, 0, 0),
+                     end=(1.0 + _m.cos(theta)*1.0, _m.sin(theta)*1.0, 0, 0),
+                     cruise_v=300.0)
+    cb = blendplanner.CornerBlender(th, move_cls=_FakeMove)
+    _ = cb.feed(prev)
+    _ = cb.feed(nxt)
+    v = prev.next_junction_v_capped_to
+    assert v is not None and math.isfinite(v) and 0.0 <= v < 10.0
