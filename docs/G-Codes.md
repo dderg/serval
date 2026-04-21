@@ -537,6 +537,14 @@ parameters of an extruder stepper (as defined in an
 If EXTRUDER is not specified, it defaults to the stepper defined in
 the active hotend.
 
+#### SET_EXTRUDER_LIMITS
+`SET_EXTRUDER_LIMITS [EXTRUDER=<name>] [ACCEL=<mm/s^2>] [RPM=<RPM>]`:
+Runtime tuning for the per-move extruder cap. Takes effect on moves queued
+after the command. Omit both ACCEL and RPM to report current values.
+Setting either to 0 disables that cap. Requires `max_extruder_accel` or
+`max_extruder_rpm` to have been parsed from `[extruder]` config on startup
+(non-zero default) for the cap machinery to be active.
+
 #### SET_EXTRUDER_ROTATION_DISTANCE
 `SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=<config_name>
 [DISTANCE=<distance>]`: Set a new value for the provided extruder

@@ -1074,6 +1074,20 @@ filament_diameter:
 #   smoother extruder movements. This parameter may not exceed 200ms.
 #   This setting only applies if pressure_advance is non-zero. The
 #   default is 0.040 (40 milliseconds).
+#max_extruder_accel: 0
+#   Maximum acceleration (mm/s^2) on the filament stepper *after* Pressure
+#   Advance has been applied. If positive, the planner evaluates every
+#   move with blendextruder.cap_move and reduces XY accel on the subset
+#   of moves that would otherwise drive the extruder stepper past this
+#   limit. 0 disables the cap. Only the moves that would exceed the
+#   limit are reduced; non-binding moves run at full max_accel. Useful
+#   on acceleration-limited extruders (direct-drive, high-flow) to
+#   prevent step skipping during aggressive acceleration phases.
+#max_extruder_rpm: 0
+#   Maximum angular velocity (RPM) on the extruder drive pulley. Converted
+#   to linear filament velocity via rotation_distance. 0 disables the
+#   cap. Typically the bottleneck on high-gear-ratio extruders (BMG,
+#   Sherpa) at high flow rates.
 #
 # The remaining variables describe the extruder heater.
 heater_pin:
