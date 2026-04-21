@@ -73,3 +73,44 @@ def test_quintic_flatness_zero_for_straight():
     Q = _unit_quintic()
     f = blendquintic._quintic_flatness(Q)
     assert f == pytest.approx(0.0, abs=1e-12)
+
+
+def _right_angle_quintic():
+    """Synthetic quintic whose control polygon traces a right-angle
+    corner with symmetric Q1=Q2 and Q3=Q4. Used for curvature tests."""
+    d = 1.0
+    r = 0.5
+    e1 = (-1.0, 0.0, 0.0)   # incoming unit tangent
+    e2 = (0.0, 1.0, 0.0)    # outgoing unit tangent
+    Q0 = (d * 1.0, 0.0, 0.0)
+    Q5 = (0.0, d * 1.0, 0.0)
+    Q1 = (Q0[0] - d * (1.0 - r), 0.0, 0.0)
+    Q2 = Q1
+    Q3 = (0.0, Q5[1] - d * (1.0 - r), 0.0)
+    Q4 = Q3
+    return (Q0, Q1, Q2, Q3, Q4, Q5)
+
+
+def test_curvature_zero_at_endpoints_for_symmetric_quintic():
+    Q = _right_angle_quintic()
+    k0 = blendquintic._curvature_at_t(Q, 0.0)
+    k1 = blendquintic._curvature_at_t(Q, 1.0)
+    assert k0 == pytest.approx(0.0, abs=1e-9)
+    assert k1 == pytest.approx(0.0, abs=1e-9)
+
+
+def test_curvature_positive_at_midpoint_for_corner():
+    Q = _right_angle_quintic()
+    k = blendquintic._curvature_at_t(Q, 0.5)
+    assert k > 0.0
+
+
+def test_peak_curvature_matches_dense_reference():
+    Q = _right_angle_quintic()
+    peak_t, peak_k = blendquintic._peak_curvature(Q, n_samples=100)
+    # Reference: 20001-sample dense scan.
+    ks = [
+        blendquintic._curvature_at_t(Q, i / 20000.0) for i in range(20001)
+    ]
+    ref_k = max(ks)
+    assert peak_k == pytest.approx(ref_k, rel=1e-3)

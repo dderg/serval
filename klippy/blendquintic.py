@@ -147,6 +147,59 @@ def _quintic_flatness(Q) -> float:
     )
 
 
+def _curvature_at_t(Q, t: float) -> float:
+    """Curvature at parameter t. For 2D (z=0), reduces to
+    kappa = |B'_x * B''_y - B'_y * B''_x| / |B'|^3.
+    For 3D, kappa = |B' x B''| / |B'|^3.
+    """
+    d1 = _quintic_first_deriv(Q, t)
+    d2 = _quintic_second_deriv(Q, t)
+    cross = (
+        d1[1] * d2[2] - d1[2] * d2[1],
+        d1[2] * d2[0] - d1[0] * d2[2],
+        d1[0] * d2[1] - d1[1] * d2[0],
+    )
+    num = math.sqrt(cross[0] ** 2 + cross[1] ** 2 + cross[2] ** 2)
+    den = (d1[0] ** 2 + d1[1] ** 2 + d1[2] ** 2) ** 1.5
+    if den < 1e-30:
+        return 0.0
+    return num / den
+
+
+def _point_frame(Q, t: float) -> tuple[Vec3, Vec3, Vec3]:
+    """Return (position, unit tangent, unit normal) at parameter t.
+
+    Normal is the 2D planar normal in the xy-plane (rot90 of tangent);
+    for 3D paths the formula would use the Frenet frame but MO is 2D.
+    """
+    p = _quintic_eval(Q, t)
+    d1 = _quintic_first_deriv(Q, t)
+    d1n = math.sqrt(d1[0] ** 2 + d1[1] ** 2 + d1[2] ** 2)
+    if d1n < 1e-30:
+        return p, (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)
+    tan = (d1[0] / d1n, d1[1] / d1n, d1[2] / d1n)
+    # 2D normal: rotate tangent 90 deg CCW in xy-plane.
+    nrm = (-tan[1], tan[0], 0.0)
+    return p, tan, nrm
+
+
+def _peak_curvature(Q, n_samples: int = 100) -> tuple[float, float]:
+    """Dense-sampling peak-curvature evaluator.
+
+    Returns (t_peak, kappa_peak). n_samples=100 gives ~5 sig-fig agreement
+    with 20001-sample reference per archive audit.
+    """
+    best_t = 0.5
+    best_k = 0.0
+    for i in range(n_samples + 1):
+        t = i / n_samples
+        k = _curvature_at_t(Q, t)
+        if k > best_k:
+            best_k = k
+            best_t = t
+    return best_t, best_k
+
+
 class QuinticShape:
     """Quintic Hermite Bezier corner blend. Implements SmoothShape."""
 
