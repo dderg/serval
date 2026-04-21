@@ -322,3 +322,52 @@ def test_polyline_segment_count_scales_with_tol():
     loose = shape.polyline(chord_tol=1e-1)
     tight = shape.polyline(chord_tol=1e-4)
     assert len(tight) > len(loose)
+
+
+def test_v_cap_at_zero_curvature_is_vmax():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    limits = blendshape.KinematicLimits(
+        a_max=45000.0, v_max=500.0, jerk_max=None,
+        shaper_sigma_T=0.0, extruder_caps=None,
+    )
+    shape._limits = limits
+    assert shape.v_cap_fn(0.0) == pytest.approx(limits.v_max)
+    assert shape.v_cap_fn(shape.arc_length) == pytest.approx(limits.v_max)
+
+
+def test_v_cap_at_peak_kappa_matches_centripetal_bound():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    limits = blendshape.KinematicLimits(
+        a_max=45000.0, v_max=50000.0,
+        jerk_max=None,
+        shaper_sigma_T=0.0, extruder_caps=None,
+    )
+    shape._limits = limits
+    _, k_peak = blendquintic._peak_curvature(Q)
+    expected = math.sqrt(limits.a_max / k_peak)
+    best_v = float("inf")
+    for i in range(1001):
+        s = shape.arc_length * i / 1000.0
+        v = shape.v_cap_fn(s)
+        best_v = min(best_v, v)
+    assert best_v == pytest.approx(expected, rel=1e-2)
+
+
+def test_v_cap_with_jerk_bound_tighter_than_without():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    limits_no_jerk = blendshape.KinematicLimits(
+        a_max=45000.0, v_max=50000.0, jerk_max=None,
+        shaper_sigma_T=0.0, extruder_caps=None,
+    )
+    limits_with_jerk = blendshape.KinematicLimits(
+        a_max=45000.0, v_max=50000.0, jerk_max=1e7,
+        shaper_sigma_T=0.0, extruder_caps=None,
+    )
+    shape._limits = limits_no_jerk
+    v_no = shape.v_cap_fn(shape.arc_length * 0.5)
+    shape._limits = limits_with_jerk
+    v_yes = shape.v_cap_fn(shape.arc_length * 0.5)
+    assert v_yes <= v_no

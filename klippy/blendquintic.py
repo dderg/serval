@@ -406,12 +406,19 @@ class QuinticShape:
             "QuinticShape is constructed via QuinticShape.from_moves(...)"
         )
 
-    def _init_from_Q(self, Q, d_consumed: float, theta: float) -> None:
+    def _init_from_Q(
+        self,
+        Q,
+        d_consumed: float,
+        theta: float,
+        limits: Optional[blendshape.KinematicLimits] = None,
+    ) -> None:
         """Internal init. Populates the instance from control points and
         scalar metadata; builds the s->t map."""
         self.Q = Q
         self.d_consumed = d_consumed
         self.theta = theta
+        self._limits = limits
         s_tab, t_tab, total_s = _build_s_to_t_map(Q)
         self._s_tab = s_tab
         self._t_tab = t_tab
@@ -482,7 +489,23 @@ class QuinticShape:
         return dkappa_ds_signed
 
     def v_cap_fn(self, s: float) -> float:
-        raise NotImplementedError   # task 10-11
+        """Velocity limit curve V_lim(s) from centripetal + rotation-jerk.
+
+        Shaper cap is applied in task 11. Extruder cap comes in plan 4
+        as a wrapper stage, not here.
+        """
+        limits = self._limits
+        if limits is None:
+            return float("inf")
+        v = limits.v_max
+        kappa = self.curvature_at(s)
+        if kappa > 0.0:
+            v_cent = math.sqrt(limits.a_max / kappa)
+            v = min(v, v_cent)
+            if limits.jerk_max is not None and limits.jerk_max > 0.0:
+                v_jerk = (limits.jerk_max / (kappa * kappa)) ** (1.0 / 3.0)
+                v = min(v, v_jerk)
+        return v
 
     def polyline(self, chord_tol: float = _DEFAULT_CHORD_TOL) -> list[Vec3]:
         return _segment_quintic(self.Q, chord_tol)
