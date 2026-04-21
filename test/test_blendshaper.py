@@ -439,3 +439,44 @@ def test_compute_shaper_bounds_j_eff_monotone_in_frequency(f_low, f_high):
         p_hat=(0.0, 0.0, 1.0),
     )
     assert b_high.j_eff > b_low.j_eff
+
+
+@pytest.mark.parametrize("shaper_type,expected_factor", [
+    ("zv",        0.5),
+    ("mzv",       0.75),
+    ("zvd",       1.0),
+    ("ei",        1.0),
+    ("2hump_ei",  1.5),
+    ("3hump_ei",  2.0),
+])
+def test_shaper_span_fir_unchanged(shaper_type, expected_factor):
+    """FIR shaper_span must not regress after SIS dispatcher lands.
+    shaper_span = factor * 1/(freq*sqrt(1-dr^2)); at freq=40, dr=0:
+    shaper_span = factor * 0.025.
+    """
+    span = blendshaper.shaper_span(shaper_type, shaper_freq=40.0, damping_ratio=0.0)
+    assert span == pytest.approx(expected_factor * 0.025, rel=1e-9)
+
+
+def test_shaper_span_fir_damped():
+    """Damping widens the span. dr=0.1 -> factor / (freq * sqrt(0.99))."""
+    span = blendshaper.shaper_span("mzv", shaper_freq=40.0, damping_ratio=0.1)
+    expected = 0.75 / (40.0 * math.sqrt(0.99))
+    assert span == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.parametrize("shaper_type", [
+    "smooth_zv",
+    "smooth_mzv",
+    "smooth_ei",
+    "smooth_2hump_ei",
+    "smooth_zvd_ei",
+    "smooth_si",
+])
+def test_shaper_span_smooth_returns_T_sm(shaper_type):
+    """SIS shaper_span returns the kernel's T_sm directly. T_sm is carried
+    in shaper_defs.INPUT_SMOOTHERS -- shaper_span must not raise ValueError
+    on SIS names, and must return a positive finite number."""
+    span = blendshaper.shaper_span(shaper_type, shaper_freq=40.0, damping_ratio=0.0)
+    assert span > 0.0
+    assert span < 0.5  # sanity: SIS spans at 40 Hz are tens of ms, not seconds

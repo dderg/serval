@@ -39,7 +39,7 @@ class ShaperBounds:
     v_step_cap: float
 
 
-# Pulse-sequence span in units of the damped period, keyed by shaper name.
+# Pulse-sequence span in units of the damped period, keyed by FIR shaper name.
 # Values match klippy/extras/shaper_defs.py exactly (last T[i] of each).
 _SHAPER_SPAN_FACTOR = {
     "zv": 0.5,
@@ -51,13 +51,36 @@ _SHAPER_SPAN_FACTOR = {
 }
 
 
-def shaper_span(shaper_type: str, shaper_freq: float, damping_ratio: float) -> float:
-    """Total pulse-sequence span in seconds for the given shaper configuration."""
-    if shaper_type not in _SHAPER_SPAN_FACTOR:
+def _smooth_is_span(shaper_type: str, shaper_freq: float, damping_ratio: float) -> float:
+    """Span of a Smooth Input Shaper polynomial kernel.
+
+    The SIS kernels carry T_sm explicitly in shaper_defs.INPUT_SMOOTHERS.
+    We replicate the runtime value by calling the kernel's init_func, which
+    returns (coeffs, T_sm) — the same tuple that init_smoother produces.
+    """
+    from klippy.extras import shaper_defs
+    factory = {s.name: s for s in shaper_defs.INPUT_SMOOTHERS}
+    if shaper_type not in factory:
         raise ValueError("unknown shaper type: %r" % (shaper_type,))
-    factor = _SHAPER_SPAN_FACTOR[shaper_type]
-    t_d = 1.0 / (shaper_freq * math.sqrt(1.0 - damping_ratio * damping_ratio))
-    return factor * t_d
+    smoother_def = factory[shaper_type]
+    # init_func returns (coeffs, T_sm); damping_ratio is ignored by SIS kernels
+    # (their polynomial coefficients are fixed; only shaper_freq scales T_sm).
+    _coeffs, T_sm = smoother_def.init_func(shaper_freq, damping_ratio)
+    return float(T_sm)
+
+
+def shaper_span(shaper_type: str, shaper_freq: float, damping_ratio: float) -> float:
+    """Effective span in seconds for the given shaper configuration.
+
+    FIR shapers: damped-period * per-type factor (existing behavior).
+    Smooth-IS shapers: kernel T_sm read from shaper_defs.INPUT_SMOOTHERS.
+    """
+    if shaper_type in _SHAPER_SPAN_FACTOR:
+        factor = _SHAPER_SPAN_FACTOR[shaper_type]
+        t_d = 1.0 / (shaper_freq * math.sqrt(1.0 - damping_ratio * damping_ratio))
+        return factor * t_d
+    # Try SIS. If unknown there too, _smooth_is_span raises a clear ValueError.
+    return _smooth_is_span(shaper_type, shaper_freq, damping_ratio)
 
 
 _AXES = ("x", "y", "z")
