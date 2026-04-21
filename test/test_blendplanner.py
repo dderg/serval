@@ -175,14 +175,23 @@ def test_feed_uturn_emits_prev_with_zero_next_junction():
 
 
 class _FakeAxisIS:
+    # Mirrors klippy.extras.input_shaper.AxisInputShaper API — axis is
+    # accessed via get_axis(), not a direct .axis attribute. See the
+    # regression test in test_blendmath.py and commit history for why.
     def __init__(self, axis, stype, freq, damping=0.1):
-        self.axis = axis
+        self._axis = axis
         class _P:
             pass
         self.params = _P()
         self.params.shaper_type = stype
         self.params.shaper_freq = freq
         self.params.damping_ratio = damping
+
+    def get_axis(self):
+        return self._axis
+
+    def get_type(self):
+        return self.params.shaper_type
 
 
 class _FakeIS:

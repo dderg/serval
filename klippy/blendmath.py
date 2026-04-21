@@ -280,9 +280,11 @@ def _sigma_T_max_from_toolhead(toolhead):
     sigma_max = 0.0
     for axis_shaper in is_obj.get_shapers():
         params = axis_shaper.params
-        freq = float(params.shaper_freq)
-        stype = params.shaper_type
-        damp = float(params.damping_ratio)
+        # Smooth-family axes don't carry shaper_freq/shaper_type; their
+        # impulse-spread sigma_T is zero by construction, so skip them.
+        freq = float(getattr(params, "shaper_freq", 0.0) or 0.0)
+        stype = getattr(params, "shaper_type", "") or ""
+        damp = float(getattr(params, "damping_ratio", 0.0) or 0.0)
         if freq > 0.0 and stype in factory:
             A, T = factory[stype](freq, damp)
             w_sum = sum(A)
@@ -417,16 +419,21 @@ def _extract_shapers(toolhead):
     snaps = []
     for axis_shaper in is_obj.get_shapers():
         params = axis_shaper.params
-        freq = float(params.shaper_freq)
-        shaper_type = params.shaper_type
-        damping_ratio = float(params.damping_ratio)
+        # After the BE-v2 smooth-shapers port, axes can carry either
+        # TypedInputShaperParams (impulse) or TypedInputSmootherParams
+        # (smooth). Arc-blending's velocity cap today only consumes the
+        # impulse family, so smooth-family axes are recorded with
+        # A_axis=0.0 (no contribution to the shaper-derived cap).
+        freq = float(getattr(params, "shaper_freq", 0.0) or 0.0)
+        shaper_type = getattr(params, "shaper_type", "") or ""
+        damping_ratio = float(getattr(params, "damping_ratio", 0.0) or 0.0)
         if freq > 0.0 and shaper_type in shaper_factory:
             impulses = shaper_factory[shaper_type](freq, damping_ratio)
             A_axis = float(sc.find_shaper_max_accel(impulses))
         else:
             A_axis = 0.0
         snaps.append(blendshaper.AxisShaperSnapshot(
-            axis=axis_shaper.axis,
+            axis=axis_shaper.get_axis(),
             shaper_type=shaper_type,
             shaper_freq=freq,
             damping_ratio=damping_ratio,

@@ -687,14 +687,29 @@ def test_segment_arc_zero_max_chord_err_raises():
 
 
 class _FakeAxisInputShaper:
+    """Mirrors the API of klippy.extras.input_shaper.AxisInputShaper.
+
+    The real class exposes axis access via ``get_axis()``, not a direct
+    ``.axis`` attribute — regression: test/test_blendmath.py used to
+    expose ``.axis`` directly and masked a blendmath bug on real hardware
+    (see commit adding this comment).
+    """
+
     def __init__(self, axis, shaper_type, freq, damping_ratio=0.1):
-        self.axis = axis
+        self._axis = axis
         self._type = shaper_type
         self._freq = freq
         self._damping = damping_ratio
 
+    def get_axis(self):
+        return self._axis
+
+    def get_type(self):
+        return self._type
+
     class _Params:
         def __init__(self, outer):
+            self.axis = outer._axis
             self.shaper_type = outer._type
             self.shaper_freq = outer._freq
             self.damping_ratio = outer._damping
@@ -773,6 +788,54 @@ def test_extract_shapers_unshaped_axis_has_zero_A():
     assert snaps_by_axis["x"].A_axis == 0.0
     # shaper_type is mirrored from params regardless of freq
     assert snaps_by_axis["x"].shaper_type == "zv"
+
+
+def test_extract_shapers_uses_real_axis_input_shaper_api():
+    """Regression: route through the real AxisInputShaper class (post
+    BE-v2 smooth-shapers port) and confirm blendmath._extract_shapers
+    uses get_axis() instead of a direct .axis attribute. The pre-port
+    API exposed .axis directly; the port removed it and the fake had
+    masked the mismatch — breaking TEST_RESONANCES on real hardware.
+    """
+    from klippy.extras import input_shaper as _is_mod
+    params = _is_mod.TypedInputShaperParams("x", "zv", None)
+    params.shaper_freq = 50.0
+    params.damping_ratio = 0.1
+    real_axis_shaper = _is_mod.AxisInputShaper(params)
+    assert not hasattr(real_axis_shaper, "axis"), (
+        "AxisInputShaper is not expected to expose .axis directly; "
+        "blendmath must call get_axis()."
+    )
+    assert real_axis_shaper.get_axis() == "x"
+
+    is_obj = _FakeInputShaper([real_axis_shaper])
+    toolhead = _FakeToolheadWithShapers(is_obj)
+    snaps = blendmath._extract_shapers(toolhead)
+    assert len(snaps) == 1
+    assert snaps[0].axis == "x"
+    assert snaps[0].shaper_type == "zv"
+    assert snaps[0].shaper_freq == 50.0
+    assert snaps[0].A_axis > 0.0
+
+
+def test_extract_shapers_smooth_family_axis_has_zero_A():
+    """Smooth-family axes carry TypedInputSmootherParams (no shaper_freq
+    / shaper_type / damping_ratio fields). _extract_shapers must not
+    crash on them — it records A_axis=0.0 because the arc-blending
+    velocity cap only consumes the impulse family today.
+    """
+    from klippy.extras import input_shaper as _is_mod
+    params = _is_mod.TypedInputSmootherParams("x", "smooth_mzv", None)
+    params.smoother_freq = 40.0
+    real_axis_smoother = _is_mod.AxisInputSmoother(params)
+    assert real_axis_smoother.get_axis() == "x"
+
+    is_obj = _FakeInputShaper([real_axis_smoother])
+    toolhead = _FakeToolheadWithShapers(is_obj)
+    snaps = blendmath._extract_shapers(toolhead)
+    assert len(snaps) == 1
+    assert snaps[0].axis == "x"
+    assert snaps[0].A_axis == 0.0
 
 
 def test_extract_shapers_zero_target_smoothing_returns_empty():
