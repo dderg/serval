@@ -523,3 +523,65 @@ def test_extract_shapers_dispatch_handles_both_attribute_conventions():
     assert fir.A_axis > 0.0
     assert sis.shaper_type == "smooth_mzv"
     assert sis.A_axis > 0.0
+
+
+def test_extract_shapers_target_smoothing_zero_disables_SIS():
+    """target_smoothing=0 sentinel must return [] regardless of shaper type.
+    This is the A/B diagnostic — fully bypasses shaper-derived velocity cap.
+    See project_target_smoothing_sentinel.md.
+    """
+    class MockSmootherParams:
+        smoother_type = "smooth_mzv"
+        smoother_freq = 40.0
+
+    class MockAxisShaper:
+        def __init__(self, axis):
+            self._axis = axis
+            self.params = MockSmootherParams()
+        def get_axis(self):
+            return self._axis
+
+    class MockInputShaper:
+        target_smoothing = 0.0  # sentinel
+        def get_shapers(self):
+            return [MockAxisShaper("x"), MockAxisShaper("y")]
+
+    class MockPrinter:
+        def lookup_object(self, name, default=None):
+            return MockInputShaper() if name == "input_shaper" else default
+
+    class MockToolhead:
+        printer = MockPrinter()
+
+    snaps = blendmath._extract_shapers(MockToolhead())
+    assert snaps == []  # sentinel bypasses the cap entirely
+
+
+def test_extract_shapers_target_smoothing_positive_keeps_SIS():
+    """target_smoothing > 0 (user-configured) keeps the cap active for SIS."""
+    class MockSmootherParams:
+        smoother_type = "smooth_mzv"
+        smoother_freq = 40.0
+
+    class MockAxisShaper:
+        def __init__(self, axis):
+            self._axis = axis
+            self.params = MockSmootherParams()
+        def get_axis(self):
+            return self._axis
+
+    class MockInputShaper:
+        target_smoothing = 0.08  # non-default positive
+        def get_shapers(self):
+            return [MockAxisShaper("x")]
+
+    class MockPrinter:
+        def lookup_object(self, name, default=None):
+            return MockInputShaper() if name == "input_shaper" else default
+
+    class MockToolhead:
+        printer = MockPrinter()
+
+    snaps = blendmath._extract_shapers(MockToolhead())
+    assert len(snaps) == 1
+    assert snaps[0].A_axis > 0.0
