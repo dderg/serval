@@ -16,6 +16,10 @@ from klippy import blendshaper
 
 Vec3 = Tuple[float, float, float]
 
+# Sine-of-half-angle below which we treat a junction as collinear.
+# Matches blendquintic.COLLINEAR_EPS; kept local to avoid an import.
+COLLINEAR_EPS = 1e-6
+
 
 def vdot(a: Vec3, b: Vec3) -> float:
     """Scalar dot product of two 3-vectors."""
@@ -98,6 +102,88 @@ def _sigma_T_max_from_toolhead(toolhead):
     return sigma_max
 
 
+def _scv_equivalent_junction_v(
+    cos_half: float,
+    sin_half: float,
+    corner_deviation: float,
+    sigma_T_max: float,
+    a_max: float,
+) -> float:
+    """Klipper junction-deviation velocity cap equivalent to mainline SCV
+    at a shaper with RMS impulse spread sigma_T_max, evaluated at a corner
+    with the given half-angle geometry.
+
+    Derivation:
+      - SCV-equivalent at 90 deg matching corner_deviation under shaper smear:
+            v_scv90 = cd / (sqrt(2) * sigma_T)
+      - Klipper's JD formula (jd = SCV^2 * (sqrt(2) - 1) / a_max):
+            jd_eq = v_scv90^2 * (sqrt(2) - 1) / a_max
+      - Per-corner radius and velocity:
+            R_scv = jd_eq * cos(theta/2) / (1 - cos(theta/2))
+            v_j   = sqrt(R_scv * a_max)
+
+    Returns +inf for collinear (no cap needed) or when any input is
+    non-positive (no cap derivable).
+    """
+    one_minus_cos = 1.0 - cos_half
+    if sin_half <= COLLINEAR_EPS or one_minus_cos <= 1e-12:
+        return float("inf")
+    if sigma_T_max <= 0.0 or corner_deviation <= 0.0 or a_max <= 0.0:
+        return float("inf")
+    v_scv90 = corner_deviation / (math.sqrt(2.0) * sigma_T_max)
+    jd_eq = v_scv90 * v_scv90 * (math.sqrt(2.0) - 1.0) / a_max
+    R_scv = jd_eq * cos_half / one_minus_cos
+    return math.sqrt(R_scv * a_max)
+
+
+def suppressed_junction_v(
+    prev_move,
+    next_move,
+    corner_deviation: float,
+    toolhead,
+) -> Optional[float]:
+    """SCV-equivalent junction velocity to apply when the corner-blender
+    returns no shape at a non-collinear corner.
+
+    Companion to shape builders: when a blend is suppressed (shape is None
+    at a real corner, e.g. because adjacent segments are too short for
+    the blend to fit, or the corner geometry falls outside the primitive's
+    supported range), the fork's `calc_junction` has no JD cap of its own
+    - so without this cap the toolhead would enter sharp corners at full
+    commanded velocity, causing step skipping.
+
+    Shape-agnostic: depends only on the two move vectors + the toolhead's
+    shaper sigma_T spread + corner_deviation + a_max. No blend-shape state.
+
+    Returns:
+        None  - truly collinear junction (no cap needed), or no shaper
+                 loaded (no cap derivable; mainline-Kalico calc_junction
+                 quarter-tan cap still applies as a lax safety net).
+        float - velocity cap to pass to prev.limit_next_junction_speed().
+    """
+    if toolhead is None:
+        return None
+    prev_dir: Vec3 = (
+        prev_move.axes_r[0], prev_move.axes_r[1], prev_move.axes_r[2],
+    )
+    next_dir: Vec3 = (
+        next_move.axes_r[0], next_move.axes_r[1], next_move.axes_r[2],
+    )
+    dp = max(-1.0, min(1.0, vdot(prev_dir, next_dir)))
+    cos_half = math.sqrt(max(0.0, (1.0 + dp) * 0.5))
+    sin_half = math.sqrt(max(0.0, (1.0 - dp) * 0.5))
+    if sin_half < COLLINEAR_EPS:
+        return None
+    sigma_T = _sigma_T_max_from_toolhead(toolhead)
+    if sigma_T <= 0.0:
+        return None
+    a_max = min(prev_move.accel, next_move.accel)
+    v_j = _scv_equivalent_junction_v(
+        cos_half, sin_half, corner_deviation, sigma_T, a_max,
+    )
+    if not math.isfinite(v_j):
+        return None
+    return v_j
 
 
 def _extract_shapers(toolhead):

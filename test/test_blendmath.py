@@ -200,3 +200,75 @@ def test_extract_shapers_zero_target_smoothing_returns_empty():
     assert blendmath._extract_shapers(toolhead) == []
 
 
+# --- Task 2: suppressed_junction_v + _scv_equivalent_junction_v ---
+
+def test_scv_equivalent_junction_v_collinear_returns_inf():
+    """Collinear corner (sin_half=0) -> no cap derivable -> +inf."""
+    v = blendmath._scv_equivalent_junction_v(
+        cos_half=1.0, sin_half=0.0,
+        corner_deviation=0.1, sigma_T_max=0.015, a_max=50000.0,
+    )
+    assert math.isinf(v)
+
+
+def test_scv_equivalent_junction_v_reversal_returns_near_zero():
+    """Near-reversal (cos_half=0) -> R_scv=0 -> v_j=0."""
+    v = blendmath._scv_equivalent_junction_v(
+        cos_half=1e-5, sin_half=1.0,
+        corner_deviation=0.1, sigma_T_max=0.015, a_max=50000.0,
+    )
+    assert v >= 0.0 and v < 1.0  # sub-1 mm/s
+
+
+def test_scv_equivalent_junction_v_right_angle_is_finite():
+    """90deg corner (cos_half = sin_half = 1/sqrt(2)) -> finite positive cap."""
+    import math as _m
+    h = _m.sqrt(2.0) / 2.0
+    v = blendmath._scv_equivalent_junction_v(
+        cos_half=h, sin_half=h,
+        corner_deviation=0.1, sigma_T_max=0.015, a_max=50000.0,
+    )
+    assert math.isfinite(v) and v > 0.0
+
+
+def test_scv_equivalent_junction_v_zero_sigma_returns_inf():
+    """sigma_T_max=0 -> no cap derivable -> +inf."""
+    v = blendmath._scv_equivalent_junction_v(
+        cos_half=0.7, sin_half=0.7,
+        corner_deviation=0.1, sigma_T_max=0.0, a_max=50000.0,
+    )
+    assert math.isinf(v)
+
+
+def test_suppressed_junction_v_none_without_shaper():
+    """Toolhead with no input_shaper -> no cap derivable -> return None."""
+    class _TH:
+        printer = None
+    prev = _FakeMove(axes_r=(1.0, 0.0, 0.0), move_d=10.0, accel=50000.0, max_cruise_v2=1000.0)
+    nxt  = _FakeMove(axes_r=(0.0, 1.0, 0.0), move_d=10.0, accel=50000.0, max_cruise_v2=1000.0)
+    assert blendmath.suppressed_junction_v(prev, nxt, 0.1, _TH()) is None
+
+
+def test_suppressed_junction_v_collinear_returns_none():
+    """Collinear (sin_half < COLLINEAR_EPS) -> None (no cap needed)."""
+    prev = _FakeMove(axes_r=(1.0, 0.0, 0.0), move_d=10.0, accel=50000.0, max_cruise_v2=1000.0)
+    nxt  = _FakeMove(axes_r=(1.0, 0.0, 0.0), move_d=10.0, accel=50000.0, max_cruise_v2=1000.0)
+    th = _FakeToolheadWithShapers(_FakeInputShaper([
+        _FakeAxisInputShaper("x", "zv", 50.0),
+        _FakeAxisInputShaper("y", "zv", 50.0),
+    ]))
+    assert blendmath.suppressed_junction_v(prev, nxt, 0.1, th) is None
+
+
+def test_suppressed_junction_v_right_angle_returns_finite():
+    """90deg corner with shaper loaded -> finite positive cap."""
+    prev = _FakeMove(axes_r=(1.0, 0.0, 0.0), move_d=10.0, accel=50000.0, max_cruise_v2=1000.0)
+    nxt  = _FakeMove(axes_r=(0.0, 1.0, 0.0), move_d=10.0, accel=50000.0, max_cruise_v2=1000.0)
+    th = _FakeToolheadWithShapers(_FakeInputShaper([
+        _FakeAxisInputShaper("x", "zv", 50.0),
+        _FakeAxisInputShaper("y", "zv", 50.0),
+    ]))
+    v = blendmath.suppressed_junction_v(prev, nxt, 0.1, th)
+    assert v is not None and math.isfinite(v) and v > 0.0
+
+
