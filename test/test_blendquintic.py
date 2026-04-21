@@ -114,3 +114,45 @@ def test_peak_curvature_matches_dense_reference():
     ]
     ref_k = max(ks)
     assert peak_k == pytest.approx(ref_k, rel=1e-3)
+
+
+def test_r_of_theta_anchor_values():
+    # Anchors from subspec 6d; verified by audit.
+    assert blendquintic._r_of_theta(math.radians(30)) == pytest.approx(0.5043, abs=1e-4)
+    assert blendquintic._r_of_theta(math.radians(90)) == pytest.approx(0.5900, abs=1e-4)
+    assert blendquintic._r_of_theta(math.radians(120)) == pytest.approx(0.6800, abs=1e-4)
+
+
+def test_r_of_theta_clamps():
+    # Clamped to [0.50, 0.86].
+    assert blendquintic._r_of_theta(0.0) >= 0.50
+    assert blendquintic._r_of_theta(math.pi) <= 0.86
+
+
+def test_deviation_coeff_formula():
+    # (1 + 15*r) / 16.
+    assert blendquintic._deviation_coeff(0.5) == pytest.approx((1.0 + 15.0 * 0.5) / 16.0)
+    assert blendquintic._deviation_coeff(0.8) == pytest.approx((1.0 + 15.0 * 0.8) / 16.0)
+
+
+def test_deviation_closed_form_vs_numerical():
+    # For a known corner, compare closed-form to numerical curve-peak evaluation.
+    d = 1.0
+    theta = math.radians(90)
+    r = blendquintic._r_of_theta(theta)
+    sin_half = math.sin(theta / 2.0)
+    eps_closed = blendquintic._deviation_closed_form(d, r, sin_half)
+    assert eps_closed > 0.0
+    # Monotonicity sanity: larger d or larger r -> larger eps.
+    assert blendquintic._deviation_closed_form(2.0, r, sin_half) > eps_closed
+    assert blendquintic._deviation_closed_form(d, 0.8, sin_half) > eps_closed
+
+
+def test_d_from_deviation_inverse():
+    eps = 0.1
+    theta = math.radians(90)
+    r = blendquintic._r_of_theta(theta)
+    sin_half = math.sin(theta / 2.0)
+    d = blendquintic._d_from_deviation(eps, r, sin_half)
+    eps_back = blendquintic._deviation_closed_form(d, r, sin_half)
+    assert eps_back == pytest.approx(eps, rel=1e-9)

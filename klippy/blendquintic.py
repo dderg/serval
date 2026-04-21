@@ -200,6 +200,55 @@ def _peak_curvature(Q, n_samples: int = 100) -> tuple[float, float]:
     return best_t, best_k
 
 
+# r(theta) quadratic fit — archive values, verified by audit. Clamped
+# to [0.50, 0.86] to stay within empirical validity window.
+_R_A = 0.5085
+_R_B = -0.03785
+_R_C = 0.05715
+_R_CLAMP_LO = 0.50
+_R_CLAMP_HI = 0.86
+
+
+def _r_of_theta(theta: float) -> float:
+    """Quadratic fit of 'shape ratio' r as a function of deflection angle.
+
+    Ported from blend-arc-quintic-archive/klippy/blendquintic.py:183-203.
+    Audit (2026-04-20) confirmed correctness against anchor values.
+    """
+    r = _R_A + _R_B * theta + _R_C * theta * theta
+    if r < _R_CLAMP_LO:
+        return _R_CLAMP_LO
+    if r > _R_CLAMP_HI:
+        return _R_CLAMP_HI
+    return r
+
+
+def _deviation_coeff(r: float) -> float:
+    """Chord-deviation prefactor (1 + 15*r) / 16."""
+    return (1.0 + 15.0 * r) / 16.0
+
+
+def _deviation_closed_form(d: float, r: float, sin_half: float) -> float:
+    """Chord deviation in [mm] for a symmetric quintic Hermite with
+    tangent length d, shape ratio r, and corner half-angle with sine
+    sin_half. Derivation: evaluate B(0.5) for the symmetric control
+    net; the perpendicular distance to the corner apex is
+    (d/16) * (1 + 15*r) * sin(theta/2).
+    """
+    return _deviation_coeff(r) * d * sin_half
+
+
+def _d_from_deviation(eps: float, r: float, sin_half: float) -> float:
+    """Inverse of _deviation_closed_form: tangent length d required to
+    achieve chord deviation eps. Returns +inf when collinear
+    (sin_half==0) or when r would drive the denominator non-positive.
+    """
+    denom = (1.0 + 15.0 * r) * sin_half
+    if denom <= 0.0:
+        return float("inf")
+    return 16.0 * eps / denom
+
+
 class QuinticShape:
     """Quintic Hermite Bezier corner blend. Implements SmoothShape."""
 
