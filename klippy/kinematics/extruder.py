@@ -98,6 +98,14 @@ class PALinearModel:
         ffi_main, ffi_lib = chelper.get_ffi()
         return ffi_lib.pressure_advance_linear_model_func
 
+    def f_prime(self, v):
+        """d/dv of the PA advance function. Constant for linear PA."""
+        return self.pressure_advance
+
+    def f_double_prime(self, v):
+        """d²/dv² of the PA advance function. Zero for linear PA."""
+        return 0.0
+
 
 class PANonLinearModel:
     def __init__(self, config=None):
@@ -182,6 +190,24 @@ class PATanhModel(PANonLinearModel):
         ffi_main, ffi_lib = chelper.get_ffi()
         return ffi_lib.pressure_advance_tanh_model_func
 
+    def f_prime(self, v):
+        """d/dv: LA + (NO/LV) · sech²(v/LV)."""
+        import math
+        if self.linearization_velocity <= 0.0:
+            return self.linear_advance
+        vn = v / self.linearization_velocity
+        sech2 = 1.0 - math.tanh(vn) ** 2
+        return self.linear_advance + (self.nonlinear_offset / self.linearization_velocity) * sech2
+
+    def f_double_prime(self, v):
+        """d²/dv²: −(2·NO/LV²) · sech²(v/LV) · tanh(v/LV)."""
+        import math
+        if self.linearization_velocity <= 0.0:
+            return 0.0
+        vn = v / self.linearization_velocity
+        sech2 = 1.0 - math.tanh(vn) ** 2
+        return -2.0 * self.nonlinear_offset / (self.linearization_velocity ** 2) * sech2 * math.tanh(vn)
+
 
 class PAReciprModel(PANonLinearModel):
     name = "recipr"
@@ -192,6 +218,20 @@ class PAReciprModel(PANonLinearModel):
     def get_func(self):
         ffi_main, ffi_lib = chelper.get_ffi()
         return ffi_lib.pressure_advance_recipr_model_func
+
+    def f_prime(self, v):
+        """d/dv: LA + (NO/LV) / (1 + v/LV)²."""
+        if self.linearization_velocity <= 0.0:
+            return self.linear_advance
+        r = v / self.linearization_velocity
+        return self.linear_advance + (self.nonlinear_offset / self.linearization_velocity) / (1.0 + r) ** 2
+
+    def f_double_prime(self, v):
+        """d²/dv²: −(2·NO/LV²) / (1 + v/LV)³."""
+        if self.linearization_velocity <= 0.0:
+            return 0.0
+        r = v / self.linearization_velocity
+        return -2.0 * self.nonlinear_offset / (self.linearization_velocity ** 2) / (1.0 + r) ** 3
 
 
 class ExtruderStepper:
