@@ -261,3 +261,25 @@ def test_tangent_matches_ds_position_numerically():
     assert num_hat[0] == pytest.approx(tan[0], abs=1e-4)
     assert num_hat[1] == pytest.approx(tan[1], abs=1e-4)
     assert num_hat[2] == pytest.approx(tan[2], abs=1e-4)
+
+
+def test_dkappa_ds_matches_finite_difference():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    ds = 1e-4
+    for s_frac in (0.25, 0.4, 0.5, 0.6, 0.75):
+        s_mid = shape.arc_length * s_frac
+        k_lo = shape.curvature_at(s_mid - ds)
+        k_hi = shape.curvature_at(s_mid + ds)
+        numerical = (k_hi - k_lo) / (2 * ds)
+        analytical = shape.dkappa_ds(s_mid)
+        assert analytical == pytest.approx(numerical, abs=1e-3, rel=1e-3)
+
+
+def test_dkappa_ds_signs_at_endpoints():
+    """Symmetric blend: kappa ramps from 0 up to peak then back to 0.
+    dkappa/ds should be positive near s=0, negative near s=arc_length."""
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    assert shape.dkappa_ds(shape.arc_length * 0.1) > 0.0
+    assert shape.dkappa_ds(shape.arc_length * 0.9) < 0.0

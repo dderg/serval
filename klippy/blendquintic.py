@@ -334,6 +334,40 @@ def _s_to_t(s_tab: list[float], t_tab: list[float], s: float) -> float:
     return t_lo + (t_hi - t_lo) * frac
 
 
+def _s_to_t_refined(
+    Q, s_tab: list[float], t_tab: list[float], s: float
+) -> float:
+    """As _s_to_t, plus one Newton step using the local arc-length
+    integrator to sharpen the linear interpolation error.
+
+    One GL8 integration over [t_lo, t_approx] costs 8 speed evals;
+    total cost per call ≈ 16 speed evals (one for the GL8, one for the
+    Newton correction). Required so that dkappa_ds and curvature_at
+    agree to rel=1e-3 in the finite-difference test.
+    """
+    t_approx = _s_to_t(s_tab, t_tab, s)
+    import bisect
+    if s <= 0.0 or s >= s_tab[-1]:
+        return t_approx
+    idx = bisect.bisect_left(s_tab, s)
+    s_lo = s_tab[idx - 1]
+    t_lo = t_tab[idx - 1]
+    # Arc length from t_lo to t_approx via GL8.
+    half = 0.5 * (t_approx - t_lo)
+    mid_t = 0.5 * (t_approx + t_lo)
+    seg = 0.0
+    for j in range(8):
+        t_j = mid_t + half * _GL8_NODES[j]
+        seg += _GL8_WEIGHTS[j] * _speed_at_t(Q, t_j)
+    seg *= half
+    s_actual = s_lo + seg
+    # Newton correction: t += (s_target - s_actual) / speed(t_approx)
+    speed = _speed_at_t(Q, t_approx)
+    if speed < 1e-30:
+        return t_approx
+    return t_approx + (s - s_actual) / speed
+
+
 class QuinticShape:
     """Quintic Hermite Bezier corner blend. Implements SmoothShape."""
 
@@ -374,11 +408,11 @@ class QuinticShape:
         return None
 
     def position_at(self, s: float) -> Vec3:
-        t = _s_to_t(self._s_tab, self._t_tab, s)
+        t = _s_to_t_refined(self.Q, self._s_tab, self._t_tab, s)
         return _quintic_eval(self.Q, t)
 
     def tangent_at(self, s: float) -> Vec3:
-        t = _s_to_t(self._s_tab, self._t_tab, s)
+        t = _s_to_t_refined(self.Q, self._s_tab, self._t_tab, s)
         d1 = _quintic_first_deriv(self.Q, t)
         mag = math.sqrt(d1[0] ** 2 + d1[1] ** 2 + d1[2] ** 2)
         if mag < 1e-30:
@@ -386,11 +420,41 @@ class QuinticShape:
         return (d1[0] / mag, d1[1] / mag, d1[2] / mag)
 
     def curvature_at(self, s: float) -> float:
-        t = _s_to_t(self._s_tab, self._t_tab, s)
+        t = _s_to_t_refined(self.Q, self._s_tab, self._t_tab, s)
         return _curvature_at_t(self.Q, t)
 
     def dkappa_ds(self, s: float) -> float:
-        raise NotImplementedError   # task 8
+        """Analytical dκ/ds via the chain rule; no finite differences.
+
+        2D planar derivation:
+            κ(t) = (B' × B'')·ẑ / |B'|^3          (signed)
+            dκ/dt = (B' × B''')·ẑ / |B'|^3
+                  − 3κ (B'·B'') / |B'|²
+            dκ/ds = (dκ/dt) / |B'(t)|
+
+        curvature_at returns |κ| (unsigned), so we return
+        d(|κ|)/ds = sign(κ) · (dκ/ds) to stay consistent with
+        the finite-difference convention used in tests.
+        """
+        t = _s_to_t_refined(self.Q, self._s_tab, self._t_tab, s)
+        d1 = _quintic_first_deriv(self.Q, t)
+        d2 = _quintic_second_deriv(self.Q, t)
+        d3 = _quintic_third_deriv(self.Q, t)
+        d1_mag2 = d1[0] ** 2 + d1[1] ** 2 + d1[2] ** 2
+        d1_mag = math.sqrt(d1_mag2)
+        if d1_mag < 1e-30:
+            return 0.0
+        d1_mag3 = d1_mag2 * d1_mag
+        cross_13_z = d1[0] * d3[1] - d1[1] * d3[0]   # 2D: z-component
+        cross_12_z = d1[0] * d2[1] - d1[1] * d2[0]
+        dot_12 = d1[0] * d2[0] + d1[1] * d2[1] + d1[2] * d2[2]
+        kappa = cross_12_z / d1_mag3           # signed scalar curvature
+        dkappa_dt = cross_13_z / d1_mag3 - 3.0 * kappa * dot_12 / d1_mag2
+        dkappa_ds_signed = dkappa_dt / d1_mag
+        # Return d(|κ|)/ds = sign(κ)·(dκ/ds); matches unsigned curvature_at.
+        if kappa < 0.0:
+            return -dkappa_ds_signed
+        return dkappa_ds_signed
 
     def v_cap_fn(self, s: float) -> float:
         raise NotImplementedError   # task 10-11
