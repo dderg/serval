@@ -283,3 +283,26 @@ def test_dkappa_ds_signs_at_endpoints():
     shape = _build_shape_direct(Q)
     assert shape.dkappa_ds(shape.arc_length * 0.1) > 0.0
     assert shape.dkappa_ds(shape.arc_length * 0.9) < 0.0
+
+
+def _right_angle_quintic_mirrored():
+    """Mirror of _right_angle_quintic across the x-axis: this produces
+    a quintic whose signed curvature is POSITIVE throughout, exercising
+    the kappa >= 0 branch of dkappa_ds."""
+    Q = _right_angle_quintic()
+    return tuple((q[0], -q[1], q[2]) for q in Q)
+
+
+def test_dkappa_ds_matches_finite_difference_mirrored():
+    """Same FD test, but on a mirrored fixture with kappa >= 0 throughout,
+    exercising the no-sign-flip branch of dkappa_ds."""
+    Q = _right_angle_quintic_mirrored()
+    shape = _build_shape_direct(Q)
+    ds = 1e-4
+    for s_frac in (0.25, 0.4, 0.5, 0.6, 0.75):
+        s_mid = shape.arc_length * s_frac
+        k_lo = shape.curvature_at(s_mid - ds)
+        k_hi = shape.curvature_at(s_mid + ds)
+        numerical = (k_hi - k_lo) / (2 * ds)
+        analytical = shape.dkappa_ds(s_mid)
+        assert analytical == pytest.approx(numerical, abs=1e-3, rel=1e-3)

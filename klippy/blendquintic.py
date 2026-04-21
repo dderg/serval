@@ -14,6 +14,7 @@
 # overshoot at the worst angles).
 from __future__ import annotations
 
+import bisect
 import math
 from typing import Optional, Tuple
 
@@ -324,7 +325,6 @@ def _s_to_t(s_tab: list[float], t_tab: list[float], s: float) -> float:
         return t_tab[0]
     if s >= s_tab[-1]:
         return t_tab[-1]
-    import bisect
     idx = bisect.bisect_left(s_tab, s)
     s_lo, s_hi = s_tab[idx - 1], s_tab[idx]
     t_lo, t_hi = t_tab[idx - 1], t_tab[idx]
@@ -341,12 +341,11 @@ def _s_to_t_refined(
     integrator to sharpen the linear interpolation error.
 
     One GL8 integration over [t_lo, t_approx] costs 8 speed evals;
-    total cost per call ≈ 16 speed evals (one for the GL8, one for the
-    Newton correction). Required so that dkappa_ds and curvature_at
+    the Newton step adds 1 speed eval at t_approx; total cost ≈ 9
+    speed evals per call. Required so that dkappa_ds and curvature_at
     agree to rel=1e-3 in the finite-difference test.
     """
     t_approx = _s_to_t(s_tab, t_tab, s)
-    import bisect
     if s <= 0.0 or s >= s_tab[-1]:
         return t_approx
     idx = bisect.bisect_left(s_tab, s)
@@ -408,11 +407,11 @@ class QuinticShape:
         return None
 
     def position_at(self, s: float) -> Vec3:
-        t = _s_to_t_refined(self.Q, self._s_tab, self._t_tab, s)
+        t = _s_to_t(self._s_tab, self._t_tab, s)
         return _quintic_eval(self.Q, t)
 
     def tangent_at(self, s: float) -> Vec3:
-        t = _s_to_t_refined(self.Q, self._s_tab, self._t_tab, s)
+        t = _s_to_t(self._s_tab, self._t_tab, s)
         d1 = _quintic_first_deriv(self.Q, t)
         mag = math.sqrt(d1[0] ** 2 + d1[1] ** 2 + d1[2] ** 2)
         if mag < 1e-30:
