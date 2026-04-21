@@ -114,9 +114,15 @@ def cap_move(
     k = move.axes_r[3]
     if k <= 0.0:
         return (float("inf"), float("inf"))
-    # Degenerate: zero accel budget.
+    # Degenerate: zero accel budget, but velocity cap may still apply.
     if extruder_limits.a_E_max <= 0.0:
-        return (float("inf"), 0.0)
+        v_E_max_d = extruder_limits.v_E_max
+        if v_E_max_d > 0.0:
+            return (v_E_max_d / k, float("inf"))
+        return (float("inf"), float("inf"))
+    # Defend against smooth_time=0 (possible via SET_PRESSURE_ADVANCE runtime).
+    if extruder_limits.smooth_time <= 0.0:
+        return (float("inf"), float("inf"))
 
     K_h = (15.0 / 8.0) / extruder_limits.smooth_time
     a_E_max = extruder_limits.a_E_max
@@ -131,7 +137,12 @@ def cap_move(
         # accel-plateau. Solve: k * v_xy + PA * a_E_cap <= v_E_max.
         v_from_accel = (v_E_max - pa * a_E_cap) / k
         v_from_rpm = v_E_max / k
-        v_cap = min(v_from_rpm, max(0.0, v_from_accel))
+        if v_from_accel <= 0.0:
+            # Accel cap forces stepper above v_E_max at any non-zero speed;
+            # enforcing both caps would require stopping motion.  Fall back to
+            # the RPM-only cap and skip the accel cap.
+            return (v_from_rpm, float("inf"))
+        v_cap = min(v_from_rpm, v_from_accel)
         return (v_cap, a_cap)
 
     # Non-linear PA: tanh or recipr.
@@ -147,4 +158,8 @@ def cap_move(
     a_cap = a_E_cap / k
     # Velocity cap via bisection.
     v_cap = _solve_velocity_cap_bisection(pa_model, k, a_E_cap, v_E_max)
+    if v_cap <= 1e-6:
+        # Bisection collapsed: accel cap is infeasible at any non-zero speed.
+        # Fall back to RPM-only cap.
+        return (v_E_max / k, float("inf"))
     return (v_cap, a_cap)

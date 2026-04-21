@@ -634,8 +634,14 @@ class ToolHead:
             import math as _m
             pa_snap, limits = snap
             v_cap, a_cap = blendextruder.cap_move(move, pa_snap, limits)
-            if _m.isfinite(v_cap) or _m.isfinite(a_cap):
-                move.limit_speed(v_cap, a_cap)
+            # Safety: never pass zero or negative to limit_speed (ZeroDivisionError).
+            v_cap_finite = _m.isfinite(v_cap) and v_cap > 0.0
+            a_cap_safe = a_cap if (_m.isfinite(a_cap) and a_cap > 0.0) else move.accel
+            if v_cap_finite:
+                move.limit_speed(v_cap, a_cap_safe)
+            elif _m.isfinite(a_cap) and a_cap > 0.0:
+                # Only accel cap applies; leave cruise velocity unchanged.
+                move.limit_speed(_m.sqrt(move.max_cruise_v2), a_cap)
         if move.axes_d[3]:
             self.extruder.check_move(move)
         self.commanded_pos[:] = move.end_pos
@@ -682,12 +688,12 @@ class ToolHead:
         if extruder is None:
             self.extruder_cap_snapshot = None
             return
-        # Kalico extruder can delegate to its ExtruderStepper
+        # PrinterExtruder delegates to its primary ExtruderStepper.
         snap_fn = getattr(extruder, "extruder_limits_snapshot", None)
         if snap_fn is None:
-            stepper = getattr(extruder, "extruder_stepper", None)
-            if stepper is not None:
-                snap_fn = getattr(stepper, "extruder_limits_snapshot", None)
+            steppers = getattr(extruder, "extruder_steppers", None)
+            if steppers:
+                snap_fn = getattr(steppers[0], "extruder_limits_snapshot", None)
         if snap_fn is None:
             self.extruder_cap_snapshot = None
             return

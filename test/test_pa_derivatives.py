@@ -91,3 +91,21 @@ def test_recipr_f_prime_numerical_check():
     for v in (0.5, 50.0, 200.0, 400.0):
         fd = (f(v + h) - f(v - h)) / (2 * h)
         assert m.f_prime(v) == pytest.approx(fd, rel=1e-6)
+
+
+def test_tanh_f_double_prime_numerical_check():
+    """Analytic f'' matches central-difference of f' for tanh model."""
+    m = _setup_tanh(la=0.005, no=0.04, lv=100.0)
+    h = 1e-4
+    for v in (0.5, 50.0, 200.0, 400.0):
+        fd2 = (m.f_prime(v + h) - m.f_prime(v - h)) / (2 * h)
+        assert m.f_double_prime(v) == pytest.approx(fd2, rel=1e-4)
+
+
+def test_recipr_f_double_prime_numerical_check():
+    """Analytic f'' matches central-difference of f' for recipr model."""
+    m = _setup_recipr(la=0.005, no=0.04, lv=100.0)
+    h = 1e-4
+    for v in (0.5, 50.0, 200.0, 400.0):
+        fd2 = (m.f_prime(v + h) - m.f_prime(v - h)) / (2 * h)
+        assert m.f_double_prime(v) == pytest.approx(fd2, rel=1e-4)

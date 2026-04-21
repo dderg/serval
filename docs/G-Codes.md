@@ -541,9 +541,9 @@ the active hotend.
 `SET_EXTRUDER_LIMITS [EXTRUDER=<name>] [ACCEL=<mm/s^2>] [RPM=<RPM>]`:
 Runtime tuning for the per-move extruder cap. Takes effect on moves queued
 after the command. Omit both ACCEL and RPM to report current values.
-Setting either to 0 disables that cap. Requires `max_extruder_accel` or
-`max_extruder_rpm` to have been parsed from `[extruder]` config on startup
-(non-zero default) for the cap machinery to be active.
+Setting either to 0 disables that cap. Works regardless of the startup
+config — `max_extruder_accel` and `max_extruder_rpm` in `[extruder]` set
+convenient defaults but are not required for this command to take effect.
 
 #### SET_EXTRUDER_ROTATION_DISTANCE
 `SET_EXTRUDER_ROTATION_DISTANCE EXTRUDER=<config_name>

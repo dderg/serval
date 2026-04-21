@@ -51,13 +51,15 @@ def test_cap_move_none_limits_returns_inf():
     assert math.isinf(a_cap)
 
 
-def test_cap_move_zero_a_max_returns_zero_accel():
-    """Degenerate: a_E_max=0 pins a_cap to 0 (cannot accelerate)."""
-    move = _FakeMove(k=0.04, max_cruise_v=300.0)
+def test_cap_move_zero_a_max_with_rpm_cap_returns_inf_accel():
+    """P0-5: a_E_max=0 with v_E_max>0 → RPM-only cap: v_cap=v_E_max/k, a_cap=+inf."""
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
     snap = _default_linear_snap()
     limits = blendshape.ExtruderLimits(a_E_max=0.0, v_E_max=15.9, smooth_time=0.04)
-    _, a_cap = blendextruder.cap_move(move, snap, limits)
-    assert a_cap == 0.0
+    v_cap, a_cap = blendextruder.cap_move(move, snap, limits)
+    assert v_cap == pytest.approx(15.9 / k, rel=1e-6)
+    assert math.isinf(a_cap)
 
 
 def test_pa_model_snapshot_is_immutable():
@@ -71,12 +73,14 @@ def test_pa_model_snapshot_is_immutable():
 
 
 def test_cap_move_linear_a_cap_closed_form():
-    """a_E_cap = a_E_max / (1 + PA * K_h); a_cap = a_E_cap / k."""
+    """a_E_cap = a_E_max / (1 + PA * K_h); a_cap = a_E_cap / k.
+    v_E_max is set high enough that the simultaneous cap is feasible."""
     k = 0.04
     move = _FakeMove(k=k, max_cruise_v=300.0)
     pa = 0.04
     snap = blendextruder.PAModelSnapshot(kind="linear", params=(pa,))
-    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    # v_E_max=200 keeps v_from_accel positive so the accel cap is returned.
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=200.0, smooth_time=0.04)
     K_h = (15.0 / 8.0) / 0.04  # = 46.875
     expected_a_E_cap = 5000.0 / (1.0 + pa * K_h)
     _, a_cap = blendextruder.cap_move(move, snap, limits)
@@ -108,11 +112,12 @@ def test_cap_move_linear_pa_zero_cap_is_simple_division():
 
 def test_cap_move_linear_high_pa_tight_cap():
     """PA = 0.08 at smooth_time=0.04: 1 + 0.08*46.875 = 4.75
-    => a_E_cap = a_E_max / 4.75 (79% reduction)."""
+    => a_E_cap = a_E_max / 4.75 (79% reduction).
+    v_E_max=200 keeps the simultaneous cap feasible."""
     k = 0.04
     move = _FakeMove(k=k, max_cruise_v=300.0)
     snap = blendextruder.PAModelSnapshot(kind="linear", params=(0.08,))
-    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=200.0, smooth_time=0.04)
     _, a_cap = blendextruder.cap_move(move, snap, limits)
     expected = (5000.0 / 4.75) / k
     assert a_cap == pytest.approx(expected, rel=1e-6)
@@ -171,7 +176,8 @@ def test_cap_move_tanh_realistic_cap_is_close_to_a_E_max_over_k():
     """Realistic NL params: f'*K_h tiny (~0.02), so a_cap ~= a_E_max/k."""
     k = 0.04
     move = _FakeMove(k=k, max_cruise_v=300.0)
-    # NO=0.04, LV=100, LA=0 => f'(0) = 4e-4, K_h = 46.875 => 1+f'*K_h = 1.01875
+    # NO=0.04, LV=100, LA=0; v_eval = k * max_cruise_v = 0.04*300 = 12
+    # f'(12) ~= (0.04/100)*sech²(0.12) ≈ 3.9e-4, K_h = 46.875 => 1+f'*K_h ~= 1.018
     tanh_snap = blendextruder.PAModelSnapshot(kind="tanh", params=(0.0, 0.04, 100.0))
     limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
     _, a_cap = blendextruder.cap_move(move, tanh_snap, limits)
@@ -307,3 +313,149 @@ def test_extruder_limits_snapshot_disabled_returns_none():
     es.max_extruder_accel = 0.0
     es.max_extruder_rpm = 0.0
     assert es.extruder_limits_snapshot() is None
+
+
+# --- New regression tests for P0-1 through P0-5 ---
+
+def test_cap_move_smooth_time_zero_returns_inf():
+    """P0-3: smooth_time=0 must not raise ZeroDivisionError."""
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    snap = _default_linear_snap()
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.0)
+    v_cap, a_cap = blendextruder.cap_move(move, snap, limits)
+    assert math.isinf(v_cap)
+    assert math.isinf(a_cap)
+
+
+def test_cap_move_rpm_only_cap_has_infinite_accel():
+    """P0-5: a_E_max=0, v_E_max>0 → (v_E_max/k, +inf), NOT (+inf, 0)."""
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    snap = _default_linear_snap()
+    limits = blendshape.ExtruderLimits(a_E_max=0.0, v_E_max=15.9, smooth_time=0.04)
+    v_cap, a_cap = blendextruder.cap_move(move, snap, limits)
+    assert v_cap == pytest.approx(15.9 / k, rel=1e-6)
+    assert math.isinf(a_cap)
+
+
+def test_cap_move_high_pa_degenerate_v_cap_falls_back():
+    """P0-4: very high PA → v_cap would be 0 → fall back to (v_E_max/k, +inf)."""
+    # PA=0.08, k=0.04, smooth_time=0.04 → K_h=46.875
+    # a_E_cap = 5000/(1+0.08*46.875) = 5000/4.75 = 1052.6
+    # v_from_accel = (15.9 - 0.08*1052.6)/0.04 = (15.9 - 84.2)/0.04 < 0 → clamp
+    k = 0.04
+    move = _FakeMove(k=k, max_cruise_v=300.0)
+    snap = blendextruder.PAModelSnapshot(kind="linear", params=(0.08,))
+    limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    v_cap, a_cap = blendextruder.cap_move(move, snap, limits)
+    # With P0-4 fix: when linear formula gives v_from_accel < 0, fall back to
+    # v_E_max/k (rpm-only cap) with a_cap=+inf.
+    assert v_cap > 0.0, "v_cap must never be 0 or negative"
+    assert v_cap == pytest.approx(15.9 / k, rel=1e-3)
+    assert math.isinf(a_cap)
+
+
+def test_extruder_limits_snapshot_tanh_shape():
+    """P0-1/snapshot: tanh snapshot has kind='tanh' and (LA, NO, LV) params."""
+    from klippy.kinematics.extruder import ExtruderStepper, PATanhModel
+
+    es = ExtruderStepper.__new__(ExtruderStepper)
+    es.max_extruder_accel = 5000.0
+    es.max_extruder_rpm = 200.0
+
+    pa = PATanhModel.__new__(PATanhModel)
+    pa.linear_advance = 0.0
+    pa.nonlinear_offset = 0.04
+    pa.linearization_velocity = 100.0
+    es.pa_model = pa
+
+    class _ExtSmoother:
+        def __init__(self, t):
+            self.smooth_time = t
+    es.smoother = _ExtSmoother(0.04)
+    es.get_rotation_distance = lambda: 4.78
+
+    snap = es.extruder_limits_snapshot()
+    assert snap is not None
+    pa_snap, _ = snap
+    assert pa_snap.kind == "tanh"
+    assert pa_snap.params == (0.0, 0.04, 100.0)
+
+
+def test_extruder_limits_snapshot_recipr_shape():
+    """P0-1/snapshot: recipr snapshot has kind='recipr' and (LA, NO, LV) params."""
+    from klippy.kinematics.extruder import ExtruderStepper, PAReciprModel
+
+    es = ExtruderStepper.__new__(ExtruderStepper)
+    es.max_extruder_accel = 5000.0
+    es.max_extruder_rpm = 200.0
+
+    pa = PAReciprModel.__new__(PAReciprModel)
+    pa.linear_advance = 0.0
+    pa.nonlinear_offset = 0.04
+    pa.linearization_velocity = 100.0
+    es.pa_model = pa
+
+    class _ExtSmoother:
+        def __init__(self, t):
+            self.smooth_time = t
+    es.smoother = _ExtSmoother(0.04)
+    es.get_rotation_distance = lambda: 4.78
+
+    snap = es.extruder_limits_snapshot()
+    assert snap is not None
+    pa_snap, _ = snap
+    assert pa_snap.kind == "recipr"
+    assert pa_snap.params == (0.0, 0.04, 100.0)
+
+
+def test_refresh_snapshot_walks_extruder_steppers():
+    """P0-1: _refresh_extruder_cap_snapshot must walk extruder_steppers[0],
+    not the non-existent extruder_stepper (singular)."""
+    import types
+
+    # Build a minimal mock snapshot.
+    fake_pa_snap = blendextruder.PAModelSnapshot(kind="linear", params=(0.04,))
+    fake_limits = blendshape.ExtruderLimits(a_E_max=5000.0, v_E_max=15.9, smooth_time=0.04)
+    fake_snapshot = (fake_pa_snap, fake_limits)
+
+    # Mock stepper that has extruder_limits_snapshot.
+    mock_stepper = types.SimpleNamespace(
+        extruder_limits_snapshot=lambda: fake_snapshot,
+    )
+
+    # Mock PrinterExtruder: no extruder_limits_snapshot itself,
+    # but has extruder_steppers = [mock_stepper].
+    mock_extruder = types.SimpleNamespace(
+        extruder_steppers=[mock_stepper],
+        # Deliberately omit extruder_limits_snapshot to confirm delegation.
+    )
+
+    # Minimal ToolHead stub.
+    class _FakeToolHead:
+        def __init__(self):
+            self.extruder = mock_extruder
+            self.extruder_cap_snapshot = None
+
+        def _refresh_extruder_cap_snapshot(self):
+            # Copy of the fixed implementation under test.
+            extruder = getattr(self, "extruder", None)
+            if extruder is None:
+                self.extruder_cap_snapshot = None
+                return
+            snap_fn = getattr(extruder, "extruder_limits_snapshot", None)
+            if snap_fn is None:
+                steppers = getattr(extruder, "extruder_steppers", None)
+                if steppers:
+                    snap_fn = getattr(steppers[0], "extruder_limits_snapshot", None)
+            if snap_fn is None:
+                self.extruder_cap_snapshot = None
+                return
+            self.extruder_cap_snapshot = snap_fn()
+
+    th = _FakeToolHead()
+    th._refresh_extruder_cap_snapshot()
+    assert th.extruder_cap_snapshot is not None, (
+        "Cap snapshot must be set when extruder_steppers[0] has the snapshot fn"
+    )

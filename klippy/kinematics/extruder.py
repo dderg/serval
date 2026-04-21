@@ -192,7 +192,6 @@ class PATanhModel(PANonLinearModel):
 
     def f_prime(self, v):
         """d/dv: LA + (NO/LV) · sech²(v/LV)."""
-        import math
         if self.linearization_velocity <= 0.0:
             return self.linear_advance
         vn = v / self.linearization_velocity
@@ -201,7 +200,6 @@ class PATanhModel(PANonLinearModel):
 
     def f_double_prime(self, v):
         """d²/dv²: −(2·NO/LV²) · sech²(v/LV) · tanh(v/LV)."""
-        import math
         if self.linearization_velocity <= 0.0:
             return 0.0
         vn = v / self.linearization_velocity
@@ -517,6 +515,14 @@ class ExtruderStepper:
             "Extruder '%s' rotation distance set to %0.6f"
             % (self.name, rotation_dist)
         )
+        # Plan 3: v_E_max = (rpm/60) * rotation_distance — refresh snapshot
+        # when rotation_distance changes so the cap stays accurate.
+        if gcmd.get_float("DISTANCE", None) is not None:
+            printer = getattr(self, "printer", None)
+            if printer is not None:
+                th = printer.lookup_object("toolhead", None)
+                if th is not None and hasattr(th, "_refresh_extruder_cap_snapshot"):
+                    th._refresh_extruder_cap_snapshot()
 
     cmd_SYNC_EXTRUDER_MOTION_help = "Set extruder stepper motion queue"
 

@@ -44,7 +44,7 @@ class KinematicLimits:
     a_max: float
     v_max: float
     jerk_max: Optional[float]   # j_eff for rotation-jerk cap; None disables
-    extruder_caps: Optional[ExtruderLimits]   # None until plan 4 (pillar 3)
+    extruder_caps: Optional[ExtruderLimits]   # plan 3 wires; plan 5 consumes
     # Per-axis shaper snapshots for dense per-s shaper cap in v_cap_fn.
     # Empty list disables the shaper cap.
     # Populated by the planner via _extract_shapers; None until Task 12.

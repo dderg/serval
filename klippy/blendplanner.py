@@ -27,6 +27,11 @@ def _extract_extruder_caps(toolhead):
         return None
     snap_fn = getattr(extruder, "extruder_limits_snapshot", None)
     if snap_fn is None:
+        # PrinterExtruder delegates to its primary ExtruderStepper.
+        steppers = getattr(extruder, "extruder_steppers", None)
+        if steppers:
+            snap_fn = getattr(steppers[0], "extruder_limits_snapshot", None)
+    if snap_fn is None:
         return None
     snapshot = snap_fn()
     if snapshot is None:
