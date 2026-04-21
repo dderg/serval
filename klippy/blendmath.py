@@ -183,6 +183,37 @@ def suppressed_junction_v(
     return v_j
 
 
+def _compute_A_axis_smooth_is(shaper_type: str, shaper_freq: float,
+                              damping_ratio: float,
+                              target_smoothing: float = 0.12) -> float:
+    """A_axis for a Smooth-IS kernel, in the same units as FIR A_axis.
+
+    Closed-form: A_axis = 2 * target_smoothing / sigma_T^2, where
+    sigma_T^2 is the second central moment of the kernel's
+    compactly-supported polynomial w(tau). Delegated to
+    ShaperCalibrate.find_smoother_max_accel.
+
+    damping_ratio is accepted for signature parity with the FIR path
+    but has no effect — SIS kernels are fixed-shape.
+
+    Returns 0.0 for unknown shaper_type or shaper_freq <= 0 (the
+    _extract_shapers sentinel for 'no shaper contribution').
+
+    Derivation: docs/superpowers/plans/plan4-derivations/A_axis_smooth_is.md.
+    """
+    from klippy.extras import shaper_defs
+    from klippy.extras.shaper_calibrate import ShaperCalibrate
+
+    if shaper_freq <= 0.0:
+        return 0.0
+    factory = {s.name: s.init_func for s in shaper_defs.INPUT_SMOOTHERS}
+    if shaper_type not in factory:
+        return 0.0
+    smoother = factory[shaper_type](shaper_freq, damping_ratio)
+    sc = ShaperCalibrate(printer=None, target_smoothing=target_smoothing)
+    return float(sc.find_smoother_max_accel(smoother, target_smoothing))
+
+
 def _extract_shapers(toolhead):
     """Pull per-axis shaper snapshots off a Kalico toolhead.
 

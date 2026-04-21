@@ -335,3 +335,68 @@ def test_suppressed_junction_v_right_angle_returns_finite():
     assert v is not None and math.isfinite(v) and v > 0.0
 
 
+# ---------------------------------------------------------------------------
+# _compute_A_axis_smooth_is tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("shaper_type,expected_A_axis", [
+    ("smooth_zv",        5732.9),
+    ("smooth_mzv",       4548.5),
+    ("smooth_ei",        4023.8),
+    ("smooth_2hump_ei",  3844.3),
+    ("smooth_zvd_ei",    2609.4),
+    ("smooth_si",        3819.4),
+])
+def test_compute_A_axis_smooth_is_expected_values(shaper_type, expected_A_axis):
+    """A_axis for each SIS kernel at f_sh=40, ts=0.12 matches derivation.
+
+    Derivation: plan4-derivations/A_axis_smooth_is.md.
+    Tolerance: rel=1e-3 — the 5% digit is noise vs the underlying
+    closed form's 1e-10 precision, but test tolerance is set to catch
+    gross implementation errors (typos in a coefficient, wrong
+    target_smoothing default).
+    """
+    A = blendmath._compute_A_axis_smooth_is(shaper_type, 40.0, 0.1,
+                                             target_smoothing=0.12)
+    assert A == pytest.approx(expected_A_axis, rel=1e-3)
+    assert A > 0.0
+    assert math.isfinite(A)
+
+
+def test_compute_A_axis_smooth_is_scales_with_freq_squared():
+    """A_axis proportional to f_sh^2 — doubling frequency quadruples A_axis."""
+    A_40 = blendmath._compute_A_axis_smooth_is("smooth_mzv", 40.0, 0.1,
+                                                target_smoothing=0.12)
+    A_80 = blendmath._compute_A_axis_smooth_is("smooth_mzv", 80.0, 0.1,
+                                                target_smoothing=0.12)
+    ratio = A_80 / A_40
+    assert ratio == pytest.approx(4.0, rel=1e-6)
+
+
+def test_compute_A_axis_smooth_is_damping_independent():
+    """SIS kernels are fixed-shape — damping_ratio argument is accepted
+    for signature parity with FIR but has no effect on A_axis.
+    """
+    A_low = blendmath._compute_A_axis_smooth_is("smooth_mzv", 40.0, 0.0,
+                                                 target_smoothing=0.12)
+    A_high = blendmath._compute_A_axis_smooth_is("smooth_mzv", 40.0, 0.5,
+                                                  target_smoothing=0.12)
+    assert A_low == pytest.approx(A_high, rel=1e-9)
+
+
+def test_compute_A_axis_smooth_is_unknown_returns_zero():
+    """Unknown SIS name returns 0.0 rather than raising.
+    Contract: _extract_shapers uses 0.0 as the sentinel for 'axis has
+    no effective shaper contribution' — matches the behavior of the
+    existing non-FIR-non-SIS fallthrough in _extract_shapers.
+    """
+    A = blendmath._compute_A_axis_smooth_is("smooth_nonexistent", 40.0, 0.1,
+                                             target_smoothing=0.12)
+    assert A == 0.0
+
+
+def test_compute_A_axis_smooth_is_zero_freq_returns_zero():
+    """shaper_freq <= 0 returns 0.0 (no shaper -> no cap contribution)."""
+    A = blendmath._compute_A_axis_smooth_is("smooth_mzv", 0.0, 0.1,
+                                             target_smoothing=0.12)
+    assert A == 0.0
