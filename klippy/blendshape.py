@@ -38,10 +38,9 @@ class KinematicLimits:
     a_max: float
     v_max: float
     jerk_max: Optional[float]   # j_eff for rotation-jerk cap; None disables
-    shaper_sigma_T: float       # from IS impulse pattern (see blendmath)
     extruder_caps: Optional[ExtruderLimits]   # None until plan 4 (pillar 3)
     # Per-axis shaper snapshots for dense per-s shaper cap in v_cap_fn.
-    # Empty list disables the shaper cap (matches shaper_sigma_T=0 intent).
+    # Empty list disables the shaper cap.
     # Populated by the planner via _extract_shapers; None until Task 12.
     shapers: Optional[list] = field(default=None)
 

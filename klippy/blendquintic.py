@@ -249,7 +249,7 @@ def _shaper_cap_dense(Q, shapers, n: int = _SHAPER_SAMPLE_N_DEFAULT) -> float:
     p_hat = _PLANE_NORMAL
     for i in range(n + 1):
         t = i / n
-        _, tan, nrm = _point_frame(Q, t)
+        _, _, nrm = _point_frame(Q, t)
         k = _curvature_at_t(Q, t)
         if k <= 0.0:
             continue
@@ -541,7 +541,7 @@ class QuinticShape:
                 v = min(v, v_jerk)
             if limits.shapers:
                 from . import blendshaper as _blendshaper
-                _, tan, nrm = _point_frame(self.Q, t)
+                _, _, nrm = _point_frame(self.Q, t)
                 R = 1.0 / kappa
                 bounds = _blendshaper.compute_shaper_bounds(
                     limits.shapers, R, nrm, _PLANE_NORMAL

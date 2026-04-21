@@ -7,7 +7,6 @@ def test_kinematic_limits_dataclass():
         a_max=45000.0,
         v_max=500.0,
         jerk_max=None,
-        shaper_sigma_T=0.0,
         extruder_caps=None,
     )
     assert lim.a_max == 45000.0
