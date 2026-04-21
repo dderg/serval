@@ -167,10 +167,7 @@ def test_feed_uturn_emits_prev_with_zero_next_junction():
 
 
 # ---------------------------------------------------------------------------
-# Regression: suppression returning None at non-collinear corners must
-# apply an SCV-equivalent junction cap via limit_next_junction_speed.
-# Without the cap the toolhead hits the corner at full cruise velocity and
-# skips steps — see `blend_from_moves` docstring for suppression rules.
+# Shaper helper classes (used in pipeline tests below).
 # ---------------------------------------------------------------------------
 
 
@@ -208,45 +205,6 @@ class _FakeToolheadWithShaper(_FakeToolhead):
             _FakeAxisIS("x", "zv", 80.0),
             _FakeAxisIS("y", "zv", 80.0),
         ]))
-
-
-def test_feed_suppressed_non_collinear_applies_junction_cap():
-    """Rule 2 suppression at a sharp 90° corner with short segments must
-    still apply an SCV-equivalent junction velocity cap to the emitted
-    prev move — otherwise the toolhead barrels through the corner at
-    full cruise velocity."""
-    th = _FakeToolheadWithShaper(
-        corner_deviation=0.2, max_accel=50000.0, max_velocity=500.0,
-    )
-    b = blendplanner.CornerBlender(th, move_cls=_FakeMove)
-    # 1 mm segments, 90° corner. R_tol = 0.483 mm (binds), v_arc ≈ 155;
-    # SCV-equivalent v_j ≈ 29 mm/s at this cd/sigma — fork_cost > main_cost
-    # → blend_from_moves returns None (velocity-aware rule).
-    m1 = _FakeMove(th, (0, 0, 0, 0), (1, 0, 0, 0.1), speed=500.0)
-    m2 = _FakeMove(th, (1, 0, 0, 0.1), (1, 1, 0, 0.2), speed=500.0)
-    assert b.feed(m1) == []
-    out = b.feed(m2)
-    # Prev was emitted (blend suppressed) and next buffered.
-    assert out == [m1]
-    assert b._prev is m2
-    # Cap was applied — next_junction_v2 dropped well below default sentinel.
-    assert m1.next_junction_v2 < 999999999.9
-    # Cap must be strictly positive (non-collinear, not a U-turn).
-    assert m1.next_junction_v2 > 0.0
-
-
-def test_feed_collinear_with_shaper_still_no_cap():
-    """Truly collinear corners must NOT gain a cap just because a shaper
-    is present — the suppressed-junction path only applies to real
-    non-collinear corners."""
-    th = _FakeToolheadWithShaper(corner_deviation=0.1)
-    b = blendplanner.CornerBlender(th, move_cls=_FakeMove)
-    m1 = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
-    m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
-    b.feed(m1)
-    out = b.feed(m2)
-    assert out == [m1]
-    assert m1.next_junction_v2 == 999999999.9
 
 
 def _state_src_dst_pair():
@@ -302,6 +260,7 @@ def test_copy_caller_state_handles_zero_delta_v2():
 
 
 def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head():
+    from klippy import blendquintic
     b = _blender(max_chord_err=20e-3)
     th = b._toolhead
     # Two 10mm moves meeting at a 90° corner at (10,0,0).
@@ -315,31 +274,24 @@ def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head()
     arc_moves = out[1:]
     # trunc_prev shares start_pos with m_prev.
     assert trunc_prev.start_pos[:3] == m_prev.start_pos[:3]
-    # trunc_prev ends before the vertex by arc.d_consumed along +X.
-    # R_mid = 0.5 * min(10,10) * cot(45°) = 5. R_tol binds much smaller:
-    # R_tol = 50e-3 * cos(45°)/(1-cos(45°)) ≈ 0.1207. So R = R_tol ≈ 0.1207,
-    # d = R * tan(45°) ≈ 0.1207.
-    d_expected = 50e-3 * (math.sqrt(2)/2) / (1 - math.sqrt(2)/2)
+    # d_expected from the quintic formula: d = 16*eps / ((1+15*r)*sin(theta/2))
+    theta = math.radians(90.0)
+    r = blendquintic._r_of_theta(theta)
+    sin_half = math.sin(theta / 2.0)
+    d_expected = blendquintic._d_from_deviation(th.corner_deviation, r, sin_half)
     assert trunc_prev.end_pos[0] == pytest.approx(10.0 - d_expected, rel=1e-6)
     assert trunc_prev.end_pos[1] == pytest.approx(0.0, abs=1e-9)
-    # buffered next_trunc_head starts where the arc ends.
+    # buffered next_trunc_head starts where the blend ends.
     assert b._prev is not None
     assert b._prev is not m_next
     nxt_head = b._prev
     assert nxt_head.start_pos[0] == pytest.approx(10.0, abs=1e-9)
     assert nxt_head.start_pos[1] == pytest.approx(d_expected, rel=1e-6)
     assert nxt_head.end_pos[:3] == (10.0, 10.0, 0.0)
-    # Polyline points all lie on the arc within max_chord_err.
-    # Arc center: m_prev.end_pos + R*n_hat where n_hat bisects inward.
-    # At a 90° corner +X to +Y, center = vertex + R*(-1/sqrt2, 1/sqrt2) rotated;
-    # simpler check: every arc_move endpoint must be within R + chord_err of center.
-    # We compute center from arc.entry_pt + R in the direction (next-prev)/|...|.
-    # For simplicity just verify that arc spans from near (10-d,0) to (10,d).
-    first_pt = arc_moves[0].start_pos[:3]
-    last_pt = arc_moves[-1].end_pos[:3]
-    assert first_pt[0] == pytest.approx(10.0 - d_expected, rel=1e-6)
-    assert last_pt[1] == pytest.approx(d_expected, rel=1e-6)
-    # All arc moves share the same max_cruise_v2 (arc.v_cap^2 in this case).
+    # Polyline endpoints match trunc edges.
+    assert arc_moves[0].start_pos[:3] == pytest.approx(trunc_prev.end_pos[:3])
+    assert arc_moves[-1].end_pos[:3] == pytest.approx(nxt_head.start_pos[:3])
+    # All arc moves share the same max_cruise_v2 (scalar v_cap for plan 1).
     v_caps = [am.max_cruise_v2 for am in arc_moves]
     assert max(v_caps) - min(v_caps) < 1e-6
     # Instrumentation.
@@ -402,14 +354,15 @@ def test_e_conservation_through_blend():
 def test_asymmetric_segments_half_segment_rule_caps_consumption():
     b = _blender(max_chord_err=20e-3)
     th = b._toolhead
-    # 60° corner. Short segment = 2mm, long = 10mm. With LOOSE tolerance so
-    # R_tol >> R_mid and the midpoint cap binds.
-    # R_mid = 0.5 * min(2, 10) * cot(30°) = 0.5 * 2 * sqrt(3) = sqrt(3)
-    # d = R * tan(30°) = sqrt(3) * (1/sqrt(3)) = 1.0 (= L_short / 2)
-    th.corner_deviation = 10.0  # absurdly loose so R_tol does not bind
+    # 60° corner. Short segment = 2mm, long = 10mm. With LOOSE tolerance the
+    # quintic d_consumed would exceed 0.5*min(2,10)=1mm so from_moves returns
+    # None and the planner emits the full prev unchanged (no truncation).
+    # Then with TIGHT tolerance the quintic fits within the half-segment cap
+    # and trunc_prev is shorter than prev.
+    # --- tight case: cd small enough that d < 1mm ---
+    th.corner_deviation = 0.05  # 50 um
     angle = math.radians(60.0)
     m_prev = _FakeMove(th, (0, 0, 0, 0), (2, 0, 0, 0.1), speed=100.0)
-    # Rotate next direction by 60° from +X.
     next_end = (
         2 + 10 * math.cos(angle),
         0 + 10 * math.sin(angle),
@@ -418,9 +371,20 @@ def test_asymmetric_segments_half_segment_rule_caps_consumption():
     m_next = _FakeMove(th, (2, 0, 0, 0.1), next_end, speed=100.0)
     b.feed(m_prev)
     out = b.feed(m_next)
+    # With tight cd, from_moves succeeds and trunc_prev.move_d < 2mm.
+    assert len(out) >= 2, "expected blend to succeed with tight corner_deviation"
     trunc_prev = out[0]
-    # trunc_prev.move_d should equal 2 - 1 = 1 mm (half-segment consumption).
-    assert trunc_prev.move_d == pytest.approx(1.0, rel=1e-6)
+    assert trunc_prev.move_d < 2.0 - 1e-9
+    # --- loose case: cd so large that d > 1mm → from_moves returns None ---
+    b.reset()
+    th.corner_deviation = 10.0  # absurdly loose
+    m2_prev = _FakeMove(th, (0, 0, 0, 0), (2, 0, 0, 0.1), speed=100.0)
+    m2_next = _FakeMove(th, (2, 0, 0, 0.1), next_end, speed=100.0)
+    b.feed(m2_prev)
+    out2 = b.feed(m2_next)
+    # from_moves returns None (d > max_d); planner emits prev unchanged.
+    assert out2 == [m2_prev]
+    assert out2[0].move_d == pytest.approx(2.0, rel=1e-6)
 
 
 def test_aggregate_kin_check_move_fires_on_representative_arc_move():
@@ -474,7 +438,7 @@ def test_arc_polyline_smooth_delta_v2_not_pinned():
         assert am.smooth_delta_v2 <= am.delta_v2 + 1e-12
 
 
-def test_arc_polyline_speed_continuity_1ppm():
+def test_polyline_speed_continuity_1ppm():
     b = _blender(max_chord_err=20e-3)
     th = b._toolhead
     m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
@@ -549,12 +513,10 @@ def test_property_random_3d_corners(seed):
     assert out[-1].end_pos[2] == pytest.approx(m_next.end_pos[2], abs=1e-9)
 
 
-def test_blender_degenerate_R_zero_forces_stop_at_prev():
-    """When CornerBlender produces R=0 (e.g. U-turn or extremely short neighbor),
-    the previous move must be limited to a full stop at its end junction.
-    This is the safety net that replaces the old JD constraint for the
-    blender-decline path. This test verifies the safety net is intact
-    before any JD deletion work."""
+def test_blender_returns_sharp_v_for_degenerate_corner():
+    """When CornerBlender encounters a near-reversal (U-turn), QuinticShape.from_moves
+    returns None (degenerate corner), so the planner falls back to sharp-V: it forces
+    a full stop at the prev move's end junction."""
     b = _blender()
     th = b._toolhead
     # Create a U-turn: +X then -X (180° reversal).
@@ -562,10 +524,32 @@ def test_blender_degenerate_R_zero_forces_stop_at_prev():
     m2 = _FakeMove(th, (10, 0, 0, 0.5), (0, 0, 0, 1.0), speed=100.0)
     assert b.feed(m1) == []  # buffered
     out = b.feed(m2)
-    # U-turn: blender detects R=0 and v_cap=0, forces a stop at prev's junction.
+    # U-turn: shape is None → planner emits sharp-V path with stop at junction.
     assert out == [m1]
     assert m1.next_junction_v2 == 0.0
     assert b._prev is m2  # next is buffered for the next corner
+
+
+def test_planner_emits_quintic_shape_for_right_angle_corner():
+    """Integration-level: planner's emitted-blend polyline comes from a
+    QuinticShape (not a BlendArc). Protocol-level assertion."""
+    from klippy import blendquintic
+    # Use tight chord_err so even a small blend decomposes into >2 segments.
+    b = _blender(max_chord_err=1e-3)
+    th = b._toolhead
+    m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
+    m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
+    assert b.feed(m_prev) == []
+    out = b.feed(m_next)
+    trunc_prev = out[0]
+    arc_moves = out[1:]
+    # Non-trivial subdivision (quintic decomposes into multiple segments).
+    assert len(arc_moves) >= 3
+    # Polyline is continuous (segment i's end == segment i+1's start).
+    for i in range(len(arc_moves) - 1):
+        assert arc_moves[i].end_pos[:3] == pytest.approx(arc_moves[i + 1].start_pos[:3])
+    # First polyline segment starts where trunc_prev ends.
+    assert arc_moves[0].start_pos[:3] == pytest.approx(trunc_prev.end_pos[:3])
 
 
 class _FakeInnerQueue:

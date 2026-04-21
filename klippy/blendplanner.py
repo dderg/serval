@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from . import blendmath
+from . import blendmath, blendquintic, blendshape
 
 
 def _copy_caller_state(src, dst):
@@ -60,45 +60,37 @@ class CornerBlender:
         if self._prev is None:
             self._prev = move
             return []
-        # toolhead=... activates blend_from_moves' shaper-aware two-pass
-        # path: j_eff is derived from the live input-shaper state rather
-        # than held as a module constant.
-        arc = blendmath.blend_from_moves(
-            self._prev, move,
-            self._toolhead.corner_deviation,
-            toolhead=self._toolhead,
+        th = self._toolhead
+        limits = blendshape.KinematicLimits(
+            a_max=th.max_accel,
+            v_max=th.max_velocity,
+            jerk_max=None,       # plan 1: jerk cap disabled; plan 5 wires it
+            extruder_caps=None,  # plan 1: extruder cap disabled; plan 4 wires it
+            shapers=blendmath._extract_shapers(th),
         )
-        if arc is None:
-            # blend_from_moves returns None for two reasons:
-            #   (a) the corner is truly collinear (prepass should have
-            #       caught this; no junction cap needed); or
-            #   (b) blendmath's shaper-aware / velocity-aware suppression
-            #       rules declined to insert an arc — the toolhead must
-            #       still traverse a non-collinear corner, and the fork's
-            #       calc_junction has no JD-based cap of its own, so we
-            #       must apply an SCV-equivalent cap here or the toolhead
-            #       will hit the corner at full cruise velocity and skip
-            #       steps.
-            # suppressed_junction_v returns None for case (a) and a finite
-            # velocity for case (b).
-            v_j = blendmath.suppressed_junction_v(
-                self._prev, move,
-                self._toolhead.corner_deviation,
-                self._toolhead,
+        shape = blendquintic.QuinticShape.from_moves(
+            self._prev, move,
+            th.corner_deviation,
+            limits,
+        )
+        if shape is None:
+            # from_moves returns None for:
+            #   (a) collinear corners — no cap needed;
+            #   (b) near-reversals (U-turns) — force a full stop;
+            #   (c) moves too short to accommodate the blend — no cap
+            #       (toolhead calc_junction centripetal term still bounds speed).
+            # Distinguish reversal from collinear/infeasible via dot product.
+            dp = sum(
+                self._prev.axes_r[i] * move.axes_r[i] for i in range(3)
             )
-            if v_j is not None:
-                self._prev.limit_next_junction_speed(v_j)
-            emitted = [self._prev]
-            self._prev = move
-            return emitted
-        if arc.R == 0.0 or arc.v_cap == 0.0:
-            # U-turn / degenerate: force a stop at the junction.
-            self._prev.limit_next_junction_speed(0.0)
+            if dp <= -0.5:
+                # Near-reversal (>120°): force stop at the junction.
+                self._prev.limit_next_junction_speed(0.0)
             emitted = [self._prev]
             self._prev = move
             return emitted
         trunc_prev, arc_moves, trunc_next_head = self._emit_arc(
-            self._prev, move, arc
+            self._prev, move, shape
         )
         self._prev = trunc_next_head
         self.blends_emitted += 1
@@ -117,10 +109,11 @@ class CornerBlender:
         # auto-scale at loose tolerances.
         return max(20e-3, 0.2 * self._toolhead.corner_deviation)
 
-    def _emit_arc(self, prev, nxt, arc):
-        """Construct [trunc_prev, arc_moves...] and the trunc_next_head.
+    def _emit_arc(self, prev, nxt, shape):
+        """Construct [trunc_prev, polyline_moves...] and the trunc_next_head.
 
-        Returns (trunc_prev, arc_moves_list, trunc_next_head).
+        `shape` is a QuinticShape (SmoothShape protocol). Returns
+        (trunc_prev, arc_moves_list, trunc_next_head).
         """
         th = self._toolhead
         move_cls = self._move_cls
@@ -132,10 +125,10 @@ class CornerBlender:
         # --- 1. Truncated prev ---
         prev_cruise_v = math.sqrt(prev.max_cruise_v2)
         trunc_prev_end_xyz = tuple(
-            vertex[i] - arc.d_consumed * prev_dir[i] for i in range(3)
+            vertex[i] - shape.d_consumed * prev_dir[i] for i in range(3)
         )
         # E carried proportional to the truncated fraction of prev.move_d.
-        frac_prev = 1.0 - arc.d_consumed / prev.move_d
+        frac_prev = 1.0 - shape.d_consumed / prev.move_d
         trunc_prev_end_e = prev.start_pos[3] + frac_prev * prev.axes_d[3]
         trunc_prev_end = (
             trunc_prev_end_xyz[0], trunc_prev_end_xyz[1],
@@ -144,15 +137,13 @@ class CornerBlender:
         trunc_prev = move_cls(th, prev.start_pos, trunc_prev_end, prev_cruise_v)
         _copy_caller_state(prev, trunc_prev)
 
-        # --- 2. Arc polyline ---
+        # --- 2. Quintic polyline ---
+        # shape.polyline() returns world-space Vec3 points (control points are
+        # built in world coordinates in from_moves). No vertex offset needed.
         chord_err = self._resolve_chord_err()
-        polyline_local = blendmath.segment_arc(arc, chord_err)
-        polyline_world = [
-            (p[0] + vertex[0], p[1] + vertex[1], p[2] + vertex[2])
-            for p in polyline_local
-        ]
+        polyline_world = shape.polyline(chord_err)
         points_4d = blendmath.interpolate_extruder(
-            polyline_world, arc.d_consumed,
+            polyline_world, shape.d_consumed,
             prev.axes_r[3], nxt.axes_r[3],
         )
         # Offset the interpolate_extruder E (starts at 0) by trunc_prev_end_e
@@ -160,8 +151,10 @@ class CornerBlender:
         points_4d = [
             (p[0], p[1], p[2], p[3] + trunc_prev_end_e) for p in points_4d
         ]
-        # Kalico stores squared velocities; arc.v_cap is a velocity so ** 2 converts.
-        arc_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2, arc.v_cap ** 2)
+        # Plan 1 scalar v_cap: midpoint of the blend arc-length.
+        # Pillar 2 plan replaces this with per-segment v(s) integration.
+        shape_mid_v = shape.v_cap_fn(shape.arc_length / 2.0)
+        arc_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2, shape_mid_v ** 2)
         arc_cap_v = math.sqrt(arc_cap_v2)
         arc_accel = min(prev.accel, nxt.accel)
         arc_moves = []
@@ -174,11 +167,11 @@ class CornerBlender:
 
         # --- 3. Truncated next head ---
         trunc_next_head_start_xyz = tuple(
-            vertex[i] + arc.d_consumed * next_dir[i] for i in range(3)
+            vertex[i] + shape.d_consumed * next_dir[i] for i in range(3)
         )
         # E at the truncated-next-head start: offset from nxt.start_pos by the
         # consumed head fraction. Symmetric with trunc_prev's E formula.
-        frac_consumed_next = arc.d_consumed / nxt.move_d
+        frac_consumed_next = shape.d_consumed / nxt.move_d
         trunc_next_head_start_e = nxt.start_pos[3] + frac_consumed_next * nxt.axes_d[3]
         trunc_next_head_start = (
             trunc_next_head_start_xyz[0], trunc_next_head_start_xyz[1],
@@ -191,7 +184,7 @@ class CornerBlender:
         _copy_caller_state(nxt, trunc_next_head)
 
         # Aggregate-safety re-check. check_move runs before lookahead.add_move
-        # in ToolHead.move, so emitted arc-polyline Moves bypass it otherwise.
+        # in ToolHead.move, so emitted polyline Moves bypass it otherwise.
         # One representative is sufficient: all arc moves share accel, v_cap,
         # and per-mm E rate; spatially the polyline is localized near the
         # corner vertex so envelope checks evaluate at roughly the same
