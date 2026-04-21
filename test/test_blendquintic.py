@@ -611,3 +611,102 @@ def test_v_cap_fn_degrades_gracefully_with_smooth_shaper_axis():
     # tighter than a_max-derived centripetal * v_max bound; in particular
     # it must not collapse to 0.
     assert v_mid >= 50.0  # extremely lax lower bound
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — Plan 4 D1 closure (Task 6)
+# ---------------------------------------------------------------------------
+# These two tests confirm that the full pipeline (Smooth-IS A_axis derivation +
+# _extract_shapers type dispatch + v_cap_fn) is wired end-to-end correctly.
+# ---------------------------------------------------------------------------
+
+from klippy import blendmath
+
+
+def _make_smooth_mzv_limits(freq=40.0, dr=0.1,
+                             a_max=5000.0, v_max=300.0):
+    """KinematicLimits with two smooth_mzv shaper snapshots (x + y)."""
+    A = blendmath._compute_A_axis_smooth_is("smooth_mzv", freq, dr)
+    shapers = [
+        blendshaper.AxisShaperSnapshot(
+            axis="x", shaper_type="smooth_mzv",
+            shaper_freq=freq, damping_ratio=dr, A_axis=A,
+        ),
+        blendshaper.AxisShaperSnapshot(
+            axis="y", shaper_type="smooth_mzv",
+            shaper_freq=freq, damping_ratio=dr, A_axis=A,
+        ),
+    ]
+    return blendshape.KinematicLimits(
+        a_max=a_max, v_max=v_max, jerk_max=None,
+        extruder_caps=None, shapers=shapers,
+    )
+
+
+def _make_fir_mzv_limits(freq=40.0, dr=0.1,
+                          a_max=5000.0, v_max=300.0):
+    """KinematicLimits with two FIR mzv shaper snapshots (x + y)."""
+    from klippy.extras import shaper_defs
+    from klippy.extras.shaper_calibrate import ShaperCalibrate
+    factory = {s.name: s.init_func for s in shaper_defs.INPUT_SHAPERS}
+    impulses = factory["mzv"](freq, dr)
+    sc = ShaperCalibrate(printer=None)
+    A = float(sc.find_shaper_max_accel(impulses))
+    shapers = [
+        blendshaper.AxisShaperSnapshot(
+            axis="x", shaper_type="mzv",
+            shaper_freq=freq, damping_ratio=dr, A_axis=A,
+        ),
+        blendshaper.AxisShaperSnapshot(
+            axis="y", shaper_type="mzv",
+            shaper_freq=freq, damping_ratio=dr, A_axis=A,
+        ),
+    ]
+    return blendshape.KinematicLimits(
+        a_max=a_max, v_max=v_max, jerk_max=None,
+        extruder_caps=None, shapers=shapers,
+    )
+
+
+def test_quintic_v_cap_finite_under_smooth_mzv():
+    """Pre-Plan-4 bug: SIS had A_axis=0 → quintic v_cap was uncapped (inf-like).
+    After Plan 4 D1: SIS carries a finite A_axis → v_cap is finite and physical.
+    """
+    # 90-degree corner: prev goes +X, next goes +Y.
+    prev = _FakeMoveFactory((-10.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    nxt  = _FakeMoveFactory((0.0, 0.0, 0.0), (0.0, 10.0, 0.0))
+    shape = blendquintic.QuinticShape.from_moves(
+        prev, nxt, 0.1, _make_smooth_mzv_limits()
+    )
+    assert shape is not None
+    v_mid = shape.v_cap_fn(shape.arc_length / 2.0)
+    assert math.isfinite(v_mid), f"v_mid was not finite: {v_mid}"
+    assert 0.0 < v_mid < 300.0, f"v_mid={v_mid} outside (0, v_max=300)"
+
+
+def test_quintic_v_cap_smooth_vs_fir_same_order_of_magnitude():
+    """At the same nominal frequency, smooth_mzv and FIR mzv caps must be
+    within a factor of 2 of each other.  A larger divergence indicates an
+    A_axis scale error in the Smooth-IS derivation.
+    """
+    prev = _FakeMoveFactory((-10.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    nxt  = _FakeMoveFactory((0.0, 0.0, 0.0), (0.0, 10.0, 0.0))
+
+    shape_sis = blendquintic.QuinticShape.from_moves(
+        prev, nxt, 0.1, _make_smooth_mzv_limits()
+    )
+    shape_fir = blendquintic.QuinticShape.from_moves(
+        prev, nxt, 0.1, _make_fir_mzv_limits()
+    )
+    assert shape_sis is not None
+    assert shape_fir is not None
+
+    v_sis = shape_sis.v_cap_fn(shape_sis.arc_length / 2.0)
+    v_fir = shape_fir.v_cap_fn(shape_fir.arc_length / 2.0)
+    ratio = v_sis / v_fir
+    # Different shaper families at the same nominal frequency give different
+    # but comparable caps (within factor-of-2).
+    assert 0.5 < ratio < 2.0, (
+        f"v_cap ratio smooth/FIR = {ratio:.3f} (v_sis={v_sis:.1f}, "
+        f"v_fir={v_fir:.1f}); likely A_axis scale error in Smooth-IS derivation"
+    )
