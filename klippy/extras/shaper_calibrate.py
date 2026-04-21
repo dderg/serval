@@ -16,6 +16,14 @@ MAX_FREQ = 300.0
 WINDOW_T_SEC = 0.5
 MAX_SHAPER_FREQ = 250.0
 
+# Max shaper attenuation ratio used as a noise floor in the scoring:
+# anything below peak_psd / SHAPER_VIBRATION_REDUCTION is treated as
+# noise and excluded from both numerator and denominator of the
+# remaining-vibrations ratio. Lifted from blend-arc's pre-port
+# shaper_defs.SHAPER_VIBRATION_REDUCTION (which was purged during the
+# impulse-shaper prune because a grep missed its use in scoring).
+SHAPER_VIBRATION_REDUCTION = 20.0
+
 TEST_DAMPING_RATIOS = [0.075, 0.1, 0.15]
 
 AUTOTUNE_SHAPERS = [
@@ -373,18 +381,25 @@ class ShaperCalibrate:
         return calibration_data
 
     def _estimate_remaining_vibrations(self, freq_bins, vals, psd):
-        # Calculate the acceptable level of remaining vibrations.
-        # Note that these are not true remaining vibrations, but rather
-        # just a score to compare different shapers between each other.
-        vibr_threshold = (
-            (psd[freq_bins > 0] / freq_bins[freq_bins > 0]).max()
-            * (freq_bins + MIN_FREQ)
-            * (1.0 / 33.3)
-        )
-        remaining_vibrations = (
-            self.numpy.maximum(vals * psd - vibr_threshold, 0) * freq_bins**2
+        # Compare different shapers with a simple scalar threshold relative
+        # to peak PSD — any vibration below peak/SHAPER_VIBRATION_REDUCTION
+        # is unreachable for an input shaper and excluded from both the
+        # numerator and denominator.
+        #
+        # We use blend-arc's pre-port threshold instead of upstream
+        # bleeding-edge-v2's dynamic per-frequency threshold. The upstream
+        # formula (`(psd/f).max() * (f+MIN_FREQ)/33.3`) blows up when low-
+        # frequency PSD noise is significant: a 1.6 Hz noise bump can
+        # drive max(psd/f) high enough to make the threshold dominate
+        # vals*psd at every frequency, collapsing remaining_vibrations to
+        # zero for every candidate. Reproduced on user hardware with
+        # belt-related low-frequency noise; blend-arc's simpler formula
+        # does not have this failure mode.
+        vibr_threshold = psd.max() / SHAPER_VIBRATION_REDUCTION
+        remaining_vibrations = self.numpy.maximum(
+            vals * psd - vibr_threshold, 0
         ).sum()
-        all_vibrations = (psd * freq_bins**2).sum()
+        all_vibrations = self.numpy.maximum(psd - vibr_threshold, 0).sum()
         return remaining_vibrations / all_vibrations
 
     def _get_shaper_smoothing(self, shaper, accel=5000):
