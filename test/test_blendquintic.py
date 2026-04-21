@@ -208,3 +208,56 @@ def test_arc_length_table_sub_micron_accuracy():
     assert max_err < 1e-2   # 10 um; plan 1 target. Tighter thresholds
                             # (1 um) achievable by bumping n_subintervals
                             # to ~100 or adding one Newton refinement step.
+
+
+def _build_shape_direct(Q):
+    """Bypass from_moves: build a QuinticShape directly from control
+    points for testing the arc-length-backed methods. d_consumed and
+    theta are dummy here; the real factory (task 12) computes them."""
+    shape = blendquintic.QuinticShape.__new__(blendquintic.QuinticShape)
+    blendquintic.QuinticShape._init_from_Q(shape, Q, d_consumed=1.0, theta=math.radians(90))
+    return shape
+
+
+def test_position_at_endpoints():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    p0 = shape.position_at(0.0)
+    p1 = shape.position_at(shape.arc_length)
+    assert p0 == pytest.approx(Q[0])
+    assert p1 == pytest.approx(Q[5])
+
+
+def test_tangent_at_endpoints_unit_length():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    t0 = shape.tangent_at(0.0)
+    t1 = shape.tangent_at(shape.arc_length)
+    for t in (t0, t1):
+        mag = math.sqrt(t[0] ** 2 + t[1] ** 2 + t[2] ** 2)
+        assert mag == pytest.approx(1.0, rel=1e-9)
+
+
+def test_curvature_at_endpoints_zero():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    assert shape.curvature_at(0.0) == pytest.approx(0.0, abs=1e-9)
+    assert shape.curvature_at(shape.arc_length) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_tangent_matches_ds_position_numerically():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    s_mid = shape.arc_length * 0.5
+    ds = 1e-4
+    p_lo = shape.position_at(s_mid - ds)
+    p_hi = shape.position_at(s_mid + ds)
+    num = ((p_hi[0] - p_lo[0]) / (2 * ds),
+           (p_hi[1] - p_lo[1]) / (2 * ds),
+           (p_hi[2] - p_lo[2]) / (2 * ds))
+    num_mag = math.sqrt(num[0] ** 2 + num[1] ** 2 + num[2] ** 2)
+    num_hat = (num[0] / num_mag, num[1] / num_mag, num[2] / num_mag)
+    tan = shape.tangent_at(s_mid)
+    assert num_hat[0] == pytest.approx(tan[0], abs=1e-4)
+    assert num_hat[1] == pytest.approx(tan[1], abs=1e-4)
+    assert num_hat[2] == pytest.approx(tan[2], abs=1e-4)

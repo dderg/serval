@@ -337,14 +337,26 @@ def _s_to_t(s_tab: list[float], t_tab: list[float], s: float) -> float:
 class QuinticShape:
     """Quintic Hermite Bezier corner blend. Implements SmoothShape."""
 
-    d_consumed: float
-    theta: float
-    arc_length: float
+    # Runtime attributes (populated by _init_from_Q):
+    # - Q: control points tuple
+    # - d_consumed, theta, arc_length
+    # - _s_tab, _t_tab: arc-length cache
 
     def __init__(self) -> None:
         raise NotImplementedError(
             "QuinticShape is constructed via QuinticShape.from_moves(...)"
         )
+
+    def _init_from_Q(self, Q, d_consumed: float, theta: float) -> None:
+        """Internal init. Populates the instance from control points and
+        scalar metadata; builds the s->t map."""
+        self.Q = Q
+        self.d_consumed = d_consumed
+        self.theta = theta
+        s_tab, t_tab, total_s = _build_s_to_t_map(Q)
+        self._s_tab = s_tab
+        self._t_tab = t_tab
+        self.arc_length = total_s
 
     @classmethod
     def from_moves(
@@ -355,31 +367,33 @@ class QuinticShape:
         limits: blendshape.KinematicLimits,
     ) -> Optional["QuinticShape"]:
         """Construct a quintic blend for the corner between prev_move and
-        next_move. Returns None for degenerate corners (collinear,
-        near-reversal, chord budget infeasible). Caller (planner) falls
-        back to sharp-V when None is returned.
-        """
+        next_move. Returns None for degenerate corners. Full implementation
+        lands in Task 12."""
         if prev_move is None or next_move is None:
             return None
-        # Full implementation lands in task 12.
         return None
 
-    # Protocol methods stubbed to allow isinstance checks; each one is
-    # filled in by the tasks below.
     def position_at(self, s: float) -> Vec3:
-        raise NotImplementedError
+        t = _s_to_t(self._s_tab, self._t_tab, s)
+        return _quintic_eval(self.Q, t)
 
     def tangent_at(self, s: float) -> Vec3:
-        raise NotImplementedError
+        t = _s_to_t(self._s_tab, self._t_tab, s)
+        d1 = _quintic_first_deriv(self.Q, t)
+        mag = math.sqrt(d1[0] ** 2 + d1[1] ** 2 + d1[2] ** 2)
+        if mag < 1e-30:
+            return (1.0, 0.0, 0.0)
+        return (d1[0] / mag, d1[1] / mag, d1[2] / mag)
 
     def curvature_at(self, s: float) -> float:
-        raise NotImplementedError
+        t = _s_to_t(self._s_tab, self._t_tab, s)
+        return _curvature_at_t(self.Q, t)
 
     def dkappa_ds(self, s: float) -> float:
-        raise NotImplementedError
+        raise NotImplementedError   # task 8
 
     def v_cap_fn(self, s: float) -> float:
-        raise NotImplementedError
+        raise NotImplementedError   # task 10-11
 
     def polyline(self, chord_tol: float = _DEFAULT_CHORD_TOL) -> list[Vec3]:
-        raise NotImplementedError
+        raise NotImplementedError   # task 9
