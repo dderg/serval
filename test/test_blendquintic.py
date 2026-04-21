@@ -516,3 +516,54 @@ def test_v_cap_uses_shaper_when_shapers_provided():
     shape._limits = limits_shaper
     v_yes = shape.v_cap_fn(shape.arc_length * 0.5)
     assert v_yes <= v_no
+
+
+def test_random_corner_sweep():
+    """Property test: 200 random corners. For each, verify:
+      - from_moves returns a valid shape (or None for degenerate)
+      - endpoint curvature == 0 (G2 continuity)
+      - v_cap_fn > 0 everywhere on [0, arc_length]
+    """
+    import random
+    rng = random.Random(1234)
+    limits = _factory_limits()
+    n_valid = 0
+    for trial in range(200):
+        theta_deg = rng.uniform(5.0, 175.0)
+        rotation_deg = rng.uniform(0.0, 360.0)
+        edge_len = rng.uniform(0.5, 20.0)
+        cd = rng.uniform(0.02, 0.3)
+        theta = math.radians(theta_deg)
+        rot = math.radians(rotation_deg)
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        e1 = (cos_r, sin_r, 0.0)
+        c2, s2 = math.cos(-theta), math.sin(-theta)
+        e2 = (e1[0] * c2 - e1[1] * s2, e1[0] * s2 + e1[1] * c2, 0.0)
+        apex = (0.0, 0.0, 0.0)
+        prev_start = (
+            apex[0] - edge_len * e1[0],
+            apex[1] - edge_len * e1[1],
+            apex[2] - edge_len * e1[2],
+        )
+        nxt_end = (
+            apex[0] + edge_len * e2[0],
+            apex[1] + edge_len * e2[1],
+            apex[2] + edge_len * e2[2],
+        )
+        prev = _FakeMoveFactory(prev_start, apex)
+        nxt = _FakeMoveFactory(apex, nxt_end)
+        shape = blendquintic.QuinticShape.from_moves(prev, nxt, cd, limits)
+        if shape is None:
+            continue
+        n_valid += 1
+        # Endpoint G2: curvature = 0 at s=0 and s=arc_length.
+        assert shape.curvature_at(0.0) == pytest.approx(0.0, abs=1e-6), (
+            f"trial={trial}, theta_deg={theta_deg}, rotation_deg={rotation_deg}"
+        )
+        assert shape.curvature_at(shape.arc_length) == pytest.approx(0.0, abs=1e-6)
+        # v_cap_fn positive everywhere.
+        for i in range(11):
+            s = shape.arc_length * i / 10.0
+            assert shape.v_cap_fn(s) > 0.0
+    # Sanity: at least half the random corners should yield valid shapes.
+    assert n_valid >= 100, f"only {n_valid}/200 corners produced valid shapes"
