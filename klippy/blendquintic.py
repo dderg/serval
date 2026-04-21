@@ -227,6 +227,39 @@ def _peak_curvature(Q, n_samples: int = 100) -> tuple[float, float]:
     return best_t, best_k
 
 
+_SHAPER_SAMPLE_N_DEFAULT = 50
+# 2D blend plane normal — all quintic blends are in the XY plane.
+_PLANE_NORMAL: Tuple[float, float, float] = (0.0, 0.0, 1.0)
+
+
+def _shaper_cap_dense(Q, shapers, n: int = _SHAPER_SAMPLE_N_DEFAULT) -> float:
+    """Min of the shaper entry-step velocity cap over n+1 uniform t-samples.
+
+    Replaces archive's 3-point cap (archive blendquintic.py:367-386) which
+    under-tightened by up to ~15% on the full axis-rotation sweep per
+    audit 2026-04-20.
+
+    shapers: list of blendshaper.AxisShaperSnapshot; empty/None returns inf.
+    n:       number of uniform t-intervals (n+1 sample points).
+    """
+    from . import blendshaper as _blendshaper
+    if not shapers:
+        return float("inf")
+    worst = float("inf")
+    p_hat = _PLANE_NORMAL
+    for i in range(n + 1):
+        t = i / n
+        _, tan, nrm = _point_frame(Q, t)
+        k = _curvature_at_t(Q, t)
+        if k <= 0.0:
+            continue
+        R = 1.0 / k
+        bounds = _blendshaper.compute_shaper_bounds(shapers, R, nrm, p_hat)
+        if bounds.v_step_cap < worst:
+            worst = bounds.v_step_cap
+    return worst
+
+
 # r(theta) quadratic fit — archive values, verified by audit. Clamped
 # to [0.50, 0.86] to stay within empirical validity window.
 _R_A = 0.5085
@@ -489,22 +522,31 @@ class QuinticShape:
         return dkappa_ds_signed
 
     def v_cap_fn(self, s: float) -> float:
-        """Velocity limit curve V_lim(s) from centripetal + rotation-jerk.
+        """Velocity limit curve V_lim(s) — centripetal + shaper + rotation-jerk.
 
-        Shaper cap is applied in task 11. Extruder cap comes in plan 4
-        as a wrapper stage, not here.
+        Extruder cap comes in plan 4 as a wrapper stage, not here.
         """
         limits = self._limits
         if limits is None:
             return float("inf")
         v = limits.v_max
-        kappa = self.curvature_at(s)
+        # Use refined s->t for consistency with curvature_at (Task 8).
+        t = _s_to_t_refined(self.Q, self._s_tab, self._t_tab, s)
+        kappa = _curvature_at_t(self.Q, t)
         if kappa > 0.0:
             v_cent = math.sqrt(limits.a_max / kappa)
             v = min(v, v_cent)
             if limits.jerk_max is not None and limits.jerk_max > 0.0:
                 v_jerk = (limits.jerk_max / (kappa * kappa)) ** (1.0 / 3.0)
                 v = min(v, v_jerk)
+            if limits.shapers:
+                from . import blendshaper as _blendshaper
+                _, tan, nrm = _point_frame(self.Q, t)
+                R = 1.0 / kappa
+                bounds = _blendshaper.compute_shaper_bounds(
+                    limits.shapers, R, nrm, _PLANE_NORMAL
+                )
+                v = min(v, bounds.v_step_cap)
         return v
 
     def polyline(self, chord_tol: float = _DEFAULT_CHORD_TOL) -> list[Vec3]:

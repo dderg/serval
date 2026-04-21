@@ -371,3 +371,95 @@ def test_v_cap_with_jerk_bound_tighter_than_without():
     shape._limits = limits_with_jerk
     v_yes = shape.v_cap_fn(shape.arc_length * 0.5)
     assert v_yes <= v_no
+
+
+from klippy import blendshaper
+
+
+def _synthesize_shapers():
+    """Minimal single-axis shaper snapshot for tests.
+
+    ZV@150Hz, zeta=0.1, A_axis=87000 mm/s^2 — matches the user's
+    hardware regime used in test_blendshaper.py numeric sanity tests.
+    The entry-step cap at R=1/kappa_peak ~ a few mm is well within
+    [100, 500] mm/s, so any shaper-active limit will be strictly below
+    the centripetal bound at high v_max.
+    """
+    return [
+        blendshaper.AxisShaperSnapshot(
+            axis="x",
+            shaper_type="zv",
+            shaper_freq=150.0,
+            damping_ratio=0.1,
+            A_axis=87000.0,
+        )
+    ]
+
+
+def test_dense_shaper_cap_tighter_than_three_point_at_pathological_angles():
+    """Regression: at (theta=122 deg, rotation=164 deg) the archive's
+    3-point cap overshot by ~15%. Dense-50 must produce a tighter cap."""
+    theta = math.radians(122.0)
+    rot = math.radians(164.0)
+    cos_r, sin_r = math.cos(rot), math.sin(rot)
+    e1 = (cos_r, sin_r, 0.0)
+    c2, s2 = math.cos(-theta), math.sin(-theta)
+    e2 = (e1[0] * c2 - e1[1] * s2, e1[0] * s2 + e1[1] * c2, 0.0)
+    d = 1.0
+    r = blendquintic._r_of_theta(theta)
+    Q0 = (-d * e1[0], -d * e1[1], 0.0)
+    Q5 = (d * e2[0], d * e2[1], 0.0)
+    Q1 = (Q0[0] + d * (1.0 - r) * e1[0], Q0[1] + d * (1.0 - r) * e1[1], 0.0)
+    Q2 = Q1
+    Q3 = (Q5[0] - d * (1.0 - r) * e2[0], Q5[1] - d * (1.0 - r) * e2[1], 0.0)
+    Q4 = Q3
+    Q = (Q0, Q1, Q2, Q3, Q4, Q5)
+
+    shapers = _synthesize_shapers()
+    p_hat = (0.0, 0.0, 1.0)   # 2D blend in XY plane
+
+    # 3-point cap (archive formula, computed inline for comparison):
+    three_pt = float("inf")
+    for t in (0.25, 0.5, 0.75):
+        _, tan, nrm = blendquintic._point_frame(Q, t)
+        k = blendquintic._curvature_at_t(Q, t)
+        if k <= 0.0:
+            continue
+        R = 1.0 / k
+        bounds = blendshaper.compute_shaper_bounds(shapers, R, nrm, p_hat)
+        three_pt = min(three_pt, bounds.v_step_cap)
+
+    # Dense-50 cap (our fix):
+    dense = blendquintic._shaper_cap_dense(Q, shapers, n=50)
+
+    # Dense must be tighter-or-equal (smaller number):
+    assert dense <= three_pt + 1e-9
+
+
+def test_dense_shaper_cap_agrees_with_50_point_reference():
+    """Dense-50 should agree with dense-500 within 1%; checks that 50
+    points is already converged."""
+    Q = _right_angle_quintic()
+    shapers = _synthesize_shapers()
+    d50 = blendquintic._shaper_cap_dense(Q, shapers, n=50)
+    d500 = blendquintic._shaper_cap_dense(Q, shapers, n=500)
+    assert d50 == pytest.approx(d500, rel=1e-2)
+
+
+def test_v_cap_uses_shaper_when_shapers_provided():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    limits_no_shaper = blendshape.KinematicLimits(
+        a_max=45000.0, v_max=50000.0, jerk_max=None,
+        shaper_sigma_T=0.0, extruder_caps=None, shapers=None,
+    )
+    limits_shaper = blendshape.KinematicLimits(
+        a_max=45000.0, v_max=50000.0, jerk_max=None,
+        shaper_sigma_T=0.0, extruder_caps=None,
+        shapers=_synthesize_shapers(),
+    )
+    shape._limits = limits_no_shaper
+    v_no = shape.v_cap_fn(shape.arc_length * 0.5)
+    shape._limits = limits_shaper
+    v_yes = shape.v_cap_fn(shape.arc_length * 0.5)
+    assert v_yes <= v_no

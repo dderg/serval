@@ -15,7 +15,7 @@
 # full kinematics/extruder stack.
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable, Tuple
 
 Vec3 = Tuple[float, float, float]
@@ -40,6 +40,10 @@ class KinematicLimits:
     jerk_max: Optional[float]   # j_eff for rotation-jerk cap; None disables
     shaper_sigma_T: float       # from IS impulse pattern (see blendmath)
     extruder_caps: Optional[ExtruderLimits]   # None until plan 4 (pillar 3)
+    # Per-axis shaper snapshots for dense per-s shaper cap in v_cap_fn.
+    # Empty list disables the shaper cap (matches shaper_sigma_T=0 intent).
+    # Populated by the planner via _extract_shapers; None until Task 12.
+    shapers: Optional[list] = field(default=None)
 
 
 @runtime_checkable
