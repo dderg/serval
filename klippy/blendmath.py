@@ -169,8 +169,8 @@ def interpolate_extruder(
 ) -> list:
     """Attach an E coordinate to each polyline point.
 
-    The blend arc replaces the final `d_consumed` mm of the previous move and
-    the first `d_consumed` mm of the next move. Total E through the arc is
+    The blend curve replaces the final `d_consumed` mm of the previous move and
+    the first `d_consumed` mm of the next move. Total E through the blend is
     conserved: sum across the polyline equals
     `d_consumed * (e_per_mm_prev + e_per_mm_next)`. E is distributed uniformly
     over the polyline's arc-length parameterization.

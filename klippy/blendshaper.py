@@ -2,8 +2,8 @@
 # Shaper-derived jerk bound module for corner blending.
 #
 # Given a toolhead's per-axis input-shaper configuration and a
-# blend-arc corner geometry, computes the effective jerk ceiling
-# (j_eff) passed to blendmath.blend_geometry plus a per-axis
+# corner-blend geometry, computes the effective jerk ceiling
+# (j_eff) passed to shape primitives like blendquintic.QuinticShape plus a per-axis
 # entry-step velocity cap (v_step_cap) applied post-hoc.
 #
 # Pure math: zero Kalico imports. All per-axis shaper state is
