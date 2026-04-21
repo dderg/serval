@@ -888,3 +888,32 @@ def test_status_excludes_square_corner_velocity():
         "ToolHead.get_status reintroduced square_corner_velocity key"
     )
     assert "'square_corner_velocity'" not in src
+
+
+def test_smoke_multi_corner_gcode_ingest():
+    """End-to-end: planner ingests a 5-move gcode sequence with 4 corners.
+    All valid corners emit polylines; no crashes; all polyline moves have
+    finite positive v_cap."""
+    b = _blender(max_chord_err=1e-3)
+    th = b._toolhead
+    # Square zig-zag: right / up / right / down / right.
+    moves = [
+        _FakeMove(th, (0, 0, 0, 0),     (10, 0, 0, 0.5),  speed=100.0),   # right
+        _FakeMove(th, (10, 0, 0, 0.5),  (10, 10, 0, 1.0), speed=100.0),   # up (90 deg)
+        _FakeMove(th, (10, 10, 0, 1.0), (20, 10, 0, 1.5), speed=100.0),   # right (90 deg)
+        _FakeMove(th, (20, 10, 0, 1.5), (20, 0, 0, 2.0),  speed=100.0),   # down (90 deg)
+        _FakeMove(th, (20, 0, 0, 2.0),  (30, 0, 0, 2.5),  speed=100.0),   # right (90 deg)
+    ]
+    for m in moves:
+        out = b.feed(m)
+        for em in out:
+            # Every emitted move has finite, positive v_cap.
+            assert em.max_cruise_v2 > 0.0
+            assert em.max_cruise_v2 < float("inf")
+    # Drain any buffered trailing move via flush().
+    out = b.flush()
+    for em in out:
+        assert em.max_cruise_v2 > 0.0
+    # Instrumentation: expect 4 blends (4 corners between 5 moves).
+    assert b.blends_emitted == 4
+    assert b.polyline_moves_emitted > 0
