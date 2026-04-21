@@ -50,37 +50,31 @@ _SHAPER_SPAN_FACTOR = {
     "3hump_ei": 2.0,
 }
 
-
-def _smooth_is_span(shaper_type: str, shaper_freq: float, damping_ratio: float) -> float:
-    """Span of a Smooth Input Shaper polynomial kernel.
-
-    The SIS kernels carry T_sm explicitly in shaper_defs.INPUT_SMOOTHERS.
-    We replicate the runtime value by calling the kernel's init_func, which
-    returns (coeffs, T_sm) — the same tuple that init_smoother produces.
-    """
-    from klippy.extras import shaper_defs
-    factory = {s.name: s for s in shaper_defs.INPUT_SMOOTHERS}
-    if shaper_type not in factory:
-        raise ValueError("unknown shaper type: %r" % (shaper_type,))
-    smoother_def = factory[shaper_type]
-    # init_func returns (coeffs, T_sm); damping_ratio is ignored by SIS kernels
-    # (their polynomial coefficients are fixed; only shaper_freq scales T_sm).
-    _coeffs, T_sm = smoother_def.init_func(shaper_freq, damping_ratio)
-    return float(T_sm)
+# SIS kernel span: T_sm = factor / shaper_freq (damping-independent by kernel construction).
+# Factors read from klippy/extras/shaper_defs.py init_*_smoother return values.
+_SMOOTH_SPAN_FACTOR = {
+    "smooth_zv":        0.80250,
+    "smooth_mzv":       0.95625,
+    "smooth_ei":        1.06625,
+    "smooth_2hump_ei":  1.14875,
+    "smooth_zvd_ei":    1.47500,
+    "smooth_si":        1.24500,
+}
 
 
 def shaper_span(shaper_type: str, shaper_freq: float, damping_ratio: float) -> float:
     """Effective span in seconds for the given shaper configuration.
 
-    FIR shapers: damped-period * per-type factor (existing behavior).
-    Smooth-IS shapers: kernel T_sm read from shaper_defs.INPUT_SMOOTHERS.
+    FIR shapers: damped-period * per-type factor.
+    Smooth-IS shapers: kernel T_sm = factor / shaper_freq (damping-independent).
     """
     if shaper_type in _SHAPER_SPAN_FACTOR:
         factor = _SHAPER_SPAN_FACTOR[shaper_type]
         t_d = 1.0 / (shaper_freq * math.sqrt(1.0 - damping_ratio * damping_ratio))
         return factor * t_d
-    # Try SIS. If unknown there too, _smooth_is_span raises a clear ValueError.
-    return _smooth_is_span(shaper_type, shaper_freq, damping_ratio)
+    if shaper_type in _SMOOTH_SPAN_FACTOR:
+        return _SMOOTH_SPAN_FACTOR[shaper_type] / shaper_freq
+    raise ValueError("unknown shaper type: %r" % (shaper_type,))
 
 
 _AXES = ("x", "y", "z")
