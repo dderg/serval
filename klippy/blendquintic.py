@@ -148,6 +148,25 @@ def _quintic_flatness(Q) -> float:
     )
 
 
+def _segment_quintic(Q, max_chord_err: float) -> list[Vec3]:
+    """Adaptive De Casteljau subdivision — recursion terminates when
+    _quintic_flatness(sub_Q) <= max_chord_err or depth == limit."""
+    if max_chord_err <= 0.0:
+        raise ValueError("max_chord_err must be positive")
+    out: list[Vec3] = [Q[0]]
+
+    def _recurse(sub_Q, depth):
+        if depth >= _SUBDIVIDE_MAX_DEPTH or _quintic_flatness(sub_Q) <= max_chord_err:
+            out.append(sub_Q[5])
+            return
+        left, right = _quintic_split(sub_Q)
+        _recurse(left, depth + 1)
+        _recurse(right, depth + 1)
+
+    _recurse(Q, 0)
+    return out
+
+
 def _curvature_at_t(Q, t: float) -> float:
     """Curvature at parameter t. For 2D (z=0), reduces to
     kappa = |B'_x * B''_y - B'_y * B''_x| / |B'|^3.
@@ -459,4 +478,4 @@ class QuinticShape:
         raise NotImplementedError   # task 10-11
 
     def polyline(self, chord_tol: float = _DEFAULT_CHORD_TOL) -> list[Vec3]:
-        raise NotImplementedError   # task 9
+        return _segment_quintic(self.Q, chord_tol)

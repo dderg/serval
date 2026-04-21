@@ -306,3 +306,19 @@ def test_dkappa_ds_matches_finite_difference_mirrored():
         numerical = (k_hi - k_lo) / (2 * ds)
         analytical = shape.dkappa_ds(s_mid)
         assert analytical == pytest.approx(numerical, abs=1e-3, rel=1e-3)
+
+
+def test_polyline_endpoints_match_control_endpoints():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    poly = shape.polyline(chord_tol=1e-3)
+    assert poly[0] == pytest.approx(Q[0])
+    assert poly[-1] == pytest.approx(Q[5])
+
+
+def test_polyline_segment_count_scales_with_tol():
+    Q = _right_angle_quintic()
+    shape = _build_shape_direct(Q)
+    loose = shape.polyline(chord_tol=1e-1)
+    tight = shape.polyline(chord_tol=1e-4)
+    assert len(tight) > len(loose)
