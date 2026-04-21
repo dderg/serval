@@ -66,6 +66,7 @@ class _FakeMove:
         self.max_smoothed_v2 = 0.0
         self.smooth_delta_v2 = 2.0 * move_d * toolhead.max_accel_to_decel
         self.next_junction_v2 = 999999999.9
+        self.next_junction_v_capped_to = None
 
     def limit_speed(self, speed, accel):
         speed2 = speed ** 2
@@ -78,6 +79,7 @@ class _FakeMove:
 
     def limit_next_junction_speed(self, speed):
         self.next_junction_v2 = min(self.next_junction_v2, speed ** 2)
+        self.next_junction_v_capped_to = speed
 
 
 def _blender(toolhead=None, max_chord_err=None):
@@ -917,3 +919,83 @@ def test_smoke_multi_corner_gcode_ingest():
     # Instrumentation: expect 4 blends (4 corners between 5 moves).
     assert b.blends_emitted == 4
     assert b.polyline_moves_emitted > 0
+
+
+# ---------------------------------------------------------------------------
+# Task 3 helpers: toolheads with/without shapers and a _make_move factory.
+# ---------------------------------------------------------------------------
+
+
+def _make_toolhead_with_zv_shapers(freq_x, freq_y, max_accel, corner_deviation):
+    """Return a _FakeToolhead with two ZV shapers (x and y at given freqs)."""
+    th = _FakeToolhead(
+        max_accel=max_accel,
+        max_accel_to_decel=max_accel,
+        corner_deviation=corner_deviation,
+        max_velocity=500.0,
+    )
+    th.printer = _FakePrinter(_FakeIS([
+        _FakeAxisIS("x", "zv", freq_x),
+        _FakeAxisIS("y", "zv", freq_y),
+    ]))
+    return th
+
+
+def _make_toolhead_without_shapers(max_accel, corner_deviation):
+    """Return a _FakeToolhead whose printer has no input_shaper module."""
+    th = _FakeToolhead(
+        max_accel=max_accel,
+        max_accel_to_decel=max_accel,
+        corner_deviation=corner_deviation,
+        max_velocity=500.0,
+    )
+    th.printer = _FakePrinter(None)
+    return th
+
+
+def _make_move(toolhead, start, end, cruise_v):
+    """Construct a _FakeMove from 4-tuples start/end and a cruise speed."""
+    return _FakeMove(toolhead, start, end, speed=cruise_v)
+
+
+# --- Task 3: suppressed-corner junction cap ---
+
+def test_feed_suppressed_corner_caps_junction_velocity():
+    """Real corner, segments too short for blend: from_moves returns None.
+    Planner must apply suppressed_junction_v cap via
+    limit_next_junction_speed so the toolhead doesn't hit the corner at
+    full cruise (skipped-steps scenario).
+    """
+    th = _make_toolhead_with_zv_shapers(freq_x=50.0, freq_y=50.0,
+                                         max_accel=50000.0,
+                                         corner_deviation=0.1)
+    prev = _make_move(th, start=(0, 0, 0, 0), end=(0.2, 0, 0, 0),
+                      cruise_v=300.0)
+    nxt  = _make_move(th, start=(0.2, 0, 0, 0), end=(0.2, 0.2, 0, 0),
+                      cruise_v=300.0)
+    cb = blendplanner.CornerBlender(th, move_cls=_FakeMove)
+    _ = cb.feed(prev)
+    emitted = cb.feed(nxt)
+    assert len(emitted) == 1 and emitted[0] is prev
+    assert prev.next_junction_v_capped_to is not None
+    assert math.isfinite(prev.next_junction_v_capped_to)
+    assert prev.next_junction_v_capped_to > 0.0
+
+
+def test_feed_suppressed_corner_no_shaper_falls_back_to_reversal_stop():
+    """If no shaper is loaded, suppressed_junction_v returns None.
+    Planner still hard-stops on near-reversals (dp <= -0.5) as safety.
+    """
+    import math as _m
+    th = _make_toolhead_without_shapers(max_accel=50000.0,
+                                         corner_deviation=0.1)
+    prev = _make_move(th, start=(0, 0, 0, 0), end=(0.2, 0, 0, 0),
+                      cruise_v=300.0)
+    a = _m.radians(180.0 - 30.0)  # 150 deg turn relative to prev
+    nxt  = _make_move(th, start=(0.2, 0, 0, 0),
+                      end=(0.2 + _m.cos(a)*0.2, _m.sin(a)*0.2, 0, 0),
+                      cruise_v=300.0)
+    cb = blendplanner.CornerBlender(th, move_cls=_FakeMove)
+    _ = cb.feed(prev)
+    _ = cb.feed(nxt)
+    assert prev.next_junction_v_capped_to == 0.0

@@ -76,16 +76,27 @@ class CornerBlender:
         if shape is None:
             # from_moves returns None for:
             #   (a) collinear corners — no cap needed;
-            #   (b) near-reversals (U-turns) — force a full stop;
-            #   (c) moves too short to accommodate the blend — no cap
-            #       (toolhead calc_junction centripetal term still bounds speed).
-            # Distinguish reversal from collinear/infeasible via dot product.
-            dp = sum(
-                self._prev.axes_r[i] * move.axes_r[i] for i in range(3)
+            #   (b) near-reversals — from_moves caught this via REVERSAL_EPS;
+            #   (c) moves too short to accommodate the blend — need a
+            #       fallback velocity cap, because fork calc_junction has
+            #       no JD-based cap of its own (centripetal quarter-tan
+            #       alone is empirically insufficient at high accel).
+            # suppressed_junction_v derives an SCV-equivalent cap from
+            # the active shaper's sigma_T; shape-agnostic.
+            v_j = blendmath.suppressed_junction_v(
+                self._prev, move, th.corner_deviation, th
             )
-            if dp <= -0.5:
-                # Near-reversal (>120°): force stop at the junction.
-                self._prev.limit_next_junction_speed(0.0)
+            if v_j is not None and math.isfinite(v_j):
+                self._prev.limit_next_junction_speed(v_j)
+            else:
+                # No shaper loaded (or v_j undefined). Fall back to the
+                # near-reversal hard-stop heuristic so the toolhead
+                # doesn't round pi-radian reversals at cruise velocity.
+                dp = sum(
+                    self._prev.axes_r[i] * move.axes_r[i] for i in range(3)
+                )
+                if dp <= -0.5:
+                    self._prev.limit_next_junction_speed(0.0)
             emitted = [self._prev]
             self._prev = move
             return emitted
