@@ -102,33 +102,17 @@ class CornerBlender:
             th.corner_deviation,
             limits,
         )
-        if shape is None:
-            # from_moves returns None for:
-            #   (a) collinear corners — no cap needed;
-            #   (b) near-reversals — from_moves caught this via REVERSAL_EPS;
-            #   (c) moves too short to accommodate the blend — need a
-            #       fallback velocity cap, because fork calc_junction has
-            #       no JD-based cap of its own (centripetal quarter-tan
-            #       alone is empirically insufficient at high accel).
-            # suppressed_junction_v derives an SCV-equivalent cap from
-            # the active shaper's sigma_T; shape-agnostic.
-            v_j = blendmath.suppressed_junction_v(
-                self._prev, move, th.corner_deviation, th
-            )
-            if v_j is not None and math.isfinite(v_j):
-                self._prev.limit_next_junction_speed(v_j)
-            else:
-                # No shaper loaded (or v_j undefined). Fall back to the
-                # near-reversal hard-stop heuristic so the toolhead
-                # doesn't round pi-radian reversals at cruise velocity.
-                dp = sum(
-                    self._prev.axes_r[i] * move.axes_r[i] for i in range(3)
-                )
-                if dp <= -0.5:
-                    self._prev.limit_next_junction_speed(0.0)
-            emitted = [self._prev]
-            self._prev = move
-            return emitted
+        if shape is None or blendmath.should_suppress_quintic(
+                self._prev, move, th.corner_deviation, shape, th):
+            # Drop the blend and fall into the sharp-V suppressed path.
+            # Reasons include:
+            #   (a) shape is None: collinear corners, near-reversals, or
+            #       moves too short to accommodate the blend.
+            #   (b) should_suppress_quintic fired on a successfully-formed
+            #       shape: two-clause D3 rule determined sharp-V + shaper
+            #       is at least as good as the blend (path-tolerance and
+            #       time both satisfied).
+            return self._suppress_and_advance(move)
         trunc_prev, blend_moves, trunc_next_head = self._emit_blend(
             self._prev, move, shape
         )
@@ -136,6 +120,36 @@ class CornerBlender:
         self.blends_emitted += 1
         self.polyline_moves_emitted += len(blend_moves)
         return [trunc_prev] + blend_moves
+
+    def _suppress_and_advance(self, move):
+        """Fallback path when the blend is dropped — either from_moves
+        returned None OR the D3 quintic suppression rule fired on an
+        otherwise-valid shape. Caps prev's next-junction velocity via
+        suppressed_junction_v when a shaper is loaded; otherwise uses
+        the near-reversal heuristic as a safety net.
+
+        suppressed_junction_v derives an SCV-equivalent cap from the
+        active shaper's sigma_T; it is shape-agnostic (works for both
+        the shape=None case and the suppression case).
+        """
+        th = self._toolhead
+        v_j = blendmath.suppressed_junction_v(
+            self._prev, move, th.corner_deviation, th
+        )
+        if v_j is not None and math.isfinite(v_j):
+            self._prev.limit_next_junction_speed(v_j)
+        else:
+            # No shaper loaded (or v_j undefined). Fall back to the
+            # near-reversal hard-stop heuristic so the toolhead
+            # doesn't round pi-radian reversals at cruise velocity.
+            dp = sum(
+                self._prev.axes_r[i] * move.axes_r[i] for i in range(3)
+            )
+            if dp <= -0.5:
+                self._prev.limit_next_junction_speed(0.0)
+        emitted = [self._prev]
+        self._prev = move
+        return emitted
 
     def _resolve_chord_err(self):
         """Return the polyline chord tolerance to use for the current blend.

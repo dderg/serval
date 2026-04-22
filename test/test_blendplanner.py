@@ -1058,3 +1058,102 @@ def test_feed_narrow_reversal_wedge_with_shaper_caps_finite():
     _ = cb.feed(nxt)
     v = prev.next_junction_v_capped_to
     assert v is not None and math.isfinite(v) and 0.0 <= v < 10.0
+
+
+# ---------------------------------------------------------------------------
+# Task 15: should_suppress_quintic wiring smoke tests
+# ---------------------------------------------------------------------------
+
+
+def test_feed_respects_should_suppress_quintic():
+    """Smoke: feed uses should_suppress_quintic to decide blend vs suppress.
+
+    Structural check — confirms the wiring is present in blendplanner source.
+    Concrete shape-level behavior is pinned in test_blendmath via
+    should_suppress_quintic_* tests.
+    """
+    import inspect
+    from klippy import blendmath as bm
+    from klippy import blendplanner as bp
+
+    assert hasattr(bm, "should_suppress_quintic"), (
+        "blendmath must export should_suppress_quintic"
+    )
+    src = inspect.getsource(bp.CornerBlender.feed)
+    assert "should_suppress_quintic" in src, (
+        "CornerBlender.feed must reference should_suppress_quintic"
+    )
+    src_helper = inspect.getsource(bp.CornerBlender._suppress_and_advance)
+    assert "suppressed_junction_v" in src_helper, (
+        "_suppress_and_advance must call suppressed_junction_v"
+    )
+
+
+def test_feed_suppress_fires_when_shaper_makes_sharp_v_cheaper():
+    """Functional wiring check using a toolhead with shapers.
+
+    Construct a wide-angle corner (90 deg) where the shaper's sigma_T makes
+    the sharp-V deviation comfortably within path tolerance AND the corner
+    segments are long enough that from_moves succeeds. Then verify that when
+    suppression fires (low cruise v -> small dev_sharpV), prev gets a
+    junction cap and no blend polyline is emitted; and when cruise v is high
+    (large dev_sharpV exceeds tolerance), the blend is kept.
+
+    The transition point is dev_sharpV = 2*v*sin(45°)*sigma_T == corner_deviation.
+    ZV at f=40Hz: T=1/40=0.025s, sigma_T=T/2=0.0125s.
+    corner_deviation=0.1mm.
+    threshold_v = corner_deviation / (2 * sin45 * sigma_T)
+               = 0.1e-3 / (2 * 0.7071 * 0.0125)  [units: mm / (s * mm/s) = 1, wait…]
+
+    All values are in mm and mm/s:
+    dev_sharpV [mm] = 2 * v [mm/s] * sin(45°) * sigma_T [s]
+    threshold: 0.1 = 2 * v * 0.7071 * 0.0125
+    v_thresh = 0.1 / (2 * 0.7071 * 0.0125) ≈ 5.66 mm/s
+
+    So cruise_v=1.0 mm/s -> suppressed (dev_sharpV << 0.1, clause 1 passes).
+    But we also need clause 2 (time): t_sharpV = 2*v*sin_half/a_max is tiny
+    at v=1mm/s, so it passes easily.
+
+    cruise_v=500mm/s -> dev_sharpV = 2*500*0.7071*0.0125 = 8.84mm >> 0.1mm
+    -> clause 1 fails -> blend kept.
+    """
+    from klippy import blendmath as bm
+
+    freq = 40.0          # Hz — low freq => large sigma_T => suppression fires at lower v
+    cd = 0.1             # mm corner_deviation
+
+    def _th(cruise_v):
+        th = _make_toolhead_with_zv_shapers(
+            freq_x=freq, freq_y=freq,
+            max_accel=10000.0,
+            corner_deviation=cd,
+        )
+        th.max_velocity = cruise_v
+        return th
+
+    # --- suppressed case: v=1 mm/s ---
+    th_low = _th(cruise_v=1.0)
+    # 10mm segments at 90 deg — long enough that from_moves normally succeeds.
+    prev_low = _make_move(th_low, (0, 0, 0, 0), (10, 0, 0, 0), cruise_v=1.0)
+    nxt_low  = _make_move(th_low, (10, 0, 0, 0), (10, 10, 0, 0), cruise_v=1.0)
+    cb_low = blendplanner.CornerBlender(th_low, move_cls=_FakeMove, max_chord_err=20e-3)
+    _ = cb_low.feed(prev_low)
+    out_low = cb_low.feed(nxt_low)
+    # Suppressed: output is [prev_low] with a junction cap, no polyline.
+    assert len(out_low) == 1 and out_low[0] is prev_low, (
+        f"Expected suppressed (1 emitted move), got {len(out_low)} moves"
+    )
+    assert prev_low.next_junction_v_capped_to is not None
+    assert cb_low.blends_emitted == 0
+
+    # --- kept case: v=500 mm/s -> clause 1 fails -> blend kept ---
+    th_hi = _th(cruise_v=500.0)
+    prev_hi = _make_move(th_hi, (0, 0, 0, 0), (10, 0, 0, 0), cruise_v=500.0)
+    nxt_hi  = _make_move(th_hi, (10, 0, 0, 0), (10, 10, 0, 0), cruise_v=500.0)
+    cb_hi = blendplanner.CornerBlender(th_hi, move_cls=_FakeMove, max_chord_err=20e-3)
+    _ = cb_hi.feed(prev_hi)
+    out_hi = cb_hi.feed(nxt_hi)
+    # Kept: output has blend polyline moves beyond just trunc_prev.
+    assert len(out_hi) >= 2, (
+        f"Expected blend kept (≥2 emitted moves), got {len(out_hi)} moves"
+    )
