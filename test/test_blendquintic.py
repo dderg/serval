@@ -587,7 +587,7 @@ def test_v_cap_fn_degrades_gracefully_with_smooth_shaper_axis():
         ),
         blendshaper.AxisShaperSnapshot(
             axis="y",
-            shaper_type="smooth_mzv",
+            shaper_type="bs3",
             shaper_freq=0.0,
             damping_ratio=0.0,
             A_axis=0.0,
@@ -623,17 +623,17 @@ def test_v_cap_fn_degrades_gracefully_with_smooth_shaper_axis():
 from klippy import blendmath
 
 
-def _make_smooth_mzv_limits(freq=40.0, dr=0.1,
+def _make_bs3_limits(freq=40.0, dr=0.1,
                              a_max=5000.0, v_max=300.0):
-    """KinematicLimits with two smooth_mzv shaper snapshots (x + y)."""
-    A = blendmath._compute_A_axis_smooth_is("smooth_mzv", freq, dr)
+    """KinematicLimits with two bs3 shaper snapshots (x + y)."""
+    A = blendmath._compute_A_axis_smooth_is("bs3", freq, dr)
     shapers = [
         blendshaper.AxisShaperSnapshot(
-            axis="x", shaper_type="smooth_mzv",
+            axis="x", shaper_type="bs3",
             shaper_freq=freq, damping_ratio=dr, A_axis=A,
         ),
         blendshaper.AxisShaperSnapshot(
-            axis="y", shaper_type="smooth_mzv",
+            axis="y", shaper_type="bs3",
             shaper_freq=freq, damping_ratio=dr, A_axis=A,
         ),
     ]
@@ -668,7 +668,7 @@ def _make_fir_mzv_limits(freq=40.0, dr=0.1,
     )
 
 
-def test_quintic_v_cap_finite_under_smooth_mzv():
+def test_quintic_v_cap_finite_under_bs3():
     """Pre-Plan-4 bug: SIS had A_axis=0 → quintic v_cap was uncapped (inf-like).
     After Plan 4 D1: SIS carries a finite A_axis → v_cap is finite and physical.
     """
@@ -676,7 +676,7 @@ def test_quintic_v_cap_finite_under_smooth_mzv():
     prev = _FakeMoveFactory((-10.0, 0.0, 0.0), (0.0, 0.0, 0.0))
     nxt  = _FakeMoveFactory((0.0, 0.0, 0.0), (0.0, 10.0, 0.0))
     shape = blendquintic.QuinticShape.from_moves(
-        prev, nxt, 0.1, _make_smooth_mzv_limits()
+        prev, nxt, 0.1, _make_bs3_limits()
     )
     assert shape is not None
     v_mid = shape.v_cap_fn(shape.arc_length / 2.0)
@@ -685,7 +685,7 @@ def test_quintic_v_cap_finite_under_smooth_mzv():
 
 
 def test_quintic_v_cap_smooth_vs_fir_same_order_of_magnitude():
-    """At the same nominal frequency, smooth_mzv and FIR mzv caps must be
+    """At the same nominal frequency, bs3 and FIR mzv caps must be
     within a factor of 2 of each other.  A larger divergence indicates an
     A_axis scale error in the Smooth-IS derivation.
     """
@@ -693,7 +693,7 @@ def test_quintic_v_cap_smooth_vs_fir_same_order_of_magnitude():
     nxt  = _FakeMoveFactory((0.0, 0.0, 0.0), (0.0, 10.0, 0.0))
 
     shape_sis = blendquintic.QuinticShape.from_moves(
-        prev, nxt, 0.1, _make_smooth_mzv_limits()
+        prev, nxt, 0.1, _make_bs3_limits()
     )
     shape_fir = blendquintic.QuinticShape.from_moves(
         prev, nxt, 0.1, _make_fir_mzv_limits()
@@ -732,7 +732,7 @@ def test_v_cap_fn_endpoints_finite_and_positive(angle_deg):
         (10.0, 0.0, 0.0),
         (10.0 + 10.0 * math.cos(theta), 10.0 * math.sin(theta), 0.0),
     )
-    limits = _make_smooth_mzv_limits()  # from T6 helpers
+    limits = _make_bs3_limits()  # from T6 helpers
     shape = blendquintic.QuinticShape.from_moves(prev, next_m, 0.1, limits)
     if shape is None:
         pytest.skip("from_moves returned None for this angle; not in scope")
@@ -749,7 +749,7 @@ def test_v_cap_fn_endpoints_at_least_straight_cruise():
     """
     prev = _FakeMoveFactory((0.0, 0.0, 0.0), (10.0, 0.0, 0.0))
     next_m = _FakeMoveFactory((10.0, 0.0, 0.0), (10.0, 10.0, 0.0))
-    limits = _make_smooth_mzv_limits()
+    limits = _make_bs3_limits()
     shape = blendquintic.QuinticShape.from_moves(prev, next_m, 0.1, limits)
     if shape is None:
         pytest.skip("from_moves returned None; not in scope")

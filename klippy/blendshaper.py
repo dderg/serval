@@ -50,15 +50,16 @@ _SHAPER_SPAN_FACTOR = {
     "3hump_ei": 2.0,
 }
 
-# SIS kernel span: T_sm = factor / shaper_freq (damping-independent by kernel construction).
-# Factors read from klippy/extras/shaper_defs.py init_*_smoother return values.
+# Cardinal B-spline chain span: T_sm = F_m / shaper_freq, damping-independent
+# by kernel construction. F_m constants from shaper_defs._F_M_TABLE (derived
+# at zeta=0.1, V=0.05 residual target); see
+# docs/superpowers/plans/plan5-derivations/new_shaper_family.md §2.
 _SMOOTH_SPAN_FACTOR = {
-    "smooth_zv":        0.80250,
-    "smooth_mzv":       0.95625,
-    "smooth_ei":        1.06625,
-    "smooth_2hump_ei":  1.14875,
-    "smooth_zvd_ei":    1.47500,
-    "smooth_si":        1.24500,
+    "bs1": 1.5553,
+    "bs2": 1.9462,
+    "bs3": 2.2519,
+    "bs4": 2.5061,
+    "bs5": 2.7252,
 }
 
 

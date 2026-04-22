@@ -182,7 +182,7 @@ defs_kin_extruder = """
     int extruder_set_shaper_params(struct stepper_kinematics *sk, char axis
         , int n, double a[], double t[]);
     int extruder_set_smoothing_params(struct stepper_kinematics *sk, char axis
-        , int n, double a[], double t_sm, double t_offs);
+        , int n_pieces, const double piece_buf[], double t_sm, double t_offs);
     double extruder_get_step_gen_window(struct stepper_kinematics *sk);
 """
 
@@ -191,7 +191,7 @@ defs_kin_shaper = """
     int input_shaper_set_shaper_params(struct stepper_kinematics *sk, char axis
         , int n, double a[], double t[]);
     int input_shaper_set_smoother_params(struct stepper_kinematics *sk
-        , char axis, int n, double a[], double t_sm);
+        , char axis, int n_pieces, const double piece_buf[], double t_sm);
     int input_shaper_set_sk(struct stepper_kinematics *sk
         , struct stepper_kinematics *orig_sk);
     struct stepper_kinematics * input_shaper_alloc(void);

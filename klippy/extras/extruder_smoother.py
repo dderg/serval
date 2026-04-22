@@ -18,12 +18,14 @@ EXTURDER_SMOOTHERS = {
     "default": ExtruderSmootherCfg(-1, (1.0, 1.0, 1)),
     "zv": ExtruderSmootherCfg(5, (0.98, 1.02, 5)),
     "mzv": ExtruderSmootherCfg(7, (0.95, 1.05, 11)),
-    "smooth_zv": ExtruderSmootherCfg(7, (0.98, 1.0, 3)),
-    "smooth_mzv": ExtruderSmootherCfg(9, (0.95, 1.07, 20)),
-    "smooth_ei": ExtruderSmootherCfg(9, (0.97, 1.07, 15)),
-    "smooth_zvd_ei": ExtruderSmootherCfg(11, (0.90, 1.10, 30)),
-    "smooth_2hump_ei": ExtruderSmootherCfg(11, (0.95, 1.07, 20)),
-    "smooth_si": ExtruderSmootherCfg(11, (0.95, 1.07, 20)),
+    # Magnum Opus bs* family replacement for the retired smooth_* entries.
+    # Order follows the rough mapping bs(m) ~= (2m+3) to match the residual
+    # vibration band the old smooth_mzv/smooth_ei tuning targeted.
+    "bs1": ExtruderSmootherCfg(7, (0.98, 1.0, 3)),
+    "bs2": ExtruderSmootherCfg(9, (0.95, 1.07, 20)),
+    "bs3": ExtruderSmootherCfg(9, (0.97, 1.07, 15)),
+    "bs4": ExtruderSmootherCfg(11, (0.95, 1.07, 20)),
+    "bs5": ExtruderSmootherCfg(11, (0.90, 1.10, 30)),
 }
 
 
@@ -61,7 +63,7 @@ def _estimate_shaper(np, shaper, test_damping_ratio, test_freqs):
 
 
 def _estimate_smoother(np, smoother, test_damping_ratio, test_freqs):
-    C, t_sm = smoother[0], smoother[1]
+    C_pieces, t_sm = smoother[0], smoother[1]
     hst = t_sm * 0.5
 
     test_freqs = np.asarray(test_freqs)
@@ -70,13 +72,9 @@ def _estimate_smoother(np, smoother, test_damping_ratio, test_freqs):
     unity_range = np.linspace(0.0, 1.0, n_t)
     time = (t_end - t_start) * unity_range + t_start
     dt = (time[-1] - time[0]) / n_t
-    tau = np.copy(time)
-    tau[time < -hst] = 0.0
-    tau[time > hst] = 0.0
 
-    w = np.zeros(shape=tau.shape)
-    for c in C[::-1]:
-        w = w * tau + c
+    w = shaper_defs.bspline_eval(C_pieces, time, t_sm)
+    w = np.asarray(w, dtype=float)
     w[time < -hst] = 0.0
     w[time > hst] = 0.0
     norms = (w * dt).sum(axis=-1)
@@ -103,7 +101,16 @@ def _estimate_smoother(np, smoother, test_damping_ratio, test_freqs):
 
 
 def _calc_extruder_smoother(np, shaper_name, t, velocities, n, t_sm):
-    zero_derivatives = shaper_name.startswith("smooth_")
+    # Cardinal B-spline chain of order m >= 2 is C^{m-1} with zero derivatives
+    # at the support boundaries by construction (Curry-Schoenberg 1966). bs1
+    # is piecewise linear with a flat cap, so its first derivative jumps at
+    # the boundary — treat it the same as an impulse shaper for the PA
+    # extruder-smoother fit.
+    if shaper_name.startswith("bs") and len(shaper_name) > 2 \
+            and shaper_name[2:].isdigit():
+        zero_derivatives = int(shaper_name[2:]) >= 2
+    else:
+        zero_derivatives = False
     if n <= 3:
         return [1.5, 0, -6.0]
     if n <= 5 and zero_derivatives:
@@ -176,10 +183,14 @@ def get_extruder_smoother(
             break
     for s in shaper_defs.INPUT_SMOOTHERS:
         if s.name == shaper_name:
-            C, t_sm = s.init_func(1.0)
+            C_pieces, t_sm = s.init_func(1.0)
             if n < 0:
-                n = len(C)
-            smoother = C, t_sm
+                # Heuristic order for the PA-side extruder smoother fit —
+                # matches the (2*m + 3) bandwidth of the pre-Magnum-Opus
+                # smooth_* family by piece count. Falls back to 5 for an
+                # empty / identity smoother.
+                n = 2 * len(C_pieces) + 3 if C_pieces else 5
+            smoother = (C_pieces, t_sm)
             t, velocities = _estimate_smoother(
                 np, smoother, damping_ratio, test_freqs
             )

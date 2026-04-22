@@ -12,6 +12,38 @@ from . import shaper_defs
 from . import extruder_smoother
 
 
+# Maximum pieces per smoother kernel. Mirrors SMOOTHER_MAX_PIECES in
+# klippy/chelper/integrate.h. Bumping this requires a matching C change.
+_FFI_MAX_PIECES = 9
+# Bytes per piece in the flat FFI buffer: [t_start, t_end, c_0..c_5] = 8
+# doubles. Mirrors struct smoother_piece coeff layout in integrate.h.
+_FFI_DOUBLES_PER_PIECE = 8
+
+
+def _marshal_pieces_to_buffer(ffi_main, C_pieces):
+    """Flatten piecewise smoother coeffs to the C FFI buffer layout.
+
+    Returns (n_pieces, buf). Pads each piece's coefficient list with zeros
+    to SMOOTHER_MAX_DEGREE (=5). Raises if the kernel exceeds
+    SMOOTHER_MAX_PIECES — indicates a Python-side bug that tried to pass
+    an over-sized piecewise kernel; the C side cannot store it.
+    """
+    n_pieces = len(C_pieces)
+    if n_pieces > _FFI_MAX_PIECES:
+        raise ValueError(
+            "Smoother has %d pieces; C side supports up to %d"
+            % (n_pieces, _FFI_MAX_PIECES)
+        )
+    buf = ffi_main.new("double[]", n_pieces * _FFI_DOUBLES_PER_PIECE)
+    for i, (t_start, t_end, coeffs) in enumerate(C_pieces):
+        base = i * _FFI_DOUBLES_PER_PIECE
+        buf[base + 0] = float(t_start)
+        buf[base + 1] = float(t_end)
+        for k in range(6):
+            buf[base + 2 + k] = float(coeffs[k]) if k < len(coeffs) else 0.0
+    return n_pieces, buf
+
+
 def parse_float_list(list_str):
     def parse_str(s):
         res = []
@@ -217,10 +249,10 @@ class AxisInputShaper:
         axis = self.get_axis().encode()
         if not self.is_extruder_smoothing(exact_mode):
             # Make sure to disable any active input smoothing
-            coeffs, smooth_time = [], 0.0
+            n_pieces, buf = _marshal_pieces_to_buffer(ffi_main, [])
             success = (
                 ffi_lib.extruder_set_smoothing_params(
-                    sk, axis, len(coeffs), coeffs, smooth_time, 0.0
+                    sk, axis, n_pieces, buf, 0.0, 0.0
                 )
                 == 0
             )
@@ -237,16 +269,17 @@ class AxisInputShaper:
                 status.get("damping_ratio", shaper_defs.DEFAULT_DAMPING_RATIO)
             )
 
-            C_e, t_sm = extruder_smoother.get_extruder_smoother(
+            C_pieces, t_sm = extruder_smoother.get_extruder_smoother(
                 shaper_type,
                 self.T[-1] - self.T[0],
                 damping_ratio,
                 normalize_coeffs=False,
             )
             smoother_offset = self.t_offs - 0.5 * t_sm
+            n_pieces, buf = _marshal_pieces_to_buffer(ffi_main, C_pieces)
             success = (
                 ffi_lib.extruder_set_smoothing_params(
-                    sk, axis, len(C_e), C_e, t_sm, smoother_offset
+                    sk, axis, n_pieces, buf, t_sm, smoother_offset
                 )
                 == 0
             )
@@ -290,13 +323,23 @@ class TypedInputSmootherParams:
         self.smoother_type = smoother_type
         self.smoother_freq = 0.0
         if config is not None:
-            if smoother_type not in self.smoothers:
-                raise config.error(
-                    "Unsupported shaper type: %s" % (smoother_type,)
-                )
+            self._validate_type(smoother_type, config.error)
             self.smoother_freq = config.getfloat(
                 "smoother_freq_" + axis, self.smoother_freq, minval=0.0
             )
+
+    @classmethod
+    def _validate_type(cls, smoother_type, error_ctor):
+        if smoother_type in cls.smoothers:
+            return
+        hint = shaper_defs.RETIRED_SMOOTHER_MIGRATION.get(smoother_type)
+        if hint is not None:
+            raise error_ctor(
+                "shaper_type '%s' was replaced in Magnum Opus with the "
+                "cardinal B-spline chain family. Use shaper_type = '%s' "
+                "for equivalent behavior." % (smoother_type, hint)
+            )
+        raise error_ctor("Unsupported shaper type: %s" % (smoother_type,))
 
     def get_type(self):
         return self.smoother_type
@@ -305,8 +348,7 @@ class TypedInputSmootherParams:
         return self.axis
 
     def update(self, smoother_type, gcmd):
-        if smoother_type not in self.smoothers:
-            raise gcmd.error("Unsupported shaper type: %s" % (smoother_type,))
+        self._validate_type(smoother_type, gcmd.error)
         axis = self.axis.upper()
         self.smoother_freq = gcmd.get_float(
             "SMOOTHER_FREQ_" + axis, self.smoother_freq, minval=0.0
@@ -314,13 +356,12 @@ class TypedInputSmootherParams:
         self.smoother_type = smoother_type
 
     def get_smoother(self):
+        """Return (C_pieces, smooth_time) piecewise kernel description."""
         if not self.smoother_freq:
-            C, tsm = shaper_defs.get_none_smoother()
-        else:
-            C, tsm = self.smoothers[self.smoother_type](
-                self.smoother_freq, normalize_coeffs=False
-            )
-        return len(C), C, tsm
+            return shaper_defs.get_none_smoother()
+        return self.smoothers[self.smoother_type](
+            self.smoother_freq, shaper_defs.DEFAULT_DAMPING_RATIO, True
+        )
 
     def get_status(self):
         return collections.OrderedDict(
@@ -336,13 +377,14 @@ class CustomInputSmootherParams:
 
     def __init__(self, axis, config):
         self.axis = axis
-        self.coeffs, self.smooth_time = shaper_defs.get_none_smoother()
+        self._raw_coeffs = []
+        self.smooth_time = 0.0
         if config is not None:
             self.smooth_time = config.getfloat(
                 "smooth_time_" + axis, self.smooth_time, minval=0.0
             )
-            self.coeffs = list(
-                reversed(config.getfloatlist("coeffs_" + axis, self.coeffs))
+            self._raw_coeffs = list(
+                reversed(config.getfloatlist("coeffs_" + axis, self._raw_coeffs))
             )
 
     def get_type(self):
@@ -365,10 +407,15 @@ class CustomInputSmootherParams:
                 coeffs.reverse()
             except:
                 raise gcmd.error("Invalid format for COEFFS parameter")
-            self.coeffs = coeffs
+            self._raw_coeffs = coeffs
 
     def get_smoother(self):
-        return len(self.coeffs), self.coeffs, self.smooth_time
+        """Return (C_pieces, smooth_time) — wrap flat coeffs in a single piece."""
+        if not self._raw_coeffs or self.smooth_time <= 0.0:
+            return shaper_defs.get_none_smoother()
+        return shaper_defs.init_smoother(
+            self._raw_coeffs, self.smooth_time, True
+        )
 
     def get_status(self):
         return collections.OrderedDict(
@@ -376,7 +423,7 @@ class CustomInputSmootherParams:
                 ("shaper_type", self.SHAPER_TYPE),
                 (
                     "shaper_coeffs",
-                    ",".join(["%.9e" % (a,) for a in reversed(self.coeffs)]),
+                    ",".join(["%.9e" % (a,) for a in reversed(self._raw_coeffs)]),
                 ),
                 ("shaper_smooth_time", self.smooth_time),
             ]
@@ -386,9 +433,9 @@ class CustomInputSmootherParams:
 class AxisInputSmoother:
     def __init__(self, params):
         self.params = params
-        self.n, self.coeffs, self.smooth_time = params.get_smoother()
+        self.C_pieces, self.smooth_time = params.get_smoother()
         self.t_offs = shaper_defs.get_smoother_offset(
-            self.coeffs, self.smooth_time, normalized=False
+            self.C_pieces, self.smooth_time, normalized=True
         )
         self.saved_smooth_time = 0.0
 
@@ -409,24 +456,27 @@ class AxisInputSmoother:
 
     def update(self, shaper_type, gcmd):
         self.params.update(shaper_type, gcmd)
-        self.n, self.coeffs, self.smooth_time = self.params.get_smoother()
+        self.C_pieces, self.smooth_time = self.params.get_smoother()
         self.t_offs = shaper_defs.get_smoother_offset(
-            self.coeffs, self.smooth_time, normalized=False
+            self.C_pieces, self.smooth_time, normalized=True
         )
 
     def update_stepper_kinematics(self, sk):
         ffi_main, ffi_lib = chelper.get_ffi()
         axis = self.get_axis().encode()
+        pieces = self.C_pieces if self.smooth_time > 0.0 else []
+        n_pieces, buf = _marshal_pieces_to_buffer(ffi_main, pieces)
         success = (
             ffi_lib.input_shaper_set_smoother_params(
-                sk, axis, self.n, self.coeffs, self.smooth_time
+                sk, axis, n_pieces, buf, self.smooth_time
             )
             == 0
         )
         if not success:
             self.disable_shaping()
+            n_pieces, buf = _marshal_pieces_to_buffer(ffi_main, [])
             ffi_lib.input_shaper_set_smoother_params(
-                sk, axis, self.n, self.coeffs, self.smooth_time
+                sk, axis, n_pieces, buf, 0.0
             )
         return success
 
@@ -437,30 +487,34 @@ class AxisInputSmoother:
         A, T = shaper_defs.get_none_shaper()
         ffi_lib.extruder_set_shaper_params(sk, axis, len(A), A, T)
         if exact_mode:
+            pieces = self.C_pieces if self.smooth_time > 0.0 else []
+            n_pieces, buf = _marshal_pieces_to_buffer(ffi_main, pieces)
             success = (
                 ffi_lib.extruder_set_smoothing_params(
-                    sk, axis, self.n, self.coeffs, self.smooth_time, self.t_offs
+                    sk, axis, n_pieces, buf, self.smooth_time, self.t_offs
                 )
                 == 0
             )
         else:
             smoother_type = self.get_type()
-            C_e, t_sm = extruder_smoother.get_extruder_smoother(
+            C_e_pieces, t_sm = extruder_smoother.get_extruder_smoother(
                 smoother_type,
                 self.smooth_time,
                 shaper_defs.DEFAULT_DAMPING_RATIO,
                 normalize_coeffs=False,
             )
+            n_pieces, buf = _marshal_pieces_to_buffer(ffi_main, C_e_pieces)
             success = (
                 ffi_lib.extruder_set_smoothing_params(
-                    sk, axis, len(C_e), C_e, t_sm, self.t_offs
+                    sk, axis, n_pieces, buf, t_sm, self.t_offs
                 )
                 == 0
             )
         if not success:
             self.disable_shaping()
+            n_pieces, buf = _marshal_pieces_to_buffer(ffi_main, [])
             ffi_lib.extruder_set_smoothing_params(
-                sk, axis, self.n, self.coeffs, self.smooth_time, 0.0
+                sk, axis, n_pieces, buf, 0.0, 0.0
             )
         return success
 
@@ -512,6 +566,14 @@ class ShaperFactory:
     def create_shaper(self, axis, config):
         shaper_type = config.get("shaper_type", "mzv")
         shaper_type = config.get("shaper_type_" + axis, shaper_type).lower()
+        # Plan 5 migration: retired smooth_* names get a friendly error.
+        hint = shaper_defs.RETIRED_SMOOTHER_MIGRATION.get(shaper_type)
+        if hint is not None:
+            raise config.error(
+                "shaper_type '%s' was replaced in Magnum Opus with the "
+                "cardinal B-spline chain family. Use shaper_type = '%s' "
+                "for equivalent behavior." % (shaper_type, hint)
+            )
         shaper = self._create_shaper(axis, shaper_type, config)
         if shaper is None:
             raise config.error("Unsupported shaper type '%s'" % (shaper_type,))

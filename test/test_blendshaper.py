@@ -466,21 +466,21 @@ def test_shaper_span_fir_damped():
 
 
 @pytest.mark.parametrize("shaper_type,expected_factor", [
-    ("smooth_zv",       0.80250),
-    ("smooth_mzv",      0.95625),
-    ("smooth_ei",       1.06625),
-    ("smooth_2hump_ei", 1.14875),
-    ("smooth_zvd_ei",   1.47500),
-    ("smooth_si",       1.24500),
+    ("bs1", 1.5553),
+    ("bs2", 1.9462),
+    ("bs3", 2.2519),
+    ("bs4", 2.5061),
+    ("bs5", 2.7252),
 ])
 def test_shaper_span_smooth_matches_T_sm(shaper_type, expected_factor):
-    """SIS shaper_span returns T_sm = factor / shaper_freq (damping-independent)."""
+    """Cardinal B-spline shaper_span returns T_sm = F_m / shaper_freq
+    (damping-independent by kernel construction)."""
     span = blendshaper.shaper_span(shaper_type, shaper_freq=40.0, damping_ratio=0.0)
     assert span == pytest.approx(expected_factor / 40.0, rel=1e-9)
 
 
 def test_shaper_span_smooth_damping_independent():
-    """SIS kernel T_sm does not depend on damping_ratio."""
-    span_no_damp = blendshaper.shaper_span("smooth_mzv", 40.0, damping_ratio=0.0)
-    span_damped = blendshaper.shaper_span("smooth_mzv", 40.0, damping_ratio=0.3)
+    """Cardinal B-spline kernel T_sm does not depend on damping_ratio."""
+    span_no_damp = blendshaper.shaper_span("bs3", 40.0, damping_ratio=0.0)
+    span_damped = blendshaper.shaper_span("bs3", 40.0, damping_ratio=0.3)
     assert span_no_damp == pytest.approx(span_damped, rel=1e-12)

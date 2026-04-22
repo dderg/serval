@@ -46,13 +46,22 @@ class ExtruderSmoother:
 
     def update_extruder_kinematics(self, extruder_sk):
         ffi_main, ffi_lib = chelper.get_ffi()
-        n = len(self.a)
         success = True
         smooth_time = self.smooth_time if self.pa_model.enabled() else 0.0
+        # Plan 5 FFI: the pressure-advance smoother is a single-piece kernel
+        # that the Python side converts to the piecewise flat buffer the C
+        # code now expects.
+        from ..extras import input_shaper as _is_mod
+        from ..extras import shaper_defs as _sd
+        if smooth_time > 0.0:
+            C_pieces, t_sm = _sd.init_smoother(self.a, smooth_time, True)
+        else:
+            C_pieces, t_sm = [], 0.0
+        n_pieces, buf = _is_mod._marshal_pieces_to_buffer(ffi_main, C_pieces)
         for axis in self.axes:
             if (
                 not ffi_lib.extruder_set_smoothing_params(
-                    extruder_sk, axis.encode(), n, self.a, smooth_time, 0.0
+                    extruder_sk, axis.encode(), n_pieces, buf, t_sm, 0.0
                 )
                 == 0
             ):

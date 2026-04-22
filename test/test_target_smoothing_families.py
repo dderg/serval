@@ -35,10 +35,9 @@ def _sc():
 
 
 def _smooth_mzv():
-    # Smoother factories accept (shaper_freq, damping_ratio_unused=...),
-    # so pass damping ratio positionally to stay agnostic of the kwarg name.
+    # Plan 5 replacement: bs2 is the direct analog of the retired smooth_mzv.
     smoother_cfg = [s for s in shaper_defs.INPUT_SMOOTHERS
-                    if s.name == "smooth_mzv"][0]
+                    if s.name == "bs2"][0]
     return smoother_cfg.init_func(40.0, 0.1)
 
 
@@ -78,17 +77,18 @@ def test_dispatch_accepts_both_families():
 
 def test_smooth_family_closed_form_matches():
     """find_shaper_max_accel on a smoother must match A_crit = 2*t/sigma^2
-    computed directly from the polynomial moments (spec §2.3, §2.4)."""
+    computed directly from the polynomial moments (spec §2.3, §2.4, and
+    Plan 5 §D1 for the cardinal B-spline chain piecewise form)."""
     sc = _sc()
     sm = _smooth_mzv()
-    C, t_sm = sm
-    hst = 0.5 * t_sm
+    C_pieces, t_sm = sm
 
     def raw_moment(k):
         s = 0.0
-        for i, c in enumerate(C):
-            if (i + k) % 2 == 0:
-                s += c * 2.0 * hst ** (i + k + 1) / (i + k + 1)
+        for (a, b, coeffs) in C_pieces:
+            for j, c in enumerate(coeffs):
+                power = j + k + 1
+                s += c * (b ** power - a ** power) / power
         return s
 
     M0 = raw_moment(0)

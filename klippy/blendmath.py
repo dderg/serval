@@ -340,8 +340,8 @@ def _extract_shapers(toolhead):
             # FIR: use ShaperCalibrate.find_shaper_max_accel.
             impulses = shaper_factory[shaper_type](freq, damping_ratio)
             A_axis = float(sc.find_shaper_max_accel(impulses))
-        elif shaper_type.startswith("smooth_"):
-            # SIS: analytical A_axis from the kernel.
+        elif shaper_type in {s.name for s in shaper_defs.INPUT_SMOOTHERS}:
+            # Cardinal B-spline chain: analytical A_axis from the kernel.
             A_axis = _compute_A_axis_smooth_is(shaper_type, freq, damping_ratio,
                                                target_smoothing=target or 0.12)
         else:

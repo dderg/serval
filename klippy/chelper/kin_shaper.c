@@ -311,9 +311,13 @@ input_shaper_set_shaper_params(struct stepper_kinematics *sk, char axis
     return status;
 }
 
+// Plan 5 piecewise-smoother FFI. piece_buf layout per piece (8 doubles):
+// [t_start, t_end, c_0, c_1, c_2, c_3, c_4, c_5]. n_pieces == 0 disables
+// the smoother (identity / none).
 int __visible
 input_shaper_set_smoother_params(struct stepper_kinematics *sk, char axis
-                                 , int n, double a[], double t_sm)
+                                 , int n_pieces, const double piece_buf[]
+                                 , double t_sm)
 {
     if (axis != 'x' && axis != 'y')
         return -1;
@@ -322,7 +326,7 @@ input_shaper_set_smoother_params(struct stepper_kinematics *sk, char axis
     struct smoother *sm = axis == 'x' ? &is->sm_x : &is->sm_y;
     int status = 0;
     if (is->orig_sk->active_flags & (axis == 'x' ? AF_X : AF_Y)) {
-        status = init_smoother(n, a, t_sm, sm);
+        status = init_smoother(n_pieces, piece_buf, t_sm, sm);
         sp->num_pulses = 0;
         shaper_note_generation_time(is);
     }

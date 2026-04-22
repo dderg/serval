@@ -282,15 +282,19 @@ extruder_set_shaper_params(struct stepper_kinematics *sk, char axis
     return status;
 }
 
+// Plan 5 piecewise-smoother FFI. piece_buf layout per piece (8 doubles):
+// [t_start, t_end, c_0, c_1, c_2, c_3, c_4, c_5]. n_pieces == 0 disables
+// the smoother (identity / none).
 int __visible
 extruder_set_smoothing_params(struct stepper_kinematics *sk, char axis
-                              , int n, double a[], double t_sm, double t_offs)
+                              , int n_pieces, const double piece_buf[]
+                              , double t_sm, double t_offs)
 {
     if (axis != 'x' && axis != 'y' && axis != 'z')
         return -1;
     struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
     struct smoother *sm = &es->sm[axis-'x'];
-    int status = init_smoother(n, a, t_sm, sm);
+    int status = init_smoother(n_pieces, piece_buf, t_sm, sm);
     sm->t_offs = t_offs;
     extruder_note_generation_time(es);
     return status;

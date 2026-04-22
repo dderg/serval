@@ -29,12 +29,11 @@ TEST_DAMPING_RATIOS = [0.075, 0.1, 0.15]
 AUTOTUNE_SHAPERS = [
     "zv",
     "mzv",
-    "smooth_zv",
-    "smooth_mzv",
-    "smooth_ei",
-    "smooth_2hump_ei",
-    "smooth_zvd_ei",
-    "smooth_si",
+    "bs1",
+    "bs2",
+    "bs3",
+    "bs4",
+    "bs5",
 ]
 
 ######################################################################
@@ -420,23 +419,32 @@ class ShaperCalibrate:
         return offset_180 * inv_D
 
     def _get_smoother_sigma2(self, smoother):
-        # Second central moment of the smoother's support polynomial.
-        # sigma^2 = M_2 / M_0 - (M_1 / M_0)^2 — closed form over the raw
-        # polynomial moments. Odd-power integrals over the symmetric
-        # interval [-t_sm/2, +t_sm/2] vanish, so only entries with matching
-        # parity contribute. See docs/superpowers/specs/
-        # 2026-04-20-target-smoothing-smooth-family.md §2.3.
-        C, t_sm = smoother
-        hst = 0.5 * t_sm
+        # Second central moment of the piecewise-polynomial kernel:
+        #     sigma^2 = M_2 / M_0 - (M_1 / M_0)^2
+        # where M_k = sum over pieces of int_{t_start}^{t_end} tau^k w(tau) dtau.
+        # Each piece stores the kernel as an ascending power-basis polynomial
+        # sum_j c_j * tau^j.
+        #
+        # Plan 5: replaces the single-polynomial assumption. Works for the
+        # legacy single-piece form (init_smoother returns one piece spanning
+        # [-t_sm/2, +t_sm/2]) and for the new cardinal B-spline chain which
+        # stores m+1 pieces.
+        C_pieces, t_sm = smoother
+        if not C_pieces or t_sm <= 0.0:
+            return 0.0
 
         def raw_moment(k):
             s = 0.0
-            for i, c in enumerate(C):
-                if (i + k) % 2 == 0:
-                    s += c * 2.0 * hst ** (i + k + 1) / (i + k + 1)
+            for (a, b, coeffs) in C_pieces:
+                for j, c in enumerate(coeffs):
+                    # int_{a}^{b} c * tau^(j+k) dtau
+                    power = j + k + 1
+                    s += c * (b ** power - a ** power) / power
             return s
 
         M0 = raw_moment(0)
+        if M0 == 0.0:
+            return 0.0
         ts = raw_moment(1) / M0
         return raw_moment(2) / M0 - ts * ts
 
