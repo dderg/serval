@@ -477,3 +477,75 @@ def test_bspline_first_spectral_zero_above_f_sh(m, expected_first_zero_hz):
         "m=%d: first zero %.2f Hz is within 1.25*f_sh=%.1f Hz — "
         "violates FIR-invertibility precondition (Besset-Béarée §III)"
         % (m, first_zero, 1.25 * f_sh))
+
+
+# ---------------------------------------------------------------------------
+# FIR companion kernel (bspline_inverse.compute_inverse_fir).
+# Cosine-taper + hard-bandlimit IFFT design per new_shaper_family.md §10.
+# Reference numbers: new_shaper_family.md §4.3 table at f_sh=40 Hz,
+# pb_max=0.3·f_sh=12 Hz, T_h=2·T_sm, dt=1e-5, tukey_alpha=0.25.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("m,expected_G", [
+    (1, 1.933), (2, 1.921), (3, 2.003), (4, 1.991), (5, 1.951),
+])
+def test_bspline_inverse_G_matches_spec(m, expected_G):
+    """G = ‖h‖₁ (L1 norm) matches new_shaper_family.md §4.3 table within 5%.
+
+    The §4.3 table was generated with tukey_alpha=0.05; we ship
+    tukey_alpha=0.25 per the Plan 5 Task 4 spec (fir_companion_kernel.md §1
+    convention). The larger taper shifts G by up to ~3.5% per variant,
+    so tolerance is 0.1 absolute (~5% of G~2) rather than a tighter pin.
+    """
+    from klippy.extras import bspline_inverse
+
+    f_sh = 40.0
+    C, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
+    h, T_h, dt = bspline_inverse.compute_inverse_fir(
+        C, t_sm, pb_max_hz=0.3 * f_sh, dt=1e-5)
+    G = float(np.sum(np.abs(h)) * dt)
+    assert abs(G - expected_G) < 0.1, (
+        "m=%d: got G=%.4f, expected %.4f (±0.1)" % (m, G, expected_G))
+
+
+@pytest.mark.parametrize("m,expected_T_h_ms", [
+    (1, 77.77), (2, 97.31), (3, 112.60), (4, 125.31), (5, 136.26),
+])
+def test_bspline_inverse_T_h_matches_spec(m, expected_T_h_ms):
+    """T_h = 2·T_sm matches the spec table to < 0.1 ms."""
+    from klippy.extras import bspline_inverse
+
+    f_sh = 40.0
+    C, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
+    h, T_h, dt = bspline_inverse.compute_inverse_fir(
+        C, t_sm, pb_max_hz=0.3 * f_sh, dt=1e-5)
+    assert abs(T_h * 1000 - expected_T_h_ms) < 0.1, (
+        "m=%d: got T_h=%.3f ms, expected %.2f ms"
+        % (m, T_h * 1000, expected_T_h_ms))
+
+
+def test_bspline_inverse_h_is_odd_length_centered():
+    """h has odd length so there's a center tap at tau=0."""
+    from klippy.extras import bspline_inverse
+
+    f_sh = 40.0
+    C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
+    h, T_h, dt = bspline_inverse.compute_inverse_fir(
+        C, t_sm, pb_max_hz=0.3 * f_sh, dt=1e-5)
+    assert len(h) % 2 == 1, (
+        "h length %d is even; should be odd so a center tap sits at tau=0"
+        % len(h))
+
+
+def test_bspline_inverse_unit_integral():
+    """∫ h(tau) dtau = 1 after the final renormalization."""
+    from klippy.extras import bspline_inverse
+
+    f_sh = 40.0
+    C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
+    h, T_h, dt = bspline_inverse.compute_inverse_fir(
+        C, t_sm, pb_max_hz=0.3 * f_sh, dt=1e-5)
+    integral = float(np.sum(h) * dt)
+    assert abs(integral - 1.0) < 1e-9, (
+        "integral = %.12f; expected 1.0 after renormalize" % integral)
