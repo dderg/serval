@@ -503,7 +503,7 @@ def test_bspline_inverse_G_matches_spec(m, expected_G):
     f_sh = 40.0
     C, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
     h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C, t_sm, pb_max_hz=0.3 * f_sh, dt=1e-5)
+        C, t_sm, f_sh_hz=f_sh, dt=1e-5)
     G = float(np.sum(np.abs(h)) * dt)
     assert abs(G - expected_G) < 0.1, (
         "m=%d: got G=%.4f, expected %.4f (±0.1)" % (m, G, expected_G))
@@ -519,7 +519,7 @@ def test_bspline_inverse_T_h_matches_spec(m, expected_T_h_ms):
     f_sh = 40.0
     C, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
     h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C, t_sm, pb_max_hz=0.3 * f_sh, dt=1e-5)
+        C, t_sm, f_sh_hz=f_sh, dt=1e-5)
     assert abs(T_h * 1000 - expected_T_h_ms) < 0.1, (
         "m=%d: got T_h=%.3f ms, expected %.2f ms"
         % (m, T_h * 1000, expected_T_h_ms))
@@ -532,7 +532,7 @@ def test_bspline_inverse_h_is_odd_length_centered():
     f_sh = 40.0
     C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
     h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C, t_sm, pb_max_hz=0.3 * f_sh, dt=1e-5)
+        C, t_sm, f_sh_hz=f_sh, dt=1e-5)
     assert len(h) % 2 == 1, (
         "h length %d is even; should be odd so a center tap sits at tau=0"
         % len(h))
@@ -545,7 +545,103 @@ def test_bspline_inverse_unit_integral():
     f_sh = 40.0
     C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
     h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C, t_sm, pb_max_hz=0.3 * f_sh, dt=1e-5)
+        C, t_sm, f_sh_hz=f_sh, dt=1e-5)
     integral = float(np.sum(h) * dt)
     assert abs(integral - 1.0) < 1e-9, (
         "integral = %.12f; expected 1.0 after renormalize" % integral)
+
+
+# ---------------------------------------------------------------------------
+# FIR companion cascade passband regression. Pins the cosine-taper algorithm
+# against §4.3 — a regression that drops the 1/W-inside-passband branch would
+# fail here even if G remains ~ 2.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("m,max_pb_err", [
+    (1, 0.06),   # §4.3 bs1 @ pb_max = 0.3 f_sh: 4.79% -> 6% headroom
+    (3, 0.04),   # §4.3 bs3 @ pb_max = 0.3 f_sh: 3.17%
+])
+def test_bspline_inverse_passband_error_bounded(m, max_pb_err):
+    """Cascade |W·H| on passband matches identity within spec tolerance.
+    Pins that the cosine-taper algorithm preserves passband fidelity — a
+    regression that drops the 1/W-inside-passband branch would fail here
+    even if G remains ≈ 2. Pinned at tukey_alpha=0.05 to match the §4.3
+    reference table (the module default is 0.25 for sharper time-domain
+    edge rolloff, which trades some passband-error headroom)."""
+    from klippy.extras import bspline_inverse
+    f_sh = 40.0
+    C, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
+    h, T_h, dt = bspline_inverse.compute_inverse_fir(
+        C, t_sm, f_sh_hz=f_sh, tukey_alpha=0.05)
+    pb_err = bspline_inverse.cascade_passband_error(
+        C, t_sm, h, dt, pb_max_hz=0.3 * f_sh)
+    assert pb_err < max_pb_err, (
+        "m=%d: pb_err=%.6f, limit=%.6f" % (m, pb_err, max_pb_err))
+
+
+# ---------------------------------------------------------------------------
+# Path C fused kernel fit. Pins that the 9-piece × degree-5 least-squares
+# reconstruction reproduces the exact FIR cascade passband error to within
+# the verification table in fused_kernel_storage_resolution.md §4.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("m,max_pb_err", [
+    (1, 0.05),
+    (2, 0.04),
+    (3, 0.04),
+    (4, 0.04),
+    (5, 0.01),
+])
+def test_fused_kernel_fit_passband_error(m, max_pb_err):
+    """Path C fit preserves cascade passband fidelity to within 5% of
+    exact FIR cascade (see fused_kernel_storage_resolution.md verification
+    table: bs3 fit 3.218% vs exact 3.218%). Pinned at tukey_alpha=0.05 to
+    match the reference table."""
+    from klippy.extras import bspline_inverse
+    f_sh = 40.0
+    C, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
+    h, T_h, dt = bspline_inverse.compute_inverse_fir(
+        C, t_sm, f_sh_hz=f_sh, tukey_alpha=0.05)
+    fused_pieces = bspline_inverse.fit_fused_kernel(
+        C, t_sm, h, T_h, dt, n_pieces=9, degree=5)
+    pb_err = bspline_inverse.fit_fused_kernel_passband_error(
+        fused_pieces, pb_max_hz=0.3 * f_sh)
+    assert pb_err < max_pb_err, (
+        "m=%d: pb_err=%.6f, limit=%.6f" % (m, pb_err, max_pb_err))
+
+
+def test_fused_kernel_fit_has_9_pieces_degree_5():
+    from klippy.extras import bspline_inverse
+    f_sh = 40.0
+    C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
+    h, T_h, dt = bspline_inverse.compute_inverse_fir(C, t_sm, f_sh_hz=f_sh)
+    fused_pieces = bspline_inverse.fit_fused_kernel(C, t_sm, h, T_h, dt)
+    assert len(fused_pieces) == 9
+    for (t_start, t_end, coeffs) in fused_pieces:
+        assert len(coeffs) == 6  # degree 5 -> 6 coefficients
+
+
+def test_fused_kernel_fit_pieces_are_equal_width():
+    from klippy.extras import bspline_inverse
+    f_sh = 40.0
+    C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
+    h, T_h, dt = bspline_inverse.compute_inverse_fir(C, t_sm, f_sh_hz=f_sh)
+    fused_pieces = bspline_inverse.fit_fused_kernel(C, t_sm, h, T_h, dt)
+    widths = [(t_end - t_start) for (t_start, t_end, _) in fused_pieces]
+    expected_width = (t_sm + T_h) / 9.0
+    for w in widths:
+        assert abs(w - expected_width) < 1e-9
+
+
+def test_fused_kernel_covers_full_support():
+    """First piece starts at -(T_sm+T_h)/2; last piece ends at +(T_sm+T_h)/2."""
+    from klippy.extras import bspline_inverse
+    f_sh = 40.0
+    C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
+    h, T_h, dt = bspline_inverse.compute_inverse_fir(C, t_sm, f_sh_hz=f_sh)
+    fused_pieces = bspline_inverse.fit_fused_kernel(C, t_sm, h, T_h, dt)
+    half_support = (t_sm + T_h) / 2
+    assert abs(fused_pieces[0][0] - (-half_support)) < 1e-9
+    assert abs(fused_pieces[-1][1] - (+half_support)) < 1e-9
