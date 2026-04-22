@@ -196,8 +196,13 @@ def get_extruder_smoother(
             )
             break
     C_e = _calc_extruder_smoother(np, shaper_name, t, velocities, n, t_sm)
+    # _calc_extruder_smoother fits in basis t^i / t_sm^(i+1), so C_e[i] is
+    # the coefficient of t^i — ASCENDING. Matches shaper_defs.init_smoother's
+    # post-Plan-5 ASCENDING convention. (Pre-Plan-5 the helper took
+    # DESCENDING and the [::-1] here was the legacy bridge; that reversal
+    # is gone now.)
     smoother = shaper_defs.init_smoother(
-        C_e[::-1], smooth_time, normalize_coeffs
+        list(C_e), smooth_time, normalize_coeffs
     )
     if not return_velocities:
         return smoother

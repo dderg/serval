@@ -17,13 +17,14 @@ extruder_smoother = importlib.import_module(".extruder_smoother", "extras")
 
 
 def plot_shaper(shaper_name, damping_ratio):
-    (C_e, t_sm), (t, velocities) = extruder_smoother.get_extruder_smoother(
+    # Post-Plan-5, get_extruder_smoother returns the kernel in piecewise
+    # form: C_e is a list of (t_start, t_end, ascending_coeffs) tuples.
+    shaper_defs = importlib.import_module(".shaper_defs", "extras")
+    (C_e_pieces, t_sm), (t, velocities) = extruder_smoother.get_extruder_smoother(
         shaper_name.lower(), 1.0, damping_ratio, return_velocities=True
     )
     tau = np.linspace(-0.5 * t_sm, 0.5 * t_sm, t.shape[0])
-    w_e = np.zeros(shape=tau.shape)
-    for c in C_e[::-1]:
-        w_e = w_e * tau + c
+    w_e = np.asarray(shaper_defs.bspline_eval(C_e_pieces, tau, t_sm))
 
     normalized_velocities = velocities / (
         velocities.sum(axis=-1)[:, np.newaxis] * (t[1] - t[0])

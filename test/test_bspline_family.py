@@ -234,6 +234,47 @@ def test_update_shaper_raises_migration_error_for_retired_name():
     assert "Magnum Opus" in msg
 
 
+@pytest.mark.parametrize("shaper_name", ["mzv", "zv", "bs2", "bs3", "bs5"])
+def test_get_extruder_smoother_kernel_shape(shaper_name):
+    """The PA-path extruder smoother (extruder_smoother.get_extruder_smoother)
+    must be a sensible smoothing kernel: boundary values ~ 0, peak interior,
+    peak magnitude strictly larger than boundary magnitudes.
+
+    Pin test for the C_e[::-1] convention flip that the initial C1 fix
+    introduced — the _calc_extruder_smoother fit emits ASCENDING
+    coefficients, and the [::-1] was flipping them to DESCENDING before
+    handoff to the now-ASCENDING-expecting init_smoother. Resulting
+    "kernel" peak landed at the boundary, not in the interior.
+    """
+    from klippy.extras import extruder_smoother
+
+    t_sm = 0.04
+    C_pieces, t_sm_ret = extruder_smoother.get_extruder_smoother(
+        shaper_name, t_sm, 0.1, normalize_coeffs=True
+    )
+    assert t_sm_ret == pytest.approx(t_sm)
+
+    grid = np.linspace(-t_sm / 2, t_sm / 2, 401)
+    w = np.asarray(shaper_defs.bspline_eval(C_pieces, grid, t_sm))
+
+    # Boundaries vanish (or nearly so — the [1.5, 0, -6] fallback gives a
+    # clean zero, the LSQ-fitted higher-order kernels land within 1e-6 of
+    # zero thanks to the boundary constraints baked into _calc_extruder_smoother).
+    np.testing.assert_allclose([w[0], w[-1]], 0.0, atol=1e-6)
+
+    # Peak is strictly interior — not within 10% of either boundary.
+    idx_peak = int(np.argmax(np.abs(w)))
+    t_peak = grid[idx_peak]
+    assert abs(t_peak) < 0.4 * t_sm, (
+        "%s kernel peak at t=%.4f; expected interior "
+        "(|t| < 0.4 * t_sm = %.4f)" % (shaper_name, t_peak, 0.4 * t_sm)
+    )
+
+    # Peak magnitude strictly greater than boundary magnitudes.
+    peak = abs(w[idx_peak])
+    assert peak > max(abs(w[0]), abs(w[-1])) + 1e-6
+
+
 def test_create_shaper_raises_migration_error_for_retired_name():
     """Config-load path: shaper_type = smooth_mzv must raise the migration
     error with the bs2 hint. Mirrors the update-path pin above."""

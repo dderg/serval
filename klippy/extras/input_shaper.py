@@ -269,11 +269,15 @@ class AxisInputShaper:
                 status.get("damping_ratio", shaper_defs.DEFAULT_DAMPING_RATIO)
             )
 
+            # Plan 5: Python now emits piecewise kernel coefficients in
+            # real-t power basis, so init_smoother must apply the
+            # 1/t_sm^(i+1) rescaling (normalize_coeffs=True). Pre-Plan-5
+            # this scaling happened on the C side for the flat-coeff FFI.
             C_pieces, t_sm = extruder_smoother.get_extruder_smoother(
                 shaper_type,
                 self.T[-1] - self.T[0],
                 damping_ratio,
-                normalize_coeffs=False,
+                normalize_coeffs=True,
             )
             smoother_offset = self.t_offs - 0.5 * t_sm
             n_pieces, buf = _marshal_pieces_to_buffer(ffi_main, C_pieces)
@@ -496,12 +500,14 @@ class AxisInputSmoother:
                 == 0
             )
         else:
+            # Plan 5 normalize_coeffs=True: see update_extruder_kinematics
+            # branch in AxisInputShaper for the rationale.
             smoother_type = self.get_type()
             C_e_pieces, t_sm = extruder_smoother.get_extruder_smoother(
                 smoother_type,
                 self.smooth_time,
                 shaper_defs.DEFAULT_DAMPING_RATIO,
-                normalize_coeffs=False,
+                normalize_coeffs=True,
             )
             n_pieces, buf = _marshal_pieces_to_buffer(ffi_main, C_e_pieces)
             success = (
