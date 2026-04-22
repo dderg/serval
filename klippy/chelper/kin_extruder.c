@@ -34,14 +34,35 @@
 // where pa_func(v) = pressure_advance * v for linear velocity model or a more
 // complicated function for non-linear pressure advance models.
 
-// Calculate the definitive integral of extruder for a given move
+// Calculate the definitive integral of extruder for a given move. PA fires
+// whenever the XY path is moving; for linear moves that's axes_r.x or .y
+// positive; for quintic moves we check whether any XY polynomial coefficient
+// c[1..10] beyond the constant term is non-zero.
 static inline void
 pa_move_integrate(const struct move *m, int axis
                   , double t0, const smoother_antiderivatives *ad
                   , double *pa_velocity_integral)
 {
-    // Calculate base position and velocity with pressure advance
-    int can_pressure_advance = m->axes_r.x > 0. || m->axes_r.y > 0.;
+    int can_pressure_advance;
+    if (likely(m->kind == MOVE_LINEAR)) {
+        can_pressure_advance = m->u.lin.axes_r.x > 0. || m->u.lin.axes_r.y > 0.;
+    } else {
+        // MOVE_QUINTIC_POLY_T: any X or Y velocity/higher-order content in
+        // any phase engages PA.
+        can_pressure_advance = 0;
+        const struct move_quintic_phase *phases[3] = {
+            &m->u.quintic.accel, &m->u.quintic.cruise, &m->u.quintic.decel,
+        };
+        for (int p = 0; p < 3 && !can_pressure_advance; ++p) {
+            const struct move_quintic_phase *ph = phases[p];
+            for (int k = 1; k < MOVE_QUINTIC_POLY_COEFFS; ++k) {
+                if (ph->c[k].x > 0.0 || ph->c[k].y > 0.0) {
+                    can_pressure_advance = 1;
+                    break;
+                }
+            }
+        }
+    }
 
     // Calculate definitive integral
     if (can_pressure_advance)
@@ -197,7 +218,9 @@ extruder_calc_position(struct stepper_kinematics *sk, struct move *m
     }
     int i;
     struct coord e_pos, pa_vel;
-    double move_dist = move_get_distance(m, move_time);
+    // move_get_coord dispatches on kind; linear path matches the prior
+    // start_pos + axes_r * move_get_distance formula bit-identically.
+    struct coord base_pos = move_get_coord(m, move_time);
     for (i = 0; i < 3; ++i) {
         int axis = 'x' + i;
         const struct shaper_pulses* sp = &es->sp[i];
@@ -205,7 +228,7 @@ extruder_calc_position(struct stepper_kinematics *sk, struct move *m
         int num_pulses = sp->num_pulses;
         e_pos.axis[i] = num_pulses
             ? shaper_calc_position(m, axis, move_time, sp)
-            : m->start_pos.axis[i] + m->axes_r.axis[i] * move_dist;
+            : base_pos.axis[i];
         if (!sm->hst) {
             pa_vel.axis[i] = 0.;
         } else {

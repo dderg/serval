@@ -67,12 +67,104 @@ def _copy_caller_state(src, dst):
     dst.min_move_t = dst.move_d / math.sqrt(dst.max_cruise_v2)
 
 
+class QuinticBlendMove:
+    """Sentinel Move-like wrapper for a direct-quintic blend emission.
+
+    Holds the per-phase position-in-t polynomial coefficients produced by
+    QuinticShape.compose_phase_polynomials, plus enough Move-compatible
+    state (start_pos, end_pos, axes_r, move_d, max_cruise_v2, accel, etc.)
+    for the LookAheadQueue / Move lifecycle.
+
+    toolhead.ToolHead._process_moves detects `quintic_trapq_payload` on a
+    Move and routes it to trapq_append_quintic instead of the default
+    trapq_append call. Plan 5 D2c flips CornerBlender._emit_blend to emit
+    QuinticBlendMove once D7 TOPP provides the per-s velocity profile;
+    today the polyline emit path ships (kept in _emit_blend).
+
+    The `quintic_trapq_payload` attribute is a tuple
+    (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
+     start_pos_xyz, coeff_buf) ready to feed trapq_append_quintic.
+    """
+
+    def __init__(self, toolhead, shape, v_cruise, start_pos_4d, end_pos_4d,
+                 accel=None):
+        self.toolhead = toolhead
+        self.shape = shape
+        self.start_pos = tuple(start_pos_4d)
+        self.end_pos = tuple(end_pos_4d)
+        axes_d = [end_pos_4d[i] - start_pos_4d[i] for i in range(4)]
+        self.axes_d = axes_d
+        # Chord-length axes_r so the LookAheadQueue's set_junction sees a
+        # sensible "direction" for the blend. The true per-axis motion
+        # comes from the quintic polynomial, not axes_r, but outer
+        # lookahead uses it for axis-unit dot products.
+        move_d = math.sqrt(sum(d * d for d in axes_d[:3]))
+        inv = 1.0 / move_d if move_d else 0.0
+        self.axes_r = tuple(d * inv for d in axes_d)
+        self.move_d = shape.arc_length if shape.arc_length > 0.0 else move_d
+        self.accel = accel if accel is not None else toolhead.max_accel
+        self.timing_callbacks = []
+        self.is_kinematic_move = True
+        self.max_cruise_v2 = v_cruise * v_cruise
+        self.max_start_v2 = 0.0
+        self.max_smoothed_v2 = 0.0
+        # All-cruise degenerate profile for D2c's first pass: v_in = v_out =
+        # cruise_v = v_cruise. D7 TOPP will supply a full v(s) profile.
+        (accel_polys, cruise_polys, decel_polys, t_accel_end, t_decel_start,
+         total_t, arc_length) = shape.compose_phase_polynomials(
+            v_in=v_cruise, v_out=v_cruise, cruise_v=v_cruise, a_max=self.accel,
+        )
+        # Pack coeff_buf for trapq_append_quintic (99 doubles).
+        coeff_buf = []
+        for phase in (accel_polys, cruise_polys, decel_polys):
+            for k in range(11):
+                coeff_buf.append(phase[0][k])
+                coeff_buf.append(phase[1][k])
+                coeff_buf.append(phase[2][k])
+        start_pos_xyz = (start_pos_4d[0], start_pos_4d[1], start_pos_4d[2])
+        v_cap_min = (
+            shape.v_cap_min() if hasattr(shape, "v_cap_min") else v_cruise
+        )
+        if not (v_cap_min and math.isfinite(v_cap_min)):
+            v_cap_min = v_cruise
+        self.quintic_trapq_payload = (
+            t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
+            start_pos_xyz, tuple(coeff_buf),
+        )
+        self.min_move_t = total_t
+        self.delta_v2 = 2.0 * self.move_d * self.accel
+        self.smooth_delta_v2 = self.delta_v2
+        self.next_junction_v2 = v_cap_min * v_cap_min if v_cap_min else 0.0
+        self.next_junction_v_capped_to = None
+
+    def limit_speed(self, speed, accel):
+        v2 = speed * speed
+        if v2 < self.max_cruise_v2:
+            self.max_cruise_v2 = v2
+        self.accel = min(self.accel, accel)
+        self.delta_v2 = 2.0 * self.move_d * self.accel
+        self.smooth_delta_v2 = min(self.smooth_delta_v2, self.delta_v2)
+
+    def limit_next_junction_speed(self, speed):
+        v2 = speed * speed
+        self.next_junction_v2 = min(self.next_junction_v2, v2)
+        self.next_junction_v_capped_to = speed
+
+
 class CornerBlender:
     """Second filter stage in the blend pipeline.
 
     Buffers one move; on the next arriving move computes a tangent-arc
     blend and emits [trunc_prev, arc_polyline_moves...] while buffering
     the truncated-next-head as the new candidate prev.
+
+    Plan 5 D2c — once D7 TOPP lands, _emit_blend's polyline loop flips to
+    a single QuinticBlendMove per corner. The flip is gated on TOPP
+    producing a real per-s velocity profile; today the polyline path
+    still ships. The direct-quintic infrastructure (QuinticShape.
+    compose_phase_polynomials, QuinticBlendMove, C-side tagged-union
+    struct move, trapq_append_quintic FFI) is in place and covered by
+    test/test_trapq_quintic.py.
     """
 
     def __init__(self, toolhead, *, move_cls, max_chord_err=None):

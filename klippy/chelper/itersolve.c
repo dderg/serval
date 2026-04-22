@@ -132,14 +132,35 @@ itersolve_gen_steps_range(struct stepper_kinematics *sk, struct move *m
  * Interface functions
  ****************************************************************/
 
-// Check if a move is likely to cause movement on a stepper
+// Check if a move is likely to cause movement on a stepper. For linear
+// moves the axis-unit-direction vector is load-bearing; a zero component
+// means the axis is stationary. For quintic moves the per-axis polynomial
+// coefficients c[1..10] carry velocity/accel/higher-derivative content —
+// if any is non-zero the axis moves. c[0] is the phase-start position and
+// is ignored here.
 static inline int
 check_active(struct stepper_kinematics *sk, struct move *m)
 {
     int af = sk->active_flags;
-    return ((af & AF_X && m->axes_r.x != 0.)
-            || (af & AF_Y && m->axes_r.y != 0.)
-            || (af & AF_Z && m->axes_r.z != 0.));
+    if (likely(m->kind == MOVE_LINEAR)) {
+        return ((af & AF_X && m->u.lin.axes_r.x != 0.)
+                || (af & AF_Y && m->u.lin.axes_r.y != 0.)
+                || (af & AF_Z && m->u.lin.axes_r.z != 0.));
+    }
+    // MOVE_QUINTIC_POLY_T: scan c[1..10] across all three phases.
+    const struct move_quintic_phase *phases[3] = {
+        &m->u.quintic.accel, &m->u.quintic.cruise, &m->u.quintic.decel,
+    };
+    int p, k;
+    for (p = 0; p < 3; ++p) {
+        const struct move_quintic_phase *ph = phases[p];
+        for (k = 1; k < MOVE_QUINTIC_POLY_COEFFS; ++k) {
+            if ((af & AF_X) && ph->c[k].x != 0.0) return 1;
+            if ((af & AF_Y) && ph->c[k].y != 0.0) return 1;
+            if ((af & AF_Z) && ph->c[k].z != 0.0) return 1;
+        }
+    }
+    return 0;
 }
 
 // Generate step times for a range of moves on the trapq
@@ -257,6 +278,9 @@ double __visible
 itersolve_calc_position_from_coord(struct stepper_kinematics *sk
                                    , double x, double y, double z)
 {
+    // memset(0) leaves kind = MOVE_LINEAR (enum value 0 is load-bearing here,
+    // see trapq.h). start_v, half_accel, axes_r all stay 0 → evaluates to
+    // start_pos at any time t.
     struct move m;
     memset(&m, 0, sizeof(m));
     m.start_pos.x = x;

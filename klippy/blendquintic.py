@@ -663,3 +663,201 @@ class QuinticShape:
 
     def polyline(self, chord_tol: float = _DEFAULT_CHORD_TOL) -> list[Vec3]:
         return _segment_quintic(self.Q, chord_tol)
+
+    # ------------------------------------------------------------------
+    # Plan 5 D2c / Task 21 — Python-side quintic(s) ∘ s(t) composition.
+    # ------------------------------------------------------------------
+
+    def _monomial_coeffs_per_axis(self) -> list[list[float]]:
+        """Convert the Bernstein control net Q (6 control points, degree 5)
+        into monomial-basis coefficients per axis.
+
+        For a Bezier of degree n = 5 in parameter u in [0, 1]:
+          B(u) = sum_{i=0..n} C(n,i) * u^i * (1-u)^(n-i) * Q_i
+        Expanding (1-u)^(n-i) in u and regrouping in powers of u gives
+        coefficients a_k (k = 0..n) with
+          a_k = sum_{i=0..k} (-1)^(k-i) * C(n,i) * C(n-i, k-i) * Q_i
+        This is the standard Bernstein -> power-basis change of basis.
+        Since s corresponds to arc-length, not u, we additionally
+        re-parameterise by the constant factor u = s / L where L is the
+        total arc length. That is an approximation (s is not linear in u
+        exactly for a Bezier) but is the natural parameterisation to
+        feed through compose_phase_polynomials when used downstream on
+        degenerate all-cruise profiles, for which the resulting position-
+        in-t error is bounded by the s->t cache's bisect-and-Newton
+        resolution (see _s_to_t_refined). Proper D7 TOPP emission will
+        feed per-s velocity into this composition.
+
+        Returns list of 3 axis coefficient lists (x, y, z), each of
+        length 6 (degrees 0..5). Coefficients are in monomial basis
+        over the parameter u in [0, 1].
+        """
+        Q = self.Q
+        n = 5
+        # Build binomials once.
+        def comb(a, b):
+            if b < 0 or b > a:
+                return 0
+            r = 1
+            for i in range(b):
+                r = r * (a - i) // (i + 1)
+            return r
+        # axis -> list[6] of monomial-basis coefficients
+        out = []
+        for axis in range(3):
+            qa = [Q[i][axis] for i in range(n + 1)]
+            a = [0.0] * (n + 1)
+            for k in range(n + 1):
+                s = 0.0
+                for i in range(k + 1):
+                    sign = -1.0 if ((k - i) & 1) else 1.0
+                    s += sign * comb(n, i) * comb(n - i, k - i) * qa[i]
+                a[k] = s
+            out.append(a)
+        return out
+
+    def compose_phase_polynomials(
+        self,
+        v_in: float,
+        v_out: float,
+        cruise_v: float,
+        a_max: float,
+    ):
+        """Compose the quintic curve position(u) with a trapezoid-in-arc-
+        length velocity profile v(s) to yield per-phase position-in-t
+        polynomial coefficients.
+
+        Returns
+        -------
+        (accel_polys, cruise_polys, decel_polys, t_accel_end, t_decel_start,
+         total_t, arc_length)
+
+        where each *_polys is a list of 3 axis coefficient lists (x, y, z),
+        each a list of length 11 (degrees 0..10) expressing
+            position(t) = sum_k c_k * (t - t_phase_start)^k
+        in phase-local time. Coefficients beyond the natural polynomial
+        degree are zero-padded to 11 so the C-side trapq entry can unpack
+        a uniform layout.
+
+        Approximation (D2c first pass): we treat the quintic's natural
+        Bezier parameter u ∈ [0, 1] as directly proportional to normalised
+        arc length s/L (see _monomial_coeffs_per_axis above). The accel
+        phase has s(t) = v_in * t + 0.5 * a_max * t^2, the cruise phase
+        has s(t) = s_accel_end + cruise_v * (t - t_accel_end), and the
+        decel phase mirrors accel.
+
+        For the **all-cruise degenerate profile** (v_in == v_out ==
+        cruise_v), accel_polys and decel_polys are zero-length phases
+        (t_accel_end == 0 and t_decel_start == total_t). Use this form
+        until D7 TOPP lands.
+        """
+        import numpy as np
+
+        L = self.arc_length
+        if L <= 0.0:
+            # Degenerate — return zero-content phases.
+            zero_coeffs = [[0.0] * 11, [0.0] * 11, [0.0] * 11]
+            return (zero_coeffs, zero_coeffs, zero_coeffs, 0.0, 0.0, 0.0, 0.0)
+        # Bezier -> monomial in u on [0, 1], per-axis.
+        coeffs_u = self._monomial_coeffs_per_axis()  # [3][6]
+        # Build Polynomial objects (in u) per axis.
+        poly_u = [np.polynomial.Polynomial(coeffs_u[ax]) for ax in range(3)]
+        # u(s) = s / L; poly_s(s) = poly_u(s / L). numpy handles this via
+        # composition with an (s / L) Polynomial.
+        u_of_s = np.polynomial.Polynomial([0.0, 1.0 / L])  # 0 + (1/L)*s
+
+        # Compute phase durations from the trapezoid profile.
+        # s_accel_end, t_accel_end
+        if a_max > 0.0:
+            t_accel_end = (cruise_v - v_in) / a_max
+            t_decel_duration = (cruise_v - v_out) / a_max
+        else:
+            t_accel_end = 0.0
+            t_decel_duration = 0.0
+        if t_accel_end < 0.0:
+            t_accel_end = 0.0
+        if t_decel_duration < 0.0:
+            t_decel_duration = 0.0
+        s_accel_end = v_in * t_accel_end + 0.5 * a_max * t_accel_end * t_accel_end
+        s_decel_start = L - (cruise_v * t_decel_duration
+                              - 0.5 * a_max * t_decel_duration * t_decel_duration)
+        if s_decel_start < s_accel_end:
+            # Not enough arc-length for a cruise plateau — collapse to a
+            # symmetric accel+decel with no cruise. For D2c's all-cruise
+            # degenerate bootstrap this branch is never taken; D7 handles
+            # the general case.
+            s_accel_end = s_decel_start = 0.5 * L
+            # Recompute t_accel_end and t_decel_duration from the halved
+            # arc-length.
+            # v_peak^2 = v_in^2 + 2 * a_max * s_accel_end
+            v_peak = math.sqrt(max(v_in * v_in + 2.0 * a_max * s_accel_end,
+                                   v_out * v_out + 2.0 * a_max * (L - s_decel_start)))
+            t_accel_end = (v_peak - v_in) / a_max if a_max > 0.0 else 0.0
+            t_decel_duration = (v_peak - v_out) / a_max if a_max > 0.0 else 0.0
+            cruise_v = v_peak
+        # Cruise-phase duration.
+        s_cruise = s_decel_start - s_accel_end
+        t_cruise = s_cruise / cruise_v if cruise_v > 0.0 else 0.0
+        t_decel_start = t_accel_end + t_cruise
+        total_t = t_decel_start + t_decel_duration
+
+        # s(t) per phase, expressed as numpy.polynomial.Polynomial in
+        # phase-local time delta_t.
+        # accel phase: s_accel(delta_t) = v_in * delta_t + 0.5 * a_max * delta_t^2
+        s_accel = np.polynomial.Polynomial([0.0, v_in, 0.5 * a_max])
+        # cruise phase: s_cruise_local(delta_t) = s_accel_end + cruise_v * delta_t
+        s_cruise_poly = np.polynomial.Polynomial([s_accel_end, cruise_v])
+        # decel phase in phase-local delta_t (starts at t = t_decel_start,
+        # initial velocity cruise_v, accel = -a_max):
+        # s_decel_local(delta_t) = s_decel_start + cruise_v * delta_t
+        #                          - 0.5 * a_max * delta_t^2
+        s_decel_poly = np.polynomial.Polynomial(
+            [s_decel_start, cruise_v, -0.5 * a_max]
+        )
+
+        def _pad(coef, n=11):
+            out = list(coef) + [0.0] * (n - len(coef))
+            return out[:n]
+
+        def _compose(axis_poly_s, phase_s_poly):
+            # phase_s_poly is s(delta_t); axis_poly_s is position(s).
+            # Compose: position(delta_t) = axis_poly_s(phase_s_poly(delta_t)).
+            # numpy.polynomial supports this via Polynomial(np.asarray(p_s.coef))
+            # evaluated with the s polynomial substituted in.
+            composed = axis_poly_s(phase_s_poly)
+            return _pad(composed.coef, 11)
+
+        # position_s_poly per axis = poly_u(u_of_s) — reparam u -> s.
+        position_s = [poly_u[ax](u_of_s) for ax in range(3)]
+
+        accel_polys = [_compose(position_s[ax], s_accel) for ax in range(3)]
+        cruise_polys = [_compose(position_s[ax], s_cruise_poly) for ax in range(3)]
+        decel_polys = [_compose(position_s[ax], s_decel_poly) for ax in range(3)]
+
+        return (
+            accel_polys,
+            cruise_polys,
+            decel_polys,
+            t_accel_end,
+            t_decel_start,
+            total_t,
+            L,
+        )
+
+    def v_cap_min(self) -> float:
+        """Minimum of v_cap_fn over [0, arc_length] sampled at 128 points.
+        Used as the Option Z upstream junction cap — the blend's tightest
+        velocity constraint, fed back to the planner so the previous linear
+        move decelerates into the blend rather than hitting the cap mid-
+        curve.
+        """
+        if self.arc_length <= 0.0:
+            return float("inf")
+        best = float("inf")
+        n = 128
+        for i in range(n + 1):
+            s = (i / n) * self.arc_length
+            v = self.v_cap_fn(s)
+            if v < best:
+                best = v
+        return best

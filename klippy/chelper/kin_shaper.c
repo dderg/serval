@@ -63,10 +63,11 @@ init_shaper(int n, double a[], double t[], struct shaper_pulses *sp)
 static inline double
 get_axis_position(const struct move *m, int axis, double move_time)
 {
-    double axis_r = m->axes_r.axis[axis - 'x'];
-    double start_pos = m->start_pos.axis[axis - 'x'];
-    double move_dist = move_get_distance(m, move_time);
-    return start_pos + axis_r * move_dist;
+    // Dispatch via move_get_coord so quintic moves evaluate their per-phase
+    // polynomial. The linear fast path inside move_get_coord keeps the
+    // start_pos + axes_r * (start_v*t + half_accel*t^2) formula.
+    struct coord c = move_get_coord(m, move_time);
+    return c.axis[axis - 'x'];
 }
 
 static inline double

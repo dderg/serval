@@ -121,32 +121,193 @@ diff_antiderivatives(const smoother_antiderivatives* ad1
     return out;
 }
 
+/****************************************************************
+ * Move-side polynomial extraction: quintic dispatch helpers (D2a)
+ ****************************************************************/
+
+// Return the polynomial coefficients c_k (for axis = 'x'/'y'/'z') expressing
+// position(t) = sum_k out_c[k] * (t - t_phase_start)^k for the phase of move
+// m that contains move_time. For MOVE_LINEAR the move has a single "phase"
+// covering [0, move_t]: position(t) = start_pos + axes_r * (start_v*t +
+// half_accel*t^2) — a degree-2 polynomial in t with phase_start = 0. Higher
+// coefficients are zero. For MOVE_QUINTIC_POLY_T the selected phase's 11
+// stored coefficients are returned directly. Sets *out_phase_start to the
+// phase's absolute-move-local origin time. The output buffer must hold
+// SMOOTHER_NUM_MOMENTS (11) doubles.
+//
+// Note: this helper is used by the generalised integrate_move dispatch for
+// the quintic path. The linear fast-path keeps its pre-D2 3-moment formula
+// for bit-identical hardware parity.
+static inline void
+move_axis_phase_polynomial(const struct move* m, int axis, double move_time,
+                           double out_c[SMOOTHER_NUM_MOMENTS],
+                           double* out_phase_start, double* out_phase_end)
+{
+    int ai = axis - 'x';
+    if (likely(m->kind == MOVE_LINEAR)) {
+        for (int k = 0; k < SMOOTHER_NUM_MOMENTS; ++k)
+            out_c[k] = 0.0;
+        out_c[0] = m->start_pos.axis[ai];
+        out_c[1] = m->u.lin.start_v * m->u.lin.axes_r.axis[ai];
+        out_c[2] = m->u.lin.half_accel * m->u.lin.axes_r.axis[ai];
+        *out_phase_start = 0.0;
+        *out_phase_end = m->move_t;
+        return;
+    }
+    // MOVE_QUINTIC_POLY_T: pick the phase and copy its polynomial directly.
+    const struct move_quintic_phase* ph = &m->u.quintic.accel;
+    double phase_start = 0.0;
+    if (move_time > m->u.quintic.accel.t_end) {
+        phase_start = m->u.quintic.accel.t_end;
+        ph = &m->u.quintic.cruise;
+        if (move_time > m->u.quintic.cruise.t_end) {
+            phase_start = m->u.quintic.cruise.t_end;
+            ph = &m->u.quintic.decel;
+        }
+    }
+    for (int k = 0; k < SMOOTHER_NUM_MOMENTS; ++k)
+        out_c[k] = ph->c[k].axis[ai];
+    *out_phase_start = phase_start;
+    *out_phase_end = ph->t_end;
+}
+
+/****************************************************************
+ * integrate_move / integrate_velocity
+ ****************************************************************/
+
 inline double
 integrate_move(const struct move* m, int axis, double base, double t0
                , const smoother_antiderivatives* s)
 {
-    // Linear-move integrand: position(t) = start + axis_r *
-    //     (start_v * t + half_accel * t^2). Moments 0..2 of the kernel
-    // suffice; m[3..10] stay unused.
-    double axis_r = m->axes_r.axis[axis - 'x'];
-    double start_v = m->start_v * axis_r;
-    double half_accel = m->half_accel * axis_r;
-    // Substitute the integration variable tnew = t0 - t to simplify integrals
-    double accel = 2. * half_accel;
-    base += (half_accel * t0 + start_v) * t0;
-    start_v += accel * t0;
-    return base * s->m[0] - start_v * s->m[1] + half_accel * s->m[2];
+    // Fast path — MOVE_LINEAR keeps the pre-Plan-5 3-moment closed form
+    // bit-identical to the single-polynomial path validated by foundation
+    // tests. `base` is the phase-start position (passed by kin_shaper at
+    // m->start_pos.axis[ai] for linear); on the quintic path we ignore it
+    // because the polynomial c[0] already carries absolute position.
+    if (likely(m->kind == MOVE_LINEAR)) {
+        double axis_r = m->u.lin.axes_r.axis[axis - 'x'];
+        double start_v = m->u.lin.start_v * axis_r;
+        double half_accel = m->u.lin.half_accel * axis_r;
+        // Substitute tnew = t0 - t. Integrand in tnew: base + start_v*(t0-tnew)
+        // + half_accel*(t0-tnew)^2 = (base + start_v*t0 + half_accel*t0^2)
+        // - (start_v + 2*half_accel*t0)*tnew + half_accel*tnew^2.
+        double accel = 2. * half_accel;
+        base += (half_accel * t0 + start_v) * t0;
+        start_v += accel * t0;
+        return base * s->m[0] - start_v * s->m[1] + half_accel * s->m[2];
+    }
+    // MOVE_QUINTIC_POLY_T — generalised 11-moment integration against a
+    // per-phase polynomial position(t). The phase containing move-local time
+    // t0 is dispatched (single phase per call is acceptable because the
+    // outer range_integrate in kin_shaper.c already splits the integration
+    // window at move boundaries — phase boundaries within a single move are
+    // expected to fall inside move_t much less often than the move-boundary
+    // split frequency, and treating the phase enclosing t0 as a uniform
+    // degree-10 polynomial is a ≤ 0.5% position error per spec D2a's
+    // acceptable-fallback clause).
+    //
+    // Let x(t) = sum_k c_k * (t - t_ps)^k.  Substitute u = t0 - t (the
+    // smoother's integration variable u = tnew, so t = t0 - u). Then
+    //   x(t) = sum_k c_k * (t0 - t_ps - u)^k
+    //        = sum_k c_k * sum_j C(k,j) * (t0 - t_ps)^(k-j) * (-u)^j
+    // Swap sums:
+    //   x(t) = sum_j (-1)^j * (sum_k>=j c_k * C(k,j) * (t0 - t_ps)^(k-j)) * u^j
+    // Integrating against the smoother's moments m_j = ∫ u^j w(u) du gives
+    //   ∫ x(t(u)) w(u) du = sum_j (-1)^j * a_j * m_j
+    // where a_j = sum_{k>=j} c_k * C(k,j) * (t0 - t_ps)^(k-j).
+    double c[SMOOTHER_NUM_MOMENTS];
+    double phase_start, phase_end;
+    (void)base;
+    move_axis_phase_polynomial(m, axis, t0, c, &phase_start, &phase_end);
+    double delta = t0 - phase_start;
+    // Precompute powers of delta for k=0..10.
+    double dpow[SMOOTHER_NUM_MOMENTS];
+    dpow[0] = 1.0;
+    for (int k = 1; k < SMOOTHER_NUM_MOMENTS; ++k)
+        dpow[k] = dpow[k-1] * delta;
+    // Pascal's triangle C(k, j) up to (10, 10).
+    static const int binom[SMOOTHER_NUM_MOMENTS][SMOOTHER_NUM_MOMENTS] = {
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 3, 3, 1, 0, 0, 0, 0, 0, 0, 0},
+        {1, 4, 6, 4, 1, 0, 0, 0, 0, 0, 0},
+        {1, 5, 10, 10, 5, 1, 0, 0, 0, 0, 0},
+        {1, 6, 15, 20, 15, 6, 1, 0, 0, 0, 0},
+        {1, 7, 21, 35, 35, 21, 7, 1, 0, 0, 0},
+        {1, 8, 28, 56, 70, 56, 28, 8, 1, 0, 0},
+        {1, 9, 36, 84, 126, 126, 84, 36, 9, 1, 0},
+        {1, 10, 45, 120, 210, 252, 210, 120, 45, 10, 1},
+    };
+    double result = 0.0;
+    double sign_j = 1.0; // (-1)^j
+    for (int j = 0; j < SMOOTHER_NUM_MOMENTS; ++j) {
+        double a_j = 0.0;
+        for (int k = j; k < SMOOTHER_NUM_MOMENTS; ++k) {
+            double c_k = c[k];
+            if (c_k == 0.0) continue;
+            a_j += c_k * (double)binom[k][j] * dpow[k - j];
+        }
+        result += sign_j * a_j * s->m[j];
+        sign_j = -sign_j;
+    }
+    return result;
 }
 
 inline double
 integrate_velocity(const struct move* m, int axis, double t0
                    , const smoother_antiderivatives* s)
 {
-    double axis_r = m->axes_r.axis[axis - 'x'];
-    double start_v = m->start_v * axis_r;
-    double accel = 2. * m->half_accel * axis_r;
-    start_v += accel * t0;
-    return start_v * s->m[0] - accel * s->m[1];
+    if (likely(m->kind == MOVE_LINEAR)) {
+        double axis_r = m->u.lin.axes_r.axis[axis - 'x'];
+        double start_v = m->u.lin.start_v * axis_r;
+        double accel = 2. * m->u.lin.half_accel * axis_r;
+        start_v += accel * t0;
+        return start_v * s->m[0] - accel * s->m[1];
+    }
+    // MOVE_QUINTIC_POLY_T — v(t) = dx/dt is the derivative of the per-axis
+    // position polynomial. If position(t) = sum_k c_k * (t - t_ps)^k then
+    // v(t) = sum_k (k+1)*c_{k+1} * (t - t_ps)^k, degree down by one.
+    // Reuse the same binomial expansion machinery as integrate_move, but
+    // feed in derived coefficients v_k = (k+1)*c_{k+1}.
+    double c[SMOOTHER_NUM_MOMENTS];
+    double phase_start, phase_end;
+    move_axis_phase_polynomial(m, axis, t0, c, &phase_start, &phase_end);
+    double v[SMOOTHER_NUM_MOMENTS];
+    for (int k = 0; k < SMOOTHER_NUM_MOMENTS - 1; ++k)
+        v[k] = (double)(k + 1) * c[k + 1];
+    v[SMOOTHER_NUM_MOMENTS - 1] = 0.0;
+    double delta = t0 - phase_start;
+    double dpow[SMOOTHER_NUM_MOMENTS];
+    dpow[0] = 1.0;
+    for (int k = 1; k < SMOOTHER_NUM_MOMENTS; ++k)
+        dpow[k] = dpow[k-1] * delta;
+    static const int binom[SMOOTHER_NUM_MOMENTS][SMOOTHER_NUM_MOMENTS] = {
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 3, 3, 1, 0, 0, 0, 0, 0, 0, 0},
+        {1, 4, 6, 4, 1, 0, 0, 0, 0, 0, 0},
+        {1, 5, 10, 10, 5, 1, 0, 0, 0, 0, 0},
+        {1, 6, 15, 20, 15, 6, 1, 0, 0, 0, 0},
+        {1, 7, 21, 35, 35, 21, 7, 1, 0, 0, 0},
+        {1, 8, 28, 56, 70, 56, 28, 8, 1, 0, 0},
+        {1, 9, 36, 84, 126, 126, 84, 36, 9, 1, 0},
+        {1, 10, 45, 120, 210, 252, 210, 120, 45, 10, 1},
+    };
+    double result = 0.0;
+    double sign_j = 1.0;
+    for (int j = 0; j < SMOOTHER_NUM_MOMENTS; ++j) {
+        double a_j = 0.0;
+        for (int k = j; k < SMOOTHER_NUM_MOMENTS; ++k) {
+            double v_k = v[k];
+            if (v_k == 0.0) continue;
+            a_j += v_k * (double)binom[k][j] * dpow[k - j];
+        }
+        result += sign_j * a_j * s->m[j];
+        sign_j = -sign_j;
+    }
+    return result;
 }
 
 /****************************************************************

@@ -106,15 +106,24 @@ class DumpTrapQ:
         self.batch_bulk = bulk_sensor.BatchBulkHelper(
             printer, self._process_batch
         )
+        # Plan 5 D2b / Task 17: schema v2 adds the `kind` field. Consumers
+        # (Mainsail, Fluidd, Moonraker, offline sim tooling) that parse this
+        # payload must version-guard on `schema_version == 2` + the `kind`
+        # tuple element. kind == 0 is the existing linear trapezoid; kind == 1
+        # is a quintic blend whose `start_velocity` / `acceleration` /
+        # `direction` fields are a chord-linear projection (a quintic cannot
+        # be reconstructed from the linear-move fields alone).
         api_resp = {
+            "schema_version": 2,
             "header": (
                 "time",
                 "duration",
+                "kind",
                 "start_velocity",
                 "acceleration",
                 "start_position",
                 "direction",
-            )
+            ),
         }
         self.batch_bulk.add_mux_endpoint(
             "motion_report/dump_trapq", "name", name, api_resp
@@ -142,13 +151,16 @@ class DumpTrapQ:
             return
         out = ["Dumping trapq '%s' %d moves:" % (self.name, len(data))]
         for i, m in enumerate(data):
+            kind_str = "lin" if m.kind == 0 else ("qui" if m.kind == 1
+                                                  else "k=%d" % m.kind)
             out.append(
-                "move %d: pt=%.6f mt=%.6f sv=%.6f a=%.6f"
+                "move %d: pt=%.6f mt=%.6f %s sv=%.6f a=%.6f"
                 " sp=(%.6f,%.6f,%.6f) ar=(%.6f,%.6f,%.6f)"
                 % (
                     i,
                     m.print_time,
                     m.move_t,
+                    kind_str,
                     m.start_v,
                     m.accel,
                     m.start_x,
@@ -185,6 +197,7 @@ class DumpTrapQ:
             (
                 m.print_time,
                 m.move_t,
+                int(m.kind),
                 m.start_v,
                 m.accel,
                 (m.start_x, m.start_y, m.start_z),

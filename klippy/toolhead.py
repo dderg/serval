@@ -469,7 +469,29 @@ class ToolHead:
             self._calc_print_time()
         # Queue moves into trapezoid motion queue (trapq)
         next_move_time = self.print_time
+        ffi_main, ffi_lib = chelper.get_ffi()
         for move in moves:
+            # Plan 5 D2c — quintic blend moves carry a pre-composed per-phase
+            # position-in-t polynomial payload. Route through
+            # trapq_append_quintic instead of the linear trapq_append path.
+            qpayload = getattr(move, "quintic_trapq_payload", None)
+            if qpayload is not None:
+                (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
+                 start_pos_xyz, coeff_tuple) = qpayload
+                coeff_buf = ffi_main.new("double[99]", list(coeff_tuple))
+                ffi_lib.trapq_append_quintic(
+                    self.trapq, next_move_time,
+                    t_accel_end, t_decel_start, total_t,
+                    arc_length, v_cap_min,
+                    start_pos_xyz[0], start_pos_xyz[1], start_pos_xyz[2],
+                    coeff_buf,
+                )
+                if move.axes_d[3]:
+                    self.extruder.move(next_move_time, move)
+                next_move_time = next_move_time + total_t
+                for cb in move.timing_callbacks:
+                    cb(next_move_time)
+                continue
             if move.is_kinematic_move:
                 self.trapq_append(
                     self.trapq,
