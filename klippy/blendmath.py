@@ -183,6 +183,69 @@ def suppressed_junction_v(
     return v_j
 
 
+def should_suppress_quintic(
+    prev_move,
+    next_move,
+    corner_deviation: float,
+    shape,
+    toolhead,
+) -> bool:
+    """Decide whether to skip the quintic blend and run sharp-V under
+    the input shaper instead. Two-clause rule:
+      1. Shaper-smeared sharp-V deviation <= corner_deviation (path tolerance).
+      2. Sharp-V recovery time (2·v·sin_half/a_max) <= blend traversal time
+         at v_cap_fn(arc_length/2) (time).
+    Suppress only when BOTH hold.
+
+    Returns True  => drop the blend; caller runs sharp-V at a
+                     suppressed_junction_v cap.
+    Returns False => keep the blend (either tolerance or time fails).
+
+    Derivation: docs/superpowers/plans/plan4-derivations/quintic_suppression.md.
+    """
+    # Defensive: no shape — nothing to suppress or keep.
+    if shape is None:
+        return True
+    # Extruder-only moves have no XYZ geometry; nothing to blend.
+    if (prev_move.axes_d[0] == 0.0 and prev_move.axes_d[1] == 0.0
+            and prev_move.axes_d[2] == 0.0):
+        return True
+    if (next_move.axes_d[0] == 0.0 and next_move.axes_d[1] == 0.0
+            and next_move.axes_d[2] == 0.0):
+        return True
+    theta = getattr(shape, "theta", 0.0)
+    sin_half = math.sin(0.5 * theta)
+    if sin_half < COLLINEAR_EPS:
+        return True
+    sigma_T = _sigma_T_max_from_toolhead(toolhead)
+    if sigma_T <= 0.0:
+        # No impulse shaper loaded -> no equivalent sharp-V claim; keep
+        # the blend. (Matches suppressed_junction_v's None branch.)
+        return False
+    v_prev = math.sqrt(max(0.0, prev_move.max_cruise_v2))
+    v_next = math.sqrt(max(0.0, next_move.max_cruise_v2))
+    v = min(v_prev, v_next)
+    if v <= 0.0:
+        return True                                       # v -> 0 sanity
+    a_max = min(prev_move.accel, next_move.accel)
+    if a_max <= 0.0:
+        return False
+    # Clause 1: path tolerance.
+    dev_sharpV = 2.0 * v * sin_half * sigma_T
+    if dev_sharpV > corner_deviation:
+        return False
+    # Clause 2: time.
+    t_sharpV = 2.0 * v * sin_half / a_max
+    arc_len = getattr(shape, "arc_length", 0.0)
+    if arc_len <= 0.0:
+        return True                                       # degenerate
+    v_mid = shape.v_cap_fn(0.5 * arc_len)
+    if not math.isfinite(v_mid) or v_mid <= 0.0:
+        return False
+    t_blend = arc_len / v_mid
+    return t_sharpV <= t_blend
+
+
 def _compute_A_axis_smooth_is(shaper_type: str, shaper_freq: float,
                               damping_ratio: float,
                               target_smoothing: float = 0.12) -> float:

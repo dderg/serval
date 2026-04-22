@@ -585,3 +585,123 @@ def test_extract_shapers_target_smoothing_positive_keeps_SIS():
     snaps = blendmath._extract_shapers(MockToolhead())
     assert len(snaps) == 1
     assert snaps[0].A_axis > 0.0
+# ---------------------------------------------------------------------------
+
+class _SuppressShape:
+    """Minimal shape for suppression tests."""
+    def __init__(self, theta=math.pi / 2, arc_length=0.5, v_mid=200.0):
+        self.theta = theta
+        self.arc_length = arc_length
+        self._v_mid = v_mid
+
+    def v_cap_fn(self, s):
+        return self._v_mid
+
+
+def _suppress_move(p0, p1, cruise_v=100.0, accel=10000.0):
+    """Minimal move for suppression tests; carries axes_d + axes_r."""
+    dx = [p1[i] - p0[i] for i in range(3)]
+    d = math.sqrt(sum(v * v for v in dx))
+
+    class _M:
+        pass
+
+    m = _M()
+    m.axes_d = [*dx, 0.0]
+    if d > 0.0:
+        m.axes_r = [x / d for x in dx] + [0.0]
+    else:
+        m.axes_r = [0.0, 0.0, 0.0, 0.0]
+    m.max_cruise_v2 = cruise_v * cruise_v
+    m.accel = accel
+    m.move_d = d
+    return m
+
+
+# Toolhead with NO shaper (printer.lookup_object returns None).
+class _THNoShaper:
+    class _Printer:
+        def lookup_object(self, name, default=None):
+            return default
+    printer = _Printer()
+    corner_deviation = 0.1
+
+
+# Toolhead with MZV @ 40 Hz, damping 0.05 — σ_T ≈ 0.01 s.
+class _THWithMzv:
+    class _ShaperParams:
+        shaper_type = "mzv"
+        shaper_freq = 40.0
+        damping_ratio = 0.05
+
+    class _AxisShaper:
+        def __init__(self, axis):
+            self._axis = axis
+
+        def get_axis(self):
+            return self._axis
+
+        @property
+        def params(self):
+            outer = _THWithMzv._ShaperParams()
+            return outer
+
+    class _IS:
+        target_smoothing = None
+
+        def get_shapers(self):
+            return [_THWithMzv._AxisShaper("x"), _THWithMzv._AxisShaper("y")]
+
+    class _Printer:
+        def lookup_object(self, name, default=None):
+            if name == "input_shaper":
+                return _THWithMzv._IS()
+            return default
+
+    printer = _Printer()
+    corner_deviation = 0.1
+
+
+def test_should_suppress_quintic_shape_none_returns_true():
+    """shape=None → always suppress (no blend to keep)."""
+    prev = _suppress_move((0, 0, 0), (10, 0, 0))
+    nxt = _suppress_move((10, 0, 0), (10, 10, 0))
+    assert blendmath.should_suppress_quintic(prev, nxt, 0.1, None, _THWithMzv()) is True
+
+
+def test_should_suppress_quintic_extruder_only_prev_returns_true():
+    """Extruder-only prev (XYZ all zero) → True (nothing to blend)."""
+    prev = _suppress_move((0, 0, 0), (0, 0, 0))
+    prev.axes_d[3] = 1.0          # extruder-only motion
+    nxt = _suppress_move((0, 0, 0), (10, 0, 0))
+    shape = _SuppressShape()
+    assert blendmath.should_suppress_quintic(prev, nxt, 0.1, shape, _THWithMzv()) is True
+
+
+def test_should_suppress_quintic_no_shaper_returns_false():
+    """No impulse shaper → σ_T=0 → no sharp-V claim → keep blend (False)."""
+    prev = _suppress_move((0, 0, 0), (10, 0, 0), cruise_v=200.0)
+    nxt = _suppress_move((10, 0, 0), (10, 10, 0), cruise_v=200.0)
+    shape = _SuppressShape()
+    assert blendmath.should_suppress_quintic(prev, nxt, 0.1, shape, _THNoShaper()) is False
+
+
+def test_should_suppress_quintic_high_v_fails_clause1():
+    """High speed → shaper-smeared deviation > cd → clause 1 fails → False."""
+    # MZV @ 40 Hz → σ_T ≈ 0.01 s.  At v=500, θ=π/2:
+    #   dev = 2·500·sin(π/4)·0.01 ≈ 7.07 >> cd=0.1 → False.
+    prev = _suppress_move((0, 0, 0), (10, 0, 0), cruise_v=500.0)
+    nxt = _suppress_move((10, 0, 0), (10, 10, 0), cruise_v=500.0)
+    shape = _SuppressShape(theta=math.pi / 2, arc_length=1.06, v_mid=224.0)
+    assert blendmath.should_suppress_quintic(prev, nxt, 0.1, shape, _THWithMzv()) is False
+
+
+def test_should_suppress_quintic_slow_speed_both_clauses_pass():
+    """At v=10, θ=π/2, cd=0.5, blend arc_length=1.06, v_mid=224:
+    clause 1: dev=2·10·sin(π/4)·0.01≈0.141 ≤ 0.5 → pass
+    clause 2: t_V=2·10·sin(π/4)/10000≈0.00141 s ≤ t_B=1.06/224≈0.00473 s → pass
+    → suppress=True."""
+    prev = _suppress_move((0, 0, 0), (10, 0, 0), cruise_v=10.0, accel=10000.0)
+    nxt = _suppress_move((10, 0, 0), (10, 10, 0), cruise_v=10.0, accel=10000.0)
+    shape = _SuppressShape(theta=math.pi / 2, arc_length=1.06, v_mid=224.0)
+    assert blendmath.should_suppress_quintic(prev, nxt, 0.5, shape, _THWithMzv()) is True
