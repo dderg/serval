@@ -15,7 +15,7 @@ from . import extruder_smoother
 # Maximum pieces per smoother kernel. Mirrors SMOOTHER_MAX_PIECES in
 # klippy/chelper/integrate.h. Bumping this requires a matching C change.
 _FFI_MAX_PIECES = 9
-# Bytes per piece in the flat FFI buffer: [t_start, t_end, c_0..c_5] = 8
+# Doubles per piece in the flat FFI buffer: [t_start, t_end, c_0..c_5] = 8
 # doubles. Mirrors struct smoother_piece coeff layout in integrate.h.
 _FFI_DOUBLES_PER_PIECE = 8
 
@@ -42,6 +42,21 @@ def _marshal_pieces_to_buffer(ffi_main, C_pieces):
         for k in range(6):
             buf[base + 2 + k] = float(coeffs[k]) if k < len(coeffs) else 0.0
     return n_pieces, buf
+
+
+def _raise_migration_error(error_ctor, retired_name, replacement):
+    """Raise the standard smooth_* -> bs* migration message.
+
+    Shared by all three smooth_* entry points (config-load
+    TypedInputSmootherParams validation, ShaperFactory.create_shaper,
+    ShaperFactory.update_shaper) so the user-visible wording stays in a
+    single place.
+    """
+    raise error_ctor(
+        "shaper_type '%s' was replaced in Magnum Opus with the "
+        "cardinal B-spline chain family. Use shaper_type = '%s' "
+        "for equivalent behavior." % (retired_name, replacement)
+    )
 
 
 def parse_float_list(list_str):
@@ -338,11 +353,7 @@ class TypedInputSmootherParams:
             return
         hint = shaper_defs.RETIRED_SMOOTHER_MIGRATION.get(smoother_type)
         if hint is not None:
-            raise error_ctor(
-                "shaper_type '%s' was replaced in Magnum Opus with the "
-                "cardinal B-spline chain family. Use shaper_type = '%s' "
-                "for equivalent behavior." % (smoother_type, hint)
-            )
+            _raise_migration_error(error_ctor, smoother_type, hint)
         raise error_ctor("Unsupported shaper type: %s" % (smoother_type,))
 
     def get_type(self):
@@ -575,11 +586,7 @@ class ShaperFactory:
         # Plan 5 migration: retired smooth_* names get a friendly error.
         hint = shaper_defs.RETIRED_SMOOTHER_MIGRATION.get(shaper_type)
         if hint is not None:
-            raise config.error(
-                "shaper_type '%s' was replaced in Magnum Opus with the "
-                "cardinal B-spline chain family. Use shaper_type = '%s' "
-                "for equivalent behavior." % (shaper_type, hint)
-            )
+            _raise_migration_error(config.error, shaper_type, hint)
         shaper = self._create_shaper(axis, shaper_type, config)
         if shaper is None:
             raise config.error("Unsupported shaper type '%s'" % (shaper_type,))
@@ -597,11 +604,7 @@ class ShaperFactory:
         # below masks it as "Unsupported shaper type".
         hint = shaper_defs.RETIRED_SMOOTHER_MIGRATION.get(shaper_type)
         if hint is not None:
-            raise gcmd.error(
-                "shaper_type '%s' was replaced in Magnum Opus with the "
-                "cardinal B-spline chain family. Use shaper_type = '%s' "
-                "for equivalent behavior." % (shaper_type, hint)
-            )
+            _raise_migration_error(gcmd.error, shaper_type, hint)
         try:
             shaper.update(shaper_type, gcmd)
             return shaper

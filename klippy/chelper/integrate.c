@@ -2,7 +2,7 @@
 //
 // Copyright (C) 2019-2020  Kevin O'Connor <kevin@koconnor.net>
 // Copyright (C) 2020-2023  Dmitry Butyugin <dmbutyugin@google.com>
-// Copyright (C) 2026       Magnum Opus foundation (Plan 5 D1)
+// Copyright (C) 2026       Magnum Opus foundation
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
