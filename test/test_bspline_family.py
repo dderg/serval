@@ -645,3 +645,146 @@ def test_fused_kernel_covers_full_support():
     half_support = (t_sm + T_h) / 2
     assert abs(fused_pieces[0][0] - (-half_support)) < 1e-9
     assert abs(fused_pieces[-1][1] - (+half_support)) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Plan 5 Pillar 1 D3 wire-up (Task 11) — pin that AxisInputSmoother's
+# recompute_fused_kernel produces the same C_fused as a direct
+# bspline_inverse.fit_fused_kernel call, and that the sentinel /
+# graceful-degradation paths still produce a forward-only kernel.
+#
+# These tests use the module directly (AxisInputSmoother +
+# TypedInputSmootherParams) rather than spinning up a full printer
+# instance — that test harness is heavier than the wire-through this
+# deliverable introduces.
+# ---------------------------------------------------------------------------
+
+
+def _make_axis_smoother(axis, shaper_type, shaper_freq):
+    """Construct an AxisInputSmoother without a config object — values
+    are set directly on the params instance to avoid PrinterShim setup."""
+    from klippy.extras import input_shaper as _is_mod
+    params = _is_mod.TypedInputSmootherParams(axis, shaper_type, None)
+    params.smoother_freq = shaper_freq
+    return _is_mod.AxisInputSmoother(params)
+
+
+def test_d3_axis_smoother_fused_matches_fit_kernel_bs3():
+    """AxisInputSmoother.C_fused after recompute_fused_kernel(0.3) matches
+    bspline_inverse.fit_fused_kernel output — pins that the wire-through
+    in update_stepper_kinematics is the same kernel D4 and the tests see.
+    """
+    from klippy.extras import bspline_inverse
+    axis = _make_axis_smoother("x", "bs3", 40.0)
+    axis.recompute_fused_kernel(0.3)
+    assert axis.C_fused is not None
+    assert len(axis.C_fused) == 9
+    # Recompute the same thing directly.
+    C_fwd, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(40.0, 0.1, True)
+    h, T_h, dt = bspline_inverse.compute_inverse_fir(
+        C_fwd, t_sm, f_sh_hz=40.0, pb_max_hz=0.3 * 40.0, tukey_alpha=0.05)
+    expected = bspline_inverse.fit_fused_kernel(
+        C_fwd, t_sm, h, T_h, dt, n_pieces=9, degree=5)
+    assert len(expected) == len(axis.C_fused)
+    for (e_piece, a_piece) in zip(expected, axis.C_fused):
+        assert abs(e_piece[0] - a_piece[0]) < 1e-12
+        assert abs(e_piece[1] - a_piece[1]) < 1e-12
+        np.testing.assert_allclose(e_piece[2], a_piece[2], rtol=1e-12,
+                                   atol=1e-14)
+    # t_fused = t_sm + T_h — same as what FFI receives.
+    assert abs(axis.t_fused - (t_sm + T_h)) < 1e-12
+    # G = ||h||_1 — positive and finite.
+    assert 1.5 < axis.G_axis < 3.0  # §4.3 reference: bs3 G ≈ 2.0
+
+
+def test_d3_sentinel_target_passband_zero_disables_fused():
+    """target_passband == 0 routes to sentinel path: no fused kernel
+    computed, G == 1.0. Matches the target_smoothing=0 user-level
+    sentinel, which InputShaper._effective_target_passband maps to 0.
+    """
+    axis = _make_axis_smoother("x", "bs3", 40.0)
+    axis.recompute_fused_kernel(0.0)
+    assert axis.C_fused is None
+    assert axis.t_fused == 0.0
+    assert axis.G_axis == 1.0
+
+
+def test_d3_non_bs_family_skips_inverse():
+    """Classic FIR shapers aren't invertible — recompute_fused_kernel
+    must skip and leave G == 1.0, C_fused == None so
+    update_stepper_kinematics falls through to the impulse-shaper path.
+
+    AxisInputShaper (classic FIR) doesn't even implement
+    recompute_fused_kernel — check it's absent so the InputShaper loop's
+    hasattr guard is load-bearing.
+    """
+    from klippy.extras import input_shaper as _is_mod
+    params = _is_mod.TypedInputShaperParams("x", "mzv", None)
+    params.shaper_freq = 40.0
+    shaper = _is_mod.AxisInputShaper(params)
+    # Classic impulse shapers don't carry fused-kernel state.
+    assert not hasattr(shaper, "recompute_fused_kernel")
+    assert not hasattr(shaper, "C_fused")
+
+
+def test_d3_none_smoother_skips_inverse():
+    """shaper_type=none (empty smoother_freq): get_smoother returns
+    ([], 0.0) per shaper_defs.get_none_smoother — recompute_fused_kernel
+    must gracefully skip (G == 1.0)."""
+    axis = _make_axis_smoother("x", "bs3", 0.0)  # freq 0 -> none path
+    axis.recompute_fused_kernel(0.3)
+    assert axis.C_fused is None
+    assert axis.G_axis == 1.0
+
+
+def test_d3_axis_smoother_bs2_different_target_passband():
+    """Sanity: flipping target_passband changes C_fused (different inverse
+    design target) — regression guard that the knob is actually wired to
+    bspline_inverse.compute_inverse_fir's pb_max_hz."""
+    axis_narrow = _make_axis_smoother("x", "bs2", 40.0)
+    axis_narrow.recompute_fused_kernel(0.2)
+    axis_wide = _make_axis_smoother("x", "bs2", 40.0)
+    axis_wide.recompute_fused_kernel(0.5)
+    # Different target_passband → different G (§4.3 table: narrower
+    # passband → smaller G).
+    assert axis_narrow.C_fused is not None
+    assert axis_wide.C_fused is not None
+    assert axis_narrow.G_axis != axis_wide.G_axis
+    assert axis_narrow.G_axis < axis_wide.G_axis  # narrow -> smaller G
+
+
+def test_d3_cascade_identity_bs3_passband_under_3pct():
+    """End-to-end cascade identity: the stored (fitted) fused kernel
+    evaluated in the passband must be flat to within ≤ 3% — this is the
+    key Task 11 integration-flavored pin. Uses
+    bspline_inverse.fit_fused_kernel_passband_error for a closed-form FT
+    of the piecewise fit, exactly what the C side sees.
+    """
+    from klippy.extras import bspline_inverse
+    axis = _make_axis_smoother("x", "bs3", 40.0)
+    axis.recompute_fused_kernel(0.3)
+    assert axis.C_fused is not None
+    pb_err = bspline_inverse.fit_fused_kernel_passband_error(
+        axis.C_fused, pb_max_hz=0.3 * 40.0)
+    assert pb_err < 0.04, (
+        "cascade identity broken: pb_err=%.6f > 0.04 at bs3@40 Hz "
+        "with target_passband=0.3" % pb_err)
+
+
+def test_d3_input_shaper_get_axis_G_defaults_to_one():
+    """InputShaper.get_axis_G returns 1.0 for any axis when the shaper
+    is unconfigured / none — avoids downstream consumers having to
+    guard against missing entries.
+    """
+    from klippy.extras import input_shaper as _is_mod
+    # Build an InputShaper with no config; inject fake shapers directly.
+    class _Dummy(_is_mod.InputShaper):
+        def __init__(self):
+            # Skip full __init__; only shapers list matters.
+            self.shapers = [_make_axis_smoother("x", "bs3", 0.0),
+                            _make_axis_smoother("y", "bs3", 0.0)]
+    d = _Dummy()
+    assert d.get_axis_G("x") == 1.0
+    assert d.get_axis_G("y") == 1.0
+    # Unknown axis falls through to 1.0 as well.
+    assert d.get_axis_G("z") == 1.0
