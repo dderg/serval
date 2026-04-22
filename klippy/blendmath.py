@@ -346,12 +346,24 @@ def _extract_shapers(toolhead):
                                                target_smoothing=target or 0.12)
         else:
             A_axis = 0.0
+        # Plan 5 Pillar 1 D4: carry ‖h_axis‖₁ for the saturation cap.
+        # Prefer AxisInputSmoother.G_axis (populated by
+        # recompute_fused_kernel); fall back to input_shaper.get_axis_G
+        # for axes that don't live on a smoother object. Both paths
+        # return 1.0 when no feedforward inverse is wired.
+        axis_char = axis_shaper.get_axis()
+        inverse_G = float(getattr(axis_shaper, "G_axis", 1.0) or 1.0)
+        if inverse_G == 1.0:
+            get_axis_G = getattr(is_obj, "get_axis_G", None)
+            if callable(get_axis_G):
+                inverse_G = float(get_axis_G(axis_char) or 1.0)
         snaps.append(blendshaper.AxisShaperSnapshot(
-            axis=axis_shaper.get_axis(),
+            axis=axis_char,
             shaper_type=shaper_type,
             shaper_freq=freq,
             damping_ratio=damping_ratio,
             A_axis=A_axis,
+            inverse_G=inverse_G,
         ))
     return snaps
 

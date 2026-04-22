@@ -31,6 +31,14 @@ class AxisShaperSnapshot:
     shaper_freq: float
     damping_ratio: float
     A_axis: float
+    # L¹ norm of this axis' feedforward inverse kernel, ‖h_axis‖₁.
+    # Consumed by Plan 5 Pillar 1 D4 (QuinticShape.v_cap_fn) to tighten
+    # the centripetal cap via G_worst(s) = max_axes G_axis · (|proj_t| +
+    # |proj_n|). Defaults to 1.0 (identity cascade) so the cap reduces to
+    # the pre-D4 form whenever the axis has no inverse wired — classic
+    # FIR, disabled shaper, target_smoothing=0 sentinel, or axes without
+    # `recompute_fused_kernel` support.
+    inverse_G: float = 1.0
 
 
 @dataclass(frozen=True)

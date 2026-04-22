@@ -231,6 +231,55 @@ _SHAPER_SAMPLE_N_DEFAULT = 50
 # 2D blend plane normal — all quintic blends are in the XY plane.
 _PLANE_NORMAL: Tuple[float, float, float] = (0.0, 0.0, 1.0)
 
+# Axis unit vectors for the per-s saturation cap (Plan 5 Pillar 1 D4).
+# Keyed by AxisShaperSnapshot.axis character. Extruder ('e') has no
+# geometric XY axis and is intentionally absent — the saturation cap
+# treats only the Cartesian (X, Y, Z) motion; extruder saturation acts
+# downstream via PA, not centripetal.
+_AXIS_UNIT_VECTORS = {
+    "x": (1.0, 0.0, 0.0),
+    "y": (0.0, 1.0, 0.0),
+    "z": (0.0, 0.0, 1.0),
+}
+
+
+def _compute_G_worst(shapers, tan, nrm) -> float:
+    """Per-s, orientation-dependent saturation factor.
+
+    Returns
+
+        G_worst = max over Cartesian shaper axes of
+                    G_axis · (|t̂·ê_axis| + |n̂·ê_axis|).
+
+    Falls back to 1.0 when no shapers are provided or none of them map
+    to a Cartesian axis (so v_cent collapses to the pre-D4 form).
+
+    Derivation: per_axis_saturation_derivation.md — independent v̇ and
+    v²κ caps under the L¹-L∞ convolution bound give the sum-of-
+    projections factor, tight everywhere (√2 at diagonal, 1 at axis-
+    aligned).
+    """
+    if not shapers:
+        return 1.0
+    best = 0.0
+    for snap in shapers:
+        e_axis = _AXIS_UNIT_VECTORS.get(snap.axis)
+        if e_axis is None:
+            continue                                   # extruder, skip
+        G_axis = getattr(snap, "inverse_G", 1.0)
+        if G_axis <= 0.0:
+            G_axis = 1.0
+        proj_t = abs(tan[0] * e_axis[0] + tan[1] * e_axis[1]
+                     + tan[2] * e_axis[2])
+        proj_n = abs(nrm[0] * e_axis[0] + nrm[1] * e_axis[1]
+                     + nrm[2] * e_axis[2])
+        factor = G_axis * (proj_t + proj_n)
+        if factor > best:
+            best = factor
+    if best <= 0.0:
+        return 1.0
+    return best
+
 
 def _shaper_cap_dense(Q, shapers, n: int = _SHAPER_SAMPLE_N_DEFAULT) -> float:
     """Min of the shaper entry-step velocity cap over n+1 uniform t-samples.
@@ -570,6 +619,20 @@ class QuinticShape:
         """Velocity limit curve V_lim(s) — centripetal + shaper + rotation-jerk.
 
         Extruder cap comes in plan 4 as a wrapper stage, not here.
+
+        Plan 5 Pillar 1 D4 — saturation cap: the centripetal term is
+        tightened by the per-s, orientation-dependent factor
+
+            G_worst(s) = max over shaped axes of
+                         G_axis · (|proj_t(s)| + |proj_n(s)|)
+
+        where G_axis = ‖h_axis‖₁ (AxisShaperSnapshot.inverse_G) and
+        proj_t, proj_n are the Frenet projections of the axis onto
+        t̂(s) and n̂(s). When no feedforward inverse is wired for any
+        axis (G_axis == 1 everywhere), G_worst(s) reduces to
+        (|proj_t| + |proj_n|) which still varies with blend
+        orientation — axis-aligned (∈ {1}) is looser than diagonal
+        (→ √2). Derivation: per_axis_saturation_derivation.md.
         """
         limits = self._limits
         if limits is None:
@@ -579,14 +642,18 @@ class QuinticShape:
         t = _s_to_t_refined(self.Q, self._s_tab, self._t_tab, s)
         kappa = _curvature_at_t(self.Q, t)
         if kappa > 0.0:
-            v_cent = math.sqrt(limits.a_max / kappa)
+            # Frenet frame — shared by D4 saturation cap and the
+            # per-s shaper-bandwidth cap below.
+            _, tan, nrm = _point_frame(self.Q, t)
+            G_worst = _compute_G_worst(limits.shapers, tan, nrm)
+            a_eff = limits.a_max / G_worst
+            v_cent = math.sqrt(a_eff / kappa)
             v = min(v, v_cent)
             if limits.jerk_max is not None and limits.jerk_max > 0.0:
                 v_jerk = (limits.jerk_max / (kappa * kappa)) ** (1.0 / 3.0)
                 v = min(v, v_jerk)
             if limits.shapers:
                 from . import blendshaper as _blendshaper
-                _, _, nrm = _point_frame(self.Q, t)
                 R = 1.0 / kappa
                 bounds = _blendshaper.compute_shaper_bounds(
                     limits.shapers, R, nrm, _PLANE_NORMAL

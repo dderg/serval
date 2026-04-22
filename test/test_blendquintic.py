@@ -757,3 +757,374 @@ def test_v_cap_fn_endpoints_at_least_straight_cruise():
     vN = shape.v_cap_fn(shape.arc_length)
     assert v0 >= 10.0, f"v_cap_fn(0) too low: {v0}"
     assert vN >= 10.0, f"v_cap_fn(arc_length) too low: {vN}"
+
+
+# === Plan 5 Pillar 1 D4: per-s saturation cap ===
+#
+# Spec: docs/superpowers/specs/2026-04-22-plan5-direct-quintic-pillar1-design.md §D4
+# Derivation: docs/superpowers/plans/plan5-derivations/per_axis_saturation_derivation.md
+#
+# G_worst(s) = max_axes G_axis · (|proj_t(s)| + |proj_n(s)|).
+# v_cent(s) = sqrt(a_max / (G_worst(s) · κ(s))).
+#
+# For a symmetric 90° quintic, the midpoint tangent is the bisector.
+# Two orientations of interest:
+#   - e1=+X, e2=+Y: midpoint tangent at 135° to +X → diagonal case,
+#     sum_X = sum_Y = √2, G_worst = √2·G, tightest cap.
+#   - e1 rotated +45° from +X, e2 rotated +135°: midpoint tangent along
+#     a world axis → axis-aligned, sum_X = sum_Y = 1, G_worst = G,
+#     loosest cap.
+
+
+def _rotated_right_angle_d4_shape(rotation_rad, inverse_G, a_max=5000.0,
+                                  v_max=50000.0):
+    """Build a 90°-corner quintic whose control polygon is rotated by
+    `rotation_rad` in the XY plane, with shaper snapshots that
+    contribute ONLY the D4 saturation cap — A_axis = 0 disables
+    compute_shaper_bounds' v_step_cap / j_eff contributions, isolating
+    the saturation term.
+
+    Returns (shape, limits). jerk_max=None so the rotation-jerk cap
+    also drops out. Only the centripetal-via-saturation bound and
+    v_max bind — perfect for pinning G_worst numerics.
+    """
+    cos_r, sin_r = math.cos(rotation_rad), math.sin(rotation_rad)
+    e1_unrot = (1.0, 0.0, 0.0)
+    e2_unrot = (0.0, 1.0, 0.0)
+    def _rot(v):
+        return (cos_r * v[0] - sin_r * v[1],
+                sin_r * v[0] + cos_r * v[1], v[2])
+    e1 = _rot(e1_unrot)
+    e2 = _rot(e2_unrot)
+    apex = (0.0, 0.0, 0.0)
+    edge_len = 10.0
+    prev_start = (apex[0] - edge_len * e1[0],
+                  apex[1] - edge_len * e1[1],
+                  apex[2] - edge_len * e1[2])
+    nxt_end = (apex[0] + edge_len * e2[0],
+               apex[1] + edge_len * e2[1],
+               apex[2] + edge_len * e2[2])
+    prev = _FakeMoveFactory(prev_start, apex)
+    nxt = _FakeMoveFactory(apex, nxt_end)
+    shapers = [
+        blendshaper.AxisShaperSnapshot(
+            axis="x", shaper_type="bs3", shaper_freq=40.0,
+            damping_ratio=0.1, A_axis=0.0, inverse_G=inverse_G,
+        ),
+        blendshaper.AxisShaperSnapshot(
+            axis="y", shaper_type="bs3", shaper_freq=40.0,
+            damping_ratio=0.1, A_axis=0.0, inverse_G=inverse_G,
+        ),
+    ]
+    limits = blendshape.KinematicLimits(
+        a_max=a_max, v_max=v_max, jerk_max=None,
+        extruder_caps=None, shapers=shapers,
+    )
+    shape = blendquintic.QuinticShape.from_moves(prev, nxt, 0.1, limits)
+    assert shape is not None
+    return shape, limits
+
+
+# Backwards alias — pre-fix name some tests referenced.
+_rotated_right_angle_bs3_shape = _rotated_right_angle_d4_shape
+
+
+def _midpoint_s_kappa_frame(shape):
+    """Return (s_mid, κ_mid, tan, nrm) at arc-length midpoint.
+
+    For a symmetric 90° quintic the midpoint is where
+    (|proj_t|+|proj_n|) hits √2 for an unrotated (e1=+X, e2=+Y) corner
+    (tangent at 135°) and hits 1 for a 45°-rotated corner (tangent
+    along -X). Used as a stable anchor for the D4 saturation-cap tests:
+    unlike the global κ_peak, the midpoint orientation is fixed by
+    symmetry and independent of the quintic's internal shape ratio.
+    """
+    s_mid = 0.5 * shape.arc_length
+    k_mid = shape.curvature_at(s_mid)
+    t_mid = blendquintic._s_to_t_refined(
+        shape.Q, shape._s_tab, shape._t_tab, s_mid,
+    )
+    _, tan, nrm = blendquintic._point_frame(shape.Q, t_mid)
+    return s_mid, k_mid, tan, nrm
+
+
+def test_d4_saturation_cap_diagonal_tightest_90_deg_corner():
+    """Unrotated 90° corner (e1=+X, e2=+Y), evaluated at the symmetric
+    midpoint: tangent at 135° gives sum_X = sum_Y = √2, G_worst = √2·G.
+
+    Cross-check against the derivation: v_cent = sqrt(a_max / (√2·G·κ)).
+    """
+    G = 2.003
+    shape, limits = _rotated_right_angle_bs3_shape(
+        rotation_rad=0.0, inverse_G=G,
+    )
+    s_mid, k_mid, tan, nrm = _midpoint_s_kappa_frame(shape)
+    # Midpoint tangent is at 135° — diagonal.
+    assert abs(tan[0]) == pytest.approx(abs(tan[1]), abs=1e-6)
+    G_worst = blendquintic._compute_G_worst(limits.shapers, tan, nrm)
+    assert G_worst == pytest.approx(math.sqrt(2.0) * G, rel=1e-6)
+    expected = math.sqrt(limits.a_max / (G_worst * k_mid))
+    v_cap = shape.v_cap_fn(s_mid)
+    # Saturation is the binder at this regime; tolerance captures the
+    # v_step_cap/jerk interaction in case it ever ticks in close.
+    assert v_cap == pytest.approx(expected, rel=0.02), (
+        f"v_cap={v_cap:.3f} != expected={expected:.3f} "
+        f"(G_worst={G_worst:.4f}, k_mid={k_mid:.5f})"
+    )
+
+
+def test_d4_saturation_cap_axis_aligned_90_deg_corner():
+    """45°-rotated 90° corner: midpoint tangent is axis-aligned (along
+    -X). sum_X = 1, sum_Y = 1, G_worst = G. Cap is looser by factor √2
+    than the diagonal orientation.
+    """
+    G = 2.003
+    shape, limits = _rotated_right_angle_bs3_shape(
+        rotation_rad=math.radians(45.0), inverse_G=G,
+    )
+    s_mid, k_mid, tan, nrm = _midpoint_s_kappa_frame(shape)
+    # Tangent along a world axis within numerical precision. At this
+    # orientation the 45°-rotated bisector puts midpoint tangent along
+    # ±X or ±Y.
+    assert min(abs(tan[0]), abs(tan[1])) < 1e-6, f"tan not axis-aligned: {tan}"
+    G_worst = blendquintic._compute_G_worst(limits.shapers, tan, nrm)
+    assert G_worst == pytest.approx(G, rel=1e-6)
+    expected = math.sqrt(limits.a_max / (G_worst * k_mid))
+    v_cap = shape.v_cap_fn(s_mid)
+    assert v_cap == pytest.approx(expected, rel=0.02), (
+        f"v_cap={v_cap:.3f} != expected={expected:.3f} "
+        f"(G_worst={G_worst:.4f}, k_mid={k_mid:.5f})"
+    )
+
+
+def test_d4_axis_aligned_is_looser_than_diagonal_by_quartic_root_two():
+    """Cross-orientation ratio at the midpoint:
+        v_cent ∝ 1 / sqrt(G_worst · κ)  →  v_axis / v_diag = sqrt(√2) = 2^(1/4).
+    Diagonal G_worst = √2·G is √2× the axis-aligned G_worst = G, so the
+    velocity ratio is the square root of that — 1.189, not √2.
+    Confirms the sum-of-projections orientation dependence matches the
+    derivation exactly (288.5/242.6 ≈ 1.189 in the worked example).
+    """
+    G = 2.003
+    shape_diag, _ = _rotated_right_angle_bs3_shape(0.0, G)
+    shape_axis, _ = _rotated_right_angle_bs3_shape(
+        math.radians(45.0), G,
+    )
+    s_d, k_d, _, _ = _midpoint_s_kappa_frame(shape_diag)
+    s_a, k_a, _, _ = _midpoint_s_kappa_frame(shape_axis)
+    # Both shapes share geometry up to rigid rotation → same κ_mid.
+    assert k_a == pytest.approx(k_d, rel=1e-3)
+    v_d = shape_diag.v_cap_fn(s_d)
+    v_a = shape_axis.v_cap_fn(s_a)
+    ratio = v_a / v_d
+    expected_ratio = 2.0 ** 0.25          # sqrt(√2) ≈ 1.18921
+    assert ratio == pytest.approx(expected_ratio, rel=0.02), (
+        f"ratio={ratio:.4f}, expected 2^(1/4) ≈ 1.189"
+    )
+
+
+def test_d4_sum_of_projections_tightens_at_diagonal_with_no_inverse():
+    """Even with G_axis = 1.0 (no feedforward inverse wired), the
+    (|proj_t| + |proj_n|) factor creates an orientation-dependent cap.
+    Diagonal tangent gives √2, axis-aligned gives 1 — the ratio √2
+    holds independently of G.
+
+    This is the expected orientation-dependence that D4 introduces.
+    Before D4, v_cent = sqrt(a/κ) was orientation-free (implicitly the
+    loosest axis-aligned bound). D4 tightens at diagonal orientations
+    even when no feedforward inverse is wired, per
+    per_axis_saturation_derivation.md §2.
+    """
+    shape_diag, limits = _rotated_right_angle_bs3_shape(0.0, inverse_G=1.0)
+    shape_axis, _ = _rotated_right_angle_bs3_shape(
+        math.radians(45.0), inverse_G=1.0,
+    )
+    s_d, k_d, _, _ = _midpoint_s_kappa_frame(shape_diag)
+    s_a, k_a, _, _ = _midpoint_s_kappa_frame(shape_axis)
+    v_d = shape_diag.v_cap_fn(s_d)
+    v_a = shape_axis.v_cap_fn(s_a)
+    # Axis-aligned matches sqrt(a/κ) exactly (G_worst = 1).
+    expected_axis = math.sqrt(limits.a_max / k_a)
+    # Diagonal is tighter by factor √2 (G_worst = √2).
+    expected_diag = math.sqrt(limits.a_max / (math.sqrt(2.0) * k_d))
+    assert v_a == pytest.approx(expected_axis, rel=0.02)
+    assert v_d == pytest.approx(expected_diag, rel=0.02)
+    # v_axis / v_diag = sqrt(G_worst_diag/G_worst_axis) = sqrt(√2) = 2^(1/4)
+    assert v_a / v_d == pytest.approx(2.0 ** 0.25, rel=0.02)
+
+
+def test_d4_worked_example_matches_spec_numbers():
+    """Pin: for bs3 with G = 2.003, a_max = 5000, the saturation cap
+    at κ = 0.03 should be 288.5 mm/s (axis-aligned) / 242.6 mm/s
+    (diagonal). Computes G_worst directly from the formula (no shape
+    involvement) so this is a pure arithmetic pin.
+    """
+    a_max = 5000.0
+    kappa = 0.03
+    G = 2.003
+    # Axis-aligned: sum_of_projections = 1.
+    v_axis = math.sqrt(a_max / (G * 1.0 * kappa))
+    assert v_axis == pytest.approx(288.5, abs=1.0)
+    # Diagonal: sum_of_projections = √2.
+    v_diag = math.sqrt(a_max / (G * math.sqrt(2.0) * kappa))
+    assert v_diag == pytest.approx(242.6, abs=1.0)
+
+
+def test_d4_compute_G_worst_helper_axis_aligned():
+    """Unit test for the _compute_G_worst helper directly: tangent
+    along +X → sum_X = 1 (proj_t=1, proj_n=0), sum_Y = 1
+    (proj_t=0, proj_n=1 since n̂=(0,1,0)·rot90 of (1,0,0) is (0,1,0)).
+    G_worst = max(G_X·1, G_Y·1).
+    """
+    tan = (1.0, 0.0, 0.0)
+    nrm = (0.0, 1.0, 0.0)        # 2D rot90-CCW of tan in xy
+    shapers = [
+        blendshaper.AxisShaperSnapshot(
+            axis="x", shaper_type="bs3", shaper_freq=40.0,
+            damping_ratio=0.1, A_axis=5000.0, inverse_G=2.0,
+        ),
+        blendshaper.AxisShaperSnapshot(
+            axis="y", shaper_type="bs3", shaper_freq=40.0,
+            damping_ratio=0.1, A_axis=5000.0, inverse_G=1.5,
+        ),
+    ]
+    G = blendquintic._compute_G_worst(shapers, tan, nrm)
+    assert G == pytest.approx(2.0, rel=1e-9)
+
+
+def test_d4_compute_G_worst_helper_diagonal():
+    """Tangent at 45° (t̂=(1/√2, 1/√2)), n̂=(-1/√2, 1/√2). Sum_X =
+    |1/√2| + |-1/√2| = √2. Sum_Y = |1/√2| + |1/√2| = √2. G_worst =
+    max(G_X, G_Y) · √2.
+    """
+    inv = 1.0 / math.sqrt(2.0)
+    tan = (inv, inv, 0.0)
+    nrm = (-inv, inv, 0.0)
+    shapers = [
+        blendshaper.AxisShaperSnapshot(
+            axis="x", shaper_type="bs3", shaper_freq=40.0,
+            damping_ratio=0.1, A_axis=5000.0, inverse_G=2.0,
+        ),
+        blendshaper.AxisShaperSnapshot(
+            axis="y", shaper_type="bs3", shaper_freq=40.0,
+            damping_ratio=0.1, A_axis=5000.0, inverse_G=1.5,
+        ),
+    ]
+    G = blendquintic._compute_G_worst(shapers, tan, nrm)
+    assert G == pytest.approx(2.0 * math.sqrt(2.0), rel=1e-9)
+
+
+def test_d4_compute_G_worst_no_shapers_returns_one():
+    """Empty/None shapers → G_worst = 1.0 (pre-D4 behavior)."""
+    tan = (1.0, 0.0, 0.0)
+    nrm = (0.0, 1.0, 0.0)
+    assert blendquintic._compute_G_worst([], tan, nrm) == 1.0
+    assert blendquintic._compute_G_worst(None, tan, nrm) == 1.0
+
+
+def test_d4_compute_G_worst_ignores_extruder_axis():
+    """Extruder-axis snapshot ('e') has no Cartesian projection; helper
+    must skip it without crashing. If it's the only snapshot G_worst
+    falls back to 1.0.
+    """
+    tan = (1.0, 0.0, 0.0)
+    nrm = (0.0, 1.0, 0.0)
+    shapers = [
+        blendshaper.AxisShaperSnapshot(
+            axis="e", shaper_type="bs3", shaper_freq=40.0,
+            damping_ratio=0.1, A_axis=5000.0, inverse_G=3.0,
+        ),
+    ]
+    G = blendquintic._compute_G_worst(shapers, tan, nrm)
+    assert G == 1.0
+
+
+class _D4FakeAxisInputShaper:
+    """Inline copy of test_blendmath._FakeAxisInputShaper.
+
+    Minimum surface _extract_shapers reads: .get_axis() and .params
+    with shaper_type / shaper_freq / damping_ratio.
+    """
+    def __init__(self, axis, shaper_type, freq, damping_ratio=0.1):
+        self._axis = axis
+        self._type = shaper_type
+        self._freq = freq
+        self._damping = damping_ratio
+
+    def get_axis(self):
+        return self._axis
+
+    class _Params:
+        def __init__(self, outer):
+            self.axis = outer._axis
+            self.shaper_type = outer._type
+            self.shaper_freq = outer._freq
+            self.damping_ratio = outer._damping
+
+    @property
+    def params(self):
+        return self._Params(self)
+
+
+class _D4FakeInputShaper:
+    def __init__(self, shapers):
+        self._shapers = shapers
+
+    def get_shapers(self):
+        return list(self._shapers)
+
+
+class _D4FakePrinterObject:
+    def __init__(self, input_shaper):
+        self._is = input_shaper
+
+    def lookup_object(self, name, default=None):
+        if name == "input_shaper":
+            return self._is
+        return default
+
+
+class _D4FakeToolheadWithShapers:
+    def __init__(self, input_shaper):
+        self.printer = _D4FakePrinterObject(input_shaper)
+
+
+def test_d4_extract_shapers_populates_inverse_G_default_one():
+    """_extract_shapers must populate AxisShaperSnapshot.inverse_G; when
+    no feedforward inverse has been wired (classic FIR or no-op
+    mock), it defaults to 1.0 so G_worst degrades to the pre-D4 form.
+    """
+    is_obj = _D4FakeInputShaper([
+        _D4FakeAxisInputShaper("x", "zv", 50.0),
+        _D4FakeAxisInputShaper("y", "zv", 50.0),
+    ])
+    toolhead = _D4FakeToolheadWithShapers(is_obj)
+    snaps = blendmath._extract_shapers(toolhead)
+    for s in snaps:
+        assert s.inverse_G == 1.0
+
+
+def test_d4_extract_shapers_reads_get_axis_G_when_available():
+    """When input_shaper exposes get_axis_G, _extract_shapers should
+    thread the returned value into AxisShaperSnapshot.inverse_G.
+    """
+    class _ISWithG(_D4FakeInputShaper):
+        def __init__(self, shapers, G_by_axis):
+            super().__init__(shapers)
+            self._G_by_axis = G_by_axis
+
+        def get_axis_G(self, axis):
+            return self._G_by_axis.get(axis, 1.0)
+
+    is_obj = _ISWithG(
+        [
+            _D4FakeAxisInputShaper("x", "zv", 50.0),
+            _D4FakeAxisInputShaper("y", "zv", 50.0),
+        ],
+        G_by_axis={"x": 2.0, "y": 1.5},
+    )
+    toolhead = _D4FakeToolheadWithShapers(is_obj)
+    snaps = blendmath._extract_shapers(toolhead)
+    by_axis = {s.axis: s for s in snaps}
+    assert by_axis["x"].inverse_G == pytest.approx(2.0)
+    assert by_axis["y"].inverse_G == pytest.approx(1.5)
