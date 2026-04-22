@@ -100,11 +100,17 @@ def test_bspline_A_axis_matches_spec_table(m):
     )
 
 
-def test_init_smoother_flat_to_piecewise_round_trip():
-    """Legacy flat-coeff init_smoother emits a single-piece piecewise kernel
-    that integrates to a finite positive value (C-side normalization then
-    rescales to unit integral)."""
-    # The extruder pressure-advance smoother uses this legacy coeff pattern.
+def test_init_smoother_pa_kernel_shape():
+    """PA extruder smoother kernel (kinematics/extruder.py:24 literal
+    ``[15/8, 0, -15, 0, 30]`` at t_sm=0.04): boundary value is zero, peak
+    sits at t=0, and sigma^2 matches the closed-form expectation.
+
+    Legacy-semantics pin: the input list is ASCENDING power-basis
+    (a[i] is the coefficient of t^i). This test is the regression gate
+    for C1 (coefficient-order flip) — an implementation that reversed
+    the convention would see w(+-hst) ~ 659 instead of 0, and
+    sigma^2 ~ 1.29e-4 instead of 5.71e-5.
+    """
     coeffs = [15.0 / 8.0, 0.0, -15.0, 0.0, 30.0]
     smooth_time = 0.04
     C_pieces, t_sm = shaper_defs.init_smoother(coeffs, smooth_time, True)
@@ -113,13 +119,153 @@ def test_init_smoother_flat_to_piecewise_round_trip():
     t_start, t_end, piece_coeffs = C_pieces[0]
     assert t_start == pytest.approx(-smooth_time / 2)
     assert t_end == pytest.approx(smooth_time / 2)
-    # Integrate over the window. The pre-normalization integral is NOT 1 —
-    # the C-side init_smoother is responsible for the final rescale.
-    grid = np.linspace(t_start, t_end, 10001)
-    w = np.asarray(shaper_defs.bspline_eval(C_pieces, grid, t_sm))
-    integral = np.trapezoid(w, grid)
-    assert integral > 0.0
-    assert math.isfinite(integral)
+
+    # Kernel vanishes at support boundaries (the whole point of the 4th-order
+    # smoothing function comment in kinematics/extruder.py).
+    endpoints = np.asarray(
+        shaper_defs.bspline_eval(C_pieces, np.array([t_start, t_end]), t_sm)
+    )
+    np.testing.assert_allclose(endpoints, [0.0, 0.0], atol=1e-9)
+
+    # Kernel is symmetric with positive peak at t=0.
+    peak_val = shaper_defs.bspline_eval(C_pieces, np.array([0.0]), t_sm)[0]
+    assert peak_val > 0.0
+
+    # sigma^2 via the piecewise moment closed-form path.
+    sc = shaper_calibrate.ShaperCalibrate(printer=None)
+    sigma2 = sc._get_smoother_sigma2((C_pieces, t_sm))
+    # Closed form: w_norm(t) = (15 / (8*t_sm^5)) * (t_sm - 2t)^2 * (t_sm + 2t)^2
+    # (factored form of the 4th-order PA kernel). Integrates to 1 over
+    # [-t_sm/2, +t_sm/2]; second moment is t_sm^2 / 28.
+    expected_sigma2 = smooth_time * smooth_time / 28.0
+    assert expected_sigma2 == pytest.approx(5.7142857e-5, rel=1e-6)
+    assert sigma2 == pytest.approx(expected_sigma2, rel=1e-2)
+
+
+def test_init_smoother_ascending_convention_pins_monomial():
+    """Direct monomial check: input ``[0, 0, 1]`` must encode w_raw(t) = t^2
+    (ASCENDING convention). A reversed convention would encode w_raw(t) = 1.
+
+    Pin test for C1: catches any future flip of the ascending-vs-descending
+    semantic in init_smoother.
+    """
+    # Choose normalize_coeffs=False so we can read the piece coeffs directly
+    # without the 1/t_sm^(i+1) rescaling obscuring the ordering.
+    smooth_time = 0.04
+    C_pieces, _ = shaper_defs.init_smoother([0.0, 0.0, 1.0], smooth_time, False)
+    piece_coeffs = C_pieces[0][2]
+    # ASCENDING: piece_coeffs[2] = 1.0 means the t^2 coefficient is 1.
+    assert piece_coeffs == [0.0, 0.0, 1.0]
+
+    # Non-trivially check the normalized path too: input [0, 0, 1] with
+    # normalize=True must scale coefficients so that the t^i scaling is
+    # 1/t_sm^(i+1). For i=2 that means piece_coeffs[2] = 1 / t_sm^3.
+    C_norm, _ = shaper_defs.init_smoother([0.0, 0.0, 1.0], smooth_time, True)
+    piece_coeffs_norm = C_norm[0][2]
+    assert piece_coeffs_norm[0] == 0.0
+    assert piece_coeffs_norm[1] == 0.0
+    assert piece_coeffs_norm[2] == pytest.approx(1.0 / smooth_time ** 3, rel=1e-12)
+
+
+def test_init_smoother_custom_coeff_round_trip_preserves_ascending():
+    """CustomInputSmootherParams stores _raw_coeffs in ASCENDING order
+    (the ``reversed()`` call at input_shaper.py converts user-written
+    highest-degree-first config into ascending). init_smoother then consumes
+    ascending directly. This regression test pins the custom-smoother pathway.
+    """
+    from klippy.extras import input_shaper as _is_mod
+
+    # Mimic what the config path produces after reversal: user wrote
+    # [30, 0, -15, 0, 15/8] (highest-degree-first) -> reversed ascending:
+    ascending = [15.0 / 8.0, 0.0, -15.0, 0.0, 30.0]
+    params = _is_mod.CustomInputSmootherParams.__new__(
+        _is_mod.CustomInputSmootherParams
+    )
+    params.axis = "x"
+    params._raw_coeffs = ascending
+    params.smooth_time = 0.04
+
+    C_pieces, t_sm = params.get_smoother()
+    # The kernel must vanish at support boundaries — same shape invariant
+    # as the PA smoother test above.
+    endpoints = np.asarray(
+        shaper_defs.bspline_eval(C_pieces, np.array([-t_sm / 2, t_sm / 2]), t_sm)
+    )
+    np.testing.assert_allclose(endpoints, [0.0, 0.0], atol=1e-9)
+
+
+def test_update_shaper_raises_migration_error_for_retired_name():
+    """SET_INPUT_SHAPER SHAPER_TYPE=smooth_mzv (runtime) must surface the
+    bs2 migration hint, not a generic "Unsupported shaper type" error.
+
+    Pin test for I2: the pre-fix code swallowed the migration error in
+    ShaperFactory.update_shaper's try/except and fell through to the
+    generic error path.
+    """
+    from klippy.extras import input_shaper as _is_mod
+
+    factory = _is_mod.ShaperFactory()
+
+    class MockError(Exception):
+        pass
+
+    class MockGcmd:
+        error = MockError
+
+        def __init__(self, shaper_type):
+            self._st = shaper_type
+
+        def get(self, key, default=None):
+            if key == "SHAPER_TYPE":
+                return self._st
+            return default
+
+    # Start from a working bs3 shaper, then attempt to "update" it to the
+    # retired smooth_mzv — this is the runtime path the bug bites.
+    p = _is_mod.TypedInputSmootherParams("x", "bs3", None)
+    p.smoother_freq = 40.0
+    existing = _is_mod.AxisInputSmoother(p)
+
+    with pytest.raises(MockError) as excinfo:
+        factory.update_shaper(existing, MockGcmd("smooth_mzv"))
+    msg = str(excinfo.value)
+    assert "smooth_mzv" in msg
+    assert "bs2" in msg
+    assert "Magnum Opus" in msg
+
+
+def test_create_shaper_raises_migration_error_for_retired_name():
+    """Config-load path: shaper_type = smooth_mzv must raise the migration
+    error with the bs2 hint. Mirrors the update-path pin above."""
+    from klippy.extras import input_shaper as _is_mod
+
+    factory = _is_mod.ShaperFactory()
+
+    class MockError(Exception):
+        pass
+
+    class MockConfig:
+        error = MockError
+
+        def __init__(self, shaper_type):
+            self._st = shaper_type
+
+        def get(self, key, default=None):
+            if key == "shaper_type":
+                return self._st
+            if key.startswith("shaper_type_"):
+                return self._st
+            return default
+
+        def getfloat(self, k, v, **kw):
+            return v
+
+    with pytest.raises(MockError) as excinfo:
+        factory.create_shaper("x", MockConfig("smooth_mzv"))
+    msg = str(excinfo.value)
+    assert "smooth_mzv" in msg
+    assert "bs2" in msg
+    assert "Magnum Opus" in msg
 
 
 @pytest.mark.parametrize("m", BS_M)

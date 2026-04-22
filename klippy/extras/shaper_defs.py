@@ -50,39 +50,37 @@ def get_shaper_offset(A, T):
 
 
 # Legacy single-polynomial kernel coefficients -> one-piece piecewise form.
-# Kept as a helper for consumers (e.g. the pressure-advance extruder smoother)
-# that still describe a kernel as flat power-basis coefficients over the
-# centered window [-t_sm/2, +t_sm/2]. Returns (C_pieces, t_sm) in the same
-# format as the bs*-family init_func results so downstream code can treat
-# both uniformly.
+# Kept as a helper for consumers (e.g. the pressure-advance extruder smoother
+# at klippy/kinematics/extruder.py:24, and the [input_shaper] custom
+# `coeffs_{x,y}` config path) that still describe a kernel as flat
+# power-basis coefficients over the centered window [-t_sm/2, +t_sm/2].
+# Returns (C_pieces, t_sm) in the same format as the bs*-family init_func
+# results so downstream code can treat both uniformly.
 #
-# Input `coeffs` are listed highest-degree-first to match historical callers
-# (e.g. shaper_defs.get_zv_smoother legacy table). When normalize_coeffs is
-# True the coefficients are scaled by 1/t_sm^(n-i) so the resulting
-# polynomial in plain t-units integrates to unity over [-t_sm/2, +t_sm/2]
-# (matching old init_smoother semantics).
+# Input `coeffs` is ASCENDING power-basis: coeffs[i] is the coefficient of
+# t^i in w(t) = sum_i coeffs[i] * t^i. This matches the legacy pre-Plan-5
+# C init_smoother convention, which the existing PA-smoother literal
+# [15/8, 0, -15, 0, 30] at kinematics/extruder.py:24 relies on (that literal
+# encodes w_raw(t) = 15/8 - 15*t^2 + 30*t^4, a 4th-order smoothing window
+# that vanishes at t = +-t_sm/2 once normalized by 1/t_sm^(i+1)).
+#
+# With normalize_coeffs=True each coefficient is divided by t_sm^(i+1). The
+# C-side init_smoother additionally rescales to unit integral so the
+# pre-norm magnitude here does not have to match the unit-integral target
+# exactly.
 def init_smoother(coeffs, smooth_time, normalize_coeffs):
     n = len(coeffs)
     if n == 0 or smooth_time <= 0.0:
         return ([], smooth_time if smooth_time > 0.0 else 0.0)
-    # Input `coeffs` is highest-degree-first:
-    #   coeffs = [h_{n-1}, ..., h_1, h_0]
-    # Output `piece_coeffs` is ASCENDING power basis (c_k for t^k), which
-    # is what the new piecewise kernel representation expects:
-    #   w(t) = sum_{k=0..n-1} piece_coeffs[k] * t^k
     if normalize_coeffs:
-        # Legacy-compatible 1/t_sm^(k+1) rescaling. The C-side init_smoother
-        # will additionally divide by the integrated norm, so the absolute
-        # magnitude does not need to match unit integral here.
         inv_t_sm = 1.0 / smooth_time
         piece_coeffs = [0.0] * n
         scale = inv_t_sm
-        for k in range(n):
-            piece_coeffs[k] = coeffs[n - 1 - k] * scale
+        for i in range(n):
+            piece_coeffs[i] = coeffs[i] * scale
             scale *= inv_t_sm
     else:
-        # Non-normalized: simply reverse descending -> ascending.
-        piece_coeffs = list(reversed(coeffs))
+        piece_coeffs = list(coeffs)
     hst = 0.5 * smooth_time
     return ([(-hst, hst, piece_coeffs)], smooth_time)
 

@@ -586,6 +586,16 @@ class ShaperFactory:
                 "SHAPER_TYPE_" + shaper.get_axis().upper(), shaper.get_type()
             )
         shaper_type = shaper_type.lower()
+        # Plan 5 migration: surface the friendly bs* hint even at runtime
+        # (SET_INPUT_SHAPER SHAPER_TYPE=smooth_mzv), BEFORE the retry path
+        # below masks it as "Unsupported shaper type".
+        hint = shaper_defs.RETIRED_SMOOTHER_MIGRATION.get(shaper_type)
+        if hint is not None:
+            raise gcmd.error(
+                "shaper_type '%s' was replaced in Magnum Opus with the "
+                "cardinal B-spline chain family. Use shaper_type = '%s' "
+                "for equivalent behavior." % (shaper_type, hint)
+            )
         try:
             shaper.update(shaper_type, gcmd)
             return shaper
