@@ -337,6 +337,35 @@ def test_suppressed_junction_v_right_angle_returns_finite():
     assert v is not None and math.isfinite(v) and v > 0.0
 
 
+def test_suppressed_junction_v_unchanged_for_typical_corner():
+    """Pin suppressed_junction_v behavior at a typical 45° corner with
+    an impulse shaper loaded. It's still the SCV-equivalent cap for the
+    from_moves=None branch at blendplanner.py."""
+    # 45° corner: prev along +X, next at 45° deflection (interior angle 135°).
+    prev = _FakeMove(axes_r=(1.0, 0.0, 0.0), move_d=10.0, accel=50000.0, max_cruise_v2=40000.0)
+    nxt  = _FakeMove(axes_r=(0.707, 0.707, 0.0), move_d=10.0, accel=50000.0, max_cruise_v2=40000.0)
+    th = _FakeToolheadWithShapers(_FakeInputShaper([
+        _FakeAxisInputShaper("x", "zv", 60.0),
+        _FakeAxisInputShaper("y", "zv", 60.0),
+    ]))
+    v_j = blendmath.suppressed_junction_v(prev, nxt, 0.1, th)
+    # With a ZV shaper loaded, sigma_T > 0 → returns a finite positive v_cap.
+    assert v_j is not None
+    assert math.isfinite(v_j)
+    assert v_j > 0.0
+
+
+def test_suppressed_junction_v_returns_none_without_shapers():
+    """No impulse shaper → sigma_T == 0 → should return None (existing contract
+    used by blendplanner.feed to fall into the hard-stop heuristic)."""
+    prev = _FakeMove(axes_r=(1.0, 0.0, 0.0), move_d=10.0, accel=50000.0, max_cruise_v2=40000.0)
+    nxt  = _FakeMove(axes_r=(0.0, 1.0, 0.0), move_d=10.0, accel=50000.0, max_cruise_v2=40000.0)
+    class _THNoShapers:
+        printer = None
+    v_j = blendmath.suppressed_junction_v(prev, nxt, 0.1, _THNoShapers())
+    assert v_j is None
+
+
 # ---------------------------------------------------------------------------
 # _compute_A_axis_smooth_is tests
 # ---------------------------------------------------------------------------
