@@ -227,6 +227,66 @@ def _peak_curvature(Q, n_samples: int = 100) -> tuple[float, float]:
     return best_t, best_k
 
 
+def _v_extr_of_k(k: float, pa_model, extruder_caps) -> float:
+    """Per-s extruder flow-rate velocity cap (Plan 5 D7).
+
+    Migrated from blendextruder.cap_move to a per-s helper so v_cap_fn
+    can compose the flow cap directly into its pointwise min. The
+    accel ceiling from blendextruder.cap_move is intentionally not
+    folded in here — TOPP uses a scalar a_max across the whole blend,
+    and the min(prev.accel, nxt.accel) propagated through the outer
+    lookahead remains the right a_max for the blend. (The extruder
+    accel cap is applied at Move-level on linear trunc_prev / trunc_nxt
+    edges via the existing Move.limit_speed path.)
+
+    Returns +inf for travel moves (k <= 0), missing PA model, missing
+    extruder caps, or any degeneracy (a_E_max <= 0 with no v_E_max
+    either).
+    """
+    if extruder_caps is None or pa_model is None:
+        return float("inf")
+    if k <= 0.0:
+        return float("inf")
+    v_E_max = extruder_caps.v_E_max
+    a_E_max = extruder_caps.a_E_max
+    smooth_time = extruder_caps.smooth_time
+    if v_E_max <= 0.0 and a_E_max <= 0.0:
+        return float("inf")
+    # Degenerate smooth_time: fall back to RPM-only cap.
+    if smooth_time <= 0.0:
+        if v_E_max > 0.0:
+            return v_E_max / k
+        return float("inf")
+    K_h = (15.0 / 8.0) / smooth_time
+    # Linear PA: closed form on f'.
+    if pa_model.kind == "linear":
+        (pa,) = pa_model.params
+        if a_E_max <= 0.0:
+            return v_E_max / k
+        a_E_cap = a_E_max / (1.0 + pa * K_h)
+        v_from_accel = (v_E_max - pa * a_E_cap) / k
+        v_from_rpm = v_E_max / k
+        if v_from_accel <= 0.0:
+            return v_from_rpm
+        return min(v_from_rpm, v_from_accel)
+    # Non-linear PA (tanh / recipr): fall through to the bisection helper
+    # exposed by blendextruder.
+    from . import blendextruder as _bex
+    if a_E_max <= 0.0:
+        if v_E_max > 0.0:
+            return v_E_max / k
+        return float("inf")
+    # Evaluate f' at v_eval = k * v_RPM, matching cap_move's behavior
+    # (approximation for the binding-moment velocity).
+    v_eval_proxy = v_E_max
+    f_prime_eval = _bex._f_prime(pa_model, v_eval_proxy)
+    a_E_cap = a_E_max / (1.0 + f_prime_eval * K_h)
+    v_cap = _bex._solve_velocity_cap_bisection(pa_model, k, a_E_cap, v_E_max)
+    if v_cap <= 1e-6:
+        return v_E_max / k
+    return v_cap
+
+
 _SHAPER_SAMPLE_N_DEFAULT = 50
 # 2D blend plane normal — all quintic blends are in the XY plane.
 _PLANE_NORMAL: Tuple[float, float, float] = (0.0, 0.0, 1.0)
@@ -615,10 +675,35 @@ class QuinticShape:
             return -dkappa_ds_signed
         return dkappa_ds_signed
 
-    def v_cap_fn(self, s: float) -> float:
-        """Velocity limit curve V_lim(s) — centripetal + shaper + rotation-jerk.
+    def v_cap_fn(
+        self,
+        s: float,
+        prev_flow_k: Optional[float] = None,
+        nxt_flow_k: Optional[float] = None,
+        pa_model=None,
+    ) -> float:
+        """Velocity limit curve V_lim(s) — composed min of all 5 cap sources.
 
-        Extruder cap comes in plan 4 as a wrapper stage, not here.
+        Plan 5 D7 "unified v(s) along the curve":
+            v_cap(s) = min(
+                v_max,                                [user / toolhead]
+                v_sat(s)    = sqrt(a_max / (G·κ(s))), [Pillar 1 saturation D4]
+                v_jerk(s)   = (j_eff / κ(s)²)^(1/3),  [rotation-jerk]
+                v_step(s)   = shaper-bandwidth cap,   [Pillar 2]
+                v_extr(s)   = extruder flow cap       [Plan 3, now per-s]
+            )
+
+        Parameters
+        ----------
+        s               arc-length along the blend [0, arc_length].
+        prev_flow_k     dE/ds of the incoming edge (axes_r[3]); the
+                        per-s flow ratio k(s) interpolates linearly
+                        from prev_flow_k at s=0 to nxt_flow_k at
+                        s=arc_length.
+        nxt_flow_k      dE/ds of the outgoing edge.
+        pa_model        Optional blendextruder.PAModelSnapshot describing
+                        the live Pressure-Advance model; when None the
+                        extruder-cap branch collapses to +inf.
 
         Plan 5 Pillar 1 D4 — saturation cap: the centripetal term is
         tightened by the per-s, orientation-dependent factor
@@ -659,6 +744,23 @@ class QuinticShape:
                     limits.shapers, R, nrm, _PLANE_NORMAL
                 )
                 v = min(v, bounds.v_step_cap)
+        # Extruder flow cap, absorbed from the former per-move
+        # blendextruder.cap_move into this per-s branch (Plan 5 D7 Task 28).
+        # k(s) interpolates linearly from prev_flow_k to nxt_flow_k; the
+        # closed-form / bisection cap is evaluated at k(s).
+        extruder_caps = limits.extruder_caps
+        if (extruder_caps is not None and pa_model is not None
+                and prev_flow_k is not None and nxt_flow_k is not None
+                and self.arc_length > 0.0):
+            frac = s / self.arc_length
+            if frac < 0.0:
+                frac = 0.0
+            elif frac > 1.0:
+                frac = 1.0
+            k_s = prev_flow_k + (nxt_flow_k - prev_flow_k) * frac
+            v_extr = _v_extr_of_k(k_s, pa_model, extruder_caps)
+            if math.isfinite(v_extr) and v_extr > 0.0:
+                v = min(v, v_extr)
         return v
 
     def polyline(self, chord_tol: float = _DEFAULT_CHORD_TOL) -> list[Vec3]:
@@ -722,6 +824,8 @@ class QuinticShape:
         v_out: float,
         cruise_v: float,
         a_max: float,
+        s_accel_end: Optional[float] = None,
+        s_decel_start: Optional[float] = None,
     ):
         """Compose the quintic curve position(u) with a trapezoid-in-arc-
         length velocity profile v(s) to yield per-phase position-in-t
@@ -739,17 +843,26 @@ class QuinticShape:
         degree are zero-padded to 11 so the C-side trapq entry can unpack
         a uniform layout.
 
-        Approximation (D2c first pass): we treat the quintic's natural
-        Bezier parameter u ∈ [0, 1] as directly proportional to normalised
-        arc length s/L (see _monomial_coeffs_per_axis above). The accel
-        phase has s(t) = v_in * t + 0.5 * a_max * t^2, the cruise phase
-        has s(t) = s_accel_end + cruise_v * (t - t_accel_end), and the
-        decel phase mirrors accel.
+        Two calling conventions:
+          (a) D2c legacy — pass only (v_in, v_out, cruise_v, a_max).
+              The phase durations are computed from a +a_max accel ramp
+              from v_in to cruise_v and a symmetric -a_max decel ramp
+              to v_out. Used for the all-cruise degenerate bootstrap.
+          (b) D7 TOPP — pass s_accel_end and s_decel_start from
+              topp.topp_trapezoid. The accel/decel acceleration signs
+              are derived from the ramp direction (cruise_v >= v_in
+              gives +a_max; cruise_v < v_in gives -a_max).
 
         For the **all-cruise degenerate profile** (v_in == v_out ==
         cruise_v), accel_polys and decel_polys are zero-length phases
-        (t_accel_end == 0 and t_decel_start == total_t). Use this form
-        until D7 TOPP lands.
+        (t_accel_end == 0 and t_decel_start == total_t).
+
+        Approximation: we treat the quintic's natural Bezier parameter
+        u ∈ [0, 1] as directly proportional to normalised arc length
+        s/L (see _monomial_coeffs_per_axis above). The accel phase has
+        s(t) = v_in * t + 0.5 * a_accel * t^2, the cruise phase has
+        s(t) = s_accel_end + cruise_v * (t - t_accel_end), and the
+        decel phase mirrors accel with a_decel.
         """
         import numpy as np
 
@@ -766,53 +879,73 @@ class QuinticShape:
         # composition with an (s / L) Polynomial.
         u_of_s = np.polynomial.Polynomial([0.0, 1.0 / L])  # 0 + (1/L)*s
 
-        # Compute phase durations from the trapezoid profile.
-        # s_accel_end, t_accel_end
-        if a_max > 0.0:
-            t_accel_end = (cruise_v - v_in) / a_max
-            t_decel_duration = (cruise_v - v_out) / a_max
+        # Derive phase s-boundaries. Two paths: caller-supplied (D7 TOPP)
+        # or legacy (compute from v_in/v_out/a_max).
+        if s_accel_end is None or s_decel_start is None:
+            if a_max > 0.0:
+                t_accel_end = max(0.0, (cruise_v - v_in) / a_max)
+                t_decel_duration = max(0.0, (cruise_v - v_out) / a_max)
+            else:
+                t_accel_end = 0.0
+                t_decel_duration = 0.0
+            s_accel_end_v = (v_in * t_accel_end
+                             + 0.5 * a_max * t_accel_end * t_accel_end)
+            s_decel_start_v = L - (cruise_v * t_decel_duration
+                                   - 0.5 * a_max * t_decel_duration
+                                     * t_decel_duration)
         else:
-            t_accel_end = 0.0
-            t_decel_duration = 0.0
-        if t_accel_end < 0.0:
-            t_accel_end = 0.0
-        if t_decel_duration < 0.0:
-            t_decel_duration = 0.0
-        s_accel_end = v_in * t_accel_end + 0.5 * a_max * t_accel_end * t_accel_end
-        s_decel_start = L - (cruise_v * t_decel_duration
-                              - 0.5 * a_max * t_decel_duration * t_decel_duration)
-        if s_decel_start < s_accel_end:
-            # Not enough arc-length for a cruise plateau — collapse to a
-            # symmetric accel+decel with no cruise. For D2c's all-cruise
-            # degenerate bootstrap this branch is never taken; D7 handles
-            # the general case.
-            s_accel_end = s_decel_start = 0.5 * L
-            # Recompute t_accel_end and t_decel_duration from the halved
-            # arc-length.
-            # v_peak^2 = v_in^2 + 2 * a_max * s_accel_end
-            v_peak = math.sqrt(max(v_in * v_in + 2.0 * a_max * s_accel_end,
-                                   v_out * v_out + 2.0 * a_max * (L - s_decel_start)))
-            t_accel_end = (v_peak - v_in) / a_max if a_max > 0.0 else 0.0
-            t_decel_duration = (v_peak - v_out) / a_max if a_max > 0.0 else 0.0
-            cruise_v = v_peak
-        # Cruise-phase duration.
-        s_cruise = s_decel_start - s_accel_end
+            s_accel_end_v = float(s_accel_end)
+            s_decel_start_v = float(s_decel_start)
+        # Clamp to [0, L] to keep phase polynomials defined on positive
+        # durations.
+        if s_accel_end_v < 0.0:
+            s_accel_end_v = 0.0
+        if s_accel_end_v > L:
+            s_accel_end_v = L
+        if s_decel_start_v < s_accel_end_v:
+            s_decel_start_v = s_accel_end_v
+        if s_decel_start_v > L:
+            s_decel_start_v = L
+
+        # Determine per-phase acceleration signs from the ramp direction.
+        # Accel phase: v_in -> cruise_v over s_accel_end_v.
+        # Use 2·Δs·a = v1² - v0² (signed), so a_accel = (cruise² - v_in²) / (2·Δs).
+        if s_accel_end_v > 1e-30:
+            a_accel = (cruise_v * cruise_v - v_in * v_in) / (2.0 * s_accel_end_v)
+        else:
+            a_accel = 0.0
+        # Decel phase: cruise_v -> v_out over (L - s_decel_start_v).
+        decel_len = L - s_decel_start_v
+        if decel_len > 1e-30:
+            a_decel = (v_out * v_out - cruise_v * cruise_v) / (2.0 * decel_len)
+        else:
+            a_decel = 0.0
+
+        # Phase durations via kinematic integrals (robust to sign).
+        if s_accel_end_v > 0.0 and (v_in + cruise_v) > 0.0:
+            t_accel_end_v = 2.0 * s_accel_end_v / (v_in + cruise_v)
+        else:
+            t_accel_end_v = 0.0
+        s_cruise = s_decel_start_v - s_accel_end_v
         t_cruise = s_cruise / cruise_v if cruise_v > 0.0 else 0.0
-        t_decel_start = t_accel_end + t_cruise
+        if decel_len > 0.0 and (v_out + cruise_v) > 0.0:
+            t_decel_duration = 2.0 * decel_len / (cruise_v + v_out)
+        else:
+            t_decel_duration = 0.0
+        t_decel_start = t_accel_end_v + t_cruise
         total_t = t_decel_start + t_decel_duration
 
         # s(t) per phase, expressed as numpy.polynomial.Polynomial in
         # phase-local time delta_t.
-        # accel phase: s_accel(delta_t) = v_in * delta_t + 0.5 * a_max * delta_t^2
-        s_accel = np.polynomial.Polynomial([0.0, v_in, 0.5 * a_max])
+        # accel phase: s_accel(delta_t) = v_in * delta_t + 0.5 * a_accel * delta_t^2
+        s_accel_poly = np.polynomial.Polynomial([0.0, v_in, 0.5 * a_accel])
         # cruise phase: s_cruise_local(delta_t) = s_accel_end + cruise_v * delta_t
-        s_cruise_poly = np.polynomial.Polynomial([s_accel_end, cruise_v])
-        # decel phase in phase-local delta_t (starts at t = t_decel_start,
-        # initial velocity cruise_v, accel = -a_max):
-        # s_decel_local(delta_t) = s_decel_start + cruise_v * delta_t
-        #                          - 0.5 * a_max * delta_t^2
+        s_cruise_poly = np.polynomial.Polynomial([s_accel_end_v, cruise_v])
+        # decel phase: s_decel_local(delta_t) = s_decel_start + cruise_v * delta_t
+        #                                       + 0.5 * a_decel * delta_t^2
+        # (a_decel is negative when decelerating to v_out < cruise_v.)
         s_decel_poly = np.polynomial.Polynomial(
-            [s_decel_start, cruise_v, -0.5 * a_max]
+            [s_decel_start_v, cruise_v, 0.5 * a_decel]
         )
 
         def _pad(coef, n=11):
@@ -820,17 +953,13 @@ class QuinticShape:
             return out[:n]
 
         def _compose(axis_poly_s, phase_s_poly):
-            # phase_s_poly is s(delta_t); axis_poly_s is position(s).
-            # Compose: position(delta_t) = axis_poly_s(phase_s_poly(delta_t)).
-            # numpy.polynomial supports this via Polynomial(np.asarray(p_s.coef))
-            # evaluated with the s polynomial substituted in.
             composed = axis_poly_s(phase_s_poly)
             return _pad(composed.coef, 11)
 
         # position_s_poly per axis = poly_u(u_of_s) — reparam u -> s.
         position_s = [poly_u[ax](u_of_s) for ax in range(3)]
 
-        accel_polys = [_compose(position_s[ax], s_accel) for ax in range(3)]
+        accel_polys = [_compose(position_s[ax], s_accel_poly) for ax in range(3)]
         cruise_polys = [_compose(position_s[ax], s_cruise_poly) for ax in range(3)]
         decel_polys = [_compose(position_s[ax], s_decel_poly) for ax in range(3)]
 
@@ -838,26 +967,35 @@ class QuinticShape:
             accel_polys,
             cruise_polys,
             decel_polys,
-            t_accel_end,
+            t_accel_end_v,
             t_decel_start,
             total_t,
             L,
         )
 
-    def v_cap_min(self) -> float:
+    def v_cap_min(
+        self,
+        prev_flow_k: Optional[float] = None,
+        nxt_flow_k: Optional[float] = None,
+        pa_model=None,
+        n_samples: int = 128,
+    ) -> float:
         """Minimum of v_cap_fn over [0, arc_length] sampled at 128 points.
-        Used as the Option Z upstream junction cap — the blend's tightest
-        velocity constraint, fed back to the planner so the previous linear
-        move decelerates into the blend rather than hitting the cap mid-
-        curve.
+
+        Used as the Option Z upstream junction cap (Plan 5 D7) — the blend's
+        tightest velocity constraint, fed back to the planner so the
+        previous linear move decelerates into the blend rather than hitting
+        the cap mid-curve.
+
+        Parameters mirror v_cap_fn: pass prev/nxt flow ratios and
+        pa_model to include the extruder-flow branch in the min.
         """
         if self.arc_length <= 0.0:
             return float("inf")
         best = float("inf")
-        n = 128
-        for i in range(n + 1):
-            s = (i / n) * self.arc_length
-            v = self.v_cap_fn(s)
+        for i in range(n_samples + 1):
+            s = (i / n_samples) * self.arc_length
+            v = self.v_cap_fn(s, prev_flow_k, nxt_flow_k, pa_model)
             if v < best:
                 best = v
         return best

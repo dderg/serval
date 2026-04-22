@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from . import blendmath, blendquintic, blendshape
+from . import blendmath, blendquintic, blendshape, topp
 
 
 def _extract_extruder_caps(toolhead):
@@ -17,11 +17,19 @@ def _extract_extruder_caps(toolhead):
     Returns None when the extruder cap is disabled or no extruder is
     present — the downstream shape-build code treats None as 'no cap'.
 
-    Plan 3 wires this; Plan 5 (pillar 2 unified v(s)) will consume it
-    as part of the continuous v(s) evaluation along the curve. For
-    now the per-move cap is applied at Move-level in Move.limit_speed
-    (see Task 11).
+    Plan 5 D7 consumes this as the per-s v_extr(s) contribution inside
+    v_cap_fn (see `klippy/blendquintic.py::_v_extr_of_k`). Before D7
+    the same data fed blendextruder.cap_move as a per-move cap;
+    that call-site is retired in D7 — flow-rate capping now lives
+    entirely inside the unified v_cap_fn.
     """
+    # Prefer the cached snapshot on the toolhead (ToolHead.extruder_cap_snapshot,
+    # refreshed by SET_PRESSURE_ADVANCE etc.); fall back to re-querying the
+    # extruder for test shims that don't wire the cache.
+    cached = getattr(toolhead, "extruder_cap_snapshot", None)
+    if cached is not None:
+        _, limits = cached
+        return limits
     extruder = getattr(toolhead, "extruder", None)
     if extruder is None:
         return None
@@ -38,6 +46,33 @@ def _extract_extruder_caps(toolhead):
         return None
     _, limits = snapshot
     return limits
+
+
+def _extract_pa_snapshot(toolhead):
+    """Pull the PAModelSnapshot off the toolhead's extruder, if configured.
+
+    Plan 5 D7: v_cap_fn needs the live PA model to compute the per-s
+    extruder-flow cap. Returns None when PA isn't enabled.
+    """
+    cached = getattr(toolhead, "extruder_cap_snapshot", None)
+    if cached is not None:
+        pa_snap, _ = cached
+        return pa_snap
+    extruder = getattr(toolhead, "extruder", None)
+    if extruder is None:
+        return None
+    snap_fn = getattr(extruder, "extruder_limits_snapshot", None)
+    if snap_fn is None:
+        steppers = getattr(extruder, "extruder_steppers", None)
+        if steppers:
+            snap_fn = getattr(steppers[0], "extruder_limits_snapshot", None)
+    if snap_fn is None:
+        return None
+    snapshot = snap_fn()
+    if snapshot is None:
+        return None
+    pa_snap, _ = snapshot
+    return pa_snap
 
 
 def _copy_caller_state(src, dst):
@@ -68,7 +103,7 @@ def _copy_caller_state(src, dst):
 
 
 class QuinticBlendMove:
-    """Sentinel Move-like wrapper for a direct-quintic blend emission.
+    """Move-like wrapper for a direct-quintic blend emission.
 
     Holds the per-phase position-in-t polynomial coefficients produced by
     QuinticShape.compose_phase_polynomials, plus enough Move-compatible
@@ -77,17 +112,20 @@ class QuinticBlendMove:
 
     toolhead.ToolHead._process_moves detects `quintic_trapq_payload` on a
     Move and routes it to trapq_append_quintic instead of the default
-    trapq_append call. Plan 5 D2c flips CornerBlender._emit_blend to emit
-    QuinticBlendMove once D7 TOPP provides the per-s velocity profile;
-    today the polyline emit path ships (kept in _emit_blend).
+    trapq_append call. Plan 5 D7 flipped CornerBlender._emit_blend to emit
+    a single QuinticBlendMove per blend, replacing the N-piece polyline
+    loop. The TOPP-derived trapezoid-in-s profile (cruise_v, s_accel_end,
+    s_decel_start) composes with the quintic position(u) to produce the
+    per-phase polynomial coefficients.
 
     The `quintic_trapq_payload` attribute is a tuple
     (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
      start_pos_xyz, coeff_buf) ready to feed trapq_append_quintic.
     """
 
-    def __init__(self, toolhead, shape, v_cruise, start_pos_4d, end_pos_4d,
-                 accel=None):
+    def __init__(self, toolhead, shape, start_pos_4d, end_pos_4d,
+                 v_in, v_out, cruise_v, s_accel_end, s_decel_start,
+                 a_max, v_cap_min, accel=None):
         self.toolhead = toolhead
         self.shape = shape
         self.start_pos = tuple(start_pos_4d)
@@ -102,17 +140,16 @@ class QuinticBlendMove:
         inv = 1.0 / move_d if move_d else 0.0
         self.axes_r = tuple(d * inv for d in axes_d)
         self.move_d = shape.arc_length if shape.arc_length > 0.0 else move_d
-        self.accel = accel if accel is not None else toolhead.max_accel
+        self.accel = accel if accel is not None else a_max
         self.timing_callbacks = []
         self.is_kinematic_move = True
-        self.max_cruise_v2 = v_cruise * v_cruise
-        self.max_start_v2 = 0.0
-        self.max_smoothed_v2 = 0.0
-        # All-cruise degenerate profile for D2c's first pass: v_in = v_out =
-        # cruise_v = v_cruise. D7 TOPP will supply a full v(s) profile.
+        self.max_cruise_v2 = cruise_v * cruise_v
+        self.max_start_v2 = v_in * v_in
+        self.max_smoothed_v2 = v_in * v_in
         (accel_polys, cruise_polys, decel_polys, t_accel_end, t_decel_start,
          total_t, arc_length) = shape.compose_phase_polynomials(
-            v_in=v_cruise, v_out=v_cruise, cruise_v=v_cruise, a_max=self.accel,
+            v_in=v_in, v_out=v_out, cruise_v=cruise_v, a_max=a_max,
+            s_accel_end=s_accel_end, s_decel_start=s_decel_start,
         )
         # Pack coeff_buf for trapq_append_quintic (99 doubles).
         coeff_buf = []
@@ -122,16 +159,16 @@ class QuinticBlendMove:
                 coeff_buf.append(phase[1][k])
                 coeff_buf.append(phase[2][k])
         start_pos_xyz = (start_pos_4d[0], start_pos_4d[1], start_pos_4d[2])
-        v_cap_min = (
-            shape.v_cap_min() if hasattr(shape, "v_cap_min") else v_cruise
-        )
-        if not (v_cap_min and math.isfinite(v_cap_min)):
-            v_cap_min = v_cruise
+        if not (v_cap_min and math.isfinite(v_cap_min)) or v_cap_min <= 0.0:
+            v_cap_min = cruise_v if cruise_v > 0.0 else v_in
+        self.v_cap_min = v_cap_min
         self.quintic_trapq_payload = (
             t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
             start_pos_xyz, tuple(coeff_buf),
         )
-        self.min_move_t = total_t
+        self.min_move_t = total_t if total_t > 0.0 else (
+            self.move_d / cruise_v if cruise_v > 0.0 else 0.0
+        )
         self.delta_v2 = 2.0 * self.move_d * self.accel
         self.smooth_delta_v2 = self.delta_v2
         self.next_junction_v2 = v_cap_min * v_cap_min if v_cap_min else 0.0
@@ -154,22 +191,35 @@ class QuinticBlendMove:
 class CornerBlender:
     """Second filter stage in the blend pipeline.
 
-    Buffers one move; on the next arriving move computes a tangent-arc
-    blend and emits [trunc_prev, arc_polyline_moves...] while buffering
-    the truncated-next-head as the new candidate prev.
+    Buffers one move; on the next arriving move computes a quintic corner
+    blend and emits [trunc_prev, QuinticBlendMove] while buffering the
+    truncated-next-head as the new candidate prev.
 
-    Plan 5 D2c — once D7 TOPP lands, _emit_blend's polyline loop flips to
-    a single QuinticBlendMove per corner. The flip is gated on TOPP
-    producing a real per-s velocity profile; today the polyline path
-    still ships. The direct-quintic infrastructure (QuinticShape.
-    compose_phase_polynomials, QuinticBlendMove, C-side tagged-union
-    struct move, trapq_append_quintic FFI) is in place and covered by
-    test/test_trapq_quintic.py.
+    Plan 5 D7 — `_emit_blend` now emits a **single** QuinticBlendMove per
+    corner. The per-phase position-in-t polynomials are composed at emit
+    time (Python side) from a trapezoid-in-s velocity profile produced by
+    TOPP (klippy/topp.py). The formerly-separate polyline loop and the
+    blendextruder.cap_move per-move pass are both retired:
+
+      - The polyline-to-trapq pipeline is replaced by trapq_append_quintic
+        (C-side FFI landed in D2); one trapq entry per blend.
+      - The extruder flow cap is absorbed into v_cap_fn(s) as the v_extr(s)
+        branch so TOPP sees it directly — no separate cap_move call
+        remains in toolhead.move.
+
+    The `polyline_moves_emitted` instrumentation counter is kept for
+    backwards compatibility with dashboards and older tests (it now
+    counts emitted QuinticBlendMove instances rather than polyline
+    sub-moves — always equal to `blends_emitted`).
     """
 
     def __init__(self, toolhead, *, move_cls, max_chord_err=None):
         self._toolhead = toolhead
         self._move_cls = move_cls
+        # max_chord_err is retained as a constructor kwarg for backwards
+        # compatibility with older callers / tests. After D7 the
+        # polyline-chord tolerance no longer gates emit — the whole blend
+        # is a single trapq entry — so the value is ignored.
         self.max_chord_err = max_chord_err
         self._prev = None
         self.polyline_moves_emitted = 0
@@ -186,7 +236,7 @@ class CornerBlender:
             a_max=th.max_accel,
             v_max=th.max_velocity,
             jerk_max=None,       # plan 1: jerk cap disabled; plan 5 wires it
-            extruder_caps=_extract_extruder_caps(th),  # plan 3; consumed by plan 5
+            extruder_caps=_extract_extruder_caps(th),  # Plan 5 D7 consumes per-s
             shapers=blendmath._extract_shapers(th),
         )
         shape = blendquintic.QuinticShape.from_moves(
@@ -205,13 +255,15 @@ class CornerBlender:
             #       is at least as good as the blend (path-tolerance and
             #       time both satisfied).
             return self._suppress_and_advance(move)
-        trunc_prev, blend_moves, trunc_next_head = self._emit_blend(
+        trunc_prev, quintic_move, trunc_next_head = self._emit_blend(
             self._prev, move, shape
         )
         self._prev = trunc_next_head
         self.blends_emitted += 1
-        self.polyline_moves_emitted += len(blend_moves)
-        return [trunc_prev] + blend_moves
+        # Post-D7: one QuinticBlendMove per blend, so the legacy
+        # polyline-moves counter advances by 1.
+        self.polyline_moves_emitted += 1
+        return [trunc_prev, quintic_move]
 
     def _suppress_and_advance(self, move):
         """Fallback path when the blend is dropped — either from_moves
@@ -243,23 +295,20 @@ class CornerBlender:
         self._prev = move
         return emitted
 
-    def _resolve_chord_err(self):
-        """Return the polyline chord tolerance to use for the current blend.
-
-        If self.max_chord_err was set at construction time, that value wins.
-        Otherwise auto-scale as max(20e-3, 0.2 * toolhead.corner_deviation).
-        """
-        if self.max_chord_err is not None:
-            return self.max_chord_err
-        # 20 microns absolute floor; 20% of corner_deviation for a sensible
-        # auto-scale at loose tolerances.
-        return max(20e-3, 0.2 * self._toolhead.corner_deviation)
-
     def _emit_blend(self, prev, nxt, shape):
-        """Construct [trunc_prev, polyline_moves...] and the trunc_next_head.
+        """Construct [trunc_prev, QuinticBlendMove] and the trunc_next_head.
 
-        `shape` is a QuinticShape (SmoothShape protocol). Returns
-        (trunc_prev, blend_moves_list, trunc_next_head).
+        `shape` is a QuinticShape (SmoothShape protocol). Plan 5 D7:
+          1. Compose v_cap_fn(s) that captures all 5 cap sources
+             (centripetal-saturation, rotation-jerk, shaper-bandwidth,
+             user v_max, and the per-s extruder-flow cap).
+          2. Sample v_cap_min() for the Option Z upstream junction cap.
+          3. Run TOPP on the composed v_cap to get a trapezoid-in-s
+             profile.
+          4. Emit a single QuinticBlendMove with the per-phase position-
+             in-t polynomials built from the TOPP profile.
+
+        Returns (trunc_prev, quintic_move, trunc_next_head).
         """
         th = self._toolhead
         move_cls = self._move_cls
@@ -283,42 +332,16 @@ class CornerBlender:
         trunc_prev = move_cls(th, prev.start_pos, trunc_prev_end, prev_cruise_v)
         _copy_caller_state(prev, trunc_prev)
 
-        # --- 2. Quintic polyline ---
-        # shape.polyline() returns world-space Vec3 points (control points are
-        # built in world coordinates in from_moves). No vertex offset needed.
-        chord_err = self._resolve_chord_err()
-        polyline_world = shape.polyline(chord_err)
-        points_4d = blendmath.interpolate_extruder(
-            polyline_world, shape.d_consumed,
-            prev.axes_r[3], nxt.axes_r[3],
-        )
-        # Offset the interpolate_extruder E (starts at 0) by trunc_prev_end_e
-        # so each polyline point's absolute E continues the global count.
-        points_4d = [
-            (p[0], p[1], p[2], p[3] + trunc_prev_end_e) for p in points_4d
-        ]
-        # Plan 1 scalar v_cap: midpoint of the blend arc-length.
-        # Pillar 2 plan replaces this with per-segment v(s) integration.
-        shape_mid_v = shape.v_cap_fn(shape.arc_length / 2.0)
-        arc_cap_v2 = min(prev.max_cruise_v2, nxt.max_cruise_v2, shape_mid_v ** 2)
-        arc_cap_v = math.sqrt(arc_cap_v2)
-        arc_accel = min(prev.accel, nxt.accel)
-        blend_moves = []
-        for p0, p1 in zip(points_4d, points_4d[1:]):
-            am = move_cls(th, p0, p1, arc_cap_v)
-            am.max_cruise_v2 = arc_cap_v2
-            am.limit_speed(arc_cap_v, arc_accel)
-            am.min_move_t = am.move_d / arc_cap_v
-            blend_moves.append(am)
-
-        # --- 3. Truncated next head ---
+        # --- 2. Truncated next head (built before quintic emit so we can
+        #        pass its start_pos through to the QuinticBlendMove boundary). ---
         trunc_next_head_start_xyz = tuple(
             vertex[i] + shape.d_consumed * next_dir[i] for i in range(3)
         )
         # E at the truncated-next-head start: offset from nxt.start_pos by the
         # consumed head fraction. Symmetric with trunc_prev's E formula.
         frac_consumed_next = shape.d_consumed / nxt.move_d
-        trunc_next_head_start_e = nxt.start_pos[3] + frac_consumed_next * nxt.axes_d[3]
+        trunc_next_head_start_e = (nxt.start_pos[3]
+                                   + frac_consumed_next * nxt.axes_d[3])
         trunc_next_head_start = (
             trunc_next_head_start_xyz[0], trunc_next_head_start_xyz[1],
             trunc_next_head_start_xyz[2], trunc_next_head_start_e,
@@ -329,19 +352,72 @@ class CornerBlender:
         )
         _copy_caller_state(nxt, trunc_next_head)
 
-        # Aggregate-safety re-check. check_move runs before lookahead.add_move
-        # in ToolHead.move, so emitted polyline Moves bypass it otherwise.
-        # One representative is sufficient: all blend moves share accel, v_cap,
-        # and per-mm E rate; spatially the polyline is localized near the
-        # corner vertex so envelope checks evaluate at roughly the same
-        # coordinates across all points.
-        if blend_moves:
-            representative = blend_moves[0]
-            th.kin.check_move(representative)
-            if representative.axes_d[3]:
-                th.extruder.check_move(representative)
+        # --- 3. Unified v_cap closure (all 5 cap sources composed per-s). ---
+        prev_flow_k = prev.axes_r[3] if len(prev.axes_r) >= 4 else 0.0
+        nxt_flow_k = nxt.axes_r[3] if len(nxt.axes_r) >= 4 else 0.0
+        pa_snap = _extract_pa_snapshot(th)
 
-        return trunc_prev, blend_moves, trunc_next_head
+        def v_cap_closure(s):
+            return shape.v_cap_fn(s, prev_flow_k, nxt_flow_k, pa_snap)
+
+        # Option Z: the blend's true min cap.  Used both as the
+        # max_cruise_v2 ceiling for the emitted move and as the
+        # next_junction_v2 clamp fed upstream so the lookahead converges
+        # to a compatible junction velocity.
+        v_cap_min = shape.v_cap_min(prev_flow_k, nxt_flow_k, pa_snap)
+        if not math.isfinite(v_cap_min) or v_cap_min <= 0.0:
+            v_cap_min = min(prev_cruise_v, next_cruise_v)
+
+        # --- 4. Run TOPP for the trapezoid-in-s velocity profile. ---
+        a_max = min(prev.accel, nxt.accel)
+        if a_max <= 0.0:
+            a_max = th.max_accel
+        # Endpoint velocities come from the outer lookahead's upstream
+        # pass. The Option Z contract hands the lookahead v_cap_min, so
+        # the prev/nxt cruise velocities should already be compatible.
+        v_in = min(prev_cruise_v, v_cap_min)
+        v_out = min(next_cruise_v, v_cap_min)
+
+        try:
+            cruise_v, s_accel_end, s_decel_start = topp.topp_trapezoid(
+                v_cap_closure, shape.arc_length,
+                v_in=v_in, v_out=v_out, a_max=a_max,
+            )
+        except topp.TOPPError:
+            # Fallback: if the boundary is infeasible (rare; lookahead
+            # feed is wrong), collapse to a flat-v_cap_min profile.
+            cruise_v = v_cap_min
+            s_accel_end = 0.0
+            s_decel_start = shape.arc_length
+            v_in = v_out = cruise_v
+
+        # --- 5. Emit a single QuinticBlendMove. ---
+        start_pos_4d = (
+            trunc_prev_end[0], trunc_prev_end[1], trunc_prev_end[2],
+            trunc_prev_end_e,
+        )
+        end_pos_4d = (
+            trunc_next_head_start[0], trunc_next_head_start[1],
+            trunc_next_head_start[2], trunc_next_head_start_e,
+        )
+        quintic_move = QuinticBlendMove(
+            toolhead=th, shape=shape,
+            start_pos_4d=start_pos_4d, end_pos_4d=end_pos_4d,
+            v_in=v_in, v_out=v_out,
+            cruise_v=cruise_v,
+            s_accel_end=s_accel_end, s_decel_start=s_decel_start,
+            a_max=a_max, v_cap_min=v_cap_min, accel=a_max,
+        )
+
+        # Aggregate-safety re-check. check_move runs before lookahead.add_move
+        # in ToolHead.move, so the emitted QuinticBlendMove bypasses it
+        # otherwise. One representative is sufficient for the corner
+        # envelope check.
+        th.kin.check_move(quintic_move)
+        if quintic_move.axes_d[3]:
+            th.extruder.check_move(quintic_move)
+
+        return trunc_prev, quintic_move, trunc_next_head
 
     def flush(self):
         if self._prev is None:

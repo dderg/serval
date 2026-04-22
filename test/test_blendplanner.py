@@ -541,26 +541,69 @@ def test_blender_returns_sharp_v_for_degenerate_corner():
     assert b._prev is m2  # next is buffered for the next corner
 
 
+def test_corner_blend_emits_single_quintic_not_polyline():
+    """Plan 5 D7: _emit_blend flips from N-piece polyline to 1 x
+    QuinticBlendMove. Verify across 45°, 90°, 120° corners.
+    """
+    from klippy import blendplanner
+
+    for theta_deg in (45.0, 90.0, 120.0):
+        th = _FakeToolhead(corner_deviation=0.05)
+        b = blendplanner.CornerBlender(th, move_cls=_FakeMove)
+        theta = math.radians(theta_deg)
+        # prev: +X, next: rotated by theta CCW.
+        m_prev = _FakeMove(th, (0, 0, 0, 0), (10.0, 0, 0, 0.5), speed=100.0)
+        # next tangent rotated by (pi - theta); deflection angle is theta.
+        rot = math.pi - theta
+        nx = 10.0 + 10.0 * math.cos(rot)
+        ny = 10.0 * math.sin(rot)
+        m_next = _FakeMove(th, (10.0, 0, 0, 0.5), (nx, ny, 0, 1.0), speed=100.0)
+        b.feed(m_prev)
+        out = b.feed(m_next)
+        assert len(out) >= 2, (
+            f"theta={theta_deg}deg: blend was suppressed, got {len(out)} emit"
+        )
+        trunc_prev = out[0]
+        blend_moves = out[1:]
+        # Single QuinticBlendMove per blend.
+        assert len(blend_moves) == 1, (
+            f"theta={theta_deg}deg: expected 1 QuinticBlendMove, "
+            f"got {len(blend_moves)}"
+        )
+        assert isinstance(blend_moves[0], blendplanner.QuinticBlendMove)
+        # Carries the per-phase polynomial payload.
+        payload = blend_moves[0].quintic_trapq_payload
+        assert len(payload) == 7
+        (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
+         start_pos_xyz, coeff_tuple) = payload
+        assert total_t > 0.0
+        assert arc_length > 0.0
+        assert len(coeff_tuple) == 99
+        # start_pos_xyz matches trunc_prev.end_pos.
+        assert start_pos_xyz[:3] == pytest.approx(trunc_prev.end_pos[:3])
+
+
 def test_planner_emits_quintic_shape_for_right_angle_corner():
-    """Integration-level: planner's emitted-blend polyline comes from a
-    QuinticShape (not a BlendArc). Protocol-level assertion."""
-    from klippy import blendquintic
-    # Use tight chord_err so even a small blend decomposes into >2 segments.
-    b = _blender(max_chord_err=1e-3)
+    """Integration-level: planner emits a single QuinticBlendMove per corner
+    (Plan 5 D7). The move carries per-phase position-in-t polynomial
+    coefficients via quintic_trapq_payload."""
+    from klippy import blendplanner
+    b = _blender()
     th = b._toolhead
     m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
     assert b.feed(m_prev) == []
     out = b.feed(m_next)
     trunc_prev = out[0]
-    arc_moves = out[1:]
-    # Non-trivial subdivision (quintic decomposes into multiple segments).
-    assert len(arc_moves) >= 3
-    # Polyline is continuous (segment i's end == segment i+1's start).
-    for i in range(len(arc_moves) - 1):
-        assert arc_moves[i].end_pos[:3] == pytest.approx(arc_moves[i + 1].start_pos[:3])
-    # First polyline segment starts where trunc_prev ends.
-    assert arc_moves[0].start_pos[:3] == pytest.approx(trunc_prev.end_pos[:3])
+    blend_moves = out[1:]
+    # Plan 5 D7: single QuinticBlendMove per corner.
+    assert len(blend_moves) == 1
+    qm = blend_moves[0]
+    assert isinstance(qm, blendplanner.QuinticBlendMove)
+    assert hasattr(qm, "quintic_trapq_payload")
+    # The quintic move's start_pos matches trunc_prev.end_pos (blend
+    # continuity in space).
+    assert qm.start_pos[:3] == pytest.approx(trunc_prev.end_pos[:3])
 
 
 class _FakeInnerQueue:
@@ -611,7 +654,9 @@ def test_pipeline_composition_prepass_then_blender():
     adapter.flush()
     # Prepass merged each side into a long move; blender produced one blend.
     assert blender.blends_emitted == 1
-    assert blender.polyline_moves_emitted >= 2
+    # Plan 5 D7: one QuinticBlendMove per blend, so polyline_moves_emitted
+    # (kept for backwards compatibility) tracks blends_emitted 1:1.
+    assert blender.polyline_moves_emitted == 1
 
 
 def test_pipeline_adapter_get_last_returns_blender_prev_when_buffered():

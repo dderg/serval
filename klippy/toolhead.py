@@ -649,7 +649,13 @@ class ToolHead:
             return
         if move.is_kinematic_move:
             self.kin.check_move(move)
-        # Plan 3: extruder-cap (post-PA stepper budget).
+        # Plan 3 extruder-cap for straight MOVE_LINEAR edges. Plan 5 D7
+        # absorbs the cap-per-s contribution into the quintic corner
+        # primitive via v_cap_fn(s)::v_extr(s); the CornerBlender's
+        # emitted QuinticBlendMove is not routed through the linear
+        # cap_move path here. On straight edges (pre/post-blend
+        # truncated Moves, pure travel, pure extrusion) the
+        # cap_move call applies unchanged.
         snap = self.extruder_cap_snapshot
         if snap is not None:
             from klippy import blendextruder
