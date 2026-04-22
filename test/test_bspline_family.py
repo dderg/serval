@@ -424,3 +424,56 @@ def test_retired_smoother_not_in_input_smoothers_list():
     names = {s.name for s in shaper_defs.INPUT_SMOOTHERS}
     assert names.isdisjoint(retired)
     assert names == {"bs1", "bs2", "bs3", "bs4", "bs5"}
+
+
+# ---------------------------------------------------------------------------
+# Fourier-domain: sinc^(m+1) spectrum and first-zero invertibility gate.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("m", [1, 2, 3, 4, 5])
+def test_bspline_spectrum_is_sinc_power(m):
+    """Numerical FT of bs_m matches closed-form sinc^(m+1) at representative
+    frequencies.
+
+    For a cardinal B-spline of order m rescaled to support [-T_sm/2, +T_sm/2]:
+        W(f) = sinc(f * T_1)^(m+1)  with  T_1 = T_sm / (m+1)
+    where numpy sinc(x) = sin(pi*x) / (pi*x).
+    """
+    f_sh = 40.0
+    C_pieces, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
+    T_1 = t_sm / (m + 1)
+    # Dense grid for numerical FT — 20001 points gives sub-1e-4 trapezoid error.
+    grid = np.linspace(-t_sm / 2, t_sm / 2, 20001)
+    w = shaper_defs.bspline_eval(C_pieces, grid, t_sm)
+    # Compare at five representative frequencies well below the first zero.
+    for f in [5.0, 10.0, 15.0, 20.0, 25.0]:
+        omega = 2 * np.pi * f
+        W_numeric = np.trapezoid(w * np.cos(omega * grid), grid)
+        # numpy sinc: sinc(x) = sin(pi*x)/(pi*x)
+        W_expected = np.sinc(f * T_1) ** (m + 1)
+        assert abs(W_numeric - W_expected) < 1e-4, (
+            "m=%d, f=%.0f Hz: numeric=%.6f, expected=%.6f"
+            % (m, f, W_numeric, W_expected))
+
+
+@pytest.mark.parametrize("m,expected_first_zero_hz", [
+    (1, 51.44), (2, 61.66), (3, 71.05), (4, 79.81), (5, 88.07),
+])
+def test_bspline_first_spectral_zero_above_f_sh(m, expected_first_zero_hz):
+    """First zero of W(f) for cardinal B-spline is at f = (m+1)/T_sm.
+
+    Must lie above 1.25 * f_sh for FIR-invertibility (Besset-Béarée 2017 §III).
+    """
+    f_sh = 40.0
+    _, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
+    first_zero = (m + 1) / t_sm
+    # Match expected value to within 0.1 Hz.
+    assert abs(first_zero - expected_first_zero_hz) < 0.1, (
+        "m=%d: computed %.2f Hz, expected %.2f Hz" % (m, first_zero,
+                                                       expected_first_zero_hz))
+    # Invertibility precondition.
+    assert first_zero > 1.25 * f_sh, (
+        "m=%d: first zero %.2f Hz is within 1.25*f_sh=%.1f Hz — "
+        "violates FIR-invertibility precondition (Besset-Béarée §III)"
+        % (m, first_zero, 1.25 * f_sh))
