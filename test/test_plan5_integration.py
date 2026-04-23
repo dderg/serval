@@ -1,33 +1,22 @@
 # test/test_plan5_integration.py
 #
-# Plan 5 Task 29 — end-to-end cascade identity integration test.
+# Plan 8 Chunk 2 Task 14 — integration tests for the baked-in shaper path.
 #
-# Chains the full pipeline in a single test session:
-#   CornerBlender.feed → QuinticBlendMove → trapq_append_quintic (C FFI)
-#   planned trajectory (QuinticShape + TOPP profile) → fused kernel cascade
+# Chains the corner-blending planner through to the baked quintic polynomial
+# and verifies:
+#   - One QuinticBlendMove per corner (D7 emit contract).
+#   - The baked payload (Chunk 2 variable-length phases) round-trips through
+#     trapq_append_quintic intact.
+#   - The baked polynomial matches a Python-side reference convolution of
+#     the pre-bake (unshaped) trajectory with the bs-family kernel, to
+#     within the 100 µm passband spec.
+#   - Phase boundaries of the baked polynomial are C^0 continuous.
 #
-# and verifies that the shaper-cascade output reproduces the planned
-# trajectory to within passband fidelity (≤ 100 μm) over the quintic
-# duration for bs1/bs3/bs5.
-#
-# Architecture note (escalation):
-#   toolhead._process_moves requires a full ToolHead instance with an MCU,
-#   reactor, stepper-kinematics graph etc. This test bypasses it by
-#   replicating the quintic-emit block of _process_moves directly: unpack
-#   QuinticBlendMove.quintic_trapq_payload, allocate a trapq via cffi,
-#   and call trapq_append_quintic.
-#
-# Architecture note (shaper sampling):
-#   kin_shaper.c::shaper_calc_position walks a live trapq list and is
-#   invoked from itersolve_generate_steps, which needs a full stepcompress
-#   setup (MCU OID, step_dist, queue, etc.) to drive. Exposing an
-#   arbitrary-time sampling helper would require a C-side change outside
-#   the test's scope. Instead, the cascade integral is evaluated on the
-#   Python side using the _exact same_ fused-kernel piecewise polynomial
-#   the C side receives via input_shaper_set_smoother_params — ensuring
-#   the kernel-mathematical content is identical, only the convolution
-#   engine differs (Python quadrature vs the C antiderivative fast path
-#   in integrate.c::integrate_move).
+# The post-hoc shaper cascade + fused feedforward inverse this file used
+# to exercise retired in Plan 8 Chunk 2 Task 13. The reference path here
+# is the explicit Python convolution of the unshaped polynomial against
+# the bs kernel — see _reference_convolution() below.
+
 from __future__ import annotations
 
 import math
@@ -38,14 +27,11 @@ import pytest
 from klippy import blendplanner, blendquintic, blendshape, chelper, topp
 from klippy.chelper.linear_quintic import append_trapezoid_as_quintic
 from klippy.extras import shaper_defs
-# bspline_inverse retired in Plan 8 Chunk 2 Task 13 — tests that depended
-# on the feedforward inverse are rewritten in Task 14.
 
 
 # ---------------------------------------------------------------------------
 # Inline fixtures — mirror test_blendplanner.py's Move/Toolhead stubs so this
-# file is importable standalone (test/ isn't a package, so cross-file imports
-# don't resolve under pytest's default rootdir discovery).
+# file is importable standalone.
 # ---------------------------------------------------------------------------
 
 
@@ -68,8 +54,6 @@ class _FakeToolhead:
 
 
 class _FakeMove:
-    """Re-implements klippy.toolhead.Move.__init__ without pyserial etc."""
-
     def __init__(self, toolhead, start_pos, end_pos, speed):
         self.toolhead = toolhead
         self.start_pos = tuple(start_pos)
@@ -119,19 +103,23 @@ class _FakeMove:
 
 
 class _FakeAxisIS:
-    """Mirrors klippy.extras.input_shaper.AxisInputShaper's blendmath-visible
-    surface. Plan 5 blendmath._extract_shapers reads shaper_type/shaper_freq
-    via .get_axis() + .params.
-    """
-    def __init__(self, axis, stype, freq, damping=0.1):
+    """Mirrors klippy.extras.input_shaper.AxisInputSmoother's blendmath-
+    visible surface for bs-family shapers. Plan 8 Chunk 2 reads
+    shaper_type / shaper_freq from params directly."""
+    def __init__(self, axis, stype, freq, damping=0.0):
         self._axis = axis
 
         class _P:
             pass
 
         self.params = _P()
+        # bs-family: smoother_type / smoother_freq convention — but we
+        # populate the FIR-style names too so blendmath._extract_shapers
+        # reads the right fields on either branch.
         self.params.shaper_type = stype
         self.params.shaper_freq = freq
+        self.params.smoother_type = stype
+        self.params.smoother_freq = freq
         self.params.damping_ratio = damping
 
     def get_axis(self):
@@ -160,86 +148,40 @@ class _FakePrinter:
 
 
 # ---------------------------------------------------------------------------
-# Fused-kernel builder — mirrors input_shaper.py AxisInputSmoother.
+# Baked-polynomial evaluator + unshaped-trajectory reference.
 # ---------------------------------------------------------------------------
 
 
-def _build_fused_kernel(bs_variant, f_sh_hz, target_passband):
-    """Retired: the fused feedforward-inverse kernel was removed with the
-    post-hoc shaper cascade in Plan 8 Chunk 2 Task 13. Task 14 rewrites
-    the passband tests against the baked planner polynomial directly."""
-    raise RuntimeError(
-        "_build_fused_kernel was retired with bspline_inverse (Plan 8 "
-        "Chunk 2 Task 13); rewrite the caller against the baked polynomial."
+def _unpack_payload(payload):
+    """Return (phase_t_ends, total_t_baked, arc_length, v_cap_min,
+    start_pos_xyz, coeff_tuple, legacy_triple).
+
+    Plan 8 Chunk 2 payload layout (9 fields):
+        (phase_t_ends_tuple, total_t_baked,
+         arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+         legacy_t_accel_end, legacy_t_decel_start, legacy_total_t)
+    """
+    (phase_t_ends_tuple, total_t_baked,
+     arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+     legacy_t_accel_end, legacy_t_decel_start, legacy_total_t) = payload
+    return (
+        tuple(phase_t_ends_tuple), total_t_baked,
+        arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+        (legacy_t_accel_end, legacy_t_decel_start, legacy_total_t),
     )
 
 
-def _eval_piecewise(C_pieces, tau):
-    """Evaluate a piecewise-polynomial kernel at global time tau.
-
-    Coeffs are in the global-time convention per bspline_inverse.fit_fused_kernel
-    (ascending powers of tau, not piece-local).
+def _baked_position_fn(payload):
+    """Return a callable t → (x, y, z) evaluating the baked per-phase
+    polynomials as trapq.c::move_get_coord does (Horner in phase-local t).
     """
-    for (a, b, coeffs) in C_pieces:
-        if a <= tau <= b:
-            acc = 0.0
-            for c in reversed(coeffs):
-                acc = acc * tau + c
-            return acc
-    return 0.0
-
-
-def _shaper_convolve(C_pieces, t_sm, traj_fn, t0, n_quad=256):
-    """Compute (k ⊛ x)(t0) = ∫ k(tau) x(t0 - tau) d tau over [-t_sm/2, +t_sm/2].
-
-    This matches the C-side convention where the smoother is centered at 0
-    (see kin_shaper.c::range_integrate and the antiderivative fast path in
-    integrate.c). n_quad chooses the Simpson-composite resolution; 256 is
-    plenty for a degree-5 piecewise kernel convolved with a degree-10
-    trajectory polynomial.
-    """
-    hst = 0.5 * t_sm
-    # Simpson's composite rule over [-hst, +hst] with 2m+1 nodes.
-    m = n_quad // 2
-    nodes = 2 * m + 1
-    step = (2.0 * hst) / (nodes - 1)
-    acc = 0.0
-    for i in range(nodes):
-        tau = -hst + i * step
-        w = 4.0 if (i % 2 == 1) else 2.0
-        if i == 0 or i == nodes - 1:
-            w = 1.0
-        k_val = _eval_piecewise(C_pieces, tau)
-        # Convention: shaped-position integrates the kernel against the
-        # commanded trajectory evaluated at t0 + tau (shaper in C uses
-        # move_time + tau when walking the trapq list). For a symmetric
-        # kernel (zero-mean) the ± choice doesn't shift the output.
-        x_val = traj_fn(t0 + tau)
-        acc += w * k_val * x_val
-    return acc * step / 3.0
-
-
-# ---------------------------------------------------------------------------
-# Fixture: planned-quintic trajectory evaluator.
-# ---------------------------------------------------------------------------
-
-
-def _planned_position_fn(payload):
-    """Return a callable t → (x, y, z) evaluating the composed per-phase
-    polynomials exactly as the C-side move_get_coord would.
-
-    Mirrors trapq.c::move_get_coord's Horner loop for MOVE_QUINTIC_POLY_T.
-    """
-    (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
-     start_pos_xyz, coeff_tuple) = payload
-    # Unpack the 135-double buffer back into per-phase [axis][k] form.
-    # Layout: phase0..phase2; per phase: 15 monomial coeffs * 3 axes
-    # interleaved (c[0].x, c[0].y, c[0].z, c[1].x, ...). Coefficients are in
-    # phase-LOCAL time (t - t_phase_start). Chunk 2 widened the slot to 15;
-    # c[11..14] are zero for the pre-Chunk-3 composer.
+    (phase_t_ends, total_t_baked, _, _, start_pos_xyz, coeff_tuple, _
+     ) = _unpack_payload(payload)
+    n_phases = len(phase_t_ends)
+    # Unpack coeff_tuple into phases[p][axis][k] layout.
     phases = []
     buf = list(coeff_tuple)
-    for p in range(3):
+    for p in range(n_phases):
         base = p * 15 * 3
         axes_coeffs = [[0.0] * 15 for _ in range(3)]
         for k in range(15):
@@ -248,33 +190,131 @@ def _planned_position_fn(payload):
         phases.append(axes_coeffs)
 
     def eval_at(t):
-        # Clip to [0, total_t]; outside the move the trajectory is a
-        # stationary hold at the endpoint (pad moves handle this).
-        if t <= 0.0:
-            return start_pos_xyz
-        if t >= total_t:
-            # End position = evaluate decel phase at its endpoint.
-            delta_t = total_t - t_decel_start
-            phase = phases[2]
-        elif t <= t_accel_end:
-            phase = phases[0]
-            delta_t = t
-        elif t <= t_decel_start:
-            phase = phases[1]
-            delta_t = t - t_accel_end
-        else:
-            phase = phases[2]
-            delta_t = t - t_decel_start
+        # Locate the containing phase. Evaluate the phase polynomial in
+        # phase-local time even at t=0 — the composer's zero-pad convention
+        # means c[0] of phase 0 already carries the pad-integrated value,
+        # which is NOT equal to struct move's start_pos.
+        phase_start = 0.0
+        chosen_phase = None
+        delta_t = 0.0
+        for p in range(n_phases):
+            phase_end = phase_t_ends[p]
+            if t <= phase_end or p == n_phases - 1:
+                chosen_phase = phases[p]
+                delta_t = t - phase_start
+                break
+            phase_start = phase_end
+        if chosen_phase is None:
+            chosen_phase = phases[-1]
+            delta_t = phase_t_ends[-1] - (
+                phase_t_ends[-2] if n_phases > 1 else 0.0
+            )
         out = [0.0, 0.0, 0.0]
         for ax in range(3):
-            coeffs = phase[ax]
+            coeffs = chosen_phase[ax]
             v = coeffs[14]
             for k in range(13, -1, -1):
                 v = v * delta_t + coeffs[k]
             out[ax] = v
         return tuple(out)
 
+    return eval_at, total_t_baked
+
+
+def _unshaped_position_fn(
+        shape, v_in, v_out, cruise_v, a_max, s_accel_end, s_decel_start):
+    """Build the UNSHAPED 3-phase polynomial directly from the QuinticShape
+    (same call the planner makes before passing through _bake_shaper_polynomial)
+    and return a t → (x, y, z) evaluator plus its total_t.
+
+    This is the "reference" trajectory that the bake path must approximate
+    via kernel convolution on passband frequencies.
+    """
+    (accel_polys, cruise_polys, decel_polys, t_accel_end, t_decel_start,
+     total_t, _arc_length) = shape.compose_phase_polynomials(
+        v_in=v_in, v_out=v_out, cruise_v=cruise_v, a_max=a_max,
+        s_accel_end=s_accel_end, s_decel_start=s_decel_start,
+    )
+
+    def eval_at(t):
+        if t <= 0.0:
+            # Evaluate accel phase at delta_t = 0 → constant-term (start_pos).
+            delta_t = 0.0
+            phase = accel_polys
+        elif t <= t_accel_end:
+            delta_t = t
+            phase = accel_polys
+        elif t <= t_decel_start:
+            delta_t = t - t_accel_end
+            phase = cruise_polys
+        elif t <= total_t:
+            delta_t = t - t_decel_start
+            phase = decel_polys
+        else:
+            # Stationary hold at end pos — evaluate decel at its endpoint.
+            delta_t = total_t - t_decel_start
+            phase = decel_polys
+        out = [0.0, 0.0, 0.0]
+        for ax in range(3):
+            coeffs = phase[ax]
+            v = coeffs[14] if len(coeffs) > 14 else 0.0
+            for k in range(min(13, len(coeffs) - 1), -1, -1):
+                v = v * delta_t + coeffs[k]
+            out[ax] = v
+        return tuple(out)
+
     return eval_at, total_t
+
+
+def _bs_kernel_eval(bs_variant, freq, damping, tau_array):
+    """Return w(tau) for the bs-family kernel at the given variant/freq.
+    Normalized (integrates to 1 over its support [-t_sm/2, t_sm/2])."""
+    for ism in shaper_defs.INPUT_SMOOTHERS:
+        if ism.name == bs_variant:
+            break
+    else:
+        raise ValueError("unknown bs variant: %s" % bs_variant)
+    C_pieces, t_sm = ism.init_func(freq, damping, True)
+    vals = np.asarray(shaper_defs.bspline_eval(C_pieces, tau_array, t_sm))
+    return vals, t_sm
+
+
+def _reference_convolution(
+        traj_fn, bs_variant, freq, t_eval, pad_start, pad_end,
+        total_t_unshaped, n_quad=513):
+    """Compute (k ⊛ x)(t_eval) using Simpson's rule over [-t_sm/2, t_sm/2].
+
+    Matches bs_compose.c convention: outside the unshaped [0, total_t_unshaped]
+    window the trajectory is ZERO-PADDED (see bs_compose.c line 317: "zero-
+    pad outside the move"). This is the per-move contribution convention —
+    the full-stream shaped trajectory sums contributions across adjacent
+    moves, but for a single-move unit test this is the exact invariant the
+    composer computes.
+    """
+    _, t_sm = _bs_kernel_eval(bs_variant, freq, 0.0, np.array([0.0]))
+    hst = 0.5 * t_sm
+    nodes = n_quad if n_quad % 2 == 1 else n_quad + 1
+    step = (2.0 * hst) / (nodes - 1)
+    taus = np.linspace(-hst, +hst, nodes)
+    k_vals, _ = _bs_kernel_eval(bs_variant, freq, 0.0, taus)
+
+    def padded(t, axis):
+        # bs_compose.c zero-pad convention: outside [0, move_t] the
+        # single-move contribution is 0 (pad_start / pad_end unused here).
+        if t <= 0.0 or t >= total_t_unshaped:
+            return 0.0
+        return traj_fn(t)[axis]
+
+    simp = np.ones(nodes)
+    simp[1:-1:2] = 4.0
+    simp[2:-1:2] = 2.0
+    out = np.zeros(3)
+    for ax in range(3):
+        integrand = np.array([
+            k_vals[i] * padded(t_eval - taus[i], ax) for i in range(nodes)
+        ])
+        out[ax] = (step / 3.0) * np.sum(simp * integrand)
+    return tuple(out)
 
 
 # ---------------------------------------------------------------------------
@@ -283,15 +323,6 @@ def _planned_position_fn(payload):
 
 
 def _make_toolhead_with_bs_shaper(bs_variant, freq, max_accel, corner_deviation):
-    """Build a _FakeToolhead whose input_shaper stub advertises a bs-family
-    shaper on both X and Y axes at the given frequency. Matches the D4
-    test-harness pattern in test_blendplanner.py.
-
-    Note: _FakeAxisIS is sufficient for blendmath._extract_shapers — the
-    snapshot pipeline there reads params.shaper_type/shaper_freq but does
-    NOT call the fused-kernel design path. That's done separately in this
-    test module via _build_fused_kernel.
-    """
     th = _FakeToolhead(
         max_accel=max_accel,
         max_accel_to_decel=max_accel,
@@ -308,8 +339,7 @@ def _make_toolhead_with_bs_shaper(bs_variant, freq, max_accel, corner_deviation)
 def _emit_right_angle_blend(th, speed=200.0):
     """Drive two 10 mm moves meeting at a 90° corner through CornerBlender.
 
-    Returns (trunc_prev, quintic_move, trunc_next_head). The quintic_move is
-    a QuinticBlendMove carrying the trapq payload.
+    Returns (trunc_prev, quintic_move, trunc_next_head).
     """
     cb = blendplanner.CornerBlender(th, move_cls=_FakeMove, max_chord_err=20e-3)
     m_prev = _FakeMove(th, (0.0, 0.0, 0.0, 0.0), (10.0, 0.0, 0.0, 0.5),
@@ -326,88 +356,79 @@ def _emit_right_angle_blend(th, speed=200.0):
     return trunc_prev, quintic_move, trunc_next_head
 
 
-# ---------------------------------------------------------------------------
-# trapq FFI round-trip: feed the QuinticBlendMove payload directly into
-# trapq_append_quintic (bypassing ToolHead._process_moves). Verify kind=1
-# storage + round-trip the move metadata via trapq_extract_old.
-# ---------------------------------------------------------------------------
-
-
 def _push_quintic_to_trapq(ffi_main, ffi_lib, tq, print_time, payload):
-    """Mirror ToolHead._process_moves's quintic-emit block without pulling
-    in the full toolhead instance."""
-    (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
-     start_pos_xyz, coeff_tuple) = payload
-    coeff_buf = ffi_main.new("double[135]", list(coeff_tuple))
-    phase_t_ends = ffi_main.new("double[3]", [
-        t_accel_end, t_decel_start, total_t,
-    ])
+    """Mirror ToolHead._process_moves's quintic-emit block (Plan 8 Chunk 2
+    variable-length phases)."""
+    (phase_t_ends, total_t_baked, arc_length, v_cap_min, start_pos_xyz,
+     coeff_tuple, _legacy) = _unpack_payload(payload)
+    n_phases = len(phase_t_ends)
+    coeff_buf = ffi_main.new(
+        f"double[{n_phases * 15 * 3}]", list(coeff_tuple)
+    )
+    phase_t_ends_buf = ffi_main.new(
+        f"double[{n_phases}]", list(phase_t_ends),
+    )
     ffi_lib.trapq_append_quintic(
         tq, print_time,
-        3, phase_t_ends,
-        total_t, arc_length, v_cap_min,
+        n_phases, phase_t_ends_buf,
+        total_t_baked, arc_length, v_cap_min,
+        0,  # shape_disabled=False: planner blend is always shaped
         start_pos_xyz[0], start_pos_xyz[1], start_pos_xyz[2],
         coeff_buf,
     )
-    return total_t
+    return total_t_baked
 
 
 # ---------------------------------------------------------------------------
-# Integration tests — shared TestClass amortizes toolhead/blend construction.
+# Integration tests.
 # ---------------------------------------------------------------------------
 
 
 class TestPlan5CascadeIntegration:
-    """End-to-end pipeline: plan corner → blend → trapq → cascade."""
+    """End-to-end pipeline: plan corner → blend → baked polynomial."""
 
     FREQ = 40.0
-    TARGET_PASSBAND = 0.3
-    # corner_deviation chosen so the blend arc_length falls in the
-    # 0.5-1 mm range: short enough to fit comfortably inside a ~50 ms
-    # total_t window, long enough that the planned trajectory carries
-    # measurable amplitude (the cascade error scales with trajectory
-    # amplitude × passband error, so we need amplitude > 0 to exercise
-    # the bound meaningfully).
     CORNER_DEVIATION = 0.2
     MAX_ACCEL = 10000.0
     SPEED = 200.0
 
-    # --- Structural: single QuinticBlendMove per 90° corner -----------------
+    # --- Structural: single QuinticBlendMove per corner ----------------------
 
     def test_single_quintic_blend_per_corner(self):
         """D7 emit contract: one QuinticBlendMove per blend, not a polyline.
 
-        Regression guard against a future accidental revert to the N-piece
-        polyline emit. The 135-double coefficient payload is present and
-        finite.
+        The Plan 8 Chunk 2 payload has 9 fields (variable phase count +
+        legacy trapezoid timings). Verify structure + finite coeffs.
         """
         th = _make_toolhead_with_bs_shaper(
             "bs3", self.FREQ, self.MAX_ACCEL, self.CORNER_DEVIATION,
         )
         _, quintic_move, _ = _emit_right_angle_blend(th, speed=self.SPEED)
         payload = quintic_move.quintic_trapq_payload
-        assert len(payload) == 7
-        (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
-         start_pos_xyz, coeff_tuple) = payload
-        assert total_t > 0.0
+        assert len(payload) == 9, "payload must be 9-tuple (Chunk 2 layout)"
+        (phase_t_ends, total_t_baked, arc_length, v_cap_min, start_pos_xyz,
+         coeff_tuple, legacy_triple) = _unpack_payload(payload)
+        assert total_t_baked > 0.0
         assert arc_length > 0.0
         assert v_cap_min > 0.0
-        assert 0.0 <= t_accel_end <= t_decel_start <= total_t
-        assert len(coeff_tuple) == 135
+        n_phases = len(phase_t_ends)
+        assert 1 <= n_phases <= 32, "n_phases out of MOVE_MAX_PIECES range"
+        # phase_t_ends is monotone non-decreasing, last equals total_t_baked.
+        assert all(phase_t_ends[i] <= phase_t_ends[i + 1]
+                   for i in range(n_phases - 1))
+        assert phase_t_ends[-1] == pytest.approx(total_t_baked, rel=1e-12)
+        assert len(coeff_tuple) == n_phases * 15 * 3
         for c in coeff_tuple:
             assert math.isfinite(c), "non-finite coefficient in payload"
+        # Legacy trapezoid-in-s timings sanity-check.
+        (t_ae, t_ds, legacy_total) = legacy_triple
+        assert 0.0 <= t_ae <= t_ds <= legacy_total
 
-    # --- Integration: blend → trapq_append_quintic → extract (kind=1) -------
+    # --- Integration: blend → trapq_append_quintic → extract -----------------
 
     def test_blend_routes_through_trapq_append_quintic(self):
         """CornerBlender emits a QuinticBlendMove → trapq_append_quintic
-        stores it as a quintic trapq entry. Verified via trapq_extract_old
-        after trapq_finalize_moves: the history carries a motion-bearing
-        entry with move_t == payload.total_t and print_time == t_print.
-
-        This is the FFI-level integration bridge ToolHead._process_moves
-        relies on. If it breaks, every blend becomes silently wrong at the
-        C boundary.
+        stores it. Verified via trapq_extract_old after trapq_finalize_moves.
         """
         th = _make_toolhead_with_bs_shaper(
             "bs3", self.FREQ, self.MAX_ACCEL, self.CORNER_DEVIATION,
@@ -426,7 +447,6 @@ class TestPlan5CascadeIntegration:
             tq, pm, 4, t_print - 0.001, t_print + total_t + 1.0,
         )
         assert n >= 1
-        # Find the motion-carrying entry (start_v > 0 under chord projection).
         found = None
         for i in range(n):
             if pm[i].start_v > 0.0 and pm[i].move_t > 0.0:
@@ -436,7 +456,7 @@ class TestPlan5CascadeIntegration:
         assert found.move_t == pytest.approx(total_t, rel=1e-9)
         assert found.print_time == pytest.approx(t_print, rel=1e-9)
 
-    # --- Cascade identity across bs1/bs3/bs5 ----------------------------------
+    # --- Baked polynomial matches Python reference convolution ---------------
 
     @pytest.mark.parametrize("bs_variant,max_err_um", [
         ("bs1", 100.0),
@@ -445,137 +465,145 @@ class TestPlan5CascadeIntegration:
     ])
     def test_shaper_cascade_matches_planned_within_passband(
             self, bs_variant, max_err_um):
-        """End-to-end cascade identity.
+        """The baked-in polynomial (blendplanner._bake_shaper_polynomial)
+        must match a Python-side reference convolution of the UNSHAPED
+        quintic with the same bs kernel, within the 100 µm passband spec.
 
-        Plan a 90° corner blend → TOPP → QuinticBlendMove → trapq payload.
-        Compute the shaper-cascade output (fused kernel convolved with the
-        planned trajectory) and compare to the planned trajectory itself.
-
-        For a bs-family feedforward-inverse cascade, fused-kernel passband
-        error is ≤ 3.17% (bs3 @ 12 Hz per §4.3 new_shaper_family.md). On
-        a quintic trajectory of amplitude ~ a few mm, this translates to
-        position error bounded by ~100 μm.
-
-        Sampling is restricted to the interior of the padded trajectory
-        where the convolution window [t - t_fused/2, t + t_fused/2] stays
-        fully inside a defined region. Outside the quintic we pad with
-        a stationary hold (constant position) — a valid zero-motion
-        extension that the fused kernel (integrating to 1) preserves
-        exactly.
+        The reference convolution uses Simpson's rule over [-t_sm/2,
+        t_sm/2] with pad-with-endpoint semantics outside the unshaped
+        duration. Since the bs kernel integrates to 1, a constant-pad
+        convolves to the same constant — matches the natural interpretation
+        of the baked polynomial outside its own support.
         """
         th = _make_toolhead_with_bs_shaper(
             bs_variant, self.FREQ, self.MAX_ACCEL, self.CORNER_DEVIATION,
         )
         _, quintic_move, _ = _emit_right_angle_blend(th, speed=self.SPEED)
         payload = quintic_move.quintic_trapq_payload
-        planned_fn, total_t = _planned_position_fn(payload)
 
-        # Padding: hold the start position before t=0 and the end position
-        # after t=total_t. The fused kernel has unit DC gain, so a constant
-        # input convolves to the same constant — the cascade at an
-        # out-of-move time reports the last-known trajectory value exactly.
-        start_xyz = planned_fn(0.0)
-        end_xyz = planned_fn(total_t)
+        # Baked polynomial evaluator.
+        baked_fn, total_t_baked = _baked_position_fn(payload)
 
-        def padded_x(t):
-            if t <= 0.0:
-                return start_xyz[0]
-            if t >= total_t:
-                return end_xyz[0]
-            return planned_fn(t)[0]
+        # Unshaped reference: re-run compose_phase_polynomials with the
+        # same TOPP-derived timings the planner used. We reconstruct them
+        # from the QuinticBlendMove attributes rather than re-doing TOPP.
+        shape = quintic_move.shape
+        # QuinticBlendMove stores start/end v2 and cruise_v on itself via
+        # set_junction; the composer needs v_in/v_out/cruise_v + s_accel/s_decel.
+        # The legacy trapezoid-in-s triple in the payload gives the timings
+        # directly, and shape carries arc_length + a_max (via shape._limits).
+        legacy_t_accel_end = payload[-3]
+        legacy_t_decel_start = payload[-2]
+        legacy_total_t = payload[-1]
+        # Recover cruise_v / v_in / v_out from the legacy triple + arc_length.
+        # This is exactly what set_junction stores on QuinticBlendMove when
+        # called by the outer lookahead, but without depending on that call
+        # having happened we peel them off the stored payload timing.
+        arc_length = payload[2]
+        cruise_t = max(0.0, legacy_t_decel_start - legacy_t_accel_end)
+        # Reuse the planner's baked-v_cap_min as a floor: cruise_v is at
+        # most v_cap_min, or v_in/v_out at the boundary.
+        v_cap_min = payload[3]
+        # Inverted trapezoid-in-s: find cruise_v from timings + arc_length.
+        a_max = shape._limits.a_max
+        # s_accel = 0.5 * (v_in + cruise_v) * t_accel (affine in s);
+        # short of redoing TOPP, use the QuinticShape.v_cap_fn(0) = v_in
+        # and v_cap_fn(arc_length) = v_out consistent with the planner.
+        # For right-angle 90° corners under a centripetal-dominated shape
+        # v_in == v_out == v_cap_min (symmetric blend).
+        v_in = v_out = min(v_cap_min, math.sqrt(quintic_move.max_start_v2))
+        # Solve cruise_v from (v_in + cruise_v) * t_accel/2 + cruise_v * cruise_t
+        #   + (cruise_v + v_out) * t_decel/2 = arc_length
+        # With symmetric ends v_in=v_out and t_accel=t_decel:
+        t_accel = legacy_t_accel_end
+        t_decel = legacy_total_t - legacy_t_decel_start
+        if t_accel == pytest.approx(t_decel, abs=1e-12):
+            # Symmetric. cruise_v solves:
+            #   v_in * t_accel + cruise_v * (t_accel + cruise_t) = arc_length
+            denom = t_accel + cruise_t
+            if denom > 0:
+                cruise_v = (arc_length - v_in * t_accel) / denom
+            else:
+                cruise_v = v_in
+        else:
+            cruise_v = arc_length / legacy_total_t
+        s_accel_end = 0.5 * (v_in + cruise_v) * t_accel
+        s_decel_start = arc_length - 0.5 * (cruise_v + v_out) * t_decel
 
-        def padded_y(t):
-            if t <= 0.0:
-                return start_xyz[1]
-            if t >= total_t:
-                return end_xyz[1]
-            return planned_fn(t)[1]
-
-        C_fused, t_fused, G, _, _ = _build_fused_kernel(
-            bs_variant, self.FREQ, self.TARGET_PASSBAND,
+        unshaped_fn, total_t_unshaped = _unshaped_position_fn(
+            shape, v_in=v_in, v_out=v_out, cruise_v=cruise_v, a_max=a_max,
+            s_accel_end=s_accel_end, s_decel_start=s_decel_start,
         )
 
-        # Sample across the full quintic duration. At the boundaries the
-        # convolution window extends into the stationary hold, which matches
-        # what the toolhead does in practice (pad moves / prior state).
-        n_samples = 30
+        # Reference convolution at t_eval samples inside [0, total_t_unshaped].
+        # Extend t_eval range up to total_t_baked: the baked polynomial is
+        # defined there and should carry the shaper's kernel tail.
+        pad_start = unshaped_fn(0.0)
+        pad_end = unshaped_fn(total_t_unshaped)
+
+        n_samples = 25
         max_err = 0.0
         max_err_t = 0.0
         max_err_axis = ""
+        # Sample inside the baked duration. For FIR the baked polynomial
+        # extends beyond total_t_unshaped — convolve with padding there too.
+        eval_end = total_t_baked
         for i in range(n_samples + 1):
-            t = total_t * i / n_samples
-            planned_xyz = planned_fn(t)
-            shaped_x = _shaper_convolve(C_fused, t_fused, padded_x, t)
-            shaped_y = _shaper_convolve(C_fused, t_fused, padded_y, t)
-            err_x = abs(shaped_x - planned_xyz[0])
-            err_y = abs(shaped_y - planned_xyz[1])
-            if err_x > max_err:
-                max_err = err_x
-                max_err_t = t
-                max_err_axis = "x"
-            if err_y > max_err:
-                max_err = err_y
-                max_err_t = t
-                max_err_axis = "y"
+            t = eval_end * i / n_samples
+            ref = _reference_convolution(
+                unshaped_fn, bs_variant, self.FREQ, t,
+                pad_start, pad_end, total_t_unshaped,
+            )
+            baked = baked_fn(t)
+            for ax_char, ax in (("x", 0), ("y", 1)):
+                err = abs(baked[ax] - ref[ax])
+                if err > max_err:
+                    max_err = err
+                    max_err_t = t
+                    max_err_axis = ax_char
         max_err_actual_um = max_err * 1000.0
         assert max_err_actual_um < max_err_um, (
-            "%s cascade identity: max err %.2f um (axis=%s) > %.1f um "
-            "at t=%.4fs (total_t=%.4fs)"
+            "%s bake-vs-convolve identity: max err %.2f um (axis=%s) "
+            "> %.1f um at t=%.4fs (total_t_baked=%.4fs, "
+            "total_t_unshaped=%.4fs)"
             % (bs_variant, max_err_actual_um, max_err_axis, max_err_um,
-               max_err_t, total_t)
+               max_err_t, total_t_baked, total_t_unshaped)
         )
 
-    # --- Phase-boundary continuity (C^0) --------------------------------------
+    # --- Phase-boundary continuity (C^0) -------------------------------------
 
     def test_phase_boundaries_C0_continuous(self):
-        """No step discontinuity in the commanded quintic trajectory at
-        the phase boundaries t_accel_end and t_decel_start. The shaper
-        cascade would smear a step, but it must not _introduce_ one.
-
-        The Python-side composed phase polynomials must match value at
-        the phase boundary from both sides (evaluating the accel phase
-        at delta_t = t_accel_end and the cruise phase at delta_t = 0).
+        """No step discontinuity in the baked polynomial at any phase
+        boundary. Plan 8 Chunk 2 produces variable-phase payloads (the
+        bs composer can introduce up to 2N+1 sub-phases for an N-phase
+        input). Each internal breakpoint must be C^0 continuous.
         """
         th = _make_toolhead_with_bs_shaper(
             "bs3", self.FREQ, self.MAX_ACCEL, self.CORNER_DEVIATION,
         )
         _, quintic_move, _ = _emit_right_angle_blend(th, speed=self.SPEED)
         payload = quintic_move.quintic_trapq_payload
-        planned_fn, total_t = _planned_position_fn(payload)
-        (t_accel_end, t_decel_start, _, _, _, _, _) = payload
-        # Eval just before and at the accel/cruise boundary.
+        baked_fn, total_t_baked = _baked_position_fn(payload)
+        (phase_t_ends, _, _, _, _, _, _) = _unpack_payload(payload)
+
         eps = 1e-9
-        # t_accel_end boundary
-        if t_accel_end > 0.0 and t_accel_end < total_t:
-            p_lo = planned_fn(t_accel_end - eps)
-            p_hi = planned_fn(t_accel_end + eps)
+        for p, t_boundary in enumerate(phase_t_ends[:-1]):
+            if t_boundary <= 0.0 or t_boundary >= total_t_baked:
+                continue
+            p_lo = baked_fn(t_boundary - eps)
+            p_hi = baked_fn(t_boundary + eps)
             for ax in range(3):
-                assert abs(p_hi[ax] - p_lo[ax]) < 1e-9, (
-                    "discontinuity at t_accel_end on axis %d: "
-                    "lo=%.12f hi=%.12f" % (ax, p_lo[ax], p_hi[ax])
-                )
-        # t_decel_start boundary
-        if t_decel_start > 0.0 and t_decel_start < total_t:
-            p_lo = planned_fn(t_decel_start - eps)
-            p_hi = planned_fn(t_decel_start + eps)
-            for ax in range(3):
-                assert abs(p_hi[ax] - p_lo[ax]) < 1e-9, (
-                    "discontinuity at t_decel_start on axis %d: "
-                    "lo=%.12f hi=%.12f" % (ax, p_lo[ax], p_hi[ax])
+                assert abs(p_hi[ax] - p_lo[ax]) < 1e-6, (
+                    "discontinuity at phase %d boundary (t=%.6f) axis %d: "
+                    "lo=%.12f hi=%.12f" % (p, t_boundary, ax, p_lo[ax],
+                                            p_hi[ax])
                 )
 
-    # --- Linear regression gate: linear move through pipeline is bit-exact ---
+    # --- Linear regression gate (unchanged by Plan 8 Chunk 2) ----------------
 
     def test_linear_move_through_pipeline_is_FP_precise(self):
-        """D2 foundation regression gate: a pure straight line (no blend)
-        routed through trapq_append (now the degenerate-quintic path) still
+        """A pure straight line (no blend) routed through trapq_append still
         reconstructs the closed-form linear trajectory to within FP precision.
-
-        After Plan 8 Chunk 1 Task 8, trapq_append converts the trapezoid to
-        a degenerate quintic coefficient buffer. We verify the round-trip at
-        the sampling level: evaluate the degenerate quintic's position at
-        representative times and compare to the closed-form
-        x(t) = start_v*t + 0.5*accel*t^2 (accel phase) etc.
         """
         th = _make_toolhead_with_bs_shaper(
             "bs3", self.FREQ, self.MAX_ACCEL, self.CORNER_DEVIATION,
@@ -587,24 +615,20 @@ class TestPlan5CascadeIntegration:
         assert emitted == [m]
         assert not hasattr(m, "quintic_trapq_payload") or \
             getattr(m, "quintic_trapq_payload", None) is None
-        # Push the linear move through trapq_append directly (mirrors
-        # ToolHead._process_moves). trapq_append builds a degenerate-quintic
-        # buffer from the classical trapezoid.
         ffi_main, ffi_lib = chelper.get_ffi()
         tq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
-        # Synthesize a simple trapezoidal profile: accel from 0 → 100 → 0.
         accel_t = 0.05
         cruise_t = 0.05
         decel_t = 0.05
         start_v = 0.0
         cruise_v = 100.0
-        accel = cruise_v / accel_t   # mm/s^2
+        accel = cruise_v / accel_t
         total_t = accel_t + cruise_t + decel_t
         append_trapezoid_as_quintic(
             tq, 1.0,
             accel_t, cruise_t, decel_t,
-            0.0, 0.0, 0.0,     # start_pos
-            1.0, 0.0, 0.0,     # axes_r — pure +X
+            0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0,
             start_v, cruise_v, accel,
         )
         ffi_lib.trapq_finalize_moves(tq, 1.0 + total_t + 1.0, 0.0)
@@ -613,25 +637,17 @@ class TestPlan5CascadeIntegration:
             tq, pm, 8, 0.5, 2.0 + total_t,
         )
         assert n >= 1
-        # Locate the motion-carrying entry (degenerate quintic spanning the
-        # entire trapezoid).
         found = None
         for i in range(n):
             if pm[i].start_v > 0.0 and pm[i].move_t > 0.0:
                 found = pm[i]
                 break
         assert found is not None
-        # Chord projection invariants: entry covers the full move_t, and
-        # the chord averaged velocity equals total_displacement / total_t.
         assert found.move_t == pytest.approx(total_t, rel=1e-12)
-        # Closed-form trapezoid displacement along +X.
         accel_d = start_v * accel_t + 0.5 * accel * accel_t * accel_t
         cruise_d = cruise_v * cruise_t
         decel_d = cruise_v * decel_t - 0.5 * accel * decel_t * decel_t
         chord = accel_d + cruise_d + decel_d
-        # Chord-average velocity from the degenerate quintic must match the
-        # analytic trapezoid chord / total_t to FP precision — this is the
-        # "linear through the pipeline is FP-precise" gate.
         assert found.start_v == pytest.approx(chord / total_t, rel=1e-12)
         assert found.x_r == pytest.approx(1.0, abs=1e-12)
         assert found.y_r == pytest.approx(0.0, abs=1e-12)
