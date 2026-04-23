@@ -37,7 +37,9 @@ import pytest
 
 from klippy import blendplanner, blendquintic, blendshape, chelper, topp
 from klippy.chelper.linear_quintic import append_trapezoid_as_quintic
-from klippy.extras import bspline_inverse, shaper_defs
+from klippy.extras import shaper_defs
+# bspline_inverse retired in Plan 8 Chunk 2 Task 13 — tests that depended
+# on the feedforward inverse are rewritten in Task 14.
 
 
 # ---------------------------------------------------------------------------
@@ -163,27 +165,13 @@ class _FakePrinter:
 
 
 def _build_fused_kernel(bs_variant, f_sh_hz, target_passband):
-    """Return (C_fused, t_fused, G, C_fwd, t_sm) for the given bs variant.
-
-    Mirrors klippy/extras/input_shaper.py::AxisInputSmoother.recompute_fused_kernel
-    step-for-step so the kernel content is bit-identical to what gets shipped
-    to the C side via input_shaper_set_smoother_params.
-    """
-    for ism in shaper_defs.INPUT_SMOOTHERS:
-        if ism.name == bs_variant:
-            break
-    else:
-        raise ValueError("unknown bs variant: %s" % bs_variant)
-    C_fwd, t_sm = ism.init_func(f_sh_hz, 0.1, True)
-    pb_max_hz = target_passband * f_sh_hz
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C_fwd, t_sm, f_sh_hz=f_sh_hz, pb_max_hz=pb_max_hz, tukey_alpha=0.05,
+    """Retired: the fused feedforward-inverse kernel was removed with the
+    post-hoc shaper cascade in Plan 8 Chunk 2 Task 13. Task 14 rewrites
+    the passband tests against the baked planner polynomial directly."""
+    raise RuntimeError(
+        "_build_fused_kernel was retired with bspline_inverse (Plan 8 "
+        "Chunk 2 Task 13); rewrite the caller against the baked polynomial."
     )
-    C_fused = bspline_inverse.fit_fused_kernel(
-        C_fwd, t_sm, h, T_h, dt, n_pieces=9, degree=5,
-    )
-    G = float(np.sum(np.abs(h)) * dt)
-    return C_fused, t_sm + T_h, G, C_fwd, t_sm
 
 
 def _eval_piecewise(C_pieces, tau):

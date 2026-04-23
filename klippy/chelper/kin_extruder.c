@@ -11,9 +11,16 @@
 #include "compiler.h" // __visible
 #include "itersolve.h" // struct stepper_kinematics
 #include "integrate.h" // struct smoother
-#include "kin_shaper.h" // struct shaper_pulses
 #include "pyhelper.h" // errorf
 #include "trapq.h" // move_get_distance
+
+// Plan 8 Chunk 2 Task 13: kin_shaper.c retired along with the post-hoc
+// step-generator shaper cascade. The previous extruder shaper-pulse
+// path (init_shaper / shaper_calc_position / shaper_pa_range_integrate)
+// becomes dead on this fork — XY shaping is baked directly into the
+// planner polynomial by blendplanner._bake_shaper_polynomial, so the
+// extruder reads an already-shaped trajectory via move_get_coord and
+// smoothing + PA through the integrate.h kernel alone.
 
 // Without pressure advance, the extruder stepper position is:
 //     extruder_position(t) = nominal_position(t)
@@ -120,23 +127,6 @@ pa_range_integrate(const struct move *m, int axis, double move_time
     }
 }
 
-static void
-shaper_pa_range_integrate(const struct move *m, int axis, double move_time
-                          , const struct shaper_pulses *sp
-                          , const struct smoother *sm
-                          , double *pa_velocity_integral)
-{
-    *pa_velocity_integral = 0.;
-    int num_pulses = sp->num_pulses, i;
-    for (i = 0; i < num_pulses; ++i) {
-        double t = sp->pulses[i].t, a = sp->pulses[i].a;
-        double p_pa_vel_int;
-        pa_range_integrate(m, axis, move_time + t, sm,
-                           &p_pa_vel_int);
-        *pa_velocity_integral += a * p_pa_vel_int;
-    }
-}
-
 struct pressure_advance_params {
     union {
         struct {
@@ -154,7 +144,6 @@ typedef double (*pressure_advance_func)(
 
 struct extruder_stepper {
     struct stepper_kinematics sk;
-    struct shaper_pulses sp[3];
     struct smoother sm[3];
     struct pressure_advance_params pa_params;
     pressure_advance_func pa_func;
@@ -208,27 +197,20 @@ extruder_calc_position(struct stepper_kinematics *sk, struct move *m
     }
     int i;
     struct coord e_pos, pa_vel;
-    // move_get_coord dispatches on kind; linear path matches the prior
-    // start_pos + axes_r * move_get_distance formula bit-identically.
+    // Post-hoc shaping retired (Plan 8 Chunk 2 Task 13). XY content is
+    // already baked into the planner polynomial, so e_pos == base_pos
+    // on every axis and PA integration reads the shaped trajectory
+    // through pa_range_integrate alone.
     struct coord base_pos = move_get_coord(m, move_time);
     for (i = 0; i < 3; ++i) {
         int axis = 'x' + i;
-        const struct shaper_pulses* sp = &es->sp[i];
         const struct smoother* sm = &es->sm[i];
-        int num_pulses = sp->num_pulses;
-        e_pos.axis[i] = num_pulses
-            ? shaper_calc_position(m, axis, move_time, sp)
-            : base_pos.axis[i];
+        e_pos.axis[i] = base_pos.axis[i];
         if (!sm->hst) {
             pa_vel.axis[i] = 0.;
         } else {
-            if (num_pulses) {
-                shaper_pa_range_integrate(m, axis, move_time, sp, sm,
-                                          &pa_vel.axis[i]);
-            } else {
-                pa_range_integrate(m, axis, move_time, sm,
-                                   &pa_vel.axis[i]);
-            }
+            pa_range_integrate(m, axis, move_time, sm,
+                               &pa_vel.axis[i]);
         }
     }
     double position = e_pos.x + e_pos.y + e_pos.z;
@@ -244,12 +226,9 @@ extruder_note_generation_time(struct extruder_stepper *es)
     double pre_active = 0., post_active = 0.;
     int i;
     for (i = 0; i < 3; ++i) {
-        struct shaper_pulses* sp = &es->sp[i];
         const struct smoother* sm = &es->sm[i];
-        double pre_active_axis = sm->hst + sm->t_offs + es->time_offset +
-            (sp->num_pulses ? sp->pulses[sp->num_pulses-1].t : 0.);
-        double post_active_axis = sm->hst - sm->t_offs - es->time_offset +
-            (sp->num_pulses ? -sp->pulses[0].t : 0.);
+        double pre_active_axis = sm->hst + sm->t_offs + es->time_offset;
+        double post_active_axis = sm->hst - sm->t_offs - es->time_offset;
         if (pre_active_axis > pre_active)
             pre_active = pre_active_axis;
         if (post_active_axis > post_active)
@@ -280,37 +259,6 @@ extruder_set_pressure_advance_model_func(struct stepper_kinematics *sk
     struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
     memset(&es->pa_params, 0, sizeof(es->pa_params));
     es->pa_func = func;
-}
-
-int __visible
-extruder_set_shaper_params(struct stepper_kinematics *sk, char axis
-                           , int n, double a[], double t[])
-{
-    if (axis != 'x' && axis != 'y')
-        return -1;
-    struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
-    struct shaper_pulses *sp = &es->sp[axis-'x'];
-    int status = init_shaper(n, a, t, sp);
-    extruder_note_generation_time(es);
-    return status;
-}
-
-// Plan 5 piecewise-smoother FFI. piece_buf layout per piece (8 doubles):
-// [t_start, t_end, c_0, c_1, c_2, c_3, c_4, c_5]. n_pieces == 0 disables
-// the smoother (identity / none).
-int __visible
-extruder_set_smoothing_params(struct stepper_kinematics *sk, char axis
-                              , int n_pieces, const double piece_buf[]
-                              , double t_sm, double t_offs)
-{
-    if (axis != 'x' && axis != 'y' && axis != 'z')
-        return -1;
-    struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
-    struct smoother *sm = &es->sm[axis-'x'];
-    int status = init_smoother(n_pieces, piece_buf, t_sm, sm);
-    sm->t_offs = t_offs;
-    extruder_note_generation_time(es);
-    return status;
 }
 
 double __visible

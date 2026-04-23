@@ -38,7 +38,6 @@ SOURCE_FILES = [
     "kin_rotary_delta.c",
     "kin_winch.c",
     "kin_extruder.c",
-    "kin_shaper.c",
     "kin_idex.c",
     "integrate.c",
     "bs_compose.c",
@@ -55,7 +54,6 @@ OTHER_FILES = [
     "linear_quintic.h",
     "pollreactor.h",
     "msgblock.h",
-    "kin_shaper.h",
     "integrate.h",
     "bs_compose.h",
     "fir_compose.h",
@@ -215,23 +213,13 @@ defs_kin_extruder = """
         , double pa_velocity, struct pressure_advance_params *pa_params);
     void extruder_set_pressure_advance_model_func(struct stepper_kinematics *sk
         , double (*func)(double, double, struct pressure_advance_params *));
-    int extruder_set_shaper_params(struct stepper_kinematics *sk, char axis
-        , int n, double a[], double t[]);
-    int extruder_set_smoothing_params(struct stepper_kinematics *sk, char axis
-        , int n_pieces, const double piece_buf[], double t_sm, double t_offs);
     double extruder_get_step_gen_window(struct stepper_kinematics *sk);
 """
 
-defs_kin_shaper = """
-    double input_shaper_get_step_gen_window(struct stepper_kinematics *sk);
-    int input_shaper_set_shaper_params(struct stepper_kinematics *sk, char axis
-        , int n, double a[], double t[]);
-    int input_shaper_set_smoother_params(struct stepper_kinematics *sk
-        , char axis, int n_pieces, const double piece_buf[], double t_sm);
-    int input_shaper_set_sk(struct stepper_kinematics *sk
-        , struct stepper_kinematics *orig_sk);
-    struct stepper_kinematics * input_shaper_alloc(void);
-"""
+# Plan 8 Chunk 2 Task 13: defs_kin_shaper retired along with kin_shaper.c.
+# The post-hoc step-generator shaper cascade has no successor on this
+# fork — shaping is baked into the planner polynomial by
+# blendplanner._bake_shaper_polynomial.
 
 defs_kin_idex = """
     void dual_carriage_set_sk(struct stepper_kinematics *sk
@@ -311,7 +299,6 @@ defs_all = [
     defs_kin_rotary_delta,
     defs_kin_winch,
     defs_kin_extruder,
-    defs_kin_shaper,
     defs_kin_idex,
     defs_compose,
 ]

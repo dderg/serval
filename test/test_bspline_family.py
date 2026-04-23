@@ -6,14 +6,15 @@ Covers:
   - A_axis at f_sh=40, target_smoothing=0.12 matches the spec §D1 table
     within 1% for each variant.
   - Legacy flat-polynomial init_smoother helper still round-trips through
-    the piecewise representation (bit-identical check for linear-move
-    moment computation against a numpy reference).
+    the piecewise representation.
 
-The fused-kernel, direct-quintic, and saturation-cap deliverables stay
-out of scope for this test file — they will be added alongside Tasks 9
-and later.
+Plan 8 Chunk 2 Task 13: tests exercising the retired post-hoc shaper
+infrastructure — bspline_inverse / fused kernel / extruder_smoother /
+_marshal_pieces_to_buffer / get_axis_G — are retired along with the
+modules they covered. The remaining tests pin the shaper_defs kernel
+math and the migration-error story, both of which the planner
+(blendplanner._bake_shaper_polynomial) still depends on.
 """
-import math
 
 import numpy as np
 import pytest
@@ -56,8 +57,6 @@ def test_bspline_kernel_even(m):
     C_pieces, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
     grid = np.linspace(-t_sm / 2, t_sm / 2, 1001)
     w = np.asarray(shaper_defs.bspline_eval(C_pieces, grid, t_sm))
-    # atol accounts for 1e-12 round-off on the largest kernel values; rtol
-    # alone is too tight for near-zero samples at the support boundaries.
     np.testing.assert_allclose(w, w[::-1], rtol=1e-6, atol=1e-10)
 
 
@@ -79,7 +78,6 @@ def test_bspline_sigma_T_closed_form(m):
     w = np.asarray(shaper_defs.bspline_eval(C_pieces, grid, t_sm))
     sigma2_numerical = np.trapezoid(w * grid * grid, grid)
     sigma2_expected = t_sm * t_sm / (12.0 * (m + 1))
-    # ~5-digit agreement; limited by trapezoidal quadrature on 10^5 points.
     assert abs(sigma2_numerical - sigma2_expected) < 1e-9
 
 
@@ -101,16 +99,9 @@ def test_bspline_A_axis_matches_spec_table(m):
 
 
 def test_init_smoother_pa_kernel_shape():
-    """PA extruder smoother kernel (kinematics/extruder.py:24 literal
-    ``[15/8, 0, -15, 0, 30]`` at t_sm=0.04): boundary value is zero, peak
-    sits at t=0, and sigma^2 matches the closed-form expectation.
-
-    Legacy-semantics pin: the input list is ASCENDING power-basis
-    (a[i] is the coefficient of t^i). This test is the regression gate
-    for C1 (coefficient-order flip) — an implementation that reversed
-    the convention would see w(+-hst) ~ 659 instead of 0, and
-    sigma^2 ~ 1.29e-4 instead of 5.71e-5.
-    """
+    """PA extruder smoother kernel (literal ``[15/8, 0, -15, 0, 30]``
+    at t_sm=0.04): boundary value is zero, peak sits at t=0, and
+    sigma^2 matches the closed-form expectation."""
     coeffs = [15.0 / 8.0, 0.0, -15.0, 0.0, 30.0]
     smooth_time = 0.04
     C_pieces, t_sm = shaper_defs.init_smoother(coeffs, smooth_time, True)
@@ -120,46 +111,28 @@ def test_init_smoother_pa_kernel_shape():
     assert t_start == pytest.approx(-smooth_time / 2)
     assert t_end == pytest.approx(smooth_time / 2)
 
-    # Kernel vanishes at support boundaries (the whole point of the 4th-order
-    # smoothing function comment in kinematics/extruder.py).
     endpoints = np.asarray(
         shaper_defs.bspline_eval(C_pieces, np.array([t_start, t_end]), t_sm)
     )
     np.testing.assert_allclose(endpoints, [0.0, 0.0], atol=1e-9)
 
-    # Kernel is symmetric with positive peak at t=0.
     peak_val = shaper_defs.bspline_eval(C_pieces, np.array([0.0]), t_sm)[0]
     assert peak_val > 0.0
 
-    # sigma^2 via the piecewise moment closed-form path.
     sc = shaper_calibrate.ShaperCalibrate(printer=None)
     sigma2 = sc._get_smoother_sigma2((C_pieces, t_sm))
-    # Closed form: w_norm(t) = (15 / (8*t_sm^5)) * (t_sm - 2t)^2 * (t_sm + 2t)^2
-    # (factored form of the 4th-order PA kernel). Integrates to 1 over
-    # [-t_sm/2, +t_sm/2]; second moment is t_sm^2 / 28.
     expected_sigma2 = smooth_time * smooth_time / 28.0
     assert expected_sigma2 == pytest.approx(5.7142857e-5, rel=1e-6)
     assert sigma2 == pytest.approx(expected_sigma2, rel=1e-2)
 
 
 def test_init_smoother_ascending_convention_pins_monomial():
-    """Direct monomial check: input ``[0, 0, 1]`` must encode w_raw(t) = t^2
-    (ASCENDING convention). A reversed convention would encode w_raw(t) = 1.
-
-    Pin test for C1: catches any future flip of the ascending-vs-descending
-    semantic in init_smoother.
-    """
-    # Choose normalize_coeffs=False so we can read the piece coeffs directly
-    # without the 1/t_sm^(i+1) rescaling obscuring the ordering.
+    """Direct monomial check: input ``[0, 0, 1]`` must encode w_raw(t) = t^2."""
     smooth_time = 0.04
     C_pieces, _ = shaper_defs.init_smoother([0.0, 0.0, 1.0], smooth_time, False)
     piece_coeffs = C_pieces[0][2]
-    # ASCENDING: piece_coeffs[2] = 1.0 means the t^2 coefficient is 1.
     assert piece_coeffs == [0.0, 0.0, 1.0]
 
-    # Non-trivially check the normalized path too: input [0, 0, 1] with
-    # normalize=True must scale coefficients so that the t^i scaling is
-    # 1/t_sm^(i+1). For i=2 that means piece_coeffs[2] = 1 / t_sm^3.
     C_norm, _ = shaper_defs.init_smoother([0.0, 0.0, 1.0], smooth_time, True)
     piece_coeffs_norm = C_norm[0][2]
     assert piece_coeffs_norm[0] == 0.0
@@ -167,41 +140,9 @@ def test_init_smoother_ascending_convention_pins_monomial():
     assert piece_coeffs_norm[2] == pytest.approx(1.0 / smooth_time ** 3, rel=1e-12)
 
 
-def test_init_smoother_custom_coeff_round_trip_preserves_ascending():
-    """CustomInputSmootherParams stores _raw_coeffs in ASCENDING order
-    (the ``reversed()`` call at input_shaper.py converts user-written
-    highest-degree-first config into ascending). init_smoother then consumes
-    ascending directly. This regression test pins the custom-smoother pathway.
-    """
-    from klippy.extras import input_shaper as _is_mod
-
-    # Mimic what the config path produces after reversal: user wrote
-    # [30, 0, -15, 0, 15/8] (highest-degree-first) -> reversed ascending:
-    ascending = [15.0 / 8.0, 0.0, -15.0, 0.0, 30.0]
-    params = _is_mod.CustomInputSmootherParams.__new__(
-        _is_mod.CustomInputSmootherParams
-    )
-    params.axis = "x"
-    params._raw_coeffs = ascending
-    params.smooth_time = 0.04
-
-    C_pieces, t_sm = params.get_smoother()
-    # The kernel must vanish at support boundaries — same shape invariant
-    # as the PA smoother test above.
-    endpoints = np.asarray(
-        shaper_defs.bspline_eval(C_pieces, np.array([-t_sm / 2, t_sm / 2]), t_sm)
-    )
-    np.testing.assert_allclose(endpoints, [0.0, 0.0], atol=1e-9)
-
-
 def test_update_shaper_raises_migration_error_for_retired_name():
     """SET_INPUT_SHAPER SHAPER_TYPE=smooth_mzv (runtime) must surface the
-    bs2 migration hint, not a generic "Unsupported shaper type" error.
-
-    Pin test for I2: the pre-fix code swallowed the migration error in
-    ShaperFactory.update_shaper's try/except and fell through to the
-    generic error path.
-    """
+    bs2 migration hint, not a generic "Unsupported shaper type" error."""
     from klippy.extras import input_shaper as _is_mod
 
     factory = _is_mod.ShaperFactory()
@@ -220,8 +161,6 @@ def test_update_shaper_raises_migration_error_for_retired_name():
                 return self._st
             return default
 
-    # Start from a working bs3 shaper, then attempt to "update" it to the
-    # retired smooth_mzv — this is the runtime path the bug bites.
     p = _is_mod.TypedInputSmootherParams("x", "bs3", None)
     p.smoother_freq = 40.0
     existing = _is_mod.AxisInputSmoother(p)
@@ -234,50 +173,9 @@ def test_update_shaper_raises_migration_error_for_retired_name():
     assert "Magnum Opus" in msg
 
 
-@pytest.mark.parametrize("shaper_name", ["mzv", "zv", "bs2", "bs3", "bs5"])
-def test_get_extruder_smoother_kernel_shape(shaper_name):
-    """The PA-path extruder smoother (extruder_smoother.get_extruder_smoother)
-    must be a sensible smoothing kernel: boundary values ~ 0, peak interior,
-    peak magnitude strictly larger than boundary magnitudes.
-
-    Pin test for the C_e[::-1] convention flip that the initial C1 fix
-    introduced — the _calc_extruder_smoother fit emits ASCENDING
-    coefficients, and the [::-1] was flipping them to DESCENDING before
-    handoff to the now-ASCENDING-expecting init_smoother. Resulting
-    "kernel" peak landed at the boundary, not in the interior.
-    """
-    from klippy.extras import extruder_smoother
-
-    t_sm = 0.04
-    C_pieces, t_sm_ret = extruder_smoother.get_extruder_smoother(
-        shaper_name, t_sm, 0.1, normalize_coeffs=True
-    )
-    assert t_sm_ret == pytest.approx(t_sm)
-
-    grid = np.linspace(-t_sm / 2, t_sm / 2, 401)
-    w = np.asarray(shaper_defs.bspline_eval(C_pieces, grid, t_sm))
-
-    # Boundaries vanish (or nearly so — the [1.5, 0, -6] fallback gives a
-    # clean zero, the LSQ-fitted higher-order kernels land within 1e-6 of
-    # zero thanks to the boundary constraints baked into _calc_extruder_smoother).
-    np.testing.assert_allclose([w[0], w[-1]], 0.0, atol=1e-6)
-
-    # Peak is strictly interior — not within 10% of either boundary.
-    idx_peak = int(np.argmax(np.abs(w)))
-    t_peak = grid[idx_peak]
-    assert abs(t_peak) < 0.4 * t_sm, (
-        "%s kernel peak at t=%.4f; expected interior "
-        "(|t| < 0.4 * t_sm = %.4f)" % (shaper_name, t_peak, 0.4 * t_sm)
-    )
-
-    # Peak magnitude strictly greater than boundary magnitudes.
-    peak = abs(w[idx_peak])
-    assert peak > max(abs(w[0]), abs(w[-1])) + 1e-6
-
-
 def test_create_shaper_raises_migration_error_for_retired_name():
     """Config-load path: shaper_type = smooth_mzv must raise the migration
-    error with the bs2 hint. Mirrors the update-path pin above."""
+    error with the bs2 hint."""
     from klippy.extras import input_shaper as _is_mod
 
     factory = _is_mod.ShaperFactory()
@@ -312,14 +210,7 @@ def test_create_shaper_raises_migration_error_for_retired_name():
 @pytest.mark.parametrize("m", BS_M)
 def test_piecewise_moments_match_numerical_reference(m):
     """For a cardinal B-spline of order m, moments m_0, m_1, m_2 computed
-    piecewise match a dense-grid numerical quadrature to ~5 digits.
-
-    This pins the moment-integration math that integrate_move consumes on
-    linear moves. If the piecewise implementation shifts by more than the
-    quadrature noise, regressions manifest as small position offsets —
-    exactly the failure mode that degree-extension from 3 to 11 moments
-    could in principle introduce but must not.
-    """
+    piecewise match a dense-grid numerical quadrature to ~5 digits."""
     f_sh = 40.0
     C_pieces, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
     grid = np.linspace(-t_sm / 2, t_sm / 2, 100001)
@@ -347,58 +238,6 @@ def test_piecewise_moments_match_numerical_reference(m):
                 "m_%d mismatch for bs%d: numeric=%.6e piecewise=%.6e"
                 % (k, m, num, pw)
             )
-
-
-# ---------------------------------------------------------------------------
-# FFI buffer-layout round-trip: piecewise smoother marshalled to the flat
-# FFI buffer must preserve every piece's t_start / t_end / coeffs.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("m", BS_M)
-def test_ffi_buffer_round_trip_preserves_pieces(m):
-    """Python-side _marshal_pieces_to_buffer preserves piece data for the
-    C-side init_smoother to consume. This is the bit-level contract that
-    the prior Task-1-in-isolation attempt got wrong (piecewise tuples
-    passed to a flat-double-array FFI signature).
-    """
-    from klippy import chelper
-    from klippy.extras import input_shaper as _is_mod
-
-    ffi_main, _ = chelper.get_ffi()
-
-    f_sh = 40.0
-    C_pieces, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
-    # Pre-normalization integral ~ 1 (closed-form cardinal B-spline).
-    grid = np.linspace(-t_sm / 2, t_sm / 2, 10001)
-    w = np.asarray(shaper_defs.bspline_eval(C_pieces, grid, t_sm))
-    integral = np.trapezoid(w, grid)
-    assert abs(integral - 1.0) < 1e-5
-
-    n_pieces, buf = _is_mod._marshal_pieces_to_buffer(ffi_main, C_pieces)
-    assert n_pieces == len(C_pieces)
-    for i, (t_start, t_end, coeffs) in enumerate(C_pieces):
-        base = i * 8
-        assert buf[base + 0] == pytest.approx(t_start, rel=1e-12)
-        assert buf[base + 1] == pytest.approx(t_end, rel=1e-12)
-        for k in range(6):
-            exp = coeffs[k] if k < len(coeffs) else 0.0
-            assert buf[base + 2 + k] == pytest.approx(exp, rel=1e-12, abs=1e-30)
-
-
-def test_ffi_buffer_rejects_too_many_pieces():
-    """The FFI buffer marshaller rejects over-sized piecewise kernels up
-    front so bugs do not reach the C side as silent buffer overruns."""
-    from klippy import chelper
-    from klippy.extras import input_shaper as _is_mod
-
-    ffi_main, _ = chelper.get_ffi()
-
-    # Build a kernel with one more piece than the C side supports.
-    over_sized = [(float(i), float(i + 1), [1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-                  for i in range(_is_mod._FFI_MAX_PIECES + 1)]
-    with pytest.raises(ValueError):
-        _is_mod._marshal_pieces_to_buffer(ffi_main, over_sized)
 
 
 # ---------------------------------------------------------------------------
@@ -434,23 +273,15 @@ def test_retired_smoother_not_in_input_smoothers_list():
 @pytest.mark.parametrize("m", [1, 2, 3, 4, 5])
 def test_bspline_spectrum_is_sinc_power(m):
     """Numerical FT of bs_m matches closed-form sinc^(m+1) at representative
-    frequencies.
-
-    For a cardinal B-spline of order m rescaled to support [-T_sm/2, +T_sm/2]:
-        W(f) = sinc(f * T_1)^(m+1)  with  T_1 = T_sm / (m+1)
-    where numpy sinc(x) = sin(pi*x) / (pi*x).
-    """
+    frequencies."""
     f_sh = 40.0
     C_pieces, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
     T_1 = t_sm / (m + 1)
-    # Dense grid for numerical FT — 20001 points gives sub-1e-4 trapezoid error.
     grid = np.linspace(-t_sm / 2, t_sm / 2, 20001)
     w = shaper_defs.bspline_eval(C_pieces, grid, t_sm)
-    # Compare at five representative frequencies well below the first zero.
     for f in [5.0, 10.0, 15.0, 20.0, 25.0]:
         omega = 2 * np.pi * f
         W_numeric = np.trapezoid(w * np.cos(omega * grid), grid)
-        # numpy sinc: sinc(x) = sin(pi*x)/(pi*x)
         W_expected = np.sinc(f * T_1) ** (m + 1)
         assert abs(W_numeric - W_expected) < 1e-4, (
             "m=%d, f=%.0f Hz: numeric=%.6f, expected=%.6f"
@@ -468,323 +299,10 @@ def test_bspline_first_spectral_zero_above_f_sh(m, expected_first_zero_hz):
     f_sh = 40.0
     _, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
     first_zero = (m + 1) / t_sm
-    # Match expected value to within 0.1 Hz.
     assert abs(first_zero - expected_first_zero_hz) < 0.1, (
         "m=%d: computed %.2f Hz, expected %.2f Hz" % (m, first_zero,
                                                        expected_first_zero_hz))
-    # Invertibility precondition.
     assert first_zero > 1.25 * f_sh, (
         "m=%d: first zero %.2f Hz is within 1.25*f_sh=%.1f Hz — "
         "violates FIR-invertibility precondition (Besset-Béarée §III)"
         % (m, first_zero, 1.25 * f_sh))
-
-
-# ---------------------------------------------------------------------------
-# FIR companion kernel (bspline_inverse.compute_inverse_fir).
-# Cosine-taper + hard-bandlimit IFFT design per new_shaper_family.md §10.
-# Reference numbers: new_shaper_family.md §4.3 table at f_sh=40 Hz,
-# pb_max=0.3·f_sh=12 Hz, T_h=2·T_sm, dt=1e-5, tukey_alpha=0.25.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("m,expected_G", [
-    (1, 1.933), (2, 1.921), (3, 2.003), (4, 1.991), (5, 1.951),
-])
-def test_bspline_inverse_G_matches_spec(m, expected_G):
-    """G = ‖h‖₁ (L1 norm) matches new_shaper_family.md §4.3 table within 5%.
-
-    The §4.3 table was generated with tukey_alpha=0.05; we ship
-    tukey_alpha=0.25 per the Plan 5 Task 4 spec (fir_companion_kernel.md §1
-    convention). The larger taper shifts G by up to ~3.5% per variant,
-    so tolerance is 0.1 absolute (~5% of G~2) rather than a tighter pin.
-    """
-    from klippy.extras import bspline_inverse
-
-    f_sh = 40.0
-    C, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C, t_sm, f_sh_hz=f_sh, dt=1e-5)
-    G = float(np.sum(np.abs(h)) * dt)
-    assert abs(G - expected_G) < 0.1, (
-        "m=%d: got G=%.4f, expected %.4f (±0.1)" % (m, G, expected_G))
-
-
-@pytest.mark.parametrize("m,expected_T_h_ms", [
-    (1, 77.77), (2, 97.31), (3, 112.60), (4, 125.31), (5, 136.26),
-])
-def test_bspline_inverse_T_h_matches_spec(m, expected_T_h_ms):
-    """T_h = 2·T_sm matches the spec table to < 0.1 ms."""
-    from klippy.extras import bspline_inverse
-
-    f_sh = 40.0
-    C, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C, t_sm, f_sh_hz=f_sh, dt=1e-5)
-    assert abs(T_h * 1000 - expected_T_h_ms) < 0.1, (
-        "m=%d: got T_h=%.3f ms, expected %.2f ms"
-        % (m, T_h * 1000, expected_T_h_ms))
-
-
-def test_bspline_inverse_h_is_odd_length_centered():
-    """h has odd length so there's a center tap at tau=0."""
-    from klippy.extras import bspline_inverse
-
-    f_sh = 40.0
-    C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C, t_sm, f_sh_hz=f_sh, dt=1e-5)
-    assert len(h) % 2 == 1, (
-        "h length %d is even; should be odd so a center tap sits at tau=0"
-        % len(h))
-
-
-def test_bspline_inverse_unit_integral():
-    """∫ h(tau) dtau = 1 after the final renormalization."""
-    from klippy.extras import bspline_inverse
-
-    f_sh = 40.0
-    C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C, t_sm, f_sh_hz=f_sh, dt=1e-5)
-    integral = float(np.sum(h) * dt)
-    assert abs(integral - 1.0) < 1e-9, (
-        "integral = %.12f; expected 1.0 after renormalize" % integral)
-
-
-# ---------------------------------------------------------------------------
-# FIR companion cascade passband regression. Pins the cosine-taper algorithm
-# against §4.3 — a regression that drops the 1/W-inside-passband branch would
-# fail here even if G remains ~ 2.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("m,max_pb_err", [
-    (1, 0.06),   # §4.3 bs1 @ pb_max = 0.3 f_sh: 4.79% -> 6% headroom
-    (3, 0.04),   # §4.3 bs3 @ pb_max = 0.3 f_sh: 3.17%
-])
-def test_bspline_inverse_passband_error_bounded(m, max_pb_err):
-    """Cascade |W·H| on passband matches identity within spec tolerance.
-    Pins that the cosine-taper algorithm preserves passband fidelity — a
-    regression that drops the 1/W-inside-passband branch would fail here
-    even if G remains ≈ 2. Pinned at tukey_alpha=0.05 to match the §4.3
-    reference table (the module default is 0.25 for sharper time-domain
-    edge rolloff, which trades some passband-error headroom)."""
-    from klippy.extras import bspline_inverse
-    f_sh = 40.0
-    C, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C, t_sm, f_sh_hz=f_sh, tukey_alpha=0.05)
-    pb_err = bspline_inverse.cascade_passband_error(
-        C, t_sm, h, dt, pb_max_hz=0.3 * f_sh)
-    assert pb_err < max_pb_err, (
-        "m=%d: pb_err=%.6f, limit=%.6f" % (m, pb_err, max_pb_err))
-
-
-# ---------------------------------------------------------------------------
-# Path C fused kernel fit. Pins that the 9-piece × degree-5 least-squares
-# reconstruction reproduces the exact FIR cascade passband error to within
-# the verification table in fused_kernel_storage_resolution.md §4.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("m,max_pb_err", [
-    (1, 0.05),
-    (2, 0.04),
-    (3, 0.04),
-    (4, 0.04),
-    (5, 0.01),
-])
-def test_fused_kernel_fit_passband_error(m, max_pb_err):
-    """Path C fit preserves cascade passband fidelity to within 5% of
-    exact FIR cascade (see fused_kernel_storage_resolution.md verification
-    table: bs3 fit 3.218% vs exact 3.218%). Pinned at tukey_alpha=0.05 to
-    match the reference table."""
-    from klippy.extras import bspline_inverse
-    f_sh = 40.0
-    C, t_sm = shaper_defs.INPUT_SMOOTHERS[m - 1].init_func(f_sh, 0.1, True)
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C, t_sm, f_sh_hz=f_sh, tukey_alpha=0.05)
-    fused_pieces = bspline_inverse.fit_fused_kernel(
-        C, t_sm, h, T_h, dt, n_pieces=9, degree=5)
-    pb_err = bspline_inverse.fit_fused_kernel_passband_error(
-        fused_pieces, pb_max_hz=0.3 * f_sh)
-    assert pb_err < max_pb_err, (
-        "m=%d: pb_err=%.6f, limit=%.6f" % (m, pb_err, max_pb_err))
-
-
-def test_fused_kernel_fit_has_9_pieces_degree_5():
-    from klippy.extras import bspline_inverse
-    f_sh = 40.0
-    C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(C, t_sm, f_sh_hz=f_sh)
-    fused_pieces = bspline_inverse.fit_fused_kernel(C, t_sm, h, T_h, dt)
-    assert len(fused_pieces) == 9
-    for (t_start, t_end, coeffs) in fused_pieces:
-        assert len(coeffs) == 6  # degree 5 -> 6 coefficients
-
-
-def test_fused_kernel_fit_pieces_are_equal_width():
-    from klippy.extras import bspline_inverse
-    f_sh = 40.0
-    C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(C, t_sm, f_sh_hz=f_sh)
-    fused_pieces = bspline_inverse.fit_fused_kernel(C, t_sm, h, T_h, dt)
-    widths = [(t_end - t_start) for (t_start, t_end, _) in fused_pieces]
-    expected_width = (t_sm + T_h) / 9.0
-    for w in widths:
-        assert abs(w - expected_width) < 1e-9
-
-
-def test_fused_kernel_covers_full_support():
-    """First piece starts at -(T_sm+T_h)/2; last piece ends at +(T_sm+T_h)/2."""
-    from klippy.extras import bspline_inverse
-    f_sh = 40.0
-    C, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(f_sh, 0.1, True)
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(C, t_sm, f_sh_hz=f_sh)
-    fused_pieces = bspline_inverse.fit_fused_kernel(C, t_sm, h, T_h, dt)
-    half_support = (t_sm + T_h) / 2
-    assert abs(fused_pieces[0][0] - (-half_support)) < 1e-9
-    assert abs(fused_pieces[-1][1] - (+half_support)) < 1e-9
-
-
-# ---------------------------------------------------------------------------
-# Plan 5 Pillar 1 D3 wire-up (Task 11) — pin that AxisInputSmoother's
-# recompute_fused_kernel produces the same C_fused as a direct
-# bspline_inverse.fit_fused_kernel call, and that the sentinel /
-# graceful-degradation paths still produce a forward-only kernel.
-#
-# These tests use the module directly (AxisInputSmoother +
-# TypedInputSmootherParams) rather than spinning up a full printer
-# instance — that test harness is heavier than the wire-through this
-# deliverable introduces.
-# ---------------------------------------------------------------------------
-
-
-def _make_axis_smoother(axis, shaper_type, shaper_freq):
-    """Construct an AxisInputSmoother without a config object — values
-    are set directly on the params instance to avoid PrinterShim setup."""
-    from klippy.extras import input_shaper as _is_mod
-    params = _is_mod.TypedInputSmootherParams(axis, shaper_type, None)
-    params.smoother_freq = shaper_freq
-    return _is_mod.AxisInputSmoother(params)
-
-
-def test_d3_axis_smoother_fused_matches_fit_kernel_bs3():
-    """AxisInputSmoother.C_fused after recompute_fused_kernel(0.3) matches
-    bspline_inverse.fit_fused_kernel output — pins that the wire-through
-    in update_stepper_kinematics is the same kernel D4 and the tests see.
-    """
-    from klippy.extras import bspline_inverse
-    axis = _make_axis_smoother("x", "bs3", 40.0)
-    axis.recompute_fused_kernel(0.3)
-    assert axis.C_fused is not None
-    assert len(axis.C_fused) == 9
-    # Recompute the same thing directly.
-    C_fwd, t_sm = shaper_defs.INPUT_SMOOTHERS[2].init_func(40.0, 0.1, True)
-    h, T_h, dt = bspline_inverse.compute_inverse_fir(
-        C_fwd, t_sm, f_sh_hz=40.0, pb_max_hz=0.3 * 40.0, tukey_alpha=0.05)
-    expected = bspline_inverse.fit_fused_kernel(
-        C_fwd, t_sm, h, T_h, dt, n_pieces=9, degree=5)
-    assert len(expected) == len(axis.C_fused)
-    for (e_piece, a_piece) in zip(expected, axis.C_fused):
-        assert abs(e_piece[0] - a_piece[0]) < 1e-12
-        assert abs(e_piece[1] - a_piece[1]) < 1e-12
-        np.testing.assert_allclose(e_piece[2], a_piece[2], rtol=1e-12,
-                                   atol=1e-14)
-    # t_fused = t_sm + T_h — same as what FFI receives.
-    assert abs(axis.t_fused - (t_sm + T_h)) < 1e-12
-    # G = ||h||_1 — positive and finite.
-    assert 1.5 < axis.G_axis < 3.0  # §4.3 reference: bs3 G ≈ 2.0
-
-
-def test_d3_sentinel_target_passband_zero_disables_fused():
-    """target_passband == 0 routes to sentinel path: no fused kernel
-    computed, G == 1.0. Matches the target_smoothing=0 user-level
-    sentinel, which InputShaper._effective_target_passband maps to 0.
-    """
-    axis = _make_axis_smoother("x", "bs3", 40.0)
-    axis.recompute_fused_kernel(0.0)
-    assert axis.C_fused is None
-    assert axis.t_fused == 0.0
-    assert axis.G_axis == 1.0
-
-
-def test_d3_non_bs_family_skips_inverse():
-    """Classic FIR shapers aren't invertible — recompute_fused_kernel
-    must skip and leave G == 1.0, C_fused == None so
-    update_stepper_kinematics falls through to the impulse-shaper path.
-
-    AxisInputShaper (classic FIR) doesn't even implement
-    recompute_fused_kernel — check it's absent so the InputShaper loop's
-    hasattr guard is load-bearing.
-    """
-    from klippy.extras import input_shaper as _is_mod
-    params = _is_mod.TypedInputShaperParams("x", "mzv", None)
-    params.shaper_freq = 40.0
-    shaper = _is_mod.AxisInputShaper(params)
-    # Classic impulse shapers don't carry fused-kernel state.
-    assert not hasattr(shaper, "recompute_fused_kernel")
-    assert not hasattr(shaper, "C_fused")
-
-
-def test_d3_none_smoother_skips_inverse():
-    """shaper_type=none (empty smoother_freq): get_smoother returns
-    ([], 0.0) per shaper_defs.get_none_smoother — recompute_fused_kernel
-    must gracefully skip (G == 1.0)."""
-    axis = _make_axis_smoother("x", "bs3", 0.0)  # freq 0 -> none path
-    axis.recompute_fused_kernel(0.3)
-    assert axis.C_fused is None
-    assert axis.G_axis == 1.0
-
-
-def test_d3_axis_smoother_bs2_different_target_passband():
-    """Sanity: flipping target_passband changes C_fused (different inverse
-    design target) — regression guard that the knob is actually wired to
-    bspline_inverse.compute_inverse_fir's pb_max_hz."""
-    axis_narrow = _make_axis_smoother("x", "bs2", 40.0)
-    axis_narrow.recompute_fused_kernel(0.2)
-    axis_wide = _make_axis_smoother("x", "bs2", 40.0)
-    axis_wide.recompute_fused_kernel(0.5)
-    # Different target_passband → different G (§4.3 table: narrower
-    # passband → smaller G).
-    assert axis_narrow.C_fused is not None
-    assert axis_wide.C_fused is not None
-    assert axis_narrow.G_axis != axis_wide.G_axis
-    assert axis_narrow.G_axis < axis_wide.G_axis  # narrow -> smaller G
-
-
-def test_d3_cascade_identity_bs3_passband_under_3pct():
-    """End-to-end cascade identity: the stored (fitted) fused kernel
-    evaluated in the passband must be flat to within ≤ 3% — this is the
-    key Task 11 integration-flavored pin. Uses
-    bspline_inverse.fit_fused_kernel_passband_error for a closed-form FT
-    of the piecewise fit, exactly what the C side sees.
-    """
-    from klippy.extras import bspline_inverse
-    axis = _make_axis_smoother("x", "bs3", 40.0)
-    axis.recompute_fused_kernel(0.3)
-    assert axis.C_fused is not None
-    pb_err = bspline_inverse.fit_fused_kernel_passband_error(
-        axis.C_fused, pb_max_hz=0.3 * 40.0)
-    assert pb_err < 0.04, (
-        "cascade identity broken: pb_err=%.6f > 0.04 at bs3@40 Hz "
-        "with target_passband=0.3" % pb_err)
-
-
-def test_d3_input_shaper_get_axis_G_defaults_to_one():
-    """InputShaper.get_axis_G returns 1.0 for any axis when the shaper
-    is unconfigured / none — avoids downstream consumers having to
-    guard against missing entries.
-    """
-    from klippy.extras import input_shaper as _is_mod
-    # Build an InputShaper with no config; inject fake shapers directly.
-    class _Dummy(_is_mod.InputShaper):
-        def __init__(self):
-            # Skip full __init__; only shapers list matters.
-            self.shapers = [_make_axis_smoother("x", "bs3", 0.0),
-                            _make_axis_smoother("y", "bs3", 0.0)]
-    d = _Dummy()
-    assert d.get_axis_G("x") == 1.0
-    assert d.get_axis_G("y") == 1.0
-    # Unknown axis falls through to 1.0 as well.
-    assert d.get_axis_G("z") == 1.0
