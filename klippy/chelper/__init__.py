@@ -44,6 +44,7 @@ SOURCE_FILES = [
     "fir_compose.c",
     "linear_pa_compose.c",
     "cheb_fit.c",
+    "nonlinear_pa_compose.c",
 ]
 DEST_LIB = "c_helper.so"
 OTHER_FILES = [
@@ -61,6 +62,7 @@ OTHER_FILES = [
     "fir_compose.h",
     "linear_pa_compose.h",
     "cheb_fit.h",
+    "nonlinear_pa_compose.h",
 ]
 
 defs_stepcompress = """
@@ -190,6 +192,19 @@ defs_compose = """
         const double *mono_coeffs,
         double v_lo, double v_hi,
         double v);
+    void nonlinear_pa_compose(
+        int n_phases,
+        const double *phase_t_ends,
+        double *coeff_buf,
+        double axis_n_x,
+        double axis_n_y,
+        double axis_n_z,
+        double extr_r,
+        double linear_advance,
+        double nonlinear_offset,
+        double linearization_velocity,
+        int model_kind,
+        double *out_max_residual);
 """
 
 defs_kin_cartesian = """
