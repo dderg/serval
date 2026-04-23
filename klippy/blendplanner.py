@@ -15,6 +15,7 @@ from .chelper import bs_compose as _bs_compose
 from .chelper import fir_compose as _fir_compose
 from .chelper import linear_pa_compose as _linear_pa_compose
 from .chelper import nonlinear_pa_compose as _nonlinear_pa_compose
+from .chelper import smooth_compose as _smooth_compose
 from .extras import shaper_defs as _shaper_defs
 
 
@@ -83,6 +84,18 @@ def _extract_pa_snapshot(toolhead):
 
 
 _BS_ORDERS = {f"bs{i}": i for i in range(1, 6)}
+
+# Legacy smooth-IS kernel init functions, keyed by shaper_type. Restored
+# alongside the bs family — empirically some printers prefer the smooth-IS
+# single-piece polynomials at equivalent support width (see branch notes).
+_SMOOTH_IS_INIT_FUNCS = {
+    "smooth_zv": _shaper_defs.get_smooth_zv_smoother,
+    "smooth_mzv": _shaper_defs.get_smooth_mzv_smoother,
+    "smooth_ei": _shaper_defs.get_smooth_ei_smoother,
+    "smooth_2hump_ei": _shaper_defs.get_smooth_2hump_ei_smoother,
+    "smooth_zvd_ei": _shaper_defs.get_smooth_zvd_ei_smoother,
+    "smooth_si": _shaper_defs.get_smooth_si_smoother,
+}
 
 
 # Filament-error threshold above which nonlinear_pa_compose emits a
@@ -195,8 +208,13 @@ def _bake_shaper_polynomial(
       - FIR shaper (zv / mzv): all axes must share shaper_type / freq /
         damping — run fir_compose with the supplied neighbour
         polynomials.
-      - Smooth-IS (bs1..bs5): same homogeneous-kernel requirement — run
-        bs_compose with neighbour polynomials.
+      - Cardinal B-spline chain (bs1..bs5): same homogeneous-kernel
+        requirement — run bs_compose with neighbour polynomials.
+      - Smooth-IS family (smooth_zv / smooth_mzv / smooth_ei /
+        smooth_2hump_ei / smooth_zvd_ei / smooth_si): single-piece
+        polynomial kernel from the pre-Plan-5 Butyugin design. Routes
+        through smooth_compose with the init_func-supplied kernel
+        pieces.
 
     Neighbour polynomials (`prev_unshaped` / `next_unshaped`) are tuples
     of the same shape as the unshaped payload — `(phase_t_ends,
@@ -250,6 +268,21 @@ def _bake_shaper_polynomial(
                 bs_order=order,
                 shaper_freq=freq,
                 damping_ratio=damping,
+                **neighbour_kwargs,
+            )
+        elif shaper_type in _SMOOTH_IS_INIT_FUNCS:
+            init_func = _SMOOTH_IS_INIT_FUNCS[shaper_type]
+            # Smooth-IS kernels accept (shaper_freq, damping_ratio,
+            # normalize_coeffs=True). damping_ratio is ignored by the
+            # current smooth-IS set (kernels are fixed-shape at zeta=0.1)
+            # but still passed through for signature parity.
+            kernel_pieces, t_sm = init_func(freq, damping, True)
+            if not kernel_pieces or t_sm <= 0.0:
+                return unshaped_phase_t_ends, unshaped_total_t, unshaped_coeffs
+            phase_t_ends, out_coeffs = _smooth_compose.smooth_compose(
+                in_phase_t_ends, in_coeffs,
+                kernel_pieces=kernel_pieces,
+                t_sm=t_sm,
                 **neighbour_kwargs,
             )
         elif shaper_type == "zv":
