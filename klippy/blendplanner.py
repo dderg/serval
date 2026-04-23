@@ -187,6 +187,28 @@ class QuinticBlendMove:
         self.next_junction_v2 = min(self.next_junction_v2, v2)
         self.next_junction_v_capped_to = speed
 
+    def calc_junction(self, prev_move):
+        # The blend's v_in is pointwise-safe via TOPP + v_cap_fn (D7
+        # Option Z); centripetal and extruder flow caps are already
+        # composed into v_cap_fn at emit time. Skip both here and just
+        # run the upstream cascade so the outer lookahead can still
+        # tighten max_start_v2 / max_smoothed_v2 when the predecessor
+        # turns out to be rate-limited.
+        if not self.is_kinematic_move or not prev_move.is_kinematic_move:
+            return
+        max_start_v2 = min(
+            self.max_start_v2,
+            self.max_cruise_v2,
+            prev_move.max_cruise_v2,
+            prev_move.next_junction_v2,
+            prev_move.max_start_v2 + prev_move.delta_v2,
+        )
+        self.max_start_v2 = max_start_v2
+        self.max_smoothed_v2 = min(
+            max_start_v2,
+            prev_move.max_smoothed_v2 + prev_move.smooth_delta_v2,
+        )
+
 
 class CornerBlender:
     """Second filter stage in the blend pipeline.
