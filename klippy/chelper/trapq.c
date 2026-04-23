@@ -5,11 +5,12 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
-#include <math.h> // sqrt
+#include <math.h> // sqrt, fmin
 #include <stddef.h> // offsetof
 #include <stdlib.h> // malloc
 #include <string.h> // memset
-#include "compiler.h" // unlikely
+#include "compiler.h" // unlikely, __visible
+#include "linear_quintic.h" // build_linear_as_quintic_coeffs
 #include "trapq.h" // move_get_coord
 
 // Allocate a new 'move' object. memset(0) produces a valid MOVE_LINEAR with
@@ -188,10 +189,11 @@ trapq_add_move(struct trapq *tq, struct move *m)
     tail_sentinel->print_time = 0.;
 }
 
-// Fill and add a (linear) move to the trapezoid velocity queue. Unchanged
-// wire signature — all five Python callers (toolhead, force_move,
-// manual_stepper, trad_rack, kinematics/extruder) continue to emit linear
-// trapq entries.
+// Plan 8 Chunk 1 Task 2: dispatch through the quintic path.
+//
+// Construct a 99-double degenerate-quintic coefficient buffer representing
+// the accel/cruise/decel trapezoid and delegate to trapq_append_quintic.
+// After this, no MOVE_LINEAR structs are produced by the append entry point.
 void __visible
 trapq_append(struct trapq *tq, double print_time
              , double accel_t, double cruise_t, double decel_t
@@ -199,47 +201,39 @@ trapq_append(struct trapq *tq, double print_time
              , double axes_r_x, double axes_r_y, double axes_r_z
              , double start_v, double cruise_v, double accel)
 {
-    struct coord start_pos = { .x=start_pos_x, .y=start_pos_y, .z=start_pos_z };
-    struct coord axes_r = { .x=axes_r_x, .y=axes_r_y, .z=axes_r_z };
-    if (accel_t) {
-        struct move *m = move_alloc();
-        m->print_time = print_time;
-        m->move_t = accel_t;
-        m->kind = MOVE_LINEAR;
-        m->u.lin.start_v = start_v;
-        m->u.lin.half_accel = .5 * accel;
-        m->start_pos = start_pos;
-        m->u.lin.axes_r = axes_r;
-        trapq_add_move(tq, m);
-
-        print_time += accel_t;
-        start_pos = move_get_coord(m, accel_t);
-    }
-    if (cruise_t) {
-        struct move *m = move_alloc();
-        m->print_time = print_time;
-        m->move_t = cruise_t;
-        m->kind = MOVE_LINEAR;
-        m->u.lin.start_v = cruise_v;
-        m->u.lin.half_accel = 0.;
-        m->start_pos = start_pos;
-        m->u.lin.axes_r = axes_r;
-        trapq_add_move(tq, m);
-
-        print_time += cruise_t;
-        start_pos = move_get_coord(m, cruise_t);
-    }
-    if (decel_t) {
-        struct move *m = move_alloc();
-        m->print_time = print_time;
-        m->move_t = decel_t;
-        m->kind = MOVE_LINEAR;
-        m->u.lin.start_v = cruise_v;
-        m->u.lin.half_accel = -.5 * accel;
-        m->start_pos = start_pos;
-        m->u.lin.axes_r = axes_r;
-        trapq_add_move(tq, m);
-    }
+    double coeff_buf[99];
+    build_linear_as_quintic_coeffs(
+        accel_t, cruise_t, decel_t,
+        start_v, cruise_v, accel,
+        axes_r_x, axes_r_y, axes_r_z,
+        start_pos_x, start_pos_y, start_pos_z,
+        coeff_buf);
+    double move_t = accel_t + cruise_t + decel_t;
+    // Total path distance is the sum of per-phase displacements along
+    // axes_r; the arc length is that distance scaled by |axes_r|.
+    double accel_d = start_v * accel_t + 0.5 * accel * accel_t * accel_t;
+    double cruise_d = cruise_v * cruise_t;
+    double decel_d = cruise_v * decel_t - 0.5 * accel * decel_t * decel_t;
+    double total_d = accel_d + cruise_d + decel_d;
+    double axes_r_mag = sqrt(axes_r_x * axes_r_x + axes_r_y * axes_r_y
+                             + axes_r_z * axes_r_z);
+    double arc_length = total_d * axes_r_mag;
+    // v_cap_min is the minimum instantaneous velocity over the trapezoid.
+    // For a classical trapezoid the velocity is monotone on each phase, so
+    // the extrema live at the endpoints: start_v, cruise_v, and the decel
+    // end velocity (cruise_v - accel * decel_t). Clamp at 0 to guard
+    // against tiny FP negatives when the planner brings the end velocity
+    // to zero.
+    double decel_end_v = cruise_v - accel * decel_t;
+    double v_cap_min = fmin(fmin(start_v, cruise_v), decel_end_v);
+    if (v_cap_min < 0.0) v_cap_min = 0.0;
+    trapq_append_quintic(
+        tq, print_time,
+        accel_t,                  // t_accel_end
+        accel_t + cruise_t,       // t_decel_start
+        move_t, arc_length, v_cap_min,
+        start_pos_x, start_pos_y, start_pos_z,
+        coeff_buf);
 }
 
 // Plan 5 D2b — emit a single quintic trapq entry. Phase boundaries are
