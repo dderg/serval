@@ -12,19 +12,12 @@ struct coord {
     };
 };
 
-// Plan 5 D2b — tagged-union struct move. MOVE_LINEAR keeps the existing
-// trapezoidal-velocity primitive bit-compatible; MOVE_QUINTIC_POLY_T carries
-// a direct per-phase position-in-t polynomial emitted by the blendplanner.
-//
-// CRITICAL: MOVE_LINEAR must remain at enum value 0. Several code paths
-// synthesize a struct move via memset(m, 0, sizeof(*m)) expecting a valid
-// zero-motion linear move (e.g. itersolve_calc_position_from_coord,
-// trapq_alloc sentinels, trapq_set_position, trapq_add_move null-fills,
-// kin_idex stub moves). Reordering the enum silently breaks all of them.
-enum move_kind {
-    MOVE_LINEAR = 0,              /* existing trapq primitive */
-    MOVE_QUINTIC_POLY_T = 1,      /* Plan 5: per-phase poly-in-t */
-};
+// Plan 8 Chunk 1 Task 8 — flattened struct move. Every move is a quintic
+// polynomial payload: three phases (accel/cruise/decel), each carrying a
+// per-axis position-in-t polynomial with up to 11 coefficients. Null-motion
+// moves (trapq sentinels, time-gap fills, itersolve stack stubs) are a
+// memset-zeroed struct move with start_pos set — move_get_coord recognizes
+// the all-zero phase t_ends and returns start_pos.
 
 // Per-phase position polynomial: x(t) = sum_k c_k * (t - t_phase_start)^k,
 // evaluated in a phase-local time coordinate. 11 coeffs per axis (degree 10
@@ -39,19 +32,10 @@ struct move_quintic_phase {
 
 struct move {
     double print_time, move_t;
-    enum move_kind kind;
     struct coord start_pos;
-    union {
-        struct {                   /* MOVE_LINEAR */
-            double start_v, half_accel;
-            struct coord axes_r;
-        } lin;
-        struct {                   /* MOVE_QUINTIC_POLY_T */
-            double arc_length;
-            struct move_quintic_phase accel, cruise, decel;
-            double v_cap_min;      /* Option Z upstream junction cap */
-        } quintic;
-    } u;
+    double arc_length;
+    struct move_quintic_phase accel, cruise, decel;
+    double v_cap_min;             /* Option Z upstream junction cap */
     struct list_node node;
 };
 
@@ -61,7 +45,6 @@ struct trapq {
 
 struct pull_move {
     double print_time, move_t;
-    int kind;             /* 0 = MOVE_LINEAR, 1 = MOVE_QUINTIC_POLY_T */
     double start_v, accel;
     double start_x, start_y, start_z;
     double x_r, y_r, z_r;

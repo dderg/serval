@@ -44,7 +44,7 @@ pa_move_integrate(const struct move *m, int axis
 {
     int can_pressure_advance = 0;
     const struct move_quintic_phase *phases[3] = {
-        &m->u.quintic.accel, &m->u.quintic.cruise, &m->u.quintic.decel,
+        &m->accel, &m->cruise, &m->decel,
     };
     for (int p = 0; p < 3 && !can_pressure_advance; ++p) {
         const struct move_quintic_phase *ph = phases[p];

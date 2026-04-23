@@ -111,7 +111,6 @@ defs_itersolve = """
 defs_trapq = """
     struct pull_move {
         double print_time, move_t;
-        int kind;
         double start_v, accel;
         double start_x, start_y, start_z;
         double x_r, y_r, z_r;

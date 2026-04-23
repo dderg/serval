@@ -1,11 +1,11 @@
 # Plan 5 D2b/D2c — direct-quintic trapq round-trip tests.
 #
+# After Plan 8 Chunk 1 Task 8, struct move is quintic-only (no tagged union).
 # Verifies:
-#  1. MOVE_LINEAR path through trapq_append + move_get_coord is unchanged
-#     relative to a Python reference (linear bit-identical gate).
-#  2. MOVE_QUINTIC_POLY_T path through trapq_append_quintic + move_get_coord
-#     evaluates the per-phase polynomial via Horner correctly (quintic round-
-#     trip gate).
+#  1. trapq_append → quintic dispatch preserves the closed-form linear
+#     trapezoid as a degenerate quintic (linear-as-quintic chord gate).
+#  2. trapq_append_quintic → move_get_coord evaluates the per-phase
+#     polynomial via Horner correctly (quintic round-trip gate).
 #  3. Python-side compose_phase_polynomials (blendquintic.QuinticShape) emits
 #     coefficients that, fed through trapq_append_quintic, produce positions
 #     matching the QuinticShape's own position_at / Bezier evaluation to
@@ -63,9 +63,10 @@ class _FakeMove:
 
 
 def test_linear_move_get_coord_bit_identical():
-    """Emitting a linear trapezoid via trapq_append and querying
-    move_get_coord produces coordinates matching the Python formula
-    to bit-exact (double precision)."""
+    """trapq_append builds a degenerate-quintic coefficient buffer from the
+    classical trapezoid. The resulting single history entry spans the whole
+    trapezoid and, via trapq_extract_old's chord projection, reports
+    (start_v, x_r, y_r) consistent with the closed-form linear path."""
     ffi_main, ffi_lib = _ffi()
     tq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
 
@@ -73,6 +74,7 @@ def test_linear_move_get_coord_bit_identical():
     accel_t = 0.05
     cruise_t = 0.1
     decel_t = 0.05
+    total_t = accel_t + cruise_t + decel_t
     start_x, start_y, start_z = 10.0, 20.0, 0.0
     ax, ay, az = 0.6, 0.8, 0.0  # unit vector
     start_v = 50.0
@@ -89,20 +91,28 @@ def test_linear_move_get_coord_bit_identical():
                                   print_time - 0.001,
                                   print_time + 1.0)
     assert n >= 1
-    # Find the accel sub-move by its start_v fingerprint.
-    found_accel = None
+    # One motion-carrying entry spanning the full trapezoid.
+    motion = None
     for i in range(n):
-        if abs(pm[i].start_v - start_v) < 1e-9 and pm[i].accel > 0.0:
-            found_accel = pm[i]
+        if pm[i].start_v > 0.0:
+            motion = pm[i]
             break
-    assert found_accel is not None, (
-        f"could not locate accel sub-move among {n} entries"
+    assert motion is not None, (
+        f"could not locate motion entry among {n} history entries"
     )
-    assert found_accel.kind == 0
-    assert found_accel.move_t == pytest.approx(accel_t)
-    assert found_accel.accel == pytest.approx(accel)
-    assert found_accel.x_r == pytest.approx(ax)
-    assert found_accel.y_r == pytest.approx(ay)
+    assert motion.move_t == pytest.approx(total_t, rel=1e-12)
+    # Closed-form trapezoid displacement along axes_r.
+    accel_d = start_v * accel_t + 0.5 * accel * accel_t * accel_t
+    cruise_d = cruise_v * cruise_t
+    decel_d = cruise_v * decel_t - 0.5 * accel * decel_t * decel_t
+    chord = accel_d + cruise_d + decel_d
+    assert motion.start_v == pytest.approx(chord / total_t, rel=1e-9)
+    assert motion.accel == pytest.approx(0.0, abs=1e-12)
+    assert motion.x_r == pytest.approx(ax, abs=1e-9)
+    assert motion.y_r == pytest.approx(ay, abs=1e-9)
+    # start_pos anchored at the supplied origin.
+    assert motion.start_x == pytest.approx(start_x)
+    assert motion.start_y == pytest.approx(start_y)
 
 
 # ----- quintic path: Horner round-trip -------------------------------------
@@ -135,12 +145,11 @@ def test_quintic_move_get_coord_horner_roundtrip():
         buf,
     )
 
-    # Pull the move via trapq_extract_old to confirm kind.
+    # Pull the move via trapq_extract_old to confirm projection.
     ffi_lib.trapq_finalize_moves(tq, 2.0, 2.0)
     pm = ffi_main.new("struct pull_move[2]")
     n = ffi_lib.trapq_extract_old(tq, pm, 2, 0.5, 2.0)
     assert n == 1
-    assert pm[0].kind == 1                            # MOVE_QUINTIC_POLY_T
     # Quintic's linear-projection fallback — chord start->end /  move_t.
     # x moves from 0.5 to 0.5 + 2.5*0.1 = 0.75 over 0.1 s → 2.5 mm/s.
     assert pm[0].start_v == pytest.approx(2.5, rel=1e-9)
@@ -247,7 +256,6 @@ def test_compose_emit_and_query_matches_bezier():
     pm = ffi_main.new("struct pull_move[2]")
     n = ffi_lib.trapq_extract_old(tq, pm, 2, 0.5, 3.0)
     assert n == 1
-    assert pm[0].kind == 1
 
     # We can't directly call move_get_coord on the C side without the struct
     # move pointer — but we can verify composition by Python Horner against

@@ -151,16 +151,15 @@ class DumpTrapQ:
             return
         out = ["Dumping trapq '%s' %d moves:" % (self.name, len(data))]
         for i, m in enumerate(data):
-            kind_str = "lin" if m.kind == 0 else ("qui" if m.kind == 1
-                                                  else "k=%d" % m.kind)
+            # Plan 8 Chunk 1 Task 8: all moves are quintic; legacy "qui"
+            # label retained for log-format continuity.
             out.append(
-                "move %d: pt=%.6f mt=%.6f %s sv=%.6f a=%.6f"
+                "move %d: pt=%.6f mt=%.6f qui sv=%.6f a=%.6f"
                 " sp=(%.6f,%.6f,%.6f) ar=(%.6f,%.6f,%.6f)"
                 % (
                     i,
                     m.print_time,
                     m.move_t,
-                    kind_str,
                     m.start_v,
                     m.accel,
                     m.start_x,
@@ -193,11 +192,15 @@ class DumpTrapQ:
     def _process_batch(self, eventtime):
         qtime = self.last_batch_msg[0] + min(self.last_batch_msg[1], 0.100)
         data, cdata = self.extract_trapq(qtime, NEVER_TIME)
+        # Plan 8 Chunk 1 Task 8: all moves are quintic; hard-code the legacy
+        # "kind" slot at 1 (MOVE_QUINTIC_POLY_T) so downstream websocket
+        # consumers that still expect the tuple shape keep working until
+        # Task 17 bumps the schema.
         d = [
             (
                 m.print_time,
                 m.move_t,
-                int(m.kind),
+                1,
                 m.start_v,
                 m.accel,
                 (m.start_x, m.start_y, m.start_z),

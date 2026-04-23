@@ -13,9 +13,11 @@
 #include "linear_quintic.h" // build_linear_as_quintic_coeffs
 #include "trapq.h" // move_get_coord
 
-// Allocate a new 'move' object. memset(0) produces a valid MOVE_LINEAR with
-// zero velocity/accel/axes_r — the MOVE_LINEAR = 0 invariant (see trapq.h)
-// guarantees downstream dispatch treats this as a linear zero-motion stub.
+// Allocate a new 'move' object. memset(0) produces a null-motion quintic
+// move: all phase t_ends are 0, all polynomial coeffs zero. move_get_coord
+// detects this via the all-zero t_end check and returns start_pos, which
+// is the degenerate behaviour every caller of a zeroed struct move wants
+// (trapq sentinels, time-gap fills, itersolve stack stubs).
 struct move *
 move_alloc(void)
 {
@@ -46,14 +48,14 @@ quintic_phase_eval(const struct move_quintic_phase *ph, double delta_t)
 static inline const struct move_quintic_phase *
 quintic_pick_phase(const struct move *m, double move_time, double *out_delta)
 {
-    const struct move_quintic_phase *ph = &m->u.quintic.accel;
+    const struct move_quintic_phase *ph = &m->accel;
     double phase_start = 0.0;
-    if (move_time > m->u.quintic.accel.t_end) {
-        phase_start = m->u.quintic.accel.t_end;
-        ph = &m->u.quintic.cruise;
-        if (move_time > m->u.quintic.cruise.t_end) {
-            phase_start = m->u.quintic.cruise.t_end;
-            ph = &m->u.quintic.decel;
+    if (move_time > m->accel.t_end) {
+        phase_start = m->accel.t_end;
+        ph = &m->cruise;
+        if (move_time > m->cruise.t_end) {
+            phase_start = m->cruise.t_end;
+            ph = &m->decel;
         }
     }
     *out_delta = move_time - phase_start;
@@ -91,6 +93,13 @@ move_get_distance(const struct move *m, double move_time)
 inline struct coord
 move_get_coord(const struct move *m, double move_time)
 {
+    // Null-move fallback: a memset-zeroed struct move (trapq sentinels,
+    // time-gap fills, itersolve stack stubs) has all phase t_ends zero.
+    // Return start_pos so zero-motion moves project to their anchor point
+    // regardless of move_time.
+    if (m->accel.t_end == 0.0 && m->cruise.t_end == 0.0
+        && m->decel.t_end == 0.0)
+        return m->start_pos;
     double delta_t;
     const struct move_quintic_phase *ph = quintic_pick_phase(m, move_time,
                                                              &delta_t);
@@ -159,9 +168,8 @@ trapq_add_move(struct trapq *tq, struct move *m)
     struct move *tail_sentinel = list_last_entry(&tq->moves, struct move, node);
     struct move *prev = list_prev_entry(tail_sentinel, node);
     if (prev->print_time + prev->move_t < m->print_time) {
-        // Add a null move to fill time gap (MOVE_LINEAR with zeroed lin union
-        // via move_alloc's memset — the MOVE_LINEAR=0 invariant guarantees
-        // this parses as a linear zero-motion stub).
+        // Null-move time-gap fill. move_alloc's memset zeroes all phase
+        // t_ends, which move_get_coord detects and returns start_pos.
         struct move *null_move = move_alloc();
         null_move->start_pos = m->start_pos;
         if (!prev->print_time && m->print_time > MAX_NULL_MOVE)
@@ -180,7 +188,7 @@ trapq_add_move(struct trapq *tq, struct move *m)
 //
 // Construct a 99-double degenerate-quintic coefficient buffer representing
 // the accel/cruise/decel trapezoid and delegate to trapq_append_quintic.
-// After this, no MOVE_LINEAR structs are produced by the append entry point.
+// After this, every trapq entry is a quintic move.
 void __visible
 trapq_append(struct trapq *tq, double print_time
              , double accel_t, double cruise_t, double decel_t
@@ -239,18 +247,17 @@ trapq_append_quintic(struct trapq *tq, double print_time
     struct move *m = move_alloc();
     m->print_time = print_time;
     m->move_t = move_t;
-    m->kind = MOVE_QUINTIC_POLY_T;
     m->start_pos.x = start_pos_x;
     m->start_pos.y = start_pos_y;
     m->start_pos.z = start_pos_z;
-    m->u.quintic.arc_length = arc_length;
-    m->u.quintic.v_cap_min = v_cap_min;
-    m->u.quintic.accel.t_end = t_accel_end;
-    m->u.quintic.cruise.t_end = t_decel_start;
-    m->u.quintic.decel.t_end = move_t;
+    m->arc_length = arc_length;
+    m->v_cap_min = v_cap_min;
+    m->accel.t_end = t_accel_end;
+    m->cruise.t_end = t_decel_start;
+    m->decel.t_end = move_t;
     // Unpack coeff_buf into per-phase per-axis arrays.
     struct move_quintic_phase *phases[3] = {
-        &m->u.quintic.accel, &m->u.quintic.cruise, &m->u.quintic.decel,
+        &m->accel, &m->cruise, &m->decel,
     };
     int p, k;
     const double *src = coeff_buf;
@@ -266,15 +273,12 @@ trapq_append_quintic(struct trapq *tq, double print_time
     trapq_add_move(tq, m);
 }
 
-// Return non-zero if the move carries any motion content. For linear moves
-// this is the original (start_v || half_accel) test; for quintic moves the
-// arc_length is the canonical zero-motion indicator.
+// Return non-zero if the move carries any motion content. arc_length is
+// the canonical zero-motion indicator for quintic moves.
 static inline int
 move_is_nonnull(const struct move *m)
 {
-    if (m->kind == MOVE_LINEAR)
-        return m->u.lin.start_v != 0.0 || m->u.lin.half_accel != 0.0;
-    return m->u.quintic.arc_length != 0.0;
+    return m->arc_length != 0.0;
 }
 
 // Expire any moves older than `print_time` from the trapezoid velocity queue
@@ -332,8 +336,9 @@ trapq_set_position(struct trapq *tq, double print_time
         free(m);
     }
 
-    // Add a marker to the trapq history (MOVE_LINEAR via move_alloc's memset;
-    // kind defaults to 0 = MOVE_LINEAR).
+    // Add a marker to the trapq history. move_alloc's memset gives a null
+    // quintic move (all phase t_ends zero); start_pos is set below and
+    // move_get_coord will return it for any move_time.
     struct move *m = move_alloc();
     m->print_time = print_time;
     m->start_pos.x = pos_x;
@@ -342,10 +347,10 @@ trapq_set_position(struct trapq *tq, double print_time
     list_add_head(&m->node, &tq->history);
 }
 
-// Return history of movement queue. Linear moves project to pull_move's
-// (start_v, accel, start_xyz, xyz_r) fields as today. Quintic moves project
-// to a degenerate linear-equivalent approximation for motion_report consumers
-// that haven't yet been updated (Plan 5 D6 / Task 17 bumps the schema).
+// Return history of movement queue. All moves are quintic; project to a
+// chord-straight linear approximation for legacy motion_report consumers
+// (average velocity along the chord, zero accel). Proper quintic
+// serialization comes with the websocket schema bump (Plan 5 D6 / Task 17).
 int __visible
 trapq_extract_old(struct trapq *tq, struct pull_move *p, int max
                   , double start_time, double end_time)
@@ -359,36 +364,22 @@ trapq_extract_old(struct trapq *tq, struct pull_move *p, int max
             continue;
         p->print_time = m->print_time;
         p->move_t = m->move_t;
-        p->kind = (int)m->kind;
         p->start_x = m->start_pos.x;
         p->start_y = m->start_pos.y;
         p->start_z = m->start_pos.z;
-        if (m->kind == MOVE_LINEAR) {
-            p->start_v = m->u.lin.start_v;
-            p->accel = 2. * m->u.lin.half_accel;
-            p->x_r = m->u.lin.axes_r.x;
-            p->y_r = m->u.lin.axes_r.y;
-            p->z_r = m->u.lin.axes_r.z;
-        } else {
-            // Quintic projected to a chord-straight linear approximation for
-            // legacy consumers. Proper serialization comes in the websocket
-            // schema (Task 17 adds a `kind` field; downstream consumers that
-            // read pull_move.kind == 1 should ignore (start_v, accel, xyz_r)
-            // since a single linear trapezoid cannot represent a quintic).
-            struct coord end = move_get_coord(m, m->move_t);
-            double dx = end.x - m->start_pos.x;
-            double dy = end.y - m->start_pos.y;
-            double dz = end.z - m->start_pos.z;
-            double chord = sqrt(dx * dx + dy * dy + dz * dz);
-            double inv_t = m->move_t > 0.0 ? 1.0 / m->move_t : 0.0;
-            double inv_chord = chord > 0.0 ? 1.0 / chord : 0.0;
-            // Approximate: average velocity along the chord.
-            p->start_v = chord * inv_t;
-            p->accel = 0.0;
-            p->x_r = dx * inv_chord;
-            p->y_r = dy * inv_chord;
-            p->z_r = dz * inv_chord;
-        }
+        struct coord end = move_get_coord(m, m->move_t);
+        double dx = end.x - m->start_pos.x;
+        double dy = end.y - m->start_pos.y;
+        double dz = end.z - m->start_pos.z;
+        double chord = sqrt(dx * dx + dy * dy + dz * dz);
+        double inv_t = m->move_t > 0.0 ? 1.0 / m->move_t : 0.0;
+        double inv_chord = chord > 0.0 ? 1.0 / chord : 0.0;
+        // Approximate: average velocity along the chord.
+        p->start_v = chord * inv_t;
+        p->accel = 0.0;
+        p->x_r = dx * inv_chord;
+        p->y_r = dy * inv_chord;
+        p->z_r = dz * inv_chord;
         p++;
         res++;
     }

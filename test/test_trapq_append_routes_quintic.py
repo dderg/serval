@@ -1,10 +1,14 @@
 # Plan 8 Chunk 1 Task 2 — verify trapq_append dispatches through the
-# quintic path. After the rewrite, every emitted move must carry
-# kind == MOVE_QUINTIC_POLY_T (=1), not the legacy MOVE_LINEAR (=0).
+# quintic path. After Chunk 1 Task 8 flattens struct move, every trapq entry
+# IS a quintic polynomial by construction (no tagged union any more). The
+# tests assert that trapq_append produces history entries that (a) exist,
+# (b) cover the right total move time, and (c) reconstruct the expected
+# chord displacement — which the chord-projection in trapq_extract_old
+# encodes via (start_v, x_r) on the pull_move.
 #
 # Walk-style mirrors test_plan5_integration.py and test_trapq_quintic.py:
 # finalize moves into history, then use trapq_extract_old to project out
-# the move metadata (including kind).
+# the move metadata.
 
 from __future__ import annotations
 
@@ -22,11 +26,20 @@ def _finalize_and_extract(ffi_main, ffi_lib, tq, t_print, duration, nmax=8):
     return pm, n
 
 
+def _find_motion_entry(pm, n):
+    """Pick the pull_move entry that actually carries motion (start_v > 0)."""
+    for i in range(n):
+        if pm[i].start_v > 0.0:
+            return pm[i]
+    return None
+
+
 def test_trapq_append_emits_single_quintic_entry():
     ffi_main, ffi_lib = chelper.get_ffi()
     tq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
     accel_t, cruise_t, decel_t = 0.05, 0.10, 0.05
     start_v, cruise_v, accel = 10.0, 20.0, 200.0
+    total_t = accel_t + cruise_t + decel_t
     t_print = 1.0
     ffi_lib.trapq_append(
         tq, t_print,
@@ -35,28 +48,23 @@ def test_trapq_append_emits_single_quintic_entry():
         1.0, 0.0, 0.0,   # axes_r — pure +X
         start_v, cruise_v, accel,
     )
-    pm, n = _finalize_and_extract(
-        ffi_main, ffi_lib, tq, t_print,
-        accel_t + cruise_t + decel_t,
+    pm, n = _finalize_and_extract(ffi_main, ffi_lib, tq, t_print, total_t)
+    # ONE motion-carrying entry spanning the full trapezoid.
+    motion = _find_motion_entry(pm, n)
+    assert motion is not None, (
+        "expected at least one motion-carrying trapq history entry"
     )
-    # ONE quintic entry, not three linear trapq entries.
-    kinds = [pm[i].kind for i in range(n)]
-    # Depending on finalize semantics there may be boundary null-moves; what
-    # matters is (a) at least one MOVE_QUINTIC_POLY_T entry exists, and
-    # (b) no MOVE_LINEAR (kind=0) entry carrying motion exists.
-    assert 1 in kinds, (
-        "expected at least one MOVE_QUINTIC_POLY_T (kind=1) entry, got "
-        "kinds=%r" % kinds
-    )
-    for i in range(n):
-        if pm[i].kind == 0:
-            # A kind=0 history entry with non-zero motion would mean
-            # trapq_append still constructs MOVE_LINEAR structs.
-            has_motion = (abs(pm[i].start_v) > 0.0 or abs(pm[i].accel) > 0.0)
-            assert not has_motion, (
-                "stray MOVE_LINEAR entry with motion: "
-                "start_v=%r accel=%r" % (pm[i].start_v, pm[i].accel)
-            )
+    assert motion.move_t == pytest.approx(total_t, rel=1e-12)
+    # Chord length for a pure +X trapezoid = accel_d + cruise_d + decel_d.
+    accel_d = start_v * accel_t + 0.5 * accel * accel_t * accel_t
+    cruise_d = cruise_v * cruise_t
+    decel_d = cruise_v * decel_t - 0.5 * accel * decel_t * decel_t
+    chord = accel_d + cruise_d + decel_d
+    # trapq_extract_old projects quintic moves to average velocity along
+    # the chord (start_v = chord / move_t).
+    assert motion.start_v == pytest.approx(chord / total_t, rel=1e-9)
+    assert motion.x_r == pytest.approx(1.0, abs=1e-12)
+    assert motion.y_r == pytest.approx(0.0, abs=1e-12)
 
 
 def test_trapq_append_pure_cruise_emits_quintic():
@@ -66,6 +74,7 @@ def test_trapq_append_pure_cruise_emits_quintic():
     accel_t, cruise_t, decel_t = 0.0, 0.10, 0.0
     start_v = cruise_v = 50.0
     accel = 0.0
+    total_t = accel_t + cruise_t + decel_t
     t_print = 0.5
     ffi_lib.trapq_append(
         tq, t_print,
@@ -74,15 +83,14 @@ def test_trapq_append_pure_cruise_emits_quintic():
         1.0, 0.0, 0.0,
         start_v, cruise_v, accel,
     )
-    pm, n = _finalize_and_extract(
-        ffi_main, ffi_lib, tq, t_print,
-        accel_t + cruise_t + decel_t,
+    pm, n = _finalize_and_extract(ffi_main, ffi_lib, tq, t_print, total_t)
+    motion = _find_motion_entry(pm, n)
+    assert motion is not None, (
+        "pure-cruise: expected a motion-carrying history entry"
     )
-    kinds = [pm[i].kind for i in range(n)]
-    assert 1 in kinds, (
-        "pure-cruise: expected at least one MOVE_QUINTIC_POLY_T entry, got "
-        "kinds=%r" % kinds
-    )
+    assert motion.move_t == pytest.approx(total_t, rel=1e-12)
+    # chord = cruise_v * cruise_t; average velocity = cruise_v.
+    assert motion.start_v == pytest.approx(cruise_v, rel=1e-9)
 
 
 def test_trapq_append_move_t_matches_sum_of_phase_times():
@@ -101,12 +109,7 @@ def test_trapq_append_move_t_matches_sum_of_phase_times():
         start_v, cruise_v, accel,
     )
     pm, n = _finalize_and_extract(ffi_main, ffi_lib, tq, t_print, total_t)
-    # Locate the quintic entry and assert its move_t.
-    quintic = None
-    for i in range(n):
-        if pm[i].kind == 1:
-            quintic = pm[i]
-            break
-    assert quintic is not None
-    assert quintic.move_t == pytest.approx(total_t, rel=1e-12)
-    assert quintic.print_time == pytest.approx(t_print, rel=1e-12)
+    motion = _find_motion_entry(pm, n)
+    assert motion is not None
+    assert motion.move_t == pytest.approx(total_t, rel=1e-12)
+    assert motion.print_time == pytest.approx(t_print, rel=1e-12)

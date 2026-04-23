@@ -127,29 +127,24 @@ diff_antiderivatives(const smoother_antiderivatives* ad1
 
 // Return the polynomial coefficients c_k (for axis = 'x'/'y'/'z') expressing
 // position(t) = sum_k out_c[k] * (t - t_phase_start)^k for the phase of move
-// m that contains move_time. The move has per-phase polynomial payloads
-// covering [0, move_t]: position(t) = start_pos + axes_r * (start_v*t +
-// half_accel*t^2) — a degree-2 polynomial in t with phase_start = 0. Higher
-// coefficients are zero. For MOVE_QUINTIC_POLY_T the selected phase's 11
-// stored coefficients are returned directly. Sets *out_phase_start to the
-// phase's absolute-move-local origin time. The output buffer must hold
-// SMOOTHER_NUM_MOMENTS (11) doubles.
-//
-// Pick the phase and copy its polynomial directly into out_c.
+// m that contains move_time. Every move is a quintic polynomial payload
+// (Plan 8 Chunk 1 Task 8); the selected phase's 11 stored coefficients are
+// returned directly. Sets *out_phase_start to the phase's absolute-move-local
+// origin time. The output buffer must hold SMOOTHER_NUM_MOMENTS (11) doubles.
 static inline void
 move_axis_phase_polynomial(const struct move* m, int axis, double move_time,
                            double out_c[SMOOTHER_NUM_MOMENTS],
                            double* out_phase_start, double* out_phase_end)
 {
     int ai = axis - 'x';
-    const struct move_quintic_phase* ph = &m->u.quintic.accel;
+    const struct move_quintic_phase* ph = &m->accel;
     double phase_start = 0.0;
-    if (move_time > m->u.quintic.accel.t_end) {
-        phase_start = m->u.quintic.accel.t_end;
-        ph = &m->u.quintic.cruise;
-        if (move_time > m->u.quintic.cruise.t_end) {
-            phase_start = m->u.quintic.cruise.t_end;
-            ph = &m->u.quintic.decel;
+    if (move_time > m->accel.t_end) {
+        phase_start = m->accel.t_end;
+        ph = &m->cruise;
+        if (move_time > m->cruise.t_end) {
+            phase_start = m->cruise.t_end;
+            ph = &m->decel;
         }
     }
     for (int k = 0; k < SMOOTHER_NUM_MOMENTS; ++k)

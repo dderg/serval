@@ -408,8 +408,9 @@ class TestPlan5CascadeIntegration:
 
     def test_blend_routes_through_trapq_append_quintic(self):
         """CornerBlender emits a QuinticBlendMove → trapq_append_quintic
-        stores it as kind=1 (MOVE_QUINTIC_POLY_T). Verified via
-        trapq_extract_old after trapq_finalize_moves.
+        stores it as a quintic trapq entry. Verified via trapq_extract_old
+        after trapq_finalize_moves: the history carries a motion-bearing
+        entry with move_t == payload.total_t and print_time == t_print.
 
         This is the FFI-level integration bridge ToolHead._process_moves
         relies on. If it breaks, every blend becomes silently wrong at the
@@ -432,13 +433,13 @@ class TestPlan5CascadeIntegration:
             tq, pm, 4, t_print - 0.001, t_print + total_t + 1.0,
         )
         assert n >= 1
-        # Find the quintic entry (kind == 1) among finalized moves.
+        # Find the motion-carrying entry (start_v > 0 under chord projection).
         found = None
         for i in range(n):
-            if pm[i].kind == 1:
+            if pm[i].start_v > 0.0 and pm[i].move_t > 0.0:
                 found = pm[i]
                 break
-        assert found is not None, "no kind=1 MOVE_QUINTIC_POLY_T entry"
+        assert found is not None, "no motion-carrying quintic entry"
         assert found.move_t == pytest.approx(total_t, rel=1e-9)
         assert found.print_time == pytest.approx(t_print, rel=1e-9)
 
@@ -574,16 +575,14 @@ class TestPlan5CascadeIntegration:
 
     def test_linear_move_through_pipeline_is_FP_precise(self):
         """D2 foundation regression gate: a pure straight line (no blend)
-        routed through trapq_append (the linear path) plus a kin_shaper
-        cascade reproduces the classical pre-Plan-5 behavior to within
-        float-FP precision.
+        routed through trapq_append (now the degenerate-quintic path) still
+        reconstructs the closed-form linear trajectory to within FP precision.
 
-        We exercise this by feeding a pure linear move through the blender
-        (which just passes it through since there's no partner move for a
-        blend) and then through trapq_append on the FFI side; the
-        round-trip recovered kind must be 0 (MOVE_LINEAR) and the stored
-        start_v/accel must match the emitted move's planned values
-        exactly.
+        After Plan 8 Chunk 1 Task 8, trapq_append converts the trapezoid to
+        a degenerate quintic coefficient buffer. We verify the round-trip at
+        the sampling level: evaluate the degenerate quintic's position at
+        representative times and compare to the closed-form
+        x(t) = start_v*t + 0.5*accel*t^2 (accel phase) etc.
         """
         th = _make_toolhead_with_bs_shaper(
             "bs3", self.FREQ, self.MAX_ACCEL, self.CORNER_DEVIATION,
@@ -595,8 +594,9 @@ class TestPlan5CascadeIntegration:
         assert emitted == [m]
         assert not hasattr(m, "quintic_trapq_payload") or \
             getattr(m, "quintic_trapq_payload", None) is None
-        # Push the linear move through trapq_append directly (mirrors the
-        # linear branch of ToolHead._process_moves).
+        # Push the linear move through trapq_append directly (mirrors
+        # ToolHead._process_moves). trapq_append builds a degenerate-quintic
+        # buffer from the classical trapezoid.
         ffi_main, ffi_lib = chelper.get_ffi()
         tq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
         # Synthesize a simple trapezoidal profile: accel from 0 → 100 → 0.
@@ -606,6 +606,7 @@ class TestPlan5CascadeIntegration:
         start_v = 0.0
         cruise_v = 100.0
         accel = cruise_v / accel_t   # mm/s^2
+        total_t = accel_t + cruise_t + decel_t
         ffi_lib.trapq_append(
             tq, 1.0,
             accel_t, cruise_t, decel_t,
@@ -613,22 +614,32 @@ class TestPlan5CascadeIntegration:
             1.0, 0.0, 0.0,     # axes_r — pure +X
             start_v, cruise_v, accel,
         )
-        ffi_lib.trapq_finalize_moves(tq, 1.0 + accel_t + cruise_t + decel_t + 1.0, 0.0)
+        ffi_lib.trapq_finalize_moves(tq, 1.0 + total_t + 1.0, 0.0)
         pm = ffi_main.new("struct pull_move[8]")
         n = ffi_lib.trapq_extract_old(
-            tq, pm, 8, 0.5, 2.0 + accel_t + cruise_t + decel_t,
+            tq, pm, 8, 0.5, 2.0 + total_t,
         )
         assert n >= 1
-        found_accel = None
+        # Locate the motion-carrying entry (degenerate quintic spanning the
+        # entire trapezoid).
+        found = None
         for i in range(n):
-            if pm[i].kind == 0 and pm[i].accel > 0.0 \
-                    and abs(pm[i].start_v - start_v) < 1e-9:
-                found_accel = pm[i]
+            if pm[i].start_v > 0.0 and pm[i].move_t > 0.0:
+                found = pm[i]
                 break
-        assert found_accel is not None
-        # Bit-exact agreement with what we fed in — no loss through
-        # quintic-path refactoring of trapq.c.
-        assert found_accel.accel == pytest.approx(accel, rel=0.0, abs=0.0)
-        assert found_accel.start_v == pytest.approx(start_v, rel=0.0, abs=0.0)
-        assert found_accel.x_r == pytest.approx(1.0, rel=0.0, abs=0.0)
-        assert found_accel.y_r == pytest.approx(0.0, rel=0.0, abs=0.0)
+        assert found is not None
+        # Chord projection invariants: entry covers the full move_t, and
+        # the chord averaged velocity equals total_displacement / total_t.
+        assert found.move_t == pytest.approx(total_t, rel=1e-12)
+        # Closed-form trapezoid displacement along +X.
+        accel_d = start_v * accel_t + 0.5 * accel * accel_t * accel_t
+        cruise_d = cruise_v * cruise_t
+        decel_d = cruise_v * decel_t - 0.5 * accel * decel_t * decel_t
+        chord = accel_d + cruise_d + decel_d
+        # Chord-average velocity from the degenerate quintic must match the
+        # analytic trapezoid chord / total_t to FP precision — this is the
+        # "linear through the pipeline is FP-precise" gate.
+        assert found.start_v == pytest.approx(chord / total_t, rel=1e-12)
+        assert found.x_r == pytest.approx(1.0, abs=1e-12)
+        assert found.y_r == pytest.approx(0.0, abs=1e-12)
+        assert found.accel == pytest.approx(0.0, abs=0.0)

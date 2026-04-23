@@ -132,24 +132,16 @@ itersolve_gen_steps_range(struct stepper_kinematics *sk, struct move *m
  * Interface functions
  ****************************************************************/
 
-// Check if a move is likely to cause movement on a stepper. For linear
-// moves the axis-unit-direction vector is load-bearing; a zero component
-// means the axis is stationary. For quintic moves the per-axis polynomial
-// coefficients c[1..10] carry velocity/accel/higher-derivative content —
-// if any is non-zero the axis moves. c[0] is the phase-start position and
-// is ignored here.
+// Check if a move is likely to cause movement on a stepper. The per-axis
+// polynomial coefficients c[1..10] carry velocity/accel/higher-derivative
+// content — if any is non-zero the axis moves. c[0] is the phase-start
+// position and is ignored here.
 static inline int
 check_active(struct stepper_kinematics *sk, struct move *m)
 {
     int af = sk->active_flags;
-    if (likely(m->kind == MOVE_LINEAR)) {
-        return ((af & AF_X && m->u.lin.axes_r.x != 0.)
-                || (af & AF_Y && m->u.lin.axes_r.y != 0.)
-                || (af & AF_Z && m->u.lin.axes_r.z != 0.));
-    }
-    // MOVE_QUINTIC_POLY_T: scan c[1..10] across all three phases.
     const struct move_quintic_phase *phases[3] = {
-        &m->u.quintic.accel, &m->u.quintic.cruise, &m->u.quintic.decel,
+        &m->accel, &m->cruise, &m->decel,
     };
     int p, k;
     for (p = 0; p < 3; ++p) {
@@ -278,9 +270,10 @@ double __visible
 itersolve_calc_position_from_coord(struct stepper_kinematics *sk
                                    , double x, double y, double z)
 {
-    // memset(0) leaves kind = MOVE_LINEAR (enum value 0 is load-bearing here,
-    // see trapq.h). start_v, half_accel, axes_r all stay 0 → evaluates to
-    // start_pos at any time t.
+    // memset(0) yields a null-quintic move: all phase t_ends zero, all
+    // polynomial coeffs zero. move_get_coord detects the all-zero t_ends
+    // and returns start_pos directly — so calc_position_cb evaluates to
+    // the supplied (x, y, z) regardless of the sample time below.
     struct move m;
     memset(&m, 0, sizeof(m));
     m.start_pos.x = x;
