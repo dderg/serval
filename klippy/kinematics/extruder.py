@@ -46,28 +46,11 @@ class ExtruderSmoother:
             self.axes.remove(axis)
 
     def update_extruder_kinematics(self, extruder_sk):
-        ffi_main, ffi_lib = chelper.get_ffi()
-        success = True
-        smooth_time = self.smooth_time if self.pa_model.enabled() else 0.0
-        # Plan 5 FFI: the pressure-advance smoother is a single-piece kernel
-        # that the Python side converts to the piecewise flat buffer the C
-        # code now expects.
-        from ..extras import input_shaper as _is_mod
-        from ..extras import shaper_defs as _sd
-        if smooth_time > 0.0:
-            C_pieces, t_sm = _sd.init_smoother(self.a, smooth_time, True)
-        else:
-            C_pieces, t_sm = [], 0.0
-        n_pieces, buf = _is_mod._marshal_pieces_to_buffer(ffi_main, C_pieces)
-        for axis in self.axes:
-            if (
-                not ffi_lib.extruder_set_smoothing_params(
-                    extruder_sk, axis.encode(), n_pieces, buf, t_sm, 0.0
-                )
-                == 0
-            ):
-                success = False
-        return success
+        # Plan 8 Chunk 2 Task 12: post-hoc extruder smoothing retired —
+        # the planner bakes PA into the extruder polynomial (Chunk 3).
+        # Left as a stub so the klippy:connect + SET_PRESSURE_ADVANCE
+        # call sites keep compiling until Chunk 3 lands the bake path.
+        return True
 
     def get_status(self, eventtime):
         return {"smooth_time": self.smooth_time}
@@ -432,26 +415,11 @@ class ExtruderStepper:
         self.pressure_advance_time_offset = time_offset
 
     def update_input_shaping(self, shapers, exact_mode):
-        ffi_main, ffi_lib = chelper.get_ffi()
-        old_delay = ffi_lib.extruder_get_step_gen_window(self.sk_extruder)
-        failed_shapers = []
-        for shaper in shapers:
-            if not shaper.update_extruder_kinematics(
-                self.sk_extruder, exact_mode
-            ):
-                failed_shapers.append(shaper)
-            # Pressure advance requires extruder smoothing, make sure that
-            # some smoothing is enabled
-            if shaper.is_extruder_smoothing(exact_mode) and shaper.is_enabled():
-                self.smoother.disable_axis(shaper.get_axis())
-            else:
-                self.smoother.enable_axis(shaper.get_axis())
-        self.smoother.update_extruder_kinematics(self.sk_extruder)
-        new_delay = ffi_lib.extruder_get_step_gen_window(self.sk_extruder)
-        toolhead = self.printer.lookup_object("toolhead")
-        if old_delay != new_delay:
-            toolhead.note_step_generation_scan_time(new_delay, old_delay)
-        return failed_shapers
+        # Plan 8 Chunk 2 Task 12: the extruder no longer runs a post-hoc
+        # shaper cascade — shaping is baked into the planner polynomial.
+        # Retained as a stub so external callers (SET_INPUT_SHAPER, older
+        # kin modules) keep compiling; returns no failed shapers.
+        return []
 
     cmd_SET_PRESSURE_ADVANCE_help = "Set pressure advance parameters"
 
