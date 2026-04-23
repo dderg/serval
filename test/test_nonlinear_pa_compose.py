@@ -341,3 +341,189 @@ def test_diagonal_motion_projection_nonlinear():
                     + nonlinear_offset * _f_tanh(v, v_lin))
         got = _eval_axis(out, 0, E_SLOT, tau)
         assert got == pytest.approx(expected, abs=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Chunk 3 fix (2026-04-23): degree-6 Chebyshev fit replaces degree-4.
+# The chunk 3 initial implementation used degree 4, which produced up
+# to ~26 µm filament error on sharp-corner blend moves (NO=0.05). These
+# tests pin the improvement: corner-blend scenarios now come in under
+# the 1 µm filament budget.
+# ---------------------------------------------------------------------------
+
+
+def _v_parabola_dip_buf(v_in, v_min_, T):
+    """Build a single-phase polynomial buffer whose projected velocity
+    along X is a parabola: v(tau) = v_min + 4*(v_in - v_min)*(tau/T - 0.5)^2.
+
+    This approximates a symmetric corner blend: velocity dips from v_in
+    down to v_min at the mid-phase and back up to v_in, which is the
+    canonical sharp-corner case that exposes tanh-knee nonlinearity on
+    a single piece.
+    """
+    buf = _empty_buf(1)
+    A = v_in - v_min_
+    # v(tau) = v_in - 4*A/T * tau + 4*A/T^2 * tau^2
+    # Position c[j] = v_coef[j-1] / j (with P(0) = 0):
+    _set(buf, 0, 1, 0, v_in)
+    _set(buf, 0, 2, 0, -2.0 * A / T)              # c[2] * 2 = -4A/T
+    _set(buf, 0, 3, 0, (4.0 * A / (T * T)) / 3.0)  # c[3] * 3 = 4A/T^2
+    return buf
+
+
+def _eval_e_minus_linear(buf, tau, v_tau, extr_r, linear_advance, p_tau):
+    """Isolate the nonlinear contribution by subtracting the exact
+    linear terms from the full .e polynomial evaluation."""
+    e_full = _eval_axis(buf, 0, E_SLOT, tau)
+    return e_full - (extr_r * p_tau + linear_advance * v_tau)
+
+
+def test_sharp_corner_blend_filament_budget():
+    """Sharp-corner blend via parabolic velocity dip (v_in=60, v_min=1,
+    v_lin=40, NO=0.05): this is the scenario the chunk 3 fix targets.
+    With the original degree-4 fit the residual was ~26 µm; degree 6
+    must bring it under 1 µm on all realistic blend durations.
+
+    We compare the composer output against high-resolution direct
+    evaluation (truth = NO * tanh(v(tau)/v_lin)) on a dense grid.
+    """
+    v_in, v_min_, v_lin = 60.0, 1.0, 40.0
+    extr_r = 0.05
+    linear_advance = 0.0
+    nonlinear_offset = 0.05
+    for T in (0.005, 0.01, 0.02, 0.05, 0.1):
+        buf = _v_parabola_dip_buf(v_in, v_min_, T)
+        out, residual = nonlinear_pa_compose(
+            1, [T], buf,
+            axis_n=(1.0, 0.0, 0.0), extr_r=extr_r,
+            linear_advance=linear_advance,
+            nonlinear_offset=nonlinear_offset,
+            linearization_velocity=v_lin,
+            model="tanh",
+        )
+        # residual is already in filament-mm (truth includes NO factor).
+        assert residual < 1e-3, (
+            f"T={T}: residual={residual*1e3:.3f} µm exceeds 1 µm budget"
+        )
+        # Dense-grid truth comparison.
+        max_err = 0.0
+        A = v_in - v_min_
+        for i in range(201):
+            tau = T * i / 200.0
+            # v_truth from the parabola formula we built the buffer with.
+            s = tau / T - 0.5
+            v_truth = v_min_ + 4.0 * A * s * s
+            p_truth = v_in * tau - 2.0 * A / T * tau * tau \
+                      + 4.0 * A / (3.0 * T * T) * tau ** 3
+            nl_true = nonlinear_offset * _f_tanh(v_truth, v_lin)
+            nl_approx = _eval_e_minus_linear(
+                out, tau, v_truth, extr_r, linear_advance, p_truth)
+            err = abs(nl_true - nl_approx)
+            if err > max_err:
+                max_err = err
+        assert max_err < 1e-3, (
+            f"T={T}: dense-grid max filament err={max_err*1e3:.3f} µm "
+            "exceeds 1 µm budget"
+        )
+
+
+def test_cruise_at_half_vlin_no_extra_fit_error():
+    """Cruise at v_lin/2 is deep in the near-linear regime of tanh.
+    The composer's fit residual must be effectively zero (constant g
+    implies exact interpolation at all nodes). Pinned here so future
+    degree / subdivision tweaks don't accidentally introduce jitter on
+    this baseline case.
+    """
+    v_lin = 100.0
+    v = 50.0
+    T = 0.2
+    buf = _empty_buf(1)
+    _set(buf, 0, 1, 0, v)
+    out, residual = nonlinear_pa_compose(
+        1, [T], buf,
+        axis_n=(1.0, 0.0, 0.0), extr_r=0.05, linear_advance=0.0,
+        nonlinear_offset=0.05, linearization_velocity=v_lin, model="tanh",
+    )
+    assert residual < 1e-12
+
+
+def test_saturation_accel_ramp_0_to_5vlin():
+    """Accel ramp 0 -> 5 * v_lin spans the full tanh knee into deep
+    saturation. Degree-6 handles this cleanly within the 1 µm budget;
+    the original degree-4 did not. Also acts as an automated regression
+    for the "saturation accel" scenario called out in the chunk 3 fix
+    brief.
+    """
+    v_lin = 40.0
+    v0 = 0.0
+    a = 1000.0  # 0 -> 200 = 5*v_lin over 0.2 s
+    T = 0.2
+    buf = _empty_buf(1)
+    _set(buf, 0, 1, 0, v0)
+    _set(buf, 0, 2, 0, 0.5 * a)
+    nonlinear_offset = 0.05
+    out, residual = nonlinear_pa_compose(
+        1, [T], buf,
+        axis_n=(1.0, 0.0, 0.0), extr_r=0.05, linear_advance=0.0,
+        nonlinear_offset=nonlinear_offset,
+        linearization_velocity=v_lin, model="tanh",
+    )
+    assert residual < 1e-3
+    # Compare against truth on dense grid.
+    for i in range(101):
+        tau = T * i / 100.0
+        v_t = v0 + a * tau
+        x_t = 0.5 * a * tau * tau
+        expected = (0.05 * x_t
+                    + nonlinear_offset * _f_tanh(v_t, v_lin))
+        got = _eval_axis(out, 0, E_SLOT, tau)
+        assert abs(got - expected) < 1e-3
+
+
+def test_extreme_stress_over_budget_reports_residual():
+    """Synthetic extreme case: high-order velocity polynomial with a
+    sharp near-plateau dip crossing the tanh knee. Degree-6 alone
+    cannot resolve this — residual exceeds the 1 µm budget. Pin that
+    the composer emits without crashing and the residual is reported
+    so the caller can log a warning.
+
+    v(tau) = v_min + (v_max - v_min) * s^8 where s = 2*tau/T - 1.
+    This forces an almost-flat region at v_min with sharp shoulders,
+    which no 7-node interpolant of tanh resolves under 1 µm at
+    NO=0.05 with v_max/v_lin = 3.
+    """
+    from math import comb
+    N = 8
+    v_max, v_min_, v_lin = 120.0, 2.0, 40.0
+    T = 0.04
+    A = v_max - v_min_
+    a_ = 2.0 / T
+    b_ = -1.0
+    # s^N expanded in tau, then scaled by A, plus v_min.
+    v_coeffs = [0.0] * (N + 1)
+    for j in range(N + 1):
+        v_coeffs[j] = A * comb(N, j) * (a_ ** j) * (b_ ** (N - j))
+    v_coeffs[0] += v_min_
+    buf = _empty_buf(1)
+    for j in range(N + 1):
+        # c[j+1] * (j+1) = v_coeffs[j]
+        _set(buf, 0, j + 1, 0, v_coeffs[j] / (j + 1))
+    nonlinear_offset = 0.05
+    out, residual = nonlinear_pa_compose(
+        1, [T], buf,
+        axis_n=(1.0, 0.0, 0.0), extr_r=0.05, linear_advance=0.0,
+        nonlinear_offset=nonlinear_offset,
+        linearization_velocity=v_lin, model="tanh",
+    )
+    # Residual is expected to exceed 1 µm — that's the point. We pin
+    # that a numeric value is returned (non-zero, finite), no crash,
+    # and E polynomial is populated (not all-zero) so the caller can
+    # emit a warning and proceed with the best-available fit.
+    assert math.isfinite(residual)
+    assert residual > 1e-3, (
+        "Synthetic stress case is expected to exceed 1 µm budget to "
+        "exercise the over-budget reporting path; got "
+        f"{residual*1e3:.3f} µm"
+    )
+    # Sanity: polynomial isn't blank.
+    assert any(abs(_get(out, 0, k, E_SLOT)) > 0.0 for k in range(15))

@@ -45,9 +45,12 @@ def nonlinear_pa_compose(
     """Compose tanh / recipr PA into the .e slot of an n_phases * 15 * 4
     buffer in place.
 
-    Returns (coeff_buf_list, max_residual). The residual is the raw
-    (unscaled) Chebyshev fit error; filament error = residual *
-    nonlinear_offset.
+    Returns (coeff_buf_list, max_residual). max_residual is the max
+    |truth - approx| filament error in mm on a dense per-phase grid;
+    the composer evaluates truth = nonlinear_offset * f(V/v_lin), so
+    the returned residual is already scaled and directly comparable to
+    the 1 µm filament budget — no additional multiply by
+    nonlinear_offset needed.
     """
     ffi, lib = get_ffi()
     expected = n_phases * 15 * 4

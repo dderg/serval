@@ -465,7 +465,10 @@ class QuinticBlendMove:
                 model=model,
             )
             coeff_tuple = tuple(coeff_list)
-            filament_err = residual * (no if no > 0.0 else 1.0)
+            # residual is already in filament-mm: nonlinear_pa_compose
+            # returns max |truth - approx| where both sides include the
+            # nonlinear_offset factor. No extra scaling needed here.
+            filament_err = residual
             if filament_err > _PA_FIT_FILAMENT_WARN_MM:
                 logging.warning(
                     "nonlinear_pa_compose fit error %.3g mm exceeds "

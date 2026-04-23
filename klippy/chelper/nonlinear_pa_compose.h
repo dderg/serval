@@ -22,12 +22,17 @@
  *
  *     g(tau) = nonlinear_offset * f(V_proj(tau) / linearization_velocity)
  *
- * at the 5 Chebyshev-second-kind nodes in phase-local tau (one piece per
+ * at the 7 Chebyshev-second-kind nodes in phase-local tau (one piece per
  * XY-polynomial phase is what the planner emits in Chunk 3), interpolating
- * a degree-4 polynomial through those samples, and adding it to the .e
+ * a degree-6 polynomial through those samples, and adding it to the .e
  * slot. This is the "tau-direct" strategy in the implementation plan:
  * simpler than explicit Chebyshev-in-v composition and gives comparable
- * error per the Phase 0 research.
+ * error per the Phase 0 research. Degree 6 captures the tanh knee on
+ * sharp corners to <1 µm filament where degree 4 previously hit ~26 µm
+ * (chunk 3 fix, 2026-04-23). A future refactor could bump
+ * MOVE_QUINTIC_POLY_COEFFS from 15 to ~20 and enable per-phase adaptive
+ * subdivision; for now the 15-coeff slot accommodates degree 6 alongside
+ * the exact linear-PA terms.
  *
  * Model kinds:
  *   0 = disabled / linear (call linear_pa_compose instead; the nonlinear
@@ -38,9 +43,11 @@
  * Residual
  * --------
  * The `out_max_residual` out-param reports the max-abs fit error on a
- * densely sampled residual grid (per phase; max across phases). Caller
- * multiplies by nonlinear_offset to get filament error and decides
- * whether to accept or fall back.
+ * densely sampled residual grid (per phase; max across phases). Both
+ * the "truth" and "approx" sides include the nonlinear_offset factor,
+ * so the returned residual is already in filament-mm and directly
+ * comparable to the 1 µm budget — callers should NOT multiply by
+ * nonlinear_offset again.
  */
 
 /* Model-kind sentinels. Keep in sync with the Python dispatch. */
