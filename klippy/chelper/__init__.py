@@ -148,9 +148,17 @@ defs_trapq = """
 
 defs_compose = """
     int bs_compose(
+        int prev_n_phases,
+        const double *prev_phase_t_ends,
+        const double *prev_coeffs,
+        double prev_T_move,
         int n_input_phases,
         const double *input_phase_t_ends,
         const double *input_coeffs,
+        int next_n_phases,
+        const double *next_phase_t_ends,
+        const double *next_coeffs,
+        double next_T_move,
         int bs_order,
         double shaper_freq,
         double damping_ratio,
@@ -158,9 +166,17 @@ defs_compose = """
         double *out_phase_t_ends,
         double *out_coeffs);
     int fir_compose(
+        int prev_n_phases,
+        const double *prev_phase_t_ends,
+        const double *prev_coeffs,
+        double prev_T_move,
         int n_input_phases,
         const double *input_phase_t_ends,
         const double *input_coeffs,
+        int next_n_phases,
+        const double *next_phase_t_ends,
+        const double *next_coeffs,
+        double next_T_move,
         int n_impulses,
         const double *impulse_amplitudes,
         const double *impulse_delays,

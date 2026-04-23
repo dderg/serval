@@ -11,24 +11,19 @@
  * polynomial on [tau_i, move_t + tau_i] with phase boundaries
  * { T_p + tau_i : p = 0..n_in }.
  *
- * Steps:
- *   1. Collect breakpoints B = sort(unique({ T_p + tau_i }) intersected
- *      with [0, move_t + max_tau] clipped further if desired. For an
- *      input-shaping FIR on a planner move, the downstream trapq entry
- *      must still cover the span [0, move_t + max_tau] because the
- *      kernel extends the move duration by max_tau. We therefore emit
- *      the full span, lengthening move_t accordingly. (Caller handles
- *      the time-budget adjustment.)
- *   2. For each output sub-interval [t_a, t_b]:
- *        - For each impulse i:
- *            u = t - tau_i;
- *            identify phase p such that T_p <= u < T_{p+1} at t_mid;
- *            x_p is a poly in phase-local time (delta = u - T_p =
- *            t - tau_i - T_p); rewrite as a poly in sub-interval-local t
- *            by Pascal shift (origin = t_a) after accounting for the
- *            constant offset (tau_i + T_p - t_a).
- *            Scale by a_i and accumulate.
- *        - Store the resulting poly in phase-local basis with origin t_a.
+ * Neighbour-aware boundary handling:
+ *   For each impulse i the shifted input at time t uses x(t - tau_i).
+ *   When t - tau_i < 0 the composer consults the prev move (if supplied)
+ *   whose absolute-t frame is shifted by -T_prev so its end sits at
+ *   u = 0. When t - tau_i > T_cur the composer consults the next move
+ *   (if supplied) shifted by +T_cur. NULL neighbours zero-pad — the
+ *   pre-fix behaviour, correct only when the print actually stops at
+ *   the move boundary.
+ *
+ *   For zv / mzv shapers tau_i >= 0, so only the prev-side lookup
+ *   actually fires; the next-side is plumbed for signature symmetry
+ *   with bs_compose. For an acausal shaper with tau_i < 0 the next
+ *   side activates automatically.
  */
 
 #include <math.h>
@@ -39,7 +34,8 @@
 
 #define FIR_MAX_IMPULSES 8
 #define FIR_OUTPUT_NC 15
-#define FIR_MAX_BREAKS 128
+#define FIR_MAX_BREAKS 256
+#define FIR_INPUT_MAX_PHASES 32
 
 /* Sort doubles (qsort callback). */
 static int cmp_dbl_fir(const void *a, const void *b)
@@ -53,12 +49,7 @@ static int cmp_dbl_fir(const void *a, const void *b)
     return 0;
 }
 
-/* Pascal shift: translate a poly from local origin o1 to local origin o2.
- *   f(t - o1) = sum_k c_in[k] * (t - o1)^k
- * We want coefficients of (t - o2):
- *   (t - o1)^k = (t - o2 + (o2 - o1))^k = sum_j C(k,j) * (o2 - o1)^(k-j) * (t - o2)^j
- * -> c_out[j] = sum_{k>=j} c_in[k] * C(k, j) * (o2 - o1)^(k - j)
- */
+/* Pascal shift: translate a poly from local origin o1 to local origin o2. */
 static void pascal_retarget(
     const double *in, double origin_in,
     double origin_out, int nc, double *out)
@@ -66,7 +57,7 @@ static void pascal_retarget(
     double delta = origin_out - origin_in;
     for (int j = 0; j < nc; ++j) {
         double acc = 0.0;
-        double dpow = 1.0;  /* delta^(k - j), starting at k = j */
+        double dpow = 1.0;
         for (int k = j; k < nc; ++k) {
             double binom = 1.0;
             for (int r = 0; r < j; ++r)
@@ -79,9 +70,17 @@ static void pascal_retarget(
 }
 
 int fir_compose(
+    int prev_n_phases,
+    const double *prev_phase_t_ends,
+    const double *prev_coeffs,
+    double prev_T_move,
     int n_input_phases,
     const double *input_phase_t_ends,
     const double *input_coeffs,
+    int next_n_phases,
+    const double *next_phase_t_ends,
+    const double *next_coeffs,
+    double next_T_move,
     int n_impulses,
     const double *impulse_amplitudes,
     const double *impulse_delays,
@@ -91,38 +90,86 @@ int fir_compose(
 {
     if (n_input_phases <= 0 || n_impulses <= 0 || n_impulses > FIR_MAX_IMPULSES)
         return -1;
+    if (n_input_phases > FIR_INPUT_MAX_PHASES)
+        return -1;
     double move_t = input_phase_t_ends[n_input_phases - 1];
     if (move_t <= 0.0)
         return -1;
     double max_tau = 0.0;
+    double min_tau = 0.0;
     for (int i = 0; i < n_impulses; ++i) {
         if (impulse_delays[i] > max_tau)
             max_tau = impulse_delays[i];
-        if (impulse_delays[i] < 0.0)
-            return -1;
+        if (impulse_delays[i] < min_tau)
+            min_tau = impulse_delays[i];
     }
     double out_span = move_t + max_tau;
 
-    /* Build phase starts (absolute move-local): phase_starts[0] = 0,
-     * phase_starts[p] = T_{p-1} = input_phase_t_ends[p-1]. */
-    double phase_starts[FIR_MAX_BREAKS];
+    int have_prev = (prev_n_phases > 0 && prev_phase_t_ends != NULL
+                     && prev_coeffs != NULL && prev_T_move > 0.0);
+    int have_next = (next_n_phases > 0 && next_phase_t_ends != NULL
+                     && next_coeffs != NULL && next_T_move > 0.0);
+    if (have_prev && prev_n_phases > FIR_INPUT_MAX_PHASES)
+        return -1;
+    if (have_next && next_n_phases > FIR_INPUT_MAX_PHASES)
+        return -1;
+
+    /* Build phase starts (absolute move-local) for current. */
+    double phase_starts[FIR_INPUT_MAX_PHASES + 1];
     phase_starts[0] = 0.0;
     for (int p = 0; p < n_input_phases; ++p)
         phase_starts[p + 1] = input_phase_t_ends[p];
+    /* Prev starts in absolute-t (where prev end coincides with u = 0). */
+    double prev_phase_starts[FIR_INPUT_MAX_PHASES + 1];
+    if (have_prev) {
+        prev_phase_starts[0] = -prev_T_move;
+        for (int p = 0; p < prev_n_phases; ++p)
+            prev_phase_starts[p + 1] = -prev_T_move + prev_phase_t_ends[p];
+    }
+    /* Next starts in absolute-t (shifted by +move_t). */
+    double next_phase_starts[FIR_INPUT_MAX_PHASES + 1];
+    if (have_next) {
+        next_phase_starts[0] = move_t;
+        for (int p = 0; p < next_n_phases; ++p)
+            next_phase_starts[p + 1] = move_t + next_phase_t_ends[p];
+    }
 
-    /* 1. Enumerate breakpoints: T_p + tau_i for each phase boundary p and
-     *    impulse i, plus 0 and out_span. */
+    /* 1. Enumerate breakpoints: a break occurs at absolute output-t = t
+     *    whenever u = t - tau_i crosses a phase boundary of any of
+     *    prev / cur / next. Clip to [0, out_span]. */
     double raw_breaks[FIR_MAX_BREAKS];
     int n_raw = 0;
     raw_breaks[n_raw++] = 0.0;
     raw_breaks[n_raw++] = out_span;
-    for (int p = 0; p <= n_input_phases; ++p) {
-        for (int i = 0; i < n_impulses; ++i) {
-            double t_break = phase_starts[p] + impulse_delays[i];
+    for (int i = 0; i < n_impulses; ++i) {
+        double tau_i = impulse_delays[i];
+        /* Current move boundaries. */
+        for (int p = 0; p <= n_input_phases; ++p) {
+            double t_break = phase_starts[p] + tau_i;
             if (t_break > 0.0 && t_break < out_span) {
                 if (n_raw >= FIR_MAX_BREAKS)
                     return -1;
                 raw_breaks[n_raw++] = t_break;
+            }
+        }
+        if (have_prev) {
+            for (int p = 0; p <= prev_n_phases; ++p) {
+                double t_break = prev_phase_starts[p] + tau_i;
+                if (t_break > 0.0 && t_break < out_span) {
+                    if (n_raw >= FIR_MAX_BREAKS)
+                        return -1;
+                    raw_breaks[n_raw++] = t_break;
+                }
+            }
+        }
+        if (have_next) {
+            for (int p = 0; p <= next_n_phases; ++p) {
+                double t_break = next_phase_starts[p] + tau_i;
+                if (t_break > 0.0 && t_break < out_span) {
+                    if (n_raw >= FIR_MAX_BREAKS)
+                        return -1;
+                    raw_breaks[n_raw++] = t_break;
+                }
             }
         }
     }
@@ -138,16 +185,15 @@ int fir_compose(
     if (n_out_phases <= 0 || n_out_phases > out_capacity)
         return -1;
 
-    /* 2. Compose per sub-interval. */
+    /* 2. Compose per sub-interval. For each impulse, locate u_mid in the
+     *    appropriate move (prev / cur / next) and accumulate the Pascal-
+     *    shifted contribution. Zero-pad if u_mid falls outside all
+     *    supplied move ranges. */
     for (int s = 0; s < n_out_phases; ++s) {
         double t_a = uniq_breaks[s];
         double t_b = uniq_breaks[s + 1];
         double t_mid = 0.5 * (t_a + t_b);
 
-        /* Zero accumulator. */
-        /* Plan 8 Chunk 3: 4-axis stride (x, y, z, e). The .e slot is left
-         * zero; downstream linear_pa_compose populates it from the baked
-         * XY polynomial. */
         double acc[FIR_OUTPUT_NC * 4];
         memset(acc, 0, sizeof(acc));
 
@@ -156,26 +202,52 @@ int fir_compose(
             if (a_i == 0.0)
                 continue;
             double tau_i = impulse_delays[i];
-            /* Shifted time u = t - tau_i. At t = t_mid, u_mid = t_mid - tau_i. */
             double u_mid = t_mid - tau_i;
-            if (u_mid <= 0.0 || u_mid >= move_t)
-                continue;  /* zero-pad outside the input move */
-            /* Identify phase p such that phase_starts[p] <= u_mid <
-             * input_phase_t_ends[p]. */
+
+            /* Identify which move and which phase. */
+            int which = -1;  /* 0=prev, 1=cur, 2=next */
             int p = 0;
-            while (p < n_input_phases - 1 && u_mid > input_phase_t_ends[p])
-                p++;
-            double phase_origin = phase_starts[p];
-            /* x_p is a poly in (u - phase_origin). In absolute input-t,
-             * that polynomial has origin = phase_origin. The shifted copy
-             * x(t - tau_i) at absolute output-t has origin = phase_origin
-             * + tau_i. Pascal-retarget to output-phase-local origin t_a.
-             * Plan 8 Chunk 3: 4-axis stride; .e is zeroed downstream. */
+            double phase_origin = 0.0;
+            if (u_mid >= 0.0 && u_mid <= move_t) {
+                which = 1;
+                while (p < n_input_phases - 1 && u_mid > input_phase_t_ends[p])
+                    p++;
+                phase_origin = phase_starts[p];
+            } else if (u_mid < 0.0 && have_prev
+                       && u_mid >= -prev_T_move) {
+                which = 0;
+                p = 0;
+                while (p < prev_n_phases - 1
+                       && u_mid > prev_phase_starts[p + 1])
+                    p++;
+                phase_origin = prev_phase_starts[p];
+            } else if (u_mid > move_t && have_next
+                       && u_mid <= move_t + next_T_move) {
+                which = 2;
+                p = 0;
+                while (p < next_n_phases - 1
+                       && u_mid > next_phase_starts[p + 1])
+                    p++;
+                phase_origin = next_phase_starts[p];
+            } else {
+                continue;  /* zero-pad */
+            }
+
+            const double *src_coeffs = NULL;
+            if (which == 0) src_coeffs = prev_coeffs;
+            else if (which == 1) src_coeffs = input_coeffs;
+            else if (which == 2) src_coeffs = next_coeffs;
+
+            /* The phase polynomial is expressed in phase-local time
+             * (origin = phase_origin in the absolute-u frame). The shifted
+             * copy x(t - tau_i) at absolute-t has origin at phase_origin
+             * + tau_i in the absolute-t frame. Pascal-retarget that to
+             * the output sub-interval origin t_a. */
             for (int axis = 0; axis < 3; ++axis) {
                 double coeffs_in[FIR_OUTPUT_NC];
                 for (int k = 0; k < FIR_OUTPUT_NC; ++k)
                     coeffs_in[k] =
-                        input_coeffs[(p * FIR_OUTPUT_NC + k) * 4 + axis];
+                        src_coeffs[(p * FIR_OUTPUT_NC + k) * 4 + axis];
                 double coeffs_out[FIR_OUTPUT_NC];
                 pascal_retarget(coeffs_in,
                                 phase_origin + tau_i,
@@ -186,9 +258,6 @@ int fir_compose(
             }
         }
 
-        /* Write accumulator into out_coeffs at phase s. .e (axis 3) stays
-         * at the zero accumulator value — populated downstream by
-         * linear_pa_compose. */
         for (int k = 0; k < FIR_OUTPUT_NC; ++k) {
             for (int axis = 0; axis < 4; ++axis) {
                 out_coeffs[(s * FIR_OUTPUT_NC + k) * 4 + axis] =
@@ -197,9 +266,9 @@ int fir_compose(
         }
     }
 
-    /* 3. Output phase t_ends. */
     for (int s = 0; s < n_out_phases; ++s)
         out_phase_t_ends[s] = uniq_breaks[s + 1];
 
+    (void)min_tau;  /* retained for potential acausal overlap refinements */
     return n_out_phases;
 }

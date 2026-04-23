@@ -3,11 +3,16 @@
 
 Plan 8 Chunk 2: bake zv / mzv input-shaping into the planner-emitted
 polynomial. Amplitudes are normalized here so the output DC gain is 1.
+
+Neighbour-aware: optional ``prev_*`` / ``next_*`` arguments supply
+adjacent moves' UNSHAPED polynomials for across-boundary kernel
+integration. When omitted the corresponding side zero-pads (matches the
+print actually starting / stopping at the move boundary).
 """
 from __future__ import annotations
 
 import math
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from klippy.chelper import get_ffi
 
@@ -21,30 +26,14 @@ def fir_compose(
     impulse_delays: Sequence[float],
     out_capacity: int = FIR_MAX_OUT_PHASES,
     normalize: bool = True,
+    prev_phase_t_ends: Optional[Sequence[float]] = None,
+    prev_coeffs: Optional[Sequence[float]] = None,
+    prev_T_move: float = 0.0,
+    next_phase_t_ends: Optional[Sequence[float]] = None,
+    next_coeffs: Optional[Sequence[float]] = None,
+    next_T_move: float = 0.0,
 ) -> Tuple[List[float], List[float]]:
-    """Bake an FIR impulse train into a piecewise-polynomial move.
-
-    Parameters
-    ----------
-    input_phase_t_ends : sequence[float]
-        Absolute move-local end time per input phase.
-    input_coeffs : sequence[float]
-        n_in * 15 * 4 doubles, interleaved per-axis (Plan 8 Chunk 3:
-        x, y, z, e). The .e slot is ignored on input and zeroed on output.
-    impulse_amplitudes : sequence[float]
-        Shaper amplitudes a_i. When `normalize` is True they are scaled to
-        sum to 1.0 (standard convention for zero-vibration shapers).
-    impulse_delays : sequence[float]
-        Shaper delays tau_i. Must be >= 0.
-    out_capacity : int, optional
-        Output phase capacity.
-    normalize : bool, optional
-        When True (default) normalize amplitudes so sum == 1.
-
-    Returns
-    -------
-    (out_phase_t_ends, out_coeffs)
-    """
+    """Bake an FIR impulse train into a piecewise-polynomial move."""
     ffi, lib = get_ffi()
     if len(impulse_amplitudes) != len(impulse_delays):
         raise ValueError("amplitudes/delays length mismatch")
@@ -65,11 +54,51 @@ def fir_compose(
     in_coeffs_buf = ffi.new("double[]", list(input_coeffs))
     amps_buf = ffi.new("double[]", amps)
     delays_buf = ffi.new("double[]", list(impulse_delays))
+
+    have_prev = (
+        prev_phase_t_ends is not None
+        and prev_coeffs is not None
+        and prev_T_move and prev_T_move > 0.0
+    )
+    have_next = (
+        next_phase_t_ends is not None
+        and next_coeffs is not None
+        and next_T_move and next_T_move > 0.0
+    )
+    null_double = ffi.cast("const double *", 0)
+    if have_prev:
+        n_prev = len(prev_phase_t_ends)
+        if len(prev_coeffs) != n_prev * 15 * 4:
+            raise ValueError(
+                f"prev_coeffs length {len(prev_coeffs)} != "
+                f"expected {n_prev * 15 * 4}"
+            )
+        prev_t_buf = ffi.new("double[]", list(prev_phase_t_ends))
+        prev_c_buf = ffi.new("double[]", list(prev_coeffs))
+    else:
+        n_prev = 0
+        prev_t_buf = null_double
+        prev_c_buf = null_double
+    if have_next:
+        n_next = len(next_phase_t_ends)
+        if len(next_coeffs) != n_next * 15 * 4:
+            raise ValueError(
+                f"next_coeffs length {len(next_coeffs)} != "
+                f"expected {n_next * 15 * 4}"
+            )
+        next_t_buf = ffi.new("double[]", list(next_phase_t_ends))
+        next_c_buf = ffi.new("double[]", list(next_coeffs))
+    else:
+        n_next = 0
+        next_t_buf = null_double
+        next_c_buf = null_double
+
     out_t_ends_buf = ffi.new("double[]", out_capacity)
     out_coeffs_buf = ffi.new("double[]", out_capacity * 15 * 4)
     n_out = lib.fir_compose(
-        n_in,
-        in_t_ends_buf, in_coeffs_buf,
+        int(n_prev), prev_t_buf, prev_c_buf, float(prev_T_move or 0.0),
+        n_in, in_t_ends_buf, in_coeffs_buf,
+        int(n_next), next_t_buf, next_c_buf, float(next_T_move or 0.0),
         n_imp, amps_buf, delays_buf,
         out_capacity,
         out_t_ends_buf, out_coeffs_buf,

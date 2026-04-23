@@ -19,17 +19,24 @@
  * The Minkowski sum of x's breakpoints and w's breakpoints in t yields
  * the breakpoints of y. Between any two consecutive breakpoints, for
  * each kernel piece i the u-support [t - b_i, t - a_i] lies entirely
- * within one input phase, so y is a single polynomial in t over the
- * sub-interval.
+ * within one input phase (of prev/current/next), so y is a single
+ * polynomial in t over the sub-interval.
  *
- * Move-boundary handling: for this Chunk 2 we zero-pad outside
- * [0, move_t] — any kernel overlap with u < 0 or u > move_t contributes
- * zero. This is the documented approximation (see header).
+ * Neighbour-aware boundary handling:
+ *   The composer accepts optional prev / next move polynomials. When
+ *   supplied, kernel-window overlap with u < 0 integrates the prev
+ *   move's polynomial (origin-shifted to t in [-T_prev, 0)), and
+ *   overlap with u > T_cur integrates the next move's polynomial
+ *   (origin-shifted to t in [T_cur, T_cur + T_next)). When NULL, the
+ *   corresponding overlap is zero-padded — correct when the actual
+ *   print starts / stops at the move boundary.
  *
  * Implementation notes:
  *   - Input phase polynomials are converted from phase-local to
  *     absolute-move-local t by a Pascal shift per phase per axis.
- *     This is done once up front and cached in `abs_poly`.
+ *     This is done once up front and cached in `abs_poly`. The prev
+ *     / next polynomials are shifted into the same absolute-t frame
+ *     as the current move by subtracting/adding T_prev / T_cur.
  *   - Kernel is evaluated in absolute-tau basis (as returned by the
  *     shaper_defs rescale path), but we rebuild it here in C from the
  *     closed-form cardinal B-spline formula so the composer has no
@@ -76,10 +83,18 @@
 /* Output per-piece polynomial degree m + 9, i.e. up to 14 for bs5; leaves
  * room to 15 = MOVE_QUINTIC_POLY_COEFFS. */
 #define BS_OUTPUT_NC 15
-/* Max breakpoints. For bs5: (n_phases + 1 internal edges) * (m + 2 kernel
- * edges). With n_phases <= 3 we get up to 4 * 7 = 28 breakpoints.
- * Tests may feed more phases for stress, so keep room. */
-#define BS_MAX_BREAKS 128
+/* Max breakpoints. With neighbour-aware baking we enumerate breakpoints
+ * from up to 3 moves (prev / current / next), each contributing at most
+ * (n_phases + 1) edges Minkowski-summed against (m + 2) kernel edges.
+ * Worst case: 3 moves * 4 edges * 7 kernel edges = 84 raw; bump the slack
+ * to 256 for safety (neighbour tests may feed more phases). */
+#define BS_MAX_BREAKS 256
+/* Input phases per "move" (prev/current/next). The planner currently
+ * emits up to 3 phases per move, but Plan 8 Chunk 2 composed outputs can
+ * themselves serve as the next input — those can be up to MOVE_MAX_PIECES.
+ * Keep headroom. */
+#define BS_INPUT_MAX_PHASES 32
+#define BS_TOTAL_MAX_PHASES (3 * BS_INPUT_MAX_PHASES)
 
 /* F_m table (duplicated from klippy/extras/shaper_defs.py:_F_M_TABLE) so
  * the C composer is self-contained. Values derived at zeta=0.1, V=0.05
@@ -150,12 +165,6 @@ static double binomial(int n, int k)
  * Output: n_pieces = m + 1; each piece i has support [tau_edges[i],
  * tau_edges[i+1]] and coefficients kernel_coeffs[i][0..m-1] in ascending
  * powers of absolute tau.
- *
- * This replicates _cardinal_bspline_pieces + _rescale_piece from
- * shaper_defs.py exactly. We build the canonical kernel on [0, m+1] first,
- * then map canonical tau = s*(t - shift) with s = (m+1)/T_sm,
- * shift = -T_sm/2. The Jacobian factor s applied at the end gives unit
- * integral over the real support.
  */
 static void build_bs_kernel(
     int m, double t_sm,
@@ -163,10 +172,6 @@ static void build_bs_kernel(
     double kernel_coeffs[BS_KERNEL_MAX_PIECES][BS_KERNEL_NC],
     int *n_pieces_out)
 {
-    /* Canonical pieces: sub-interval [i, i+1] has coefficients
-     *   N(tau) = (1/m!) * sum_{k=0..i} (-1)^k * C(m+1, k) *
-     *                                  sum_{j=0..m} C(m, j) * (-k)^(m-j) * tau^j
-     */
     double fac_m = 1.0;
     for (int i = 2; i <= m; ++i)
         fac_m *= (double)i;
@@ -184,14 +189,6 @@ static void build_bs_kernel(
             }
         }
     }
-    /* Rescale each canonical piece [i, i+1] to real time [-T_sm/2 + i*h,
-     * -T_sm/2 + (i+1)*h] with h = T_sm / (m+1). Map tau_canon = s*(t - shift)
-     * with s = (m+1)/T_sm, shift = -T_sm/2.
-     * In absolute-t basis this gives:
-     *   tau_canon^j = (s*t + b0)^j where b0 = -s * shift = (m+1)/2.
-     * Expand via binomial into ascending t powers, then apply the density
-     * Jacobian factor s.
-     */
     double s = (double)(m + 1) / t_sm;
     double shift = -0.5 * t_sm;
     double b0 = -s * shift;  /* = (m+1)/2 */
@@ -201,27 +198,19 @@ static void build_bs_kernel(
         for (int j = 0; j <= m; ++j) {
             if (canonical[i][j] == 0.0)
                 continue;
-            /* (s*t + b0)^j = sum_k C(j,k) * s^k * b0^(j-k) * t^k */
             double s_pow = 1.0;
-            double b0_pow_jk = 1.0;
-            /* Pre-compute b0^(j - k) for k = 0..j */
             double b0_pows[BS_KERNEL_NC + 1];
             b0_pows[j] = 1.0;
             for (int k = j - 1; k >= 0; --k)
                 b0_pows[k] = b0_pows[k + 1] * b0;
-            /* b0_pows[k] = b0^(j - k). */
             for (int k = 0; k <= j; ++k) {
                 new_coeffs[k] += canonical[i][j] * binomial(j, k)
                                  * s_pow * b0_pows[k];
                 s_pow *= s;
             }
-            (void)b0_pow_jk;
         }
-        /* Jacobian factor s applied to all coefficients. */
         for (int k = 0; k < BS_KERNEL_NC; ++k)
             kernel_coeffs[i][k] = s * new_coeffs[k];
-        /* Piece bounds: canonical [i, i+1] -> real [-T_sm/2 + i*h,
-         * -T_sm/2 + (i+1)*h]. */
     }
     double h = t_sm / (double)(m + 1);
     for (int i = 0; i <= m + 1; ++i)
@@ -242,92 +231,129 @@ static int cmp_dbl(const void *a, const void *b)
 }
 
 /* ------------------------------------------------------------------ */
+/* Build the absolute-t polynomial array for a "concatenated" phase stream
+ * covering prev / current / next moves (each optional). Input phase-local
+ * polynomials are Pascal-retargeted into an absolute-t frame where t = 0
+ * coincides with the START of the current move:
+ *
+ *   - prev  spans u in [-T_prev, 0)   with phase boundaries at T_prev_bnd
+ *     shifted by -T_prev.
+ *   - cur   spans u in [0, T_cur]     with phase boundaries unchanged.
+ *   - next  spans u in [T_cur, T_cur + T_next] with phase boundaries
+ *     shifted by +T_cur.
+ *
+ * Returns n_total_phases and writes:
+ *   phase_starts[0..n_total_phases]   — n_total_phases + 1 boundary values
+ *                                        in absolute-t; phase p spans
+ *                                        [phase_starts[p], phase_starts[p+1]].
+ *   abs_poly[p][k]                    — coefficient of t^k for phase p.
+ */
+static int flatten_axis_polys(
+    int prev_n, const double *prev_ends, const double *prev_axis,
+    double prev_T, int cur_n, const double *cur_ends,
+    const double *cur_axis, int next_n, const double *next_ends,
+    const double *next_axis, double next_T,
+    double *phase_starts,
+    double abs_poly[BS_TOTAL_MAX_PHASES][BS_INPUT_NC])
+{
+    int p_out = 0;
+    /* Absolute shift for prev: its internal time 0 sits at t = -prev_T. */
+    if (prev_n > 0 && prev_axis != NULL) {
+        double shift = -prev_T;
+        for (int p = 0; p < prev_n; ++p) {
+            double start_rel = (p == 0) ? 0.0 : prev_ends[p - 1];
+            double end_rel = prev_ends[p];
+            phase_starts[p_out] = shift + start_rel;
+            double in_buf[BS_OUTPUT_NC];
+            for (int k = 0; k < BS_OUTPUT_NC; ++k)
+                in_buf[k] = prev_axis[p * BS_OUTPUT_NC + k];
+            double shifted[BS_INPUT_NC];
+            /* Phase-local origin sits at shift + start_rel in absolute-t. */
+            pascal_retarget(in_buf, shift + start_rel, 0.0, BS_INPUT_NC, shifted);
+            for (int k = 0; k < BS_INPUT_NC; ++k)
+                abs_poly[p_out][k] = shifted[k];
+            p_out++;
+            (void)end_rel;
+        }
+    }
+    /* Current move. */
+    for (int p = 0; p < cur_n; ++p) {
+        double start_rel = (p == 0) ? 0.0 : cur_ends[p - 1];
+        phase_starts[p_out] = start_rel;
+        double in_buf[BS_OUTPUT_NC];
+        for (int k = 0; k < BS_OUTPUT_NC; ++k)
+            in_buf[k] = cur_axis[p * BS_OUTPUT_NC + k];
+        double shifted[BS_INPUT_NC];
+        pascal_retarget(in_buf, start_rel, 0.0, BS_INPUT_NC, shifted);
+        for (int k = 0; k < BS_INPUT_NC; ++k)
+            abs_poly[p_out][k] = shifted[k];
+        p_out++;
+    }
+    /* Next move. */
+    if (next_n > 0 && next_axis != NULL) {
+        double shift = cur_ends[cur_n - 1];
+        for (int p = 0; p < next_n; ++p) {
+            double start_rel = (p == 0) ? 0.0 : next_ends[p - 1];
+            phase_starts[p_out] = shift + start_rel;
+            double in_buf[BS_OUTPUT_NC];
+            for (int k = 0; k < BS_OUTPUT_NC; ++k)
+                in_buf[k] = next_axis[p * BS_OUTPUT_NC + k];
+            double shifted[BS_INPUT_NC];
+            pascal_retarget(in_buf, shift + start_rel, 0.0, BS_INPUT_NC, shifted);
+            for (int k = 0; k < BS_INPUT_NC; ++k)
+                abs_poly[p_out][k] = shifted[k];
+            p_out++;
+        }
+        (void)next_T;
+    }
+    /* Final phase-end sentinel. */
+    double final_end;
+    if (next_n > 0 && next_axis != NULL)
+        final_end = cur_ends[cur_n - 1] + next_ends[next_n - 1];
+    else
+        final_end = cur_ends[cur_n - 1];
+    phase_starts[p_out] = final_end;
+    return p_out;
+}
+
+/* ------------------------------------------------------------------ */
 /* Core single-axis composer. Called 3x from bs_compose (once per axis).
  *
  * Inputs:
- *   n_in        : number of input phases
- *   phase_ends  : absolute move-local end time of each phase [n_in]
- *   phase_coeffs: per-phase 15 coefficients, phase-local basis [n_in * 15]
- *   m           : bs order 1..5
- *   t_sm        : kernel support width (F_m / shaper_freq)
- *   move_t      : total move duration
- *   breaks      : sorted unique breakpoints (absolute t) [n_breaks]
- *   n_breaks    : number of breakpoints (= n output phases + 1, with
- *                 breaks[0] = 0, breaks[n_breaks-1] = move_t)
+ *   n_total      : number of flattened phases (prev + cur + next)
+ *   phase_starts : length n_total + 1, absolute-t bounds of each phase
+ *   abs_poly     : per-phase polynomial in absolute-t monomial basis
+ *   m            : bs order 1..5
+ *   t_sm         : kernel support width
+ *   u_min, u_max : absolute-t integration domain (outside is zero-padded).
+ *                  Typically u_min = -prev_T (or 0 if no prev) and
+ *                  u_max = cur_T + next_T (or cur_T if no next).
+ *   cur_move_t   : duration of the current move (for output phase shift)
+ *   breaks       : sorted unique output breakpoints in absolute-t,
+ *                  covering [0, cur_move_t]
+ *   n_breaks     : length of breaks
  *
  * Outputs:
- *   out_coeffs  : per-phase 15 coefficients, phase-local [n_out * 15]
- *                 where n_out = n_breaks - 1.
- *
- * Returns 0 on success, -1 on internal error.
+ *   out_coeffs   : per-phase 15 coefficients, phase-local [n_out * 15]
  */
 static int compose_axis(
-    int n_in,
-    const double *phase_ends,
-    const double *phase_coeffs,
+    int n_total,
+    const double *phase_starts,
+    double abs_poly[BS_TOTAL_MAX_PHASES][BS_INPUT_NC],
     int m,
     double t_sm,
-    double move_t,
+    double u_min,
+    double u_max,
     const double *breaks,
     int n_breaks,
     double *out_coeffs)
 {
-    /* 1. Convert each input phase polynomial to absolute-t monomial basis.
-     *    phase p has phase-local origin phase_starts[p] = (p == 0 ? 0
-     *    : phase_ends[p-1]). */
-    double abs_poly[BS_MAX_BREAKS][BS_INPUT_NC];
-    memset(abs_poly, 0, sizeof(abs_poly));
-    for (int p = 0; p < n_in; ++p) {
-        double origin = (p == 0) ? 0.0 : phase_ends[p - 1];
-        /* phase_coeffs[p * 15 + k] -> only [0..10] are potentially non-zero
-         * for the pre-Chunk-3 callers. We still honour all 15 in case a
-         * test shoves degree-14 input (bs5 round-trip etc.). */
-        double in_buf[BS_OUTPUT_NC];
-        for (int k = 0; k < BS_OUTPUT_NC; ++k)
-            in_buf[k] = phase_coeffs[p * BS_OUTPUT_NC + k];
-        /* Reduce to BS_INPUT_NC effective coefficients; higher-order are
-         * treated as zero. If any non-zero degree > 10 comes in the
-         * composer still handles it but the arithmetic below truncates.
-         * In practice the callers always have deg <= 10 before bs. */
-        double shifted[BS_INPUT_NC];
-        /* Convert phase-local (origin = phase_origin) to absolute-t
-         * (origin = 0). */
-        pascal_retarget(in_buf, origin, 0.0, BS_INPUT_NC, shifted);
-        for (int k = 0; k < BS_INPUT_NC; ++k)
-            abs_poly[p][k] = shifted[k];
-    }
-
-    /* 2. Build the kernel. */
+    /* Build the kernel. */
     double tau_edges[BS_KERNEL_MAX_PIECES + 1];
     double kernel_coeffs[BS_KERNEL_MAX_PIECES][BS_KERNEL_NC];
     int n_kpieces = 0;
     build_bs_kernel(m, t_sm, tau_edges, kernel_coeffs, &n_kpieces);
 
-    /* 3. For each output sub-interval [t_a, t_b] from consecutive
-     *    breakpoints, compute the output polynomial y(t) in absolute-t
-     *    basis by summing the contributions of each (kernel piece,
-     *    overlapping input phase) pair, with integration limits clipped
-     *    to the kernel-piece/phase overlap and to [0, move_t].
-     *
-     *    For a given kernel piece i with absolute-tau support [a_i, b_i]
-     *    (a_i = tau_edges[i], b_i = tau_edges[i+1]):
-     *        u = t - tau
-     *        u in [t - b_i, t - a_i]
-     *    We must further restrict u to the input phase range [T_p, T_{p+1}]
-     *    and to [0, move_t] (zero-pad outside the move).
-     *
-     *    Under the sub-interval-constancy guarantee (from Minkowski break
-     *    enumeration) the u-limits per (i, p) are:
-     *        u_hi(t) = clip(t - a_i, T_p, T_{p+1}, 0, move_t, chosen constant side)
-     *        u_lo(t) = clip(t - b_i, T_p, T_{p+1}, 0, move_t, chosen constant side)
-     *    But because we enumerate breakpoints for every kernel edge and
-     *    every phase edge (and move edges 0, move_t), within a sub-
-     *    interval the "active" limit form is affine in t with slope 1
-     *    (when unclipped) or constant (when clipped by a phase/move edge).
-     *
-     *    We probe at t_mid to determine which case each kernel piece is
-     *    in, then build I_i(t) symbolically.
-     */
     int n_out = n_breaks - 1;
     for (int s_idx = 0; s_idx < n_out; ++s_idx) {
         double t_a = breaks[s_idx];
@@ -342,85 +368,59 @@ static int compose_axis(
             /* Unclipped u-range for this kernel piece at t_mid. */
             double u_hi_mid = t_mid - a_i;
             double u_lo_mid = t_mid - b_i;
-            /* Clip to [0, move_t] (zero-pad outside the move). */
+            /* Clip to [u_min, u_max] (zero-pad outside the integration
+             * domain). */
             double u_hi_cl = u_hi_mid;
             double u_lo_cl = u_lo_mid;
-            if (u_hi_cl > move_t) u_hi_cl = move_t;
-            if (u_lo_cl < 0.0)    u_lo_cl = 0.0;
+            if (u_hi_cl > u_max) u_hi_cl = u_max;
+            if (u_lo_cl < u_min) u_lo_cl = u_min;
             if (u_hi_cl <= u_lo_cl)
-                continue;  /* kernel piece entirely outside the move */
-            /* Determine which input phase contains u_mid in the clipped
-             * range. Within a breakpoint-bounded sub-interval the clipped
-             * u-range lies entirely in one phase by construction. */
+                continue;
+            /* Identify which input phase contains u_mid_clip. Within a
+             * sub-interval bounded by the full break grid (all prev/
+             * cur/next phase boundaries shifted by each kernel edge),
+             * the clipped u-range lies in exactly one flattened phase. */
             double u_mid_clip = 0.5 * (u_hi_cl + u_lo_cl);
             int p = 0;
-            while (p < n_in - 1 && u_mid_clip > phase_ends[p])
+            while (p < n_total - 1 && u_mid_clip > phase_starts[p + 1])
                 p++;
-            /* Build the integrand P_i(u; t) = x_p(u) * w_i(t - u), as a
-             * polynomial in u with coefficients that are polynomials in t.
-             *
-             * Strategy: expand w_i(t - u) as a polynomial in u with
-             * coefficients depending on t, multiply by x_p(u), then
-             * integrate u^n from u_lo(t) to u_hi(t).
-             *
-             * w_i(tau) = sum_j w_ij * tau^j    (tau = t - u)
-             *          = sum_j w_ij * sum_l C(j,l) * t^(j-l) * (-u)^l
-             *          = sum_j sum_l w_ij * C(j,l) * (-1)^l * t^(j-l) * u^l
-             *
-             * x_p(u) = sum_k X_k * u^k            (abs_poly[p][k])
-             *
-             * Product coefficient of u^n (with n = k + l):
-             *   P_n(t) = sum_{k+l=n} X_k * sum_{j>=l} w_ij * C(j,l) * (-1)^l * t^(j-l)
-             *
-             * Integration: integral u^n du from ul(t) to uh(t)
-             *            = (uh^(n+1) - ul^(n+1)) / (n+1).
-             * uh(t), ul(t) are affine in t (clipped case) or a constant (fully
-             * clipped). We treat both uniformly by representing uh(t), ul(t)
-             * as polynomials in t (degree 1 for unclipped, degree 0 for
-             * clipped).
-             */
-            /* uh(t), ul(t) as linear polys in t: uh_p[0] + uh_p[1]*t. */
+            /* Guard against round-off landing u_mid_clip just outside. */
+            if (u_mid_clip < phase_starts[0] - 1e-15)
+                continue;
+            if (u_mid_clip > phase_starts[n_total] + 1e-15)
+                continue;
+            /* Build integration limits as linear polys in t (degree 1
+             * when the edge is unclipped, degree 0 when clipped by the
+             * domain bound). */
             double uh_p[2], ul_p[2];
-            /* Unclipped: uh = t - a_i -> [-a_i, 1]; ul = t - b_i -> [-b_i, 1] */
-            int uh_clipped_hi = (u_hi_mid > move_t);
-            int ul_clipped_lo = (u_lo_mid < 0.0);
-            /* Also phase-bound clipping: if u_mid was clipped by a phase
-             * boundary rather than a move boundary, we need to detect that.
-             * For the current chunk we've only guaranteed that within the
-             * sub-interval neither u_hi nor u_lo crosses a breakpoint — so
-             * once we've clipped to [0, move_t], the surviving range lies
-             * in a single phase [T_p, T_{p+1}]. No extra phase clipping. */
+            int uh_clipped_hi = (u_hi_mid > u_max);
+            int ul_clipped_lo = (u_lo_mid < u_min);
             if (uh_clipped_hi) {
-                uh_p[0] = move_t;
+                uh_p[0] = u_max;
                 uh_p[1] = 0.0;
             } else {
                 uh_p[0] = -a_i;
                 uh_p[1] = 1.0;
             }
             if (ul_clipped_lo) {
-                ul_p[0] = 0.0;
+                ul_p[0] = u_min;
                 ul_p[1] = 0.0;
             } else {
                 ul_p[0] = -b_i;
                 ul_p[1] = 1.0;
             }
 
-            /* Pre-compute powers of uh_p and ul_p (as polys in t) up to
-             * degree (BS_INPUT_NC + m) — safe upper bound. The power
-             * `uh_p^(n+1)` in t has degree at most (n+1). Integrand in u
-             * has degree BS_INPUT_MAX_DEG + m. */
+            /* Pre-compute powers of uh_p and ul_p as polys in t up to
+             * degree (BS_INPUT_MAX_DEG + m + 1). */
             int max_n = BS_INPUT_MAX_DEG + m;
-            int max_pow = max_n + 1;  /* n+1 */
-            /* Storage: uh_pow[pw][k] = coefficient of t^k in uh_p^pw. */
+            int max_pow = max_n + 1;
             double uh_pow[BS_INPUT_NC + BS_KERNEL_NC + 1][BS_OUTPUT_NC];
             double ul_pow[BS_INPUT_NC + BS_KERNEL_NC + 1][BS_OUTPUT_NC];
             memset(uh_pow, 0, sizeof(uh_pow));
             memset(ul_pow, 0, sizeof(ul_pow));
-            /* pw = 0: constant 1. */
             uh_pow[0][0] = 1.0;
             ul_pow[0][0] = 1.0;
             for (int pw = 1; pw <= max_pow; ++pw) {
-                /* uh_pow[pw] = uh_pow[pw-1] * uh_p (convolve coefficients). */
                 for (int k = 0; k < BS_OUTPUT_NC; ++k) {
                     double a0 = uh_pow[pw - 1][k];
                     if (a0 == 0.0)
@@ -441,10 +441,6 @@ static int compose_axis(
                 }
             }
 
-            /* Build P_n(t) as polys in t of degree at most m:
-             *   P_n(t) = sum_{k=0..min(n, 10)} X_k * sum_{j=max(n-k, 0)..m}
-             *            w_{ij} * C(j, n-k) * (-1)^(n-k) * t^(j - (n - k))
-             */
             double X[BS_INPUT_NC];
             for (int k = 0; k < BS_INPUT_NC; ++k)
                 X[k] = abs_poly[p][k];
@@ -452,24 +448,18 @@ static int compose_axis(
             for (int j = 0; j < BS_KERNEL_NC; ++j)
                 w[j] = kernel_coeffs[i][j];
 
-            /* Integrand in u has degree BS_INPUT_MAX_DEG + m. */
             int integrand_deg = BS_INPUT_MAX_DEG + m;
-            /* For each n = 0..integrand_deg, compute P_n(t) and
-             * accumulate into y_abs as P_n(t) * (uh^(n+1) - ul^(n+1)) /
-             * (n + 1). */
             for (int n = 0; n <= integrand_deg; ++n) {
                 double P_n[BS_KERNEL_NC];
                 memset(P_n, 0, sizeof(P_n));
                 for (int k = 0; k <= n && k < BS_INPUT_NC; ++k) {
                     int l = n - k;
-                    if (l < 0 || l > m)  /* kernel piece has coeffs 0..m */
+                    if (l < 0 || l > m)
                         continue;
                     double Xk = X[k];
                     if (Xk == 0.0)
                         continue;
                     double sign_l = (l & 1) ? -1.0 : 1.0;
-                    /* Iterate over j in [l, m]. Each contributes to
-                     * t^(j - l) in P_n. */
                     for (int j = l; j <= m; ++j) {
                         double w_ij = w[j];
                         if (w_ij == 0.0)
@@ -479,8 +469,6 @@ static int compose_axis(
                         P_n[t_deg] += term;
                     }
                 }
-                /* Now accumulate P_n(t) * (uh^(n+1) - ul^(n+1)) / (n+1)
-                 * into y_abs (poly in t). */
                 double inv_np1 = 1.0 / (double)(n + 1);
                 for (int a = 0; a <= m; ++a) {
                     double pa = P_n[a];
@@ -500,8 +488,7 @@ static int compose_axis(
             }
         }
 
-        /* 4. Shift y_abs from absolute-t basis to phase-local basis
-         *    (origin = breaks[s_idx]). Store in output. */
+        /* Shift from absolute-t to phase-local (origin = breaks[s_idx]). */
         double y_local[BS_OUTPUT_NC];
         pascal_retarget(y_abs, 0.0, breaks[s_idx],
                         BS_OUTPUT_NC, y_local);
@@ -515,9 +502,17 @@ static int compose_axis(
 /* ------------------------------------------------------------------ */
 /* Public entry. See header for contract. */
 int bs_compose(
+    int prev_n_phases,
+    const double *prev_phase_t_ends,
+    const double *prev_coeffs,
+    double prev_T_move,
     int n_input_phases,
     const double *input_phase_t_ends,
     const double *input_coeffs,
+    int next_n_phases,
+    const double *next_phase_t_ends,
+    const double *next_coeffs,
+    double next_T_move,
     int bs_order,
     double shaper_freq,
     double damping_ratio,
@@ -537,26 +532,50 @@ int bs_compose(
     double t_sm = F_M_TABLE[bs_order] / shaper_freq;
     double h = t_sm / (double)(bs_order + 1);
 
-    /* 1. Enumerate breakpoints: kernel edges tau_i = -T_sm/2 + i*h shifted
-     *    by each phase boundary (0, T_1, ..., T_{n_in}). Plus move edges
-     *    0 and move_t. Clip to [0, move_t] and uniq-sort. */
+    /* Resolve neighbour presence. Treat NULL arrays or non-positive
+     * T_move as "no neighbour" (zero-pad outside). */
+    int have_prev = (prev_n_phases > 0 && prev_phase_t_ends != NULL
+                     && prev_coeffs != NULL && prev_T_move > 0.0);
+    int have_next = (next_n_phases > 0 && next_phase_t_ends != NULL
+                     && next_coeffs != NULL && next_T_move > 0.0);
+    if (have_prev && prev_n_phases > BS_INPUT_MAX_PHASES)
+        return -1;
+    if (have_next && next_n_phases > BS_INPUT_MAX_PHASES)
+        return -1;
+    if (n_input_phases > BS_INPUT_MAX_PHASES)
+        return -1;
+
+    double u_min = have_prev ? -prev_T_move : 0.0;
+    double u_max = have_next ? (move_t + next_T_move) : move_t;
+
+    /* 1. Enumerate breakpoints in [0, move_t]: the output grid. The
+     *    integrand changes whenever a kernel edge crosses any (prev /
+     *    cur / next) phase boundary. For kernel edge i and phase boundary
+     *    u = T_bnd, the break is t = T_bnd + tau_edge_i. We then clip
+     *    to [0, move_t] and keep the open-interior breaks. */
     double raw_breaks[BS_MAX_BREAKS];
     int n_raw = 0;
     raw_breaks[n_raw++] = 0.0;
     raw_breaks[n_raw++] = move_t;
-    /* Phase boundaries in absolute move-local time. */
-    double phase_boundaries[BS_MAX_BREAKS];
-    int n_pb = n_input_phases + 1;
-    phase_boundaries[0] = 0.0;
+    /* Collect all flattened phase boundaries in absolute-t. */
+    double phase_bnds[BS_MAX_BREAKS];
+    int n_bnd = 0;
+    if (have_prev) {
+        phase_bnds[n_bnd++] = -prev_T_move;   /* prev start */
+        for (int p = 0; p < prev_n_phases; ++p)
+            phase_bnds[n_bnd++] = -prev_T_move + prev_phase_t_ends[p];
+    }
+    /* Always include current move start (which may coincide with prev end). */
+    phase_bnds[n_bnd++] = 0.0;
     for (int p = 0; p < n_input_phases; ++p)
-        phase_boundaries[p + 1] = input_phase_t_ends[p];
-    /* For each kernel edge i in [0..m+1], breakpoint t satisfies
-     *   u_{phase-boundary} = t - (-T_sm/2 + i*h) = T_p
-     *   -> t = T_p + (-T_sm/2 + i*h)
-     */
-    for (int p = 0; p < n_pb; ++p) {
+        phase_bnds[n_bnd++] = input_phase_t_ends[p];
+    if (have_next) {
+        for (int p = 0; p < next_n_phases; ++p)
+            phase_bnds[n_bnd++] = move_t + next_phase_t_ends[p];
+    }
+    for (int p = 0; p < n_bnd; ++p) {
         for (int i = 0; i <= bs_order + 1; ++i) {
-            double t_break = phase_boundaries[p]
+            double t_break = phase_bnds[p]
                              + (-0.5 * t_sm + (double)i * h);
             if (t_break > 0.0 && t_break < move_t) {
                 if (n_raw >= BS_MAX_BREAKS)
@@ -566,7 +585,6 @@ int bs_compose(
         }
     }
     qsort(raw_breaks, n_raw, sizeof(double), cmp_dbl);
-    /* Uniq with absolute tolerance ~1e-12 * move_t. */
     double tol = 1e-12 * (move_t + 1.0);
     double uniq_breaks[BS_MAX_BREAKS];
     int n_uniq = 0;
@@ -579,39 +597,68 @@ int bs_compose(
     if (n_out_phases <= 0 || n_out_phases > out_capacity)
         return -1;
 
-    /* 2. Per-axis compose. input_coeffs layout (Plan 8 Chunk 3):
-     *    per phase: 15 * 4 doubles interleaved
-     *        (c[0].x, c[0].y, c[0].z, c[0].e, c[1].x, ... c[14].e)
-     *    Output same layout. We compose only the XY axes (0..2) — the .e
-     *    slot is zeroed here and populated downstream by linear_pa_compose
-     *    from the (now baked) XY polynomial. Pure-E content arrives via a
-     *    separate emit path and never reaches this composer.
-     */
-    /* Zero the .e slots in the output buffer up front. */
+    /* 2. Per-axis compose. The coeff buffer layout is interleaved
+     *    (x, y, z, e) per phase per coefficient index. We compose XY
+     *    (axes 0..2); the .e slot is zeroed (populated downstream by
+     *    linear_pa_compose). */
     for (int s = 0; s < n_out_phases; ++s) {
         for (int k = 0; k < BS_OUTPUT_NC; ++k) {
             out_coeffs[(s * BS_OUTPUT_NC + k) * 4 + 3] = 0.0;
         }
     }
     for (int axis = 0; axis < 3; ++axis) {
-        double in_axis[BS_MAX_BREAKS * BS_OUTPUT_NC];
-        double out_axis[BS_MAX_BREAKS * BS_OUTPUT_NC];
-        /* Deinterleave this axis. */
+        double in_prev_axis[BS_INPUT_MAX_PHASES * BS_OUTPUT_NC];
+        double in_cur_axis[BS_INPUT_MAX_PHASES * BS_OUTPUT_NC];
+        double in_next_axis[BS_INPUT_MAX_PHASES * BS_OUTPUT_NC];
+        if (have_prev) {
+            for (int p = 0; p < prev_n_phases; ++p) {
+                for (int k = 0; k < BS_OUTPUT_NC; ++k) {
+                    in_prev_axis[p * BS_OUTPUT_NC + k] =
+                        prev_coeffs[(p * BS_OUTPUT_NC + k) * 4 + axis];
+                }
+            }
+        }
         for (int p = 0; p < n_input_phases; ++p) {
             for (int k = 0; k < BS_OUTPUT_NC; ++k) {
-                in_axis[p * BS_OUTPUT_NC + k] =
+                in_cur_axis[p * BS_OUTPUT_NC + k] =
                     input_coeffs[(p * BS_OUTPUT_NC + k) * 4 + axis];
             }
         }
+        if (have_next) {
+            for (int p = 0; p < next_n_phases; ++p) {
+                for (int k = 0; k < BS_OUTPUT_NC; ++k) {
+                    in_next_axis[p * BS_OUTPUT_NC + k] =
+                        next_coeffs[(p * BS_OUTPUT_NC + k) * 4 + axis];
+                }
+            }
+        }
+
+        double abs_poly[BS_TOTAL_MAX_PHASES][BS_INPUT_NC];
+        double phase_starts[BS_TOTAL_MAX_PHASES + 1];
+        int n_total = flatten_axis_polys(
+            have_prev ? prev_n_phases : 0,
+            have_prev ? prev_phase_t_ends : NULL,
+            have_prev ? in_prev_axis : NULL,
+            have_prev ? prev_T_move : 0.0,
+            n_input_phases, input_phase_t_ends, in_cur_axis,
+            have_next ? next_n_phases : 0,
+            have_next ? next_phase_t_ends : NULL,
+            have_next ? in_next_axis : NULL,
+            have_next ? next_T_move : 0.0,
+            phase_starts, abs_poly
+        );
+        if (n_total <= 0)
+            return -1;
+
+        double out_axis[BS_MAX_BREAKS * BS_OUTPUT_NC];
         int rc = compose_axis(
-            n_input_phases, input_phase_t_ends, in_axis,
-            bs_order, t_sm, move_t,
+            n_total, phase_starts, abs_poly,
+            bs_order, t_sm, u_min, u_max,
             uniq_breaks, n_uniq,
             out_axis
         );
         if (rc != 0)
             return -1;
-        /* Re-interleave. */
         for (int s = 0; s < n_out_phases; ++s) {
             for (int k = 0; k < BS_OUTPUT_NC; ++k) {
                 out_coeffs[(s * BS_OUTPUT_NC + k) * 4 + axis] =
@@ -620,7 +667,6 @@ int bs_compose(
         }
     }
 
-    /* 3. Output phase t_ends = uniq_breaks[1..n_uniq-1] (skip the 0). */
     for (int s = 0; s < n_out_phases; ++s)
         out_phase_t_ends[s] = uniq_breaks[s + 1];
 
