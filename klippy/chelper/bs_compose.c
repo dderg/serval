@@ -69,6 +69,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "compiler.h" // __visible
 #include "bs_compose.h"
 
 #define BS_MAX_ORDER 5
@@ -501,7 +502,8 @@ static int compose_axis(
 
 /* ------------------------------------------------------------------ */
 /* Public entry. See header for contract. */
-int bs_compose(
+int __visible
+bs_compose(
     int prev_n_phases,
     const double *prev_phase_t_ends,
     const double *prev_coeffs,

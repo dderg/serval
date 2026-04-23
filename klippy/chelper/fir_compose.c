@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "compiler.h" // __visible
 #include "fir_compose.h"
 
 #define FIR_MAX_IMPULSES 8
@@ -69,7 +70,8 @@ static void pascal_retarget(
     }
 }
 
-int fir_compose(
+int __visible
+fir_compose(
     int prev_n_phases,
     const double *prev_phase_t_ends,
     const double *prev_coeffs,

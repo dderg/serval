@@ -36,6 +36,7 @@
  * aggressive-corner PA and document the ceiling.
  */
 
+#include "compiler.h" // __visible
 #include "nonlinear_pa_compose.h"
 
 #include <math.h>
@@ -208,7 +209,7 @@ fit_deg_samples_to_tau_mono(
     }
 }
 
-void
+void __visible
 nonlinear_pa_compose(
     int n_phases,
     const double *phase_t_ends,

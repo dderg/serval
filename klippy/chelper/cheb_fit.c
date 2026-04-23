@@ -35,6 +35,7 @@
  * conditioned and the monomial conversion matrix has entries in [-8, 8].
  */
 
+#include "compiler.h" // __visible
 #include "cheb_fit.h"
 #include <math.h>
 #include <stddef.h>
@@ -46,7 +47,7 @@
 #define CF_PI 3.14159265358979323846
 #endif
 
-void
+void __visible
 cheb_fit_degree4_nodes(double v_lo, double v_hi, double *out_nodes)
 {
     int i;
@@ -132,7 +133,7 @@ cheb_fit_degree4_interval(
     return 0.0;
 }
 
-int
+int __visible
 cheb_fit_degree4_piecewise(
     double v_lo, double v_hi,
     int n_breaks,

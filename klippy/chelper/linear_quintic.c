@@ -1,3 +1,4 @@
+#include "compiler.h" // __visible
 #include "linear_quintic.h"
 
 // Plan 8 Chunk 3: per-phase stride MOVE_QUINTIC_POLY_COEFFS (15) * 4 axes
@@ -38,7 +39,7 @@ fill_phase(double *buf_phase, double v, double a,
     }
 }
 
-void
+void __visible
 build_linear_as_quintic_coeffs(
     double accel_t, double cruise_t, double decel_t,
     double start_v, double cruise_v, double accel,

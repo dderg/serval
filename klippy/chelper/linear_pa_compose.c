@@ -3,6 +3,7 @@
  * See linear_pa_compose.h for the math derivation and buffer layout.
  */
 
+#include "compiler.h" // __visible
 #include "linear_pa_compose.h"
 
 /* Mirror trapq.h's MOVE_QUINTIC_POLY_COEFFS to keep this file standalone
@@ -13,7 +14,7 @@
 #define LPA_AXES 4
 #define LPA_E_OFFSET 3
 
-void
+void __visible
 linear_pa_compose(
     int n_phases,
     double *coeff_buf,
