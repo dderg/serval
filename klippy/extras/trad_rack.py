@@ -11,6 +11,7 @@ import time
 from collections import deque
 
 from .. import chelper, toolhead
+from ..chelper.linear_quintic import append_trapezoid_as_quintic
 from ..gcode import CommandError
 from ..kinematics import extruder
 from ..stepper import LookupMultiRail
@@ -2389,7 +2390,7 @@ class TradRackToolHead(toolhead.ToolHead, object):
         # Setup iterative solver
         ffi_main, ffi_lib = chelper.get_ffi()
         self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
-        self.trapq_append = ffi_lib.trapq_append
+        self.trapq_append = append_trapezoid_as_quintic
         self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
         self.step_generators = []
         # Create kinematic class

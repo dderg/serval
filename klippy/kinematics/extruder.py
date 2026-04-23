@@ -7,6 +7,7 @@ import logging
 import math
 
 from klippy import chelper, stepper
+from klippy.chelper.linear_quintic import append_trapezoid_as_quintic
 
 from ..extras.danger_options import get_danger_options
 
@@ -650,7 +651,7 @@ class PrinterExtruder:
         # Setup extruder trapq (trapezoidal motion queue)
         ffi_main, ffi_lib = chelper.get_ffi()
         self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
-        self.trapq_append = ffi_lib.trapq_append
+        self.trapq_append = append_trapezoid_as_quintic
         self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
 
         # Setup extruder stepper

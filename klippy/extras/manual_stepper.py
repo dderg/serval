@@ -4,6 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from klippy import chelper, stepper
+from klippy.chelper.linear_quintic import append_trapezoid_as_quintic
 
 from . import force_move
 
@@ -29,7 +30,7 @@ class ManualStepper:
         # Setup iterative solver
         ffi_main, ffi_lib = chelper.get_ffi()
         self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
-        self.trapq_append = ffi_lib.trapq_append
+        self.trapq_append = append_trapezoid_as_quintic
         self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
         self.rail.setup_itersolve("cartesian_stepper_alloc", b"x")
         self.rail.set_trapq(self.trapq)

@@ -7,6 +7,7 @@ import logging
 import math
 
 from klippy import chelper
+from klippy.chelper.linear_quintic import append_trapezoid_as_quintic
 
 BUZZ_DISTANCE = 1.0
 BUZZ_VELOCITY = BUZZ_DISTANCE / 0.250
@@ -39,7 +40,7 @@ class ForceMove:
         # Setup iterative solver
         ffi_main, ffi_lib = chelper.get_ffi()
         self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
-        self.trapq_append = ffi_lib.trapq_append
+        self.trapq_append = append_trapezoid_as_quintic
         self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
         self.stepper_kinematics = ffi_main.gc(
             ffi_lib.cartesian_stepper_alloc(b"x"), ffi_lib.free
