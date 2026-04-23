@@ -57,13 +57,7 @@ struct trapq *trapq_alloc(void);
 void trapq_free(struct trapq *tq);
 void trapq_check_sentinels(struct trapq *tq);
 void trapq_add_move(struct trapq *tq, struct move *m);
-void trapq_append(struct trapq *tq, double print_time
-                  , double accel_t, double cruise_t, double decel_t
-                  , double start_pos_x, double start_pos_y, double start_pos_z
-                  , double axes_r_x, double axes_r_y, double axes_r_z
-                  , double start_v, double cruise_v, double accel);
-
-// Plan 5 D2b — direct-quintic trapq emit. Three phases, each a degree-10
+// Direct-quintic trapq emit. Three phases, each a degree-10
 // position-in-t polynomial in phase-local time. coeff_buf layout:
 //   per phase: MOVE_QUINTIC_POLY_COEFFS * 3 doubles  (c[0].x, c[0].y, c[0].z,
 //                                                     c[1].x, c[1].y, c[1].z,

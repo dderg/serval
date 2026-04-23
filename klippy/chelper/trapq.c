@@ -5,12 +5,11 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
-#include <math.h> // sqrt, fmin
+#include <math.h> // sqrt
 #include <stddef.h> // offsetof
 #include <stdlib.h> // malloc
 #include <string.h> // memset
 #include "compiler.h" // unlikely, __visible
-#include "linear_quintic.h" // build_linear_as_quintic_coeffs
 #include "trapq.h" // move_get_coord
 
 // Allocate a new 'move' object. memset(0) produces a null-motion quintic
@@ -182,53 +181,6 @@ trapq_add_move(struct trapq *tq, struct move *m)
     }
     list_add_before(&m->node, &tail_sentinel->node);
     tail_sentinel->print_time = 0.;
-}
-
-// Plan 8 Chunk 1 Task 2: dispatch through the quintic path.
-//
-// Construct a 99-double degenerate-quintic coefficient buffer representing
-// the accel/cruise/decel trapezoid and delegate to trapq_append_quintic.
-// After this, every trapq entry is a quintic move.
-void __visible
-trapq_append(struct trapq *tq, double print_time
-             , double accel_t, double cruise_t, double decel_t
-             , double start_pos_x, double start_pos_y, double start_pos_z
-             , double axes_r_x, double axes_r_y, double axes_r_z
-             , double start_v, double cruise_v, double accel)
-{
-    double coeff_buf[99];
-    build_linear_as_quintic_coeffs(
-        accel_t, cruise_t, decel_t,
-        start_v, cruise_v, accel,
-        axes_r_x, axes_r_y, axes_r_z,
-        start_pos_x, start_pos_y, start_pos_z,
-        coeff_buf);
-    double move_t = accel_t + cruise_t + decel_t;
-    // Total path distance is the sum of per-phase displacements along
-    // axes_r; the arc length is that distance scaled by |axes_r|.
-    double accel_d = start_v * accel_t + 0.5 * accel * accel_t * accel_t;
-    double cruise_d = cruise_v * cruise_t;
-    double decel_d = cruise_v * decel_t - 0.5 * accel * decel_t * decel_t;
-    double total_d = accel_d + cruise_d + decel_d;
-    double axes_r_mag = sqrt(axes_r_x * axes_r_x + axes_r_y * axes_r_y
-                             + axes_r_z * axes_r_z);
-    double arc_length = total_d * axes_r_mag;
-    // v_cap_min is the minimum instantaneous velocity over the trapezoid.
-    // For a classical trapezoid the velocity is monotone on each phase, so
-    // the extrema live at the endpoints: start_v, cruise_v, and the decel
-    // end velocity (cruise_v - accel * decel_t). Clamp at 0 to guard
-    // against tiny FP negatives when the planner brings the end velocity
-    // to zero.
-    double decel_end_v = cruise_v - accel * decel_t;
-    double v_cap_min = fmin(fmin(start_v, cruise_v), decel_end_v);
-    if (v_cap_min < 0.0) v_cap_min = 0.0;
-    trapq_append_quintic(
-        tq, print_time,
-        accel_t,                  // t_accel_end
-        accel_t + cruise_t,       // t_decel_start
-        move_t, arc_length, v_cap_min,
-        start_pos_x, start_pos_y, start_pos_z,
-        coeff_buf);
 }
 
 // Plan 5 D2b — emit a single quintic trapq entry. Phase boundaries are

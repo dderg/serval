@@ -36,6 +36,7 @@ import numpy as np
 import pytest
 
 from klippy import blendplanner, blendquintic, blendshape, chelper, topp
+from klippy.chelper.linear_quintic import append_trapezoid_as_quintic
 from klippy.extras import bspline_inverse, shaper_defs
 
 
@@ -607,7 +608,7 @@ class TestPlan5CascadeIntegration:
         cruise_v = 100.0
         accel = cruise_v / accel_t   # mm/s^2
         total_t = accel_t + cruise_t + decel_t
-        ffi_lib.trapq_append(
+        append_trapezoid_as_quintic(
             tq, 1.0,
             accel_t, cruise_t, decel_t,
             0.0, 0.0, 0.0,     # start_pos

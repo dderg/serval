@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from klippy import chelper
+from klippy.chelper.linear_quintic import append_trapezoid_as_quintic
 
 
 def _finalize_and_extract(ffi_main, ffi_lib, tq, t_print, duration, nmax=8):
@@ -41,7 +42,7 @@ def test_trapq_append_emits_single_quintic_entry():
     start_v, cruise_v, accel = 10.0, 20.0, 200.0
     total_t = accel_t + cruise_t + decel_t
     t_print = 1.0
-    ffi_lib.trapq_append(
+    append_trapezoid_as_quintic(
         tq, t_print,
         accel_t, cruise_t, decel_t,
         0.0, 0.0, 0.0,   # start_pos
@@ -76,7 +77,7 @@ def test_trapq_append_pure_cruise_emits_quintic():
     accel = 0.0
     total_t = accel_t + cruise_t + decel_t
     t_print = 0.5
-    ffi_lib.trapq_append(
+    append_trapezoid_as_quintic(
         tq, t_print,
         accel_t, cruise_t, decel_t,
         5.0, 0.0, 0.0,
@@ -101,7 +102,7 @@ def test_trapq_append_move_t_matches_sum_of_phase_times():
     start_v, cruise_v, accel = 5.0, 15.0, 333.333333
     total_t = accel_t + cruise_t + decel_t
     t_print = 2.0
-    ffi_lib.trapq_append(
+    append_trapezoid_as_quintic(
         tq, t_print,
         accel_t, cruise_t, decel_t,
         0.0, 0.0, 0.0,

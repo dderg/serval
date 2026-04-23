@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from klippy import blendquintic, blendshape, chelper
+from klippy.chelper.linear_quintic import append_trapezoid_as_quintic
 
 
 # ----- helpers -------------------------------------------------------------
@@ -80,7 +81,7 @@ def test_linear_move_get_coord_bit_identical():
     start_v = 50.0
     cruise_v = 150.0
     accel = 2000.0
-    ffi_lib.trapq_append(tq, print_time, accel_t, cruise_t, decel_t,
+    append_trapezoid_as_quintic(tq, print_time, accel_t, cruise_t, decel_t,
                          start_x, start_y, start_z, ax, ay, az,
                          start_v, cruise_v, accel)
 
