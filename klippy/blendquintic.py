@@ -837,11 +837,13 @@ class QuinticShape:
          total_t, arc_length)
 
         where each *_polys is a list of 3 axis coefficient lists (x, y, z),
-        each a list of length 11 (degrees 0..10) expressing
+        each a list of length 15 (degrees 0..14) expressing
             position(t) = sum_k c_k * (t - t_phase_start)^k
         in phase-local time. Coefficients beyond the natural polynomial
-        degree are zero-padded to 11 so the C-side trapq entry can unpack
-        a uniform layout.
+        degree are zero-padded to 15 so the C-side trapq entry can unpack
+        a uniform layout. Chunk 2 widens the slot to hold Chunk 3's
+        bs-shaped composed moves (degree up to 14); pre-Chunk-3 callers
+        leave c[11..14] = 0.
 
         Two calling conventions:
           (a) D2c legacy — pass only (v_in, v_out, cruise_v, a_max).
@@ -869,7 +871,7 @@ class QuinticShape:
         L = self.arc_length
         if L <= 0.0:
             # Degenerate — return zero-content phases.
-            zero_coeffs = [[0.0] * 11, [0.0] * 11, [0.0] * 11]
+            zero_coeffs = [[0.0] * 15, [0.0] * 15, [0.0] * 15]
             return (zero_coeffs, zero_coeffs, zero_coeffs, 0.0, 0.0, 0.0, 0.0)
         # Bezier -> monomial in u on [0, 1], per-axis.
         coeffs_u = self._monomial_coeffs_per_axis()  # [3][6]
@@ -948,13 +950,13 @@ class QuinticShape:
             [s_decel_start_v, cruise_v, 0.5 * a_decel]
         )
 
-        def _pad(coef, n=11):
+        def _pad(coef, n=15):
             out = list(coef) + [0.0] * (n - len(coef))
             return out[:n]
 
         def _compose(axis_poly_s, phase_s_poly):
             composed = axis_poly_s(phase_s_poly)
-            return _pad(composed.coef, 11)
+            return _pad(composed.coef, 15)
 
         # position_s_poly per axis = poly_u(u_of_s) — reparam u -> s.
         position_s = [poly_u[ax](u_of_s) for ax in range(3)]

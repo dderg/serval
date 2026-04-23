@@ -8,12 +8,12 @@ def linear_as_quintic_coeffs(
     start_v, cruise_v, accel,
     axes_r, start_pos,
 ):
-    """Return a 99-double list representing a linear accel/cruise/decel
-    motion as a degenerate quintic coefficient buffer.
+    """Return a 135-double list representing a linear accel/cruise/decel
+    motion as a degenerate quintic coefficient buffer (3 phases × 15 × 3).
 
     axes_r, start_pos: 3-tuples (x, y, z)."""
     ffi, lib = get_ffi()
-    buf = ffi.new("double[99]")
+    buf = ffi.new("double[135]")
     lib.build_linear_as_quintic_coeffs(
         accel_t, cruise_t, decel_t,
         start_v, cruise_v, accel,
@@ -21,7 +21,7 @@ def linear_as_quintic_coeffs(
         start_pos[0], start_pos[1], start_pos[2],
         buf,
     )
-    return [buf[i] for i in range(99)]
+    return [buf[i] for i in range(135)]
 
 
 def append_trapezoid_as_quintic(
@@ -34,7 +34,7 @@ def append_trapezoid_as_quintic(
     quintic move. Signature mirrors the legacy trapq_append FFI call so
     callers migrate with no parameter reshuffling."""
     ffi, lib = get_ffi()
-    buf = ffi.new("double[99]")
+    buf = ffi.new("double[135]")
     lib.build_linear_as_quintic_coeffs(
         accel_t, cruise_t, decel_t,
         start_v, cruise_v, accel,
@@ -53,10 +53,15 @@ def append_trapezoid_as_quintic(
     v_cap_min = min(start_v, cruise_v, decel_end_v)
     if v_cap_min < 0.0:
         v_cap_min = 0.0
+    # 3-phase layout: t_ends = [accel_t, accel_t+cruise_t, move_t].
+    phase_t_ends = ffi.new("double[3]", [
+        accel_t,
+        accel_t + cruise_t,
+        move_t,
+    ])
     lib.trapq_append_quintic(
         tq, print_time,
-        accel_t,                    # t_accel_end
-        accel_t + cruise_t,         # t_decel_start
+        3, phase_t_ends,
         move_t, arc_length, v_cap_min,
         start_pos_x, start_pos_y, start_pos_z,
         buf,

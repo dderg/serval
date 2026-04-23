@@ -151,10 +151,12 @@ class QuinticBlendMove:
             v_in=v_in, v_out=v_out, cruise_v=cruise_v, a_max=a_max,
             s_accel_end=s_accel_end, s_decel_start=s_decel_start,
         )
-        # Pack coeff_buf for trapq_append_quintic (99 doubles).
+        # Pack coeff_buf for trapq_append_quintic. Chunk 2: 3 phases ×
+        # 15 coeffs × 3 axes = 135 doubles. compose_phase_polynomials
+        # pads c[11..14] = 0 for the pre-Chunk-3 bs composer.
         coeff_buf = []
         for phase in (accel_polys, cruise_polys, decel_polys):
-            for k in range(11):
+            for k in range(15):
                 coeff_buf.append(phase[0][k])
                 coeff_buf.append(phase[1][k])
                 coeff_buf.append(phase[2][k])

@@ -140,12 +140,10 @@ static inline int
 check_active(struct stepper_kinematics *sk, struct move *m)
 {
     int af = sk->active_flags;
-    const struct move_quintic_phase *phases[3] = {
-        &m->accel, &m->cruise, &m->decel,
-    };
+    int n = m->n_phases;
     int p, k;
-    for (p = 0; p < 3; ++p) {
-        const struct move_quintic_phase *ph = phases[p];
+    for (p = 0; p < n; ++p) {
+        const struct move_quintic_phase *ph = &m->phases[p];
         for (k = 1; k < MOVE_QUINTIC_POLY_COEFFS; ++k) {
             if ((af & AF_X) && ph->c[k].x != 0.0) return 1;
             if ((af & AF_Y) && ph->c[k].y != 0.0) return 1;

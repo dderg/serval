@@ -2,6 +2,10 @@ import pytest
 from klippy.chelper import get_ffi
 from klippy.chelper.linear_quintic import linear_as_quintic_coeffs
 
+# Chunk 2 stride: per-phase MOVE_QUINTIC_POLY_COEFFS (15) * 3 axes = 45 doubles.
+PHASE_STRIDE = 45
+COEFFS_PER_PHASE = 15
+
 
 def test_degenerate_quintic_matches_linear_at_sample_times():
     # Linear motion: accel from v0=10 mm/s over accel_t=0.05s at a=200 mm/s^2,
@@ -18,16 +22,16 @@ def test_degenerate_quintic_matches_linear_at_sample_times():
         start_v, cruise_v, accel,
         axes_r, start_pos,
     )
-    assert len(coeffs) == 99
+    assert len(coeffs) == 135
 
     # Degenerate quintic: phase 0 (accel), c[0]=start_pos_x=0, c[1]=start_v,
-    # c[2]=half_accel=100, c[3..10]=0.
-    # Buffer index: phase * 33 + coeff * 3 + axis.
-    assert coeffs[0 * 33 + 0 * 3 + 0] == pytest.approx(0.0)    # x0
-    assert coeffs[0 * 33 + 1 * 3 + 0] == pytest.approx(10.0)   # v0
-    assert coeffs[0 * 33 + 2 * 3 + 0] == pytest.approx(100.0)  # half_a
-    for i in range(3, 11):
-        assert coeffs[0 * 33 + i * 3 + 0] == 0.0
+    # c[2]=half_accel=100, c[3..14]=0.
+    # Buffer index: phase * 45 + coeff * 3 + axis.
+    assert coeffs[0 * PHASE_STRIDE + 0 * 3 + 0] == pytest.approx(0.0)    # x0
+    assert coeffs[0 * PHASE_STRIDE + 1 * 3 + 0] == pytest.approx(10.0)   # v0
+    assert coeffs[0 * PHASE_STRIDE + 2 * 3 + 0] == pytest.approx(100.0)  # half_a
+    for i in range(3, COEFFS_PER_PHASE):
+        assert coeffs[0 * PHASE_STRIDE + i * 3 + 0] == 0.0
 
 
 def test_degenerate_quintic_pure_cruise():
@@ -37,10 +41,10 @@ def test_degenerate_quintic_pure_cruise():
         50.0, 50.0, 0.0,
         (1.0, 0.0, 0.0), (5.0, 0.0, 0.0),
     )
-    # Cruise phase (phase 1): c[0]=5 (x0 at start of cruise), c[1]=50, c[2..10]=0.
-    assert coeffs[1 * 33 + 0 * 3 + 0] == pytest.approx(5.0)
-    assert coeffs[1 * 33 + 1 * 3 + 0] == pytest.approx(50.0)
-    assert coeffs[1 * 33 + 2 * 3 + 0] == 0.0
+    # Cruise phase (phase 1): c[0]=5 (x0 at start of cruise), c[1]=50, c[2..14]=0.
+    assert coeffs[1 * PHASE_STRIDE + 0 * 3 + 0] == pytest.approx(5.0)
+    assert coeffs[1 * PHASE_STRIDE + 1 * 3 + 0] == pytest.approx(50.0)
+    assert coeffs[1 * PHASE_STRIDE + 2 * 3 + 0] == 0.0
 
 
 def test_decel_phase_position_and_accel_sign():
@@ -62,12 +66,12 @@ def test_decel_phase_position_and_accel_sign():
     # Decel start: cruise_start_x + cruise_v*cruise_t
     #            = 0.75 + 20*0.1 = 2.75
     decel_phase = 2
-    assert coeffs[decel_phase * 33 + 0 * 3 + 0] == pytest.approx(2.75)  # x0
-    assert coeffs[decel_phase * 33 + 1 * 3 + 0] == pytest.approx(20.0)  # v0=cruise_v
+    assert coeffs[decel_phase * PHASE_STRIDE + 0 * 3 + 0] == pytest.approx(2.75)  # x0
+    assert coeffs[decel_phase * PHASE_STRIDE + 1 * 3 + 0] == pytest.approx(20.0)  # v0=cruise_v
     # Decel accel is negated: c[2] = axes_r_x * (-accel/2) = -100.
-    assert coeffs[decel_phase * 33 + 2 * 3 + 0] == pytest.approx(-100.0)
-    for i in range(3, 11):
-        assert coeffs[decel_phase * 33 + i * 3 + 0] == 0.0
+    assert coeffs[decel_phase * PHASE_STRIDE + 2 * 3 + 0] == pytest.approx(-100.0)
+    for i in range(3, COEFFS_PER_PHASE):
+        assert coeffs[decel_phase * PHASE_STRIDE + i * 3 + 0] == 0.0
 
 
 def test_pure_y_axis_no_xz_transposition():
@@ -79,17 +83,17 @@ def test_pure_y_axis_no_xz_transposition():
     )
     # Accel phase:
     # c[0] on X/Y/Z reads start_pos_x, start_pos_y, start_pos_z.
-    assert coeffs[0 * 33 + 0 * 3 + 0] == pytest.approx(7.0)
-    assert coeffs[0 * 33 + 0 * 3 + 1] == pytest.approx(8.0)
-    assert coeffs[0 * 33 + 0 * 3 + 2] == pytest.approx(9.0)
+    assert coeffs[0 * PHASE_STRIDE + 0 * 3 + 0] == pytest.approx(7.0)
+    assert coeffs[0 * PHASE_STRIDE + 0 * 3 + 1] == pytest.approx(8.0)
+    assert coeffs[0 * PHASE_STRIDE + 0 * 3 + 2] == pytest.approx(9.0)
     # c[1] = axes_r * start_v.  X=0, Y=10, Z=0.
-    assert coeffs[0 * 33 + 1 * 3 + 0] == pytest.approx(0.0)
-    assert coeffs[0 * 33 + 1 * 3 + 1] == pytest.approx(10.0)
-    assert coeffs[0 * 33 + 1 * 3 + 2] == pytest.approx(0.0)
+    assert coeffs[0 * PHASE_STRIDE + 1 * 3 + 0] == pytest.approx(0.0)
+    assert coeffs[0 * PHASE_STRIDE + 1 * 3 + 1] == pytest.approx(10.0)
+    assert coeffs[0 * PHASE_STRIDE + 1 * 3 + 2] == pytest.approx(0.0)
     # c[2] = axes_r * (accel/2).  X=0, Y=100, Z=0.
-    assert coeffs[0 * 33 + 2 * 3 + 0] == pytest.approx(0.0)
-    assert coeffs[0 * 33 + 2 * 3 + 1] == pytest.approx(100.0)
-    assert coeffs[0 * 33 + 2 * 3 + 2] == pytest.approx(0.0)
+    assert coeffs[0 * PHASE_STRIDE + 2 * 3 + 0] == pytest.approx(0.0)
+    assert coeffs[0 * PHASE_STRIDE + 2 * 3 + 1] == pytest.approx(100.0)
+    assert coeffs[0 * PHASE_STRIDE + 2 * 3 + 2] == pytest.approx(0.0)
 
 
 def test_negative_axes_r_sign_propagation():
@@ -99,5 +103,5 @@ def test_negative_axes_r_sign_propagation():
         10.0, 20.0, 200.0,
         (-1.0, 0.0, 0.0), (0.0, 0.0, 0.0),
     )
-    assert coeffs[0 * 33 + 1 * 3 + 0] == pytest.approx(-10.0)
-    assert coeffs[0 * 33 + 2 * 3 + 0] == pytest.approx(-100.0)
+    assert coeffs[0 * PHASE_STRIDE + 1 * 3 + 0] == pytest.approx(-10.0)
+    assert coeffs[0 * PHASE_STRIDE + 2 * 3 + 0] == pytest.approx(-100.0)

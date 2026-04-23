@@ -12,18 +12,22 @@ struct coord {
     };
 };
 
-// Plan 8 Chunk 1 Task 8 — flattened struct move. Every move is a quintic
-// polynomial payload: three phases (accel/cruise/decel), each carrying a
-// per-axis position-in-t polynomial with up to 11 coefficients. Null-motion
-// moves (trapq sentinels, time-gap fills, itersolve stack stubs) are a
-// memset-zeroed struct move with start_pos set — move_get_coord recognizes
-// the all-zero phase t_ends and returns start_pos.
+// Plan 8 Chunk 2 — variable-length phases[] upgrade. Every move is a quintic
+// polynomial payload: up to MOVE_MAX_PIECES phases, each carrying a per-axis
+// position-in-t polynomial with up to 15 coefficients. Null-motion moves
+// (trapq sentinels, time-gap fills, itersolve stack stubs) are a memset-zeroed
+// struct move with start_pos set and n_phases == 0 — move_get_coord detects
+// the n_phases == 0 sentinel and returns start_pos.
 
 // Per-phase position polynomial: x(t) = sum_k c_k * (t - t_phase_start)^k,
-// evaluated in a phase-local time coordinate. 11 coeffs per axis (degree 10
-// for accel/decel where quintic ∘ degree-2 s(t) gives degree 10, c_6..c_10 = 0
-// for cruise where quintic ∘ degree-1 s(t) gives degree 5).
-#define MOVE_QUINTIC_POLY_COEFFS 11
+// evaluated in a phase-local time coordinate. 15 coeffs per axis — Chunk 2
+// widens the slot to make room for Chunk 3's bs-shaped composed moves where
+// the effective polynomial degree exceeds the legacy 10. Existing consumers
+// (linear-as-quintic, QuinticShape.compose_phase_polynomials) populate only
+// c[0..10] and leave c[11..14] = 0; the 11-moment integrator in integrate.c
+// still truncates at SMOOTHER_NUM_MOMENTS = 11 per Chunk 2 §3.5.
+#define MOVE_QUINTIC_POLY_COEFFS 15
+#define MOVE_MAX_PIECES 32
 
 struct move_quintic_phase {
     double t_end;                 /* phase end (relative to move start) */
@@ -34,8 +38,9 @@ struct move {
     double print_time, move_t;
     struct coord start_pos;
     double arc_length;
-    struct move_quintic_phase accel, cruise, decel;
     double v_cap_min;             /* Option Z upstream junction cap */
+    int n_phases;                 /* 0 = null/sentinel move; 1..MOVE_MAX_PIECES otherwise */
+    struct move_quintic_phase phases[MOVE_MAX_PIECES];
     struct list_node node;
 };
 
@@ -57,19 +62,20 @@ struct trapq *trapq_alloc(void);
 void trapq_free(struct trapq *tq);
 void trapq_check_sentinels(struct trapq *tq);
 void trapq_add_move(struct trapq *tq, struct move *m);
-// Direct-quintic trapq emit. Three phases, each a degree-10
-// position-in-t polynomial in phase-local time. coeff_buf layout:
+// Direct-quintic trapq emit. n_phases phases in [1, MOVE_MAX_PIECES], each a
+// degree-up-to-14 position-in-t polynomial in phase-local time. phase_t_ends
+// gives the absolute move-local t_end of each phase (monotonic, last equals
+// move_t). coeff_buf layout:
 //   per phase: MOVE_QUINTIC_POLY_COEFFS * 3 doubles  (c[0].x, c[0].y, c[0].z,
 //                                                     c[1].x, c[1].y, c[1].z,
-//                                                     ..., c[10].z)
-// so coeff_buf is 3 phases * 11 * 3 = 99 doubles. t_accel_end / t_decel_start
-// / move_t are the phase boundaries in absolute move-local time. Zero-length
-// phases are allowed (t_accel_end==0 collapses the accel phase, etc).
+//                                                     ..., c[14].z)
+// so coeff_buf is n_phases * 15 * 3 doubles. Zero-length phases are allowed
+// (phase_t_ends[i] == phase_t_ends[i-1] collapses phase i).
 void trapq_append_quintic(struct trapq *tq, double print_time
-                          , double t_accel_end, double t_decel_start
+                          , int n_phases, const double *phase_t_ends
                           , double move_t, double arc_length, double v_cap_min
                           , double start_pos_x, double start_pos_y
-                          , double start_pos_z, const double coeff_buf[]);
+                          , double start_pos_z, const double *coeff_buf);
 
 void trapq_finalize_moves(struct trapq *tq, double print_time
                           , double clear_history_time);

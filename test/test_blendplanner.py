@@ -578,7 +578,7 @@ def test_corner_blend_emits_single_quintic_not_polyline():
          start_pos_xyz, coeff_tuple) = payload
         assert total_t > 0.0
         assert arc_length > 0.0
-        assert len(coeff_tuple) == 99
+        assert len(coeff_tuple) == 135
         # start_pos_xyz matches trunc_prev.end_pos.
         assert start_pos_xyz[:3] == pytest.approx(trunc_prev.end_pos[:3])
 

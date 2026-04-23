@@ -43,22 +43,26 @@ quintic_phase_eval(const struct move_quintic_phase *ph, double delta_t)
 
 // Return the quintic phase containing move_time, and the phase-local time.
 // Note: each phase stores its absolute-move-local t_end; the phase's local
-// origin is the previous phase's t_end (or 0 for accel).
+// origin is the previous phase's t_end (or 0 for the first phase).
+// Linear scan over phases[0..n_phases-1]. If move_time exceeds the last
+// phase's t_end (numerical rounding past move_t), the last phase is
+// returned with a delta relative to its own start.
 static inline const struct move_quintic_phase *
 quintic_pick_phase(const struct move *m, double move_time, double *out_delta)
 {
-    const struct move_quintic_phase *ph = &m->accel;
+    int n = m->n_phases;
     double phase_start = 0.0;
-    if (move_time > m->accel.t_end) {
-        phase_start = m->accel.t_end;
-        ph = &m->cruise;
-        if (move_time > m->cruise.t_end) {
-            phase_start = m->cruise.t_end;
-            ph = &m->decel;
+    int i;
+    for (i = 0; i < n - 1; ++i) {
+        if (move_time <= m->phases[i].t_end) {
+            *out_delta = move_time - phase_start;
+            return &m->phases[i];
         }
+        phase_start = m->phases[i].t_end;
     }
+    // Fall-through: last phase (or only phase).
     *out_delta = move_time - phase_start;
-    return ph;
+    return &m->phases[n - 1];
 }
 
 // Return the distance moved given a time in a move. For quintic moves the
@@ -93,11 +97,10 @@ inline struct coord
 move_get_coord(const struct move *m, double move_time)
 {
     // Null-move fallback: a memset-zeroed struct move (trapq sentinels,
-    // time-gap fills, itersolve stack stubs) has all phase t_ends zero.
+    // time-gap fills, itersolve stack stubs) has n_phases == 0.
     // Return start_pos so zero-motion moves project to their anchor point
     // regardless of move_time.
-    if (m->accel.t_end == 0.0 && m->cruise.t_end == 0.0
-        && m->decel.t_end == 0.0)
+    if (m->n_phases == 0)
         return m->start_pos;
     double delta_t;
     const struct move_quintic_phase *ph = quintic_pick_phase(m, move_time,
@@ -183,18 +186,20 @@ trapq_add_move(struct trapq *tq, struct move *m)
     tail_sentinel->print_time = 0.;
 }
 
-// Plan 5 D2b — emit a single quintic trapq entry. Phase boundaries are
-// absolute move-local times (relative to print_time). coeff_buf has 99
-// doubles: 3 phases × 11 coeffs × 3 axes, each phase in order
-//   c[0].x, c[0].y, c[0].z, c[1].x, c[1].y, c[1].z, ..., c[10].x, c[10].y,
-//   c[10].z. Within each phase the polynomial is in phase-local time
+// Plan 8 Chunk 2 — emit a single quintic trapq entry with variable-length
+// phase layout. Phase boundaries are absolute move-local times (relative to
+// print_time): phase_t_ends[i] is the t_end of phase i, monotonic
+// non-decreasing, with phase_t_ends[n_phases-1] == move_t. coeff_buf is
+// n_phases * MOVE_QUINTIC_POLY_COEFFS * 3 doubles, each phase in order
+//   c[0].x, c[0].y, c[0].z, c[1].x, c[1].y, c[1].z, ..., c[14].x, c[14].y,
+//   c[14].z. Within each phase the polynomial is in phase-local time
 //   delta_t = t_move_local - t_phase_start.
 void __visible
 trapq_append_quintic(struct trapq *tq, double print_time
-                     , double t_accel_end, double t_decel_start
+                     , int n_phases, const double *phase_t_ends
                      , double move_t, double arc_length, double v_cap_min
                      , double start_pos_x, double start_pos_y
-                     , double start_pos_z, const double coeff_buf[])
+                     , double start_pos_z, const double *coeff_buf)
 {
     struct move *m = move_alloc();
     m->print_time = print_time;
@@ -204,17 +209,16 @@ trapq_append_quintic(struct trapq *tq, double print_time
     m->start_pos.z = start_pos_z;
     m->arc_length = arc_length;
     m->v_cap_min = v_cap_min;
-    m->accel.t_end = t_accel_end;
-    m->cruise.t_end = t_decel_start;
-    m->decel.t_end = move_t;
-    // Unpack coeff_buf into per-phase per-axis arrays.
-    struct move_quintic_phase *phases[3] = {
-        &m->accel, &m->cruise, &m->decel,
-    };
+    if (n_phases < 0)
+        n_phases = 0;
+    if (n_phases > MOVE_MAX_PIECES)
+        n_phases = MOVE_MAX_PIECES;
+    m->n_phases = n_phases;
     int p, k;
     const double *src = coeff_buf;
-    for (p = 0; p < 3; ++p) {
-        struct move_quintic_phase *ph = phases[p];
+    for (p = 0; p < n_phases; ++p) {
+        struct move_quintic_phase *ph = &m->phases[p];
+        ph->t_end = phase_t_ends[p];
         for (k = 0; k < MOVE_QUINTIC_POLY_COEFFS; ++k) {
             ph->c[k].x = src[0];
             ph->c[k].y = src[1];

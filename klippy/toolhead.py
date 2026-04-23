@@ -479,11 +479,14 @@ class ToolHead:
             if qpayload is not None:
                 (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
                  start_pos_xyz, coeff_tuple) = qpayload
-                coeff_buf = ffi_main.new("double[99]", list(coeff_tuple))
+                coeff_buf = ffi_main.new("double[135]", list(coeff_tuple))
+                phase_t_ends = ffi_main.new("double[3]", [
+                    t_accel_end, t_decel_start, total_t,
+                ])
                 ffi_lib.trapq_append_quintic(
                     self.trapq, next_move_time,
-                    t_accel_end, t_decel_start, total_t,
-                    arc_length, v_cap_min,
+                    3, phase_t_ends,
+                    total_t, arc_length, v_cap_min,
                     start_pos_xyz[0], start_pos_xyz[1], start_pos_xyz[2],
                     coeff_buf,
                 )

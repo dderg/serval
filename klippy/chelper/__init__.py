@@ -119,16 +119,16 @@ defs_trapq = """
     struct trapq *trapq_alloc(void);
     void trapq_free(struct trapq *tq);
     void trapq_append_quintic(struct trapq *tq, double print_time
-        , double t_accel_end, double t_decel_start
+        , int n_phases, const double *phase_t_ends
         , double move_t, double arc_length, double v_cap_min
         , double start_pos_x, double start_pos_y, double start_pos_z
-        , const double coeff_buf[]);
+        , const double *coeff_buf);
     void build_linear_as_quintic_coeffs(
         double accel_t, double cruise_t, double decel_t,
         double start_v, double cruise_v, double accel,
         double axes_r_x, double axes_r_y, double axes_r_z,
         double start_pos_x, double start_pos_y, double start_pos_z,
-        double coeff_buf[99]);
+        double coeff_buf[135]);
     void trapq_finalize_moves(struct trapq *tq, double print_time
         , double clear_history_time);
     void trapq_set_position(struct trapq *tq, double print_time

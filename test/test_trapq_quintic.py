@@ -29,22 +29,41 @@ def _ffi():
 
 
 def _pack_phase_coeffs(accel_polys, cruise_polys, decel_polys):
-    """Flatten the Python composition output into the 99-double coeff_buf
-    layout that trapq_append_quintic expects.
+    """Flatten the Python composition output into the 135-double coeff_buf
+    layout that trapq_append_quintic expects (Chunk 2: 15-coeff slots).
 
-    Each phase: 11 coefficients * 3 axes, stored interleaved
-    (c[0].x, c[0].y, c[0].z, c[1].x, ..., c[10].z).
+    Each phase: 15 coefficients * 3 axes, stored interleaved
+    (c[0].x, c[0].y, c[0].z, c[1].x, ..., c[14].z). Callers that build
+    legacy 11-coeff phase lists get zero-padded to 15.
     """
     buf = []
     for phase_polys in (accel_polys, cruise_polys, decel_polys):
-        # phase_polys is [axis_x_coeffs, axis_y_coeffs, axis_z_coeffs], each
-        # length 11.
-        for k in range(11):
-            buf.append(phase_polys[0][k])
-            buf.append(phase_polys[1][k])
-            buf.append(phase_polys[2][k])
-    assert len(buf) == 99
+        # phase_polys is [axis_x_coeffs, axis_y_coeffs, axis_z_coeffs].
+        for k in range(15):
+            for axis in range(3):
+                coeffs = phase_polys[axis]
+                buf.append(coeffs[k] if k < len(coeffs) else 0.0)
+    assert len(buf) == 135
     return buf
+
+
+def _append_quintic_3phase(ffi_main, ffi_lib, tq, print_time,
+                           t_accel_end, t_decel_start, move_t,
+                           arc_length, v_cap_min,
+                           start_x, start_y, start_z, coeff_buf):
+    """Call trapq_append_quintic with a 3-phase layout (accel/cruise/decel).
+
+    Convenience wrapper so tests that predate Chunk 2's variable-phase FFI
+    read naturally.
+    """
+    phase_t_ends = ffi_main.new("double[3]", [
+        t_accel_end, t_decel_start, move_t,
+    ])
+    ffi_lib.trapq_append_quintic(
+        tq, print_time, 3, phase_t_ends,
+        move_t, arc_length, v_cap_min,
+        start_x, start_y, start_z, coeff_buf,
+    )
 
 
 class _FakeMove:
@@ -136,10 +155,10 @@ def test_quintic_move_get_coord_horner_roundtrip():
     decel_polys = [[0.0] * 11, [0.0] * 11, [0.0] * 11]
 
     coeff_buf = _pack_phase_coeffs(accel_polys, cruise_polys, decel_polys)
-    buf = ffi_main.new("double[99]", coeff_buf)
+    buf = ffi_main.new("double[135]", coeff_buf)
 
-    ffi_lib.trapq_append_quintic(
-        tq, 1.0,                 # print_time
+    _append_quintic_3phase(
+        ffi_main, ffi_lib, tq, 1.0,
         0.0, move_t, move_t,     # t_accel_end, t_decel_start, move_t
         0.25, 2.0,               # arc_length, v_cap_min
         0.5, 0.0, 0.0,           # start_pos
@@ -243,12 +262,13 @@ def test_compose_emit_and_query_matches_bezier():
     ffi_main, ffi_lib = _ffi()
     tq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
     coeff_buf = _pack_phase_coeffs(accel_polys, cruise_polys, decel_polys)
-    buf = ffi_main.new("double[99]", coeff_buf)
+    buf = ffi_main.new("double[135]", coeff_buf)
 
     # Start pos is u=0 (= Q[0]).
     start_xyz = blendquintic._quintic_eval(shape.Q, 0.0)
-    ffi_lib.trapq_append_quintic(
-        tq, 1.0, t_ae, t_ds, total_t, arc_length, v_cruise,
+    _append_quintic_3phase(
+        ffi_main, ffi_lib, tq, 1.0, t_ae, t_ds, total_t,
+        arc_length, v_cruise,
         start_xyz[0], start_xyz[1], start_xyz[2], buf,
     )
 

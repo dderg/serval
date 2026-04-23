@@ -1,5 +1,9 @@
 #include "linear_quintic.h"
 
+// Per-phase stride: MOVE_QUINTIC_POLY_COEFFS (15) * 3 axes = 45 doubles.
+#define LINEAR_QUINTIC_PHASE_STRIDE 45
+#define LINEAR_QUINTIC_COEFFS 15
+
 static inline void
 fill_phase(double *buf_phase, double v, double a,
            double pos_x, double pos_y, double pos_z,
@@ -18,8 +22,8 @@ fill_phase(double *buf_phase, double v, double a,
     buf_phase[2 * 3 + 0] = rx * half_a;
     buf_phase[2 * 3 + 1] = ry * half_a;
     buf_phase[2 * 3 + 2] = rz * half_a;
-    // c[3..10] = 0
-    for (int i = 3; i < 11; i++) {
+    // c[3..14] = 0
+    for (int i = 3; i < LINEAR_QUINTIC_COEFFS; i++) {
         buf_phase[i * 3 + 0] = 0.0;
         buf_phase[i * 3 + 1] = 0.0;
         buf_phase[i * 3 + 2] = 0.0;
@@ -32,10 +36,10 @@ build_linear_as_quintic_coeffs(
     double start_v, double cruise_v, double accel,
     double axes_r_x, double axes_r_y, double axes_r_z,
     double start_pos_x, double start_pos_y, double start_pos_z,
-    double coeff_buf[99])
+    double coeff_buf[135])
 {
     // Accel phase: start_v + accel * t, pos starts at (start_pos_*).
-    fill_phase(&coeff_buf[0 * 33], start_v, accel,
+    fill_phase(&coeff_buf[0 * LINEAR_QUINTIC_PHASE_STRIDE], start_v, accel,
                start_pos_x, start_pos_y, start_pos_z,
                axes_r_x, axes_r_y, axes_r_z);
     // Cruise phase: constant cruise_v, pos starts where accel ended.
@@ -43,14 +47,14 @@ build_linear_as_quintic_coeffs(
     double pos_after_accel_x = start_pos_x + axes_r_x * accel_disp;
     double pos_after_accel_y = start_pos_y + axes_r_y * accel_disp;
     double pos_after_accel_z = start_pos_z + axes_r_z * accel_disp;
-    fill_phase(&coeff_buf[1 * 33], cruise_v, 0.0,
+    fill_phase(&coeff_buf[1 * LINEAR_QUINTIC_PHASE_STRIDE], cruise_v, 0.0,
                pos_after_accel_x, pos_after_accel_y, pos_after_accel_z,
                axes_r_x, axes_r_y, axes_r_z);
     // Decel phase: starts at cruise_v, accel = -accel (deceleration).
     double pos_after_cruise_x = pos_after_accel_x + axes_r_x * cruise_v * cruise_t;
     double pos_after_cruise_y = pos_after_accel_y + axes_r_y * cruise_v * cruise_t;
     double pos_after_cruise_z = pos_after_accel_z + axes_r_z * cruise_v * cruise_t;
-    fill_phase(&coeff_buf[2 * 33], cruise_v, -accel,
+    fill_phase(&coeff_buf[2 * LINEAR_QUINTIC_PHASE_STRIDE], cruise_v, -accel,
                pos_after_cruise_x, pos_after_cruise_y, pos_after_cruise_z,
                axes_r_x, axes_r_y, axes_r_z);
 }

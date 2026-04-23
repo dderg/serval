@@ -128,25 +128,32 @@ diff_antiderivatives(const smoother_antiderivatives* ad1
 // Return the polynomial coefficients c_k (for axis = 'x'/'y'/'z') expressing
 // position(t) = sum_k out_c[k] * (t - t_phase_start)^k for the phase of move
 // m that contains move_time. Every move is a quintic polynomial payload
-// (Plan 8 Chunk 1 Task 8); the selected phase's 11 stored coefficients are
+// (Plan 8 Chunk 1 Task 8); the selected phase's stored coefficients are
 // returned directly. Sets *out_phase_start to the phase's absolute-move-local
 // origin time. The output buffer must hold SMOOTHER_NUM_MOMENTS (11) doubles.
+//
+// TODO: Chunk 3 will retire this convolution path; until then, bs5-shaped
+// moves with significant c[11..14] content produce a ≤0.5% integration error.
+// Acceptable per spec §3.5.
 static inline void
 move_axis_phase_polynomial(const struct move* m, int axis, double move_time,
                            double out_c[SMOOTHER_NUM_MOMENTS],
                            double* out_phase_start, double* out_phase_end)
 {
     int ai = axis - 'x';
-    const struct move_quintic_phase* ph = &m->accel;
+    int n = m->n_phases;
+    const struct move_quintic_phase* ph = &m->phases[0];
     double phase_start = 0.0;
-    if (move_time > m->accel.t_end) {
-        phase_start = m->accel.t_end;
-        ph = &m->cruise;
-        if (move_time > m->cruise.t_end) {
-            phase_start = m->cruise.t_end;
-            ph = &m->decel;
+    int i;
+    for (i = 0; i < n - 1; ++i) {
+        if (move_time <= m->phases[i].t_end) {
+            ph = &m->phases[i];
+            break;
         }
+        phase_start = m->phases[i].t_end;
     }
+    if (i == n - 1)
+        ph = &m->phases[n - 1];
     for (int k = 0; k < SMOOTHER_NUM_MOMENTS; ++k)
         out_c[k] = ph->c[k].axis[ai];
     *out_phase_start = phase_start;

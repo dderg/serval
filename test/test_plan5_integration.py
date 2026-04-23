@@ -244,16 +244,17 @@ def _planned_position_fn(payload):
     """
     (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
      start_pos_xyz, coeff_tuple) = payload
-    # Unpack the 99-double buffer back into per-phase [axis][k] form.
-    # Layout: phase0..phase2; per phase: 11 monomial coeffs * 3 axes
+    # Unpack the 135-double buffer back into per-phase [axis][k] form.
+    # Layout: phase0..phase2; per phase: 15 monomial coeffs * 3 axes
     # interleaved (c[0].x, c[0].y, c[0].z, c[1].x, ...). Coefficients are in
-    # phase-LOCAL time (t - t_phase_start).
+    # phase-LOCAL time (t - t_phase_start). Chunk 2 widened the slot to 15;
+    # c[11..14] are zero for the pre-Chunk-3 composer.
     phases = []
     buf = list(coeff_tuple)
     for p in range(3):
-        base = p * 11 * 3
-        axes_coeffs = [[0.0] * 11 for _ in range(3)]
-        for k in range(11):
+        base = p * 15 * 3
+        axes_coeffs = [[0.0] * 15 for _ in range(3)]
+        for k in range(15):
             for ax in range(3):
                 axes_coeffs[ax][k] = buf[base + k * 3 + ax]
         phases.append(axes_coeffs)
@@ -279,8 +280,8 @@ def _planned_position_fn(payload):
         out = [0.0, 0.0, 0.0]
         for ax in range(3):
             coeffs = phase[ax]
-            v = coeffs[10]
-            for k in range(9, -1, -1):
+            v = coeffs[14]
+            for k in range(13, -1, -1):
                 v = v * delta_t + coeffs[k]
             out[ax] = v
         return tuple(out)
@@ -349,11 +350,14 @@ def _push_quintic_to_trapq(ffi_main, ffi_lib, tq, print_time, payload):
     in the full toolhead instance."""
     (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
      start_pos_xyz, coeff_tuple) = payload
-    coeff_buf = ffi_main.new("double[99]", list(coeff_tuple))
+    coeff_buf = ffi_main.new("double[135]", list(coeff_tuple))
+    phase_t_ends = ffi_main.new("double[3]", [
+        t_accel_end, t_decel_start, total_t,
+    ])
     ffi_lib.trapq_append_quintic(
         tq, print_time,
-        t_accel_end, t_decel_start, total_t,
-        arc_length, v_cap_min,
+        3, phase_t_ends,
+        total_t, arc_length, v_cap_min,
         start_pos_xyz[0], start_pos_xyz[1], start_pos_xyz[2],
         coeff_buf,
     )
@@ -386,7 +390,7 @@ class TestPlan5CascadeIntegration:
         """D7 emit contract: one QuinticBlendMove per blend, not a polyline.
 
         Regression guard against a future accidental revert to the N-piece
-        polyline emit. The 99-double coefficient payload is present and
+        polyline emit. The 135-double coefficient payload is present and
         finite.
         """
         th = _make_toolhead_with_bs_shaper(
@@ -401,7 +405,7 @@ class TestPlan5CascadeIntegration:
         assert arc_length > 0.0
         assert v_cap_min > 0.0
         assert 0.0 <= t_accel_end <= t_decel_start <= total_t
-        assert len(coeff_tuple) == 99
+        assert len(coeff_tuple) == 135
         for c in coeff_tuple:
             assert math.isfinite(c), "non-finite coefficient in payload"
 
