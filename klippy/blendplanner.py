@@ -11,6 +11,7 @@ import math
 from . import blendmath, blendquintic, blendshape, topp
 from .chelper import bs_compose as _bs_compose
 from .chelper import fir_compose as _fir_compose
+from .chelper import linear_pa_compose as _linear_pa_compose
 from .extras import shaper_defs as _shaper_defs
 
 
@@ -79,6 +80,27 @@ def _extract_pa_snapshot(toolhead):
 
 
 _BS_ORDERS = {f"bs{i}": i for i in range(1, 6)}
+
+
+def _resolve_linear_k_pa(toolhead):
+    """Return the linear-PA coefficient (k_pa) currently configured on the
+    toolhead's extruder, or 0.0 if PA is disabled or the configured model
+    is non-linear.
+
+    Plan 8 Chunk 3 Stage A: only the 'linear' PA model is composed at plan
+    time. Non-linear models ('tanh', 'recipr') will be handled by Stage B
+    via piecewise Chebyshev fits; until then their k_pa contribution is
+    treated as zero (the .e slot still carries extr_r * P_proj, the
+    nominal filament motion without PA kick).
+    """
+    pa_snap = _extract_pa_snapshot(toolhead)
+    if pa_snap is None:
+        return 0.0
+    if pa_snap.kind != "linear":
+        return 0.0
+    if not pa_snap.params:
+        return 0.0
+    return float(pa_snap.params[0])
 
 
 def _bake_shaper_polynomial(
@@ -299,6 +321,29 @@ class QuinticBlendMove:
             t_accel_end, t_decel_start, total_t,
             shaper_list or [],
         )
+        # Plan 8 Chunk 3 Task 3 — bake linear PA into the .e slot of the
+        # baked polynomial. For non-linear PA the .e slot stays zero
+        # (Stage B's nonlinear_pa_compose lands later). For linear or
+        # zero PA we run the composer; the .e content is ready for the
+        # Stage C extruder-stepper rewrite to consume directly. Until
+        # Stage C lands, the .e slot is harmlessly populated but unread
+        # (extruder still convolves PA on its own trapq).
+        n_phases_baked = len(phase_t_ends_tuple)
+        # axes_d[3] is signed E displacement; arc_length is the curve length
+        # of the XY blend. extr_r = E-displacement per XY-arc-mm (signed).
+        if arc_length > 0.0:
+            extr_r = axes_d[3] / arc_length
+        else:
+            extr_r = 0.0
+        # XY direction n: chord-direction unit vector. For straight moves
+        # this matches the actual XY motion; for curved blends it's the
+        # legacy approximation (kin_extruder.c made the same choice).
+        axis_n = (self.axes_r[0], self.axes_r[1], self.axes_r[2])
+        k_pa = _resolve_linear_k_pa(toolhead)
+        coeff_tuple = tuple(_linear_pa_compose.linear_pa_compose(
+            n_phases_baked, list(coeff_tuple),
+            axis_n=axis_n, extr_r=extr_r, k_pa=k_pa,
+        ))
         start_pos_xyz = (start_pos_4d[0], start_pos_4d[1], start_pos_4d[2])
         if not (v_cap_min and math.isfinite(v_cap_min)) or v_cap_min <= 0.0:
             v_cap_min = cruise_v if cruise_v > 0.0 else v_in
