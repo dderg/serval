@@ -131,7 +131,7 @@ defs_trapq = """
         double start_v, double cruise_v, double accel,
         double axes_r_x, double axes_r_y, double axes_r_z,
         double start_pos_x, double start_pos_y, double start_pos_z,
-        double coeff_buf[135]);
+        double coeff_buf[180]);
     void trapq_finalize_moves(struct trapq *tq, double print_time
         , double clear_history_time);
     void trapq_set_position(struct trapq *tq, double print_time

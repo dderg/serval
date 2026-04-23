@@ -21,9 +21,9 @@ def _pack_constant_velocity(move_t, v, axis=0):
     """Return (phase_t_ends, coeff_buf) for a single-phase constant-velocity
     move with position x(t) = v * t on the chosen axis (0=x, 1=y, 2=z)."""
     n_in = 1
-    coeffs = [0.0] * (n_in * 15 * 3)
+    coeffs = [0.0] * (n_in * 15 * 4)
     # phase 0, c[0].axis = 0, c[1].axis = v.
-    coeffs[(0 * 15 + 1) * 3 + axis] = v
+    coeffs[(0 * 15 + 1) * 4 + axis] = v
     return [move_t], coeffs
 
 
@@ -31,15 +31,15 @@ def _pack_zero(move_t, n_phases=3):
     """Return (phase_t_ends, coeff_buf) for a zero-motion move with the
     given number of phases (evenly spaced)."""
     t_ends = [move_t * (p + 1) / n_phases for p in range(n_phases)]
-    coeffs = [0.0] * (n_phases * 15 * 3)
+    coeffs = [0.0] * (n_phases * 15 * 4)
     return t_ends, coeffs
 
 
 def _pack_accel_ramp(move_t, v0, a, axis=0):
     """Constant-acceleration ramp: x(t) = v0*t + 0.5*a*t^2 on one axis."""
-    coeffs = [0.0] * (1 * 15 * 3)
-    coeffs[(0 * 15 + 1) * 3 + axis] = v0
-    coeffs[(0 * 15 + 2) * 3 + axis] = 0.5 * a
+    coeffs = [0.0] * (1 * 15 * 4)
+    coeffs[(0 * 15 + 1) * 4 + axis] = v0
+    coeffs[(0 * 15 + 2) * 4 + axis] = 0.5 * a
     return [move_t], coeffs
 
 
@@ -62,7 +62,7 @@ def _eval_output(out_t_ends, out_coeffs, t, axis=0):
     # Horner.
     val = 0.0
     for k in range(14, -1, -1):
-        val = val * dt + out_coeffs[(phase_idx * 15 + k) * 3 + axis]
+        val = val * dt + out_coeffs[(phase_idx * 15 + k) * 4 + axis]
     return val
 
 
@@ -175,18 +175,18 @@ def test_bs5_piece_count_within_budget():
     # 3 non-degenerate phases: accel (0..0.2), cruise (0.2..0.4), decel
     # (0.4..0.6), each with some distinct polynomial content.
     t_ends = [0.2, 0.4, 0.6]
-    coeffs = [0.0] * (3 * 15 * 3)
+    coeffs = [0.0] * (3 * 15 * 4)
     # accel: x(t) = v0*t + 0.5*a*t^2 in phase-local (origin = 0).
-    coeffs[(0 * 15 + 1) * 3 + 0] = 50.0
-    coeffs[(0 * 15 + 2) * 3 + 0] = 400.0
+    coeffs[(0 * 15 + 1) * 4 + 0] = 50.0
+    coeffs[(0 * 15 + 2) * 4 + 0] = 400.0
     # cruise: phase-local origin 0.2; at t_local=0 position = 50*0.2 +
     # 0.5*800*0.04 = 10 + 16 = 26. x(t_local) = 26 + 130 * t_local.
-    coeffs[(1 * 15 + 0) * 3 + 0] = 26.0
-    coeffs[(1 * 15 + 1) * 3 + 0] = 130.0
+    coeffs[(1 * 15 + 0) * 4 + 0] = 26.0
+    coeffs[(1 * 15 + 1) * 4 + 0] = 130.0
     # decel: phase-local origin 0.4; x(t_local) = 52 + 130*t_local - 0.5*400*t_local^2.
-    coeffs[(2 * 15 + 0) * 3 + 0] = 52.0
-    coeffs[(2 * 15 + 1) * 3 + 0] = 130.0
-    coeffs[(2 * 15 + 2) * 3 + 0] = -200.0
+    coeffs[(2 * 15 + 0) * 4 + 0] = 52.0
+    coeffs[(2 * 15 + 1) * 4 + 0] = 130.0
+    coeffs[(2 * 15 + 2) * 4 + 0] = -200.0
     out_t_ends, out_coeffs = bs_compose(
         t_ends, coeffs, bs_order=5, shaper_freq=shaper_freq,
     )

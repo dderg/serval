@@ -477,20 +477,21 @@ class ToolHead:
             # trapq_append_quintic instead of the linear trapq_append path.
             qpayload = getattr(move, "quintic_trapq_payload", None)
             if qpayload is not None:
-                # Plan 8 Chunk 2 payload layout:
+                # Plan 8 Chunk 3 payload layout:
                 #   (phase_t_ends_tuple, total_t_baked,
                 #    arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
                 #    legacy_t_accel_end, legacy_t_decel_start, legacy_total_t)
                 # phase_t_ends_tuple is a tuple of absolute move-local end
                 # times per phase, length n_phases up to MOVE_MAX_PIECES.
-                # coeff_tuple is n_phases * 15 * 3 doubles. total_t_baked
-                # is phase_t_ends_tuple[-1].
+                # coeff_tuple is n_phases * 15 * 4 doubles (x, y, z, e).
+                # The .e slot carries the linear-PA-baked extruder
+                # polynomial. total_t_baked is phase_t_ends_tuple[-1].
                 (phase_t_ends_tuple, total_t_baked,
                  arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
                  *_legacy) = qpayload
                 n_phases = len(phase_t_ends_tuple)
                 coeff_buf = ffi_main.new(
-                    f"double[{n_phases * 15 * 3}]", list(coeff_tuple)
+                    f"double[{n_phases * 15 * 4}]", list(coeff_tuple)
                 )
                 phase_t_ends = ffi_main.new(
                     f"double[{n_phases}]", list(phase_t_ends_tuple)

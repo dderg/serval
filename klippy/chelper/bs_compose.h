@@ -43,13 +43,13 @@
 int bs_compose(
     int n_input_phases,
     const double *input_phase_t_ends,   /* length n_input_phases */
-    const double *input_coeffs,         /* n_input_phases * 15 * 3 doubles */
+    const double *input_coeffs,         /* n_input_phases * 15 * 4 doubles */
     int bs_order,                       /* 1..5 */
     double shaper_freq,                 /* Hz, > 0 */
     double damping_ratio,               /* ignored — bs kernel is damping-independent */
     int out_capacity,                   /* caller buffer size (phases) */
     double *out_phase_t_ends,           /* length out_capacity */
-    double *out_coeffs                  /* out_capacity * 15 * 3 doubles */
+    double *out_coeffs                  /* out_capacity * 15 * 4 doubles; .e zeroed */
 );
 
 #endif /* BS_COMPOSE_H */

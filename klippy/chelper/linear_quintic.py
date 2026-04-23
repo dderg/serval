@@ -8,12 +8,14 @@ def linear_as_quintic_coeffs(
     start_v, cruise_v, accel,
     axes_r, start_pos,
 ):
-    """Return a 135-double list representing a linear accel/cruise/decel
-    motion as a degenerate quintic coefficient buffer (3 phases × 15 × 3).
+    """Return a 180-double list representing a linear accel/cruise/decel
+    motion as a degenerate quintic coefficient buffer (3 phases × 15 × 4).
 
-    axes_r, start_pos: 3-tuples (x, y, z)."""
+    axes_r, start_pos: 3-tuples (x, y, z). The .e slot of every coefficient
+    is left zero; the linear-PA composer populates it at plan time.
+    """
     ffi, lib = get_ffi()
-    buf = ffi.new("double[135]")
+    buf = ffi.new("double[180]")
     lib.build_linear_as_quintic_coeffs(
         accel_t, cruise_t, decel_t,
         start_v, cruise_v, accel,
@@ -21,7 +23,7 @@ def linear_as_quintic_coeffs(
         start_pos[0], start_pos[1], start_pos[2],
         buf,
     )
-    return [buf[i] for i in range(135)]
+    return [buf[i] for i in range(180)]
 
 
 def append_trapezoid_as_quintic(
@@ -38,9 +40,14 @@ def append_trapezoid_as_quintic(
     ``shape_disabled`` (kwarg, default False) stamps the emitted move with
     the Plan 8 shape-disabled flag. Must-be-unshaped emit sites (force_move,
     manual_stepper, drip-homed moves, pure-E) pass ``True`` so the
-    planner's shaper-bake step skips baking (Chunk 2 Task 11 threading)."""
+    planner's shaper-bake step skips baking (Chunk 2 Task 11 threading).
+
+    Plan 8 Chunk 3: the underlying coeff_buf is now 4-axis (x, y, z, e);
+    .e is left zero by the C-side builder. Pure-E emit goes via
+    append_extruder_only_as_quintic which fills .e directly.
+    """
     ffi, lib = get_ffi()
-    buf = ffi.new("double[135]")
+    buf = ffi.new("double[180]")
     lib.build_linear_as_quintic_coeffs(
         accel_t, cruise_t, decel_t,
         start_v, cruise_v, accel,

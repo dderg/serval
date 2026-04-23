@@ -145,7 +145,10 @@ int fir_compose(
         double t_mid = 0.5 * (t_a + t_b);
 
         /* Zero accumulator. */
-        double acc[FIR_OUTPUT_NC * 3];
+        /* Plan 8 Chunk 3: 4-axis stride (x, y, z, e). The .e slot is left
+         * zero; downstream linear_pa_compose populates it from the baked
+         * XY polynomial. */
+        double acc[FIR_OUTPUT_NC * 4];
         memset(acc, 0, sizeof(acc));
 
         for (int i = 0; i < n_impulses; ++i) {
@@ -166,27 +169,30 @@ int fir_compose(
             /* x_p is a poly in (u - phase_origin). In absolute input-t,
              * that polynomial has origin = phase_origin. The shifted copy
              * x(t - tau_i) at absolute output-t has origin = phase_origin
-             * + tau_i. Pascal-retarget to output-phase-local origin t_a. */
+             * + tau_i. Pascal-retarget to output-phase-local origin t_a.
+             * Plan 8 Chunk 3: 4-axis stride; .e is zeroed downstream. */
             for (int axis = 0; axis < 3; ++axis) {
                 double coeffs_in[FIR_OUTPUT_NC];
                 for (int k = 0; k < FIR_OUTPUT_NC; ++k)
                     coeffs_in[k] =
-                        input_coeffs[(p * FIR_OUTPUT_NC + k) * 3 + axis];
+                        input_coeffs[(p * FIR_OUTPUT_NC + k) * 4 + axis];
                 double coeffs_out[FIR_OUTPUT_NC];
                 pascal_retarget(coeffs_in,
                                 phase_origin + tau_i,
                                 t_a,
                                 FIR_OUTPUT_NC, coeffs_out);
                 for (int k = 0; k < FIR_OUTPUT_NC; ++k)
-                    acc[k * 3 + axis] += a_i * coeffs_out[k];
+                    acc[k * 4 + axis] += a_i * coeffs_out[k];
             }
         }
 
-        /* Write accumulator into out_coeffs at phase s. */
+        /* Write accumulator into out_coeffs at phase s. .e (axis 3) stays
+         * at the zero accumulator value — populated downstream by
+         * linear_pa_compose. */
         for (int k = 0; k < FIR_OUTPUT_NC; ++k) {
-            for (int axis = 0; axis < 3; ++axis) {
-                out_coeffs[(s * FIR_OUTPUT_NC + k) * 3 + axis] =
-                    acc[k * 3 + axis];
+            for (int axis = 0; axis < 4; ++axis) {
+                out_coeffs[(s * FIR_OUTPUT_NC + k) * 4 + axis] =
+                    acc[k * 4 + axis];
             }
         }
     }

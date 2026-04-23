@@ -30,13 +30,16 @@ move_alloc(void)
 static inline struct coord
 quintic_phase_eval(const struct move_quintic_phase *ph, double delta_t)
 {
-    // Horner form, descending powers. c[10] is the top coefficient.
+    // Horner form, descending powers. c[14] is the top coefficient.
+    // Plan 8 Chunk 3: 4-axis (x, y, z, e). The .e slot carries the
+    // pre-baked extruder polynomial (linear PA composed at plan time).
     struct coord r = ph->c[MOVE_QUINTIC_POLY_COEFFS - 1];
     int k;
     for (k = MOVE_QUINTIC_POLY_COEFFS - 2; k >= 0; --k) {
         r.x = r.x * delta_t + ph->c[k].x;
         r.y = r.y * delta_t + ph->c[k].y;
         r.z = r.z * delta_t + ph->c[k].z;
+        r.e = r.e * delta_t + ph->c[k].e;
     }
     return r;
 }
@@ -186,14 +189,18 @@ trapq_add_move(struct trapq *tq, struct move *m)
     tail_sentinel->print_time = 0.;
 }
 
-// Plan 8 Chunk 2 — emit a single quintic trapq entry with variable-length
+// Plan 8 Chunk 3 — emit a single quintic trapq entry with variable-length
 // phase layout. Phase boundaries are absolute move-local times (relative to
 // print_time): phase_t_ends[i] is the t_end of phase i, monotonic
 // non-decreasing, with phase_t_ends[n_phases-1] == move_t. coeff_buf is
-// n_phases * MOVE_QUINTIC_POLY_COEFFS * 3 doubles, each phase in order
-//   c[0].x, c[0].y, c[0].z, c[1].x, c[1].y, c[1].z, ..., c[14].x, c[14].y,
-//   c[14].z. Within each phase the polynomial is in phase-local time
-//   delta_t = t_move_local - t_phase_start.
+// n_phases * MOVE_QUINTIC_POLY_COEFFS * 4 doubles, each phase in order
+//   c[0].x, c[0].y, c[0].z, c[0].e, c[1].x, c[1].y, c[1].z, c[1].e,
+//   ..., c[14].x, c[14].y, c[14].z, c[14].e.
+// The .e slot carries the pre-baked extruder polynomial (linear PA
+// composed at plan time per Plan 8 Chunk 3); pre-Chunk-3 callers that
+// only emit XY motion should pass zeros for the .e slots.
+// Within each phase the polynomial is in phase-local time
+// delta_t = t_move_local - t_phase_start.
 void __visible
 trapq_append_quintic(struct trapq *tq, double print_time
                      , int n_phases, const double *phase_t_ends
@@ -208,6 +215,7 @@ trapq_append_quintic(struct trapq *tq, double print_time
     m->start_pos.x = start_pos_x;
     m->start_pos.y = start_pos_y;
     m->start_pos.z = start_pos_z;
+    m->start_pos.e = 0.0;
     m->arc_length = arc_length;
     m->v_cap_min = v_cap_min;
     m->shape_disabled = shape_disabled ? 1 : 0;
@@ -225,7 +233,8 @@ trapq_append_quintic(struct trapq *tq, double print_time
             ph->c[k].x = src[0];
             ph->c[k].y = src[1];
             ph->c[k].z = src[2];
-            src += 3;
+            ph->c[k].e = src[3];
+            src += 4;
         }
     }
     trapq_add_move(tq, m);

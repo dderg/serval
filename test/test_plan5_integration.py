@@ -179,14 +179,16 @@ def _baked_position_fn(payload):
      ) = _unpack_payload(payload)
     n_phases = len(phase_t_ends)
     # Unpack coeff_tuple into phases[p][axis][k] layout.
+    # Plan 8 Chunk 3: 4-axis stride (x, y, z, e). Only XY axes (0..2) are
+    # extracted here — the .e slot is exercised by linear_pa_compose tests.
     phases = []
     buf = list(coeff_tuple)
     for p in range(n_phases):
-        base = p * 15 * 3
+        base = p * 15 * 4
         axes_coeffs = [[0.0] * 15 for _ in range(3)]
         for k in range(15):
             for ax in range(3):
-                axes_coeffs[ax][k] = buf[base + k * 3 + ax]
+                axes_coeffs[ax][k] = buf[base + k * 4 + ax]
         phases.append(axes_coeffs)
 
     def eval_at(t):
@@ -363,7 +365,7 @@ def _push_quintic_to_trapq(ffi_main, ffi_lib, tq, print_time, payload):
      coeff_tuple, _legacy) = _unpack_payload(payload)
     n_phases = len(phase_t_ends)
     coeff_buf = ffi_main.new(
-        f"double[{n_phases * 15 * 3}]", list(coeff_tuple)
+        f"double[{n_phases * 15 * 4}]", list(coeff_tuple)
     )
     phase_t_ends_buf = ffi_main.new(
         f"double[{n_phases}]", list(phase_t_ends),
@@ -417,7 +419,7 @@ class TestPlan5CascadeIntegration:
         assert all(phase_t_ends[i] <= phase_t_ends[i + 1]
                    for i in range(n_phases - 1))
         assert phase_t_ends[-1] == pytest.approx(total_t_baked, rel=1e-12)
-        assert len(coeff_tuple) == n_phases * 15 * 3
+        assert len(coeff_tuple) == n_phases * 15 * 4
         for c in coeff_tuple:
             assert math.isfinite(c), "non-finite coefficient in payload"
         # Legacy trapezoid-in-s timings sanity-check.

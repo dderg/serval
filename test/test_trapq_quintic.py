@@ -29,12 +29,13 @@ def _ffi():
 
 
 def _pack_phase_coeffs(accel_polys, cruise_polys, decel_polys):
-    """Flatten the Python composition output into the 135-double coeff_buf
-    layout that trapq_append_quintic expects (Chunk 2: 15-coeff slots).
+    """Flatten the Python composition output into the 180-double coeff_buf
+    layout that trapq_append_quintic expects (Plan 8 Chunk 3: 4-axis slots).
 
-    Each phase: 15 coefficients * 3 axes, stored interleaved
-    (c[0].x, c[0].y, c[0].z, c[1].x, ..., c[14].z). Callers that build
-    legacy 11-coeff phase lists get zero-padded to 15.
+    Each phase: 15 coefficients * 4 axes (x, y, z, e), stored interleaved
+    (c[0].x, c[0].y, c[0].z, c[0].e, c[1].x, ..., c[14].e). The .e slot
+    is zero — populated downstream by linear_pa_compose. Callers that
+    build legacy 11-coeff phase lists get zero-padded to 15.
     """
     buf = []
     for phase_polys in (accel_polys, cruise_polys, decel_polys):
@@ -43,7 +44,8 @@ def _pack_phase_coeffs(accel_polys, cruise_polys, decel_polys):
             for axis in range(3):
                 coeffs = phase_polys[axis]
                 buf.append(coeffs[k] if k < len(coeffs) else 0.0)
-    assert len(buf) == 135
+            buf.append(0.0)  # .e slot
+    assert len(buf) == 180
     return buf
 
 
@@ -156,7 +158,7 @@ def test_quintic_move_get_coord_horner_roundtrip():
     decel_polys = [[0.0] * 11, [0.0] * 11, [0.0] * 11]
 
     coeff_buf = _pack_phase_coeffs(accel_polys, cruise_polys, decel_polys)
-    buf = ffi_main.new("double[135]", coeff_buf)
+    buf = ffi_main.new("double[180]", coeff_buf)
 
     _append_quintic_3phase(
         ffi_main, ffi_lib, tq, 1.0,
@@ -263,7 +265,7 @@ def test_compose_emit_and_query_matches_bezier():
     ffi_main, ffi_lib = _ffi()
     tq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
     coeff_buf = _pack_phase_coeffs(accel_polys, cruise_polys, decel_polys)
-    buf = ffi_main.new("double[135]", coeff_buf)
+    buf = ffi_main.new("double[180]", coeff_buf)
 
     # Start pos is u=0 (= Q[0]).
     start_xyz = blendquintic._quintic_eval(shape.Q, 0.0)

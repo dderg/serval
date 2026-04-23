@@ -579,11 +579,20 @@ int bs_compose(
     if (n_out_phases <= 0 || n_out_phases > out_capacity)
         return -1;
 
-    /* 2. Per-axis compose. input_coeffs layout:
-     *    per phase: 15 * 3 doubles interleaved
-     *        (c[0].x, c[0].y, c[0].z, c[1].x, ... c[14].z)
-     *    Output same layout.
+    /* 2. Per-axis compose. input_coeffs layout (Plan 8 Chunk 3):
+     *    per phase: 15 * 4 doubles interleaved
+     *        (c[0].x, c[0].y, c[0].z, c[0].e, c[1].x, ... c[14].e)
+     *    Output same layout. We compose only the XY axes (0..2) — the .e
+     *    slot is zeroed here and populated downstream by linear_pa_compose
+     *    from the (now baked) XY polynomial. Pure-E content arrives via a
+     *    separate emit path and never reaches this composer.
      */
+    /* Zero the .e slots in the output buffer up front. */
+    for (int s = 0; s < n_out_phases; ++s) {
+        for (int k = 0; k < BS_OUTPUT_NC; ++k) {
+            out_coeffs[(s * BS_OUTPUT_NC + k) * 4 + 3] = 0.0;
+        }
+    }
     for (int axis = 0; axis < 3; ++axis) {
         double in_axis[BS_MAX_BREAKS * BS_OUTPUT_NC];
         double out_axis[BS_MAX_BREAKS * BS_OUTPUT_NC];
@@ -591,7 +600,7 @@ int bs_compose(
         for (int p = 0; p < n_input_phases; ++p) {
             for (int k = 0; k < BS_OUTPUT_NC; ++k) {
                 in_axis[p * BS_OUTPUT_NC + k] =
-                    input_coeffs[(p * BS_OUTPUT_NC + k) * 3 + axis];
+                    input_coeffs[(p * BS_OUTPUT_NC + k) * 4 + axis];
             }
         }
         int rc = compose_axis(
@@ -605,7 +614,7 @@ int bs_compose(
         /* Re-interleave. */
         for (int s = 0; s < n_out_phases; ++s) {
             for (int k = 0; k < BS_OUTPUT_NC; ++k) {
-                out_coeffs[(s * BS_OUTPUT_NC + k) * 3 + axis] =
+                out_coeffs[(s * BS_OUTPUT_NC + k) * 4 + axis] =
                     out_axis[s * BS_OUTPUT_NC + k];
             }
         }

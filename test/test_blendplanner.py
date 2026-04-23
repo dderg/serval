@@ -576,7 +576,7 @@ def test_corner_blend_emits_single_quintic_not_polyline():
         #    start_pos_xyz, coeff_tuple,
         #    legacy_t_accel_end, legacy_t_decel_start, legacy_total_t)
         # where n_phases = len(phase_t_ends_tuple), and coeff_tuple has
-        # n_phases * 15 * 3 doubles.
+        # n_phases * 15 * 4 doubles (Plan 8 Chunk 3: x, y, z, e).
         payload = blend_moves[0].quintic_trapq_payload
         assert len(payload) == 9
         (phase_t_ends_tuple, total_t_baked, arc_length, v_cap_min,
@@ -586,7 +586,7 @@ def test_corner_blend_emits_single_quintic_not_polyline():
         assert n_phases >= 1
         assert total_t_baked > 0.0
         assert arc_length > 0.0
-        assert len(coeff_tuple) == n_phases * 15 * 3
+        assert len(coeff_tuple) == n_phases * 15 * 4
         # start_pos_xyz matches trunc_prev.end_pos.
         assert start_pos_xyz[:3] == pytest.approx(trunc_prev.end_pos[:3])
 

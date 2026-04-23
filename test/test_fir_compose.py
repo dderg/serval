@@ -15,15 +15,15 @@ from klippy.extras import shaper_defs
 
 
 def _pack_constant_velocity(move_t, v, axis=0):
-    coeffs = [0.0] * (1 * 15 * 3)
-    coeffs[(0 * 15 + 1) * 3 + axis] = v
+    coeffs = [0.0] * (1 * 15 * 4)
+    coeffs[(0 * 15 + 1) * 4 + axis] = v
     return [move_t], coeffs
 
 
 def _pack_accel(move_t, v0, a, axis=0):
-    coeffs = [0.0] * (1 * 15 * 3)
-    coeffs[(0 * 15 + 1) * 3 + axis] = v0
-    coeffs[(0 * 15 + 2) * 3 + axis] = 0.5 * a
+    coeffs = [0.0] * (1 * 15 * 4)
+    coeffs[(0 * 15 + 1) * 4 + axis] = v0
+    coeffs[(0 * 15 + 2) * 4 + axis] = 0.5 * a
     return [move_t], coeffs
 
 
@@ -42,7 +42,7 @@ def _eval(out_t_ends, out_coeffs, t, axis=0):
     dt = t - start
     val = 0.0
     for k in range(14, -1, -1):
-        val = val * dt + out_coeffs[(pidx * 15 + k) * 3 + axis]
+        val = val * dt + out_coeffs[(pidx * 15 + k) * 4 + axis]
     return val
 
 
@@ -119,12 +119,12 @@ def test_zv_piece_count_bound():
     damping_ratio = 0.1
     A, T = shaper_defs.get_zv_shaper(shaper_freq, damping_ratio)
     t_ends = [0.1, 0.2, 0.3]
-    coeffs = [0.0] * (3 * 15 * 3)
-    coeffs[(0 * 15 + 1) * 3 + 0] = 50.0
-    coeffs[(1 * 15 + 0) * 3 + 0] = 5.0
-    coeffs[(1 * 15 + 1) * 3 + 0] = 100.0
-    coeffs[(2 * 15 + 0) * 3 + 0] = 15.0
-    coeffs[(2 * 15 + 1) * 3 + 0] = 100.0
+    coeffs = [0.0] * (3 * 15 * 4)
+    coeffs[(0 * 15 + 1) * 4 + 0] = 50.0
+    coeffs[(1 * 15 + 0) * 4 + 0] = 5.0
+    coeffs[(1 * 15 + 1) * 4 + 0] = 100.0
+    coeffs[(2 * 15 + 0) * 4 + 0] = 15.0
+    coeffs[(2 * 15 + 1) * 4 + 0] = 100.0
     out_t_ends, out_coeffs = fir_compose(t_ends, coeffs, A, T)
     # Upper bound: 4 phase edges (0, T1, T2, T3) × 2 impulses = 8
     # breakpoints including 0, so up to 7 output pieces (or fewer after

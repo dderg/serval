@@ -110,14 +110,19 @@ def _bake_shaper_polynomial(
         phase_t_ends : tuple[float] of length n_phases (absolute move-local).
         total_t_baked: phase_t_ends[-1] (may be longer than input total_t
                        for FIR due to kernel support extension).
-        coeff_buf_flat: tuple[float] of length n_phases * 15 * 3 in the
-                        interleaved layout the C trapq_append_quintic wants.
+        coeff_buf_flat: tuple[float] of length n_phases * 15 * 4 in the
+                        interleaved layout the C trapq_append_quintic wants
+                        (Plan 8 Chunk 3: x, y, z, e per coeff). The .e
+                        slot is left zero here — the linear-PA composer
+                        (Chunk 3 Task 2) populates it from the baked XY
+                        polynomial after this returns.
 
     Heterogeneous per-axis shapers are not supported in Chunk 2; when
     detected we fall back to pass-through. Chunk 3 (per-axis polynomial
     baking) will remove that restriction.
     """
     # Helper that packs the legacy 3-phase output as a flat coeff buffer.
+    # Plan 8 Chunk 3: 4-axis stride — .e left zero, populated downstream.
     def _legacy_passthrough():
         phase_t_ends = (t_accel_end, t_decel_start, total_t)
         flat = []
@@ -126,6 +131,7 @@ def _bake_shaper_polynomial(
                 flat.append(phase[0][k])
                 flat.append(phase[1][k])
                 flat.append(phase[2][k])
+                flat.append(0.0)  # .e slot
         return phase_t_ends, total_t, tuple(flat)
 
     if shape_disabled:
@@ -161,6 +167,7 @@ def _bake_shaper_polynomial(
             in_coeffs.append(phase[0][k])
             in_coeffs.append(phase[1][k])
             in_coeffs.append(phase[2][k])
+            in_coeffs.append(0.0)  # .e slot — populated by linear_pa_compose
 
     try:
         if shaper_type in _BS_ORDERS:

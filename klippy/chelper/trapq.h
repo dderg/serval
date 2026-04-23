@@ -6,9 +6,9 @@
 struct coord {
     union {
         struct {
-            double x, y, z;
+            double x, y, z, e;
         };
-        double axis[3];
+        double axis[4];
     };
 };
 
@@ -67,11 +67,14 @@ void trapq_add_move(struct trapq *tq, struct move *m);
 // degree-up-to-14 position-in-t polynomial in phase-local time. phase_t_ends
 // gives the absolute move-local t_end of each phase (monotonic, last equals
 // move_t). coeff_buf layout:
-//   per phase: MOVE_QUINTIC_POLY_COEFFS * 3 doubles  (c[0].x, c[0].y, c[0].z,
-//                                                     c[1].x, c[1].y, c[1].z,
-//                                                     ..., c[14].z)
-// so coeff_buf is n_phases * 15 * 3 doubles. Zero-length phases are allowed
-// (phase_t_ends[i] == phase_t_ends[i-1] collapses phase i).
+//   per phase: MOVE_QUINTIC_POLY_COEFFS * 4 doubles  (c[0].x, c[0].y, c[0].z,
+//                                                     c[0].e, c[1].x, ...,
+//                                                     c[14].e)
+// so coeff_buf is n_phases * 15 * 4 doubles. The .e slot carries the
+// pre-baked extruder polynomial (Plan 8 Chunk 3); pre-Chunk-3 callers that
+// only emit XY motion should pass zeros for the .e slots. Zero-length
+// phases are allowed (phase_t_ends[i] == phase_t_ends[i-1] collapses
+// phase i).
 void trapq_append_quintic(struct trapq *tq, double print_time
                           , int n_phases, const double *phase_t_ends
                           , double move_t, double arc_length, double v_cap_min

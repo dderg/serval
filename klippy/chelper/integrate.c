@@ -125,12 +125,19 @@ diff_antiderivatives(const smoother_antiderivatives* ad1
  * Move-side polynomial extraction: quintic dispatch helpers (D2a)
  ****************************************************************/
 
-// Return the polynomial coefficients c_k (for axis = 'x'/'y'/'z') expressing
-// position(t) = sum_k out_c[k] * (t - t_phase_start)^k for the phase of move
-// m that contains move_time. Every move is a quintic polynomial payload
-// (Plan 8 Chunk 1 Task 8); the selected phase's stored coefficients are
-// returned directly. Sets *out_phase_start to the phase's absolute-move-local
-// origin time. The output buffer must hold SMOOTHER_NUM_MOMENTS (11) doubles.
+// Return the polynomial coefficients c_k (for axis = 'x'/'y'/'z'/'e')
+// expressing position(t) = sum_k out_c[k] * (t - t_phase_start)^k for the
+// phase of move m that contains move_time. Every move is a quintic
+// polynomial payload (Plan 8 Chunk 1 Task 8); the selected phase's stored
+// coefficients are returned directly. Sets *out_phase_start to the phase's
+// absolute-move-local origin time. The output buffer must hold
+// SMOOTHER_NUM_MOMENTS (11) doubles.
+//
+// Plan 8 Chunk 3: axis='e' selects offset 3 in the (x, y, z, e) coord
+// vector. The .e slot carries the linear-PA-baked extruder polynomial
+// (composed at plan time by linear_pa_compose) — Stage C will route
+// extruder_calc_position through this directly to retire the post-hoc
+// convolution.
 //
 // TODO: Chunk 3 will retire this convolution path; until then, bs5-shaped
 // moves with significant c[11..14] content produce a ≤0.5% integration error.
@@ -140,7 +147,8 @@ move_axis_phase_polynomial(const struct move* m, int axis, double move_time,
                            double out_c[SMOOTHER_NUM_MOMENTS],
                            double* out_phase_start, double* out_phase_end)
 {
-    int ai = axis - 'x';
+    // axis: 'x' -> 0, 'y' -> 1, 'z' -> 2, 'e' -> 3.
+    int ai = (axis == 'e') ? 3 : (axis - 'x');
     int n = m->n_phases;
     const struct move_quintic_phase* ph = &m->phases[0];
     double phase_start = 0.0;

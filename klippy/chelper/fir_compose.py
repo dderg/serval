@@ -29,7 +29,8 @@ def fir_compose(
     input_phase_t_ends : sequence[float]
         Absolute move-local end time per input phase.
     input_coeffs : sequence[float]
-        n_in * 15 * 3 doubles, interleaved per-axis.
+        n_in * 15 * 4 doubles, interleaved per-axis (Plan 8 Chunk 3:
+        x, y, z, e). The .e slot is ignored on input and zeroed on output.
     impulse_amplitudes : sequence[float]
         Shaper amplitudes a_i. When `normalize` is True they are scaled to
         sum to 1.0 (standard convention for zero-vibration shapers).
@@ -55,7 +56,7 @@ def fir_compose(
             raise ValueError("amplitudes sum is zero/non-finite")
         amps = [a / total for a in amps]
     n_in = len(input_phase_t_ends)
-    expected = n_in * 15 * 3
+    expected = n_in * 15 * 4
     if len(input_coeffs) != expected:
         raise ValueError(
             f"input_coeffs length {len(input_coeffs)} != expected {expected}"
@@ -65,7 +66,7 @@ def fir_compose(
     amps_buf = ffi.new("double[]", amps)
     delays_buf = ffi.new("double[]", list(impulse_delays))
     out_t_ends_buf = ffi.new("double[]", out_capacity)
-    out_coeffs_buf = ffi.new("double[]", out_capacity * 15 * 3)
+    out_coeffs_buf = ffi.new("double[]", out_capacity * 15 * 4)
     n_out = lib.fir_compose(
         n_in,
         in_t_ends_buf, in_coeffs_buf,
@@ -76,5 +77,5 @@ def fir_compose(
     if n_out < 0:
         raise ValueError("fir_compose failed (overflow or bad args)")
     out_t_ends = [out_t_ends_buf[i] for i in range(n_out)]
-    out_coeffs = [out_coeffs_buf[i] for i in range(n_out * 15 * 3)]
+    out_coeffs = [out_coeffs_buf[i] for i in range(n_out * 15 * 4)]
     return out_t_ends, out_coeffs
