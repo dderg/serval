@@ -42,6 +42,7 @@ SOURCE_FILES = [
     "integrate.c",
     "bs_compose.c",
     "fir_compose.c",
+    "linear_pa_compose.c",
 ]
 DEST_LIB = "c_helper.so"
 OTHER_FILES = [
@@ -57,6 +58,7 @@ OTHER_FILES = [
     "integrate.h",
     "bs_compose.h",
     "fir_compose.h",
+    "linear_pa_compose.h",
 ]
 
 defs_stepcompress = """
@@ -161,6 +163,14 @@ defs_compose = """
         int out_capacity,
         double *out_phase_t_ends,
         double *out_coeffs);
+    void linear_pa_compose(
+        int n_phases,
+        double *coeff_buf,
+        double axis_n_x,
+        double axis_n_y,
+        double axis_n_z,
+        double extr_r,
+        double k_pa);
 """
 
 defs_kin_cartesian = """
