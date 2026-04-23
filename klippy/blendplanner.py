@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import math
 
+import logging
+
 from . import blendmath, blendquintic, blendshape, topp
 from .chelper import bs_compose as _bs_compose
 from .chelper import fir_compose as _fir_compose
 from .chelper import linear_pa_compose as _linear_pa_compose
+from .chelper import nonlinear_pa_compose as _nonlinear_pa_compose
 from .extras import shaper_defs as _shaper_defs
 
 
@@ -82,25 +85,45 @@ def _extract_pa_snapshot(toolhead):
 _BS_ORDERS = {f"bs{i}": i for i in range(1, 6)}
 
 
-def _resolve_linear_k_pa(toolhead):
-    """Return the linear-PA coefficient (k_pa) currently configured on the
-    toolhead's extruder, or 0.0 if PA is disabled or the configured model
-    is non-linear.
+# Filament-error threshold above which nonlinear_pa_compose emits a
+# warning (per Phase 0 research §6). 1 µm = 1e-3 mm.
+_PA_FIT_FILAMENT_WARN_MM = 1e-3
 
-    Plan 8 Chunk 3 Stage A: only the 'linear' PA model is composed at plan
-    time. Non-linear models ('tanh', 'recipr') will be handled by Stage B
-    via piecewise Chebyshev fits; until then their k_pa contribution is
-    treated as zero (the .e slot still carries extr_r * P_proj, the
-    nominal filament motion without PA kick).
+
+def _resolve_pa_dispatch(toolhead):
+    """Return a dispatch tuple describing how to compose E polynomial PA.
+
+    Returns one of:
+      ("none", 0.0)                            — PA disabled entirely.
+      ("linear", k_pa)                         — linear PA with coeff k_pa.
+      ("nonlinear", model, LA, NO, v_lin)      — tanh / recipr PA.
+
+    Plan 8 Chunk 3 Stage B: 'linear' routes to linear_pa_compose (exact
+    polynomial arithmetic). 'nonlinear' routes to nonlinear_pa_compose
+    with the configured model, linear_advance, nonlinear_offset, and
+    linearization_velocity.
     """
     pa_snap = _extract_pa_snapshot(toolhead)
     if pa_snap is None:
-        return 0.0
-    if pa_snap.kind != "linear":
-        return 0.0
-    if not pa_snap.params:
-        return 0.0
-    return float(pa_snap.params[0])
+        return ("none", 0.0)
+    if pa_snap.kind == "linear":
+        if not pa_snap.params:
+            return ("none", 0.0)
+        k_pa = float(pa_snap.params[0])
+        if k_pa <= 0.0:
+            return ("none", 0.0)
+        return ("linear", k_pa)
+    if pa_snap.kind in ("tanh", "recipr"):
+        if len(pa_snap.params) < 3:
+            return ("none", 0.0)
+        la, no, v_lin = (float(x) for x in pa_snap.params[:3])
+        if la <= 0.0 and no <= 0.0:
+            return ("none", 0.0)
+        if no > 0.0 and v_lin <= 0.0:
+            # Misconfigured snapshot; bail out safely.
+            return ("none", 0.0)
+        return ("nonlinear", pa_snap.kind, la, no, v_lin)
+    return ("none", 0.0)
 
 
 def _bake_shaper_polynomial(
@@ -321,13 +344,16 @@ class QuinticBlendMove:
             t_accel_end, t_decel_start, total_t,
             shaper_list or [],
         )
-        # Plan 8 Chunk 3 Task 3 — bake linear PA into the .e slot of the
-        # baked polynomial. For non-linear PA the .e slot stays zero
-        # (Stage B's nonlinear_pa_compose lands later). For linear or
-        # zero PA we run the composer; the .e content is ready for the
-        # Stage C extruder-stepper rewrite to consume directly. Until
-        # Stage C lands, the .e slot is harmlessly populated but unread
-        # (extruder still convolves PA on its own trapq).
+        # Plan 8 Chunk 3 Task 3 + Task 7 — bake PA into the .e slot of
+        # the baked polynomial. Dispatch routes to:
+        #   - linear_pa_compose (exact polynomial arithmetic) for the
+        #     'linear' PA model,
+        #   - nonlinear_pa_compose (piecewise Chebyshev-in-tau deg-4 fit)
+        #     for 'tanh' / 'recipr' models,
+        #   - pass-through (E = extr_r * P_proj, no PA) when PA is
+        #     disabled or model unknown.
+        # The .e content is ready for Stage C (extruder step-gen
+        # polynomial-eval) to consume directly.
         n_phases_baked = len(phase_t_ends_tuple)
         # axes_d[3] is signed E displacement; arc_length is the curve length
         # of the XY blend. extr_r = E-displacement per XY-arc-mm (signed).
@@ -339,11 +365,43 @@ class QuinticBlendMove:
         # this matches the actual XY motion; for curved blends it's the
         # legacy approximation (kin_extruder.c made the same choice).
         axis_n = (self.axes_r[0], self.axes_r[1], self.axes_r[2])
-        k_pa = _resolve_linear_k_pa(toolhead)
-        coeff_tuple = tuple(_linear_pa_compose.linear_pa_compose(
-            n_phases_baked, list(coeff_tuple),
-            axis_n=axis_n, extr_r=extr_r, k_pa=k_pa,
-        ))
+        pa_dispatch = _resolve_pa_dispatch(toolhead)
+        if pa_dispatch[0] == "linear":
+            k_pa = pa_dispatch[1]
+            coeff_tuple = tuple(_linear_pa_compose.linear_pa_compose(
+                n_phases_baked, list(coeff_tuple),
+                axis_n=axis_n, extr_r=extr_r, k_pa=k_pa,
+            ))
+        elif pa_dispatch[0] == "nonlinear":
+            _, model, la, no, v_lin = pa_dispatch
+            coeff_list, residual = _nonlinear_pa_compose.nonlinear_pa_compose(
+                n_phases_baked, list(phase_t_ends_tuple),
+                list(coeff_tuple),
+                axis_n=axis_n, extr_r=extr_r,
+                linear_advance=la,
+                nonlinear_offset=no,
+                linearization_velocity=v_lin,
+                model=model,
+            )
+            coeff_tuple = tuple(coeff_list)
+            filament_err = residual * (no if no > 0.0 else 1.0)
+            if filament_err > _PA_FIT_FILAMENT_WARN_MM:
+                logging.warning(
+                    "nonlinear_pa_compose fit error %.3g mm exceeds "
+                    "%.3g mm filament budget (model=%s, NO=%.4f, "
+                    "v_lin=%.2f)",
+                    filament_err, _PA_FIT_FILAMENT_WARN_MM,
+                    model, no, v_lin,
+                )
+        else:
+            # PA disabled — still run linear_pa_compose with k_pa = 0 so
+            # the .e slot receives extr_r * P_proj (the nominal filament
+            # motion). This keeps Stage C's polynomial-eval step-gen
+            # correct for moves without PA.
+            coeff_tuple = tuple(_linear_pa_compose.linear_pa_compose(
+                n_phases_baked, list(coeff_tuple),
+                axis_n=axis_n, extr_r=extr_r, k_pa=0.0,
+            ))
         start_pos_xyz = (start_pos_4d[0], start_pos_4d[1], start_pos_4d[2])
         if not (v_cap_min and math.isfinite(v_cap_min)) or v_cap_min <= 0.0:
             v_cap_min = cruise_v if cruise_v > 0.0 else v_in
