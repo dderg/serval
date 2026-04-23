@@ -40,6 +40,7 @@ struct move {
     double arc_length;
     double v_cap_min;             /* Option Z upstream junction cap */
     int n_phases;                 /* 0 = null/sentinel move; 1..MOVE_MAX_PIECES otherwise */
+    int shape_disabled;           /* 1 = planner skipped shaper bake; emit raw polynomial */
     struct move_quintic_phase phases[MOVE_MAX_PIECES];
     struct list_node node;
 };
@@ -74,6 +75,7 @@ void trapq_add_move(struct trapq *tq, struct move *m);
 void trapq_append_quintic(struct trapq *tq, double print_time
                           , int n_phases, const double *phase_t_ends
                           , double move_t, double arc_length, double v_cap_min
+                          , int shape_disabled
                           , double start_pos_x, double start_pos_y
                           , double start_pos_z, const double *coeff_buf);
 

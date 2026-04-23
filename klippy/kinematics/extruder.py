@@ -767,9 +767,13 @@ class PrinterExtruder:
         if move.is_kinematic_move:
             # Regular kinematic move with extrusion
             extr_r = [math.copysign(r * r, axis_r) for r in move.axes_r[:3]]
+            shape_disabled = False
         else:
-            # Extrude-only move, do not apply pressure advance
+            # Extrude-only move, do not apply pressure advance. Plan 8
+            # Chunk 2 §6.5: pure-E moves carry no XY velocity polynomial
+            # to inherit a cascade kernel from, so we emit raw (unshaped).
             extr_r = [0.0, 0.0, axis_r]
+            shape_disabled = True
         self.trapq_append(
             self.trapq,
             print_time,
@@ -785,6 +789,7 @@ class PrinterExtruder:
             start_v,
             cruise_v,
             accel,
+            shape_disabled=shape_disabled,
         )
         extr_d = abs(move.axes_d[3])
         for i in range(3):

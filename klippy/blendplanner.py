@@ -85,6 +85,7 @@ def _bake_shaper_polynomial(
     accel_polys, cruise_polys, decel_polys,
     t_accel_end, t_decel_start, total_t,
     shapers,
+    shape_disabled=False,
 ):
     """Apply the configured input-shaping kernel at plan time.
 
@@ -93,6 +94,8 @@ def _bake_shaper_polynomial(
     and — depending on the axis shaper snapshots — returns a baked
     piecewise-polynomial representation:
 
+      - ``shape_disabled`` set (homing / force / manual / pure-E): skip
+        baking entirely. Returns the legacy 3-phase layout.
       - No shaper configured (no shapers, disabled, or mismatched per-
         axis types): pass-through. Returns the legacy 3-phase layout.
       - FIR shaper (zv / mzv): all axes must share the same shaper_type,
@@ -125,6 +128,9 @@ def _bake_shaper_polynomial(
                 flat.append(phase[2][k])
         return phase_t_ends, total_t, tuple(flat)
 
+    if shape_disabled:
+        # Emit site requested unshaped output — skip the whole bake path.
+        return _legacy_passthrough()
     if not shapers:
         return _legacy_passthrough()
     # Filter snapshots that actually carry a shaper.

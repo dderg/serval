@@ -125,6 +125,7 @@ defs_trapq = """
     void trapq_append_quintic(struct trapq *tq, double print_time
         , int n_phases, const double *phase_t_ends
         , double move_t, double arc_length, double v_cap_min
+        , int shape_disabled
         , double start_pos_x, double start_pos_y, double start_pos_z
         , const double *coeff_buf);
     void build_linear_as_quintic_coeffs(

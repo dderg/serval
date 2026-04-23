@@ -495,10 +495,15 @@ class ToolHead:
                 phase_t_ends = ffi_main.new(
                     f"double[{n_phases}]", list(phase_t_ends_tuple)
                 )
+                # Planner-emitted blend moves are always shaped (the whole
+                # point of baking) — shape_disabled=0. Future drip / homing
+                # paths that route through this branch will need their
+                # own flag plumbing (see Phase 0 §6.5 audit).
                 ffi_lib.trapq_append_quintic(
                     self.trapq, next_move_time,
                     n_phases, phase_t_ends,
                     total_t_baked, arc_length, v_cap_min,
+                    0,
                     start_pos_xyz[0], start_pos_xyz[1], start_pos_xyz[2],
                     coeff_buf,
                 )

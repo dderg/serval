@@ -198,6 +198,7 @@ void __visible
 trapq_append_quintic(struct trapq *tq, double print_time
                      , int n_phases, const double *phase_t_ends
                      , double move_t, double arc_length, double v_cap_min
+                     , int shape_disabled
                      , double start_pos_x, double start_pos_y
                      , double start_pos_z, const double *coeff_buf)
 {
@@ -209,6 +210,7 @@ trapq_append_quintic(struct trapq *tq, double print_time
     m->start_pos.z = start_pos_z;
     m->arc_length = arc_length;
     m->v_cap_min = v_cap_min;
+    m->shape_disabled = shape_disabled ? 1 : 0;
     if (n_phases < 0)
         n_phases = 0;
     if (n_phases > MOVE_MAX_PIECES)

@@ -62,6 +62,7 @@ def _append_quintic_3phase(ffi_main, ffi_lib, tq, print_time,
     ffi_lib.trapq_append_quintic(
         tq, print_time, 3, phase_t_ends,
         move_t, arc_length, v_cap_min,
+        0,  # shape_disabled=False
         start_x, start_y, start_z, coeff_buf,
     )
 

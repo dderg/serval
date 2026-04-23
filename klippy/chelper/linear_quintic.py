@@ -29,10 +29,16 @@ def append_trapezoid_as_quintic(
     start_pos_x, start_pos_y, start_pos_z,
     axes_r_x, axes_r_y, axes_r_z,
     start_v, cruise_v, accel,
+    shape_disabled=False,
 ):
     """Emit an accel/cruise/decel trapezoid onto trapq as a single degenerate-
     quintic move. Signature mirrors the legacy trapq_append FFI call so
-    callers migrate with no parameter reshuffling."""
+    callers migrate with no parameter reshuffling.
+
+    ``shape_disabled`` (kwarg, default False) stamps the emitted move with
+    the Plan 8 shape-disabled flag. Must-be-unshaped emit sites (force_move,
+    manual_stepper, drip-homed moves, pure-E) pass ``True`` so the
+    planner's shaper-bake step skips baking (Chunk 2 Task 11 threading)."""
     ffi, lib = get_ffi()
     buf = ffi.new("double[135]")
     lib.build_linear_as_quintic_coeffs(
@@ -63,6 +69,7 @@ def append_trapezoid_as_quintic(
         tq, print_time,
         3, phase_t_ends,
         move_t, arc_length, v_cap_min,
+        1 if shape_disabled else 0,
         start_pos_x, start_pos_y, start_pos_z,
         buf,
     )

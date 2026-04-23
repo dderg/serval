@@ -116,6 +116,7 @@ class ForceMove:
             0.0,
             cruise_v,
             accel,
+            shape_disabled=True,
         )
         print_time = print_time + accel_t + cruise_t + accel_t
         stepper.generate_steps(print_time)
