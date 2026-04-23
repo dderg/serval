@@ -9,6 +9,9 @@ from __future__ import annotations
 import math
 
 from . import blendmath, blendquintic, blendshape, topp
+from .chelper import bs_compose as _bs_compose
+from .chelper import fir_compose as _fir_compose
+from .extras import shaper_defs as _shaper_defs
 
 
 def _extract_extruder_caps(toolhead):
@@ -75,6 +78,117 @@ def _extract_pa_snapshot(toolhead):
     return pa_snap
 
 
+_BS_ORDERS = {f"bs{i}": i for i in range(1, 6)}
+
+
+def _bake_shaper_polynomial(
+    accel_polys, cruise_polys, decel_polys,
+    t_accel_end, t_decel_start, total_t,
+    shapers,
+):
+    """Apply the configured input-shaping kernel at plan time.
+
+    Takes the raw (accel, cruise, decel) quintic phase polynomials produced
+    by QuinticShape.compose_phase_polynomials plus their phase timings,
+    and — depending on the axis shaper snapshots — returns a baked
+    piecewise-polynomial representation:
+
+      - No shaper configured (no shapers, disabled, or mismatched per-
+        axis types): pass-through. Returns the legacy 3-phase layout.
+      - FIR shaper (zv / mzv): all axes must share the same shaper_type,
+        freq, damping — run fir_compose once, output shape extends
+        beyond total_t by the last impulse delay.
+      - Smooth-IS (bs1..bs5): same homogeneous-kernel requirement —
+        run bs_compose.
+
+    Returns
+    -------
+    (phase_t_ends, total_t_baked, coeff_buf_flat)
+        phase_t_ends : tuple[float] of length n_phases (absolute move-local).
+        total_t_baked: phase_t_ends[-1] (may be longer than input total_t
+                       for FIR due to kernel support extension).
+        coeff_buf_flat: tuple[float] of length n_phases * 15 * 3 in the
+                        interleaved layout the C trapq_append_quintic wants.
+
+    Heterogeneous per-axis shapers are not supported in Chunk 2; when
+    detected we fall back to pass-through. Chunk 3 (per-axis polynomial
+    baking) will remove that restriction.
+    """
+    # Helper that packs the legacy 3-phase output as a flat coeff buffer.
+    def _legacy_passthrough():
+        phase_t_ends = (t_accel_end, t_decel_start, total_t)
+        flat = []
+        for phase in (accel_polys, cruise_polys, decel_polys):
+            for k in range(15):
+                flat.append(phase[0][k])
+                flat.append(phase[1][k])
+                flat.append(phase[2][k])
+        return phase_t_ends, total_t, tuple(flat)
+
+    if not shapers:
+        return _legacy_passthrough()
+    # Filter snapshots that actually carry a shaper.
+    active = [s for s in shapers if s.shaper_freq > 0.0 and s.shaper_type]
+    if not active:
+        return _legacy_passthrough()
+    # Chunk 2 simplification: all active axes must share the same shaper
+    # config. Heterogeneous = fall back to pass-through.
+    first = active[0]
+    for s in active[1:]:
+        if (s.shaper_type != first.shaper_type
+                or abs(s.shaper_freq - first.shaper_freq) > 1e-9
+                or abs(s.damping_ratio - first.damping_ratio) > 1e-9):
+            return _legacy_passthrough()
+    shaper_type = first.shaper_type
+    freq = first.shaper_freq
+    damping = first.damping_ratio
+
+    # Build the input (3-phase) flat buffer.
+    in_phase_t_ends = [t_accel_end, t_decel_start, total_t]
+    # Collapse zero-duration phases: bs / fir composers tolerate them but
+    # emitting fewer input phases keeps the breakpoint grid tighter. We
+    # still pass the 3-phase layout as-is here; the composer's break-dedup
+    # handles zero-length phases.
+    in_coeffs = []
+    for phase in (accel_polys, cruise_polys, decel_polys):
+        for k in range(15):
+            in_coeffs.append(phase[0][k])
+            in_coeffs.append(phase[1][k])
+            in_coeffs.append(phase[2][k])
+
+    try:
+        if shaper_type in _BS_ORDERS:
+            order = _BS_ORDERS[shaper_type]
+            phase_t_ends, out_coeffs = _bs_compose.bs_compose(
+                in_phase_t_ends, in_coeffs,
+                bs_order=order,
+                shaper_freq=freq,
+                damping_ratio=damping,
+            )
+        elif shaper_type == "zv":
+            A, T = _shaper_defs.get_zv_shaper(freq, damping)
+            phase_t_ends, out_coeffs = _fir_compose.fir_compose(
+                in_phase_t_ends, in_coeffs,
+                impulse_amplitudes=A, impulse_delays=T,
+            )
+        elif shaper_type == "mzv":
+            A, T = _shaper_defs.get_mzv_shaper(freq, damping)
+            phase_t_ends, out_coeffs = _fir_compose.fir_compose(
+                in_phase_t_ends, in_coeffs,
+                impulse_amplitudes=A, impulse_delays=T,
+            )
+        else:
+            return _legacy_passthrough()
+    except ValueError:
+        # Composer bailed (overflow or bad args). Fall back to the
+        # unshaped polynomial — safer than dropping the move.
+        return _legacy_passthrough()
+
+    if not phase_t_ends:
+        return _legacy_passthrough()
+    return tuple(phase_t_ends), phase_t_ends[-1], tuple(out_coeffs)
+
+
 def _copy_caller_state(src, dst):
     """Transfer caller-mutable Move state from src to the truncated dst.
 
@@ -119,8 +233,13 @@ class QuinticBlendMove:
     per-phase polynomial coefficients.
 
     The `quintic_trapq_payload` attribute is a tuple
-    (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
-     start_pos_xyz, coeff_buf) ready to feed trapq_append_quintic.
+    (phase_t_ends_tuple, total_t_baked, arc_length, v_cap_min,
+     start_pos_xyz, coeff_tuple, legacy_t_accel_end, legacy_t_decel_start,
+     legacy_total_t). The first 6 fields feed trapq_append_quintic
+     directly; the trailing legacy trio stays around for callers like
+     set_junction that still want the underlying trapezoid-in-s phase
+     timings (which may differ from the baked polynomial's phase
+     structure when an FIR shaper extends the move duration).
     """
 
     def __init__(self, toolhead, shape, start_pos_4d, end_pos_4d,
@@ -151,22 +270,40 @@ class QuinticBlendMove:
             v_in=v_in, v_out=v_out, cruise_v=cruise_v, a_max=a_max,
             s_accel_end=s_accel_end, s_decel_start=s_decel_start,
         )
-        # Pack coeff_buf for trapq_append_quintic. Chunk 2: 3 phases ×
-        # 15 coeffs × 3 axes = 135 doubles. compose_phase_polynomials
-        # pads c[11..14] = 0 for the pre-Chunk-3 bs composer.
-        coeff_buf = []
-        for phase in (accel_polys, cruise_polys, decel_polys):
-            for k in range(15):
-                coeff_buf.append(phase[0][k])
-                coeff_buf.append(phase[1][k])
-                coeff_buf.append(phase[2][k])
+        # Plan 8 Chunk 2 — bake the configured input-shaping kernel into
+        # the polynomial at plan time (Tasks 7–9). For unshaped axes or
+        # disabled shapers this is a pass-through; for bs1..bs5 it calls
+        # bs_compose, and for zv / mzv it calls fir_compose. The baked
+        # payload may expand from the legacy 3-phase layout to up to
+        # MOVE_MAX_PIECES phases.
+        shape_limits = getattr(shape, "_limits", None)
+        shaper_list = (
+            getattr(shape_limits, "shapers", None) if shape_limits is not None
+            else None
+        ) or []
+        phase_t_ends_tuple, total_t_baked, coeff_tuple = _bake_shaper_polynomial(
+            accel_polys, cruise_polys, decel_polys,
+            t_accel_end, t_decel_start, total_t,
+            shaper_list or [],
+        )
         start_pos_xyz = (start_pos_4d[0], start_pos_4d[1], start_pos_4d[2])
         if not (v_cap_min and math.isfinite(v_cap_min)) or v_cap_min <= 0.0:
             v_cap_min = cruise_v if cruise_v > 0.0 else v_in
         self.v_cap_min = v_cap_min
+        # New payload layout carries a variable-length phase_t_ends tuple
+        # plus the flat coeff buffer. Consumer (toolhead._process_moves)
+        # reads n_phases = len(phase_t_ends_tuple). Total duration is
+        # phase_t_ends_tuple[-1] (= total_t_baked), which may exceed the
+        # input total_t for FIR shapers that extend the move by max_tau.
         self.quintic_trapq_payload = (
-            t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
-            start_pos_xyz, tuple(coeff_buf),
+            phase_t_ends_tuple, total_t_baked,
+            arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+            # Legacy 3-phase timings for consumers that still need them
+            # (set_junction, extruder.move timing, min_move_t). These
+            # always reflect the INPUT (unshaped) timings; the baked
+            # polynomial spans phase_t_ends_tuple[-1], which can be
+            # longer.
+            t_accel_end, t_decel_start, total_t,
         )
         self.min_move_t = total_t if total_t > 0.0 else (
             self.move_d / cruise_v if cruise_v > 0.0 else 0.0
@@ -222,9 +359,15 @@ class QuinticBlendMove:
         # Populate the Move-shaped fields (start_v, cruise_v, end_v,
         # accel_t, cruise_t, decel_t) that downstream consumers such as
         # extruder.move expect to find on every move.
-        (t_accel_end, t_decel_start, total_t, *_rest) = (
-            self.quintic_trapq_payload
-        )
+        # New payload layout: (phase_t_ends_tuple, total_t_baked,
+        # arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+        # t_accel_end, t_decel_start, total_t). The legacy 3-phase
+        # (t_accel_end, t_decel_start, total_t) trio is retained at the
+        # tail for consumers like set_junction that still want the
+        # trapezoid-in-s-timing shape even after the polynomial has been
+        # extended by a FIR kernel.
+        payload = self.quintic_trapq_payload
+        t_accel_end, t_decel_start, total_t = payload[-3], payload[-2], payload[-1]
         self.start_v = math.sqrt(start_v2) if start_v2 > 0.0 else 0.0
         self.cruise_v = math.sqrt(cruise_v2) if cruise_v2 > 0.0 else 0.0
         self.end_v = math.sqrt(end_v2) if end_v2 > 0.0 else 0.0

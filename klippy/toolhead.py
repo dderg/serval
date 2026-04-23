@@ -477,22 +477,34 @@ class ToolHead:
             # trapq_append_quintic instead of the linear trapq_append path.
             qpayload = getattr(move, "quintic_trapq_payload", None)
             if qpayload is not None:
-                (t_accel_end, t_decel_start, total_t, arc_length, v_cap_min,
-                 start_pos_xyz, coeff_tuple) = qpayload
-                coeff_buf = ffi_main.new("double[135]", list(coeff_tuple))
-                phase_t_ends = ffi_main.new("double[3]", [
-                    t_accel_end, t_decel_start, total_t,
-                ])
+                # Plan 8 Chunk 2 payload layout:
+                #   (phase_t_ends_tuple, total_t_baked,
+                #    arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+                #    legacy_t_accel_end, legacy_t_decel_start, legacy_total_t)
+                # phase_t_ends_tuple is a tuple of absolute move-local end
+                # times per phase, length n_phases up to MOVE_MAX_PIECES.
+                # coeff_tuple is n_phases * 15 * 3 doubles. total_t_baked
+                # is phase_t_ends_tuple[-1].
+                (phase_t_ends_tuple, total_t_baked,
+                 arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+                 *_legacy) = qpayload
+                n_phases = len(phase_t_ends_tuple)
+                coeff_buf = ffi_main.new(
+                    f"double[{n_phases * 15 * 3}]", list(coeff_tuple)
+                )
+                phase_t_ends = ffi_main.new(
+                    f"double[{n_phases}]", list(phase_t_ends_tuple)
+                )
                 ffi_lib.trapq_append_quintic(
                     self.trapq, next_move_time,
-                    3, phase_t_ends,
-                    total_t, arc_length, v_cap_min,
+                    n_phases, phase_t_ends,
+                    total_t_baked, arc_length, v_cap_min,
                     start_pos_xyz[0], start_pos_xyz[1], start_pos_xyz[2],
                     coeff_buf,
                 )
                 if move.axes_d[3]:
                     self.extruder.move(next_move_time, move)
-                next_move_time = next_move_time + total_t
+                next_move_time = next_move_time + total_t_baked
                 for cb in move.timing_callbacks:
                     cb(next_move_time)
                 continue
