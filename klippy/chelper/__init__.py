@@ -25,6 +25,7 @@ SOURCE_FILES = [
     "stepcompress.c",
     "itersolve.c",
     "trapq.c",
+    "linear_quintic.c",
     "pollreactor.c",
     "msgblock.c",
     "trdispatch.c",
@@ -49,6 +50,7 @@ OTHER_FILES = [
     "itersolve.h",
     "pyhelper.h",
     "trapq.h",
+    "linear_quintic.h",
     "pollreactor.h",
     "msgblock.h",
     "kin_shaper.h",
@@ -127,6 +129,12 @@ defs_trapq = """
         , double move_t, double arc_length, double v_cap_min
         , double start_pos_x, double start_pos_y, double start_pos_z
         , const double coeff_buf[]);
+    void build_linear_as_quintic_coeffs(
+        double accel_t, double cruise_t, double decel_t,
+        double start_v, double cruise_v, double accel,
+        double axes_r_x, double axes_r_y, double axes_r_z,
+        double start_pos_x, double start_pos_y, double start_pos_z,
+        double coeff_buf[99]);
     void trapq_finalize_moves(struct trapq *tq, double print_time
         , double clear_history_time);
     void trapq_set_position(struct trapq *tq, double print_time
