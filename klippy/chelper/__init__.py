@@ -256,7 +256,7 @@ defs_kin_extruder = """
     double pressure_advance_recipr_model_func(double position
         , double pa_velocity, struct pressure_advance_params *pa_params);
     void extruder_set_pressure_advance_model_func(struct stepper_kinematics *sk
-        , double (*func)(double, double, struct pressure_advance_params *));
+        , void *func);
     double extruder_get_step_gen_window(struct stepper_kinematics *sk);
 """
 

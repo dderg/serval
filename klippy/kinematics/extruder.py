@@ -7,7 +7,10 @@ import logging
 import math
 
 from klippy import chelper, stepper
-from klippy.chelper.linear_quintic import append_trapezoid_as_quintic
+from klippy.chelper.linear_quintic import (
+    append_trapezoid_as_quintic,
+    append_trapezoid_e_only_as_quintic,
+)
 
 from ..extras.danger_options import get_danger_options
 
@@ -726,42 +729,115 @@ class PrinterExtruder:
         return move.max_cruise_v2
 
     def move(self, print_time, move):
+        # Plan 8 Chunk 3 Task 8 — all extruder trapq entries now carry
+        # the filament-position polynomial in the .e slot. The extruder
+        # stepper reads move_get_coord(m, t).e directly; no PA
+        # convolution in kin_extruder.c.
+        #
+        # If the Move is a QuinticBlendMove (quintic_trapq_payload set),
+        # the planner already baked XY shaping + PA into .e — emit a
+        # twin into self.trapq reusing that polynomial. Otherwise
+        # (linear kinematic move or pure-E move), emit a raw
+        # filament-trapezoid via append_trapezoid_e_only_as_quintic.
         axis_r = move.axes_r[3]
         abs_axis_r = abs(axis_r)
         accel = move.accel * abs_axis_r
         start_v = move.start_v * abs_axis_r
         cruise_v = move.cruise_v * abs_axis_r
-        extr_pos = self.last_position
+        qpayload = getattr(move, "quintic_trapq_payload", None)
+        if qpayload is not None:
+            self._emit_quintic_twin(print_time, move, qpayload)
+            # The planner's baked E polynomial ends at last_position +
+            # axes_d[3] (extr_r * arc_length + k_pa * dv term, where
+            # dv = 0 for start/end-rest trapezoids). Bookkeeping-wise
+            # we advance last_position[0] by the signed net filament
+            # displacement.
+            self.last_position[0] += move.axes_d[3]
+            self.last_position[1] = 0.0
+            self.last_position[2] = 0.0
+            return
+        # Non-QuinticBlendMove path: filament-trapezoid with .e carrying
+        # the PA-free nominal E polynomial (PA is baked ONLY on the
+        # QuinticBlendMove path now; linear kinematic moves without a
+        # blend payload fall back to no-PA, same as today's behavior
+        # when PA is disabled).
+        #
+        # For kinematic moves, use axis_r (signed filament-per-XY ratio)
+        # to scale the start_v/cruise_v/accel already computed. For
+        # pure-E (extrude-only) moves, axes_r[3] = ±1 and the trapezoid
+        # is filament-direct.
         if move.is_kinematic_move:
-            # Regular kinematic move with extrusion
-            extr_r = [math.copysign(r * r, axis_r) for r in move.axes_r[:3]]
-            shape_disabled = False
+            signed_start_v = math.copysign(start_v, axis_r)
+            signed_cruise_v = math.copysign(cruise_v, axis_r)
+            signed_accel = math.copysign(accel, axis_r)
         else:
-            # Extrude-only move, do not apply pressure advance. Plan 8
-            # Chunk 2 §6.5: pure-E moves carry no XY velocity polynomial
-            # to inherit a cascade kernel from, so we emit raw (unshaped).
-            extr_r = [0.0, 0.0, axis_r]
-            shape_disabled = True
-        self.trapq_append(
-            self.trapq,
-            print_time,
-            move.accel_t,
-            move.cruise_t,
-            move.decel_t,
-            extr_pos[0],
-            extr_pos[1],
-            extr_pos[2],
-            extr_r[0],
-            extr_r[1],
-            extr_r[2],
-            start_v,
-            cruise_v,
-            accel,
-            shape_disabled=shape_disabled,
+            signed_start_v = math.copysign(start_v, axis_r)
+            signed_cruise_v = math.copysign(cruise_v, axis_r)
+            signed_accel = math.copysign(accel, axis_r)
+        append_trapezoid_e_only_as_quintic(
+            self.trapq, print_time,
+            move.accel_t, move.cruise_t, move.decel_t,
+            self.last_position[0],
+            signed_start_v, signed_cruise_v, signed_accel,
         )
-        extr_d = abs(move.axes_d[3])
-        for i in range(3):
-            self.last_position[i] += extr_d * extr_r[i]
+        # last_position tracks the signed filament coordinate; advance
+        # by the move's E displacement (signed via axis_r).
+        self.last_position[0] += move.axes_d[3]
+        # Legacy per-axis last_position[1..2] tracked the xyz-sum trick
+        # in the old extruder_calc_position. With .e-slot read-through,
+        # those slots are dead — zero them.
+        self.last_position[1] = 0.0
+        self.last_position[2] = 0.0
+
+    def _emit_quintic_twin(self, print_time, move, qpayload):
+        """Push a twin entry into self.trapq for a QuinticBlendMove.
+
+        The twin uses the same phase structure (phase_t_ends) as the
+        toolhead's trapq entry. Only the .e column of the coefficient
+        buffer is retained; x/y/z are zeroed so the extruder stepper's
+        move_get_coord(m, t).e read gives the PA-baked filament
+        position verbatim.
+
+        The planner composes the E polynomial in the toolhead's XY
+        position frame (c[0].e = extr_r * (n . start_pos_xyz) + k_pa *
+        start_v), which is NOT the filament-position frame used by the
+        extruder stepper. We shift by a constant so that
+        twin.E(tau_start_of_first_phase) equals self.last_position[0]
+        (the running filament anchor tracked by PrinterExtruder). The
+        shift is additive across all phases, preserving derivatives.
+        """
+        from klippy import chelper
+        ffi_main, ffi_lib = chelper.get_ffi()
+        (phase_t_ends_tuple, total_t_baked,
+         arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+         *_legacy) = qpayload
+        n_phases = len(phase_t_ends_tuple)
+        stride = 15 * 4
+        # Original planner .e at phase 0 coefficient 0 (the move start).
+        planner_e0 = coeff_tuple[0 * stride + 0 * 4 + 3]
+        # Shift so that the twin's E(tau=0) matches last_position.
+        shift = self.last_position[0] - planner_e0
+        buf = [0.0] * (n_phases * stride)
+        for phase in range(n_phases):
+            base = phase * stride
+            # Apply the shift to every phase's c[0].e — additive only at
+            # the constant term keeps higher coefficients unchanged.
+            buf[base + 0 * 4 + 3] = coeff_tuple[base + 0 * 4 + 3] + shift
+            for k in range(1, 15):
+                buf[base + k * 4 + 3] = coeff_tuple[base + k * 4 + 3]
+        coeff_buf = ffi_main.new(f"double[{n_phases * stride}]", buf)
+        phase_t_ends = ffi_main.new(
+            f"double[{n_phases}]", list(phase_t_ends_tuple)
+        )
+        ffi_lib.trapq_append_quintic(
+            self.trapq, print_time,
+            n_phases, phase_t_ends,
+            total_t_baked, arc_length, v_cap_min,
+            0,  # shape_disabled=0: E is PA-baked, not raw
+            self.last_position[0],  # start_pos_x <- filament anchor
+            0.0, 0.0,
+            coeff_buf,
+        )
 
     def find_past_position(self, print_time):
         if not self.extruder_steppers:
