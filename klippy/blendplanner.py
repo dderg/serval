@@ -209,6 +209,27 @@ class QuinticBlendMove:
             prev_move.max_smoothed_v2 + prev_move.smooth_delta_v2,
         )
 
+    def set_junction(self, start_v2, cruise_v2, end_v2):
+        # Under D7 Option Z the outer lookahead converges to exactly the
+        # v_in / cruise_v / v_out that TOPP composed into the quintic
+        # phase polynomials, so the (start_v2, cruise_v2, end_v2) passed
+        # in should equal the blender's baked-in values. The pre-composed
+        # phase timings (t_accel_end, t_decel_start, total_t) are the
+        # authoritative ones — trapq_append_quintic steps directly from
+        # them in _process_moves regardless of what we store here.
+        # Populate the Move-shaped fields (start_v, cruise_v, end_v,
+        # accel_t, cruise_t, decel_t) that downstream consumers such as
+        # extruder.move expect to find on every move.
+        (t_accel_end, t_decel_start, total_t, *_rest) = (
+            self.quintic_trapq_payload
+        )
+        self.start_v = math.sqrt(start_v2) if start_v2 > 0.0 else 0.0
+        self.cruise_v = math.sqrt(cruise_v2) if cruise_v2 > 0.0 else 0.0
+        self.end_v = math.sqrt(end_v2) if end_v2 > 0.0 else 0.0
+        self.accel_t = t_accel_end
+        self.cruise_t = max(0.0, t_decel_start - t_accel_end)
+        self.decel_t = max(0.0, total_t - t_decel_start)
+
 
 class CornerBlender:
     """Second filter stage in the blend pipeline.
