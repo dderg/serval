@@ -41,6 +41,8 @@ SOURCE_FILES = [
     "kin_shaper.c",
     "kin_idex.c",
     "integrate.c",
+    "bs_compose.c",
+    "fir_compose.c",
 ]
 DEST_LIB = "c_helper.so"
 OTHER_FILES = [
@@ -55,6 +57,8 @@ OTHER_FILES = [
     "msgblock.h",
     "kin_shaper.h",
     "integrate.h",
+    "bs_compose.h",
+    "fir_compose.h",
 ]
 
 defs_stepcompress = """
@@ -135,6 +139,29 @@ defs_trapq = """
         , double pos_x, double pos_y, double pos_z);
     int trapq_extract_old(struct trapq *tq, struct pull_move *p, int max
         , double start_time, double end_time);
+"""
+
+defs_compose = """
+    int bs_compose(
+        int n_input_phases,
+        const double *input_phase_t_ends,
+        const double *input_coeffs,
+        int bs_order,
+        double shaper_freq,
+        double damping_ratio,
+        int out_capacity,
+        double *out_phase_t_ends,
+        double *out_coeffs);
+    int fir_compose(
+        int n_input_phases,
+        const double *input_phase_t_ends,
+        const double *input_coeffs,
+        int n_impulses,
+        const double *impulse_amplitudes,
+        const double *impulse_delays,
+        int out_capacity,
+        double *out_phase_t_ends,
+        double *out_coeffs);
 """
 
 defs_kin_cartesian = """
@@ -285,6 +312,7 @@ defs_all = [
     defs_kin_extruder,
     defs_kin_shaper,
     defs_kin_idex,
+    defs_compose,
 ]
 
 
