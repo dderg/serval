@@ -127,7 +127,7 @@ diff_antiderivatives(const smoother_antiderivatives* ad1
 
 // Return the polynomial coefficients c_k (for axis = 'x'/'y'/'z') expressing
 // position(t) = sum_k out_c[k] * (t - t_phase_start)^k for the phase of move
-// m that contains move_time. For MOVE_LINEAR the move has a single "phase"
+// m that contains move_time. The move has per-phase polynomial payloads
 // covering [0, move_t]: position(t) = start_pos + axes_r * (start_v*t +
 // half_accel*t^2) — a degree-2 polynomial in t with phase_start = 0. Higher
 // coefficients are zero. For MOVE_QUINTIC_POLY_T the selected phase's 11
@@ -135,26 +135,13 @@ diff_antiderivatives(const smoother_antiderivatives* ad1
 // phase's absolute-move-local origin time. The output buffer must hold
 // SMOOTHER_NUM_MOMENTS (11) doubles.
 //
-// Note: this helper is used by the generalised integrate_move dispatch for
-// the quintic path. The linear fast-path keeps its pre-D2 3-moment formula
-// for bit-identical hardware parity.
+// Pick the phase and copy its polynomial directly into out_c.
 static inline void
 move_axis_phase_polynomial(const struct move* m, int axis, double move_time,
                            double out_c[SMOOTHER_NUM_MOMENTS],
                            double* out_phase_start, double* out_phase_end)
 {
     int ai = axis - 'x';
-    if (likely(m->kind == MOVE_LINEAR)) {
-        for (int k = 0; k < SMOOTHER_NUM_MOMENTS; ++k)
-            out_c[k] = 0.0;
-        out_c[0] = m->start_pos.axis[ai];
-        out_c[1] = m->u.lin.start_v * m->u.lin.axes_r.axis[ai];
-        out_c[2] = m->u.lin.half_accel * m->u.lin.axes_r.axis[ai];
-        *out_phase_start = 0.0;
-        *out_phase_end = m->move_t;
-        return;
-    }
-    // MOVE_QUINTIC_POLY_T: pick the phase and copy its polynomial directly.
     const struct move_quintic_phase* ph = &m->u.quintic.accel;
     double phase_start = 0.0;
     if (move_time > m->u.quintic.accel.t_end) {
@@ -179,25 +166,9 @@ inline double
 integrate_move(const struct move* m, int axis, double base, double t0
                , const smoother_antiderivatives* s)
 {
-    // Fast path — MOVE_LINEAR keeps the pre-Plan-5 3-moment closed form
-    // bit-identical to the single-polynomial path validated by foundation
-    // tests. `base` is the phase-start position (passed by kin_shaper at
-    // m->start_pos.axis[ai] for linear); on the quintic path we ignore it
-    // because the polynomial c[0] already carries absolute position.
-    if (likely(m->kind == MOVE_LINEAR)) {
-        double axis_r = m->u.lin.axes_r.axis[axis - 'x'];
-        double start_v = m->u.lin.start_v * axis_r;
-        double half_accel = m->u.lin.half_accel * axis_r;
-        // Substitute tnew = t0 - t. Integrand in tnew: base + start_v*(t0-tnew)
-        // + half_accel*(t0-tnew)^2 = (base + start_v*t0 + half_accel*t0^2)
-        // - (start_v + 2*half_accel*t0)*tnew + half_accel*tnew^2.
-        double accel = 2. * half_accel;
-        base += (half_accel * t0 + start_v) * t0;
-        start_v += accel * t0;
-        return base * s->m[0] - start_v * s->m[1] + half_accel * s->m[2];
-    }
-    // MOVE_QUINTIC_POLY_T — generalised 11-moment integration against a
-    // per-phase polynomial position(t). The phase containing move-local time
+    // Generalised 11-moment integration against a per-phase polynomial
+    // position(t). `base` is unused — the polynomial c[0] already carries
+    // absolute position. The phase containing move-local time
     // t0 is dispatched (single phase per call is acceptable because the
     // outer range_integrate in kin_shaper.c already splits the integration
     // window at move boundaries — phase boundaries within a single move are
@@ -258,15 +229,8 @@ inline double
 integrate_velocity(const struct move* m, int axis, double t0
                    , const smoother_antiderivatives* s)
 {
-    if (likely(m->kind == MOVE_LINEAR)) {
-        double axis_r = m->u.lin.axes_r.axis[axis - 'x'];
-        double start_v = m->u.lin.start_v * axis_r;
-        double accel = 2. * m->u.lin.half_accel * axis_r;
-        start_v += accel * t0;
-        return start_v * s->m[0] - accel * s->m[1];
-    }
-    // MOVE_QUINTIC_POLY_T — v(t) = dx/dt is the derivative of the per-axis
-    // position polynomial. If position(t) = sum_k c_k * (t - t_ps)^k then
+    // v(t) = dx/dt is the derivative of the per-axis position polynomial.
+    // If position(t) = sum_k c_k * (t - t_ps)^k then
     // v(t) = sum_k (k+1)*c_{k+1} * (t - t_ps)^k, degree down by one.
     // Reuse the same binomial expansion machinery as integrate_move, but
     // feed in derived coefficients v_k = (k+1)*c_{k+1}.
