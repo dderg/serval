@@ -35,31 +35,23 @@
 // complicated function for non-linear pressure advance models.
 
 // Calculate the definitive integral of extruder for a given move. PA fires
-// whenever the XY path is moving; for linear moves that's axes_r.x or .y
-// positive; for quintic moves we check whether any XY polynomial coefficient
-// c[1..10] beyond the constant term is non-zero.
+// whenever the XY path is moving: any X or Y polynomial coefficient c[1..10]
+// beyond the constant term is non-zero in any phase.
 static inline void
 pa_move_integrate(const struct move *m, int axis
                   , double t0, const smoother_antiderivatives *ad
                   , double *pa_velocity_integral)
 {
-    int can_pressure_advance;
-    if (likely(m->kind == MOVE_LINEAR)) {
-        can_pressure_advance = m->u.lin.axes_r.x > 0. || m->u.lin.axes_r.y > 0.;
-    } else {
-        // MOVE_QUINTIC_POLY_T: any X or Y velocity/higher-order content in
-        // any phase engages PA.
-        can_pressure_advance = 0;
-        const struct move_quintic_phase *phases[3] = {
-            &m->u.quintic.accel, &m->u.quintic.cruise, &m->u.quintic.decel,
-        };
-        for (int p = 0; p < 3 && !can_pressure_advance; ++p) {
-            const struct move_quintic_phase *ph = phases[p];
-            for (int k = 1; k < MOVE_QUINTIC_POLY_COEFFS; ++k) {
-                if (ph->c[k].x > 0.0 || ph->c[k].y > 0.0) {
-                    can_pressure_advance = 1;
-                    break;
-                }
+    int can_pressure_advance = 0;
+    const struct move_quintic_phase *phases[3] = {
+        &m->u.quintic.accel, &m->u.quintic.cruise, &m->u.quintic.decel,
+    };
+    for (int p = 0; p < 3 && !can_pressure_advance; ++p) {
+        const struct move_quintic_phase *ph = phases[p];
+        for (int k = 1; k < MOVE_QUINTIC_POLY_COEFFS; ++k) {
+            if (ph->c[k].x > 0.0 || ph->c[k].y > 0.0) {
+                can_pressure_advance = 1;
+                break;
             }
         }
     }
