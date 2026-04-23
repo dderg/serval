@@ -72,12 +72,11 @@ quintic_pick_phase(const struct move *m, double move_time, double *out_delta)
 inline double
 move_get_distance(const struct move *m, double move_time)
 {
-    if (likely(m->kind == MOVE_LINEAR))
-        return (m->u.lin.start_v + m->u.lin.half_accel * move_time) * move_time;
-    // MOVE_QUINTIC_POLY_T: compute the chord distance from start_pos to the
-    // evaluated position — not the true arc-length, but a monotonic scalar
-    // that callers treating this as a "progress" measure can consume. Pure
-    // quintic consumers should use move_get_coord instead.
+    // Chord distance from start_pos to the evaluated position — not the true
+    // arc-length, but a monotonic scalar consumers treating this as a
+    // "progress" measure can use. Pure quintic consumers should use
+    // move_get_coord instead. For degenerate-quintic straight lines, chord
+    // equals arc-length.
     struct coord p = move_get_coord(m, move_time);
     double dx = p.x - m->start_pos.x;
     double dy = p.y - m->start_pos.y;
@@ -85,25 +84,13 @@ move_get_distance(const struct move *m, double move_time)
     return sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-// Return the XYZ coordinates given a time in a move. Dispatches on kind:
-// MOVE_LINEAR evaluates start_pos + axes_r * (start_v*t + half_accel*t^2);
-// MOVE_QUINTIC_POLY_T picks the phase and evaluates the per-axis polynomial
-// in phase-local time via Horner.
+// Return the XYZ coordinates given a time in a move. Picks the phase and
+// evaluates the per-axis polynomial in phase-local time via Horner.
+// c[0] carries absolute position (chosen at emit-time by
+// compose_phase_polynomials), so no explicit start_pos add here.
 inline struct coord
 move_get_coord(const struct move *m, double move_time)
 {
-    if (likely(m->kind == MOVE_LINEAR)) {
-        double move_dist = (m->u.lin.start_v + m->u.lin.half_accel * move_time)
-                           * move_time;
-        return (struct coord) {
-            .x = m->start_pos.x + m->u.lin.axes_r.x * move_dist,
-            .y = m->start_pos.y + m->u.lin.axes_r.y * move_dist,
-            .z = m->start_pos.z + m->u.lin.axes_r.z * move_dist };
-    }
-    // MOVE_QUINTIC_POLY_T: phase-local polynomial. c[0] is position at phase
-    // start, so no explicit start_pos add here — the per-phase polynomial
-    // already carries the absolute position via its c[0] term (chosen at
-    // emit-time by compose_phase_polynomials).
     double delta_t;
     const struct move_quintic_phase *ph = quintic_pick_phase(m, move_time,
                                                              &delta_t);
