@@ -43,6 +43,7 @@ SOURCE_FILES = [
     "bs_compose.c",
     "fir_compose.c",
     "linear_pa_compose.c",
+    "cheb_fit.c",
 ]
 DEST_LIB = "c_helper.so"
 OTHER_FILES = [
@@ -59,6 +60,7 @@ OTHER_FILES = [
     "bs_compose.h",
     "fir_compose.h",
     "linear_pa_compose.h",
+    "cheb_fit.h",
 ]
 
 defs_stepcompress = """
@@ -171,6 +173,23 @@ defs_compose = """
         double axis_n_z,
         double extr_r,
         double k_pa);
+    void cheb_fit_degree4_nodes(
+        double v_lo, double v_hi, double *out_nodes);
+    double cheb_fit_degree4_interval(
+        const double *samples,
+        double *out_cheb_coeffs,
+        double *out_mono_coeffs);
+    int cheb_fit_degree4_piecewise(
+        double v_lo, double v_hi,
+        int n_breaks,
+        const double *breaks,
+        const double *samples,
+        double *out_mono_coeffs,
+        double *out_piece_v_bounds);
+    double cheb_fit_degree4_eval_mono(
+        const double *mono_coeffs,
+        double v_lo, double v_hi,
+        double v);
 """
 
 defs_kin_cartesian = """
