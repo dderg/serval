@@ -204,13 +204,8 @@ def estimate_smoother(np, smoother, test_damping_ratio, test_freqs):
     unity_range = np.linspace(0.0, 1.0, n_t)
     time = (t_end[:, np.newaxis] - t_start) * unity_range + t_start
     dt = (time[:, -1] - time[:, 0]) / n_t
-    tau = np.copy(time)
-    tau[time > hst] = 0.0
-    tau[time < -hst] = 0.0
 
-    w = np.zeros(shape=tau.shape)
-    for c in C[::-1]:
-        w = w * tau + c
+    w = np.asarray(shaper_defs.bspline_eval(C, time, t_sm), dtype=float)
     w[time > hst] = 0.0
     w[time < -hst] = 0.0
     norms = (w * dt[:, np.newaxis]).sum(axis=-1)
