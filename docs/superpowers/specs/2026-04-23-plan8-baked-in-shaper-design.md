@@ -16,7 +16,7 @@ Move input shaping AND pressure advance from post-hoc step-gen stages into the p
 **In scope:**
 
 - Fold Plan 6 (retire `MOVE_LINEAR`, every move is a quintic polynomial).
-- Bake the input shaper into the planner for all three kernel families — FIR (MZV / ZV / EI / EI3 / ZVD), smooth-IS (smooth_zv / smooth_mzv / smooth_ei), and bs (bs1 … bs5).
+- Bake the input shaper into the planner for both kernel families supported in this fork — FIR (`zv`, `mzv`) and bs (`bs1` … `bs5`). The full EI family and the smooth-IS family are not configurable here (`shaper_defs.py:281-311`).
 - Bake pressure advance into the planner — planner emits the E polynomial with PA applied. Linear PA is exact; non-linear PA models (tanh, recipr) fit as piecewise polynomial.
 - Retire Plan 5 Pillar 1 feedforward inverse (no shaper left to invert).
 - Retire `target_smoothing` knob.
@@ -46,9 +46,8 @@ Move input shaping AND pressure advance from post-hoc step-gen stages into the p
 
 ### 3.3 What "baked in" means per kernel family
 
-- **Smooth-IS (smooth_zv, smooth_mzv, smooth_ei):** kernel is a continuous piecewise polynomial. Planner composes `kernel ⊛ motion_polynomial` analytically, producing one polynomial per phase. Step-gen: single polynomial eval per move. This is the genuinely trivial case.
-- **bs (bs1 … bs5):** cardinal B-spline kernels. Same treatment as smooth-IS — analytical composition, one polynomial per phase.
-- **FIR (MZV / ZV / EI / EI3 / ZVD):** impulse-train kernels of N impulses (N = 2 … 4). Planner emits a **piecewise polynomial** per move, with breakpoints at the impulse delay offsets. Step-gen: select the right piece for the current `t`, evaluate. Mathematically identical to the current `shaper_calc_position` sum-over-N-delayed-positions, but the summing is done once at planner-emit time rather than at every step.
+- **bs (`bs1` … `bs5`):** cardinal B-spline kernels (continuous piecewise polynomials). Planner composes `kernel ⊛ motion_polynomial` analytically, producing one polynomial per phase. Step-gen: single polynomial eval per move. This is the genuinely trivial case.
+- **FIR (`zv`, `mzv`):** impulse-train kernels with N = 2 (ZV) or N = 3 (MZV). Planner emits a **piecewise polynomial** per move, with breakpoints at the impulse delay offsets (MZV: `(0, 0.375·t_d, 0.75·t_d)` with amplitudes `(1−1/√2, (√2−1)·K, (1−1/√2)·K²)` where `K = exp(−0.75·ζ·π/√(1−ζ²))`; see `shaper_defs.py:32-43`). Step-gen: select the right piece for the current `t`, evaluate. Mathematically identical to the current `shaper_calc_position` sum-over-N-delayed-positions, but the summing is done once at planner-emit time rather than at every step.
 
 ### 3.4 What step-gen gets
 
@@ -81,7 +80,7 @@ Bypass code paths that must set `shape_disabled`:
 **Unchanged:**
 
 - `[input_shaper]` block name (legacy-but-stable).
-- `shaper_type_x / y = mzv | zv | ei | ei3 | zvd | smooth_zv | smooth_mzv | smooth_ei | bs1 | bs2 | bs3 | bs4 | bs5`. Same names; controls planner motion primitive family under the hood.
+- `shaper_type_x / y = zv | mzv | bs1 | bs2 | bs3 | bs4 | bs5`. Same names; controls planner motion primitive family under the hood. Legacy names (`smooth_zv` etc.) migrate via `RETIRED_SMOOTHER_MIGRATION` table in `shaper_defs.py:305-311`.
 - `shaper_freq_x / y`, `damping_ratio_x / y`.
 - `pressure_advance`, `pressure_advance_smooth_time`, `pressure_advance_model` — unchanged.
 
@@ -117,6 +116,8 @@ Bypass code paths that must set `shape_disabled`:
 - **Extended lookahead commit window**: `LOOKAHEAD_FLUSH_TIME` covers `max(kernel_support) × max_moves_per_sec`. Today 250 ms; at 120 Hz f_sh the kernel support is ~8 ms, at 50 Hz it is ~50 ms. Both inside budget.
 
 ## 6. Research gaps (resolve before writing the implementation plan)
+
+**Status:** resolved. See `docs/superpowers/plans/plan8-research/00-summary.md` for outcomes.
 
 Each gap gets a subagent research pass. Findings feed into the implementation plan.
 
