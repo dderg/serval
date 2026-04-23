@@ -341,7 +341,10 @@ def _make_toolhead_with_bs_shaper(bs_variant, freq, max_accel, corner_deviation)
 def _emit_right_angle_blend(th, speed=200.0):
     """Drive two 10 mm moves meeting at a 90° corner through CornerBlender.
 
-    Returns (trunc_prev, quintic_move, trunc_next_head).
+    Returns (trunc_prev, quintic_move, trunc_next_head). The chunk2-fix
+    deferred-emit wiring keeps the quintic buffered until the next move
+    arrives, so we drive `flush()` to drain it with next=None (matches
+    the session-end / print-stops-here path).
     """
     cb = blendplanner.CornerBlender(th, move_cls=_FakeMove, max_chord_err=20e-3)
     m_prev = _FakeMove(th, (0.0, 0.0, 0.0, 0.0), (10.0, 0.0, 0.0, 0.5),
@@ -349,12 +352,15 @@ def _emit_right_angle_blend(th, speed=200.0):
     m_next = _FakeMove(th, (10.0, 0.0, 0.0, 0.5), (10.0, 10.0, 0.0, 1.0),
                        speed=speed)
     assert cb.feed(m_prev) == []
-    out = cb.feed(m_next)
-    assert len(out) == 2, "expected [trunc_prev, QuinticBlendMove]"
-    trunc_prev, quintic_move = out
-    assert isinstance(quintic_move, blendplanner.QuinticBlendMove)
-    assert cb._prev is not None
+    out_feed = cb.feed(m_next)
+    # Round 2: [trunc_prev] (quintic is pending-deferred).
+    trunc_prev = out_feed[0]
     trunc_next_head = cb._prev
+    # Flush drains the pending quintic with next=None and then _prev.
+    out_flush = cb.flush()
+    # First element is the finalized quintic; second is trunc_next_head.
+    assert isinstance(out_flush[0], blendplanner.QuinticBlendMove)
+    quintic_move = out_flush[0]
     return trunc_prev, quintic_move, trunc_next_head
 
 

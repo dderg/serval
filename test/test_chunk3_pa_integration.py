@@ -109,11 +109,14 @@ def _emit_right_angle_blend(th, speed=200.0):
     m_next = _FakeMove(th, (10.0, 0.0, 0.0, 0.5), (10.0, 10.0, 0.0, 1.0),
                        speed=speed)
     assert cb.feed(m_prev) == []
-    out = cb.feed(m_next)
-    assert len(out) == 2
-    trunc_prev, quintic_move = out
-    assert isinstance(quintic_move, blendplanner.QuinticBlendMove)
-    return trunc_prev, quintic_move
+    # chunk2-fix deferred-emit: round-2 emits only trunc_prev. Flush the
+    # pending quintic (final bake with next=None for the session end).
+    out_feed = cb.feed(m_next)
+    assert len(out_feed) == 1
+    trunc_prev = out_feed[0]
+    out_flush = cb.flush()
+    assert isinstance(out_flush[0], blendplanner.QuinticBlendMove)
+    return trunc_prev, out_flush[0]
 
 
 def _eval_axis_poly(coeff_tuple, phase, axis, tau):

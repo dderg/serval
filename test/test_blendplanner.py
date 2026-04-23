@@ -278,11 +278,22 @@ def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head()
     m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
     assert b.feed(m_prev) == []
-    out = b.feed(m_next)
-    # Emission: [trunc_prev, arc[0], ..., arc[N-1]]
-    assert len(out) >= 2
-    trunc_prev = out[0]
-    arc_moves = out[1:]
+    # chunk2-fix deferred-emit: round-2 releases trunc_prev; the quintic
+    # is pending until flush or the next blend-forming feed.
+    out_feed = b.feed(m_next)
+    # Flush drains the pending quintic with next=None, then _prev
+    # (trunc_next_head). Reconstruct the logical round-2 emission as
+    # [trunc_prev, quintic_move].
+    assert len(out_feed) == 1, "chunk2-fix: round-2 emits only trunc_prev"
+    trunc_prev = out_feed[0]
+    # Recover trunc_next_head from b._prev before flushing so the
+    # buffered-next-head assertion below remains meaningful.
+    nxt_head_before_flush = b._prev
+    out_flush = b.flush()
+    # flush returns [quintic_finalized, trunc_next_head].
+    assert isinstance(out_flush[0], blendplanner.QuinticBlendMove)
+    arc_moves = [out_flush[0]]
+    out = [trunc_prev, *arc_moves]
     # trunc_prev shares start_pos with m_prev.
     assert trunc_prev.start_pos[:3] == m_prev.start_pos[:3]
     # d_expected from the quintic formula: d = 16*eps / ((1+15*r)*sin(theta/2))
@@ -292,10 +303,11 @@ def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head()
     d_expected = blendquintic._d_from_deviation(th.corner_deviation, r, sin_half)
     assert trunc_prev.end_pos[0] == pytest.approx(10.0 - d_expected, rel=1e-6)
     assert trunc_prev.end_pos[1] == pytest.approx(0.0, abs=1e-9)
-    # buffered next_trunc_head starts where the blend ends.
-    assert b._prev is not None
-    assert b._prev is not m_next
-    nxt_head = b._prev
+    # buffered next_trunc_head starts where the blend ends (captured
+    # pre-flush).
+    assert nxt_head_before_flush is not None
+    assert nxt_head_before_flush is not m_next
+    nxt_head = nxt_head_before_flush
     assert nxt_head.start_pos[0] == pytest.approx(10.0, abs=1e-9)
     assert nxt_head.start_pos[1] == pytest.approx(d_expected, rel=1e-6)
     assert nxt_head.end_pos[:3] == (10.0, 10.0, 0.0)
@@ -324,9 +336,11 @@ def test_corner_deviation_mutation_affects_next_blend():
     m1_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=100.0)
     m1_next = _FakeMove(th, (10, 0, 0, 0), (10, 10, 0, 0), speed=100.0)
     b.feed(m1_prev)
-    out_loose = b.feed(m1_next)
-    arc_loose = out_loose[1:]
+    # chunk2-fix deferred-emit: drain the pending quintic via flush.
+    out_loose = b.feed(m1_next) + b.flush()
     trunc_prev_loose = out_loose[0]
+    arc_loose = [m for m in out_loose
+                 if isinstance(m, blendplanner.QuinticBlendMove)]
     d_loose = 10.0 - trunc_prev_loose.end_pos[0]
     # Mutate corner_deviation mid-stream, mimic cmd_SET_VELOCITY_LIMIT.
     th.corner_deviation = 0.01
@@ -334,9 +348,10 @@ def test_corner_deviation_mutation_affects_next_blend():
     m2_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=100.0)
     m2_next = _FakeMove(th, (10, 0, 0, 0), (10, 10, 0, 0), speed=100.0)
     b.feed(m2_prev)
-    out_tight = b.feed(m2_next)
-    arc_tight = out_tight[1:]
+    out_tight = b.feed(m2_next) + b.flush()
     trunc_prev_tight = out_tight[0]
+    arc_tight = [m for m in out_tight
+                 if isinstance(m, blendplanner.QuinticBlendMove)]
     d_tight = 10.0 - trunc_prev_tight.end_pos[0]
     # 20x deviation shrink must produce roughly 20x shorter d_consumed
     # (d_consumed = R * tan(theta/2); at 90° tan=1 so d == R, and R is
@@ -381,7 +396,8 @@ def test_asymmetric_segments_half_segment_rule_caps_consumption():
     )
     m_next = _FakeMove(th, (2, 0, 0, 0.1), next_end, speed=100.0)
     b.feed(m_prev)
-    out = b.feed(m_next)
+    # chunk2-fix deferred-emit: drain via flush.
+    out = b.feed(m_next) + b.flush()
     # With tight cd, from_moves succeeds and trunc_prev.move_d < 2mm.
     assert len(out) >= 2, "expected blend to succeed with tight corner_deviation"
     trunc_prev = out[0]
@@ -392,8 +408,10 @@ def test_asymmetric_segments_half_segment_rule_caps_consumption():
     m2_prev = _FakeMove(th, (0, 0, 0, 0), (2, 0, 0, 0.1), speed=100.0)
     m2_next = _FakeMove(th, (2, 0, 0, 0.1), next_end, speed=100.0)
     b.feed(m2_prev)
+    # Suppression path: from_moves returns None. No pending quintic,
+    # so feed yields [m2_prev] directly without deferral (m2_next is
+    # buffered in _prev for the next corner).
     out2 = b.feed(m2_next)
-    # from_moves returns None (d > max_d); planner emits prev unchanged.
     assert out2 == [m2_prev]
     assert out2[0].move_d == pytest.approx(2.0, rel=1e-6)
 
@@ -404,9 +422,9 @@ def test_aggregate_kin_check_move_fires_on_representative_arc_move():
     m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
     b.feed(m_prev)
-    out = b.feed(m_next)
+    out = b.feed(m_next) + b.flush()
     # The representative arc move was passed to kin.check_move exactly once.
-    arc_moves = out[1:]
+    arc_moves = [m for m in out if isinstance(m, blendplanner.QuinticBlendMove)]
     assert len(th.kin.calls) == 1
     assert th.kin.calls[0] is arc_moves[0]
 
@@ -455,8 +473,8 @@ def test_polyline_speed_continuity_1ppm():
     m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
     b.feed(m_prev)
-    out = b.feed(m_next)
-    arc_moves = out[1:]
+    out = b.feed(m_next) + b.flush()
+    arc_moves = [m for m in out if isinstance(m, blendplanner.QuinticBlendMove)]
     v2s = [am.max_cruise_v2 for am in arc_moves]
     # All arc moves share the same cap to 1 ppm.
     assert (max(v2s) - min(v2s)) / max(v2s) < 1e-6
@@ -559,12 +577,13 @@ def test_corner_blend_emits_single_quintic_not_polyline():
         ny = 10.0 * math.sin(rot)
         m_next = _FakeMove(th, (10.0, 0, 0, 0.5), (nx, ny, 0, 1.0), speed=100.0)
         b.feed(m_prev)
-        out = b.feed(m_next)
+        out = b.feed(m_next) + b.flush()
         assert len(out) >= 2, (
             f"theta={theta_deg}deg: blend was suppressed, got {len(out)} emit"
         )
         trunc_prev = out[0]
-        blend_moves = out[1:]
+        blend_moves = [m for m in out[1:]
+                       if isinstance(m, blendplanner.QuinticBlendMove)]
         # Single QuinticBlendMove per blend.
         assert len(blend_moves) == 1, (
             f"theta={theta_deg}deg: expected 1 QuinticBlendMove, "
@@ -601,9 +620,10 @@ def test_planner_emits_quintic_shape_for_right_angle_corner():
     m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
     assert b.feed(m_prev) == []
-    out = b.feed(m_next)
+    out = b.feed(m_next) + b.flush()
     trunc_prev = out[0]
-    blend_moves = out[1:]
+    blend_moves = [m for m in out[1:]
+                   if isinstance(m, blendplanner.QuinticBlendMove)]
     # Plan 5 D7: single QuinticBlendMove per corner.
     assert len(blend_moves) == 1
     qm = blend_moves[0]
@@ -701,8 +721,8 @@ def test_get_last_no_forfeit_callback_transfers_to_trunc_prev():
     m_prev.limit_next_junction_speed(50.0)
     # Feed the next move — should trigger a blend and transfer callback state.
     m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
-    out = b.feed(m_next)
-    # Emission: [trunc_prev, arc[0], ..., arc[N-1]]
+    out = b.feed(m_next) + b.flush()
+    # Emission: [trunc_prev, quintic, trunc_next_head]
     assert len(out) >= 2
     trunc_prev = out[0]
     assert trunc_prev is not m_prev  # new Move, not the original
@@ -1205,7 +1225,8 @@ def test_feed_suppress_fires_when_shaper_makes_sharp_v_cheaper():
     nxt_hi  = _make_move(th_hi, (10, 0, 0, 0), (10, 10, 0, 0), cruise_v=500.0)
     cb_hi = blendplanner.CornerBlender(th_hi, move_cls=_FakeMove, max_chord_err=20e-3)
     _ = cb_hi.feed(prev_hi)
-    out_hi = cb_hi.feed(nxt_hi)
+    # chunk2-fix deferred-emit: drain via flush to observe the blend.
+    out_hi = cb_hi.feed(nxt_hi) + cb_hi.flush()
     # Kept: output has blend polyline moves beyond just trunc_prev.
     assert len(out_hi) >= 2, (
         f"Expected blend kept (≥2 emitted moves), got {len(out_hi)} moves"

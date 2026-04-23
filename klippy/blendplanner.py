@@ -126,93 +126,121 @@ def _resolve_pa_dispatch(toolhead):
     return ("none", 0.0)
 
 
-def _bake_shaper_polynomial(
+def _build_unshaped_payload(
     accel_polys, cruise_polys, decel_polys,
     t_accel_end, t_decel_start, total_t,
+):
+    """Pack the raw (unshaped) 3-phase quintic polynomial as the
+    interleaved-axis flat coeff buffer the composers consume.
+
+    Returns (phase_t_ends, total_t, coeff_buf_flat) with .e left zero.
+    """
+    phase_t_ends = (t_accel_end, t_decel_start, total_t)
+    flat = []
+    for phase in (accel_polys, cruise_polys, decel_polys):
+        for k in range(15):
+            flat.append(phase[0][k])
+            flat.append(phase[1][k])
+            flat.append(phase[2][k])
+            flat.append(0.0)  # .e slot
+    return phase_t_ends, total_t, tuple(flat)
+
+
+def _offset_unshaped_for_neighbour(unshaped_payload, origin_delta_xyz):
+    """Return a neighbour unshaped-payload with its XY polynomial shifted
+    by `origin_delta_xyz` so the resulting motion is continuous with
+    the current move's reference frame.
+
+    Each QuinticBlendMove's polynomial starts at position 0 at
+    t_local=0 (absolute position comes from start_pos_xyz in trapq).
+    When used as a neighbour to a different move, the neighbour's
+    absolute start position differs from the current move's by
+    (neighbour_start_xyz - cur_start_xyz); we add that delta to c[0]
+    of every phase / every XY axis so the stream is continuous when
+    the composer integrates the kernel across the boundary.
+
+    The .e slot is intentionally NOT offset — the E polynomial is
+    populated downstream by linear_pa_compose (which operates on the
+    already-baked XY polynomial) and never reaches the neighbour path
+    here.
+    """
+    t_ends, total_t, coeffs = unshaped_payload
+    n_phases = len(t_ends)
+    flat = list(coeffs)
+    dx, dy, dz = origin_delta_xyz
+    for p in range(n_phases):
+        flat[(p * 15 + 0) * 4 + 0] += dx
+        flat[(p * 15 + 0) * 4 + 1] += dy
+        flat[(p * 15 + 0) * 4 + 2] += dz
+    return t_ends, total_t, tuple(flat)
+
+
+def _bake_shaper_polynomial(
+    unshaped_phase_t_ends, unshaped_total_t, unshaped_coeffs,
     shapers,
     shape_disabled=False,
+    prev_unshaped=None,
+    next_unshaped=None,
 ):
     """Apply the configured input-shaping kernel at plan time.
 
-    Takes the raw (accel, cruise, decel) quintic phase polynomials produced
-    by QuinticShape.compose_phase_polynomials plus their phase timings,
-    and — depending on the axis shaper snapshots — returns a baked
-    piecewise-polynomial representation:
+    Consumes the pre-packed unshaped polynomial (phase_t_ends, total_t,
+    flat coeff buffer — same layout as produced by
+    `_build_unshaped_payload`) plus the axis shaper snapshots, and
+    returns the baked piecewise polynomial:
 
       - ``shape_disabled`` set (homing / force / manual / pure-E): skip
-        baking entirely. Returns the legacy 3-phase layout.
-      - No shaper configured (no shapers, disabled, or mismatched per-
-        axis types): pass-through. Returns the legacy 3-phase layout.
-      - FIR shaper (zv / mzv): all axes must share the same shaper_type,
-        freq, damping — run fir_compose once, output shape extends
-        beyond total_t by the last impulse delay.
-      - Smooth-IS (bs1..bs5): same homogeneous-kernel requirement —
-        run bs_compose.
+        baking. Returns the unshaped polynomial verbatim.
+      - No shaper configured: same pass-through.
+      - FIR shaper (zv / mzv): all axes must share shaper_type / freq /
+        damping — run fir_compose with the supplied neighbour
+        polynomials.
+      - Smooth-IS (bs1..bs5): same homogeneous-kernel requirement — run
+        bs_compose with neighbour polynomials.
+
+    Neighbour polynomials (`prev_unshaped` / `next_unshaped`) are tuples
+    of the same shape as the unshaped payload — `(phase_t_ends,
+    total_t, coeff_buf)` — or None when no neighbour is available (first
+    / last move of a session, or a non-blend neighbour). The composer
+    integrates the kernel across move boundaries using these; without
+    them the kernel window zero-pads at the boundary, which is correct
+    only when the print actually stops there.
 
     Returns
     -------
     (phase_t_ends, total_t_baked, coeff_buf_flat)
-        phase_t_ends : tuple[float] of length n_phases (absolute move-local).
-        total_t_baked: phase_t_ends[-1] (may be longer than input total_t
-                       for FIR due to kernel support extension).
-        coeff_buf_flat: tuple[float] of length n_phases * 15 * 4 in the
-                        interleaved layout the C trapq_append_quintic wants
-                        (Plan 8 Chunk 3: x, y, z, e per coeff). The .e
-                        slot is left zero here — the linear-PA composer
-                        (Chunk 3 Task 2) populates it from the baked XY
-                        polynomial after this returns.
-
-    Heterogeneous per-axis shapers are not supported in Chunk 2; when
-    detected we fall back to pass-through. Chunk 3 (per-axis polynomial
-    baking) will remove that restriction.
     """
-    # Helper that packs the legacy 3-phase output as a flat coeff buffer.
-    # Plan 8 Chunk 3: 4-axis stride — .e left zero, populated downstream.
-    def _legacy_passthrough():
-        phase_t_ends = (t_accel_end, t_decel_start, total_t)
-        flat = []
-        for phase in (accel_polys, cruise_polys, decel_polys):
-            for k in range(15):
-                flat.append(phase[0][k])
-                flat.append(phase[1][k])
-                flat.append(phase[2][k])
-                flat.append(0.0)  # .e slot
-        return phase_t_ends, total_t, tuple(flat)
-
-    if shape_disabled:
-        # Emit site requested unshaped output — skip the whole bake path.
-        return _legacy_passthrough()
-    if not shapers:
-        return _legacy_passthrough()
-    # Filter snapshots that actually carry a shaper.
+    if shape_disabled or not shapers:
+        return unshaped_phase_t_ends, unshaped_total_t, unshaped_coeffs
     active = [s for s in shapers if s.shaper_freq > 0.0 and s.shaper_type]
     if not active:
-        return _legacy_passthrough()
-    # Chunk 2 simplification: all active axes must share the same shaper
-    # config. Heterogeneous = fall back to pass-through.
+        return unshaped_phase_t_ends, unshaped_total_t, unshaped_coeffs
     first = active[0]
     for s in active[1:]:
         if (s.shaper_type != first.shaper_type
                 or abs(s.shaper_freq - first.shaper_freq) > 1e-9
                 or abs(s.damping_ratio - first.damping_ratio) > 1e-9):
-            return _legacy_passthrough()
+            return unshaped_phase_t_ends, unshaped_total_t, unshaped_coeffs
     shaper_type = first.shaper_type
     freq = first.shaper_freq
     damping = first.damping_ratio
 
-    # Build the input (3-phase) flat buffer.
-    in_phase_t_ends = [t_accel_end, t_decel_start, total_t]
-    # Collapse zero-duration phases: bs / fir composers tolerate them but
-    # emitting fewer input phases keeps the breakpoint grid tighter. We
-    # still pass the 3-phase layout as-is here; the composer's break-dedup
-    # handles zero-length phases.
-    in_coeffs = []
-    for phase in (accel_polys, cruise_polys, decel_polys):
-        for k in range(15):
-            in_coeffs.append(phase[0][k])
-            in_coeffs.append(phase[1][k])
-            in_coeffs.append(phase[2][k])
-            in_coeffs.append(0.0)  # .e slot — populated by linear_pa_compose
+    in_phase_t_ends = list(unshaped_phase_t_ends)
+    in_coeffs = list(unshaped_coeffs)
+
+    # Unpack neighbour polynomials into composer kwargs. Either neighbour
+    # may be None (zero-pad that side).
+    neighbour_kwargs = {}
+    if prev_unshaped is not None:
+        prev_t_ends, prev_T, prev_coeffs = prev_unshaped
+        neighbour_kwargs["prev_phase_t_ends"] = list(prev_t_ends)
+        neighbour_kwargs["prev_coeffs"] = list(prev_coeffs)
+        neighbour_kwargs["prev_T_move"] = float(prev_T)
+    if next_unshaped is not None:
+        next_t_ends, next_T, next_coeffs = next_unshaped
+        neighbour_kwargs["next_phase_t_ends"] = list(next_t_ends)
+        neighbour_kwargs["next_coeffs"] = list(next_coeffs)
+        neighbour_kwargs["next_T_move"] = float(next_T)
 
     try:
         if shaper_type in _BS_ORDERS:
@@ -222,28 +250,31 @@ def _bake_shaper_polynomial(
                 bs_order=order,
                 shaper_freq=freq,
                 damping_ratio=damping,
+                **neighbour_kwargs,
             )
         elif shaper_type == "zv":
             A, T = _shaper_defs.get_zv_shaper(freq, damping)
             phase_t_ends, out_coeffs = _fir_compose.fir_compose(
                 in_phase_t_ends, in_coeffs,
                 impulse_amplitudes=A, impulse_delays=T,
+                **neighbour_kwargs,
             )
         elif shaper_type == "mzv":
             A, T = _shaper_defs.get_mzv_shaper(freq, damping)
             phase_t_ends, out_coeffs = _fir_compose.fir_compose(
                 in_phase_t_ends, in_coeffs,
                 impulse_amplitudes=A, impulse_delays=T,
+                **neighbour_kwargs,
             )
         else:
-            return _legacy_passthrough()
+            return unshaped_phase_t_ends, unshaped_total_t, unshaped_coeffs
     except ValueError:
         # Composer bailed (overflow or bad args). Fall back to the
         # unshaped polynomial — safer than dropping the move.
-        return _legacy_passthrough()
+        return unshaped_phase_t_ends, unshaped_total_t, unshaped_coeffs
 
     if not phase_t_ends:
-        return _legacy_passthrough()
+        return unshaped_phase_t_ends, unshaped_total_t, unshaped_coeffs
     return tuple(phase_t_ends), phase_t_ends[-1], tuple(out_coeffs)
 
 
@@ -328,44 +359,94 @@ class QuinticBlendMove:
             v_in=v_in, v_out=v_out, cruise_v=cruise_v, a_max=a_max,
             s_accel_end=s_accel_end, s_decel_start=s_decel_start,
         )
-        # Plan 8 Chunk 2 — bake the configured input-shaping kernel into
-        # the polynomial at plan time (Tasks 7–9). For unshaped axes or
-        # disabled shapers this is a pass-through; for bs1..bs5 it calls
-        # bs_compose, and for zv / mzv it calls fir_compose. The baked
-        # payload may expand from the legacy 3-phase layout to up to
-        # MOVE_MAX_PIECES phases.
-        shape_limits = getattr(shape, "_limits", None)
-        shaper_list = (
-            getattr(shape_limits, "shapers", None) if shape_limits is not None
-            else None
-        ) or []
-        phase_t_ends_tuple, total_t_baked, coeff_tuple = _bake_shaper_polynomial(
+        # Remember the unshaped polynomial so (a) CornerBlender can hand
+        # it to the NEXT quintic's composer as "prev", and (b) this
+        # quintic's own bake can be re-driven with neighbour info.
+        self._unshaped_payload = _build_unshaped_payload(
             accel_polys, cruise_polys, decel_polys,
             t_accel_end, t_decel_start, total_t,
-            shaper_list or [],
         )
-        # Plan 8 Chunk 3 Task 3 + Task 7 — bake PA into the .e slot of
-        # the baked polynomial. Dispatch routes to:
-        #   - linear_pa_compose (exact polynomial arithmetic) for the
-        #     'linear' PA model,
-        #   - nonlinear_pa_compose (piecewise Chebyshev-in-tau deg-4 fit)
-        #     for 'tanh' / 'recipr' models,
-        #   - pass-through (E = extr_r * P_proj, no PA) when PA is
-        #     disabled or model unknown.
-        # The .e content is ready for Stage C (extruder step-gen
-        # polynomial-eval) to consume directly.
+        self._arc_length = arc_length
+        self._v_in = v_in
+        self._v_out = v_out
+        self._cruise_v = cruise_v
+        self._a_max = a_max
+        self._v_cap_min_raw = v_cap_min
+        self._start_pos_4d = tuple(start_pos_4d)
+        self._unshaped_timings = (t_accel_end, t_decel_start, total_t)
+        # Store the shaper list at construction time so finalize_shape
+        # (which may be called later from CornerBlender once the next
+        # neighbour is known) sees the SAME snapshot as this move was
+        # planned against. Re-querying shape._limits.shapers at finalize
+        # time would risk a race with SET_INPUT_SHAPER between plan and
+        # emit.
+        shape_limits = getattr(shape, "_limits", None)
+        shaper_list = (
+            getattr(shape_limits, "shapers", None)
+            if shape_limits is not None else None
+        ) or []
+        self._shapers_snapshot = list(shaper_list)
+        self._pa_dispatch_cached = _resolve_pa_dispatch(toolhead)
+        # Initial bake with no neighbour info. CornerBlender will
+        # re-drive finalize_shape(prev, next) before the move is
+        # released downstream; the initial bake is a safety net for any
+        # emit path that bypasses the deferral (tests that build a
+        # QuinticBlendMove directly, flush at session end, etc.).
+        self.finalize_shape(prev_unshaped=None, next_unshaped=None)
+
+    def finalize_shape(self, prev_unshaped=None, next_unshaped=None,
+                       prev_start_pos_xyz=None, next_start_pos_xyz=None):
+        """(Re-)compose the shaper bake with neighbour polynomials.
+
+        Called twice for most moves: once from __init__ with both
+        neighbours None (safety-net), and again from
+        CornerBlender.feed once the next-move's unshaped polynomial is
+        known. The second call overwrites the quintic_trapq_payload and
+        related attributes; downstream consumers (toolhead._process_moves)
+        read the final payload after the CornerBlender emits the move.
+
+        `prev_start_pos_xyz` / `next_start_pos_xyz` are the neighbour
+        moves' absolute start_pos (XY only used) so this move can shift
+        the neighbour polynomials into its own reference frame before
+        the composer integrates across the boundary. When omitted the
+        neighbour polynomial is used as-is (assumes continuous frames
+        — correct for tests that hand-craft the offsets).
+        """
+        unshaped_t_ends, unshaped_total_t, unshaped_coeffs = self._unshaped_payload
+        cur_start_xyz = (
+            self._start_pos_4d[0], self._start_pos_4d[1], self._start_pos_4d[2],
+        )
+        if prev_unshaped is not None and prev_start_pos_xyz is not None:
+            dx = prev_start_pos_xyz[0] - cur_start_xyz[0]
+            dy = prev_start_pos_xyz[1] - cur_start_xyz[1]
+            dz = prev_start_pos_xyz[2] - cur_start_xyz[2]
+            prev_unshaped = _offset_unshaped_for_neighbour(
+                prev_unshaped, (dx, dy, dz)
+            )
+        if next_unshaped is not None and next_start_pos_xyz is not None:
+            dx = next_start_pos_xyz[0] - cur_start_xyz[0]
+            dy = next_start_pos_xyz[1] - cur_start_xyz[1]
+            dz = next_start_pos_xyz[2] - cur_start_xyz[2]
+            next_unshaped = _offset_unshaped_for_neighbour(
+                next_unshaped, (dx, dy, dz)
+            )
+        phase_t_ends_tuple, total_t_baked, coeff_tuple = _bake_shaper_polynomial(
+            unshaped_t_ends, unshaped_total_t, unshaped_coeffs,
+            self._shapers_snapshot,
+            prev_unshaped=prev_unshaped,
+            next_unshaped=next_unshaped,
+        )
         n_phases_baked = len(phase_t_ends_tuple)
+        arc_length = self._arc_length
+        axes_d = self.axes_d
         # axes_d[3] is signed E displacement; arc_length is the curve length
         # of the XY blend. extr_r = E-displacement per XY-arc-mm (signed).
         if arc_length > 0.0:
             extr_r = axes_d[3] / arc_length
         else:
             extr_r = 0.0
-        # XY direction n: chord-direction unit vector. For straight moves
-        # this matches the actual XY motion; for curved blends it's the
-        # legacy approximation (kin_extruder.c made the same choice).
         axis_n = (self.axes_r[0], self.axes_r[1], self.axes_r[2])
-        pa_dispatch = _resolve_pa_dispatch(toolhead)
+        pa_dispatch = self._pa_dispatch_cached
         if pa_dispatch[0] == "linear":
             k_pa = pa_dispatch[1]
             coeff_tuple = tuple(_linear_pa_compose.linear_pa_compose(
@@ -394,39 +475,34 @@ class QuinticBlendMove:
                     model, no, v_lin,
                 )
         else:
-            # PA disabled — still run linear_pa_compose with k_pa = 0 so
-            # the .e slot receives extr_r * P_proj (the nominal filament
-            # motion). This keeps Stage C's polynomial-eval step-gen
-            # correct for moves without PA.
             coeff_tuple = tuple(_linear_pa_compose.linear_pa_compose(
                 n_phases_baked, list(coeff_tuple),
                 axis_n=axis_n, extr_r=extr_r, k_pa=0.0,
             ))
-        start_pos_xyz = (start_pos_4d[0], start_pos_4d[1], start_pos_4d[2])
+        start_pos_xyz = (
+            self._start_pos_4d[0], self._start_pos_4d[1],
+            self._start_pos_4d[2],
+        )
+        v_cap_min = self._v_cap_min_raw
         if not (v_cap_min and math.isfinite(v_cap_min)) or v_cap_min <= 0.0:
-            v_cap_min = cruise_v if cruise_v > 0.0 else v_in
+            v_cap_min = self._cruise_v if self._cruise_v > 0.0 else self._v_in
         self.v_cap_min = v_cap_min
-        # New payload layout carries a variable-length phase_t_ends tuple
-        # plus the flat coeff buffer. Consumer (toolhead._process_moves)
-        # reads n_phases = len(phase_t_ends_tuple). Total duration is
-        # phase_t_ends_tuple[-1] (= total_t_baked), which may exceed the
-        # input total_t for FIR shapers that extend the move by max_tau.
+        t_accel_end, t_decel_start, total_t = self._unshaped_timings
         self.quintic_trapq_payload = (
             phase_t_ends_tuple, total_t_baked,
             arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
-            # Legacy 3-phase timings for consumers that still need them
-            # (set_junction, extruder.move timing, min_move_t). These
-            # always reflect the INPUT (unshaped) timings; the baked
-            # polynomial spans phase_t_ends_tuple[-1], which can be
-            # longer.
+            # Legacy 3-phase timings — always reflect the unshaped
+            # timings; the baked polynomial spans phase_t_ends_tuple[-1].
             t_accel_end, t_decel_start, total_t,
         )
         self.min_move_t = total_t if total_t > 0.0 else (
-            self.move_d / cruise_v if cruise_v > 0.0 else 0.0
+            self.move_d / self._cruise_v if self._cruise_v > 0.0 else 0.0
         )
         self.delta_v2 = 2.0 * self.move_d * self.accel
         self.smooth_delta_v2 = self.delta_v2
-        self.next_junction_v2 = v_cap_min * v_cap_min if v_cap_min else 0.0
+        self.next_junction_v2 = (
+            v_cap_min * v_cap_min if v_cap_min else 0.0
+        )
         self.next_junction_v_capped_to = None
 
     def limit_speed(self, speed, accel):
@@ -526,8 +602,43 @@ class CornerBlender:
         # is a single trapq entry — so the value is ignored.
         self.max_chord_err = max_chord_err
         self._prev = None
+        # One-move emit deferral so the composer can integrate the kernel
+        # across move boundaries using neighbour polynomials. When a new
+        # QuinticBlendMove forms, the previously-pending quintic finally
+        # learns its "next" and is re-baked before being released
+        # downstream. See chunk2-fix boundary-artifact report.
+        self._pending_quintic = None
+        # prev passed to pending's bake: (unshaped_payload, start_pos_xyz)
+        # or None when there is no prior quintic neighbour.
+        self._pending_prev = None
+        self._pending_leading = []  # linear moves preceding pending_quintic
         self.polyline_moves_emitted = 0
         self.blends_emitted = 0
+
+    def _finalize_pending(self, next_unshaped, next_start_pos_xyz):
+        """Drain the pending-emit buffer with the pending quintic's next
+        neighbour now known. Returns the list of released moves in
+        emit-time order.
+        """
+        if self._pending_quintic is None:
+            released = list(self._pending_leading)
+            self._pending_leading = []
+            return released
+        prev_payload = None
+        prev_start = None
+        if self._pending_prev is not None:
+            prev_payload, prev_start = self._pending_prev
+        self._pending_quintic.finalize_shape(
+            prev_unshaped=prev_payload,
+            next_unshaped=next_unshaped,
+            prev_start_pos_xyz=prev_start,
+            next_start_pos_xyz=next_start_pos_xyz,
+        )
+        released = list(self._pending_leading) + [self._pending_quintic]
+        self._pending_leading = []
+        self._pending_quintic = None
+        self._pending_prev = None
+        return released
 
     def feed(self, move):
         if not move.is_kinematic_move:
@@ -550,14 +661,6 @@ class CornerBlender:
         )
         if shape is None or blendmath.should_suppress_quintic(
                 self._prev, move, th.corner_deviation, shape, th):
-            # Drop the blend and fall into the sharp-V suppressed path.
-            # Reasons include:
-            #   (a) shape is None: collinear corners, near-reversals, or
-            #       moves too short to accommodate the blend.
-            #   (b) should_suppress_quintic fired on a successfully-formed
-            #       shape: two-clause D3 rule determined sharp-V + shaper
-            #       is at least as good as the blend (path-tolerance and
-            #       time both satisfied).
             return self._suppress_and_advance(move)
         trunc_prev, quintic_move, trunc_next_head = self._emit_blend(
             self._prev, move, shape
@@ -567,7 +670,37 @@ class CornerBlender:
         # Post-D7: one QuinticBlendMove per blend, so the legacy
         # polyline-moves counter advances by 1.
         self.polyline_moves_emitted += 1
-        return [trunc_prev, quintic_move]
+        # Capture the old pending's (unshaped, start_pos_xyz) before
+        # finalize_pending clears it — the new quintic will use it as
+        # its prev neighbour.
+        old_pending_snapshot = None
+        if self._pending_quintic is not None:
+            old_pending_snapshot = (
+                self._pending_quintic._unshaped_payload,
+                (self._pending_quintic._start_pos_4d[0],
+                 self._pending_quintic._start_pos_4d[1],
+                 self._pending_quintic._start_pos_4d[2]),
+            )
+        # The pending quintic (if any) now knows its next neighbour —
+        # it's the freshly-built quintic_move's unshaped polynomial.
+        released = self._finalize_pending(
+            next_unshaped=quintic_move._unshaped_payload,
+            next_start_pos_xyz=(
+                quintic_move._start_pos_4d[0],
+                quintic_move._start_pos_4d[1],
+                quintic_move._start_pos_4d[2],
+            ),
+        )
+        # Emit order: previously-buffered leading + finalized pending +
+        # trunc_prev (which leads the newly-pending quintic). trunc_prev
+        # is a plain linear Move so it needs no shape finalization.
+        released.append(trunc_prev)
+        # Record the new pending quintic. Its prev neighbour is the
+        # just-finalized pending quintic's unshaped polynomial.
+        self._pending_quintic = quintic_move
+        self._pending_prev = old_pending_snapshot
+        self._pending_leading = []
+        return released
 
     def _suppress_and_advance(self, move):
         """Fallback path when the blend is dropped — either from_moves
@@ -595,9 +728,18 @@ class CornerBlender:
             )
             if dp <= -0.5:
                 self._prev.limit_next_junction_speed(0.0)
-        emitted = [self._prev]
+        emitted_prev = self._prev
         self._prev = move
-        return emitted
+        # No new quintic forms here, so any pending quintic's next
+        # neighbour is necessarily a linear move — which does not
+        # participate in the across-boundary bake. Finalize the
+        # pending quintic with next=None (zero-pad) and emit in time
+        # order: [pending_quintic_finalized, emitted_prev].
+        released = self._finalize_pending(
+            next_unshaped=None, next_start_pos_xyz=None,
+        )
+        released.append(emitted_prev)
+        return released
 
     def _emit_blend(self, prev, nxt, shape):
         """Construct [trunc_prev, QuinticBlendMove] and the trunc_next_head.
@@ -724,14 +866,27 @@ class CornerBlender:
         return trunc_prev, quintic_move, trunc_next_head
 
     def flush(self):
-        if self._prev is None:
-            return []
-        emitted = [self._prev]
-        self._prev = None
-        return emitted
+        # Drain the pending quintic (if any) with next=None — the print
+        # stops here so the composer's zero-pad on the "next" side is
+        # correct.
+        released = self._finalize_pending(
+            next_unshaped=None, next_start_pos_xyz=None,
+        )
+        if self._prev is not None:
+            released.append(self._prev)
+            self._prev = None
+        return released
 
     def reset(self):
         self._prev = None
+        self._pending_quintic = None
+        self._pending_prev = None
+        self._pending_leading = []
 
     def peek_buffered(self):
-        return [self._prev] if self._prev is not None else []
+        buf = list(self._pending_leading)
+        if self._pending_quintic is not None:
+            buf.append(self._pending_quintic)
+        if self._prev is not None:
+            buf.append(self._prev)
+        return buf
