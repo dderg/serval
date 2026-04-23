@@ -140,9 +140,9 @@ def test_init_smoother_ascending_convention_pins_monomial():
     assert piece_coeffs_norm[2] == pytest.approx(1.0 / smooth_time ** 3, rel=1e-12)
 
 
-def test_update_shaper_raises_migration_error_for_retired_name():
-    """SET_INPUT_SHAPER SHAPER_TYPE=smooth_mzv (runtime) must surface the
-    bs2 migration hint, not a generic "Unsupported shaper type" error."""
+def test_update_shaper_accepts_smooth_is_name():
+    """SET_INPUT_SHAPER SHAPER_TYPE=smooth_mzv must succeed — the smooth-IS
+    family is first-class alongside the bs family."""
     from klippy.extras import input_shaper as _is_mod
 
     factory = _is_mod.ShaperFactory()
@@ -161,21 +161,19 @@ def test_update_shaper_raises_migration_error_for_retired_name():
                 return self._st
             return default
 
+        def get_float(self, key, default, **kw):
+            return default
+
     p = _is_mod.TypedInputSmootherParams("x", "bs3", None)
     p.smoother_freq = 40.0
     existing = _is_mod.AxisInputSmoother(p)
-
-    with pytest.raises(MockError) as excinfo:
-        factory.update_shaper(existing, MockGcmd("smooth_mzv"))
-    msg = str(excinfo.value)
-    assert "smooth_mzv" in msg
-    assert "bs2" in msg
-    assert "Magnum Opus" in msg
+    updated = factory.update_shaper(existing, MockGcmd("smooth_mzv"))
+    assert updated.get_type() == "smooth_mzv"
 
 
-def test_create_shaper_raises_migration_error_for_retired_name():
-    """Config-load path: shaper_type = smooth_mzv must raise the migration
-    error with the bs2 hint."""
+def test_create_shaper_accepts_smooth_is_name():
+    """Config-load path: shaper_type = smooth_mzv must succeed — smooth-IS
+    is a first-class member of INPUT_SMOOTHERS."""
     from klippy.extras import input_shaper as _is_mod
 
     factory = _is_mod.ShaperFactory()
@@ -199,12 +197,8 @@ def test_create_shaper_raises_migration_error_for_retired_name():
         def getfloat(self, k, v, **kw):
             return v
 
-    with pytest.raises(MockError) as excinfo:
-        factory.create_shaper("x", MockConfig("smooth_mzv"))
-    msg = str(excinfo.value)
-    assert "smooth_mzv" in msg
-    assert "bs2" in msg
-    assert "Magnum Opus" in msg
+    created = factory.create_shaper("x", MockConfig("smooth_mzv"))
+    assert created.get_type() == "smooth_mzv"
 
 
 @pytest.mark.parametrize("m", BS_M)
@@ -241,28 +235,36 @@ def test_piecewise_moments_match_numerical_reference(m):
 
 
 # ---------------------------------------------------------------------------
-# Migration: retired smooth_* names surface a friendly error.
+# Smoother catalog: both families (bs and smooth-IS) are first-class.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("retired,expected_hint", [
-    ("smooth_zv", "bs1"),
-    ("smooth_mzv", "bs2"),
-    ("smooth_ei", "bs3"),
-    ("smooth_2hump_ei", "bs4"),
-    ("smooth_zvd_ei", "bs5"),
-    ("smooth_si", "bs3"),
+@pytest.mark.parametrize("name", [
+    "smooth_zv", "smooth_mzv", "smooth_ei",
+    "smooth_2hump_ei", "smooth_zvd_ei", "smooth_si",
 ])
-def test_retired_smoother_name_maps_to_bs_variant(retired, expected_hint):
-    assert shaper_defs.RETIRED_SMOOTHER_MIGRATION[retired] == expected_hint
+def test_smooth_is_variant_registered_and_composable(name):
+    """Each smooth-IS variant appears in INPUT_SMOOTHERS and produces a
+    well-formed one-piece kernel (support = [-t_sm/2, +t_sm/2],
+    non-empty coefficient vector)."""
+    entry = next(s for s in shaper_defs.INPUT_SMOOTHERS if s.name == name)
+    assert entry.min_freq > 0.0
+    C_pieces, t_sm = entry.init_func(40.0, 0.1, True)
+    assert t_sm > 0.0
+    assert len(C_pieces) == 1
+    t_start, t_end, coeffs = C_pieces[0]
+    assert t_start == pytest.approx(-t_sm / 2)
+    assert t_end == pytest.approx(+t_sm / 2)
+    assert len(coeffs) >= 5
 
 
-def test_retired_smoother_not_in_input_smoothers_list():
-    retired = {"smooth_zv", "smooth_mzv", "smooth_ei", "smooth_2hump_ei",
-               "smooth_zvd_ei", "smooth_si"}
+def test_input_smoothers_catalog_covers_both_families():
+    """INPUT_SMOOTHERS lists bs1..bs5 (cardinal B-spline chain) plus the
+    six smooth-IS variants from the pre-Plan-5 design."""
     names = {s.name for s in shaper_defs.INPUT_SMOOTHERS}
-    assert names.isdisjoint(retired)
-    assert names == {"bs1", "bs2", "bs3", "bs4", "bs5"}
+    assert {"bs1", "bs2", "bs3", "bs4", "bs5"}.issubset(names)
+    assert {"smooth_zv", "smooth_mzv", "smooth_ei",
+            "smooth_2hump_ei", "smooth_zvd_ei", "smooth_si"}.issubset(names)
 
 
 # ---------------------------------------------------------------------------

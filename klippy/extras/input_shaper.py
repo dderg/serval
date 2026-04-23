@@ -20,18 +20,11 @@ import collections
 from . import shaper_defs
 
 
-# Cardinal B-spline chain family name set — used for config-validation
-# and the shaper_* / smoother_* polymorphism.
-_BS_FAMILY_NAMES = frozenset(s.name for s in shaper_defs.INPUT_SMOOTHERS)
-
-
-def _raise_migration_error(error_ctor, retired_name, replacement):
-    """Raise the standard smooth_* -> bs* migration message."""
-    raise error_ctor(
-        "shaper_type '%s' was replaced in Magnum Opus with the "
-        "cardinal B-spline chain family. Use shaper_type = '%s' "
-        "for equivalent behavior." % (retired_name, replacement)
-    )
+# Smoother-family name set — used for config-validation and the shaper_* /
+# smoother_* polymorphism. Covers both the cardinal B-spline chain
+# (bs1..bs5) and the legacy smooth-IS family (smooth_zv, smooth_mzv,
+# smooth_ei, smooth_2hump_ei, smooth_zvd_ei, smooth_si).
+_SMOOTHER_FAMILY_NAMES = frozenset(s.name for s in shaper_defs.INPUT_SMOOTHERS)
 
 
 def parse_float_list(list_str):
@@ -258,9 +251,6 @@ class TypedInputSmootherParams:
     def _validate_type(cls, smoother_type, error_ctor):
         if smoother_type in cls.smoothers:
             return
-        hint = shaper_defs.RETIRED_SMOOTHER_MIGRATION.get(smoother_type)
-        if hint is not None:
-            _raise_migration_error(error_ctor, smoother_type, hint)
         raise error_ctor("Unsupported shaper type: %s" % (smoother_type,))
 
     def get_type(self):
@@ -357,7 +347,7 @@ class AxisInputSmoother:
         return self.params.get_axis()
 
     def is_bs_family(self):
-        return self.get_type() in _BS_FAMILY_NAMES
+        return self.get_type() in _SMOOTHER_FAMILY_NAMES
 
     def is_enabled(self):
         freq = float(getattr(self.params, "smoother_freq", 0.0) or 0.0)
@@ -428,9 +418,6 @@ class ShaperFactory:
     def create_shaper(self, axis, config):
         shaper_type = config.get("shaper_type", "mzv")
         shaper_type = config.get("shaper_type_" + axis, shaper_type).lower()
-        hint = shaper_defs.RETIRED_SMOOTHER_MIGRATION.get(shaper_type)
-        if hint is not None:
-            _raise_migration_error(config.error, shaper_type, hint)
         shaper = self._create_shaper(axis, shaper_type, config)
         if shaper is None:
             raise config.error("Unsupported shaper type '%s'" % (shaper_type,))
@@ -443,9 +430,6 @@ class ShaperFactory:
                 "SHAPER_TYPE_" + shaper.get_axis().upper(), shaper.get_type()
             )
         shaper_type = shaper_type.lower()
-        hint = shaper_defs.RETIRED_SMOOTHER_MIGRATION.get(shaper_type)
-        if hint is not None:
-            _raise_migration_error(gcmd.error, shaper_type, hint)
         try:
             shaper.update(shaper_type, gcmd)
             return shaper

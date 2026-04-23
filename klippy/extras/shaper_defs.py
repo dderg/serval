@@ -91,6 +91,128 @@ def get_none_smoother():
 
 
 # ---------------------------------------------------------------------------
+# Legacy smooth-IS family (pre-Plan-5, restored alongside the bs family).
+#
+# Each smoother below is a SINGLE polynomial piece on the centered window
+# [-t_sm/2, +t_sm/2]. Coefficients were optimized by Dmitry Butyugin (2020-
+# 2023) in the Maxima algebra system at zeta=0.1 for a 5% residual-vibration
+# target; see `docs/superpowers/plans/plan5-derivations/shaper_family.md`
+# and the upstream Klipper commit history for the closed-form derivation.
+#
+# The raw coefficient lists below are stored DESCENDING (highest degree
+# first), matching the historical convention used by the pre-Plan-5
+# C `init_smoother`. They are reversed to ASCENDING in-situ before being
+# passed to the shared `init_smoother` helper defined above.
+# ---------------------------------------------------------------------------
+
+
+def _smooth_init(coeffs_descending, smooth_time, normalize_coeffs):
+    """Convert descending-coeff legacy smooth-IS kernel to piecewise form.
+
+    The shared `init_smoother` above consumes ASCENDING-power coefficients
+    and produces a one-piece (t_start, t_end, coeffs) tuple. Reverse here
+    so the historical descending literals paste in unchanged.
+    """
+    return init_smoother(
+        list(reversed(coeffs_descending)), smooth_time, normalize_coeffs
+    )
+
+
+def get_smooth_zv_smoother(
+    shaper_freq, damping_ratio_unused=None, normalize_coeffs=True
+):
+    coeffs = [
+        -118.4265334338076,
+        5.861885495127615,
+        29.52796003014231,
+        -1.465471373781904,
+        0.01966833207740377,
+    ]
+    return _smooth_init(coeffs, 0.8025 / shaper_freq, normalize_coeffs)
+
+
+def get_smooth_mzv_smoother(
+    shaper_freq, damping_ratio_unused=None, normalize_coeffs=True
+):
+    coeffs = [
+        -1906.717580206364,
+        125.8892756660212,
+        698.0200035767849,
+        -37.75923018121473,
+        -62.18762409216703,
+        1.57172781617736,
+        1.713117990217123,
+    ]
+    return _smooth_init(coeffs, 0.95625 / shaper_freq, normalize_coeffs)
+
+
+def get_smooth_ei_smoother(
+    shaper_freq, damping_ratio_unused=None, normalize_coeffs=True
+):
+    coeffs = [
+        -1797.048868963208,
+        120.5310596109878,
+        669.6653197989012,
+        -35.71975707450795,
+        -62.49388325512682,
+        1.396748042940248,
+        1.848276903900512,
+    ]
+    return _smooth_init(coeffs, 1.06625 / shaper_freq, normalize_coeffs)
+
+
+def get_smooth_2hump_ei_smoother(
+    shaper_freq, damping_ratio_unused=None, normalize_coeffs=True
+):
+    coeffs = [
+        -22525.88434486782,
+        2524.826047114184,
+        10554.22832043971,
+        -1051.778387878068,
+        -1475.914693073253,
+        121.2177946817349,
+        57.95603221424528,
+        -4.018706414213658,
+        0.8375784787864095,
+    ]
+    return _smooth_init(coeffs, 1.14875 / shaper_freq, normalize_coeffs)
+
+
+def get_smooth_si_smoother(
+    shaper_freq, damping_ratio_unused=None, normalize_coeffs=True
+):
+    coeffs = [
+        -6186.76006449789,
+        1206.747198930197,
+        2579.985143622855,
+        -476.8554763069169,
+        -295.546608490564,
+        52.69679971161049,
+        4.234582468800491,
+        -2.226157642004671,
+        1.267781046297883,
+    ]
+    return _smooth_init(coeffs, 1.245 / shaper_freq, normalize_coeffs)
+
+
+def get_smooth_zvd_ei_smoother(
+    shaper_freq, damping_ratio_unused=None, normalize_coeffs=True
+):
+    coeffs = [
+        -18835.07746719777,
+        1914.349309746547,
+        8786.608981369287,
+        -807.3061869131075,
+        -1209.429748155012,
+        96.48879052981883,
+        43.1595785340444,
+        -3.577268915175282,
+        1.083220648523371,
+    ]
+    return _smooth_init(coeffs, 1.475 / shaper_freq, normalize_coeffs)
+
+
+# ---------------------------------------------------------------------------
 # Cardinal B-spline chain family (bs1..bs5)
 #
 # Replacement for the legacy smooth_* family. Each variant is the (m+1)-fold
@@ -285,28 +407,27 @@ INPUT_SHAPERS = [
     InputShaperCfg("mzv", get_mzv_shaper, min_freq=23.0),
 ]
 
-# Cardinal B-spline chain family (Plan 5 "Magnum Opus" replacement for the
-# legacy smooth_* family). Single integer parameter m = 1..5 interpolates
-# from narrow/fast/weak (bs1) to wide/slow/strong (bs5). All variants share
-# a closed-form kernel with no passband spectral zeros, which lets every
-# variant carry a finite-support FIR inverse (future Plan 5 D3).
+# Smoother catalog: cardinal B-spline chain (bs1..bs5) and the legacy
+# smooth-IS family. Both kernel families compose through
+# `smooth_compose`/`bs_compose` in the planner — bs variants carry a
+# closed-form kernel with no passband spectral zeros (FIR-invertible),
+# while the smooth-IS variants are the single-piece polynomials from the
+# original Butyugin design, preferred by some printers for cleaner
+# visual output at equivalent support width.
 INPUT_SMOOTHERS = [
     InputSmootherCfg("bs1", _get_bs1_smoother, min_freq=18.0),
     InputSmootherCfg("bs2", _get_bs2_smoother, min_freq=20.0),
     InputSmootherCfg("bs3", _get_bs3_smoother, min_freq=21.0),
     InputSmootherCfg("bs4", _get_bs4_smoother, min_freq=23.0),
     InputSmootherCfg("bs5", _get_bs5_smoother, min_freq=25.0),
+    InputSmootherCfg("smooth_zv", get_smooth_zv_smoother, min_freq=18.0),
+    InputSmootherCfg("smooth_mzv", get_smooth_mzv_smoother, min_freq=20.0),
+    InputSmootherCfg("smooth_ei", get_smooth_ei_smoother, min_freq=21.0),
+    InputSmootherCfg(
+        "smooth_2hump_ei", get_smooth_2hump_ei_smoother, min_freq=21.5
+    ),
+    InputSmootherCfg(
+        "smooth_zvd_ei", get_smooth_zvd_ei_smoother, min_freq=26.0
+    ),
+    InputSmootherCfg("smooth_si", get_smooth_si_smoother, min_freq=21.5),
 ]
-
-
-# Migration table: old smooth_* name -> closest bs* replacement.
-# See docs/superpowers/specs/2026-04-22-plan5-direct-quintic-pillar1-design.md
-# §D6 for rationale.
-RETIRED_SMOOTHER_MIGRATION = {
-    "smooth_zv": "bs1",
-    "smooth_mzv": "bs2",
-    "smooth_ei": "bs3",
-    "smooth_2hump_ei": "bs4",
-    "smooth_zvd_ei": "bs5",
-    "smooth_si": "bs3",
-}
