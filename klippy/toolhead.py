@@ -52,14 +52,15 @@ class Move:
             inv_move_d = 1.0 / move_d
         self.axes_r = [d * inv_move_d for d in axes_d]
         self.min_move_t = move_d / velocity
-        # Junction speeds are tracked in velocity squared.  The
-        # delta_v2 is the maximum amount of this squared-velocity that
-        # can change in this move.
+        # Junction speeds are tracked in velocity squared.  max_start_v2
+        # is set by calc_junction and tightened by the reverse pass
+        # before set_junction is invoked.  Plan 9 A5 retires
+        # delta_v2 / max_smoothed_v2 / smooth_delta_v2: the trapezoidal
+        # forward cap and the smoothed-pass machinery they backed are
+        # gone — the reverse pass uses jerk_math.max_reachable_cruise_v
+        # and calc_junction uses jerk_math.reachable_v_end directly.
         self.max_start_v2 = 0.0
         self.max_cruise_v2 = velocity**2
-        self.delta_v2 = 2.0 * move_d * self.accel
-        self.max_smoothed_v2 = 0.0
-        self.smooth_delta_v2 = 2.0 * move_d * toolhead.max_accel_to_decel
         self.next_junction_v2 = 999999999.9
         # Plan 9 A3: unshaped polynomial, set by build_unshaped_payload
         # after set_junction. None until set_junction is called.
@@ -71,13 +72,15 @@ class Move:
         self._shapers_snapshot = getattr(toolhead, "shapers_snapshot", [])
 
     def limit_speed(self, speed, accel):
+        # Plan 9 A5: max_cruise_v2 + accel are the only caller-mutable
+        # kinematic limits that cross into the reverse pass; delta_v2
+        # and smooth_delta_v2 (trapezoidal-era forward / smoothed caps)
+        # are retired.
         speed2 = speed**2
         if speed2 < self.max_cruise_v2:
             self.max_cruise_v2 = speed2
             self.min_move_t = self.move_d / speed
         self.accel = min(self.accel, accel)
-        self.delta_v2 = 2.0 * self.move_d * self.accel
-        self.smooth_delta_v2 = min(self.smooth_delta_v2, self.delta_v2)
 
     def limit_next_junction_speed(self, speed):
         self.next_junction_v2 = min(self.next_junction_v2, speed**2)
@@ -227,16 +230,32 @@ class Move:
         return self.toolhead.printer.command_error(m)
 
     def calc_junction(self, prev_move):
+        # Plan 9 A5: forward junction cap is now jerk-aware. The old
+        # ``prev_move.max_start_v2 + prev_move.delta_v2`` term was the
+        # constant-accel forward reachability; under jerk-limited
+        # motion the correct bound is ``reachable_v_end(prev_start_v,
+        # a_max, j_max, prev_move.move_d)``. Centripetal cap (A2c form)
+        # is kept — it is a geometric cap on the corner radius, not a
+        # trapezoidal artifact. The smoothed-pass propagation
+        # (``max_smoothed_v2``) is also gone with A5.
         if not self.is_kinematic_move or not prev_move.is_kinematic_move:
             return
         # Allow extruder to calculate its maximum junction
         extruder_v2 = self.toolhead.extruder.calc_junction(prev_move, self)
+        prev_start_v = (math.sqrt(prev_move.max_start_v2)
+                        if prev_move.max_start_v2 > 0.0 else 0.0)
+        prev_forward_reach = jerk_math.reachable_v_end(
+            v_start=prev_start_v,
+            a_max=prev_move.accel,
+            j_max=prev_move.j_max,
+            L=prev_move.move_d,
+        )
         max_start_v2 = min(
             extruder_v2,
             self.max_cruise_v2,
             prev_move.max_cruise_v2,
             prev_move.next_junction_v2,
-            prev_move.max_start_v2 + prev_move.delta_v2,
+            prev_forward_reach * prev_forward_reach,
         )
         # Find max velocity using "approximated centripetal velocity"
         axes_r = self.axes_r
@@ -270,9 +289,6 @@ class Move:
             )
         # Apply limits
         self.max_start_v2 = max_start_v2
-        self.max_smoothed_v2 = min(
-            max_start_v2, prev_move.max_smoothed_v2 + prev_move.smooth_delta_v2
-        )
 
     def set_junction(self, start_v2, cruise_v2, end_v2):
         # Plan 9 A2c: jerk-aware phase timings via jerk_profile.compute_profile.
@@ -421,104 +437,67 @@ class LookAheadQueue:
         update_flush_count = lazy
         queue = self.queue
         flush_count = len(queue)
-        # Traverse queue from last to first move and determine maximum
-        # junction speed assuming the robot comes to a complete stop
-        # after the last move.
-        delayed = []
-        next_end_v2 = next_smoothed_v2 = peak_cruise_v2 = 0.0
+        # Plan 9 A5 — jerk-native reverse pass. Propagate end_v² backwards;
+        # at each move, clip cruise_v to the jerk-aware
+        # ``jerk_math.max_reachable_cruise_v`` cap, then call
+        # ``set_junction``. No smoothed pass, no peak_cruise_v² averaging,
+        # no delayed[] queue. Pure-E moves go through the same loop —
+        # they carry an ``accel`` (set to a huge value in ``Move.__init__``
+        # so it is effectively non-binding) and a ``j_max`` (toolhead
+        # max_jerk), so the same primitive applies.
+        #
+        # QuinticBlendMove (from CornerBlender) carries a TOPP-baked
+        # immutable profile — its ``set_junction`` is a no-op and only
+        # its ``max_start_v2`` / ``max_cruise_v2`` participate in the
+        # cascade.
+        next_end_v2 = 0.0
         for i in range(flush_count - 1, -1, -1):
             move = queue[i]
-            # QuinticBlendMove carries a TOPP-baked (v_in, cruise_v, v_out)
-            # profile that is immutable post-emit (Option-Z); skip the
-            # jerk-aware reverse-pass kinematics and treat the blend as
-            # a decel-capable anchor — its max_cruise_v2 defines the new
-            # peak_cruise_v2 for any delayed-accel batch downstream of
-            # it, and its max_start_v2 (=v_in²) feeds the upstream
-            # propagation.
             if not isinstance(move, Move):
-                start_v2 = move.max_start_v2
-                smoothed_v2 = move.max_smoothed_v2
-                if update_flush_count and peak_cruise_v2:
+                # QuinticBlendMove: immutable post-TOPP. Just feed its
+                # ``max_start_v2`` (=v_in²) backwards as the upstream
+                # ``end_v²``. The blend's own ``max_cruise_v2`` is
+                # already pinned by D7 Option-Z.
+                if update_flush_count and move.max_cruise_v2:
                     flush_count = i
                     update_flush_count = False
-                peak_cruise_v2 = move.max_cruise_v2
-                if delayed and not update_flush_count and i < flush_count:
-                    mc_v2 = peak_cruise_v2
-                    for m, ms_v2, me_v2 in reversed(delayed):
-                        mc_v2 = min(mc_v2, ms_v2)
-                        m.set_junction(
-                            min(ms_v2, mc_v2), mc_v2, min(me_v2, mc_v2)
-                        )
-                del delayed[:]
-                next_end_v2 = start_v2
-                next_smoothed_v2 = smoothed_v2
+                next_end_v2 = move.max_start_v2
                 continue
-            # Jerk-aware reverse pass (Plan 9 A2c). next_end_v2 is the
-            # velocity² the move must land at (next move's start, or 0
-            # at end of queue). reachable_v_from_v_end returns the
-            # largest v_start achievable on an accel-side group across
-            # move.move_d under (move.accel, move.j_max). Symmetry lets
-            # us reuse the same primitive for both accel and decel
-            # reverse passes.
-            reachable_start_v = move.reachable_v_from_v_end(
-                math.sqrt(next_end_v2) if next_end_v2 > 0.0 else 0.0
+            # Clamp demanded end_v² to max_cruise_v² so the jerk profile
+            # is never asked to cruise above cap.
+            end_v2 = min(next_end_v2, move.max_cruise_v2)
+            start_v2 = move.max_start_v2
+            start_v = math.sqrt(start_v2) if start_v2 > 0.0 else 0.0
+            end_v = math.sqrt(end_v2) if end_v2 > 0.0 else 0.0
+            cruise_v_cap = math.sqrt(move.max_cruise_v2)
+            cruise_v = jerk_math.max_reachable_cruise_v(
+                v_start=start_v, v_end=end_v,
+                a_max=move.accel, j_max=move.j_max,
+                L=move.move_d, v_cruise_cap=cruise_v_cap,
             )
-            reachable_start_v2 = reachable_start_v * reachable_start_v
-            start_v2 = min(move.max_start_v2, reachable_start_v2)
-            # Smoothed pass uses max_accel_to_decel as its accel budget;
-            # formula is otherwise identical.
-            next_smoothed_v = (
-                math.sqrt(next_smoothed_v2) if next_smoothed_v2 > 0.0 else 0.0
-            )
-            reachable_smoothed_v = jerk_math.reachable_v_end(
-                v_start=next_smoothed_v,
-                a_max=move.toolhead.max_accel_to_decel,
-                j_max=move.j_max,
+            cruise_v2 = cruise_v * cruise_v
+            # Tighten the demanded end_v² further if the chosen
+            # cruise_v cannot sustain it; same for start_v². This
+            # guarantees ``set_junction`` sees a jerk-feasible
+            # (start, cruise, end, L) tuple.
+            end_v2 = min(end_v2, cruise_v2)
+            start_v2 = min(start_v2, cruise_v2)
+            if update_flush_count and cruise_v2:
+                flush_count = i
+                update_flush_count = False
+            if not update_flush_count and i < flush_count:
+                move.set_junction(start_v2, cruise_v2, end_v2)
+            # Backwards-reachability bound feeding the move upstream:
+            # the largest v_start² such that a jerk-limited accel group
+            # ends at this move's start_v across this move's distance
+            # is ``reachable_v_end(start_v, accel, j_max, move_d)`` by
+            # time-reversal symmetry of the jerk profile.
+            reach = jerk_math.reachable_v_end(
+                v_start=start_v,
+                a_max=move.accel, j_max=move.j_max,
                 L=move.move_d,
             )
-            reachable_smoothed_v2 = reachable_smoothed_v * reachable_smoothed_v
-            smoothed_v2 = min(move.max_smoothed_v2, reachable_smoothed_v2)
-            if smoothed_v2 < reachable_smoothed_v2:
-                # It's possible for this move to accelerate
-                if (
-                    smoothed_v2 + move.smooth_delta_v2 > next_smoothed_v2
-                    or delayed
-                ):
-                    # This move can decelerate or this is a full accel
-                    # move after a full decel move
-                    if update_flush_count and peak_cruise_v2:
-                        flush_count = i
-                        update_flush_count = False
-                    peak_cruise_v2 = min(
-                        move.max_cruise_v2,
-                        (smoothed_v2 + reachable_smoothed_v2) * 0.5,
-                    )
-                    if delayed:
-                        # Propagate peak_cruise_v2 to any delayed moves
-                        if not update_flush_count and i < flush_count:
-                            mc_v2 = peak_cruise_v2
-                            for m, ms_v2, me_v2 in reversed(delayed):
-                                mc_v2 = min(mc_v2, ms_v2)
-                                m.set_junction(
-                                    min(ms_v2, mc_v2), mc_v2, min(me_v2, mc_v2)
-                                )
-                        del delayed[:]
-                if not update_flush_count and i < flush_count:
-                    cruise_v2 = min(
-                        (start_v2 + reachable_start_v2) * 0.5,
-                        move.max_cruise_v2,
-                        peak_cruise_v2,
-                    )
-                    move.set_junction(
-                        min(start_v2, cruise_v2),
-                        cruise_v2,
-                        min(next_end_v2, cruise_v2),
-                    )
-            else:
-                # Delay calculating this move until peak_cruise_v2 is known
-                delayed.append((move, start_v2, next_end_v2))
-            next_end_v2 = start_v2
-            next_smoothed_v2 = smoothed_v2
+            next_end_v2 = min(start_v2, reach * reach)
         # Plan 9 A3 — drain the pending-last move when the queue is empty
         # and the caller requested a full drain. The early-return below
         # would otherwise orphan the pending at drain points like

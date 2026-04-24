@@ -408,3 +408,89 @@ def test_kinematic_retract_preserves_signed_e():
         "E polynomial net displacement %.9f != axes_d[3]=-5.0"
         % total_e_displacement
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase A5 — reverse pass is jerk-feasible by construction.
+# ---------------------------------------------------------------------------
+
+
+def test_reverse_pass_closes_bed_mesh_crash():
+    """The original bed_mesh crash inputs, fed through Move +
+    LookAheadQueue, must NOT raise 'Jerk profile infeasible'.
+
+    Crash tuple: start_v=374.7, cruise_v_request=469.8, end_v=469.8,
+    move_d=1.143, accel=70k, j_max=500k. Pre-A5 the trapezoidal cruise
+    cap let set_junction receive a jerk-infeasible (start, cruise, end,
+    L) tuple and jerk_profile.compute_profile raised. Post-A5 the
+    reverse pass clips cruise_v via max_reachable_cruise_v, so the tuple
+    is feasible by construction.
+    """
+    from klippy.toolhead import Move, LookAheadQueue
+
+    th = _FakeToolhead(max_accel=70000.0, max_jerk=500000.0,
+                       max_velocity=600.0)
+    la = LookAheadQueue(th)
+    # Recreate the crash pattern: a pre-probe cruise move feeding a
+    # short 1.143 mm probe hop at 469.8 mm/s that lands at 469.8 mm/s
+    # (probe drop into a subsequent move of equal speed).
+    m_a = Move(th, (0, 0, 0, 0), (50, 0, 0, 0), speed=469.8)
+    m_b = Move(th, (50, 0, 0, 0), (51.143, 0, 0, 0), speed=469.8)
+    m_c = Move(th, (51.143, 0, 0, 0), (200, 0, 0, 0), speed=469.8)
+    la.queue.extend([m_a, m_b, m_c])
+    m_b.calc_junction(m_a)
+    m_c.calc_junction(m_b)
+    la.flush(lazy=False)
+    # If the plan is correct, flush did not raise. Each move must carry
+    # a valid jerk_profile attached by set_junction.
+    for m in (m_a, m_b, m_c):
+        assert hasattr(m, "jerk_profile"), \
+            "set_junction must run for every flushed move"
+
+
+def test_reverse_pass_no_smoothed_fields_on_move():
+    """After A5, Move must not carry smoothed-pass state.
+
+    The smoothed pass is dead — its backing fields should be gone so
+    future code cannot accidentally read stale values.
+    """
+    from klippy.toolhead import Move
+    th = _FakeToolhead()
+    m = Move(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=100.0)
+    assert not hasattr(m, "smooth_delta_v2"), \
+        "A5 must remove smooth_delta_v2 from Move"
+    assert not hasattr(m, "max_smoothed_v2"), \
+        "A5 must remove max_smoothed_v2 from Move"
+    assert not hasattr(m, "delta_v2"), \
+        "A5 must remove delta_v2 from Move"
+
+
+def test_reverse_pass_uses_max_reachable_cruise_v():
+    """For a short move between two high-velocity moves, the chosen
+    cruise_v must equal max_reachable_cruise_v(start_v, end_v, a, j, L).
+
+    This is the structural assertion: the trapezoidal cruise cap is
+    gone and the jerk-aware primitive is in its place.
+    """
+    from klippy import jerk_math
+    from klippy.toolhead import Move, LookAheadQueue
+
+    th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0,
+                       max_velocity=500.0)
+    la = LookAheadQueue(th)
+    # Long flank, tiny middle, long flank — middle move's cruise_v is
+    # constrained by jerk reachability from 500 mm/s ends across 2 mm.
+    m_a = Move(th, (0, 0, 0, 0), (100, 0, 0, 0), speed=500.0)
+    m_b = Move(th, (100, 0, 0, 0), (102, 0, 0, 0), speed=500.0)
+    m_c = Move(th, (102, 0, 0, 0), (200, 0, 0, 0), speed=500.0)
+    la.queue.extend([m_a, m_b, m_c])
+    m_b.calc_junction(m_a)
+    m_c.calc_junction(m_b)
+    la.flush(lazy=False)
+    # m_b's cruise_v should match the analytic jerk-aware cap.
+    expected = jerk_math.max_reachable_cruise_v(
+        v_start=m_b.start_v, v_end=m_b.end_v,
+        a_max=m_b.accel, j_max=m_b.j_max,
+        L=m_b.move_d, v_cruise_cap=500.0,
+    )
+    assert m_b.cruise_v == pytest.approx(expected, rel=1e-6)
