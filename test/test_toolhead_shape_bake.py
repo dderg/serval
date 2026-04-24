@@ -261,27 +261,21 @@ def test_finalize_shape_offsets_prev_neighbour_polynomial():
 
 
 def test_lookahead_queue_has_deferred_last_state():
-    """LookAheadQueue exposes the deferred-last-move state fields for
-    Plan 9 A3 shape-bake pass."""
+    """LookAheadQueue exposes the deferred-last tuple for the Plan 9 A3
+    shape-bake pass."""
     tool = _FakeToolhead()
     laq = th_mod.LookAheadQueue(tool)
-    assert laq._pending_last_move is None
-    assert laq._pending_last_prev_unshaped is None
-    assert laq._pending_last_prev_start_pos_xyz is None
+    assert laq._pending_last is None
 
 
 def test_lookahead_queue_reset_clears_deferred_last_state():
     tool = _FakeToolhead()
     laq = th_mod.LookAheadQueue(tool)
-    laq._pending_last_move = object()
-    # Simplified sentinel — any non-None value works; the tuple shape is not
-    # contractual at the reset layer.
-    laq._pending_last_prev_unshaped = object()
-    laq._pending_last_prev_start_pos_xyz = (1., 2., 3.)
+    # Any non-None tuple works; the internal shape is not contractual at
+    # the reset layer.
+    laq._pending_last = (object(), object(), (1., 2., 3.))
     laq.reset()
-    assert laq._pending_last_move is None
-    assert laq._pending_last_prev_unshaped is None
-    assert laq._pending_last_prev_start_pos_xyz is None
+    assert laq._pending_last is None
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +312,7 @@ def test_flush_drain_emits_all_moves():
     _inject_and_drain(laq, [m1, m2, m3])
     assert len(emitted) == 3
     assert emitted == [m1, m2, m3]
-    assert laq._pending_last_move is None
+    assert laq._pending_last is None
     for m in (m1, m2, m3):
         assert m.quintic_trapq_payload is not None
 
@@ -331,8 +325,7 @@ def test_flush_lazy_false_drains_all():
     m2 = _make_move(tool, [10., 0., 0., 0.], [20., 0., 0., 0.])
     _inject_and_drain(laq, [m1, m2])
     assert len(emitted) == 2
-    assert laq._pending_last_move is None
-    assert laq._pending_last_prev_unshaped is None
+    assert laq._pending_last is None
 
 
 def test_flush_single_move_lazy_false():
@@ -343,7 +336,7 @@ def test_flush_single_move_lazy_false():
     _inject_and_drain(laq, [m1])
     assert len(emitted) == 1
     assert emitted[0] is m1
-    assert laq._pending_last_move is None
+    assert laq._pending_last is None
 
 
 def test_flush_chain_prev_pending_emitted_before_new_batch():
@@ -360,13 +353,11 @@ def test_flush_chain_prev_pending_emitted_before_new_batch():
     m3 = _make_move(tool, [20., 0., 0., 0.], [30., 0., 0., 0.])
     # Simulate "m1 was the pending last of a prior flush"
     m1.set_junction(0.0, m1.max_cruise_v2 * 0.5, 0.0)
-    laq._pending_last_move = m1
-    laq._pending_last_prev_unshaped = None
-    laq._pending_last_prev_start_pos_xyz = None
+    laq._pending_last = (m1, None, None)
     # Drain [m2, m3]. m1 should appear first.
     _inject_and_drain(laq, [m2, m3])
     assert emitted == [m1, m2, m3]
-    assert laq._pending_last_move is None
+    assert laq._pending_last is None
 
 
 def test_flush_chain_two_drain_flushes():
@@ -381,7 +372,7 @@ def test_flush_chain_two_drain_flushes():
     assert emitted == [m1, m2]
     _inject_and_drain(laq, [m3])
     assert emitted == [m1, m2, m3]
-    assert laq._pending_last_move is None
+    assert laq._pending_last is None
 
 
 def test_flush_pure_e_move_passes_through_unchanged():
@@ -403,22 +394,23 @@ def test_flush_pure_e_move_passes_through_unchanged():
 def test_flush_lazy_true_single_move_becomes_pending():
     """With a 1-move queue and lazy=True, the reverse pass may return
     early (flush_count=0) OR flush it (flush_count=1). In the flush_count=1
-    case, T5 must hold the move as _pending_last_move. We inject the move
+    case, T5 must hold the move as the pending-last. We inject the move
     with set_junction already called to ensure the reverse pass confirms it,
     then force flush(lazy=True) by bypassing add_move.
 
     We verify the post-condition: either nothing was emitted (the move is
     pending) or the pending is None (lazy returned early — also acceptable
     because the move is still in the queue for the next flush).
-    The key invariant: if _pending_last_move is set, it IS the move we added."""
+    The key invariant: if _pending_last is set, its first element IS the
+    move we added."""
     tool = _FakeToolhead()
     laq, emitted = _make_laq_with_spy(tool)
     m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
     m1.set_junction(0.0, m1.max_cruise_v2 * 0.5, 0.0)
     laq.queue.append(m1)
     laq.flush(lazy=True)
-    if laq._pending_last_move is not None:
-        assert laq._pending_last_move is m1
+    if laq._pending_last is not None:
+        assert laq._pending_last[0] is m1
         assert len(emitted) == 0
 
 
@@ -426,7 +418,7 @@ def test_drain_pending_on_empty_queue_lazy_false():
     """Regression: lazy=False must drain a pending move even when the
     queue is empty.
 
-    Scenario: a prior lazy flush held `m_last` as _pending_last_move and
+    Scenario: a prior lazy flush held `m_last` as the pending-last and
     emptied the queue. A subsequent lazy=False flush with no new moves
     must still finalize the pending with next=None and emit it. Otherwise
     the move is silently dropped at drain points (wait_moves,
@@ -436,18 +428,14 @@ def test_drain_pending_on_empty_queue_lazy_false():
     m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
     # Simulate "m1 was held as pending by a prior lazy flush".
     m1.set_junction(0.0, m1.max_cruise_v2 * 0.5, 0.0)
-    laq._pending_last_move = m1
-    laq._pending_last_prev_unshaped = None
-    laq._pending_last_prev_start_pos_xyz = None
+    laq._pending_last = (m1, None, None)
     # Queue is empty.
     assert len(laq.queue) == 0
     # Drain with lazy=False.
     laq.flush(lazy=False)
     # m1 must have been emitted and pending state cleared.
     assert emitted == [m1]
-    assert laq._pending_last_move is None
-    assert laq._pending_last_prev_unshaped is None
-    assert laq._pending_last_prev_start_pos_xyz is None
+    assert laq._pending_last is None
 
 
 def test_empty_queue_lazy_true_does_not_drain_pending():
@@ -459,13 +447,12 @@ def test_empty_queue_lazy_true_does_not_drain_pending():
     laq, emitted = _make_laq_with_spy(tool)
     m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
     m1.set_junction(0.0, m1.max_cruise_v2 * 0.5, 0.0)
-    laq._pending_last_move = m1
-    laq._pending_last_prev_unshaped = None
-    laq._pending_last_prev_start_pos_xyz = None
+    laq._pending_last = (m1, None, None)
     laq.flush(lazy=True)
     # Pending is still held; nothing emitted.
     assert emitted == []
-    assert laq._pending_last_move is m1
+    assert laq._pending_last is not None
+    assert laq._pending_last[0] is m1
 
 
 def test_drain_non_kinematic_pending_on_empty_queue():
@@ -478,7 +465,7 @@ def test_drain_non_kinematic_pending_on_empty_queue():
     # A pure-E move as pending — synthetic defensive scenario
     m_e = _make_move(tool, [0., 0., 0., 0.], [0., 0., 0., 5.])
     assert m_e.is_kinematic_move is False
-    laq._pending_last_move = m_e
+    laq._pending_last = (m_e, None, None)
     laq.flush(lazy=False)
     assert emitted == [m_e]
-    assert laq._pending_last_move is None
+    assert laq._pending_last is None

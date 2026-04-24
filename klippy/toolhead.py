@@ -347,6 +347,14 @@ class Move:
 LOOKAHEAD_FLUSH_TIME = 0.250
 
 
+# Plan 9 A3 — shape-bake discriminator. A move qualifies for plan-time
+# shape baking iff it is a plain kinematic ``Move`` (``QuinticBlendMove``
+# in blendplanner.py is NOT a subclass of ``Move`` and arrives already
+# baked from CornerBlender; pure-E moves carry no XY polynomial).
+def _is_shape_bake_target(move):
+    return isinstance(move, Move) and move.is_kinematic_move
+
+
 # Class to track a list of pending move requests and to facilitate
 # "look-ahead" across moves to reduce acceleration between moves.
 class LookAheadQueue:
@@ -354,17 +362,51 @@ class LookAheadQueue:
         self.toolhead = toolhead
         self.queue = []
         self.junction_flush = LOOKAHEAD_FLUSH_TIME
-        # Plan 9 A3 — deferred-last shape-bake state (see flush).
-        self._pending_last_move = None
-        self._pending_last_prev_unshaped = None
-        self._pending_last_prev_start_pos_xyz = None
+        # Plan 9 A3 — deferred-last shape-bake state (see flush). When
+        # populated, a 3-tuple ``(move, prev_unshaped, prev_start_pos_xyz)``
+        # carrying the last move of the prior lazy flush along with the
+        # saved prev-neighbour context needed to finalize it once the
+        # next flush's queue[0] supplies the "next" neighbour.
+        self._pending_last = None
 
     def reset(self):
         del self.queue[:]
         self.junction_flush = LOOKAHEAD_FLUSH_TIME
-        self._pending_last_move = None
-        self._pending_last_prev_unshaped = None
-        self._pending_last_prev_start_pos_xyz = None
+        self._pending_last = None
+
+    def _finalize_with_neighbours(self, move, prev_move, next_move,
+                                  prev_override=None):
+        """Shape-bake ``move`` with prev/next neighbour polynomials,
+        falling back to None when a neighbour is absent or not a
+        shape-bake target.
+
+        ``prev_override`` optionally supplies ``(prev_unshaped,
+        prev_start_pos_xyz)`` directly (used when draining the pending
+        move whose prev is saved state, not a queue move). When
+        ``prev_override`` is given, ``prev_move`` is ignored.
+        """
+        if not _is_shape_bake_target(move):
+            return
+        if prev_override is not None:
+            prev_unshaped, prev_start = prev_override
+        elif prev_move is not None and _is_shape_bake_target(prev_move):
+            prev_unshaped = prev_move._unshaped_payload
+            prev_start = tuple(prev_move.start_pos[:3])
+        else:
+            prev_unshaped = None
+            prev_start = None
+        if next_move is not None and _is_shape_bake_target(next_move):
+            next_unshaped = next_move._unshaped_payload
+            next_start = tuple(next_move.start_pos[:3])
+        else:
+            next_unshaped = None
+            next_start = None
+        move.finalize_shape(
+            prev_unshaped=prev_unshaped,
+            next_unshaped=next_unshaped,
+            prev_start_pos_xyz=prev_start,
+            next_start_pos_xyz=next_start,
+        )
 
     def set_flush_time(self, flush_time):
         self.junction_flush = flush_time
@@ -454,100 +496,46 @@ class LookAheadQueue:
             next_smoothed_v2 = smoothed_v2
         # Plan 9 A3 — drain the pending-last move when the queue is empty
         # and the caller requested a full drain. The early-return below
-        # would otherwise orphan _pending_last_move at drain points like
+        # would otherwise orphan the pending at drain points like
         # flush_step_generation / wait_moves / drip_move where the queue
         # may have been emptied by a prior lazy flush.
-        if (not lazy) and self._pending_last_move is not None and not flush_count:
-            pending = self._pending_last_move
-            if isinstance(pending, Move) and pending.is_kinematic_move:
-                pending.finalize_shape(
-                    prev_unshaped=self._pending_last_prev_unshaped,
-                    next_unshaped=None,
-                    prev_start_pos_xyz=self._pending_last_prev_start_pos_xyz,
-                    next_start_pos_xyz=None,
-                )
-            self.toolhead._process_moves([pending])
-            self._pending_last_move = None
-            self._pending_last_prev_unshaped = None
-            self._pending_last_prev_start_pos_xyz = None
+        if (not lazy) and self._pending_last is not None and not flush_count:
+            pending_move, prev_unshaped, prev_start = self._pending_last
+            self._finalize_with_neighbours(
+                pending_move, prev_move=None, next_move=None,
+                prev_override=(prev_unshaped, prev_start),
+            )
+            self.toolhead._process_moves([pending_move])
+            self._pending_last = None
 
         if update_flush_count or not flush_count:
             return
 
-        # Plan 9 A3 — deferred-last shape-bake pass.
-        #
-        # After the reverse pass, every kinematic plain Move has
-        # ``_unshaped_payload`` populated by ``set_junction``. We now
-        # re-bake each such move with queue-internal prev/next neighbour
-        # polynomials so the shaper kernel sees continuous motion across
-        # move boundaries. QuinticBlendMove instances from CornerBlender
-        # are already fully shape-baked and pass through unchanged.
-        #
-        # Discriminator: ``isinstance(move, Move)`` is True only for
-        # plain ``Move`` objects (``QuinticBlendMove`` in blendplanner.py
-        # is NOT a subclass of Move). We additionally require
-        # ``is_kinematic_move`` to skip pure-E moves.
-        def _is_shape_bake_target(move):
-            return isinstance(move, Move) and move.is_kinematic_move
-
-        def _unshaped_triple(move):
-            return move._unshaped_payload
-
-        def _start_xyz(move):
-            return (move.start_pos[0], move.start_pos[1],
-                    move.start_pos[2])
-
+        # Plan 9 A3 — deferred-last shape-bake pass. After the reverse
+        # pass, every kinematic plain Move has ``_unshaped_payload``
+        # populated by ``set_junction``; we re-bake each with queue-
+        # internal prev/next neighbour polynomials so the shaper kernel
+        # sees continuous motion across move boundaries.
         batch_to_emit = []
 
         # 1. Finalize the previous flush's pending-last move using
         #    queue[0] as its next neighbour.
-        if self._pending_last_move is not None:
-            first = queue[0]
-            next_unshaped = (
-                _unshaped_triple(first)
-                if _is_shape_bake_target(first) else None
+        if self._pending_last is not None:
+            pending_move, prev_unshaped, prev_start = self._pending_last
+            self._finalize_with_neighbours(
+                pending_move, prev_move=None, next_move=queue[0],
+                prev_override=(prev_unshaped, prev_start),
             )
-            next_start = (
-                _start_xyz(first)
-                if _is_shape_bake_target(first) else None
-            )
-            if _is_shape_bake_target(self._pending_last_move):
-                self._pending_last_move.finalize_shape(
-                    prev_unshaped=self._pending_last_prev_unshaped,
-                    next_unshaped=next_unshaped,
-                    prev_start_pos_xyz=self._pending_last_prev_start_pos_xyz,
-                    next_start_pos_xyz=next_start,
-                )
-            batch_to_emit.append(self._pending_last_move)
-            self._pending_last_move = None
-            self._pending_last_prev_unshaped = None
-            self._pending_last_prev_start_pos_xyz = None
+            batch_to_emit.append(pending_move)
+            self._pending_last = None
 
         # 2. Shape-bake queue[0 .. flush_count-2] with queue-internal
-        #    prev/next neighbours. The prev is the last element of
-        #    batch_to_emit (if it is a shape-bake target); next is
-        #    queue[i+1].
+        #    prev/next neighbours. Non-bake-targets (QuinticBlendMove,
+        #    pure-E) pass through unchanged.
         for i in range(flush_count - 1):
             move = queue[i]
-            if _is_shape_bake_target(move):
-                prev_move = batch_to_emit[-1] if batch_to_emit else None
-                next_move = queue[i + 1]
-                prev_unshaped = None
-                prev_start = None
-                if prev_move is not None and _is_shape_bake_target(prev_move):
-                    prev_unshaped = _unshaped_triple(prev_move)
-                    prev_start = _start_xyz(prev_move)
-                next_unshaped = None
-                next_start = None
-                if _is_shape_bake_target(next_move):
-                    next_unshaped = _unshaped_triple(next_move)
-                    next_start = _start_xyz(next_move)
-                move.finalize_shape(
-                    prev_unshaped=prev_unshaped,
-                    next_unshaped=next_unshaped,
-                    prev_start_pos_xyz=prev_start,
-                    next_start_pos_xyz=next_start,
-                )
+            prev_move = batch_to_emit[-1] if batch_to_emit else None
+            self._finalize_with_neighbours(move, prev_move, queue[i + 1])
             batch_to_emit.append(move)
 
         # 3. Handle queue[flush_count-1] (the last move to flush this
@@ -556,34 +544,22 @@ class LookAheadQueue:
         #    lazy=False (drain), finalize with next=None — the print
         #    actually stops here so zero-pad is correct.
         last = queue[flush_count - 1]
-        if lazy:
-            if _is_shape_bake_target(last):
-                self._pending_last_move = last
-                prev = batch_to_emit[-1] if batch_to_emit else None
-                if prev is not None and _is_shape_bake_target(prev):
-                    self._pending_last_prev_unshaped = _unshaped_triple(prev)
-                    self._pending_last_prev_start_pos_xyz = _start_xyz(prev)
-                else:
-                    self._pending_last_prev_unshaped = None
-                    self._pending_last_prev_start_pos_xyz = None
+        prev = batch_to_emit[-1] if batch_to_emit else None
+        if lazy and _is_shape_bake_target(last):
+            # Hold `last` for the next flush. Snapshot its prev-neighbour
+            # now so the next flush can finalize it without a stale queue
+            # reference.
+            if prev is not None and _is_shape_bake_target(prev):
+                prev_unshaped = prev._unshaped_payload
+                prev_start = tuple(prev.start_pos[:3])
             else:
-                # QuinticBlendMove or non-kinematic: already baked, emit now.
-                batch_to_emit.append(last)
-        else:
-            # Drain: finalize with next=None.
-            if _is_shape_bake_target(last):
-                prev = batch_to_emit[-1] if batch_to_emit else None
                 prev_unshaped = None
                 prev_start = None
-                if prev is not None and _is_shape_bake_target(prev):
-                    prev_unshaped = _unshaped_triple(prev)
-                    prev_start = _start_xyz(prev)
-                last.finalize_shape(
-                    prev_unshaped=prev_unshaped,
-                    next_unshaped=None,
-                    prev_start_pos_xyz=prev_start,
-                    next_start_pos_xyz=None,
-                )
+            self._pending_last = (last, prev_unshaped, prev_start)
+        else:
+            # Drain path (or non-bake-target last): finalize with
+            # next=None when applicable, and emit immediately.
+            self._finalize_with_neighbours(last, prev, next_move=None)
             batch_to_emit.append(last)
 
         # Emit the batch and remove processed moves from the queue.
