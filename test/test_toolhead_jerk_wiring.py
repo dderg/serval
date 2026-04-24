@@ -52,3 +52,25 @@ def test_move_j_max_unchanged_by_limit_speed():
     m = Move(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=100.0)
     m.limit_speed(50.0, 1000.0)
     assert m.j_max == 150000.0
+
+
+def test_move_reachable_v_from_v_end_matches_jerk_math():
+    """Move.reachable_v_from_v_end must delegate to jerk_math.reachable_v_end
+    using self.accel, self.j_max, self.move_d."""
+    from klippy import jerk_math
+    from klippy.toolhead import Move
+    th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
+    m = Move(th, (0, 0, 0, 0), (50, 0, 0, 0), speed=1000.0)  # move_d = 50 mm
+    v_end = 200.0
+    expected = jerk_math.reachable_v_end(
+        v_start=v_end, a_max=m.accel, j_max=m.j_max, L=m.move_d
+    )
+    assert m.reachable_v_from_v_end(v_end) == pytest.approx(expected, rel=1e-12)
+
+
+def test_move_reachable_v_zero_distance_returns_v_end():
+    from klippy.toolhead import Move
+    th = _FakeToolhead()
+    m = Move(th, (0, 0, 0, 0), (1e-6, 0, 0, 0), speed=10.0)  # ~0 move_d
+    # reachable_v_from_v_end(v_end) at near-zero L ≈ v_end.
+    assert m.reachable_v_from_v_end(50.0) == pytest.approx(50.0, rel=1e-6)

@@ -8,6 +8,7 @@ import logging
 import math
 
 from . import chelper
+from . import jerk_math
 from .chelper.linear_quintic import append_trapezoid_as_quintic
 from .extras.danger_options import get_danger_options
 from .kinematics import extruder
@@ -71,6 +72,20 @@ class Move:
 
     def limit_next_junction_speed(self, speed):
         self.next_junction_v2 = min(self.next_junction_v2, speed**2)
+
+    def reachable_v_from_v_end(self, v_end):
+        """Jerk-aware reachable-velocity: return the largest v_start such
+        that an accel-side group from v_start down to v_end spans
+        self.move_d under (self.accel, self.j_max).
+
+        By symmetry of the jerk profile the accel-side kinematics are the
+        same whether we call the known endpoint v_start or v_end; A2b's
+        reachable_v_end is therefore reused for the reverse pass by
+        passing v_end in its v_start slot.
+        """
+        return jerk_math.reachable_v_end(
+            v_start=v_end, a_max=self.accel, j_max=self.j_max, L=self.move_d,
+        )
 
     def move_error(self, msg="Move out of range"):
         ep = self.end_pos
