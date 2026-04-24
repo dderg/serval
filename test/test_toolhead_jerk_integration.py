@@ -443,6 +443,119 @@ def test_reverse_pass_closes_bed_mesh_crash():
             "set_junction must run for every flushed move"
 
 
+# ---------------------------------------------------------------------------
+# Phase A5 T6 — bed_mesh acceptance gate.
+# ---------------------------------------------------------------------------
+
+
+def test_a5_bed_mesh_exact_crash_tuple_replay():
+    """A5 T6 ACCEPTANCE GATE — replay the exact bed_mesh-crashing tuple
+    through the real ``Move`` + ``LookAheadQueue.flush`` pipeline.
+
+    The original Trident bed_mesh_calibrate crash captured this exact
+    state on the short probe move:
+
+        start_v        = 374.7    mm/s
+        cruise_v_req   = 469.8    mm/s   (move's max_cruise_v2 = 469.8²)
+        end_v          = 469.8    mm/s   (probe-drop into equal-speed move)
+        move_d         = 1.143    mm
+        accel          = 70000    mm/s²
+        j_max          = 500000   mm/s³
+
+    Pre-A5, the trapezoidal cruise cap
+    ``(start_v² + reachable_start_v²) * 0.5`` told the planner this
+    tuple was feasible. Then ``set_junction`` invoked
+    ``jerk_profile.compute_profile`` which rejected it with
+    ``klippy.gcode.CommandError: Jerk profile infeasible for move
+    (...)`` because the 374.7 → 469.8 ramp under j=500k needs
+    ~11.65 mm of runway, not the 0.574 mm a constant-accel
+    approximation suggests (off by 20×).
+
+    Post-A5, the reverse pass clips ``cruise_v`` to
+    ``max_reachable_cruise_v(374.7, 469.8, 70k, 500k, 1.143, 469.8)
+    = 375.86`` mm/s, which is jerk-feasible by construction. End_v
+    is then re-clamped to ``min(469.8, 375.86) = 375.86`` mm/s, so
+    the tuple ``set_junction`` actually sees is jerk-feasible and
+    ``compute_profile`` returns ``JP_OK``.
+
+    This is the **acceptance gate** — the hardware regression is
+    closed iff this test passes. We pin the move's pre-flush state
+    to the exact crash tuple (rather than reconstructing the
+    upstream G-code chain that produced 374.7 mm/s start_v) so the
+    test is independent of bed_mesh's specific calibration sequence.
+    """
+    from klippy import jerk_math
+    from klippy.toolhead import LookAheadQueue, Move
+
+    th = _FakeToolhead(max_accel=70000.0, max_jerk=500000.0,
+                       max_velocity=600.0)
+    la = LookAheadQueue(th)
+
+    # Single 1.143 mm move with the crash-tuple kinematic state.
+    move = Move(th, (0, 0, 0, 0), (1.143, 0, 0, 0), speed=469.8)
+    # speed=469.8 already pins max_cruise_v2 = 469.8²; verify.
+    assert move.move_d == pytest.approx(1.143, rel=1e-12)
+    assert move.max_cruise_v2 == pytest.approx(469.8 ** 2, rel=1e-12)
+    assert move.accel == 70000.0
+    assert move.j_max == 500000.0
+    # Pin the upstream-imposed start_v² = 374.7². In a real bed_mesh
+    # calibrate, this value is the result of the reverse-pass cascade
+    # through prior probe moves. We inject it directly to make the
+    # test independent of the upstream chain — the acceptance question
+    # is whether *this* move + the queue's flush cope with the tuple.
+    move.max_start_v2 = 374.7 ** 2
+    # Tail: a follow-on move at 469.8 mm/s (the crash had end_v=469.8).
+    # Its max_start_v2 is the queue's source for next_end_v² when
+    # processing `move` in the reverse pass.
+    tail = Move(th, (1.143, 0, 0, 0), (50, 0, 0, 0), speed=469.8)
+    tail.max_start_v2 = 469.8 ** 2
+    la.queue.extend([move, tail])
+
+    # Pre-A5: la.flush would propagate 469.8² backwards as next_end_v²,
+    # the trapezoidal cruise cap would say "OK", and set_junction would
+    # raise CommandError. Post-A5: max_reachable_cruise_v clips cruise_v
+    # to ~375.86 mm/s and the (clamped) tuple is feasible.
+    la.flush(lazy=False)  # MUST NOT RAISE — this is the gate.
+
+    # Verify the chosen cruise_v matches the analytic jerk-aware cap.
+    expected_cruise_v = jerk_math.max_reachable_cruise_v(
+        v_start=374.7, v_end=469.8,
+        a_max=70000.0, j_max=500000.0,
+        L=1.143, v_cruise_cap=469.8,
+    )
+    assert expected_cruise_v == pytest.approx(375.86, abs=0.05), (
+        "spec-cited expected cruise_v cap is ~375.86 mm/s; analytic "
+        "primitive gave %.4f" % expected_cruise_v
+    )
+    assert move.cruise_v == pytest.approx(expected_cruise_v, rel=1e-9), (
+        "cruise_v should be clipped to max_reachable_cruise_v "
+        "(%.4f) but was %.4f" % (expected_cruise_v, move.cruise_v)
+    )
+    # set_junction must have run and attached a feasible jerk profile.
+    assert hasattr(move, "jerk_profile"), \
+        "set_junction must run for the bed_mesh probe move"
+    from klippy.chelper import jerk_profile as jp_mod
+    assert move.jerk_profile.status == jp_mod.JP_OK, (
+        "post-A5 jerk_profile.status must be JP_OK (got %d)"
+        % move.jerk_profile.status
+    )
+    # The A2d emit path must have populated the quintic payload.
+    assert move.quintic_trapq_payload is not None, (
+        "quintic_trapq_payload must be populated post-flush — "
+        "downstream _process_moves consumes this 9-tuple"
+    )
+    # Sanity: the trapezoidal cap that mis-classified the tuple as
+    # feasible was off by 20×. Spot-check the math is still off by
+    # the cited factor — if this drifts, the spec doc is stale.
+    trapezoidal_L = (469.8 ** 2 - 374.7 ** 2) / (2.0 * 70000.0)
+    jerk_aware_L = 11.647  # from the spec verification block.
+    assert trapezoidal_L == pytest.approx(0.574, abs=0.001)
+    assert jerk_aware_L / trapezoidal_L == pytest.approx(20.3, abs=0.5), (
+        "trapezoidal vs jerk-aware L ratio drifted from spec's ~20× "
+        "(got %.2f×)" % (jerk_aware_L / trapezoidal_L)
+    )
+
+
 def test_reverse_pass_no_smoothed_fields_on_move():
     """After A5, Move must not carry smoothed-pass state.
 
