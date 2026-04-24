@@ -86,3 +86,55 @@ def test_find_v_hat_matches_reference(v0, v1, v_peak, a_max, j_max, L, desc):
     # Sanity: v_hat must be in [max(v0,v1), v_peak].
     assert v_hat_c >= max(v0, v1) - 1e-9
     assert v_hat_c <= v_peak + 1e-9
+
+
+def _eval_poly(coeffs, t):
+    """Horner evaluation on ascending-order coefficients."""
+    acc = 0.0
+    for c in reversed(coeffs):
+        acc = acc * t + c
+    return acc
+
+
+def _eval_poly_deriv(coeffs, t, order):
+    """order-th derivative at t. order in {0,1,2}."""
+    if order == 0:
+        return _eval_poly(coeffs, t)
+    # d/dt of ascending-order [c0, c1, c2, c3, c4, c5] -> [c1, 2c2, 3c3, 4c4, 5c5]
+    derived = [coeffs[k+1] * (k+1) for k in range(len(coeffs)-1)]
+    return _eval_poly_deriv(derived + [0.0], t, order - 1)
+
+
+# A few fully-specified cases where we know the full 7-phase profile exists.
+_COMPUTE_CASES_FULL_7 = [
+    # (v0, v1, v_peak, a_max, j_max, L, desc)
+    (0.0, 0.0, 200.0, 5000.0, 100000.0, 100.0, "symmetric zero-to-zero, long"),
+    (0.0, 100.0, 200.0, 5000.0, 100000.0, 80.0, "asym, non-cruise collapse"),
+]
+
+
+@pytest.mark.parametrize(
+    "v0,v1,v_peak,a_max,j_max,L,desc", _COMPUTE_CASES_FULL_7,
+    ids=[c[6] for c in _COMPUTE_CASES_FULL_7])
+def test_profile_c2_continuity(v0, v1, v_peak, a_max, j_max, L, desc):
+    prof = jp.compute_profile(v0, v1, v_peak, a_max, j_max, L)
+    assert prof.status == jp.JP_OK, f"status {prof.status} ({desc})"
+    # C0, C1, C2 continuity across every interior segment boundary.
+    for i in range(len(prof.segments) - 1):
+        s = prof.segments[i]
+        t = prof.segments[i + 1]
+        p_end = _eval_poly_deriv(s.coeffs, s.T, 0)
+        v_end = _eval_poly_deriv(s.coeffs, s.T, 1)
+        a_end = _eval_poly_deriv(s.coeffs, s.T, 2)
+        p_next = _eval_poly_deriv(t.coeffs, 0.0, 0)
+        v_next = _eval_poly_deriv(t.coeffs, 0.0, 1)
+        a_next = _eval_poly_deriv(t.coeffs, 0.0, 2)
+        assert p_end == pytest.approx(p_next, abs=1e-9), f"p jump at seg {i}"
+        assert v_end == pytest.approx(v_next, abs=1e-9), f"v jump at seg {i}"
+        assert a_end == pytest.approx(a_next, abs=1e-9), f"a jump at seg {i}"
+    # End conditions: v(T_last) == v1, a(T_last) == 0.
+    last = prof.segments[-1]
+    assert _eval_poly_deriv(last.coeffs, last.T, 1) == pytest.approx(v1, abs=1e-9)
+    assert _eval_poly_deriv(last.coeffs, last.T, 2) == pytest.approx(0.0, abs=1e-9)
+    # Sum of durations * .. well, end position must equal L.
+    assert _eval_poly_deriv(last.coeffs, last.T, 0) == pytest.approx(L, abs=1e-9)
