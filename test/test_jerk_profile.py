@@ -6,6 +6,7 @@ Plan 9 Phase A1 — jerk-limited polynomial profile generator.
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import math
 from pathlib import Path
 
@@ -138,3 +139,40 @@ def test_profile_c2_continuity(v0, v1, v_peak, a_max, j_max, L, desc):
     assert _eval_poly_deriv(last.coeffs, last.T, 2) == pytest.approx(0.0, abs=1e-9)
     # Sum of durations * .. well, end position must equal L.
     assert _eval_poly_deriv(last.coeffs, last.T, 0) == pytest.approx(L, abs=1e-9)
+
+
+_SWEEP_V0 = [0.0, 50.0, 200.0]
+_SWEEP_V1 = [0.0, 50.0, 200.0]
+_SWEEP_L  = [1.0, 10.0, 100.0, 1000.0]
+_SWEEP = list(itertools.product(_SWEEP_V0, _SWEEP_V1, _SWEEP_L))
+
+
+@pytest.mark.parametrize("v0,v1,L", _SWEEP, ids=[f"v0={v0},v1={v1},L={L}"
+                                                  for v0, v1, L in _SWEEP])
+def test_sweep_parity_vs_reference(v0, v1, L):
+    V_PEAK = 500.0
+    A_MAX = 5000.0
+    J_MAX = 100000.0
+    # Reference - may return a Profile with feasible=False.
+    ref = REF.compute_profile(v0, v1, V_PEAK, A_MAX, J_MAX, L)
+    c = jp.compute_profile(v0, v1, V_PEAK, A_MAX, J_MAX, L)
+    # Infeasibility must agree.
+    if not ref.feasible:
+        assert c.status == jp.JP_INFEASIBLE, (
+            f"C reported feasible where reference said infeasible: "
+            f"v0={v0} v1={v1} L={L}")
+        return
+    assert c.status == jp.JP_OK, (
+        f"C infeasible where reference was feasible: v0={v0} v1={v1} L={L}")
+    # Segment count matches.
+    assert len(c.segments) == len(ref.segments), (
+        f"seg count mismatch ({len(c.segments)} vs {len(ref.segments)}): "
+        f"v0={v0} v1={v1} L={L}")
+    # Durations and coeffs match to 1e-9.
+    for i, (cs, rs) in enumerate(zip(c.segments, ref.segments)):
+        assert cs.type == rs.type, f"type[{i}] differs v0={v0} v1={v1} L={L}"
+        assert cs.T == pytest.approx(rs.T, abs=1e-9, rel=1e-9), \
+            f"T[{i}] differs"
+        for k, (cc, rc) in enumerate(zip(cs.coeffs, rs.coeffs)):
+            assert cc == pytest.approx(rc, abs=1e-9, rel=1e-9), \
+                f"coeff[{i}][{k}] differs"
