@@ -23,11 +23,6 @@ class _FakeToolhead:
         self.extruder = _E()
 
 
-def test_toolhead_max_jerk_default_loaded():
-    # Config-driven ToolHead bootstrap is covered in Task 6 end-to-end test;
-    # this is a placeholder so the file has a real slot for the integration case.
-    pytest.skip("Config-driven ToolHead bootstrap is covered in Task 6 end-to-end test")
-
 
 def test_fake_toolhead_has_max_jerk():
     """Sanity: _FakeToolhead mirrors the real ToolHead's jerk attribute."""
