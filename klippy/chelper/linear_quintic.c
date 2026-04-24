@@ -1,5 +1,7 @@
 #include "compiler.h" // __visible
+#include "jerk_profile.h" // struct jerk_profile_result, JP_OK
 #include "linear_quintic.h"
+#include "trapq.h" // MOVE_MAX_PIECES
 
 // Plan 8 Chunk 3: per-phase stride MOVE_QUINTIC_POLY_COEFFS (15) * 4 axes
 // (x, y, z, e) = 60 doubles. The .e slot is left zero by this builder; the
@@ -66,4 +68,31 @@ build_linear_as_quintic_coeffs(
     fill_phase(&coeff_buf[2 * LINEAR_QUINTIC_PHASE_STRIDE], cruise_v, -accel,
                pos_after_cruise_x, pos_after_cruise_y, pos_after_cruise_z,
                axes_r_x, axes_r_y, axes_r_z);
+}
+
+/* Translate a 1-D jerk_profile_result into the multi-axis quintic-trapq slot
+ * layout. Writes up to MOVE_MAX_PIECES phases into coeff_buf[MOVE_MAX_PIECES*15*4];
+ * unused phases are left untouched (caller is expected to zero the buffer).
+ *
+ * Returns the number of phases emitted, or -1 if the profile is not JP_OK.
+ *
+ * axes_r: direction ratios (rx, ry, rz). For a unit-norm move vector, |(rx,ry,rz)|=1.
+ * start_pos: absolute start position (axis-E / axis 3 is set to 0 by caller).
+ * phase_t_ends_out: absolute (cumulative) phase end times, length must be
+ * MOVE_MAX_PIECES.
+ *
+ * Plan 9 Phase A2a. Mirrors build_linear_as_quintic_coeffs for jerk profiles.
+ */
+__visible int
+build_jerk_profile_as_quintic_coeffs(
+    const struct jerk_profile_result *prof,
+    double rx, double ry, double rz,
+    double start_pos_x, double start_pos_y, double start_pos_z,
+    double *phase_t_ends_out,
+    double *coeff_buf /* [MOVE_MAX_PIECES * 15 * 4] */)
+{
+    (void)prof; (void)rx; (void)ry; (void)rz;
+    (void)start_pos_x; (void)start_pos_y; (void)start_pos_z;
+    (void)phase_t_ends_out; (void)coeff_buf;
+    return -1;
 }

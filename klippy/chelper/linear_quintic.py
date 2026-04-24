@@ -140,3 +140,71 @@ def append_trapezoid_as_quintic(
         start_pos_x, start_pos_y, start_pos_z,
         buf,
     )
+
+
+MOVE_MAX_PIECES = 32
+QUINTIC_SLOT_COEFFS = 15
+QUINTIC_AXES = 4
+
+
+def build_jerk_profile_as_quintic_coeffs(profile, axes_r, start_pos):
+    """Translate a jerk_profile.Profile into the quintic-trapq slot layout.
+
+    Parameters
+    ----------
+    profile : klippy.chelper.jerk_profile.Profile
+        Result of jerk_profile.compute_profile(); must have status == JP_OK.
+    axes_r : tuple of 3 floats
+        Move direction ratios (rx, ry, rz). For a unit-norm vector |r| == 1.
+    start_pos : tuple of 3 floats
+        Start position (sx, sy, sz). Axis E (index 3) is always 0 here.
+
+    Returns
+    -------
+    (n_phases, phase_t_ends, coeff_buf)
+        n_phases: int in [1, 7].
+        phase_t_ends: list of n_phases absolute (cumulative) phase end times.
+        coeff_buf: list of MOVE_MAX_PIECES * QUINTIC_SLOT_COEFFS * QUINTIC_AXES
+            doubles, ready to feed to trapq_append_quintic. Unused phases are
+            zero-filled.
+
+    Raises
+    ------
+    ValueError: if profile.status != JP_OK or axes_r / start_pos are wrong shape.
+    """
+    from klippy.chelper import jerk_profile as jp_mod
+    if profile.status != jp_mod.JP_OK:
+        raise ValueError(f"profile status {profile.status} is not JP_OK")
+    if len(axes_r) != 3 or len(start_pos) != 3:
+        raise ValueError("axes_r and start_pos must be 3-tuples")
+    ffi, lib = get_ffi()
+    result_c = ffi.new("struct jerk_profile_result *")
+    result_c.status = profile.status
+    result_c.n_segments = len(profile.segments)
+    result_c.a_acc = profile.a_acc
+    result_c.a_dec = profile.a_dec
+    result_c.v_hat = profile.v_hat
+    for i, seg in enumerate(profile.segments):
+        type_int = {"J+": 1, "A+": 2, "J-": 3, "C": 4,
+                    "J-d": 5, "A-": 6, "J+d": 7}.get(seg.type, 0)
+        result_c.segments[i].type = type_int
+        result_c.segments[i].T = seg.T
+        for k in range(6):
+            result_c.segments[i].coeffs[k] = seg.coeffs[k]
+        result_c.segments[i].p0 = seg.p0
+        result_c.segments[i].v0 = seg.v0
+        result_c.segments[i].a0 = seg.a0
+        result_c.segments[i].j = seg.j
+    phase_t_ends = ffi.new(f"double[{MOVE_MAX_PIECES}]")
+    coeff_buf = ffi.new(
+        f"double[{MOVE_MAX_PIECES * QUINTIC_SLOT_COEFFS * QUINTIC_AXES}]")
+    rx, ry, rz = axes_r
+    sx, sy, sz = start_pos
+    n_phases = lib.build_jerk_profile_as_quintic_coeffs(
+        result_c, rx, ry, rz, sx, sy, sz, phase_t_ends, coeff_buf)
+    if n_phases < 0:
+        raise RuntimeError("build_jerk_profile_as_quintic_coeffs failed")
+    return (n_phases,
+            [phase_t_ends[i] for i in range(n_phases)],
+            [coeff_buf[i] for i in
+             range(MOVE_MAX_PIECES * QUINTIC_SLOT_COEFFS * QUINTIC_AXES)])

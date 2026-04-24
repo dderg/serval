@@ -274,6 +274,12 @@ defs_jerk_profile = """
         double *out_a_peak, double *out_dist);
     double jerk_profile_find_v_hat(double v0, double v1, double v_peak,
         double a_max, double j_max, double L);
+    int build_jerk_profile_as_quintic_coeffs(
+        const struct jerk_profile_result *prof,
+        double rx, double ry, double rz,
+        double start_pos_x, double start_pos_y, double start_pos_z,
+        double *phase_t_ends_out,
+        double *coeff_buf);
 """
 
 defs_kin_cartesian = """
