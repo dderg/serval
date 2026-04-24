@@ -168,7 +168,6 @@ class KalicoTelementry:
                 "max_accel",
                 "max_z_velocity",
                 "max_z_accel",
-                "minimum_cruise_ratio",
             ],
             ...
         }

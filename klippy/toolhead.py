@@ -1267,7 +1267,8 @@ class ToolHead:
         for retired in ("MINIMUM_CRUISE_RATIO", "ACCEL_TO_DECEL"):
             if gcmd.get_float(retired, None) is not None:
                 raise gcmd.error(
-                    "%s is retired in Plan 9 A5; tune ACCEL and JERK instead."
+                    "%s is retired in Plan 9 A5; jerk-limited motion has "
+                    "no cruise-fraction knob. Tune ACCEL and JERK instead."
                     % retired
                 )
         corner_deviation = gcmd.get_float(

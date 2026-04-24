@@ -57,8 +57,10 @@ def _parse_axis(gcmd, raw_axis):
 
 @contextmanager
 def suspend_limits(printer, max_accel, max_velocity, input_shaping):
-    # Override maximum acceleration and cruise ratio
-    # based on the maximum test frequency
+    # Override maximum acceleration based on the maximum test frequency.
+    # Plan 9 A5: minimum_cruise_ratio is retired; the jerk-limited planner
+    # has no cruise-fraction knob, so there is nothing to override or
+    # restore beyond ACCEL / VELOCITY.
     gcode = printer.lookup_object("gcode")
     input_shaper = printer.lookup_object("input_shaper", None)
     if input_shaper is not None and not input_shaping:
@@ -70,10 +72,9 @@ def suspend_limits(printer, max_accel, max_velocity, input_shaping):
     systime = printer.get_reactor().monotonic()
     toolhead_info = toolhead.get_status(systime)
     old_max_accel = toolhead_info["max_accel"]
-    old_minimum_cruise_ratio = toolhead_info["minimum_cruise_ratio"]
     old_max_velocity = toolhead_info["max_velocity"]
     gcode.run_script_from_command(
-        "SET_VELOCITY_LIMIT ACCEL=%.3f MINIMUM_CRUISE_RATIO=0 VELOCITY=%.3f"
+        "SET_VELOCITY_LIMIT ACCEL=%.3f VELOCITY=%.3f"
         % (max_accel, max_velocity)
     )
     kin = toolhead.get_kinematics()
@@ -107,8 +108,8 @@ def suspend_limits(printer, max_accel, max_velocity, input_shaping):
             gcode.respond_info("Re-enabled [input_shaper]")
         # Restore the original acceleration values
         gcode.run_script_from_command(
-            "SET_VELOCITY_LIMIT ACCEL=%.3f MINIMUM_CRUISE_RATIO=%.3f VELOCITY=%.3f"
-            % (old_max_accel, old_minimum_cruise_ratio, old_max_velocity)
+            "SET_VELOCITY_LIMIT ACCEL=%.3f VELOCITY=%.3f"
+            % (old_max_accel, old_max_velocity)
         )
         if old_max_velocities is not None:
             kin.max_velocities = old_max_velocities
