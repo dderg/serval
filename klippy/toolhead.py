@@ -270,6 +270,7 @@ class ToolHead:
         # Velocity and acceleration control
         self.max_velocity = config.getfloat("max_velocity", above=0.0)
         self.max_accel = config.getfloat("max_accel", above=0.0)
+        self.max_jerk = config.getfloat("max_jerk", 100000.0, above=0.0)
         self.corner_deviation = config.getfloat("corner_deviation", above=0.0)
         min_cruise_ratio = 0.5
         if config.getfloat("minimum_cruise_ratio", None) is None:
@@ -297,6 +298,7 @@ class ToolHead:
         self.orig_cfg = {}
         self.orig_cfg["max_velocity"] = self.max_velocity
         self.orig_cfg["max_accel"] = self.max_accel
+        self.orig_cfg["max_jerk"] = self.max_jerk
         self.orig_cfg["corner_deviation"] = self.corner_deviation
         self.orig_cfg["min_cruise_ratio"] = self.min_cruise_ratio
         # Input stall detection
@@ -837,6 +839,7 @@ class ToolHead:
                 "position": self.Coord(*self.commanded_pos),
                 "max_velocity": self.max_velocity,
                 "max_accel": self.max_accel,
+                "max_jerk": self.max_jerk,
                 "minimum_cruise_ratio": self.min_cruise_ratio,
                 "corner_deviation": self.corner_deviation,
             }
@@ -903,6 +906,7 @@ class ToolHead:
     def cmd_SET_VELOCITY_LIMIT(self, gcmd):
         max_velocity = gcmd.get_float("VELOCITY", None, above=0.0)
         max_accel = gcmd.get_float("ACCEL", None, above=0.0)
+        max_jerk = gcmd.get_float("JERK", None, above=0.0)
         # Parsed but discarded: the new arc-blending planner ignores SCV.
         # Kept as a local for the all-None guard below so SET_VELOCITY_LIMIT
         # SQUARE_CORNER_VELOCITY=N does not spam the current-status dump.
@@ -931,6 +935,8 @@ class ToolHead:
             self.max_velocity = max_velocity
         if max_accel is not None:
             self.max_accel = max_accel
+        if max_jerk is not None:
+            self.max_jerk = max_jerk
         if min_cruise_ratio is not None:
             self.min_cruise_ratio = min_cruise_ratio
         if corner_deviation is not None:
@@ -938,6 +944,7 @@ class ToolHead:
         msg = [
             "max_velocity: %.6f" % self.max_velocity,
             "max_accel: %.6f" % self.max_accel,
+            "max_jerk: %.6f" % self.max_jerk,
         ]
         if hasattr(self.kin, "max_x_velocity"):
             max_x_velocity = gcmd.get_float("X_VELOCITY", None)
@@ -987,6 +994,7 @@ class ToolHead:
             if (
                 max_velocity is None
                 and max_accel is None
+                and max_jerk is None
                 and square_corner_velocity is None
                 and min_cruise_ratio is None
                 and corner_deviation is None
@@ -998,9 +1006,11 @@ class ToolHead:
     def cmd_RESET_VELOCITY_LIMIT(self, gcmd):
         self.max_velocity = self.orig_cfg["max_velocity"]
         self.max_accel = self.orig_cfg["max_accel"]
+        self.max_jerk = self.orig_cfg["max_jerk"]
         msg = [
             "max_velocity: %.6f" % self.max_velocity,
             "max_accel: %.6f" % self.max_accel,
+            "max_jerk: %.6f" % self.max_jerk,
         ]
 
         if hasattr(self.kin, "max_x_velocity"):
