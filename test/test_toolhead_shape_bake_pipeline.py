@@ -1,38 +1,20 @@
 """Plan 9 A3-followup — full production pipeline integration test.
 
 All existing A3 tests inject moves directly into ``LookAheadQueue.queue``,
-bypassing the production filter stack.  This file provides tests that exercise
-the REAL entry path:
+bypassing the production filter stack.  This file exercises the REAL
+entry path:
 
     BlendPipelineLookAheadQueue  →  [CollinearCollapser, CornerBlender]
                                  →  inner LookAheadQueue
                                  →  _process_moves spy
 
-== BUG SURFACED ==
-
-``test_full_pipeline_with_mzv_shaper_exercises_all_stages`` surfaces a
-production bug: ``LookAheadQueue.flush`` calls ``move.reachable_v_from_v_end``
-and ``move.j_max`` on every move in the queue, but ``QuinticBlendMove``
-(emitted by ``CornerBlender``) does not have these attributes.
-
-In the real production stack, ``CornerBlender`` finalises and emits
-``QuinticBlendMove`` objects through ``BlendPipelineLookAheadQueue.add_move``
-→ ``inner_LookAheadQueue.add_move(m)`` → appended to ``inner.queue``.  When
-``inner.flush()`` subsequently runs its reverse-pass loop, it crashes on any
-``QuinticBlendMove`` in the queue.
-
-The correct fix is to add ``reachable_v_from_v_end`` and ``j_max`` (or an
-equivalent guard) to ``QuinticBlendMove``.  For ``QuinticBlendMove`` the
-kinematics are pre-baked by TOPP (v_in/v_out/cruise_v are locked in by
-Option-Z at emit time) so the reverse-pass cannot usefully change the profile;
-the method should return ``v_end`` unchanged (the blend is already velocity-
-safe from TOPP) or a sufficiently large value that the existing constraints
-win.  A ``j_max`` that is large (``float("inf")`` or ``toolhead.max_jerk``)
-is also safe since the TOPP pass already saturated the jerk-based
-centripetal cap.
-
-**Verdict: DONE_WITH_CONCERNS** — test file committed; production bug
-documented in the test; requires a follow-up fix in ``QuinticBlendMove``.
+It caught an A2c-era regression: the jerk-aware reverse-pass loop in
+``LookAheadQueue.flush`` called ``move.reachable_v_from_v_end`` / read
+``move.j_max`` / called ``move.set_junction`` on every queue entry —
+crashing when a ``QuinticBlendMove`` (TOPP-baked; no jerk-math surface)
+arrived from ``CornerBlender``.  The A3-followup fix skips QBMs in the
+reverse pass and populates Move-shape fields directly at QBM construction
+(see blendplanner.QuinticBlendMove.finalize_shape).
 """
 from __future__ import annotations
 
@@ -173,27 +155,13 @@ def test_full_pipeline_with_mzv_shaper_exercises_all_stages():
     """Integration test: moves enter via BlendPipelineLookAheadQueue.add_move,
     traverse CollinearCollapser → CornerBlender → LookAheadQueue.
 
-    ** THIS TEST SURFACES A PRODUCTION BUG **
-
-    ``LookAheadQueue.flush`` calls ``move.reachable_v_from_v_end`` and reads
-    ``move.j_max`` on every move in its queue.  ``QuinticBlendMove`` (emitted
-    by ``CornerBlender`` and forwarded to the inner queue) does not have
-    ``reachable_v_from_v_end`` or ``j_max``.  The flush crashes with
-    ``AttributeError: 'QuinticBlendMove' object has no attribute
-    'reachable_v_from_v_end'``.
-
-    The test is left in *failing* state intentionally: it is the regression
-    test that must be unblocked once ``QuinticBlendMove`` grows
-    ``reachable_v_from_v_end`` (returning ``v_end`` — TOPP has already
-    saturated velocity) and ``j_max`` (``float("inf")`` is correct since the
-    jerk cap was applied at blend-emit time).
-
-    Failure modes this test guards against once the bug is fixed:
+    Failure modes this test guards against:
     - BlendPipelineLookAheadQueue bypassed → blender.blends_emitted stays 0.
     - CornerBlender bypassed → no QuinticBlendMove in captured.
     - Inner LookAheadQueue shape-bake pass bypassed → plain Move payloads
       have baked_coeffs == unshaped_coeffs.
     - Shaper not picked up → toolhead.shapers_snapshot empty.
+    - Reverse-pass crashes on a QuinticBlendMove (A3-followup regression).
     """
     th = _PipelineToolhead(shaper_type="mzv", freq=42.0)
 
@@ -215,18 +183,7 @@ def test_full_pipeline_with_mzv_shaper_exercises_all_stages():
     th.laq.add_move(m_b)
     th.laq.add_move(m_c)
 
-    # This flush currently raises:
-    #   AttributeError: 'QuinticBlendMove' object has no attribute
-    #   'reachable_v_from_v_end'
-    # because LookAheadQueue.flush's reverse-pass loop calls that method on
-    # every move in the inner queue, and QuinticBlendMove is now in that queue.
-    #
-    # Expected fix: add reachable_v_from_v_end(v_end) → v_end and j_max to
-    # QuinticBlendMove.  Then remove the xfail mark and add the assertions
-    # below.
     th.laq.flush(lazy=False)
-
-    # --- Post-bug-fix assertions (currently unreachable) --------------------
 
     # Assertion 2: CornerBlender ran and emitted at least one blend.
     assert th._blender.blends_emitted >= 1, (
@@ -325,8 +282,8 @@ def test_pipeline_corner_blender_fires_on_ninety_degree_corner():
     inner LookAheadQueue.
 
     We call CornerBlender directly here (not through the full
-    BlendPipelineLookAheadQueue) to avoid the production bug in
-    LookAheadQueue.flush (see test_full_pipeline_with_mzv_shaper_exercises_all_stages).
+    BlendPipelineLookAheadQueue) to isolate blend-emit behaviour from
+    the outer queue's lookahead.
     """
     th = _PipelineToolhead(shaper_type="mzv", freq=42.0)
 
@@ -413,20 +370,20 @@ def test_pipeline_collinear_collapser_merges_before_corner_blender():
     assert merged.end_pos[:3] == pytest.approx([30.0, 0.0, 0.0], abs=1e-9)
 
 
-def test_pipeline_quintic_blend_move_missing_reverse_pass_attributes():
-    """Documents the production bug: QuinticBlendMove lacks the attributes
-    that LookAheadQueue.flush's reverse-pass loop requires.
+def test_pipeline_quintic_blend_move_skipped_in_reverse_pass():
+    """Regression guard for the A3-followup fix.
 
-    This test verifies the bug is present (it should pass until the bug is
-    fixed).  Once QuinticBlendMove grows reachable_v_from_v_end and j_max,
-    this test should be inverted / deleted and
-    test_full_pipeline_with_mzv_shaper_exercises_all_stages un-xfail'd.
+    LookAheadQueue.flush's jerk-aware reverse pass (Plan 9 A2c) must
+    NOT call reachable_v_from_v_end / read j_max / call set_junction on
+    a QuinticBlendMove — the blend's (v_in, cruise_v, v_out) profile is
+    TOPP-baked at emit time and immutable (Option-Z).  Instead the pass
+    uses the QBM's baked max_start_v2 / max_cruise_v2 / max_smoothed_v2
+    directly.
 
-    Bug: LookAheadQueue.flush calls move.reachable_v_from_v_end() and reads
-    move.j_max on every move in the queue.  CornerBlender emits
-    QuinticBlendMove objects that enter the inner LookAheadQueue via
-    BlendPipelineLookAheadQueue.add_move → inner.add_move.  When flush runs
-    its reverse-pass loop, it crashes on QuinticBlendMove.
+    Fields populated at construction on the QBM (start_v, cruise_v,
+    end_v, accel_t, cruise_t, decel_t) must therefore equal the
+    TOPP-baked endpoint velocities / phase timings — no reverse-pass
+    set_junction call reshapes them.
     """
     th = _PipelineToolhead(shaper_type="mzv", freq=42.0)
 
@@ -444,14 +401,30 @@ def test_pipeline_quintic_blend_move_missing_reverse_pass_attributes():
     assert len(quintics) == 1, "Expected 1 QuinticBlendMove from CornerBlender"
     qm = quintics[0]
 
-    # Confirm the missing attributes.
-    assert not hasattr(qm, "reachable_v_from_v_end"), (
-        "QuinticBlendMove now has reachable_v_from_v_end — "
-        "the production bug is fixed.  Delete this test and "
-        "un-xfail test_full_pipeline_with_mzv_shaper_exercises_all_stages."
+    # QBM is NOT a subclass of Move — reverse pass skips via isinstance check.
+    assert not isinstance(qm, Move), (
+        "QuinticBlendMove must not be a subclass of Move; the reverse pass "
+        "uses isinstance(move, Move) to skip jerk-aware refinement of blends."
     )
-    assert not hasattr(qm, "j_max"), (
-        "QuinticBlendMove now has j_max — "
-        "the production bug is fixed.  Delete this test and "
-        "un-xfail test_full_pipeline_with_mzv_shaper_exercises_all_stages."
+
+    # set_junction has been deleted from QBM — it is never invoked in
+    # production (reverse pass skips QBMs) and Move-shape fields are
+    # populated directly at finalize_shape time.
+    assert not hasattr(qm, "set_junction"), (
+        "QuinticBlendMove.set_junction still exists — the reverse-pass "
+        "skip path means it should never be called; remove it to prevent "
+        "silent attribute-based refinement drift."
     )
+
+    # Move-shape fields are populated from TOPP-baked values.
+    for attr in ("start_v", "cruise_v", "end_v",
+                 "accel_t", "cruise_t", "decel_t"):
+        assert hasattr(qm, attr), (
+            f"QuinticBlendMove missing {attr} — extruder.move / "
+            f"motion_report read this on every move."
+        )
+
+    # And they equal the TOPP baked-in values (v_in, cruise_v, v_out).
+    assert qm.start_v == pytest.approx(qm._v_in, abs=1e-9)
+    assert qm.cruise_v == pytest.approx(qm._cruise_v, abs=1e-9)
+    assert qm.end_v == pytest.approx(qm._v_out, abs=1e-9)

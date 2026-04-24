@@ -428,6 +428,31 @@ class LookAheadQueue:
         next_end_v2 = next_smoothed_v2 = peak_cruise_v2 = 0.0
         for i in range(flush_count - 1, -1, -1):
             move = queue[i]
+            # QuinticBlendMove carries a TOPP-baked (v_in, cruise_v, v_out)
+            # profile that is immutable post-emit (Option-Z); skip the
+            # jerk-aware reverse-pass kinematics and treat the blend as
+            # a decel-capable anchor — its max_cruise_v2 defines the new
+            # peak_cruise_v2 for any delayed-accel batch downstream of
+            # it, and its max_start_v2 (=v_in²) feeds the upstream
+            # propagation.
+            if not isinstance(move, Move):
+                start_v2 = move.max_start_v2
+                smoothed_v2 = move.max_smoothed_v2
+                if update_flush_count and peak_cruise_v2:
+                    flush_count = i
+                    update_flush_count = False
+                peak_cruise_v2 = move.max_cruise_v2
+                if delayed and not update_flush_count and i < flush_count:
+                    mc_v2 = peak_cruise_v2
+                    for m, ms_v2, me_v2 in reversed(delayed):
+                        mc_v2 = min(mc_v2, ms_v2)
+                        m.set_junction(
+                            min(ms_v2, mc_v2), mc_v2, min(me_v2, mc_v2)
+                        )
+                del delayed[:]
+                next_end_v2 = start_v2
+                next_smoothed_v2 = smoothed_v2
+                continue
             # Jerk-aware reverse pass (Plan 9 A2c). next_end_v2 is the
             # velocity² the move must land at (next move's start, or 0
             # at end of queue). reachable_v_from_v_end returns the

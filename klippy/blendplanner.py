@@ -358,10 +358,10 @@ class QuinticBlendMove:
     (phase_t_ends_tuple, total_t_baked, arc_length, v_cap_min,
      start_pos_xyz, coeff_tuple, legacy_t_accel_end, legacy_t_decel_start,
      legacy_total_t). The first 6 fields feed trapq_append_quintic
-     directly; the trailing legacy trio stays around for callers like
-     set_junction that still want the underlying trapezoid-in-s phase
-     timings (which may differ from the baked polynomial's phase
-     structure when an FIR shaper extends the move duration).
+     directly; the trailing legacy trio is the unshaped trapezoid-in-s
+     phase timings (which may differ from the baked polynomial's phase
+     structure when an FIR shaper extends the move duration) kept for
+     debugging / instrumentation.
     """
 
     def __init__(self, toolhead, shape, start_pos_4d, end_pos_4d,
@@ -540,6 +540,17 @@ class QuinticBlendMove:
             v_cap_min * v_cap_min if v_cap_min else 0.0
         )
         self.next_junction_v_capped_to = None
+        # Move-shape fields populated directly from the TOPP-baked endpoint
+        # velocities / phase timings — the LookAheadQueue reverse pass skips
+        # QBMs (Option-Z: blend velocities are immutable once composed), so
+        # set_junction is never invoked and these fields must be populated
+        # here. Consumers (extruder.move, motion_report) still read them.
+        self.start_v = self._v_in
+        self.cruise_v = self._cruise_v
+        self.end_v = self._v_out
+        self.accel_t = t_accel_end
+        self.cruise_t = max(0.0, t_decel_start - t_accel_end)
+        self.decel_t = max(0.0, total_t - t_decel_start)
 
     def limit_speed(self, speed, accel):
         v2 = speed * speed
@@ -575,33 +586,6 @@ class QuinticBlendMove:
             max_start_v2,
             prev_move.max_smoothed_v2 + prev_move.smooth_delta_v2,
         )
-
-    def set_junction(self, start_v2, cruise_v2, end_v2):
-        # Under D7 Option Z the outer lookahead converges to exactly the
-        # v_in / cruise_v / v_out that TOPP composed into the quintic
-        # phase polynomials, so the (start_v2, cruise_v2, end_v2) passed
-        # in should equal the blender's baked-in values. The pre-composed
-        # phase timings (t_accel_end, t_decel_start, total_t) are the
-        # authoritative ones — trapq_append_quintic steps directly from
-        # them in _process_moves regardless of what we store here.
-        # Populate the Move-shaped fields (start_v, cruise_v, end_v,
-        # accel_t, cruise_t, decel_t) that downstream consumers such as
-        # extruder.move expect to find on every move.
-        # New payload layout: (phase_t_ends_tuple, total_t_baked,
-        # arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
-        # t_accel_end, t_decel_start, total_t). The legacy 3-phase
-        # (t_accel_end, t_decel_start, total_t) trio is retained at the
-        # tail for consumers like set_junction that still want the
-        # trapezoid-in-s-timing shape even after the polynomial has been
-        # extended by a FIR kernel.
-        payload = self.quintic_trapq_payload
-        t_accel_end, t_decel_start, total_t = payload[-3], payload[-2], payload[-1]
-        self.start_v = math.sqrt(start_v2) if start_v2 > 0.0 else 0.0
-        self.cruise_v = math.sqrt(cruise_v2) if cruise_v2 > 0.0 else 0.0
-        self.end_v = math.sqrt(end_v2) if end_v2 > 0.0 else 0.0
-        self.accel_t = t_accel_end
-        self.cruise_t = max(0.0, t_decel_start - t_accel_end)
-        self.decel_t = max(0.0, total_t - t_decel_start)
 
 
 class CornerBlender:
