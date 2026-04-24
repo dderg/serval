@@ -41,8 +41,8 @@
   3. `test_a3_ztilt_regression_1000mms_shape_baked` — z_tilt structural test: 100 mm move at 1000 mm/s with MZV 42 Hz exits flush with `baked_coeffs != unshaped_coeffs`. Structural precondition for the hardware fix.
 
 - Targeted Plan-9-specific suite: **574 passed, 4 skipped, 0 failed** (was 571 before T6).
-- A3-specific new tests (T1–T6): **21 new tests** in `test_toolhead_shape_bake.py`.
-- Full cumulative Plan-9-specific test count: 274 (pre-A3 baseline) + 21 (A3) = **295**.
+- A3-specific new tests (T1–T6): **24 new tests** in `test_toolhead_shape_bake.py`.
+- Full cumulative Plan-9-specific test count: 274 (pre-A3 baseline) + 24 (A3) = **298**.
 - No regressions in `test_blendextruder_integration.py`, `test_chunk3_pa_integration.py`, `test_blendplanner.py`, `test_blendprepass.py`, `test_toolhead_jerk_wiring.py`, `test_toolhead_jerk_integration.py`.
 
 ## Architecture notes
@@ -51,7 +51,7 @@
 
 - The deferred-last pattern **mirrors `CornerBlender._finalize_pending`**. Every kinematic Move in the LookAheadQueue will see non-None neighbours mid-stream; zero-pad occurs only at true print boundaries (`lazy=False` drain with no follow-up move).
 
-- **`_is_shape_bake_target(move)`** — module-level predicate: `isinstance(move, Move) and move.is_kinematic_move`. QuinticBlendMoves inherit from Move but already have their `finalize_shape` called before entering the LookAheadQueue; they carry a populated `_unshaped_payload` so `_finalize_with_neighbours` would technically re-bake them. In practice they are not re-baked because `_is_shape_bake_target` tests `isinstance(move, Move)` — and QuinticBlendMove IS a Move subclass. This is safe because the LookAheadQueue T5 code calls `finalize_shape` on targets, and `finalize_shape` is idempotent (it overwrites `quintic_trapq_payload`). The T5 invariant is: the final `quintic_trapq_payload` reflects the queue-position neighbours, which is correct whether or not the move was pre-baked.
+- **`_is_shape_bake_target(move)`** — module-level predicate: `isinstance(move, Move) and move.is_kinematic_move`. QuinticBlendMove is a standalone class (not a Move subclass — see `klippy/blendplanner.py:341`), so the `isinstance(move, Move)` discriminator excludes it from the LookAheadQueue's shape-bake pass entirely. QBMs are shape-baked upstream by `CornerBlender._finalize_pending` before they reach the inner LookAheadQueue, so this exclusion is correct — there's no double-baking risk and no missed bake.
 
 - **Safety-net call in `set_junction`**: `set_junction` still calls `finalize_shape()` immediately after building `_unshaped_payload`. This zero-pad bake ensures `quintic_trapq_payload` is always populated for unit tests that bypass the LookAheadQueue. The flush pass's `finalize_shape` call overwrites this with correct neighbours for production paths.
 
@@ -65,8 +65,12 @@ A3 closes this gap: every plain `Move` now exits the planner with a shaper-convo
 
 ## Known limits / follow-up
 
-- **`shape_disabled` bypass audit** — drip_move / force_move / manual_stepper paths call `lookahead.flush` in ways that may skip the shape-bake pass or route through the old trapezoid emit. Documented as future scope; not in A3 scope.
+- **Known limit — cross-blend-boundary zero-pad.** At every boundary between a plain Move and a QuinticBlendMove (in either direction), the shaper kernel sees a zero-pad discontinuity on the cross-boundary side: the discriminator skips QBMs as neighbours for plain Moves, and CornerBlender finalizes QBMs with `next=None` whenever the following move isn't a blend (`klippy/blendplanner.py:774,908`). This means "shape-baked by construction" holds within blend runs and within plain-Move runs, but is degraded at run-to-run transitions. Not a correctness blocker for the z_tilt straight-line target (no blend runs involved), but flagged for future work — likely a Phase A6 or B follow-up to plumb the QBM↔Move neighbour handshake.
 
-- **Cross-blend-boundary neighbour context** — when a plain `Move` is queued directly after a `QuinticBlendMove`, the "prev" neighbour supplied to `bake_shaper_polynomial` is the QBM's `_unshaped_payload`. This is the un-shaped polynomial of the corner move, which is correct (the shaper sees the underlying unfiltered trajectory and convolves it).
+- **No integration test exercises the full upstream pipeline.** All 24 A3 tests inject moves directly into the inner `laq.queue`, bypassing `ToolHead.lookahead.add_move` → `BlendPipelineLookAheadQueue` → `CollinearCollapser` → `CornerBlender` → inner `LookAheadQueue`. A broken prepass or blender filter with a configured shaper wouldn't be caught by the current test set. Track for follow-up — add an end-to-end test that drives the full filter stack.
+
+- **Wasted safety-net `finalize_shape()` call.** `Move.set_junction` at `klippy/toolhead.py:344` calls `finalize_shape()` without neighbours, which is then overwritten by `LookAheadQueue.flush`'s neighbour-aware call. For an N-move flush that's N wasted shape-bake calls — pure cost, not correctness. Track for follow-up cleanup (can be guarded by a flag set only on the direct-test path).
+
+- **`shape_disabled` bypass audit** — drip_move / force_move / manual_stepper / IDEX paths call `lookahead.flush` in ways that may skip the shape-bake pass or route through the old trapezoid emit. Documented as future scope; not in A3 scope.
 
 - **Phase B onwards** — host↔MCU protocol redesign for quintic polynomial emit; MCU firmware for the `trapq_append_quintic` path; Rust rewrite candidates (per Plan 9 scope expansion 2026-04-24).
