@@ -278,6 +278,13 @@ class Move:
         # lowered) is correct. calc_junction's centripetal formula
         # on the NEXT move continues to reference prev_move.accel
         # for the same purpose.
+        # A2d: populate quintic_trapq_payload so _process_moves routes
+        # this move through trapq_append_quintic with a jerk-limited XY
+        # polynomial and a PA-baked E polynomial. Kinematic moves only —
+        # extrude-only (is_kinematic_move == False) fall back to the
+        # legacy trapezoid path.
+        if self.is_kinematic_move:
+            self.quintic_trapq_payload = self.build_quintic_payload()
 
 
 LOOKAHEAD_FLUSH_TIME = 0.250

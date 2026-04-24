@@ -273,3 +273,30 @@ def test_build_quintic_payload_pa_linear_fills_e_slot():
             "E slot all zero after PA compose with k_pa=0.05")
     finally:
         klippy.blendplanner._resolve_pa_dispatch = orig
+
+
+def test_set_junction_populates_quintic_trapq_payload():
+    """After set_junction, move.quintic_trapq_payload must be the same
+    9-tuple build_quintic_payload would return."""
+    from klippy.toolhead import Move
+    th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
+    m = Move(th, (0, 0, 0, 0), (50, 0, 0, 0), speed=200.0)
+    m.set_junction(0.0, 200.0 ** 2, 0.0)
+    assert hasattr(m, "quintic_trapq_payload")
+    payload = m.quintic_trapq_payload
+    assert isinstance(payload, tuple)
+    assert len(payload) == 9
+    nonzero_segs = [s for s in m.jerk_profile.segments if s.T > 1e-12]
+    assert len(payload[0]) == len(nonzero_segs)
+
+
+def test_set_junction_quintic_payload_total_t_equals_sum_of_phase_times():
+    """total_t_baked == accel_t + cruise_t + decel_t (all derived from
+    jerk profile)."""
+    from klippy.toolhead import Move
+    th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
+    m = Move(th, (0, 0, 0, 0), (50, 0, 0, 0), speed=300.0)
+    m.set_junction(0.0, 300.0 ** 2, 0.0)
+    payload = m.quintic_trapq_payload
+    assert payload[1] == pytest.approx(
+        m.accel_t + m.cruise_t + m.decel_t, rel=1e-9)
