@@ -125,3 +125,25 @@ def test_emitter_rejects_bad_profile():
     with pytest.raises(ValueError):
         build_jerk_profile_as_quintic_coeffs(
             profile=bad, axes_r=(1.0, 0.0, 0.0), start_pos=(0.0, 0.0, 0.0))
+
+
+def test_roundtrip_eval_matches_profile_sum():
+    """Sample positions from coeff_buf at key times; must match jerk_profile's
+    own polynomial evaluation + start_pos offset."""
+    prof = jp.compute_profile(0.0, 0.0, 200.0, 5000.0, 100000.0, 50.0)
+    n_phases, phase_t_ends, coeff_buf = build_jerk_profile_as_quintic_coeffs(
+        profile=prof,
+        axes_r=(1.0, 0.0, 0.0),
+        start_pos=(100.0, 0.0, 0.0),
+    )
+    segs_nonzero = [s for s in prof.segments if s.T > 1e-12]
+    for phase_idx, seg in enumerate(segs_nonzero):
+        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+            local_t = frac * seg.T
+            # Direct eval on the segment's 1-D polynomial.
+            p_1d = 0.0
+            for c in reversed(seg.coeffs):
+                p_1d = p_1d * local_t + c
+            x_expected = 100.0 + p_1d
+            x_from_buf = _eval_phase(coeff_buf, phase_idx, 0, local_t)
+            assert x_from_buf == pytest.approx(x_expected, abs=1e-9, rel=1e-9)
