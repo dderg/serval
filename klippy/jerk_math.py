@@ -109,3 +109,78 @@ def reachable_v_end(v_start: float, a_max: float, j_max: float, L: float) -> flo
     if L <= L_boundary:
         return _reachable_v_end_tri(v_start, a_max, j_max, L)
     return _reachable_v_end_trap(v_start, a_max, j_max, L)
+
+
+def max_reachable_cruise_v(
+    v_start: float, v_end: float, a_max: float, j_max: float,
+    L: float, v_cruise_cap: float,
+) -> float:
+    """Largest cruise_v <= v_cruise_cap such that a jerk-limited accel
+    ramp from v_start to cruise_v followed by a decel ramp from cruise_v
+    to v_end fits within total distance L under (a_max, j_max).
+
+    This is the A5 jerk-native replacement for the trapezoidal cruise cap
+    ((v_start**2 + reachable_v_end_from_v_start**2) * 0.5) that Klipper's
+    reverse pass used. Under that cap, a short move could be assigned a
+    cruise_v that jerk_profile.compute_profile then rejected as infeasible.
+
+    Short-circuits:
+      * L == 0 returns min(v_start, v_end, v_cruise_cap).
+      * If reachable_v_end from both endpoints at full L >= v_cruise_cap,
+        returns v_cruise_cap (the move is at-cap-capable).
+      * If v_cruise_cap <= max(v_start, v_end), returns v_cruise_cap
+        (trivially reachable from the higher endpoint).
+
+    Otherwise: bisect on L_accel in [0, L], solving
+      reachable_v_end(v_start, a_max, j_max, L_accel)
+        == reachable_v_end(v_end, a_max, j_max, L - L_accel).
+    Both sides are monotonic and continuous; bisection is robust across
+    the triangular/trapezoidal regime boundaries.
+    """
+    if not all(math.isfinite(x) for x in
+               (v_start, v_end, a_max, j_max, L, v_cruise_cap)):
+        raise ValueError(
+            "max_reachable_cruise_v requires finite inputs; got "
+            f"v_start={v_start!r}, v_end={v_end!r}, a_max={a_max!r}, "
+            f"j_max={j_max!r}, L={L!r}, v_cruise_cap={v_cruise_cap!r}"
+        )
+    if v_start < 0.0 or v_end < 0.0:
+        raise ValueError("v_start and v_end must be >= 0")
+    if a_max <= 0.0 or j_max <= 0.0:
+        raise ValueError("a_max and j_max must be > 0")
+    if L < 0.0:
+        raise ValueError("L must be >= 0")
+    if v_cruise_cap <= 0.0:
+        return 0.0
+    if L == 0.0:
+        return min(v_start, v_end, v_cruise_cap)
+    # Short-circuit: cap is at or below both endpoints -- cruising at the cap
+    # is trivially feasible because no acceleration is needed on either side.
+    # NB: v_cruise_cap <= max(v_start, v_end) is NOT safe -- the higher
+    # endpoint may itself be unreachable from the lower endpoint within L
+    # (this is the bed_mesh crash signature).
+    if v_cruise_cap <= min(v_start, v_end):
+        return v_cruise_cap
+    # Short-circuit: both ends can reach the cap in the full L -- take it.
+    reach_start_full = reachable_v_end(v_start, a_max, j_max, L)
+    reach_end_full = reachable_v_end(v_end, a_max, j_max, L)
+    if reach_start_full >= v_cruise_cap and reach_end_full >= v_cruise_cap:
+        return v_cruise_cap
+    # Bisection: find L_accel in [0, L] where ramp_from_start(L_accel) ==
+    # ramp_from_end(L - L_accel). Monotonicity: ramp_from_start is
+    # increasing in L_accel, ramp_from_end is decreasing.
+    lo, hi = 0.0, L
+    for _ in range(60):  # 2^-60 L is machine-epsilon territory.
+        mid = (lo + hi) * 0.5
+        v_from_start = reachable_v_end(v_start, a_max, j_max, mid)
+        v_from_end = reachable_v_end(v_end, a_max, j_max, L - mid)
+        if v_from_start < v_from_end:
+            lo = mid
+        else:
+            hi = mid
+    mid = (lo + hi) * 0.5
+    crossover_v = min(
+        reachable_v_end(v_start, a_max, j_max, mid),
+        reachable_v_end(v_end, a_max, j_max, L - mid),
+    )
+    return min(crossover_v, v_cruise_cap)
