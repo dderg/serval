@@ -382,6 +382,13 @@ class QuinticBlendMove:
         self.axes_r = tuple(d * inv for d in axes_d)
         self.move_d = shape.arc_length if shape.arc_length > 0.0 else move_d
         self.accel = accel if accel is not None else a_max
+        # Plan 9 A5: j_max parity with plain Move. A downstream plain
+        # Move's calc_junction reads prev_move.j_max for the jerk-aware
+        # forward reachability cap; without this, flushes where a plain
+        # Move follows a QuinticBlendMove would AttributeError. T3 will
+        # rewrite QBM further, but the j_max parity is part of the
+        # stable attribute contract shared with Move.
+        self.j_max = toolhead.max_jerk
         self.timing_callbacks = []
         self.is_kinematic_move = True
         self.max_cruise_v2 = cruise_v * cruise_v

@@ -494,3 +494,44 @@ def test_reverse_pass_uses_max_reachable_cruise_v():
         L=m_b.move_d, v_cruise_cap=500.0,
     )
     assert m_b.cruise_v == pytest.approx(expected, rel=1e-6)
+
+
+def test_calc_junction_forward_cap_uses_reachable_v_end():
+    """Move.calc_junction's forward reachability cap must be
+    ``reachable_v_end(prev_start_v, prev_accel, prev_j_max, prev_move_d)²``
+    — the A5 jerk-aware replacement for the trapezoidal
+    ``prev_max_start_v2 + prev_delta_v2`` term.
+
+    Scenario: m1 starts from rest (max_start_v2=0), so the forward
+    cap evaluates to ``reachable_v_end(0, a, j, L)²``. For a=5000,
+    j=100000, L=10 the triangular-regime answer is ~215.44 mm/s
+    → v² ≈ 46415. At a 150° turn the centripetal cap is
+    ~93301 (looser), the per-move max_cruise_v² = 1000² = 1e6
+    (looser), and the extruder cap is 1e18 (looser). Forward-reach
+    is the binding term.
+    """
+    import math as _math
+    from klippy import jerk_math
+    from klippy.toolhead import Move
+
+    th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0,
+                       max_velocity=1000.0)
+    # 150° turn angle at the junction (theta/2 = 75° → tan ≈ 3.732).
+    turn = _math.radians(150.0)
+    dx = 10.0 * _math.cos(_math.pi - turn)
+    dy = 10.0 * _math.sin(_math.pi - turn)
+    m1 = Move(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=1000.0)
+    m2 = Move(th, (10, 0, 0, 0), (10 + dx, dy, 0, 0), speed=1000.0)
+    m2.calc_junction(m1)
+
+    prev_start_v = (_math.sqrt(m1.max_start_v2)
+                    if m1.max_start_v2 > 0.0 else 0.0)
+    expected_reach = jerk_math.reachable_v_end(
+        v_start=prev_start_v, a_max=m1.accel, j_max=m1.j_max,
+        L=m1.move_d,
+    )
+    expected_cap = expected_reach * expected_reach
+    assert m2.max_start_v2 == pytest.approx(expected_cap, rel=1e-9), (
+        f"Forward-reach cap should bind: got {m2.max_start_v2} "
+        f"vs expected {expected_cap}"
+    )

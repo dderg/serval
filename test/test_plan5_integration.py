@@ -47,6 +47,7 @@ class _FakeToolhead:
     def __init__(self, **overrides):
         self.max_velocity = overrides.get("max_velocity", 500.0)
         self.max_accel = overrides.get("max_accel", 10000.0)
+        self.max_jerk = overrides.get("max_jerk", 100000.0)
         self.max_accel_to_decel = overrides.get("max_accel_to_decel", 10000.0)
         self.corner_deviation = overrides.get("corner_deviation", 50e-3)
         self.kin = _FakeCheckMove()
@@ -660,3 +661,80 @@ class TestPlan5CascadeIntegration:
         assert found.x_r == pytest.approx(1.0, abs=1e-12)
         assert found.y_r == pytest.approx(0.0, abs=1e-12)
         assert found.accel == pytest.approx(0.0, abs=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase A5 T2 C1 — Move.calc_junction must tolerate a QuinticBlendMove as
+# prev_move, including reading prev_move.j_max for the jerk-aware forward
+# reachability cap. Regression for the omitted attribute that the reviewer
+# found after T2 landed.
+# ---------------------------------------------------------------------------
+
+
+def test_quintic_blend_move_carries_j_max_parity_with_move():
+    """A real QuinticBlendMove emitted by CornerBlender must carry
+    ``j_max`` (= toolhead.max_jerk). ``Move.calc_junction`` reads this
+    when the prev_move is a QBM; without parity the flush crashes with
+    AttributeError.
+    """
+    from klippy.toolhead import Move as _RealMove
+
+    th = _make_toolhead_with_bs_shaper(
+        "bs3", 40.0, 10000.0, 0.2,
+    )
+    _, quintic_move, _ = _emit_right_angle_blend(th, speed=200.0)
+    # Parity check: the attribute exists and matches toolhead.max_jerk.
+    assert hasattr(quintic_move, "j_max"), (
+        "QuinticBlendMove must carry j_max (A5 attribute-contract parity "
+        "with Move — Move.calc_junction reads prev_move.j_max)"
+    )
+    assert quintic_move.j_max == th.max_jerk
+
+    # End-to-end contract: a plain Move constructed downstream of the QBM
+    # must survive calc_junction(qbm) without AttributeError AND its
+    # max_start_v2 must be bounded by the jerk-aware forward-reach cap
+    # computed from the QBM's (max_start_v2, accel, j_max, move_d).
+    import math as _math
+    from klippy import jerk_math as _jm
+
+    class _RealisticToolhead:
+        # Minimal surface Move + calc_junction need. Uses the QBM's
+        # toolhead.max_jerk so the plain Move's own j_max matches.
+        max_velocity = th.max_velocity
+        max_accel = th.max_accel
+        max_jerk = th.max_jerk
+
+        class _Ext:
+            def calc_junction(self, *_a):
+                return 1e18
+        extruder = _Ext()
+
+    rth = _RealisticToolhead()
+    # Place the plain Move collinear with the QBM's exit direction so the
+    # centripetal cap is loose (cos_theta ≈ 1) and the forward-reach cap
+    # is the binding term.
+    qbm_axes_r = quintic_move.axes_r
+    exit_dir = (qbm_axes_r[0], qbm_axes_r[1], qbm_axes_r[2])
+    exit_pos = quintic_move.end_pos
+    end_pos = (
+        exit_pos[0] + 10.0 * exit_dir[0],
+        exit_pos[1] + 10.0 * exit_dir[1],
+        exit_pos[2] + 10.0 * exit_dir[2],
+        exit_pos[3],
+    )
+    # The real Move requires (x,y,z,e) tuples; ensure the chord is > 0.
+    m = _RealMove(rth, exit_pos, end_pos, speed=200.0)
+    # Must not raise: this is the regression.
+    m.calc_junction(quintic_move)
+    # Upper bound: the jerk-aware forward-reach cap is computed from the
+    # QBM attributes. max_start_v2 must be at most that value.
+    prev_start_v = (_math.sqrt(quintic_move.max_start_v2)
+                    if quintic_move.max_start_v2 > 0.0 else 0.0)
+    forward_reach = _jm.reachable_v_end(
+        v_start=prev_start_v,
+        a_max=quintic_move.accel, j_max=quintic_move.j_max,
+        L=quintic_move.move_d,
+    )
+    assert m.max_start_v2 <= forward_reach * forward_reach + 1e-9, (
+        "Move.max_start_v2 must respect the QBM-sourced forward-reach cap"
+    )

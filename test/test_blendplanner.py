@@ -22,6 +22,7 @@ class _FakeToolhead:
     def __init__(self, **overrides):
         self.max_velocity = overrides.get("max_velocity", 500.0)
         self.max_accel = overrides.get("max_accel", 10000.0)
+        self.max_jerk = overrides.get("max_jerk", 100000.0)
         self.max_accel_to_decel = overrides.get("max_accel_to_decel", 10000.0)
         self.corner_deviation = overrides.get("corner_deviation", 50e-3)
         self.kin = _FakeCheckMove()

@@ -487,17 +487,14 @@ class LookAheadQueue:
                 update_flush_count = False
             if not update_flush_count and i < flush_count:
                 move.set_junction(start_v2, cruise_v2, end_v2)
-            # Backwards-reachability bound feeding the move upstream:
-            # the largest v_start² such that a jerk-limited accel group
-            # ends at this move's start_v across this move's distance
-            # is ``reachable_v_end(start_v, accel, j_max, move_d)`` by
-            # time-reversal symmetry of the jerk profile.
-            reach = jerk_math.reachable_v_end(
-                v_start=start_v,
-                a_max=move.accel, j_max=move.j_max,
-                L=move.move_d,
-            )
-            next_end_v2 = min(start_v2, reach * reach)
+            # Continuity: the upstream move's end_v² equals this move's
+            # start_v². A further reachable_v_end(start_v, accel, j_max,
+            # move_d) bound here would be a no-op — reachable_v_end
+            # returns v_start + dv with dv >= 0, so min(start_v2, reach²)
+            # always reduces to start_v2. The jerk-aware accel-side
+            # cap on this move's own start_v has already been folded
+            # into start_v2 via max_reachable_cruise_v above.
+            next_end_v2 = start_v2
         # Plan 9 A3 — drain the pending-last move when the queue is empty
         # and the caller requested a full drain. The early-return below
         # would otherwise orphan the pending at drain points like
