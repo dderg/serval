@@ -175,17 +175,20 @@ def test_set_junction_populates_start_v_cruise_v_end_v():
 
 
 def test_build_quintic_payload_returns_expected_tuple_shape():
-    """build_quintic_payload must return a 9-tuple matching QuinticBlendMove's
-    payload contract:
+    """quintic_trapq_payload (populated by finalize_shape after set_junction)
+    must be a 9-tuple matching QuinticBlendMove's payload contract:
       (phase_t_ends_tuple, total_t_baked, arc_length, v_cap_min,
        start_pos_xyz, coeff_tuple,
        legacy_t_accel_end, legacy_t_decel_start, legacy_total_t)
+
+    Plan 9 A3: build_quintic_payload was renamed to build_unshaped_payload
+    (3-tuple) + finalize_shape (packs 9-tuple into quintic_trapq_payload).
     """
     from klippy.toolhead import Move
     th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
     m = Move(th, (1, 2, 3, 0), (51, 2, 3, 0), speed=200.0)
     m.set_junction(0.0, 200.0 ** 2, 0.0)
-    payload = m.build_quintic_payload()
+    payload = m.quintic_trapq_payload
     assert isinstance(payload, tuple)
     assert len(payload) == 9
     phase_t_ends, total_t, arc_length, v_cap_min, start_pos_xyz, coeff_tuple, \
@@ -204,17 +207,18 @@ def test_build_quintic_payload_returns_expected_tuple_shape():
 
 
 def test_build_quintic_payload_xy_polynomial_matches_build_jerk_profile():
-    """The XY polynomial in the payload's coeff_tuple must match
+    """The XY polynomial in the unshaped payload's coeff_tuple must match
     build_jerk_profile_as_quintic_coeffs output bit-for-bit in the
-    .x/.y/.z slots."""
+    .x/.y/.z slots.
+
+    Plan 9 A3: uses _unshaped_payload (3-tuple) instead of the removed
+    build_quintic_payload method."""
     from klippy.chelper.linear_quintic import build_jerk_profile_as_quintic_coeffs
     from klippy.toolhead import Move
     th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
     m = Move(th, (1, 2, 3, 0), (51, 2, 3, 0), speed=200.0)
     m.set_junction(0.0, 200.0 ** 2, 0.0)
-    payload = m.build_quintic_payload()
-    phase_t_ends = payload[0]
-    coeff_tuple = payload[5]
+    phase_t_ends, _total_t, coeff_tuple = m._unshaped_payload
     n_phases = len(phase_t_ends)
     expected_n, expected_t_ends, expected_coeff = \
         build_jerk_profile_as_quintic_coeffs(
@@ -230,14 +234,16 @@ def test_build_quintic_payload_xy_polynomial_matches_build_jerk_profile():
 
 
 def test_build_quintic_payload_pa_zero_when_no_pa():
-    """With no PA configured, .e slot must be all zeros."""
+    """With no PA configured, .e slot must be all zeros.
+
+    Plan 9 A3: uses _unshaped_payload (3-tuple) instead of the removed
+    build_quintic_payload method."""
     from klippy.toolhead import Move
     th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
     m = Move(th, (0, 0, 0, 0), (50, 0, 0, 0), speed=200.0)
     m.set_junction(0.0, 200.0 ** 2, 0.0)
-    payload = m.build_quintic_payload()
-    n_phases = len(payload[0])
-    coeff_tuple = payload[5]
+    phase_t_ends, _total_t, coeff_tuple = m._unshaped_payload
+    n_phases = len(phase_t_ends)
     for i in range(n_phases):
         for k in range(15):
             idx = (i * 15 + k) * 4 + 3
@@ -246,7 +252,10 @@ def test_build_quintic_payload_pa_zero_when_no_pa():
 
 
 def test_build_quintic_payload_pa_linear_fills_e_slot():
-    """With k_pa > 0, the .e slot should carry a nontrivial polynomial."""
+    """With k_pa > 0, the .e slot should carry a nontrivial polynomial.
+
+    Plan 9 A3: uses build_unshaped_payload() directly instead of the
+    removed build_quintic_payload method."""
     from klippy.toolhead import Move
     import klippy.blendplanner
 
@@ -261,9 +270,8 @@ def test_build_quintic_payload_pa_linear_fills_e_slot():
     try:
         m = Move(th, (0, 0, 0, 0), (50, 0, 0, 5), speed=200.0)
         m.set_junction(0.0, 200.0 ** 2, 0.0)
-        payload = m.build_quintic_payload()
-        n_phases = len(payload[0])
-        coeff_tuple = payload[5]
+        phase_t_ends, _total_t, coeff_tuple = m.build_unshaped_payload()
+        n_phases = len(phase_t_ends)
         e_values = []
         for i in range(n_phases):
             for k in range(15):
@@ -276,8 +284,8 @@ def test_build_quintic_payload_pa_linear_fills_e_slot():
 
 
 def test_set_junction_populates_quintic_trapq_payload():
-    """After set_junction, move.quintic_trapq_payload must be the same
-    9-tuple build_quintic_payload would return."""
+    """After set_junction, move.quintic_trapq_payload must be a valid
+    9-tuple (populated via build_unshaped_payload + finalize_shape)."""
     from klippy.toolhead import Move
     th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
     m = Move(th, (0, 0, 0, 0), (50, 0, 0, 0), speed=200.0)

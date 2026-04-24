@@ -60,6 +60,9 @@ class Move:
         self.max_smoothed_v2 = 0.0
         self.smooth_delta_v2 = 2.0 * move_d * toolhead.max_accel_to_decel
         self.next_junction_v2 = 999999999.9
+        # Plan 9 A3: unshaped polynomial, set by build_unshaped_payload
+        # after set_junction. None until set_junction is called.
+        self._unshaped_payload = None
 
     def limit_speed(self, speed, accel):
         speed2 = speed**2
@@ -87,22 +90,14 @@ class Move:
             v_start=v_end, a_max=self.accel, j_max=self.j_max, L=self.move_d,
         )
 
-    def build_quintic_payload(self):
-        """Build a jerk-limited XY + PA-baked E quintic_trapq_payload.
+    def build_unshaped_payload(self):
+        """Plan 9 A3. Build the unshaped jerk XY + PA-baked E polynomial.
 
-        Plan 9 A2d. Mirrors QuinticBlendMove.finalize_shape's payload
-        format but skips shape baking (A3 scope). Must be called AFTER
-        set_junction (requires self.jerk_profile). Returns the 9-tuple
-        consumed by `_process_moves`:
-
-            (phase_t_ends_tuple, total_t_baked,
-             arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
-             legacy_t_accel_end, legacy_t_decel_start, legacy_total_t)
-
-        The XY polynomial is the A2a emitter's output; the .e slot is
-        filled by linear_pa_compose / nonlinear_pa_compose selected via
-        blendplanner._resolve_pa_dispatch(self.toolhead). No shape
-        baking.
+        Returns ``(phase_t_ends, total_t, coeff_tuple)`` — the raw
+        polynomial before input-shaper convolution. Shape baking is
+        applied later by ``finalize_shape`` once prev/next neighbour
+        polynomials are known. Must be called AFTER ``set_junction``
+        (requires ``self.jerk_profile``).
         """
         from .chelper.linear_quintic import build_jerk_profile_as_quintic_coeffs
         from .chelper import linear_pa_compose as _linear_pa_compose
@@ -117,7 +112,7 @@ class Move:
         active_len = n_phases * 15 * 4
         coeff_list = list(coeff_buf_full[:active_len])
         phase_t_ends_tuple = tuple(phase_t_ends_list)
-        total_t_baked = phase_t_ends_tuple[-1] if phase_t_ends_tuple else 0.0
+        total_t = phase_t_ends_tuple[-1] if phase_t_ends_tuple else 0.0
         arc_length = self.move_d
         if arc_length > 0.0:
             extr_r = self.axes_d[3] / arc_length
@@ -147,19 +142,32 @@ class Move:
                 n_phases, coeff_list,
                 axis_n=axis_n, extr_r=extr_r, k_pa=0.0,
             )
-        coeff_tuple = tuple(coeff_list)
+        return phase_t_ends_tuple, total_t, tuple(coeff_list)
+
+    def finalize_shape(self, prev_unshaped=None, next_unshaped=None,
+                       prev_start_pos_xyz=None, next_start_pos_xyz=None):
+        """Plan 9 A3. Shape-bake the unshaped polynomial and store
+        ``self.quintic_trapq_payload`` for emit.
+
+        Task 1 stub: no shape baking — pass unshaped through. Task 3
+        replaces this with the ``_bake_shaper_polynomial`` call.
+        """
+        phase_t_ends, total_t, coeff_tuple = self._unshaped_payload
+        baked_t_ends = phase_t_ends
+        baked_total_t = total_t
+        baked_coeffs = coeff_tuple
+        arc_length = self.move_d
         v_cap_min = min(self.start_v, self.cruise_v, self.end_v)
         if v_cap_min < 0.0:
             v_cap_min = 0.0
-        start_pos_xyz = (
-            self.start_pos[0], self.start_pos[1], self.start_pos[2]
-        )
+        start_pos_xyz = (self.start_pos[0], self.start_pos[1],
+                         self.start_pos[2])
         legacy_t_accel_end = self.accel_t
         legacy_t_decel_start = self.accel_t + self.cruise_t
         legacy_total_t = self.accel_t + self.cruise_t + self.decel_t
-        return (
-            phase_t_ends_tuple, total_t_baked,
-            arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+        self.quintic_trapq_payload = (
+            baked_t_ends, baked_total_t,
+            arc_length, v_cap_min, start_pos_xyz, baked_coeffs,
             legacy_t_accel_end, legacy_t_decel_start, legacy_total_t,
         )
 
@@ -276,13 +284,14 @@ class Move:
         # lowered) is correct. calc_junction's centripetal formula
         # on the NEXT move continues to reference prev_move.accel
         # for the same purpose.
-        # A2d: populate quintic_trapq_payload so _process_moves routes
-        # this move through trapq_append_quintic with a jerk-limited XY
-        # polynomial and a PA-baked E polynomial. Kinematic moves only —
-        # extrude-only (is_kinematic_move == False) fall back to the
-        # legacy trapezoid path.
+        # A3: populate _unshaped_payload and then call finalize_shape as
+        # a safety-net so quintic_trapq_payload is always valid after
+        # set_junction. LookAheadQueue.flush overwrites quintic_trapq_payload
+        # with neighbour-aware baking once prev/next polynomials are known.
+        # Kinematic moves only — extrude-only falls back to legacy trapezoid.
         if self.is_kinematic_move:
-            self.quintic_trapq_payload = self.build_quintic_payload()
+            self._unshaped_payload = self.build_unshaped_payload()
+            self.finalize_shape()
 
 
 LOOKAHEAD_FLUSH_TIME = 0.250
