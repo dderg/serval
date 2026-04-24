@@ -10,7 +10,7 @@ import math
 
 import logging
 
-from . import blendmath, blendquintic, blendshape, topp
+from . import blendmath, blendquintic, blendshape, jerk_math, topp
 from .chelper import bs_compose as _bs_compose
 from .chelper import fir_compose as _fir_compose
 from .chelper import linear_pa_compose as _linear_pa_compose
@@ -317,24 +317,24 @@ def _copy_caller_state(src, dst):
     Pins caller-intent fields verbatim (timing_callbacks, next_junction_v2,
     max_cruise_v2, accel) so that M204 / SET_VELOCITY_LIMIT
     / register_lookahead_callback mutations applied upstream to src survive
-    the emit-time construction of dst. Recomputes length-derived fields
-    (delta_v2, smooth_delta_v2, min_move_t) from dst's NEW move_d and the
-    pinned accel.
+    the emit-time construction of dst. Recomputes length-derived
+    min_move_t from dst's new move_d and pinned max_cruise_v2.
 
     The accel pin is a direct assignment (not via dst.limit_speed) because
     limit_speed takes min(self.accel, accel); if an intervening M204 had
-    lowered toolhead.max_accel between src construction and emit, Move.__init__'s
-    snapshot of the new (lower) value would win over src.accel.
+    lowered toolhead.max_accel between src construction and emit,
+    Move.__init__'s snapshot of the new (lower) value would win over
+    src.accel.
+
+    Plan 9 A5 T3: delta_v2 / smooth_delta_v2 are no longer copied —
+    those fields are retired from the Move / QuinticBlendMove attribute
+    contract. The forward-reach cap that consumed them is now jerk-aware
+    inside calc_junction (reads prev_move.{accel, j_max, move_d} directly).
     """
     dst.timing_callbacks = list(src.timing_callbacks)
     dst.next_junction_v2 = src.next_junction_v2
     dst.max_cruise_v2 = src.max_cruise_v2
     dst.accel = src.accel
-    dst.delta_v2 = 2.0 * dst.move_d * dst.accel
-    ratio = src.smooth_delta_v2 / src.delta_v2 if src.delta_v2 > 0.0 else 1.0
-    dst.smooth_delta_v2 = min(
-        dst.delta_v2, 2.0 * dst.move_d * dst.accel * ratio
-    )
     dst.min_move_t = dst.move_d / math.sqrt(dst.max_cruise_v2)
 
 
@@ -393,7 +393,11 @@ class QuinticBlendMove:
         self.is_kinematic_move = True
         self.max_cruise_v2 = cruise_v * cruise_v
         self.max_start_v2 = v_in * v_in
-        self.max_smoothed_v2 = v_in * v_in
+        # Plan 9 A5 T3: smoothed-pass state (max_smoothed_v2,
+        # smooth_delta_v2) and the trapezoidal forward cap (delta_v2)
+        # are retired. QBM's attribute surface tracks Move's new
+        # contract: max_cruise_v2, max_start_v2, accel, j_max, move_d,
+        # next_junction_v2.
         (accel_polys, cruise_polys, decel_polys, t_accel_end, t_decel_start,
          total_t, arc_length) = shape.compose_phase_polynomials(
             v_in=v_in, v_out=v_out, cruise_v=cruise_v, a_max=a_max,
@@ -541,8 +545,9 @@ class QuinticBlendMove:
         self.min_move_t = total_t if total_t > 0.0 else (
             self.move_d / self._cruise_v if self._cruise_v > 0.0 else 0.0
         )
-        self.delta_v2 = 2.0 * self.move_d * self.accel
-        self.smooth_delta_v2 = self.delta_v2
+        # Plan 9 A5 T3: delta_v2 / smooth_delta_v2 retired — the forward
+        # reachability cap is now jerk-aware (calc_junction reads
+        # prev_move.{accel, j_max, move_d, max_start_v2} directly).
         self.next_junction_v2 = (
             v_cap_min * v_cap_min if v_cap_min else 0.0
         )
@@ -560,12 +565,13 @@ class QuinticBlendMove:
         self.decel_t = max(0.0, total_t - t_decel_start)
 
     def limit_speed(self, speed, accel):
+        # Plan 9 A5 T3: delta_v2 / smooth_delta_v2 retired — the forward
+        # reachability cap is jerk-aware now (Move.calc_junction reads
+        # prev_move.{accel, j_max, move_d}).
         v2 = speed * speed
         if v2 < self.max_cruise_v2:
             self.max_cruise_v2 = v2
         self.accel = min(self.accel, accel)
-        self.delta_v2 = 2.0 * self.move_d * self.accel
-        self.smooth_delta_v2 = min(self.smooth_delta_v2, self.delta_v2)
 
     def limit_next_junction_speed(self, speed):
         v2 = speed * speed
@@ -573,26 +579,42 @@ class QuinticBlendMove:
         self.next_junction_v_capped_to = speed
 
     def calc_junction(self, prev_move):
+        # Plan 9 A5 T3: same treatment as Move.calc_junction — the
+        # constant-accel forward cap (prev_move.delta_v2) is replaced
+        # with jerk-aware forward reachability via
+        # jerk_math.reachable_v_end. The smoothed-pass propagation
+        # (max_smoothed_v2) is gone with A5.
+        #
         # The blend's v_in is pointwise-safe via TOPP + v_cap_fn (D7
         # Option Z); centripetal and extruder flow caps are already
         # composed into v_cap_fn at emit time. Skip both here and just
         # run the upstream cascade so the outer lookahead can still
-        # tighten max_start_v2 / max_smoothed_v2 when the predecessor
-        # turns out to be rate-limited.
+        # tighten max_start_v2 when the predecessor turns out to be
+        # rate-limited.
         if not self.is_kinematic_move or not prev_move.is_kinematic_move:
             return
+        prev_start_v = (math.sqrt(prev_move.max_start_v2)
+                        if prev_move.max_start_v2 > 0.0 else 0.0)
+        # prev_move may be either a plain Move (carries j_max) or
+        # another QuinticBlendMove (also carries j_max as of T2 fixup).
+        # The getattr fallback covers test stubs that pre-date the
+        # attribute-contract migration; production paths always hit
+        # the explicit attribute.
+        prev_j_max = getattr(prev_move, "j_max", self.toolhead.max_jerk)
+        prev_forward_reach = jerk_math.reachable_v_end(
+            v_start=prev_start_v,
+            a_max=prev_move.accel,
+            j_max=prev_j_max,
+            L=prev_move.move_d,
+        )
         max_start_v2 = min(
             self.max_start_v2,
             self.max_cruise_v2,
             prev_move.max_cruise_v2,
             prev_move.next_junction_v2,
-            prev_move.max_start_v2 + prev_move.delta_v2,
+            prev_forward_reach * prev_forward_reach,
         )
         self.max_start_v2 = max_start_v2
-        self.max_smoothed_v2 = min(
-            max_start_v2,
-            prev_move.max_smoothed_v2 + prev_move.smooth_delta_v2,
-        )
 
 
 class CornerBlender:
