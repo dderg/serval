@@ -148,6 +148,7 @@ check_active(struct stepper_kinematics *sk, struct move *m)
             if ((af & AF_X) && ph->c[k].x != 0.0) return 1;
             if ((af & AF_Y) && ph->c[k].y != 0.0) return 1;
             if ((af & AF_Z) && ph->c[k].z != 0.0) return 1;
+            if ((af & AF_E) && ph->c[k].e != 0.0) return 1;
         }
     }
     return 0;

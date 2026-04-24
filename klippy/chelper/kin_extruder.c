@@ -143,6 +143,6 @@ extruder_stepper_alloc(void)
     struct extruder_stepper *es = malloc(sizeof(*es));
     memset(es, 0, sizeof(*es));
     es->sk.calc_position_cb = extruder_calc_position;
-    es->sk.active_flags = AF_X | AF_Y | AF_Z;
+    es->sk.active_flags = AF_E;
     return &es->sk;
 }
