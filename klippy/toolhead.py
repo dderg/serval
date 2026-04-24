@@ -183,9 +183,30 @@ class LookAheadQueue:
         next_end_v2 = next_smoothed_v2 = peak_cruise_v2 = 0.0
         for i in range(flush_count - 1, -1, -1):
             move = queue[i]
-            reachable_start_v2 = next_end_v2 + move.delta_v2
+            # Jerk-aware reverse pass (Plan 9 A2c). next_end_v2 is the
+            # velocity² the move must land at (next move's start, or 0
+            # at end of queue). reachable_v_from_v_end returns the
+            # largest v_start achievable on an accel-side group across
+            # move.move_d under (move.accel, move.j_max). Symmetry lets
+            # us reuse the same primitive for both accel and decel
+            # reverse passes.
+            reachable_start_v = move.reachable_v_from_v_end(
+                math.sqrt(next_end_v2) if next_end_v2 > 0.0 else 0.0
+            )
+            reachable_start_v2 = reachable_start_v * reachable_start_v
             start_v2 = min(move.max_start_v2, reachable_start_v2)
-            reachable_smoothed_v2 = next_smoothed_v2 + move.smooth_delta_v2
+            # Smoothed pass uses max_accel_to_decel as its accel budget;
+            # formula is otherwise identical.
+            next_smoothed_v = (
+                math.sqrt(next_smoothed_v2) if next_smoothed_v2 > 0.0 else 0.0
+            )
+            reachable_smoothed_v = jerk_math.reachable_v_end(
+                v_start=next_smoothed_v,
+                a_max=move.toolhead.max_accel_to_decel,
+                j_max=move.j_max,
+                L=move.move_d,
+            )
+            reachable_smoothed_v2 = reachable_smoothed_v * reachable_smoothed_v
             smoothed_v2 = min(move.max_smoothed_v2, reachable_smoothed_v2)
             if smoothed_v2 < reachable_smoothed_v2:
                 # It's possible for this move to accelerate

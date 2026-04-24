@@ -74,3 +74,54 @@ def test_move_reachable_v_zero_distance_returns_v_end():
     m = Move(th, (0, 0, 0, 0), (1e-6, 0, 0, 0), speed=10.0)  # ~0 move_d
     # reachable_v_from_v_end(v_end) at near-zero L ≈ v_end.
     assert m.reachable_v_from_v_end(50.0) == pytest.approx(50.0, rel=1e-6)
+
+
+def test_lookahead_flush_uses_jerk_reachable():
+    """Two moves: stop at end. Reverse pass must compute max_start_v
+    via jerk_math, not 2*a*L.
+
+    Setup: move A (40 mm) → move B (10 mm) → stop. Under trapezoid
+    (2*a*L) math move B's reachable start_v² = 2*5000*10 = 1e5, so
+    start_v(B) = sqrt(1e5) = 316.2 mm/s. Under jerk_math with
+    a=5000, j=100000, L=10 mm starting from v_end=0, regime is
+    triangular: u³ = L*sqrt(j) = 10 * sqrt(1e5) ≈ 3162.3, u ≈
+    14.68, dv = u² ≈ 215.5, so reachable_v_end(0, ..., 10) ≈ 215.5
+    — materially LOWER than 316.2.
+    """
+    import math as _m
+    from klippy.toolhead import Move, LookAheadQueue
+    from klippy import jerk_math
+
+    captured = []
+
+    class _StubToolhead:
+        def __init__(self):
+            self.max_velocity = 500.0
+            self.max_accel = 5000.0
+            self.max_jerk = 100000.0
+            self.max_accel_to_decel = 5000.0
+            class _K:
+                def check_move(self, m): pass
+            class _E:
+                def check_move(self, m): pass
+                def calc_junction(self, *_a): return 1e18
+            self.kin = _K()
+            self.extruder = _E()
+
+        def _process_moves(self, moves):
+            captured.extend(moves)
+
+    th = _StubToolhead()
+    lookahead = LookAheadQueue(th)
+    # Colinear moves so calc_junction gives cos_theta=1 (straight
+    # junction with no centripetal cap).
+    m_a = Move(th, (0, 0, 0, 0), (40, 0, 0, 0), speed=500.0)
+    m_b = Move(th, (40, 0, 0, 0), (50, 0, 0, 0), speed=500.0)
+    lookahead.queue.extend([m_a, m_b])
+    m_b.calc_junction(m_a)
+    lookahead.flush(lazy=False)
+    expected_start_v = jerk_math.reachable_v_end(
+        v_start=0.0, a_max=5000.0, j_max=100000.0, L=10.0,
+    )
+    assert m_b.start_v == pytest.approx(expected_start_v, rel=1e-9)
+    assert m_b.end_v == pytest.approx(0.0, abs=1e-12)

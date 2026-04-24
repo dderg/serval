@@ -836,6 +836,7 @@ def test_calc_junction_skips_block_at_perfect_tangency():
     class _StubToolhead:
         max_velocity = 1e6
         max_accel = 10000.0
+        max_jerk = 100000.0
         min_cruise_ratio = 0.5
         max_accel_to_decel = th_mod.ToolHead.max_accel_to_decel
         junction_deviation = 0.01  # ignored after deletion; still readable
@@ -865,6 +866,7 @@ def test_calc_junction_centripetal_at_90deg_after_jd_removal():
     class _StubToolhead:
         max_velocity = 1e6
         max_accel = 10000.0
+        max_jerk = 100000.0
         min_cruise_ratio = 0.5
         max_accel_to_decel = th_mod.ToolHead.max_accel_to_decel
         junction_deviation = 0.01  # ignored after deletion
