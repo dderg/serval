@@ -60,3 +60,29 @@ def test_accel_side_timings_matches_reference(v_start, v_end, a_max, j_max, desc
     assert t_a_c == pytest.approx(t_a_r, abs=1e-12), f"t_a mismatch ({desc})"
     assert a_p_c == pytest.approx(a_p_r, abs=1e-12), f"a_peak mismatch ({desc})"
     assert d_c   == pytest.approx(d_r,   abs=1e-9),  f"dist mismatch ({desc})"
+
+
+# Cases where cruise collapses — find_v_hat must return something < v_peak.
+_V_HAT_CASES = [
+    # (v0, v1, v_peak, a_max, j_max, L, desc)
+    (0.0, 0.0, 500.0, 5000.0, 100000.0, 10.0,  "short symmetric"),
+    (0.0, 100.0, 500.0, 5000.0, 100000.0, 15.0, "short asymmetric"),
+    (50.0, 150.0, 500.0, 3000.0, 50000.0, 20.0, "both endpoints nonzero"),
+    (200.0, 200.0, 500.0, 5000.0, 100000.0, 8.0, "endpoints equal, nonzero"),
+]
+
+
+@pytest.mark.parametrize(
+    "v0,v1,v_peak,a_max,j_max,L,desc", _V_HAT_CASES,
+    ids=[c[6] for c in _V_HAT_CASES])
+def test_find_v_hat_matches_reference(v0, v1, v_peak, a_max, j_max, L, desc):
+    v_hat_c = jp.find_v_hat(v0, v1, v_peak, a_max, j_max, L)
+    # Reference's find_v_hat has signature (v0, v1, a_max, j_max, L) — it does
+    # NOT take v_peak (brackets by doubling from max(v0,v1)). The C uses v_peak
+    # as v_hi instead. Both converge to the same root.
+    v_hat_r = REF.find_v_hat(v0, v1, a_max, j_max, L)
+    assert v_hat_c == pytest.approx(v_hat_r, rel=1e-9, abs=1e-9), \
+        f"v_hat mismatch ({desc}): C={v_hat_c}, ref={v_hat_r}"
+    # Sanity: v_hat must be in [max(v0,v1), v_peak].
+    assert v_hat_c >= max(v0, v1) - 1e-9
+    assert v_hat_c <= v_peak + 1e-9
