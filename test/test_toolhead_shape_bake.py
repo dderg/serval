@@ -469,3 +469,129 @@ def test_drain_non_kinematic_pending_on_empty_queue():
     laq.flush(lazy=False)
     assert emitted == [m_e]
     assert laq._pending_last is None
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — A3 integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_a3_e2e_mzv_shaper_bakes_payload_through_lookahead():
+    """End-to-end A3 path: build toolhead with MZV shaper, queue a
+    sequence of kinematic moves through LookAheadQueue, flush, and
+    verify the resulting quintic_trapq_payload is shape-baked (the
+    polynomial's coefficient buffer differs from the unshaped
+    counterpart, proving the shaper convolution was applied).
+
+    This is the primary A3 integration assertion: plain Moves that exit
+    the LookAheadQueue flush pass must have their polynomial transformed
+    by the shaper kernel, not pass-through.
+    """
+    tool = _make_toolhead_with_mzv()
+    laq, emitted = _make_laq_with_spy(tool)
+
+    m1 = _make_move(tool, [0., 0., 0., 0.], [30., 0., 0., 0.], speed=200.0)
+    m2 = _make_move(tool, [30., 0., 0., 0.], [60., 0., 0., 0.], speed=200.0)
+    m3 = _make_move(tool, [60., 0., 0., 0.], [90., 0., 0., 0.], speed=200.0)
+    _inject_and_drain(laq, [m1, m2, m3])
+
+    assert len(emitted) == 3, "all three moves must be emitted"
+    for label, mv in (("m1", m1), ("m2", m2), ("m3", m3)):
+        assert mv.quintic_trapq_payload is not None, (
+            "%s: quintic_trapq_payload not set" % label
+        )
+        baked_coeffs = mv.quintic_trapq_payload[5]
+        unshaped_coeffs = mv._unshaped_payload[2]
+        assert baked_coeffs != unshaped_coeffs, (
+            "%s: baked_coeffs == unshaped_coeffs — shape was NOT applied "
+            "(MZV convolution should change the polynomial)" % label
+        )
+
+
+def test_a3_i3_coverage_gap_neighbour_changes_coeff_tuple():
+    """I3 coverage-gap test (from the T5 reviewer): prove that a move's
+    quintic_trapq_payload[5] (coeff_tuple) depends on its queue-neighbour
+    presence.
+
+    Scenario A: queue [m1, m2, m3] with MZV, lazy flush + drain.
+        m1 is baked with m2 as its next neighbour (queue-internal).
+        Capture m1's coeff_tuple → coeffs_with_neighbour.
+
+    Scenario B: build fresh copies of the same moves; queue [m1_fresh]
+        alone; lazy=False drain. m1 is baked with next=None (no neighbour).
+        Capture m1's coeff_tuple → coeffs_alone.
+
+    Assert coeffs_with_neighbour != coeffs_alone — proves the deferred-
+    last pattern correctly propagates neighbour context, not just a zero-
+    pad for every move.
+    """
+    # Scenario A — m1 baked with m2 as next neighbour
+    tool_a = _make_toolhead_with_mzv()
+    laq_a, emitted_a = _make_laq_with_spy(tool_a)
+    m1_a = _make_move(tool_a, [0., 0., 0., 0.], [20., 0., 0., 0.], speed=200.0)
+    m2_a = _make_move(tool_a, [20., 0., 0., 0.], [40., 0., 0., 0.], speed=200.0)
+    m3_a = _make_move(tool_a, [40., 0., 0., 0.], [60., 0., 0., 0.], speed=200.0)
+    _inject_and_drain(laq_a, [m1_a, m2_a, m3_a])
+    assert m1_a in emitted_a, "m1 must be emitted in Scenario A"
+    coeffs_with_neighbour = m1_a.quintic_trapq_payload[5]
+
+    # Scenario B — m1_fresh alone, no neighbours
+    tool_b = _make_toolhead_with_mzv()
+    laq_b, emitted_b = _make_laq_with_spy(tool_b)
+    m1_b = _make_move(tool_b, [0., 0., 0., 0.], [20., 0., 0., 0.], speed=200.0)
+    _inject_and_drain(laq_b, [m1_b])
+    assert m1_b in emitted_b, "m1 must be emitted in Scenario B"
+    coeffs_alone = m1_b.quintic_trapq_payload[5]
+
+    assert coeffs_with_neighbour != coeffs_alone, (
+        "m1's coeff_tuple must differ when baked with a next-neighbour "
+        "(Scenario A) vs. baked alone with next=None (Scenario B). "
+        "If they are equal, the deferred-last neighbour context is not "
+        "being used in the shaper convolution."
+    )
+
+
+def test_a3_ztilt_regression_1000mms_shape_baked():
+    """Z-tilt regression scenario (structural test): queue a kinematic move
+    at 1000 mm/s with an MZV shaper at ~42 Hz (Trident config), and verify
+    the resulting polynomial is shape-baked (differs from unshaped). This is
+    a structural correctness test — it proves the A3 hot path runs correctly
+    for the specific velocity/shaper regime where the z_tilt stepper-slip
+    regression manifested on the physical Trident printer.
+
+    Hardware validation (confirming the stepper slip is gone) is out of scope
+    for automated tests and must be done on the printer. This test verifies
+    that a move at the regression velocity exits the planner with a shaped
+    polynomial, which is the necessary precondition for the hardware fix.
+    """
+    tool = _make_toolhead_with_mzv()  # MZV 42 Hz — same as Trident config
+    # Use high max_velocity to allow 1000 mm/s cruise
+    tool.max_velocity = 1000.0
+    tool.max_accel = 10000.0
+    tool.max_accel_to_decel = 10000.0
+    # Refresh shaper snapshot so the toolhead cache reflects updated params
+    # (snapshot was captured at construction via shapers_snapshot already set)
+
+    laq, emitted = _make_laq_with_spy(tool)
+
+    # 100 mm kinematic move at 1000 mm/s — matches the z_tilt regression case
+    m = _make_move(tool, [0., 0., 0., 0.], [100., 0., 0., 0.], speed=1000.0)
+    # Manually call set_junction with aggressive jerk profile
+    m.set_junction(0.0, 1000.0 ** 2, 0.0)
+    laq.queue.append(m)
+    laq.flush(lazy=False)
+
+    assert len(emitted) == 1, "the move must be emitted"
+    assert emitted[0] is m
+    assert m.quintic_trapq_payload is not None, (
+        "quintic_trapq_payload must be set after flush at 1000 mm/s"
+    )
+    # The baked polynomial must differ from the unshaped polynomial — proving
+    # the MZV kernel was applied to the high-speed move.
+    baked_coeffs = m.quintic_trapq_payload[5]
+    unshaped_coeffs = m._unshaped_payload[2]
+    assert baked_coeffs != unshaped_coeffs, (
+        "baked_coeffs == unshaped_coeffs at 1000 mm/s — MZV shaper was NOT "
+        "applied (z_tilt regression: this is the exact path that was "
+        "emitting un-shaped polynomials, causing stepper slip)"
+    )
