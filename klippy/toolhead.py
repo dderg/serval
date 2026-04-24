@@ -354,10 +354,20 @@ class LookAheadQueue:
         self.toolhead = toolhead
         self.queue = []
         self.junction_flush = LOOKAHEAD_FLUSH_TIME
+        # Plan 9 A3 — deferred-last shape-bake pattern. The last kinematic
+        # move of each flush batch is held here until the next batch arrives
+        # so its kernel-window `next` neighbour is known. lazy=False flushes
+        # drain the pending move with next=None (the print actually stops).
+        self._pending_last_move = None
+        self._pending_last_prev_unshaped = None
+        self._pending_last_prev_start_pos_xyz = None
 
     def reset(self):
         del self.queue[:]
         self.junction_flush = LOOKAHEAD_FLUSH_TIME
+        self._pending_last_move = None
+        self._pending_last_prev_unshaped = None
+        self._pending_last_prev_start_pos_xyz = None
 
     def set_flush_time(self, flush_time):
         self.junction_flush = flush_time

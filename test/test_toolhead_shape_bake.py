@@ -253,3 +253,30 @@ def test_finalize_shape_offsets_prev_neighbour_polynomial():
     coeffs_no_offset = m2.quintic_trapq_payload[5]
 
     assert coeffs_with_offset != coeffs_no_offset
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — LookAheadQueue deferred-last state fields
+# ---------------------------------------------------------------------------
+
+
+def test_lookahead_queue_has_deferred_last_state():
+    """LookAheadQueue exposes the deferred-last-move state fields for
+    Plan 9 A3 shape-bake pass."""
+    tool = _FakeToolhead()
+    laq = th_mod.LookAheadQueue(tool)
+    assert laq._pending_last_move is None
+    assert laq._pending_last_prev_unshaped is None
+    assert laq._pending_last_prev_start_pos_xyz is None
+
+
+def test_lookahead_queue_reset_clears_deferred_last_state():
+    tool = _FakeToolhead()
+    laq = th_mod.LookAheadQueue(tool)
+    laq._pending_last_move = object()
+    laq._pending_last_prev_unshaped = ((0.,), 0., (0.,) * 60)
+    laq._pending_last_prev_start_pos_xyz = (1., 2., 3.)
+    laq.reset()
+    assert laq._pending_last_move is None
+    assert laq._pending_last_prev_unshaped is None
+    assert laq._pending_last_prev_start_pos_xyz is None
