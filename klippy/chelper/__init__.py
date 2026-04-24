@@ -46,6 +46,7 @@ SOURCE_FILES = [
     "linear_pa_compose.c",
     "cheb_fit.c",
     "nonlinear_pa_compose.c",
+    "jerk_profile.c",
 ]
 DEST_LIB = "c_helper.so"
 OTHER_FILES = [
@@ -65,6 +66,7 @@ OTHER_FILES = [
     "linear_pa_compose.h",
     "cheb_fit.h",
     "nonlinear_pa_compose.h",
+    "jerk_profile.h",
 ]
 
 defs_stepcompress = """
@@ -245,6 +247,35 @@ defs_compose = """
         double *out_max_residual);
 """
 
+defs_jerk_profile = """
+    struct jerk_profile_segment {
+        int type;
+        double T;
+        double coeffs[6];
+        double p0;
+        double v0;
+        double a0;
+        double j;
+    };
+    struct jerk_profile_result {
+        int status;
+        int n_segments;
+        struct jerk_profile_segment segments[7];
+        double a_acc;
+        double a_dec;
+        double v_hat;
+    };
+    int jerk_profile_compute(double v0, double v1, double v_peak,
+        double a_max, double j_max, double L,
+        struct jerk_profile_result *out);
+    void jerk_profile_accel_side_timings(double v_start, double v_end,
+        double a_max, double j_max,
+        double *out_t_j, double *out_t_a,
+        double *out_a_peak, double *out_dist);
+    double jerk_profile_find_v_hat(double v0, double v1, double v_peak,
+        double a_max, double j_max, double L);
+"""
+
 defs_kin_cartesian = """
     struct stepper_kinematics *cartesian_stepper_alloc(char axis);
 """
@@ -383,6 +414,7 @@ defs_all = [
     defs_kin_extruder,
     defs_kin_idex,
     defs_compose,
+    defs_jerk_profile,
 ]
 
 
