@@ -265,8 +265,8 @@ def max_reachable_cruise_v(
       * L == 0 returns min(v_start, v_end, v_cruise_cap).
       * If reachable_v_end from both endpoints at full L >= v_cruise_cap,
         returns v_cruise_cap (the move is at-cap-capable).
-      * If v_cruise_cap <= max(v_start, v_end), returns v_cruise_cap
-        (trivially reachable from the higher endpoint).
+      * If v_cruise_cap <= min(v_start, v_end), returns v_cruise_cap
+        (no acceleration needed on either side).
 
     Otherwise: bisect on L_accel in [0, L], solving
       reachable_v_end(v_start, a_max, j_max, L_accel)
@@ -291,8 +291,9 @@ def max_reachable_cruise_v(
         return 0.0
     if L == 0.0:
         return min(v_start, v_end, v_cruise_cap)
-    # Short-circuit: cap is trivially reachable from either endpoint.
-    if v_cruise_cap <= max(v_start, v_end):
+    # Short-circuit: cap is at or below both endpoints -- no acceleration
+    # needed on either side to cruise at the cap.
+    if v_cruise_cap <= min(v_start, v_end):
         return v_cruise_cap
     # Short-circuit: both ends can reach the cap in the full L — take it.
     reach_start_full = reachable_v_end(v_start, a_max, j_max, L)
