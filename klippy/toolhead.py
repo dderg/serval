@@ -9,6 +9,7 @@ import math
 
 from . import chelper
 from . import jerk_math
+from .chelper import jerk_profile as jp_mod
 from .chelper.linear_quintic import append_trapezoid_as_quintic
 from .extras.danger_options import get_danger_options
 from .kinematics import extruder
@@ -115,11 +116,20 @@ class Move:
         sin_theta_d2 = math.sqrt(max(0.5 * (1.0 - junction_cos_theta), 0.0))
         cos_theta_d2 = math.sqrt(max(0.5 * (1.0 + junction_cos_theta), 0.0))
         if cos_theta_d2 > 0.0:
-            # Approximated circle must contact moves no further than mid-move:
-            #   centripetal_v2 = .5 * self.move_d * self.accel * tan(theta/2)
-            quarter_tan_theta_d2 = 0.25 * sin_theta_d2 / cos_theta_d2
-            move_centripetal_v2 = self.delta_v2 * quarter_tan_theta_d2
-            pmove_centripetal_v2 = prev_move.delta_v2 * quarter_tan_theta_d2
+            # Centripetal cap: the approximating circle must contact
+            # each adjacent move no further than its midpoint, giving
+            #   v_max² = 0.5 * move_d * accel * tan(theta/2).
+            # Plan 9 A2c: written from the physical form directly
+            # rather than as delta_v2 * 0.25 * sin/cos, so it is no
+            # longer coupled to the constant-accel delta_v2
+            # approximation. accel here is the per-move accel limit,
+            # which already carries any kin.check_move / limit_speed
+            # tightening.
+            tan_theta_d2 = sin_theta_d2 / cos_theta_d2
+            move_centripetal_v2 = 0.5 * self.move_d * self.accel * tan_theta_d2
+            pmove_centripetal_v2 = (
+                0.5 * prev_move.move_d * prev_move.accel * tan_theta_d2
+            )
             max_start_v2 = min(
                 max_start_v2,
                 move_centripetal_v2,
@@ -132,20 +142,66 @@ class Move:
         )
 
     def set_junction(self, start_v2, cruise_v2, end_v2):
-        # Determine accel, cruise, and decel portions of the move distance
-        half_inv_accel = 0.5 / self.accel
-        accel_d = (cruise_v2 - start_v2) * half_inv_accel
-        decel_d = (cruise_v2 - end_v2) * half_inv_accel
-        cruise_d = self.move_d - accel_d - decel_d
-        # Determine move velocities
-        self.start_v = start_v = math.sqrt(start_v2)
-        self.cruise_v = cruise_v = math.sqrt(cruise_v2)
-        self.end_v = end_v = math.sqrt(end_v2)
-        # Determine time spent in each portion of move (time is the
-        # distance divided by average velocity)
-        self.accel_t = accel_d / ((start_v + cruise_v) * 0.5)
-        self.cruise_t = cruise_d / cruise_v
-        self.decel_t = decel_d / ((end_v + cruise_v) * 0.5)
+        # Plan 9 A2c: jerk-aware phase timings via jerk_profile.compute_profile.
+        # The 7-segment profile (J+/A+/J-/C/J-d/A-/J+d) is stored on
+        # self.jerk_profile for the A2d emit path. Legacy trapezoidal
+        # fields (accel_t/cruise_t/decel_t/start_v/cruise_v/end_v/accel)
+        # are populated so existing consumers (extruder.move,
+        # _process_moves → append_trapezoid_as_quintic) emit a
+        # trapezoidal approximation whose integral equals move_d and
+        # whose endpoint velocities / total duration match the
+        # jerk-limited profile exactly.
+        start_v = math.sqrt(start_v2) if start_v2 > 0.0 else 0.0
+        cruise_v = math.sqrt(cruise_v2) if cruise_v2 > 0.0 else 0.0
+        end_v = math.sqrt(end_v2) if end_v2 > 0.0 else 0.0
+        self.jerk_profile = jp_mod.compute_profile(
+            v0=start_v, v1=end_v, v_peak=cruise_v,
+            a_max=self.accel, j_max=self.j_max, L=self.move_d,
+        )
+        if self.jerk_profile.status != jp_mod.JP_OK:
+            raise self.toolhead.printer.command_error(
+                "Jerk profile infeasible for move "
+                "(start_v=%.6f cruise_v=%.6f end_v=%.6f move_d=%.6f "
+                "accel=%.6f j_max=%.6f status=%d)" % (
+                    start_v, cruise_v, end_v, self.move_d,
+                    self.accel, self.j_max, self.jerk_profile.status,
+                )
+            )
+        # Collapse the 7-segment profile into accel / cruise / decel
+        # totals. Segment type tags: J+ / A+ / J- = accel side;
+        # C = cruise; J-d / A- / J+d = decel side.
+        accel_types = {"J+", "A+", "J-"}
+        decel_types = {"J-d", "A-", "J+d"}
+        accel_t = 0.0
+        cruise_t = 0.0
+        decel_t = 0.0
+        for seg in self.jerk_profile.segments:
+            if seg.type in accel_types:
+                accel_t += seg.T
+            elif seg.type == "C":
+                cruise_t += seg.T
+            elif seg.type in decel_types:
+                decel_t += seg.T
+            else:
+                raise self.toolhead.printer.command_error(
+                    "Unknown jerk_profile segment type: %r" % (seg.type,)
+                )
+        self.start_v = start_v
+        self.cruise_v = cruise_v
+        self.end_v = end_v
+        self.accel_t = accel_t
+        self.cruise_t = cruise_t
+        self.decel_t = decel_t
+        # Back-compat emit path relies on the trapezoidal integral
+        # (start_v + cruise_v) * 0.5 * accel_t to match the true
+        # accel-side distance. Under the jerk-limited profile's
+        # (start_v, cruise_v, accel_t) triple this identity holds
+        # regardless of what `accel` we carry on self, so leaving
+        # self.accel at its pre-set_junction value (the config
+        # max_accel that limit_speed / kin.check_move may have
+        # lowered) is correct. calc_junction's centripetal formula
+        # on the NEXT move continues to reference prev_move.accel
+        # for the same purpose.
 
 
 LOOKAHEAD_FLUSH_TIME = 0.250
