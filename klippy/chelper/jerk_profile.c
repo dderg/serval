@@ -160,9 +160,64 @@ jerk_profile_compute(double v0, double v1, double v_peak,
                      double a_max, double j_max, double L,
                      struct jerk_profile_result *out)
 {
-    (void)v0; (void)v1; (void)v_peak;
-    (void)a_max; (void)j_max; (void)L;
     memset(out, 0, sizeof(*out));
-    out->status = JP_BAD_INPUT;
-    return JP_BAD_INPUT;
+    /* Input validation. */
+    if (!(v0 >= 0.0) || !(v1 >= 0.0) || !(v_peak > 0.0)
+        || !(a_max > 0.0) || !(j_max > 0.0) || !(L > 0.0)
+        || v0 > v_peak + JP_EPS || v1 > v_peak + JP_EPS) {
+        out->status = JP_BAD_INPUT;
+        return JP_BAD_INPUT;
+    }
+    /* Feasibility: d_floor = accel(v0 -> max(v0,v1)) + accel(max(v0,v1) -> v1)
+     * (one side ramps up, the other down, by a trivial min-distance path). */
+    double v_mid = (v0 > v1) ? v0 : v1;
+    double d_floor = accel_side_distance(v0, v_mid, a_max, j_max)
+                   + accel_side_distance(v_mid, v1, a_max, j_max);
+    if (L + JP_EPS < d_floor) {
+        out->status = JP_INFEASIBLE;
+        out->v_hat = v_mid;
+        return JP_INFEASIBLE;
+    }
+    /* Does full-peak fit? */
+    double d_full = accel_side_distance(v0, v_peak, a_max, j_max)
+                  + accel_side_distance(v_peak, v1, a_max, j_max);
+    double v_hat;
+    int have_cruise = 0;
+    double cruise_T = 0.0;
+    if (L + JP_EPS >= d_full) {
+        v_hat = v_peak;
+        cruise_T = (L - d_full) / v_peak;
+        have_cruise = (cruise_T > JP_EPS);
+    } else {
+        v_hat = jerk_profile_find_v_hat(v0, v1, v_peak, a_max, j_max, L);
+    }
+    out->v_hat = v_hat;
+    /* Build accel side (v0 -> v_hat). */
+    double p_cur = 0.0, v_cur = v0, a_cur = 0.0;
+    double a_acc = build_accel_side(v0, v_hat, a_max, j_max,
+                                    out->segments, &out->n_segments,
+                                    &p_cur, &v_cur, &a_cur);
+    out->a_acc = a_acc;
+    /* Cruise (if any). */
+    if (have_cruise) {
+        struct jerk_profile_segment *s = &out->segments[out->n_segments++];
+        s->type = JP_SEG_CRUISE;
+        s->T = cruise_T;
+        s->coeffs[0] = p_cur;
+        s->coeffs[1] = v_cur;
+        s->coeffs[2] = 0.0;
+        s->coeffs[3] = 0.0;
+        s->coeffs[4] = 0.0;
+        s->coeffs[5] = 0.0;
+        s->p0 = p_cur; s->v0 = v_cur; s->a0 = 0.0; s->j = 0.0;
+        p_cur += v_cur * cruise_T;
+        /* v, a unchanged. */
+    }
+    /* Build decel side (v_hat -> v1). */
+    double a_dec = build_accel_side(v_hat, v1, a_max, j_max,
+                                    out->segments, &out->n_segments,
+                                    &p_cur, &v_cur, &a_cur);
+    out->a_dec = a_dec;
+    out->status = JP_OK;
+    return JP_OK;
 }
