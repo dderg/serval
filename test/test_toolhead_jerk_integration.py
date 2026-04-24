@@ -232,3 +232,179 @@ def test_two_move_flush_produces_jerk_profiles_on_both_moves():
             "%s: legacy_total=%.9f != profile_total=%.9f"
             % (label, legacy, total)
         )
+
+
+# ---------------------------------------------------------------------------
+# Layer 3 — A2d integration: qpayload presence and correctness after flush.
+# ---------------------------------------------------------------------------
+
+
+def test_kinematic_move_populates_qpayload_end_to_end():
+    """After lookahead flushes a kinematic move through the real Move +
+    LookAheadQueue pipeline, move.quintic_trapq_payload must be set and
+    its total_t must match the jerk profile's summed segment times."""
+    from klippy.toolhead import Move, LookAheadQueue
+
+    class _StubToolhead:
+        def __init__(self):
+            self.max_velocity = 500.0
+            self.max_accel = 5000.0
+            self.max_jerk = 100000.0
+            self.max_accel_to_decel = 5000.0
+            self.extruder_cap_snapshot = None
+
+            class _K:
+                def check_move(self, m):
+                    pass
+
+            class _E:
+                def check_move(self, m):
+                    pass
+
+                def calc_junction(self, *_a):
+                    return 1e18
+
+            self.kin = _K()
+            self.extruder = _E()
+            self.captured = []
+
+        def _process_moves(self, moves):
+            self.captured.extend(moves)
+
+    th = _StubToolhead()
+    la = LookAheadQueue(th)
+    m_a = Move(th, (0, 0, 0, 0), (40, 0, 0, 0), speed=500.0)
+    m_b = Move(th, (40, 0, 0, 0), (50, 0, 0, 0), speed=500.0)
+    la.queue.extend([m_a, m_b])
+    m_b.calc_junction(m_a)
+    la.flush(lazy=False)
+    for m in th.captured:
+        assert hasattr(m, "quintic_trapq_payload"), (
+            "move %s missing quintic_trapq_payload after flush" % m
+        )
+        total_t = m.quintic_trapq_payload[1]
+        legacy_total = m.accel_t + m.cruise_t + m.decel_t
+        assert total_t == pytest.approx(legacy_total, rel=1e-9)
+
+
+def test_kinematic_move_qpayload_phase_count_exceeds_three_for_jerk_regime():
+    """For a short move in the triangular jerk regime, the qpayload must
+    carry more than 3 phases — proving the jerk polynomial is emitted,
+    not a degenerate 3-phase trapezoid."""
+    from klippy.toolhead import Move, LookAheadQueue
+
+    class _StubToolhead:
+        def __init__(self):
+            self.max_velocity = 500.0
+            self.max_accel = 5000.0
+            self.max_jerk = 100000.0
+            self.max_accel_to_decel = 5000.0
+            self.extruder_cap_snapshot = None
+
+            class _K:
+                def check_move(self, m):
+                    pass
+
+            class _E:
+                def check_move(self, m):
+                    pass
+
+                def calc_junction(self, *_a):
+                    return 1e18
+
+            self.kin = _K()
+            self.extruder = _E()
+            self.captured = []
+
+        def _process_moves(self, moves):
+            self.captured.extend(moves)
+
+    th = _StubToolhead()
+    la = LookAheadQueue(th)
+    m = Move(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=500.0)
+    la.queue.append(m)
+    la.flush(lazy=False)
+    payload = th.captured[0].quintic_trapq_payload
+    n_phases = len(payload[0])
+    assert n_phases >= 3, "expected >=3 phases, got %d" % n_phases
+    assert n_phases > 3, (
+        "only %d phases — jerk polynomial may be degenerate" % n_phases
+    )
+
+
+def test_kinematic_retract_preserves_signed_e():
+    """A kinematic move with negative E displacement (wipe-retract) must
+    produce a qpayload whose E polynomial encodes the signed
+    displacement. We verify that the net E integrated over the move
+    duration equals axes_d[3].
+
+    With no PA configured the E polynomial is:
+        E(tau) = extr_r * P_proj(tau)
+    where P_proj is the XY position projected onto the unit direction n.
+    For start_pos=(0,0,0), E(0) = 0 and E(T_total) = extr_r * arc_length
+    = axes_d[3]. Summing (E_i(T_i) - E_i(0)) across phases gives the
+    total displacement, which must equal axes_d[3] = -5.0.
+    """
+    from klippy.toolhead import Move, LookAheadQueue
+
+    class _StubToolhead:
+        def __init__(self):
+            self.max_velocity = 500.0
+            self.max_accel = 5000.0
+            self.max_jerk = 100000.0
+            self.max_accel_to_decel = 5000.0
+            self.extruder_cap_snapshot = None
+
+            class _K:
+                def check_move(self, m):
+                    pass
+
+            class _E:
+                def check_move(self, m):
+                    pass
+
+                def calc_junction(self, *_a):
+                    return 1e18
+
+            self.kin = _K()
+            self.extruder = _E()
+            self.captured = []
+
+        def _process_moves(self, moves):
+            self.captured.extend(moves)
+
+    th = _StubToolhead()
+    la = LookAheadQueue(th)
+    # Kinematic move with negative E (wipe-retract combo).
+    m = Move(th, (0, 0, 0, 0), (20, 0, 0, -5), speed=500.0)
+    assert m.is_kinematic_move is True
+    la.queue.append(m)
+    la.flush(lazy=False)
+    captured_m = th.captured[0]
+    payload = captured_m.quintic_trapq_payload
+    phase_t_ends_tuple = payload[0]
+    coeff_tuple = payload[5]
+    n_phases = len(phase_t_ends_tuple)
+    # Sum (E_end - E_start) across phases. Each phase's E polynomial is in
+    # absolute XY-position frame; the delta per phase is the displacement.
+    # With k_pa=0: E(tau) = extr_r * P_proj(tau), P_proj(0)=start_pos_x=0,
+    # so net total equals extr_r * arc_length = axes_d[3] = -5.0.
+    prev_t = 0.0
+    total_e_displacement = 0.0
+    for i in range(n_phases):
+        phase_end_t = phase_t_ends_tuple[i]
+        T = phase_end_t - prev_t
+        # E at tau=0 for this phase (constant term of E polynomial).
+        e_start = coeff_tuple[(i * 15 + 0) * 4 + 3]
+        # E at tau=T: sum_{k=0..14} coeff[k] * T^k.
+        e_end = 0.0
+        t_pow = 1.0
+        for k in range(15):
+            e_end += coeff_tuple[(i * 15 + k) * 4 + 3] * t_pow
+            t_pow *= T
+        total_e_displacement += e_end - e_start
+        prev_t = phase_end_t
+    assert total_e_displacement == pytest.approx(-5.0, rel=1e-6), (
+        "E polynomial net displacement %.9f != axes_d[3]=-5.0"
+        % total_e_displacement
+    )
