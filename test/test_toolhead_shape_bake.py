@@ -81,3 +81,34 @@ def test_finalize_shape_stub_matches_a2d_payload_layout():
     # Legacy compat fields preserved
     assert legacy_total_t == pytest.approx(
         move.accel_t + move.cruise_t + move.decel_t)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — shaper snapshot capture
+# ---------------------------------------------------------------------------
+
+
+def test_move_captures_empty_shapers_snapshot_when_no_input_shaper():
+    tool = _FakeToolhead()
+    move = _make_move(tool, [0., 0., 0., 0.], [20., 0., 0., 0.])
+    # No input_shaper module loaded → empty list
+    assert move._shapers_snapshot == []
+
+
+def test_move_captures_shaper_snapshot_when_input_shaper_loaded():
+    tool = _FakeToolhead()
+    class _FakeAxisShaper:
+        class params:
+            shaper_type = "mzv"
+            shaper_freq = 42.0
+            damping_ratio = 0.1
+        def get_axis(self):
+            return "x"
+    class _FakeIS:
+        def get_shapers(self):
+            return [_FakeAxisShaper(), _FakeAxisShaper()]
+    tool.printer._objs["input_shaper"] = _FakeIS()
+    move = _make_move(tool, [0., 0., 0., 0.], [20., 0., 0., 0.])
+    # Snapshot must be captured (exact format is blendmath's — here we
+    # just assert non-empty)
+    assert len(move._shapers_snapshot) == 2

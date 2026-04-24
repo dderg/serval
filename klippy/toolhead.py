@@ -63,6 +63,11 @@ class Move:
         # Plan 9 A3: unshaped polynomial, set by build_unshaped_payload
         # after set_junction. None until set_junction is called.
         self._unshaped_payload = None
+        # Plan 9 A3 T2: frozen shaper snapshot captured at construction time
+        # so finalize_shape has the shaper list available without re-querying.
+        # Empty list when no input_shaper module is loaded (pass-through).
+        from . import blendmath as _blendmath
+        self._shapers_snapshot = _blendmath.extract_shapers(toolhead)
 
     def limit_speed(self, speed, accel):
         speed2 = speed**2

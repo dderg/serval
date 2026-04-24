@@ -368,6 +368,10 @@ def _extract_shapers(toolhead):
     return snaps
 
 
+# Public alias — A3 introduces Move-level shape baking which needs to
+# call this without crossing the private-by-underscore convention.
+extract_shapers = _extract_shapers
+
 
 
 def interpolate_extruder(
