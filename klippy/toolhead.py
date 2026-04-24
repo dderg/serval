@@ -452,6 +452,25 @@ class LookAheadQueue:
                 delayed.append((move, start_v2, next_end_v2))
             next_end_v2 = start_v2
             next_smoothed_v2 = smoothed_v2
+        # Plan 9 A3 — drain the pending-last move when the queue is empty
+        # and the caller requested a full drain. The early-return below
+        # would otherwise orphan _pending_last_move at drain points like
+        # flush_step_generation / wait_moves / drip_move where the queue
+        # may have been emptied by a prior lazy flush.
+        if (not lazy) and self._pending_last_move is not None and not flush_count:
+            pending = self._pending_last_move
+            if isinstance(pending, Move) and pending.is_kinematic_move:
+                pending.finalize_shape(
+                    prev_unshaped=self._pending_last_prev_unshaped,
+                    next_unshaped=None,
+                    prev_start_pos_xyz=self._pending_last_prev_start_pos_xyz,
+                    next_start_pos_xyz=None,
+                )
+            self.toolhead._process_moves([pending])
+            self._pending_last_move = None
+            self._pending_last_prev_unshaped = None
+            self._pending_last_prev_start_pos_xyz = None
+
         if update_flush_count or not flush_count:
             return
 

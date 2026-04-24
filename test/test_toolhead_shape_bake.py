@@ -420,3 +420,65 @@ def test_flush_lazy_true_single_move_becomes_pending():
     if laq._pending_last_move is not None:
         assert laq._pending_last_move is m1
         assert len(emitted) == 0
+
+
+def test_drain_pending_on_empty_queue_lazy_false():
+    """Regression: lazy=False must drain a pending move even when the
+    queue is empty.
+
+    Scenario: a prior lazy flush held `m_last` as _pending_last_move and
+    emptied the queue. A subsequent lazy=False flush with no new moves
+    must still finalize the pending with next=None and emit it. Otherwise
+    the move is silently dropped at drain points (wait_moves,
+    flush_step_generation, drip_move, etc.)."""
+    tool = _FakeToolhead()
+    laq, emitted = _make_laq_with_spy(tool)
+    m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
+    # Simulate "m1 was held as pending by a prior lazy flush".
+    m1.set_junction(0.0, m1.max_cruise_v2 * 0.5, 0.0)
+    laq._pending_last_move = m1
+    laq._pending_last_prev_unshaped = None
+    laq._pending_last_prev_start_pos_xyz = None
+    # Queue is empty.
+    assert len(laq.queue) == 0
+    # Drain with lazy=False.
+    laq.flush(lazy=False)
+    # m1 must have been emitted and pending state cleared.
+    assert emitted == [m1]
+    assert laq._pending_last_move is None
+    assert laq._pending_last_prev_unshaped is None
+    assert laq._pending_last_prev_start_pos_xyz is None
+
+
+def test_empty_queue_lazy_true_does_not_drain_pending():
+    """Dual of test_drain_pending_on_empty_queue_lazy_false: lazy=True
+    with an empty queue must NOT drain the pending — we might still get
+    a follow-up move that provides the "next" neighbour. The pending
+    stays held."""
+    tool = _FakeToolhead()
+    laq, emitted = _make_laq_with_spy(tool)
+    m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
+    m1.set_junction(0.0, m1.max_cruise_v2 * 0.5, 0.0)
+    laq._pending_last_move = m1
+    laq._pending_last_prev_unshaped = None
+    laq._pending_last_prev_start_pos_xyz = None
+    laq.flush(lazy=True)
+    # Pending is still held; nothing emitted.
+    assert emitted == []
+    assert laq._pending_last_move is m1
+
+
+def test_drain_non_kinematic_pending_on_empty_queue():
+    """Edge: if the pending somehow holds a non-bake-target (defensive
+    path — shouldn't happen in production since only plain kinematic
+    Moves get held), lazy=False still emits it without calling
+    finalize_shape."""
+    tool = _FakeToolhead()
+    laq, emitted = _make_laq_with_spy(tool)
+    # A pure-E move as pending — synthetic defensive scenario
+    m_e = _make_move(tool, [0., 0., 0., 0.], [0., 0., 0., 5.])
+    assert m_e.is_kinematic_move is False
+    laq._pending_last_move = m_e
+    laq.flush(lazy=False)
+    assert emitted == [m_e]
+    assert laq._pending_last_move is None
