@@ -155,13 +155,54 @@ class Move:
         """Plan 9 A3. Shape-bake the unshaped polynomial and store
         ``self.quintic_trapq_payload`` for emit.
 
-        Task 1 stub: no shape baking — pass unshaped through. Task 3
-        replaces this with the ``_bake_shaper_polynomial`` call.
+        Convolves ``self._shapers_snapshot`` with the unshaped polynomial
+        via ``blendplanner._bake_shaper_polynomial``. Neighbour polynomials
+        are shifted into this move's reference frame first via
+        ``blendplanner._offset_unshaped_for_neighbour`` before being passed
+        to the composer, mirroring ``QuinticBlendMove.finalize_shape``.
+
+        Parameters
+        ----------
+        prev_unshaped / next_unshaped : tuple or None
+            Neighbour unshaped payloads as ``(phase_t_ends, total_t,
+            coeff_buf)`` — same 3-tuple format returned by
+            ``build_unshaped_payload``. ``None`` zero-pads the kernel
+            window at that boundary (correct when the print stops there;
+            the LookAheadQueue deferred-last pattern arranges for non-None
+            neighbours mid-stream).
+        prev_start_pos_xyz / next_start_pos_xyz : tuple (x, y, z) or None
+            Absolute XYZ start position of the corresponding neighbour move.
+            Required to shift the neighbour polynomial into this move's
+            reference frame. When omitted the polynomial is used as-is
+            (assumes the frames are already aligned, e.g. in hand-crafted
+            unit tests).
         """
+        from . import blendplanner as bp
         phase_t_ends, total_t, coeff_tuple = self._unshaped_payload
-        baked_t_ends = phase_t_ends
-        baked_total_t = total_t
-        baked_coeffs = coeff_tuple
+
+        cur_start_xyz = (self.start_pos[0], self.start_pos[1],
+                         self.start_pos[2])
+        if prev_unshaped is not None and prev_start_pos_xyz is not None:
+            dx = prev_start_pos_xyz[0] - cur_start_xyz[0]
+            dy = prev_start_pos_xyz[1] - cur_start_xyz[1]
+            dz = prev_start_pos_xyz[2] - cur_start_xyz[2]
+            prev_unshaped = bp._offset_unshaped_for_neighbour(
+                prev_unshaped, (dx, dy, dz))
+        if next_unshaped is not None and next_start_pos_xyz is not None:
+            dx = next_start_pos_xyz[0] - cur_start_xyz[0]
+            dy = next_start_pos_xyz[1] - cur_start_xyz[1]
+            dz = next_start_pos_xyz[2] - cur_start_xyz[2]
+            next_unshaped = bp._offset_unshaped_for_neighbour(
+                next_unshaped, (dx, dy, dz))
+
+        baked_t_ends, baked_total_t, baked_coeffs = bp._bake_shaper_polynomial(
+            phase_t_ends, total_t, coeff_tuple,
+            self._shapers_snapshot,
+            shape_disabled=False,
+            prev_unshaped=prev_unshaped,
+            next_unshaped=next_unshaped,
+        )
+
         arc_length = self.move_d
         v_cap_min = min(self.start_v, self.cruise_v, self.end_v)
         if v_cap_min < 0.0:
@@ -172,8 +213,8 @@ class Move:
         legacy_t_decel_start = self.accel_t + self.cruise_t
         legacy_total_t = self.accel_t + self.cruise_t + self.decel_t
         self.quintic_trapq_payload = (
-            baked_t_ends, baked_total_t,
-            arc_length, v_cap_min, start_pos_xyz, baked_coeffs,
+            tuple(baked_t_ends), baked_total_t,
+            arc_length, v_cap_min, start_pos_xyz, tuple(baked_coeffs),
             legacy_t_accel_end, legacy_t_decel_start, legacy_total_t,
         )
 

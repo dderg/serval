@@ -167,3 +167,89 @@ def test_refresh_shapers_snapshot_picks_up_config_changes():
     assert len(m2._shapers_snapshot) == 1
     # The baseline move's snapshot is unchanged (frozen at construction).
     assert m1._shapers_snapshot == []
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — real shape-bake in finalize_shape
+# ---------------------------------------------------------------------------
+
+
+def _make_toolhead_with_mzv():
+    """Return a _FakeToolhead with a 3-axis MZV 42 Hz shaper configured."""
+    tool = _FakeToolhead()
+    class _FakeAxisShaper:
+        class params:
+            shaper_type = "mzv"
+            shaper_freq = 42.0
+            damping_ratio = 0.1
+        def get_axis(self):
+            return "x"
+    class _FakeIS:
+        def get_shapers(self):
+            return [_FakeAxisShaper()] * 3
+    tool.printer._objs["input_shaper"] = _FakeIS()
+    tool._refresh_shapers_snapshot()
+    return tool
+
+
+def test_finalize_shape_applies_mzv_when_shaper_configured():
+    """With a configured MZV shaper, finalize_shape must produce a
+    polynomial different from the unshaped (the shape is actually
+    applied)."""
+    tool = _make_toolhead_with_mzv()
+    move = _make_move(tool, [0., 0., 0., 0.], [50., 0., 0., 0.])
+    move.set_junction(150.0**2, 150.0**2, 150.0**2)
+    # Unshaped is captured; baked differs because MZV convolution
+    # extends the move in time.
+    u_phase_t_ends, u_total_t, u_coeffs = move._unshaped_payload
+    baked = move.quintic_trapq_payload
+    b_phase_t_ends, b_total_t = baked[0], baked[1]
+    b_coeffs = baked[5]
+    assert b_total_t >= u_total_t  # MZV stretches by the shaper window
+    # Coefficient buffers must differ (shape applied, not pass-through)
+    assert b_coeffs != u_coeffs
+
+
+def test_finalize_shape_passthrough_when_no_shaper():
+    """No input_shaper → pass-through (matches Task 1 stub behavior)."""
+    tool = _FakeToolhead()
+    move = _make_move(tool, [0., 0., 0., 0.], [50., 0., 0., 0.])
+    move.set_junction(150.0**2, 150.0**2, 150.0**2)
+    u_phase_t_ends, u_total_t, u_coeffs = move._unshaped_payload
+    baked = move.quintic_trapq_payload
+    assert baked[0] == u_phase_t_ends
+    assert baked[1] == u_total_t
+    assert baked[5] == u_coeffs
+
+
+def test_finalize_shape_offsets_prev_neighbour_polynomial():
+    """When a prev_unshaped is supplied with its own start_pos,
+    finalize_shape should shift it into cur_start_pos frame before
+    composing. We verify by building two setups that only differ in
+    neighbour start_pos — the baked polynomial must differ because
+    the XY offset changes cross-boundary coefficients."""
+    tool = _make_toolhead_with_mzv()
+
+    # Two moves; second will shape-bake with first as prev.
+    m1 = _make_move(tool, [0., 0., 0., 0.], [20., 0., 0., 0.])
+    m1.set_junction(150.0**2, 150.0**2, 150.0**2)
+    m2 = _make_move(tool, [20., 0., 0., 0.], [40., 0., 0., 0.])
+    m2.set_junction(150.0**2, 150.0**2, 150.0**2)
+
+    # Bake m2 with m1 as prev — correct (continuous): m1 starts at (0,0,0)
+    # so dx = 0 - 20 = -20 shift applied to m1's c[0].
+    m2.finalize_shape(
+        prev_unshaped=m1._unshaped_payload,
+        prev_start_pos_xyz=(0., 0., 0.),
+    )
+    coeffs_with_offset = m2.quintic_trapq_payload[5]
+
+    # Bake m2 with m1's unshaped but WRONG start_pos (pretend m1
+    # started at m2's start) — no offset applied (dx=0).
+    m2.finalize_shape(
+        prev_unshaped=m1._unshaped_payload,
+        prev_start_pos_xyz=(20., 0., 0.),
+    )
+    coeffs_no_offset = m2.quintic_trapq_payload[5]
+
+    assert coeffs_with_offset != coeffs_no_offset
