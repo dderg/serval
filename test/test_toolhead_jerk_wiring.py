@@ -35,3 +35,20 @@ def test_fake_toolhead_has_max_jerk():
     assert th.max_jerk == 100000.0
     th2 = _FakeToolhead(max_jerk=250000.0)
     assert th2.max_jerk == 250000.0
+
+
+def test_move_captures_j_max_from_toolhead():
+    """Move.__init__ must snapshot toolhead.max_jerk as self.j_max."""
+    from klippy.toolhead import Move
+    th = _FakeToolhead(max_jerk=250000.0)
+    m = Move(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=100.0)
+    assert m.j_max == 250000.0
+
+
+def test_move_j_max_unchanged_by_limit_speed():
+    """limit_speed caps velocity/accel, but j_max is a toolhead property."""
+    from klippy.toolhead import Move
+    th = _FakeToolhead(max_jerk=150000.0)
+    m = Move(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=100.0)
+    m.limit_speed(50.0, 1000.0)
+    assert m.j_max == 150000.0

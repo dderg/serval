@@ -22,6 +22,7 @@ class _FakeToolhead:
     def __init__(self, **overrides):
         self.max_velocity = overrides.get("max_velocity", 500.0)
         self.max_accel = overrides.get("max_accel", 10000.0)
+        self.max_jerk = overrides.get("max_jerk", 100000.0)
         self.max_accel_to_decel = overrides.get("max_accel_to_decel", 10000.0)
         self.kin = _FakeCheckMove()
         self.extruder = _FakeCheckMove()
@@ -35,6 +36,7 @@ class _FakeMove:
         self.start_pos = tuple(start_pos)
         self.end_pos = tuple(end_pos)
         self.accel = toolhead.max_accel
+        self.j_max = toolhead.max_jerk
         self.timing_callbacks = []
         velocity = min(speed, toolhead.max_velocity)
         self.is_kinematic_move = True
