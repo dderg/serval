@@ -176,3 +176,44 @@ def test_sweep_parity_vs_reference(v0, v1, L):
         for k, (cc, rc) in enumerate(zip(cs.coeffs, rs.coeffs)):
             assert cc == pytest.approx(rc, abs=1e-9, rel=1e-9), \
                 f"coeff[{i}][{k}] differs"
+
+
+def test_rejects_zero_v_peak():
+    prof = jp.compute_profile(0.0, 0.0, 0.0, 5000.0, 100000.0, 10.0)
+    assert prof.status == jp.JP_BAD_INPUT
+
+
+def test_rejects_negative_distance():
+    prof = jp.compute_profile(0.0, 0.0, 500.0, 5000.0, 100000.0, -10.0)
+    assert prof.status == jp.JP_BAD_INPUT
+
+
+def test_rejects_v_above_peak():
+    prof = jp.compute_profile(600.0, 0.0, 500.0, 5000.0, 100000.0, 10.0)
+    assert prof.status == jp.JP_BAD_INPUT
+
+
+def test_very_long_cruise_precision():
+    """10 meter cruise at 400 mm/s - end position must be exactly 10000 mm."""
+    prof = jp.compute_profile(0.0, 0.0, 400.0, 5000.0, 100000.0, 10000.0)
+    assert prof.status == jp.JP_OK
+    # Integrate all segments to get total distance.
+    last = prof.segments[-1]
+    # last.coeffs[0] is p at t=0 of last segment; evaluate at T for total.
+    total_p = _eval_poly_deriv(last.coeffs, last.T, 0)
+    assert total_p == pytest.approx(10000.0, abs=1e-6)
+
+
+def test_pure_cruise_when_no_dv_required():
+    """v0 == v1 == v_peak, long L - should produce exactly one linear cruise segment."""
+    prof = jp.compute_profile(500.0, 500.0, 500.0, 5000.0, 100000.0, 100.0)
+    assert prof.status == jp.JP_OK
+    # All accel/decel segments have zero duration; only cruise has T > 0.
+    nonzero = [s for s in prof.segments if s.T > 1e-12]
+    assert len(nonzero) == 1 and nonzero[0].type == "C"
+
+
+def test_infeasible_returns_status():
+    """Tiny L with nonzero endpoint speed mismatch - physically impossible."""
+    prof = jp.compute_profile(200.0, 0.0, 500.0, 5000.0, 100000.0, 0.1)
+    assert prof.status == jp.JP_INFEASIBLE
