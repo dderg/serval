@@ -172,3 +172,104 @@ def test_set_junction_populates_start_v_cruise_v_end_v():
     assert m.start_v == pytest.approx(100.0, rel=1e-9)
     assert m.cruise_v == pytest.approx(300.0, rel=1e-9)
     assert m.end_v == pytest.approx(50.0, rel=1e-9)
+
+
+def test_build_quintic_payload_returns_expected_tuple_shape():
+    """build_quintic_payload must return a 9-tuple matching QuinticBlendMove's
+    payload contract:
+      (phase_t_ends_tuple, total_t_baked, arc_length, v_cap_min,
+       start_pos_xyz, coeff_tuple,
+       legacy_t_accel_end, legacy_t_decel_start, legacy_total_t)
+    """
+    from klippy.toolhead import Move
+    th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
+    m = Move(th, (1, 2, 3, 0), (51, 2, 3, 0), speed=200.0)
+    m.set_junction(0.0, 200.0 ** 2, 0.0)
+    payload = m.build_quintic_payload()
+    assert isinstance(payload, tuple)
+    assert len(payload) == 9
+    phase_t_ends, total_t, arc_length, v_cap_min, start_pos_xyz, coeff_tuple, \
+        t_accel_end, t_decel_start, total_t_legacy = payload
+    nonzero_segs = [s for s in m.jerk_profile.segments if s.T > 1e-12]
+    assert len(phase_t_ends) == len(nonzero_segs)
+    assert total_t == pytest.approx(sum(s.T for s in nonzero_segs), rel=1e-9)
+    assert arc_length == pytest.approx(m.move_d, rel=1e-9)
+    assert v_cap_min == pytest.approx(0.0, abs=1e-12)
+    assert start_pos_xyz == (1.0, 2.0, 3.0)
+    assert len(coeff_tuple) == len(phase_t_ends) * 15 * 4
+    assert t_accel_end == pytest.approx(m.accel_t, rel=1e-9)
+    assert t_decel_start == pytest.approx(m.accel_t + m.cruise_t, rel=1e-9)
+    assert total_t_legacy == pytest.approx(
+        m.accel_t + m.cruise_t + m.decel_t, rel=1e-9)
+
+
+def test_build_quintic_payload_xy_polynomial_matches_build_jerk_profile():
+    """The XY polynomial in the payload's coeff_tuple must match
+    build_jerk_profile_as_quintic_coeffs output bit-for-bit in the
+    .x/.y/.z slots."""
+    from klippy.chelper.linear_quintic import build_jerk_profile_as_quintic_coeffs
+    from klippy.toolhead import Move
+    th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
+    m = Move(th, (1, 2, 3, 0), (51, 2, 3, 0), speed=200.0)
+    m.set_junction(0.0, 200.0 ** 2, 0.0)
+    payload = m.build_quintic_payload()
+    phase_t_ends = payload[0]
+    coeff_tuple = payload[5]
+    n_phases = len(phase_t_ends)
+    expected_n, expected_t_ends, expected_coeff = \
+        build_jerk_profile_as_quintic_coeffs(
+            m.jerk_profile, m.axes_r[:3], m.start_pos[:3])
+    active_len = n_phases * 15 * 4
+    expected_active = expected_coeff[:active_len]
+    for i in range(n_phases):
+        for k in range(15):
+            for axis in (0, 1, 2):
+                idx = (i * 15 + k) * 4 + axis
+                assert coeff_tuple[idx] == expected_active[idx], (
+                    f"mismatch at phase {i} coeff {k} axis {axis}")
+
+
+def test_build_quintic_payload_pa_zero_when_no_pa():
+    """With no PA configured, .e slot must be all zeros."""
+    from klippy.toolhead import Move
+    th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
+    m = Move(th, (0, 0, 0, 0), (50, 0, 0, 0), speed=200.0)
+    m.set_junction(0.0, 200.0 ** 2, 0.0)
+    payload = m.build_quintic_payload()
+    n_phases = len(payload[0])
+    coeff_tuple = payload[5]
+    for i in range(n_phases):
+        for k in range(15):
+            idx = (i * 15 + k) * 4 + 3
+            assert coeff_tuple[idx] == 0.0, (
+                f"E slot nonzero with PA disabled at phase {i} coeff {k}")
+
+
+def test_build_quintic_payload_pa_linear_fills_e_slot():
+    """With k_pa > 0, the .e slot should carry a nontrivial polynomial."""
+    from klippy.toolhead import Move
+    import klippy.blendplanner
+
+    class _PAFakeToolhead(_FakeToolhead):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.extruder_cap_snapshot = None
+
+    th = _PAFakeToolhead(max_accel=5000.0, max_jerk=100000.0)
+    orig = klippy.blendplanner._resolve_pa_dispatch
+    klippy.blendplanner._resolve_pa_dispatch = lambda _th: ("linear", 0.05)
+    try:
+        m = Move(th, (0, 0, 0, 0), (50, 0, 0, 5), speed=200.0)
+        m.set_junction(0.0, 200.0 ** 2, 0.0)
+        payload = m.build_quintic_payload()
+        n_phases = len(payload[0])
+        coeff_tuple = payload[5]
+        e_values = []
+        for i in range(n_phases):
+            for k in range(15):
+                idx = (i * 15 + k) * 4 + 3
+                e_values.append(coeff_tuple[idx])
+        assert any(abs(v) > 1e-12 for v in e_values), (
+            "E slot all zero after PA compose with k_pa=0.05")
+    finally:
+        klippy.blendplanner._resolve_pa_dispatch = orig

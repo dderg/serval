@@ -88,6 +88,82 @@ class Move:
             v_start=v_end, a_max=self.accel, j_max=self.j_max, L=self.move_d,
         )
 
+    def build_quintic_payload(self):
+        """Build a jerk-limited XY + PA-baked E quintic_trapq_payload.
+
+        Plan 9 A2d. Mirrors QuinticBlendMove.finalize_shape's payload
+        format but skips shape baking (A3 scope). Must be called AFTER
+        set_junction (requires self.jerk_profile). Returns the 9-tuple
+        consumed by `_process_moves`:
+
+            (phase_t_ends_tuple, total_t_baked,
+             arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+             legacy_t_accel_end, legacy_t_decel_start, legacy_total_t)
+
+        The XY polynomial is the A2a emitter's output; the .e slot is
+        filled by linear_pa_compose / nonlinear_pa_compose selected via
+        blendplanner._resolve_pa_dispatch(self.toolhead). No shape
+        baking.
+        """
+        from .chelper.linear_quintic import build_jerk_profile_as_quintic_coeffs
+        from .chelper import linear_pa_compose as _linear_pa_compose
+        from .chelper import nonlinear_pa_compose as _nonlinear_pa_compose
+        from . import blendplanner
+        n_phases, phase_t_ends_list, coeff_buf_full = \
+            build_jerk_profile_as_quintic_coeffs(
+                self.jerk_profile,
+                (self.axes_r[0], self.axes_r[1], self.axes_r[2]),
+                (self.start_pos[0], self.start_pos[1], self.start_pos[2]),
+            )
+        active_len = n_phases * 15 * 4
+        coeff_list = list(coeff_buf_full[:active_len])
+        phase_t_ends_tuple = tuple(phase_t_ends_list)
+        total_t_baked = phase_t_ends_tuple[-1] if phase_t_ends_tuple else 0.0
+        arc_length = self.move_d
+        if arc_length > 0.0:
+            extr_r = self.axes_d[3] / arc_length
+        else:
+            extr_r = 0.0
+        axis_n = (self.axes_r[0], self.axes_r[1], self.axes_r[2])
+        pa_dispatch = blendplanner._resolve_pa_dispatch(self.toolhead)
+        if pa_dispatch[0] == "linear":
+            k_pa = pa_dispatch[1]
+            coeff_list = _linear_pa_compose.linear_pa_compose(
+                n_phases, coeff_list,
+                axis_n=axis_n, extr_r=extr_r, k_pa=k_pa,
+            )
+        elif pa_dispatch[0] == "nonlinear":
+            _, model, la, no, v_lin = pa_dispatch
+            coeff_list, _residual = _nonlinear_pa_compose.nonlinear_pa_compose(
+                n_phases, list(phase_t_ends_tuple),
+                coeff_list,
+                axis_n=axis_n, extr_r=extr_r,
+                linear_advance=la,
+                nonlinear_offset=no,
+                linearization_velocity=v_lin,
+                model=model,
+            )
+        else:
+            coeff_list = _linear_pa_compose.linear_pa_compose(
+                n_phases, coeff_list,
+                axis_n=axis_n, extr_r=extr_r, k_pa=0.0,
+            )
+        coeff_tuple = tuple(coeff_list)
+        v_cap_min = min(self.start_v, self.cruise_v, self.end_v)
+        if v_cap_min < 0.0:
+            v_cap_min = 0.0
+        start_pos_xyz = (
+            self.start_pos[0], self.start_pos[1], self.start_pos[2]
+        )
+        legacy_t_accel_end = self.accel_t
+        legacy_t_decel_start = self.accel_t + self.cruise_t
+        legacy_total_t = self.accel_t + self.cruise_t + self.decel_t
+        return (
+            phase_t_ends_tuple, total_t_baked,
+            arc_length, v_cap_min, start_pos_xyz, coeff_tuple,
+            legacy_t_accel_end, legacy_t_decel_start, legacy_total_t,
+        )
+
     def move_error(self, msg="Move out of range"):
         ep = self.end_pos
         m = "%s: %.3f %.3f %.3f [%.3f]" % (msg, ep[0], ep[1], ep[2], ep[3])
