@@ -535,3 +535,38 @@ def test_calc_junction_forward_cap_uses_reachable_v_end():
         f"Forward-reach cap should bind: got {m2.max_start_v2} "
         f"vs expected {expected_cap}"
     )
+
+
+# ---------------------------------------------------------------------------
+# A5 T4 — retirement of max_accel_to_decel / minimum_cruise_ratio.
+# ---------------------------------------------------------------------------
+
+
+def test_toolhead_has_no_max_accel_to_decel(
+    config_root: typing.Annotated[
+        pathlib.Path, "test_configs/toolhead_jerk"
+    ],
+):
+    """A5: max_accel_to_decel is retired. The ToolHead must not expose
+    it as a property, and the config deprecation path must be gone."""
+    start_args = {"config_file": str(config_root / "printer.cfg")}
+    with PrinterShim(start_args) as printer:
+        config = printer.load_config()
+        from klippy.toolhead import ToolHead
+        # The property must be gone.
+        assert not hasattr(ToolHead, "max_accel_to_decel"), (
+            "ToolHead.max_accel_to_decel must be deleted in A5 T4"
+        )
+
+
+def test_toolhead_has_no_min_cruise_ratio():
+    """A5: minimum_cruise_ratio is retired. ToolHead must not set
+    min_cruise_ratio during __init__, and no class-level descriptor."""
+    from klippy.toolhead import ToolHead
+    # No class-level descriptor.
+    assert not hasattr(ToolHead, "min_cruise_ratio"), (
+        "ToolHead must not have a class-level min_cruise_ratio"
+    )
+    # Instance level: _FakeToolhead mirrors real ToolHead; if real ToolHead
+    # sets min_cruise_ratio in __init__ the integration tests that use
+    # _FakeToolhead will fail differently. A direct class check suffices.

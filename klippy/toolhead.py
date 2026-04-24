@@ -621,19 +621,12 @@ class ToolHead:
         self.max_accel = config.getfloat("max_accel", above=0.0)
         self.max_jerk = config.getfloat("max_jerk", 100000.0, above=0.0)
         self.corner_deviation = config.getfloat("corner_deviation", above=0.0)
-        min_cruise_ratio = 0.5
-        if config.getfloat("minimum_cruise_ratio", None) is None:
-            req_accel_to_decel = config.getfloat(
-                "max_accel_to_decel", None, above=0.0
-            )
-            if req_accel_to_decel is not None:
-                config.deprecate("max_accel_to_decel")
-                min_cruise_ratio = 1.0 - min(
-                    1.0, (req_accel_to_decel / self.max_accel)
-                )
-        self.min_cruise_ratio = config.getfloat(
-            "minimum_cruise_ratio", min_cruise_ratio, below=1.0, minval=0.0
-        )
+        # Plan 9 A5: square_corner_velocity, minimum_cruise_ratio, and
+        # max_accel_to_decel are all retired. Under jerk-limited motion the
+        # profile shape is determined by (max_accel, max_jerk); there is no
+        # "cruise fraction" knob. square_corner_velocity is still parsed
+        # below as a deprecation warning path so users carrying stale configs
+        # still get a helpful message rather than a config.error.
         scv_legacy = config.getfloat(
             "square_corner_velocity", None, minval=0.0
         )
@@ -641,15 +634,25 @@ class ToolHead:
             config.deprecate("square_corner_velocity")
             logging.warning(
                 "config option [printer] square_corner_velocity is obsolete; "
-                "the new arc-blending planner ignores it. Remove it from your "
+                "the jerk-limited planner ignores it. Remove it from your "
                 "config to silence this warning."
             )
+        # Hard-fail on the retired A5 knobs: if a user carries these from a
+        # pre-A5 config, refuse to start with a direct message rather than
+        # silently ignoring them.
+        for retired in ("max_accel_to_decel", "minimum_cruise_ratio"):
+            if config.get(retired, None) is not None:
+                raise config.error(
+                    "config option [printer] %s is retired in Plan 9 A5; "
+                    "jerk-limited motion has no cruise-fraction knob. "
+                    "Remove the option and tune max_accel and max_jerk instead."
+                    % retired
+                )
         self.orig_cfg = {}
         self.orig_cfg["max_velocity"] = self.max_velocity
         self.orig_cfg["max_accel"] = self.max_accel
         self.orig_cfg["max_jerk"] = self.max_jerk
         self.orig_cfg["corner_deviation"] = self.corner_deviation
-        self.orig_cfg["min_cruise_ratio"] = self.min_cruise_ratio
         # Input stall detection
         self.check_stall_time = 0.0
         self.print_stall = 0
@@ -1194,7 +1197,6 @@ class ToolHead:
                 "max_velocity": self.max_velocity,
                 "max_accel": self.max_accel,
                 "max_jerk": self.max_jerk,
-                "minimum_cruise_ratio": self.min_cruise_ratio,
                 "corner_deviation": self.corner_deviation,
             }
         )
@@ -1240,12 +1242,6 @@ class ToolHead:
     def get_max_velocity(self):
         return self.max_velocity, self.max_accel
 
-    @property
-    def max_accel_to_decel(self):
-        # Derived live from min_cruise_ratio rather than cached, so M204 /
-        # SET_VELOCITY_LIMIT mutations are visible without an explicit recompute.
-        return self.max_accel * (1.0 - self.min_cruise_ratio)
-
     def cmd_G4(self, gcmd):
         # Dwell
         delay = gcmd.get_float("P", 0.0, minval=0.0) / 1000.0
@@ -1261,26 +1257,18 @@ class ToolHead:
         max_velocity = gcmd.get_float("VELOCITY", None, above=0.0)
         max_accel = gcmd.get_float("ACCEL", None, above=0.0)
         max_jerk = gcmd.get_float("JERK", None, above=0.0)
-        # Parsed but discarded: the new arc-blending planner ignores SCV.
-        # Kept as a local for the all-None guard below so SET_VELOCITY_LIMIT
-        # SQUARE_CORNER_VELOCITY=N does not spam the current-status dump.
+        # Parsed but discarded; the jerk-limited planner ignores SCV.
         square_corner_velocity = gcmd.get_float(
             "SQUARE_CORNER_VELOCITY", None, minval=0.0
         )
-        min_cruise_ratio = gcmd.get_float(
-            "MINIMUM_CRUISE_RATIO", None, minval=0.0, below=1.0
-        )
-        if min_cruise_ratio is None:
-            req_accel_to_decel = gcmd.get_float(
-                "ACCEL_TO_DECEL", None, above=0.0
-            )
-            if req_accel_to_decel is not None and max_accel is not None:
-                min_cruise_ratio = 1.0 - min(
-                    1.0, req_accel_to_decel / max_accel
-                )
-            elif req_accel_to_decel is not None and max_accel is None:
-                min_cruise_ratio = 1.0 - min(
-                    1.0, (req_accel_to_decel / self.max_accel)
+        # Plan 9 A5: MINIMUM_CRUISE_RATIO and ACCEL_TO_DECEL are retired.
+        # Reject them loudly so users notice rather than silently losing
+        # their tuning.
+        for retired in ("MINIMUM_CRUISE_RATIO", "ACCEL_TO_DECEL"):
+            if gcmd.get_float(retired, None) is not None:
+                raise gcmd.error(
+                    "%s is retired in Plan 9 A5; tune ACCEL and JERK instead."
+                    % retired
                 )
         corner_deviation = gcmd.get_float(
             "CORNER_DEVIATION", None, above=0.0
@@ -1291,8 +1279,6 @@ class ToolHead:
             self.max_accel = max_accel
         if max_jerk is not None:
             self.max_jerk = max_jerk
-        if min_cruise_ratio is not None:
-            self.min_cruise_ratio = min_cruise_ratio
         if corner_deviation is not None:
             self.corner_deviation = corner_deviation
         msg = [
@@ -1338,7 +1324,6 @@ class ToolHead:
                 self.kin.max_z_accel = max_z_accel
             msg.append("max_z_accel: %.6f" % self.kin.max_z_accel)
 
-        msg.append("minimum_cruise_ratio: %.6f" % self.min_cruise_ratio)
         msg.append("corner_deviation: %.6f" % self.corner_deviation)
 
         if get_danger_options().log_velocity_limit_changes:
@@ -1350,7 +1335,6 @@ class ToolHead:
                 and max_accel is None
                 and max_jerk is None
                 and square_corner_velocity is None
-                and min_cruise_ratio is None
                 and corner_deviation is None
             ):
                 gcmd.respond_info("\n".join(msg), log=False)
@@ -1393,14 +1377,8 @@ class ToolHead:
             self.kin.max_z_accel = self.orig_cfg["max_z_accel"]
             msg.append("max_z_accel: %.6f" % self.kin.max_z_accel)
 
-        self.min_cruise_ratio = self.orig_cfg["min_cruise_ratio"]
         self.corner_deviation = self.orig_cfg["corner_deviation"]
-        msg.extend(
-            (
-                "minimum_cruise_ratio: %.6f" % self.min_cruise_ratio,
-                "corner_deviation: %.6f" % self.corner_deviation,
-            )
-        )
+        msg.append("corner_deviation: %.6f" % self.corner_deviation)
         if get_danger_options().log_velocity_limit_changes:
             gcmd.respond_info("\n".join(msg), log=False)
 

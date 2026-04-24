@@ -2344,20 +2344,16 @@ class TradRackToolHead(toolhead.ToolHead, object):
             "filament_max_accel", default=1500.0, above=0.0
         )
         self.max_accel = max(self.sel_max_accel, self.fil_max_accel)
-        self.min_cruise_ratio = config.getfloat(
-            "minimum_cruise_ratio", None, below=1.0, minval=0.0
-        )
-        if self.min_cruise_ratio is None:
-            self.min_cruise_ratio = 0.5
-            req_accel_to_decel = config.getfloat(
-                "max_accel_to_decel", None, above=0.0
-            )
-            if req_accel_to_decel is not None:
-                config.deprecate("max_accel_to_decel")
-                self.min_cruise_ratio = 1.0 - min(
-                    1.0, (req_accel_to_decel / self.max_accel)
+        # Plan 9 A5: minimum_cruise_ratio and max_accel_to_decel are retired.
+        # Hard-fail so users carrying stale configs get a clear message.
+        for retired in ("minimum_cruise_ratio", "max_accel_to_decel"):
+            if config.get(retired, None) is not None:
+                raise config.error(
+                    "config option [trad_rack] %s is retired in Plan 9 A5; "
+                    "jerk-limited motion has no cruise-fraction knob. "
+                    "Remove the option and tune max_accel and max_jerk instead."
+                    % retired
                 )
-        self.requested_accel_to_decel = self.min_cruise_ratio * self.max_accel
         self.square_corner_velocity = config.getfloat(
             "square_corner_velocity", 5.0, minval=0.0
         )
