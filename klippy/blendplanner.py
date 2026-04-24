@@ -595,12 +595,11 @@ class QuinticBlendMove:
             return
         prev_start_v = (math.sqrt(prev_move.max_start_v2)
                         if prev_move.max_start_v2 > 0.0 else 0.0)
-        # prev_move may be either a plain Move (carries j_max) or
-        # another QuinticBlendMove (also carries j_max as of T2 fixup).
-        # The getattr fallback covers test stubs that pre-date the
-        # attribute-contract migration; production paths always hit
-        # the explicit attribute.
-        prev_j_max = getattr(prev_move, "j_max", self.toolhead.max_jerk)
+        # prev_move is either a plain Move or another QuinticBlendMove;
+        # both carry j_max (Move.__init__ snapshots it from the toolhead,
+        # QuinticBlendMove.__init__ sets it explicitly as of T2 fixup).
+        # All test stubs have been migrated to provide the attribute (T5).
+        prev_j_max = prev_move.j_max
         prev_forward_reach = jerk_math.reachable_v_end(
             v_start=prev_start_v,
             a_max=prev_move.accel,

@@ -12,8 +12,6 @@ class _FakeToolhead:
         self.max_velocity = kw.get("max_velocity", 500.0)
         self.max_accel = kw.get("max_accel", 5000.0)
         self.max_jerk = kw.get("max_jerk", 100000.0)
-        self.max_accel_to_decel = kw.get("max_accel_to_decel", 5000.0)
-        self.min_cruise_ratio = kw.get("min_cruise_ratio", 0.0)
         class _K:
             def check_move(self, m): pass
         class _E:
@@ -94,7 +92,6 @@ def test_lookahead_flush_uses_jerk_reachable():
             self.max_velocity = 500.0
             self.max_accel = 5000.0
             self.max_jerk = 100000.0
-            self.max_accel_to_decel = 5000.0
             class _K:
                 def check_move(self, m): pass
             class _E:

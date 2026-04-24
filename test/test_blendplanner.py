@@ -23,7 +23,6 @@ class _FakeToolhead:
         self.max_velocity = overrides.get("max_velocity", 500.0)
         self.max_accel = overrides.get("max_accel", 10000.0)
         self.max_jerk = overrides.get("max_jerk", 100000.0)
-        self.max_accel_to_decel = overrides.get("max_accel_to_decel", 10000.0)
         self.corner_deviation = overrides.get("corner_deviation", 50e-3)
         self.kin = _FakeCheckMove()
         self.extruder = _FakeCheckMove()
@@ -60,12 +59,10 @@ class _FakeMove:
             inv_move_d = 1.0 / move_d
         self.move_d = move_d
         self.axes_r = [d * inv_move_d for d in axes_d]
+        self.j_max = toolhead.max_jerk
         self.min_move_t = move_d / velocity if velocity else 0.0
         self.max_start_v2 = 0.0
         self.max_cruise_v2 = velocity ** 2
-        self.delta_v2 = 2.0 * move_d * self.accel
-        self.max_smoothed_v2 = 0.0
-        self.smooth_delta_v2 = 2.0 * move_d * toolhead.max_accel_to_decel
         self.next_junction_v2 = 999999999.9
         self.next_junction_v_capped_to = None
 
@@ -75,8 +72,6 @@ class _FakeMove:
             self.max_cruise_v2 = speed2
             self.min_move_t = self.move_d / speed if speed else 0.0
         self.accel = min(self.accel, accel)
-        self.delta_v2 = 2.0 * self.move_d * self.accel
-        self.smooth_delta_v2 = min(self.smooth_delta_v2, self.delta_v2)
 
     def limit_next_junction_speed(self, speed):
         self.next_junction_v2 = min(self.next_junction_v2, speed ** 2)
@@ -229,8 +224,6 @@ def _state_src_dst_pair():
     src.next_junction_v2 = 42.0
     src.max_cruise_v2 = 150.0 ** 2
     src.accel = 5000.0
-    src.delta_v2 = 2.0 * src.move_d * src.accel
-    src.smooth_delta_v2 = min(src.delta_v2, 2.0 * src.move_d * 2500.0)
     dst = _FakeMove(th, (0, 0, 0, 0), (4, 0, 0, 0.4), speed=200.0)
     return th, src, dst
 
@@ -249,26 +242,27 @@ def test_copy_caller_state_transfers_caller_intent_fields():
 def test_copy_caller_state_recomputes_length_derived_fields():
     th, src, dst = _state_src_dst_pair()
     blendplanner._copy_caller_state(src, dst)
-    # delta_v2 recomputed from NEW move_d (4 mm) and pinned accel (5000).
-    assert dst.delta_v2 == pytest.approx(2.0 * 4.0 * 5000.0)
-    # smooth_delta_v2 preserves the parent ratio; src had smooth/delta = 0.5
-    # (max_accel_to_decel/accel = 2500/5000), so dst should follow.
-    ratio = src.smooth_delta_v2 / src.delta_v2
-    assert dst.smooth_delta_v2 == pytest.approx(
-        min(dst.delta_v2, 2.0 * 4.0 * dst.accel * ratio)
-    )
+    # Plan 9 A5: delta_v2 / smooth_delta_v2 are retired. _copy_caller_state
+    # only copies the 5-field caller-intent set: timing_callbacks,
+    # next_junction_v2, max_cruise_v2, accel, and recomputed min_move_t.
+    # Verify the pinned accel survives on dst.
+    assert dst.accel == 5000.0
+    # min_move_t recomputed from dst's new move_d (4 mm) and pinned max_cruise_v2.
     # min_move_t = move_d / sqrt(max_cruise_v2) = 4 / 150 = 0.02667
     assert dst.min_move_t == pytest.approx(4.0 / 150.0)
 
 
-def test_copy_caller_state_handles_zero_delta_v2():
+def test_copy_caller_state_pins_all_caller_intent_fields():
+    # Plan 9 A5: _copy_caller_state copies exactly 5 fields:
+    # timing_callbacks (copy), next_junction_v2, max_cruise_v2, accel,
+    # and recomputed min_move_t. Verify each is transferred from src.
     th, src, dst = _state_src_dst_pair()
-    src.delta_v2 = 0.0
-    src.smooth_delta_v2 = 0.0
     blendplanner._copy_caller_state(src, dst)
-    # Falls back to ratio=1.0 when src.delta_v2 is zero; dst.smooth_delta_v2
-    # collapses to dst.delta_v2 via the min().
-    assert dst.smooth_delta_v2 == pytest.approx(dst.delta_v2)
+    assert dst.accel == src.accel
+    assert dst.next_junction_v2 == src.next_junction_v2
+    assert dst.max_cruise_v2 == src.max_cruise_v2
+    assert dst.timing_callbacks == src.timing_callbacks
+    assert dst.timing_callbacks is not src.timing_callbacks  # copy, not alias
 
 
 def test_90deg_corner_emits_trunc_prev_plus_arc_polyline_and_buffers_next_head():
@@ -453,19 +447,18 @@ def test_aggregate_extruder_check_move_skipped_when_not_extruding():
     assert len(th.extruder.calls) == 0
 
 
-def test_arc_polyline_smooth_delta_v2_not_pinned():
-    # The emit path no longer pins smooth_delta_v2 == delta_v2 — that
-    # was overreach. Kalico's Move invariant smooth_delta_v2 <= delta_v2
-    # must still hold on every emitted polyline move.
+def test_blend_emits_quintic_blend_move_not_polyline():
+    # Plan 9 A5: delta_v2 / smooth_delta_v2 are retired. The blend path
+    # emits a single QuinticBlendMove per corner (no legacy polyline pieces).
+    # Verify that feed+flush produce exactly one QBM in the output.
     b = _blender(max_chord_err=20e-3)
     th = b._toolhead
     m_prev = _FakeMove(th, (0, 0, 0, 0), (10, 0, 0, 0.5), speed=100.0)
     m_next = _FakeMove(th, (10, 0, 0, 0.5), (10, 10, 0, 1.0), speed=100.0)
     b.feed(m_prev)
-    out = b.feed(m_next)
-    arc_moves = out[1:]
-    for am in arc_moves:
-        assert am.smooth_delta_v2 <= am.delta_v2 + 1e-12
+    out = b.feed(m_next) + b.flush()
+    qbms = [m for m in out if isinstance(m, blendplanner.QuinticBlendMove)]
+    assert len(qbms) == 1
 
 
 def test_polyline_speed_continuity_1ppm():
@@ -802,32 +795,12 @@ def test_adapter_queue_reports_blender_buffered_move():
     assert adapter.queue == [m]
 
 
-def test_max_accel_to_decel_is_property_tracking_min_cruise_ratio():
-    """max_accel_to_decel must be derived from min_cruise_ratio on every
-    read, not cached as a field set by _calc_junction_deviation."""
-    # Use a real ToolHead-like object via direct attribute manipulation.
-    # The contract is: max_accel_to_decel == max_accel * (1 - min_cruise_ratio)
-    # at any moment, with no recompute call required.
-    from klippy import toolhead as th_mod
-
-    class _Stub:
-        max_accel_to_decel = th_mod.ToolHead.max_accel_to_decel
-        max_accel = 5000.0
-        min_cruise_ratio = 0.5
-
-    s = _Stub()
-    assert s.max_accel_to_decel == 2500.0
-    s.min_cruise_ratio = 0.7
-    assert s.max_accel_to_decel == pytest.approx(1500.0, rel=1e-12)
-    s.max_accel = 10000.0
-    assert s.max_accel_to_decel == pytest.approx(3000.0, rel=1e-12)
-
 
 def test_calc_junction_skips_block_at_perfect_tangency():
     """At a tangent (collinear) junction, cos_theta_d2 == 0 and the
     centripetal/JD block must be skipped entirely. max_start_v2 is
-    therefore set by the pre-block min() — typically prev.max_start_v2
-    + prev.delta_v2."""
+    therefore set by the pre-block min() of: extruder cap, cruise cap,
+    prev cruise cap, prev next_junction_v2, and jerk-aware forward reach."""
     from klippy import toolhead as th_mod
 
     class _StubExtruder:
@@ -838,27 +811,33 @@ def test_calc_junction_skips_block_at_perfect_tangency():
         max_velocity = 1e6
         max_accel = 10000.0
         max_jerk = 100000.0
-        min_cruise_ratio = 0.5
-        max_accel_to_decel = th_mod.ToolHead.max_accel_to_decel
-        junction_deviation = 0.01  # ignored after deletion; still readable
         extruder = _StubExtruder()
 
     th = _StubToolhead()
     m1 = th_mod.Move(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=200.0)
     m2 = th_mod.Move(th, (10, 0, 0, 0), (20, 0, 0, 0), speed=200.0)
-    # Pre-state: m1.max_start_v2 starts at 0; m1.delta_v2 = 2*10*10000 = 200000.
+    # Pre-state: m1.max_start_v2 starts at 0, so prev_start_v = 0.
+    # forward_reach = reachable_v_end(0, 10000, 100000, 10) ≈ 215.44 mm/s
+    # → forward_reach² ≈ 46415.9. But cruise cap (200²=40000) binds tighter.
+    # Tangent: block skipped, max_start_v2 = min(1e18, 40000, 40000,
+    #   999999999.9, 46415.9) = 40000 (cruise cap binds).
     m2.calc_junction(m1)
-    # Tangent: block skipped, max_start_v2 = min(extruder, cruise, prev_cruise,
-    #   prev.next_junction_v2, prev.max_start_v2 + prev.delta_v2)
-    # = min(1e18, 40000, 40000, 999999999.9, 200000) = 40000 (cruise cap binds).
     assert m2.max_start_v2 == pytest.approx(40000.0, rel=1e-12)
 
 
 def test_calc_junction_centripetal_at_90deg_after_jd_removal():
-    """At a 90° corner with JD deleted, the centripetal mid-move cap
-    must be the binding term: v² ≤ 0.5 · d · a · tan(θ/2). With θ=π/2,
-    d=10, a=10000: cap = 0.5 · 10 · 10000 · 1 = 50000."""
+    """At a 90° corner, the jerk-aware forward reach is the binding term
+    when prev starts from rest. With m1.max_start_v2=0, the forward
+    reach = reachable_v_end(0, 10000, 100000, 10) ≈ 215.44 mm/s
+    → v² ≈ 46415.89. Centripetal = 0.5·10·10000·tan(45°) = 50000 is
+    looser, so forward-reach binds.
+
+    Use a geometry where centripetal is the actual binding constraint:
+    a wide-angle corner with a long prev segment. See the new test
+    test_calc_junction_centripetal_binds_when_forward_reach_is_loose for
+    that case. This test now pins the jerk-forward-reach contract."""
     from klippy import toolhead as th_mod
+    from klippy import jerk_math as _jm
 
     class _StubExtruder:
         def calc_junction(self, prev, nxt):
@@ -868,20 +847,86 @@ def test_calc_junction_centripetal_at_90deg_after_jd_removal():
         max_velocity = 1e6
         max_accel = 10000.0
         max_jerk = 100000.0
-        min_cruise_ratio = 0.5
-        max_accel_to_decel = th_mod.ToolHead.max_accel_to_decel
-        junction_deviation = 0.01  # ignored after deletion
         extruder = _StubExtruder()
 
     th = _StubToolhead()
     m1 = th_mod.Move(th, (0, 0, 0, 0), (10, 0, 0, 0), speed=1000.0)
     m2 = th_mod.Move(th, (10, 0, 0, 0), (10, 10, 0, 0), speed=1000.0)
     m2.calc_junction(m1)
-    # delta_v2 = 2*10*10000 = 200000; quarter_tan(π/4) = 0.25;
-    # centripetal = 0.25 * 200000 = 50000. cruise cap = 1e6 (loose).
-    # JD cap (if still present) = R_jd * 0.01 * 10000 = 2.414 * 100 = 241.4 — would bind.
-    # After JD deletion: centripetal = 50000 binds.
-    assert m2.max_start_v2 == pytest.approx(50000.0, rel=1e-12)
+    # m1 starts from rest (max_start_v2=0), so the forward reach is
+    # reachable_v_end(0, 10000, 100000, 10) ≈ 215.44 mm/s → v² ≈ 46415.89.
+    # Centripetal = 50000 and cruise = 1e6 are both looser — forward reach binds.
+    expected = _jm.reachable_v_end(
+        v_start=0.0, a_max=10000.0, j_max=100000.0, L=10.0
+    ) ** 2
+    assert m2.max_start_v2 == pytest.approx(expected, rel=1e-9)
+
+
+def test_qbm_calc_junction_forward_cap_uses_reachable_v_end():
+    """QBM.calc_junction uses jerk-aware forward reachability from the
+    predecessor's (max_start_v2, accel, j_max, move_d), matching the
+    contract from test_calc_junction_forward_cap_uses_reachable_v_end in
+    test_toolhead_jerk_integration.py.
+
+    Strategy: emit a real QBM via the blender, then force all other terms
+    in the min() to be loose (large), so only the forward-reach cap from
+    the predecessor binds. The predecessor is a _FakeMove with known
+    parameters.
+
+    Predecessor: v_start=0, a=10000, j=100000, L=10 mm
+    → forward_reach = reachable_v_end(0, 10000, 100000, 10) ≈ 215.44 mm/s
+    → forward_reach^2 ≈ 46415.88
+
+    After forcing qbm.max_cruise_v2 >> forward_reach^2 and
+    prev_move.next_junction_v2 >> forward_reach^2, the forward-reach
+    term is the binding constraint and qbm.max_start_v2 must equal it.
+    """
+    import math as _math
+    from klippy import jerk_math as _jm
+
+    b = _blender(
+        toolhead=_FakeToolhead(
+            max_accel=10000.0,
+            max_jerk=100000.0,
+            max_velocity=1000.0,
+            corner_deviation=0.2,
+        ),
+        max_chord_err=20e-3,
+    )
+    th = b._toolhead
+
+    # 90° corner with 10mm segments.
+    m_prev = _FakeMove(th, (0.0, 0.0, 0.0, 0.0), (10.0, 0.0, 0.0, 0.0),
+                       speed=1000.0)
+    m_next = _FakeMove(th, (10.0, 0.0, 0.0, 0.0), (10.0, 10.0, 0.0, 0.0),
+                       speed=1000.0)
+
+    # Feed the blender to emit the QBM.
+    b.feed(m_prev)
+    out = b.feed(m_next) + b.flush()
+    qbms = [m for m in out if isinstance(m, blendplanner.QuinticBlendMove)]
+    assert len(qbms) == 1, "expected exactly one QBM for a 90° corner"
+    qbm = qbms[0]
+
+    # Compute the expected forward-reach cap from the predecessor.
+    # m_prev.max_start_v2 == 0 (default); forward reach starts from rest.
+    expected_reach_v = _jm.reachable_v_end(
+        v_start=0.0, a_max=m_prev.accel, j_max=m_prev.j_max, L=m_prev.move_d
+    )
+    expected_v2 = expected_reach_v ** 2  # ≈ 46415.88
+
+    # Force all other terms in the min() to be loose so forward-reach binds.
+    qbm.max_start_v2 = 1e18        # will be overwritten by calc_junction
+    qbm.max_cruise_v2 = 1e18       # loosen QBM cruise cap
+    m_prev.max_cruise_v2 = 1e18    # loosen prev cruise cap
+    m_prev.next_junction_v2 = 1e18 # loosen prev junction cap
+
+    qbm.calc_junction(m_prev)
+
+    assert qbm.max_start_v2 == pytest.approx(expected_v2, rel=1e-9), (
+        f"QBM.calc_junction forward-reach cap: got {qbm.max_start_v2}, "
+        f"expected {expected_v2} (reachable_v_end^2)"
+    )
 
 
 def test_scv_config_deprecation_warning(caplog):
@@ -1015,7 +1060,6 @@ def _make_toolhead_with_zv_shapers(freq_x, freq_y, max_accel, corner_deviation):
     """Return a _FakeToolhead with two ZV shapers (x and y at given freqs)."""
     th = _FakeToolhead(
         max_accel=max_accel,
-        max_accel_to_decel=max_accel,
         corner_deviation=corner_deviation,
         max_velocity=500.0,
     )
@@ -1030,7 +1074,6 @@ def _make_toolhead_without_shapers(max_accel, corner_deviation):
     """Return a _FakeToolhead whose printer has no input_shaper module."""
     th = _FakeToolhead(
         max_accel=max_accel,
-        max_accel_to_decel=max_accel,
         corner_deviation=corner_deviation,
         max_velocity=500.0,
     )

@@ -377,7 +377,7 @@ def test_pipeline_quintic_blend_move_skipped_in_reverse_pass():
     NOT call reachable_v_from_v_end / read j_max / call set_junction on
     a QuinticBlendMove — the blend's (v_in, cruise_v, v_out) profile is
     TOPP-baked at emit time and immutable (Option-Z).  Instead the pass
-    uses the QBM's baked max_start_v2 / max_cruise_v2 / max_smoothed_v2
+    uses the QBM's baked max_start_v2 / max_cruise_v2
     directly.
 
     Fields populated at construction on the QBM (start_v, cruise_v,

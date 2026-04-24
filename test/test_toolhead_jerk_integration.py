@@ -52,8 +52,6 @@ class _FakeToolhead:
         self.max_velocity = kw.get("max_velocity", 500.0)
         self.max_accel = kw.get("max_accel", 5000.0)
         self.max_jerk = kw.get("max_jerk", 100000.0)
-        self.max_accel_to_decel = kw.get("max_accel_to_decel", 5000.0)
-        self.min_cruise_ratio = kw.get("min_cruise_ratio", 0.0)
         self._captured = []
 
         class _Kin:
@@ -250,7 +248,6 @@ def test_kinematic_move_populates_qpayload_end_to_end():
             self.max_velocity = 500.0
             self.max_accel = 5000.0
             self.max_jerk = 100000.0
-            self.max_accel_to_decel = 5000.0
             self.extruder_cap_snapshot = None
 
             class _K:
@@ -298,7 +295,6 @@ def test_kinematic_move_qpayload_phase_count_exceeds_three_for_jerk_regime():
             self.max_velocity = 500.0
             self.max_accel = 5000.0
             self.max_jerk = 100000.0
-            self.max_accel_to_decel = 5000.0
             self.extruder_cap_snapshot = None
 
             class _K:
@@ -352,7 +348,6 @@ def test_kinematic_retract_preserves_signed_e():
             self.max_velocity = 500.0
             self.max_accel = 5000.0
             self.max_jerk = 100000.0
-            self.max_accel_to_decel = 5000.0
             self.extruder_cap_snapshot = None
 
             class _K:

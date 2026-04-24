@@ -23,7 +23,6 @@ class _FakeToolhead:
         self.max_velocity = overrides.get("max_velocity", 500.0)
         self.max_accel = overrides.get("max_accel", 10000.0)
         self.max_jerk = overrides.get("max_jerk", 100000.0)
-        self.max_accel_to_decel = overrides.get("max_accel_to_decel", 10000.0)
         self.kin = _FakeCheckMove()
         self.extruder = _FakeCheckMove()
 
@@ -63,9 +62,6 @@ class _FakeMove:
         self.min_move_t = move_d / velocity if velocity else 0.0
         self.max_start_v2 = 0.0
         self.max_cruise_v2 = velocity ** 2
-        self.delta_v2 = 2.0 * move_d * self.accel
-        self.max_smoothed_v2 = 0.0
-        self.smooth_delta_v2 = 2.0 * move_d * toolhead.max_accel_to_decel
         self.next_junction_v2 = 999999999.9
 
     def limit_speed(self, speed, accel):
@@ -74,8 +70,6 @@ class _FakeMove:
             self.max_cruise_v2 = speed2
             self.min_move_t = self.move_d / speed if speed else 0.0
         self.accel = min(self.accel, accel)
-        self.delta_v2 = 2.0 * self.move_d * self.accel
-        self.smooth_delta_v2 = min(self.smooth_delta_v2, self.delta_v2)
 
 
 def _collapser(toolhead=None):
@@ -642,13 +636,11 @@ def test_merged_has_fresh_lookahead_invariants():
     m2 = _FakeMove(th, (10, 0, 0, 0.5), (20, 0, 0, 1.0), speed=100.0)
     # Simulate lookahead having partially planned a constituent before merge.
     m1.max_start_v2 = 1234.5
-    m1.max_smoothed_v2 = 6789.0
     c.feed(m1)
     c.feed(m2)
     out = c.flush()
     merged = out[0]
     assert merged.max_start_v2 == 0.0
-    assert merged.max_smoothed_v2 == 0.0
 
 
 def test_post_merge_kin_check_can_reject_aggregate():

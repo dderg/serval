@@ -24,7 +24,6 @@ class _FakeToolhead:
         self.printer = _Printer()
         self.max_velocity = 500.0
         self.max_accel = 5000.0
-        self.max_accel_to_decel = 5000.0
         self.square_corner_velocity = 5.0
         self.junction_deviation = 0.05
         self.max_jerk = 100000.0
@@ -568,7 +567,6 @@ def test_a3_ztilt_regression_1000mms_shape_baked():
     # Use high max_velocity to allow 1000 mm/s cruise
     tool.max_velocity = 1000.0
     tool.max_accel = 10000.0
-    tool.max_accel_to_decel = 10000.0
     # Refresh shaper snapshot so the toolhead cache reflects updated params
     # (snapshot was captured at construction via shapers_snapshot already set)
 

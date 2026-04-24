@@ -27,7 +27,6 @@ class _FakeToolhead:
         self.max_velocity = overrides.get("max_velocity", 500.0)
         self.max_accel = overrides.get("max_accel", 10000.0)
         self.max_jerk = overrides.get("max_jerk", 100000.0)
-        self.max_accel_to_decel = overrides.get("max_accel_to_decel", 10000.0)
         self.corner_deviation = overrides.get("corner_deviation", 0.2)
         self.kin = _FakeCheckMove()
         if pa_snap is None:
@@ -60,6 +59,7 @@ class _FakeMove:
         self.start_pos = tuple(start_pos)
         self.end_pos = tuple(end_pos)
         self.accel = toolhead.max_accel
+        self.j_max = toolhead.max_jerk
         self.timing_callbacks = []
         velocity = min(speed, toolhead.max_velocity)
         self.is_kinematic_move = True
@@ -83,9 +83,6 @@ class _FakeMove:
         self.min_move_t = move_d / velocity if velocity else 0.0
         self.max_start_v2 = 0.0
         self.max_cruise_v2 = velocity ** 2
-        self.delta_v2 = 2.0 * move_d * self.accel
-        self.max_smoothed_v2 = 0.0
-        self.smooth_delta_v2 = 2.0 * move_d * toolhead.max_accel_to_decel
         self.next_junction_v2 = 999999999.9
         self.next_junction_v_capped_to = None
 
@@ -95,8 +92,6 @@ class _FakeMove:
             self.max_cruise_v2 = speed2
             self.min_move_t = self.move_d / speed if speed else 0.0
         self.accel = min(self.accel, accel)
-        self.delta_v2 = 2.0 * self.move_d * self.accel
-        self.smooth_delta_v2 = min(self.smooth_delta_v2, self.delta_v2)
 
     def limit_next_junction_speed(self, speed):
         self.next_junction_v2 = min(self.next_junction_v2, speed ** 2)
