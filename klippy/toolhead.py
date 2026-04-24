@@ -10,7 +10,6 @@ import math
 from . import chelper
 from . import jerk_math
 from .chelper import jerk_profile as jp_mod
-from .chelper.linear_quintic import append_trapezoid_as_quintic
 from .extras.danger_options import get_danger_options
 from .kinematics import extruder
 
@@ -222,8 +221,7 @@ class Move:
         # The 7-segment profile (J+/A+/J-/C/J-d/A-/J+d) is stored on
         # self.jerk_profile for the A2d emit path. Legacy trapezoidal
         # fields (accel_t/cruise_t/decel_t/start_v/cruise_v/end_v/accel)
-        # are populated so existing consumers (extruder.move,
-        # _process_moves → append_trapezoid_as_quintic) emit a
+        # are populated so existing consumers (extruder.move) emit a
         # trapezoidal approximation whose integral equals move_d and
         # whose endpoint velocities / total duration match the
         # jerk-limited profile exactly.
@@ -503,7 +501,6 @@ class ToolHead:
         # Setup iterative solver
         ffi_main, ffi_lib = chelper.get_ffi()
         self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
-        self.trapq_append = append_trapezoid_as_quintic
         self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
         self.step_generators = []
         # Create kinematics class
@@ -692,23 +689,10 @@ class ToolHead:
                 for cb in move.timing_callbacks:
                     cb(next_move_time)
                 continue
-            if move.is_kinematic_move:
-                self.trapq_append(
-                    self.trapq,
-                    next_move_time,
-                    move.accel_t,
-                    move.cruise_t,
-                    move.decel_t,
-                    move.start_pos[0],
-                    move.start_pos[1],
-                    move.start_pos[2],
-                    move.axes_r[0],
-                    move.axes_r[1],
-                    move.axes_r[2],
-                    move.start_v,
-                    move.cruise_v,
-                    move.accel,
-                )
+            # Plan 9 A2d: kinematic moves all carry quintic_trapq_payload
+            # and took the `continue` path above. Only pure-E moves
+            # (is_kinematic_move == False) reach here; they emit through
+            # extruder.move's legacy trapezoid path below.
             if move.axes_d[3]:
                 self.extruder.move(next_move_time, move)
             next_move_time = (

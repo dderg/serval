@@ -300,3 +300,19 @@ def test_set_junction_quintic_payload_total_t_equals_sum_of_phase_times():
     payload = m.quintic_trapq_payload
     assert payload[1] == pytest.approx(
         m.accel_t + m.cruise_t + m.decel_t, rel=1e-9)
+
+
+def test_pure_e_move_skips_quintic_trapq_payload():
+    """Pure-E (is_kinematic_move == False) moves must NOT populate
+    quintic_trapq_payload — they route through the legacy trapezoid
+    path in extruder.move for A2d scope."""
+    from klippy.toolhead import Move
+    th = _FakeToolhead(max_accel=5000.0, max_jerk=100000.0)
+    # Zero XYZ displacement, nonzero E → pure-E move.
+    m = Move(th, (0, 0, 0, 0), (0, 0, 0, 10), speed=100.0)
+    assert m.is_kinematic_move is False
+    m.set_junction(0.0, 100.0 ** 2, 0.0)
+    assert not hasattr(m, "quintic_trapq_payload"), (
+        "pure-E move must NOT get quintic_trapq_payload — A2d guards on "
+        "is_kinematic_move, pure-E routes through the legacy trapezoid path"
+    )
