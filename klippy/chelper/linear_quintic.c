@@ -1,3 +1,4 @@
+#include <stddef.h> // NULL
 #include "compiler.h" // __visible
 #include "jerk_profile.h" // struct jerk_profile_result, JP_OK
 #include "linear_quintic.h"
@@ -89,10 +90,42 @@ build_jerk_profile_as_quintic_coeffs(
     double rx, double ry, double rz,
     double start_pos_x, double start_pos_y, double start_pos_z,
     double *phase_t_ends_out,
-    double *coeff_buf /* [MOVE_MAX_PIECES * 15 * 4] */)
+    double *coeff_buf)
 {
-    (void)prof; (void)rx; (void)ry; (void)rz;
-    (void)start_pos_x; (void)start_pos_y; (void)start_pos_z;
-    (void)phase_t_ends_out; (void)coeff_buf;
-    return -1;
+    if (prof == NULL || prof->status != JP_OK)
+        return -1;
+    /* Zero coeff_buf (caller may not have zeroed). */
+    for (int i = 0; i < MOVE_MAX_PIECES * 15 * 4; i++)
+        coeff_buf[i] = 0.0;
+    /* Note: seg->coeffs[0] is absolute-in-1D (set by build_accel_side in
+     * jerk_profile.c, which threads *p_cursor as an absolute scalar starting
+     * at 0.0 set by jerk_profile_compute). So axis-wise c0 is simply
+     * start_pos_<axis> + r_<axis> * seg->coeffs[0]. No per-phase running
+     * offset needed. */
+    double cum_t = 0.0;
+    int out_phase = 0;
+    for (int s = 0; s < prof->n_segments; s++) {
+        const struct jerk_profile_segment *seg = &prof->segments[s];
+        if (seg->T <= 1e-12)
+            continue;       /* Skip zero-duration segments. */
+        if (out_phase >= MOVE_MAX_PIECES)
+            return -1;      /* Too many phases to fit. */
+        /* Per-axis polynomial coefficients: ax_c[k] = axis_ratio * seg.coeffs[k]. */
+        double *phase_base = coeff_buf + out_phase * 15 * 4;
+        for (int k = 0; k < 6; k++) {
+            double c_1d = seg->coeffs[k];
+            phase_base[k * 4 + 0] = rx * c_1d;
+            phase_base[k * 4 + 1] = ry * c_1d;
+            phase_base[k * 4 + 2] = rz * c_1d;
+            phase_base[k * 4 + 3] = 0.0; /* Axis E not handled here — A5 scope. */
+        }
+        /* Override c0 with absolute start_pos + axis-ratio * 1-D segment start. */
+        phase_base[0 * 4 + 0] = start_pos_x + rx * seg->coeffs[0];
+        phase_base[0 * 4 + 1] = start_pos_y + ry * seg->coeffs[0];
+        phase_base[0 * 4 + 2] = start_pos_z + rz * seg->coeffs[0];
+        cum_t += seg->T;
+        phase_t_ends_out[out_phase] = cum_t;
+        out_phase++;
+    }
+    return out_phase;
 }
