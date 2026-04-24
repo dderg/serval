@@ -688,7 +688,7 @@ class CornerBlender:
             v_max=th.max_velocity,
             jerk_max=None,       # plan 1: jerk cap disabled; plan 5 wires it
             extruder_caps=_extract_extruder_caps(th),  # Plan 5 D7 consumes per-s
-            shapers=blendmath._extract_shapers(th),
+            shapers=blendmath.extract_shapers(th),
         )
         shape = blendquintic.QuinticShape.from_moves(
             self._prev, move,

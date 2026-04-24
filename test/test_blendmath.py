@@ -154,13 +154,13 @@ class _FakeToolheadWithShapers:
         self.printer = _FakePrinterObject(input_shaper)
 
 
-def test_extract_shapers_two_axes():
+def testextract_shapers_two_axes():
     is_obj = _FakeInputShaper([
         _FakeAxisInputShaper("x", "zv", 150.0),
         _FakeAxisInputShaper("y", "zv", 80.0),
     ])
     toolhead = _FakeToolheadWithShapers(is_obj)
-    snaps = blendmath._extract_shapers(toolhead)
+    snaps = blendmath.extract_shapers(toolhead)
     snaps_by_axis = {s.axis: s for s in snaps}
     assert snaps_by_axis["x"].shaper_freq == 150.0
     assert snaps_by_axis["x"].shaper_type == "zv"
@@ -172,11 +172,11 @@ def test_extract_shapers_two_axes():
     assert snaps_by_axis["x"].A_axis > snaps_by_axis["y"].A_axis
 
 
-def test_extract_shapers_none_toolhead_returns_empty():
-    assert blendmath._extract_shapers(None) == []
+def testextract_shapers_none_toolhead_returns_empty():
+    assert blendmath.extract_shapers(None) == []
 
 
-def test_extract_shapers_no_input_shaper_module_returns_empty():
+def testextract_shapers_no_input_shaper_module_returns_empty():
     class _FakePrinterObjectNoIS:
         def lookup_object(self, name, default=None):
             return default
@@ -184,17 +184,17 @@ def test_extract_shapers_no_input_shaper_module_returns_empty():
     class _FakeToolhead:
         printer = _FakePrinterObjectNoIS()
 
-    assert blendmath._extract_shapers(_FakeToolhead()) == []
+    assert blendmath.extract_shapers(_FakeToolhead()) == []
 
 
-def test_extract_shapers_unshaped_axis_has_zero_A():
+def testextract_shapers_unshaped_axis_has_zero_A():
     # Axis with shaper_freq=0 is unshaped → snapshot carries A_axis=0.
     is_obj = _FakeInputShaper([
         _FakeAxisInputShaper("x", "zv", 0.0),
         _FakeAxisInputShaper("y", "zv", 80.0),
     ])
     toolhead = _FakeToolheadWithShapers(is_obj)
-    snaps = blendmath._extract_shapers(toolhead)
+    snaps = blendmath.extract_shapers(toolhead)
     snaps_by_axis = {s.axis: s for s in snaps}
     assert snaps_by_axis["x"].shaper_freq == 0.0
     assert snaps_by_axis["x"].A_axis == 0.0
@@ -202,9 +202,9 @@ def test_extract_shapers_unshaped_axis_has_zero_A():
     assert snaps_by_axis["x"].shaper_type == "zv"
 
 
-def test_extract_shapers_uses_real_axis_input_shaper_api():
+def testextract_shapers_uses_real_axis_input_shaper_api():
     """Regression: route through the real AxisInputShaper class (post
-    BE-v2 smooth-shapers port) and confirm blendmath._extract_shapers
+    BE-v2 smooth-shapers port) and confirm blendmath.extract_shapers
     uses get_axis() instead of a direct .axis attribute. The pre-port
     API exposed .axis directly; the port removed it and the fake had
     masked the mismatch — breaking TEST_RESONANCES on real hardware.
@@ -222,7 +222,7 @@ def test_extract_shapers_uses_real_axis_input_shaper_api():
 
     is_obj = _FakeInputShaper([real_axis_shaper])
     toolhead = _FakeToolheadWithShapers(is_obj)
-    snaps = blendmath._extract_shapers(toolhead)
+    snaps = blendmath.extract_shapers(toolhead)
     assert len(snaps) == 1
     assert snaps[0].axis == "x"
     assert snaps[0].shaper_type == "zv"
@@ -230,10 +230,10 @@ def test_extract_shapers_uses_real_axis_input_shaper_api():
     assert snaps[0].A_axis > 0.0
 
 
-def test_extract_shapers_smooth_family_axis_has_nonzero_A():
+def testextract_shapers_smooth_family_axis_has_nonzero_A():
     """Smooth-family axes carry TypedInputSmootherParams (smoother_type /
     smoother_freq, no shaper_* attributes). After the T4 attribute-name
-    fix, _extract_shapers must not crash on them AND must return a finite
+    fix, extract_shapers must not crash on them AND must return a finite
     positive A_axis (not 0.0 as the pre-T4 broken path produced).
     """
     import math
@@ -245,16 +245,16 @@ def test_extract_shapers_smooth_family_axis_has_nonzero_A():
 
     is_obj = _FakeInputShaper([real_axis_smoother])
     toolhead = _FakeToolheadWithShapers(is_obj)
-    snaps = blendmath._extract_shapers(toolhead)
+    snaps = blendmath.extract_shapers(toolhead)
     assert len(snaps) == 1
     assert snaps[0].axis == "x"
     assert snaps[0].A_axis > 0.0
     assert math.isfinite(snaps[0].A_axis)
 
 
-def test_extract_shapers_zero_target_smoothing_returns_empty():
+def testextract_shapers_zero_target_smoothing_returns_empty():
     # target_smoothing=0 is the sentinel to disable the shaper-derived
-    # velocity cap. _extract_shapers must return [] so compute_shaper_bounds
+    # velocity cap. extract_shapers must return [] so compute_shaper_bounds
     # produces (inf, inf) bounds — identical to "no input_shaper loaded".
     is_obj = _FakeInputShaper([
         _FakeAxisInputShaper("x", "zv", 150.0),
@@ -262,7 +262,7 @@ def test_extract_shapers_zero_target_smoothing_returns_empty():
     ])
     is_obj.target_smoothing = 0.0
     toolhead = _FakeToolheadWithShapers(is_obj)
-    assert blendmath._extract_shapers(toolhead) == []
+    assert blendmath.extract_shapers(toolhead) == []
 
 
 # --- Task 2: suppressed_junction_v + _scv_equivalent_junction_v ---
@@ -417,9 +417,9 @@ def test_compute_A_axis_smooth_is_damping_independent():
 
 def test_compute_A_axis_smooth_is_unknown_returns_zero():
     """Unknown SIS name returns 0.0 rather than raising.
-    Contract: _extract_shapers uses 0.0 as the sentinel for 'axis has
+    Contract: extract_shapers uses 0.0 as the sentinel for 'axis has
     no effective shaper contribution' — matches the behavior of the
-    existing non-FIR-non-SIS fallthrough in _extract_shapers.
+    existing non-FIR-non-SIS fallthrough in extract_shapers.
     """
     A = blendmath._compute_A_axis_smooth_is("smooth_nonexistent", 40.0, 0.1,
                                              target_smoothing=0.12)
@@ -433,7 +433,7 @@ def test_compute_A_axis_smooth_is_zero_freq_returns_zero():
     assert A == 0.0
 
 
-def test_extract_shapers_smooth_is_produces_nonzero_A_axis():
+def testextract_shapers_smooth_is_produces_nonzero_A_axis():
     """After D1, SIS axes must carry a finite positive A_axis, not 0.0.
 
     Uses the REAL attribute names on TypedInputSmootherParams:
@@ -467,7 +467,7 @@ def test_extract_shapers_smooth_is_produces_nonzero_A_axis():
     class MockToolhead:
         printer = MockPrinter()
 
-    snaps = blendmath._extract_shapers(MockToolhead())
+    snaps = blendmath.extract_shapers(MockToolhead())
     assert len(snaps) == 2
     for s in snaps:
         assert s.shaper_type == "bs3"
@@ -476,7 +476,7 @@ def test_extract_shapers_smooth_is_produces_nonzero_A_axis():
         assert math.isfinite(s.A_axis)
 
 
-def test_extract_shapers_fir_unchanged():
+def testextract_shapers_fir_unchanged():
     """FIR path must still produce A_axis via ShaperCalibrate.find_shaper_max_accel."""
     class MockShaperParams:
         shaper_type = "mzv"
@@ -502,14 +502,14 @@ def test_extract_shapers_fir_unchanged():
     class MockToolhead:
         printer = MockPrinter()
 
-    snaps = blendmath._extract_shapers(MockToolhead())
+    snaps = blendmath.extract_shapers(MockToolhead())
     assert len(snaps) == 1
     assert snaps[0].shaper_type == "mzv"
     assert snaps[0].A_axis > 0.0
 
 
-def test_extract_shapers_dispatch_handles_both_attribute_conventions():
-    """_extract_shapers must handle both TypedInputShaperParams
+def testextract_shapers_dispatch_handles_both_attribute_conventions():
+    """extract_shapers must handle both TypedInputShaperParams
     (shaper_*) and TypedInputSmootherParams (smoother_*) attribute
     conventions in a single call.
     """
@@ -544,7 +544,7 @@ def test_extract_shapers_dispatch_handles_both_attribute_conventions():
     class MockToolhead:
         printer = MockPrinter()
 
-    snaps = blendmath._extract_shapers(MockToolhead())
+    snaps = blendmath.extract_shapers(MockToolhead())
     assert len(snaps) == 2
     fir = next(s for s in snaps if s.axis == "x")
     sis = next(s for s in snaps if s.axis == "y")
@@ -554,7 +554,7 @@ def test_extract_shapers_dispatch_handles_both_attribute_conventions():
     assert sis.A_axis > 0.0
 
 
-def test_extract_shapers_target_smoothing_zero_disables_SIS():
+def testextract_shapers_target_smoothing_zero_disables_SIS():
     """target_smoothing=0 sentinel must return [] regardless of shaper type.
     This is the A/B diagnostic — fully bypasses shaper-derived velocity cap.
     See project_target_smoothing_sentinel.md.
@@ -582,11 +582,11 @@ def test_extract_shapers_target_smoothing_zero_disables_SIS():
     class MockToolhead:
         printer = MockPrinter()
 
-    snaps = blendmath._extract_shapers(MockToolhead())
+    snaps = blendmath.extract_shapers(MockToolhead())
     assert snaps == []  # sentinel bypasses the cap entirely
 
 
-def test_extract_shapers_target_smoothing_positive_keeps_SIS():
+def testextract_shapers_target_smoothing_positive_keeps_SIS():
     """target_smoothing > 0 (user-configured) keeps the cap active for SIS."""
     class MockSmootherParams:
         smoother_type = "bs3"
@@ -611,7 +611,7 @@ def test_extract_shapers_target_smoothing_positive_keeps_SIS():
     class MockToolhead:
         printer = MockPrinter()
 
-    snaps = blendmath._extract_shapers(MockToolhead())
+    snaps = blendmath.extract_shapers(MockToolhead())
     assert len(snaps) == 1
     assert snaps[0].A_axis > 0.0
 # ---------------------------------------------------------------------------

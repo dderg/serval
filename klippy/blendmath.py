@@ -70,7 +70,7 @@ def _sigma_T_max_from_toolhead(toolhead):
     sigma_T is a property of the shaper impulse sequence alone — independent
     of target_smoothing — so this is safe to use for suppression decisions
     regardless of the target_smoothing=0 sentinel behaviour in
-    _extract_shapers().
+    extract_shapers().
     """
     if toolhead is None:
         return 0.0
@@ -260,7 +260,7 @@ def _compute_A_axis_smooth_is(shaper_type: str, shaper_freq: float,
     but has no effect — SIS kernels are fixed-shape.
 
     Returns 0.0 for unknown shaper_type or shaper_freq <= 0 (the
-    _extract_shapers sentinel for 'no shaper contribution').
+    extract_shapers sentinel for 'no shaper contribution').
 
     Derivation: docs/superpowers/plans/plan4-derivations/A_axis_smooth_is.md.
     """
@@ -277,7 +277,7 @@ def _compute_A_axis_smooth_is(shaper_type: str, shaper_freq: float,
     return float(sc.find_smoother_max_accel(smoother, target_smoothing))
 
 
-def _extract_shapers(toolhead):
+def extract_shapers(toolhead):
     """Pull per-axis shaper snapshots off a Kalico toolhead.
 
     Returns an empty list if `toolhead` is None or no `input_shaper`
@@ -366,11 +366,6 @@ def _extract_shapers(toolhead):
             inverse_G=inverse_G,
         ))
     return snaps
-
-
-# Public alias — A3 introduces Move-level shape baking which needs to
-# call this without crossing the private-by-underscore convention.
-extract_shapers = _extract_shapers
 
 
 

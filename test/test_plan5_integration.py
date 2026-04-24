@@ -114,7 +114,7 @@ class _FakeAxisIS:
 
         self.params = _P()
         # bs-family: smoother_type / smoother_freq convention — but we
-        # populate the FIR-style names too so blendmath._extract_shapers
+        # populate the FIR-style names too so blendmath.extract_shapers
         # reads the right fields on either branch.
         self.params.shaper_type = stype
         self.params.shaper_freq = freq

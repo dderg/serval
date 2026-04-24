@@ -47,7 +47,7 @@ class KinematicLimits:
     extruder_caps: Optional[ExtruderLimits]   # plan 3 wires; plan 5 consumes
     # Per-axis shaper snapshots for dense per-s shaper cap in v_cap_fn.
     # Empty list disables the shaper cap.
-    # Populated by the planner via _extract_shapers; None until Task 12.
+    # Populated by the planner via extract_shapers; None until Task 12.
     shapers: Optional[list] = field(default=None)
 
 

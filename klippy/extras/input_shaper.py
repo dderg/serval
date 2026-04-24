@@ -508,9 +508,16 @@ class InputShaper:
         """Force a step-gen resync so the next emitted move picks up the
         new shaper. Pre-Plan-8 this triggered the C-side FFI rebuild;
         under baked-in shaping a plain flush is enough — the next
-        QuinticBlendMove.__init__ reads the updated shapers list."""
+        QuinticBlendMove.__init__ reads the updated shapers list.
+
+        Plan 9 A3: also invalidate the toolhead's cached shaper snapshot
+        (consumed by Move.__init__) so moves constructed after the update
+        see the new shaper configuration."""
         if self.toolhead is not None:
             self.toolhead.flush_step_generation()
+            refresh = getattr(self.toolhead, "_refresh_shapers_snapshot", None)
+            if refresh is not None:
+                refresh()
 
     def disable_shaping(self):
         self._flush_for_shaper_update()

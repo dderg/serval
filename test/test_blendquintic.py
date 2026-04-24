@@ -570,8 +570,8 @@ def test_random_corner_sweep():
 
 
 def test_v_cap_fn_degrades_gracefully_with_smooth_shaper_axis():
-    """When a smooth-family axis is passed in, _extract_shapers records
-    A_axis=0.0 (see test_blendmath.py::test_extract_shapers_smooth_family_axis_has_zero_A).
+    """When a smooth-family axis is passed in, extract_shapers records
+    A_axis=0.0 (see test_blendmath.py::testextract_shapers_smooth_family_axis_has_zero_A).
     QuinticShape.v_cap_fn must not crash or return zero from that -- the
     shaper term should drop out, leaving a_max / v_max bounds intact.
     """
@@ -617,7 +617,7 @@ def test_v_cap_fn_degrades_gracefully_with_smooth_shaper_axis():
 # Integration tests — Plan 4 D1 closure (Task 6)
 # ---------------------------------------------------------------------------
 # These two tests confirm that the full pipeline (Smooth-IS A_axis derivation +
-# _extract_shapers type dispatch + v_cap_fn) is wired end-to-end correctly.
+# extract_shapers type dispatch + v_cap_fn) is wired end-to-end correctly.
 # ---------------------------------------------------------------------------
 
 from klippy import blendmath
@@ -1042,7 +1042,7 @@ def test_d4_compute_G_worst_ignores_extruder_axis():
 class _D4FakeAxisInputShaper:
     """Inline copy of test_blendmath._FakeAxisInputShaper.
 
-    Minimum surface _extract_shapers reads: .get_axis() and .params
+    Minimum surface extract_shapers reads: .get_axis() and .params
     with shaper_type / shaper_freq / damping_ratio.
     """
     def __init__(self, axis, shaper_type, freq, damping_ratio=0.1):
@@ -1089,8 +1089,8 @@ class _D4FakeToolheadWithShapers:
         self.printer = _D4FakePrinterObject(input_shaper)
 
 
-def test_d4_extract_shapers_populates_inverse_G_default_one():
-    """_extract_shapers must populate AxisShaperSnapshot.inverse_G; when
+def test_d4extract_shapers_populates_inverse_G_default_one():
+    """extract_shapers must populate AxisShaperSnapshot.inverse_G; when
     no feedforward inverse has been wired (classic FIR or no-op
     mock), it defaults to 1.0 so G_worst degrades to the pre-D4 form.
     """
@@ -1099,13 +1099,13 @@ def test_d4_extract_shapers_populates_inverse_G_default_one():
         _D4FakeAxisInputShaper("y", "zv", 50.0),
     ])
     toolhead = _D4FakeToolheadWithShapers(is_obj)
-    snaps = blendmath._extract_shapers(toolhead)
+    snaps = blendmath.extract_shapers(toolhead)
     for s in snaps:
         assert s.inverse_G == 1.0
 
 
-def test_d4_extract_shapers_reads_get_axis_G_when_available():
-    """When input_shaper exposes get_axis_G, _extract_shapers should
+def test_d4extract_shapers_reads_get_axis_G_when_available():
+    """When input_shaper exposes get_axis_G, extract_shapers should
     thread the returned value into AxisShaperSnapshot.inverse_G.
     """
     class _ISWithG(_D4FakeInputShaper):
@@ -1124,7 +1124,7 @@ def test_d4_extract_shapers_reads_get_axis_G_when_available():
         G_by_axis={"x": 2.0, "y": 1.5},
     )
     toolhead = _D4FakeToolheadWithShapers(is_obj)
-    snaps = blendmath._extract_shapers(toolhead)
+    snaps = blendmath.extract_shapers(toolhead)
     by_axis = {s.axis: s for s in snaps}
     assert by_axis["x"].inverse_G == pytest.approx(2.0)
     assert by_axis["y"].inverse_G == pytest.approx(1.5)

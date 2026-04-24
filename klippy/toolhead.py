@@ -7,6 +7,7 @@ import importlib
 import logging
 import math
 
+from . import blendmath
 from . import chelper
 from . import jerk_math
 from .chelper import jerk_profile as jp_mod
@@ -63,11 +64,11 @@ class Move:
         # Plan 9 A3: unshaped polynomial, set by build_unshaped_payload
         # after set_junction. None until set_junction is called.
         self._unshaped_payload = None
-        # Plan 9 A3 T2: frozen shaper snapshot captured at construction time
-        # so finalize_shape has the shaper list available without re-querying.
-        # Empty list when no input_shaper module is loaded (pass-through).
-        from . import blendmath as _blendmath
-        self._shapers_snapshot = _blendmath.extract_shapers(toolhead)
+        # Plan 9 A3 T2: frozen shaper snapshot taken at construction. We read
+        # the toolhead-owned cache (refreshed on SET_INPUT_SHAPER / connect)
+        # rather than calling extract_shapers per move — that would trigger
+        # find_shaper_max_accel bisection on every gcode line.
+        self._shapers_snapshot = getattr(toolhead, "shapers_snapshot", [])
 
     def limit_speed(self, speed, accel):
         speed2 = speed**2
@@ -525,6 +526,11 @@ class ToolHead:
         # Refreshed by SET_PRESSURE_ADVANCE / SET_EXTRUDER_LIMITS handlers
         # and on Print Start. None when cap is disabled.
         self.extruder_cap_snapshot = None
+        # Plan 9 A3: cached per-axis shaper snapshot for Move construction.
+        # Refreshed at connect time (after input_shaper loads) and when
+        # SET_INPUT_SHAPER / ENABLE_INPUT_SHAPER / DISABLE_INPUT_SHAPER fire.
+        # Empty list when no input_shaper module is loaded.
+        self.shapers_snapshot = []
         kin_name = config.get("kinematics")
         try:
             mod = importlib.import_module("klippy.kinematics." + kin_name)
@@ -574,6 +580,12 @@ class ToolHead:
         gcode.register_command("M204", self.cmd_M204)
         self.printer.register_event_handler(
             "klippy:shutdown", self._handle_shutdown
+        )
+        # Plan 9 A3: populate cached shaper snapshot once input_shaper has
+        # loaded. Subsequent updates go through _refresh_shapers_snapshot
+        # from input_shaper's SET_INPUT_SHAPER / ENABLE / DISABLE handlers.
+        self.printer.register_event_handler(
+            "klippy:connect", self._refresh_shapers_snapshot
         )
         # Load some default modules
         modules = [
@@ -924,6 +936,14 @@ class ToolHead:
             self.extruder_cap_snapshot = None
             return
         self.extruder_cap_snapshot = snap_fn()
+
+    def _refresh_shapers_snapshot(self):
+        """Plan 9 A3. Refresh cached per-axis shaper snapshot used by
+        Move.__init__. Called when the input_shaper configuration changes
+        (SET_INPUT_SHAPER / ENABLE_INPUT_SHAPER / DISABLE_INPUT_SHAPER)
+        and at connect time once the input_shaper module is loaded.
+        Empty list when no input_shaper module is present."""
+        self.shapers_snapshot = blendmath.extract_shapers(self)
 
     # Homing "drip move" handling
     def _update_drip_move_time(self, next_print_time):
