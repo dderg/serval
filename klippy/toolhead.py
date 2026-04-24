@@ -156,10 +156,13 @@ class Move:
         ``self.quintic_trapq_payload`` for emit.
 
         Convolves ``self._shapers_snapshot`` with the unshaped polynomial
-        via ``blendplanner._bake_shaper_polynomial``. Neighbour polynomials
+        via ``blendplanner.bake_shaper_polynomial``. Neighbour polynomials
         are shifted into this move's reference frame first via
-        ``blendplanner._offset_unshaped_for_neighbour`` before being passed
+        ``blendplanner.offset_unshaped_for_neighbour`` before being passed
         to the composer, mirroring ``QuinticBlendMove.finalize_shape``.
+
+        Must be called AFTER ``set_junction`` (reads
+        ``self._unshaped_payload`` and ``self._shapers_snapshot``).
 
         Parameters
         ----------
@@ -186,16 +189,16 @@ class Move:
             dx = prev_start_pos_xyz[0] - cur_start_xyz[0]
             dy = prev_start_pos_xyz[1] - cur_start_xyz[1]
             dz = prev_start_pos_xyz[2] - cur_start_xyz[2]
-            prev_unshaped = bp._offset_unshaped_for_neighbour(
+            prev_unshaped = bp.offset_unshaped_for_neighbour(
                 prev_unshaped, (dx, dy, dz))
         if next_unshaped is not None and next_start_pos_xyz is not None:
             dx = next_start_pos_xyz[0] - cur_start_xyz[0]
             dy = next_start_pos_xyz[1] - cur_start_xyz[1]
             dz = next_start_pos_xyz[2] - cur_start_xyz[2]
-            next_unshaped = bp._offset_unshaped_for_neighbour(
+            next_unshaped = bp.offset_unshaped_for_neighbour(
                 next_unshaped, (dx, dy, dz))
 
-        baked_t_ends, baked_total_t, baked_coeffs = bp._bake_shaper_polynomial(
+        baked_t_ends, baked_total_t, baked_coeffs = bp.bake_shaper_polynomial(
             phase_t_ends, total_t, coeff_tuple,
             self._shapers_snapshot,
             shape_disabled=False,
@@ -213,8 +216,8 @@ class Move:
         legacy_t_decel_start = self.accel_t + self.cruise_t
         legacy_total_t = self.accel_t + self.cruise_t + self.decel_t
         self.quintic_trapq_payload = (
-            tuple(baked_t_ends), baked_total_t,
-            arc_length, v_cap_min, start_pos_xyz, tuple(baked_coeffs),
+            baked_t_ends, baked_total_t,
+            arc_length, v_cap_min, start_pos_xyz, baked_coeffs,
             legacy_t_accel_end, legacy_t_decel_start, legacy_total_t,
         )
 

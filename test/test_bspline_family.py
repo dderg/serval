@@ -13,7 +13,7 @@ infrastructure — bspline_inverse / fused kernel / extruder_smoother /
 _marshal_pieces_to_buffer / get_axis_G — are retired along with the
 modules they covered. The remaining tests pin the shaper_defs kernel
 math and the migration-error story, both of which the planner
-(blendplanner._bake_shaper_polynomial) still depends on.
+(blendplanner.bake_shaper_polynomial) still depends on.
 """
 
 import numpy as np

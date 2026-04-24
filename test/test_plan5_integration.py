@@ -226,7 +226,7 @@ def _baked_position_fn(payload):
 def _unshaped_position_fn(
         shape, v_in, v_out, cruise_v, a_max, s_accel_end, s_decel_start):
     """Build the UNSHAPED 3-phase polynomial directly from the QuinticShape
-    (same call the planner makes before passing through _bake_shaper_polynomial)
+    (same call the planner makes before passing through bake_shaper_polynomial)
     and return a t → (x, y, z) evaluator plus its total_t.
 
     This is the "reference" trajectory that the bake path must approximate
@@ -473,7 +473,7 @@ class TestPlan5CascadeIntegration:
     ])
     def test_shaper_cascade_matches_planned_within_passband(
             self, bs_variant, max_err_um):
-        """The baked-in polynomial (blendplanner._bake_shaper_polynomial)
+        """The baked-in polynomial (blendplanner.bake_shaper_polynomial)
         must match a Python-side reference convolution of the UNSHAPED
         quintic with the same bs kernel, within the 100 µm passband spec.
 

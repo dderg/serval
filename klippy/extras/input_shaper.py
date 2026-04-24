@@ -8,7 +8,7 @@
 # Plan 8 Chunk 2 Task 12 — the post-hoc step-generator kin_shaper.c cascade
 # is retired. The [input_shaper] config section now exists purely to carry
 # per-axis shaper_type / shaper_freq / damping_ratio parameters that the
-# planner (`klippy/blendplanner.py::_bake_shaper_polynomial`) reads at
+# planner (`klippy/blendplanner.py::bake_shaper_polynomial`) reads at
 # emit time to bake the kernel directly into the quintic polynomial.
 #
 # SET_INPUT_SHAPER still works — it flushes the toolhead, updates the
@@ -181,7 +181,7 @@ class AxisInputShaper:
     After Plan 8 Chunk 2 Task 12 this class owns no step-gen kinematics
     state — the kernel is baked into the planner polynomial inside
     QuinticShape.compose_phase_polynomials via
-    blendplanner._bake_shaper_polynomial. The .params attribute is
+    blendplanner.bake_shaper_polynomial. The .params attribute is
     the sole entry point downstream consumers read.
     """
 

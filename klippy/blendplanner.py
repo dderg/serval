@@ -159,7 +159,7 @@ def _build_unshaped_payload(
     return phase_t_ends, total_t, tuple(flat)
 
 
-def _offset_unshaped_for_neighbour(unshaped_payload, origin_delta_xyz):
+def offset_unshaped_for_neighbour(unshaped_payload, origin_delta_xyz):
     """Return a neighbour unshaped-payload with its XY polynomial shifted
     by `origin_delta_xyz` so the resulting motion is continuous with
     the current move's reference frame.
@@ -188,7 +188,7 @@ def _offset_unshaped_for_neighbour(unshaped_payload, origin_delta_xyz):
     return t_ends, total_t, tuple(flat)
 
 
-def _bake_shaper_polynomial(
+def bake_shaper_polynomial(
     unshaped_phase_t_ends, unshaped_total_t, unshaped_coeffs,
     shapers,
     shape_disabled=False,
@@ -453,17 +453,17 @@ class QuinticBlendMove:
             dx = prev_start_pos_xyz[0] - cur_start_xyz[0]
             dy = prev_start_pos_xyz[1] - cur_start_xyz[1]
             dz = prev_start_pos_xyz[2] - cur_start_xyz[2]
-            prev_unshaped = _offset_unshaped_for_neighbour(
+            prev_unshaped = offset_unshaped_for_neighbour(
                 prev_unshaped, (dx, dy, dz)
             )
         if next_unshaped is not None and next_start_pos_xyz is not None:
             dx = next_start_pos_xyz[0] - cur_start_xyz[0]
             dy = next_start_pos_xyz[1] - cur_start_xyz[1]
             dz = next_start_pos_xyz[2] - cur_start_xyz[2]
-            next_unshaped = _offset_unshaped_for_neighbour(
+            next_unshaped = offset_unshaped_for_neighbour(
                 next_unshaped, (dx, dy, dz)
             )
-        phase_t_ends_tuple, total_t_baked, coeff_tuple = _bake_shaper_polynomial(
+        phase_t_ends_tuple, total_t_baked, coeff_tuple = bake_shaper_polynomial(
             unshaped_t_ends, unshaped_total_t, unshaped_coeffs,
             self._shapers_snapshot,
             prev_unshaped=prev_unshaped,

@@ -361,10 +361,10 @@ def test_smooth_compose_neighbour_aware_constant_velocity():
 
 
 def test_planner_dispatch_bakes_smooth_mzv():
-    """blendplanner._bake_shaper_polynomial on a shaper_type='smooth_mzv'
+    """blendplanner.bake_shaper_polynomial on a shaper_type='smooth_mzv'
     snapshot must route through smooth_compose and return a valid
     piecewise polynomial (not the pass-through)."""
-    from klippy.blendplanner import _bake_shaper_polynomial, _build_unshaped_payload
+    from klippy.blendplanner import bake_shaper_polynomial, _build_unshaped_payload
 
     # 3-phase constant-velocity polynomial (accel/cruise/decel all flat)
     # at operational move-duration scale.
@@ -390,11 +390,11 @@ def test_planner_dispatch_bakes_smooth_mzv():
             self.damping_ratio = 0.1
 
     shapers = [_Shaper(), _Shaper(), _Shaper()]
-    # Assign axes so _bake_shaper_polynomial treats them as homogeneous.
+    # Assign axes so bake_shaper_polynomial treats them as homogeneous.
     for s, axis in zip(shapers, "xyz"):
         s.axis = axis
 
-    out_t_ends, out_total_t, out_coeffs = _bake_shaper_polynomial(
+    out_t_ends, out_total_t, out_coeffs = bake_shaper_polynomial(
         t_ends, total_t_pack, flat, shapers,
     )
 

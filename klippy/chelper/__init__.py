@@ -338,7 +338,7 @@ defs_kin_extruder = """
 # Plan 8 Chunk 2 Task 13: defs_kin_shaper retired along with kin_shaper.c.
 # The post-hoc step-generator shaper cascade has no successor on this
 # fork — shaping is baked into the planner polynomial by
-# blendplanner._bake_shaper_polynomial.
+# blendplanner.bake_shaper_polynomial.
 
 defs_kin_idex = """
     void dual_carriage_set_sk(struct stepper_kinematics *sk
