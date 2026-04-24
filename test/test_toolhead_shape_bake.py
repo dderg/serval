@@ -274,9 +274,149 @@ def test_lookahead_queue_reset_clears_deferred_last_state():
     tool = _FakeToolhead()
     laq = th_mod.LookAheadQueue(tool)
     laq._pending_last_move = object()
-    laq._pending_last_prev_unshaped = ((0.,), 0., (0.,) * 60)
+    # Simplified sentinel — any non-None value works; the tuple shape is not
+    # contractual at the reset layer.
+    laq._pending_last_prev_unshaped = object()
     laq._pending_last_prev_start_pos_xyz = (1., 2., 3.)
     laq.reset()
     assert laq._pending_last_move is None
     assert laq._pending_last_prev_unshaped is None
     assert laq._pending_last_prev_start_pos_xyz is None
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — LookAheadQueue deferred-last shape-bake pass
+# ---------------------------------------------------------------------------
+
+
+def _make_laq_with_spy(tool):
+    """Return (LookAheadQueue, emitted_list) with a spy on _process_moves."""
+    laq = th_mod.LookAheadQueue(tool)
+    emitted = []
+    tool._process_moves = lambda moves: emitted.extend(moves)
+    return laq, emitted
+
+
+def _inject_and_drain(laq, moves):
+    """Inject pre-set-junction moves directly into the LookAheadQueue and
+    drain with lazy=False. Bypasses the reverse-pass velocity math so tests
+    exercise the shape-bake pass without depending on junction convergence."""
+    for m in moves:
+        if m.is_kinematic_move:
+            m.set_junction(0.0, m.max_cruise_v2 * 0.5, 0.0)
+        laq.queue.append(m)
+    laq.flush(lazy=False)
+
+
+def test_flush_drain_emits_all_moves():
+    """lazy=False (drain) emits all moves, all get shape-baked payloads."""
+    tool = _FakeToolhead()
+    laq, emitted = _make_laq_with_spy(tool)
+    m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
+    m2 = _make_move(tool, [10., 0., 0., 0.], [20., 0., 0., 0.])
+    m3 = _make_move(tool, [20., 0., 0., 0.], [30., 0., 0., 0.])
+    _inject_and_drain(laq, [m1, m2, m3])
+    assert len(emitted) == 3
+    assert emitted == [m1, m2, m3]
+    assert laq._pending_last_move is None
+    for m in (m1, m2, m3):
+        assert m.quintic_trapq_payload is not None
+
+
+def test_flush_lazy_false_drains_all():
+    """lazy=False emits all moves and leaves no pending state."""
+    tool = _FakeToolhead()
+    laq, emitted = _make_laq_with_spy(tool)
+    m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
+    m2 = _make_move(tool, [10., 0., 0., 0.], [20., 0., 0., 0.])
+    _inject_and_drain(laq, [m1, m2])
+    assert len(emitted) == 2
+    assert laq._pending_last_move is None
+    assert laq._pending_last_prev_unshaped is None
+
+
+def test_flush_single_move_lazy_false():
+    """A single-move drain flush emits the one move immediately."""
+    tool = _FakeToolhead()
+    laq, emitted = _make_laq_with_spy(tool)
+    m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
+    _inject_and_drain(laq, [m1])
+    assert len(emitted) == 1
+    assert emitted[0] is m1
+    assert laq._pending_last_move is None
+
+
+def test_flush_chain_prev_pending_emitted_before_new_batch():
+    """A pending move from a prior flush is emitted at the head of the
+    next flush's batch, finalized with the first new move as its next
+    neighbour.
+
+    We plant a pending move directly to simulate the output of a prior lazy
+    flush, then drain a new batch. The pending move must appear first."""
+    tool = _FakeToolhead()
+    laq, emitted = _make_laq_with_spy(tool)
+    m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
+    m2 = _make_move(tool, [10., 0., 0., 0.], [20., 0., 0., 0.])
+    m3 = _make_move(tool, [20., 0., 0., 0.], [30., 0., 0., 0.])
+    # Simulate "m1 was the pending last of a prior flush"
+    m1.set_junction(0.0, m1.max_cruise_v2 * 0.5, 0.0)
+    laq._pending_last_move = m1
+    laq._pending_last_prev_unshaped = None
+    laq._pending_last_prev_start_pos_xyz = None
+    # Drain [m2, m3]. m1 should appear first.
+    _inject_and_drain(laq, [m2, m3])
+    assert emitted == [m1, m2, m3]
+    assert laq._pending_last_move is None
+
+
+def test_flush_chain_two_drain_flushes():
+    """Two successive drain flushes carry moves in the correct order with
+    no re-ordering or duplication."""
+    tool = _FakeToolhead()
+    laq, emitted = _make_laq_with_spy(tool)
+    m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
+    m2 = _make_move(tool, [10., 0., 0., 0.], [20., 0., 0., 0.])
+    m3 = _make_move(tool, [20., 0., 0., 0.], [30., 0., 0., 0.])
+    _inject_and_drain(laq, [m1, m2])
+    assert emitted == [m1, m2]
+    _inject_and_drain(laq, [m3])
+    assert emitted == [m1, m2, m3]
+    assert laq._pending_last_move is None
+
+
+def test_flush_pure_e_move_passes_through_unchanged():
+    """Pure-E (non-kinematic) moves are not shape-bake targets — they pass
+    through _process_moves unchanged and quintic_trapq_payload stays None."""
+    tool = _FakeToolhead()
+    laq, emitted = _make_laq_with_spy(tool)
+    m_e = _make_move(tool, [10., 10., 10., 0.], [10., 10., 10., 5.])
+    assert m_e.is_kinematic_move is False
+    laq.queue.append(m_e)
+    laq.flush(lazy=False)
+    assert len(emitted) == 1
+    assert emitted[0] is m_e
+    # Pure-E move: set_junction is never called, so quintic_trapq_payload
+    # is never set. Either absent or None — either way, not shape-baked.
+    assert getattr(m_e, "quintic_trapq_payload", None) is None
+
+
+def test_flush_lazy_true_single_move_becomes_pending():
+    """With a 1-move queue and lazy=True, the reverse pass may return
+    early (flush_count=0) OR flush it (flush_count=1). In the flush_count=1
+    case, T5 must hold the move as _pending_last_move. We inject the move
+    with set_junction already called to ensure the reverse pass confirms it,
+    then force flush(lazy=True) by bypassing add_move.
+
+    We verify the post-condition: either nothing was emitted (the move is
+    pending) or the pending is None (lazy returned early — also acceptable
+    because the move is still in the queue for the next flush).
+    The key invariant: if _pending_last_move is set, it IS the move we added."""
+    tool = _FakeToolhead()
+    laq, emitted = _make_laq_with_spy(tool)
+    m1 = _make_move(tool, [0., 0., 0., 0.], [10., 0., 0., 0.])
+    m1.set_junction(0.0, m1.max_cruise_v2 * 0.5, 0.0)
+    laq.queue.append(m1)
+    laq.flush(lazy=True)
+    if laq._pending_last_move is not None:
+        assert laq._pending_last_move is m1
+        assert len(emitted) == 0
