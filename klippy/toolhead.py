@@ -335,7 +335,16 @@ class Move:
                     "Unknown jerk_profile segment type: %r" % (seg.type,)
                 )
         self.start_v = start_v
-        self.cruise_v = cruise_v
+        # Plan 9 A2c: cruise_v stored as the actual jerk-profile peak
+        # velocity (v_hat), not the requested cruise_v from the
+        # lookahead. For short moves (typically pure-E retracts) the
+        # jerk-feasible peak under (a_max, j_max, L) is below the
+        # requested cap; consumers that read move.cruise_v as a
+        # kinematic velocity (the trapezoidal integral identity used
+        # by ``append_trapezoid_e_only_as_quintic``, the centripetal
+        # corner formula in ``calc_junction``, the linear-PA composer)
+        # need the true peak so polynomial integrals match move_d.
+        self.cruise_v = self.jerk_profile.v_hat
         self.end_v = end_v
         self.accel_t = accel_t
         self.cruise_t = cruise_t

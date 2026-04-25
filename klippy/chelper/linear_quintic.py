@@ -6,7 +6,7 @@ from klippy.chelper import get_ffi
 def append_trapezoid_e_only_as_quintic(
     tq, print_time, accel_t, cruise_t, decel_t,
     e_start,
-    start_v, cruise_v, accel,
+    start_v, cruise_v, end_v,
 ):
     """Emit an extruder-only trapezoid onto `tq` carrying the filament
     position polynomial in the .e slot of a 3-phase degenerate quintic.
@@ -17,20 +17,28 @@ def append_trapezoid_e_only_as_quintic(
     idle extrusions), this helper provides the straight filament-
     trapezoid emit path with .e filled and x/y/z = 0.
 
-    Signature mirrors the accel/cruise/decel pattern of
-    append_trapezoid_as_quintic so callers can swap between them by
-    trivial keyword adjustment.
+    The accel coefficient on each side is derived from the velocity
+    triple, not from the planner's max-accel scalar: under the jerk-
+    limited profile (Plan 9 A2c) ``accel_t`` is set so that the
+    trapezoidal integral ``(start_v + cruise_v) / 2 * accel_t`` matches
+    the true accel-side distance, which only matches a
+    ``0.5 * a * tau^2`` polynomial when ``a == (cruise_v - start_v) /
+    accel_t``. Trusting ``move.accel`` here (the unmodified config
+    max_accel) overshoots the polynomial and breaks step monotonicity
+    on back-to-back pure-E moves.
     """
     ffi, lib = get_ffi()
     n_phases = 3
     stride = 15 * 4
     buf = ffi.new(f"double[{n_phases * stride}]")
-    # Phase 0: accel, E(tau) = e_start + start_v*tau + 0.5*accel*tau^2
+    accel_a = (cruise_v - start_v) / accel_t if accel_t > 0.0 else 0.0
+    decel_a = (end_v - cruise_v) / decel_t if decel_t > 0.0 else 0.0
+    # Phase 0: accel, E(tau) = e_start + start_v*tau + 0.5*accel_a*tau^2
     buf[0 * stride + 0 * 4 + 3] = e_start
     buf[0 * stride + 1 * 4 + 3] = start_v
-    buf[0 * stride + 2 * 4 + 3] = 0.5 * accel
+    buf[0 * stride + 2 * 4 + 3] = 0.5 * accel_a
     # Phase 1: cruise, starting at E after accel.
-    accel_d = start_v * accel_t + 0.5 * accel * accel_t * accel_t
+    accel_d = (start_v + cruise_v) * 0.5 * accel_t
     cruise_e_start = e_start + accel_d
     buf[1 * stride + 0 * 4 + 3] = cruise_e_start
     buf[1 * stride + 1 * 4 + 3] = cruise_v
@@ -40,12 +48,11 @@ def append_trapezoid_e_only_as_quintic(
     decel_e_start = cruise_e_start + cruise_d
     buf[2 * stride + 0 * 4 + 3] = decel_e_start
     buf[2 * stride + 1 * 4 + 3] = cruise_v
-    buf[2 * stride + 2 * 4 + 3] = -0.5 * accel
+    buf[2 * stride + 2 * 4 + 3] = 0.5 * decel_a
     move_t = accel_t + cruise_t + decel_t
-    decel_d = cruise_v * decel_t - 0.5 * accel * decel_t * decel_t
+    decel_d = (cruise_v + end_v) * 0.5 * decel_t
     arc_length = abs(accel_d + cruise_d + decel_d)
-    decel_end_v = cruise_v - accel * decel_t
-    v_cap_min = min(start_v, cruise_v, decel_end_v)
+    v_cap_min = min(start_v, cruise_v, end_v)
     if v_cap_min < 0.0:
         v_cap_min = 0.0
     phase_t_ends = ffi.new("double[3]", [

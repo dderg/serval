@@ -741,9 +741,6 @@ class PrinterExtruder:
         # filament-trapezoid via append_trapezoid_e_only_as_quintic.
         axis_r = move.axes_r[3]
         abs_axis_r = abs(axis_r)
-        accel = move.accel * abs_axis_r
-        start_v = move.start_v * abs_axis_r
-        cruise_v = move.cruise_v * abs_axis_r
         qpayload = getattr(move, "quintic_trapq_payload", None)
         if qpayload is not None:
             self._emit_quintic_twin(print_time, move, qpayload)
@@ -761,24 +758,15 @@ class PrinterExtruder:
         # QuinticBlendMove path now; linear kinematic moves without a
         # blend payload fall back to no-PA, same as today's behavior
         # when PA is disabled).
-        #
-        # For kinematic moves, use axis_r (signed filament-per-XY ratio)
-        # to scale the start_v/cruise_v/accel already computed. For
-        # pure-E (extrude-only) moves, axes_r[3] = ±1 and the trapezoid
-        # is filament-direct.
-        if move.is_kinematic_move:
-            signed_start_v = math.copysign(start_v, axis_r)
-            signed_cruise_v = math.copysign(cruise_v, axis_r)
-            signed_accel = math.copysign(accel, axis_r)
-        else:
-            signed_start_v = math.copysign(start_v, axis_r)
-            signed_cruise_v = math.copysign(cruise_v, axis_r)
-            signed_accel = math.copysign(accel, axis_r)
+        sign = math.copysign(1.0, axis_r)
+        signed_start_v = sign * move.start_v * abs_axis_r
+        signed_cruise_v = sign * move.cruise_v * abs_axis_r
+        signed_end_v = sign * move.end_v * abs_axis_r
         append_trapezoid_e_only_as_quintic(
             self.trapq, print_time,
             move.accel_t, move.cruise_t, move.decel_t,
             self.last_position[0],
-            signed_start_v, signed_cruise_v, signed_accel,
+            signed_start_v, signed_cruise_v, signed_end_v,
         )
         # last_position tracks the signed filament coordinate; advance
         # by the move's E displacement (signed via axis_r).
