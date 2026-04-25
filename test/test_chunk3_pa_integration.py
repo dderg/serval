@@ -124,6 +124,56 @@ def _eval_axis_poly(coeff_tuple, phase, axis, tau):
     return val
 
 
+def _bake_chord(payload):
+    """Chord projection of the post-bake XY polynomial along axis_n.
+
+    Mirrors the formula used by ``QuinticBlendMove.finalize_shape`` to compute
+    extr_r. For curved blends ``arc_length > chord``, so the chord-projected
+    linear_pa_compose integral closes on ``extr_r * chord``; setting
+    ``extr_r = axes_d[3] / chord`` makes it close on ``axes_d[3]`` exactly.
+    These tests therefore reference the chord-corrected ``extr_r`` rather
+    than ``axes_d[3] / arc_length``, matching the production composer's
+    formula bit-for-bit.
+    """
+    (phase_t_ends, _total, _arc_length, _vcap, _spos,
+     coeff_tuple, *_legacy) = payload
+    n_phases = len(phase_t_ends)
+    if n_phases == 0:
+        return 0.0
+    stride = 15 * 4
+    last = n_phases - 1
+    prev_t = phase_t_ends[last - 1] if last > 0 else 0.0
+    dt = phase_t_ends[last] - prev_t
+    chord = 0.0
+    for ax_idx in range(3):
+        start = coeff_tuple[0 * stride + 0 * 4 + ax_idx]
+        end = coeff_tuple[last * stride + 14 * 4 + ax_idx]
+        for k in range(13, -1, -1):
+            end = end * dt + coeff_tuple[last * stride + k * 4 + ax_idx]
+        chord += (end - start)
+    return chord
+
+
+def _bake_chord_along_axis_n(payload, axis_n):
+    (phase_t_ends, _total, _arc_length, _vcap, _spos,
+     coeff_tuple, *_legacy) = payload
+    n_phases = len(phase_t_ends)
+    if n_phases == 0:
+        return 0.0
+    stride = 15 * 4
+    last = n_phases - 1
+    prev_t = phase_t_ends[last - 1] if last > 0 else 0.0
+    dt = phase_t_ends[last] - prev_t
+    chord = 0.0
+    for ax_idx in range(3):
+        start = coeff_tuple[0 * stride + 0 * 4 + ax_idx]
+        end = coeff_tuple[last * stride + 14 * 4 + ax_idx]
+        for k in range(13, -1, -1):
+            end = end * dt + coeff_tuple[last * stride + k * 4 + ax_idx]
+        chord += axis_n[ax_idx] * (end - start)
+    return chord
+
+
 def _eval_axis_deriv(coeff_tuple, phase, axis, tau):
     stride = 15 * 4
     base = phase * stride
@@ -158,7 +208,11 @@ def test_linear_pa_e_polynomial_matches_direct_formula():
      coeff_tuple, *_legacy) = payload
     # move's axis_n is the chord direction. axes_d[3] = E displacement.
     axis_n = (move.axes_r[0], move.axes_r[1], move.axes_r[2])
-    extr_r = move.axes_d[3] / arc_length
+    # Plan 9 chord-corrected extr_r: production linear_pa_compose receives
+    # ``axes_d[3] / bake_chord`` (not ``arc_length``) so the chord-projected
+    # integral closes on axes_d[3] for curved blends. See blendplanner.py.
+    bake_chord = _bake_chord_along_axis_n(payload, axis_n)
+    extr_r = move.axes_d[3] / bake_chord
     t_total = phase_t_ends[-1]
     for i in range(21):
         t_sample = t_total * i / 20.0
@@ -211,7 +265,11 @@ def test_tanh_pa_e_polynomial_composes_exact_at_linear_term():
     (phase_t_ends, _total, arc_length, _vcap, _spos,
      coeff_tuple, *_legacy) = payload
     axis_n = (move.axes_r[0], move.axes_r[1], move.axes_r[2])
-    extr_r = move.axes_d[3] / arc_length
+    # Plan 9 chord-corrected extr_r: production linear_pa_compose receives
+    # ``axes_d[3] / bake_chord`` (not ``arc_length``) so the chord-projected
+    # integral closes on axes_d[3] for curved blends. See blendplanner.py.
+    bake_chord = _bake_chord_along_axis_n(payload, axis_n)
+    extr_r = move.axes_d[3] / bake_chord
     p, _T, _tstart = _first_nondegenerate_phase(phase_t_ends)
     # tau=0 of the first nondegenerate phase is a Chebyshev-Lobatto
     # node — interpolation residual is O(machine eps).
@@ -255,7 +313,11 @@ def test_tanh_pa_filament_budget_on_cruise_phase():
     # accept up to the residual reported by the composer (approximated
     # here as 1 mm filament, way more than we expect in practice).
     axis_n = (move.axes_r[0], move.axes_r[1], move.axes_r[2])
-    extr_r = move.axes_d[3] / arc_length
+    # Plan 9 chord-corrected extr_r: production linear_pa_compose receives
+    # ``axes_d[3] / bake_chord`` (not ``arc_length``) so the chord-projected
+    # integral closes on axes_d[3] for curved blends. See blendplanner.py.
+    bake_chord = _bake_chord_along_axis_n(payload, axis_n)
+    extr_r = move.axes_d[3] / bake_chord
     prev = 0.0
     any_sampled = False
     for p, t_end in enumerate(phase_t_ends):
@@ -304,7 +366,11 @@ def test_recipr_pa_endpoint_exact():
     (phase_t_ends, _total, arc_length, _vcap, _spos,
      coeff_tuple, *_legacy) = payload
     axis_n = (move.axes_r[0], move.axes_r[1], move.axes_r[2])
-    extr_r = move.axes_d[3] / arc_length
+    # Plan 9 chord-corrected extr_r: production linear_pa_compose receives
+    # ``axes_d[3] / bake_chord`` (not ``arc_length``) so the chord-projected
+    # integral closes on axes_d[3] for curved blends. See blendplanner.py.
+    bake_chord = _bake_chord_along_axis_n(payload, axis_n)
+    extr_r = move.axes_d[3] / bake_chord
     p, _T, _tstart = _first_nondegenerate_phase(phase_t_ends)
     p_proj_0 = sum(
         axis_n[a] * _eval_axis_poly(coeff_tuple, p, a, 0.0)
@@ -323,6 +389,79 @@ def test_recipr_pa_endpoint_exact():
     assert got_0 == pytest.approx(expected_0, abs=1e-9)
 
 
+def _polynomial_e_displacement(payload):
+    """Total E displacement of the post-bake polynomial over the move.
+
+    Evaluates E(0) at the start of phase 0 and E(T) at the end of the
+    last phase via Horner. Equal to ``axes_d[3]`` iff the chord-projected
+    linear_pa_compose integral closes correctly.
+    """
+    (phase_t_ends, _total, _arc_length, _vcap, _spos,
+     coeff_tuple, *_legacy) = payload
+    n_phases = len(phase_t_ends)
+    if n_phases == 0:
+        return 0.0
+    stride = 15 * 4
+    last = n_phases - 1
+    prev_t = phase_t_ends[last - 1] if last > 0 else 0.0
+    dt = phase_t_ends[last] - prev_t
+    e_start = coeff_tuple[0 * stride + 0 * 4 + 3]
+    e_end = coeff_tuple[last * stride + 14 * 4 + 3]
+    for k in range(13, -1, -1):
+        e_end = e_end * dt + coeff_tuple[last * stride + k * 4 + 3]
+    return e_end - e_start
+
+
+def test_qbm_polynomial_e_closes_on_axes_d3_no_pa():
+    """Regression for the QBM chord-projection bug.
+
+    Pre-fix: ``linear_pa_compose`` set ``E[k] = extr_r * (axis_n . XYZ[k])``
+    with ``extr_r = axes_d[3] / arc_length``. For a curved blend the
+    chord-projected integral closes on ``extr_r * chord``, which is
+    strictly less than ``axes_d[3]`` whenever ``chord < arc_length``. The
+    extruder bookkeeping ``last_position[0] += axes_d[3]`` therefore
+    accumulated a per-move discontinuity in physical E and eventually
+    crashed stepcompress with ``Invalid sequence``. The fix rescales
+    ``extr_r`` to the post-bake chord projection so the chord-projected
+    integral closes on ``axes_d[3]`` exactly. This test pins that
+    invariant for the no-PA path on a 90° corner blend.
+    """
+    th = _FakeToolhead(pa_snap=None)
+    _, move = _emit_right_angle_blend(th, speed=200.0)
+    e_disp = _polynomial_e_displacement(move.quintic_trapq_payload)
+    assert e_disp == pytest.approx(move.axes_d[3], abs=1e-12), (
+        f"polynomial E displacement {e_disp!r} must close on "
+        f"axes_d[3]={move.axes_d[3]!r} exactly"
+    )
+
+
+def test_qbm_polynomial_e_closes_on_axes_d3_linear_pa():
+    """Same chord-projection regression, but with linear PA enabled.
+
+    The k_pa term contributes ``k_pa * (v_chord_end - v_chord_start)`` to
+    the integral. For a same-velocity blend (cruise → cruise → cruise on
+    a right-angle corner reduced by corner_deviation) the PA term
+    cancels at the chord-projected endpoints, so the integral still
+    closes on ``axes_d[3]`` exactly.
+    """
+    pa_snap = blendextruder.PAModelSnapshot(kind="linear", params=(0.05,))
+    th = _FakeToolhead(pa_snap=pa_snap)
+    _, move = _emit_right_angle_blend(th, speed=200.0)
+    payload = move.quintic_trapq_payload
+    e_disp = _polynomial_e_displacement(payload)
+    # Linear PA contributes k_pa * delta_v_chord across the whole move.
+    # On the right-angle blend the entry and exit velocity vectors have
+    # equal projection onto axis_n by symmetry, so delta_v_chord ≈ 0 and
+    # the integral closes on axes_d[3] to machine precision.
+    axis_n = (move.axes_r[0], move.axes_r[1], move.axes_r[2])
+    pa_drift = e_disp - move.axes_d[3]
+    assert abs(pa_drift) < 1e-9, (
+        f"polynomial E displacement {e_disp!r} drift from "
+        f"axes_d[3]={move.axes_d[3]!r} = {pa_drift!r}; expected ≈ 0 by "
+        f"symmetry of the right-angle blend"
+    )
+
+
 def test_pa_disabled_e_equals_extr_r_times_projection():
     """Without PA, the .e slot is just extr_r * n.P(tau)."""
     th = _FakeToolhead(pa_snap=None)
@@ -331,7 +470,11 @@ def test_pa_disabled_e_equals_extr_r_times_projection():
     (phase_t_ends, _total, arc_length, _vcap, _spos,
      coeff_tuple, *_legacy) = payload
     axis_n = (move.axes_r[0], move.axes_r[1], move.axes_r[2])
-    extr_r = move.axes_d[3] / arc_length
+    # Plan 9 chord-corrected extr_r: production linear_pa_compose receives
+    # ``axes_d[3] / bake_chord`` (not ``arc_length``) so the chord-projected
+    # integral closes on axes_d[3] for curved blends. See blendplanner.py.
+    bake_chord = _bake_chord_along_axis_n(payload, axis_n)
+    extr_r = move.axes_d[3] / bake_chord
     t_total = phase_t_ends[-1]
     for i in range(11):
         t_sample = t_total * i / 10.0

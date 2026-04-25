@@ -19,6 +19,37 @@ def _signed_cbrt(x: float) -> float:
     return math.copysign(abs(x) ** (1.0 / 3.0), x)
 
 
+def accel_side_distance(
+    v_start: float, v_end: float, a_max: float, j_max: float
+) -> float:
+    """Forward distance for a jerk-limited accel-side group ``v_start ↦ v_end``.
+
+    Mirrors the C-side ``jerk_profile_accel_side_timings`` exactly so that
+    Python's reverse-pass feasibility checks agree with C's
+    ``jerk_profile_compute`` to within float precision. Used by
+    ``reachable_v_end`` to refine its Cardano-based answer (which suffers
+    catastrophic cancellation for ``2*v_start << L*sqrt(j_max)``) and by
+    ``max_reachable_cruise_v`` to verify its bisection result.
+
+    Sign-agnostic (uses ``|v_end - v_start|``) — caller orients the group.
+    """
+    dv = abs(v_end - v_start)
+    if dv == 0.0:
+        return 0.0
+    dv_tri = a_max * a_max / j_max
+    if dv >= dv_tri:
+        # Trapezoidal: jerk-up + const-accel + jerk-down.
+        t_j = a_max / j_max
+        t_a = (dv - dv_tri) / a_max
+    else:
+        # Triangular: peak accel saturates below a_max.
+        a_peak = math.sqrt(j_max * dv)
+        t_j = a_peak / j_max
+        t_a = 0.0
+    T = 2.0 * t_j + t_a
+    return 0.5 * (v_start + v_end) * T
+
+
 def _regime_boundary_distance(v_start: float, a_max: float, j_max: float) -> float:
     """Accel-side distance at the triangular/trapezoidal regime boundary.
 
@@ -107,8 +138,56 @@ def reachable_v_end(v_start: float, a_max: float, j_max: float, L: float) -> flo
 
     L_boundary = _regime_boundary_distance(v_start, a_max, j_max)
     if L <= L_boundary:
-        return _reachable_v_end_tri(v_start, a_max, j_max, L)
-    return _reachable_v_end_trap(v_start, a_max, j_max, L)
+        v_end = _reachable_v_end_tri(v_start, a_max, j_max, L)
+    else:
+        v_end = _reachable_v_end_trap(v_start, a_max, j_max, L)
+    # Newton refinement against the forward formula. The Cardano solution
+    # used in the triangular regime suffers catastrophic cancellation when
+    # ``(p/3)^3 << (q/2)^2`` (small v_start, large L*sqrt(j_max)) — the
+    # ``-q/2 - sqrt(D)`` subtraction loses up to ~13 significant figures, so
+    # the returned ``v_end`` can be off by a few μm/s relative to the
+    # forward distance. That gap is enough to trip the C-side
+    # jerk_profile_compute feasibility check (``L + JP_EPS < d_floor``)
+    # and crash the planner with "Jerk profile infeasible" on moves whose
+    # ``cruise_v`` was inferred from this function.
+    # One Newton step on ``f(v_end) = accel_side_distance(v_start, v_end) - L``
+    # restores inverse-consistency to <1 ULP. We clamp to ``v_end >=
+    # v_start`` because the function is only called for accel-side groups.
+    for _ in range(2):
+        d = accel_side_distance(v_start, v_end, a_max, j_max)
+        err = d - L
+        if abs(err) <= 8.0 * abs(L) * 2.220446049250313e-16:
+            # Within ~8 ULP of L — refinement saturated.
+            break
+        # f'(v_end) for v_end > v_start:
+        #   triangular: f'(v_end) = T/2 + (v_start+v_end)/(4 sqrt(dv*j_max))
+        #   trapezoidal: f'(v_end) = T/2 + (v_start+v_end)/(2*a_max)
+        # T = 2 t_j + t_a in both regimes; (v_start+v_end)/(2*a_max) is the
+        # same family. Use a regime-dispatched derivative for sharper Newton
+        # convergence.
+        dv = v_end - v_start
+        if dv <= 0.0:
+            break
+        dv_tri = a_max * a_max / j_max
+        if dv >= dv_tri:
+            t_j = a_max / j_max
+            t_a = (dv - dv_tri) / a_max
+            T = 2.0 * t_j + t_a
+            # dT/dv_end = 1/a_max ; df/dv_end = T/2 + (v_start+v_end)/(2 a_max)
+            df_dv = 0.5 * T + 0.5 * (v_start + v_end) / a_max
+        else:
+            a_peak = math.sqrt(j_max * dv)
+            t_j = a_peak / j_max
+            T = 2.0 * t_j
+            # dT/dv_end = 1 / a_peak ;
+            # df/dv_end = T/2 + (v_start+v_end)/(2 a_peak)
+            df_dv = 0.5 * T + 0.5 * (v_start + v_end) / a_peak
+        if df_dv <= 0.0:
+            break
+        v_end -= err / df_dv
+        if v_end < v_start:
+            v_end = v_start
+    return v_end
 
 
 def max_reachable_cruise_v(

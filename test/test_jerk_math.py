@@ -202,6 +202,76 @@ def test_max_cruise_v_bed_mesh_roundtrip_through_jerk_profile():
     )
 
 
+def test_reachable_v_end_inverse_consistent_with_accel_side_distance():
+    """Newton-refinement regression.
+
+    The Cardano-based ``_reachable_v_end_tri`` solution suffers from
+    catastrophic cancellation in ``-q/2 - sqrt(D)`` when
+    ``(p/3)^3 << (q/2)^2`` (small ``v_start`` relative to
+    ``L*sqrt(j_max)``). On a representative print-start move the
+    pre-Newton answer was ~9 nm/s above the true inverse, which fed
+    forward into ``max_reachable_cruise_v`` and produced a cruise_v
+    that the C-side ``jerk_profile_compute`` rejected as infeasible
+    by ~12 nm in distance.
+
+    This test pins the post-Newton invariant: ``reachable_v_end``
+    must be consistent with the forward ``accel_side_distance`` to
+    within machine epsilon, so that any cruise_v the bisection
+    returns survives the C feasibility check.
+    """
+    cases = [
+        # (v_start, a_max, j_max, L) — first one is the actual print-start
+        # move that triggered the crash.
+        (0.008556, 45000.0, 500000.0, 1.468337),
+        (0.0, 45000.0, 500000.0, 1.468337),
+        (1e-9, 45000.0, 500000.0, 0.5),
+        (0.001, 70000.0, 500000.0, 2.0),
+        (10.0, 70000.0, 500000.0, 5.0),
+    ]
+    for v_start, a_max, j_max, L in cases:
+        v_end = jerk_math.reachable_v_end(v_start, a_max, j_max, L)
+        d = jerk_math.accel_side_distance(v_start, v_end, a_max, j_max)
+        # d must be <= L (the inverse never claims more than L worth of
+        # distance covered) AND within ~8 ULP of L (refinement saturates).
+        assert d <= L + 1e-15 * abs(L), (
+            f"reachable_v_end overshoot: v_start={v_start} L={L} "
+            f"v_end={v_end!r} d={d!r}"
+        )
+        # Tightness: post-Newton, d must match L to <8 ULP * L.
+        assert abs(d - L) <= 16.0 * abs(L) * 2.220446049250313e-16, (
+            f"reachable_v_end loose: L - d = {L - d!r}; "
+            f"v_start={v_start} L={L} v_end={v_end!r}"
+        )
+
+
+def test_max_cruise_v_print_start_roundtrip_through_jerk_profile():
+    """Acceptance test for the print-start jerk-feasibility crash.
+
+    The CornerBlender's first move from rest can request acceleration
+    that's mathematically just at the edge of feasibility. Pre-Newton,
+    Python's ``max_reachable_cruise_v`` returned a value that C's
+    ``jerk_profile_compute`` rejected with ``L + JP_EPS < d_floor``.
+    Post-Newton, the bisection result is exactly inverse-consistent so
+    the C feasibility check passes.
+    """
+    from klippy.chelper import jerk_profile as jp_mod
+    v = jerk_math.max_reachable_cruise_v(
+        v_start=0.008556, v_end=102.532549,
+        a_max=45000.0, j_max=500000.0,
+        L=1.468337, v_cruise_cap=102.532549,
+    )
+    end_v = min(102.532549, v)
+    start_v = min(0.008556, v)
+    prof = jp_mod.compute_profile(
+        v0=start_v, v1=end_v, v_peak=v,
+        a_max=45000.0, j_max=500000.0, L=1.468337,
+    )
+    assert prof.status == jp_mod.JP_OK, (
+        f"Jerk profile rejected print-start cruise_v={v!r} "
+        f"start_v={start_v!r} end_v={end_v!r} (status={prof.status})"
+    )
+
+
 def test_max_cruise_v_obeys_cap():
     v = jerk_math.max_reachable_cruise_v(
         v_start=0.0, v_end=0.0, a_max=5000.0, j_max=100000.0,

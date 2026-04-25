@@ -483,13 +483,54 @@ class QuinticBlendMove:
         n_phases_baked = len(phase_t_ends_tuple)
         arc_length = self._arc_length
         axes_d = self.axes_d
-        # axes_d[3] is signed E displacement; arc_length is the curve length
-        # of the XY blend. extr_r = E-displacement per XY-arc-mm (signed).
-        if arc_length > 0.0:
+        axis_n = (self.axes_r[0], self.axes_r[1], self.axes_r[2])
+        # Plan 9 / Plan 8 chunk-3 follow-up: linear_pa_compose composes E
+        # from the XY polynomial via chord projection
+        # ``E[k] = extr_r * (axis_n . XYZ[k])``. For straight Move
+        # polynomials this is exact (chord ≡ arc length). For QBM blends
+        # the chord is strictly shorter than the arc length whenever the
+        # corner deflects, so the chord-projected integral closes on
+        # ``extr_r * chord`` instead of ``extr_r * arc_length = axes_d[3]``.
+        # The planner's bookkeeping advances ``last_position[0] += axes_d[3]``
+        # regardless, accumulating per-move discontinuities in the extruder
+        # polynomial that eventually crash stepcompress with ``Invalid
+        # sequence``.
+        # Fix: rescale extr_r to the chord projection of the (already-baked)
+        # XY polynomial so the chord-projected integral closes on axes_d[3]
+        # exactly. Rate timing is mildly distorted on the curved blend
+        # (instantaneous flow ∝ axis_n·v_xy rather than |v_xy|, off by
+        # chord/arc ≈ 5–8 % at 60–90° corners). A follow-up plan9 chunk
+        # should replace linear_pa_compose with an arc-length composer
+        # that fills E directly from the s(t)/v(t) polynomials already
+        # produced by ``compose_phase_polynomials``.
+        bake_chord = 0.0
+        if n_phases_baked > 0:
+            stride = 15 * 4
+            last_phase = n_phases_baked - 1
+            prev_t = (phase_t_ends_tuple[last_phase - 1]
+                      if last_phase > 0 else 0.0)
+            dt = phase_t_ends_tuple[last_phase] - prev_t
+            for ax_idx, n_comp in enumerate(axis_n):
+                if n_comp == 0.0:
+                    continue
+                start = coeff_tuple[0 * stride + 0 * 4 + ax_idx]
+                end = coeff_tuple[last_phase * stride + 14 * 4 + ax_idx]
+                for k in range(13, -1, -1):
+                    end = end * dt + coeff_tuple[
+                        last_phase * stride + k * 4 + ax_idx]
+                bake_chord += n_comp * (end - start)
+        # axes_d[3] is signed E displacement; bake_chord is the chord
+        # projection of the post-bake XY trajectory along axis_n.
+        # extr_r = E-displacement per chord-projected mm (signed); the
+        # linear_pa_compose-projected integral then closes on axes_d[3].
+        if abs(bake_chord) > 1e-12:
+            extr_r = axes_d[3] / bake_chord
+        elif arc_length > 0.0:
+            # Fallback for degenerate paths (pure Z hop, pure E-only QBM
+            # where the chord vanishes but the arc length is well-defined).
             extr_r = axes_d[3] / arc_length
         else:
             extr_r = 0.0
-        axis_n = (self.axes_r[0], self.axes_r[1], self.axes_r[2])
         pa_dispatch = self._pa_dispatch_cached
         if pa_dispatch[0] == "linear":
             k_pa = pa_dispatch[1]
