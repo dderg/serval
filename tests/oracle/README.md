@@ -1,38 +1,24 @@
 # Trajectory oracle
 
 Reference dataset of mainline-Kalico planner output for a curated set of
-short G-code inputs, plus a diff harness to assert that our fork
-(`sota-motion`) produces equivalent output. Purely offline; no MCU,
-no hardware, no `printer.cfg` touch.
+short G-code inputs, plus diff harness + fork-side adapter that lets us
+assert this fork produces an equivalent trajectory. Purely offline; no
+MCU, no hardware, no `printer.cfg` touch.
 
-## Status (2026-05-21)
+## Status
 
 - **Mainline reference (`expected/*.csv`):** captured, all 4 inputs.
-- **Fork capture (`actual_fork/*.csv`):** **not produced**. Our fork
-  crashes inside klipper-sim's batch-mode klippy at the MCU-identify
-  step (see `actual_fork/*.log`):
+- **Fork capture (`actual_fork/*.csv`):** generated via
+  `tests/oracle/regen_fork.py` (klippy batch-mode + `[bridge-trace]
+  move` parse + trapezoidal reconstruction). All 4 inputs currently
+  diverge from mainline — see `Fork-side workflow` below for the
+  meaning of divergence at this layer.
 
-    ```
-    File "klippy/serialhdl.py", line 412, in connect_file
-        self.serialqueue = self.ffi_main.gc(
-    AttributeError: 'NoneType' object has no attribute 'gc'
-    ```
-
-    Root cause is architectural, not a bug to patch around. Our fork
-    routes all wire I/O through `motion_bridge_native.so` and never
-    initialises `chelper`'s `ffi_main` (`serialhdl.py:30` sets it to
-    `None`). Even if we worked around the init crash, the fork's
-    planner output goes through Rust FFI to the MCU's runtime
-    step generator, not through klippy's `serialqueue → queue_step`
-    pipe that klipper-sim decodes. The MCU-stream oracle therefore
-    cannot capture this fork's trajectory output unmodified.
-
-    What this means for the bug we are chasing (silent motors during
-    jogs): the divergence happens *below* the layer this oracle
-    observes — the host-side planner submits moves to the bridge
-    correctly; the breakage is in `motion_bridge_native.so` /
-    `runtime` / MCU step emission. A separate oracle layer is needed
-    for the fork. See "Next oracle layer" below.
+The fork's klippy used to crash inside batch mode at
+`serialhdl.py:412` because `ffi_main` is `None` in bridge mode. Fixed
+in `klippy/serialhdl.py:connect_file` by lazy-initialising `chelper`
+only in that debug-only entry point; production `connect_pipe` /
+`connect_uart` paths are unchanged.
 
 ## Layout
 
@@ -109,25 +95,87 @@ The CSV schema is whatever klipper-sim writes (currently 13 columns):
 `t, x, y, z, e, vx, vy, vz, ve, ax, ay, az, ae`, one row per 100 µs.
 `diff.py` discovers columns dynamically — schema additions are tolerated.
 
-## Regenerate `actual_fork/` (current branch)
+## Fork-side workflow
 
-Same command as above, but pointed at this checkout:
+### Regenerate `actual_fork/`
 
 ```bash
-cd /Users/daniladergachev/Developer/klipper-sim
-for n in 01_x10 02_two_segments 03_xy_diagonal 04_xy_corner; do
-  python3 simulate_gcode.py \
-    --klipper-root /Users/daniladergachev/Developer/kalico \
-    --klipper-dict test/fixtures/klipper.dict \
-    --config /Users/daniladergachev/Developer/kalico/tests/oracle/cfg/oracle.cfg \
-    --runner docker \
-    /Users/daniladergachev/Developer/kalico/tests/oracle/inputs/${n}.gcode \
-    -o /Users/daniladergachev/Developer/kalico/tests/oracle/actual_fork/${n}.csv
-done
+cd /Users/daniladergachev/Developer/kalico
+python3 tests/oracle/regen_fork.py
 ```
 
-As of 2026-05-21 this fails for the reason described in Status. The crash
-log is preserved at `actual_fork/<input>.log`.
+This runs the fork's klippy in batch mode for each input:
+
+```
+python3 klippy/klippy.py tests/oracle/cfg/oracle.cfg \
+    -i tests/oracle/inputs/<stem>.gcode \
+    -o /tmp/oracle_fork_<stem>.out \
+    -d ~/Developer/klipper-sim/test/fixtures/klipper.dict \
+    -l tests/oracle/actual_fork/<stem>.log
+```
+
+It then parses `[bridge-trace] move:` records from `klippy.log`
+(emitted by `klippy/motion_toolhead.py:367`) and reconstructs a 100 µs
+CSV with the same schema as `expected/*.csv`.
+
+### `[bridge-trace] move:` schema
+
+Per-line format (one line per `MotionToolhead.move` call,
+unconditional — fires whether or not the bridge is attached):
+
+```
+[bridge-trace] move: newpos=[X, Y, Z, E] speed=<mm/s> dx=DX dy=DY dz=DZ de=DE feedrate=<mm/s> bridge_is_none=<bool>
+```
+
+- `newpos`: absolute end position of the move in (x, y, z, e), mm
+- `speed`: gcode-requested feedrate (`F` value), already converted to
+  mm/s (NOT mm/min — `gcode.py` divides by 60)
+- `dx, dy, dz, de`: per-axis deltas for this move, mm; `move.axes_d`
+- `feedrate`: post-clamp scalar speed (`move_d / min_move_t`), mm/s.
+  Same value as `speed` except when Z-only and capped to
+  `max_z_velocity`
+- `bridge_is_none`: True in debug mode (no MCU), False in production
+
+Sample rate: **one record per submitted move**, not time-sampled. The
+adapter reconstructs the per-100µs trajectory by integrating the
+moves with a trapezoidal kinematic profile.
+
+### Reconstruction model (mainline parity, not fork-engine fidelity)
+
+`regen_fork.py:sample_trajectory` is a faithful re-implementation of
+mainline Klipper's trapezoidal planner: forward/backward velocity
+pass, junction-deviation cornering (`klippy/toolhead.py:91-117`,
+`scv² × (√2-1) / max_accel`), accel/cruise/decel decomposition per
+move. It uses the same `max_velocity`, `max_accel`,
+`square_corner_velocity` the mainline reference run uses.
+
+**What the diff vs `expected/*.csv` does and does not cover:**
+- It DOES catch divergences in *which moves the fork's host-side
+  planner forwards to the bridge* (`MotionToolhead.move` arguments) —
+  i.e. anything bug-shaped in `motion_toolhead.py`, `motion_bridge.py`'s
+  pre-bridge accounting, gcode-side coordinate transforms, or move
+  validation/clamping.
+- It does NOT cover post-bridge anything: the Rust planner
+  (`rust/motion-bridge/src/planner.rs`), shaper, beta iteration,
+  emit_shaped, or runtime step emission. The fork uses cubic Bézier +
+  smooth_zv shaping with a fundamentally different trajectory shape
+  than mainline's trapezoid + smooth_zv kernel. Even on a healthy fork
+  the per-100µs samples diverge — *this is expected, not a bug*. The
+  diff reports concrete numbers (sample index, axis, delta) which
+  localise where divergence begins.
+
+For a fork-engine-fidelity oracle, the next step would be to log full
+Bézier control points per `[bridge-trace] seg-dispatch`
+(`rust/motion-bridge/src/bridge.rs:2186` currently logs only
+endpoints) and replace `sample_trajectory` with a Bézier evaluator.
+That is the right layer to compare cubic-vs-cubic, post-shaping; it's
+left for the follow-up that adds the per-piece dump to Rust.
+
+### Failure path
+
+If the fork's klippy fails to start (non-zero exit) or emits no
+`[bridge-trace] move:` lines, the adapter writes only
+`actual_fork/<stem>.log` and `diff.py` reports `MISSING FORK CAPTURE`.
 
 ## Diff
 
@@ -149,25 +197,20 @@ Tolerances (`tests/oracle/diff.py`):
 
 Exit codes: 0 = all match, 1 = at least one divergence, 2 = missing capture.
 
-## Next oracle layer (when the fork crash is unblocked)
+## Next oracle layer
 
-Two paths, both expand this oracle rather than replacing it:
+The current fork adapter compares at the **move-handoff** layer
+(what `MotionToolhead.move` forwards to the bridge), with a mainline-
+parity trapezoidal reconstruction. To compare at the **post-shaping
+Bézier** layer (true fork-engine output) we'd need:
 
-1. **Patch fork to survive klipper-sim batch mode.** Initialise
-   `chelper.get_ffi()` lazily in `serialhdl.SerialReader.connect_file`
-   even when running in bridge mode, allocate the legacy serialqueue,
-   and have the bridge replay its outbound moves into that queue as
-   `queue_step` messages so klipper-sim's decoder sees them. This is
-   the cheapest way to make the fork CSV-comparable to mainline at
-   the existing `expected/` schema, but it covers only the host-side
-   planner — the MCU runtime / `motion_bridge_native.so` step
-   generation are NOT exercised.
+1. Extend `rust/motion-bridge/src/bridge.rs:2186` to log full
+   per-piece Bézier control points + degree + axis assignments
+   (currently logs only endpoints), and
+2. Replace `regen_fork.py:sample_trajectory` with a Bézier evaluator
+   that reproduces the runtime's piece evaluation at 100 µs.
 
-2. **Bridge-trace oracle (different schema).** Capture the
-   `[bridge-trace]` log lines our `motion_toolhead.py` already emits
-   (`klippy/motion_toolhead.py:367`) — per-move
-   `(dx, dy, dz, de, feedrate)` records. Save these alongside the
-   100 µs CSV in a `*.moves.jsonl` and write a second diff that
-   matches at the move level. This exercises a different layer (move
-   handoff to bridge, not step emission) and is the cleaner long-term
-   answer if we keep the bridge architecture.
+That gives a real cubic-vs-cubic comparison; it has nothing to do with
+mainline's trapezoid CSV, so it'd live as a separate `expected_bezier/`
+reference captured from a known-good fork checkpoint rather than from
+upstream/main.

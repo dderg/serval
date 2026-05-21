@@ -407,6 +407,17 @@ class SerialReader:
         return True
 
     def connect_file(self, debugoutput, dictionary, pace=False):
+        # Debug mode (klippy -i input.gcode -o output.bin). Bridge mode
+        # never initialises self.ffi_main / self.ffi_lib because production
+        # paths route I/O through the Rust motion bridge. Debug mode does
+        # not engage the bridge at all (no real MCU), so lazily attach the
+        # legacy C serialqueue here so the debug-output file gets the
+        # mainline-shaped binary protocol stream. Restricted to this entry
+        # point: production `connect_pipe` / `connect_uart` paths still
+        # leave ffi_main as None and stay on the bridge.
+        if self.ffi_main is None:
+            from . import chelper as _chelper
+            self.ffi_main, self.ffi_lib = _chelper.get_ffi()
         self.serial_dev = debugoutput
         self.msgparser.process_identify(dictionary, decompress=False)
         self.serialqueue = self.ffi_main.gc(
