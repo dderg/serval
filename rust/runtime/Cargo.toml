@@ -39,6 +39,15 @@ loom = "0.7"
 [features]
 default = ["host"]
 host = ["nurbs/host"]
+# Linux MCU sim: enables `std` (via `host`) for the Linux process environment
+# while preserving real `extern "C"` linkage for MCU-side C symbols
+# (timer_read_time, timer_is_before, runtime_emit_step_pulses, step_queues,
+# kalico_runtime_get_sample_period_cycles, etc.).  Without this feature, the
+# `host` stubs in `per_axis_timer.rs` and `step_queue.rs` shadow the real C
+# implementations, causing the per-axis timers to spin at `now+0` and never
+# pop any steps.  Used exclusively by the Linux klipper.elf sim build via
+# `src/Makefile`; never set for the klippy-side bridge or production firmware.
+linux-mcu = ["host"]
 mcu-h7 = ["nurbs/mcu-h7"]
 mcu-f4 = ["nurbs/mcu-f4"]
 # Phase 12.2: gates the `Engine::inject_iter_count` test-only injection

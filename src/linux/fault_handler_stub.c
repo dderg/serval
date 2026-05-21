@@ -5,9 +5,16 @@
 // compiled for the Linux MCU build. The host sim doesn't need the
 // wedge counters or fault-record persistence — provide no-ops so
 // runtime_tick.c and friends link cleanly.
+//
+// Also stubs out sched_writable_begin/end/reset (MPU section-protection,
+// meaningful only on Cortex-M with CONFIG_MPU_PROTECT) and timer_wrap_event
+// (defined in src/generic/armcm_timer.c for ARM targets; the Linux timer.c
+// provides its own wrap logic and the symbol is only needed at link-time via
+// sched.c's function-pointer table).
 
 #include <stdint.h>
 #include "generic/fault_handler.h"
+#include "sched.h"
 
 static volatile uint32_t stub_zero;
 
@@ -128,3 +135,23 @@ DIAG_GET_STUB(peek_data)
 DIAG_GET_STUB(tim5_count)
 DIAG_GET_STUB(tx_drops_kalico)
 DIAG_GET_STUB(tx_drops_klipper)
+// runtime_tick.c reads these in the runtime_status_drain path.
+// The host Linux build has no DWT/CYCCNT, so stub them out.
+DIAG_GET_STUB(rt_tick_count)
+DIAG_GET_STUB(rt_tick_cycles_max)
+
+// ─── MPU / scheduler write-protection stubs ──────────────────────────────
+// On Cortex-M with CONFIG_MPU_PROTECT the sched timer list is mapped
+// read-only; sched_writable_begin/end/reset flip the MPU AP bits. The
+// Linux process has no MPU — these are no-ops.
+
+void sched_writable_begin(void) {}
+void sched_writable_end(void)   {}
+void sched_writable_reset(void) {}
+
+// timer_wrap_event is defined in src/generic/armcm_timer.c for ARM targets.
+// sched.c references it via a function pointer in the static `wrap_timer`
+// struct. On Linux the scheduler timer never wraps (it uses host monotonic
+// clocks); provide a stub that returns DECR_DONE so any accidental call
+// is a no-op rather than a missing-symbol abort.
+uint_fast8_t timer_wrap_event(struct timer *t) { (void)t; return 1; }

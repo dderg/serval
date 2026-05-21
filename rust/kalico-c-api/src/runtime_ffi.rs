@@ -2008,6 +2008,7 @@ pub mod exports {
         fixture_id: u16,
         out_handle_packed: *mut u32,
     ) -> i32 {
+        use runtime::cubic_curve::WirePiece;
         use runtime::sim_fixtures::{FIXTURE_CPS_MAX, FIXTURE_KNOTS_MAX, FIXTURE_WEIGHTS_MAX};
         if rt.is_null() {
             return KALICO_ERR_NULL_PTR;
@@ -2017,44 +2018,56 @@ pub mod exports {
         }
         let ctx = rt.cast::<RuntimeContext>();
         // SAFETY: project to the top-level CurvePool only — no `&mut
-        // RuntimeContext` forms on this path. The fixture path uses the
-        // FPU-free `load_unchecked` to avoid Renode's CPACR-disabled
-        // UsageFault on the regular load() path.
+        // RuntimeContext` forms on this path.
+        //
+        // 2026-05-21 refactor: the NURBS-era `load_unchecked` / `MAX_CONTROL_POINTS`
+        // APIs were removed when the curve pool switched to cubic-Bezier
+        // `WirePiece` storage (`try_alloc_and_load`). This path builds a single
+        // `WirePiece` from the fixture's scalar geometry (X-component of the 3D
+        // fixture CPs promoted to degree-3 Bernstein form) and calls
+        // `try_alloc_and_load`.
+        //
+        // Accuracy note: for the Renode sim escape hatch, curve accuracy is NOT
+        // the goal — protocol-correctness iteration is (segments must retire by
+        // reaching `t_end`; curve eval is skipped on the zero-CYCCNT path). A
+        // collinear cubic approximation is correct for degree-3 fixtures and a
+        // safe stand-in for degree-1 and degree-2 fixtures.
         unsafe {
             let pool: &CurvePool = &*core::ptr::addr_of!((*ctx).curve_pool);
             let mut cps = [0.0_f32; FIXTURE_CPS_MAX];
             let mut knots = [0.0_f32; FIXTURE_KNOTS_MAX];
             let mut weights = [0.0_f32; FIXTURE_WEIGHTS_MAX];
-            let Some((degree, n_cp, n_knots, _n_weights)) =
+            let Some((_degree, n_cp, _n_knots, _n_weights)) =
                 runtime::sim_fixtures::lookup(fixture_id, &mut cps, &mut knots, &mut weights)
             else {
                 return KALICO_ERR_INVALID_CURVE;
             };
-            // Step 7-B: load_unchecked uses scalar API. Fixtures still
-            // emit 3D data (3 floats per CP); extract first component (X).
-            // Task 8 will update fixtures to native scalar.
-            const FIXTURE_DIM: usize = 3; // sim_fixtures' per-CP dimension
-            let mut cps_scalar = [0.0_f32; runtime::curve_pool::MAX_CONTROL_POINTS];
-            for i in 0..n_cp {
-                cps_scalar[i] = cps[i * FIXTURE_DIM];
-            }
-            match pool.load_unchecked(
-                slot_idx,
-                degree,
-                &knots[..n_knots],
-                &cps_scalar[..n_cp],
-            ) {
-                Ok(handle) => {
+            // Extract scalar X-component (stride = 3 for 3D fixture CPs).
+            const FIXTURE_DIM: usize = 3;
+            let p0 = if n_cp > 0 { cps[0] } else { 0.0_f32 };
+            let p3 = if n_cp > 0 { cps[(n_cp - 1) * FIXTURE_DIM] } else { 0.0_f32 };
+            // Promote to degree-3 Bernstein with collinear control points:
+            // b0=p0, b1=p0+L/3, b2=p0+2L/3, b3=p3.  This is exact for degree-3
+            // fixtures whose interior CPs are already collinear; a linear
+            // approximation for degree-1 and degree-2.
+            let piece = WirePiece {
+                bp0_bits: p0.to_bits(),
+                bp1_bits: (p0 + (p3 - p0) / 3.0).to_bits(),
+                bp2_bits: (p0 + 2.0 * (p3 - p0) / 3.0).to_bits(),
+                bp3_bits: p3.to_bits(),
+                // Nominal 1-second duration. The Renode sim escape hatch path
+                // does not use the duration for real timing — segment retirement
+                // is driven by `t_start`/`t_end` cycle counts set at push time.
+                duration_bits: 1.0_f32.to_bits(),
+            };
+            match pool.try_alloc_and_load(slot_idx as usize, &[piece]) {
+                Some(handle) => {
                     if !out_handle_packed.is_null() {
                         *out_handle_packed = handle.pack();
                     }
                     KALICO_OK
                 }
-                Err(
-                    runtime::curve_pool::CurvePoolError::OutOfBounds
-                    | runtime::curve_pool::CurvePoolError::SlotAlreadyLoaded,
-                ) => KALICO_ERR_INVALID_HANDLE,
-                Err(_) => KALICO_ERR_INVALID_CURVE,
+                None => KALICO_ERR_INVALID_HANDLE,
             }
         }
     }

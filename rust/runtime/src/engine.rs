@@ -874,7 +874,9 @@ impl<P: PaSlot, I: IsSlot> Engine<P, I> {
         // with volatile stores — the matching ISR-side reads also use
         // volatile, so the ordering relative to the mode-publish below is
         // sufficient without an explicit fence.
-        #[cfg(not(any(test, feature = "host")))]
+        // Active on bare-metal MCU builds and on the Linux MCU sim
+        // (`linux-mcu`), which links against real C objects.
+        #[cfg(not(any(test, all(feature = "host", not(feature = "linux-mcu")))))]
         {
             #[allow(unsafe_code)]
             {
@@ -1029,11 +1031,12 @@ impl<P: PaSlot, I: IsSlot> Engine<P, I> {
             return;
         }
 
-        // Resolve per-axis queue pointers. On MCU builds the storage is
-        // the C-declared `step_queues` symbol (one queue per axis); on
-        // host/test builds, null pointers — `dispatch_axis` short-
-        // circuits before any push.
-        #[cfg(not(any(test, feature = "host")))]
+        // Resolve per-axis queue pointers. On bare-metal MCU builds and on
+        // the Linux MCU sim (`linux-mcu`), the storage is the C-declared
+        // `step_queues` symbol (one queue per axis). On pure host/test
+        // builds, null pointers — `dispatch_axis` short-circuits before
+        // any push.
+        #[cfg(not(any(test, all(feature = "host", not(feature = "linux-mcu")))))]
         #[allow(unsafe_code)]
         let queue_ptrs: [*mut crate::step_queue::StepQueue;
             crate::stepping_state::N_AXES] = {
@@ -1051,7 +1054,7 @@ impl<P: PaSlot, I: IsSlot> Engine<P, I> {
                 [base, base.add(1), base.add(2), base.add(3)]
             }
         };
-        #[cfg(any(test, feature = "host"))]
+        #[cfg(any(test, all(feature = "host", not(feature = "linux-mcu"))))]
         let queue_ptrs: [*mut crate::step_queue::StepQueue;
             crate::stepping_state::N_AXES] = self.test_queue_ptrs;
 

@@ -98,9 +98,14 @@ $(KALICO_LIB): FORCE
 endif
 
 ifeq ($(CONFIG_MACH_LINUX),y)
-# Host build: f64 host features for klippy-in-loop integration testing.
+# Linux MCU sim build: `linux-mcu` enables std (via its `host` dependency)
+# while preserving real extern "C" linkage for MCU-side C symbols
+# (timer_read_time, timer_is_before, runtime_emit_step_pulses, step_queues,
+# kalico_runtime_get_sample_period_cycles, etc.).  Using plain `host` here
+# would activate Rust host stubs that return 0 for all clock/queue accessors,
+# causing the per-axis step timers to spin at now+0 and never emit steps.
 # Always includes `kalico-sim` (the Linux build is itself a sim variant).
-KALICO_RUST_FEATURES := host,header-nurbs,header-runtime,kalico-sim
+KALICO_RUST_FEATURES := linux-mcu,header-nurbs,header-runtime,kalico-sim
 
 rust/target/release/libkalico_c_api.a: FORCE
 	cd rust && PATH="$(HOME)/.cargo/bin:$$PATH" \

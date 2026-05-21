@@ -38,6 +38,11 @@ struct gpio_line {
 static struct gpio_line gpio_lines[9 * MAX_GPIO_LINES];
 static int gpio_chip_fd[9] = { -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 
+// Sentinel returned by get_chip_fd() in sim mode when /dev/gpiochipN is
+// absent. Must be < 0 so gpio_release_line()'s "fd > 0" guard stays correct,
+// and distinct from -1 (the "not opened yet" sentinel) so we don't retry.
+#define GPIO_SIM_DUMMY_FD (-2)
+
 static int
 get_chip_fd(uint8_t chipId)
 {
@@ -47,8 +52,22 @@ get_chip_fd(uint8_t chipId)
     snprintf(chipFilename, sizeof(chipFilename), "/dev/gpiochip%u", chipId);
     int ret = access(chipFilename, F_OK);
     if (ret < 0) {
+#if CONFIG_KALICO_SIM
+        // In sim mode the GPIO chip devices are absent (Docker / CI / Renode).
+        // Record the dummy sentinel so subsequent calls are fast, then return
+        // it — all callers treat it as a no-op fd.
+        gpio_chip_fd[chipId] = GPIO_SIM_DUMMY_FD;
+        int i;
+        for (i=0; i<MAX_GPIO_LINES; i++) {
+            gpio_lines[GPIO(chipId, i)].offset = i;
+            gpio_lines[GPIO(chipId, i)].fd = GPIO_SIM_DUMMY_FD;
+            gpio_lines[GPIO(chipId, i)].chipid = chipId;
+        }
+        return GPIO_SIM_DUMMY_FD;
+#else
         report_errno("gpio access", ret);
         shutdown("GPIO chip device not found");
+#endif
     }
     int fd = open(chipFilename, O_RDWR | O_CLOEXEC);
     if (fd < 0) {
@@ -89,6 +108,12 @@ void
 gpio_out_reset(struct gpio_out g, uint8_t val)
 {
     gpio_release_line(g.line);
+    int fd = get_chip_fd(g.line->chipid);
+    if (fd == GPIO_SIM_DUMMY_FD) {
+        // Sim mode: no real GPIO chip; record the requested state and return.
+        g.line->state = !!val;
+        return;
+    }
     struct gpiohandle_request req;
     memset(&req, 0, sizeof(req));
     req.lines = 1;
@@ -96,7 +121,6 @@ gpio_out_reset(struct gpio_out g, uint8_t val)
     req.lineoffsets[0] = g.line->offset;
     req.default_values[0] = !!val;
     strncpy(req.consumer_label, GPIO_CONSUMER, sizeof(req.consumer_label) - 1);
-    int fd = get_chip_fd(g.line->chipid);
     int ret = ioctl(fd, GPIO_GET_LINEHANDLE_IOCTL, &req);
     if (ret < 0) {
         report_errno("gpio_out_reset get line", ret);
@@ -110,6 +134,10 @@ gpio_out_reset(struct gpio_out g, uint8_t val)
 void
 gpio_out_write(struct gpio_out g, uint8_t val)
 {
+    if (g.line->fd == GPIO_SIM_DUMMY_FD) {
+        g.line->state = !!val;
+        return;
+    }
     struct gpiohandle_data data;
     memset(&data, 0, sizeof(data));
     data.values[0] = !!val;
@@ -144,6 +172,12 @@ void
 gpio_in_reset(struct gpio_in g, int8_t pull_up)
 {
     gpio_release_line(g.line);
+    int fd = get_chip_fd(g.line->chipid);
+    if (fd == GPIO_SIM_DUMMY_FD) {
+        // Sim mode: no real GPIO chip; line reads as 0.
+        (void)pull_up;
+        return;
+    }
     struct gpiohandle_request req;
     memset(&req, 0, sizeof(req));
     req.lines = 1;
@@ -157,7 +191,6 @@ gpio_in_reset(struct gpio_in g, int8_t pull_up)
 #endif
     req.lineoffsets[0] = g.line->offset;
     strncpy(req.consumer_label, GPIO_CONSUMER, sizeof(req.consumer_label) - 1);
-    int fd = get_chip_fd(g.line->chipid);
     int ret = ioctl(fd, GPIO_GET_LINEHANDLE_IOCTL, &req);
     if (ret < 0) {
         report_errno("gpio_in_reset get line", ret);
@@ -170,6 +203,8 @@ gpio_in_reset(struct gpio_in g, int8_t pull_up)
 uint8_t
 gpio_in_read(struct gpio_in g)
 {
+    if (g.line->fd == GPIO_SIM_DUMMY_FD)
+        return 0; // Sim mode: always read as 0 (deasserted / no endstop trigger).
     struct gpiohandle_data data;
     memset(&data, 0, sizeof(data));
     ioctl(g.line->fd, GPIOHANDLE_GET_LINE_VALUES_IOCTL, &data);

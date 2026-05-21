@@ -1410,7 +1410,12 @@ extern void runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps);
 // next waketime. Wired into `command_kalico_configure_axis` (stepper.c)
 // via `init_per_axis_step_timers`.
 
-extern uint32_t kalico_per_axis_step_event(uint8_t axis_idx);
+// `kalico_per_axis_step_event(axis_idx, now)` — the Rust body takes the
+// current clock value as a parameter (rather than calling timer_read_time
+// itself) so that timer_read_time is used only from C and remains visible
+// to the LTO pass under -fwhole-program -flto.  The trampoline reads
+// timer_read_time() here, in C, before delegating to Rust.
+extern uint32_t kalico_per_axis_step_event(uint8_t axis_idx, uint32_t now);
 
 // Per-axis timers (4 axes). The `func` slot is dispatched by Klipper's
 // SysTick scheduler; each trampoline below binds a literal axis_idx that
@@ -1418,19 +1423,19 @@ extern uint32_t kalico_per_axis_step_event(uint8_t axis_idx);
 static struct timer per_axis_timers[4];
 
 static uint_fast8_t per_axis_timer_event_0(struct timer *t) {
-    t->waketime = kalico_per_axis_step_event(0);
+    t->waketime = kalico_per_axis_step_event(0, timer_read_time());
     return SF_RESCHEDULE;
 }
 static uint_fast8_t per_axis_timer_event_1(struct timer *t) {
-    t->waketime = kalico_per_axis_step_event(1);
+    t->waketime = kalico_per_axis_step_event(1, timer_read_time());
     return SF_RESCHEDULE;
 }
 static uint_fast8_t per_axis_timer_event_2(struct timer *t) {
-    t->waketime = kalico_per_axis_step_event(2);
+    t->waketime = kalico_per_axis_step_event(2, timer_read_time());
     return SF_RESCHEDULE;
 }
 static uint_fast8_t per_axis_timer_event_3(struct timer *t) {
-    t->waketime = kalico_per_axis_step_event(3);
+    t->waketime = kalico_per_axis_step_event(3, timer_read_time());
     return SF_RESCHEDULE;
 }
 

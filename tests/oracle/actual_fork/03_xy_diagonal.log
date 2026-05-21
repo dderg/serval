@@ -1,65 +1,17 @@
 =======================
 Starting Klippy...
-Args: ['/Users/daniladergachev/Developer/kalico/klippy/klippy.py', '/Users/daniladergachev/Developer/kalico/tests/oracle/cfg/oracle.cfg', '-i', '/Users/daniladergachev/Developer/kalico/tests/oracle/inputs/03_xy_diagonal.gcode', '-o', '/tmp/oracle_fork_03_xy_diagonal.out', '-d', '/Users/daniladergachev/Developer/klipper-sim/test/fixtures/klipper.dict', '-l', '/Users/daniladergachev/Developer/kalico/tests/oracle/actual_fork/03_xy_diagonal.log']
+Args: ['klippy/klippy.py', '/tmp/03_xy_diagonal.cfg', '-l', 'tests/oracle/actual_fork/03_xy_diagonal.log', '-a', '/tmp/klipper_api_03_xy_diagonal']
 App Name: Kalico
-Git version: 'v2026.04.00-1595-ga6e3e0411-dirty'
+Git version: 'v2026.04.00-1597-ga377706c5-dirty'
 Branch: oracle-bench
 Remote: origin
 Tracked URL: git@github.com:dderg/kalico.git
-CPU: ?
-Python: '3.14.4 (main, Apr  7 2026, 13:13:20) [Clang 21.0.0 (clang-2100.0.123.102)]'
-Start printer at Thu May 21 13:22:46 2026 (1779362566.8 3373100.7)
-Failed to load module 'autotune_tmc'.
-Traceback (most recent call last):
-  File "/Users/daniladergachev/Developer/kalico/klippy/printer.py", line 127, in load
-    self.module = importlib.import_module(self.module_info.name)
-                  ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/homebrew/Cellar/python@3.14/3.14.4/Frameworks/Python.framework/Versions/3.14/lib/python3.14/importlib/__init__.py", line 88, in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "<frozen importlib._bootstrap>", line 1406, in _gcd_import
-  File "<frozen importlib._bootstrap>", line 1371, in _find_and_load
-  File "<frozen importlib._bootstrap>", line 1335, in _find_and_load_unlocked
-ModuleNotFoundError: No module named 'klippy.extras.autotune_tmc'
-Failed to load module 'beacon'.
-Traceback (most recent call last):
-  File "/Users/daniladergachev/Developer/kalico/klippy/printer.py", line 127, in load
-    self.module = importlib.import_module(self.module_info.name)
-                  ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/homebrew/Cellar/python@3.14/3.14.4/Frameworks/Python.framework/Versions/3.14/lib/python3.14/importlib/__init__.py", line 88, in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "<frozen importlib._bootstrap>", line 1406, in _gcd_import
-  File "<frozen importlib._bootstrap>", line 1371, in _find_and_load
-  File "<frozen importlib._bootstrap>", line 1335, in _find_and_load_unlocked
-ModuleNotFoundError: No module named 'klippy.extras.beacon'
-Failed to load module 'motor_constants'.
-Traceback (most recent call last):
-  File "/Users/daniladergachev/Developer/kalico/klippy/printer.py", line 127, in load
-    self.module = importlib.import_module(self.module_info.name)
-                  ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/homebrew/Cellar/python@3.14/3.14.4/Frameworks/Python.framework/Versions/3.14/lib/python3.14/importlib/__init__.py", line 88, in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "<frozen importlib._bootstrap>", line 1406, in _gcd_import
-  File "<frozen importlib._bootstrap>", line 1371, in _find_and_load
-  File "<frozen importlib._bootstrap>", line 1335, in _find_and_load_unlocked
-ModuleNotFoundError: No module named 'klippy.extras.motor_constants'
-Failed to load module 'motors_sync'.
-Traceback (most recent call last):
-  File "/Users/daniladergachev/Developer/kalico/klippy/printer.py", line 127, in load
-    self.module = importlib.import_module(self.module_info.name)
-                  ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/homebrew/Cellar/python@3.14/3.14.4/Frameworks/Python.framework/Versions/3.14/lib/python3.14/importlib/__init__.py", line 88, in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "<frozen importlib._bootstrap>", line 1406, in _gcd_import
-  File "<frozen importlib._bootstrap>", line 1371, in _find_and_load
-  File "<frozen importlib._bootstrap>", line 1335, in _find_and_load_unlocked
-ModuleNotFoundError: No module named 'klippy.extras.motors_sync'
+CPU: 18 core ?
+Python: '3.11.2 (main, Apr  8 2026, 01:58:00) [GCC 12.2.0]'
+Start printer at Thu May 21 13:18:06 2026 (1779369486.2 445.5)
 ===== Config file =====
 [mcu]
-serial = /tmp/klippy_sim_pty
+serial = /tmp/klipper_oracle_03_xy_diagonal
 
 [printer]
 kinematics = corexy
@@ -69,97 +21,133 @@ minimum_cruise_ratio = 0.5
 square_corner_velocity = 5.0
 
 [stepper_x]
-step_pin = PA5
-dir_pin = PA4
-enable_pin = !PA1
+step_pin = gpiochip0/gpio9
+dir_pin = gpiochip0/gpio10
+enable_pin = !gpiochip0/gpio11
 microsteps = 32
 rotation_distance = 40
-endstop_pin = ^PB0
+endstop_pin = ^gpiochip0/gpio20
 position_endstop = 0
 position_max = 300
 position_min = -3
 
 [stepper_y]
-step_pin = PA3
-dir_pin = PA2
-enable_pin = !PA6
+step_pin = gpiochip0/gpio12
+dir_pin = gpiochip0/gpio13
+enable_pin = !gpiochip0/gpio14
 microsteps = 32
 rotation_distance = 40
-endstop_pin = ^PB1
+endstop_pin = ^gpiochip0/gpio21
 position_endstop = 0
 position_max = 302
 
 [stepper_z]
-step_pin = PD7
-dir_pin = PD5
-enable_pin = !PD3
+step_pin = gpiochip0/gpio15
+dir_pin = gpiochip0/gpio16
+enable_pin = !gpiochip0/gpio17
 microsteps = 32
 rotation_distance = 40
-endstop_pin = ^PB2
+endstop_pin = ^gpiochip0/gpio22
 position_min = -5
 position_endstop = 0
 position_max = 230
 
-[extruder]
-step_pin = PD4
-dir_pin = PD2
-enable_pin = !PD1
-microsteps = 16
-rotation_distance = 22.678
-nozzle_diameter = 0.4
-filament_diameter = 1.75
-heater_pin = PB4
-sensor_type = EPCOS 100K B57560G104F
-sensor_pin = PA7
-control = pid
-pid_kp = 22.2
-pid_ki = 1.08
-pid_kd = 114
-min_temp = 0
-max_temp = 300
-min_extrude_temp = 0
+[input_shaper]
+shaper_type_x = smooth_zv
+shaper_freq_x = 50
+shaper_type_y = smooth_zv
+shaper_freq_y = 50
+
+[force_move]
+enable_force_move = True
 =======================
-motion_bridge_native module not found; build with 'make -f Makefile.kalico motion-bridge'
 MotionToolhead: Phase 1 skeleton initialized
-Extruder max_extrude_ratio=0.266081
-Loaded MCU 'mcu' 128 commands (Kalico ?-20260423_071736-242ea5b5204b / gcc: (GCC) 5.4.0 binutils: (GNU Binutils) 2.26.20160125)
-MCU 'mcu' config: ADC_MAX=1023 BUS_PINS_spi=PB3,PB2,PB1 BUS_PINS_twi=PD0,PD1 CLOCK_FREQ=16000000 MCU=atmega2560 PWM_MAX=255 RECEIVE_WINDOW=192 RESERVE_PINS_serial=PE0,PE1 SERIAL_BAUD=250000 STATS_SUMSQ_BASE=256 STEPPER_OPTIMIZED_UNSTEP=40 STEPPER_STEP_BOTH_EDGE=1
-motion_bridge: failed to register MCU 'mcu'
-Traceback (most recent call last):
-  File "/Users/daniladergachev/Developer/kalico/klippy/mcu.py", line 1497, in _mcu_identify
-    self._motion_bridge.set_msgproto_dict(raw_dict)
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AttributeError: 'NoneType' object has no attribute 'set_msgproto_dict'
+mcu 'mcu': Starting connect
+mcu 'mcu': bridge attach_serial /tmp/klipper_oracle_03_xy_diagonal (handle=0)
+mcu 'mcu': bridge identify done (4515 bytes)
+mcu 'mcu': [bridge-async] kalico_status_v6 frame #1 engine_status=0
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3892314112, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 445.887244504, '#receive_time': 445.887244504}
+mcu 'mcu': [bridge-async] kalico_status_v6 frame #2 engine_status=0
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 445.987252462, '#receive_time': 445.987252462}
+mcu 'mcu': [bridge-async] kalico_status_v6 frame #3 engine_status=0
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 446.089203004, '#receive_time': 446.089203004}
+mcu 'mcu': [bridge-async] kalico_status_v6 frame #4 engine_status=0
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 446.189277004, '#receive_time': 446.189277004}
+Loaded MCU 'mcu' 169 commands (Kalico v2026.04.00-1597-ga377706c5-dirty-20260521_131042-d417cce873d5 / gcc: (Debian 12.2.0-14+deb12u1) 12.2.0 binutils: (GNU Binutils for Debian) 2.40)
+MCU 'mcu' config: ADC_MAX=4095 CLOCK_FREQ=50000000 MCU=linux PCA9685_MAX=4096 PWM_MAX=32768 STATS_SUMSQ_BASE=256
+[py-trace] _bridge_send enter cmd=get_config response=config
 Sending MCU 'mcu' printer configuration...
-[config-send] mcu=mcu cmd=allocate_oids count=13
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=allocate_oids count=13
-[config-send] mcu=mcu cmd=config_stepper oid=0 step_pin=PA5 dir_pin=PA4 invert_step=-1 step_pulse_ticks=0
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=config_stepper oid=0 step_pin=PA5 dir_pin=PA4 invert_step=-1 step_pulse_ticks=0
-[config-send] mcu=mcu cmd=config_digital_out oid=7 pin=PA1 value=1 default_value=1 max_duration=0
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=config_digital_out oid=7 pin=PA1 value=1 default_value=1 max_duration=0
-[config-send] mcu=mcu cmd=config_stepper oid=2 step_pin=PA3 dir_pin=PA2 invert_step=-1 step_pulse_ticks=0
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=config_stepper oid=2 step_pin=PA3 dir_pin=PA2 invert_step=-1 step_pulse_ticks=0
-[config-send] mcu=mcu cmd=config_digital_out oid=8 pin=PA6 value=1 default_value=1 max_duration=0
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=config_digital_out oid=8 pin=PA6 value=1 default_value=1 max_duration=0
-[config-send] mcu=mcu cmd=config_stepper oid=4 step_pin=PD7 dir_pin=PD5 invert_step=-1 step_pulse_ticks=0
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=config_stepper oid=4 step_pin=PD7 dir_pin=PD5 invert_step=-1 step_pulse_ticks=0
-[config-send] mcu=mcu cmd=config_digital_out oid=9 pin=PD3 value=1 default_value=1 max_duration=0
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=config_digital_out oid=9 pin=PD3 value=1 default_value=1 max_duration=0
-[config-send] mcu=mcu cmd=config_analog_in oid=10 pin=PA7
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=config_analog_in oid=10 pin=PA7
-[config-send] mcu=mcu cmd=config_digital_out oid=11 pin=PB4 value=0 default_value=0 max_duration=48000000
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=config_digital_out oid=11 pin=PB4 value=0 default_value=0 max_duration=48000000
-[config-send] mcu=mcu cmd=set_digital_out_pwm_cycle oid=11 cycle_ticks=1600000
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=set_digital_out_pwm_cycle oid=11 cycle_ticks=1600000
-[config-send] mcu=mcu cmd=config_stepper oid=6 step_pin=PD4 dir_pin=PD2 invert_step=-1 step_pulse_ticks=0
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=config_stepper oid=6 step_pin=PD4 dir_pin=PD2 invert_step=-1 step_pulse_ticks=0
-[config-send] mcu=mcu cmd=config_digital_out oid=12 pin=PD1 value=1 default_value=1 max_duration=0
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=config_digital_out oid=12 pin=PD1 value=1 default_value=1 max_duration=0
-[config-send] mcu=mcu cmd=finalize_config crc=3329902232
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=finalize_config crc=3329902232
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=query_analog_in oid=10 clock=17600000 sample_ticks=16000 sample_count=8 rest_ticks=4800000 min_value=182 max_value=8070 range_check_count=4
-[serial-send] DROPPED in bridge mode: bridge=None handle=None msg=queue_digital_out oid=11 clock=3200000 on_ticks=0
-Configured MCU 'mcu' (500 moves)
+[config-send] mcu=mcu cmd=allocate_oids count=9
+[serial-send] bridge_send mcu=mcu handle=0 msg=allocate_oids count=9
+[config-send] mcu=mcu cmd=config_stepper oid=0 step_pin=gpiochip0/gpio9 dir_pin=gpiochip0/gpio10 invert_step=-1 step_pulse_ticks=0
+[serial-send] bridge_send mcu=mcu handle=0 msg=config_stepper oid=0 step_pin=gpiochip0/gpio9 dir_pin=gpiochip0/gpio10 invert_step=-1 step_pulse_ticks=0
+[config-send] mcu=mcu cmd=config_digital_out oid=6 pin=gpiochip0/gpio11 value=1 default_value=1 max_duration=0
+[serial-send] bridge_send mcu=mcu handle=0 msg=config_digital_out oid=6 pin=gpiochip0/gpio11 value=1 default_value=1 max_duration=0
+[config-send] mcu=mcu cmd=config_stepper oid=2 step_pin=gpiochip0/gpio12 dir_pin=gpiochip0/gpio13 invert_step=-1 step_pulse_ticks=0
+[serial-send] bridge_send mcu=mcu handle=0 msg=config_stepper oid=2 step_pin=gpiochip0/gpio12 dir_pin=gpiochip0/gpio13 invert_step=-1 step_pulse_ticks=0
+[config-send] mcu=mcu cmd=config_digital_out oid=7 pin=gpiochip0/gpio14 value=1 default_value=1 max_duration=0
+[serial-send] bridge_send mcu=mcu handle=0 msg=config_digital_out oid=7 pin=gpiochip0/gpio14 value=1 default_value=1 max_duration=0
+[config-send] mcu=mcu cmd=config_stepper oid=4 step_pin=gpiochip0/gpio15 dir_pin=gpiochip0/gpio16 invert_step=-1 step_pulse_ticks=0
+[serial-send] bridge_send mcu=mcu handle=0 msg=config_stepper oid=4 step_pin=gpiochip0/gpio15 dir_pin=gpiochip0/gpio16 invert_step=-1 step_pulse_ticks=0
+[config-send] mcu=mcu cmd=config_digital_out oid=8 pin=gpiochip0/gpio17 value=1 default_value=1 max_duration=0
+[serial-send] bridge_send mcu=mcu handle=0 msg=config_digital_out oid=8 pin=gpiochip0/gpio17 value=1 default_value=1 max_duration=0
+[config-send] mcu=mcu cmd=finalize_config crc=1237736442
+[serial-send] bridge_send mcu=mcu handle=0 msg=finalize_config crc=1237736442
+[py-trace] _bridge_send enter cmd=get_config response=config
+Configured MCU 'mcu' (1024 moves)
+[serial-send] bridge_send mcu=mcu handle=0 msg=kalico_configure_axis axis_idx=0 mode=0 microstep_distance=1003277517 extrusion_per_xy_mm=0 stepper_count=1 steppers=0000ff00
+[serial-send] bridge_send mcu=mcu handle=0 msg=kalico_configure_axis axis_idx=1 mode=0 microstep_distance=1003277517 extrusion_per_xy_mm=0 stepper_count=1 steppers=0200ff00
+[serial-send] bridge_send mcu=mcu handle=0 msg=kalico_configure_axis axis_idx=2 mode=0 microstep_distance=1003277517 extrusion_per_xy_mm=0 stepper_count=1 steppers=0400ff00
+MotionToolhead: configure_axes mcu=mcu kin=0 present=0x7 awd=0x3 invert=0x0 steps_per_mm=[160.0, 160.0, 160.0, 0.0] step_modes=[1, 1, 1, 1] mcu_caps=0x1 runtime_bindings=[(0, 'stepper_x', 0, 0), (1, 'stepper_y', 2, 0), (2, 'stepper_z', 4, 0)] phase_configs=[] any_phase_stepping=False phase_motor_count=0
+MotionToolhead: registered kalico_credit_freed handler for MCU 'mcu' (handle=0)
+Welcome to Kalico
+
+Kalico is starting an opt-in analytics campaign, collecting anonymous data about our users
+Submitted data will contain an anonymized copy of your current configuration, enabled Kalico modules and plugins, and some basic information about the host machine.
+
+`ENABLE_TELEMETRY` will opt-in to the campaign
+`DISABLE_TELEMETRY` will permanently opt-out
+
+`TELEMETRY_EXAMPLE` will save a full example of what would be submitted as 'telemetry.json' in your configuration folder
+
+For more information, visit https://kalico.gg/telemetry
+mcu 'mcu': [bridge-async] kalico_status_v6 frame #5 engine_status=0
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3774873600, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 446.291017046, '#receive_time': 446.291017046}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3791651089, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 446.392298587, '#receive_time': 446.392298587}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3909091328, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 446.492248462, '#receive_time': 446.492248462}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 446.592229004, '#receive_time': 446.592229004}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 446.692226046, '#receive_time': 446.692226046}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 446.794220338, '#receive_time': 446.794220338}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3774873600, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 446.894207754, '#receive_time': 446.894207754}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 0, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3791651089, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 446.995415254, '#receive_time': 446.995415254}
+webhooks client 281472995995216: New connection
 SET_KINEMATIC_POSITION pos=0.000,0.000,0.000 clear=
-[bridge-trace] move: newpos=[20.0, 20.0, 0.0, 0.0] speed=50.0 dx=20.0000 dy=20.0000 dz=0.0000 de=0.0000 feedrate=50.0000 bridge_is_none=True
-Exiting (print time 0.250s)
+[bridge-trace] move: newpos=[20.0, 20.0, 0.0, 0.0] speed=50.0 dx=20.0000 dy=20.0000 dz=0.0000 de=0.0000 feedrate=50.0000 bridge_is_none=False
+[serial-send] bridge_send mcu=mcu handle=0 msg=queue_digital_out oid=6 clock=4510182047 on_ticks=0
+[serial-send] bridge_send mcu=mcu handle=0 msg=queue_digital_out oid=6 clock=4530970580 on_ticks=1
+webhooks client 281472995995216: Disconnected
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3976200192, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 447.097244713, '#receive_time': 447.097244713}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 447.197232338, '#receive_time': 447.197232338}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 447.298235838, '#receive_time': 447.298235838}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 447.399211504, '#receive_time': 447.399211504}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3774873600, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 447.500226296, '#receive_time': 447.500226296}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3791651089, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 447.602252088, '#receive_time': 447.602252088}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3036676096, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 447.702231505, '#receive_time': 447.702231505}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 447.803242546, '#receive_time': 447.803242546}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 447.903448838, '#receive_time': 447.903448838}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 448.003222338, '#receive_time': 448.003222338}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3774873600, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 448.10313288, '#receive_time': 448.10313288}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3791651089, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 448.20621688, '#receive_time': 448.20621688}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3053453316, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 448.306245755, '#receive_time': 448.306245755}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 448.407248047, '#receive_time': 448.407248047}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 448.507217213, '#receive_time': 448.507217213}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 448.607225172, '#receive_time': 448.607225172}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3774873600, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 448.709242297, '#receive_time': 448.709242297}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3791651089, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 448.810229672, '#receive_time': 448.810229672}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3070230528, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 448.910239922, '#receive_time': 448.910239922}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 449.010258755, '#receive_time': 449.010258755}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 449.112058547, '#receive_time': 449.112058547}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 0, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 449.21210263, '#receive_time': 449.21210263}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3774873600, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 449.314241547, '#receive_time': 449.314241547}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3791651089, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 449.414220255, '#receive_time': 449.414220255}
+mcu 'mcu':  got {'type': 'status', 'engine_status': 0, 'queue_depth': 4, 'current_segment_id': 0, 'last_fault': 0, 'fault_detail': 3992977408, 'retired_through_segment_id': 0, '#name': 'kalico_status_v6', '#sent_time': 449.516246464, '#receive_time': 449.516246464}

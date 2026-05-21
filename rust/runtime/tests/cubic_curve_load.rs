@@ -37,10 +37,11 @@ fn rejects_zero_pieces() {
 
 #[test]
 fn rejects_too_many_pieces() {
+    use runtime::curve_pool::MAX_PIECES_PER_CURVE;
     let mut curve = LoadedCubicCurve::empty();
-    // 17 pieces (one over MAX_PIECES_PER_CURVE = 16).
+    // MAX_PIECES_PER_CURVE + 1 pieces (one over the limit).
     let one = make_wire([0.0, 0.333, 0.667, 1.0], 1e-3);
-    let wire = vec![one; 17];
+    let wire = vec![one; MAX_PIECES_PER_CURVE + 1];
     assert_eq!(
         populate_from_wire(&mut curve, &wire),
         Err(CubicLoadError::PieceCountOutOfRange)

@@ -96,10 +96,11 @@ const _: () = {
     assert!(STEP_QUEUE_DEPTH.is_power_of_two());
 };
 
-// On MCU builds, storage is the C-declared `step_queues` symbol; the
-// `UnsafeCell` wrapper is purely a marker that interior mutation is
-// expected. Host / test builds construct queues directly via `new()`.
-#[cfg(not(any(test, feature = "host")))]
+// On MCU builds (bare-metal or Linux sim via `linux-mcu`), storage is the
+// C-declared `step_queues` symbol; the `UnsafeCell` wrapper is purely a
+// marker that interior mutation is expected. Pure host / test builds
+// construct queues directly via `new()`.
+#[cfg(not(any(test, all(feature = "host", not(feature = "linux-mcu")))))]
 unsafe extern "C" {
     pub static step_queues: core::cell::UnsafeCell<[StepQueue; N_AXIS_STEP_QUEUES]>;
 }

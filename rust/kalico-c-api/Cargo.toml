@@ -20,6 +20,13 @@ default = ["host", "header-nurbs", "header-runtime"]
 mcu-h7 = ["nurbs/mcu-h7", "runtime/mcu-h7"]
 mcu-f4 = ["nurbs/mcu-f4", "runtime/mcu-f4"]
 host = ["nurbs/host", "runtime/host", "dep:cbindgen"]
+# Linux MCU sim: enables std (via `host`) and passes through to
+# runtime/linux-mcu which preserves real extern "C" linkage for timer/step/
+# queue C symbols.  Both this crate and the runtime crate need `host` (for
+# no_std → std promotion and panic-handler suppression); the runtime needs
+# `linux-mcu` additionally to disable its C-symbol stubs.
+# Used by `src/Makefile` for the Linux klipper.elf build.
+linux-mcu = ["host", "runtime/linux-mcu"]
 header-nurbs = []
 header-runtime = []
 # Pass-through to runtime/kalico-sim. See runtime/Cargo.toml for the
