@@ -1,0 +1,13 @@
+{
+  "print_time_s": 1.027,
+  "shutdown_reason": null,
+  "host_comments": [],
+  "invocation": {
+    "klipper_root": "/tmp/kalico-mainline",
+    "config": "/Users/daniladergachev/Developer/kalico/tests/oracle/cfg/oracle.cfg",
+    "gcode": "/Users/daniladergachev/Developer/kalico/tests/oracle/inputs/03_xy_diagonal.gcode",
+    "dt": 0.0001,
+    "smoothing_window": 5,
+    "runner": "docker"
+  }
+}

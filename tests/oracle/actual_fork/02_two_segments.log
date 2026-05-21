@@ -1,0 +1,142 @@
+=======================
+Starting Klippy...
+Args: ['/workspace/klipper/klippy/klippy.py', '/workspace/printer.cfg', '-i', '/workspace/input.gcode', '-o', '/workspace/out/run.serial', '-d', '/workspace/klipper/out/klipper.dict', '-l', '/workspace/out/run.log']
+App Name: Kalico
+Git version: '?'
+Branch: ?
+Remote: ?
+Tracked URL: ?
+CPU: 18 core ?
+Python: '3.11.2 (main, Apr 28 2025, 14:11:48) [GCC 12.2.0]'
+Building C code module c_helper.so
+Start printer at Thu May 21 10:50:07 2026 (1779360607.1 438.0)
+Failed to load module 'autotune_tmc'.
+Traceback (most recent call last):
+  File "/workspace/klipper/klippy/printer.py", line 127, in load
+    self.module = importlib.import_module(self.module_info.name)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1206, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1178, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1142, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'klippy.extras.autotune_tmc'
+Failed to load module 'beacon'.
+Traceback (most recent call last):
+  File "/workspace/klipper/klippy/printer.py", line 127, in load
+    self.module = importlib.import_module(self.module_info.name)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1206, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1178, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1142, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'klippy.extras.beacon'
+Failed to load module 'motor_constants'.
+Traceback (most recent call last):
+  File "/workspace/klipper/klippy/printer.py", line 127, in load
+    self.module = importlib.import_module(self.module_info.name)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1206, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1178, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1142, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'klippy.extras.motor_constants'
+Failed to load module 'motors_sync'.
+Traceback (most recent call last):
+  File "/workspace/klipper/klippy/printer.py", line 127, in load
+    self.module = importlib.import_module(self.module_info.name)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1206, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1178, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1142, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'klippy.extras.motors_sync'
+===== Config file =====
+[mcu]
+serial = /tmp/klippy_sim_pty
+
+[printer]
+kinematics = corexy
+max_velocity = 300
+max_accel = 5000
+minimum_cruise_ratio = 0.5
+square_corner_velocity = 5.0
+
+[stepper_x]
+step_pin = PA5
+dir_pin = PA4
+enable_pin = !PA1
+microsteps = 32
+rotation_distance = 40
+endstop_pin = ^PB0
+position_endstop = 0
+position_max = 300
+position_min = -3
+
+[stepper_y]
+step_pin = PA3
+dir_pin = PA2
+enable_pin = !PA6
+microsteps = 32
+rotation_distance = 40
+endstop_pin = ^PB1
+position_endstop = 0
+position_max = 302
+
+[stepper_z]
+step_pin = PD7
+dir_pin = PD5
+enable_pin = !PD3
+microsteps = 32
+rotation_distance = 40
+endstop_pin = ^PB2
+position_min = -5
+position_endstop = 0
+position_max = 230
+
+[extruder]
+step_pin = PD4
+dir_pin = PD2
+enable_pin = !PD1
+microsteps = 16
+rotation_distance = 22.678
+nozzle_diameter = 0.4
+filament_diameter = 1.75
+heater_pin = PB4
+sensor_type = EPCOS 100K B57560G104F
+sensor_pin = PA7
+control = pid
+pid_kp = 22.2
+pid_ki = 1.08
+pid_kd = 114
+min_temp = 0
+max_temp = 300
+min_extrude_temp = 0
+=======================
+MotionToolhead: Phase 1 skeleton initialized
+Extruder max_extrude_ratio=0.266081
+Unhandled exception during connect
+Traceback (most recent call last):
+  File "/workspace/klipper/klippy/printer.py", line 398, in _connect
+    self.send_event("klippy:mcu_identify")
+  File "/workspace/klipper/klippy/printer.py", line 537, in send_event
+    return [cb(*params) for cb in self.event_handlers.get(event, [])]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/klipper/klippy/printer.py", line 537, in <listcomp>
+    return [cb(*params) for cb in self.event_handlers.get(event, [])]
+            ^^^^^^^^^^^
+  File "/workspace/klipper/klippy/mcu.py", line 1419, in _mcu_identify
+    self._connect_file()
+  File "/workspace/klipper/klippy/mcu.py", line 1192, in _connect_file
+    self._serial.connect_file(outfile, dict_data)
+  File "/workspace/klipper/klippy/serialhdl.py", line 412, in connect_file
+    self.serialqueue = self.ffi_main.gc(
+                       ^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'gc'
