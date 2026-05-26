@@ -596,6 +596,58 @@ mod tests {
         assert_eq!(p.free_count(), CURVE_POOL_N);
     }
 
+    /// Reproduces the generation-mismatch bug observed on the F446 bench:
+    ///
+    /// 1. alloc slot S at gen=1, load_curve succeeds (MCU now at gen=1)
+    /// 2. push_segment fails → host calls release(S)
+    /// 3. alloc S again → host gen=2
+    /// 4. load_curve(slot=S, gen=2) → MCU rejects: "slot busy at gen=1"
+    ///
+    /// release() advances the host generation without telling the MCU,
+    /// creating a permanent gen mismatch. The MCU still holds a curve at
+    /// gen=1 that was never committed/retired.
+    #[test]
+    fn release_after_load_curve_creates_generation_mismatch() {
+        let mut p = SlotPool::new(4);
+
+        // Step 1: alloc all 4 slots, register to segments 1-4
+        let mut slots = Vec::new();
+        for seg in 1..=4u32 {
+            let (s, g) = p.try_alloc().unwrap();
+            assert_eq!(g, 1, "first alloc of every slot is gen=1");
+            p.register_segment(s, seg);
+            slots.push(s);
+        }
+        assert!(p.try_alloc().is_none(), "pool exhausted");
+
+        // Step 2: MCU retires segment 1 → slot 0 freed
+        p.retire_through_segment(1);
+        assert_eq!(p.in_flight_count(), 3);
+
+        // Step 3: re-alloc the freed slot for segment 5
+        let (s5, g5) = p.try_alloc().unwrap();
+        assert_eq!(s5, slots[0], "FIFO: should get slot 0 back");
+        assert_eq!(g5, 2, "second alloc of slot 0 is gen=2");
+        // At this point, if load_curve succeeded, MCU has slot 0 at gen=2.
+
+        // Step 4: push_segment fails → error handler calls release
+        p.release(s5);
+        assert_eq!(p.in_flight_count(), 3, "slot 0 back in free pool");
+
+        // Step 5: re-alloc slot 0 for a retry
+        let (s_retry, g_retry) = p.try_alloc().unwrap();
+        assert_eq!(s_retry, slots[0]);
+
+        // BUG: host gen is now 3, but MCU still holds gen=2 (never retired).
+        // load_curve(slot=0, gen=3) will be rejected by MCU as "slot busy."
+        // The host pool has no way to know the MCU's actual generation.
+        assert_eq!(
+            g_retry, 3,
+            "host advanced to gen=3, but MCU is stuck at gen=2 — \
+             this WILL cause 'slot busy' on the MCU"
+        );
+    }
+
     #[test]
     fn many_alloc_release_cycles_dont_leak() {
         // Cycle through more than CURVE_POOL_N allocations to verify the
