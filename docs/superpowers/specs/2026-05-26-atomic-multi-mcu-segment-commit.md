@@ -27,6 +27,14 @@ No MCU executes a segment until every MCU has confirmed receipt.
 
 ## Architecture
 
+### Invariant
+
+The host MUST NOT push segment N+1 to any MCU until segment N has either
+committed on all MCUs or been aborted/cleared on all MCUs. Each MCU has
+exactly one pending slot. The pending slot is either empty or holds one
+uncommitted segment. There is no pending queue, no batch buffer, no
+out-of-order commit.
+
 ### Two-phase segment dispatch
 
 **Phase 1 — Push.** For each logical segment from the planner:
