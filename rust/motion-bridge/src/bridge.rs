@@ -459,6 +459,7 @@ pub struct PyMotionBridge {
     probe_handle_counter: AtomicU64,
     cold_start_done: Arc<Mutex<HashMap<u32, bool>>>,
     schedule_state: Arc<Mutex<HashMap<u32, (u64, u64)>>>,
+    next_seg_id: Arc<Mutex<HashMap<u32, u32>>>,
 }
 
 /// Build the kalico-native `ConfigureAxes` wire body.
@@ -563,6 +564,7 @@ impl PyMotionBridge {
             probe_handle_counter: AtomicU64::new(1),
             cold_start_done: Arc::new(Mutex::new(HashMap::new())),
             schedule_state: Arc::new(Mutex::new(HashMap::new())),
+            next_seg_id: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -2143,7 +2145,7 @@ impl PyMotionBridge {
         // Per-MCU rolling segment id. Allocated alongside the slot to
         // bind the `kalico_credit_freed.retired_through_segment_id`
         // retirement signal to the segment's curve slots.
-        let next_seg_id: Arc<Mutex<HashMap<u32, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+        let next_seg_id = Arc::clone(&self.next_seg_id);
         // Per-MCU schedule state:
         //   (current batch base clock, next available absolute clock).
         // `trajectory::shape_batch` emits batch-local times, with each new
@@ -2964,6 +2966,18 @@ impl PyMotionBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        {
+            let pools = self.slot_pools.lock().unwrap_or_else(|p| p.into_inner());
+            for pool in pools.values() {
+                pool.retire_through_segment(u32::MAX);
+            }
+        }
+        {
+            let mut seg_ids = self.next_seg_id.lock().unwrap_or_else(|p| p.into_inner());
+            for v in seg_ids.values_mut() {
+                *v = 0;
+            }
+        }
         Ok(())
     }
 
