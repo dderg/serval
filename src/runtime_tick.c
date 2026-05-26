@@ -474,6 +474,18 @@ runtime_drain(void)
             uint32_t fault_detail = runtime_handle_fault_detail(runtime_handle);
             uint32_t cur_seg = runtime_handle_current_segment_id(runtime_handle);
             kalico_native_emit_fault_event((uint16_t)fault_code, fault_detail, cur_seg);
+            if (fault_code == 0x0010 /* LATE_ARM */) {
+                extern uint32_t runtime_handle_diag_commit_seed_lo(void*);
+                extern uint32_t runtime_handle_diag_commit_seed_hi(void*);
+                extern uint32_t runtime_handle_diag_commit_t_start_lo(void*);
+                extern uint32_t runtime_handle_diag_commit_t_start_hi(void*);
+                uint32_t s_lo = runtime_handle_diag_commit_seed_lo(runtime_handle);
+                uint32_t s_hi = runtime_handle_diag_commit_seed_hi(runtime_handle);
+                uint32_t t_lo = runtime_handle_diag_commit_t_start_lo(runtime_handle);
+                uint32_t t_hi = runtime_handle_diag_commit_t_start_hi(runtime_handle);
+                output("late_arm_diag seed_lo=%u seed_hi=%u t_start_lo=%u t_start_hi=%u delta=%u",
+                       s_lo, s_hi, t_lo, t_hi, fault_detail);
+            }
         }
     }
 

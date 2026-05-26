@@ -285,6 +285,15 @@ pub struct SharedState {
     /// but this stays 0, the retirement table lookup is returning `None`
     /// (handles not registered before enqueue) or all handles are sentinels.
     pub diag_confirm_retired_cas_total: AtomicU32,
+    /// Commit-time seed diagnostic: low 32 bits of `runtime_widened_host_clock()`
+    /// captured at the first cold-start commit_segment (TIM5 enable path).
+    pub diag_commit_seed_lo: AtomicU32,
+    /// High 32 bits of the commit-time seed.
+    pub diag_commit_seed_hi: AtomicU32,
+    /// Low 32 bits of `t_start` from the first cold-start commit.
+    pub diag_commit_t_start_lo: AtomicU32,
+    /// High 32 bits of `t_start` from the first cold-start commit.
+    pub diag_commit_t_start_hi: AtomicU32,
     /// 2026-05-17: snapshot of `seg.consumers_remaining` AFTER the
     /// clear-all-motors loop in modulated_tick's retirement branch.
     /// If non-zero, the clear loop missed bits that compute_consumers_remaining
@@ -682,6 +691,10 @@ impl SharedState {
             modulated_retire_successes: AtomicU32::new(0),
             diag_drain_segment_end_total: AtomicU32::new(0),
             diag_confirm_retired_cas_total: AtomicU32::new(0),
+            diag_commit_seed_lo: AtomicU32::new(0),
+            diag_commit_seed_hi: AtomicU32::new(0),
+            diag_commit_t_start_lo: AtomicU32::new(0),
+            diag_commit_t_start_hi: AtomicU32::new(0),
             last_retire_consumers_after_clear: AtomicU32::new(0),
             credit_epoch: AtomicU32::new(0),
             accepted_segment_id: AtomicU32::new(0),

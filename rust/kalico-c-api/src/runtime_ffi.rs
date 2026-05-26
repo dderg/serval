@@ -619,6 +619,13 @@ pub mod exports {
                 let last_widened = super::exports::runtime_widened_host_clock();
                 widen_state.seed(last_widened);
                 runtime::clock::publish_widened_now(shared, last_widened);
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    shared.diag_commit_seed_lo.store(last_widened as u32, Ordering::Relaxed);
+                    shared.diag_commit_seed_hi.store((last_widened >> 32) as u32, Ordering::Relaxed);
+                    shared.diag_commit_t_start_lo.store(t_start as u32, Ordering::Relaxed);
+                    shared.diag_commit_t_start_hi.store((t_start >> 32) as u32, Ordering::Relaxed);
+                }
                 super::exports::runtime_tick_enable();
             }
         }
@@ -1380,6 +1387,31 @@ pub mod exports {
                 .diag_confirm_retired_cas_total
                 .load(Ordering::Acquire)
         }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn runtime_handle_diag_commit_seed_lo(rt: *mut KalicoRuntime) -> u32 {
+        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) { return 0; }
+        let ctx = rt.cast::<RuntimeContext>();
+        unsafe { (*core::ptr::addr_of!((*ctx).shared)).diag_commit_seed_lo.load(Ordering::Relaxed) }
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn runtime_handle_diag_commit_seed_hi(rt: *mut KalicoRuntime) -> u32 {
+        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) { return 0; }
+        let ctx = rt.cast::<RuntimeContext>();
+        unsafe { (*core::ptr::addr_of!((*ctx).shared)).diag_commit_seed_hi.load(Ordering::Relaxed) }
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn runtime_handle_diag_commit_t_start_lo(rt: *mut KalicoRuntime) -> u32 {
+        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) { return 0; }
+        let ctx = rt.cast::<RuntimeContext>();
+        unsafe { (*core::ptr::addr_of!((*ctx).shared)).diag_commit_t_start_lo.load(Ordering::Relaxed) }
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn runtime_handle_diag_commit_t_start_hi(rt: *mut KalicoRuntime) -> u32 {
+        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) { return 0; }
+        let ctx = rt.cast::<RuntimeContext>();
+        unsafe { (*core::ptr::addr_of!((*ctx).shared)).diag_commit_t_start_hi.load(Ordering::Relaxed) }
     }
 
     /// 2026-05-17 F4-retire-stall diagnostic: read low 32 bits of the most
