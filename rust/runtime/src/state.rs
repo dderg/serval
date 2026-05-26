@@ -273,6 +273,18 @@ pub struct SharedState {
     /// path). Should equal `modulated_retire_attempts` if the consumers
     /// mask is being cleared correctly.
     pub modulated_retire_successes: AtomicU32,
+    /// 2026-05-27 drain-path diagnostic: increments every time the foreground
+    /// drain pipeline observes a `TRACE_FLAG_SEGMENT_END` sample (regardless
+    /// of whether the retirement table lookup succeeds). If this stays 0
+    /// while `retired_through_segment_id` also stays 0, the drain pipeline
+    /// is not seeing the SEGMENT_END samples that the ISR enqueues.
+    pub diag_drain_segment_end_total: AtomicU32,
+    /// 2026-05-27 drain-path diagnostic: increments every time
+    /// `CurvePool::confirm_retired` successfully CAS-advances
+    /// `last_retired_gen` for a slot. If `diag_drain_segment_end_total` > 0
+    /// but this stays 0, the retirement table lookup is returning `None`
+    /// (handles not registered before enqueue) or all handles are sentinels.
+    pub diag_confirm_retired_cas_total: AtomicU32,
     /// 2026-05-17: snapshot of `seg.consumers_remaining` AFTER the
     /// clear-all-motors loop in modulated_tick's retirement branch.
     /// If non-zero, the clear loop missed bits that compute_consumers_remaining
@@ -668,6 +680,8 @@ impl SharedState {
             last_modulated_duration_lo: AtomicU32::new(0),
             modulated_retire_attempts: AtomicU32::new(0),
             modulated_retire_successes: AtomicU32::new(0),
+            diag_drain_segment_end_total: AtomicU32::new(0),
+            diag_confirm_retired_cas_total: AtomicU32::new(0),
             last_retire_consumers_after_clear: AtomicU32::new(0),
             credit_epoch: AtomicU32::new(0),
             accepted_segment_id: AtomicU32::new(0),

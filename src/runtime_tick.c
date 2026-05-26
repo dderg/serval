@@ -629,7 +629,7 @@ runtime_status_drain(void)
         // tags (0xB6, 0xB7), curve-resolve tag (0xB8), demuxer tag (0xB9).
         static uint8_t st_emit_phase_ext;
         st_emit_phase_ext = (uint8_t)(st_emit_phase_ext + 1);
-        if (st_emit_phase_ext >= 63) st_emit_phase_ext = 0;
+        if (st_emit_phase_ext >= 65) st_emit_phase_ext = 0;
         switch (st_emit_phase_ext) {
         case 3:
             // 0xE6 — Live step_mode discriminants for motors 0..3, two
@@ -1391,6 +1391,30 @@ runtime_status_drain(void)
             extern uint32_t kalico_runtime_get_push_widened_hi(void* h);
             uint32_t v = kalico_runtime_get_push_widened_hi(runtime_handle);
             fault_detail = 0xB3000000u | (v & 0x00FFFFFFu);
+            break;
+        }
+        case 63: {
+            // 0xD9 — 2026-05-27 drain-path diagnostic: low 24 bits of
+            // diag_drain_segment_end_total. Counts every TRACE_FLAG_SEGMENT_END
+            // sample the foreground drain processes. If this stays 0 while
+            // retired_through_segment_id also stays 0, the drain pipeline
+            // is never seeing SEGMENT_END samples (ISR not enqueuing them,
+            // or drain task not running).
+            extern uint32_t runtime_handle_diag_drain_segment_end_total(void* h);
+            uint32_t v = runtime_handle_diag_drain_segment_end_total(runtime_handle);
+            fault_detail = 0xD9000000u | (v & 0x00FFFFFFu);
+            break;
+        }
+        case 64: {
+            // 0xDA — 2026-05-27 drain-path diagnostic: low 24 bits of
+            // diag_confirm_retired_cas_total. Counts every successful
+            // CAS advance of last_retired_gen. If 0xD9 > 0 but this stays
+            // 0, every SEGMENT_END's retirement table lookup returns None
+            // (handles not registered before enqueue, or all are sentinels).
+            // If both 0xD9 == 0 and 0xDA == 0, the drain path never fires.
+            extern uint32_t runtime_handle_diag_confirm_retired_cas_total(void* h);
+            uint32_t v = runtime_handle_diag_confirm_retired_cas_total(runtime_handle);
+            fault_detail = 0xDA000000u | (v & 0x00FFFFFFu);
             break;
         }
         }

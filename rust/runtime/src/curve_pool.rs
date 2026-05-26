@@ -282,17 +282,22 @@ impl CurvePool {
     /// foreground drains the trace ring's EARLIER `SEGMENT_END` events.
     /// Without the CAS guard, the stale foreground drain would overwrite
     /// `last_retired_gen` backwards, leaving the slot permanently "busy."
-    pub fn confirm_retired(&self, handle: CurveHandle) {
+    ///
+    /// Returns `true` if the CAS successfully advanced `last_retired_gen`
+    /// (i.e. this call performed the retirement), `false` if the call was a
+    /// no-op (sentinel, out-of-range slot, or generation already at or past
+    /// `handle.generation`).
+    pub fn confirm_retired(&self, handle: CurveHandle) -> bool {
         let slot_idx = handle.slot_idx as usize;
         if slot_idx >= CURVE_POOL_N {
-            return;
+            return false;
         }
         if let Some(slot) = self.slots.get(slot_idx) {
             loop {
                 let current_last = slot.last_retired_gen.load(Ordering::Acquire);
                 let delta = handle.generation.wrapping_sub(current_last);
                 if delta == 0 || delta >= 32768 {
-                    break;
+                    return false;
                 }
                 match slot.last_retired_gen.compare_exchange_weak(
                     current_last,
@@ -300,11 +305,12 @@ impl CurvePool {
                     Ordering::Release,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => break,
+                    Ok(_) => return true,
                     Err(_) => continue,
                 }
             }
         }
+        false
     }
 
     /// Returns `true` if `slot_idx`'s `last_retired_gen` matches its
@@ -396,7 +402,7 @@ mod tests {
             .expect("first");
         // Second alloc into the same slot must fail (slot busy).
         assert!(pool.try_alloc_and_load(0, &wire).is_none());
-        pool.confirm_retired(h1);
+        let _ = pool.confirm_retired(h1);
         let h2 = pool
             .try_alloc_and_load(0, &wire)
             .expect("second");

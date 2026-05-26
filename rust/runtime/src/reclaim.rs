@@ -102,10 +102,17 @@ where
     while drained < limit {
         let Some(sample) = drain_one() else { break };
         if sample.flags & TRACE_FLAG_SEGMENT_END != 0 {
+            shared
+                .diag_drain_segment_end_total
+                .fetch_add(1, Ordering::Relaxed);
             if let Some(handles) = table.lookup(sample.segment_id) {
                 for h in &handles {
                     if !h.is_unused_sentinel() && *h != CurveHandle::HOLD_SEGMENT_SENTINEL {
-                        pool.confirm_retired(*h);
+                        if pool.confirm_retired(*h) {
+                            shared
+                                .diag_confirm_retired_cas_total
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
             }

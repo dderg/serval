@@ -979,6 +979,9 @@ pub mod exports {
                     break;
                 };
                 if (sample.flags & runtime::trace::TRACE_FLAG_SEGMENT_END) != 0 {
+                    shared
+                        .diag_drain_segment_end_total
+                        .fetch_add(1, Ordering::Relaxed);
                     // Retire all 4 per-axis handles via the retirement table.
                     if let Some(handles) = fg.retirement_table.lookup(sample.segment_id) {
                         for h in &handles {
@@ -986,7 +989,11 @@ pub mod exports {
                                 && *h
                                     != runtime::curve_pool::CurveHandle::HOLD_SEGMENT_SENTINEL
                             {
-                                pool.confirm_retired(*h);
+                                if pool.confirm_retired(*h) {
+                                    shared
+                                        .diag_confirm_retired_cas_total
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         }
                     }
@@ -1327,6 +1334,50 @@ pub mod exports {
             let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
             (*shared_ptr)
                 .retired_through_segment_id
+                .load(Ordering::Acquire)
+        }
+    }
+
+    /// 2026-05-27 drain-path diagnostic: number of `TRACE_FLAG_SEGMENT_END`
+    /// samples observed by the foreground drain pipeline since boot. If this
+    /// stays 0 while `retired_through_segment_id` also stays 0, the drain
+    /// pipeline is not processing SEGMENT_END samples. If > 0 but
+    /// `runtime_handle_diag_confirm_retired_cas_total` stays 0, the
+    /// retirement table lookup is returning `None` for every segment end
+    /// (handles not registered, or all handles are sentinels).
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn runtime_handle_diag_drain_segment_end_total(
+        rt: *mut KalicoRuntime,
+    ) -> u32 {
+        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) {
+            return 0;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        // SAFETY: SharedState atomics-only access.
+        unsafe {
+            (*core::ptr::addr_of!((*ctx).shared))
+                .diag_drain_segment_end_total
+                .load(Ordering::Acquire)
+        }
+    }
+
+    /// 2026-05-27 drain-path diagnostic: number of times
+    /// `CurvePool::confirm_retired` successfully CAS-advanced
+    /// `last_retired_gen`. Pair with
+    /// `runtime_handle_diag_drain_segment_end_total`: if segment-end > 0
+    /// but this stays 0, no slot is being unlocked by the drain path.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn runtime_handle_diag_confirm_retired_cas_total(
+        rt: *mut KalicoRuntime,
+    ) -> u32 {
+        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) {
+            return 0;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        // SAFETY: SharedState atomics-only access.
+        unsafe {
+            (*core::ptr::addr_of!((*ctx).shared))
+                .diag_confirm_retired_cas_total
                 .load(Ordering::Acquire)
         }
     }
