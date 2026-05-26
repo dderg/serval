@@ -325,8 +325,16 @@ pub fn apply_split_times(
                 // "hold prev value" on UNUSED handles preserves position from
                 // sub 0. Avoids overrunning small curve pools (e.g. F446
                 // CURVE_POOL_N=4) when unified split creates many windows.
-                if w > 0 && curve_load_is_constant(&extracted) {
+                let is_const = curve_load_is_constant(&extracted);
+                if w > 0 && is_const {
                     return None;
+                }
+                if w > 0 && !is_const {
+                    log::warn!(
+                        "[split-diag] mcu={} w={} axis={} NOT constant: pieces={} bp0={:?}",
+                        plan.mcu_id, w, axis_idx, extracted.piece_count(),
+                        extracted.bp_per_piece.first(),
+                    );
                 }
                 Some((*axis_idx, extracted))
             })
