@@ -636,6 +636,111 @@ pub mod exports {
         KALICO_OK
     }
 
+    /// Abort a previously staged segment without committing it. Two-phase
+    /// commit escape hatch — Phase 1 failure path.
+    ///
+    /// The host calls this after `runtime_handle_push_segment` (Phase 1) if it
+    /// determines the segment cannot be committed (e.g. timing gap, upstream
+    /// planner abort, or any Phase 1 validation error surfaced after push but
+    /// before commit). The staged slot is cleared and all loaded curve handles
+    /// are released back to the curve pool.
+    ///
+    /// `segment_id` is the id supplied to `push_segment`; it is used as a
+    /// safety interlock to confirm the caller is aborting the correct segment.
+    ///
+    /// `out_aborted_id` (optional, may be NULL): receives `segment_id` on a
+    /// normal abort, or `0` when there was no staged segment (idempotent).
+    ///
+    /// Returns `KALICO_OK` in both the "nothing staged" and normal abort cases.
+    /// Returns `KALICO_ERR_SEGMENT_ID_MISMATCH` (-202) if a segment IS staged
+    /// but its id does not match `segment_id`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn runtime_handle_abort_pending(
+        rt: *mut KalicoRuntime,
+        segment_id: u32,
+        out_aborted_id: *mut u32,
+    ) -> i32 {
+        if rt.is_null() {
+            return KALICO_ERR_NULL_PTR;
+        }
+        if !INIT_DONE.load(Ordering::Acquire) {
+            return KALICO_ERR_NOT_INIT;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        // SAFETY: `rt` is the published RT_CELL pointer (verified non-null
+        // and INIT_DONE==true above). We project to the foreground half-state
+        // and the CurvePool via raw pointers; no `&mut RuntimeContext` ever
+        // exists on this path. The §11.1 foreground-sole-writer discipline
+        // is enforced by code review.
+        unsafe {
+            let fg_ptr: *mut FgState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).fg));
+            let pool_ptr: *const CurvePool = core::ptr::addr_of!((*ctx).curve_pool);
+            let fg: &mut FgState = &mut *fg_ptr;
+            let pool: &CurvePool = &*pool_ptr;
+            abort_pending_impl(fg, pool, segment_id, out_aborted_id)
+        }
+    }
+
+    /// Foreground abort body. Operates on the half-split borrows projected by
+    /// the FFI shim above.
+    ///
+    /// Clears `FgState::staged_segment` and releases all non-sentinel curve
+    /// handles in `FgState::staged_segment_handles` directly via
+    /// `CurvePool::confirm_retired`. The handles were never registered in the
+    /// retirement table (that happens only at commit time), so the trace-drain
+    /// pipeline will never retire them — we must free the slots here.
+    fn abort_pending_impl(
+        fg: &mut FgState,
+        pool: &CurvePool,
+        segment_id: u32,
+        out_aborted_id: *mut u32,
+    ) -> i32 {
+        // Idempotent: nothing staged — nothing to abort.
+        if fg.staged_segment.is_none() {
+            if !out_aborted_id.is_null() {
+                // SAFETY: caller-provided pointer is documented to be a valid
+                // u32 location for writes when non-null.
+                unsafe {
+                    *out_aborted_id = 0;
+                }
+            }
+            return KALICO_OK;
+        }
+        // Safety interlock: the staged segment's id must match.
+        if fg
+            .staged_segment
+            .as_ref()
+            .map_or(true, |s| s.id != segment_id)
+        {
+            return KALICO_ERR_SEGMENT_ID_MISMATCH;
+        }
+        // Release curve pool slots for all non-sentinel handles. The handles
+        // were loaded (via runtime_handle_load_curve_cubic) but never committed
+        // to the ISR queue, so the ISR will never emit SEGMENT_END for them
+        // and the retirement table will never fire confirm_retired. We free
+        // the slots directly here so they become available for the next load.
+        let handles = fg.staged_segment_handles;
+        for h in &handles {
+            if !h.is_unused_sentinel()
+                && *h != runtime::curve_pool::CurveHandle::HOLD_SEGMENT_SENTINEL
+            {
+                pool.confirm_retired(*h);
+            }
+        }
+        // Clear staged state.
+        fg.staged_segment = None;
+        fg.staged_segment_handles =
+            [runtime::curve_pool::CurveHandle::UNUSED_SENTINEL; 4];
+        if !out_aborted_id.is_null() {
+            // SAFETY: caller-provided pointer is documented to be a valid
+            // u32 location for writes when non-null.
+            unsafe {
+                *out_aborted_id = segment_id;
+            }
+        }
+        KALICO_OK
+    }
+
     /// Atomic one-shot load of a cubic-piece curve. Spec §3.2 (2026-05-20
     /// stepping-redesign).
     ///
