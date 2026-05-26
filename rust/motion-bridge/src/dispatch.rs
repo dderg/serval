@@ -36,9 +36,6 @@ pub const AXIS_Z: usize = 2;
 
 /// Epsilon for the "all control points equal" trivial-constant test.
 const EPS_CONST: f64 = 1e-12;
-// Wider than EPS_CONST because refit_to_cubic (REFIT_TOLERANCE_MM=1e-4)
-// can introduce ~100 nm jitter in "constant" axes like Z during XY moves.
-const EPS_CONST_F32: f32 = 1e-3;
 
 /// Per-MCU configuration: which `ShapedSegment` axes this MCU is responsible
 /// for, plus the firmware kinematics tag.
@@ -118,16 +115,6 @@ pub fn is_trivially_constant(curve: &nurbs::ScalarNurbs<f64>) -> bool {
     }
     let first = cps[0];
     cps.iter().all(|&v| (v - first).abs() <= EPS_CONST)
-}
-
-fn curve_load_is_constant(curve: &CurveLoadParams) -> bool {
-    if curve.bp_per_piece.is_empty() {
-        return true;
-    }
-    let ref_val = curve.bp_per_piece[0][0];
-    curve.bp_per_piece.iter().all(|bp| {
-        bp.iter().all(|&v| (v - ref_val).abs() <= EPS_CONST_F32)
-    })
 }
 
 /// De Casteljau subdivision of a cubic Bernstein polynomial at parameter `t`.
@@ -304,17 +291,6 @@ pub fn apply_split_times(
 
     let t_start_clock = plan.params.t_start;
     let t_end_clock = plan.params.t_end;
-    // Pre-compute which curves are constant in the ORIGINAL plan (before any
-    // window extraction). Constant curves are loaded in sub 0 to anchor the
-    // engine's position, then skipped in subsequent subs — the MCU's "hold
-    // prev value" on UNUSED handles keeps them coherent. Checking the original
-    // curve avoids epsilon sensitivity from refit_to_cubic jitter (~100nm).
-    let constant_axes: Vec<bool> = plan
-        .curves_to_load
-        .iter()
-        .map(|(_, curve)| curve_load_is_constant(curve))
-        .collect();
-
     let mut chunks = Vec::with_capacity(n_chunks);
     let mut chunk_start_clock = t_start_clock;
 
@@ -332,14 +308,7 @@ pub fn apply_split_times(
         let sub_curves: Vec<(usize, CurveLoadParams)> = plan
             .curves_to_load
             .iter()
-            .enumerate()
-            .filter_map(|(i, (axis_idx, curve))| {
-                if w > 0 && constant_axes[i] {
-                    return None;
-                }
-                let extracted = extract_time_window(curve, win_start, win_end);
-                Some((*axis_idx, extracted))
-            })
+            .map(|(axis_idx, curve)| (*axis_idx, extract_time_window(curve, win_start, win_end)))
             .collect();
 
         let mut sub_params = plan.params;
@@ -1201,35 +1170,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_unified_split_constant_curves_skipped_after_first_sub() {
-        // MCU A: 20-piece non-constant X, cap=8 → 4 chunks.
-        // MCU B: 2-piece constant Z (holding position), cap=4.
-        // Without filtering, MCU B would need 4 slot allocs on pool_n=4.
-        // With filtering, only sub 0 loads the curve; subs 1-3 are idle.
-        let curve_a = make_curve(20, 0.1, 1.0);
-        let const_z = CurveLoadParams {
-            bp_per_piece: vec![[5.0, 5.0, 5.0, 5.0], [5.0, 5.0, 5.0, 5.0]],
-            duration_per_piece: vec![1.0, 1.0],
-        };
-        let plan_a = make_plan(0, vec![(AXIS_X, curve_a)], 2_000_000);
-        let plan_b = make_plan(1, vec![(AXIS_Z, const_z)], 2_000_000);
-
-        let caps = vec![
-            (0u32, McuCaps { curve_pool_n: 16, max_pieces_per_curve: 8 }),
-            (1u32, McuCaps { curve_pool_n: 4, max_pieces_per_curve: 16 }),
-        ];
-        let plans_ref = vec![&plan_a, &plan_b];
-        let split_times = super::compute_unified_split_times(&plans_ref, &caps);
-
-        let subs_b = super::apply_split_times(plan_b, &split_times, 1_000_000.0);
-        assert_eq!(subs_b.len(), 4, "MCU B must have 4 sub-plans (same as A)");
-        assert_eq!(subs_b[0].curves_to_load.len(), 1, "sub 0 loads the constant Z curve");
-        for sub in &subs_b[1..] {
-            assert!(sub.curves_to_load.is_empty(),
-                "subs after 0 must skip constant Z — engine holds prev value");
-        }
-    }
 
     /// **Diagonal jog — both motors step at distinct rates.** X and Y are both
     /// linear but with different slopes. Motor-A and Motor-B must both be

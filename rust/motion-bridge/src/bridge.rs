@@ -2124,8 +2124,21 @@ impl PyMotionBridge {
             {
                 let pool_for_cb = Arc::clone(&slot_pool);
                 let homing_for_cb = Arc::clone(&self.homing);
+                let retire_mcu_id = cfg_mcu.mcu_id;
                 io.attach_retirement_callback(Arc::new(move |retired_through| {
-                    pool_for_cb.retire_through_segment(retired_through);
+                    let pre = pool_for_cb.in_flight_count();
+                    let n = pool_for_cb.retire_through_segment(retired_through);
+                    let post = pool_for_cb.in_flight_count();
+                    if n > 0 || pre > 0 {
+                        let msg = format!(
+                            "[slot-trace] retire mcu={} retired_through={} \
+                             freed={} in_flight {}/{}→{}/{}",
+                            retire_mcu_id, retired_through, n,
+                            pre, pool_for_cb.capacity(),
+                            post, pool_for_cb.capacity(),
+                        );
+                        diag_file_log(&msg);
+                    }
                     homing_for_cb.complete_if_retired(retired_through);
                 }));
             }
@@ -2662,11 +2675,17 @@ impl PyMotionBridge {
                                     break;
                                 }
                             };
-                            log::debug!(
-                                "[slot-trace] try_alloc mcu={} seg_id={} sub={}/{} axis={} slot={} gen={}",
-                                sp_mcu_id, sp_seg_id,
-                                sub_idx + 1, n_sub, axis_idx, slot, slot_gen,
-                            );
+                            {
+                                let msg = format!(
+                                    "[slot-trace] alloc mcu={} seg_id={} sub={}/{} axis={} \
+                                     slot={} host_gen={} in_flight={}/{}",
+                                    sp_mcu_id, sp_seg_id,
+                                    sub_idx + 1, n_sub, axis_idx, slot, slot_gen,
+                                    slot_pool.in_flight_count(), slot_pool.capacity(),
+                                );
+                                log::info!("{}", msg);
+                                diag_file_log(&msg);
+                            }
                             allocated_slots.push(slot);
                             match producer::load_curve(
                                 io.as_ref(),
@@ -2676,9 +2695,28 @@ impl PyMotionBridge {
                                 producer::DEFAULT_LOAD_CURVE_TIMEOUT,
                             ) {
                                 Ok(handle) => {
+                                    let mcu_gen = (handle >> 16) as u16;
+                                    let _mcu_slot = (handle & 0xFFFF) as u16;
+                                    if mcu_gen != slot_gen {
+                                        let msg = format!(
+                                            "[slot-trace] GEN MISMATCH mcu={} slot={} \
+                                             host_gen={} mcu_gen={} handle=0x{:08x}",
+                                            sp_mcu_id, slot, slot_gen, mcu_gen, handle,
+                                        );
+                                        log::error!("{}", msg);
+                                        diag_file_log(&msg);
+                                    }
                                     loaded_handles.push((axis_idx, handle));
                                 }
                                 Err(e) => {
+                                    let msg = format!(
+                                        "[slot-trace] load_curve FAILED mcu={} slot={} \
+                                         host_gen={} seg_id={} sub={}/{} axis={} err={:?}",
+                                        sp_mcu_id, slot, slot_gen, sp_seg_id,
+                                        sub_idx + 1, n_sub, axis_idx, e,
+                                    );
+                                    log::error!("{}", msg);
+                                    diag_file_log(&msg);
                                     seg_err = Some(DispatchError::LoadCurve {
                                         mcu_id: sp_mcu_id,
                                         slot,
