@@ -545,6 +545,23 @@ pub struct SharedState {
     pub last_push_y_handle_packed: AtomicU32,
     /// Last `consumers_remaining` mask computed by `push_segment_impl`.
     pub last_push_consumers_remaining: AtomicU32,
+    /// 2026-05-26 clock-mismatch diagnosis: low/high 32 bits of
+    /// `seg.t_start` captured by `push_segment_impl` at enqueue time.
+    /// Pair with `push_widened_lo/hi` to see whether the host-dispatched
+    /// segment start time is reachable by the firmware's widened clock at
+    /// the moment of the push.
+    pub push_t_start_lo: AtomicU32,
+    pub push_t_start_hi: AtomicU32,
+    /// 2026-05-26 clock-mismatch diagnosis: low/high 32 bits of
+    /// `runtime_widened_host_clock()` captured by `push_segment_impl`
+    /// immediately after the successful enqueue.  If
+    /// `push_t_start > push_widened`, the segment's start is in the
+    /// future at push time — the ISR must park it until widened_now
+    /// catches up.  If `push_t_start` is much larger than
+    /// `push_widened` (e.g. hi half differs), the two clock domains
+    /// are out of sync (wrong epoch, truncated u32, or stale seed).
+    pub push_widened_lo: AtomicU32,
+    pub push_widened_hi: AtomicU32,
     /// 2026-05-15 live diagnosis (CP capture): cps[0] (start control
     /// point, mm) of the last resolved primary X curve, raw f32 bits.
     /// Captured in producer_step right after `pool.resolve(primary)`
@@ -781,6 +798,10 @@ impl SharedState {
             last_push_x_handle_packed: AtomicU32::new(0),
             last_push_y_handle_packed: AtomicU32::new(0),
             last_push_consumers_remaining: AtomicU32::new(0),
+            push_t_start_lo: AtomicU32::new(0),
+            push_t_start_hi: AtomicU32::new(0),
+            push_widened_lo: AtomicU32::new(0),
+            push_widened_hi: AtomicU32::new(0),
             last_resolved_primary_cps_0: AtomicU32::new(0),
             last_resolved_primary_cps_3: AtomicU32::new(0),
             last_combined_motor_a_cps_0: AtomicU32::new(0),

@@ -629,7 +629,7 @@ runtime_status_drain(void)
         // tags (0xB6, 0xB7), curve-resolve tag (0xB8), demuxer tag (0xB9).
         static uint8_t st_emit_phase_ext;
         st_emit_phase_ext = (uint8_t)(st_emit_phase_ext + 1);
-        if (st_emit_phase_ext >= 59) st_emit_phase_ext = 0;
+        if (st_emit_phase_ext >= 63) st_emit_phase_ext = 0;
         switch (st_emit_phase_ext) {
         case 3:
             // 0xE6 — Live step_mode discriminants for motors 0..3, two
@@ -1324,6 +1324,75 @@ runtime_status_drain(void)
             break;
         }
 #endif
+        // 2026-05-26 clock-mismatch diagnosis — cases 59..62.
+        // Case 59: emit a single prior_diag_clock_mismatch output() line with all
+        // 8 clock-domain values. The push-side values (push_ts_lo/hi, push_wid_lo/hi)
+        // capture what the host sent and what firmware's widened clock read at that
+        // moment. The ISR-side values (isr_wid_lo/hi) plus park/arm counts confirm
+        // the park decision. A match push_ts_hi == isr_wid_hi with push_ts_lo >
+        // push_wid_lo means the segment is legitimately in the future at push time
+        // and the ISR will arm it once widened_now catches up. A mismatch in hi
+        // halves (e.g. push_ts_hi == 0 while isr_wid_hi > 0) confirms truncation
+        // hypothesis (b).
+        case 59: {
+            extern uint32_t kalico_runtime_get_push_t_start_lo(void* h);
+            extern uint32_t kalico_runtime_get_push_t_start_hi(void* h);
+            extern uint32_t kalico_runtime_get_push_widened_lo(void* h);
+            extern uint32_t kalico_runtime_get_push_widened_hi(void* h);
+            extern uint32_t kalico_runtime_get_isr_last_widened_lo(void* h);
+            extern uint32_t kalico_runtime_get_isr_last_widened_hi(void* h);
+            extern uint32_t kalico_runtime_get_isr_parked_count(void* h);
+            extern uint32_t kalico_runtime_get_isr_armed_count(void* h);
+            output("prior_diag_clock_mismatch"
+                   " push_ts_lo %u push_ts_hi %u"
+                   " push_wid_lo %u push_wid_hi %u"
+                   " isr_wid_lo %u isr_wid_hi %u"
+                   " isr_park %u isr_arm %u",
+                   kalico_runtime_get_push_t_start_lo(runtime_handle),
+                   kalico_runtime_get_push_t_start_hi(runtime_handle),
+                   kalico_runtime_get_push_widened_lo(runtime_handle),
+                   kalico_runtime_get_push_widened_hi(runtime_handle),
+                   kalico_runtime_get_isr_last_widened_lo(runtime_handle),
+                   kalico_runtime_get_isr_last_widened_hi(runtime_handle),
+                   kalico_runtime_get_isr_parked_count(runtime_handle),
+                   kalico_runtime_get_isr_armed_count(runtime_handle));
+            break;
+        }
+        case 60: {
+            // 0xB1 — HIGH 32 bits of seg.t_start captured at push_segment_impl
+            // (push-time, before the ISR sees it). Compare with 0xA4
+            // (isr_last_t_start_hi, ISR park/arm decision time): they should
+            // match since t_start doesn't change after enqueue. If 0xB1 is 0
+            // while 0xA5 (isr_last_widened_hi) is non-zero, host sent a u32-
+            // width t_start while firmware has been running > 8.3 s.
+            extern uint32_t kalico_runtime_get_push_t_start_hi(void* h);
+            uint32_t v = kalico_runtime_get_push_t_start_hi(runtime_handle);
+            fault_detail = 0xB1000000u | (v & 0x00FFFFFFu);
+            break;
+        }
+        case 61: {
+            // 0xB2 — LOW 32 bits of firmware's widened clock at push time.
+            // Compare with 0xEE (isr_last_t_start_lo): if 0xB2 << 0xEE, the
+            // ISR's widened_now has advanced significantly beyond the push-time
+            // snapshot — segment was in the past by ISR time. If 0xB2 >> 0xEE
+            // and 0xEC (isr_park) > 0, t_start was ahead of even the push-time
+            // widened clock — the host front-ran the firmware clock.
+            extern uint32_t kalico_runtime_get_push_widened_lo(void* h);
+            uint32_t v = kalico_runtime_get_push_widened_lo(runtime_handle);
+            fault_detail = 0xB2000000u | (v & 0x00FFFFFFu);
+            break;
+        }
+        case 62: {
+            // 0xB3 — HIGH 32 bits of firmware's widened clock at push time.
+            // At 520 MHz after 32 s uptime: push_widened_hi ≈ 3.
+            // If 0 while 0xA5 (isr_last_widened_hi) is non-zero, the push
+            // happened before the first ISR cycle updated the seqlock, or
+            // stats_send_time_high hadn't wrapped yet.
+            extern uint32_t kalico_runtime_get_push_widened_hi(void* h);
+            uint32_t v = kalico_runtime_get_push_widened_hi(runtime_handle);
+            fault_detail = 0xB3000000u | (v & 0x00FFFFFFu);
+            break;
+        }
         }
     }
 

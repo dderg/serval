@@ -385,6 +385,28 @@ pub mod exports {
         shared
             .producer_enqueue_success_total
             .fetch_add(1, Ordering::AcqRel);
+        // 2026-05-26 clock-mismatch diagnosis: capture t_start and the
+        // firmware's widened clock at push time so the host can compare them
+        // against isr_last_t_start / isr_last_widened at park/arm decision
+        // time.  This is foreground-context — runtime_widened_host_clock() is
+        // not ISR-safe (reads timer_read_time), but push_segment_impl is
+        // always called from the foreground (Klipper dispatch task), so it is
+        // correct here.
+        shared
+            .push_t_start_lo
+            .store(t_start as u32, Ordering::Relaxed);
+        shared
+            .push_t_start_hi
+            .store((t_start >> 32) as u32, Ordering::Relaxed);
+        // SAFETY: foreground context — same contract as the re-enable branch
+        // below which also calls runtime_widened_host_clock().
+        let push_widened = unsafe { super::exports::runtime_widened_host_clock() };
+        shared
+            .push_widened_lo
+            .store(push_widened as u32, Ordering::Relaxed);
+        shared
+            .push_widened_hi
+            .store((push_widened >> 32) as u32, Ordering::Relaxed);
         // Register all 4 per-axis handles in the retirement table so the
         // trace-drain pipeline can retire them on SEGMENT_END.
         fg.retirement_table.register(id, [x_handle, y_handle, z_handle, e_handle]);
@@ -949,6 +971,12 @@ pub mod exports {
     shared_u32_reader!(kalico_runtime_get_isr_last_arm_x_piece_count, isr_last_arm_x_piece_count);
     shared_u32_reader!(kalico_runtime_get_isr_last_arm_participating, isr_last_arm_participating);
     shared_u32_reader!(kalico_runtime_get_isr_last_arm_x_piece0_duration_bits, isr_last_arm_x_piece0_duration_bits);
+    // 2026-05-26 clock-mismatch diagnosis: push-time t_start and widened
+    // clock snapshots for comparison with isr_last_t_start/isr_last_widened.
+    shared_u32_reader!(kalico_runtime_get_push_t_start_lo, push_t_start_lo);
+    shared_u32_reader!(kalico_runtime_get_push_t_start_hi, push_t_start_hi);
+    shared_u32_reader!(kalico_runtime_get_push_widened_lo, push_widened_lo);
+    shared_u32_reader!(kalico_runtime_get_push_widened_hi, push_widened_hi);
 
     // ---- Phase 11 §5.3 status-frame accessors -----------------------------
     //
