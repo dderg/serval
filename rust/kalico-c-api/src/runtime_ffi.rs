@@ -30,7 +30,9 @@ pub mod exports {
         KALICO_ERR_INVALID_CURVE, KALICO_ERR_INVALID_DURATION, KALICO_ERR_INVALID_HANDLE,
         KALICO_ERR_INVALID_KINEMATICS,
         KALICO_ERR_NOT_INIT, KALICO_ERR_NULL_PTR,
-        KALICO_ERR_PENDING_SLOT_OCCUPIED, KALICO_ERR_PROTOCOL_VERSION_UNSUPPORTED,
+        KALICO_ERR_NO_PENDING_SEGMENT, KALICO_ERR_PENDING_SLOT_OCCUPIED,
+        KALICO_ERR_PROTOCOL_VERSION_UNSUPPORTED,
+        KALICO_ERR_QUEUE_FULL, KALICO_ERR_SEGMENT_ID_MISMATCH,
         KALICO_ERR_SEGMENT_ID_NON_MONOTONIC,
         KALICO_ERR_ZERO_DURATION_SEGMENT, KALICO_OK,
     };
@@ -441,6 +443,196 @@ pub mod exports {
                 *out_credit_epoch = credit_epoch;
             }
         }
+        KALICO_OK
+    }
+
+    /// Commit a previously staged segment. Two-phase commit Phase 2.
+    ///
+    /// The host calls `runtime_handle_push_segment` first (Phase 1), which
+    /// validates the segment, computes `consumers_remaining`, and parks it in
+    /// `FgState::staged_segment`. Then the host calls this entry point (Phase 2)
+    /// to supply definitive timing, enqueue the segment to the ISR SPSC queue,
+    /// and drive the stream-state machine + TIM5 re-enable.
+    ///
+    /// Timing:
+    /// - `t_start_clock != 0` (cold start): `t_start = t_start_clock`,
+    ///   `t_end = t_start_clock + duration_clocks`.
+    /// - `t_start_clock == 0` (chaining): `t_start = fg.last_committed_t_end`,
+    ///   `t_end = fg.last_committed_t_end + duration_clocks`.
+    ///
+    /// `out_segment_id` may be NULL; when non-null it receives `segment_id` on
+    /// success.
+    ///
+    /// Returns `KALICO_OK` on success.
+    /// Returns `KALICO_ERR_NO_PENDING_SEGMENT` (-201) if no segment is staged.
+    /// Returns `KALICO_ERR_SEGMENT_ID_MISMATCH` (-202) if the staged segment's
+    /// id does not match `segment_id`.
+    /// Returns `KALICO_ERR_QUEUE_FULL` (-1) if the SPSC queue rejected the
+    /// enqueue (defensive; the single-pending-slot invariant should prevent this).
+    #[unsafe(no_mangle)]
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe extern "C" fn runtime_handle_commit_segment(
+        rt: *mut KalicoRuntime,
+        segment_id: u32,
+        t_start_clock: u64,
+        duration_clocks: u64,
+        out_segment_id: *mut u32,
+    ) -> i32 {
+        if rt.is_null() {
+            return KALICO_ERR_NULL_PTR;
+        }
+        if !INIT_DONE.load(Ordering::Acquire) {
+            return KALICO_ERR_NOT_INIT;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        // SAFETY: `rt` is the published RT_CELL pointer (verified non-null
+        // and INIT_DONE==true above). We project to the foreground half-state,
+        // the SharedState atomics, and a const pointer to IsrState (for the
+        // TIM5 re-enable path) via raw pointers; no `&mut RuntimeContext` ever
+        // exists on this path. The §11.1 ownership discipline (foreground sole
+        // writer of FgState) is enforced by code review.
+        unsafe {
+            let fg_ptr: *mut FgState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).fg));
+            let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
+            let isr_ptr_const: *const IsrState =
+                UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr)).cast_const();
+            let fg: &mut FgState = &mut *fg_ptr;
+            let shared: &SharedState = &*shared_ptr;
+            let result = commit_segment_impl(
+                fg,
+                shared,
+                isr_ptr_const,
+                segment_id,
+                t_start_clock,
+                duration_clocks,
+                out_segment_id,
+            );
+            shared
+                .last_push_segment_result
+                .store(result, Ordering::Release);
+            result
+        }
+    }
+
+    /// Foreground commit body. Operates on the half-split borrows projected by
+    /// the FFI shim above.
+    ///
+    /// Takes ownership of the staged segment from `FgState::staged_segment`,
+    /// stamps it with definitive timing, registers its handles in the
+    /// retirement table, enqueues it to the ISR SPSC, drives the stream-state
+    /// machine, and re-enables TIM5 if the runtime was Idle or Drained.
+    ///
+    /// SAFETY (caller): `isr_ptr_const` must point at the `IsrState` within
+    /// the same `RuntimeContext` that `fg` and `shared` were projected from.
+    /// The ISR is quiescent during the TIM5 re-enable reinit (the ISR is
+    /// stopped while `runtime_status == Idle || Drained`).
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn commit_segment_impl(
+        fg: &mut FgState,
+        shared: &SharedState,
+        isr_ptr_const: *const IsrState,
+        segment_id: u32,
+        t_start_clock: u64,
+        duration_clocks: u64,
+        out_segment_id: *mut u32,
+    ) -> i32 {
+        use runtime::stream::FgStreamState::{Armed, Running, StreamOpenPriming, StreamOpening};
+
+        // Guard: staged slot must be occupied.
+        if fg.staged_segment.is_none() {
+            return KALICO_ERR_NO_PENDING_SEGMENT;
+        }
+        // Guard: segment ID must match the staged segment.
+        if fg
+            .staged_segment
+            .as_ref()
+            .map_or(true, |s| s.id != segment_id)
+        {
+            return KALICO_ERR_SEGMENT_ID_MISMATCH;
+        }
+
+        // Compute timing. t_start_clock == 0 means "chain from last commit".
+        let t_start = if t_start_clock != 0 {
+            t_start_clock
+        } else {
+            fg.last_committed_t_end
+        };
+        let t_end = t_start.wrapping_add(duration_clocks);
+
+        // Take the staged segment (cannot panic — we checked is_some above).
+        let mut seg = fg.staged_segment.take().unwrap();
+        // Stamp definitive timing.
+        seg.t_start = t_start;
+        seg.t_end = t_end;
+
+        // Register curve handles in the retirement table so the trace-drain
+        // pipeline can retire all 4 per-axis slots on SEGMENT_END.
+        let handles = fg.staged_segment_handles;
+        fg.retirement_table.register(segment_id, handles);
+
+        // Enqueue to the ISR SPSC. The single-pending-slot invariant means
+        // this should not fail in practice, but guard defensively.
+        if fg.queue_producer.enqueue(seg).is_err() {
+            return KALICO_ERR_QUEUE_FULL;
+        }
+
+        // Update foreground tracking state.
+        fg.last_committed_t_end = t_end;
+        shared
+            .committed_segment_id
+            .store(segment_id, Ordering::Release);
+
+        // Drive stream state machine (moved from push_segment_impl).
+        match fg.stream_state_machine {
+            StreamOpening => {
+                fg.stream_state_machine = StreamOpenPriming;
+                if fg.first_priming_segment_t_start.is_none() {
+                    fg.first_priming_segment_t_start = Some(t_start);
+                }
+            }
+            StreamOpenPriming => {
+                if fg.first_priming_segment_t_start.is_none() {
+                    fg.first_priming_segment_t_start = Some(t_start);
+                }
+            }
+            Armed => {
+                fg.stream_state_machine = Running;
+            }
+            _ => {}
+        }
+
+        // TIM5 re-enable protocol (moved from push_segment_impl). If the
+        // runtime is Idle or Drained, reinitialise the widen state and arm
+        // TIM5. At this point the ISR is stopped (Idle/Drained), so the
+        // foreground can safely touch `IsrState::widen_state` via a cast_mut.
+        let cur_status = shared.runtime_status.load(Ordering::Acquire);
+        if cur_status == runtime::engine::RuntimeStatus::Idle as u8
+            || cur_status == runtime::engine::RuntimeStatus::Drained as u8
+        {
+            // SAFETY: the runtime is Idle or Drained, meaning TIM5 is not
+            // firing and the ISR is quiescent. The foreground is the sole
+            // active context; forming `&mut widen_state` through the const
+            // pointer is therefore sound for the duration of this block.
+            unsafe {
+                let raw = super::exports::runtime_cyccnt_read();
+                let isr_ptr_mut = isr_ptr_const.cast_mut();
+                let widen_state = &mut (*isr_ptr_mut).widen_state;
+                let last_widened = super::exports::runtime_widened_host_clock();
+                widen_state.reinit(raw, last_widened);
+                runtime::clock::publish_widened_now(shared, last_widened);
+                super::exports::runtime_tick_enable();
+            }
+        }
+
+        // Write optional out-param.
+        if !out_segment_id.is_null() {
+            // SAFETY: caller-provided pointer is documented to be a valid
+            // u32 location for writes when non-null.
+            unsafe {
+                *out_segment_id = segment_id;
+            }
+        }
+
         KALICO_OK
     }
 
