@@ -2263,6 +2263,28 @@ impl PyMotionBridge {
                     diag_file_log(&msg);
                 }
 
+                // ── Phase 0: per-MCU preparation ──────────────────────────
+                //
+                // Filter non-kalico MCUs, compute clocks, split into
+                // sub-plans, and collect everything into `prepared_mcus`.
+                // This runs once per MCU before the two-phase commit loop.
+
+                /// Per-MCU prepared state: IO handle, credit, slot pool,
+                /// sub-plans with IDs, clock freq, and timing.
+                #[allow(dead_code)]
+                struct PreparedMcu {
+                    mcu_id: u32,
+                    io: Arc<KalicoHostIo>,
+                    credit: Arc<CreditCounter>,
+                    slot_pool: Arc<SharedSlotPool>,
+                    sub_plans: Vec<dispatch::McuPushPlan>,
+                    freq: f64,
+                    t_start_clock: u64,
+                    t_end_clock: u64,
+                }
+
+                let mut prepared_mcus: Vec<PreparedMcu> = Vec::new();
+
                 for mut plan in mcu_plans {
                     // Skip plans targeting MCUs without kalico-runtime — stock
                     // Klipper firmware can't decode load_curve / push_segment.
@@ -2479,22 +2501,117 @@ impl PyMotionBridge {
                     // dispatch is still in progress.
                     let pre_alloc_ids: Vec<u32> = {
                         let mut ids = next_seg_id.lock().unwrap_or_else(|p| p.into_inner());
-                        let entry = ids.entry(sub_plans[0].mcu_id).or_insert(1);
+                        let mcu_id = sub_plans[0].mcu_id;
+                        let entry = ids.entry(mcu_id).or_insert(1);
                         let first = *entry;
                         *entry = entry.wrapping_add(n_sub as u32);
                         (0..n_sub as u32).map(|i| first.wrapping_add(i)).collect()
                     };
                     homing.mark_dispatched_segment(*pre_alloc_ids.last().unwrap());
 
-                    for (sub_idx, mut sub_plan) in sub_plans.into_iter().enumerate() {
-                        sub_plan.params.id = pre_alloc_ids[sub_idx];
+                    // Stamp segment IDs into sub-plans.
+                    let stamped_subs: Vec<dispatch::McuPushPlan> = sub_plans
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, mut sp)| {
+                            sp.params.id = pre_alloc_ids[i];
+                            sp
+                        })
+                        .collect();
 
-                        let mut allocated_slots: Vec<u16> =
-                            Vec::with_capacity(sub_plan.curves_to_load.len());
+                    prepared_mcus.push(PreparedMcu {
+                        mcu_id: stamped_subs[0].mcu_id,
+                        io: Arc::clone(&io),
+                        credit: Arc::clone(credit),
+                        slot_pool: Arc::clone(slot_pool),
+                        sub_plans: stamped_subs,
+                        freq,
+                        t_start_clock,
+                        t_end_clock,
+                    });
+                }
+
+                // ── Two-phase segment commit ─────────────────────────────
+                //
+                // Outer loop: sub-plan index (0..max_subs).
+                // Inner loops: Phase 1 pushes to all MCUs, Phase 2
+                // commits on all MCUs.
+
+                let max_subs = prepared_mcus
+                    .iter()
+                    .map(|m| m.sub_plans.len())
+                    .max()
+                    .unwrap_or(0);
+
+                for sub_idx in 0..max_subs {
+                    let n_total_subs = max_subs;
+
+                    // ── Phase 1: push this sub to all MCUs ───────────────
+                    //
+                    // Tracks which MCUs were successfully pushed so we can
+                    // abort_pending on them if a later MCU's push fails.
+                    // Stores Arc clones of IO/slot_pool so we never re-borrow
+                    // `prepared_mcus` during the error-recovery path.
+                    struct PushedMcuInfo {
+                        io: Arc<KalicoHostIo>,
+                        mcu_id: u32,
+                        seg_id: u32,
+                        /// Sub-plan's t_start/t_end for commit timing.
+                        sub_t_start_clock: u64,
+                        sub_t_end_clock: u64,
+                    }
+                    let mut pushed: Vec<PushedMcuInfo> = Vec::new();
+
+                    // Helper: abort all previously-pushed MCUs in this sub_idx
+                    // round. Takes `&[PushedMcuInfo]` plus the failing MCU's id
+                    // for diagnostic context.
+                    let abort_pushed = |pushed: &[PushedMcuInfo], failing_mcu_id: u32| {
+                        for prev in pushed {
+                            let _ = producer::abort_pending(
+                                prev.io.as_ref(),
+                                prev.seg_id,
+                                Duration::from_millis(2000),
+                            );
+                            let msg = format!(
+                                "[bridge-trace] abort_pending mcu={} seg_id={} (push failure on mcu={})",
+                                prev.mcu_id, prev.seg_id, failing_mcu_id,
+                            );
+                            log::warn!("{}", msg);
+                            diag_file_log(&msg);
+                        }
+                    };
+
+                    for mcu_idx in 0..prepared_mcus.len() {
+                        // Skip MCUs that don't have a sub-plan at this index.
+                        if sub_idx >= prepared_mcus[mcu_idx].sub_plans.len() {
+                            continue;
+                        }
+
+                        // Snapshot immutable fields from the sub-plan before
+                        // entering the curve-load loop. This avoids holding a
+                        // mutable borrow on `prepared_mcus` across the entire
+                        // loop body, which would conflict with the slot_pool /
+                        // io borrows on the same PreparedMcu.
+                        let n_sub = prepared_mcus[mcu_idx].sub_plans.len();
+                        let n_curves = prepared_mcus[mcu_idx].sub_plans[sub_idx].curves_to_load.len();
+                        let sp_mcu_id = prepared_mcus[mcu_idx].sub_plans[sub_idx].mcu_id;
+                        let sp_seg_id = prepared_mcus[mcu_idx].sub_plans[sub_idx].params.id;
+
+                        // Clone Arc handles for the MCU's IO and slot pool so
+                        // we can use them without re-borrowing `prepared_mcus`.
+                        let io = Arc::clone(&prepared_mcus[mcu_idx].io);
+                        let credit = Arc::clone(&prepared_mcus[mcu_idx].credit);
+                        let slot_pool = Arc::clone(&prepared_mcus[mcu_idx].slot_pool);
+
+                        let mut allocated_slots: Vec<u16> = Vec::with_capacity(n_curves);
+                        // Collected (axis_idx, handle) pairs to apply after
+                        // the load loop (avoids holding &mut sub_plan across
+                        // slot_pool / io accesses).
+                        let mut loaded_handles: Vec<(usize, u32)> = Vec::with_capacity(n_curves);
                         let mut seg_err: Option<DispatchError> = None;
-                        for i in 0..sub_plan.curves_to_load.len() {
-                            let axis_idx = sub_plan.curves_to_load[i].0;
-                            let curve_params = sub_plan.curves_to_load[i].1.clone();
+                        for i in 0..n_curves {
+                            let axis_idx = prepared_mcus[mcu_idx].sub_plans[sub_idx].curves_to_load[i].0;
+                            let curve_params = prepared_mcus[mcu_idx].sub_plans[sub_idx].curves_to_load[i].1.clone();
                             let pre_in_flight = slot_pool.in_flight_count();
                             let pre_capacity = slot_pool.capacity();
                             if pre_in_flight >= pre_capacity {
@@ -2502,7 +2619,7 @@ impl PyMotionBridge {
                                     "[slot-trace] SLOT POOL FULL before alloc: mcu={} \
                                      seg_id={} axis={} in_flight={}/{} homing={:?} — \
                                      will block up to 60s waiting for retirement",
-                                    sub_plan.mcu_id, sub_plan.params.id,
+                                    sp_mcu_id, sp_seg_id,
                                     axis_idx, pre_in_flight, pre_capacity,
                                     homing.state(),
                                 );
@@ -2512,7 +2629,7 @@ impl PyMotionBridge {
                             let alloc_result = slot_pool
                                 .alloc_blocking(DEFAULT_SLOT_ACQUIRE_TIMEOUT)
                                 .ok_or_else(|| DispatchError::SlotPoolExhausted {
-                                    mcu_id: sub_plan.mcu_id,
+                                    mcu_id: sp_mcu_id,
                                     capacity: slot_pool.capacity(),
                                     in_flight: slot_pool.in_flight_count(),
                                 });
@@ -2525,7 +2642,7 @@ impl PyMotionBridge {
                             };
                             log::debug!(
                                 "[slot-trace] try_alloc mcu={} seg_id={} sub={}/{} axis={} slot={} gen={}",
-                                sub_plan.mcu_id, sub_plan.params.id,
+                                sp_mcu_id, sp_seg_id,
                                 sub_idx + 1, n_sub, axis_idx, slot, slot_gen,
                             );
                             allocated_slots.push(slot);
@@ -2537,13 +2654,13 @@ impl PyMotionBridge {
                                 producer::DEFAULT_LOAD_CURVE_TIMEOUT,
                             ) {
                                 Ok(handle) => {
-                                    sub_plan.set_handle(axis_idx, handle);
+                                    loaded_handles.push((axis_idx, handle));
                                 }
                                 Err(e) => {
                                     seg_err = Some(DispatchError::LoadCurve {
-                                        mcu_id: sub_plan.mcu_id,
+                                        mcu_id: sp_mcu_id,
                                         slot,
-                                        seg_id: sub_plan.params.id,
+                                        seg_id: sp_seg_id,
                                         axis: axis_idx,
                                         host_gen: slot_gen,
                                         detail: e.to_string(),
@@ -2557,25 +2674,36 @@ impl PyMotionBridge {
                             for s in &allocated_slots {
                                 slot_pool.release(*s);
                             }
+                            abort_pushed(&pushed, sp_mcu_id);
                             return Err(err);
+                        }
+
+                        // Apply loaded handles to the sub-plan.
+                        {
+                            let sub_plan = &mut prepared_mcus[mcu_idx].sub_plans[sub_idx];
+                            for (axis_idx, handle) in &loaded_handles {
+                                sub_plan.set_handle(*axis_idx, *handle);
+                            }
                         }
 
                         // Register slots BEFORE push (slot_pool.rs:126 requirement)
                         for slot in &allocated_slots {
-                            slot_pool.register_segment(*slot, sub_plan.params.id);
+                            slot_pool.register_segment(*slot, sp_seg_id);
                             log::debug!(
                                 "[slot-trace] register_segment mcu={} slot={} seg_id={}",
-                                sub_plan.mcu_id, slot, sub_plan.params.id,
+                                sp_mcu_id, slot, sp_seg_id,
                             );
                         }
 
-                        let push_result =
-                            dispatch_push_segment(io.as_ref(), credit, &sub_plan.params);
+                        let push_result = {
+                            let sub_plan = &prepared_mcus[mcu_idx].sub_plans[sub_idx];
+                            dispatch_push_segment(io.as_ref(), &credit, &sub_plan.params)
+                        };
                         match &push_result {
                             Ok(info) => {
                                 let msg = format!(
                                     "[bridge-trace] push_segment ok: mcu={} seg_id={} sub={}/{} accepted_id={}",
-                                    sub_plan.mcu_id, sub_plan.params.id,
+                                    sp_mcu_id, sp_seg_id,
                                     sub_idx + 1, n_sub, info.accepted_segment_id,
                                 );
                                 log::info!("{}", msg);
@@ -2584,7 +2712,7 @@ impl PyMotionBridge {
                             Err(e) => {
                                 let msg = format!(
                                     "[bridge-trace] push_segment err: mcu={} seg_id={} sub={}/{} err={:?}",
-                                    sub_plan.mcu_id, sub_plan.params.id,
+                                    sp_mcu_id, sp_seg_id,
                                     sub_idx + 1, n_sub, e,
                                 );
                                 log::info!("{}", msg);
@@ -2595,13 +2723,91 @@ impl PyMotionBridge {
                             for s in &allocated_slots {
                                 slot_pool.release(*s);
                             }
+                            abort_pushed(&pushed, sp_mcu_id);
                             return Err(DispatchError::PushSegment {
-                                mcu_id: sub_plan.mcu_id,
+                                mcu_id: sp_mcu_id,
                                 detail: e.to_string(),
                             });
                         }
-                    } // end sub_plan loop
-                }
+
+                        // Record the sub-plan's clock window for the commit
+                        // phase. These come from the sub-plan's `params`
+                        // which were set by `split_plan_if_needed`.
+                        let sub_plan = &prepared_mcus[mcu_idx].sub_plans[sub_idx];
+                        pushed.push(PushedMcuInfo {
+                            io: Arc::clone(&io),
+                            mcu_id: sp_mcu_id,
+                            seg_id: sp_seg_id,
+                            sub_t_start_clock: sub_plan.params.t_start,
+                            sub_t_end_clock: sub_plan.params.t_end,
+                        });
+                    } // end Phase 1 per-MCU push
+
+                    // ── Phase 2: commit this sub on all MCUs ─────────────
+                    //
+                    // All MCUs have been pushed for this sub_idx. Now commit
+                    // each one with its timing. Commit failure is
+                    // unrecoverable — the MCU state is inconsistent.
+
+                    for info in &pushed {
+                        let duration_clocks =
+                            info.sub_t_end_clock.saturating_sub(info.sub_t_start_clock);
+                        // First sub of a trajectory: use the computed
+                        // t_start_clock. Subsequent subs: t_start_clock=0
+                        // tells the MCU to chain from previous t_end.
+                        let commit_t_start = if sub_idx == 0 {
+                            info.sub_t_start_clock
+                        } else {
+                            0
+                        };
+                        let commit_result = producer::commit_segment(
+                            info.io.as_ref(),
+                            info.seg_id,
+                            commit_t_start,
+                            duration_clocks,
+                            Duration::from_millis(2000),
+                        );
+                        match &commit_result {
+                            Ok(_ci) => {
+                                let msg = format!(
+                                    "[bridge-trace] commit_segment ok: mcu={} seg_id={} sub={}/{} t_start={} dur={}",
+                                    info.mcu_id, info.seg_id,
+                                    sub_idx + 1, n_total_subs,
+                                    commit_t_start, duration_clocks,
+                                );
+                                log::info!("{}", msg);
+                                diag_file_log(&msg);
+                            }
+                            Err(e) => {
+                                // Commit failure is unrecoverable. Log and
+                                // attempt emergency_stop on all MCUs, then
+                                // propagate the error.
+                                let msg = format!(
+                                    "[bridge-trace] commit_segment FAILED: mcu={} seg_id={} sub={}/{} err={:?} — triggering emergency_stop",
+                                    info.mcu_id, info.seg_id,
+                                    sub_idx + 1, n_total_subs, e,
+                                );
+                                log::error!("{}", msg);
+                                diag_file_log(&msg);
+
+                                // Best-effort emergency_stop on all prepared MCUs.
+                                for pm in &prepared_mcus {
+                                    use kalico_host_rt::host_io::parser::FieldValue;
+                                    let _ = pm.io.send_typed(
+                                        "emergency_stop",
+                                        &[] as &[(&str, FieldValue)],
+                                    );
+                                }
+
+                                return Err(DispatchError::CommitSegment {
+                                    mcu_id: info.mcu_id,
+                                    seg_id: info.seg_id,
+                                    detail: e.to_string(),
+                                });
+                            }
+                        }
+                    } // end Phase 2 commit
+                } // end sub_idx loop
 
                 counter.fetch_add(1, Ordering::Relaxed);
                 Ok(())

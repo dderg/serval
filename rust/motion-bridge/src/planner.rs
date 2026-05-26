@@ -202,6 +202,18 @@ pub enum DispatchError {
     },
     #[error("push_segment mcu={mcu_id}: {detail}")]
     PushSegment { mcu_id: u32, detail: String },
+    #[error("commit_segment mcu={mcu_id} seg_id={seg_id}: {detail}")]
+    CommitSegment {
+        mcu_id: u32,
+        seg_id: u32,
+        detail: String,
+    },
+    #[error("abort_pending mcu={mcu_id} seg_id={seg_id}: {detail}")]
+    AbortPending {
+        mcu_id: u32,
+        seg_id: u32,
+        detail: String,
+    },
     /// The `Arc<KalicoHostIo>` for the given MCU was dropped (e.g. by
     /// `attach_serial` during a FIRMWARE_RESTART) before this dispatch
     /// completed. The dispatch closure holds only a `Weak` reference and
