@@ -36,7 +36,9 @@ pub const AXIS_Z: usize = 2;
 
 /// Epsilon for the "all control points equal" trivial-constant test.
 const EPS_CONST: f64 = 1e-12;
-const EPS_CONST_F32: f32 = 1e-6;
+// Wider than EPS_CONST because refit_to_cubic (REFIT_TOLERANCE_MM=1e-4)
+// can introduce ~100 nm jitter in "constant" axes like Z during XY moves.
+const EPS_CONST_F32: f32 = 1e-3;
 
 /// Per-MCU configuration: which `ShapedSegment` axes this MCU is responsible
 /// for, plus the firmware kinematics tag.
@@ -325,16 +327,8 @@ pub fn apply_split_times(
                 // "hold prev value" on UNUSED handles preserves position from
                 // sub 0. Avoids overrunning small curve pools (e.g. F446
                 // CURVE_POOL_N=4) when unified split creates many windows.
-                let is_const = curve_load_is_constant(&extracted);
-                if w > 0 && is_const {
+                if w > 0 && curve_load_is_constant(&extracted) {
                     return None;
-                }
-                if w > 0 && !is_const {
-                    log::warn!(
-                        "[split-diag] mcu={} w={} axis={} NOT constant: pieces={} bp0={:?}",
-                        plan.mcu_id, w, axis_idx, extracted.piece_count(),
-                        extracted.bp_per_piece.first(),
-                    );
                 }
                 Some((*axis_idx, extracted))
             })
