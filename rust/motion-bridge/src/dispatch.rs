@@ -304,6 +304,17 @@ pub fn apply_split_times(
 
     let t_start_clock = plan.params.t_start;
     let t_end_clock = plan.params.t_end;
+    // Pre-compute which curves are constant in the ORIGINAL plan (before any
+    // window extraction). Constant curves are loaded in sub 0 to anchor the
+    // engine's position, then skipped in subsequent subs — the MCU's "hold
+    // prev value" on UNUSED handles keeps them coherent. Checking the original
+    // curve avoids epsilon sensitivity from refit_to_cubic jitter (~100nm).
+    let constant_axes: Vec<bool> = plan
+        .curves_to_load
+        .iter()
+        .map(|(_, curve)| curve_load_is_constant(curve))
+        .collect();
+
     let mut chunks = Vec::with_capacity(n_chunks);
     let mut chunk_start_clock = t_start_clock;
 
@@ -321,15 +332,12 @@ pub fn apply_split_times(
         let sub_curves: Vec<(usize, CurveLoadParams)> = plan
             .curves_to_load
             .iter()
-            .filter_map(|(axis_idx, curve)| {
-                let extracted = extract_time_window(curve, win_start, win_end);
-                // After the first sub-plan, skip constant curves: the MCU's
-                // "hold prev value" on UNUSED handles preserves position from
-                // sub 0. Avoids overrunning small curve pools (e.g. F446
-                // CURVE_POOL_N=4) when unified split creates many windows.
-                if w > 0 && curve_load_is_constant(&extracted) {
+            .enumerate()
+            .filter_map(|(i, (axis_idx, curve))| {
+                if w > 0 && constant_axes[i] {
                     return None;
                 }
+                let extracted = extract_time_window(curve, win_start, win_end);
                 Some((*axis_idx, extracted))
             })
             .collect();
