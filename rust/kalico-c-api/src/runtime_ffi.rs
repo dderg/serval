@@ -2085,6 +2085,7 @@ pub mod exports {
             let drained = runtime::reclaim::drain_and_reclaim(
                 pool,
                 &fg.retirement_table,
+                shared,
                 || {
                     let s = fg.trace_consumer.dequeue();
                     if let Some(sample) = s {

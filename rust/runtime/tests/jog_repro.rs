@@ -191,7 +191,7 @@ fn isr_sample_tick_arms_queued_segment_and_pushes_steps() {
     // outlives the test process, which is fine.
     let trace_queue: &'static mut Queue<TraceSample, TRACE_RING_N> =
         Box::leak(Box::new(Queue::new()));
-    let (trace_producer, _trace_consumer) = trace_queue.split();
+    let (trace_producer, mut trace_consumer) = trace_queue.split();
 
     let mut isr = IsrState {
         queue_consumer,
@@ -279,11 +279,23 @@ fn isr_sample_tick_arms_queued_segment_and_pushes_steps() {
          every sample; widened-now is still 0 after 4 000 ticks."
     );
 
-    // The segment should have retired by the end of the 100 ms loop.
+    // retired_through_segment_id advances only after foreground drain. Run
+    // drain_and_reclaim to simulate the foreground drain cycle. An empty
+    // retirement table is sufficient here — we're only verifying the cursor
+    // advances, not pool handle reclaim (no FgState in this harness).
+    let retirement_table = runtime::reclaim::RetirementTable::new();
+    runtime::reclaim::drain_and_reclaim(
+        &pool,
+        &retirement_table,
+        &shared,
+        || trace_consumer.dequeue(),
+        4200,
+    );
+
     let retired = shared.retired_through_segment_id.load(Ordering::Acquire);
     assert_eq!(
         retired, 1,
-        "segment 1 should have retired by sample 4000; \
+        "segment 1 should have retired after drain_and_reclaim; \
          retired_through_segment_id = {retired}. Likely cause: arm-from-queue \
          never fired so retire bookkeeping had no current to clear."
     );

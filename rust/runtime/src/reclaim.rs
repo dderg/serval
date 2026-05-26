@@ -84,10 +84,14 @@ impl Default for RetirementTable {
 
 /// Drain up to `limit` trace samples from `drain_one`; for each
 /// `SEGMENT_END` observed, retire all non-sentinel handles recorded in
-/// `table` for that `segment_id`. Returns the count drained.
+/// `table` for that `segment_id`, then advance
+/// `shared.retired_through_segment_id`. The cursor advances only after
+/// the pool slots are free, preventing the host from reusing a slot the
+/// MCU hasn't released yet. Returns the count drained.
 pub fn drain_and_reclaim<F>(
     pool: &CurvePool,
     table: &RetirementTable,
+    shared: &SharedState,
     mut drain_one: F,
     limit: usize,
 ) -> usize
@@ -105,6 +109,9 @@ where
                     }
                 }
             }
+            shared
+                .retired_through_segment_id
+                .store(sample.segment_id, Ordering::Release);
         }
         drained += 1;
     }

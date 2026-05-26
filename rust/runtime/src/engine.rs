@@ -742,24 +742,22 @@ impl<P: PaSlot, I: IsSlot> Engine<P, I> {
     /// publish retirement bookkeeping and clear segment state. Spec §4.5.
     ///
     /// Side effects (atomic-publishing in `Release` order):
-    /// 1. `shared.retired_through_segment_id ← current.id` — host slot
-    ///    pool's `release_through(retired_through)` watches this cursor.
-    ///    Matches the legacy contract (mirrored by `abort_for_homing_trip`
-    ///    at engine.rs:1683).
-    /// 2. `shared.producer_segment_retired_total += 1` — drained-segments
+    /// 1. `shared.producer_segment_retired_total += 1` — drained-segments
     ///    counter consumed by `kalico_credit_freed` foreground emission.
-    /// 3. `stream::check_terminal_on_retire(shared, seg_id)` — terminal-
-    ///    segment + stream-machine bookkeeping (mirrors the legacy
-    ///    `abort_for_homing_trip` site).
-    /// 4. Enqueue `TRACE_FLAG_SEGMENT_END` sample — foreground
-    ///    `drain_and_reclaim` (`rust/runtime/src/reclaim.rs`) reads this
-    ///    and calls `pool.confirm_retired` for each handle in the
-    ///    `RetirementTable` entry keyed by `seg_id`.
-    /// 5. Roll forward `e_accumulator` by the segment's `CoupledToXy`
+    /// 2. `stream::check_terminal_on_retire(shared, seg_id)` — terminal-
+    ///    segment + stream-machine bookkeeping.
+    /// 3. Enqueue `TRACE_FLAG_SEGMENT_END` sample — foreground
+    ///    `drain_and_reclaim` (`rust/runtime/src/reclaim.rs`) reads this,
+    ///    calls `pool.confirm_retired` for each handle in the
+    ///    `RetirementTable` entry keyed by `seg_id`, then advances
+    ///    `shared.retired_through_segment_id`. The cursor update happens
+    ///    there — after the pool slots are actually freed — so the host
+    ///    cannot observe retirement before the MCU has released the slots.
+    /// 4. Roll forward `e_accumulator` by the segment's `CoupledToXy`
     ///    contribution (`extrusion_ratio * ds_xy_segment`). For
     ///    `Independent` / `Travel` the intrinsic E NURBS already drove
     ///    the accumulator forward via Phase 3; Task 11 refines this.
-    /// 6. Clear `current`, `participating_mask`, `pending_mask`,
+    /// 5. Clear `current`, `participating_mask`, `pending_mask`,
     ///    `segment_base_e`, `ds_xy_segment`.
     ///
     /// Returns `true` iff retirement fired.
@@ -778,20 +776,16 @@ impl<P: PaSlot, I: IsSlot> Engine<P, I> {
         let e_mode = seg.e_mode;
         let extrusion_ratio = seg.extrusion_ratio;
 
-        // 1. Publish retirement cursor.
-        shared
-            .retired_through_segment_id
-            .store(seg_id, Ordering::Release);
-        // 2. Drained-segments counter.
+        // 1. Drained-segments counter.
         shared
             .producer_segment_retired_total
             .fetch_add(1, Ordering::AcqRel);
-        // 3. Stream-state terminal hook.
+        // 2. Stream-state terminal hook.
         crate::stream::check_terminal_on_retire(shared, seg_id);
-        // 4. SEGMENT_END trace marker. `tick`/`curve_handle` use the same
-        // sentinel pattern the existing `abort_for_homing_trip` emission
-        // uses for non-fault retire markers — reclaim only needs
-        // `segment_id` + the `TRACE_FLAG_SEGMENT_END` bit.
+        // 3. SEGMENT_END trace marker. Foreground `drain_and_reclaim` reads
+        // this, frees the curve-pool handles, then advances
+        // `retired_through_segment_id` — ensuring the host never observes
+        // the cursor before the slots are actually free.
         let _ = trace.enqueue(TraceSample {
             tick: 0,
             motor_a: self.last_motors[0],

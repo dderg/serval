@@ -121,12 +121,11 @@ fn piece_advances_when_sample_passes_duration() {
 }
 
 #[test]
-#[ignore = "retirement was moved out of runtime_tick_sample into \
-            Engine::retire_if_complete / post_pass_exhaustion (Task 10). \
-            Reconstructing the engine-level state machine in an integration \
-            test without the engine requires synthesizing the post_pass + \
-            retire calls; the engine-level test for that lives in \
-            exhaustion_post_pass.rs."]
+#[ignore = "retirement bookkeeping lives in Engine::retire_if_complete / \
+            post_pass_exhaustion (Task 10) and retired_through_segment_id \
+            now advances only after drain_and_reclaim processes the \
+            SEGMENT_END sample. See exhaustion_post_pass.rs for the \
+            engine-level coverage."]
 fn segment_retirement_increments_counter_and_resets_arc_length() {
     // Two-phase test:
     //

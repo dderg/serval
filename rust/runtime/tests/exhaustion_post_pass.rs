@@ -125,20 +125,40 @@ fn simultaneous_xy_exhaustion_does_not_fault() {
     let retired = engine.retire_if_complete(&shared, &mut t_producer);
     assert!(retired, "retire_if_complete must fire when pending_mask==0");
     assert!(!engine.debug_current_is_some(), "current cleared on retire");
+
+    // Cursor not yet published — drain must happen first.
+    assert_eq!(
+        shared.retired_through_segment_id.load(Ordering::Acquire),
+        0,
+        "retired_through_segment_id must not advance until drain_and_reclaim runs",
+    );
+
+    // Drain the SEGMENT_END sample; cursor advances after pool free.
+    let table = runtime::reclaim::RetirementTable::new();
+    let pool = CurvePool::new();
+    let mut found_end = false;
+    let drained = runtime::reclaim::drain_and_reclaim(
+        &pool,
+        &table,
+        &shared,
+        || {
+            let s = t_consumer.dequeue();
+            if let Some(ref sample) = s {
+                if sample.flags & TRACE_FLAG_SEGMENT_END != 0 && sample.segment_id == 7 {
+                    found_end = true;
+                }
+            }
+            s
+        },
+        16,
+    );
+    assert!(drained > 0, "drain_and_reclaim must consume the SEGMENT_END sample");
+    assert!(found_end, "SEGMENT_END trace for seg.id=7 must be enqueued");
     assert_eq!(
         shared.retired_through_segment_id.load(Ordering::Acquire),
         7,
-        "retired_through_segment_id published the segment id",
+        "retired_through_segment_id published after drain",
     );
-
-    // SEGMENT_END trace sample observable.
-    let mut found_end = false;
-    while let Some(s) = t_consumer.dequeue() {
-        if s.flags & TRACE_FLAG_SEGMENT_END != 0 && s.segment_id == 7 {
-            found_end = true;
-        }
-    }
-    assert!(found_end, "SEGMENT_END trace for seg.id=7 must be enqueued");
 }
 
 #[test]
