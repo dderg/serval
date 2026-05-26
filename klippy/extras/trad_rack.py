@@ -10,7 +10,7 @@ import os
 import time
 from collections import deque
 
-from .. import chelper, toolhead
+from .. import toolhead
 from ..gcode import CommandError
 from ..kinematics import extruder
 from ..stepper import LookupMultiRail
@@ -2387,11 +2387,10 @@ class TradRackToolHead(toolhead.ToolHead, object):
         # Kinematic step generation scan window time tracking
         self.kin_flush_delay = toolhead.SDS_CHECK_TIME
         self.kin_flush_times = []
-        # Setup iterative solver
-        ffi_main, ffi_lib = chelper.get_ffi()
-        self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
-        self.trapq_append = ffi_lib.trapq_append
-        self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
+        # Motion bridge owns step generation; C trapq not allocated.
+        self.trapq = None
+        self.trapq_append = lambda *a: None
+        self.trapq_finalize_moves = lambda *a: None
         self.step_generators = []
         # Create kinematic class
         gcode = self.printer.lookup_object("gcode")
@@ -2432,10 +2431,7 @@ class TradRackKinematics:
         selector_rail = LookupMultiRail(selector_stepper_section)
         fil_driver_rail = LookupMultiRail(fil_driver_stepper_section)
         self.rails = [selector_rail, fil_driver_rail]
-        for rail, axis in zip(self.rails, "xy"):
-            rail.setup_itersolve("cartesian_stepper_alloc", axis.encode())
         for s in self.get_steppers():
-            s.set_trapq(toolhead.get_trapq())
             toolhead.register_step_generator(s.generate_steps)
         self.printer.register_event_handler(
             "stepper_enable:motor_off", self._motor_off
@@ -2742,12 +2738,10 @@ class TradRackExtruderSyncManager:
         self.toolhead.flush_step_generation()
         self.tr_toolhead.flush_step_generation()
 
-        ffi_main, ffi_lib = chelper.get_ffi()
         if sync_type == EXTRUDER_TO_FIL_DRIVER:
             steppers = self._get_extruder_mcu_steppers()
             self._prev_trapq = steppers[0].get_trapq()
             external_trapq = self.tr_toolhead.get_trapq()
-            stepper_alloc = ffi_lib.cartesian_stepper_alloc(b"y")
             prev_toolhead = self.toolhead
             external_toolhead = self.tr_toolhead
             self.reset_fil_driver()
@@ -2757,7 +2751,6 @@ class TradRackExtruderSyncManager:
             self._prev_trapq = self.tr_toolhead.get_trapq()
             extruder = self.toolhead.get_extruder()
             external_trapq = extruder.get_trapq()
-            stepper_alloc = ffi_lib.extruder_stepper_alloc()
             prev_toolhead = self.tr_toolhead
             external_toolhead = self.toolhead
             new_pos = extruder.last_position
@@ -2769,11 +2762,9 @@ class TradRackExtruderSyncManager:
         self._prev_sks = []
         self._prev_rotation_dists = []
         for stepper in steppers:
-            stepper_kinematics = ffi_main.gc(stepper_alloc, ffi_lib.free)
+            # C kinematics alloc removed; store None as previous sk placeholder.
             self._prev_rotation_dists.append(stepper.get_rotation_distance()[0])
-            self._prev_sks.append(
-                stepper.set_stepper_kinematics(stepper_kinematics)
-            )
+            self._prev_sks.append(None)
             stepper.set_trapq(external_trapq)
             stepper.set_position(new_pos)
             prev_toolhead.step_generators.remove(stepper.generate_steps)

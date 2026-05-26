@@ -3,7 +3,7 @@
 # Copyright (C) 2019-2021  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-from klippy import chelper, stepper
+from klippy import stepper
 
 from . import force_move
 
@@ -26,13 +26,10 @@ class ManualStepper:
             "accel", 0.0, minval=0.0
         )
         self.next_cmd_time = 0.0
-        # Setup iterative solver
-        ffi_main, ffi_lib = chelper.get_ffi()
-        self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
-        self.trapq_append = ffi_lib.trapq_append
-        self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
-        self.rail.setup_itersolve("cartesian_stepper_alloc", b"x")
-        self.rail.set_trapq(self.trapq)
+        # Motion bridge owns step generation; C itersolve/trapq not allocated.
+        self.trapq = None
+        self.trapq_append = lambda *a: None
+        self.trapq_finalize_moves = lambda *a: None
         # Register commands
         stepper_name = config.get_name().split()[1]
         gcode = self.printer.lookup_object("gcode")

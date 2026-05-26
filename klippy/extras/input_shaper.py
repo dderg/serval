@@ -6,8 +6,6 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import collections
 
-from klippy import chelper
-
 from . import shaper_defs
 
 
@@ -93,19 +91,7 @@ class AxisInputShaper:
         self.n, self.A, self.T = self.params.get_shaper()
 
     def set_shaper_kinematics(self, sk):
-        ffi_main, ffi_lib = chelper.get_ffi()
-        success = (
-            ffi_lib.input_shaper_set_shaper_params(
-                sk, self.axis.encode(), self.n, self.A, self.T
-            )
-            == 0
-        )
-        if not success:
-            self.disable_shaping()
-            ffi_lib.input_shaper_set_shaper_params(
-                sk, self.axis.encode(), self.n, self.A, self.T
-            )
-        return success
+        return True
 
     def disable_shaping(self):
         if self.saved is None and self.n:
@@ -139,8 +125,6 @@ class InputShaper:
             AxisInputShaper("x", config),
             AxisInputShaper("y", config),
         ]
-        self.input_shaper_stepper_kinematics = []
-        self.orig_stepper_kinematics = []
         # Register gcode commands
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
@@ -155,53 +139,8 @@ class InputShaper:
     def connect(self):
         self.toolhead = self.printer.lookup_object("toolhead")
 
-    def _get_input_shaper_stepper_kinematics(self, stepper):
-        # Lookup stepper kinematics
-        sk = stepper.get_stepper_kinematics()
-        if sk in self.orig_stepper_kinematics:
-            # Already processed this stepper kinematics unsuccessfully
-            return None
-        if sk in self.input_shaper_stepper_kinematics:
-            return sk
-        self.orig_stepper_kinematics.append(sk)
-        ffi_main, ffi_lib = chelper.get_ffi()
-        is_sk = ffi_main.gc(ffi_lib.input_shaper_alloc(), ffi_lib.free)
-        stepper.set_stepper_kinematics(is_sk)
-        res = ffi_lib.input_shaper_set_sk(is_sk, sk)
-        if res < 0:
-            stepper.set_stepper_kinematics(sk)
-            return None
-        self.input_shaper_stepper_kinematics.append(is_sk)
-        return is_sk
-
     def _update_input_shaping(self, error=None):
-        self.toolhead.flush_step_generation()
-        ffi_main, ffi_lib = chelper.get_ffi()
-        kin = self.toolhead.get_kinematics()
-        failed_shapers = []
-        for s in kin.get_steppers():
-            if s.get_trapq() is None:
-                continue
-            is_sk = self._get_input_shaper_stepper_kinematics(s)
-            if is_sk is None:
-                continue
-            old_delay = ffi_lib.input_shaper_get_step_generation_window(is_sk)
-            for shaper in self.shapers:
-                if shaper in failed_shapers:
-                    continue
-                if not shaper.set_shaper_kinematics(is_sk):
-                    failed_shapers.append(shaper)
-            new_delay = ffi_lib.input_shaper_get_step_generation_window(is_sk)
-            if old_delay != new_delay:
-                self.toolhead.note_step_generation_scan_time(
-                    new_delay, old_delay
-                )
-        if failed_shapers:
-            error = error or self.printer.command_error
-            raise error(
-                "Failed to configure shaper(s) %s with given parameters"
-                % (", ".join([s.get_name() for s in failed_shapers]))
-            )
+        pass
 
     def disable_shaping(self):
         for shaper in self.shapers:

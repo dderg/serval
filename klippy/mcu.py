@@ -1101,8 +1101,6 @@ class MCU:
             "max_stepper_error", 0.000025, minval=0.0
         )
         self._reserved_move_slots = 0
-        self._stepqueues = []
-        self._steppersync = None
         self._flush_callbacks = []
         # Stats
         self._get_status_info = {}
@@ -1444,7 +1442,6 @@ class MCU:
             self._init_cmds = self._init_cmds_post_inits.copy()
             self._restart_cmds = self._restart_cmds_post_inits.copy()
         self._reserved_move_slots = 0
-        self._steppersync = None
 
     def _connect(self):
         if self.non_critical_disconnected:
@@ -1476,12 +1473,9 @@ class MCU:
                     )
                 # Already configured - send init commands
                 self._send_config(config_params["crc"])
-        # Setup steppersync with the move_count returned by get_config
         move_count = config_params["move_count"]
         if move_count < self._reserved_move_slots:
             raise error("Too few moves available on MCU '%s'" % (self._name,))
-        # Bridge mode: step emission lives in Rust, no C steppersync.
-        self._steppersync = None
         # Log config information
         move_msg = "Configured MCU '%s' (%d moves)" % (self._name, move_count)
         logging.info(move_msg)
@@ -1761,7 +1755,6 @@ class MCU:
     # Restarts
     def _disconnect(self):
         self._serial.disconnect()
-        self._steppersync = None
 
     def _shutdown(self, force=False):
         if self._emergency_stop_cmd is None or (
@@ -1855,9 +1848,6 @@ class MCU:
         self._firmware_restart(True)
 
     # Move queue tracking
-    def register_stepqueue(self, stepqueue):
-        self._stepqueues.append(stepqueue)
-
     def request_move_queue_slot(self):
         self._reserved_move_slots += 1
 
@@ -1865,13 +1855,9 @@ class MCU:
         self._flush_callbacks.append(callback)
 
     def flush_moves(self, print_time, clear_history_time):
-        # Bridge mode: step generation lives in the Rust runtime. Host-side
-        # steppersync flushing has nothing to do here.
-        return
+        pass
 
     def check_active(self, print_time, eventtime):
-        # Bridge mode: clock sync runs through motion_bridge; the legacy
-        # steppersync clock-calibration path no longer has work to do here.
         if (
             self._clocksync.is_active()
             or self.is_fileoutput()

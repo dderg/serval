@@ -142,7 +142,6 @@ class MixingExtruder:
             extruder_stepper.stepper.set_rotation_distance(
                 self._rotation_distances[i]
             )
-            extruder_stepper.stepper.set_trapq(self._trapqs[i])
 
     def _apply_mixing(self, mixing):
         if mixing and not self._enabled:

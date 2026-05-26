@@ -7,7 +7,6 @@ import importlib
 import logging
 import math
 
-from . import chelper
 from .extras.danger_options import get_danger_options
 from .kinematics import extruder
 
@@ -316,11 +315,9 @@ class ToolHead:
         # Kinematic step generation scan window time tracking
         self.kin_flush_delay = SDS_CHECK_TIME
         self.kin_flush_times = []
-        # Setup iterative solver
-        ffi_main, ffi_lib = chelper.get_ffi()
-        self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
-        self.trapq_append = ffi_lib.trapq_append
-        self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
+        # trapq is unused (motion goes through Rust bridge); kept as None
+        # so get_trapq() and motion_toolhead.py callers see a consistent value.
+        self.trapq = None
         self.step_generators = []
         # Create kinematics class
         gcode = self.printer.lookup_object("gcode")
@@ -406,21 +403,16 @@ class ToolHead:
     # Print time and flush tracking
     def _advance_flush_time(self, flush_time):
         flush_time = max(flush_time, self.last_flush_time)
-        # Generate steps via itersolve
         sg_flush_want = min(
             flush_time + STEPCOMPRESS_FLUSH_TIME,
             self.print_time - self.kin_flush_delay,
         )
         sg_flush_time = max(sg_flush_want, flush_time)
-        for sg in self.step_generators:
-            sg(sg_flush_time)
         self.min_restart_time = max(self.min_restart_time, sg_flush_time)
-        # Free trapq entries that are no longer needed
         clear_history_time = self.clear_history_time
         if not self.can_pause:
             clear_history_time = flush_time - MOVE_HISTORY_EXPIRE
         free_time = sg_flush_time - self.kin_flush_delay
-        self.trapq_finalize_moves(self.trapq, free_time, clear_history_time)
         self.extruder.update_move_time(free_time, clear_history_time)
         # Flush stepcompress and mcu steppersync
         for m in self.all_mcus:
@@ -461,26 +453,8 @@ class ToolHead:
                 self.special_queuing_state = ""
                 self.need_check_pause = -1.0
             self._calc_print_time()
-        # Queue moves into trapezoid motion queue (trapq)
         next_move_time = self.print_time
         for move in moves:
-            if move.is_kinematic_move:
-                self.trapq_append(
-                    self.trapq,
-                    next_move_time,
-                    move.accel_t,
-                    move.cruise_t,
-                    move.decel_t,
-                    move.start_pos[0],
-                    move.start_pos[1],
-                    move.start_pos[2],
-                    move.axes_r[0],
-                    move.axes_r[1],
-                    move.axes_r[2],
-                    move.start_v,
-                    move.cruise_v,
-                    move.accel,
-                )
             if move.axes_d[3]:
                 self.extruder.move(next_move_time, move)
             next_move_time = (
@@ -602,10 +576,6 @@ class ToolHead:
 
     def set_position(self, newpos, homing_axes=()):
         self.flush_step_generation()
-        ffi_main, ffi_lib = chelper.get_ffi()
-        ffi_lib.trapq_set_position(
-            self.trapq, self.print_time, newpos[0], newpos[1], newpos[2]
-        )
         self.commanded_pos[:] = newpos
         self.kin.set_position(newpos, homing_axes)
         self.printer.send_event("toolhead:set_position")
@@ -701,7 +671,6 @@ class ToolHead:
             self.lookahead.flush()
         except DripModeEndSignal as e:
             self.lookahead.reset()
-            self.trapq_finalize_moves(self.trapq, self.reactor.NEVER, 0)
         # Exit "Drip" state
         self.reactor.update_timer(self.flush_timer, self.reactor.NOW)
         self.flush_step_generation()
@@ -758,7 +727,7 @@ class ToolHead:
         return self.trapq
 
     def register_step_generator(self, handler):
-        self.step_generators.append(handler)
+        pass
 
     def note_step_generation_scan_time(self, delay, old_delay=0.0):
         self.flush_step_generation()

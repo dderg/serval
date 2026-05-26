@@ -6,8 +6,6 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import math
 
-from klippy import chelper
-
 INACTIVE = "INACTIVE"
 PRIMARY = "PRIMARY"
 COPY = "COPY"
@@ -288,20 +286,6 @@ class DualCarriagesRail:
         self.mode = (INACTIVE, PRIMARY)[active]
         self.offset = 0.0
         self.scale = 1.0 if active else 0.0
-        ffi_main, ffi_lib = chelper.get_ffi()
-        self.dc_stepper_kinematics = []
-        self.orig_stepper_kinematics = []
-        for s in rail.get_steppers():
-            sk = ffi_main.gc(ffi_lib.dual_carriage_alloc(), ffi_lib.free)
-            orig_sk = s.get_stepper_kinematics()
-            ffi_lib.dual_carriage_set_sk(sk, orig_sk)
-            # Set the default transform for the other axis
-            ffi_lib.dual_carriage_set_transform(
-                sk, self.ENC_AXES[1 - axis], 1.0, 0.0
-            )
-            self.dc_stepper_kinematics.append(sk)
-            self.orig_stepper_kinematics.append(orig_sk)
-            s.set_stepper_kinematics(sk)
 
     def get_rail(self):
         return self.rail
@@ -313,11 +297,8 @@ class DualCarriagesRail:
         return position[self.axis] * self.scale + self.offset
 
     def apply_transform(self):
-        ffi_main, ffi_lib = chelper.get_ffi()
-        for sk in self.dc_stepper_kinematics:
-            ffi_lib.dual_carriage_set_transform(
-                sk, self.ENC_AXES[self.axis], self.scale, self.offset
-            )
+        # dual_carriage C kinematics removed; no-op under new motion path.
+        pass
 
     def activate(self, mode, position, old_position=None):
         old_axis_position = self.get_axis_position(old_position or position)
