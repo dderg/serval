@@ -122,6 +122,21 @@ const FALLBACK_RUNTIME_CAPS: kalico_protocol::messages::RuntimeCapsResponse =
         max_pieces_per_curve: 16,
     };
 
+/// Append a diagnostic line to `~/printer_data/logs/bridge_diag.log`.
+/// Survives plug-pulls (fsync'd). Best-effort — silently drops on I/O error.
+fn diag_file_log(msg: &str) {
+    use std::io::Write;
+    let path = std::path::Path::new("/home/dderg/printer_data/logs/bridge_diag.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "[{:?}] {}", std::time::SystemTime::now(), msg);
+        let _ = f.flush();
+    }
+}
+
 /// Maximum time the dispatch closure blocks waiting for a free curve slot.
 /// Under normal operation slots are retired before this deadline by the
 /// reactor-thread retirement callback. 60 s is long enough to absorb a
@@ -2233,16 +2248,20 @@ impl PyMotionBridge {
                         .unwrap_or_else(|p| p.into_inner()) = Some(retained);
                 }
 
-                log::info!(
-                    "[bridge-trace] mcu_plans built: count={} mcu_ids=[{}] homing={:?}",
-                    mcu_plans.len(),
-                    mcu_plans
-                        .iter()
-                        .map(|p| format!("{}({}c)", p.mcu_id, p.curves_to_load.len()))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    homing.state(),
-                );
+                {
+                    let msg = format!(
+                        "[bridge-trace] mcu_plans built: count={} mcu_ids=[{}] homing={:?}",
+                        mcu_plans.len(),
+                        mcu_plans
+                            .iter()
+                            .map(|p| format!("{}({}c)", p.mcu_id, p.curves_to_load.len()))
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        homing.state(),
+                    );
+                    log::info!("{}", msg);
+                    diag_file_log(&msg);
+                }
 
                 for mut plan in mcu_plans {
                     // Skip plans targeting MCUs without kalico-runtime — stock
@@ -2479,7 +2498,7 @@ impl PyMotionBridge {
                             let pre_in_flight = slot_pool.in_flight_count();
                             let pre_capacity = slot_pool.capacity();
                             if pre_in_flight >= pre_capacity {
-                                log::warn!(
+                                let msg = format!(
                                     "[slot-trace] SLOT POOL FULL before alloc: mcu={} \
                                      seg_id={} axis={} in_flight={}/{} homing={:?} — \
                                      will block up to 60s waiting for retirement",
@@ -2487,6 +2506,8 @@ impl PyMotionBridge {
                                     axis_idx, pre_in_flight, pre_capacity,
                                     homing.state(),
                                 );
+                                log::warn!("{}", msg);
+                                diag_file_log(&msg);
                             }
                             let alloc_result = slot_pool
                                 .alloc_blocking(DEFAULT_SLOT_ACQUIRE_TIMEOUT)
@@ -2551,16 +2572,24 @@ impl PyMotionBridge {
                         let push_result =
                             dispatch_push_segment(io.as_ref(), credit, &sub_plan.params);
                         match &push_result {
-                            Ok(info) => log::info!(
-                                "[bridge-trace] push_segment ok: mcu={} seg_id={} sub={}/{} accepted_id={}",
-                                sub_plan.mcu_id, sub_plan.params.id,
-                                sub_idx + 1, n_sub, info.accepted_segment_id,
-                            ),
-                            Err(e) => log::info!(
-                                "[bridge-trace] push_segment err: mcu={} seg_id={} sub={}/{} err={:?}",
-                                sub_plan.mcu_id, sub_plan.params.id,
-                                sub_idx + 1, n_sub, e,
-                            ),
+                            Ok(info) => {
+                                let msg = format!(
+                                    "[bridge-trace] push_segment ok: mcu={} seg_id={} sub={}/{} accepted_id={}",
+                                    sub_plan.mcu_id, sub_plan.params.id,
+                                    sub_idx + 1, n_sub, info.accepted_segment_id,
+                                );
+                                log::info!("{}", msg);
+                                diag_file_log(&msg);
+                            }
+                            Err(e) => {
+                                let msg = format!(
+                                    "[bridge-trace] push_segment err: mcu={} seg_id={} sub={}/{} err={:?}",
+                                    sub_plan.mcu_id, sub_plan.params.id,
+                                    sub_idx + 1, n_sub, e,
+                                );
+                                log::info!("{}", msg);
+                                diag_file_log(&msg);
+                            }
                         }
                         if let Err(e) = push_result {
                             for s in &allocated_slots {

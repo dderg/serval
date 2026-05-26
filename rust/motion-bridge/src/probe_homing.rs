@@ -5,6 +5,19 @@ use std::time::{Duration, Instant};
 use kalico_host_rt::host_io::{InterceptorId, KalicoHostIo};
 use kalico_host_rt::transport::TransportError;
 
+fn diag_file_log(msg: &str) {
+    use std::io::Write;
+    let path = std::path::Path::new("/home/dderg/printer_data/logs/bridge_diag.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "[{:?}] {}", std::time::SystemTime::now(), msg);
+        let _ = f.flush();
+    }
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -144,30 +157,33 @@ pub fn prepare_probe_homing(
 pub fn run_probe_homing(
     handle: &ProbeHomingHandle,
 ) -> Result<ProbeHomingResult, TransportError> {
-    log::info!(
-        "[z-home-diag] run_probe_homing entry: arm_id={} \
-         sensor_fault_timeout={:.2}s already_triggered={}",
-        handle.arm_id,
-        handle.sensor_fault_timeout.as_secs_f64(),
-        handle.triggered.load(Ordering::Acquire),
-    );
+    {
+        let msg = format!(
+            "[z-home-diag] run_probe_homing entry: arm_id={} \
+             sensor_fault_timeout={:.2}s already_triggered={}",
+            handle.arm_id,
+            handle.sensor_fault_timeout.as_secs_f64(),
+            handle.triggered.load(Ordering::Acquire),
+        );
+        log::info!("{}", msg);
+        diag_file_log(&msg);
+    }
 
     let extend_cmd = format!(
         "runtime_extend_homing_deadline arm_id={}",
         handle.arm_id
     );
-    log::info!(
-        "[z-home-diag] run_probe_homing: sending initial deadline extension \
-         arm_id={}",
-        handle.arm_id,
-    );
     handle.stepper_io.send_fire_and_forget(&extend_cmd)?;
 
     let result = run_loop(handle, &extend_cmd);
-    log::info!(
-        "[z-home-diag] run_probe_homing returning: result={:?} arm_id={}",
-        result, handle.arm_id,
-    );
+    {
+        let msg = format!(
+            "[z-home-diag] run_probe_homing returning: result={:?} arm_id={}",
+            result, handle.arm_id,
+        );
+        log::info!("{}", msg);
+        diag_file_log(&msg);
+    }
     result
 }
 
@@ -192,41 +208,36 @@ fn run_loop(
         tick += 1;
 
         if handle.triggered.load(Ordering::Acquire) {
-            log::info!(
-                "[z-home-diag] run_loop: TRIGGERED at tick={} elapsed={:.3}s \
-                 arm_id={}",
+            let msg = format!(
+                "[z-home-diag] run_loop: TRIGGERED at tick={} elapsed={:.3}s arm_id={}",
                 tick, elapsed.as_secs_f64(), handle.arm_id,
             );
-            log::info!(
-                "[probe-homing] probe triggered elapsed={:.3}s",
-                elapsed.as_secs_f64(),
-            );
+            log::info!("{}", msg);
+            diag_file_log(&msg);
             return Ok(ProbeHomingResult::ProbeTriggered);
         }
 
         if elapsed > handle.sensor_fault_timeout {
-            log::error!(
+            let msg = format!(
                 "[z-home-diag] run_loop: SENSOR FAULT at tick={} \
                  elapsed={:.1}s timeout={:.1}s arm_id={}",
                 tick, elapsed.as_secs_f64(),
                 handle.sensor_fault_timeout.as_secs_f64(),
                 handle.arm_id,
             );
-            log::error!(
-                "[probe-homing] SENSOR FAULT: no trigger after {:.1}s",
-                elapsed.as_secs_f64(),
-            );
+            log::error!("{}", msg);
+            diag_file_log(&msg);
             return Ok(ProbeHomingResult::SensorFault);
         }
 
-        // Log every 10th deadline extension to avoid log spam
         if tick % 10 == 0 {
-            log::info!(
-                "[z-home-diag] run_loop tick={} elapsed={:.3}s arm_id={} \
-                 sending deadline extension triggered={}",
+            let msg = format!(
+                "[z-home-diag] run_loop tick={} elapsed={:.3}s arm_id={} triggered={}",
                 tick, elapsed.as_secs_f64(), handle.arm_id,
                 handle.triggered.load(Ordering::Acquire),
             );
+            log::info!("{}", msg);
+            diag_file_log(&msg);
         }
 
         handle.stepper_io.send_fire_and_forget(extend_cmd)?;
