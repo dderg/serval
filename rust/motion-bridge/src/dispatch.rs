@@ -428,29 +428,11 @@ pub fn build_push_params(
             curves_to_load.push((axis_idx, curve_params));
         }
 
-        if curves_to_load.is_empty() {
-            continue;
-        }
-
-        // Skip MCUs where every configured axis is trivially constant
-        // (all control points equal). The "don't skip constants" policy
-        // (line 213) applies when an MCU has a MIX of moving and constant
-        // axes — sending the constant alongside the moving one anchors the
-        // engine's absolute-position model. When ALL axes are constant,
-        // the MCU has zero work: no steps to emit, no position to track
-        // relative to a moving partner. Dispatching would occupy a curve-
-        // pool slot that never retires (the engine arms the segment,
-        // ticks through pieces, and retires — but the host slot pool
-        // only has `curve_pool_n` capacity, which is 4 on the F446;
-        // filling it with no-op segments blocks real motion later).
-        {
-            let all_constant = cfg.axes.iter().all(|&axis_idx| {
-                axis_idx < shaped.axes.len() && is_trivially_constant(&shaped.axes[axis_idx])
-            });
-            if all_constant {
-                continue;
-            }
-        }
+        // Two-phase commit: every MCU gets every segment, even if all
+        // its axes are trivially constant (idle segment). The MCU receives
+        // push_segment with all handles = UNUSED, evaluates nothing, and
+        // retires immediately. This keeps segment counters in lockstep
+        // across MCUs and makes the commit protocol uniform.
 
         let params = SegmentPushParams {
             id: 0,
