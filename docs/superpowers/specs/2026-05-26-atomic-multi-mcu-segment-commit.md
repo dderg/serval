@@ -94,12 +94,47 @@ that caused the observed failure.
 | One MCU hangs after commit | Other MCUs execute one committed segment, then stall waiting for next commit (safe) |
 | Commit arrives at different times | Safe — execution gates on `t_start_clock`, not commit arrival. Commit just arms; timing is in the clock domain |
 
-### Timing
+### Timing: "what" in the push, "when" in the commit
+
+`PushSegment` carries the segment data: curve handles, kinematics, segment ID,
+duration. No absolute clock values. The segment describes *what* to execute.
+
+`CommitSegment` carries the definitive `t_start_clock` and `t_end_clock`. It
+describes *when* to execute. The host computes `t_start_clock = now + lead` at
+commit time — after all pushes are ACK'd. The lead time only needs to cover
+the commit broadcast (~1-2ms per MCU), not the push round-trips.
+
+This guarantees `t_start_clock` is always in the future at commit time,
+regardless of how long Phase 1 took. If push takes 2 seconds (slow curve
+uploads, pool retirements), the timing is still fresh — it's computed after
+the slow work is done.
+
+The segment duration (`t_end - t_start`) is invariant — it's a property of the
+trajectory, not wall-clock time. The push carries the duration; the commit
+stamps the absolute epoch.
+
+### Late arm is a hard fault
+
+**The existing silent-rebase logic is removed.** The current ISR code shifts a
+late segment forward (`seg.t_start = now; seg.t_end += lateness`) if
+`t_start_clock` is in the past at arm time. This silently produces
+desynchronized multi-MCU trajectories: one axis starts on time, another starts
+50ms late, the toolhead path deviates, and nothing reports it.
+
+With timing-in-commit, a late `t_start_clock` means something is genuinely
+broken (host stalled, transport hung, clock sync diverged). The correct
+response is a hard fault, not a silent rebase.
+
+**New ISR behavior:** if `t_start_clock < now - JITTER_TOLERANCE` at arm time,
+set engine status to Fault with a `LATE_ARM` fault code. `JITTER_TOLERANCE` is
+a small number of ISR ticks (e.g., 2-3 ticks at the sample rate) to absorb
+normal scheduling jitter. Any lateness beyond that stops the machine.
+
+### Throughput at speed
 
 The commit adds one round-trip per segment (broadcast `CommitSegment` +
 responses). At USB full-speed latency (~1ms per MCU), this is ~2-3ms for a
-2-3 MCU setup. The `t_start_clock` lead time (currently 250ms) absorbs this
-easily.
+2-3 MCU setup.
 
 For throughput at speed: the host pipelines segment N+1's Phase 1 (push) while
 segment N is executing. The commit latency is hidden as long as the pipeline
@@ -112,7 +147,9 @@ round-trip added to the per-segment dispatch budget.
 
 ```
 CommitSegment {
-    segment_id: u32,   // matches the id from PushSegment
+    segment_id: u32,     // matches the id from PushSegment
+    t_start_clock: u64,  // definitive absolute start time in MCU clocks
+    t_end_clock: u64,    // definitive absolute end time in MCU clocks
 }
 ```
 
@@ -127,17 +164,26 @@ CommitSegmentResponse {
 
 ### Modified behavior: `PushSegment`
 
-`push_segment` no longer enqueues the segment to the SPSC queue. Instead:
+`push_segment` no longer enqueues the segment to the SPSC queue, and no longer
+carries absolute timing. Instead:
 
 - Validates the segment (existing checks).
-- Loads curve handles into the engine's pending slot (foreground-owned).
+- Stores curve handles, kinematics, duration, and segment ID into the
+  foreground-owned pending slot.
 - Returns `PushSegmentResponse` with `accepted_id` (unchanged wire format).
 - The segment is NOT visible to the ISR until `CommitSegment` arrives.
+
+The `t_start` and `t_end` fields are removed from the `PushSegment` wire
+format (or zeroed — the values are ignored). Duration is implicit from the
+curve pieces' `duration` fields.
 
 ### Modified behavior: `CommitSegment`
 
 - Looks up the pending segment by `segment_id`.
+- Stamps `t_start_clock` and `t_end_clock` from the commit message onto the
+  segment.
 - Moves it from the pending slot to the SPSC queue.
+- Runs the existing re-enable protocol (TIM5 arm on Idle→Running transition).
 - Returns `CommitSegmentResponse`.
 - On error (no pending segment, id mismatch): returns error code, does not
   enqueue.
