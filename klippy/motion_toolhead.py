@@ -146,7 +146,8 @@ class BridgeKinematics:
             mcu_stepper.setup_itersolve(
                 "cartesian_stepper_alloc", axis.encode()
             )
-            mcu_stepper.set_trapq(trapq)
+            # DIAG: set_trapq intentionally removed — testing whether Z
+            # motion depends on this call. Clock instrumentation active.
             mcu_stepper.get_mcu()._bridge_drives_steppers = True
         self.rails.append(rail)
 
