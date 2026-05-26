@@ -614,11 +614,10 @@ pub mod exports {
             // active context; forming `&mut widen_state` through the const
             // pointer is therefore sound for the duration of this block.
             unsafe {
-                let raw = super::exports::runtime_cyccnt_read();
                 let isr_ptr_mut = isr_ptr_const.cast_mut();
                 let widen_state = &mut (*isr_ptr_mut).widen_state;
                 let last_widened = super::exports::runtime_widened_host_clock();
-                widen_state.reinit(raw, last_widened);
+                widen_state.seed(last_widened);
                 runtime::clock::publish_widened_now(shared, last_widened);
                 super::exports::runtime_tick_enable();
             }

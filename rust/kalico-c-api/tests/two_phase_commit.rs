@@ -2,11 +2,13 @@
 //!
 //! Exercises the push -> commit / abort flow defined by
 //! `runtime_handle_push_segment`, `runtime_handle_commit_segment`, and
-//! `runtime_handle_abort_pending`. All eleven cases run sequentially in
-//! a single `#[test]` to avoid inter-test ordering issues with the global
-//! `INIT_DONE` singleton.
+//! `runtime_handle_abort_pending`. All cases run sequentially in a single
+//! `#[test]` to avoid inter-test ordering issues with the global `INIT_DONE`
+//! singleton.
 
 #![allow(unsafe_code, non_upper_case_globals)]
+
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Host-side stubs for `extern "C"` symbols the runtime FFI declares.
@@ -26,9 +28,24 @@ pub extern "C" fn runtime_tick_enable() {}
 #[unsafe(no_mangle)]
 pub extern "C" fn runtime_tick_disable() {}
 
+// Configurable stubs: tests can change STUB_CYCCNT / STUB_WIDENED to inject
+// specific clock values without rebuilding. Defaults reproduce the original
+// fixed values so all pre-existing cases are unaffected.
+//
+// STUB_CYCCNT_STEP: added to STUB_CYCCNT on each call, simulating advancing
+// hardware. Set to 0 for the old fixed-value behavior.
+static STUB_CYCCNT: AtomicU32 = AtomicU32::new(0);
+static STUB_CYCCNT_STEP: AtomicU32 = AtomicU32::new(0);
+static STUB_WIDENED: AtomicU64 = AtomicU64::new(1_000_000_000);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn runtime_cyccnt_read() -> u32 {
-    0
+    let v = STUB_CYCCNT.load(Ordering::Relaxed);
+    let step = STUB_CYCCNT_STEP.load(Ordering::Relaxed);
+    if step > 0 {
+        STUB_CYCCNT.store(v.wrapping_add(step), Ordering::Relaxed);
+    }
+    v
 }
 
 #[unsafe(no_mangle)]
@@ -37,12 +54,22 @@ pub extern "C" fn runtime_reset_stepper_bindings() {}
 #[unsafe(no_mangle)]
 pub extern "C" fn runtime_diag_progress(_tag: u32, _stage: u32, _value: u32) {}
 
-/// Returns a reasonable widened clock value (~2 s at 520 MHz).
-/// `commit_segment_impl` calls this during the TIM5 re-enable path when
-/// the runtime status is Idle or Drained.
+#[unsafe(no_mangle)]
+pub extern "C" fn runtime_irq_save() -> u32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn runtime_irq_restore(_flags: u32) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn runtime_host_now_us() -> u64 {
+    0
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn runtime_widened_host_clock() -> u64 {
-    1_000_000_000
+    STUB_WIDENED.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -275,68 +302,166 @@ fn two_phase_commit_protocol() {
     );
     assert_eq!(out_id, 4, "out_segment_id should be 4 after chained commit");
 
-    // ── Case 12: stale t_start_clock triggers LATE_ARM fault ────────
+    // ── Case 12: next push after chained commit succeeds. Push id=5. ───────
     //
-    // Reproduces the G28 X instacrash (2026-05-26): cold-start t_start_clock
-    // computed at push time was stale by commit time. The ISR found t_start
-    // in the past and faulted with LATE_ARM.
-    //
-    // Commits a segment with a deliberately stale t_start_clock (value 1,
-    // which is ~2s behind the widened clock seeded at 1_000_000_000),
-    // drives the ISR, and verifies the engine faults with LATE_ARM instead
-    // of silently rebasing.
+    // (Placeholder sequence-advance so id=10 used in Cases 13/14 is not
+    // accidentally equal to a prior commit id, keeping inter-case id tracking
+    // straightforward. We abort immediately so the staged slot is free.)
+    let rc = unsafe { push(rt, 5) };
+    assert_eq!(
+        rc,
+        kalico_c_api::KALICO_OK,
+        "push(id=5) should succeed after chained commit"
+    );
+    let mut out_aborted: u32 = 0;
+    let rc = unsafe {
+        kalico_c_api::runtime_handle_abort_pending(rt, 5, &mut out_aborted as *mut u32)
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "abort(id=5) should succeed");
 
-    // Push segment id=10 (well past any previous IDs from cases 1-11).
+    // ── Case 13: spurious-wrap regression — `seed` vs `reinit` ─────────────
+    //
+    // Regression test for the cold-start widen_state initialisation bug:
+    // the old code called reinit(raw, last_widened) where `raw` was sampled a
+    // few cycles BEFORE `last_widened`, so `raw < last_widened as u32` was
+    // ALWAYS true. reinit() interpreted that as a real 32-bit wrap and bumped
+    // `high` by 2^32 ≈ 8.26 s at 520 MHz. Every subsequent segment had
+    // t_start deep in the past → LATE_ARM.
+    //
+    // The fix: replace reinit(raw, last_widened) with seed(last_widened) which
+    // force-sets BOTH halves from the known-good 64-bit value.
+    //
+    // Scenario: widened clock ≈ 149 s uptime (77_410_000_000 cycles at 520 MHz).
+    // CYCCNT low 32 bits = 77_410_000_000 % 2^32 = 100_131_264.
+    // Simulated "raw sampled first" = 100_131_164 (100 cycles earlier).
+    // With reinit: raw(100_131_164) < captured_low(100_131_264) → spurious
+    //   high += 2^32; ISR sees now ≈ 77_410_000_000 + 4_294_967_296.
+    //   t_start (widened + 130_000_000) is ~4.16 billion cycles in the past →
+    //   LATE_ARM.
+    // With seed: high = 77_410_000_000 & !0xFFFF_FFFF, last_low = 100_131_264.
+    //   ISR reads fresh CYCCNT ≈ 100_131_264 + small_delta → no spurious wrap,
+    //   now ≈ 77_410_000_000 + small_delta < t_start → PARKED. No fault.
+
+    const WIDENED_CASE13: u64 = 77_410_000_000;
+    const CYCCNT_LOW_CASE13: u32 = (WIDENED_CASE13 % (1u64 << 32)) as u32;
+
+    // Flush the runtime to drain all queued segments from Cases 5-11
+    // without driving the ISR (which would LATE_ARM on the old-domain
+    // segments due to the spurious reinit wrap). flush() synchronously
+    // retires everything and resets to Idle.
+    let mut flush_epoch: u32 = 0;
+    let rc = unsafe {
+        kalico_c_api::kalico_runtime_stream_flush(rt, &mut flush_epoch as *mut u32)
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13 setup: flush should succeed");
+
+    // Switch stubs to the Case 13 clock domain.
+    STUB_WIDENED.store(WIDENED_CASE13, Ordering::Relaxed);
+    STUB_CYCCNT_STEP.store(0, Ordering::Relaxed);
+
+    // Push and commit while CYCCNT doesn't matter (seed doesn't read it,
+    // push doesn't use it for timing).
     let rc = unsafe {
         kalico_c_api::runtime_handle_push_segment(
             rt, 10,
-            0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE, // UNUSED handles
-            0, 500_000, // t_start/t_end (ignored by push in two-phase)
-            1, // kinematics = CartesianXyzAndE
-            2, // e_mode = Travel
-            0, // extrusion_ratio_bits
+            0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE,
+            0, 500_000,
+            1, 2, 0,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         )
     };
-    assert_eq!(rc, kalico_c_api::KALICO_OK, "push id=10 should succeed");
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13: push id=10 should succeed");
 
-    // Commit with a STALE t_start_clock — value 1, which is ~1 billion
-    // cycles behind the widened clock (seeded at 1_000_000_000 by the
-    // runtime_widened_host_clock stub). This reproduces the bug where
-    // push-time timing was passed through to commit instead of being
-    // recomputed fresh.
+    let t_start_case13: u64 = WIDENED_CASE13 + 130_000_000;
     let mut out_id: u32 = 0;
     let rc = unsafe {
         kalico_c_api::runtime_handle_commit_segment(
             rt,
-            10,       // segment_id
-            1,        // t_start_clock = 1 (deliberately stale / in the past)
-            100_000,  // duration_clocks
+            10,
+            t_start_case13,
+            500_000,
             &mut out_id as *mut u32,
         )
     };
-    assert_eq!(rc, kalico_c_api::KALICO_OK, "commit itself should succeed (enqueues to SPSC)");
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13: commit id=10 should succeed");
 
-    // Drive the ISR — this will dequeue the segment and try to arm it.
-    // The arm check should find t_start far in the past and fault.
-    unsafe {
-        kalico_c_api::kalico_runtime_tick_sample(rt);
-    }
+    // Set CYCCNT to a value PAST the seed point before driving the ISR.
+    // On the real MCU, the ISR fires microseconds after seed(), so CYCCNT
+    // has advanced past low32(WIDENED). +500 ≈ 1µs at 520 MHz.
+    STUB_CYCCNT.store(CYCCNT_LOW_CASE13 + 500, Ordering::Relaxed);
+    unsafe { kalico_c_api::kalico_runtime_tick_sample(rt) };
 
-    // Verify the engine faulted with LATE_ARM.
+    let status = unsafe { kalico_c_api::runtime_handle_status(rt) };
+    let last_error = unsafe { kalico_c_api::runtime_handle_last_error(rt) };
+    assert_ne!(
+        status, 3,
+        "Case 13: engine must NOT fault after seed()-initialised cold start (got status={})",
+        status,
+    );
+    assert_eq!(
+        last_error, 0,
+        "Case 13: last_error must be 0 after correct seed (got 0x{:x})",
+        last_error,
+    );
+
+    // ── Case 14: stale t_start_clock triggers LATE_ARM fault ────────────────
+    //
+    // Formerly Case 12. Reset stubs to the defaults so the widened clock is
+    // back at 1_000_000_000 and the deliberately stale t_start_clock=1 is
+    // unambiguously in the past.
+    // Flush to retire Case 13's parked segment and return to Idle.
+    let mut flush_epoch: u32 = 0;
+    let rc = unsafe {
+        kalico_c_api::kalico_runtime_stream_flush(rt, &mut flush_epoch as *mut u32)
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 14 setup: flush should succeed");
+
+    STUB_CYCCNT.store(0, Ordering::Relaxed);
+    STUB_CYCCNT_STEP.store(0, Ordering::Relaxed);
+    STUB_WIDENED.store(1_000_000_000, Ordering::Relaxed);
+
+    // Push segment id=20 (well clear of id=10 used in Case 13).
+    let rc = unsafe {
+        kalico_c_api::runtime_handle_push_segment(
+            rt, 20,
+            0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE,
+            0, 500_000,
+            1, 2, 0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 14: push id=20 should succeed");
+
+    // Commit with a STALE t_start_clock — value 1, which is ~1 billion
+    // cycles behind the widened clock reseeded to 1_000_000_000.
+    let mut out_id: u32 = 0;
+    let rc = unsafe {
+        kalico_c_api::runtime_handle_commit_segment(
+            rt,
+            20,
+            1,        // t_start_clock = 1 (deliberately stale)
+            100_000,
+            &mut out_id as *mut u32,
+        )
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 14: commit itself should succeed (enqueues to SPSC)");
+
+    unsafe { kalico_c_api::kalico_runtime_tick_sample(rt) };
+
     let status = unsafe { kalico_c_api::runtime_handle_status(rt) };
     let last_error = unsafe { kalico_c_api::runtime_handle_last_error(rt) };
 
     assert_eq!(
-        status, 3, // RuntimeStatus::Fault = 3
-        "engine should be in Fault state after LATE_ARM (got status={})",
+        status, 3,
+        "Case 14: engine should be in Fault state after LATE_ARM (got status={})",
         status,
     );
     assert_eq!(
         last_error,
         kalico_c_api::KALICO_FAULT_LATE_ARM,
-        "last_error should be KALICO_FAULT_LATE_ARM (0x0010), got 0x{:x}",
+        "Case 14: last_error should be KALICO_FAULT_LATE_ARM (0x0010), got 0x{:x}",
         last_error,
     );
 }
