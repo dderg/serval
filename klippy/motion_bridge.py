@@ -305,6 +305,9 @@ class MotionBridgeWrapper:
     def wait_moves(self):
         return self._bridge.wait_moves()
 
+    def cancel_motion(self):
+        return self._bridge.cancel_motion()
+
     def submit_dwell(self, duration_s):
         return self._bridge.submit_dwell(duration_s)
 

@@ -1268,7 +1268,7 @@ pub mod exports {
     }
 
     /// Read the credit-flow epoch counter (§5.3 + §10.4). Bumped on each
-    /// `kalico_stream_flush` so the host can detect mid-stream resets.
+    /// `kalico_stream_cancel` so the host can detect mid-stream resets.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_credit_epoch(rt: *mut KalicoRuntime) -> u32 {
         if rt.is_null() {
@@ -2244,14 +2244,14 @@ pub mod exports {
         KALICO_OK
     }
 
-    /// `kalico_stream_flush` — `force_idle` handshake (§8.5).
+    /// `kalico_stream_cancel` — `force_idle` handshake (§8.5).
     ///
     /// `flush()` projects to both halves under disabled-IRQ, so we hand it
     /// the raw `*mut RuntimeContext` directly rather than going through
     /// the foreground-only `project_fg` helper. SAFETY: caller is the
     /// single-threaded foreground command dispatch.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kalico_runtime_stream_flush(
+    pub unsafe extern "C" fn kalico_runtime_stream_cancel(
         rt: *mut KalicoRuntime,
         out_credit_epoch: *mut u32,
     ) -> i32 {

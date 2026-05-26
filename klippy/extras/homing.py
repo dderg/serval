@@ -207,11 +207,11 @@ class HomingMove:
             "move_end_print_time=%.6f",
             trigger_times, move_end_print_time,
         )
-        # After a homing move the MCU is idle — correct the pending-time
-        # projection so wait_moves_and_mcu doesn't block on ghost time
-        # from the planned-but-truncated segment.
+        # Cancel remaining queued segments on all MCUs. The homed axis
+        # already stopped (endstop/trsync), and other MCUs only have idle
+        # segments that serve no purpose after the trigger.
+        self.toolhead.cancel_motion()
         self.toolhead.note_homing_end()
-        # Determine stepper halt positions
         self.toolhead.flush_step_generation()
         for sp in self.stepper_positions:
             tt = trigger_times.get(sp.endstop_name, move_end_print_time)

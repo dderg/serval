@@ -112,7 +112,7 @@ uint64_t runtime_handle_widened_now(kalico_nurbs_KalicoRuntime *rt);
 
 /**
  * Read the credit-flow epoch counter (§5.3 + §10.4). Bumped on each
- * `kalico_stream_flush` so the host can detect mid-stream resets.
+ * `kalico_stream_cancel` so the host can detect mid-stream resets.
  */
 uint32_t runtime_handle_credit_epoch(kalico_nurbs_KalicoRuntime *rt);
 
@@ -346,14 +346,14 @@ int32_t kalico_runtime_stream_arm(kalico_nurbs_KalicoRuntime *rt,
 int32_t kalico_runtime_stream_terminal(kalico_nurbs_KalicoRuntime *rt, uint32_t segment_id);
 
 /**
- * `kalico_stream_flush` — `force_idle` handshake (§8.5).
+ * `kalico_stream_cancel` — `force_idle` handshake (§8.5).
  *
  * `flush()` projects to both halves under disabled-IRQ, so we hand it
  * the raw `*mut RuntimeContext` directly rather than going through
  * the foreground-only `project_fg` helper. SAFETY: caller is the
  * single-threaded foreground command dispatch.
  */
-int32_t kalico_runtime_stream_flush(kalico_nurbs_KalicoRuntime *rt, uint32_t *out_credit_epoch);
+int32_t kalico_runtime_stream_cancel(kalico_nurbs_KalicoRuntime *rt, uint32_t *out_credit_epoch);
 
 /**
  * `kalico_clock_sync_request` — RTT-aware clock-sync ping (§12.1).

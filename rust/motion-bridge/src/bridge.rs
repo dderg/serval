@@ -457,6 +457,8 @@ pub struct PyMotionBridge {
     /// Active probe-homing handles keyed by an incrementing ID.
     probe_handles: Mutex<HashMap<u64, crate::probe_homing::ProbeHomingHandle>>,
     probe_handle_counter: AtomicU64,
+    cold_start_done: Arc<Mutex<HashMap<u32, bool>>>,
+    schedule_state: Arc<Mutex<HashMap<u32, (u64, u64)>>>,
 }
 
 /// Build the kalico-native `ConfigureAxes` wire body.
@@ -559,6 +561,8 @@ impl PyMotionBridge {
             retained_homing_curve: Arc::new(Mutex::new(None)),
             probe_handles: Mutex::new(HashMap::new()),
             probe_handle_counter: AtomicU64::new(1),
+            cold_start_done: Arc::new(Mutex::new(HashMap::new())),
+            schedule_state: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -2146,10 +2150,8 @@ impl PyMotionBridge {
         // batch starting at t=0. Dispatch places those relative seconds onto
         // the MCU's live clock with a small lead so the firmware does not see
         // zero-duration or already-expired segments.
-        let schedule_state: Arc<Mutex<HashMap<u32, (u64, u64)>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let cold_start_done: Arc<Mutex<HashMap<u32, bool>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let schedule_state = Arc::clone(&self.schedule_state);
+        let cold_start_done = Arc::clone(&self.cold_start_done);
 
         let dispatch: Arc<
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
@@ -2419,13 +2421,9 @@ impl PyMotionBridge {
                         _diag_now_clock = now_clock;
                         if entry.1 == 0 || seg.t_start <= 1.0e-12 {
                             entry.0 = entry.1.max(now_plus_lead);
-                            cold_start_done.lock().unwrap_or_else(|p| p.into_inner())
-                                .remove(&plan.mcu_id);
                             _diag_branch_outer = "fresh";
                         } else if entry.1 < now_clock {
                             entry.0 = now_plus_lead.saturating_sub(planner_offset_cycles);
-                            cold_start_done.lock().unwrap_or_else(|p| p.into_inner())
-                                .remove(&plan.mcu_id);
                             _diag_branch_outer = "rebase-drained";
                         } else {
                             // Previous dispatched segment is still in flight
@@ -2922,6 +2920,50 @@ impl PyMotionBridge {
         })?;
         py.allow_threads(|| planner.flush()).map_err(planner_err)?;
         self.homing.refresh_after_wait();
+        Ok(())
+    }
+
+    /// Cancel all queued motion on every kalico MCU. Sends
+    /// `runtime_stream_cancel` to each MCU that has a live KalicoHostIo
+    /// connection, resets the per-MCU cold-start and schedule tracking so
+    /// the next dispatch starts with fresh timing.
+    fn cancel_motion(&self) -> PyResult<()> {
+        let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+        for (&mcu_id, conn) in mcus.iter() {
+            let Some(io) = conn.host_io.as_ref() else {
+                continue;
+            };
+            match io.send_with_response(
+                "runtime_stream_cancel",
+                "kalico_stream_cancel_response",
+                Duration::from_secs(2),
+            ) {
+                Ok(r) => {
+                    let result = r.try_get_i32("result").unwrap_or(-999);
+                    if result != 0 {
+                        log::warn!(
+                            "[bridge-trace] cancel_motion mcu={} result={}",
+                            mcu_id, result,
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[bridge-trace] cancel_motion mcu={} transport err: {:?}",
+                        mcu_id, e,
+                    );
+                }
+            }
+        }
+        drop(mcus);
+        self.cold_start_done
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        self.schedule_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
         Ok(())
     }
 

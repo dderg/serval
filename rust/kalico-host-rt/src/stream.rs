@@ -17,7 +17,7 @@
 //! [`ArmFailure`] carrying both the originating [`ArmError`] and the
 //! list of MCU indices that DID complete the arm step before the
 //! failure (i.e. received a successful `kalico_stream_arm_response`).
-//! The caller iterates `armed_indices` and issues `kalico_stream_flush`
+//! The caller iterates `armed_indices` and issues `kalico_stream_cancel`
 //! to wind those MCUs back to IDLE — leaving the others alone, since
 //! they never armed.
 
@@ -289,7 +289,7 @@ impl std::error::Error for ArmError {}
 /// I5 fix: partial-arm failure surface. When `arm_all_mcus` fails
 /// mid-stream, MCUs that already received a successful
 /// `kalico_stream_arm_response` are armed and need to be flushed back
-/// to IDLE (`kalico_stream_flush`); MCUs not in `armed_indices` were
+/// to IDLE (`kalico_stream_cancel`); MCUs not in `armed_indices` were
 /// never armed and require no rollback.
 #[derive(Debug)]
 pub struct ArmFailure {

@@ -351,7 +351,7 @@ fn two_phase_commit_protocol() {
     // retires everything and resets to Idle.
     let mut flush_epoch: u32 = 0;
     let rc = unsafe {
-        kalico_c_api::kalico_runtime_stream_flush(rt, &mut flush_epoch as *mut u32)
+        kalico_c_api::kalico_runtime_stream_cancel(rt, &mut flush_epoch as *mut u32)
     };
     assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13 setup: flush should succeed");
 
@@ -417,7 +417,7 @@ fn two_phase_commit_protocol() {
 
     let mut flush_epoch: u32 = 0;
     let rc = unsafe {
-        kalico_c_api::kalico_runtime_stream_flush(rt, &mut flush_epoch as *mut u32)
+        kalico_c_api::kalico_runtime_stream_cancel(rt, &mut flush_epoch as *mut u32)
     };
     assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13b setup: flush");
 
@@ -478,7 +478,7 @@ fn two_phase_commit_protocol() {
 
     let mut flush_epoch: u32 = 0;
     let rc = unsafe {
-        kalico_c_api::kalico_runtime_stream_flush(rt, &mut flush_epoch as *mut u32)
+        kalico_c_api::kalico_runtime_stream_cancel(rt, &mut flush_epoch as *mut u32)
     };
     assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13c setup: flush");
 

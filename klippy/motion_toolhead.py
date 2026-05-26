@@ -792,6 +792,9 @@ class MotionToolhead(ToolHead):
     def wait_moves(self):
         self.bridge.wait_moves()
 
+    def cancel_motion(self):
+        self.bridge.cancel_motion()
+
     def wait_moves_and_mcu(self):
         self.flush_step_generation()
 
