@@ -13,8 +13,9 @@
 use std::time::Duration;
 
 use kalico_protocol::{
-    Decode, Encode, LoadCurveCubic, LoadCurveResponse, MessageKind, PushSegment,
-    PushSegmentResponse, ResetCurvePool, ResetCurvePoolResponse,
+    AbortPending, AbortPendingResponse, CommitSegment, CommitSegmentResponse, Decode, Encode,
+    LoadCurveCubic, LoadCurveResponse, MessageKind, PushSegment, PushSegmentResponse,
+    ResetCurvePool, ResetCurvePoolResponse,
 };
 
 /// Wire-format safety ceiling for `load_curve`'s piece_count argument.
@@ -422,4 +423,83 @@ pub fn reset_curve_pool(io: &KalicoHostIo, timeout: Duration) -> Result<(), Prod
         return Err(ProducerError::McuRejected(resp.result));
     }
     Ok(())
+}
+
+// =============================================================================
+// CommitSegment — two-phase commit Phase 2
+// =============================================================================
+
+#[derive(Debug, Clone, Copy)]
+pub struct CommitSegmentInfo {
+    pub segment_id: u32,
+}
+
+pub fn commit_segment(
+    io: &KalicoHostIo,
+    segment_id: u32,
+    t_start_clock: u64,
+    duration_clocks: u64,
+    timeout: Duration,
+) -> Result<CommitSegmentInfo, ProducerError> {
+    let body = CommitSegment {
+        segment_id,
+        t_start_clock,
+        duration_clocks,
+    }
+    .encoded_to_vec();
+
+    let (kind, resp_body) = io.kalico_call(MessageKind::CommitSegment, body, timeout)?;
+    if kind != MessageKind::CommitSegmentResponse {
+        return Err(ProducerError::Transport(TransportError::Parse(format!(
+            "commit_segment: expected CommitSegmentResponse, got 0x{:04x}",
+            kind.as_u16()
+        ))));
+    }
+    let resp = CommitSegmentResponse::decode(&resp_body).map_err(|e| {
+        ProducerError::Transport(TransportError::Parse(format!(
+            "CommitSegmentResponse decode failed: {e:?}"
+        )))
+    })?;
+    if resp.result != 0 {
+        return Err(ProducerError::McuRejected(resp.result));
+    }
+    Ok(CommitSegmentInfo {
+        segment_id: resp.segment_id,
+    })
+}
+
+// =============================================================================
+// AbortPending — clears staged slot on Phase 1 failure
+// =============================================================================
+
+#[derive(Debug, Clone, Copy)]
+pub struct AbortPendingInfo {
+    pub segment_id: u32,
+}
+
+pub fn abort_pending(
+    io: &KalicoHostIo,
+    segment_id: u32,
+    timeout: Duration,
+) -> Result<AbortPendingInfo, ProducerError> {
+    let body = AbortPending { segment_id }.encoded_to_vec();
+
+    let (kind, resp_body) = io.kalico_call(MessageKind::AbortPending, body, timeout)?;
+    if kind != MessageKind::AbortPendingResponse {
+        return Err(ProducerError::Transport(TransportError::Parse(format!(
+            "abort_pending: expected AbortPendingResponse, got 0x{:04x}",
+            kind.as_u16()
+        ))));
+    }
+    let resp = AbortPendingResponse::decode(&resp_body).map_err(|e| {
+        ProducerError::Transport(TransportError::Parse(format!(
+            "AbortPendingResponse decode failed: {e:?}"
+        )))
+    })?;
+    if resp.result != 0 {
+        return Err(ProducerError::McuRejected(resp.result));
+    }
+    Ok(AbortPendingInfo {
+        segment_id: resp.segment_id,
+    })
 }

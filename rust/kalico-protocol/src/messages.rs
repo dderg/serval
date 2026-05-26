@@ -244,6 +244,102 @@ impl Decode for PushSegmentResponse {
 }
 
 // =============================================================================
+// CommitSegment (0x0060) — two-phase commit Phase 2
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitSegment {
+    pub segment_id: u32,
+    pub t_start_clock: u64,
+    pub duration_clocks: u64,
+}
+
+impl Encode for CommitSegment {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u32(out, self.segment_id);
+        put_u64(out, self.t_start_clock);
+        put_u64(out, self.duration_clocks);
+    }
+}
+
+impl Decode for CommitSegment {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            segment_id: get_u32(c)?,
+            t_start_clock: get_u64(c)?,
+            duration_clocks: get_u64(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitSegmentResponse {
+    pub result: i32,
+    pub segment_id: u32,
+}
+
+impl Encode for CommitSegmentResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+        put_u32(out, self.segment_id);
+    }
+}
+
+impl Decode for CommitSegmentResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+            segment_id: get_u32(c)?,
+        })
+    }
+}
+
+// =============================================================================
+// AbortPending (0x0070)
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbortPending {
+    pub segment_id: u32,
+}
+
+impl Encode for AbortPending {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u32(out, self.segment_id);
+    }
+}
+
+impl Decode for AbortPending {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            segment_id: get_u32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbortPendingResponse {
+    pub result: i32,
+    pub segment_id: u32,
+}
+
+impl Encode for AbortPendingResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+        put_u32(out, self.segment_id);
+    }
+}
+
+impl Decode for AbortPendingResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+            segment_id: get_u32(c)?,
+        })
+    }
+}
+
+// =============================================================================
 // ConfigureAxes (0x0030)
 // =============================================================================
 
