@@ -2234,13 +2234,14 @@ impl PyMotionBridge {
                 }
 
                 log::info!(
-                    "[bridge-trace] mcu_plans built: count={} mcu_ids=[{}]",
+                    "[bridge-trace] mcu_plans built: count={} mcu_ids=[{}] homing={:?}",
                     mcu_plans.len(),
                     mcu_plans
                         .iter()
                         .map(|p| format!("{}({}c)", p.mcu_id, p.curves_to_load.len()))
                         .collect::<Vec<_>>()
                         .join(","),
+                    homing.state(),
                 );
 
                 for mut plan in mcu_plans {
