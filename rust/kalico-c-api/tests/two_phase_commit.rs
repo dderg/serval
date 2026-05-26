@@ -405,63 +405,126 @@ fn two_phase_commit_protocol() {
         last_error,
     );
 
-    // ── Case 14: stale t_start_clock triggers LATE_ARM fault ────────────────
+    // ── Case 13b: chained second plan succeeds when first is queued ahead ───
     //
-    // Formerly Case 12. Reset stubs to the defaults so the widened clock is
-    // back at 1_000_000_000 and the deliberately stale t_start_clock=1 is
-    // unambiguously in the past.
-    // Flush to retire Case 13's parked segment and return to Idle.
+    // Reproduces the post-homing-approach scenario: the bridge dispatches
+    // multiple plans in rapid succession. If the second plan chains from
+    // the first (t_start_clock=0), the ISR correctly continues from the
+    // previous t_end regardless of how long the first plan runs.
+    //
+    // Seg A: cold-start, dur = 2_000_000_000 (~3.85s at 520 MHz)
+    // Seg B: chain from A's t_end (t_start_clock=0), dur = 500_000
+
     let mut flush_epoch: u32 = 0;
     let rc = unsafe {
         kalico_c_api::kalico_runtime_stream_flush(rt, &mut flush_epoch as *mut u32)
     };
-    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 14 setup: flush should succeed");
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13b setup: flush");
 
-    STUB_CYCCNT.store(0, Ordering::Relaxed);
+    const LEAD: u64 = 130_000_000;
+    const LONG_DUR: u64 = 2_000_000_000;
+    const SHORT_DUR: u64 = 500_000;
+
+    STUB_WIDENED.store(WIDENED_CASE13, Ordering::Relaxed);
     STUB_CYCCNT_STEP.store(0, Ordering::Relaxed);
-    STUB_WIDENED.store(1_000_000_000, Ordering::Relaxed);
+    STUB_CYCCNT.store(CYCCNT_LOW_CASE13 + 500, Ordering::Relaxed);
 
-    // Push segment id=20 (well clear of id=10 used in Case 13).
-    let rc = unsafe {
-        kalico_c_api::runtime_handle_push_segment(
-            rt, 20,
-            0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE,
-            0, 500_000,
-            1, 2, 0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 14: push id=20 should succeed");
-
-    // Commit with a STALE t_start_clock — value 1, which is ~1 billion
-    // cycles behind the widened clock reseeded to 1_000_000_000.
+    let rc = unsafe { push(rt, 30) };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13b: push A (id=30)");
     let mut out_id: u32 = 0;
     let rc = unsafe {
         kalico_c_api::runtime_handle_commit_segment(
-            rt,
-            20,
-            1,        // t_start_clock = 1 (deliberately stale)
-            100_000,
-            &mut out_id as *mut u32,
+            rt, 30, WIDENED_CASE13 + LEAD, LONG_DUR, &mut out_id as *mut u32,
         )
     };
-    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 14: commit itself should succeed (enqueues to SPSC)");
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13b: commit A cold-start");
 
-    unsafe { kalico_c_api::kalico_runtime_tick_sample(rt) };
+    let rc = unsafe { push(rt, 31) };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13b: push B (id=31)");
+    let rc = unsafe {
+        kalico_c_api::runtime_handle_commit_segment(
+            rt, 31, 0, SHORT_DUR, &mut out_id as *mut u32, // chain
+        )
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13b: commit B chained");
+
+    // Advance CYCCNT to exactly A's t_start so A arms (t_start <= now,
+    // and with test jitter_tolerance=0 we need t_start == now to avoid
+    // LATE_ARM). A retires immediately (UNUSED handles → pending_mask=0).
+    let a_t_start_low = ((WIDENED_CASE13 + LEAD) % (1u64 << 32)) as u32;
+    STUB_CYCCNT.store(a_t_start_low, Ordering::Relaxed);
+    for _ in 0..4 { unsafe { kalico_c_api::kalico_runtime_tick_sample(rt) }; }
+
+    // Advance CYCCNT to exactly B's chained t_start (= A's t_end).
+    let b_t_start = WIDENED_CASE13 + LEAD + LONG_DUR;
+    let b_t_start_low = (b_t_start % (1u64 << 32)) as u32;
+    STUB_CYCCNT.store(b_t_start_low, Ordering::Relaxed);
+    for _ in 0..4 { unsafe { kalico_c_api::kalico_runtime_tick_sample(rt) }; }
 
     let status = unsafe { kalico_c_api::runtime_handle_status(rt) };
     let last_error = unsafe { kalico_c_api::runtime_handle_last_error(rt) };
+    assert_ne!(
+        status, 3,
+        "Case 13b: chained second plan must NOT fault (got status={}, err=0x{:x})",
+        status, last_error,
+    );
 
+    // ── Case 13c: stale cold-start on queued second plan → LATE_ARM ──────
+    //
+    // Same setup as 13b, but seg B gets a fresh cold-start t_start instead
+    // of chaining. The t_start is computed "now" at commit time — but A
+    // hasn't executed yet, so by the time the ISR reaches B, the cold-start
+    // timing is ~3.85 seconds in the past. LATE_ARM.
+
+    let mut flush_epoch: u32 = 0;
+    let rc = unsafe {
+        kalico_c_api::kalico_runtime_stream_flush(rt, &mut flush_epoch as *mut u32)
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13c setup: flush");
+
+    STUB_CYCCNT.store(CYCCNT_LOW_CASE13 + 500, Ordering::Relaxed);
+
+    let rc = unsafe { push(rt, 40) };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13c: push A (id=40)");
+    let rc = unsafe {
+        kalico_c_api::runtime_handle_commit_segment(
+            rt, 40, WIDENED_CASE13 + LEAD, LONG_DUR, &mut out_id as *mut u32,
+        )
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13c: commit A cold-start");
+
+    let rc = unsafe { push(rt, 41) };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13c: push B (id=41)");
+    // Stale cold-start: t_start = WIDENED + LEAD + 1000 (only 1000 cycles
+    // after A's t_start, but A runs for 2 billion cycles).
+    let rc = unsafe {
+        kalico_c_api::runtime_handle_commit_segment(
+            rt, 41, WIDENED_CASE13 + LEAD + 1000, SHORT_DUR, &mut out_id as *mut u32,
+        )
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "Case 13c: commit B stale cold-start");
+
+    // Advance to exactly A's t_start → A arms + retires.
+    STUB_CYCCNT.store(a_t_start_low, Ordering::Relaxed);
+    for _ in 0..4 { unsafe { kalico_c_api::kalico_runtime_tick_sample(rt) }; }
+
+    // Advance to A's t_end. B's stale t_start (WIDENED + LEAD + 1000)
+    // is now ~2 billion cycles in the past → LATE_ARM.
+    STUB_CYCCNT.store(b_t_start_low, Ordering::Relaxed);
+    for _ in 0..4 { unsafe { kalico_c_api::kalico_runtime_tick_sample(rt) }; }
+
+    let status = unsafe { kalico_c_api::runtime_handle_status(rt) };
+    let last_error = unsafe { kalico_c_api::runtime_handle_last_error(rt) };
     assert_eq!(
         status, 3,
-        "Case 14: engine should be in Fault state after LATE_ARM (got status={})",
+        "Case 13c: stale cold-start on queued plan must LATE_ARM (got status={})",
         status,
     );
     assert_eq!(
         last_error,
         kalico_c_api::KALICO_FAULT_LATE_ARM,
-        "Case 14: last_error should be KALICO_FAULT_LATE_ARM (0x0010), got 0x{:x}",
+        "Case 13c: last_error should be LATE_ARM (0x0010), got 0x{:x}",
         last_error,
     );
+
 }

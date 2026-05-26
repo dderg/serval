@@ -2148,6 +2148,8 @@ impl PyMotionBridge {
         // zero-duration or already-expired segments.
         let schedule_state: Arc<Mutex<HashMap<u32, (u64, u64)>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let cold_start_done: Arc<Mutex<HashMap<u32, bool>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let dispatch: Arc<
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
@@ -2416,26 +2418,14 @@ impl PyMotionBridge {
                         let _diag_prev_entry1 = entry.1;
                         _diag_now_clock = now_clock;
                         if entry.1 == 0 || seg.t_start <= 1.0e-12 {
-                            // Fresh trajectory: first ever dispatch on this MCU,
-                            // or planner-time-zero (post-stream-open reset).
-                            // Anchor base so the first segment lands at now+lead.
                             entry.0 = entry.1.max(now_plus_lead);
+                            cold_start_done.lock().unwrap_or_else(|p| p.into_inner())
+                                .remove(&plan.mcu_id);
                             _diag_branch_outer = "fresh";
                         } else if entry.1 < now_clock {
-                            // Continuity break: the previous dispatched segment's
-                            // t_end_clock is already in the past, so the MCU
-                            // engine has drained and is sitting idle. Rebase so
-                            // *this* segment lands at now+lead — that is, choose
-                            // a base such that `base + planner_t_start*freq ==
-                            // now+lead`. The planner emits cumulative
-                            // `seg.t_start` values that grow across moves
-                            // (continuous streaming model); without this
-                            // subtraction, the dispatch would add the cumulative
-                            // planner time on top of wall-clock now, producing
-                            // a perceived ~planner_t_start-second delay before
-                            // motion starts (bench-observed 2026-05-11: "second
-                            // jog is slower" when clicks bracket a drained gap).
                             entry.0 = now_plus_lead.saturating_sub(planner_offset_cycles);
+                            cold_start_done.lock().unwrap_or_else(|p| p.into_inner())
+                                .remove(&plan.mcu_id);
                             _diag_branch_outer = "rebase-drained";
                         } else {
                             // Previous dispatched segment is still in flight
@@ -2764,21 +2754,27 @@ impl PyMotionBridge {
                             })?;
 
                         let duration_clocks = info.sub_duration_clocks;
-                        // Cold start (sub_idx == 0): compute t_start fresh
-                        // NOW, after all pushes completed. This guarantees
-                        // t_start is in the future regardless of how long
-                        // Phase 1 took.
-                        let commit_t_start = if sub_idx == 0 {
-                            let lead_cycles = (info.freq * 0.250).round().max(1.0) as u64;
-                            let mcu_h = mcu_handle_from_raw(info.mcu_id);
-                            let now_clock = router_for_cb
+                        let commit_t_start = {
+                            let now_clock = if sub_idx == 0 {
+                                let mcu_h = mcu_handle_from_raw(info.mcu_id);
+                                router_for_cb
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .compute_ack_clock(mcu_h)
+                                    .map_err(|e| DispatchError::ComputeAckClock(e.to_string()))?
+                            } else {
+                                0
+                            };
+                            let mut csd = cold_start_done
                                 .lock()
-                                .unwrap_or_else(|p| p.into_inner())
-                                .compute_ack_clock(mcu_h)
-                                .map_err(|e| DispatchError::ComputeAckClock(e.to_string()))?;
-                            now_clock.saturating_add(lead_cycles)
-                        } else {
-                            0 // chain from previous t_end
+                                .unwrap_or_else(|p| p.into_inner());
+                            compute_commit_t_start(
+                                sub_idx,
+                                info.mcu_id,
+                                info.freq,
+                                &mut csd,
+                                now_clock,
+                            )
                         };
                         let commit_result = producer::commit_segment(
                             info.io.as_ref(),
@@ -3639,4 +3635,88 @@ fn trip_event_to_pydict(py: Python<'_>, evt: runtime::endstop::TripEvent) -> PyR
         .collect();
     d.set_item("steppers", steppers)?;
     Ok(d.unbind())
+}
+
+// ── Cold-start vs chain decision ────────────────────────────────────────
+
+/// Decide the `t_start_clock` value for a commit_segment call.
+///
+/// Returns non-zero (cold-start) only for the very first segment on an
+/// MCU after idle/flush. All subsequent commits chain (`t_start_clock=0`)
+/// regardless of `sub_idx`, because the MCU already has segments queued
+/// and their timing is contiguous.
+///
+/// `cold_start_done` tracks per-MCU whether a cold-start has been issued
+/// in the current session. The caller resets it on flush.
+fn compute_commit_t_start(
+    sub_idx: usize,
+    mcu_id: u32,
+    freq: f64,
+    cold_start_done: &mut HashMap<u32, bool>,
+    now_clock: u64,
+) -> u64 {
+    if sub_idx == 0 && !cold_start_done.get(&mcu_id).copied().unwrap_or(false) {
+        let lead_cycles = (freq * 0.250).round().max(1.0) as u64;
+        cold_start_done.insert(mcu_id, true);
+        now_clock.saturating_add(lead_cycles)
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_t_start_chains_after_first_cold_start() {
+        let mut cold_start_done = HashMap::new();
+        let freq = 520_000_000.0f64;
+        let now = 77_410_000_000u64;
+
+        // First plan, sub_idx=0: cold start (non-zero t_start)
+        let t = compute_commit_t_start(0, 0, freq, &mut cold_start_done, now);
+        assert!(t > 0, "first plan's first sub should cold-start");
+        let expected_lead = (freq * 0.250).round() as u64;
+        assert_eq!(t, now + expected_lead);
+
+        // First plan, sub_idx=1: chain (always)
+        let t = compute_commit_t_start(1, 0, freq, &mut cold_start_done, now);
+        assert_eq!(t, 0, "first plan's second sub should chain");
+
+        // Second plan, sub_idx=0: must chain because MCU already has
+        // segments queued from the first plan.
+        let t = compute_commit_t_start(0, 0, freq, &mut cold_start_done, now);
+        assert_eq!(
+            t, 0,
+            "second plan's first sub must chain, not cold-start — \
+             MCU already has segments queued"
+        );
+
+        // Different MCU, sub_idx=0: cold start (first segment on this MCU)
+        let t = compute_commit_t_start(0, 1, freq, &mut cold_start_done, now);
+        assert!(t > 0, "first segment on a new MCU should cold-start");
+
+        // Same MCU 1 again: chain
+        let t = compute_commit_t_start(0, 1, freq, &mut cold_start_done, now);
+        assert_eq!(t, 0, "subsequent plans on MCU 1 should chain");
+    }
+
+    #[test]
+    fn cold_start_resets_on_flush() {
+        let mut cold_start_done = HashMap::new();
+        let freq = 520_000_000.0f64;
+        let now = 77_410_000_000u64;
+
+        // First cold start
+        let t = compute_commit_t_start(0, 0, freq, &mut cold_start_done, now);
+        assert!(t > 0);
+
+        // Simulate flush: clear the map
+        cold_start_done.clear();
+
+        // After flush, next sub_idx=0 should cold-start again
+        let t = compute_commit_t_start(0, 0, freq, &mut cold_start_done, now + 1_000_000);
+        assert!(t > 0, "after flush, first segment should cold-start again");
+    }
 }
