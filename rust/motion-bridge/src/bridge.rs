@@ -2476,6 +2476,18 @@ impl PyMotionBridge {
                         for i in 0..sub_plan.curves_to_load.len() {
                             let axis_idx = sub_plan.curves_to_load[i].0;
                             let curve_params = sub_plan.curves_to_load[i].1.clone();
+                            let pre_in_flight = slot_pool.in_flight_count();
+                            let pre_capacity = slot_pool.capacity();
+                            if pre_in_flight >= pre_capacity {
+                                log::warn!(
+                                    "[slot-trace] SLOT POOL FULL before alloc: mcu={} \
+                                     seg_id={} axis={} in_flight={}/{} homing={:?} — \
+                                     will block up to 60s waiting for retirement",
+                                    sub_plan.mcu_id, sub_plan.params.id,
+                                    axis_idx, pre_in_flight, pre_capacity,
+                                    homing.state(),
+                                );
+                            }
                             let alloc_result = slot_pool
                                 .alloc_blocking(DEFAULT_SLOT_ACQUIRE_TIMEOUT)
                                 .ok_or_else(|| DispatchError::SlotPoolExhausted {
