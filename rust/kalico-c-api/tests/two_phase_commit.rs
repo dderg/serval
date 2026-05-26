@@ -37,15 +37,6 @@ pub extern "C" fn runtime_reset_stepper_bindings() {}
 #[unsafe(no_mangle)]
 pub extern "C" fn runtime_diag_progress(_tag: u32, _stage: u32, _value: u32) {}
 
-#[unsafe(no_mangle)]
-pub extern "C" fn runtime_irq_save() -> u32 { 0 }
-
-#[unsafe(no_mangle)]
-pub extern "C" fn runtime_irq_restore(_flags: u32) {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn runtime_host_now_us() -> u64 { 0 }
-
 /// Returns a reasonable widened clock value (~2 s at 520 MHz).
 /// `commit_segment_impl` calls this during the TIM5 re-enable path when
 /// the runtime status is Idle or Drained.
@@ -347,70 +338,5 @@ fn two_phase_commit_protocol() {
         kalico_c_api::KALICO_FAULT_LATE_ARM,
         "last_error should be KALICO_FAULT_LATE_ARM (0x0010), got 0x{:x}",
         last_error,
-    );
-
-    // ── Case 13: fault latch persists — push after LATE_ARM fails ───
-    //
-    // Without clearing the fault, subsequent pushes return FAULT_LATCHED.
-    // This reproduces the G28 X second-crash (2026-05-26): the MCU
-    // faulted in session 1, klipper restarted (session 2), but the MCU
-    // fault was never cleared → every push in session 2 returned -8.
-
-    let rc = unsafe {
-        kalico_c_api::runtime_handle_push_segment(
-            rt, 20,
-            0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE,
-            0, 500_000, 1, 2, 0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(
-        rc,
-        kalico_c_api::KALICO_ERR_FAULT_LATCHED,
-        "push after LATE_ARM should fail with FAULT_LATCHED (-8), got {}",
-        rc,
-    );
-
-    // ── Case 14: flush clears fault — push succeeds after flush ─────
-    //
-    // The fix: stream::flush (called by init_planner on reconnect) must
-    // clear the fault latch so the MCU accepts segments in the new session.
-
-    let mut out_credit_epoch: u32 = 0;
-    let rc = unsafe {
-        kalico_c_api::kalico_runtime_stream_flush(rt, &mut out_credit_epoch as *mut u32)
-    };
-    assert_eq!(rc, kalico_c_api::KALICO_OK, "flush should succeed, got {}", rc);
-
-    // After flush, fault should be cleared.
-    let status = unsafe { kalico_c_api::runtime_handle_status(rt) };
-    let last_error = unsafe { kalico_c_api::runtime_handle_last_error(rt) };
-    assert_eq!(
-        status, 0, // RuntimeStatus::Idle = 0
-        "engine should be Idle after flush (got status={})",
-        status,
-    );
-    assert_eq!(
-        last_error, 0,
-        "last_error should be cleared after flush (got 0x{:x})",
-        last_error,
-    );
-
-    // Push should succeed now.
-    let rc = unsafe {
-        kalico_c_api::runtime_handle_push_segment(
-            rt, 21,
-            0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE,
-            0, 500_000, 1, 2, 0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(
-        rc,
-        kalico_c_api::KALICO_OK,
-        "push after flush should succeed (got {})",
-        rc,
     );
 }

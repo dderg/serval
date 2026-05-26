@@ -1374,17 +1374,14 @@ impl<P: PaSlot, I: IsSlot> Engine<P, I> {
 
         // 6. Re-publish settled engine status. After force_idle the
         //    host either re-streams (transitions Idle → Running on
-        //    next segment activation) or stays idle. Clear fault state
-        //    unconditionally — the flush is the host's explicit
-        //    acknowledgment that it has read the fault and is resetting
-        //    the MCU for a new session. Without this, a LATE_ARM fault
-        //    from session N permanently blocks all pushes in session N+1
-        //    (the fault-latch short-circuit in push_segment_impl).
-        shared.last_error.store(0, Ordering::Release);
-        shared.runtime_status
-            .store(RuntimeStatus::Idle as u8, Ordering::Release);
-        self.status
-            .store(RuntimeStatus::Idle as u8, Ordering::Release);
+        //    next segment activation) or stays idle, so `Idle` is the
+        //    most accurate post-flush state. Fault status is NOT
+        //    cleared — the host explicitly inspects the fault before
+        //    issuing flush; clearing it would mask the failure history.
+        if self.status() != RuntimeStatus::Fault {
+            self.status
+                .store(RuntimeStatus::Idle as u8, Ordering::Release);
+        }
 
         // 7. Transition gesture for the `acked_force_idle` polling
         //    path (e.g., `runtime::stream::flush`'s spin loop).
