@@ -379,6 +379,26 @@ pub unsafe fn flush(rt: *mut RuntimeContext, out_credit_epoch: *mut u32) -> i32 
     }
     unsafe { runtime_irq_restore(irq_flags) };
 
+    // Step 3: release staged slot. `staged_segment` is foreground-owned;
+    // no IRQ disable needed here. The handles were loaded but never
+    // committed to the ISR queue (commit enqueues them into the retirement
+    // table; flush tears down before that can happen), so `confirm_retired`
+    // must be called directly — the ISR retire path will never fire for
+    // these slots and they would stay occupied forever without this.
+    if fg.staged_segment.is_some() {
+        let handles = fg.staged_segment_handles;
+        for h in &handles {
+            if !h.is_unused_sentinel()
+                && *h != crate::curve_pool::CurveHandle::HOLD_SEGMENT_SENTINEL
+            {
+                pool.confirm_retired(*h);
+            }
+        }
+        fg.staged_segment = None;
+        fg.staged_segment_handles =
+            [crate::curve_pool::CurveHandle::UNUSED_SENTINEL; 4];
+    }
+
     // Step 5: reset per-slot last_retired_gen = current_gen for all slots.
     pool.reset_all_retired_to_current();
 
@@ -389,13 +409,18 @@ pub unsafe fn flush(rt: *mut RuntimeContext, out_credit_epoch: *mut u32) -> i32 
         .fetch_add(1, Ordering::AcqRel)
         .wrapping_add(1);
 
-    // Step 7: clear stream-machine + terminal-segment + monotonicity flags.
+    // Step 7: clear stream-machine + terminal-segment + monotonicity flags
+    // + two-phase commit bookkeeping so the next PushSegment never sees a
+    // stale `ERR_PENDING_SLOT_OCCUPIED` or a mismatched t_end continuity
+    // check.
     fg.stream_state_machine = FgStreamState::Idle;
     fg.current_stream_id = None;
     fg.armed_t_start_t0 = None;
     fg.first_priming_segment_t_start = None;
     fg.terminal_segment_id = None;
     fg.flush_start_tick = None;
+    fg.last_committed_t_end = 0;
+    shared.committed_segment_id.store(0, Ordering::Release);
     shared
         .terminal_segment_id_set
         .store(false, Ordering::Release);

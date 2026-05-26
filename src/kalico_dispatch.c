@@ -211,16 +211,19 @@ handle_identify(uint32_t correlation_id, const uint8_t *body, uint16_t body_len)
     body_out[58] = (uint8_t)((epoch >> 8) & 0xFF);
     body_out[59] = (uint8_t)((epoch >> 16) & 0xFF);
     body_out[60] = (uint8_t)((epoch >> 24) & 0xFF);
-    // capabilities: bit 0 = PHASE_STEPPING_CAPABLE. Advertised
-    // unconditionally — every supported MCU runs the kalico runtime
-    // (H7 modulates at 40 kHz via runtime_tick_h7.c, F4 at 10 kHz via
-    // runtime_tick_f4.c). Until Step 10 wires true coil-current
-    // synthesis to TMC5160 XDIRECT, both chips route Modulated mode
-    // through the same `emit_step_pulses` GPIO path; the bit reflects
-    // "this firmware can service a Modulated motor at this chip's tick
-    // cadence", not "this firmware drives coil currents".
+    // capabilities bitmap (u64 LE at offset 61):
+    //   bit 0 = PHASE_STEPPING_CAPABLE. Advertised unconditionally —
+    //     every supported MCU runs the kalico runtime (H7 modulates at
+    //     40 kHz via runtime_tick_h7.c, F4 at 10 kHz via
+    //     runtime_tick_f4.c). Until Step 10 wires true coil-current
+    //     synthesis to TMC5160 XDIRECT, both chips route Modulated mode
+    //     through the same `emit_step_pulses` GPIO path; the bit reflects
+    //     "this firmware can service a Modulated motor at this chip's tick
+    //     cadence", not "this firmware drives coil currents".
+    //   bit 1 = SEGMENT_COMMIT_CAPABLE. This firmware always supports
+    //     the two-phase PushSegment / CommitSegment protocol.
     memset(&body_out[61], 0, 8);
-    body_out[61] = 0x01;
+    body_out[61] = 0x01 | 0x02;
     // mcu_serial: zero-fill (Phase D wires this).
     memset(&body_out[69], 0, 12);
 
