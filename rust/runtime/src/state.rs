@@ -138,6 +138,21 @@ pub struct FgState {
     /// so the trace-drain pipeline can retire all 4 per-axis curve slots on
     /// a single `SEGMENT_END` observation. Populated at push time.
     pub retirement_table: crate::reclaim::RetirementTable,
+    /// Two-phase commit: foreground-owned pending slot. Holds a segment that
+    /// has been staged (curve handles loaded, consumers_remaining computed)
+    /// but not yet enqueued to the ISR. Named `staged_segment` to avoid
+    /// collision with `IsrState::pending_segment` (the ISR's deferred-parking
+    /// slot — completely different purpose and ownership).
+    pub staged_segment: Option<Segment>,
+    /// Curve handles loaded for `staged_segment`. Kept here so an abort can
+    /// reclaim the four pool slots without re-deriving them from the segment.
+    /// Valid only while `staged_segment.is_some()`; undefined otherwise.
+    pub staged_segment_handles: [crate::curve_pool::CurveHandle; 4],
+    /// `t_end` of the most recently committed segment. The two-phase commit
+    /// path uses this for chaining: a segment with `t_start_clock == 0` means
+    /// "start immediately after the previous segment ends," and the chain
+    /// target is read from here. Initialized to 0 at boot.
+    pub last_committed_t_end: u64,
 }
 
 /// ISR-half state. Touched by two MCU-side contexts:
@@ -228,6 +243,12 @@ pub struct SharedState {
     pub credit_epoch: AtomicU32,
     pub accepted_segment_id: AtomicU32,
     pub retired_through_segment_id: AtomicU32,
+    /// Two-phase commit: the segment ID of the most recently committed
+    /// segment. Distinct from `accepted_segment_id` (which tracks push
+    /// acceptance) — this advances only when a staged segment is fully
+    /// committed and enqueued to the ISR. Initialized to 0; reset in the
+    /// flush/force-idle path (Task 8).
+    pub committed_segment_id: AtomicU32,
     /// 2026-05-17 F4-retire-stall diagnostic: low 32 bits of the most
     /// recent `now - seg.t_start` value computed inside
     /// `runtime_modulated_tick`. Exposed via fault_detail tag 0xFB. If
@@ -651,6 +672,7 @@ impl SharedState {
             credit_epoch: AtomicU32::new(0),
             accepted_segment_id: AtomicU32::new(0),
             retired_through_segment_id: AtomicU32::new(0),
+            committed_segment_id: AtomicU32::new(0),
             fault_detail: AtomicU32::new(0),
             terminal_segment_id_set: AtomicBool::new(false),
             terminal_segment_id_value: AtomicU32::new(0),
@@ -999,6 +1021,9 @@ impl RuntimeContext {
                 terminal_segment_id: None,
                 flush_start_tick: None,
                 retirement_table: crate::reclaim::RetirementTable::new(),
+                staged_segment: None,
+                staged_segment_handles: [crate::curve_pool::CurveHandle::UNUSED_SENTINEL; 4],
+                last_committed_t_end: 0,
             }));
 
             // Initialize IsrState — IN-PLACE, field-by-field, to avoid
