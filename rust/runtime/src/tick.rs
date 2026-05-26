@@ -1242,8 +1242,8 @@ pub fn isr_sample_tick(
     //    `arm_segment` / `dequeue` calls don't fight for the IsrState
     //    field borrows.
     if isr.engine.current.is_none() {
-        let candidate = match isr.pending_segment.take() {
-            Some(parked) => Some(parked),
+        let (candidate, was_parked) = match isr.pending_segment.take() {
+            Some(parked) => (Some(parked), true),
             None => {
                 let dequeued = isr.queue_consumer.dequeue();
                 if dequeued.is_some() {
@@ -1254,7 +1254,7 @@ pub fn isr_sample_tick(
                 } else {
                     bump_relaxed(&shared.isr_deq_none_count);
                 }
-                dequeued
+                (dequeued, false)
             }
         };
         if let Some(seg) = candidate {
@@ -1281,31 +1281,29 @@ pub fn isr_sample_tick(
                 .isr_arm_delta_hi
                 .store((delta >> 32) as u32, Ordering::Relaxed);
             if seg.t_start <= now {
-                // Check for late arm — if t_start is too far in the past,
-                // something is genuinely broken (e.g. the host sent a
-                // segment whose epoch predates the current ISR clock by
-                // more than jitter). Fault instead of silently rebasing,
-                // which would let advance_piece_if_needed walk every short
-                // piece to exhaustion and retire the move without steps.
-                let sample_period =
-                    unsafe { kalico_runtime_get_sample_period_cycles() };
-                let jitter_tolerance = 3u64 * u64::from(sample_period);
-                if seg.t_start.saturating_add(jitter_tolerance) < now {
-                    let delta = now.saturating_sub(seg.t_start);
-                    #[allow(clippy::cast_possible_truncation)]
-                    shared.fault_detail.store(delta as u32, Ordering::Release);
-                    shared.last_error.store(
-                        crate::error::KALICO_FAULT_LATE_ARM,
-                        Ordering::Release,
-                    );
-                    shared.runtime_status.store(
-                        crate::engine::RuntimeStatus::Fault as u8,
-                        Ordering::Release,
-                    );
-                    return;
+                // LATE_ARM check: only for freshly-dequeued segments.
+                // Parked segments waited for t_start by design — ISR
+                // scheduling jitter means `now` may overshoot by a few
+                // ticks, which is normal and not an epoch mismatch.
+                if !was_parked {
+                    let sample_period =
+                        unsafe { kalico_runtime_get_sample_period_cycles() };
+                    let jitter_tolerance = 3u64 * u64::from(sample_period);
+                    if seg.t_start.saturating_add(jitter_tolerance) < now {
+                        let late_delta = now.saturating_sub(seg.t_start);
+                        #[allow(clippy::cast_possible_truncation)]
+                        shared.fault_detail.store(late_delta as u32, Ordering::Release);
+                        shared.last_error.store(
+                            crate::error::KALICO_FAULT_LATE_ARM,
+                            Ordering::Release,
+                        );
+                        shared.runtime_status.store(
+                            crate::engine::RuntimeStatus::Fault as u8,
+                            Ordering::Release,
+                        );
+                        return;
+                    }
                 }
-                // Normal arm — t_start is in the past but within jitter
-                // tolerance. Proceed without rebasing.
                 shared.current_segment_id.store(seg.id, Ordering::Release);
                 bump_relaxed(&shared.isr_armed_count);
                 isr.engine.arm_segment_with_diag(seg, curve_pool, shared);
