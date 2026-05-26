@@ -1291,8 +1291,6 @@ pub fn isr_sample_tick(
                     unsafe { kalico_runtime_get_sample_period_cycles() };
                 let jitter_tolerance = 3u64 * u64::from(sample_period);
                 if seg.t_start.saturating_add(jitter_tolerance) < now {
-                    // Late arm: t_start is more than 3 ISR ticks in the
-                    // past. Fault and discard; do not arm the engine.
                     shared.last_error.store(
                         crate::error::KALICO_FAULT_LATE_ARM,
                         Ordering::Release,
