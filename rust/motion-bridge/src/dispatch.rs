@@ -1102,6 +1102,88 @@ mod tests {
         }
     }
 
+    /// **All-constant segment still produces a plan for every MCU.**
+    ///
+    /// When every axis in a `ShapedSegment` is trivially constant (zero
+    /// displacement), `build_push_params` must still emit one `McuPushPlan`
+    /// per MCU in the config.  The old `is_trivially_constant` skip (removed
+    /// 2026-05-11) would have left the secondary MCU (F446 / Z) with no plan,
+    /// breaking the two-phase commit segment-counter lockstep invariant.
+    ///
+    /// This test directly encodes the requirement from the comment block in
+    /// `build_push_params`:
+    ///   "Two-phase commit: every MCU gets every segment, even if all its
+    ///    axes are trivially constant (idle segment)."
+    #[test]
+    fn all_constant_axes_still_produces_plan_for_every_mcu() {
+        // Both MCUs: Octopus (mcu_id=0, CoreXY, X+Y) and F446 (mcu_id=1, Z).
+        let configs = cfgs();
+
+        // All three axes constant at the same value — zero displacement.
+        let seg = shaped([
+            constant_curve(75.0),
+            constant_curve(75.0),
+            constant_curve(5.0),
+        ]);
+
+        let plans = build_push_params(&seg, &configs, 10_000, 20_000);
+
+        // Every MCU in the config must receive a plan.
+        assert_eq!(
+            plans.len(),
+            configs.len(),
+            "every MCU must receive a plan even when all axes are constant; \
+             got {} plans for {} MCUs",
+            plans.len(),
+            configs.len(),
+        );
+
+        // Plan ordering must cover both known MCU IDs.
+        let has_octopus = plans.iter().any(|p| p.mcu_id == 0);
+        let has_f446 = plans.iter().any(|p| p.mcu_id == 1);
+        assert!(has_octopus, "Octopus (mcu_id=0) must have a plan for all-constant segment");
+        assert!(has_f446, "F446 (mcu_id=1) must have a plan for all-constant segment");
+
+        // Both plans carry the correct timing window.
+        for plan in &plans {
+            assert_eq!(
+                plan.params.t_start,
+                10_000,
+                "mcu_id={} plan has wrong t_start",
+                plan.mcu_id
+            );
+            assert_eq!(
+                plan.params.t_end,
+                20_000,
+                "mcu_id={} plan has wrong t_end",
+                plan.mcu_id
+            );
+        }
+
+        // Octopus: must include curves for both its kinematic axes (X and Y),
+        // even though both are constant — the engine needs the absolute-position
+        // anchor to avoid phantom position jumps across segments.
+        let octopus = plans.iter().find(|p| p.mcu_id == 0).unwrap();
+        assert_eq!(
+            octopus.curves_to_load.len(),
+            2,
+            "Octopus must get curves for both X and Y even when constant"
+        );
+
+        // F446: must include a curve for Z.
+        let f446 = plans.iter().find(|p| p.mcu_id == 1).unwrap();
+        assert_eq!(
+            f446.curves_to_load.len(),
+            1,
+            "F446 must get a curve for Z even when constant"
+        );
+        assert_eq!(
+            f446.curves_to_load[0].0,
+            AXIS_Z,
+            "F446's single curve must be for AXIS_Z"
+        );
+    }
+
     /// **Diagonal jog — both motors step at distinct rates.** X and Y are both
     /// linear but with different slopes. Motor-A and Motor-B must both be
     /// non-constant and differ from each other.

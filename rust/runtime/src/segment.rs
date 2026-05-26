@@ -382,4 +382,31 @@ mod tests {
         #[allow(clippy::clone_on_copy)]
         let _ = seg.clone();
     }
+
+    /// An idle segment — all four curve handles are `UNUSED_SENTINEL` — must
+    /// produce `consumers_remaining == 0` so the engine retires it immediately
+    /// without waiting for any motor to clear a consumer bit.
+    ///
+    /// This property is load-bearing for the two-phase commit idle-segment path:
+    /// when the bridge sends a segment where every MCU has all-UNUSED handles
+    /// (e.g. a pure timing-alignment segment), the MCU evaluates nothing and
+    /// must retire the segment on the first `consumers_done()` check.
+    #[test]
+    fn idle_segment_all_unused_handles_consumers_remaining_is_zero() {
+        for kinematics in [KinematicTag::CoreXyAndE, KinematicTag::CartesianXyzAndE] {
+            let mask = Segment::compute_consumers_remaining(
+                kinematics,
+                CurveHandle::UNUSED_SENTINEL,
+                CurveHandle::UNUSED_SENTINEL,
+                CurveHandle::UNUSED_SENTINEL,
+                CurveHandle::UNUSED_SENTINEL,
+            );
+            assert_eq!(
+                mask,
+                0,
+                "all-UNUSED-handle segment must have consumers_remaining=0 \
+                 (kinematics={kinematics:?}): got {mask:#06x}"
+            );
+        }
+    }
 }

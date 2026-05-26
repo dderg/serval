@@ -792,4 +792,116 @@ mod tests {
             other => panic!("expected TrailingBytes(1), got {other:?}"),
         }
     }
+
+    // =========================================================================
+    // Two-phase commit wire format tests (CommitSegment, AbortPending and
+    // their responses).
+    // =========================================================================
+
+    /// `CommitSegment` (0x0060) carries the timing window for Phase 2 of the
+    /// two-phase commit protocol: 4 bytes segment_id + 8 bytes t_start_clock
+    /// + 8 bytes duration_clocks = 20 bytes.
+    #[test]
+    fn commit_segment_roundtrip_and_size() {
+        let msg = CommitSegment {
+            segment_id: 42,
+            t_start_clock: 1_000_000,
+            duration_clocks: 500_000,
+        };
+        let bytes = msg.encoded_to_vec();
+        assert_eq!(
+            bytes.len(),
+            20,
+            "CommitSegment wire size must be 20 bytes (4 + 8 + 8)"
+        );
+        let decoded = CommitSegment::decode(&bytes).expect("CommitSegment decode ok");
+        assert_eq!(decoded, msg);
+    }
+
+    /// Verify extreme values survive the encode/decode path without truncation.
+    #[test]
+    fn commit_segment_extreme_values_roundtrip() {
+        let msg = CommitSegment {
+            segment_id: u32::MAX,
+            t_start_clock: u64::MAX,
+            duration_clocks: u64::MAX,
+        };
+        assert_eq!(roundtrip(&msg), msg);
+    }
+
+    /// `CommitSegmentResponse` (0x0061): 4 bytes result (i32) + 4 bytes
+    /// segment_id = 8 bytes total.
+    #[test]
+    fn commit_segment_response_roundtrip_and_size() {
+        let ok = CommitSegmentResponse { result: 0, segment_id: 42 };
+        let bytes = ok.encoded_to_vec();
+        assert_eq!(
+            bytes.len(),
+            8,
+            "CommitSegmentResponse wire size must be 8 bytes (4 + 4)"
+        );
+        assert_eq!(CommitSegmentResponse::decode(&bytes).expect("decode ok"), ok);
+
+        // Negative result (MCU rejection) must also survive the round-trip.
+        let err = CommitSegmentResponse { result: -1, segment_id: 99 };
+        assert_eq!(roundtrip(&err), err);
+    }
+
+    /// `AbortPending` (0x0070): single u32 segment_id = 4 bytes.
+    #[test]
+    fn abort_pending_roundtrip_and_size() {
+        let msg = AbortPending { segment_id: 7 };
+        let bytes = msg.encoded_to_vec();
+        assert_eq!(
+            bytes.len(),
+            4,
+            "AbortPending wire size must be 4 bytes (u32 segment_id only)"
+        );
+        let decoded = AbortPending::decode(&bytes).expect("AbortPending decode ok");
+        assert_eq!(decoded, msg);
+    }
+
+    /// `AbortPendingResponse` (0x0071): 4 bytes result (i32) + 4 bytes
+    /// segment_id = 8 bytes total.
+    #[test]
+    fn abort_pending_response_roundtrip_and_size() {
+        let ok = AbortPendingResponse { result: 0, segment_id: 7 };
+        let bytes = ok.encoded_to_vec();
+        assert_eq!(
+            bytes.len(),
+            8,
+            "AbortPendingResponse wire size must be 8 bytes (4 + 4)"
+        );
+        assert_eq!(AbortPendingResponse::decode(&bytes).expect("decode ok"), ok);
+
+        let err = AbortPendingResponse { result: -2, segment_id: 0 };
+        assert_eq!(roundtrip(&err), err);
+    }
+
+    /// `MessageKind` discriminants for the two-phase commit messages must be
+    /// present in the catalog and survive the `from_u16` round-trip.
+    #[test]
+    fn commit_abort_message_kinds_are_in_catalog() {
+        assert_eq!(
+            MessageKind::from_u16(MessageKind::CommitSegment.as_u16()),
+            Some(MessageKind::CommitSegment),
+        );
+        assert_eq!(
+            MessageKind::from_u16(MessageKind::CommitSegmentResponse.as_u16()),
+            Some(MessageKind::CommitSegmentResponse),
+        );
+        assert_eq!(
+            MessageKind::from_u16(MessageKind::AbortPending.as_u16()),
+            Some(MessageKind::AbortPending),
+        );
+        assert_eq!(
+            MessageKind::from_u16(MessageKind::AbortPendingResponse.as_u16()),
+            Some(MessageKind::AbortPendingResponse),
+        );
+        // Discriminant values per spec §7.1.
+        assert_eq!(MessageKind::CommitSegment.as_u16(), 0x0060);
+        assert_eq!(MessageKind::CommitSegmentResponse.as_u16(), 0x0061);
+        assert_eq!(MessageKind::AbortPending.as_u16(), 0x0070);
+        assert_eq!(MessageKind::AbortPendingResponse.as_u16(), 0x0071);
+    }
 }
