@@ -969,6 +969,7 @@ pub mod exports {
         unsafe {
             let fg_ptr: *mut FgState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).fg));
             let pool: &CurvePool = &*core::ptr::addr_of!((*ctx).curve_pool);
+            let shared: &SharedState = &*core::ptr::addr_of!((*ctx).shared);
             let fg: &mut FgState = &mut *fg_ptr;
             let out_slice = core::slice::from_raw_parts_mut(out_buf, out_cap as usize);
             let mut count = 0usize;
@@ -989,6 +990,9 @@ pub mod exports {
                             }
                         }
                     }
+                    shared
+                        .retired_through_segment_id
+                        .store(sample.segment_id, Ordering::Release);
                     saw_segment_end = true;
                 }
                 if let Some(slot) = out_slice.get_mut(count) {
