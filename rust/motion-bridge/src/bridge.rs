@@ -386,10 +386,10 @@ fn build_shaper_config(
 /// kalico round-trip — measured in microseconds on USB-CDC.
 fn dispatch_push_segment(
     io: &KalicoHostIo,
-    credit: &CreditCounter,
+    _credit: &CreditCounter,
     params: &producer::SegmentPushParams,
 ) -> Result<producer::PushedSegmentInfo, producer::ProducerError> {
-    producer::push_segment_with_timeout(io, credit, params, producer::DEFAULT_PUSH_RESPONSE_TIMEOUT)
+    producer::push_segment_no_credit(io, params, producer::DEFAULT_PUSH_RESPONSE_TIMEOUT)
 }
 
 // ── PyMotionBridge ──────────────────────────────────────────────────────
@@ -2554,9 +2554,9 @@ impl PyMotionBridge {
                     // `prepared_mcus` during the error-recovery path.
                     struct PushedMcuInfo {
                         io: Arc<KalicoHostIo>,
+                        credit: Arc<CreditCounter>,
                         mcu_id: u32,
                         seg_id: u32,
-                        /// Sub-plan's t_start/t_end for commit timing.
                         sub_t_start_clock: u64,
                         sub_t_end_clock: u64,
                     }
@@ -2736,6 +2736,7 @@ impl PyMotionBridge {
                         let sub_plan = &prepared_mcus[mcu_idx].sub_plans[sub_idx];
                         pushed.push(PushedMcuInfo {
                             io: Arc::clone(&io),
+                            credit: Arc::clone(&credit),
                             mcu_id: sp_mcu_id,
                             seg_id: sp_seg_id,
                             sub_t_start_clock: sub_plan.params.t_start,
@@ -2750,11 +2751,18 @@ impl PyMotionBridge {
                     // unrecoverable — the MCU state is inconsistent.
 
                     for info in &pushed {
+                        // Acquire credit before commit — the commit moves
+                        // the segment into the SPSC queue, consuming a slot.
+                        info.credit
+                            .acquire_blocking(producer::DEFAULT_CREDIT_ACQUIRE_TIMEOUT)
+                            .map_err(|()| DispatchError::SlotPoolExhausted {
+                                mcu_id: info.mcu_id,
+                                capacity: 0,
+                                in_flight: 0,
+                            })?;
+
                         let duration_clocks =
                             info.sub_t_end_clock.saturating_sub(info.sub_t_start_clock);
-                        // First sub of a trajectory: use the computed
-                        // t_start_clock. Subsequent subs: t_start_clock=0
-                        // tells the MCU to chain from previous t_end.
                         let commit_t_start = if sub_idx == 0 {
                             info.sub_t_start_clock
                         } else {

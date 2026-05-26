@@ -139,20 +139,25 @@ pub fn push_segment_with_timeout(
     params: &SegmentPushParams,
     timeout: Duration,
 ) -> Result<PushedSegmentInfo, ProducerError> {
-    // Spec §5 back-pressure: the MCU's segment queue is capped at
-    // `Q_N - 1 = 7` in flight. Under rapid `submit_move` bursts the
-    // host fills the queue and the next `kalico_credit_freed` event
-    // arrives with `free_slots=0`, snapping `credit.available` to zero.
-    // Block until the MCU retires a segment and emits the next
-    // `credit_freed` (with non-zero free slots), or until `timeout`
-    // elapses. Without this wait, the planner's dispatch closure would
-    // fail on the first oversubscription, store a `Dispatch` error, and
-    // stop — producing the bench-observed "every other jog dropped"
-    // symptom (commit history: bench session 2026-05-11).
     credit
         .acquire_blocking(DEFAULT_CREDIT_ACQUIRE_TIMEOUT)
         .map_err(|()| ProducerError::NoCredit)?;
+    match push_segment_no_credit(io, params, timeout) {
+        Ok(info) => Ok(info),
+        Err(e) => {
+            credit.release();
+            Err(e)
+        }
+    }
+}
 
+/// Push a segment without acquiring credit. Used by the two-phase commit
+/// protocol where credit is consumed at commit time, not push time.
+pub fn push_segment_no_credit(
+    io: &KalicoHostIo,
+    params: &SegmentPushParams,
+    timeout: Duration,
+) -> Result<PushedSegmentInfo, ProducerError> {
     let body = PushSegment {
         id: params.id,
         handle_x: params.x_handle_packed,
@@ -167,31 +172,21 @@ pub fn push_segment_with_timeout(
     }
     .encoded_to_vec();
 
-    let (kind, resp_body) = match io.kalico_call(MessageKind::PushSegment, body, timeout) {
-        Ok(r) => r,
-        Err(e) => {
-            credit.release();
-            return Err(ProducerError::Transport(e));
-        }
-    };
+    let (kind, resp_body) = io
+        .kalico_call(MessageKind::PushSegment, body, timeout)
+        .map_err(ProducerError::Transport)?;
     if kind != MessageKind::PushSegmentResponse {
-        credit.release();
         return Err(ProducerError::Transport(TransportError::Parse(format!(
             "expected PushSegmentResponse, got 0x{:04x}",
             kind.as_u16()
         ))));
     }
-    let resp = match PushSegmentResponse::decode(&resp_body) {
-        Ok(r) => r,
-        Err(e) => {
-            credit.release();
-            return Err(ProducerError::Transport(TransportError::Parse(format!(
-                "PushSegmentResponse decode failed: {e:?}"
-            ))));
-        }
-    };
+    let resp = PushSegmentResponse::decode(&resp_body).map_err(|e| {
+        ProducerError::Transport(TransportError::Parse(format!(
+            "PushSegmentResponse decode failed: {e:?}"
+        )))
+    })?;
     if resp.result != 0 {
-        credit.release();
         return Err(ProducerError::McuRejected(resp.result));
     }
     Ok(PushedSegmentInfo {
