@@ -274,4 +274,69 @@ fn two_phase_commit_protocol() {
         "commit(id=4) with t_start_clock=0 (chaining) should succeed"
     );
     assert_eq!(out_id, 4, "out_segment_id should be 4 after chained commit");
+
+    // ── Case 12: stale t_start_clock triggers LATE_ARM fault ────────
+    //
+    // Reproduces the G28 X instacrash (2026-05-26): cold-start t_start_clock
+    // computed at push time was stale by commit time. The ISR found t_start
+    // in the past and faulted with LATE_ARM.
+    //
+    // Commits a segment with a deliberately stale t_start_clock (value 1,
+    // which is ~2s behind the widened clock seeded at 1_000_000_000),
+    // drives the ISR, and verifies the engine faults with LATE_ARM instead
+    // of silently rebasing.
+
+    // Push segment id=10 (well past any previous IDs from cases 1-11).
+    let rc = unsafe {
+        kalico_c_api::runtime_handle_push_segment(
+            rt, 10,
+            0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE, 0xFFFF_FFFE, // UNUSED handles
+            0, 500_000, // t_start/t_end (ignored by push in two-phase)
+            1, // kinematics = CartesianXyzAndE
+            2, // e_mode = Travel
+            0, // extrusion_ratio_bits
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "push id=10 should succeed");
+
+    // Commit with a STALE t_start_clock — value 1, which is ~1 billion
+    // cycles behind the widened clock (seeded at 1_000_000_000 by the
+    // runtime_widened_host_clock stub). This reproduces the bug where
+    // push-time timing was passed through to commit instead of being
+    // recomputed fresh.
+    let mut out_id: u32 = 0;
+    let rc = unsafe {
+        kalico_c_api::runtime_handle_commit_segment(
+            rt,
+            10,       // segment_id
+            1,        // t_start_clock = 1 (deliberately stale / in the past)
+            100_000,  // duration_clocks
+            &mut out_id as *mut u32,
+        )
+    };
+    assert_eq!(rc, kalico_c_api::KALICO_OK, "commit itself should succeed (enqueues to SPSC)");
+
+    // Drive the ISR — this will dequeue the segment and try to arm it.
+    // The arm check should find t_start far in the past and fault.
+    unsafe {
+        kalico_c_api::kalico_runtime_tick_sample(rt);
+    }
+
+    // Verify the engine faulted with LATE_ARM.
+    let status = unsafe { kalico_c_api::runtime_handle_status(rt) };
+    let last_error = unsafe { kalico_c_api::runtime_handle_last_error(rt) };
+
+    assert_eq!(
+        status, 3, // RuntimeStatus::Fault = 3
+        "engine should be in Fault state after LATE_ARM (got status={})",
+        status,
+    );
+    assert_eq!(
+        last_error,
+        kalico_c_api::KALICO_FAULT_LATE_ARM,
+        "last_error should be KALICO_FAULT_LATE_ARM (0x0010), got 0x{:x}",
+        last_error,
+    );
 }
