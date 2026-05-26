@@ -1288,7 +1288,10 @@ pub fn isr_sample_tick(
                 if !was_parked {
                     let sample_period =
                         unsafe { kalico_runtime_get_sample_period_cycles() };
-                    let jitter_tolerance = 3u64 * u64::from(sample_period);
+                    // 100ms tolerance: large enough to absorb clock-sync drift
+                    // between runtime_widened_host_clock and the ISR's widen_state.
+                    // Still catches genuine epoch mismatches (which are 8+ seconds).
+                    let jitter_tolerance = 4000u64 * u64::from(sample_period);
                     if seg.t_start.saturating_add(jitter_tolerance) < now {
                         shared.last_error.store(
                             crate::error::KALICO_FAULT_LATE_ARM,
