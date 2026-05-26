@@ -2248,6 +2248,19 @@ impl PyMotionBridge {
 
                 let mut prepared_mcus: Vec<PreparedMcu> = Vec::new();
 
+                // Step A: compute clocks and collect per-MCU data without splitting yet.
+                struct ClockedPlan {
+                    plan: dispatch::McuPushPlan,
+                    caps: dispatch::McuCaps,
+                    freq: f64,
+                    io: Arc<KalicoHostIo>,
+                    credit: Arc<CreditCounter>,
+                    slot_pool: Arc<SharedSlotPool>,
+                    t_start_clock: u64,
+                    t_end_clock: u64,
+                }
+                let mut clocked_plans: Vec<ClockedPlan> = Vec::new();
+
                 for mut plan in mcu_plans {
                     // Skip plans targeting MCUs without kalico-runtime — stock
                     // Klipper firmware can't decode load_curve / push_segment.
@@ -2453,14 +2466,11 @@ impl PyMotionBridge {
                         }
                     }
 
-                    // --- Move splitting (dispatch-level curve chunking) ---
                     let caps = mcu_configs_for_cb
                         .iter()
                         .find(|c| c.mcu_id == plan.mcu_id)
                         .map(|c| c.caps)
                         .unwrap_or_default();
-                    let effective_max_pieces =
-                        (caps.max_pieces_per_curve as usize).min(255);
                     if caps.max_pieces_per_curve > 255 {
                         log::warn!(
                             "MCU {} reports max_pieces_per_curve={}, clamping to 255 (u8 wire ceiling)",
@@ -2468,15 +2478,41 @@ impl PyMotionBridge {
                         );
                     }
 
-                    let sub_plans = dispatch::split_plan_if_needed(
-                        plan, effective_max_pieces, freq,
-                    )?;
+                    clocked_plans.push(ClockedPlan {
+                        plan,
+                        caps,
+                        freq,
+                        io,
+                        credit: Arc::clone(credit),
+                        slot_pool: Arc::clone(slot_pool),
+                        t_start_clock,
+                        t_end_clock,
+                    });
+                }
+
+                // Step B: compute unified split times from all clocked plans, then
+                // apply the same boundaries to every MCU so all end up with identical
+                // sub-plan counts — required by the two-phase commit invariant.
+                let caps_list: Vec<(u32, dispatch::McuCaps)> = clocked_plans
+                    .iter()
+                    .map(|cp| (cp.plan.mcu_id, cp.caps))
+                    .collect();
+                let plan_refs: Vec<&dispatch::McuPushPlan> = clocked_plans
+                    .iter()
+                    .map(|cp| &cp.plan)
+                    .collect();
+                let split_times =
+                    dispatch::compute_unified_split_times(&plan_refs, &caps_list);
+
+                for cp in clocked_plans {
+                    let sub_plans =
+                        dispatch::apply_split_times(cp.plan, &split_times, cp.freq);
 
                     let n_sub = sub_plans.len();
                     if n_sub > 1 {
                         log::info!(
-                            "[bridge-trace] split mcu={}: {} sub-segments (max_pieces={})",
-                            sub_plans[0].mcu_id, n_sub, effective_max_pieces,
+                            "[bridge-trace] split mcu={}: {} sub-segments (unified)",
+                            sub_plans[0].mcu_id, n_sub,
                         );
                     }
 
@@ -2507,13 +2543,13 @@ impl PyMotionBridge {
 
                     prepared_mcus.push(PreparedMcu {
                         mcu_id: stamped_subs[0].mcu_id,
-                        io: Arc::clone(&io),
-                        credit: Arc::clone(credit),
-                        slot_pool: Arc::clone(slot_pool),
+                        io: cp.io,
+                        credit: cp.credit,
+                        slot_pool: cp.slot_pool,
                         sub_plans: stamped_subs,
-                        freq,
-                        t_start_clock,
-                        t_end_clock,
+                        freq: cp.freq,
+                        t_start_clock: cp.t_start_clock,
+                        t_end_clock: cp.t_end_clock,
                     });
                 }
 
@@ -2568,10 +2604,10 @@ impl PyMotionBridge {
                     };
 
                     for mcu_idx in 0..prepared_mcus.len() {
-                        // Skip MCUs that don't have a sub-plan at this index.
-                        if sub_idx >= prepared_mcus[mcu_idx].sub_plans.len() {
-                            continue;
-                        }
+                        debug_assert!(
+                            sub_idx < prepared_mcus[mcu_idx].sub_plans.len(),
+                            "unified split guarantees equal sub-plan counts"
+                        );
 
                         // Snapshot immutable fields from the sub-plan before
                         // entering the curve-load loop. This avoids holding a

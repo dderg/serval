@@ -312,6 +312,150 @@ fn split_recursive(
     Ok(result)
 }
 
+/// Compute unified time-domain split boundaries covering all MCU plans.
+///
+/// Returns a `Vec` of split times in seconds where adjacent pairs define
+/// sub-segment windows. Every MCU will receive sub-plans at exactly these
+/// boundaries, preserving the two-phase commit lockstep invariant.
+///
+/// `caps` is a slice of `(mcu_id, McuCaps)` in the same order as `plans`.
+pub fn compute_unified_split_times(
+    plans: &[&McuPushPlan],
+    caps: &[(u32, McuCaps)],
+) -> Vec<f64> {
+    // Find the bottleneck: the MCU × axis combination that requires the most chunks.
+    struct Bottleneck<'a> {
+        curve: &'a CurveLoadParams,
+        stride: usize,
+        n_chunks: usize,
+    }
+
+    let mut best: Option<Bottleneck<'_>> = None;
+
+    for plan in plans {
+        let effective_max = caps
+            .iter()
+            .find(|(id, _)| *id == plan.mcu_id)
+            .map(|(_, c)| (c.max_pieces_per_curve as usize).min(255))
+            .unwrap_or(16);
+
+        if effective_max < 3 {
+            continue;
+        }
+
+        let stride = effective_max - 2;
+
+        for (_, curve) in &plan.curves_to_load {
+            let pc = curve.piece_count();
+            if pc == 0 {
+                continue;
+            }
+            let n_chunks = pc.div_ceil(stride);
+            if best.as_ref().map_or(true, |b| n_chunks > b.n_chunks) {
+                best = Some(Bottleneck { curve, stride, n_chunks });
+            }
+        }
+    }
+
+    let bottleneck = match best {
+        None => {
+            // No curves or all fit — compute total duration from any curve.
+            let total = plans
+                .iter()
+                .flat_map(|p| p.curves_to_load.iter())
+                .map(|(_, c)| c.duration_per_piece.iter().map(|&d| d as f64).sum::<f64>())
+                .next()
+                .unwrap_or(0.0);
+            return vec![0.0, total];
+        }
+        Some(b) => b,
+    };
+
+    if bottleneck.n_chunks <= 1 {
+        let total: f64 = bottleneck
+            .curve
+            .duration_per_piece
+            .iter()
+            .map(|&d| d as f64)
+            .sum();
+        return vec![0.0, total];
+    }
+
+    let mut split_times = vec![0.0_f64];
+    let mut elapsed = 0.0_f64;
+    for (i, d) in bottleneck.curve.duration_per_piece.iter().enumerate() {
+        elapsed += *d as f64;
+        if (i + 1) % bottleneck.stride == 0 && i + 1 < bottleneck.curve.piece_count() {
+            split_times.push(elapsed);
+        }
+    }
+    split_times.push(elapsed);
+
+    split_times
+}
+
+/// Apply pre-computed split times to a single MCU's plan, producing one
+/// sub-plan per time window.
+///
+/// `split_times` must have at least 2 entries. Each adjacent pair
+/// `(split_times[w], split_times[w+1])` defines one window. Windows where
+/// a curve has no pieces yield an empty `curves_to_load` for that axis
+/// (the two-phase commit protocol sends the segment with all UNUSED handles).
+pub fn apply_split_times(
+    plan: McuPushPlan,
+    split_times: &[f64],
+    freq: f64,
+) -> Vec<McuPushPlan> {
+    debug_assert!(split_times.len() >= 2, "split_times must have at least 2 entries");
+
+    let n_chunks = split_times.len() - 1;
+    if n_chunks == 1 {
+        return vec![plan];
+    }
+
+    let t_start_clock = plan.params.t_start;
+    let t_end_clock = plan.params.t_end;
+    let mut chunks = Vec::with_capacity(n_chunks);
+    let mut chunk_start_clock = t_start_clock;
+
+    for w in 0..n_chunks {
+        let win_start = split_times[w];
+        let win_end = split_times[w + 1];
+
+        let chunk_end_clock = if w == n_chunks - 1 {
+            t_end_clock
+        } else {
+            let dur_clocks = (win_end - win_start) * freq;
+            chunk_start_clock + dur_clocks.round() as u64
+        };
+
+        let sub_curves: Vec<(usize, CurveLoadParams)> = plan
+            .curves_to_load
+            .iter()
+            .map(|(axis_idx, curve)| (*axis_idx, extract_time_window(curve, win_start, win_end)))
+            .collect();
+
+        let mut sub_params = plan.params;
+        sub_params.t_start = chunk_start_clock;
+        sub_params.t_end = chunk_end_clock;
+        sub_params.id = 0;
+        sub_params.x_handle_packed = UNUSED_HANDLE;
+        sub_params.y_handle_packed = UNUSED_HANDLE;
+        sub_params.z_handle_packed = UNUSED_HANDLE;
+        sub_params.e_handle_packed = UNUSED_HANDLE;
+
+        chunks.push(McuPushPlan {
+            mcu_id: plan.mcu_id,
+            curves_to_load: sub_curves,
+            params: sub_params,
+        });
+
+        chunk_start_clock = chunk_end_clock;
+    }
+
+    chunks
+}
+
 /// Build per-MCU push plans for a single shaped segment.
 ///
 /// `t_start_clock` / `t_end_clock` are 64-bit MCU-clock values produced by
@@ -1182,6 +1326,127 @@ mod tests {
             AXIS_Z,
             "F446's single curve must be for AXIS_Z"
         );
+    }
+
+    fn make_plan(mcu_id: u32, curves: Vec<(usize, CurveLoadParams)>, t_end: u64) -> McuPushPlan {
+        McuPushPlan {
+            mcu_id,
+            curves_to_load: curves,
+            params: SegmentPushParams {
+                id: 0,
+                x_handle_packed: UNUSED_HANDLE,
+                y_handle_packed: UNUSED_HANDLE,
+                z_handle_packed: UNUSED_HANDLE,
+                e_handle_packed: UNUSED_HANDLE,
+                t_start: 0,
+                t_end,
+                kinematics: 0,
+                e_mode: 2,
+                extrusion_ratio: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn test_unified_split_times_single_mcu() {
+        // 20 pieces at 0.1s each → 2.0s total; cap=8 → stride=6 → ceil(20/6)=4 chunks
+        let curve = make_curve(20, 0.1, 1.0);
+        let plan = make_plan(0, vec![(AXIS_X, curve)], 2_000_000);
+        let caps = vec![(0u32, McuCaps { curve_pool_n: 16, max_pieces_per_curve: 8 })];
+        let plans = vec![&plan];
+        let times = super::compute_unified_split_times(&plans, &caps);
+        // n_chunks = ceil(20/6) = 4 windows → 5 boundary values
+        assert_eq!(times.len(), 5, "expected 4 windows = 5 boundaries, got {:?}", times);
+        assert!((times[0] - 0.0).abs() < 1e-9);
+        assert!((times[times.len() - 1] - 2.0).abs() < 1e-6, "total duration must be 2.0s");
+        // Boundaries are at piece-boundary multiples of stride=6
+        assert!((times[1] - 0.6).abs() < 1e-6, "first boundary at piece 6 = 0.6s");
+        assert!((times[2] - 1.2).abs() < 1e-6, "second boundary at piece 12 = 1.2s");
+        assert!((times[3] - 1.8).abs() < 1e-6, "third boundary at piece 18 = 1.8s");
+    }
+
+    #[test]
+    fn test_unified_split_all_mcus_same_count() {
+        // MCU A: 20 pieces, cap=8 → needs 4 chunks.
+        // MCU B: 2 pieces, cap=16 → fits in 1 chunk normally.
+        // Unified split must give both MCUs 4 sub-plans.
+        let curve_a = make_curve(20, 0.1, 1.0);
+        let plan_a = make_plan(0, vec![(AXIS_X, curve_a)], 2_000_000);
+
+        let curve_b = make_curve(2, 1.0, 1.0);
+        let plan_b = make_plan(1, vec![(AXIS_Z, curve_b)], 2_000_000);
+
+        let caps = vec![
+            (0u32, McuCaps { curve_pool_n: 16, max_pieces_per_curve: 8 }),
+            (1u32, McuCaps { curve_pool_n: 16, max_pieces_per_curve: 16 }),
+        ];
+        let plans_ref = vec![&plan_a, &plan_b];
+        let split_times = super::compute_unified_split_times(&plans_ref, &caps);
+
+        let subs_a = super::apply_split_times(plan_a, &split_times, 1_000_000.0);
+        let subs_b = super::apply_split_times(plan_b, &split_times, 1_000_000.0);
+
+        assert_eq!(subs_a.len(), subs_b.len(), "both MCUs must have the same sub-plan count");
+        assert!(subs_a.len() > 1, "A must have been split");
+
+        // MCU B's sub-plans in windows where it has no pieces must have empty curves
+        // (extract_time_window returns empty for out-of-range windows, so piece_count==0).
+        for (i, sub) in subs_b.iter().enumerate() {
+            let total_pieces: usize = sub.curves_to_load.iter().map(|(_, c)| c.piece_count()).sum();
+            // The first two windows cover [0.0, 0.6) and [0.6, 1.2) which both contain
+            // the first piece (dur=1.0s). Later windows may have empty pieces.
+            let _ = (i, total_pieces); // just assert no panic
+        }
+    }
+
+    #[test]
+    fn test_unified_split_no_split_needed() {
+        // Both MCUs under their caps → one window covering the whole segment.
+        let curve_a = make_curve(4, 0.1, 1.0);
+        let curve_b = make_curve(3, 0.1, 1.0);
+        let plan_a = make_plan(0, vec![(AXIS_X, curve_a)], 400_000);
+        let plan_b = make_plan(1, vec![(AXIS_Z, curve_b)], 400_000);
+
+        let caps = vec![
+            (0u32, McuCaps { curve_pool_n: 16, max_pieces_per_curve: 8 }),
+            (1u32, McuCaps { curve_pool_n: 16, max_pieces_per_curve: 8 }),
+        ];
+        let plans_ref = vec![&plan_a, &plan_b];
+        let split_times = super::compute_unified_split_times(&plans_ref, &caps);
+
+        // Both fit → single window
+        assert_eq!(split_times.len(), 2, "no split needed: expected 2 boundary values");
+        assert!((split_times[0] - 0.0).abs() < 1e-9);
+
+        let subs_a = super::apply_split_times(plan_a, &split_times, 1_000_000.0);
+        let subs_b = super::apply_split_times(plan_b, &split_times, 1_000_000.0);
+        assert_eq!(subs_a.len(), 1);
+        assert_eq!(subs_b.len(), 1);
+    }
+
+    #[test]
+    fn test_unified_split_idle_mcu() {
+        // MCU A: 20 pieces, cap=8 → 4 chunks.
+        // MCU B: no curves (idle MCU — all handles UNUSED).
+        let curve_a = make_curve(20, 0.1, 1.0);
+        let plan_a = make_plan(0, vec![(AXIS_X, curve_a)], 2_000_000);
+        let plan_b = make_plan(1, vec![], 2_000_000);
+
+        let caps = vec![
+            (0u32, McuCaps { curve_pool_n: 16, max_pieces_per_curve: 8 }),
+            (1u32, McuCaps { curve_pool_n: 16, max_pieces_per_curve: 8 }),
+        ];
+        let plans_ref = vec![&plan_a, &plan_b];
+        let split_times = super::compute_unified_split_times(&plans_ref, &caps);
+
+        let subs_a = super::apply_split_times(plan_a, &split_times, 1_000_000.0);
+        let subs_b = super::apply_split_times(plan_b, &split_times, 1_000_000.0);
+
+        assert_eq!(subs_a.len(), subs_b.len(), "idle MCU must have the same sub-plan count as active MCU");
+        assert!(subs_a.len() > 1, "active MCU must have been split");
+        for sub in &subs_b {
+            assert!(sub.curves_to_load.is_empty(), "idle MCU sub-plans must have no curves");
+        }
     }
 
     /// **Diagonal jog — both motors step at distinct rates.** X and Y are both
