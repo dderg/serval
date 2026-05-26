@@ -1257,7 +1257,7 @@ pub fn isr_sample_tick(
                 dequeued
             }
         };
-        if let Some(mut seg) = candidate {
+        if let Some(seg) = candidate {
             shared
                 .isr_last_t_start_lo
                 .store(seg.t_start as u32, Ordering::Relaxed);
@@ -1281,29 +1281,32 @@ pub fn isr_sample_tick(
                 .isr_arm_delta_hi
                 .store((delta >> 32) as u32, Ordering::Relaxed);
             if seg.t_start <= now {
+                // Check for late arm — if t_start is too far in the past,
+                // something is genuinely broken (e.g. the host sent a
+                // segment whose epoch predates the current ISR clock by
+                // more than jitter). Fault instead of silently rebasing,
+                // which would let advance_piece_if_needed walk every short
+                // piece to exhaustion and retire the move without steps.
+                let sample_period =
+                    unsafe { kalico_runtime_get_sample_period_cycles() };
+                let jitter_tolerance = 3u64 * u64::from(sample_period);
+                if seg.t_start.saturating_add(jitter_tolerance) < now {
+                    // Late arm: t_start is more than 3 ISR ticks in the
+                    // past. Fault and discard; do not arm the engine.
+                    shared.last_error.store(
+                        crate::error::KALICO_FAULT_LATE_ARM,
+                        Ordering::Release,
+                    );
+                    shared.runtime_status.store(
+                        crate::engine::RuntimeStatus::Fault as u8,
+                        Ordering::Release,
+                    );
+                    return;
+                }
+                // Normal arm — t_start is in the past but within jitter
+                // tolerance. Proceed without rebasing.
                 shared.current_segment_id.store(seg.id, Ordering::Release);
                 bump_relaxed(&shared.isr_armed_count);
-                // Host/USB command latency can make a freshly dequeued
-                // terminal segment start a few milliseconds in the past by
-                // the time the TIM5 ISR arms it. If we keep that stale
-                // epoch, `advance_piece_if_needed` may walk every short
-                // piece to exhaustion before the first evaluation and the
-                // move retires without emitting steps. Rebase late arms to
-                // the current ISR clock while preserving segment duration.
-                let lateness = now.saturating_sub(seg.t_start);
-                if lateness > 0 {
-                    seg.t_start = now;
-                    seg.t_end = seg.t_end.saturating_add(lateness);
-                }
-                // 2026-05-21 bisection step 4: arm_segment ON, evaluator OFF.
-                // bd62f20bb (dequeue+park yes, arm+eval no) survived. EA=2
-                // dequeues, EC=0 parks (widening seed correct, seg.t_start
-                // <= now), ED=2 would-be-arms, EE=EF=0xBD47F5 (host time
-                // domain matches MCU's widened). Now actually call
-                // arm_segment but still bail before tick_sample. If bench
-                // survives, freeze is in tick_sample evaluator. If crashes,
-                // freeze is in arm_segment (likely curve_pool lookup or
-                // axis piece initialization).
                 isr.engine.arm_segment_with_diag(seg, curve_pool, shared);
             } else {
                 bump_relaxed(&shared.isr_parked_count);
@@ -1377,6 +1380,20 @@ pub fn isr_sample_tick(
 #[cfg(not(any(test, feature = "host")))]
 unsafe extern "C" {
     fn runtime_cyccnt_read() -> u32;
+}
+
+// Sample-period extern. Mirrors the declaration in `per_axis_timer` —
+// the same C symbol is needed here for the late-arm jitter tolerance
+// calculation. Host/test stub returns 0 (jitter_tolerance == 0, so the
+// late-arm check degenerates to `seg.t_start < now`, which is safe for
+// tests that set t_start == now).
+#[cfg(not(any(test, feature = "host")))]
+unsafe extern "C" {
+    fn kalico_runtime_get_sample_period_cycles() -> u32;
+}
+#[cfg(any(test, feature = "host"))]
+unsafe fn kalico_runtime_get_sample_period_cycles() -> u32 {
+    0
 }
 #[cfg(not(any(test, feature = "host")))]
 #[inline]
