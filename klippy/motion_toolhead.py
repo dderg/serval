@@ -1021,8 +1021,19 @@ class MotionToolhead(ToolHead):
             if slot_primary[slot_idx] is not None:
                 slot_steppers[slot_idx].insert(0, slot_primary[slot_idx])
 
-        # Capability bit: bit 0 of the IdentifyResponse capabilities bitmap.
+        # Capability bits from the IdentifyResponse capabilities bitmap.
         PHASE_STEPPING_BIT = 0x1
+        SEGMENT_COMMIT_BIT = 0x2
+
+        for name, mcu_obj, mcu_handle in bridge_mcus:
+            caps = self.bridge.get_mcu_capabilities(mcu_handle)
+            if not (caps & SEGMENT_COMMIT_BIT):
+                logging.warning(
+                    "MotionToolhead: MCU '%s' lacks SEGMENT_COMMIT_CAPABLE "
+                    "(caps=0x%x). Two-phase commit requires all MCUs to "
+                    "support it. Rebuild with latest firmware.",
+                    name, caps,
+                )
 
         for name, mcu_obj, mcu_handle in bridge_mcus:
             present_mask = 0
