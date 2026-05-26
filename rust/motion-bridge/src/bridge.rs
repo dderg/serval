@@ -2754,7 +2754,7 @@ impl PyMotionBridge {
 
                         // Record the sub-plan's clock window for the commit
                         // phase. These come from the sub-plan's `params`
-                        // which were set by `split_plan_if_needed`.
+                        // which were set by `apply_split_times`.
                         let sub_plan = &prepared_mcus[mcu_idx].sub_plans[sub_idx];
                         let sub_dur_clocks = sub_plan.params.t_end
                             .saturating_sub(sub_plan.params.t_start);

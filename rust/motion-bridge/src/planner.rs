@@ -160,16 +160,6 @@ impl std::error::Error for PlannerError {}
 /// string-matching.
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
-    #[error(
-        "motion-bridge: curve for mcu {mcu_id} exceeds caps \
-         (pieces {pieces} > {max_pieces}); \
-         logical-move splitting not yet implemented (Task 13 follow-up)."
-    )]
-    CapsExceeded {
-        mcu_id: u32,
-        pieces: usize,
-        max_pieces: usize,
-    },
     #[error("compute_ack_clock: {0}")]
     ComputeAckClock(String),
     #[error(
