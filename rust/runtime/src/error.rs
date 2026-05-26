@@ -65,6 +65,12 @@ pub const KALICO_ERR_TRACE_OVERFLOW: i32 = -133;
 pub const KALICO_ERR_STREAM_STATE_VIOLATION: i32 = -140;
 pub const KALICO_ERR_SEGMENT_ID_NON_MONOTONIC: i32 = -141;
 
+// Two-phase segment commit protocol.
+pub const KALICO_ERR_PENDING_SLOT_OCCUPIED: i32 = -200;
+pub const KALICO_ERR_NO_PENDING_SEGMENT: i32 = -201;
+pub const KALICO_ERR_SEGMENT_ID_MISMATCH: i32 = -202;
+pub const KALICO_FAULT_LATE_ARM: i32 = 0x0010;
+
 // Step-6 time-domain (§9.1).
 pub const KALICO_ERR_T_START_IN_PAST: i32 = -150;
 pub const KALICO_ERR_T_END_BEFORE_T_START: i32 = -151;
