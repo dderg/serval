@@ -9,26 +9,6 @@ independently testable. Tasks within a phase can be parallelized where noted.
 
 ---
 
-## Phase 0: Config prerequisite
-
-### Task 0: Reduce H7 pool depth, increase max_pieces_per_curve
-
-**Files:** `.config.h7.bak` on the Pi
-
-Reduce `CONFIG_RUNTIME_CURVE_POOL_N` from 16 to 4 (matching F446). Reallocate
-the freed RAM to `CONFIG_RUNTIME_MAX_CONTROL_POINTS` /
-`CONFIG_RUNTIME_MAX_KNOT_VECTOR_LEN` so that `max_pieces_per_curve` grows.
-
-**Why this is Phase 0:** The single-pending-slot invariant means each sub-plan
-within a logical segment must go through its own push+commit cycle. If the H7
-still needs 11 sub-plans per segment, each one is a full multi-MCU round-trip.
-Reducing pool depth and increasing piece capacity cuts sub-plans to 1-2 per
-segment, making the two-phase protocol practical. Without this, the dispatch
-loop becomes `11 × (push_all + commit_all)` per homing move, which is
-unacceptably slow.
-
----
-
 ## Phase 1: Firmware — pending slot and protocol primitives
 
 ### Task 1: New fields in FgState and SharedState
@@ -235,8 +215,9 @@ across sub-plans. MCUs that have fewer sub-plans than the max receive idle
 segments for the remaining sub-indices. This preserves the lockstep invariant
 at sub-plan granularity.
 
-Note: with Task 0 (pool depth reduction), `max_subs` should be 1-2 for
-typical moves, making the inner loop trivial.
+Note: with higher `max_pieces_per_curve` (a separate config tuning),
+`max_subs` drops to 1-2 for typical moves, making the inner loop trivial.
+Even without that tuning, the loop is correct — just more round-trips.
 
 ### Task 11: Idle segment dispatch
 
@@ -362,7 +343,6 @@ Error handling:
 ## Dependencies
 
 ```
-Task 0 (config) ── no code dependency, can be done anytime before Task 17
 Task 1 ← Task 3, Task 4, Task 5, Task 8
 Task 2 ← Task 3, Task 4, Task 5, Task 6
 Task 3 ← Task 4 (push must stage before commit can move)
@@ -380,6 +360,6 @@ Tasks 15-18 ← all of above
 | Risk | Mitigation |
 |------|-----------|
 | F446 RAM at 100% — ~84 bytes net new | Profile after Task 1. If tight, reduce `SharedState` diagnostic fields added in this session (push_t_start_lo/hi, push_widened_lo/hi — 16 bytes reclaimable). |
-| Sub-plan count still >1 after Task 0 | Task 10's inner loop handles it correctly. Worst case is slower dispatch, not incorrect behavior. |
+| Sub-plan count >1 for complex shaped moves | Task 10's inner loop handles it correctly. Each sub is a full push+commit cycle. Slower dispatch, not incorrect. Separate config tuning (more pieces per curve) reduces sub count. |
 | Legacy fallback preserves old bugs | Acceptable — only for mixed-capability setups during transition. |
 | SPSC queue depth < curve pool on some configs | Task 10 should assert `spsc_queue_depth >= curve_pool_n` at init and log warning if violated. |
