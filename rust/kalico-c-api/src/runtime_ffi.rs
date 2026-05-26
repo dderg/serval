@@ -30,8 +30,9 @@ pub mod exports {
         KALICO_ERR_INVALID_CURVE, KALICO_ERR_INVALID_DURATION, KALICO_ERR_INVALID_HANDLE,
         KALICO_ERR_INVALID_KINEMATICS,
         KALICO_ERR_NOT_INIT, KALICO_ERR_NULL_PTR,
-        KALICO_ERR_PROTOCOL_VERSION_UNSUPPORTED, KALICO_ERR_QUEUE_FULL,
-        KALICO_ERR_SEGMENT_ID_NON_MONOTONIC, KALICO_ERR_ZERO_DURATION_SEGMENT, KALICO_OK,
+        KALICO_ERR_PENDING_SLOT_OCCUPIED, KALICO_ERR_PROTOCOL_VERSION_UNSUPPORTED,
+        KALICO_ERR_SEGMENT_ID_NON_MONOTONIC,
+        KALICO_ERR_ZERO_DURATION_SEGMENT, KALICO_OK,
     };
     use runtime::segment::{KinematicTag, Segment};
     use runtime::state::{FgState, IsrState, RuntimeContext, SharedState};
@@ -276,15 +277,14 @@ pub mod exports {
     /// Registers all 4 handles in the retirement table at push time so the
     /// trace-drain pipeline can retire them on `SEGMENT_END`.
     ///
-    /// SAFETY (caller): `isr_ptr_const` must point at the same `RuntimeContext`'s
-    /// `IsrState`, and the ISR must be disabled while the producer-protocol
-    /// re-enable branch runs (Klipper's `runtime_tick_disable()` does
-    /// this; callers via the C shim hold to that contract).
+    /// SAFETY (caller): `_isr_ptr_const` is retained for ABI stability; the
+    /// TIM5 re-enable protocol has moved to `commit_segment`. It must still
+    /// point at the same `RuntimeContext`'s `IsrState` — commit will use it.
     #[allow(clippy::too_many_arguments)]
     unsafe fn push_segment_impl(
         fg: &mut FgState,
         shared: &SharedState,
-        isr_ptr_const: *const IsrState,
+        _isr_ptr_const: *const IsrState,
         id: u32,
         x_handle: CurveHandle,
         y_handle: CurveHandle,
@@ -304,6 +304,12 @@ pub mod exports {
             && shared.runtime_status.load(Ordering::Acquire) == RuntimeStatus::Fault as u8
         {
             return KALICO_ERR_FAULT_LATCHED;
+        }
+        // Two-phase commit: reject a second push while a staged segment is
+        // waiting for commit_segment. The host must call commit_segment (or
+        // abort_segment) before pushing the next segment.
+        if fg.staged_segment.is_some() {
+            return KALICO_ERR_PENDING_SLOT_OCCUPIED;
         }
         if t_end == t_start {
             return KALICO_ERR_ZERO_DURATION_SEGMENT;
@@ -379,9 +385,13 @@ pub mod exports {
             _pad: [0; 1],
             consumers_remaining,
         };
-        if fg.queue_producer.enqueue(seg).is_err() {
-            return KALICO_ERR_QUEUE_FULL;
-        }
+        // Two-phase commit: park the segment in the foreground-owned staged
+        // slot. Retirement-table registration, stream-state-machine
+        // transitions, and TIM5 re-enable all move to commit_segment (Task 4)
+        // so they execute only after the host has supplied timing via the
+        // commit wire command.
+        fg.staged_segment = Some(seg);
+        fg.staged_segment_handles = [x_handle, y_handle, z_handle, e_handle];
         shared
             .producer_enqueue_success_total
             .fetch_add(1, Ordering::AcqRel);
@@ -398,8 +408,8 @@ pub mod exports {
         shared
             .push_t_start_hi
             .store((t_start >> 32) as u32, Ordering::Relaxed);
-        // SAFETY: foreground context — same contract as the re-enable branch
-        // below which also calls runtime_widened_host_clock().
+        // SAFETY: foreground context — not ISR-safe; push_segment_impl is
+        // always called from the Klipper foreground dispatch task.
         let push_widened = unsafe { super::exports::runtime_widened_host_clock() };
         shared
             .push_widened_lo
@@ -407,39 +417,10 @@ pub mod exports {
         shared
             .push_widened_hi
             .store((push_widened >> 32) as u32, Ordering::Relaxed);
-        // Register all 4 per-axis handles in the retirement table so the
-        // trace-drain pipeline can retire them on SEGMENT_END.
-        fg.retirement_table.register(id, [x_handle, y_handle, z_handle, e_handle]);
-        // Round-2 B6: on the FIRST push of a fresh stream (Opening or
-        // StreamOpenPriming with no recorded first segment yet), capture
-        // the priming segment's t_start in FgState so the §6.3 arm()
-        // predicate can validate it without peeking the ISR-owned queue.
-        // Also auto-transition StreamOpening → StreamOpenPriming on first
-        // push so the state machine reflects priming-buffer accumulation.
-        match fg.stream_state_machine {
-            runtime::stream::FgStreamState::StreamOpening => {
-                fg.stream_state_machine = runtime::stream::FgStreamState::StreamOpenPriming;
-                if fg.first_priming_segment_t_start.is_none() {
-                    fg.first_priming_segment_t_start = Some(t_start);
-                }
-            }
-            runtime::stream::FgStreamState::StreamOpenPriming => {
-                if fg.first_priming_segment_t_start.is_none() {
-                    fg.first_priming_segment_t_start = Some(t_start);
-                }
-            }
-            runtime::stream::FgStreamState::Armed => {
-                // Round-3 B-R3-9 implicit transition: once a push lands
-                // after arm(), the stream is in steady-state motion.
-                // Foreground state machine reflects that.
-                fg.stream_state_machine = runtime::stream::FgStreamState::Running;
-            }
-            _ => {}
-        }
-        // Round-2 B14: foreground publishes the cumulative-accepted cursor
-        // for both the periodic kalico_status frame and Gate-B observers.
-        // Release pairs with foreground/host readers' Acquire on the same
-        // atomics.
+        // Round-2 B14: foreground publishes the cumulative-accepted cursor.
+        // "Accepted" means received into the pending slot — the host may
+        // proceed to send commit_segment.  Release pairs with Acquire loads
+        // in the host-side status-frame readers and Gate-B observers.
         shared.accepted_segment_id.store(id, Ordering::Release);
         shared
             .accepted_segment_id_seen
@@ -458,40 +439,6 @@ pub mod exports {
             // u32 location for writes when non-null.
             unsafe {
                 *out_credit_epoch = credit_epoch;
-            }
-        }
-        // §4.4 producer-protocol: re-enable TIM5 if observed status was IDLE/DRAINED.
-        let cur_status = shared.runtime_status.load(Ordering::Acquire);
-        if cur_status == RuntimeStatus::Idle as u8 || cur_status == RuntimeStatus::Drained as u8 {
-            // SAFETY: foreground-context access; spec §4.7 invariant — TIM5
-            // was disabled by C-side caller before push, so `widen_state`
-            // has no concurrent ISR writer. We materialize a `&mut
-            // WidenState` here under that contract.
-            //
-            // Per Round-3 fix B-R3-4, `widen_state` lives on `IsrState`,
-            // not Engine. The shim borrows it by projecting through the
-            // ISR-state UnsafeCell *only* under the ISR-disabled
-            // discipline.
-            unsafe {
-                let raw = super::exports::runtime_cyccnt_read();
-                let isr_ptr_mut = isr_ptr_const.cast_mut();
-                let widen_state = &mut (*isr_ptr_mut).widen_state;
-                // Seed widening with the C-side boot-relative widened
-                // clock (timer_read_time widened with stats_send_time_high).
-                // Earlier seed from `read_widened_now(shared)` returned 0
-                // (the seqlock cell stays 0 until the first ISR publish),
-                // making widening start at zero while seg.t_start is
-                // billions — segments parked forever in pending_segment.
-                // Re-attempting after the 01f4090a5 revert; if this trips
-                // the previous 4-second-IRQ freeze, the per-stage cycle
-                // counters added in this commit (shared.isr_*_cycles_max +
-                // isr_overrun_count, emitted as fault_detail tags
-                // 0xE6-0xE9) will pinpoint which stage of isr_sample_tick
-                // is the spike.
-                let last_widened = super::exports::runtime_widened_host_clock();
-                widen_state.reinit(raw, last_widened);
-                runtime::clock::publish_widened_now(shared, last_widened);
-                super::exports::runtime_tick_enable();
             }
         }
         KALICO_OK
