@@ -2556,9 +2556,9 @@ impl PyMotionBridge {
                         io: Arc<KalicoHostIo>,
                         credit: Arc<CreditCounter>,
                         mcu_id: u32,
+                        freq: f64,
                         seg_id: u32,
-                        sub_t_start_clock: u64,
-                        sub_t_end_clock: u64,
+                        sub_duration_clocks: u64,
                     }
                     let mut pushed: Vec<PushedMcuInfo> = Vec::new();
 
@@ -2734,13 +2734,15 @@ impl PyMotionBridge {
                         // phase. These come from the sub-plan's `params`
                         // which were set by `split_plan_if_needed`.
                         let sub_plan = &prepared_mcus[mcu_idx].sub_plans[sub_idx];
+                        let sub_dur_clocks = sub_plan.params.t_end
+                            .saturating_sub(sub_plan.params.t_start);
                         pushed.push(PushedMcuInfo {
                             io: Arc::clone(&io),
                             credit: Arc::clone(&credit),
                             mcu_id: sp_mcu_id,
+                            freq: prepared_mcus[mcu_idx].freq,
                             seg_id: sp_seg_id,
-                            sub_t_start_clock: sub_plan.params.t_start,
-                            sub_t_end_clock: sub_plan.params.t_end,
+                            sub_duration_clocks: sub_dur_clocks,
                         });
                     } // end Phase 1 per-MCU push
 
@@ -2761,12 +2763,22 @@ impl PyMotionBridge {
                                 in_flight: 0,
                             })?;
 
-                        let duration_clocks =
-                            info.sub_t_end_clock.saturating_sub(info.sub_t_start_clock);
+                        let duration_clocks = info.sub_duration_clocks;
+                        // Cold start (sub_idx == 0): compute t_start fresh
+                        // NOW, after all pushes completed. This guarantees
+                        // t_start is in the future regardless of how long
+                        // Phase 1 took.
                         let commit_t_start = if sub_idx == 0 {
-                            info.sub_t_start_clock
+                            let lead_cycles = (info.freq * 0.250).round().max(1.0) as u64;
+                            let mcu_h = mcu_handle_from_raw(info.mcu_id);
+                            let now_clock = router_for_cb
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .compute_ack_clock(mcu_h)
+                                .map_err(|e| DispatchError::ComputeAckClock(e.to_string()))?;
+                            now_clock.saturating_add(lead_cycles)
                         } else {
-                            0
+                            0 // chain from previous t_end
                         };
                         let commit_result = producer::commit_segment(
                             info.io.as_ref(),
