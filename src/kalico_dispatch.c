@@ -63,6 +63,8 @@ volatile int32_t handle_push_segment_last_r
 
 static void handle_load_curve_cubic(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
 static void handle_push_segment(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
+static void handle_commit_segment(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
+static void handle_abort_pending(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
 static void handle_configure_axes(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
 static void handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
 static void handle_reset_curve_pool(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
@@ -259,6 +261,12 @@ kalico_dispatch_frame(uint8_t channel, const uint8_t *payload,
         return;
     case KALICO_MSG_PUSH_SEGMENT:
         handle_push_segment(correlation_id, body, body_len);
+        return;
+    case KALICO_MSG_COMMIT_SEGMENT:
+        handle_commit_segment(correlation_id, body, body_len);
+        return;
+    case KALICO_MSG_ABORT_PENDING:
+        handle_abort_pending(correlation_id, body, body_len);
         return;
     case KALICO_MSG_CONFIGURE_AXES:
         handle_configure_axes(correlation_id, body, body_len);
@@ -457,6 +465,105 @@ handle_push_segment(uint32_t correlation_id, const uint8_t *body, uint16_t body_
         // the SPSC queue directly. Stepping-redesign-finish Task 17.
     }
     send_push_segment_response(correlation_id, r, accepted_id, credit_epoch);
+}
+
+// ---------------------------------------------------------------------------
+// CommitSegment handler (two-phase commit Phase 2)
+// ---------------------------------------------------------------------------
+
+static void
+send_commit_segment_response(uint32_t correlation_id, int32_t result,
+                             uint32_t segment_id)
+{
+    uint8_t payload[PER_MESSAGE_HEADER_LEN + 8];
+    encode_message_header(payload, KALICO_MSG_COMMIT_SEGMENT_RESPONSE,
+                          MESSAGE_VERSION_DEFAULT, correlation_id);
+    uint8_t *body = &payload[PER_MESSAGE_HEADER_LEN];
+    body[0] = (uint8_t)(result & 0xFF);
+    body[1] = (uint8_t)((result >> 8) & 0xFF);
+    body[2] = (uint8_t)((result >> 16) & 0xFF);
+    body[3] = (uint8_t)((result >> 24) & 0xFF);
+    body[4] = (uint8_t)(segment_id & 0xFF);
+    body[5] = (uint8_t)((segment_id >> 8) & 0xFF);
+    body[6] = (uint8_t)((segment_id >> 16) & 0xFF);
+    body[7] = (uint8_t)((segment_id >> 24) & 0xFF);
+    kalico_transport_send_frame(KALICO_CHANNEL_CONTROL,
+                                payload, sizeof(payload));
+}
+
+static void
+handle_commit_segment(uint32_t correlation_id, const uint8_t *body,
+                      uint16_t body_len)
+{
+    // Body: segment_id(u32) + t_start_clock(u64) + duration_clocks(u64) = 20 bytes.
+    if (body_len != 20) {
+        send_commit_segment_response(correlation_id, KALICO_ERR_INVALID_CURVE, 0);
+        return;
+    }
+    if (!runtime_handle) {
+        send_commit_segment_response(correlation_id, KALICO_ERR_NOT_INIT, 0);
+        return;
+    }
+    uint32_t segment_id = (uint32_t)body[0] | ((uint32_t)body[1] << 8)
+                        | ((uint32_t)body[2] << 16) | ((uint32_t)body[3] << 24);
+    uint64_t t_start_clock = 0;
+    for (int i = 0; i < 8; i++)
+        t_start_clock |= ((uint64_t)body[4 + i]) << (8 * i);
+    uint64_t duration_clocks = 0;
+    for (int i = 0; i < 8; i++)
+        duration_clocks |= ((uint64_t)body[12 + i]) << (8 * i);
+
+    uint32_t out_segment_id = 0;
+    int32_t r = runtime_handle_commit_segment(
+        runtime_handle, segment_id, t_start_clock, duration_clocks,
+        &out_segment_id);
+    send_commit_segment_response(correlation_id, r, out_segment_id);
+}
+
+// ---------------------------------------------------------------------------
+// AbortPending handler
+// ---------------------------------------------------------------------------
+
+static void
+send_abort_pending_response(uint32_t correlation_id, int32_t result,
+                            uint32_t segment_id)
+{
+    uint8_t payload[PER_MESSAGE_HEADER_LEN + 8];
+    encode_message_header(payload, KALICO_MSG_ABORT_PENDING_RESPONSE,
+                          MESSAGE_VERSION_DEFAULT, correlation_id);
+    uint8_t *body = &payload[PER_MESSAGE_HEADER_LEN];
+    body[0] = (uint8_t)(result & 0xFF);
+    body[1] = (uint8_t)((result >> 8) & 0xFF);
+    body[2] = (uint8_t)((result >> 16) & 0xFF);
+    body[3] = (uint8_t)((result >> 24) & 0xFF);
+    body[4] = (uint8_t)(segment_id & 0xFF);
+    body[5] = (uint8_t)((segment_id >> 8) & 0xFF);
+    body[6] = (uint8_t)((segment_id >> 16) & 0xFF);
+    body[7] = (uint8_t)((segment_id >> 24) & 0xFF);
+    kalico_transport_send_frame(KALICO_CHANNEL_CONTROL,
+                                payload, sizeof(payload));
+}
+
+static void
+handle_abort_pending(uint32_t correlation_id, const uint8_t *body,
+                     uint16_t body_len)
+{
+    // Body: segment_id(u32) = 4 bytes.
+    if (body_len != 4) {
+        send_abort_pending_response(correlation_id, KALICO_ERR_INVALID_CURVE, 0);
+        return;
+    }
+    if (!runtime_handle) {
+        send_abort_pending_response(correlation_id, KALICO_ERR_NOT_INIT, 0);
+        return;
+    }
+    uint32_t segment_id = (uint32_t)body[0] | ((uint32_t)body[1] << 8)
+                        | ((uint32_t)body[2] << 16) | ((uint32_t)body[3] << 24);
+
+    uint32_t out_aborted_id = 0;
+    int32_t r = runtime_handle_abort_pending(
+        runtime_handle, segment_id, &out_aborted_id);
+    send_abort_pending_response(correlation_id, r, out_aborted_id);
 }
 
 // ---------------------------------------------------------------------------
