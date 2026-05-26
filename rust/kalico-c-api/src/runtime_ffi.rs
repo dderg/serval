@@ -553,16 +553,19 @@ pub mod exports {
 
         // Compute timing. t_start_clock == 0 means "chain from last commit".
         let t_start = if t_start_clock != 0 {
-            // MCU-side lead enforcement: if the host's clock estimate is
-            // stale, t_start_clock may be barely ahead of (or behind) the
-            // MCU's actual clock. Enforce a minimum 10ms lead so the ISR
-            // has time to park and arm without LATE_ARM jitter.
-            let mcu_now = unsafe { super::exports::runtime_widened_host_clock() };
-            let clock_freq = unsafe { super::exports::runtime_clock_freq };
-            let min_lead = u64::from(clock_freq) / 100; // 10ms
-            let min_t_start = mcu_now.saturating_add(min_lead);
-            if t_start_clock < min_t_start {
-                min_t_start
+            // Cold-start: the host sends a t_start based on its clock estimate.
+            // If the estimate is stale, t_start may be barely ahead of the
+            // MCU's actual clock. Override with MCU's own clock + 10ms lead
+            // when the engine is idle (first commit in session). For running
+            // engines (subsequent cold-starts after flush), use host's value.
+            let cur_status = shared.runtime_status.load(Ordering::Acquire);
+            if cur_status == runtime::engine::RuntimeStatus::Idle as u8
+                || cur_status == runtime::engine::RuntimeStatus::Drained as u8
+            {
+                let mcu_now = unsafe { super::exports::runtime_widened_host_clock() };
+                let clock_freq = unsafe { super::exports::runtime_clock_freq };
+                let min_lead = u64::from(clock_freq) / 100; // 10ms
+                mcu_now.saturating_add(min_lead)
             } else {
                 t_start_clock
             }
