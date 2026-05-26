@@ -126,10 +126,25 @@ class HomingMove:
         ]
         # Start endstop checking
         print_time = self.toolhead.get_last_move_time()
+        # [z-home-diag] Log endstops that will be checked
+        logging.info(
+            "[z-home-diag] homing_move: movepos=%s speed=%s endstops=%s",
+            list(movepos), speed,
+            [(name, type(es).__name__,
+              getattr(es.get_mcu(), '_name', '?') if hasattr(es, 'get_mcu') else '?')
+             for es, name in self.endstops],
+        )
         # Pre-register the Rust interceptor before home_start sends
         # beacon_home — ensures the interceptor is in place before the
         # probe can trigger.
         self.toolhead._prepare_probe_interceptor(self.endstops)
+        # [z-home-diag] Confirm interceptor registration result
+        logging.info(
+            "[z-home-diag] _prepare_probe_interceptor returned: "
+            "handle_id=%s probe_arm_id=%s",
+            getattr(self.toolhead, '_probe_homing_handle_id', 'MISSING'),
+            getattr(self.toolhead, '_probe_homing_arm_id', 'MISSING'),
+        )
         endstop_triggers = []
         for mcu_endstop, name in self.endstops:
             rest_time = self._calc_endstop_rate(mcu_endstop, movepos, speed)
@@ -140,12 +155,29 @@ class HomingMove:
                 rest_time,
                 triggered=triggered,
             )
+            # [z-home-diag] Log each home_start result
+            logging.info(
+                "[z-home-diag] home_start: endstop=%s type=%s "
+                "mcu=%s wait_type=%s",
+                name, type(mcu_endstop).__name__,
+                getattr(mcu_endstop.get_mcu(), '_name', '?')
+                if hasattr(mcu_endstop, 'get_mcu') else '?',
+                type(wait).__name__,
+            )
             endstop_triggers.append(wait)
         all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
 
         self.toolhead.dwell(HOMING_START_DELAY)
         # Issue move
         self.toolhead._homing_endstops = self.endstops
+        # [z-home-diag] Log state just before drip_move
+        logging.info(
+            "[z-home-diag] calling drip_move: handle_id=%s "
+            "drip_completion_type=%s active_homing_arms=%s",
+            getattr(self.toolhead, '_probe_homing_handle_id', 'MISSING'),
+            type(all_endstop_trigger).__name__,
+            sorted(getattr(self.toolhead, 'active_homing_arms', set())),
+        )
         error = None
         try:
             self.toolhead.drip_move(movepos, speed, all_endstop_trigger)
@@ -153,6 +185,8 @@ class HomingMove:
             error = "Error during homing move: %s" % (str(e),)
         finally:
             self.toolhead._homing_endstops = []
+        # [z-home-diag] drip_move returned
+        logging.info("[z-home-diag] drip_move returned: error=%s", error)
         # Wait for endstops to trigger
         trigger_times = {}
         move_end_print_time = self.toolhead.get_last_move_time()
@@ -167,6 +201,12 @@ class HomingMove:
                 trigger_times[name] = trigger_time
             elif check_triggered and error is None:
                 error = "No trigger on %s after full movement" % (name,)
+        # [z-home-diag] Log trigger_times after home_wait loop
+        logging.info(
+            "[z-home-diag] home_wait loop done: trigger_times=%s "
+            "move_end_print_time=%.6f",
+            trigger_times, move_end_print_time,
+        )
         # After a homing move the MCU is idle — correct the pending-time
         # projection so wait_moves_and_mcu doesn't block on ghost time
         # from the planned-but-truncated segment.

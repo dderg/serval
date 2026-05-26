@@ -450,11 +450,14 @@ class MotionToolhead(ToolHead):
     def drip_move(self, newpos, speed, drip_completion):
         logging.info(
             "[bridge-trace] drip_move entered: newpos=%s speed=%s "
-            "drip_test=%s active_homing_arms=%s",
+            "drip_test=%s active_homing_arms=%s "
+            "probe_handle_id=%s probe_arm_id=%s",
             list(newpos), speed,
             (drip_completion.test()
              if drip_completion is not None else None),
             sorted(self.active_homing_arms),
+            getattr(self, '_probe_homing_handle_id', 'NOT_SET'),
+            getattr(self, '_probe_homing_arm_id', 'NOT_SET'),
         )
         if drip_completion is not None and drip_completion.test():
             return
@@ -493,19 +496,61 @@ class MotionToolhead(ToolHead):
         for s in self.kin.get_steppers():
             if s.get_name().startswith("stepper_z"):
                 stepper_mcus.add(s.get_mcu())
+        logging.info(
+            "[z-home-diag] _prepare_probe_interceptor: "
+            "z_stepper_mcu_count=%d z_stepper_mcus=%s",
+            len(stepper_mcus),
+            [getattr(m, '_name', '?') for m in stepper_mcus],
+        )
         if len(stepper_mcus) != 1:
+            logging.info(
+                "[z-home-diag] _prepare_probe_interceptor: ABORT "
+                "z_stepper_mcu_count=%d (need exactly 1)",
+                len(stepper_mcus),
+            )
             return
         stepper_mcu = next(iter(stepper_mcus))
         for mcu_endstop, name in endstops:
             es_mcu = mcu_endstop.get_mcu()
+            es_mcu_name = getattr(es_mcu, '_name', '?')
+            stepper_mcu_name = getattr(stepper_mcu, '_name', '?')
+            is_cross_mcu = es_mcu != stepper_mcu
+            es_bridge_handle = getattr(es_mcu, '_bridge_handle', None)
+            logging.info(
+                "[z-home-diag] _prepare_probe_interceptor checking: "
+                "endstop=%s type=%s es_mcu=%s stepper_mcu=%s "
+                "is_cross_mcu=%s es_bridge_handle=%s",
+                name, type(mcu_endstop).__name__,
+                es_mcu_name, stepper_mcu_name,
+                is_cross_mcu, es_bridge_handle,
+            )
             if es_mcu == stepper_mcu:
+                logging.info(
+                    "[z-home-diag] _prepare_probe_interceptor: "
+                    "endstop=%s SKIP (same MCU as stepper)", name,
+                )
                 continue
             if es_mcu._bridge_handle is None:
+                logging.info(
+                    "[z-home-diag] _prepare_probe_interceptor: "
+                    "endstop=%s SKIP (es_mcu has no bridge handle)", name,
+                )
                 continue
-            trsync = getattr(
-                getattr(mcu_endstop, '_shared', None), '_trsync', None
+            _shared = getattr(mcu_endstop, '_shared', None)
+            trsync = getattr(_shared, '_trsync', None)
+            logging.info(
+                "[z-home-diag] _prepare_probe_interceptor: "
+                "endstop=%s _shared=%s trsync=%s trsync_oid=%s",
+                name,
+                type(_shared).__name__ if _shared is not None else None,
+                type(trsync).__name__ if trsync is not None else None,
+                trsync.get_oid() if trsync is not None else None,
             )
             if trsync is None:
+                logging.info(
+                    "[z-home-diag] _prepare_probe_interceptor: "
+                    "endstop=%s SKIP (no trsync on _shared)", name,
+                )
                 continue
             from . import motion_bridge as _mb
             arm_id = _mb._alloc_arm_id()
@@ -516,6 +561,14 @@ class MotionToolhead(ToolHead):
                 z_min, z_max = z_rail.get_range()
                 nominal_dist = abs(z_max - z_min)
             sensor_fault_timeout = nominal_dist / 5.0 + 5.0
+            logging.info(
+                "[z-home-diag] _prepare_probe_interceptor: "
+                "calling prepare_probe_homing beacon_handle=%s "
+                "trsync_oid=%d stepper_handle=%s arm_id=%d "
+                "sensor_fault_timeout=%.2fs",
+                es_mcu._bridge_handle, trsync.get_oid(),
+                stepper_mcu._bridge_handle, arm_id, sensor_fault_timeout,
+            )
             handle_id = self.bridge.prepare_probe_homing(
                 es_mcu._bridge_handle,
                 trsync.get_oid(),
@@ -532,6 +585,11 @@ class MotionToolhead(ToolHead):
                 arm_id,
             )
             return
+        logging.info(
+            "[z-home-diag] _prepare_probe_interceptor: "
+            "no cross-MCU probe endstop found — interceptor NOT registered "
+            "(handle_id remains None)"
+        )
 
     def _drip_move_software_trip(self, newpos, speed, drip_completion):
         from . import motion_bridge as _mb
@@ -553,6 +611,15 @@ class MotionToolhead(ToolHead):
             self.commanded_pos[2],
             pos3[0], pos3[1], pos3[2],
             dx, dy, dz,
+        )
+        logging.info(
+            "[z-home-diag] _drip_move_software_trip entry: "
+            "probe_handle_id=%s probe_arm_id=%s "
+            "active_homing_arms=%s software_trip_active=%s",
+            getattr(self, '_probe_homing_handle_id', 'NOT_SET'),
+            getattr(self, '_probe_homing_arm_id', 'NOT_SET'),
+            sorted(self.active_homing_arms),
+            getattr(self.bridge, '_software_trip_active', '?'),
         )
 
         # Select moving steppers via kinematic motor-delta mapping
@@ -673,6 +740,19 @@ class MotionToolhead(ToolHead):
             SENSOR_FAULT = 2
             DEADLINE_EXPIRED = 3
 
+            _result_names = {
+                PROBE_TRIGGERED: "PROBE_TRIGGERED",
+                SEGMENT_RETIRED: "SEGMENT_RETIRED",
+                SENSOR_FAULT: "SENSOR_FAULT",
+                DEADLINE_EXPIRED: "DEADLINE_EXPIRED",
+            }
+            logging.info(
+                "[z-home-diag] run_probe_homing returned: "
+                "result=%d (%s) handle_id=%d arm_id=%d",
+                result, _result_names.get(result, "UNKNOWN"),
+                handle_id, arm_id,
+            )
+
             if result == SENSOR_FAULT:
                 raise self.printer.command_error(
                     "Probe sensor fault: no trigger during full Z "
@@ -687,6 +767,13 @@ class MotionToolhead(ToolHead):
             self.bridge.wait_moves()
             bridge_lmt_after = self.bridge.get_last_move_time()
             duration = bridge_lmt_after - bridge_lmt_before
+            logging.info(
+                "[z-home-diag] post-wait_moves: "
+                "bridge_lmt_before=%.6f bridge_lmt_after=%.6f "
+                "duration=%.6f software_trip_active=%s",
+                bridge_lmt_before, bridge_lmt_after, duration,
+                self.bridge._software_trip_active,
+            )
             self._bump_pending_end_time(duration)
         finally:
             self.bridge._software_trip_active = False

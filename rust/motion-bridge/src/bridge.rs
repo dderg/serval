@@ -2890,6 +2890,12 @@ impl PyMotionBridge {
     ) -> PyResult<u8> {
         let _ = stepper_oids;
 
+        log::info!(
+            "[z-home-diag] bridge::run_probe_homing entry: handle_id={} \
+             move_pos={:?} speed={:.3}",
+            handle_id, move_pos, speed,
+        );
+
         let handle = self
             .probe_handles
             .lock()
@@ -2900,6 +2906,13 @@ impl PyMotionBridge {
                     "run_probe_homing: unknown handle_id {handle_id}"
                 ))
             })?;
+
+        log::info!(
+            "[z-home-diag] bridge::run_probe_homing: handle found \
+             arm_id={} already_triggered={}",
+            handle.arm_id,
+            handle.triggered.load(Ordering::Relaxed),
+        );
 
         let seg_count_before = self.dispatched_segments.load(Ordering::Relaxed);
         self.submit_homing_move_inner(&move_pos, speed, &[handle.arm_id])?;
@@ -2920,14 +2933,33 @@ impl PyMotionBridge {
             }
         }
 
+        log::info!(
+            "[z-home-diag] bridge::run_probe_homing: homing move dispatched, \
+             seg_before={} seg_after={} dispatched={} — entering blocking loop",
+            seg_count_before, seg_count_after,
+            seg_count_after.wrapping_sub(seg_count_before),
+        );
+
         let result = py.allow_threads(|| {
             crate::probe_homing::run_probe_homing(&handle)
         });
 
+        log::info!(
+            "[z-home-diag] bridge::run_probe_homing: blocking loop returned \
+             result={:?}",
+            result,
+        );
+
         crate::probe_homing::cleanup_probe_homing(handle);
 
         match result {
-            Ok(r) => Ok(r as u8),
+            Ok(r) => {
+                log::info!(
+                    "[z-home-diag] bridge::run_probe_homing returning Ok({})",
+                    r as u8,
+                );
+                Ok(r as u8)
+            }
             Err(e) => Err(PyRuntimeError::new_err(format!(
                 "run_probe_homing transport error: {e}"
             ))),
