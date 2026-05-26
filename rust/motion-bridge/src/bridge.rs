@@ -2813,8 +2813,15 @@ impl PyMotionBridge {
                     // unrecoverable — the MCU state is inconsistent.
 
                     for info in &pushed {
-                        // Acquire credit before commit — the commit moves
-                        // the segment into the SPSC queue, consuming a slot.
+                        {
+                            let msg = format!(
+                                "[credit-trace] acquire_blocking mcu={} seg_id={} sub={}/{} credit_avail={}",
+                                info.mcu_id, info.seg_id,
+                                sub_idx + 1, n_total_subs,
+                                info.credit.available(),
+                            );
+                            diag_file_log(&msg);
+                        }
                         info.credit
                             .acquire_blocking(producer::DEFAULT_CREDIT_ACQUIRE_TIMEOUT)
                             .map_err(|()| DispatchError::SlotPoolExhausted {
@@ -2822,6 +2829,15 @@ impl PyMotionBridge {
                                 capacity: 0,
                                 in_flight: 0,
                             })?;
+                        {
+                            let msg = format!(
+                                "[credit-trace] acquired mcu={} seg_id={} sub={}/{} credit_avail={}",
+                                info.mcu_id, info.seg_id,
+                                sub_idx + 1, n_total_subs,
+                                info.credit.available(),
+                            );
+                            diag_file_log(&msg);
+                        }
 
                         let duration_clocks = info.sub_duration_clocks;
                         let commit_t_start = {
