@@ -1290,9 +1290,6 @@ pub fn isr_sample_tick(
                         unsafe { kalico_runtime_get_sample_period_cycles() };
                     let jitter_tolerance = 3u64 * u64::from(sample_period);
                     if seg.t_start.saturating_add(jitter_tolerance) < now {
-                        let late_delta = now.saturating_sub(seg.t_start);
-                        #[allow(clippy::cast_possible_truncation)]
-                        shared.fault_detail.store(late_delta as u32, Ordering::Release);
                         shared.last_error.store(
                             crate::error::KALICO_FAULT_LATE_ARM,
                             Ordering::Release,

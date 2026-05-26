@@ -625,6 +625,16 @@ pub mod exports {
                     shared.diag_commit_seed_hi.store((last_widened >> 32) as u32, Ordering::Relaxed);
                     shared.diag_commit_t_start_lo.store(t_start as u32, Ordering::Relaxed);
                     shared.diag_commit_t_start_hi.store((t_start >> 32) as u32, Ordering::Relaxed);
+                    // Encode epoch comparison in fault_detail preemptively:
+                    // high 16 bits = seed_hi & 0xFFFF, low 16 bits = t_start_hi & 0xFFFF.
+                    // If they differ, the MCU's C-side widening doesn't match the
+                    // host's clock estimate — that's the LATE_ARM root cause.
+                    let seed_hi16 = ((last_widened >> 32) as u16) as u32;
+                    let tstart_hi16 = ((t_start >> 32) as u16) as u32;
+                    shared.fault_detail.store(
+                        (seed_hi16 << 16) | tstart_hi16,
+                        Ordering::Relaxed,
+                    );
                 }
                 super::exports::runtime_tick_enable();
             }
