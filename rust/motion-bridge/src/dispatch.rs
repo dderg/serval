@@ -808,8 +808,8 @@ mod tests {
 
     #[test]
     fn z_move_sends_curves_for_every_kinematic_axis_on_each_mcu() {
-        // Same pattern: Z varies, X+Y constant. Both MCUs still get plans
-        // because both have kinematic axes that need to be anchored.
+        // Z varies, X+Y constant. Both MCUs still get plans because
+        // both have kinematic axes that need to be anchored.
         let seg = shaped([
             constant_curve(50.0),
             constant_curve(100.0),
