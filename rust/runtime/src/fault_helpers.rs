@@ -118,6 +118,19 @@ pub fn raise_jog_parameters_invalid(shared: &SharedState) {
         .store(FaultCode::JogParametersInvalid.as_i32(), Ordering::Release);
 }
 
+/// Latch a `TStartInPast` fault.
+///
+/// The ISR found a segment whose `t_start` is at or before `now`. This
+/// means the host's clock estimate was wrong or segments arrived too late.
+/// `lateness_lo` is the low 32 bits of `now - t_start` for diagnostics.
+#[inline]
+pub fn raise_t_start_in_past(shared: &SharedState, lateness_lo: u32) {
+    shared.fault_detail.store(lateness_lo, Ordering::Release);
+    shared
+        .last_error
+        .store(FaultCode::TStartInPast.as_i32(), Ordering::Release);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

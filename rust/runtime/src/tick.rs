@@ -1242,68 +1242,23 @@ pub fn isr_sample_tick(
     //    `arm_segment` / `dequeue` calls don't fight for the IsrState
     //    field borrows.
     if isr.engine.current.is_none() {
-        let candidate = match isr.pending_segment.take() {
-            Some(parked) => Some(parked),
+        let (candidate, is_fresh) = match isr.pending_segment.take() {
+            Some(parked) => (Some(parked), false),
             None => {
                 let dequeued = isr.queue_consumer.dequeue();
                 if dequeued.is_some() {
-                    shared
-                        .producer_segment_dequeued_total
-                        .fetch_add(1, Ordering::AcqRel);
                     bump_relaxed(&shared.isr_deq_some_count);
                 } else {
                     bump_relaxed(&shared.isr_deq_none_count);
                 }
-                dequeued
+                (dequeued, true)
             }
         };
-        if let Some(mut seg) = candidate {
-            shared
-                .isr_last_t_start_lo
-                .store(seg.t_start as u32, Ordering::Relaxed);
-            shared
-                .isr_last_widened_lo
-                .store(now as u32, Ordering::Relaxed);
-            // 2026-05-21 epoch-diagnosis: also capture HIGH 32 bits and the
-            // saturating cycle-delta so we can distinguish hypothesis (a) wrong
-            // epoch from (b) u32-narrowed t_start on the wire.
-            shared
-                .isr_last_t_start_hi
-                .store((seg.t_start >> 32) as u32, Ordering::Relaxed);
-            shared
-                .isr_last_widened_hi
-                .store((now >> 32) as u32, Ordering::Relaxed);
-            let delta = now.saturating_sub(seg.t_start);
-            shared
-                .isr_arm_delta_lo
-                .store(delta as u32, Ordering::Relaxed);
-            shared
-                .isr_arm_delta_hi
-                .store((delta >> 32) as u32, Ordering::Relaxed);
+        if let Some(seg) = candidate {
             if seg.t_start <= now {
+                // Clock has reached or passed t_start — arm the segment.
                 shared.current_segment_id.store(seg.id, Ordering::Release);
                 bump_relaxed(&shared.isr_armed_count);
-                // Host/USB command latency can make a freshly dequeued
-                // terminal segment start a few milliseconds in the past by
-                // the time the TIM5 ISR arms it. If we keep that stale
-                // epoch, `advance_piece_if_needed` may walk every short
-                // piece to exhaustion before the first evaluation and the
-                // move retires without emitting steps. Rebase late arms to
-                // the current ISR clock while preserving segment duration.
-                let lateness = now.saturating_sub(seg.t_start);
-                if lateness > 0 {
-                    seg.t_start = now;
-                    seg.t_end = seg.t_end.saturating_add(lateness);
-                }
-                // 2026-05-21 bisection step 4: arm_segment ON, evaluator OFF.
-                // bd62f20bb (dequeue+park yes, arm+eval no) survived. EA=2
-                // dequeues, EC=0 parks (widening seed correct, seg.t_start
-                // <= now), ED=2 would-be-arms, EE=EF=0xBD47F5 (host time
-                // domain matches MCU's widened). Now actually call
-                // arm_segment but still bail before tick_sample. If bench
-                // survives, freeze is in tick_sample evaluator. If crashes,
-                // freeze is in arm_segment (likely curve_pool lookup or
-                // axis piece initialization).
                 isr.engine.arm_segment_with_diag(seg, curve_pool, shared);
             } else {
                 bump_relaxed(&shared.isr_parked_count);

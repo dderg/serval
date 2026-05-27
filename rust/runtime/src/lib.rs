@@ -60,6 +60,7 @@ pub mod stream;
 pub mod sub_sample_timing;
 pub mod test_xdirect_capture;
 pub mod tick;
+pub mod timeline;
 pub mod trace;
 pub mod wire;
 
