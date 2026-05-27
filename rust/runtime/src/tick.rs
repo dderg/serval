@@ -1242,8 +1242,8 @@ pub fn isr_sample_tick(
     //    `arm_segment` / `dequeue` calls don't fight for the IsrState
     //    field borrows.
     if isr.engine.current.is_none() {
-        let (candidate, was_parked) = match isr.pending_segment.take() {
-            Some(parked) => (Some(parked), true),
+        let candidate = match isr.pending_segment.take() {
+            Some(parked) => Some(parked),
             None => {
                 let dequeued = isr.queue_consumer.dequeue();
                 if dequeued.is_some() {
@@ -1254,7 +1254,7 @@ pub fn isr_sample_tick(
                 } else {
                     bump_relaxed(&shared.isr_deq_none_count);
                 }
-                (dequeued, false)
+                dequeued
             }
         };
         if let Some(seg) = candidate {
@@ -1281,29 +1281,6 @@ pub fn isr_sample_tick(
                 .isr_arm_delta_hi
                 .store((delta >> 32) as u32, Ordering::Relaxed);
             if seg.t_start <= now {
-                // LATE_ARM check: only for freshly-dequeued segments.
-                // Parked segments waited for t_start by design — ISR
-                // scheduling jitter means `now` may overshoot by a few
-                // ticks, which is normal and not an epoch mismatch.
-                if !was_parked {
-                    let sample_period =
-                        unsafe { kalico_runtime_get_sample_period_cycles() };
-                    // 100ms tolerance: large enough to absorb clock-sync drift
-                    // between runtime_widened_host_clock and the ISR's widen_state.
-                    // Still catches genuine epoch mismatches (which are 8+ seconds).
-                    let jitter_tolerance = 4000u64 * u64::from(sample_period);
-                    if seg.t_start.saturating_add(jitter_tolerance) < now {
-                        shared.last_error.store(
-                            crate::error::KALICO_FAULT_LATE_ARM,
-                            Ordering::Release,
-                        );
-                        shared.runtime_status.store(
-                            crate::engine::RuntimeStatus::Fault as u8,
-                            Ordering::Release,
-                        );
-                        return;
-                    }
-                }
                 // Rebase late arms: if t_start is in the past, shift the
                 // segment forward to `now` while preserving duration. Without
                 // this, advance_piece_if_needed walks every piece to exhaustion
@@ -1392,19 +1369,6 @@ unsafe extern "C" {
     fn runtime_cyccnt_read() -> u32;
 }
 
-// Sample-period extern. Mirrors the declaration in `per_axis_timer` —
-// the same C symbol is needed here for the late-arm jitter tolerance
-// calculation. Host/test stub returns 0 (jitter_tolerance == 0, so the
-// late-arm check degenerates to `seg.t_start < now`, which is safe for
-// tests that set t_start == now).
-#[cfg(not(any(test, feature = "host")))]
-unsafe extern "C" {
-    fn kalico_runtime_get_sample_period_cycles() -> u32;
-}
-#[cfg(any(test, feature = "host"))]
-unsafe fn kalico_runtime_get_sample_period_cycles() -> u32 {
-    0
-}
 #[cfg(not(any(test, feature = "host")))]
 #[inline]
 unsafe fn cyccnt_read() -> u32 {
