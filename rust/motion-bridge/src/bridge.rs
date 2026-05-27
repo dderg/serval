@@ -3055,7 +3055,7 @@ impl PyMotionBridge {
         {
             let pools = self.slot_pools.lock().unwrap_or_else(|p| p.into_inner());
             for pool in pools.values() {
-                pool.retire_through_segment(u32::MAX);
+                pool.reset();
             }
         }
         {

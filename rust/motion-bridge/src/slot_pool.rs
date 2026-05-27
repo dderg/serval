@@ -238,6 +238,16 @@ impl SharedSlotPool {
         self.closed.load(AtomicOrdering::Acquire)
     }
 
+    /// Reset the pool to its initial state: all slots free, all generations
+    /// back to 0. Called by `cancel_motion` so the host's generation counters
+    /// re-sync with the MCU's post-flush `reset_all_retired_to_current` state.
+    pub fn reset(&self) {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let cap = guard.capacity();
+        *guard = SlotPool::new(cap);
+        self.cv.notify_all();
+    }
+
     /// Non-blocking alloc. Returns `Some((slot_idx, generation))` when a
     /// free slot is available, `None` when the pool is exhausted or closed.
     pub fn try_alloc(&self) -> Option<(u16, u16)> {
