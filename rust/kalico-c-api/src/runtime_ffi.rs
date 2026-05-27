@@ -552,25 +552,30 @@ pub mod exports {
         }
 
         // Compute timing. t_start_clock == 0 means "chain from last commit".
+        let mcu_now = unsafe { super::exports::runtime_widened_host_clock() };
+        let clock_freq = unsafe { super::exports::runtime_clock_freq };
+        let min_lead = u64::from(clock_freq) / 100; // 10ms
         let t_start = if t_start_clock != 0 {
-            // Cold-start: the host sends a t_start based on its clock estimate.
-            // If the estimate is stale, t_start may be barely ahead of the
-            // MCU's actual clock. Override with MCU's own clock + 10ms lead
-            // when the engine is idle (first commit in session). For running
-            // engines (subsequent cold-starts after flush), use host's value.
+            // Cold-start from host. Override with MCU clock when engine is
+            // idle — the host's estimate may be stale.
             let cur_status = shared.runtime_status.load(Ordering::Acquire);
             if cur_status == runtime::engine::RuntimeStatus::Idle as u8
                 || cur_status == runtime::engine::RuntimeStatus::Drained as u8
             {
-                let mcu_now = unsafe { super::exports::runtime_widened_host_clock() };
-                let clock_freq = unsafe { super::exports::runtime_clock_freq };
-                let min_lead = u64::from(clock_freq) / 100; // 10ms
                 mcu_now.saturating_add(min_lead)
             } else {
                 t_start_clock
             }
         } else {
-            fg.last_committed_t_end
+            // Chain from previous commit. If last_committed_t_end is stale
+            // (gap between moves — engine went Idle, host sends chain because
+            // cold_start_done is still set), override with MCU clock + lead.
+            let candidate = fg.last_committed_t_end;
+            if candidate.saturating_add(min_lead) < mcu_now {
+                mcu_now.saturating_add(min_lead)
+            } else {
+                candidate
+            }
         };
         let t_end = t_start.wrapping_add(duration_clocks);
 
