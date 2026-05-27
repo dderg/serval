@@ -868,6 +868,18 @@ class MotionToolhead(ToolHead):
                     "MotionToolhead: failed to read input_shaper params"
                 )
 
+        kin_name = (self.kinematics_name or "").lower()
+        if kin_name == "corexy":
+            kin_tag = 0
+        elif kin_name == "cartesian":
+            kin_tag = 1
+        else:
+            logging.warning(
+                "MotionToolhead: unrecognised kinematics %r, defaulting to CoreXY (0)",
+                self.kinematics_name,
+            )
+            kin_tag = 0
+
         try:
             self.bridge.init_planner(
                 self.max_velocity,
@@ -881,6 +893,7 @@ class MotionToolhead(ToolHead):
                 shaper_freq_y,
                 octopus,
                 f446,
+                kinematics=kin_tag,
             )
             self._configure_axes_per_mcu(bridge_mcus)
 

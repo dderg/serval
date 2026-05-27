@@ -484,8 +484,11 @@ def run_simulation(
                 )
             log.info("Klippy ready")
 
-            # Endstop triggering is handled by the libsim_intercept.so
-            # shim's auto-endstop feature (step counting → GPIO trigger).
+            # Reset auto-endstops: the runtime generates initialization
+            # steps that accumulate in the shim's auto-endstop counters,
+            # potentially triggering endstops before homing even starts.
+            # Clear and re-add with fresh state so homing works correctly.
+            _reset_auto_endstops(str(h7_sock_dir / "sim_control"))
 
             # Record virtual time at start
             vtime_start = vtime_read_ns()
@@ -696,6 +699,57 @@ G1 Z125 F300
                 beacon_stub.stop()
 
             vtime_destroy()
+
+
+def _send_sim_control(sock_path: str, cmd: str, timeout: float = 2.0) -> str:
+    """Send a command to the sim_control socket and return the response."""
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(sock_path)
+        sock.sendall((cmd + "\n").encode())
+        resp = sock.recv(256).decode().strip()
+        sock.close()
+        return resp
+    except (ConnectionRefusedError, FileNotFoundError, socket.timeout) as e:
+        log.warning("sim_control command failed: %s: %s", cmd, e)
+        return ""
+
+
+# step_gpio_lines from runtime_tick_host.c — the axis→gpio mapping used
+# by sim_intercept_notify_step. Must match the compile-time constant.
+STEP_GPIO_LINES = [18, 7, 15]
+
+# Default auto-endstop configuration: step_gpio_lines[axis] → endstop pin.
+# Endstop pins match _generate_minimal_config (gpio 10, 11, 12).
+DEFAULT_AUTO_ENDSTOPS = [
+    {"step_chip": 0, "step_line": 18, "endstop_chip": 0, "endstop_line": 10, "trigger_after": 500},
+    {"step_chip": 0, "step_line": 7,  "endstop_chip": 0, "endstop_line": 11, "trigger_after": 500},
+    {"step_chip": 0, "step_line": 15, "endstop_chip": 0, "endstop_line": 12, "trigger_after": 500},
+]
+
+
+def _reset_auto_endstops(sim_control_path: str):
+    """Clear and re-add auto-endstops with fresh state.
+
+    Called after klippy is ready to discard the init-time step
+    accumulation that would otherwise leave endstops pre-triggered.
+    """
+    resp = _send_sim_control(sim_control_path, "clear_auto_endstops")
+    log.info("clear_auto_endstops: %s", resp)
+    for ae in DEFAULT_AUTO_ENDSTOPS:
+        cmd = (
+            f"add_auto_endstop step_chip={ae['step_chip']} "
+            f"step_line={ae['step_line']} "
+            f"endstop_chip={ae['endstop_chip']} "
+            f"endstop_line={ae['endstop_line']} "
+            f"trigger_after={ae['trigger_after']}"
+        )
+        resp = _send_sim_control(sim_control_path, cmd)
+        log.info("add_auto_endstop: %s -> %s", cmd, resp)
+    # Wait for a few tick cycles so runtime_endstop_sample_pins sees
+    # the cleared GPIO and updates PIN_LEVELS in the Rust runtime.
+    time.sleep(0.05)
 
 
 def _start_chip_emulators(h7_sock_dir, f4_sock_dir, repo_root):
@@ -1078,6 +1132,7 @@ position_min: 0
 position_endstop: 0
 position_max: 250
 homing_speed: 10
+homing_retract_dist: 0
 
 [stepper_y]
 step_pin: gpiochip0/gpio3
@@ -1090,6 +1145,7 @@ position_min: 0
 position_endstop: 0
 position_max: 250
 homing_speed: 10
+homing_retract_dist: 0
 
 [stepper_z]
 step_pin: gpiochip0/gpio6
@@ -1102,6 +1158,17 @@ position_min: -5
 position_endstop: 0
 position_max: 250
 homing_speed: 5
+homing_retract_dist: 0
+
+[homing_override]
+axes: xyz
+set_position_x: 125
+set_position_y: 125
+set_position_z: 125
+gcode:
+  {{% set axes = params.AXES|default("XYZ") %}}
+  G28 X
+  SET_KINEMATIC_POSITION Y=0 Z=0
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -1490,6 +1557,19 @@ def main():
 
     if not result.success and result.mcu_logs:
         for name, content in result.mcu_logs.items():
+            # Show shim diagnostic lines from full log
+            shim_lines = [l for l in content.split("\n")
+                          if any(k in l for k in (
+                              "gpio-watch", "auto-endstop", "shim-endstop",
+                              "pull_up", "[shim]", "tick-drain", "mcu-arm",
+                              "mcu-cfg-axis", "tick-enable", "tick-alive",
+                              "mcu-push-seg", "arm-axis",
+                          ))]
+            if shim_lines:
+                print(f"\n--- {name} shim diagnostics ({len(shim_lines)} lines) ---")
+                for line in shim_lines[:50]:
+                    print(line)
+                print(f"--- end {name} shim ---")
             print(f"\n--- {name} MCU log (last 30 lines) ---")
             for line in content.strip().split("\n")[-30:]:
                 print(line)

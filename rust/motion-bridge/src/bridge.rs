@@ -1852,6 +1852,7 @@ impl PyMotionBridge {
         shaper_freq_y,
         octopus_handle,
         f446_handle,
+        kinematics = 0,
         window_capacity = 32,
         beta_max_iters = 10,
     ))]
@@ -1869,6 +1870,7 @@ impl PyMotionBridge {
         shaper_freq_y: f64,
         octopus_handle: u32,
         f446_handle: u32,
+        kinematics: u8,
         window_capacity: usize,
         beta_max_iters: u8,
     ) -> PyResult<()> {
@@ -1918,20 +1920,71 @@ impl PyMotionBridge {
                 .unwrap_or_default();
             (oc, fc)
         };
-        let mcu_configs = vec![
-            McuAxisConfig {
-                mcu_id: octopus_handle,
-                axes: vec![AXIS_X, AXIS_Y],
-                kinematics: 0, // CoreXyAndE
-                caps: octopus_caps,
-            },
-            McuAxisConfig {
-                mcu_id: f446_handle,
-                axes: vec![AXIS_Z],
-                kinematics: 1, // CartesianXyzAndE
-                caps: f446_caps,
-            },
-        ];
+        // Build the per-MCU axis config from the kinematics tag supplied by
+        // the Python layer.
+        //
+        //   kinematics == 0  →  CoreXY:
+        //     H7 (octopus):  axes [X, Y], kinematics 0 (CoreXyAndE)
+        //     F446:          axes [Z],    kinematics 1 (CartesianXyzAndE)
+        //
+        //   kinematics == 1  →  Cartesian:
+        //     Two-MCU variant (octopus_handle != f446_handle):
+        //       H7 (octopus): axes [X, Y], kinematics 1
+        //       F446:         axes [Z],    kinematics 1
+        //     Single-MCU variant (octopus_handle == f446_handle):
+        //       H7 (octopus): axes [X, Y, Z], kinematics 1
+        let mcu_configs: Vec<McuAxisConfig> = match kinematics {
+            0 => {
+                // CoreXY — original two-MCU topology.
+                vec![
+                    McuAxisConfig {
+                        mcu_id: octopus_handle,
+                        axes: vec![AXIS_X, AXIS_Y],
+                        kinematics: 0, // CoreXyAndE
+                        caps: octopus_caps,
+                    },
+                    McuAxisConfig {
+                        mcu_id: f446_handle,
+                        axes: vec![AXIS_Z],
+                        kinematics: 1, // CartesianXyzAndE
+                        caps: f446_caps,
+                    },
+                ]
+            }
+            1 => {
+                // Cartesian.
+                if octopus_handle != f446_handle {
+                    // Two-MCU: H7 owns X+Y, F446 owns Z.
+                    vec![
+                        McuAxisConfig {
+                            mcu_id: octopus_handle,
+                            axes: vec![AXIS_X, AXIS_Y],
+                            kinematics: 1, // CartesianXyzAndE
+                            caps: octopus_caps,
+                        },
+                        McuAxisConfig {
+                            mcu_id: f446_handle,
+                            axes: vec![AXIS_Z],
+                            kinematics: 1, // CartesianXyzAndE
+                            caps: f446_caps,
+                        },
+                    ]
+                } else {
+                    // Single-MCU (sim / all-in-one): one entry covers X+Y+Z.
+                    vec![McuAxisConfig {
+                        mcu_id: octopus_handle,
+                        axes: vec![AXIS_X, AXIS_Y, AXIS_Z],
+                        kinematics: 1, // CartesianXyzAndE
+                        caps: octopus_caps,
+                    }]
+                }
+            }
+            _ => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "init_planner: unsupported kinematics tag {kinematics}"
+                )));
+            }
+        };
         *self
             .mcu_axis_configs
             .lock()

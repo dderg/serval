@@ -20,6 +20,12 @@
 #include "stepper.h"
 #include "trsync.h" // trsync_add_signal
 #include "kalico_runtime.h" // StepperBindingRust
+#if CONFIG_MACH_LINUX
+#include <stdio.h>
+#define MAX_STEPPER_OIDS_SIM 16
+int8_t stepper_oid_to_axis[MAX_STEPPER_OIDS_SIM];
+static int stepper_oid_to_axis_inited = 0;
+#endif
 
 struct stepper {
     struct gpio_out step_pin, dir_pin;
@@ -249,6 +255,18 @@ command_kalico_configure_axis(uint32_t *args)
     uint16_t blob_len       = (uint16_t)args[5];
     const uint8_t *blob     = command_decode_ptr(args[6]);
 
+#if CONFIG_MACH_LINUX
+    if (!stepper_oid_to_axis_inited) {
+        for (int i = 0; i < MAX_STEPPER_OIDS_SIM; i++)
+            stepper_oid_to_axis[i] = -1;
+        stepper_oid_to_axis_inited = 1;
+    }
+    for (uint8_t i = 0; i < stepper_count; i++) {
+        uint8_t oid = blob[i*4+0];
+        if (oid < MAX_STEPPER_OIDS_SIM)
+            stepper_oid_to_axis[oid] = (int8_t)axis_idx;
+    }
+#endif
     // ── Phase 1: validate every input + every binding, no mutations.
     if (axis_idx >= RUNTIME_MOTOR_COUNT)
         shutdown("configure_axis axis_idx out of range");

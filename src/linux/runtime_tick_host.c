@@ -86,7 +86,7 @@ runtime_host_widened_clock_now(void)
 // Step pin → GPIO line mapping for the sim step queue consumer.
 // Matches printer_real/config after pin-overrides.toml:
 // X(motor0)=PG4→gpio18, Y(motor1)=PF11→gpio7, Z(motor2)=PG0→gpio15.
-static const int step_gpio_lines[N_AXIS_STEP_QUEUES] = { 18, 7, 15, -1 };
+const int step_gpio_lines[N_AXIS_STEP_QUEUES] = { 18, 7, 15, -1 };
 
 // dlsym-resolved shim function for notifying auto-endstop of steps.
 static void (*sim_notify_step)(int chip, int line, int32_t n_steps);
@@ -131,10 +131,12 @@ host_tick_main(void *arg)
         // notify the auto-endstop shim so it can count step pulses.
         for (int axis = 0; axis < N_AXIS_STEP_QUEUES; axis++) {
             StepQueue *q = &step_queues[axis];
+            int drained = 0;
             while (q->head != q->tail) {
                 uint16_t idx = q->head & (STEP_QUEUE_DEPTH - 1);
                 int8_t dir = q->buf[idx].dir;
                 q->head++;
+                drained++;
                 if (sim_notify_step && step_gpio_lines[axis] >= 0)
                     sim_notify_step(0, step_gpio_lines[axis],
                                     dir ? -1 : 1);
@@ -209,5 +211,9 @@ runtime_tick_enable(void)
 __attribute__((used)) void
 runtime_tick_disable(void)
 {
-    atomic_store_explicit(&host_tick_enabled, 0, memory_order_release);
+    // On MACH_LINUX the tick thread is the ONLY stepping path (there is
+    // no separate step-event ISR). Disabling it would kill step
+    // generation for all axes. The H7/F4 ISR shims gate on
+    // count_modulated_steppers, but the Linux sim needs the tick
+    // unconditionally — leave it enabled.
 }

@@ -15,6 +15,10 @@
 #include "board/misc.h"           // timer_read_time
 #include "kalico_runtime.h"       // FFI export prototypes
 #include "kalico_dispatch.h"      // kalico_native_emit_*
+#if CONFIG_MACH_LINUX
+#include <dlfcn.h>                // dlsym for sim_intercept_*
+#include "step_queue.h"           // N_AXIS_STEP_QUEUES
+#endif
 #if CONFIG_MACH_STM32
 #include "stm32/phase_stepping_spi.h"
 #elif CONFIG_MACH_LINUX
@@ -163,10 +167,6 @@ endstop_pin_table_populate(uint8_t source_count, const uint8_t *sources_ptr)
 void
 command_runtime_arm_endstop(uint32_t *args)
 {
-#if CONFIG_MACH_LINUX
-    fprintf(stderr, "[mcu-arm] command_runtime_arm_endstop entered arm_id=%u\n", args[0]);
-    fflush(stderr);
-#endif
     uint32_t arm_id = args[0];
     uint32_t arm_clock_lo = args[1];
     uint32_t arm_clock_hi = args[2];
@@ -190,6 +190,50 @@ command_runtime_arm_endstop(uint32_t *args)
             }
         }
     }
+#if CONFIG_MACH_LINUX
+    // Sim: configure auto-endstop for this arm, mapping the homed
+    // stepper's step queue to the endstop GPIO from the sources blob.
+    // step_gpio_lines[stepper_oid] is the GPIO line the tick host uses
+    // when calling sim_intercept_notify_step for that stepper's axis.
+    {
+        static void (*sim_reset)(int, int);
+        static void (*sim_setup)(int, int, int, int, int);
+        if (!sim_reset)
+            sim_reset = dlsym(RTLD_DEFAULT, "sim_intercept_reset_endstop");
+        if (!sim_setup)
+            sim_setup = dlsym(RTLD_DEFAULT, "sim_intercept_setup_homing_endstop");
+        extern const int step_gpio_lines[];
+        extern int8_t stepper_oid_to_axis[];
+        if (sim_reset && sim_setup && sources_ptr && steppers_ptr) {
+            for (uint8_t i = 0; i < source_count; i++) {
+                const uint8_t *r = sources_ptr
+                    + (uint32_t)i * KALICO_ENDSTOP_SOURCE_RECORD_LEN;
+                if (r[0] == 2) continue;
+                uint16_t gpio_id = (uint16_t)r[1] | ((uint16_t)r[2] << 8);
+                int chip = gpio_id / 32;
+                int line_off = gpio_id % 32;
+                sim_reset(chip, line_off);
+                (void)kalico_endstop_set_pin_level(gpio_id, 0);
+            }
+            for (uint8_t si = 0; si < stepper_count && si < source_count; si++) {
+                const uint8_t *r = sources_ptr
+                    + (uint32_t)si * KALICO_ENDSTOP_SOURCE_RECORD_LEN;
+                if (r[0] == 2) continue;
+                uint16_t gpio_id = (uint16_t)r[1] | ((uint16_t)r[2] << 8);
+                int endstop_chip = gpio_id / 32;
+                int endstop_line = gpio_id % 32;
+                uint8_t stepper_oid = steppers_ptr[si * 4];
+                // Map OID → axis index via configure_axis table
+                int8_t axis_idx = (stepper_oid < 16)
+                    ? stepper_oid_to_axis[stepper_oid] : -1;
+                int step_line = (axis_idx >= 0 && axis_idx < N_AXIS_STEP_QUEUES)
+                    ? step_gpio_lines[axis_idx] : -1;
+                if (step_line >= 0)
+                    sim_setup(0, step_line, endstop_chip, endstop_line, 500);
+            }
+        }
+    }
+#endif
     (void)kalico_endstop_arm(arm_id, arm_clock_lo, arm_clock_hi,
                              source_count, sources_ptr, sources_len,
                              stepper_count, steppers_ptr, steppers_len,

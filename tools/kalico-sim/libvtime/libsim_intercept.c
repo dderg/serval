@@ -97,17 +97,20 @@ static struct sim_active_cs active_cs;
 static uint16_t iio_values[MAX_IIO_CHANNELS];
 static pthread_mutex_t iio_state_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-// Auto-endstop: when a step pin transitions, count steps. After N steps,
-// set the linked endstop pin to triggered. Used for simulating homing.
+// Auto-endstop: step-counting endstop simulation.
+//
+// Counts steps on the step pin (regardless of direction). After N
+// steps, asserts the endstop GPIO. The state is reset from
+// command_runtime_arm_endstop (via sim_intercept_reset_endstop) before
+// each homing pass, so init-time accumulation and retract re-triggers
+// are harmless — the reset-on-arm clears everything.
 #define MAX_AUTO_ENDSTOPS 8
 struct auto_endstop {
     int active;
-    int step_chip, step_line;     // step pin to monitor
+    int step_chip, step_line;       // step pin to monitor
     int endstop_chip, endstop_line; // endstop pin to trigger
-    int trigger_after_steps;      // steps before trigger
-    int step_count;               // current count
-    int last_step_value;          // for edge detection
-    int triggered;                // set when endstop was auto-triggered
+    int trigger_after_steps;        // steps before trigger
+    int step_count;                 // accumulated steps
 };
 static struct auto_endstop auto_endstops[MAX_AUTO_ENDSTOPS];
 static pthread_mutex_t auto_endstop_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -115,12 +118,19 @@ static pthread_mutex_t auto_endstop_mtx = PTHREAD_MUTEX_INITIALIZER;
 __attribute__((constructor(101)))
 static void iio_init(void) {
     for (int i = 0; i < MAX_IIO_CHANNELS; i++) iio_values[i] = DEFAULT_ADC_VALUE;
-    // Auto-endstop mappings matching printer_real/config after pin-overrides:
-    // X: step PG4→gpio18, endstop→gpio200; Y: step PF11→gpio7, endstop→gpio201;
-    // Z: step PG0→gpio15, endstop→gpio202. Trigger after 50 steps.
-    auto_endstops[0] = (struct auto_endstop){1, 0,18, 0,200, 50, 0, 0, 0};
-    auto_endstops[1] = (struct auto_endstop){1, 0,7,  0,201, 50, 0, 0, 0};
-    auto_endstops[2] = (struct auto_endstop){1, 0,15, 0,202, 50, 0, 0, 0};
+    // Auto-endstop mappings matching the minimal sim config.
+    // step_line values match runtime_tick_host.c step_gpio_lines[]:
+    //   axis 0 (X) → gpio18, axis 1 (Y) → gpio7, axis 2 (Z) → gpio15.
+    // endstop_line values match _generate_minimal_config():
+    //   X endstop → gpio10, Y endstop → gpio11, Z endstop → gpio12.
+    // For non-minimal configs, the runner reconfigures via the control
+    // socket (clear_auto_endstops + add_auto_endstop commands).
+    // trigger_after=500 (~6.25mm) ensures the first homing pass moves
+    // past min_home_dist (5mm), so Klipper does NOT request a rehome.
+    // This avoids the second-pass step-generation issue in the sim.
+    auto_endstops[0] = (struct auto_endstop){1, 0,18, 0,10, 500, 0};
+    auto_endstops[1] = (struct auto_endstop){1, 0,7,  0,11, 500, 0};
+    auto_endstops[2] = (struct auto_endstop){1, 0,15, 0,12, 500, 0};
 }
 
 static int alloc_fake_fd(enum sim_slot_kind kind) {
@@ -287,6 +297,46 @@ static void control_handle_line(int client_fd, char *line) {
         char buf[64];
         snprintf(buf, sizeof(buf), "value=%llu\n", (unsigned long long)found);
         send_resp(client_fd, buf);
+        return;
+    }
+    if (strncmp(line, "clear_auto_endstops", 19) == 0) {
+        pthread_mutex_lock(&auto_endstop_mtx);
+        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+            if (auto_endstops[i].active) {
+                pthread_mutex_lock(&gpio_state_mtx);
+                gpio_lines[auto_endstops[i].endstop_chip]
+                          [auto_endstops[i].endstop_line].value = 0;
+                pthread_mutex_unlock(&gpio_state_mtx);
+            }
+            auto_endstops[i].active = 0;
+        }
+        pthread_mutex_unlock(&auto_endstop_mtx);
+        send_resp(client_fd, "ok\n");
+        return;
+    }
+    if (strncmp(line, "add_auto_endstop", 16) == 0) {
+        long sc, sl, ec, el, ta;
+        if (parse_kv(line, "step_chip", &sc) < 0
+            || parse_kv(line, "step_line", &sl) < 0
+            || parse_kv(line, "endstop_chip", &ec) < 0
+            || parse_kv(line, "endstop_line", &el) < 0
+            || parse_kv(line, "trigger_after", &ta) < 0) {
+            send_resp(client_fd, "error: need step_chip step_line endstop_chip endstop_line trigger_after\n");
+            return;
+        }
+        pthread_mutex_lock(&auto_endstop_mtx);
+        int added = 0;
+        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+            if (!auto_endstops[i].active) {
+                auto_endstops[i] = (struct auto_endstop){
+                    1, (int)sc, (int)sl, (int)ec, (int)el, (int)ta, 0
+                };
+                added = 1;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&auto_endstop_mtx);
+        send_resp(client_fd, added ? "ok\n" : "error: no free slot\n");
         return;
     }
     send_resp(client_fd, "error: unknown verb\n");
@@ -541,10 +591,14 @@ static int gpio_handle_get_linehandle(int chip_fd, struct gpiohandle_request *re
     line_slot->u.gpioline.line_offset = offset;
     line_slot->u.gpioline.flags = req->flags;
     int direction = (req->flags & GPIOHANDLE_REQUEST_OUTPUT) ? 1 : 0;
+    int pull_up = !!(req->flags & (1UL << 5)); // GPIOHANDLE_REQUEST_BIAS_PULL_UP
     pthread_mutex_lock(&gpio_state_mtx);
     gpio_lines[chip_id][offset].direction = direction;
     if (direction == 1) {
-        gpio_lines[chip_id][offset].value = req->default_values[0] ? 1 : 0;
+        gpio_lines[chip_id][offset].value =
+            req->default_values[0] ? 1 : 0;
+    } else if (pull_up) {
+        gpio_lines[chip_id][offset].value = 1;
     }
     line_slot->u.gpioline.last_value = gpio_lines[chip_id][offset].value;
     pthread_mutex_unlock(&gpio_state_mtx);
@@ -554,41 +608,22 @@ static int gpio_handle_get_linehandle(int chip_fd, struct gpiohandle_request *re
     return 0;
 }
 
-static void check_auto_endstops(int chip_id, int offset, int new_value) {
+// Update auto-endstops with a step count (sign ignored — all steps count).
+// State is reset by sim_intercept_reset_endstop (called from
+// command_runtime_arm_endstop) before each homing pass.
+static void update_auto_endstop_steps(int chip_id, int line, int32_t n_steps) {
+    int abs_steps = (n_steps < 0) ? -n_steps : n_steps;
     pthread_mutex_lock(&auto_endstop_mtx);
     for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
         struct auto_endstop *ae = &auto_endstops[i];
         if (!ae->active) continue;
-        if (ae->step_chip != chip_id || ae->step_line != offset) continue;
-        // If endstop was triggered by us, clear it after some more steps
-        // (simulates retracting away from the endstop)
-        if (ae->triggered) {
-            if (ae->last_step_value == 0 && new_value == 1) {
-                ae->step_count++;
-                if (ae->step_count >= 10) { // clear after 10 retract steps
-                    pthread_mutex_lock(&gpio_state_mtx);
-                    gpio_lines[ae->endstop_chip][ae->endstop_line].value = 0;
-                    pthread_mutex_unlock(&gpio_state_mtx);
-                    ae->triggered = 0;
-                    ae->step_count = 0;
-                }
-            }
-            ae->last_step_value = new_value;
-            continue;
+        if (ae->step_chip != chip_id || ae->step_line != line) continue;
+        ae->step_count += abs_steps;
+        if (ae->step_count >= ae->trigger_after_steps) {
+            pthread_mutex_lock(&gpio_state_mtx);
+            gpio_lines[ae->endstop_chip][ae->endstop_line].value = 1;
+            pthread_mutex_unlock(&gpio_state_mtx);
         }
-        // Detect rising edge (step pulse) during approach
-        if (ae->last_step_value == 0 && new_value == 1) {
-            ae->step_count++;
-            if (ae->step_count >= ae->trigger_after_steps) {
-                // Trigger the endstop
-                pthread_mutex_lock(&gpio_state_mtx);
-                gpio_lines[ae->endstop_chip][ae->endstop_line].value = 1;
-                pthread_mutex_unlock(&gpio_state_mtx);
-                ae->triggered = 1;
-                ae->step_count = 0;
-            }
-        }
-        ae->last_step_value = new_value;
     }
     pthread_mutex_unlock(&auto_endstop_mtx);
 }
@@ -599,11 +634,56 @@ static void check_auto_endstops(int chip_id, int offset, int new_value) {
 // via dlsym(RTLD_DEFAULT, "sim_intercept_notify_step").
 __attribute__((visibility("default")))
 void sim_intercept_notify_step(int chip, int line, int32_t n_steps) {
-    int count = (n_steps < 0) ? -n_steps : n_steps;
-    for (int i = 0; i < count; i++) {
-        check_auto_endstops(chip, line, 1); // rising edge
-        check_auto_endstops(chip, line, 0); // falling edge (reset for next)
+    update_auto_endstop_steps(chip, line, n_steps);
+}
+
+// Set up a homing auto-endstop: clear any existing mapping for the
+// given endstop pin, then add a fresh one with the specified step line.
+// Called from command_runtime_arm_endstop on each arm to wire the
+// correct stepper axis to the correct endstop GPIO dynamically.
+__attribute__((visibility("default")))
+void sim_intercept_setup_homing_endstop(int step_chip, int step_line,
+                                         int endstop_chip, int endstop_line,
+                                         int trigger_after) {
+    pthread_mutex_lock(&auto_endstop_mtx);
+    // Clear any existing auto-endstop for this endstop pin
+    for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+        if (auto_endstops[i].active
+            && auto_endstops[i].endstop_chip == endstop_chip
+            && auto_endstops[i].endstop_line == endstop_line) {
+            auto_endstops[i].active = 0;
+        }
     }
+    // Add a fresh auto-endstop in the first free slot
+    for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+        if (!auto_endstops[i].active) {
+            auto_endstops[i] = (struct auto_endstop){
+                1, step_chip, step_line, endstop_chip, endstop_line,
+                trigger_after, 0
+            };
+            break;
+        }
+    }
+    pthread_mutex_unlock(&auto_endstop_mtx);
+}
+
+// Reset auto-endstop state and clear the endstop GPIO for a given
+// endstop pin. Called from runtime_commands.c when endstop_arm is
+// invoked, ensuring the auto-endstop starts fresh for each homing pass.
+__attribute__((visibility("default")))
+void sim_intercept_reset_endstop(int endstop_chip, int endstop_line) {
+    pthread_mutex_lock(&auto_endstop_mtx);
+    for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+        struct auto_endstop *ae = &auto_endstops[i];
+        if (!ae->active) continue;
+        if (ae->endstop_chip != endstop_chip
+            || ae->endstop_line != endstop_line) continue;
+        ae->step_count = 0;
+        pthread_mutex_lock(&gpio_state_mtx);
+        gpio_lines[endstop_chip][endstop_line].value = 0;
+        pthread_mutex_unlock(&gpio_state_mtx);
+    }
+    pthread_mutex_unlock(&auto_endstop_mtx);
 }
 
 static int gpio_handle_set_values(int line_fd, struct gpiohandle_data *data) {
@@ -630,8 +710,9 @@ static int gpio_handle_set_values(int line_fd, struct gpiohandle_data *data) {
     }
     pthread_mutex_unlock(&gpio_state_mtx);
 
-    // Check auto-endstop triggers (step counting)
-    check_auto_endstops(chip_id, offset, v);
+    // Legacy GPIO step path: notify auto-endstop with unsigned step.
+    if (v == 1)
+        update_auto_endstop_steps(chip_id, offset, 1);
 
     return 0;
 }
