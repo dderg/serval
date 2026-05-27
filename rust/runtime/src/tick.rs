@@ -1304,6 +1304,17 @@ pub fn isr_sample_tick(
                         return;
                     }
                 }
+                // Rebase late arms: if t_start is in the past, shift the
+                // segment forward to `now` while preserving duration. Without
+                // this, advance_piece_if_needed walks every piece to exhaustion
+                // before the first evaluation — the segment retires without
+                // emitting any steps ("zero steps" bench symptom).
+                let mut seg = seg;
+                let lateness = now.saturating_sub(seg.t_start);
+                if lateness > 0 {
+                    seg.t_start = now;
+                    seg.t_end = seg.t_end.saturating_add(lateness);
+                }
                 shared.current_segment_id.store(seg.id, Ordering::Release);
                 bump_relaxed(&shared.isr_armed_count);
                 isr.engine.arm_segment_with_diag(seg, curve_pool, shared);
