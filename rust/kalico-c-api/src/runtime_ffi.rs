@@ -551,31 +551,29 @@ pub mod exports {
             return KALICO_ERR_SEGMENT_ID_MISMATCH;
         }
 
-        // Compute timing. t_start_clock == 0 means "chain from last commit".
-        let mcu_now = unsafe { super::exports::runtime_widened_host_clock() };
+        // Engine status check — used for both t_start override and TIM5 enable.
+        let cur_status = shared.runtime_status.load(Ordering::Acquire);
+        let engine_idle = cur_status == runtime::engine::RuntimeStatus::Idle as u8
+            || cur_status == runtime::engine::RuntimeStatus::Drained as u8;
+
+        // Read MCU clock ONCE when engine is idle. This single value is used
+        // for both the segment's t_start AND the ISR widen_state seed,
+        // guaranteeing they are in the same epoch.
         let clock_freq = unsafe { super::exports::runtime_clock_freq };
         let min_lead = u64::from(clock_freq) / 100; // 10ms
-        let t_start = if t_start_clock != 0 {
-            // Cold-start from host. Override with MCU clock when engine is
-            // idle — the host's estimate may be stale.
-            let cur_status = shared.runtime_status.load(Ordering::Acquire);
-            if cur_status == runtime::engine::RuntimeStatus::Idle as u8
-                || cur_status == runtime::engine::RuntimeStatus::Drained as u8
-            {
-                mcu_now.saturating_add(min_lead)
-            } else {
-                t_start_clock
-            }
+        let cold_start_seed = if engine_idle {
+            Some(unsafe { super::exports::runtime_widened_host_clock() })
         } else {
-            // Chain from previous commit. If last_committed_t_end is stale
-            // (gap between moves — engine went Idle, host sends chain because
-            // cold_start_done is still set), override with MCU clock + lead.
-            let candidate = fg.last_committed_t_end;
-            if candidate.saturating_add(min_lead) < mcu_now {
-                mcu_now.saturating_add(min_lead)
-            } else {
-                candidate
-            }
+            None
+        };
+
+        // Compute timing. t_start_clock == 0 means "chain from last commit".
+        let t_start = if let Some(seed) = cold_start_seed {
+            seed.saturating_add(min_lead)
+        } else if t_start_clock != 0 {
+            t_start_clock
+        } else {
+            fg.last_committed_t_end
         };
         let t_end = t_start.wrapping_add(duration_clocks);
 
@@ -621,39 +619,16 @@ pub mod exports {
             _ => {}
         }
 
-        // TIM5 re-enable protocol (moved from push_segment_impl). If the
-        // runtime is Idle or Drained, reinitialise the widen state and arm
-        // TIM5. At this point the ISR is stopped (Idle/Drained), so the
-        // foreground can safely touch `IsrState::widen_state` via a cast_mut.
-        let cur_status = shared.runtime_status.load(Ordering::Acquire);
-        if cur_status == runtime::engine::RuntimeStatus::Idle as u8
-            || cur_status == runtime::engine::RuntimeStatus::Drained as u8
-        {
-            // SAFETY: the runtime is Idle or Drained, meaning TIM5 is not
-            // firing and the ISR is quiescent. The foreground is the sole
-            // active context; forming `&mut widen_state` through the const
-            // pointer is therefore sound for the duration of this block.
+        // TIM5 re-enable: seed widen_state from the SAME clock read that
+        // was used for t_start above (cold_start_seed). This guarantees
+        // the ISR's widened clock and the segment's timing are in the
+        // same epoch — no drift between separate widened_host_clock calls.
+        if let Some(seed) = cold_start_seed {
             unsafe {
                 let isr_ptr_mut = isr_ptr_const.cast_mut();
                 let widen_state = &mut (*isr_ptr_mut).widen_state;
-                let last_widened = super::exports::runtime_widened_host_clock();
-                widen_state.seed(last_widened);
-                runtime::clock::publish_widened_now(shared, last_widened);
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    shared.diag_commit_seed_lo.store(last_widened as u32, Ordering::Relaxed);
-                    shared.diag_commit_seed_hi.store((last_widened >> 32) as u32, Ordering::Relaxed);
-                    shared.diag_commit_t_start_lo.store(t_start as u32, Ordering::Relaxed);
-                    shared.diag_commit_t_start_hi.store((t_start >> 32) as u32, Ordering::Relaxed);
-                    // Store (t_start - seed) as fault_detail. Expected:
-                    // ~130M for H7 (250ms × 520MHz), ~45M for F446 (250ms × 180MHz).
-                    // Wildly different = seed is wrong = root cause of LATE_ARM.
-                    #[allow(clippy::cast_possible_truncation)]
-                    shared.fault_detail.store(
-                        t_start.wrapping_sub(last_widened) as u32,
-                        Ordering::Relaxed,
-                    );
-                }
+                widen_state.seed(seed);
+                runtime::clock::publish_widened_now(shared, seed);
                 super::exports::runtime_tick_enable();
             }
         }
