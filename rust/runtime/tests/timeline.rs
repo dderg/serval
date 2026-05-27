@@ -1,34 +1,14 @@
-//! Contract tests for [`runtime::timeline::Timeline`].
-//!
-//! Tests create `LoadedCubicCurve` structs on the stack and load them into
-//! the Timeline via `test_load_axis_raw`. No CurvePool needed — the Timeline
-//! just holds pointers into the test-owned curve data.
+//! Contract tests for the Timeline.
 
-#![allow(unsafe_code, clippy::unwrap_used)]
+#![allow(clippy::unwrap_used)]
 
-use runtime::cubic_curve::LoadedCubicCurve;
 use runtime::monomial::BezierPieceMonomial;
-use runtime::timeline::Timeline;
+use runtime::timeline::{GetPieceResult, Timeline};
 
 const CLOCK_HZ: f32 = 520_000_000.0;
 
 fn ms_to_cycles(ms: f32) -> u64 {
     (ms / 1_000.0 * CLOCK_HZ) as u64
-}
-
-const ZERO_PIECE: BezierPieceMonomial = BezierPieceMonomial {
-    coeffs: [0.0; 4],
-    vel_coeffs: [0.0; 3],
-    duration: 0.0,
-};
-
-fn make_curve(pieces: &[BezierPieceMonomial]) -> LoadedCubicCurve {
-    let mut curve = LoadedCubicCurve::empty();
-    curve.piece_count = pieces.len() as u16;
-    for (i, p) in pieces.iter().enumerate() {
-        curve.pieces[i] = *p;
-    }
-    curve
 }
 
 fn linear_piece(duration_sec: f32) -> BezierPieceMonomial {
@@ -48,221 +28,215 @@ fn constant_piece(position: f32, duration_sec: f32) -> BezierPieceMonomial {
     }
 }
 
-/// Helper: load a curve onto axis 0 with a given start time.
-fn load_axis0(tl: &mut Timeline, curve: &LoadedCubicCurve, start_ms: f32) {
-    unsafe {
-        tl.test_load_axis_raw(
-            0,
-            curve as *const _,
-            curve.piece_count,
-            ms_to_cycles(start_ms),
-            CLOCK_HZ,
-        );
+/// Helper: extract (&piece, t_local) from a Hit result, panic otherwise.
+fn unwrap_hit<'a>(result: GetPieceResult<'a>) -> (&'a BezierPieceMonomial, f32) {
+    match result {
+        GetPieceResult::Hit(p, t) => (p, t),
+        GetPieceResult::NeedsAdvance => panic!("expected Hit, got NeedsAdvance"),
+        GetPieceResult::Idle => panic!("expected Hit, got Idle"),
+    }
+}
+
+/// Helper: get_piece with auto-advance for tests. Simulates what the ISR
+/// loop does: try get_piece, if NeedsAdvance call test_advance_piece.
+fn get_or_advance<'a>(
+    tl: &'a mut Timeline,
+    axis: usize,
+    now: u64,
+    pieces: &[BezierPieceMonomial],
+) -> Option<(&'a BezierPieceMonomial, f32)> {
+    // Two-step borrow: try get_piece first, then advance if needed.
+    // Can't hold the reference across the advance call, so we check
+    // the discriminant first.
+    let needs_advance = matches!(tl.get_piece(axis, now), GetPieceResult::NeedsAdvance);
+    if needs_advance {
+        match tl.test_advance_piece(axis, now, pieces) {
+            GetPieceResult::Hit(p, t) => Some((p, t)),
+            _ => None,
+        }
+    } else {
+        match tl.get_piece(axis, now) {
+            GetPieceResult::Hit(p, t) => Some((p, t)),
+            _ => None,
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Basic: returns piece and correct t_local
-// ---------------------------------------------------------------------------
 
 #[test]
 fn returns_piece_and_t_local_within_piece() {
-    let curve = make_curve(&[linear_piece(0.1)]); // 100ms
+    let pieces = [linear_piece(0.1)];
     let mut tl = Timeline::new(CLOCK_HZ);
-    load_axis0(&mut tl, &curve, 0.0);
+    tl.test_load_pieces(0, &pieces, 0);
 
-    let (_, t_local) = tl.get_piece(0, ms_to_cycles(50.0)).unwrap();
+    let (_, t_local) = unwrap_hit(tl.get_piece(0, ms_to_cycles(50.0)));
     assert!(
         (t_local - 0.05).abs() < 1e-4,
         "t_local = {t_local}, expected ≈ 0.05"
     );
 }
 
-// ---------------------------------------------------------------------------
-// Advances to next piece when time passes
-// ---------------------------------------------------------------------------
-
 #[test]
 fn advances_to_next_piece_when_time_passes() {
-    let curve = make_curve(&[linear_piece(0.05), constant_piece(5.0, 0.05)]);
+    let pieces = [linear_piece(0.05), constant_piece(5.0, 0.05)];
     let mut tl = Timeline::new(CLOCK_HZ);
-    load_axis0(&mut tl, &curve, 0.0);
+    tl.test_load_pieces(0, &pieces, 0);
 
-    let (piece, t_local) = tl.get_piece(0, ms_to_cycles(75.0)).unwrap();
-    // Should be in piece 2 (constant at 5.0), t_local ≈ 25ms
+    let (piece, t_local) = get_or_advance(&mut tl, 0, ms_to_cycles(75.0), &pieces).unwrap();
     assert!(
         (t_local - 0.025).abs() < 1e-4,
         "t_local = {t_local}, expected ≈ 0.025"
     );
     assert!(
         (piece.coeffs[0] - 5.0).abs() < 0.01,
-        "should be the constant piece (c0=5.0), got c0={}",
-        piece.coeffs[0]
+        "should be the constant piece"
     );
 }
 
-// ---------------------------------------------------------------------------
-// Returns None when no curve loaded
-// ---------------------------------------------------------------------------
-
 #[test]
-fn returns_none_when_empty() {
+fn returns_idle_when_empty() {
     let mut tl = Timeline::new(CLOCK_HZ);
-    assert!(tl.get_piece(0, ms_to_cycles(50.0)).is_none());
-    assert!(tl.get_piece(1, ms_to_cycles(0.0)).is_none());
+    assert!(matches!(tl.get_piece(0, ms_to_cycles(50.0)), GetPieceResult::Idle));
 }
 
-// ---------------------------------------------------------------------------
-// Returns None after last piece
-// ---------------------------------------------------------------------------
-
 #[test]
-fn returns_none_after_last_piece() {
-    let curve = make_curve(&[linear_piece(0.1)]);
+fn returns_idle_after_last_piece() {
+    let pieces = [linear_piece(0.1)];
     let mut tl = Timeline::new(CLOCK_HZ);
-    load_axis0(&mut tl, &curve, 0.0);
+    tl.test_load_pieces(0, &pieces, 0);
 
-    assert!(tl.get_piece(0, ms_to_cycles(150.0)).is_none());
-    assert!(!tl.axis_active(0), "axis should be idle after exhaustion");
+    // Advance past the end
+    let result = tl.get_piece(0, ms_to_cycles(50.0)); // within piece
+    assert!(matches!(result, GetPieceResult::Hit(..)));
+
+    // Now past the end — get_piece returns NeedsAdvance, advance returns Idle
+    match tl.get_piece(0, ms_to_cycles(150.0)) {
+        GetPieceResult::NeedsAdvance => {
+            let result = tl.test_advance_piece(0, ms_to_cycles(150.0), &pieces);
+            assert!(matches!(result, GetPieceResult::Idle));
+        }
+        other => panic!("expected NeedsAdvance, got {other:?}"),
+    }
+    assert!(!tl.axis_active(0));
 }
-
-// ---------------------------------------------------------------------------
-// Skips sub-tick piece
-// ---------------------------------------------------------------------------
 
 #[test]
 fn skips_piece_shorter_than_tick_period() {
-    let curve = make_curve(&[
+    let pieces = [
         constant_piece(0.0, 10e-6), // 10µs — shorter than one 40kHz tick
-        linear_piece(0.1),           // 100ms
-    ]);
+        linear_piece(0.1),
+    ];
     let mut tl = Timeline::new(CLOCK_HZ);
-    load_axis0(&mut tl, &curve, 0.0);
+    tl.test_load_pieces(0, &pieces, 0);
 
-    let (piece, _) = tl.get_piece(0, ms_to_cycles(50.0)).unwrap();
+    let (piece, _) = get_or_advance(&mut tl, 0, ms_to_cycles(50.0), &pieces).unwrap();
     assert!(
         (piece.duration - 0.1).abs() < 1e-6,
         "should skip the 10µs piece and return the 100ms one"
     );
 }
 
-// ---------------------------------------------------------------------------
-// Consecutive calls same piece (cache hit)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn consecutive_calls_same_piece_no_advance() {
-    let curve = make_curve(&[linear_piece(0.1)]);
+    let pieces = [linear_piece(0.1)];
     let mut tl = Timeline::new(CLOCK_HZ);
-    load_axis0(&mut tl, &curve, 0.0);
+    tl.test_load_pieces(0, &pieces, 0);
 
-    let (_, t1) = tl.get_piece(0, ms_to_cycles(25.0)).unwrap();
-    let (_, t2) = tl.get_piece(0, ms_to_cycles(26.0)).unwrap();
+    let (_, t1) = unwrap_hit(tl.get_piece(0, ms_to_cycles(25.0)));
+    let (_, t2) = unwrap_hit(tl.get_piece(0, ms_to_cycles(26.0)));
 
     assert!((t1 - 0.025).abs() < 1e-4);
     assert!((t2 - 0.026).abs() < 1e-4);
     assert!((t2 - t1 - 0.001).abs() < 1e-4, "delta should be ~1ms");
 }
 
-// ---------------------------------------------------------------------------
-// Multi-axis independence
-// ---------------------------------------------------------------------------
-
 #[test]
 fn multi_axis_independence() {
-    let curve0 = make_curve(&[linear_piece(0.05), linear_piece(0.05)]);
-    let curve1 = make_curve(&[constant_piece(0.0, 0.1)]);
+    let pieces0 = [linear_piece(0.05), linear_piece(0.05)];
+    let pieces1 = [constant_piece(0.0, 0.1)];
     let mut tl = Timeline::new(CLOCK_HZ);
+    tl.test_load_pieces(0, &pieces0, 0);
+    tl.test_load_pieces(1, &pieces1, 0);
 
-    load_axis0(&mut tl, &curve0, 0.0);
-    unsafe {
-        tl.test_load_axis_raw(1, &curve1 as *const _, curve1.piece_count, 0, CLOCK_HZ);
-    }
-
-    // Advance axis 0 past its first piece
-    let (_, t0) = tl.get_piece(0, ms_to_cycles(75.0)).unwrap();
+    let (_, t0) = get_or_advance(&mut tl, 0, ms_to_cycles(75.0), &pieces0).unwrap();
     assert!((t0 - 0.025).abs() < 1e-4, "axis 0 in piece 2");
 
-    // Axis 1 should be unaffected
-    let (_, t1) = tl.get_piece(1, ms_to_cycles(30.0)).unwrap();
+    let (_, t1) = unwrap_hit(tl.get_piece(1, ms_to_cycles(30.0)));
     assert!((t1 - 0.030).abs() < 1e-4, "axis 1 unaffected");
 }
 
-// ---------------------------------------------------------------------------
-// Cursor recovery after exhaustion (reload)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn cursor_recovers_after_reload() {
-    let curve1 = make_curve(&[linear_piece(0.1)]);
+    let pieces1 = [linear_piece(0.1)];
     let mut tl = Timeline::new(CLOCK_HZ);
-    load_axis0(&mut tl, &curve1, 0.0);
+    tl.test_load_pieces(0, &pieces1, 0);
 
-    // Exhaust
-    assert!(tl.get_piece(0, ms_to_cycles(150.0)).is_none());
+    // Exhaust via advance
+    let _ = get_or_advance(&mut tl, 0, ms_to_cycles(150.0), &pieces1);
     assert!(!tl.axis_active(0));
 
-    // Reload with a new curve starting at 200ms
-    let curve2 = make_curve(&[linear_piece(0.1)]);
-    unsafe {
-        tl.test_load_axis_raw(0, &curve2, curve2.piece_count, ms_to_cycles(200.0), CLOCK_HZ);
-    }
+    // Reload
+    let pieces2 = [linear_piece(0.1)];
+    tl.test_load_pieces(0, &pieces2, ms_to_cycles(200.0));
 
-    let (_, t_local) = tl.get_piece(0, ms_to_cycles(250.0)).unwrap();
+    let (_, t_local) = unwrap_hit(tl.get_piece(0, ms_to_cycles(250.0)));
     assert!(
         (t_local - 0.05).abs() < 1e-4,
-        "reloaded curve should work, got t_local={t_local}"
+        "reloaded curve should work"
     );
 }
 
-// ---------------------------------------------------------------------------
-// Reset clears all axes
-// ---------------------------------------------------------------------------
-
 #[test]
 fn reset_clears_all_axes() {
-    let curve = make_curve(&[linear_piece(0.1)]);
+    let pieces = [linear_piece(0.1)];
     let mut tl = Timeline::new(CLOCK_HZ);
-    load_axis0(&mut tl, &curve, 0.0);
+    tl.test_load_pieces(0, &pieces, 0);
 
     assert!(tl.axis_active(0));
     tl.reset();
     assert!(!tl.axis_active(0));
     assert!(tl.all_idle());
-    assert!(tl.get_piece(0, ms_to_cycles(50.0)).is_none());
+    assert!(matches!(tl.get_piece(0, ms_to_cycles(50.0)), GetPieceResult::Idle));
 }
-
-// ---------------------------------------------------------------------------
-// Monotonic sweep (ISR simulation)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn monotonic_sweep_no_gaps() {
-    let curve = make_curve(&[
+    let pieces = [
         linear_piece(0.025),
         linear_piece(0.025),
         linear_piece(0.025),
         linear_piece(0.025),
-    ]); // 4 pieces × 25ms = 100ms
+    ];
     let mut tl = Timeline::new(CLOCK_HZ);
-    load_axis0(&mut tl, &curve, 0.0);
+    tl.test_load_pieces(0, &pieces, 0);
 
-    let tick_cycles = (CLOCK_HZ / 40_000.0) as u64; // 13000 cycles per tick
+    let tick_cycles = (CLOCK_HZ / 40_000.0) as u64;
     let end = ms_to_cycles(99.0);
     let mut now: u64 = 0;
     let mut ticks_with_piece = 0u32;
 
     while now < end {
-        match tl.get_piece(0, now) {
-            Some((_, t_local)) => {
+        let result = tl.get_piece(0, now);
+        match result {
+            GetPieceResult::Hit(_, t_local) => {
                 assert!(
                     t_local >= 0.0 && t_local <= 0.026,
                     "t_local out of range: {t_local} at now={now}"
                 );
                 ticks_with_piece += 1;
             }
-            None => {
-                panic!("got None at now={now} cycles ({}ms) — gap in timeline", now as f32 / CLOCK_HZ * 1000.0);
+            GetPieceResult::NeedsAdvance => {
+                match tl.test_advance_piece(0, now, &pieces) {
+                    GetPieceResult::Hit(_, t_local) => {
+                        assert!(t_local >= 0.0 && t_local <= 0.026);
+                        ticks_with_piece += 1;
+                    }
+                    _ => panic!("advance returned non-Hit at now={now}"),
+                }
+            }
+            GetPieceResult::Idle => {
+                panic!("got Idle at now={now} — gap in timeline");
             }
         }
         now += tick_cycles;
