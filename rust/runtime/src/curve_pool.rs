@@ -22,6 +22,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::cubic_curve::{populate_from_wire, CubicLoadError, LoadedCubicCurve, WirePiece};
+use crate::monomial::BezierPieceMonomial;
 
 // Build-time-configurable sizing constants. The `pub const`s (see
 // `runtime/build.rs`) are emitted from Klipper's Kconfig values. Defaults
@@ -257,6 +258,39 @@ impl CurvePool {
             return None;
         }
         Some(slot.curve.get().cast_const())
+    }
+
+    /// Copy a single piece out of a pool slot by value.
+    ///
+    /// Returns `None` on generation mismatch, out-of-range slot, or
+    /// `piece_idx >= piece_count`. The unsafe dereference is contained
+    /// here — callers get a plain `BezierPieceMonomial` with no pointer.
+    #[allow(unsafe_code)]
+    pub fn copy_piece(
+        &self,
+        handle: CurveHandle,
+        piece_idx: usize,
+    ) -> Option<BezierPieceMonomial> {
+        let curve_ptr = self.lookup_active(handle)?;
+        // SAFETY: lookup_active validated the generation. The slot's
+        // UnsafeCell payload is only written by the foreground under the
+        // generation guard; the ISR is the sole reader of active slots.
+        let curve = unsafe { &*curve_ptr };
+        if piece_idx < curve.piece_count as usize {
+            Some(curve.pieces[piece_idx])
+        } else {
+            None
+        }
+    }
+
+    /// Return the piece count for a pool slot.
+    ///
+    /// Returns `None` on generation mismatch or out-of-range slot.
+    #[allow(unsafe_code)]
+    pub fn piece_count(&self, handle: CurveHandle) -> Option<u16> {
+        let curve_ptr = self.lookup_active(handle)?;
+        let curve = unsafe { &*curve_ptr };
+        Some(curve.piece_count)
     }
 
     /// §8.5 flush helper. Resets every slot's `last_retired_gen` to its

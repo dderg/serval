@@ -65,9 +65,8 @@ impl Timeline {
         }
     }
 
-    /// Load a curve for one axis. Resolves the handle through the pool,
-    /// copies piece 0 into the cursor, and sets up timing.
-    #[allow(unsafe_code)]
+    /// Load a curve for one axis. Copies piece 0 from the pool into the
+    /// cursor and sets up timing. No unsafe — uses `pool.copy_piece`.
     pub fn load_axis(
         &mut self,
         axis: usize,
@@ -82,24 +81,24 @@ impl Timeline {
             self.axes[axis] = AxisCursor::empty();
             return false;
         }
-        let Some(curve_ptr) = pool.lookup_active(handle) else {
+        let Some(count) = pool.piece_count(handle) else {
             self.axes[axis] = AxisCursor::empty();
             return false;
         };
-        // SAFETY: lookup_active validated the generation. We copy the piece
-        // out immediately — no pointer is stored.
-        let curve = unsafe { &*curve_ptr };
-        if curve.piece_count == 0 {
+        if count == 0 {
             self.axes[axis] = AxisCursor::empty();
             return false;
         }
-        let first_piece = curve.pieces[0];
+        let Some(first_piece) = pool.copy_piece(handle, 0) else {
+            self.axes[axis] = AxisCursor::empty();
+            return false;
+        };
         let duration_cycles = (first_piece.duration * self.clock_hz) as u64;
         self.axes[axis] = AxisCursor {
             piece: Some(first_piece),
             handle,
             piece_idx: 0,
-            piece_count: curve.piece_count,
+            piece_count: count,
             piece_start_cycles: segment_start_cycles,
             piece_end_cycles: segment_start_cycles + duration_cycles,
         };
@@ -153,7 +152,7 @@ impl Timeline {
 
     /// Advance to the next piece, copying it from the CurvePool.
     /// Call this when `get_piece` returns `NeedsAdvance`.
-    #[allow(unsafe_code)]
+    /// No unsafe — uses `pool.copy_piece`.
     pub fn advance_piece(
         &mut self,
         axis: usize,
@@ -169,19 +168,9 @@ impl Timeline {
 
         loop {
             cursor.piece_idx += 1;
-            if cursor.piece_idx >= cursor.piece_count {
+            let Some(next_piece) = pool.copy_piece(cursor.handle, cursor.piece_idx as usize) else {
                 *cursor = AxisCursor::empty();
                 return GetPieceResult::Idle;
-            }
-
-            let Some(curve_ptr) = pool.lookup_active(cursor.handle) else {
-                *cursor = AxisCursor::empty();
-                return GetPieceResult::Idle;
-            };
-            // SAFETY: lookup_active validated the generation.
-            // piece_idx < piece_count. We copy the piece out immediately.
-            let next_piece = unsafe {
-                (*curve_ptr).pieces[cursor.piece_idx as usize]
             };
 
             cursor.piece_start_cycles = cursor.piece_end_cycles;
