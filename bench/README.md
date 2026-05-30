@@ -2,8 +2,17 @@
 
 Minimal SOEM-based bring-up for the STEPPERONLINE **A6-EC** (OEM: **ANCTL AS715N**)
 EtherCAT AC servo. `ec_spin.c` brings the drive up in **CSP** (Cyclic Synchronous
-Position) over Distributed Clock and runs a hardcoded velocity ramp by integrating
-position: **30 rpm forward 3 s, reverse 3 s, hold, de-energize**.
+Position) over Distributed Clock and streams a hardcoded position trajectory each
+cycle, in one of two profiles:
+
+- **`sine`** (default) — gentle `A·(1−cos ωt)` oscillation: 1 rev peak-to-peak,
+  4 s period, 3 cycles. Starts/ends at zero velocity, so enable and disable are
+  bump-free and there are no velocity discontinuities.
+- **`ramp`** — the original constant-velocity there-and-back: 30 rpm forward 3 s,
+  reverse 3 s, hold, de-energize. The instant FWD→REV reversal is a velocity step
+  that spikes following error — useful as the "violent" counterexample to `sine`.
+
+Both share the identical DC bring-up; only `traj_offset()` differs.
 
 Deliberately simple, known-good reference code (CLAUDE.md "no-throwaway"
 exception) — the foundation the real Rust implementation builds on, not the
@@ -29,7 +38,7 @@ SOEM v1.4.0 needs `-Werror` removed from its `CMakeLists.txt` to build on GCC 14
 ## Run
 ```
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-sudo ./ec_spin eth0 [cycle_us]     # default 2000 us = 500 Hz; floor 250 us
+sudo ./ec_spin eth0 [cycle_us] [sine|ramp]   # defaults: 2000 us = 500 Hz, sine
 ```
 
 ## Hard-won gotchas — the A6-EC DC-sync handshake
@@ -48,6 +57,11 @@ sudo ./ec_spin eth0 [cycle_us]     # default 2000 us = 500 Hz; floor 250 us
    needed at 500 Hz.
 
 ## Verified
-2026-05-30, Pi 3B @ 500 Hz / 2 ms: clean CSP move, `wkc=3`, `AL=0x0000`, no faults,
-following error peaked ~3200 counts (window 429483), `toff` within ~±150 ns,
-returned to start position and de-energized.
+2026-05-30, Pi 3B @ 500 Hz / 2 ms, `wkc=3`, `AL=0x0000`, `toff` within ~±150 ns:
+- `ramp`: clean CSP move; following error peaked ~3258 counts in a single cycle at
+  the FWD→REV velocity step.
+- `sine`: smooth tracking, `ferr` ~±2900 gliding through zero at each turnaround
+  (no reversal spike). Grabbing the shaft by hand mid-swing drove `ferr` to ~−4200
+  and `trq` from ~−20 to −69 (the loop fighting back), then it recovered the instant
+  it was released — confirms the position loop is genuinely closed on the streamed
+  setpoints, with fault-threshold headroom above a manual load.

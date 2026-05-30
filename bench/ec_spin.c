@@ -1,21 +1,20 @@
 /*
- * ec_spin.c - minimal SOEM CSP bench: spin the A6-EC / AS715N servo.
+ * ec_spin.c - minimal SOEM CSP bench: drive the A6-EC / AS715N servo with a
+ * streamed Cyclic-Synchronous-Position trajectory.
  *
  * Bring-up-only code (CLAUDE.md "no-throwaway" exception): a deliberately
  * simple, known-good reference we build the real Rust implementation on.
  *
  * The drive supports ONLY DC SYNC0 (1C32:04=0x04) and powers up in SM-sync,
- * so we must (a) tell its firmware to use DC SYNC0 (1C32:01=2) and (b) feed it
- * a disciplined distributed clock, else Er74.1 "no sync signal". Startup order:
- *   enumerate -> CSP (6060=8) + sync-type SDOs -> map default PDO 1701/1B01
- *   -> SAFE-OP -> DC-corrected cyclic loop to STABILIZE the clock & phase-lock
- *   -> activate SYNC0 (with phase shift) -> SETTLE -> OP
- *   -> CiA402 fault-reset if needed -> enable (06->07->0F)
- *   -> ramp target position: +RPM for PHASE_SEC, -RPM for PHASE_SEC, hold, stop.
+ * so we must (a) tell its firmware to use DC SYNC0 (1C32:01=2) and (b) have
+ * SYNC0 active BEFORE the SAFE-OP transition, else Er74.1 / AL 0x0030.
+ * Startup: enumerate -> CSP (6060=8) + sync-type SDOs -> configdc + dcsync0
+ *   (PRE-OP) -> map (-> SAFE-OP) -> align DC -> OP -> fault-reset -> enable
+ *   -> stream target position from traj() each cycle -> stop.
  *
- * 1:1 gear, 17-bit encoder => 131072 counts/rev. 30 rpm = 65536 counts/s.
+ * 1:1 gear, 17-bit encoder => 131072 counts/rev.
  *
- * Run: sudo ./ec_spin eth0 [cycle_us]     (cycle_us default 2000, min 250)
+ * Run: sudo ./ec_spin eth0 [cycle_us] [sine|ramp]   (defaults: 2000 us, sine)
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -32,15 +31,40 @@
 
 #define IF_DEFAULT      "eth0"
 #define RT_PRIO         80
-#define RT_CPU          3              /* pin the cyclic loop to this core */
+#define RT_CPU          3
 #define COUNTS_PER_REV  131072.0       /* 17-bit encoder, 1:1 gear */
-#define TARGET_RPM      30.0
-#define PHASE_SEC       3.0
-#define HOLD_SEC        0.5
-#define STABILIZE_SEC   2.0            /* lock DC + phase-align before SYNC0 */
-#define SETTLE_SEC      0.5            /* let SYNC0 run before requesting OP */
+
+/* --- ramp trajectory params --- */
+#define RAMP_RPM        30.0
+#define RAMP_PHASE_SEC  3.0
+#define RAMP_HOLD_SEC   0.5
+/* --- sine (1-cos) trajectory params: gentle oscillation --- */
+#define SINE_SWING_REV  1.0            /* peak-to-peak travel, revolutions */
+#define SINE_PERIOD_SEC 4.0            /* one full there-and-back */
+#define SINE_CYCLES     3
+
+#define STABILIZE_SEC   1.5
 #define WAIT_OP_SEC     2.0
 #define DISABLE_SEC     0.2
+
+typedef enum { TRAJ_SINE, TRAJ_RAMP } traj_mode_t;
+
+/* Position offset from start (counts) at time t (s). Both profiles begin AND
+ * end at zero offset with zero velocity, so enable/disable are bump-free. */
+static double traj_offset(traj_mode_t m, double t, double *total_dur) {
+    if (m == TRAJ_RAMP) {
+        const double cps = (RAMP_RPM / 60.0) * COUNTS_PER_REV;
+        *total_dur = 2.0 * RAMP_PHASE_SEC + RAMP_HOLD_SEC;
+        if (t < RAMP_PHASE_SEC)            return cps * t;                      /* fwd */
+        if (t < 2.0 * RAMP_PHASE_SEC)      return cps * (2.0 * RAMP_PHASE_SEC - t); /* rev */
+        return 0.0;                                                            /* hold @ start */
+    } else { /* TRAJ_SINE: A*(1-cos(wt)) -> starts at 0 with zero velocity */
+        const double A = SINE_SWING_REV * COUNTS_PER_REV / 2.0;
+        const double w = 2.0 * M_PI / SINE_PERIOD_SEC;
+        *total_dur = SINE_PERIOD_SEC * SINE_CYCLES;
+        return A * (1.0 - cos(w * t));
+    }
+}
 
 #pragma pack(push, 1)
 typedef struct {                 /* RxPDO 0x1701 (12 bytes) */
@@ -74,7 +98,6 @@ static void add_timespec(struct timespec *ts, int64_t addtime) {
     if (ts->tv_nsec >= 1000000000LL) { ts->tv_nsec -= 1000000000LL; ts->tv_sec++; }
 }
 
-/* PI controller to align the local cycle to the DC reference clock. */
 static void dc_sync(int64_t reftime, int64_t cycletime, int64_t *offset) {
     static int64_t integral = 0;
     int64_t delta = reftime % cycletime;
@@ -97,38 +120,35 @@ int main(int argc, char **argv) {
     const char *ifname = (argc > 1) ? argv[1] : IF_DEFAULT;
     int64_t cycle_ns   = (argc > 2) ? (int64_t)atoll(argv[2]) * 1000 : 2000000;
     if (cycle_ns < 250000) cycle_ns = 250000;
+    traj_mode_t mode   = (argc > 3 && strcmp(argv[3], "ramp") == 0) ? TRAJ_RAMP : TRAJ_SINE;
     const int64_t sync0_shift = cycle_ns / 2;
-    setvbuf(stdout, NULL, _IOLBF, 0);   /* line-buffered: survive SIGTERM/pipe */
+
+    setvbuf(stdout, NULL, _IOLBF, 0);
     signal(SIGINT, on_sigint);
     go_realtime();
-    printf("cycle=%lld us (%.0f Hz), SYNC0 shift=%lld ns\n",
-           (long long)(cycle_ns / 1000), 1e9 / (double)cycle_ns, (long long)sync0_shift);
+    printf("cycle=%lld us (%.0f Hz), traj=%s, SYNC0 shift=%lld ns\n",
+           (long long)(cycle_ns / 1000), 1e9 / (double)cycle_ns,
+           mode == TRAJ_RAMP ? "ramp" : "sine", (long long)sync0_shift);
 
     if (!ec_init(ifname)) { printf("ec_init failed on %s\n", ifname); return 1; }
-    printf("ec_init ok on %s\n", ifname);
     if (ec_config_init(FALSE) <= 0) { printf("no slaves found\n"); ec_close(); return 1; }
     printf("%d slave(s): %s\n", ec_slavecount, ec_slave[1].name);
 
-    int8_t mode = 8;  /* CSP */
-    ec_SDOwrite(1, 0x6060, 0x00, FALSE, sizeof(mode), &mode, EC_TIMEOUTRXM);
-
-    /* Arm DC SYNC0 in firmware (default is SM-sync -> "no sync signal"). */
-    uint16_t sync_dc = 2;                 /* 2 = DC SYNC0 */
+    int8_t opmode = 8;  /* CSP */
+    ec_SDOwrite(1, 0x6060, 0x00, FALSE, sizeof(opmode), &opmode, EC_TIMEOUTRXM);
+    uint16_t sync_dc = 2;                 /* DC SYNC0 */
     uint32_t cyc_ns  = (uint32_t)cycle_ns;
     ec_SDOwrite(1, 0x1C32, 0x01, FALSE, sizeof(sync_dc), &sync_dc, EC_TIMEOUTRXM);
     ec_SDOwrite(1, 0x1C33, 0x01, FALSE, sizeof(sync_dc), &sync_dc, EC_TIMEOUTRXM);
     ec_SDOwrite(1, 0x1C32, 0x02, FALSE, sizeof(cyc_ns),  &cyc_ns,  EC_TIMEOUTRXM);
     ec_SDOwrite(1, 0x1C33, 0x02, FALSE, sizeof(cyc_ns),  &cyc_ns,  EC_TIMEOUTRXM);
 
-    /* SYNC0 must be active BEFORE the SAFE-OP transition: the drive validates
-     * DC config on entering SAFE-OP, and a declared DC mode with an inactive
-     * SYNC0 (cycle reg = 0) trips AL 0x0030 "invalid DC sync configuration".
-     * So configure DC + activate SYNC0 here in PRE-OP, then map (-> SAFE-OP). */
+    /* SYNC0 active BEFORE SAFE-OP (else AL 0x0030 invalid DC config). */
     ec_configdc();
     ec_dcsync0(1, TRUE, (uint32_t)cycle_ns, (int32_t)sync0_shift);
     ec_config_map(&IOmap);
     ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * 4);
-    printf("SAFE-OP reached (SYNC0 active, DC declared). Aligning clock...\n");
+    printf("SAFE-OP reached (SYNC0 active). Aligning clock...\n");
 
     out_t *out = (out_t *) ec_slave[1].outputs;
     in_t  *in  = (in_t  *) ec_slave[1].inputs;
@@ -136,18 +156,18 @@ int main(int argc, char **argv) {
     out->touch_probe_fn = 0; out->phys_outputs = 0;
 
     const int64_t stabilize_cyc = (int64_t)(STABILIZE_SEC * 1e9 / cycle_ns);
-    const int64_t settle_cyc    = (int64_t)(SETTLE_SEC    * 1e9 / cycle_ns);
     const int64_t wait_op_cyc   = (int64_t)(WAIT_OP_SEC   * 1e9 / cycle_ns);
     const int64_t disable_cyc   = (int64_t)(DISABLE_SEC   * 1e9 / cycle_ns);
-    const double  per_cycle     = (TARGET_RPM / 60.0) * COUNTS_PER_REV * (cycle_ns / 1e9);
+    const double  dt            = cycle_ns / 1e9;
 
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     int64_t toff = 0;
 
-    enum { STABILIZE, SETTLE, WAIT_OP, ALIGN, FWD, REV, HOLD, DISABLE, DONE } phase = STABILIZE;
+    enum { STABILIZE, WAIT_OP, ALIGN, RUN, DISABLE, DONE } phase = STABILIZE;
     int64_t pc = 0;
-    double cmd = 0.0, t_phase = 0.0;
+    int32_t start_pos = 0;
+    double  t_run = 0.0, total_dur = 0.0;
     int announced = 0, prdiv = 0, op_ok = 0;
 
     while (!g_stop && phase != DONE) {
@@ -159,14 +179,13 @@ int main(int argc, char **argv) {
         pc++;
 
         switch (phase) {
-        case STABILIZE:                          /* SYNC0 already active; just phase-align */
+        case STABILIZE:
             out->controlword = 0; out->target_position = in->position_actual;
             if (pc >= stabilize_cyc) {
                 ec_slave[0].state = EC_STATE_OPERATIONAL; ec_writestate(0);
                 printf("clock aligned, requested OP...\n"); phase = WAIT_OP; pc = 0;
             }
             break;
-        case SETTLE: break;                      /* unused */
         case WAIT_OP:
             out->controlword = 0; out->target_position = in->position_actual;
             if (pc % 20 == 0) ec_readstate();
@@ -182,7 +201,6 @@ int main(int argc, char **argv) {
             break;
         case ALIGN:
             out->target_position = in->position_actual;
-            cmd = (double) in->position_actual;
             if (sw & 0x0008) {
                 out->controlword = ((pc / 10) % 2) ? 0x0080 : 0x0000;   /* pulse fault reset */
                 if (pc >= 1500) { printf("fault won't clear: sw=0x%04x err=0x%04x\n", sw, in->error_code); phase = DISABLE; pc = 0; }
@@ -191,25 +209,23 @@ int main(int argc, char **argv) {
             else if   ((sw & 0x006F) == 0x0023) out->controlword = 0x000F;
             else if   ((sw & 0x006F) == 0x0027) {
                 out->controlword = 0x000F;
-                if (!announced) { printf("operation enabled @ pos=%d\n", in->position_actual);
-                    announced = 1; t_phase = 0.0; phase = FWD; pc = 0; }
+                if (!announced) {
+                    start_pos = in->position_actual; t_run = 0.0;
+                    printf("operation enabled @ pos=%d, streaming %s trajectory\n",
+                           start_pos, mode == TRAJ_RAMP ? "ramp" : "sine");
+                    announced = 1; phase = RUN; pc = 0;
+                }
             } else out->controlword = 0x0000;
             break;
-        case FWD:
-            if (sw & 0x0008) { printf("FAULT during FWD: err=0x%04x ferr=%d\n", in->error_code, in->following_error); phase = DISABLE; pc = 0; break; }
-            out->controlword = 0x000F; cmd += per_cycle; out->target_position = (int32_t) llround(cmd);
-            if ((t_phase += cycle_ns / 1e9) >= PHASE_SEC) { t_phase = 0; phase = REV; printf("reverse\n"); }
+        case RUN: {
+            if (sw & 0x0008) { printf("FAULT during RUN: err=0x%04x ferr=%d\n", in->error_code, in->following_error); phase = DISABLE; pc = 0; break; }
+            double off = traj_offset(mode, t_run, &total_dur);
+            out->controlword = 0x000F;
+            out->target_position = start_pos + (int32_t) llround(off);
+            t_run += dt;
+            if (t_run >= total_dur) { phase = DISABLE; pc = 0; printf("trajectory done, stopping\n"); }
             break;
-        case REV:
-            if (sw & 0x0008) { printf("FAULT during REV: err=0x%04x ferr=%d\n", in->error_code, in->following_error); phase = DISABLE; pc = 0; break; }
-            out->controlword = 0x000F; cmd -= per_cycle; out->target_position = (int32_t) llround(cmd);
-            if ((t_phase += cycle_ns / 1e9) >= PHASE_SEC) { t_phase = 0; phase = HOLD; printf("hold\n"); }
-            break;
-        case HOLD:
-            if (sw & 0x0008) { printf("FAULT during HOLD: err=0x%04x\n", in->error_code); phase = DISABLE; pc = 0; break; }
-            out->controlword = 0x000F; out->target_position = (int32_t) llround(cmd);
-            if ((t_phase += cycle_ns / 1e9) >= HOLD_SEC) { phase = DISABLE; pc = 0; printf("stopping\n"); }
-            break;
+        }
         case DISABLE:
             out->target_position = in->position_actual; out->controlword = 0x0006;
             if (pc >= disable_cyc) phase = DONE;
@@ -219,7 +235,7 @@ int main(int argc, char **argv) {
 
         dc_sync(ec_DCtime, cycle_ns, &toff);
 
-        if (++prdiv >= (int)(0.5e9 / cycle_ns)) {   /* ~2 prints/sec */
+        if (++prdiv >= (int)(0.5e9 / cycle_ns)) {
             prdiv = 0;
             ec_readstate();
             printf("phase=%d ecat=0x%02x AL=0x%04x wkc=%d sw=0x%04x err=0x%04x pos=%d cmd=%d ferr=%d trq=%d toff=%lld\n",
