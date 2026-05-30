@@ -87,26 +87,38 @@ closure body already iterates a **per-node context map** (`dispatch_ios`, keyed
 by `mcu_id`) and calls `dispatch::build_push_params` to turn a `ShapedSegment`
 into per-node curve loads + segment pushes.
 
-The refactor promotes that existing structure into a trait (provisional):
+The refactor promotes that existing structure into a trait. **The seam is
+chosen so the code most likely to regress does not move.** The closure's
+per-MCU clock-base arithmetic (`bridge.rs:2260–2364` — the `schedule_state`
+fresh/drained/continuous rebasing, with all its hard-won bench bug-fixes) is
+*clock-domain-agnostic*: it only inlines two node-specific lookups —
+`now_clock` (today `router.compute_ack_clock` + a 5 s block-wait for clock-sync
+to converge) and `freq` (today `clock_freqs[mcu_id]`, fed by klippy's
+`ClockSyncEstimator`). Those two lookups become the trait surface; the
+arithmetic stays in the closure verbatim:
 
 ```
-trait MotionNode {
-    fn caps(&self) -> NodeCaps;                 // channels owned, phase/servo flags
-    fn dispatch_segment(&self, seg: &ShapedSegment) -> Result<(), DispatchError>;
-    fn query_state(&self, channels: ChannelMask) -> Result<NodeState, NodeError>;
-    // clock-sync participation handled via the shared ClockSyncEstimator path
+trait MotionNode: Send + Sync {
+    fn now_clock(&self) -> Result<u64, DispatchError>;  // node clock-domain "now"
+    fn clock_freq(&self) -> f64;                         // ticks/sec
+    fn load_and_push(&self, plan: McuPushPlan) -> Result<(), DispatchError>;
+    // query_state(channels) -> NodeState added later for feedback (out of M1)
 }
 ```
 
-- `StepperMcuNode` — the *current* closure body, lifted verbatim: `build_push_params`
-  + `producer::load_curve` / `producer::push_segment` over the serial
-  `KalicoHostIo`. No behavioural change.
-- `EtherCatNode` — new. Same `build_push_params` + producer path, but over a
-  **unix-socket** transport to the EtherCAT RT process.
+- `StepperMcuNode` — `now_clock` = the existing `compute_ack_clock` + block-wait;
+  `clock_freq` = the `clock_freqs` lookup; `load_and_push` = the slot-alloc +
+  `producer::load_curve` + `dispatch_push_segment` inner loop (`bridge.rs:2465–2557`).
+  All lifted verbatim over the serial `KalicoHostIo`. No behavioural change.
+- `EtherCatNode` — new. `now_clock` = `monotonic_ns()` directly (no router, no
+  block-wait: the clock is live and shared); `clock_freq` = `1e9`; `load_and_push`
+  = the same producer path over a **unix-socket** `NativeCall` to the EtherCAT
+  RT process.
 
-The planner's dispatch closure becomes "for each node: `node.dispatch_segment(seg)`",
-which is what it already does in spirit. Routing is per-channel: a node only
-receives curves for the channels it owns.
+The dispatch closure keeps `build_push_params` + the `schedule_state`
+arithmetic, but reads `node.now_clock()` / `node.clock_freq()` where it used to
+inline them, then calls `node.load_and_push(plan)`. Routing is per-channel: a
+node only receives curves for the channels it owns.
 
 ### The EtherCAT RT process (`kalico-ethercat-rt`)
 
@@ -201,16 +213,47 @@ A standalone, RT-hardened binary (the bench's hardening: `SCHED_FIFO`,
   encoder counts. The host SPSC queue is unnecessary — hold the active segment
   directly and walk pieces in the endpoint.
 
+## Resolved decisions (2026-05-30, Plan 2 planning)
+
+- **Transport: Approach B — lean native socket client, endpoint stays pure
+  kalico-native.** The earlier "main risk" (below, struck) was based on a wrong
+  reading. `KalicoHostIo` is *not* serial-only and the curve/segment traffic is
+  already socket-portable: `producer::load_curve`/`push_segment` reach the wire
+  only through `KalicoHostIo::kalico_call`, which emits **pure kalico-native
+  `0x55` frames** byte-identical to what the Plan-1 endpoint already decodes.
+  The *only* incompatibility is the construction handshake (`identify_handshake`
+  speaks Klipper msgproto, not kalico-native). So instead of making the endpoint
+  impersonate a Klipper MCU (Approach A), we: (1) hoist the one method the
+  producers use, `kalico_call`, onto a small `NativeCall` trait — `KalicoHostIo`
+  already has it; (2) genericize the two producer fns over `&impl NativeCall`
+  (one-line signature change); (3) add `UnixNativeConn: NativeCall`, a lean
+  socket client that frames a request, writes it, and awaits the
+  correlation-matched response. The endpoint never learns Klipper msgproto. No
+  `ClockSyncEstimator` round-trips for the EtherCAT node: same host ⇒ shared
+  `CLOCK_MONOTONIC` ⇒ `clock_freq = 1e9`, `now_clock = monotonic_ns()`.
+
+- **Crate placement.** `NativeCall` + `UnixNativeConn` live in `kalico-host-rt`
+  (next to `kalico_call`); `MotionNode` + `StepperMcuNode` + `EtherCatNode` live
+  in `motion-bridge`.
+
+- **Scope split.** Plan 2 is **Rust-side only** and fully testable without
+  klippy (mock `NativeCall`, loopback `UnixNativeConn`, and the real Plan-1
+  endpoint as socket peer). Everything needing a live klippy or a `printer.cfg`
+  — the axis→node mapping config surface, passthrough-anywhere wired into real
+  config, the STM32/fake-stepper config that makes klippy validate, and the
+  first real `G1` jog — is a **final integration step done with the user**, after
+  the Rust side lands. The M1 jog needs no new command: `G1` already flows
+  `gcode_move → toolhead.move → bridge.submit_move → classify → planner →
+  ShapedSegment → dispatch`.
+
 ## Open questions / risks
 
-1. **`KalicoHostIo` is serial-only (confirmed).** Its only injection point is
-   `open_with_port(Box<dyn serialport::SerialPort>)`; there is no `Connection`
-   constructor, and every path runs a Klipper msgproto handshake. The producer
-   functions are bound to it. **Plan 1 does not use `KalicoHostIo`** (the
-   endpoint decodes frames directly). **Plan 2** must add a socket transport in
-   `motion-bridge` *without* routing through `KalicoHostIo` — either a small
-   `Connection`-based `KalicoNativeTransport<UnixSocket>` send path or a new
-   socket I/O owner. This is the main Plan 2 risk and is scoped there.
+1. ~~**`KalicoHostIo` is serial-only (confirmed).**~~ **Superseded by the
+   Resolved Decisions above.** `KalicoHostIo` has `open_tcp`/`open_pipe`/
+   `open_with_port`, and `kalico_call` already emits socket-portable
+   kalico-native frames. Plan 2 adds `UnixNativeConn: NativeCall` rather than
+   routing through `KalicoHostIo`; the producer fns become generic over
+   `NativeCall`. This is a small, low-risk change, not the main risk.
 2. **`StepperMcuNode` extraction must stay an extraction.** If lifting the
    closure into a trait perturbs the working serial dispatch, fall back to
    `EtherCatNode`-alongside per the constraints.
