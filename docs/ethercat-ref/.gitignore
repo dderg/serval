@@ -1,0 +1,2 @@
+# Vendor manual PDF is large (~17 MB) and re-downloadable; keep it out of git.
+*.pdf
