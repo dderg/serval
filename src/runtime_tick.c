@@ -18,6 +18,7 @@
 #include "stepper.h"        // runtime_emit_step_pulses (via stepper.c)
 #if defined(__linux__) || defined(__APPLE__)
 #include <stdio.h>          // fprintf, stderr
+#include <stdlib.h>         // getenv
 #include <time.h>           // clock_gettime
 #endif
 #include "autoconf.h"
@@ -1438,16 +1439,23 @@ runtime_status_drain(void)
     // Sim-only: dump stepper counters so a test that lost its klippy
     // bridge_call link can still observe motion progress via the elf log.
     // Phase 4 test polls this to confirm GATE GREEN.
-    int32_t c0 = kalico_runtime_get_stepper_count(runtime_handle, 0);
-    int32_t c1 = kalico_runtime_get_stepper_count(runtime_handle, 1);
-    int32_t c2 = kalico_runtime_get_stepper_count(runtime_handle, 2);
-    extern uint32_t kalico_runtime_get_xdirect_write_count(void);
-    uint32_t spi_writes = kalico_runtime_get_xdirect_write_count();
-    fprintf(stderr,
-        "[sim-progress] status=%u seg=%u counts=[%d,%d,%d]"
-        " spi_writes=%u\n",
-        status, cur_seg, c0, c1, c2, spi_writes);
-    fflush(stderr);
+    // Runtime-gated on KALICO_SIM_SOCK_DIR (set only by the sim runner) so a
+    // bare host-MCU run stays silent; cached once to avoid getenv per tick.
+    static int sim_progress_enabled = -1;
+    if (sim_progress_enabled < 0)
+        sim_progress_enabled = (getenv("KALICO_SIM_SOCK_DIR") != NULL);
+    if (sim_progress_enabled) {
+        int32_t c0 = kalico_runtime_get_stepper_count(runtime_handle, 0);
+        int32_t c1 = kalico_runtime_get_stepper_count(runtime_handle, 1);
+        int32_t c2 = kalico_runtime_get_stepper_count(runtime_handle, 2);
+        extern uint32_t kalico_runtime_get_xdirect_write_count(void);
+        uint32_t spi_writes = kalico_runtime_get_xdirect_write_count();
+        fprintf(stderr,
+            "[sim-progress] status=%u seg=%u counts=[%d,%d,%d]"
+            " spi_writes=%u\n",
+            status, cur_seg, c0, c1, c2, spi_writes);
+        fflush(stderr);
+    }
 #endif
 }
 DECL_TASK(runtime_status_drain);
