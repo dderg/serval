@@ -32,6 +32,7 @@ pub mod credit;
 pub mod endstop;
 pub mod fault;
 pub mod host_io;
+pub mod native_call;
 pub mod passthrough_queue;
 pub mod producer;
 pub mod stream;
