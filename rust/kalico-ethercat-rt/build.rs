@@ -1,6 +1,16 @@
 use std::env;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=ECRT_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=SOEM_LIB_DIR");
+
+    // Native linking to libecrt/SOEM only happens under the `hw` feature. Without
+    // it (the default), the crate is pure Rust — so `cargo test`/`cargo build`
+    // run the scale/wire/curves unit tests on any machine without the C libs.
+    if env::var_os("CARGO_FEATURE_HW").is_none() {
+        return;
+    }
+
     // Directory holding libecrt.a (built by bench/Makefile on the target host).
     // Override with ECRT_LIB_DIR; default to the repo's bench/ directory
     // relative to this crate's manifest.
@@ -27,6 +37,4 @@ fn main() {
     println!("cargo:rerun-if-changed=../../bench/libecrt.h");
     println!("cargo:rerun-if-changed=../../bench/Makefile");
     println!("cargo:rerun-if-changed=../../bench/libecrt.a");
-    println!("cargo:rerun-if-env-changed=ECRT_LIB_DIR");
-    println!("cargo:rerun-if-env-changed=SOEM_LIB_DIR");
 }

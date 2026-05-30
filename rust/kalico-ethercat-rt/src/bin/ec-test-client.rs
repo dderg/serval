@@ -11,7 +11,6 @@
 //! `motion-bridge`, it will supply real shared-clock timestamps derived from a
 //! common `CLOCK_MONOTONIC` reference negotiated at connect time; do not hardcode
 //! `t_start = 0` there.
-#![allow(unsafe_code)]
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;

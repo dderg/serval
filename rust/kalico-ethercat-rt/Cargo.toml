@@ -7,10 +7,21 @@ edition = "2021"
 name = "kalico_ethercat_rt"
 crate-type = ["rlib"]
 
+# `hw` gates the EtherCAT FFI (`ffi` module) and the native link to libecrt/SOEM.
+# OFF by default so the pure scale/wire/curves unit tests build and run on any
+# machine (and in CI) without the Pi's C libraries. Build with `--features hw`
+# on the target host to produce the hardware endpoint binary.
+[features]
+default = []
+hw = []
+
+# The endpoint binary drives real hardware via the FFI; it only exists with `hw`.
 [[bin]]
 name = "kalico-ethercat-rt"
 path = "src/bin/kalico-ethercat-rt.rs"
+required-features = ["hw"]
 
+# The test client speaks the socket protocol only (no FFI) — builds without `hw`.
 [[bin]]
 name = "ec-test-client"
 path = "src/bin/ec-test-client.rs"
