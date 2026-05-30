@@ -182,12 +182,35 @@ A standalone, RT-hardened binary (the bench's hardening: `SCHED_FIFO`,
 | EtherCAT/CSP/DC bring-up | `bench/ec_spin.c` logic | Rust FFI wrap / port |
 | Transport | `Connection` trait | unix-socket `Connection` impl |
 
+## Findings from planning investigation (2026-05-30)
+
+- **No clock-sync message exists in kalico-native.** Synchronization is carried
+  by absolute `t_start`/`t_end` (u64) inside `PushSegment`, not by round-trips.
+  Because the EtherCAT RT process runs on the *same host* as klippy, both share
+  `CLOCK_MONOTONIC`; the sync requirement is met by a shared clock domain. The
+  endpoint drives `runtime`'s evaluator with `now_cycles_u64 = monotonic_ns`,
+  `cycles_per_second = 1e9`.
+- **Receiver path confirmed:** `FrameSource<UnixStream>` → `Demuxer::feed_slice`
+  → `decode_message_header` → `MessageKind::from_u16` → `Struct::decode(body)`.
+  Frames are `0x55 | len:u16 | channel:u8 | payload | crc16` (CCITT); the
+  per-message header is `kind:u16 | version:u8 | correlation_id:u32` (7 bytes).
+- **Evaluator reuse confirmed:** `runtime` (default `host` feature, `f32`).
+  Use `CurvePool::try_alloc_and_load(slot, &[WirePiece])` → `CurveHandle`,
+  `lookup_active(handle)`, `eval_position_velocity(&piece, t_local_s)`. Output is
+  **millimetres**; the endpoint applies a configurable `counts_per_mm` to reach
+  encoder counts. The host SPSC queue is unnecessary — hold the active segment
+  directly and walk pieces in the endpoint.
+
 ## Open questions / risks
 
-1. **`KalicoHostIo` is serial-coupled.** It owns a serial port via the reactor
-   thread. A unix-socket transport needs either a generalisation behind the
-   `Connection`/`Transport` trait or a parallel socket-backed I/O owner. Must
-   verify this stays a small addition and not a refactor of the serial owner.
+1. **`KalicoHostIo` is serial-only (confirmed).** Its only injection point is
+   `open_with_port(Box<dyn serialport::SerialPort>)`; there is no `Connection`
+   constructor, and every path runs a Klipper msgproto handshake. The producer
+   functions are bound to it. **Plan 1 does not use `KalicoHostIo`** (the
+   endpoint decodes frames directly). **Plan 2** must add a socket transport in
+   `motion-bridge` *without* routing through `KalicoHostIo` — either a small
+   `Connection`-based `KalicoNativeTransport<UnixSocket>` send path or a new
+   socket I/O owner. This is the main Plan 2 risk and is scoped there.
 2. **`StepperMcuNode` extraction must stay an extraction.** If lifting the
    closure into a trait perturbs the working serial dispatch, fall back to
    `EtherCatNode`-alongside per the constraints.
