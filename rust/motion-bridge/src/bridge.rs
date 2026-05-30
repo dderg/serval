@@ -122,11 +122,8 @@ const FALLBACK_RUNTIME_CAPS: kalico_protocol::messages::RuntimeCapsResponse =
         max_pieces_per_curve: 16,
     };
 
-/// Maximum time the dispatch closure blocks waiting for a free curve slot.
-/// Under normal operation slots are retired before this deadline by the
-/// reactor-thread retirement callback. 60 s is long enough to absorb a
-/// stalled MCU and short enough to surface a genuine leak promptly.
-const DEFAULT_SLOT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(60);
+// Note: DEFAULT_SLOT_ACQUIRE_TIMEOUT has moved to motion_node.rs, where
+// load_and_push_via consumes it. No direct reference remains in bridge.rs.
 
 /// Sample interval for the periodic `kalico_clock_sync_request` driver.
 /// The host's `compute_ack_clock` extrapolates linearly between samples,
@@ -364,18 +361,9 @@ fn build_shaper_config(
     })
 }
 
-/// Push a segment via the kalico-native transport (spec §7.4 / Phase C-B).
-/// This was a fire-and-forget Klipper-protocol command pre-Phase-C; the new
-/// transport delivers a synchronous `PushSegmentResponse` so the dispatch
-/// loop confirms acceptance before moving on. Per-segment latency is one
-/// kalico round-trip — measured in microseconds on USB-CDC.
-fn dispatch_push_segment(
-    io: &KalicoHostIo,
-    credit: &CreditCounter,
-    params: &producer::SegmentPushParams,
-) -> Result<producer::PushedSegmentInfo, producer::ProducerError> {
-    producer::push_segment_with_timeout(io, credit, params, producer::DEFAULT_PUSH_RESPONSE_TIMEOUT)
-}
+// dispatch_push_segment was removed: the dispatch closure now delegates
+// slot-alloc + load_curve + push_segment to StepperMcuNode::load_and_push
+// (via motion_node::load_and_push_via), which supersedes this thin wrapper.
 
 // ── PyMotionBridge ──────────────────────────────────────────────────────
 
@@ -2118,8 +2106,31 @@ impl PyMotionBridge {
         drop(self_credits);
         drop(self_pools);
 
+        // Build the per-MCU node map from the same Arc handles that the
+        // dispatch_ios build loop produced. Each StepperMcuNode carries its
+        // own Weak<KalicoHostIo>, credit, slot_pool, and shared clock state —
+        // exactly what the closure's inline freq/now_clock/load+push blocks
+        // were doing. The schedule-base arithmetic stays in the closure.
+        use crate::motion_node::{MotionNode, StepperMcuNode};
+        let mut nodes: HashMap<u32, Arc<dyn MotionNode>> = HashMap::new();
+        for (mcu_id, (io_weak, credit, slot_pool)) in &dispatch_ios {
+            nodes.insert(
+                *mcu_id,
+                Arc::new(StepperMcuNode::new(
+                    *mcu_id,
+                    io_weak.clone(),
+                    Arc::clone(credit),
+                    Arc::clone(slot_pool),
+                    Arc::clone(&clock_freqs),
+                    Arc::clone(&router_arc),
+                    Arc::clone(&fallback_counter),
+                    Arc::clone(&warned_mcus),
+                )) as Arc<dyn MotionNode>,
+            );
+        }
+        let nodes = Arc::new(nodes);
+
         let mcu_configs_for_cb = mcu_configs;
-        let router_for_cb = Arc::clone(&router_arc);
 
         // Per-MCU rolling segment id. Allocated alongside the slot to
         // bind the `kalico_credit_freed.retired_through_segment_id`
@@ -2216,8 +2227,8 @@ impl PyMotionBridge {
                         );
                         continue;
                     }
-                    let (io_weak, credit, slot_pool) = match dispatch_ios.get(&plan.mcu_id) {
-                        Some(v) => v,
+                    let io_weak = match dispatch_ios.get(&plan.mcu_id) {
+                        Some((w, _, _)) => w,
                         None => continue,
                     };
                     let io = match io_weak.upgrade() {
@@ -2226,30 +2237,15 @@ impl PyMotionBridge {
                             return Err(DispatchError::ConnectionDropped(plan.mcu_id));
                         }
                     };
+                    let node = match nodes.get(&plan.mcu_id) {
+                        Some(n) => Arc::clone(n),
+                        None => continue,
+                    };
 
-                    // Per-MCU clock conversion. Falls back to a microsecond
-                    // approximation if `set_clock_est` has not been called yet.
-                    let mcu_h = mcu_handle_from_raw(plan.mcu_id);
-                    let freq = clock_freqs
-                    .lock()
-                    .unwrap()
-                    .get(&plan.mcu_id)
-                    .copied()
-                    .filter(|f| *f > 0.0)
-                    .unwrap_or_else(|| {
-                        fallback_counter.fetch_add(1, Ordering::Relaxed);
-                        let first_for_mcu = {
-                            let mut warned = warned_mcus.lock().unwrap_or_else(|p| p.into_inner());
-                            warned.insert(plan.mcu_id)
-                        };
-                        if first_for_mcu {
-                            log::warn!(
-                                "motion-bridge: MCU {} clock frequency not installed; using 1 MHz fallback for relative segment timing. SET_CLOCK_EST not yet wired by klippy?",
-                                plan.mcu_id
-                            );
-                        }
-                        1_000_000.0
-                    });
+                    // Per-MCU clock conversion — delegated to the node.
+                    // StepperMcuNode::clock_freq reproduces the inline fallback
+                    // logic verbatim (falls back to 1 MHz with a one-shot warn).
+                    let freq = node.clock_freq();
 
                     // Captured outside the base-clock block for the
                     // post-dispatch diagnostic log (2026-05-11): they tell us
@@ -2273,39 +2269,10 @@ impl PyMotionBridge {
                         // pulses fire ('first jog after restart doesn't
                         // move' bench symptom 2026-05-11).
                         let lead_cycles_init = (freq * 0.250).round().max(1.0) as u64;
-                        let wait_start = Instant::now();
-                        let mut wait_iter: u32 = 0;
-                        let now_clock = loop {
-                            let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
-                            let n = r
-                                .compute_ack_clock(mcu_h)
-                                .map_err(|e| DispatchError::ComputeAckClock(e.to_string()))?;
-                            drop(r);
-                            if n > 0 {
-                                break n;
-                            }
-                            if wait_iter == 0
-                                || wait_iter == 50
-                                || wait_iter == 250
-                                || wait_iter == 499
-                            {
-                                log::debug!(
-                                    "[bridge-trace] dispatch-wait iter={} mcu_id={} mcu_h={:?} now_clock=0 freq_from_map={}",
-                                    wait_iter,
-                                    plan.mcu_id,
-                                    mcu_h,
-                                    freq as u64,
-                                );
-                            }
-                            wait_iter += 1;
-                            if wait_start.elapsed() > Duration::from_secs(5) {
-                                return Err(DispatchError::ClockSyncTimeout {
-                                    mcu_id: plan.mcu_id,
-                                    mcu_handle: mcu_h,
-                                });
-                            }
-                            std::thread::sleep(Duration::from_millis(10));
-                        };
+                        // now_clock acquisition delegated to the node; the
+                        // polling/retry/timeout logic lives in
+                        // StepperMcuNode::now_clock (motion_node.rs).
+                        let now_clock = node.now_clock()?;
                         let lead_cycles = lead_cycles_init;
 
                         // One-shot diag (per-session): on the very first
@@ -2314,13 +2281,12 @@ impl PyMotionBridge {
                         static FIRST_DISPATCH_LOGGED: AtomicBool = AtomicBool::new(false);
                         if !FIRST_DISPATCH_LOGGED.swap(true, AOrd::AcqRel) {
                             log::debug!(
-                                "[bridge-trace] first-dispatch mcu={} freq={} now_clock={} lead_cycles={} seg.t_start={:.6} clock_sync_wait_ms={}",
+                                "[bridge-trace] first-dispatch mcu={} freq={} now_clock={} lead_cycles={} seg.t_start={:.6}",
                                 plan.mcu_id,
                                 freq as u64,
                                 now_clock,
                                 lead_cycles,
                                 seg.t_start,
-                                wait_start.elapsed().as_millis(),
                             );
                         }
 
@@ -2464,96 +2430,7 @@ impl PyMotionBridge {
 
                     for (sub_idx, mut sub_plan) in sub_plans.into_iter().enumerate() {
                         sub_plan.params.id = pre_alloc_ids[sub_idx];
-
-                        let mut allocated_slots: Vec<u16> =
-                            Vec::with_capacity(sub_plan.curves_to_load.len());
-                        let mut seg_err: Option<DispatchError> = None;
-                        for i in 0..sub_plan.curves_to_load.len() {
-                            let axis_idx = sub_plan.curves_to_load[i].0;
-                            let curve_params = sub_plan.curves_to_load[i].1.clone();
-                            let alloc_result = slot_pool
-                                .alloc_blocking(DEFAULT_SLOT_ACQUIRE_TIMEOUT)
-                                .ok_or_else(|| DispatchError::SlotPoolExhausted {
-                                    mcu_id: sub_plan.mcu_id,
-                                    capacity: slot_pool.capacity(),
-                                    in_flight: slot_pool.in_flight_count(),
-                                });
-                            let (slot, slot_gen) = match alloc_result {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    seg_err = Some(e);
-                                    break;
-                                }
-                            };
-                            log::debug!(
-                                "[slot-trace] try_alloc mcu={} seg_id={} sub={}/{} axis={} slot={} gen={}",
-                                sub_plan.mcu_id, sub_plan.params.id,
-                                sub_idx + 1, n_sub, axis_idx, slot, slot_gen,
-                            );
-                            allocated_slots.push(slot);
-                            match producer::load_curve(
-                                io.as_ref(),
-                                slot,
-                                axis_idx as u8,
-                                &curve_params,
-                                producer::DEFAULT_LOAD_CURVE_TIMEOUT,
-                            ) {
-                                Ok(handle) => {
-                                    sub_plan.set_handle(axis_idx, handle);
-                                }
-                                Err(e) => {
-                                    seg_err = Some(DispatchError::LoadCurve {
-                                        mcu_id: sub_plan.mcu_id,
-                                        slot,
-                                        seg_id: sub_plan.params.id,
-                                        axis: axis_idx,
-                                        host_gen: slot_gen,
-                                        detail: e.to_string(),
-                                    });
-                                    break;
-                                }
-                            }
-                        }
-
-                        if let Some(err) = seg_err {
-                            for s in &allocated_slots {
-                                slot_pool.release(*s);
-                            }
-                            return Err(err);
-                        }
-
-                        // Register slots BEFORE push (slot_pool.rs:126 requirement)
-                        for slot in &allocated_slots {
-                            slot_pool.register_segment(*slot, sub_plan.params.id);
-                            log::debug!(
-                                "[slot-trace] register_segment mcu={} slot={} seg_id={}",
-                                sub_plan.mcu_id, slot, sub_plan.params.id,
-                            );
-                        }
-
-                        let push_result =
-                            dispatch_push_segment(io.as_ref(), credit, &sub_plan.params);
-                        match &push_result {
-                            Ok(info) => log::info!(
-                                "[bridge-trace] push_segment ok: mcu={} seg_id={} sub={}/{} accepted_id={}",
-                                sub_plan.mcu_id, sub_plan.params.id,
-                                sub_idx + 1, n_sub, info.accepted_segment_id,
-                            ),
-                            Err(e) => log::info!(
-                                "[bridge-trace] push_segment err: mcu={} seg_id={} sub={}/{} err={:?}",
-                                sub_plan.mcu_id, sub_plan.params.id,
-                                sub_idx + 1, n_sub, e,
-                            ),
-                        }
-                        if let Err(e) = push_result {
-                            for s in &allocated_slots {
-                                slot_pool.release(*s);
-                            }
-                            return Err(DispatchError::PushSegment {
-                                mcu_id: sub_plan.mcu_id,
-                                detail: e.to_string(),
-                            });
-                        }
+                        node.load_and_push(sub_plan)?;
                     } // end sub_plan loop
                 }
 
