@@ -4,6 +4,22 @@
 **Branch:** `ethercat`
 **Status:** design, pending implementation plan
 
+## ⚠️ Mandatory reference — read before writing any EtherCAT-communicating code
+
+**Drive manual:** `/Users/daniladergachev/Downloads/A6-EC_series_servo_drive_manual (1).pdf`
+
+Whenever you write, modify, or debug *anything* that communicates over EtherCAT
+with this drive — PDO mappings, SDO writes, CiA402 state-machine transitions, DC
+sync / SYNC0 configuration, operating-mode selection, fault handling, units /
+scaling, object-dictionary access — **read the relevant chapters of this manual
+in full first.** Read entire chapters, not snippets: do not guess at object
+indices, value semantics, sync-mode support, or timing requirements. The A6-EC's
+DC handshake quirks (e.g. `1C32:01=2`, SYNC0-before-SAFE-OP, Er74.x faults) were
+only solved by reading the manual carefully; the same discipline applies to every
+new register or transition. When in doubt, the manual is authoritative — not
+assumptions, not analogy to other CoE drives. (Kept out of git via
+`docs/ethercat-ref/.gitignore`; re-download from the vendor if absent.)
+
 ## Goal
 
 Bring a STEPPERONLINE A6-EC EtherCAT servo into the kalico motion engine as a
@@ -99,6 +115,8 @@ A standalone, RT-hardened binary (the bench's hardening: `SCHED_FIFO`,
    `1C32:01=2` + SYNC0-before-SAFE-OP ordering), reused via a thin Rust FFI
    wrapper around the C, or ported. Each DC tick: evaluate position(t) for the
    owned channel → scale mm→encoder counts → write `target_position` PDO.
+   **Before touching any object index, PDO map, mode, or sync setting here, read
+   the relevant manual chapters in full** (see the Mandatory reference above).
 4. **Feedback** — reads `position_actual` / `torque_actual` / `following_error`
    from the TxPDO each cycle, exposed via `query_state` (node-local; not wired
    into endstop/homing).
