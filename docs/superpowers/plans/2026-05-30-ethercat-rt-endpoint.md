@@ -1322,8 +1322,12 @@ fn main() {
 
 - [ ] **Step 2: Build-check on the dev machine**
 
-Run: `cd rust && cargo check -p kalico-ethercat-rt --bins`
-Expected: PASS (no link).
+Run: `cd rust && cargo check -p kalico-ethercat-rt --bins --features hw`
+Expected: PASS (no link — `cargo check` type-checks the FFI-using endpoint bin
+without linking libecrt/SOEM). Without `--features hw` the endpoint bin is gated
+out (`required-features`); the FFI module and native link only exist under `hw`.
+Also run `cd rust && cargo test -p kalico-ethercat-rt` (default, no `hw`): the
+scale/wire/curves unit tests run locally because the default build is pure Rust.
 
 - [ ] **Step 3: Commit**
 
@@ -1359,9 +1363,12 @@ SSHPASS=password sshpass -e ssh dderg@ethercat.local '
   cd bench && make clean && make &&
   cd ~/kalico/rust &&
   ECRT_LIB_DIR=$HOME/kalico/bench SOEM_LIB_DIR=$HOME/ethercat/SOEM/build \
-    cargo build --release -p kalico-ethercat-rt'
+    cargo build --release -p kalico-ethercat-rt --features hw'
 ```
 Expected: both `kalico-ethercat-rt` and `ec-test-client` link and build.
+**Note:** `--features hw` is required — the endpoint bin (`kalico-ethercat-rt`)
+has `required-features = ["hw"]`, which enables the EtherCAT FFI and the
+libecrt/SOEM native link. Without it, only the lib + `ec-test-client` build.
 (If the Pi's repo lives at a different path than `~/kalico`, adjust. `ECRT_LIB_DIR` must point at the dir containing the freshly built `libecrt.a`.)
 
 - [ ] **Step 3: Run the endpoint (terminal A) — confirm bring-up**
