@@ -10,17 +10,22 @@
 //! host's `CLOCK_MONOTONIC`, so its clock domain is nanoseconds with no
 //! drift — `clock_freq() == 1e9`, `now_clock() == monotonic_ns()`.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use kalico_host_rt::credit::CreditCounter;
+use kalico_host_rt::host_io::KalicoHostIo;
 use kalico_host_rt::native_call::NativeCall;
+use kalico_host_rt::passthrough_queue::PassthroughRouter;
 use kalico_host_rt::producer;
 use kalico_host_rt::unix_native_conn::UnixNativeConn;
 
 use crate::dispatch::McuPushPlan;
 use crate::planner::DispatchError;
 use crate::slot_pool::SharedSlotPool;
+use crate::types::mcu_handle_from_raw;
 
 /// Maximum time `load_and_push_via` blocks waiting for a free curve slot.
 /// Mirrors the private `DEFAULT_SLOT_ACQUIRE_TIMEOUT` in `bridge.rs`.
@@ -183,6 +188,133 @@ pub(crate) fn load_and_push_via(
                 detail: e.to_string(),
             })
         }
+    }
+}
+
+/// The serial stepper MCU as a motion node. Holds the same per-MCU state the
+/// dispatch closure used to capture inline; `clock_freq`/`now_clock` reproduce
+/// the closure's logic verbatim. `now_clock` returns the MCU's current widened
+/// clock (the schedule-base rebasing stays in the dispatch closure).
+pub struct StepperMcuNode {
+    pub mcu_id: u32,
+    io: Weak<KalicoHostIo>,
+    credit: Arc<CreditCounter>,
+    slot_pool: Arc<SharedSlotPool>,
+    clock_freqs: Arc<Mutex<HashMap<u32, f64>>>,
+    router: Arc<Mutex<PassthroughRouter>>,
+    fallback_counter: Arc<AtomicU64>,
+    warned_mcus: Arc<Mutex<HashSet<u32>>>,
+}
+
+impl std::fmt::Debug for StepperMcuNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepperMcuNode")
+            .field("mcu_id", &self.mcu_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StepperMcuNode {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        mcu_id: u32,
+        io: Weak<KalicoHostIo>,
+        credit: Arc<CreditCounter>,
+        slot_pool: Arc<SharedSlotPool>,
+        clock_freqs: Arc<Mutex<HashMap<u32, f64>>>,
+        router: Arc<Mutex<PassthroughRouter>>,
+        fallback_counter: Arc<AtomicU64>,
+        warned_mcus: Arc<Mutex<HashSet<u32>>>,
+    ) -> Self {
+        Self {
+            mcu_id,
+            io,
+            credit,
+            slot_pool,
+            clock_freqs,
+            router,
+            fallback_counter,
+            warned_mcus,
+        }
+    }
+}
+
+impl MotionNode for StepperMcuNode {
+    /// Returns the MCU's clock frequency in ticks/second.
+    ///
+    /// Verbatim lift of the `freq` lookup from `bridge.rs` (~line 2233).
+    /// Falls back to 1 MHz with a one-shot per-MCU `log::warn!` if
+    /// `set_clock_est` has not installed a valid frequency yet.
+    fn clock_freq(&self) -> f64 {
+        self.clock_freqs
+            .lock()
+            .unwrap()
+            .get(&self.mcu_id)
+            .copied()
+            .filter(|f| *f > 0.0)
+            .unwrap_or_else(|| {
+                self.fallback_counter.fetch_add(1, Ordering::Relaxed);
+                let first_for_mcu = {
+                    let mut warned = self
+                        .warned_mcus
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    warned.insert(self.mcu_id)
+                };
+                if first_for_mcu {
+                    log::warn!(
+                        "motion-bridge: MCU {} clock frequency not installed; \
+                         using 1 MHz fallback for relative segment timing. \
+                         SET_CLOCK_EST not yet wired by klippy?",
+                        self.mcu_id
+                    );
+                }
+                1_000_000.0
+            })
+    }
+
+    /// Returns the MCU's current widened clock (ticks).
+    ///
+    /// Verbatim lift of the `now_clock` acquisition loop from `bridge.rs`
+    /// (~line 2278–2308). Polls `PassthroughRouter::compute_ack_clock` until
+    /// it returns a non-zero value, sleeping 10 ms between retries. Returns
+    /// `DispatchError::ClockSyncTimeout` if clock-sync does not establish
+    /// within 5 seconds.
+    ///
+    /// The schedule-base rebasing arithmetic (`lead_cycles`, `schedule_state`)
+    /// stays in the dispatch closure and is NOT part of this method.
+    fn now_clock(&self) -> Result<u64, DispatchError> {
+        let mcu_h = mcu_handle_from_raw(self.mcu_id);
+        let wait_start = Instant::now();
+        let now_clock = loop {
+            let r = self
+                .router
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let n = r
+                .compute_ack_clock(mcu_h)
+                .map_err(|e| DispatchError::ComputeAckClock(e.to_string()))?;
+            drop(r);
+            if n > 0 {
+                break n;
+            }
+            if wait_start.elapsed() > Duration::from_secs(5) {
+                return Err(DispatchError::ClockSyncTimeout {
+                    mcu_id: self.mcu_id,
+                    mcu_handle: mcu_h,
+                });
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        Ok(now_clock)
+    }
+
+    fn load_and_push(&self, plan: McuPushPlan) -> Result<(), DispatchError> {
+        let io = self
+            .io
+            .upgrade()
+            .ok_or(DispatchError::ConnectionDropped(self.mcu_id))?;
+        load_and_push_via(io.as_ref(), &self.credit, &self.slot_pool, plan)
     }
 }
 
