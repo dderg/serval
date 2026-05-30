@@ -2227,6 +2227,12 @@ impl PyMotionBridge {
                         );
                         continue;
                     }
+                    // NOTE (deferred EtherCAT integration): this `dispatch_ios` guard predates the
+                    // MotionNode split and currently has the SAME key set as `nodes` (all stepper
+                    // MCUs). When an EtherCatNode is added to `nodes` but NOT `dispatch_ios`, this
+                    // guard would silently `continue` past it. At that point, restructure so the
+                    // `nodes` lookup is primary and the io-weak/seed path is taken only for stepper
+                    // nodes. `io` below is used solely for stepper-only `runtime_seed_position`.
                     let io_weak = match dispatch_ios.get(&plan.mcu_id) {
                         Some((w, _, _)) => w,
                         None => continue,

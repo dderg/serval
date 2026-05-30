@@ -138,6 +138,10 @@ pub(crate) fn load_and_push_via(
                 break;
             }
         };
+        log::debug!(
+            "[slot-trace] try_alloc mcu={} seg_id={} axis={} slot={} gen={}",
+            plan.mcu_id, plan.params.id, axis_idx, slot, slot_gen,
+        );
         allocated_slots.push(slot);
 
         match producer::load_curve(
@@ -175,11 +179,25 @@ pub(crate) fn load_and_push_via(
     // registered before the MCU can retire them via credit_freed events).
     for slot in &allocated_slots {
         slot_pool.register_segment(*slot, plan.params.id);
+        log::debug!(
+            "[slot-trace] register_segment mcu={} slot={} seg_id={}",
+            plan.mcu_id, slot, plan.params.id,
+        );
     }
 
     match producer::push_segment(io, credit, &plan.params) {
-        Ok(_info) => Ok(()),
+        Ok(info) => {
+            log::debug!(
+                "[bridge-trace] push_segment ok: mcu={} seg_id={} accepted_id={}",
+                plan.mcu_id, plan.params.id, info.accepted_segment_id,
+            );
+            Ok(())
+        }
         Err(e) => {
+            log::debug!(
+                "[bridge-trace] push_segment err: mcu={} seg_id={} err={:?}",
+                plan.mcu_id, plan.params.id, e,
+            );
             for s in &allocated_slots {
                 slot_pool.release(*s);
             }
@@ -248,7 +266,7 @@ impl MotionNode for StepperMcuNode {
     fn clock_freq(&self) -> f64 {
         self.clock_freqs
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(&self.mcu_id)
             .copied()
             .filter(|f| *f > 0.0)
@@ -286,6 +304,7 @@ impl MotionNode for StepperMcuNode {
     fn now_clock(&self) -> Result<u64, DispatchError> {
         let mcu_h = mcu_handle_from_raw(self.mcu_id);
         let wait_start = Instant::now();
+        let mut wait_iter: u32 = 0;
         let now_clock = loop {
             let r = self
                 .router
@@ -298,6 +317,13 @@ impl MotionNode for StepperMcuNode {
             if n > 0 {
                 break n;
             }
+            if wait_iter == 0 || wait_iter == 50 || wait_iter == 250 || wait_iter == 499 {
+                log::debug!(
+                    "[bridge-trace] dispatch-wait iter={} mcu_id={} mcu_h={:?} now_clock=0",
+                    wait_iter, self.mcu_id, mcu_h,
+                );
+            }
+            wait_iter += 1;
             if wait_start.elapsed() > Duration::from_secs(5) {
                 return Err(DispatchError::ClockSyncTimeout {
                     mcu_id: self.mcu_id,
