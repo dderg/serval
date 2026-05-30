@@ -2,20 +2,22 @@
 //!
 //! Usage: ec-test-client [--socket PATH] [--mm F] [--secs F]
 //!
-//! Time-domain note: the endpoint arms `t_start` against *its own* `monotonic_ns()`
-//! epoch (process start on the endpoint). Sending `t_start = 0` means "already
-//! started" from the endpoint's perspective — it arms immediately and `sample()`
-//! returns the piece-0 start position. `CountMap` captures the origin on the first
-//! sample, so there is no position jump regardless of where the rotor sits at arm
-//! time. This is correct for M1 (immediate gentle move). When Plan 2 wires
-//! `motion-bridge`, it will supply real shared-clock timestamps derived from a
-//! common `CLOCK_MONOTONIC` reference negotiated at connect time; do not hardcode
-//! `t_start = 0` there.
+//! Time-domain note: both this client and the endpoint read the host-wide
+//! `CLOCK_MONOTONIC` epoch directly (via `kalico_ethercat_rt::clock::monotonic_ns`),
+//! which is shared by every process on the machine — unlike `std::time::Instant`,
+//! whose value is opaque and anchored per-process and therefore NOT comparable
+//! across the socket. The client stamps `t_start = monotonic_ns() + LEAD_NS` so the
+//! segment arrives, arms, and pre-rolls at the start position before play begins.
+//! `CountMap` captures the origin on the first sample, so there is no position jump
+//! regardless of where the rotor sits at arm time. When Plan 2 wires `motion-bridge`,
+//! it will negotiate the host↔endpoint reference on this same `CLOCK_MONOTONIC`
+//! primitive.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
+use kalico_ethercat_rt::clock::monotonic_ns;
 use kalico_ethercat_rt::wire::control_frame;
 use kalico_native_transport::demux::{Demuxer, Frame};
 use kalico_native_transport::wire_helpers::decode_message_header;
@@ -130,10 +132,13 @@ fn main() {
             0x0001_0000
         });
 
-    // t_start = 0: the endpoint arms immediately (t_start is in its past).
-    // See the time-domain note in the module doc above.
-    let t_start: u64 = 0;
-    let t_end: u64 = (2.0 * secs * 1e9) as u64;
+    // Stamp the segment on the shared host-wide CLOCK_MONOTONIC timeline (the
+    // same clock the endpoint reads), with a 150 ms lead so it arrives, arms,
+    // and pre-rolls at the start position before play begins. Total play time is
+    // both ease pieces: 2 * secs.
+    const LEAD_NS: u64 = 150_000_000;
+    let t_start: u64 = monotonic_ns() + LEAD_NS;
+    let t_end: u64 = t_start + (2.0 * secs * 1e9) as u64;
 
     let seg = PushSegment {
         id: 1,

@@ -30,6 +30,7 @@ path = "src/bin/ec-test-client.rs"
 runtime = { path = "../runtime" }                 # default features => "host" (f32, std)
 kalico-protocol = { path = "../kalico-protocol" }
 kalico-native-transport = { path = "../kalico-native-transport" }
+libc = "0.2"                                       # raw clock_gettime(CLOCK_MONOTONIC)
 
 [lints]
 workspace = true

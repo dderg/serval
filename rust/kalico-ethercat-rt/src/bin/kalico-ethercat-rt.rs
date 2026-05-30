@@ -6,9 +6,8 @@
 #![allow(unsafe_code)]
 
 use std::ffi::CString;
-use std::sync::OnceLock;
-use std::time::Instant;
 
+use kalico_ethercat_rt::clock::monotonic_ns;
 use kalico_ethercat_rt::curves::{ChannelTrack, CurveStore};
 use kalico_ethercat_rt::ffi;
 use kalico_ethercat_rt::scale::CountMap;
@@ -18,15 +17,6 @@ use kalico_ethercat_rt::wire::{
     reset_pool_response_frame,
 };
 use kalico_protocol::messages::PushSegment;
-
-/// Nanoseconds since process start (CLOCK_MONOTONIC via `Instant`).
-fn monotonic_ns() -> u64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    let start = START.get_or_init(Instant::now);
-    // elapsed() wraps Duration; as_nanos() returns u128. Cap at u64::MAX
-    // (~584 years) which is beyond any practical run time.
-    start.elapsed().as_nanos() as u64
-}
 
 fn arg_val(args: &[String], key: &str) -> Option<String> {
     args.iter().position(|a| a == key).and_then(|i| args.get(i + 1).cloned())
