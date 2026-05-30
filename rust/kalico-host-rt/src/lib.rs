@@ -37,4 +37,5 @@ pub mod passthrough_queue;
 pub mod producer;
 pub mod stream;
 pub mod transport;
+pub mod unix_native_conn;
 pub mod wire;
