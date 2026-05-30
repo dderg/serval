@@ -6,7 +6,11 @@
 
 /* go_realtime + ec_init + CSP/DC config + map + SAFE-OP + DC align + OP +
  * CiA402 enable, running an internal cyclic+DC loop with target=actual the
- * whole time. Returns 0 once "operation enabled", <0 on any failure. */
+ * whole time. Returns 0 once "operation enabled".
+ * Failure codes: -1 ec_init, -2 no slaves, -3 SAFE-OP not reached,
+ *                -4 OP not reached, -5 CiA402 enable timeout.
+ * The caller MUST check the return is 0 before calling any other function;
+ * on failure the bus is closed and the g_out/g_in pointers are not valid. */
 int  ec_rt_bringup(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt_prio);
 
 /* One steady-state DC cycle: sleep to next deadline, send+recv process data,

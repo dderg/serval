@@ -21,7 +21,12 @@ fn main() {
     println!("cargo:rustc-link-lib=rt");
     println!("cargo:rustc-link-lib=m");
 
-    // Rebuild if the C shim sources change.
+    // Re-run if the C shim sources, its build recipe, or the prebuilt archive
+    // change — gives a clear "re-check the link" trigger after a manual rebuild.
     println!("cargo:rerun-if-changed=../../bench/libecrt.c");
     println!("cargo:rerun-if-changed=../../bench/libecrt.h");
+    println!("cargo:rerun-if-changed=../../bench/Makefile");
+    println!("cargo:rerun-if-changed=../../bench/libecrt.a");
+    println!("cargo:rerun-if-env-changed=ECRT_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=SOEM_LIB_DIR");
 }

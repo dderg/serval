@@ -1,4 +1,5 @@
 SOEM ?= $(HOME)/ethercat/SOEM
+CC ?= cc
 CFLAGS = -O2 -Wall -D_GNU_SOURCE \
   -I$(SOEM)/soem -I$(SOEM)/osal -I$(SOEM)/osal/linux -I$(SOEM)/oshw/linux -I$(SOEM)/oshw
 

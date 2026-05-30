@@ -1,12 +1,14 @@
 #define _GNU_SOURCE
 #include "libecrt.h"
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include "ethercat.h"
 
-#define COUNTS_PER_REV 131072.0
+/* Drive encoder resolution for context: 131072 counts/rev (17-bit, 1:1 gear).
+ * Not used here — mm->counts scaling lives on the Rust side. */
 
 /*
  * PDO layout must match the drive's active mapping exactly.
@@ -76,12 +78,18 @@ static void dc_sync(int64_t reftime, int64_t cycletime, int64_t *offset) {
     *offset = -(delta / 100) - (g_integral / 20);
 }
 
+/*
+ * Best-effort RT hardening. Failures are non-fatal (the caller may lack
+ * CAP_IPC_LOCK / CAP_SYS_NICE) but they ARE reported on stderr: without RT
+ * scheduling the DC loop jitters and the drive throws Er74.1 / misses SYNC0,
+ * which looks like a drive bug rather than a missing-capability problem.
+ */
 static void go_realtime(int cpu, int prio) {
-    mlockall(MCL_CURRENT | MCL_FUTURE);
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) perror("ec_rt: mlockall (continuing)");
     cpu_set_t set; CPU_ZERO(&set); CPU_SET(cpu, &set);
-    sched_setaffinity(0, sizeof(set), &set);
+    if (sched_setaffinity(0, sizeof(set), &set) != 0) perror("ec_rt: setaffinity (continuing)");
     struct sched_param sp; sp.sched_priority = prio;
-    sched_setscheduler(0, SCHED_FIFO, &sp);
+    if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0) perror("ec_rt: SCHED_FIFO (continuing)");
 }
 
 /*
@@ -128,7 +136,12 @@ int ec_rt_bringup(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt_prio)
     ec_configdc();
     ec_dcsync0(1, TRUE, (uint32_t)g_cycle_ns, (int32_t)(g_cycle_ns / 2));
     ec_config_map(&IOmap);
-    ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * 4);
+    /* If SAFE-OP is not reached, PDOs are not mapped and ec_slave[1].outputs may
+     * be NULL/stale — bail before dereferencing it in the stabilize loop. */
+    if (ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * 4) != EC_STATE_SAFE_OP) {
+        ec_close();
+        return -3; /* SAFE-OP not reached */
+    }
 
     g_out = (out_t *) ec_slave[1].outputs;
     g_in  = (in_t  *) ec_slave[1].inputs;
@@ -159,7 +172,7 @@ int ec_rt_bringup(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt_prio)
         if (i % 20 == 0) ec_readstate();
         if (ec_slave[0].state == EC_STATE_OPERATIONAL) break;
     }
-    if (ec_slave[0].state != EC_STATE_OPERATIONAL) return -3;
+    if (ec_slave[0].state != EC_STATE_OPERATIONAL) return -4; /* OP not reached */
 
     /*
      * CiA402 enable state machine — identical to ec_spin.c's ALIGN phase.
@@ -190,7 +203,7 @@ int ec_rt_bringup(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt_prio)
         }
         rt_exchange(&toff);
     }
-    return -4; /* CiA402 enable timed out */
+    return -5; /* CiA402 enable timed out */
 }
 
 int ec_rt_cycle(int64_t *toff_ns) {
