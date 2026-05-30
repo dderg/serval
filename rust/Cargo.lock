@@ -655,6 +655,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kalico-ethercat-rt"
+version = "0.1.0"
+dependencies = [
+ "kalico-native-transport",
+ "kalico-protocol",
+ "runtime",
+]
+
+[[package]]
 name = "kalico-host-rt"
 version = "0.1.0"
 dependencies = [
