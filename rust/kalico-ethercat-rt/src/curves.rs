@@ -39,7 +39,15 @@ impl CurveStore {
     pub fn with_curve<R>(&self, handle_packed: u32, f: impl FnOnce(&LoadedCubicCurve) -> R) -> Option<R> {
         let handle = CurveHandle::unpack(handle_packed);
         let ptr = self.pool.lookup_active(handle)?;
-        // SAFETY: pointer valid for the lifetime of this call; no concurrent mutation.
+        // SAFETY: three invariants hold:
+        // 1. `ptr` comes from `lookup_active`, which validates the slot generation;
+        //    the slot is occupied and its `LoadedCubicCurve` is fully initialized
+        //    (written before the generation bump, observed Acquire here).
+        // 2. `CurvePool` owns the slot array for its whole lifetime and is not moved
+        //    while this call runs, so `ptr` stays valid for the borrow.
+        // 3. This call graph is single-threaded (the DC loop is non-async) and `f`
+        //    is `FnOnce` running to completion synchronously, so no `load()` can
+        //    interleave — there is no aliased mutable access to the slot's UnsafeCell.
         let curve: &LoadedCubicCurve = unsafe { &*ptr };
         Some(f(curve))
     }
@@ -127,7 +135,10 @@ impl ChannelTrack {
         let t_local_s = (now_ns.saturating_sub(self.piece_start_ns)) as f32 / 1e9;
         let cursor = self.cursor;
         store.with_curve(self.handle_packed, |c| {
-            let idx = cursor.min(c.piece_count as usize - 1);
+            // `piece_count >= 1` is a CurvePool invariant (`populate_from_wire`
+            // rejects empty curves); `saturating_sub` keeps this sound regardless.
+            debug_assert!(c.piece_count >= 1, "CurvePool invariant: piece_count >= 1");
+            let idx = cursor.min((c.piece_count as usize).saturating_sub(1));
             eval_curve_at(c, idx, t_local_s.min(c.pieces[idx].duration))
         })
     }

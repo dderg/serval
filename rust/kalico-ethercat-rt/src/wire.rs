@@ -188,6 +188,15 @@ mod decode_cmd_tests {
             other => panic!("wrong variant: {other:?}"),
         }
     }
+
+    #[test]
+    fn decodes_identify() {
+        let payload = frame_payload(MessageKind::Identify, 1, &[3u8]);
+        match decode_command(&payload).unwrap() {
+            Command::Identify { correlation_id: 1, proto_version: 3 } => {}
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
