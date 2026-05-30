@@ -21,6 +21,15 @@ assumptions, not analogy to other CoE drives. (The PDF lives in the user's
 `~/Downloads` — outside the repo, so it is not tracked by git; re-download from
 the vendor if absent.)
 
+**Page offset:** the printed page numbers are offset from the PDF page index by
+~+2 (PDF page 5 prints "03"). So a TOC entry like "Chapter 8 — Communication
+Description, p.156" is around **PDF page 158**; fault tables at printed p.171+
+are around PDF page 173+. Read a couple pages wide to land on the right content.
+Key sections: **Ch. 8 Communication (printed 156–168)** — EtherCAT specs, state
+machine, **8.2.3 DC (p.162)**, **8.3 Process/Mailbox data (p.163+)**;
+**Ch. 10 Troubleshooting (printed 171+)** — fault tables; **7.7 Torque
+Feedforward (p.148)** for the corexy feedforward feature.
+
 ## Goal
 
 Bring a STEPPERONLINE A6-EC EtherCAT servo into the kalico motion engine as a
