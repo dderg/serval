@@ -2052,7 +2052,7 @@ impl PyMotionBridge {
                 let mut last_err = None;
                 for attempt in 0..MAX_RETRIES {
                     match producer::reset_curve_pool(
-                        &io,
+                        io.as_ref(),
                         producer::DEFAULT_RESET_CURVE_POOL_TIMEOUT,
                     ) {
                         Ok(()) => {

@@ -27,7 +27,7 @@ use kalico_protocol::{
 pub const MAX_PIECES_PER_CURVE: usize = 255;
 
 use crate::credit::CreditCounter;
-use crate::host_io::KalicoHostIo;
+use crate::native_call::NativeCall;
 use crate::transport::TransportError;
 
 /// Default timeout for `LoadCurveResponse` (spec §7.4). The MCU should
@@ -125,7 +125,7 @@ pub struct SegmentPushParams {
 
 /// Push a single segment to the MCU via kalico-native PushSegment.
 pub fn push_segment(
-    io: &KalicoHostIo,
+    io: &dyn NativeCall,
     credit: &CreditCounter,
     params: &SegmentPushParams,
 ) -> Result<PushedSegmentInfo, ProducerError> {
@@ -133,7 +133,7 @@ pub fn push_segment(
 }
 
 pub fn push_segment_with_timeout(
-    io: &KalicoHostIo,
+    io: &dyn NativeCall,
     credit: &CreditCounter,
     params: &SegmentPushParams,
     timeout: Duration,
@@ -300,7 +300,7 @@ fn build_pieces_wire_bytes(bp: &[[f32; 4]], durs: &[f32]) -> Vec<u8> {
 ///
 /// Spec: `docs/superpowers/specs/2026-05-20-stepping-redesign-finish-design.md` §3.2.
 pub fn load_curve(
-    io: &KalicoHostIo,
+    io: &dyn NativeCall,
     slot: u16,
     axis_idx: u8,
     params: &CurveLoadParams,
@@ -404,7 +404,7 @@ pub const DEFAULT_RESET_CURVE_POOL_TIMEOUT: Duration = Duration::from_millis(500
 /// `LoadCurveResponse` is always authoritative — the host's own generation
 /// counter in `SlotPool` is advisory diagnostics only and is never sent to
 /// the MCU.
-pub fn reset_curve_pool(io: &KalicoHostIo, timeout: Duration) -> Result<(), ProducerError> {
+pub fn reset_curve_pool(io: &dyn NativeCall, timeout: Duration) -> Result<(), ProducerError> {
     let body = ResetCurvePool.encoded_to_vec();
     let (kind, resp_body) = io.kalico_call(MessageKind::ResetCurvePool, body, timeout)?;
     if kind != MessageKind::ResetCurvePoolResponse {
