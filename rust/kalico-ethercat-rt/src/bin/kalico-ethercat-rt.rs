@@ -140,12 +140,24 @@ fn main() {
             }
             if tr.is_done(now) {
                 track = None;
+                // Drop the origin too: the next armed segment must recapture it
+                // from the rotor position at its own arm time, not inherit this
+                // segment's offset (else a second move jumps).
+                cmap = None;
             }
         }
 
         // 4) One DC cycle. Pacing (sleep-to-deadline) is inside ec_rt_cycle.
         let mut toff = 0i64;
         let wkc = unsafe { ffi::ec_rt_cycle(&mut toff) };
+
+        // Bus health: 3 == read+write+config for one slave. A drop to 0 means the
+        // slave fell off the bus (cable/power) — halt rather than stream targets
+        // into PDOs that are never delivered.
+        if wkc != 3 {
+            eprintln!("ec-rt: working counter {wkc} (expected 3) — bus lost, halting");
+            break;
+        }
 
         // 5) Telemetry every ~0.5 s.
         prdiv += 1;
