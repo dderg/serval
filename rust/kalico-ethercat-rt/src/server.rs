@@ -2,6 +2,7 @@
 //! handler, write framed responses. Non-blocking poll suited to a DC loop.
 
 use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Duration;
 
@@ -30,6 +31,11 @@ impl FrameServer {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
         listener.set_nonblocking(true)?;
+        // The endpoint runs as root (raw EtherCAT socket), so the bind would
+        // otherwise leave the socket root-only. Relax to 0o666 so a non-root
+        // client — the bench `ec-test-client` now, the klipper-user motion-bridge
+        // later — can connect. This is a local-only UDS on a single-purpose host.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
         Ok(Self { listener, conn: None, demux: Demuxer::new(), buf: [0u8; 4096] })
     }
 
