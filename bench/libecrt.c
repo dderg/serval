@@ -140,8 +140,11 @@ int ec_rt_bringup(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt_prio)
     clock_gettime(CLOCK_MONOTONIC, &g_ts);
     int64_t toff = 0;
 
-    /* STABILIZE: align DC for ~1 s with target tracking actual. */
-    for (int64_t i = 0; i < (int64_t)(1.0e9 / g_cycle_ns); i++) {
+    /* STABILIZE: align DC for 1.5 s with target tracking actual. Matches the
+     * proven ec_spin.c STABILIZE_SEC; the Pi 3B's USB-attached NIC needs the
+     * longer window for the DC PI loop to settle before OP, else Er74.1 /
+     * AL 0x0030 at the SAFE-OP->OP transition. */
+    for (int64_t i = 0; i < (int64_t)(1.5e9 / g_cycle_ns); i++) {
         g_out->controlword     = 0;
         g_out->target_position = g_in->position_actual;
         rt_exchange(&toff);
