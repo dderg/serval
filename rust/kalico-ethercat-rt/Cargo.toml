@@ -1,0 +1,24 @@
+[package]
+name = "kalico-ethercat-rt"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "kalico_ethercat_rt"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "kalico-ethercat-rt"
+path = "src/bin/kalico-ethercat-rt.rs"
+
+[[bin]]
+name = "ec-test-client"
+path = "src/bin/ec-test-client.rs"
+
+[dependencies]
+runtime = { path = "../runtime" }                 # default features => "host" (f32, std)
+kalico-protocol = { path = "../kalico-protocol" }
+kalico-native-transport = { path = "../kalico-native-transport" }
+
+[lints]
+workspace = true
