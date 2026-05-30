@@ -30,6 +30,15 @@ pub struct UnixNativeConn {
     next_cid: AtomicU32,
 }
 
+impl core::fmt::Debug for UnixNativeConn {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // `ConnState` holds a raw `Demuxer` + socket; don't lock or dump it.
+        f.debug_struct("UnixNativeConn")
+            .field("next_cid", &self.next_cid.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl UnixNativeConn {
     /// Connect to a listening kalico-native endpoint at `path`.
     pub fn connect(path: &str) -> std::io::Result<Self> {
