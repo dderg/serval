@@ -3,3 +3,4 @@
 pub mod scale;
 pub mod wire;
 pub mod curves;
+pub mod ffi;
