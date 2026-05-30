@@ -17,8 +17,9 @@ indices, value semantics, sync-mode support, or timing requirements. The A6-EC's
 DC handshake quirks (e.g. `1C32:01=2`, SYNC0-before-SAFE-OP, Er74.x faults) were
 only solved by reading the manual carefully; the same discipline applies to every
 new register or transition. When in doubt, the manual is authoritative — not
-assumptions, not analogy to other CoE drives. (Kept out of git via
-`docs/ethercat-ref/.gitignore`; re-download from the vendor if absent.)
+assumptions, not analogy to other CoE drives. (The PDF lives in the user's
+`~/Downloads` — outside the repo, so it is not tracked by git; re-download from
+the vendor if absent.)
 
 ## Goal
 
