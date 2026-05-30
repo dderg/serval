@@ -1,0 +1,96 @@
+//! Unix-socket server: decode kalico-native command frames, hand them to a
+//! handler, write framed responses. Non-blocking poll suited to a DC loop.
+
+use std::io::{ErrorKind, Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::time::Duration;
+
+use kalico_native_transport::demux::{Demuxer, Frame};
+
+use crate::wire::{Command, decode_command};
+
+pub struct FrameServer {
+    listener: UnixListener,
+    conn: Option<UnixStream>,
+    demux: Demuxer,
+    buf: [u8; 4096],
+}
+
+impl core::fmt::Debug for FrameServer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FrameServer")
+            .field("conn", &self.conn.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl FrameServer {
+    /// Bind a unix-domain socket at `path`. Removes any stale socket file first.
+    pub fn bind(path: &str) -> std::io::Result<Self> {
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(path)?;
+        listener.set_nonblocking(true)?;
+        Ok(Self { listener, conn: None, demux: Demuxer::new(), buf: [0u8; 4096] })
+    }
+
+    /// Accept a pending client if we do not already have one.
+    fn try_accept(&mut self) {
+        if self.conn.is_none() {
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    // 200 µs read timeout: long enough to drain a small burst,
+                    // short enough not to blow the DC cycle budget.
+                    let _ = stream.set_read_timeout(Some(Duration::from_micros(200)));
+                    self.conn = Some(stream);
+                    eprintln!("ec-rt: client connected");
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(e) => eprintln!("ec-rt: accept error: {e}"),
+            }
+        }
+    }
+
+    /// Drain whatever bytes are available from the client and return decoded
+    /// commands. Responses are written by the caller via [`respond`].
+    pub fn poll_commands(&mut self) -> Vec<Command> {
+        self.try_accept();
+        let mut cmds = Vec::new();
+        let Some(stream) = self.conn.as_mut() else { return cmds };
+        match stream.read(&mut self.buf) {
+            Ok(0) => {
+                eprintln!("ec-rt: client disconnected");
+                self.conn = None;
+            }
+            Ok(n) => {
+                let (frames, errs) = self.demux.feed_slice(&self.buf[..n]);
+                for e in &errs {
+                    eprintln!("ec-rt: stream error: {e:?}");
+                }
+                for f in frames {
+                    if let Frame::Kalico { payload, .. } = f {
+                        match decode_command(&payload) {
+                            Ok(cmd) => cmds.push(cmd),
+                            Err(e) => eprintln!("ec-rt: bad command: {e:?}"),
+                        }
+                    }
+                }
+            }
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
+            Err(e) => {
+                eprintln!("ec-rt: read error: {e}");
+                self.conn = None;
+            }
+        }
+        cmds
+    }
+
+    /// Write a framed response to the connected client. Drops the connection on write error.
+    pub fn respond(&mut self, frame: &[u8]) {
+        if let Some(stream) = self.conn.as_mut() {
+            if let Err(e) = stream.write_all(frame) {
+                eprintln!("ec-rt: write error: {e}");
+                self.conn = None;
+            }
+        }
+    }
+}
