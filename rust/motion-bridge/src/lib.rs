@@ -2,6 +2,8 @@ mod bridge;
 #[doc(hidden)]
 pub mod cap_check;
 #[doc(hidden)]
+pub mod motion_node;
+#[doc(hidden)]
 pub mod probe_homing;
 #[doc(hidden)]
 pub mod classify;
