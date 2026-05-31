@@ -1863,6 +1863,11 @@ impl PyMotionBridge {
     /// for the two-MCU first-print MVP topology:
     ///   - Octopus drives X+Y (CoreXyAndE = kinematics 0).
     ///   - F446 drives Z (CartesianXyzAndE = kinematics 1).
+    ///
+    /// `ethercat_handle`: optional EtherCAT node handle returned by
+    /// `claim_ethercat_node`. When non-zero (Part A hardcoded routing), the
+    /// servo axis (X) is owned by the EtherCAT node; Y stays on octopus and
+    /// Z stays on f446. When zero the original all-stepper layout is used.
     #[pyo3(signature = (
         max_velocity,
         max_accel,
@@ -1875,6 +1880,7 @@ impl PyMotionBridge {
         shaper_freq_y,
         octopus_handle,
         f446_handle,
+        ethercat_handle = 0,
         window_capacity = 32,
         beta_max_iters = 10,
     ))]
@@ -1892,6 +1898,7 @@ impl PyMotionBridge {
         shaper_freq_y: f64,
         octopus_handle: u32,
         f446_handle: u32,
+        ethercat_handle: u32,
         window_capacity: usize,
         beta_max_iters: u8,
     ) -> PyResult<()> {
@@ -1941,20 +1948,48 @@ impl PyMotionBridge {
                 .unwrap_or_default();
             (oc, fc)
         };
-        let mcu_configs = vec![
-            McuAxisConfig {
-                mcu_id: octopus_handle,
-                axes: vec![AXIS_X, AXIS_Y],
-                kinematics: 0, // CoreXyAndE
-                caps: octopus_caps,
-            },
-            McuAxisConfig {
-                mcu_id: f446_handle,
-                axes: vec![AXIS_Z],
-                kinematics: 1, // CartesianXyzAndE
-                caps: f446_caps,
-            },
-        ];
+        // Part A: hardcoded EtherCAT routing. When ethercat_handle != 0, the
+        // servo axis (X) is owned by the EtherCAT node; Y stays on octopus,
+        // Z on f446. When ethercat_handle == 0, the original all-stepper
+        // layout is unchanged.
+        // (The generic data-driven version lands on a separate branch.)
+        let mcu_configs: Vec<McuAxisConfig> = if ethercat_handle != 0 {
+            vec![
+                McuAxisConfig {
+                    mcu_id: ethercat_handle,
+                    axes: vec![AXIS_X],
+                    kinematics: 1, // CartesianXyzAndE — per-axis cartesian for servo
+                    caps: McuCaps::default(), // no QueryRuntimeCaps round-trip for EtherCAT; same default an unqueried/timed-out MCU receives
+                },
+                McuAxisConfig {
+                    mcu_id: octopus_handle,
+                    axes: vec![AXIS_Y],
+                    kinematics: 0, // CoreXyAndE
+                    caps: octopus_caps,
+                },
+                McuAxisConfig {
+                    mcu_id: f446_handle,
+                    axes: vec![AXIS_Z],
+                    kinematics: 1, // CartesianXyzAndE
+                    caps: f446_caps,
+                },
+            ]
+        } else {
+            vec![
+                McuAxisConfig {
+                    mcu_id: octopus_handle,
+                    axes: vec![AXIS_X, AXIS_Y],
+                    kinematics: 0, // CoreXyAndE
+                    caps: octopus_caps,
+                },
+                McuAxisConfig {
+                    mcu_id: f446_handle,
+                    axes: vec![AXIS_Z],
+                    kinematics: 1, // CartesianXyzAndE
+                    caps: f446_caps,
+                },
+            ]
+        };
         *self
             .mcu_axis_configs
             .lock()
