@@ -26,6 +26,12 @@ required-features = ["hw"]
 name = "ec-test-client"
 path = "src/bin/ec-test-client.rs"
 
+# No-hardware stub: serves the kalico-native socket and answers the protocol
+# without driving EtherCAT. For drive-off integration testing. No `hw` feature.
+[[bin]]
+name = "kalico-ethercat-rt-stub"
+path = "src/bin/kalico-ethercat-rt-stub.rs"
+
 [dependencies]
 runtime = { path = "../runtime" }                 # default features => "host" (f32, std)
 kalico-protocol = { path = "../kalico-protocol" }

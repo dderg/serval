@@ -823,6 +823,7 @@ dependencies = [
  "heapless",
  "kalico-host-rt",
  "kalico-protocol",
+ "libc",
  "log",
  "nurbs",
  "pyo3",
