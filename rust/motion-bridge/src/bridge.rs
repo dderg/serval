@@ -111,6 +111,9 @@ struct McuConnection {
     clock_sync_stop: Option<Arc<AtomicBool>>,
     /// Join handle for the clock-sync thread. Joined on `release_mcu`.
     clock_sync_thread: Option<JoinHandle<()>>,
+    /// EtherCAT endpoint socket path. `Some` for an EtherCAT node, `None` for
+    /// a serial MCU. Mutually exclusive with a live `serial_path` connection.
+    ethercat_socket: Option<String>,
 }
 
 /// Default fallback caps used when the MCU doesn't respond to
@@ -564,6 +567,38 @@ impl PyMotionBridge {
                 kalico_native_supported: false,
                 clock_sync_stop: None,
                 clock_sync_thread: None,
+                ethercat_socket: None,
+            },
+        );
+        Ok(raw)
+    }
+
+    // ── EtherCAT: claim_ethercat_node ───────────────────────────────────
+
+    /// Register an EtherCAT node with the bridge. Like `claim_mcu` but the
+    /// transport is a same-host Unix socket (the kalico-ethercat-rt endpoint),
+    /// not a serial port. The node is marked kalico-native here at claim time
+    /// (it speaks the protocol by construction; no identify handshake needed).
+    /// The socket is connected later in `init_planner`. Returns the opaque mcu_id handle.
+    #[pyo3(signature = (label, socket_path))]
+    fn claim_ethercat_node(&self, label: &str, socket_path: &str) -> PyResult<u32> {
+        let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+        let handle = router.claim_mcu(label);
+        let raw = handle.raw();
+        self.mcus.lock().unwrap_or_else(|p| p.into_inner()).insert(
+            raw,
+            McuConnection {
+                label: label.to_owned(),
+                serial_path: String::new(),
+                baud: 0,
+                host_io: None,
+                runtime_rx: None,
+                runtime_caps: None,
+                identify_caps: 0,
+                kalico_native_supported: true, // EtherCAT endpoint speaks kalico-native
+                clock_sync_stop: None,
+                clock_sync_thread: None,
+                ethercat_socket: Some(socket_path.to_owned()),
             },
         );
         Ok(raw)
