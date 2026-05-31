@@ -4,7 +4,6 @@
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::time::Duration;
 
 use kalico_native_transport::demux::{Demuxer, Frame};
 
@@ -44,9 +43,15 @@ impl FrameServer {
         if self.conn.is_none() {
             match self.listener.accept() {
                 Ok((stream, _)) => {
-                    // 200 µs read timeout: long enough to drain a small burst,
-                    // short enough not to blow the DC cycle budget.
-                    let _ = stream.set_read_timeout(Some(Duration::from_micros(200)));
+                    // Non-blocking, NOT a read timeout. This server's poll runs
+                    // inside the endpoint's single-threaded 1 ms EtherCAT DC loop.
+                    // A blocking read — even a 200 µs timeout — stalls that loop:
+                    // once a client connected, the per-cycle read latency pushed
+                    // the PDO exchange past the A6-EC's sync watchdog and faulted
+                    // the drive (wkc 3->1, errc1.1). Non-blocking returns WouldBlock
+                    // instantly when the socket is idle; partial/burst frames simply
+                    // accumulate in the demuxer across DC cycles.
+                    let _ = stream.set_nonblocking(true);
                     self.conn = Some(stream);
                     eprintln!("ec-rt: client connected");
                 }
