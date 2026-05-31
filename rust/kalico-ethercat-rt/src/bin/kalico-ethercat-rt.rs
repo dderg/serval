@@ -83,6 +83,10 @@ fn main() {
                 Command::LoadCurve { correlation_id, msg } => {
                     match store.load(msg.slot_idx, msg.piece_count, &msg.pieces_bytes) {
                         Ok(handle) => {
+                            eprintln!(
+                                "ec-rt: load_curve slot={} pieces={} -> handle={handle}",
+                                msg.slot_idx, msg.piece_count
+                            );
                             server.respond(&load_curve_response_frame(correlation_id, 0, handle));
                         }
                         Err(e) => {
@@ -93,6 +97,10 @@ fn main() {
                 }
                 Command::PushSegment { correlation_id, msg } => {
                     let h = pick_handle(&msg, &handle_sel);
+                    eprintln!(
+                        "ec-rt: push_segment id={} handle={h} t=[{}..{}]",
+                        msg.id, msg.t_start, msg.t_end
+                    );
                     pending = Some((h, msg.t_start, msg.t_end));
                     server.respond(&push_segment_response_frame(correlation_id, 0, msg.id));
                 }
