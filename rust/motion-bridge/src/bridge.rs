@@ -508,6 +508,40 @@ pub(crate) fn build_configure_axes_body(
     body
 }
 
+/// Resolve the dispatch target for a single `plan.mcu_id`.
+///
+/// Returns:
+/// - `Ok(Some((node, Some(io))))` — serial stepper: node found, io live.
+/// - `Ok(Some((node, None)))` — EtherCAT node: found in `nodes`, absent
+///   from `dispatch_ios` (expected — no serial `KalicoHostIo`).
+/// - `Ok(None)` — no node registered for `mcu_id`; caller should skip
+///   this plan. This is only reached on a configuration bug (a plan whose
+///   `mcu_id` was never added to `nodes`).
+/// - `Err(DispatchError::ConnectionDropped)` — serial node whose
+///   `Weak<KalicoHostIo>` has already been dropped (MCU disconnected).
+///
+/// Extracted from the dispatch closure in `init_planner` so that the
+/// node-selection + io-optionality logic is unit-testable without standing
+/// up a full `PyMotionBridge` + `PlannerHandle` + serial connections.
+pub(crate) fn resolve_dispatch_target(
+    mcu_id: u32,
+    nodes: &HashMap<u32, Arc<dyn crate::motion_node::MotionNode>>,
+    dispatch_ios: &HashMap<u32, (Weak<KalicoHostIo>, Arc<CreditCounter>, Arc<SharedSlotPool>)>,
+) -> Result<Option<(Arc<dyn crate::motion_node::MotionNode>, Option<Arc<KalicoHostIo>>)>, DispatchError> {
+    let node = match nodes.get(&mcu_id) {
+        Some(n) => Arc::clone(n),
+        None => return Ok(None),
+    };
+    let serial_io: Option<Arc<KalicoHostIo>> = match dispatch_ios.get(&mcu_id) {
+        Some((w, _, _)) => match w.upgrade() {
+            Some(io) => Some(io),
+            None => return Err(DispatchError::ConnectionDropped(mcu_id)),
+        },
+        None => None,
+    };
+    Ok(Some((node, serial_io)))
+}
+
 #[pymethods]
 impl PyMotionBridge {
     // ── Task 31: constructor ────────────────────────────────────────────
@@ -2376,30 +2410,15 @@ impl PyMotionBridge {
                         );
                         continue;
                     }
-                    // `nodes` is the primary dispatch lookup. Any mcu_id that has a
-                    // plan but no node entry is a genuine logic error (the plan came
-                    // from `build_push_params` which is seeded from `mcu_configs`,
-                    // and every mcu_id in `mcu_configs` gets a node — stepper or
-                    // EtherCAT). Skip rather than panic so a mis-configured MCU
-                    // doesn't bring down the planner thread.
-                    let node = match nodes.get(&plan.mcu_id) {
-                        Some(n) => Arc::clone(n),
-                        None => continue,
-                    };
-                    // `dispatch_ios` is populated only for serial stepper MCUs.
-                    // EtherCAT nodes have no KalicoHostIo and therefore have no
-                    // entry here — that is expected and correct. The Option drives
-                    // the seed-send gate below: `Some` for serial, `None` for
-                    // EtherCAT (seed skipped in Part A; no homing/seed support yet).
-                    let serial_io: Option<Arc<KalicoHostIo>> =
-                        match dispatch_ios.get(&plan.mcu_id) {
-                            Some((w, _, _)) => match w.upgrade() {
-                                Some(io) => Some(io),
-                                None => {
-                                    return Err(DispatchError::ConnectionDropped(plan.mcu_id));
-                                }
-                            },
-                            None => None,
+                    // Node + optional serial-io selection delegated to
+                    // `resolve_dispatch_target` (unit-tested in
+                    // bridge/dispatch_target_tests.rs).  See its doc-comment
+                    // for the three-outcome semantics.
+                    let (node, serial_io) =
+                        match resolve_dispatch_target(plan.mcu_id, &nodes, &dispatch_ios)? {
+                            Some(pair) => pair,
+                            // No node registered for this mcu_id — skip.
+                            None => continue,
                         };
 
                     // Per-MCU clock conversion — delegated to the node.
@@ -3239,6 +3258,9 @@ impl PyMotionBridge {
 
 #[cfg(test)]
 mod build_configure_axes_body_tests;
+
+#[cfg(test)]
+mod dispatch_target_tests;
 
 fn trip_event_to_pydict(py: Python<'_>, evt: runtime::endstop::TripEvent) -> PyResult<Py<PyDict>> {
     let d = PyDict::new(py);
