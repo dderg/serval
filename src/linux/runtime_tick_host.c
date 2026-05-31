@@ -43,7 +43,15 @@ volatile uint8_t runtime_liveness_ok = 1;
 // monotonic-derived counter that runtime_cyccnt_read returns.
 volatile uint32_t runtime_sim_cyccnt = 0;
 
-#define HOST_TICK_HZ 40000UL
+// Host-process tick rate. On real MCU hardware the modulation ISR runs at
+// 20-40 kHz; the Linux stand-in only needs a tick fast enough to drain step
+// queues and keep the integration loop live. It does NOT drive clocksync
+// (that rides the timer/stats path). A 40 kHz wakeup rate burns enough Pi-3B
+// CPU that, under desktop load, the SCHED_FIFO timer thread misses its
+// deadlines and trips "Rescheduled timer in the past". 1 kHz keeps the
+// stand-in functional while leaving ample headroom for the timer thread.
+// (The G0 board will eventually replace this Linux MCU entirely.)
+#define HOST_TICK_HZ 1000UL
 #define HOST_TICK_NS (1000000000UL / HOST_TICK_HZ)
 
 static atomic_int host_tick_enabled = 0;
