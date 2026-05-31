@@ -2273,6 +2273,11 @@ impl PyMotionBridge {
 
         let mcu_configs_for_cb = mcu_configs;
 
+        // ███ TEMPORARY BENCH HACK capture — DELETE WITH THE FILTER BELOW ███
+        // Cloned so the dispatch closure can keep only EtherCAT-node plans.
+        // See the loud block at the build_push_params call site.
+        let ethercat_mcu_ids_for_cb = ethercat_mcu_ids.clone();
+
         // Per-MCU rolling segment id. Allocated alongside the slot to
         // bind the `kalico_credit_freed.retired_through_segment_id`
         // retirement signal to the segment's curve slots.
@@ -2326,6 +2331,32 @@ impl PyMotionBridge {
                 // Build per-axis-per-segment plans first; we still need clocks
                 // before we can fill in the timing fields.
                 let mcu_plans = build_push_params(seg, &mcu_configs_for_cb, 0, 0);
+
+                // ╔══════════════════════════════════════════════════════════╗
+                // ║                                                            ║
+                // ║  ███ TEMPORARY BENCH HACK — DELETE BEFORE ANY REAL USE ███ ║
+                // ║                                                            ║
+                // ║  Keep ONLY EtherCAT-node plans (the X servo under test).   ║
+                // ║  Y/Z live on the STM32G0B1 bring-up firmware, which does    ║
+                // ║  NOT yet retire curve-pool slots / emit credit_freed, so a ║
+                // ║  multi-segment move trips "LoadCurveCubic slot busy" on    ║
+                // ║  the G0 (mcu=0 axis=1) and aborts the whole move. Dropping ║
+                // ║  every non-EtherCAT plan keeps the G0 out of dispatch so   ║
+                // ║  the EtherCAT X path can be exercised in isolation on a    ║
+                // ║  powered drive.                                            ║
+                // ║                                                            ║
+                // ║  THIS BREAKS NORMAL MULTI-AXIS MOTION — Y/Z never move.    ║
+                // ║  REMOVE this filter AND the `ethercat_mcu_ids_for_cb`      ║
+                // ║  capture above the moment the G0 retires slots / emits     ║
+                // ║  credit_freed. Tracking task: "G0 curve-pool retirement /  ║
+                // ║  credit_freed not firing". This is the ONLY place it lives.║
+                // ║                                                            ║
+                // ╚══════════════════════════════════════════════════════════╝
+                let mcu_plans: Vec<_> = mcu_plans
+                    .into_iter()
+                    .filter(|plan| ethercat_mcu_ids_for_cb.contains(&plan.mcu_id))
+                    .collect();
+                // ▲▲▲ END TEMPORARY BENCH HACK ▲▲▲
 
                 // Retain homing segment curves once per logical segment (not per
                 // MCU plan) so the Python side can evaluate position at the trigger
