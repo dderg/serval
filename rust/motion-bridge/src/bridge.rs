@@ -2020,10 +2020,31 @@ impl PyMotionBridge {
         let pending_seed_for_cb = Arc::clone(&self.pending_seed);
         let retained_curve_for_cb = Arc::clone(&self.retained_homing_curve);
 
+        // Collect the set of EtherCAT mcu_ids up front so both the host_ios
+        // and dispatch_ios loops can skip them with a simple membership test.
+        // EtherCAT nodes have no serial KalicoHostIo and must not be fed into
+        // the serial-only dispatch_ios path.
+        let ethercat_mcu_ids: HashSet<u32> = {
+            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            mcu_configs
+                .iter()
+                .filter(|c| {
+                    mcus.get(&c.mcu_id)
+                        .map_or(false, |conn| conn.ethercat_socket.is_some())
+                })
+                .map(|c| c.mcu_id)
+                .collect()
+        };
+
         let host_ios: HashMap<u32, Arc<KalicoHostIo>> = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             let mut out = HashMap::new();
             for cfg_mcu in &mcu_configs {
+                // EtherCAT nodes have no serial KalicoHostIo — skip them here;
+                // they are wired up in the EtherCatNode build loop below.
+                if ethercat_mcu_ids.contains(&cfg_mcu.mcu_id) {
+                    continue;
+                }
                 let conn = mcus.get(&cfg_mcu.mcu_id).ok_or_else(|| {
                     PyRuntimeError::new_err(format!(
                         "init_planner: unknown mcu_handle {}",
@@ -2085,6 +2106,11 @@ impl PyMotionBridge {
         self_credits.clear();
         self_pools.clear();
         for cfg_mcu in &mcu_configs {
+            // EtherCAT nodes are not in `host_ios` and get no dispatch_ios
+            // entry — their MotionNode is built in the EtherCatNode loop below.
+            if ethercat_mcu_ids.contains(&cfg_mcu.mcu_id) {
+                continue;
+            }
             let io = host_ios
                 .get(&cfg_mcu.mcu_id)
                 .expect("host_io map built from mcu_configs")
@@ -2181,7 +2207,8 @@ impl PyMotionBridge {
         // own Weak<KalicoHostIo>, credit, slot_pool, and shared clock state —
         // exactly what the closure's inline freq/now_clock/load+push blocks
         // were doing. The schedule-base arithmetic stays in the closure.
-        use crate::motion_node::{MotionNode, StepperMcuNode};
+        use crate::motion_node::{EtherCatNode, MotionNode, StepperMcuNode};
+        use kalico_host_rt::unix_native_conn::UnixNativeConn;
         let mut nodes: HashMap<u32, Arc<dyn MotionNode>> = HashMap::new();
         for (mcu_id, (io_weak, credit, slot_pool)) in &dispatch_ios {
             nodes.insert(
@@ -2198,6 +2225,58 @@ impl PyMotionBridge {
                 )) as Arc<dyn MotionNode>,
             );
         }
+
+        // Build EtherCatNode entries for every EtherCAT-routed mcu_id.
+        // Each node gets its own CreditCounter + SharedSlotPool registered into
+        // the same persistent maps (`self.credit_counters`, `self.slot_pools`)
+        // so that credit / retirement accounting is uniform with stepper MCUs.
+        // Sizing mirrors the stepper path: CREDIT_SEED_CAPACITY credits,
+        // `caps.curve_pool_n` slots (McuCaps::default() → 16 for EtherCAT
+        // nodes that don't undergo a QueryRuntimeCaps round-trip).
+        {
+            let mcus_guard = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mut ec_credits = self
+                .credit_counters
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let mut ec_pools = self.slot_pools.lock().unwrap_or_else(|p| p.into_inner());
+            for cfg_mcu in &mcu_configs {
+                if !ethercat_mcu_ids.contains(&cfg_mcu.mcu_id) {
+                    continue;
+                }
+                let path = mcus_guard
+                    .get(&cfg_mcu.mcu_id)
+                    .and_then(|c| c.ethercat_socket.as_deref())
+                    .ok_or_else(|| {
+                        PyRuntimeError::new_err(format!(
+                            "init_planner: EtherCAT mcu_id {} has no socket path",
+                            cfg_mcu.mcu_id
+                        ))
+                    })?
+                    .to_owned();
+                let conn = UnixNativeConn::connect(&path).map_err(|e| {
+                    PyRuntimeError::new_err(format!(
+                        "init_planner: EtherCAT connect {path} failed: {e}"
+                    ))
+                })?;
+                let conn = Arc::new(conn);
+                let credit = Arc::new(CreditCounter::new(CREDIT_SEED_CAPACITY));
+                let pool_capacity = cfg_mcu.caps.curve_pool_n as usize;
+                log::debug!(
+                    "[slot-trace] init_pool ethercat mcu={} capacity={}",
+                    cfg_mcu.mcu_id,
+                    pool_capacity,
+                );
+                let slot_pool = Arc::new(SharedSlotPool::new(pool_capacity));
+                ec_credits.insert(cfg_mcu.mcu_id, Arc::clone(&credit));
+                ec_pools.insert(cfg_mcu.mcu_id, Arc::clone(&slot_pool));
+                nodes.insert(
+                    cfg_mcu.mcu_id,
+                    Arc::new(EtherCatNode::new(conn, credit, slot_pool)) as Arc<dyn MotionNode>,
+                );
+            }
+        }
+
         let nodes = Arc::new(nodes);
 
         let mcu_configs_for_cb = mcu_configs;
