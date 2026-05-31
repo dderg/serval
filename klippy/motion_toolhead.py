@@ -10,6 +10,7 @@ from collections import defaultdict
 from . import chelper
 from . import motion_kinematics
 from . import stepper
+from .extras import servo_axis
 from .kinematics import extruder
 from .toolhead import Move, ToolHead, BUFFER_TIME_START
 
@@ -137,6 +138,25 @@ class BridgeKinematics:
         self.clear_homing_state((0, 1, 2))
 
     def _register_axis(self, config, axis, trapq, extras=()):
+        # EtherCAT servo axis branch (Part A). A `[servo_<axis>]` section
+        # routes this axis to a position-commanded EtherCAT node instead of
+        # host-side step generation. The ServoRail honors the same rail
+        # contract BridgeKinematics reaches on `self.rails` entries
+        # (get_name/get_steppers/get_endstops/get_range/get_homing_info/
+        # set_position) but carries no MCU steppers, no itersolve, and no
+        # `_bridge_drives_steppers` marker (there is no stepper MCU to mark).
+        servo_sec = "servo_" + axis
+        stepper_sec = "stepper_" + axis
+        has_servo = config.has_section(servo_sec)
+        has_stepper = config.has_section(stepper_sec)
+        if has_servo and has_stepper:
+            raise config.error(
+                "axis %s has both [%s] and [%s]; pick one"
+                % (axis, servo_sec, stepper_sec))
+        if has_servo:
+            rail = servo_axis.ServoRail(config.getsection(servo_sec))
+            self.rails.append(rail)
+            return
         rail = stepper.PrinterRail(config.getsection("stepper_" + axis))
         for suffix in extras:
             extra_name = "stepper_" + axis + suffix
@@ -225,6 +245,10 @@ class BridgeKinematics:
         for axis in homing_state.get_axes():
             rail = axis_rails.get(axis)
             if rail is None:
+                continue
+            # Servo (EtherCAT) rails have no endstops and no homing in Part A,
+            # so skip them; a future servo-homing part will revisit this.
+            if isinstance(rail, servo_axis.ServoRail):
                 continue
             position_min, position_max = rail.get_range()
             hi = rail.get_homing_info()
@@ -878,6 +902,22 @@ class MotionToolhead(ToolHead):
                     "MotionToolhead: failed to read input_shaper params"
                 )
 
+        # EtherCAT node handle (Part A: single node). When present, the Rust
+        # init_planner hardcodes X->ethercat / Y->octopus / Z->f446 routing;
+        # when 0 (no [ethercat_node] section) behavior is the all-stepper
+        # path, unchanged. [ethercat_node <name>] objects are registered
+        # under the module-prefixed name, so lookup_objects(module=
+        # "ethercat_node") returns them; each exposes get_bridge_handle().
+        ethercat_handle = 0
+        ethercat_nodes = self.printer.lookup_objects(module="ethercat_node")
+        if len(ethercat_nodes) > 1:
+            raise self.printer.config_error(
+                "Part A supports a single [ethercat_node]; found %d"
+                % (len(ethercat_nodes),))
+        if ethercat_nodes:
+            _name, node_obj = ethercat_nodes[0]
+            ethercat_handle = node_obj.get_bridge_handle() or 0
+
         try:
             self.bridge.init_planner(
                 self.max_velocity,
@@ -891,6 +931,7 @@ class MotionToolhead(ToolHead):
                 shaper_freq_y,
                 octopus,
                 f446,
+                ethercat_handle,
             )
             self._configure_axes_per_mcu(bridge_mcus)
 
