@@ -2376,26 +2376,31 @@ impl PyMotionBridge {
                         );
                         continue;
                     }
-                    // NOTE (deferred EtherCAT integration): this `dispatch_ios` guard predates the
-                    // MotionNode split and currently has the SAME key set as `nodes` (all stepper
-                    // MCUs). When an EtherCatNode is added to `nodes` but NOT `dispatch_ios`, this
-                    // guard would silently `continue` past it. At that point, restructure so the
-                    // `nodes` lookup is primary and the io-weak/seed path is taken only for stepper
-                    // nodes. `io` below is used solely for stepper-only `runtime_seed_position`.
-                    let io_weak = match dispatch_ios.get(&plan.mcu_id) {
-                        Some((w, _, _)) => w,
-                        None => continue,
-                    };
-                    let io = match io_weak.upgrade() {
-                        Some(io) => io,
-                        None => {
-                            return Err(DispatchError::ConnectionDropped(plan.mcu_id));
-                        }
-                    };
+                    // `nodes` is the primary dispatch lookup. Any mcu_id that has a
+                    // plan but no node entry is a genuine logic error (the plan came
+                    // from `build_push_params` which is seeded from `mcu_configs`,
+                    // and every mcu_id in `mcu_configs` gets a node — stepper or
+                    // EtherCAT). Skip rather than panic so a mis-configured MCU
+                    // doesn't bring down the planner thread.
                     let node = match nodes.get(&plan.mcu_id) {
                         Some(n) => Arc::clone(n),
                         None => continue,
                     };
+                    // `dispatch_ios` is populated only for serial stepper MCUs.
+                    // EtherCAT nodes have no KalicoHostIo and therefore have no
+                    // entry here — that is expected and correct. The Option drives
+                    // the seed-send gate below: `Some` for serial, `None` for
+                    // EtherCAT (seed skipped in Part A; no homing/seed support yet).
+                    let serial_io: Option<Arc<KalicoHostIo>> =
+                        match dispatch_ios.get(&plan.mcu_id) {
+                            Some((w, _, _)) => match w.upgrade() {
+                                Some(io) => Some(io),
+                                None => {
+                                    return Err(DispatchError::ConnectionDropped(plan.mcu_id));
+                                }
+                            },
+                            None => None,
+                        };
 
                     // Per-MCU clock conversion — delegated to the node.
                     // StepperMcuNode::clock_freq reproduces the inline fallback
@@ -2504,7 +2509,10 @@ impl PyMotionBridge {
                     plan.params.t_end = t_end_clock;
 
                     // ── Per-MCU seed delivery ─────────────────────────────────
-                    if let Some(ref seed) = taken_seed {
+                    // Serial stepper MCUs only: EtherCAT nodes have no
+                    // `KalicoHostIo` (`serial_io == None`), so the seed send is
+                    // skipped for them in Part A (no homing/seed support yet).
+                    if let (Some(seed), Some(io)) = (&taken_seed, &serial_io) {
                         let encode_q16 = |mm: f64| -> i32 {
                             let raw = mm * 65536.0;
                             raw.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32
