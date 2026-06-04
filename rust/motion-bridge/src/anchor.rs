@@ -50,18 +50,33 @@ impl Anchor {
         seg_t_end: f64,
         host_now: f64,
     ) -> (f64, bool) {
-        let fresh = match self.t0 {
-            None => true,
+        let (fresh, fresh_reason) = match self.t0 {
+            None => (true, "first_segment"),
             Some(t0) => {
-                // (a) backward planner jump (timeline reset)
-                (seg_t_start + CONTIGUITY_EPS < self.last_t_end)
-                // (b) idle/stall gap: real time has outrun the planner timeline;
-                // this segment would map to a host time already in the past.
-                || (t0 + seg_t_start < host_now)
+                let backward_jump = seg_t_start + CONTIGUITY_EPS < self.last_t_end;
+                let idle_gap = t0 + seg_t_start < host_now;
+                if backward_jump {
+                    (true, "backward_jump")
+                } else if idle_gap {
+                    (true, "idle_gap")
+                } else {
+                    (false, "contiguous")
+                }
             }
         };
         if fresh {
+            let old_t0 = self.t0;
             self.t0 = Some(host_now + self.lead_secs - seg_t_start);
+            log::warn!(
+                "[faceb] anchor fresh=true reason={} old_t0={:?} new_t0={:.6} \
+                 host_now={:.6} seg_t_start={:.6} last_t_end={:.6}",
+                fresh_reason,
+                old_t0,
+                self.t0.unwrap(),
+                host_now,
+                seg_t_start,
+                self.last_t_end,
+            );
         }
         self.last_t_end = seg_t_end;
         (self.t0.unwrap(), fresh)

@@ -642,6 +642,11 @@ where
                 // writes retired_counts()[i] = stepping_axes[i].ring.retired_count()
                 // in index order (runtime_ffi.rs), and push_pieces(axis_idx) targets
                 // that same stepping_axes[axis_idx]. Do not reorder either side.
+                log::warn!(
+                    "[faceb] heartbeat mcu={} retired_counts={:?}",
+                    mcu_id,
+                    retired_counts,
+                );
                 for (axis, &c) in retired_counts.iter().enumerate() {
                     let key = AxisKey {
                         mcu_id,
@@ -676,18 +681,63 @@ where
         // Otherwise block indefinitely — a heartbeat or enqueue will wake us.
         let first = if holding_ahead {
             match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(m) => Some(m),
+                Ok(m) => {
+                    let tag = match &m {
+                        PumpMsg::Enqueue(e) => {
+                            log::warn!(
+                                "[faceb] wake=msg variant=Enqueue key={:?} n_pieces={}",
+                                e.key,
+                                e.pieces.len(),
+                            );
+                            "Enqueue"
+                        }
+                        PumpMsg::Heartbeat(h) => {
+                            log::warn!(
+                                "[faceb] wake=msg variant=Heartbeat mcu_id={}",
+                                h.mcu_id,
+                            );
+                            "Heartbeat"
+                        }
+                        PumpMsg::Shutdown => {
+                            log::warn!("[faceb] wake=msg variant=Shutdown");
+                            "Shutdown"
+                        }
+                    };
+                    let _ = tag;
+                    Some(m)
+                }
                 Err(RecvTimeoutError::Timeout) => {
                     // MCU clock has advanced; re-evaluate the send loop without
                     // consuming a message. `holding_ahead` stays true until the
                     // schedule loop clears it.
+                    log::warn!("[faceb] wake=timeout-poll (holding_ahead 50ms tick)");
                     None
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         } else {
             match rx.recv() {
-                Ok(m) => Some(m),
+                Ok(m) => {
+                    match &m {
+                        PumpMsg::Enqueue(e) => {
+                            log::warn!(
+                                "[faceb] wake=msg variant=Enqueue key={:?} n_pieces={}",
+                                e.key,
+                                e.pieces.len(),
+                            );
+                        }
+                        PumpMsg::Heartbeat(h) => {
+                            log::warn!(
+                                "[faceb] wake=msg variant=Heartbeat mcu_id={}",
+                                h.mcu_id,
+                            );
+                        }
+                        PumpMsg::Shutdown => {
+                            log::warn!("[faceb] wake=msg variant=Shutdown");
+                        }
+                    }
+                    Some(m)
+                }
                 Err(RecvError) => return,
             }
         };
@@ -712,11 +762,66 @@ where
         holding_ahead = false;
         'send: loop {
             match schedule(&queues, MAX_PER_FRAME, &horizon_of) {
-                Schedule::Idle => break 'send,
-                Schedule::StallFull(_stall_key) => {
+                Schedule::Idle => {
+                    log::warn!("[faceb] sched=idle");
                     break 'send;
                 }
-                Schedule::StallAhead(_stall_key) => {
+                Schedule::StallFull(stall_key) => {
+                    let q = queues.get(&stall_key);
+                    let (pieces_len, pushed, retired, room, ring_depth, front_start) =
+                        q.map(|q| {
+                            (
+                                q.pieces.len(),
+                                q.pushed,
+                                q.retired,
+                                q.room(),
+                                q.ring_depth,
+                                q.pieces.front().map(|p| p.start_time),
+                            )
+                        })
+                        .unwrap_or((0, 0, 0, 0, 0, None));
+                    let horizon = horizon_of(stall_key.mcu_id);
+                    log::warn!(
+                        "[faceb] sched=StallFull key={:?} pieces={} pushed={} retired={} \
+                         room={} ring_depth={} front_start={:?} horizon={:?}",
+                        stall_key,
+                        pieces_len,
+                        pushed,
+                        retired,
+                        room,
+                        ring_depth,
+                        front_start,
+                        horizon,
+                    );
+                    break 'send;
+                }
+                Schedule::StallAhead(stall_key) => {
+                    let q = queues.get(&stall_key);
+                    let (pieces_len, pushed, retired, room, ring_depth, front_start) =
+                        q.map(|q| {
+                            (
+                                q.pieces.len(),
+                                q.pushed,
+                                q.retired,
+                                q.room(),
+                                q.ring_depth,
+                                q.pieces.front().map(|p| p.start_time),
+                            )
+                        })
+                        .unwrap_or((0, 0, 0, 0, 0, None));
+                    let horizon = horizon_of(stall_key.mcu_id);
+                    log::warn!(
+                        "[faceb] sched=StallAhead key={:?} pieces={} pushed={} retired={} \
+                         room={} ring_depth={} front_start={:?} horizon={:?}",
+                        stall_key,
+                        pieces_len,
+                        pushed,
+                        retired,
+                        room,
+                        ring_depth,
+                        front_start,
+                        horizon,
+                    );
                     // Ring has room but the head piece is beyond the current
                     // commit-lead horizon. Arm the 50 ms poll so we
                     // re-evaluate as the MCU clock advances.
@@ -727,6 +832,18 @@ where
                     if frames.is_empty() {
                         break 'send;
                     }
+                    let total_pieces: usize = frames.iter().map(|f| f.pieces.len()).sum();
+                    let first_start = frames
+                        .first()
+                        .and_then(|f| f.pieces.first())
+                        .map(|p| p.start_time)
+                        .unwrap_or(0);
+                    log::warn!(
+                        "[faceb] sched=Send n_frames={} total_pieces={} first_start={}",
+                        frames.len(),
+                        total_pieces,
+                        first_start,
+                    );
                     for mut f in frames {
                         let n = f.pieces.len() as u32;
                         // Look up cursor + compute new_head BEFORE borrowing the
@@ -742,8 +859,18 @@ where
                             f.start_slot = q.physical_write_cursor as u16;
                             q.pushed.wrapping_add(n)
                         };
+                        let frame_first_start = f.pieces.first().map(|p| p.start_time).unwrap_or(0);
+                        let t_before_send = std::time::Instant::now();
                         match sink.send_frame(f.key, &f.pieces, f.start_slot, new_head) {
                             Ok(_) => {
+                                let rtt_us = t_before_send.elapsed().as_micros();
+                                log::warn!(
+                                    "[faceb] send_frame key={:?} n_pieces={} first_start={} rtt_us={}",
+                                    f.key,
+                                    f.pieces.len(),
+                                    frame_first_start,
+                                    rtt_us,
+                                );
                                 let q = queues.get_mut(&f.key).expect("planned key exists");
                                 for _ in 0..f.pieces.len() {
                                     q.pieces.pop_front();

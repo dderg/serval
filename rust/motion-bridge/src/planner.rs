@@ -589,6 +589,11 @@ fn run_commit_and_dispatch(
 ) -> bool {
     let t_app_before = state.t_appended;
     let t_disp_before = state.t_dispatched;
+    log::warn!(
+        "[faceb] run_commit_and_dispatch entry t_dispatched={:.6} t_appended={:.6}",
+        t_disp_before,
+        t_app_before,
+    );
     let commit_start = Instant::now();
     let drained = match state.commit_decel_to_zero(&thread_state.emit_ctx()) {
         Ok(out) => out,
@@ -624,6 +629,14 @@ fn run_commit_and_dispatch(
         batch_dur,
         commit_us,
         t_app_before,
+        t_disp_before,
+        state.t_dispatched,
+    );
+    log::warn!(
+        "[faceb] run_commit_and_dispatch exit drained={} committed_dur_s={:.6} \
+         t_dispatched_before={:.6} t_dispatched_after={:.6}",
+        drained.len(),
+        batch_dur,
         t_disp_before,
         state.t_dispatched,
     );
@@ -713,6 +726,16 @@ fn run_loop(
         let next_timeout = if state.t_dispatched < state.t_appended - 1e-12 {
             let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
             let remaining = (state.t_dispatched + LEAD - SAFETY_MARGIN) - esc;
+            let deadline_abs = esc + remaining;
+            log::warn!(
+                "[faceb] next_timeout computed remaining={:.6} deadline_abs_esc={:.6} \
+                 t_dispatched={:.6} t_appended={:.6} esc={:.6}",
+                remaining,
+                deadline_abs,
+                state.t_dispatched,
+                state.t_appended,
+                esc,
+            );
             // `try_from_secs_f64` returns Err on NaN / infinite / negative,
             // covering all non-finite hazards at once — never panic the
             // planner thread on a degenerate deadline; fall back to an
@@ -742,6 +765,14 @@ fn run_loop(
                     PlannerMsg::ClockSyncRearm { .. } => "ClockSyncRearm",
                     PlannerMsg::Shutdown => "Shutdown",
                 };
+                let esc = sync_instant.map_or(-1.0_f64, |t| t.elapsed().as_secs_f64());
+                log::warn!(
+                    "[faceb] planner_recv variant={} esc={:.6} t_dispatched={:.6} t_appended={:.6}",
+                    tag,
+                    esc,
+                    state.t_dispatched,
+                    state.t_appended,
+                );
                 tracing::debug!(
                     subsystem = "motion",
                     event = "planner_recv_gap",
@@ -756,6 +787,18 @@ fn run_loop(
                 // commit the held-back decel-to-zero so the MCU stops cleanly.
                 // DO NOT reset the timeline — the monotonic clock keeps running;
                 // the next move self-places via max(t_appended, elapsed_since_sync).
+                let esc_at_fire = sync_instant.map_or(-1.0_f64, |t| t.elapsed().as_secs_f64());
+                let intended_deadline = state.t_dispatched + LEAD - SAFETY_MARGIN;
+                let lateness_ms = (esc_at_fire - intended_deadline) * 1000.0;
+                log::warn!(
+                    "[faceb] timeout fired esc={:.6} intended_deadline={:.6} lateness_ms={:.3} \
+                     t_dispatched={:.6} t_appended={:.6}",
+                    esc_at_fire,
+                    intended_deadline,
+                    lateness_ms,
+                    state.t_dispatched,
+                    state.t_appended,
+                );
                 if state.t_dispatched < state.t_appended - 1e-12 {
                     let _ok = run_commit_and_dispatch(
                         &mut state,
@@ -820,6 +863,14 @@ fn run_loop(
                     } else {
                         true
                     };
+                    log::warn!(
+                        "[faceb] advance_idle esc={:.6} prior_t_appended={:.6} \
+                         prior_t_dispatched={:.6} committed_ok={}",
+                        esc,
+                        prior_t_appended,
+                        prior_t_disp,
+                        committed_ok,
+                    );
                     if committed_ok {
                         state.advance_idle(esc);
                     }
@@ -872,6 +923,12 @@ fn run_loop(
                     state.t_decel_start,
                     prior_t_disp,
                     state.t_dispatched,
+                );
+                log::warn!(
+                    "[faceb] replan_us={} emit_us={} moves_queued={}",
+                    replan_us,
+                    emit_us,
+                    drained.len(),
                 );
 
                 for s in &drained {

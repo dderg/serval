@@ -2614,6 +2614,16 @@ impl PyMotionBridge {
                     .unwrap_or_else(|p| p.into_inner())
                     .anchor_segment(seg.t_start, seg.t_end, host_now);
 
+                log::warn!(
+                    "[faceb] dispatch seg_t_start={:.6} seg_t_end={:.6} t0={:.6} \
+                     fresh={} host_now={:.6}",
+                    seg.t_start,
+                    seg.t_end,
+                    t0,
+                    fresh,
+                    host_now,
+                );
+
                 // DIAG (temporary, -308 investigation): on the first dispatch
                 // of a stream, log segment-0's projected start_time vs each
                 // MCU's clock-now to expose any per-MCU past-deficit.
