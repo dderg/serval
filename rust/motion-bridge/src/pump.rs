@@ -104,130 +104,168 @@ pub enum Schedule {
 /// `start_time` must not be committed this pass. `None` means "not synced
 /// yet — apply no time gate for this MCU" (count-only, same as pre-sync
 /// behaviour).
+///
+/// Scheduling is performed **independently per MCU**. Raw `start_time` ticks
+/// are only compared within a single MCU's clock domain — cross-MCU tick
+/// comparison is meaningless (H7 runs at 520 MHz with its own epoch, F446 at
+/// 180 MHz with a different epoch). A single global head that happens to be a
+/// numerically-small F446 tick would otherwise starve the H7's ready work via
+/// a premature `StallAhead`/`StallFull` early-return; this is the bench-proven
+/// root cause of the Face-B -308 shutdown.
+///
+/// Merge rule: if ANY MCU produced frames → `Send(all frames)`. Else if any
+/// MCU is ahead-stalled → `StallAhead` (first by mcu_id). Else if any MCU is
+/// full-stalled → `StallFull` (first by mcu_id). Else `Idle`.
+///
+/// When one MCU is ahead-stalled and another is full-stalled with no frames,
+/// `StallAhead` is returned (not `StallFull`) — the 50 ms poll covers both
+/// conditions, whereas blocking on recv() would re-introduce starvation for
+/// the ahead-gated MCU.
 #[must_use]
 pub fn schedule(
     queues: &BTreeMap<AxisKey, AxisQueue>,
     max_per_frame: usize,
     horizon_of: impl Fn(u32) -> Option<u64>,
 ) -> Schedule {
-    // A queue head is "sendable" iff it has room AND passes the time gate.
-    // Collect the earliest sendable head first; if there are non-empty heads
-    // with room that are only blocked by the horizon, return StallAhead.
-    let mut stall_ahead_candidate: Option<AxisKey> = None;
-
-    let head = queues
-        .iter()
-        .filter(|(_, q)| !q.pieces.is_empty())
-        .min_by(|(ka, qa), (kb, qb)| {
-            qa.pieces
-                .front()
-                .unwrap()
-                .start_time
-                .cmp(&qb.pieces.front().unwrap().start_time)
-                .then(ka.cmp(kb))
-        });
-    let (&head_key, head_q) = match head {
-        None => return Schedule::Idle,
-        Some(h) => h,
+    // Collect the distinct MCU ids that have at least one non-empty queue.
+    let active_mcus: Vec<u32> = {
+        let mut ids: Vec<u32> = queues
+            .keys()
+            .filter(|k| !queues[k].pieces.is_empty())
+            .map(|k| k.mcu_id)
+            .collect();
+        ids.dedup(); // BTreeMap is sorted by (mcu_id, axis) so duplicates are adjacent
+        ids
     };
-    let head_start = head_q.pieces.front().unwrap().start_time;
 
-    // Ring-full check (global head has no room).
-    if head_q.room() == 0 {
-        return Schedule::StallFull(head_key);
+    if active_mcus.is_empty() {
+        return Schedule::Idle;
     }
 
-    // Time-gate check for the global head.
-    if let Some(horizon) = horizon_of(head_key.mcu_id) {
-        if head_start > horizon {
-            // The global head has room but is too far ahead — StallAhead.
-            return Schedule::StallAhead(head_key);
-        }
-    }
+    let mut all_frames: Vec<FramePlan> = Vec::new();
+    let mut first_stall_ahead: Option<AxisKey> = None;
+    let mut first_stall_full: Option<AxisKey> = None;
 
-    // Greedily take the contiguous prefix of global time order that stays on
-    // head_key.mcu_id, has room, and passes the time gate. Simulate room
-    // locally so a single scheduling pass never plans more than each ring can
-    // hold.
-    //
-    // `maxed` tracks same-MCU axes that have hit their room, frame cap, or
-    // time-horizon this pass. They are excluded from candidate selection to
-    // avoid re-selecting them every iteration (which would infinite-loop), but
-    // their saturation does NOT end the batch — other same-MCU axes with room
-    // still get pieces.
-    let mut taken: BTreeMap<AxisKey, usize> = BTreeMap::new(); // key -> count planned
-    let mut maxed: BTreeSet<AxisKey> = BTreeSet::new();
-    loop {
-        let next = queues
+    for mcu_id in active_mcus {
+        // Pick this MCU's head: the non-empty queue with the smallest
+        // start_time (raw ticks are valid within one clock domain); break
+        // ties by AxisKey ordering for determinism.
+        let mcu_head = queues
             .iter()
-            .filter_map(|(k, q)| {
-                if maxed.contains(k) {
-                    return None;
-                }
-                let already = taken.get(k).copied().unwrap_or(0);
-                q.pieces.get(already).map(|p| (*k, p.start_time))
-            })
-            .min_by(|(ka, sa), (kb, sb)| sa.cmp(sb).then(ka.cmp(kb)));
-        let (k, start) = match next {
-            Some(n) => n,
-            None => break,
+            .filter(|(k, q)| k.mcu_id == mcu_id && !q.pieces.is_empty())
+            .min_by(|(ka, qa), (kb, qb)| {
+                qa.pieces
+                    .front()
+                    .unwrap()
+                    .start_time
+                    .cmp(&qb.pieces.front().unwrap().start_time)
+                    .then(ka.cmp(kb))
+            });
+        let (&head_key, head_q) = match mcu_head {
+            None => continue,
+            Some(h) => h,
         };
-        if k.mcu_id != head_key.mcu_id {
-            break; // next-earliest is a different MCU — stop the batch
-        }
-        let already = taken.get(&k).copied().unwrap_or(0);
-        let q = &queues[&k];
-        let room = q.room() as usize;
-        if already >= room || already >= max_per_frame {
-            // This axis is saturated for this pass — exclude it from further
-            // candidate selection and continue batching other same-MCU axes.
-            maxed.insert(k);
+        let head_start = head_q.pieces.front().unwrap().start_time;
+
+        // Ring-full check for this MCU's head.
+        if head_q.room() == 0 {
+            if first_stall_full.is_none() {
+                first_stall_full = Some(head_key);
+            }
             continue;
         }
-        // Time-gate: a piece beyond the horizon makes this axis maxed for this
-        // pass, but does NOT end the batch (other same-MCU axes with earlier
-        // pieces may still be eligible).
-        if let Some(horizon) = horizon_of(k.mcu_id) {
-            if start > horizon {
-                // Track for StallAhead in case taken is empty at the end.
-                if stall_ahead_candidate.is_none() {
-                    stall_ahead_candidate = Some(k);
+
+        // Time-gate check for this MCU's head.
+        if let Some(horizon) = horizon_of(mcu_id) {
+            if head_start > horizon {
+                if first_stall_ahead.is_none() {
+                    first_stall_ahead = Some(head_key);
                 }
-                maxed.insert(k);
                 continue;
             }
         }
-        *taken.entry(k).or_insert(0) += 1;
-    }
 
-    // If nothing was taken but at least one axis is time-gated (has room but
-    // is beyond the horizon), return StallAhead so the pump knows to poll.
-    if taken.is_empty() {
-        if let Some(k) = stall_ahead_candidate {
-            return Schedule::StallAhead(k);
+        // Greedily take the contiguous prefix of this MCU's time order that
+        // has room and passes the time gate. `maxed` tracks axes saturated
+        // this pass to avoid re-selecting them (which would infinite-loop).
+        let mut taken: BTreeMap<AxisKey, usize> = BTreeMap::new();
+        let mut maxed: BTreeSet<AxisKey> = BTreeSet::new();
+        let mut mcu_stall_ahead: Option<AxisKey> = None;
+        loop {
+            let next = queues
+                .iter()
+                .filter_map(|(k, q)| {
+                    if k.mcu_id != mcu_id || maxed.contains(k) {
+                        return None;
+                    }
+                    let already = taken.get(k).copied().unwrap_or(0);
+                    q.pieces.get(already).map(|p| (*k, p.start_time))
+                })
+                .min_by(|(ka, sa), (kb, sb)| sa.cmp(sb).then(ka.cmp(kb)));
+            let (k, start) = match next {
+                Some(n) => n,
+                None => break,
+            };
+            let already = taken.get(&k).copied().unwrap_or(0);
+            let q = &queues[&k];
+            let room = q.room() as usize;
+            if already >= room || already >= max_per_frame {
+                maxed.insert(k);
+                continue;
+            }
+            if let Some(horizon) = horizon_of(mcu_id) {
+                if start > horizon {
+                    if mcu_stall_ahead.is_none() {
+                        mcu_stall_ahead = Some(k);
+                    }
+                    maxed.insert(k);
+                    continue;
+                }
+            }
+            *taken.entry(k).or_insert(0) += 1;
         }
-        // All axes are either empty or maxed by count only (should not happen
-        // given the head-room check above, but be safe).
-        return Schedule::StallFull(head_key);
+
+        if taken.is_empty() {
+            // Nothing sendable this pass for this MCU.
+            if let Some(k) = mcu_stall_ahead {
+                if first_stall_ahead.is_none() {
+                    first_stall_ahead = Some(k);
+                }
+            } else {
+                // Head had room but the batch loop found nothing — head_q.room()
+                // was > 0 above, so this path means every axis became maxed by
+                // count; fall back to StallFull for this MCU.
+                if first_stall_full.is_none() {
+                    first_stall_full = Some(head_key);
+                }
+            }
+            continue;
+        }
+
+        for (k, n) in taken {
+            if n > 0 {
+                all_frames.push(FramePlan {
+                    key: k,
+                    pieces: queues[&k].pieces.iter().take(n).copied().collect(),
+                    start_slot: 0,
+                });
+            }
+        }
     }
 
-    // `taken` entries are always ≥1 by construction (the only path into `taken`
-    // is the `+= 1` above, after the saturation check passes), so the filter is
-    // a defensive no-op. Kept to make the invariant explicit.
-    let frames: Vec<FramePlan> = taken
-        .into_iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(k, n)| FramePlan {
-            key: k,
-            pieces: queues[&k].pieces.iter().take(n).copied().collect(),
-            // start_slot is filled in by run_pump just before sending, once
-            // it looks up the queue's physical_write_cursor. Set 0 here.
-            start_slot: 0,
-        })
-        .collect();
-    // The head-room > 0 check above guarantees at least one piece is planned.
-    debug_assert!(!frames.is_empty());
-    Schedule::Send(frames)
+    // Merge: frames from any MCU → Send. Prefer StallAhead over StallFull when
+    // no frames were produced (50 ms poll covers both; blocking recv would
+    // re-introduce starvation for the ahead-gated MCU).
+    if !all_frames.is_empty() {
+        return Schedule::Send(all_frames);
+    }
+    if let Some(k) = first_stall_ahead {
+        return Schedule::StallAhead(k);
+    }
+    if let Some(k) = first_stall_full {
+        return Schedule::StallFull(k);
+    }
+    Schedule::Idle
 }
 
 #[cfg(test)]
@@ -255,12 +293,11 @@ mod sched_tests {
 
     #[test]
     fn stalls_when_global_head_ring_full() {
+        // Single-MCU fixture: the only non-empty queue is full → StallFull.
         let mut queues = BTreeMap::new();
-        // mcuA/x earliest but full; mcuB/x later but has room → must STALL, not skip.
         let mut a = q_with(2, &[10]);
         a.pushed = 2; // full
         queues.insert(AxisKey { mcu_id: 1, axis: 0 }, a);
-        queues.insert(AxisKey { mcu_id: 2, axis: 0 }, q_with(8, &[20]));
         assert!(matches!(
             schedule(&queues, 255, |_| None),
             Schedule::StallFull(AxisKey { mcu_id: 1, axis: 0 })
@@ -268,21 +305,31 @@ mod sched_tests {
     }
 
     #[test]
-    fn batches_contiguous_same_mcu_prefix_only() {
+    fn batches_per_mcu_independently() {
+        // Two MCUs whose time ranges overlap in global order. Under per-MCU
+        // scheduling each MCU is batched independently: mcu1 gets all of its
+        // ready pieces regardless of mcu2's time position, and vice versa.
+        //
+        // mcu1: A/x has pieces at t=0 and t=3; A/y has a piece at t=1.
+        // mcu2: B/x has a piece at t=2.
+        //
+        // Per-MCU result: mcu1 sends A/x×2 + A/y×1; mcu2 sends B/x×1.
+        // (The old global-order loop stopped mcu1's batch at B/x@2, so A/x
+        // only got [0]. That was the cross-MCU coupling bug; the new behavior
+        // is correct — B/x@2 is on a different clock domain and irrelevant.)
         let mut queues = BTreeMap::new();
-        // global order: A/x@0, A/y@1, B/x@2, A/x@3
         queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[0, 3]));
         queues.insert(AxisKey { mcu_id: 1, axis: 1 }, q_with(8, &[1]));
         queues.insert(AxisKey { mcu_id: 2, axis: 0 }, q_with(8, &[2]));
-        let s = schedule(&queues, 255, |_| None);
-        // batch stops at B/x@2 → A/x gets [0] only (A/x@3 is after the B boundary),
-        // A/y gets [1]. B/x not included.
-        match s {
+        match schedule(&queues, 255, |_| None) {
             Schedule::Send(frames) => {
                 let ax: Vec<_> = frames.iter().map(|f| (f.key, f.pieces.len())).collect();
-                assert!(ax.contains(&(AxisKey { mcu_id: 1, axis: 0 }, 1)));
+                // mcu1/axis0 gets both pieces (t=0 and t=3).
+                assert!(ax.contains(&(AxisKey { mcu_id: 1, axis: 0 }, 2)));
+                // mcu1/axis1 gets its one piece.
                 assert!(ax.contains(&(AxisKey { mcu_id: 1, axis: 1 }, 1)));
-                assert!(!ax.iter().any(|(k, _)| k.mcu_id == 2));
+                // mcu2/axis0 also gets its piece — independent MCU.
+                assert!(ax.contains(&(AxisKey { mcu_id: 2, axis: 0 }, 1)));
             }
             other => panic!("expected Send, got {other:?}"),
         }
@@ -354,8 +401,7 @@ mod sched_tests {
 
     #[test]
     fn all_beyond_horizon_returns_stall_ahead() {
-        // Single axis on MCU 1. Its piece start_time=1000 is beyond horizon=500.
-        // Ring has room (pushed=0). Should return StallAhead, not StallFull.
+        // Single-MCU fixture: sole piece beyond horizon, ring has room → StallAhead.
         let mut queues = BTreeMap::new();
         queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[1000]));
         assert!(
@@ -379,6 +425,83 @@ mod sched_tests {
                 assert_eq!(frames[0].pieces.len(), 1);
             }
             other => panic!("expected Send (no time gate), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn face_b_regression_ahead_stalled_mcu_does_not_starve_ready_mcu() {
+        // Regression: Face-B bench starvation. mcu1 (F446) has one piece at a
+        // far-future tick (numerically small in the 180 MHz domain but beyond
+        // its horizon); mcu0 (H7) has pieces within its horizon and ring room.
+        //
+        // Old global-head logic: F446 tick 50 < H7 tick 10_000_000 → F446 became
+        // the global head → StallAhead early-return → H7's ready backlog starved
+        // for 2.15 s → pieces 649 ms stale → -308 PieceStartInPast.
+        //
+        // Per-MCU scheduling: each MCU is evaluated independently; mcu0's frames
+        // must be in the Send result even though mcu1 is ahead-stalled.
+        let mut queues = BTreeMap::new();
+        // mcu0 (H7): ticks in the 520 MHz domain; horizon 10_000_100; pieces ready.
+        queues.insert(AxisKey { mcu_id: 0, axis: 0 }, q_with(8, &[10_000_000]));
+        queues.insert(AxisKey { mcu_id: 0, axis: 1 }, q_with(8, &[10_000_010]));
+        // mcu1 (F446): tick 50 is numerically tiny but its horizon is 40; ahead-stalled.
+        queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[50]));
+        let horizon_of = |mcu_id: u32| -> Option<u64> {
+            match mcu_id {
+                0 => Some(10_000_100), // mcu0 horizon: both pieces within range
+                1 => Some(40),         // mcu1 horizon: piece@50 is beyond it
+                _ => None,
+            }
+        };
+        match schedule(&queues, 255, horizon_of) {
+            Schedule::Send(frames) => {
+                // mcu0 must have been scheduled.
+                assert!(
+                    frames.iter().any(|f| f.key.mcu_id == 0),
+                    "mcu0 frames must be present; got {frames:?}"
+                );
+                // mcu1 must NOT appear — it is ahead-stalled.
+                assert!(
+                    !frames.iter().any(|f| f.key.mcu_id == 1),
+                    "mcu1 must not appear while ahead-stalled; got {frames:?}"
+                );
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn face_b_regression_full_mcu_does_not_starve_ready_mcu() {
+        // Regression: StallFull cross-MCU coupling. mcu1's head queue ring is full
+        // (room==0); mcu0 has pieces within its horizon and ring room.
+        //
+        // Old global-head logic: if mcu1 happened to be the global head (e.g.
+        // numerically-smaller tick), StallFull early-return would starve mcu0's
+        // ready work until a heartbeat freed mcu1's ring — causing the same class
+        // of -308 on mcu0 once its pieces went stale.
+        //
+        // Per-MCU scheduling: mcu1 is full-stalled for this round; mcu0's frames
+        // must still be in the Send result.
+        let mut queues = BTreeMap::new();
+        // mcu0: ready — pieces within horizon, ring has room.
+        queues.insert(AxisKey { mcu_id: 0, axis: 0 }, q_with(8, &[100]));
+        // mcu1: ring full (pushed == ring_depth).
+        let mut full_q = q_with(4, &[200]);
+        full_q.pushed = 4;
+        queues.insert(AxisKey { mcu_id: 1, axis: 0 }, full_q);
+        let horizon_of = |_mcu_id: u32| -> Option<u64> { Some(1_000) };
+        match schedule(&queues, 255, horizon_of) {
+            Schedule::Send(frames) => {
+                assert!(
+                    frames.iter().any(|f| f.key.mcu_id == 0),
+                    "mcu0 frames must be present; got {frames:?}"
+                );
+                assert!(
+                    !frames.iter().any(|f| f.key.mcu_id == 1),
+                    "full mcu1 must not appear in the batch; got {frames:?}"
+                );
+            }
+            other => panic!("expected Send, got {other:?}"),
         }
     }
 }
