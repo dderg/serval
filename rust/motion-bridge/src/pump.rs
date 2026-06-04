@@ -35,6 +35,10 @@ pub struct AxisQueue {
     /// incrementally (mod ring_depth) on each ACKed send — never reset on
     /// time re-anchor, only on an MCU ring reset.
     pub physical_write_cursor: u32,
+    /// Projected MCU-tick end of the last piece from the previous Enqueue for
+    /// this axis. Used by the Face-A overlap diagnostic to detect non-monotonic
+    /// junctions between consecutive Enqueue batches.
+    pub last_enqueued_end: Option<u64>,
 }
 
 impl AxisQueue {
@@ -45,6 +49,7 @@ impl AxisQueue {
             retired: 0,
             ring_depth,
             physical_write_cursor: 0,
+            last_enqueued_end: None,
         }
     }
     /// Free ring slots = depth − in-flight, where in-flight = pushed − retired
@@ -748,11 +753,86 @@ where
             PumpMsg::Enqueue(EnqueueMsg {
                 key,
                 pieces,
-                fresh_stream: _,
+                fresh_stream,
             }) => {
                 let q = queues
                     .entry(key)
                     .or_insert_with(|| AxisQueue::new(ring_depth_of(key)));
+
+                // Face-A overlap diagnostic: check for non-monotonic MCU-tick
+                // junctions between consecutive Enqueue batches on the same axis.
+                if !pieces.is_empty() {
+                    // Approximate MCU clock frequency for tick <-> µs conversion.
+                    // Mirrors the approx_freq_hz pattern in WireSink::send_frame.
+                    let approx_freq_hz: f64 = if key.mcu_id == 0 {
+                        520_000_000.0 // H723
+                    } else {
+                        180_000_000.0 // F446 and other serial MCUs
+                    };
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let approx_freq_f32 = approx_freq_hz as f32;
+
+                    // Within-Enqueue monotonicity check (intra-batch).
+                    for i in 0..pieces.len().saturating_sub(1) {
+                        let this_end = pieces[i].end_time(approx_freq_f32);
+                        let next_start = pieces[i + 1].start_time;
+                        if next_start < this_end {
+                            let overlap_ticks = this_end - next_start;
+                            let overlap_us = (overlap_ticks as f64 / approx_freq_hz) * 1e6;
+                            log::warn!(
+                                "[faceb-overlap-intra] key={:?} idx={} overlap_us={:.1}",
+                                key,
+                                i,
+                                overlap_us,
+                            );
+                        }
+                    }
+
+                    let first_start = pieces[0].start_time;
+                    let last_end = pieces[pieces.len() - 1].end_time(approx_freq_f32);
+
+                    // A fresh_stream legitimately re-anchors the timeline;
+                    // reset the tracking state before the junction check so we
+                    // don't spuriously flag it as an overlap, but still log it
+                    // with the fresh_stream=true marker so the distribution is
+                    // visible.
+                    if fresh_stream {
+                        q.last_enqueued_end = None;
+                    }
+
+                    match q.last_enqueued_end {
+                        Some(prev_end) if first_start < prev_end => {
+                            let overlap_ticks = prev_end - first_start;
+                            let overlap_us = (overlap_ticks as f64 / approx_freq_hz) * 1e6;
+                            log::warn!(
+                                "[faceb-overlap] key={:?} OVERLAP first_start={} prev_end={} \
+                                 overlap_ticks={} overlap_us={:.1} fresh_stream={}",
+                                key,
+                                first_start,
+                                prev_end,
+                                overlap_ticks,
+                                overlap_us,
+                                fresh_stream,
+                            );
+                        }
+                        Some(prev_end) => {
+                            let gap_ticks = first_start - prev_end;
+                            let gap_us = (gap_ticks as f64 / approx_freq_hz) * 1e6;
+                            log::warn!(
+                                "[faceb-junction] key={:?} gap_ticks={} gap_us={:.1} \
+                                 fresh_stream={}",
+                                key,
+                                gap_ticks,
+                                gap_us,
+                                fresh_stream,
+                            );
+                        }
+                        None => {}
+                    }
+
+                    q.last_enqueued_end = Some(last_end);
+                }
+
                 q.pieces.extend(pieces);
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
