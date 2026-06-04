@@ -1,6 +1,13 @@
 //! Host-side motion drain: the bridge tracks, per (mcu, axis), how many pieces
 //! it has `sent` to the wire and the latest `retired` count from the heartbeat.
-//! `drain` blocks until `retired == sent` for every axis that has been sent to.
+//! `drain` blocks until the per-stream delta of retired equals sent for every
+//! axis that has been sent to in the current stream.
+//!
+//! `retired` is the MCU's raw cumulative counter (monotonic per boot). At each
+//! stream reset, `baseline` captures the current cumulative values; drained
+//! comparisons use `retired - baseline` so a new stream starting at non-zero
+//! cumulative counts never breaks equality.
+//!
 //! Nothing flows back from the pump — the heartbeat callback feeds `retired`
 //! directly and the dispatch path feeds `sent`.
 
@@ -14,6 +21,7 @@ type AxisKey = (u32, u8); // (mcu_id, axis)
 struct Counts {
     sent: HashMap<AxisKey, u32>,
     retired: HashMap<AxisKey, u32>,
+    baseline: HashMap<AxisKey, u32>,
 }
 
 pub struct DrainSync {
@@ -38,6 +46,7 @@ impl DrainSync {
     }
 
     /// Update the latest retired count for `(mcu, axis)` from a heartbeat.
+    /// The value is the MCU's raw cumulative counter.
     pub fn set_retired(&self, mcu: u32, axis: u8, retired: u32) {
         let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
         c.retired.insert((mcu, axis), retired);
@@ -45,20 +54,26 @@ impl DrainSync {
         self.cv.notify_all();
     }
 
-    /// Reset all counters (stream re-open / ring reset). Both sides go to 0.
+    /// Reset for a new stream. Clears `sent`; snapshots current `retired` into
+    /// `baseline`; keeps `retired` as a live mirror of the MCU counter.
     pub fn reset(&self) {
         let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
         c.sent.clear();
-        c.retired.clear();
+        let snapshot: Vec<(AxisKey, u32)> = c.retired.iter().map(|(&k, &v)| (k, v)).collect();
+        for (k, v) in snapshot {
+            c.baseline.insert(k, v);
+        }
         drop(c);
         self.cv.notify_all();
     }
 
-    /// True iff every axis with sent>0 has retired == sent.
+    /// True iff every axis with sent>0 has (retired - baseline) == sent.
     fn is_drained(c: &Counts) -> bool {
-        c.sent
-            .iter()
-            .all(|(k, &s)| c.retired.get(k).copied().unwrap_or(0) == s)
+        c.sent.iter().all(|(k, &s)| {
+            let r = c.retired.get(k).copied().unwrap_or(0);
+            let b = c.baseline.get(k).copied().unwrap_or(0);
+            r.saturating_sub(b) == s
+        })
     }
 
     /// Block until drained or `timeout` elapses. Returns Err(message) on timeout.
@@ -68,14 +83,21 @@ impl DrainSync {
         while !Self::is_drained(&c) {
             let now = Instant::now();
             if now >= deadline {
-                // Snapshot the lagging axes for a loud, actionable error.
                 let lagging: Vec<String> = c
                     .sent
                     .iter()
-                    .filter(|(k, s)| c.retired.get(*k).copied().unwrap_or(0) != **s)
+                    .filter(|(k, s)| {
+                        let r = c.retired.get(*k).copied().unwrap_or(0);
+                        let b = c.baseline.get(*k).copied().unwrap_or(0);
+                        r.saturating_sub(b) != **s
+                    })
                     .map(|(k, s)| {
                         let r = c.retired.get(k).copied().unwrap_or(0);
-                        format!("mcu{} axis{}: retired {} / sent {}", k.0, k.1, r, s)
+                        let b = c.baseline.get(k).copied().unwrap_or(0);
+                        format!(
+                            "mcu{} axis{}: retired {} baseline {} delta {} / sent {}",
+                            k.0, k.1, r, b, r.saturating_sub(b), s
+                        )
                     })
                     .collect();
                 return Err(format!(
@@ -94,10 +116,6 @@ impl DrainSync {
     }
 }
 
-// These tests cover pump ring flow-control accounting (pushed/retired).
-// This mechanism is UNCHANGED by the monotonic-clock design (spec §E):
-// DrainSync.add_sent / set_retired remain the sole flow-control path and are
-// NOT replaced by the clock-based Flush.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,11 +125,9 @@ mod tests {
         let d = DrainSync::new();
         d.add_sent(1, 0, 3);
         d.add_sent(1, 1, 2);
-        // Not drained yet.
         assert!(d.wait_drained(Duration::from_millis(20)).is_err());
         d.set_retired(1, 0, 3);
         d.set_retired(1, 1, 2);
-        // Now drained immediately.
         assert!(d.wait_drained(Duration::from_millis(20)).is_ok());
     }
 
@@ -121,11 +137,113 @@ mod tests {
         assert!(d.wait_drained(Duration::from_millis(20)).is_ok());
     }
 
+    /// After reset, `sent` is cleared, so even with no new activity the stream
+    /// is trivially drained — even when the heartbeat keeps delivering the old
+    /// cumulative retired value.
     #[test]
-    fn reset_clears_both_sides() {
+    fn reset_clears_sent_cumulative_retired_does_not_break_drain() {
         let d = DrainSync::new();
         d.add_sent(1, 0, 5);
-        d.reset();
+        d.set_retired(1, 0, 5);
         assert!(d.wait_drained(Duration::from_millis(20)).is_ok());
+        d.reset();
+        // Heartbeat arrives again with the same cumulative value; no new sent.
+        d.set_retired(1, 0, 5);
+        assert!(d.wait_drained(Duration::from_millis(20)).is_ok());
+    }
+
+    /// Regression: exact bench numbers from the failing session.
+    ///
+    /// Stream 1: 8737 sent, retired reaches 8737 → drained.
+    /// reset() → baseline is set to 8737.
+    /// Heartbeat fires with cumulative 8737 (no new MCU work yet) → still trivially drained.
+    /// Stream 2: 8737 more sent; MCU retires them: cumulative reaches 17474 → drained.
+    #[test]
+    fn regression_cumulative_retired_across_two_streams() {
+        let d = DrainSync::new();
+
+        // Stream 1.
+        d.add_sent(0, 0, 8737);
+        d.set_retired(0, 0, 8737);
+        assert!(
+            d.wait_drained(Duration::from_millis(20)).is_ok(),
+            "stream 1 should be drained"
+        );
+
+        d.reset();
+
+        // Heartbeat repeats the cumulative value before any new pieces are sent.
+        d.set_retired(0, 0, 8737);
+        assert!(
+            d.wait_drained(Duration::from_millis(20)).is_ok(),
+            "after reset with no new sent, trivially drained"
+        );
+
+        // Stream 2: same number of pieces again.
+        d.add_sent(0, 0, 8737);
+        // MCU hasn't retired them yet — not drained.
+        assert!(
+            d.wait_drained(Duration::from_millis(20)).is_err(),
+            "stream 2 not yet drained before MCU catches up"
+        );
+        // MCU retires stream 2: cumulative becomes 17474.
+        d.set_retired(0, 0, 17474);
+        assert!(
+            d.wait_drained(Duration::from_millis(20)).is_ok(),
+            "stream 2 should be drained at cumulative 17474"
+        );
+    }
+
+    /// After reset, a cumulative retired value that is ahead of baseline must
+    /// NOT satisfy a new stream's sent unless the delta actually covers it.
+    #[test]
+    fn post_reset_partial_retired_not_drained() {
+        let d = DrainSync::new();
+
+        // Stream 1: drain cleanly.
+        d.add_sent(0, 1, 86);
+        d.set_retired(0, 1, 86);
+        assert!(d.wait_drained(Duration::from_millis(20)).is_ok());
+
+        d.reset();
+
+        // Stream 2: send 100 more; MCU heartbeat still at old cumulative 86.
+        d.add_sent(0, 1, 100);
+        d.set_retired(0, 1, 86); // delta = 0 — not drained
+        assert!(
+            d.wait_drained(Duration::from_millis(20)).is_err(),
+            "delta 0 against sent 100 must not be drained"
+        );
+        // MCU retires 50 of the 100 new pieces: cumulative = 136.
+        d.set_retired(0, 1, 136); // delta = 50 — still not drained
+        assert!(
+            d.wait_drained(Duration::from_millis(20)).is_err(),
+            "delta 50 against sent 100 must not be drained"
+        );
+        // Full 100 retired: cumulative = 186.
+        d.set_retired(0, 1, 186); // delta = 100 — drained
+        assert!(
+            d.wait_drained(Duration::from_millis(20)).is_ok(),
+            "delta 100 against sent 100 must be drained"
+        );
+    }
+
+    /// Multi-axis: all axes must be drained before wait_drained returns Ok.
+    #[test]
+    fn multi_axis_all_must_drain() {
+        let d = DrainSync::new();
+        d.add_sent(0, 0, 17474);
+        d.add_sent(1, 2, 86);
+
+        d.set_retired(0, 0, 17474);
+        assert!(
+            d.wait_drained(Duration::from_millis(20)).is_err(),
+            "axis (1,2) still pending"
+        );
+        d.set_retired(1, 2, 86);
+        assert!(
+            d.wait_drained(Duration::from_millis(20)).is_ok(),
+            "all axes drained"
+        );
     }
 }
