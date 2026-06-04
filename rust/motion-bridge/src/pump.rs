@@ -673,6 +673,290 @@ mod tests {
         // We don't assert it here (no access to the queue after run_pump exits),
         // but the new_head values prove both batches were fully sent.
     }
+
+    // ── Monotonic junction clamp tests ───────────────────────────────────────
+
+    /// A sink that records the `start_time` of every piece sent across all
+    /// frames, in delivery order.
+    #[derive(Clone)]
+    struct StartTimeSink {
+        starts: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl StartTimeSink {
+        fn new() -> Self {
+            Self {
+                starts: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+        fn recorded(&self) -> Vec<u64> {
+            self.starts.lock().unwrap().clone()
+        }
+    }
+
+    impl PieceSink for StartTimeSink {
+        fn send_frame(
+            &self,
+            _key: AxisKey,
+            pieces: &[PieceEntry],
+            _start_slot: u16,
+            _new_head: u32,
+        ) -> Result<i32, String> {
+            let mut g = self.starts.lock().unwrap();
+            for p in pieces {
+                g.push(p.start_time);
+            }
+            Ok(kalico_protocol::result_codes::OK)
+        }
+    }
+
+    fn make_piece_dur(t: u64, duration: f32) -> PieceEntry {
+        PieceEntry {
+            start_time: t,
+            coeffs: [0.0; 4],
+            duration,
+            _reserved: 0,
+        }
+    }
+
+    /// Helper: send a single Enqueue, wait until `expected_count` pieces have
+    /// been recorded by the sink, then send Shutdown and join.
+    fn pump_one_batch(
+        sink: StartTimeSink,
+        key: AxisKey,
+        pieces: Vec<PieceEntry>,
+        fresh_stream: bool,
+        ring_depth: u32,
+    ) -> Vec<u64> {
+        let (tx, rx) = std::sync::mpsc::channel::<PumpMsg>();
+        let sink_clone = sink.clone();
+        let expected = pieces.len();
+        let handle = std::thread::spawn(move || {
+            run_pump(rx, sink_clone, |_| ring_depth, |_| None);
+        });
+        tx.send(PumpMsg::Enqueue(EnqueueMsg {
+            key,
+            pieces,
+            fresh_stream,
+        }))
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if sink.recorded().len() >= expected {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pump did not drain batch within deadline"
+            );
+            std::thread::yield_now();
+        }
+        tx.send(PumpMsg::Shutdown).unwrap();
+        handle.join().unwrap();
+        sink.recorded()
+    }
+
+    /// Pump two batches sequentially through the same pump thread.
+    /// Returns the recorded start_times of all sent pieces.
+    fn pump_two_batches(
+        batch_a: (Vec<PieceEntry>, bool),
+        batch_b: (Vec<PieceEntry>, bool),
+        ring_depth: u32,
+    ) -> Vec<u64> {
+        let key = AxisKey { mcu_id: 1, axis: 0 };
+        let sink = StartTimeSink::new();
+        let (tx, rx) = std::sync::mpsc::channel::<PumpMsg>();
+        let sink_clone = sink.clone();
+        let total = batch_a.0.len() + batch_b.0.len();
+        let handle = std::thread::spawn(move || {
+            run_pump(rx, sink_clone, |_| ring_depth, |_| None);
+        });
+
+        tx.send(PumpMsg::Enqueue(EnqueueMsg {
+            key,
+            pieces: batch_a.0,
+            fresh_stream: batch_a.1,
+        }))
+        .unwrap();
+        // Wait for batch A to drain so last_enqueued_end is committed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if sink.recorded().len() >= total / 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "batch A did not drain"
+            );
+            std::thread::yield_now();
+        }
+
+        tx.send(PumpMsg::Enqueue(EnqueueMsg {
+            key,
+            pieces: batch_b.0,
+            fresh_stream: batch_b.1,
+        }))
+        .unwrap();
+        let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if sink.recorded().len() >= total {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline2,
+                "batch B did not drain"
+            );
+            std::thread::yield_now();
+        }
+
+        tx.send(PumpMsg::Shutdown).unwrap();
+        handle.join().unwrap();
+        sink.recorded()
+    }
+
+    /// Use the F446 approx_freq (180 MHz).  clamp_max = 0.05 × 180_000_000
+    /// = 9_000_000 ticks ≈ 50 ms.
+    ///
+    /// Batch A: 2 pieces with duration 0.001 s each.
+    ///   piece 0: start=0,       end ≈ 0 + 0.001×180e6 = 180_000
+    ///   piece 1: start=180_000, end ≈ 360_000
+    ///
+    /// Batch B with overlap X=500 ticks (< clamp_max):
+    ///   piece 0 raw: start = 360_000 − 500 = 359_500
+    ///   piece 1 raw: start = 359_500 + 180_000 = 539_500
+    ///
+    /// After clamp (+500 ticks):
+    ///   piece 0: start = 360_000
+    ///   piece 1: start = 540_000
+    ///
+    /// Assert: all B pieces shifted by X; full queue timeline is monotonic.
+    #[test]
+    fn clamp_shifts_overlapping_batch() {
+        // F446 freq: 180_000_000 Hz; duration 0.001 s → 180_000 ticks per piece.
+        const DUR: f32 = 0.001;
+        const FREQ: u64 = 180_000_000;
+        let ticks_per_piece = (DUR * FREQ as f32) as u64; // 180_000
+
+        let batch_a = vec![
+            make_piece_dur(0, DUR),
+            make_piece_dur(ticks_per_piece, DUR),
+        ];
+        let end_a = ticks_per_piece * 2; // 360_000
+
+        let overlap: u64 = 500;
+        let batch_b_raw_start = end_a - overlap; // 359_500
+        let batch_b = vec![
+            make_piece_dur(batch_b_raw_start, DUR),
+            make_piece_dur(batch_b_raw_start + ticks_per_piece, DUR),
+        ];
+
+        let starts = pump_two_batches(
+            (batch_a, false),
+            (batch_b, false),
+            32,
+        );
+
+        assert_eq!(starts.len(), 4, "expected 4 pieces total");
+
+        // Batch A unchanged.
+        assert_eq!(starts[0], 0);
+        assert_eq!(starts[1], ticks_per_piece);
+
+        // Batch B shifted by `overlap`.
+        assert_eq!(
+            starts[2], end_a,
+            "batch B piece 0 should be clamped to end_a={end_a}, got {}",
+            starts[2]
+        );
+        assert_eq!(
+            starts[3],
+            end_a + ticks_per_piece,
+            "batch B piece 1 should be end_a + ticks_per_piece"
+        );
+
+        // Full timeline monotonic: each start_time >= previous.
+        for w in starts.windows(2) {
+            assert!(
+                w[1] >= w[0],
+                "timeline non-monotonic: {} then {}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    /// A fresh_stream=true batch that overlaps with the previous batch's end
+    /// must NOT be clamped — it legitimately re-anchors the timeline.
+    #[test]
+    fn fresh_stream_not_clamped() {
+        const DUR: f32 = 0.001;
+        const FREQ: u64 = 180_000_000;
+        let ticks_per_piece = (DUR * FREQ as f32) as u64; // 180_000
+
+        let batch_a = vec![make_piece_dur(0, DUR), make_piece_dur(ticks_per_piece, DUR)];
+        let end_a = ticks_per_piece * 2;
+
+        let overlap: u64 = 500;
+        let raw_start = end_a - overlap; // overlaps batch A's end
+
+        // Batch B: fresh_stream=true — not a wobble, a real re-anchor.
+        let batch_b = vec![make_piece_dur(raw_start, DUR)];
+
+        let starts = pump_two_batches(
+            (batch_a, false),
+            (batch_b, true), // fresh_stream!
+            32,
+        );
+
+        assert_eq!(starts.len(), 3);
+        // Batch B piece must appear at the raw (un-clamped) start_time.
+        assert_eq!(
+            starts[2], raw_start,
+            "fresh_stream batch must not be clamped; expected raw_start={raw_start}, got {}",
+            starts[2]
+        );
+    }
+
+    /// An overlap that exceeds clamp_max_ticks (> 50 ms × freq) must NOT be
+    /// shifted — a jump that large indicates a missed re-anchor, not a
+    /// projection wobble.  The pieces are left at their raw start_times.
+    #[test]
+    fn overlap_beyond_bound_not_clamped() {
+        const DUR: f32 = 0.001;
+        const FREQ: u64 = 180_000_000;
+        let ticks_per_piece = (DUR * FREQ as f32) as u64; // 180_000
+        // clamp_max = 0.05 × 180_000_000 = 9_000_000 ticks.
+        let clamp_max: u64 = (0.05 * FREQ as f64) as u64; // 9_000_000
+
+        // Start batch A far enough forward that end_a > huge_overlap, so that
+        // raw_start is positive (saturating_sub would silently zero it otherwise).
+        const START_OFFSET: u64 = 100_000_000; // >> clamp_max
+        let batch_a = vec![
+            make_piece_dur(START_OFFSET, DUR),
+            make_piece_dur(START_OFFSET + ticks_per_piece, DUR),
+        ];
+        let end_a = START_OFFSET + ticks_per_piece * 2;
+
+        // Overlap is clamp_max + 1 — one tick beyond the bound.
+        let huge_overlap = clamp_max + 1;
+        let raw_start = end_a - huge_overlap; // positive: end_a >> huge_overlap
+
+        let batch_b = vec![make_piece_dur(raw_start, DUR)];
+
+        let starts = pump_two_batches(
+            (batch_a, false),
+            (batch_b, false),
+            32,
+        );
+
+        assert_eq!(starts.len(), 3);
+        // Batch B piece must appear at the raw (un-clamped) start_time.
+        assert_eq!(
+            starts[2], raw_start,
+            "overlap beyond bound must not be clamped; expected raw_start={raw_start}, got {}",
+            starts[2]
+        );
+    }
 }
 
 // ── Inbound message types ────────────────────────────────────────────────────
@@ -789,7 +1073,6 @@ where
                     }
 
                     let first_start = pieces[0].start_time;
-                    let last_end = pieces[pieces.len() - 1].end_time(approx_freq_f32);
 
                     // A fresh_stream legitimately re-anchors the timeline;
                     // reset the tracking state before the junction check so we
@@ -800,10 +1083,22 @@ where
                         q.last_enqueued_end = None;
                     }
 
+                    // Maximum overlap we will absorb by shifting the batch.
+                    // Anything beyond this threshold means a re-anchor was missed
+                    // (not a projection wobble), so we leave it unclamped and let
+                    // the MCU fault loudly.
+                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                    let clamp_max_ticks: u64 = (0.05 * approx_freq_hz) as u64;
+
+                    // Track how many ticks we shifted (0 = no clamp applied).
+                    let mut clamped_shift: u64 = 0;
+
                     match q.last_enqueued_end {
                         Some(prev_end) if first_start < prev_end => {
                             let overlap_ticks = prev_end - first_start;
                             let overlap_us = (overlap_ticks as f64 / approx_freq_hz) * 1e6;
+                            // Log pre-clamp values so the raw projection wobble
+                            // distribution is always visible.
                             log::warn!(
                                 "[faceb-overlap] key={:?} OVERLAP first_start={} prev_end={} \
                                  overlap_ticks={} overlap_us={:.1} fresh_stream={}",
@@ -814,6 +1109,31 @@ where
                                 overlap_us,
                                 fresh_stream,
                             );
+                            if overlap_ticks <= clamp_max_ticks {
+                                // Physical meaning: shifting the entire batch
+                                // forward by `overlap` ticks converts the
+                                // sub-ms projection wobble into a sub-ms dwell
+                                // at the junction — position-continuous,
+                                // kinematically negligible.  The real fix is
+                                // tick-exact incremental projection per chain;
+                                // this clamp exists to verify the mechanism on
+                                // the bench.
+                                clamped_shift = overlap_ticks;
+                                log::warn!(
+                                    "[faceb-clamp] key={:?} shifted batch +{}ticks (+{:.1}us) \
+                                     to restore monotonicity",
+                                    key,
+                                    overlap_ticks,
+                                    overlap_us,
+                                );
+                            } else {
+                                log::error!(
+                                    "[faceb-clamp] key={:?} overlap {:.1}us EXCEEDS clamp bound \
+                                     — leaving unclamped (will fault)",
+                                    key,
+                                    overlap_us,
+                                );
+                            }
                         }
                         Some(prev_end) => {
                             let gap_ticks = first_start - prev_end;
@@ -830,10 +1150,28 @@ where
                         None => {}
                     }
 
-                    q.last_enqueued_end = Some(last_end);
-                }
+                    // Apply the shift to every piece in the incoming batch before
+                    // extending the queue.  When clamped_shift == 0 this is a
+                    // no-op that the compiler elides.
+                    let pieces: Vec<_> = if clamped_shift > 0 {
+                        pieces
+                            .into_iter()
+                            .map(|mut p| {
+                                p.start_time += clamped_shift;
+                                p
+                            })
+                            .collect()
+                    } else {
+                        pieces
+                    };
 
-                q.pieces.extend(pieces);
+                    // last_end must reflect the post-clamp timeline so the next
+                    // junction check sees the shifted boundary.
+                    let last_end = pieces[pieces.len() - 1].end_time(approx_freq_f32);
+                    q.last_enqueued_end = Some(last_end);
+
+                    q.pieces.extend(pieces);
+                }
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
