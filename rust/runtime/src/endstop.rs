@@ -406,7 +406,7 @@ static ARM: Arm = Arm::new();
 static TRIP_EVENT_QUEUED: AtomicBool = AtomicBool::new(false);
 static PIN_LEVELS: [AtomicBool; MAX_GPIO_PINS] = [const { AtomicBool::new(false) }; MAX_GPIO_PINS];
 
-#[cfg(test)]
+#[cfg(any(test, feature = "host"))]
 static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn set_pin_level(gpio: PinId, pin_high: bool) -> bool {
@@ -419,8 +419,13 @@ pub fn set_pin_level(gpio: PinId, pin_high: bool) -> bool {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+/// Acquire the per-test global mutex and reset all endstop statics to their
+/// initial state.  Guards against data races when running tests in parallel.
+///
+/// Exposed under `host` feature so integration tests (a separate crate) can
+/// call it; the `host` feature is always active in test builds.
+#[cfg(any(test, feature = "host"))]
+pub fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     let guard = match TEST_MUTEX.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -429,8 +434,8 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
-#[cfg(test)]
-fn reset_for_test() {
+#[cfg(any(test, feature = "host"))]
+pub fn reset_for_test() {
     ARM.state.store(ArmState::Idle as u8, Ordering::Release);
     ARM.arm_id.store(0, Ordering::Release);
     ARM.source_count.store(0, Ordering::Release);

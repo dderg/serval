@@ -323,6 +323,33 @@ impl Engine {
         active
     }
 
+    /// Collect per-axis absolute velocity magnitudes in Q16.16 fixed-point
+    /// (mm/s * 65536) for the three logical axes X=0, Y=1, Z=2.
+    ///
+    /// Reads the PREVIOUS tick's `v_prev` (updated at the end of each active
+    /// `engine.tick`), so callers at the TOP of the ISR get one-tick-stale
+    /// velocity — acceptable for the `IgnoreUntilMoving` endstop policy.
+    ///
+    /// Float-to-Q16 conversion is saturating: velocities above ~65535 mm/s
+    /// (physically impossible on a stepper-driven printer) pin at u32::MAX.
+    pub fn v_per_axis_q16(&self) -> [u32; 3] {
+        let mut out = [0u32; 3];
+        for (slot, axis_opt) in out.iter_mut().zip(self.stepping_axes.iter().take(3)) {
+            if let Some(axis) = axis_opt {
+                let v_abs = axis.v_prev.abs();
+                *slot = if v_abs.is_finite() {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    {
+                        (v_abs * 65536.0_f32).min(u32::MAX as f32) as u32
+                    }
+                } else {
+                    0
+                };
+            }
+        }
+        out
+    }
+
     pub fn retired_counts(&self) -> [u32; MAX_AXES] {
         let mut out = [0u32; MAX_AXES];
         for (slot, entry) in out.iter_mut().zip(self.stepping_axes.iter()) {
