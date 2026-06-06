@@ -258,15 +258,40 @@ fn tick_returns_continue_for_non_armed_non_tripped_states() {
     }
 }
 
+/// Tripping/TrippedReady WITHOUT the freeze latch must return Continue.
+/// The latch is the sole AbortNow trigger; GPIO-detected states alone never freeze.
 #[test]
-fn tick_returns_abort_for_tripped_states() {
+fn tick_returns_continue_for_tripped_states_without_latch() {
     let _guard = reset();
     for state in [ArmState::Tripping, ArmState::TrippedReady] {
+        FREEZE_LATCH.store(false, Ordering::Release);
+        ARM.state.store(state as u8, Ordering::Release);
+        assert_eq!(
+            tick(1, [0, 0, 0], &[1]),
+            TripAction::Continue,
+            "tick() must return Continue when state={state:?} and latch not set"
+        );
+    }
+}
+
+/// Freeze latch set → AbortNow regardless of ARM state.
+#[test]
+fn tick_returns_abort_when_freeze_latch_set() {
+    let _guard = reset();
+    FREEZE_LATCH.store(true, Ordering::Release);
+    for state in [
+        ArmState::Idle,
+        ArmState::Armed,
+        ArmState::Tripping,
+        ArmState::TrippedReady,
+        ArmState::TrippedSent,
+        ArmState::Disarmed,
+    ] {
         ARM.state.store(state as u8, Ordering::Release);
         assert_eq!(
             tick(1, [0, 0, 0], &[1]),
             TripAction::AbortNow,
-            "tick() must return AbortNow when state={state:?}"
+            "tick() must return AbortNow when freeze latch set, state={state:?}"
         );
     }
 }
@@ -488,13 +513,19 @@ fn software_trip_on_non_armed_state_is_not_armed() {
     assert_eq!(software_trip(0, 500, &[]), TripResult::NotArmed);
 }
 
+/// After a first software_trip (Armed → TrippedReady + latch), a second
+/// software_trip with the same arm_id returns Tripped via the already-tripped
+/// branch (latch-only, no second snapshot). This is the relay-arrives-twice case.
 #[test]
-fn software_trip_idempotent_second_call_returns_not_armed() {
+fn software_trip_second_call_already_tripped_returns_tripped() {
     let _guard = reset();
     arm(sw_msg(10_000)).expect("arm");
     assert_eq!(software_trip(42, 1, &[]), TripResult::Tripped);
-    // State is now TrippedReady; a second call must return NotArmed.
-    assert_eq!(software_trip(42, 2, &[]), TripResult::NotArmed);
+    assert!(FREEZE_LATCH.load(Ordering::Acquire), "latch set after first trip");
+    // State is now TrippedReady with matching arm_id → already-tripped branch.
+    assert_eq!(software_trip(42, 2, &[]), TripResult::Tripped);
+    // No duplicate event queued; the latch remains set.
+    assert!(FREEZE_LATCH.load(Ordering::Acquire));
 }
 
 #[test]
@@ -680,4 +711,197 @@ fn software_trip_before_arm_clock_causes_tick_to_abort() {
         TripAction::AbortNow,
         "tick() must abort after software_trip even if deadline wasn't active"
     );
+}
+
+/// GPIO detection on the detecting tick → Continue + event queued.
+/// Subsequent ticks (before relay arrives) → Continue, no AbortNow, no duplicate event.
+/// This tests that state Tripping/TrippedReady without the latch never freezes.
+#[test]
+fn gpio_detection_continue_across_multiple_ticks_until_relay() {
+    let _guard = reset();
+    let mut sources = [SourceConfig::EMPTY; MAX_SOURCES];
+    sources[0] = SourceConfig {
+        kind: SourceKind::Physical,
+        gpio: 21,
+        active_high: true,
+        policy: ArmPolicy::TripImmediately,
+        sample_n: 1,
+        velocity_axis: VelocityAxis::X,
+        v_min_q16: 0,
+    };
+    arm(ArmMsg {
+        arm_id: 10,
+        arm_clock: 0,
+        source_count: 1,
+        sources,
+        stepper_count: 1,
+        stepper_oids: [0, 0, 0, 0, 0, 0, 0, 0],
+        grant_ticks: 0,
+    })
+    .expect("arm");
+
+    set_pin_level(21, true);
+
+    // Detection tick.
+    assert_eq!(tick(1, [0, 0, 0], &[1]), TripAction::Continue);
+    assert!(!FREEZE_LATCH.load(Ordering::Acquire), "latch must not be set by GPIO detection");
+    let evt = poll_trip().expect("event queued on detection tick");
+    assert_eq!(evt.arm_id, 10);
+
+    // Several more ticks while relay is in flight — all Continue.
+    for clk in 2..=10u64 {
+        assert_eq!(
+            tick(clk, [0, 0, 0], &[1]),
+            TripAction::Continue,
+            "tick {clk} must be Continue while relay has not arrived"
+        );
+        assert!(poll_trip().is_none(), "no duplicate event on tick {clk}");
+    }
+}
+
+/// GPIO detects first → Continue; relay software_trip arrives → Tripped (latch
+/// set, no second snapshot); next tick → AbortNow.
+#[test]
+fn gpio_detect_then_software_trip_freezes_no_duplicate_event() {
+    let _guard = reset();
+    let mut sources = [SourceConfig::EMPTY; MAX_SOURCES];
+    sources[0] = SourceConfig {
+        kind: SourceKind::Physical,
+        gpio: 22,
+        active_high: true,
+        policy: ArmPolicy::TripImmediately,
+        sample_n: 1,
+        velocity_axis: VelocityAxis::X,
+        v_min_q16: 0,
+    };
+    arm(ArmMsg {
+        arm_id: 11,
+        arm_clock: 0,
+        source_count: 1,
+        sources,
+        stepper_count: 1,
+        stepper_oids: [0, 0, 0, 0, 0, 0, 0, 0],
+        grant_ticks: 0,
+    })
+    .expect("arm");
+
+    set_pin_level(22, true);
+
+    // GPIO detection tick.
+    assert_eq!(tick(1, [0, 0, 0], &[1]), TripAction::Continue);
+    let _evt = poll_trip().expect("first event queued");
+
+    // Relay arrives: software_trip with already-tripped state.
+    let result = software_trip(11, 2, &[1]);
+    assert_eq!(result, TripResult::Tripped, "relay must return Tripped even if GPIO was first");
+    assert!(FREEZE_LATCH.load(Ordering::Acquire), "latch set by relay");
+
+    // No duplicate event was queued.
+    assert!(poll_trip().is_none(), "no second event after relay software_trip");
+
+    // Next tick freezes.
+    assert_eq!(tick(3, [0, 0, 0], &[1]), TripAction::AbortNow);
+}
+
+/// Full sequence: arm → GPIO detect (motion continues N ticks) →
+/// software_trip (relay) → frozen → recovery → motion resumes.
+#[test]
+fn full_sequence_arm_gpio_relay_freeze_recovery() {
+    let _guard = reset();
+    let gpio_pin: PinId = 23;
+    let mut sources = [SourceConfig::EMPTY; MAX_SOURCES];
+    sources[0] = SourceConfig {
+        kind: SourceKind::Physical,
+        gpio: gpio_pin,
+        active_high: true,
+        policy: ArmPolicy::TripImmediately,
+        sample_n: 1,
+        velocity_axis: VelocityAxis::X,
+        v_min_q16: 0,
+    };
+    arm(ArmMsg {
+        arm_id: 12,
+        arm_clock: 0,
+        source_count: 1,
+        sources,
+        stepper_count: 1,
+        stepper_oids: [0, 0, 0, 0, 0, 0, 0, 0],
+        grant_ticks: 0,
+    })
+    .expect("arm");
+
+    // Phase 1: motion with pin not asserted.
+    for clk in 0..3u64 {
+        assert_eq!(tick(clk, [0, 0, 0], &[1]), TripAction::Continue);
+    }
+
+    // Phase 2: GPIO detects — motion continues across multiple ticks.
+    set_pin_level(gpio_pin, true);
+    assert_eq!(tick(3, [0, 0, 0], &[1]), TripAction::Continue);
+    let _evt = poll_trip().expect("detection event queued");
+    for clk in 4..=8u64 {
+        assert_eq!(
+            tick(clk, [0, 0, 0], &[1]),
+            TripAction::Continue,
+            "motion must continue at tick {clk} before relay"
+        );
+    }
+    assert!(!FREEZE_LATCH.load(Ordering::Acquire));
+
+    // Phase 3: relay arrives.
+    assert_eq!(software_trip(12, 9, &[1]), TripResult::Tripped);
+    assert!(FREEZE_LATCH.load(Ordering::Acquire));
+
+    // Phase 4: frozen ticks.
+    assert_eq!(tick(9, [0, 0, 0], &[1]), TripAction::AbortNow);
+    assert_eq!(tick(10, [0, 0, 0], &[1]), TripAction::AbortNow);
+
+    // Phase 5: recovery — arm() clears the latch.
+    disarm(12);
+    arm(ArmMsg {
+        arm_id: 13,
+        arm_clock: 1000,
+        source_count: 1,
+        sources,
+        stepper_count: 1,
+        stepper_oids: [0, 0, 0, 0, 0, 0, 0, 0],
+        grant_ticks: 0,
+    })
+    .expect("re-arm");
+    assert!(!FREEZE_LATCH.load(Ordering::Acquire), "latch cleared by arm()");
+
+    // Phase 6: motion resumes (arm_clock in future → Continue).
+    assert_eq!(tick(11, [0, 0, 0], &[1]), TripAction::Continue);
+    assert_eq!(tick(12, [0, 0, 0], &[1]), TripAction::Continue);
+}
+
+/// software_trip on an Armed state (no GPIO detected yet) sets the latch
+/// and next tick returns AbortNow.
+#[test]
+fn software_trip_on_armed_sets_latch_and_next_tick_aborts() {
+    let _guard = reset();
+    arm(sw_msg(100_000)).expect("arm");
+    assert!(!FREEZE_LATCH.load(Ordering::Acquire));
+
+    assert_eq!(software_trip(42, 50, &[10, 20]), TripResult::Tripped);
+    assert!(FREEZE_LATCH.load(Ordering::Acquire));
+
+    let evt = drain_trip();
+    assert_eq!(evt.trip_source_idx, TRIP_SOURCE_SOFTWARE);
+
+    assert_eq!(tick(51, [0, 0, 0], &[10, 20]), TripAction::AbortNow);
+}
+
+/// arm() clears the freeze latch as part of the recovery cycle.
+#[test]
+fn arm_clears_freeze_latch_on_recovery() {
+    let _guard = reset();
+    arm(sw_msg(10_000)).expect("arm");
+    software_trip(42, 1, &[]);
+    assert!(FREEZE_LATCH.load(Ordering::Acquire));
+
+    disarm(42);
+    arm(sw_msg(10_000)).expect("re-arm");
+    assert!(!FREEZE_LATCH.load(Ordering::Acquire), "arm() must clear the freeze latch");
+    assert_eq!(tick(1, [0, 0, 0], &[]), TripAction::Continue, "motion resumes after recovery");
 }

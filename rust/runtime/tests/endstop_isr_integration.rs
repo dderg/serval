@@ -144,7 +144,8 @@ fn read_widened_now(shared: &SharedState) -> u64 {
 
 /// Armed GPIO endstop, pin asserted mid-"motion" → ISR tick calls endstop::tick,
 /// queues the trip report, returns Continue (siren disabled) → engine.tick runs
-/// (active piece still dispatched, last_tick_now becomes Some).
+/// across MULTIPLE subsequent ticks before the relay arrives. No freeze until
+/// software_trip sets the latch.
 #[test]
 fn gpio_detection_reports_without_freezing_steps_continue() {
     let _guard = runtime::endstop::test_guard();
@@ -185,6 +186,24 @@ fn gpio_detection_reports_without_freezing_steps_continue() {
         isr.last_tick_now.is_some(),
         "engine.tick ran: last_tick_now must be Some after active tick"
     );
+
+    // Multiple subsequent ticks while relay is in flight — engine must keep running.
+    for n in 2u32..=5 {
+        isr_sample_tick(&mut isr, &shared, &mut storage, TICK_CYCLES * n);
+        assert_eq!(
+            shared.last_error.load(Ordering::Acquire),
+            0,
+            "tick {n} must not fault while relay is in flight"
+        );
+        assert!(
+            isr.last_tick_now.is_some(),
+            "engine.tick must run at tick {n}: last_tick_now must be Some"
+        );
+        assert!(
+            poll_trip().is_none(),
+            "no duplicate trip event at tick {n}"
+        );
+    }
 }
 
 // ─── test 2: software_trip → AbortNow → zero steps, clock still published ────
@@ -458,5 +477,99 @@ fn unfreeze_does_not_trigger_gap_fault_after_large_clock_jump() {
         shared.last_error.load(Ordering::Acquire),
         0,
         "first tick after unfreeze with large gap must not fault"
+    );
+}
+
+// ─── test 6: full sequence arm → GPIO detect → relay → frozen → recovery ─────
+
+/// Complete homing sequence through the ISR:
+///   1. arm → engine active several ticks (pin low)
+///   2. GPIO asserted → detection tick (Continue, event queued, engine runs)
+///   3. N more ticks while relay round-trip is in flight (Continue, engine runs)
+///   4. software_trip (relay arrives) → freeze latch set
+///   5. Next ISR tick → AbortNow, engine skipped, last_tick_now cleared
+///   6. recovery (disarm → engine.reset → re-arm) → engine resumes
+#[test]
+fn full_sequence_gpio_detect_relay_freeze_recovery() {
+    let _guard = runtime::endstop::test_guard();
+
+    let mut isr = make_isr();
+    let shared = SharedState::new();
+    let mut storage = make_storage();
+    configure_axis(&mut isr, 0, 0, &mut storage);
+    let _qs = install_queue(&mut isr);
+
+    push_one_piece(&mut isr, 0, const_piece(0, 10.0), &mut storage);
+    arm_gpio(0);
+
+    // Phase 1: normal motion, pin low.
+    for n in 0u32..3 {
+        isr_sample_tick(&mut isr, &shared, &mut storage, TICK_CYCLES * n);
+        assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+        assert!(poll_trip().is_none());
+    }
+
+    // Phase 2: GPIO asserted → detection tick.
+    set_pin_level(GPIO_PIN, true);
+    isr_sample_tick(&mut isr, &shared, &mut storage, TICK_CYCLES * 3);
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+    assert!(isr.last_tick_now.is_some(), "engine ran on detection tick");
+    let evt = poll_trip().expect("trip event queued after detection");
+    assert_eq!(evt.arm_id, ARM_ID);
+
+    // Phase 3: relay in-flight — engine keeps running.
+    for n in 4u32..=7 {
+        isr_sample_tick(&mut isr, &shared, &mut storage, TICK_CYCLES * n);
+        assert_eq!(shared.last_error.load(Ordering::Acquire), 0, "tick {n}");
+        assert!(
+            isr.last_tick_now.is_some(),
+            "engine must run at tick {n} before relay arrives"
+        );
+        assert!(poll_trip().is_none(), "no duplicate event at tick {n}");
+    }
+
+    // Phase 4: relay arrives via software_trip.
+    let trip_result = software_trip(ARM_ID, u64::from(TICK_CYCLES) * 8, &[]);
+    assert_eq!(trip_result, runtime::endstop::TripResult::Tripped);
+
+    // Phase 5: next ISR tick → frozen.
+    isr_sample_tick(&mut isr, &shared, &mut storage, TICK_CYCLES * 8);
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+    assert!(
+        isr.last_tick_now.is_none(),
+        "engine must be frozen: last_tick_now = None"
+    );
+
+    // Another frozen tick.
+    isr_sample_tick(&mut isr, &shared, &mut storage, TICK_CYCLES * 9);
+    assert!(isr.last_tick_now.is_none(), "still frozen");
+
+    // Phase 6: recovery.
+    let ds = disarm(ARM_ID);
+    assert!(matches!(
+        ds,
+        runtime::endstop::DisarmStatus::AlreadyTripped
+            | runtime::endstop::DisarmStatus::Disarmed
+    ));
+    isr.engine.reset();
+    arm_gpio(u64::from(TICK_CYCLES) * 1000);
+    configure_axis(&mut isr, 0, 0, &mut storage);
+    let _ = install_queue(&mut isr);
+    push_one_piece(
+        &mut isr,
+        0,
+        const_piece(u64::from(TICK_CYCLES) * 20, 100.0),
+        &mut storage,
+    );
+
+    isr_sample_tick(&mut isr, &shared, &mut storage, TICK_CYCLES * 20);
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        0,
+        "recovery tick must not fault"
+    );
+    assert!(
+        isr.last_tick_now.is_some(),
+        "engine resumes after full recovery"
     );
 }

@@ -404,6 +404,9 @@ pub struct TripEvent {
 
 static ARM: Arm = Arm::new();
 static TRIP_EVENT_QUEUED: AtomicBool = AtomicBool::new(false);
+// Set ONLY by software_trip (relay round-trip) and tick_software_deadline (host
+// death / timeout). GPIO detection alone never sets this. Cleared by arm().
+static FREEZE_LATCH: AtomicBool = AtomicBool::new(false);
 static PIN_LEVELS: [AtomicBool; MAX_GPIO_PINS] = [const { AtomicBool::new(false) }; MAX_GPIO_PINS];
 
 #[cfg(any(test, feature = "host"))]
@@ -449,6 +452,7 @@ pub fn reset_for_test() {
     ARM.grant_ticks_lo.store(0, Ordering::Release);
     ARM.grant_ticks_hi.store(0, Ordering::Release);
     TRIP_EVENT_QUEUED.store(false, Ordering::Release);
+    FREEZE_LATCH.store(false, Ordering::Release);
     for src in &ARM.sources {
         src.reset_latches();
     }
@@ -467,6 +471,7 @@ pub fn arm(msg: ArmMsg) -> Result<ArmStatus, ArmError> {
 
     ARM.state.store(ArmState::Idle as u8, Ordering::Release);
     TRIP_EVENT_QUEUED.store(false, Ordering::Release);
+    FREEZE_LATCH.store(false, Ordering::Release);
     ARM.arm_id.store(msg.arm_id, Ordering::Release);
     ARM.arm_clock_lo
         .store(msg.arm_clock as u32, Ordering::Release);
@@ -558,10 +563,10 @@ pub fn disarm(arm_id: u32) -> DisarmStatus {
 }
 
 pub fn tick(clock: u64, v_per_axis_q16: [u32; 3], stepper_counts: &[i32]) -> TripAction {
-    let state = ARM.state.load(Ordering::Acquire);
-    if matches_u8(state, ArmState::TrippedReady) || matches_u8(state, ArmState::Tripping) {
+    if FREEZE_LATCH.load(Ordering::Acquire) {
         return TripAction::AbortNow;
     }
+    let state = ARM.state.load(Ordering::Acquire);
     if !matches_u8(state, ArmState::Armed) {
         return TripAction::Continue;
     }
@@ -693,6 +698,9 @@ fn tick_software_deadline(clock: u64, stepper_counts: &[i32]) -> TripAction {
         ARM.state
             .store(ArmState::TrippedReady as u8, Ordering::Release);
         TRIP_EVENT_QUEUED.store(true, Ordering::Release);
+        // Deadline expiry is a host-death stop: the relay will never arrive,
+        // so the latch must be set here to freeze the engine immediately.
+        FREEZE_LATCH.store(true, Ordering::Release);
         return TripAction::AbortNow;
     }
     TripAction::Continue
@@ -716,14 +724,24 @@ pub fn software_trip(arm_id: u32, clock: u64, stepper_counts: &[i32]) -> TripRes
         Ordering::AcqRel,
         Ordering::Acquire,
     ) {
-        Ok(_) => {}
+        Ok(_) => {
+            publish_snapshot(clock, TRIP_SOURCE_SOFTWARE, stepper_counts);
+            ARM.state
+                .store(ArmState::TrippedReady as u8, Ordering::Release);
+            TRIP_EVENT_QUEUED.store(true, Ordering::Release);
+        }
+        Err(current)
+            if matches_u8(current, ArmState::Tripping)
+                || matches_u8(current, ArmState::TrippedReady)
+                || matches_u8(current, ArmState::TrippedSent) =>
+        {
+            // GPIO detection already reported; relay now arrives. Set the latch
+            // without publishing a second snapshot or queueing a second event.
+        }
         Err(_) => return TripResult::NotArmed,
     }
 
-    publish_snapshot(clock, TRIP_SOURCE_SOFTWARE, stepper_counts);
-    ARM.state
-        .store(ArmState::TrippedReady as u8, Ordering::Release);
-    TRIP_EVENT_QUEUED.store(true, Ordering::Release);
+    FREEZE_LATCH.store(true, Ordering::Release);
     TripResult::Tripped
 }
 
