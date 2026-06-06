@@ -444,6 +444,15 @@ class MotionBridgeWrapper:
     def software_trip(self, mcu, arm_id, timeout_s=2.0):
         return self._bridge.software_trip(mcu, arm_id, timeout_s)
 
+    def trip_dispatch_prepare(self, sources, sinks):
+        # sources: [(kind, mcu_handle, id)]  kind 0=BridgeGpio(id=arm_id),
+        #                                    kind 1=Trsync(id=trsync_oid)
+        # sinks:   [(mcu_handle, trsync_oid)]
+        return self._bridge.trip_dispatch_prepare(sources, sinks)
+
+    def trip_dispatch_cleanup(self, handle_id):
+        return self._bridge.trip_dispatch_cleanup(handle_id)
+
     def extend_homing_deadline(self, mcu, arm_id):
         return self._bridge.extend_homing_deadline(mcu, arm_id)
 
@@ -530,6 +539,8 @@ class BridgeTriggerDispatch:
         self._arm_print_time = None
         self._handler_registered = False
         self._toolhead_arms = None
+        self._sink_trsyncs = {}
+        self._trip_handle_id = None
 
     def get_oid(self):
         return self._arm_id
@@ -543,6 +554,20 @@ class BridgeTriggerDispatch:
     def add_stepper(self, mcu_stepper):
         self._stepper_oids.append(mcu_stepper.get_oid())
         self._steppers.append(mcu_stepper)
+        # Create one firmware sink trsync per distinct stepper MCU (config-time
+        # oid alloc, mirroring legacy TriggerDispatch.add_stepper). At homing
+        # start each is armed with runtime_stop_on_trigger so a relayed
+        # trsync_trigger freezes that MCU's curve evaluator.
+        # Function-level import to avoid the mcu <-> motion_bridge
+        # circular import (mirrors the `from . import motion_bridge as _mb`
+        # pattern used on the mcu.py side).
+        from .mcu import MCU_trsync
+        stepper_mcu = mcu_stepper.get_mcu()
+        trsync = self._sink_trsyncs.get(stepper_mcu)
+        if trsync is None:
+            trsync = MCU_trsync(stepper_mcu, None)
+            self._sink_trsyncs[stepper_mcu] = trsync
+        trsync.add_stepper(mcu_stepper)
 
     def get_steppers(self):
         return list(self._steppers)
@@ -610,31 +635,69 @@ class BridgeTriggerDispatch:
             self._toolhead_arms = toolhead.active_homing_arms
             self._toolhead_arms.add(self._arm_id)
 
-        logging.info(
-            "[bridge-trace] endstop_arm arm_id=%s sources=%s steppers=%s",
-            self._arm_id,
-            self._sources,
-            self._stepper_oids,
-        )
-        status = self._bridge.endstop_arm(
-            self._mcu,
-            self._queue,
-            self._arm_id,
-            arm_clock,
-            self._sources,
-            self._stepper_oids,
-        )
-        logging.info("[bridge-trace] endstop_arm status=%s", status)
+        if self._trip_handle_id is not None:
+            raise printer.command_error(
+                "BridgeTriggerDispatch.start: stale trip handle %d — "
+                "prior homing arm never stopped" % self._trip_handle_id
+            )
+        if not self._sink_trsyncs:
+            raise printer.command_error(
+                "BridgeTriggerDispatch.start: homing arm_id=%d has no "
+                "sink trsyncs; nothing would stop motion on trip"
+                % self._arm_id
+            )
+
+        # Sinks + relay must be live BEFORE endstop_arm starts GPIO
+        # sampling, or a trip in the gap is missed. On any failure after
+        # trip_dispatch_prepare the relay handle must be torn down here —
+        # home_start never calls stop() on a raise, so the handle would
+        # leak into the next start(). ARM_STATUS_ALREADY_TRIPPED is a
+        # normal completion and keeps the relay up for stop() in
+        # home_wait.
+        try:
+            sinks = []
+            for trsync in self._sink_trsyncs.values():
+                trsync._bridge_arm_id = self._arm_id
+                trsync.start(arm_print_time, 0.0, self._completion, 0.0)
+                sinks.append(
+                    (trsync.get_mcu()._bridge_handle, trsync.get_oid())
+                )
+            sources = [(0, self._mcu, self._arm_id)]
+            self._trip_handle_id = self._bridge.trip_dispatch_prepare(
+                sources, sinks
+            )
+
+            logging.info(
+                "[bridge-trace] endstop_arm arm_id=%s sources=%s steppers=%s",
+                self._arm_id,
+                self._sources,
+                self._stepper_oids,
+            )
+            status = self._bridge.endstop_arm(
+                self._mcu,
+                self._queue,
+                self._arm_id,
+                arm_clock,
+                self._sources,
+                self._stepper_oids,
+            )
+            logging.info("[bridge-trace] endstop_arm status=%s", status)
+            if status == ARM_STATUS_REJECTED:
+                raise printer.command_error(
+                    "runtime_arm_endstop rejected (status=%d)" % status
+                )
+        except Exception:
+            if self._trip_handle_id is not None:
+                self._bridge.trip_dispatch_cleanup(self._trip_handle_id)
+                self._trip_handle_id = None
+            raise
+
         if status == ARM_STATUS_ALREADY_TRIPPED:
             # Pin asserted at arm time; arm() published a trip snapshot — fetch
             # it so home_wait can return a real trigger time.
             self._trip_event = self._bridge.take_trip_event() or {}
             self._reason = REASON_ENDSTOP_HIT
             self._completion.complete(self._reason)
-        elif status == ARM_STATUS_REJECTED:
-            raise printer.command_error(
-                "runtime_arm_endstop rejected (status=%d)" % status
-            )
         return self._completion
 
     def _on_trip_message(self, params):
@@ -659,6 +722,22 @@ class BridgeTriggerDispatch:
         self._completion.complete(self._reason)
 
     def stop(self):
+        # Relay teardown comes first so no further trsync_triggers fire on
+        # the sinks. The handle is reset BEFORE the cleanup call so a raised
+        # cleanup can't strand it, and a cleanup failure must not abort the
+        # disarm/unregister below. Idempotent on double-stop: handle is None
+        # on the second call.
+        if self._trip_handle_id is not None:
+            handle = self._trip_handle_id
+            self._trip_handle_id = None
+            try:
+                self._bridge.trip_dispatch_cleanup(handle)
+            except Exception:
+                logging.exception(
+                    "[bridge-trace] trip_dispatch_cleanup(%d) raised during "
+                    "stop(); handle already cleared, continuing teardown",
+                    handle,
+                )
         if self._reason is None:
             try:
                 status = self._bridge.endstop_disarm(

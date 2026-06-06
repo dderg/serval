@@ -449,6 +449,9 @@ pub struct PyMotionBridge {
     probe_handles: Mutex<HashMap<u64, crate::probe_homing::ProbeHomingHandle>>,
     probe_handle_counter: AtomicU64,
     events_dir: Mutex<Option<std::path::PathBuf>>,
+    trip_dispatch_handles:
+        Mutex<HashMap<u64, crate::trip_dispatch::TripDispatchHandle>>,
+    trip_dispatch_next_id: AtomicU64,
     pump_tx: Mutex<Option<std::sync::mpsc::Sender<crate::pump::PumpMsg>>>,
     pump_thread: Mutex<Option<JoinHandle<()>>>,
     drain: std::sync::Arc<crate::drain::DrainSync>,
@@ -670,6 +673,8 @@ impl PyMotionBridge {
             probe_handles: Mutex::new(HashMap::new()),
             probe_handle_counter: AtomicU64::new(1),
             events_dir: Mutex::new(None),
+            trip_dispatch_handles: Mutex::new(HashMap::new()),
+            trip_dispatch_next_id: AtomicU64::new(0),
             pump_tx: Mutex::new(None),
             pump_thread: Mutex::new(None),
             drain: std::sync::Arc::new(crate::drain::DrainSync::new()),
@@ -2539,6 +2544,72 @@ impl PyMotionBridge {
         let msg = format!("runtime_extend_homing_deadline arm_id={arm_id}");
         io.send_fire_and_forget(&msg)
             .map_err(|e| PyRuntimeError::new_err(format!("extend_homing_deadline: {e}")))?;
+        Ok(())
+    }
+
+    /// Prepare the cross-MCU trip relay for one homing move.
+    ///
+    /// `sources`: list of `(kind, mcu, id)` where kind `0` = `BridgeGpio`
+    /// (`id` is `arm_id`), kind `1` = `Trsync` (`id` is `trsync_oid`).
+    /// `sinks`: list of `(mcu, trsync_oid)`.
+    ///
+    /// Returns an opaque handle id for [`trip_dispatch_cleanup`].
+    fn trip_dispatch_prepare(
+        &self,
+        sources: Vec<(u8, u32, u32)>,
+        sinks: Vec<(u32, u8)>,
+    ) -> PyResult<u64> {
+        use crate::trip_dispatch::{self, SinkSpec, SourceSpec};
+
+        let mut src_specs = Vec::new();
+        for (kind, mcu, id) in sources {
+            let io = self.host_io_for_mcu("trip_dispatch_prepare", mcu)?;
+            let spec = match kind {
+                0 => SourceSpec::BridgeGpio { mcu, arm_id: id },
+                1 => SourceSpec::Trsync { mcu, trsync_oid: id as u8 },
+                other => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "trip_dispatch_prepare: bad source kind {other}"
+                    )));
+                }
+            };
+            src_specs.push((spec, io));
+        }
+
+        let sink_specs: Vec<SinkSpec> = sinks
+            .iter()
+            .map(|(mcu, oid)| SinkSpec { mcu: *mcu, trsync_oid: *oid })
+            .collect();
+        let mut sink_ios = Vec::new();
+        for (mcu, _) in &sinks {
+            let io = self.host_io_for_mcu("trip_dispatch_prepare", *mcu)?;
+            sink_ios.push((*mcu, io));
+        }
+
+        let handle = trip_dispatch::prepare(src_specs, sink_specs, sink_ios)
+            .map_err(|e| PyRuntimeError::new_err(format!("trip_dispatch_prepare: {e}")))?;
+
+        let id = self.trip_dispatch_next_id.fetch_add(1, Ordering::AcqRel);
+        self.trip_dispatch_handles
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, handle);
+        Ok(id)
+    }
+
+    /// Tear down the cross-MCU trip relay (unregister all interceptors).
+    ///
+    /// Idempotent: calling with an already-cleaned-up or unknown `handle_id`
+    /// is a no-op.
+    fn trip_dispatch_cleanup(&self, handle_id: u64) -> PyResult<()> {
+        if let Some(handle) = self
+            .trip_dispatch_handles
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&handle_id)
+        {
+            crate::trip_dispatch::cleanup(handle);
+        }
         Ok(())
     }
 
