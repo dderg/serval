@@ -9,7 +9,7 @@ use kalico_protocol::bootstrap::{IdentifyResponse, IDENTIFY_RESPONSE_BODY_LEN};
 use kalico_protocol::codec::{Decode, Encode};
 use kalico_protocol::messages::{
     ClaimHandshakeReply, MessageKind, PushPieces, PushPiecesResponse, RuntimeCapsResponse,
-    StatusHeartbeat,
+    SetTorque, SetTorqueResponse, StatusHeartbeat,
 };
 use kalico_protocol::KALICO_CHANNEL_PIECES;
 
@@ -29,6 +29,10 @@ pub enum Command {
     },
     ClaimHandshake {
         correlation_id: u32,
+    },
+    SetTorque {
+        correlation_id: u32,
+        msg: SetTorque,
     },
     Unknown {
         correlation_id: u32,
@@ -68,6 +72,13 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
         Some(MessageKind::ClaimHandshake) => Ok(Command::ClaimHandshake {
             correlation_id: cid,
         }),
+        Some(MessageKind::SetTorque) => {
+            let msg = SetTorque::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::SetTorque {
+                correlation_id: cid,
+                msg,
+            })
+        }
         _ => Ok(Command::Unknown {
             correlation_id: cid,
             kind_raw: hdr.kind_raw,
@@ -88,6 +99,11 @@ pub fn frame_payload(kind: MessageKind, correlation_id: u32, body: &[u8]) -> Vec
 
 pub fn control_frame(kind: MessageKind, correlation_id: u32, body: &[u8]) -> Vec<u8> {
     encode_frame(CHANNEL_CONTROL, &frame_payload(kind, correlation_id, body))
+}
+
+pub fn set_torque_response_frame(cid: u32, result: i32) -> Vec<u8> {
+    let body = SetTorqueResponse { result }.encoded_to_vec();
+    control_frame(MessageKind::SetTorqueResponse, cid, &body)
 }
 
 pub fn push_pieces_response_frame(
@@ -150,107 +166,4 @@ pub fn identify_response_frame(cid: u32, proto_version: u8) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use kalico_native_transport::frame::decode_frame;
-    use kalico_protocol::messages::{SlaveState, SlaveStatus};
-
-    #[test]
-    fn decodes_identify_on_control_channel() {
-        let payload = frame_payload(MessageKind::Identify, 1, &[3u8]);
-        match decode_command(0, &payload).unwrap() {
-            Command::Identify {
-                correlation_id: 1,
-                proto_version: 3,
-            } => {}
-            other => panic!("wrong variant: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn decodes_push_pieces_on_pieces_channel() {
-        let msg = PushPieces {
-            axis_idx: 0,
-            piece_count: 0,
-            start_slot: 0,
-            new_head: 1,
-            pieces_bytes: vec![],
-        };
-        let payload = frame_payload(MessageKind::PushPieces, 7, &msg.encoded_to_vec());
-        match decode_command(KALICO_CHANNEL_PIECES, &payload).unwrap() {
-            Command::PushPieces {
-                correlation_id,
-                msg: m,
-            } => {
-                assert_eq!(correlation_id, 7);
-                assert_eq!(m.axis_idx, 0);
-                assert_eq!(m.piece_count, 0);
-                assert_eq!(m.new_head, 1);
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn push_pieces_response_decodes_back() {
-        let frame = push_pieces_response_frame(42, 0, 0, 1_000_000_000);
-        let (chan, payload) = decode_frame(&frame).unwrap();
-        assert_eq!(chan, CHANNEL_CONTROL);
-        let (hdr, body) = decode_message_header(payload).unwrap();
-        assert_eq!(hdr.correlation_id, 42);
-        assert_eq!(
-            MessageKind::from_u16(hdr.kind_raw),
-            Some(MessageKind::PushPiecesResponse)
-        );
-        let r = PushPiecesResponse::decode(body).unwrap();
-        assert_eq!(r.result, 0);
-        assert_eq!(r.front_start_time, 1_000_000_000);
-    }
-
-    #[test]
-    fn claim_handshake_reply_frame_decodes() {
-        let reply = ClaimHandshakeReply {
-            slave_statuses: vec![SlaveStatus {
-                slave_idx: 1,
-                state: SlaveState::Ok,
-                fault_code: 0,
-            }],
-        };
-        let frame = claim_handshake_reply_frame(7, &reply);
-        let (chan, payload) = decode_frame(&frame).unwrap();
-        assert_eq!(chan, CHANNEL_CONTROL);
-        let (hdr, body) = decode_message_header(payload).unwrap();
-        assert_eq!(hdr.correlation_id, 7);
-        assert_eq!(
-            MessageKind::from_u16(hdr.kind_raw),
-            Some(MessageKind::ClaimHandshakeReply)
-        );
-        let decoded = ClaimHandshakeReply::decode(body).unwrap();
-        assert_eq!(decoded, reply);
-    }
-
-    #[test]
-    fn decode_command_yields_claim_handshake_variant() {
-        let payload = frame_payload(MessageKind::ClaimHandshake, 99, &[]);
-        match decode_command(0, &payload).unwrap() {
-            Command::ClaimHandshake { correlation_id: 99 } => {}
-            other => panic!("expected ClaimHandshake, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn status_heartbeat_frame_on_events_channel() {
-        let frame = status_heartbeat_frame(1, &[42u32, 0u32]);
-        let (chan, payload) = decode_frame(&frame).unwrap();
-        assert_eq!(chan, CHANNEL_EVENTS);
-        let (hdr, body) = decode_message_header(payload).unwrap();
-        assert_eq!(
-            MessageKind::from_u16(hdr.kind_raw),
-            Some(MessageKind::StatusHeartbeat)
-        );
-        assert_eq!(hdr.correlation_id, 0);
-        let hb = StatusHeartbeat::decode(body).unwrap();
-        assert_eq!(hb.engine_state, 1);
-        assert_eq!(hb.retired_counts, vec![42u32, 0u32]);
-    }
-}
+mod tests;
