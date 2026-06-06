@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import signal
 import socket
 import struct
@@ -692,12 +693,19 @@ def run_simulation(
                         err_msg = raw_err.get("message", "") or str(raw_err)
                     else:
                         err_msg = str(raw_err) if raw_err else ""
+                    moved_mm = None
+                    m = re.search(
+                        r"homing: steps_moved=\{'stepper_x': (-?[\d.]+)",
+                        klippy_content,
+                    )
+                    if m:
+                        moved_mm = abs(float(m.group(1)))
                     if "No trigger on x" in err_msg:
                         error = (
                             "G28 X ran the full homing distance and raised "
                             "'No trigger on x' %.1fs after the endstop pin "
-                            "asserted (a working trigger chain stops in "
-                            "<1s); kalico_endstop_tripped seen: %s"
+                            "asserted (a working trigger chain trips "
+                            "immediately); kalico_endstop_tripped seen: %s"
                             % (stop_latency, tripped_seen)
                         )
                     elif err_msg:
@@ -711,15 +719,27 @@ def run_simulation(
                             "G28 X returned no response — klippy reactor "
                             "wedged in the homing wait"
                         )
-                    elif stop_latency > 12.0:
+                    elif moved_mm is None:
                         error = (
-                            "G28 X succeeded but only %.1fs after the trip "
-                            "(expected <12s)" % stop_latency
+                            "G28 X succeeded but klippy.log has no "
+                            "'homing: steps_moved' line — cannot verify "
+                            "the trip rewind"
+                        )
+                    elif moved_mm > 100.0:
+                        # Until Part B's drip dispatch lands, G28 returns at
+                        # the move's wall-clock end; the proof the MCU froze
+                        # at the trip is the rewind distance, not latency.
+                        error = (
+                            "G28 X succeeded but the trip snapshot rewound "
+                            "%.1fmm — the toolhead ran well past the trip "
+                            "point (full travel = 375mm)" % moved_mm
                         )
                     else:
                         log.info(
-                            "Homing GPIO test: G28 X completed %.1fs after "
-                            "the trip — trigger chain works",
+                            "Homing GPIO test: G28 X ok; trip rewind "
+                            "%.1fmm, returned %.1fs after the trip — "
+                            "trigger chain works",
+                            moved_mm,
                             stop_latency,
                         )
 
