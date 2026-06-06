@@ -515,6 +515,11 @@ def run_simulation(
             if verbose:
                 env["KALICO_VTIME_DEBUG"] = "1"
             env["KALICO_SIM_SOCK_DIR"] = str(h7_sock_dir)
+            # Docker VM scheduling + the vtime↔realtime clock mapping eat
+            # the default 250 ms dispatch lead and the first post-idle
+            # piece lands in the past (PieceStartInPast). Budget for the
+            # sim host's jitter; the Pi keeps the tight default.
+            env.setdefault("KALICO_ANCHOR_LEAD_SECS", "2.0")
 
             # Add sim_klippy's third-party plugin paths if available.
             # Klipper's module loader scans klippy/extras/ — third-party
