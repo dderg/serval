@@ -1,5 +1,6 @@
 # Python wrapper around the PyO3 motion_bridge native module.
 import logging
+import struct
 
 try:
     from . import motion_bridge_native as _native
@@ -708,13 +709,54 @@ class BridgeTriggerDispatch:
             return
         if self._reason is not None:
             return
-        # Real hardware carries the trip snapshot in params; native tests queue
-        # it in the bridge runtime. Prefer params so stepper snapshots survive.
-        self._trip_event = dict(params)
-        if "steppers" not in self._trip_event:
-            self._trip_event = self._bridge.take_trip_event()
+        # Real hardware carries the trip snapshot in params (the v1 wire blob);
+        # native tests queue a pre-decoded event in the bridge runtime.
+        evt = self._decode_trip_params(params)
+        if evt is None:
+            evt = self._bridge.take_trip_event()
+        if evt is None:
+            # The MCU reported a trip we cannot decode — homing must not
+            # proceed on a guessed trigger position. Abort loudly.
+            logging.error(
+                "[bridge-trace] undecodable kalico_endstop_tripped "
+                "params=%s",
+                params,
+            )
+            self._reason = REASON_COMMS_TIMEOUT
+            self._completion.complete(self._reason)
+            return
+        self._trip_event = evt
         self._reason = REASON_ENDSTOP_HIT
         self._completion.complete(self._reason)
+
+    TRIP_EVENT_FMT_V1 = 1
+
+    def _decode_trip_params(self, params):
+        if "steppers" in params:
+            return dict(params)
+        raw = params.get("stepper_data")
+        if raw is None:
+            return None
+        if params.get("fmt_version") != self.TRIP_EVENT_FMT_V1:
+            return None
+        n = int(params.get("stepper_n", 0))
+        if len(raw) < n * 5:
+            return None
+        steppers = []
+        for i in range(n):
+            off = i * 5
+            (oid,) = struct.unpack_from("<B", raw, off)
+            (count,) = struct.unpack_from("<i", raw, off + 1)
+            steppers.append({"oid": oid, "step_count": count})
+        trip_clock = (int(params["trip_clock_hi"]) << 32) | int(
+            params["trip_clock_lo"]
+        )
+        return {
+            "arm_id": int(params["arm_id"]),
+            "trip_clock": trip_clock,
+            "trip_source_idx": params.get("trip_source_idx"),
+            "steppers": steppers,
+        }
 
     def _fire_past_end_time(self):
         # Only fire if no terminal yet (mirror _on_trip_message).

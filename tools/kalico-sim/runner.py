@@ -471,6 +471,7 @@ def run_simulation(
                 has_motion_bridge=has_motion_bridge,
                 phase_stepping=phase_stepping,
                 homing_test=homing_test,
+                homing_gpio_test=homing_gpio_test,
             )
 
             if serve:
@@ -1040,6 +1041,7 @@ def _prepare_config(
     has_motion_bridge: bool = False,
     phase_stepping: bool = False,
     homing_test: bool = False,
+    homing_gpio_test: bool = False,
 ) -> pathlib.Path:
     """Render printer.cfg with sim serial paths."""
     # Try to find config from sim_klippy
@@ -1057,7 +1059,10 @@ def _prepare_config(
             )
         else:
             cfg = _generate_minimal_config(
-                h7_pty, f4_pty, gcode_dir=str(tmp_dir / "gcodes")
+                h7_pty,
+                f4_pty,
+                gcode_dir=str(tmp_dir / "gcodes"),
+                homing_retract_zero=homing_gpio_test,
             )
         if has_motion_bridge and not phase_stepping and not homing_test:
             cfg += """
@@ -1315,14 +1320,22 @@ enable_force_move: True
 
 
 def _generate_minimal_config(
-    h7_pty: str, f4_pty: str, gcode_dir: str = "/tmp/kalico_sim_gcodes"
+    h7_pty: str,
+    f4_pty: str,
+    gcode_dir: str = "/tmp/kalico_sim_gcodes",
+    homing_retract_zero: bool = False,
 ) -> str:
     """Generate a minimal single-MCU Cartesian config for testing.
 
     MACH_LINUX uses gpiochip0/gpioN pin naming (not STM32 PA3 style).
     Uses only the H7 MCU. All endstops are simulated via GPIO lines
     in the LD_PRELOAD shim.
+
+    homing_retract_zero: single-approach homing for the GPIO trip test —
+    the shim's injected endstop has no step feedback, so it cannot clear
+    during a retract the way a physical switch does.
     """
+    retract = "homing_retract_dist: 0\n" if homing_retract_zero else ""
     return f"""\
 [mcu]
 serial: {h7_pty}
@@ -1345,6 +1358,7 @@ position_min: 0
 position_endstop: 0
 position_max: 250
 homing_speed: 10
+{retract}
 
 [stepper_y]
 step_pin: gpiochip0/gpio3
@@ -1858,6 +1872,21 @@ def main():
             for line in trace_lines[-30:]:
                 print(line)
             print("--- end bridge trace ---")
+
+    if (
+        args.homing_gpio_test
+        and not result.success
+        and result.klippy_log
+    ):
+        # Diagnostic mode: a failed trigger chain needs the unfiltered
+        # timeline, not excerpts.
+        print("\n--- FULL klippy.log ---")
+        print(result.klippy_log)
+        print("--- end klippy.log ---")
+        for name, content in result.mcu_logs.items():
+            print(f"\n--- FULL {name} MCU log ---")
+            print(content)
+            print(f"--- end {name} ---")
 
     if args.homing_test and result.klippy_log:
         print("\n--- Beacon homing log excerpts ---")
