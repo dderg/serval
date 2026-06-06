@@ -51,7 +51,7 @@ pub enum SourceSpec {
 /// # Example
 ///
 /// ```
-/// use motion_bridge::trip_dispatch::build_trigger_cmd;
+/// use motion_bridge_native::trip_dispatch::build_trigger_cmd;
 /// assert_eq!(build_trigger_cmd(42), "trsync_trigger oid=42 reason=1");
 /// ```
 pub fn build_trigger_cmd(oid: u8) -> String {

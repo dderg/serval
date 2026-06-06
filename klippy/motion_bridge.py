@@ -52,6 +52,8 @@ _STUB_MOTION_METHODS = frozenset(
         "endstop_disarm",
         "software_trip",
         "extend_homing_deadline",
+        "trip_dispatch_prepare",
+        "trip_dispatch_cleanup",
         "prepare_probe_homing",
         "run_probe_homing",
         "get_homing_position_at_time",
