@@ -913,8 +913,6 @@ G1 Z125 F300
             if print_time_s == 0:
                 try:
                     klippy_content = klippy_log.read_text(errors="replace")
-                    import re
-
                     for line in reversed(klippy_content.split("\n")):
                         m = re.search(r"print_time=(\d+\.?\d*)", line)
                         if m:
@@ -1631,8 +1629,6 @@ def run_batch_simulation(
                     error += f"\n{result.stderr[-500:]}"
 
         # Extract print time from log
-        import re
-
         # Look for "Exiting (print time X.XXXs)" — the definitive line
         for line in reversed(klippy_content.split("\n")):
             m = re.search(r"print time (\d+\.?\d*)s", line)
