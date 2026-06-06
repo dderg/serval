@@ -671,6 +671,15 @@ def run_simulation(
                     for mcu in mcus
                     if pathlib.Path(mcu.log_path).exists()
                 }
+                # The bridge's structured events (anchor decisions, seg0
+                # clock-deficit math, replan/dispatch errors) land in the
+                # events sibling of klippy.log — the primary forensics for
+                # any timing failure.
+                events_file = klippy_log.parent / "events" / "host-rust.jsonl"
+                if events_file.exists():
+                    mcu_logs["host-rust-events"] = events_file.read_text(
+                        errors="replace"
+                    )
                 tripped_seen = "kalico_endstop_tripped" in klippy_content or (
                     any(
                         "kalico_endstop_tripped" in v
