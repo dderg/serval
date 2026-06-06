@@ -1,5 +1,38 @@
+use std::sync::OnceLock;
+
 const CONTIGUITY_EPS: f64 = 1e-6;
-const DEFAULT_LEAD_SECS: f64 = 0.25;
+
+const LEAD_DEFAULT_SECS: f64 = 0.25;
+const LEAD_MAX_SECS: f64 = 30.0;
+
+static LEAD_SECS: OnceLock<f64> = OnceLock::new();
+
+/// Returns the host dispatch-latency/jitter budget in seconds.
+///
+/// Read once from `KALICO_ANCHOR_LEAD_SECS` on first call; subsequent calls
+/// return the cached value.  Absent → 0.25 s.  Set-but-unparsable or outside
+/// (0.0, 30.0] → panic (fail loud at bridge init).
+pub fn lead_secs() -> f64 {
+    *LEAD_SECS.get_or_init(|| {
+        match std::env::var("KALICO_ANCHOR_LEAD_SECS") {
+            Err(_) => LEAD_DEFAULT_SECS,
+            Ok(raw) => {
+                let v: f64 = raw.trim().parse().unwrap_or_else(|_| {
+                    panic!(
+                        "KALICO_ANCHOR_LEAD_SECS={raw:?} is not a valid f64 — \
+                         set it to a number in (0.0, 30.0] or leave it unset"
+                    )
+                });
+                assert!(
+                    v > 0.0 && v <= LEAD_MAX_SECS,
+                    "KALICO_ANCHOR_LEAD_SECS={v} is out of range (0.0, {LEAD_MAX_SECS}] — \
+                     use a positive value no greater than {LEAD_MAX_SECS} s"
+                );
+                v
+            }
+        }
+    })
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct SegmentLate {
@@ -12,7 +45,6 @@ pub struct SegmentLate {
 pub struct Anchor {
     t0: Option<f64>,
     last_t_end: f64,
-    lead_secs: f64,
 }
 
 impl Anchor {
@@ -20,7 +52,6 @@ impl Anchor {
         Self {
             t0: None,
             last_t_end: 0.0,
-            lead_secs: DEFAULT_LEAD_SECS,
         }
     }
 
@@ -30,6 +61,7 @@ impl Anchor {
         seg_t_end: f64,
         host_now: f64,
     ) -> Result<(f64, bool), SegmentLate> {
+        let lead = lead_secs();
         let reanchor = match self.t0 {
             None => true,
             Some(t0) => {
@@ -56,7 +88,7 @@ impl Anchor {
                 None => "first",
                 Some(_) => "backward-jump",
             };
-            self.t0 = Some(host_now + self.lead_secs - seg_t_start);
+            self.t0 = Some(host_now + lead - seg_t_start);
             let t0 = self.t0.unwrap();
             tracing::info!(host_now, t0, seg_t_start, condition, "[anchor-decision]");
         }

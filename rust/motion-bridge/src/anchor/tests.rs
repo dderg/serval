@@ -5,7 +5,7 @@ fn first_segment_lands_lead_ahead() {
     let mut a = Anchor::new();
     let (t0, fresh) = a.anchor_segment(0.0, 1.0, 100.0).unwrap();
     assert!(fresh);
-    assert!((t0 + 0.0 - (100.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9);
+    assert!((t0 + 0.0 - (100.0 + lead_secs())).abs() < 1e-9);
 }
 
 #[test]
@@ -24,7 +24,7 @@ fn late_segment_returns_err_with_correct_gap() {
     let result = a.anchor_segment(1.0, 2.0, 104.0);
     let err = result.expect_err("starvation must return Err");
     assert!(err.gap_s > 0.0, "gap_s must be positive, got {}", err.gap_s);
-    let expected_gap = 104.0 - (100.25 + 1.0);
+    let expected_gap = 104.0 - (100.0 + lead_secs() + 1.0);
     assert!(
         (err.gap_s - expected_gap).abs() < 1e-9,
         "gap_s={} expected={expected_gap}",
@@ -40,7 +40,7 @@ fn backward_jump_reanchors() {
     let (t0_b, fresh) = a.anchor_segment(0.0, 1.0, 130.0).unwrap();
     assert!(fresh);
     assert_ne!(t0_a, t0_b);
-    assert!((t0_b - (130.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9);
+    assert!((t0_b - (130.0 + lead_secs())).abs() < 1e-9);
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn backward_jump_while_late_reanchors_silently() {
     let (t0_new, fresh) = result.expect("backward jump must re-anchor, not error");
     assert!(fresh, "backward jump must be fresh");
     assert!(
-        (t0_new - (130.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9,
+        (t0_new - (130.0 + lead_secs())).abs() < 1e-9,
         "t0_new={t0_new}"
     );
 }

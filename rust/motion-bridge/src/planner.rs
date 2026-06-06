@@ -14,13 +14,12 @@ use trajectory::{AxisShaper, EHalo, RequiredShaper, ShapedSegment, ShaperConfig}
 
 const T_IDLE: Duration = Duration::from_secs(3600);
 
-/// Must equal `anchor::DEFAULT_LEAD_SECS`. Keep in sync with anchor.rs.
-const LEAD: f64 = 0.25;
-
 /// Safety margin for the decel-commit deadline: covers shaping + dispatch + pump + wire latency.
 const SAFETY_MARGIN: f64 = 0.050;
 
-const REPLAN_WARN_BUDGET_US: u64 = ((LEAD - SAFETY_MARGIN) * 1e6) as u64;
+fn replan_warn_budget_us() -> u64 {
+    ((crate::anchor::lead_secs() - SAFETY_MARGIN) * 1e6) as u64
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ClockBias {
@@ -408,7 +407,7 @@ fn run_loop(
     loop {
         let next_timeout = if state.t_dispatched < state.t_appended - 1e-12 {
             let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
-            let remaining = (state.t_dispatched + LEAD - SAFETY_MARGIN) - esc;
+            let remaining = (state.t_dispatched + crate::anchor::lead_secs() - SAFETY_MARGIN) - esc;
             Duration::try_from_secs_f64(remaining.max(0.0)).unwrap_or(Duration::ZERO)
         } else {
             T_IDLE
@@ -541,7 +540,7 @@ fn run_loop(
                     nominal_s = nominal,
                     "replan stats"
                 );
-                if replan_us > REPLAN_WARN_BUDGET_US {
+                if replan_us > replan_warn_budget_us() {
                     tracing::warn!(
                         subsystem = "motion",
                         event = "replan_overrun",
@@ -599,7 +598,7 @@ fn run_loop(
                     );
                 }
                 let finish = sync_instant.map(|t| {
-                    t + Duration::try_from_secs_f64(state.t_appended + LEAD)
+                    t + Duration::try_from_secs_f64(state.t_appended + crate::anchor::lead_secs())
                         .unwrap_or(Duration::ZERO)
                 });
                 let _ = notify.send(finish);
