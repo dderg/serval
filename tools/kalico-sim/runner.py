@@ -348,6 +348,7 @@ def run_simulation(
     verbose: bool = False,
     phase_stepping: bool = False,
     homing_test: bool = False,
+    homing_gpio_test: bool = False,
     serve: bool = False,
     serve_data_dir=None,
 ) -> SimResult:
@@ -612,6 +613,119 @@ def run_simulation(
 
             # Record virtual time at start
             vtime_start = vtime_read_ns()
+
+            if homing_gpio_test:
+                # -- GPIO endstop mid-move trip test (G28 X) ---------------
+                # The firmware build has CONFIG_KALICO_SIM unset, so it
+                # samples armed endstop GPIOs through the shim every host
+                # tick — asserting the pin via sim_control is exactly what
+                # a closing physical switch looks like to the firmware.
+                # G28 X runs on a worker thread because the homing wait can
+                # block klippy's reactor (API socket included); the trip
+                # must be injected from outside klippy.
+                x_endstop = (0, 10)  # ^gpiochip0/gpio10 in minimal config
+                trip_delay_s = 3.0
+                # position_max 250 * klipper's 1.5 overshoot / 10 mm/s
+                full_travel_s = 250 * 1.5 / 10.0
+                endstop = EndstopTrigger(
+                    str(h7_sock_dir / "sim_control"), [x_endstop]
+                )
+                endstop.clear()
+
+                g28: dict = {}
+
+                def _g28_worker():
+                    g28["t0"] = time.monotonic()
+                    g28["resp"] = send_gcode(
+                        api_socket, "G28 X", timeout=full_travel_s + 30
+                    )
+                    g28["t1"] = time.monotonic()
+
+                worker = threading.Thread(target=_g28_worker, daemon=True)
+                worker.start()
+                time.sleep(trip_delay_s)
+                endstop.trigger_once()
+                t_trip = time.monotonic()
+                log.info(
+                    "Homing GPIO test: X endstop pin asserted %.1fs into "
+                    "G28 X (full travel would take %.0fs)",
+                    t_trip - g28.get("t0", t_trip),
+                    full_travel_s,
+                )
+                worker.join(timeout=full_travel_s + 60)
+
+                klippy_content = (
+                    klippy_log.read_text(errors="replace")
+                    if klippy_log.exists()
+                    else ""
+                )
+                mcu_logs = {
+                    mcu.name: open(mcu.log_path).read()
+                    for mcu in mcus
+                    if pathlib.Path(mcu.log_path).exists()
+                }
+                tripped_seen = "kalico_endstop_tripped" in klippy_content or (
+                    any(
+                        "kalico_endstop_tripped" in v
+                        for v in mcu_logs.values()
+                    )
+                )
+
+                error = None
+                if worker.is_alive():
+                    error = (
+                        "G28 X still running %.0fs after the endstop pin "
+                        "asserted — motion never stopped"
+                        % (time.monotonic() - t_trip)
+                    )
+                else:
+                    resp = g28.get("resp") or {}
+                    stop_latency = g28["t1"] - t_trip
+                    raw_err = resp.get("error") if isinstance(resp, dict) else None
+                    if isinstance(raw_err, dict):
+                        err_msg = raw_err.get("message", "") or str(raw_err)
+                    else:
+                        err_msg = str(raw_err) if raw_err else ""
+                    if "No trigger on x" in err_msg:
+                        error = (
+                            "G28 X ran the full homing distance and raised "
+                            "'No trigger on x' %.1fs after the endstop pin "
+                            "asserted (a working trigger chain stops in "
+                            "<1s); kalico_endstop_tripped seen: %s"
+                            % (stop_latency, tripped_seen)
+                        )
+                    elif err_msg:
+                        error = (
+                            "G28 X failed %.1fs after the endstop pin "
+                            "asserted: %s (kalico_endstop_tripped seen: %s)"
+                            % (stop_latency, err_msg, tripped_seen)
+                        )
+                    elif not resp:
+                        error = (
+                            "G28 X returned no response — klippy reactor "
+                            "wedged in the homing wait"
+                        )
+                    elif stop_latency > 12.0:
+                        error = (
+                            "G28 X succeeded but only %.1fs after the trip "
+                            "(expected <12s)" % stop_latency
+                        )
+                    else:
+                        log.info(
+                            "Homing GPIO test: G28 X completed %.1fs after "
+                            "the trip — trigger chain works",
+                            stop_latency,
+                        )
+
+                return SimResult(
+                    success=error is None,
+                    print_time_s=0,
+                    wall_time_s=time.monotonic() - wall_start,
+                    speedup=0,
+                    error=error,
+                    klippy_log=klippy_content,
+                    mcu_logs=mcu_logs,
+                )
 
             if homing_test:
                 # -- Beacon Z homing test ----------------------------------
@@ -1609,6 +1723,12 @@ def main():
         help="Enable phase stepping config (TMC5160 on X)",
     )
     parser.add_argument(
+        "--homing-gpio-test",
+        action="store_true",
+        help="Full-mode G28 X with a GPIO endstop asserted mid-move via "
+        "the sim_control shim (the physical-switch scenario)",
+    )
+    parser.add_argument(
         "--homing-test",
         action="store_true",
         help="Run beacon Z homing test (dual-MCU CoreXY + beacon proximity)",
@@ -1659,6 +1779,7 @@ def main():
             verbose=args.verbose,
             phase_stepping=args.phase_test,
             homing_test=args.homing_test,
+            homing_gpio_test=args.homing_gpio_test,
             serve=args.serve,
             serve_data_dir=args.data_dir,
         )
