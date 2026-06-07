@@ -405,8 +405,17 @@ pub struct TripEvent {
 static ARM: Arm = Arm::new();
 static TRIP_EVENT_QUEUED: AtomicBool = AtomicBool::new(false);
 // Set ONLY by software_trip (relay round-trip) and tick_software_deadline (host
-// death / timeout). GPIO detection alone never sets this. Cleared by arm().
+// death / timeout). GPIO detection alone never sets this. Cleared by arm() and
+// by disarm() of a frozen arm — which also requests a ring purge so the
+// abandoned homing pieces can never replay once the latch lifts.
 static FREEZE_LATCH: AtomicBool = AtomicBool::new(false);
+static RING_PURGE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// One-shot consume of the purge request. Called by the motion ISR before it
+/// would evaluate pieces, so the purge always precedes the next engine tick.
+pub fn take_ring_purge_request() -> bool {
+    RING_PURGE_REQUESTED.swap(false, Ordering::AcqRel)
+}
 static PIN_LEVELS: [AtomicBool; MAX_GPIO_PINS] = [const { AtomicBool::new(false) }; MAX_GPIO_PINS];
 
 #[cfg(any(test, feature = "host"))]
@@ -453,6 +462,7 @@ pub fn reset_for_test() {
     ARM.grant_ticks_hi.store(0, Ordering::Release);
     TRIP_EVENT_QUEUED.store(false, Ordering::Release);
     FREEZE_LATCH.store(false, Ordering::Release);
+    RING_PURGE_REQUESTED.store(false, Ordering::Release);
     for src in &ARM.sources {
         src.reset_latches();
     }
@@ -543,7 +553,7 @@ pub fn disarm(arm_id: u32) -> DisarmStatus {
         return DisarmStatus::Unknown;
     }
 
-    match ARM.state.compare_exchange(
+    let status = match ARM.state.compare_exchange(
         ArmState::Armed as u8,
         ArmState::Disarmed as u8,
         Ordering::AcqRel,
@@ -559,7 +569,13 @@ pub fn disarm(arm_id: u32) -> DisarmStatus {
         }
         Err(state) if matches_u8(state, ArmState::Disarmed) => DisarmStatus::Disarmed,
         Err(_) => DisarmStatus::Unknown,
+    };
+    if !matches!(status, DisarmStatus::Unknown)
+        && FREEZE_LATCH.swap(false, Ordering::AcqRel)
+    {
+        RING_PURGE_REQUESTED.store(true, Ordering::Release);
     }
+    status
 }
 
 pub fn tick(clock: u64, v_per_axis_q16: [u32; 3], stepper_counts: &[i32]) -> TripAction {

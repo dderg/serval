@@ -905,3 +905,54 @@ fn arm_clears_freeze_latch_on_recovery() {
     assert!(!FREEZE_LATCH.load(Ordering::Acquire), "arm() must clear the freeze latch");
     assert_eq!(tick(1, [0, 0, 0], &[]), TripAction::Continue, "motion resumes after recovery");
 }
+
+#[test]
+fn disarm_of_frozen_arm_clears_latch_and_requests_purge() {
+    let _guard = reset();
+    arm(sw_msg(10_000)).expect("arm");
+    software_trip(42, 1, &[]);
+    assert!(FREEZE_LATCH.load(Ordering::Acquire));
+
+    assert_eq!(disarm(42), DisarmStatus::AlreadyTripped);
+    assert!(
+        !FREEZE_LATCH.load(Ordering::Acquire),
+        "disarm() of a frozen arm must clear the freeze latch"
+    );
+    assert!(
+        take_ring_purge_request(),
+        "frozen disarm must request a ring purge"
+    );
+    assert!(
+        !take_ring_purge_request(),
+        "purge request is one-shot"
+    );
+    assert_eq!(
+        tick(2, [0, 0, 0], &[]),
+        TripAction::Continue,
+        "no AbortNow after frozen disarm — abandoned pieces are purged, not replayed"
+    );
+}
+
+#[test]
+fn disarm_without_freeze_requests_no_purge() {
+    let _guard = reset();
+    arm(sw_msg(10_000)).expect("arm");
+    assert_eq!(disarm(42), DisarmStatus::Disarmed);
+    assert!(
+        !take_ring_purge_request(),
+        "clean no-trip disarm must not purge — the move drained naturally"
+    );
+}
+
+#[test]
+fn disarm_unknown_arm_id_leaves_freeze_latch_alone() {
+    let _guard = reset();
+    arm(sw_msg(10_000)).expect("arm");
+    software_trip(42, 1, &[]);
+    assert_eq!(disarm(999), DisarmStatus::Unknown);
+    assert!(
+        FREEZE_LATCH.load(Ordering::Acquire),
+        "a mismatched disarm must not unfreeze someone else's arm"
+    );
+    assert!(!take_ring_purge_request());
+}

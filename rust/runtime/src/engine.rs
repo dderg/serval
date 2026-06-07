@@ -323,6 +323,21 @@ impl Engine {
         active
     }
 
+    /// Retire every queued piece on every axis without evaluating them.
+    /// Used after a homing trip: the freeze abandoned the rest of the move,
+    /// and retiring (not just dropping) returns the ring credits the host's
+    /// drain is waiting on. Positions and axis config stay intact — they
+    /// hold the trip state the host rewinds from.
+    pub fn purge_rings(&mut self) {
+        for axis in self.stepping_axes.iter_mut().flatten() {
+            while !axis.ring.is_empty() {
+                axis.ring.advance_counter();
+            }
+            axis.armed = None;
+            axis.v_prev = 0.0;
+        }
+    }
+
     /// Collect per-axis absolute velocity magnitudes in Q16.16 fixed-point
     /// (mm/s * 65536) for the three logical axes X=0, Y=1, Z=2.
     ///

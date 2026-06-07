@@ -124,6 +124,13 @@ pub fn isr_sample_tick(
         after_arm.wrapping_sub(after_widen),
     );
 
+    // A disarm of a frozen arm abandons the rest of the homing move; the
+    // purge retires those pieces (returning the host's ring credits) before
+    // the engine could ever evaluate them.
+    if crate::endstop::take_ring_purge_request() {
+        isr.engine.purge_rings();
+    }
+
     // Endstop trip detector — runs BEFORE engine.tick so AbortNow freezes this
     // tick's step dispatch rather than the next one.
     //

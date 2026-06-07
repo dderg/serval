@@ -313,6 +313,11 @@ fn recovery_after_freeze_accepts_new_motion() {
         "disarm after trip: {ds:?}"
     );
 
+    // One tick between disarm and new motion, as on hardware (host command
+    // round-trips span many tick periods): it consumes the frozen-disarm
+    // ring purge so it cannot eat the next move's pieces.
+    isr_sample_tick(&mut isr, &shared, &mut storage, 2 * TICK_CYCLES);
+
     // engine.reset: clears axes + ring (abandoned pieces gone).
     isr.engine.reset();
     assert_eq!(isr.engine.num_axes, 0, "engine.reset must clear axes");
@@ -551,6 +556,9 @@ fn full_sequence_gpio_detect_relay_freeze_recovery() {
         runtime::endstop::DisarmStatus::AlreadyTripped
             | runtime::endstop::DisarmStatus::Disarmed
     ));
+    // One tick between disarm and new motion, as on hardware: consumes the
+    // frozen-disarm ring purge so it cannot eat the next move's pieces.
+    isr_sample_tick(&mut isr, &shared, &mut storage, TICK_CYCLES * 10);
     isr.engine.reset();
     arm_gpio(u64::from(TICK_CYCLES) * 1000);
     configure_axis(&mut isr, 0, 0, &mut storage);
@@ -571,5 +579,64 @@ fn full_sequence_gpio_detect_relay_freeze_recovery() {
     assert!(
         isr.last_tick_now.is_some(),
         "engine resumes after full recovery"
+    );
+}
+
+#[test]
+fn disarm_after_freeze_purges_rings_via_isr_no_rearm_needed() {
+    // Single-approach homing: after the trip there is NO retract / second
+    // approach, so nothing ever re-arms. The disarm alone must unfreeze the
+    // engine and retire the abandoned pieces (returning ring credits), or
+    // the host's post-homing drain hangs forever.
+    let _guard = runtime::endstop::test_guard();
+
+    let mut isr = make_isr();
+    let shared = SharedState::new();
+    let mut storage = make_storage();
+    configure_axis(&mut isr, 0, 0, &mut storage);
+    let _qs = install_queue(&mut isr);
+
+    push_one_piece(&mut isr, 0, const_piece(0, 100.0), &mut storage);
+    arm_gpio(0);
+
+    isr_sample_tick(&mut isr, &shared, &mut storage, 0);
+    assert!(isr.last_tick_now.is_some());
+
+    software_trip(ARM_ID, 0, &[]);
+    isr_sample_tick(&mut isr, &shared, &mut storage, TICK_CYCLES);
+    assert!(isr.last_tick_now.is_none(), "must be frozen");
+    let queued: usize = isr
+        .engine
+        .stepping_axes
+        .iter()
+        .flatten()
+        .map(|a| a.ring.len())
+        .sum();
+    assert!(queued > 0, "abandoned piece still queued while frozen");
+
+    let ds = disarm(ARM_ID);
+    assert!(matches!(
+        ds,
+        runtime::endstop::DisarmStatus::AlreadyTripped
+            | runtime::endstop::DisarmStatus::Disarmed
+    ));
+
+    // Next ISR tick: purge runs before any piece evaluation; engine unfrozen.
+    isr_sample_tick(&mut isr, &shared, &mut storage, 2 * TICK_CYCLES);
+    let queued_after: usize = isr
+        .engine
+        .stepping_axes
+        .iter()
+        .flatten()
+        .map(|a| a.ring.len())
+        .sum();
+    assert_eq!(queued_after, 0, "abandoned pieces must be retired by the purge");
+    assert!(
+        isr.engine
+            .stepping_axes
+            .iter()
+            .flatten()
+            .all(|a| a.armed.is_none()),
+        "armed piece must be dropped by the purge"
     );
 }
