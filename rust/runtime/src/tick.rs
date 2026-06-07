@@ -1,29 +1,3 @@
-// TIM5 ISR body — clock widening, inter-arrival gap guard, `Engine::tick`, and
-// the endstop trip detector + freeze consumer.
-//
-// Call order each tick:
-//   1. Widen raw CYCCNT → `now` (u64).
-//   2. Publish widened clock unconditionally (freeze path must not skip this —
-//      skipping pegs the foreground scheduler; see warning at line ~88).
-//   3. Call `endstop::tick()` with the PREVIOUS tick's per-axis Q16 velocities
-//      and the live per-stepper step counts from `shared.stepper_counts`.
-//   4a. AbortNow → freeze: skip `engine.tick`, clear `last_tick_now` (so the
-//       inter-arrival guard does not fire on unfreeze), return.
-//   4b. Continue → run the inter-arrival guard and `engine.tick` as before.
-//
-// Freeze contract:
-//   AbortNow latches via `endstop::ARM.state` staying `Tripping`/`TrippedReady`
-//   across ticks. No separate flag needed: `endstop::tick()` returns AbortNow
-//   on every ISR call until `endstop::arm()` transitions state back to Armed.
-//   `last_tick_now = None` on frozen ticks guards the gap check so unfreezing
-//   does not raise TickIntervalExceeded.
-//
-// Recovery path:
-//   host: disarm_endstop → runtime_reset (engine.reset()) → seed_position →
-//         arm_endstop (→ endstop::arm() resets state → Armed). After arm(),
-//         tick() returns Continue and engine.tick runs normally. The ring is
-//         cleared by engine.reset(), so abandoned pieces never replay.
-
 #![allow(unsafe_code)]
 
 use core::sync::atomic::Ordering;
@@ -160,8 +134,6 @@ pub fn isr_sample_tick(
     if let Some(last) = isr.last_tick_now {
         let gap = now.wrapping_sub(last);
         if period != 0 && gap > period * TICK_GAP_FAULT_MULT {
-            // Integer division is intentional: `gap_ticks` is the integer
-            // count of sample periods elapsed, used as a fault detail tag.
             #[allow(clippy::integer_division)]
             let gap_ticks = (gap / period) as u32;
             // Store before the fault code latches so the host always sees
@@ -194,8 +166,6 @@ pub fn isr_sample_tick(
         body_end.wrapping_sub(after_arm),
     );
 
-    // Some only when this tick was active; idle ticks clear it so the gap
-    // check never straddles an idle gap.
     isr.last_tick_now = if active { Some(now) } else { None };
     crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_ISR_EXIT);
 }

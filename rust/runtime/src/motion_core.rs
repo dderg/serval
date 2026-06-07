@@ -1,16 +1,6 @@
-// Hardened piece-ring walker — per-axis walk+eval loop shared by the MCU
-// stepper engine and any other motion node.
-//
-// Walk/load split: only the LANDED piece (the one whose window contains `now`)
-// is monomialised; walked-past pieces are retired without calling `to_monomial`.
-// `to_monomial` is the dominant cost on the hot path; calling it for every
-// expired piece is an O(walk-depth) waste — do not revert this split.
-
 use crate::fault_sink::FaultSink;
 use crate::piece_ring::{PieceEntry, RingDescriptor};
 
-/// ISR's cached working copy of the currently-armed piece: monomial
-/// coefficients plus the piece's MCU-clock window.
 #[derive(Debug, Clone, Copy)]
 pub struct ArmedPiece {
     pub mono_coeffs: [f32; 4],

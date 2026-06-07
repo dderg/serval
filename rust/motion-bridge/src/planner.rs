@@ -254,8 +254,6 @@ impl Drop for PlannerHandle {
     }
 }
 
-/// Below this magnitude the `actual − nominal` delta is indistinguishable from
-/// floating-point noise (well below the MCU tick rate ~10 µs).
 const RECTIFICATION_TOLERANCE_S: f64 = 1e-6;
 
 const RECTIFICATION_CAS_MAX_ATTEMPTS: usize = 100;
@@ -469,7 +467,6 @@ fn run_loop(
                 let move_dist = m.distance_mm;
                 let move_feed = m.segment.feedrate_mm_s;
 
-                // Commit held-back tail before inserting an idle rest-hold when clock outran plan.
                 let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
                 if esc > state.t_appended + 1e-6 {
                     if state.t_dispatched < state.t_appended - 1e-12 {
@@ -590,7 +587,6 @@ fn run_loop(
             }
 
             PlannerMsg::Flush { notify } => {
-                // Commit held-back decel-to-zero; idempotent when already committed.
                 if state.t_dispatched < state.t_appended - 1e-12 {
                     run_commit_and_dispatch(
                         &mut state,

@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""Kalico Simulator — run full-stack Klipper simulation with virtual time.
-
-Spawns MACH_LINUX MCU firmware processes + klippy with a shared virtual
-clock that eliminates wall-clock sleeps, achieving faster-than-real-time
-simulation. Peripheral emulators (TMC5160/2209, thermocouples, Beacon)
-are loaded from the sim_klippy orchestrator modules.
-
-Usage:
-    python3 runner.py [--branch BRANCH] [--gcode FILE] [--config DIR]
-                      [--timeout SECS] [--verbose]
-
-The runner builds firmware, starts emulators, boots klippy, feeds G-code,
-and reports: pass/fail, print time, error details.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -65,7 +50,6 @@ class SimResult:
 
 
 def vtime_create(start_ns: int = 1_000_000_000) -> None:
-    """Create shared virtual clock."""
     with open(VTIME_SHM, "wb") as f:
         f.write(struct.pack(VTIME_STRUCT_FMT, start_ns, 0, 0, 1, 0))
     os.chmod(VTIME_SHM, 0o666)
@@ -90,10 +74,8 @@ def vtime_destroy() -> None:
 def build_firmware(
     repo_root: pathlib.Path, config_name: str, output_name: str
 ) -> pathlib.Path:
-    """Build MACH_LINUX firmware ELF from a .config file."""
     config_src = repo_root / "tools" / "kalico-sim" / "configs" / config_name
     if not config_src.exists():
-        # Fall back to sim_klippy configs if they exist
         config_src = (
             repo_root / "tools" / "sim_klippy" / "configs" / config_name
         )
@@ -134,7 +116,6 @@ def build_firmware(
 
 
 def ensure_shims_built(repo_root: pathlib.Path) -> tuple:
-    """Build libsim_intercept.so + libvtime.so. Returns (shim_path, vtime_path)."""
     shim_dir = repo_root / "tools" / "kalico-sim" / "libvtime"
     shim_so = shim_dir / "libsim_intercept.so"
     vtime_so = shim_dir / "libvtime.so"
@@ -153,15 +134,14 @@ def spawn_mcu(
     vtime_so: pathlib.Path,
     verbose: bool = False,
 ) -> McuProcess:
-    """Spawn a MACH_LINUX firmware process with both shims."""
     if os.path.exists(pty_path):
         os.unlink(pty_path)
 
     log_fd = open(log_path, "wb")
     env = os.environ.copy()
-    # GPIO/SPI shim only — vtime disabled for now to avoid
-    # "Stepper too far in past" during homing. Acceleration will be
-    # re-enabled after the core sim works at real speed.
+    # vtime is intentionally NOT loaded here: adding it causes "Stepper too far
+    # in past" during homing because both sides stall waiting for I/O while
+    # neither advances virtual time. Re-enable only after that deadlock is solved.
     env["LD_PRELOAD"] = str(shim_so)
     env["KALICO_SIM_SOCK_DIR"] = sock_dir
     if verbose:
@@ -175,7 +155,6 @@ def spawn_mcu(
         env=env,
     )
 
-    # Wait for PTY to appear
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         if os.path.exists(pty_path):
@@ -200,7 +179,6 @@ def spawn_mcu(
 
 
 def send_gcode(api_socket: str, script: str, timeout: float = 30.0) -> dict:
-    """Send G-code to klippy via API socket."""
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     sock.connect(api_socket)
@@ -233,7 +211,6 @@ def send_gcode(api_socket: str, script: str, timeout: float = 30.0) -> dict:
 
 
 def query_status(api_socket: str, timeout: float = 5.0) -> dict:
-    """Query printer status via klippy API."""
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
@@ -284,7 +261,6 @@ def wait_for_klippy_ready(
     klippy_proc: subprocess.Popen,
     timeout: float = 120.0,
 ) -> bool:
-    """Wait for klippy to reach 'Printer is ready' state."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if klippy_log.exists():
@@ -309,17 +285,14 @@ def wait_for_print_done(
     klippy_log: pathlib.Path,
     timeout: float = 600.0,
 ) -> tuple:
-    """Wait for the print to finish. Returns (success, error_msg)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if klippy_proc.poll() is not None:
             return False, "klippy exited unexpectedly"
 
-        # Check log for errors
         if klippy_log.exists():
             content = klippy_log.read_bytes()
             if b"shutdown:" in content:
-                # Extract shutdown reason
                 for line in content.decode(errors="replace").split("\n"):
                     if "shutdown:" in line.lower():
                         return False, f"Printer shutdown: {line.strip()}"
@@ -354,7 +327,6 @@ def run_simulation(
     serve: bool = False,
     serve_data_dir=None,
 ) -> SimResult:
-    """Run a complete simulation. Returns SimResult."""
     wall_start = time.monotonic()
 
     with tempfile.TemporaryDirectory(prefix="kalico_sim_") as tmpdir:
@@ -387,10 +359,7 @@ def run_simulation(
         log_dir = tmp / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build shims
         shim_so, vtime_so = ensure_shims_built(repo_root)
-
-        # Initialize virtual clock
         vtime_create(start_ns=1_000_000_000)
 
         mcus = []
@@ -400,13 +369,11 @@ def run_simulation(
         endstop_trigger = None
 
         try:
-            # Socket directories for chip emulators
             h7_sock_dir = tmp / "sim" / "h7"
             f4_sock_dir = tmp / "sim" / "f4"
             h7_sock_dir.mkdir(parents=True, exist_ok=True)
             f4_sock_dir.mkdir(parents=True, exist_ok=True)
 
-            # Detect available ELFs
             h7_elf = repo_root / "out" / "klipper-h7-sim.elf"
             f4_elf = repo_root / "out" / "klipper-f4-sim.elf"
             if not h7_elf.exists():
@@ -449,16 +416,11 @@ def run_simulation(
                 mcus.append(f4)
                 log.info("F4 MCU spawned (pid=%d)", f4.process.pid)
 
-            # Start chip emulators (only if sim_klippy is available)
             chip_servers = _start_chip_emulators(
                 h7_sock_dir, f4_sock_dir, repo_root
             )
-
-            # Prepare printer config
             beacon_pty = str(tmp / "klipper_sim_beacon")
             beacon_stub = _start_beacon(beacon_pty, log_dir, repo_root)
-
-            # Detect if this branch has the Kalico motion bridge
             has_motion_bridge = (
                 repo_root / "klippy" / "motion_bridge.py"
             ).exists()
@@ -478,10 +440,8 @@ def run_simulation(
             )
 
             if serve:
-                # Mainsail/Moonraker-friendly sections, INTERACTIVE ONLY. full
-                # and batch keep the plain minimal config so their print-time
-                # predictions are unchanged. smooth_mzv shaper is required on
-                # sota-motion (the kalico motion bridge rejects freq=0).
+                # smooth_mzv shaper required here: the kalico motion bridge
+                # rejects freq=0, so omitting it causes immediate boot failure.
                 with open(rendered_cfg, "a") as _cfgf:
                     _cfgf.write(
                         "\n[input_shaper]\nshaper_freq_x: 50\nshaper_freq_y: 50\n"
@@ -495,7 +455,6 @@ def run_simulation(
                         "gcode:\n  CLEAR_PAUSE\n  BASE_CANCEL_PRINT\n"
                     )
 
-            # Copy G-code to virtual SD card location
             gcode_dir = tmp / "gcodes"
             gcode_dir.mkdir(parents=True, exist_ok=True)
             if gcode_path:
@@ -504,17 +463,14 @@ def run_simulation(
                 gcode_dest = gcode_dir / gcode_path.name
                 shutil.copy2(gcode_path, gcode_dest)
 
-            # Spawn klippy with virtual time
             klippy_log = log_dir / "klippy.log"
             api_socket = str(tmp / "klippy.sock")
 
             env = os.environ.copy()
-            # Klippy does NOT use virtual time — it runs at real CPU
-            # speed. The MCU processes use virtual time (via LD_PRELOAD
-            # in spawn_mcu) so they process commands instantly. Klippy's
-            # motion planner generates moves at CPU speed; the MCU is
-            # "infinitely fast." This avoids the virtual-time deadlock
-            # where both sides wait for I/O and neither advances time.
+            # Klippy deliberately does NOT use virtual time: it runs at real
+            # CPU speed while MCU processes run under LD_PRELOAD vtime so they
+            # process commands instantly. Loading vtime in klippy too causes a
+            # deadlock where both sides block on I/O and neither advances time.
             if verbose:
                 env["KALICO_VTIME_DEBUG"] = "1"
             env["KALICO_SIM_SOCK_DIR"] = str(h7_sock_dir)
@@ -524,9 +480,6 @@ def run_simulation(
             # sim host's jitter; the Pi keeps the tight default.
             env.setdefault("KALICO_ANCHOR_LEAD_SECS", "2.0")
 
-            # Add sim_klippy's third-party plugin paths if available.
-            # Klipper's module loader scans klippy/extras/ — third-party
-            # modules need symlinks there to be discoverable.
             third_party = (
                 repo_root
                 / "tools"
@@ -575,7 +528,6 @@ def run_simulation(
             )
             log.info("Klippy spawned (pid=%d)", klippy_proc.pid)
 
-            # Wait for klippy to be ready
             if not wait_for_klippy_ready(klippy_log, klippy_proc, timeout=120):
                 content = ""
                 if klippy_log.exists():
@@ -619,8 +571,6 @@ def run_simulation(
 
             # Endstop triggering is handled by the libsim_intercept.so
             # shim's auto-endstop feature (step counting → GPIO trigger).
-
-            # Record virtual time at start
             vtime_start = vtime_read_ns()
 
             if homing_gpio_test or homing_sensorless_test:
@@ -830,15 +780,6 @@ def run_simulation(
                 )
 
             if homing_test:
-                # -- Beacon Z homing test ----------------------------------
-                # Sequence:
-                #   1. SET_KINEMATIC_POSITION marks all axes as homed and
-                #      places XY at the beacon home position. This avoids
-                #      GPIO-based XY homing which requires the MACH_LINUX
-                #      MCU firmware to execute steps in real time (fragile
-                #      under Docker VM timing).
-                #   2. G28 Z exercises the full beacon proximity homing path:
-                #      BeaconHomingHelper → trsync → drip_move_software_trip.
                 log.info("Homing test: faking position, then G28 Z via beacon")
 
                 resp = send_gcode(
@@ -853,8 +794,6 @@ def run_simulation(
                 resp = send_gcode(api_socket, "G28 Z", timeout=60)
                 log.info("G28 Z: %s", resp)
 
-                # Determine success: no error key in response and klippy
-                # log contains no shutdown after the homing command.
                 klippy_content = (
                     klippy_log.read_text(errors="replace")
                     if klippy_log.exists()
@@ -891,7 +830,6 @@ def run_simulation(
                 )
 
             if gcode_path:
-                # Start the print via virtual SD card
                 gcode_name = gcode_path.name
                 resp = send_gcode(
                     api_socket,
@@ -900,7 +838,6 @@ def run_simulation(
                 )
                 log.info("Print started: %s", gcode_name)
 
-                # Wait for completion
                 success, error = wait_for_print_done(
                     api_socket,
                     klippy_proc,
@@ -908,7 +845,6 @@ def run_simulation(
                     timeout,
                 )
             else:
-                # No G-code — generate and print a test pattern
                 log.info("No G-code file, generating test pattern")
                 test_gcode = gcode_dir / "sim_test.gcode"
                 if phase_stepping:
@@ -963,7 +899,6 @@ G1 Z125 F300
             wall_end = time.monotonic()
             wall_time_s = wall_end - wall_start
 
-            # Get actual print time from klippy's toolhead/print_stats
             print_time_s = 0.0
             try:
                 status = query_status(api_socket)
@@ -976,7 +911,6 @@ G1 Z125 F300
             except Exception:
                 pass
 
-            # Fallback: extract print time from klippy log stats
             if print_time_s == 0:
                 try:
                     klippy_content = klippy_log.read_text(errors="replace")
@@ -1016,11 +950,8 @@ G1 Z125 F300
             )
 
         finally:
-            # Stop endstop trigger
             if endstop_trigger:
                 endstop_trigger.stop()
-
-            # Cleanup
             if klippy_proc and klippy_proc.poll() is None:
                 klippy_proc.terminate()
                 try:
@@ -1047,7 +978,6 @@ G1 Z125 F300
 
 
 def _start_chip_emulators(h7_sock_dir, f4_sock_dir, repo_root):
-    """Start chip emulators. Returns list of servers to stop later."""
     servers = []
     try:
         sys.path.insert(0, str(repo_root))
@@ -1064,7 +994,6 @@ def _start_chip_emulators(h7_sock_dir, f4_sock_dir, repo_root):
             TMC5160Emulator,
         )
 
-        # H7 SPI bus 0: TMC5160s + MAX31865
         h7_chips = [
             (5, TMC5160Emulator().transfer),  # stepper_x
             (4, TMC5160Emulator().transfer),  # stepper_y
@@ -1104,11 +1033,10 @@ def _start_chip_emulators(h7_sock_dir, f4_sock_dir, repo_root):
 
 
 def _start_beacon(beacon_pty, log_dir, repo_root):
-    """Start Beacon MCU emulator."""
     try:
         sys.path.insert(0, str(repo_root))
-        # Local emulator (kalico-sim/emulators/) — add to path directly
-        # since the hyphen in kalico-sim makes it non-importable as a module
+        # tools/kalico-sim is not importable as a module (hyphen in name),
+        # so the emulators/ subdir is added to sys.path directly.
         emulators_dir = repo_root / "tools" / "kalico-sim" / "emulators"
         if emulators_dir.exists():
             sys.path.insert(0, str(emulators_dir))
@@ -1143,8 +1071,6 @@ def _prepare_config(
     homing_gpio_test: bool = False,
     homing_sensorless_test: bool = False,
 ) -> pathlib.Path:
-    """Render printer.cfg with sim serial paths."""
-    # Try to find config from sim_klippy
     if config_dir is None:
         if homing_test:
             cfg = _generate_beacon_homing_config(
@@ -1179,7 +1105,6 @@ shaper_type: smooth_mzv
         cfg_path.write_text(cfg)
         return cfg_path
 
-    # Use sim_klippy's override system
     try:
         sys.path.insert(0, str(repo_root))
         from tools.sim_klippy.orchestrator.overrides import (
@@ -1206,7 +1131,6 @@ shaper_type: smooth_mzv
         cfg_path = tmp_dir / "printer.cfg"
         cfg_path.write_text(rendered)
 
-        # Stage companion configs
         import shutil
 
         for entry in config_dir.iterdir():
@@ -1235,15 +1159,11 @@ shaper_type: smooth_mzv
 
 
 class EndstopTrigger:
-    """Background thread that triggers endstop GPIOs for homing.
-
-    Connects to the sim_control socket and periodically toggles endstop
-    GPIO lines to simulate physical endstop switches. Endstops trigger
-    after a brief delay from when homing starts.
+    """Toggles endstop GPIO lines via sim_control socket to simulate endstop
+    switches; endstops trigger after a brief delay from when homing starts.
     """
 
     def __init__(self, sim_control_path: str, endstop_pins: list):
-        """endstop_pins: list of (chip, line) tuples for endstop GPIOs."""
         self.sim_control_path = sim_control_path
         self.endstop_pins = endstop_pins
         self._stop = threading.Event()
@@ -1271,17 +1191,14 @@ class EndstopTrigger:
             return ""
 
     def _run(self):
-        # Wait briefly for MCU to be fully up
+        # Load-bearing sleep: MCU must be fully up before GPIO commands work.
         time.sleep(0.5)
 
-        # Continuously cycle endstops through homing-compatible sequence:
-        # clear → wait → trigger → hold briefly → clear → wait → repeat
-        # This ensures that whenever homing starts on any axis, the
-        # endstop will trigger within ~0.5s, then clear for the retract,
-        # then trigger again for the second approach.
+        # Cycles clear→wait→trigger→wait→repeat so the endstop always triggers
+        # within ~0.5 s of homing start, clears for the retract (~0.5-1 s), then
+        # triggers again for the second approach.
         while not self._stop.is_set():
-            # Clear phase — stay clear long enough for homing to start
-            # and for retract to complete (retract takes ~0.5-1s)
+            # Clear phase — long enough for homing start and retract to complete.
             for chip, line in self.endstop_pins:
                 self._send_cmd(
                     f"set_gpio_input chip={chip} line={line} value=0"
@@ -1290,7 +1207,6 @@ class EndstopTrigger:
             if self._stop.is_set():
                 break
 
-            # Trigger phase — brief pulse to simulate endstop hit
             for chip, line in self.endstop_pins:
                 self._send_cmd(
                     f"set_gpio_input chip={chip} line={line} value=1"
@@ -1300,12 +1216,10 @@ class EndstopTrigger:
                 break
 
     def trigger_once(self):
-        """Set all endstops to triggered state once."""
         for chip, line in self.endstop_pins:
             self._send_cmd(f"set_gpio_input chip={chip} line={line} value=1")
 
     def clear(self):
-        """Clear all endstops."""
         for chip, line in self.endstop_pins:
             self._send_cmd(f"set_gpio_input chip={chip} line={line} value=0")
 
@@ -1316,17 +1230,12 @@ def _generate_beacon_homing_config(
     beacon_pty: str,
     gcode_dir: str = "/tmp/kalico_sim_gcodes",
 ) -> str:
-    """Generate a dual-MCU CoreXY config with beacon probe for Z homing tests.
+    """SAVE_CONFIG beacon model must match the stub's frequency model.
 
-    Uses H7 for X/Y/E and F4 (bottom) for Z steppers. Beacon is the
-    virtual endstop for the Z axis. The SAVE_CONFIG block contains a
-    calibrated beacon model so klippy boots without requiring NVM calibration
-    from the stub's NVM image.
-
-    model_domain [1.8359e-7, 1.8936e-7] corresponds to frequencies
-    ~5.28–5.45 MHz, which matches the stub's updated frequency model:
+    model_domain [1.8359e-7, 1.8936e-7] → frequencies ~5.28–5.45 MHz:
       z=10mm → count ≈ 70,710,853 (freq ≈ 5,268,182 Hz)
       z=0    → count ≈ 73,153,076 (freq ≈ 5,450,000 Hz)
+    Changing either without the other causes boot-time calibration rejection.
     """
     f4_section = ""
     if f4_pty:
@@ -1574,7 +1483,6 @@ enable_force_move: True
 def _generate_phase_stepping_config(
     h7_pty: str, f4_pty: str, gcode_dir: str = "/tmp/kalico_sim_gcodes"
 ) -> str:
-    """Generate a config with TMC5160 phase stepping on X axis."""
     return f"""\
 [mcu]
 serial: {h7_pty}
@@ -1649,21 +1557,14 @@ def run_batch_simulation(
     timeout: float = 300.0,
     verbose: bool = False,
 ) -> SimResult:
-    """Run Klipper in batch mode (--debuginput/--debugoutput) for
-    faster-than-real-time print time prediction.
-
-    This mode runs the full motion planner WITHOUT any MCU firmware.
-    It processes G-code at CPU speed (~100x real-time for typical prints)
-    and produces exact timing data. No Docker privileges needed.
-
-    Requires a dictionary file (klipper.dict) built from the firmware.
+    """Runs full motion planner without MCU firmware (~100x real-time).
+    Requires out/klipper.dict built from the firmware.
     """
     wall_start = time.monotonic()
 
     with tempfile.TemporaryDirectory(prefix="kalico_batch_") as tmpdir:
         tmp = pathlib.Path(tmpdir)
 
-        # Find or build dictionary file
         dict_path = repo_root / "out" / "klipper.dict"
         if not dict_path.exists():
             return SimResult(
@@ -1674,19 +1575,14 @@ def run_batch_simulation(
                 error="Missing klipper.dict. Build firmware first.",
             )
 
-        # Prepare config
         if config_path is None:
-            # Generate a batch-mode config (no serial needed)
             cfg_text = _generate_batch_config()
             cfg_file = tmp / "printer.cfg"
             cfg_file.write_text(cfg_text)
             config_path = cfg_file
 
-        # Prepare output files
         debug_output = str(tmp / "debug_output")
         klippy_log = str(tmp / "klippy.log")
-
-        # Run klippy in batch mode
         cmd = [
             "python3",
             str(repo_root / "klippy" / "klippy.py"),
@@ -1703,7 +1599,6 @@ def run_batch_simulation(
         if verbose:
             cmd.append("-v")
 
-        # Preprocess G-code: strip custom macros, replace PRINT_START
         preprocessor = (
             repo_root / "tools" / "kalico-sim" / "preprocess_gcode.py"
         )
@@ -1749,7 +1644,6 @@ def run_batch_simulation(
         wall_end = time.monotonic()
         wall_time = wall_end - wall_start
 
-        # Parse klippy log for print time
         print_time = 0.0
         error = None
         klippy_content = ""
@@ -1761,7 +1655,6 @@ def run_batch_simulation(
             pass
 
         if result.returncode != 0:
-            # Check for known errors
             if (
                 "error" in klippy_content.lower()
                 or "shutdown" in klippy_content.lower()
@@ -1782,7 +1675,6 @@ def run_batch_simulation(
             if m:
                 print_time = float(m.group(1))
                 break
-        # Fallback: look for "print_time=X.XXX" in stats
         if print_time == 0:
             for line in reversed(klippy_content.split("\n")):
                 m = re.search(r"print_time=(\d+\.?\d*)", line)
@@ -1803,10 +1695,8 @@ def run_batch_simulation(
 
 
 def _generate_batch_config() -> str:
-    """Generate a config for batch mode (MACH_LINUX pin format).
-
-    Matches a typical Voron Trident 250/300 config: CoreXY kinematics,
-    high accel/velocity limits, 0.4mm nozzle, large build volume.
+    """Voron Trident 250/300 representative config for batch timing predictions.
+    Limits calibrated to that hardware; adjust if targeting a different machine.
     """
     return """\
 [mcu]
