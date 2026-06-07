@@ -639,7 +639,10 @@ def run_simulation(
                 x_endstop = (0, 10)
                 idle_level = 1 if homing_sensorless_test else 0
                 trip_level = 1 - idle_level
-                trip_delay_s = 3.0
+                # Past the 2s sim anchor lead plus margin, so the trip lands
+                # mid-motion and the rewind proves the freeze stopped a
+                # moving axis (~6s × 10 mm/s ≈ 60 mm expected).
+                trip_delay_s = 8.0
                 # position_max 250 * klipper's 1.5 overshoot / 10 mm/s
                 full_travel_s = 250 * 1.5 / 10.0
                 endstop = EndstopTrigger(
@@ -794,14 +797,18 @@ def run_simulation(
                             "'homing: steps_moved' line — cannot verify "
                             "the trip rewind"
                         )
-                    elif moved_mm > 100.0:
+                    elif not 10.0 <= moved_mm <= 100.0:
                         # Until Part B's drip dispatch lands, G28 returns at
                         # the move's wall-clock end; the proof the MCU froze
                         # at the trip is the rewind distance, not latency.
+                        # The trip lands ~6s into a 10mm/s move: ~60mm. Near
+                        # zero = position tracking never advanced (the trip
+                        # snapshot is the seed, the rewind is fiction); near
+                        # full travel = the freeze did not stop the axis.
                         error = (
                             "G28 X succeeded but the trip snapshot rewound "
-                            "%.1fmm — the toolhead ran well past the trip "
-                            "point (full travel = 375mm)" % moved_mm
+                            "%.1fmm — expected ~60mm for a trip 6s into a "
+                            "10mm/s move (full travel = 375mm)" % moved_mm
                         )
                     else:
                         log.info(
