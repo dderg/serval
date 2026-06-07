@@ -82,6 +82,11 @@ static const int step_gpio_lines[N_AXIS_STEP_QUEUES] = { 18, 7, 15, -1 };
 static void (*sim_notify_step)(int chip, int line, int32_t n_steps);
 #endif
 
+// One sample period expressed in MCU clock cycles.
+// CONFIG_CLOCK_FREQ = 50 MHz for MACH_LINUX; HOST_TICK_HZ = 1000 Hz.
+// Result: 50 000 cycles, matching sample_period_cycles in the Rust engine.
+#define HOST_TICK_CYCLES ((uint32_t)(CONFIG_CLOCK_FREQ / HOST_TICK_HZ))
+
 static void *
 host_tick_main(void *arg)
 {
@@ -93,6 +98,9 @@ host_tick_main(void *arg)
 
     struct timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
+
+    // Last MCU clock value seen at tick-thread wake. Zero = not yet set.
+    uint32_t last_tick_clk = 0;
 
     while (1) {
         next.tv_nsec += HOST_TICK_NS;
@@ -106,6 +114,24 @@ host_tick_main(void *arg)
             continue;
         if (!runtime_handle)
             continue;
+
+        // On MACH_LINUX, the MCU main loop runs on a separate CPU core and
+        // can advance virtual time by N*sample_period in one ppoll-timer step
+        // while this thread sleeps between ticks. When vtime jumps, the tick
+        // thread fires all skipped ticks at the same virtual `now`, and the
+        // runtime's inter-arrival gap guard (last_tick_now diff) sees a gap
+        // of N*sample_period instead of 1, tripping TickIntervalExceeded.
+        //
+        // Detect the jump here (actual MCU clock advanced by > 2 periods
+        // since the last tick) and reset the gap baseline before the engine
+        // sees the first tick after the jump.
+        uint32_t now_clk = timer_read_time();
+        if (last_tick_clk != 0) {
+            uint32_t gap_clk = now_clk - last_tick_clk;
+            if (gap_clk > 2 * HOST_TICK_CYCLES)
+                kalico_runtime_clear_last_tick_now(runtime_handle);
+        }
+        last_tick_clk = now_clk;
 
 #if !CONFIG_KALICO_SIM
         runtime_endstop_sample_pins();
@@ -145,10 +171,32 @@ runtime_tick_init(void)
         return;
     clock_gettime(CLOCK_MONOTONIC, &host_tick_t0);
 
-
     pthread_attr_t attr;
     pthread_attr_init(&attr);
+
+    // Request SCHED_FIFO for the tick thread to mirror TIM5 ISR preemption
+    // semantics on MACH_LINUX. Without it, the CFS scheduler may let the MCU
+    // main loop advance virtual time by >1 sample period before the tick
+    // thread wakes, triggering TickIntervalExceeded (gap > 2*sample_period).
+    //
+    // Requires CAP_SYS_NICE (--privileged in Docker or cap_sys_nice on bare
+    // Linux). Failure is non-fatal: CFS ticks are noisier but still correct
+    // on lightly loaded hosts. The error is printed so sim runs expose it.
+    struct sched_param sp;
+    sp.sched_priority = (sched_get_priority_max(SCHED_FIFO)
+                         + sched_get_priority_min(SCHED_FIFO)) / 2;
+    if (pthread_attr_setschedpolicy(&attr, SCHED_FIFO) == 0
+        && pthread_attr_setschedparam(&attr, &sp) == 0)
+        pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+    else
+        fprintf(stderr, "kalico_host_tick: SCHED_FIFO attr setup failed"
+                " — tick jitter possible\n");
+
     int rc = pthread_create(&host_tick_thread, &attr, host_tick_main, NULL);
+    if (rc == EPERM)
+        // SCHED_FIFO requires CAP_SYS_NICE; retry at CFS with no priority
+        // attributes so the tick still starts on unprivileged hosts.
+        rc = pthread_create(&host_tick_thread, NULL, host_tick_main, NULL);
     pthread_attr_destroy(&attr);
     if (rc != 0) {
         fprintf(stderr, "kalico_host_tick: pthread_create failed: %d\n", rc);

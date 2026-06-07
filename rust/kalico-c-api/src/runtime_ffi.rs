@@ -121,6 +121,32 @@ pub mod exports {
         }
     }
 
+    // Clear `isr.last_tick_now` so the inter-arrival gap guard resets its
+    // baseline. Called from the MACH_LINUX tick thread whenever `timer_read_time()`
+    // shows a larger-than-expected virtual-time advance since the last tick —
+    // a vtime jump caused by the MCU main loop's ppoll vtimer firing on another
+    // core. Without this reset, the gap guard fires `TickIntervalExceeded` for a
+    // jump that is an artefact of the multi-core vtime model, not real starvation.
+    #[cfg(not(target_os = "none"))]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kalico_runtime_clear_last_tick_now(rt: *mut KalicoRuntime) {
+        if rt.is_null() {
+            return;
+        }
+        if !INIT_DONE.load(Ordering::Acquire) {
+            return;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        // SAFETY: ISR owns IsrState; this clears last_tick_now before the ISR reads it.
+        // On MACH_LINUX, the "ISR" is the tick pthread itself — this is called from the
+        // same pthread before isr_sample_tick, so there is no data race.
+        unsafe {
+            let isr_ptr: *mut IsrState =
+                UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+            (*isr_ptr).last_tick_now = None;
+        }
+    }
+
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_status(rt: *mut KalicoRuntime) -> u8 {
         if rt.is_null() {
@@ -464,7 +490,23 @@ pub mod exports {
         // SAFETY: foreground-only; single-threaded command dispatch, no concurrent TIM5.
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-            (*isr_ptr).engine.seed_position([x, y, z]);
+            let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
+            let engine = &mut (*isr_ptr).engine;
+            engine.seed_position([x, y, z]);
+            // Mirror the seeded step counts into shared.stepper_counts so that
+            // endstop::collect_stepper_counts sees the correct baseline at trip time.
+            // Without this mirror the array stays zero and trip events report step_count=0
+            // (producing steps_moved = trip_count - start_count = 0 - seed = -seed×step_mm).
+            for axis_opt in engine.stepping_axes.iter() {
+                let Some(axis) = axis_opt else { continue };
+                for stepper in axis.steppers.iter() {
+                    let oid = usize::from(stepper.stepper_oid);
+                    let count = stepper.position_count.load(Ordering::Acquire);
+                    if let Some(slot) = (*shared_ptr).stepper_counts.get(oid) {
+                        slot.store(count, Ordering::Release);
+                    }
+                }
+            }
         }
         KALICO_OK
     }

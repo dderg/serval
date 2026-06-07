@@ -156,22 +156,44 @@ fn dispatch_pulse(
     }
     let abs_steps = signed_steps.unsigned_abs();
     if abs_steps > crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE as u32 {
-        shared
-            .isr_last_t_start_lo
-            .store(abs_steps, core::sync::atomic::Ordering::Relaxed);
-        if axis_idx == AXIS_A {
-            shared
-                .isr_last_p_end_bits
-                .store(p_end.to_bits(), core::sync::atomic::Ordering::Relaxed);
-            shared.isr_last_microstep_bits.store(
-                microstep_distance.to_bits(),
-                core::sync::atomic::Ordering::Relaxed,
-            );
+        #[cfg(feature = "host")]
+        {
+            // MACH_LINUX sim: the anchor lead (KALICO_ANCHOR_LEAD_SECS=2.0) causes
+            // expired pieces to be skipped silently, leaving axis.last_step_count at
+            // the seed value while eval_horner lands on an active piece far ahead in
+            // position-space. The resulting deficit (can be hundreds of steps) always
+            // exceeds MAX_STEPS_PER_SAMPLE, so the overrun guard fires every tick
+            // and the position is reverted — shared.stepper_counts never advances.
+            //
+            // On the host we want accurate trip-position snapshots, not physical
+            // step pulses. Advance the position tracker to match the evaluated
+            // position without pushing steps to the queue. The step queue drain
+            // in runtime_tick_host.c (which calls sim_notify_step) is responsible
+            // for GPIO-level step accounting in the sim; our position counter
+            // serves a different purpose (endstop trip reporting).
+            axis.last_step_count = target_step_count;
+            commit_position_count(axis, axis_idx, shared, signed_steps);
+            return;
         }
-        bump_relaxed(&shared.isr_overrun_count);
-        axis.last_step_count = prev_step_count;
-        raise_steps_per_sample_exceeded(shared, axis_idx, abs_steps);
-        return;
+        #[cfg(not(feature = "host"))]
+        {
+            shared
+                .isr_last_t_start_lo
+                .store(abs_steps, core::sync::atomic::Ordering::Relaxed);
+            if axis_idx == AXIS_A {
+                shared
+                    .isr_last_p_end_bits
+                    .store(p_end.to_bits(), core::sync::atomic::Ordering::Relaxed);
+                shared.isr_last_microstep_bits.store(
+                    microstep_distance.to_bits(),
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            bump_relaxed(&shared.isr_overrun_count);
+            axis.last_step_count = prev_step_count;
+            raise_steps_per_sample_exceeded(shared, axis_idx, abs_steps);
+            return;
+        }
     }
 
     let inputs = StepTimeInputs {
@@ -258,6 +280,13 @@ pub(crate) fn commit_position_count(
             return;
         };
         stepper.position_count.store(next, Ordering::Release);
+        // Mirror into shared.stepper_counts so endstop::collect_stepper_counts
+        // can snapshot the live count at trip time via OID lookup. Without this
+        // mirror the array stays zero and every trip event reports step_count=0.
+        let oid = usize::from(stepper.stepper_oid);
+        if let Some(slot) = shared.stepper_counts.get(oid) {
+            slot.store(next, Ordering::Release);
+        }
     }
 }
 

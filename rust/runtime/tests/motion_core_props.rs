@@ -20,9 +20,9 @@
 //! 2. **Ring empty** — returns `None` without faulting. Covered by
 //!    `walker_branch2_empty_ring_returns_none`.
 //!
-//! 3. **Adopted piece exceeds drift-budget tolerance** — `TestFaultSink` count
-//!    increments, returns `None`. Covered by
-//!    `walker_branch3_past_piece_faults` and `walker_fault_boundary_exact`.
+//! 3. **Expired piece with deficit > fault_tolerance** — `PieceStartInPast`
+//!    fires. `TestFaultSink` count increments, returns `None`. Covered by
+//!    `walker_branch3_past_piece_faults` and `walker_fault_boundary_*`.
 //!
 //! 4. (Walk/load) — walked-past pieces retired without monomialisation; only
 //!    the landed piece is armed.
@@ -37,13 +37,21 @@
 //!   `drift_budget = (200e-6 * 520_000_000) as u64 = 104_000`
 //!   `fault_tolerance = 104_000 + 13_000 = 117_000`
 //!
-//! `now.saturating_sub(start) > fault_tolerance` is the trigger (strictly greater-than).
-//! - `== fault_tolerance` → NO fault.
-//! - `== fault_tolerance + 1` → fault.
+//! The fault condition is: piece is EXPIRED (now >= end_time) AND
+//! `now.saturating_sub(start) > fault_tolerance` (strictly greater-than).
+//! - Piece still active (`now < end_time`) → ALWAYS adopted, no fault.
+//! - Piece expired AND deficit == fault_tolerance → retire, no fault.
+//! - Piece expired AND deficit == fault_tolerance + 1 → PieceStartInPast fault.
 //!
 //! These exact values are load-bearing: they were derived and validated
 //! on hardware. Any refactor that changes the formula or inequality sense must
 //! be explicitly confirmed with the user.
+//!
+//! Tests for the fault boundary use a SHORT piece (duration < fault_tolerance
+//! cycles) so the piece is expired at `now = start + FAULT_TOLERANCE + 1`.
+//! At 520MHz, FAULT_TOLERANCE = 117_000 cycles = 225µs; use duration = 100µs
+//! (52_000 cycles). At `now = start + 117_001`, piece is expired (52_000 < 117_001)
+//! and deficit (117_001) > fault_tolerance (117_000) → fault fires.
 
 use std::cell::Cell;
 
@@ -252,10 +260,17 @@ fn walker_branch2_configured_empty_ring_returns_none() {
     assert_eq!(fault.fault_count(), 0);
 }
 
-// ── Branch 3: piece start exceeds drift-budget tolerance → fault ─────────────
+// ── Branch 3: expired piece past fault_tolerance ─────────────────────────────
+//
+// Hardware: hard-faults PieceStartInPast, returns None, does not retire.
+// Host (MACH_LINUX): silently retires, ring drains, returns None — no fault.
 
-/// Push a piece with start_time = 1_000 cycles. Call walker at
-/// `now = 1_000 + FAULT_TOLERANCE + 1` (lateness = fault_tolerance + 1 cycles).
+/// **Hardware only** — Push a short piece (100µs = 52_000 cycles at 520MHz)
+/// with start_time = 1_000 cycles. Call walker at `now = 1_000 + FAULT_TOLERANCE + 1`.
+///
+/// At this `now`:
+///   - Piece is EXPIRED: now (118_001) > end_time (start + 52_000 = 53_000).
+///   - Deficit: 117_001 > fault_tolerance (117_000) → PieceStartInPast fires.
 ///
 /// Expects:
 ///   - `None` returned
@@ -266,12 +281,14 @@ fn walker_branch2_configured_empty_ring_returns_none() {
 /// calling `advance_counter`, so `retired` stays at 0. This matches the spec
 /// (fault = hard stop, not a soft retire).
 ///
-/// Tolerance at 520 MHz / 40 kHz:
-///   drift_budget = 104_000 cycles, fault_tolerance = 117_000 cycles.
+/// On the host build this test is skipped: expired pieces are silently retired
+/// (not faulted) on MACH_LINUX to tolerate CFS scheduler jitter.
 #[test]
+#[cfg(not(feature = "host"))]
 fn walker_branch3_past_piece_faults() {
     let start = 1_000_u64;
-    let entry = make_entry(start, [0.0; 4], 0.1);
+    // 100µs piece → 52_000 cycles at 520MHz. Expired before fault threshold.
+    let entry = make_entry(start, [0.0; 4], 0.000_100);
     let (mut ring, mut storage) = ring_with_one(entry);
 
     let fault = TestFaultSink::new();
@@ -301,6 +318,49 @@ fn walker_branch3_past_piece_faults() {
         ring.retired_count(),
         0,
         "branch 3: retired must NOT be incremented on a fault (hard-stop semantics)"
+    );
+}
+
+/// **Host build** — Same scenario as `walker_branch3_past_piece_faults` but on
+/// MACH_LINUX: an expired piece past fault_tolerance is silently retired (no
+/// fault). The ring empties and the walker returns `None`.
+#[test]
+#[cfg(feature = "host")]
+fn walker_branch3_host_expired_piece_silently_retired() {
+    let start = 1_000_u64;
+    // 100µs piece → 52_000 cycles at 520MHz. Expired at `now = start + 117_001`.
+    let entry = make_entry(start, [0.0; 4], 0.000_100);
+    let (mut ring, mut storage) = ring_with_one(entry);
+
+    let fault = TestFaultSink::new();
+    let mut armed = None;
+
+    let now = start + FAULT_TOLERANCE + 1;
+    let res = get_position_and_velocity(
+        &mut armed,
+        &mut ring,
+        &mut storage,
+        now,
+        TICK_CYCLES,
+        CLOCK_FREQ,
+        0,
+        &fault,
+    );
+
+    assert!(
+        res.is_none(),
+        "host: expired piece past tolerance must return None (ring empty after silent retire)"
+    );
+    assert_eq!(
+        fault.fault_count(),
+        0,
+        "host: no fault must fire for expired piece — MACH_LINUX silently retires"
+    );
+    // The piece was retired: ring.retired_count() == 1.
+    assert_eq!(
+        ring.retired_count(),
+        1,
+        "host: retired_count must be 1 after silent retire of the expired piece"
     );
 }
 
@@ -350,17 +410,28 @@ fn walker_fault_boundary_exact_is_not_a_fault() {
     );
 }
 
-/// `now - start == FAULT_TOLERANCE + 1` IS a fault.
+/// **Hardware only** — `now - start == FAULT_TOLERANCE + 1` IS a fault when the
+/// piece is expired.
 ///
 /// This pins the upper side of the boundary: one cycle past the tolerance
-/// must trigger the fault.
+/// must trigger the fault when now >= end_time.
+///
+/// Uses a short piece (100µs = 52_000 cycles at 520MHz) so end_time =
+/// start + 52_000. At `now = start + FAULT_TOLERANCE + 1 = start + 117_001`:
+///   - Piece is expired (117_001 > 52_000).
+///   - Deficit 117_001 > fault_tolerance 117_000 → PieceStartInPast fires.
+///
+/// On the host build this test is skipped: expired pieces are silently retired
+/// (not faulted) on MACH_LINUX regardless of deficit.
 ///
 /// Tolerance at 520 MHz / 40 kHz: FAULT_TOLERANCE = 117_000 cycles.
 #[test]
+#[cfg(not(feature = "host"))]
 fn walker_fault_boundary_plus_one_is_a_fault() {
     let start = 1_000_u64;
 
-    let entry = make_entry(start, [0.0; 4], 0.1);
+    // 100µs piece → 52_000 cycles at 520MHz. Expired well before fault threshold.
+    let entry = make_entry(start, [0.0; 4], 0.000_100);
     let (mut ring, mut storage) = ring_with_one(entry);
     let fault = TestFaultSink::new();
     let mut armed = None;

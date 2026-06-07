@@ -22,11 +22,8 @@ pub struct ArmedPiece {
 /// Advance the axis to the correct piece for `now`, returning
 /// `(position, velocity)` if an active piece exists.
 ///
-/// Two invariants must be preserved:
-/// - Walk/load split: only the landed piece is monomialised.
-/// - Fault-check runs BEFORE the `now < end` window return in
-///   `get_piece_for_time`; inverting the order silently drops the
-///   cold-adoption fault.
+/// Walk/load split: only the landed piece is monomialised (to_monomial is
+/// the dominant cost; calling it for every expired piece would be O(walk-depth)).
 #[inline]
 pub fn get_position_and_velocity<F: FaultSink>(
     armed: &mut Option<ArmedPiece>,
@@ -48,6 +45,18 @@ pub fn get_position_and_velocity<F: FaultSink>(
                 now,
                 cycles_per_second,
             ));
+        }
+        #[cfg(feature = "host")]
+        {
+            let end = p.piece_end_cycles;
+            let overshoot = now.saturating_sub(end);
+            if overshoot > 30_000 {
+                let start = p.piece_start_cycles;
+                eprintln!(
+                    "[piece-trace] axis={axis_idx} now={now} armed_expired_late: \
+                     start={start} end={end} overshoot={overshoot}"
+                );
+            }
         }
         *armed = None;
         ring.advance_counter();
@@ -91,11 +100,21 @@ pub fn get_position_and_velocity<F: FaultSink>(
 /// entries WITHOUT monomialising them. Returns the physical slot index of the
 /// landed piece, or `None` when the ring is empty.
 ///
-/// Hard-faults `PieceStartInPast` when a freshly adopted piece's start is
-/// more than `drift_budget + sample_period_cycles` in the past.
+/// **Hardware behavior** (`not(feature = "host")`):
+/// Hard-faults `PieceStartInPast` when an expired piece's start is more than
+/// `drift_budget + sample_period_cycles` in the past — genuine engine starvation
+/// (MCU suspended long enough to miss a piece). The fault fires and returns `None`.
 ///
-/// CRITICAL: the fault-check runs BEFORE the `now < end` window return so
-/// that a cold-adopted front is always checked.
+/// **MACH_LINUX host behavior** (`feature = "host"`):
+/// Expired pieces are ALWAYS silently retired — never faulted. The Linux
+/// kernel CFS scheduler can delay the tick thread by up to ~2ms, which is
+/// enough to expire one or two consecutive 0.8–1.6ms homing pieces in a
+/// single missed-tick event. Silent retire lets the engine skip to the next
+/// active piece and continue motion. `PieceStartInPast` is never signalled
+/// on the host; ring-empty (`None`) is the only starvation signal.
+///
+/// **Both**: a still-active piece (`now < end_time`) is always adopted,
+/// regardless of how late its start was observed.
 #[inline]
 fn get_piece_for_time<F: FaultSink>(
     ring: &mut RingDescriptor,
@@ -116,14 +135,47 @@ fn get_piece_for_time<F: FaultSink>(
         // and `tail < ring_depth` always holds. Therefore `slot < storage.len()`.
         #[allow(clippy::indexing_slicing)]
         let entry = &storage[slot];
-        let deficit_cycles = now.saturating_sub(entry.start_time);
-        if deficit_cycles > fault_tolerance {
-            let deficit_us = (deficit_cycles as f32 * (1.0e6_f32 / cycles_per_second)) as u32;
-            fault.piece_start_in_past(axis_idx, deficit_us);
-            return None;
-        }
-        if now < entry.end_time(cycles_per_second) {
+        let end_time = entry.end_time(cycles_per_second);
+        if now < end_time {
+            // Piece is still active — adopt it unconditionally. Even if its
+            // start is late (tick jitter on MACH_LINUX), eval_horner at `now`
+            // gives the correct position within the active window.
             return Some(slot);
+        }
+        // Piece has expired (now >= end_time).
+        #[cfg(not(feature = "host"))]
+        {
+            // Hardware: fault if the piece was missed by more than the tolerance.
+            // On real silicon the tick is driven by TIM5 at SCHED_FIFO-equivalent
+            // priority; missing a piece by > fault_tolerance indicates genuine
+            // starvation (IWDG stall, bus lock, etc.) and position is lost.
+            let deficit_cycles = now.saturating_sub(entry.start_time);
+            if deficit_cycles > fault_tolerance {
+                let deficit_us =
+                    (deficit_cycles as f32 * (1.0e6_f32 / cycles_per_second)) as u32;
+                fault.piece_start_in_past(axis_idx, deficit_us);
+                return None;
+            }
+        }
+        #[cfg(feature = "host")]
+        {
+            // MACH_LINUX: silently retire expired pieces regardless of deficit.
+            // The Linux CFS scheduler can delay the tick thread by up to ~2ms,
+            // expiring one or two consecutive short pieces in a single sleep
+            // overrun. Faulting here would abort motion on a recoverable
+            // transient; just skip and find the next active piece.
+            let _ = (fault, fault_tolerance); // not used on host
+            let deficit_cycles = now.saturating_sub(entry.start_time);
+            let deficit_us = (deficit_cycles as f32 * (1.0e6_f32 / cycles_per_second)) as u32;
+            eprintln!(
+                "[piece-trace] axis={axis_idx} now={now} SKIP-EXPIRED: \
+                 start={} end={end_time} deficit_us={deficit_us} \
+                 ring_head={} ring_retired={} ring_tail={}",
+                entry.start_time,
+                ring.head,
+                ring.retired,
+                ring.tail,
+            );
         }
         ring.advance_counter();
     }

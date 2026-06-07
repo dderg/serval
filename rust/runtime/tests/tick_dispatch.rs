@@ -180,11 +180,12 @@ fn pulse_queue_overflow_latches_fault() {
     assert_eq!(shared.queue_overflow_count[2].load(Ordering::Acquire), 1);
 }
 
-/// A single-sample step delta beyond MAX_STEPS_PER_SAMPLE (16) is an
+/// Hardware: a single-sample step delta beyond MAX_STEPS_PER_SAMPLE (16) is an
 /// unrecoverable baseline discontinuity (e.g. a missing position seed). It
 /// must hard-fault with `StepsPerSampleExceeded` — like `PieceStartInPast` —
 /// not silently revert and freeze the axis. `fault_detail` carries the axis
 /// index in bits 16..24 and the saturated step count in the low 16 bits.
+#[cfg(not(feature = "host"))]
 #[test]
 fn pulse_steps_per_sample_exceeded_hard_faults() {
     let shared = SharedState::new();
@@ -222,6 +223,54 @@ fn pulse_steps_per_sample_exceeded_hard_faults() {
         shared.fault_detail.load(Ordering::Acquire),
         (1u32 << 16) | 40,
         "fault_detail encodes axis index and saturated step count"
+    );
+}
+
+/// Host: a single-sample delta beyond MAX_STEPS_PER_SAMPLE is silently advanced.
+/// MACH_LINUX anchor lead (KALICO_ANCHOR_LEAD_SECS≈1–2s) causes expired pieces to
+/// be skipped, leaving axis.last_step_count at the seed while eval_horner lands on
+/// an active piece whose position is hundreds of steps ahead. The host path
+/// advances the tracker (no fault, no revert) so shared.stepper_counts stays in
+/// sync for accurate endstop trip snapshots.
+#[cfg(feature = "host")]
+#[test]
+fn pulse_steps_per_sample_exceeded_host_advances_position() {
+    let shared = SharedState::new();
+    let mut q = StepQueue::new();
+    let mut axis = make_axis(StepMode::Pulse, 0.0125);
+
+    // p_end = 0.5 mm / 0.0125 = 40 microsteps from baseline 0 → 40 > 16.
+    let q_ptr: *mut StepQueue = &mut q;
+    dispatch_axis(
+        0,
+        &mut axis,
+        q_ptr,
+        &shared,
+        /* p_end */ 0.5,
+        /* v_end */ 0.0,
+        /* p_sample_start */ 0.0,
+        /* sample_period_sec */ 25e-6,
+        /* sample_start_cycles */ 0,
+        /* cycles_per_second */ 520_000_000.0,
+    );
+
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        0,
+        "host must not fault on over-threshold delta"
+    );
+    // No steps pushed to queue (physical pulses skipped on host).
+    assert_eq!(q.tail, q.head, "no steps may be enqueued on host overrun");
+    // Baseline advanced to match eval_horner's evaluated position.
+    assert_eq!(
+        axis.last_step_count, 40,
+        "host must advance last_step_count to target"
+    );
+    // shared.stepper_counts[0] mirrors the advanced position.
+    assert_eq!(
+        shared.stepper_counts[0].load(Ordering::Acquire),
+        40,
+        "stepper_counts[0] must reflect the advanced position"
     );
 }
 

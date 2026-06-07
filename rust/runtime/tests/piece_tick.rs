@@ -224,18 +224,19 @@ fn tick_idle_when_ring_empty() {
     assert_eq!(engine.retired_counts()[0], 0);
 }
 
-// ── Test 4: fault on piece start in past ─────────────────────────────────────
+// ── Test 4: expired piece past drift-budget tolerance ────────────────────────
+//
+// Hardware: PieceStartInPast fires.
+// Host (MACH_LINUX): piece silently retired; ring empty; no fault.
 
-/// Push a piece with `start_time = 1_000`.  Tick well past the drift-budget
-/// fault tolerance and confirm `PieceStartInPast` is latched.
+/// **Hardware only** — Push a SHORT piece that is entirely elapsed before the
+/// tick arrives. Confirm `PieceStartInPast` is latched.
 ///
-/// Tolerance at 520 MHz / 40 kHz (TICK_CYCLES = 13_000):
-///   drift_budget = 200 µs × 520_000_000 Hz = 104_000 cycles
-///   fault_tolerance = 104_000 + 13_000 = 117_000 cycles
-///
-/// We tick at start + 10 × TICK_CYCLES = start + 130_000, which exceeds
-/// 117_000 and must trigger the fault.
+/// On the host build this path is skipped: MACH_LINUX silently retires expired
+/// pieces to tolerate CFS scheduler jitter. The host-build assertion is
+/// covered by `tick_expired_piece_host_silent_retire` below.
 #[test]
+#[cfg(not(feature = "host"))]
 fn tick_faults_on_piece_start_in_past() {
     let mut engine = make_engine();
     configure_axis0(&mut engine, 64);
@@ -251,7 +252,8 @@ fn tick_faults_on_piece_start_in_past() {
     ];
 
     let start = 1_000_u64;
-    let piece = const_piece(start, 0.001);
+    // 100µs piece → 52_000 cycles at 520MHz. Expired before now arrives.
+    let piece = const_piece(start, 0.000_100);
     let rc = engine.push_pieces(0, &[piece], &mut storage);
     assert_eq!(rc, 0);
 
@@ -261,14 +263,53 @@ fn tick_faults_on_piece_start_in_past() {
     engine.test_install_step_queues(qs);
 
     let shared = SharedState::new();
-    // 10 ticks past start (130_000 cycles) — exceeds drift-budget tolerance (117_000).
     let now = start + TICK_CYCLES * 10;
     engine.tick(now, &shared, &mut storage);
 
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
         FaultCode::PieceStartInPast.as_i32(),
-        "PieceStartInPast fault must be latched when piece exceeds drift-budget tolerance"
+        "PieceStartInPast fault must be latched for an expired piece with deficit > fault_tolerance"
+    );
+}
+
+/// **Host build** — Same scenario on MACH_LINUX: expired piece is silently
+/// retired, no fault fires.
+#[test]
+#[cfg(feature = "host")]
+fn tick_expired_piece_host_silent_retire() {
+    let mut engine = make_engine();
+    configure_axis0(&mut engine, 64);
+
+    let mut storage = vec![
+        PieceEntry {
+            start_time: 0,
+            coeffs: [0.0; 4],
+            duration: 0.0,
+            _reserved: 0
+        };
+        TOTAL_RING_PIECES
+    ];
+
+    let start = 1_000_u64;
+    // 100µs piece → 52_000 cycles at 520MHz.
+    let piece = const_piece(start, 0.000_100);
+    let rc = engine.push_pieces(0, &[piece], &mut storage);
+    assert_eq!(rc, 0);
+
+    let mut q0 = StepQueue::new();
+    let mut qs: [*mut StepQueue; MAX_AXES] = [core::ptr::null_mut(); MAX_AXES];
+    qs[0] = &mut q0;
+    engine.test_install_step_queues(qs);
+
+    let shared = SharedState::new();
+    let now = start + TICK_CYCLES * 10;
+    engine.tick(now, &shared, &mut storage);
+
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        0,
+        "host: MACH_LINUX must silently retire expired piece — no fault"
     );
 }
 

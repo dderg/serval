@@ -97,6 +97,8 @@ int32_t kalico_endstop_set_pin_level(uint16_t gpio, uint8_t level);
 
 int32_t kalico_extend_deadline(uint32_t arm_id, uint32_t clock_lo, uint32_t clock_hi);
 
+void kalico_runtime_clear_last_tick_now(struct KalicoRuntime *rt);
+
 int32_t kalico_runtime_clock_sync_request(struct KalicoRuntime *rt,
                                           uint32_t request_id,
                                           uint32_t host_send_time_lo,
