@@ -350,6 +350,7 @@ def run_simulation(
     phase_stepping: bool = False,
     homing_test: bool = False,
     homing_gpio_test: bool = False,
+    homing_sensorless_test: bool = False,
     serve: bool = False,
     serve_data_dir=None,
 ) -> SimResult:
@@ -473,6 +474,7 @@ def run_simulation(
                 phase_stepping=phase_stepping,
                 homing_test=homing_test,
                 homing_gpio_test=homing_gpio_test,
+                homing_sensorless_test=homing_sensorless_test,
             )
 
             if serve:
@@ -621,23 +623,32 @@ def run_simulation(
             # Record virtual time at start
             vtime_start = vtime_read_ns()
 
-            if homing_gpio_test:
-                # -- GPIO endstop mid-move trip test (G28 X) ---------------
+            if homing_gpio_test or homing_sensorless_test:
+                # -- endstop mid-move trip test (G28 X) --------------------
                 # The firmware build has CONFIG_KALICO_SIM unset, so it
                 # samples armed endstop GPIOs through the shim every host
-                # tick — asserting the pin via sim_control is exactly what
-                # a closing physical switch looks like to the firmware.
+                # tick — driving the pin via sim_control is exactly what
+                # the physical signal looks like to the firmware.
+                # GPIO mode: plain switch, idle low, asserts high.
+                # Sensorless mode: TMC DIAG via ^! pin (the bench shape) —
+                # idle high (pullup), asserts LOW; arm is kind=TmcDiag with
+                # policy=IgnoreUntilMoving.
                 # G28 X runs on a worker thread because the homing wait can
                 # block klippy's reactor (API socket included); the trip
                 # must be injected from outside klippy.
-                x_endstop = (0, 10)  # ^gpiochip0/gpio10 in minimal config
+                x_endstop = (0, 10)
+                idle_level = 1 if homing_sensorless_test else 0
+                trip_level = 1 - idle_level
                 trip_delay_s = 3.0
                 # position_max 250 * klipper's 1.5 overshoot / 10 mm/s
                 full_travel_s = 250 * 1.5 / 10.0
                 endstop = EndstopTrigger(
                     str(h7_sock_dir / "sim_control"), [x_endstop]
                 )
-                endstop.clear()
+                endstop._send_cmd(
+                    "set_gpio_input chip=%d line=%d value=%d"
+                    % (x_endstop[0], x_endstop[1], idle_level)
+                )
 
                 g28: dict = {}
 
@@ -651,11 +662,16 @@ def run_simulation(
                 worker = threading.Thread(target=_g28_worker, daemon=True)
                 worker.start()
                 time.sleep(trip_delay_s)
-                endstop.trigger_once()
+                endstop._send_cmd(
+                    "set_gpio_input chip=%d line=%d value=%d"
+                    % (x_endstop[0], x_endstop[1], trip_level)
+                )
                 t_trip = time.monotonic()
                 log.info(
-                    "Homing GPIO test: X endstop pin asserted %.1fs into "
+                    "Homing %s test: X endstop pin driven to %d %.1fs into "
                     "G28 X (full travel would take %.0fs)",
+                    "sensorless" if homing_sensorless_test else "GPIO",
+                    trip_level,
                     t_trip - g28.get("t0", t_trip),
                     full_travel_s,
                 )
@@ -688,7 +704,51 @@ def run_simulation(
                 )
 
                 error = None
-                if worker.is_alive():
+                if homing_sensorless_test:
+                    # Chain-evidence verdict: until the sim's piece-adoption
+                    # defect is fixed no motion runs in Docker, so assert the
+                    # detection/relay chain itself on the bench's arm shape.
+                    arm_m = re.search(
+                        r"endstop_arm arm_id=\d+ sources=\[\((\d+), \d+, "
+                        r"(\w+), (\d+),",
+                        klippy_content,
+                    )
+                    trip_decoded = re.search(
+                        r"trip_event=\{[^}]*'fmt_version': 1[^}]*'steppers'",
+                        klippy_content,
+                    ) or re.search(
+                        r"trip_event=\{[^}]*'steppers'[^}]*'fmt_version': 1",
+                        klippy_content,
+                    )
+                    if arm_m is None:
+                        error = (
+                            "sensorless arm never happened — no endstop_arm "
+                            "in klippy.log"
+                        )
+                    elif (arm_m.group(1), arm_m.group(2), arm_m.group(3)) != (
+                        "1",
+                        "False",
+                        "2",
+                    ):
+                        error = (
+                            "arm shape mismatch: kind=%s active_high=%s "
+                            "policy=%s (bench shape is kind=1 TmcDiag, "
+                            "active_high=False, policy=2 IgnoreUntilMoving)"
+                            % (arm_m.group(1), arm_m.group(2), arm_m.group(3))
+                        )
+                    elif not trip_decoded:
+                        error = (
+                            "DIAG asserted but no decoded kalico_endstop_"
+                            "tripped reached home_wait — detection or relay "
+                            "broke on the sensorless branch"
+                        )
+                    else:
+                        log.info(
+                            "Sensorless chain: arm(kind=TmcDiag, "
+                            "IgnoreUntilMoving, active-low) + decoded trip "
+                            "event — detection and relay fired"
+                        )
+                elif worker.is_alive():
                     error = (
                         "G28 X still running %.0fs after the endstop pin "
                         "asserted — motion never stopped"
@@ -1074,6 +1134,7 @@ def _prepare_config(
     phase_stepping: bool = False,
     homing_test: bool = False,
     homing_gpio_test: bool = False,
+    homing_sensorless_test: bool = False,
 ) -> pathlib.Path:
     """Render printer.cfg with sim serial paths."""
     # Try to find config from sim_klippy
@@ -1084,6 +1145,10 @@ def _prepare_config(
                 f4_pty,
                 beacon_pty,
                 gcode_dir=str(tmp_dir / "gcodes"),
+            )
+        elif homing_sensorless_test:
+            cfg = _generate_sensorless_config(
+                h7_pty, f4_pty, gcode_dir=str(tmp_dir / "gcodes")
             )
         elif phase_stepping:
             cfg = _generate_phase_stepping_config(
@@ -1415,6 +1480,81 @@ position_min: -5
 position_endstop: 0
 position_max: 250
 homing_speed: 5
+
+[virtual_sdcard]
+path: {gcode_dir}
+
+[force_move]
+enable_force_move: True
+"""
+
+
+def _generate_sensorless_config(
+    h7_pty: str, f4_pty: str, gcode_dir: str = "/tmp/kalico_sim_gcodes"
+) -> str:
+    """X homes via a TMC5160 virtual endstop — the bench's exact arm shape:
+    kind=TmcDiag, policy=IgnoreUntilMoving, inverted+pulled-up DIAG pin
+    (mirrors the Trident's `diag1_pin: ^!PG9`).
+    """
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+kinematics: cartesian
+max_velocity: 100
+max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
+
+[stepper_x]
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+endstop_pin: tmc5160_stepper_x:virtual_endstop
+position_min: 0
+position_endstop: 0
+position_max: 250
+homing_speed: 10
+homing_retract_dist: 0
+
+[tmc5160 stepper_x]
+spi_bus: spidev0.0
+cs_pin: gpiochip0/gpio5
+run_current: 1.0
+sense_resistor: 0.075
+diag1_pin: ^!gpiochip0/gpio10
+
+[stepper_y]
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio20
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^gpiochip0/gpio11
+position_min: 0
+position_endstop: 0
+position_max: 250
+homing_speed: 10
+
+[stepper_z]
+step_pin: gpiochip0/gpio6
+dir_pin: gpiochip0/gpio7
+enable_pin: !gpiochip0/gpio21
+microsteps: 16
+rotation_distance: 4
+endstop_pin: ^gpiochip0/gpio12
+position_min: -5
+position_endstop: 0
+position_max: 250
+homing_speed: 5
+
+[input_shaper]
+shaper_freq_x: 50
+shaper_freq_y: 50
+shaper_type: smooth_mzv
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -1773,6 +1913,13 @@ def main():
         "the sim_control shim (the physical-switch scenario)",
     )
     parser.add_argument(
+        "--homing-sensorless-test",
+        action="store_true",
+        help="Full-mode G28 X with a TMC5160 virtual endstop and an "
+        "active-low DIAG driven mid-move (the Trident bench arm shape: "
+        "kind=TmcDiag, policy=IgnoreUntilMoving)",
+    )
+    parser.add_argument(
         "--homing-test",
         action="store_true",
         help="Run beacon Z homing test (dual-MCU CoreXY + beacon proximity)",
@@ -1824,6 +1971,7 @@ def main():
             phase_stepping=args.phase_test,
             homing_test=args.homing_test,
             homing_gpio_test=args.homing_gpio_test,
+            homing_sensorless_test=args.homing_sensorless_test,
             serve=args.serve,
             serve_data_dir=args.data_dir,
         )
@@ -1904,7 +2052,7 @@ def main():
             print("--- end bridge trace ---")
 
     if (
-        args.homing_gpio_test
+        (args.homing_gpio_test or args.homing_sensorless_test)
         and not result.success
         and result.klippy_log
     ):

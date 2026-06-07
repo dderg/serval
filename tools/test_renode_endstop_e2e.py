@@ -200,20 +200,11 @@ def _wait_for_response_with_id(io, name, arm_id, timeout=5.0):
 
 def test_arm_trip_disarm(io, renode):
     """Arm → assert pin → expect trip event → disarm and expect AlreadyTripped."""
-    # Make the runtime tick the endstop poll path. With no stream open,
-    # Engine::tick reaches poll_endstop_trip every period.
-
-    # TIM5 (40 kHz modulation timer) is gated until first-segment push in
-    # production. The e2e test never pushes a segment, so we use the
-    # sim-only `runtime_sim_engine_tick_start` shim to start TIM5 directly
-    # so endstop::tick runs each modulation period.
-    io.send("runtime_sim_engine_tick_start")
+    # TIM5 (40 kHz modulation timer) free-runs from runtime_tick_init at boot
+    # on this branch (src/stm32/runtime_tick_h7.c::runtime_tick_init enables
+    # CEN unconditionally), so endstop::tick runs each modulation period with
+    # no segment pushed and no extra start command.
     renode.advance_time(0.005)
-    tick_start_resp = io.wait_for_response(
-        "runtime_sim_engine_tick_start_response", timeout=3.0
-    )
-    assert int(tick_start_resp["result"]) == 0
-    print("[arm_trip] TIM5 enabled")
 
     arm_id = 0xA5A50001
     test_gpio = 17  # arbitrary slot in PIN_LEVELS table
@@ -393,7 +384,6 @@ def run(args):
             "runtime_arm_endstop",
             "runtime_disarm_endstop",
             "runtime_sim_endstop_set_pin",
-            "runtime_sim_engine_tick_start",
         ):
             assert need in names, (
                 "%s missing from data dict; rebuild with CONFIG_KALICO_SIM=y"

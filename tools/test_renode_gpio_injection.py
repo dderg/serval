@@ -93,7 +93,11 @@ class RenodeMonitor:
             raise RenodeFixtureError(
                 "out/klipper.elf not found; run tools/sim/build_sim_firmware.sh"
             )
-        resc = REPO_ROOT / "tools/sim/h723_sim.resc"
+        resc = pathlib.Path(
+            os.environ.get(
+                "KALICO_RESC", str(REPO_ROOT / "tools/sim/h723_sim.resc")
+            )
+        )
         config_path = pathlib.Path("/tmp/kalico-renode-fixture.cfg")
         config_path.write_text(
             "[general]\n"
