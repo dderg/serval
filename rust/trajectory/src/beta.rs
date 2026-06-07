@@ -66,6 +66,7 @@ pub struct PlannedBatch {
     pub converged: bool,
     pub beta_iterations: u8,
     pub beta_warning: Option<BetaWarning>,
+    pub max_slp_outer_iters: u32,
 }
 
 pub fn plan_batch_full(
@@ -81,6 +82,7 @@ pub fn plan_batch_full(
         converged: outcome.converged,
         beta_iterations: outcome.iterations,
         beta_warning: outcome.beta_warning,
+        max_slp_outer_iters: outcome.max_slp_outer_iters,
     })
 }
 
@@ -127,6 +129,13 @@ pub struct PlanStats {
     pub beta_iterations: u8,
     pub beta_converged: bool,
     pub segments: usize,
+    /// Maximum SLP outer-iteration count observed across all segments and beta
+    /// passes. Carries `outer_iters` from `SolveStatus::SolvedSlp` /
+    /// `DivergedSlp`; 0 when the base SOCP sufficed on every segment.
+    /// Diagnostic: values near `SLP_MAX_OUTER_ITERS` (50) + `SLP9_MAX_OUTER_ITERS`
+    /// (30) indicate pathological per-axis jerk convergence; each outer iteration
+    /// is one Clarabel solve so cost scales linearly with this counter.
+    pub slp_outer_iters: u32,
 }
 
 #[derive(Debug)]
@@ -147,6 +156,7 @@ pub fn plan_velocity_inner(
                 beta_iterations: 0,
                 beta_converged: true,
                 segments: 0,
+                slp_outer_iters: 0,
             },
         });
     }
@@ -159,6 +169,7 @@ pub fn plan_velocity_inner(
             beta_iterations: planned.beta_iterations,
             beta_converged: planned.converged,
             segments,
+            slp_outer_iters: planned.max_slp_outer_iters,
         },
     })
 }
@@ -168,6 +179,8 @@ struct BetaIterationOutcome {
     converged: bool,
     iterations: u8,
     beta_warning: Option<BetaWarning>,
+    /// Passed through from the last `BetaIterResult::max_slp_outer_iters`.
+    max_slp_outer_iters: u32,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -286,11 +299,13 @@ fn beta_iterate_inner(
         }
     };
 
+    let max_slp_outer_iters = result.max_slp_outer_iters;
     Ok(BetaIterationOutcome {
         result,
         converged,
         iterations,
         beta_warning,
+        max_slp_outer_iters,
     })
 }
 
@@ -324,6 +339,9 @@ struct BetaIterResult {
     joining_status: temporal::multi::JoiningStatus,
     _iteration: u8,
     global_ends: Vec<f64>,
+    /// Maximum SLP outer-iteration count across all segments in this beta pass.
+    /// `SolvedSlp { outer_iters }` carries the count; 0 when the base SOCP sufficed.
+    max_slp_outer_iters: u32,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -540,12 +558,24 @@ fn run_one_iteration(
         })
         .collect();
 
+    let max_slp_outer_iters: u32 = run_profiles
+        .iter()
+        .flat_map(|profiles| profiles.iter())
+        .map(|p| match p.status {
+            temporal::SolveStatus::SolvedSlp { outer_iters }
+            | temporal::SolveStatus::DivergedSlp { outer_iters, .. } => outer_iters,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+
     Ok(BetaIterResult {
         fitted,
         peaks,
         joining_status: last_joining_status,
         _iteration: 0,
         global_ends,
+        max_slp_outer_iters,
     })
 }
 

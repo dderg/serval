@@ -523,6 +523,7 @@ fn run_loop(
                 } = report;
                 let beta_iters = plan.beta_iterations;
                 let beta_converged = plan.beta_converged;
+                let slp_outer_iters = plan.slp_outer_iters;
                 tracing::debug!(
                     subsystem = "motion",
                     event = "replan_stats",
@@ -533,6 +534,7 @@ fn run_loop(
                     window_segments,
                     beta_iters,
                     beta_converged,
+                    slp_outer_iters,
                     emit_us,
                     drained = drained.len(),
                     dist_mm = move_dist,
@@ -551,6 +553,7 @@ fn run_loop(
                         window_segments,
                         beta_iters,
                         beta_converged,
+                        slp_outer_iters,
                         emit_us,
                         drained = drained.len(),
                         dist_mm = move_dist,
