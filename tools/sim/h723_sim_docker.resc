@@ -39,6 +39,6 @@ emulation SetGlobalQuantum "0.000100"
 
 machine StartGdbServer 3333 true
 
-sysbus LoadELF @out/klipper.elf
+sysbus LoadELF @out/klipper-h7-sim.elf
 
 echo "Renode kalico-h723-sim (Docker) ready."
