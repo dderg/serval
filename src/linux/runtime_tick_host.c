@@ -10,8 +10,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/resource.h>
-#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -90,16 +88,7 @@ host_tick_main(void *arg)
     (void)arg;
 
 #if CONFIG_KALICO_SIM
-    // The main thread's ppoll must advance virtual time, so deprioritise this
-    // tick thread below it (throughput is irrelevant in sim).
-    pid_t tid = (pid_t)syscall(SYS_gettid);
-    setpriority(PRIO_PROCESS, tid, 19);
-
     sim_notify_step = dlsym(RTLD_DEFAULT, "sim_intercept_notify_step");
-#else
-    // Real Linux MCU: this tick is the motion ISR — inherit the process
-    // scheduler (SCHED_FIFO with -r) rather than self-demoting, or it can't
-    // hold cadence under load and trips TickIntervalExceeded.
 #endif
 
     struct timespec next;

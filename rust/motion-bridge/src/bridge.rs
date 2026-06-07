@@ -2174,12 +2174,18 @@ impl PyMotionBridge {
         let pump_timeout = Duration::from_secs(5);
         let ring_depth_table_for_pump = ring_depth_table.clone();
         let router_for_pump = Arc::clone(&self.router);
+        let pump_mcu_clock_hz: HashMap<u32, f64> = self
+            .clock_freqs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let pump_thread_handle = std::thread::Builder::new()
             .name("push-pieces-pump".into())
             .spawn(move || {
                 let sink = crate::pump::WireSink {
                     transports: wire_transports,
                     timeout: pump_timeout,
+                    mcu_clock_hz: pump_mcu_clock_hz,
                 };
                 crate::pump::run_pump(
                     pump_rx,

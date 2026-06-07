@@ -466,6 +466,10 @@ impl std::fmt::Debug for McuTransport {
 pub struct WireSink {
     pub transports: HashMap<u32, McuTransport>,
     pub timeout: Duration,
+    /// Per-MCU clock frequency in Hz, populated from `set_clock_est` snapshots.
+    /// Used by the transit-diag log to convert `arrival_lead_ticks` to µs.
+    /// `send_frame` falls back to a coarse heuristic when the MCU id is absent.
+    pub mcu_clock_hz: HashMap<u32, f64>,
 }
 
 impl WireSink {
@@ -589,7 +593,9 @@ impl PieceSink for WireSink {
 
         {
             let arrival_lead_ticks = r.front_start_time as i64 - r.arrival_clock as i64;
-            let approx_freq_hz: f64 = if r.arrival_clock > 1_000_000_000_000 {
+            let approx_freq_hz: f64 = if let Some(&f) = self.mcu_clock_hz.get(&key.mcu_id) {
+                f
+            } else if r.arrival_clock > 1_000_000_000_000 {
                 1_000_000_000.0
             } else if key.mcu_id == 0 {
                 520_000_000.0

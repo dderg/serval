@@ -36,6 +36,7 @@ fn closed_peer_yields_fatal_send_error() {
             m
         },
         timeout: Duration::from_millis(50),
+        mcu_clock_hz: HashMap::new(),
     };
     let pieces = one_piece();
     match sink.call_push_pieces(key(), &pieces, 0, 1) {

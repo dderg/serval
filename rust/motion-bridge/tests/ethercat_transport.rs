@@ -42,6 +42,7 @@ fn wire_sink_missing_transport_is_hard_error() {
     let sink = WireSink {
         transports: HashMap::new(), // intentionally empty
         timeout: Duration::from_secs(1),
+        mcu_clock_hz: HashMap::new(),
     };
     let (p, _) = piece(0);
     let result = sink.send_frame(
