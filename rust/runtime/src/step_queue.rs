@@ -73,7 +73,7 @@ impl Default for StepQueue {
 
 const _: () = {
     assert!(core::mem::size_of::<StepEntry>() == 8);
-    assert!(core::mem::size_of::<StepQueue>() == 8 + STEP_QUEUE_DEPTH * core::mem::size_of::<StepEntry>());
+    assert!(core::mem::size_of::<StepQueue>() == 264);
     assert!(STEP_QUEUE_DEPTH.is_power_of_two());
 };
 
