@@ -13,7 +13,7 @@ const _: () = assert!(
     0x3FF < PHASE_LUT_SIZE,
     "PHASE_LUT_SIZE must be > 0x3FF (1023) for the phase-mask indexing in dispatch_phase to be infallible",
 );
-use crate::step_queue::{StepEntry, StepQueue, peek as queue_peek, push as queue_push};
+use crate::step_queue::{StepEntry, StepQueue, len as queue_len, peek as queue_peek, push as queue_push};
 use crate::stepping_state::{AxisConfig, StepMode};
 use crate::sub_sample_timing::{StepTimeInputs, StepTimingResult, compute_step_times};
 use crate::tick::bump_relaxed;
@@ -33,6 +33,8 @@ unsafe extern "C" {
 #[cfg(not(any(test, feature = "host")))]
 unsafe extern "C" {
     fn kalico_kick_step_output(axis_idx: u8, cycle_abs: u32);
+    fn step_output_timer_is_running() -> u8;
+    fn timer_read_time() -> u32;
 }
 
 #[inline]
@@ -47,6 +49,24 @@ fn kick_per_axis_timer(axis_idx: usize, cycle_abs: u32) {
     {
         let _ = (axis_idx, cycle_abs);
     }
+}
+
+#[inline]
+fn timer_running() -> u32 {
+    #[cfg(not(any(test, feature = "host")))]
+    // SAFETY: single volatile load of step_out_running; no aliasing.
+    return unsafe { u32::from(step_output_timer_is_running()) };
+    #[cfg(any(test, feature = "host"))]
+    0
+}
+
+#[inline]
+fn now_cycles() -> u32 {
+    #[cfg(not(any(test, feature = "host")))]
+    // SAFETY: single u32 MMIO read of TIM5/SysTick counter.
+    return unsafe { timer_read_time() };
+    #[cfg(any(test, feature = "host"))]
+    0
 }
 
 pub const DISPLACEMENT_THRESHOLD_MM: f32 = 1e-4;
@@ -195,6 +215,7 @@ fn dispatch_pulse(
     let first_cycle_abs = times.first().copied();
 
     let mut steps_committed: i32 = 0;
+    let mut first_push_recorded = false;
     #[allow(clippy::explicit_counter_loop)]
     for cycle_abs in times.iter().copied() {
         let entry = StepEntry {
@@ -206,6 +227,16 @@ fn dispatch_pulse(
         let push_res = unsafe { queue_push(queue_ptr, entry) };
         if push_res.is_ok() {
             bump_relaxed(&shared.isr_step_push_count);
+            if !first_push_recorded {
+                first_push_recorded = true;
+                let now = now_cycles();
+                #[allow(clippy::cast_possible_wrap)]
+                let delta = cycle_abs.wrapping_sub(now) as i32;
+                crate::sq_diag::sq_first_push_capture(
+                    delta,
+                    crate::isr_phase::cyccnt(),
+                );
+            }
         }
         if push_res.is_err() {
             let committed_delta = steps_committed * (i32::from(dir));
@@ -215,7 +246,9 @@ fn dispatch_pulse(
                     kick_per_axis_timer(axis_idx, wt);
                 }
             }
-            raise_step_queue_overflow(shared, axis_idx);
+            // SAFETY: sole producer; qlen read is racy-by-design (monitoring only).
+            let qlen = u32::from(unsafe { queue_len(queue_ptr) });
+            raise_step_queue_overflow(shared, axis_idx, qlen, timer_running());
             axis.last_step_count = prev_step_count + committed_delta;
             return;
         }

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn step_queue_overflow_publishes_code_and_bumps_counter() {
     let shared = SharedState::new();
-    raise_step_queue_overflow(&shared, 2);
+    raise_step_queue_overflow(&shared, 2, 32, 0);
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
         FaultCode::StepQueueOverflow.as_i32()
@@ -16,7 +16,7 @@ fn step_queue_overflow_publishes_code_and_bumps_counter() {
 #[test]
 fn step_queue_overflow_out_of_range_axis_does_not_panic() {
     let shared = SharedState::new();
-    raise_step_queue_overflow(&shared, 7);
+    raise_step_queue_overflow(&shared, 7, 32, 1);
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
         FaultCode::StepQueueOverflow.as_i32()

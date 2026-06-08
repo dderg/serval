@@ -1007,6 +1007,7 @@ pub mod exports {
         }
         #[cfg(not(any(test, feature = "host")))]
         runtime::step_queue::reset_all_queues();
+        runtime::sq_diag::sq_reset_run_flags();
         KALICO_OK
     }
 

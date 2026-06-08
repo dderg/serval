@@ -45,8 +45,18 @@ fn emit_fault_log(fault: FaultCode, detail: u32) {
 ///
 /// `axis_idx` is in `0..4` (X, Y, Z, E). `fault_detail` encoding:
 /// `(axis_idx & 0xFF) << 16`.
+///
+/// `qlen_at_overflow`: queue depth (tail-head) at the failing push, for
+/// the `diag.sq_overflow_qlen` capture.
+/// `timer_running`: value of `step_output_timer_is_running()` at overflow.
 #[inline]
-pub fn raise_step_queue_overflow(shared: &SharedState, axis_idx: usize) {
+pub fn raise_step_queue_overflow(
+    shared: &SharedState,
+    axis_idx: usize,
+    qlen_at_overflow: u32,
+    timer_running: u32,
+) {
+    crate::sq_diag::sq_overflow_capture(qlen_at_overflow, timer_running);
     let detail = (axis_idx as u32 & 0xFF) << 16;
     shared.fault_detail.store(detail, Ordering::Release);
     shared

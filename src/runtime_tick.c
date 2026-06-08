@@ -359,6 +359,8 @@ kalico_kick_step_output(uint8_t axis_idx, uint32_t cycle_abs)
     if (axis_idx >= 4)
         return;
     step_output_owned_mask |= (uint8_t)(1u << axis_idx);
+    extern void diag_sq_kick_account(void);
+    diag_sq_kick_account();
 
     if (!step_output_timer_is_running()) {
         step_output_timer_arm(cycle_abs);

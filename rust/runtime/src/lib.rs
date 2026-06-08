@@ -35,6 +35,7 @@ pub mod error;
 pub mod fault_helpers;
 pub mod fault_sink;
 pub(crate) mod isr_phase;
+pub mod sq_diag;
 pub mod log_codes;
 pub mod monomial;
 pub mod motion_core;

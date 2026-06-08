@@ -182,6 +182,8 @@ step_output_timer_arm(uint32_t cycle_abs)
         step_out_running = 0;
         return;
     }
+    extern void diag_sq_arm_account(uint32_t cyccnt);
+    diag_sq_arm_account(DWT->CYCCNT);
     step_out_target = cycle_abs;
     step_out_running = 1;
     uint32_t now = runtime_cyccnt_read();
@@ -242,9 +244,12 @@ void
 TIM2_IRQHandler(void)
 {
     extern void diag_stepout_account(uint32_t enter, uint32_t exit);
+    extern void diag_tim2_fire_account(void);
     uint32_t diag_enter = DWT->CYCCNT;
 
     TIM2->SR = ~TIM_SR_CC1IF;
+
+    diag_tim2_fire_account();
 
     extern uint32_t kalico_step_output_event(void);
     uint32_t next = kalico_step_output_event();

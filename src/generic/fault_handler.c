@@ -212,6 +212,16 @@ struct diag_counters {
     uint32_t usb_in_dtxfsts;
     uint32_t usb_out_doepctl;
     uint32_t usb_out_doepint;
+
+    uint32_t sq_overflow_qlen;
+    uint32_t sq_overflow_running;
+    uint32_t sq_kick_calls;
+    uint32_t sq_arm_calls;
+    int32_t  sq_first_push_delta;
+    uint32_t sq_first_push_cyc;
+    uint32_t sq_first_arm_cyc;
+    uint32_t tim2_fire_count;
+    uint32_t sq_first_push_seen;
 };
 
 #if CONFIG_MACH_STM32H7
@@ -617,6 +627,63 @@ diag_note_dispatch(uint32_t func, uint32_t addr)
     live_snap.last_dispatch_addr = addr;
 }
 
+__attribute__((used, externally_visible))
+void
+diag_sq_overflow_capture(uint32_t qlen, uint32_t running)
+{
+    diag.sq_overflow_qlen    = qlen;
+    diag.sq_overflow_running = running;
+}
+
+__attribute__((used, externally_visible))
+void
+diag_sq_kick_account(void)
+{
+    diag.sq_kick_calls++;
+}
+
+__attribute__((used, externally_visible))
+void
+diag_sq_arm_account(uint32_t cyccnt)
+{
+    diag.sq_arm_calls++;
+    if (diag.sq_first_arm_cyc == 0)
+        diag.sq_first_arm_cyc = cyccnt;
+}
+
+__attribute__((used, externally_visible))
+void
+diag_sq_first_push_capture(int32_t delta_cycles, uint32_t cyccnt)
+{
+    if (diag.sq_first_push_seen)
+        return;
+    diag.sq_first_push_seen = 1;
+    diag.sq_first_push_delta = delta_cycles;
+    diag.sq_first_push_cyc   = cyccnt;
+}
+
+__attribute__((used, externally_visible))
+void
+diag_sq_reset_run_flags(void)
+{
+    diag.sq_first_push_seen = 0;
+    diag.sq_first_push_delta = 0;
+    diag.sq_first_push_cyc  = 0;
+    diag.sq_first_arm_cyc   = 0;
+    diag.sq_kick_calls      = 0;
+    diag.sq_arm_calls       = 0;
+    diag.sq_overflow_qlen   = 0;
+    diag.sq_overflow_running = 0;
+    diag.tim2_fire_count    = 0;
+}
+
+__attribute__((used, externally_visible))
+void
+diag_tim2_fire_account(void)
+{
+    diag.tim2_fire_count++;
+}
+
 uint32_t diag_get_otg_rxflvl(void)        { return diag.otg_rxflvl_fires; }
 uint32_t diag_get_otg_iepint(void)        { return diag.otg_iepint_fires; }
 uint32_t diag_get_otg_other(void)         { return diag.otg_otherflag_fires; }
@@ -906,6 +973,15 @@ fault_handler_report_task(void)
             prior_diag.usb_in_dtxfsts         = diag.usb_in_dtxfsts;
             prior_diag.usb_out_doepctl        = diag.usb_out_doepctl;
             prior_diag.usb_out_doepint        = diag.usb_out_doepint;
+            prior_diag.sq_overflow_qlen       = diag.sq_overflow_qlen;
+            prior_diag.sq_overflow_running    = diag.sq_overflow_running;
+            prior_diag.sq_kick_calls          = diag.sq_kick_calls;
+            prior_diag.sq_arm_calls           = diag.sq_arm_calls;
+            prior_diag.sq_first_push_delta    = diag.sq_first_push_delta;
+            prior_diag.sq_first_push_cyc      = diag.sq_first_push_cyc;
+            prior_diag.sq_first_arm_cyc       = diag.sq_first_arm_cyc;
+            prior_diag.tim2_fire_count        = diag.tim2_fire_count;
+            prior_diag.sq_first_push_seen     = diag.sq_first_push_seen;
             for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {
                 prior_ring[i].tag       = diag_ring[i].tag;
                 prior_ring[i]._pad0     = diag_ring[i]._pad0;
