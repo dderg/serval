@@ -667,14 +667,6 @@ void
 diag_sq_reset_run_flags(void)
 {
     diag.sq_first_push_seen = 0;
-    diag.sq_first_push_delta = 0;
-    diag.sq_first_push_cyc  = 0;
-    diag.sq_first_arm_cyc   = 0;
-    diag.sq_kick_calls      = 0;
-    diag.sq_arm_calls       = 0;
-    diag.sq_overflow_qlen   = 0;
-    diag.sq_overflow_running = 0;
-    diag.tim2_fire_count    = 0;
 }
 
 __attribute__((used, externally_visible))
