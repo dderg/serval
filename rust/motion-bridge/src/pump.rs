@@ -339,6 +339,13 @@ pub fn run_pump<S, F, C, A>(
                 mcu_id,
                 retired_counts,
             }) => {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "hb_diag",
+                    mcu_id,
+                    counts = ?retired_counts,
+                    "[place-diag] heartbeat retired_counts"
+                );
                 // retired_counts[i] is axis index i; same numbering as PushPieces.axis_idx in runtime_ffi.rs — do not reorder either side.
                 for (axis, &c) in retired_counts.iter().enumerate() {
                     let key = AxisKey {
