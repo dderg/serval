@@ -10,7 +10,7 @@ use core::ptr;
 use core::sync::atomic::{Ordering, fence};
 
 /// Power-of-two ring depth shared with the C side; see `src/step_queue.h`.
-pub const STEP_QUEUE_DEPTH: usize = 128;
+pub const STEP_QUEUE_DEPTH: usize = 32;
 pub const STEP_QUEUE_DEPTH_MASK: u16 = (STEP_QUEUE_DEPTH as u16) - 1;
 pub const N_AXIS_STEP_QUEUES: usize = 4;
 
