@@ -596,7 +596,18 @@ impl PieceSink for WireSink {
 
         let host_front_start_time: u64 = pieces.first().map(|p| p.start_time).unwrap_or(0);
 
-        let r = self.call_push_pieces(key, pieces, start_slot, new_head)?;
+        let _cps_start = std::time::Instant::now();
+        let _cps_res = self.call_push_pieces(key, pieces, start_slot, new_head);
+        let _cps_us = _cps_start.elapsed().as_micros();
+        if _cps_us > 2000 {
+            log::warn!(
+                "[place-diag] call_push_pieces {} us axis={} ok={}",
+                _cps_us,
+                key.axis,
+                _cps_res.is_ok()
+            );
+        }
+        let r = _cps_res?;
 
         {
             let arrival_lead_ticks = r.front_start_time as i64 - r.arrival_clock as i64;

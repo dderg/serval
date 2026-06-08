@@ -2233,7 +2233,7 @@ impl PyMotionBridge {
             t
         };
 
-        let pump_timeout = Duration::from_secs(5);
+        let pump_timeout = Duration::from_secs(1);
         let ring_depth_table_for_pump = ring_depth_table.clone();
         let router_for_pump = Arc::clone(&self.router);
         let router_for_freq = Arc::clone(&self.router);
