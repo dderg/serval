@@ -1,5 +1,5 @@
 const CONTIGUITY_EPS: f64 = 1e-6;
-const DEFAULT_LEAD_SECS: f64 = 0.25;
+const DEFAULT_LEAD_SECS: f64 = 0.6;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SegmentLate {

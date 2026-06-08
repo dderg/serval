@@ -15,7 +15,7 @@ use trajectory::{AxisShaper, EHalo, RequiredShaper, ShapedSegment, ShaperConfig}
 const T_IDLE: Duration = Duration::from_secs(3600);
 
 /// Must equal `anchor::DEFAULT_LEAD_SECS`. Keep in sync with anchor.rs.
-const LEAD: f64 = 0.25;
+const LEAD: f64 = 0.6;
 
 const SAFETY_MARGIN: f64 = 0.050;
 
