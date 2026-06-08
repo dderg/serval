@@ -523,6 +523,16 @@ fn run_loop(
                     "Move arm: drained"
                 );
                 let emit_us = emit_start.elapsed().as_micros() as u64;
+                if let (Some(df), Some(dl)) = (drained.first(), drained.last()) {
+                    tracing::info!(
+                        subsystem = "motion",
+                        event = "dispatch_span",
+                        n = drained.len(),
+                        first_t = df.t_start,
+                        last_t = dl.t_end,
+                        "[place-diag] dispatched planner-time span"
+                    );
+                }
                 let ReplanReport {
                     split_us,
                     solve_us,
