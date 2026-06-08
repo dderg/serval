@@ -468,7 +468,19 @@ fn run_loop(
                 let move_feed = m.segment.feedrate_mm_s;
 
                 let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
-                if esc > state.t_appended + 1e-6 {
+                let advance_taken = esc > state.t_appended + 1e-6;
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "place_diag",
+                    esc,
+                    t_appended = state.t_appended,
+                    t_dispatched = state.t_dispatched,
+                    sync_set = sync_instant.is_some(),
+                    advance_taken,
+                    move_feed,
+                    "[place-diag] pre-placement"
+                );
+                if advance_taken {
                     if state.t_dispatched < state.t_appended - 1e-12 {
                         run_commit_and_dispatch(
                             &mut state,
@@ -627,11 +639,25 @@ fn run_loop(
             }
 
             PlannerMsg::KalicoStreamOpen { home_pos } | PlannerMsg::Homing { home_pos } => {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "place_reset",
+                    kind = "stream_open_or_homing",
+                    t_appended = state.t_appended,
+                    "[place-diag] genuine reset"
+                );
                 sync_instant = None;
                 state.reset(home_pos);
             }
 
             PlannerMsg::Underrun { recovered_pos } | PlannerMsg::ForceIdle { recovered_pos } => {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "place_reset",
+                    kind = "underrun_or_forceidle",
+                    t_appended = state.t_appended,
+                    "[place-diag] genuine reset"
+                );
                 sync_instant = None;
                 state.reset(recovered_pos);
             }
