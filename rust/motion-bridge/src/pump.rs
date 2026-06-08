@@ -400,11 +400,24 @@ pub fn run_pump<S, F, C, A>(
         holding_ahead = false;
         'send: loop {
             match schedule(&queues, MAX_PER_FRAME, &horizon_of) {
-                Schedule::Idle => break 'send,
-                Schedule::StallFull(_stall_key) => {
+                Schedule::Idle => {
+                    log::warn!("[sched-diag] Idle (no pushable pieces — producer starved)");
                     break 'send;
                 }
-                Schedule::StallAhead(_stall_key) => {
+                Schedule::StallFull(k) => {
+                    let q = queues.get(&k);
+                    log::warn!(
+                        "[sched-diag] StallFull axis={} room={:?} pushed={:?} retired={:?} queued={:?}",
+                        k.axis,
+                        q.map(|q| q.room()),
+                        q.map(|q| q.pushed),
+                        q.map(|q| q.retired),
+                        q.map(|q| q.pieces.len())
+                    );
+                    break 'send;
+                }
+                Schedule::StallAhead(k) => {
+                    log::warn!("[sched-diag] StallAhead axis={} (piece beyond horizon)", k.axis);
                     holding_ahead = true;
                     break 'send;
                 }
