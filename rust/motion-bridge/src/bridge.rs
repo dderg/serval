@@ -2409,6 +2409,13 @@ impl PyMotionBridge {
                     .expect("host_io map built from mcu_configs")
                     .clone();
                 io.attach_heartbeat_callback(Arc::new(move |retired: &[u32]| {
+                    tracing::info!(
+                        subsystem = "motion",
+                        event = "hb_parsed",
+                        mcu_id,
+                        counts = ?retired,
+                        "[place-diag] heartbeat parsed by host_io"
+                    );
                     let _ = pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(
                         crate::pump::HeartbeatMsg {
                             mcu_id,
