@@ -601,9 +601,11 @@ impl PieceSink for WireSink {
         let _cps_us = _cps_start.elapsed().as_micros();
         if _cps_us > 2000 {
             log::warn!(
-                "[place-diag] call_push_pieces {} us axis={} ok={}",
+                "[place-diag] call_push_pieces {} us axis={} n_pieces={} ~bytes={} ok={}",
                 _cps_us,
                 key.axis,
+                pieces.len(),
+                pieces.len() * core::mem::size_of::<PieceEntry>(),
                 _cps_res.is_ok()
             );
         }
