@@ -9,7 +9,6 @@ use crate::fit::FittedSegment;
 use crate::pad::EHalo;
 use crate::plan_velocity::{PlanShaper, PlanStats, SafetyMode};
 use crate::ELimits;
-use crate::ShapedSegment;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ReplanReport {
@@ -18,6 +17,9 @@ pub struct ReplanReport {
     pub rebuild_us: u64,
     pub window_segments: usize,
     pub plan: PlanStats,
+    /// Which fallback rung resolved the plan: 1 = full window succeeded, 2 = Replace-remnant
+    /// dropped, 3 = witness preserved and new segment planned alone from rest.
+    pub fallback_rung: u8,
 }
 
 mod decel_finder;
@@ -85,8 +87,6 @@ pub struct ShaperState {
     pub t_shaped: f64,
     /// Latest absolute time for which a shaped sample has been dispatched to the wire.
     pub t_dispatched: f64,
-
-    pub pending_dispatch: Vec<ShapedSegment>,
 
     pub(crate) planned_fitted: Vec<FittedSegment>,
     /// Per-segment metadata parallel to `planned_fitted`.
