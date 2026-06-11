@@ -26,7 +26,7 @@ log = logging.getLogger("kalico-sim")
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 VTIME_SHM = "/dev/shm/kalico_vtime"
-VTIME_SHM_SIZE = 32
+VTIME_SHM_SIZE = 256
 VTIME_STRUCT_FMT = "<QIIII"
 
 
@@ -51,7 +51,8 @@ class SimResult:
 
 def vtime_create(start_ns: int = 1_000_000_000) -> None:
     with open(VTIME_SHM, "wb") as f:
-        f.write(struct.pack(VTIME_STRUCT_FMT, start_ns, 0, 0, 1, 0))
+        header = struct.pack(VTIME_STRUCT_FMT, start_ns, 0, 0, 1, 0)
+        f.write(header + b"\x00" * (VTIME_SHM_SIZE - len(header)))
     os.chmod(VTIME_SHM, 0o666)
 
 
@@ -139,10 +140,14 @@ def spawn_mcu(
 
     log_fd = open(log_path, "wb")
     env = os.environ.copy()
-    # vtime is intentionally NOT loaded here: adding it causes "Stepper too far
-    # in past" during homing because both sides stall waiting for I/O while
-    # neither advances virtual time. Re-enable only after that deadlock is solved.
-    env["LD_PRELOAD"] = str(shim_so)
+    # vtime first, intercept second (constructor/interpose ordering). The
+    # motion tick thread registers as a vtime pacer, which both prevents the
+    # historical stall-deadlock (the pacer always advances time) and pins
+    # virtual time so it can never skip a motion sample period. SPEED=0.2
+    # runs the simulated world at 1/5 real speed, inflating every host-side
+    # latency budget (drip window, trsync timeouts) 5x against Docker jitter.
+    env["LD_PRELOAD"] = "%s:%s" % (vtime_so, shim_so)
+    env.setdefault("KALICO_VTIME_SPEED", "1")
     env["KALICO_SIM_SOCK_DIR"] = sock_dir
     if verbose:
         env["KALICO_SIM_SHIM_VERBOSE"] = "1"
@@ -1777,6 +1782,19 @@ def run_probe_test(
                 print("\n--- klippy.log tail ---")
                 print(klippy_log.read_text(errors="replace")[-4000:])
                 print("--- end klippy.log ---")
+                for mcu_log in sorted(klippy_log.parent.glob("*.log")):
+                    if mcu_log == klippy_log:
+                        continue
+                    print(f"\n--- {mcu_log.name} tail ---")
+                    print(mcu_log.read_text(errors="replace")[-3000:])
+                    print(f"--- end {mcu_log.name} ---")
+                events_dir = klippy_log.parent / "events"
+                for ev_file in sorted(events_dir.glob("*.jsonl")):
+                    lines = ev_file.read_text(errors="replace").splitlines()
+                    print(f"\n--- {ev_file.name} tail ---")
+                    for line in lines[-80:]:
+                        print(line)
+                    print(f"--- end {ev_file.name} ---")
 
     return 1 if [c for c in checks if not c[1]] else 0
 

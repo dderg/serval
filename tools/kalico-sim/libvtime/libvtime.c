@@ -101,40 +101,117 @@ vtime_now(void)
     return atomic_load_explicit(&vshm->nanos, memory_order_acquire);
 }
 
+static int owned_pacer_slots[VTIME_MAX_PACERS];
+
 static uint64_t
-vtime_advance_by(uint64_t delta_ns)
+pacer_floor_min(void)
 {
-    uint64_t cap = vtime_speed_cap();
-    uint64_t cur = vtime_now();
-    uint64_t target = cur + delta_ns;
-    if (target > cap) {
-        while (vtime_speed_cap() < target) {
-            struct timespec w = { 0, 100000 };
-            real_nanosleep(&w, NULL);
-        }
+    uint64_t floor = UINT64_MAX;
+    uint32_t used = atomic_load_explicit(&vshm->pacer_slots_used,
+                                         memory_order_acquire);
+    if (used > VTIME_MAX_PACERS)
+        used = VTIME_MAX_PACERS;
+    for (uint32_t i = 0; i < used; i++) {
+        if (!atomic_load_explicit(&vshm->pacers[i].active,
+                                  memory_order_acquire))
+            continue;
+        uint64_t f = atomic_load_explicit(&vshm->pacers[i].floor_ns,
+                                          memory_order_acquire);
+        if (f < floor)
+            floor = f;
     }
-    return atomic_fetch_add_explicit(&vshm->nanos, delta_ns,
-                                     memory_order_acq_rel) + delta_ns;
+    return floor;
+}
+
+static void
+vtime_raise_to(uint64_t bounded_target)
+{
+    uint64_t cur;
+    do {
+        cur = atomic_load_explicit(&vshm->nanos, memory_order_acquire);
+        if (bounded_target <= cur)
+            return;
+    } while (!atomic_compare_exchange_weak_explicit(
+        &vshm->nanos, &cur, bounded_target,
+        memory_order_acq_rel, memory_order_acquire));
 }
 
 static void
 vtime_advance_to(uint64_t target_ns)
 {
-    uint64_t cap = vtime_speed_cap();
-    if (target_ns > cap) {
-        while (vtime_speed_cap() < target_ns) {
-            struct timespec w = { 0, 100000 };
-            real_nanosleep(&w, NULL);
-        }
-    }
-    uint64_t cur;
-    do {
-        cur = atomic_load_explicit(&vshm->nanos, memory_order_acquire);
-        if (target_ns <= cur)
+    for (;;) {
+        if (vtime_now() >= target_ns)
             return;
-    } while (!atomic_compare_exchange_weak_explicit(
-        &vshm->nanos, &cur, target_ns,
-        memory_order_acq_rel, memory_order_acquire));
+        uint64_t bound = vtime_speed_cap();
+        uint64_t floor = pacer_floor_min();
+        if (floor < bound)
+            bound = floor;
+        if (bound > vtime_now()) {
+            uint64_t step = target_ns < bound ? target_ns : bound;
+            vtime_raise_to(step);
+            if (step >= target_ns)
+                return;
+        }
+        struct timespec w = { 0, 100000 };
+        real_nanosleep(&w, NULL);
+    }
+}
+
+static uint64_t
+vtime_advance_by(uint64_t delta_ns)
+{
+    uint64_t target = vtime_now() + delta_ns;
+    vtime_advance_to(target);
+    return target;
+}
+
+static void vtimer_check_and_fire(void);
+
+__attribute__((visibility("default"))) int
+kalico_vtime_pacer_register(uint64_t period_ns)
+{
+    if (!vshm || period_ns == 0)
+        return -1;
+    uint32_t slot = atomic_fetch_add_explicit(&vshm->pacer_slots_used, 1,
+                                              memory_order_acq_rel);
+    if (slot >= VTIME_MAX_PACERS)
+        return -1;
+    atomic_store_explicit(&vshm->pacers[slot].floor_ns,
+                          vtime_now() + period_ns, memory_order_release);
+    atomic_store_explicit(&vshm->pacers[slot].active, 1,
+                          memory_order_release);
+    owned_pacer_slots[slot] = 1;
+    VLOG("pacer %u registered, period=%lu ns", slot,
+         (unsigned long)period_ns);
+    return (int)slot;
+}
+
+__attribute__((visibility("default"))) void
+kalico_vtime_pacer_advance(int slot, uint64_t target_ns, uint64_t period_ns)
+{
+    if (!vshm || slot < 0 || slot >= VTIME_MAX_PACERS)
+        return;
+    (void)period_ns;
+    // Floor equals the tick target exactly: virtual time may never outrun
+    // the tick the pacer is about to execute, so the engine's clock read at
+    // tick N is at most one period past any piece start it adopts.
+    atomic_store_explicit(&vshm->pacers[slot].floor_ns, target_ns,
+                          memory_order_release);
+    vtime_advance_to(target_ns);
+    vtimer_check_and_fire();
+    sched_yield();
+}
+
+__attribute__((destructor))
+static void
+vtime_pacer_cleanup(void)
+{
+    if (!vshm)
+        return;
+    for (int i = 0; i < VTIME_MAX_PACERS; i++)
+        if (owned_pacer_slots[i])
+            atomic_store_explicit(&vshm->pacers[i].active, 0,
+                                  memory_order_release);
 }
 
 static void
@@ -163,7 +240,7 @@ vtime_init(void)
     const char *speed_env = getenv("KALICO_VTIME_SPEED");
     if (speed_env)
         vtime_speed = atof(speed_env);
-    if (vtime_speed < 1.0)
+    if (vtime_speed <= 0.0)
         vtime_speed = 100.0;
 
     real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
@@ -306,16 +383,30 @@ poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
             return 0;
 
         pthread_mutex_lock(&vtimer.lock);
-        if (vtimer.armed && vtimer.target_ns <= deadline_ns) {
-            uint64_t target = vtimer.target_ns;
-            vtimer.armed = 0;
-            pthread_mutex_unlock(&vtimer.lock);
-            vtime_advance_to(target);
-            raise(SIGALRM);
-            errno = EINTR;
-            return -1;
-        }
+        int armed = vtimer.armed;
+        uint64_t target = vtimer.target_ns;
         pthread_mutex_unlock(&vtimer.lock);
+
+        if (armed && target <= deadline_ns) {
+            while (vtime_now() < target) {
+                uint64_t chunk = vtime_now() + 1000000ULL;
+                vtime_advance_to(chunk < target ? chunk : target);
+                ret = real_poll(fds, nfds, 0);
+                if (ret != 0)
+                    return ret;
+            }
+            pthread_mutex_lock(&vtimer.lock);
+            int fire = vtimer.armed && vtimer.target_ns == target;
+            if (fire)
+                vtimer.armed = 0;
+            pthread_mutex_unlock(&vtimer.lock);
+            if (fire) {
+                raise(SIGALRM);
+                errno = EINTR;
+                return -1;
+            }
+            continue;
+        }
 
         real_nanosleep(&spin, NULL);
     }
@@ -352,18 +443,34 @@ ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
             return 0;
 
         pthread_mutex_lock(&vtimer.lock);
-        if (vtimer.armed) {
-            uint64_t target = vtimer.target_ns;
-            if (target <= deadline_ns) {
+        int armed = vtimer.armed;
+        uint64_t target = vtimer.target_ns;
+        pthread_mutex_unlock(&vtimer.lock);
+
+        if (armed && target <= deadline_ns) {
+            // Advancing to the timer target is no longer instantaneous (the
+            // speed cap and pacer floors stretch it over real time), so it
+            // must stay interruptible: advance in 1 ms virtual chunks and let
+            // freshly arrived fd data preempt the timer, which stays armed.
+            while (vtime_now() < target) {
+                uint64_t chunk = vtime_now() + 1000000ULL;
+                vtime_advance_to(chunk < target ? chunk : target);
+                ret = real_ppoll(fds, nfds, &zero, sigmask);
+                if (ret != 0)
+                    return ret;
+            }
+            pthread_mutex_lock(&vtimer.lock);
+            int fire = vtimer.armed && vtimer.target_ns == target;
+            if (fire)
                 vtimer.armed = 0;
-                pthread_mutex_unlock(&vtimer.lock);
-                vtime_advance_to(target);
+            pthread_mutex_unlock(&vtimer.lock);
+            if (fire) {
                 raise(SIGALRM);
                 errno = EINTR;
                 return -1;
             }
+            continue;
         }
-        pthread_mutex_unlock(&vtimer.lock);
 
         struct timespec one_ms = { .tv_sec = 0, .tv_nsec = 1000000 };
         ret = real_ppoll(fds, nfds, &one_ms, sigmask);
