@@ -1,5 +1,9 @@
+import math
+
 from klippy import pins
 from klippy.bridge_endstop import BridgeEndstop, allocate_provider_id
+
+from . import manual_probe
 
 Z_AXIS = 2
 ACCURACY_DEFAULT_SAMPLES = 10
@@ -250,6 +254,168 @@ class PrinterProbe:
                 sigma,
             )
         )
+
+
+class ProbePointsHelper:
+    def __init__(
+        self,
+        config,
+        finalize_callback,
+        default_points=None,
+        option_name="points",
+        use_offsets=False,
+        enable_horizontal_z_clearance=False,
+    ):
+        self.printer = config.get_printer()
+        self.finalize_callback = finalize_callback
+        self.probe_points = default_points
+        self.name = config.get_name()
+        self.gcode = self.printer.lookup_object("gcode")
+        if default_points is None or config.get(option_name, None) is not None:
+            self.probe_points = config.getlists(
+                option_name, seps=(",", "\n"), parser=float, count=2
+            )
+        def_move_z = config.getfloat("horizontal_move_z", 5.0)
+        self.horizontal_move_z = self.default_horizontal_move_z = def_move_z
+        self.enable_horizontal_z_clearance = enable_horizontal_z_clearance
+        self.horizontal_z_clearance = self.default_horizontal_z_clearance = None
+        if enable_horizontal_z_clearance:
+            z_clearance = config.getfloat("horizontal_z_clearance", None)
+            self.default_horizontal_z_clearance = z_clearance
+            self.horizontal_z_clearance = z_clearance
+        self.adaptive_horizontal_move_z = config.getboolean(
+            "adaptive_horizontal_move_z", False
+        )
+        self.min_horizontal_move_z = config.getfloat(
+            "min_horizontal_move_z", 1.0
+        )
+        self.speed = config.getfloat("speed", 50.0, above=0.0)
+        self.use_offsets = config.getboolean(
+            "use_probe_xy_offsets", use_offsets
+        )
+        self.enforce_lift_speed = config.getboolean("enforce_lift_speed", False)
+        self.lift_speed = self.speed
+        self.probe_offsets = (0.0, 0.0, 0.0)
+        self.results = []
+
+    def get_probe_points(self):
+        return self.probe_points
+
+    def minimum_points(self, n):
+        if len(self.probe_points) < n:
+            raise self.printer.config_error(
+                "Need at least %d probe points for %s" % (n, self.name)
+            )
+
+    def update_probe_points(self, points, min_points):
+        self.probe_points = points
+        self.minimum_points(min_points)
+
+    def use_xy_offsets(self, use_offsets):
+        self.use_offsets = use_offsets
+
+    def get_lift_speed(self, gcmd=None):
+        if gcmd is not None:
+            return gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.0)
+        return self.lift_speed
+
+    def _lift_toolhead(self):
+        toolhead = self.printer.lookup_object("toolhead")
+        speed = self.lift_speed
+        if not self.results and not self.enforce_lift_speed:
+            speed = self.speed
+        z_pos = self.horizontal_move_z
+        if self.horizontal_z_clearance is not None and self.results:
+            z_pos = toolhead.get_position()[2] + self.horizontal_z_clearance
+        toolhead.manual_move([None, None, z_pos], speed)
+
+    def _next_pos(self):
+        nextpos = list(self.probe_points[len(self.results)])
+        if self.use_offsets:
+            nextpos[0] -= self.probe_offsets[0]
+            nextpos[1] -= self.probe_offsets[1]
+        return nextpos
+
+    def _move_next(self):
+        toolhead = self.printer.lookup_object("toolhead")
+        done = False
+        finalize = len(self.results) >= len(self.probe_points)
+        if finalize:
+            toolhead.get_last_move_time()
+            res = self.finalize_callback(self.probe_offsets, self.results)
+            if isinstance(res, (int, float)):
+                if res == 0:
+                    done = True
+                if self.adaptive_horizontal_move_z:
+                    error = math.ceil(res)
+                    self.horizontal_move_z = max(
+                        error + self.probe_offsets[2],
+                        self.min_horizontal_move_z,
+                    )
+            elif res != "retry":
+                done = True
+        self._lift_toolhead()
+        if finalize:
+            self.results = []
+        if done:
+            return True
+        toolhead.manual_move(self._next_pos(), self.speed)
+        return False
+
+    def start_probe(self, gcmd):
+        manual_probe.verify_no_manual_probe(self.printer)
+        probe = self.printer.lookup_object("probe", None)
+        method = gcmd.get("METHOD", "automatic").lower()
+        if method not in ("automatic", "manual"):
+            raise gcmd.error(
+                "METHOD=%s is not supported (use automatic or manual)"
+                % (method,)
+            )
+        self.results = []
+        def_move_z = self.default_horizontal_move_z
+        self.horizontal_move_z = gcmd.get_float("HORIZONTAL_MOVE_Z", def_move_z)
+        if self.enable_horizontal_z_clearance:
+            self.horizontal_z_clearance = gcmd.get_float(
+                "HORIZONTAL_Z_CLEARANCE", self.default_horizontal_z_clearance
+            )
+        enforce_lift_speed = gcmd.get_int(
+            "ENFORCE_LIFT_SPEED", None, minval=0, maxval=1
+        )
+        if enforce_lift_speed is not None:
+            self.enforce_lift_speed = enforce_lift_speed
+        if probe is None or method == "manual":
+            self.lift_speed = self.speed
+            self.probe_offsets = (0.0, 0.0, 0.0)
+            self._manual_probe_start()
+            return
+        self.lift_speed = probe.get_lift_speed(gcmd)
+        self.probe_offsets = probe.get_offsets()
+        if self.horizontal_move_z < self.probe_offsets[2]:
+            raise gcmd.error(
+                "horizontal_move_z can't be less than probe's z_offset"
+            )
+        probe.multi_probe_begin()
+        while True:
+            done = self._move_next()
+            if done:
+                break
+            pos = probe.run_probe(gcmd)
+            self.results.append(pos)
+        probe.multi_probe_end()
+
+    def _manual_probe_start(self):
+        done = self._move_next()
+        if not done:
+            gcmd = self.gcode.create_gcode_command("", "", {})
+            manual_probe.ManualProbeHelper(
+                self.printer, gcmd, self._manual_probe_finalize
+            )
+
+    def _manual_probe_finalize(self, kin_pos):
+        if kin_pos is None:
+            return
+        self.results.append(kin_pos)
+        self._manual_probe_start()
 
 
 def load_config(config):
