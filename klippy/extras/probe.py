@@ -100,6 +100,17 @@ class PrinterProbe:
     def get_offsets(self):
         return self.x_offset, self.y_offset, self.z_offset
 
+    def get_lift_speed(self, gcmd=None):
+        if gcmd is not None:
+            return gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.0)
+        return self.lift_speed
+
+    def multi_probe_begin(self):
+        pass
+
+    def multi_probe_end(self):
+        pass
+
     def get_status(self, eventtime):
         return {
             "name": "probe",
@@ -182,16 +193,16 @@ class PrinterProbe:
             if len(measured) >= sample_count:
                 break
             self._retract(toolhead, z + retract, lift_speed)
-        return calc_probe_z_result(measured, method)
+        epos = list(toolhead.get_position()[:3])
+        epos[Z_AXIS] = calc_probe_z_result(measured, method)
+        return epos
 
     def cmd_PROBE(self, gcmd):
-        toolhead = self.printer.lookup_object("toolhead")
-        pos = toolhead.get_position()
-        z_result = self.run_probe(gcmd)
+        pos = self.run_probe(gcmd)
         gcmd.respond_info(
-            "probe at %.3f,%.3f is z=%.6f" % (pos[0], pos[1], z_result)
+            "probe at %.3f,%.3f is z=%.6f" % (pos[0], pos[1], pos[2])
         )
-        self.last_z_result = z_result
+        self.last_z_result = pos[2]
 
     def cmd_QUERY_PROBE(self, gcmd):
         triggered = self._endstop.is_triggered()
