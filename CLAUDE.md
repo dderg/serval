@@ -24,6 +24,10 @@ We are working on a complete rewrite of the motion planner and more:
 
   The `compat` crate has two callers: the offline Step-13 binary (file → file) and the live bridge (terminal/macro G1/G2/G3 conversion via `compat::collinear::to_collinear_g5`, `compat::arc::arc_to_g5`, `compat::degree_elev::elevate_g51_to_g5`). Both share the lexer.
 
+# Homing
+- We deliberately do not optimize for same mcu endstop+motor homing. All homing works as if mcu with the endstop is a different one than the one that drives the motors. it makes testing easier
+  at this stage of development.
+
 # Testing
 
 Run the Rust suite with `cargo nextest run` from `rust/`, not `cargo test`.
