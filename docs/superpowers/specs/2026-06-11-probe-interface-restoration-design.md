@@ -112,7 +112,7 @@ Toolhead surface used: `manual_move`, `get_last_move_time`,
 ## z_tilt / QGL fail-loud stub
 
 `ZAdjustHelper.adjust_steppers` raises: per-motor Z adjustment is not
-implemented under the motion bridge. Consequence: `Z_TILT_ADJUST` and
+yet implemented. Consequence: `Z_TILT_ADJUST` and
 `QUAD_GANTRY_LEVEL` probe their points, report measured deviations, then
 error at the adjust step. The probing half is real exercise of the
 helper; the raise prevents the silent lockstep no-op. The `set_trapq`
