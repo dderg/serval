@@ -63,6 +63,7 @@ fn rejects_negative_initial_v() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -83,6 +84,7 @@ fn rejects_nan_terminal_v() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -103,6 +105,7 @@ fn nonzero_initial_v_produces_chained_profile() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -136,6 +139,7 @@ fn passthrough_on_x_is_valid() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -156,6 +160,7 @@ fn passthrough_on_y_is_valid() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -176,6 +181,7 @@ fn none_on_x_treated_as_passthrough() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -196,6 +202,7 @@ fn all_passthrough_produces_fitted_output() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -214,6 +221,7 @@ fn returns_one_fitted_per_xy_segment() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -233,6 +241,7 @@ fn worst_case_future_segment_durations_monotone() {
             temporal: temporal::multi::SegmentInput {
                 curve: &curve0,
                 limits: default_limits(),
+                followers: &[],
             },
             followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
@@ -241,6 +250,7 @@ fn worst_case_future_segment_durations_monotone() {
             temporal: temporal::multi::SegmentInput {
                 curve: &curve1,
                 limits: default_limits(),
+                followers: &[],
             },
             followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
@@ -279,6 +289,7 @@ fn worst_case_future_is_no_faster_than_terminal_known() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -307,6 +318,7 @@ fn plan_velocity_rejects_accel_at_rest_start() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -325,6 +337,7 @@ fn plan_velocity_rejects_nonfinite_accel() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,

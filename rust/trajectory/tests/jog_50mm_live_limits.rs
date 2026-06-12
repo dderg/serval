@@ -32,6 +32,7 @@ fn jog_50mm_at_100mms_with_live_limits() {
         temporal: SegmentInput {
             curve: &curve,
             limits: live_limits(),
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: 100.0,
@@ -94,6 +95,7 @@ fn jog_50mm_with_higher_scv() {
         temporal: SegmentInput {
             curve: &curve,
             limits,
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: 100.0,
@@ -152,6 +154,7 @@ fn probe_with_feedrate(feedrate: f64, dist_mm: f64) -> f64 {
         temporal: SegmentInput {
             curve: &curve,
             limits,
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: feedrate,
@@ -212,6 +215,7 @@ fn jog_50mm_with_z_jmax_uncapped() {
         temporal: SegmentInput {
             curve: &curve,
             limits,
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: 100.0,
@@ -279,6 +283,7 @@ fn jog_50mm_low_accel_baseline() {
         temporal: SegmentInput {
             curve: &curve,
             limits,
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: 100.0,

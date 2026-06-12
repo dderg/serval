@@ -21,6 +21,7 @@ fn plan_batch_single_segment_works() {
     let segment = SegmentInput {
         curve: &curve,
         limits: textbook_limits(),
+        followers: &[],
     };
     let input = BatchInput {
         segments: &[segment],
@@ -72,10 +73,12 @@ fn smooth_junction_has_no_accel_impulse() {
         SegmentInput {
             curve: &left,
             limits,
+            followers: &[],
         },
         SegmentInput {
             curve: &right,
             limits,
+            followers: &[],
         },
     ];
     let out = plan_batch(BatchInput {
@@ -131,6 +134,7 @@ fn plan_batch_threads_nonzero_initial_velocity() {
     let segment = SegmentInput {
         curve: &curve,
         limits: textbook_limits(),
+        followers: &[],
     };
     let input = BatchInput {
         segments: &[segment],

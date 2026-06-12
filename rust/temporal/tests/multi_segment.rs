@@ -51,10 +51,12 @@ mod fixture_1_two_g1_sharp_corner {
             SegmentInput {
                 curve: &left,
                 limits,
+                followers: &[],
             },
             SegmentInput {
                 curve: &right,
                 limits,
+                followers: &[],
             },
         ];
         let input = BatchInput {
@@ -108,10 +110,12 @@ mod fixture_2_g1_to_g5_smooth {
             SegmentInput {
                 curve: &left,
                 limits,
+                followers: &[],
             },
             SegmentInput {
                 curve: &right,
                 limits,
+                followers: &[],
             },
         ];
         let input = BatchInput {
@@ -160,10 +164,12 @@ mod fixture_3_long_straight_then_corner {
             SegmentInput {
                 curve: &straight,
                 limits,
+                followers: &[],
             },
             SegmentInput {
                 curve: &corner_right,
                 limits,
+                followers: &[],
             },
         ];
         let input = BatchInput {
@@ -239,14 +245,17 @@ mod fixture_4_per_segment_limits_change {
             SegmentInput {
                 curve: &segments_curves[0],
                 limits: normal_limits,
+                followers: &[],
             },
             SegmentInput {
                 curve: &segments_curves[1],
                 limits: reduced_limits,
+                followers: &[],
             },
             SegmentInput {
                 curve: &segments_curves[2],
                 limits: normal_limits,
+                followers: &[],
             },
         ];
         let input = BatchInput {
@@ -319,7 +328,11 @@ mod fixture_5_star_pattern {
         let limits = textbook_limits();
         let segments: Vec<_> = curves
             .iter()
-            .map(|c| SegmentInput { curve: c, limits })
+            .map(|c| SegmentInput {
+                curve: c,
+                limits,
+                followers: &[],
+            })
             .collect();
         let input = BatchInput {
             segments: &segments,
@@ -410,7 +423,11 @@ mod fixture_6_long_realistic_chain {
         let limits = realistic_machine_limits();
         let segments: Vec<_> = curves
             .iter()
-            .map(|c| SegmentInput { curve: c, limits })
+            .map(|c| SegmentInput {
+                curve: c,
+                limits,
+                followers: &[],
+            })
             .collect();
         let input = BatchInput {
             segments: &segments,
@@ -734,14 +751,17 @@ mod fixture_10_near_zero_length_middle_segment_smooth_chain {
             SegmentInput {
                 curve: &seg0,
                 limits,
+                followers: &[],
             },
             SegmentInput {
                 curve: &seg1,
                 limits,
+                followers: &[],
             },
             SegmentInput {
                 curve: &seg2,
                 limits,
+                followers: &[],
             },
         ];
         let input = BatchInput {
@@ -798,7 +818,11 @@ mod fixture_10_near_zero_length_middle_segment_smooth_chain {
         let limits = textbook_limits();
         let segments: Vec<_> = curves
             .iter()
-            .map(|c| SegmentInput { curve: c, limits })
+            .map(|c| SegmentInput {
+                curve: c,
+                limits,
+                followers: &[],
+            })
             .collect();
         let baseline = BatchInput {
             segments: &segments,
@@ -851,14 +875,17 @@ mod fixture_11_nanometer_dust_segment_smooth_chain {
             SegmentInput {
                 curve: &seg0,
                 limits,
+                followers: &[],
             },
             SegmentInput {
                 curve: &dust,
                 limits,
+                followers: &[],
             },
             SegmentInput {
                 curve: &seg2,
                 limits,
+                followers: &[],
             },
         ];
         let input = BatchInput {
@@ -923,10 +950,12 @@ mod fixture_9_kinematic_boundary_end_no_oscillation {
             SegmentInput {
                 curve: &seg0,
                 limits,
+                followers: &[],
             },
             SegmentInput {
                 curve: &seg1,
                 limits,
+                followers: &[],
             },
         ];
         let input = BatchInput {

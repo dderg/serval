@@ -91,6 +91,7 @@ fn empty_history_matches_shape_batch_byte_identical() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,

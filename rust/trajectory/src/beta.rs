@@ -344,6 +344,7 @@ fn run_one_iteration(
             temporal::multi::SegmentInput {
                 curve: orig.curve,
                 limits: derated_limits,
+                followers: &[],
             }
         })
         .collect();

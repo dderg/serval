@@ -49,3 +49,72 @@ fn extreme_spacing_ratio_panics() {
 fn lim(v: f64) -> Limits {
     Limits::axis_boxes([v; 3], [5_000.0; 3], [100_000.0; 3])
 }
+
+#[test]
+fn chain_carries_per_segment_follower_demands() {
+    let a = tests_support::line([0.0; 3], [40.0, 0.0, 0.0]);
+    let b = tests_support::line([40.0, 0.0, 0.0], [80.0, 0.0, 0.0]);
+    let ga = sample_arclength_grid(&a, 11).unwrap();
+    let gb = sample_arclength_grid(&b, 11).unwrap();
+    let demand = crate::FollowerDemand {
+        axis: 3,
+        ratio: 0.05,
+        pa_k: 0.0,
+    };
+    let chain = ChainGrid::try_from_segment_grids_with_followers(
+        vec![ga, gb],
+        vec![lim_e(300.0), lim_e(300.0)],
+        vec![vec![demand], vec![]],
+        &[false, false],
+    )
+    .unwrap();
+    let (s0, e0) = chain.segment_ranges[0];
+    let (s1, e1) = chain.segment_ranges[1];
+    for i in s0..e0 {
+        assert_eq!(chain.followers_at(i), &[demand]);
+    }
+    for i in (e0.max(s1) + 1)..=e1 {
+        assert!(chain.followers_at(i).is_empty());
+    }
+}
+
+#[test]
+fn follower_demand_validation_fails_loudly() {
+    let a = tests_support::line([0.0; 3], [40.0, 0.0, 0.0]);
+    let ga = sample_arclength_grid(&a, 11).unwrap();
+    let bad = |d: crate::FollowerDemand| {
+        ChainGrid::try_from_segment_grids_with_followers(
+            vec![ga.clone()],
+            vec![lim_e(300.0)],
+            vec![vec![d]],
+            &[false],
+        )
+        .unwrap_err()
+    };
+    let base = crate::FollowerDemand {
+        axis: 3,
+        ratio: 0.05,
+        pa_k: 0.0,
+    };
+    bad(crate::FollowerDemand { axis: 1, ..base });
+    bad(crate::FollowerDemand { axis: 4, ..base });
+    bad(crate::FollowerDemand {
+        ratio: f64::NAN,
+        ..base
+    });
+    bad(crate::FollowerDemand { ratio: 0.0, ..base });
+    bad(crate::FollowerDemand { pa_k: -1.0, ..base });
+}
+
+fn lim_e(v: f64) -> Limits {
+    let mut sets: Vec<crate::LimitSet> = Limits::axis_boxes([v; 3], [5_000.0; 3], [100_000.0; 3])
+        .sets()
+        .to_vec();
+    sets.push(crate::LimitSet {
+        axes: crate::AxisSet::from_indices(&[3]),
+        v_max: 75.0,
+        a_max: 1500.0,
+        j_max: 3000.0,
+    });
+    Limits::try_new(&sets, 4).unwrap()
+}

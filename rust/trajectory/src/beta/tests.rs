@@ -44,6 +44,7 @@ fn single_straight_line_converges() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: generous_limits,
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,

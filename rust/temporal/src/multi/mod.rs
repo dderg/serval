@@ -17,6 +17,7 @@ pub enum GridStrategy {
 pub struct SegmentInput<'a> {
     pub curve: &'a VectorNurbs<f64, 3>,
     pub limits: Limits,
+    pub followers: &'a [crate::FollowerDemand],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +62,8 @@ pub enum BatchError {
     InvalidThreads,
     #[error("segment {0}: {1}")]
     Segment(usize, crate::topp::ScheduleError),
+    #[error("invalid follower demand: {0}")]
+    InvalidFollowerDemand(String),
 }
 
 pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
@@ -124,8 +127,18 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
                 })
                 .collect();
             let seg_limits: Vec<_> = range.clone().map(|i| input.segments[i].limits).collect();
-            seg_grids.map(|grids| {
-                ChainGrid::from_segment_grids_with_absorbed(grids, seg_limits, &absorbed)
+            let seg_followers: Vec<_> = range
+                .clone()
+                .map(|i| input.segments[i].followers.to_vec())
+                .collect();
+            seg_grids.and_then(|grids| {
+                ChainGrid::try_from_segment_grids_with_followers(
+                    grids,
+                    seg_limits,
+                    seg_followers,
+                    &absorbed,
+                )
+                .map_err(|e| BatchError::InvalidFollowerDemand(e.to_string()))
             })
         })
         .collect::<Result<Vec<_>, _>>()?;

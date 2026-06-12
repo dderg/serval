@@ -42,6 +42,7 @@ fn shape_batch_straight_line() {
         temporal: SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -96,6 +97,7 @@ fn shape_batch_short_low_velocity_line_refits_at_five_microns() {
         temporal: SegmentInput {
             curve: &curve,
             limits,
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: 1000.0 / 60.0,
@@ -149,6 +151,7 @@ fn shape_batch_two_segments() {
             temporal: SegmentInput {
                 curve: &curve1,
                 limits: default_limits(),
+                followers: &[],
             },
             followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
@@ -157,6 +160,7 @@ fn shape_batch_two_segments() {
             temporal: SegmentInput {
                 curve: &curve2,
                 limits: default_limits(),
+                followers: &[],
             },
             followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
@@ -211,6 +215,7 @@ fn shape_batch_beta_warning() {
         temporal: SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,

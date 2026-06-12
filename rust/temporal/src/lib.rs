@@ -5,13 +5,23 @@ pub use limits::{
 };
 
 pub mod topp;
-pub use topp::{ScheduleError, ToleranceMode, schedule_segment, schedule_segment_with_tolerance};
+pub use topp::{
+    ScheduleError, ToleranceMode, schedule_segment, schedule_segment_with_followers,
+    schedule_segment_with_tolerance,
+};
 
 pub mod multi;
 pub use multi::{
     BatchError, BatchInput, BatchOutput, GridStrategy, JoiningStatus, JunctionInfo, SegmentInput,
     plan_batch,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FollowerDemand {
+    pub axis: usize,
+    pub ratio: f64,
+    pub pa_k: f64,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct GridConfig {

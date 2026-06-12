@@ -144,6 +144,7 @@ impl SolverScale {
                 })
                 .collect(),
             segment_ranges: chain.segment_ranges.clone(),
+            followers: chain.followers.clone(),
             inter_geom: chain
                 .inter_geom
                 .iter()

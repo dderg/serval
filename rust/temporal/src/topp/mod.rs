@@ -165,6 +165,18 @@ pub fn schedule_segment_with_tolerance(
     v_end: f64,
     tolerance: ToleranceMode,
 ) -> Result<TopProfile, ScheduleError> {
+    schedule_segment_with_followers(curve, limits, grid, v_start, v_end, tolerance, &[])
+}
+
+pub fn schedule_segment_with_followers(
+    curve: &VectorNurbs<f64, 3>,
+    limits: &Limits,
+    grid: &GridConfig,
+    v_start: f64,
+    v_end: f64,
+    tolerance: ToleranceMode,
+    followers: &[crate::FollowerDemand],
+) -> Result<TopProfile, ScheduleError> {
     if !v_start.is_finite() || v_start < 0.0 {
         return Err(ScheduleError::InvalidEndpointVelocity(
             "v_start must be finite, ≥ 0",
@@ -184,7 +196,13 @@ pub fn schedule_segment_with_tolerance(
     let arc_grid = path::sample_arclength_grid(curve, grid.n)
         .map_err(|e| ScheduleError::PathParam(format!("{e}")))?;
 
-    let chain = chain::ChainGrid::from_segment_grids(vec![arc_grid], vec![*limits]);
+    let chain = chain::ChainGrid::try_from_segment_grids_with_followers(
+        vec![arc_grid],
+        vec![*limits],
+        vec![followers.to_vec()],
+        &[false],
+    )
+    .map_err(|e| ScheduleError::SolverSetup(e.to_string()))?;
     schedule_chain_with_tolerance(
         &chain,
         EndpointConditions {

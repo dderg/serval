@@ -1,5 +1,30 @@
-use crate::Limits;
 use crate::topp::path::{ArclengthGrid, InterSample};
+use crate::{FollowerDemand, Limits, N_SPATIAL};
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum ChainError {
+    #[error(
+        "segment {segment}: follower demand axis {axis} out of range \
+         [{N_SPATIAL}, {n_axes})"
+    )]
+    FollowerAxisOutOfRange {
+        segment: usize,
+        axis: usize,
+        n_axes: usize,
+    },
+    #[error("segment {segment}: follower demand axis {axis} has invalid ratio {ratio}")]
+    InvalidFollowerRatio {
+        segment: usize,
+        axis: usize,
+        ratio: f64,
+    },
+    #[error("segment {segment}: follower demand axis {axis} has invalid pa_k {pa_k}")]
+    InvalidFollowerPaGain {
+        segment: usize,
+        axis: usize,
+        pa_k: f64,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PointGeom {
@@ -35,6 +60,8 @@ pub struct ChainGrid {
     /// Interior geometry samples for each chain interval `[i, i+1]`, len M−1.
     /// Each sample's θ ∈ (0,1).
     pub inter_geom: Vec<Vec<InterSample>>,
+    /// Follower demands per segment, indexed like `limits`.
+    pub followers: Vec<Vec<FollowerDemand>>,
 }
 
 pub(crate) const MAX_JUNCTION_SPACING_RATIO: f64 = 16.0;
@@ -43,6 +70,43 @@ impl ChainGrid {
     pub fn from_segment_grids(grids: Vec<ArclengthGrid>, limits: Vec<Limits>) -> Self {
         let n = grids.len();
         Self::from_segment_grids_with_absorbed(grids, limits, &vec![false; n])
+    }
+
+    pub fn try_from_segment_grids_with_followers(
+        grids: Vec<ArclengthGrid>,
+        limits: Vec<Limits>,
+        followers: Vec<Vec<FollowerDemand>>,
+        absorbed: &[bool],
+    ) -> Result<Self, ChainError> {
+        assert_eq!(followers.len(), limits.len());
+        for (segment, (segment_followers, lim)) in followers.iter().zip(&limits).enumerate() {
+            for f in segment_followers {
+                if f.axis < N_SPATIAL || f.axis >= lim.n_axes() {
+                    return Err(ChainError::FollowerAxisOutOfRange {
+                        segment,
+                        axis: f.axis,
+                        n_axes: lim.n_axes(),
+                    });
+                }
+                if !f.ratio.is_finite() || f.ratio == 0.0 {
+                    return Err(ChainError::InvalidFollowerRatio {
+                        segment,
+                        axis: f.axis,
+                        ratio: f.ratio,
+                    });
+                }
+                if !f.pa_k.is_finite() || f.pa_k < 0.0 {
+                    return Err(ChainError::InvalidFollowerPaGain {
+                        segment,
+                        axis: f.axis,
+                        pa_k: f.pa_k,
+                    });
+                }
+            }
+        }
+        let mut chain = Self::from_segment_grids_with_absorbed(grids, limits, absorbed);
+        chain.followers = followers;
+        Ok(chain)
     }
 
     /// Concatenate per-segment grids into one chain. Adjacent grids must be
@@ -123,6 +187,7 @@ impl ChainGrid {
             s_offset += g.total_length;
         }
 
+        let followers = vec![Vec::new(); limits.len()];
         Self {
             s,
             geom,
@@ -132,6 +197,7 @@ impl ChainGrid {
             junctions,
             segment_ranges,
             inter_geom,
+            followers,
         }
     }
 
@@ -141,6 +207,10 @@ impl ChainGrid {
 
     pub fn limits_at(&self, i: usize) -> &Limits {
         &self.limits[self.limits_idx[i]]
+    }
+
+    pub fn followers_at(&self, i: usize) -> &[FollowerDemand] {
+        &self.followers[self.limits_idx[i]]
     }
 }
 

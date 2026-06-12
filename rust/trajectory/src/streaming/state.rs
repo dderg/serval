@@ -142,6 +142,7 @@ impl ShaperState {
                         &ctx.limits,
                         m.segment.feedrate_mm_s,
                     ),
+                    followers: &[],
                 },
                 followers: &m.segment.followers,
                 feedrate_mm_s: m.segment.feedrate_mm_s,
@@ -549,6 +550,7 @@ fn try_rung2(
             temporal: temporal::multi::SegmentInput {
                 curve: &m.segment.xyz,
                 limits: per_segment_limits(&m.segment.xyz, &ctx.limits, m.segment.feedrate_mm_s),
+                followers: &[],
             },
             followers: &m.segment.followers,
             feedrate_mm_s: m.segment.feedrate_mm_s,
@@ -623,6 +625,7 @@ fn try_rung3(
         temporal: temporal::multi::SegmentInput {
             curve: &seg.segment.xyz,
             limits: per_segment_limits(&seg.segment.xyz, &ctx.limits, seg.segment.feedrate_mm_s),
+            followers: &[],
         },
         followers: &seg.segment.followers,
         feedrate_mm_s: seg.segment.feedrate_mm_s,
