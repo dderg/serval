@@ -402,8 +402,10 @@ fn solve_with_cuts_and_trust_region(
     }
 
     let mut b_rhs: Vec<f64> = bundle.b_rhs.clone();
-    let j_path = bundle.j_path;
-    debug_assert!(j_path > 0.0, "bundle must carry positive j_path");
+    debug_assert!(
+        bundle.j_path_at.iter().all(|&j| j > 0.0),
+        "bundle must carry positive j_path_at"
+    );
     let b_floor = scale.to_scaled_b(SLP_B_FLOOR);
     for cut in cuts {
         match cut {
@@ -676,7 +678,7 @@ fn append_path_jerk_cut_weights(
 pub(crate) fn find_jerk_violators_chain(
     b: &[f64],
     h_intervals: &[f64],
-    j_path: f64,
+    j_path_at: &[f64],
 ) -> Vec<JerkViolator> {
     let n = b.len();
     if n < 3 {
@@ -691,7 +693,7 @@ pub(crate) fn find_jerk_violators_chain(
         let (idx, hl, hr) = crate::topp::stencil::stencil_at(i, n, h_intervals);
         let w = crate::topp::stencil::b_dd_weights(hl, hr);
         let b_dd = w[0] * b[idx[0]] + w[1] * b[idx[1]] + w[2] * b[idx[2]];
-        let ratio = b_dd.abs() * bi.sqrt() / (2.0 * j_path);
+        let ratio = b_dd.abs() * bi.sqrt() / (2.0 * j_path_at[i]);
         if ratio > 1.0 + SLP_EPS_FEAS {
             out.push(JerkViolator { i, ratio });
         }
@@ -904,8 +906,7 @@ pub(crate) fn slp_solve_chain(
     tol: f64,
     scale: &SolverScale,
 ) -> Result<(SolverResult, SlpOutcome), SolverSetupError> {
-    let j_path = bundle.j_path;
-    debug_assert!(j_path > 0.0);
+    debug_assert!(bundle.j_path_at.iter().all(|&j| j > 0.0));
     let n = bundle.n_grid;
 
     let mut cuts: Vec<SlpCut> = Vec::new();
@@ -918,7 +919,8 @@ pub(crate) fn slp_solve_chain(
         return Ok((last_result, SlpOutcome::InnerSolverFailure));
     }
 
-    let violators = find_jerk_violators_chain(&last_result.b, &bundle.h_intervals, j_path);
+    let violators =
+        find_jerk_violators_chain(&last_result.b, &bundle.h_intervals, &bundle.j_path_at);
     if violators.is_empty() {
         return Ok((last_result, SlpOutcome::Converged { outer_iters: 0 }));
     }
@@ -945,7 +947,7 @@ pub(crate) fn slp_solve_chain(
             cuts.push(SlpCut::PathJerkWeights {
                 i,
                 b_bar,
-                j_path,
+                j_path: bundle.j_path_at[i],
                 idx,
                 w,
                 h_bar,
@@ -970,7 +972,8 @@ pub(crate) fn slp_solve_chain(
         }
         last_result = new_result;
 
-        let new_violators = find_jerk_violators_chain(&last_result.b, &bundle.h_intervals, j_path);
+        let new_violators =
+            find_jerk_violators_chain(&last_result.b, &bundle.h_intervals, &bundle.j_path_at);
         if new_violators.is_empty() {
             return Ok((last_result, SlpOutcome::Converged { outer_iters: outer }));
         }

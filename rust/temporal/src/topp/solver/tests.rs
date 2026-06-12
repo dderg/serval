@@ -155,7 +155,7 @@ fn find_jerk_violators_chain_ratio_has_no_spurious_h_factor() {
     let j_path = 100.0_f64;
     let b = vec![401.375_f64, 400.0, 401.375];
     let h_intervals = vec![h, h];
-    let violators = find_jerk_violators_chain(&b, &h_intervals, j_path);
+    let violators = find_jerk_violators_chain(&b, &h_intervals, &[j_path; 3]);
     assert_eq!(
         violators.len(),
         1,

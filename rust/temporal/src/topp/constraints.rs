@@ -22,7 +22,7 @@ pub struct ConstraintBundle {
     pub b_max_cent: Vec<f64>,
 
     pub h_intervals: Vec<f64>,
-    pub j_path: f64,
+    pub j_path_at: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -293,12 +293,26 @@ pub fn build_chain(
 
     let n_vars = off_x2 + n_interior;
 
-    let j_path = chain
-        .limits
-        .iter()
-        .map(Limits::j_path)
-        .fold(f64::INFINITY, f64::min);
-    debug_assert!(j_path > 0.0, "jerk limit must be positive");
+    let j_path_at: Vec<f64> = (0..n)
+        .map(|i| {
+            let mut cap = chain.limits_at(i).j_path();
+            for f in chain.followers_at(i) {
+                if f.pa_k != 0.0 {
+                    continue;
+                }
+                for (_, set) in chain.limits_at(i).follower_sets() {
+                    if set.axes.contains(f.axis) && set.j_max.is_finite() {
+                        cap = cap.min(set.j_max / f.ratio.abs());
+                    }
+                }
+            }
+            cap
+        })
+        .collect();
+    debug_assert!(
+        j_path_at.iter().all(|&j| j > 0.0),
+        "jerk limit must be positive"
+    );
 
     let mut cones: Vec<(Cone, usize)> = Vec::new();
     let mut a_rows: Vec<Vec<f64>> = Vec::new();
@@ -625,7 +639,7 @@ pub fn build_chain(
             let i = k + 1;
             let t_idx = off_t + k;
             let w = crate::topp::stencil::b_dd_weights(h[i - 1], h[i]);
-            let c = h_bar(i) / (2.0 * j_path);
+            let c = h_bar(i) / (2.0 * j_path_at[k + 1]);
             for sign in [1.0_f64, -1.0] {
                 push_row(
                     &mut a_rows,
@@ -726,7 +740,7 @@ pub fn build_chain(
         objective,
         b_max_cent,
         h_intervals: chain.h_intervals.clone(),
-        j_path,
+        j_path_at,
     })
 }
 

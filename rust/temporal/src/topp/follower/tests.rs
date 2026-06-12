@@ -125,3 +125,40 @@ fn binding_tag_names_the_follower_set() {
         "cruise sample should bind on the follower velocity row"
     );
 }
+
+#[test]
+fn follower_jerk_cap_binds_through_the_slp() {
+    let limits = limits_with_follower(1.0e6, 1.0e9, 1000.0);
+    let profile = solve_with_followers(
+        &limits,
+        &[FollowerDemand {
+            axis: 3,
+            ratio: 0.5,
+            pa_k: 0.0,
+        }],
+    );
+    let n = profile.samples.len();
+    let t: Vec<f64> = {
+        let mut acc = vec![0.0];
+        for w in profile.samples.windows(2) {
+            let v_avg = (w[0].v + w[1].v).max(1e-9);
+            acc.push(acc.last().unwrap() + 2.0 * (w[1].s - w[0].s) / v_avg);
+        }
+        acc
+    };
+    let mut max_jerk: f64 = 0.0;
+    for i in 1..n - 1 {
+        let dt_l = t[i] - t[i - 1];
+        let dt_r = t[i + 1] - t[i];
+        if dt_l < 1e-9 || dt_r < 1e-9 {
+            continue;
+        }
+        let a_l = (profile.samples[i].v - profile.samples[i - 1].v) / dt_l;
+        let a_r = (profile.samples[i + 1].v - profile.samples[i].v) / dt_r;
+        max_jerk = max_jerk.max(((a_r - a_l) / (0.5 * (dt_l + dt_r))).abs());
+    }
+    assert!(
+        max_jerk <= 2000.0 * 1.10,
+        "path jerk {max_jerk} exceeds effective cap 2000"
+    );
+}
