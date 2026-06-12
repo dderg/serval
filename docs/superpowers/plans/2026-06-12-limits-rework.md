@@ -628,13 +628,16 @@ fn arc_geometry(curve: &VectorNurbs<f64, 3>, at_end: bool) -> ([f64; 3], [f64; 3
 
 Then:
 
+- **Delete the junction-deviation machinery entirely** (it is mainline's SCV/JD transplant — a virtual-rounding pretense that implies infinite jerk at the kink): `sharp_corner_jd_cap`, `V_JD_REVERSAL_FLOOR_MM_S`, `ALPHA_COLLINEAR_THRESHOLD`, `ALPHA_REVERSAL_THRESHOLD`, the `chord_tolerance_mm` parameter of `compute_junction_velocity`, and the `JunctionBindingCap::SharpCornerChord` variant.
+- `JunctionKind::Corner` junctions (tangent disagreement beyond `THETA_FUSE_RAD`, or degenerate tangents) now get `v_junction = 0.0` — a kink is a full stop, with binding tag `JunctionBindingCap::FullStopCorner`. The caps below apply only to `Smooth` junctions.
 - `per_axis_velocity_cap` → `set_velocity_cap(t, limits)`: min over sets with finite v and `‖t_S‖ > 1e-12` of `v_S / ‖t_S‖`.
 - `centripetal_cap` → `set_accel_v_cap(c′, c″, limits)`: min over sets with finite a of `sqrt(a_S / κ_S)` where `κ_S = kappa_set(c′, c″, set.axes, KAPPA_FLOOR)`, skipping `κ_S ≤ KAPPA_FLOOR`; `B_MAX_CENT_CAP.sqrt()` if nothing binds.
-- `cap_sharp` (`sharp_corner_jd_cap`): replace `limits.a_centripetal_max` with `a_eff` = min over sets with finite a of `a_S / max(‖t_left_S‖, ‖t_right_S‖)` (skip sets where both norms < 1e-12). The `kappa_left/right ≤ KAPPA_FLOOR` gate now tests `‖c″‖` from `arc_geometry`.
 - `cap_v_max`: min over both sides' sets of finite `v_max`.
-- `JunctionBindingCap` variants: `PerAxisVelocity` → `SetVelocity`, `Centripetal` → `SetAccelNorm`, `GlobalVMax` → `MinVMax`, `SharpCornerChord` unchanged. Update consumers (`grep -rn "JunctionBindingCap" rust/`).
+- `JunctionBindingCap` variants: `PerAxisVelocity` → `SetVelocity`, `Centripetal` → `SetAccelNorm`, `GlobalVMax` → `MinVMax`, `SharpCornerChord` → `FullStopCorner`. Update consumers (`grep -rn "JunctionBindingCap" rust/`).
 
-`kappa_left`/`kappa_right` in `JunctionResult` become `‖c″‖` (numerically identical to the old curvature).
+`kappa_left`/`kappa_right` in `JunctionResult` become `‖c″‖` (numerically identical to the old curvature). Reword the `THETA_FUSE_RAD` doc comment — its "scv impulse budget" justification is gone; the fuse threshold survives purely as a numerical collinearity epsilon.
+
+**Consequence, accepted deliberately:** tangent-discontinuous input (today: all compat-converted G1 polylines) full-stops at every corner until upstream corner blending exists (future work, its own brainstorm). Do not soften this with any floor or virtual rounding — the slowdown is the honest signal that the blender is missing.
 
 - [ ] **Step 7: Port `multi/parallel.rs` and `multi/mod.rs`.** `base_v_max = chain.limits[0].v_max` (line 278) → `chain.limits[0].v_ceiling()`; the rescale at lines 348-352 maps sets like `scale_limits`. `multi/mod.rs` is type-mechanical (`Limits` is still `Copy`).
 
@@ -770,7 +773,7 @@ impl LimitSection {
 }
 ```
 
-In `PlannerConfig`: `limits: PlannerLimits` → `limit_sections: Vec<LimitSection>`, plus `runtime_caps: RuntimeCaps` and `junction_deviation_mm: f64`. Conversion:
+In `PlannerConfig`: `limits: PlannerLimits` → `limit_sections: Vec<LimitSection>`, plus `runtime_caps: RuntimeCaps`. (No junction-deviation field: the JD machinery dies in Task 3; `ReplanContext.junction_chord_tolerance_mm` is deleted in Task 5.) Conversion:
 
 ```rust
 impl PlannerConfig {
@@ -793,7 +796,7 @@ impl PlannerConfig {
 }
 ```
 
-Default impl: sections `gantry {x,y}, v=300, a=3000` and `z {z}, v=15, a=100`, `runtime_caps: default`, `junction_deviation_mm: 0.005`. (Temporal must re-export `AxisSet`, `LimitSet`, `LimitsError` from its lib.rs — add if missing.)
+Default impl: sections `gantry {x,y}, v=300, a=3000` and `z {z}, v=15, a=100`, `runtime_caps: default`. (Temporal must re-export `AxisSet`, `LimitSet`, `LimitsError` from its lib.rs — add if missing.)
 
 - [ ] **Step 4: Run** — `cargo nextest run -p motion-bridge -E 'test(config)'` → PASS (other motion-bridge code is still broken — that's Task 5; scope the run to the config tests, or accept compile failure here and fold the run into Task 5's verification if the crate won't build test-by-test).
 - [ ] **Step 5: Commit** — `feat(motion-bridge): [limit] section config model with runtime overlay caps`
@@ -806,12 +809,11 @@ Default impl: sections `gantry {x,y}, v=300, a=3000` and `z {z}, v=15, a=100`, `
 - Modify: `rust/motion-bridge/src/bridge.rs` (`init_planner` ~line 2206, `update_limits` ~line 2976)
 - Modify: `rust/motion-bridge/src/planner.rs` (`build_replan_context` ~line 765, `update_limits` on the planner, any `PlannerLimits` mention — `grep -rn "PlannerLimits\|to_temporal_limits\|junction_deviation" rust/motion-bridge/ rust/kalico-host-rt/`)
 
-- [ ] **Step 1: `init_planner` signature.** Replace the five scalar limit params with the section list and junction deviation:
+- [ ] **Step 1: `init_planner` signature.** Replace the five scalar limit params with the section list:
 
 ```rust
 #[pyo3(signature = (
     limits,
-    junction_deviation,
     shaper_type_x,
     shaper_freq_x,
     shaper_type_y,
@@ -823,12 +825,11 @@ Default impl: sections `gantry {x,y}, v=300, a=3000` and `z {z}, v=15, a=100`, `
 fn init_planner(
     &self,
     limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
-    junction_deviation: f64,
     ...
 ) -> PyResult<()> {
 ```
 
-Body: build `Vec<LimitSection>` (mapping axis names through `axis_index`, any error → `PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())`), set `cfg.limit_sections`, `cfg.junction_deviation_mm = junction_deviation`, then **validate eagerly**: `cfg.to_temporal_limits().map_err(|e| PyValueError::new_err(e.to_string()))?;` before storing — config errors must surface at startup, not first move.
+Body: build `Vec<LimitSection>` (mapping axis names through `axis_index`, any error → `PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())`), set `cfg.limit_sections`, then **validate eagerly**: `cfg.to_temporal_limits().map_err(|e| PyValueError::new_err(e.to_string()))?;` before storing — config errors must surface at startup, not first move.
 
 - [ ] **Step 2: `update_limits` → `update_runtime_caps`:**
 
@@ -850,7 +851,7 @@ fn update_runtime_caps(&self, velocity: Option<f64>, accel: Option<f64>) -> PyRe
 
 Change the planner-side `update_limits` to take `temporal::Limits` directly (it previously took `PlannerLimits` and converted internally — find and follow the chain).
 
-- [ ] **Step 3: `build_replan_context`:** `limits: config.to_temporal_limits().expect("limit sections validated in init_planner")`, `junction_chord_tolerance_mm: config.junction_deviation_mm`.
+- [ ] **Step 3: `build_replan_context`:** `limits: config.to_temporal_limits().expect("limit sections validated in init_planner")`. Delete `junction_chord_tolerance_mm` from `ReplanContext` (trajectory crate) and trace every consumer down to the now-parameterless `compute_junction_velocity` call — `grep -rn "junction_chord_tolerance\|chord_tolerance" rust/`.
 
 - [ ] **Step 4: Whole-workspace build & test** — `cargo nextest run` from `rust/` → PASS (this catches every remaining `PlannerLimits` / old-`Limits` straggler across kalico-host-rt and integration tests, e.g. `rust/trajectory/tests/jog_50mm_live_limits.rs` — port them with `axis_boxes`/`norm_all` or the new sections as fits each test's intent).
 - [ ] **Step 5: Commit** — `feat(motion-bridge): init_planner takes [limit] sections; runtime caps replace update_limits`
@@ -956,9 +957,6 @@ def _read_limits(self, config):
     self.orig_cfg = {}
     self.runtime_velocity = None
     self.runtime_accel = None
-    self.planner_junction_deviation = config.getfloat(
-        "junction_deviation", 0.005, above=0.0
-    )
 ```
 
 Note `self.max_velocity`/`self.max_accel` remain as conservative compat scalars — `get_max_velocity()` consumers (homing, extruder checks) keep working. Place the method on `MotionToolhead`; it overrides the base hook from Step 2. Also remove the now-dead `max_z_velocity`/`max_z_accel` reads at motion_toolhead.py:273-278 and fix their consumers (line ~209 z_ratio math and line ~351 feedrate clamp) to read from the z-covering limit sections: add a helper `def _axis_limit(self, axis, kind)` returning `min` over `self.limit_sections` entries covering `axis` with that cap declared (`None` entries skipped); fail loudly (`raise self.printer.config_error(...)`) if nothing covers it — coverage validation should have caught it already.
@@ -967,8 +965,7 @@ Note `self.max_velocity`/`self.max_accel` remain as conservative compat scalars 
 
 ```python
 self.bridge.init_planner(
-    [(name, axes, v, a, j) for (name, axes, v, a, j) in self.limit_sections],
-    self.planner_junction_deviation,
+    list(self.limit_sections),
     shaper_type_x,
     shaper_freq_x,
     shaper_type_y,
@@ -1049,7 +1046,7 @@ max_velocity: 15
 max_accel: 100
 ```
 
-(Carry each fixture's own numbers over; `max_z_velocity/max_z_accel` values become the `[limit z]` section. Drop `square_corner_velocity` — nothing replaces it; `junction_deviation` in `[printer]` only if the fixture relied on a non-default SCV materially, default otherwise.)
+(Carry each fixture's own numbers over; `max_z_velocity/max_z_accel` values become the `[limit z]` section. Drop `square_corner_velocity` — nothing replaces it.)
 
 - [ ] **Step 3: Commit** — `chore: migrate config fixtures to [limit] sections`
 
@@ -1074,6 +1071,7 @@ Expected survivors only: legacy `toolhead.py` base-class code (legacy `ToolHead`
 - [ ] **Step 2:** Boot a simulated printer via the **kalico-sim** skill with a migrated fixture; verify: clean startup (no config errors), a homing + square + diagonal G-code runs, and a fixture with a deliberate `[printer] max_accel` errors at startup naming `[limit]` sections.
 - [ ] **Step 3:** In the sim, exercise `SET_VELOCITY_LIMIT ACCEL=500` mid-stream and `RESET_VELOCITY_LIMIT`; verify no planner error and visibly slower motion under the cap (compare trajectory durations via sim step counts).
 - [ ] **Step 4:** Diagonal-vs-axis sanity check (the √2 bug death): with `[limit gantry] axes: x,y max_accel: 3000`, a pure-X 100 mm move and a 45° 100 mm move should now show the *same* peak toolhead acceleration in planner output (previously the diagonal reached ~4243). A unit-level assertion of this already lives in the Task 3 test updates; this step is the integration confirmation.
+- [ ] **Step 4b:** Corner full-stop check: a two-move L-shaped G-code (90° corner) must come to rest at the corner (velocity → 0 at the junction). Print-time regression on polyline G-code versus pre-rework is **expected and accepted** — it is the honest cost of the deleted junction-deviation pretense, recovered by the future upstream corner-blending plan.
 - [ ] **Step 5: Commit** any fixes, then final commit — `feat: unified [limit] sections end-to-end`
 
 ---
@@ -1084,7 +1082,7 @@ Expected survivors only: legacy `toolhead.py` base-class code (legacy `ToolHead`
 - Mandatory coverage, fail loudly at load: Task 2 (`LimitsError`), Task 5 (eager validation in `init_planner`), Task 6 (config errors) ✓
 - Norm rows in solver (linear velocity rows, SOC accel rows): Task 3 ✓
 - Centripetal cap deleted, subsumed by accel-norm orthogonal component: Tasks 1-3, 8 ✓
-- SCV deleted; junction chord tolerance gets its own explicit `junction_deviation` key: Tasks 4-6 ✓
+- SCV and the whole junction-deviation pretense deleted; sharp junctions are full stops until upstream corner blending exists (separate future plan): Tasks 3, 5, 8 ✓
 - Jerk broadcast (`2×accel` hardcode) dies; jerk is a declarable cap with a documented per-section default: Task 4 ✓
 - Legacy `[printer]` keys rejected with errors naming the replacement: Task 6 ✓
 - Planner stays a pure function: unchanged — config still arrives as data; no new side channels ✓
