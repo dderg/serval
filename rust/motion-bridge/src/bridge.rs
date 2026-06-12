@@ -1901,8 +1901,7 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel, host_now))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel))]
     fn adjust_motor(
         &self,
         py: Python<'_>,
@@ -1912,17 +1911,16 @@ impl PyMotionBridge {
         delta_mm: f64,
         speed: f64,
         accel: f64,
-        host_now: f64,
     ) -> PyResult<f64> {
         const CORRECTION_LEAD_SECS: f64 = 0.15;
         let profile = crate::correction::plan_correction_profile(delta_mm, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
         let duration = crate::correction::profile_duration(delta_mm, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
-        let start_secs = host_now + CORRECTION_LEAD_SECS;
         let handle = mcu_handle_from_raw(mcu_handle);
         let entries = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            let start_secs = router.host_now_secs() + CORRECTION_LEAD_SECS;
             crate::correction::to_piece_entries(
                 &profile,
                 |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
@@ -1973,7 +1971,7 @@ impl PyMotionBridge {
             }
             Ok(())
         })?;
-        Ok(start_secs + duration - host_now)
+        Ok(CORRECTION_LEAD_SECS + duration)
     }
 
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {

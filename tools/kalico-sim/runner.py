@@ -330,6 +330,7 @@ def run_simulation(
     beacon_test: Optional[str] = None,
     motion_state_test: bool = False,
     sensorless_phase_test: bool = False,
+    motor_adjust_test: bool = False,
     serve: bool = False,
     serve_data_dir=None,
 ) -> SimResult:
@@ -449,6 +450,7 @@ def run_simulation(
                 homing_test=homing_test,
                 beacon_test=beacon_test,
                 sensorless_phase_test=sensorless_phase_test,
+                motor_adjust_test=motor_adjust_test,
             )
 
             if serve:
@@ -907,6 +909,136 @@ def run_simulation(
                     },
                 )
 
+            if motor_adjust_test:
+                log.info(
+                    "Motor-adjust test: MOTOR_ADJUST on a 3-Z-stepper axis"
+                )
+                ma_error = None
+
+                def _toolhead_z():
+                    status = query_status(api_socket)
+                    toolhead = (
+                        status.get("result", {})
+                        .get("status", {})
+                        .get("toolhead", {})
+                    )
+                    pos = toolhead.get("position", [None, None, None])
+                    return pos[2] if len(pos) > 2 else None
+
+                send_gcode(
+                    api_socket,
+                    "SET_KINEMATIC_POSITION X=125 Y=125 Z=100",
+                    timeout=10,
+                )
+                send_gcode(api_socket, "G4 P500", timeout=15)
+                z_before = _toolhead_z()
+
+                resp = send_gcode(
+                    api_socket,
+                    "MOTOR_ADJUST MOTOR=stepper_z1 DELTA=2.0",
+                    timeout=60,
+                )
+                log.info("MOTOR_ADJUST stepper_z1: %s", resp)
+                if isinstance(resp, dict) and resp.get("error"):
+                    ma_error = f"MOTOR_ADJUST failed: {resp['error']}"
+                elif not resp:
+                    ma_error = "MOTOR_ADJUST timed out"
+
+                if ma_error is None:
+                    z_after = _toolhead_z()
+                    if z_before is None or z_after is None:
+                        ma_error = (
+                            "could not read toolhead Z (before=%r after=%r)"
+                            % (z_before, z_after)
+                        )
+                    elif abs(z_after - z_before) > 1e-6:
+                        ma_error = (
+                            "commanded Z changed across MOTOR_ADJUST: "
+                            "%.6f -> %.6f" % (z_before, z_after)
+                        )
+
+                if ma_error is None:
+                    time.sleep(2.0)
+                    events_dir = log_dir / "events"
+                    ev_text = ""
+                    for ev_file in sorted(events_dir.glob("*.jsonl")):
+                        ev_text += ev_file.read_text(errors="replace")
+                    if "motion.correction_start" not in ev_text:
+                        ma_error = (
+                            "no motion.correction_start event in events/*.jsonl"
+                        )
+                    elif "motion.correction_drained" not in ev_text:
+                        ma_error = (
+                            "no motion.correction_drained event in "
+                            "events/*.jsonl"
+                        )
+                    if ma_error is not None:
+                        for line in ev_text.splitlines():
+                            if (
+                                "motion." in line
+                                or "fault" in line
+                                or "correction" in line
+                            ):
+                                log.info("EVENT %s", line)
+                        resp2 = send_gcode(
+                            api_socket,
+                            "MOTOR_ADJUST MOTOR=stepper_z2 DELTA=0.5",
+                            timeout=60,
+                        )
+                        log.info("DISCRIMINATOR second adjust: %s", resp2)
+                        resp3 = send_gcode(
+                            api_socket, "G1 Z101 F300", timeout=30
+                        )
+                        log.info("DISCRIMINATOR G1 Z101: %s", resp3)
+                        resp4 = send_gcode(api_socket, "M400", timeout=30)
+                        log.info("DISCRIMINATOR M400: %s", resp4)
+
+                if ma_error is None:
+                    resp = send_gcode(
+                        api_socket,
+                        "MOTOR_ADJUST MOTOR=stepper_q DELTA=1",
+                        timeout=30,
+                    )
+                    log.info("MOTOR_ADJUST stepper_q: %s", resp)
+                    err_text = (
+                        resp.get("error", "") if isinstance(resp, dict) else ""
+                    )
+                    if "Unknown motor" not in str(err_text):
+                        ma_error = (
+                            "unknown-motor command did not fail with the "
+                            "expected error; got %r" % (resp,)
+                        )
+
+                klippy_content = (
+                    klippy_log.read_text(errors="replace")
+                    if klippy_log.exists()
+                    else ""
+                )
+                if ma_error is None and "shutdown:" in klippy_content.lower():
+                    for line in klippy_content.split("\n"):
+                        if "shutdown:" in line.lower():
+                            ma_error = (
+                                "MCU shutdown during motor-adjust test: "
+                                + line.strip()
+                            )
+                            break
+
+                success = ma_error is None
+                wall_end = time.monotonic()
+                return SimResult(
+                    success=success,
+                    print_time_s=0,
+                    wall_time_s=wall_end - wall_start,
+                    speedup=0,
+                    error=ma_error,
+                    klippy_log=klippy_content,
+                    mcu_logs={
+                        mcu.name: open(mcu.log_path).read()
+                        for mcu in mcus
+                        if pathlib.Path(mcu.log_path).exists()
+                    },
+                )
+
             if motion_state_test:
                 log.info("Motion-state test: move, then query mid-move state")
 
@@ -1227,8 +1359,16 @@ def _prepare_config(
     homing_test: bool = False,
     beacon_test: Optional[str] = None,
     sensorless_phase_test: bool = False,
+    motor_adjust_test: bool = False,
 ) -> pathlib.Path:
     if config_dir is None:
+        if motor_adjust_test:
+            cfg = _generate_multi_z_config(
+                h7_pty, gcode_dir=str(tmp_dir / "gcodes")
+            )
+            cfg_path = tmp_dir / "printer.cfg"
+            cfg_path.write_text(cfg)
+            return cfg_path
         if homing_test or beacon_test:
             cfg = _generate_beacon_homing_config(
                 h7_pty,
@@ -2222,6 +2362,85 @@ enable_force_move: True
 """
 
 
+def _generate_multi_z_config(
+    h7_pty: str, gcode_dir: str = "/tmp/kalico_sim_gcodes"
+) -> str:
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+kinematics: corexy
+max_velocity: 100
+max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
+
+[stepper_x]
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^gpiochip0/gpio10
+position_min: 0
+position_endstop: 0
+position_max: 250
+homing_speed: 10
+
+[stepper_y]
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+endstop_pin: ^gpiochip0/gpio11
+position_min: 0
+position_endstop: 0
+position_max: 250
+homing_speed: 10
+
+[stepper_z]
+step_pin: gpiochip0/gpio6
+dir_pin: gpiochip0/gpio7
+enable_pin: !gpiochip0/gpio8
+microsteps: 16
+rotation_distance: 4
+endstop_pin: ^gpiochip0/gpio12
+position_min: -5
+position_endstop: 0
+position_max: 250
+homing_speed: 5
+
+[stepper_z1]
+step_pin: gpiochip0/gpio13
+dir_pin: gpiochip0/gpio14
+enable_pin: !gpiochip0/gpio15
+microsteps: 16
+rotation_distance: 4
+
+[stepper_z2]
+step_pin: gpiochip0/gpio16
+dir_pin: gpiochip0/gpio17
+enable_pin: !gpiochip0/gpio18
+microsteps: 16
+rotation_distance: 4
+
+[motor_adjust]
+
+[input_shaper]
+shaper_freq_x: 50
+shaper_freq_y: 50
+shaper_type: smooth_mzv
+
+[virtual_sdcard]
+path: {gcode_dir}
+
+[force_move]
+enable_force_move: True
+"""
+
+
 def _generate_phase_stepping_config(
     h7_pty: str, f4_pty: str, gcode_dir: str = "/tmp/kalico_sim_gcodes"
 ) -> str:
@@ -2653,6 +2872,11 @@ def main():
         help="Move, then query mid-move commanded state via motion_state_at",
     )
     parser.add_argument(
+        "--motor-adjust-test",
+        action="store_true",
+        help="MOTOR_ADJUST on a 3-Z-stepper cartesian config",
+    )
+    parser.add_argument(
         "--repo",
         type=str,
         default=str(REPO_ROOT),
@@ -2711,6 +2935,7 @@ def main():
             beacon_test=args.beacon_test,
             motion_state_test=args.test_motion_state,
             sensorless_phase_test=args.sensorless_phase_test,
+            motor_adjust_test=args.motor_adjust_test,
             serve=args.serve,
             serve_data_dir=args.data_dir,
         )

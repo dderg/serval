@@ -410,11 +410,9 @@ class MotionBridgeWrapper:
             axis, direction, speed_mm_s, max_travel_mm, endstop_id, endstop_mcu
         )
 
-    def adjust_motor(
-        self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, host_now
-    ):
+    def adjust_motor(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
         return self._bridge.adjust_motor(
-            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, host_now
+            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
         )
 
     def home_axis_poll(self):

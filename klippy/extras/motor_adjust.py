@@ -39,11 +39,10 @@ class MotorAdjust:
         self._ensure_motor_enabled(toolhead, stepper_name)
         bridge = toolhead.get_bridge()
         reactor = self.printer.get_reactor()
-        host_now = reactor.monotonic()
         duration = bridge.adjust_motor(
-            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, host_now
+            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
         )
-        deadline = host_now + duration + ADJUST_SETTLE_PAD
+        deadline = reactor.monotonic() + duration + ADJUST_SETTLE_PAD
         while reactor.monotonic() < deadline:
             reactor.pause(reactor.monotonic() + 0.01)
 
