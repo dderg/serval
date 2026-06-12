@@ -158,9 +158,6 @@ class MCU_stepper:
     def get_commanded_position(self):
         return 0.0
 
-    def dump_steps(self, count, start_clock, end_clock):
-        return ([], 0)
-
     def get_stepper_kinematics(self):
         return self._stepper_kinematics
 
