@@ -2,7 +2,6 @@ import contextlib
 import logging
 
 from klippy.bridge_endstop import AXIS_ENDSTOP_IDS, BridgeEndstop
-from klippy.extras.danger_options import get_danger_options
 
 HOMING_POLL_PERIOD = 0.001
 TRIP_DEADLINE_MARGIN = 5.0
@@ -282,76 +281,39 @@ class Homing:
 
         self._set_homing_current(toolhead, rail, pre_homing=True)
         try:
-
-            def run_home(home_speed, home_max_travel):
-                pre_pos = toolhead.get_position()[axis]
-                trip_pos, final_pos = _run_servo_guarded_trip(
+            trip_pos, final_pos = _run_servo_guarded_trip(
+                gcmd,
+                bridge,
+                axis,
+                stepper_enable,
+                rail,
+                servo_handle,
+                servo_limits,
+                lambda: self.trip_move(
                     gcmd,
+                    toolhead,
                     bridge,
                     axis,
-                    stepper_enable,
-                    rail,
-                    servo_handle,
-                    servo_limits,
-                    lambda: self.trip_move(
-                        gcmd,
-                        toolhead,
-                        bridge,
-                        axis,
-                        direction,
-                        home_speed,
-                        home_max_travel,
-                        entry,
-                    ),
-                )
-                newpos = list(toolhead.get_position())
-                newpos[axis] = _homed_axis_position(
-                    entry["provider"], axis, trip_pos, final_pos, trigger_height
-                )
-                toolhead.set_position(newpos, homing_axes=[axis])
-                travel = abs(trip_pos[axis] - pre_pos)
-                logging.info(
-                    "homing: %s trigger=%.4f overshoot=%+.4f travel=%.4f"
-                    " set %s=%.4f",
-                    "XYZ"[axis],
-                    trigger_height,
-                    final_pos[axis] - trip_pos[axis],
-                    travel,
-                    "XYZ"[axis],
-                    newpos[axis],
-                )
-                return travel
+                    direction,
+                    speed,
+                    max_travel,
+                    entry,
+                ),
+            )
 
-            travel = run_home(speed, max_travel)
-            tolerance = get_danger_options().homing_elapsed_distance_tolerance
-            if (
-                hi.use_sensorless_homing
-                and hi.min_home_dist
-                and travel < hi.min_home_dist - tolerance
-            ):
-                logging.info(
-                    "homing: %s tripped after %.3fmm < min_home_dist %.3f —"
-                    " retracting and re-homing to reject an early sensorless"
-                    " trigger",
-                    "XYZ"[axis],
-                    travel,
-                    hi.min_home_dist,
-                )
-                rehome_retractpos = list(toolhead.get_position())
-                rehome_retractpos[axis] = (
-                    trigger_height - direction * hi.min_home_dist
-                )
-                toolhead.move(rehome_retractpos, hi.retract_speed)
-                toolhead.wait_moves()
-                rehome_travel = run_home(
-                    hi.second_homing_speed, hi.min_home_dist + tolerance
-                )
-                if rehome_travel < hi.min_home_dist - tolerance:
-                    raise gcmd.error(
-                        "%s sensorless re-home tripped after %.3fmm but"
-                        " expected ~%.3fmm — early trigger, homing aborted"
-                        % ("XYZ"[axis], rehome_travel, hi.min_home_dist)
-                    )
+            newpos = list(toolhead.get_position())
+            newpos[axis] = _homed_axis_position(
+                entry["provider"], axis, trip_pos, final_pos, trigger_height
+            )
+            toolhead.set_position(newpos, homing_axes=[axis])
+            logging.info(
+                "homing: %s trigger=%.4f overshoot=%+.4f set %s=%.4f",
+                "XYZ"[axis],
+                trigger_height,
+                final_pos[axis] - trip_pos[axis],
+                "XYZ"[axis],
+                newpos[axis],
+            )
             if hi.retract_dist:
                 retractpos = list(toolhead.get_position())
                 retractpos[axis] = trigger_height - direction * hi.retract_dist
