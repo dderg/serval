@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 
 use motion_bridge_native::classify::classify_and_build;
-use motion_bridge_native::config::{PlannerConfig, PlannerLimits};
+use motion_bridge_native::config::{LimitSection, PlannerConfig};
 use motion_bridge_native::dispatch::{KINEMATICS_COREXY, McuAxisConfig, McuCaps};
 use motion_bridge_native::enqueue::enqueue_segment;
 use motion_bridge_native::planner::{DispatchError, PlannerHandle};
@@ -49,14 +49,23 @@ fn smooth_zv_186hz_config() -> PlannerConfig {
     c
 }
 
-fn bench_limits() -> PlannerLimits {
-    PlannerLimits {
-        max_velocity: 300.0,
-        max_accel: 5000.0,
-        max_z_velocity: 10.0,
-        max_z_accel: 80.0,
-        square_corner_velocity: 5.0,
-    }
+fn bench_limit_sections() -> Vec<LimitSection> {
+    vec![
+        LimitSection {
+            name: "gantry".into(),
+            axes: vec![0, 1],
+            max_velocity: Some(300.0),
+            max_accel: Some(5000.0),
+            max_jerk: None,
+        },
+        LimitSection {
+            name: "z".into(),
+            axes: vec![2],
+            max_velocity: Some(10.0),
+            max_accel: Some(80.0),
+            max_jerk: None,
+        },
+    ]
 }
 
 fn corexy_cfg() -> McuAxisConfig {
@@ -311,8 +320,9 @@ fn scenario_single_x_jog(label: &'static str) -> Vec<PieceStreamEntry> {
     );
 
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(bench_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = bench_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit jog");
@@ -343,8 +353,9 @@ fn scenario_three_x_jogs_in_flight(label: &'static str) -> Vec<PieceStreamEntry>
     use std::time::Duration;
 
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(bench_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = bench_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
     h.kalico_stream_open([295.0, 0.0, 0.0, 0.0])
         .expect("kalico_stream_open");
 

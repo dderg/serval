@@ -189,6 +189,42 @@ impl Limits {
     }
 
     #[must_use]
+    pub fn axis_velocity_cap(&self, axis: usize) -> f64 {
+        self.axis_cap(axis, |s| s.v_max)
+    }
+
+    #[must_use]
+    pub fn axis_accel_cap(&self, axis: usize) -> f64 {
+        self.axis_cap(axis, |s| s.a_max)
+    }
+
+    #[must_use]
+    pub fn axis_jerk_cap(&self, axis: usize) -> f64 {
+        self.axis_cap(axis, |s| s.j_max)
+    }
+
+    fn axis_cap(&self, axis: usize, cap: fn(&LimitSet) -> f64) -> f64 {
+        self.sets()
+            .iter()
+            .filter(|s| s.axes.contains(axis))
+            .map(cap)
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    #[must_use]
+    pub fn with_sets_mapped(&self, f: impl Fn(&LimitSet) -> LimitSet) -> Self {
+        let sets: Vec<LimitSet> = self.sets().iter().map(f).collect();
+        Self::try_new(&sets).expect("set mapping preserves validity")
+    }
+
+    #[must_use]
+    pub fn with_extra_sets(&self, extra: &[LimitSet]) -> Self {
+        let mut sets: Vec<LimitSet> = self.sets().to_vec();
+        sets.extend_from_slice(extra);
+        Self::try_new(&sets).expect("appending sets preserves validity")
+    }
+
+    #[must_use]
     pub fn b_cent_cap(
         &self,
         c_prime: &[f64; 3],

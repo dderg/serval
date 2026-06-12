@@ -20,12 +20,7 @@ fn make_straight_line(from: [f64; 3], to: [f64; 3]) -> VectorNurbs<f64, 3> {
 }
 
 fn default_limits() -> temporal::Limits {
-    temporal::Limits::new(
-        [500.0; 3],     // v_max
-        [5_000.0; 3],   // a_max
-        [100_000.0; 3], // j_max
-        2_500.0,        // a_centripetal_max
-    )
+    temporal::Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
 }
 
 fn test_shaper_config() -> ShaperConfig {
@@ -51,7 +46,6 @@ fn shape_batch_straight_line() {
         temporal: SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -104,18 +98,13 @@ fn shape_batch_straight_line() {
 #[test]
 fn shape_batch_short_low_velocity_line_refits_at_five_microns() {
     let curve = make_straight_line([0.0, 0.0, 0.0], [10.0, 0.0, 0.0]);
-    let limits = temporal::Limits::new(
-        [1000.0 / 60.0, 500.0, 500.0],
-        [5_000.0; 3],
-        [100_000.0; 3],
-        2_500.0,
-    );
+    let limits =
+        temporal::Limits::axis_boxes([1000.0 / 60.0, 500.0, 500.0], [5_000.0; 3], [100_000.0; 3]);
 
     let segments = [ShapeSegmentInput {
         temporal: SegmentInput {
             curve: &curve,
             limits,
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::Travel,
         extrusion_per_xy_mm: 0.0,
@@ -172,7 +161,6 @@ fn shape_batch_two_segments() {
             temporal: SegmentInput {
                 curve: &curve1,
                 limits: default_limits(),
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             e_mode: EMode::CoupledToXy,
             extrusion_per_xy_mm: 0.04,
@@ -183,7 +171,6 @@ fn shape_batch_two_segments() {
             temporal: SegmentInput {
                 curve: &curve2,
                 limits: default_limits(),
-                trailing_junction_chord_tolerance_mm: 0.04,
             },
             e_mode: EMode::CoupledToXy,
             extrusion_per_xy_mm: 0.04,
@@ -247,7 +234,6 @@ fn shape_batch_with_retraction() {
             temporal: SegmentInput {
                 curve: &curve1,
                 limits: default_limits(),
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             e_mode: EMode::CoupledToXy,
             extrusion_per_xy_mm: 0.04,
@@ -258,7 +244,6 @@ fn shape_batch_with_retraction() {
             temporal: SegmentInput {
                 curve: &curve_hold,
                 limits: default_limits(),
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             e_mode: EMode::Independent,
             extrusion_per_xy_mm: 0.0,
@@ -269,7 +254,6 @@ fn shape_batch_with_retraction() {
             temporal: SegmentInput {
                 curve: &curve2,
                 limits: default_limits(),
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             e_mode: EMode::CoupledToXy,
             extrusion_per_xy_mm: 0.04,
@@ -336,7 +320,6 @@ fn shape_batch_beta_warning() {
         temporal: SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,

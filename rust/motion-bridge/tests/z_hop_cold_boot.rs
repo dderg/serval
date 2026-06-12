@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use motion_bridge_native::classify::classify_and_build;
-use motion_bridge_native::config::{PlannerConfig, PlannerLimits};
+use motion_bridge_native::config::{LimitSection, PlannerConfig};
 use motion_bridge_native::planner::{DispatchError, PlannerHandle};
 use nurbs::bezier::extract_bezier_pieces;
 use trajectory::{AxisShaper, ShapedSegment, ShaperConfig};
@@ -37,14 +37,23 @@ fn neptune_config() -> PlannerConfig {
     c
 }
 
-fn neptune_limits() -> PlannerLimits {
-    PlannerLimits {
-        max_velocity: 200.0,
-        max_accel: 2000.0,
-        max_z_velocity: 20.0,
-        max_z_accel: 150.0,
-        square_corner_velocity: 4.0,
-    }
+fn neptune_limit_sections() -> Vec<LimitSection> {
+    vec![
+        LimitSection {
+            name: "gantry".into(),
+            axes: vec![0, 1],
+            max_velocity: Some(200.0),
+            max_accel: Some(2000.0),
+            max_jerk: None,
+        },
+        LimitSection {
+            name: "z".into(),
+            axes: vec![2],
+            max_velocity: Some(20.0),
+            max_accel: Some(150.0),
+            max_jerk: None,
+        },
+    ]
 }
 
 const Z_HOP_MM: f64 = 10.0;
@@ -107,8 +116,9 @@ fn max_z_step_delta_per_sample(seg: &ShapedSegment) -> u32 {
 #[test]
 fn cold_boot_z_hop_first_piece_starts_at_seed_position() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(neptune_config(), dispatch);
-    h.update_limits(neptune_limits()).expect("update_limits");
+    let mut cfg = neptune_config();
+    cfg.limit_sections = neptune_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.kalico_stream_open([0.0, 0.0, 0.0, 0.0])
         .expect("kalico_stream_open (cold-boot Z=0)");
@@ -149,8 +159,9 @@ fn cold_boot_z_hop_first_piece_starts_at_seed_position() {
 #[test]
 fn cold_boot_z_hop_first_piece_is_cubic() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(neptune_config(), dispatch);
-    h.update_limits(neptune_limits()).expect("update_limits");
+    let mut cfg = neptune_config();
+    cfg.limit_sections = neptune_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.kalico_stream_open([0.0, 0.0, 0.0, 0.0])
         .expect("kalico_stream_open (cold-boot Z=0)");
@@ -193,8 +204,9 @@ fn cold_boot_z_hop_first_piece_is_cubic() {
 #[test]
 fn cold_boot_z_hop_steps_per_sample_within_mcu_limit() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(neptune_config(), dispatch);
-    h.update_limits(neptune_limits()).expect("update_limits");
+    let mut cfg = neptune_config();
+    cfg.limit_sections = neptune_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.kalico_stream_open([0.0, 0.0, 0.0, 0.0])
         .expect("kalico_stream_open (cold-boot Z=0)");
@@ -232,8 +244,9 @@ fn z_hop_after_stream_open_with_nonzero_seed_starts_at_seed() {
     let z_seed = 5.0_f64;
 
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(neptune_config(), dispatch);
-    h.update_limits(neptune_limits()).expect("update_limits");
+    let mut cfg = neptune_config();
+    cfg.limit_sections = neptune_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.kalico_stream_open([100.0, 200.0, z_seed, 0.0])
         .expect("kalico_stream_open");
@@ -283,8 +296,9 @@ fn z_hop_after_stream_open_with_nonzero_seed_starts_at_seed() {
 #[test]
 fn z_hop_inter_piece_continuity() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(neptune_config(), dispatch);
-    h.update_limits(neptune_limits()).expect("update_limits");
+    let mut cfg = neptune_config();
+    cfg.limit_sections = neptune_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.kalico_stream_open([0.0, 0.0, 0.0, 0.0])
         .expect("kalico_stream_open");

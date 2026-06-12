@@ -80,7 +80,9 @@ impl ShaperState {
             };
 
         let initial_v_raw = self.read_path_speed_at(t_freeze, ctx.fallback_initial_v);
-        let a_max_path = ctx.limits.a_max.iter().copied().fold(f64::MAX, f64::min);
+        let a_max_path = (0..3)
+            .map(|ax| ctx.limits.axis_accel_cap(ax))
+            .fold(f64::MAX, f64::min);
         let (initial_a, start_d2_override) = if initial_v_raw > 0.0 {
             let axis_accels = self.read_axis_accels_at(t_freeze);
             let path_a = self
@@ -136,7 +138,6 @@ impl ShaperState {
                 temporal: temporal::multi::SegmentInput {
                     curve: &m.segment.xyz,
                     limits: per_segment_limits(&m.segment.xyz, ctx.limits, m.segment.feedrate_mm_s),
-                    trailing_junction_chord_tolerance_mm: ctx.junction_chord_tolerance_mm,
                 },
                 e_mode: m.segment.e_mode,
                 extrusion_per_xy_mm: m.segment.extrusion_per_xy_mm,
@@ -557,7 +558,6 @@ fn try_rung2(
             temporal: temporal::multi::SegmentInput {
                 curve: &m.segment.xyz,
                 limits: per_segment_limits(&m.segment.xyz, ctx.limits, m.segment.feedrate_mm_s),
-                trailing_junction_chord_tolerance_mm: ctx.junction_chord_tolerance_mm,
             },
             e_mode: m.segment.e_mode,
             extrusion_per_xy_mm: m.segment.extrusion_per_xy_mm,
@@ -635,7 +635,6 @@ fn try_rung3(
         temporal: temporal::multi::SegmentInput {
             curve: &seg.segment.xyz,
             limits: per_segment_limits(&seg.segment.xyz, ctx.limits, seg.segment.feedrate_mm_s),
-            trailing_junction_chord_tolerance_mm: ctx.junction_chord_tolerance_mm,
         },
         e_mode: seg.segment.e_mode,
         extrusion_per_xy_mm: seg.segment.extrusion_per_xy_mm,
@@ -833,15 +832,8 @@ fn boundary_path_speed_cap(seg: &PlanSegment<'_>) -> f64 {
     if mag < 1e-12 {
         return f64::INFINITY;
     }
-    let v_max = seg.temporal.limits.v_max;
-    let mut cap = f64::INFINITY;
-    for ax in 0..3 {
-        let dir = (tan[ax] / mag).abs();
-        if dir > 1e-12 {
-            cap = cap.min(v_max[ax] / dir);
-        }
-    }
-    cap
+    let unit_tan = [tan[0] / mag, tan[1] / mag, tan[2] / mag];
+    seg.temporal.limits.mvc_b(&unit_tan, 1e-12).sqrt()
 }
 
 fn per_segment_limits(
@@ -870,36 +862,39 @@ fn per_segment_limits(
     }
     let chord_len = (span[0] * span[0] + span[1] * span[1] + span[2] * span[2]).sqrt();
 
-    let max_active_j = (0..3)
-        .filter_map(|ax| {
-            if span[ax] > AXIS_INACTIVE_SPAN_EPS_MM {
-                Some(base.j_max[ax])
-            } else {
-                None
-            }
-        })
+    let set_is_inactive = |axes: temporal::AxisSet| {
+        axes.indices()
+            .all(|ax| span[ax] <= AXIS_INACTIVE_SPAN_EPS_MM)
+    };
+    let max_active_j = base
+        .sets()
+        .iter()
+        .filter(|s| !set_is_inactive(s.axes) && s.j_max.is_finite())
+        .map(|s| s.j_max)
         .fold(0.0_f64, f64::max);
-    let mut j_max = base.j_max;
+
+    let mut limits = base;
     if max_active_j > 0.0 {
-        for ax in 0..3 {
-            if span[ax] <= AXIS_INACTIVE_SPAN_EPS_MM {
-                j_max[ax] = max_active_j;
-            }
-        }
+        limits = limits.with_sets_mapped(|set| {
+            let j_max = if set_is_inactive(set.axes) {
+                set.j_max.max(max_active_j)
+            } else {
+                set.j_max
+            };
+            temporal::LimitSet { j_max, ..*set }
+        });
     }
 
-    let mut v_max = base.v_max;
     if feedrate_mm_s > 0.0 && chord_len > AXIS_INACTIVE_SPAN_EPS_MM {
-        for ax in 0..3 {
-            if span[ax] > AXIS_INACTIVE_SPAN_EPS_MM {
-                let direction_fraction = span[ax] / chord_len;
-                let feed_cap = feedrate_mm_s * direction_fraction;
-                v_max[ax] = v_max[ax].min(feed_cap);
-            }
-        }
+        limits = limits.with_extra_sets(&[temporal::LimitSet {
+            axes: temporal::AxisSet::all(),
+            v_max: feedrate_mm_s,
+            a_max: f64::INFINITY,
+            j_max: f64::INFINITY,
+        }]);
     }
 
-    temporal::Limits::new(v_max, base.a_max, j_max, base.a_centripetal_max)
+    limits
 }
 
 fn build_axis_queue(home_pos: f64, shaper: Option<AxisShaper>) -> AxisShaperQueue {

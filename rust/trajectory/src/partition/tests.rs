@@ -27,11 +27,10 @@ fn make_e_nurbs(e_start: f64, e_end: f64) -> ScalarNurbs<f64> {
 }
 
 fn default_limits() -> temporal::Limits {
-    temporal::Limits::new(
+    temporal::Limits::axis_boxes(
         [500.0, 500.0, 500.0],
         [10_000.0, 10_000.0, 10_000.0],
         [100_000.0, 100_000.0, 100_000.0],
-        5_000.0,
     )
 }
 
@@ -51,7 +50,6 @@ fn make_xy_segment(
         temporal: temporal::multi::SegmentInput {
             curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode,
         extrusion_per_xy_mm,
@@ -68,7 +66,6 @@ fn make_independent_segment<'a>(
         temporal: temporal::multi::SegmentInput {
             curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::Independent,
         extrusion_per_xy_mm: 0.0,
