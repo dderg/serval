@@ -45,6 +45,11 @@ int32_t kalico_runtime_clock_sync_request(struct KalicoRuntime *rt,
                                           uint32_t host_send_time_hi,
                                           uint64_t *out_mcu_clock);
 
+int32_t kalico_runtime_commit_correction(struct KalicoRuntime *rt,
+                                         uint8_t axis_idx,
+                                         uint8_t motor_idx,
+                                         uint32_t new_head);
+
 int32_t kalico_runtime_commit_head(struct KalicoRuntime *rt, uint8_t axis_idx, uint32_t new_head);
 
 int32_t kalico_runtime_configure_axis(struct KalicoRuntime *rt,
@@ -144,6 +149,12 @@ int32_t kalico_runtime_stream_flush(struct KalicoRuntime *rt, uint32_t *out_cred
 void kalico_runtime_tick_sample(struct KalicoRuntime *rt);
 
 int32_t kalico_runtime_ungate_pieces(struct KalicoRuntime *rt);
+
+int32_t kalico_runtime_write_correction_piece(struct KalicoRuntime *rt,
+                                              uint8_t axis_idx,
+                                              uint16_t start_slot,
+                                              uint8_t index,
+                                              const uint8_t *piece_ptr);
 
 int32_t kalico_runtime_write_piece(struct KalicoRuntime *rt,
                                    uint8_t axis_idx,

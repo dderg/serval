@@ -27,7 +27,6 @@ pub mod segment;
 pub mod sizing;
 pub use sizing::RT_STORAGE_SIZE;
 pub mod clock;
-#[cfg(feature = "motion-module-stepper")]
 pub mod dispatch_correction;
 pub mod dispatch_stepper;
 pub mod engine;
