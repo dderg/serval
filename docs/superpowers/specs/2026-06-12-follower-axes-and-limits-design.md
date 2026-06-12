@@ -37,23 +37,47 @@ meaning; stepper config carries hardware. Limits can in the future be declared
 in stepper space (§3); the linear kinematic map translates them into ordinary
 constraint rows.
 
-The kinematic map is itself declared in config, not implied by stepper section
-names. The kinematics declaration names a type — which defines the roles that
-exist and the linear math (corexy: belts `a`/`b`, `a = x + y`, `b = x − y`) —
-and assigns steppers to roles explicitly:
+The kinematic map is a **swappable module** declared in config, not implied by
+stepper section names. Each kinematics type (cartesian, corexy, future delta /
+IDEX / rotating-table) is a self-contained unit defining four things:
+
+1. **Its own config schema** — which axis roles it binds and which stepper
+   lists it asks for. Roles bind to declared axis names explicitly
+   (`axis_x: x` is a binding, not redundancy — the module assumes no letters).
+2. **Inverse transform** (axes → steppers) — the emission workhorse.
+3. **Forward transform** (steppers → axes) — homing and position seeding.
+4. **Linearity declaration** — either a constant matrix (cartesian, corexy,
+   IDEX), or nonlinear (delta, polar). Linear: stepper cubics are exact
+   coefficient combinations of axis cubics. Nonlinear: the host samples the
+   inverse transform and refits cubic pieces within a declared tolerance.
+   Either way the MCU stays dumb — it never learns kinematics exist.
+
+The module sits at exactly one pipeline stage: emission, after the per-axis
+chain (§5) produces final axis tracks, before piece fitting. The planner,
+limits, follower, and shapers are all axis-space and blind to which module is
+loaded. Adding a printer geometry means writing one module, nothing else.
 
 ```
 [kinematics]
 type: corexy
-a_steppers: stepper_front, stepper_rear_left
-b_steppers: stepper_back, stepper_rear_right
+axis_x: x
+axis_y: y
+axis_z: z
+a_steppers: stepper_a, stepper_a1
+b_steppers: stepper_b, stepper_b1
 z_steppers: stepper_z0, stepper_z1, stepper_z2
 ```
 
-Stepper names are arbitrary; a stepper has no axis identity outside this
+Stepper names are arbitrary; a stepper has no axis identity outside its
 assignment (`stepper_x` on a corexy was always a lie, and the lie has nowhere
-to live). Follower axes do not appear in the kinematics map: their relation is
-`follows`, and their motors are assigned like any other stepper.
+to live). Direct-drive steppers self-assign with an `axis:` key in their own
+section (the degenerate identity kinematics) — so a follower's motor declares
+`axis: e`, and kinematics modules claim only the coupled axes they exist for.
+
+Three coverage rules close the config, each failing at load naming the gap:
+every axis appears in at least one `[limit]` section (§3); every axis is
+stepper-mapped exactly once (one kinematics role or one stepper `axis:` key —
+never zero, never twice); every `follows` entry references a declared axis.
 
 Axis names double as G-code word letters (`[axis e]` ↔ word `E`): single
 letters, collisions with structural G5 words (I/J/P/Q/F) rejected at load.
