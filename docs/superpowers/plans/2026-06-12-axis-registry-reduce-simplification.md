@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make axes config-declared objects (`[axis <name>]` with `follows`/`steppers`), replace the E-mode zoo with one follower rule (ratio = delta / 3D path length), and delete every E-special code path — leaving loud errors where plans 3–4 will land.
+**Goal:** Make axes config-declared objects (`[axis <name>]` with `follows`/`motors`), replace the E-mode zoo with one follower rule (ratio = delta / 3D path length), and delete every E-special code path — leaving loud errors where plans 3–4 will land.
 
 **Architecture:** Spec: `docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md` §1–§2. A `CubicSegment` carries `followers: Vec<FollowerDemand { axis_index, ratio }>` instead of `e_mode`/`extrusion_per_xy_mm`/`e_independent`. The reduce boundary computes per-follower deltas from a config-derived word list (`FollowerWord { letter, axis_index }`) against a per-follower nominal ledger; ratio uses **3D** arc length, so vase mode and hop-retracts become ordinary moves. `e_independent.rs` (trapezoid scheduler), `ELimits`, and `partition.rs` (E-gap machinery) are deleted with nothing replacing them: follower-only moves are a fatal reduce error until plan 3; the live-path `ExtrusionNotSupported` rejection stays until plan 4. The axis registry lives in `motion-bridge/src/config.rs` next to plan 1's `LimitSection`; klippy gains `[axis]` sections and rejects `[firmware_retraction]`.
 
@@ -12,7 +12,7 @@
 
 **Line numbers in this plan are pre-plan-1 approximations — always anchor by symbol name and the given grep commands, never by line.**
 
-**Out of scope (later plans):** planner constraint rows for follower axes (plan 3 — follower-covering `[limit]` sections are validated but produce no temporal rows here, which is safe because nothing moves a follower axis after this plan), any E motion/emission/PA (plan 4 — `classify.rs` keeps rejecting live extrusion), kinematics modules and stepper-role mapping (plan 5 — `steppers:` keys are parsed and stored, not consumed).
+**Out of scope (later plans):** planner constraint rows for follower axes (plan 3 — follower-covering `[limit]` sections are validated but produce no temporal rows here, which is safe because nothing moves a follower axis after this plan), any E motion/emission/PA (plan 4 — `classify.rs` keeps rejecting live extrusion), kinematics modules and motor-role mapping (plan 5 — `motors:` keys are parsed and stored, not consumed).
 
 **Repo rules for every task:** unit tests in separate files from tested code; no explanatory comments — name/extract instead; fail loudly; commit after every task; no Claude/Anthropic commit trailers; `cargo fmt --all --check` before any PR push.
 
@@ -374,7 +374,7 @@ fn decl(name: &str, follows: &[&str]) -> AxisDecl {
     AxisDecl {
         name: name.into(),
         follows: follows.iter().map(|s| s.to_string()).collect(),
-        steppers: vec![],
+        motors: vec![],
     }
 }
 
@@ -486,7 +486,7 @@ const RESERVED_LETTERS: [u8; 9] = [b'i', b'j', b'p', b'q', b'f', b'g', b'm', b'n
 pub struct AxisDecl {
     pub name: String,
     pub follows: Vec<String>,
-    pub steppers: Vec<String>,
+    pub motors: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -597,7 +597,7 @@ NoFollowerCoverage { axis: String },
 
 Coverage rule: every non-spatial registry axis must appear in ≥1 section carrying finite `max_velocity` AND ≥1 carrying finite `max_accel` (jerk not required until plan 3). The runtime-caps overlay (plan 1) stays spatial-only — it uses `AxisSet::all()`, which is the spatial set.
 
-- [ ] **Step 5: classify.rs + plumbing.** `CubicSegment::try_new(xyz, vec![], feedrate_mm_s, source, None)` at the construction site; `MoveClass`/`ExtrusionNotSupported` untouched. `bridge.rs::init_planner` gains a leading param `axes: Vec<(String, Vec<String>, Vec<String>)>` (name, follows, steppers) → `AxisDecl`s → `AxisRegistry::try_new` → store in config → eager `cfg.to_temporal_limits()?` validation as plan 1 established. Everywhere `ShapeSegmentInput`/plan-input structs are built (`grep -rn "e_limits\|e_mode\|extrusion_per_xy_mm" rust/motion-bridge/ rust/kalico-host-rt/`), apply the Task 3 shapes; delete the `PlannerConfig` `e_limits` field and its default.
+- [ ] **Step 5: classify.rs + plumbing.** `CubicSegment::try_new(xyz, vec![], feedrate_mm_s, source, None)` at the construction site; `MoveClass`/`ExtrusionNotSupported` untouched. `bridge.rs::init_planner` gains a leading param `axes: Vec<(String, Vec<String>, Vec<String>)>` (name, follows, motors) → `AxisDecl`s → `AxisRegistry::try_new` → store in config → eager `cfg.to_temporal_limits()?` validation as plan 1 established. Everywhere `ShapeSegmentInput`/plan-input structs are built (`grep -rn "e_limits\|e_mode\|extrusion_per_xy_mm" rust/motion-bridge/ rust/kalico-host-rt/`), apply the Task 3 shapes; delete the `PlannerConfig` `e_limits` field and its default.
 
 - [ ] **Step 6: Run** — `cargo nextest run -p motion-bridge` → PASS, then full workspace `cargo nextest run` from `rust/` → PASS (catches stragglers in kalico-host-rt and integration tests).
 - [ ] **Step 7: Commit** — `feat(motion-bridge): axis registry; follower-aware [limit] validation; e_limits dies`
@@ -631,10 +631,10 @@ class AxisSection:
                 % (config.get_name(), self.name)
             )
         self.follows = [a.strip().lower() for a in config.getlist("follows", [])]
-        self.steppers = [s.strip() for s in config.getlist("steppers", [])]
+        self.motors = [m.strip() for m in config.getlist("motors", [])]
 
     def get_status(self, eventtime):
-        return {"follows": list(self.follows), "steppers": list(self.steppers)}
+        return {"follows": list(self.follows), "motors": list(self.motors)}
 
 
 def load_config_prefix(config):
@@ -653,8 +653,8 @@ self.axis_sections = []
 for sc in config.get_prefix_sections("axis "):
     name = sc.get_name().split(None, 1)[1]
     follows = [a.strip().lower() for a in sc.getlist("follows", [])]
-    steppers = [s.strip() for s in sc.getlist("steppers", [])]
-    self.axis_sections.append((name, follows, steppers))
+    motors = [m.strip() for m in sc.getlist("motors", [])]
+    self.axis_sections.append((name, follows, motors))
 declared = {name for name, _, _ in self.axis_sections}
 for required in ("x", "y", "z"):
     if required not in declared:
@@ -729,7 +729,7 @@ Every hit dies or gets a written justification in the commit message. Expected l
 
 ## Self-review notes (spec → plan coverage)
 
-- `[axis <name>]` config objects, `follows`, `steppers:` key parsed (consumed in plan 5): Tasks 4–5 ✓
+- `[axis <name>]` config objects, `follows`, `motors:` key parsed (consumed in plan 5): Tasks 4–5 ✓
 - Axis name = G-code letter, structural-letter collisions rejected: Tasks 4–5 (RESERVED_LETTERS both sides) ✓
 - 3D arc length; vase mode / hop-retract become ordinary moves; helical error deleted: Tasks 1–2 ✓
 - One follower rule, segments carry ratio only, no modes: Task 2 ✓

@@ -31,23 +31,24 @@ centripetal cap, square-corner-velocity, and the MCU's knowledge that any axis
 is special. The MCU plays per-axis cubic tapes; every track, including a
 follower's, is fully written on the host.
 
-Steppers are a separate layer: hardware objects (pins, currents, microsteps)
-connected to axes only through the kinematic map. Axis config carries planning
-meaning; stepper config carries hardware. Limits can in the future be declared
-in stepper space (§3); the linear kinematic map translates them into ordinary
+Motors are a separate layer: hardware objects (pins, currents, drive
+technology — stepper, servo, whatever comes next) connected to axes only
+through the kinematic map. Axis config carries planning
+meaning; motor config carries hardware. Limits can in the future be declared
+in motor space (§3); the linear kinematic map translates them into ordinary
 constraint rows.
 
 The kinematic map is a **swappable module** declared in config, not implied by
-stepper section names. Each kinematics type (cartesian, corexy, future delta /
+motor section names. Each kinematics type (cartesian, corexy, future delta /
 IDEX / rotating-table) is a self-contained unit defining four things:
 
-1. **Its own config schema** — which axis roles it binds and which stepper
+1. **Its own config schema** — which axis roles it binds and which motor
    lists it asks for. Roles bind to declared axis names explicitly
    (`axis_x: x` is a binding, not redundancy — the module assumes no letters).
-2. **Inverse transform** (axes → steppers) — the emission workhorse.
-3. **Forward transform** (steppers → axes) — homing and position seeding.
+2. **Inverse transform** (axes → motors) — the emission workhorse.
+3. **Forward transform** (motors → axes) — homing and position seeding.
 4. **Linearity declaration** — either a constant matrix (cartesian, corexy,
-   IDEX), or nonlinear (delta, polar). Linear: stepper cubics are exact
+   IDEX), or nonlinear (delta, polar). Linear: motor cubics are exact
    coefficient combinations of axis cubics. Nonlinear: the host samples the
    inverse transform and refits cubic pieces within a declared tolerance.
    Either way the MCU stays dumb — it never learns kinematics exist.
@@ -63,21 +64,23 @@ type: corexy
 axis_x: x
 axis_y: y
 axis_z: z
-a_steppers: stepper_a, stepper_a1
-b_steppers: stepper_b, stepper_b1
-z_steppers: stepper_z0, stepper_z1, stepper_z2
+a_motors: motor_a, motor_a1
+b_motors: motor_b, motor_b1
+z_motors: motor_z0, motor_z1, motor_z2
 ```
 
-Stepper names are arbitrary; a stepper has no axis identity outside its
+Motor names are arbitrary; a motor has no axis identity outside its
 assignment (`stepper_x` on a corexy was always a lie, and the lie has nowhere
-to live). Direct-drive axes declare their motors in their own section —
-`[axis e]` carries `steppers: extruder_motor` (the degenerate identity
-kinematics) — so kinematics modules claim only the coupled axes they exist
-for, and nothing is inferred from the stepper side.
+to live). A motor is a stepper or a servo — or whatever drive technology comes
+next; nothing axis- or planner-side ever cares which. Direct-drive axes
+declare their motors in their own section — `[axis e]` carries
+`motors: extruder_motor` (the degenerate identity kinematics) — so kinematics
+modules claim only the coupled axes they exist for, and nothing is inferred
+from the motor side.
 
 Three coverage rules close the config, each failing at load naming the gap:
 every axis appears in at least one `[limit]` section (§3); every axis is
-stepper-mapped exactly once (one kinematics role or its own `steppers:` key —
+motor-mapped exactly once (one kinematics role or its own `motors:` key —
 never zero, never twice); every `follows` entry references a declared axis.
 
 Axis names double as G-code word letters (`[axis e]` ↔ word `E`): single
@@ -163,9 +166,9 @@ max_accel: 1500
 Today's behavior — global `max_accel` broadcast into per-axis boxes, so
 diagonals reach √2× the configured value — dies with the legacy fields.
 
-Reserved syntax, **not built now**: `steppers:` instead of `axes:` declares the
-set in stepper space; the kinematic map translates it into rows in the same pot
-(corexy `stepper_a` ⇒ `|ẍ + ÿ| ≤ cap`). Velocity-dependent caps (torque
+Reserved syntax, **not built now**: `motors:` instead of `axes:` declares the
+set in motor space; the kinematic map translates it into rows in the same pot
+(corexy belt motor ⇒ `|ẍ + ÿ| ≤ cap`). Velocity-dependent caps (torque
 curves) would be additional keys on the same section. Nothing in this work
 depends on either.
 
@@ -311,12 +314,12 @@ Separately plannable, separately testable, in dependency order:
    out of the Rust side; klippy/bridge seam renamed; thin compat shim for the
    published `toolhead` status object, retired on its own schedule. Includes
    the declared kinematic map (§1): `[kinematics]` section with explicit
-   stepper-to-role assignment, replacing role-encoding stepper section names.
+   motor-to-role assignment, replacing role-encoding motor section names.
 6. **Observability.** Binding-constraint reporting via structured logs. Small,
    rides on 3.
 
-Deferred, consciously — door open, nothing built: stepper-space limits
-(`steppers:` key, syntax reserved), velocity-dependent caps (torque curves),
+Deferred, consciously — door open, nothing built: motor-space limits
+(`motors:` key, syntax reserved), velocity-dependent caps (torque curves),
 nonlinear PA (trait slot exists), exposing a follower's own shaper in config,
 automated limit tuning. All additive rows, keys, or trait implementations; none
 change the architecture.
