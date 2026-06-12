@@ -11,6 +11,13 @@ use crate::monomial::bernstein_to_monomial_with_duration;
 ///   starting from 0, so no division is needed on the hot path.
 ///
 /// Occupancy: `head.wrapping_sub(retired)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitOutcome {
+    Applied,
+    Stale,
+    Overcommit,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RingDescriptor {
     pub ring_offset: usize,
@@ -82,13 +89,22 @@ impl RingDescriptor {
         }
     }
 
+    /// `Stale` (a retransmit of an already-committed head) is idempotent-OK;
+    /// `Overcommit` means the proposal exceeds ring capacity relative to the
+    /// retire frontier — the host's view of this ring has desynced and the
+    /// commit was NOT applied.
     #[inline]
-    pub fn commit_head(&mut self, new_head: u32) {
+    pub fn commit_head(&mut self, new_head: u32) -> CommitOutcome {
         let cur = self.head.wrapping_sub(self.retired);
         let proposed = new_head.wrapping_sub(self.retired);
-        if proposed > cur && proposed <= self.ring_depth as u32 {
-            self.head = new_head;
+        if proposed <= cur {
+            return CommitOutcome::Stale;
         }
+        if proposed > self.ring_depth as u32 {
+            return CommitOutcome::Overcommit;
+        }
+        self.head = new_head;
+        CommitOutcome::Applied
     }
 
     #[inline]

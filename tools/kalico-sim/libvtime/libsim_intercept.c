@@ -251,6 +251,33 @@ static void control_handle_line(int client_fd, char *line) {
         send_resp(client_fd, buf);
         return;
     }
+    if (strncmp(line, "get_steps", 9) == 0) {
+        long line_off;
+        if (parse_kv(line, "line", &line_off) < 0) {
+            send_resp(client_fd, "error: parse error\n");
+            return;
+        }
+        long pos = 0;
+        int hit = 0;
+        pthread_mutex_lock(&auto_endstop_mtx);
+        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+            if (auto_endstops[i].active
+                && auto_endstops[i].step_line == (int)line_off) {
+                pos = auto_endstops[i].pos;
+                hit = 1;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&auto_endstop_mtx);
+        if (!hit) {
+            send_resp(client_fd, "error: no step tracker for line\n");
+            return;
+        }
+        char buf[48];
+        snprintf(buf, sizeof(buf), "steps=%ld\n", pos);
+        send_resp(client_fd, buf);
+        return;
+    }
     if (strncmp(line, "get_pwm", 7) == 0) {
         long chip, pwm;
         if (parse_kv(line, "chip", &chip) < 0

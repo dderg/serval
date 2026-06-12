@@ -227,6 +227,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-markupsafe \
     libffi8 \
     libudev1 \
+    gdb \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --break-system-packages \

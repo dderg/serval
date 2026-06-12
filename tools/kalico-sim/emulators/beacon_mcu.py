@@ -55,9 +55,28 @@ DEFAULT_TEMP_RAW = 2048
 class BeaconMcuStub:
     SAMPLE_RATE_HZ = 1600.0
 
-    def __init__(self, pty_path: str, log_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        pty_path: str,
+        log_path: Optional[str] = None,
+        step_sock_path: Optional[str] = None,
+        z_steps_per_mm: float = 800.0,
+        z_step_line: int = 15,
+        z_step_sign: int = 1,
+    ) -> None:
         self._pty_path = pty_path
         self._log_path = log_path
+        self._step_sock_path = step_sock_path
+        self._z_steps_per_mm = z_steps_per_mm
+        self._z_step_line = z_step_line
+        self._z_step_sign = z_step_sign
+        self._z_anchor_mm = 10.0
+        self._z_anchor_steps = 0
+        self._steps_now = 0
+        self._step_tracking = False
+        self._step_thread: Optional[threading.Thread] = None
+        self._z_line_locked = False
+        self._line_baselines = {}
         self._z_target: float = 10.0
         self._stream_en: bool = False
         self._stop = threading.Event()
@@ -96,6 +115,9 @@ class BeaconMcuStub:
         self._homing_trigger_delay: float = 0.5
         self._homing_trigger_timer: Optional[threading.Timer] = None
         self._contact_homing_active: bool = False
+        self._contact_armed_clock: int = 0
+        self._contact_trsync_oid: int = 0
+        self._contact_trigger_reason: int = 1
         self._contact_trigger_clock: int = 0
         self._contact_trigger_sample: int = 0
         self._contact_trigger_freq: int = 0
@@ -141,6 +163,13 @@ class BeaconMcuStub:
             target=self._reactor_loop, name="beacon-stub-rx", daemon=True
         )
         self._thread.start()
+        if self._step_sock_path and self._step_thread is None:
+            self._step_thread = threading.Thread(
+                target=self._step_poll_loop,
+                name="beacon-stub-steps",
+                daemon=True,
+            )
+            self._step_thread.start()
 
     def start_sample_stream(
         self, z_target_mm: float, rate_hz: float = SAMPLE_RATE_HZ
@@ -181,6 +210,87 @@ class BeaconMcuStub:
             os.unlink(self._pty_path)
         except FileNotFoundError:
             pass
+
+    def _step_poll_loop(self) -> None:
+        import socket as _socket
+
+        sock = None
+        buf = b""
+        while not self._stop.is_set():
+            if sock is None:
+                try:
+                    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                    sock.settimeout(1.0)
+                    sock.connect(self._step_sock_path)
+                except OSError:
+                    sock = None
+                    time.sleep(0.25)
+                    continue
+            try:
+                if self._z_line_locked:
+                    probe_lines = [self._z_step_line]
+                else:
+                    probe_lines = [15, 18, 7]
+                readings = {}
+                for ln in probe_lines:
+                    sock.sendall(b"get_steps line=%d\n" % ln)
+                    while b"\n" not in buf:
+                        chunk = sock.recv(64)
+                        if not chunk:
+                            raise OSError("closed")
+                        buf += chunk
+                    resp, _, buf = buf.partition(b"\n")
+                    if resp.startswith(b"steps="):
+                        readings[ln] = int(resp[6:])
+                if not self._z_line_locked:
+                    for ln, val in readings.items():
+                        if val != self._line_baselines.get(ln, val):
+                            self._z_step_line = ln
+                            self._z_line_locked = True
+                            logging.info(
+                                "beacon-stub: z step line locked to gpio%d",
+                                ln,
+                            )
+                            break
+                        self._line_baselines[ln] = val
+                line = (
+                    b"steps=%d" % readings[self._z_step_line]
+                    if self._z_step_line in readings
+                    else b""
+                )
+            except OSError:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                sock = None
+                continue
+            if line.startswith(b"steps="):
+                steps = int(line[6:])
+                self._steps_now = steps
+                # Step tracking only takes over from the timer fallback once
+                # a step line is confirmed to move (today the sim does not
+                # export kalico-runtime steps, so this stays in timer mode —
+                # TODO: export runtime steps via sim_intercept_notify_step).
+                if self._z_line_locked and not self._step_tracking:
+                    self._step_tracking = True
+                    self._z_anchor_steps = steps
+                if self._step_tracking:
+                    z = (
+                        self._z_anchor_mm
+                        + self._z_step_sign
+                        * (steps - self._z_anchor_steps)
+                        / self._z_steps_per_mm
+                    )
+                    self._z_current = z
+                    if self._contact_homing_active and z <= 0.0:
+                        self._fire_contact_trigger()
+            time.sleep(0.005)
+
+    def _anchor_z(self, z_mm: float) -> None:
+        if self._step_tracking:
+            self._z_anchor_mm = z_mm
+            self._z_anchor_steps = self._steps_now
 
     def _now_clock(self) -> int:
         elapsed = time.monotonic() - self._clock_origin
@@ -260,6 +370,7 @@ class BeaconMcuStub:
             if not chunk:
                 continue
             self.rx_byte_count += len(chunk)
+            self._log("rx-raw", bytes(chunk))
             self._inbuf.extend(chunk)
             self._drain_inbuf()
 
@@ -269,6 +380,10 @@ class BeaconMcuStub:
             if msglen == 0:
                 return
             if msglen < 0:
+                logging.info(
+                    "beacon-stub: RESYNC bad framing, buf head=%s",
+                    bytes(self._inbuf[:24]).hex(),
+                )
                 idx = self._inbuf.find(msgproto.MESSAGE_SYNC)
                 if idx < 0:
                     self._inbuf.clear()
@@ -279,6 +394,12 @@ class BeaconMcuStub:
             del self._inbuf[:msglen]
             frame_seq = frame[1] & msgproto.MESSAGE_SEQ_MASK
             if frame_seq != self._host_recv_seq & msgproto.MESSAGE_SEQ_MASK:
+                logging.info(
+                    "beacon-stub: DROP frame seq=%d expected=%d len=%d",
+                    frame_seq,
+                    self._host_recv_seq & msgproto.MESSAGE_SEQ_MASK,
+                    len(frame),
+                )
                 self._send_ack()
                 continue
             self._host_recv_seq = (self._host_recv_seq + 1) & 0xFFFF
@@ -399,6 +520,11 @@ class BeaconMcuStub:
         self._home_trigger_reason = params["trigger_reason"]
         self._home_trigger_invert = params["trigger_invert"]
         if not self._home_active:
+            # A fresh arm approaches from above; a prior pass left z at the
+            # trigger height. Without step feedback there is no retract
+            # motion to observe, so reset the modeled height.
+            if not self._step_tracking:
+                self._z_current = 10.0
             self._homing_start_z = self._z_current
             self._homing_start_time = time.monotonic()
             self._home_active = True
@@ -429,11 +555,13 @@ class BeaconMcuStub:
         iter_count = 0
         while not self._stop.is_set() and self._home_active:
             time.sleep(period)
-            elapsed = time.monotonic() - self._homing_start_time
-            self._z_current = max(
-                0.0,
-                self._homing_start_z - elapsed * self._homing_approach_speed,
-            )
+            if not self._step_tracking:
+                elapsed = time.monotonic() - self._homing_start_time
+                self._z_current = max(
+                    0.0,
+                    self._homing_start_z
+                    - elapsed * self._homing_approach_speed,
+                )
             freq = self._z_to_frequency(self._z_current)
             count = self._freq_to_count(freq)
             iter_count += 1
@@ -478,42 +606,46 @@ class BeaconMcuStub:
 
     def _handle_beacon_contact_home(self, params: dict) -> None:
         self._contact_homing_active = True
-        armed_clock = self._now_clock()
-        trsync_oid = params["trsync_oid"]
-        trigger_reason = params["trigger_reason"]
-
-        def _fire():
-            if not self._contact_homing_active:
-                return
-            self._contact_homing_active = False
-            self._contact_triggered = True
-            self._contact_trigger_clock = self._now_clock()
-            self._contact_trigger_sample = self._sample_index
-            self._contact_trigger_freq = self._z_to_frequency(0.0)
-            self._send_msg(
-                "beacon_contact armed_clock=%u trigger_clock=%u"
-                " detect_clock=%u latency=%c error=%c",
-                armed_clock=armed_clock,
-                trigger_clock=self._contact_trigger_clock,
-                detect_clock=self._contact_trigger_clock,
-                latency=0,
-                error=0,
-            )
-            self._send_msg(
-                "trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u",
-                oid=trsync_oid,
-                can_trigger=0,
-                trigger_reason=trigger_reason,
-                clock=self._contact_trigger_clock,
-            )
+        self._contact_armed_clock = self._now_clock()
+        self._contact_trsync_oid = params["trsync_oid"]
+        self._contact_trigger_reason = params["trigger_reason"]
 
         if self._homing_trigger_timer is not None:
             self._homing_trigger_timer.cancel()
-        self._homing_trigger_timer = threading.Timer(
-            self._homing_trigger_delay, _fire
+        if not self._step_tracking:
+            # No step feedback available: fall back to firing on a timer.
+            self._homing_trigger_timer = threading.Timer(
+                self._homing_trigger_delay, self._fire_contact_trigger
+            )
+            self._homing_trigger_timer.daemon = True
+            self._homing_trigger_timer.start()
+
+    def _fire_contact_trigger(self) -> None:
+        if not self._contact_homing_active:
+            return
+        self._contact_homing_active = False
+        self._contact_triggered = True
+        self._contact_trigger_clock = self._now_clock()
+        self._contact_trigger_sample = self._sample_index
+        self._contact_trigger_freq = self._z_to_frequency(0.0)
+        # The nozzle touches the bed at the contact trigger: true z is 0.
+        self._anchor_z(0.0)
+        self._send_msg(
+            "beacon_contact armed_clock=%u trigger_clock=%u"
+            " detect_clock=%u latency=%c error=%c",
+            armed_clock=self._contact_armed_clock,
+            trigger_clock=self._contact_trigger_clock,
+            detect_clock=self._contact_trigger_clock,
+            latency=0,
+            error=0,
         )
-        self._homing_trigger_timer.daemon = True
-        self._homing_trigger_timer.start()
+        self._send_msg(
+            "trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u",
+            oid=self._contact_trsync_oid,
+            can_trigger=0,
+            trigger_reason=self._contact_trigger_reason,
+            clock=self._contact_trigger_clock,
+        )
 
     def _handle_beacon_contact_stop_home(self, params: dict) -> None:
         self._contact_homing_active = False
@@ -535,9 +667,6 @@ class BeaconMcuStub:
     def _handle_trsync_start(self, params: dict) -> None:
         self._trsync_oids.add(params["oid"])
         self._trsync_can_trigger[params["oid"]] = True
-        # Reset Z so the next homing pass approaches from above; a prior
-        # pass leaves _z_current at 0.
-        self._z_current = self._homing_start_z = 10.0
 
     def _handle_trsync_trigger(self, params: dict) -> None:
         oid = params["oid"]
@@ -641,7 +770,7 @@ class BeaconMcuStub:
                 next_batch += batch_period
                 start_clock = self._now_clock()
 
-                if self._home_active:
+                if self._home_active and not self._step_tracking:
                     elapsed = now - self._homing_start_time
                     self._z_current = max(
                         0.0,

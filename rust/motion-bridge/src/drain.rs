@@ -73,6 +73,11 @@ impl DrainSync {
         })
     }
 
+    pub fn drained(&self) -> bool {
+        let c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+        Self::is_drained(&c)
+    }
+
     pub fn wait_drained(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());

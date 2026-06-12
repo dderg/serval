@@ -515,6 +515,9 @@ pub struct PyMotionBridge {
     active_drip_cohort: Arc<Mutex<Option<u64>>>,
     motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
     homing_run: Arc<Mutex<Option<HomingRun>>>,
+    pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
+    pending_flushes: Mutex<HashMap<u64, FlushWait>>,
+    next_flush_id: std::sync::atomic::AtomicU64,
     homing_result:
         Mutex<Option<crossbeam_channel::Receiver<Result<([f64; 3], [f64; 3], u64), String>>>>,
     latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
@@ -757,6 +760,9 @@ impl PyMotionBridge {
             active_drip_cohort: Arc::new(Mutex::new(None)),
             motion_history: Arc::new(Mutex::new(crate::motion_history::HistoryStore::default())),
             homing_run: Arc::new(Mutex::new(None)),
+            pending_trip: Arc::new(Mutex::new(None)),
+            pending_flushes: Mutex::new(HashMap::new()),
+            next_flush_id: std::sync::atomic::AtomicU64::new(1),
             homing_result: Mutex::new(None),
             latched_drive_fault: Arc::new(Mutex::new(HashMap::new())),
             remote_triggers: Mutex::new(HashMap::new()),
@@ -2841,6 +2847,57 @@ impl PyMotionBridge {
             .map_err(PyRuntimeError::new_err)
     }
 
+    fn wait_moves_start(&self) -> PyResult<u64> {
+        let rx = {
+            let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            let planner = guard.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err("planner not initialized — call init_planner first")
+            })?;
+            planner.flush_start().map_err(planner_err)?
+        };
+        let mut pending = self
+            .pending_flushes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let id = self.next_flush_id.fetch_add(1, Ordering::Relaxed);
+        pending.insert(id, FlushWait { rx, deadline: None });
+        Ok(id)
+    }
+
+    fn wait_moves_poll(&self, flush_id: u64) -> PyResult<bool> {
+        let mut pending = self
+            .pending_flushes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let Some(wait) = pending.get_mut(&flush_id) else {
+            return Err(PyRuntimeError::new_err(format!(
+                "wait_moves_poll: unknown flush id {flush_id}"
+            )));
+        };
+        if wait.deadline.is_none() {
+            match wait.rx.try_recv() {
+                Ok(finish) => {
+                    wait.deadline = Some(finish.unwrap_or_else(std::time::Instant::now));
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => return Ok(false),
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    pending.remove(&flush_id);
+                    return Err(PyRuntimeError::new_err(
+                        "wait_moves_poll: planner channel closed",
+                    ));
+                }
+            }
+        }
+        let done = wait
+            .deadline
+            .map(|d| std::time::Instant::now() >= d)
+            .unwrap_or(false);
+        if done {
+            pending.remove(&flush_id);
+        }
+        Ok(done)
+    }
+
     fn motion_drain_poll(&self, py: Python<'_>) -> PyResult<bool> {
         let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         let planner = guard.as_ref().ok_or_else(|| {
@@ -3193,7 +3250,30 @@ impl PyMotionBridge {
         }
 
         *self.homing_result.lock().unwrap_or_else(|p| p.into_inner()) = Some(result_rx);
+
+        let pending = self
+            .pending_trip
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some((p_mcu, p_endstop, p_clock)) = pending {
+            if p_mcu == endstop_mcu && p_endstop == endstop_id {
+                tracing::warn!(
+                    subsystem = "trip-relay",
+                    event = "early_trip_consumed",
+                    mcu = p_mcu,
+                    endstop_id = p_endstop,
+                    trip_clock = p_clock,
+                    "dispatching buffered early trip"
+                );
+                dispatch_endstop_trip(&self.trip_deps(), p_mcu, p_endstop, p_clock);
+            }
+        }
         Ok(())
+    }
+
+    fn motion_drained(&self) -> bool {
+        self.drain.drained()
     }
 
     fn home_axis_poll(&self) -> PyResult<Option<([f64; 3], [f64; 3], u64)>> {
@@ -3249,6 +3329,7 @@ impl PyMotionBridge {
                 ))
             })?;
         let deps = self.trip_deps();
+        *self.pending_trip.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let router = Arc::clone(&self.router);
         let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let id = host_io
@@ -3513,9 +3594,15 @@ impl Drop for PyMotionBridge {
     }
 }
 
+struct FlushWait {
+    rx: crossbeam_channel::Receiver<Option<std::time::Instant>>,
+    deadline: Option<std::time::Instant>,
+}
+
 #[derive(Clone)]
 pub(crate) struct TripDeps {
     homing_run: Arc<Mutex<Option<HomingRun>>>,
+    pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
     active_drip_cohort: Arc<Mutex<Option<u64>>>,
     pump_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<crate::pump::PumpMsg>>>>,
     mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
@@ -3528,6 +3615,7 @@ impl PyMotionBridge {
     pub(crate) fn trip_deps(&self) -> TripDeps {
         TripDeps {
             homing_run: Arc::clone(&self.homing_run),
+            pending_trip: Arc::clone(&self.pending_trip),
             active_drip_cohort: Arc::clone(&self.active_drip_cohort),
             pump_tx: Arc::clone(&self.pump_tx),
             mcus: Arc::clone(&self.mcus),
@@ -3589,7 +3677,24 @@ pub(crate) fn dispatch_endstop_trip(
         guard.take()
     };
     let run = match run_opt {
-        None => return,
+        None => {
+            // The trip beat home_axis to setting the run (device armed in
+            // trip_move_begin, planning/drain still in flight). Buffer it:
+            // home_axis consumes it right after registering the run.
+            // Dropping it would turn a legitimate trigger into a full
+            // max-travel descend.
+            tracing::warn!(
+                subsystem = "trip-relay",
+                event = "early_trip_buffered",
+                mcu = event_mcu,
+                endstop_id,
+                trip_clock,
+                "terminal report arrived before the homing run was registered — buffered"
+            );
+            *deps.pending_trip.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some((event_mcu, endstop_id, trip_clock));
+            return;
+        }
         Some(r) => r,
     };
     if run.endstop_id != endstop_id || run.endstop_mcu != event_mcu {
