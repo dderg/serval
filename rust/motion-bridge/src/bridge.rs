@@ -3101,12 +3101,23 @@ impl PyMotionBridge {
                 .map_err(PyRuntimeError::new_err)?;
         }
 
+        // The trip-staleness window must be projected with the SAME clock
+        // record era the drip pieces (and the trip-clock conversion) will
+        // use. The axis's last recorded endpoint clock can come from an
+        // older era — the Python clocksync estimate is not consistent
+        // across re-anchors (vtime sims wobble by whole seconds) — which
+        // falsely rejects valid trips as "predating" the move.
         let window_start_clock = {
-            let store = self
-                .motion_history
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            store.last_endpoint_clock(axis_key)
+            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            let host_now = router.host_now_secs();
+            router
+                .host_time_to_mcu_clock(mcu_handle_from_raw(axis_key.mcu_id), host_now)
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!(
+                        "home_axis: cannot project arm-time clock for axis mcu {}: {e:?}",
+                        axis_key.mcu_id
+                    ))
+                })?
         };
 
         {
