@@ -72,7 +72,7 @@ pub extern "C" fn timer_is_before(_a: u32, _b: u32) -> u8 {
     0
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn runtime_emit_step_pulses(_axis_idx: u8, _n_steps: i32) {}
+pub extern "C" fn runtime_emit_step_pulses(_axis_idx: u8, _n_steps: i32, _stepper_sel: u8) {}
 
 #[test]
 fn clock_sync_returns_widened_host_clock_not_seqlock() {

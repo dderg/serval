@@ -16,7 +16,8 @@
 typedef struct {
     uint32_t cycle_abs;   // low 32 bits of DWT CYCCNT; wrap-aware compare only
     int8_t   dir;
-    uint8_t  _pad[3];
+    uint8_t  stepper_sel; // 0 = all steppers of the motor; n = only stepper n-1
+    uint8_t  _pad[2];
 } StepEntry;
 
 typedef struct {

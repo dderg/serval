@@ -70,7 +70,7 @@ pub extern "C" fn kalico_stepout_late_reset() {
 unsafe extern "C" {
     static runtime_clock_freq: u32;
     fn timer_read_time() -> u32;
-    fn runtime_emit_step_pulses(axis_idx: u8, n_steps: i32);
+    fn runtime_emit_step_pulses(axis_idx: u8, n_steps: i32, stepper_sel: u8);
     fn kalico_step_output_owned_mask() -> u8;
 }
 
@@ -82,8 +82,8 @@ unsafe fn timer_read_time() -> u32 {
     test_hooks::now()
 }
 #[cfg(any(test, feature = "host"))]
-unsafe fn runtime_emit_step_pulses(axis_idx: u8, n_steps: i32) {
-    test_hooks::record_emit(axis_idx, n_steps);
+unsafe fn runtime_emit_step_pulses(axis_idx: u8, n_steps: i32, stepper_sel: u8) {
+    test_hooks::record_emit(axis_idx, n_steps, stepper_sel);
 }
 #[cfg(any(test, feature = "host"))]
 unsafe fn kalico_step_output_owned_mask() -> u8 {
@@ -126,7 +126,9 @@ pub extern "C" fn kalico_step_output_event() -> u32 {
                 let _ = unsafe { queue_pop(q) };
                 // SAFETY: C step emitter guards out-of-range motor indices.
                 crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_STEPOUT_EMIT);
-                unsafe { runtime_emit_step_pulses(axis_idx as u8, i32::from(entry.dir)) };
+                unsafe {
+                    runtime_emit_step_pulses(axis_idx as u8, i32::from(entry.dir), entry.stepper_sel)
+                };
                 emitted += 1;
                 emitted_this_pass = true;
             }
@@ -192,7 +194,7 @@ pub mod test_hooks {
         static OWNED: RefCell<u8> = const { RefCell::new(0) };
         static QUEUES: RefCell<[StepQueue; N_QUEUES]> =
             RefCell::new(core::array::from_fn(|_| StepQueue::new()));
-        static EMITS: RefCell<Vec<(u8, i32)>> = const { RefCell::new(Vec::new()) };
+        static EMITS: RefCell<Vec<(u8, i32, u8)>> = const { RefCell::new(Vec::new()) };
         static LATE_THRESHOLD: RefCell<u32> = const { RefCell::new(500) };
     }
 
@@ -214,10 +216,10 @@ pub mod test_hooks {
     pub fn late_threshold() -> u32 {
         LATE_THRESHOLD.with(|c| *c.borrow())
     }
-    pub fn record_emit(axis: u8, n: i32) {
-        EMITS.with(|c| c.borrow_mut().push((axis, n)));
+    pub fn record_emit(axis: u8, n: i32, stepper_sel: u8) {
+        EMITS.with(|c| c.borrow_mut().push((axis, n, stepper_sel)));
     }
-    pub fn take_emits() -> Vec<(u8, i32)> {
+    pub fn take_emits() -> Vec<(u8, i32, u8)> {
         EMITS.with(|c| core::mem::take(&mut *c.borrow_mut()))
     }
     pub fn take_late_stats() -> (u32, u32, u32) {

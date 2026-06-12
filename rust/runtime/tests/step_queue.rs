@@ -17,7 +17,8 @@ fn entry(cycle_abs: u32, dir: i8) -> StepEntry {
     StepEntry {
         cycle_abs,
         dir,
-        _pad: [0; 3],
+        stepper_sel: 0,
+        _pad: [0; 2],
     }
 }
 

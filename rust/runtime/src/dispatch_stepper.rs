@@ -196,7 +196,8 @@ fn dispatch_pulse(
         let entry = StepEntry {
             cycle_abs,
             dir,
-            _pad: [0; 3],
+            stepper_sel: crate::step_queue::STEPPER_SEL_ALL,
+            _pad: [0; 2],
         };
         // SAFETY: `queue_ptr` is supplied by the TIM5 ISR, sole producer.
         let push_res = unsafe { queue_push(queue_ptr, entry) };
