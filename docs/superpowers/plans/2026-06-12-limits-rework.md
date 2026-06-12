@@ -595,44 +595,13 @@ pub(crate) fn scale_limits(&self, limits: &Limits) -> Limits {
 
 `for_limits` / `for_chain` sigma: `limits.v_ceiling()` (max finite v over sets) replacing the per-axis max. `scale_chain_grid`: `inter_geom` scales like Task 1 Step 3.
 
-- [ ] **Step 6: Port `multi/junction.rs`.** Add an endpoint arc-geometry helper and per-set caps:
-
-The arc-length reparameterization at an endpoint is `c′ = d1/‖d1‖` and `c″ = (d2 − (d2·c′)c′) / ‖d1‖²` (purely normal, so `‖c″‖ = κ`, matching the old `curvature_from_derivs` value):
-
-```rust
-fn arc_geometry(curve: &VectorNurbs<f64, 3>, at_end: bool) -> ([f64; 3], [f64; 3]) {
-    let u = if at_end { *curve.knots().last().expect("knots non-empty") } else { curve.knots()[0] };
-    let d1c = vector_derivative(curve);
-    let d1 = vector_eval(&d1c.as_view(), u);
-    let d2 = if d1c.degree() >= 1 {
-        let d2c = vector_derivative(&d1c);
-        vector_eval(&d2c.as_view(), u)
-    } else {
-        [0.0; 3]
-    };
-    let f2 = d1[0] * d1[0] + d1[1] * d1[1] + d1[2] * d1[2];
-    let f = f2.sqrt();
-    if f < 1e-12 {
-        return ([0.0; 3], [0.0; 3]);
-    }
-    let t = [d1[0] / f, d1[1] / f, d1[2] / f];
-    let d2_dot_t = d2[0] * t[0] + d2[1] * t[1] + d2[2] * t[2];
-    let c_double_prime = [
-        (d2[0] - d2_dot_t * t[0]) / f2,
-        (d2[1] - d2_dot_t * t[1]) / f2,
-        (d2[2] - d2_dot_t * t[2]) / f2,
-    ];
-    (t, c_double_prime)
-}
-```
-
-Then:
+- [ ] **Step 6: Reduce `multi/junction.rs` to a classifier.**
 
 - **Delete the junction-deviation machinery entirely** (it is mainline's SCV/JD transplant — a virtual-rounding pretense that implies infinite jerk at the kink): `sharp_corner_jd_cap`, `V_JD_REVERSAL_FLOOR_MM_S`, `ALPHA_COLLINEAR_THRESHOLD`, `ALPHA_REVERSAL_THRESHOLD`, and the `chord_tolerance_mm` parameter of `compute_junction_velocity`.
 - **There is no junction velocity to compute — delete the calculation, keep only the classifier.** A junction is either tangent-continuous within `THETA_FUSE_RAD` (→ the segments fuse into one chain, the point becomes an ordinary interior grid point, and the solver's constraint rows govern it like everywhere else) or it is not (→ full stop, `v = 0`). `compute_junction_velocity` is replaced by `classify_junction` alone; `JunctionResult.v_junction`, `per_axis_velocity_cap`, `centripetal_cap`, `cap_v_max`, `min_with_tag`, and the entire `JunctionBindingCap` enum are deleted. The contract: whatever feeds the planner is responsible for tangent continuity; the planner does not negotiate with kinks.
 - Consumers (`grep -rn "compute_junction_velocity\|JunctionBindingCap\|v_junction" rust/`): wherever a smooth junction's `v_junction` was consumed as a chain-boundary condition, that junction must instead be fused (it already is — smooth junctions fuse via the existing chain machinery); corner junctions get boundary velocity `0.0`. If the executor finds a code path that genuinely needs a nonzero boundary velocity at a point that cannot fuse (e.g. a forced split), **stop and surface it for review** — do not reinvent a junction cap.
 
-`kappa_left`/`kappa_right` in `JunctionResult` become `‖c″‖` (numerically identical to the old curvature). Reword the `THETA_FUSE_RAD` doc comment — its "scv impulse budget" justification is gone; the fuse threshold survives purely as a numerical collinearity epsilon.
+What survives in the module: `classify_junction` with its existing tangent helpers (`forward_unit_tangent_at_*`) and `THETA_FUSE_RAD`. If `JunctionResult.kappa_left/right` turn out to have consumers (the chain-fusion path may use them), keep `curvature_at_start/end` for those; otherwise delete them too. Reword the `THETA_FUSE_RAD` doc comment — its "scv impulse budget" justification is gone; the fuse threshold survives purely as a numerical collinearity epsilon.
 
 **Consequence, accepted deliberately:** tangent-discontinuous input (today: all compat-converted G1 polylines) full-stops at every corner until upstream corner blending exists (future work, its own brainstorm). Do not soften this with any floor or virtual rounding — the slowdown is the honest signal that the blender is missing.
 
