@@ -1,13 +1,16 @@
 import logging
+import math
 import os
+import signal
 import struct
 from collections import defaultdict
 
 from . import stepper
 from .extras import servo_axis
+from .extras.danger_options import get_danger_options
 from .kinematics import extruder
-from .toolhead import BUFFER_TIME_START, Move, ToolHead
 
+BUFFER_TIME_START = 0.250
 DRAIN_TIMEOUT = 60.0
 
 _MOTOR_SLOT_PREFIXES = (
@@ -73,6 +76,51 @@ def _open_sim_control():
     except ImportError:
         return None
     return SimControlClient(sock_path)
+
+
+class Move:
+    def __init__(self, toolhead, start_pos, end_pos, speed):
+        self.toolhead = toolhead
+        self.start_pos = tuple(start_pos)
+        self.end_pos = tuple(end_pos)
+        self.accel = toolhead.max_accel
+        velocity = min(speed, toolhead.max_velocity)
+        self.is_kinematic_move = True
+        self.axes_d = axes_d = [end_pos[i] - start_pos[i] for i in (0, 1, 2, 3)]
+        self.move_d = move_d = math.sqrt(sum([d * d for d in axes_d[:3]]))
+        if move_d < 0.000000001:
+            # Extrude only move
+            self.end_pos = (
+                start_pos[0],
+                start_pos[1],
+                start_pos[2],
+                end_pos[3],
+            )
+            axes_d[0] = axes_d[1] = axes_d[2] = 0.0
+            self.move_d = move_d = abs(axes_d[3])
+            inv_move_d = 0.0
+            if move_d:
+                inv_move_d = 1.0 / move_d
+            self.accel = 99999999.9
+            velocity = speed
+            self.is_kinematic_move = False
+        else:
+            inv_move_d = 1.0 / move_d
+        self.axes_r = [d * inv_move_d for d in axes_d]
+        self.min_move_t = move_d / velocity
+        self.max_cruise_v2 = velocity**2
+
+    def limit_speed(self, speed, accel):
+        speed2 = speed**2
+        if speed2 < self.max_cruise_v2:
+            self.max_cruise_v2 = speed2
+            self.min_move_t = self.move_d / speed
+        self.accel = min(self.accel, accel)
+
+    def move_error(self, msg="Move out of range"):
+        ep = self.end_pos
+        m = "%s: %.3f %.3f %.3f [%.3f]" % (msg, ep[0], ep[1], ep[2], ep[3])
+        return self.toolhead.printer.command_error(m)
 
 
 class BridgeKinematics:
@@ -250,11 +298,11 @@ class BridgeKinematics:
         }
 
 
-class MotionToolhead(ToolHead):
+class MotionToolhead:
     def __init__(self, config):
-        # Pre-super: attributes BridgeKinematics / handlers reference during
-        # super().__init__.
         printer = config.get_printer()
+        self.printer = printer
+        self.reactor = printer.get_reactor()
         self.bridge = printer.lookup_object("motion_bridge", None)
         if self.bridge is None:
             from . import motion_bridge
@@ -263,14 +311,40 @@ class MotionToolhead(ToolHead):
         self.kinematics_name = config.get("kinematics", "")
         self.bridge._kinematics_name = self.kinematics_name
         self._mcu_pending_end_time = 0.0
+        self.all_mcus = [m for n, m in printer.lookup_objects(module="mcu")]
+        self.mcu = self.all_mcus[0]
+        self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
+        self._read_limits(config)
+        self.print_time = 0.0
+        self.print_stall = 0
+        self.trapq = None
+        self.step_generators = []
+        gcode = printer.lookup_object("gcode")
+        self.Coord = gcode.Coord
+        self.extruder = extruder.DummyExtruder(printer)
+        self.kin = self._load_kinematics(config)
+        if (
+            config.has_section("dual_carriage")
+            and not self.kin.supports_dual_carriage
+        ):
+            raise config.error(
+                "dual_carriage not compatible with '%s' kinematics system"
+                % (config.get("kinematics"),)
+            )
 
-        super().__init__(config)
-
-        # Bridge owns the timeline; silence upstream's flush machinery.
-        self.reactor.update_timer(self.flush_timer, self.reactor.NEVER)
-        self.do_kick_flush_timer = False
-
-        gcode = self.printer.lookup_object("gcode")
+        gcode.register_command("G4", self.cmd_G4)
+        gcode.register_command("M400", self.cmd_M400)
+        gcode.register_command(
+            "SET_VELOCITY_LIMIT",
+            self.cmd_SET_VELOCITY_LIMIT,
+            desc=self.cmd_SET_VELOCITY_LIMIT_help,
+        )
+        gcode.register_command(
+            "RESET_VELOCITY_LIMIT",
+            self.cmd_RESET_VELOCITY_LIMIT,
+            desc=self.cmd_RESET_VELOCITY_LIMIT_help,
+        )
+        gcode.register_command("M204", self.cmd_M204)
         gcode.register_command(
             "KALICO_SIM_STEP_COUNT",
             self.cmd_KALICO_SIM_STEP_COUNT,
@@ -303,20 +377,28 @@ class MotionToolhead(ToolHead):
             "event ring) to the structured-log store; no reset required",
         )
 
-        self.printer.register_event_handler(
-            "klippy:connect", self._init_planner
-        )
-        self.printer.register_event_handler(
+        for module_name in (
+            "gcode_move",
+            "homing",
+            "idle_timeout",
+            "statistics",
+            "manual_probe",
+            "tuning_tower",
+            "garbage_collection",
+        ):
+            printer.load_object(config, module_name)
+
+        printer.register_event_handler("klippy:connect", self._init_planner)
+        printer.register_event_handler(
             "klippy:disconnect", self._handle_disconnect
         )
-        import signal
 
         def _sigterm_handler(signum, frame):
             self.printer.request_exit("exit")
 
         signal.signal(signal.SIGTERM, _sigterm_handler)
 
-        logging.info("MotionToolhead: Phase 1 skeleton initialized")
+        logging.info("MotionToolhead: config phase complete")
 
     def _handle_disconnect(self):
         logging.info("MotionToolhead: _handle_disconnect called")
@@ -327,6 +409,89 @@ class MotionToolhead(ToolHead):
 
     def _load_kinematics(self, config):
         return BridgeKinematics(self, config)
+
+    def get_position(self):
+        return list(self.commanded_pos)
+
+    def set_position(self, newpos, homing_axes=()):
+        self.flush_step_generation()
+        self.commanded_pos[:] = newpos
+        self.kin.set_position(newpos, homing_axes)
+        self.printer.send_event("toolhead:set_position")
+
+    def manual_move(self, coord, speed):
+        curpos = list(self.commanded_pos)
+        for i in range(len(coord)):
+            if coord[i] is not None:
+                curpos[i] = coord[i]
+        self.move(curpos, speed)
+        self.printer.send_event("toolhead:manual_move")
+
+    def limit_next_junction_speed(self, speed):
+        pass
+
+    def set_extruder(self, extruder, extrude_pos):
+        self.extruder = extruder
+        self.commanded_pos[3] = extrude_pos
+
+    def get_extruder(self):
+        return self.extruder
+
+    def get_kinematics(self):
+        return self.kin
+
+    def get_trapq(self):
+        return self.trapq
+
+    def register_step_generator(self, handler):
+        self.step_generators.append(handler)
+
+    def note_step_generation_scan_time(self, delay, old_delay=0.0):
+        self.flush_step_generation()
+
+    def register_lookahead_callback(self, callback):
+        callback(self.get_last_move_time())
+
+    def get_max_velocity(self):
+        return self.max_velocity, self.max_accel
+
+    def get_status(self, eventtime):
+        print_time = self.print_time
+        estimated_print_time = self.mcu.estimated_print_time(eventtime)
+        res = dict(self.kin.get_status(eventtime))
+        res.update(
+            {
+                "print_time": print_time,
+                "stalls": self.print_stall,
+                "estimated_print_time": estimated_print_time,
+                "extruder": self.extruder.get_name(),
+                "position": self.Coord(*self.commanded_pos),
+                "max_velocity": self.max_velocity,
+                "max_accel": self.max_accel,
+                "minimum_cruise_ratio": self.min_cruise_ratio,
+                "square_corner_velocity": self.square_corner_velocity,
+            }
+        )
+        return res
+
+    def cmd_G4(self, gcmd):
+        delay = gcmd.get_float("P", 0.0, minval=0.0) / 1000.0
+        self.dwell(delay)
+
+    def cmd_M204(self, gcmd):
+        # Use S for accel
+        accel = gcmd.get_float("S", None, above=0.0)
+        if accel is None:
+            # Use minimum of P and T for accel
+            p = gcmd.get_float("P", None, above=0.0)
+            t = gcmd.get_float("T", None, above=0.0)
+            if p is None or t is None:
+                gcmd.respond_info(
+                    'Invalid M204 command "%s"' % (gcmd.get_commandline(),)
+                )
+                return
+            accel = min(p, t)
+        self.set_accel(accel)
 
     def move(self, newpos, speed):
         # The bridge replaces the lookahead, but Move/kin/extruder validation
@@ -546,7 +711,7 @@ class MotionToolhead(ToolHead):
         )
 
     def note_mcu_movequeue_activity(self, mq_time, set_step_gen_time=False):
-        # No-op: upstream's body would re-arm the silenced flush_timer.
+        # No-op kept for extras (output_pin); the bridge owns flushing.
         pass
 
     def set_accel(self, accel):
@@ -561,6 +726,8 @@ class MotionToolhead(ToolHead):
         self.bridge.update_runtime_caps(
             self.runtime_velocity, self.runtime_accel
         )
+
+    cmd_SET_VELOCITY_LIMIT_help = "Set printer velocity limits"
 
     def cmd_SET_VELOCITY_LIMIT(self, gcmd):
         for unsupported in (
@@ -588,6 +755,8 @@ class MotionToolhead(ToolHead):
         self.bridge.update_runtime_caps(
             self.runtime_velocity, self.runtime_accel
         )
+
+    cmd_RESET_VELOCITY_LIMIT_help = "Reset printer velocity limits"
 
     def cmd_RESET_VELOCITY_LIMIT(self, gcmd):
         self.runtime_velocity = None

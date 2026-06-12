@@ -35,46 +35,15 @@ class ZAdjustHelper:
         self.z_steppers = z_steppers
 
     def adjust_steppers(self, adjustments, speed):
-        toolhead = self.printer.lookup_object("toolhead")
         gcode = self.printer.lookup_object("gcode")
-        curpos = toolhead.get_position()
-        # Report on movements
         stepstrs = [
             "%s = %.6f" % (s.get_name(), a)
             for s, a in zip(self.z_steppers, adjustments)
         ]
-        msg = "Making the following Z adjustments:\n%s" % ("\n".join(stepstrs),)
-        gcode.respond_info(msg)
-        # Disable Z stepper movements
-        toolhead.flush_step_generation()
-        for s in self.z_steppers:
-            s.set_trapq(None)
-        # Move each z stepper (sorted from lowest to highest) until they match
-        positions = [(-a, s) for a, s in zip(adjustments, self.z_steppers)]
-        positions.sort(key=(lambda k: k[0]))
-        first_stepper_offset, first_stepper = positions[0]
-        z_low = curpos[2] - first_stepper_offset
-        for i in range(len(positions) - 1):
-            stepper_offset, stepper = positions[i]
-            next_stepper_offset, next_stepper = positions[i + 1]
-            toolhead.flush_step_generation()
-            stepper.set_trapq(toolhead.get_trapq())
-            curpos[2] = z_low + next_stepper_offset
-            try:
-                toolhead.move(curpos, speed)
-                toolhead.set_position(curpos)
-            except:
-                logging.exception("ZAdjustHelper adjust_steppers")
-                toolhead.flush_step_generation()
-                for s in self.z_steppers:
-                    s.set_trapq(toolhead.get_trapq())
-                raise
-        # Z should now be level - do final cleanup
-        last_stepper_offset, last_stepper = positions[-1]
-        toolhead.flush_step_generation()
-        last_stepper.set_trapq(toolhead.get_trapq())
-        curpos[2] += first_stepper_offset
-        toolhead.set_position(curpos)
+        gcode.respond_info("Z adjustments needed:\n%s" % ("\n".join(stepstrs),))
+        raise self.printer.command_error(
+            "per-motor Z adjustment is not yet implemented"
+        )
 
 
 class ZAdjustStatus:
@@ -190,9 +159,9 @@ class ZTilt:
     cmd_Z_TILT_ADJUST_help = "Adjust the Z tilt"
 
     def cmd_Z_TILT_ADJUST(self, gcmd):
-        raise gcmd.error(
-            "Z_TILT_ADJUST is not yet supported under the new motion path"
-        )
+        self.z_status.reset()
+        self.retry_helper.start(gcmd)
+        self.probe_helper.start_probe(gcmd)
 
     def probe_finalize(self, offsets, positions):
         # Setup for coordinate descent analysis

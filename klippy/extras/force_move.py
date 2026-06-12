@@ -1,45 +1,17 @@
-# Utility for manually moving a stepper for diagnostic purposes
+# Stepper registry and low-level kinematic position commands
 #
 # Copyright (C) 2018-2019  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
-import math
 
-BUZZ_DISTANCE = 1.0
-BUZZ_VELOCITY = BUZZ_DISTANCE / 0.250
-BUZZ_RADIANS_DISTANCE = math.radians(1.0)
-BUZZ_RADIANS_VELOCITY = BUZZ_RADIANS_DISTANCE / 0.250
-STALL_TIME = 0.100
-
-
-def calc_move_time(dist, speed, accel):
-    axis_r = 1.0
-    if dist < 0.0:
-        axis_r = -1.0
-        dist = -dist
-    if not accel or not dist:
-        return axis_r, 0.0, dist / speed, speed
-    max_cruise_v2 = dist * accel
-    if max_cruise_v2 < speed**2:
-        speed = math.sqrt(max_cruise_v2)
-    accel_t = speed / accel
-    accel_decel_d = accel_t * speed
-    cruise_t = (dist - accel_decel_d) / speed
-    return axis_r, accel_t, cruise_t, speed
+PHASE5_GATE = "%s is not yet supported under the new motion path until Phase 5"
 
 
 class ForceMove:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.steppers = {}
-        # Bridge mode: STEPPER_BUZZ / FORCE_MOVE are gated below until the
-        # Rust planner supports them; the C iterative-solver / trapq state
-        # is not allocated.
-        self.trapq = None
-        self.trapq_append = lambda *a: None
-        self.trapq_finalize_moves = lambda *a: None
-        self.stepper_kinematics = None
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
             "STEPPER_BUZZ",
@@ -66,109 +38,18 @@ class ForceMove:
             raise self.printer.config_error("Unknown stepper %s" % (name,))
         return self.steppers[name]
 
-    def _force_enable(self, stepper):
-        toolhead = self.printer.lookup_object("toolhead")
-        print_time = toolhead.get_last_move_time()
-        stepper_enable = self.printer.lookup_object("stepper_enable")
-        enable = stepper_enable.lookup_enable(stepper.get_name())
-        was_enable = enable.is_motor_enabled()
-        if not was_enable:
-            enable.motor_enable(print_time)
-            toolhead.dwell(STALL_TIME)
-        return was_enable
-
-    def _restore_enable(self, stepper, was_enable):
-        if not was_enable:
-            toolhead = self.printer.lookup_object("toolhead")
-            toolhead.dwell(STALL_TIME)
-            print_time = toolhead.get_last_move_time()
-            stepper_enable = self.printer.lookup_object("stepper_enable")
-            enable = stepper_enable.lookup_enable(stepper.get_name())
-            enable.motor_disable(print_time)
-            toolhead.dwell(STALL_TIME)
-
     def manual_move(self, stepper, dist, speed, accel=0.0):
-        toolhead = self.printer.lookup_object("toolhead")
-        toolhead.flush_step_generation()
-        prev_sk = stepper.set_stepper_kinematics(self.stepper_kinematics)
-        prev_trapq = stepper.set_trapq(self.trapq)
-        stepper.set_position((0.0, 0.0, 0.0))
-        axis_r, accel_t, cruise_t, cruise_v = calc_move_time(dist, speed, accel)
-        print_time = toolhead.get_last_move_time()
-        self.trapq_append(
-            self.trapq,
-            print_time,
-            accel_t,
-            cruise_t,
-            accel_t,
-            0.0,
-            0.0,
-            0.0,
-            axis_r,
-            0.0,
-            0.0,
-            0.0,
-            cruise_v,
-            accel,
-        )
-        print_time = print_time + accel_t + cruise_t + accel_t
-        stepper.generate_steps(print_time)
-        self.trapq_finalize_moves(
-            self.trapq, print_time + 99999.9, print_time + 99999.9
-        )
-        stepper.set_trapq(prev_trapq)
-        stepper.set_stepper_kinematics(prev_sk)
-        toolhead.note_mcu_movequeue_activity(print_time)
-        toolhead.dwell(accel_t + cruise_t + accel_t)
-        toolhead.flush_step_generation()
-
-    def _lookup_stepper(self, gcmd):
-        name = gcmd.get("STEPPER")
-        if name not in self.steppers:
-            raise gcmd.error("Unknown stepper %s" % (name,))
-        return self.steppers[name]
+        raise self.printer.command_error(PHASE5_GATE % ("manual_move",))
 
     cmd_STEPPER_BUZZ_help = "Oscillate a given stepper to help id it"
 
     def cmd_STEPPER_BUZZ(self, gcmd):
-        raise gcmd.error(
-            "STEPPER_BUZZ is not yet supported under the new "
-            "motion path until Phase 5"
-        )
-        stepper = self._lookup_stepper(gcmd)
-        logging.info("Stepper buzz %s", stepper.get_name())
-        was_enable = self._force_enable(stepper)
-        toolhead = self.printer.lookup_object("toolhead")
-        dist, speed = BUZZ_DISTANCE, BUZZ_VELOCITY
-        if stepper.units_in_radians():
-            dist, speed = BUZZ_RADIANS_DISTANCE, BUZZ_RADIANS_VELOCITY
-        for i in range(10):
-            self.manual_move(stepper, dist, speed)
-            toolhead.dwell(0.050)
-            self.manual_move(stepper, -dist, speed)
-            toolhead.dwell(0.450)
-        self._restore_enable(stepper, was_enable)
+        raise gcmd.error(PHASE5_GATE % ("STEPPER_BUZZ",))
 
     cmd_FORCE_MOVE_help = "Manually move a stepper; invalidates kinematics"
 
     def cmd_FORCE_MOVE(self, gcmd):
-        raise gcmd.error(
-            "FORCE_MOVE is not yet supported under the new "
-            "motion path until Phase 5"
-        )
-        stepper = self._lookup_stepper(gcmd)
-        distance = gcmd.get_float("DISTANCE")
-        speed = gcmd.get_float("VELOCITY", above=0.0)
-        accel = gcmd.get_float("ACCEL", 0.0, minval=0.0)
-        logging.info(
-            "FORCE_MOVE %s distance=%.3f velocity=%.3f accel=%.3f",
-            stepper.get_name(),
-            distance,
-            speed,
-            accel,
-        )
-        self._force_enable(stepper)
-        self.manual_move(stepper, distance, speed, accel)
+        raise gcmd.error(PHASE5_GATE % ("FORCE_MOVE",))
 
     cmd_SET_KINEMATIC_POSITION_help = "Force a low-level kinematic position"
 

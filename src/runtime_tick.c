@@ -232,6 +232,12 @@ runtime_drain(void)
         // Persist before shutdown resets the USB stack.
         diag_ring_push(DIAG_EV_RUST_FAULT, (uint32_t)cur_error, fdetail);
         runtime_liveness_ok = 0;
+#ifdef __linux__
+        {
+            extern void runtime_tick_trace_dump(void);
+            runtime_tick_trace_dump();
+        }
+#endif
         shutdown("kalico runtime fault");
     }
 

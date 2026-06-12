@@ -55,3 +55,36 @@ def test_modifiers_rejected():
 def test_non_z_axis_rejected():
     with pytest.raises(pins.error):
         validate_virtual_endstop_request(_pin_params(), 0)
+
+
+class _FakeGCmd:
+    def __init__(self, params=None):
+        self._params = params or {}
+
+    def get_float(self, name, default=None, above=None, minval=None):
+        return float(self._params.get(name, default))
+
+
+def test_get_lift_speed_returns_config_value_without_gcmd():
+    from klippy.extras.probe import PrinterProbe
+
+    probe = PrinterProbe.__new__(PrinterProbe)
+    probe.lift_speed = 7.5
+    assert probe.get_lift_speed() == 7.5
+
+
+def test_get_lift_speed_honors_gcmd_override():
+    from klippy.extras.probe import PrinterProbe
+
+    probe = PrinterProbe.__new__(PrinterProbe)
+    probe.lift_speed = 7.5
+    assert probe.get_lift_speed(_FakeGCmd({"LIFT_SPEED": 3.0})) == 3.0
+    assert probe.get_lift_speed(_FakeGCmd()) == 7.5
+
+
+def test_multi_probe_lifecycle_is_noop():
+    from klippy.extras.probe import PrinterProbe
+
+    probe = PrinterProbe.__new__(PrinterProbe)
+    assert probe.multi_probe_begin() is None
+    assert probe.multi_probe_end() is None

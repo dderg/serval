@@ -75,7 +75,29 @@ runtime_host_widened_clock_now(void)
 static const int step_gpio_lines[N_AXIS_STEP_QUEUES] = { 18, 7, 15, -1 };
 
 static void (*sim_notify_step)(int chip, int line, int32_t n_steps);
+
+// libvtime pacer API: while registered, virtual time cannot advance past
+// this thread's floor, so no motion sample period is ever skipped.
+static int (*vtime_pacer_register)(uint64_t period_ns);
+static void (*vtime_pacer_advance)(int slot, uint64_t target_ns,
+                                   uint64_t period_ns);
+static int vtime_pacer_slot = -1;
 #endif
+
+#define TICK_TRACE_DEPTH 16
+static uint32_t tick_trace_times[TICK_TRACE_DEPTH];
+static uint32_t tick_trace_seq;
+
+__attribute__((used)) void
+runtime_tick_trace_dump(void)
+{
+    fprintf(stderr, "[tick-trace] seq=%u recent reads (oldest first):\n",
+            tick_trace_seq);
+    for (unsigned i = 0; i < TICK_TRACE_DEPTH; i++) {
+        unsigned idx = (tick_trace_seq + i) % TICK_TRACE_DEPTH;
+        fprintf(stderr, "[tick-trace]   %u\n", tick_trace_times[idx]);
+    }
+}
 
 static void *
 host_tick_main(void *arg)
@@ -89,6 +111,10 @@ host_tick_main(void *arg)
     setpriority(PRIO_PROCESS, tid, 19);
 
     sim_notify_step = dlsym(RTLD_DEFAULT, "sim_intercept_notify_step");
+    vtime_pacer_register = dlsym(RTLD_DEFAULT, "kalico_vtime_pacer_register");
+    vtime_pacer_advance = dlsym(RTLD_DEFAULT, "kalico_vtime_pacer_advance");
+    if (vtime_pacer_register && vtime_pacer_advance)
+        vtime_pacer_slot = vtime_pacer_register(HOST_TICK_NS);
 #else
     // Real Linux MCU: this tick is the motion ISR — inherit the process
     // scheduler (SCHED_FIFO with -r) rather than self-demoting, or it can't
@@ -104,14 +130,26 @@ host_tick_main(void *arg)
             next.tv_nsec -= 1000000000L;
             next.tv_sec  += 1;
         }
+#if CONFIG_KALICO_SIM
+        if (vtime_pacer_slot >= 0) {
+            uint64_t target = (uint64_t)next.tv_sec * 1000000000ULL
+                              + (uint64_t)next.tv_nsec;
+            vtime_pacer_advance(vtime_pacer_slot, target, HOST_TICK_NS);
+        } else {
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        }
+#else
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+#endif
 
         if (!atomic_load_explicit(&host_tick_enabled, memory_order_acquire))
             continue;
         if (!runtime_handle)
             continue;
 
-        (void)runtime_cyccnt_read();
+        tick_trace_times[tick_trace_seq % TICK_TRACE_DEPTH] =
+            runtime_cyccnt_read();
+        tick_trace_seq++;
         kalico_runtime_tick_sample(runtime_handle);
 
         // Must drain every tick or the queue overflows (StepQueueOverflow).
