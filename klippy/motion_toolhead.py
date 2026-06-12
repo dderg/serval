@@ -676,8 +676,8 @@ class MotionToolhead:
                 "[limit] sections must declare max_velocity and max_accel "
                 "coverage"
             )
-        self.max_velocity = min(velocities)
-        self.max_accel = min(accels)
+        self.max_velocity = max(velocities)
+        self.max_accel = max(accels)
         self.min_cruise_ratio = 0.0
         self.square_corner_velocity = 0.0
         self.orig_cfg = {}
