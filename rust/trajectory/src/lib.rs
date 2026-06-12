@@ -2,6 +2,7 @@ mod beta;
 pub mod emit_shaped;
 pub mod fit;
 mod kernel;
+pub mod odometer;
 mod pad;
 mod parallel;
 pub mod peak;
