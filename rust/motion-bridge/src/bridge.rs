@@ -1510,7 +1510,7 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    #[pyo3(signature = (mcu_handle, serial_path, baud, timeout_s = 30.0, klippy_non_critical = false, expect_kalico = true))]
+    #[pyo3(signature = (mcu_handle, serial_path, baud, timeout_s = 30.0, klippy_non_critical = false, expect_native = true))]
     fn attach_serial(
         &self,
         mcu_handle: u32,
@@ -1518,7 +1518,7 @@ impl PyMotionBridge {
         baud: u32,
         timeout_s: f64,
         klippy_non_critical: bool,
-        expect_kalico: bool,
+        expect_native: bool,
     ) -> PyResult<()> {
         use std::time::{Duration, Instant};
         let deadline = Instant::now() + Duration::from_secs_f64(timeout_s);
@@ -1544,7 +1544,7 @@ impl PyMotionBridge {
                         ))
                     })?;
 
-                    let (kalico_native_supported, identify_caps) = if !expect_kalico {
+                    let (kalico_native_supported, identify_caps) = if !expect_native {
                         log::info!(
                             "attach_serial: kalico identify skipped on reuse for \
                              {serial_path} (plugin-attached peripheral, not declared \
@@ -1667,7 +1667,7 @@ impl PyMotionBridge {
             PyRuntimeError::new_err(format!("attach_serial: runtime_event subscribe: {e:?}"))
         })?;
 
-        let (kalico_native_supported, identify_caps) = if !expect_kalico {
+        let (kalico_native_supported, identify_caps) = if !expect_native {
             log::info!(
                 "attach_serial: kalico identify skipped for {serial_path} \
                  (plugin-attached peripheral, not declared via an [mcu] section)"

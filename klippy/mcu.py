@@ -725,10 +725,10 @@ class MCU:
         self._reactor = printer.get_reactor()
         self._name = config.get_name()
         # MCUs declared via [mcu*] sections run our firmware and must answer
-        # the kalico identify handshake; MCUs fabricated by sensor plugins
+        # the native identify handshake; MCUs fabricated by sensor plugins
         # from other sections (e.g. [beacon]) are foreign peripherals that
         # never will, so the probe is skipped for them.
-        self._expect_kalico = self._name == "mcu" or self._name.startswith(
+        self._expect_native = self._name == "mcu" or self._name.startswith(
             "mcu "
         )
         if self._name.startswith("mcu "):
