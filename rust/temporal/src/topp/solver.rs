@@ -764,10 +764,6 @@ fn jerk_vector(
     jerk
 }
 
-/// Projects the point geometry onto the jerk vector's unit direction within
-/// `axes`, reducing the per-set norm constraint to the scalar cut form the
-/// `AxisJerkCut` linearization expects. Returns `None` when the restricted
-/// jerk is numerically zero (no meaningful cut direction).
 fn set_jerk_projection(
     geom: &crate::topp::chain::PointGeom,
     jerk: &[f64; 3],
