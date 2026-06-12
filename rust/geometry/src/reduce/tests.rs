@@ -1,6 +1,11 @@
 use super::*;
 use gcode::{Params, Token};
 
+const E_WORDS: &[FollowerWord] = &[FollowerWord {
+    letter: b'E',
+    axis_index: 3,
+}];
+
 fn cmd(letter: u8, major: u32, line_no: u32, params: Params) -> Token {
     Token::Command {
         letter,
@@ -37,7 +42,7 @@ fn p(setters: &[(u8, f64)]) -> Params {
 
 #[test]
 fn modal_state_initializes_at_origin() {
-    let st = ModalState::new();
+    let st = ModalState::new(E_WORDS.len());
     #[allow(clippy::float_cmp)]
     {
         assert_eq!(st.position, [0.0, 0.0, 0.0]);
@@ -49,7 +54,7 @@ fn modal_state_initializes_at_origin() {
 #[test]
 fn t_marker_carries_tool_number() {
     let toks = vec![cmd(b'T', 2, 1, Params::default())];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     match &events[0] {
         ReduceEvent::Marker {
             kind: MotionMarkerKind::T,
@@ -62,20 +67,20 @@ fn t_marker_carries_tool_number() {
 
 #[test]
 fn modal_state_plane_defaults_to_xy() {
-    let st = ModalState::new();
+    let st = ModalState::new(E_WORDS.len());
     assert_eq!(st.active_plane, Plane::XY);
 }
 
 #[test]
 fn modal_state_prev_g5_pq_defaults_to_none() {
-    let st = ModalState::new();
+    let st = ModalState::new(E_WORDS.len());
     assert_eq!(st.prev_g5_pq, None);
 }
 
 #[test]
 fn g17_keeps_xy_plane() {
     let toks = vec![cmd(b'G', 17, 1, Params::default())];
-    let _events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let _events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(Plane::default(), Plane::XY);
     assert_eq!(Plane::XY, Plane::XY);
     assert_ne!(Plane::XY, Plane::XZ);
@@ -84,32 +89,32 @@ fn g17_keeps_xy_plane() {
 
 #[test]
 fn g17_sets_xy_plane() {
-    let mut st = ModalState::new();
+    let mut st = ModalState::new(E_WORDS.len());
     let toks = vec![cmd(b'G', 17, 1, Params::default())];
-    let _events: Vec<_> = reduce_with_state(&mut st, toks.into_iter().map(Ok)).collect();
+    let _events: Vec<_> = reduce_with_state(&mut st, toks.into_iter().map(Ok), E_WORDS).collect();
     assert_eq!(st.active_plane, Plane::XY);
 }
 
 #[test]
 fn g18_sets_xz_plane() {
-    let mut st = ModalState::new();
+    let mut st = ModalState::new(E_WORDS.len());
     let toks = vec![cmd(b'G', 18, 1, Params::default())];
-    let _events: Vec<_> = reduce_with_state(&mut st, toks.into_iter().map(Ok)).collect();
+    let _events: Vec<_> = reduce_with_state(&mut st, toks.into_iter().map(Ok), E_WORDS).collect();
     assert_eq!(st.active_plane, Plane::XZ);
 }
 
 #[test]
 fn g19_sets_yz_plane() {
-    let mut st = ModalState::new();
+    let mut st = ModalState::new(E_WORDS.len());
     let toks = vec![cmd(b'G', 19, 1, Params::default())];
-    let _events: Vec<_> = reduce_with_state(&mut st, toks.into_iter().map(Ok)).collect();
+    let _events: Vec<_> = reduce_with_state(&mut st, toks.into_iter().map(Ok), E_WORDS).collect();
     assert_eq!(st.active_plane, Plane::YZ);
 }
 
 #[test]
 fn plane_select_emits_no_event() {
     let toks = vec![cmd(b'G', 17, 1, Params::default())];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert!(events.is_empty(), "expected no events, got {events:?}");
 }
 
@@ -131,7 +136,7 @@ fn g5_with_explicit_ijpq_emits_curve_cubic() {
             (b'F', 1500.0),
         ]),
     )];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 1);
     match &events[0] {
         ReduceEvent::Curve {
@@ -189,7 +194,7 @@ fn g5_error_path_clears_prev_g5_pq() {
             p(&[(b'X', 30.0), (b'Y', 0.0), (b'P', -2.0), (b'Q', 2.0)]),
         ),
     ];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 3);
     match &events[1] {
         ReduceEvent::ParseError {
@@ -245,7 +250,7 @@ fn g5_chain_implicit_tangent_from_prev_pq() {
             p(&[(b'X', 30.0), (b'Y', 0.0), (b'P', 0.0), (b'Q', 0.0)]),
         ),
     ];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 3);
 
     match &events[1] {
@@ -302,7 +307,7 @@ fn g5_chain_broken_by_g1_emits_recovery() {
             p(&[(b'X', 20.0), (b'Y', 0.0), (b'P', -2.0), (b'Q', 2.0)]),
         ),
     ];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 3);
     match &events[2] {
         ReduceEvent::ParseError {
@@ -342,7 +347,7 @@ fn g5_chain_preserved_by_plane_select() {
             p(&[(b'X', 20.0), (b'Y', 0.0), (b'P', -2.0), (b'Q', 2.0)]),
         ),
     ];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 2);
     match &events[1] {
         ReduceEvent::Curve {
@@ -384,7 +389,7 @@ fn g5_chain_preserved_by_m_and_t_codes() {
             p(&[(b'X', 20.0), (b'Y', 0.0), (b'P', -2.0), (b'Q', 2.0)]),
         ),
     ];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 4);
     match &events[3] {
         ReduceEvent::Curve {
@@ -424,7 +429,7 @@ fn g5_chain_broken_by_g92_emits_recovery() {
             p(&[(b'X', 20.0), (b'Y', 0.0), (b'P', -2.0), (b'Q', 2.0)]),
         ),
     ];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     let last = events.last().expect("expected at least one event");
     match last {
         ReduceEvent::ParseError {
@@ -454,7 +459,7 @@ fn g5_single_i_only_is_malformed() {
             (b'F', 1500.0),
         ]),
     )];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     match &events[0] {
         ReduceEvent::ParseError {
             line_no: 1,
@@ -480,7 +485,7 @@ fn g5_missing_pq_is_malformed() {
             (b'F', 1500.0),
         ]),
     )];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     match &events[0] {
         ReduceEvent::ParseError {
             line_no: 1,
@@ -510,7 +515,7 @@ fn g5_with_z_delta_interpolates_z_at_thirds() {
             (b'F', 1500.0),
         ]),
     )];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     match &events[0] {
         ReduceEvent::Curve {
             geom: CurveGeom::Cubic { cps },
@@ -543,7 +548,7 @@ fn g5_1_with_z_delta_interpolates_z_at_midpoint() {
             (b'F', 1500.0),
         ]),
     )];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     match &events[0] {
         ReduceEvent::Curve {
             geom: CurveGeom::Quadratic { cps },
@@ -574,7 +579,7 @@ fn g5_1_with_explicit_ij_emits_curve_quadratic() {
             (b'F', 1500.0),
         ]),
     )];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 1);
     match &events[0] {
         ReduceEvent::Curve {
@@ -604,7 +609,7 @@ fn g5_1_outside_xy_plane_emits_recovery() {
             p(&[(b'X', 10.0), (b'Z', 1.0), (b'I', 3.0), (b'J', 3.0)]),
         ),
     ];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 1);
     match &events[0] {
         ReduceEvent::ParseError {
@@ -627,7 +632,7 @@ fn g5_1_with_both_ij_zero_is_malformed() {
         1,
         p(&[(b'X', 10.0), (b'Y', 0.0), (b'I', 0.0), (b'J', 0.0)]),
     )];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     match &events[0] {
         ReduceEvent::ParseError {
             kind: ParseErrorKind::G5MalformedTangent,
@@ -646,7 +651,7 @@ fn g5_1_missing_j_is_malformed() {
         1,
         p(&[(b'X', 10.0), (b'Y', 0.0), (b'I', 3.0)]),
     )];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     match &events[0] {
         ReduceEvent::ParseError {
             kind: ParseErrorKind::G5MalformedTangent,
@@ -665,7 +670,7 @@ fn g5_1_missing_i_is_malformed() {
         1,
         p(&[(b'X', 10.0), (b'Y', 0.0), (b'J', 3.0)]),
     )];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     match &events[0] {
         ReduceEvent::ParseError {
             kind: ParseErrorKind::G5MalformedTangent,
@@ -684,7 +689,7 @@ fn g5_1_no_ij_is_malformed() {
         1,
         p(&[(b'X', 10.0), (b'Y', 0.0)]),
     )];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     match &events[0] {
         ReduceEvent::ParseError {
             kind: ParseErrorKind::G5MalformedTangent,
@@ -706,7 +711,7 @@ fn g5_1_outside_g19_plane_emits_recovery() {
             p(&[(b'Y', 10.0), (b'Z', 1.0), (b'I', 3.0), (b'J', 3.0)]),
         ),
     ];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 1);
     match &events[0] {
         ReduceEvent::ParseError {
@@ -740,7 +745,7 @@ fn g5_1_after_g18_then_g17_succeeds() {
             ]),
         ),
     ];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 1);
     match &events[0] {
         ReduceEvent::Curve {
@@ -762,7 +767,7 @@ fn comment_marker_layer_change_is_forwarded() {
         kind: gcode::MarkerKind::LayerChange { layer: Some(7) },
         line_no: 42,
     }];
-    let events = reduce(toks.into_iter().map(Ok)).collect::<Vec<_>>();
+    let events = reduce(toks.into_iter().map(Ok), E_WORDS).collect::<Vec<_>>();
     assert_eq!(events.len(), 1);
     match &events[0] {
         ReduceEvent::CommentMarker { kind, line_no: 42 } => match kind {

@@ -2,7 +2,7 @@ use geometry::{FitterParams, GeometryPipeline, Item, Recovery, TelemetryEvent};
 
 fn run(text: &str) -> (Vec<Item>, Vec<TelemetryEvent>) {
     let mut events = vec![];
-    let mut p = GeometryPipeline::new(FitterParams::default());
+    let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let items: Vec<_> = {
         let mut sink = |e: TelemetryEvent| events.push(e);
         p.process(text, &mut sink).collect()

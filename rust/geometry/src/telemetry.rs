@@ -11,10 +11,6 @@ pub enum TelemetryEvent {
         tool: u32,
         line_no: u32,
     },
-    Retraction {
-        e_delta_mm: f64,
-        line_no: u32,
-    },
     WindowFlush {
         run_vertex_count: u32,
         line_no: u32,

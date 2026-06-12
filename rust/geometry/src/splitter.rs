@@ -16,7 +16,6 @@ pub enum SplitError {
     NotSinglePieceCubic,
     ArcLengthTableBuildFailed { reason: &'static str },
     InvalidCap { max_arc_length_mm: f64 },
-    CannotSplitIndependent,
 }
 
 pub fn split_segment_to_cap(
@@ -29,10 +28,6 @@ pub fn split_segment_to_cap(
 
     if is_zero_motion(&segment.xyz) {
         return Ok(vec![segment.clone()]);
-    }
-
-    if segment.e_mode == crate::EMode::Independent {
-        return Err(SplitError::CannotSplitIndependent);
     }
 
     let table = build_arc_length_table_vector(&segment.xyz, 1e-9, 64).map_err(|_| {
@@ -111,9 +106,7 @@ pub fn split_segment_to_cap(
         };
         let child = CubicSegment::try_new(
             xyz,
-            segment.e_mode,
-            segment.extrusion_per_xy_mm,
-            segment.e_independent.clone(),
+            segment.followers.clone(),
             segment.feedrate_mm_s,
             segment.source,
             Some(split_info),

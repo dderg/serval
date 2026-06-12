@@ -12,9 +12,15 @@ pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, S
 pub use params::FitterParams;
 pub use pipeline::{GeometryPipeline, Item, Segments, degree_elevate_2_to_3};
 pub use segment::{
-    BlendFamily, CornerBlendSlot, CubicSegment, EMode, JunctionDeviation, Segment, SourceRange,
-    SplitInfo,
+    BlendFamily, CornerBlendSlot, CubicSegment, FollowerDemand, JunctionDeviation, Segment,
+    SourceRange, SplitInfo,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FollowerWord {
+    pub letter: u8,
+    pub axis_index: usize,
+}
 pub use splitter::{SplitError, split_segment_to_cap};
 
 pub use telemetry::TelemetryEvent;

@@ -1,5 +1,5 @@
-use geometry::{CubicSegment, EMode, GeometryError, SourceRange};
-use nurbs::{ScalarNurbs, VectorNurbs, eval::vector_eval};
+use geometry::{CubicSegment, FollowerDemand, GeometryError, SourceRange};
+use nurbs::{VectorNurbs, eval::vector_eval};
 
 fn valid_cubic_xyz() -> VectorNurbs<f64, 3> {
     VectorNurbs::<f64, 3>::try_new(
@@ -30,15 +30,7 @@ fn try_new_rejects_non_cubic() {
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
     )
     .expect("valid linear");
-    let result = CubicSegment::try_new(
-        linear,
-        EMode::Travel,
-        0.0,
-        None,
-        100.0,
-        dummy_source(),
-        None,
-    );
+    let result = CubicSegment::try_new(linear, vec![], 100.0, dummy_source(), None);
     assert!(matches!(
         result,
         Err(GeometryError::NotSinglePieceCubic { .. })
@@ -47,11 +39,18 @@ fn try_new_rejects_non_cubic() {
 
 #[test]
 fn try_new_accepts_valid_travel() {
+    let result = CubicSegment::try_new(valid_cubic_xyz(), vec![], 100.0, dummy_source(), None);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn try_new_accepts_follower_with_signed_ratio() {
     let result = CubicSegment::try_new(
         valid_cubic_xyz(),
-        EMode::Travel,
-        0.0,
-        None,
+        vec![FollowerDemand {
+            axis_index: 3,
+            ratio: -0.05,
+        }],
         100.0,
         dummy_source(),
         None,
@@ -60,50 +59,44 @@ fn try_new_accepts_valid_travel() {
 }
 
 #[test]
-fn try_new_accepts_coupled_signed_ratio() {
+fn try_new_rejects_zero_follower_ratio() {
     let result = CubicSegment::try_new(
         valid_cubic_xyz(),
-        EMode::CoupledToXy,
-        -0.05,
-        None,
-        100.0,
-        dummy_source(),
-        None,
-    );
-    assert!(result.is_ok());
-}
-
-#[test]
-fn try_new_rejects_travel_with_nonzero_ratio() {
-    let result = CubicSegment::try_new(
-        valid_cubic_xyz(),
-        EMode::Travel,
-        0.05,
-        None,
+        vec![FollowerDemand {
+            axis_index: 3,
+            ratio: 0.0,
+        }],
         100.0,
         dummy_source(),
         None,
     );
     assert!(matches!(
         result,
-        Err(GeometryError::EModeInvariantViolation { .. })
+        Err(GeometryError::FollowerInvariantViolation { .. })
     ));
 }
 
 #[test]
-fn try_new_rejects_independent_without_e_curve() {
+fn try_new_rejects_duplicate_follower_axis() {
     let result = CubicSegment::try_new(
         valid_cubic_xyz(),
-        EMode::Independent,
-        0.0,
-        None,
+        vec![
+            FollowerDemand {
+                axis_index: 3,
+                ratio: 0.1,
+            },
+            FollowerDemand {
+                axis_index: 3,
+                ratio: 0.2,
+            },
+        ],
         100.0,
         dummy_source(),
         None,
     );
     assert!(matches!(
         result,
-        Err(GeometryError::EModeInvariantViolation { .. })
+        Err(GeometryError::FollowerInvariantViolation { .. })
     ));
 }
 
@@ -113,7 +106,7 @@ fn live_reduce_rejects_g1() {
 
     let mut events: Vec<TelemetryEvent> = vec![];
     let items: Vec<Item> = {
-        let mut pipeline = GeometryPipeline::new(FitterParams::default());
+        let mut pipeline = GeometryPipeline::new(FitterParams::default(), vec![]);
         let mut sink = |evt: TelemetryEvent| events.push(evt);
         pipeline.process("G1 X10 Y10 F1000\n", &mut sink).collect()
     };
@@ -162,7 +155,7 @@ fn live_reduce_rejects_g2() {
 
     let mut events: Vec<TelemetryEvent> = vec![];
     let items: Vec<Item> = {
-        let mut pipeline = GeometryPipeline::new(FitterParams::default());
+        let mut pipeline = GeometryPipeline::new(FitterParams::default(), vec![]);
         let mut sink = |evt: TelemetryEvent| events.push(evt);
         pipeline
             .process("G2 X10 Y10 I5 J5 F1000\n", &mut sink)
@@ -189,7 +182,7 @@ fn live_g0_then_g5_aborts_before_emitting_stale_cubic() {
     // the subsequent G5 emitted a cubic with cps[0] = [0,0,0] instead of
     // [10,0,0] — silent 10mm geometric corruption. Post-fix: G0 produces
     // Item::Fatal which terminates the iterator before the G5 is processed.
-    let mut p = GeometryPipeline::new(FitterParams::default());
+    let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut sink = |_e: TelemetryEvent| {};
     let src = "G0 X10 Y0\nG5 X20 Y0 I3 J3 P-3 Q3 F1000\n";
     let items: Vec<_> = p.process(src, &mut sink).collect();
@@ -215,61 +208,64 @@ fn live_g0_then_g5_aborts_before_emitting_stale_cubic() {
 }
 
 #[test]
-fn live_reduce_rejects_z_plus_e_as_helical() {
-    use geometry::{Fatal, FitterParams, GeometryPipeline, Item, TelemetryEvent};
+fn z_plus_e_classifies_as_ordinary_move_with_3d_ratio() {
+    use geometry::{FitterParams, FollowerWord, GeometryPipeline, Item, Segment, TelemetryEvent};
 
-    // G5 Z move with E delta (pure-Z+E, no XY motion). Must be rejected as
-    // helical extrusion — pre-fix this leaked through as EMode::Independent
-    // and the splitter would have cloned the full E curve into every child.
-    // Round-5 review fix: helical rejection now produces `Item::Fatal` (not
-    // `Recovered`) because reduce-stage already committed modal state before
-    // the pipeline classified, so a recoverable rejection let subsequent G5s
-    // start from the rejected endpoint.
-    let mut p = GeometryPipeline::new(FitterParams::default());
+    // Previously Fatal::HelicalExtrusionUnsupported; the follower ratio is
+    // delta over 3D path length, so Z+E is an ordinary move.
+    let mut p = GeometryPipeline::new(
+        FitterParams::default(),
+        vec![FollowerWord {
+            letter: b'E',
+            axis_index: 3,
+        }],
+    );
     let mut sink = |_e: TelemetryEvent| {};
     let src = "G5 Z10 E5 I0 J0 P0 Q0 F1500\n";
     let items: Vec<_> = p.process(src, &mut sink).collect();
 
-    assert!(
-        items
-            .iter()
-            .any(|item| matches!(item, Item::Fatal(Fatal::HelicalExtrusionUnsupported { .. }))),
-        "pure-Z+E G5 should produce Item::Fatal(Fatal::HelicalExtrusionUnsupported); got {items:#?}"
-    );
+    let cubic = items
+        .iter()
+        .find_map(|item| match item {
+            Item::Segment(Segment::Cubic(c)) => Some(c.clone()),
+            _ => None,
+        })
+        .expect("pure-Z+E G5 should classify as an ordinary move");
+    let path_len = nurbs::arc_length::path_arc_length(&cubic.xyz);
+    assert_eq!(cubic.followers.len(), 1);
+    assert_eq!(cubic.followers[0].axis_index, 3);
+    assert!((cubic.followers[0].ratio - 5.0 / path_len).abs() < 1e-12);
 }
 
 #[test]
-fn helical_rejection_aborts_before_subsequent_g5_can_inherit_stale_state() {
-    use geometry::{Fatal, FitterParams, GeometryPipeline, Item, Segment, TelemetryEvent};
+fn helical_move_with_follower_classifies_and_pipeline_continues() {
+    use geometry::{FitterParams, FollowerWord, GeometryPipeline, Item, Segment, TelemetryEvent};
 
-    // Pre-fix bug (round-5 Claim G): the first G5's helical rejection did
-    // NOT terminate the pipeline; reduce-stage had already committed
-    // state.position = [10, 0, 5] and state.e = 2 before pipeline
-    // classified the move as helical. The follow-up valid G5 then started
-    // its cubic from [10, 0, 5] instead of [0, 0, 0].
-    //
-    // Post-fix: helical rejection produces Item::Fatal, the iterator goes
-    // terminal, the second G5 never reaches handle_event.
-    let mut p = GeometryPipeline::new(FitterParams::default());
+    // Previously the first move was a fatal helical rejection; now both
+    // moves classify and the pipeline keeps going.
+    let mut p = GeometryPipeline::new(
+        FitterParams::default(),
+        vec![FollowerWord {
+            letter: b'E',
+            axis_index: 3,
+        }],
+    );
     let mut sink = |_e: TelemetryEvent| {};
     let src = "G5 X10 Y0 Z5 I0 J3 P0 Q-3 E2 F1500\nG5 X20 Y0 I3 J3 P-3 Q3 F1500\n";
     let items: Vec<_> = p.process(src, &mut sink).collect();
 
-    assert!(
-        items
-            .iter()
-            .any(|item| matches!(item, Item::Fatal(Fatal::HelicalExtrusionUnsupported { .. }))),
-        "expected Item::Fatal(HelicalExtrusionUnsupported), got {items:#?}"
-    );
-
-    let cubic_count = items
+    let cubics: Vec<_> = items
         .iter()
-        .filter(|item| matches!(item, Item::Segment(Segment::Cubic(_))))
-        .count();
-    assert_eq!(
-        cubic_count, 0,
-        "post-Fatal cubic emission means the iterator continued past the rejection; got {cubic_count} cubics in {items:#?}"
-    );
+        .filter_map(|item| match item {
+            Item::Segment(Segment::Cubic(c)) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cubics.len(), 2, "expected two cubics, got {items:#?}");
+    let path_len = nurbs::arc_length::path_arc_length(&cubics[0].xyz);
+    assert_eq!(cubics[0].followers.len(), 1);
+    assert!((cubics[0].followers[0].ratio - 2.0 / path_len).abs() < 1e-12);
+    assert!(cubics[1].followers.is_empty());
 }
 
 #[test]
@@ -281,7 +277,7 @@ fn g92_resets_modal_position_for_subsequent_g5() {
     // G5 emitted P0 = [0,0,0] instead of [10,20,0] — silent geometric
     // corruption. Post-fix: G92 binds params and writes them through to
     // state.position before the marker break.
-    let mut p = GeometryPipeline::new(FitterParams::default());
+    let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut sink = |_: TelemetryEvent| {};
     let src = "G92 X10 Y20\nG5 X20 Y30 I0 J5 P0 Q-5 F1500\n";
     let items: Vec<_> = p.process(src, &mut sink).collect();
@@ -302,12 +298,18 @@ fn g92_resets_modal_position_for_subsequent_g5() {
 }
 
 #[test]
-fn g92_e0_resets_modal_e_for_subsequent_g5_e_delta() {
-    use geometry::{EMode, FitterParams, GeometryPipeline, Item, Segment, TelemetryEvent};
+fn g92_e_resets_follower_ledger_for_subsequent_g5_delta() {
+    use geometry::{FitterParams, FollowerWord, GeometryPipeline, Item, Segment, TelemetryEvent};
 
-    // Pre-fix: G92 E0 didn't update state.e. The next G5 with E5 computed
-    // e_delta = 5 - state.e (whatever was there before), instead of 5 - 0.
-    let mut p = GeometryPipeline::new(FitterParams::default());
+    // Pre-fix: G92 E5 didn't update the ledger. The next G5 with E10 computed
+    // delta = 10 - <stale>, instead of 10 - 5.
+    let mut p = GeometryPipeline::new(
+        FitterParams::default(),
+        vec![FollowerWord {
+            letter: b'E',
+            axis_index: 3,
+        }],
+    );
     let mut sink = |_: TelemetryEvent| {};
     let src = "G92 E5\nG5 X10 Y0 I3 J3 P-3 Q3 E10 F1500\n";
     let items: Vec<_> = p.process(src, &mut sink).collect();
@@ -320,11 +322,12 @@ fn g92_e0_resets_modal_e_for_subsequent_g5_e_delta() {
         })
         .expect("expected one Segment::Cubic after G92 E + G5");
 
-    assert_eq!(cubic.e_mode, EMode::CoupledToXy);
+    let path_len = nurbs::arc_length::path_arc_length(&cubic.xyz);
+    assert_eq!(cubic.followers.len(), 1);
     assert!(
-        cubic.extrusion_per_xy_mm > 0.0,
-        "expected positive extrusion ratio (e_delta=5), got {}",
-        cubic.extrusion_per_xy_mm
+        (cubic.followers[0].ratio - 5.0 / path_len).abs() < 1e-12,
+        "expected ratio from delta=5, got {}",
+        cubic.followers[0].ratio
     );
 }
 
@@ -334,7 +337,7 @@ fn g18_then_g5_emits_plane_mismatch_recovery() {
 
     // Pre-fix: G5 ignored active_plane and emitted a CurveGeom::Cubic as if
     // XY. Post-fix: mirrors G5.1's plane check; emits Recovery::G5PlaneMismatch.
-    let mut p = GeometryPipeline::new(FitterParams::default());
+    let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut sink = |_: TelemetryEvent| {};
     let src = "G18\nG5 X10 Y0 I3 J3 P-3 Q3 F1500\n";
     let items: Vec<_> = p.process(src, &mut sink).collect();
@@ -358,7 +361,7 @@ fn g18_then_g5_emits_plane_mismatch_recovery() {
 fn g19_then_g5_emits_plane_mismatch_recovery() {
     use geometry::{FitterParams, GeometryPipeline, Item, Recovery, TelemetryEvent};
 
-    let mut p = GeometryPipeline::new(FitterParams::default());
+    let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut sink = |_: TelemetryEvent| {};
     let src = "G19\nG5 X10 Y0 I3 J3 P-3 Q3 F1500\n";
     let items: Vec<_> = p.process(src, &mut sink).collect();
@@ -391,7 +394,7 @@ fn nan_g5_produces_malformed_params_recovery_not_silent_drop() {
     // Post-Fix-H: lexer rejects NaN as MalformedNumber, the geometry
     // pipeline maps the parse error to Recovery::MalformedParams via the
     // existing handle_event::ParseError path.
-    let mut p = GeometryPipeline::new(FitterParams::default());
+    let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut sink = |_e: TelemetryEvent| {};
     let src = "G5 XNaN Y0 I0 J3 P0 Q-3 F1500\n";
     let items: Vec<_> = p.process(src, &mut sink).collect();
@@ -419,9 +422,7 @@ fn try_new_rejects_non_finite_control_point() {
     .expect("VectorNurbs accepts NaN at the type level; CubicSegment::try_new must catch it");
     let result = CubicSegment::try_new(
         xyz,
-        EMode::Travel,
-        0.0,
-        None,
+        vec![],
         100.0,
         SourceRange {
             start_line: 1,
@@ -450,9 +451,7 @@ fn try_new_rejects_non_finite_feedrate() {
     .unwrap();
     let result = CubicSegment::try_new(
         xyz,
-        EMode::Travel,
-        0.0,
-        None,
+        vec![],
         f64::INFINITY,
         SourceRange {
             start_line: 1,
@@ -462,12 +461,12 @@ fn try_new_rejects_non_finite_feedrate() {
     );
     assert!(matches!(
         result,
-        Err(GeometryError::EModeInvariantViolation { .. })
+        Err(GeometryError::FollowerInvariantViolation { .. })
     ));
 }
 
 #[test]
-fn try_new_rejects_non_finite_extrusion_ratio() {
+fn try_new_rejects_non_finite_follower_ratio() {
     let xyz = VectorNurbs::<f64, 3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
@@ -481,9 +480,10 @@ fn try_new_rejects_non_finite_extrusion_ratio() {
     .unwrap();
     let result = CubicSegment::try_new(
         xyz,
-        EMode::CoupledToXy,
-        f64::NAN,
-        None,
+        vec![FollowerDemand {
+            axis_index: 3,
+            ratio: f64::NAN,
+        }],
         100.0,
         SourceRange {
             start_line: 1,
@@ -493,34 +493,6 @@ fn try_new_rejects_non_finite_extrusion_ratio() {
     );
     assert!(matches!(
         result,
-        Err(GeometryError::EModeInvariantViolation { .. })
-    ));
-}
-
-#[test]
-fn try_new_rejects_non_finite_e_independent_curve() {
-    let xyz = VectorNurbs::<f64, 3>::try_new(
-        3,
-        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
-        vec![[0.0; 3]; 4],
-    )
-    .unwrap();
-    let bad_e =
-        ScalarNurbs::<f64>::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, f64::INFINITY]).unwrap();
-    let result = CubicSegment::try_new(
-        xyz,
-        EMode::Independent,
-        0.0,
-        Some(bad_e),
-        100.0,
-        SourceRange {
-            start_line: 1,
-            end_line: 1,
-        },
-        None,
-    );
-    assert!(matches!(
-        result,
-        Err(GeometryError::EModeInvariantViolation { .. })
+        Err(GeometryError::FollowerInvariantViolation { .. })
     ));
 }

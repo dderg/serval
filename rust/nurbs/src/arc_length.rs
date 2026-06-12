@@ -274,55 +274,6 @@ pub fn build_arc_length_table_vector<T: Float, V: VectorNurbsView<T, 3>>(
 
 #[cfg(feature = "host")]
 #[must_use]
-pub fn xy_arc_length<const D: usize>(xyz: &crate::VectorNurbs<f64, D>) -> f64
-where
-    [(); D]:,
-{
-    debug_assert!(D >= 2, "xy_arc_length requires D >= 2 (X and Y axes)");
-
-    let knots = xyz.knots();
-    let u_start = knots[0];
-    let u_end = knots[knots.len() - 1];
-
-    let deriv = vector_derivative(xyz);
-
-    let xy_speed = |u: f64| -> f64 {
-        let d = vector_eval(&deriv, u);
-        let dx = d[0];
-        let dy = d[1];
-        (dx * dx + dy * dy).sqrt()
-    };
-
-    let span = u_end - u_start;
-    let mut prev_estimate: Option<f64> = None;
-    let mut subintervals: usize = 1;
-
-    loop {
-        let mut sum = 0.0_f64;
-        for i in 0..subintervals {
-            let a = u_start + span * (i as f64) / (subintervals as f64);
-            let b = u_start + span * ((i + 1) as f64) / (subintervals as f64);
-            sum += integrate_arc_length(xy_speed, a, b, 5);
-        }
-
-        if let Some(prev) = prev_estimate {
-            let tol = 1e-9 * sum.abs().max(1e-300);
-            if (sum - prev).abs() < tol {
-                return sum;
-            }
-        }
-
-        if subintervals >= 64 {
-            return sum;
-        }
-
-        prev_estimate = Some(sum);
-        subintervals *= 2;
-    }
-}
-
-#[cfg(feature = "host")]
-#[must_use]
 pub fn path_arc_length(xyz: &crate::VectorNurbs<f64, 3>) -> f64 {
     let knots = xyz.knots();
     let u_start = knots[0];

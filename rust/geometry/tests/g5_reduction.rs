@@ -3,7 +3,7 @@ use geometry::{
 };
 
 fn process(text: &str) -> (Vec<Item>, Vec<TelemetryEvent>) {
-    let mut p = GeometryPipeline::new(FitterParams::default());
+    let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut events = vec![];
     let items: Vec<_> = {
         let mut sink = |e: TelemetryEvent| events.push(e);
@@ -146,16 +146,29 @@ fn g5_1_outside_g17_plane_emits_recovery() {
 }
 
 #[test]
-fn g5_with_z_motion_rejected_as_helical_extrusion_when_e_present() {
-    use geometry::Fatal;
-    let (items, _events) = process("G5 X10 Y0 Z0.3 E0.5 I3 J3 P-3 Q3 F1500\n");
-    let helical = items
-        .iter()
-        .find(|it| matches!(it, Item::Fatal(Fatal::HelicalExtrusionUnsupported { .. })));
-    assert!(
-        helical.is_some(),
-        "expected Item::Fatal(HelicalExtrusionUnsupported), got {items:#?}"
+fn g5_with_z_motion_and_e_classifies_with_3d_ratio() {
+    use geometry::FollowerWord;
+    let mut p = GeometryPipeline::new(
+        FitterParams::default(),
+        vec![FollowerWord {
+            letter: b'E',
+            axis_index: 3,
+        }],
     );
+    let mut sink = |_: TelemetryEvent| {};
+    let items: Vec<_> = p
+        .process("G5 X10 Y0 Z0.3 E0.5 I3 J3 P-3 Q3 F1500\n", &mut sink)
+        .collect();
+    let c = items
+        .iter()
+        .find_map(|it| match it {
+            Item::Segment(Segment::Cubic(c)) => Some(c),
+            _ => None,
+        })
+        .expect("Z+E G5 should classify as an ordinary move");
+    let path_len = nurbs::arc_length::path_arc_length(&c.xyz);
+    assert_eq!(c.followers.len(), 1);
+    assert!((c.followers[0].ratio - 0.5 / path_len).abs() < 1e-12);
 }
 
 #[test]
@@ -173,7 +186,7 @@ fn g5_with_z_motion_no_e_emits_travel_cubic() {
     assert!(approx(cps[1][2], 0.1));
     assert!(approx(cps[2][2], 0.2));
     assert!(approx(cps[3][2], 0.3));
-    assert_eq!(c.e_mode, geometry::EMode::Travel);
+    assert!(c.followers.is_empty());
 }
 
 #[test]
