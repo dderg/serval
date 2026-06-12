@@ -1,35 +1,36 @@
 # Kalico — sota-motion
 
-**A ground-up rewrite of 3D printer motion. The planner computes the
-time-optimal trajectory — not a good approximation, the real thing — and the
-machine model is so simple it fits in one sentence: a printer is a set of
-axes, some of which follow others, all of which obey one shared rulebook.**
-
 This is a fork of [Kalico](https://github.com/KalicoCrew/kalico) (itself a
-fork of [Klipper](https://github.com/Klipper3d/klipper)). Everything you know
-from Kalico is still here — see [README_KALICO.md](README_KALICO.md) — but
-the motion stack underneath is being replaced entirely.
+fork of [Klipper](https://github.com/Klipper3d/klipper)) that replaces the
+motion stack. The upstream README, with Kalico's feature list and install
+instructions, is at [README_KALICO.md](README_KALICO.md).
 
-## Your printer is slower than physics requires
+The short version: each move's timing is solved as a time-optimal control
+problem instead of being approximated with lookahead heuristics, and the
+machine model is reduced to a single concept — axes — with two relations
+between them.
 
-Every classic planner is a stack of heuristics: trapezoids, lookahead,
-square-corner-velocity, a centripetal cap, per-axis accel knobs that secretly
-let diagonals exceed your configured limit by √2. Each one is a safe
-approximation of the question nobody could afford to answer exactly:
+## The planner
 
-> *What is the fastest way through this path that violates no limit?*
+Classical planners are built from approximations: trapezoidal velocity
+profiles, square corner velocity, a centripetal cap, per-axis acceleration
+settings that quietly allow a diagonal move to exceed the configured limit by
+√2. All of these stand in for a question that used to be too expensive to
+answer directly: what is the fastest way through this path that stays within
+every limit?
 
-We answer it exactly. Every move's timing is solved as a constrained
-time-optimal problem: the trajectory rides whichever limit binds at each
-point along the path — your gantry's acceleration through one corner, your
-extruder's flow ceiling through the next — and is provably as fast as those
-limits allow everywhere in between. There is no cornering knob to tune,
-because cornering is not a special case. There is no "safe" margin baked in,
-because the solver does not need one.
+This planner answers it directly. It discretizes each move's timing and
+solves for the fastest profile that satisfies every constraint pointwise
+along the path. Where your gantry's acceleration limit binds, the trajectory
+rides it; where the extruder's flow limit takes over, it rides that instead.
+Cornering falls out of the same math as everything else, so there is no
+corner velocity setting and nothing to tune besides the limits themselves.
 
-## The extruder was never special
+## Axes
 
-Delete the toolhead. Delete the extruder concept. What remains is honest:
+There is no toolhead in the config and no extruder concept in the code. A
+printer is a set of axes. Two things can be said about an axis: what it
+follows, and which limits cover it.
 
 ```
 [axis e]
@@ -46,22 +47,26 @@ max_velocity: 75
 max_accel: 1500
 ```
 
-An axis that `follows` other axes pays out its motion proportionally to the
-distance *actually traveled* along their path — an odometer, not a script.
-The extruder is just the first follower. From this one rule, whole categories
-of special cases simply stop existing: vase mode, retract-with-hop, spiral
-lift, extrude-only moves — all ordinary moves now. And because every axis's
-limits pour into the same pot, your extruder's flow limit slows the gantry
-exactly where it must and nowhere else. Want a second extruder, a paste head,
-a fiber tensioner? Declare another axis. The planner doesn't know what an
-axis is *for* — and that's precisely why it can plan anything.
+A follower axis pays out its commanded displacement in proportion to the
+distance actually traveled along the path of the axes it follows. The
+extruder is the obvious example, but nothing in the system knows it's an
+extruder. Because following is measured along the real path in 3D, the cases
+that needed special handling before — vase mode, retract while z-hopping,
+extrude-only moves — are just moves.
 
-## Pressure advance and input shaping are the same thing
+Limits work the same way for every axis: each `[limit]` section caps the
+combined motion of the axes it names, and all sections constrain the shared
+move clock together. A slow extruder limit slows the gantry exactly where the
+flow demand would exceed it, and nowhere else. Adding a second extruder, a
+paste head, or anything else that should track the print path is a config
+section, not a feature request.
 
-One smooths your motion to cancel ringing. The other sharpens your extruder
-to cancel pressure lag. Opposite effects — identical mathematics. So they are
-one concept here, declared the same way, applied per axis, in chains, tunable
-live:
+## Post-processors
+
+Input shaping and pressure advance turn out to be the same kind of object: a
+linear operator applied to one axis's motion. One smooths the signal to avoid
+exciting resonances, the other sharpens it to compensate pressure lag in the
+melt zone. They are declared the same way and can be chained:
 
 ```
 [post_processor is]
@@ -80,35 +85,31 @@ follows: x, y, z
 post_processors: pa
 ```
 
-And here is the payoff: the planner constrains what comes **out** of that
-chain — what your motors and your nozzle actually feel — not the nominal
-command. It knows the shaper will round a corner before the motor sees it, so
-it may legally command a sharper one. It knows pressure advance will spike
-extruder velocity at each accel, so it slows exactly the moves where that
-spike would exceed your flow limit — and no others. Your tuning numbers
-finally mean what they say.
+Limits apply to the output of the chain — the signal the motor actually
+receives — rather than to the nominal command. The planner accounts for this:
+it knows the shaper will round a corner before the motor sees it, so it can
+command a tighter one; it knows pressure advance spikes extruder velocity
+during acceleration, so it slows only the moves where that spike would exceed
+the flow limit. Parameters can be changed at runtime, and new post-processor
+types (a different pressure advance model, for instance) plug in as new
+sections rather than code changes.
 
-New post-processor types plug in the same way. Someone's better
-pressure-advance model is a config section away, not a fork away.
+## Extrusion bookkeeping
 
-## The bookkeeping is honest too
+The G-code's extrusion counter advances exactly as written — macros and UIs
+see the numbers the file commanded. The filament actually extruded follows
+the realized path, which is slightly shorter where shaping rounds a corner,
+so slightly less is paid out there. The slicer computed that filament for
+road that, after shaping, doesn't exist; extruding it anyway would
+overextrude the road that does. The discrepancy is deliberate and never
+"corrected."
 
-The G-code's extrusion counter is a contract, executed exactly as written.
-The physical filament paid out follows the *real* road — which is shorter
-where smoothing rounds a corner, so proportionally less plastic goes down.
-That's not drift; that's the first planner that refuses to overextrude road
-that doesn't exist. The books are a contract; the road is physics; nobody
-rewrites the books to match the road.
-
-## Where this stands
+## Status
 
 Under heavy development on the `sota-motion` branch. The geometry pipeline is
-cubic-Bézier native (G5/G5.1), the time-optimal solver with follower and
-post-processor constraints is in place, and the per-axis emission chain is
-being built now. The full design — readable, opinionated, and the actual
-source of truth for the code — lives in
-[`docs/superpowers/specs/`](docs/superpowers/specs/), starting with
+cubic-Bézier native (G5/G5.1 input), the time-optimal solver including
+follower and post-processor constraints is in place, and the per-axis
+emission chain is being built now. The design documents in
+[`docs/superpowers/specs/`](docs/superpowers/specs/) are the source of truth;
+start with
 [the follower-axes-and-limits design](docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md).
-
-Upstream Kalico — features, documentation, installation:
-[README_KALICO.md](README_KALICO.md).
