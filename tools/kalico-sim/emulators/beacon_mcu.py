@@ -33,6 +33,15 @@ def _build_nvm_image() -> bytes:
     # version byte; 0 selects the V0 (no-params) branch.
     struct.pack_into("<IH", nvm, 0, 0xFFFFFFFF, 0xFFFF)
     nvm[12] = 0x00
+    # Offset 65534 holds the MCU temp calibration two-word pack
+    # (BeaconMCUTempHelper.build_with_nvm). All-zero words make
+    # temp_hot == temp_room and a zero ADC denominator — every
+    # beacon_status/beacon_data callback then dies on ZeroDivisionError.
+    # Encode temp_room=20.0, temp_hot=60.0, ref_room=ref_hot=1.0,
+    # adc_room=1000, adc_hot=3000.
+    lower = 20 | (60 << 12)
+    upper = (1000 << 8) | (3000 << 20)
+    struct.pack_into("<II", nvm, 65534, lower, upper)
     return bytes(nvm)
 
 
@@ -58,7 +67,7 @@ class BeaconMcuStub:
         self._slave_fd: Optional[int] = None
         self._t0: float = time.monotonic()
         self._send_lock = threading.Lock()
-        self._send_seq: int = 1
+        self._host_recv_seq: int = 1
         self._inbuf = bytearray()
         self._parser = msgproto.MessageParser(warn_prefix="beacon-stub: ")
         self._parser.process_identify(IDENTIFY_BLOB, decompress=True)
@@ -195,16 +204,18 @@ class BeaconMcuStub:
             logging.exception("beacon-stub: unknown msgformat %r", msgformat)
             return
         with self._send_lock:
-            seq = self._send_seq
-            seq_byte = (seq & msgproto.MESSAGE_SEQ_MASK) | msgproto.MESSAGE_DEST
+            # Klipper protocol: the seq byte of MCU->host frames is the
+            # MCU's *receive* sequence — it acknowledges host frames. An
+            # independent counter only works while every host frame draws
+            # exactly one response; no-response commands (trsync_set_timeout
+            # heartbeats) desync it and the host retransmits forever.
+            seq_byte = (
+                self._host_recv_seq & msgproto.MESSAGE_SEQ_MASK
+            ) | msgproto.MESSAGE_DEST
             payload = [msgproto.MESSAGE_MIN + len(cmd), seq_byte] + list(cmd)
             crc = msgproto.crc16_ccitt(payload)
             payload.extend(crc)
             payload.append(msgproto.MESSAGE_SYNC)
-            self._send_seq = (seq + 1) & msgproto.MESSAGE_SEQ_MASK
-            if self._send_seq == 0:
-                # Seq 0 is reserved as "uninitialised"; skip it on rollover.
-                self._send_seq = 1
             try:
                 os.write(self._master_fd, bytes(payload))
             except (BlockingIOError, OSError):
@@ -213,6 +224,23 @@ class BeaconMcuStub:
                 return
             self.tx_frame_count += 1
             self._log("tx", bytes(payload), msgformat, kwargs)
+
+    def _send_ack(self) -> None:
+        if self._master_fd is None:
+            return
+        with self._send_lock:
+            seq_byte = (
+                self._host_recv_seq & msgproto.MESSAGE_SEQ_MASK
+            ) | msgproto.MESSAGE_DEST
+            payload = [msgproto.MESSAGE_MIN, seq_byte]
+            crc = msgproto.crc16_ccitt(payload)
+            payload.extend(crc)
+            payload.append(msgproto.MESSAGE_SYNC)
+            try:
+                os.write(self._master_fd, bytes(payload))
+            except (BlockingIOError, OSError):
+                return
+            self._log("tx-ack", bytes(payload))
 
     def _reactor_loop(self) -> None:
         master_fd = self._master_fd
@@ -249,12 +277,21 @@ class BeaconMcuStub:
                 continue
             frame = list(self._inbuf[:msglen])
             del self._inbuf[:msglen]
+            frame_seq = frame[1] & msgproto.MESSAGE_SEQ_MASK
+            if frame_seq != self._host_recv_seq & msgproto.MESSAGE_SEQ_MASK:
+                self._send_ack()
+                continue
+            self._host_recv_seq = (self._host_recv_seq + 1) & 0xFFFF
             try:
                 params = self._parser.parse(frame)
             except msgproto.error:
                 logging.exception("beacon-stub: parse failed")
+                self._send_ack()
                 continue
+            tx_before = self.tx_frame_count
             self._dispatch(params, frame)
+            if self.tx_frame_count == tx_before:
+                self._send_ack()
 
     def _dispatch(self, params: dict, frame: list) -> None:
         name = params.get("#name")
@@ -616,15 +653,18 @@ class BeaconMcuStub:
                 data_value = self._freq_to_count(freq)
 
                 buf = bytearray()
+                # beacon.py's decoder starts each message at data=0, so the
+                # first sample must be absolute (or a delta from zero).
+                last_data_value = 0
                 for i in range(SAMPLES_PER_BATCH):
                     delta = data_value - last_data_value
-                    if -8192 <= delta <= 8191:
-                        # beacon_data: top bit clear marks a 2-byte delta.
-                        encoded = (delta + 8192) & 0x3FFF
+                    if -16384 <= delta <= 16383:
+                        # 2-byte delta: 15-bit two's complement, top bit clear.
+                        encoded = delta & 0x7FFF
                         buf.append((encoded >> 8) & 0x7F)
                         buf.append(encoded & 0xFF)
                     else:
-                        # beacon_data: top bit set marks a 4-byte absolute.
+                        # 4-byte absolute: top bit set, 31-bit value.
                         buf.append(0x80 | ((data_value >> 24) & 0x7F))
                         buf.append((data_value >> 16) & 0xFF)
                         buf.append((data_value >> 8) & 0xFF)
