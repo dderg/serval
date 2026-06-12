@@ -336,9 +336,11 @@ impl Engine {
             return crate::error::KALICO_ERR_CORRECTION_IN_PROGRESS;
         }
         if !axis.correction_active() {
+            axis.correction_ring.reset_cursors();
             axis.correction_motor_idx = motor_idx;
             axis.correction_last_step_count = 0;
             axis.correction_p_prev = 0.0;
+            crate::dispatch_correction::emit_correction_start(axis_idx, motor_idx);
         }
         match axis.correction_ring.commit_head(new_head) {
             crate::piece_ring::CommitOutcome::Applied
@@ -387,9 +389,47 @@ impl Engine {
         #[allow(clippy::cast_possible_truncation)]
         let now_lo = now as u32;
 
+        let corr_sample_period_sec = if self.sample_period_cycles == 0
+            || self.cycles_per_second == 0.0
+        {
+            0.0_f32
+        } else {
+            self.sample_period_cycles as f32 / self.cycles_per_second
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let corr_now_lo = now as u32;
+
         let mut active = false;
 
         for i in 0..(self.num_axes as usize) {
+            {
+                #[cfg(feature = "motion-module-stepper")]
+                let corr_queue = get_queue(i);
+                #[cfg(not(feature = "motion-module-stepper"))]
+                let corr_queue = core::ptr::null_mut();
+                let sample_period_cycles = self.sample_period_cycles;
+                let cps = self.cycles_per_second;
+                let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
+                    continue;
+                };
+                let fault = SharedFaultSink { shared };
+                if crate::dispatch_correction::tick_correction(
+                    i,
+                    axis,
+                    corr_queue,
+                    shared,
+                    storage,
+                    now,
+                    sample_period_cycles,
+                    corr_sample_period_sec,
+                    corr_now_lo,
+                    cps,
+                    &fault,
+                ) {
+                    active = true;
+                }
+            }
+
             let (p_end, v_end, p_sample_start) = {
                 let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
                     continue;

@@ -57,6 +57,8 @@ pub const EVENT_RUNTIME_RING_STATE: u16 = 16;
 
 pub const EVENT_MOTION_PIECE_START_PAST: u16 = 1;
 pub const EVENT_MOTION_RING_FULL: u16 = 2;
+pub const EVENT_MOTION_CORRECTION_START: u16 = 3;
+pub const EVENT_MOTION_CORRECTION_DRAINED: u16 = 4;
 
 pub const EVENT_TICK_INTERVAL_EXCEEDED: u16 = 1;
 pub const EVENT_TICK_UNDERRUN: u16 = 2;
@@ -192,6 +194,14 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_MOTION, EVENT_MOTION_RING_FULL) => {
             ("motion.ring_full", "axis ring full axis={arg0}")
         }
+        (SUBSYSTEM_MOTION, EVENT_MOTION_CORRECTION_START) => (
+            "motion.correction_start",
+            "correction stream start axis={arg0} motor={arg1}",
+        ),
+        (SUBSYSTEM_MOTION, EVENT_MOTION_CORRECTION_DRAINED) => (
+            "motion.correction_drained",
+            "correction stream drained axis={arg0} steps={arg1}",
+        ),
         (SUBSYSTEM_TICK, EVENT_TICK_INTERVAL_EXCEEDED) => (
             "tick.interval_exceeded",
             "TIM5 inter-arrival exceeded: got={arg0} limit={arg1}",
