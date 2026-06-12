@@ -314,6 +314,7 @@ class MotionToolhead:
         self.mcu = self.all_mcus[0]
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
         self._read_limits(config)
+        self._read_axes(config)
         self.print_time = 0.0
         self.print_stall = 0
         self.trapq = None
@@ -644,6 +645,33 @@ class MotionToolhead:
         "max_z_accel",
     )
 
+    def _read_axes(self, config):
+        if config.has_section("firmware_retraction"):
+            raise config.error(
+                "[firmware_retraction] is not supported: it presupposes an "
+                "extruder concept the motion system does not have"
+            )
+        self.axis_sections = []
+        for sc in config.get_prefix_sections("axis "):
+            name = sc.get_name().split(None, 1)[1]
+            follows = [a.strip().lower() for a in sc.getlist("follows", [])]
+            motors = [m.strip() for m in sc.getlist("motors", [])]
+            self.axis_sections.append((name, follows, motors))
+        declared = {name for name, _, _ in self.axis_sections}
+        for required in ("x", "y", "z"):
+            if required not in declared:
+                raise config.error(
+                    "[axis %s] section is required (every axis must be "
+                    "declared)" % required
+                )
+        for _, axes, _, _, _ in self.limit_sections:
+            for a in axes:
+                if a not in declared:
+                    raise config.error(
+                        "[limit] references undeclared axis '%s' "
+                        "(declare [axis %s])" % (a, a)
+                    )
+
     def _read_limits(self, config):
         for key in self.LEGACY_LIMIT_KEYS:
             if config.get(key, None) is not None:
@@ -848,6 +876,7 @@ class MotionToolhead:
 
         try:
             self.bridge.init_planner(
+                list(self.axis_sections),
                 list(self.limit_sections),
                 shaper_type_x,
                 shaper_freq_x,

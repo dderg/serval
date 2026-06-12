@@ -1,16 +1,7 @@
-SUPPORTED_AXES = ("x", "y", "z")
-
-
 class LimitSection:
     def __init__(self, config):
         self.name = config.get_name().split(None, 1)[1]
         self.axes = [a.strip().lower() for a in config.getlist("axes")]
-        for a in self.axes:
-            if a not in SUPPORTED_AXES:
-                raise config.error(
-                    "[%s]: unknown axis '%s' (supported: %s)"
-                    % (config.get_name(), a, ", ".join(SUPPORTED_AXES))
-                )
         if not self.axes:
             raise config.error(
                 "[%s]: axes must not be empty" % config.get_name()
