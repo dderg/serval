@@ -10,6 +10,7 @@ const E_FOLLOWER_04: &[FollowerDemand] = &[FollowerDemand {
     axis_index: 3,
     ratio: 0.04,
 }];
+use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::bezier::{bezier_pieces_to_nurbs, extract_bezier_pieces, BezierPiece};
 use nurbs::VectorNurbs;
 
@@ -149,8 +150,9 @@ fn empty_history_matches_shape_batch_byte_identical() {
     let emitted = emit_shaped(
         &planned,
         &meta,
-        &kernels,
+        &AxisChainSet::spatial_from_kernels(&kernels),
         &PerAxisHistory::empty(),
+        &[],
         batch_t_start,
         batch_t_end,
     )
@@ -213,6 +215,7 @@ fn pad_segment_axis_with_history_seam_reads_history_tail() {
         axes: [x_nurbs, y_nurbs, z_nurbs],
         t_start: 1.0,
         t_end: 2.0,
+        virtual_s_of_t: None,
     }];
 
     let history_x = vec![BezierPiece {
@@ -293,6 +296,7 @@ fn empty_history_pad_matches_legacy() {
         axes: [x_nurbs, y_nurbs, z_nurbs],
         t_start: 0.0,
         t_end: 1.0,
+        virtual_s_of_t: None,
     }];
 
     let t_sm_half = 0.1;
@@ -379,6 +383,7 @@ fn constant_y_axis_emits_cubic_matching_moving_x_corexy_degree_invariant() {
         axes: [degree5_x.clone(), degree5_constant_y, constant_z],
         t_start: fitted_from_fitter.t_start,
         t_end: fitted_from_fitter.t_end,
+        virtual_s_of_t: None,
     };
 
     let kernels: [Option<PiecewisePolynomialKernel<f64>>; 4] = [
@@ -397,8 +402,9 @@ fn constant_y_axis_emits_cubic_matching_moving_x_corexy_degree_invariant() {
     let emitted = emit_shaped(
         &[fitted],
         &meta,
-        &kernels,
+        &AxisChainSet::spatial_from_kernels(&kernels),
         &PerAxisHistory::empty(),
+        &[],
         fitted_from_fitter.t_start,
         fitted_from_fitter.t_end,
     )
@@ -413,6 +419,390 @@ fn constant_y_axis_emits_cubic_matching_moving_x_corexy_degree_invariant() {
              axis must be refit to cubic, not returned as-is from the fitter)",
             seg.axes[0].degree(),
             seg.axes[1].degree(),
+        );
+    }
+}
+
+fn golden_fixture_segments() -> Vec<FittedSegment> {
+    let lin = |p0: f64, p1: f64, t0: f64, t1: f64| {
+        nurbs::ScalarNurbs::try_new(
+            3,
+            vec![t0, t0, t0, t0, t1, t1, t1, t1],
+            vec![p0, p0 + (p1 - p0) / 3.0, p0 + 2.0 * (p1 - p0) / 3.0, p1],
+        )
+        .unwrap()
+    };
+    let curved = |p0: f64, p1: f64, p2: f64, p3: f64, t0: f64, t1: f64| {
+        nurbs::ScalarNurbs::try_new(
+            3,
+            vec![t0, t0, t0, t0, t1, t1, t1, t1],
+            vec![p0, p1, p2, p3],
+        )
+        .unwrap()
+    };
+    vec![
+        FittedSegment {
+            axes: [
+                lin(0.0, 30.0, 0.0, 1.0),
+                curved(0.0, 2.0, 8.0, 10.0, 0.0, 1.0),
+                lin(5.0, 5.0, 0.0, 1.0),
+            ],
+            t_start: 0.0,
+            t_end: 1.0,
+            virtual_s_of_t: None,
+        },
+        FittedSegment {
+            axes: [
+                curved(30.0, 40.0, 42.0, 45.0, 1.0, 2.0),
+                lin(10.0, 25.0, 1.0, 2.0),
+                lin(5.0, 5.0, 1.0, 2.0),
+            ],
+            t_start: 1.0,
+            t_end: 2.0,
+            virtual_s_of_t: None,
+        },
+        FittedSegment {
+            axes: [
+                lin(45.0, 50.0, 2.0, 2.5),
+                lin(25.0, 25.0, 2.0, 2.5),
+                lin(5.0, 6.0, 2.0, 2.5),
+            ],
+            t_start: 2.0,
+            t_end: 2.5,
+            virtual_s_of_t: None,
+        },
+    ]
+}
+
+#[test]
+fn passthrough_chains_reproduce_legacy_output_bitwise() {
+    let planned = golden_fixture_segments();
+    let meta: Vec<EmitSegmentMeta> = (0..3)
+        .map(|_| EmitSegmentMeta { followers: vec![] })
+        .collect();
+    let kernels: [Option<PiecewisePolynomialKernel<f64>>; 4] = [
+        AxisShaper::SmoothZv { frequency_hz: 50.0 }.to_kernel(),
+        AxisShaper::SmoothMzv { frequency_hz: 40.0 }.to_kernel(),
+        None,
+        None,
+    ];
+    let out = emit_shaped(
+        &planned,
+        &meta,
+        &AxisChainSet::spatial_from_kernels(&kernels),
+        &PerAxisHistory::empty(),
+        &[],
+        0.0,
+        2.5,
+    )
+    .unwrap();
+
+    let golden = include_str!("golden_passthrough_capture.txt");
+    for (i, seg) in out.iter().enumerate() {
+        assert_eq!(seg.axes.len(), 3);
+        for (ax, curve) in seg.axes.iter().enumerate() {
+            let cps: Vec<u64> = curve.control_points().iter().map(|c| c.to_bits()).collect();
+            let knots: Vec<u64> = curve.knots().iter().map(|k| k.to_bits()).collect();
+            let want_cps = golden_line(golden, &format!("SEG{i} AX{ax} CPS "));
+            let want_knots = golden_line(golden, &format!("SEG{i} AX{ax} KNOTS "));
+            assert_eq!(
+                format!("{cps:?}"),
+                want_cps,
+                "seg {i} axis {ax}: control points diverged from pre-refactor capture"
+            );
+            assert_eq!(
+                format!("{knots:?}"),
+                want_knots,
+                "seg {i} axis {ax}: knots diverged from pre-refactor capture"
+            );
+        }
+    }
+}
+
+fn golden_line(golden: &str, prefix: &str) -> String {
+    golden
+        .lines()
+        .find_map(|l| l.strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("golden capture missing line with prefix '{prefix}'"))
+        .to_string()
+}
+
+fn e_follower_chains(
+    gain: f64,
+    kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4],
+) -> AxisChainSet {
+    let mut chains = AxisChainSet::spatial_from_kernels(kernels);
+    chains
+        .chains
+        .push(crate::CompiledChain { kernel: None, gain });
+    chains.followers.push((3, vec![0, 1, 2]));
+    chains
+}
+
+#[test]
+fn follower_track_integral_matches_ratio_times_arclength() {
+    let planned = golden_fixture_segments();
+    let ratio = 0.05;
+    let meta: Vec<EmitSegmentMeta> = (0..3)
+        .map(|_| EmitSegmentMeta {
+            followers: vec![FollowerDemand {
+                axis_index: 3,
+                ratio,
+            }],
+        })
+        .collect();
+    let chains = e_follower_chains(0.0, &[None, None, None, None]);
+    let start = 7.0;
+    let out = emit_shaped(
+        &planned,
+        &meta,
+        &chains,
+        &PerAxisHistory::empty(),
+        &[start],
+        0.0,
+        2.5,
+    )
+    .unwrap();
+
+    let spatial: Vec<ScalarNurbs<f64>> = (0..3)
+        .map(|ax| {
+            let pieces: Vec<BezierPiece<f64>> = out
+                .iter()
+                .flat_map(|seg| extract_bezier_pieces(&seg.axes[ax]))
+                .collect();
+            bezier_pieces_to_nurbs(&pieces)
+        })
+        .collect();
+    let odo = crate::odometer::Odometer::build(&spatial, 0.0, 2.5, 64).unwrap();
+    let expected_end = start + ratio * odo.distance_at(2.5);
+
+    let last = out.last().unwrap();
+    let got_end = nurbs::eval::eval(&last.axes[3], 2.5);
+    assert!(
+        (got_end - expected_end).abs() < 1e-6,
+        "follower end {got_end} != start + ratio·arclength {expected_end}"
+    );
+
+    for w in out.windows(2) {
+        let t = w[0].t_end;
+        let left = nurbs::eval::eval(&w[0].axes[3], t);
+        let right = nurbs::eval::eval(&w[1].axes[3], t);
+        assert!(
+            (left - right).abs() < 1e-6,
+            "follower position jump at seam t={t}: {left} vs {right}"
+        );
+        let dl = nurbs::eval::derivative(&w[0].axes[3]);
+        let dr = nurbs::eval::derivative(&w[1].axes[3]);
+        let vl = nurbs::eval::eval(&dl, t);
+        let vr = nurbs::eval::eval(&dr, t);
+        assert!(
+            (vl - vr).abs() < 1e-6,
+            "follower velocity jump at seam t={t}: {vl} vs {vr}"
+        );
+    }
+}
+
+fn corner_segments() -> Vec<FittedSegment> {
+    let lin = |p0: f64, p1: f64, t0: f64, t1: f64| {
+        nurbs::ScalarNurbs::try_new(
+            3,
+            vec![t0, t0, t0, t0, t1, t1, t1, t1],
+            vec![p0, p0 + (p1 - p0) / 3.0, p0 + 2.0 * (p1 - p0) / 3.0, p1],
+        )
+        .unwrap()
+    };
+    vec![
+        FittedSegment {
+            axes: [
+                lin(0.0, 40.0, 0.0, 1.0),
+                lin(0.0, 0.0, 0.0, 1.0),
+                lin(0.0, 0.0, 0.0, 1.0),
+            ],
+            t_start: 0.0,
+            t_end: 1.0,
+            virtual_s_of_t: None,
+        },
+        FittedSegment {
+            axes: [
+                lin(40.0, 40.0, 1.0, 2.0),
+                lin(0.0, 40.0, 1.0, 2.0),
+                lin(0.0, 0.0, 1.0, 2.0),
+            ],
+            t_start: 1.0,
+            t_end: 2.0,
+            virtual_s_of_t: None,
+        },
+    ]
+}
+
+#[test]
+fn follower_samples_post_kernel_path() {
+    let ratio = 0.05;
+    let meta: Vec<EmitSegmentMeta> = (0..2)
+        .map(|_| EmitSegmentMeta {
+            followers: vec![FollowerDemand {
+                axis_index: 3,
+                ratio,
+            }],
+        })
+        .collect();
+    let kernels: [Option<PiecewisePolynomialKernel<f64>>; 4] = [
+        AxisShaper::SmoothMzv { frequency_hz: 10.0 }.to_kernel(),
+        AxisShaper::SmoothMzv { frequency_hz: 10.0 }.to_kernel(),
+        None,
+        None,
+    ];
+
+    let corner = corner_segments();
+    let shaped_out = emit_shaped(
+        &corner,
+        &meta,
+        &e_follower_chains(0.0, &kernels),
+        &PerAxisHistory::empty(),
+        &[0.0],
+        0.0,
+        2.0,
+    )
+    .unwrap();
+    let nominal_length = 80.0;
+    let shaped_end = nurbs::eval::eval(&shaped_out.last().unwrap().axes[3], 2.0);
+    assert!(
+        shaped_end < ratio * nominal_length - 1e-3,
+        "kernel shortcuts the corner: follower end {shaped_end} must fall short \
+         of ratio·nominal {}",
+        ratio * nominal_length
+    );
+
+    let straight = golden_fixture_segments();
+    let straight_meta: Vec<EmitSegmentMeta> = (0..3)
+        .map(|_| EmitSegmentMeta {
+            followers: vec![FollowerDemand {
+                axis_index: 3,
+                ratio,
+            }],
+        })
+        .collect();
+    let passthrough_out = emit_shaped(
+        &straight,
+        &straight_meta,
+        &e_follower_chains(0.0, &[None, None, None, None]),
+        &PerAxisHistory::empty(),
+        &[0.0],
+        0.0,
+        2.5,
+    )
+    .unwrap();
+    let spatial: Vec<ScalarNurbs<f64>> = (0..3)
+        .map(|ax| {
+            let pieces: Vec<BezierPiece<f64>> = passthrough_out
+                .iter()
+                .flat_map(|seg| extract_bezier_pieces(&seg.axes[ax]))
+                .collect();
+            bezier_pieces_to_nurbs(&pieces)
+        })
+        .collect();
+    let odo = crate::odometer::Odometer::build(&spatial, 0.0, 2.5, 64).unwrap();
+    let got = nurbs::eval::eval(&passthrough_out.last().unwrap().axes[3], 2.5);
+    assert!(
+        (got - ratio * odo.distance_at(2.5)).abs() < 1e-6,
+        "passthrough follower must pay out exactly ratio·realized length"
+    );
+}
+
+#[test]
+fn pa_gain_boosts_follower_during_accel() {
+    let accel = 20.0;
+    let quad_x = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: 0.0,
+        u_end: 1.0,
+        coeffs: vec![0.0, 0.0, accel / 2.0, 0.0],
+    }]);
+    let lin0 = crate::beta::constant_cubic_nurbs(0.0, 0.0, 1.0);
+    let planned = vec![FittedSegment {
+        axes: [quad_x, lin0.clone(), lin0],
+        t_start: 0.0,
+        t_end: 1.0,
+        virtual_s_of_t: None,
+    }];
+    let ratio = 0.05;
+    let k = 0.04;
+    let meta = vec![EmitSegmentMeta {
+        followers: vec![FollowerDemand {
+            axis_index: 3,
+            ratio,
+        }],
+    }];
+    let out = emit_shaped(
+        &planned,
+        &meta,
+        &e_follower_chains(k, &[None, None, None, None]),
+        &PerAxisHistory::empty(),
+        &[0.0],
+        0.0,
+        1.0,
+    )
+    .unwrap();
+
+    let track = &out[0].axes[3];
+    let t = 0.5;
+    let s_dot = accel * t;
+    let s_ddot = accel;
+    let expected_v = ratio * s_dot + k * ratio * s_ddot;
+    let d1 = nurbs::eval::derivative(track);
+    let got_v = nurbs::eval::eval(&d1, t);
+    assert!(
+        ((got_v - expected_v) / expected_v).abs() < 1e-3,
+        "PA-boosted follower velocity at mid-accel: got {got_v}, want {expected_v}"
+    );
+}
+
+#[test]
+fn follower_only_move_emits_planned_track() {
+    let length = 4.0;
+    let s_of_t = bezier_pieces_to_nurbs(&[BezierPiece {
+        u_start: 0.0,
+        u_end: 1.0,
+        coeffs: vec![0.0, 0.0, length, 0.0],
+    }]);
+    let const_axis = crate::beta::constant_cubic_nurbs(12.0, 0.0, 1.0);
+    let planned = vec![FittedSegment {
+        axes: [const_axis.clone(), const_axis.clone(), const_axis],
+        t_start: 0.0,
+        t_end: 1.0,
+        virtual_s_of_t: Some(s_of_t.clone()),
+    }];
+    let ratio = -1.0;
+    let start = 9.0;
+    let meta = vec![EmitSegmentMeta {
+        followers: vec![FollowerDemand {
+            axis_index: 3,
+            ratio,
+        }],
+    }];
+    let out = emit_shaped(
+        &planned,
+        &meta,
+        &e_follower_chains(0.0, &[None, None, None, None]),
+        &PerAxisHistory::empty(),
+        &[start],
+        0.0,
+        1.0,
+    )
+    .unwrap();
+
+    for ax in 0..3 {
+        assert!(
+            (nurbs::eval::eval(&out[0].axes[ax], 0.7) - 12.0).abs() < 1e-9,
+            "spatial axis {ax} must stay parked during a follower-only move"
+        );
+    }
+    let track = &out[0].axes[3];
+    for t in [0.0, 0.3, 0.6, 1.0] {
+        let want = start + ratio * nurbs::eval::eval(&s_of_t, t);
+        let got = nurbs::eval::eval(track, t);
+        assert!(
+            (got - want).abs() < 1e-4,
+            "follower-only track at t={t}: got {got}, want {want}"
         );
     }
 }

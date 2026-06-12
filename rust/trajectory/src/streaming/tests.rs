@@ -1131,6 +1131,7 @@ fn read_path_accel_at_matches_analytic() {
         axes: [x_nurbs, y_nurbs, z_nurbs],
         t_start: 0.0,
         t_end: 1.0,
+        virtual_s_of_t: None,
     }];
     let a = state.read_path_accel_at(0.5, f64::NAN);
     assert!(
@@ -1161,6 +1162,7 @@ fn read_path_accel_at_zero_speed_returns_fallback() {
         axes: [x_nurbs, y_nurbs, z_nurbs],
         t_start: 0.0,
         t_end: 1.0,
+        virtual_s_of_t: None,
     }];
 
     let a = state.read_path_accel_at(0.0, 0.0);

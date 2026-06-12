@@ -252,6 +252,10 @@ impl ShaperState {
                 ],
                 t_start: f.t_start + time_offset,
                 t_end: f.t_end + time_offset,
+                virtual_s_of_t: f
+                    .virtual_s_of_t
+                    .as_ref()
+                    .map(|s| shift_nurbs_in_time(s, time_offset)),
             })
             .collect();
 

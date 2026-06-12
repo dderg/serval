@@ -18,7 +18,7 @@ pub use plan_velocity::{
     plan_velocity, PlanInput, PlanOutput, PlanSegment, PlanShaper, PlanStats, SafetyMode,
 };
 pub use post_processor::{
-    CompiledChain, PostProcessorError, PostProcessorInstance, PostProcessorType,
+    AxisChainSet, CompiledChain, PostProcessorError, PostProcessorInstance, PostProcessorType,
 };
 pub use streaming::ReplanReport;
 

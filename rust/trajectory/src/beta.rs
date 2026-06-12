@@ -33,7 +33,9 @@ pub fn beta_loop_with_safety(
 
     let planned = plan_batch_full(input, safety_mode)?;
 
-    let kernel_array = build_kernel_array_from_shaper_config(&input.shaper);
+    let chain_set = crate::AxisChainSet::spatial_from_kernels(
+        &build_kernel_array_from_shaper_config(&input.shaper),
+    );
     let meta: Vec<EmitSegmentMeta> = collect_xy_meta(input);
     let batch_t_start = 0.0_f64;
     let batch_t_end = planned.global_ends.last().copied().unwrap_or(0.0);
@@ -41,8 +43,9 @@ pub fn beta_loop_with_safety(
     let emitted_xy = emit_shaped(
         &planned.fitted,
         &meta,
-        &kernel_array,
+        &chain_set,
         &PerAxisHistory::empty(),
+        &[],
         batch_t_start,
         batch_t_end,
     )?;
@@ -484,15 +487,17 @@ fn run_one_iteration(
     let batch_t_end = t_cursor;
     let batch_t_start = 0.0;
 
-    let kernel_array = build_kernel_array_from_axis_kernels(kernels);
+    let chain_set =
+        crate::AxisChainSet::spatial_from_kernels(&build_kernel_array_from_axis_kernels(kernels));
     let dummy_meta: Vec<EmitSegmentMeta> = (0..fitted.len())
         .map(|_| EmitSegmentMeta { followers: vec![] })
         .collect();
     let emitted = emit_shaped(
         &fitted,
         &dummy_meta,
-        &kernel_array,
+        &chain_set,
         &PerAxisHistory::empty(),
+        &[],
         batch_t_start,
         batch_t_end,
     )?;

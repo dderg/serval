@@ -9,6 +9,10 @@ pub struct FittedSegment {
     pub axes: [ScalarNurbs<f64>; 3],
     pub t_start: f64,
     pub t_end: f64,
+    /// Planned path progress `s(t)` for a follower-only (virtual-path)
+    /// segment. The spatial axes are zero-displacement constants; followers
+    /// pay out `start + ratio·s(t)` from this track instead of the odometer.
+    pub virtual_s_of_t: Option<ScalarNurbs<f64>>,
 }
 
 pub fn fit_and_split(
@@ -66,6 +70,7 @@ pub fn fit_and_split(
         axes,
         t_start,
         t_end,
+        virtual_s_of_t: None,
     })
 }
 
@@ -301,6 +306,7 @@ pub fn split_without_refit(
         axes,
         t_start,
         t_end,
+        virtual_s_of_t: None,
     })
 }
 

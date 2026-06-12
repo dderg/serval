@@ -102,6 +102,7 @@ fn derate_detects_exceeding_peaks() {
         ],
         t_start: 0.0,
         t_end: 1.0,
+        virtual_s_of_t: None,
     }];
     let machine = vec![[5000.0, 5000.0, 5000.0]];
     let peaks_within = vec![[4000.0, 3000.0, 2000.0]];

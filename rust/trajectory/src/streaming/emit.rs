@@ -133,14 +133,16 @@ impl ShaperState {
             freeze_end_velocities
         };
 
+        let chain_set = crate::AxisChainSet::spatial_from_kernels(ctx.kernels);
         let shaped = emit_shaped_with_left_bc(
             &self.planned_fitted,
             &self.planned_meta,
-            ctx.kernels,
+            &chain_set,
             &history,
+            &[],
             emit_start,
             batch_t_end,
-            left_bc,
+            &left_bc,
         )?;
 
         let new_pending_start = target;
@@ -295,11 +297,13 @@ impl ShaperState {
                 ],
             };
 
+            let chain_set = crate::AxisChainSet::spatial_from_kernels(ctx.kernels);
             let shaped = emit_shaped(
                 &self.planned_fitted,
                 &self.planned_meta,
-                ctx.kernels,
+                &chain_set,
                 &history,
+                &[],
                 emit_start,
                 self.t_appended,
             )?;

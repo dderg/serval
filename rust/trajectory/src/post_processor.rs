@@ -136,6 +136,55 @@ impl CompiledChain {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AxisChainSet {
+    /// Index = axis registry index; spatial 0..3 then followers.
+    pub chains: Vec<CompiledChain>,
+    /// `(follower_axis_index, followed_axis_indices)` — from the axis registry.
+    pub followers: Vec<(usize, Vec<usize>)>,
+}
+
+impl AxisChainSet {
+    #[must_use]
+    pub fn passthrough_spatial() -> Self {
+        Self {
+            chains: vec![CompiledChain::default(); 3],
+            followers: Vec::new(),
+        }
+    }
+
+    /// Legacy bridge: spatial-only chain set from the `[X, Y, Z, E]` kernel
+    /// array. The E slot must be empty — followers carry their own chains.
+    #[must_use]
+    pub fn spatial_from_kernels(kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4]) -> Self {
+        assert!(
+            kernels[3].is_none(),
+            "spatial_from_kernels: E-slot kernel must be None; follower chains \
+             are declared via AxisChainSet::followers"
+        );
+        Self {
+            chains: kernels[..3]
+                .iter()
+                .map(|k| CompiledChain {
+                    kernel: k.clone(),
+                    gain: 0.0,
+                })
+                .collect(),
+            followers: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn n_axes(&self) -> usize {
+        self.chains.len()
+    }
+
+    #[must_use]
+    pub fn is_follower_axis(&self, axis: usize) -> bool {
+        self.followers.iter().any(|(f, _)| *f == axis)
+    }
+}
+
 #[must_use]
 pub fn apply_derivative_gain(track: &ScalarNurbs<f64>, k: f64) -> ScalarNurbs<f64> {
     let pieces = nurbs::bezier::extract_bezier_pieces(track);
