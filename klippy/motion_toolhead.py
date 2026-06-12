@@ -206,8 +206,8 @@ class BridgeKinematics:
         self._check_endstops(move)
         z_ratio = move.move_d / abs(move.axes_d[2])
         move.limit_speed(
-            self._toolhead.max_z_velocity * z_ratio,
-            self._toolhead.max_z_accel * z_ratio,
+            self._toolhead._axis_limit("z", "max_velocity") * z_ratio,
+            self._toolhead._axis_limit("z", "max_accel") * z_ratio,
         )
 
     def set_position(self, newpos, homing_axes=()):
@@ -269,13 +269,6 @@ class MotionToolhead(ToolHead):
         # Bridge owns the timeline; silence upstream's flush machinery.
         self.reactor.update_timer(self.flush_timer, self.reactor.NEVER)
         self.do_kick_flush_timer = False
-
-        self.max_z_velocity = config.getfloat(
-            "max_z_velocity", self.max_velocity, above=0.0
-        )
-        self.max_z_accel = config.getfloat(
-            "max_z_accel", self.max_accel, above=0.0
-        )
 
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
@@ -348,7 +341,7 @@ class MotionToolhead(ToolHead):
         dx, dy, dz, de = move.axes_d
         feedrate = move.move_d / move.min_move_t
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
-            feedrate = min(feedrate, self.max_z_velocity)
+            feedrate = min(feedrate, self._axis_limit("z", "max_velocity"))
         logging.info(
             "[bridge-trace] move: newpos=%s speed=%s dx=%.4f dy=%.4f "
             "dz=%.4f de=%.4f feedrate=%.4f",
@@ -477,6 +470,69 @@ class MotionToolhead(ToolHead):
         lookahead_empty = print_time <= est_print_time
         return print_time, est_print_time, lookahead_empty
 
+    LEGACY_LIMIT_KEYS = (
+        "max_velocity",
+        "max_accel",
+        "max_accel_to_decel",
+        "minimum_cruise_ratio",
+        "square_corner_velocity",
+        "max_z_velocity",
+        "max_z_accel",
+    )
+
+    def _read_limits(self, config):
+        for key in self.LEGACY_LIMIT_KEYS:
+            if config.get(key, None) is not None:
+                raise config.error(
+                    "[printer] %s is not supported: declare motion limits in "
+                    "[limit <name>] sections (axes + max_velocity/max_accel/"
+                    "max_jerk)" % key
+                )
+        self.limit_sections = []
+        velocities, accels = [], []
+        for sc in config.get_prefix_sections("limit "):
+            name = sc.get_name().split(None, 1)[1]
+            axes = [a.strip().lower() for a in sc.getlist("axes")]
+            v = sc.getfloat("max_velocity", None, above=0.0)
+            a = sc.getfloat("max_accel", None, above=0.0)
+            j = sc.getfloat("max_jerk", None, above=0.0)
+            self.limit_sections.append((name, axes, v, a, j))
+            if v is not None:
+                velocities.append(v)
+            if a is not None:
+                accels.append(a)
+        if not self.limit_sections:
+            raise config.error(
+                "at least one [limit <name>] section is required "
+                "(every axis needs max_velocity and max_accel coverage)"
+            )
+        if not velocities or not accels:
+            raise config.error(
+                "[limit] sections must declare max_velocity and max_accel "
+                "coverage"
+            )
+        self.max_velocity = min(velocities)
+        self.max_accel = min(accels)
+        self.min_cruise_ratio = 0.0
+        self.square_corner_velocity = 0.0
+        self.orig_cfg = {}
+        self.runtime_velocity = None
+        self.runtime_accel = None
+
+    def _axis_limit(self, axis, kind):
+        kind_idx = {"max_velocity": 2, "max_accel": 3, "max_jerk": 4}[kind]
+        caps = [
+            section[kind_idx]
+            for section in self.limit_sections
+            if axis in section[1] and section[kind_idx] is not None
+        ]
+        if not caps:
+            raise self.printer.config_error(
+                "no [limit] section declares %s covering axis '%s'"
+                % (kind, axis)
+            )
+        return min(caps)
+
     def _sync_print_time(self):
         if self.mcu is None:
             return
@@ -495,19 +551,48 @@ class MotionToolhead(ToolHead):
 
     def set_accel(self, accel):
         if accel is not None and accel > 0.0:
-            self.max_accel = accel
-            self.bridge.update_limits(self.max_velocity, self.max_accel)
+            self.runtime_accel = accel
+            self.bridge.update_runtime_caps(
+                self.runtime_velocity, self.runtime_accel
+            )
 
     def reset_accel(self):
-        self.bridge.update_limits(self.max_velocity, self.max_accel)
+        self.runtime_accel = None
+        self.bridge.update_runtime_caps(
+            self.runtime_velocity, self.runtime_accel
+        )
 
     def cmd_SET_VELOCITY_LIMIT(self, gcmd):
-        super().cmd_SET_VELOCITY_LIMIT(gcmd)
-        self.bridge.update_limits(self.max_velocity, self.max_accel)
+        for unsupported in (
+            "SQUARE_CORNER_VELOCITY",
+            "MINIMUM_CRUISE_RATIO",
+            "ACCEL_TO_DECEL",
+        ):
+            if gcmd.get_float(unsupported, None) is not None:
+                raise gcmd.error(
+                    "%s is not supported: declare limits in [limit] config "
+                    "sections" % unsupported
+                )
+        v = gcmd.get_float("VELOCITY", None, above=0.0)
+        a = gcmd.get_float("ACCEL", None, above=0.0)
+        if v is None and a is None:
+            gcmd.respond_info(
+                "runtime caps: velocity=%s accel=%s"
+                % (self.runtime_velocity, self.runtime_accel)
+            )
+            return
+        if v is not None:
+            self.runtime_velocity = v
+        if a is not None:
+            self.runtime_accel = a
+        self.bridge.update_runtime_caps(
+            self.runtime_velocity, self.runtime_accel
+        )
 
     def cmd_RESET_VELOCITY_LIMIT(self, gcmd):
-        super().cmd_RESET_VELOCITY_LIMIT(gcmd)
-        self.bridge.update_limits(self.max_velocity, self.max_accel)
+        self.runtime_velocity = None
+        self.runtime_accel = None
+        self.bridge.update_runtime_caps(None, None)
 
     def stats(self, eventtime):
         max_queue_time = max(self.print_time, self._mcu_pending_end_time)
@@ -595,11 +680,7 @@ class MotionToolhead(ToolHead):
 
         try:
             self.bridge.init_planner(
-                self.max_velocity,
-                self.max_accel,
-                self.max_z_velocity,
-                self.max_z_accel,
-                self.square_corner_velocity,
+                list(self.limit_sections),
                 shaper_type_x,
                 shaper_freq_x,
                 shaper_type_y,
