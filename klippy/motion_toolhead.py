@@ -836,7 +836,12 @@ class MotionToolhead:
                 "<PARAM>=<VALUE>" % name
             )
         for key, value in params.items():
-            self.bridge.update_post_processor(name, key.lower(), float(value))
+            try:
+                self.bridge.update_post_processor(
+                    name, key.lower(), float(value)
+                )
+            except (ValueError, RuntimeError) as e:
+                raise gcmd.error(str(e))
 
     cmd_RESET_VELOCITY_LIMIT_help = "Reset printer velocity limits"
 

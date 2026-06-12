@@ -215,8 +215,8 @@ fn beta_iterate_inner(
 
                     let ratio = machine / peak;
                     let floor = machine * BETA_ACCEL_MIN_RATIO;
-                    planning_a_max[seg_flat_idx][axis] = (planning_a_max[seg_flat_idx][axis]
-                        * ratio)
+                    let binding_cap = planning_a_max[seg_flat_idx][axis].min(peak);
+                    planning_a_max[seg_flat_idx][axis] = (binding_cap * ratio)
                         .min(planning_a_max[seg_flat_idx][axis])
                         .max(floor);
                 }

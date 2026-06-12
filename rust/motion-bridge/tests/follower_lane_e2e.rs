@@ -237,3 +237,88 @@ fn follower_history_mid_move_is_between_endpoints_and_monotone() {
         prev = st.position;
     }
 }
+
+fn z_segment_10mm() -> geometry::segment::CubicSegment {
+    use geometry::segment::SourceRange;
+    use nurbs::VectorNurbs;
+    let lerp = |t: f64| [0.0, 0.0, 10.0 * t];
+    let cps = vec![lerp(0.0), lerp(1.0 / 3.0), lerp(2.0 / 3.0), lerp(1.0)];
+    let xyz = VectorNurbs::<f64, 3>::try_new(3, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], cps)
+        .unwrap();
+    geometry::segment::CubicSegment::try_new(
+        xyz,
+        vec![],
+        15.0,
+        SourceRange {
+            start_line: 0,
+            end_line: 0,
+        },
+        None,
+    )
+    .unwrap()
+}
+
+fn probe_report(cfg: &PlannerConfig) -> trajectory::streaming::ReplanReport {
+    let chains = cfg.post_processors.compile(&cfg.axis_registry).unwrap();
+    let ctx = trajectory::streaming::ReplanContext {
+        limits: cfg.to_temporal_limits().unwrap(),
+        chains: chains.clone(),
+        fit_tolerance_mm: cfg.fit_tolerance_mm,
+        beta_max_iters: cfg.beta_max_iters,
+        beta_convergence_ratio: cfg.beta_convergence_ratio,
+        worker_threads: 1,
+        grid_strategy: temporal::multi::GridStrategy::Adaptive {
+            min_n: 20,
+            max_n: 200,
+            target_grid_spacing_mm: 0.5,
+        },
+        fallback_initial_v: 0.0,
+        safety_mode: trajectory::plan_velocity::SafetyMode::WorstCaseFuture,
+    };
+    let home = vec![0.0; chains.n_axes()];
+    let mut state = trajectory::streaming::ShaperState::new(&home, &chains);
+    state.append_and_replan(z_segment_10mm(), &ctx).unwrap()
+}
+
+#[test]
+fn probe_neptune_exact_limits() {
+    let mut cfg = follower_config(false, 0.0);
+    cfg.fit_tolerance_mm = 0.005;
+    cfg.limit_sections = vec![
+        LimitSection {
+            name: "gantry".into(),
+            axes: vec![0, 1],
+            max_velocity: Some(800.0),
+            max_accel: Some(30000.0),
+            max_jerk: None,
+        },
+        LimitSection {
+            name: "y".into(),
+            axes: vec![1],
+            max_velocity: Some(50.0),
+            max_accel: Some(4000.0),
+            max_jerk: None,
+        },
+        LimitSection {
+            name: "z".into(),
+            axes: vec![2],
+            max_velocity: Some(25.0),
+            max_accel: Some(100.0),
+            max_jerk: None,
+        },
+        LimitSection {
+            name: "extruder".into(),
+            axes: vec![3],
+            max_velocity: Some(75.0),
+            max_accel: Some(1500.0),
+            max_jerk: None,
+        },
+    ];
+    let r = probe_report(&cfg);
+    assert!(
+        r.plan.beta_converged,
+        "neptune-limit z lift must converge (got {} iterations)",
+        r.plan.beta_iterations
+    );
+    assert!(r.plan.beta_iterations <= 4);
+}

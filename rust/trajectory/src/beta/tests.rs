@@ -169,3 +169,66 @@ fn effective_machine_a_max_worst_case_empty_is_empty() {
     let effective = effective_machine_a_max(&machine, SafetyMode::WorstCaseFuture);
     assert!(effective.is_empty());
 }
+
+#[test]
+fn jerk_limited_z_move_converges_under_worst_case_derate() {
+    let curve = straight_linear([0.0, 0.0, 0.0], [0.0, 0.0, 10.0]);
+    let sets = vec![
+        temporal::LimitSet {
+            axes: temporal::AxisSet::from_indices(&[0, 1]),
+            v_max: 800.0,
+            a_max: 30_000.0,
+            j_max: 60_000.0,
+        },
+        temporal::LimitSet {
+            axes: temporal::AxisSet::from_indices(&[2]),
+            v_max: 25.0,
+            a_max: 100.0,
+            j_max: 200.0,
+        },
+    ];
+    let limits = temporal::Limits::try_new(&sets, 3).unwrap();
+    let segments = [ShapeSegmentInput {
+        temporal: temporal::multi::SegmentInput {
+            curve: &curve,
+            limits,
+            followers: &[],
+            virtual_path: None,
+        },
+        followers: &[],
+        feedrate_mm_s: 15.0,
+    }];
+    let chains = AxisChainSet::passthrough_spatial();
+    let input = ShapeBatchInput {
+        follower_history: None,
+        segments: &segments,
+        grid_strategy: temporal::multi::GridStrategy::Adaptive {
+            min_n: 20,
+            max_n: 200,
+            target_grid_spacing_mm: 0.5,
+        },
+        worker_threads: 1,
+        chains: &chains,
+        follower_start: &[],
+        fit_tolerance_mm: 0.005,
+        beta_max_iters: 10,
+        beta_convergence_ratio: 1.02,
+        initial_v: 0.0,
+        initial_a: 0.0,
+        terminal_v: 0.0,
+        start_d2_override: None,
+    };
+
+    let output =
+        plan_velocity_inner(&input, SafetyMode::WorstCaseFuture).expect("plan should succeed");
+    assert!(
+        output.stats.beta_converged,
+        "jerk-limited z move must converge (got {} iterations)",
+        output.stats.beta_iterations
+    );
+    assert!(
+        output.stats.beta_iterations <= 4,
+        "convergence must take a few derate steps, not the full budget (got {})",
+        output.stats.beta_iterations
+    );
+}

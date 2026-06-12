@@ -112,3 +112,63 @@ def test_happy_path_parses_sections_for_init_planner():
     assert ("pa", "linear_pressure_advance", [("k", 0.04)]) in (
         th.post_processor_sections
     )
+
+
+class CommandError(Exception):
+    pass
+
+
+class StubGcmd:
+    error = CommandError
+
+    def __init__(self, params):
+        self.params = params
+
+    def get(self, key):
+        return self.params[key]
+
+    def get_command_parameters(self):
+        return dict(self.params)
+
+
+class RaisingBridge:
+    def update_post_processor(self, name, key, value):
+        raise ValueError("unknown post_processor '%s'" % name)
+
+
+def test_set_post_processor_bridge_error_becomes_command_error():
+    th = make_toolhead()
+    th.bridge = RaisingBridge()
+    gcmd = StubGcmd({"NAME": "ghost", "K": "0.1"})
+    with pytest.raises(CommandError, match="ghost"):
+        th.cmd_SET_POST_PROCESSOR(gcmd)
+
+
+class CommandError(Exception):
+    pass
+
+
+class StubGcmd:
+    error = CommandError
+
+    def __init__(self, params):
+        self.params = params
+
+    def get(self, key):
+        return self.params[key]
+
+    def get_command_parameters(self):
+        return dict(self.params)
+
+
+class RaisingBridge:
+    def update_post_processor(self, name, key, value):
+        raise ValueError("unknown post_processor '%s'" % name)
+
+
+def test_set_post_processor_bridge_error_becomes_command_error():
+    th = make_toolhead()
+    th.bridge = RaisingBridge()
+    gcmd = StubGcmd({"NAME": "ghost", "K": "0.1"})
+    with pytest.raises(CommandError, match="ghost"):
+        th.cmd_SET_POST_PROCESSOR(gcmd)
