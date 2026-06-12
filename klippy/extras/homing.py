@@ -124,6 +124,7 @@ class Homing:
         self.printer = config.get_printer()
         self._config = config
         self._axes = None
+        self._homing_axes = []
 
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command("G28", self.cmd_G28, desc="Home")
@@ -233,6 +234,9 @@ class Homing:
             gcmd, toolhead, bridge, kin, axis, entry, speed, max_travel
         )
 
+    def get_axes(self):
+        return self._homing_axes
+
     def _home_axis(
         self,
         gcmd,
@@ -316,6 +320,8 @@ class Homing:
                 toolhead.move(retractpos, hi.retract_speed)
                 toolhead.wait_moves()
             _check_servo_drive_fault(gcmd, bridge, axis, servo_handle)
+            self._homing_axes = [axis]
+            self.printer.send_event("homing:home_rails_end", self, [rail])
         except BaseException:
             try:
                 self._set_homing_current(toolhead, rail, pre_homing=False)
