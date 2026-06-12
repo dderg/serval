@@ -6,6 +6,7 @@ mod pad;
 mod parallel;
 pub mod peak;
 pub mod plan_velocity;
+pub mod post_processor;
 mod reparam;
 mod shaper;
 mod smooth_fit;
@@ -14,6 +15,9 @@ pub mod streaming;
 pub use emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory};
 pub use plan_velocity::{
     plan_velocity, PlanInput, PlanOutput, PlanSegment, PlanShaper, PlanStats, SafetyMode,
+};
+pub use post_processor::{
+    CompiledChain, PostProcessorError, PostProcessorInstance, PostProcessorType,
 };
 pub use streaming::ReplanReport;
 
