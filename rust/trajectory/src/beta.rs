@@ -351,6 +351,7 @@ fn run_one_iteration(
 
     let batch_input = temporal::multi::BatchInput {
         segments: &run_segments,
+        shaping: None,
         grid_strategy: input.grid_strategy,
         worker_threads: input.worker_threads,
         initial_velocity: input.initial_v,

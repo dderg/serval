@@ -271,3 +271,261 @@ fn verify_tags_pa_rows() {
     });
     assert!(tagged, "no sample tagged PaVelocity");
 }
+
+use crate::topp::window::eval_kernel;
+use nurbs::algebra::PiecewisePolynomialKernel;
+
+fn bell_kernel(frequency_hz: f64) -> PiecewisePolynomialKernel<f64> {
+    let t_sm = 0.8025 / frequency_hz;
+    let h = t_sm / 2.0;
+    let c = 15.0 / (16.0 * h.powi(5));
+    PiecewisePolynomialKernel::single_poly_from_absolute(
+        vec![c * h.powi(4), 0.0, -2.0 * c * h * h, 0.0, c],
+        (-h, h),
+    )
+}
+
+fn solve_folded(
+    limits: &Limits,
+    followers: &[FollowerDemand],
+    kernels: [Option<PiecewisePolynomialKernel<f64>>; 3],
+    history: Option<crate::FollowerHistory>,
+) -> crate::TopProfile {
+    let curve = line([0.0; 3], [100.0, 0.0, 0.0]);
+    let arc = crate::topp::path::sample_arclength_grid(&curve, 401).unwrap();
+    let mut chain = crate::topp::chain::ChainGrid::try_from_segment_grids_with_followers(
+        vec![arc],
+        vec![*limits],
+        vec![followers.to_vec()],
+        &[false],
+    )
+    .unwrap();
+    chain.axis_kernels = kernels;
+    chain.follower_history = history;
+    crate::topp::schedule_chain_with_tolerance(
+        &chain,
+        crate::topp::EndpointConditions {
+            v_start: 0.0,
+            v_end: 0.0,
+            a_start: None,
+        },
+        ToleranceMode::Tight,
+    )
+    .unwrap()
+}
+
+fn solve_identity_dense(limits: &Limits, followers: &[FollowerDemand]) -> crate::TopProfile {
+    let curve = line([0.0; 3], [100.0, 0.0, 0.0]);
+    schedule_segment_with_followers(
+        &curve,
+        limits,
+        &GridConfig {
+            scheme: GridScheme::UniformArclength,
+            n: 401,
+        },
+        0.0,
+        0.0,
+        ToleranceMode::Tight,
+        followers,
+    )
+    .unwrap()
+}
+
+#[test]
+fn passthrough_kernels_reproduce_identity_rows() {
+    let limits = limits_with_follower(50.0, 1.0e9, 1.0e12);
+    let demand = [FollowerDemand {
+        axis: 3,
+        ratio: 0.5,
+        pa_k: 0.0,
+    }];
+    let folded = solve_folded(&limits, &demand, [None, None, None], None);
+    let identity = solve_identity_dense(&limits, &demand);
+    assert!((folded.total_time - identity.total_time).abs() < 1e-9);
+}
+
+#[test]
+fn folded_rows_recover_speed_at_a_smoothed_start() {
+    let limits = limits_with_follower(50.0, 1.0e9, 1.0e12);
+    let demand = [FollowerDemand {
+        axis: 3,
+        ratio: 0.5,
+        pa_k: 0.0,
+    }];
+    let folded = solve_folded(
+        &limits,
+        &demand,
+        [Some(bell_kernel(40.0)), None, None],
+        None,
+    );
+    let identity = solve_identity_dense(&limits, &demand);
+    assert!(
+        folded.total_time < identity.total_time - 1e-4,
+        "folded {} should beat identity {} (shaped speed lags during ramp)",
+        folded.total_time,
+        identity.total_time
+    );
+}
+
+fn brute_force_shaped_demand_check(
+    profile: &crate::TopProfile,
+    kernel: &PiecewisePolynomialKernel<f64>,
+    ratio: f64,
+    v_max: f64,
+    history_v: f64,
+) {
+    let n = profile.samples.len();
+    let mut t = vec![0.0];
+    for w in profile.samples.windows(2) {
+        let v_avg = (w[0].v + w[1].v).max(1e-9);
+        t.push(t.last().unwrap() + 2.0 * (w[1].s - w[0].s) / v_avg);
+    }
+    let total = *t.last().unwrap();
+    let v_at = |tau: f64| -> f64 {
+        if tau < 0.0 {
+            return history_v;
+        }
+        if tau >= total {
+            return profile.samples[n - 1].v;
+        }
+        let j = t.partition_point(|&tj| tj <= tau).min(n - 1);
+        let (t0, t1) = (t[j - 1], t[j]);
+        let (v0, v1) = (profile.samples[j - 1].v, profile.samples[j].v);
+        v0 + (v1 - v0) * (tau - t0) / (t1 - t0).max(1e-12)
+    };
+    let (k_lo, k_hi) = kernel.support();
+    let dt = 1e-3;
+    let mut tau = 0.0;
+    while tau <= total {
+        let mut shaped = 0.0;
+        let mut z = k_lo;
+        while z <= k_hi {
+            shaped += eval_kernel(kernel, z) * v_at(tau - z) * dt;
+            z += dt;
+        }
+        let demand = ratio * shaped.abs();
+        assert!(
+            demand <= v_max * (1.0 + 5e-2),
+            "t={tau:.4}: shaped demand {demand} > {v_max}"
+        );
+        tau += 5e-3;
+    }
+}
+
+#[test]
+fn folded_demand_holds_against_brute_force_convolution() {
+    let limits = limits_with_follower(50.0, 1.0e9, 1.0e12);
+    let kernel = bell_kernel(40.0);
+    let folded = solve_folded(
+        &limits,
+        &[FollowerDemand {
+            axis: 3,
+            ratio: 0.5,
+            pa_k: 0.0,
+        }],
+        [Some(kernel.clone()), None, None],
+        None,
+    );
+    brute_force_shaped_demand_check(&folded, &kernel, 0.5, 50.0, 0.0);
+}
+
+#[test]
+fn nonzero_history_constrains_the_chain_start() {
+    let limits = limits_with_follower(50.0, 1.0e9, 1.0e12);
+    let kernel = bell_kernel(40.0);
+    let half = kernel.support().1;
+    let history = crate::FollowerHistory {
+        dt: half / 32.0,
+        axis_velocity: [vec![100.0; 32], Vec::new(), Vec::new()],
+    };
+    let folded = solve_folded(
+        &limits,
+        &[FollowerDemand {
+            axis: 3,
+            ratio: 0.5,
+            pa_k: 0.0,
+        }],
+        [Some(kernel.clone()), None, None],
+        Some(history),
+    );
+    brute_force_shaped_demand_check(&folded, &kernel, 0.5, 50.0, 100.0);
+}
+
+#[test]
+fn refreeze_divergence_fails_loudly() {
+    let limits = limits_with_follower(50.0, 1.0e9, 1.0e12);
+    let curve = line([0.0; 3], [100.0, 0.0, 0.0]);
+    let arc = crate::topp::path::sample_arclength_grid(&curve, 401).unwrap();
+    let mut chain = crate::topp::chain::ChainGrid::try_from_segment_grids_with_followers(
+        vec![arc],
+        vec![limits],
+        vec![vec![FollowerDemand {
+            axis: 3,
+            ratio: 0.5,
+            pa_k: 0.0,
+        }]],
+        &[false],
+    )
+    .unwrap();
+    chain.axis_kernels = [Some(bell_kernel(40.0)), None, None];
+    let err = crate::topp::schedule_chain_with_refreeze_cap(
+        &chain,
+        crate::topp::EndpointConditions {
+            v_start: 0.0,
+            v_end: 0.0,
+            a_start: None,
+        },
+        ToleranceMode::Tight,
+        1,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::topp::ScheduleError::FollowerSlpDiverged { refreezes: 1, .. }
+    ));
+}
+
+#[test]
+fn batch_tail_exchange_holds_shaped_demand_across_a_stop() {
+    use crate::multi::{BatchInput, BatchShaping, GridStrategy, SegmentInput, plan_batch};
+    let limits = limits_with_follower(50.0, 1.0e9, 1.0e12);
+    let demand = [FollowerDemand {
+        axis: 3,
+        ratio: 0.5,
+        pa_k: 0.0,
+    }];
+    let a = line([0.0; 3], [50.0, 0.0, 0.0]);
+    let b = line([50.0, 0.0, 0.0], [50.0, 50.0, 0.0]);
+    let segments = [
+        SegmentInput {
+            curve: &a,
+            limits,
+            followers: &demand,
+        },
+        SegmentInput {
+            curve: &b,
+            limits,
+            followers: &demand,
+        },
+    ];
+    let shaping = BatchShaping {
+        axis_kernels: [Some(bell_kernel(40.0)), Some(bell_kernel(40.0)), None],
+        follower_history: None,
+    };
+    let out = plan_batch(BatchInput {
+        segments: &segments,
+        shaping: Some(&shaping),
+        grid_strategy: GridStrategy::Fixed(201),
+        worker_threads: 1,
+        initial_velocity: 0.0,
+        initial_accel: 0.0,
+        terminal_velocity: 0.0,
+    })
+    .unwrap();
+    assert_eq!(out.profiles.len(), 2);
+    for profile in &out.profiles {
+        let peak = profile.samples.iter().map(|s| s.v).fold(0.0, f64::max);
+        assert!(peak > 50.0, "chains should still move briskly, got {peak}");
+    }
+    brute_force_shaped_demand_check(&out.profiles[0], &bell_kernel(40.0), 0.5, 50.0, 0.0);
+}

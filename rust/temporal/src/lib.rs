@@ -23,6 +23,12 @@ pub struct FollowerDemand {
     pub pa_k: f64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct FollowerHistory {
+    pub dt: f64,
+    pub axis_velocity: [Vec<f64>; 3],
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct GridConfig {
     pub scheme: GridScheme,

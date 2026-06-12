@@ -83,6 +83,18 @@ impl WindowOperator {
         t_map: &[f64],
         history: &WindowHistory,
     ) -> Self {
+        Self::from_kernel_with_terminal(kernel, t_map, history, &WindowHistory::empty())
+    }
+
+    /// `terminal` holds post-chain signal samples; sample `m` sits at
+    /// `t_end + (m + 0.5) * dt`. Kernel mass beyond the supplied samples
+    /// falls back to holding the final chain sample.
+    pub fn from_kernel_with_terminal(
+        kernel: &PiecewisePolynomialKernel<f64>,
+        t_map: &[f64],
+        history: &WindowHistory,
+        terminal: &WindowHistory,
+    ) -> Self {
         let n = t_map.len();
         assert!(n >= 2, "window operator needs at least two samples");
         let (k_lo, k_hi) = kernel.support();
@@ -114,6 +126,17 @@ impl WindowOperator {
                         }
                     }
                 }
+                if terminal.dt > 0.0 {
+                    let t_end = t_map[n - 1];
+                    for (m, &sample) in terminal.samples.iter().enumerate() {
+                        let tau = t_end + (m as f64 + 0.5) * terminal.dt;
+                        let k = eval_kernel(kernel, ti - tau);
+                        if k != 0.0 {
+                            history_value += k * terminal.dt * sample;
+                            mass += k * terminal.dt;
+                        }
+                    }
+                }
                 let leftover = 1.0 - mass;
                 if leftover > 0.0 && ti + k_hi > t_map[n - 1] {
                     let last = weights
@@ -125,10 +148,15 @@ impl WindowOperator {
                         Some(w) => *w += leftover,
                         None => weights.push((n - 1, leftover)),
                     }
+                    mass = 1.0;
+                }
+                assert!(mass > 0.0, "window row {i}: zero kernel mass");
+                for (_, w) in &mut weights {
+                    *w /= mass;
                 }
                 WindowRow {
                     weights,
-                    history: history_value,
+                    history: history_value / mass,
                 }
             })
             .collect();

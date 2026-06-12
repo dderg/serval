@@ -23,6 +23,9 @@ pub struct SegmentInput<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct BatchInput<'a> {
     pub segments: &'a [SegmentInput<'a>],
+    /// Input-shaper kernels + pre-batch follower history; `None` = no shaper
+    /// folding anywhere in the batch.
+    pub shaping: Option<&'a BatchShaping>,
     pub grid_strategy: GridStrategy,
     pub worker_threads: usize,
     pub initial_velocity: f64,
@@ -30,6 +33,12 @@ pub struct BatchInput<'a> {
     /// at a rest start it MUST be 0.0 (asserted) and the rest envelope governs.
     pub initial_accel: f64,
     pub terminal_velocity: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BatchShaping {
+    pub axis_kernels: [Option<nurbs::algebra::PiecewisePolynomialKernel<f64>>; 3],
+    pub follower_history: Option<crate::FollowerHistory>,
 }
 
 #[derive(Debug)]
@@ -64,6 +73,15 @@ pub enum BatchError {
     Segment(usize, crate::topp::ScheduleError),
     #[error("invalid follower demand: {0}")]
     InvalidFollowerDemand(String),
+    #[error(
+        "follower tail exchange did not settle after {passes} passes \
+         (chain {chain} total time still moving {rel_change:.4})"
+    )]
+    TailExchangeDiverged {
+        passes: u32,
+        chain: usize,
+        rel_change: f64,
+    },
 }
 
 pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
@@ -143,6 +161,16 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let mut chain_grids = chain_grids;
+    if let Some(shaping) = input.shaping {
+        for (c, cg) in chain_grids.iter_mut().enumerate() {
+            cg.axis_kernels = shaping.axis_kernels.clone();
+            if c == 0 {
+                cg.follower_history = shaping.follower_history.clone();
+            }
+        }
+    }
+
     let mut states: Vec<joining::ChainState> = chain_ranges
         .iter()
         .enumerate()
@@ -178,6 +206,8 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
         &corner_caps,
         input.worker_threads,
     )?;
+
+    joining::exchange_follower_tails(&mut chain_grids, &mut states, input.worker_threads)?;
 
     // Slice each chain profile into per-segment profiles and flatten.
     let profiles: Vec<TopProfile> = states

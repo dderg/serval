@@ -94,6 +94,7 @@ fn rung3_micro_arc_0_01mm_via_adaptive_batch() {
     }];
     let output = plan_batch(BatchInput {
         segments: &segments,
+        shaping: None,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,
             max_n: 200,

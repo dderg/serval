@@ -25,6 +25,7 @@ fn plan_batch_single_segment_works() {
     };
     let input = BatchInput {
         segments: &[segment],
+        shaping: None,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 10,
             max_n: 200,
@@ -83,6 +84,7 @@ fn smooth_junction_has_no_accel_impulse() {
     ];
     let out = plan_batch(BatchInput {
         segments: &segs,
+        shaping: None,
         grid_strategy: GridStrategy::Fixed(32),
         worker_threads: 1,
         initial_velocity: 0.0,
@@ -138,6 +140,7 @@ fn plan_batch_threads_nonzero_initial_velocity() {
     };
     let input = BatchInput {
         segments: &[segment],
+        shaping: None,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,
             max_n: 200,

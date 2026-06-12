@@ -197,6 +197,14 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         };
     }
 
+    let windows = if chain.has_active_windows() {
+        Some(crate::topp::follower::build_follower_windows(
+            chain, &result.b,
+        ))
+    } else {
+        None
+    };
+
     let mut binding_per_grid: Vec<BindingConstraint> = Vec::with_capacity(n);
     let mut point_worst_ratio: Vec<f64> = Vec::with_capacity(n);
     let mut global_worst_ratio: f64 = f64::NEG_INFINITY;
@@ -233,9 +241,27 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             s_dddot,
             s_ddddot,
             limits: chain.limits_at(i),
-            followers: chain.followers_at(i),
+            followers: if windows.is_some() {
+                &[]
+            } else {
+                chain.followers_at(i)
+            },
         });
 
+        let mut pr = pr;
+        if let Some(w) = &windows {
+            for d in crate::topp::follower::windowed_demands_at(w, chain, &result.b, &result.a, i) {
+                let ratio = d.value / d.cap;
+                if ratio > pr.max_jerk {
+                    pr.max_jerk = ratio;
+                }
+                if ratio > pr.worst_ratio {
+                    pr.worst_ratio = ratio;
+                    pr.worst_tag = windowed_tag(&d);
+                }
+            }
+        }
+        let pr = pr;
         let final_tag = if (i == 0 || i == n - 1) && b_i.abs() < BOUNDARY_B_TOL {
             BindingConstraint::Boundary
         } else {
@@ -314,6 +340,18 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         feasible,
         worst_jerk_ratio,
         worst_non_jerk_ratio,
+    }
+}
+
+fn windowed_tag(d: &crate::topp::follower::WindowedDemand) -> BindingConstraint {
+    use crate::topp::follower::PaFamily;
+    match (d.family, d.pa) {
+        (PaFamily::Velocity, false) => BindingConstraint::Velocity { set: d.set },
+        (PaFamily::Accel, false) => BindingConstraint::AccelNorm { set: d.set },
+        (PaFamily::Jerk, false) => BindingConstraint::JerkNorm { set: d.set },
+        (PaFamily::Velocity, true) => BindingConstraint::PaVelocity { set: d.set },
+        (PaFamily::Accel, true) => BindingConstraint::PaAccel { set: d.set },
+        (PaFamily::Jerk, true) => BindingConstraint::PaJerk { set: d.set },
     }
 }
 

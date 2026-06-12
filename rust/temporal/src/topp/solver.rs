@@ -52,7 +52,7 @@ use clarabel::solver::{
 use crate::topp::constraints::{Cone, ConstraintBundle};
 use crate::topp::scaling::SolverScale;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum SlpCut {
     /// Weight-based path-jerk cut. Rows scaled by `h̄²` to stay O(1).
     PathJerkWeights {
@@ -65,6 +65,7 @@ pub(crate) enum SlpCut {
     },
     AxisJerk(AxisJerkCut),
     Follower(crate::topp::follower::FollowerCut),
+    FollowerWindowed(crate::topp::follower::WindowedCut),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -369,7 +370,13 @@ fn solve_with_cuts_and_trust_region(
     let n_grid = bundle.n_grid;
 
     let mut cones_clarabel = map_clarabel_cones(bundle)?;
-    let cut_rows = 2 * cuts.len();
+    let cut_rows: usize = cuts
+        .iter()
+        .map(|c| match c {
+            SlpCut::FollowerWindowed(_) => 1,
+            _ => 2,
+        })
+        .sum();
     if cut_rows > 0 {
         cones_clarabel.push(NonnegativeConeT(cut_rows));
     }
@@ -453,6 +460,14 @@ fn solve_with_cuts_and_trust_region(
                     b_rhs.push(if sign > 0.0 { fc.rhs_pos } else { fc.rhs_neg });
                     n_rows += 1;
                 }
+            }
+            SlpCut::FollowerWindowed(wc) => {
+                let row = n_rows;
+                for &(col, g) in &wc.entries {
+                    push_nz(&mut rowval_per_col, &mut nzval_per_col, col, row, g);
+                }
+                b_rhs.push(wc.rhs);
+                n_rows += 1;
             }
         }
     }
@@ -717,6 +732,7 @@ pub(crate) fn find_jerk_violators_chain(
 pub(crate) fn max_axis_ratio_chain(
     result: &SolverResult,
     chain: &crate::topp::chain::ChainGrid,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
 ) -> f64 {
     let n = result.b.len();
     debug_assert_eq!(chain.s.len(), n);
@@ -758,9 +774,14 @@ pub(crate) fn max_axis_ratio_chain(
             }
         }
     }
-    worst.max(crate::topp::follower::max_pa_ratio(
-        &result.b, &result.a, chain,
-    ))
+    match windows {
+        Some(w) => worst.max(crate::topp::follower::max_windowed_ratio(
+            w, chain, &result.b, &result.a,
+        )),
+        None => worst.max(crate::topp::follower::max_pa_ratio(
+            &result.b, &result.a, chain,
+        )),
+    }
 }
 
 fn jerk_vector(
@@ -802,7 +823,7 @@ fn set_jerk_projection(
 
 const SLP9_MAX_OUTER_ITERS: u32 = 30;
 const SLP9_WARN_AT_ITER: u32 = 15;
-const SLP9_EPS_FEAS: f64 = 5e-2;
+pub(crate) const SLP9_EPS_FEAS: f64 = 5e-2;
 const SLP9_RHO_B_INIT: f64 = 0.10;
 const SLP9_RHO_A_INIT: f64 = 0.25;
 const SLP9_RHO_B_MIN: f64 = 0.005;
@@ -1038,9 +1059,11 @@ enum Slp9LoopOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_slp9_loop(
     bundle: &ConstraintBundle,
     chain: &crate::topp::chain::ChainGrid,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
     start: SolverResult,
     tol: f64,
     scale: &SolverScale,
@@ -1053,7 +1076,7 @@ fn run_slp9_loop(
 ) -> Result<Slp9LoopOutcome, SolverSetupError> {
     let mut last_result = start.clone();
     let mut best_result = start;
-    let mut best_ratio = max_axis_ratio_chain(&last_result, chain);
+    let mut best_ratio = max_axis_ratio_chain(&last_result, chain, windows);
     let mut rho_b = rho_b_init;
     let mut rho_a = rho_a_init;
     let mut accepted_total: u32 = 0;
@@ -1070,20 +1093,37 @@ fn run_slp9_loop(
         let target_floor = (1.0 + SLP9_EPS_FEAS) * (1.0 - SLP9_TARGET_MARGIN);
         let target_ratio = (best_ratio * SLP9_TARGET_DECAY).max(target_floor);
         let mut cuts = build_axis_jerk_cuts_chain(&last_result, chain, target_ratio);
-        cuts.extend(
-            crate::topp::follower::build_follower_pa_cuts(
-                &last_result.b,
-                &last_result.a,
-                chain,
-                target_ratio,
-                SLP9_EPS_FEAS,
-                SLP9_CUT_PLACEMENT_FRACTION,
-                SLP9_TARGET_DECAY,
-                scale.to_scaled_b(SLP_B_FLOOR),
-            )
-            .into_iter()
-            .map(SlpCut::Follower),
-        );
+        match windows {
+            Some(w) => cuts.extend(
+                crate::topp::follower::build_windowed_follower_cuts(
+                    &last_result.b,
+                    &last_result.a,
+                    chain,
+                    w,
+                    target_ratio,
+                    SLP9_EPS_FEAS,
+                    SLP9_CUT_PLACEMENT_FRACTION,
+                    SLP9_TARGET_DECAY,
+                    scale.to_scaled_b(SLP_B_FLOOR),
+                )
+                .into_iter()
+                .map(SlpCut::FollowerWindowed),
+            ),
+            None => cuts.extend(
+                crate::topp::follower::build_follower_pa_cuts(
+                    &last_result.b,
+                    &last_result.a,
+                    chain,
+                    target_ratio,
+                    SLP9_EPS_FEAS,
+                    SLP9_CUT_PLACEMENT_FRACTION,
+                    SLP9_TARGET_DECAY,
+                    scale.to_scaled_b(SLP_B_FLOOR),
+                )
+                .into_iter()
+                .map(SlpCut::Follower),
+            ),
+        }
         if cuts.is_empty() {
             return Ok(Slp9LoopOutcome::Done(
                 last_result,
@@ -1115,7 +1155,7 @@ fn run_slp9_loop(
             ) {
                 continue;
             }
-            let cand_ratio = max_axis_ratio_chain(&candidate, chain);
+            let cand_ratio = max_axis_ratio_chain(&candidate, chain, windows);
             if cand_ratio < best_ratio {
                 accepted = Some(candidate);
                 best_ratio = cand_ratio;
@@ -1128,7 +1168,7 @@ fn run_slp9_loop(
                 candidate.status,
                 SolverStatus::Infeasible | SolverStatus::MaxIter { .. }
             ) {
-                let cand_ratio = max_axis_ratio_chain(&candidate, chain);
+                let cand_ratio = max_axis_ratio_chain(&candidate, chain, windows);
                 if cand_ratio < best_ratio {
                     accepted = Some(candidate);
                     best_ratio = cand_ratio;
@@ -1189,19 +1229,20 @@ fn damp_profile_uniform(result: &SolverResult, lambda: f64) -> SolverResult {
 fn uniform_damp_for_feasibility(
     result: &SolverResult,
     chain: &crate::topp::chain::ChainGrid,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
     current_ratio: f64,
 ) -> (SolverResult, f64) {
     let mut lambda = (SLP9_DAMP_TARGET_RATIO / current_ratio).cbrt().min(1.0);
     for _ in 0..32 {
         let damped = damp_profile_uniform(result, lambda);
-        let ratio = max_axis_ratio_chain(&damped, chain);
+        let ratio = max_axis_ratio_chain(&damped, chain, windows);
         if ratio <= SLP9_DAMP_TARGET_RATIO {
             return (damped, ratio);
         }
         lambda *= 0.75;
     }
     let damped = damp_profile_uniform(result, lambda);
-    let ratio = max_axis_ratio_chain(&damped, chain);
+    let ratio = max_axis_ratio_chain(&damped, chain, windows);
     (damped, ratio)
 }
 
@@ -1229,6 +1270,7 @@ fn damp_interior_a(result: &SolverResult, scale_factor: f64) -> SolverResult {
 fn damp_scale_for_axis_feasibility(
     result: &SolverResult,
     chain: &crate::topp::chain::ChainGrid,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
     current_ratio: f64,
 ) -> f64 {
     let target_ratio = SLP9_DAMP_TARGET_RATIO;
@@ -1237,7 +1279,7 @@ fn damp_scale_for_axis_feasibility(
     let mut s = s_analytical.min(1.0);
     for _ in 0..24 {
         let damped = damp_interior_a(result, s);
-        let ratio = max_axis_ratio_chain(&damped, chain);
+        let ratio = max_axis_ratio_chain(&damped, chain, windows);
         if ratio <= target_ratio {
             return s;
         }
@@ -1246,10 +1288,99 @@ fn damp_scale_for_axis_feasibility(
     s
 }
 
+const SLP9_POLISH_MAX_ITERS: u32 = 5;
+const SLP9_POLISH_MIN_GAIN: f64 = 1e-6;
+
+fn profile_time(result: &SolverResult, h_intervals: &[f64]) -> f64 {
+    h_intervals
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let v_sum = result.b[i].max(0.0).sqrt() + result.b[i + 1].max(0.0).sqrt();
+            if v_sum > 0.0 {
+                2.0 * h / v_sum
+            } else {
+                f64::INFINITY
+            }
+        })
+        .sum()
+}
+
+/// The SLP9 loop only ever reduces constraint violation; descending from the
+/// follower-free iterate it stops at first feasibility, which can sit a few
+/// percent below the local optimum. Re-maximize speed under full-cap cuts
+/// rebuilt at each accepted iterate while staying feasible.
+fn polish_windowed(
+    bundle: &ConstraintBundle,
+    chain: &crate::topp::chain::ChainGrid,
+    windows: &crate::topp::follower::FollowerWindows,
+    start: SolverResult,
+    tol: f64,
+    scale: &SolverScale,
+) -> Result<SolverResult, SolverSetupError> {
+    let mut current = start;
+    let mut current_time = profile_time(&current, &bundle.h_intervals);
+    for _ in 0..SLP9_POLISH_MAX_ITERS {
+        let mut cuts = build_axis_jerk_cuts_chain(&current, chain, 1.0);
+        cuts.extend(
+            crate::topp::follower::build_windowed_follower_cuts(
+                &current.b,
+                &current.a,
+                chain,
+                windows,
+                1.0,
+                SLP9_EPS_FEAS,
+                SLP9_CUT_PLACEMENT_FRACTION,
+                SLP9_TARGET_DECAY,
+                scale.to_scaled_b(SLP_B_FLOOR),
+            )
+            .into_iter()
+            .map(SlpCut::FollowerWindowed),
+        );
+        let candidate = solve_with_cuts(bundle, &cuts, tol, scale)?;
+        if matches!(
+            candidate.status,
+            SolverStatus::Infeasible | SolverStatus::MaxIter { .. }
+        ) {
+            break;
+        }
+        let ratio = max_axis_ratio_chain(&candidate, chain, Some(windows));
+        if ratio > 1.0 + SLP9_EPS_FEAS {
+            break;
+        }
+        let t = profile_time(&candidate, &bundle.h_intervals);
+        if t < current_time * (1.0 - SLP9_POLISH_MIN_GAIN) {
+            current = candidate;
+            current_time = t;
+        } else {
+            break;
+        }
+    }
+    Ok(current)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn slp_solve_with_axis_jerk_chain(
     bundle: &ConstraintBundle,
     chain: &crate::topp::chain::ChainGrid,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
+    tol: f64,
+    scale: &SolverScale,
+) -> Result<(SolverResult, SlpOutcome), SolverSetupError> {
+    let (result, outcome) =
+        slp_solve_with_axis_jerk_chain_inner(bundle, chain, windows, tol, scale)?;
+    if let (Some(w), SlpOutcome::Converged { .. }) = (windows, &outcome) {
+        let polished = polish_windowed(bundle, chain, w, result, tol, scale)?;
+        return Ok((polished, outcome));
+    }
+    Ok((result, outcome))
+}
+
+#[allow(clippy::too_many_lines)]
+fn slp_solve_with_axis_jerk_chain_inner(
+    bundle: &ConstraintBundle,
+    chain: &crate::topp::chain::ChainGrid,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
     tol: f64,
     scale: &SolverScale,
 ) -> Result<(SolverResult, SlpOutcome), SolverSetupError> {
@@ -1269,7 +1400,7 @@ pub(crate) fn slp_solve_with_axis_jerk_chain(
         _ => 0,
     };
 
-    let initial_max = max_axis_ratio_chain(&path_result, chain);
+    let initial_max = max_axis_ratio_chain(&path_result, chain, windows);
     if initial_max <= 1.0 + SLP9_EPS_FEAS {
         return Ok((
             path_result,
@@ -1302,6 +1433,7 @@ pub(crate) fn slp_solve_with_axis_jerk_chain(
         let loop_outcome = run_slp9_loop(
             bundle,
             chain,
+            windows,
             current_start.clone(),
             tol,
             scale,
@@ -1332,14 +1464,15 @@ pub(crate) fn slp_solve_with_axis_jerk_chain(
                         },
                     ));
                 }
-                let damp_s = damp_scale_for_axis_feasibility(&best_result, chain, best_ratio);
+                let damp_s =
+                    damp_scale_for_axis_feasibility(&best_result, chain, windows, best_ratio);
                 let damped = damp_interior_a(&best_result, damp_s);
-                let ratio_after_damp = max_axis_ratio_chain(&damped, chain);
+                let ratio_after_damp = max_axis_ratio_chain(&damped, chain, windows);
                 let restored = if ratio_after_damp <= 1.0 {
                     damped
                 } else {
                     let (uniform, uniform_ratio) =
-                        uniform_damp_for_feasibility(&best_result, chain, best_ratio);
+                        uniform_damp_for_feasibility(&best_result, chain, windows, best_ratio);
                     if uniform_ratio > 1.0 {
                         return Ok((
                             best_result,

@@ -36,12 +36,26 @@ pub enum ScheduleError {
     PathParam(String),
     #[error("solver setup failed: {0}")]
     SolverSetup(String),
+    #[error(
+        "follower shaper-folding SLP diverged after {refreezes} refreezes \
+         (worst ratio {worst_ratio:.4})"
+    )]
+    FollowerSlpDiverged { refreezes: u32, worst_ratio: f64 },
 }
 
 pub fn schedule_chain_with_tolerance(
     chain: &chain::ChainGrid,
     endpoints: EndpointConditions,
     tolerance: ToleranceMode,
+) -> Result<TopProfile, ScheduleError> {
+    schedule_chain_with_refreeze_cap(chain, endpoints, tolerance, follower::FOLLOWER_REFREEZE_MAX)
+}
+
+pub(crate) fn schedule_chain_with_refreeze_cap(
+    chain: &chain::ChainGrid,
+    endpoints: EndpointConditions,
+    tolerance: ToleranceMode,
+    refreeze_max: u32,
 ) -> Result<TopProfile, ScheduleError> {
     let v_start = endpoints.v_start;
     let v_end = endpoints.v_end;
@@ -117,8 +131,12 @@ pub fn schedule_chain_with_tolerance(
     };
 
     let call_slp = |tol| {
-        solver::slp_solve_with_axis_jerk_chain(&bundle, &scaled, tol, &scale)
-            .map_err(|e| ScheduleError::SolverSetup(format!("{e}")))
+        if scaled.has_active_windows() {
+            solve_with_refreeze(&bundle, &scaled, tol, &scale, refreeze_max)
+        } else {
+            solver::slp_solve_with_axis_jerk_chain(&bundle, &scaled, None, tol, &scale)
+                .map_err(|e| ScheduleError::SolverSetup(format!("{e}")))
+        }
     };
 
     let (mut solver_result, slp_outcome) = match tolerance {
@@ -147,6 +165,40 @@ pub fn schedule_chain_with_tolerance(
         },
         slp_outcome,
     ))
+}
+
+const FOLLOWER_REFREEZE_KM_ALPHA: f64 = 0.7;
+
+fn solve_with_refreeze(
+    bundle: &constraints::ConstraintBundle,
+    scaled: &chain::ChainGrid,
+    tol: f64,
+    scale: &SolverScale,
+    refreeze_max: u32,
+) -> Result<(solver::SolverResult, solver::SlpOutcome), ScheduleError> {
+    let (result, _outcome) =
+        solver::slp_solve_with_axis_jerk_chain(bundle, scaled, None, tol, scale)
+            .map_err(|e| ScheduleError::SolverSetup(format!("{e}")))?;
+    let mut b_freeze = result.b.clone();
+    let mut last_worst = f64::INFINITY;
+    for _refreeze in 0..refreeze_max {
+        let windows = follower::build_follower_windows(scaled, &b_freeze);
+        let (r2, o2) =
+            solver::slp_solve_with_axis_jerk_chain(bundle, scaled, Some(&windows), tol, scale)
+                .map_err(|e| ScheduleError::SolverSetup(format!("{e}")))?;
+        let drift = follower::refreeze_drift(&windows, &r2.b, scaled);
+        last_worst = follower::max_windowed_ratio(&windows, scaled, &r2.b, &r2.a);
+        if drift < follower::REFREEZE_DRIFT_TOL && last_worst <= 1.0 + solver::SLP9_EPS_FEAS {
+            return Ok((r2, o2));
+        }
+        for (f, n) in b_freeze.iter_mut().zip(&r2.b) {
+            *f = (1.0 - FOLLOWER_REFREEZE_KM_ALPHA) * *f + FOLLOWER_REFREEZE_KM_ALPHA * n;
+        }
+    }
+    Err(ScheduleError::FollowerSlpDiverged {
+        refreezes: refreeze_max,
+        worst_ratio: last_worst,
+    })
 }
 
 pub fn schedule_segment(

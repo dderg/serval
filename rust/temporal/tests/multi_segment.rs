@@ -61,6 +61,7 @@ mod fixture_1_two_g1_sharp_corner {
         ];
         let input = BatchInput {
             segments: &segments,
+            shaping: None,
             grid_strategy: adaptive(),
             worker_threads: 3,
             initial_velocity: 0.0,
@@ -120,6 +121,7 @@ mod fixture_2_g1_to_g5_smooth {
         ];
         let input = BatchInput {
             segments: &segments,
+            shaping: None,
             grid_strategy: adaptive(),
             worker_threads: 3,
             initial_velocity: 0.0,
@@ -174,6 +176,7 @@ mod fixture_3_long_straight_then_corner {
         ];
         let input = BatchInput {
             segments: &segments,
+            shaping: None,
             grid_strategy: adaptive(),
             worker_threads: 3,
             initial_velocity: 0.0,
@@ -260,6 +263,7 @@ mod fixture_4_per_segment_limits_change {
         ];
         let input = BatchInput {
             segments: &segments,
+            shaping: None,
             grid_strategy: adaptive(),
             worker_threads: 3,
             initial_velocity: 0.0,
@@ -336,6 +340,7 @@ mod fixture_5_star_pattern {
             .collect();
         let input = BatchInput {
             segments: &segments,
+            shaping: None,
             grid_strategy: adaptive(),
             worker_threads: 3,
             initial_velocity: 0.0,
@@ -431,6 +436,7 @@ mod fixture_6_long_realistic_chain {
             .collect();
         let input = BatchInput {
             segments: &segments,
+            shaping: None,
             grid_strategy: adaptive(),
             worker_threads: 3,
             initial_velocity: 0.0,
@@ -766,6 +772,7 @@ mod fixture_10_near_zero_length_middle_segment_smooth_chain {
         ];
         let input = BatchInput {
             segments: &segments,
+            shaping: None,
             grid_strategy: GridStrategy::Adaptive {
                 min_n: 20,
                 max_n: 200,
@@ -826,6 +833,7 @@ mod fixture_10_near_zero_length_middle_segment_smooth_chain {
             .collect();
         let baseline = BatchInput {
             segments: &segments,
+            shaping: None,
             grid_strategy: GridStrategy::Adaptive {
                 min_n: 20,
                 max_n: 200,
@@ -890,6 +898,7 @@ mod fixture_11_nanometer_dust_segment_smooth_chain {
         ];
         let input = BatchInput {
             segments: &segments,
+            shaping: None,
             grid_strategy: GridStrategy::Adaptive {
                 min_n: 20,
                 max_n: 200,
@@ -960,6 +969,7 @@ mod fixture_9_kinematic_boundary_end_no_oscillation {
         ];
         let input = BatchInput {
             segments: &segments,
+            shaping: None,
             grid_strategy: adaptive(),
             worker_threads: 1,
             initial_velocity: 400.0,

@@ -1,5 +1,6 @@
 use crate::topp::path::{ArclengthGrid, InterSample};
-use crate::{FollowerDemand, Limits, N_SPATIAL};
+use crate::{FollowerDemand, FollowerHistory, Limits, N_SPATIAL};
+use nurbs::algebra::PiecewisePolynomialKernel;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ChainError {
@@ -62,6 +63,14 @@ pub struct ChainGrid {
     pub inter_geom: Vec<Vec<InterSample>>,
     /// Follower demands per segment, indexed like `limits`.
     pub followers: Vec<Vec<FollowerDemand>>,
+    /// Input-shaper kernels per spatial axis; `None` = passthrough.
+    pub axis_kernels: [Option<PiecewisePolynomialKernel<f64>>; 3],
+    /// Realized per-axis velocity immediately before this chain, for the
+    /// shaper window's left edge.
+    pub follower_history: Option<FollowerHistory>,
+    /// Per-axis velocity immediately after this chain (the right neighbor's
+    /// ramp), for the shaper window's right edge.
+    pub follower_terminal: Option<FollowerHistory>,
 }
 
 pub(crate) const MAX_JUNCTION_SPACING_RATIO: f64 = 16.0;
@@ -198,7 +207,15 @@ impl ChainGrid {
             segment_ranges,
             inter_geom,
             followers,
+            axis_kernels: [None, None, None],
+            follower_history: None,
+            follower_terminal: None,
         }
+    }
+
+    pub fn has_active_windows(&self) -> bool {
+        self.axis_kernels.iter().any(Option::is_some)
+            && self.followers.iter().any(|f| !f.is_empty())
     }
 
     pub fn n_points(&self) -> usize {
