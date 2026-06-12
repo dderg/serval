@@ -359,12 +359,12 @@ class Homing:
                 "trip_move: endstop MCU for axis %s is not attached to the"
                 " bridge" % ("XYZ"[axis],)
             )
+        toolhead.wait_moves()
         if endstop.is_triggered():
             raise gcmd.error(
                 "%s endstop already triggered — move off the trigger before"
                 " homing or probing" % ("XYZ"[axis],)
             )
-        toolhead.wait_moves()
         start_axis_pos = toolhead.get_position()[axis]
         provider = entry["provider"]
         if provider is not None and hasattr(provider, "trip_move_begin"):

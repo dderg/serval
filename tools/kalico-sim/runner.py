@@ -26,7 +26,7 @@ log = logging.getLogger("kalico-sim")
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 VTIME_SHM = "/dev/shm/kalico_vtime"
-VTIME_SHM_SIZE = 32
+VTIME_SHM_SIZE = 256
 VTIME_STRUCT_FMT = "<QIIII"
 
 
@@ -51,7 +51,8 @@ class SimResult:
 
 def vtime_create(start_ns: int = 1_000_000_000) -> None:
     with open(VTIME_SHM, "wb") as f:
-        f.write(struct.pack(VTIME_STRUCT_FMT, start_ns, 0, 0, 1, 0))
+        header = struct.pack(VTIME_STRUCT_FMT, start_ns, 0, 0, 1, 0)
+        f.write(header + b"\x00" * (VTIME_SHM_SIZE - len(header)))
     os.chmod(VTIME_SHM, 0o666)
 
 
@@ -139,10 +140,14 @@ def spawn_mcu(
 
     log_fd = open(log_path, "wb")
     env = os.environ.copy()
-    # vtime is intentionally NOT loaded here: adding it causes "Stepper too far
-    # in past" during homing because both sides stall waiting for I/O while
-    # neither advances virtual time. Re-enable only after that deadlock is solved.
-    env["LD_PRELOAD"] = str(shim_so)
+    # vtime first, intercept second (constructor/interpose ordering). The
+    # motion tick thread registers as a vtime pacer, which both prevents the
+    # historical stall-deadlock (the pacer always advances time) and pins
+    # virtual time so it can never skip a motion sample period. SPEED=0.2
+    # runs the simulated world at 1/5 real speed, inflating every host-side
+    # latency budget (drip window, trsync timeouts) 5x against Docker jitter.
+    env["LD_PRELOAD"] = "%s:%s" % (vtime_so, shim_so)
+    env.setdefault("KALICO_VTIME_SPEED", "1")
     env["KALICO_SIM_SOCK_DIR"] = sock_dir
     if verbose:
         env["KALICO_SIM_SHIM_VERBOSE"] = "1"
@@ -1300,6 +1305,7 @@ PROBE_TEST_VARIANTS = (
     "conflict",
     "pullup",
     "remote",
+    "points",
 )
 
 PROBE_TEST_BOOT_ERRORS = {
@@ -1370,6 +1376,50 @@ trigger_delay: 1.0
 measured_z: 3.25
 trigger_height: 0
 """
+
+    points_sections = ""
+    if variant == "points":
+        points_sections = """
+[stepper_z1]
+step_pin: gpiochip0/gpio9
+dir_pin: gpiochip0/gpio10
+enable_pin: !gpiochip0/gpio11
+microsteps: 16
+rotation_distance: 4
+
+[z_tilt]
+z_positions:
+    0, 125
+    250, 125
+points:
+    50, 125
+    200, 125
+speed: 50
+horizontal_move_z: 8
+
+[bed_mesh]
+mesh_min: 30, 10
+mesh_max: 200, 200
+probe_count: 3, 3
+speed: 50
+horizontal_move_z: 8
+
+[screws_tilt_adjust]
+screw1: 50, 50
+screw1_name: front left
+screw2: 200, 50
+screw2_name: front right
+screw3: 125, 200
+screw3_name: back
+speed: 50
+horizontal_move_z: 8
+screw_thread: CW-M4
+
+[axis_twist_compensation]
+calibrate_start_x: 30
+calibrate_end_x: 200
+calibrate_y: 125
+"""
     return f"""\
 [mcu]
 serial: {h7_pty}
@@ -1415,7 +1465,7 @@ rotation_distance: 4
 position_min: -5
 position_max: 250
 homing_speed: 5
-{safe_z_section}{probe_section}{remote_section}
+{safe_z_section}{probe_section}{remote_section}{points_sections}
 [input_shaper]
 shaper_freq_x: 50
 shaper_freq_y: 50
@@ -1677,7 +1727,7 @@ def run_probe_test(
                     homing_lines = [
                         l.strip() for l in out.split("\n") if "homing: " in l
                     ]
-                    if variant in ("virtual", "safe-z"):
+                    if variant in ("virtual", "safe-z", "points"):
                         check(
                             "g28-z-trigger-height",
                             any(
@@ -1689,7 +1739,7 @@ def run_probe_test(
                     z = _query_toolhead_z(api_socket)
                     if variant == "safe-z":
                         expected_z = 10.0
-                    elif variant == "virtual":
+                    elif variant in ("virtual", "points"):
                         expected_z = 6.5
                     else:
                         expected_z = 5.0
@@ -1761,6 +1811,47 @@ def run_probe_test(
                         or resp,
                     )
 
+                    if variant == "points":
+                        resp = send_gcode(
+                            api_socket, "SCREWS_TILT_ADJUST", timeout=300
+                        )
+                        out, offset = _log_tail_since(klippy_log, offset)
+                        check(
+                            "screws-tilt-adjust",
+                            not resp.get("error")
+                            and "front left" in out
+                            and "back" in out,
+                            resp.get("error") or "screw report present",
+                        )
+
+                        resp = send_gcode(
+                            api_socket, "BED_MESH_CALIBRATE", timeout=600
+                        )
+                        out, offset = _log_tail_since(klippy_log, offset)
+                        check(
+                            "bed-mesh-calibrate",
+                            not resp.get("error")
+                            and "Mesh Bed Leveling Complete" in out,
+                            resp.get("error") or "mesh completed",
+                        )
+
+                        resp = send_gcode(
+                            api_socket, "Z_TILT_ADJUST", timeout=300
+                        )
+                        out, offset = _log_tail_since(klippy_log, offset)
+                        err = str(resp.get("error", ""))
+                        check(
+                            "z-tilt-fails-loudly",
+                            "per-motor Z adjustment is not yet implemented"
+                            in err,
+                            err or "expected not-yet-implemented error",
+                        )
+                        check(
+                            "z-tilt-reports-adjustments",
+                            "Z adjustments needed" in out,
+                            "measured deviations reported before the raise",
+                        )
+
                 shutdown = (
                     b"shutdown:" in klippy_log.read_bytes()
                     if klippy_log.exists()
@@ -1802,6 +1893,19 @@ def run_probe_test(
                 print("\n--- klippy.log tail ---")
                 print(klippy_log.read_text(errors="replace")[-4000:])
                 print("--- end klippy.log ---")
+                for mcu_log in sorted(klippy_log.parent.glob("*.log")):
+                    if mcu_log == klippy_log:
+                        continue
+                    print(f"\n--- {mcu_log.name} tail ---")
+                    print(mcu_log.read_text(errors="replace")[-3000:])
+                    print(f"--- end {mcu_log.name} ---")
+                events_dir = klippy_log.parent / "events"
+                for ev_file in sorted(events_dir.glob("*.jsonl")):
+                    lines = ev_file.read_text(errors="replace").splitlines()
+                    print(f"\n--- {ev_file.name} tail ---")
+                    for line in lines[-80:]:
+                        print(line)
+                    print(f"--- end {ev_file.name} ---")
 
     return 1 if [c for c in checks if not c[1]] else 0
 
