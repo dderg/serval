@@ -6,6 +6,8 @@ pub mod classify;
 #[doc(hidden)]
 pub mod config;
 #[doc(hidden)]
+pub mod correction;
+#[doc(hidden)]
 pub mod dispatch;
 pub mod drain;
 #[doc(hidden)]

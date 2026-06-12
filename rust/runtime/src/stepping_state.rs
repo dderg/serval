@@ -11,6 +11,9 @@ pub const N_AXES: usize = MAX_AXES;
 
 pub const MAX_STEPPERS_PER_AXIS: usize = 4;
 
+pub const CORRECTION_RING_DEPTH: usize = 16;
+pub const CORRECTION_MOTOR_NONE: u8 = 0xFF;
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepMode {
@@ -73,6 +76,11 @@ pub struct AxisState {
     pub last_step_count: i32,
     pub p_prev: f32,
     pub v_prev: f32,
+    pub correction_ring: RingDescriptor,
+    pub correction_armed: Option<ArmedPiece>,
+    pub correction_motor_idx: u8,
+    pub correction_last_step_count: i32,
+    pub correction_p_prev: f32,
 }
 
 impl AxisState {
@@ -86,6 +94,11 @@ impl AxisState {
             last_step_count: 0,
             p_prev: 0.0,
             v_prev: 0.0,
+            correction_ring: RingDescriptor::new_unconfigured(),
+            correction_armed: None,
+            correction_motor_idx: CORRECTION_MOTOR_NONE,
+            correction_last_step_count: 0,
+            correction_p_prev: 0.0,
         }
     }
 
@@ -94,6 +107,14 @@ impl AxisState {
         self.last_step_count = 0;
         self.p_prev = 0.0;
         self.v_prev = 0.0;
+        self.correction_armed = None;
+        self.correction_motor_idx = CORRECTION_MOTOR_NONE;
+        self.correction_last_step_count = 0;
+        self.correction_p_prev = 0.0;
+    }
+
+    pub fn correction_active(&self) -> bool {
+        !self.correction_ring.is_empty() || self.correction_armed.is_some()
     }
 }
 

@@ -27,6 +27,7 @@ _PRINT_FINISH_EVENTS = (
 # motion without a real bridge.
 _STUB_MOTION_METHODS = frozenset(
     {
+        "adjust_motor",
         "init_planner",
         "submit_move",
         "submit_dwell",
@@ -263,14 +264,22 @@ class MotionBridgeWrapper:
         baud,
         timeout_s=30.0,
         klippy_non_critical=False,
+        expect_native=True,
     ):
         """klippy_non_critical feeds the per-MCU criticality gate: a
         non-critical MCU's transport drop does not abort klippy, a critical
         motion MCU's does. A Klipper-protocol-only attach (identify timed out)
-        is always treated as non-critical.
+        is always treated as non-critical. expect_native=False skips the
+        native identify probe entirely (plugin-attached foreign peripherals
+        like the Beacon never answer it; probing them stalls connect).
         """
         return self._bridge.attach_serial(
-            mcu_handle, serial_path, baud, timeout_s, klippy_non_critical
+            mcu_handle,
+            serial_path,
+            baud,
+            timeout_s,
+            klippy_non_critical,
+            expect_native,
         )
 
     def get_identify_data(self, mcu_handle):
@@ -401,6 +410,11 @@ class MotionBridgeWrapper:
     ):
         return self._bridge.home_axis_start(
             axis, direction, speed_mm_s, max_travel_mm, endstop_id, endstop_mcu
+        )
+
+    def adjust_motor(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
+        return self._bridge.adjust_motor(
+            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
         )
 
     def home_axis_poll(self):

@@ -92,6 +92,30 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         ],
     },
     SchemaMessage {
+        type_tag: 0x0062,
+        name: "PushCorrectionPieces",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "axis_idx", ty: "u8" },
+            SchemaField { name: "motor_idx", ty: "u8" },
+            SchemaField { name: "piece_count", ty: "u8" },
+            SchemaField { name: "start_slot", ty: "u16" },
+            SchemaField { name: "new_head", ty: "u32" },
+            SchemaField { name: "pieces_bytes", ty: "array<u8>" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x0063,
+        name: "PushCorrectionPiecesResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+            SchemaField { name: "arrival_clock", ty: "u64" },
+        ],
+    },
+    SchemaMessage {
         type_tag: 0x0068,
         name: "StartCapture",
         version: 1,

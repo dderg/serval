@@ -392,7 +392,7 @@ static uint32_t step_last_edge_dwt[RUNTIME_MOTOR_COUNT];
 
 __attribute__((used, externally_visible))
 void
-runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps)
+runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps, uint8_t stepper_sel)
 {
     runtime_emit_calls++;
     if (motor_idx >= RUNTIME_MOTOR_COUNT)
@@ -404,18 +404,26 @@ runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps)
         return;
     runtime_emit_pulses += (n_steps < 0) ? (uint32_t)-n_steps : (uint32_t)n_steps;
 
+    uint8_t j_begin = 0, j_end = cnt;
+    if (stepper_sel != 0) {
+        if (stepper_sel > cnt)
+            shutdown("correction stepper_sel out of range");
+        j_begin = stepper_sel - 1;
+        j_end = stepper_sel;
+    }
+
     int8_t want_dir = (n_steps < 0) ? 1 : 0;
     uint32_t count = (n_steps < 0) ? (uint32_t)-n_steps : (uint32_t)n_steps;
 
-    if (runtime_motor_last_dir[motor_idx] != want_dir) {
-        for (uint8_t j = 0; j < cnt; j++) {
+    if (stepper_sel != 0 || runtime_motor_last_dir[motor_idx] != want_dir) {
+        for (uint8_t j = j_begin; j < j_end; j++) {
             uint8_t bench_verified_not_want_dir_xor_invert
                 = (uint8_t)(!want_dir)
                 ^ runtime_motor_steppers[motor_idx][j].invert_dir;
             gpio_out_write(runtime_motor_steppers[motor_idx][j].stepper->dir_pin,
                            bench_verified_not_want_dir_xor_invert);
         }
-        runtime_motor_last_dir[motor_idx] = want_dir;
+        runtime_motor_last_dir[motor_idx] = (stepper_sel != 0) ? -1 : want_dir;
     }
 
     extern uint32_t runtime_cyccnt_read(void);
@@ -431,13 +439,13 @@ runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps)
             while ((int32_t)(runtime_cyccnt_read() - target) < 0)
                 ;
         }
-        for (uint8_t j = 0; j < cnt; j++)
+        for (uint8_t j = j_begin; j < j_end; j++)
             gpio_out_toggle_noirq(runtime_motor_steppers[motor_idx][j].stepper->step_pin);
         if (!both_edge) {
             uint32_t fall_at = runtime_cyccnt_read() + pulse_ticks;
             while ((int32_t)(runtime_cyccnt_read() - fall_at) < 0)
                 ;
-            for (uint8_t j = 0; j < cnt; j++)
+            for (uint8_t j = j_begin; j < j_end; j++)
                 gpio_out_toggle_noirq(
                     runtime_motor_steppers[motor_idx][j].stepper->step_pin);
         }

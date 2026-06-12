@@ -10,7 +10,8 @@ fn entry(cycle_abs: u32, dir: i8) -> StepEntry {
     StepEntry {
         cycle_abs,
         dir,
-        _pad: [0; 3],
+        stepper_sel: 0,
+        _pad: [0; 2],
     }
 }
 
@@ -19,6 +20,29 @@ fn enqueue(axis: usize, cycle_abs: u32, dir: i8) {
     assert!(!q.is_null());
     // SAFETY: host test queue, sole producer here.
     unsafe { push(q, entry(cycle_abs, dir)).expect("queue not full") };
+}
+
+#[test]
+fn stepper_sel_passed_through_to_emitter() {
+    reset();
+    set_now(2000);
+    set_owned_mask(0b0001);
+    let q = queue_for_axis(0);
+    // SAFETY: host test queue, sole producer here.
+    unsafe {
+        push(
+            q,
+            StepEntry {
+                cycle_abs: 1500,
+                dir: 1,
+                stepper_sel: 2,
+                _pad: [0; 2],
+            },
+        )
+        .expect("queue not full");
+    }
+    kalico_step_output_event();
+    assert_eq!(take_emits(), vec![(0u8, 1i32, 2u8)]);
 }
 
 #[test]
@@ -48,7 +72,7 @@ fn arrived_head_emitted() {
     enqueue(0, 1500, 1);
     let next = kalico_step_output_event();
     let emits = take_emits();
-    assert_eq!(emits, vec![(0u8, 1i32)]);
+    assert_eq!(emits, vec![(0u8, 1i32, 0u8)]);
     assert_eq!(next, STEP_OUTPUT_DISABLE);
 }
 
@@ -59,7 +83,7 @@ fn exactly_now_is_due() {
     set_owned_mask(0b0001);
     enqueue(0, 2000, -1);
     let next = kalico_step_output_event();
-    assert_eq!(take_emits(), vec![(0u8, -1i32)]);
+    assert_eq!(take_emits(), vec![(0u8, -1i32, 0u8)]);
     assert_eq!(next, STEP_OUTPUT_DISABLE);
 }
 
@@ -115,7 +139,7 @@ fn single_axis_ordering_emits_all_due_then_returns_future() {
     enqueue(0, 3000, 1);
     enqueue(0, 9000, 1);
     let next = kalico_step_output_event();
-    assert_eq!(take_emits(), vec![(0, 1), (0, 1), (0, 1)]);
+    assert_eq!(take_emits(), vec![(0, 1, 0), (0, 1, 0), (0, 1, 0)]);
     assert_eq!(next, 9000);
 }
 
@@ -165,8 +189,8 @@ fn mixed_due_and_future_across_axes() {
     let next = kalico_step_output_event();
     let emits = take_emits();
     assert_eq!(emits.len(), 2);
-    assert!(emits.contains(&(0u8, 1i32)));
-    assert!(emits.contains(&(2u8, -1i32)));
+    assert!(emits.contains(&(0u8, 1i32, 0u8)));
+    assert!(emits.contains(&(2u8, -1i32, 0u8)));
     assert_eq!(next, 6000);
 }
 

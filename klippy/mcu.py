@@ -724,6 +724,10 @@ class MCU:
         self._clocksync = clocksync
         self._reactor = printer.get_reactor()
         self._name = config.get_name()
+        declared_via_mcu_section = self._name == "mcu" or self._name.startswith(
+            "mcu "
+        )
+        self._expect_native = declared_via_mcu_section
         if self._name.startswith("mcu "):
             self._name = self._name[4:]
         self._motion_bridge = printer.lookup_object("motion_bridge", None)

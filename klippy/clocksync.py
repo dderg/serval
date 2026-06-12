@@ -94,12 +94,18 @@ class ClockSync:
 
     def _handle_clock(self, params):
         self.queries_pending = 0
-        # Extend clock to 64bit
         last_clock = self.last_clock
         clock_delta = (params["clock"] - last_clock) & 0xFFFFFFFF
-        self.last_clock = clock = last_clock + clock_delta
-        # Check if this is the best round-trip-time seen so far
+        clock = last_clock + clock_delta
         sent_time = params["#sent_time"]
+        if sent_time:
+            exp_clock = (sent_time - self.time_avg) * self.clock_est[
+                2
+            ] + self.clock_avg
+            wraps_lost_to_sample_gap = round((exp_clock - clock) / 2**32)
+            if wraps_lost_to_sample_gap > 0:
+                clock += wraps_lost_to_sample_gap * 2**32
+        self.last_clock = clock
         if not sent_time:
             return
         receive_time = params["#receive_time"]

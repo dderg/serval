@@ -14,19 +14,25 @@ pub const STEP_QUEUE_DEPTH: usize = 32;
 pub const STEP_QUEUE_DEPTH_MASK: u16 = (STEP_QUEUE_DEPTH as u16) - 1;
 pub const N_AXIS_STEP_QUEUES: usize = 4;
 
-/// One pending step pulse: an absolute MCU cycle time and a direction.
+/// One pending step pulse: an absolute MCU cycle time, a direction, and a
+/// stepper selector (`0` = every stepper of the motor, `n` = only stepper
+/// `n-1` — used by correction streams to move one motor of a multi-stepper
+/// axis).
 ///
 /// Layout must match the C struct exactly — `#[repr(C)]` + the same field
-/// order + the explicit 3-byte tail pad gives an 8-byte entry on every
+/// order + the explicit 2-byte tail pad gives an 8-byte entry on every
 /// target we care about (ABI-stable across H7 / F4 / host).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct StepEntry {
     pub cycle_abs: u32,
     pub dir: i8,
+    pub stepper_sel: u8,
     #[allow(clippy::pub_underscore_fields)]
-    pub _pad: [u8; 3],
+    pub _pad: [u8; 2],
 }
+
+pub const STEPPER_SEL_ALL: u8 = 0;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -48,7 +54,8 @@ impl StepQueue {
             buf: [StepEntry {
                 cycle_abs: 0,
                 dir: 0,
-                _pad: [0; 3],
+                stepper_sel: STEPPER_SEL_ALL,
+                _pad: [0; 2],
             }; STEP_QUEUE_DEPTH],
         }
     }

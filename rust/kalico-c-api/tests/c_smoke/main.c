@@ -24,7 +24,7 @@ void runtime_irq_restore(uint32_t flags) { (void)flags; }
 
 uint32_t timer_read_time(void) { return 0u; }
 uint8_t timer_is_before(uint32_t a, uint32_t b) { (void)a; (void)b; return 0u; }
-void runtime_emit_step_pulses(uint8_t axis_idx, int32_t n_steps) {
+void runtime_emit_step_pulses(uint8_t axis_idx, int32_t n_steps, uint8_t stepper_sel) {
     (void)axis_idx; (void)n_steps;
 }
 uint32_t stats_send_time = 0u;

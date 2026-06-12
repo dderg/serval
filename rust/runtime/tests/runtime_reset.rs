@@ -43,15 +43,15 @@ fn reset_reclaims_ring_allocation() {
     let mut e = new_engine();
     let b = pulse_binding();
     assert_eq!(
-        e.configure_axis(0, StepMode::Pulse, 0.0125, 256, &[b], 512),
+        e.configure_axis(0, StepMode::Pulse, 0.0125, 240, &[b], 512),
         0
     );
     assert_eq!(
-        e.configure_axis(1, StepMode::Pulse, 0.0125, 256, &[b], 512),
+        e.configure_axis(1, StepMode::Pulse, 0.0125, 240, &[b], 512),
         0
     );
     assert_ne!(
-        e.configure_axis(2, StepMode::Pulse, 0.0125, 256, &[b], 512),
+        e.configure_axis(2, StepMode::Pulse, 0.0125, 240, &[b], 512),
         0,
         "expected RING_FULL before reset"
     );
@@ -59,11 +59,11 @@ fn reset_reclaims_ring_allocation() {
     e.reset();
 
     assert_eq!(
-        e.configure_axis(0, StepMode::Pulse, 0.0125, 256, &[b], 512),
+        e.configure_axis(0, StepMode::Pulse, 0.0125, 240, &[b], 512),
         0
     );
     assert_eq!(
-        e.configure_axis(1, StepMode::Pulse, 0.0125, 256, &[b], 512),
+        e.configure_axis(1, StepMode::Pulse, 0.0125, 240, &[b], 512),
         0
     );
 }
@@ -74,7 +74,7 @@ fn reset_is_idempotent_on_fresh_engine() {
     e.reset();
     let b = pulse_binding();
     assert_eq!(
-        e.configure_axis(0, StepMode::Pulse, 0.0125, 512, &[b], 512),
+        e.configure_axis(0, StepMode::Pulse, 0.0125, 496, &[b], 512),
         0
     );
 }

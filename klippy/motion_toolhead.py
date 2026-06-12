@@ -310,6 +310,7 @@ class MotionToolhead:
         self.kinematics_name = config.get("kinematics", "")
         self.bridge._kinematics_name = self.kinematics_name
         self._mcu_pending_end_time = 0.0
+        self._motor_bindings = {}
         self.all_mcus = [m for n, m in printer.lookup_objects(module="mcu")]
         self.mcu = self.all_mcus[0]
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
@@ -439,6 +440,23 @@ class MotionToolhead:
 
     def get_kinematics(self):
         return self.kin
+
+    def get_bridge(self):
+        return self.bridge
+
+    def get_motor_binding(self, stepper_name):
+        binding = self._motor_bindings.get(stepper_name)
+        if binding is None:
+            raise self.printer.config_error(
+                "Unknown motor '%s'; bound motors: %s"
+                % (stepper_name, ", ".join(sorted(self._motor_bindings)))
+            )
+        return binding
+
+    def get_max_axis_accel(self, axis_idx):
+        if axis_idx == 2:
+            return self.max_z_accel
+        return self.max_accel
 
     def get_trapq(self):
         return self.trapq
@@ -891,6 +909,7 @@ class MotionToolhead:
             raise
 
     def _configure_axes_per_mcu(self, bridge_mcus):
+        self._motor_bindings = {}
         kin = (self.kinematics_name or "").lower()
         if kin == "corexy":
             kin_tag = 0
@@ -1125,8 +1144,8 @@ class MotionToolhead:
                         slot_idx,
                     )
             axis_bindings = defaultdict(list)
-            for motor_idx, sname, oid, inv in bind_list:
-                axis_bindings[motor_idx].append((oid, inv))
+            for slot_idx, sname, oid, inv in bind_list:
+                axis_bindings[slot_idx].append((sname, oid, inv))
 
             MODE_PULSE = 0  # wire encoding: 0=Pulse, 1=Phase
             MODE_PHASE = 1  # (host step_modes list: 0=Modulated, 1=StepTime)
@@ -1149,20 +1168,22 @@ class MotionToolhead:
                 # extrusion_per_xy_mm unused by firmware; sent 0 for ABI compat.
                 extrusion_bits = 0
                 blob = bytearray()
-                for oid, inv in bindings:
+                for motor_idx, (sname, oid, inv) in enumerate(bindings):
+                    self._motor_bindings[sname] = (
+                        mcu_handle,
+                        axis_idx,
+                        motor_idx,
+                    )
                     blob.append(oid)
                     blob.append(inv & 0x01)
                     tmc_oid = TMC_CS_OID_NONE
                     if step_modes[axis_idx] == 0:
-                        for sname, s in slot_steppers[axis_idx]:
-                            if s.get_oid() == oid:
-                                tmc_name = "tmc5160 " + sname
-                                try:
-                                    tmc = self.printer.lookup_object(tmc_name)
-                                    tmc_oid = tmc.get_spi_oid()
-                                except Exception:
-                                    pass
-                                break
+                        tmc_name = "tmc5160 " + sname
+                        try:
+                            tmc = self.printer.lookup_object(tmc_name)
+                            tmc_oid = tmc.get_spi_oid()
+                        except Exception:
+                            pass
                     blob.append(tmc_oid)
                     blob.append(FLAGS_DEFAULT)
                 ring_depth = self.bridge.ring_depth_for_axis(

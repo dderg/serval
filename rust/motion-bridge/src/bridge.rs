@@ -529,7 +529,9 @@ pub struct PyMotionBridge {
 }
 
 pub(crate) fn axis_ring_depth(total_pieces: u32, num_axes: u32) -> u32 {
-    (total_pieces / num_axes.max(1)).max(1)
+    let correction_reserve =
+        num_axes.max(1) * runtime::stepping_state::CORRECTION_RING_DEPTH as u32;
+    (total_pieces.saturating_sub(correction_reserve) / num_axes.max(1)).max(1)
 }
 
 pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::pump::AxisKey> {
@@ -593,29 +595,36 @@ mod drip_cohort_participants_tests {
 mod axis_ring_depth_tests {
     use super::axis_ring_depth;
 
+    use runtime::stepping_state::CORRECTION_RING_DEPTH;
+
     #[test]
-    fn typical_two_axis_mcu() {
-        assert_eq!(axis_ring_depth(1984, 2), 992);
+    fn typical_two_axis_mcu_reserves_correction_rings() {
+        assert_eq!(
+            axis_ring_depth(1984, 2),
+            (1984 - 2 * CORRECTION_RING_DEPTH as u32) / 2
+        );
     }
 
     #[test]
-    fn single_axis_mcu() {
-        assert_eq!(axis_ring_depth(1984, 1), 1984);
+    fn single_axis_mcu_reserves_correction_ring() {
+        assert_eq!(
+            axis_ring_depth(1984, 1),
+            1984 - CORRECTION_RING_DEPTH as u32
+        );
     }
 
     #[test]
-    fn floor_division() {
-        assert_eq!(axis_ring_depth(5, 2), 2);
-    }
-
-    #[test]
-    fn lower_clamp_on_zero_total() {
+    fn lower_clamp_when_reserve_exceeds_total() {
+        assert_eq!(axis_ring_depth(5, 2), 1);
         assert_eq!(axis_ring_depth(0, 2), 1);
     }
 
     #[test]
     fn zero_num_axes_treated_as_one() {
-        assert_eq!(axis_ring_depth(1000, 0), 1000);
+        assert_eq!(
+            axis_ring_depth(1000, 0),
+            1000 - CORRECTION_RING_DEPTH as u32
+        );
     }
 }
 
@@ -683,11 +692,11 @@ mod ring_depth_for_axis_tests {
     fn success_two_axis_mcu() {
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 1, AXIS_X as u8).unwrap(),
-            992
+            976
         );
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 1, AXIS_Y as u8).unwrap(),
-            992
+            976
         );
     }
 
@@ -695,7 +704,7 @@ mod ring_depth_for_axis_tests {
     fn success_single_axis_mcu() {
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 2, AXIS_Z as u8).unwrap(),
-            1984
+            1968
         );
     }
 
@@ -1501,7 +1510,7 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    #[pyo3(signature = (mcu_handle, serial_path, baud, timeout_s = 30.0, klippy_non_critical = false))]
+    #[pyo3(signature = (mcu_handle, serial_path, baud, timeout_s = 30.0, klippy_non_critical = false, expect_native = true))]
     fn attach_serial(
         &self,
         mcu_handle: u32,
@@ -1509,6 +1518,7 @@ impl PyMotionBridge {
         baud: u32,
         timeout_s: f64,
         klippy_non_critical: bool,
+        expect_native: bool,
     ) -> PyResult<()> {
         use std::time::{Duration, Instant};
         let deadline = Instant::now() + Duration::from_secs_f64(timeout_s);
@@ -1534,7 +1544,14 @@ impl PyMotionBridge {
                         ))
                     })?;
 
-                    let (kalico_native_supported, identify_caps) =
+                    let (kalico_native_supported, identify_caps) = if !expect_native {
+                        log::info!(
+                            "attach_serial: kalico identify skipped on reuse for \
+                             {serial_path} (plugin-attached peripheral, not declared \
+                             via an [mcu] section)"
+                        );
+                        (false, 0u64)
+                    } else {
                         match io.kalico_identify(std::time::Duration::from_secs(5)) {
                             Ok(out) => {
                                 log::info!(
@@ -1552,7 +1569,8 @@ impl PyMotionBridge {
                                 );
                                 (false, 0u64)
                             }
-                        };
+                        }
+                    };
 
                     let runtime_caps = if kalico_native_supported {
                         match query_runtime_caps(&io, std::time::Duration::from_secs(2)) {
@@ -1649,7 +1667,13 @@ impl PyMotionBridge {
             PyRuntimeError::new_err(format!("attach_serial: runtime_event subscribe: {e:?}"))
         })?;
 
-        let (kalico_native_supported, identify_caps) =
+        let (kalico_native_supported, identify_caps) = if !expect_native {
+            log::info!(
+                "attach_serial: kalico identify skipped for {serial_path} \
+                 (plugin-attached peripheral, not declared via an [mcu] section)"
+            );
+            (false, 0u64)
+        } else {
             match host_io.kalico_identify(std::time::Duration::from_secs(5)) {
                 Ok(out) => {
                     log::info!(
@@ -1667,7 +1691,8 @@ impl PyMotionBridge {
                     );
                     (false, 0u64)
                 }
-            };
+            }
+        };
 
         let runtime_caps = if kalico_native_supported {
             match query_runtime_caps(&host_io, std::time::Duration::from_secs(2)) {
@@ -1890,6 +1915,79 @@ impl PyMotionBridge {
             )));
         }
         Ok(())
+    }
+
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel))]
+    fn adjust_motor(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        axis_idx: u8,
+        motor_idx: u8,
+        delta_mm: f64,
+        speed: f64,
+        accel: f64,
+    ) -> PyResult<f64> {
+        const CORRECTION_LEAD_SECS: f64 = 0.15;
+        let profile = crate::correction::plan_correction_profile(delta_mm, speed, accel)
+            .map_err(PyRuntimeError::new_err)?;
+        let duration = crate::correction::profile_duration(delta_mm, speed, accel)
+            .map_err(PyRuntimeError::new_err)?;
+        let handle = mcu_handle_from_raw(mcu_handle);
+        let entries = {
+            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            let start_secs = router.host_now_secs() + CORRECTION_LEAD_SECS;
+            crate::correction::to_piece_entries(
+                &profile,
+                |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
+                start_secs,
+            )
+        };
+        if entries.iter().any(|e| e.start_time == 0) {
+            return Err(PyRuntimeError::new_err(format!(
+                "adjust_motor: clock unsynced for mcu {mcu_handle}"
+            )));
+        }
+        let io = {
+            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let conn = mcus.get(&mcu_handle).ok_or_else(|| {
+                PyRuntimeError::new_err(format!("adjust_motor: unknown mcu_handle {mcu_handle}"))
+            })?;
+            conn.host_io
+                .as_ref()
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err(
+                        "adjust_motor: serial transport not attached for this MCU \
+                         (EtherCAT correction moves are not supported yet)",
+                    )
+                })?
+                .clone()
+        };
+        py.detach(|| -> PyResult<()> {
+            for msg in crate::correction::chunk_correction_messages(axis_idx, motor_idx, &entries) {
+                let mut body = Vec::with_capacity(9 + msg.pieces_bytes.len());
+                kalico_protocol::codec::Encode::encode(&msg, &mut body);
+                let (_kind, resp) = io
+                    .kalico_call_on_channel(
+                        kalico_protocol::KALICO_CHANNEL_CONTROL,
+                        kalico_protocol::MessageKind::PushCorrectionPieces,
+                        body,
+                        std::time::Duration::from_secs(2),
+                    )
+                    .map_err(|e| PyRuntimeError::new_err(format!("adjust_motor send: {e:?}")))?;
+                use kalico_protocol::codec::Decode as _;
+                let r = kalico_protocol::messages::PushCorrectionPiecesResponse::decode(&resp)
+                    .map_err(|e| PyRuntimeError::new_err(format!("adjust_motor decode: {e:?}")))?;
+                if r.result != 0 {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "adjust_motor rejected by MCU: error {}",
+                        r.result
+                    )));
+                }
+            }
+            Ok(())
+        })?;
+        Ok(CORRECTION_LEAD_SECS + duration)
     }
 
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {
