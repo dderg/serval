@@ -65,10 +65,10 @@ impl SolverScale {
                 .collect(),
             kappa: grid.kappa.iter().map(|k| k * s).collect(),
             total_length: grid.total_length / s,
-            inter_kappa: grid
-                .inter_kappa
+            inter_geom: grid
+                .inter_geom
                 .iter()
-                .map(|iv| iv.iter().map(|&(theta, k)| (theta, k * s)).collect())
+                .map(|iv| iv.iter().map(|smp| scale_inter_sample(smp, s)).collect())
                 .collect(),
         }
     }
@@ -147,12 +147,23 @@ impl SolverScale {
                 })
                 .collect(),
             segment_ranges: chain.segment_ranges.clone(),
-            inter_kappa: chain
-                .inter_kappa
+            inter_geom: chain
+                .inter_geom
                 .iter()
-                .map(|iv| iv.iter().map(|&(theta, k)| (theta, k * s)).collect())
+                .map(|iv| iv.iter().map(|smp| scale_inter_sample(smp, s)).collect())
                 .collect(),
         }
+    }
+}
+
+fn scale_inter_sample(
+    sample: &crate::topp::path::InterSample,
+    s: f64,
+) -> crate::topp::path::InterSample {
+    crate::topp::path::InterSample {
+        theta: sample.theta,
+        c_prime: sample.c_prime,
+        c_double_prime: sample.c_double_prime.map(|v| v * s),
     }
 }
 

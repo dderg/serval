@@ -1,6 +1,6 @@
 use super::*;
 use crate::Limits;
-use crate::topp::path::ArclengthGrid;
+use crate::topp::path::{ArclengthGrid, InterSample};
 use crate::topp::solver::{SolverResult, SolverStatus};
 
 fn limits_with_v_max(v_max: [f64; 3]) -> Limits {
@@ -63,7 +63,14 @@ fn tiny_grid(s: f64, kappa: f64) -> ArclengthGrid {
         c_triple_prime,
         kappa: kappa_vec,
         total_length: s,
-        inter_kappa: vec![vec![(0.25, kappa), (0.5, kappa), (0.75, kappa)]; n.saturating_sub(1)],
+        inter_geom: vec![
+            vec![
+                InterSample::planar(0.25, kappa),
+                InterSample::planar(0.5, kappa),
+                InterSample::planar(0.75, kappa)
+            ];
+            n.saturating_sub(1)
+        ],
     }
 }
 

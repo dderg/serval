@@ -2,7 +2,7 @@ use super::*;
 use crate::Limits;
 use crate::topp::chain::ChainGrid;
 use crate::topp::chain::tests_support::two_segment_chain_with_junction;
-use crate::topp::path::ArclengthGrid;
+use crate::topp::path::{ArclengthGrid, InterSample};
 
 fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
     let s: Vec<f64> = (0..n).map(|i| length * i as f64 / (n - 1) as f64).collect();
@@ -12,7 +12,14 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
     let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
     let kappa = vec![0.0; n];
-    let inter_kappa = vec![vec![(0.25, 0.0), (0.5, 0.0), (0.75, 0.0)]; n.saturating_sub(1)];
+    let inter_geom = vec![
+        vec![
+            InterSample::planar(0.25, 0.0),
+            InterSample::planar(0.5, 0.0),
+            InterSample::planar(0.75, 0.0)
+        ];
+        n.saturating_sub(1)
+    ];
     ArclengthGrid {
         s,
         u,
@@ -22,7 +29,7 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
         c_triple_prime,
         kappa,
         total_length: length,
-        inter_kappa,
+        inter_geom,
     }
 }
 
@@ -465,7 +472,14 @@ fn diagonal_line_a_env_is_projected() {
         kappa: vec![0.0; n],
         total_length: length,
         s,
-        inter_kappa: vec![vec![(0.25, 0.0), (0.5, 0.0), (0.75, 0.0)]; n.saturating_sub(1)],
+        inter_geom: vec![
+            vec![
+                InterSample::planar(0.25, 0.0),
+                InterSample::planar(0.5, 0.0),
+                InterSample::planar(0.75, 0.0)
+            ];
+            n.saturating_sub(1)
+        ],
     };
     let limits = textbook_limits();
     let chain = chain_of_one(grid.clone(), limits);
@@ -758,10 +772,12 @@ fn curvature_spike_grid() -> (ArclengthGrid, Limits) {
     let kappa_nodes = vec![0.01_f64; n];
 
     let kappa_spike = 0.5_f64;
-    let inter_kappa = vec![
-        vec![(0.25, 0.01), (0.5, kappa_spike), (0.75, 0.01)],
-        vec![(0.25, 0.01), (0.5, kappa_spike), (0.75, 0.01)],
+    let spike_interval = vec![
+        InterSample::planar(0.25, 0.01),
+        InterSample::planar(0.5, kappa_spike),
+        InterSample::planar(0.75, 0.01),
     ];
+    let inter_geom = vec![spike_interval.clone(), spike_interval];
 
     let limits = Limits {
         v_max: [500.0, 500.0, 500.0],
@@ -779,7 +795,7 @@ fn curvature_spike_grid() -> (ArclengthGrid, Limits) {
             c_triple_prime,
             kappa: kappa_nodes,
             total_length: length,
-            inter_kappa,
+            inter_geom,
         },
         limits,
     )
@@ -848,10 +864,12 @@ fn intergrid_centripetal_rows_absent_when_kappa_valley_between_nodes() {
     let node_kappas = vec![k_node; n];
 
     let k_valley = 0.05_f64;
-    let inter_kappa = vec![
-        vec![(0.25, k_valley), (0.5, k_valley), (0.75, k_valley)],
-        vec![(0.25, k_valley), (0.5, k_valley), (0.75, k_valley)],
+    let valley_interval = vec![
+        InterSample::planar(0.25, k_valley),
+        InterSample::planar(0.5, k_valley),
+        InterSample::planar(0.75, k_valley),
     ];
+    let inter_geom = vec![valley_interval.clone(), valley_interval];
 
     let limits = textbook_limits();
     let grid = ArclengthGrid {
@@ -863,7 +881,7 @@ fn intergrid_centripetal_rows_absent_when_kappa_valley_between_nodes() {
         c_triple_prime,
         kappa: node_kappas,
         total_length: length,
-        inter_kappa,
+        inter_geom,
     };
     let chain = chain_of_one(grid, limits);
     let bundle = match build_chain(
