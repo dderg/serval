@@ -80,7 +80,7 @@ Axis indices 0–2 stay the spatial frame; 3..MAX_AXES are follower axes. A set 
 - Modify: `rust/temporal/src/limits/tests.rs`
 - Modify: every `Limits::try_new` / `AxisSet::all` caller — `grep -rn "Limits::try_new\|AxisSet::all" rust/`
 
-- [ ] **Step 1: Write failing tests** (append to `limits/tests.rs`):
+- [x] **Step 1: Write failing tests** (append to `limits/tests.rs`):
 
 ```rust
 #[test]
@@ -125,9 +125,9 @@ fn spatial_helpers_reject_follower_sets() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(limits)'` → FAIL
+- [x] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(limits)'` → FAIL
 
-- [ ] **Step 3: Implement.** In `limits.rs`:
+- [x] **Step 3: Implement.** In `limits.rs`:
   - `pub const N_SPATIAL: usize = 3;` `pub const MAX_AXES: usize = 8;` (the `AxisSet(u8)` bitmask already holds 8).
   - `AxisSet`: add `pub fn is_spatial(self) -> bool { self.0 < (1 << N_SPATIAL) }` and `pub fn is_follower(self) -> bool { self.0 >> N_SPATIAL != 0 && self.0 & ((1 << N_SPATIAL) - 1) == 0 }`; rename `AxisSet::all()` → `AxisSet::spatial()` (it means "all spatial" everywhere it is used — fix callers, `grep -rn "AxisSet::all" rust/`).
   - `Limits::try_new(sets: &[LimitSet], n_axes: usize)`: assert `N_SPATIAL <= n_axes && n_axes <= MAX_AXES`; reject any set that is neither `is_spatial` nor `is_follower` with new `LimitsError::MixedSpatialFollower { set: usize }`; run the existing per-derivative coverage loop over `0..n_axes` instead of `0..MAX_AXES`. Store `n_axes: u8` on `Limits` with a getter.
@@ -137,8 +137,8 @@ fn spatial_helpers_reject_follower_sets() {
   - `scale_limits` in `scaling.rs` rebuilds via `try_new(_, limits.n_axes())` — port.
   - Every existing `try_new` caller gains `, 3` (or `N_SPATIAL`) — mechanical, `grep -rn "Limits::try_new" rust/`.
 
-- [ ] **Step 4: Run** — `cargo nextest run -p temporal` → PASS (zero behavioral change for 3-axis limits).
-- [ ] **Step 5: Commit** — `feat(temporal): follower axes in the limit axis space; mixed sets rejected`
+- [x] **Step 4: Run** — `cargo nextest run -p temporal` → PASS (zero behavioral change for 3-axis limits).
+- [x] **Step 5: Commit** — `feat(temporal): follower axes in the limit axis space; mixed sets rejected`
 
 ---
 
@@ -152,7 +152,7 @@ fn spatial_helpers_reject_follower_sets() {
 - Modify: callers — `grep -rn "SegmentInput {" rust/`
 - Test: `rust/temporal/src/topp/chain/tests.rs` (or wherever `from_segment_grids` tests live — `grep -rln "from_segment_grids" rust/temporal/`)
 
-- [ ] **Step 1: Write failing test** — a two-segment chain built from inputs with different follower ratios exposes them per grid point:
+- [x] **Step 1: Write failing test** — a two-segment chain built from inputs with different follower ratios exposes them per grid point:
 
 ```rust
 #[test]
@@ -167,9 +167,9 @@ fn chain_carries_per_segment_follower_demands() {
 
 (Flesh out with the existing harness idioms in the chain tests — grid construction is already demonstrated there.)
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(follower_demands)'` → FAIL
+- [x] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(follower_demands)'` → FAIL
 
-- [ ] **Step 3: Implement.** In `lib.rs`:
+- [x] **Step 3: Implement.** In `lib.rs`:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -182,8 +182,8 @@ pub struct FollowerDemand {
 
 `SegmentInput` gains `pub followers: &'a [FollowerDemand]`. `ChainGrid` gains `pub followers: Vec<Vec<FollowerDemand>>` indexed like `limits` (one entry per limits_idx / segment), plus `pub fn followers_at(&self, i: usize) -> &[FollowerDemand]` mirroring `limits_at`. `from_segment_grids` threads the slices through; the single-segment constructors take `&[FollowerDemand]` (existing callers pass `&[]`). Validate at chain construction: every `axis` must be `>= N_SPATIAL`, `< limits.n_axes()`, `ratio` finite, `pa_k` finite and `>= 0.0` — violation is a panic-free constructor error (fail loudly, new `ChainError` variant or extend the existing one — `grep -n "enum.*Error" rust/temporal/src/topp/chain.rs`).
 
-- [ ] **Step 4: Run** — `cargo nextest run -p temporal` → PASS
-- [ ] **Step 5: Commit** — `feat(temporal): segments carry follower demands into the chain`
+- [x] **Step 4: Run** — `cargo nextest run -p temporal` → PASS
+- [x] **Step 5: Commit** — `feat(temporal): segments carry follower demands into the chain`
 
 ---
 
@@ -195,7 +195,7 @@ The reusable core: time map from an iterate, kernel sampling, history folding, i
 - Create: `rust/temporal/src/topp/window.rs` (+ `mod window;` in `topp/mod.rs`)
 - Create: `rust/temporal/src/topp/window/tests.rs`
 
-- [ ] **Step 1: Write failing tests:**
+- [x] **Step 1: Write failing tests:**
 
 ```rust
 use super::*;
@@ -261,9 +261,9 @@ fn right_edge_extends_with_terminal_hold() {
 
 (`test_bell_kernel` builds the same `w(t) = c·(h²−t²)²` kernel as `trajectory/src/kernel.rs::build_smooth_zv_kernel` — copy the five coefficients into the test helper; `temporal` already depends on `nurbs`, which owns `PiecewisePolynomialKernel`.)
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(window)'` → FAIL
+- [x] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(window)'` → FAIL
 
-- [ ] **Step 3: Implement** in `window.rs`:
+- [x] **Step 3: Implement** in `window.rs`:
 
 ```rust
 pub fn frozen_time_map(b: &[f64], h_intervals: &[f64]) -> Vec<f64> {
@@ -301,8 +301,8 @@ pub struct WindowHistory {
 
 Resolve the exact shape during implementation — the tests above pin the semantics (constant reproduction at interior, left edge with history, right edge with terminal hold); adjust the test helper calls to the final signature, never weaken the assertions.
 
-- [ ] **Step 4: Run** — `cargo nextest run -p temporal -E 'test(window)'` → PASS
-- [ ] **Step 5: Commit** — `feat(temporal): frozen-time-map window operator with history folding`
+- [x] **Step 4: Run** — `cargo nextest run -p temporal -E 'test(window)'` → PASS
+- [x] **Step 5: Commit** — `feat(temporal): frozen-time-map window operator with history folding`
 
 ---
 
@@ -316,7 +316,7 @@ Convex case first: `|r|·√b ≤ v_max` is a `b`-cap row; `|r|·|a_i| ≤ a_max
 - Modify: `rust/temporal/src/topp/constraints.rs` (`build_chain` calls the new emitter; find the velocity block with `grep -n "v_max" rust/temporal/src/topp/constraints.rs`)
 - Modify: `rust/temporal/src/lib.rs` / `rust/temporal/src/topp/verify.rs` (`BindingConstraint`, `ratios_at`)
 
-- [ ] **Step 1: Write failing solver-level tests** in `follower/tests.rs` (use the existing single-segment scheduling harness idioms — `grep -rn "schedule_segment_with_tolerance" rust/temporal/` for examples):
+- [x] **Step 1: Write failing solver-level tests** in `follower/tests.rs` (use the existing single-segment scheduling harness idioms — `grep -rn "schedule_segment_with_tolerance" rust/temporal/` for examples):
 
 ```rust
 #[test]
@@ -345,9 +345,9 @@ fn binding_tag_names_the_follower_set() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(follower)'` → FAIL
+- [x] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(follower)'` → FAIL
 
-- [ ] **Step 3: Implement emission** in `follower.rs`:
+- [x] **Step 3: Implement emission** in `follower.rs`:
 
 ```rust
 pub(crate) fn emit_base_follower_rows(
@@ -390,8 +390,8 @@ Wire into `build_chain` next to the existing velocity family (inside the Nonneg 
 
 **verify.rs:** extend `ratios_at` inputs with the point's `&[FollowerDemand]`; for each demand and covering follower set push entries `(r·ṡ / v_max, Velocity { set })`, `(r·|s̈| / a_max, AccelNorm { set })`, `(r·|s⃛| / j_max, JerkNorm { set })`. The existing variants carry set indices already (plan 1) — no new variants needed for the base rows. `check_chain` passes `chain.followers_at(i)` through.
 
-- [ ] **Step 4: Run** — `cargo nextest run -p temporal` → PASS
-- [ ] **Step 5: Commit** — `feat(temporal): base follower velocity/accel rows with binding attribution`
+- [x] **Step 4: Run** — `cargo nextest run -p temporal` → PASS
+- [x] **Step 5: Commit** — `feat(temporal): base follower velocity/accel rows with binding attribution`
 
 ---
 
@@ -404,7 +404,7 @@ Wire into `build_chain` next to the existing velocity family (inside the Nonneg 
 - Modify: `rust/temporal/src/topp/solver.rs` (`find_jerk_violators_chain`, `append_path_jerk_cut_weights` — these consume `j_path`)
 - Test: `rust/temporal/src/topp/follower/tests.rs`
 
-- [ ] **Step 1: Write failing test:**
+- [x] **Step 1: Write failing test:**
 
 ```rust
 #[test]
@@ -416,9 +416,9 @@ fn follower_jerk_cap_binds_through_the_slp() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(follower_jerk)'` → FAIL (cap ignored)
+- [x] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(follower_jerk)'` → FAIL (cap ignored)
 
-- [ ] **Step 3: Implement.** Replace the scalar `j_path` with a per-point vector `j_path_at: Vec<f64>`:
+- [x] **Step 3: Implement.** Replace the scalar `j_path` with a per-point vector `j_path_at: Vec<f64>`:
 
 ```rust
 let j_path_at: Vec<f64> = (0..n)
@@ -441,8 +441,8 @@ let j_path_at: Vec<f64> = (0..n)
 
 Thread it through the bundle to `find_jerk_violators_chain` (violation test uses `j_path_at[i]`) and `append_path_jerk_cut_weights` (cut target uses the same). Where the auxiliary `t_k` rows in `build_chain` divide by `j_path`, use `j_path_at[k + 1]` (the interior point the row anchors). The all-spatial case reduces to the old scalar at every point — the existing suite must pass unchanged.
 
-- [ ] **Step 4: Run** — `cargo nextest run -p temporal` → PASS
-- [ ] **Step 5: Commit** — `feat(temporal): per-point path-jerk envelope; follower jerk caps join the SLP`
+- [x] **Step 4: Run** — `cargo nextest run -p temporal` → PASS
+- [x] **Step 5: Commit** — `feat(temporal): per-point path-jerk envelope; follower jerk caps join the SLP`
 
 ---
 
@@ -455,7 +455,7 @@ Thread it through the bundle to `find_jerk_violators_chain` (violation test uses
 - Modify: stencil tests — `grep -rln "b_dd_weights" rust/temporal/` for where they live
 - Modify: `rust/temporal/src/topp/verify.rs` (expose `s_ddddot_at` for later consumers)
 
-- [ ] **Step 1: Write failing tests:**
+- [x] **Step 1: Write failing tests:**
 
 ```rust
 #[test]
@@ -474,9 +474,9 @@ fn s_snap_on_constant_jerk_profile() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(snap) or test(b_ddd)'` → FAIL
+- [x] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(snap) or test(b_ddd)'` → FAIL
 
-- [ ] **Step 3: Implement** in `stencil.rs`: a small Fornberg weight generator
+- [x] **Step 3: Implement** in `stencil.rs`: a small Fornberg weight generator
 
 ```rust
 pub fn fornberg_weights(x0: f64, xs: &[f64], order: usize) -> Vec<Vec<f64>>
@@ -501,8 +501,8 @@ pub fn s_ddddot_at_weights(b: &[f64], a_i: f64, i: usize, s: &[f64], h_intervals
 
 Verify the existing `b_dd_weights` against `fornberg_weights` in a test (they must agree to 1e-12) — if they do, optionally collapse the old closed form onto Fornberg in a follow-up, not now.
 
-- [ ] **Step 4: Run** — `cargo nextest run -p temporal` → PASS
-- [ ] **Step 5: Commit** — `feat(temporal): path snap via Fornberg third-difference weights`
+- [x] **Step 4: Run** — `cargo nextest run -p temporal` → PASS
+- [x] **Step 5: Commit** — `feat(temporal): path snap via Fornberg third-difference weights`
 
 ---
 
@@ -516,7 +516,7 @@ PA shifts each demand one derivative up: `|r|(ṡ + k·s̈) ≤ v_max`, `|r|(s̈
 - Modify: `rust/temporal/src/lib.rs` (`BindingConstraint` gains `PaVelocity { set }`, `PaAccel { set }`, `PaJerk { set }`), `verify.rs` (`ratios_at` PA entries — demand formulas above, `s⁗` via Task 6)
 - Test: `rust/temporal/src/topp/follower/tests.rs`
 
-- [ ] **Step 1: Write failing tests:**
+- [x] **Step 1: Write failing tests:**
 
 ```rust
 #[test]
@@ -546,9 +546,9 @@ fn verify_tags_pa_rows() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(pa_)'` → FAIL
+- [x] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(pa_)'` → FAIL
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
   - **Demand evaluation at the iterate** (shared with verify): for point `i`, `d_v = r·(√b̄ + k·ā)`, `d_a = r·(ā + k·s⃛(b̄))`, `d_j = r·(s⃛(b̄) + k·s⁗(b̄, ā))`. Ratios against the covering follower sets' caps.
   - **Violator scan** `find_follower_violators(chain, b̄, ā) -> Vec<FollowerViolator { i, set, family, ratio }>` — same shape as `find_jerk_violators_chain`, threshold `1 + SLP9_EPS_FEAS`.
   - **Cut builder**: linearize each demand at the iterate. Every term is already linearized elsewhere in the codebase — reuse the gradient pieces: `√b → b/(2√b̄) + √b̄/2`; `s⃛ → (√b̄·δb″ + b̄″·δb_i/(2√b̄))/2` expanded over the `b_dd` stencil exactly as `append_path_jerk_cut_weights` does; `s⁗` gradient over the 4-point `b_ddd` stencil plus the `a·b″/2` cross terms (gradient w.r.t. `a_i` is `b̄″/2`; w.r.t. stencil `b`s via the two weight sets). Emit two Nonneg rows (±) per violator with the same `row_scale` conditioning as `append_axis_jerk_cut_to_clarabel` — follow that function's structure literally, swapping the gradient terms.
@@ -556,8 +556,8 @@ fn verify_tags_pa_rows() {
   - **Loop placement**: extend the SLP9 outer loop's cut-collection step to also call `find_follower_violators`/`build_follower_cuts` and merge the cut lists; the existing trust-region, backtracking, target-decay, and divergence machinery applies unchanged. Worst-ratio bookkeeping takes the max over axis-jerk and follower families.
   - **verify.rs**: PA entries per demand with the new `BindingConstraint` variants; tie-break order: existing classes first, then `PaVelocity > PaAccel > PaJerk`; PA-jerk joins the jerk class (`max_jerk`), PA-velocity/accel the non-jerk class.
 
-- [ ] **Step 4: Run** — `cargo nextest run -p temporal` → PASS (including all pre-existing SLP tests — the follower scan returns empty when no demands exist).
-- [ ] **Step 5: Commit** — `feat(temporal): pressure-advance rows as SLP cuts with snap-backed jerk`
+- [x] **Step 4: Run** — `cargo nextest run -p temporal` → PASS (including all pre-existing SLP tests — the follower scan returns empty when no demands exist).
+- [x] **Step 5: Commit** — `feat(temporal): pressure-advance rows as SLP cuts with snap-backed jerk`
 
 ---
 
@@ -581,9 +581,9 @@ pub struct FollowerHistory {
 - Modify: `rust/temporal/src/multi/mod.rs` + `multi/joining.rs` (tail exchange — Step 5)
 - Test: `rust/temporal/src/topp/follower/tests.rs`
 
-- [ ] **Step 0: Dispatch `verify-logic` (background, non-blocking).** Before starting this task's implementation, dispatch the `verify-logic` skill on the claim: *"fixed-point iteration over a frozen time map (re-freezing sample times from the current iterate, rebuilding convolution-window constraint rows, re-solving) converges for averaging-type kernels in time-optimal path parameterization — or known counterexample shapes exist (e.g. kernel support wider than a chain between stops)."* Continue implementing while it runs — the divergence guards below make non-convergence safe regardless; the verification informs whether retry-and-fail is acceptable as the permanent posture or a fallback scheme is needed. Fold any counterexample it finds into `refreeze_divergence_fails_loudly`-style tests.
+- [x] **Step 0: Dispatch `verify-logic` (background, non-blocking).** Before starting this task's implementation, dispatch the `verify-logic` skill on the claim: *"fixed-point iteration over a frozen time map (re-freezing sample times from the current iterate, rebuilding convolution-window constraint rows, re-solving) converges for averaging-type kernels in time-optimal path parameterization — or known counterexample shapes exist (e.g. kernel support wider than a chain between stops)."* Continue implementing while it runs — the divergence guards below make non-convergence safe regardless; the verification informs whether retry-and-fail is acceptable as the permanent posture or a fallback scheme is needed. Fold any counterexample it finds into `refreeze_divergence_fails_loudly`-style tests.
 
-- [ ] **Step 1: Write failing tests:**
+- [x] **Step 1: Write failing tests:**
 
 ```rust
 #[test]
@@ -629,15 +629,15 @@ fn refreeze_divergence_fails_loudly() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(folded) or test(refreeze)'` → FAIL
+- [x] **Step 2: Run to verify failure** — `cargo nextest run -p temporal -E 'test(folded) or test(refreeze)'` → FAIL
 
-- [ ] **Step 3: Windowed demand machinery** in `follower.rs`:
+- [x] **Step 3: Windowed demand machinery** in `follower.rs`:
   - `build_follower_windows(chain, b̄) -> FollowerWindows`: time map via `frozen_time_map`; per followed axis `α`, `WindowOperator::from_kernel(kernel_α, …)` or `identity`; history terms per signal kind from `FollowerHistory` (velocity history given; accel/jerk histories finite-differenced from the velocity samples — document that choice in the function name, e.g. `history_accel_from_velocity`).
   - Windowed demands at the iterate: `V_α(i)`, `A_α(i)`, `J_α(i)` per the reference section, evaluated numerically from `(b̄, ā)`; demands `d_v = r(‖V‖ + k‖A‖)`, `d_a = r(‖A‖ + k‖J‖)`, `d_j = r(‖J‖ + k|s⁗|)`.
   - Cut builder: hyperplane directions `û = V̄/max(‖V̄‖, FLOOR)` etc.; row entries = `|r|·Σ_α û_α · ∂V_α/∂(b_j, a_j)` over the window's source samples (affine pieces per the reference; `√b` and `s⃛` linearized at `b̄` exactly as in Task 7). One Nonneg row per violator (the hyperplane already encodes the binding side; emit the ± pair only for the scalar `s⁗` tail).
   - When every followed axis is passthrough **and** `pa_k == 0`, Task 4's static rows remain the emission path (they are exact and convex — never replace exact with linearized when the exact form exists). The follower SLP scan skips such demands.
 
-- [ ] **Step 4: Re-freeze outer loop** in `solver.rs`, wrapping the existing phases:
+- [x] **Step 4: Re-freeze outer loop** in `solver.rs`, wrapping the existing phases:
 
 ```text
 solve base+jerk SLP (existing)                       — iterate 0
@@ -654,12 +654,12 @@ fail: ScheduleError::FollowerSlpDiverged { refreezes, worst_ratio }
 
 Chains with no active windows (no kernels, no PA) skip the wrapper entirely — zero cost on today's paths.
 
-- [ ] **Step 5: Cross-chain tail exchange** in `multi/joining.rs`: after `join_until_converged` returns, if any chain has active windows, run up to `TAIL_EXCHANGE_MAX (3)` passes: for each chain, sample its neighbors' solved boundary-window velocity signals (per axis, from the neighbor profile within one kernel width of the shared stop) into a `FollowerHistory` (left neighbor → history; right neighbor → terminal extension samples — add a mirrored `follower_terminal` field alongside `follower_history` if the right side needs more than terminal-hold), re-solve dirty chains, stop when no chain's total time moved by more than 0.1%. Junction velocities stay 0 — only the window constants change. If the pass cap is hit, fail loudly (`BatchError` variant naming the junction). The batch-boundary (streaming) history arrives via `BatchInput` → first chain's `follower_history` (Task 10).
+- [x] **Step 5: Cross-chain tail exchange** in `multi/joining.rs`: after `join_until_converged` returns, if any chain has active windows, run up to `TAIL_EXCHANGE_MAX (3)` passes: for each chain, sample its neighbors' solved boundary-window velocity signals (per axis, from the neighbor profile within one kernel width of the shared stop) into a `FollowerHistory` (left neighbor → history; right neighbor → terminal extension samples — add a mirrored `follower_terminal` field alongside `follower_history` if the right side needs more than terminal-hold), re-solve dirty chains, stop when no chain's total time moved by more than 0.1%. Junction velocities stay 0 — only the window constants change. If the pass cap is hit, fail loudly (`BatchError` variant naming the junction). The batch-boundary (streaming) history arrives via `BatchInput` → first chain's `follower_history` (Task 10).
 
-- [ ] **Step 6: verify.rs** — windowed demands enter `check_chain` through the same evaluation functions (verify receives the final frozen windows from the solve, not a fresh map — expose them on the output bundle), so the report covers folded rows.
+- [x] **Step 6: verify.rs** — windowed demands enter `check_chain` through the same evaluation functions (verify receives the final frozen windows from the solve, not a fresh map — expose them on the output bundle), so the report covers folded rows.
 
-- [ ] **Step 7: Run** — `cargo nextest run -p temporal` → PASS
-- [ ] **Step 8: Commit** — `feat(temporal): shaper-folded follower rows on a frozen time map with history constants`
+- [x] **Step 7: Run** — `cargo nextest run -p temporal` → PASS
+- [x] **Step 8: Commit** — `feat(temporal): shaper-folded follower rows on a frozen time map with history constants`
 
 ---
 
@@ -672,7 +672,7 @@ Plan 2 made these `Fatal::FollowerOnlyMoveUnsupported`. Now: the move's path len
 - Modify: `rust/temporal/src/topp/chain.rs` (virtual-path chain constructor) and `rust/trajectory/src/` plumbing (`grep -rn "FollowerOnlyMoveUnsupported" rust/` for every consumer)
 - Tests: `rust/geometry/src/pipeline/tests.rs`, `rust/temporal/src/topp/follower/tests.rs`
 
-- [ ] **Step 1: Write failing tests:**
+- [x] **Step 1: Write failing tests:**
 
 ```rust
 // geometry/pipeline tests: the plan-2 follower_only_move_is_fatal test flips —
@@ -689,17 +689,17 @@ fn virtual_path_plans_under_follower_limits_and_feedrate() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — scoped nextest → FAIL
+- [x] **Step 2: Run to verify failure** — scoped nextest → FAIL
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
   - `CubicSegment` gains `pub virtual_path_mm: Option<f64>`; `try_new` validates: if `Some(l)`, `l > 0.0` finite, the xyz curve must have zero displacement (all control points equal within 1e-9 — assert, fail loudly), and `followers` non-empty.
   - `classify_followers`: the `path_len <= EPS_PATH && any_follower_motion` arm returns the virtual classification: `L = max |delta|` over followers, ratios `delta_i / L`, `virtual_path_mm: Some(L)` flagged to the caller (return an enum `Classified::Spatial(Vec<FollowerDemand>) | Classified::VirtualPath { length, followers }` — adjust `handle_curve`).
   - temporal: `ChainGrid::virtual_path(length, n, limits, followers) -> ChainGrid` — uniform `s` grid over `[0, L]`, `PointGeom` all-zero (every spatial row family already skips on `restricted_norm < COMP_FLOOR`; confirm `mvc_b` returns the `b_cap` ceiling, and that the velocity↔accel relation rows are geometry-free — they are), `inter_geom` empty. The feedrate cap is the caller's existing `b_cap` mechanism (`grep -n "b_cap" rust/temporal/src/topp/constraints.rs` — confirm it derives from feedrate; it does via the MVC seed). Follower rows from Tasks 4–8 do the rest.
   - trajectory: where segments are mapped to `temporal::SegmentInput` (`grep -rn "SegmentInput" rust/trajectory/`), route `virtual_path_mm` segments to the virtual-path constructor; they form their own single-segment chain (no fusing with spatial neighbors — tangent continuity is undefined against a zero curve; junction classification treats them as corner stops on both sides).
   - Delete the `Fatal::FollowerOnlyMoveUnsupported` variant and every consumer.
 
-- [ ] **Step 4: Run** — `cargo nextest run -p geometry -p temporal -p trajectory` → PASS
-- [ ] **Step 5: Commit** — `feat: follower-only moves plan on a virtual path (spec §2 degenerate rule)`
+- [x] **Step 4: Run** — `cargo nextest run -p geometry -p temporal -p trajectory` → PASS
+- [x] **Step 5: Commit** — `feat: follower-only moves plan on a virtual path (spec §2 degenerate rule)`
 
 ---
 
@@ -714,7 +714,7 @@ Follower limit sections reach temporal as real sets; segments' `FollowerDemand`s
 - Modify: `rust/trajectory/src/streaming/state.rs` + `streaming/emit.rs` (history extraction)
 - Tests: `rust/motion-bridge/src/config/tests.rs`, trajectory integration test
 
-- [ ] **Step 1: Write failing bridge test:**
+- [x] **Step 1: Write failing bridge test:**
 
 ```rust
 #[test]
@@ -725,26 +725,26 @@ fn follower_sections_become_temporal_sets() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**, implement the config conversion (replace plan 2's "recorded for coverage only" branch: follower section axes map straight into `AxisSet::from_indices`; pass `axis_registry.n_axes()` to `Limits::try_new`). The runtime-caps overlay stays `AxisSet::spatial()`.
+- [x] **Step 2: Run to verify failure**, implement the config conversion (replace plan 2's "recorded for coverage only" branch: follower section axes map straight into `AxisSet::from_indices`; pass `axis_registry.n_axes()` to `Limits::try_new`). The runtime-caps overlay stays `AxisSet::spatial()`.
 
-- [ ] **Step 3: trajectory threading** — at every `temporal::SegmentInput` construction site, attach the segment's followers (mapped, `pa_k` looked up per axis from `ReplanContext.follower_pa`, default `0.0`). Kernels: the followed axes' kernels are exactly the chain's `axis_kernels` — populate from the same `ReplanContext.kernels` used by emission (`grep -n "kernels" rust/trajectory/src/streaming/mod.rs`), converting `PlanShaper`/`AxisShaper` to `PiecewisePolynomialKernel` via the existing `to_kernel` path.
+- [x] **Step 3: trajectory threading** — at every `temporal::SegmentInput` construction site, attach the segment's followers (mapped, `pa_k` looked up per axis from `ReplanContext.follower_pa`, default `0.0`). Kernels: the followed axes' kernels are exactly the chain's `axis_kernels` — populate from the same `ReplanContext.kernels` used by emission (`grep -n "kernels" rust/trajectory/src/streaming/mod.rs`), converting `PlanShaper`/`AxisShaper` to `PiecewisePolynomialKernel` via the existing `to_kernel` path.
 
-- [ ] **Step 4: streaming history** — in `append_and_replan` (streaming/state.rs), when any kernel is active and any uncommitted segment carries followers, sample the realized per-axis velocities over `[t_freeze − max_h, t_freeze]` from the retained shaped pieces (`self.axes[α].pieces` + `pending_freeze` — the same data the freeze zone already preserves; differentiate the Bezier pieces at `HISTORY_DT = max_h / 32` steps) into `temporal`'s `FollowerHistory`, passed through `plan_velocity` → `BatchInput`. When no shaped history exists yet (cold start), the history is all-zero — correct, the machine was at rest.
+- [x] **Step 4: streaming history** — in `append_and_replan` (streaming/state.rs), when any kernel is active and any uncommitted segment carries followers, sample the realized per-axis velocities over `[t_freeze − max_h, t_freeze]` from the retained shaped pieces (`self.axes[α].pieces` + `pending_freeze` — the same data the freeze zone already preserves; differentiate the Bezier pieces at `HISTORY_DT = max_h / 32` steps) into `temporal`'s `FollowerHistory`, passed through `plan_velocity` → `BatchInput`. When no shaped history exists yet (cold start), the history is all-zero — correct, the machine was at rest.
 
-- [ ] **Step 5: Integration test** (new `rust/trajectory/tests/follower_rows.rs`): plan a 3-segment batch (straight, corner stop, straight) with an extruder follower (ratio 0.05, `[limit extruder]` v=75 a=1500), X/Y smooth-zv kernels, `pa_k = 0.04`; assert (a) it solves, (b) brute-force shaped-demand check as in Task 8's test holds over the emitted profile, (c) with `pa_k = 0` total time strictly decreases or stays equal (PA rows only ever tighten).
+- [x] **Step 5: Integration test** (new `rust/trajectory/tests/follower_rows.rs`): plan a 3-segment batch (straight, corner stop, straight) with an extruder follower (ratio 0.05, `[limit extruder]` v=75 a=1500), X/Y smooth-zv kernels, `pa_k = 0.04`; assert (a) it solves, (b) brute-force shaped-demand check as in Task 8's test holds over the emitted profile, (c) with `pa_k = 0` total time strictly decreases or stays equal (PA rows only ever tighten).
 
-- [ ] **Step 6: Run** — `cargo nextest run` from `rust/` → full workspace PASS
-- [ ] **Step 7: Commit** — `feat(trajectory,motion-bridge): follower demands, kernels, and history reach the solver`
+- [x] **Step 6: Run** — `cargo nextest run` from `rust/` → full workspace PASS
+- [x] **Step 7: Commit** — `feat(trajectory,motion-bridge): follower demands, kernels, and history reach the solver`
 
 ---
 
 ### Task 11: fossil sweep and end-to-end verification
 
-- [ ] **Step 1:** `grep -rn "FollowerOnlyMoveUnsupported\|NoFollowerCoverage.*coverage only\|recorded for coverage" rust/ klippy/ --include="*.rs" --include="*.py"` — plan-2 stopgaps must be gone or rewritten; every survivor justified in the commit message.
-- [ ] **Step 2:** `cargo nextest run` from `rust/` → PASS; `cargo test --doc` if doc examples touched; `cargo fmt --all --check` → clean. If `klippy/` was touched (it should not be in this plan — confirm with `git status`), run `./scripts/ci.sh py`.
-- [ ] **Step 3:** kalico-sim sanity: boot a migrated fixture with `[axis e]` + `[limit extruder]`; travel-only prints behave identically to plan-2 (followers empty on live segments — live extrusion is still rejected until plan 4); a fixture whose `[limit extruder]` declares only `max_jerk` errors at startup naming velocity/accel coverage.
-- [ ] **Step 4:** Pure-function check: every new temporal test runs with zero hardware/bridge involvement — the planner remains `(geometry, rows, kernels, history) → profile`. Confirm no new `static`/global entered `temporal` (`grep -rn "static\|lazy_static\|OnceLock" rust/temporal/src/ | grep -v test`).
-- [ ] **Step 5: Commit** — `feat: follower/PA/shaper-folded constraint rows end-to-end (plan 3)`
+- [x] **Step 1:** `grep -rn "FollowerOnlyMoveUnsupported\|NoFollowerCoverage.*coverage only\|recorded for coverage" rust/ klippy/ --include="*.rs" --include="*.py"` — plan-2 stopgaps must be gone or rewritten; every survivor justified in the commit message.
+- [x] **Step 2:** `cargo nextest run` from `rust/` → PASS; `cargo test --doc` if doc examples touched; `cargo fmt --all --check` → clean. If `klippy/` was touched (it should not be in this plan — confirm with `git status`), run `./scripts/ci.sh py`.
+- [x] **Step 3:** kalico-sim sanity: boot a migrated fixture with `[axis e]` + `[limit extruder]`; travel-only prints behave identically to plan-2 (followers empty on live segments — live extrusion is still rejected until plan 4); a fixture whose `[limit extruder]` declares only `max_jerk` errors at startup naming velocity/accel coverage.
+- [x] **Step 4:** Pure-function check: every new temporal test runs with zero hardware/bridge involvement — the planner remains `(geometry, rows, kernels, history) → profile`. Confirm no new `static`/global entered `temporal` (`grep -rn "static\|lazy_static\|OnceLock" rust/temporal/src/ | grep -v test`).
+- [x] **Step 5: Commit** — `feat: follower/PA/shaper-folded constraint rows end-to-end (plan 3)`
 
 ---
 
