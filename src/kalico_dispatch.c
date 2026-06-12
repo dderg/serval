@@ -261,8 +261,6 @@ handle_push_correction_pieces(uint32_t correlation_id, const uint8_t *body,
             runtime_handle, axis_idx, start_slot, i,
             &body[CORRECTION_HEADER_LEN + (uint32_t)i * 32u]);
     if (rc == 0) {
-        // The commit validation reads ring/armed state the TIM5 ISR mutates —
-        // same pattern as handle_stop.
         irqstatus_t flag = irq_save();
         rc = kalico_runtime_commit_correction(runtime_handle, axis_idx,
                                               motor_idx, new_head);

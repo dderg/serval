@@ -80,10 +80,19 @@ fn push_linear(out: &mut Vec<ProfilePiece>, p0: f64, v: f64, t: f64, sign: f64) 
     });
 }
 
-// Demux buffer 512 − envelope 4 − crc 2 − msg header 7 − body header 9 = 490;
-// 490 / 32 = 15 pieces per frame.
-pub const MAX_CORRECTION_PIECES_PER_MSG: usize = 15;
-const _: () = assert!(MAX_CORRECTION_PIECES_PER_MSG == (512 - 4 - 2 - 7 - 9) / 32);
+const DEMUX_BUFFER_BYTES: usize = 512;
+const FRAME_ENVELOPE_BYTES: usize = 4;
+const FRAME_CRC_BYTES: usize = 2;
+const MESSAGE_HEADER_BYTES: usize = 7;
+const CORRECTION_BODY_HEADER_BYTES: usize = 9;
+const PIECE_BYTES: usize = 32;
+
+pub const MAX_CORRECTION_PIECES_PER_MSG: usize = (DEMUX_BUFFER_BYTES
+    - FRAME_ENVELOPE_BYTES
+    - FRAME_CRC_BYTES
+    - MESSAGE_HEADER_BYTES
+    - CORRECTION_BODY_HEADER_BYTES)
+    / PIECE_BYTES;
 const _: () = assert!(
     MAX_CORRECTION_PIECES_PER_MSG < runtime::stepping_state::CORRECTION_RING_DEPTH,
     "each chunk must fit the MCU correction ring"

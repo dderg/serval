@@ -724,13 +724,10 @@ class MCU:
         self._clocksync = clocksync
         self._reactor = printer.get_reactor()
         self._name = config.get_name()
-        # MCUs declared via [mcu*] sections run our firmware and must answer
-        # the native identify handshake; MCUs fabricated by sensor plugins
-        # from other sections (e.g. [beacon]) are foreign peripherals that
-        # never will, so the probe is skipped for them.
-        self._expect_native = self._name == "mcu" or self._name.startswith(
-            "mcu "
+        declared_via_mcu_section = (
+            self._name == "mcu" or self._name.startswith("mcu ")
         )
+        self._expect_native = declared_via_mcu_section
         if self._name.startswith("mcu "):
             self._name = self._name[4:]
         self._motion_bridge = printer.lookup_object("motion_bridge", None)
