@@ -428,6 +428,8 @@ class MotionToolhead:
 
         signal.signal(signal.SIGTERM, _sigterm_handler)
 
+        logging.info("MotionToolhead: config phase complete")
+
     def _handle_disconnect(self):
         logging.info("MotionToolhead: _handle_disconnect called")
         if self.bridge is not None:
