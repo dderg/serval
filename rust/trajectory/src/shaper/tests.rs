@@ -55,7 +55,7 @@ fn shaped_signal_constant_is_constant() {
     let x_val = 42.0;
     let fitted = vec![constant_segment(x_val, 0.0, 0.0, 0.0, 1.0)];
 
-    let padded = pad_segment_axis(0, 0, &fitted, &[], t_sm_half, 0.0, 1.0);
+    let padded = pad_segment_axis(0, 0, &fitted, t_sm_half, 0.0, 1.0);
     let sig = ShapedSignal::new(&padded, &kernel, 0.0, 1.0);
 
     for &t in &[0.0, 0.25, 0.5, 0.75, 1.0] {
@@ -106,15 +106,7 @@ fn pad_trim_shaped_signal_matches_global_convolve() {
 
     for seg_idx in 0..3 {
         let seg = &fitted[seg_idx];
-        let padded = pad_segment_axis(
-            seg_idx,
-            0,
-            &fitted,
-            &[],
-            t_sm_half,
-            batch_t_start,
-            batch_t_end,
-        );
+        let padded = pad_segment_axis(seg_idx, 0, &fitted, t_sm_half, batch_t_start, batch_t_end);
         let sig = ShapedSignal::new(&padded, &kernel, seg.t_start, seg.t_end);
 
         let n_samples = 10;
@@ -142,7 +134,7 @@ fn shaped_signal_edge_boundary_approximately_correct() {
     let x_end = 15.0;
     let fitted = vec![linear_segment(x_start, x_end, 0.0, 1.0)];
 
-    let padded = pad_segment_axis(0, 0, &fitted, &[], t_sm_half, 0.0, 1.0);
+    let padded = pad_segment_axis(0, 0, &fitted, t_sm_half, 0.0, 1.0);
     let pieces = extract_bezier_pieces(&padded);
 
     assert!(pieces[0].u_start < 0.0, "padding should extend before t=0");

@@ -18,10 +18,6 @@ fn shape_batch_rejects_empty_segments() {
         fit_tolerance_mm: 0.001,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
-        e_limits: ELimits {
-            v_max: 100.0,
-            a_max: 50_000.0,
-        },
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,

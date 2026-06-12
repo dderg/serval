@@ -1,6 +1,5 @@
 use crate::fit::FittedSegment;
-use crate::partition::partition_batch;
-use crate::{AxisShaper, ELimits, ShapeBatchInput, ShapeError, ShapeSegmentInput, ShaperConfig};
+use crate::{AxisShaper, ShapeBatchInput, ShapeError, ShapeSegmentInput, ShaperConfig};
 
 pub use crate::beta::{PlanOutput, PlanStats};
 
@@ -36,10 +35,7 @@ impl PlanShaper {
 #[derive(Debug, Clone, Copy)]
 pub struct PlanSegment<'a> {
     pub temporal: temporal::multi::SegmentInput<'a>,
-    /// E-axis mode. Used by the partitioning step to identify XY-motion runs.
-    pub e_mode: geometry::segment::EMode,
-    pub extrusion_per_xy_mm: f64,
-    pub e_independent: Option<&'a nurbs::ScalarNurbs<f64>>,
+    pub followers: &'a [geometry::segment::FollowerDemand],
     pub feedrate_mm_s: f64,
 }
 
@@ -53,7 +49,6 @@ pub struct PlanInput<'a> {
     pub fit_tolerance_mm: f64,
     pub beta_max_iters: u8,
     pub beta_convergence_ratio: f64,
-    pub e_limits: ELimits,
     pub initial_v: f64,
     pub initial_a: f64,
     pub terminal_v: f64,
@@ -91,9 +86,7 @@ pub fn plan_velocity(input: &PlanInput<'_>) -> Result<PlanOutput, ShapeError> {
         .iter()
         .map(|s| ShapeSegmentInput {
             temporal: s.temporal,
-            e_mode: s.e_mode,
-            extrusion_per_xy_mm: s.extrusion_per_xy_mm,
-            e_independent: s.e_independent,
+            followers: s.followers,
             feedrate_mm_s: s.feedrate_mm_s,
         })
         .collect();
@@ -106,15 +99,13 @@ pub fn plan_velocity(input: &PlanInput<'_>) -> Result<PlanOutput, ShapeError> {
         fit_tolerance_mm: input.fit_tolerance_mm,
         beta_max_iters: input.beta_max_iters,
         beta_convergence_ratio: input.beta_convergence_ratio,
-        e_limits: input.e_limits,
         initial_v: input.initial_v,
         initial_a: input.initial_a,
         terminal_v: input.terminal_v,
         start_d2_override: input.start_d2_override,
     };
 
-    let partition = partition_batch(&segments, &input.e_limits);
-    crate::beta::plan_velocity_inner(&shape_input, &partition, input.safety_mode)
+    crate::beta::plan_velocity_inner(&shape_input, input.safety_mode)
 }
 
 fn build_shaper_config(kernels: &[Option<PlanShaper>; 4]) -> ShaperConfig {

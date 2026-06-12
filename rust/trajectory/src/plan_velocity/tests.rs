@@ -1,6 +1,10 @@
 use super::*;
-use crate::ELimits;
-use geometry::segment::EMode;
+use geometry::segment::FollowerDemand;
+
+const E_FOLLOWER_04: &[FollowerDemand] = &[FollowerDemand {
+    axis_index: 3,
+    ratio: 0.04,
+}];
 use nurbs::VectorNurbs;
 
 fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
@@ -13,13 +17,6 @@ fn default_limits() -> temporal::Limits {
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
     )
-}
-
-fn default_e_limits() -> ELimits {
-    ELimits {
-        v_max: 100.0,
-        a_max: 5_000.0,
-    }
 }
 
 fn default_kernels() -> [Option<PlanShaper>; 4] {
@@ -44,7 +41,6 @@ fn default_input<'a>(segments: &'a [PlanSegment<'a>], safety: SafetyMode) -> Pla
         fit_tolerance_mm: 0.5,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -68,9 +64,7 @@ fn rejects_negative_initial_v() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
@@ -90,9 +84,7 @@ fn rejects_nan_terminal_v() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
@@ -112,9 +104,7 @@ fn nonzero_initial_v_produces_chained_profile() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
@@ -147,9 +137,7 @@ fn passthrough_on_x_is_valid() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
@@ -169,9 +157,7 @@ fn passthrough_on_y_is_valid() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
@@ -191,9 +177,7 @@ fn none_on_x_treated_as_passthrough() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
@@ -213,9 +197,7 @@ fn all_passthrough_produces_fitted_output() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
@@ -233,9 +215,7 @@ fn returns_one_fitted_per_xy_segment() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
     let input = default_input(&segments, SafetyMode::TerminalKnown);
@@ -254,9 +234,7 @@ fn worst_case_future_segment_durations_monotone() {
                 curve: &curve0,
                 limits: default_limits(),
             },
-            e_mode: EMode::CoupledToXy,
-            extrusion_per_xy_mm: 0.04,
-            e_independent: None,
+            followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
         },
         PlanSegment {
@@ -264,9 +242,7 @@ fn worst_case_future_segment_durations_monotone() {
                 curve: &curve1,
                 limits: default_limits(),
             },
-            e_mode: EMode::CoupledToXy,
-            extrusion_per_xy_mm: 0.04,
-            e_independent: None,
+            followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
         },
     ];
@@ -304,9 +280,7 @@ fn worst_case_future_is_no_faster_than_terminal_known() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
@@ -334,9 +308,7 @@ fn plan_velocity_rejects_accel_at_rest_start() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
@@ -354,9 +326,7 @@ fn plan_velocity_rejects_nonfinite_accel() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);

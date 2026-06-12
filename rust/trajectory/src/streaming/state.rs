@@ -143,9 +143,7 @@ impl ShaperState {
                         m.segment.feedrate_mm_s,
                     ),
                 },
-                e_mode: m.segment.e_mode,
-                extrusion_per_xy_mm: m.segment.extrusion_per_xy_mm,
-                e_independent: m.segment.e_independent.as_ref(),
+                followers: &m.segment.followers,
                 feedrate_mm_s: m.segment.feedrate_mm_s,
             })
             .collect();
@@ -173,7 +171,6 @@ impl ShaperState {
             fit_tolerance_mm: ctx.fit_tolerance_mm,
             beta_max_iters: ctx.beta_max_iters,
             beta_convergence_ratio: ctx.beta_convergence_ratio,
-            e_limits: ctx.e_limits,
             initial_v,
             initial_a,
             terminal_v: 0.0,
@@ -255,8 +252,7 @@ impl ShaperState {
             .uncommitted_moves
             .iter()
             .map(|m| EmitSegmentMeta {
-                e_mode: m.segment.e_mode,
-                extrusion_per_xy_mm: m.segment.extrusion_per_xy_mm,
+                followers: m.segment.followers.clone(),
             })
             .collect();
 
@@ -437,13 +433,6 @@ impl ShaperState {
 
         let move_ref = self.uncommitted_moves.get(idx)?;
 
-        if matches!(
-            move_ref.segment.e_mode,
-            geometry::segment::EMode::Independent
-        ) {
-            return None;
-        }
-
         let p_target = [
             nurbs::eval::eval(&planned.axes[0], t_freeze),
             nurbs::eval::eval(&planned.axes[1], t_freeze),
@@ -470,9 +459,7 @@ impl ShaperState {
 
         let new_segment = CubicSegment::try_new(
             right,
-            move_ref.segment.e_mode,
-            move_ref.segment.extrusion_per_xy_mm,
-            move_ref.segment.e_independent.clone(),
+            move_ref.segment.followers.clone(),
             move_ref.segment.feedrate_mm_s,
             move_ref.segment.source,
             move_ref.segment.split_info,
@@ -563,9 +550,7 @@ fn try_rung2(
                 curve: &m.segment.xyz,
                 limits: per_segment_limits(&m.segment.xyz, &ctx.limits, m.segment.feedrate_mm_s),
             },
-            e_mode: m.segment.e_mode,
-            extrusion_per_xy_mm: m.segment.extrusion_per_xy_mm,
-            e_independent: m.segment.e_independent.as_ref(),
+            followers: &m.segment.followers,
             feedrate_mm_s: m.segment.feedrate_mm_s,
         })
         .collect();
@@ -591,7 +576,6 @@ fn try_rung2(
         fit_tolerance_mm: ctx.fit_tolerance_mm,
         beta_max_iters: ctx.beta_max_iters,
         beta_convergence_ratio: ctx.beta_convergence_ratio,
-        e_limits: ctx.e_limits,
         initial_v: retry_iv,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -640,9 +624,7 @@ fn try_rung3(
             curve: &seg.segment.xyz,
             limits: per_segment_limits(&seg.segment.xyz, &ctx.limits, seg.segment.feedrate_mm_s),
         },
-        e_mode: seg.segment.e_mode,
-        extrusion_per_xy_mm: seg.segment.extrusion_per_xy_mm,
-        e_independent: seg.segment.e_independent.as_ref(),
+        followers: &seg.segment.followers,
         feedrate_mm_s: seg.segment.feedrate_mm_s,
     }];
 
@@ -654,7 +636,6 @@ fn try_rung3(
         fit_tolerance_mm: ctx.fit_tolerance_mm,
         beta_max_iters: ctx.beta_max_iters,
         beta_convergence_ratio: ctx.beta_convergence_ratio,
-        e_limits: ctx.e_limits,
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,

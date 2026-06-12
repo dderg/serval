@@ -137,7 +137,6 @@ impl ShaperState {
             &self.planned_fitted,
             &self.planned_meta,
             ctx.kernels,
-            ctx.e_halos,
             &history,
             emit_start,
             batch_t_end,
@@ -300,7 +299,6 @@ impl ShaperState {
                 &self.planned_fitted,
                 &self.planned_meta,
                 ctx.kernels,
-                ctx.e_halos,
                 &history,
                 emit_start,
                 self.t_appended,
@@ -388,9 +386,7 @@ fn restrict_segment_lo_hi(
     ];
     Ok(ShapedSegment {
         axes: restricted_axes,
-        e_mode: seg.e_mode,
-        extrusion_per_xy_mm: seg.extrusion_per_xy_mm,
-        e_independent: seg.e_independent.clone(),
+        followers: seg.followers.clone(),
         t_start: t_lo,
         t_end: t_hi,
     })

@@ -154,7 +154,11 @@ fn single_cubic(items: &[Item]) -> &crate::CubicSegment {
             _ => None,
         })
         .collect();
-    assert_eq!(cubics.len(), 1, "expected exactly one cubic, got {items:#?}");
+    assert_eq!(
+        cubics.len(),
+        1,
+        "expected exactly one cubic, got {items:#?}"
+    );
     cubics[0]
 }
 
@@ -180,9 +184,8 @@ fn z_hop_with_follower_classifies() {
 
 #[test]
 fn follower_only_move_is_fatal() {
-    let items = collect_with_e_follower(
-        "G5 X10 Y0 I3 J0 P-3 Q0 F3000\nG5 X10 Y0 I0 J0 P0 Q0 E5 F3000\n",
-    );
+    let items =
+        collect_with_e_follower("G5 X10 Y0 I3 J0 P-3 Q0 F3000\nG5 X10 Y0 I0 J0 P0 Q0 E5 F3000\n");
     assert!(
         items
             .iter()

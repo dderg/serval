@@ -1,11 +1,9 @@
 mod beta;
-mod e_independent;
 pub mod emit_shaped;
 pub mod fit;
 mod kernel;
 mod pad;
 mod parallel;
-mod partition;
 pub mod peak;
 pub mod plan_velocity;
 mod reparam;
@@ -14,7 +12,6 @@ mod smooth_fit;
 pub mod streaming;
 
 pub use emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory};
-pub use pad::EHalo;
 pub use plan_velocity::{
     plan_velocity, PlanInput, PlanOutput, PlanSegment, PlanShaper, PlanStats, SafetyMode,
 };
@@ -29,7 +26,6 @@ pub struct ShapeBatchInput<'a> {
     pub fit_tolerance_mm: f64,
     pub beta_max_iters: u8,
     pub beta_convergence_ratio: f64,
-    pub e_limits: ELimits,
     pub initial_v: f64,
     pub initial_a: f64,
     pub terminal_v: f64,
@@ -44,17 +40,8 @@ pub struct ShapeBatchInput<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct ShapeSegmentInput<'a> {
     pub temporal: temporal::multi::SegmentInput<'a>,
-    pub e_mode: geometry::segment::EMode,
-    /// Extrusion ratio (mm E per mm XY arc-length). Meaningful when `e_mode == CoupledToXy`.
-    pub extrusion_per_xy_mm: f64,
-    pub e_independent: Option<&'a nurbs::ScalarNurbs<f64>>,
+    pub followers: &'a [geometry::segment::FollowerDemand],
     pub feedrate_mm_s: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ELimits {
-    pub v_max: f64,
-    pub a_max: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -88,9 +75,7 @@ pub struct BetaWarning {
 #[derive(Debug, Clone)]
 pub struct ShapedSegment {
     pub axes: [nurbs::ScalarNurbs<f64>; 3],
-    pub e_mode: geometry::segment::EMode,
-    pub extrusion_per_xy_mm: f64,
-    pub e_independent: Option<nurbs::ScalarNurbs<f64>>,
+    pub followers: Vec<geometry::segment::FollowerDemand>,
     pub t_start: f64,
     pub t_end: f64,
 }
@@ -139,9 +124,7 @@ pub fn shape_batch(input: &ShapeBatchInput<'_>) -> Result<ShapeBatchOutput, Shap
         return Err(ShapeError::EmptySegments);
     }
 
-    let partition = partition::partition_batch(input.segments, &input.e_limits);
-
-    beta::beta_loop(input, &partition)
+    beta::beta_loop(input)
 }
 
 #[cfg(test)]

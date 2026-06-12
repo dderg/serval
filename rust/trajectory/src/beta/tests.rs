@@ -1,5 +1,11 @@
 use super::*;
-use crate::{ELimits, ShapeBatchInput, ShapeSegmentInput, ShaperConfig};
+use crate::{ShapeBatchInput, ShapeSegmentInput, ShaperConfig};
+use geometry::segment::FollowerDemand;
+
+const E_FOLLOWER_04: &[FollowerDemand] = &[FollowerDemand {
+    axis_index: 3,
+    ratio: 0.04,
+}];
 use nurbs::VectorNurbs;
 
 fn default_limits() -> temporal::Limits {
@@ -22,13 +28,6 @@ fn default_shaper_config() -> ShaperConfig {
     }
 }
 
-fn default_e_limits() -> ELimits {
-    ELimits {
-        v_max: 100.0,
-        a_max: 5000.0,
-    }
-}
-
 fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
     VectorNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![start, end]).unwrap()
 }
@@ -46,9 +45,7 @@ fn single_straight_line_converges() {
             curve: &curve,
             limits: generous_limits,
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
@@ -60,7 +57,6 @@ fn single_straight_line_converges() {
         fit_tolerance_mm: 0.5,
         beta_max_iters: 1,
         beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -71,8 +67,7 @@ fn single_straight_line_converges() {
 
     assert_eq!(output.segments.len(), 1);
     assert!(output.segments[0].t_end > output.segments[0].t_start);
-    assert_eq!(output.segments[0].e_mode, EMode::CoupledToXy);
-    assert!((output.segments[0].extrusion_per_xy_mm - 0.04).abs() < 1e-12);
+    assert_eq!(output.segments[0].followers, E_FOLLOWER_04);
 
     for axis_nurbs in &output.segments[0].axes {
         assert!(
@@ -80,74 +75,6 @@ fn single_straight_line_converges() {
             "shaped axis should have at least 2 control points"
         );
     }
-}
-
-#[test]
-fn two_segments_with_e_gap() {
-    let curve1 = straight_linear([0.0, 0.0, 0.0], [50.0, 0.0, 0.0]);
-    let curve2 = straight_linear([50.0, 0.0, 0.0], [100.0, 0.0, 0.0]);
-    let e_hold = straight_linear([50.0, 0.0, 0.0], [50.0, 0.0, 0.0]);
-    let e_nurbs =
-        nurbs::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![10.0, 5.0]).unwrap();
-
-    let segments = [
-        ShapeSegmentInput {
-            temporal: temporal::multi::SegmentInput {
-                curve: &curve1,
-                limits: default_limits(),
-            },
-            e_mode: EMode::CoupledToXy,
-            extrusion_per_xy_mm: 0.04,
-            e_independent: None,
-            feedrate_mm_s: 100.0,
-        },
-        ShapeSegmentInput {
-            temporal: temporal::multi::SegmentInput {
-                curve: &e_hold,
-                limits: default_limits(),
-            },
-            e_mode: EMode::Independent,
-            extrusion_per_xy_mm: 0.0,
-            e_independent: Some(&e_nurbs),
-            feedrate_mm_s: 50.0,
-        },
-        ShapeSegmentInput {
-            temporal: temporal::multi::SegmentInput {
-                curve: &curve2,
-                limits: default_limits(),
-            },
-            e_mode: EMode::CoupledToXy,
-            extrusion_per_xy_mm: 0.04,
-            e_independent: None,
-            feedrate_mm_s: 100.0,
-        },
-    ];
-
-    let input = ShapeBatchInput {
-        segments: &segments,
-        grid_strategy: temporal::multi::GridStrategy::Fixed(10),
-        worker_threads: 1,
-        shaper: default_shaper_config(),
-        fit_tolerance_mm: 0.5,
-        beta_max_iters: 1,
-        beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
-        initial_v: 0.0,
-        initial_a: 0.0,
-        terminal_v: 0.0,
-        start_d2_override: None,
-    };
-
-    let output = crate::shape_batch(&input).expect("should succeed");
-
-    assert_eq!(output.segments.len(), 3);
-    assert_eq!(output.segments[0].e_mode, EMode::CoupledToXy);
-    assert_eq!(output.segments[1].e_mode, EMode::Independent);
-    assert_eq!(output.segments[2].e_mode, EMode::CoupledToXy);
-
-    assert!(output.segments[1].e_independent.is_some());
-    assert!(output.segments[0].t_end <= output.segments[1].t_start + 1e-9);
-    assert!(output.segments[1].t_end <= output.segments[2].t_start + 1e-9);
 }
 
 #[test]
@@ -178,46 +105,6 @@ fn derate_detects_exceeding_peaks() {
     assert!(info.needs_derate);
     assert!((info.worst_ratio - 1.2).abs() < 1e-10);
     assert_eq!(info.exceeding_indices, vec![0]);
-}
-
-#[test]
-fn all_e_gaps_output() {
-    let e_hold = straight_linear([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
-    let e_nurbs =
-        nurbs::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![10.0, 5.0]).unwrap();
-
-    let segments = [ShapeSegmentInput {
-        temporal: temporal::multi::SegmentInput {
-            curve: &e_hold,
-            limits: default_limits(),
-        },
-        e_mode: EMode::Independent,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: Some(&e_nurbs),
-        feedrate_mm_s: 50.0,
-    }];
-
-    let input = ShapeBatchInput {
-        segments: &segments,
-        grid_strategy: temporal::multi::GridStrategy::Fixed(10),
-        worker_threads: 1,
-        shaper: default_shaper_config(),
-        fit_tolerance_mm: 0.5,
-        beta_max_iters: 1,
-        beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
-        initial_v: 0.0,
-        initial_a: 0.0,
-        terminal_v: 0.0,
-        start_d2_override: None,
-    };
-
-    let output = crate::shape_batch(&input).expect("should succeed");
-
-    assert_eq!(output.segments.len(), 1);
-    assert_eq!(output.segments[0].e_mode, EMode::Independent);
-    assert!(output.segments[0].e_independent.is_some());
-    assert!(output.segments[0].t_end > output.segments[0].t_start);
 }
 
 #[test]

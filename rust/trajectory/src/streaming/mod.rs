@@ -6,9 +6,7 @@ use nurbs::bezier::BezierPiece;
 
 use crate::emit_shaped::EmitSegmentMeta;
 use crate::fit::FittedSegment;
-use crate::pad::EHalo;
 use crate::plan_velocity::{PlanShaper, PlanStats, SafetyMode};
-use crate::ELimits;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ReplanReport {
@@ -57,7 +55,6 @@ pub struct ReplanContext {
     pub fit_tolerance_mm: f64,
     pub beta_max_iters: u8,
     pub beta_convergence_ratio: f64,
-    pub e_limits: ELimits,
     /// Worker thread count for TOPP-RA's parallel fan-out.
     pub worker_threads: usize,
     pub grid_strategy: temporal::multi::GridStrategy,
@@ -70,8 +67,6 @@ pub struct ReplanContext {
 pub struct EmitContext<'a> {
     /// Per-axis shaper kernels `[X, Y, Z, E]`. E slot unused by `emit_shaped`.
     pub kernels: &'a [Option<PiecewisePolynomialKernel<f64>>; 4],
-    /// E-gap halo list. Streaming passes `&[]`.
-    pub e_halos: &'a [EHalo],
 }
 
 #[derive(Debug)]

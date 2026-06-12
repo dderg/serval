@@ -1,5 +1,9 @@
 use nurbs::algebra::PiecewisePolynomialKernel;
 
+// inline(never): per-call-site float codegen produced last-ulp coefficient
+// differences between kernels built in tests vs beta_loop; one body keeps
+// kernel construction bit-identical everywhere.
+#[inline(never)]
 fn build_bell_kernel(t_sm: f64) -> PiecewisePolynomialKernel<f64> {
     let h = t_sm / 2.0;
     let c = 15.0 / (16.0 * h.powi(5));

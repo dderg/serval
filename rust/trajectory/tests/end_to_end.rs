@@ -8,12 +8,15 @@
 //! (high f) produce large polynomial coefficients that amplify floating-point
 //! error in the convolution + double-differentiation pipeline.
 
-use geometry::segment::EMode;
+use geometry::segment::FollowerDemand;
+
+const E_FOLLOWER_04: &[FollowerDemand] = &[FollowerDemand {
+    axis_index: 3,
+    ratio: 0.04,
+}];
 use nurbs::{ScalarNurbs, VectorNurbs};
 use temporal::multi::{GridStrategy, SegmentInput};
-use trajectory::{
-    AxisShaper, ELimits, ShapeBatchInput, ShapeError, ShapeSegmentInput, ShaperConfig,
-};
+use trajectory::{AxisShaper, ShapeBatchInput, ShapeError, ShapeSegmentInput, ShaperConfig};
 
 fn make_straight_line(from: [f64; 3], to: [f64; 3]) -> VectorNurbs<f64, 3> {
     VectorNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![from, to]).unwrap()
@@ -31,13 +34,6 @@ fn test_shaper_config() -> ShaperConfig {
     }
 }
 
-fn default_e_limits() -> ELimits {
-    ELimits {
-        v_max: 100.0,
-        a_max: 5_000.0,
-    }
-}
-
 #[test]
 fn shape_batch_straight_line() {
     let curve = make_straight_line([0.0, 0.0, 0.0], [50.0, 0.0, 0.0]);
@@ -47,9 +43,7 @@ fn shape_batch_straight_line() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
@@ -61,7 +55,6 @@ fn shape_batch_straight_line() {
         fit_tolerance_mm: 0.5,
         beta_max_iters: 3,
         beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -83,9 +76,7 @@ fn shape_batch_straight_line() {
     {
         assert_eq!(seg.t_start, 0.0);
     }
-    assert_eq!(seg.e_mode, EMode::CoupledToXy);
-    assert!((seg.extrusion_per_xy_mm - 0.04).abs() < 1e-12);
-    assert!(seg.e_independent.is_none());
+    assert_eq!(seg.followers, E_FOLLOWER_04);
 
     for (axis_idx, axis_nurbs) in seg.axes.iter().enumerate() {
         assert!(
@@ -106,9 +97,7 @@ fn shape_batch_short_low_velocity_line_refits_at_five_microns() {
             curve: &curve,
             limits,
         },
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: &[],
         feedrate_mm_s: 1000.0 / 60.0,
     }];
 
@@ -124,7 +113,6 @@ fn shape_batch_short_low_velocity_line_refits_at_five_microns() {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 3,
         beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -162,9 +150,7 @@ fn shape_batch_two_segments() {
                 curve: &curve1,
                 limits: default_limits(),
             },
-            e_mode: EMode::CoupledToXy,
-            extrusion_per_xy_mm: 0.04,
-            e_independent: None,
+            followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
         },
         ShapeSegmentInput {
@@ -172,9 +158,7 @@ fn shape_batch_two_segments() {
                 curve: &curve2,
                 limits: default_limits(),
             },
-            e_mode: EMode::CoupledToXy,
-            extrusion_per_xy_mm: 0.04,
-            e_independent: None,
+            followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
         },
     ];
@@ -187,7 +171,6 @@ fn shape_batch_two_segments() {
         fit_tolerance_mm: 0.5,
         beta_max_iters: 3,
         beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -198,8 +181,8 @@ fn shape_batch_two_segments() {
 
     assert_eq!(output.segments.len(), 2);
 
-    assert_eq!(output.segments[0].e_mode, EMode::CoupledToXy);
-    assert_eq!(output.segments[1].e_mode, EMode::CoupledToXy);
+    assert_eq!(output.segments[0].followers, E_FOLLOWER_04);
+    assert_eq!(output.segments[1].followers, E_FOLLOWER_04);
 
     for (i, seg) in output.segments.iter().enumerate() {
         assert!(
@@ -221,98 +204,6 @@ fn shape_batch_two_segments() {
 }
 
 #[test]
-#[cfg_attr(target_os = "linux", ignore)]
-fn shape_batch_with_retraction() {
-    let curve1 = make_straight_line([0.0, 0.0, 0.0], [50.0, 0.0, 0.0]);
-    let curve_hold = make_straight_line([50.0, 0.0, 0.0], [50.0, 0.0, 0.0]);
-    let curve2 = make_straight_line([50.0, 0.0, 0.0], [100.0, 0.0, 0.0]);
-
-    let e_retract = ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![10.0, 5.0]).unwrap();
-
-    let segments = [
-        ShapeSegmentInput {
-            temporal: SegmentInput {
-                curve: &curve1,
-                limits: default_limits(),
-            },
-            e_mode: EMode::CoupledToXy,
-            extrusion_per_xy_mm: 0.04,
-            e_independent: None,
-            feedrate_mm_s: 100.0,
-        },
-        ShapeSegmentInput {
-            temporal: SegmentInput {
-                curve: &curve_hold,
-                limits: default_limits(),
-            },
-            e_mode: EMode::Independent,
-            extrusion_per_xy_mm: 0.0,
-            e_independent: Some(&e_retract),
-            feedrate_mm_s: 50.0,
-        },
-        ShapeSegmentInput {
-            temporal: SegmentInput {
-                curve: &curve2,
-                limits: default_limits(),
-            },
-            e_mode: EMode::CoupledToXy,
-            extrusion_per_xy_mm: 0.04,
-            e_independent: None,
-            feedrate_mm_s: 100.0,
-        },
-    ];
-
-    let input = ShapeBatchInput {
-        segments: &segments,
-        grid_strategy: GridStrategy::Fixed(20),
-        worker_threads: 1,
-        shaper: test_shaper_config(),
-        fit_tolerance_mm: 0.5,
-        beta_max_iters: 3,
-        beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
-        initial_v: 0.0,
-        initial_a: 0.0,
-        terminal_v: 0.0,
-        start_d2_override: None,
-    };
-
-    let output = trajectory::shape_batch(&input).expect("shape_batch should succeed");
-
-    assert_eq!(output.segments.len(), 3);
-    assert_eq!(output.segments[0].e_mode, EMode::CoupledToXy);
-    assert_eq!(output.segments[1].e_mode, EMode::Independent);
-    assert_eq!(output.segments[2].e_mode, EMode::CoupledToXy);
-
-    assert!(
-        output.segments[1].e_independent.is_some(),
-        "independent E segment should have e_independent populated"
-    );
-
-    assert!(
-        output.segments[0].t_end <= output.segments[1].t_start + 1e-9,
-        "seg[0].t_end={} should be <= seg[1].t_start={}",
-        output.segments[0].t_end,
-        output.segments[1].t_start
-    );
-    assert!(
-        output.segments[1].t_end <= output.segments[2].t_start + 1e-9,
-        "seg[1].t_end={} should be <= seg[2].t_start={}",
-        output.segments[1].t_end,
-        output.segments[2].t_start
-    );
-
-    for (i, seg) in output.segments.iter().enumerate() {
-        assert!(
-            seg.t_end > seg.t_start,
-            "segment {i}: t_end={} must be > t_start={}",
-            seg.t_end,
-            seg.t_start
-        );
-    }
-}
-
-#[test]
 fn shape_batch_beta_warning() {
     let curve = make_straight_line([0.0, 0.0, 0.0], [50.0, 0.0, 0.0]);
 
@@ -321,9 +212,7 @@ fn shape_batch_beta_warning() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
@@ -335,7 +224,6 @@ fn shape_batch_beta_warning() {
         fit_tolerance_mm: 0.5,
         beta_max_iters: 1,
         beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -374,7 +262,6 @@ fn shape_batch_empty_input() {
         fit_tolerance_mm: 0.5,
         beta_max_iters: 3,
         beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,

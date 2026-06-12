@@ -1,10 +1,7 @@
 use crate::emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory};
 use crate::fit::FittedSegment;
-use crate::pad::EHalo;
-use crate::partition::BatchPartition;
 use crate::plan_velocity::SafetyMode;
 use crate::{BetaWarning, ShapeBatchInput, ShapeBatchOutput, ShapeError, ShapedSegment};
-use geometry::segment::EMode;
 use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::ScalarNurbs;
 
@@ -17,41 +14,51 @@ struct AxisKernels {
     z: Option<PiecewisePolynomialKernel<f64>>,
 }
 
-pub fn beta_loop(
-    input: &ShapeBatchInput<'_>,
-    partition: &BatchPartition,
-) -> Result<ShapeBatchOutput, ShapeError> {
-    beta_loop_with_safety(input, partition, SafetyMode::TerminalKnown)
+pub fn beta_loop(input: &ShapeBatchInput<'_>) -> Result<ShapeBatchOutput, ShapeError> {
+    beta_loop_with_safety(input, SafetyMode::TerminalKnown)
 }
 
 pub fn beta_loop_with_safety(
     input: &ShapeBatchInput<'_>,
-    partition: &BatchPartition,
     safety_mode: SafetyMode,
 ) -> Result<ShapeBatchOutput, ShapeError> {
-    if partition.runs.is_empty() {
-        return assemble_e_only_output(input, partition);
+    if input.segments.is_empty() {
+        return Ok(ShapeBatchOutput {
+            segments: Vec::new(),
+            beta_iters: 0,
+            temporal_status: temporal::multi::JoiningStatus::Converged,
+            beta_warning: None,
+        });
     }
 
-    let planned = plan_batch_full(input, partition, safety_mode)?;
+    let planned = plan_batch_full(input, safety_mode)?;
 
     let kernel_array = build_kernel_array_from_shaper_config(&input.shaper);
-    let e_halos = build_e_halos(partition, &planned.global_ends);
-    let meta: Vec<EmitSegmentMeta> = collect_xy_meta(input, partition);
+    let meta: Vec<EmitSegmentMeta> = collect_xy_meta(input);
     let batch_t_start = 0.0_f64;
-    let batch_t_end = compute_batch_t_end(partition, &planned.global_ends);
+    let batch_t_end = planned.global_ends.last().copied().unwrap_or(0.0);
 
     let emitted_xy = emit_shaped(
         &planned.fitted,
         &meta,
         &kernel_array,
-        &e_halos,
         &PerAxisHistory::empty(),
         batch_t_start,
         batch_t_end,
     )?;
 
-    assemble_with_e_gaps(input, partition, &planned, emitted_xy)
+    let beta_iters = if planned.converged {
+        1
+    } else {
+        input.beta_max_iters
+    };
+
+    Ok(ShapeBatchOutput {
+        segments: emitted_xy,
+        beta_iters,
+        temporal_status: planned.joining_status,
+        beta_warning: planned.beta_warning.clone(),
+    })
 }
 
 pub struct PlannedBatch {
@@ -65,10 +72,9 @@ pub struct PlannedBatch {
 
 pub fn plan_batch_full(
     input: &ShapeBatchInput<'_>,
-    partition: &BatchPartition,
     safety_mode: SafetyMode,
 ) -> Result<PlannedBatch, ShapeError> {
-    let outcome = beta_iterate_inner(input, partition, safety_mode)?;
+    let outcome = beta_iterate_inner(input, safety_mode)?;
     Ok(PlannedBatch {
         fitted: outcome.result.fitted,
         global_ends: outcome.result.global_ends,
@@ -90,31 +96,14 @@ fn build_kernel_array_from_shaper_config(
     ]
 }
 
-fn collect_xy_meta(
-    input: &ShapeBatchInput<'_>,
-    partition: &BatchPartition,
-) -> Vec<EmitSegmentMeta> {
-    partition
-        .runs
+fn collect_xy_meta(input: &ShapeBatchInput<'_>) -> Vec<EmitSegmentMeta> {
+    input
+        .segments
         .iter()
-        .flat_map(|r| r.segment_range.clone())
-        .map(|i| EmitSegmentMeta {
-            e_mode: input.segments[i].e_mode,
-            extrusion_per_xy_mm: input.segments[i].extrusion_per_xy_mm,
+        .map(|s| EmitSegmentMeta {
+            followers: s.followers.to_vec(),
         })
         .collect()
-}
-
-fn compute_batch_t_end(partition: &BatchPartition, global_ends: &[f64]) -> f64 {
-    let mut t = global_ends.last().copied().unwrap_or(0.0);
-    if let Some(last_run) = partition.runs.last() {
-        for eg in &partition.e_gaps {
-            if eg.segment_index >= last_run.segment_range.end {
-                t += eg.duration;
-            }
-        }
-    }
-    t
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -132,10 +121,9 @@ pub struct PlanOutput {
 
 pub fn plan_velocity_inner(
     input: &ShapeBatchInput<'_>,
-    partition: &BatchPartition,
     safety_mode: SafetyMode,
 ) -> Result<PlanOutput, ShapeError> {
-    if partition.runs.is_empty() {
+    if input.segments.is_empty() {
         return Ok(PlanOutput {
             fitted: Vec::new(),
             stats: PlanStats {
@@ -146,7 +134,7 @@ pub fn plan_velocity_inner(
         });
     }
 
-    let planned = plan_batch_full(input, partition, safety_mode)?;
+    let planned = plan_batch_full(input, safety_mode)?;
     let segments = planned.fitted.len();
     Ok(PlanOutput {
         fitted: planned.fitted,
@@ -168,7 +156,6 @@ struct BetaIterationOutcome {
 #[allow(clippy::too_many_lines)]
 fn beta_iterate_inner(
     input: &ShapeBatchInput<'_>,
-    partition: &BatchPartition,
     safety_mode: SafetyMode,
 ) -> Result<BetaIterationOutcome, ShapeError> {
     let kernels = AxisKernels {
@@ -178,20 +165,15 @@ fn beta_iterate_inner(
     };
 
     debug_assert!(
-        !partition.runs.is_empty(),
-        "beta_iterate_inner caller must handle empty-runs fast path"
+        !input.segments.is_empty(),
+        "beta_iterate_inner caller must handle the empty-batch fast path"
     );
 
-    let all_xy_indices: Vec<usize> = partition
-        .runs
+    let machine_a_max: Vec<[f64; 3]> = input
+        .segments
         .iter()
-        .flat_map(|r| r.segment_range.clone())
-        .collect();
-
-    let machine_a_max: Vec<[f64; 3]> = all_xy_indices
-        .iter()
-        .map(|&i| {
-            let lim = &input.segments[i].temporal.limits;
+        .map(|seg| {
+            let lim = &seg.temporal.limits;
             [
                 lim.axis_accel_cap(0),
                 lim.axis_accel_cap(1),
@@ -210,7 +192,7 @@ fn beta_iterate_inner(
     let mut iterations: u8 = 0;
 
     for iteration in 0..input.beta_max_iters {
-        let result = match run_one_iteration(input, partition, &planning_a_max, &kernels) {
+        let result = match run_one_iteration(input, &planning_a_max, &kernels) {
             Ok(result) => result,
             Err(_) if last_result.is_some() => {
                 beta_warning = Some(beta_warning_from_last(
@@ -252,8 +234,7 @@ fn beta_iterate_inner(
         }
 
         if iteration == input.beta_max_iters - 1 {
-            let final_result = match run_one_iteration(input, partition, &planning_a_max, &kernels)
-            {
+            let final_result = match run_one_iteration(input, &planning_a_max, &kernels) {
                 Ok(result) => result,
                 Err(_) => {
                     beta_warning = Some(beta_warning_from_last(&result, &derate_machine_a_max));
@@ -281,7 +262,7 @@ fn beta_iterate_inner(
         Some(r) => r,
         None => {
             debug_assert_eq!(input.beta_max_iters, 0);
-            let r = run_one_iteration(input, partition, &planning_a_max, &kernels)?;
+            let r = run_one_iteration(input, &planning_a_max, &kernels)?;
             iterations = 1;
             converged = true;
             r
@@ -331,216 +312,160 @@ struct BetaIterResult {
 #[allow(clippy::too_many_lines)]
 fn run_one_iteration(
     input: &ShapeBatchInput<'_>,
-    partition: &BatchPartition,
     planning_a_max: &[[f64; 3]],
     kernels: &AxisKernels,
 ) -> Result<BetaIterResult, ShapeError> {
-    let all_xy_indices: Vec<usize> = partition
-        .runs
+    let run_segments: Vec<temporal::multi::SegmentInput<'_>> = input
+        .segments
         .iter()
-        .flat_map(|r| r.segment_range.clone())
+        .enumerate()
+        .map(|(flat_idx, seg)| {
+            let orig = &seg.temporal;
+            let mut seg_a_max = planning_a_max[flat_idx];
+            if flat_idx == 0 && input.initial_v > 0.0 {
+                let committed = input.initial_a.abs();
+                for (ax, cap) in seg_a_max.iter_mut().enumerate() {
+                    *cap = cap.max(committed.min(orig.limits.axis_accel_cap(ax)));
+                }
+            }
+            let derated_limits = orig.limits.with_sets_mapped(|set| {
+                let scale = set
+                    .axes
+                    .indices()
+                    .map(|ax| seg_a_max[ax] / orig.limits.axis_accel_cap(ax))
+                    .fold(1.0_f64, f64::min);
+                temporal::LimitSet {
+                    axes: set.axes,
+                    v_max: set.v_max,
+                    a_max: set.a_max * scale.min(1.0),
+                    j_max: set.j_max,
+                }
+            });
+            temporal::multi::SegmentInput {
+                curve: orig.curve,
+                limits: derated_limits,
+            }
+        })
         .collect();
 
-    let mut run_profiles: Vec<Vec<temporal::TopProfile>> = Vec::new();
-    let mut last_joining_status = temporal::multi::JoiningStatus::Converged;
+    let batch_input = temporal::multi::BatchInput {
+        segments: &run_segments,
+        grid_strategy: input.grid_strategy,
+        worker_threads: input.worker_threads,
+        initial_velocity: input.initial_v,
+        initial_accel: input.initial_a,
+        terminal_velocity: input.terminal_v,
+    };
 
-    for run in &partition.runs {
-        let run_segments: Vec<temporal::multi::SegmentInput<'_>> = run
-            .segment_range
-            .clone()
-            .map(|global_idx| {
-                let orig = &input.segments[global_idx].temporal;
-                let flat_idx = all_xy_indices
-                    .iter()
-                    .position(|&i| i == global_idx)
-                    .unwrap();
-                let mut seg_a_max = planning_a_max[flat_idx];
-                if flat_idx == 0 && input.initial_v > 0.0 {
-                    let committed = input.initial_a.abs();
-                    for (ax, cap) in seg_a_max.iter_mut().enumerate() {
-                        *cap = cap.max(committed.min(orig.limits.axis_accel_cap(ax)));
-                    }
+    let batch_output = temporal::multi::plan_batch(batch_input)?;
+
+    match batch_output.joining_status {
+        temporal::multi::JoiningStatus::Converged => {}
+        status => {
+            use core::fmt::Write;
+            let mut detail = String::new();
+            for (global_idx, profile) in batch_output.profiles.iter().enumerate() {
+                let is_success = matches!(
+                    profile.status,
+                    temporal::SolveStatus::Solved
+                        | temporal::SolveStatus::SolvedInexact { .. }
+                        | temporal::SolveStatus::SolvedSlp { .. }
+                );
+                if is_success {
+                    continue;
                 }
-                let derated_limits = orig.limits.with_sets_mapped(|set| {
-                    let scale = set
-                        .axes
-                        .indices()
-                        .map(|ax| seg_a_max[ax] / orig.limits.axis_accel_cap(ax))
-                        .fold(1.0_f64, f64::min);
-                    temporal::LimitSet {
-                        axes: set.axes,
-                        v_max: set.v_max,
-                        a_max: set.a_max * scale.min(1.0),
-                        j_max: set.j_max,
-                    }
+                let seg = &run_segments[global_idx];
+                let limits = &seg.limits;
+                let n_cps = seg.curve.control_points().len();
+                let degree = seg.curve.degree();
+                let total_time = profile.total_time;
+                let n_samples = profile.samples.len();
+                let v_start = profile.samples.first().map(|s| s.v).unwrap_or(f64::NAN);
+                let v_end = profile.samples.last().map(|s| s.v).unwrap_or(f64::NAN);
+                let _ = write!(
+                    &mut detail,
+                    " | seg{}: status={:?} v_start={:.4} v_end={:.4} \
+                     n_samples={} total_time={:.4}s degree={} n_cps={} \
+                     limits[{:?}]",
+                    global_idx,
+                    profile.status,
+                    v_start,
+                    v_end,
+                    n_samples,
+                    total_time,
+                    degree,
+                    n_cps,
+                    limits.sets(),
+                );
+            }
+            return Err(ShapeError::TemporalJoining(status, detail));
+        }
+    }
+    let last_joining_status = batch_output.joining_status;
+
+    for (global_idx, profile) in batch_output.profiles.iter().enumerate() {
+        match profile.status {
+            temporal::SolveStatus::Solved
+            | temporal::SolveStatus::SolvedInexact { .. }
+            | temporal::SolveStatus::SolvedSlp { .. } => {}
+            ref status => {
+                return Err(ShapeError::SegmentUnsolvable {
+                    index: global_idx,
+                    status: *status,
                 });
-                temporal::multi::SegmentInput {
-                    curve: orig.curve,
-                    limits: derated_limits,
-                }
-            })
-            .collect();
-
-        let is_first_run = std::ptr::eq(run, &partition.runs[0]);
-        let is_last_run = std::ptr::eq(run, &partition.runs[partition.runs.len() - 1]);
-        let run_initial_v = if is_first_run { input.initial_v } else { 0.0 };
-        let run_initial_a = if is_first_run { input.initial_a } else { 0.0 };
-        let run_terminal_v = if is_last_run { input.terminal_v } else { 0.0 };
-
-        let batch_input = temporal::multi::BatchInput {
-            segments: &run_segments,
-            grid_strategy: input.grid_strategy,
-            worker_threads: input.worker_threads,
-            initial_velocity: run_initial_v,
-            initial_accel: run_initial_a,
-            terminal_velocity: run_terminal_v,
-        };
-
-        let batch_output = temporal::multi::plan_batch(batch_input)?;
-
-        match batch_output.joining_status {
-            temporal::multi::JoiningStatus::Converged => {}
-            status => {
-                use core::fmt::Write;
-                let mut detail = String::new();
-                for (local_idx, profile) in batch_output.profiles.iter().enumerate() {
-                    let is_success = matches!(
-                        profile.status,
-                        temporal::SolveStatus::Solved
-                            | temporal::SolveStatus::SolvedInexact { .. }
-                            | temporal::SolveStatus::SolvedSlp { .. }
-                    );
-                    if is_success {
-                        continue;
-                    }
-                    let global_idx = run.segment_range.start + local_idx;
-                    let seg = &run_segments[local_idx];
-                    let limits = &seg.limits;
-                    let n_cps = seg.curve.control_points().len();
-                    let degree = seg.curve.degree();
-                    let total_time = profile.total_time;
-                    let n_samples = profile.samples.len();
-                    let v_start = profile.samples.first().map(|s| s.v).unwrap_or(f64::NAN);
-                    let v_end = profile.samples.last().map(|s| s.v).unwrap_or(f64::NAN);
-                    let _ = write!(
-                        &mut detail,
-                        " | seg{}: status={:?} v_start={:.4} v_end={:.4} \
-                         n_samples={} total_time={:.4}s degree={} n_cps={} \
-                         limits[{:?}]",
-                        global_idx,
-                        profile.status,
-                        v_start,
-                        v_end,
-                        n_samples,
-                        total_time,
-                        degree,
-                        n_cps,
-                        limits.sets(),
-                    );
-                }
-                return Err(ShapeError::TemporalJoining(status, detail));
             }
         }
-        last_joining_status = batch_output.joining_status;
-
-        for (local_idx, profile) in batch_output.profiles.iter().enumerate() {
-            match profile.status {
-                temporal::SolveStatus::Solved
-                | temporal::SolveStatus::SolvedInexact { .. }
-                | temporal::SolveStatus::SolvedSlp { .. } => {}
-                ref status => {
-                    let global_idx = run.segment_range.start + local_idx;
-                    return Err(ShapeError::SegmentUnsolvable {
-                        index: global_idx,
-                        status: *status,
-                    });
-                }
-            }
-        }
-
-        run_profiles.push(batch_output.profiles);
     }
 
-    let mut fitted: Vec<FittedSegment> = Vec::with_capacity(all_xy_indices.len());
-    let mut global_ends: Vec<f64> = Vec::with_capacity(all_xy_indices.len());
+    let mut fitted: Vec<FittedSegment> = Vec::with_capacity(input.segments.len());
+    let mut global_ends: Vec<f64> = Vec::with_capacity(input.segments.len());
     let mut t_cursor = 0.0_f64;
-    let e_gaps_sorted = &partition.e_gaps;
 
-    for (run_idx, run) in partition.runs.iter().enumerate() {
-        let prev_run_end = if run_idx > 0 {
-            partition.runs[run_idx - 1].segment_range.end
-        } else {
-            0
-        };
-        for eg in e_gaps_sorted {
-            if eg.segment_index >= prev_run_end && eg.segment_index < run.segment_range.start {
-                t_cursor += eg.duration;
-            }
-        }
+    for (global_idx, profile) in batch_output.profiles.iter().enumerate() {
+        let t_offset = t_cursor;
 
-        for (local_idx, global_idx) in run.segment_range.clone().enumerate() {
-            let profile = &run_profiles[run_idx][local_idx];
-            let t_offset = t_cursor;
+        let curve = input.segments[global_idx].temporal.curve;
 
-            let curve = input.segments[global_idx].temporal.curve;
-
-            let table = nurbs::arc_length::build_arc_length_table_vector(curve, 1e-6, 1024)
-                .map_err(|e| ShapeError::ArcLength {
+        let table =
+            nurbs::arc_length::build_arc_length_table_vector(curve, 1e-6, 1024).map_err(|e| {
+                ShapeError::ArcLength {
                     index: global_idx,
                     detail: format!("{e}"),
-                })?;
+                }
+            })?;
 
-            let s_pieces = crate::reparam::build_s_of_t_pieces(profile, t_offset);
+        let s_pieces = crate::reparam::build_s_of_t_pieces(profile, t_offset);
 
-            let arc_fit_tolerance = 1e-4; // mm
-            let composed = crate::reparam::compose_segment(
-                curve,
-                &table.as_view(),
-                &s_pieces,
-                arc_fit_tolerance,
-            )?;
+        let arc_fit_tolerance = 1e-4; // mm
+        let composed =
+            crate::reparam::compose_segment(curve, &table.as_view(), &s_pieces, arc_fit_tolerance)?;
 
-            let seg_d2_override = if run_idx == 0 && local_idx == 0 {
-                input.start_d2_override
-            } else {
-                None
-            };
-            let mut seg_fitted =
-                crate::fit::fit_and_split(&composed, input.fit_tolerance_mm, seg_d2_override)?;
-            seg_fitted.t_start = s_pieces.t_start;
-            seg_fitted.t_end = s_pieces.t_end;
+        let seg_d2_override = if global_idx == 0 {
+            input.start_d2_override
+        } else {
+            None
+        };
+        let mut seg_fitted =
+            crate::fit::fit_and_split(&composed, input.fit_tolerance_mm, seg_d2_override)?;
+        seg_fitted.t_start = s_pieces.t_start;
+        seg_fitted.t_end = s_pieces.t_end;
 
-            fitted.push(seg_fitted);
-            t_cursor = s_pieces.t_end;
-            global_ends.push(t_cursor);
-        }
-    }
-
-    if let Some(last_run) = partition.runs.last() {
-        for eg in e_gaps_sorted {
-            if eg.segment_index >= last_run.segment_range.end {
-                t_cursor += eg.duration;
-            }
-        }
+        fitted.push(seg_fitted);
+        t_cursor = s_pieces.t_end;
+        global_ends.push(t_cursor);
     }
 
     let batch_t_end = t_cursor;
     let batch_t_start = 0.0;
 
-    let e_halos = build_e_halos(partition, &global_ends);
-
     let kernel_array = build_kernel_array_from_axis_kernels(kernels);
     let dummy_meta: Vec<EmitSegmentMeta> = (0..fitted.len())
-        .map(|_| EmitSegmentMeta {
-            e_mode: EMode::CoupledToXy,
-            extrusion_per_xy_mm: 0.0,
-        })
+        .map(|_| EmitSegmentMeta { followers: vec![] })
         .collect();
     let emitted = emit_shaped(
         &fitted,
         &dummy_meta,
         &kernel_array,
-        &e_halos,
         &PerAxisHistory::empty(),
         batch_t_start,
         batch_t_end,
@@ -626,195 +551,6 @@ fn axis_span(curve: &ScalarNurbs<f64>) -> f64 {
     let min = cps.iter().copied().fold(f64::INFINITY, f64::min);
     let max = cps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     max - min
-}
-
-fn build_e_halos(partition: &BatchPartition, global_ends: &[f64]) -> Vec<EHalo> {
-    let mut halos = Vec::new();
-
-    let all_xy_indices: Vec<usize> = partition
-        .runs
-        .iter()
-        .flat_map(|r| r.segment_range.clone())
-        .collect();
-
-    for eg in &partition.e_gaps {
-        let t_gap_start = find_gap_start(eg.segment_index, &all_xy_indices, global_ends, partition);
-        let t_gap_end = t_gap_start + eg.duration;
-
-        halos.push(EHalo {
-            xyz_position: eg.xyz_position,
-            t_start: t_gap_start,
-            t_end: t_gap_end,
-        });
-    }
-
-    halos
-}
-
-fn find_gap_start(
-    gap_seg_index: usize,
-    all_xy_indices: &[usize],
-    global_ends: &[f64],
-    partition: &BatchPartition,
-) -> f64 {
-    let preceding_xy = all_xy_indices
-        .iter()
-        .enumerate()
-        .filter(|(_, &idx)| idx < gap_seg_index)
-        .last();
-
-    if let Some((flat_idx, &preceding_idx)) = preceding_xy {
-        let mut t = global_ends[flat_idx];
-        for eg in &partition.e_gaps {
-            if eg.segment_index > preceding_idx && eg.segment_index < gap_seg_index {
-                t += eg.duration;
-            }
-        }
-        t
-    } else {
-        let mut t = 0.0;
-        for eg in &partition.e_gaps {
-            if eg.segment_index < gap_seg_index {
-                t += eg.duration;
-            } else {
-                break;
-            }
-        }
-        t
-    }
-}
-
-fn assemble_with_e_gaps(
-    input: &ShapeBatchInput<'_>,
-    partition: &BatchPartition,
-    planned: &PlannedBatch,
-    emitted_xy: Vec<ShapedSegment>,
-) -> Result<ShapeBatchOutput, ShapeError> {
-    let total_input_segments = input.segments.len();
-    let mut output_segments: Vec<Option<ShapedSegment>> = vec![None; total_input_segments];
-
-    let all_xy_indices: Vec<usize> = partition
-        .runs
-        .iter()
-        .flat_map(|r| r.segment_range.clone())
-        .collect();
-
-    debug_assert_eq!(
-        emitted_xy.len(),
-        all_xy_indices.len(),
-        "emitted_xy length must match the number of XY-motion segments",
-    );
-
-    for (flat_idx, shaped_seg) in emitted_xy.into_iter().enumerate() {
-        let global_idx = all_xy_indices[flat_idx];
-        output_segments[global_idx] = Some(shaped_seg);
-    }
-
-    for eg in &partition.e_gaps {
-        let seg_input = &input.segments[eg.segment_index];
-        let t_gap_start = find_gap_start(
-            eg.segment_index,
-            &all_xy_indices,
-            &planned.global_ends,
-            partition,
-        );
-        let t_gap_end = t_gap_start + eg.duration;
-
-        let const_axes = std::array::from_fn(|axis| {
-            constant_cubic_nurbs(eg.xyz_position[axis], t_gap_start, t_gap_end)
-        });
-
-        let e_scheduled = seg_input
-            .e_independent
-            .map(|e_nurbs| {
-                crate::e_independent::schedule_e_full(
-                    e_nurbs,
-                    seg_input.feedrate_mm_s,
-                    &input.e_limits,
-                    t_gap_start,
-                )
-            })
-            .transpose()?;
-
-        output_segments[eg.segment_index] = Some(ShapedSegment {
-            axes: const_axes,
-            e_mode: EMode::Independent,
-            extrusion_per_xy_mm: 0.0,
-            e_independent: e_scheduled,
-            t_start: t_gap_start,
-            t_end: t_gap_end,
-        });
-    }
-
-    let segments: Vec<ShapedSegment> = output_segments
-        .into_iter()
-        .enumerate()
-        .map(|(i, opt)| {
-            opt.unwrap_or_else(|| {
-                panic!("output segment {i} was not populated — partition logic error")
-            })
-        })
-        .collect();
-
-    let beta_iters = if planned.converged {
-        1
-    } else {
-        input.beta_max_iters
-    };
-
-    Ok(ShapeBatchOutput {
-        segments,
-        beta_iters,
-        temporal_status: planned.joining_status,
-        beta_warning: planned.beta_warning.clone(),
-    })
-}
-
-fn assemble_e_only_output(
-    input: &ShapeBatchInput<'_>,
-    partition: &BatchPartition,
-) -> Result<ShapeBatchOutput, ShapeError> {
-    let mut segments = Vec::with_capacity(input.segments.len());
-    let mut t_cursor = 0.0;
-
-    for eg in &partition.e_gaps {
-        let seg_input = &input.segments[eg.segment_index];
-        let t_start = t_cursor;
-        let t_end = t_start + eg.duration;
-
-        let const_axes =
-            std::array::from_fn(|axis| constant_cubic_nurbs(eg.xyz_position[axis], t_start, t_end));
-
-        let e_scheduled = seg_input
-            .e_independent
-            .map(|e_nurbs| {
-                crate::e_independent::schedule_e_full(
-                    e_nurbs,
-                    seg_input.feedrate_mm_s,
-                    &input.e_limits,
-                    t_start,
-                )
-            })
-            .transpose()?;
-
-        segments.push(ShapedSegment {
-            axes: const_axes,
-            e_mode: EMode::Independent,
-            extrusion_per_xy_mm: 0.0,
-            e_independent: e_scheduled,
-            t_start,
-            t_end,
-        });
-
-        t_cursor = t_end;
-    }
-
-    Ok(ShapeBatchOutput {
-        segments,
-        beta_iters: 0,
-        temporal_status: temporal::multi::JoiningStatus::Converged,
-        beta_warning: None,
-    })
 }
 
 pub(crate) fn kernel_half_support(kernel: &PiecewisePolynomialKernel<f64>) -> f64 {

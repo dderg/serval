@@ -1,10 +1,15 @@
 use super::*;
 use crate::fit::{fit_and_split, FittedSegment};
 use crate::{
-    plan_velocity, AxisShaper, ELimits, PlanInput, PlanSegment, PlanShaper, SafetyMode,
-    ShapeBatchInput, ShapeSegmentInput, ShaperConfig,
+    plan_velocity, AxisShaper, PlanInput, PlanSegment, PlanShaper, SafetyMode, ShapeBatchInput,
+    ShapeSegmentInput, ShaperConfig,
 };
-use geometry::segment::EMode;
+use geometry::segment::FollowerDemand;
+
+const E_FOLLOWER_04: &[FollowerDemand] = &[FollowerDemand {
+    axis_index: 3,
+    ratio: 0.04,
+}];
 use nurbs::bezier::{bezier_pieces_to_nurbs, extract_bezier_pieces, BezierPiece};
 use nurbs::VectorNurbs;
 
@@ -18,13 +23,6 @@ fn default_limits() -> temporal::Limits {
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
     )
-}
-
-fn default_e_limits() -> ELimits {
-    ELimits {
-        v_max: 100.0,
-        a_max: 5_000.0,
-    }
 }
 
 fn default_shaper_config() -> ShaperConfig {
@@ -94,9 +92,7 @@ fn empty_history_matches_shape_batch_byte_identical() {
             curve: &curve,
             limits: default_limits(),
         },
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
-        e_independent: None,
+        followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
@@ -108,7 +104,6 @@ fn empty_history_matches_shape_batch_byte_identical() {
         fit_tolerance_mm: 0.5,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -133,8 +128,7 @@ fn empty_history_matches_shape_batch_byte_identical() {
         None,
     ];
     let meta = [EmitSegmentMeta {
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
+        followers: E_FOLLOWER_04.to_vec(),
     }];
 
     let batch_t_start = 0.0;
@@ -144,7 +138,6 @@ fn empty_history_matches_shape_batch_byte_identical() {
         &planned,
         &meta,
         &kernels,
-        &[],
         &PerAxisHistory::empty(),
         batch_t_start,
         batch_t_end,
@@ -153,9 +146,7 @@ fn empty_history_matches_shape_batch_byte_identical() {
 
     let segs = [ShapeSegmentInput {
         temporal: plan_segs[0].temporal,
-        e_mode: plan_segs[0].e_mode,
-        extrusion_per_xy_mm: plan_segs[0].extrusion_per_xy_mm,
-        e_independent: plan_segs[0].e_independent,
+        followers: plan_segs[0].followers,
         feedrate_mm_s: plan_segs[0].feedrate_mm_s,
     }];
     let shape_input = ShapeBatchInput {
@@ -166,7 +157,6 @@ fn empty_history_matches_shape_batch_byte_identical() {
         fit_tolerance_mm: 0.5,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
-        e_limits: default_e_limits(),
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -179,11 +169,7 @@ fn empty_history_matches_shape_batch_byte_identical() {
         assert_nurbs_near_equal(&a.axes[0], &b.axes[0], &format!("seg{i} X"));
         assert_nurbs_near_equal(&a.axes[1], &b.axes[1], &format!("seg{i} Y"));
         assert_nurbs_near_equal(&a.axes[2], &b.axes[2], &format!("seg{i} Z"));
-        assert_eq!(a.e_mode, b.e_mode, "seg{i}: e_mode differs");
-        assert!(
-            (a.extrusion_per_xy_mm - b.extrusion_per_xy_mm).abs() < 1e-15,
-            "seg{i}: extrusion_per_xy_mm differs",
-        );
+        assert_eq!(a.followers, b.followers, "seg{i}: followers differ");
         #[allow(clippy::float_cmp)]
         {
             assert_eq!(a.t_start, b.t_start, "seg{i}: t_start differs");
@@ -222,16 +208,8 @@ fn pad_segment_axis_with_history_seam_reads_history_tail() {
     }];
 
     let t_sm_half = 0.3;
-    let padded = crate::pad::pad_segment_axis_with_history(
-        0,
-        0,
-        &fitted,
-        &[],
-        &history_x,
-        t_sm_half,
-        1.0,
-        2.0,
-    );
+    let padded =
+        crate::pad::pad_segment_axis_with_history(0, 0, &fitted, &history_x, t_sm_half, 1.0, 2.0);
 
     let pieces = extract_bezier_pieces(&padded);
     assert!(
@@ -260,7 +238,7 @@ fn pad_segment_axis_with_history_seam_reads_history_tail() {
         "expected 10.0 at seam, got {val_10}",
     );
 
-    let padded_no_history = crate::pad::pad_segment_axis(0, 0, &fitted, &[], t_sm_half, 1.0, 2.0);
+    let padded_no_history = crate::pad::pad_segment_axis(0, 0, &fitted, t_sm_half, 1.0, 2.0);
     let pieces_no_history = extract_bezier_pieces(&padded_no_history);
     let val_08_no_history = pieces_no_history
         .iter()
@@ -305,17 +283,9 @@ fn empty_history_pad_matches_legacy() {
 
     let t_sm_half = 0.1;
     for axis in 0..3 {
-        let with_history = crate::pad::pad_segment_axis_with_history(
-            0,
-            axis,
-            &fitted,
-            &[],
-            &[],
-            t_sm_half,
-            0.0,
-            1.0,
-        );
-        let legacy = crate::pad::pad_segment_axis(0, axis, &fitted, &[], t_sm_half, 0.0, 1.0);
+        let with_history =
+            crate::pad::pad_segment_axis_with_history(0, axis, &fitted, &[], t_sm_half, 0.0, 1.0);
+        let legacy = crate::pad::pad_segment_axis(0, axis, &fitted, t_sm_half, 0.0, 1.0);
         assert_nurbs_near_equal(&with_history, &legacy, &format!("axis {axis}"));
     }
 }
@@ -407,15 +377,13 @@ fn constant_y_axis_emits_cubic_matching_moving_x_corexy_degree_invariant() {
         None,
     ];
     let meta = [EmitSegmentMeta {
-        e_mode: EMode::CoupledToXy,
-        extrusion_per_xy_mm: 0.04,
+        followers: E_FOLLOWER_04.to_vec(),
     }];
 
     let emitted = emit_shaped(
         &[fitted],
         &meta,
         &kernels,
-        &[],
         &PerAxisHistory::empty(),
         fitted_from_fitter.t_start,
         fitted_from_fitter.t_end,
