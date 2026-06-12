@@ -1036,11 +1036,21 @@ class MCU:
         except Exception as e:
             if "shutdown state" not in str(e):
                 raise
-            # The MCU latched a shutdown from a previous host session (klippy
-            # broadcasts emergency_stop to every MCU on shutdown; devices
-            # like the Beacon stay latched until cleared or power-cycled).
-            # Clear it and retry once so a plain RESTART recovers, matching
-            # the stock-klipper FIRMWARE_RESTART behavior.
+            msgparser = self._serial.get_msgparser()
+            if "kalico_runtime_reset" in msgparser.messages_by_name:
+                # A kalico-native motion MCU latched a shutdown; its timer
+                # and runtime state need a REAL reset, which clear_shutdown
+                # does not provide — recovering it in place re-shutdowns
+                # within seconds ("Timer too close" loop). Fail loudly.
+                raise error(
+                    "MCU '%s' is latched in shutdown and requires a power"
+                    " cycle (no reset command available): %s"
+                    % (self._name, e)
+                )
+            # A peripheral MCU (e.g. the Beacon probe) latched the shutdown
+            # klippy broadcasts on every host shutdown; it stays latched
+            # until cleared or power-cycled. Clear it and retry once so a
+            # plain RESTART recovers, matching stock-klipper behavior.
             logging.info(
                 "MCU '%s' latched shutdown at config time; sending"
                 " clear_shutdown and retrying: %s",
