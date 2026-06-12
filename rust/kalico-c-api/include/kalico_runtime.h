@@ -28,6 +28,13 @@ typedef struct StepperBindingRust {
   uint8_t _pad[2];
 } StepperBindingRust;
 
+extern void kalico_log_emit(uint8_t level,
+                            uint8_t subsystem,
+                            uint16_t event,
+                            uint16_t code,
+                            uint32_t arg0,
+                            uint32_t arg1);
+
 int32_t kalico_runtime_bind_phase_motor(struct KalicoRuntime *rt,
                                         uint8_t motor_idx,
                                         uint8_t slot_idx);

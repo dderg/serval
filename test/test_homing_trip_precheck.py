@@ -31,6 +31,24 @@ class FakeEndstop:
         raise ArmReached()
 
 
+class FakeReactor:
+    def monotonic(self):
+        return 0.0
+
+    def pause(self, waketime):
+        pass
+
+
+class FakePrinter:
+    def get_reactor(self):
+        return FakeReactor()
+
+
+class FakeBridge:
+    def motion_drained(self):
+        return True
+
+
 class FakeToolhead:
     def __init__(self, endstop):
         self.endstop = endstop
@@ -45,9 +63,12 @@ class FakeToolhead:
 
 def run_trip_move(endstop):
     homing = Homing.__new__(Homing)
+    homing.printer = FakePrinter()
     toolhead = FakeToolhead(endstop)
     entry = {"endstop": endstop, "provider": None}
-    homing.trip_move(FakeGcmd(), toolhead, object(), 2, -1, 5.0, 40.0, entry)
+    homing.trip_move(
+        FakeGcmd(), toolhead, FakeBridge(), 2, -1, 5.0, 40.0, entry
+    )
 
 
 def test_pin_triggered_only_while_moves_queued_does_not_error():
