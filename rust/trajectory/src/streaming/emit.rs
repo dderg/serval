@@ -379,11 +379,11 @@ fn restrict_segment_lo_hi(
 ) -> Result<ShapedSegment, nurbs::AlgebraError> {
     use nurbs::algebra::restrict_to_domain;
 
-    let restricted_axes: [nurbs::ScalarNurbs<f64>; 3] = [
-        restrict_to_domain(&seg.axes[0], t_lo, t_hi)?,
-        restrict_to_domain(&seg.axes[1], t_lo, t_hi)?,
-        restrict_to_domain(&seg.axes[2], t_lo, t_hi)?,
-    ];
+    let restricted_axes: Vec<nurbs::ScalarNurbs<f64>> = seg
+        .axes
+        .iter()
+        .map(|axis| restrict_to_domain(axis, t_lo, t_hi))
+        .collect::<Result<_, _>>()?;
     Ok(ShapedSegment {
         axes: restricted_axes,
         followers: seg.followers.clone(),

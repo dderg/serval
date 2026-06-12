@@ -33,7 +33,7 @@ fn linear_axis(p0: f64, p1: f64) -> ScalarNurbs<f64> {
 
 fn seg_x_move() -> ShapedSegment {
     ShapedSegment {
-        axes: [
+        axes: vec![
             linear_axis(0.0, 10.0),
             linear_axis(0.0, 0.0),
             linear_axis(0.0, 0.0),
@@ -103,7 +103,7 @@ fn corexy_x_slot_is_x_plus_y() {
     }];
 
     let seg = ShapedSegment {
-        axes: [
+        axes: vec![
             linear_axis(0.0, 10.0),
             linear_axis(0.0, 4.0),
             linear_axis(0.0, 0.0),
@@ -201,7 +201,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
     }
 
     let seg = ShapedSegment {
-        axes: [
+        axes: vec![
             linear_axis_scaled(0.0, 10.0, 0.2),
             linear_axis_scaled(0.0, 0.0, 0.2),
             linear_axis_scaled(0.0, 0.0, 0.2),
@@ -272,7 +272,7 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
     let curve = constant_axis(5.0, n_knots, piece_dur);
 
     let seg = ShapedSegment {
-        axes: [curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
+        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
         t_start: 0.0,
         t_end: total,
@@ -330,7 +330,7 @@ fn motion_constant_motion_merges_only_the_constant_run() {
     ]);
 
     let seg = ShapedSegment {
-        axes: [curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
+        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
         t_start: 0.0,
         t_end: 5.0 * dur,
@@ -398,7 +398,7 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
     ]);
 
     let seg = ShapedSegment {
-        axes: [curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
+        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
         t_start: 0.0,
         t_end: 4.0 * dur,
@@ -472,7 +472,7 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
     let curve = constant_axis(3.0, n_knots, piece_dur);
 
     let seg = ShapedSegment {
-        axes: [curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
+        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
         t_start: 0.0,
         t_end: total,
@@ -546,7 +546,7 @@ fn nonzero_curve_base_preserves_host_times() {
     let total = 1.0;
 
     let seg = ShapedSegment {
-        axes: [curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
+        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
         t_start: U_BASE,
         t_end: U_BASE + total,

@@ -159,7 +159,7 @@ pub fn emit_shaped_with_left_bc(
 
         let m = &meta[seg_idx];
         output.push(ShapedSegment {
-            axes: [
+            axes: vec![
                 shaped_axes[0].take().unwrap(),
                 shaped_axes[1].take().unwrap(),
                 shaped_axes[2].take().unwrap(),

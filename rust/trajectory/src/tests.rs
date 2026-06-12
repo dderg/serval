@@ -28,3 +28,22 @@ fn shape_batch_rejects_empty_segments() {
     let result = shape_batch(&input);
     assert!(matches!(result, Err(ShapeError::EmptySegments)));
 }
+
+#[test]
+fn shaped_segment_carries_registry_indexed_tracks() {
+    let constant = |v: f64| {
+        nurbs::ScalarNurbs::try_new(
+            3,
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            vec![v, v, v, v],
+        )
+        .unwrap()
+    };
+    let seg = ShapedSegment {
+        axes: vec![constant(0.0), constant(1.0), constant(2.0), constant(3.0)],
+        followers: vec![],
+        t_start: 0.0,
+        t_end: 1.0,
+    };
+    assert_eq!(seg.axes.len(), 4);
+}

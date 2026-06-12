@@ -83,7 +83,8 @@ pub struct BetaWarning {
 
 #[derive(Debug, Clone)]
 pub struct ShapedSegment {
-    pub axes: [nurbs::ScalarNurbs<f64>; 3],
+    /// Index = axis registry index: 0..3 spatial, 3.. followers. Always ≥ 3.
+    pub axes: Vec<nurbs::ScalarNurbs<f64>>,
     pub followers: Vec<geometry::segment::FollowerDemand>,
     pub t_start: f64,
     pub t_end: f64,
