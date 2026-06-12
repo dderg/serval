@@ -441,6 +441,7 @@ class BeaconMcuStub:
 
     def _handle_beacon_contact_home(self, params: dict) -> None:
         self._contact_homing_active = True
+        armed_clock = self._now_clock()
         trsync_oid = params["trsync_oid"]
         trigger_reason = params["trigger_reason"]
 
@@ -452,6 +453,15 @@ class BeaconMcuStub:
             self._contact_trigger_clock = self._now_clock()
             self._contact_trigger_sample = self._sample_index
             self._contact_trigger_freq = self._z_to_frequency(0.0)
+            self._send_msg(
+                "beacon_contact armed_clock=%u trigger_clock=%u"
+                " detect_clock=%u latency=%c error=%c",
+                armed_clock=armed_clock,
+                trigger_clock=self._contact_trigger_clock,
+                detect_clock=self._contact_trigger_clock,
+                latency=0,
+                error=0,
+            )
             self._send_msg(
                 "trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u",
                 oid=trsync_oid,
