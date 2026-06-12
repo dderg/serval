@@ -1950,8 +1950,7 @@ impl PyMotionBridge {
                 .clone()
         };
         py.detach(|| -> PyResult<()> {
-            for msg in crate::correction::chunk_correction_messages(axis_idx, motor_idx, &entries)
-            {
+            for msg in crate::correction::chunk_correction_messages(axis_idx, motor_idx, &entries) {
                 let mut body = Vec::with_capacity(9 + msg.pieces_bytes.len());
                 kalico_protocol::codec::Encode::encode(&msg, &mut body);
                 let (_kind, resp) = io
@@ -1961,14 +1960,10 @@ impl PyMotionBridge {
                         body,
                         std::time::Duration::from_secs(2),
                     )
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("adjust_motor send: {e:?}"))
-                    })?;
+                    .map_err(|e| PyRuntimeError::new_err(format!("adjust_motor send: {e:?}")))?;
                 use kalico_protocol::codec::Decode as _;
                 let r = kalico_protocol::messages::PushCorrectionPiecesResponse::decode(&resp)
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("adjust_motor decode: {e:?}"))
-                    })?;
+                    .map_err(|e| PyRuntimeError::new_err(format!("adjust_motor decode: {e:?}")))?;
                 if r.result != 0 {
                     return Err(PyRuntimeError::new_err(format!(
                         "adjust_motor rejected by MCU: error {}",

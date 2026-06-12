@@ -75,7 +75,10 @@ fn commit_correction_rejects_bad_motor_idx() {
 #[test]
 fn commit_correction_rejects_busy_axis() {
     let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
-    assert_eq!(engine.push_pieces(2, &[one_piece(1000)], &mut storage), KALICO_OK);
+    assert_eq!(
+        engine.push_pieces(2, &[one_piece(1000)], &mut storage),
+        KALICO_OK
+    );
     engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
     assert_eq!(
         engine.commit_correction(2, 1, 1),
@@ -119,7 +122,10 @@ fn normal_commit_rejected_while_correction_active() {
 fn commit_correction_seeds_motor_tracking_state() {
     let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
     assert_eq!(
-        engine.stepping_axes[2].as_ref().unwrap().correction_motor_idx,
+        engine.stepping_axes[2]
+            .as_ref()
+            .unwrap()
+            .correction_motor_idx,
         CORRECTION_MOTOR_NONE
     );
     engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);

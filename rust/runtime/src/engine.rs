@@ -343,8 +343,9 @@ impl Engine {
             crate::dispatch_correction::emit_correction_start(axis_idx, motor_idx);
         }
         match axis.correction_ring.commit_head(new_head) {
-            crate::piece_ring::CommitOutcome::Applied
-            | crate::piece_ring::CommitOutcome::Stale => KALICO_OK,
+            crate::piece_ring::CommitOutcome::Applied | crate::piece_ring::CommitOutcome::Stale => {
+                KALICO_OK
+            }
             crate::piece_ring::CommitOutcome::Overcommit => KALICO_ERR_RING_FULL,
         }
     }
@@ -389,13 +390,12 @@ impl Engine {
         #[allow(clippy::cast_possible_truncation)]
         let now_lo = now as u32;
 
-        let corr_sample_period_sec = if self.sample_period_cycles == 0
-            || self.cycles_per_second == 0.0
-        {
-            0.0_f32
-        } else {
-            self.sample_period_cycles as f32 / self.cycles_per_second
-        };
+        let corr_sample_period_sec =
+            if self.sample_period_cycles == 0 || self.cycles_per_second == 0.0 {
+                0.0_f32
+            } else {
+                self.sample_period_cycles as f32 / self.cycles_per_second
+            };
         #[allow(clippy::cast_possible_truncation)]
         let corr_now_lo = now as u32;
 

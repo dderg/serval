@@ -93,13 +93,8 @@ fn write_and_commit_correction_roundtrip() {
     let handle = rt();
     let piece = piece_bytes(1_000_000);
     unsafe {
-        let rc = kalico_c_api::kalico_runtime_write_correction_piece(
-            handle,
-            2,
-            0,
-            0,
-            piece.as_ptr(),
-        );
+        let rc =
+            kalico_c_api::kalico_runtime_write_correction_piece(handle, 2, 0, 0, piece.as_ptr());
         assert_eq!(rc, kalico_c_api::KALICO_OK, "write failed: {rc}");
         let rc = kalico_c_api::kalico_runtime_commit_correction(handle, 2, 1, 1);
         assert_eq!(rc, kalico_c_api::KALICO_OK, "commit failed: {rc}");
@@ -117,13 +112,8 @@ fn commit_correction_rejects_when_axis_busy() {
         let rc = kalico_c_api::kalico_runtime_commit_head(handle, 2, 1);
         assert_eq!(rc, kalico_c_api::KALICO_OK);
 
-        let rc = kalico_c_api::kalico_runtime_write_correction_piece(
-            handle,
-            2,
-            0,
-            0,
-            piece.as_ptr(),
-        );
+        let rc =
+            kalico_c_api::kalico_runtime_write_correction_piece(handle, 2, 0, 0, piece.as_ptr());
         assert_eq!(rc, kalico_c_api::KALICO_OK);
         let rc = kalico_c_api::kalico_runtime_commit_correction(handle, 2, 1, 1);
         assert_eq!(rc, runtime::error::KALICO_ERR_MOTION_IN_PROGRESS);
@@ -138,13 +128,8 @@ fn normal_commit_rejects_when_correction_active() {
     let handle = rt();
     let piece = piece_bytes(3_000_000);
     unsafe {
-        let rc = kalico_c_api::kalico_runtime_write_correction_piece(
-            handle,
-            2,
-            0,
-            0,
-            piece.as_ptr(),
-        );
+        let rc =
+            kalico_c_api::kalico_runtime_write_correction_piece(handle, 2, 0, 0, piece.as_ptr());
         assert_eq!(rc, kalico_c_api::KALICO_OK);
         let rc = kalico_c_api::kalico_runtime_commit_correction(handle, 2, 1, 1);
         assert_eq!(rc, kalico_c_api::KALICO_OK);
@@ -171,8 +156,7 @@ fn correction_ffi_null_rt_is_null_ptr_error() {
             piece.as_ptr(),
         );
         assert_eq!(rc, kalico_c_api::KALICO_ERR_NULL_PTR);
-        let rc =
-            kalico_c_api::kalico_runtime_commit_correction(core::ptr::null_mut(), 2, 1, 1);
+        let rc = kalico_c_api::kalico_runtime_commit_correction(core::ptr::null_mut(), 2, 1, 1);
         assert_eq!(rc, kalico_c_api::KALICO_ERR_NULL_PTR);
     }
 }

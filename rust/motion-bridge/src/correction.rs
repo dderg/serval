@@ -125,8 +125,7 @@ pub fn chunk_correction_messages(
     let mut head: u32 = 0;
     for chunk in entries.chunks(MAX_CORRECTION_PIECES_PER_MSG) {
         #[allow(clippy::cast_possible_truncation)]
-        let start_slot =
-            (head % runtime::stepping_state::CORRECTION_RING_DEPTH as u32) as u16;
+        let start_slot = (head % runtime::stepping_state::CORRECTION_RING_DEPTH as u32) as u16;
         let mut pieces_bytes = Vec::with_capacity(chunk.len() * 32);
         for e in chunk {
             pieces_bytes.extend_from_slice(&e.to_le_bytes());

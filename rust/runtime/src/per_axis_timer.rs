@@ -127,7 +127,11 @@ pub extern "C" fn kalico_step_output_event() -> u32 {
                 // SAFETY: C step emitter guards out-of-range motor indices.
                 crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_STEPOUT_EMIT);
                 unsafe {
-                    runtime_emit_step_pulses(axis_idx as u8, i32::from(entry.dir), entry.stepper_sel)
+                    runtime_emit_step_pulses(
+                        axis_idx as u8,
+                        i32::from(entry.dir),
+                        entry.stepper_sel,
+                    )
                 };
                 emitted += 1;
                 emitted_this_pass = true;
