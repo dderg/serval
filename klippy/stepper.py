@@ -16,6 +16,9 @@ class error(Exception):
 # Steppers
 ######################################################################
 
+MAX_BOTH_EDGE_PULSE_DURATION = 0.000000500
+DEFAULT_STEP_PULSE_DURATION = 0.000002
+
 
 class MCU_stepper:
     def __init__(
@@ -45,8 +48,7 @@ class MCU_stepper:
             )
         self._dir_pin = dir_pin_params["pin"]
         self._invert_dir = self._orig_invert_dir = dir_pin_params["invert"]
-        # Step-on-both-edges is the only mode the Rust runtime emits.
-        self._step_both_edge = True
+        self._step_both_edge = False
         self._req_step_both_edge = False
         self._active_callbacks = []
         self._bridge_active_axes = b""
@@ -86,13 +88,21 @@ class MCU_stepper:
                 break
 
     def _build_config(self):
-        # The runtime toggles step_pin once per step (every edge counts), so the
-        # TMC driver needs DEDGE=1. invert_step / step_pulse_ticks are sent for
-        # ABI compatibility but ignored on the MCU.
-        self._step_both_edge = True
-        self._step_pulse_duration = 0.0
-        invert_step = -1
-        step_pulse_ticks = 0
+        if self._step_pulse_duration is None:
+            self._step_pulse_duration = DEFAULT_STEP_PULSE_DURATION
+        self._step_both_edge = (
+            self._req_step_both_edge
+            and self._step_pulse_duration <= MAX_BOTH_EDGE_PULSE_DURATION
+        )
+        if self._step_both_edge:
+            self._step_pulse_duration = 0.0
+            invert_step = -1
+            step_pulse_ticks = 0
+        else:
+            invert_step = self._invert_step
+            step_pulse_ticks = self._mcu.seconds_to_clock(
+                self._step_pulse_duration
+            )
         self._mcu.add_config_cmd(
             "config_stepper oid=%d step_pin=%s dir_pin=%s invert_step=%d"
             " step_pulse_ticks=%u"
