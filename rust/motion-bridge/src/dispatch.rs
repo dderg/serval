@@ -41,25 +41,24 @@ impl McuCaps {
     }
 }
 
-impl Default for McuCaps {
-    fn default() -> Self {
-        // Fallback for firmware predating QueryRuntimeCaps: 62 KB = Octopus Pro H7 SRAM budget.
-        Self {
-            total_piece_memory: 62 * 1024,
-        }
-    }
-}
-
 pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
     mcus: &[(u32, Vec<u8>, u8)],
     caps_by_handle: &HashMap<u32, McuCaps, S>,
-) -> Vec<McuAxisConfig> {
+) -> Result<Vec<McuAxisConfig>, String> {
     mcus.iter()
-        .map(|(handle, axes, tag)| McuAxisConfig {
-            mcu_id: *handle,
-            axes: axes.iter().map(|&a| a as usize).collect(),
-            kinematics: *tag,
-            caps: caps_by_handle.get(handle).copied().unwrap_or_default(),
+        .map(|(handle, axes, tag)| {
+            let caps = caps_by_handle.get(handle).copied().ok_or_else(|| {
+                format!(
+                    "no runtime caps recorded for mcu_handle {handle} — \
+                     refusing to size piece rings by guess"
+                )
+            })?;
+            Ok(McuAxisConfig {
+                mcu_id: *handle,
+                axes: axes.iter().map(|&a| a as usize).collect(),
+                kinematics: *tag,
+                caps,
+            })
         })
         .collect()
 }
@@ -156,7 +155,7 @@ mod topology_tests {
             (7u32, vec![AXIS_X as u8, AXIS_Y as u8, AXIS_E as u8], 0u8),
             (9u32, vec![AXIS_Z as u8], 1u8),
         ];
-        let cfgs = build_mcu_configs(&mcus, &caps);
+        let cfgs = build_mcu_configs(&mcus, &caps).unwrap();
         assert_eq!(cfgs.len(), 2);
         assert_eq!(cfgs[0].mcu_id, 7);
         assert_eq!(cfgs[0].axes, vec![AXIS_X, AXIS_Y, AXIS_E]);
@@ -173,12 +172,11 @@ mod topology_tests {
     }
 
     #[test]
-    fn build_mcu_configs_missing_caps_falls_back_to_default() {
+    fn build_mcu_configs_missing_caps_is_an_error() {
         let caps: HashMap<u32, McuCaps> = HashMap::new();
         let mcus = vec![(7u32, vec![AXIS_X as u8, AXIS_Y as u8], 0u8)];
-        let cfgs = build_mcu_configs(&mcus, &caps);
-        assert_eq!(cfgs.len(), 1);
-        assert_eq!(cfgs[0].caps, McuCaps::default());
+        let err = build_mcu_configs(&mcus, &caps).unwrap_err();
+        assert!(err.contains("mcu_handle 7"), "got: {err}");
     }
 }
 
