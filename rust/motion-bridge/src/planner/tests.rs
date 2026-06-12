@@ -134,6 +134,100 @@ fn update_post_processor_processed_without_error() {
     h.shutdown();
 }
 
+fn segment_capturing_dispatch() -> (
+    Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
+    Arc<std::sync::Mutex<Vec<ShapedSegment>>>,
+) {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let c = Arc::clone(&captured);
+    let cb: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
+        Arc::new(move |seg: &ShapedSegment| {
+            c.lock().unwrap().push(seg.clone());
+            Ok(())
+        });
+    (cb, captured)
+}
+
+fn pa_on_x_config(k: f64) -> PlannerConfig {
+    let registry = crate::config::AxisRegistry::try_new(
+        ["x", "y", "z"]
+            .iter()
+            .map(|name| crate::config::AxisDecl {
+                name: (*name).to_string(),
+                follows: vec![],
+                motors: vec![],
+                post_processors: if *name == "x" {
+                    vec!["pa".to_string()]
+                } else {
+                    vec![]
+                },
+            })
+            .collect(),
+    )
+    .unwrap();
+    let mut cfg = relaxed_config();
+    cfg.post_processors = crate::config::PostProcessorSet::try_new(
+        &registry,
+        &[crate::config::PostProcessorDecl {
+            name: "pa".into(),
+            ty: "linear_pressure_advance".into(),
+            params: vec![("k".into(), k)],
+        }],
+    )
+    .unwrap();
+    cfg.axis_registry = registry;
+    cfg
+}
+
+fn peak_x_track_speed(batch: &[ShapedSegment]) -> f64 {
+    let mut peak = 0.0_f64;
+    for seg in batch {
+        let n = 200;
+        let h = (seg.t_end - seg.t_start) / n as f64;
+        for i in 0..n {
+            let t = seg.t_start + i as f64 * h;
+            let a = nurbs::eval::eval(&seg.axes[0], t);
+            let b = nurbs::eval::eval(&seg.axes[0], t + h);
+            peak = peak.max(((b - a) / h).abs());
+        }
+    }
+    peak
+}
+
+#[test]
+fn update_post_processor_applies_to_new_plans_only() {
+    let (dispatch, captured) = segment_capturing_dispatch();
+    let mut h = PlannerHandle::spawn(pa_on_x_config(0.0), dispatch);
+
+    h.submit_move(long_move()).unwrap();
+    h.flush().unwrap();
+    let batch_a: Vec<ShapedSegment> = captured.lock().unwrap().clone();
+    assert!(!batch_a.is_empty());
+
+    h.update_post_processor("pa", "k", 0.05).unwrap();
+    let count_after_update = captured.lock().unwrap().len();
+    assert_eq!(
+        count_after_update,
+        batch_a.len(),
+        "runtime tuning must not re-emit dispatched pieces"
+    );
+
+    h.submit_move(long_move()).unwrap();
+    h.flush().unwrap();
+    let batch_b: Vec<ShapedSegment> = captured.lock().unwrap()[count_after_update..].to_vec();
+    assert!(!batch_b.is_empty());
+
+    let peak_a = peak_x_track_speed(&batch_a);
+    let peak_b = peak_x_track_speed(&batch_b);
+    assert!(
+        peak_b > peak_a + 4.0,
+        "PA gain k=0.05 must visibly boost the peak emitted track speed \
+         while accelerating (got peak_a={peak_a}, peak_b={peak_b})"
+    );
+
+    h.shutdown();
+}
+
 #[test]
 fn submit_triggers_replan_per_move() {
     let (dispatch, counter) = counting_dispatch();
