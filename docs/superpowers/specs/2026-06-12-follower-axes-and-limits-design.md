@@ -70,13 +70,14 @@ z_steppers: stepper_z0, stepper_z1, stepper_z2
 
 Stepper names are arbitrary; a stepper has no axis identity outside its
 assignment (`stepper_x` on a corexy was always a lie, and the lie has nowhere
-to live). Direct-drive steppers self-assign with an `axis:` key in their own
-section (the degenerate identity kinematics) — so a follower's motor declares
-`axis: e`, and kinematics modules claim only the coupled axes they exist for.
+to live). Direct-drive axes declare their motors in their own section —
+`[axis e]` carries `steppers: extruder_motor` (the degenerate identity
+kinematics) — so kinematics modules claim only the coupled axes they exist
+for, and nothing is inferred from the stepper side.
 
 Three coverage rules close the config, each failing at load naming the gap:
 every axis appears in at least one `[limit]` section (§3); every axis is
-stepper-mapped exactly once (one kinematics role or one stepper `axis:` key —
+stepper-mapped exactly once (one kinematics role or its own `steppers:` key —
 never zero, never twice); every `follows` entry references a declared axis.
 
 Axis names double as G-code word letters (`[axis e]` ↔ word `E`): single
