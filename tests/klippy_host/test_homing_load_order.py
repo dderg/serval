@@ -15,10 +15,16 @@ serial: /tmp/kalico-test-no-such-serial
 
 [printer]
 kinematics: cartesian
+
+[limit gantry]
+axes: x, y
 max_velocity: 100
 max_accel: 1000
-max_z_velocity: 10
-max_z_accel: 30
+
+[limit z]
+axes: z
+max_velocity: 10
+max_accel: 30
 
 [stepper_x]
 step_pin: PC12
