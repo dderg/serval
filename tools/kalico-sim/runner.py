@@ -1210,10 +1210,16 @@ serial: {h7_pty}
 {f4_section}
 [printer]
 kinematics: corexy
+
+[limit gantry]
+axes: x, y
 max_velocity: 300
 max_accel: 3000
-max_z_velocity: 10
-max_z_accel: 100
+
+[limit z]
+axes: z
+max_velocity: 10
+max_accel: 100
 
 [stepper_x]
 step_pin: gpiochip0/gpio0
@@ -1376,10 +1382,16 @@ serial: {h7_pty}
 
 [printer]
 kinematics: cartesian
+
+[limit gantry]
+axes: x, y
 max_velocity: 100
 max_accel: 1000
-max_z_velocity: 10
-max_z_accel: 30
+
+[limit z]
+axes: z
+max_velocity: 10
+max_accel: 30
 
 [stepper_x]
 step_pin: gpiochip0/gpio0
@@ -1816,10 +1828,16 @@ serial: {h7_pty}
 
 [printer]
 kinematics: cartesian
+
+[limit gantry]
+axes: x, y
 max_velocity: 100
 max_accel: 1000
-max_z_velocity: 10
-max_z_accel: 30
+
+[limit z]
+axes: z
+max_velocity: 10
+max_accel: 30
 
 [stepper_x]
 step_pin: gpiochip0/gpio0
@@ -1874,10 +1892,16 @@ serial: {h7_pty}
 
 [printer]
 kinematics: cartesian
+
+[limit gantry]
+axes: x, y
 max_velocity: 100
 max_accel: 1000
-max_z_velocity: 10
-max_z_accel: 30
+
+[limit z]
+axes: z
+max_velocity: 10
+max_accel: 30
 
 [stepper_x]
 step_pin: gpiochip0/gpio0
@@ -1952,10 +1976,16 @@ serial: {h7_pty}
 
 [printer]
 kinematics: cartesian
+
+[limit gantry]
+axes: x, y
 max_velocity: 100
 max_accel: 1000
-max_z_velocity: 10
-max_z_accel: 30
+
+[limit z]
+axes: z
+max_velocity: 10
+max_accel: 30
 
 [stepper_x]
 step_pin: gpiochip0/gpio0
@@ -2170,11 +2200,16 @@ serial: /dev/null
 
 [printer]
 kinematics: corexy
+
+[limit gantry]
+axes: x, y
 max_velocity: 500
 max_accel: 25000
-max_z_velocity: 30
-max_z_accel: 100
-square_corner_velocity: 5
+
+[limit z]
+axes: z
+max_velocity: 30
+max_accel: 100
 
 [stepper_x]
 step_pin: gpiochip0/gpio0
