@@ -9,7 +9,7 @@ use nurbs::algebra::PiecewisePolynomialKernel;
 use crate::classify::ClassifiedMove;
 use crate::config::{PlannerConfig, RuntimeCaps};
 use crate::pump::AxisKey;
-use trajectory::plan_velocity::{PlanShaper, SafetyMode};
+use trajectory::plan_velocity::SafetyMode;
 use trajectory::streaming::{EmitContext, ReplanContext, ReplanReport, ShaperState};
 use trajectory::{AxisShaper, ShapedSegment, ShaperConfig};
 
@@ -146,8 +146,8 @@ impl PlannerHandle {
         let last_move_time_bits = Arc::new(AtomicU64::new(0u64));
         let commit_fire_count = Arc::new(AtomicU32::new(0));
 
-        let shapers = shaper_config_to_axis_shapers(&config.shaper);
-        let state = ShaperState::new([0.0; 4], &shapers);
+        let chains = config.shaper.to_chain_set();
+        let state = ShaperState::new(&vec![0.0; chains.n_axes()], &chains);
 
         let last_thread = Arc::clone(&last_move_time_bits);
         let commit_thread = Arc::clone(&commit_fire_count);
@@ -387,29 +387,23 @@ fn run_commit_and_dispatch(
 }
 
 struct PlannerThreadState {
-    emit_kernels: [Option<PiecewisePolynomialKernel<f64>>; 4],
     replan_ctx: ReplanContext,
 }
 
 impl PlannerThreadState {
     fn build(config: &PlannerConfig) -> Self {
-        let emit_kernels = shaper_config_to_emit_kernels(&config.shaper);
-        let replan_ctx = build_replan_context(config);
         Self {
-            emit_kernels,
-            replan_ctx,
+            replan_ctx: build_replan_context(config),
         }
     }
 
     fn rebuild(&mut self, config: &PlannerConfig) {
-        let next = Self::build(config);
-        self.emit_kernels = next.emit_kernels;
-        self.replan_ctx = next.replan_ctx;
+        self.replan_ctx = Self::build(config).replan_ctx;
     }
 
     fn emit_ctx(&self) -> EmitContext<'_> {
         EmitContext {
-            kernels: &self.emit_kernels,
+            chains: &self.replan_ctx.chains,
         }
     }
 }
@@ -676,19 +670,21 @@ fn run_loop(
                     );
                 }
                 config.shaper = s;
-                let shapers = shaper_config_to_axis_shapers(&config.shaper);
-                state = ShaperState::new([0.0; 4], &shapers);
+                let chains = config.shaper.to_chain_set();
+                state = ShaperState::new(&vec![0.0; chains.n_axes()], &chains);
                 thread_state.rebuild(&config);
             }
 
             PlannerMsg::KalicoStreamOpen { home_pos } => {
                 sync_instant = None;
-                state.reset(home_pos);
+                let chains = &thread_state.replan_ctx.chains;
+                state.reset(&home_pos[..chains.n_axes()], chains);
             }
 
             PlannerMsg::Underrun { recovered_pos } | PlannerMsg::ForceIdle { recovered_pos } => {
                 sync_instant = None;
-                state.reset(recovered_pos);
+                let chains = &thread_state.replan_ctx.chains;
+                state.reset(&recovered_pos[..chains.n_axes()], chains);
             }
 
             PlannerMsg::ClockSyncRearm { new_bias: _ } => {
@@ -710,7 +706,8 @@ fn run_loop(
 
             PlannerMsg::HomeDrip(p) => {
                 sync_instant = None;
-                state.reset(p.home_pos);
+                let chains = &thread_state.replan_ctx.chains;
+                state.reset(&p.home_pos[..chains.n_axes()], chains);
 
                 let (dx, dy, dz) = match p.axis {
                     0 => (p.direction * p.max_travel_mm, 0.0, 0.0),
@@ -768,11 +765,10 @@ fn run_loop(
 
 fn build_replan_context(config: &PlannerConfig) -> ReplanContext {
     ReplanContext {
-        follower_pa: [0.0; temporal::MAX_AXES],
         limits: config
             .to_temporal_limits()
             .expect("limit sections validated in init_planner"),
-        kernels: shaper_config_to_plan_shapers(&config.shaper),
+        chains: config.shaper.to_chain_set(),
         fit_tolerance_mm: config.fit_tolerance_mm,
         beta_max_iters: config.beta_max_iters,
         beta_convergence_ratio: config.beta_convergence_ratio,
@@ -785,38 +781,6 @@ fn build_replan_context(config: &PlannerConfig) -> ReplanContext {
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
     }
-}
-
-fn shaper_config_to_emit_kernels(
-    cfg: &ShaperConfig,
-) -> [Option<PiecewisePolynomialKernel<f64>>; 4] {
-    [
-        cfg.x.to_kernel(),
-        cfg.y.to_kernel(),
-        cfg.z.to_kernel(),
-        None,
-    ]
-}
-
-fn axis_to_plan(ax: AxisShaper) -> PlanShaper {
-    match ax {
-        AxisShaper::SmoothZv { frequency_hz } => PlanShaper::SmoothZv { frequency_hz },
-        AxisShaper::SmoothMzv { frequency_hz } => PlanShaper::SmoothMzv { frequency_hz },
-        AxisShaper::Passthrough => PlanShaper::Passthrough,
-    }
-}
-
-fn shaper_config_to_plan_shapers(cfg: &ShaperConfig) -> [Option<PlanShaper>; 4] {
-    [
-        Some(axis_to_plan(cfg.x)),
-        Some(axis_to_plan(cfg.y)),
-        Some(axis_to_plan(cfg.z)),
-        None,
-    ]
-}
-
-fn shaper_config_to_axis_shapers(cfg: &ShaperConfig) -> [Option<AxisShaper>; 4] {
-    [Some(cfg.x), Some(cfg.y), Some(cfg.z), None]
 }
 
 #[cfg(test)]

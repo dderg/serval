@@ -148,13 +148,10 @@ fn z_only_move_after_homing_xy_shaped_axes_are_constant() {
     ];
     cfg.shaper = shaper_cfg;
 
-    let shapers = shaper_config_to_axis_shapers(&cfg.shaper);
-    let mut state = ShaperState::new([0.0; 4], &shapers);
-
     let replan_ctx = build_replan_context(&cfg);
-    let emit_kernels = shaper_config_to_emit_kernels(&cfg.shaper);
+    let mut state = ShaperState::new(&[0.0; 3], &replan_ctx.chains);
     let emit_ctx = EmitContext {
-        kernels: &emit_kernels,
+        chains: &replan_ctx.chains,
     };
 
     let do_move =
@@ -175,24 +172,24 @@ fn z_only_move_after_homing_xy_shaped_axes_are_constant() {
             .expect("commit_decel_to_zero should succeed")
     };
 
-    state.reset([-154.5, 0.0, 0.0, 0.0]);
+    state.reset(&[-154.5, 0.0, 0.0], &replan_ctx.chains);
     let _ = do_move(&mut state, [-154.5, 0.0, 0.0], 454.5, 0.0, 0.0, 100.0);
     let _ = do_flush(&mut state);
-    state.reset([300.0, 0.0, 0.0, 0.0]);
+    state.reset(&[300.0, 0.0, 0.0], &replan_ctx.chains);
     let _ = do_move(&mut state, [300.0, 0.0, 0.0], -5.0, 0.0, 0.0, 100.0);
     let _ = do_move(&mut state, [295.0, 0.0, 0.0], -100.0, 0.0, 0.0, 100.0);
     let _ = do_move(&mut state, [195.0, 0.0, 0.0], -100.0, 0.0, 0.0, 100.0);
     let _ = do_flush(&mut state);
 
-    state.reset([95.0, -151.5, 0.0, 0.0]);
+    state.reset(&[95.0, -151.5, 0.0], &replan_ctx.chains);
     let _ = do_move(&mut state, [95.0, -151.5, 0.0], 0.0, 453.5, 0.0, 100.0);
     let _ = do_flush(&mut state);
-    state.reset([95.0, 302.0, 0.0, 0.0]);
+    state.reset(&[95.0, 302.0, 0.0], &replan_ctx.chains);
     let _ = do_move(&mut state, [95.0, 302.0, 0.0], 0.0, -5.0, 0.0, 100.0);
     let _ = do_move(&mut state, [95.0, 297.0, 0.0], 55.0, -165.0, 0.0, 300.0);
     let _ = do_flush(&mut state);
 
-    state.reset([150.0, 132.0, 344.0, 0.0]);
+    state.reset(&[150.0, 132.0, 344.0], &replan_ctx.chains);
 
     let z_move = classify_and_build([150.0, 132.0, 344.0], 0.0, 0.0, -342.0, 0.0, 8.0)
         .expect("classify Z move");
@@ -277,12 +274,10 @@ fn z_move_with_tiny_x_after_homing_xy_deviation_proportional() {
     ];
     cfg.shaper = shaper_cfg;
 
-    let shapers = shaper_config_to_axis_shapers(&cfg.shaper);
-    let mut state = ShaperState::new([0.0; 4], &shapers);
     let replan_ctx = build_replan_context(&cfg);
-    let emit_kernels = shaper_config_to_emit_kernels(&cfg.shaper);
+    let mut state = ShaperState::new(&[0.0; 3], &replan_ctx.chains);
     let emit_ctx = EmitContext {
-        kernels: &emit_kernels,
+        chains: &replan_ctx.chains,
     };
 
     let do_move =
@@ -297,23 +292,23 @@ fn z_move_with_tiny_x_after_homing_xy_deviation_proportional() {
         state.commit_decel_to_zero(&emit_ctx).expect("flush")
     };
 
-    state.reset([-154.5, 0.0, 0.0, 0.0]);
+    state.reset(&[-154.5, 0.0, 0.0], &replan_ctx.chains);
     let _ = do_move(&mut state, [-154.5, 0.0, 0.0], 454.5, 0.0, 0.0, 100.0);
     let _ = do_flush(&mut state);
-    state.reset([300.0, 0.0, 0.0, 0.0]);
+    state.reset(&[300.0, 0.0, 0.0], &replan_ctx.chains);
     let _ = do_move(&mut state, [300.0, 0.0, 0.0], -5.0, 0.0, 0.0, 100.0);
     let _ = do_move(&mut state, [295.0, 0.0, 0.0], -100.0, 0.0, 0.0, 100.0);
     let _ = do_move(&mut state, [195.0, 0.0, 0.0], -100.0, 0.0, 0.0, 100.0);
     let _ = do_flush(&mut state);
-    state.reset([95.0, -151.5, 0.0, 0.0]);
+    state.reset(&[95.0, -151.5, 0.0], &replan_ctx.chains);
     let _ = do_move(&mut state, [95.0, -151.5, 0.0], 0.0, 453.5, 0.0, 100.0);
     let _ = do_flush(&mut state);
-    state.reset([95.0, 302.0, 0.0, 0.0]);
+    state.reset(&[95.0, 302.0, 0.0], &replan_ctx.chains);
     let _ = do_move(&mut state, [95.0, 302.0, 0.0], 0.0, -5.0, 0.0, 100.0);
     let _ = do_move(&mut state, [95.0, 297.0, 0.0], 55.0, -165.0, 0.0, 300.0);
     let _ = do_flush(&mut state);
 
-    state.reset([150.0, 132.0, 344.0, 0.0]);
+    state.reset(&[150.0, 132.0, 344.0], &replan_ctx.chains);
     let z_move = classify_and_build([150.0, 132.0, 344.0], 0.1, 0.0, -342.0, 0.0, 8.0)
         .expect("classify Z+tiny-X move");
     state
@@ -498,15 +493,13 @@ fn z_only_move_no_prior_xy_motion() {
     ];
     cfg.shaper = shaper_cfg;
 
-    let shapers = shaper_config_to_axis_shapers(&cfg.shaper);
-    let mut state = ShaperState::new([0.0; 4], &shapers);
     let replan_ctx = build_replan_context(&cfg);
-    let emit_kernels = shaper_config_to_emit_kernels(&cfg.shaper);
+    let mut state = ShaperState::new(&[0.0; 3], &replan_ctx.chains);
     let emit_ctx = EmitContext {
-        kernels: &emit_kernels,
+        chains: &replan_ctx.chains,
     };
 
-    state.reset([150.0, 132.0, 344.0, 0.0]);
+    state.reset(&[150.0, 132.0, 344.0], &replan_ctx.chains);
 
     let z_move = classify_and_build([150.0, 132.0, 344.0], 0.0, 0.0, -342.0, 0.0, 8.0)
         .expect("classify Z move");
@@ -573,15 +566,13 @@ fn peak_speed_of_single_x_move(max_velocity: f64, max_accel: f64, feedrate: f64)
     cfg.limit_sections[0].max_velocity = Some(max_velocity);
     cfg.limit_sections[0].max_accel = Some(max_accel);
 
-    let shapers = shaper_config_to_axis_shapers(&cfg.shaper);
-    let mut state = ShaperState::new([0.0; 4], &shapers);
     let replan_ctx = build_replan_context(&cfg);
-    let emit_kernels = shaper_config_to_emit_kernels(&cfg.shaper);
+    let mut state = ShaperState::new(&[0.0; 3], &replan_ctx.chains);
     let emit_ctx = EmitContext {
-        kernels: &emit_kernels,
+        chains: &replan_ctx.chains,
     };
 
-    state.reset([0.0; 4]);
+    state.reset(&[0.0; 3], &replan_ctx.chains);
     let m = classify_and_build([0.0; 3], 600.0, 0.0, 0.0, 0.0, feedrate)
         .expect("classify_and_build should succeed");
     state

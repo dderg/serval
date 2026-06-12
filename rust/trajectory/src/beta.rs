@@ -1,6 +1,7 @@
 use crate::emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory};
 use crate::fit::FittedSegment;
 use crate::plan_velocity::SafetyMode;
+use crate::post_processor::AxisChainSet;
 use crate::{BetaWarning, ShapeBatchInput, ShapeBatchOutput, ShapeError, ShapedSegment};
 use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::ScalarNurbs;
@@ -8,10 +9,11 @@ use nurbs::ScalarNurbs;
 const MIN_AXIS_SPAN_FOR_DERATE: f64 = 0.5;
 const BETA_ACCEL_MIN_RATIO: f64 = 0.02;
 
-struct AxisKernels {
-    x: Option<PiecewisePolynomialKernel<f64>>,
-    y: Option<PiecewisePolynomialKernel<f64>>,
-    z: Option<PiecewisePolynomialKernel<f64>>,
+fn spatial_only_view(chains: &AxisChainSet) -> AxisChainSet {
+    AxisChainSet {
+        chains: chains.chains[..3].to_vec(),
+        followers: Vec::new(),
+    }
 }
 
 pub fn beta_loop(input: &ShapeBatchInput<'_>) -> Result<ShapeBatchOutput, ShapeError> {
@@ -33,22 +35,24 @@ pub fn beta_loop_with_safety(
 
     let planned = plan_batch_full(input, safety_mode)?;
 
-    let chain_set = crate::AxisChainSet::spatial_from_kernels(
-        &build_kernel_array_from_shaper_config(&input.shaper),
-    );
     let meta: Vec<EmitSegmentMeta> = collect_xy_meta(input);
     let batch_t_start = 0.0_f64;
     let batch_t_end = planned.global_ends.last().copied().unwrap_or(0.0);
 
+    let anchor = crate::emit_shaped::FollowerAnchor {
+        t: planned.fitted.first().map_or(0.0, |f| f.t_start),
+        values: input.follower_start,
+    };
     let emitted_xy = emit_shaped(
         &planned.fitted,
         &meta,
-        &chain_set,
+        input.chains,
         &PerAxisHistory::empty(),
-        &[],
+        &anchor,
         batch_t_start,
         batch_t_end,
-    )?;
+    )?
+    .segments;
 
     let beta_iters = if planned.converged {
         1
@@ -86,17 +90,6 @@ pub fn plan_batch_full(
         beta_iterations: outcome.iterations,
         beta_warning: outcome.beta_warning,
     })
-}
-
-fn build_kernel_array_from_shaper_config(
-    shaper: &crate::ShaperConfig,
-) -> [Option<PiecewisePolynomialKernel<f64>>; 4] {
-    [
-        shaper.x.to_kernel(),
-        shaper.y.to_kernel(),
-        shaper.z.to_kernel(),
-        None,
-    ]
 }
 
 fn collect_xy_meta(input: &ShapeBatchInput<'_>) -> Vec<EmitSegmentMeta> {
@@ -161,12 +154,6 @@ fn beta_iterate_inner(
     input: &ShapeBatchInput<'_>,
     safety_mode: SafetyMode,
 ) -> Result<BetaIterationOutcome, ShapeError> {
-    let kernels = AxisKernels {
-        x: input.shaper.x.to_kernel(),
-        y: input.shaper.y.to_kernel(),
-        z: input.shaper.z.to_kernel(),
-    };
-
     debug_assert!(
         !input.segments.is_empty(),
         "beta_iterate_inner caller must handle the empty-batch fast path"
@@ -195,7 +182,7 @@ fn beta_iterate_inner(
     let mut iterations: u8 = 0;
 
     for iteration in 0..input.beta_max_iters {
-        let result = match run_one_iteration(input, &planning_a_max, &kernels) {
+        let result = match run_one_iteration(input, &planning_a_max) {
             Ok(result) => result,
             Err(_) if last_result.is_some() => {
                 beta_warning = Some(beta_warning_from_last(
@@ -237,7 +224,7 @@ fn beta_iterate_inner(
         }
 
         if iteration == input.beta_max_iters - 1 {
-            let final_result = match run_one_iteration(input, &planning_a_max, &kernels) {
+            let final_result = match run_one_iteration(input, &planning_a_max) {
                 Ok(result) => result,
                 Err(_) => {
                     beta_warning = Some(beta_warning_from_last(&result, &derate_machine_a_max));
@@ -265,7 +252,7 @@ fn beta_iterate_inner(
         Some(r) => r,
         None => {
             debug_assert_eq!(input.beta_max_iters, 0);
-            let r = run_one_iteration(input, &planning_a_max, &kernels)?;
+            let r = run_one_iteration(input, &planning_a_max)?;
             iterations = 1;
             converged = true;
             r
@@ -316,8 +303,8 @@ struct BetaIterResult {
 fn run_one_iteration(
     input: &ShapeBatchInput<'_>,
     planning_a_max: &[[f64; 3]],
-    kernels: &AxisKernels,
 ) -> Result<BetaIterResult, ShapeError> {
+    let chains = input.chains;
     let follower_storage: Vec<Vec<temporal::FollowerDemand>> = input
         .segments
         .iter()
@@ -327,14 +314,18 @@ fn run_one_iteration(
                 .map(|f| temporal::FollowerDemand {
                     axis: f.axis_index,
                     ratio: f.ratio,
-                    pa_k: input.follower_pa[f.axis_index],
+                    pa_k: chains.chains.get(f.axis_index).map_or(0.0, |c| c.gain),
                 })
                 .collect()
         })
         .collect();
     let any_followers = follower_storage.iter().any(|f| !f.is_empty());
     let shaping = temporal::multi::BatchShaping {
-        axis_kernels: [kernels.x.clone(), kernels.y.clone(), kernels.z.clone()],
+        axis_kernels: [
+            chains.chains[0].kernel.clone(),
+            chains.chains[1].kernel.clone(),
+            chains.chains[2].kernel.clone(),
+        ],
         follower_history: input.follower_history.cloned(),
     };
     let shaping_active = any_followers
@@ -372,6 +363,7 @@ fn run_one_iteration(
                 curve: orig.curve,
                 limits: derated_limits,
                 followers: &follower_storage[flat_idx],
+                virtual_path: orig.virtual_path,
             }
         })
         .collect();
@@ -454,30 +446,36 @@ fn run_one_iteration(
         let t_offset = t_cursor;
 
         let curve = input.segments[global_idx].temporal.curve;
-
-        let table =
-            nurbs::arc_length::build_arc_length_table_vector(curve, 1e-6, 1024).map_err(|e| {
-                ShapeError::ArcLength {
-                    index: global_idx,
-                    detail: format!("{e}"),
-                }
-            })?;
-
         let s_pieces = crate::reparam::build_s_of_t_pieces(profile, t_offset);
 
-        let arc_fit_tolerance = 1e-4; // mm
-        let composed =
-            crate::reparam::compose_segment(curve, &table.as_view(), &s_pieces, arc_fit_tolerance)?;
-
-        let seg_d2_override = if global_idx == 0 {
-            input.start_d2_override
+        let seg_fitted = if input.segments[global_idx].temporal.virtual_path.is_some() {
+            virtual_fitted_segment(curve, &s_pieces)
         } else {
-            None
+            let table = nurbs::arc_length::build_arc_length_table_vector(curve, 1e-6, 1024)
+                .map_err(|e| ShapeError::ArcLength {
+                    index: global_idx,
+                    detail: format!("{e}"),
+                })?;
+
+            let arc_fit_tolerance = 1e-4; // mm
+            let composed = crate::reparam::compose_segment(
+                curve,
+                &table.as_view(),
+                &s_pieces,
+                arc_fit_tolerance,
+            )?;
+
+            let seg_d2_override = if global_idx == 0 {
+                input.start_d2_override
+            } else {
+                None
+            };
+            let mut seg_fitted =
+                crate::fit::fit_and_split(&composed, input.fit_tolerance_mm, seg_d2_override)?;
+            seg_fitted.t_start = s_pieces.t_start;
+            seg_fitted.t_end = s_pieces.t_end;
+            seg_fitted
         };
-        let mut seg_fitted =
-            crate::fit::fit_and_split(&composed, input.fit_tolerance_mm, seg_d2_override)?;
-        seg_fitted.t_start = s_pieces.t_start;
-        seg_fitted.t_end = s_pieces.t_end;
 
         fitted.push(seg_fitted);
         t_cursor = s_pieces.t_end;
@@ -487,8 +485,7 @@ fn run_one_iteration(
     let batch_t_end = t_cursor;
     let batch_t_start = 0.0;
 
-    let chain_set =
-        crate::AxisChainSet::spatial_from_kernels(&build_kernel_array_from_axis_kernels(kernels));
+    let chain_set = spatial_only_view(chains);
     let dummy_meta: Vec<EmitSegmentMeta> = (0..fitted.len())
         .map(|_| EmitSegmentMeta { followers: vec![] })
         .collect();
@@ -497,10 +494,11 @@ fn run_one_iteration(
         &dummy_meta,
         &chain_set,
         &PerAxisHistory::empty(),
-        &[],
+        &crate::emit_shaped::FollowerAnchor::none(),
         batch_t_start,
         batch_t_end,
-    )?;
+    )?
+    .segments;
 
     let peaks: Vec<[f64; 3]> = emitted
         .iter()
@@ -522,15 +520,19 @@ fn run_one_iteration(
     })
 }
 
-fn build_kernel_array_from_axis_kernels(
-    kernels: &AxisKernels,
-) -> [Option<PiecewisePolynomialKernel<f64>>; 4] {
-    [
-        kernels.x.clone(),
-        kernels.y.clone(),
-        kernels.z.clone(),
-        None,
-    ]
+fn virtual_fitted_segment(
+    curve: &nurbs::VectorNurbs<f64, 3>,
+    s_pieces: &crate::reparam::SOfTPieces,
+) -> FittedSegment {
+    let parked = curve.control_points()[0];
+    FittedSegment {
+        axes: std::array::from_fn(|ax| {
+            constant_cubic_nurbs(parked[ax], s_pieces.t_start, s_pieces.t_end)
+        }),
+        t_start: s_pieces.t_start,
+        t_end: s_pieces.t_end,
+        virtual_s_of_t: Some(nurbs::bezier::bezier_pieces_to_nurbs(&s_pieces.pieces)),
+    }
 }
 
 struct DerateInfo {

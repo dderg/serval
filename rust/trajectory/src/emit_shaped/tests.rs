@@ -1,7 +1,7 @@
 use super::*;
 use crate::fit::{fit_and_split, FittedSegment};
 use crate::{
-    plan_velocity, AxisShaper, PlanInput, PlanSegment, PlanShaper, SafetyMode, ShapeBatchInput,
+    plan_velocity, AxisShaper, PlanInput, PlanSegment, SafetyMode, ShapeBatchInput,
     ShapeSegmentInput, ShaperConfig,
 };
 use geometry::segment::FollowerDemand;
@@ -47,18 +47,8 @@ fn default_shaper_config() -> ShaperConfig {
     }
 }
 
-fn default_kernels() -> [Option<PlanShaper>; 4] {
-    [
-        Some(PlanShaper::SmoothZv {
-            frequency_hz: 180.0,
-        }),
-        Some(PlanShaper::SmoothZv {
-            frequency_hz: 120.0,
-        }),
-        Some(PlanShaper::Passthrough),
-        None,
-    ]
-}
+static DEFAULT_CHAINS: std::sync::LazyLock<crate::AxisChainSet> =
+    std::sync::LazyLock::new(|| default_shaper_config().to_chain_set());
 
 fn assert_nurbs_near_equal(a: &ScalarNurbs<f64>, b: &ScalarNurbs<f64>, label: &str) {
     assert_eq!(a.degree(), b.degree(), "{label}: degree differs");
@@ -102,18 +92,18 @@ fn empty_history_matches_shape_batch_byte_identical() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
     let plan_input = PlanInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
         follower_history: None,
         segments: &plan_segs,
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         worker_threads: 1,
-        kernels: default_kernels(),
+        chains: &DEFAULT_CHAINS,
         fit_tolerance_mm: 0.5,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
@@ -152,10 +142,14 @@ fn empty_history_matches_shape_batch_byte_identical() {
         &meta,
         &AxisChainSet::spatial_from_kernels(&kernels),
         &PerAxisHistory::empty(),
-        &[],
+        &crate::emit_shaped::FollowerAnchor {
+            t: batch_t_start,
+            values: &[],
+        },
         batch_t_start,
         batch_t_end,
     )
+    .map(|e| e.segments)
     .expect("emit_shaped should succeed");
 
     let segs = [ShapeSegmentInput {
@@ -163,13 +157,14 @@ fn empty_history_matches_shape_batch_byte_identical() {
         followers: plan_segs[0].followers,
         feedrate_mm_s: plan_segs[0].feedrate_mm_s,
     }];
+    let chains = default_shaper_config().to_chain_set();
     let shape_input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &segs,
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         worker_threads: 1,
-        shaper: default_shaper_config(),
         fit_tolerance_mm: 0.5,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
@@ -404,10 +399,14 @@ fn constant_y_axis_emits_cubic_matching_moving_x_corexy_degree_invariant() {
         &meta,
         &AxisChainSet::spatial_from_kernels(&kernels),
         &PerAxisHistory::empty(),
-        &[],
+        &crate::emit_shaped::FollowerAnchor {
+            t: fitted_from_fitter.t_start,
+            values: &[],
+        },
         fitted_from_fitter.t_start,
         fitted_from_fitter.t_end,
     )
+    .map(|e| e.segments)
     .expect("emit_shaped must not return an error");
 
     for (i, seg) in emitted.iter().enumerate() {
@@ -491,11 +490,15 @@ fn passthrough_chains_reproduce_legacy_output_bitwise() {
         &meta,
         &AxisChainSet::spatial_from_kernels(&kernels),
         &PerAxisHistory::empty(),
-        &[],
+        &crate::emit_shaped::FollowerAnchor {
+            t: 0.0,
+            values: &[],
+        },
         0.0,
         2.5,
     )
-    .unwrap();
+    .unwrap()
+    .segments;
 
     let golden = include_str!("golden_passthrough_capture.txt");
     for (i, seg) in out.iter().enumerate() {
@@ -558,11 +561,15 @@ fn follower_track_integral_matches_ratio_times_arclength() {
         &meta,
         &chains,
         &PerAxisHistory::empty(),
-        &[start],
+        &crate::emit_shaped::FollowerAnchor {
+            t: 0.0,
+            values: &[start],
+        },
         0.0,
         2.5,
     )
-    .unwrap();
+    .unwrap()
+    .segments;
 
     let spatial: Vec<ScalarNurbs<f64>> = (0..3)
         .map(|ax| {
@@ -659,11 +666,15 @@ fn follower_samples_post_kernel_path() {
         &meta,
         &e_follower_chains(0.0, &kernels),
         &PerAxisHistory::empty(),
-        &[0.0],
+        &crate::emit_shaped::FollowerAnchor {
+            t: 0.0,
+            values: &[0.0],
+        },
         0.0,
         2.0,
     )
-    .unwrap();
+    .unwrap()
+    .segments;
     let nominal_length = 80.0;
     let shaped_end = nurbs::eval::eval(&shaped_out.last().unwrap().axes[3], 2.0);
     assert!(
@@ -687,11 +698,15 @@ fn follower_samples_post_kernel_path() {
         &straight_meta,
         &e_follower_chains(0.0, &[None, None, None, None]),
         &PerAxisHistory::empty(),
-        &[0.0],
+        &crate::emit_shaped::FollowerAnchor {
+            t: 0.0,
+            values: &[0.0],
+        },
         0.0,
         2.5,
     )
-    .unwrap();
+    .unwrap()
+    .segments;
     let spatial: Vec<ScalarNurbs<f64>> = (0..3)
         .map(|ax| {
             let pieces: Vec<BezierPiece<f64>> = passthrough_out
@@ -737,11 +752,15 @@ fn pa_gain_boosts_follower_during_accel() {
         &meta,
         &e_follower_chains(k, &[None, None, None, None]),
         &PerAxisHistory::empty(),
-        &[0.0],
+        &crate::emit_shaped::FollowerAnchor {
+            t: 0.0,
+            values: &[0.0],
+        },
         0.0,
         1.0,
     )
-    .unwrap();
+    .unwrap()
+    .segments;
 
     let track = &out[0].axes[3];
     let t = 0.5;
@@ -784,11 +803,15 @@ fn follower_only_move_emits_planned_track() {
         &meta,
         &e_follower_chains(0.0, &[None, None, None, None]),
         &PerAxisHistory::empty(),
-        &[start],
+        &crate::emit_shaped::FollowerAnchor {
+            t: 0.0,
+            values: &[start],
+        },
         0.0,
         1.0,
     )
-    .unwrap();
+    .unwrap()
+    .segments;
 
     for ax in 0..3 {
         assert!(

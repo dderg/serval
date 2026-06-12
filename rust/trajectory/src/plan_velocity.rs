@@ -1,5 +1,6 @@
 use crate::fit::FittedSegment;
-use crate::{AxisShaper, ShapeBatchInput, ShapeError, ShapeSegmentInput, ShaperConfig};
+use crate::post_processor::AxisChainSet;
+use crate::{ShapeBatchInput, ShapeError, ShapeSegmentInput};
 
 pub use crate::beta::{PlanOutput, PlanStats};
 
@@ -10,26 +11,6 @@ pub enum SafetyMode {
     /// β-medium derates against the worst-case-future bound by tightening the
     /// effective machine accel limit on the trailing region.
     WorstCaseFuture,
-}
-
-/// Per-axis shaper for a [`PlanInput`]. Unlike [`ShaperConfig`], allows
-/// `None` on every axis — streaming may legitimately plan with passthrough
-/// before per-axis shaper config is loaded.
-#[derive(Debug, Clone, Copy)]
-pub enum PlanShaper {
-    SmoothZv { frequency_hz: f64 },
-    SmoothMzv { frequency_hz: f64 },
-    Passthrough,
-}
-
-impl PlanShaper {
-    fn into_axis(self) -> AxisShaper {
-        match self {
-            Self::SmoothZv { frequency_hz } => AxisShaper::SmoothZv { frequency_hz },
-            Self::SmoothMzv { frequency_hz } => AxisShaper::SmoothMzv { frequency_hz },
-            Self::Passthrough => AxisShaper::Passthrough,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,8 +25,8 @@ pub struct PlanInput<'a> {
     pub segments: &'a [PlanSegment<'a>],
     pub grid_strategy: temporal::multi::GridStrategy,
     pub worker_threads: usize,
-    /// Per-axis shapers `[X, Y, Z, E]`. E is always passthrough.
-    pub kernels: [Option<PlanShaper>; 4],
+    /// Per-axis post-processor chains — single source for solver shaping and PA.
+    pub chains: &'a AxisChainSet,
     pub fit_tolerance_mm: f64,
     pub beta_max_iters: u8,
     pub beta_convergence_ratio: f64,
@@ -53,7 +34,6 @@ pub struct PlanInput<'a> {
     pub initial_a: f64,
     pub terminal_v: f64,
     pub safety_mode: SafetyMode,
-    pub follower_pa: [f64; temporal::MAX_AXES],
     pub follower_history: Option<&'a temporal::FollowerHistory>,
     /// Axis-wise second derivatives to pin at the first sample of the first fitted
     /// segment. Forwarded verbatim to [`ShapeBatchInput::start_d2_override`].
@@ -82,7 +62,6 @@ pub fn plan_velocity(input: &PlanInput<'_>) -> Result<PlanOutput, ShapeError> {
         return Err(ShapeError::UnsupportedBoundaryAccel);
     }
 
-    let shaper = build_shaper_config(&input.kernels);
     let segments: Vec<ShapeSegmentInput<'_>> = input
         .segments
         .iter()
@@ -95,11 +74,11 @@ pub fn plan_velocity(input: &PlanInput<'_>) -> Result<PlanOutput, ShapeError> {
 
     let shape_input = ShapeBatchInput {
         segments: &segments,
-        follower_pa: input.follower_pa,
+        chains: input.chains,
+        follower_start: &[],
         follower_history: input.follower_history,
         grid_strategy: input.grid_strategy,
         worker_threads: input.worker_threads,
-        shaper,
         fit_tolerance_mm: input.fit_tolerance_mm,
         beta_max_iters: input.beta_max_iters,
         beta_convergence_ratio: input.beta_convergence_ratio,
@@ -110,13 +89,6 @@ pub fn plan_velocity(input: &PlanInput<'_>) -> Result<PlanOutput, ShapeError> {
     };
 
     crate::beta::plan_velocity_inner(&shape_input, input.safety_mode)
-}
-
-fn build_shaper_config(kernels: &[Option<PlanShaper>; 4]) -> ShaperConfig {
-    let x = kernels[0].map_or(AxisShaper::Passthrough, PlanShaper::into_axis);
-    let y = kernels[1].map_or(AxisShaper::Passthrough, PlanShaper::into_axis);
-    let z = kernels[2].map_or(AxisShaper::Passthrough, PlanShaper::into_axis);
-    ShaperConfig { x, y, z }
 }
 
 #[cfg(test)]

@@ -18,6 +18,10 @@ pub struct SegmentInput<'a> {
     pub curve: &'a VectorNurbs<f64, 3>,
     pub limits: Limits,
     pub followers: &'a [crate::FollowerDemand],
+    /// `Some(length)` marks a follower-only move planned on a virtual path of
+    /// this arclength; `curve` has zero displacement and the follower rows do
+    /// all the limiting.
+    pub virtual_path: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +88,21 @@ pub enum BatchError {
     },
 }
 
+fn virtual_grid_n(strategy: &GridStrategy, length: f64) -> usize {
+    match *strategy {
+        GridStrategy::Fixed(n) => n.max(2),
+        GridStrategy::Adaptive {
+            min_n,
+            max_n,
+            target_grid_spacing_mm,
+        } => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = (length / target_grid_spacing_mm).ceil() as usize;
+            n.clamp(min_n, max_n).max(2)
+        }
+    }
+}
+
 pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
     use crate::multi::{chain, grid, joining, junction, parallel};
     use crate::topp::chain::ChainGrid;
@@ -119,6 +138,25 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
     let chain_grids: Vec<ChainGrid> = chain_ranges
         .iter()
         .map(|range| {
+            if let Some(length) = input.segments[*range.start()].virtual_path {
+                assert_eq!(
+                    range.clone().count(),
+                    1,
+                    "virtual-path segment must be isolated in its own chain — \
+                     zero tangents classify both junctions as corners"
+                );
+                let seg = &input.segments[*range.start()];
+                let n = virtual_grid_n(&input.grid_strategy, length);
+                return ChainGrid::virtual_path(length, n, seg.limits, seg.followers.to_vec(), 0.0)
+                    .map_err(|e| BatchError::InvalidFollowerDemand(e.to_string()));
+            }
+            assert!(
+                range
+                    .clone()
+                    .all(|i| input.segments[i].virtual_path.is_none()),
+                "virtual-path segment fused into a multi-segment chain — \
+                 junction classification must isolate zero-displacement curves"
+            );
             let chain_curves: Vec<&VectorNurbs<f64, 3>> =
                 range.clone().map(|i| input.segments[i].curve).collect();
             let mut ns: Vec<usize> = chain_curves

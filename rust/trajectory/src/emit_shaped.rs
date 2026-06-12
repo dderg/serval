@@ -14,17 +14,16 @@ const SMOOTH_FIT_TOLERANCE_MM: f64 = 5.0e-3;
 const ODOMETER_MIN_INTERVALS: usize = 16;
 const CONSTANT_AXIS_EPS: f64 = 1e-12;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 pub struct PerAxisHistory<'a> {
-    pub axes: [&'a [BezierPiece<f64>]; 4],
+    /// Index = axis registry index; missing trailing axes mean no history.
+    pub axes: Vec<&'a [BezierPiece<f64>]>,
 }
 
 impl PerAxisHistory<'_> {
     #[must_use]
     pub const fn empty() -> Self {
-        Self {
-            axes: [&[], &[], &[], &[]],
-        }
+        Self { axes: Vec::new() }
     }
 
     fn axis(&self, axis: usize) -> &[BezierPiece<f64>] {
@@ -32,10 +31,13 @@ impl PerAxisHistory<'_> {
     }
 }
 
-impl Default for PerAxisHistory<'_> {
-    fn default() -> Self {
-        Self::empty()
-    }
+/// Emission output: shaped per-segment tracks plus, per follower (parallel to
+/// `chains.followers`), the pre-gain input-track pieces — the follower's
+/// nominal position ledger over the batch.
+#[derive(Debug)]
+pub struct ShapeEmission {
+    pub segments: Vec<ShapedSegment>,
+    pub follower_inputs: Vec<Vec<BezierPiece<f64>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,28 +50,48 @@ pub fn emit_shaped(
     meta: &[EmitSegmentMeta],
     chains: &AxisChainSet,
     history: &PerAxisHistory<'_>,
-    follower_start: &[f64],
+    follower_anchor: &FollowerAnchor<'_>,
     batch_t_start: f64,
     batch_t_end: f64,
-) -> Result<Vec<ShapedSegment>, ShapeError> {
+) -> Result<ShapeEmission, ShapeError> {
     emit_shaped_with_left_bc(
         planned,
         meta,
         chains,
         history,
-        follower_start,
+        follower_anchor,
         batch_t_start,
         batch_t_end,
         &[],
     )
 }
 
+/// Pins each follower's nominal ledger to a committed value at time `t`:
+/// emitted follower tracks are shifted so the pre-gain ledger passes through
+/// `values[i]` at `t`. Regions before `t` are never re-dispatched, so drift
+/// from re-fitting them must not leak into the committed stream.
+#[derive(Debug, Clone, Copy)]
+pub struct FollowerAnchor<'a> {
+    pub t: f64,
+    /// Parallel to `chains.followers`.
+    pub values: &'a [f64],
+}
+
+impl FollowerAnchor<'_> {
+    #[must_use]
+    pub const fn none() -> Self {
+        FollowerAnchor {
+            t: f64::NEG_INFINITY,
+            values: &[],
+        }
+    }
+}
+
 /// Like [`emit_shaped`] but overrides the left-boundary slope for the FIRST
 /// segment's per-axis `fit_c2_cubic` call.  Passing the previous emission's
 /// right-boundary slope enforces C1 continuity across the dispatch seam.
 ///
-/// `follower_start` is the physical start position per follower, parallel to
-/// `chains.followers`. `first_seg_left_bc` is indexed by axis registry index;
+/// `first_seg_left_bc` is indexed by axis registry index;
 /// missing trailing entries mean no override.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_shaped_with_left_bc(
@@ -77,11 +99,11 @@ pub fn emit_shaped_with_left_bc(
     meta: &[EmitSegmentMeta],
     chains: &AxisChainSet,
     history: &PerAxisHistory<'_>,
-    follower_start: &[f64],
+    follower_anchor: &FollowerAnchor<'_>,
     batch_t_start: f64,
     batch_t_end: f64,
     first_seg_left_bc: &[Option<f64>],
-) -> Result<Vec<ShapedSegment>, ShapeError> {
+) -> Result<ShapeEmission, ShapeError> {
     debug_assert_eq!(
         planned.len(),
         meta.len(),
@@ -93,9 +115,9 @@ pub fn emit_shaped_with_left_bc(
         "emit_shaped: chain set must cover at least the 3 spatial axes"
     );
     assert_eq!(
-        follower_start.len(),
+        follower_anchor.values.len(),
         chains.followers.len(),
-        "emit_shaped: follower_start must be parallel to chains.followers"
+        "emit_shaped: follower anchor values must be parallel to chains.followers"
     );
     for axis in 3..n_axes {
         assert!(
@@ -106,7 +128,10 @@ pub fn emit_shaped_with_left_bc(
     }
 
     if planned.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ShapeEmission {
+            segments: Vec::new(),
+            follower_inputs: vec![Vec::new(); chains.followers.len()],
+        });
     }
 
     let mut shaped: Vec<Vec<Option<ScalarNurbs<f64>>>> = planned
@@ -132,23 +157,29 @@ pub fn emit_shaped_with_left_bc(
         )?;
     }
 
+    let mut follower_inputs: Vec<Vec<BezierPiece<f64>>> =
+        Vec::with_capacity(chains.followers.len());
     for (follower_idx, (f_axis, followed)) in chains.followers.iter().enumerate() {
-        emit_follower_axis(
+        let ledger = emit_follower_axis(
             planned,
             meta,
             *f_axis,
             followed,
             &chains.chains[*f_axis],
             history,
-            follower_start[follower_idx],
+            FollowerAnchor {
+                t: follower_anchor.t,
+                values: &follower_anchor.values[follower_idx..=follower_idx],
+            },
             batch_t_start,
             batch_t_end,
             left_bc_for(*f_axis),
             &mut shaped,
         )?;
+        follower_inputs.push(ledger);
     }
 
-    let output = planned
+    let segments = planned
         .iter()
         .zip(shaped)
         .zip(meta)
@@ -163,7 +194,10 @@ pub fn emit_shaped_with_left_bc(
         })
         .collect();
 
-    Ok(output)
+    Ok(ShapeEmission {
+        segments,
+        follower_inputs,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -242,13 +276,14 @@ fn emit_follower_axis(
     followed: &[usize],
     chain: &CompiledChain,
     history: &PerAxisHistory<'_>,
-    start: f64,
+    anchor: FollowerAnchor<'_>,
     batch_t_start: f64,
     batch_t_end: f64,
     first_left_bc: Option<f64>,
     shaped: &mut [Vec<Option<ScalarNurbs<f64>>>],
-) -> Result<(), ShapeError> {
+) -> Result<Vec<BezierPiece<f64>>, ShapeError> {
     let odo = build_batch_odometer(planned, followed, shaped)?;
+    let start = 0.0;
 
     let ratios: Vec<f64> = meta
         .iter()
@@ -261,7 +296,9 @@ fn emit_follower_axis(
         .collect();
 
     let mut input_tracks: Vec<ScalarNurbs<f64>> = Vec::with_capacity(planned.len());
+    let mut ledger_pieces: Vec<BezierPiece<f64>> = Vec::new();
     let mut cursor = start;
+    let _ = start;
 
     for (seg_idx, fitted) in planned.iter().enumerate() {
         let t_start = fitted.t_start;
@@ -269,13 +306,24 @@ fn emit_follower_axis(
         let ratio = ratios[seg_idx];
 
         let track = if ratio == 0.0 {
-            crate::beta::constant_cubic_nurbs(cursor, t_start, t_end)
+            let constant = crate::beta::constant_cubic_nurbs(cursor, t_start, t_end);
+            ledger_pieces.extend(extract_bezier_pieces(&constant));
+            constant
         } else if let Some(s_curve) = fitted.virtual_s_of_t.as_ref() {
             let s_deriv = nurbs::eval::derivative(s_curve);
             let s0 = nurbs_eval(s_curve, t_start);
             let value = |t: f64| cursor + ratio * (nurbs_eval(s_curve, t) - s0);
             let deriv = |t: f64| ratio * nurbs_eval(&s_deriv, t);
             let raw = fit_with_gain(&value, &deriv, chain.gain, t_start, t_end, None, seg_idx)?;
+            push_ledger(
+                &mut ledger_pieces,
+                &raw,
+                &value,
+                chain.gain,
+                t_start,
+                t_end,
+                seg_idx,
+            )?;
             cursor = value(t_end);
             raw
         } else {
@@ -283,6 +331,15 @@ fn emit_follower_axis(
             let value = |t: f64| cursor + ratio * (odo.distance_at(t) - d0);
             let deriv = |t: f64| ratio * odo.speed_at(t);
             let raw = fit_with_gain(&value, &deriv, chain.gain, t_start, t_end, None, seg_idx)?;
+            push_ledger(
+                &mut ledger_pieces,
+                &raw,
+                &value,
+                chain.gain,
+                t_start,
+                t_end,
+                seg_idx,
+            )?;
             cursor = value(t_end);
             raw
         };
@@ -343,6 +400,67 @@ fn emit_follower_axis(
         }
     }
 
+    let raw_at_anchor = eval_ledger_pieces(&ledger_pieces, anchor.t).unwrap_or_else(|| {
+        panic!(
+            "emit_shaped: follower anchor t={} outside the batch ledger domain [{}, {}]",
+            anchor.t,
+            planned[0].t_start,
+            planned[planned.len() - 1].t_end,
+        )
+    });
+    let shift = anchor.values[0] - raw_at_anchor;
+    for seg_axes in shaped.iter_mut() {
+        let track = seg_axes[f_axis]
+            .take()
+            .expect("follower track emitted above");
+        seg_axes[f_axis] = Some(shift_nurbs_value(&track, shift));
+    }
+    for piece in &mut ledger_pieces {
+        piece.coeffs[0] += shift;
+    }
+
+    Ok(ledger_pieces)
+}
+
+fn eval_ledger_pieces(pieces: &[BezierPiece<f64>], t: f64) -> Option<f64> {
+    const EDGE_TOL: f64 = 1e-9;
+    if pieces.is_empty() {
+        return None;
+    }
+    let last = pieces.last().unwrap();
+    if t >= last.u_end && t <= last.u_end + EDGE_TOL {
+        return Some(last.evaluate(last.u_end));
+    }
+    pieces
+        .iter()
+        .find(|p| p.u_start - EDGE_TOL <= t && t < p.u_end)
+        .map(|p| p.evaluate(t))
+}
+
+fn shift_nurbs_value(curve: &ScalarNurbs<f64>, shift: f64) -> ScalarNurbs<f64> {
+    if shift == 0.0 {
+        return curve.clone();
+    }
+    let cps: Vec<f64> = curve.control_points().iter().map(|c| c + shift).collect();
+    ScalarNurbs::try_new(curve.degree(), curve.knots().to_vec(), cps)
+        .expect("constant shift preserves NURBS invariants")
+}
+
+fn push_ledger(
+    ledger_pieces: &mut Vec<BezierPiece<f64>>,
+    post_gain_fit: &ScalarNurbs<f64>,
+    value: &impl Fn(f64) -> f64,
+    gain: f64,
+    t_start: f64,
+    t_end: f64,
+    seg_idx: usize,
+) -> Result<(), ShapeError> {
+    if gain == 0.0 {
+        ledger_pieces.extend(extract_bezier_pieces(post_gain_fit));
+    } else {
+        let pre_gain = fit_track(value, t_start, t_end, None, seg_idx)?;
+        ledger_pieces.extend(extract_bezier_pieces(&pre_gain));
+    }
     Ok(())
 }
 

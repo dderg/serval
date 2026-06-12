@@ -6,7 +6,8 @@ use nurbs::bezier::BezierPiece;
 
 use crate::emit_shaped::EmitSegmentMeta;
 use crate::fit::FittedSegment;
-use crate::plan_velocity::{PlanShaper, PlanStats, SafetyMode};
+use crate::plan_velocity::{PlanStats, SafetyMode};
+use crate::post_processor::AxisChainSet;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ReplanReport {
@@ -46,11 +47,12 @@ pub struct UncommittedMove {
     pub t_end: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ReplanContext {
     pub limits: temporal::Limits,
-    /// Per-axis shaper kernels `[X, Y, Z, E]`. E is always `Passthrough` or `None`.
-    pub kernels: [Option<PlanShaper>; 4],
+    /// Per-axis post-processor chains — single source for solver shaping,
+    /// PA gains, and emission.
+    pub chains: AxisChainSet,
     /// L-infinity tolerance for the C1-constrained fit (mm).
     pub fit_tolerance_mm: f64,
     pub beta_max_iters: u8,
@@ -61,19 +63,20 @@ pub struct ReplanContext {
     /// Fallback path speed at `t_dispatched` when the cursor is outside the `pieces` domain.
     pub fallback_initial_v: f64,
     pub safety_mode: SafetyMode,
-    /// Pressure-advance gain per axis index; zero = no PA.
-    pub follower_pa: [f64; temporal::MAX_AXES],
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct EmitContext<'a> {
-    /// Per-axis shaper kernels `[X, Y, Z, E]`. E slot unused by `emit_shaped`.
-    pub kernels: &'a [Option<PiecewisePolynomialKernel<f64>>; 4],
+    /// Per-axis post-processor chains, shared with the replan side.
+    pub chains: &'a AxisChainSet,
 }
 
 #[derive(Debug)]
 pub struct ShaperState {
-    pub axes: [AxisShaperQueue; 4],
+    /// Index = axis registry index; spatial lanes hold the fitted (unshaped)
+    /// pieces, follower lanes hold the emitted input-track (nominal ledger)
+    /// pieces.
+    pub axes: Vec<AxisShaperQueue>,
 
     pub uncommitted_moves: VecDeque<UncommittedMove>,
 
@@ -93,4 +96,7 @@ pub struct ShaperState {
     /// already-sent output.  Cleared by `emit_committed`, `commit_decel_to_zero`, and
     /// `advance_idle`.
     pub(crate) pending_freeze: Vec<crate::ShapedSegment>,
+    /// Follower nominal-ledger value at `planned_fitted[0].t_start`, parallel
+    /// to the chain set's `followers`. Seeds pass-two emission.
+    pub(crate) follower_emit_start: Vec<f64>,
 }

@@ -13,21 +13,22 @@ use nurbs::bezier::{bezier_pieces_to_nurbs, BezierPiece};
 
 use super::{EmitContext, ReplanContext, ShaperState};
 use crate::fit::FittedSegment;
-use crate::plan_velocity::{PlanShaper, SafetyMode};
-use crate::AxisShaper;
+use crate::plan_velocity::SafetyMode;
+use crate::post_processor::AxisChainSet;
+use crate::{AxisShaper, ShaperConfig};
 
 #[test]
 #[allow(clippy::float_cmp)]
 fn new_seeds_axis_queues_with_rest_extension() {
-    let shapers: [Option<AxisShaper>; 4] = [
-        Some(AxisShaper::SmoothZv {
+    let chains = ShaperConfig {
+        x: AxisShaper::SmoothZv {
             frequency_hz: 100.0,
-        }),
-        Some(AxisShaper::SmoothMzv { frequency_hz: 80.0 }),
-        Some(AxisShaper::Passthrough),
-        None,
-    ];
-    let state = ShaperState::new([1.0, 2.0, 3.0, 4.0], &shapers);
+        },
+        y: AxisShaper::SmoothMzv { frequency_hz: 80.0 },
+        z: AxisShaper::Passthrough,
+    }
+    .to_chain_set();
+    let state = ShaperState::new(&[1.0, 2.0, 3.0], &chains);
 
     let h_x = 0.8025 / 100.0 / 2.0;
     assert_eq!(state.axes[0].pieces.len(), 1);
@@ -47,10 +48,7 @@ fn new_seeds_axis_queues_with_rest_extension() {
     assert!(state.axes[2].pieces.is_empty());
     assert_eq!(state.axes[2].h, 0.0);
     assert!(state.axes[2].kernel.is_none());
-
-    assert!(state.axes[3].pieces.is_empty());
-    assert_eq!(state.axes[3].h, 0.0);
-    assert!(state.axes[3].kernel.is_none());
+    assert_eq!(state.axes.len(), 3);
 
     assert_eq!(state.t_appended, 0.0);
     assert_eq!(state.t_decel_start, 0.0);
@@ -60,17 +58,17 @@ fn new_seeds_axis_queues_with_rest_extension() {
 
 #[test]
 fn required_shaper_h_matches_axis_shaper_h() {
-    let shapers: [Option<AxisShaper>; 4] = [
-        Some(AxisShaper::SmoothZv {
+    let chains = ShaperConfig {
+        x: AxisShaper::SmoothZv {
             frequency_hz: 186.0,
-        }),
-        Some(AxisShaper::SmoothMzv {
+        },
+        y: AxisShaper::SmoothMzv {
             frequency_hz: 122.0,
-        }),
-        Some(AxisShaper::Passthrough),
-        None,
-    ];
-    let state = ShaperState::new([0.0; 4], &shapers);
+        },
+        z: AxisShaper::Passthrough,
+    }
+    .to_chain_set();
+    let state = ShaperState::new(&[0.0; 3], &chains);
 
     let kernel_x = AxisShaper::SmoothZv {
         frequency_hz: 186.0,
@@ -91,31 +89,13 @@ fn required_shaper_h_matches_axis_shaper_h() {
     assert!((state.axes[1].h - expected_h_y).abs() < 1e-15);
 }
 
-fn replan_shapers() -> [Option<AxisShaper>; 4] {
-    [
-        Some(AxisShaper::SmoothMzv { frequency_hz: 60.0 }),
-        Some(AxisShaper::SmoothMzv { frequency_hz: 60.0 }),
-        Some(AxisShaper::Passthrough),
-        None,
-    ]
-}
-
-fn replan_kernels_planshaper() -> [Option<PlanShaper>; 4] {
-    [
-        Some(PlanShaper::SmoothMzv { frequency_hz: 60.0 }),
-        Some(PlanShaper::SmoothMzv { frequency_hz: 60.0 }),
-        Some(PlanShaper::Passthrough),
-        None,
-    ]
-}
-
-fn replan_kernels_piecewise() -> [Option<PiecewisePolynomialKernel<f64>>; 4] {
-    [
-        AxisShaper::SmoothMzv { frequency_hz: 60.0 }.to_kernel(),
-        AxisShaper::SmoothMzv { frequency_hz: 60.0 }.to_kernel(),
-        None,
-        None,
-    ]
+fn replan_chains() -> AxisChainSet {
+    ShaperConfig {
+        x: AxisShaper::SmoothMzv { frequency_hz: 60.0 },
+        y: AxisShaper::SmoothMzv { frequency_hz: 60.0 },
+        z: AxisShaper::Passthrough,
+    }
+    .to_chain_set()
 }
 
 fn replan_limits() -> temporal::Limits {
@@ -124,9 +104,8 @@ fn replan_limits() -> temporal::Limits {
 
 fn replan_context() -> ReplanContext {
     ReplanContext {
-        follower_pa: [0.0; temporal::MAX_AXES],
         limits: replan_limits(),
-        kernels: replan_kernels_planshaper(),
+        chains: replan_chains(),
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
@@ -197,7 +176,7 @@ fn linear_y_segment(start_y: f64, end_y: f64, feedrate: f64) -> CubicSegment {
 
 #[test]
 fn single_move_append_planning_completes() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx = replan_context();
     let seg = linear_x_segment(0.0, 1.0, 100.0);
 
@@ -243,7 +222,7 @@ fn single_move_append_planning_completes() {
 
 #[test]
 fn two_move_replan_chains_smoothly() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx = replan_context();
 
     let m1 = linear_x_segment(0.0, 1.0, 100.0);
@@ -275,7 +254,7 @@ fn two_move_replan_chains_smoothly() {
 
 #[test]
 fn append_after_committed_dispatch_keeps_history() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx = replan_context();
 
     let m1 = linear_x_segment(0.0, 1.0, 100.0);
@@ -329,7 +308,7 @@ fn append_after_committed_dispatch_keeps_history() {
 
 #[test]
 fn t_decel_start_lands_on_actual_decel_for_cruise_move() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let mut ctx = replan_context();
     ctx.grid_strategy = temporal::multi::GridStrategy::Fixed(50);
     let seg = linear_x_segment(0.0, 2000.0, 500.0);
@@ -443,15 +422,15 @@ fn t_decel_start_lands_on_actual_decel_for_cruise_move() {
     );
 }
 
-fn emit_context_default(kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4]) -> EmitContext<'_> {
-    EmitContext { kernels }
+fn emit_context_default(chains: &AxisChainSet) -> EmitContext<'_> {
+    EmitContext { chains }
 }
 
 #[test]
 fn emit_committed_returns_empty_when_target_not_advanced() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
-    let kernels = replan_kernels_piecewise();
-    let ctx = emit_context_default(&kernels);
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
+    let emit_chains = replan_chains();
+    let ctx = emit_context_default(&emit_chains);
 
     let out = state
         .emit_committed(&ctx)
@@ -463,7 +442,7 @@ fn emit_committed_returns_empty_when_target_not_advanced() {
 
 #[test]
 fn emit_committed_after_single_append_dispatches_pre_decel_region() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx_replan = replan_context();
     let seg = linear_x_segment(0.0, 200.0, 200.0);
     state.append_and_replan(seg, &ctx_replan).expect("append");
@@ -472,8 +451,8 @@ fn emit_committed_after_single_append_dispatches_pre_decel_region() {
     let target = state.t_decel_start - max_h;
     assert!(target > 0.0, "target must be positive for this test");
 
-    let kernels = replan_kernels_piecewise();
-    let ctx = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx = emit_context_default(&emit_chains);
     let out = state
         .emit_committed(&ctx)
         .expect("single-append emit_committed should succeed");
@@ -525,7 +504,7 @@ fn emit_committed_after_single_append_dispatches_pre_decel_region() {
 
 #[test]
 fn emit_committed_chains_across_two_appends() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx_replan = replan_context();
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
@@ -536,8 +515,8 @@ fn emit_committed_chains_across_two_appends() {
     let target_1 = state.t_decel_start - max_h;
     assert!(target_1 > 0.0);
 
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
     let out_1 = state
         .emit_committed(&ctx_emit)
         .expect("first emit_committed");
@@ -600,10 +579,10 @@ fn emit_committed_chains_across_two_appends() {
 
 #[test]
 fn t_dispatched_interior_to_move_replan_preserves_position() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx_replan = replan_context();
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
     state
@@ -660,10 +639,10 @@ fn read_axis_value_at(state: &ShaperState, axis_idx: usize, t: f64) -> Option<f6
 #[test]
 #[allow(clippy::float_cmp)]
 fn append_and_replan_rolls_back_planned_caches_on_plan_velocity_error() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx_good = replan_context();
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
     state
@@ -690,7 +669,7 @@ fn append_and_replan_rolls_back_planned_caches_on_plan_velocity_error() {
         .map(|m| m.followers.clone())
         .collect();
 
-    let mut ctx_bad = ctx_good;
+    let mut ctx_bad = ctx_good.clone();
     ctx_bad.limits = temporal::Limits::axis_boxes([1e-10; 3], [5_000.0; 3], [100_000.0; 3]);
 
     let m_broken = linear_x_segment(200.0, 400.0, 200.0);
@@ -789,10 +768,10 @@ fn append_and_replan_rolls_back_planned_caches_on_plan_velocity_error() {
 
 #[test]
 fn emit_committed_trims_old_history() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx_replan = replan_context();
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
     state.append_and_replan(m1, &ctx_replan).expect("append 1");
@@ -818,11 +797,11 @@ fn emit_committed_trims_old_history() {
 
 #[test]
 fn reset_after_motion_clears_state_and_reseeds_at_home() {
-    let shapers = replan_shapers();
-    let mut state = ShaperState::new([0.0; 4], &shapers);
+    let chains = replan_chains();
+    let mut state = ShaperState::new(&[0.0; 3], &chains);
     let ctx_replan = replan_context();
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
     state.append_and_replan(m1, &ctx_replan).expect("append 1");
@@ -841,10 +820,10 @@ fn reset_after_motion_clears_state_and_reseeds_at_home() {
         "precondition: planned_fitted populated",
     );
 
-    let new_home = [10.0, 20.0, 30.0, 0.0];
-    state.reset(new_home);
+    let new_home = [10.0, 20.0, 30.0];
+    state.reset(&new_home, &chains);
 
-    let fresh = ShaperState::new(new_home, &shapers);
+    let fresh = ShaperState::new(&new_home, &chains);
 
     assert_eq!(state.t_appended, fresh.t_appended);
     assert_eq!(state.t_decel_start, fresh.t_decel_start);
@@ -854,7 +833,7 @@ fn reset_after_motion_clears_state_and_reseeds_at_home() {
     assert!(state.planned_fitted.is_empty());
     assert!(state.planned_meta.is_empty());
 
-    for axis_idx in 0..4 {
+    for axis_idx in 0..3 {
         let s = &state.axes[axis_idx];
         let f = &fresh.axes[axis_idx];
         assert_eq!(
@@ -878,11 +857,11 @@ fn reset_after_motion_clears_state_and_reseeds_at_home() {
 
 #[test]
 fn current_position_reads_settled_endpoint_after_motion() {
-    let shapers = replan_shapers();
-    let mut state = ShaperState::new([0.0; 4], &shapers);
+    let chains = replan_chains();
+    let mut state = ShaperState::new(&[0.0; 3], &chains);
     let ctx_replan = replan_context();
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
     state.append_and_replan(m1, &ctx_replan).expect("append");
@@ -904,8 +883,8 @@ fn current_position_reads_settled_endpoint_after_motion() {
 
 #[test]
 fn current_position_on_fresh_shaped_state_reads_seed() {
-    let shapers = replan_shapers();
-    let state = ShaperState::new([7.0, 9.0, 5.0, 3.0], &shapers);
+    let chains = replan_chains();
+    let state = ShaperState::new(&[7.0, 9.0, 5.0], &chains);
     let pos = state.current_position();
     assert!((pos[0] - 7.0).abs() < 1e-12, "X seed, got {}", pos[0]);
     assert!((pos[1] - 9.0).abs() < 1e-12, "Y seed, got {}", pos[1]);
@@ -914,16 +893,11 @@ fn current_position_on_fresh_shaped_state_reads_seed() {
         "passthrough Z falls back to 0.0, got {}",
         pos[2]
     );
-    assert_eq!(
-        pos[3], 0.0,
-        "none-shaper E falls back to 0.0, got {}",
-        pos[3]
-    );
 }
 
 #[test]
 fn live_limits_50mm_pure_x_completes_quickly() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let live = temporal::Limits::axis_boxes(
         [1000.0, 1000.0, 5.0],
         [70000.0, 70000.0, 100.0],
@@ -950,7 +924,7 @@ fn live_limits_50mm_pure_x_completes_quickly() {
 
 #[test]
 fn advance_idle_is_noop_when_target_not_past_t_appended() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx_replan = replan_context();
     state
         .append_and_replan(linear_x_segment(0.0, 200.0, 200.0), &ctx_replan)
@@ -973,13 +947,13 @@ fn advance_idle_is_noop_when_target_not_past_t_appended() {
 
 #[test]
 fn advance_idle_when_drained_extends_to_target_preserving_position() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx_replan = replan_context();
     state
         .append_and_replan(linear_x_segment(0.0, 200.0, 200.0), &ctx_replan)
         .expect("append");
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
     let _ = state.emit_committed(&ctx_emit).expect("emit");
     let _ = state.commit_decel_to_zero(&ctx_emit).expect("commit");
 
@@ -1002,7 +976,7 @@ fn advance_idle_when_drained_extends_to_target_preserving_position() {
         "t_dispatched must advance to target"
     );
     let pos_after = state.current_position();
-    for i in 0..4 {
+    for i in 0..3 {
         assert!(
             (pos_after[i] - pos_before[i]).abs() < 1e-6,
             "axis {i} position must be continuous across the rest-hold"
@@ -1021,13 +995,13 @@ fn advance_idle_when_drained_extends_to_target_preserving_position() {
 
 #[test]
 fn commit_decel_to_zero_advances_t_dispatched_to_t_appended_and_is_idempotent() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx_replan = replan_context();
     state
         .append_and_replan(linear_x_segment(0.0, 200.0, 200.0), &ctx_replan)
         .expect("append");
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
 
     let partial = state.emit_committed(&ctx_emit).expect("emit");
     assert!(!partial.is_empty());
@@ -1050,10 +1024,10 @@ fn commit_decel_to_zero_advances_t_dispatched_to_t_appended_and_is_idempotent() 
 
 #[test]
 fn piece_stamps_monotone_across_idle_gap() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx = replan_context();
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
 
     state
         .append_and_replan(linear_x_segment(0.0, 200.0, 200.0), &ctx)
@@ -1081,10 +1055,10 @@ fn piece_stamps_monotone_across_idle_gap() {
 
 #[test]
 fn advance_idle_then_append_places_new_move_at_target() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx = replan_context();
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = emit_context_default(&kernels);
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
     state
         .append_and_replan(linear_x_segment(0.0, 200.0, 200.0), &ctx)
         .expect("m1");
@@ -1126,7 +1100,7 @@ fn read_path_accel_at_matches_analytic() {
         u_end: 1.0,
         coeffs: vec![0.0],
     }]);
-    let mut state = ShaperState::new([0.0; 4], &[None; 4]);
+    let mut state = ShaperState::new(&[0.0; 3], &AxisChainSet::passthrough_spatial());
     state.planned_fitted = vec![FittedSegment {
         axes: [x_nurbs, y_nurbs, z_nurbs],
         t_start: 0.0,
@@ -1157,7 +1131,7 @@ fn read_path_accel_at_zero_speed_returns_fallback() {
         u_end: 1.0,
         coeffs: vec![0.0],
     }]);
-    let mut state = ShaperState::new([0.0; 4], &[None; 4]);
+    let mut state = ShaperState::new(&[0.0; 3], &AxisChainSet::passthrough_spatial());
     state.planned_fitted = vec![FittedSegment {
         axes: [x_nurbs, y_nurbs, z_nurbs],
         t_start: 0.0,
@@ -1172,34 +1146,28 @@ fn read_path_accel_at_zero_speed_returns_fallback() {
 const LOW_FREQ_HZ: f64 = 13.0;
 const HARNESS_A_MAX: f64 = 5_000.0;
 
+fn low_freq_chains() -> AxisChainSet {
+    ShaperConfig {
+        x: AxisShaper::SmoothZv {
+            frequency_hz: LOW_FREQ_HZ,
+        },
+        y: AxisShaper::SmoothZv {
+            frequency_hz: LOW_FREQ_HZ,
+        },
+        z: AxisShaper::Passthrough,
+    }
+    .to_chain_set()
+}
+
 fn single_axis_harness(v_max: f64, a_max: f64) -> (ShaperState, ReplanContext) {
-    let shapers: [Option<AxisShaper>; 4] = [
-        Some(AxisShaper::SmoothZv {
-            frequency_hz: LOW_FREQ_HZ,
-        }),
-        Some(AxisShaper::SmoothZv {
-            frequency_hz: LOW_FREQ_HZ,
-        }),
-        Some(AxisShaper::Passthrough),
-        None,
-    ];
-    let state = ShaperState::new([0.0; 4], &shapers);
+    let chains = low_freq_chains();
+    let state = ShaperState::new(&[0.0; 3], &chains);
 
     let limits =
         temporal::Limits::axis_boxes([v_max, v_max, v_max], [a_max, a_max, a_max], [100_000.0; 3]);
     let ctx = ReplanContext {
-        follower_pa: [0.0; temporal::MAX_AXES],
         limits,
-        kernels: [
-            Some(PlanShaper::SmoothZv {
-                frequency_hz: LOW_FREQ_HZ,
-            }),
-            Some(PlanShaper::SmoothZv {
-                frequency_hz: LOW_FREQ_HZ,
-            }),
-            Some(PlanShaper::Passthrough),
-            None,
-        ],
+        chains,
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
@@ -1219,13 +1187,8 @@ fn append_x_move(state: &mut ShaperState, ctx: &ReplanContext, dist_mm: f64, fee
 }
 
 fn emit_partial_window(state: &mut ShaperState) -> f64 {
-    let kernel_xy = crate::AxisShaper::SmoothZv {
-        frequency_hz: LOW_FREQ_HZ,
-    }
-    .to_kernel();
-    let kernels: [Option<PiecewisePolynomialKernel<f64>>; 4] =
-        [kernel_xy.clone(), kernel_xy, None, None];
-    let emit_ctx = EmitContext { kernels: &kernels };
+    let chains = low_freq_chains();
+    let emit_ctx = EmitContext { chains: &chains };
     let _ = state
         .emit_committed(&emit_ctx)
         .expect("emit_partial_window");
@@ -1275,31 +1238,10 @@ fn replan_boundary_carries_acceleration() {
 
 #[test]
 fn replan_with_positive_boundary_accel_and_short_first_segment_succeeds() {
-    let shapers: [Option<AxisShaper>; 4] = [
-        Some(AxisShaper::SmoothZv {
-            frequency_hz: LOW_FREQ_HZ,
-        }),
-        Some(AxisShaper::SmoothZv {
-            frequency_hz: LOW_FREQ_HZ,
-        }),
-        Some(AxisShaper::Passthrough),
-        None,
-    ];
-
     let limits = temporal::Limits::axis_boxes([300.0; 3], [5_000.0; 3], [10_000.0; 3]);
     let ctx = ReplanContext {
-        follower_pa: [0.0; temporal::MAX_AXES],
         limits,
-        kernels: [
-            Some(PlanShaper::SmoothZv {
-                frequency_hz: LOW_FREQ_HZ,
-            }),
-            Some(PlanShaper::SmoothZv {
-                frequency_hz: LOW_FREQ_HZ,
-            }),
-            Some(PlanShaper::Passthrough),
-            None,
-        ],
+        chains: low_freq_chains(),
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
@@ -1310,7 +1252,7 @@ fn replan_with_positive_boundary_accel_and_short_first_segment_succeeds() {
         safety_mode: SafetyMode::WorstCaseFuture,
     };
 
-    let mut state = ShaperState::new([0.0; 4], &shapers);
+    let mut state = ShaperState::new(&[0.0; 3], &ctx.chains);
 
     let m1 = linear_x_segment(0.0, 3.0, 300.0);
     state.append_and_replan(m1, &ctx).expect("move 1");
@@ -1354,14 +1296,8 @@ fn corner_context_passthrough() -> ReplanContext {
         [10_000.0; 3],
     );
     ReplanContext {
-        follower_pa: [0.0; temporal::MAX_AXES],
         limits,
-        kernels: [
-            Some(PlanShaper::Passthrough),
-            Some(PlanShaper::Passthrough),
-            Some(PlanShaper::Passthrough),
-            None,
-        ],
+        chains: AxisChainSet::passthrough_spatial(),
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
@@ -1378,15 +1314,8 @@ fn corner_context_passthrough() -> ReplanContext {
 
 #[test]
 fn split_remnant_corner_infeasibility_recovered() {
-    let shapers: [Option<AxisShaper>; 4] = [
-        Some(AxisShaper::Passthrough),
-        Some(AxisShaper::Passthrough),
-        Some(AxisShaper::Passthrough),
-        None,
-    ];
-
     let ctx = corner_context_passthrough();
-    let mut state = ShaperState::new([0.0; 4], &shapers);
+    let mut state = ShaperState::new(&[0.0; 3], &ctx.chains);
 
     let seg_a = linear_x_segment(0.0, 5.0, 300.0);
     state.append_and_replan(seg_a, &ctx).expect("seg_A plans");
@@ -1420,27 +1349,14 @@ fn split_remnant_corner_infeasibility_recovered() {
 
 #[test]
 fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
-    let shapers: [Option<AxisShaper>; 4] = [
-        Some(AxisShaper::Passthrough),
-        Some(AxisShaper::Passthrough),
-        Some(AxisShaper::Passthrough),
-        None,
-    ];
-
     let tight_limits = temporal::Limits::axis_boxes(
         [300.0, 300.0, 5.0],
         [5_000.0, 5_000.0, 350.0],
         [10_000.0; 3],
     );
     let ctx = ReplanContext {
-        follower_pa: [0.0; temporal::MAX_AXES],
         limits: tight_limits,
-        kernels: [
-            Some(PlanShaper::Passthrough),
-            Some(PlanShaper::Passthrough),
-            Some(PlanShaper::Passthrough),
-            None,
-        ],
+        chains: AxisChainSet::passthrough_spatial(),
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
@@ -1454,7 +1370,7 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
         safety_mode: SafetyMode::WorstCaseFuture,
     };
 
-    let mut state = ShaperState::new([0.0; 4], &shapers);
+    let mut state = ShaperState::new(&[0.0; 3], &ctx.chains);
 
     let seg_a = linear_x_segment(0.0, 300.0, 300.0);
     let report_a = state
@@ -1501,8 +1417,8 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
         "rung-3 produces exactly one fitted segment (the new move)",
     );
 
-    let kernels = replan_kernels_piecewise();
-    let ctx_emit = EmitContext { kernels: &kernels };
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
     state
         .commit_decel_to_zero(&ctx_emit)
         .expect("commit_decel_to_zero after rung-3 must not error");
@@ -1510,7 +1426,7 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
 
 #[test]
 fn rung1_success_does_not_activate_fallback() {
-    let mut state = ShaperState::new([0.0; 4], &replan_shapers());
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
     let ctx = replan_context();
 
     let seg = linear_x_segment(0.0, 50.0, 100.0);
@@ -1624,4 +1540,232 @@ fn per_segment_limits_tolerates_follower_sets() {
         follower_set.j_max, 3000.0,
         "follower jerk cap must not be relaxed by spatial inactivity"
     );
+}
+
+fn follower_chains(kernel_hz: Option<f64>, pa_gain: f64) -> AxisChainSet {
+    let mut chains = match kernel_hz {
+        Some(frequency_hz) => ShaperConfig {
+            x: AxisShaper::SmoothMzv { frequency_hz },
+            y: AxisShaper::SmoothMzv { frequency_hz },
+            z: AxisShaper::Passthrough,
+        }
+        .to_chain_set(),
+        None => AxisChainSet::passthrough_spatial(),
+    };
+    chains.chains.push(crate::CompiledChain {
+        kernel: None,
+        gain: pa_gain,
+    });
+    chains.followers.push((3, vec![0, 1, 2]));
+    chains
+}
+
+fn follower_limits() -> temporal::Limits {
+    let mut sets = replan_limits().sets().to_vec();
+    sets.push(temporal::LimitSet {
+        axes: temporal::AxisSet::from_indices(&[3]),
+        v_max: 75.0,
+        a_max: 1500.0,
+        j_max: 30_000.0,
+    });
+    temporal::Limits::try_new(&sets, 4).unwrap()
+}
+
+fn follower_replan_context(kernel_hz: Option<f64>, pa_gain: f64) -> ReplanContext {
+    ReplanContext {
+        limits: follower_limits(),
+        chains: follower_chains(kernel_hz, pa_gain),
+        fit_tolerance_mm: 0.005,
+        beta_max_iters: 5,
+        beta_convergence_ratio: 1.02,
+        worker_threads: 1,
+        grid_strategy: temporal::multi::GridStrategy::Fixed(20),
+        fallback_initial_v: 0.0,
+        safety_mode: SafetyMode::WorstCaseFuture,
+    }
+}
+
+fn extruding_x_segment(start_x: f64, end_x: f64, ratio: f64, feedrate: f64) -> CubicSegment {
+    use geometry::segment::{FollowerDemand, SourceRange};
+    use nurbs::VectorNurbs;
+
+    let p0 = [start_x, 0.0, 0.0];
+    let p3 = [end_x, 0.0, 0.0];
+    let lerp = |t: f64| -> [f64; 3] {
+        [
+            p0[0] + (p3[0] - p0[0]) * t,
+            p0[1] + (p3[1] - p0[1]) * t,
+            p0[2] + (p3[2] - p0[2]) * t,
+        ]
+    };
+    let cps = vec![p0, lerp(1.0 / 3.0), lerp(2.0 / 3.0), p3];
+    let xyz = VectorNurbs::<f64, 3>::try_new(3, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], cps)
+        .unwrap();
+    CubicSegment::try_new(
+        xyz,
+        vec![FollowerDemand {
+            axis_index: 3,
+            ratio,
+        }],
+        feedrate,
+        SourceRange {
+            start_line: 0,
+            end_line: 0,
+        },
+        None,
+    )
+    .unwrap()
+}
+
+fn follower_only_retract(at: [f64; 3], delta: f64, feedrate: f64) -> CubicSegment {
+    use geometry::segment::{FollowerDemand, SourceRange};
+    use nurbs::VectorNurbs;
+
+    let xyz = VectorNurbs::<f64, 3>::try_new(
+        3,
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        vec![at, at, at, at],
+    )
+    .unwrap();
+    let length = delta.abs();
+    CubicSegment::try_new_virtual(
+        xyz,
+        vec![FollowerDemand {
+            axis_index: 3,
+            ratio: delta / length,
+        }],
+        feedrate,
+        SourceRange {
+            start_line: 0,
+            end_line: 0,
+        },
+        length,
+    )
+    .unwrap()
+}
+
+fn assert_follower_stream_continuous(all: &[crate::ShapedSegment]) {
+    for w in all.windows(2) {
+        let t = w[0].t_end;
+        assert!(
+            (t - w[1].t_start).abs() < 1e-9,
+            "dispatched segments must abut: {t} vs {}",
+            w[1].t_start
+        );
+        let left = nurbs::eval::eval(&w[0].axes[3], t);
+        let right = nurbs::eval::eval(&w[1].axes[3], t);
+        assert!(
+            (left - right).abs() < 2e-3,
+            "follower position jump at seam t={t}: {left} vs {right}"
+        );
+    }
+}
+
+#[test]
+fn streaming_follower_emits_ledger_across_batches() {
+    let ctx = follower_replan_context(None, 0.0);
+    let mut state = ShaperState::new(&[0.0; 4], &ctx.chains);
+    let ctx_emit = EmitContext {
+        chains: &ctx.chains,
+    };
+    let ratio = 0.05;
+
+    let mut all: Vec<crate::ShapedSegment> = Vec::new();
+    state
+        .append_and_replan(extruding_x_segment(0.0, 100.0, ratio, 200.0), &ctx)
+        .expect("batch A");
+    all.extend(state.emit_committed(&ctx_emit).expect("emit A"));
+    state
+        .append_and_replan(extruding_x_segment(100.0, 150.0, ratio, 200.0), &ctx)
+        .expect("batch B");
+    all.extend(state.emit_committed(&ctx_emit).expect("emit B"));
+    all.extend(state.commit_decel_to_zero(&ctx_emit).expect("flush"));
+
+    assert!(!all.is_empty());
+    for seg in &all {
+        assert_eq!(
+            seg.axes.len(),
+            4,
+            "every dispatched segment must carry the follower lane"
+        );
+    }
+    assert_follower_stream_continuous(&all);
+
+    let last = all.last().unwrap();
+    let end = nurbs::eval::eval(&last.axes[3], last.t_end);
+    let expected = ratio * 150.0;
+    assert!(
+        (end - expected).abs() < 1e-3,
+        "passthrough follower ledger must pay out ratio·distance: got {end}, want {expected}"
+    );
+}
+
+#[test]
+fn streaming_follower_history_survives_freeze_zone_seams() {
+    let ctx = follower_replan_context(Some(60.0), 0.0);
+    let mut state = ShaperState::new(&[0.0; 4], &ctx.chains);
+    let ctx_emit = EmitContext {
+        chains: &ctx.chains,
+    };
+    let ratio = 0.05;
+
+    let mut all: Vec<crate::ShapedSegment> = Vec::new();
+    let strokes = [(0.0, 60.0), (60.0, 130.0), (130.0, 200.0)];
+    for (from, to) in strokes {
+        state
+            .append_and_replan(extruding_x_segment(from, to, ratio, 200.0), &ctx)
+            .expect("append stroke");
+        all.extend(state.emit_committed(&ctx_emit).expect("emit stroke"));
+    }
+    all.extend(state.commit_decel_to_zero(&ctx_emit).expect("flush"));
+
+    assert_follower_stream_continuous(&all);
+
+    let last = all.last().unwrap();
+    let end = nurbs::eval::eval(&last.axes[3], last.t_end);
+    let nominal = ratio * 200.0;
+    assert!(
+        end > 0.5 * nominal && end <= nominal + 1e-3,
+        "shaped follower end {end} must be positive and never exceed the nominal ledger {nominal}"
+    );
+}
+
+#[test]
+fn streaming_routes_follower_only_virtual_move() {
+    let ctx = follower_replan_context(None, 0.0);
+    let mut state = ShaperState::new(&[0.0; 4], &ctx.chains);
+    let ctx_emit = EmitContext {
+        chains: &ctx.chains,
+    };
+    let ratio = 0.05;
+
+    let mut all: Vec<crate::ShapedSegment> = Vec::new();
+    state
+        .append_and_replan(extruding_x_segment(0.0, 100.0, ratio, 200.0), &ctx)
+        .expect("print move");
+    all.extend(state.emit_committed(&ctx_emit).expect("emit print"));
+    state
+        .append_and_replan(follower_only_retract([100.0, 0.0, 0.0], -2.0, 35.0), &ctx)
+        .expect("virtual retract must route through the planner");
+    all.extend(state.emit_committed(&ctx_emit).expect("emit retract"));
+    all.extend(state.commit_decel_to_zero(&ctx_emit).expect("flush"));
+
+    assert_follower_stream_continuous(&all);
+
+    let last = all.last().unwrap();
+    let end = nurbs::eval::eval(&last.axes[3], last.t_end);
+    let expected = ratio * 100.0 - 2.0;
+    assert!(
+        (end - expected).abs() < 1e-3,
+        "retract must pay out on the virtual path: got {end}, want {expected}"
+    );
+    for seg in &all {
+        for t in [seg.t_start, 0.5 * (seg.t_start + seg.t_end), seg.t_end] {
+            let x = nurbs::eval::eval(&seg.axes[0], t);
+            assert!(
+                x <= 100.0 + 1e-6,
+                "spatial X must never overshoot the parked position during the retract"
+            );
+        }
+    }
 }

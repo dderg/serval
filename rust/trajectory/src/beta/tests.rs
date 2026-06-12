@@ -50,18 +50,20 @@ fn single_straight_line_converges() {
             curve: &curve,
             limits: generous_limits,
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
+    let chains = default_shaper_config().to_chain_set();
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
         follower_history: None,
         segments: &segments,
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         worker_threads: 1,
-        shaper: default_shaper_config(),
+        chains: &chains,
+        follower_start: &[],
         fit_tolerance_mm: 0.5,
         beta_max_iters: 1,
         beta_convergence_ratio: 1.02,
