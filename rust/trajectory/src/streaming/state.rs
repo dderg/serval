@@ -872,7 +872,7 @@ fn per_segment_limits(
 
     if feedrate_mm_s > 0.0 && chord_len > AXIS_INACTIVE_SPAN_EPS_MM {
         limits = limits.with_extra_sets(&[temporal::LimitSet {
-            axes: temporal::AxisSet::all(),
+            axes: temporal::AxisSet::spatial(),
             v_max: feedrate_mm_s,
             a_max: f64::INFINITY,
             j_max: f64::INFINITY,

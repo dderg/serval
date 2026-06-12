@@ -49,7 +49,7 @@ fn runtime_caps_append_an_all_axis_overlay() {
     let overlay = lims.sets().last().unwrap();
     assert_eq!(overlay.v_max, 100.0);
     assert_eq!(overlay.a_max, 1000.0);
-    assert_eq!(overlay.axes, temporal::AxisSet::all());
+    assert_eq!(overlay.axes, temporal::AxisSet::spatial());
 }
 
 #[test]

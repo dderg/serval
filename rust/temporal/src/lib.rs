@@ -1,6 +1,7 @@
 pub mod limits;
 pub use limits::{
-    AxisSet, LimitSet, Limits, LimitsError, MAX_AXES, MAX_LIMIT_SETS, kappa_set, restricted_norm,
+    AxisSet, LimitSet, Limits, LimitsError, MAX_AXES, MAX_LIMIT_SETS, N_SPATIAL, kappa_set,
+    restricted_norm,
 };
 
 pub mod topp;

@@ -258,7 +258,7 @@ impl PlannerConfig {
         if self.runtime_caps.velocity.is_some() || self.runtime_caps.accel.is_some() {
             let a = self.runtime_caps.accel.unwrap_or(f64::INFINITY);
             sets.push(temporal::LimitSet {
-                axes: temporal::AxisSet::all(),
+                axes: temporal::AxisSet::spatial(),
                 v_max: self.runtime_caps.velocity.unwrap_or(f64::INFINITY),
                 a_max: a,
                 j_max: if a.is_finite() {
@@ -268,7 +268,7 @@ impl PlannerConfig {
                 },
             });
         }
-        Ok(temporal::Limits::try_new(&sets)?)
+        Ok(temporal::Limits::try_new(&sets, temporal::N_SPATIAL)?)
     }
 }
 

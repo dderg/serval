@@ -43,7 +43,7 @@ impl SolverScale {
                 j_max: l.j_max / s,
             })
             .collect();
-        Limits::try_new(&sets).expect("scaling preserves validity")
+        Limits::try_new(&sets, limits.n_axes()).expect("scaling preserves validity")
     }
 
     pub(crate) fn scale_grid(&self, grid: &ArclengthGrid) -> ArclengthGrid {
