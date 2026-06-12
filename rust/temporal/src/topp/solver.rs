@@ -716,7 +716,7 @@ pub(crate) fn max_axis_ratio_chain(
         let geom = &chain.geom[i];
         let lim = chain.limits_at(i);
         let jerk = jerk_vector(geom, s_dot3, s_dot, s_ddot, s_dddot);
-        for set in lim.sets() {
+        for (_, set) in lim.spatial_sets() {
             if !set.j_max.is_finite() {
                 continue;
             }
@@ -735,7 +735,7 @@ pub(crate) fn max_axis_ratio_chain(
         let geom = &jct.geom;
         let lim = &chain.limits[jct.limits_idx];
         let jerk = jerk_vector(geom, s_dot3, s_dot, s_ddot, s_dddot);
-        for set in lim.sets() {
+        for (_, set) in lim.spatial_sets() {
             if !set.j_max.is_finite() {
                 continue;
             }
@@ -828,7 +828,7 @@ pub(crate) fn build_axis_jerk_cuts_chain(
         let geom = &chain.geom[i];
         let lim = chain.limits_at(i);
         let jerk = jerk_vector(geom, s_dot3, s_dot, s_ddot, s_dddot);
-        for (set_idx, set) in lim.sets().iter().enumerate() {
+        for (set_idx, set) in lim.spatial_sets() {
             if !set.j_max.is_finite() {
                 continue;
             }
@@ -861,7 +861,7 @@ pub(crate) fn build_axis_jerk_cuts_chain(
             let jlim = &chain.limits[jct.limits_idx];
             let jgeom = &jct.geom;
             let jjerk = jerk_vector(jgeom, s_dot3, s_dot, s_ddot, s_dddot);
-            for (set_idx, set) in jlim.sets().iter().enumerate() {
+            for (set_idx, set) in jlim.spatial_sets() {
                 if !set.j_max.is_finite() {
                     continue;
                 }

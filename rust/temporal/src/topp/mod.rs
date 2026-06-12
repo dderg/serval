@@ -5,6 +5,7 @@ use scaling::SolverScale;
 
 pub mod chain;
 pub mod constraints;
+pub(crate) mod follower;
 pub(crate) mod output;
 pub mod path;
 pub mod scaling;

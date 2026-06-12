@@ -1,6 +1,6 @@
 use crate::topp::chain::ChainGrid;
 use crate::topp::solver::SolverResult;
-use crate::{BindingConstraint, Limits, restricted_norm};
+use crate::{BindingConstraint, FollowerDemand, Limits, restricted_norm};
 
 /// 0.2% feasibility margin for velocity / accel / centripetal.
 pub(crate) const EPS_FEAS: f64 = 2e-3;
@@ -33,6 +33,7 @@ struct PointInputs<'a> {
     s_ddot: f64,
     s_dddot: f64,
     limits: &'a Limits,
+    followers: &'a [FollowerDemand],
 }
 
 struct PointRatios {
@@ -64,7 +65,7 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
 
     let lim = p.limits;
     let mut entries: Vec<(f64, BindingConstraint)> = Vec::with_capacity(3 * lim.sets().len());
-    for (set_idx, set) in lim.sets().iter().enumerate() {
+    for (set_idx, set) in lim.spatial_sets() {
         if set.v_max.is_finite() {
             entries.push((
                 restricted_norm(&vel, set.axes) / set.v_max,
@@ -72,7 +73,7 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
             ));
         }
     }
-    for (set_idx, set) in lim.sets().iter().enumerate() {
+    for (set_idx, set) in lim.spatial_sets() {
         if set.a_max.is_finite() {
             entries.push((
                 restricted_norm(&accel, set.axes) / set.a_max,
@@ -80,12 +81,38 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
             ));
         }
     }
-    for (set_idx, set) in lim.sets().iter().enumerate() {
+    for (set_idx, set) in lim.spatial_sets() {
         if set.j_max.is_finite() {
             entries.push((
                 restricted_norm(&jerk, set.axes) / set.j_max,
                 BindingConstraint::JerkNorm { set: set_idx },
             ));
+        }
+    }
+    for f in p.followers {
+        let r = f.ratio.abs();
+        for (set_idx, set) in lim.follower_sets() {
+            if !set.axes.contains(f.axis) {
+                continue;
+            }
+            if set.v_max.is_finite() {
+                entries.push((
+                    r * p.s_dot / set.v_max,
+                    BindingConstraint::Velocity { set: set_idx },
+                ));
+            }
+            if set.a_max.is_finite() {
+                entries.push((
+                    r * p.s_ddot.abs() / set.a_max,
+                    BindingConstraint::AccelNorm { set: set_idx },
+                ));
+            }
+            if set.j_max.is_finite() {
+                entries.push((
+                    r * p.s_dddot.abs() / set.j_max,
+                    BindingConstraint::JerkNorm { set: set_idx },
+                ));
+            }
         }
     }
 
@@ -164,6 +191,7 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             s_ddot,
             s_dddot,
             limits: chain.limits_at(i),
+            followers: chain.followers_at(i),
         });
 
         let final_tag = if (i == 0 || i == n - 1) && b_i.abs() < BOUNDARY_B_TOL {
@@ -203,6 +231,7 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             s_ddot,
             s_dddot,
             limits: &chain.limits[jd.limits_idx],
+            followers: &chain.followers[jd.limits_idx],
         });
 
         if pr.worst_ratio > global_worst_ratio {

@@ -379,7 +379,7 @@ pub fn build_chain(
                              a_rows: &mut Vec<Vec<f64>>,
                              b_rhs: &mut Vec<f64>,
                              count: &mut usize| {
-            for set in lim.sets() {
+            for (_, set) in lim.spatial_sets() {
                 if !set.v_max.is_finite() {
                     continue;
                 }
@@ -421,6 +421,16 @@ pub fn build_chain(
     }
 
     {
+        let count =
+            crate::topp::follower::emit_base_follower_rows(chain, off_b, off_a, |entries, rhs| {
+                push_row(&mut a_rows, &mut b_rhs, entries, rhs)
+            });
+        if count > 0 {
+            cones.push((Cone::Nonneg, count));
+        }
+    }
+
+    {
         const BLOCK_D_SAFETY: f64 = 0.1;
         let mut nonneg_run = 0_usize;
         let emit_accel = |i: usize,
@@ -432,7 +442,7 @@ pub fn build_chain(
                           nonneg_run: &mut usize| {
             let b_cap_i = b_max_cent[i].min(b_cap);
             let a_cap_i = b_cap_i / (2.0 * h_bar(i));
-            for set in lim.sets() {
+            for (_, set) in lim.spatial_sets() {
                 if !set.a_max.is_finite() {
                     continue;
                 }
