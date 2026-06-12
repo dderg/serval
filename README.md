@@ -1,255 +1,162 @@
-<p align="center"><a href="https://docs.kalico.gg"><img align="center" src="docs/logo/kalico-big.png" alt="Kalico Logo"></a></p>
-
-[![Action Status](https://github.com/KalicoCrew/kalico/actions/workflows/ci-build_test.yaml/badge.svg?branch=main)](https://github.com/KalicoCrew/kalico/actions/workflows/ci-build_test.yaml)
-
-# Welcome to the Kalico project!
-
-This is a community-maintained fork of the [Klipper](https://github.com/Klipper3d/klipper) firmware.
-
-Our goal is to support features and behavior that could be "risky" if used incorrectly.
-
-If I want my printer to light itself on fire, I should be able to make my printer light itself on fire.
-
-See the [Kalico Additions document](https://docs.kalico.gg/Kalico_Additions.html) for more information on *some* of the differences from Klipper.
-
-## Features merged into the main branch:
-
-- [core: no Python2 tests; no PRU boards](https://github.com/KalicoCrew/kalico/pull/39)
-
-- [core: git-untracked folder, plugins for user-plugins](https://github.com/KalicoCrew/kalico/pull/82)
-
-- [core: danger_options](https://github.com/KalicoCrew/kalico/pull/67)
-
-- [core: rotate log file at every restart](https://github.com/KalicoCrew/kalico/pull/181)
-
-- [core: options for API server socket file mode, user, and group](https://github.com/KalicoCrew/kalico/pull/612)
-
-- [core: options to change mode and group of linux mcu psuedoterminal](https://github.com/KalicoCrew/kalico/pull/692)
-
-- [fan: normalising Fan PWM power](https://github.com/KalicoCrew/kalico/pull/44) ([klipper#6307](https://github.com/Klipper3d/klipper/pull/6307))
-
-- [fan: reverse FAN](https://github.com/KalicoCrew/kalico/pull/51) ([klipper#4983](https://github.com/Klipper3d/klipper/pull/4983))
-
-- [heaters: modify PID without reload](https://github.com/KalicoCrew/kalico/pull/35)
-
-- [heaters: MPC temperature control](https://github.com/KalicoCrew/kalico/pull/333)
-
-- [heaters: velocity PID](https://github.com/KalicoCrew/kalico/pull/47) ([klipper#6272](https://github.com/Klipper3d/klipper/pull/6272))
-
-- [heaters: PID-Profiles](https://github.com/KalicoCrew/kalico/pull/162)
-
-- [heaters: expose heater thermistor out of min/max](https://github.com/KalicoCrew/kalico/pull/182)
-
-- [heaters: dual loop pid control](https://github.com/KalicoCrew/kalico/pull/735)
-
-- [heaters/fan: new heated_fan module](https://github.com/KalicoCrew/kalico/pull/259)
-
-- [gcode: jinja2.ext.do extension](https://github.com/KalicoCrew/kalico/pull/26) ([klipper#5149](https://github.com/Klipper3d/klipper/pull/5149))
-
-- [gcode: gcode_shell_command](https://github.com/KalicoCrew/kalico/pull/71) ([klipper#2173](https://github.com/Klipper3d/klipper/pull/2173) / [kiuah](https://github.com/dw-0/kiauh/blob/master/resources/gcode_shell_command.py) )
-
-- [gcode: expose math functions to gcode macros](https://github.com/KalicoCrew/kalico/pull/173) ([klipper#4072](https://github.com/Klipper3d/klipper/pull/4072))
-
-- [gcode: HEATER_INTERRUPT gcode command](https://github.com/KalicoCrew/kalico/pull/94)
-
-- [gcode: RELOAD_GCODE_MACROS command](https://github.com/KalicoCrew/kalico/pull/305)
-
-- [probe: dockable Probe](https://github.com/KalicoCrew/kalico/pull/43) ([klipper#4328](https://github.com/Klipper3d/klipper/pull/4328))
-
-- [probe: drop the first result](https://github.com/KalicoCrew/kalico/pull/2) ([klipper#3397](https://github.com/Klipper3d/klipper/issues/3397))
-
-- [probe: z_calibration](https://github.com/KalicoCrew/kalico/pull/31) ([klipper#4614](https://github.com/Klipper3d/klipper/pull/4614) / [protoloft/z_calibration](https://github.com/protoloft/klipper_z_calibration))
-
-- [z_tilt: z-tilt calibration](https://github.com/KalicoCrew/kalico/pull/105) ([klipper3d#4083](https://github.com/Klipper3d/klipper/pull/4083) / [dk/ztilt_calibration](https://github.com/KalicoCrew/kalico/pull/54))
-
-- [stepper: home_current](https://github.com/KalicoCrew/kalico/pull/65)
-
-- [stepper: current_change_dwell_time](https://github.com/KalicoCrew/kalico/pull/90)
-
-- [homing: post-home retract](https://github.com/KalicoCrew/kalico/pull/65)
-
-- [homing: sensorless minimum home distance](https://github.com/KalicoCrew/kalico/pull/65)
-
-- [homing: min_home_dist](https://github.com/KalicoCrew/kalico/pull/90)
-
-- [virtual_sdcard: scanning of subdirectories](https://github.com/KalicoCrew/kalico/pull/68) ([klipper#6327](https://github.com/Klipper3d/klipper/pull/6327))
-
-- [retraction: z_hop while retracting](https://github.com/KalicoCrew/kalico/pull/83) ([klipper#6311](https://github.com/Klipper3d/klipper/pull/6311))
-
-- [danger_options: allow plugins to override conflicting extras](https://github.com/KalicoCrew/kalico/pull/82)
-
-- [danger_options: expose the multi mcu homing timeout as a parameter](https://github.com/KalicoCrew/kalico/pull/93)
-
-- [danger_options: option to configure the homing elapsed distance tolerance](https://github.com/KalicoCrew/kalico/pull/110)
-
-- [danger_options: option to ignore ADC out of range](https://github.com/KalicoCrew/kalico/pull/129)
-
-- [temperature_mcu: add reference_voltage](https://github.com/KalicoCrew/kalico/pull/99) ([klipper#5713](https://github.com/Klipper3d/klipper/pull/5713))
-
-- [adxl345: improve ACCELEROMETER_QUERY command](https://github.com/KalicoCrew/kalico/pull/124)
-
-- [extruder: add flag to use the PA constant from a trapq move vs a cached value](https://github.com/KalicoCrew/kalico/pull/132)
-
-- [force_move: turn on by default](https://github.com/KalicoCrew/kalico/pull/135)
-
-- [resonance_tester: warn about active fans during input shaper calibration](https://github.com/KalicoCrew/kalico/pull/627)
-
-- [bed_mesh: add BED_MESH_CHECK command for mesh validation](https://github.com/KalicoCrew/kalico/pull/629)
-
-- [respond: turn on by default](https://github.com/KalicoCrew/kalico/pull/296)
-
-- [exclude_object: turn on by default](https://github.com/KalicoCrew/kalico/pull/306)
-
-- [bed_mesh: add bed_mesh_default config option](https://github.com/KalicoCrew/kalico/pull/143)
-
-- [config: CONFIG_SAVE updates included files](https://github.com/KalicoCrew/kalico/pull/153)
-
-- [kinematics: independent X&Y accel/velocity for corexy and cartesian](https://github.com/KalicoCrew/kalico/pull/4)
-
-- [kinematics: independent X&Y accel/velocity for corexz](https://github.com/KalicoCrew/kalico/pull/267)
-
-- [idle_timeout: allow the idle timeout to be disabled](https://github.com/KalicoCrew/kalico/issues/165)
-
-- [canbus: custom CAN bus uuid hash for deterministic uuids](https://github.com/KalicoCrew/kalico/pull/156)
-
-- [filament_switch|motion_sensor:  runout distance, smart and runout gcode](https://github.com/KalicoCrew/kalico/pull/158)
-
-- [z_tilt|qgl: custom threshold for probe_points_increasing check](https://github.com/KalicoCrew/kalico/pull/189)
-
-- [save_config: save without restarting the firmware](https://github.com/KalicoCrew/kalico/pull/191)
-
-- [configfile: recursive globs](https://github.com/KalicoCrew/kalico/pull/200) / ([klipper#6375](https://github.com/Klipper3d/klipper/pull/6375))
-
-- [temperature_fan: curve control algorithm](https://github.com/KalicoCrew/kalico/pull/193)
-
-- [shaper_calibrate: store and expose accel_per_hz](https://github.com/KalicoCrew/kalico/pull/224)
-
-- [resonance_tester: accepts ACCEL_PER_HZ in TEST_RESONANCES](https://github.com/KalicoCrew/kalico/pull/312)
-
-- [mcu: support for AT32F403](https://github.com/KalicoCrew/kalico/pull/284)
-
-- [z_tilt, quad_gantry_level: adaptive horizontal move z](https://github.com/KalicoCrew/kalico/pull/336)
-
-- [core: non-critical-mcus](https://github.com/KalicoCrew/kalico/pull/339)
-
-- [gcode_macros: !python templates](https://github.com/KalicoCrew/kalico/pull/360)
-
-- [gcode_macros: !!include macros/my_macro.py](https://github.com/KalicoCrew/kalico/pull/578)
-
-- [core: action_log](https://github.com/KalicoCrew/kalico/pull/367)
-
-- [danger_options: configurable homing constants](https://github.com/KalicoCrew/kalico/pull/378)
-
-- [tmc2240: adjustable driver_CS and current_range](https://github.com/KalicoCrew/kalico/pull/556)
-
-- [extruder: cold_extrude](https://github.com/KalicoCrew/kalico/pull/750)
-
-If you're feeling adventurous, take a peek at the extra features in the bleeding-edge-v2 branch [feature documentation](docs/Bleeding_Edge.md)
-and [feature configuration reference](docs/Config_Reference_Bleeding_Edge.md):
-
-- [extruder/pa: do not smooth base extruder position, only advance](https://github.com/KalicoCrew/kalico/pull/266)
-
-- [dmbutyugin's advanced-features branch - Pull Request #262](https://github.com/KalicoCrew/kalico/pull/262)
-  - stepper: high precision stepping protocol
-  - extruder: sync extruder motion with input shaper
-  - extruder: new print_pa_tower utility
-  - input_shaper: smooth input shapers
-  - input_shaper: new print_ringing_tower utility
-
-## Switch to Kalico
-
-> [!NOTE]
-> Any add-on modules you are using will need to be reinstalled after switching to Kalico. This includes things like Beacon support, led-effect, etc.
->
-> Any data in ~/printer_data such as printer configs and macros will be unaffected.
-
-### Option 1. Manually clone the repository
-
-If desired, make a backup copy of your existing Klipper installation by running:
-
-```bash
-mv ~/klipper ~/klipper_old
+# Kalico — sota-motion fork
+
+A fork of [Kalico](https://github.com/KalicoCrew/kalico) (itself a fork of
+[Klipper](https://github.com/Klipper3d/klipper)) that replaces the motion
+stack end to end: a new planner, a new host↔MCU contract, and a new set of
+abstractions for what a printer even *is*. Everything inherited from Kalico
+that we have not rewritten still works the Kalico way — see
+[README_KALICO.md](README_KALICO.md) for the upstream project, its feature
+list, and installation.
+
+This README describes the architecture we are building. It is under heavy
+development on the `sota-motion` branch; the design source of truth lives in
+[`docs/superpowers/specs/`](docs/superpowers/specs/), most centrally
+[the follower-axes-and-limits design](docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md).
+
+## The pillars
+
+### 1. Trajectory optimality is non-negotiable
+
+The planner never trades trajectory time for planning convenience. Each
+move's timing is discretized and solved as a constrained time-optimal
+problem (TOPP via SOCP, with SLP linearization for the non-convex jerk
+rows) — the move runs as fast as every constraint allows, pointwise along
+the path, not as fast as a heuristic felt safe. Host compute is something we
+spend in service of trajectory tightness, never the other way around: if the
+host can't keep up, we optimize the implementation, parallelize, or upgrade
+the host. We do not ship a cheaper algorithm that produces a measurably
+slower print.
+
+*Plainly: the printer should move as fast as physics and your config allow —
+the planner's job is to find that speed, the computer's job is to afford the
+search.*
+
+### 2. Cubic Bézier all the way down
+
+One geometric primitive flows through the entire pipeline: the uniform cubic
+Bézier. G5 maps to it directly; G5.1 degree-elevates to it exactly; legacy
+G0/G1/G2/G3 are converted upstream by the `compat` crate and **never reach
+the planner** — anything else at the reduce boundary is a hard error, not a
+fallback path. No arcs, no rational NURBS, no mixed-degree dispatch, no
+per-source special cases anywhere live.
+
+### 3. A printer is a set of axes — nothing else
+
+There is no toolhead concept, no extruder concept, no hardcoded roles. An
+axis is a config object; the code never knows what an axis is *for*. Exactly
+two relations between axes exist, both explicit in config:
+
+- **`follows`** — a follower axis pays out its commanded displacement
+  proportionally to the *realized* distance traveled along the path of the
+  axes it follows (the odometer rule). The extruder is just the canonical
+  follower of `{x, y, z}`. Smoothed corners shorten the real road, so
+  proportionally less follower motion happens — correct output, not error.
+- **`[limit]` membership** — every limit names a set of coordinates and caps
+  the magnitude of the motion vector restricted to them: velocity, accel,
+  jerk, higher derivatives where declared. All sections contribute rows to
+  one pot; one solve; no precedence, no cornering knobs, no
+  square-corner-velocity. Coverage is mandatory — an axis in no limit
+  section fails config load.
+
+*Plainly: instead of "a printer has a toolhead with an extruder," the model
+is "axes, some of which follow others, all of which obey one shared
+rulebook." The extruder stops being special; vase mode, retract-with-hop,
+and spiral lift stop being modes.*
+
+### 4. Post-processors: one abstraction for shapers and pressure advance
+
+An input shaper and pressure advance are the same mathematical object — a
+linear time-invariant operator on a per-axis track. One smooths, one
+sharpens; structurally they are identical. So there is one config object,
+`[post_processor <name>]`, with a `type:` (`smooth_zv`, `smooth_mzv`,
+`linear_pressure_advance`, whatever comes next) and runtime-tunable
+parameters; an axis applies an ordered list of them. Each type exposes its
+emission-time transform and its plan-time linear action, so the solver
+constrains the **output** of the chain — what the motor actually feels — not
+the nominal signal. The planner rides those limits exactly where they bind.
+
+### 5. Kinematics are swappable modules
+
+A kinematics module (cartesian, corexy, future delta/IDEX/…) is a
+self-contained unit: its own config schema, inverse transform, forward
+transform, and a linearity declaration. It sits at exactly one pipeline
+stage — emission, after per-axis tracks are final. The planner, limits,
+followers, and post-processors are all axis-space and blind to which module
+is loaded. Motors are arbitrary named hardware objects bound to axes only
+through the module (`stepper_x` on a corexy was always a lie, and the lie
+has nowhere to live).
+
+### 6. A dumb MCU and a sharp boundary
+
+The MCU plays per-axis cubic tapes. It knows nothing about kinematics,
+followers, shapers, or G-code — every track is fully written on the host.
+The host↔MCU seam is `extern "C"` + `#[repr(C)]` only: C owns boot,
+safety-critical paths, and shared-memory placement; Rust owns the motion
+engine. The invariant is documented in
+[`docs/kalico-rewrite/mcu-c-rust-boundary.md`](docs/kalico-rewrite/mcu-c-rust-boundary.md)
+and designs are required to keep it true with zero edits.
+
+### 7. Rust engine, deliberately boring seams
+
+New code is Rust by default — one source compiled f64 on the host and f32 on
+the MCU. C remains where low-level primitives must be trivially debuggable
+(e.g. the MCU-side SPSC segment queue). The planner is a **pure function**:
+`(geometry, constraint rows, post-processor operators) → timed trajectory` —
+deterministic, unit-testable without hardware, callable as an oracle by
+anything upstream.
+
+### 8. Fail loudly
+
+Unexpected states raise errors with clear codes instead of being padded,
+clamped, or silently recovered. A segment arriving late is a bug we want to
+see, not a start time to quietly shift. The same posture applies to config:
+legacy fields (`max_accel` in old homes, `square_corner_velocity`,
+`[input_shaper]`, `[firmware_retraction]`) are rejected at load with errors
+naming the replacement — no silent migration.
+
+### 9. Structured observability
+
+Diagnostics flow through a structured event pipeline (`events/*.jsonl`,
+queryable via VictoriaLogs) rather than printf into a flat log. The planner
+will report which constraint row binds at every point — "slowed here by
+`[limit extruder]` accel via the PA post-processor" — so the coupling
+between one axis's config and the whole machine's speed is discoverable the
+moment someone asks why.
+
+## The pipeline
+
+```
+G-code (G5/G5.1; legacy converted by compat, rejected past this point)
+  │  reduce: words → cubic Bézier segments + follower deltas (rust/gcode, rust/geometry)
+  ▼
+geometry: uniform cubic segments, follower ratios, virtual paths
+  │
+  ▼
+temporal: constrained time-optimal timing (TOPP/SLP, Clarabel SOCP) —
+  │       limit rows, follower rows, PA rows, shaper-window rows
+  ▼
+trajectory: per-axis emission chain —
+  │       input track (planned curve, or odometer for followers)
+  │       → post-processor chain → fit to C2 cubic pieces
+  ▼
+kinematics module: axis tracks → motor tracks
+  │
+  ▼
+MCU: per-axis cubic tapes, dumb by design (C queue + Rust engine)
 ```
 
-Then clone the Kalico repository and restart the `klipper` service:
+Two ledgers close the loop: the G-code's nominal counter (advanced exactly
+as written, what macros and UIs see) and the physical realization (nominal
+deltas through the odometer). The books are a contract; the road is physics;
+nobody rewrites the books to match the road.
 
-```bash
-git clone https://github.com/KalicoCrew/kalico.git ~/klipper
-sudo systemctl restart klipper
-```
+## Working on this fork
 
-It might happen that your python environment needs to be updated. If that is the case, run:
-
-```bash
-~/klippy-env/bin/pip install -r ~/klipper/scripts/klippy-requirements.txt
-```
-
-### Option 2. Using KIAUH
-
-For users that are not comfortable using Git directly, [KIAUH v6](https://github.com/dw-0/kiauh) is able to use custom repositories.
-
-To do this, add the Kalico repo to KIAUH's custom repository config depending on your KIAUH version:
-
-#### Setup Kalico as repository in KIAUH v6
-
-- `cd ~/kiauh`
-- `cp default.kiauh.cfg kiauh.cfg`
-- `nano kiauh.cfg`
-- add `https://github.com/KalicoCrew/kalico, main` for the main branch
-
-    or `https://github.com/KalicoCrew/kalico, bleeding-edge-v2` for the bleeding edge branch
-- CTRL-X to save and exit
-
-From the KIAUH menu select:
-
--   [S] Settings
--   1\) Switch Klipper source repository
-
--   Select Kalico from the list
-
-#### Setup Kalico as repository in KIAUH v4
-
-- Add the custom repository to your `klipper_repos.txt` in the `~kiauh` directory
-- `echo "https://github.com/KalicoCrew/kalico,main" >> ~/kiauh/klipper_repos.txt` for the main branch
-
-  or `echo "https://github.com/KalicoCrew/kalico,bleeding-edge-v2" >> ~/kiauh/klipper_repos.txt` for the bleeding edge branch
-
-From the KIAUH menu select:
-
--   [6] Settings
--   1\) Set custom Klipper repository
-
--   Select Kalico from the list
-
-
-*Repository changes will not persist across KIAUH versions.*
-
-### Option 3. Adding a git-remote to the existing installation
-
-It allows you to switch back to mainline Klipper at any time via a `git checkout upstream_main`
-
-```bash
-cd ~/klipper
-git remote add kalico https://github.com/KalicoCrew/kalico.git
-git fetch kalico
-git checkout -b upstream-main origin/master
-git branch -D master
-git checkout -b main kalico/main
-sudo systemctl restart klipper
-sudo systemctl restart moonraker
-```
-
----
-
-Kalico is a 3d-Printer firmware. It combines the power of a general
-purpose computer with one or more micro-controllers. See the
-[features document](https://docs.kalico.gg/Features.html) for more
-information on why you should use Kalico.
-
-To begin using Kalico start by
-[installing](https://docs.kalico.gg/Installation.html) it.
-
-Kalico is Free Software. See the [license](COPYING) or read the
-[documentation](https://docs.kalico.gg/Overview.html).
-
-[![Join me on Discord](https://discord.com/api/guilds/1297243471442214913/widget.png?style=banner2)](https://kalico.gg/discord)
+- Rust workspace lives in [`rust/`](rust/); run tests with
+  `cargo nextest run` from `rust/` (not bare `cargo test`).
+- CI gate: `./scripts/ci.sh quick` (plus `./scripts/ci.sh py` for `klippy/`
+  changes).
+- Design documents: [`docs/superpowers/specs/`](docs/superpowers/specs/);
+  implementation plans: [`docs/superpowers/plans/`](docs/superpowers/plans/).
+- Upstream Kalico documentation, features, and installation:
+  [README_KALICO.md](README_KALICO.md).
