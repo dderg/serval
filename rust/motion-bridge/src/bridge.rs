@@ -1901,6 +1901,86 @@ impl PyMotionBridge {
         Ok(())
     }
 
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel, host_now))]
+    #[allow(clippy::too_many_arguments)]
+    fn adjust_motor(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        axis_idx: u8,
+        motor_idx: u8,
+        delta_mm: f64,
+        speed: f64,
+        accel: f64,
+        host_now: f64,
+    ) -> PyResult<f64> {
+        const CORRECTION_LEAD_SECS: f64 = 0.15;
+        let profile = crate::correction::plan_correction_profile(delta_mm, speed, accel)
+            .map_err(PyRuntimeError::new_err)?;
+        let duration = crate::correction::profile_duration(delta_mm, speed, accel)
+            .map_err(PyRuntimeError::new_err)?;
+        let start_secs = host_now + CORRECTION_LEAD_SECS;
+        let handle = mcu_handle_from_raw(mcu_handle);
+        let entries = {
+            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            crate::correction::to_piece_entries(
+                &profile,
+                |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
+                start_secs,
+            )
+        };
+        if entries.iter().any(|e| e.start_time == 0) {
+            return Err(PyRuntimeError::new_err(format!(
+                "adjust_motor: clock unsynced for mcu {mcu_handle}"
+            )));
+        }
+        let io = {
+            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let conn = mcus.get(&mcu_handle).ok_or_else(|| {
+                PyRuntimeError::new_err(format!("adjust_motor: unknown mcu_handle {mcu_handle}"))
+            })?;
+            conn.host_io
+                .as_ref()
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err(
+                        "adjust_motor: serial transport not attached for this MCU \
+                         (EtherCAT correction moves are not supported yet)",
+                    )
+                })?
+                .clone()
+        };
+        py.detach(|| -> PyResult<()> {
+            for msg in crate::correction::chunk_correction_messages(axis_idx, motor_idx, &entries)
+            {
+                let mut body = Vec::with_capacity(9 + msg.pieces_bytes.len());
+                kalico_protocol::codec::Encode::encode(&msg, &mut body);
+                let (_kind, resp) = io
+                    .kalico_call_on_channel(
+                        kalico_protocol::KALICO_CHANNEL_CONTROL,
+                        kalico_protocol::MessageKind::PushCorrectionPieces,
+                        body,
+                        std::time::Duration::from_secs(2),
+                    )
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("adjust_motor send: {e:?}"))
+                    })?;
+                use kalico_protocol::codec::Decode as _;
+                let r = kalico_protocol::messages::PushCorrectionPiecesResponse::decode(&resp)
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("adjust_motor decode: {e:?}"))
+                    })?;
+                if r.result != 0 {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "adjust_motor rejected by MCU: error {}",
+                        r.result
+                    )));
+                }
+            }
+            Ok(())
+        })?;
+        Ok(start_secs + duration - host_now)
+    }
+
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {
         let io = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
