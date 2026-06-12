@@ -39,6 +39,7 @@ fn textbook_limits() -> Limits {
     )
 }
 
+#[allow(clippy::large_types_passed_by_value)]
 fn chain_of_one(grid: ArclengthGrid, limits: Limits) -> ChainGrid {
     ChainGrid::from_segment_grids(vec![grid], vec![limits])
 }

@@ -7,7 +7,6 @@ from collections import defaultdict
 
 from . import stepper
 from .extras import servo_axis
-from .extras.danger_options import get_danger_options
 from .kinematics import extruder
 
 BUFFER_TIME_START = 0.250

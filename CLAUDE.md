@@ -38,6 +38,15 @@ Use `cargo nextest run -p <crate>` or `-E 'test(<name>)'` to scope down.
 Doc-tests are the one gap — `nextest` skips them, so run `cargo test --doc`
 when you touch doc examples.
 
+# Before opening or updating a PR
+
+Run `./scripts/ci.sh quick` and get it fully green — it bundles ruff
+(check + format) over the whole repo, the Rust workspace tests, clippy
+with `-D warnings`, `cargo fmt --check`, and the watchdog canary. This is
+the same set CI runs first, so a red gate here is a red PR. Individual
+jobs: `./scripts/ci.sh <job>` (see the header of `scripts/ci.sh` for the
+full list, e.g. `ruff`, `rust-clippy`, `rust-mcu-h7`).
+
 # Observability / structured logging
 
 Log via the structured pipeline (`kalico_log_emit` → `events/*.jsonl`), not

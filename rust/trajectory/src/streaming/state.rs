@@ -137,7 +137,11 @@ impl ShaperState {
             .map(|m| PlanSegment {
                 temporal: temporal::multi::SegmentInput {
                     curve: &m.segment.xyz,
-                    limits: per_segment_limits(&m.segment.xyz, ctx.limits, m.segment.feedrate_mm_s),
+                    limits: per_segment_limits(
+                        &m.segment.xyz,
+                        &ctx.limits,
+                        m.segment.feedrate_mm_s,
+                    ),
                 },
                 e_mode: m.segment.e_mode,
                 extrusion_per_xy_mm: m.segment.extrusion_per_xy_mm,
@@ -557,7 +561,7 @@ fn try_rung2(
         .map(|m| PlanSegment {
             temporal: temporal::multi::SegmentInput {
                 curve: &m.segment.xyz,
-                limits: per_segment_limits(&m.segment.xyz, ctx.limits, m.segment.feedrate_mm_s),
+                limits: per_segment_limits(&m.segment.xyz, &ctx.limits, m.segment.feedrate_mm_s),
             },
             e_mode: m.segment.e_mode,
             extrusion_per_xy_mm: m.segment.extrusion_per_xy_mm,
@@ -634,7 +638,7 @@ fn try_rung3(
     let rung3_segments = [PlanSegment {
         temporal: temporal::multi::SegmentInput {
             curve: &seg.segment.xyz,
-            limits: per_segment_limits(&seg.segment.xyz, ctx.limits, seg.segment.feedrate_mm_s),
+            limits: per_segment_limits(&seg.segment.xyz, &ctx.limits, seg.segment.feedrate_mm_s),
         },
         e_mode: seg.segment.e_mode,
         extrusion_per_xy_mm: seg.segment.extrusion_per_xy_mm,
@@ -838,7 +842,7 @@ fn boundary_path_speed_cap(seg: &PlanSegment<'_>) -> f64 {
 
 fn per_segment_limits(
     curve: &nurbs::VectorNurbs<f64, 3>,
-    base: temporal::Limits,
+    base: &temporal::Limits,
     feedrate_mm_s: f64,
 ) -> temporal::Limits {
     const AXIS_INACTIVE_SPAN_EPS_MM: f64 = 1e-6;
@@ -873,7 +877,7 @@ fn per_segment_limits(
         .map(|s| s.j_max)
         .fold(0.0_f64, f64::max);
 
-    let mut limits = base;
+    let mut limits = *base;
     if max_active_j > 0.0 {
         limits = limits.with_sets_mapped(|set| {
             let j_max = if set_is_inactive(set.axes) {
