@@ -16,56 +16,59 @@ fn default_config_shaper_is_passthrough() {
 }
 
 #[test]
-fn temporal_limits_converts() {
-    let l = PlannerLimits {
-        max_velocity: 300.0,
-        max_accel: 3000.0,
-        max_z_velocity: 15.0,
-        max_z_accel: 100.0,
-        square_corner_velocity: 5.0,
-    };
-    let tl = l.to_temporal_limits();
-    assert_eq!(tl.v_max[0], 300.0);
-    assert_eq!(tl.v_max[2], 15.0);
-    assert_eq!(tl.a_max[0], 3000.0);
-    assert_eq!(tl.a_centripetal_max, 3000.0);
+fn sections_convert_to_temporal_sets() {
+    let cfg = PlannerConfig::default();
+    let lims = cfg.to_temporal_limits().unwrap();
+    assert_eq!(lims.sets().len(), 2);
+    assert_eq!(lims.sets()[0].v_max, 300.0);
+    assert_eq!(lims.sets()[1].a_max, 100.0);
 }
 
 #[test]
-fn junction_deviation_mm_matches_klipper_formula() {
-    let l = PlannerLimits {
-        max_velocity: 300.0,
-        max_accel: 3000.0,
-        max_z_velocity: 15.0,
-        max_z_accel: 100.0,
-        square_corner_velocity: 5.0,
-    };
-    let jd = l.junction_deviation_mm();
-    let expected = 5.0_f64.powi(2) * (std::f64::consts::SQRT_2 - 1.0) / 3000.0;
-    assert!(
-        (jd - expected).abs() < 1e-12,
-        "junction_deviation_mm = {jd:.6e}, expected {expected:.6e}",
-    );
-    assert!(
-        (jd - 3.4518e-3).abs() < 1e-6,
-        "junction_deviation_mm = {jd:.6e}, expected ≈ 3.4518e-3 mm",
-    );
+fn jerk_defaults_to_twice_accel_per_section() {
+    let cfg = PlannerConfig::default();
+    let lims = cfg.to_temporal_limits().unwrap();
+    assert_eq!(lims.sets()[0].j_max, 6000.0);
 }
 
 #[test]
-fn a_centripetal_max_is_max_accel_not_length() {
-    let l = PlannerLimits {
-        max_velocity: 300.0,
-        max_accel: 3000.0,
-        max_z_velocity: 15.0,
-        max_z_accel: 100.0,
-        square_corner_velocity: 5.0,
+fn missing_axis_coverage_is_an_error() {
+    let mut cfg = PlannerConfig::default();
+    cfg.limit_sections.retain(|s| s.name != "z");
+    assert!(cfg.to_temporal_limits().is_err());
+}
+
+#[test]
+fn unknown_axis_name_is_an_error() {
+    assert!(axis_index("e").is_err());
+    assert_eq!(axis_index("x").unwrap(), 0);
+}
+
+#[test]
+fn runtime_caps_append_an_all_axis_overlay() {
+    let mut cfg = PlannerConfig::default();
+    cfg.runtime_caps = RuntimeCaps {
+        velocity: Some(100.0),
+        accel: Some(1000.0),
     };
-    let tl = l.to_temporal_limits();
-    assert_eq!(
-        tl.a_centripetal_max, 3000.0,
-        "a_centripetal_max must equal max_accel (mm/s²), not the old scv²/accel formula (mm)",
-    );
+    let lims = cfg.to_temporal_limits().unwrap();
+    let overlay = lims.sets().last().unwrap();
+    assert_eq!(overlay.v_max, 100.0);
+    assert_eq!(overlay.a_max, 1000.0);
+    assert_eq!(overlay.axes, temporal::AxisSet::all());
+}
+
+#[test]
+fn section_with_no_caps_is_an_error() {
+    let mut cfg = PlannerConfig::default();
+    cfg.limit_sections.push(LimitSection {
+        name: "empty".into(),
+        axes: vec![0],
+        max_velocity: None,
+        max_accel: None,
+        max_jerk: None,
+    });
+    assert!(cfg.to_temporal_limits().is_err());
 }
 
 #[test]
