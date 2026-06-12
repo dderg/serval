@@ -186,11 +186,6 @@ impl HistoryStore {
                 }
                 piece.endpoint()
             }
-            // An empty ring means the axis is parked at its endpoint: that
-            // position is the answer for any query clock. Ordering the query
-            // against the endpoint clock would compare values from different
-            // clock-record eras (the rebase projection vs the query-time
-            // projection), which diverge under vtime simulation.
             None => *self
                 .endpoints
                 .get(&key)

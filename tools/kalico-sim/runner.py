@@ -716,8 +716,6 @@ def run_simulation(
                                 )
                                 break
                 if beacon_error is None and beacon_test == "connect":
-                    # The firmware-update check subprocess always fails in
-                    # docker (no real device); its traceback is benign.
                     relevant = klippy_content.replace(
                         "Executing Beacon update script failed: Traceback",
                         "Executing Beacon update script failed:",
@@ -780,10 +778,6 @@ def run_simulation(
                     and "model convergence" in beacon_error
                     and "Collected" in klippy_content
                 ):
-                    # The emulator cannot follow toolhead z during the model
-                    # sweep (the sim does not export kalico-runtime steps),
-                    # so the freq/z fit cannot converge. The seam-side flow
-                    # (contact arming, descents, sampling loop) completed.
                     log.info(
                         "contact: tolerating emulator model-fit limitation: %s",
                         beacon_error,

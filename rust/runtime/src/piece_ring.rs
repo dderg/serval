@@ -1,5 +1,12 @@
 use crate::monomial::bernstein_to_monomial_with_duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitOutcome {
+    Applied,
+    Stale,
+    Overcommit,
+}
+
 /// ## Cursor invariants (ISR/host safety boundary)
 ///
 /// - `head` — monotonic valid frontier (wrapping u32). Advanced **only** by
@@ -11,13 +18,6 @@ use crate::monomial::bernstein_to_monomial_with_duration;
 ///   starting from 0, so no division is needed on the hot path.
 ///
 /// Occupancy: `head.wrapping_sub(retired)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommitOutcome {
-    Applied,
-    Stale,
-    Overcommit,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct RingDescriptor {
     pub ring_offset: usize,
@@ -89,10 +89,6 @@ impl RingDescriptor {
         }
     }
 
-    /// `Stale` (a retransmit of an already-committed head) is idempotent-OK;
-    /// `Overcommit` means the proposal exceeds ring capacity relative to the
-    /// retire frontier — the host's view of this ring has desynced and the
-    /// commit was NOT applied.
     #[inline]
     pub fn commit_head(&mut self, new_head: u32) -> CommitOutcome {
         let cur = self.head.wrapping_sub(self.retired);

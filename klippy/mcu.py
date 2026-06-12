@@ -1024,6 +1024,29 @@ class MCU:
                 )
             raise
 
+    def _recover_latched_peripheral_shutdown(self, get_config_cmd, exc):
+        is_motion_mcu = (
+            "kalico_runtime_reset"
+            in self._serial.get_msgparser().messages_by_name
+        )
+        if is_motion_mcu:
+            raise error(
+                "MCU '%s' is latched in shutdown and requires a power"
+                " cycle (clear_shutdown cannot reset its timer and runtime"
+                " state): %s" % (self._name, exc)
+            )
+        logging.info(
+            "MCU '%s' latched the shutdown broadcast from a previous host"
+            " session; sending clear_shutdown and retrying: %s",
+            self._name,
+            exc,
+        )
+        self._serial.send("clear_shutdown")
+        config_params = get_config_cmd.send()
+        self._is_shutdown = False
+        self._shutdown_msg = ""
+        return config_params
+
     def _send_get_config(self):
         get_config_cmd = self.lookup_query_command(
             "get_config",
@@ -1036,31 +1059,9 @@ class MCU:
         except Exception as e:
             if "shutdown state" not in str(e):
                 raise
-            msgparser = self._serial.get_msgparser()
-            if "kalico_runtime_reset" in msgparser.messages_by_name:
-                # A kalico-native motion MCU latched a shutdown; its timer
-                # and runtime state need a REAL reset, which clear_shutdown
-                # does not provide — recovering it in place re-shutdowns
-                # within seconds ("Timer too close" loop). Fail loudly.
-                raise error(
-                    "MCU '%s' is latched in shutdown and requires a power"
-                    " cycle (no reset command available): %s"
-                    % (self._name, e)
-                )
-            # A peripheral MCU (e.g. the Beacon probe) latched the shutdown
-            # klippy broadcasts on every host shutdown; it stays latched
-            # until cleared or power-cycled. Clear it and retry once so a
-            # plain RESTART recovers, matching stock-klipper behavior.
-            logging.info(
-                "MCU '%s' latched shutdown at config time; sending"
-                " clear_shutdown and retrying: %s",
-                self._name,
-                e,
+            config_params = self._recover_latched_peripheral_shutdown(
+                get_config_cmd, e
             )
-            self._serial.send("clear_shutdown")
-            config_params = get_config_cmd.send()
-            self._is_shutdown = False
-            self._shutdown_msg = ""
         if self._is_shutdown:
             raise error(
                 "MCU '%s' error during config: %s"

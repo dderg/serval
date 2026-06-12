@@ -3158,13 +3158,7 @@ impl PyMotionBridge {
                 .map_err(PyRuntimeError::new_err)?;
         }
 
-        // The trip-staleness window must be projected with the SAME clock
-        // record era the drip pieces (and the trip-clock conversion) will
-        // use. The axis's last recorded endpoint clock can come from an
-        // older era — the Python clocksync estimate is not consistent
-        // across re-anchors (vtime sims wobble by whole seconds) — which
-        // falsely rejects valid trips as "predating" the move.
-        let window_start_clock = {
+        let window_start_clock_in_drip_piece_era = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
             let host_now = router.host_now_secs();
             router
@@ -3212,7 +3206,7 @@ impl PyMotionBridge {
                 axis,
                 axis_key,
                 all_axis_keys: all_axis_keys.clone(),
-                window_start_clock,
+                window_start_clock: window_start_clock_in_drip_piece_era,
                 notify: result_tx,
             });
         }
@@ -3570,10 +3564,6 @@ impl PyMotionBridge {
         for (key, axis_clock, now_clock) in resolved {
             let st = match store.state_at_clock(key, axis_clock, Some(now_clock)) {
                 Ok(st) => st,
-                // An axis that has never moved and never been rebased (a
-                // cold extruder) genuinely has no answer at any clock; omit
-                // it rather than failing the whole query. Other errors
-                // (before-window, future) still fail loudly.
                 Err(crate::motion_history::HistoryError::NoHistoryForAxis(_)) => continue,
                 Err(e) => return Err(PyRuntimeError::new_err(e.to_string())),
             };
@@ -3684,11 +3674,6 @@ pub(crate) fn dispatch_endstop_trip(
     };
     let run = match run_opt {
         None => {
-            // The trip beat home_axis to setting the run (device armed in
-            // trip_move_begin, planning/drain still in flight). Buffer it:
-            // home_axis consumes it right after registering the run.
-            // Dropping it would turn a legitimate trigger into a full
-            // max-travel descend.
             tracing::warn!(
                 subsystem = "trip-relay",
                 event = "early_trip_buffered",

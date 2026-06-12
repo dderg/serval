@@ -33,15 +33,12 @@ def _build_nvm_image() -> bytes:
     # version byte; 0 selects the V0 (no-params) branch.
     struct.pack_into("<IH", nvm, 0, 0xFFFFFFFF, 0xFFFF)
     nvm[12] = 0x00
-    # Offset 65534 holds the MCU temp calibration two-word pack
-    # (BeaconMCUTempHelper.build_with_nvm). All-zero words make
-    # temp_hot == temp_room and a zero ADC denominator — every
-    # beacon_status/beacon_data callback then dies on ZeroDivisionError.
-    # Encode temp_room=20.0, temp_hot=60.0, ref_room=ref_hot=1.0,
-    # adc_room=1000, adc_hot=3000.
-    lower = 20 | (60 << 12)
-    upper = (1000 << 8) | (3000 << 20)
-    struct.pack_into("<II", nvm, 65534, lower, upper)
+    mcu_temp_cal_offset = 65534
+    temp_room_c, temp_hot_c = 20, 60
+    adc_room, adc_hot = 1000, 3000
+    lower = temp_room_c | (temp_hot_c << 12)
+    upper = (adc_room << 8) | (adc_hot << 20)
+    struct.pack_into("<II", nvm, mcu_temp_cal_offset, lower, upper)
     return bytes(nvm)
 
 
@@ -50,6 +47,8 @@ NVM_IMAGE = _build_nvm_image()
 DEFAULT_FREQUENCY_HZ = 5_400_000
 
 DEFAULT_TEMP_RAW = 2048
+
+APPROACH_FROM_ABOVE_Z_MM = 10.0
 
 
 class BeaconMcuStub:
@@ -268,10 +267,8 @@ class BeaconMcuStub:
             if line.startswith(b"steps="):
                 steps = int(line[6:])
                 self._steps_now = steps
-                # Step tracking only takes over from the timer fallback once
-                # a step line is confirmed to move (today the sim does not
-                # export kalico-runtime steps, so this stays in timer mode —
-                # TODO: export runtime steps via sim_intercept_notify_step).
+                # TODO: export kalico-runtime steps via
+                # sim_intercept_notify_step so a line can ever lock.
                 if self._z_line_locked and not self._step_tracking:
                     self._step_tracking = True
                     self._z_anchor_steps = steps
@@ -314,11 +311,6 @@ class BeaconMcuStub:
             logging.exception("beacon-stub: unknown msgformat %r", msgformat)
             return
         with self._send_lock:
-            # Klipper protocol: the seq byte of MCU->host frames is the
-            # MCU's *receive* sequence — it acknowledges host frames. An
-            # independent counter only works while every host frame draws
-            # exactly one response; no-response commands (trsync_set_timeout
-            # heartbeats) desync it and the host retransmits forever.
             seq_byte = (
                 self._host_recv_seq & msgproto.MESSAGE_SEQ_MASK
             ) | msgproto.MESSAGE_DEST
@@ -520,11 +512,8 @@ class BeaconMcuStub:
         self._home_trigger_reason = params["trigger_reason"]
         self._home_trigger_invert = params["trigger_invert"]
         if not self._home_active:
-            # A fresh arm approaches from above; a prior pass left z at the
-            # trigger height. Without step feedback there is no retract
-            # motion to observe, so reset the modeled height.
             if not self._step_tracking:
-                self._z_current = 10.0
+                self._z_current = APPROACH_FROM_ABOVE_Z_MM
             self._homing_start_z = self._z_current
             self._homing_start_time = time.monotonic()
             self._home_active = True
@@ -613,7 +602,6 @@ class BeaconMcuStub:
         if self._homing_trigger_timer is not None:
             self._homing_trigger_timer.cancel()
         if not self._step_tracking:
-            # No step feedback available: fall back to firing on a timer.
             self._homing_trigger_timer = threading.Timer(
                 self._homing_trigger_delay, self._fire_contact_trigger
             )
@@ -628,8 +616,8 @@ class BeaconMcuStub:
         self._contact_trigger_clock = self._now_clock()
         self._contact_trigger_sample = self._sample_index
         self._contact_trigger_freq = self._z_to_frequency(0.0)
-        # The nozzle touches the bed at the contact trigger: true z is 0.
-        self._anchor_z(0.0)
+        nozzle_touches_bed_z = 0.0
+        self._anchor_z(nozzle_touches_bed_z)
         self._send_msg(
             "beacon_contact armed_clock=%u trigger_clock=%u"
             " detect_clock=%u latency=%c error=%c",
@@ -782,19 +770,21 @@ class BeaconMcuStub:
                 data_value = self._freq_to_count(freq)
 
                 buf = bytearray()
-                # beacon.py's decoder starts each message at data=0, so the
-                # first sample must be absolute (or a delta from zero).
-                last_data_value = 0
+                decoder_baseline = 0
+                last_data_value = decoder_baseline
                 for i in range(SAMPLES_PER_BATCH):
                     delta = data_value - last_data_value
-                    if -16384 <= delta <= 16383:
-                        # 2-byte delta: 15-bit two's complement, top bit clear.
+                    fits_two_byte_twos_complement = -16384 <= delta <= 16383
+                    if fits_two_byte_twos_complement:
                         encoded = delta & 0x7FFF
                         buf.append((encoded >> 8) & 0x7F)
                         buf.append(encoded & 0xFF)
                     else:
-                        # 4-byte absolute: top bit set, 31-bit value.
-                        buf.append(0x80 | ((data_value >> 24) & 0x7F))
+                        four_byte_absolute_flag = 0x80
+                        buf.append(
+                            four_byte_absolute_flag
+                            | ((data_value >> 24) & 0x7F)
+                        )
                         buf.append((data_value >> 16) & 0xFF)
                         buf.append((data_value >> 8) & 0xFF)
                         buf.append(data_value & 0xFF)

@@ -933,12 +933,13 @@ pub mod exports {
                 runtime::piece_ring::CommitOutcome::Applied
                 | runtime::piece_ring::CommitOutcome::Stale => {}
                 runtime::piece_ring::CommitOutcome::Overcommit => {
-                    // 3 = error level; code high bit marks the overcommit case.
+                    const LOG_LEVEL_ERROR: u8 = 3;
+                    const CODE_FLAG_OVERCOMMIT: u16 = 0x100;
                     kalico_log_emit(
-                        3,
+                        LOG_LEVEL_ERROR,
                         runtime::log_codes::SUBSYSTEM_RUNTIME,
                         runtime::log_codes::EVENT_RUNTIME_RING_STATE,
-                        u16::from(axis_idx) | 0x100,
+                        u16::from(axis_idx) | CODE_FLAG_OVERCOMMIT,
                         axis.ring.head,
                         axis.ring.retired,
                     );

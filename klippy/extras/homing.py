@@ -350,6 +350,17 @@ class Homing:
         if dwell_time:
             toolhead.dwell(dwell_time)
 
+    def _drain_motion_before_arming_device(self, gcmd, bridge, axis):
+        reactor = self.printer.get_reactor()
+        deadline = reactor.monotonic() + _DRAIN_PAUSE_TIMEOUT
+        while not bridge.motion_drained():
+            if reactor.monotonic() > deadline:
+                raise gcmd.error(
+                    "%s trip move: motion did not drain within %.0fs before"
+                    " homing" % ("XYZ"[axis], _DRAIN_PAUSE_TIMEOUT)
+                )
+            reactor.pause(reactor.monotonic() + 0.005)
+
     def trip_move(
         self, gcmd, toolhead, bridge, axis, direction, speed, max_travel, entry
     ):
@@ -361,20 +372,7 @@ class Homing:
                 " bridge" % ("XYZ"[axis],)
             )
         toolhead.wait_moves()
-        # Drain prior motion with the reactor alive BEFORE arming the
-        # provider's device. home_axis_start also waits for the drain, but
-        # natively — blocking the reactor starves timers (provider trsync
-        # heartbeats, stream watchdogs) and widens the window in which a
-        # device trigger beats the homing-run registration.
-        reactor = self.printer.get_reactor()
-        drain_deadline = reactor.monotonic() + _DRAIN_PAUSE_TIMEOUT
-        while not bridge.motion_drained():
-            if reactor.monotonic() > drain_deadline:
-                raise gcmd.error(
-                    "%s trip move: motion did not drain within %.0fs before"
-                    " homing" % ("XYZ"[axis], _DRAIN_PAUSE_TIMEOUT)
-                )
-            reactor.pause(reactor.monotonic() + 0.005)
+        self._drain_motion_before_arming_device(gcmd, bridge, axis)
         if endstop.is_triggered():
             raise gcmd.error(
                 "%s endstop already triggered — move off the trigger before"
