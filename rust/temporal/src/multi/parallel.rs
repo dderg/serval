@@ -355,7 +355,8 @@ fn scale_chain_v_max(chain: &ChainGrid, factor: f64) -> ChainGrid {
                 j_max: s.j_max,
             })
             .collect();
-        *l = crate::Limits::try_new(&sets).expect("velocity rescale preserves validity");
+        *l =
+            crate::Limits::try_new(&sets, l.n_axes()).expect("velocity rescale preserves validity");
     }
     scaled
 }

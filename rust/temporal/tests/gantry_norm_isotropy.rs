@@ -2,20 +2,23 @@ use nurbs::VectorNurbs;
 use temporal::{AxisSet, GridConfig, GridScheme, LimitSet, Limits, SolveStatus, schedule_segment};
 
 fn gantry_limits() -> Limits {
-    Limits::try_new(&[
-        LimitSet {
-            axes: AxisSet::from_indices(&[0, 1]),
-            v_max: 300.0,
-            a_max: 3000.0,
-            j_max: 6000.0,
-        },
-        LimitSet {
-            axes: AxisSet::from_indices(&[2]),
-            v_max: 15.0,
-            a_max: 100.0,
-            j_max: 200.0,
-        },
-    ])
+    Limits::try_new(
+        &[
+            LimitSet {
+                axes: AxisSet::from_indices(&[0, 1]),
+                v_max: 300.0,
+                a_max: 3000.0,
+                j_max: 6000.0,
+            },
+            LimitSet {
+                axes: AxisSet::from_indices(&[2]),
+                v_max: 15.0,
+                a_max: 100.0,
+                j_max: 200.0,
+            },
+        ],
+        temporal::N_SPATIAL,
+    )
     .unwrap()
 }
 

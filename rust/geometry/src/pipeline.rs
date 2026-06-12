@@ -202,35 +202,39 @@ impl Segments<'_> {
             CurveGeom::Quadratic { cps } => degree_elevate_2_to_3(&nurbs_from_quadratic(cps)),
         };
 
-        match classify_followers(&xyz, follower_deltas) {
-            Ok(followers) => {
-                match CubicSegment::try_new(xyz, followers, feedrate_mm_s, source, None) {
-                    Ok(seg) => {
-                        self.queue.push_back(Item::Segment(Segment::Cubic(seg)));
-                    }
-                    Err(
-                        GeometryError::NotSinglePieceCubic { reason }
-                        | GeometryError::FollowerInvariantViolation { reason },
-                    ) => {
-                        self.queue.push_back(Item::Fatal(Fatal::Internal(Box::new(
-                            InternalDetails {
-                                kind: InternalKind::CubicSegmentInvariantViolation { reason },
-                                context: format!("line_no={line_no}"),
-                                backtrace: std::backtrace::Backtrace::capture(),
-                            },
-                        ))));
-                    }
-                    Err(_) => unreachable!(
-                        "classify_followers would not have returned Ok if try_new could fail this way"
-                    ),
-                }
-            }
-            Err(GeometryError::ZeroMotion) => {}
-            Err(GeometryError::FollowerOnlyMoveUnsupported) => {
-                self.queue
-                    .push_back(Item::Fatal(Fatal::FollowerOnlyMoveUnsupported { line_no }));
-            }
+        let built = match classify_followers(&xyz, follower_deltas) {
+            Ok(Classified::Spatial(followers)) => Some(CubicSegment::try_new(
+                xyz,
+                followers,
+                feedrate_mm_s,
+                source,
+                None,
+            )),
+            Ok(Classified::VirtualPath { length, followers }) => Some(
+                CubicSegment::try_new_virtual(xyz, followers, feedrate_mm_s, source, length),
+            ),
+            Err(GeometryError::ZeroMotion) => None,
             Err(_) => unreachable!("classify_followers return shape is exhaustive"),
+        };
+        match built {
+            None => {}
+            Some(Ok(seg)) => {
+                self.queue.push_back(Item::Segment(Segment::Cubic(seg)));
+            }
+            Some(Err(
+                GeometryError::NotSinglePieceCubic { reason }
+                | GeometryError::FollowerInvariantViolation { reason },
+            )) => {
+                self.queue
+                    .push_back(Item::Fatal(Fatal::Internal(Box::new(InternalDetails {
+                        kind: InternalKind::CubicSegmentInvariantViolation { reason },
+                        context: format!("line_no={line_no}"),
+                        backtrace: std::backtrace::Backtrace::capture(),
+                    }))));
+            }
+            Some(Err(_)) => {
+                unreachable!("CubicSegment constructors only fail with the variants above")
+            }
         }
 
         self.prev_g1_end = None;
@@ -239,28 +243,51 @@ impl Segments<'_> {
     }
 }
 
+enum Classified {
+    Spatial(Vec<FollowerDemand>),
+    VirtualPath {
+        length: f64,
+        followers: Vec<FollowerDemand>,
+    },
+}
+
 fn classify_followers(
     xyz: &nurbs::VectorNurbs<f64, 3>,
     follower_deltas: &[(usize, f64)],
-) -> Result<Vec<FollowerDemand>, GeometryError> {
+) -> Result<Classified, GeometryError> {
     const EPS_PATH: f64 = 1e-6;
     const EPS_FOLLOWER: f64 = 1e-6;
     let path_len = nurbs::arc_length::path_arc_length(xyz);
-    let any_follower_motion = follower_deltas.iter().any(|&(_, d)| d.abs() > EPS_FOLLOWER);
-    if path_len <= EPS_PATH {
-        if any_follower_motion {
-            return Err(GeometryError::FollowerOnlyMoveUnsupported);
-        }
-        return Err(GeometryError::ZeroMotion);
-    }
-    Ok(follower_deltas
+    let moving: Vec<(usize, f64)> = follower_deltas
         .iter()
-        .filter(|&&(_, d)| d.abs() > EPS_FOLLOWER)
-        .map(|&(axis_index, d)| FollowerDemand {
-            axis_index,
-            ratio: d / path_len,
-        })
-        .collect())
+        .copied()
+        .filter(|&(_, d)| d.abs() > EPS_FOLLOWER)
+        .collect();
+    if path_len <= EPS_PATH {
+        if moving.is_empty() {
+            return Err(GeometryError::ZeroMotion);
+        }
+        let length = moving.iter().map(|&(_, d)| d.abs()).fold(0.0, f64::max);
+        return Ok(Classified::VirtualPath {
+            length,
+            followers: moving
+                .into_iter()
+                .map(|(axis_index, d)| FollowerDemand {
+                    axis_index,
+                    ratio: d / length,
+                })
+                .collect(),
+        });
+    }
+    Ok(Classified::Spatial(
+        moving
+            .into_iter()
+            .map(|(axis_index, d)| FollowerDemand {
+                axis_index,
+                ratio: d / path_len,
+            })
+            .collect(),
+    ))
 }
 
 #[must_use]

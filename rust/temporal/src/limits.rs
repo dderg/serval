@@ -1,4 +1,5 @@
-pub const MAX_AXES: usize = 3;
+pub const N_SPATIAL: usize = 3;
+pub const MAX_AXES: usize = 8;
 pub const MAX_LIMIT_SETS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,8 +17,16 @@ impl AxisSet {
         Self(bits)
     }
     #[must_use]
-    pub fn all() -> Self {
-        Self((1 << MAX_AXES) - 1)
+    pub fn spatial() -> Self {
+        Self((1 << N_SPATIAL) - 1)
+    }
+    #[must_use]
+    pub fn is_spatial(self) -> bool {
+        self.0 < (1 << N_SPATIAL)
+    }
+    #[must_use]
+    pub fn is_follower(self) -> bool {
+        self.0 >> N_SPATIAL != 0 && self.0 & ((1 << N_SPATIAL) - 1) == 0
     }
     #[must_use]
     pub fn contains(self, axis: usize) -> bool {
@@ -44,6 +53,7 @@ pub struct LimitSet {
 pub struct Limits {
     sets: [LimitSet; MAX_LIMIT_SETS],
     n_sets: u8,
+    n_axes: u8,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -60,10 +70,16 @@ pub enum LimitsError {
     NoAccelCoverage { axis: usize },
     #[error("axis {axis}: no limit set declares a finite max_jerk covering it")]
     NoJerkCoverage { axis: usize },
+    #[error("limit set {set}: mixes spatial and follower axes (unsupported)")]
+    MixedSpatialFollower { set: usize },
 }
 
 impl Limits {
-    pub fn try_new(sets: &[LimitSet]) -> Result<Self, LimitsError> {
+    pub fn try_new(sets: &[LimitSet], n_axes: usize) -> Result<Self, LimitsError> {
+        assert!(
+            (N_SPATIAL..=MAX_AXES).contains(&n_axes),
+            "n_axes {n_axes} out of range"
+        );
         if sets.is_empty() {
             return Err(LimitsError::Empty);
         }
@@ -75,8 +91,11 @@ impl Limits {
             if !(ok(s.v_max) && ok(s.a_max) && ok(s.j_max)) {
                 return Err(LimitsError::BadCap { set: idx });
             }
+            if !s.axes.is_spatial() && !s.axes.is_follower() {
+                return Err(LimitsError::MixedSpatialFollower { set: idx });
+            }
         }
-        for axis in 0..MAX_AXES {
+        for axis in 0..n_axes {
             let covered = |f: fn(&LimitSet) -> f64| {
                 sets.iter()
                     .any(|s| s.axes.contains(axis) && f(s).is_finite())
@@ -97,12 +116,32 @@ impl Limits {
         Ok(Self {
             sets: arr,
             n_sets: sets.len() as u8,
+            n_axes: n_axes as u8,
         })
     }
 
     #[must_use]
     pub fn sets(&self) -> &[LimitSet] {
         &self.sets[..self.n_sets as usize]
+    }
+
+    #[must_use]
+    pub fn n_axes(&self) -> usize {
+        self.n_axes as usize
+    }
+
+    pub fn spatial_sets(&self) -> impl Iterator<Item = (usize, &LimitSet)> {
+        self.sets()
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.axes.is_spatial())
+    }
+
+    pub fn follower_sets(&self) -> impl Iterator<Item = (usize, &LimitSet)> {
+        self.sets()
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.axes.is_follower())
     }
 
     #[must_use]
@@ -115,24 +154,27 @@ impl Limits {
                 j_max: j[ax],
             })
             .collect();
-        Self::try_new(&sets).expect("axis_boxes: finite positive caps")
+        Self::try_new(&sets, N_SPATIAL).expect("axis_boxes: finite positive caps")
     }
 
     #[must_use]
     pub fn norm_all(v: f64, a: f64, j: f64) -> Self {
-        Self::try_new(&[LimitSet {
-            axes: AxisSet::all(),
-            v_max: v,
-            a_max: a,
-            j_max: j,
-        }])
+        Self::try_new(
+            &[LimitSet {
+                axes: AxisSet::spatial(),
+                v_max: v,
+                a_max: a,
+                j_max: j,
+            }],
+            N_SPATIAL,
+        )
         .expect("norm_all: finite positive caps")
     }
 
     #[must_use]
     pub fn mvc_b(&self, c_prime: &[f64; 3], floor: f64) -> f64 {
         let mut bound = f64::INFINITY;
-        for s in self.sets() {
+        for (_, s) in self.spatial_sets() {
             if !s.v_max.is_finite() {
                 continue;
             }
@@ -157,7 +199,7 @@ impl Limits {
 
     fn tan_cap(&self, c_prime: &[f64; 3], floor: f64, cap: fn(&LimitSet) -> f64) -> f64 {
         let mut bound = f64::INFINITY;
-        for s in self.sets() {
+        for (_, s) in self.spatial_sets() {
             let c = cap(s);
             if !c.is_finite() {
                 continue;
@@ -172,18 +214,16 @@ impl Limits {
 
     #[must_use]
     pub fn j_path(&self) -> f64 {
-        self.sets()
-            .iter()
-            .map(|s| s.j_max)
+        self.spatial_sets()
+            .map(|(_, s)| s.j_max)
             .filter(|j| j.is_finite())
             .fold(f64::INFINITY, f64::min)
     }
 
     #[must_use]
     pub fn v_ceiling(&self) -> f64 {
-        self.sets()
-            .iter()
-            .map(|s| s.v_max)
+        self.spatial_sets()
+            .map(|(_, s)| s.v_max)
             .filter(|v| v.is_finite())
             .fold(f64::NEG_INFINITY, f64::max)
     }
@@ -214,14 +254,14 @@ impl Limits {
     #[must_use]
     pub fn with_sets_mapped(&self, f: impl Fn(&LimitSet) -> LimitSet) -> Self {
         let sets: Vec<LimitSet> = self.sets().iter().map(f).collect();
-        Self::try_new(&sets).expect("set mapping preserves validity")
+        Self::try_new(&sets, self.n_axes()).expect("set mapping preserves validity")
     }
 
     #[must_use]
     pub fn with_extra_sets(&self, extra: &[LimitSet]) -> Self {
         let mut sets: Vec<LimitSet> = self.sets().to_vec();
         sets.extend_from_slice(extra);
-        Self::try_new(&sets).expect("appending sets preserves validity")
+        Self::try_new(&sets, self.n_axes()).expect("appending sets preserves validity")
     }
 
     #[must_use]
@@ -232,7 +272,7 @@ impl Limits {
         kappa_floor: f64,
     ) -> f64 {
         let mut bound = f64::INFINITY;
-        for s in self.sets() {
+        for (_, s) in self.spatial_sets() {
             if !s.a_max.is_finite() {
                 continue;
             }
@@ -247,11 +287,13 @@ impl Limits {
 
 #[must_use]
 pub fn restricted_norm(v: &[f64; 3], axes: AxisSet) -> f64 {
+    debug_assert!(axes.is_spatial());
     axes.indices().map(|i| v[i] * v[i]).sum::<f64>().sqrt()
 }
 
 #[must_use]
 pub fn kappa_set(c_prime: &[f64; 3], c_double_prime: &[f64; 3], axes: AxisSet, floor: f64) -> f64 {
+    debug_assert!(axes.is_spatial());
     let mut pp = 0.0;
     let mut pq = 0.0;
     let mut qq = 0.0;

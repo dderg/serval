@@ -12,11 +12,20 @@ fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
 }
 
 fn default_limits() -> temporal::Limits {
-    temporal::Limits::axis_boxes(
+    let mut sets: Vec<temporal::LimitSet> = temporal::Limits::axis_boxes(
         [500.0, 500.0, 500.0],
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
     )
+    .sets()
+    .to_vec();
+    sets.push(temporal::LimitSet {
+        axes: temporal::AxisSet::from_indices(&[3]),
+        v_max: 75.0,
+        a_max: 1500.0,
+        j_max: 3000.0,
+    });
+    temporal::Limits::try_new(&sets, 4).unwrap()
 }
 
 fn default_kernels() -> [Option<PlanShaper>; 4] {
@@ -34,6 +43,8 @@ fn default_kernels() -> [Option<PlanShaper>; 4] {
 
 fn default_input<'a>(segments: &'a [PlanSegment<'a>], safety: SafetyMode) -> PlanInput<'a> {
     PlanInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments,
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         worker_threads: 1,
@@ -63,6 +74,7 @@ fn rejects_negative_initial_v() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -83,6 +95,7 @@ fn rejects_nan_terminal_v() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -103,6 +116,7 @@ fn nonzero_initial_v_produces_chained_profile() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -136,6 +150,7 @@ fn passthrough_on_x_is_valid() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -156,6 +171,7 @@ fn passthrough_on_y_is_valid() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -176,6 +192,7 @@ fn none_on_x_treated_as_passthrough() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -196,6 +213,7 @@ fn all_passthrough_produces_fitted_output() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -214,6 +232,7 @@ fn returns_one_fitted_per_xy_segment() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -233,6 +252,7 @@ fn worst_case_future_segment_durations_monotone() {
             temporal: temporal::multi::SegmentInput {
                 curve: &curve0,
                 limits: default_limits(),
+                followers: &[],
             },
             followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
@@ -241,6 +261,7 @@ fn worst_case_future_segment_durations_monotone() {
             temporal: temporal::multi::SegmentInput {
                 curve: &curve1,
                 limits: default_limits(),
+                followers: &[],
             },
             followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
@@ -279,6 +300,7 @@ fn worst_case_future_is_no_faster_than_terminal_known() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -307,6 +329,7 @@ fn plan_velocity_rejects_accel_at_rest_start() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -325,6 +348,7 @@ fn plan_velocity_rejects_nonfinite_accel() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,

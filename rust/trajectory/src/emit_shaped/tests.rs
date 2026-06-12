@@ -18,11 +18,20 @@ fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
 }
 
 fn default_limits() -> temporal::Limits {
-    temporal::Limits::axis_boxes(
+    let mut sets: Vec<temporal::LimitSet> = temporal::Limits::axis_boxes(
         [500.0, 500.0, 500.0],
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
     )
+    .sets()
+    .to_vec();
+    sets.push(temporal::LimitSet {
+        axes: temporal::AxisSet::from_indices(&[3]),
+        v_max: 75.0,
+        a_max: 1500.0,
+        j_max: 3000.0,
+    });
+    temporal::Limits::try_new(&sets, 4).unwrap()
 }
 
 fn default_shaper_config() -> ShaperConfig {
@@ -91,12 +100,15 @@ fn empty_history_matches_shape_batch_byte_identical() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
+            followers: &[],
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
     let plan_input = PlanInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &plan_segs,
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         worker_threads: 1,
@@ -150,6 +162,8 @@ fn empty_history_matches_shape_batch_byte_identical() {
         feedrate_mm_s: plan_segs[0].feedrate_mm_s,
     }];
     let shape_input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segs,
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         worker_threads: 1,

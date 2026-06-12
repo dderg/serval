@@ -124,6 +124,7 @@ fn replan_limits() -> temporal::Limits {
 
 fn replan_context() -> ReplanContext {
     ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits: replan_limits(),
         kernels: replan_kernels_planshaper(),
         fit_tolerance_mm: 0.005,
@@ -1185,6 +1186,7 @@ fn single_axis_harness(v_max: f64, a_max: f64) -> (ShaperState, ReplanContext) {
     let limits =
         temporal::Limits::axis_boxes([v_max, v_max, v_max], [a_max, a_max, a_max], [100_000.0; 3]);
     let ctx = ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits,
         kernels: [
             Some(PlanShaper::SmoothZv {
@@ -1284,6 +1286,7 @@ fn replan_with_positive_boundary_accel_and_short_first_segment_succeeds() {
 
     let limits = temporal::Limits::axis_boxes([300.0; 3], [5_000.0; 3], [10_000.0; 3]);
     let ctx = ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits,
         kernels: [
             Some(PlanShaper::SmoothZv {
@@ -1349,6 +1352,7 @@ fn corner_context_passthrough() -> ReplanContext {
         [10_000.0; 3],
     );
     ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits,
         kernels: [
             Some(PlanShaper::Passthrough),
@@ -1427,6 +1431,7 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
         [10_000.0; 3],
     );
     let ctx = ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits: tight_limits,
         kernels: [
             Some(PlanShaper::Passthrough),
@@ -1590,4 +1595,31 @@ fn emit_covers_window_starting_after_t_dispatched() {
     state.t_dispatched = (t_split - 0.009).max(0.0);
 
     let _ = emit_partial_window(&mut state);
+}
+
+#[test]
+fn per_segment_limits_tolerates_follower_sets() {
+    let mut sets: Vec<temporal::LimitSet> =
+        temporal::Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
+            .sets()
+            .to_vec();
+    sets.push(temporal::LimitSet {
+        axes: temporal::AxisSet::from_indices(&[3]),
+        v_max: 75.0,
+        a_max: 1500.0,
+        j_max: 3000.0,
+    });
+    let base = temporal::Limits::try_new(&sets, 4).unwrap();
+    let curve = nurbs::VectorNurbs::try_new(
+        1,
+        vec![0.0, 0.0, 1.0, 1.0],
+        vec![[0.0, 0.0, 0.0], [0.0, 0.0, 10.0]],
+    )
+    .unwrap();
+    let limits = super::state::per_segment_limits(&curve, &base, 15.0);
+    let (_, follower_set) = limits.follower_sets().next().unwrap();
+    assert_eq!(
+        follower_set.j_max, 3000.0,
+        "follower jerk cap must not be relaxed by spatial inactivity"
+    );
 }

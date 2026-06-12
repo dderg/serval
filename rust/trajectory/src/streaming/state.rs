@@ -70,6 +70,9 @@ impl ShaperState {
         new_segment: CubicSegment,
         ctx: &ReplanContext,
     ) -> Result<ReplanReport, ShapeError> {
+        if new_segment.virtual_path_mm.is_some() {
+            return Err(ShapeError::VirtualPathUnrouted);
+        }
         let max_h = self.axes.iter().map(|a| a.h).fold(0.0_f64, f64::max);
 
         let t_freeze =
@@ -142,6 +145,7 @@ impl ShaperState {
                         &ctx.limits,
                         m.segment.feedrate_mm_s,
                     ),
+                    followers: &[],
                 },
                 followers: &m.segment.followers,
                 feedrate_mm_s: m.segment.feedrate_mm_s,
@@ -163,6 +167,7 @@ impl ShaperState {
             (initial_v, initial_a, start_d2_override)
         };
 
+        let follower_history = self.follower_history_at(t_freeze, max_h, &self.uncommitted_moves);
         let plan_input = PlanInput {
             segments: &plan_segments,
             grid_strategy: ctx.grid_strategy,
@@ -175,6 +180,8 @@ impl ShaperState {
             initial_a,
             terminal_v: 0.0,
             safety_mode: ctx.safety_mode,
+            follower_pa: ctx.follower_pa,
+            follower_history: follower_history.as_ref(),
             start_d2_override,
         };
 
@@ -334,6 +341,36 @@ impl ShaperState {
             nurbs::eval::eval(&d2, t)
         });
         Some(accel)
+    }
+
+    /// Realized per-axis velocities over `[t_freeze - max_h, t_freeze]` from
+    /// the retained shaped pieces, for the shaper window's left edge. `None`
+    /// when no kernel is active or no uncommitted segment carries followers;
+    /// all-zero samples before any motion exists (cold start at rest).
+    fn follower_history_at(
+        &self,
+        t_freeze: f64,
+        max_h: f64,
+        uncommitted: &VecDeque<UncommittedMove>,
+    ) -> Option<temporal::FollowerHistory> {
+        const HISTORY_SAMPLES: usize = 32;
+        if max_h <= 0.0 || uncommitted.iter().all(|m| m.segment.followers.is_empty()) {
+            return None;
+        }
+        let dt = max_h / HISTORY_SAMPLES as f64;
+        let mut axis_velocity: [Vec<f64>; 3] = Default::default();
+        for m in 0..HISTORY_SAMPLES {
+            let tau = t_freeze - (m as f64 + 0.5) * dt;
+            for (axis, out) in axis_velocity.iter_mut().enumerate() {
+                let v = if tau >= 0.0 {
+                    self.axis_velocity_at(axis, tau).unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                out.push(v);
+            }
+        }
+        Some(temporal::FollowerHistory { dt, axis_velocity })
     }
 
     pub(crate) fn read_path_speed_at(&self, t: f64, fallback: f64) -> f64 {
@@ -549,6 +586,7 @@ fn try_rung2(
             temporal: temporal::multi::SegmentInput {
                 curve: &m.segment.xyz,
                 limits: per_segment_limits(&m.segment.xyz, &ctx.limits, m.segment.feedrate_mm_s),
+                followers: &[],
             },
             followers: &m.segment.followers,
             feedrate_mm_s: m.segment.feedrate_mm_s,
@@ -580,6 +618,8 @@ fn try_rung2(
         initial_a: 0.0,
         terminal_v: 0.0,
         safety_mode: ctx.safety_mode,
+        follower_pa: ctx.follower_pa,
+        follower_history: None,
         start_d2_override: None,
     };
 
@@ -623,6 +663,7 @@ fn try_rung3(
         temporal: temporal::multi::SegmentInput {
             curve: &seg.segment.xyz,
             limits: per_segment_limits(&seg.segment.xyz, &ctx.limits, seg.segment.feedrate_mm_s),
+            followers: &[],
         },
         followers: &seg.segment.followers,
         feedrate_mm_s: seg.segment.feedrate_mm_s,
@@ -640,6 +681,8 @@ fn try_rung3(
         initial_a: 0.0,
         terminal_v: 0.0,
         safety_mode: ctx.safety_mode,
+        follower_pa: ctx.follower_pa,
+        follower_history: None,
         start_d2_override: None,
     };
 
@@ -821,7 +864,7 @@ fn boundary_path_speed_cap(seg: &PlanSegment<'_>) -> f64 {
     seg.temporal.limits.mvc_b(&unit_tan, 1e-12).sqrt()
 }
 
-fn per_segment_limits(
+pub(crate) fn per_segment_limits(
     curve: &nurbs::VectorNurbs<f64, 3>,
     base: &temporal::Limits,
     feedrate_mm_s: f64,
@@ -848,14 +891,15 @@ fn per_segment_limits(
     let chord_len = (span[0] * span[0] + span[1] * span[1] + span[2] * span[2]).sqrt();
 
     let set_is_inactive = |axes: temporal::AxisSet| {
-        axes.indices()
-            .all(|ax| span[ax] <= AXIS_INACTIVE_SPAN_EPS_MM)
+        axes.is_spatial()
+            && axes
+                .indices()
+                .all(|ax| span[ax] <= AXIS_INACTIVE_SPAN_EPS_MM)
     };
     let max_active_j = base
-        .sets()
-        .iter()
-        .filter(|s| !set_is_inactive(s.axes) && s.j_max.is_finite())
-        .map(|s| s.j_max)
+        .spatial_sets()
+        .filter(|(_, s)| !set_is_inactive(s.axes) && s.j_max.is_finite())
+        .map(|(_, s)| s.j_max)
         .fold(0.0_f64, f64::max);
 
     let mut limits = *base;
@@ -872,7 +916,7 @@ fn per_segment_limits(
 
     if feedrate_mm_s > 0.0 && chord_len > AXIS_INACTIVE_SPAN_EPS_MM {
         limits = limits.with_extra_sets(&[temporal::LimitSet {
-            axes: temporal::AxisSet::all(),
+            axes: temporal::AxisSet::spatial(),
             v_max: feedrate_mm_s,
             a_max: f64::INFINITY,
             j_max: f64::INFINITY,

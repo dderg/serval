@@ -1,6 +1,6 @@
 use crate::topp::chain::ChainGrid;
 use crate::topp::solver::SolverResult;
-use crate::{BindingConstraint, Limits, restricted_norm};
+use crate::{BindingConstraint, FollowerDemand, Limits, restricted_norm};
 
 /// 0.2% feasibility margin for velocity / accel / centripetal.
 pub(crate) const EPS_FEAS: f64 = 2e-3;
@@ -32,7 +32,9 @@ struct PointInputs<'a> {
     s_dot: f64,
     s_ddot: f64,
     s_dddot: f64,
+    s_ddddot: f64,
     limits: &'a Limits,
+    followers: &'a [FollowerDemand],
 }
 
 struct PointRatios {
@@ -64,7 +66,7 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
 
     let lim = p.limits;
     let mut entries: Vec<(f64, BindingConstraint)> = Vec::with_capacity(3 * lim.sets().len());
-    for (set_idx, set) in lim.sets().iter().enumerate() {
+    for (set_idx, set) in lim.spatial_sets() {
         if set.v_max.is_finite() {
             entries.push((
                 restricted_norm(&vel, set.axes) / set.v_max,
@@ -72,7 +74,7 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
             ));
         }
     }
-    for (set_idx, set) in lim.sets().iter().enumerate() {
+    for (set_idx, set) in lim.spatial_sets() {
         if set.a_max.is_finite() {
             entries.push((
                 restricted_norm(&accel, set.axes) / set.a_max,
@@ -80,12 +82,60 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
             ));
         }
     }
-    for (set_idx, set) in lim.sets().iter().enumerate() {
+    for (set_idx, set) in lim.spatial_sets() {
         if set.j_max.is_finite() {
             entries.push((
                 restricted_norm(&jerk, set.axes) / set.j_max,
                 BindingConstraint::JerkNorm { set: set_idx },
             ));
+        }
+    }
+    for f in p.followers {
+        let r = f.ratio.abs();
+        let k = f.pa_k;
+        for (set_idx, set) in lim.follower_sets() {
+            if !set.axes.contains(f.axis) {
+                continue;
+            }
+            if k == 0.0 {
+                if set.v_max.is_finite() {
+                    entries.push((
+                        r * p.s_dot / set.v_max,
+                        BindingConstraint::Velocity { set: set_idx },
+                    ));
+                }
+                if set.a_max.is_finite() {
+                    entries.push((
+                        r * p.s_ddot.abs() / set.a_max,
+                        BindingConstraint::AccelNorm { set: set_idx },
+                    ));
+                }
+                if set.j_max.is_finite() {
+                    entries.push((
+                        r * p.s_dddot.abs() / set.j_max,
+                        BindingConstraint::JerkNorm { set: set_idx },
+                    ));
+                }
+            } else {
+                if set.v_max.is_finite() {
+                    entries.push((
+                        r * (p.s_dot + k * p.s_ddot).abs() / set.v_max,
+                        BindingConstraint::PaVelocity { set: set_idx },
+                    ));
+                }
+                if set.a_max.is_finite() {
+                    entries.push((
+                        r * (p.s_ddot + k * p.s_dddot).abs() / set.a_max,
+                        BindingConstraint::PaAccel { set: set_idx },
+                    ));
+                }
+                if set.j_max.is_finite() {
+                    entries.push((
+                        r * (p.s_dddot + k * p.s_ddddot).abs() / set.j_max,
+                        BindingConstraint::PaJerk { set: set_idx },
+                    ));
+                }
+            }
         }
     }
 
@@ -99,7 +149,13 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
             worst_ratio = ratio;
             worst_tag = tag;
         }
-        if matches!(tag, BindingConstraint::JerkNorm { .. }) {
+        if matches!(
+            tag,
+            BindingConstraint::JerkNorm { .. }
+                | BindingConstraint::PaJerk { .. }
+                | BindingConstraint::PaVelocity { .. }
+                | BindingConstraint::PaAccel { .. }
+        ) {
             if ratio > max_jerk {
                 max_jerk = ratio;
             }
@@ -126,6 +182,7 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
 /// primary arrays; the dual pass is what enforces the right side.
 pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyReport {
     let n = chain.n_points();
+    let has_pa = chain.followers.iter().flatten().any(|f| f.pa_k != 0.0);
     debug_assert_eq!(result.b.len(), n);
     debug_assert_eq!(result.a.len(), n);
 
@@ -139,6 +196,14 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             worst_non_jerk_ratio: 0.0,
         };
     }
+
+    let windows = if chain.has_active_windows() {
+        Some(crate::topp::follower::build_follower_windows(
+            chain, &result.b,
+        ))
+    } else {
+        None
+    };
 
     let mut binding_per_grid: Vec<BindingConstraint> = Vec::with_capacity(n);
     let mut point_worst_ratio: Vec<f64> = Vec::with_capacity(n);
@@ -154,6 +219,17 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         let s_dot = b_i.max(0.0).sqrt();
         let s_ddot = a_i;
         let s_dddot = crate::topp::stencil::s_dddot_at_weights(&result.b, i, &chain.h_intervals);
+        let s_ddddot = if has_pa {
+            crate::topp::stencil::s_ddddot_at_weights(
+                &result.b,
+                a_i,
+                i,
+                &chain.s,
+                &chain.h_intervals,
+            )
+        } else {
+            0.0
+        };
 
         let g = &chain.geom[i];
         let pr = ratios_at(&PointInputs {
@@ -163,9 +239,29 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             s_dot,
             s_ddot,
             s_dddot,
+            s_ddddot,
             limits: chain.limits_at(i),
+            followers: if windows.is_some() {
+                &[]
+            } else {
+                chain.followers_at(i)
+            },
         });
 
+        let mut pr = pr;
+        if let Some(w) = &windows {
+            for d in crate::topp::follower::windowed_demands_at(w, chain, &result.b, &result.a, i) {
+                let ratio = d.value / d.cap;
+                if ratio > pr.max_jerk {
+                    pr.max_jerk = ratio;
+                }
+                if ratio > pr.worst_ratio {
+                    pr.worst_ratio = ratio;
+                    pr.worst_tag = windowed_tag(&d);
+                }
+            }
+        }
+        let pr = pr;
         let final_tag = if (i == 0 || i == n - 1) && b_i.abs() < BOUNDARY_B_TOL {
             BindingConstraint::Boundary
         } else {
@@ -194,6 +290,17 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         let s_dot = b_i.max(0.0).sqrt();
         let s_ddot = result.a[i];
         let s_dddot = crate::topp::stencil::s_dddot_at_weights(&result.b, i, &chain.h_intervals);
+        let s_ddddot = if has_pa {
+            crate::topp::stencil::s_ddddot_at_weights(
+                &result.b,
+                s_ddot,
+                i,
+                &chain.s,
+                &chain.h_intervals,
+            )
+        } else {
+            0.0
+        };
 
         let pr = ratios_at(&PointInputs {
             cp: jd.geom.c_prime,
@@ -202,7 +309,9 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             s_dot,
             s_ddot,
             s_dddot,
+            s_ddddot,
             limits: &chain.limits[jd.limits_idx],
+            followers: &chain.followers[jd.limits_idx],
         });
 
         if pr.worst_ratio > global_worst_ratio {
@@ -231,6 +340,18 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         feasible,
         worst_jerk_ratio,
         worst_non_jerk_ratio,
+    }
+}
+
+fn windowed_tag(d: &crate::topp::follower::WindowedDemand) -> BindingConstraint {
+    use crate::topp::follower::PaFamily;
+    match (d.family, d.pa) {
+        (PaFamily::Velocity, false) => BindingConstraint::Velocity { set: d.set },
+        (PaFamily::Accel, false) => BindingConstraint::AccelNorm { set: d.set },
+        (PaFamily::Jerk, false) => BindingConstraint::JerkNorm { set: d.set },
+        (PaFamily::Velocity, true) => BindingConstraint::PaVelocity { set: d.set },
+        (PaFamily::Accel, true) => BindingConstraint::PaAccel { set: d.set },
+        (PaFamily::Jerk, true) => BindingConstraint::PaJerk { set: d.set },
     }
 }
 

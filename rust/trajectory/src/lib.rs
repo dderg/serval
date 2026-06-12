@@ -20,6 +20,10 @@ pub use streaming::ReplanReport;
 #[derive(Debug)]
 pub struct ShapeBatchInput<'a> {
     pub segments: &'a [ShapeSegmentInput<'a>],
+    /// Pressure-advance gain per axis index; zero = no PA.
+    pub follower_pa: [f64; temporal::MAX_AXES],
+    /// Realized pre-batch per-axis velocity for the shaper window's left edge.
+    pub follower_history: Option<&'a temporal::FollowerHistory>,
     pub grid_strategy: temporal::multi::GridStrategy,
     pub worker_threads: usize,
     pub shaper: ShaperConfig,
@@ -84,6 +88,11 @@ pub struct ShapedSegment {
 pub enum ShapeError {
     #[error("temporal batch error: {0}")]
     TemporalBatch(#[from] temporal::multi::BatchError),
+    #[error(
+        "virtual-path (follower-only) segment reached the live streaming \
+         planner; routing lands with follower emission (plan 4)"
+    )]
+    VirtualPathUnrouted,
     #[error("temporal joining: {0:?}{1}")]
     TemporalJoining(temporal::multi::JoiningStatus, String),
     #[error("segment {index} unsolvable: {status:?}")]

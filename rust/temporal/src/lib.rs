@@ -1,16 +1,33 @@
 pub mod limits;
 pub use limits::{
-    AxisSet, LimitSet, Limits, LimitsError, MAX_AXES, MAX_LIMIT_SETS, kappa_set, restricted_norm,
+    AxisSet, LimitSet, Limits, LimitsError, MAX_AXES, MAX_LIMIT_SETS, N_SPATIAL, kappa_set,
+    restricted_norm,
 };
 
 pub mod topp;
-pub use topp::{ScheduleError, ToleranceMode, schedule_segment, schedule_segment_with_tolerance};
+pub use topp::{
+    ScheduleError, ToleranceMode, schedule_segment, schedule_segment_with_followers,
+    schedule_segment_with_tolerance,
+};
 
 pub mod multi;
 pub use multi::{
     BatchError, BatchInput, BatchOutput, GridStrategy, JoiningStatus, JunctionInfo, SegmentInput,
     plan_batch,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FollowerDemand {
+    pub axis: usize,
+    pub ratio: f64,
+    pub pa_k: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FollowerHistory {
+    pub dt: f64,
+    pub axis_velocity: [Vec<f64>; 3],
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct GridConfig {
@@ -31,6 +48,9 @@ pub enum BindingConstraint {
     Velocity { set: usize },
     AccelNorm { set: usize },
     JerkNorm { set: usize },
+    PaVelocity { set: usize },
+    PaAccel { set: usize },
+    PaJerk { set: usize },
     Boundary,
 }
 

@@ -43,7 +43,7 @@ impl SolverScale {
                 j_max: l.j_max / s,
             })
             .collect();
-        Limits::try_new(&sets).expect("scaling preserves validity")
+        Limits::try_new(&sets, limits.n_axes()).expect("scaling preserves validity")
     }
 
     pub(crate) fn scale_grid(&self, grid: &ArclengthGrid) -> ArclengthGrid {
@@ -144,6 +144,26 @@ impl SolverScale {
                 })
                 .collect(),
             segment_ranges: chain.segment_ranges.clone(),
+            followers: chain.followers.clone(),
+            axis_kernels: chain.axis_kernels.clone(),
+            follower_history: chain.follower_history.as_ref().map(|h| {
+                let mut scaled = h.clone();
+                for axis in &mut scaled.axis_velocity {
+                    for v in axis.iter_mut() {
+                        *v = self.scale_velocity(*v);
+                    }
+                }
+                scaled
+            }),
+            follower_terminal: chain.follower_terminal.as_ref().map(|h| {
+                let mut scaled = h.clone();
+                for axis in &mut scaled.axis_velocity {
+                    for v in axis.iter_mut() {
+                        *v = self.scale_velocity(*v);
+                    }
+                }
+                scaled
+            }),
             inter_geom: chain
                 .inter_geom
                 .iter()

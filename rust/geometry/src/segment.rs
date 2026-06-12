@@ -42,6 +42,9 @@ pub struct CubicSegment {
     pub feedrate_mm_s: f64,
     pub source: SourceRange,
     pub split_info: Option<SplitInfo>,
+    /// `Some(length)` marks a follower-only move planned on a virtual path of
+    /// this arclength; the xyz curve has zero displacement.
+    pub virtual_path_mm: Option<f64>,
 }
 
 impl CubicSegment {
@@ -108,9 +111,42 @@ impl CubicSegment {
             xyz,
             followers,
             feedrate_mm_s,
+            virtual_path_mm: None,
             source,
             split_info,
         })
+    }
+
+    pub fn try_new_virtual(
+        xyz: VectorNurbs<f64, 3>,
+        followers: Vec<FollowerDemand>,
+        feedrate_mm_s: f64,
+        source: SourceRange,
+        virtual_path_mm: f64,
+    ) -> Result<Self, crate::GeometryError> {
+        if !(virtual_path_mm.is_finite() && virtual_path_mm > 0.0) {
+            return Err(crate::GeometryError::FollowerInvariantViolation {
+                reason: "virtual path length must be finite and positive",
+            });
+        }
+        if followers.is_empty() {
+            return Err(crate::GeometryError::FollowerInvariantViolation {
+                reason: "virtual path requires at least one follower",
+            });
+        }
+        let first = xyz.control_points()[0];
+        let displaced = xyz
+            .control_points()
+            .iter()
+            .any(|p| p.iter().zip(&first).any(|(a, b)| (a - b).abs() > 1e-9));
+        if displaced {
+            return Err(crate::GeometryError::FollowerInvariantViolation {
+                reason: "virtual path xyz curve must have zero displacement",
+            });
+        }
+        let mut segment = Self::try_new(xyz, followers, feedrate_mm_s, source, None)?;
+        segment.virtual_path_mm = Some(virtual_path_mm);
+        Ok(segment)
     }
 }
 

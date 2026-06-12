@@ -32,12 +32,15 @@ fn jog_50mm_at_100mms_with_live_limits() {
         temporal: SegmentInput {
             curve: &curve,
             limits: live_limits(),
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,
@@ -94,12 +97,15 @@ fn jog_50mm_with_higher_scv() {
         temporal: SegmentInput {
             curve: &curve,
             limits,
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,
@@ -152,11 +158,14 @@ fn probe_with_feedrate(feedrate: f64, dist_mm: f64) -> f64 {
         temporal: SegmentInput {
             curve: &curve,
             limits,
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: feedrate,
     }];
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,
@@ -212,12 +221,15 @@ fn jog_50mm_with_z_jmax_uncapped() {
         temporal: SegmentInput {
             curve: &curve,
             limits,
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,
@@ -279,12 +291,15 @@ fn jog_50mm_low_accel_baseline() {
         temporal: SegmentInput {
             curve: &curve,
             limits,
+            followers: &[],
         },
         followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,

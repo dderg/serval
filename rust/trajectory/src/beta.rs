@@ -315,6 +315,27 @@ fn run_one_iteration(
     planning_a_max: &[[f64; 3]],
     kernels: &AxisKernels,
 ) -> Result<BetaIterResult, ShapeError> {
+    let follower_storage: Vec<Vec<temporal::FollowerDemand>> = input
+        .segments
+        .iter()
+        .map(|seg| {
+            seg.followers
+                .iter()
+                .map(|f| temporal::FollowerDemand {
+                    axis: f.axis_index,
+                    ratio: f.ratio,
+                    pa_k: input.follower_pa[f.axis_index],
+                })
+                .collect()
+        })
+        .collect();
+    let any_followers = follower_storage.iter().any(|f| !f.is_empty());
+    let shaping = temporal::multi::BatchShaping {
+        axis_kernels: [kernels.x.clone(), kernels.y.clone(), kernels.z.clone()],
+        follower_history: input.follower_history.cloned(),
+    };
+    let shaping_active = any_followers
+        && (shaping.axis_kernels.iter().any(Option::is_some) || shaping.follower_history.is_some());
     let run_segments: Vec<temporal::multi::SegmentInput<'_>> = input
         .segments
         .iter()
@@ -329,6 +350,9 @@ fn run_one_iteration(
                 }
             }
             let derated_limits = orig.limits.with_sets_mapped(|set| {
+                if set.axes.is_follower() {
+                    return *set;
+                }
                 let scale = set
                     .axes
                     .indices()
@@ -344,12 +368,14 @@ fn run_one_iteration(
             temporal::multi::SegmentInput {
                 curve: orig.curve,
                 limits: derated_limits,
+                followers: &follower_storage[flat_idx],
             }
         })
         .collect();
 
     let batch_input = temporal::multi::BatchInput {
         segments: &run_segments,
+        shaping: shaping_active.then_some(&shaping),
         grid_strategy: input.grid_strategy,
         worker_threads: input.worker_threads,
         initial_velocity: input.initial_v,

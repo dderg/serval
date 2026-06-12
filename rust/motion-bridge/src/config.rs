@@ -221,14 +221,7 @@ impl PlannerConfig {
             if all_spatial {
                 sets.push(section.to_set()?);
             } else if all_follower {
-                if section.max_velocity.is_none()
-                    && section.max_accel.is_none()
-                    && section.max_jerk.is_none()
-                {
-                    return Err(LimitConfigError::EmptySection {
-                        section: section.name.clone(),
-                    });
-                }
+                sets.push(section.to_set()?);
                 for &i in &section.axes {
                     if section.max_velocity.is_some_and(f64::is_finite) {
                         follower_velocity_covered[i] = true;
@@ -258,7 +251,7 @@ impl PlannerConfig {
         if self.runtime_caps.velocity.is_some() || self.runtime_caps.accel.is_some() {
             let a = self.runtime_caps.accel.unwrap_or(f64::INFINITY);
             sets.push(temporal::LimitSet {
-                axes: temporal::AxisSet::all(),
+                axes: temporal::AxisSet::spatial(),
                 v_max: self.runtime_caps.velocity.unwrap_or(f64::INFINITY),
                 a_max: a,
                 j_max: if a.is_finite() {
@@ -268,7 +261,10 @@ impl PlannerConfig {
                 },
             });
         }
-        Ok(temporal::Limits::try_new(&sets)?)
+        Ok(temporal::Limits::try_new(
+            &sets,
+            n_axes.max(temporal::N_SPATIAL),
+        )?)
     }
 }
 

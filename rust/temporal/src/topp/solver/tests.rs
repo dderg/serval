@@ -155,7 +155,7 @@ fn find_jerk_violators_chain_ratio_has_no_spurious_h_factor() {
     let j_path = 100.0_f64;
     let b = vec![401.375_f64, 400.0, 401.375];
     let h_intervals = vec![h, h];
-    let violators = find_jerk_violators_chain(&b, &h_intervals, j_path);
+    let violators = find_jerk_violators_chain(&b, &h_intervals, &[j_path; 3]);
     assert_eq!(
         violators.len(),
         1,
@@ -368,15 +368,15 @@ fn damp_scale_for_axis_feasibility_achieves_target() {
         status: SolverStatus::Solved,
     };
 
-    let initial_ratio = max_axis_ratio_chain(&result, &chain);
+    let initial_ratio = max_axis_ratio_chain(&result, &chain, None);
     assert!(
         initial_ratio > SLP9_DAMP_TARGET_RATIO,
         "test requires initial_ratio > {SLP9_DAMP_TARGET_RATIO}, got {initial_ratio}",
     );
 
-    let s = damp_scale_for_axis_feasibility(&result, &chain, initial_ratio);
+    let s = damp_scale_for_axis_feasibility(&result, &chain, None, initial_ratio);
     let damped = damp_interior_a(&result, s);
-    let final_ratio = max_axis_ratio_chain(&damped, &chain);
+    let final_ratio = max_axis_ratio_chain(&damped, &chain, None);
 
     assert!(
         final_ratio <= SLP9_DAMP_TARGET_RATIO,

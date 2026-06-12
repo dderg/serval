@@ -22,7 +22,7 @@ pub struct ConstraintBundle {
     pub b_max_cent: Vec<f64>,
 
     pub h_intervals: Vec<f64>,
-    pub j_path: f64,
+    pub j_path_at: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -237,6 +237,27 @@ pub fn build_chain(
                 j_env = j_env.max(j_tan_i);
             }
         }
+        if !(a_env.is_finite() && j_env.is_finite()) {
+            for i in 0..n {
+                let lim = chain.limits_at(i);
+                for f in chain.followers_at(i) {
+                    let r = f.ratio.abs();
+                    let mut a_cap = f64::INFINITY;
+                    let mut j_cap = f64::INFINITY;
+                    for (_, set) in lim.follower_sets() {
+                        if !set.axes.contains(f.axis) {
+                            continue;
+                        }
+                        a_cap = a_cap.min(set.a_max / r);
+                        j_cap = j_cap.min(set.j_max / r);
+                    }
+                    if a_cap.is_finite() && j_cap.is_finite() {
+                        a_env = a_env.max(a_cap);
+                        j_env = j_env.max(j_cap);
+                    }
+                }
+            }
+        }
         debug_assert!(
             a_env > 0.0 && j_env > 0.0,
             "A_env/J_env must be positive — corrupt grid tangents"
@@ -293,12 +314,26 @@ pub fn build_chain(
 
     let n_vars = off_x2 + n_interior;
 
-    let j_path = chain
-        .limits
-        .iter()
-        .map(Limits::j_path)
-        .fold(f64::INFINITY, f64::min);
-    debug_assert!(j_path > 0.0, "jerk limit must be positive");
+    let j_path_at: Vec<f64> = (0..n)
+        .map(|i| {
+            let mut cap = chain.limits_at(i).j_path();
+            for f in chain.followers_at(i) {
+                if f.pa_k != 0.0 {
+                    continue;
+                }
+                for (_, set) in chain.limits_at(i).follower_sets() {
+                    if set.axes.contains(f.axis) && set.j_max.is_finite() {
+                        cap = cap.min(set.j_max / f.ratio.abs());
+                    }
+                }
+            }
+            cap
+        })
+        .collect();
+    debug_assert!(
+        j_path_at.iter().all(|&j| j > 0.0),
+        "jerk limit must be positive"
+    );
 
     let mut cones: Vec<(Cone, usize)> = Vec::new();
     let mut a_rows: Vec<Vec<f64>> = Vec::new();
@@ -379,7 +414,7 @@ pub fn build_chain(
                              a_rows: &mut Vec<Vec<f64>>,
                              b_rhs: &mut Vec<f64>,
                              count: &mut usize| {
-            for set in lim.sets() {
+            for (_, set) in lim.spatial_sets() {
                 if !set.v_max.is_finite() {
                     continue;
                 }
@@ -421,6 +456,16 @@ pub fn build_chain(
     }
 
     {
+        let count =
+            crate::topp::follower::emit_base_follower_rows(chain, off_b, off_a, |entries, rhs| {
+                push_row(&mut a_rows, &mut b_rhs, entries, rhs)
+            });
+        if count > 0 {
+            cones.push((Cone::Nonneg, count));
+        }
+    }
+
+    {
         const BLOCK_D_SAFETY: f64 = 0.1;
         let mut nonneg_run = 0_usize;
         let emit_accel = |i: usize,
@@ -432,7 +477,7 @@ pub fn build_chain(
                           nonneg_run: &mut usize| {
             let b_cap_i = b_max_cent[i].min(b_cap);
             let a_cap_i = b_cap_i / (2.0 * h_bar(i));
-            for set in lim.sets() {
+            for (_, set) in lim.spatial_sets() {
                 if !set.a_max.is_finite() {
                     continue;
                 }
@@ -615,7 +660,7 @@ pub fn build_chain(
             let i = k + 1;
             let t_idx = off_t + k;
             let w = crate::topp::stencil::b_dd_weights(h[i - 1], h[i]);
-            let c = h_bar(i) / (2.0 * j_path);
+            let c = h_bar(i) / (2.0 * j_path_at[k + 1]);
             for sign in [1.0_f64, -1.0] {
                 push_row(
                     &mut a_rows,
@@ -716,7 +761,7 @@ pub fn build_chain(
         objective,
         b_max_cent,
         h_intervals: chain.h_intervals.clone(),
-        j_path,
+        j_path_at,
     })
 }
 

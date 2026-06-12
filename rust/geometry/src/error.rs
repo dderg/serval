@@ -52,9 +52,6 @@ pub enum Fatal {
         line_no: u32,
         gcode_kind: &'static str,
     },
-    FollowerOnlyMoveUnsupported {
-        line_no: u32,
-    },
 }
 
 #[derive(Debug)]
@@ -79,7 +76,6 @@ pub enum GeometryError {
     UnsupportedGcode { gcode_kind: &'static str },
     NotSinglePieceCubic { reason: &'static str },
     FollowerInvariantViolation { reason: &'static str },
-    FollowerOnlyMoveUnsupported,
     ZeroMotion,
 }
 

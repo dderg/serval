@@ -49,7 +49,7 @@ fn runtime_caps_append_an_all_axis_overlay() {
     let overlay = lims.sets().last().unwrap();
     assert_eq!(overlay.v_max, 100.0);
     assert_eq!(overlay.a_max, 1000.0);
-    assert_eq!(overlay.axes, temporal::AxisSet::all());
+    assert_eq!(overlay.axes, temporal::AxisSet::spatial());
 }
 
 #[test]
@@ -260,4 +260,33 @@ fn follower_axis_without_limit_coverage_is_an_error() {
         cfg.to_temporal_limits().unwrap_err(),
         LimitConfigError::NoFollowerCoverage { .. }
     ));
+}
+
+#[test]
+fn follower_sections_become_temporal_sets() {
+    let reg = AxisRegistry::try_new(vec![
+        decl("x", &[]),
+        decl("y", &[]),
+        decl("z", &[]),
+        decl("e", &["x", "y", "z"]),
+    ])
+    .unwrap();
+    let mut cfg = PlannerConfig::default();
+    cfg.axis_registry = reg;
+    cfg.limit_sections.push(LimitSection {
+        name: "extruder".into(),
+        axes: vec![3],
+        max_velocity: Some(75.0),
+        max_accel: Some(1500.0),
+        max_jerk: None,
+    });
+    let lims = cfg.to_temporal_limits().unwrap();
+    assert_eq!(lims.n_axes(), 4);
+    let followers: Vec<_> = lims.follower_sets().collect();
+    assert_eq!(followers.len(), 1);
+    let (_, set) = followers[0];
+    assert!(set.axes.contains(3));
+    assert_eq!(set.v_max, 75.0);
+    assert_eq!(set.a_max, 1500.0);
+    assert_eq!(set.j_max, 3000.0);
 }

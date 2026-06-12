@@ -22,7 +22,7 @@ pub struct ReplanReport {
 
 mod decel_finder;
 mod emit;
-mod state;
+pub(crate) mod state;
 
 #[cfg(test)]
 mod tests;
@@ -61,6 +61,8 @@ pub struct ReplanContext {
     /// Fallback path speed at `t_dispatched` when the cursor is outside the `pieces` domain.
     pub fallback_initial_v: f64,
     pub safety_mode: SafetyMode,
+    /// Pressure-advance gain per axis index; zero = no PA.
+    pub follower_pa: [f64; temporal::MAX_AXES],
 }
 
 #[derive(Debug, Clone, Copy)]
