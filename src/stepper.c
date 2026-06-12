@@ -18,6 +18,8 @@
 
 struct stepper {
     struct gpio_out step_pin, dir_pin;
+    uint32_t step_pulse_ticks;
+    uint8_t step_both_edge, step_idle_level;
     struct trsync_signal stop_signal;
 };
 
@@ -39,7 +41,11 @@ command_config_stepper(uint32_t *args)
         runtime_diag_progress(0xCD, args[0] & 0xFFu, exp_lo);
     }
     struct stepper *s = oid_alloc(args[0], command_config_stepper, sizeof(*s));
-    s->step_pin = gpio_out_setup(args[1], 0);
+    int_fast8_t invert_step = (int_fast8_t)args[3];
+    s->step_both_edge = invert_step < 0;
+    s->step_idle_level = invert_step > 0;
+    s->step_pulse_ticks = args[4];
+    s->step_pin = gpio_out_setup(args[1], s->step_idle_level);
     s->dir_pin = gpio_out_setup(args[2], 0);
 }
 DECL_COMMAND(command_config_stepper, "config_stepper oid=%c step_pin=%c"
@@ -56,7 +62,7 @@ stepper_stop(struct trsync_signal *tss, uint8_t reason)
 {
     struct stepper *s = container_of(tss, struct stepper, stop_signal);
     gpio_out_write(s->dir_pin, 0);
-    gpio_out_write(s->step_pin, 0);
+    gpio_out_write(s->step_pin, s->step_idle_level);
 }
 
 void
@@ -92,6 +98,12 @@ command_diag_stepper_buzz(uint32_t *args)
     uint32_t deadline = timer_read_time();
     for (uint32_t i = 0; i < step_count; i++) {
         gpio_out_toggle(s->step_pin);
+        if (!s->step_both_edge) {
+            uint32_t fall_deadline = timer_read_time() + s->step_pulse_ticks;
+            while (timer_is_before(timer_read_time(), fall_deadline))
+                ;
+            gpio_out_toggle(s->step_pin);
+        }
         deadline += period_ticks;
         while (timer_is_before(timer_read_time(), deadline))
             ;
@@ -126,6 +138,8 @@ struct runtime_motor_stepper {
 static struct runtime_motor_stepper runtime_motor_steppers[RUNTIME_MOTOR_COUNT]
                                                           [RUNTIME_MAX_STEPPERS_PER_MOTOR];
 static uint8_t runtime_motor_stepper_count[RUNTIME_MOTOR_COUNT];
+static uint8_t runtime_motor_both_edge[RUNTIME_MOTOR_COUNT];
+static uint32_t runtime_motor_pulse_ticks[RUNTIME_MOTOR_COUNT];
 static int8_t runtime_motor_last_dir[RUNTIME_MOTOR_COUNT] = { -1, -1, -1, -1 };
 
 volatile uint32_t runtime_emit_calls __attribute__((used, externally_visible));
@@ -206,11 +220,23 @@ command_kalico_configure_axis(uint32_t *args)
     if (rc != 0)
         shutdown("configure_axis rejected by runtime");
 
+    uint8_t motor_both_edge = stepper_count ? staged[0].stepper->step_both_edge
+                                            : 1;
+    uint32_t motor_pulse_ticks = 0;
+    for (uint8_t i = 0; i < stepper_count; i++) {
+        if (staged[i].stepper->step_both_edge != motor_both_edge)
+            shutdown("configure_axis mixed step edge modes on one axis");
+        if (staged[i].stepper->step_pulse_ticks > motor_pulse_ticks)
+            motor_pulse_ticks = staged[i].stepper->step_pulse_ticks;
+    }
+
     runtime_motor_stepper_count[axis_idx] = stepper_count;
     for (uint8_t i = 0; i < stepper_count; i++) {
         runtime_motor_steppers[axis_idx][i].stepper = staged[i].stepper;
         runtime_motor_steppers[axis_idx][i].invert_dir = staged[i].invert_dir;
     }
+    runtime_motor_both_edge[axis_idx] = motor_both_edge;
+    runtime_motor_pulse_ticks[axis_idx] = motor_pulse_ticks;
     runtime_motor_last_dir[axis_idx] = -1;
     (void)extrusion_bits;
 
@@ -394,6 +420,8 @@ runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps)
 
     extern uint32_t runtime_cyccnt_read(void);
     uint32_t last = step_last_edge_dwt[motor_idx];
+    uint8_t both_edge = runtime_motor_both_edge[motor_idx];
+    uint32_t pulse_ticks = runtime_motor_pulse_ticks[motor_idx];
 
     for (uint32_t i = 0; i < count; i++) {
         uint32_t now = runtime_cyccnt_read();
@@ -405,6 +433,14 @@ runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps)
         }
         for (uint8_t j = 0; j < cnt; j++)
             gpio_out_toggle_noirq(runtime_motor_steppers[motor_idx][j].stepper->step_pin);
+        if (!both_edge) {
+            uint32_t fall_at = runtime_cyccnt_read() + pulse_ticks;
+            while ((int32_t)(runtime_cyccnt_read() - fall_at) < 0)
+                ;
+            for (uint8_t j = 0; j < cnt; j++)
+                gpio_out_toggle_noirq(
+                    runtime_motor_steppers[motor_idx][j].stepper->step_pin);
+        }
         last = runtime_cyccnt_read();
     }
 
