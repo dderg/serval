@@ -30,6 +30,11 @@ void runtime_emit_step_pulses(uint8_t axis_idx, int32_t n_steps) {
 uint32_t stats_send_time = 0u;
 uint32_t stats_send_time_high = 0u;
 uint64_t runtime_widened_host_clock(void) { return 0ULL; }
+void kalico_log_emit(uint8_t level, uint8_t subsystem, uint16_t event,
+                     uint16_t code, uint32_t arg0, uint32_t arg1) {
+    (void)level; (void)subsystem; (void)event;
+    (void)code; (void)arg0; (void)arg1;
+}
 
 int main(void) {
     KalicoRuntime *h = runtime_handle_create();

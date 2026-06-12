@@ -57,6 +57,7 @@ pub mod exports {
 
     unsafe extern "C" {
         fn runtime_cyccnt_read() -> u32;
+        fn kalico_log_emit(level: u8, subsystem: u8, event: u16, code: u16, arg0: u32, arg1: u32);
     }
 
     #[unsafe(no_mangle)]
@@ -928,7 +929,23 @@ pub mod exports {
             if !axis.ring.is_configured() {
                 return KALICO_ERR_INVALID_ARG;
             }
-            axis.ring.commit_head(new_head);
+            match axis.ring.commit_head(new_head) {
+                runtime::piece_ring::CommitOutcome::Applied
+                | runtime::piece_ring::CommitOutcome::Stale => {}
+                runtime::piece_ring::CommitOutcome::Overcommit => {
+                    const LOG_LEVEL_ERROR: u8 = 3;
+                    const CODE_FLAG_OVERCOMMIT: u16 = 0x100;
+                    kalico_log_emit(
+                        LOG_LEVEL_ERROR,
+                        runtime::log_codes::SUBSYSTEM_RUNTIME,
+                        runtime::log_codes::EVENT_RUNTIME_RING_STATE,
+                        u16::from(axis_idx) | CODE_FLAG_OVERCOMMIT,
+                        axis.ring.head,
+                        axis.ring.retired,
+                    );
+                    return runtime::error::KALICO_ERR_RING_FULL;
+                }
+            }
         }
         KALICO_OK
     }

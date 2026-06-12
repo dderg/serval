@@ -366,7 +366,9 @@ class MotionBridgeWrapper:
         return self._bridge.submit_move(dx, dy, dz, de, feedrate)
 
     def wait_moves(self):
-        return self._bridge.wait_moves()
+        flush_id = self._bridge.wait_moves_start()
+        while not self._bridge.wait_moves_poll(flush_id):
+            self._reactor.pause(self._reactor.monotonic() + 0.005)
 
     def drain_motion(self):
         return self._bridge.drain_motion()
@@ -382,6 +384,9 @@ class MotionBridgeWrapper:
 
     def set_position(self, x, y, z):
         return self._bridge.set_position(x, y, z, self._reactor.monotonic())
+
+    def motion_drained(self):
+        return self._bridge.motion_drained()
 
     def home_axis_start(
         self,

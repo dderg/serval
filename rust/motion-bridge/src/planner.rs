@@ -186,6 +186,16 @@ impl PlannerHandle {
             .map_err(|_| PlannerError::ChannelClosed)
     }
 
+    pub fn flush_start(
+        &self,
+    ) -> Result<crossbeam_channel::Receiver<Option<Instant>>, PlannerError> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.sender
+            .send(PlannerMsg::Flush { notify: tx })
+            .map_err(|_| PlannerError::ChannelClosed)?;
+        Ok(rx)
+    }
+
     pub fn flush(&self) -> Result<(), PlannerError> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.sender

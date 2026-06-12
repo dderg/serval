@@ -27,30 +27,46 @@ pub fn reconstruct_axis_position(
 ) -> Result<f64, String> {
     let axis_mcu = axis_key.mcu_id;
 
-    let axis_clock = {
+    let (axis_clock, trip_host_secs, host_now_secs) = if endstop_mcu == axis_mcu {
+        (trip_clock, 0.0, 0.0)
+    } else {
         let router_guard = router.lock().unwrap_or_else(|p| p.into_inner());
-        crate::motion_history::clock_between_mcus(
-            &router_guard,
-            crate::types::mcu_handle_from_raw(endstop_mcu),
-            crate::types::mcu_handle_from_raw(axis_mcu),
-            trip_clock,
-        )
-        .map_err(|description| {
-            ReconstructError::ClockUnsynced {
-                description,
-                endstop_mcu,
-                axis_mcu,
-                trip_clock,
-            }
-            .to_string()
-        })?
+        let host_secs = router_guard
+            .clock_to_host_secs(crate::types::mcu_handle_from_raw(endstop_mcu), trip_clock)
+            .ok_or_else(|| {
+                ReconstructError::ClockUnsynced {
+                    description: format!(
+                        "clock_to_host_secs returned None for endstop mcu {endstop_mcu}"
+                    ),
+                    endstop_mcu,
+                    axis_mcu,
+                    trip_clock,
+                }
+                .to_string()
+            })?;
+        let axis_clock = router_guard
+            .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(axis_mcu), host_secs)
+            .map_err(|e| {
+                ReconstructError::ClockUnsynced {
+                    description: format!(
+                        "host_time_to_mcu_clock failed for axis mcu {axis_mcu}: {e:?}"
+                    ),
+                    endstop_mcu,
+                    axis_mcu,
+                    trip_clock,
+                }
+                .to_string()
+            })?;
+        (axis_clock, host_secs, router_guard.host_now_secs())
     };
 
     if axis_clock <= window_start_clock {
         return Err(format!(
             "endstop trip clock {axis_clock} predates this homing move \
              (window starts at {window_start_clock}) — stale trip or \
-             mis-synced clock"
+             mis-synced clock (endstop_mcu={endstop_mcu} trip_clock={trip_clock} \
+             trip_host_secs={trip_host_secs:.6} host_now={host_now_secs:.6} \
+             axis_mcu={axis_mcu})"
         ));
     }
 
