@@ -628,12 +628,27 @@ fn arc_geometry(curve: &VectorNurbs<f64, 3>, at_end: bool) -> ([f64; 3], [f64; 3
 
 Then:
 
-- **Delete the junction-deviation machinery entirely** (it is mainline's SCV/JD transplant — a virtual-rounding pretense that implies infinite jerk at the kink): `sharp_corner_jd_cap`, `V_JD_REVERSAL_FLOOR_MM_S`, `ALPHA_COLLINEAR_THRESHOLD`, `ALPHA_REVERSAL_THRESHOLD`, the `chord_tolerance_mm` parameter of `compute_junction_velocity`, and the `JunctionBindingCap::SharpCornerChord` variant.
-- `JunctionKind::Corner` junctions (tangent disagreement beyond `THETA_FUSE_RAD`, or degenerate tangents) now get `v_junction = 0.0` — a kink is a full stop, with binding tag `JunctionBindingCap::FullStopCorner`. The caps below apply only to `Smooth` junctions.
-- `per_axis_velocity_cap` → `set_velocity_cap(t, limits)`: min over sets with finite v and `‖t_S‖ > 1e-12` of `v_S / ‖t_S‖`.
-- `centripetal_cap` → `set_accel_v_cap(c′, c″, limits)`: min over sets with finite a of `sqrt(a_S / κ_S)` where `κ_S = kappa_set(c′, c″, set.axes, KAPPA_FLOOR)`, skipping `κ_S ≤ KAPPA_FLOOR`; `B_MAX_CENT_CAP.sqrt()` if nothing binds.
-- `cap_v_max`: min over both sides' sets of finite `v_max`.
-- `JunctionBindingCap` variants: `PerAxisVelocity` → `SetVelocity`, `Centripetal` → `SetAccelNorm`, `GlobalVMax` → `MinVMax`, `SharpCornerChord` → `FullStopCorner`. Update consumers (`grep -rn "JunctionBindingCap" rust/`).
+- **Delete the junction-deviation machinery entirely** (it is mainline's SCV/JD transplant — a virtual-rounding pretense that implies infinite jerk at the kink): `sharp_corner_jd_cap`, `V_JD_REVERSAL_FLOOR_MM_S`, `ALPHA_COLLINEAR_THRESHOLD`, `ALPHA_REVERSAL_THRESHOLD`, and the `chord_tolerance_mm` parameter of `compute_junction_velocity`.
+- **Delete the hand-unrolled cap zoo.** A junction velocity is nothing but the pointwise max-velocity bound — the same rows the solver enforces, evaluated at one point. The four named caps collapse to the two `Limits` helpers the constraint builder already uses:
+
+```rust
+let (t_left, cdp_left) = arc_geometry(left, true);
+let (t_right, cdp_right) = arc_geometry(right, false);
+let kind = classify_junction(&t_left, &t_right);
+if kind == JunctionKind::Corner {
+    return JunctionResult { v_junction: 0.0, binding: JunctionBinding::FullStopCorner, ... };
+}
+let b_cap = left_limits
+    .mvc_b(&t_left, 1e-12)
+    .min(right_limits.mvc_b(&t_right, 1e-12))
+    .min(left_limits.b_cent_cap(&t_left, &cdp_left, KAPPA_FLOOR))
+    .min(right_limits.b_cent_cap(&t_right, &cdp_right, KAPPA_FLOOR))
+    .min(B_MAX_CENT_CAP);
+let v_junction = b_cap.sqrt();
+```
+
+  `per_axis_velocity_cap`, `centripetal_cap`, and `cap_v_max` are deleted — the last was a fossil that capped every junction by the slowest axis's `v_max` even when that axis wasn't moving (dominated semantics, "one global number" thinking).
+- **Delete the `JunctionBindingCap` enum.** "Which row won" is the vocabulary `verify.rs` already speaks; junctions report `BindingConstraint` (`Velocity { set }` / `AccelNorm { set }`) plus one junction-only `FullStopCorner` case — define `enum JunctionBinding { Row(BindingConstraint), FullStopCorner }` (or fold `FullStopCorner` into `BindingConstraint` if verify's consumers tolerate it — executor's call, one vocabulary either way). To report which row won, have the min-chain track the binding tag alongside the value (a `(f64, JunctionBinding)` fold, as `min_with_tag` did). Update consumers (`grep -rn "JunctionBindingCap" rust/`).
 
 `kappa_left`/`kappa_right` in `JunctionResult` become `‖c″‖` (numerically identical to the old curvature). Reword the `THETA_FUSE_RAD` doc comment — its "scv impulse budget" justification is gone; the fuse threshold survives purely as a numerical collinearity epsilon.
 
