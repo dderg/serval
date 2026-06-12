@@ -194,5 +194,19 @@ enforces it regardless.
 - End-to-end: kalico-sim scenario — push correction pieces to an idle axis,
   assert only the target stepper's pin toggles and the axis tracker is
   unchanged; assert hard errors when the axis is moving.
-- Bench: Trident (3-motor Z) `Z_TILT_ADJUST` convergence once the consumer
-  lands.
+- Bench, manual: a debug command ships with the bridge API, before any
+  probe consumer —
+
+  ```
+  MOTOR_ADJUST AXIS=Z MOTOR=1 DELTA=2.0 [SPEED=5] [ACCEL=100]
+  ```
+
+  thin wrapper over `adjust_motor`; enables the motors if needed, requires
+  an idle (not necessarily homed) axis. Bench script on the Trident
+  (3-motor Z): `MOTOR_ADJUST ... DELTA=2.0` → exactly one leadscrew turns,
+  the other two stay still, Mainsail's reported Z position does not change;
+  `DELTA=-2.0` returns it. Error paths: issue it mid-move → hard error;
+  bad MOTOR index → hard error. Cross-check via query-logs that the
+  correction-stream start/drain events fired and only the target stepper
+  was driven.
+- Bench: Trident `Z_TILT_ADJUST` convergence once the probe consumer lands.
