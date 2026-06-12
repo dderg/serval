@@ -114,3 +114,42 @@ fn parse_explicit_passthrough_names() {
         Ok(AxisShaper::Passthrough)
     ));
 }
+
+#[test]
+fn overlay_above_config_cannot_raise_limits() {
+    let mut cfg = PlannerConfig::default();
+    cfg.runtime_caps = RuntimeCaps {
+        velocity: Some(10_000.0),
+        accel: Some(1_000_000.0),
+    };
+    let lims = cfg.to_temporal_limits().unwrap();
+    let x_tangent = [1.0, 0.0, 0.0];
+    assert_eq!(lims.mvc_b(&x_tangent, 1e-12), 300.0 * 300.0);
+    assert_eq!(lims.a_tan_cap(&x_tangent, 1e-12), 3000.0);
+}
+
+#[test]
+fn overlay_below_config_tightens() {
+    let mut cfg = PlannerConfig::default();
+    cfg.runtime_caps = RuntimeCaps {
+        velocity: Some(50.0),
+        accel: Some(500.0),
+    };
+    let lims = cfg.to_temporal_limits().unwrap();
+    let x_tangent = [1.0, 0.0, 0.0];
+    assert_eq!(lims.mvc_b(&x_tangent, 1e-12), 50.0 * 50.0);
+    assert_eq!(lims.a_tan_cap(&x_tangent, 1e-12), 500.0);
+}
+
+#[test]
+fn clearing_runtime_caps_restores_config_limits() {
+    let mut cfg = PlannerConfig::default();
+    cfg.runtime_caps = RuntimeCaps {
+        velocity: Some(50.0),
+        accel: Some(500.0),
+    };
+    cfg.runtime_caps = RuntimeCaps::default();
+    let lims = cfg.to_temporal_limits().unwrap();
+    assert_eq!(lims.sets().len(), 2);
+    assert_eq!(lims.mvc_b(&[1.0, 0.0, 0.0], 1e-12), 300.0 * 300.0);
+}
