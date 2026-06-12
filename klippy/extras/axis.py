@@ -22,9 +22,16 @@ class AxisSection:
             a.strip().lower() for a in config.getlist("follows", [])
         ]
         self.motors = [m.strip() for m in config.getlist("motors", [])]
+        self.post_processors = [
+            p.strip() for p in config.getlist("post_processors", [])
+        ]
 
     def get_status(self, eventtime):
-        return {"follows": list(self.follows), "motors": list(self.motors)}
+        return {
+            "follows": list(self.follows),
+            "motors": list(self.motors),
+            "post_processors": list(self.post_processors),
+        }
 
 
 def load_config_prefix(config):
