@@ -34,12 +34,11 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
 }
 
 fn textbook_limits() -> Limits {
-    Limits {
-        v_max: [500.0, 500.0, 500.0],
-        a_max: [5_000.0, 5_000.0, 5_000.0],
-        j_max: [100_000.0, 100_000.0, 100_000.0],
-        a_centripetal_max: 2_500.0,
-    }
+    Limits::axis_boxes(
+        [500.0, 500.0, 500.0],
+        [5_000.0, 5_000.0, 5_000.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    )
 }
 
 fn chain_of_one(grid: ArclengthGrid, limits: Limits) -> ChainGrid {
@@ -76,7 +75,8 @@ fn straight_line_zero_endpoints_builds_ok() {
 #[test]
 fn boundary_above_mvc_returns_boundary_outcome() {
     let mut grid = dummy_straight_grid(5, 10.0);
-    grid.kappa = vec![0.05; 5];
+    grid.kappa = vec![0.1; 5];
+    grid.c_double_prime = vec![[0.0, 0.1, 0.0]; 5];
     let limits = textbook_limits();
     let chain = chain_of_one(grid, limits);
     match build_chain(
@@ -102,8 +102,11 @@ fn start_above_per_axis_velocity_cap_is_boundary_infeasible() {
     // streaming-replan ripple that crashed the bridge) must be caught here, not
     // handed to the SOCP to emit a frozen garbage profile.
     let grid = dummy_straight_grid(10, 100.0);
-    let mut limits = textbook_limits();
-    limits.v_max = [200.0, 300.0, 15.0];
+    let limits = Limits::axis_boxes(
+        [200.0, 300.0, 15.0],
+        [5_000.0, 5_000.0, 5_000.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    );
     let chain = chain_of_one(grid, limits);
     match build_chain(
         &chain,
@@ -124,8 +127,11 @@ fn start_above_per_axis_velocity_cap_is_boundary_infeasible() {
 #[test]
 fn end_above_per_axis_velocity_cap_is_boundary_infeasible() {
     let grid = dummy_straight_grid(10, 100.0);
-    let mut limits = textbook_limits();
-    limits.v_max = [200.0, 300.0, 15.0];
+    let limits = Limits::axis_boxes(
+        [200.0, 300.0, 15.0],
+        [5_000.0, 5_000.0, 5_000.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    );
     let chain = chain_of_one(grid, limits);
     match build_chain(
         &chain,
@@ -500,8 +506,8 @@ fn diagonal_line_a_env_is_projected() {
     // For the diagonal, projected a_tan = min(a_max[0]/(1/√2), a_max[1]/(1/√2))
     //                                   = a_max · √2.
     // The first envelope row (i=1, d = s[1]-s[0]) should correspond to a_env ≈ √2·a_max.
-    let a_env_expected = limits.a_max[0] * sqrt2;
-    let j_env_expected = limits.j_max[0] * sqrt2;
+    let a_env_expected = 5_000.0 * sqrt2;
+    let j_env_expected = 100_000.0 * sqrt2;
     let d1 = grid.total_length / (n - 1) as f64; // = 25.0
     let cap_expected = super::rest_boundary_b_cap(d1, a_env_expected, j_env_expected);
 
@@ -512,13 +518,11 @@ fn diagonal_line_a_env_is_projected() {
     // cap_expected = v1² + 2·A_env·(d1 - s1).
     let _ = bundle; // bundle used only to verify Ok; formula verified analytically
     assert!(
-        (cap_expected - (limits.v_max[0] * sqrt2).powi(2)).abs()
-            / (limits.v_max[0] * sqrt2).powi(2)
-            < 1.0,
+        (cap_expected - (500.0_f64 * sqrt2).powi(2)).abs() / (500.0_f64 * sqrt2).powi(2) < 1.0,
         "projected cap for diagonal should be in v_max range: cap={cap_expected}"
     );
     // More precisely: cap must be strictly larger than the axis-min cap.
-    let cap_axis_min = super::rest_boundary_b_cap(d1, limits.a_max[0], limits.j_max[0]);
+    let cap_axis_min = super::rest_boundary_b_cap(d1, 5_000.0, 100_000.0);
     assert!(
         cap_expected > cap_axis_min,
         "diagonal projected cap {cap_expected} must exceed axis-min cap {cap_axis_min}"
@@ -548,12 +552,7 @@ fn two_segment_chain_curved_junction() -> crate::topp::chain::ChainGrid {
     )
     .unwrap();
     let gb = sample_arclength_grid(&curve_b, 11).unwrap();
-    let lim = |a: f64| crate::Limits {
-        v_max: [300.0; 3],
-        a_max: [a; 3],
-        j_max: [100_000.0; 3],
-        a_centripetal_max: 2_500.0,
-    };
+    let lim = |a: f64| crate::Limits::axis_boxes([300.0; 3], [a; 3], [100_000.0; 3]);
     ChainGrid::from_segment_grids(vec![ga, gb], vec![lim(5_000.0), lim(2_000.0)])
 }
 
@@ -721,12 +720,7 @@ fn signed_a0_mid_brake_not_end_below_min_reachable() {
     let n = 10_usize;
     let mut grid = dummy_straight_grid(n, s_total);
     grid.c_prime = vec![[0.0, 0.0, 1.0]; n];
-    let limits = Limits {
-        v_max: [500.0, 500.0, v_start + 1.0],
-        a_max: [a_max; 3],
-        j_max: [j_max; 3],
-        a_centripetal_max: 25_000.0,
-    };
+    let limits = Limits::axis_boxes([500.0, 500.0, v_start + 1.0], [a_max; 3], [j_max; 3]);
     let chain = chain_of_one(grid, limits);
     let outcome = build_chain(
         &chain,
@@ -767,7 +761,7 @@ fn curvature_spike_grid() -> (ArclengthGrid, Limits) {
     let u = s.clone();
     let c = s.iter().map(|si| [*si, 0.0, 0.0]).collect();
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
-    let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
+    let c_double_prime = vec![[0.0, 0.01, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
     let kappa_nodes = vec![0.01_f64; n];
 
@@ -779,12 +773,11 @@ fn curvature_spike_grid() -> (ArclengthGrid, Limits) {
     ];
     let inter_geom = vec![spike_interval.clone(), spike_interval];
 
-    let limits = Limits {
-        v_max: [500.0, 500.0, 500.0],
-        a_max: [5_000.0, 5_000.0, 5_000.0],
-        j_max: [100_000.0, 100_000.0, 100_000.0],
-        a_centripetal_max: 2_500.0,
-    };
+    let limits = Limits::axis_boxes(
+        [500.0, 500.0, 500.0],
+        [5_000.0, 5_000.0, 5_000.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    );
     (
         ArclengthGrid {
             s,
@@ -819,7 +812,7 @@ fn intergrid_centripetal_rows_added_when_spike_between_nodes() {
     };
 
     let kappa_spike = 0.5_f64;
-    let a_cent = limits.a_centripetal_max;
+    let a_cent = 5_000.0_f64;
     let expected_cap = a_cent / kappa_spike;
 
     let intergrid_rows: Vec<_> = bundle
@@ -856,11 +849,11 @@ fn intergrid_centripetal_rows_absent_when_kappa_valley_between_nodes() {
     let s: Vec<f64> = (0..n).map(|i| length * i as f64 / (n - 1) as f64).collect();
     let u = s.clone();
     let c = s.iter().map(|si| [*si, 0.0, 0.0]).collect();
+    let k_node = 0.3_f64;
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
-    let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
+    let c_double_prime = vec![[0.0, k_node, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
 
-    let k_node = 0.3_f64;
     let node_kappas = vec![k_node; n];
 
     let k_valley = 0.05_f64;
@@ -897,7 +890,7 @@ fn intergrid_centripetal_rows_absent_when_kappa_valley_between_nodes() {
         BuildOutcome::Boundary(_) => panic!("should be feasible"),
     };
 
-    let a_cent = limits.a_centripetal_max;
+    let a_cent = 5_000.0_f64;
     let node_cap = a_cent / k_node;
     let inter_cap = a_cent / k_valley;
 

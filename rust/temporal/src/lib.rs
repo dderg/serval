@@ -1,13 +1,15 @@
 pub mod limits;
-pub use limits::Limits;
+pub use limits::{
+    AxisSet, LimitSet, Limits, LimitsError, MAX_AXES, MAX_LIMIT_SETS, kappa_set, restricted_norm,
+};
 
 pub mod topp;
 pub use topp::{ScheduleError, ToleranceMode, schedule_segment, schedule_segment_with_tolerance};
 
 pub mod multi;
 pub use multi::{
-    BatchError, BatchInput, BatchOutput, GridStrategy, JoiningStatus, JunctionBindingCap,
-    JunctionInfo, SegmentInput, plan_batch,
+    BatchError, BatchInput, BatchOutput, GridStrategy, JoiningStatus, JunctionInfo, SegmentInput,
+    plan_batch,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -22,21 +24,13 @@ pub enum GridScheme {
     UniformArclength,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Axis {
-    X,
-    Y,
-    Z,
-}
-
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BindingConstraint {
     None,
-    Velocity { axis: Axis },
-    AxisAccel { axis: Axis },
-    AxisJerk { axis: Axis },
-    Centripetal,
+    Velocity { set: usize },
+    AccelNorm { set: usize },
+    JerkNorm { set: usize },
     Boundary,
 }
 

@@ -4,12 +4,7 @@ use crate::topp::path::{ArclengthGrid, InterSample};
 use crate::topp::solver::{SolverResult, SolverStatus};
 
 fn limits_with_v_max(v_max: [f64; 3]) -> Limits {
-    Limits {
-        v_max,
-        a_max: [50_000.0; 3],
-        j_max: [100_000.0; 3],
-        a_centripetal_max: 1_000.0,
-    }
+    Limits::axis_boxes(v_max, [50_000.0; 3], [100_000.0; 3])
 }
 
 #[test]
@@ -19,28 +14,6 @@ fn for_limits_picks_max_axis_vmax_over_10() {
     assert!(
         (scale.sigma() - 100.0).abs() < 1e-12,
         "expected sigma=100, got {}",
-        scale.sigma()
-    );
-}
-
-#[test]
-fn degenerate_limits_zero_vmax_returns_identity() {
-    let limits = limits_with_v_max([0.0, 0.0, 0.0]);
-    let scale = SolverScale::for_limits(&limits);
-    assert!(
-        (scale.sigma() - 1.0).abs() < 1e-12,
-        "expected identity sigma=1, got {}",
-        scale.sigma()
-    );
-}
-
-#[test]
-fn degenerate_limits_nan_vmax_returns_identity() {
-    let limits = limits_with_v_max([f64::NAN, f64::NAN, f64::NAN]);
-    let scale = SolverScale::for_limits(&limits);
-    assert!(
-        (scale.sigma() - 1.0).abs() < 1e-12,
-        "expected identity sigma=1 for NaN limits, got {}",
         scale.sigma()
     );
 }
@@ -214,32 +187,26 @@ fn unscale_result_inverts_b_and_a() {
 fn limits_scaling_divides_all_four_families_by_sigma() {
     let sigma = 50.0_f64;
     let scale = SolverScale { mm_per_unit: sigma };
-    let raw = Limits {
-        v_max: [1000.0, 800.0, 15.0],
-        a_max: [50_000.0, 40_000.0, 100.0],
-        j_max: [100_000.0, 100_000.0, 100_000.0],
-        a_centripetal_max: 2_500.0,
-    };
+    let raw = Limits::axis_boxes(
+        [1000.0, 800.0, 15.0],
+        [50_000.0, 40_000.0, 100.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    );
     let scaled = scale.scale_limits(&raw);
 
-    for ax in 0..3 {
-        assert!((scaled.v_max[ax] - raw.v_max[ax] / sigma).abs() < 1e-12);
-        assert!((scaled.a_max[ax] - raw.a_max[ax] / sigma).abs() < 1e-9);
-        assert!((scaled.j_max[ax] - raw.j_max[ax] / sigma).abs() < 1e-9);
+    for (rs, ss) in raw.sets().iter().zip(scaled.sets()) {
+        assert_eq!(rs.axes, ss.axes);
+        assert!((ss.v_max - rs.v_max / sigma).abs() < 1e-12);
+        assert!((ss.a_max - rs.a_max / sigma).abs() < 1e-9);
+        assert!((ss.j_max - rs.j_max / sigma).abs() < 1e-9);
     }
-    assert!((scaled.a_centripetal_max - raw.a_centripetal_max / sigma).abs() < 1e-12);
 }
 
 #[test]
 fn chain_grid_scaling_matches_arclength_grid_scaling() {
     let c = crate::topp::chain::tests_support::line_50mm();
     let g = crate::topp::path::sample_arclength_grid(&c, 9).unwrap();
-    let lims = crate::Limits {
-        v_max: [1000.0; 3],
-        a_max: [50_000.0; 3],
-        j_max: [100_000.0; 3],
-        a_centripetal_max: 50_000.0,
-    };
+    let lims = crate::Limits::axis_boxes([1000.0; 3], [50_000.0; 3], [100_000.0; 3]);
     let chain = crate::topp::chain::ChainGrid::from_segment_grids(vec![g.clone()], vec![lims]);
     let scale = SolverScale::for_chain(&chain);
     let sg = scale.scale_grid(&g);

@@ -11,13 +11,13 @@ fn set(axes: &[usize], v: f64, a: f64, j: f64) -> LimitSet {
 
 #[test]
 fn coverage_validation_rejects_uncovered_axis() {
-    let err = NormLimits::try_new(&[set(&[0, 1], 300.0, 3000.0, 6000.0)]).unwrap_err();
+    let err = Limits::try_new(&[set(&[0, 1], 300.0, 3000.0, 6000.0)]).unwrap_err();
     assert!(matches!(err, LimitsError::NoVelocityCoverage { axis: 2 }));
 }
 
 #[test]
 fn coverage_is_per_derivative() {
-    let err = NormLimits::try_new(&[
+    let err = Limits::try_new(&[
         set(&[0, 1, 2], 300.0, f64::INFINITY, f64::INFINITY),
         set(&[0, 1], f64::INFINITY, 3000.0, 6000.0),
     ])
@@ -27,13 +27,13 @@ fn coverage_is_per_derivative() {
 
 #[test]
 fn rejects_nonpositive_caps() {
-    let err = NormLimits::try_new(&[set(&[0], 0.0, 100.0, 200.0)]).unwrap_err();
+    let err = Limits::try_new(&[set(&[0], 0.0, 100.0, 200.0)]).unwrap_err();
     assert!(matches!(err, LimitsError::BadCap { set: 0 }));
 }
 
 #[test]
 fn mvc_b_is_min_over_sets() {
-    let lim = NormLimits::try_new(&[
+    let lim = Limits::try_new(&[
         set(&[0, 1], 60.0, 6000.0, 12000.0),
         set(&[1], 40.0, f64::INFINITY, f64::INFINITY),
         set(&[2], 15.0, 100.0, 200.0),
@@ -89,7 +89,7 @@ fn kappa_set_is_orthogonal_component_of_restricted_second_derivative() {
 
 #[test]
 fn b_cent_cap_uses_per_set_kappa() {
-    let lim = NormLimits::try_new(&[
+    let lim = Limits::try_new(&[
         set(&[0, 1], 300.0, 1000.0, 2000.0),
         set(&[2], 15.0, 100.0, 200.0),
     ])

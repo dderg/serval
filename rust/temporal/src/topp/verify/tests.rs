@@ -34,12 +34,11 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
 }
 
 fn textbook_limits() -> Limits {
-    Limits {
-        v_max: [500.0, 500.0, 500.0],
-        a_max: [5_000.0, 5_000.0, 5_000.0],
-        j_max: [100_000.0, 100_000.0, 100_000.0],
-        a_centripetal_max: 2_500.0,
-    }
+    Limits::axis_boxes(
+        [500.0, 500.0, 500.0],
+        [5_000.0, 5_000.0, 5_000.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    )
 }
 
 fn chain_of_one(grid: ArclengthGrid, limits: Limits) -> ChainGrid {
@@ -118,8 +117,8 @@ fn over_accel_profile_flagged_as_accel() {
     assert!(!report.feasible, "over-accel profile should be infeasible");
     let interior = &report.binding_per_grid[1];
     assert!(
-        matches!(interior, BindingConstraint::AxisAccel { axis: Axis::X }),
-        "expected AxisAccel{{X}} at interior point, got {interior:?}",
+        matches!(interior, BindingConstraint::AccelNorm { set: 0 }),
+        "expected AccelNorm{{set: 0}} at interior point, got {interior:?}",
     );
 }
 
@@ -231,7 +230,7 @@ fn over_centripetal_profile_flagged() {
     let u = s.clone();
     let c = s.iter().map(|si| [*si, 0.0, 0.0]).collect();
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
-    let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
+    let c_double_prime = vec![[0.0, 1.0, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
     let kappa = vec![1.0; n];
 
@@ -257,7 +256,7 @@ fn over_centripetal_profile_flagged() {
     let limits = textbook_limits();
     let chain = chain_of_one(grid, limits);
     let result = SolverResult {
-        b: vec![5_000.0; n],
+        b: vec![10_000.0; n],
         a: vec![0.0; n],
         status: SolverStatus::Solved,
     };
@@ -266,13 +265,13 @@ fn over_centripetal_profile_flagged() {
         !report.feasible,
         "over-centripetal profile should be infeasible"
     );
-    let has_centripetal = report
+    let has_accel_norm = report
         .binding_per_grid
         .iter()
-        .any(|b| matches!(b, BindingConstraint::Centripetal));
+        .any(|b| matches!(b, BindingConstraint::AccelNorm { .. }));
     assert!(
-        has_centripetal,
-        "expected at least one Centripetal tag, got {:?}",
+        has_accel_norm,
+        "expected at least one AccelNorm tag (centripetal accel), got {:?}",
         report.binding_per_grid
     );
 }

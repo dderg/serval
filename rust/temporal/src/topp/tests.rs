@@ -18,12 +18,11 @@ fn schedule_segment_straight_line_at_1000mms_solves() {
     let curve =
         VectorNurbs::<f64, 3>::try_new(3, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], cps)
             .unwrap();
-    let limits = Limits {
-        v_max: [1000.0, 1000.0, 15.0],
-        a_max: [50_000.0, 50_000.0, 100.0],
-        j_max: [100_000.0, 100_000.0, 100_000.0],
-        a_centripetal_max: 50_000.0,
-    };
+    let limits = Limits::axis_boxes(
+        [1000.0, 1000.0, 15.0],
+        [50_000.0, 50_000.0, 100.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    );
     let cfg = GridConfig {
         scheme: crate::GridScheme::UniformArclength,
         n: 200,
@@ -60,12 +59,11 @@ fn schedule_segment_straight_line_returns_profile() {
         vec![[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]],
     )
     .unwrap();
-    let limits = Limits {
-        v_max: [500.0, 500.0, 500.0],
-        a_max: [5_000.0, 5_000.0, 5_000.0],
-        j_max: [100_000.0, 100_000.0, 100_000.0],
-        a_centripetal_max: 2_500.0,
-    };
+    let limits = Limits::axis_boxes(
+        [500.0, 500.0, 500.0],
+        [5_000.0, 5_000.0, 5_000.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    );
     let cfg = GridConfig {
         scheme: crate::GridScheme::UniformArclength,
         n: 50,
@@ -94,12 +92,11 @@ fn pinned_nonzero_a_start_converges() {
         vec![[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]],
     )
     .unwrap();
-    let limits = Limits {
-        v_max: [600.0, 600.0, 600.0],
-        a_max: [50_000.0, 50_000.0, 50_000.0],
-        j_max: [100_000.0, 100_000.0, 100_000.0],
-        a_centripetal_max: 2_500.0,
-    };
+    let limits = Limits::axis_boxes(
+        [600.0, 600.0, 600.0],
+        [50_000.0, 50_000.0, 50_000.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    );
     let arc_grid = path::sample_arclength_grid(&curve, 100).unwrap();
     let chain_grid = chain::ChainGrid::from_segment_grids(vec![arc_grid], vec![limits]);
     let profile = schedule_chain_with_tolerance(

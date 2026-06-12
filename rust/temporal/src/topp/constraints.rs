@@ -1,7 +1,6 @@
-use crate::Limits;
 use crate::topp::chain::ChainGrid;
-use crate::topp::path::{cross3, dot3};
 use crate::topp::scaling::SolverScale;
+use crate::{Limits, restricted_norm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cone {
@@ -176,18 +175,6 @@ pub(crate) fn boundary_reachable_b_lower(s: f64, v0: f64, a0: f64, a_max: f64, j
     }
 }
 
-fn velocity_mvc_b(c_prime: &[f64; 3], v_max: &[f64; 3]) -> f64 {
-    let mut bound = f64::INFINITY;
-    for ax in 0..3 {
-        let g = c_prime[ax].abs();
-        if g > COMP_FLOOR {
-            let vb = v_max[ax] / g;
-            bound = bound.min(vb * vb);
-        }
-    }
-    bound
-}
-
 #[allow(clippy::too_many_lines)]
 pub fn build_chain(
     chain: &ChainGrid,
@@ -212,21 +199,20 @@ pub fn build_chain(
 
     let mut b_max_cent: Vec<f64> = (0..n)
         .map(|i| {
-            let k = chain.geom[i].kappa;
-            if k.abs() < kappa_floor {
-                b_cap
-            } else {
-                (chain.limits_at(i).a_centripetal_max / k.abs()).min(b_cap)
-            }
+            chain
+                .limits_at(i)
+                .b_cent_cap(
+                    &chain.geom[i].c_prime,
+                    &chain.geom[i].c_double_prime,
+                    kappa_floor,
+                )
+                .min(b_cap)
         })
         .collect();
     for j in &chain.junctions {
-        let k = j.geom.kappa;
-        let cap = if k.abs() < kappa_floor {
-            b_cap
-        } else {
-            (chain.limits[j.limits_idx].a_centripetal_max / k.abs()).min(b_cap)
-        };
+        let cap = chain.limits[j.limits_idx]
+            .b_cent_cap(&j.geom.c_prime, &j.geom.c_double_prime, kappa_floor)
+            .min(b_cap);
         b_max_cent[j.idx] = b_max_cent[j.idx].min(cap);
     }
 
@@ -235,38 +221,18 @@ pub fn build_chain(
         let mut j_env = f64::NEG_INFINITY;
         for i in 0..n {
             let lim = chain.limits_at(i);
-            let g = &chain.geom[i].c_prime;
-            let mut a_tan_i = f64::INFINITY;
-            let mut j_tan_i = f64::INFINITY;
-            let mut active = false;
-            for ax in 0..3 {
-                let gabs = g[ax].abs();
-                if gabs > COMP_FLOOR {
-                    a_tan_i = a_tan_i.min(lim.a_max[ax] / gabs);
-                    j_tan_i = j_tan_i.min(lim.j_max[ax] / gabs);
-                    active = true;
-                }
-            }
-            if active {
+            let a_tan_i = lim.a_tan_cap(&chain.geom[i].c_prime, COMP_FLOOR);
+            let j_tan_i = lim.j_tan_cap(&chain.geom[i].c_prime, COMP_FLOOR);
+            if a_tan_i.is_finite() && j_tan_i.is_finite() {
                 a_env = a_env.max(a_tan_i);
                 j_env = j_env.max(j_tan_i);
             }
         }
         for j in &chain.junctions {
             let lim = &chain.limits[j.limits_idx];
-            let g = &j.geom.c_prime;
-            let mut a_tan_i = f64::INFINITY;
-            let mut j_tan_i = f64::INFINITY;
-            let mut active = false;
-            for ax in 0..3 {
-                let gabs = g[ax].abs();
-                if gabs > COMP_FLOOR {
-                    a_tan_i = a_tan_i.min(lim.a_max[ax] / gabs);
-                    j_tan_i = j_tan_i.min(lim.j_max[ax] / gabs);
-                    active = true;
-                }
-            }
-            if active {
+            let a_tan_i = lim.a_tan_cap(&j.geom.c_prime, COMP_FLOOR);
+            let j_tan_i = lim.j_tan_cap(&j.geom.c_prime, COMP_FLOOR);
+            if a_tan_i.is_finite() && j_tan_i.is_finite() {
                 a_env = a_env.max(a_tan_i);
                 j_env = j_env.max(j_tan_i);
             }
@@ -281,14 +247,12 @@ pub fn build_chain(
     let b_start = endpoints.v_start * endpoints.v_start;
     let b_end = endpoints.v_end * endpoints.v_end;
 
-    let mvc_start = b_max_cent[0].min(velocity_mvc_b(
-        &chain.geom[0].c_prime,
-        &chain.limits_at(0).v_max,
-    ));
-    let mvc_end = b_max_cent[n - 1].min(velocity_mvc_b(
-        &chain.geom[n - 1].c_prime,
-        &chain.limits_at(n - 1).v_max,
-    ));
+    let mvc_start = b_max_cent[0].min(chain.limits_at(0).mvc_b(&chain.geom[0].c_prime, COMP_FLOOR));
+    let mvc_end = b_max_cent[n - 1].min(
+        chain
+            .limits_at(n - 1)
+            .mvc_b(&chain.geom[n - 1].c_prime, COMP_FLOOR),
+    );
 
     const B_BOUNDARY_REL_TOL: f64 = f64::EPSILON * 4.0;
     if b_start > mvc_start * (1.0 + B_BOUNDARY_REL_TOL) {
@@ -332,7 +296,7 @@ pub fn build_chain(
     let j_path = chain
         .limits
         .iter()
-        .flat_map(|l| l.j_max.iter().copied())
+        .map(Limits::j_path)
         .fold(f64::INFINITY, f64::min);
     debug_assert!(j_path > 0.0, "jerk limit must be positive");
 
@@ -409,38 +373,47 @@ pub fn build_chain(
 
     {
         let mut count = 0_usize;
+        let emit_velocity = |i: usize,
+                             c_prime: &[f64; 3],
+                             lim: &Limits,
+                             a_rows: &mut Vec<Vec<f64>>,
+                             b_rhs: &mut Vec<f64>,
+                             count: &mut usize| {
+            for set in lim.sets() {
+                if !set.v_max.is_finite() {
+                    continue;
+                }
+                let p = restricted_norm(c_prime, set.axes);
+                if p < COMP_FLOOR {
+                    continue;
+                }
+                let rhs = (set.v_max / p).powi(2);
+                if rhs > b_cap {
+                    continue;
+                }
+                push_row(a_rows, b_rhs, &[(off_b + i, -1.0)], rhs);
+                *count += 1;
+            }
+        };
         for i in 0..n {
-            let lim = chain.limits_at(i);
-            for ax in 0..3 {
-                let g = chain.geom[i].c_prime[ax];
-                if g.abs() < COMP_FLOOR {
-                    continue;
-                }
-                let v_ax = lim.v_max[ax];
-                let rhs = (v_ax / g).powi(2);
-                if rhs > b_cap {
-                    continue;
-                }
-                push_row(&mut a_rows, &mut b_rhs, &[(off_b + i, -1.0)], rhs);
-                count += 1;
-            }
+            emit_velocity(
+                i,
+                &chain.geom[i].c_prime,
+                chain.limits_at(i),
+                &mut a_rows,
+                &mut b_rhs,
+                &mut count,
+            );
         }
-
         for j in &chain.junctions {
-            let i = j.idx;
-            let lims = &chain.limits[j.limits_idx];
-            for ax in 0..3 {
-                let g = j.geom.c_prime[ax];
-                if g.abs() < COMP_FLOOR {
-                    continue;
-                }
-                let rhs = (lims.v_max[ax] / g).powi(2);
-                if rhs > b_cap {
-                    continue;
-                }
-                push_row(&mut a_rows, &mut b_rhs, &[(off_b + i, -1.0)], rhs);
-                count += 1;
-            }
+            emit_velocity(
+                j.idx,
+                &j.geom.c_prime,
+                &chain.limits[j.limits_idx],
+                &mut a_rows,
+                &mut b_rhs,
+                &mut count,
+            );
         }
         if count > 0 {
             cones.push((Cone::Nonneg, count));
@@ -449,71 +422,90 @@ pub fn build_chain(
 
     {
         const BLOCK_D_SAFETY: f64 = 0.1;
-        let mut count = 0_usize;
+        let mut nonneg_run = 0_usize;
+        let emit_accel = |i: usize,
+                          geom: &crate::topp::chain::PointGeom,
+                          lim: &Limits,
+                          a_rows: &mut Vec<Vec<f64>>,
+                          b_rhs: &mut Vec<f64>,
+                          cones: &mut Vec<(Cone, usize)>,
+                          nonneg_run: &mut usize| {
+            let b_cap_i = b_max_cent[i].min(b_cap);
+            let a_cap_i = b_cap_i / (2.0 * h_bar(i));
+            for set in lim.sets() {
+                if !set.a_max.is_finite() {
+                    continue;
+                }
+                let gp_n = restricted_norm(&geom.c_prime, set.axes);
+                let gpp_n = restricted_norm(&geom.c_double_prime, set.axes);
+                if gp_n < COMP_FLOOR && gpp_n < COMP_FLOOR {
+                    continue;
+                }
+                if gpp_n * b_cap_i + gp_n * a_cap_i < BLOCK_D_SAFETY * set.a_max {
+                    continue;
+                }
+                if set.axes.count() == 1 {
+                    let ax = set.axes.indices().next().expect("singleton");
+                    let gp = geom.c_prime[ax];
+                    let gpp = geom.c_double_prime[ax];
+                    push_row(
+                        a_rows,
+                        b_rhs,
+                        &[(off_b + i, -gpp), (off_a + i, -gp)],
+                        set.a_max,
+                    );
+                    push_row(
+                        a_rows,
+                        b_rhs,
+                        &[(off_b + i, gpp), (off_a + i, gp)],
+                        set.a_max,
+                    );
+                    *nonneg_run += 2;
+                } else {
+                    if *nonneg_run > 0 {
+                        cones.push((Cone::Nonneg, *nonneg_run));
+                        *nonneg_run = 0;
+                    }
+                    push_row(a_rows, b_rhs, &[], set.a_max);
+                    for ax in set.axes.indices() {
+                        push_row(
+                            a_rows,
+                            b_rhs,
+                            &[
+                                (off_b + i, geom.c_double_prime[ax]),
+                                (off_a + i, geom.c_prime[ax]),
+                            ],
+                            0.0,
+                        );
+                    }
+                    cones.push((Cone::SecondOrder, 1 + set.axes.count()));
+                }
+            }
+        };
         for i in 0..n {
-            let lim = chain.limits_at(i);
-            let b_cap_i = b_max_cent[i].min(b_cap);
-            let a_cap_i = b_cap_i / (2.0 * h_bar(i));
-            for ax in 0..3 {
-                let gp = chain.geom[i].c_prime[ax];
-                let gpp = chain.geom[i].c_double_prime[ax];
-                if gp.abs() < COMP_FLOOR && gpp.abs() < COMP_FLOOR {
-                    continue;
-                }
-                let a_ax = lim.a_max[ax];
-                let worst_case_lhs = gpp.abs() * b_cap_i + gp.abs() * a_cap_i;
-                if worst_case_lhs < BLOCK_D_SAFETY * a_ax {
-                    continue;
-                }
-                push_row(
-                    &mut a_rows,
-                    &mut b_rhs,
-                    &[(off_b + i, -gpp), (off_a + i, -gp)],
-                    a_ax,
-                );
-                push_row(
-                    &mut a_rows,
-                    &mut b_rhs,
-                    &[(off_b + i, gpp), (off_a + i, gp)],
-                    a_ax,
-                );
-                count += 2;
-            }
+            emit_accel(
+                i,
+                &chain.geom[i],
+                chain.limits_at(i),
+                &mut a_rows,
+                &mut b_rhs,
+                &mut cones,
+                &mut nonneg_run,
+            );
         }
-
         for j in &chain.junctions {
-            let i = j.idx;
-            let lims = &chain.limits[j.limits_idx];
-            let b_cap_i = b_max_cent[i].min(b_cap);
-            let a_cap_i = b_cap_i / (2.0 * h_bar(i));
-            for ax in 0..3 {
-                let gp = j.geom.c_prime[ax];
-                let gpp = j.geom.c_double_prime[ax];
-                if gp.abs() < COMP_FLOOR && gpp.abs() < COMP_FLOOR {
-                    continue;
-                }
-                let a_ax = lims.a_max[ax];
-                let worst_case_lhs = gpp.abs() * b_cap_i + gp.abs() * a_cap_i;
-                if worst_case_lhs < BLOCK_D_SAFETY * a_ax {
-                    continue;
-                }
-                push_row(
-                    &mut a_rows,
-                    &mut b_rhs,
-                    &[(off_b + i, -gpp), (off_a + i, -gp)],
-                    a_ax,
-                );
-                push_row(
-                    &mut a_rows,
-                    &mut b_rhs,
-                    &[(off_b + i, gpp), (off_a + i, gp)],
-                    a_ax,
-                );
-                count += 2;
-            }
+            emit_accel(
+                j.idx,
+                &j.geom,
+                &chain.limits[j.limits_idx],
+                &mut a_rows,
+                &mut b_rhs,
+                &mut cones,
+                &mut nonneg_run,
+            );
         }
-        if count > 0 {
-            cones.push((Cone::Nonneg, count));
+        if nonneg_run > 0 {
+            cones.push((Cone::Nonneg, nonneg_run));
         }
     }
 
@@ -528,16 +520,13 @@ pub fn build_chain(
     {
         let mut count = 0_usize;
         for i in 0..n - 1 {
-            let a_cent_interval_owner = chain.limits_at(i + 1).a_centripetal_max;
+            let lim = chain.limits_at(i + 1);
             let node_cap_i = b_max_cent[i];
             let node_cap_j = b_max_cent[i + 1];
             for sample in &chain.inter_geom[i] {
-                let cross = cross3(sample.c_prime, sample.c_double_prime);
-                let kappa = dot3(cross, cross).sqrt();
-                if kappa.abs() < kappa_floor {
-                    continue;
-                }
-                let inter_cap = (a_cent_interval_owner / kappa).min(b_cap);
+                let inter_cap = lim
+                    .b_cent_cap(&sample.c_prime, &sample.c_double_prime, kappa_floor)
+                    .min(b_cap);
                 let interp_node_cap = (1.0 - sample.theta) * node_cap_i + sample.theta * node_cap_j;
                 if inter_cap >= interp_node_cap * (1.0 - 1e-9) {
                     continue;

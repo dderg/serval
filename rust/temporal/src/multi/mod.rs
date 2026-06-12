@@ -17,7 +17,6 @@ pub enum GridStrategy {
 pub struct SegmentInput<'a> {
     pub curve: &'a VectorNurbs<f64, 3>,
     pub limits: Limits,
-    pub trailing_junction_chord_tolerance_mm: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,19 +51,6 @@ pub enum JoiningStatus {
 pub struct JunctionInfo {
     pub between_segments: (usize, usize),
     pub v_junction: f64,
-    pub binding_cap: JunctionBindingCap,
-    pub kappa_left: f64,
-    pub kappa_right: f64,
-}
-
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy)]
-pub enum JunctionBindingCap {
-    PerAxisVelocity,
-    Centripetal,
-    GlobalVMax,
-    SharpCornerChord,
-    ChainInterior,
 }
 
 #[derive(Debug, Error)]
@@ -96,19 +82,11 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
 
     let k = input.segments.len();
 
-    let junctions: Vec<junction::JunctionResult> = (0..k - 1)
+    let kinds: Vec<junction::JunctionKind> = (0..k - 1)
         .map(|i| {
-            junction::compute_junction_velocity(
-                input.segments[i].curve,
-                input.segments[i + 1].curve,
-                &input.segments[i].limits,
-                &input.segments[i + 1].limits,
-                input.segments[i].trailing_junction_chord_tolerance_mm,
-            )
+            junction::classify_junction_curves(input.segments[i].curve, input.segments[i + 1].curve)
         })
         .collect();
-
-    let kinds: Vec<junction::JunctionKind> = junctions.iter().map(|j| j.kind).collect();
     let chain_ranges = chain::partition_chains(k, &kinds);
     let n_chains = chain_ranges.len();
 
@@ -155,18 +133,12 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
     let mut states: Vec<joining::ChainState> = chain_ranges
         .iter()
         .enumerate()
-        .map(|(c, range)| {
-            let lo_c = *range.start();
-            let hi_c = *range.end();
-            let v_start = if c == 0 {
-                input.initial_velocity
-            } else {
-                junctions[lo_c - 1].v_junction
-            };
+        .map(|(c, _range)| {
+            let v_start = if c == 0 { input.initial_velocity } else { 0.0 };
             let v_end = if c + 1 == n_chains {
                 input.terminal_velocity
             } else {
-                junctions[hi_c].v_junction
+                0.0
             };
             let a_start = if c == 0 && input.initial_velocity > 0.0 {
                 Some(input.initial_accel)
@@ -185,14 +157,7 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
 
     parallel::fan_out_solves(&chain_grids, &mut states, input.worker_threads)?;
 
-    let corner_caps: Vec<f64> = chain_ranges
-        .iter()
-        .take(n_chains - 1)
-        .map(|range| {
-            let hi_c = *range.end();
-            junctions[hi_c].v_junction
-        })
-        .collect();
+    let corner_caps: Vec<f64> = vec![0.0; n_chains.saturating_sub(1)];
 
     let (sweeps, joining_status) = joining::join_until_converged(
         &chain_grids,
@@ -211,25 +176,10 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
         })
         .collect();
 
-    let junction_infos: Vec<JunctionInfo> = junctions
-        .into_iter()
-        .enumerate()
-        .map(|(j, junc)| {
-            let v_junction = profiles[j].samples.last().map_or(0.0, |s| s.v);
-            let binding = if junc.kind == junction::JunctionKind::Corner {
-                junc.binding_cap
-            } else if (v_junction - junc.v_junction).abs() < 1e-3 {
-                junc.binding_cap
-            } else {
-                JunctionBindingCap::ChainInterior
-            };
-            JunctionInfo {
-                between_segments: (j, j + 1),
-                v_junction,
-                binding_cap: binding,
-                kappa_left: junc.kappa_left,
-                kappa_right: junc.kappa_right,
-            }
+    let junction_infos: Vec<JunctionInfo> = (0..k - 1)
+        .map(|j| JunctionInfo {
+            between_segments: (j, j + 1),
+            v_junction: profiles[j].samples.last().map_or(0.0, |s| s.v),
         })
         .collect();
 

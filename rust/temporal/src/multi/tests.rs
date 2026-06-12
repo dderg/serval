@@ -12,12 +12,7 @@ fn straight_50mm() -> VectorNurbs<f64, 3> {
 }
 
 fn textbook_limits() -> Limits {
-    Limits {
-        v_max: [500.0; 3],
-        a_max: [5_000.0; 3],
-        j_max: [100_000.0; 3],
-        a_centripetal_max: 2_500.0,
-    }
+    Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
 }
 
 #[test]
@@ -26,7 +21,6 @@ fn plan_batch_single_segment_works() {
     let segment = SegmentInput {
         curve: &curve,
         limits: textbook_limits(),
-        trailing_junction_chord_tolerance_mm: 0.05,
     };
     let input = BatchInput {
         segments: &[segment],
@@ -78,12 +72,10 @@ fn smooth_junction_has_no_accel_impulse() {
         SegmentInput {
             curve: &left,
             limits,
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         SegmentInput {
             curve: &right,
             limits,
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
     ];
     let out = plan_batch(BatchInput {
@@ -121,7 +113,7 @@ fn smooth_junction_has_no_accel_impulse() {
     let d = hl * hr * (hl + hr);
     let b_dd = (2.0 * hr * bl - 2.0 * (hl + hr) * bj + 2.0 * hl * br) / d;
     let jerk = bj.max(0.0).sqrt() * b_dd / 2.0;
-    let j_path = limits.j_max[0].min(limits.j_max[1]).min(limits.j_max[2]);
+    let j_path = limits.j_path();
     assert!(
         jerk.abs() <= j_path * 1.10,
         "junction-spanning jerk {jerk:.0} exceeds j_path {j_path:.0}"
@@ -139,7 +131,6 @@ fn plan_batch_threads_nonzero_initial_velocity() {
     let segment = SegmentInput {
         curve: &curve,
         limits: textbook_limits(),
-        trailing_junction_chord_tolerance_mm: 0.05,
     };
     let input = BatchInput {
         segments: &[segment],

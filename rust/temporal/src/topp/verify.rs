@@ -1,6 +1,6 @@
 use crate::topp::chain::ChainGrid;
 use crate::topp::solver::SolverResult;
-use crate::{Axis, BindingConstraint, Limits};
+use crate::{BindingConstraint, Limits, restricted_norm};
 
 /// 0.2% feasibility margin for velocity / accel / centripetal.
 pub(crate) const EPS_FEAS: f64 = 2e-3;
@@ -29,8 +29,6 @@ struct PointInputs<'a> {
     cp: [f64; 3],
     cpp: [f64; 3],
     cppp: [f64; 3],
-    kappa: f64,
-    b_i: f64,
     s_dot: f64,
     s_ddot: f64,
     s_dddot: f64,
@@ -46,8 +44,8 @@ struct PointRatios {
 
 /// All constraint ratios at one grid point. Class maxima scan every entry, not
 /// just the per-point winner, so an in-band jerk ratio can't mask a co-located
-/// non-jerk violation. Tie-breaking: Velocity > AxisAccel > AxisJerk >
-/// Centripetal; X > Y > Z.
+/// non-jerk violation. Tie-breaking: Velocity > AccelNorm > JerkNorm; lower
+/// set index wins within a class.
 fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
     let s_dot2 = p.s_dot * p.s_dot;
     let s_dot3 = s_dot2 * p.s_dot;
@@ -65,48 +63,31 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
     ];
 
     let lim = p.limits;
-    let entries: [(f64, BindingConstraint); 10] = [
-        (
-            vel[0].abs() / lim.v_max[0],
-            BindingConstraint::Velocity { axis: Axis::X },
-        ),
-        (
-            vel[1].abs() / lim.v_max[1],
-            BindingConstraint::Velocity { axis: Axis::Y },
-        ),
-        (
-            vel[2].abs() / lim.v_max[2],
-            BindingConstraint::Velocity { axis: Axis::Z },
-        ),
-        (
-            accel[0].abs() / lim.a_max[0],
-            BindingConstraint::AxisAccel { axis: Axis::X },
-        ),
-        (
-            accel[1].abs() / lim.a_max[1],
-            BindingConstraint::AxisAccel { axis: Axis::Y },
-        ),
-        (
-            accel[2].abs() / lim.a_max[2],
-            BindingConstraint::AxisAccel { axis: Axis::Z },
-        ),
-        (
-            jerk[0].abs() / lim.j_max[0],
-            BindingConstraint::AxisJerk { axis: Axis::X },
-        ),
-        (
-            jerk[1].abs() / lim.j_max[1],
-            BindingConstraint::AxisJerk { axis: Axis::Y },
-        ),
-        (
-            jerk[2].abs() / lim.j_max[2],
-            BindingConstraint::AxisJerk { axis: Axis::Z },
-        ),
-        (
-            p.b_i.max(0.0) * p.kappa / lim.a_centripetal_max,
-            BindingConstraint::Centripetal,
-        ),
-    ];
+    let mut entries: Vec<(f64, BindingConstraint)> = Vec::with_capacity(3 * lim.sets().len());
+    for (set_idx, set) in lim.sets().iter().enumerate() {
+        if set.v_max.is_finite() {
+            entries.push((
+                restricted_norm(&vel, set.axes) / set.v_max,
+                BindingConstraint::Velocity { set: set_idx },
+            ));
+        }
+    }
+    for (set_idx, set) in lim.sets().iter().enumerate() {
+        if set.a_max.is_finite() {
+            entries.push((
+                restricted_norm(&accel, set.axes) / set.a_max,
+                BindingConstraint::AccelNorm { set: set_idx },
+            ));
+        }
+    }
+    for (set_idx, set) in lim.sets().iter().enumerate() {
+        if set.j_max.is_finite() {
+            entries.push((
+                restricted_norm(&jerk, set.axes) / set.j_max,
+                BindingConstraint::JerkNorm { set: set_idx },
+            ));
+        }
+    }
 
     let mut worst_ratio = 0.0_f64;
     let mut worst_tag = BindingConstraint::None;
@@ -118,7 +99,7 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
             worst_ratio = ratio;
             worst_tag = tag;
         }
-        if matches!(tag, BindingConstraint::AxisJerk { .. }) {
+        if matches!(tag, BindingConstraint::JerkNorm { .. }) {
             if ratio > max_jerk {
                 max_jerk = ratio;
             }
@@ -179,8 +160,6 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             cp: g.c_prime,
             cpp: g.c_double_prime,
             cppp: g.c_triple_prime,
-            kappa: g.kappa,
-            b_i,
             s_dot,
             s_ddot,
             s_dddot,
@@ -220,8 +199,6 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             cp: jd.geom.c_prime,
             cpp: jd.geom.c_double_prime,
             cppp: jd.geom.c_triple_prime,
-            kappa: jd.geom.kappa,
-            b_i,
             s_dot,
             s_ddot,
             s_dddot,

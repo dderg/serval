@@ -18,11 +18,10 @@ fn micro_move_below_cut_floor_is_not_max_iter_slp() {
     )
     .expect("degree-1 line NURBS always valid");
 
-    let limits = Limits::new(
+    let limits = Limits::axis_boxes(
         [300.0, 300.0, 15.0],
         [5_000.0, 5_000.0, 350.0],
         [1.0, 1.0, 1.0],
-        1.0,
     );
 
     let profile = schedule_segment(

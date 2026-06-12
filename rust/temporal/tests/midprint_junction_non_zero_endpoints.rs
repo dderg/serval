@@ -18,11 +18,10 @@ fn pure_x_50mm_collinear_cubic() -> VectorNurbs<f64, 3> {
 }
 
 fn standard_limits() -> Limits {
-    Limits::new(
+    Limits::axis_boxes(
         [300.0, 300.0, 15.0],
         [3000.0, 3000.0, 100.0],
         [6000.0, 6000.0, 6000.0],
-        25.0_f64 / 1500.0,
     )
 }
 

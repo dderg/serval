@@ -14,12 +14,7 @@ pub struct SolverScale {
 
 impl SolverScale {
     pub fn for_limits(limits: &Limits) -> Self {
-        let sigma = limits
-            .v_max
-            .iter()
-            .copied()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .fold(f64::NEG_INFINITY, f64::max);
+        let sigma = limits.v_ceiling();
         if sigma <= 0.0 || !sigma.is_finite() {
             return Self::identity();
         }
@@ -38,12 +33,17 @@ impl SolverScale {
 
     pub(crate) fn scale_limits(&self, limits: &Limits) -> Limits {
         let s = self.sigma();
-        Limits {
-            v_max: limits.v_max.map(|v| v / s),
-            a_max: limits.a_max.map(|a| a / s),
-            j_max: limits.j_max.map(|j| j / s),
-            a_centripetal_max: limits.a_centripetal_max / s,
-        }
+        let sets: Vec<crate::LimitSet> = limits
+            .sets()
+            .iter()
+            .map(|l| crate::LimitSet {
+                axes: l.axes,
+                v_max: l.v_max / s,
+                a_max: l.a_max / s,
+                j_max: l.j_max / s,
+            })
+            .collect();
+        Limits::try_new(&sets).expect("scaling preserves validity")
     }
 
     pub(crate) fn scale_grid(&self, grid: &ArclengthGrid) -> ArclengthGrid {
@@ -109,8 +109,7 @@ impl SolverScale {
         let sigma = chain
             .limits
             .iter()
-            .flat_map(|l| l.v_max.iter().copied())
-            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(Limits::v_ceiling)
             .fold(f64::NEG_INFINITY, f64::max);
         if sigma <= 0.0 || !sigma.is_finite() {
             return Self::identity();

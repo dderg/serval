@@ -1,24 +1,3 @@
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy)]
-pub struct Limits {
-    pub v_max: [f64; 3],
-    pub a_max: [f64; 3],
-    pub j_max: [f64; 3],
-    pub a_centripetal_max: f64,
-}
-
-impl Limits {
-    #[must_use]
-    pub fn new(v_max: [f64; 3], a_max: [f64; 3], j_max: [f64; 3], a_centripetal_max: f64) -> Self {
-        Self {
-            v_max,
-            a_max,
-            j_max,
-            a_centripetal_max,
-        }
-    }
-}
-
 pub const MAX_AXES: usize = 3;
 pub const MAX_LIMIT_SETS: usize = 8;
 
@@ -62,7 +41,7 @@ pub struct LimitSet {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NormLimits {
+pub struct Limits {
     sets: [LimitSet; MAX_LIMIT_SETS],
     n_sets: u8,
 }
@@ -83,7 +62,7 @@ pub enum LimitsError {
     NoJerkCoverage { axis: usize },
 }
 
-impl NormLimits {
+impl Limits {
     pub fn try_new(sets: &[LimitSet]) -> Result<Self, LimitsError> {
         if sets.is_empty() {
             return Err(LimitsError::Empty);

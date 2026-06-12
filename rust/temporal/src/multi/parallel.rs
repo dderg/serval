@@ -186,7 +186,13 @@ pub(crate) fn solve_with_boundary_fallback(
             let v_max_end = chain
                 .limits
                 .last()
-                .map(|l| l.v_max.iter().copied().fold(f64::INFINITY, f64::min))
+                .map(|l| {
+                    l.sets()
+                        .iter()
+                        .map(|s| s.v_max)
+                        .filter(|v| v.is_finite())
+                        .fold(f64::INFINITY, f64::min)
+                })
                 .unwrap_or(f64::INFINITY);
             let mut lo_v = min_v;
             let mut hi_v = v_max_end.min(v_start.max(v_end) * 2.0 + min_v + 1.0);
@@ -275,12 +281,12 @@ pub(crate) fn solve_with_boundary_fallback(
             ToleranceMode::Auto,
         );
     }
-    let base_v_max = chain.limits[0].v_max;
+    let base_v_max = chain.limits[0].v_ceiling();
     let mut vlo = 0.0_f64;
     let mut vhi = 1.0_f64;
     let mut vbest: Option<TopProfile> = None;
     for _ in 0..24 {
-        if (vhi - vlo) < BISECT_VEL_RESOLUTION_MM_S / base_v_max[0].max(1e-9) {
+        if (vhi - vlo) < BISECT_VEL_RESOLUTION_MM_S / base_v_max.max(1e-9) {
             break;
         }
         let mid = (vlo + vhi) * 0.5;
@@ -323,19 +329,9 @@ fn chain_envelope_aj(chain: &crate::topp::chain::ChainGrid) -> (f64, f64) {
     let mut j_env = 0.0_f64;
     for (node_idx, geom) in chain.geom.iter().enumerate() {
         let lim = chain.limits_at(node_idx);
-        let g = &geom.c_prime;
-        let mut a_tan = f64::INFINITY;
-        let mut j_tan = f64::INFINITY;
-        let mut active = false;
-        for ax in 0..3 {
-            let gabs = g[ax].abs();
-            if gabs > COMP_FLOOR {
-                a_tan = a_tan.min(lim.a_max[ax] / gabs);
-                j_tan = j_tan.min(lim.j_max[ax] / gabs);
-                active = true;
-            }
-        }
-        if active {
+        let a_tan = lim.a_tan_cap(&geom.c_prime, COMP_FLOOR);
+        let j_tan = lim.j_tan_cap(&geom.c_prime, COMP_FLOOR);
+        if a_tan.is_finite() && j_tan.is_finite() {
             a_env = a_env.max(a_tan);
             j_env = j_env.max(j_tan);
         }
@@ -343,15 +339,23 @@ fn chain_envelope_aj(chain: &crate::topp::chain::ChainGrid) -> (f64, f64) {
     (a_env.max(1e-9), j_env.max(1e-9))
 }
 
+const V_SCALE_FACTOR_FLOOR: f64 = 1e-12;
+
 fn scale_chain_v_max(chain: &ChainGrid, factor: f64) -> ChainGrid {
+    let factor = factor.max(V_SCALE_FACTOR_FLOOR);
     let mut scaled = chain.clone();
     for l in &mut scaled.limits {
-        *l = crate::Limits::new(
-            l.v_max.map(|v| v * factor),
-            l.a_max,
-            l.j_max,
-            l.a_centripetal_max,
-        );
+        let sets: Vec<crate::LimitSet> = l
+            .sets()
+            .iter()
+            .map(|s| crate::LimitSet {
+                axes: s.axes,
+                v_max: s.v_max * factor,
+                a_max: s.a_max,
+                j_max: s.j_max,
+            })
+            .collect();
+        *l = crate::Limits::try_new(&sets).expect("velocity rescale preserves validity");
     }
     scaled
 }

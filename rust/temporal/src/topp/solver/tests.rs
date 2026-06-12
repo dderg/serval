@@ -201,12 +201,11 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
 #[test]
 fn straight_line_solves_to_nontrivial_profile() {
     let grid = dummy_straight_grid(50, 100.0);
-    let limits = Limits {
-        v_max: [500.0, 500.0, 500.0],
-        a_max: [5_000.0, 5_000.0, 5_000.0],
-        j_max: [100_000.0, 100_000.0, 100_000.0],
-        a_centripetal_max: 2_500.0,
-    };
+    let limits = Limits::axis_boxes(
+        [500.0, 500.0, 500.0],
+        [5_000.0, 5_000.0, 5_000.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    );
     let chain = ChainGrid::from_segment_grids(vec![grid], vec![limits]);
     let bundle = match build_chain(
         &chain,
@@ -356,12 +355,11 @@ fn damp_scale_for_axis_feasibility_achieves_target() {
             inter_geom,
         }
     };
-    let limits = Limits {
-        v_max: [500.0, 500.0, 500.0],
-        a_max: [50_000.0, 50_000.0, 50_000.0],
-        j_max: [j_max, j_max, j_max],
-        a_centripetal_max: 1e9,
-    };
+    let limits = Limits::axis_boxes(
+        [500.0, 500.0, 500.0],
+        [50_000.0, 50_000.0, 50_000.0],
+        [j_max, j_max, j_max],
+    );
     let chain = ChainGrid::from_segment_grids(vec![grid], vec![limits]);
 
     let b = vec![b0; n];
@@ -448,12 +446,11 @@ fn build_axis_jerk_cuts_chain_places_maintenance_cuts() {
             inter_geom,
         }
     };
-    let limits = Limits {
-        v_max: [500.0, 500.0, 500.0],
-        a_max: [50_000.0, 50_000.0, 50_000.0],
-        j_max: [j_max, j_max, j_max],
-        a_centripetal_max: 1e9,
-    };
+    let limits = Limits::axis_boxes(
+        [500.0, 500.0, 500.0],
+        [50_000.0, 50_000.0, 50_000.0],
+        [j_max, j_max, j_max],
+    );
     let chain = ChainGrid::from_segment_grids(vec![grid], vec![limits]);
 
     let b = vec![b_val; n];
@@ -523,12 +520,11 @@ fn build_axis_jerk_cuts_chain_places_maintenance_cuts() {
 #[test]
 fn slp_solve_chain_zero_cuts_placeable_is_converged_not_max_iters() {
     let grid = dummy_straight_grid(20, 0.03_f64);
-    let limits = Limits {
-        v_max: [300.0, 300.0, 15.0],
-        a_max: [5_000.0, 5_000.0, 350.0],
-        j_max: [1.0, 1.0, 1.0],
-        a_centripetal_max: 1.0,
-    };
+    let limits = Limits::axis_boxes(
+        [300.0, 300.0, 15.0],
+        [5_000.0, 5_000.0, 350.0],
+        [1.0, 1.0, 1.0],
+    );
     let chain = ChainGrid::from_segment_grids(vec![grid], vec![limits]);
     let scale = crate::topp::scaling::SolverScale::for_chain(&chain);
     let scaled = scale.scale_chain_grid(&chain);

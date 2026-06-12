@@ -47,10 +47,5 @@ fn extreme_spacing_ratio_panics() {
 }
 
 fn lim(v: f64) -> Limits {
-    Limits {
-        v_max: [v; 3],
-        a_max: [5_000.0; 3],
-        j_max: [100_000.0; 3],
-        a_centripetal_max: 2_500.0,
-    }
+    Limits::axis_boxes([v; 3], [5_000.0; 3], [100_000.0; 3])
 }
