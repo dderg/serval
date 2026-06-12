@@ -145,7 +145,7 @@ fn cold_boot_z_hop_first_piece_starts_at_seed_position() {
         .expect("kalico_stream_open (cold-boot Z=0)");
 
     h.submit_move(
-        classify_and_build([0.0, 0.0, 0.0], 0.0, 0.0, Z_HOP_MM, 0.0, Z_HOP_FEEDRATE)
+        classify_and_build([0.0, 0.0, 0.0], 0.0, 0.0, Z_HOP_MM, &[], Z_HOP_FEEDRATE)
             .expect("classify Z hop"),
     )
     .expect("submit Z hop");
@@ -188,7 +188,7 @@ fn cold_boot_z_hop_first_piece_is_cubic() {
         .expect("kalico_stream_open (cold-boot Z=0)");
 
     h.submit_move(
-        classify_and_build([0.0, 0.0, 0.0], 0.0, 0.0, Z_HOP_MM, 0.0, Z_HOP_FEEDRATE)
+        classify_and_build([0.0, 0.0, 0.0], 0.0, 0.0, Z_HOP_MM, &[], Z_HOP_FEEDRATE)
             .expect("classify Z hop"),
     )
     .expect("submit Z hop");
@@ -233,7 +233,7 @@ fn cold_boot_z_hop_steps_per_sample_within_mcu_limit() {
         .expect("kalico_stream_open (cold-boot Z=0)");
 
     h.submit_move(
-        classify_and_build([0.0, 0.0, 0.0], 0.0, 0.0, Z_HOP_MM, 0.0, Z_HOP_FEEDRATE)
+        classify_and_build([0.0, 0.0, 0.0], 0.0, 0.0, Z_HOP_MM, &[], Z_HOP_FEEDRATE)
             .expect("classify Z hop"),
     )
     .expect("submit Z hop");
@@ -278,7 +278,7 @@ fn z_hop_after_stream_open_with_nonzero_seed_starts_at_seed() {
             0.0,
             0.0,
             Z_HOP_MM,
-            0.0,
+            &[],
             Z_HOP_FEEDRATE,
         )
         .expect("classify Z hop"),
@@ -325,7 +325,7 @@ fn z_hop_inter_piece_continuity() {
         .expect("kalico_stream_open");
 
     h.submit_move(
-        classify_and_build([0.0, 0.0, 0.0], 0.0, 0.0, Z_HOP_MM, 0.0, Z_HOP_FEEDRATE)
+        classify_and_build([0.0, 0.0, 0.0], 0.0, 0.0, Z_HOP_MM, &[], Z_HOP_FEEDRATE)
             .expect("classify Z hop"),
     )
     .expect("submit Z hop");

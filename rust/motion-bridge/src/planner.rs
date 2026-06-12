@@ -756,7 +756,7 @@ fn run_loop(
                 };
 
                 let move_result =
-                    crate::classify::classify_and_build(p.start, dx, dy, dz, 0.0, p.speed_mm_s);
+                    crate::classify::classify_and_build(p.start, dx, dy, dz, &[], p.speed_mm_s);
                 let classified = match move_result {
                     Ok(m) => m,
                     Err(e) => {

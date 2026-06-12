@@ -2812,8 +2812,23 @@ impl PyMotionBridge {
             "bridge.submit_move enter"
         );
         py.detach(|| -> PyResult<()> {
+            let followers: Vec<(usize, f64)> = if de.abs() > 0.0 {
+                let cfg = self
+                    .planner_config
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                let axis_index = cfg.axis_registry.axis_index("e").map_err(|_| {
+                    PyRuntimeError::new_err(
+                        "E word on a move but no [axis e] is declared — declare the \
+                         follower axis or stop sending E",
+                    )
+                })?;
+                vec![(axis_index, de)]
+            } else {
+                vec![]
+            };
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            let classified = classify::classify_and_build(pos, dx, dy, dz, de, feedrate)
+            let classified = classify::classify_and_build(pos, dx, dy, dz, &followers, feedrate)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
             {

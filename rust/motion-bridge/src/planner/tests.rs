@@ -23,7 +23,7 @@ fn relaxed_config() -> PlannerConfig {
 }
 
 fn long_move() -> ClassifiedMove {
-    classify_and_build([0.0; 3], 200.0, 0.0, 0.0, 0.0, 200.0).unwrap()
+    classify_and_build([0.0; 3], 200.0, 0.0, 0.0, &[], 200.0).unwrap()
 }
 
 #[test]
@@ -283,7 +283,7 @@ fn z_only_move_after_homing_xy_shaped_axes_are_constant() {
 
     let do_move =
         |state: &mut ShaperState, start: [f64; 3], dx: f64, dy: f64, dz: f64, feed: f64| {
-            let m = classify_and_build(start, dx, dy, dz, 0.0, feed)
+            let m = classify_and_build(start, dx, dy, dz, &[], feed)
                 .expect("classify_and_build should succeed for valid moves");
             state
                 .append_and_replan(m.segment, &replan_ctx)
@@ -318,7 +318,7 @@ fn z_only_move_after_homing_xy_shaped_axes_are_constant() {
 
     state.reset(&[150.0, 132.0, 344.0], &replan_ctx.chains);
 
-    let z_move = classify_and_build([150.0, 132.0, 344.0], 0.0, 0.0, -342.0, 0.0, 8.0)
+    let z_move = classify_and_build([150.0, 132.0, 344.0], 0.0, 0.0, -342.0, &[], 8.0)
         .expect("classify Z move");
     state
         .append_and_replan(z_move.segment, &replan_ctx)
@@ -400,7 +400,7 @@ fn z_move_with_tiny_x_after_homing_xy_deviation_proportional() {
 
     let do_move =
         |state: &mut ShaperState, start: [f64; 3], dx: f64, dy: f64, dz: f64, feed: f64| {
-            let m = classify_and_build(start, dx, dy, dz, 0.0, feed).expect("classify");
+            let m = classify_and_build(start, dx, dy, dz, &[], feed).expect("classify");
             state
                 .append_and_replan(m.segment, &replan_ctx)
                 .expect("replan");
@@ -427,7 +427,7 @@ fn z_move_with_tiny_x_after_homing_xy_deviation_proportional() {
     let _ = do_flush(&mut state);
 
     state.reset(&[150.0, 132.0, 344.0], &replan_ctx.chains);
-    let z_move = classify_and_build([150.0, 132.0, 344.0], 0.1, 0.0, -342.0, 0.0, 8.0)
+    let z_move = classify_and_build([150.0, 132.0, 344.0], 0.1, 0.0, -342.0, &[], 8.0)
         .expect("classify Z+tiny-X move");
     state
         .append_and_replan(z_move.segment, &replan_ctx)
@@ -509,7 +509,7 @@ fn quiescence_keeps_timeline_monotone_next_move_does_not_rewind() {
 
     log.lock().unwrap().clear();
     std::thread::sleep(Duration::from_millis(400));
-    let m2 = classify_and_build([200.0, 0.0, 0.0], 200.0, 0.0, 0.0, 0.0, 200.0).unwrap();
+    let m2 = classify_and_build([200.0, 0.0, 0.0], 200.0, 0.0, 0.0, &[], 200.0).unwrap();
     h.submit_move(m2).unwrap();
     wait_for_commits(&h, 2);
     let m2_min_t_start = log
@@ -550,7 +550,7 @@ fn move_after_idle_resumes_with_dispatch_lead() {
     std::thread::sleep(Duration::from_secs_f64(idle_extra));
 
     log.lock().unwrap().clear();
-    let m2 = classify_and_build([200.0, 0.0, 0.0], 200.0, 0.0, 0.0, 0.0, 200.0).unwrap();
+    let m2 = classify_and_build([200.0, 0.0, 0.0], 200.0, 0.0, 0.0, &[], 200.0).unwrap();
     h.submit_move(m2).unwrap();
     h.flush().unwrap();
     let m2_min_t_start = log
@@ -610,7 +610,7 @@ fn z_only_move_no_prior_xy_motion() {
 
     state.reset(&[150.0, 132.0, 344.0], &replan_ctx.chains);
 
-    let z_move = classify_and_build([150.0, 132.0, 344.0], 0.0, 0.0, -342.0, 0.0, 8.0)
+    let z_move = classify_and_build([150.0, 132.0, 344.0], 0.0, 0.0, -342.0, &[], 8.0)
         .expect("classify Z move");
     state
         .append_and_replan(z_move.segment, &replan_ctx)
@@ -682,7 +682,7 @@ fn peak_speed_of_single_x_move(max_velocity: f64, max_accel: f64, feedrate: f64)
     };
 
     state.reset(&[0.0; 3], &replan_ctx.chains);
-    let m = classify_and_build([0.0; 3], 600.0, 0.0, 0.0, 0.0, feedrate)
+    let m = classify_and_build([0.0; 3], 600.0, 0.0, 0.0, &[], feedrate)
         .expect("classify_and_build should succeed");
     state
         .append_and_replan(m.segment, &replan_ctx)
@@ -755,7 +755,7 @@ fn flush_then_move_dispatches_without_error() {
     assert!(m1_max_t_end > 0.0, "move 1 produced no dispatched segments");
 
     log.lock().unwrap().clear();
-    let m2 = classify_and_build([200.0, 0.0, 0.0], 200.0, 0.0, 0.0, 0.0, 200.0).unwrap();
+    let m2 = classify_and_build([200.0, 0.0, 0.0], 200.0, 0.0, 0.0, &[], 200.0).unwrap();
     h.submit_move(m2).unwrap();
     h.flush().unwrap();
     let m2_log = log.lock().unwrap().clone();

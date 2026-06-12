@@ -345,7 +345,7 @@ fn scenario_single_x_jog(label: &'static str) -> Vec<PieceStreamEntry> {
     cfg.limit_sections = bench_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog");
     h.flush().expect("flush");
 
@@ -380,17 +380,17 @@ fn scenario_three_x_jogs_in_flight(label: &'static str) -> Vec<PieceStreamEntry>
     h.kalico_stream_open([295.0, 0.0, 0.0, 0.0])
         .expect("kalico_stream_open");
 
-    h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 1");
 
     std::thread::sleep(Duration::from_millis(50));
 
-    h.submit_move(classify_and_build([275.0, 0.0, 0.0], -25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([275.0, 0.0, 0.0], -25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 2");
 
     std::thread::sleep(Duration::from_millis(50));
 
-    h.submit_move(classify_and_build([250.0, 0.0, 0.0], -25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([250.0, 0.0, 0.0], -25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 3");
 
     h.flush().expect("flush");

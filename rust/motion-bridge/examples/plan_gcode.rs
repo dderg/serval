@@ -237,7 +237,7 @@ fn main() {
                     }
 
                     let classified =
-                        match classify_and_build(start, dx, dy, dz, 0.0, pos.feedrate_mm_s) {
+                        match classify_and_build(start, dx, dy, dz, &[], pos.feedrate_mm_s) {
                             Ok(m) => m,
                             Err(ClassifyError::ZeroDisplacement) => {
                                 skipped_zero += 1;

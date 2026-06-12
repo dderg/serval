@@ -237,13 +237,13 @@ fn two_jogs_queued_while_first_in_flight_remain_continuous() {
     cfg.limit_sections = high_speed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, 0.0, 350.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, &[], 350.0).unwrap())
         .expect("submit jog 1");
 
     wait_for_commits(&h, 1);
     std::thread::sleep(Duration::from_millis(50));
 
-    h.submit_move(classify_and_build([25.0, 0.0, 0.0], 25.0, 0.0, 0.0, 0.0, 666.666).unwrap())
+    h.submit_move(classify_and_build([25.0, 0.0, 0.0], 25.0, 0.0, 0.0, &[], 666.666).unwrap())
         .expect("submit jog 2");
 
     wait_for_commits(&h, 2);
@@ -271,11 +271,11 @@ fn two_jogs_second_queued_before_first_commit_remain_continuous() {
     cfg.limit_sections = high_speed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, 0.0, 350.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, &[], 350.0).unwrap())
         .expect("submit jog 1");
     std::thread::sleep(Duration::from_millis(5));
 
-    h.submit_move(classify_and_build([25.0, 0.0, 0.0], 25.0, 0.0, 0.0, 0.0, 666.666).unwrap())
+    h.submit_move(classify_and_build([25.0, 0.0, 0.0], 25.0, 0.0, 0.0, &[], 666.666).unwrap())
         .expect("submit jog 2");
 
     h.flush().expect("flush");
@@ -293,12 +293,12 @@ fn two_jogs_second_queued_right_after_first_commit_remain_continuous() {
     cfg.limit_sections = high_speed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, 0.0, 350.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, &[], 350.0).unwrap())
         .expect("submit jog 1");
 
     wait_for_commits(&h, 1);
 
-    h.submit_move(classify_and_build([25.0, 0.0, 0.0], 25.0, 0.0, 0.0, 0.0, 666.666).unwrap())
+    h.submit_move(classify_and_build([25.0, 0.0, 0.0], 25.0, 0.0, 0.0, &[], 666.666).unwrap())
         .expect("submit jog 2");
 
     h.flush().expect("flush");
@@ -316,9 +316,9 @@ fn cross_move_continuity_within_refit_noise() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
-    h.submit_move(classify_and_build([1.0, 0.0, 0.0], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([1.0, 0.0, 0.0], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 2");
     h.flush().expect("flush");
 
@@ -380,7 +380,7 @@ fn four_consecutive_jogs_chain_continuously() {
 
     for i in 0..4 {
         let start = [(i as f64) * 1.0, 0.0, 0.0];
-        let m = classify_and_build(start, 1.0, 0.0, 0.0, 0.0, 100.0)
+        let m = classify_and_build(start, 1.0, 0.0, 0.0, &[], 100.0)
             .unwrap_or_else(|e| panic!("classify move {i}: {e:?}"));
         h.submit_move(m)
             .unwrap_or_else(|e| panic!("submit move {i}: {e}"));
@@ -484,13 +484,13 @@ fn slow_jogs_decelerate_to_zero_between() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
     h.flush().expect("flush 1");
 
     let count_after_first = recorded.lock().unwrap().len();
 
-    h.submit_move(classify_and_build([1.0, 0.0, 0.0], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([1.0, 0.0, 0.0], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 2");
     h.flush().expect("flush 2");
 
@@ -568,9 +568,9 @@ fn replan_during_long_cruise_preserves_committed_position() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 200.0, 0.0, 0.0, 0.0, 200.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 200.0, 0.0, 0.0, &[], 200.0).unwrap())
         .expect("submit move 1 (200 mm)");
-    h.submit_move(classify_and_build([200.0, 0.0, 0.0], 100.0, 0.0, 0.0, 0.0, 200.0).unwrap())
+    h.submit_move(classify_and_build([200.0, 0.0, 0.0], 100.0, 0.0, 0.0, &[], 200.0).unwrap())
         .expect("submit move 2 (100 mm)");
     h.flush().expect("synchronization flush after move 2");
 
@@ -624,7 +624,7 @@ fn quiescence_timer_fires_after_single_move() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move");
 
     wait_for_commits(&h, 1);
@@ -648,7 +648,7 @@ fn commit_after_quiescence_dispatches_terminal_decel() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move");
 
     wait_for_commits(&h, 1);
@@ -710,7 +710,7 @@ fn commit_then_new_move_starts_from_rest() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
 
     wait_for_commits(&h, 1);
@@ -742,7 +742,7 @@ fn commit_then_new_move_starts_from_rest() {
         move_1_terminal_v,
     );
 
-    h.submit_move(classify_and_build([1.0, 0.0, 0.0], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([1.0, 0.0, 0.0], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 2");
 
     wait_for_commits(&h, 2);
@@ -800,7 +800,7 @@ fn commit_decel_to_zero_is_idempotent_across_re_armed_timer() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
     wait_for_commits(&h, 1);
     assert_eq!(h.commit_fire_count(), 1);
@@ -830,7 +830,7 @@ fn flush_commits_terminal_decel_synchronously() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move");
     h.flush().expect("flush");
 
@@ -912,7 +912,7 @@ fn kalico_stream_open_resets_planner_state() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
     h.flush().expect("flush move 1");
 
@@ -931,7 +931,7 @@ fn kalico_stream_open_resets_planner_state() {
             1.0,
             0.0,
             0.0,
-            0.0,
+            &[],
             100.0,
         )
         .unwrap(),
@@ -980,7 +980,7 @@ fn underrun_recovery_resets_to_recovered_position() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
     h.flush().expect("flush move 1");
 
@@ -999,7 +999,7 @@ fn underrun_recovery_resets_to_recovered_position() {
             1.0,
             0.0,
             0.0,
-            0.0,
+            &[],
             100.0,
         )
         .unwrap(),
@@ -1046,7 +1046,7 @@ fn force_idle_recovery_resets_to_recovered_position() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
     h.flush().expect("flush move 1");
 
@@ -1062,7 +1062,7 @@ fn force_idle_recovery_resets_to_recovered_position() {
             1.0,
             0.0,
             0.0,
-            0.0,
+            &[],
             100.0,
         )
         .unwrap(),
@@ -1091,7 +1091,7 @@ fn update_post_processor_commits_held_output_before_swap() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
 
     let commit_count_before = h.commit_fire_count();
@@ -1115,7 +1115,7 @@ fn update_post_processor_commits_held_output_before_swap() {
     );
 
     let segs_before_post_swap = recorded.lock().unwrap().len();
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("post-swap submit");
     h.flush().expect("post-swap flush");
     let segs_after_post_swap = recorded.lock().unwrap().len();
@@ -1139,7 +1139,7 @@ fn clock_sync_rearm_commits_old_bias_first() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
 
     let commit_count_before = h.commit_fire_count();
@@ -1190,7 +1190,7 @@ fn submit_move_advances_last_move_time_synchronously() {
         "fresh planner should start with last_move_time = 0.0, got {t0}",
     );
 
-    let m = classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap();
+    let m = classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap();
     let expected_nominal = m.nominal_duration();
     assert!(
         (expected_nominal - 0.01).abs() < 1e-12,
@@ -1220,7 +1220,7 @@ fn rectification_corrects_actual_duration() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    let m = classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap();
+    let m = classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap();
     let nominal = m.nominal_duration();
 
     h.submit_move(m).expect("submit move");
@@ -1263,17 +1263,17 @@ fn inline_event_scheduling_uses_queued_time() {
     cfg.limit_sections = relaxed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    let m1 = classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap();
+    let m1 = classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap();
     let nominal1 = m1.nominal_duration();
     h.submit_move(m1).expect("submit move 1");
     let after_m1 = h.last_move_time();
 
-    let m2 = classify_and_build([1.0, 0.0, 0.0], 2.0, 0.0, 0.0, 0.0, 100.0).unwrap();
+    let m2 = classify_and_build([1.0, 0.0, 0.0], 2.0, 0.0, 0.0, &[], 100.0).unwrap();
     let nominal2 = m2.nominal_duration();
     h.submit_move(m2).expect("submit move 2");
     let after_m2 = h.last_move_time();
 
-    let m3 = classify_and_build([3.0, 0.0, 0.0], 3.0, 0.0, 0.0, 0.0, 100.0).unwrap();
+    let m3 = classify_and_build([3.0, 0.0, 0.0], 3.0, 0.0, 0.0, &[], 100.0).unwrap();
     let nominal3 = m3.nominal_duration();
     h.submit_move(m3).expect("submit move 3");
     let after_m3 = h.last_move_time();
@@ -1316,7 +1316,7 @@ fn wait_moves_blocks_until_dispatch_catches_up() {
     let starts = [[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]];
     let mut cumulative_nominal = 0.0;
     for start in starts.iter() {
-        let m = classify_and_build(*start, 1.0, 0.0, 0.0, 0.0, 100.0).unwrap();
+        let m = classify_and_build(*start, 1.0, 0.0, 0.0, &[], 100.0).unwrap();
         cumulative_nominal += m.nominal_duration();
         h.submit_move(m).expect("submit move");
     }
@@ -1442,12 +1442,12 @@ fn two_jog_replan_segments_survive_corexy_motor_union() {
     let (dispatch, recorded) = recording_dispatch();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, 0.0, 350.0).unwrap())
+    h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, &[], 350.0).unwrap())
         .expect("submit jog 1");
 
     wait_for_commits(&h, 1);
 
-    h.submit_move(classify_and_build([25.0, 0.0, 0.0], 25.0, 0.0, 0.0, 0.0, 666.666).unwrap())
+    h.submit_move(classify_and_build([25.0, 0.0, 0.0], 25.0, 0.0, 0.0, &[], 666.666).unwrap())
         .expect("submit jog 2");
 
     wait_for_commits(&h, 2);
@@ -1538,17 +1538,17 @@ fn three_pure_x_jogs_in_flight_corexy_degree_invariant() {
     cfg.limit_sections = high_speed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 1");
 
     std::thread::sleep(Duration::from_millis(50));
 
-    h.submit_move(classify_and_build([275.0, 0.0, 0.0], -25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([275.0, 0.0, 0.0], -25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 2");
 
     std::thread::sleep(Duration::from_millis(50));
 
-    h.submit_move(classify_and_build([250.0, 0.0, 0.0], -25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([250.0, 0.0, 0.0], -25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 3");
 
     h.flush().expect("flush");
@@ -1570,15 +1570,15 @@ fn three_pure_x_jogs_from_rest_with_quiescence_corexy_degree_invariant() {
     cfg.limit_sections = high_speed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 1");
     h.flush().expect("flush 1");
 
-    h.submit_move(classify_and_build([275.0, 0.0, 0.0], -25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([275.0, 0.0, 0.0], -25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 2");
     h.flush().expect("flush 2");
 
-    h.submit_move(classify_and_build([250.0, 0.0, 0.0], -25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([250.0, 0.0, 0.0], -25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 3");
     h.flush().expect("flush 3");
 
@@ -1601,15 +1601,15 @@ fn three_pure_x_jogs_quiescence_timer_corexy_degree_invariant() {
     cfg.limit_sections = high_speed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
 
-    h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 1");
     wait_for_commits(&h, 1);
 
-    h.submit_move(classify_and_build([275.0, 0.0, 0.0], -25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([275.0, 0.0, 0.0], -25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 2");
     wait_for_commits(&h, 2);
 
-    h.submit_move(classify_and_build([250.0, 0.0, 0.0], -25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([250.0, 0.0, 0.0], -25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 3");
     wait_for_commits(&h, 3);
 
@@ -1637,17 +1637,17 @@ fn three_pure_x_jogs_in_flight_velocity_seam() {
     h.kalico_stream_open([295.0, 0.0, 0.0, 0.0])
         .expect("stream_open");
 
-    h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 1");
 
     std::thread::sleep(Duration::from_millis(50));
 
-    h.submit_move(classify_and_build([275.0, 0.0, 0.0], -25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([275.0, 0.0, 0.0], -25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 2");
 
     std::thread::sleep(Duration::from_millis(50));
 
-    h.submit_move(classify_and_build([250.0, 0.0, 0.0], -25.0, 0.0, 0.0, 0.0, 100.0).unwrap())
+    h.submit_move(classify_and_build([250.0, 0.0, 0.0], -25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 3");
 
     h.flush().expect("flush");
