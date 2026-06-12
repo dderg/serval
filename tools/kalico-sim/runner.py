@@ -503,14 +503,17 @@ def run_simulation(
                     )
                 )
                 extras_dir = repo_root / "klippy" / "extras"
-                beacon_py = beacon_path / "beacon.py"
-                extras_beacon = extras_dir / "beacon.py"
-                if beacon_py.exists() and not extras_beacon.exists():
-                    try:
-                        os.symlink(str(beacon_py.resolve()), str(extras_beacon))
-                        log.info("Symlinked beacon.py into klippy/extras/")
-                    except OSError:
-                        pass
+                for fname in ("beacon.py", "beacon_kalico.py"):
+                    src = beacon_path / fname
+                    dest = extras_dir / fname
+                    if src.exists() and not dest.exists():
+                        try:
+                            os.symlink(str(src.resolve()), str(dest))
+                            log.info(
+                                "Symlinked %s into klippy/extras/", fname
+                            )
+                        except OSError:
+                            pass
 
             klippy_proc = subprocess.Popen(
                 [
