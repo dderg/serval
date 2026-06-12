@@ -106,6 +106,10 @@ pub const KALICO_ERR_UNKNOWN_STEP_MODE: i32 = -312;
 /// entry in `phase_slot_idx[0..phase_motor_count]` maps it to a registered
 /// SPI motor. Detail: `((axis_idx & 0xFF) << 16) | stepper_oid`.
 pub const KALICO_ERR_PHASE_MOTOR_UNMAPPED: i32 = -313;
+/// Normal PushPieces commit attempted while a correction stream is active
+/// on the axis, or a correction commit attempted while one is already
+/// active elsewhere. Detail: `((axis_idx & 0xFF) << 16) | motor_idx`.
+pub const KALICO_ERR_CORRECTION_IN_PROGRESS: i32 = -314;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +191,7 @@ pub enum FaultCode {
     TickIntervalExceeded = -311,
     UnknownStepMode = -312,
     PhaseMotorUnmapped = -313,
+    CorrectionInProgress = -314,
 }
 
 impl FaultCode {
@@ -288,6 +293,7 @@ impl FaultCode {
             -311 => Self::TickIntervalExceeded,
             -312 => Self::UnknownStepMode,
             -313 => Self::PhaseMotorUnmapped,
+            -314 => Self::CorrectionInProgress,
             _ => return None,
         })
     }
@@ -367,6 +373,7 @@ impl FaultCode {
             Self::TickIntervalExceeded => "TickIntervalExceeded",
             Self::UnknownStepMode => "UnknownStepMode",
             Self::PhaseMotorUnmapped => "PhaseMotorUnmapped",
+            Self::CorrectionInProgress => "CorrectionInProgress",
         }
     }
 }

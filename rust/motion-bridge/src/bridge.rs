@@ -529,7 +529,9 @@ pub struct PyMotionBridge {
 }
 
 pub(crate) fn axis_ring_depth(total_pieces: u32, num_axes: u32) -> u32 {
-    (total_pieces / num_axes.max(1)).max(1)
+    let correction_reserve =
+        num_axes.max(1) * runtime::stepping_state::CORRECTION_RING_DEPTH as u32;
+    (total_pieces.saturating_sub(correction_reserve) / num_axes.max(1)).max(1)
 }
 
 pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::pump::AxisKey> {
@@ -593,29 +595,36 @@ mod drip_cohort_participants_tests {
 mod axis_ring_depth_tests {
     use super::axis_ring_depth;
 
+    use runtime::stepping_state::CORRECTION_RING_DEPTH;
+
     #[test]
-    fn typical_two_axis_mcu() {
-        assert_eq!(axis_ring_depth(1984, 2), 992);
+    fn typical_two_axis_mcu_reserves_correction_rings() {
+        assert_eq!(
+            axis_ring_depth(1984, 2),
+            (1984 - 2 * CORRECTION_RING_DEPTH as u32) / 2
+        );
     }
 
     #[test]
-    fn single_axis_mcu() {
-        assert_eq!(axis_ring_depth(1984, 1), 1984);
+    fn single_axis_mcu_reserves_correction_ring() {
+        assert_eq!(
+            axis_ring_depth(1984, 1),
+            1984 - CORRECTION_RING_DEPTH as u32
+        );
     }
 
     #[test]
-    fn floor_division() {
-        assert_eq!(axis_ring_depth(5, 2), 2);
-    }
-
-    #[test]
-    fn lower_clamp_on_zero_total() {
+    fn lower_clamp_when_reserve_exceeds_total() {
+        assert_eq!(axis_ring_depth(5, 2), 1);
         assert_eq!(axis_ring_depth(0, 2), 1);
     }
 
     #[test]
     fn zero_num_axes_treated_as_one() {
-        assert_eq!(axis_ring_depth(1000, 0), 1000);
+        assert_eq!(
+            axis_ring_depth(1000, 0),
+            1000 - CORRECTION_RING_DEPTH as u32
+        );
     }
 }
 
@@ -683,11 +692,11 @@ mod ring_depth_for_axis_tests {
     fn success_two_axis_mcu() {
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 1, AXIS_X as u8).unwrap(),
-            992
+            976
         );
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 1, AXIS_Y as u8).unwrap(),
-            992
+            976
         );
     }
 
@@ -695,7 +704,7 @@ mod ring_depth_for_axis_tests {
     fn success_single_axis_mcu() {
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 2, AXIS_Z as u8).unwrap(),
-            1984
+            1968
         );
     }
 

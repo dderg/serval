@@ -167,12 +167,16 @@ impl Engine {
         if !microstep_distance.is_finite() || microstep_distance <= 0.0 {
             return KALICO_ERR_INVALID_ARG;
         }
-        if self.ring_alloc_cursor + ring_depth > total_ring_pieces {
+        if self.ring_alloc_cursor + ring_depth + crate::stepping_state::CORRECTION_RING_DEPTH
+            > total_ring_pieces
+        {
             return KALICO_ERR_RING_FULL;
         }
 
         let offset = self.ring_alloc_cursor;
         self.ring_alloc_cursor += ring_depth;
+        let correction_offset = self.ring_alloc_cursor;
+        self.ring_alloc_cursor += crate::stepping_state::CORRECTION_RING_DEPTH;
 
         let idx = axis_idx as usize;
         // SAFETY: `idx < MAX_AXES` is guaranteed by the bounds check above.
@@ -182,6 +186,10 @@ impl Engine {
 
         axis.microstep_distance = microstep_distance;
         axis.ring = crate::piece_ring::RingDescriptor::new(offset, ring_depth);
+        axis.correction_ring = crate::piece_ring::RingDescriptor::new(
+            correction_offset,
+            crate::stepping_state::CORRECTION_RING_DEPTH,
+        );
         axis.reset_isr_cache();
         axis.steppers.clear();
         for b in bindings {
@@ -229,6 +237,13 @@ impl Engine {
                 axis.ring.advance_counter();
             }
             axis.armed = None;
+            while axis.correction_ring.front_slot().is_some() {
+                axis.correction_ring.advance_counter();
+            }
+            axis.correction_armed = None;
+            axis.correction_motor_idx = crate::stepping_state::CORRECTION_MOTOR_NONE;
+            axis.correction_last_step_count = 0;
+            axis.correction_p_prev = 0.0;
         }
     }
 
@@ -269,6 +284,80 @@ impl Engine {
             }
         }
         KALICO_OK
+    }
+
+    pub fn write_correction_piece(
+        &mut self,
+        axis_idx: u8,
+        start_slot: u16,
+        index: u8,
+        entry: PieceEntry,
+        storage: &mut [PieceEntry],
+    ) -> i32 {
+        let Some(axis) = self
+            .stepping_axes
+            .get_mut(axis_idx as usize)
+            .and_then(|s| s.as_mut())
+        else {
+            return KALICO_ERR_INVALID_ARG;
+        };
+        if !axis.correction_ring.is_configured() {
+            return KALICO_ERR_INVALID_ARG;
+        }
+        let slot = (start_slot as usize + index as usize) % axis.correction_ring.ring_depth;
+        axis.correction_ring.write_slot(storage, slot, entry);
+        KALICO_OK
+    }
+
+    pub fn commit_correction(&mut self, axis_idx: u8, motor_idx: u8, new_head: u32) -> i32 {
+        let any_other_active = self.stepping_axes.iter().enumerate().any(|(i, a)| {
+            i != axis_idx as usize && a.as_ref().map_or(false, |ax| ax.correction_active())
+        });
+        let Some(axis) = self
+            .stepping_axes
+            .get_mut(axis_idx as usize)
+            .and_then(|s| s.as_mut())
+        else {
+            return KALICO_ERR_INVALID_ARG;
+        };
+        if !axis.correction_ring.is_configured() {
+            return KALICO_ERR_INVALID_ARG;
+        }
+        if (motor_idx as usize) >= axis.steppers.len() {
+            return KALICO_ERR_INVALID_ARG;
+        }
+        if !axis.ring.is_empty() || axis.armed.is_some() {
+            return crate::error::KALICO_ERR_MOTION_IN_PROGRESS;
+        }
+        if any_other_active {
+            return crate::error::KALICO_ERR_CORRECTION_IN_PROGRESS;
+        }
+        if axis.correction_active() && axis.correction_motor_idx != motor_idx {
+            return crate::error::KALICO_ERR_CORRECTION_IN_PROGRESS;
+        }
+        if !axis.correction_active() {
+            axis.correction_motor_idx = motor_idx;
+            axis.correction_last_step_count = 0;
+            axis.correction_p_prev = 0.0;
+        }
+        match axis.correction_ring.commit_head(new_head) {
+            crate::piece_ring::CommitOutcome::Applied
+            | crate::piece_ring::CommitOutcome::Stale => KALICO_OK,
+            crate::piece_ring::CommitOutcome::Overcommit => KALICO_ERR_RING_FULL,
+        }
+    }
+
+    pub fn guard_normal_commit(&self, axis_idx: u8) -> i32 {
+        let active = self
+            .stepping_axes
+            .get(axis_idx as usize)
+            .and_then(|s| s.as_ref())
+            .map_or(false, |ax| ax.correction_active());
+        if active {
+            crate::error::KALICO_ERR_CORRECTION_IN_PROGRESS
+        } else {
+            KALICO_OK
+        }
     }
 
     pub fn tick(&mut self, now: u64, shared: &SharedState, storage: &mut [PieceEntry]) -> bool {
@@ -565,6 +654,13 @@ impl Engine {
                 axis.ring.advance_counter();
             }
             axis.armed = None;
+            while axis.correction_ring.front_slot().is_some() {
+                axis.correction_ring.advance_counter();
+            }
+            axis.correction_armed = None;
+            axis.correction_motor_idx = crate::stepping_state::CORRECTION_MOTOR_NONE;
+            axis.correction_last_step_count = 0;
+            axis.correction_p_prev = 0.0;
             let axis_pos_mm = motor_positions.get(i).copied().unwrap_or(0.0);
             let microstep_distance = axis.microstep_distance;
             if !microstep_distance.is_finite() || microstep_distance <= 0.0 {
@@ -614,6 +710,7 @@ impl Engine {
             if let Some(axis) = axis_opt.as_mut() {
                 axis.reset_isr_cache();
                 axis.ring.drain();
+                axis.correction_ring.drain();
             }
         }
         self.last_motors = [0.0; MAX_AXES];
@@ -664,3 +761,6 @@ impl Default for Engine {
         Self::new(520_000_000, crate::clock::TEST_ONLY_TICK_RATE_HZ)
     }
 }
+
+#[cfg(test)]
+mod tests;
