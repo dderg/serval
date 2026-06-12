@@ -186,21 +186,15 @@ impl HistoryStore {
                 }
                 piece.endpoint()
             }
-            None => {
-                let endpoint = self
-                    .endpoints
-                    .get(&key)
-                    .ok_or(HistoryError::NoHistoryForAxis(key))?;
-                if clock < endpoint.clock {
-                    return Err(HistoryError::BeforeRetainedWindow {
-                        key,
-                        queried: clock,
-                        window_start: endpoint.clock,
-                        window_end: endpoint.clock,
-                    });
-                }
-                *endpoint
-            }
+            // An empty ring means the axis is parked at its endpoint: that
+            // position is the answer for any query clock. Ordering the query
+            // against the endpoint clock would compare values from different
+            // clock-record eras (the rebase projection vs the query-time
+            // projection), which diverge under vtime simulation.
+            None => *self
+                .endpoints
+                .get(&key)
+                .ok_or(HistoryError::NoHistoryForAxis(key))?,
         };
         if let Some(now_clock) = now_clock {
             if clock > now_clock {
