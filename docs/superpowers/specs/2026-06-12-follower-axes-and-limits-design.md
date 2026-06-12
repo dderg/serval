@@ -14,7 +14,8 @@ boundary; everything past that boundary is uniform.
 The system knows exactly two relations between axes, both explicit in config:
 
 - **`follows`** — a follower axis derives its motion from the *realized* path
-  of the axes it follows (downstream of those axes' shapers): it pays out its
+  of the axes it follows (downstream of those axes' filter chains, §4): it
+  pays out its
   commanded displacement proportionally to actual distance traveled along that
   path (the odometer rule). The extruder is the canonical instance: a follower
   of `{x, y, z}`. This is the only directional dependency in the system.
@@ -159,9 +160,10 @@ max_accel: 1500
 - Jerk caps are declared like any other derivative cap, with sensible defaults
   when unset. The `j_max = 2 × a_max` broadcast dies.
 - **Legacy config fields fail loudly.** `max_accel` / `max_velocity` in their
-  old homes, `square_corner_velocity`, `max_z_accel`, and the rest are rejected
-  at load with errors naming the field as unsupported and pointing at the
-  `[limit]` syntax. No silent migration; users rewrite deliberately.
+  old homes, `square_corner_velocity`, `max_z_accel`, `[input_shaper]`, and
+  the rest are rejected at load with errors naming the field as unsupported
+  and pointing at the replacement (`[limit]`, `[filter]`) syntax. No silent
+  migration; users rewrite deliberately.
 
 Today's behavior — global `max_accel` broadcast into per-axis boxes, so
 diagonals reach √2× the configured value — dies with the legacy fields.
@@ -173,7 +175,7 @@ curves) would be additional keys on the same section. Nothing in this work
 depends on either.
 
 Limits are declarative data readable by any component. The planner consuming
-them is a **pure function** — `(geometry, rows, shaper operators) → timed
+them is a **pure function** — `(geometry, rows, filter operators) → timed
 trajectory` — deterministic, unit-testable without hardware, and callable as an
 oracle by any future upstream component. That API shape is a hard requirement
 of this work.
@@ -191,9 +193,9 @@ direction along the move never changes:
 `|ratio|·ṡ ≤ v_max`, `|ratio|·s̈ ≤ a_max` — the same row shape as everything
 else.
 
-**Post-processor (PA) rows.** A post-processor is a per-axis transform applied
-at emission (§5); pressure advance, `F_cmd = F + k·Ḟ`, is the first
-implementation. Its plan-time consequence: PA converts path acceleration into
+**Pressure-advance (PA) rows.** PA, `F_cmd = F + k·Ḟ`, is a per-axis filter
+applied at emission (§5; the unified filter abstraction is defined below).
+Its plan-time consequence: PA converts path acceleration into
 follower velocity demand and path jerk into follower acceleration demand:
 
 ```
@@ -206,21 +208,55 @@ what constrained time-optimal means; nothing is slowed globally. Jerk caps
 under PA require path snap; the planner's derivative order is extended
 accordingly (separately testable). Nonlinear PA makes these rows nonlinear in
 `ṡ`; the SLP linearization already used for the jerk relaxation handles them.
-The post-processor is a trait from day one; linear PA is the first instance.
 
-**Shaper folding.** Each axis's limits apply to that axis's *input* — for
-spatial axes that means pre-shaper, by definition and by tuning convention. A
-follower differs only in where its input is sampled: downstream of the followed
-axes' shapers. Every shaper we have is a **linear operator** on the
-discretization (a convolution: shaped velocity at `t` is a fixed weighted sum
-of nominal velocities at `t − dᵢ`, weights independent of the signal — see
-`rust/trajectory/src/shaper.rs`). So the follower's rows are written on the
-shaped combination of plan variables: known weights, samples a few steps apart.
-The solver picks all N samples at once such that the shaped-then-post-processed
-follower track is in-limit. No feedback, no iteration — the shaper is not
-predicted, it is written into the inequality. Rows coupling nearby samples
-already exist (jerk); the shaper window widens the coupling without changing
-its kind.
+**Filters — one abstraction for shapers and post-processors.** An input
+shaper and pressure advance are the same mathematical object: a linear
+time-invariant operator on a per-axis track (the shaper convolves with a
+unity-integral kernel; linear PA convolves with `δ + k·δ′`). One attenuates
+high frequencies, the other amplifies them; structurally they are identical.
+So there is one config object: `[filter <name>]` declares a named instance
+with a `type:` (`smooth_zv`, `smooth_mzv`, `linear_pressure_advance`, future
+models — other PA formulations, third-party transforms — plug in the same
+way) and that type's parameters. An axis applies an ordered list
+(`filters:` on its `[axis]` section). The planner never knows what a filter
+does or which axes exist — each type exposes exactly two things: its
+emission-time transform and its plan-time linear action on the
+discretization (the window operator `W` for kernels, the mixed-derivative
+shift for PA). Linear filters commute, so list order only acquires meaning
+when a nonlinear type exists.
+
+**Limits constrain the chain output — what the motor feels.** The old
+pre-shaper convention was tradition plus an accident of safety: a smoothing
+kernel is contractive (`‖K∗a‖∞ ≤ ‖a‖∞`), so rows on the nominal signal never
+under-constrain the motor — they merely over-constrain it. PA amplifies, so
+nominal rows there would lie to the motor. One rule covers both: every limit
+row is written on the axis's post-chain signal. For shaped axes this is
+strictly less conservative than the pre-shaper convention — the planner may
+command a sharper nominal corner whose smoothed, realized demand rides the
+cap exactly. Staging: rows on nominal spatial signals ship first (the
+conservative direction — valid, never motor-unsafe); switching spatial rows
+to their windowed post-chain form is a separately planned tightening that
+only speeds prints (§6).
+
+Filter parameters are **runtime-tunable**: a parameter change applies to
+everything planned after it and never rewrites already-planned trajectory —
+that is what makes live tuning possible without replanning. Compatibility
+shims for mainline tuning commands (`SET_PRESSURE_ADVANCE`, the legacy
+`[input_shaper]` section) are deferred, built later on top of the generic
+sections and parameter-update path.
+
+**Shaper folding.** The follower's rows are the first instance of the
+post-chain rule above: its input is sampled downstream of the followed axes'
+filter chains, so its rows are written on the shaped signal. Every kernel we
+have is a **linear operator** on the discretization (a convolution: shaped
+velocity at `t` is a fixed weighted sum of nominal velocities at `t − dᵢ`,
+weights independent of the signal — see `rust/trajectory/src/shaper.rs`). So
+the follower's rows are written on the shaped combination of plan variables:
+known weights, samples a few steps apart. The solver picks all N samples at
+once such that the post-chain follower track is in-limit. No feedback, no
+iteration — the kernel is not predicted, it is written into the inequality.
+Rows coupling nearby samples already exist (jerk); the kernel window widens
+the coupling without changing its kind.
 
 Accepted consequences:
 
@@ -228,10 +264,10 @@ Accepted consequences:
   committed tail of the previous plan enters as constants. Plumbing, not math.
 - Solve cost grows with window width — host compute spent on trajectory
   tightness, per the throughput rule.
-- The shaper trait's contract gains one requirement: expose your action as a
-  linear operator. Every practical shaper is one. A hypothetical nonlinear
-  shaper supplies its own local linearization or forces an outer loop — that
-  fallback is designed by whoever builds such a shaper, not here.
+- The filter trait's contract requires exposing your action as a linear
+  operator. Every practical shaper and linear PA is one. A hypothetical
+  nonlinear filter supplies its own local linearization or forces an outer
+  loop — that fallback is designed by whoever builds such a filter, not here.
 
 Verification: unit tests covering every row family and edge case are the
 backbone. `verify-logic` is dispatched only if plan-writing hits a claim we
@@ -243,27 +279,26 @@ SLP convergence).
 Every axis, at emission, runs the same per-axis chain — no axis-specific code
 paths, only stages that are configured or skipped:
 
-1. **Input track.** Spatial axis: its planned, shaped curve. Follower axis:
-   the odometer — integrate the followed axes' realized speed (downstream of
-   their shapers; quadrature over exact polynomial derivatives, host f64) to
-   get actual distance over time, then `track = start + ratio × distance`.
-   Follower-only moves: the track comes straight from the plan.
-2. **Post-processor** (optional, any axis): the configured transform on the
-   track. PA is the first implementation. Not follower-specific: any axis may
-   declare one; the architecture does not ask whether it makes sense — that is
-   the user's call. Plan-time rows fold it in, so limits hold downstream of it
-   (the motor feels the post-processed demand).
-3. **The axis's own shaper** (optional, any axis — a follower may have one;
-   typically it won't). Limits are pre-own-shaper by the same convention as
-   every axis.
-4. **Fit to cubic pieces**, ship as an ordinary `PushPieces` lane.
+1. **Input track.** Spatial axis: its planned curve. Follower axis: the
+   odometer — integrate the followed axes' realized speed (downstream of
+   their filter chains; quadrature over exact polynomial derivatives, host
+   f64) to get actual distance over time, then
+   `track = start + ratio × distance`. Follower-only moves: the track comes
+   straight from the plan.
+2. **Filter chain** (optional, any axis): the axis's configured `filters`
+   list applied to the track in order — shaper kernels and PA are the same
+   stage (§4). Not follower-specific: any axis may declare any chain; the
+   architecture does not ask whether it makes sense — that is the user's
+   call. Plan-time rows constrain the chain's output, so limits hold where
+   the motor feels them.
+3. **Fit to cubic pieces**, ship as an ordinary `PushPieces` lane.
 
-"After shaping," wherever this document says it, means: a follower samples the
-path it follows after that path's own processing; the follower's own
-processing happens downstream of the sampling, like any axis.
+"After shaping," wherever this document says it, means: a follower samples
+the path it follows downstream of that path's own filter chain; the
+follower's own chain runs downstream of the sampling, like any axis.
 
 The MCU is untouched: per-axis cubic tapes, no knowledge of followers,
-post-processors, or shapers. `docs/kalico-rewrite/mcu-c-rust-boundary.md`
+filters. `docs/kalico-rewrite/mcu-c-rust-boundary.md`
 requires zero edits.
 
 **Two ledgers, by intention** (any follower axis; the extruder is the
@@ -288,7 +323,7 @@ match the road.
 
 **Observability.** The planner knows which constraint row binds at every point
 and reports it through the structured log pipeline ("slowed here by
-`[limit extruder]` accel via post-processor"). The coupling between one axis's
+`[limit extruder]` accel via the PA filter"). The coupling between one axis's
 config and the whole machine's speed becomes discoverable at the moment
 someone asks why.
 
@@ -304,12 +339,14 @@ Separately plannable, separately testable, in dependency order:
    `follows`; 3D arc length; delete `e_mode` / `Independent` / `Travel` /
    `HelicalExtrusionUnsupported`; absolute→delta normalization; follower-only
    moves as regular moves. Mostly deletion.
-3. **Planner extension.** Follower rows, post-processor rows, snap support,
+3. **Planner extension.** Follower rows, PA rows, snap support,
    shaper-operator folding with cross-segment window plumbing. The deep item;
    depends on 1–2.
-4. **Per-axis emission chain.** Odometer quadrature, post-processor trait with
-   linear PA first, own-shaper slot, piece fitting, two-ledger bookkeeping.
-   Depends on 2; testable against 3's output offline (klipper-sim).
+4. **Per-axis emission chain.** Odometer quadrature; filter registry
+   (`[filter]` sections, ordered per-axis chains, runtime-tunable
+   parameters) unifying shaper kernels and linear PA as the first two types;
+   piece fitting; two-ledger bookkeeping. Depends on 2; testable against 3's
+   output offline (klipper-sim).
 5. **Concept removal sweep.** Toolhead and remaining mainline-planner fossils
    out of the Rust side; klippy/bridge seam renamed; thin compat shim for the
    published `toolhead` status object, retired on its own schedule. Includes
@@ -318,11 +355,14 @@ Separately plannable, separately testable, in dependency order:
 6. **Observability.** Binding-constraint reporting via structured logs. Small,
    rides on 3.
 
-Deferred, consciously — door open, nothing built: motor-space limits
-(`motors:` key, syntax reserved), velocity-dependent caps (torque curves),
-nonlinear PA (trait slot exists), exposing a follower's own shaper in config,
-automated limit tuning. All additive rows, keys, or trait implementations; none
-change the architecture.
+Deferred, consciously — door open, nothing built: **windowed post-chain rows
+for spatial axes** (the §4 tightening — spatial rows ship in nominal,
+conservative form first; the upgrade reuses plan 3's cut machinery and only
+speeds prints), motor-space limits (`motors:` key, syntax reserved),
+velocity-dependent caps (torque curves), nonlinear PA (a new filter type),
+mainline-compatible migration shims (`SET_PRESSURE_ADVANCE`, an
+`[input_shaper]` compat flag), automated limit tuning. All additive rows,
+keys, sections, or type implementations; none change the architecture.
 
 Hard requirements carried through every plan: the planner stays a pure
 function (the unit-test surface and the oracle API); fail loudly everywhere;
