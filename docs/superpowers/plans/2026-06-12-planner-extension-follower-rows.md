@@ -8,7 +8,7 @@
 
 **Tech stack:** Rust (`temporal`, `trajectory`, `motion-bridge`, `geometry` crates; Clarabel SOCP). Tests: `cargo nextest run` from `rust/` (never bare `cargo test`); doc-tests via `cargo test --doc` if touched.
 
-**PRECONDITION: Plan 2 (`docs/superpowers/plans/2026-06-12-axis-registry-reduce-simplification.md`) must be fully landed** — this plan builds on `geometry::FollowerDemand`, `CubicSegment.followers`, trajectory's `ShapeSegmentInput.followers`, and the bridge's `AxisRegistry` + follower-coverage validation. Verify before starting: `git log --oneline | head -20` shows plan 2's final commit (`feat: axis registry + follower segments end-to-end (plan 2)`) and `cargo nextest run` passes from `rust/`.
+**PRECONDITION (satisfied 2026-06-12): Plan 2 is fully landed** — commit `725917f32` (`feat: axis registry + follower segments end-to-end (plan 2)`). This plan builds on `geometry::FollowerDemand`, `CubicSegment.followers`, trajectory's `ShapeSegmentInput.followers`, and the bridge's `AxisRegistry` + follower-coverage validation. Executors still verify `cargo nextest run` passes from `rust/` before starting.
 
 **All line numbers in this plan are pre-plan-2 approximations — anchor by symbol name and the given grep commands, never by line.**
 
@@ -18,13 +18,16 @@
 
 ---
 
-## Design decisions this plan makes (beyond the spec's text — review these first)
+## Design decisions this plan makes (beyond the spec's text)
+
+**All four decisions reviewed and approved with the user, 2026-06-12.** Discussion outcomes folded in below: decision 2 gains a background `verify-logic` dispatch (see Task 8 Step 0); decision 3 gains its tuning posture.
 
 The spec writes the follower rows in scalar path-derivative form (`|ratio|·ṡ ≤ v_max` etc.) and says shaper folding writes them "on the shaped combination of plan variables." Making that executable required four concrete decisions:
 
 1. **Per-axis windowed vectors, norm by supporting hyperplane.** X and Y may run different kernels (different shaper frequencies), and Z is typically passthrough — a single scalar convolution of `ṡ` cannot represent that. So the shaped follower demand is built per followed axis: shaped axis velocity `V_α(i) = Σ_j W^α_ij · c′_α,j·√b_j + hist`, and the speed demand is `|r|·‖V(i)‖`. On straights with one kernel this reduces exactly to the spec's scalar `K∗ṡ`. The norm is handled by supporting-hyperplane cuts at the iterate (the constraint is convex in the affine window expressions, so hyperplanes are valid outer cuts).
 2. **Frozen time map.** Kernel delays are in time; solver samples are in path position; the time of sample `i` depends on the solution. Each follower outer iteration freezes `t̄_i` from the current `b̄`, builds the window weights `W` on it, solves, and re-freezes. Same fixed-point posture as the existing path-jerk and axis-jerk SLP phases, with the same divergence guards — capped iterations, loud `ScheduleError` on non-convergence. Follower cuts are **rebuilt from scratch whenever the time map is re-frozen** (cuts built on a stale `W` constrain the wrong operator).
 3. **PA-jerk row stays in nominal path form.** `|r·(s⃛ + k·s⁗)| ≤ j_max` uses *path* snap with the identity window (no shaper folding on this one row). Folding it would require 4th-order axis geometry (`c⁗`) that nothing else needs. Since the smoothing kernel is an averaging operator, the nominal row is conservative — never under-constrains; it is exact on straights and slightly over-tight inside the shaper window at corners. Accepted for v1; tightening it later is additive.
+   *Tuning posture (agreed):* the row only exists when `pa_k > 0`; the per-machine escape hatch is a generously high `max_jerk` on the follower's `[limit]` section (the config default — 2× the section's accel cap — is moderately tight). Plan 6's binding-constraint reporting will show whether this row ever binds at corners on real prints; only evidence there motivates building the windowed-snap upgrade.
 4. **Cross-chain tails within a batch.** Chain junctions are full stops (plan 1), but the shaper window spans a stop — the neighbor chain's ramp contributes to shaped speed near the boundary. After the existing joining sweeps converge, one tail-exchange pass re-solves each chain with its neighbors' boundary-window velocity samples as constants, iterated to a small cap. The batch-boundary case (committed tail of the previous plan) enters the same way, supplied by trajectory's streaming layer.
 
 A fifth, smaller one: **follower-only moves get a virtual path** — a chain whose spatial geometry is identically zero and whose arc length is the largest follower displacement; only follower rows bind, and the G-code feedrate caps `ṡ` as on any move (spec §2's "fallback line, not a mode").
@@ -577,6 +580,8 @@ pub struct FollowerHistory {
 - Modify: `rust/temporal/src/topp/follower.rs` (windowed demand evaluation + cuts), `rust/temporal/src/topp/solver.rs` (outer re-freeze loop), `rust/temporal/src/topp/window.rs` (whatever Task 3's shape needs to serve per-axis signals)
 - Modify: `rust/temporal/src/multi/mod.rs` + `multi/joining.rs` (tail exchange — Step 5)
 - Test: `rust/temporal/src/topp/follower/tests.rs`
+
+- [ ] **Step 0: Dispatch `verify-logic` (background, non-blocking).** Before starting this task's implementation, dispatch the `verify-logic` skill on the claim: *"fixed-point iteration over a frozen time map (re-freezing sample times from the current iterate, rebuilding convolution-window constraint rows, re-solving) converges for averaging-type kernels in time-optimal path parameterization — or known counterexample shapes exist (e.g. kernel support wider than a chain between stops)."* Continue implementing while it runs — the divergence guards below make non-convergence safe regardless; the verification informs whether retry-and-fail is acceptable as the permanent posture or a fallback scheme is needed. Fold any counterexample it finds into `refreeze_divergence_fails_loudly`-style tests.
 
 - [ ] **Step 1: Write failing tests:**
 
