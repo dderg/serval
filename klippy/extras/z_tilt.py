@@ -13,6 +13,7 @@ from . import probe
 class ZAdjustHelper:
     def __init__(self, config, z_count):
         self.printer = config.get_printer()
+        self.config = config
         self.name = config.get_name()
         self.z_count = z_count
         self.z_steppers = []
@@ -40,10 +41,16 @@ class ZAdjustHelper:
             "%s = %.6f" % (s.get_name(), a)
             for s, a in zip(self.z_steppers, adjustments)
         ]
-        gcode.respond_info("Z adjustments needed:\n%s" % ("\n".join(stepstrs),))
-        raise self.printer.command_error(
-            "per-motor Z adjustment is not yet implemented"
+        gcode.respond_info(
+            "Making the following Z adjustments:\n%s" % ("\n".join(stepstrs),)
         )
+        adjuster = self.printer.load_object(self.config, "motor_adjust")
+        toolhead = self.printer.lookup_object("toolhead")
+        accel = toolhead.get_max_axis_accel(2)
+        for stepper, adjustment in zip(self.z_steppers, adjustments):
+            if abs(adjustment) < 1e-6:
+                continue
+            adjuster.adjust(stepper.get_name(), adjustment, speed, accel)
 
 
 class ZAdjustStatus:
