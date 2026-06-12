@@ -21,6 +21,13 @@ typedef struct kalico_nurbs_ScalarNurbsRef_f32 kalico_nurbs_ScalarNurbsRef_f32;
 
 typedef struct kalico_nurbs_VectorNurbsRef_f32__3 kalico_nurbs_VectorNurbsRef_f32__3;
 
+extern void kalico_log_emit(uint8_t level,
+                            uint8_t subsystem,
+                            uint16_t event,
+                            uint16_t code,
+                            uint32_t arg0,
+                            uint32_t arg1);
+
 float kalico_nurbs_eval_f32(const struct kalico_nurbs_ScalarNurbsRef_f32 *curve, float u);
 
 float kalico_nurbs_param_from_arc_length_f32(const struct kalico_nurbs_ArcLengthTableRef_f32 *table,

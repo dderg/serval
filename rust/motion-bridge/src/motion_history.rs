@@ -186,21 +186,10 @@ impl HistoryStore {
                 }
                 piece.endpoint()
             }
-            None => {
-                let endpoint = self
-                    .endpoints
-                    .get(&key)
-                    .ok_or(HistoryError::NoHistoryForAxis(key))?;
-                if clock < endpoint.clock {
-                    return Err(HistoryError::BeforeRetainedWindow {
-                        key,
-                        queried: clock,
-                        window_start: endpoint.clock,
-                        window_end: endpoint.clock,
-                    });
-                }
-                *endpoint
-            }
+            None => *self
+                .endpoints
+                .get(&key)
+                .ok_or(HistoryError::NoHistoryForAxis(key))?,
         };
         if let Some(now_clock) = now_clock {
             if clock > now_clock {

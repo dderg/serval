@@ -1018,6 +1018,29 @@ class MCU:
                 )
             raise
 
+    def _recover_latched_peripheral_shutdown(self, get_config_cmd, exc):
+        is_motion_mcu = (
+            "kalico_runtime_reset"
+            in self._serial.get_msgparser().messages_by_name
+        )
+        if is_motion_mcu:
+            raise error(
+                "MCU '%s' is latched in shutdown and requires a power"
+                " cycle (clear_shutdown cannot reset its timer and runtime"
+                " state): %s" % (self._name, exc)
+            )
+        logging.info(
+            "MCU '%s' latched the shutdown broadcast from a previous host"
+            " session; sending clear_shutdown and retrying: %s",
+            self._name,
+            exc,
+        )
+        self._serial.send("clear_shutdown")
+        config_params = get_config_cmd.send()
+        self._is_shutdown = False
+        self._shutdown_msg = ""
+        return config_params
+
     def _send_get_config(self):
         get_config_cmd = self.lookup_query_command(
             "get_config",
@@ -1025,7 +1048,14 @@ class MCU:
         )
         if self.is_fileoutput():
             return {"is_config": 0, "move_count": 500, "crc": 0}
-        config_params = get_config_cmd.send()
+        try:
+            config_params = get_config_cmd.send()
+        except Exception as e:
+            if "shutdown state" not in str(e):
+                raise
+            config_params = self._recover_latched_peripheral_shutdown(
+                get_config_cmd, e
+            )
         if self._is_shutdown:
             raise error(
                 "MCU '%s' error during config: %s"

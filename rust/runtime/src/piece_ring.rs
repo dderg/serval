@@ -1,5 +1,12 @@
 use crate::monomial::bernstein_to_monomial_with_duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitOutcome {
+    Applied,
+    Stale,
+    Overcommit,
+}
+
 /// ## Cursor invariants (ISR/host safety boundary)
 ///
 /// - `head` — monotonic valid frontier (wrapping u32). Advanced **only** by
@@ -83,12 +90,17 @@ impl RingDescriptor {
     }
 
     #[inline]
-    pub fn commit_head(&mut self, new_head: u32) {
+    pub fn commit_head(&mut self, new_head: u32) -> CommitOutcome {
         let cur = self.head.wrapping_sub(self.retired);
         let proposed = new_head.wrapping_sub(self.retired);
-        if proposed > cur && proposed <= self.ring_depth as u32 {
-            self.head = new_head;
+        if proposed <= cur {
+            return CommitOutcome::Stale;
         }
+        if proposed > self.ring_depth as u32 {
+            return CommitOutcome::Overcommit;
+        }
+        self.head = new_head;
+        CommitOutcome::Applied
     }
 
     #[inline]

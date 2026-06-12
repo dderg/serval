@@ -359,6 +359,7 @@ impl Reactor {
             }
             return Err(e);
         }
+
         let now = self.clock.now();
         self.unacked_window
             .push(crate::host_io::window::UnackedEntry {

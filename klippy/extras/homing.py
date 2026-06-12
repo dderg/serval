@@ -6,6 +6,7 @@ from klippy.bridge_endstop import AXIS_ENDSTOP_IDS, BridgeEndstop
 
 HOMING_POLL_PERIOD = 0.001
 TRIP_DEADLINE_MARGIN = 5.0
+_DRAIN_PAUSE_TIMEOUT = 60.0
 NO_MOVEMENT_EPSILON = 0.005
 
 
@@ -349,6 +350,17 @@ class Homing:
         if dwell_time:
             toolhead.dwell(dwell_time)
 
+    def _drain_motion_before_arming_device(self, gcmd, bridge, axis):
+        reactor = self.printer.get_reactor()
+        deadline = reactor.monotonic() + _DRAIN_PAUSE_TIMEOUT
+        while not bridge.motion_drained():
+            if reactor.monotonic() > deadline:
+                raise gcmd.error(
+                    "%s trip move: motion did not drain within %.0fs before"
+                    " homing" % ("XYZ"[axis], _DRAIN_PAUSE_TIMEOUT)
+                )
+            reactor.pause(reactor.monotonic() + 0.005)
+
     def trip_move(
         self, gcmd, toolhead, bridge, axis, direction, speed, max_travel, entry
     ):
@@ -360,6 +372,7 @@ class Homing:
                 " bridge" % ("XYZ"[axis],)
             )
         toolhead.wait_moves()
+        self._drain_motion_before_arming_device(gcmd, bridge, axis)
         if endstop.is_triggered():
             raise gcmd.error(
                 "%s endstop already triggered — move off the trigger before"

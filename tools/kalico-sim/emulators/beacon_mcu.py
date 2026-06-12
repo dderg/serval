@@ -33,6 +33,12 @@ def _build_nvm_image() -> bytes:
     # version byte; 0 selects the V0 (no-params) branch.
     struct.pack_into("<IH", nvm, 0, 0xFFFFFFFF, 0xFFFF)
     nvm[12] = 0x00
+    mcu_temp_cal_offset = 65534
+    temp_room_c, temp_hot_c = 20, 60
+    adc_room, adc_hot = 1000, 3000
+    lower = temp_room_c | (temp_hot_c << 12)
+    upper = (adc_room << 8) | (adc_hot << 20)
+    struct.pack_into("<II", nvm, mcu_temp_cal_offset, lower, upper)
     return bytes(nvm)
 
 
@@ -42,13 +48,34 @@ DEFAULT_FREQUENCY_HZ = 5_400_000
 
 DEFAULT_TEMP_RAW = 2048
 
+APPROACH_FROM_ABOVE_Z_MM = 10.0
+
 
 class BeaconMcuStub:
     SAMPLE_RATE_HZ = 1600.0
 
-    def __init__(self, pty_path: str, log_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        pty_path: str,
+        log_path: Optional[str] = None,
+        step_sock_path: Optional[str] = None,
+        z_steps_per_mm: float = 800.0,
+        z_step_line: int = 15,
+        z_step_sign: int = 1,
+    ) -> None:
         self._pty_path = pty_path
         self._log_path = log_path
+        self._step_sock_path = step_sock_path
+        self._z_steps_per_mm = z_steps_per_mm
+        self._z_step_line = z_step_line
+        self._z_step_sign = z_step_sign
+        self._z_anchor_mm = 10.0
+        self._z_anchor_steps = 0
+        self._steps_now = 0
+        self._step_tracking = False
+        self._step_thread: Optional[threading.Thread] = None
+        self._z_line_locked = False
+        self._line_baselines = {}
         self._z_target: float = 10.0
         self._stream_en: bool = False
         self._stop = threading.Event()
@@ -58,7 +85,7 @@ class BeaconMcuStub:
         self._slave_fd: Optional[int] = None
         self._t0: float = time.monotonic()
         self._send_lock = threading.Lock()
-        self._send_seq: int = 1
+        self._host_recv_seq: int = 1
         self._inbuf = bytearray()
         self._parser = msgproto.MessageParser(warn_prefix="beacon-stub: ")
         self._parser.process_identify(IDENTIFY_BLOB, decompress=True)
@@ -87,6 +114,9 @@ class BeaconMcuStub:
         self._homing_trigger_delay: float = 0.5
         self._homing_trigger_timer: Optional[threading.Timer] = None
         self._contact_homing_active: bool = False
+        self._contact_armed_clock: int = 0
+        self._contact_trsync_oid: int = 0
+        self._contact_trigger_reason: int = 1
         self._contact_trigger_clock: int = 0
         self._contact_trigger_sample: int = 0
         self._contact_trigger_freq: int = 0
@@ -132,6 +162,13 @@ class BeaconMcuStub:
             target=self._reactor_loop, name="beacon-stub-rx", daemon=True
         )
         self._thread.start()
+        if self._step_sock_path and self._step_thread is None:
+            self._step_thread = threading.Thread(
+                target=self._step_poll_loop,
+                name="beacon-stub-steps",
+                daemon=True,
+            )
+            self._step_thread.start()
 
     def start_sample_stream(
         self, z_target_mm: float, rate_hz: float = SAMPLE_RATE_HZ
@@ -173,6 +210,85 @@ class BeaconMcuStub:
         except FileNotFoundError:
             pass
 
+    def _step_poll_loop(self) -> None:
+        import socket as _socket
+
+        sock = None
+        buf = b""
+        while not self._stop.is_set():
+            if sock is None:
+                try:
+                    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                    sock.settimeout(1.0)
+                    sock.connect(self._step_sock_path)
+                except OSError:
+                    sock = None
+                    time.sleep(0.25)
+                    continue
+            try:
+                if self._z_line_locked:
+                    probe_lines = [self._z_step_line]
+                else:
+                    probe_lines = [15, 18, 7]
+                readings = {}
+                for ln in probe_lines:
+                    sock.sendall(b"get_steps line=%d\n" % ln)
+                    while b"\n" not in buf:
+                        chunk = sock.recv(64)
+                        if not chunk:
+                            raise OSError("closed")
+                        buf += chunk
+                    resp, _, buf = buf.partition(b"\n")
+                    if resp.startswith(b"steps="):
+                        readings[ln] = int(resp[6:])
+                if not self._z_line_locked:
+                    for ln, val in readings.items():
+                        if val != self._line_baselines.get(ln, val):
+                            self._z_step_line = ln
+                            self._z_line_locked = True
+                            logging.info(
+                                "beacon-stub: z step line locked to gpio%d",
+                                ln,
+                            )
+                            break
+                        self._line_baselines[ln] = val
+                line = (
+                    b"steps=%d" % readings[self._z_step_line]
+                    if self._z_step_line in readings
+                    else b""
+                )
+            except OSError:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                sock = None
+                continue
+            if line.startswith(b"steps="):
+                steps = int(line[6:])
+                self._steps_now = steps
+                # TODO: export kalico-runtime steps via
+                # sim_intercept_notify_step so a line can ever lock.
+                if self._z_line_locked and not self._step_tracking:
+                    self._step_tracking = True
+                    self._z_anchor_steps = steps
+                if self._step_tracking:
+                    z = (
+                        self._z_anchor_mm
+                        + self._z_step_sign
+                        * (steps - self._z_anchor_steps)
+                        / self._z_steps_per_mm
+                    )
+                    self._z_current = z
+                    if self._contact_homing_active and z <= 0.0:
+                        self._fire_contact_trigger()
+            time.sleep(0.005)
+
+    def _anchor_z(self, z_mm: float) -> None:
+        if self._step_tracking:
+            self._z_anchor_mm = z_mm
+            self._z_anchor_steps = self._steps_now
+
     def _now_clock(self) -> int:
         elapsed = time.monotonic() - self._clock_origin
         return int(elapsed * CLOCK_FREQ) & 0xFFFFFFFF
@@ -195,16 +311,13 @@ class BeaconMcuStub:
             logging.exception("beacon-stub: unknown msgformat %r", msgformat)
             return
         with self._send_lock:
-            seq = self._send_seq
-            seq_byte = (seq & msgproto.MESSAGE_SEQ_MASK) | msgproto.MESSAGE_DEST
+            seq_byte = (
+                self._host_recv_seq & msgproto.MESSAGE_SEQ_MASK
+            ) | msgproto.MESSAGE_DEST
             payload = [msgproto.MESSAGE_MIN + len(cmd), seq_byte] + list(cmd)
             crc = msgproto.crc16_ccitt(payload)
             payload.extend(crc)
             payload.append(msgproto.MESSAGE_SYNC)
-            self._send_seq = (seq + 1) & msgproto.MESSAGE_SEQ_MASK
-            if self._send_seq == 0:
-                # Seq 0 is reserved as "uninitialised"; skip it on rollover.
-                self._send_seq = 1
             try:
                 os.write(self._master_fd, bytes(payload))
             except (BlockingIOError, OSError):
@@ -213,6 +326,23 @@ class BeaconMcuStub:
                 return
             self.tx_frame_count += 1
             self._log("tx", bytes(payload), msgformat, kwargs)
+
+    def _send_ack(self) -> None:
+        if self._master_fd is None:
+            return
+        with self._send_lock:
+            seq_byte = (
+                self._host_recv_seq & msgproto.MESSAGE_SEQ_MASK
+            ) | msgproto.MESSAGE_DEST
+            payload = [msgproto.MESSAGE_MIN, seq_byte]
+            crc = msgproto.crc16_ccitt(payload)
+            payload.extend(crc)
+            payload.append(msgproto.MESSAGE_SYNC)
+            try:
+                os.write(self._master_fd, bytes(payload))
+            except (BlockingIOError, OSError):
+                return
+            self._log("tx-ack", bytes(payload))
 
     def _reactor_loop(self) -> None:
         master_fd = self._master_fd
@@ -232,6 +362,7 @@ class BeaconMcuStub:
             if not chunk:
                 continue
             self.rx_byte_count += len(chunk)
+            self._log("rx-raw", bytes(chunk))
             self._inbuf.extend(chunk)
             self._drain_inbuf()
 
@@ -241,6 +372,10 @@ class BeaconMcuStub:
             if msglen == 0:
                 return
             if msglen < 0:
+                logging.info(
+                    "beacon-stub: RESYNC bad framing, buf head=%s",
+                    bytes(self._inbuf[:24]).hex(),
+                )
                 idx = self._inbuf.find(msgproto.MESSAGE_SYNC)
                 if idx < 0:
                     self._inbuf.clear()
@@ -249,12 +384,27 @@ class BeaconMcuStub:
                 continue
             frame = list(self._inbuf[:msglen])
             del self._inbuf[:msglen]
+            frame_seq = frame[1] & msgproto.MESSAGE_SEQ_MASK
+            if frame_seq != self._host_recv_seq & msgproto.MESSAGE_SEQ_MASK:
+                logging.info(
+                    "beacon-stub: DROP frame seq=%d expected=%d len=%d",
+                    frame_seq,
+                    self._host_recv_seq & msgproto.MESSAGE_SEQ_MASK,
+                    len(frame),
+                )
+                self._send_ack()
+                continue
+            self._host_recv_seq = (self._host_recv_seq + 1) & 0xFFFF
             try:
                 params = self._parser.parse(frame)
             except msgproto.error:
                 logging.exception("beacon-stub: parse failed")
+                self._send_ack()
                 continue
+            tx_before = self.tx_frame_count
             self._dispatch(params, frame)
+            if self.tx_frame_count == tx_before:
+                self._send_ack()
 
     def _dispatch(self, params: dict, frame: list) -> None:
         name = params.get("#name")
@@ -362,6 +512,8 @@ class BeaconMcuStub:
         self._home_trigger_reason = params["trigger_reason"]
         self._home_trigger_invert = params["trigger_invert"]
         if not self._home_active:
+            if not self._step_tracking:
+                self._z_current = APPROACH_FROM_ABOVE_Z_MM
             self._homing_start_z = self._z_current
             self._homing_start_time = time.monotonic()
             self._home_active = True
@@ -392,11 +544,13 @@ class BeaconMcuStub:
         iter_count = 0
         while not self._stop.is_set() and self._home_active:
             time.sleep(period)
-            elapsed = time.monotonic() - self._homing_start_time
-            self._z_current = max(
-                0.0,
-                self._homing_start_z - elapsed * self._homing_approach_speed,
-            )
+            if not self._step_tracking:
+                elapsed = time.monotonic() - self._homing_start_time
+                self._z_current = max(
+                    0.0,
+                    self._homing_start_z
+                    - elapsed * self._homing_approach_speed,
+                )
             freq = self._z_to_frequency(self._z_current)
             count = self._freq_to_count(freq)
             iter_count += 1
@@ -441,32 +595,45 @@ class BeaconMcuStub:
 
     def _handle_beacon_contact_home(self, params: dict) -> None:
         self._contact_homing_active = True
-        trsync_oid = params["trsync_oid"]
-        trigger_reason = params["trigger_reason"]
-
-        def _fire():
-            if not self._contact_homing_active:
-                return
-            self._contact_homing_active = False
-            self._contact_triggered = True
-            self._contact_trigger_clock = self._now_clock()
-            self._contact_trigger_sample = self._sample_index
-            self._contact_trigger_freq = self._z_to_frequency(0.0)
-            self._send_msg(
-                "trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u",
-                oid=trsync_oid,
-                can_trigger=0,
-                trigger_reason=trigger_reason,
-                clock=self._contact_trigger_clock,
-            )
+        self._contact_armed_clock = self._now_clock()
+        self._contact_trsync_oid = params["trsync_oid"]
+        self._contact_trigger_reason = params["trigger_reason"]
 
         if self._homing_trigger_timer is not None:
             self._homing_trigger_timer.cancel()
-        self._homing_trigger_timer = threading.Timer(
-            self._homing_trigger_delay, _fire
+        if not self._step_tracking:
+            self._homing_trigger_timer = threading.Timer(
+                self._homing_trigger_delay, self._fire_contact_trigger
+            )
+            self._homing_trigger_timer.daemon = True
+            self._homing_trigger_timer.start()
+
+    def _fire_contact_trigger(self) -> None:
+        if not self._contact_homing_active:
+            return
+        self._contact_homing_active = False
+        self._contact_triggered = True
+        self._contact_trigger_clock = self._now_clock()
+        self._contact_trigger_sample = self._sample_index
+        self._contact_trigger_freq = self._z_to_frequency(0.0)
+        nozzle_touches_bed_z = 0.0
+        self._anchor_z(nozzle_touches_bed_z)
+        self._send_msg(
+            "beacon_contact armed_clock=%u trigger_clock=%u"
+            " detect_clock=%u latency=%c error=%c",
+            armed_clock=self._contact_armed_clock,
+            trigger_clock=self._contact_trigger_clock,
+            detect_clock=self._contact_trigger_clock,
+            latency=0,
+            error=0,
         )
-        self._homing_trigger_timer.daemon = True
-        self._homing_trigger_timer.start()
+        self._send_msg(
+            "trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u",
+            oid=self._contact_trsync_oid,
+            can_trigger=0,
+            trigger_reason=self._contact_trigger_reason,
+            clock=self._contact_trigger_clock,
+        )
 
     def _handle_beacon_contact_stop_home(self, params: dict) -> None:
         self._contact_homing_active = False
@@ -488,9 +655,6 @@ class BeaconMcuStub:
     def _handle_trsync_start(self, params: dict) -> None:
         self._trsync_oids.add(params["oid"])
         self._trsync_can_trigger[params["oid"]] = True
-        # Reset Z so the next homing pass approaches from above; a prior
-        # pass leaves _z_current at 0.
-        self._z_current = self._homing_start_z = 10.0
 
     def _handle_trsync_trigger(self, params: dict) -> None:
         oid = params["oid"]
@@ -594,7 +758,7 @@ class BeaconMcuStub:
                 next_batch += batch_period
                 start_clock = self._now_clock()
 
-                if self._home_active:
+                if self._home_active and not self._step_tracking:
                     elapsed = now - self._homing_start_time
                     self._z_current = max(
                         0.0,
@@ -606,16 +770,21 @@ class BeaconMcuStub:
                 data_value = self._freq_to_count(freq)
 
                 buf = bytearray()
+                decoder_baseline = 0
+                last_data_value = decoder_baseline
                 for i in range(SAMPLES_PER_BATCH):
                     delta = data_value - last_data_value
-                    if -8192 <= delta <= 8191:
-                        # beacon_data: top bit clear marks a 2-byte delta.
-                        encoded = (delta + 8192) & 0x3FFF
+                    fits_two_byte_twos_complement = -16384 <= delta <= 16383
+                    if fits_two_byte_twos_complement:
+                        encoded = delta & 0x7FFF
                         buf.append((encoded >> 8) & 0x7F)
                         buf.append(encoded & 0xFF)
                     else:
-                        # beacon_data: top bit set marks a 4-byte absolute.
-                        buf.append(0x80 | ((data_value >> 24) & 0x7F))
+                        four_byte_absolute_flag = 0x80
+                        buf.append(
+                            four_byte_absolute_flag
+                            | ((data_value >> 24) & 0x7F)
+                        )
                         buf.append((data_value >> 16) & 0xFF)
                         buf.append((data_value >> 8) & 0xFF)
                         buf.append(data_value & 0xFF)

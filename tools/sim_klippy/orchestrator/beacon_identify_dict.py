@@ -105,7 +105,7 @@ CORE_RESPONSES = [
 BEACON_RESPONSES = [
     "beacon_data data=%*s samples=%c start_clock=%u delta_clock=%u",
     "beacon_status mcu_temp=%u supply_voltage=%u coil_temp=%u status=%u",
-    "beacon_contact triggered=%c clock=%u sample=%i frequency=%u",
+    "beacon_contact armed_clock=%u trigger_clock=%u detect_clock=%u latency=%c error=%c",
     "beacon_nvm_data bytes=%*s offset=%hu",
     "beacon_contact_state triggered=%c detect_clock=%u",
     "beacon_accel_data start_clock=%u delta_clock=%u data=%*s",

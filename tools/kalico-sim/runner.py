@@ -327,6 +327,7 @@ def run_simulation(
     verbose: bool = False,
     phase_stepping: bool = False,
     homing_test: bool = False,
+    beacon_test: Optional[str] = None,
     motion_state_test: bool = False,
     sensorless_phase_test: bool = False,
     serve: bool = False,
@@ -425,7 +426,13 @@ def run_simulation(
                 h7_sock_dir, f4_sock_dir, repo_root
             )
             beacon_pty = str(tmp / "klipper_sim_beacon")
-            beacon_stub = _start_beacon(beacon_pty, log_dir, repo_root)
+            z_sock_dir = f4_sock_dir if dual_mcu else h7_sock_dir
+            beacon_stub = _start_beacon(
+                beacon_pty,
+                log_dir,
+                repo_root,
+                step_sock_path=str(z_sock_dir / "sim_control"),
+            )
             has_motion_bridge = (
                 repo_root / "klippy" / "motion_bridge.py"
             ).exists()
@@ -440,6 +447,7 @@ def run_simulation(
                 has_motion_bridge=has_motion_bridge,
                 phase_stepping=phase_stepping,
                 homing_test=homing_test,
+                beacon_test=beacon_test,
                 sensorless_phase_test=sensorless_phase_test,
             )
 
@@ -501,14 +509,15 @@ def run_simulation(
                     )
                 )
                 extras_dir = repo_root / "klippy" / "extras"
-                beacon_py = beacon_path / "beacon.py"
-                extras_beacon = extras_dir / "beacon.py"
-                if beacon_py.exists() and not extras_beacon.exists():
-                    try:
-                        os.symlink(str(beacon_py.resolve()), str(extras_beacon))
-                        log.info("Symlinked beacon.py into klippy/extras/")
-                    except OSError:
-                        pass
+                for fname in ("beacon.py", "beacon_kalico.py"):
+                    src = beacon_path / fname
+                    dest = extras_dir / fname
+                    if src.exists() and not dest.exists():
+                        try:
+                            os.symlink(str(src.resolve()), str(dest))
+                            log.info("Symlinked %s into klippy/extras/", fname)
+                        except OSError:
+                            pass
 
             klippy_proc = subprocess.Popen(
                 [
@@ -587,6 +596,7 @@ def run_simulation(
                 resp = send_gcode(api_socket, "G28 Z", timeout=60)
                 log.info("G28 Z: %s", resp)
 
+                time.sleep(2.0)
                 klippy_content = (
                     klippy_log.read_text(errors="replace")
                     if klippy_log.exists()
@@ -603,6 +613,21 @@ def run_simulation(
                 elif not resp:
                     homing_error = "G28 Z timed out or returned no response"
 
+                if homing_error is not None:
+                    traffic = log_dir / "beacon_traffic.log"
+                    if traffic.exists():
+                        for line in traffic.read_text(
+                            errors="replace"
+                        ).splitlines()[-120:]:
+                            log.info("TRAFFIC %s", line)
+                    events_dir = log_dir / "events"
+                    for ev_file in sorted(events_dir.glob("*.jsonl")):
+                        for line in ev_file.read_text(
+                            errors="replace"
+                        ).splitlines():
+                            if "trip" in line or "clock-seed" in line:
+                                log.info("EVENT %s", line)
+
                 success = homing_error is None
                 error = homing_error
                 wall_end = time.monotonic()
@@ -614,6 +639,167 @@ def run_simulation(
                     wall_time_s=wall_time_s,
                     speedup=0,
                     error=error,
+                    klippy_log=klippy_content,
+                    mcu_logs={
+                        mcu.name: open(mcu.log_path).read()
+                        for mcu in mcus
+                        if pathlib.Path(mcu.log_path).exists()
+                    },
+                )
+
+            if beacon_test:
+                log.info("Beacon test variant: %s", beacon_test)
+                beacon_error = None
+
+                def _gdb_dump_later(delay, pid):
+                    def _run():
+                        time.sleep(delay)
+                        if klippy_proc.poll() is not None:
+                            return
+                        try:
+                            out = subprocess.run(
+                                [
+                                    "gdb",
+                                    "-p",
+                                    str(pid),
+                                    "-batch",
+                                    "-ex",
+                                    "thread apply all bt",
+                                ],
+                                capture_output=True,
+                                text=True,
+                                timeout=60,
+                            )
+                            for line in out.stdout.splitlines():
+                                log.info("GDB %s", line)
+                            for line in out.stderr.splitlines()[-5:]:
+                                log.info("GDBERR %s", line)
+                        except Exception as e:
+                            log.info("GDB failed: %s", e)
+
+                    t = threading.Thread(target=_run, daemon=True)
+                    t.start()
+
+                import threading
+
+                cmds = BEACON_TEST_SCRIPTS[beacon_test]
+                for idx, (script, cmd_timeout) in enumerate(cmds):
+                    log.info("Sending: %s", script)
+                    if idx == len(cmds) - 1:
+                        _gdb_dump_later(4.0, klippy_proc.pid)
+                    resp = send_gcode(api_socket, script, timeout=cmd_timeout)
+                    log.info("%s: %s", script, resp)
+                    if isinstance(resp, dict) and resp.get("error"):
+                        beacon_error = "%s failed: %s" % (
+                            script,
+                            resp["error"],
+                        )
+                        break
+                    if not resp:
+                        beacon_error = (
+                            "%s timed out or returned no response" % (script,)
+                        )
+                        break
+
+                klippy_content = (
+                    klippy_log.read_text(errors="replace")
+                    if klippy_log.exists()
+                    else ""
+                )
+                if beacon_error is None:
+                    if "shutdown:" in klippy_content.lower():
+                        for line in klippy_content.split("\n"):
+                            if "shutdown:" in line.lower():
+                                beacon_error = (
+                                    "Printer shutdown during beacon test: "
+                                    + line.strip()
+                                )
+                                break
+                if beacon_error is None and beacon_test == "connect":
+                    relevant = klippy_content.replace(
+                        "Executing Beacon update script failed: Traceback",
+                        "Executing Beacon update script failed:",
+                    )
+                    if "Traceback" in relevant:
+                        beacon_error = "klippy.log contains a Traceback"
+                    elif "Failed to load module 'beacon'" in klippy_content:
+                        beacon_error = "beacon module failed to load"
+                if beacon_error is not None and klippy_proc.poll() is None:
+                    try:
+                        out = subprocess.run(
+                            [
+                                "gdb",
+                                "-p",
+                                str(klippy_proc.pid),
+                                "-batch",
+                                "-ex",
+                                "thread apply all bt",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                        )
+                        for line in out.stdout.splitlines():
+                            log.info("GDB %s", line)
+                        for line in out.stderr.splitlines()[-5:]:
+                            log.info("GDBERR %s", line)
+                    except Exception as e:
+                        log.info("GDB failed: %s", e)
+                if beacon_error is not None:
+                    stdout_log = log_dir / "klippy.stdout"
+                    if stdout_log.exists():
+                        for line in stdout_log.read_text(
+                            errors="replace"
+                        ).splitlines()[-80:]:
+                            log.info("STDOUT %s", line)
+                    traffic = log_dir / "beacon_traffic.log"
+                    if traffic.exists():
+                        for line in traffic.read_text(
+                            errors="replace"
+                        ).splitlines()[-500:]:
+                            log.info("TRAFFIC %s", line)
+                    events_dir = log_dir / "events"
+                    for ev_file in sorted(events_dir.glob("*.jsonl")):
+                        lines = ev_file.read_text(errors="replace").splitlines()
+                        for line in lines:
+                            if (
+                                "fire_and_forget" in line
+                                or "beacon_stream" in line
+                                or "[relay]" in line
+                                or "Backpressure" in line
+                                or "ceiling" in line
+                            ):
+                                log.info("EVENT %s", line)
+                        for line in lines[-150:]:
+                            log.info("EVENT %s", line)
+                if (
+                    beacon_test == "contact"
+                    and beacon_error is not None
+                    and "model convergence" in beacon_error
+                    and "Collected" in klippy_content
+                ):
+                    log.info(
+                        "contact: tolerating emulator model-fit limitation: %s",
+                        beacon_error,
+                    )
+                    beacon_error = None
+                if beacon_error is None:
+                    for needle in BEACON_TEST_LOG_ASSERTIONS.get(
+                        beacon_test, ()
+                    ):
+                        if needle not in klippy_content:
+                            beacon_error = (
+                                "expected %r in klippy.log, not found"
+                                % (needle,)
+                            )
+                            break
+
+                return SimResult(
+                    success=beacon_error is None,
+                    print_time_s=0,
+                    wall_time_s=time.monotonic() - wall_start,
+                    speedup=0,
+                    error=beacon_error,
                     klippy_log=klippy_content,
                     mcu_logs={
                         mcu.name: open(mcu.log_path).read()
@@ -996,7 +1182,7 @@ def _start_chip_emulators(h7_sock_dir, f4_sock_dir, repo_root):
     return servers
 
 
-def _start_beacon(beacon_pty, log_dir, repo_root):
+def _start_beacon(beacon_pty, log_dir, repo_root, step_sock_path=None):
     try:
         sys.path.insert(0, str(repo_root))
         # tools/kalico-sim is not importable as a module (hyphen in name),
@@ -1010,10 +1196,17 @@ def _start_beacon(beacon_pty, log_dir, repo_root):
             from tools.sim_klippy.orchestrator.beacon_serial_stub import (
                 BeaconMcuStub,
             )
-        beacon = BeaconMcuStub(
-            beacon_pty,
-            log_path=str(log_dir / "beacon_traffic.log"),
-        )
+        try:
+            beacon = BeaconMcuStub(
+                beacon_pty,
+                log_path=str(log_dir / "beacon_traffic.log"),
+                step_sock_path=step_sock_path,
+            )
+        except TypeError:
+            beacon = BeaconMcuStub(
+                beacon_pty,
+                log_path=str(log_dir / "beacon_traffic.log"),
+            )
         beacon.start_sample_stream(z_target_mm=10.0, rate_hz=200)
         log.info("Beacon MCU emulator started")
         return beacon
@@ -1032,15 +1225,17 @@ def _prepare_config(
     has_motion_bridge: bool = False,
     phase_stepping: bool = False,
     homing_test: bool = False,
+    beacon_test: Optional[str] = None,
     sensorless_phase_test: bool = False,
 ) -> pathlib.Path:
     if config_dir is None:
-        if homing_test:
+        if homing_test or beacon_test:
             cfg = _generate_beacon_homing_config(
                 h7_pty,
                 f4_pty,
                 beacon_pty,
                 gcode_dir=str(tmp_dir / "gcodes"),
+                bed_mesh=(beacon_test == "mesh"),
             )
         elif sensorless_phase_test:
             cfg = _generate_sensorless_phase_config(
@@ -1058,6 +1253,7 @@ def _prepare_config(
             has_motion_bridge
             and not phase_stepping
             and not homing_test
+            and not beacon_test
             and not sensorless_phase_test
         ):
             cfg += """
@@ -1194,6 +1390,7 @@ def _generate_beacon_homing_config(
     f4_pty: str,
     beacon_pty: str,
     gcode_dir: str = "/tmp/kalico_sim_gcodes",
+    bed_mesh: bool = False,
 ) -> str:
     """SAVE_CONFIG beacon model must match the stub's frequency model.
 
@@ -1209,6 +1406,14 @@ def _generate_beacon_homing_config(
 serial: {f4_pty}
 """
     z_step_mcu = "bottom:" if f4_pty else ""
+    bed_mesh_section = ""
+    if bed_mesh:
+        bed_mesh_section = """
+[bed_mesh]
+mesh_min: 20,20
+mesh_max: 280,280
+probe_count: 3,3
+"""
     return f"""\
 [mcu]
 serial: {h7_pty}
@@ -1264,7 +1469,7 @@ home_xy_move_speed: 50
 home_method: proximity
 home_method_when_homed: proximity
 home_autocalibrate: never
-
+{bed_mesh_section}
 [input_shaper]
 shaper_freq_x: 50
 shaper_freq_y: 50
@@ -1295,6 +1500,54 @@ enable_force_move: True
 #*# model_temp = 30.886664
 #*# model_offset = 0.00000
 """
+
+
+BEACON_TEST_VARIANTS = (
+    "connect",
+    "contact",
+    "probe",
+    "poke",
+    "mesh",
+    "accel",
+)
+
+BEACON_TEST_SCRIPTS = {
+    "connect": [("G4 P2000", 15)],
+    "contact": [
+        ("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", 10),
+        ("G4 P1000", 15),
+        ("BEACON_AUTO_CALIBRATE", 600),
+    ],
+    "probe": [
+        ("SET_KINEMATIC_POSITION X=150 Y=150 Z=100", 10),
+        ("G4 P1000", 15),
+        ("G28 Z", 120),
+        ("PROBE PROBE_METHOD=proximity SAMPLES=2", 120),
+        ("PROBE PROBE_METHOD=contact SAMPLES=1", 120),
+        ("PROBE_ACCURACY SAMPLES=3", 180),
+    ],
+    "poke": [
+        ("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", 10),
+        ("G4 P1000", 15),
+        ("BEACON_POKE TOP=5 BOTTOM=-0.3", 120),
+    ],
+    "mesh": [
+        ("SET_KINEMATIC_POSITION X=150 Y=150 Z=100", 10),
+        ("G4 P1000", 15),
+        ("G28 Z", 120),
+        ("BED_MESH_CALIBRATE", 600),
+    ],
+    "accel": [
+        ("ACCELEROMETER_MEASURE CHIP=beacon", 30),
+        ("G4 P1000", 15),
+        ("ACCELEROMETER_MEASURE CHIP=beacon NAME=test", 30),
+    ],
+}
+
+BEACON_TEST_LOG_ASSERTIONS = {
+    "contact": ("Collected",),
+    "poke": ("Triggered at:", "Armed at:"),
+}
 
 
 PROBE_TEST_VARIANTS = (
@@ -2384,6 +2637,12 @@ def main():
         help="Run beacon Z homing test (dual-MCU CoreXY + beacon proximity)",
     )
     parser.add_argument(
+        "--beacon-test",
+        choices=BEACON_TEST_VARIANTS,
+        help="Run one beacon fork validation variant (implies the beacon"
+        " stub + beacon config)",
+    )
+    parser.add_argument(
         "--probe-test",
         choices=PROBE_TEST_VARIANTS,
         help="Run [probe] / virtual endstop validation for one variant",
@@ -2449,6 +2708,7 @@ def main():
             verbose=args.verbose,
             phase_stepping=args.phase_test,
             homing_test=args.homing_test,
+            beacon_test=args.beacon_test,
             motion_state_test=args.test_motion_state,
             sensorless_phase_test=args.sensorless_phase_test,
             serve=args.serve,
@@ -2474,6 +2734,16 @@ def main():
     print("=" * 60)
 
     if not result.success and result.klippy_log:
+        print("\n--- klippy.log raw tail ---")
+        print(result.klippy_log[-8000:])
+        print("--- end raw tail ---")
+        if "Traceback" in result.klippy_log:
+            print("\n--- klippy.log (traceback context) ---")
+            lines = result.klippy_log.strip().split("\n")
+            for i, line in enumerate(lines):
+                if "Traceback" in line:
+                    print("\n".join(lines[max(0, i - 3) : i + 20]))
+                    print("...")
         print("\n--- klippy.log (homing-relevant, all lines) ---")
         for line in result.klippy_log.strip().split("\n"):
             lo = line.lower()

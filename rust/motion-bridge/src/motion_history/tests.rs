@@ -166,10 +166,8 @@ fn rebase_clears_ring_and_answers_from_register() {
         .state_at_clock(key(), 2_000_000_500, Some(3_000_000_000))
         .unwrap();
     assert!((held.position - 42.0).abs() < 1e-9);
-    let err = store
-        .state_at_clock(key(), 1_000, Some(u64::MAX))
-        .unwrap_err();
-    assert!(matches!(err, HistoryError::BeforeRetainedWindow { .. }));
+    let held_before = store.state_at_clock(key(), 1_000, Some(u64::MAX)).unwrap();
+    assert!((held_before.position - 42.0).abs() < 1e-9);
 }
 
 #[test]
