@@ -2432,16 +2432,19 @@ impl PyMotionBridge {
             let mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             mcus.iter()
                 .map(|(handle, _, _)| {
-                    let caps = mcus_lock
-                        .get(handle)
-                        .and_then(|c| c.runtime_caps)
-                        .map(McuCaps::from)
-                        .unwrap_or_default();
-                    (*handle, caps)
+                    let conn = mcus_lock.get(handle).ok_or_else(|| {
+                        PyRuntimeError::new_err(format!(
+                            "init_planner: unknown mcu_handle {handle}"
+                        ))
+                    })?;
+                    let caps = resolve_motion_caps(conn.runtime_caps, &conn.label, *handle)
+                        .map_err(PyRuntimeError::new_err)?;
+                    Ok((*handle, caps))
                 })
-                .collect()
+                .collect::<PyResult<_>>()?
         };
-        let mcu_configs = build_mcu_configs(&mcus, &caps_by_handle);
+        let mcu_configs =
+            build_mcu_configs(&mcus, &caps_by_handle).map_err(PyRuntimeError::new_err)?;
         *self
             .mcu_axis_configs
             .lock()
