@@ -53,45 +53,6 @@ pub struct ShapeSegmentInput<'a> {
     pub feedrate_mm_s: f64,
 }
 
-/// Legacy per-axis shaper config; survives only as motion-bridge's config
-/// surface until `[post_processor]` chains replace it (plan 4 task 6).
-#[derive(Debug, Clone)]
-pub struct ShaperConfig {
-    pub x: AxisShaper,
-    pub y: AxisShaper,
-    pub z: AxisShaper,
-}
-
-impl ShaperConfig {
-    #[must_use]
-    pub fn to_chain_set(&self) -> AxisChainSet {
-        AxisChainSet {
-            chains: vec![
-                CompiledChain {
-                    kernel: self.x.to_kernel(),
-                    gain: 0.0,
-                },
-                CompiledChain {
-                    kernel: self.y.to_kernel(),
-                    gain: 0.0,
-                },
-                CompiledChain {
-                    kernel: self.z.to_kernel(),
-                    gain: 0.0,
-                },
-            ],
-            followers: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum AxisShaper {
-    SmoothZv { frequency_hz: f64 },
-    SmoothMzv { frequency_hz: f64 },
-    Passthrough,
-}
-
 #[derive(Debug)]
 pub struct ShapeBatchOutput {
     pub segments: Vec<ShapedSegment>,

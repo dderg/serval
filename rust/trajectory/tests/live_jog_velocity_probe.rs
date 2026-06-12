@@ -2,19 +2,20 @@ use geometry::segment::{CubicSegment, SourceRange};
 use nurbs::VectorNurbs;
 use trajectory::plan_velocity::SafetyMode;
 use trajectory::streaming::{EmitContext, ReplanContext, ShaperState};
-use trajectory::{AxisChainSet, AxisShaper, ShapedSegment, ShaperConfig};
+use trajectory::{AxisChainSet, ShapedSegment};
 
 fn live_chains() -> AxisChainSet {
-    ShaperConfig {
-        x: AxisShaper::SmoothMzv {
+    trajectory::AxisChainSet::spatial(
+        trajectory::PostProcessorType::SmoothMzv {
             frequency_hz: 186.0,
-        },
-        y: AxisShaper::SmoothMzv {
+        }
+        .into_chain(),
+        trajectory::PostProcessorType::SmoothMzv {
             frequency_hz: 122.0,
-        },
-        z: AxisShaper::Passthrough,
-    }
-    .to_chain_set()
+        }
+        .into_chain(),
+        trajectory::CompiledChain::default(),
+    )
 }
 
 fn live_ctx() -> ReplanContext {
@@ -40,12 +41,11 @@ fn live_ctx() -> ReplanContext {
 }
 
 fn passthrough_chains() -> AxisChainSet {
-    ShaperConfig {
-        x: AxisShaper::Passthrough,
-        y: AxisShaper::Passthrough,
-        z: AxisShaper::Passthrough,
-    }
-    .to_chain_set()
+    trajectory::AxisChainSet::spatial(
+        trajectory::CompiledChain::default(),
+        trajectory::CompiledChain::default(),
+        trajectory::CompiledChain::default(),
+    )
 }
 
 fn passthrough_ctx() -> ReplanContext {

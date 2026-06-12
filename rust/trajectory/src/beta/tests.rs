@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ShapeBatchInput, ShapeSegmentInput, ShaperConfig};
+use crate::{AxisChainSet, ShapeBatchInput, ShapeSegmentInput};
 use geometry::segment::FollowerDemand;
 
 const E_FOLLOWER_04: &[FollowerDemand] = &[FollowerDemand {
@@ -25,16 +25,18 @@ fn default_limits() -> temporal::Limits {
     temporal::Limits::try_new(&sets, 4).unwrap()
 }
 
-fn default_shaper_config() -> ShaperConfig {
-    ShaperConfig {
-        x: crate::AxisShaper::SmoothZv {
+fn default_chain_set() -> AxisChainSet {
+    AxisChainSet::spatial(
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 180.0,
-        },
-        y: crate::AxisShaper::SmoothZv {
+        }
+        .into_chain(),
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 120.0,
-        },
-        z: crate::AxisShaper::Passthrough,
-    }
+        }
+        .into_chain(),
+        crate::CompiledChain::default(),
+    )
 }
 
 fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
@@ -56,7 +58,7 @@ fn single_straight_line_converges() {
         feedrate_mm_s: 100.0,
     }];
 
-    let chains = default_shaper_config().to_chain_set();
+    let chains = default_chain_set();
     let input = ShapeBatchInput {
         follower_history: None,
         segments: &segments,

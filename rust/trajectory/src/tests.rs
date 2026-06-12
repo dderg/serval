@@ -2,16 +2,17 @@ use super::*;
 
 #[test]
 fn shape_batch_rejects_empty_segments() {
-    let chains = ShaperConfig {
-        x: AxisShaper::SmoothZv {
+    let chains = crate::AxisChainSet::spatial(
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 180.0,
-        },
-        y: AxisShaper::SmoothMzv {
+        }
+        .into_chain(),
+        crate::PostProcessorType::SmoothMzv {
             frequency_hz: 120.0,
-        },
-        z: AxisShaper::Passthrough,
-    }
-    .to_chain_set();
+        }
+        .into_chain(),
+        crate::CompiledChain::default(),
+    );
     let input = ShapeBatchInput {
         chains: &chains,
         follower_start: &[],

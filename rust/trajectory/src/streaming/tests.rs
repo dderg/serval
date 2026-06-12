@@ -15,19 +15,18 @@ use super::{EmitContext, ReplanContext, ShaperState};
 use crate::fit::FittedSegment;
 use crate::plan_velocity::SafetyMode;
 use crate::post_processor::AxisChainSet;
-use crate::{AxisShaper, ShaperConfig};
 
 #[test]
 #[allow(clippy::float_cmp)]
 fn new_seeds_axis_queues_with_rest_extension() {
-    let chains = ShaperConfig {
-        x: AxisShaper::SmoothZv {
+    let chains = crate::AxisChainSet::spatial(
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 100.0,
-        },
-        y: AxisShaper::SmoothMzv { frequency_hz: 80.0 },
-        z: AxisShaper::Passthrough,
-    }
-    .to_chain_set();
+        }
+        .into_chain(),
+        crate::PostProcessorType::SmoothMzv { frequency_hz: 80.0 }.into_chain(),
+        crate::CompiledChain::default(),
+    );
     let state = ShaperState::new(&[1.0, 2.0, 3.0], &chains);
 
     let h_x = 0.8025 / 100.0 / 2.0;
@@ -58,31 +57,34 @@ fn new_seeds_axis_queues_with_rest_extension() {
 
 #[test]
 fn required_shaper_h_matches_axis_shaper_h() {
-    let chains = ShaperConfig {
-        x: AxisShaper::SmoothZv {
+    let chains = crate::AxisChainSet::spatial(
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 186.0,
-        },
-        y: AxisShaper::SmoothMzv {
+        }
+        .into_chain(),
+        crate::PostProcessorType::SmoothMzv {
             frequency_hz: 122.0,
-        },
-        z: AxisShaper::Passthrough,
-    }
-    .to_chain_set();
+        }
+        .into_chain(),
+        crate::CompiledChain::default(),
+    );
     let state = ShaperState::new(&[0.0; 3], &chains);
 
-    let kernel_x = AxisShaper::SmoothZv {
+    let kernel_x = crate::PostProcessorType::SmoothZv {
         frequency_hz: 186.0,
     }
-    .to_kernel()
+    .into_chain()
+    .kernel
     .unwrap();
     let (lo_x, hi_x) = kernel_x.support();
     let expected_h_x = (hi_x - lo_x) / 2.0;
     assert!((state.axes[0].h - expected_h_x).abs() < 1e-15);
 
-    let kernel_y = AxisShaper::SmoothMzv {
+    let kernel_y = crate::PostProcessorType::SmoothMzv {
         frequency_hz: 122.0,
     }
-    .to_kernel()
+    .into_chain()
+    .kernel
     .unwrap();
     let (lo_y, hi_y) = kernel_y.support();
     let expected_h_y = (hi_y - lo_y) / 2.0;
@@ -90,12 +92,11 @@ fn required_shaper_h_matches_axis_shaper_h() {
 }
 
 fn replan_chains() -> AxisChainSet {
-    ShaperConfig {
-        x: AxisShaper::SmoothMzv { frequency_hz: 60.0 },
-        y: AxisShaper::SmoothMzv { frequency_hz: 60.0 },
-        z: AxisShaper::Passthrough,
-    }
-    .to_chain_set()
+    crate::AxisChainSet::spatial(
+        crate::PostProcessorType::SmoothMzv { frequency_hz: 60.0 }.into_chain(),
+        crate::PostProcessorType::SmoothMzv { frequency_hz: 60.0 }.into_chain(),
+        crate::CompiledChain::default(),
+    )
 }
 
 fn replan_limits() -> temporal::Limits {
@@ -1147,16 +1148,17 @@ const LOW_FREQ_HZ: f64 = 13.0;
 const HARNESS_A_MAX: f64 = 5_000.0;
 
 fn low_freq_chains() -> AxisChainSet {
-    ShaperConfig {
-        x: AxisShaper::SmoothZv {
+    crate::AxisChainSet::spatial(
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: LOW_FREQ_HZ,
-        },
-        y: AxisShaper::SmoothZv {
+        }
+        .into_chain(),
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: LOW_FREQ_HZ,
-        },
-        z: AxisShaper::Passthrough,
-    }
-    .to_chain_set()
+        }
+        .into_chain(),
+        crate::CompiledChain::default(),
+    )
 }
 
 fn single_axis_harness(v_max: f64, a_max: f64) -> (ShaperState, ReplanContext) {
@@ -1544,12 +1546,11 @@ fn per_segment_limits_tolerates_follower_sets() {
 
 fn follower_chains(kernel_hz: Option<f64>, pa_gain: f64) -> AxisChainSet {
     let mut chains = match kernel_hz {
-        Some(frequency_hz) => ShaperConfig {
-            x: AxisShaper::SmoothMzv { frequency_hz },
-            y: AxisShaper::SmoothMzv { frequency_hz },
-            z: AxisShaper::Passthrough,
-        }
-        .to_chain_set(),
+        Some(frequency_hz) => crate::AxisChainSet::spatial(
+            crate::PostProcessorType::SmoothMzv { frequency_hz }.into_chain(),
+            crate::PostProcessorType::SmoothMzv { frequency_hz }.into_chain(),
+            crate::CompiledChain::default(),
+        ),
         None => AxisChainSet::passthrough_spatial(),
     };
     chains.chains.push(crate::CompiledChain {

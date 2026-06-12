@@ -29,16 +29,17 @@ fn default_limits() -> temporal::Limits {
 }
 
 static DEFAULT_CHAINS: std::sync::LazyLock<crate::AxisChainSet> = std::sync::LazyLock::new(|| {
-    crate::ShaperConfig {
-        x: crate::AxisShaper::SmoothZv {
+    crate::AxisChainSet::spatial(
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 180.0,
-        },
-        y: crate::AxisShaper::SmoothMzv {
+        }
+        .into_chain(),
+        crate::PostProcessorType::SmoothMzv {
             frequency_hz: 120.0,
-        },
-        z: crate::AxisShaper::Passthrough,
-    }
-    .to_chain_set()
+        }
+        .into_chain(),
+        crate::CompiledChain::default(),
+    )
 });
 
 fn default_input<'a>(segments: &'a [PlanSegment<'a>], safety: SafetyMode) -> PlanInput<'a> {

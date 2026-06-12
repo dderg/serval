@@ -1,8 +1,9 @@
 use super::*;
 use crate::fit::{fit_and_split, FittedSegment};
+use crate::post_processor::PostProcessorType;
 use crate::{
-    plan_velocity, AxisShaper, PlanInput, PlanSegment, SafetyMode, ShapeBatchInput,
-    ShapeSegmentInput, ShaperConfig,
+    plan_velocity, AxisChainSet, PlanInput, PlanSegment, SafetyMode, ShapeBatchInput,
+    ShapeSegmentInput,
 };
 use geometry::segment::FollowerDemand;
 
@@ -35,20 +36,22 @@ fn default_limits() -> temporal::Limits {
     temporal::Limits::try_new(&sets, 4).unwrap()
 }
 
-fn default_shaper_config() -> ShaperConfig {
-    ShaperConfig {
-        x: AxisShaper::SmoothZv {
+fn default_chain_set() -> AxisChainSet {
+    AxisChainSet::spatial(
+        PostProcessorType::SmoothZv {
             frequency_hz: 180.0,
-        },
-        y: AxisShaper::SmoothZv {
+        }
+        .into_chain(),
+        PostProcessorType::SmoothZv {
             frequency_hz: 120.0,
-        },
-        z: AxisShaper::Passthrough,
-    }
+        }
+        .into_chain(),
+        crate::CompiledChain::default(),
+    )
 }
 
 static DEFAULT_CHAINS: std::sync::LazyLock<crate::AxisChainSet> =
-    std::sync::LazyLock::new(|| default_shaper_config().to_chain_set());
+    std::sync::LazyLock::new(default_chain_set);
 
 fn assert_nurbs_near_equal(a: &ScalarNurbs<f64>, b: &ScalarNurbs<f64>, label: &str) {
     assert_eq!(a.degree(), b.degree(), "{label}: degree differs");
@@ -119,14 +122,16 @@ fn empty_history_matches_shape_batch_byte_identical() {
     assert_eq!(planned.len(), 1);
 
     let kernels: [Option<PiecewisePolynomialKernel<f64>>; 4] = [
-        AxisShaper::SmoothZv {
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 180.0,
         }
-        .to_kernel(),
-        AxisShaper::SmoothZv {
+        .into_chain()
+        .kernel,
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 120.0,
         }
-        .to_kernel(),
+        .into_chain()
+        .kernel,
         None,
         None,
     ];
@@ -157,7 +162,7 @@ fn empty_history_matches_shape_batch_byte_identical() {
         followers: plan_segs[0].followers,
         feedrate_mm_s: plan_segs[0].feedrate_mm_s,
     }];
-    let chains = default_shaper_config().to_chain_set();
+    let chains = default_chain_set();
     let shape_input = ShapeBatchInput {
         chains: &chains,
         follower_start: &[],
@@ -382,10 +387,11 @@ fn constant_y_axis_emits_cubic_matching_moving_x_corexy_degree_invariant() {
     };
 
     let kernels: [Option<PiecewisePolynomialKernel<f64>>; 4] = [
-        AxisShaper::SmoothZv {
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 186.0,
         }
-        .to_kernel(),
+        .into_chain()
+        .kernel,
         None,
         None,
         None,
@@ -480,8 +486,12 @@ fn passthrough_chains_reproduce_legacy_output_bitwise() {
         .map(|_| EmitSegmentMeta { followers: vec![] })
         .collect();
     let kernels: [Option<PiecewisePolynomialKernel<f64>>; 4] = [
-        AxisShaper::SmoothZv { frequency_hz: 50.0 }.to_kernel(),
-        AxisShaper::SmoothMzv { frequency_hz: 40.0 }.to_kernel(),
+        crate::PostProcessorType::SmoothZv { frequency_hz: 50.0 }
+            .into_chain()
+            .kernel,
+        crate::PostProcessorType::SmoothMzv { frequency_hz: 40.0 }
+            .into_chain()
+            .kernel,
         None,
         None,
     ];
@@ -654,8 +664,12 @@ fn follower_samples_post_kernel_path() {
         })
         .collect();
     let kernels: [Option<PiecewisePolynomialKernel<f64>>; 4] = [
-        AxisShaper::SmoothMzv { frequency_hz: 10.0 }.to_kernel(),
-        AxisShaper::SmoothMzv { frequency_hz: 10.0 }.to_kernel(),
+        crate::PostProcessorType::SmoothMzv { frequency_hz: 10.0 }
+            .into_chain()
+            .kernel,
+        crate::PostProcessorType::SmoothMzv { frequency_hz: 10.0 }
+            .into_chain()
+            .kernel,
         None,
         None,
     ];

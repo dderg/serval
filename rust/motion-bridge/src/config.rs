@@ -1,10 +1,190 @@
 use thiserror::Error;
-use trajectory::{AxisShaper, ShaperConfig};
+use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, PostProcessorType};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PostProcessorDecl {
+    pub name: String,
+    pub ty: String,
+    pub params: Vec<(String, f64)>,
+}
 
 #[derive(Debug, Error)]
-pub enum ShaperConfigError {
-    #[error("unsupported shaper type: '{kind}'. Use smooth_zv or smooth_mzv")]
-    UnsupportedKind { kind: String },
+pub enum PostProcessorConfigError {
+    #[error(
+        "unsupported [post_processor {name}] type: '{kind}'. Use smooth_zv,          smooth_mzv or linear_pressure_advance"
+    )]
+    UnsupportedKind { name: String, kind: String },
+    #[error("duplicate [post_processor {name}]")]
+    Duplicate { name: String },
+    #[error("[post_processor {name}]: missing required parameter '{key}'")]
+    MissingParam { name: String, key: String },
+    #[error("[post_processor {name}]: parameter '{key}' must be finite and > 0, got {value}")]
+    BadParamValue {
+        name: String,
+        key: String,
+        value: f64,
+    },
+    #[error("{0}")]
+    Param(#[from] trajectory::PostProcessorError),
+    #[error("unknown post_processor '{name}'")]
+    UnknownInstance { name: String },
+    #[error("axis '{axis}': post_processors references undeclared '{name}'")]
+    UnknownAxisReference { axis: String, name: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct PostProcessorSet {
+    instances: Vec<PostProcessorInstance>,
+    per_axis: Vec<Vec<String>>,
+}
+
+impl PostProcessorSet {
+    pub fn try_new(
+        registry: &AxisRegistry,
+        decls: &[PostProcessorDecl],
+    ) -> Result<Self, PostProcessorConfigError> {
+        let mut instances: Vec<PostProcessorInstance> = Vec::with_capacity(decls.len());
+        for d in decls {
+            if instances.iter().any(|i| i.name() == d.name) {
+                return Err(PostProcessorConfigError::Duplicate {
+                    name: d.name.clone(),
+                });
+            }
+            instances.push(build_instance(d)?);
+        }
+
+        let per_axis: Vec<Vec<String>> = registry
+            .decls()
+            .iter()
+            .map(|d| d.post_processors.clone())
+            .collect();
+        for (axis_decl, names) in registry.decls().iter().zip(&per_axis) {
+            for name in names {
+                if !instances.iter().any(|i| i.name() == *name) {
+                    return Err(PostProcessorConfigError::UnknownAxisReference {
+                        axis: axis_decl.name.clone(),
+                        name: name.clone(),
+                    });
+                }
+            }
+        }
+
+        let set = Self {
+            instances,
+            per_axis,
+        };
+        set.compile(registry)?;
+        Ok(set)
+    }
+
+    pub fn compile(
+        &self,
+        registry: &AxisRegistry,
+    ) -> Result<AxisChainSet, PostProcessorConfigError> {
+        assert_eq!(
+            self.per_axis.len(),
+            registry.n_axes(),
+            "post-processor set built against a different axis registry"
+        );
+        let chains: Vec<CompiledChain> = self
+            .per_axis
+            .iter()
+            .map(|names| {
+                let chain: Vec<PostProcessorInstance> = names
+                    .iter()
+                    .map(|n| {
+                        self.instances
+                            .iter()
+                            .find(|i| i.name() == *n)
+                            .expect("validated in try_new")
+                            .clone()
+                    })
+                    .collect();
+                CompiledChain::compile(&chain).map_err(PostProcessorConfigError::Param)
+            })
+            .collect::<Result<_, _>>()?;
+        let followers = registry.follower_index_map();
+        Ok(AxisChainSet { chains, followers })
+    }
+
+    pub fn set_param(
+        &mut self,
+        name: &str,
+        key: &str,
+        value: f64,
+    ) -> Result<(), PostProcessorConfigError> {
+        let inst = self
+            .instances
+            .iter_mut()
+            .find(|i| i.name() == name)
+            .ok_or_else(|| PostProcessorConfigError::UnknownInstance { name: name.into() })?;
+        inst.set_param(key, value)?;
+        Ok(())
+    }
+}
+
+fn build_instance(
+    d: &PostProcessorDecl,
+) -> Result<PostProcessorInstance, PostProcessorConfigError> {
+    let required_param = match d.ty.as_str() {
+        "smooth_zv" | "smooth_mzv" => "frequency_hz",
+        "linear_pressure_advance" => "k",
+        other => {
+            return Err(PostProcessorConfigError::UnsupportedKind {
+                name: d.name.clone(),
+                kind: other.to_string(),
+            });
+        }
+    };
+    let required_value = d
+        .params
+        .iter()
+        .find(|(k, _)| k == required_param)
+        .map(|(_, v)| *v)
+        .ok_or_else(|| PostProcessorConfigError::MissingParam {
+            name: d.name.clone(),
+            key: required_param.to_string(),
+        })?;
+    let ty = match d.ty.as_str() {
+        "smooth_zv" => {
+            require_positive(d, required_param, required_value)?;
+            PostProcessorType::SmoothZv {
+                frequency_hz: required_value,
+            }
+        }
+        "smooth_mzv" => {
+            require_positive(d, required_param, required_value)?;
+            PostProcessorType::SmoothMzv {
+                frequency_hz: required_value,
+            }
+        }
+        "linear_pressure_advance" => PostProcessorType::LinearPressureAdvance { k: required_value },
+        _ => unreachable!("ty validated above"),
+    };
+    let mut inst = PostProcessorInstance::new(&d.name, ty);
+    for (key, value) in &d.params {
+        if key == required_param {
+            continue;
+        }
+        inst.set_param(key, *value)?;
+    }
+    Ok(inst)
+}
+
+fn require_positive(
+    d: &PostProcessorDecl,
+    key: &str,
+    value: f64,
+) -> Result<(), PostProcessorConfigError> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(PostProcessorConfigError::BadParamValue {
+            name: d.name.clone(),
+            key: key.to_string(),
+            value,
+        })
+    }
 }
 
 const SPATIAL: [&str; 3] = ["x", "y", "z"];
@@ -15,6 +195,7 @@ pub struct AxisDecl {
     pub name: String,
     pub follows: Vec<String>,
     pub motors: Vec<String>,
+    pub post_processors: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +290,29 @@ impl AxisRegistry {
     }
 
     #[must_use]
+    pub fn decls(&self) -> &[AxisDecl] {
+        &self.ordered
+    }
+
+    /// `(follower_axis_index, followed_axis_indices)` per non-spatial axis.
+    #[must_use]
+    pub fn follower_index_map(&self) -> Vec<(usize, Vec<usize>)> {
+        self.ordered
+            .iter()
+            .enumerate()
+            .skip(SPATIAL.len())
+            .map(|(idx, d)| {
+                let followed = d
+                    .follows
+                    .iter()
+                    .map(|t| self.axis_index(t).expect("follows validated in try_new"))
+                    .collect();
+                (idx, followed)
+            })
+            .collect()
+    }
+
+    #[must_use]
     pub fn follower_words(&self) -> Vec<geometry::FollowerWord> {
         self.ordered
             .iter()
@@ -131,6 +335,7 @@ impl Default for AxisRegistry {
                     name: (*name).to_string(),
                     follows: vec![],
                     motors: vec![],
+                    post_processors: vec![],
                 })
                 .collect(),
         )
@@ -143,7 +348,7 @@ pub struct PlannerConfig {
     pub axis_registry: AxisRegistry,
     pub limit_sections: Vec<LimitSection>,
     pub runtime_caps: RuntimeCaps,
-    pub shaper: ShaperConfig,
+    pub post_processors: PostProcessorSet,
     pub window_capacity: usize,
     pub beta_max_iters: u8,
     pub beta_convergence_ratio: f64,
@@ -270,8 +475,11 @@ impl PlannerConfig {
 
 impl Default for PlannerConfig {
     fn default() -> Self {
+        let axis_registry = AxisRegistry::default();
+        let post_processors = PostProcessorSet::try_new(&axis_registry, &[])
+            .expect("empty post-processor set is always valid");
         Self {
-            axis_registry: AxisRegistry::default(),
+            axis_registry,
             limit_sections: vec![
                 LimitSection {
                     name: "gantry".into(),
@@ -289,36 +497,13 @@ impl Default for PlannerConfig {
                 },
             ],
             runtime_caps: RuntimeCaps::default(),
-            shaper: ShaperConfig {
-                x: AxisShaper::Passthrough,
-                y: AxisShaper::Passthrough,
-                z: AxisShaper::Passthrough,
-            },
+            post_processors,
             window_capacity: 32,
             beta_max_iters: 10,
             beta_convergence_ratio: 0.05,
             fit_tolerance_mm: 0.005,
             worker_threads: 3,
         }
-    }
-}
-
-pub fn parse_axis_shaper(name: &str, freq: f64) -> Result<AxisShaper, ShaperConfigError> {
-    match name {
-        "" | "none" | "passthrough" => return Ok(AxisShaper::Passthrough),
-        _ => {}
-    }
-
-    if !freq.is_finite() || freq <= 0.0 {
-        return Ok(AxisShaper::Passthrough);
-    }
-
-    match name {
-        "smooth_zv" | "smooth-zv" => Ok(AxisShaper::SmoothZv { frequency_hz: freq }),
-        "smooth_mzv" | "smooth-mzv" => Ok(AxisShaper::SmoothMzv { frequency_hz: freq }),
-        other => Err(ShaperConfigError::UnsupportedKind {
-            kind: other.to_string(),
-        }),
     }
 }
 

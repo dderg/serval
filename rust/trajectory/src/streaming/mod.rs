@@ -29,7 +29,7 @@ pub(crate) mod state;
 mod tests;
 
 #[derive(Debug, Clone)]
-pub struct AxisShaperQueue {
+pub struct AxisLane {
     /// Unshaped polynomial pieces, in time order.
     pub pieces: VecDeque<BezierPiece<f64>>,
     /// Smooth-shaper kernel for this axis. `None` for passthrough.
@@ -76,7 +76,7 @@ pub struct ShaperState {
     /// Index = axis registry index; spatial lanes hold the fitted (unshaped)
     /// pieces, follower lanes hold the emitted input-track (nominal ledger)
     /// pieces.
-    pub axes: Vec<AxisShaperQueue>,
+    pub axes: Vec<AxisLane>,
 
     pub uncommitted_moves: VecDeque<UncommittedMove>,
 

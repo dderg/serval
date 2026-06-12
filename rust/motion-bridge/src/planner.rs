@@ -9,9 +9,9 @@ use nurbs::algebra::PiecewisePolynomialKernel;
 use crate::classify::ClassifiedMove;
 use crate::config::{PlannerConfig, RuntimeCaps};
 use crate::pump::AxisKey;
+use trajectory::ShapedSegment;
 use trajectory::plan_velocity::SafetyMode;
 use trajectory::streaming::{EmitContext, ReplanContext, ReplanReport, ShaperState};
-use trajectory::{AxisShaper, ShapedSegment, ShaperConfig};
 
 const T_IDLE: Duration = Duration::from_secs(3600);
 
@@ -59,15 +59,33 @@ impl std::fmt::Debug for HomeDripParams {
 #[derive(Debug)]
 pub enum PlannerMsg {
     Move(ClassifiedMove),
-    Dwell { duration_s: f64, notify: Sender<()> },
-    Flush { notify: Sender<Option<Instant>> },
+    Dwell {
+        duration_s: f64,
+        notify: Sender<()>,
+    },
+    Flush {
+        notify: Sender<Option<Instant>>,
+    },
     UpdateRuntimeCaps(RuntimeCaps),
-    UpdateShaper(ShaperConfig),
+    UpdatePostProcessor {
+        name: String,
+        key: String,
+        value: f64,
+        notify: Sender<Result<(), String>>,
+    },
     Shutdown,
-    KalicoStreamOpen { home_pos: [f64; 4] },
-    Underrun { recovered_pos: [f64; 4] },
-    ForceIdle { recovered_pos: [f64; 4] },
-    ClockSyncRearm { new_bias: ClockBias },
+    KalicoStreamOpen {
+        home_pos: [f64; 4],
+    },
+    Underrun {
+        recovered_pos: [f64; 4],
+    },
+    ForceIdle {
+        recovered_pos: [f64; 4],
+    },
+    ClockSyncRearm {
+        new_bias: ClockBias,
+    },
     HomeDrip(HomeDripParams),
 }
 
@@ -76,6 +94,7 @@ pub enum PlannerError {
     Shape(trajectory::ShapeError),
     ChannelClosed,
     Dispatch(DispatchError),
+    Config(String),
 }
 
 impl std::fmt::Display for PlannerError {
@@ -84,6 +103,7 @@ impl std::fmt::Display for PlannerError {
             Self::Shape(e) => write!(f, "shape pipeline error: {e}"),
             Self::ChannelClosed => write!(f, "planner channel closed"),
             Self::Dispatch(s) => write!(f, "dispatch error: {s}"),
+            Self::Config(s) => write!(f, "post-processor config error: {s}"),
         }
     }
 }
@@ -146,7 +166,10 @@ impl PlannerHandle {
         let last_move_time_bits = Arc::new(AtomicU64::new(0u64));
         let commit_fire_count = Arc::new(AtomicU32::new(0));
 
-        let chains = config.shaper.to_chain_set();
+        let chains = config
+            .post_processors
+            .compile(&config.axis_registry)
+            .expect("post-processor chains validated in init_planner");
         let state = ShaperState::new(&vec![0.0; chains.n_axes()], &chains);
 
         let last_thread = Arc::clone(&last_move_time_bits);
@@ -235,10 +258,24 @@ impl PlannerHandle {
             .map_err(|_| PlannerError::ChannelClosed)
     }
 
-    pub fn update_shaper(&self, s: ShaperConfig) -> Result<(), PlannerError> {
+    pub fn update_post_processor(
+        &self,
+        name: &str,
+        key: &str,
+        value: f64,
+    ) -> Result<(), PlannerError> {
+        let (notify, ack) = unbounded();
         self.sender
-            .send(PlannerMsg::UpdateShaper(s))
-            .map_err(|_| PlannerError::ChannelClosed)
+            .send(PlannerMsg::UpdatePostProcessor {
+                name: name.to_string(),
+                key: key.to_string(),
+                value,
+                notify,
+            })
+            .map_err(|_| PlannerError::ChannelClosed)?;
+        ack.recv()
+            .map_err(|_| PlannerError::ChannelClosed)?
+            .map_err(PlannerError::Config)
     }
 
     pub fn kalico_stream_open(&self, home_pos: [f64; 4]) -> Result<(), PlannerError> {
@@ -422,11 +459,7 @@ fn run_loop(
         let tl = config
             .to_temporal_limits()
             .expect("limit sections validated in init_planner");
-        log::debug!(
-            "[planner-trace] startup limits {:?} shaper={:?}",
-            tl.sets(),
-            config.shaper,
-        );
+        log::debug!("[planner-trace] startup limits {:?}", tl.sets());
     }
 
     let mut last_recv_time: Option<Instant> = None;
@@ -453,7 +486,7 @@ fn run_loop(
                     PlannerMsg::Flush { .. } => "Flush",
                     PlannerMsg::Dwell { .. } => "Dwell",
                     PlannerMsg::UpdateRuntimeCaps(_) => "UpdateRuntimeCaps",
-                    PlannerMsg::UpdateShaper(_) => "UpdateShaper",
+                    PlannerMsg::UpdatePostProcessor { .. } => "UpdatePostProcessor",
                     PlannerMsg::KalicoStreamOpen { .. } => "KalicoStreamOpen",
                     PlannerMsg::Underrun { .. } => "Underrun",
                     PlannerMsg::ForceIdle { .. } => "ForceIdle",
@@ -659,20 +692,21 @@ fn run_loop(
                 thread_state.rebuild(&config);
             }
 
-            PlannerMsg::UpdateShaper(s) => {
-                if state.t_dispatched < state.t_appended - 1e-12 {
-                    run_commit_and_dispatch(
-                        &mut state,
-                        &thread_state,
-                        &dispatch,
-                        &last_move_time_bits,
-                        &commit_fire_count,
-                    );
+            PlannerMsg::UpdatePostProcessor {
+                name,
+                key,
+                value,
+                notify,
+            } => {
+                let result = config
+                    .post_processors
+                    .set_param(&name, &key, value)
+                    .map_err(|e| e.to_string());
+                if result.is_ok() {
+                    thread_state.rebuild(&config);
+                    state.update_chains(&thread_state.replan_ctx.chains);
                 }
-                config.shaper = s;
-                let chains = config.shaper.to_chain_set();
-                state = ShaperState::new(&vec![0.0; chains.n_axes()], &chains);
-                thread_state.rebuild(&config);
+                let _ = notify.send(result);
             }
 
             PlannerMsg::KalicoStreamOpen { home_pos } => {
@@ -768,7 +802,10 @@ fn build_replan_context(config: &PlannerConfig) -> ReplanContext {
         limits: config
             .to_temporal_limits()
             .expect("limit sections validated in init_planner"),
-        chains: config.shaper.to_chain_set(),
+        chains: config
+            .post_processors
+            .compile(&config.axis_registry)
+            .expect("post-processor chains validated in init_planner"),
         fit_tolerance_mm: config.fit_tolerance_mm,
         beta_max_iters: config.beta_max_iters,
         beta_convergence_ratio: config.beta_convergence_ratio,

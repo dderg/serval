@@ -6,7 +6,7 @@ use nurbs::bezier::{extract_bezier_pieces, BezierPiece};
 use std::time::Instant;
 
 use super::decel_finder::find_decel_start_time;
-use super::{AxisShaperQueue, ReplanContext, ReplanReport, ShaperState, UncommittedMove};
+use super::{AxisLane, ReplanContext, ReplanReport, ShaperState, UncommittedMove};
 use crate::emit_shaped::EmitSegmentMeta;
 use crate::fit::FittedSegment;
 use crate::plan_velocity::{plan_velocity, PlanInput, PlanOutput, PlanSegment, PlanStats};
@@ -39,7 +39,7 @@ impl ShaperState {
             chains.n_axes(),
             "ShaperState::new: home position must cover every registry axis"
         );
-        let axes: Vec<AxisShaperQueue> = home_pos
+        let axes: Vec<AxisLane> = home_pos
             .iter()
             .zip(&chains.chains)
             .map(|(&home, chain)| build_axis_queue(home, chain))
@@ -82,6 +82,25 @@ impl ShaperState {
         self.t_decel_start = 0.0;
         self.t_shaped = 0.0;
         self.t_dispatched = 0.0;
+    }
+
+    /// Swap in recompiled chains after a runtime post-processor parameter
+    /// change. Lane histories survive — they hold pre-kernel input pieces;
+    /// only the kernels and their half-supports refresh. Takes effect at the
+    /// next replan; committed trajectory is never rewritten.
+    pub fn update_chains(&mut self, chains: &AxisChainSet) {
+        assert_eq!(
+            self.axes.len(),
+            chains.n_axes(),
+            "update_chains cannot change the axis registry shape"
+        );
+        for (lane, chain) in self.axes.iter_mut().zip(&chains.chains) {
+            lane.kernel = chain.kernel.clone();
+            lane.h = chain
+                .kernel
+                .as_ref()
+                .map_or(0.0, crate::beta::kernel_half_support);
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -981,7 +1000,7 @@ pub(crate) fn per_segment_limits(
     limits
 }
 
-fn build_axis_queue(home_pos: f64, chain: &CompiledChain) -> AxisShaperQueue {
+fn build_axis_queue(home_pos: f64, chain: &CompiledChain) -> AxisLane {
     let kernel = chain.kernel.clone();
     let h = kernel
         .as_ref()
@@ -999,10 +1018,10 @@ fn build_axis_queue(home_pos: f64, chain: &CompiledChain) -> AxisShaperQueue {
         });
     }
 
-    AxisShaperQueue { pieces, kernel, h }
+    AxisLane { pieces, kernel, h }
 }
 
-fn reseed_axis_queue(axis: &mut AxisShaperQueue, home_pos: f64) {
+fn reseed_axis_queue(axis: &mut AxisLane, home_pos: f64) {
     axis.pieces.clear();
     if axis.h > 0.0 {
         let delta_safety = axis.h;

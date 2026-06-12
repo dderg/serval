@@ -386,10 +386,7 @@ impl ShaperState {
     }
 }
 
-fn build_history_storage(
-    axes: &[super::AxisShaperQueue],
-    t_start: f64,
-) -> Vec<Vec<BezierPiece<f64>>> {
+fn build_history_storage(axes: &[super::AxisLane], t_start: f64) -> Vec<Vec<BezierPiece<f64>>> {
     axes.iter()
         .map(|axis| {
             axis.pieces
@@ -401,7 +398,7 @@ fn build_history_storage(
         .collect()
 }
 
-fn trim_per_axis_history(axes: &mut [super::AxisShaperQueue], t_dispatched: f64, max_h: f64) {
+fn trim_per_axis_history(axes: &mut [super::AxisLane], t_dispatched: f64, max_h: f64) {
     let delta_safety = max_h;
     let trim_cutoff = t_dispatched - max_h - delta_safety;
     for axis in axes {

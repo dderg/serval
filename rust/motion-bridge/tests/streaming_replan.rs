@@ -4,14 +4,41 @@ use std::sync::{Arc, Mutex};
 // name `motion_bridge_native` (because `[lib].name` must match the
 // `#[pymodule]` fn — see Cargo.toml).
 use motion_bridge_native::classify::classify_and_build;
-use motion_bridge_native::config::{LimitSection, PlannerConfig};
+use motion_bridge_native::config::{
+    AxisDecl, AxisRegistry, LimitSection, PlannerConfig, PostProcessorDecl, PostProcessorSet,
+};
 use motion_bridge_native::planner::{DispatchError, PlannerHandle};
-use trajectory::{AxisShaper, ShapedSegment, ShaperConfig};
+use trajectory::ShapedSegment;
 
 use nurbs::ScalarNurbs;
 use nurbs::eval::{eval_derivative, eval_polynomial};
 
 type Recorded = Arc<Mutex<Vec<ShapedSegment>>>;
+
+fn smooth_zv_post_processors(freq_x: f64, freq_y: f64) -> (AxisRegistry, PostProcessorSet) {
+    let decls: Vec<AxisDecl> = [("x", "is_x"), ("y", "is_y"), ("z", "")]
+        .iter()
+        .map(|(name, pp)| AxisDecl {
+            name: (*name).to_string(),
+            follows: vec![],
+            motors: vec![],
+            post_processors: if pp.is_empty() {
+                vec![]
+            } else {
+                vec![(*pp).to_string()]
+            },
+        })
+        .collect();
+    let registry = AxisRegistry::try_new(decls).unwrap();
+    let pp = |name: &str, freq: f64| PostProcessorDecl {
+        name: name.to_string(),
+        ty: "smooth_zv".to_string(),
+        params: vec![("frequency_hz".to_string(), freq)],
+    };
+    let set =
+        PostProcessorSet::try_new(&registry, &[pp("is_x", freq_x), pp("is_y", freq_y)]).unwrap();
+    (registry, set)
+}
 
 fn recording_dispatch() -> (
     Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
@@ -29,15 +56,9 @@ fn recording_dispatch() -> (
 
 fn smooth_zv_186hz_config() -> PlannerConfig {
     let mut c = PlannerConfig::default();
-    c.shaper = ShaperConfig {
-        x: AxisShaper::SmoothZv {
-            frequency_hz: 186.0,
-        },
-        y: AxisShaper::SmoothZv {
-            frequency_hz: 186.0,
-        },
-        z: AxisShaper::Passthrough,
-    };
+    let (registry, post_processors) = smooth_zv_post_processors(55.4, 39.2);
+    c.axis_registry = registry;
+    c.post_processors = post_processors;
     c.fit_tolerance_mm = 0.05;
     c
 }
@@ -1064,7 +1085,7 @@ fn force_idle_recovery_resets_to_recovered_position() {
 }
 
 #[test]
-fn update_shaper_commits_held_output_before_swap() {
+fn update_post_processor_commits_held_output_before_swap() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
@@ -1075,18 +1096,16 @@ fn update_shaper_commits_held_output_before_swap() {
 
     let commit_count_before = h.commit_fire_count();
 
-    let new_shaper = ShaperConfig {
-        x: AxisShaper::SmoothZv { frequency_hz: 60.0 },
-        y: AxisShaper::SmoothZv { frequency_hz: 60.0 },
-        z: AxisShaper::Passthrough,
-    };
-    h.update_shaper(new_shaper).expect("update_shaper");
+    h.update_post_processor("is_x", "frequency_hz", 60.0)
+        .expect("update is_x");
+    h.update_post_processor("is_y", "frequency_hz", 60.0)
+        .expect("update is_y");
     h.flush().expect("flush as sync barrier");
 
     let commit_count_after = h.commit_fire_count();
     assert!(
         commit_count_after > commit_count_before,
-        "update_shaper did not drain the held-back tail under the old \
+        "update_post_processor did not drain the held-back tail under the old \
          kernel — commit_fire_count went {} → {} (expected increment). \
          This means the trailing decel-to-zero of move 1 was silently \
          discarded when the shaper was swapped, the Phase 5 Task 5.3 \
@@ -1391,13 +1410,32 @@ fn two_jog_replan_segments_survive_corexy_motor_union() {
     };
 
     let mut cfg = PlannerConfig::default();
-    cfg.shaper = ShaperConfig {
-        x: AxisShaper::SmoothZv {
-            frequency_hz: 186.0,
-        },
-        y: AxisShaper::Passthrough,
-        z: AxisShaper::Passthrough,
-    };
+    let x_only_registry = AxisRegistry::try_new(
+        [("x", true), ("y", false), ("z", false)]
+            .iter()
+            .map(|(name, shaped)| AxisDecl {
+                name: (*name).to_string(),
+                follows: vec![],
+                motors: vec![],
+                post_processors: if *shaped {
+                    vec!["is_x".to_string()]
+                } else {
+                    vec![]
+                },
+            })
+            .collect(),
+    )
+    .unwrap();
+    cfg.post_processors = PostProcessorSet::try_new(
+        &x_only_registry,
+        &[PostProcessorDecl {
+            name: "is_x".to_string(),
+            ty: "smooth_zv".to_string(),
+            params: vec![("frequency_hz".to_string(), 186.0)],
+        }],
+    )
+    .unwrap();
+    cfg.axis_registry = x_only_registry;
     cfg.fit_tolerance_mm = 0.05;
 
     cfg.limit_sections = high_speed_limit_sections();

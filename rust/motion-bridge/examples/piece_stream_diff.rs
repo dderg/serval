@@ -11,14 +11,41 @@
 use std::sync::{Arc, Mutex};
 
 use motion_bridge_native::classify::classify_and_build;
-use motion_bridge_native::config::{LimitSection, PlannerConfig};
+use motion_bridge_native::config::{
+    AxisDecl, AxisRegistry, LimitSection, PlannerConfig, PostProcessorDecl, PostProcessorSet,
+};
 use motion_bridge_native::dispatch::{KINEMATICS_COREXY, McuAxisConfig, McuCaps};
 use motion_bridge_native::enqueue::enqueue_segment;
 use motion_bridge_native::planner::{DispatchError, PlannerHandle};
 use motion_bridge_native::pump::MAX_LEAD_SECS;
-use trajectory::{AxisShaper, ShapedSegment, ShaperConfig};
+use trajectory::ShapedSegment;
 
 type Recorded = Arc<Mutex<Vec<ShapedSegment>>>;
+
+fn smooth_zv_post_processors(freq_x: f64, freq_y: f64) -> (AxisRegistry, PostProcessorSet) {
+    let decls: Vec<AxisDecl> = [("x", "is_x"), ("y", "is_y"), ("z", "")]
+        .iter()
+        .map(|(name, pp)| AxisDecl {
+            name: (*name).to_string(),
+            follows: vec![],
+            motors: vec![],
+            post_processors: if pp.is_empty() {
+                vec![]
+            } else {
+                vec![(*pp).to_string()]
+            },
+        })
+        .collect();
+    let registry = AxisRegistry::try_new(decls).unwrap();
+    let pp = |name: &str, freq: f64| PostProcessorDecl {
+        name: name.to_string(),
+        ty: "smooth_zv".to_string(),
+        params: vec![("frequency_hz".to_string(), freq)],
+    };
+    let set =
+        PostProcessorSet::try_new(&registry, &[pp("is_x", freq_x), pp("is_y", freq_y)]).unwrap();
+    (registry, set)
+}
 
 fn recording_dispatch() -> (
     Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
@@ -36,15 +63,9 @@ fn recording_dispatch() -> (
 
 fn smooth_zv_186hz_config() -> PlannerConfig {
     let mut c = PlannerConfig::default();
-    c.shaper = ShaperConfig {
-        x: AxisShaper::SmoothZv {
-            frequency_hz: 186.0,
-        },
-        y: AxisShaper::SmoothZv {
-            frequency_hz: 186.0,
-        },
-        z: AxisShaper::Passthrough,
-    };
+    let (registry, post_processors) = smooth_zv_post_processors(55.4, 39.2);
+    c.axis_registry = registry;
+    c.post_processors = post_processors;
     c.fit_tolerance_mm = 0.05;
     c
 }

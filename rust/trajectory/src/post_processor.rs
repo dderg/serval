@@ -12,6 +12,15 @@ pub enum PostProcessorType {
     LinearPressureAdvance { k: f64 },
 }
 
+impl PostProcessorType {
+    /// Single-instance chain — the common test/config shorthand.
+    #[must_use]
+    pub fn into_chain(self) -> CompiledChain {
+        CompiledChain::compile(&[PostProcessorInstance::new("inline", self)])
+            .expect("a single post-processor always compiles")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PostProcessorInstance {
     name: String,
@@ -145,6 +154,14 @@ pub struct AxisChainSet {
 }
 
 impl AxisChainSet {
+    #[must_use]
+    pub fn spatial(x: CompiledChain, y: CompiledChain, z: CompiledChain) -> Self {
+        Self {
+            chains: vec![x, y, z],
+            followers: Vec::new(),
+        }
+    }
+
     #[must_use]
     pub fn passthrough_spatial() -> Self {
         Self {

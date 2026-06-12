@@ -77,17 +77,59 @@ fn update_runtime_caps_processed_without_error() {
     h.shutdown();
 }
 
-#[test]
-fn update_shaper_processed_without_error() {
-    let (dispatch, _counter) = counting_dispatch();
-    let mut h = PlannerHandle::spawn(PlannerConfig::default(), dispatch);
+fn smooth_mzv_xy_post_processors(freq_x: f64, freq_y: f64) -> crate::config::PostProcessorSet {
+    crate::config::PostProcessorSet::try_new(
+        &mzv_registry(),
+        &[
+            crate::config::PostProcessorDecl {
+                name: "is_x".into(),
+                ty: "smooth_mzv".into(),
+                params: vec![("frequency_hz".into(), freq_x)],
+            },
+            crate::config::PostProcessorDecl {
+                name: "is_y".into(),
+                ty: "smooth_mzv".into(),
+                params: vec![("frequency_hz".into(), freq_y)],
+            },
+        ],
+    )
+    .unwrap()
+}
 
-    let shaper = ShaperConfig {
-        x: trajectory::AxisShaper::SmoothZv { frequency_hz: 60.0 },
-        y: trajectory::AxisShaper::SmoothZv { frequency_hz: 60.0 },
-        z: trajectory::AxisShaper::Passthrough,
-    };
-    h.update_shaper(shaper).unwrap();
+fn mzv_registry() -> crate::config::AxisRegistry {
+    crate::config::AxisRegistry::try_new(
+        [("x", "is_x"), ("y", "is_y"), ("z", "")]
+            .iter()
+            .map(|(name, pp)| crate::config::AxisDecl {
+                name: (*name).to_string(),
+                follows: vec![],
+                motors: vec![],
+                post_processors: if pp.is_empty() {
+                    vec![]
+                } else {
+                    vec![(*pp).to_string()]
+                },
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn update_post_processor_processed_without_error() {
+    let (dispatch, _counter) = counting_dispatch();
+    let mut cfg = PlannerConfig::default();
+    cfg.post_processors = smooth_mzv_xy_post_processors(60.0, 60.0);
+    cfg.axis_registry = mzv_registry();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
+
+    h.update_post_processor("is_x", "frequency_hz", 80.0)
+        .unwrap();
+    assert!(
+        h.update_post_processor("ghost", "frequency_hz", 80.0)
+            .is_err()
+    );
+    assert!(h.update_post_processor("is_x", "k", 0.1).is_err());
 
     h.shutdown();
 }
@@ -119,16 +161,6 @@ fn drop_without_explicit_shutdown_does_not_hang() {
 fn z_only_move_after_homing_xy_shaped_axes_are_constant() {
     use crate::classify::classify_and_build;
 
-    let shaper_cfg = ShaperConfig {
-        x: trajectory::AxisShaper::SmoothMzv {
-            frequency_hz: 186.0,
-        },
-        y: trajectory::AxisShaper::SmoothMzv {
-            frequency_hz: 122.0,
-        },
-        z: trajectory::AxisShaper::Passthrough,
-    };
-
     let mut cfg = PlannerConfig::default();
     cfg.limit_sections = vec![
         crate::config::LimitSection {
@@ -146,7 +178,8 @@ fn z_only_move_after_homing_xy_shaped_axes_are_constant() {
             max_jerk: None,
         },
     ];
-    cfg.shaper = shaper_cfg;
+    cfg.post_processors = smooth_mzv_xy_post_processors(186.0, 122.0);
+    cfg.axis_registry = mzv_registry();
 
     let replan_ctx = build_replan_context(&cfg);
     let mut state = ShaperState::new(&[0.0; 3], &replan_ctx.chains);
@@ -245,16 +278,6 @@ fn z_only_move_after_homing_xy_shaped_axes_are_constant() {
 fn z_move_with_tiny_x_after_homing_xy_deviation_proportional() {
     use crate::classify::classify_and_build;
 
-    let shaper_cfg = ShaperConfig {
-        x: AxisShaper::SmoothMzv {
-            frequency_hz: 186.0,
-        },
-        y: AxisShaper::SmoothMzv {
-            frequency_hz: 122.0,
-        },
-        z: AxisShaper::Passthrough,
-    };
-
     let mut cfg = PlannerConfig::default();
     cfg.limit_sections = vec![
         crate::config::LimitSection {
@@ -272,7 +295,8 @@ fn z_move_with_tiny_x_after_homing_xy_deviation_proportional() {
             max_jerk: None,
         },
     ];
-    cfg.shaper = shaper_cfg;
+    cfg.post_processors = smooth_mzv_xy_post_processors(186.0, 122.0);
+    cfg.axis_registry = mzv_registry();
 
     let replan_ctx = build_replan_context(&cfg);
     let mut state = ShaperState::new(&[0.0; 3], &replan_ctx.chains);
@@ -464,16 +488,6 @@ fn move_after_idle_resumes_with_dispatch_lead() {
 fn z_only_move_no_prior_xy_motion() {
     use crate::classify::classify_and_build;
 
-    let shaper_cfg = ShaperConfig {
-        x: AxisShaper::SmoothMzv {
-            frequency_hz: 186.0,
-        },
-        y: AxisShaper::SmoothMzv {
-            frequency_hz: 122.0,
-        },
-        z: AxisShaper::Passthrough,
-    };
-
     let mut cfg = PlannerConfig::default();
     cfg.limit_sections = vec![
         crate::config::LimitSection {
@@ -491,7 +505,8 @@ fn z_only_move_no_prior_xy_motion() {
             max_jerk: None,
         },
     ];
-    cfg.shaper = shaper_cfg;
+    cfg.post_processors = smooth_mzv_xy_post_processors(186.0, 122.0);
+    cfg.axis_registry = mzv_registry();
 
     let replan_ctx = build_replan_context(&cfg);
     let mut state = ShaperState::new(&[0.0; 3], &replan_ctx.chains);
