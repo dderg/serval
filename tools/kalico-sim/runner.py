@@ -509,9 +509,7 @@ def run_simulation(
                     if src.exists() and not dest.exists():
                         try:
                             os.symlink(str(src.resolve()), str(dest))
-                            log.info(
-                                "Symlinked %s into klippy/extras/", fname
-                            )
+                            log.info("Symlinked %s into klippy/extras/", fname)
                         except OSError:
                             pass
 
@@ -661,7 +659,13 @@ def run_simulation(
                                 )
                                 break
                 if beacon_error is None and beacon_test == "connect":
-                    if "Traceback" in klippy_content:
+                    # The firmware-update check subprocess always fails in
+                    # docker (no real device); its traceback is benign.
+                    relevant = klippy_content.replace(
+                        "Executing Beacon update script failed: Traceback",
+                        "Executing Beacon update script failed:",
+                    )
+                    if "Traceback" in relevant:
                         beacon_error = "klippy.log contains a Traceback"
                     elif "Failed to load module 'beacon'" in klippy_content:
                         beacon_error = "beacon module failed to load"
@@ -2609,6 +2613,13 @@ def main():
     print("=" * 60)
 
     if not result.success and result.klippy_log:
+        if "Traceback" in result.klippy_log:
+            print("\n--- klippy.log (traceback context) ---")
+            lines = result.klippy_log.strip().split("\n")
+            for i, line in enumerate(lines):
+                if "Traceback" in line:
+                    print("\n".join(lines[max(0, i - 3) : i + 20]))
+                    print("...")
         print("\n--- klippy.log (homing-relevant, all lines) ---")
         for line in result.klippy_log.strip().split("\n"):
             lo = line.lower()
