@@ -88,6 +88,36 @@ classic step/dir stepper, a phase-stepped one, or an EtherCAT servo — the
 fork speaks to servo drives natively. Nothing on the planning side knows or
 cares which drive technology sits at the end.
 
+This is running hardware, not a roadmap. From one of the test benches, where
+the X axis is an industrial EtherCAT servo and the other axes are steppers:
+
+```
+[ethercat_node node_x]
+interface: eth0
+
+[servo_x]
+protocol: ethercat
+node: node_x
+rotation_distance: 40
+encoder_counts_per_rev: 131072
+max_torque: 100
+following_error: 10
+velocity_ff: True
+```
+
+A stepper opts into phase stepping with one line in its existing section:
+
+```
+[stepper_y]
+microsteps: 256
+rotation_distance: 40
+phase_stepping: 1
+
+[tmc5160 stepper_y]
+spi_bus: spidev0.0
+run_current: 1.0
+```
+
 ## The MCU plays motion, not steps
 
 The host writes every axis's final motion — planned, followed, shaped,
