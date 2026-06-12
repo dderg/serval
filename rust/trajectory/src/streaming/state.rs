@@ -864,7 +864,7 @@ fn boundary_path_speed_cap(seg: &PlanSegment<'_>) -> f64 {
     seg.temporal.limits.mvc_b(&unit_tan, 1e-12).sqrt()
 }
 
-fn per_segment_limits(
+pub(crate) fn per_segment_limits(
     curve: &nurbs::VectorNurbs<f64, 3>,
     base: &temporal::Limits,
     feedrate_mm_s: f64,
@@ -891,14 +891,15 @@ fn per_segment_limits(
     let chord_len = (span[0] * span[0] + span[1] * span[1] + span[2] * span[2]).sqrt();
 
     let set_is_inactive = |axes: temporal::AxisSet| {
-        axes.indices()
-            .all(|ax| span[ax] <= AXIS_INACTIVE_SPAN_EPS_MM)
+        axes.is_spatial()
+            && axes
+                .indices()
+                .all(|ax| span[ax] <= AXIS_INACTIVE_SPAN_EPS_MM)
     };
     let max_active_j = base
-        .sets()
-        .iter()
-        .filter(|s| !set_is_inactive(s.axes) && s.j_max.is_finite())
-        .map(|s| s.j_max)
+        .spatial_sets()
+        .filter(|(_, s)| !set_is_inactive(s.axes) && s.j_max.is_finite())
+        .map(|(_, s)| s.j_max)
         .fold(0.0_f64, f64::max);
 
     let mut limits = *base;

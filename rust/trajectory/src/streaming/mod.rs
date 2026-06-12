@@ -22,7 +22,7 @@ pub struct ReplanReport {
 
 mod decel_finder;
 mod emit;
-mod state;
+pub(crate) mod state;
 
 #[cfg(test)]
 mod tests;

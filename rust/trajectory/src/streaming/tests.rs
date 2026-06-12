@@ -1596,3 +1596,30 @@ fn emit_covers_window_starting_after_t_dispatched() {
 
     let _ = emit_partial_window(&mut state);
 }
+
+#[test]
+fn per_segment_limits_tolerates_follower_sets() {
+    let mut sets: Vec<temporal::LimitSet> =
+        temporal::Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
+            .sets()
+            .to_vec();
+    sets.push(temporal::LimitSet {
+        axes: temporal::AxisSet::from_indices(&[3]),
+        v_max: 75.0,
+        a_max: 1500.0,
+        j_max: 3000.0,
+    });
+    let base = temporal::Limits::try_new(&sets, 4).unwrap();
+    let curve = nurbs::VectorNurbs::try_new(
+        1,
+        vec![0.0, 0.0, 1.0, 1.0],
+        vec![[0.0, 0.0, 0.0], [0.0, 0.0, 10.0]],
+    )
+    .unwrap();
+    let limits = super::state::per_segment_limits(&curve, &base, 15.0);
+    let (_, follower_set) = limits.follower_sets().next().unwrap();
+    assert_eq!(
+        follower_set.j_max, 3000.0,
+        "follower jerk cap must not be relaxed by spatial inactivity"
+    );
+}
