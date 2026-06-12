@@ -97,9 +97,23 @@ class ClockSync:
         # Extend clock to 64bit
         last_clock = self.last_clock
         clock_delta = (params["clock"] - last_clock) & 0xFFFFFFFF
-        self.last_clock = clock = last_clock + clock_delta
-        # Check if this is the best round-trip-time seen so far
+        clock = last_clock + clock_delta
         sent_time = params["#sent_time"]
+        if sent_time:
+            # The blind 32-bit extension above loses one full wrap period
+            # (2^32/freq — 8.26s at 520MHz) for every wrap the inter-sample
+            # gap spans; a reactor stall longer than that would collapse the
+            # frequency regression and shut the MCU down with "Timer too
+            # close". Recover the missed wraps from the regression's own
+            # clock prediction.
+            exp_clock = (sent_time - self.time_avg) * self.clock_est[
+                2
+            ] + self.clock_avg
+            missed_wraps = round((exp_clock - clock) / 2**32)
+            if missed_wraps > 0:
+                clock += missed_wraps * 2**32
+        self.last_clock = clock
+        # Check if this is the best round-trip-time seen so far
         if not sent_time:
             return
         receive_time = params["#receive_time"]
