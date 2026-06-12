@@ -38,22 +38,40 @@ in stepper space (§3); the linear kinematic map translates them into ordinary
 constraint rows.
 
 The kinematic map is itself declared in config, not implied by stepper section
-names. The kinematics declaration names a type — which defines the roles that
-exist and the linear math (corexy: belts `a`/`b`, `a = x + y`, `b = x − y`) —
-and assigns steppers to roles explicitly:
+names. Kinematics types are **modules**: each defines its own config schema —
+which axis roles it binds, which stepper roles it assigns — and its linear
+math (corexy: `a = x + y`, `b = x − y`). A `[kinematics <name>]` section
+instantiates a module; the core never enumerates types or assumes which axes
+exist — it consumes instances: these axes, these steppers, this matrix.
 
 ```
-[kinematics]
+[kinematics gantry]
 type: corexy
+x: x
+y: y
+z: z
 a_steppers: stepper_front, stepper_rear_left
 b_steppers: stepper_back, stepper_rear_right
 z_steppers: stepper_z0, stepper_z1, stepper_z2
+
+[kinematics extruder]
+type: direct
+axis: e
+steppers: stepper_e
 ```
 
-Stepper names are arbitrary; a stepper has no axis identity outside this
-assignment (`stepper_x` on a corexy was always a lie, and the lie has nowhere
-to live). Follower axes do not appear in the kinematics map: their relation is
-`follows`, and their motors are assigned like any other stepper.
+Multiple instances compose (a gantry plus a rotary table plus extruders); an
+axis or stepper claimed by two instances is a config error. The trivial
+`direct` module (identity map) covers single-axis motors — every axis reaches
+its steppers through a kinematics instance, no exceptions. New machine shapes
+(idex, delta, rotary) are new modules defining whatever schema they need, not
+core changes.
+
+Stepper names are arbitrary; a stepper has no axis identity outside its
+kinematics assignment (`stepper_x` on a corexy was always a lie, and the lie
+has nowhere to live). The `follows` relation is planner-side and fully
+orthogonal: how a follower axis's motor is wired is its kinematics instance's
+business, like any axis.
 
 Axis names double as G-code word letters (`[axis e]` ↔ word `E`): single
 letters, collisions with structural G5 words (I/J/P/Q/F) rejected at load.
