@@ -12,11 +12,20 @@ fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
 }
 
 fn default_limits() -> temporal::Limits {
-    temporal::Limits::axis_boxes(
+    let mut sets: Vec<temporal::LimitSet> = temporal::Limits::axis_boxes(
         [500.0, 500.0, 500.0],
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
     )
+    .sets()
+    .to_vec();
+    sets.push(temporal::LimitSet {
+        axes: temporal::AxisSet::from_indices(&[3]),
+        v_max: 75.0,
+        a_max: 1500.0,
+        j_max: 3000.0,
+    });
+    temporal::Limits::try_new(&sets, 4).unwrap()
 }
 
 fn default_kernels() -> [Option<PlanShaper>; 4] {
@@ -34,6 +43,8 @@ fn default_kernels() -> [Option<PlanShaper>; 4] {
 
 fn default_input<'a>(segments: &'a [PlanSegment<'a>], safety: SafetyMode) -> PlanInput<'a> {
     PlanInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments,
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         worker_threads: 1,

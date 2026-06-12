@@ -39,6 +39,8 @@ fn jog_50mm_at_100mms_with_live_limits() {
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,
@@ -102,6 +104,8 @@ fn jog_50mm_with_higher_scv() {
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,
@@ -160,6 +164,8 @@ fn probe_with_feedrate(feedrate: f64, dist_mm: f64) -> f64 {
         feedrate_mm_s: feedrate,
     }];
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,
@@ -222,6 +228,8 @@ fn jog_50mm_with_z_jmax_uncapped() {
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,
@@ -290,6 +298,8 @@ fn jog_50mm_low_accel_baseline() {
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
             min_n: 20,

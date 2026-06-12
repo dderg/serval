@@ -768,6 +768,7 @@ fn run_loop(
 
 fn build_replan_context(config: &PlannerConfig) -> ReplanContext {
     ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits: config
             .to_temporal_limits()
             .expect("limit sections validated in init_planner"),

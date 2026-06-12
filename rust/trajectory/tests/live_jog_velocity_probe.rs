@@ -20,6 +20,7 @@ fn live_shapers() -> [Option<AxisShaper>; 4] {
 
 fn live_ctx() -> ReplanContext {
     ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits: temporal::Limits::axis_boxes(
             [1000.0, 1000.0, 5.0],
             [70000.0, 70000.0, 100.0],

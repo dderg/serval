@@ -3,6 +3,8 @@ use super::*;
 #[test]
 fn shape_batch_rejects_empty_segments() {
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &[],
         grid_strategy: temporal::multi::GridStrategy::Fixed(100),
         worker_threads: 1,

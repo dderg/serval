@@ -9,11 +9,20 @@ const E_FOLLOWER_04: &[FollowerDemand] = &[FollowerDemand {
 use nurbs::VectorNurbs;
 
 fn default_limits() -> temporal::Limits {
-    temporal::Limits::axis_boxes(
+    let mut sets: Vec<temporal::LimitSet> = temporal::Limits::axis_boxes(
         [500.0, 500.0, 500.0],
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
     )
+    .sets()
+    .to_vec();
+    sets.push(temporal::LimitSet {
+        axes: temporal::AxisSet::from_indices(&[3]),
+        v_max: 75.0,
+        a_max: 1500.0,
+        j_max: 3000.0,
+    });
+    temporal::Limits::try_new(&sets, 4).unwrap()
 }
 
 fn default_shaper_config() -> ShaperConfig {
@@ -35,11 +44,7 @@ fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
 #[test]
 fn single_straight_line_converges() {
     let curve = straight_linear([0.0, 0.0, 0.0], [50.0, 0.0, 0.0]);
-    let generous_limits = temporal::Limits::axis_boxes(
-        [500.0, 500.0, 500.0],
-        [5_000.0, 5_000.0, 5_000.0],
-        [100_000.0, 100_000.0, 100_000.0],
-    );
+    let generous_limits = default_limits();
     let segments = [ShapeSegmentInput {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
@@ -51,6 +56,8 @@ fn single_straight_line_converges() {
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         worker_threads: 1,

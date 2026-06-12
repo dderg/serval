@@ -124,6 +124,7 @@ fn replan_limits() -> temporal::Limits {
 
 fn replan_context() -> ReplanContext {
     ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits: replan_limits(),
         kernels: replan_kernels_planshaper(),
         fit_tolerance_mm: 0.005,
@@ -1185,6 +1186,7 @@ fn single_axis_harness(v_max: f64, a_max: f64) -> (ShaperState, ReplanContext) {
     let limits =
         temporal::Limits::axis_boxes([v_max, v_max, v_max], [a_max, a_max, a_max], [100_000.0; 3]);
     let ctx = ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits,
         kernels: [
             Some(PlanShaper::SmoothZv {
@@ -1284,6 +1286,7 @@ fn replan_with_positive_boundary_accel_and_short_first_segment_succeeds() {
 
     let limits = temporal::Limits::axis_boxes([300.0; 3], [5_000.0; 3], [10_000.0; 3]);
     let ctx = ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits,
         kernels: [
             Some(PlanShaper::SmoothZv {
@@ -1349,6 +1352,7 @@ fn corner_context_passthrough() -> ReplanContext {
         [10_000.0; 3],
     );
     ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits,
         kernels: [
             Some(PlanShaper::Passthrough),
@@ -1427,6 +1431,7 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
         [10_000.0; 3],
     );
     let ctx = ReplanContext {
+        follower_pa: [0.0; temporal::MAX_AXES],
         limits: tight_limits,
         kernels: [
             Some(PlanShaper::Passthrough),

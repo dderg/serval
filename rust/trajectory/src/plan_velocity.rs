@@ -53,6 +53,8 @@ pub struct PlanInput<'a> {
     pub initial_a: f64,
     pub terminal_v: f64,
     pub safety_mode: SafetyMode,
+    pub follower_pa: [f64; temporal::MAX_AXES],
+    pub follower_history: Option<&'a temporal::FollowerHistory>,
     /// Axis-wise second derivatives to pin at the first sample of the first fitted
     /// segment. Forwarded verbatim to [`ShapeBatchInput::start_d2_override`].
     pub start_d2_override: Option<[f64; 3]>,
@@ -93,6 +95,8 @@ pub fn plan_velocity(input: &PlanInput<'_>) -> Result<PlanOutput, ShapeError> {
 
     let shape_input = ShapeBatchInput {
         segments: &segments,
+        follower_pa: input.follower_pa,
+        follower_history: input.follower_history,
         grid_strategy: input.grid_strategy,
         worker_threads: input.worker_threads,
         shaper,

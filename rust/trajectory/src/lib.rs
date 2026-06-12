@@ -20,6 +20,10 @@ pub use streaming::ReplanReport;
 #[derive(Debug)]
 pub struct ShapeBatchInput<'a> {
     pub segments: &'a [ShapeSegmentInput<'a>],
+    /// Pressure-advance gain per axis index; zero = no PA.
+    pub follower_pa: [f64; temporal::MAX_AXES],
+    /// Realized pre-batch per-axis velocity for the shaper window's left edge.
+    pub follower_history: Option<&'a temporal::FollowerHistory>,
     pub grid_strategy: temporal::multi::GridStrategy,
     pub worker_threads: usize,
     pub shaper: ShaperConfig,

@@ -23,7 +23,17 @@ fn make_straight_line(from: [f64; 3], to: [f64; 3]) -> VectorNurbs<f64, 3> {
 }
 
 fn default_limits() -> temporal::Limits {
-    temporal::Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
+    let mut sets: Vec<temporal::LimitSet> =
+        temporal::Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
+            .sets()
+            .to_vec();
+    sets.push(temporal::LimitSet {
+        axes: temporal::AxisSet::from_indices(&[3]),
+        v_max: 75.0,
+        a_max: 1500.0,
+        j_max: 3000.0,
+    });
+    temporal::Limits::try_new(&sets, 4).unwrap()
 }
 
 fn test_shaper_config() -> ShaperConfig {
@@ -49,6 +59,8 @@ fn shape_batch_straight_line() {
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Fixed(20),
         worker_threads: 1,
@@ -104,6 +116,8 @@ fn shape_batch_short_low_velocity_line_refits_at_five_microns() {
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Fixed(25),
         worker_threads: 1,
@@ -168,6 +182,8 @@ fn shape_batch_two_segments() {
     ];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Fixed(20),
         worker_threads: 1,
@@ -222,6 +238,8 @@ fn shape_batch_beta_warning() {
     }];
 
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Fixed(20),
         worker_threads: 1,
@@ -260,6 +278,8 @@ fn shape_batch_beta_warning() {
 #[test]
 fn shape_batch_empty_input() {
     let input = ShapeBatchInput {
+        follower_pa: [0.0; temporal::MAX_AXES],
+        follower_history: None,
         segments: &[],
         grid_strategy: GridStrategy::Fixed(20),
         worker_threads: 1,
