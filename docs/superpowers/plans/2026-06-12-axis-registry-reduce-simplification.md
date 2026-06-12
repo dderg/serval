@@ -282,27 +282,40 @@ fn classify_followers(
 ```rust
 #[test]
 fn vase_mode_helix_classifies_with_3d_ratio() {
-    // G5 with X/Y motion, Z rise, and E — previously HelicalExtrusionUnsupported.
-    // Assert: one segment, followers == [FollowerDemand { axis_index: 3, ratio: de / path_len_3d }].
+    // Previously Fatal::HelicalExtrusionUnsupported.
+    let gcode = "G5 X10 Y0 Z0.3 I3 J0 P-3 Q0 E0.5 F3000\n";
+    // Run through a pipeline built with vec![FollowerWord { letter: b'E', axis_index: 3 }];
+    // collect Items; assert exactly one Item::Segment(Segment::Cubic(seg));
+    // assert seg.followers.len() == 1, axis_index == 3,
+    // and (seg.followers[0].ratio - 0.5 / nurbs::arc_length::path_arc_length(&seg.xyz)).abs() < 1e-12.
 }
 
 #[test]
 fn z_hop_with_follower_classifies() {
-    // Z-only displacement plus E word: followers ratio = de / dz.
+    let gcode = "G5 X0 Y0 Z2.0 I0.1 J0 P-0.1 Q0 E-3.2 F3000\n";
+    // Assert one cubic segment with followers == [FollowerDemand { axis_index: 3, ratio: -3.2 / path_len }].
 }
 
 #[test]
 fn follower_only_move_is_fatal() {
-    // E word, no XYZ displacement: Item::Fatal(Fatal::FollowerOnlyMoveUnsupported).
+    let gcode = "G5 X0 Y0 I0.1 J0 P-0.1 Q0 E-3.2 F3000\n";
+    // Wait — I/J displacement still bends the curve; use a truly zero-length curve:
+    // start at origin, end at origin, degenerate tangents are rejected by G5 parsing,
+    // so drive this through TWO lines: a real move to X10, then "G5 X10 Y0 I1 J0 P-1 Q0 E5 F3000"
+    // (endpoint == current position, zero net displacement, zero path length).
+    // Assert the second item is Item::Fatal(Fatal::FollowerOnlyMoveUnsupported { .. }).
 }
 
 #[test]
 fn absolute_word_ledger_survives_g92() {
-    // E10 → G92 E0 → E10 again: both curves get delta 10.0.
+    let gcode = "G5 X10 Y0 I3 J0 P-3 Q0 E10 F3000\nG92 E0\nG5 X20 Y0 I3 J0 P-3 Q0 E10 F3000\n";
+    // Both curves must classify with the SAME positive ratio (each saw delta 10.0).
 }
 ```
 
-(Write the four bodies out fully — construct G-code text, run `pipeline.process`, destructure `Item`s; follow the existing test idioms in `pipeline/tests.rs`.)
+(Flesh out the bodies following the existing harness idioms in `pipeline/tests.rs` — pipeline construction, `process`, item collection are already demonstrated there; the G-code strings and assertions above are the substance. For `follower_only_move_is_fatal`, if the zero-length G5 trips a different pre-existing parse guard, surface it — do not weaken the guard to make the test pass.)
+
+Also port the out-of-crate `GeometryPipeline::new` callers now (they compile against geometry directly): `rust/temporal/tests/adaptive_tolerance.rs` and `rust/temporal/tests/prototype.rs` — find with `grep -rln "GeometryPipeline::new" rust/ | grep -v geometry/src` — pass `vec![]` (no followers) unless the test exercises extrusion.
 
 - [ ] **Step 7: Run** — `cargo nextest run -p geometry -p nurbs` → PASS
 - [ ] **Step 8: Commit** — `feat(geometry): followers replace E modes; 3D path ratio; follower-only moves fatal`
