@@ -24,15 +24,21 @@ solves for the fastest profile that satisfies every constraint pointwise
 along the path. Where your gantry's acceleration limit binds, the trajectory
 rides it; where the extruder's flow limit takes over, it rides that instead.
 
-Square corner velocity is the clearest casualty. The SCV hack exists because
-classic planners model a corner as an instantaneous change of direction —
-physically impossible — and then need one global number to cap how violent
-that impossibility may be. Here the path is curves end to end (G5 cubic
-Bézier input), turning at speed is just acceleration, and the same
-acceleration rows that govern straights govern every turn. Cornering speed
-emerges per-corner from your real limits and the actual local curvature.
-There is no corner setting because there is nothing left for it to
-approximate.
+Square corner velocity is the clearest casualty. Taking a sharp corner at
+any nonzero speed means the velocity vector changes direction instantly —
+infinite acceleration. SCV is the agreement to permit a small dose of
+infinity and cap it with one global number. Here the path is curves end to
+end (G5 cubic Bézier input), so turning at speed is just acceleration, and
+the same acceleration limits that govern straights govern every turn; where
+the input does contain a genuinely sharp junction, junction deviation
+(planned) replaces it with real rounded geometry inside a configured
+tolerance, which then gets planned like everything else. Cornering speed
+emerges per-corner from your limits and the local curvature — never from a
+fudge factor, never from infinity.
+
+Motion is also genuinely third-order: jerk is a constraint row like
+velocity and acceleration, solved per axis along the path, not a trapezoid
+with sharp acceleration steps and a smoothing knob on top.
 
 ## Axes
 
