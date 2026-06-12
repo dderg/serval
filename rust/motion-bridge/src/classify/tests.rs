@@ -4,7 +4,7 @@ use super::*;
 fn xy_travel_classifies_correctly() {
     let m = classify_and_build([0.0; 3], 10.0, 0.0, 0.0, 0.0, 100.0).unwrap();
     assert!(matches!(m.class, MoveClass::XyTravel));
-    assert_eq!(m.segment.e_mode, EMode::Travel);
+    assert!(m.segment.followers.is_empty());
     assert_eq!(m.segment.feedrate_mm_s, 100.0);
     let cps = m.segment.xyz.control_points();
     assert_eq!(cps.len(), 4);

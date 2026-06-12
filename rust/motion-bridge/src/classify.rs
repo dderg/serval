@@ -1,5 +1,5 @@
 use compat::collinear::to_collinear_bezier;
-use geometry::segment::{CubicSegment, EMode, SourceRange};
+use geometry::segment::{CubicSegment, SourceRange};
 use nurbs::VectorNurbs;
 
 #[derive(Debug)]
@@ -60,9 +60,7 @@ pub fn classify_and_build(
 
     let segment = CubicSegment::try_new(
         xyz,
-        EMode::Travel,
-        0.0,
-        None,
+        vec![],
         feedrate_mm_s,
         SourceRange {
             start_line: 0,

@@ -11,7 +11,7 @@ use crate::config::{PlannerConfig, RuntimeCaps};
 use crate::pump::AxisKey;
 use trajectory::plan_velocity::{PlanShaper, SafetyMode};
 use trajectory::streaming::{EmitContext, ReplanContext, ReplanReport, ShaperState};
-use trajectory::{AxisShaper, EHalo, ShapedSegment, ShaperConfig};
+use trajectory::{AxisShaper, ShapedSegment, ShaperConfig};
 
 const T_IDLE: Duration = Duration::from_secs(3600);
 
@@ -388,9 +388,6 @@ fn run_commit_and_dispatch(
 
 struct PlannerThreadState {
     emit_kernels: [Option<PiecewisePolynomialKernel<f64>>; 4],
-    /// Empty: streaming `emit_committed` never has E-only gaps. Retained so
-    /// the borrow plumbing into `EmitContext` is straight-line.
-    e_halos: Vec<EHalo>,
     replan_ctx: ReplanContext,
 }
 
@@ -400,7 +397,6 @@ impl PlannerThreadState {
         let replan_ctx = build_replan_context(config);
         Self {
             emit_kernels,
-            e_halos: Vec::new(),
             replan_ctx,
         }
     }
@@ -408,14 +404,12 @@ impl PlannerThreadState {
     fn rebuild(&mut self, config: &PlannerConfig) {
         let next = Self::build(config);
         self.emit_kernels = next.emit_kernels;
-        self.e_halos = next.e_halos;
         self.replan_ctx = next.replan_ctx;
     }
 
     fn emit_ctx(&self) -> EmitContext<'_> {
         EmitContext {
             kernels: &self.emit_kernels,
-            e_halos: &self.e_halos,
         }
     }
 }
@@ -781,7 +775,6 @@ fn build_replan_context(config: &PlannerConfig) -> ReplanContext {
         fit_tolerance_mm: config.fit_tolerance_mm,
         beta_max_iters: config.beta_max_iters,
         beta_convergence_ratio: config.beta_convergence_ratio,
-        e_limits: config.e_limits,
         worker_threads: config.worker_threads,
         grid_strategy: temporal::multi::GridStrategy::Adaptive {
             min_n: 20,

@@ -1,6 +1,6 @@
 use crate::{
-    CubicSegment, EMode, Fatal, FitterParams, GeometryError, JunctionDeviation, Recovery, Segment,
-    SourceRange, TelemetryEvent,
+    CubicSegment, Fatal, FitterParams, FollowerDemand, FollowerWord, GeometryError,
+    JunctionDeviation, Recovery, Segment, SourceRange, TelemetryEvent,
     error::{InternalDetails, InternalKind},
     reduce::{CurveGeom, MotionMarkerKind, ParseErrorKind, ReduceEvent, reduce},
 };
@@ -10,11 +10,12 @@ use std::collections::VecDeque;
 #[derive(Debug)]
 pub struct GeometryPipeline {
     params: FitterParams,
+    followers: Vec<FollowerWord>,
 }
 
 impl GeometryPipeline {
     #[must_use]
-    pub fn new(params: FitterParams) -> Self {
+    pub fn new(params: FitterParams, followers: Vec<FollowerWord>) -> Self {
         debug_assert!(
             params.degree >= 1 && params.degree <= 5,
             "degree must be in [1, 5], got {}",
@@ -27,7 +28,7 @@ impl GeometryPipeline {
         );
         debug_assert!(params.eps_chord_mm > 0.0);
         debug_assert!(params.max_window_vertices >= u32::from(params.degree) + 2);
-        Self { params }
+        Self { params, followers }
     }
 
     pub fn process<'a>(
@@ -37,7 +38,7 @@ impl GeometryPipeline {
     ) -> Segments<'a> {
         Segments {
             params: &self.params,
-            events: Box::new(reduce(lex(text))),
+            events: Box::new(reduce(lex(text), &self.followers)),
             queue: VecDeque::new(),
             sink,
             terminal: false,
@@ -101,11 +102,11 @@ impl Segments<'_> {
         match event {
             ReduceEvent::Curve {
                 geom,
-                e_delta,
+                follower_deltas,
                 feedrate_mm_s,
                 line_no,
             } => {
-                self.handle_curve(geom, e_delta, feedrate_mm_s, line_no);
+                self.handle_curve(geom, &follower_deltas, feedrate_mm_s, line_no);
             }
             ReduceEvent::CommentMarker { kind, line_no } => {
                 if let gcode::MarkerKind::LayerChange { layer } = kind {
@@ -119,23 +120,11 @@ impl Segments<'_> {
                 kind,
                 line_no,
                 tool,
-                e_delta_mm,
             } => {
-                match kind {
-                    MotionMarkerKind::T => {
-                        if let Some(tool) = tool {
-                            (self.sink)(TelemetryEvent::ToolChange { tool, line_no });
-                        }
+                if kind == MotionMarkerKind::T {
+                    if let Some(tool) = tool {
+                        (self.sink)(TelemetryEvent::ToolChange { tool, line_no });
                     }
-                    MotionMarkerKind::EOnly => {
-                        if let Some(e_delta_mm) = e_delta_mm {
-                            (self.sink)(TelemetryEvent::Retraction {
-                                e_delta_mm,
-                                line_no,
-                            });
-                        }
-                    }
-                    _ => {}
                 }
                 self.prev_g1_end = None;
                 self.prev_g1_feedrate = None;
@@ -196,11 +185,10 @@ impl Segments<'_> {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn handle_curve(
         &mut self,
         geom: CurveGeom,
-        e_delta: Option<f64>,
+        follower_deltas: &[(usize, f64)],
         feedrate_mm_s: f64,
         line_no: u32,
     ) {
@@ -214,23 +202,15 @@ impl Segments<'_> {
             CurveGeom::Quadratic { cps } => degree_elevate_2_to_3(&nurbs_from_quadratic(cps)),
         };
 
-        match classify_e_mode(&xyz, e_delta) {
-            Ok((e_mode, extrusion_per_xy_mm, e_independent)) => {
-                match CubicSegment::try_new(
-                    xyz,
-                    e_mode,
-                    extrusion_per_xy_mm,
-                    e_independent,
-                    feedrate_mm_s,
-                    source,
-                    None,
-                ) {
+        match classify_followers(&xyz, follower_deltas) {
+            Ok(followers) => {
+                match CubicSegment::try_new(xyz, followers, feedrate_mm_s, source, None) {
                     Ok(seg) => {
                         self.queue.push_back(Item::Segment(Segment::Cubic(seg)));
                     }
                     Err(
                         GeometryError::NotSinglePieceCubic { reason }
-                        | GeometryError::EModeInvariantViolation { reason },
+                        | GeometryError::FollowerInvariantViolation { reason },
                     ) => {
                         self.queue.push_back(Item::Fatal(Fatal::Internal(Box::new(
                             InternalDetails {
@@ -241,16 +221,16 @@ impl Segments<'_> {
                         ))));
                     }
                     Err(_) => unreachable!(
-                        "classify_e_mode would not have returned Ok if try_new could fail this way"
+                        "classify_followers would not have returned Ok if try_new could fail this way"
                     ),
                 }
             }
             Err(GeometryError::ZeroMotion) => {}
-            Err(GeometryError::HelicalExtrusionUnsupported) => {
+            Err(GeometryError::FollowerOnlyMoveUnsupported) => {
                 self.queue
-                    .push_back(Item::Fatal(Fatal::HelicalExtrusionUnsupported { line_no }));
+                    .push_back(Item::Fatal(Fatal::FollowerOnlyMoveUnsupported { line_no }));
             }
-            Err(_) => unreachable!("classify_e_mode return shape is exhaustive"),
+            Err(_) => unreachable!("classify_followers return shape is exhaustive"),
         }
 
         self.prev_g1_end = None;
@@ -259,41 +239,28 @@ impl Segments<'_> {
     }
 }
 
-fn classify_e_mode(
+fn classify_followers(
     xyz: &nurbs::VectorNurbs<f64, 3>,
-    e_delta: Option<f64>,
-) -> Result<(EMode, f64, Option<nurbs::ScalarNurbs<f64>>), GeometryError> {
-    const EPS_XYZ: f64 = 1e-6;
-    const EPS_Z: f64 = 1e-6;
-    const EPS_E: f64 = 1e-6;
-
-    let xy_len = nurbs::arc_length::xy_arc_length(xyz);
-
-    let cps = xyz.control_points();
-    let dz = (cps[3][2] - cps[0][2]).abs();
-
-    let de = e_delta.unwrap_or(0.0);
-    let abs_de = de.abs();
-
-    let xyz_motion = xy_len > EPS_XYZ;
-    let z_motion = dz > EPS_Z;
-    let e_motion = abs_de > EPS_E;
-
-    match (xyz_motion, z_motion, e_motion) {
-        (true | false, true, true) => Err(GeometryError::HelicalExtrusionUnsupported),
-        (true, false, true) => Ok((EMode::CoupledToXy, de / xy_len, None)),
-        (true, _, false) | (false, true, false) => Ok((EMode::Travel, 0.0, None)),
-        (false, false, true) => {
-            let e_curve = build_linear_e_curve(de);
-            Ok((EMode::Independent, 0.0, Some(e_curve)))
+    follower_deltas: &[(usize, f64)],
+) -> Result<Vec<FollowerDemand>, GeometryError> {
+    const EPS_PATH: f64 = 1e-6;
+    const EPS_FOLLOWER: f64 = 1e-6;
+    let path_len = nurbs::arc_length::path_arc_length(xyz);
+    let any_follower_motion = follower_deltas.iter().any(|&(_, d)| d.abs() > EPS_FOLLOWER);
+    if path_len <= EPS_PATH {
+        if any_follower_motion {
+            return Err(GeometryError::FollowerOnlyMoveUnsupported);
         }
-        (false, false, false) => Err(GeometryError::ZeroMotion),
+        return Err(GeometryError::ZeroMotion);
     }
-}
-
-fn build_linear_e_curve(e_delta: f64) -> nurbs::ScalarNurbs<f64> {
-    nurbs::ScalarNurbs::<f64>::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, e_delta])
-        .expect("linear E curve always valid")
+    Ok(follower_deltas
+        .iter()
+        .filter(|&&(_, d)| d.abs() > EPS_FOLLOWER)
+        .map(|&(axis_index, d)| FollowerDemand {
+            axis_index,
+            ratio: d / path_len,
+        })
+        .collect())
 }
 
 #[must_use]

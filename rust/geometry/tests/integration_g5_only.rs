@@ -9,7 +9,7 @@ const BOUNDARY_TOL: f64 = 1e-12;
 fn synthetic_long_g5_reduces_splits_and_plans() {
     let g5_input = "G5 X50 Y0 I0 J20 P0 Q20 F1000\n";
 
-    let mut pipeline = GeometryPipeline::new(FitterParams::default());
+    let mut pipeline = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut sink = |_: TelemetryEvent| {};
     let items: Vec<_> = pipeline.process(g5_input, &mut sink).collect();
 

@@ -1,9 +1,9 @@
-use geometry::segment::{CubicSegment, EMode, SourceRange};
+use geometry::segment::{CubicSegment, SourceRange};
 use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::VectorNurbs;
 use trajectory::plan_velocity::{PlanShaper, SafetyMode};
 use trajectory::streaming::{EmitContext, ReplanContext, ShaperState};
-use trajectory::{AxisShaper, ELimits, ShapedSegment};
+use trajectory::{AxisShaper, ShapedSegment};
 
 fn live_shapers() -> [Option<AxisShaper>; 4] {
     [
@@ -38,10 +38,6 @@ fn live_ctx() -> ReplanContext {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
-        e_limits: ELimits {
-            v_max: 100.0,
-            a_max: 5000.0,
-        },
         worker_threads: 1,
         grid_strategy: temporal::multi::GridStrategy::Adaptive {
             min_n: 20,
@@ -101,11 +97,7 @@ fn run_jog_experiment(
     feedrate: f64,
 ) -> Vec<bool> {
     let mut state = ShaperState::new([0.0; 4], shapers);
-    let halos = Vec::new();
-    let ctx_emit = EmitContext {
-        kernels: emit,
-        e_halos: &halos,
-    };
+    let ctx_emit = EmitContext { kernels: emit };
     let mut converged = Vec::with_capacity(strokes.len());
     eprintln!("--- {label} ---");
     for (i, (from, to)) in strokes.iter().enumerate() {
@@ -232,9 +224,7 @@ fn linear_x_segment(start_x: f64, end_x: f64, feedrate: f64) -> CubicSegment {
         .unwrap();
     CubicSegment::try_new(
         xyz,
-        EMode::Travel,
-        0.0,
-        None,
+        vec![],
         feedrate,
         SourceRange {
             start_line: 0,
@@ -360,11 +350,7 @@ fn back_to_back_fast_jogs_replan_stays_realtime() {
     let mut state = ShaperState::new([0.0; 4], &live_shapers());
     let ctx = live_ctx();
     let kernels = emit_kernels();
-    let halos = Vec::new();
-    let ctx_emit = EmitContext {
-        kernels: &kernels,
-        e_halos: &halos,
-    };
+    let ctx_emit = EmitContext { kernels: &kernels };
 
     let feedrate = 1000.0;
     let jog_mm = 30.0;
@@ -408,11 +394,7 @@ fn live_jog_sequence_velocity_probe() {
     let mut state = ShaperState::new([0.0; 4], &live_shapers());
     let ctx = live_ctx();
     let kernels = emit_kernels();
-    let halos = Vec::new();
-    let ctx_emit = EmitContext {
-        kernels: &kernels,
-        e_halos: &halos,
-    };
+    let ctx_emit = EmitContext { kernels: &kernels };
 
     let mut all: Vec<ShapedSegment> = Vec::new();
 

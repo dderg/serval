@@ -37,7 +37,7 @@ fn constant_69s_near_zero_deviation() {
 
     let x_val = 150.0;
     let fitted = vec![constant_segment_69s(x_val)];
-    let padded = pad_segment_axis(0, 0, &fitted, &[], t_sm_half, 0.0, 69.0);
+    let padded = pad_segment_axis(0, 0, &fitted, t_sm_half, 0.0, 69.0);
 
     let sig = ShapedSignal::new(&padded, &kernel, 0.0, 69.0);
 
@@ -63,7 +63,7 @@ fn stable_where_nurbs_convolve_fails() {
 
     let x_val = 150.0;
     let fitted = vec![constant_segment_69s(x_val)];
-    let padded = pad_segment_axis(0, 0, &fitted, &[], t_sm_half, 0.0, 69.0);
+    let padded = pad_segment_axis(0, 0, &fitted, t_sm_half, 0.0, 69.0);
 
     let sig = ShapedSignal::new(&padded, &kernel, 0.0, 69.0);
 

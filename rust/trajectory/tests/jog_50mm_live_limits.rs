@@ -1,7 +1,6 @@
-use geometry::segment::EMode;
 use nurbs::VectorNurbs;
 use temporal::multi::{GridStrategy, SegmentInput};
-use trajectory::{AxisShaper, ELimits, ShapeBatchInput, ShapeSegmentInput, ShaperConfig};
+use trajectory::{AxisShaper, ShapeBatchInput, ShapeSegmentInput, ShaperConfig};
 
 fn x_50mm_collinear_cubic() -> VectorNurbs<f64, 3> {
     VectorNurbs::<f64, 3>::try_new(
@@ -34,9 +33,7 @@ fn jog_50mm_at_100mms_with_live_limits() {
             curve: &curve,
             limits: live_limits(),
         },
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
@@ -60,10 +57,6 @@ fn jog_50mm_at_100mms_with_live_limits() {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,
-        e_limits: ELimits {
-            v_max: 50.0,
-            a_max: 5000.0,
-        },
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -102,9 +95,7 @@ fn jog_50mm_with_higher_scv() {
             curve: &curve,
             limits,
         },
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
@@ -128,10 +119,6 @@ fn jog_50mm_with_higher_scv() {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,
-        e_limits: ELimits {
-            v_max: 50.0,
-            a_max: 5000.0,
-        },
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -166,9 +153,7 @@ fn probe_with_feedrate(feedrate: f64, dist_mm: f64) -> f64 {
             curve: &curve,
             limits,
         },
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: &[],
         feedrate_mm_s: feedrate,
     }];
     let input = ShapeBatchInput {
@@ -191,10 +176,6 @@ fn probe_with_feedrate(feedrate: f64, dist_mm: f64) -> f64 {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,
-        e_limits: ELimits {
-            v_max: 50.0,
-            a_max: 5000.0,
-        },
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -232,9 +213,7 @@ fn jog_50mm_with_z_jmax_uncapped() {
             curve: &curve,
             limits,
         },
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
@@ -258,10 +237,6 @@ fn jog_50mm_with_z_jmax_uncapped() {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,
-        e_limits: ELimits {
-            v_max: 50.0,
-            a_max: 5000.0,
-        },
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,
@@ -305,9 +280,7 @@ fn jog_50mm_low_accel_baseline() {
             curve: &curve,
             limits,
         },
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
@@ -327,10 +300,6 @@ fn jog_50mm_low_accel_baseline() {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,
-        e_limits: ELimits {
-            v_max: 50.0,
-            a_max: 5000.0,
-        },
         initial_v: 0.0,
         initial_a: 0.0,
         terminal_v: 0.0,

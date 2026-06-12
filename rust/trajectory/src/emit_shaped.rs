@@ -5,7 +5,7 @@ use nurbs::ScalarNurbs;
 
 use crate::beta::kernel_half_support;
 use crate::fit::FittedSegment;
-use crate::pad::{pad_segment_axis_with_history, EHalo};
+use crate::pad::pad_segment_axis_with_history;
 use crate::smooth_fit::fit_c2_cubic_with_bc;
 use crate::{ShapeError, ShapedSegment};
 
@@ -31,17 +31,15 @@ impl Default for PerAxisHistory<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EmitSegmentMeta {
-    pub e_mode: geometry::segment::EMode,
-    pub extrusion_per_xy_mm: f64,
+    pub followers: Vec<geometry::segment::FollowerDemand>,
 }
 
 pub fn emit_shaped(
     planned: &[FittedSegment],
     meta: &[EmitSegmentMeta],
     kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4],
-    e_halos: &[EHalo],
     history: &PerAxisHistory<'_>,
     batch_t_start: f64,
     batch_t_end: f64,
@@ -50,7 +48,6 @@ pub fn emit_shaped(
         planned,
         meta,
         kernels,
-        e_halos,
         history,
         batch_t_start,
         batch_t_end,
@@ -65,7 +62,6 @@ pub fn emit_shaped_with_left_bc(
     planned: &[FittedSegment],
     meta: &[EmitSegmentMeta],
     kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4],
-    e_halos: &[EHalo],
     history: &PerAxisHistory<'_>,
     batch_t_start: f64,
     batch_t_end: f64,
@@ -110,7 +106,6 @@ pub fn emit_shaped_with_left_bc(
                     seg_idx,
                     axis,
                     planned,
-                    e_halos,
                     history.axes[axis],
                     half_supports[axis],
                     batch_t_start,
@@ -162,16 +157,14 @@ pub fn emit_shaped_with_left_bc(
 
         prev_right_bc = next_left_bc;
 
-        let m = meta[seg_idx];
+        let m = &meta[seg_idx];
         output.push(ShapedSegment {
             axes: [
                 shaped_axes[0].take().unwrap(),
                 shaped_axes[1].take().unwrap(),
                 shaped_axes[2].take().unwrap(),
             ],
-            e_mode: m.e_mode,
-            extrusion_per_xy_mm: m.extrusion_per_xy_mm,
-            e_independent: None,
+            followers: m.followers.clone(),
             t_start,
             t_end,
         });

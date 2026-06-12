@@ -52,7 +52,7 @@ pub enum Fatal {
         line_no: u32,
         gcode_kind: &'static str,
     },
-    HelicalExtrusionUnsupported {
+    FollowerOnlyMoveUnsupported {
         line_no: u32,
     },
 }
@@ -77,9 +77,9 @@ pub enum InternalKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GeometryError {
     UnsupportedGcode { gcode_kind: &'static str },
-    HelicalExtrusionUnsupported,
     NotSinglePieceCubic { reason: &'static str },
-    EModeInvariantViolation { reason: &'static str },
+    FollowerInvariantViolation { reason: &'static str },
+    FollowerOnlyMoveUnsupported,
     ZeroMotion,
 }
 

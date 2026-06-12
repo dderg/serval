@@ -4,7 +4,7 @@
 // apply to "this field is unchanged".
 #![allow(clippy::float_cmp)]
 
-use geometry::{CubicSegment, EMode, SourceRange, split_segment_to_cap};
+use geometry::{CubicSegment, FollowerDemand, SourceRange, split_segment_to_cap};
 use nurbs::VectorNurbs;
 
 fn straight_cubic(length_mm: f64) -> CubicSegment {
@@ -21,9 +21,7 @@ fn straight_cubic(length_mm: f64) -> CubicSegment {
     .unwrap();
     CubicSegment::try_new(
         xyz,
-        EMode::Travel,
-        0.0,
-        None,
+        vec![],
         100.0,
         SourceRange {
             start_line: 1,
@@ -75,8 +73,7 @@ fn metadata_propagates() {
     let out = split_segment_to_cap(&seg, 12.5).unwrap();
     for child in &out {
         assert_eq!(child.feedrate_mm_s, seg.feedrate_mm_s);
-        assert_eq!(child.e_mode, seg.e_mode);
-        assert_eq!(child.extrusion_per_xy_mm, seg.extrusion_per_xy_mm);
+        assert_eq!(child.followers, seg.followers);
         assert_eq!(child.source, seg.source);
     }
 }
@@ -105,25 +102,16 @@ fn boundary_continuity_within_round_off() {
 }
 
 #[test]
-fn pure_e_only_independent_passthrough() {
-    use nurbs::ScalarNurbs;
+fn zero_motion_segment_passthrough() {
     let xyz = VectorNurbs::<f64, 3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         vec![[0.0; 3]; 4], // all four CPs at origin → cp_polygon_length == 0
     )
     .unwrap();
-    let e_curve = ScalarNurbs::<f64>::try_new(
-        1,
-        vec![0.0, 0.0, 1.0, 1.0],
-        vec![0.0, -2.0], // retraction
-    )
-    .unwrap();
     let seg = CubicSegment::try_new(
         xyz,
-        EMode::Independent,
-        0.0,
-        Some(e_curve),
+        vec![],
         100.0,
         SourceRange {
             start_line: 1,
@@ -152,9 +140,7 @@ fn closed_loop_chord_zero_splits_by_arc_length() {
     .unwrap();
     let seg = CubicSegment::try_new(
         xyz,
-        EMode::Travel,
-        0.0,
-        None,
+        vec![],
         100.0,
         SourceRange {
             start_line: 1,
@@ -209,9 +195,7 @@ fn invalid_cap_rejects_infinity() {
 }
 
 #[test]
-fn rejects_independent_with_non_trivial_xyz() {
-    use nurbs::ScalarNurbs;
-
+fn follower_segment_splits_with_invariant_ratio() {
     let xyz = VectorNurbs::<f64, 3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
@@ -223,12 +207,13 @@ fn rejects_independent_with_non_trivial_xyz() {
         ],
     )
     .unwrap();
-    let e_curve = ScalarNurbs::<f64>::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 5.0]).unwrap();
+    let followers = vec![FollowerDemand {
+        axis_index: 3,
+        ratio: 5.0 / 30.0,
+    }];
     let seg = CubicSegment::try_new(
         xyz,
-        EMode::Independent,
-        0.0,
-        Some(e_curve),
+        followers.clone(),
         100.0,
         SourceRange {
             start_line: 1,
@@ -236,13 +221,11 @@ fn rejects_independent_with_non_trivial_xyz() {
         },
         None,
     )
-    .expect(
-        "CubicSegment::try_new accepts Independent + xyz (no per-segment invariant prevents it)",
-    );
+    .unwrap();
 
-    let err = split_segment_to_cap(&seg, 12.5).unwrap_err();
-    assert!(
-        matches!(err, geometry::SplitError::CannotSplitIndependent),
-        "expected CannotSplitIndependent, got {err:?}"
-    );
+    let out = split_segment_to_cap(&seg, 12.5).unwrap();
+    assert!(out.len() > 1, "30mm at 12.5mm cap should split");
+    for child in &out {
+        assert_eq!(child.followers, followers);
+    }
 }

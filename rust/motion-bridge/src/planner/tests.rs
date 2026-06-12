@@ -153,10 +153,8 @@ fn z_only_move_after_homing_xy_shaped_axes_are_constant() {
 
     let replan_ctx = build_replan_context(&cfg);
     let emit_kernels = shaper_config_to_emit_kernels(&cfg.shaper);
-    let e_halos: Vec<trajectory::EHalo> = Vec::new();
     let emit_ctx = EmitContext {
         kernels: &emit_kernels,
-        e_halos: &e_halos,
     };
 
     let do_move =
@@ -283,10 +281,8 @@ fn z_move_with_tiny_x_after_homing_xy_deviation_proportional() {
     let mut state = ShaperState::new([0.0; 4], &shapers);
     let replan_ctx = build_replan_context(&cfg);
     let emit_kernels = shaper_config_to_emit_kernels(&cfg.shaper);
-    let e_halos: Vec<trajectory::EHalo> = Vec::new();
     let emit_ctx = EmitContext {
         kernels: &emit_kernels,
-        e_halos: &e_halos,
     };
 
     let do_move =
@@ -506,10 +502,8 @@ fn z_only_move_no_prior_xy_motion() {
     let mut state = ShaperState::new([0.0; 4], &shapers);
     let replan_ctx = build_replan_context(&cfg);
     let emit_kernels = shaper_config_to_emit_kernels(&cfg.shaper);
-    let e_halos: Vec<trajectory::EHalo> = Vec::new();
     let emit_ctx = EmitContext {
         kernels: &emit_kernels,
-        e_halos: &e_halos,
     };
 
     state.reset([150.0, 132.0, 344.0, 0.0]);
@@ -583,10 +577,8 @@ fn peak_speed_of_single_x_move(max_velocity: f64, max_accel: f64, feedrate: f64)
     let mut state = ShaperState::new([0.0; 4], &shapers);
     let replan_ctx = build_replan_context(&cfg);
     let emit_kernels = shaper_config_to_emit_kernels(&cfg.shaper);
-    let e_halos: Vec<trajectory::EHalo> = Vec::new();
     let emit_ctx = EmitContext {
         kernels: &emit_kernels,
-        e_halos: &e_halos,
     };
 
     state.reset([0.0; 4]);

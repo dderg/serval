@@ -1,4 +1,4 @@
-use nurbs::{ScalarNurbs, VectorNurbs};
+use nurbs::VectorNurbs;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
@@ -29,12 +29,16 @@ pub struct JunctionDeviation {
     pub source: SourceRange,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FollowerDemand {
+    pub axis_index: usize,
+    pub ratio: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CubicSegment {
     pub xyz: VectorNurbs<f64, 3>,
-    pub e_mode: EMode,
-    pub extrusion_per_xy_mm: f64,
-    pub e_independent: Option<ScalarNurbs<f64>>,
+    pub followers: Vec<FollowerDemand>,
     pub feedrate_mm_s: f64,
     pub source: SourceRange,
     pub split_info: Option<SplitInfo>,
@@ -43,9 +47,7 @@ pub struct CubicSegment {
 impl CubicSegment {
     pub fn try_new(
         xyz: VectorNurbs<f64, 3>,
-        e_mode: EMode,
-        extrusion_per_xy_mm: f64,
-        e_independent: Option<ScalarNurbs<f64>>,
+        followers: Vec<FollowerDemand>,
         feedrate_mm_s: f64,
         source: SourceRange,
         split_info: Option<SplitInfo>,
@@ -67,37 +69,16 @@ impl CubicSegment {
             });
         }
 
-        match e_mode {
-            EMode::CoupledToXy => {
-                if e_independent.is_some() {
-                    return Err(crate::GeometryError::EModeInvariantViolation {
-                        reason: "CoupledToXy must have e_independent: None",
-                    });
-                }
+        for (i, f) in followers.iter().enumerate() {
+            if !f.ratio.is_finite() || f.ratio == 0.0 {
+                return Err(crate::GeometryError::FollowerInvariantViolation {
+                    reason: "follower ratio must be finite and nonzero",
+                });
             }
-            EMode::Travel => {
-                if extrusion_per_xy_mm != 0.0 {
-                    return Err(crate::GeometryError::EModeInvariantViolation {
-                        reason: "Travel must have extrusion_per_xy_mm == 0.0",
-                    });
-                }
-                if e_independent.is_some() {
-                    return Err(crate::GeometryError::EModeInvariantViolation {
-                        reason: "Travel must have e_independent: None",
-                    });
-                }
-            }
-            EMode::Independent => {
-                if e_independent.is_none() {
-                    return Err(crate::GeometryError::EModeInvariantViolation {
-                        reason: "Independent must have e_independent: Some(_)",
-                    });
-                }
-                if extrusion_per_xy_mm != 0.0 {
-                    return Err(crate::GeometryError::EModeInvariantViolation {
-                        reason: "Independent must have extrusion_per_xy_mm == 0.0",
-                    });
-                }
+            if followers[..i].iter().any(|p| p.axis_index == f.axis_index) {
+                return Err(crate::GeometryError::FollowerInvariantViolation {
+                    reason: "duplicate follower axis",
+                });
             }
         }
 
@@ -111,27 +92,13 @@ impl CubicSegment {
             }
         }
         if !feedrate_mm_s.is_finite() {
-            return Err(crate::GeometryError::EModeInvariantViolation {
+            return Err(crate::GeometryError::FollowerInvariantViolation {
                 reason: "feedrate_mm_s must be finite",
             });
         }
-        if !extrusion_per_xy_mm.is_finite() {
-            return Err(crate::GeometryError::EModeInvariantViolation {
-                reason: "extrusion_per_xy_mm must be finite",
-            });
-        }
-        if let Some(curve) = &e_independent {
-            for &v in curve.control_points() {
-                if !v.is_finite() {
-                    return Err(crate::GeometryError::EModeInvariantViolation {
-                        reason: "e_independent control point contains non-finite value",
-                    });
-                }
-            }
-        }
         if let Some(info) = &split_info {
             if !info.s_lo_mm.is_finite() || !info.s_hi_mm.is_finite() {
-                return Err(crate::GeometryError::EModeInvariantViolation {
+                return Err(crate::GeometryError::FollowerInvariantViolation {
                     reason: "split_info arc-length range contains non-finite value",
                 });
             }
@@ -139,9 +106,7 @@ impl CubicSegment {
 
         Ok(Self {
             xyz,
-            e_mode,
-            extrusion_per_xy_mm,
-            e_independent,
+            followers,
             feedrate_mm_s,
             source,
             split_info,
@@ -203,13 +168,6 @@ pub fn split_cubic_bezier(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlendFamily {
     CubicBezier,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EMode {
-    CoupledToXy,
-    Travel,
-    Independent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

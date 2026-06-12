@@ -13,9 +13,8 @@ use nurbs::bezier::{bezier_pieces_to_nurbs, BezierPiece};
 
 use super::{EmitContext, ReplanContext, ShaperState};
 use crate::fit::FittedSegment;
-use crate::pad::EHalo;
 use crate::plan_velocity::{PlanShaper, SafetyMode};
-use crate::{AxisShaper, ELimits};
+use crate::AxisShaper;
 
 #[test]
 #[allow(clippy::float_cmp)]
@@ -130,10 +129,6 @@ fn replan_context() -> ReplanContext {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
-        e_limits: ELimits {
-            v_max: 100.0,
-            a_max: 5_000.0,
-        },
         worker_threads: 1,
         grid_strategy: temporal::multi::GridStrategy::Fixed(20),
         fallback_initial_v: 0.0,
@@ -142,7 +137,7 @@ fn replan_context() -> ReplanContext {
 }
 
 fn linear_x_segment(start_x: f64, end_x: f64, feedrate: f64) -> CubicSegment {
-    use geometry::segment::{EMode, SourceRange};
+    use geometry::segment::SourceRange;
     use nurbs::VectorNurbs;
 
     let p0 = [start_x, 0.0, 0.0];
@@ -159,9 +154,7 @@ fn linear_x_segment(start_x: f64, end_x: f64, feedrate: f64) -> CubicSegment {
         .unwrap();
     CubicSegment::try_new(
         xyz,
-        EMode::Travel,
-        0.0,
-        None,
+        vec![],
         feedrate,
         SourceRange {
             start_line: 0,
@@ -173,7 +166,7 @@ fn linear_x_segment(start_x: f64, end_x: f64, feedrate: f64) -> CubicSegment {
 }
 
 fn linear_y_segment(start_y: f64, end_y: f64, feedrate: f64) -> CubicSegment {
-    use geometry::segment::{EMode, SourceRange};
+    use geometry::segment::SourceRange;
     use nurbs::VectorNurbs;
 
     let p0 = [0.0, start_y, 0.0];
@@ -190,9 +183,7 @@ fn linear_y_segment(start_y: f64, end_y: f64, feedrate: f64) -> CubicSegment {
         .unwrap();
     CubicSegment::try_new(
         xyz,
-        EMode::Travel,
-        0.0,
-        None,
+        vec![],
         feedrate,
         SourceRange {
             start_line: 0,
@@ -451,19 +442,15 @@ fn t_decel_start_lands_on_actual_decel_for_cruise_move() {
     );
 }
 
-fn emit_context_default<'a>(
-    kernels: &'a [Option<PiecewisePolynomialKernel<f64>>; 4],
-    e_halos: &'a [EHalo],
-) -> EmitContext<'a> {
-    EmitContext { kernels, e_halos }
+fn emit_context_default(kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4]) -> EmitContext<'_> {
+    EmitContext { kernels }
 }
 
 #[test]
 fn emit_committed_returns_empty_when_target_not_advanced() {
     let mut state = ShaperState::new([0.0; 4], &replan_shapers());
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx = emit_context_default(&kernels, &halos);
+    let ctx = emit_context_default(&kernels);
 
     let out = state
         .emit_committed(&ctx)
@@ -485,8 +472,7 @@ fn emit_committed_after_single_append_dispatches_pre_decel_region() {
     assert!(target > 0.0, "target must be positive for this test");
 
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx = emit_context_default(&kernels, &halos);
+    let ctx = emit_context_default(&kernels);
     let out = state
         .emit_committed(&ctx)
         .expect("single-append emit_committed should succeed");
@@ -550,8 +536,7 @@ fn emit_committed_chains_across_two_appends() {
     assert!(target_1 > 0.0);
 
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = emit_context_default(&kernels, &halos);
+    let ctx_emit = emit_context_default(&kernels);
     let out_1 = state
         .emit_committed(&ctx_emit)
         .expect("first emit_committed");
@@ -617,8 +602,7 @@ fn t_dispatched_interior_to_move_replan_preserves_position() {
     let mut state = ShaperState::new([0.0; 4], &replan_shapers());
     let ctx_replan = replan_context();
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = emit_context_default(&kernels, &halos);
+    let ctx_emit = emit_context_default(&kernels);
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
     state
@@ -678,8 +662,7 @@ fn append_and_replan_rolls_back_planned_caches_on_plan_velocity_error() {
     let mut state = ShaperState::new([0.0; 4], &replan_shapers());
     let ctx_good = replan_context();
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = emit_context_default(&kernels, &halos);
+    let ctx_emit = emit_context_default(&kernels);
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
     state
@@ -700,10 +683,10 @@ fn append_and_replan_rolls_back_planned_caches_on_plan_velocity_error() {
         .iter()
         .map(|f| (f.t_start, f.t_end))
         .collect();
-    let snap_planned_meta_extrusion: Vec<f64> = state
+    let snap_planned_meta_followers: Vec<_> = state
         .planned_meta
         .iter()
-        .map(|m| m.extrusion_per_xy_mm)
+        .map(|m| m.followers.clone())
         .collect();
 
     let mut ctx_bad = ctx_good;
@@ -773,12 +756,12 @@ fn append_and_replan_rolls_back_planned_caches_on_plan_velocity_error() {
     for (i, (a, b)) in state
         .planned_meta
         .iter()
-        .zip(snap_planned_meta_extrusion.iter())
+        .zip(snap_planned_meta_followers.iter())
         .enumerate()
     {
         assert_eq!(
-            a.extrusion_per_xy_mm, *b,
-            "planned_meta[{i}].extrusion_per_xy_mm changed across failed append",
+            a.followers, *b,
+            "planned_meta[{i}].followers changed across failed append",
         );
     }
 
@@ -808,8 +791,7 @@ fn emit_committed_trims_old_history() {
     let mut state = ShaperState::new([0.0; 4], &replan_shapers());
     let ctx_replan = replan_context();
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = emit_context_default(&kernels, &halos);
+    let ctx_emit = emit_context_default(&kernels);
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
     state.append_and_replan(m1, &ctx_replan).expect("append 1");
@@ -839,8 +821,7 @@ fn reset_after_motion_clears_state_and_reseeds_at_home() {
     let mut state = ShaperState::new([0.0; 4], &shapers);
     let ctx_replan = replan_context();
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = emit_context_default(&kernels, &halos);
+    let ctx_emit = emit_context_default(&kernels);
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
     state.append_and_replan(m1, &ctx_replan).expect("append 1");
@@ -900,8 +881,7 @@ fn current_position_reads_settled_endpoint_after_motion() {
     let mut state = ShaperState::new([0.0; 4], &shapers);
     let ctx_replan = replan_context();
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = emit_context_default(&kernels, &halos);
+    let ctx_emit = emit_context_default(&kernels);
 
     let m1 = linear_x_segment(0.0, 200.0, 200.0);
     state.append_and_replan(m1, &ctx_replan).expect("append");
@@ -998,8 +978,7 @@ fn advance_idle_when_drained_extends_to_target_preserving_position() {
         .append_and_replan(linear_x_segment(0.0, 200.0, 200.0), &ctx_replan)
         .expect("append");
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = emit_context_default(&kernels, &halos);
+    let ctx_emit = emit_context_default(&kernels);
     let _ = state.emit_committed(&ctx_emit).expect("emit");
     let _ = state.commit_decel_to_zero(&ctx_emit).expect("commit");
 
@@ -1047,8 +1026,7 @@ fn commit_decel_to_zero_advances_t_dispatched_to_t_appended_and_is_idempotent() 
         .append_and_replan(linear_x_segment(0.0, 200.0, 200.0), &ctx_replan)
         .expect("append");
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = emit_context_default(&kernels, &halos);
+    let ctx_emit = emit_context_default(&kernels);
 
     let partial = state.emit_committed(&ctx_emit).expect("emit");
     assert!(!partial.is_empty());
@@ -1074,8 +1052,7 @@ fn piece_stamps_monotone_across_idle_gap() {
     let mut state = ShaperState::new([0.0; 4], &replan_shapers());
     let ctx = replan_context();
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = emit_context_default(&kernels, &halos);
+    let ctx_emit = emit_context_default(&kernels);
 
     state
         .append_and_replan(linear_x_segment(0.0, 200.0, 200.0), &ctx)
@@ -1106,8 +1083,7 @@ fn advance_idle_then_append_places_new_move_at_target() {
     let mut state = ShaperState::new([0.0; 4], &replan_shapers());
     let ctx = replan_context();
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = emit_context_default(&kernels, &halos);
+    let ctx_emit = emit_context_default(&kernels);
     state
         .append_and_replan(linear_x_segment(0.0, 200.0, 200.0), &ctx)
         .expect("m1");
@@ -1223,10 +1199,6 @@ fn single_axis_harness(v_max: f64, a_max: f64) -> (ShaperState, ReplanContext) {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
-        e_limits: ELimits {
-            v_max: 100.0,
-            a_max: 5_000.0,
-        },
         worker_threads: 1,
         grid_strategy: temporal::multi::GridStrategy::Fixed(40),
         fallback_initial_v: 0.0,
@@ -1249,11 +1221,7 @@ fn emit_partial_window(state: &mut ShaperState) -> f64 {
     .to_kernel();
     let kernels: [Option<PiecewisePolynomialKernel<f64>>; 4] =
         [kernel_xy.clone(), kernel_xy, None, None];
-    let halos: Vec<EHalo> = Vec::new();
-    let emit_ctx = EmitContext {
-        kernels: &kernels,
-        e_halos: &halos,
-    };
+    let emit_ctx = EmitContext { kernels: &kernels };
     let _ = state
         .emit_committed(&emit_ctx)
         .expect("emit_partial_window");
@@ -1330,10 +1298,6 @@ fn replan_with_positive_boundary_accel_and_short_first_segment_succeeds() {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
-        e_limits: ELimits {
-            v_max: 100.0,
-            a_max: 5_000.0,
-        },
         worker_threads: 1,
 
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
@@ -1395,10 +1359,6 @@ fn corner_context_passthrough() -> ReplanContext {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
-        e_limits: ELimits {
-            v_max: 100.0,
-            a_max: 5_000.0,
-        },
         worker_threads: 1,
         grid_strategy: temporal::multi::GridStrategy::Adaptive {
             min_n: 20,
@@ -1477,10 +1437,6 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
-        e_limits: ELimits {
-            v_max: 100.0,
-            a_max: 5_000.0,
-        },
         worker_threads: 1,
         grid_strategy: temporal::multi::GridStrategy::Adaptive {
             min_n: 20,
@@ -1539,11 +1495,7 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
     );
 
     let kernels = replan_kernels_piecewise();
-    let halos: Vec<EHalo> = Vec::new();
-    let ctx_emit = EmitContext {
-        kernels: &kernels,
-        e_halos: &halos,
-    };
+    let ctx_emit = EmitContext { kernels: &kernels };
     state
         .commit_decel_to_zero(&ctx_emit)
         .expect("commit_decel_to_zero after rung-3 must not error");

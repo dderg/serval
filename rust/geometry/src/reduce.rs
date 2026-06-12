@@ -1,3 +1,4 @@
+use crate::FollowerWord;
 use gcode::{MarkerKind, ParseError, Token};
 
 #[allow(dead_code)]
@@ -9,7 +10,7 @@ fn f_to_mm_s(f: f64) -> f64 {
 #[allow(dead_code)]
 pub(crate) struct ModalState {
     pub position: [f64; 3],
-    pub e: f64,
+    pub follower_ledger: Vec<f64>,
     pub feedrate_mm_s: Option<f64>,
     pub tool: u32,
     pub active_plane: Plane,
@@ -18,10 +19,10 @@ pub(crate) struct ModalState {
 
 impl ModalState {
     #[allow(dead_code)]
-    pub fn new() -> Self {
+    pub fn new(n_followers: usize) -> Self {
         Self {
             position: [0.0, 0.0, 0.0],
-            e: 0.0,
+            follower_ledger: vec![0.0; n_followers],
             feedrate_mm_s: None,
             tool: 0,
             active_plane: Plane::XY,
@@ -42,7 +43,7 @@ pub(crate) enum CurveGeom {
 pub(crate) enum ReduceEvent {
     Curve {
         geom: CurveGeom,
-        e_delta: Option<f64>,
+        follower_deltas: Vec<(usize, f64)>,
         feedrate_mm_s: f64,
         line_no: u32,
     },
@@ -50,7 +51,6 @@ pub(crate) enum ReduceEvent {
         kind: MotionMarkerKind,
         line_no: u32,
         tool: Option<u32>,
-        e_delta_mm: Option<f64>,
     },
     CommentMarker {
         kind: MarkerKind,
@@ -97,13 +97,18 @@ pub(crate) enum Plane {
 }
 
 #[allow(dead_code)]
-pub(crate) fn reduce<I>(tokens: I) -> impl Iterator<Item = ReduceEvent>
+pub(crate) fn reduce<'a, I>(
+    tokens: I,
+    followers: &'a [FollowerWord],
+) -> impl Iterator<Item = ReduceEvent> + 'a
 where
     I: IntoIterator<Item = Result<Token, ParseError>>,
+    I::IntoIter: 'a,
 {
     ReduceIter {
         tokens: tokens.into_iter(),
-        state: ModalState::new(),
+        state: ModalState::new(followers.len()),
+        followers,
     }
 }
 
@@ -112,6 +117,7 @@ where
 pub(crate) fn reduce_with_state<'a, I>(
     state: &'a mut ModalState,
     tokens: I,
+    followers: &'a [FollowerWord],
 ) -> impl Iterator<Item = ReduceEvent> + 'a
 where
     I: IntoIterator<Item = Result<Token, ParseError>> + 'a,
@@ -120,6 +126,7 @@ where
     ReduceIterRef {
         tokens: tokens.into_iter(),
         state,
+        followers,
     }
 }
 
@@ -130,6 +137,7 @@ where
 {
     tokens: I,
     state: &'a mut ModalState,
+    followers: &'a [FollowerWord],
 }
 
 #[cfg(test)]
@@ -140,31 +148,36 @@ where
     type Item = ReduceEvent;
 
     fn next(&mut self) -> Option<Self::Item> {
-        next_event(&mut self.tokens, self.state)
+        next_event(&mut self.tokens, self.state, self.followers)
     }
 }
 
-struct ReduceIter<I>
+struct ReduceIter<'a, I>
 where
     I: Iterator<Item = Result<Token, ParseError>>,
 {
     tokens: I,
     state: ModalState,
+    followers: &'a [FollowerWord],
 }
 
-impl<I> Iterator for ReduceIter<I>
+impl<I> Iterator for ReduceIter<'_, I>
 where
     I: Iterator<Item = Result<Token, ParseError>>,
 {
     type Item = ReduceEvent;
 
     fn next(&mut self) -> Option<Self::Item> {
-        next_event(&mut self.tokens, &mut self.state)
+        next_event(&mut self.tokens, &mut self.state, self.followers)
     }
 }
 
 #[allow(clippy::too_many_lines, clippy::needless_continue)]
-fn next_event<I>(tokens: &mut I, state: &mut ModalState) -> Option<ReduceEvent>
+fn next_event<I>(
+    tokens: &mut I,
+    state: &mut ModalState,
+    followers: &[FollowerWord],
+) -> Option<ReduceEvent>
 where
     I: Iterator<Item = Result<Token, ParseError>>,
 {
@@ -240,15 +253,16 @@ where
                 if let Some(z) = params.z() {
                     state.position[2] = z;
                 }
-                if let Some(e) = params.e() {
-                    state.e = e;
+                for (k, fw) in followers.iter().enumerate() {
+                    if let Some(pos) = params.get(fw.letter) {
+                        state.follower_ledger[k] = pos;
+                    }
                 }
                 state.prev_g5_pq = None;
                 return Some(ReduceEvent::Marker {
                     kind: MotionMarkerKind::G92,
                     line_no,
                     tool: None,
-                    e_delta_mm: None,
                 });
             }
             Token::Command {
@@ -260,7 +274,6 @@ where
                     kind: MotionMarkerKind::M,
                     line_no,
                     tool: None,
-                    e_delta_mm: None,
                 });
             }
             Token::Command {
@@ -274,7 +287,6 @@ where
                     kind: MotionMarkerKind::T,
                     line_no,
                     tool: Some(major),
-                    e_delta_mm: None,
                 });
             }
             Token::Command {
@@ -351,11 +363,17 @@ where
                 if let Some(f) = params.f() {
                     state.feedrate_mm_s = Some(f_to_mm_s(f));
                 }
-                let e_delta = params.e().map(|new_e| {
-                    let d = new_e - state.e;
-                    state.e = new_e;
-                    d
-                });
+                let follower_deltas: Vec<(usize, f64)> = followers
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, fw)| {
+                        params.get(fw.letter).map(|new_pos| {
+                            let d = new_pos - state.follower_ledger[k];
+                            state.follower_ledger[k] = new_pos;
+                            (fw.axis_index, d)
+                        })
+                    })
+                    .collect();
 
                 state.position = p3;
                 state.prev_g5_pq = Some([pp, qq]);
@@ -365,7 +383,7 @@ where
                     geom: CurveGeom::Cubic {
                         cps: [p0, p1, p2, p3],
                     },
-                    e_delta,
+                    follower_deltas,
                     feedrate_mm_s,
                     line_no,
                 });
@@ -428,11 +446,17 @@ where
                 if let Some(f) = params.f() {
                     state.feedrate_mm_s = Some(f_to_mm_s(f));
                 }
-                let e_delta = params.e().map(|new_e| {
-                    let d = new_e - state.e;
-                    state.e = new_e;
-                    d
-                });
+                let follower_deltas: Vec<(usize, f64)> = followers
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, fw)| {
+                        params.get(fw.letter).map(|new_pos| {
+                            let d = new_pos - state.follower_ledger[k];
+                            state.follower_ledger[k] = new_pos;
+                            (fw.axis_index, d)
+                        })
+                    })
+                    .collect();
 
                 state.position = p2;
                 state.prev_g5_pq = None;
@@ -440,7 +464,7 @@ where
                 let feedrate_mm_s = state.feedrate_mm_s.unwrap_or(0.0);
                 return Some(ReduceEvent::Curve {
                     geom: CurveGeom::Quadratic { cps: [p0, p1, p2] },
-                    e_delta,
+                    follower_deltas,
                     feedrate_mm_s,
                     line_no,
                 });

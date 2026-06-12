@@ -11,7 +11,7 @@ fn textbook_limits() -> Limits {
 
 fn build_g5_fixture_4_curve() -> VectorNurbs<f64, 3> {
     let src = "G5 X10 Y0 I3 J3 P-3 Q3 F1500\n";
-    let mut pipeline = GeometryPipeline::new(FitterParams::default());
+    let mut pipeline = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut events: Vec<TelemetryEvent> = vec![];
     let items: Vec<_> = {
         let mut sink = |e: TelemetryEvent| events.push(e);

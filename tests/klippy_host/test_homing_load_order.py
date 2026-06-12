@@ -16,6 +16,10 @@ serial: /tmp/kalico-test-no-such-serial
 [printer]
 kinematics: cartesian
 
+[axis x]
+[axis y]
+[axis z]
+
 [limit gantry]
 axes: x, y
 max_velocity: 100

@@ -31,7 +31,7 @@ fn pad_single_segment_extends_left_by_velocity_right_by_constant() {
     let fitted = vec![linear_segment(0.0, 10.0, 0.0, 1.0)];
     let t_sm_half = 0.1;
 
-    let padded = pad_segment_axis(0, 0, &fitted, &[], t_sm_half, 0.0, 1.0);
+    let padded = pad_segment_axis(0, 0, &fitted, t_sm_half, 0.0, 1.0);
     let pieces = extract_bezier_pieces(&padded);
 
     assert!(
@@ -87,7 +87,7 @@ fn pad_middle_segment_uses_neighbors() {
     ];
     let t_sm_half = 0.3;
 
-    let padded = pad_segment_axis(1, 0, &fitted, &[], t_sm_half, 0.0, 3.0);
+    let padded = pad_segment_axis(1, 0, &fitted, t_sm_half, 0.0, 3.0);
     let pieces = extract_bezier_pieces(&padded);
 
     let first = &pieces[0];
@@ -111,36 +111,6 @@ fn pad_middle_segment_uses_neighbors() {
 }
 
 #[test]
-fn pad_with_e_halo_gap() {
-    let fitted = vec![
-        linear_segment(0.0, 10.0, 0.0, 1.0),
-        linear_segment(10.0, 20.0, 1.5, 2.5),
-    ];
-    let e_halos = vec![EHalo {
-        xyz_position: [10.0, 0.0, 0.0],
-        t_start: 1.0,
-        t_end: 1.5,
-    }];
-    let t_sm_half = 0.3;
-
-    let padded = pad_segment_axis(1, 0, &fitted, &e_halos, t_sm_half, 0.0, 2.5);
-    let pieces = extract_bezier_pieces(&padded);
-
-    let first = &pieces[0];
-    assert!(
-        (first.u_start - 1.2).abs() < 1e-10,
-        "expected start ~1.2, got {}",
-        first.u_start
-    );
-
-    assert!(
-        (first.evaluate(1.2) - 10.0).abs() < 1e-6,
-        "expected 10.0 at t=1.2 (halo), got {}",
-        first.evaluate(1.2)
-    );
-}
-
-#[test]
 fn padded_pieces_are_contiguous() {
     let fitted = vec![
         linear_segment(0.0, 5.0, 0.0, 0.5),
@@ -150,7 +120,7 @@ fn padded_pieces_are_contiguous() {
     let t_sm_half = 0.2;
 
     for seg_idx in 0..fitted.len() {
-        let padded = pad_segment_axis(seg_idx, 0, &fitted, &[], t_sm_half, 0.0, 2.0);
+        let padded = pad_segment_axis(seg_idx, 0, &fitted, t_sm_half, 0.0, 2.0);
         let pieces = extract_bezier_pieces(&padded);
         for w in pieces.windows(2) {
             assert!(

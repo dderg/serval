@@ -342,6 +342,7 @@ class MotionBridgeWrapper:
 
     def init_planner(
         self,
+        axes,
         limits,
         shaper_type_x,
         shaper_freq_x,
@@ -352,6 +353,7 @@ class MotionBridgeWrapper:
         beta_max_iters=10,
     ):
         return self._bridge.init_planner(
+            axes,
             limits,
             shaper_type_x,
             shaper_freq_x,

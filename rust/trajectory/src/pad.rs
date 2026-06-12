@@ -2,24 +2,10 @@ use crate::fit::FittedSegment;
 use nurbs::bezier::{bezier_pieces_to_nurbs, extract_bezier_pieces, BezierPiece};
 use nurbs::ScalarNurbs;
 
-#[allow(dead_code)]
-pub struct BatchFittedData {
-    pub segments: Vec<FittedSegment>,
-    pub e_halos: Vec<EHalo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct EHalo {
-    pub xyz_position: [f64; 3],
-    pub t_start: f64,
-    pub t_end: f64,
-}
-
 pub fn pad_segment_axis(
     seg_idx: usize,
     axis: usize,
     fitted: &[FittedSegment],
-    e_halos: &[EHalo],
     t_sm_half: f64,
     batch_t_start: f64,
     batch_t_end: f64,
@@ -28,7 +14,6 @@ pub fn pad_segment_axis(
         seg_idx,
         axis,
         fitted,
-        e_halos,
         &[],
         t_sm_half,
         batch_t_start,
@@ -36,12 +21,10 @@ pub fn pad_segment_axis(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn pad_segment_axis_with_history(
     seg_idx: usize,
     axis: usize,
     fitted: &[FittedSegment],
-    e_halos: &[EHalo],
     history: &[BezierPiece<f64>],
     t_sm_half: f64,
     batch_t_start: f64,
@@ -55,22 +38,14 @@ pub fn pad_segment_axis_with_history(
         seg_idx,
         axis,
         fitted,
-        e_halos,
         history,
         t_sm_half,
         batch_t_start,
         target_degree,
     );
 
-    let mut right_pieces = collect_right_padding(
-        seg_idx,
-        axis,
-        fitted,
-        e_halos,
-        t_sm_half,
-        batch_t_end,
-        target_degree,
-    );
+    let mut right_pieces =
+        collect_right_padding(seg_idx, axis, fitted, t_sm_half, batch_t_end, target_degree);
 
     let mut all_pieces = Vec::new();
     all_pieces.append(&mut left_pieces);
@@ -84,12 +59,10 @@ pub fn pad_segment_axis_with_history(
     bezier_pieces_to_nurbs(&all_pieces)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn collect_left_padding(
     seg_idx: usize,
     axis: usize,
     fitted: &[FittedSegment],
-    e_halos: &[EHalo],
     history: &[BezierPiece<f64>],
     t_sm_half: f64,
     batch_t_start: f64,
@@ -105,34 +78,6 @@ fn collect_left_padding(
             if cursor <= pad_target {
                 break;
             }
-            let next_seg_start = if i + 1 < fitted.len() {
-                fitted[i + 1].t_start
-            } else {
-                cursor
-            };
-            let neighbor_end = fitted[i].t_end;
-            let gap_halos = find_halos_in_range(e_halos, neighbor_end, next_seg_start);
-            for halo in gap_halos.into_iter().rev() {
-                if cursor <= pad_target {
-                    break;
-                }
-                let h_start = halo.t_start.max(pad_target);
-                let h_end = halo.t_end.min(cursor);
-                if h_end > h_start {
-                    pieces.push(constant_piece(
-                        halo.xyz_position[axis],
-                        h_start,
-                        h_end,
-                        target_degree,
-                    ));
-                    cursor = h_start;
-                }
-            }
-
-            if cursor <= pad_target {
-                break;
-            }
-
             let neighbor_pieces = extract_bezier_pieces(&fitted[i].axes[axis]);
             for np in neighbor_pieces.into_iter().rev() {
                 if cursor <= pad_target {
@@ -145,31 +90,6 @@ fn collect_left_padding(
                     pieces.push(degree_elevate_to(trimmed, target_degree));
                     cursor = p_start;
                 }
-            }
-        }
-    }
-
-    if cursor > pad_target {
-        let first_seg_start = if seg_idx > 0 {
-            fitted[0].t_start
-        } else {
-            seg.t_start
-        };
-        let gap_halos = find_halos_in_range(e_halos, batch_t_start, first_seg_start);
-        for halo in gap_halos.into_iter().rev() {
-            if cursor <= pad_target {
-                break;
-            }
-            let h_start = halo.t_start.max(pad_target);
-            let h_end = halo.t_end.min(cursor);
-            if h_end > h_start {
-                pieces.push(constant_piece(
-                    halo.xyz_position[axis],
-                    h_start,
-                    h_end,
-                    target_degree,
-                ));
-                cursor = h_start;
             }
         }
     }
@@ -212,7 +132,6 @@ fn collect_right_padding(
     seg_idx: usize,
     axis: usize,
     fitted: &[FittedSegment],
-    e_halos: &[EHalo],
     t_sm_half: f64,
     batch_t_end: f64,
     target_degree: usize,
@@ -226,31 +145,6 @@ fn collect_right_padding(
         if cursor >= pad_target {
             break;
         }
-        let prev_seg_end = if i > 0 { fitted[i - 1].t_end } else { cursor };
-        let neighbor_start = fitted[i].t_start;
-
-        let gap_halos = find_halos_in_range(e_halos, prev_seg_end, neighbor_start);
-        for halo in &gap_halos {
-            if cursor >= pad_target {
-                break;
-            }
-            let h_start = halo.t_start.max(cursor);
-            let h_end = halo.t_end.min(pad_target);
-            if h_end > h_start {
-                pieces.push(constant_piece(
-                    halo.xyz_position[axis],
-                    h_start,
-                    h_end,
-                    target_degree,
-                ));
-                cursor = h_end;
-            }
-        }
-
-        if cursor >= pad_target {
-            break;
-        }
-
         let neighbor_pieces = extract_bezier_pieces(&fitted[i].axes[axis]);
         for np in &neighbor_pieces {
             if cursor >= pad_target {
@@ -262,27 +156,6 @@ fn collect_right_padding(
                 let trimmed = trim_piece(np, p_start, p_end);
                 pieces.push(degree_elevate_to(trimmed, target_degree));
                 cursor = p_end;
-            }
-        }
-    }
-
-    if cursor < pad_target {
-        let last_seg_end = fitted.last().map_or(cursor, |s| s.t_end);
-        let gap_halos = find_halos_in_range(e_halos, last_seg_end, batch_t_end);
-        for halo in &gap_halos {
-            if cursor >= pad_target {
-                break;
-            }
-            let h_start = halo.t_start.max(cursor);
-            let h_end = halo.t_end.min(pad_target);
-            if h_end > h_start {
-                pieces.push(constant_piece(
-                    halo.xyz_position[axis],
-                    h_start,
-                    h_end,
-                    target_degree,
-                ));
-                cursor = h_end;
             }
         }
     }
@@ -329,13 +202,6 @@ fn trim_piece(piece: &BezierPiece<f64>, t_lo: f64, t_hi: f64) -> BezierPiece<f64
     }
 
     p
-}
-
-fn find_halos_in_range(e_halos: &[EHalo], t_lo: f64, t_hi: f64) -> Vec<&EHalo> {
-    e_halos
-        .iter()
-        .filter(|h| h.t_end > t_lo && h.t_start < t_hi)
-        .collect()
 }
 
 fn first_axis_boundary(seg_idx: usize, axis: usize, fitted: &[FittedSegment]) -> (f64, f64, f64) {

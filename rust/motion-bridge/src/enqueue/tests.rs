@@ -1,6 +1,5 @@
 use super::*;
 use crate::dispatch::{KINEMATICS_COREXY, McuCaps};
-use geometry::segment::EMode;
 
 fn constant_axis(value: f64, n_pieces: usize, piece_dur: f64) -> ScalarNurbs<f64> {
     let bern = [value; 4];
@@ -39,9 +38,7 @@ fn seg_x_move() -> ShapedSegment {
             linear_axis(0.0, 0.0),
             linear_axis(0.0, 0.0),
         ],
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: vec![],
         t_start: 0.0,
         t_end: 1.0,
     }
@@ -111,9 +108,7 @@ fn corexy_x_slot_is_x_plus_y() {
             linear_axis(0.0, 4.0),
             linear_axis(0.0, 0.0),
         ],
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: vec![],
         t_start: 0.0,
         t_end: 1.0,
     };
@@ -211,9 +206,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
             linear_axis_scaled(0.0, 0.0, 0.2),
             linear_axis_scaled(0.0, 0.0, 0.2),
         ],
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: vec![],
         t_start: 0.0,
         t_end: 0.2,
     };
@@ -280,9 +273,7 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
 
     let seg = ShapedSegment {
         axes: [curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: vec![],
         t_start: 0.0,
         t_end: total,
     };
@@ -340,9 +331,7 @@ fn motion_constant_motion_merges_only_the_constant_run() {
 
     let seg = ShapedSegment {
         axes: [curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: vec![],
         t_start: 0.0,
         t_end: 5.0 * dur,
     };
@@ -410,9 +399,7 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
 
     let seg = ShapedSegment {
         axes: [curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: vec![],
         t_start: 0.0,
         t_end: 4.0 * dur,
     };
@@ -486,9 +473,7 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
 
     let seg = ShapedSegment {
         axes: [curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: vec![],
         t_start: 0.0,
         t_end: total,
     };
@@ -562,9 +547,7 @@ fn nonzero_curve_base_preserves_host_times() {
 
     let seg = ShapedSegment {
         axes: [curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
-        e_mode: EMode::Travel,
-        extrusion_per_xy_mm: 0.0,
-        e_independent: None,
+        followers: vec![],
         t_start: U_BASE,
         t_end: U_BASE + total,
     };
