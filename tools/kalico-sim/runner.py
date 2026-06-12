@@ -590,6 +590,7 @@ def run_simulation(
                 resp = send_gcode(api_socket, "G28 Z", timeout=60)
                 log.info("G28 Z: %s", resp)
 
+                time.sleep(2.0)
                 klippy_content = (
                     klippy_log.read_text(errors="replace")
                     if klippy_log.exists()
@@ -605,6 +606,21 @@ def run_simulation(
                             break
                 elif not resp:
                     homing_error = "G28 Z timed out or returned no response"
+
+                if homing_error is not None:
+                    traffic = log_dir / "beacon_traffic.log"
+                    if traffic.exists():
+                        for line in traffic.read_text(
+                            errors="replace"
+                        ).splitlines()[-120:]:
+                            log.info("TRAFFIC %s", line)
+                    events_dir = log_dir / "events"
+                    for ev_file in sorted(events_dir.glob("*.jsonl")):
+                        for line in ev_file.read_text(
+                            errors="replace"
+                        ).splitlines():
+                            if "trip" in line or "clock-seed" in line:
+                                log.info("EVENT %s", line)
 
                 success = homing_error is None
                 error = homing_error
@@ -2613,6 +2629,9 @@ def main():
     print("=" * 60)
 
     if not result.success and result.klippy_log:
+        print("\n--- klippy.log raw tail ---")
+        print(result.klippy_log[-8000:])
+        print("--- end raw tail ---")
         if "Traceback" in result.klippy_log:
             print("\n--- klippy.log (traceback context) ---")
             lines = result.klippy_log.strip().split("\n")
