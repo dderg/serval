@@ -64,6 +64,7 @@ pub(crate) enum SlpCut {
         h_bar: f64,
     },
     AxisJerk(AxisJerkCut),
+    Follower(crate::topp::follower::FollowerCut),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -443,6 +444,16 @@ fn solve_with_cuts_and_trust_region(
                     n_grid,
                 );
             }
+            SlpCut::Follower(fc) => {
+                for sign in [1.0_f64, -1.0] {
+                    let row = n_rows;
+                    for &(col, g) in &fc.entries[..fc.n_entries] {
+                        push_nz(&mut rowval_per_col, &mut nzval_per_col, col, row, sign * g);
+                    }
+                    b_rhs.push(if sign > 0.0 { fc.rhs_pos } else { fc.rhs_neg });
+                    n_rows += 1;
+                }
+            }
         }
     }
 
@@ -747,7 +758,9 @@ pub(crate) fn max_axis_ratio_chain(
             }
         }
     }
-    worst
+    worst.max(crate::topp::follower::max_pa_ratio(
+        &result.b, &result.a, chain,
+    ))
 }
 
 fn jerk_vector(
@@ -1056,7 +1069,21 @@ fn run_slp9_loop(
 
         let target_floor = (1.0 + SLP9_EPS_FEAS) * (1.0 - SLP9_TARGET_MARGIN);
         let target_ratio = (best_ratio * SLP9_TARGET_DECAY).max(target_floor);
-        let cuts = build_axis_jerk_cuts_chain(&last_result, chain, target_ratio);
+        let mut cuts = build_axis_jerk_cuts_chain(&last_result, chain, target_ratio);
+        cuts.extend(
+            crate::topp::follower::build_follower_pa_cuts(
+                &last_result.b,
+                &last_result.a,
+                chain,
+                target_ratio,
+                SLP9_EPS_FEAS,
+                SLP9_CUT_PLACEMENT_FRACTION,
+                SLP9_TARGET_DECAY,
+                scale.to_scaled_b(SLP_B_FLOOR),
+            )
+            .into_iter()
+            .map(SlpCut::Follower),
+        );
         if cuts.is_empty() {
             return Ok(Slp9LoopOutcome::Done(
                 last_result,
@@ -1144,6 +1171,38 @@ fn run_slp9_loop(
             last_max_ratio: best_ratio,
         },
     ))
+}
+
+/// Uniform time dilation of the iterate: `b ← λ²·b`, `a ← λ²·a`. Every
+/// constraint-family ratio decreases monotonically as λ → 0, so this can
+/// always restore a feasible linearization point (unlike `damp_interior_a`,
+/// which leaves `b`-driven families untouched).
+fn damp_profile_uniform(result: &SolverResult, lambda: f64) -> SolverResult {
+    let l2 = lambda * lambda;
+    SolverResult {
+        b: result.b.iter().map(|&b| b * l2).collect(),
+        a: result.a.iter().map(|&a| a * l2).collect(),
+        status: result.status,
+    }
+}
+
+fn uniform_damp_for_feasibility(
+    result: &SolverResult,
+    chain: &crate::topp::chain::ChainGrid,
+    current_ratio: f64,
+) -> (SolverResult, f64) {
+    let mut lambda = (SLP9_DAMP_TARGET_RATIO / current_ratio).cbrt().min(1.0);
+    for _ in 0..32 {
+        let damped = damp_profile_uniform(result, lambda);
+        let ratio = max_axis_ratio_chain(&damped, chain);
+        if ratio <= SLP9_DAMP_TARGET_RATIO {
+            return (damped, ratio);
+        }
+        lambda *= 0.75;
+    }
+    let damped = damp_profile_uniform(result, lambda);
+    let ratio = max_axis_ratio_chain(&damped, chain);
+    (damped, ratio)
 }
 
 /// Scales all interior `a` values by `scale_factor`, leaving `b` and endpoint
@@ -1261,6 +1320,9 @@ pub(crate) fn slp_solve_with_axis_jerk_chain(
                 outer_iters,
                 accepted_total: _,
             } => {
+                if best_ratio <= 1.0 + SLP9_EPS_FEAS {
+                    return Ok((best_result, SlpOutcome::Converged { outer_iters }));
+                }
                 if restorations_used >= SLP9_MAX_RESTORATIONS {
                     return Ok((
                         best_result,
@@ -1273,16 +1335,23 @@ pub(crate) fn slp_solve_with_axis_jerk_chain(
                 let damp_s = damp_scale_for_axis_feasibility(&best_result, chain, best_ratio);
                 let damped = damp_interior_a(&best_result, damp_s);
                 let ratio_after_damp = max_axis_ratio_chain(&damped, chain);
-                if ratio_after_damp > 1.0 {
-                    return Ok((
-                        best_result,
-                        SlpOutcome::Diverged {
-                            last_max_ratio: best_ratio,
-                            outer_iters,
-                        },
-                    ));
-                }
-                current_start = damped;
+                let restored = if ratio_after_damp <= 1.0 {
+                    damped
+                } else {
+                    let (uniform, uniform_ratio) =
+                        uniform_damp_for_feasibility(&best_result, chain, best_ratio);
+                    if uniform_ratio > 1.0 {
+                        return Ok((
+                            best_result,
+                            SlpOutcome::Diverged {
+                                last_max_ratio: best_ratio,
+                                outer_iters,
+                            },
+                        ));
+                    }
+                    uniform
+                };
+                current_start = restored;
                 outer_iters_consumed = outer_iters - path_outer_iters;
                 restorations_used += 1;
             }

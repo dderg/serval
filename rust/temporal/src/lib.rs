@@ -42,6 +42,9 @@ pub enum BindingConstraint {
     Velocity { set: usize },
     AccelNorm { set: usize },
     JerkNorm { set: usize },
+    PaVelocity { set: usize },
+    PaAccel { set: usize },
+    PaJerk { set: usize },
     Boundary,
 }
 

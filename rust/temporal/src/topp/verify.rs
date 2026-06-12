@@ -32,6 +32,7 @@ struct PointInputs<'a> {
     s_dot: f64,
     s_ddot: f64,
     s_dddot: f64,
+    s_ddddot: f64,
     limits: &'a Limits,
     followers: &'a [FollowerDemand],
 }
@@ -91,27 +92,49 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
     }
     for f in p.followers {
         let r = f.ratio.abs();
+        let k = f.pa_k;
         for (set_idx, set) in lim.follower_sets() {
             if !set.axes.contains(f.axis) {
                 continue;
             }
-            if set.v_max.is_finite() {
-                entries.push((
-                    r * p.s_dot / set.v_max,
-                    BindingConstraint::Velocity { set: set_idx },
-                ));
-            }
-            if set.a_max.is_finite() {
-                entries.push((
-                    r * p.s_ddot.abs() / set.a_max,
-                    BindingConstraint::AccelNorm { set: set_idx },
-                ));
-            }
-            if set.j_max.is_finite() {
-                entries.push((
-                    r * p.s_dddot.abs() / set.j_max,
-                    BindingConstraint::JerkNorm { set: set_idx },
-                ));
+            if k == 0.0 {
+                if set.v_max.is_finite() {
+                    entries.push((
+                        r * p.s_dot / set.v_max,
+                        BindingConstraint::Velocity { set: set_idx },
+                    ));
+                }
+                if set.a_max.is_finite() {
+                    entries.push((
+                        r * p.s_ddot.abs() / set.a_max,
+                        BindingConstraint::AccelNorm { set: set_idx },
+                    ));
+                }
+                if set.j_max.is_finite() {
+                    entries.push((
+                        r * p.s_dddot.abs() / set.j_max,
+                        BindingConstraint::JerkNorm { set: set_idx },
+                    ));
+                }
+            } else {
+                if set.v_max.is_finite() {
+                    entries.push((
+                        r * (p.s_dot + k * p.s_ddot).abs() / set.v_max,
+                        BindingConstraint::PaVelocity { set: set_idx },
+                    ));
+                }
+                if set.a_max.is_finite() {
+                    entries.push((
+                        r * (p.s_ddot + k * p.s_dddot).abs() / set.a_max,
+                        BindingConstraint::PaAccel { set: set_idx },
+                    ));
+                }
+                if set.j_max.is_finite() {
+                    entries.push((
+                        r * (p.s_dddot + k * p.s_ddddot).abs() / set.j_max,
+                        BindingConstraint::PaJerk { set: set_idx },
+                    ));
+                }
             }
         }
     }
@@ -126,7 +149,13 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
             worst_ratio = ratio;
             worst_tag = tag;
         }
-        if matches!(tag, BindingConstraint::JerkNorm { .. }) {
+        if matches!(
+            tag,
+            BindingConstraint::JerkNorm { .. }
+                | BindingConstraint::PaJerk { .. }
+                | BindingConstraint::PaVelocity { .. }
+                | BindingConstraint::PaAccel { .. }
+        ) {
             if ratio > max_jerk {
                 max_jerk = ratio;
             }
@@ -153,6 +182,7 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
 /// primary arrays; the dual pass is what enforces the right side.
 pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyReport {
     let n = chain.n_points();
+    let has_pa = chain.followers.iter().flatten().any(|f| f.pa_k != 0.0);
     debug_assert_eq!(result.b.len(), n);
     debug_assert_eq!(result.a.len(), n);
 
@@ -181,6 +211,17 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         let s_dot = b_i.max(0.0).sqrt();
         let s_ddot = a_i;
         let s_dddot = crate::topp::stencil::s_dddot_at_weights(&result.b, i, &chain.h_intervals);
+        let s_ddddot = if has_pa {
+            crate::topp::stencil::s_ddddot_at_weights(
+                &result.b,
+                a_i,
+                i,
+                &chain.s,
+                &chain.h_intervals,
+            )
+        } else {
+            0.0
+        };
 
         let g = &chain.geom[i];
         let pr = ratios_at(&PointInputs {
@@ -190,6 +231,7 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             s_dot,
             s_ddot,
             s_dddot,
+            s_ddddot,
             limits: chain.limits_at(i),
             followers: chain.followers_at(i),
         });
@@ -222,6 +264,17 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         let s_dot = b_i.max(0.0).sqrt();
         let s_ddot = result.a[i];
         let s_dddot = crate::topp::stencil::s_dddot_at_weights(&result.b, i, &chain.h_intervals);
+        let s_ddddot = if has_pa {
+            crate::topp::stencil::s_ddddot_at_weights(
+                &result.b,
+                s_ddot,
+                i,
+                &chain.s,
+                &chain.h_intervals,
+            )
+        } else {
+            0.0
+        };
 
         let pr = ratios_at(&PointInputs {
             cp: jd.geom.c_prime,
@@ -230,6 +283,7 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             s_dot,
             s_ddot,
             s_dddot,
+            s_ddddot,
             limits: &chain.limits[jd.limits_idx],
             followers: &chain.followers[jd.limits_idx],
         });

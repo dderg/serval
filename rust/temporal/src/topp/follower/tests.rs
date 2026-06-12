@@ -162,3 +162,112 @@ fn follower_jerk_cap_binds_through_the_slp() {
         "path jerk {max_jerk} exceeds effective cap 2000"
     );
 }
+
+fn finite_diff_derivatives(profile: &crate::TopProfile) -> Vec<(f64, f64, f64, f64)> {
+    let n = profile.samples.len();
+    let mut t = vec![0.0];
+    for w in profile.samples.windows(2) {
+        let v_avg = (w[0].v + w[1].v).max(1e-9);
+        t.push(t.last().unwrap() + 2.0 * (w[1].s - w[0].s) / v_avg);
+    }
+    let v: Vec<f64> = profile.samples.iter().map(|s| s.v).collect();
+    let deriv = |f: &[f64]| -> Vec<f64> {
+        (0..n)
+            .map(|i| {
+                if i == 0 || i == n - 1 {
+                    0.0
+                } else {
+                    (f[i + 1] - f[i - 1]) / (t[i + 1] - t[i - 1]).max(1e-12)
+                }
+            })
+            .collect()
+    };
+    let a = deriv(&v);
+    let j = deriv(&a);
+    let s4 = deriv(&j);
+    (0..n).map(|i| (v[i], a[i], j[i], s4[i])).collect()
+}
+
+#[test]
+fn pa_velocity_row_slows_the_accel_phase() {
+    let limits = limits_with_follower(50.0, 1.0e9, 1.0e12);
+    let profile = solve_with_followers(
+        &limits,
+        &[FollowerDemand {
+            axis: 3,
+            ratio: 0.5,
+            pa_k: 0.05,
+        }],
+    );
+    let d = finite_diff_derivatives(&profile);
+    for (i, &(v, a, _, _)) in d.iter().enumerate() {
+        let demand = 0.5 * (v + 0.05 * a);
+        assert!(
+            demand <= 50.0 * (1.0 + 5e-2),
+            "sample {i}: PA velocity demand {demand} > 50"
+        );
+    }
+}
+
+#[test]
+fn pa_accel_row_holds_pointwise() {
+    let limits = limits_with_follower(1.0e6, 500.0, 1.0e12);
+    let profile = solve_with_followers(
+        &limits,
+        &[FollowerDemand {
+            axis: 3,
+            ratio: 0.5,
+            pa_k: 0.05,
+        }],
+    );
+    let d = finite_diff_derivatives(&profile);
+    for (i, &(_, a, j, _)) in d.iter().enumerate().skip(2).take(d.len() - 4) {
+        let demand = 0.5 * (a + 0.05 * j).abs();
+        assert!(
+            demand <= 500.0 * 1.10,
+            "sample {i}: PA accel demand {demand} > 500"
+        );
+    }
+}
+
+#[test]
+fn pa_jerk_row_holds_pointwise() {
+    let limits = limits_with_follower(1.0e6, 1.0e9, 5000.0);
+    let profile = solve_with_followers(
+        &limits,
+        &[FollowerDemand {
+            axis: 3,
+            ratio: 0.5,
+            pa_k: 0.05,
+        }],
+    );
+    let d = finite_diff_derivatives(&profile);
+    for (i, &(_, _, j, s4)) in d.iter().enumerate().skip(3).take(d.len() - 6) {
+        let demand = 0.5 * (j + 0.05 * s4).abs();
+        assert!(
+            demand <= 5000.0 * 1.20,
+            "sample {i}: PA jerk demand {demand} > 5000"
+        );
+    }
+}
+
+#[test]
+fn verify_tags_pa_rows() {
+    let limits = limits_with_follower(50.0, 1.0e9, 1.0e12);
+    let follower_set_idx = limits.follower_sets().next().map(|(idx, _)| idx).unwrap();
+    let profile = solve_with_followers(
+        &limits,
+        &[FollowerDemand {
+            axis: 3,
+            ratio: 0.5,
+            pa_k: 0.05,
+        }],
+    );
+    let tagged = profile.samples.iter().any(|s| {
+        s.binding
+            == BindingConstraint::PaVelocity {
+                set: follower_set_idx,
+            }
+    });
+    assert!(tagged, "no sample tagged PaVelocity");
+}
