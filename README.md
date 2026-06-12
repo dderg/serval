@@ -89,7 +89,9 @@ fork speaks to servo drives natively. Nothing on the planning side knows or
 cares which drive technology sits at the end.
 
 This is running hardware, not a roadmap. From one of the test benches, where
-the X axis is an industrial EtherCAT servo and the other axes are steppers:
+the X axis is an industrial EtherCAT servo and the other axes are steppers
+(a stepper opts into phase stepping with `phase_stepping: 1` in its existing
+section):
 
 ```
 [ethercat_node node_x]
@@ -98,25 +100,23 @@ interface: eth0
 [servo_x]
 protocol: ethercat
 node: node_x
-rotation_distance: 40
-encoder_counts_per_rev: 131072
 max_torque: 100
-following_error: 10
 velocity_ff: True
+params:
+  0x2000.0x05: u16 0      # manual gain mode (no auto-tuning)
+  0x2000.0x07: u16 37     # load inertia ratio, % (servo-ident fit)
+  0x2001.0x01: u16 2200   # position gain, 220 rad/s
+  0x2001.0x02: u16 1375   # speed gain, 137.5 Hz
+  0x2001.0x03: u16 909    # integral time, 9.09 ms
+dynamics_profile: servo_dynamics/dynamics_ident_20260611_181313.toml
 ```
 
-A stepper opts into phase stepping with one line in its existing section:
-
-```
-[stepper_y]
-microsteps: 256
-rotation_distance: 40
-phase_stepping: 1
-
-[tmc5160 stepper_y]
-spi_bus: spidev0.0
-run_current: 1.0
-```
+The `params:` block writes straight into the drive's object dictionary at
+startup — loop gains live in version-controlled printer config, not in a
+vendor tuning GUI. And the inertia ratio comment isn't a guess:
+`dynamics_profile` points at the output of the fork's own identification
+routine, which excites the axis, fits its dynamics, and feeds the result
+forward.
 
 ## The MCU plays motion, not steps
 
