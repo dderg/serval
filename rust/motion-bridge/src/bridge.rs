@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -17,7 +17,7 @@ use kalico_host_rt::unix_native_conn::UnixNativeConn;
 use trajectory::{AxisShaper, ShaperConfig};
 
 use crate::classify;
-use crate::config::{self, PlannerConfig, PlannerLimits, parse_axis_shaper};
+use crate::config::{self, PlannerConfig, parse_axis_shaper};
 use crate::dispatch::{AXIS_E, McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::planner::{DispatchError, PlannerError, PlannerHandle};
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
@@ -2210,11 +2210,7 @@ impl PyMotionBridge {
     }
 
     #[pyo3(signature = (
-        max_velocity,
-        max_accel,
-        max_z_velocity,
-        max_z_accel,
-        square_corner_velocity,
+        limits,
         shaper_type_x,
         shaper_freq_x,
         shaper_type_y,
@@ -2226,11 +2222,7 @@ impl PyMotionBridge {
     #[allow(clippy::too_many_arguments)]
     fn init_planner(
         &self,
-        max_velocity: f64,
-        max_accel: f64,
-        max_z_velocity: f64,
-        max_z_accel: f64,
-        square_corner_velocity: f64,
+        limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
         shaper_type_x: &str,
         shaper_freq_x: f64,
         shaper_type_y: &str,
@@ -2252,16 +2244,28 @@ impl PyMotionBridge {
             build_shaper_config(shaper_type_x, shaper_freq_x, shaper_type_y, shaper_freq_y)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-        let limits = PlannerLimits {
-            max_velocity,
-            max_accel,
-            max_z_velocity,
-            max_z_accel,
-            square_corner_velocity,
-        };
+        let limit_sections: Vec<config::LimitSection> = limits
+            .into_iter()
+            .map(|(name, axes, max_velocity, max_accel, max_jerk)| {
+                let axes = axes
+                    .iter()
+                    .map(|a| config::axis_index(a))
+                    .collect::<Result<Vec<usize>, _>>()
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                Ok(config::LimitSection {
+                    name,
+                    axes,
+                    max_velocity,
+                    max_accel,
+                    max_jerk,
+                })
+            })
+            .collect::<PyResult<_>>()?;
 
         let mut cfg = config::PlannerConfig::default();
-        cfg.limits = limits;
+        cfg.limit_sections = limit_sections;
+        cfg.to_temporal_limits()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cfg.shaper = shaper;
         cfg.window_capacity = window_capacity;
         cfg.beta_max_iters = beta_max_iters;
@@ -3030,21 +3034,24 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    fn update_limits(&self, max_velocity: f64, max_accel: f64) -> PyResult<()> {
-        let mut cfg = self
-            .planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        cfg.limits.max_velocity = max_velocity;
-        cfg.limits.max_accel = max_accel;
-        let new_limits = cfg.limits;
-        drop(cfg);
+    #[pyo3(signature = (velocity, accel))]
+    fn update_runtime_caps(&self, velocity: Option<f64>, accel: Option<f64>) -> PyResult<()> {
+        let caps = config::RuntimeCaps { velocity, accel };
+        {
+            let mut cfg = self
+                .planner_config
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            cfg.runtime_caps = caps;
+            cfg.to_temporal_limits()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
 
         let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
-        planner.update_limits(new_limits).map_err(planner_err)
+        planner.update_runtime_caps(caps).map_err(planner_err)
     }
 
     fn update_shaper(

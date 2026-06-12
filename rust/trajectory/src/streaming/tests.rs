@@ -120,7 +120,7 @@ fn replan_kernels_piecewise() -> [Option<PiecewisePolynomialKernel<f64>>; 4] {
 }
 
 fn replan_limits() -> temporal::Limits {
-    temporal::Limits::new([500.0; 3], [5_000.0; 3], [100_000.0; 3], 2_500.0)
+    temporal::Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
 }
 
 fn replan_context() -> ReplanContext {
@@ -134,7 +134,6 @@ fn replan_context() -> ReplanContext {
             v_max: 100.0,
             a_max: 5_000.0,
         },
-        junction_chord_tolerance_mm: 0.05,
         worker_threads: 1,
         grid_strategy: temporal::multi::GridStrategy::Fixed(20),
         fallback_initial_v: 0.0,
@@ -708,7 +707,7 @@ fn append_and_replan_rolls_back_planned_caches_on_plan_velocity_error() {
         .collect();
 
     let mut ctx_bad = ctx_good;
-    ctx_bad.limits = temporal::Limits::new([1e-10; 3], [5_000.0; 3], [100_000.0; 3], 2_500.0);
+    ctx_bad.limits = temporal::Limits::axis_boxes([1e-10; 3], [5_000.0; 3], [100_000.0; 3]);
 
     let m_broken = linear_x_segment(200.0, 400.0, 200.0);
     let bad_result = state.append_and_replan(m_broken, &ctx_bad);
@@ -944,11 +943,10 @@ fn current_position_on_fresh_shaped_state_reads_seed() {
 #[test]
 fn live_limits_50mm_pure_x_completes_quickly() {
     let mut state = ShaperState::new([0.0; 4], &replan_shapers());
-    let live = temporal::Limits::new(
+    let live = temporal::Limits::axis_boxes(
         [1000.0, 1000.0, 5.0],
         [70000.0, 70000.0, 100.0],
         [140000.0, 140000.0, 200.0],
-        5.0_f64.powi(2) / (70000.0 * 0.5),
     );
     let mut ctx = replan_context();
     ctx.limits = live;
@@ -1208,12 +1206,8 @@ fn single_axis_harness(v_max: f64, a_max: f64) -> (ShaperState, ReplanContext) {
     ];
     let state = ShaperState::new([0.0; 4], &shapers);
 
-    let limits = temporal::Limits::new(
-        [v_max, v_max, v_max],
-        [a_max, a_max, a_max],
-        [100_000.0; 3],
-        f64::MAX,
-    );
+    let limits =
+        temporal::Limits::axis_boxes([v_max, v_max, v_max], [a_max, a_max, a_max], [100_000.0; 3]);
     let ctx = ReplanContext {
         limits,
         kernels: [
@@ -1233,7 +1227,6 @@ fn single_axis_harness(v_max: f64, a_max: f64) -> (ShaperState, ReplanContext) {
             v_max: 100.0,
             a_max: 5_000.0,
         },
-        junction_chord_tolerance_mm: 0.05,
         worker_threads: 1,
         grid_strategy: temporal::multi::GridStrategy::Fixed(40),
         fallback_initial_v: 0.0,
@@ -1321,7 +1314,7 @@ fn replan_with_positive_boundary_accel_and_short_first_segment_succeeds() {
         None,
     ];
 
-    let limits = temporal::Limits::new([300.0; 3], [5_000.0; 3], [10_000.0; 3], f64::MAX);
+    let limits = temporal::Limits::axis_boxes([300.0; 3], [5_000.0; 3], [10_000.0; 3]);
     let ctx = ReplanContext {
         limits,
         kernels: [
@@ -1341,7 +1334,6 @@ fn replan_with_positive_boundary_accel_and_short_first_segment_succeeds() {
             v_max: 100.0,
             a_max: 5_000.0,
         },
-        junction_chord_tolerance_mm: 0.05,
         worker_threads: 1,
 
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
@@ -1387,11 +1379,10 @@ fn replan_with_positive_boundary_accel_and_short_first_segment_succeeds() {
 }
 
 fn corner_context_passthrough() -> ReplanContext {
-    let limits = temporal::Limits::new(
+    let limits = temporal::Limits::axis_boxes(
         [300.0, 300.0, 5.0],
         [5_000.0, 5_000.0, 350.0],
         [10_000.0; 3],
-        5_000.0,
     );
     ReplanContext {
         limits,
@@ -1408,7 +1399,6 @@ fn corner_context_passthrough() -> ReplanContext {
             v_max: 100.0,
             a_max: 5_000.0,
         },
-        junction_chord_tolerance_mm: 0.05,
         worker_threads: 1,
         grid_strategy: temporal::multi::GridStrategy::Adaptive {
             min_n: 20,
@@ -1471,11 +1461,10 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
         None,
     ];
 
-    let tight_limits = temporal::Limits::new(
+    let tight_limits = temporal::Limits::axis_boxes(
         [300.0, 300.0, 5.0],
         [5_000.0, 5_000.0, 350.0],
         [10_000.0; 3],
-        5_000.0,
     );
     let ctx = ReplanContext {
         limits: tight_limits,
@@ -1492,7 +1481,6 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
             v_max: 100.0,
             a_max: 5_000.0,
         },
-        junction_chord_tolerance_mm: 0.05,
         worker_threads: 1,
         grid_strategy: temporal::multi::GridStrategy::Adaptive {
             min_n: 20,

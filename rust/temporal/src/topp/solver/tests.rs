@@ -2,7 +2,7 @@ use super::*;
 use crate::Limits;
 use crate::topp::chain::ChainGrid;
 use crate::topp::constraints::{BuildOutcome, EndpointConditions, build_chain};
-use crate::topp::path::ArclengthGrid;
+use crate::topp::path::{ArclengthGrid, InterSample};
 
 /// Verify that `append_axis_jerk_cut_to_clarabel` emits ∞-norm-normalized rows.
 ///
@@ -176,8 +176,14 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
     let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
-    let kappa = vec![0.0; n];
-    let inter_kappa = vec![vec![(0.25, 0.0), (0.5, 0.0), (0.75, 0.0)]; n.saturating_sub(1)];
+    let inter_geom = vec![
+        vec![
+            InterSample::planar(0.25, 0.0),
+            InterSample::planar(0.5, 0.0),
+            InterSample::planar(0.75, 0.0)
+        ];
+        n.saturating_sub(1)
+    ];
     ArclengthGrid {
         s,
         u,
@@ -185,21 +191,19 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
         c_prime,
         c_double_prime,
         c_triple_prime,
-        kappa,
         total_length: length,
-        inter_kappa,
+        inter_geom,
     }
 }
 
 #[test]
 fn straight_line_solves_to_nontrivial_profile() {
     let grid = dummy_straight_grid(50, 100.0);
-    let limits = Limits {
-        v_max: [500.0, 500.0, 500.0],
-        a_max: [5_000.0, 5_000.0, 5_000.0],
-        j_max: [100_000.0, 100_000.0, 100_000.0],
-        a_centripetal_max: 2_500.0,
-    };
+    let limits = Limits::axis_boxes(
+        [500.0, 500.0, 500.0],
+        [5_000.0, 5_000.0, 5_000.0],
+        [100_000.0, 100_000.0, 100_000.0],
+    );
     let chain = ChainGrid::from_segment_grids(vec![grid], vec![limits]);
     let bundle = match build_chain(
         &chain,
@@ -328,8 +332,14 @@ fn damp_scale_for_axis_feasibility_achieves_target() {
         let c_prime = vec![[1.0, 0.0, 0.0]; n];
         let c_double_prime = vec![[0.0, cpp_val, 0.0]; n];
         let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
-        let kappa = vec![0.0; n];
-        let inter_kappa = vec![vec![(0.25, 0.0), (0.5, 0.0), (0.75, 0.0)]; n.saturating_sub(1)];
+        let inter_geom = vec![
+            vec![
+                InterSample::planar(0.25, 0.0),
+                InterSample::planar(0.5, 0.0),
+                InterSample::planar(0.75, 0.0)
+            ];
+            n.saturating_sub(1)
+        ];
         ArclengthGrid {
             s,
             u,
@@ -337,17 +347,15 @@ fn damp_scale_for_axis_feasibility_achieves_target() {
             c_prime,
             c_double_prime,
             c_triple_prime,
-            kappa,
             total_length: length,
-            inter_kappa,
+            inter_geom,
         }
     };
-    let limits = Limits {
-        v_max: [500.0, 500.0, 500.0],
-        a_max: [50_000.0, 50_000.0, 50_000.0],
-        j_max: [j_max, j_max, j_max],
-        a_centripetal_max: 1e9,
-    };
+    let limits = Limits::axis_boxes(
+        [500.0, 500.0, 500.0],
+        [50_000.0, 50_000.0, 50_000.0],
+        [j_max, j_max, j_max],
+    );
     let chain = ChainGrid::from_segment_grids(vec![grid], vec![limits]);
 
     let b = vec![b0; n];
@@ -413,8 +421,14 @@ fn build_axis_jerk_cuts_chain_places_maintenance_cuts() {
         let c_prime = vec![[1.0, 0.0, 0.0]; n];
         let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
         let c_triple_prime: Vec<[f64; 3]> = cppp_vals.iter().map(|&v| [v, 0.0, 0.0]).collect();
-        let kappa = vec![0.0; n];
-        let inter_kappa = vec![vec![(0.25, 0.0), (0.5, 0.0), (0.75, 0.0)]; n.saturating_sub(1)];
+        let inter_geom = vec![
+            vec![
+                InterSample::planar(0.25, 0.0),
+                InterSample::planar(0.5, 0.0),
+                InterSample::planar(0.75, 0.0)
+            ];
+            n.saturating_sub(1)
+        ];
         ArclengthGrid {
             s,
             u,
@@ -422,17 +436,15 @@ fn build_axis_jerk_cuts_chain_places_maintenance_cuts() {
             c_prime,
             c_double_prime,
             c_triple_prime,
-            kappa,
             total_length: length,
-            inter_kappa,
+            inter_geom,
         }
     };
-    let limits = Limits {
-        v_max: [500.0, 500.0, 500.0],
-        a_max: [50_000.0, 50_000.0, 50_000.0],
-        j_max: [j_max, j_max, j_max],
-        a_centripetal_max: 1e9,
-    };
+    let limits = Limits::axis_boxes(
+        [500.0, 500.0, 500.0],
+        [50_000.0, 50_000.0, 50_000.0],
+        [j_max, j_max, j_max],
+    );
     let chain = ChainGrid::from_segment_grids(vec![grid], vec![limits]);
 
     let b = vec![b_val; n];
@@ -496,18 +508,17 @@ fn build_axis_jerk_cuts_chain_places_maintenance_cuts() {
 /// all interior b values are below `SLP_B_CUT_FLOOR` (no cuts placeable).
 ///
 /// `j_max = [1,1,1]` ensures the FD-estimated path-jerk ratio exceeds 1.05 on
-/// the initial SOCP solution while `a_centripetal_max = 1.0` caps peak b far
-/// below `SLP_B_CUT_FLOOR = 100.0`, making `added == 0` guaranteed. The old
-/// code returned `MaxIters`; the fix returns `Converged`.
+/// the initial SOCP solution while the 0.03 mm move keeps peak b far below
+/// `SLP_B_CUT_FLOOR = 100.0`, making `added == 0` guaranteed. The old code
+/// returned `MaxIters`; the fix returns `Converged`.
 #[test]
 fn slp_solve_chain_zero_cuts_placeable_is_converged_not_max_iters() {
     let grid = dummy_straight_grid(20, 0.03_f64);
-    let limits = Limits {
-        v_max: [300.0, 300.0, 15.0],
-        a_max: [5_000.0, 5_000.0, 350.0],
-        j_max: [1.0, 1.0, 1.0],
-        a_centripetal_max: 1.0,
-    };
+    let limits = Limits::axis_boxes(
+        [300.0, 300.0, 15.0],
+        [5_000.0, 5_000.0, 350.0],
+        [1.0, 1.0, 1.0],
+    );
     let chain = ChainGrid::from_segment_grids(vec![grid], vec![limits]);
     let scale = crate::topp::scaling::SolverScale::for_chain(&chain);
     let scaled = scale.scale_chain_grid(&chain);

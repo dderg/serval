@@ -60,18 +60,15 @@ fn dwell_advances_print_time_and_unblocks() {
 }
 
 #[test]
-fn update_limits_processed_without_error() {
+fn update_runtime_caps_processed_without_error() {
     let (dispatch, counter) = counting_dispatch();
     let mut h = PlannerHandle::spawn(relaxed_config(), dispatch);
 
-    let new_limits = PlannerLimits {
-        max_velocity: 200.0,
-        max_accel: 2000.0,
-        max_z_velocity: 10.0,
-        max_z_accel: 80.0,
-        square_corner_velocity: 4.0,
-    };
-    h.update_limits(new_limits).unwrap();
+    h.update_runtime_caps(RuntimeCaps {
+        velocity: Some(200.0),
+        accel: Some(2000.0),
+    })
+    .unwrap();
 
     h.submit_move(long_move()).unwrap();
     h.flush().unwrap();
@@ -133,10 +130,22 @@ fn z_only_move_after_homing_xy_shaped_axes_are_constant() {
     };
 
     let mut cfg = PlannerConfig::default();
-    cfg.limits.max_velocity = 1000.0;
-    cfg.limits.max_accel = 70000.0;
-    cfg.limits.max_z_velocity = 5.0;
-    cfg.limits.max_z_accel = 100.0;
+    cfg.limit_sections = vec![
+        crate::config::LimitSection {
+            name: "gantry".into(),
+            axes: vec![0, 1],
+            max_velocity: Some(1000.0),
+            max_accel: Some(70000.0),
+            max_jerk: None,
+        },
+        crate::config::LimitSection {
+            name: "z".into(),
+            axes: vec![2],
+            max_velocity: Some(5.0),
+            max_accel: Some(100.0),
+            max_jerk: None,
+        },
+    ];
     cfg.shaper = shaper_cfg;
 
     let shapers = shaper_config_to_axis_shapers(&cfg.shaper);
@@ -252,10 +261,22 @@ fn z_move_with_tiny_x_after_homing_xy_deviation_proportional() {
     };
 
     let mut cfg = PlannerConfig::default();
-    cfg.limits.max_velocity = 1000.0;
-    cfg.limits.max_accel = 70000.0;
-    cfg.limits.max_z_velocity = 5.0;
-    cfg.limits.max_z_accel = 100.0;
+    cfg.limit_sections = vec![
+        crate::config::LimitSection {
+            name: "gantry".into(),
+            axes: vec![0, 1],
+            max_velocity: Some(1000.0),
+            max_accel: Some(70000.0),
+            max_jerk: None,
+        },
+        crate::config::LimitSection {
+            name: "z".into(),
+            axes: vec![2],
+            max_velocity: Some(5.0),
+            max_accel: Some(100.0),
+            max_jerk: None,
+        },
+    ];
     cfg.shaper = shaper_cfg;
 
     let shapers = shaper_config_to_axis_shapers(&cfg.shaper);
@@ -463,10 +484,22 @@ fn z_only_move_no_prior_xy_motion() {
     };
 
     let mut cfg = PlannerConfig::default();
-    cfg.limits.max_velocity = 1000.0;
-    cfg.limits.max_accel = 70000.0;
-    cfg.limits.max_z_velocity = 5.0;
-    cfg.limits.max_z_accel = 100.0;
+    cfg.limit_sections = vec![
+        crate::config::LimitSection {
+            name: "gantry".into(),
+            axes: vec![0, 1],
+            max_velocity: Some(1000.0),
+            max_accel: Some(70000.0),
+            max_jerk: None,
+        },
+        crate::config::LimitSection {
+            name: "z".into(),
+            axes: vec![2],
+            max_velocity: Some(5.0),
+            max_accel: Some(100.0),
+            max_jerk: None,
+        },
+    ];
     cfg.shaper = shaper_cfg;
 
     let shapers = shaper_config_to_axis_shapers(&cfg.shaper);
@@ -543,8 +576,8 @@ fn flush_blocks_until_motion_complete_by_clock() {
 
 fn peak_speed_of_single_x_move(max_velocity: f64, max_accel: f64, feedrate: f64) -> f64 {
     let mut cfg = PlannerConfig::default();
-    cfg.limits.max_velocity = max_velocity;
-    cfg.limits.max_accel = max_accel;
+    cfg.limit_sections[0].max_velocity = Some(max_velocity);
+    cfg.limit_sections[0].max_accel = Some(max_accel);
 
     let shapers = shaper_config_to_axis_shapers(&cfg.shaper);
     let mut state = ShaperState::new([0.0; 4], &shapers);

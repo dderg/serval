@@ -18,11 +18,10 @@ fn x_50mm_collinear_cubic() -> VectorNurbs<f64, 3> {
 }
 
 fn live_limits() -> temporal::Limits {
-    temporal::Limits::new(
+    temporal::Limits::axis_boxes(
         [1000.0, 1000.0, 5.0],
         [70000.0, 70000.0, 100.0],
         [140000.0, 140000.0, 200.0],
-        70000.0,
     )
 }
 
@@ -34,7 +33,6 @@ fn jog_50mm_at_100mms_with_live_limits() {
         temporal: SegmentInput {
             curve: &curve,
             limits: live_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::Travel,
         extrusion_per_xy_mm: 0.0,
@@ -93,18 +91,16 @@ fn jog_50mm_at_100mms_with_live_limits() {
 #[test]
 fn jog_50mm_with_higher_scv() {
     let curve = x_50mm_collinear_cubic();
-    let limits = temporal::Limits::new(
+    let limits = temporal::Limits::axis_boxes(
         [1000.0, 1000.0, 5.0],
         [70000.0, 70000.0, 100.0],
         [140000.0, 140000.0, 200.0],
-        70000.0,
     );
 
     let segments = [ShapeSegmentInput {
         temporal: SegmentInput {
             curve: &curve,
             limits,
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::Travel,
         extrusion_per_xy_mm: 0.0,
@@ -169,7 +165,6 @@ fn probe_with_feedrate(feedrate: f64, dist_mm: f64) -> f64 {
         temporal: SegmentInput {
             curve: &curve,
             limits,
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::Travel,
         extrusion_per_xy_mm: 0.0,
@@ -226,18 +221,16 @@ fn sweep_feedrate() {
 #[test]
 fn jog_50mm_with_z_jmax_uncapped() {
     let curve = x_50mm_collinear_cubic();
-    let limits = temporal::Limits::new(
+    let limits = temporal::Limits::axis_boxes(
         [1000.0, 1000.0, 5.0],
         [70000.0, 70000.0, 1000.0],
         [140000.0, 140000.0, 2000.0],
-        70000.0,
     );
 
     let segments = [ShapeSegmentInput {
         temporal: SegmentInput {
             curve: &curve,
             limits,
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::Travel,
         extrusion_per_xy_mm: 0.0,
@@ -301,18 +294,16 @@ fn sweep_distance() {
 #[test]
 fn jog_50mm_low_accel_baseline() {
     let curve = x_50mm_collinear_cubic();
-    let limits = temporal::Limits::new(
+    let limits = temporal::Limits::axis_boxes(
         [300.0, 300.0, 15.0],
         [3000.0, 3000.0, 100.0],
         [6000.0, 6000.0, 200.0],
-        3000.0,
     );
 
     let segments = [ShapeSegmentInput {
         temporal: SegmentInput {
             curve: &curve,
             limits,
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::Travel,
         extrusion_per_xy_mm: 0.0,

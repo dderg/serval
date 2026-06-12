@@ -715,12 +715,12 @@ pub(crate) fn max_axis_ratio_chain(
         let s_ddot = result.a[i];
         let geom = &chain.geom[i];
         let lim = chain.limits_at(i);
-        for ax in 0..3 {
-            let cp = geom.c_prime[ax];
-            let cpp = geom.c_double_prime[ax];
-            let cppp = geom.c_triple_prime[ax];
-            let j = cppp * s_dot3 + 3.0 * cpp * s_dot * s_ddot + cp * s_dddot;
-            let ratio = j.abs() / lim.j_max[ax];
+        let jerk = jerk_vector(geom, s_dot3, s_dot, s_ddot, s_dddot);
+        for set in lim.sets() {
+            if !set.j_max.is_finite() {
+                continue;
+            }
+            let ratio = crate::restricted_norm(&jerk, set.axes) / set.j_max;
             if ratio > worst {
                 worst = ratio;
             }
@@ -734,18 +734,55 @@ pub(crate) fn max_axis_ratio_chain(
         let s_ddot = result.a[i];
         let geom = &jct.geom;
         let lim = &chain.limits[jct.limits_idx];
-        for ax in 0..3 {
-            let cp = geom.c_prime[ax];
-            let cpp = geom.c_double_prime[ax];
-            let cppp = geom.c_triple_prime[ax];
-            let j = cppp * s_dot3 + 3.0 * cpp * s_dot * s_ddot + cp * s_dddot;
-            let ratio = j.abs() / lim.j_max[ax];
+        let jerk = jerk_vector(geom, s_dot3, s_dot, s_ddot, s_dddot);
+        for set in lim.sets() {
+            if !set.j_max.is_finite() {
+                continue;
+            }
+            let ratio = crate::restricted_norm(&jerk, set.axes) / set.j_max;
             if ratio > worst {
                 worst = ratio;
             }
         }
     }
     worst
+}
+
+fn jerk_vector(
+    geom: &crate::topp::chain::PointGeom,
+    s_dot3: f64,
+    s_dot: f64,
+    s_ddot: f64,
+    s_dddot: f64,
+) -> [f64; 3] {
+    let mut jerk = [0.0_f64; 3];
+    for (ax, j) in jerk.iter_mut().enumerate() {
+        *j = geom.c_triple_prime[ax] * s_dot3
+            + 3.0 * geom.c_double_prime[ax] * s_dot * s_ddot
+            + geom.c_prime[ax] * s_dddot;
+    }
+    jerk
+}
+
+fn set_jerk_projection(
+    geom: &crate::topp::chain::PointGeom,
+    jerk: &[f64; 3],
+    axes: crate::AxisSet,
+) -> Option<(f64, f64, f64, f64)> {
+    let jn = crate::restricted_norm(jerk, axes);
+    if jn <= f64::MIN_POSITIVE {
+        return None;
+    }
+    let mut cp = 0.0;
+    let mut cpp = 0.0;
+    let mut cppp = 0.0;
+    for ax in axes.indices() {
+        let u = jerk[ax] / jn;
+        cp += u * geom.c_prime[ax];
+        cpp += u * geom.c_double_prime[ax];
+        cppp += u * geom.c_triple_prime[ax];
+    }
+    Some((jn, cp, cpp, cppp))
 }
 
 const SLP9_MAX_OUTER_ITERS: u32 = 30;
@@ -790,22 +827,25 @@ pub(crate) fn build_axis_jerk_cuts_chain(
         let b_bars: [f64; 3] = [result.b[idx[0]], result.b[idx[1]], result.b[idx[2]]];
         let geom = &chain.geom[i];
         let lim = chain.limits_at(i);
-        for ax in 0..3 {
-            let cp = geom.c_prime[ax];
-            let cpp = geom.c_double_prime[ax];
-            let cppp = geom.c_triple_prime[ax];
-            let j = cppp * s_dot3 + 3.0 * cpp * s_dot * s_ddot + cp * s_dddot;
-            let ratio = j.abs() / lim.j_max[ax];
+        let jerk = jerk_vector(geom, s_dot3, s_dot, s_ddot, s_dddot);
+        for (set_idx, set) in lim.sets().iter().enumerate() {
+            if !set.j_max.is_finite() {
+                continue;
+            }
+            let Some((jn, cp, cpp, cppp)) = set_jerk_projection(geom, &jerk, set.axes) else {
+                continue;
+            };
+            let ratio = jn / set.j_max;
             let j_lim = if ratio > SLP9_CUT_PLACEMENT_FRACTION * target_ratio {
-                lim.j_max[ax] * target_ratio
+                set.j_max * target_ratio
             } else if ratio > SLP9_EPS_FEAS {
-                lim.j_max[ax]
+                set.j_max
             } else {
                 continue;
             };
             cuts.push(SlpCut::AxisJerk(AxisJerkCut {
                 i,
-                axis: ax,
+                axis: set_idx,
                 idx,
                 w,
                 b_bars,
@@ -820,22 +860,25 @@ pub(crate) fn build_axis_jerk_cuts_chain(
         for jct in chain.junctions.iter().filter(|jct| jct.idx == i) {
             let jlim = &chain.limits[jct.limits_idx];
             let jgeom = &jct.geom;
-            for ax in 0..3 {
-                let cp = jgeom.c_prime[ax];
-                let cpp = jgeom.c_double_prime[ax];
-                let cppp = jgeom.c_triple_prime[ax];
-                let j = cppp * s_dot3 + 3.0 * cpp * s_dot * s_ddot + cp * s_dddot;
-                let ratio = j.abs() / jlim.j_max[ax];
+            let jjerk = jerk_vector(jgeom, s_dot3, s_dot, s_ddot, s_dddot);
+            for (set_idx, set) in jlim.sets().iter().enumerate() {
+                if !set.j_max.is_finite() {
+                    continue;
+                }
+                let Some((jn, cp, cpp, cppp)) = set_jerk_projection(jgeom, &jjerk, set.axes) else {
+                    continue;
+                };
+                let ratio = jn / set.j_max;
                 let j_lim = if ratio > SLP9_CUT_PLACEMENT_FRACTION * target_ratio {
-                    jlim.j_max[ax] * target_ratio
+                    set.j_max * target_ratio
                 } else if ratio > SLP9_EPS_FEAS {
-                    jlim.j_max[ax]
+                    set.j_max
                 } else {
                     continue;
                 };
                 cuts.push(SlpCut::AxisJerk(AxisJerkCut {
                     i,
-                    axis: ax,
+                    axis: set_idx,
                     idx,
                     w,
                     b_bars,

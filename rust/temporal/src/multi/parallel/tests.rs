@@ -15,7 +15,7 @@ fn straight() -> VectorNurbs<f64, 3> {
 }
 
 fn limits() -> Limits {
-    Limits::new([500.0; 3], [5_000.0; 3], [100_000.0; 3], 2_500.0)
+    Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
 }
 
 fn straight_chain() -> ChainGrid {

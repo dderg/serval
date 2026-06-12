@@ -61,11 +61,10 @@ mod fixture_1_straight_line_x_aligned {
     use temporal::{GridConfig, GridScheme, Limits, SolveStatus, schedule_segment};
 
     fn textbook_limits() -> Limits {
-        Limits::new(
+        Limits::axis_boxes(
             [500.0, 500.0, 500.0],
             [5_000.0, 5_000.0, 5_000.0],
             [100_000.0, 100_000.0, 100_000.0],
-            2_500.0,
         )
     }
 
@@ -92,8 +91,7 @@ mod fixture_1_straight_line_x_aligned {
             ref other => panic!("fixture 1 status: {:?}", other),
         }
 
-        let t_closed =
-            total_time_double_s(100.0, limits.v_max[0], limits.a_max[0], limits.j_max[0]);
+        let t_closed = total_time_double_s(100.0, 500.0, 5_000.0, 100_000.0);
         let rel_err = (profile.total_time - t_closed).abs() / t_closed;
         assert!(
             rel_err <= 0.08,
@@ -116,11 +114,10 @@ mod fixture_2_diagonal {
     use temporal::{GridConfig, GridScheme, Limits, SolveStatus, schedule_segment};
 
     fn textbook_limits() -> Limits {
-        Limits::new(
+        Limits::axis_boxes(
             [500.0, 500.0, 500.0],
             [5_000.0, 5_000.0, 5_000.0],
             [100_000.0, 100_000.0, 100_000.0],
-            2_500.0,
         )
     }
 
@@ -147,10 +144,8 @@ mod fixture_2_diagonal {
         ));
 
         let sqrt2 = std::f64::consts::SQRT_2;
-        let v_eff = limits.v_max[0] * sqrt2;
-        let a_eff = limits.a_max[0] * sqrt2;
-        let j_eff = limits.j_max[0] * sqrt2;
-        let t_closed = total_time_double_s(100.0, v_eff, a_eff, j_eff);
+        let t_closed =
+            total_time_double_s(100.0, 500.0 * sqrt2, 5_000.0 * sqrt2, 100_000.0 * sqrt2);
         let rel_err = (profile.total_time - t_closed).abs() / t_closed;
         assert!(
             rel_err <= 0.05,
@@ -171,12 +166,7 @@ mod fixture_4_g5_cubic {
     use temporal::{GridConfig, GridScheme, Limits, SolveStatus, schedule_segment};
 
     fn textbook_limits() -> Limits {
-        Limits::new(
-            [500.0, 500.0, 500.0],
-            [5_000.0, 5_000.0, 5_000.0],
-            [100_000.0, 100_000.0, 100_000.0],
-            2_500.0,
-        )
+        Limits::norm_all(500.0, 5_000.0, 100_000.0)
     }
 
     #[test]
@@ -243,16 +233,15 @@ mod fixture_4_g5_cubic {
         let grid = sample_arclength_grid(curve, 3)
             .expect("arclength grid must succeed for a valid G5 NURBS");
 
-        let kappa_start = grid.kappa[0];
-        let kappa_end = *grid.kappa.last().expect("grid has ≥ 2 points");
-
-        eprintln!(
-            "fixture 4 mvc_endpoints: κ_start = {:.6e}, κ_end = {:.6e}",
-            kappa_start, kappa_end,
-        );
-
-        let b_start = (limits.a_centripetal_max / kappa_start.max(1e-12)).min(1e8);
-        let b_end = (limits.a_centripetal_max / kappa_end.max(1e-12)).min(1e8);
+        let last = grid.c_prime.len() - 1;
+        let b_start = limits
+            .b_cent_cap(&grid.c_prime[0], &grid.c_double_prime[0], 1e-12)
+            .min(limits.mvc_b(&grid.c_prime[0], 1e-12))
+            .min(1e8);
+        let b_end = limits
+            .b_cent_cap(&grid.c_prime[last], &grid.c_double_prime[last], 1e-12)
+            .min(limits.mvc_b(&grid.c_prime[last], 1e-12))
+            .min(1e8);
 
         (b_start, b_end)
     }
@@ -263,11 +252,10 @@ mod fixture_5_curvature_spike {
     use temporal::{GridConfig, GridScheme, Limits, SolveStatus, schedule_segment};
 
     fn textbook_limits() -> Limits {
-        Limits::new(
+        Limits::axis_boxes(
             [500.0, 500.0, 500.0],
             [5_000.0, 5_000.0, 5_000.0],
             [100_000.0, 100_000.0, 100_000.0],
-            2_500.0,
         )
     }
 
@@ -315,11 +303,10 @@ mod fixture_6_mixed_feature {
     use temporal::{GridConfig, GridScheme, Limits, SolveStatus, schedule_segment};
 
     fn textbook_limits() -> Limits {
-        Limits::new(
+        Limits::axis_boxes(
             [500.0, 500.0, 500.0],
             [5_000.0, 5_000.0, 5_000.0],
             [100_000.0, 100_000.0, 100_000.0],
-            2_500.0,
         )
     }
 
@@ -408,11 +395,10 @@ mod fixture_7_convergence {
     use temporal::{GridConfig, GridScheme, Limits, SolveStatus, schedule_segment};
 
     fn realistic_limits() -> Limits {
-        Limits::new(
+        Limits::axis_boxes(
             [1_000.0, 1_000.0, 1_000.0],
             [65_000.0, 65_000.0, 65_000.0],
             [50_000_000.0, 50_000_000.0, 50_000_000.0],
-            65_000.0,
         )
     }
 
@@ -469,12 +455,7 @@ mod fixture_3_constant_curvature_arc {
     };
 
     fn textbook_limits() -> Limits {
-        Limits::new(
-            [500.0, 500.0, 500.0],
-            [5_000.0, 5_000.0, 5_000.0],
-            [100_000.0, 100_000.0, 100_000.0],
-            2_500.0,
-        )
+        Limits::norm_all(500.0, 2_500.0, 200_000.0)
     }
 
     #[test]
@@ -515,8 +496,11 @@ mod fixture_3_constant_curvature_arc {
             v_cruise_expected,
         );
         assert!(
-            matches!(profile.samples[mid].binding, BindingConstraint::Centripetal),
-            "fixture 3: binding at mid should be Centripetal, got {:?}",
+            matches!(
+                profile.samples[mid].binding,
+                BindingConstraint::AccelNorm { set: 0 }
+            ),
+            "fixture 3: binding at mid should be AccelNorm, got {:?}",
             profile.samples[mid].binding,
         );
 

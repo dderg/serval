@@ -2,7 +2,7 @@
 /// must not produce `MaxIterSlp`.
 ///
 /// `j_max = [1,1,1]` makes the FD path-jerk ratio fire on the initial SOCP
-/// solution while `a_centripetal_max = 1.0` keeps every b below the cut floor.
+/// solution while the 0.03 mm move keeps every b below the cut floor.
 /// Before the fix, `slp_solve_chain` returned `MaxIters` (→ `MaxIterSlp` from
 /// `output::map_status` when the verifier also reported infeasible), stalling
 /// the joining loop with `StalledOnInfeasibleSegment`.
@@ -18,11 +18,10 @@ fn micro_move_below_cut_floor_is_not_max_iter_slp() {
     )
     .expect("degree-1 line NURBS always valid");
 
-    let limits = Limits::new(
+    let limits = Limits::axis_boxes(
         [300.0, 300.0, 15.0],
         [5_000.0, 5_000.0, 350.0],
         [1.0, 1.0, 1.0],
-        1.0,
     );
 
     let profile = schedule_segment(

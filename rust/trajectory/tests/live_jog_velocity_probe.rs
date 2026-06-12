@@ -20,11 +20,10 @@ fn live_shapers() -> [Option<AxisShaper>; 4] {
 
 fn live_ctx() -> ReplanContext {
     ReplanContext {
-        limits: temporal::Limits::new(
+        limits: temporal::Limits::axis_boxes(
             [1000.0, 1000.0, 5.0],
             [70000.0, 70000.0, 100.0],
             [140000.0, 140000.0, 200.0],
-            70000.0,
         ),
         kernels: [
             Some(PlanShaper::SmoothMzv {
@@ -43,7 +42,6 @@ fn live_ctx() -> ReplanContext {
             v_max: 100.0,
             a_max: 5000.0,
         },
-        junction_chord_tolerance_mm: 0.05,
         worker_threads: 1,
         grid_strategy: temporal::multi::GridStrategy::Adaptive {
             min_n: 20,
@@ -145,11 +143,10 @@ fn mid_flight_fast_jog_replan_converges_across_regimes() {
     let long_continuation = [(0.0, 200.0), (200.0, 400.0), (400.0, 600.0), (600.0, 800.0)];
 
     let mut ctx_vmax2000 = live_ctx();
-    ctx_vmax2000.limits = temporal::Limits::new(
+    ctx_vmax2000.limits = temporal::Limits::axis_boxes(
         [2000.0, 2000.0, 5.0],
         [70000.0, 70000.0, 100.0],
         [140000.0, 140000.0, 200.0],
-        70000.0,
     );
 
     let scenarios: [(

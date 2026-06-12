@@ -8,11 +8,10 @@ fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
 }
 
 fn default_limits() -> temporal::Limits {
-    temporal::Limits::new(
+    temporal::Limits::axis_boxes(
         [500.0, 500.0, 500.0],
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
-        2_500.0,
     )
 }
 
@@ -68,7 +67,6 @@ fn rejects_negative_initial_v() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -91,7 +89,6 @@ fn rejects_nan_terminal_v() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -114,7 +111,6 @@ fn nonzero_initial_v_produces_chained_profile() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -150,7 +146,6 @@ fn passthrough_on_x_is_valid() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -173,7 +168,6 @@ fn passthrough_on_y_is_valid() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -196,7 +190,6 @@ fn none_on_x_treated_as_passthrough() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -219,7 +212,6 @@ fn all_passthrough_produces_fitted_output() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -240,7 +232,6 @@ fn returns_one_fitted_per_xy_segment() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -262,7 +253,6 @@ fn worst_case_future_segment_durations_monotone() {
             temporal: temporal::multi::SegmentInput {
                 curve: &curve0,
                 limits: default_limits(),
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             e_mode: EMode::CoupledToXy,
             extrusion_per_xy_mm: 0.04,
@@ -273,7 +263,6 @@ fn worst_case_future_segment_durations_monotone() {
             temporal: temporal::multi::SegmentInput {
                 curve: &curve1,
                 limits: default_limits(),
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             e_mode: EMode::CoupledToXy,
             extrusion_per_xy_mm: 0.04,
@@ -314,7 +303,6 @@ fn worst_case_future_is_no_faster_than_terminal_known() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -345,7 +333,6 @@ fn plan_velocity_rejects_accel_at_rest_start() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -366,7 +353,6 @@ fn plan_velocity_rejects_nonfinite_accel() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,

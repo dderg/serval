@@ -13,11 +13,10 @@ fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
 }
 
 fn default_limits() -> temporal::Limits {
-    temporal::Limits::new(
+    temporal::Limits::axis_boxes(
         [500.0, 500.0, 500.0],
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
-        2_500.0,
     )
 }
 
@@ -94,7 +93,6 @@ fn empty_history_matches_shape_batch_byte_identical() {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,

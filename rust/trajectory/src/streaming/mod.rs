@@ -58,7 +58,6 @@ pub struct ReplanContext {
     pub beta_max_iters: u8,
     pub beta_convergence_ratio: f64,
     pub e_limits: ELimits,
-    pub junction_chord_tolerance_mm: f64,
     /// Worker thread count for TOPP-RA's parallel fan-out.
     pub worker_threads: usize,
     pub grid_strategy: temporal::multi::GridStrategy,

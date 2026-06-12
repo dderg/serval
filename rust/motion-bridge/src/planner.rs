@@ -7,7 +7,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use nurbs::algebra::PiecewisePolynomialKernel;
 
 use crate::classify::ClassifiedMove;
-use crate::config::{PlannerConfig, PlannerLimits};
+use crate::config::{PlannerConfig, RuntimeCaps};
 use crate::pump::AxisKey;
 use trajectory::plan_velocity::{PlanShaper, SafetyMode};
 use trajectory::streaming::{EmitContext, ReplanContext, ReplanReport, ShaperState};
@@ -61,7 +61,7 @@ pub enum PlannerMsg {
     Move(ClassifiedMove),
     Dwell { duration_s: f64, notify: Sender<()> },
     Flush { notify: Sender<Option<Instant>> },
-    UpdateLimits(PlannerLimits),
+    UpdateRuntimeCaps(RuntimeCaps),
     UpdateShaper(ShaperConfig),
     Shutdown,
     KalicoStreamOpen { home_pos: [f64; 4] },
@@ -229,9 +229,9 @@ impl PlannerHandle {
         }
     }
 
-    pub fn update_limits(&self, l: PlannerLimits) -> Result<(), PlannerError> {
+    pub fn update_runtime_caps(&self, caps: RuntimeCaps) -> Result<(), PlannerError> {
         self.sender
-            .send(PlannerMsg::UpdateLimits(l))
+            .send(PlannerMsg::UpdateRuntimeCaps(caps))
             .map_err(|_| PlannerError::ChannelClosed)
     }
 
@@ -431,13 +431,12 @@ fn run_loop(
     let mut thread_state = PlannerThreadState::build(&config);
 
     {
-        let tl = config.limits.to_temporal_limits();
+        let tl = config
+            .to_temporal_limits()
+            .expect("limit sections validated in init_planner");
         log::debug!(
-            "[planner-trace] startup limits v_max={:?} a_max={:?} j_max={:?} a_centripetal_max={} shaper={:?}",
-            tl.v_max,
-            tl.a_max,
-            tl.j_max,
-            tl.a_centripetal_max,
+            "[planner-trace] startup limits {:?} shaper={:?}",
+            tl.sets(),
             config.shaper,
         );
     }
@@ -465,7 +464,7 @@ fn run_loop(
                     PlannerMsg::Move(_) => "Move",
                     PlannerMsg::Flush { .. } => "Flush",
                     PlannerMsg::Dwell { .. } => "Dwell",
-                    PlannerMsg::UpdateLimits(_) => "UpdateLimits",
+                    PlannerMsg::UpdateRuntimeCaps(_) => "UpdateRuntimeCaps",
                     PlannerMsg::UpdateShaper(_) => "UpdateShaper",
                     PlannerMsg::KalicoStreamOpen { .. } => "KalicoStreamOpen",
                     PlannerMsg::Underrun { .. } => "Underrun",
@@ -667,8 +666,8 @@ fn run_loop(
                 let _ = notify.send(());
             }
 
-            PlannerMsg::UpdateLimits(l) => {
-                config.limits = l;
+            PlannerMsg::UpdateRuntimeCaps(caps) => {
+                config.runtime_caps = caps;
                 thread_state.rebuild(&config);
             }
 
@@ -775,13 +774,14 @@ fn run_loop(
 
 fn build_replan_context(config: &PlannerConfig) -> ReplanContext {
     ReplanContext {
-        limits: config.limits.to_temporal_limits(),
+        limits: config
+            .to_temporal_limits()
+            .expect("limit sections validated in init_planner"),
         kernels: shaper_config_to_plan_shapers(&config.shaper),
         fit_tolerance_mm: config.fit_tolerance_mm,
         beta_max_iters: config.beta_max_iters,
         beta_convergence_ratio: config.beta_convergence_ratio,
         e_limits: config.e_limits,
-        junction_chord_tolerance_mm: config.limits.junction_deviation_mm(),
         worker_threads: config.worker_threads,
         grid_strategy: temporal::multi::GridStrategy::Adaptive {
             min_n: 20,

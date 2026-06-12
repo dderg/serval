@@ -6,7 +6,7 @@ use temporal::{
 };
 
 fn textbook_limits() -> Limits {
-    Limits::new([500.0; 3], [5_000.0; 3], [100_000.0; 3], 2_500.0)
+    Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
 }
 
 fn build_g5_fixture_4_curve() -> VectorNurbs<f64, 3> {
@@ -28,10 +28,13 @@ fn build_g5_fixture_4_curve() -> VectorNurbs<f64, 3> {
 
 fn fifty_pct_mvc_velocities(curve: &VectorNurbs<f64, 3>, limits: &Limits) -> (f64, f64) {
     let grid = sample_arclength_grid(curve, 3).expect("arclength grid");
-    let kappa_start = grid.kappa[0];
-    let kappa_end = *grid.kappa.last().expect("at least 2 points");
-    let b_start = (limits.a_centripetal_max / kappa_start.max(1e-12)).min(1e8);
-    let b_end = (limits.a_centripetal_max / kappa_end.max(1e-12)).min(1e8);
+    let last = grid.c_prime.len() - 1;
+    let b_start = limits
+        .b_cent_cap(&grid.c_prime[0], &grid.c_double_prime[0], 1e-12)
+        .min(1e8);
+    let b_end = limits
+        .b_cent_cap(&grid.c_prime[last], &grid.c_double_prime[last], 1e-12)
+        .min(1e8);
     (0.5 * b_start.sqrt(), 0.5 * b_end.sqrt())
 }
 

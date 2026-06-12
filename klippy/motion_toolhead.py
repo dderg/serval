@@ -7,7 +7,6 @@ from collections import defaultdict
 
 from . import stepper
 from .extras import servo_axis
-from .extras.danger_options import get_danger_options
 from .kinematics import extruder
 
 BUFFER_TIME_START = 0.250
@@ -254,8 +253,8 @@ class BridgeKinematics:
         self._check_endstops(move)
         z_ratio = move.move_d / abs(move.axes_d[2])
         move.limit_speed(
-            self._toolhead.max_z_velocity * z_ratio,
-            self._toolhead.max_z_accel * z_ratio,
+            self._toolhead._axis_limit("z", "max_velocity") * z_ratio,
+            self._toolhead._axis_limit("z", "max_accel") * z_ratio,
         )
 
     def set_position(self, newpos, homing_axes=()):
@@ -314,30 +313,7 @@ class MotionToolhead:
         self.all_mcus = [m for n, m in printer.lookup_objects(module="mcu")]
         self.mcu = self.all_mcus[0]
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
-        self.max_velocity = config.getfloat("max_velocity", above=0.0)
-        self.max_accel = config.getfloat("max_accel", above=0.0)
-        min_cruise_ratio = 0.5
-        if config.getfloat("minimum_cruise_ratio", None) is None:
-            req_accel_to_decel = config.getfloat(
-                "max_accel_to_decel", None, above=0.0
-            )
-            if req_accel_to_decel is not None:
-                config.deprecate("max_accel_to_decel")
-                min_cruise_ratio = 1.0 - min(
-                    1.0, (req_accel_to_decel / self.max_accel)
-                )
-        self.min_cruise_ratio = config.getfloat(
-            "minimum_cruise_ratio", min_cruise_ratio, below=1.0, minval=0.0
-        )
-        self.square_corner_velocity = config.getfloat(
-            "square_corner_velocity", 5.0, minval=0.0
-        )
-        self.orig_cfg = {
-            "max_velocity": self.max_velocity,
-            "max_accel": self.max_accel,
-            "min_cruise_ratio": self.min_cruise_ratio,
-            "square_corner_velocity": self.square_corner_velocity,
-        }
+        self._read_limits(config)
         self.print_time = 0.0
         self.print_stall = 0
         self.trapq = None
@@ -354,13 +330,6 @@ class MotionToolhead:
                 "dual_carriage not compatible with '%s' kinematics system"
                 % (config.get("kinematics"),)
             )
-
-        self.max_z_velocity = config.getfloat(
-            "max_z_velocity", self.max_velocity, above=0.0
-        )
-        self.max_z_accel = config.getfloat(
-            "max_z_accel", self.max_accel, above=0.0
-        )
 
         gcode.register_command("G4", self.cmd_G4)
         gcode.register_command("M400", self.cmd_M400)
@@ -521,7 +490,7 @@ class MotionToolhead:
                 )
                 return
             accel = min(p, t)
-        self.max_accel = accel
+        self.set_accel(accel)
 
     def move(self, newpos, speed):
         # The bridge replaces the lookahead, but Move/kin/extruder validation
@@ -536,7 +505,7 @@ class MotionToolhead:
         dx, dy, dz, de = move.axes_d
         feedrate = move.move_d / move.min_move_t
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
-            feedrate = min(feedrate, self.max_z_velocity)
+            feedrate = min(feedrate, self._axis_limit("z", "max_velocity"))
         logging.info(
             "[bridge-trace] move: newpos=%s speed=%s dx=%.4f dy=%.4f "
             "dz=%.4f de=%.4f feedrate=%.4f",
@@ -665,6 +634,69 @@ class MotionToolhead:
         lookahead_empty = print_time <= est_print_time
         return print_time, est_print_time, lookahead_empty
 
+    LEGACY_LIMIT_KEYS = (
+        "max_velocity",
+        "max_accel",
+        "max_accel_to_decel",
+        "minimum_cruise_ratio",
+        "square_corner_velocity",
+        "max_z_velocity",
+        "max_z_accel",
+    )
+
+    def _read_limits(self, config):
+        for key in self.LEGACY_LIMIT_KEYS:
+            if config.get(key, None) is not None:
+                raise config.error(
+                    "[printer] %s is not supported: declare motion limits in "
+                    "[limit <name>] sections (axes + max_velocity/max_accel/"
+                    "max_jerk)" % key
+                )
+        self.limit_sections = []
+        velocities, accels = [], []
+        for sc in config.get_prefix_sections("limit "):
+            name = sc.get_name().split(None, 1)[1]
+            axes = [a.strip().lower() for a in sc.getlist("axes")]
+            v = sc.getfloat("max_velocity", None, above=0.0)
+            a = sc.getfloat("max_accel", None, above=0.0)
+            j = sc.getfloat("max_jerk", None, above=0.0)
+            self.limit_sections.append((name, axes, v, a, j))
+            if v is not None:
+                velocities.append(v)
+            if a is not None:
+                accels.append(a)
+        if not self.limit_sections:
+            raise config.error(
+                "at least one [limit <name>] section is required "
+                "(every axis needs max_velocity and max_accel coverage)"
+            )
+        if not velocities or not accels:
+            raise config.error(
+                "[limit] sections must declare max_velocity and max_accel "
+                "coverage"
+            )
+        self.max_velocity = max(velocities)
+        self.max_accel = max(accels)
+        self.min_cruise_ratio = 0.0
+        self.square_corner_velocity = 0.0
+        self.orig_cfg = {}
+        self.runtime_velocity = None
+        self.runtime_accel = None
+
+    def _axis_limit(self, axis, kind):
+        kind_idx = {"max_velocity": 2, "max_accel": 3, "max_jerk": 4}[kind]
+        caps = [
+            section[kind_idx]
+            for section in self.limit_sections
+            if axis in section[1] and section[kind_idx] is not None
+        ]
+        if not caps:
+            raise self.printer.config_error(
+                "no [limit] section declares %s covering axis '%s'"
+                % (kind, axis)
+            )
+        return min(caps)
+
     def _sync_print_time(self):
         if self.mcu is None:
             return
@@ -683,78 +715,52 @@ class MotionToolhead:
 
     def set_accel(self, accel):
         if accel is not None and accel > 0.0:
-            self.max_accel = accel
-            self.bridge.update_limits(self.max_velocity, self.max_accel)
+            self.runtime_accel = accel
+            self.bridge.update_runtime_caps(
+                self.runtime_velocity, self.runtime_accel
+            )
 
     def reset_accel(self):
-        self.bridge.update_limits(self.max_velocity, self.max_accel)
+        self.runtime_accel = None
+        self.bridge.update_runtime_caps(
+            self.runtime_velocity, self.runtime_accel
+        )
 
     cmd_SET_VELOCITY_LIMIT_help = "Set printer velocity limits"
 
     def cmd_SET_VELOCITY_LIMIT(self, gcmd):
-        max_velocity = gcmd.get_float("VELOCITY", None, above=0.0)
-        max_accel = gcmd.get_float("ACCEL", None, above=0.0)
-        square_corner_velocity = gcmd.get_float(
-            "SQUARE_CORNER_VELOCITY", None, minval=0.0
-        )
-        min_cruise_ratio = gcmd.get_float(
-            "MINIMUM_CRUISE_RATIO", None, minval=0.0, below=1.0
-        )
-        if min_cruise_ratio is None:
-            req_accel_to_decel = gcmd.get_float(
-                "ACCEL_TO_DECEL", None, above=0.0
-            )
-            if req_accel_to_decel is not None and max_accel is not None:
-                min_cruise_ratio = 1.0 - min(
-                    1.0, req_accel_to_decel / max_accel
+        for unsupported in (
+            "SQUARE_CORNER_VELOCITY",
+            "MINIMUM_CRUISE_RATIO",
+            "ACCEL_TO_DECEL",
+        ):
+            if gcmd.get_float(unsupported, None) is not None:
+                raise gcmd.error(
+                    "%s is not supported: declare limits in [limit] config "
+                    "sections" % unsupported
                 )
-            elif req_accel_to_decel is not None and max_accel is None:
-                min_cruise_ratio = 1.0 - min(
-                    1.0, (req_accel_to_decel / self.max_accel)
-                )
-        if max_velocity is not None:
-            self.max_velocity = max_velocity
-        if max_accel is not None:
-            self.max_accel = max_accel
-        if square_corner_velocity is not None:
-            self.square_corner_velocity = square_corner_velocity
-        if min_cruise_ratio is not None:
-            self.min_cruise_ratio = min_cruise_ratio
-        msg = [
-            "max_velocity: %.6f" % self.max_velocity,
-            "max_accel: %.6f" % self.max_accel,
-            "minimum_cruise_ratio: %.6f" % self.min_cruise_ratio,
-            "square_corner_velocity: %.6f" % self.square_corner_velocity,
-        ]
-        if get_danger_options().log_velocity_limit_changes:
-            self.printer.set_rollover_info(
-                "toolhead", "toolhead: %s" % (" ".join(msg),)
+        v = gcmd.get_float("VELOCITY", None, above=0.0)
+        a = gcmd.get_float("ACCEL", None, above=0.0)
+        if v is None and a is None:
+            gcmd.respond_info(
+                "runtime caps: velocity=%s accel=%s"
+                % (self.runtime_velocity, self.runtime_accel)
             )
-            if (
-                max_velocity is None
-                and max_accel is None
-                and square_corner_velocity is None
-                and min_cruise_ratio is None
-            ):
-                gcmd.respond_info("\n".join(msg), log=False)
-        self.bridge.update_limits(self.max_velocity, self.max_accel)
+            return
+        if v is not None:
+            self.runtime_velocity = v
+        if a is not None:
+            self.runtime_accel = a
+        self.bridge.update_runtime_caps(
+            self.runtime_velocity, self.runtime_accel
+        )
 
     cmd_RESET_VELOCITY_LIMIT_help = "Reset printer velocity limits"
 
     def cmd_RESET_VELOCITY_LIMIT(self, gcmd):
-        self.max_velocity = self.orig_cfg["max_velocity"]
-        self.max_accel = self.orig_cfg["max_accel"]
-        self.square_corner_velocity = self.orig_cfg["square_corner_velocity"]
-        self.min_cruise_ratio = self.orig_cfg["min_cruise_ratio"]
-        msg = [
-            "max_velocity: %.6f" % self.max_velocity,
-            "max_accel: %.6f" % self.max_accel,
-            "minimum_cruise_ratio: %.6f" % self.min_cruise_ratio,
-            "square_corner_velocity: %.6f" % self.square_corner_velocity,
-        ]
-        if get_danger_options().log_velocity_limit_changes:
-            gcmd.respond_info("\n".join(msg), log=False)
-        self.bridge.update_limits(self.max_velocity, self.max_accel)
+        self.runtime_velocity = None
+        self.runtime_accel = None
+        self.bridge.update_runtime_caps(None, None)
 
     def stats(self, eventtime):
         max_queue_time = max(self.print_time, self._mcu_pending_end_time)
@@ -842,11 +848,7 @@ class MotionToolhead:
 
         try:
             self.bridge.init_planner(
-                self.max_velocity,
-                self.max_accel,
-                self.max_z_velocity,
-                self.max_z_accel,
-                self.square_corner_velocity,
+                list(self.limit_sections),
                 shaper_type_x,
                 shaper_freq_x,
                 shaper_type_y,

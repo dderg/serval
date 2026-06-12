@@ -1,5 +1,5 @@
 use super::*;
-use crate::topp::path::ArclengthGrid;
+use crate::topp::path::{ArclengthGrid, InterSample};
 use crate::topp::solver::{SolverResult, SolverStatus};
 use crate::topp::verify::VerifyReport;
 use crate::{BindingConstraint, GridConfig, GridScheme};
@@ -11,7 +11,6 @@ fn dummy_grid(n: usize, length: f64) -> ArclengthGrid {
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
     let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
-    let kappa = vec![0.0; n];
     ArclengthGrid {
         s,
         u,
@@ -19,9 +18,15 @@ fn dummy_grid(n: usize, length: f64) -> ArclengthGrid {
         c_prime,
         c_double_prime,
         c_triple_prime,
-        kappa,
         total_length: length,
-        inter_kappa: vec![vec![(0.25, 0.0), (0.5, 0.0), (0.75, 0.0)]; n.saturating_sub(1)],
+        inter_geom: vec![
+            vec![
+                InterSample::planar(0.25, 0.0),
+                InterSample::planar(0.5, 0.0),
+                InterSample::planar(0.75, 0.0)
+            ];
+            n.saturating_sub(1)
+        ],
     }
 }
 

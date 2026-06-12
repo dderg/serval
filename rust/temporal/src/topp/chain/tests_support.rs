@@ -20,11 +20,6 @@ pub(crate) fn two_segment_chain_with_junction() -> ChainGrid {
     let gb =
         crate::topp::path::sample_arclength_grid(&line([40.0, 0.0, 0.0], [100.0, 0.0, 0.0]), 13)
             .unwrap();
-    let lim = |v: f64| Limits {
-        v_max: [v; 3],
-        a_max: [5_000.0; 3],
-        j_max: [100_000.0; 3],
-        a_centripetal_max: 2_500.0,
-    };
+    let lim = |v: f64| Limits::axis_boxes([v; 3], [5_000.0; 3], [100_000.0; 3]);
     ChainGrid::from_segment_grids(vec![ga, gb], vec![lim(300.0), lim(150.0)])
 }

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 // name `motion_bridge_native` (because `[lib].name` must match the
 // `#[pymodule]` fn — see Cargo.toml).
 use motion_bridge_native::classify::classify_and_build;
-use motion_bridge_native::config::{PlannerConfig, PlannerLimits};
+use motion_bridge_native::config::{LimitSection, PlannerConfig};
 use motion_bridge_native::planner::{DispatchError, PlannerHandle};
 use trajectory::{AxisShaper, ShapedSegment, ShaperConfig};
 
@@ -42,14 +42,23 @@ fn smooth_zv_186hz_config() -> PlannerConfig {
     c
 }
 
-fn relaxed_limits() -> PlannerLimits {
-    PlannerLimits {
-        max_velocity: 200.0,
-        max_accel: 2000.0,
-        max_z_velocity: 10.0,
-        max_z_accel: 80.0,
-        square_corner_velocity: 4.0,
-    }
+fn relaxed_limit_sections() -> Vec<LimitSection> {
+    vec![
+        LimitSection {
+            name: "gantry".into(),
+            axes: vec![0, 1],
+            max_velocity: Some(200.0),
+            max_accel: Some(2000.0),
+            max_jerk: None,
+        },
+        LimitSection {
+            name: "z".into(),
+            axes: vec![2],
+            max_velocity: Some(10.0),
+            max_accel: Some(80.0),
+            max_jerk: None,
+        },
+    ]
 }
 
 fn wait_for_commits(h: &PlannerHandle, target: u32) {
@@ -87,14 +96,23 @@ fn axis_vel_at(seg: &ShapedSegment, axis: usize, t: f64) -> f64 {
     eval_derivative(c.control_points(), c.knots(), c.degree(), t)
 }
 
-fn high_speed_limits() -> PlannerLimits {
-    PlannerLimits {
-        max_velocity: 700.0,
-        max_accel: 7000.0,
-        max_z_velocity: 10.0,
-        max_z_accel: 80.0,
-        square_corner_velocity: 4.0,
-    }
+fn high_speed_limit_sections() -> Vec<LimitSection> {
+    vec![
+        LimitSection {
+            name: "gantry".into(),
+            axes: vec![0, 1],
+            max_velocity: Some(700.0),
+            max_accel: Some(7000.0),
+            max_jerk: None,
+        },
+        LimitSection {
+            name: "z".into(),
+            axes: vec![2],
+            max_velocity: Some(10.0),
+            max_accel: Some(80.0),
+            max_jerk: None,
+        },
+    ]
 }
 
 const STEPS_PER_MM: f64 = 160.0;
@@ -194,8 +212,9 @@ fn two_jogs_queued_while_first_in_flight_remain_continuous() {
     use std::time::Duration;
 
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(high_speed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = high_speed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, 0.0, 350.0).unwrap())
         .expect("submit jog 1");
@@ -227,8 +246,9 @@ fn two_jogs_second_queued_before_first_commit_remain_continuous() {
     use std::time::Duration;
 
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(high_speed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = high_speed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, 0.0, 350.0).unwrap())
         .expect("submit jog 1");
@@ -248,8 +268,9 @@ fn two_jogs_second_queued_before_first_commit_remain_continuous() {
 #[test]
 fn two_jogs_second_queued_right_after_first_commit_remain_continuous() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(high_speed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = high_speed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, 0.0, 350.0).unwrap())
         .expect("submit jog 1");
@@ -270,8 +291,9 @@ fn two_jogs_second_queued_right_after_first_commit_remain_continuous() {
 #[test]
 fn cross_move_continuity_within_refit_noise() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move 1");
@@ -331,8 +353,9 @@ fn cross_move_continuity_within_refit_noise() {
 #[test]
 fn four_consecutive_jogs_chain_continuously() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     for i in 0..4 {
         let start = [(i as f64) * 1.0, 0.0, 0.0];
@@ -436,8 +459,9 @@ fn four_consecutive_jogs_chain_continuously() {
 #[test]
 fn slow_jogs_decelerate_to_zero_between() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move 1");
@@ -519,8 +543,9 @@ fn slow_jogs_decelerate_to_zero_between() {
 #[test]
 fn replan_during_long_cruise_preserves_committed_position() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 200.0, 0.0, 0.0, 0.0, 200.0).unwrap())
         .expect("submit move 1 (200 mm)");
@@ -574,8 +599,9 @@ fn quiescence_timer_fires_after_single_move() {
     use std::time::Duration;
 
     let (dispatch, _recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move");
@@ -597,8 +623,9 @@ fn quiescence_timer_fires_after_single_move() {
 #[test]
 fn commit_after_quiescence_dispatches_terminal_decel() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move");
@@ -658,8 +685,9 @@ fn commit_after_quiescence_dispatches_terminal_decel() {
 #[test]
 fn commit_then_new_move_starts_from_rest() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move 1");
@@ -747,8 +775,9 @@ fn commit_decel_to_zero_is_idempotent_across_re_armed_timer() {
     use std::time::Duration;
 
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move 1");
@@ -776,8 +805,9 @@ fn commit_decel_to_zero_is_idempotent_across_re_armed_timer() {
 #[test]
 fn flush_commits_terminal_decel_synchronously() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move");
@@ -857,8 +887,9 @@ fn flush_commits_terminal_decel_synchronously() {
 #[test]
 fn kalico_stream_open_resets_planner_state() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move 1");
@@ -924,8 +955,9 @@ fn kalico_stream_open_resets_planner_state() {
 #[test]
 fn underrun_recovery_resets_to_recovered_position() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move 1");
@@ -989,8 +1021,9 @@ fn underrun_recovery_resets_to_recovered_position() {
 #[test]
 fn force_idle_recovery_resets_to_recovered_position() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move 1");
@@ -1033,8 +1066,9 @@ fn force_idle_recovery_resets_to_recovered_position() {
 #[test]
 fn update_shaper_commits_held_output_before_swap() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move 1");
@@ -1082,8 +1116,9 @@ fn clock_sync_rearm_commits_old_bias_first() {
     use motion_bridge_native::planner::ClockBias;
 
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit move 1");
@@ -1126,8 +1161,9 @@ fn clock_sync_rearm_commits_old_bias_first() {
 #[test]
 fn submit_move_advances_last_move_time_synchronously() {
     let (dispatch, _recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     let t0 = h.last_move_time();
     assert!(
@@ -1161,8 +1197,9 @@ fn submit_move_advances_last_move_time_synchronously() {
 #[test]
 fn rectification_corrects_actual_duration() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     let m = classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap();
     let nominal = m.nominal_duration();
@@ -1203,8 +1240,9 @@ fn rectification_corrects_actual_duration() {
 #[test]
 fn inline_event_scheduling_uses_queued_time() {
     let (dispatch, _recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     let m1 = classify_and_build([0.0; 3], 1.0, 0.0, 0.0, 0.0, 100.0).unwrap();
     let nominal1 = m1.nominal_duration();
@@ -1252,8 +1290,9 @@ fn inline_event_scheduling_uses_queued_time() {
 #[test]
 fn wait_moves_blocks_until_dispatch_catches_up() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(relaxed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = relaxed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     let starts = [[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]];
     let mut cumulative_nominal = 0.0;
@@ -1361,9 +1400,9 @@ fn two_jog_replan_segments_survive_corexy_motor_union() {
     };
     cfg.fit_tolerance_mm = 0.05;
 
+    cfg.limit_sections = high_speed_limit_sections();
     let (dispatch, recorded) = recording_dispatch();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
-    h.update_limits(high_speed_limits()).expect("update_limits");
 
     h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, 0.0, 350.0).unwrap())
         .expect("submit jog 1");
@@ -1457,8 +1496,9 @@ fn three_pure_x_jogs_in_flight_corexy_degree_invariant() {
     use std::time::Duration;
 
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(high_speed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = high_speed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit jog 1");
@@ -1488,8 +1528,9 @@ fn three_pure_x_jogs_in_flight_corexy_degree_invariant() {
 #[test]
 fn three_pure_x_jogs_from_rest_with_quiescence_corexy_degree_invariant() {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(high_speed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = high_speed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit jog 1");
@@ -1518,8 +1559,9 @@ fn three_pure_x_jogs_quiescence_timer_corexy_degree_invariant() {
     use std::time::Duration;
 
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(high_speed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = high_speed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, 0.0, 100.0).unwrap())
         .expect("submit jog 1");
@@ -1551,8 +1593,9 @@ fn three_pure_x_jogs_in_flight_velocity_seam() {
     use std::time::Duration;
 
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(smooth_zv_186hz_config(), dispatch);
-    h.update_limits(high_speed_limits()).expect("update_limits");
+    let mut cfg = smooth_zv_186hz_config();
+    cfg.limit_sections = high_speed_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
     h.kalico_stream_open([295.0, 0.0, 0.0, 0.0])
         .expect("stream_open");
 

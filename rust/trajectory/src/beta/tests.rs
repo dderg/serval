@@ -3,11 +3,10 @@ use crate::{ELimits, ShapeBatchInput, ShapeSegmentInput, ShaperConfig};
 use nurbs::VectorNurbs;
 
 fn default_limits() -> temporal::Limits {
-    temporal::Limits::new(
+    temporal::Limits::axis_boxes(
         [500.0, 500.0, 500.0],
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
-        2_500.0,
     )
 }
 
@@ -37,17 +36,15 @@ fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
 #[test]
 fn single_straight_line_converges() {
     let curve = straight_linear([0.0, 0.0, 0.0], [50.0, 0.0, 0.0]);
-    let generous_limits = temporal::Limits::new(
+    let generous_limits = temporal::Limits::axis_boxes(
         [500.0, 500.0, 500.0],
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
-        2_500.0,
     );
     let segments = [ShapeSegmentInput {
         temporal: temporal::multi::SegmentInput {
             curve: &curve,
             limits: generous_limits,
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::CoupledToXy,
         extrusion_per_xy_mm: 0.04,
@@ -98,7 +95,6 @@ fn two_segments_with_e_gap() {
             temporal: temporal::multi::SegmentInput {
                 curve: &curve1,
                 limits: default_limits(),
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             e_mode: EMode::CoupledToXy,
             extrusion_per_xy_mm: 0.04,
@@ -109,7 +105,6 @@ fn two_segments_with_e_gap() {
             temporal: temporal::multi::SegmentInput {
                 curve: &e_hold,
                 limits: default_limits(),
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             e_mode: EMode::Independent,
             extrusion_per_xy_mm: 0.0,
@@ -120,7 +115,6 @@ fn two_segments_with_e_gap() {
             temporal: temporal::multi::SegmentInput {
                 curve: &curve2,
                 limits: default_limits(),
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             e_mode: EMode::CoupledToXy,
             extrusion_per_xy_mm: 0.04,
@@ -196,7 +190,6 @@ fn all_e_gaps_output() {
         temporal: temporal::multi::SegmentInput {
             curve: &e_hold,
             limits: default_limits(),
-            trailing_junction_chord_tolerance_mm: 0.05,
         },
         e_mode: EMode::Independent,
         extrusion_per_xy_mm: 0.0,

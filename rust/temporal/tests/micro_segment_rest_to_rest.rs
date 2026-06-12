@@ -5,11 +5,10 @@ use temporal::{
 };
 
 fn voron_limits() -> Limits {
-    Limits::new(
+    Limits::axis_boxes(
         [300.0, 300.0, 15.0],
         [5_000.0, 5_000.0, 350.0],
         [10_000.0, 10_000.0, 10_000.0],
-        5_000.0,
     )
 }
 
@@ -91,7 +90,6 @@ fn rung3_micro_arc_0_01mm_via_adaptive_batch() {
     let segments = [SegmentInput {
         curve: &curve,
         limits,
-        trailing_junction_chord_tolerance_mm: 0.05,
     }];
     let output = plan_batch(BatchInput {
         segments: &segments,

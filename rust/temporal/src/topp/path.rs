@@ -6,6 +6,24 @@ use nurbs::{
 
 const INTER_INTERVAL_THETA_SAMPLES: &[f64] = &[0.25, 0.5, 0.75];
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterSample {
+    pub theta: f64,
+    pub c_prime: [f64; 3],
+    pub c_double_prime: [f64; 3],
+}
+
+#[cfg(test)]
+impl InterSample {
+    pub(crate) fn planar(theta: f64, kappa: f64) -> Self {
+        Self {
+            theta,
+            c_prime: [1.0, 0.0, 0.0],
+            c_double_prime: [0.0, kappa, 0.0],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ArclengthGrid {
     /// `s_i ∈ [0, L]`, length N.
@@ -20,14 +38,12 @@ pub struct ArclengthGrid {
     pub c_double_prime: Vec<[f64; 3]>,
     /// `d³C/ds³` at `s_i`, length N.
     pub c_triple_prime: Vec<[f64; 3]>,
-    /// `κ(s_i) = |C'(s) × C''(s)|` (arclength parameterization), length N.
-    pub kappa: Vec<f64>,
     /// Total arclength, mm.
     pub total_length: f64,
-    /// Interior κ samples for each interval `[i, i+1]`, length N−1.
-    /// Each entry is a vec of `(θ, κ)` pairs with θ ∈ (0,1) being the
-    /// fractional position within the interval (`s = s_i + θ·h`).
-    pub inter_kappa: Vec<Vec<(f64, f64)>>,
+    /// Interior geometry samples for each interval `[i, i+1]`, length N−1.
+    /// Each sample's θ ∈ (0,1) is the fractional position within the
+    /// interval (`s = s_i + θ·h`).
+    pub inter_geom: Vec<Vec<InterSample>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,14 +90,13 @@ pub fn sample_arclength_grid(
     let mut c_prime_vec = Vec::with_capacity(n);
     let mut c_double_prime_vec = Vec::with_capacity(n);
     let mut c_triple_prime_vec = Vec::with_capacity(n);
-    let mut kappa_vec = Vec::with_capacity(n);
-    let mut inter_kappa_vec: Vec<Vec<(f64, f64)>> = Vec::with_capacity(n.saturating_sub(1));
+    let mut inter_geom_vec: Vec<Vec<InterSample>> = Vec::with_capacity(n.saturating_sub(1));
 
     let curve_view = curve.as_view();
 
     let floor = MIN_PARAMETRIC_SPEED;
 
-    let kappa_at_u = |u: f64| -> f64 {
+    let arc_geometry_at = |u: f64| -> ([f64; 3], [f64; 3]) {
         let eval_or_zero = |dn: &Option<VectorNurbs<f64, 3>>, u: f64| -> [f64; 3] {
             match dn {
                 Some(c) => vector_eval(&c.as_view(), u),
@@ -99,8 +114,7 @@ pub fn sample_arclength_grid(
         let du_ds_sq = du_ds * du_ds;
         let c_prime = scale3(dc_du, du_ds);
         let c_double_prime = add3(scale3(d2c_du2, du_ds_sq), scale3(dc_du, d2u_ds2));
-        let cross = cross3(c_prime, c_double_prime);
-        dot3(cross, cross).sqrt()
+        (c_prime, c_double_prime)
     };
 
     for i in 0..n {
@@ -146,29 +160,30 @@ pub fn sample_arclength_grid(
             scale3(dc_du, d3u_ds3),
         );
 
-        let cross = cross3(c_prime_i, c_double_prime_i);
-        let kappa_i = dot3(cross, cross).sqrt();
-
         s_vec.push(s_i);
         u_vec.push(u_i);
         c_vec.push(c_i);
         c_prime_vec.push(c_prime_i);
         c_double_prime_vec.push(c_double_prime_i);
         c_triple_prime_vec.push(c_triple_prime_i);
-        kappa_vec.push(kappa_i);
 
         if i + 1 < n {
             let s_next = ((i + 1) as f64) / ((n - 1) as f64) * total_length;
             let h = s_next - s_i;
-            let samples: Vec<(f64, f64)> = INTER_INTERVAL_THETA_SAMPLES
+            let samples: Vec<InterSample> = INTER_INTERVAL_THETA_SAMPLES
                 .iter()
                 .map(|&theta| {
                     let s_mid = s_i + theta * h;
                     let u_mid = param_from_arc_length(&table_ref, s_mid);
-                    (theta, kappa_at_u(u_mid))
+                    let (c_prime, c_double_prime) = arc_geometry_at(u_mid);
+                    InterSample {
+                        theta,
+                        c_prime,
+                        c_double_prime,
+                    }
                 })
                 .collect();
-            inter_kappa_vec.push(samples);
+            inter_geom_vec.push(samples);
         }
     }
 
@@ -179,14 +194,13 @@ pub fn sample_arclength_grid(
         c_prime: c_prime_vec,
         c_double_prime: c_double_prime_vec,
         c_triple_prime: c_triple_prime_vec,
-        kappa: kappa_vec,
         total_length,
-        inter_kappa: inter_kappa_vec,
+        inter_geom: inter_geom_vec,
     })
 }
 
 #[inline]
-fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+pub(crate) fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
@@ -201,7 +215,7 @@ fn add3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 
 #[inline]
-fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub(crate) fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use motion_bridge_native::classify::{ClassifyError, classify_and_build};
-use motion_bridge_native::config::{PlannerConfig, PlannerLimits};
+use motion_bridge_native::config::{LimitSection, PlannerConfig};
 use motion_bridge_native::planner::{DispatchError, PlannerHandle};
 use nurbs::bezier::extract_bezier_pieces;
 use trajectory::{AxisShaper, ShapedSegment, ShaperConfig};
@@ -21,14 +21,23 @@ fn trident_config() -> PlannerConfig {
     c
 }
 
-fn trident_limits() -> PlannerLimits {
-    PlannerLimits {
-        max_velocity: 300.0,
-        max_accel: 5000.0,
-        max_z_velocity: 15.0,
-        max_z_accel: 350.0,
-        square_corner_velocity: 5.0,
-    }
+fn trident_limit_sections() -> Vec<LimitSection> {
+    vec![
+        LimitSection {
+            name: "gantry".into(),
+            axes: vec![0, 1],
+            max_velocity: Some(300.0),
+            max_accel: Some(5000.0),
+            max_jerk: None,
+        },
+        LimitSection {
+            name: "z".into(),
+            axes: vec![2],
+            max_velocity: Some(15.0),
+            max_accel: Some(350.0),
+            max_jerk: None,
+        },
+    ]
 }
 
 // Three-element array: segment count, total pieces summed per axis [x, y, z], max pieces per
@@ -145,9 +154,9 @@ fn main() {
             Ok(())
         });
 
-    let mut h = PlannerHandle::spawn(trident_config(), dispatch);
-    h.update_limits(trident_limits())
-        .unwrap_or_else(|e| fatal_planner(e, 0, 0));
+    let mut cfg = trident_config();
+    cfg.limit_sections = trident_limit_sections();
+    let mut h = PlannerHandle::spawn(cfg, dispatch);
 
     let mut pos = PositionState::new();
     let mut submitted: u64 = 0;

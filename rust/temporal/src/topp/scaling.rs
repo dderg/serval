@@ -14,12 +14,7 @@ pub struct SolverScale {
 
 impl SolverScale {
     pub fn for_limits(limits: &Limits) -> Self {
-        let sigma = limits
-            .v_max
-            .iter()
-            .copied()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .fold(f64::NEG_INFINITY, f64::max);
+        let sigma = limits.v_ceiling();
         if sigma <= 0.0 || !sigma.is_finite() {
             return Self::identity();
         }
@@ -38,12 +33,17 @@ impl SolverScale {
 
     pub(crate) fn scale_limits(&self, limits: &Limits) -> Limits {
         let s = self.sigma();
-        Limits {
-            v_max: limits.v_max.map(|v| v / s),
-            a_max: limits.a_max.map(|a| a / s),
-            j_max: limits.j_max.map(|j| j / s),
-            a_centripetal_max: limits.a_centripetal_max / s,
-        }
+        let sets: Vec<crate::LimitSet> = limits
+            .sets()
+            .iter()
+            .map(|l| crate::LimitSet {
+                axes: l.axes,
+                v_max: l.v_max / s,
+                a_max: l.a_max / s,
+                j_max: l.j_max / s,
+            })
+            .collect();
+        Limits::try_new(&sets).expect("scaling preserves validity")
     }
 
     pub(crate) fn scale_grid(&self, grid: &ArclengthGrid) -> ArclengthGrid {
@@ -63,12 +63,11 @@ impl SolverScale {
                 .iter()
                 .map(|p| p.map(|v| v * s * s))
                 .collect(),
-            kappa: grid.kappa.iter().map(|k| k * s).collect(),
             total_length: grid.total_length / s,
-            inter_kappa: grid
-                .inter_kappa
+            inter_geom: grid
+                .inter_geom
                 .iter()
-                .map(|iv| iv.iter().map(|&(theta, k)| (theta, k * s)).collect())
+                .map(|iv| iv.iter().map(|smp| scale_inter_sample(smp, s)).collect())
                 .collect(),
         }
     }
@@ -109,8 +108,7 @@ impl SolverScale {
         let sigma = chain
             .limits
             .iter()
-            .flat_map(|l| l.v_max.iter().copied())
-            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(Limits::v_ceiling)
             .fold(f64::NEG_INFINITY, f64::max);
         if sigma <= 0.0 || !sigma.is_finite() {
             return Self::identity();
@@ -129,7 +127,6 @@ impl SolverScale {
             c_prime: g.c_prime,
             c_double_prime: g.c_double_prime.map(|v| v * s),
             c_triple_prime: g.c_triple_prime.map(|v| v * s * s),
-            kappa: g.kappa * s,
         };
         crate::topp::chain::ChainGrid {
             s: chain.s.iter().map(|v| v / s).collect(),
@@ -147,12 +144,23 @@ impl SolverScale {
                 })
                 .collect(),
             segment_ranges: chain.segment_ranges.clone(),
-            inter_kappa: chain
-                .inter_kappa
+            inter_geom: chain
+                .inter_geom
                 .iter()
-                .map(|iv| iv.iter().map(|&(theta, k)| (theta, k * s)).collect())
+                .map(|iv| iv.iter().map(|smp| scale_inter_sample(smp, s)).collect())
                 .collect(),
         }
+    }
+}
+
+fn scale_inter_sample(
+    sample: &crate::topp::path::InterSample,
+    s: f64,
+) -> crate::topp::path::InterSample {
+    crate::topp::path::InterSample {
+        theta: sample.theta,
+        c_prime: sample.c_prime,
+        c_double_prime: sample.c_double_prime.map(|v| v * s),
     }
 }
 

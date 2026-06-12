@@ -1,10 +1,8 @@
 use nurbs::VectorNurbs;
-use temporal::{
-    BatchInput, GridStrategy, JoiningStatus, JunctionBindingCap, Limits, SegmentInput, plan_batch,
-};
+use temporal::{BatchInput, GridStrategy, JoiningStatus, Limits, SegmentInput, plan_batch};
 
 fn textbook_limits() -> Limits {
-    Limits::new([500.0; 3], [5_000.0; 3], [100_000.0; 3], 2_500.0)
+    Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
 }
 
 fn adaptive() -> GridStrategy {
@@ -53,12 +51,10 @@ mod fixture_1_two_g1_sharp_corner {
             SegmentInput {
                 curve: &left,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             SegmentInput {
                 curve: &right,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
         ];
         let input = BatchInput {
@@ -75,18 +71,10 @@ mod fixture_1_two_g1_sharp_corner {
 
         assert_junction_continuity_for_all(&output, 1.0);
         let v_jct = output.junctions[0].v_junction;
-
-        // Sharp-corner cap: v_jd² = a·δ·cos(α/2)/(1-cos(α/2)); for 90° deviation
-        // α = π/2, cos(α/2) = 1/√2, so factor = 1/(1 - 1/√2) ≈ 2.414.
-        let expected = (2_500.0_f64 * 0.05 * 2.414_213_562).sqrt();
         assert!(
-            (v_jct - expected).abs() < 0.1,
-            "v_jct {v_jct} vs expected {expected}"
+            v_jct.abs() < 0.1,
+            "tangent-discontinuous junction must come to a full stop, got {v_jct}"
         );
-        assert!(matches!(
-            output.junctions[0].binding_cap,
-            JunctionBindingCap::SharpCornerChord
-        ));
 
         assert!(output.joining_sweeps <= 3);
         assert!(matches!(output.joining_status, JoiningStatus::Converged));
@@ -120,12 +108,10 @@ mod fixture_2_g1_to_g5_smooth {
             SegmentInput {
                 curve: &left,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             SegmentInput {
                 curve: &right,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
         ];
         let input = BatchInput {
@@ -138,21 +124,10 @@ mod fixture_2_g1_to_g5_smooth {
         };
         let output = plan_batch(input).expect("should succeed");
 
-        let j = &output.junctions[0];
+        let v_jct = output.junctions[0].v_junction;
         assert!(
-            j.kappa_right.abs() > 1e-6,
-            "G5 should have nonzero κ at u=0, got {}",
-            j.kappa_right
-        );
-        assert!(
-            matches!(
-                j.binding_cap,
-                JunctionBindingCap::Centripetal
-                    | JunctionBindingCap::PerAxisVelocity
-                    | JunctionBindingCap::GlobalVMax
-            ),
-            "smooth junction should not trigger SharpCornerChord, got {:?}",
-            j.binding_cap
+            v_jct > 1.0,
+            "smooth G1→G5 junction must carry speed through the fuse, got {v_jct}"
         );
 
         assert!(output.joining_sweeps <= 3);
@@ -185,12 +160,10 @@ mod fixture_3_long_straight_then_corner {
             SegmentInput {
                 curve: &straight,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             SegmentInput {
                 curve: &corner_right,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
         ];
         let input = BatchInput {
@@ -261,23 +234,19 @@ mod fixture_4_per_segment_limits_change {
             })
             .collect();
         let normal_limits = textbook_limits();
-        let mut reduced_limits = normal_limits;
-        reduced_limits.a_max = [2_500.0; 3];
+        let reduced_limits = Limits::axis_boxes([500.0; 3], [2_500.0; 3], [100_000.0; 3]);
         let segments = [
             SegmentInput {
                 curve: &segments_curves[0],
                 limits: normal_limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             SegmentInput {
                 curve: &segments_curves[1],
                 limits: reduced_limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             SegmentInput {
                 curve: &segments_curves[2],
                 limits: normal_limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
         ];
         let input = BatchInput {
@@ -350,11 +319,7 @@ mod fixture_5_star_pattern {
         let limits = textbook_limits();
         let segments: Vec<_> = curves
             .iter()
-            .map(|c| SegmentInput {
-                curve: c,
-                limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
-            })
+            .map(|c| SegmentInput { curve: c, limits })
             .collect();
         let input = BatchInput {
             segments: &segments,
@@ -382,7 +347,7 @@ mod fixture_6_long_realistic_chain {
     use std::time::Instant;
 
     fn realistic_machine_limits() -> Limits {
-        Limits::new([1_000.0; 3], [65_000.0; 3], [50_000_000.0; 3], 65_000.0)
+        Limits::axis_boxes([1_000.0; 3], [65_000.0; 3], [50_000_000.0; 3])
     }
 
     #[test]
@@ -445,11 +410,7 @@ mod fixture_6_long_realistic_chain {
         let limits = realistic_machine_limits();
         let segments: Vec<_> = curves
             .iter()
-            .map(|c| SegmentInput {
-                curve: c,
-                limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
-            })
+            .map(|c| SegmentInput { curve: c, limits })
             .collect();
         let input = BatchInput {
             segments: &segments,
@@ -528,11 +489,10 @@ mod fixture_8_stub_25mms_no_haircut {
     };
 
     fn trident_limits() -> Limits {
-        Limits::new(
+        Limits::axis_boxes(
             [25.0, 1000.0, 15.0],
             [70_000.0, 70_000.0, 100.0],
             [140_000.0, 140_000.0, 200.0],
-            5.0_f64.powi(2) / (70_000.0 * 0.5),
         )
     }
 
@@ -611,7 +571,7 @@ mod fixture_7_curvature_spike_intergrid_sanity {
             ],
         )
         .unwrap();
-        let limits = textbook_limits();
+        let limits = Limits::norm_all(500.0, 2_500.0, 100_000.0);
 
         let grid = GridConfig {
             scheme: GridScheme::UniformArclength,
@@ -673,28 +633,21 @@ mod fixture_7_curvature_spike_intergrid_sanity {
                 tangent[2] * a_path + normal_dir[2] * kappa * v_squared,
             ];
 
-            for axis in 0..3 {
-                let v_axis = tangent[axis].abs() * v_path;
-                if v_axis > limits.v_max[axis] * 1.001 {
-                    violations.push(format!(
-                        "v_axis at s={s_val:.4} u={u:.4}, axis={axis}: {v_axis} > v_max={}",
-                        limits.v_max[axis],
-                    ));
-                }
-                if a_axis[axis].abs() > limits.a_max[axis] * 1.001 {
-                    violations.push(format!(
-                        "a_axis at s={s_val:.4} u={u:.4}, axis={axis}: {} > a_max={}",
-                        a_axis[axis].abs(),
-                        limits.a_max[axis],
-                    ));
-                }
+            if v_path > 500.0 * 1.001 {
+                violations.push(format!("v at s={s_val:.4} u={u:.4}: {v_path} > v_max=500"));
             }
-            if v_squared * kappa > limits.a_centripetal_max * CENTRIPETAL_RESIDUAL_FACTOR {
+            let a_mag = mag_3(a_axis);
+            if a_mag > 2_500.0 * CENTRIPETAL_RESIDUAL_FACTOR {
                 violations.push(format!(
-                    "centripetal at s={s_val:.4} u={u:.4}: v²·κ={:.4} > a_cent={} \
+                    "‖a‖ at s={s_val:.4} u={u:.4}: {a_mag:.4} > a_max=2500 \
+                     (residual budget = Hermite interpolation error + κ sample spacing)"
+                ));
+            }
+            if v_squared * kappa > 2_500.0 * CENTRIPETAL_RESIDUAL_FACTOR {
+                violations.push(format!(
+                    "centripetal at s={s_val:.4} u={u:.4}: v²·κ={:.4} > a_max=2500 \
                      (residual budget = Hermite interpolation error + κ sample spacing)",
                     v_squared * kappa,
-                    limits.a_centripetal_max,
                 ));
             }
         }
@@ -781,17 +734,14 @@ mod fixture_10_near_zero_length_middle_segment_smooth_chain {
             SegmentInput {
                 curve: &seg0,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             SegmentInput {
                 curve: &seg1,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             SegmentInput {
                 curve: &seg2,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
         ];
         let input = BatchInput {
@@ -848,11 +798,7 @@ mod fixture_10_near_zero_length_middle_segment_smooth_chain {
         let limits = textbook_limits();
         let segments: Vec<_> = curves
             .iter()
-            .map(|c| SegmentInput {
-                curve: c,
-                limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
-            })
+            .map(|c| SegmentInput { curve: c, limits })
             .collect();
         let baseline = BatchInput {
             segments: &segments,
@@ -905,17 +851,14 @@ mod fixture_11_nanometer_dust_segment_smooth_chain {
             SegmentInput {
                 curve: &seg0,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             SegmentInput {
                 curve: &dust,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             SegmentInput {
                 curve: &seg2,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
         ];
         let input = BatchInput {
@@ -980,12 +923,10 @@ mod fixture_9_kinematic_boundary_end_no_oscillation {
             SegmentInput {
                 curve: &seg0,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
             SegmentInput {
                 curve: &seg1,
                 limits,
-                trailing_junction_chord_tolerance_mm: 0.05,
             },
         ];
         let input = BatchInput {

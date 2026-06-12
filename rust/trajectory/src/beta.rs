@@ -190,7 +190,14 @@ fn beta_iterate_inner(
 
     let machine_a_max: Vec<[f64; 3]> = all_xy_indices
         .iter()
-        .map(|&i| input.segments[i].temporal.limits.a_max)
+        .map(|&i| {
+            let lim = &input.segments[i].temporal.limits;
+            [
+                lim.axis_accel_cap(0),
+                lim.axis_accel_cap(1),
+                lim.axis_accel_cap(2),
+            ]
+        })
         .collect();
 
     let derate_machine_a_max = effective_machine_a_max(&machine_a_max, safety_mode);
@@ -350,20 +357,26 @@ fn run_one_iteration(
                 let mut seg_a_max = planning_a_max[flat_idx];
                 if flat_idx == 0 && input.initial_v > 0.0 {
                     let committed = input.initial_a.abs();
-                    for ax in 0..3 {
-                        seg_a_max[ax] = seg_a_max[ax].max(committed.min(orig.limits.a_max[ax]));
+                    for (ax, cap) in seg_a_max.iter_mut().enumerate() {
+                        *cap = cap.max(committed.min(orig.limits.axis_accel_cap(ax)));
                     }
                 }
-                let derated_limits = temporal::Limits::new(
-                    orig.limits.v_max,
-                    seg_a_max,
-                    orig.limits.j_max,
-                    orig.limits.a_centripetal_max,
-                );
+                let derated_limits = orig.limits.with_sets_mapped(|set| {
+                    let scale = set
+                        .axes
+                        .indices()
+                        .map(|ax| seg_a_max[ax] / orig.limits.axis_accel_cap(ax))
+                        .fold(1.0_f64, f64::min);
+                    temporal::LimitSet {
+                        axes: set.axes,
+                        v_max: set.v_max,
+                        a_max: set.a_max * scale.min(1.0),
+                        j_max: set.j_max,
+                    }
+                });
                 temporal::multi::SegmentInput {
                     curve: orig.curve,
                     limits: derated_limits,
-                    trailing_junction_chord_tolerance_mm: orig.trailing_junction_chord_tolerance_mm,
                 }
             })
             .collect();
@@ -413,7 +426,7 @@ fn run_one_iteration(
                         &mut detail,
                         " | seg{}: status={:?} v_start={:.4} v_end={:.4} \
                          n_samples={} total_time={:.4}s degree={} n_cps={} \
-                         limits[v={:?} a={:?} j={:?} a_centripetal={:?}]",
+                         limits[{:?}]",
                         global_idx,
                         profile.status,
                         v_start,
@@ -422,10 +435,7 @@ fn run_one_iteration(
                         total_time,
                         degree,
                         n_cps,
-                        limits.v_max,
-                        limits.a_max,
-                        limits.j_max,
-                        limits.a_centripetal_max,
+                        limits.sets(),
                     );
                 }
                 return Err(ShapeError::TemporalJoining(status, detail));

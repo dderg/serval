@@ -5,11 +5,10 @@ use nurbs::VectorNurbs;
 use temporal::{GridConfig, GridScheme, Limits, schedule_segment};
 
 fn textbook_limits() -> Limits {
-    Limits::new(
+    Limits::axis_boxes(
         [500.0, 500.0, 500.0],
         [5_000.0, 5_000.0, 5_000.0],
         [100_000.0, 100_000.0, 100_000.0],
-        2_500.0,
     )
 }
 
