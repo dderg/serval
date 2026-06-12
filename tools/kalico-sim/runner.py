@@ -327,6 +327,7 @@ def run_simulation(
     verbose: bool = False,
     phase_stepping: bool = False,
     homing_test: bool = False,
+    beacon_test: Optional[str] = None,
     motion_state_test: bool = False,
     sensorless_phase_test: bool = False,
     serve: bool = False,
@@ -440,6 +441,7 @@ def run_simulation(
                 has_motion_bridge=has_motion_bridge,
                 phase_stepping=phase_stepping,
                 homing_test=homing_test,
+                beacon_test=beacon_test,
                 sensorless_phase_test=sensorless_phase_test,
             )
 
@@ -614,6 +616,69 @@ def run_simulation(
                     wall_time_s=wall_time_s,
                     speedup=0,
                     error=error,
+                    klippy_log=klippy_content,
+                    mcu_logs={
+                        mcu.name: open(mcu.log_path).read()
+                        for mcu in mcus
+                        if pathlib.Path(mcu.log_path).exists()
+                    },
+                )
+
+            if beacon_test:
+                log.info("Beacon test variant: %s", beacon_test)
+                beacon_error = None
+                for script, cmd_timeout in BEACON_TEST_SCRIPTS[beacon_test]:
+                    log.info("Sending: %s", script)
+                    resp = send_gcode(api_socket, script, timeout=cmd_timeout)
+                    log.info("%s: %s", script, resp)
+                    if isinstance(resp, dict) and resp.get("error"):
+                        beacon_error = "%s failed: %s" % (
+                            script,
+                            resp["error"],
+                        )
+                        break
+                    if not resp:
+                        beacon_error = (
+                            "%s timed out or returned no response" % (script,)
+                        )
+                        break
+
+                klippy_content = (
+                    klippy_log.read_text(errors="replace")
+                    if klippy_log.exists()
+                    else ""
+                )
+                if beacon_error is None:
+                    if "shutdown:" in klippy_content.lower():
+                        for line in klippy_content.split("\n"):
+                            if "shutdown:" in line.lower():
+                                beacon_error = (
+                                    "Printer shutdown during beacon test: "
+                                    + line.strip()
+                                )
+                                break
+                if beacon_error is None and beacon_test == "connect":
+                    if "Traceback" in klippy_content:
+                        beacon_error = "klippy.log contains a Traceback"
+                    elif "Failed to load module 'beacon'" in klippy_content:
+                        beacon_error = "beacon module failed to load"
+                if beacon_error is None:
+                    for needle in BEACON_TEST_LOG_ASSERTIONS.get(
+                        beacon_test, ()
+                    ):
+                        if needle not in klippy_content:
+                            beacon_error = (
+                                "expected %r in klippy.log, not found"
+                                % (needle,)
+                            )
+                            break
+
+                return SimResult(
+                    success=beacon_error is None,
+                    print_time_s=0,
+                    wall_time_s=time.monotonic() - wall_start,
+                    speedup=0,
+                    error=beacon_error,
                     klippy_log=klippy_content,
                     mcu_logs={
                         mcu.name: open(mcu.log_path).read()
@@ -1032,15 +1097,17 @@ def _prepare_config(
     has_motion_bridge: bool = False,
     phase_stepping: bool = False,
     homing_test: bool = False,
+    beacon_test: Optional[str] = None,
     sensorless_phase_test: bool = False,
 ) -> pathlib.Path:
     if config_dir is None:
-        if homing_test:
+        if homing_test or beacon_test:
             cfg = _generate_beacon_homing_config(
                 h7_pty,
                 f4_pty,
                 beacon_pty,
                 gcode_dir=str(tmp_dir / "gcodes"),
+                bed_mesh=(beacon_test == "mesh"),
             )
         elif sensorless_phase_test:
             cfg = _generate_sensorless_phase_config(
@@ -1058,6 +1125,7 @@ def _prepare_config(
             has_motion_bridge
             and not phase_stepping
             and not homing_test
+            and not beacon_test
             and not sensorless_phase_test
         ):
             cfg += """
@@ -1194,6 +1262,7 @@ def _generate_beacon_homing_config(
     f4_pty: str,
     beacon_pty: str,
     gcode_dir: str = "/tmp/kalico_sim_gcodes",
+    bed_mesh: bool = False,
 ) -> str:
     """SAVE_CONFIG beacon model must match the stub's frequency model.
 
@@ -1209,6 +1278,14 @@ def _generate_beacon_homing_config(
 serial: {f4_pty}
 """
     z_step_mcu = "bottom:" if f4_pty else ""
+    bed_mesh_section = ""
+    if bed_mesh:
+        bed_mesh_section = """
+[bed_mesh]
+mesh_min: 20,20
+mesh_max: 280,280
+probe_count: 3,3
+"""
     return f"""\
 [mcu]
 serial: {h7_pty}
@@ -1264,7 +1341,7 @@ home_xy_move_speed: 50
 home_method: proximity
 home_method_when_homed: proximity
 home_autocalibrate: never
-
+{bed_mesh_section}
 [input_shaper]
 shaper_freq_x: 50
 shaper_freq_y: 50
@@ -1295,6 +1372,54 @@ enable_force_move: True
 #*# model_temp = 30.886664
 #*# model_offset = 0.00000
 """
+
+
+BEACON_TEST_VARIANTS = (
+    "connect",
+    "contact",
+    "probe",
+    "poke",
+    "mesh",
+    "accel",
+)
+
+BEACON_TEST_SCRIPTS = {
+    "connect": [("G4 P2000", 15)],
+    "contact": [
+        ("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", 10),
+        ("G4 P1000", 15),
+        ("BEACON_AUTO_CALIBRATE", 300),
+    ],
+    "probe": [
+        ("SET_KINEMATIC_POSITION X=150 Y=150 Z=100", 10),
+        ("G4 P1000", 15),
+        ("G28 Z", 120),
+        ("PROBE PROBE_METHOD=proximity SAMPLES=2", 120),
+        ("PROBE PROBE_METHOD=contact SAMPLES=1", 120),
+        ("PROBE_ACCURACY SAMPLES=3", 180),
+    ],
+    "poke": [
+        ("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", 10),
+        ("G4 P1000", 15),
+        ("BEACON_POKE TOP=5 BOTTOM=-0.3", 120),
+    ],
+    "mesh": [
+        ("SET_KINEMATIC_POSITION X=150 Y=150 Z=100", 10),
+        ("G4 P1000", 15),
+        ("G28 Z", 120),
+        ("BED_MESH_CALIBRATE", 600),
+    ],
+    "accel": [
+        ("ACCELEROMETER_MEASURE CHIP=beacon", 30),
+        ("G4 P1000", 15),
+        ("ACCELEROMETER_MEASURE CHIP=beacon NAME=test", 30),
+    ],
+}
+
+BEACON_TEST_LOG_ASSERTIONS = {
+    "contact": ("Collected",),
+    "poke": ("Triggered at:", "Armed at:"),
+}
 
 
 PROBE_TEST_VARIANTS = (
@@ -2384,6 +2509,12 @@ def main():
         help="Run beacon Z homing test (dual-MCU CoreXY + beacon proximity)",
     )
     parser.add_argument(
+        "--beacon-test",
+        choices=BEACON_TEST_VARIANTS,
+        help="Run one beacon fork validation variant (implies the beacon"
+        " stub + beacon config)",
+    )
+    parser.add_argument(
         "--probe-test",
         choices=PROBE_TEST_VARIANTS,
         help="Run [probe] / virtual endstop validation for one variant",
@@ -2449,6 +2580,7 @@ def main():
             verbose=args.verbose,
             phase_stepping=args.phase_test,
             homing_test=args.homing_test,
+            beacon_test=args.beacon_test,
             motion_state_test=args.test_motion_state,
             sensorless_phase_test=args.sensorless_phase_test,
             serve=args.serve,
