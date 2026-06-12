@@ -70,6 +70,9 @@ impl ShaperState {
         new_segment: CubicSegment,
         ctx: &ReplanContext,
     ) -> Result<ReplanReport, ShapeError> {
+        if new_segment.virtual_path_mm.is_some() {
+            return Err(ShapeError::VirtualPathUnrouted);
+        }
         let max_h = self.axes.iter().map(|a| a.h).fold(0.0_f64, f64::max);
 
         let t_freeze =

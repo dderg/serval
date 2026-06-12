@@ -237,6 +237,27 @@ pub fn build_chain(
                 j_env = j_env.max(j_tan_i);
             }
         }
+        if !(a_env.is_finite() && j_env.is_finite()) {
+            for i in 0..n {
+                let lim = chain.limits_at(i);
+                for f in chain.followers_at(i) {
+                    let r = f.ratio.abs();
+                    let mut a_cap = f64::INFINITY;
+                    let mut j_cap = f64::INFINITY;
+                    for (_, set) in lim.follower_sets() {
+                        if !set.axes.contains(f.axis) {
+                            continue;
+                        }
+                        a_cap = a_cap.min(set.a_max / r);
+                        j_cap = j_cap.min(set.j_max / r);
+                    }
+                    if a_cap.is_finite() && j_cap.is_finite() {
+                        a_env = a_env.max(a_cap);
+                        j_env = j_env.max(j_cap);
+                    }
+                }
+            }
+        }
         debug_assert!(
             a_env > 0.0 && j_env > 0.0,
             "A_env/J_env must be positive — corrupt grid tangents"

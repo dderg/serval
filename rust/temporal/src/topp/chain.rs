@@ -88,7 +88,17 @@ impl ChainGrid {
         absorbed: &[bool],
     ) -> Result<Self, ChainError> {
         assert_eq!(followers.len(), limits.len());
-        for (segment, (segment_followers, lim)) in followers.iter().zip(&limits).enumerate() {
+        Self::validate_followers(&followers, &limits)?;
+        let mut chain = Self::from_segment_grids_with_absorbed(grids, limits, absorbed);
+        chain.followers = followers;
+        Ok(chain)
+    }
+
+    fn validate_followers(
+        followers: &[Vec<FollowerDemand>],
+        limits: &[Limits],
+    ) -> Result<(), ChainError> {
+        for (segment, (segment_followers, lim)) in followers.iter().zip(limits).enumerate() {
             for f in segment_followers {
                 if f.axis < N_SPATIAL || f.axis >= lim.n_axes() {
                     return Err(ChainError::FollowerAxisOutOfRange {
@@ -113,9 +123,7 @@ impl ChainGrid {
                 }
             }
         }
-        let mut chain = Self::from_segment_grids_with_absorbed(grids, limits, absorbed);
-        chain.followers = followers;
-        Ok(chain)
+        Ok(())
     }
 
     /// Concatenate per-segment grids into one chain. Adjacent grids must be
@@ -211,6 +219,60 @@ impl ChainGrid {
             follower_history: None,
             follower_terminal: None,
         }
+    }
+
+    /// Chain for a follower-only move: zero spatial geometry, arclength =
+    /// the largest follower displacement, follower rows + feedrate cap do
+    /// all the limiting (spec §2's fallback line).
+    pub fn virtual_path(
+        length: f64,
+        n: usize,
+        limits: Limits,
+        followers: Vec<FollowerDemand>,
+        feedrate_mm_s: f64,
+    ) -> Result<Self, ChainError> {
+        assert!(length > 0.0 && length.is_finite(), "virtual path length");
+        assert!(n >= 2, "virtual path needs at least 2 grid points");
+        assert!(
+            !followers.is_empty(),
+            "virtual path without followers is a zero move"
+        );
+        let limits = if feedrate_mm_s.is_finite() && feedrate_mm_s > 0.0 {
+            let axes: Vec<usize> = followers.iter().map(|f| f.axis).collect();
+            limits.with_extra_sets(&[crate::LimitSet {
+                axes: crate::AxisSet::from_indices(&axes),
+                v_max: feedrate_mm_s,
+                a_max: f64::INFINITY,
+                j_max: f64::INFINITY,
+            }])
+        } else {
+            limits
+        };
+        let h = length / (n - 1) as f64;
+        let zero_geom = PointGeom {
+            c_prime: [0.0; 3],
+            c_double_prime: [0.0; 3],
+            c_triple_prime: [0.0; 3],
+        };
+        let mut chain = Self {
+            s: (0..n).map(|i| i as f64 * h).collect(),
+            geom: vec![zero_geom; n],
+            h_intervals: vec![h; n - 1],
+            limits_idx: vec![0; n],
+            limits: vec![limits],
+            junctions: Vec::new(),
+            segment_ranges: vec![(0, n - 1)],
+            inter_geom: vec![Vec::new(); n - 1],
+            followers: vec![Vec::new()],
+            axis_kernels: [None, None, None],
+            follower_history: None,
+            follower_terminal: None,
+        };
+        let grids: Vec<ArclengthGrid> = Vec::new();
+        let _ = grids;
+        Self::validate_followers(&[followers.clone()], &chain.limits)?;
+        chain.followers = vec![followers];
+        Ok(chain)
     }
 
     pub fn has_active_windows(&self) -> bool {

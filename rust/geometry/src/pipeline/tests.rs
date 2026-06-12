@@ -183,14 +183,28 @@ fn z_hop_with_follower_classifies() {
 }
 
 #[test]
-fn follower_only_move_is_fatal() {
+fn follower_only_move_yields_virtual_path() {
     let items =
         collect_with_e_follower("G5 X10 Y0 I3 J0 P-3 Q0 F3000\nG5 X10 Y0 I0 J0 P0 Q0 E5 F3000\n");
+    let cubics: Vec<_> = items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Segment(Segment::Cubic(seg)) => Some(seg),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cubics.len(), 2, "got {items:#?}");
+    let virt = cubics[1];
+    assert_eq!(virt.virtual_path_mm, Some(5.0));
+    assert_eq!(virt.followers.len(), 1);
+    assert_eq!(virt.followers[0].axis_index, 3);
+    assert!((virt.followers[0].ratio - 1.0).abs() < 1e-12);
+    let cps = virt.xyz.control_points();
+    let first = cps[0];
     assert!(
-        items
-            .iter()
-            .any(|it| matches!(it, Item::Fatal(Fatal::FollowerOnlyMoveUnsupported { .. }))),
-        "expected FollowerOnlyMoveUnsupported, got {items:#?}"
+        cps.iter()
+            .all(|p| p.iter().zip(&first).all(|(a, b)| (a - b).abs() < 1e-9)),
+        "virtual path must have zero spatial displacement"
     );
 }
 

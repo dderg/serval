@@ -529,3 +529,54 @@ fn batch_tail_exchange_holds_shaped_demand_across_a_stop() {
     }
     brute_force_shaped_demand_check(&out.profiles[0], &bell_kernel(40.0), 0.5, 50.0, 0.0);
 }
+
+#[test]
+fn virtual_path_plans_under_follower_limits_and_feedrate() {
+    let limits = limits_with_follower(75.0, 1500.0, 1.0e9);
+    let followers = vec![FollowerDemand {
+        axis: 3,
+        ratio: 1.0,
+        pa_k: 0.0,
+    }];
+    let solve = |feedrate: f64| {
+        let chain = crate::topp::chain::ChainGrid::virtual_path(
+            10.0,
+            51,
+            limits,
+            followers.clone(),
+            feedrate,
+        )
+        .unwrap();
+        crate::topp::schedule_chain_with_tolerance(
+            &chain,
+            crate::topp::EndpointConditions {
+                v_start: 0.0,
+                v_end: 0.0,
+                a_start: None,
+            },
+            ToleranceMode::Tight,
+        )
+        .unwrap()
+    };
+    let slow = solve(40.0);
+    let peak_slow = slow.samples.iter().map(|s| s.v).fold(0.0, f64::max);
+    assert!(
+        (peak_slow - 40.0).abs() < 1.0,
+        "feedrate 40 should cap cruise, got {peak_slow}"
+    );
+    let fast = solve(200.0);
+    let peak_fast = fast.samples.iter().map(|s| s.v).fold(0.0, f64::max);
+    assert!(
+        (peak_fast - 75.0).abs() < 1.5,
+        "follower v_max 75 should cap cruise, got {peak_fast}"
+    );
+    let mut max_dvdt: f64 = 0.0;
+    for w in fast.samples.windows(2) {
+        let v_avg = (w[0].v + w[1].v).max(1e-9);
+        let dt = 2.0 * (w[1].s - w[0].s) / v_avg;
+        if dt > 1e-12 {
+            max_dvdt = max_dvdt.max(((w[1].v - w[0].v) / dt).abs());
+        }
+    }
+    assert!(max_dvdt <= 1500.0 * 1.02, "accel {max_dvdt} > 1500");
+}

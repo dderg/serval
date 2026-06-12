@@ -84,6 +84,11 @@ pub struct ShapedSegment {
 pub enum ShapeError {
     #[error("temporal batch error: {0}")]
     TemporalBatch(#[from] temporal::multi::BatchError),
+    #[error(
+        "virtual-path (follower-only) segment reached the live streaming \
+         planner; routing lands with follower emission (plan 4)"
+    )]
+    VirtualPathUnrouted,
     #[error("temporal joining: {0:?}{1}")]
     TemporalJoining(temporal::multi::JoiningStatus, String),
     #[error("segment {index} unsolvable: {status:?}")]
