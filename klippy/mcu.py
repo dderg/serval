@@ -1031,7 +1031,26 @@ class MCU:
         )
         if self.is_fileoutput():
             return {"is_config": 0, "move_count": 500, "crc": 0}
-        config_params = get_config_cmd.send()
+        try:
+            config_params = get_config_cmd.send()
+        except Exception as e:
+            if "shutdown state" not in str(e):
+                raise
+            # The MCU latched a shutdown from a previous host session (klippy
+            # broadcasts emergency_stop to every MCU on shutdown; devices
+            # like the Beacon stay latched until cleared or power-cycled).
+            # Clear it and retry once so a plain RESTART recovers, matching
+            # the stock-klipper FIRMWARE_RESTART behavior.
+            logging.info(
+                "MCU '%s' latched shutdown at config time; sending"
+                " clear_shutdown and retrying: %s",
+                self._name,
+                e,
+            )
+            self._serial.send("clear_shutdown")
+            config_params = get_config_cmd.send()
+            self._is_shutdown = False
+            self._shutdown_msg = ""
         if self._is_shutdown:
             raise error(
                 "MCU '%s' error during config: %s"
