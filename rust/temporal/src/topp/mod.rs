@@ -11,6 +11,7 @@ pub mod scaling;
 pub(crate) mod solver;
 pub mod stencil;
 pub(crate) mod verify;
+pub mod window;
 
 pub use constraints::EndpointConditions;
 pub use solver::{AxisJerkGradient, axis_jerk_gradient_for_test};
