@@ -316,7 +316,7 @@ class Homing:
             )
             if hi.retract_dist:
                 retractpos = list(toolhead.get_position())
-                retractpos[axis] -= direction * hi.retract_dist
+                retractpos[axis] = trigger_height - direction * hi.retract_dist
                 toolhead.move(retractpos, hi.retract_speed)
                 toolhead.wait_moves()
             _check_servo_drive_fault(gcmd, bridge, axis, servo_handle)
