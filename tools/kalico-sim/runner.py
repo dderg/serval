@@ -994,6 +994,26 @@ def run_simulation(
                         log.info("DISCRIMINATOR M400: %s", resp4)
 
                 if ma_error is None:
+                    for script in (
+                        "MOTOR_ADJUST MOTOR=stepper_z DELTA=1.5 SPEED=5",
+                        "MOTOR_ADJUST MOTOR=stepper_z2 DELTA=0.8 SPEED=5",
+                        "G1 Z104 F300",
+                        "G1 X10 F12000",
+                        "M400",
+                    ):
+                        resp = send_gcode(api_socket, script, timeout=60)
+                        log.info("post-adjust %s: %s", script, resp)
+                        if isinstance(resp, dict) and resp.get("error"):
+                            ma_error = "%s failed: %s" % (
+                                script,
+                                resp["error"],
+                            )
+                            break
+                        if not resp:
+                            ma_error = "%s timed out" % (script,)
+                            break
+
+                if ma_error is None:
                     resp = send_gcode(
                         api_socket,
                         "MOTOR_ADJUST MOTOR=stepper_q DELTA=1",
