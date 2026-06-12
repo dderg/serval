@@ -3568,9 +3568,15 @@ impl PyMotionBridge {
             .unwrap_or_else(|p| p.into_inner());
         let mut out = std::collections::HashMap::new();
         for (key, axis_clock, now_clock) in resolved {
-            let st = store
-                .state_at_clock(key, axis_clock, Some(now_clock))
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let st = match store.state_at_clock(key, axis_clock, Some(now_clock)) {
+                Ok(st) => st,
+                // An axis that has never moved and never been rebased (a
+                // cold extruder) genuinely has no answer at any clock; omit
+                // it rather than failing the whole query. Other errors
+                // (before-window, future) still fail loudly.
+                Err(crate::motion_history::HistoryError::NoHistoryForAxis(_)) => continue,
+                Err(e) => return Err(PyRuntimeError::new_err(e.to_string())),
+            };
             let name = AXIS_NAMES.get(key.axis as usize).ok_or_else(|| {
                 PyRuntimeError::new_err(format!("motion_state_at: unnamed axis {}", key.axis))
             })?;
