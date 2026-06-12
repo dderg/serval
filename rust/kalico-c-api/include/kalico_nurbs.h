@@ -47,6 +47,11 @@ int32_t kalico_runtime_clock_sync_request(kalico_nurbs_KalicoRuntime *rt,
                                           uint32_t host_send_time_hi,
                                           uint64_t *out_mcu_clock);
 
+int32_t kalico_runtime_commit_correction(kalico_nurbs_KalicoRuntime *rt,
+                                         uint8_t axis_idx,
+                                         uint8_t motor_idx,
+                                         uint32_t new_head);
+
 int32_t kalico_runtime_commit_head(kalico_nurbs_KalicoRuntime *rt,
                                    uint8_t axis_idx,
                                    uint32_t new_head);
@@ -150,6 +155,12 @@ int32_t kalico_runtime_stream_flush(kalico_nurbs_KalicoRuntime *rt, uint32_t *ou
 void kalico_runtime_tick_sample(kalico_nurbs_KalicoRuntime *rt);
 
 int32_t kalico_runtime_ungate_pieces(kalico_nurbs_KalicoRuntime *rt);
+
+int32_t kalico_runtime_write_correction_piece(kalico_nurbs_KalicoRuntime *rt,
+                                              uint8_t axis_idx,
+                                              uint16_t start_slot,
+                                              uint8_t index,
+                                              const uint8_t *piece_ptr);
 
 int32_t kalico_runtime_write_piece(kalico_nurbs_KalicoRuntime *rt,
                                    uint8_t axis_idx,

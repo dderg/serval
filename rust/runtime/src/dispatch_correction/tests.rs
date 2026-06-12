@@ -1,4 +1,8 @@
-#![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::integer_division
+)]
 
 use core::sync::atomic::Ordering;
 
