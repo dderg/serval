@@ -283,6 +283,9 @@ fn spawn_ethercat_endpoint(
     interface: &str,
     socket_path: &str,
     counts_per_mm: f64,
+    velocity_ff: bool,
+    dynamics_profile: Option<&str>,
+    torque_clamp_pct: f64,
     following_error_counts: Option<u32>,
     max_torque_tenth_pct: Option<u16>,
 ) -> Result<std::process::Child, String> {
@@ -291,7 +294,15 @@ fn spawn_ethercat_endpoint(
         .arg("--socket")
         .arg(socket_path)
         .arg("--counts-per-mm")
-        .arg(counts_per_mm.to_string());
+        .arg(counts_per_mm.to_string())
+        .arg("--torque-clamp-pct")
+        .arg(torque_clamp_pct.to_string());
+    if velocity_ff {
+        cmd.arg("--velocity-ff");
+    }
+    if let Some(p) = dynamics_profile {
+        cmd.arg("--dynamics-profile").arg(p);
+    }
     if let Some(ferr) = following_error_counts {
         cmd.arg("--following-error-counts").arg(ferr.to_string());
     }
@@ -484,7 +495,7 @@ pub struct PyMotionBridge {
     mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
     events: Arc<Mutex<VecDeque<BridgeEvent>>>,
     #[allow(dead_code)]
-    handlers: Mutex<HashMap<(u32, String, u32), PyObject>>,
+    handlers: Mutex<HashMap<(u32, String, u32), Py<PyAny>>>,
     // `Mutex<Option<..>>` (not `OnceLock`) so `shutdown()` can *take* the handle
     // and join the `kalico-planner` thread. A `OnceLock` cannot be drained, so
     // the planner thread would only be joined when the whole bridge dropped —
@@ -512,50 +523,6 @@ pub struct PyMotionBridge {
     // Drop backstop, a second `klippy:disconnect`, the failed-connect path) see
     // this and no-op, so double-teardown is provably safe and observable.
     shut_down: AtomicBool,
-}
-
-pub(crate) fn build_configure_axes_body(
-    kinematics: u8,
-    present_mask: u8,
-    awd_mask: u8,
-    invert_mask: u8,
-    steps_per_mm: &[f32; 4],
-    step_modes: Option<&[u8; 4]>,
-    phase_configs: Option<&[(u8, u8, u8)]>,
-    phase_capable: u8,
-) -> Vec<u8> {
-    let mut body = Vec::with_capacity(26 + 3 * 16);
-    body.push(kinematics);
-    body.push(present_mask);
-    body.push(awd_mask);
-    body.push(invert_mask);
-    for v in steps_per_mm {
-        body.extend_from_slice(&v.to_le_bytes());
-    }
-    if let Some(sm) = step_modes {
-        body.push(phase_capable);
-        for &m in sm.iter() {
-            body.push(m);
-        }
-    }
-    if let Some(pc) = phase_configs {
-        assert!(
-            step_modes.is_some(),
-            "phase_configs requires step_modes (variable-length format extends 25-byte)"
-        );
-        assert!(
-            pc.len() <= 16,
-            "phase_configs.len()={} exceeds MAX_STEPPER_OIDS=16",
-            pc.len(),
-        );
-        body.push(pc.len() as u8);
-        for &(bus_id, cs_pin_id, slot_idx) in pc.iter() {
-            body.push(bus_id);
-            body.push(cs_pin_id);
-            body.push(slot_idx);
-        }
-    }
-    body
 }
 
 pub(crate) fn axis_ring_depth(total_pieces: u32, num_axes: u32) -> u32 {
@@ -840,7 +807,7 @@ impl PyMotionBridge {
         Ok(raw)
     }
 
-    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, counts_per_mm, following_error_counts=None, max_torque_tenth_pct=None))]
+    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, counts_per_mm, velocity_ff, dynamics_profile, torque_clamp_pct, following_error_counts=None, max_torque_tenth_pct=None))]
     fn claim_ethercat_node(
         &self,
         label: &str,
@@ -848,6 +815,9 @@ impl PyMotionBridge {
         interface: &str,
         endpoint_binary: &str,
         counts_per_mm: f64,
+        velocity_ff: bool,
+        dynamics_profile: Option<String>,
+        torque_clamp_pct: f64,
         following_error_counts: Option<u32>,
         max_torque_tenth_pct: Option<u16>,
     ) -> PyResult<u32> {
@@ -864,6 +834,9 @@ impl PyMotionBridge {
             interface,
             socket_path,
             counts_per_mm,
+            velocity_ff,
+            dynamics_profile.as_deref(),
+            torque_clamp_pct,
             following_error_counts,
             max_torque_tenth_pct,
         )
@@ -1419,7 +1392,7 @@ impl PyMotionBridge {
         mcu: u32,
         name: &str,
         oid: u32,
-        callback: PyObject,
+        callback: Py<PyAny>,
     ) -> PyResult<()> {
         self.handlers
             .lock()
@@ -1428,12 +1401,12 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    fn passthrough_register_flush_callback(&self, mcu: u32, callback: PyObject) -> PyResult<()> {
+    fn passthrough_register_flush_callback(&self, mcu: u32, callback: Py<PyAny>) -> PyResult<()> {
         let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
         let mcu_h = mcu_handle_from_raw(mcu);
 
         let cb: Box<dyn Fn() + Send> = Box::new(move || {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 if let Err(e) = callback.call0(py) {
                     e.print(py);
                 }
@@ -1807,127 +1780,6 @@ impl PyMotionBridge {
         ring_depth_for_axis_inner(&configs, mcu_handle, axis).map_err(PyRuntimeError::new_err)
     }
 
-    #[pyo3(signature = (mcu_handle, kinematics, present_mask, awd_mask, invert_mask, steps_per_mm, step_modes = None, phase_configs = None, timeout_s = 2.0))]
-    fn configure_axes(
-        &self,
-        py: Python<'_>,
-        mcu_handle: u32,
-        kinematics: u8,
-        present_mask: u8,
-        awd_mask: u8,
-        invert_mask: u8,
-        steps_per_mm: Vec<f32>,
-        step_modes: Option<Vec<u8>>,
-        phase_configs: Option<Vec<(u8, u8, u8)>>,
-        timeout_s: f64,
-    ) -> PyResult<()> {
-        tracing::info!(
-            subsystem = "bridge",
-            event = "configure_axes_entry",
-            mcu_handle,
-            kinematics,
-            present_mask,
-            awd_mask,
-            invert_mask,
-            steps_per_mm_len = steps_per_mm.len(),
-            step_modes = ?step_modes,
-            "configure_axes entry"
-        );
-        if steps_per_mm.len() != 4 {
-            return Err(PyRuntimeError::new_err(
-                "configure_axes: steps_per_mm must be a list of 4 floats",
-            ));
-        }
-        if let Some(ref sm) = step_modes {
-            if sm.len() != 4 {
-                return Err(PyRuntimeError::new_err(
-                    "configure_axes: step_modes must be a list of 4 ints (0=Modulated, 1=StepTime)",
-                ));
-            }
-        }
-        if let Some(ref pc) = phase_configs {
-            if pc.len() > 16 {
-                return Err(PyRuntimeError::new_err(format!(
-                    "configure_axes: phase_configs.len()={} exceeds MAX_STEPPER_OIDS=16",
-                    pc.len(),
-                )));
-            }
-            if step_modes.is_none() {
-                return Err(PyRuntimeError::new_err(
-                    "configure_axes: phase_configs requires step_modes (variable-length format extends 25-byte)",
-                ));
-            }
-            for (i, &(_, _, slot_idx)) in pc.iter().enumerate() {
-                if slot_idx >= 4 {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "configure_axes: phase_configs[{i}].slot_idx={slot_idx} must be < 4",
-                    )));
-                }
-            }
-        }
-        let (io, identify_caps) = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-            let conn = mcus.get(&mcu_handle).ok_or_else(|| {
-                PyRuntimeError::new_err(format!("configure_axes: unknown mcu_handle {mcu_handle}"))
-            })?;
-            if !conn.kalico_native_supported {
-                return Ok(());
-            }
-            let io = conn
-                .host_io
-                .as_ref()
-                .ok_or_else(|| {
-                    PyRuntimeError::new_err(
-                        "configure_axes: attach_serial has not been called for this MCU",
-                    )
-                })?
-                .clone();
-            (io, conn.identify_caps)
-        };
-        let phase_capable: u8 = if identify_caps & 0x1 != 0 { 1 } else { 0 };
-        let steps_arr: [f32; 4] = [
-            steps_per_mm[0],
-            steps_per_mm[1],
-            steps_per_mm[2],
-            steps_per_mm[3],
-        ];
-        let step_modes_arr: Option<[u8; 4]> =
-            step_modes.as_ref().map(|sm| [sm[0], sm[1], sm[2], sm[3]]);
-        let body = build_configure_axes_body(
-            kinematics,
-            present_mask,
-            awd_mask,
-            invert_mask,
-            &steps_arr,
-            step_modes_arr.as_ref(),
-            phase_configs.as_deref(),
-            phase_capable,
-        );
-        let timeout = std::time::Duration::from_secs_f64(timeout_s);
-        let result = py.allow_threads(|| {
-            io.kalico_call(kalico_protocol::MessageKind::ConfigureAxes, body, timeout)
-        });
-        match result {
-            Ok((_, body)) => {
-                if body.len() < 4 {
-                    return Err(PyRuntimeError::new_err(
-                        "configure_axes: short response body",
-                    ));
-                }
-                let r = i32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-                if r != 0 {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "configure_axes: MCU returned error {r}"
-                    )));
-                }
-                Ok(())
-            }
-            Err(e) => Err(PyRuntimeError::new_err(format!(
-                "configure_axes: transport error: {e:?}"
-            ))),
-        }
-    }
-
     #[pyo3(signature = (mcu_handle, bus_id, rate, timeout_s = 5.0))]
     fn register_phase_bus(
         &self,
@@ -1958,7 +1810,7 @@ impl PyMotionBridge {
         };
         let timeout = std::time::Duration::from_secs_f64(timeout_s);
         let msg = format!("runtime_register_phase_bus bus_id={bus_id} rate={rate}");
-        let params = py.allow_threads(|| -> PyResult<_> {
+        let params = py.detach(|| -> PyResult<_> {
             use kalico_host_rt::transport::Transport;
             io.call(&msg, "kalico_register_phase_bus_response", timeout)
                 .map_err(|e| {
@@ -1978,7 +1830,7 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    #[pyo3(signature = (mcu_handle, motor_idx, bus_id, cs_pin_id, timeout_s = 5.0))]
+    #[pyo3(signature = (mcu_handle, motor_idx, bus_id, cs_pin_id, slot_idx, timeout_s = 5.0))]
     fn register_phase_motor(
         &self,
         py: Python<'_>,
@@ -1986,6 +1838,7 @@ impl PyMotionBridge {
         motor_idx: u8,
         bus_id: u8,
         cs_pin_id: u8,
+        slot_idx: u8,
         timeout_s: f64,
     ) -> PyResult<()> {
         let io = {
@@ -2010,9 +1863,9 @@ impl PyMotionBridge {
         let timeout = std::time::Duration::from_secs_f64(timeout_s);
         let msg = format!(
             "runtime_register_phase_motor motor_idx={motor_idx} \
-             bus_id={bus_id} cs_pin_id={cs_pin_id}"
+             bus_id={bus_id} cs_pin_id={cs_pin_id} slot_idx={slot_idx}"
         );
-        let params = py.allow_threads(|| -> PyResult<_> {
+        let params = py.detach(|| -> PyResult<_> {
             use kalico_host_rt::transport::Transport;
             io.call(&msg, "kalico_register_phase_motor_response", timeout)
                 .map_err(|e| {
@@ -2081,7 +1934,7 @@ impl PyMotionBridge {
 
         let msg_owned = msg.to_owned();
         let response_owned = response.to_owned();
-        let params = py.allow_threads(|| -> PyResult<_> {
+        let params = py.detach(|| -> PyResult<_> {
             use kalico_host_rt::transport::Transport;
             io.call(
                 &msg_owned,
@@ -2948,7 +2801,7 @@ impl PyMotionBridge {
             feedrate,
             "bridge.submit_move enter"
         );
-        py.allow_threads(|| -> PyResult<()> {
+        py.detach(|| -> PyResult<()> {
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
             let classified = classify::classify_and_build(pos, dx, dy, dz, de, feedrate)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -2974,7 +2827,7 @@ impl PyMotionBridge {
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
-        py.allow_threads(|| planner.flush()).map_err(planner_err)
+        py.detach(|| planner.flush()).map_err(planner_err)
     }
 
     fn drain_motion(&self, py: Python<'_>) -> PyResult<()> {
@@ -2982,9 +2835,9 @@ impl PyMotionBridge {
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
-        py.allow_threads(|| planner.flush()).map_err(planner_err)?;
+        py.detach(|| planner.flush()).map_err(planner_err)?;
         let drain = self.drain.clone();
-        py.allow_threads(|| drain.wait_drained(DRAIN_TIMEOUT))
+        py.detach(|| drain.wait_drained(DRAIN_TIMEOUT))
             .map_err(PyRuntimeError::new_err)
     }
 
@@ -2993,7 +2846,7 @@ impl PyMotionBridge {
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
-        py.allow_threads(|| planner.flush()).map_err(planner_err)?;
+        py.detach(|| planner.flush()).map_err(planner_err)?;
         Ok(self.drain.is_drained_now())
     }
 
@@ -3015,10 +2868,10 @@ impl PyMotionBridge {
         }
         let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(planner) = planner_guard.as_ref() {
-            py.allow_threads(|| planner.flush()).map_err(planner_err)?;
+            py.detach(|| planner.flush()).map_err(planner_err)?;
             {
                 let drain = self.drain.clone();
-                py.allow_threads(|| drain.wait_drained(DRAIN_TIMEOUT))
+                py.detach(|| drain.wait_drained(DRAIN_TIMEOUT))
                     .map_err(PyRuntimeError::new_err)?;
             }
 
@@ -3244,7 +3097,7 @@ impl PyMotionBridge {
 
         {
             let drain = self.drain.clone();
-            py.allow_threads(|| drain.wait_drained(DRAIN_TIMEOUT))
+            py.detach(|| drain.wait_drained(DRAIN_TIMEOUT))
                 .map_err(PyRuntimeError::new_err)?;
         }
 
@@ -3317,7 +3170,7 @@ impl PyMotionBridge {
                 planner_err(e)
             })?;
 
-        let dispatch = py.allow_threads(|| {
+        let dispatch = py.detach(|| {
             planner_done_rx
                 .recv_timeout(Duration::from_secs(5))
                 .map_err(|_| "home_axis: planner timed out dispatching homing move".to_owned())
@@ -3496,8 +3349,7 @@ impl PyMotionBridge {
             let _ = tx.send(crate::pump::PumpMsg::DripDisarm(ctx.cohort));
             let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
             let _ = tx.send(crate::pump::PumpMsg::Barrier(ack_tx));
-            let barrier =
-                py.allow_threads(move || ack_rx.recv_timeout(std::time::Duration::from_secs(1)));
+            let barrier = py.detach(move || ack_rx.recv_timeout(std::time::Duration::from_secs(1)));
             if barrier.is_err() {
                 tracing::error!(
                     "home_abort: pump did not acknowledge the flush barrier — \
@@ -3528,7 +3380,7 @@ impl PyMotionBridge {
         };
 
         let drain = self.drain.clone();
-        let drain_result = py.allow_threads(|| drain.wait_drained(DRAIN_TIMEOUT));
+        let drain_result = py.detach(|| drain.wait_drained(DRAIN_TIMEOUT));
         if let Err(e) = drain_result {
             tracing::error!(
                 "home_abort: drain timed out after aborted homing move — \
@@ -3914,9 +3766,6 @@ impl PyMotionBridge {
 }
 
 #[cfg(test)]
-mod build_configure_axes_body_tests;
-
-#[cfg(test)]
 mod tests;
 
 #[cfg(test)]
@@ -4036,6 +3885,9 @@ mod ethercat_endpoint_tests {
             "eth0",
             "/tmp/test.sock",
             1.0,
+            false,
+            None,
+            30.0,
             None,
             None,
         );
