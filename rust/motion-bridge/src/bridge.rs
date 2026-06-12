@@ -1510,7 +1510,7 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    #[pyo3(signature = (mcu_handle, serial_path, baud, timeout_s = 30.0, klippy_non_critical = false))]
+    #[pyo3(signature = (mcu_handle, serial_path, baud, timeout_s = 30.0, klippy_non_critical = false, expect_kalico = true))]
     fn attach_serial(
         &self,
         mcu_handle: u32,
@@ -1518,6 +1518,7 @@ impl PyMotionBridge {
         baud: u32,
         timeout_s: f64,
         klippy_non_critical: bool,
+        expect_kalico: bool,
     ) -> PyResult<()> {
         use std::time::{Duration, Instant};
         let deadline = Instant::now() + Duration::from_secs_f64(timeout_s);
@@ -1543,7 +1544,14 @@ impl PyMotionBridge {
                         ))
                     })?;
 
-                    let (kalico_native_supported, identify_caps) =
+                    let (kalico_native_supported, identify_caps) = if !expect_kalico {
+                        log::info!(
+                            "attach_serial: kalico identify skipped on reuse for \
+                             {serial_path} (plugin-attached peripheral, not declared \
+                             via an [mcu] section)"
+                        );
+                        (false, 0u64)
+                    } else {
                         match io.kalico_identify(std::time::Duration::from_secs(5)) {
                             Ok(out) => {
                                 log::info!(
@@ -1561,7 +1569,8 @@ impl PyMotionBridge {
                                 );
                                 (false, 0u64)
                             }
-                        };
+                        }
+                    };
 
                     let runtime_caps = if kalico_native_supported {
                         match query_runtime_caps(&io, std::time::Duration::from_secs(2)) {
@@ -1658,7 +1667,13 @@ impl PyMotionBridge {
             PyRuntimeError::new_err(format!("attach_serial: runtime_event subscribe: {e:?}"))
         })?;
 
-        let (kalico_native_supported, identify_caps) =
+        let (kalico_native_supported, identify_caps) = if !expect_kalico {
+            log::info!(
+                "attach_serial: kalico identify skipped for {serial_path} \
+                 (plugin-attached peripheral, not declared via an [mcu] section)"
+            );
+            (false, 0u64)
+        } else {
             match host_io.kalico_identify(std::time::Duration::from_secs(5)) {
                 Ok(out) => {
                     log::info!(
@@ -1676,7 +1691,8 @@ impl PyMotionBridge {
                     );
                     (false, 0u64)
                 }
-            };
+            }
+        };
 
         let runtime_caps = if kalico_native_supported {
             match query_runtime_caps(&host_io, std::time::Duration::from_secs(2)) {

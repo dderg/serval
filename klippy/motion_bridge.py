@@ -264,14 +264,22 @@ class MotionBridgeWrapper:
         baud,
         timeout_s=30.0,
         klippy_non_critical=False,
+        expect_kalico=True,
     ):
         """klippy_non_critical feeds the per-MCU criticality gate: a
         non-critical MCU's transport drop does not abort klippy, a critical
         motion MCU's does. A Klipper-protocol-only attach (identify timed out)
-        is always treated as non-critical.
+        is always treated as non-critical. expect_kalico=False skips the
+        kalico identify probe entirely (plugin-attached foreign peripherals
+        like the Beacon never answer it; probing them stalls connect).
         """
         return self._bridge.attach_serial(
-            mcu_handle, serial_path, baud, timeout_s, klippy_non_critical
+            mcu_handle,
+            serial_path,
+            baud,
+            timeout_s,
+            klippy_non_critical,
+            expect_kalico,
         )
 
     def get_identify_data(self, mcu_handle):

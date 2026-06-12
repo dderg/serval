@@ -396,12 +396,15 @@ class SerialReader:
             )
         handle = self.mcu._bridge_handle
         klippy_non_critical = bool(getattr(self.mcu, "is_non_critical", False))
+        expect_kalico = bool(getattr(self.mcu, "_expect_kalico", True))
         logging.info(
-            "%sbridge attach_serial %s (handle=%s, non_critical=%s)",
+            "%sbridge attach_serial %s (handle=%s, non_critical=%s,"
+            " expect_kalico=%s)",
             self.warn_prefix,
             filename,
             handle,
             klippy_non_critical,
+            expect_kalico,
         )
         bridge.attach_serial(
             handle,
@@ -409,6 +412,7 @@ class SerialReader:
             baud,
             timeout_s=30.0,
             klippy_non_critical=klippy_non_critical,
+            expect_kalico=expect_kalico,
         )
         identify_data = bridge.get_identify_data(handle)
         logging.info(
