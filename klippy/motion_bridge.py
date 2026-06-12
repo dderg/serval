@@ -27,6 +27,7 @@ _PRINT_FINISH_EVENTS = (
 # motion without a real bridge.
 _STUB_MOTION_METHODS = frozenset(
     {
+        "adjust_motor",
         "init_planner",
         "submit_move",
         "submit_dwell",
@@ -407,6 +408,13 @@ class MotionBridgeWrapper:
     ):
         return self._bridge.home_axis_start(
             axis, direction, speed_mm_s, max_travel_mm, endstop_id, endstop_mcu
+        )
+
+    def adjust_motor(
+        self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, host_now
+    ):
+        return self._bridge.adjust_motor(
+            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, host_now
         )
 
     def home_axis_poll(self):
