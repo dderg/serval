@@ -392,6 +392,7 @@ class Homing:
                 endstop.endstop_id,
                 endstop_mcu,
             )
+            reactor = self.printer.get_reactor()
             deadline = (
                 reactor.monotonic() + max_travel / speed + TRIP_DEADLINE_MARGIN
             )
