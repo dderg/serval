@@ -6,7 +6,6 @@ pub struct PointGeom {
     pub c_prime: [f64; 3],
     pub c_double_prime: [f64; 3],
     pub c_triple_prime: [f64; 3],
-    pub kappa: f64,
 }
 
 /// Right-side geometry/limits of a shared junction point. The primary
@@ -150,7 +149,6 @@ fn point_geom(g: &ArclengthGrid, i: usize) -> PointGeom {
         c_prime: g.c_prime[i],
         c_double_prime: g.c_double_prime[i],
         c_triple_prime: g.c_triple_prime[i],
-        kappa: g.kappa[i],
     }
 }
 

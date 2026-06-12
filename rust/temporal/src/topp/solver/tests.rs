@@ -176,7 +176,6 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
     let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
-    let kappa = vec![0.0; n];
     let inter_geom = vec![
         vec![
             InterSample::planar(0.25, 0.0),
@@ -192,7 +191,6 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
         c_prime,
         c_double_prime,
         c_triple_prime,
-        kappa,
         total_length: length,
         inter_geom,
     }
@@ -334,7 +332,6 @@ fn damp_scale_for_axis_feasibility_achieves_target() {
         let c_prime = vec![[1.0, 0.0, 0.0]; n];
         let c_double_prime = vec![[0.0, cpp_val, 0.0]; n];
         let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
-        let kappa = vec![0.0; n];
         let inter_geom = vec![
             vec![
                 InterSample::planar(0.25, 0.0),
@@ -350,7 +347,6 @@ fn damp_scale_for_axis_feasibility_achieves_target() {
             c_prime,
             c_double_prime,
             c_triple_prime,
-            kappa,
             total_length: length,
             inter_geom,
         }
@@ -425,7 +421,6 @@ fn build_axis_jerk_cuts_chain_places_maintenance_cuts() {
         let c_prime = vec![[1.0, 0.0, 0.0]; n];
         let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
         let c_triple_prime: Vec<[f64; 3]> = cppp_vals.iter().map(|&v| [v, 0.0, 0.0]).collect();
-        let kappa = vec![0.0; n];
         let inter_geom = vec![
             vec![
                 InterSample::planar(0.25, 0.0),
@@ -441,7 +436,6 @@ fn build_axis_jerk_cuts_chain_places_maintenance_cuts() {
             c_prime,
             c_double_prime,
             c_triple_prime,
-            kappa,
             total_length: length,
             inter_geom,
         }
@@ -514,9 +508,9 @@ fn build_axis_jerk_cuts_chain_places_maintenance_cuts() {
 /// all interior b values are below `SLP_B_CUT_FLOOR` (no cuts placeable).
 ///
 /// `j_max = [1,1,1]` ensures the FD-estimated path-jerk ratio exceeds 1.05 on
-/// the initial SOCP solution while `a_centripetal_max = 1.0` caps peak b far
-/// below `SLP_B_CUT_FLOOR = 100.0`, making `added == 0` guaranteed. The old
-/// code returned `MaxIters`; the fix returns `Converged`.
+/// the initial SOCP solution while the 0.03 mm move keeps peak b far below
+/// `SLP_B_CUT_FLOOR = 100.0`, making `added == 0` guaranteed. The old code
+/// returned `MaxIters`; the fix returns `Converged`.
 #[test]
 fn slp_solve_chain_zero_cuts_placeable_is_converged_not_max_iters() {
     let grid = dummy_straight_grid(20, 0.03_f64);

@@ -38,8 +38,6 @@ pub struct ArclengthGrid {
     pub c_double_prime: Vec<[f64; 3]>,
     /// `d³C/ds³` at `s_i`, length N.
     pub c_triple_prime: Vec<[f64; 3]>,
-    /// `κ(s_i) = |C'(s) × C''(s)|` (arclength parameterization), length N.
-    pub kappa: Vec<f64>,
     /// Total arclength, mm.
     pub total_length: f64,
     /// Interior geometry samples for each interval `[i, i+1]`, length N−1.
@@ -92,7 +90,6 @@ pub fn sample_arclength_grid(
     let mut c_prime_vec = Vec::with_capacity(n);
     let mut c_double_prime_vec = Vec::with_capacity(n);
     let mut c_triple_prime_vec = Vec::with_capacity(n);
-    let mut kappa_vec = Vec::with_capacity(n);
     let mut inter_geom_vec: Vec<Vec<InterSample>> = Vec::with_capacity(n.saturating_sub(1));
 
     let curve_view = curve.as_view();
@@ -163,16 +160,12 @@ pub fn sample_arclength_grid(
             scale3(dc_du, d3u_ds3),
         );
 
-        let cross = cross3(c_prime_i, c_double_prime_i);
-        let kappa_i = dot3(cross, cross).sqrt();
-
         s_vec.push(s_i);
         u_vec.push(u_i);
         c_vec.push(c_i);
         c_prime_vec.push(c_prime_i);
         c_double_prime_vec.push(c_double_prime_i);
         c_triple_prime_vec.push(c_triple_prime_i);
-        kappa_vec.push(kappa_i);
 
         if i + 1 < n {
             let s_next = ((i + 1) as f64) / ((n - 1) as f64) * total_length;
@@ -201,7 +194,6 @@ pub fn sample_arclength_grid(
         c_prime: c_prime_vec,
         c_double_prime: c_double_prime_vec,
         c_triple_prime: c_triple_prime_vec,
-        kappa: kappa_vec,
         total_length,
         inter_geom: inter_geom_vec,
     })

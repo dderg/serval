@@ -2,7 +2,7 @@
 /// must not produce `MaxIterSlp`.
 ///
 /// `j_max = [1,1,1]` makes the FD path-jerk ratio fire on the initial SOCP
-/// solution while `a_centripetal_max = 1.0` keeps every b below the cut floor.
+/// solution while the 0.03 mm move keeps every b below the cut floor.
 /// Before the fix, `slp_solve_chain` returned `MaxIters` (→ `MaxIterSlp` from
 /// `output::map_status` when the verifier also reported infeasible), stalling
 /// the joining loop with `StalledOnInfeasibleSegment`.

@@ -26,7 +26,6 @@ fn tiny_grid(s: f64, kappa: f64) -> ArclengthGrid {
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
     let c_double_prime = vec![[0.001, 0.0, 0.0]; n];
     let c_triple_prime = vec![[0.00002, 0.0, 0.0]; n];
-    let kappa_vec = vec![kappa; n];
     ArclengthGrid {
         s: s_vec,
         u,
@@ -34,7 +33,6 @@ fn tiny_grid(s: f64, kappa: f64) -> ArclengthGrid {
         c_prime,
         c_double_prime,
         c_triple_prime,
-        kappa: kappa_vec,
         total_length: s,
         inter_geom: vec![
             vec![
@@ -118,17 +116,6 @@ fn grid_scaling_fields_have_correct_power_of_sigma() {
                 sc[ax]
             );
         }
-    }
-
-    // kappa ×σ
-    for (raw, sc) in grid.kappa.iter().zip(scaled.kappa.iter()) {
-        let expected = raw * sigma;
-        assert!(
-            (sc - expected).abs() < 1e-12,
-            "kappa: expected {}, got {}",
-            expected,
-            sc
-        );
     }
 
     // total_length ÷ σ
@@ -215,7 +202,6 @@ fn chain_grid_scaling_matches_arclength_grid_scaling() {
     for i in 0..sc.n_points() {
         assert_eq!(sc.geom[i].c_double_prime, sg.c_double_prime[i]);
         assert_eq!(sc.geom[i].c_triple_prime, sg.c_triple_prime[i]);
-        assert_eq!(sc.geom[i].kappa, sg.kappa[i]);
     }
     assert!((sc.h_intervals[0] - (sg.s[1] - sg.s[0])).abs() < 1e-15);
 }

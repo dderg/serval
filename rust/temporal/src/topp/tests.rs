@@ -3,10 +3,8 @@ use crate::Limits;
 use constraints::EndpointConditions;
 
 /// Straight 600 mm collinear cubic at machine-limit speed: v_max = 1000 mm/s,
-/// a_max = 50 km/s². Limits mirror the bridge's `to_temporal_limits` output for
-/// `max_velocity=1000, max_accel=50000, scv=5` — a_centripetal_max equals
-/// max_accel (50_000 mm/s²). κ = 0 on a straight line so the centripetal cap
-/// is never active; the solver must produce a usable profile, not MaxIter.
+/// a_max = 50 km/s². κ = 0 on a straight line, so no curvature row is active;
+/// the solver must produce a usable profile, not MaxIter.
 #[test]
 fn schedule_segment_straight_line_at_1000mms_solves() {
     let cps = vec![

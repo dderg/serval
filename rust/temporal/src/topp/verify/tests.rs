@@ -11,7 +11,6 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
     let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
-    let kappa = vec![0.0; n];
     let inter_geom = vec![
         vec![
             InterSample::planar(0.25, 0.0),
@@ -27,7 +26,6 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
         c_prime,
         c_double_prime,
         c_triple_prime,
-        kappa,
         total_length: length,
         inter_geom,
     }
@@ -232,7 +230,6 @@ fn over_centripetal_profile_flagged() {
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
     let c_double_prime = vec![[0.0, 1.0, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
-    let kappa = vec![1.0; n];
 
     let grid = ArclengthGrid {
         s,
@@ -241,7 +238,6 @@ fn over_centripetal_profile_flagged() {
         c_prime,
         c_double_prime,
         c_triple_prime,
-        kappa,
         total_length: length,
         inter_geom: vec![
             vec![

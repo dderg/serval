@@ -20,8 +20,11 @@ fn straight_line_x_aligned_returns_unit_tangent_and_zero_curvature() {
         assert!(tan[1].abs() < 1e-6);
         assert!(tan[2].abs() < 1e-6);
     }
-    for k in &grid.kappa {
-        assert!(k.abs() < 1e-6);
+    for g in &grid.inter_geom {
+        for sample in g {
+            let cross = super::cross3(sample.c_prime, sample.c_double_prime);
+            assert!(super::dot3(cross, cross).sqrt() < 1e-6);
+        }
     }
 }
 

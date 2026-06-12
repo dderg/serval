@@ -11,7 +11,6 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
     let c_double_prime = vec![[0.0, 0.0, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
-    let kappa = vec![0.0; n];
     let inter_geom = vec![
         vec![
             InterSample::planar(0.25, 0.0),
@@ -27,7 +26,6 @@ fn dummy_straight_grid(n: usize, length: f64) -> ArclengthGrid {
         c_prime,
         c_double_prime,
         c_triple_prime,
-        kappa,
         total_length: length,
         inter_geom,
     }
@@ -75,7 +73,6 @@ fn straight_line_zero_endpoints_builds_ok() {
 #[test]
 fn boundary_above_mvc_returns_boundary_outcome() {
     let mut grid = dummy_straight_grid(5, 10.0);
-    grid.kappa = vec![0.1; 5];
     grid.c_double_prime = vec![[0.0, 0.1, 0.0]; 5];
     let limits = textbook_limits();
     let chain = chain_of_one(grid, limits);
@@ -475,7 +472,6 @@ fn diagonal_line_a_env_is_projected() {
         c_prime,
         c_double_prime: vec![[0.0; 3]; n],
         c_triple_prime: vec![[0.0; 3]; n],
-        kappa: vec![0.0; n],
         total_length: length,
         s,
         inter_geom: vec![
@@ -763,7 +759,6 @@ fn curvature_spike_grid() -> (ArclengthGrid, Limits) {
     let c_prime = vec![[1.0, 0.0, 0.0]; n];
     let c_double_prime = vec![[0.0, 0.01, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
-    let kappa_nodes = vec![0.01_f64; n];
 
     let kappa_spike = 0.5_f64;
     let spike_interval = vec![
@@ -786,7 +781,6 @@ fn curvature_spike_grid() -> (ArclengthGrid, Limits) {
             c_prime,
             c_double_prime,
             c_triple_prime,
-            kappa: kappa_nodes,
             total_length: length,
             inter_geom,
         },
@@ -854,8 +848,6 @@ fn intergrid_centripetal_rows_absent_when_kappa_valley_between_nodes() {
     let c_double_prime = vec![[0.0, k_node, 0.0]; n];
     let c_triple_prime = vec![[0.0, 0.0, 0.0]; n];
 
-    let node_kappas = vec![k_node; n];
-
     let k_valley = 0.05_f64;
     let valley_interval = vec![
         InterSample::planar(0.25, k_valley),
@@ -872,7 +864,6 @@ fn intergrid_centripetal_rows_absent_when_kappa_valley_between_nodes() {
         c_prime,
         c_double_prime,
         c_triple_prime,
-        kappa: node_kappas,
         total_length: length,
         inter_geom,
     };

@@ -63,7 +63,6 @@ impl SolverScale {
                 .iter()
                 .map(|p| p.map(|v| v * s * s))
                 .collect(),
-            kappa: grid.kappa.iter().map(|k| k * s).collect(),
             total_length: grid.total_length / s,
             inter_geom: grid
                 .inter_geom
@@ -128,7 +127,6 @@ impl SolverScale {
             c_prime: g.c_prime,
             c_double_prime: g.c_double_prime.map(|v| v * s),
             c_triple_prime: g.c_triple_prime.map(|v| v * s * s),
-            kappa: g.kappa * s,
         };
         crate::topp::chain::ChainGrid {
             s: chain.s.iter().map(|v| v / s).collect(),
