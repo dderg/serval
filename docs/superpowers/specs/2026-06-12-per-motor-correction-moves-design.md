@@ -198,15 +198,18 @@ enforces it regardless.
   probe consumer —
 
   ```
-  MOTOR_ADJUST AXIS=Z MOTOR=1 DELTA=2.0 [SPEED=5] [ACCEL=100]
+  MOTOR_ADJUST MOTOR=stepper_z1 DELTA=2.0 [SPEED=5] [ACCEL=100]
   ```
 
-  thin wrapper over `adjust_motor`; enables the motors if needed, requires
-  an idle (not necessarily homed) axis. Bench script on the Trident
-  (3-motor Z): `MOTOR_ADJUST ... DELTA=2.0` → exactly one leadscrew turns,
+  thin wrapper over `adjust_motor`; the host resolves the config-section
+  stepper name to `(mcu, axis_idx, motor_idx)` from the slot binding in
+  `motion_toolhead.py` — the wire stays numeric. Unknown name → hard error
+  listing the valid names. Enables the motors if needed, requires an idle
+  (not necessarily homed) axis. Bench script on the Trident (3-motor Z):
+  `MOTOR_ADJUST MOTOR=stepper_z1 DELTA=2.0` → exactly one leadscrew turns,
   the other two stay still, Mainsail's reported Z position does not change;
   `DELTA=-2.0` returns it. Error paths: issue it mid-move → hard error;
-  bad MOTOR index → hard error. Cross-check via query-logs that the
+  `MOTOR=stepper_q` → hard error. Cross-check via query-logs that the
   correction-stream start/drain events fired and only the target stepper
   was driven.
 - Bench: Trident `Z_TILT_ADJUST` convergence once the probe consumer lands.
