@@ -2210,6 +2210,7 @@ impl PyMotionBridge {
     }
 
     #[pyo3(signature = (
+        axes,
         limits,
         shaper_type_x,
         shaper_freq_x,
@@ -2222,6 +2223,7 @@ impl PyMotionBridge {
     #[allow(clippy::too_many_arguments)]
     fn init_planner(
         &self,
+        axes: Vec<(String, Vec<String>, Vec<String>)>,
         limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
         shaper_type_x: &str,
         shaper_freq_x: f64,
@@ -2244,12 +2246,23 @@ impl PyMotionBridge {
             build_shaper_config(shaper_type_x, shaper_freq_x, shaper_type_y, shaper_freq_y)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
+        let axis_registry = config::AxisRegistry::try_new(
+            axes.into_iter()
+                .map(|(name, follows, motors)| config::AxisDecl {
+                    name,
+                    follows,
+                    motors,
+                })
+                .collect(),
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
         let limit_sections: Vec<config::LimitSection> = limits
             .into_iter()
             .map(|(name, axes, max_velocity, max_accel, max_jerk)| {
                 let axes = axes
                     .iter()
-                    .map(|a| config::axis_index(a))
+                    .map(|a| axis_registry.axis_index(a))
                     .collect::<Result<Vec<usize>, _>>()
                     .map_err(|e| PyValueError::new_err(e.to_string()))?;
                 Ok(config::LimitSection {
@@ -2263,6 +2276,7 @@ impl PyMotionBridge {
             .collect::<PyResult<_>>()?;
 
         let mut cfg = config::PlannerConfig::default();
+        cfg.axis_registry = axis_registry;
         cfg.limit_sections = limit_sections;
         cfg.to_temporal_limits()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
