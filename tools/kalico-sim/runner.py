@@ -685,6 +685,19 @@ def run_simulation(
                         beacon_error = "klippy.log contains a Traceback"
                     elif "Failed to load module 'beacon'" in klippy_content:
                         beacon_error = "beacon module failed to load"
+                if beacon_error is not None:
+                    traffic = log_dir / "beacon_traffic.log"
+                    if traffic.exists():
+                        for line in traffic.read_text(
+                            errors="replace"
+                        ).splitlines()[-150:]:
+                            log.info("TRAFFIC %s", line)
+                    events_dir = log_dir / "events"
+                    for ev_file in sorted(events_dir.glob("*.jsonl")):
+                        for line in ev_file.read_text(
+                            errors="replace"
+                        ).splitlines()[-600:]:
+                            log.info("EVENT %s", line)
                 if beacon_error is None:
                     for needle in BEACON_TEST_LOG_ASSERTIONS.get(
                         beacon_test, ()
@@ -1411,6 +1424,7 @@ BEACON_TEST_SCRIPTS = {
     "contact": [
         ("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", 10),
         ("G4 P1000", 15),
+        ("PROBE PROBE_METHOD=contact SAMPLES=1", 120),
         ("BEACON_AUTO_CALIBRATE", 300),
     ],
     "probe": [
