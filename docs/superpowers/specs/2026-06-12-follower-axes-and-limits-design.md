@@ -37,6 +37,31 @@ meaning; stepper config carries hardware. Limits can in the future be declared
 in stepper space (§3); the linear kinematic map translates them into ordinary
 constraint rows.
 
+The kinematic map is itself declared in config, not implied by stepper section
+names. The kinematics declaration names a type — which defines the roles that
+exist and the linear math (corexy: belts `a`/`b`, `a = x + y`, `b = x − y`) —
+and assigns steppers to roles explicitly:
+
+```
+[kinematics]
+type: corexy
+a_steppers: stepper_front, stepper_rear_left
+b_steppers: stepper_back, stepper_rear_right
+z_steppers: stepper_z0, stepper_z1, stepper_z2
+```
+
+Stepper names are arbitrary; a stepper has no axis identity outside this
+assignment (`stepper_x` on a corexy was always a lie, and the lie has nowhere
+to live). Follower axes do not appear in the kinematics map: their relation is
+`follows`, and their motors are assigned like any other stepper.
+
+Axis names double as G-code word letters (`[axis e]` ↔ word `E`): single
+letters, collisions with structural G5 words (I/J/P/Q/F) rejected at load.
+Commands that presuppose an axis *purpose* the system does not have (G10/G11
+firmware retraction presupposing "the extruder") are unsupported: the
+`[firmware_retraction]` section is rejected at config load. If such features
+return, they must be expressed in axis terms — separate design.
+
 ## 2. G-code input and reduce
 
 Input remains G5/G5.1 only at the reduce boundary. An extruding move is a cubic
@@ -259,7 +284,9 @@ Separately plannable, separately testable, in dependency order:
    Depends on 2; testable against 3's output offline (klipper-sim).
 5. **Concept removal sweep.** Toolhead and remaining mainline-planner fossils
    out of the Rust side; klippy/bridge seam renamed; thin compat shim for the
-   published `toolhead` status object, retired on its own schedule.
+   published `toolhead` status object, retired on its own schedule. Includes
+   the declared kinematic map (§1): `[kinematics]` section with explicit
+   stepper-to-role assignment, replacing role-encoding stepper section names.
 6. **Observability.** Binding-constraint reporting via structured logs. Small,
    rides on 3.
 
