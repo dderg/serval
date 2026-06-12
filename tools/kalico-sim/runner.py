@@ -1421,6 +1421,10 @@ serial: {h7_pty}
 [printer]
 kinematics: corexy
 
+[axis x]
+[axis y]
+[axis z]
+
 [limit gantry]
 axes: x, y
 max_velocity: 300
@@ -1685,6 +1689,10 @@ serial: {h7_pty}
 
 [printer]
 kinematics: cartesian
+
+[axis x]
+[axis y]
+[axis z]
 
 [limit gantry]
 axes: x, y
@@ -2186,6 +2194,10 @@ serial: {h7_pty}
 [printer]
 kinematics: cartesian
 
+[axis x]
+[axis y]
+[axis z]
+
 [limit gantry]
 axes: x, y
 max_velocity: 100
@@ -2249,6 +2261,10 @@ serial: {h7_pty}
 
 [printer]
 kinematics: cartesian
+
+[axis x]
+[axis y]
+[axis z]
 
 [limit gantry]
 axes: x, y
@@ -2333,6 +2349,10 @@ serial: {h7_pty}
 
 [printer]
 kinematics: cartesian
+
+[axis x]
+[axis y]
+[axis z]
 
 [limit gantry]
 axes: x, y
@@ -2557,6 +2577,18 @@ serial: /dev/null
 
 [printer]
 kinematics: corexy
+
+[axis x]
+[axis y]
+[axis z]
+
+[axis e]
+follows: x, y, z
+
+[limit extruder]
+axes: e
+max_velocity: 75
+max_accel: 1500
 
 [limit gantry]
 axes: x, y
