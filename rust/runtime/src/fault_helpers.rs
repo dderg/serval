@@ -165,6 +165,13 @@ pub fn raise_steps_per_sample_exceeded(
 ) {
     let detail = ((axis_idx as u32 & 0xFF) << 16) | abs_steps.min(0xFFFF);
     shared.fault_detail.store(detail, Ordering::Release);
+    // Stash the absolute target step count in the tick-blocker-pc slot: it is
+    // meaningless for a non-tick fault, and the C fault emitter ships it as the
+    // event's `segment_id`, a channel that survives the fault-shutdown (unlike
+    // the log ring). `prev = target - signed_steps` is then recoverable host-side.
+    shared
+        .tick_blocker_pc
+        .store(target_step_count as u32, Ordering::Release);
     shared.last_error.store(
         FaultCode::StepsPerSampleExceeded.as_i32(),
         Ordering::Release,
