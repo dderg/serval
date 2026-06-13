@@ -522,13 +522,10 @@ pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::
     configs
         .iter()
         .flat_map(|cfg| {
-            cfg.axes
-                .iter()
-                .filter(|&&a| a < AXIS_E)
-                .map(move |&a| crate::pump::AxisKey {
-                    mcu_id: cfg.mcu_id,
-                    axis: a as u8,
-                })
+            cfg.axes.iter().map(move |&a| crate::pump::AxisKey {
+                mcu_id: cfg.mcu_id,
+                axis: a as u8,
+            })
         })
         .collect()
 }
@@ -551,7 +548,7 @@ mod drip_cohort_participants_tests {
     }
 
     #[test]
-    fn excludes_the_extruder_so_the_homing_floor_can_advance() {
+    fn includes_every_configured_axis_so_lane_3_enqueues_stay_in_cohort() {
         let configs = vec![cfg(0, vec![AXIS_Y, AXIS_Z, AXIS_E]), cfg(1, vec![AXIS_X])];
         let participants = drip_cohort_participants(&configs);
         assert_eq!(
@@ -566,12 +563,15 @@ mod drip_cohort_participants_tests {
                     axis: AXIS_Z as u8
                 },
                 AxisKey {
+                    mcu_id: 0,
+                    axis: AXIS_E as u8
+                },
+                AxisKey {
                     mcu_id: 1,
                     axis: AXIS_X as u8
                 },
             ]
         );
-        assert!(participants.iter().all(|k| k.axis != AXIS_E as u8));
     }
 }
 
