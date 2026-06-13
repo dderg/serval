@@ -5,8 +5,8 @@ pub const KINEMATICS_COREXY: u8 = KinematicTag::CoreXy as u8;
 
 const _: () = assert!(
     KinematicTag::CoreXy as u8 == 0,
-    "wire-ABI invariant broken: KinematicTag::CoreXy discriminant must be 0 \
-     (matches KINEMATICS_COREXY on the host and the MCU firmware's kinematics byte)",
+    "KinematicTag::CoreXy discriminant must be 0 — the Python↔Rust init_planner \
+     topology tuples mirror it numerically (see segment.rs); renumbering breaks that contract",
 );
 
 pub const AXIS_X: usize = 0;
