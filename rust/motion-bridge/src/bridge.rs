@@ -3086,7 +3086,18 @@ impl PyMotionBridge {
                     })
                     .map(|c| c.mcu_id)
                     .collect();
-                crate::dispatch::build_serial_seed_sends(&configs, &ethercat_mcu_ids, x, y, z)
+                let s = crate::dispatch::build_serial_seed_sends(&configs, &ethercat_mcu_ids, x, y, z);
+                for send in &s {
+                    log::warn!(
+                        "[seed] mcu={} from_xyz=[{},{},{}] motor_q16=[{},{},{}] (A={},B={},Z={})",
+                        send.mcu_id, x, y, z,
+                        send.x_q16, send.y_q16, send.z_q16,
+                        send.x_q16 as f64 / 65536.0,
+                        send.y_q16 as f64 / 65536.0,
+                        send.z_q16 as f64 / 65536.0,
+                    );
+                }
+                s
             };
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             for s in sends {

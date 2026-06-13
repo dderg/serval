@@ -424,6 +424,19 @@ pub fn run_pump<S, F, C, A, O, D>(
                     }
                 }
                 if fresh_stream {
+                    let new_start = pieces.first().map(|(e, _)| e.coeffs[0]);
+                    let prior_end = junction_ends.get(&key).map(|j| j.end_pos);
+                    if let (Some(ns), Some(pe)) = (new_start, prior_end) {
+                        log::warn!(
+                            "[fresh-anchor] key={:?} prior_end={} new_start={} gap_mm={}",
+                            key, pe, ns, ns - pe
+                        );
+                    } else if let Some(ns) = new_start {
+                        log::warn!(
+                            "[fresh-anchor] key={:?} prior_end=NONE new_start={} (first stream after seed)",
+                            key, ns
+                        );
+                    }
                     junction_ends.remove(&key);
                 }
                 if !pieces.is_empty() {
