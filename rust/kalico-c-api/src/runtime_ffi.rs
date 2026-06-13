@@ -929,6 +929,18 @@ pub mod exports {
             if !axis.ring.is_configured() {
                 return KALICO_ERR_INVALID_ARG;
             }
+            let guard = (*isr_ptr).engine.guard_normal_commit(axis_idx);
+            if guard != KALICO_OK {
+                return guard;
+            }
+            let Some(axis) = (*isr_ptr)
+                .engine
+                .stepping_axes
+                .get_mut(axis_idx as usize)
+                .and_then(|s| s.as_mut())
+            else {
+                return KALICO_ERR_INVALID_ARG;
+            };
             match axis.ring.commit_head(new_head) {
                 runtime::piece_ring::CommitOutcome::Applied
                 | runtime::piece_ring::CommitOutcome::Stale => {}
@@ -948,6 +960,61 @@ pub mod exports {
             }
         }
         KALICO_OK
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kalico_runtime_write_correction_piece(
+        rt: *mut KalicoRuntime,
+        axis_idx: u8,
+        start_slot: u16,
+        index: u8,
+        piece_ptr: *const u8,
+    ) -> i32 {
+        if rt.is_null() || piece_ptr.is_null() {
+            return KALICO_ERR_NULL_PTR;
+        }
+        if !INIT_DONE.load(Ordering::Acquire) {
+            return KALICO_ERR_NOT_INIT;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        // SAFETY: §11.2 foreground-only. ISR pops correction ring tail; foreground writes slots only, never advances head here. piece_ptr is unaligned (protocol frame offset); PieceEntry has no invalid bit patterns.
+        unsafe {
+            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+            let ps_ptr: *mut [runtime::piece_ring::PieceEntry; runtime::state::TOTAL_RING_PIECES] =
+                UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).piece_storage));
+            let storage: &mut [runtime::piece_ring::PieceEntry] = &mut *ps_ptr;
+            let entry =
+                core::ptr::read_unaligned(piece_ptr.cast::<runtime::piece_ring::PieceEntry>());
+            (*isr_ptr)
+                .engine
+                .write_correction_piece(axis_idx, start_slot, index, entry, storage)
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kalico_runtime_commit_correction(
+        rt: *mut KalicoRuntime,
+        axis_idx: u8,
+        motor_idx: u8,
+        new_head: u32,
+    ) -> i32 {
+        if rt.is_null() {
+            return KALICO_ERR_NULL_PTR;
+        }
+        if !INIT_DONE.load(Ordering::Acquire) {
+            return KALICO_ERR_NOT_INIT;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        // SAFETY: §11.2 foreground-only. correction_ring.head is a plain u32 written only by foreground; on single-core ARMv7E-M exception entry/return are memory barriers — no explicit fence needed.
+        unsafe {
+            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+            if (*isr_ptr).engine.pieces_gated() {
+                return runtime::error::KALICO_ERR_STREAM_HALTED;
+            }
+            (*isr_ptr)
+                .engine
+                .commit_correction(axis_idx, motor_idx, new_head)
+        }
     }
 
     #[unsafe(no_mangle)]

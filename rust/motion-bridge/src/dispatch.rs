@@ -41,15 +41,6 @@ impl McuCaps {
     }
 }
 
-impl Default for McuCaps {
-    fn default() -> Self {
-        // Fallback for firmware predating QueryRuntimeCaps: 62 KB = Octopus Pro H7 SRAM budget.
-        Self {
-            total_piece_memory: 62 * 1024,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum KinematicsConfigError {
     #[error("mcu handle {handle}: unknown kinematics tag {tag}; known: 0=corexy, 1=cartesian")]
@@ -59,6 +50,11 @@ pub enum KinematicsConfigError {
          Y (axis {AXIS_Y}) on the same mcu, got axes {axes:?}"
     )]
     CorexyMissingXy { handle: u32, axes: Vec<usize> },
+    #[error(
+        "no runtime caps recorded for mcu_handle {handle} — \
+         refusing to size piece rings by guess"
+    )]
+    CapsMissing { handle: u32 },
 }
 
 pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
@@ -80,11 +76,15 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                     axes,
                 });
             }
+            let caps = caps_by_handle
+                .get(handle)
+                .copied()
+                .ok_or(KinematicsConfigError::CapsMissing { handle: *handle })?;
             Ok(McuAxisConfig {
                 mcu_id: *handle,
                 axes,
                 kinematics: *tag,
-                caps: caps_by_handle.get(handle).copied().unwrap_or_default(),
+                caps,
             })
         })
         .collect()
@@ -194,12 +194,14 @@ mod topology_tests {
     }
 
     #[test]
-    fn build_mcu_configs_missing_caps_falls_back_to_default() {
+    fn build_mcu_configs_missing_caps_is_an_error() {
         let caps: HashMap<u32, McuCaps> = HashMap::new();
         let mcus = vec![(7u32, vec![AXIS_X as u8, AXIS_Y as u8], 0u8)];
-        let cfgs = build_mcu_configs(&mcus, &caps).unwrap();
-        assert_eq!(cfgs.len(), 1);
-        assert_eq!(cfgs[0].caps, McuCaps::default());
+        let err = build_mcu_configs(&mcus, &caps).unwrap_err();
+        assert!(matches!(
+            err,
+            KinematicsConfigError::CapsMissing { handle: 7 }
+        ));
     }
 
     #[test]

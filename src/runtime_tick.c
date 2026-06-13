@@ -319,7 +319,8 @@ runtime_status_drain(void)
 }
 DECL_TASK(runtime_status_drain);
 
-extern void runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps);
+extern void runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps,
+                                     uint8_t stepper_sel);
 
 // Step-output timer wiring (TIM3 on H7, TIM2 on F4). Step-output ISR runs at
 // the same NVIC priority as TIM5, so the kick from the TIM5 ISR is SPSC-safe

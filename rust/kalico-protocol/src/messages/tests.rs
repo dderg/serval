@@ -243,6 +243,63 @@ fn push_pieces_kind_in_message_kind_table() {
 }
 
 #[test]
+fn push_correction_pieces_roundtrip() {
+    let msg = PushCorrectionPieces {
+        axis_idx: 2,
+        motor_idx: 1,
+        piece_count: 2,
+        start_slot: 5,
+        new_head: 7,
+        pieces_bytes: vec![0xAB; 64],
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    let decoded = PushCorrectionPieces::decode(&buf).unwrap();
+    assert_eq!(decoded, msg);
+}
+
+#[test]
+fn push_correction_pieces_response_roundtrip() {
+    let msg = PushCorrectionPiecesResponse {
+        result: -31,
+        arrival_clock: 0x1122_3344_5566_7788,
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    let decoded = PushCorrectionPiecesResponse::decode(&buf).unwrap();
+    assert_eq!(decoded, msg);
+}
+
+#[test]
+fn push_correction_pieces_rejects_short_body() {
+    let msg = PushCorrectionPieces {
+        axis_idx: 2,
+        motor_idx: 1,
+        piece_count: 3,
+        start_slot: 0,
+        new_head: 3,
+        pieces_bytes: vec![0; 64],
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert!(PushCorrectionPieces::decode(&buf).is_err());
+}
+
+#[test]
+fn push_correction_pieces_kind_in_message_kind_table() {
+    assert_eq!(
+        MessageKind::from_u16(0x0062),
+        Some(MessageKind::PushCorrectionPieces)
+    );
+    assert_eq!(
+        MessageKind::from_u16(0x0063),
+        Some(MessageKind::PushCorrectionPiecesResponse)
+    );
+    assert_eq!(MessageKind::PushCorrectionPieces.as_u16(), 0x0062);
+    assert_eq!(MessageKind::PushCorrectionPiecesResponse.as_u16(), 0x0063);
+}
+
+#[test]
 fn set_torque_round_trips() {
     let msg = SetTorque {
         value: 1,

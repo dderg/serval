@@ -36,7 +36,7 @@ unsafe extern "C" {
 }
 
 #[inline]
-fn kick_per_axis_timer(axis_idx: usize, cycle_abs: u32) {
+pub(crate) fn kick_per_axis_timer(axis_idx: usize, cycle_abs: u32) {
     #[cfg(not(any(test, feature = "host")))]
     // SAFETY: writes only a timer compare register and an owned-mask bit;
     // same NVIC priority as the step-output ISR so cannot interleave.
@@ -196,7 +196,8 @@ fn dispatch_pulse(
         let entry = StepEntry {
             cycle_abs,
             dir,
-            _pad: [0; 3],
+            stepper_sel: crate::step_queue::STEPPER_SEL_ALL,
+            _pad: [0; 2],
         };
         // SAFETY: `queue_ptr` is supplied by the TIM5 ISR, sole producer.
         let push_res = unsafe { queue_push(queue_ptr, entry) };

@@ -142,6 +142,18 @@ impl RingDescriptor {
         }
     }
 
+    /// Rewind all cursors to zero so a new stream can use stream-relative
+    /// slot/head numbering. Caller must guarantee the ring is empty and no
+    /// consumer is mid-flight (correction ring at stream start, under the
+    /// commit-side validation).
+    #[inline]
+    pub fn reset_cursors(&mut self) {
+        debug_assert!(self.is_empty(), "reset_cursors on a non-empty ring");
+        self.head = 0;
+        self.retired = 0;
+        self.tail = 0;
+    }
+
     /// Touches only consumer-owned cursors (`retired`, `tail`) — never `head`.
     #[inline]
     pub fn drain(&mut self) {
