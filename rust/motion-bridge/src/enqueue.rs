@@ -117,6 +117,34 @@ where
     P: Fn(u32, f64) -> u64,
 {
     let bps = nurbs::bezier::extract_bezier_pieces(curve);
+
+    if axis_idx < SPATIAL_AXES {
+        let mut prev_end: Option<f64> = None;
+        for (i, bp) in bps.iter().enumerate() {
+            let bern = bp.to_bernstein();
+            let deg = bern.len().saturating_sub(1);
+            let start_v = bern[0];
+            let end_v = bern[bern.len() - 1];
+            if deg < 3 {
+                tracing::warn!(
+                    mcu_id, axis = axis_idx, piece = i, degree = deg,
+                    start_v, end_v, "[lane-degree] sub-cubic piece (mis-elevation candidate)"
+                );
+            }
+            if let Some(pe) = prev_end {
+                let gap = start_v - pe;
+                if gap.abs() > 1e-6 {
+                    tracing::warn!(
+                        mcu_id, axis = axis_idx, piece = i, gap_mm = gap,
+                        prev_end = pe, this_start = start_v,
+                        "[lane-gap] consecutive-piece position discontinuity"
+                    );
+                }
+            }
+            prev_end = Some(end_v);
+        }
+    }
+
     let mut merged: Vec<MergedPiece> = Vec::with_capacity(bps.len());
 
     for bp in bps.iter() {
