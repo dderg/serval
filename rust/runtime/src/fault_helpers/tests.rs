@@ -115,7 +115,7 @@ fn tick_interval_exceeded_publishes_code_and_saturated_detail() {
 #[test]
 fn steps_per_sample_exceeded_publishes_code_and_detail() {
     let shared = SharedState::new();
-    raise_steps_per_sample_exceeded(&shared, 3, 200);
+    raise_steps_per_sample_exceeded(&shared, 3, 200, 0, 200);
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
         FaultCode::StepsPerSampleExceeded.as_i32()

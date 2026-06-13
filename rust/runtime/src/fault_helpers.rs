@@ -156,14 +156,41 @@ pub fn raise_tick_interval_exceeded(shared: &SharedState, gap_ticks: u32) {
 /// - bits 16..24: `axis_idx`
 /// - bits  0..16: `abs_steps` saturated at 0xFFFF
 #[inline]
-pub fn raise_steps_per_sample_exceeded(shared: &SharedState, axis_idx: usize, abs_steps: u32) {
+pub fn raise_steps_per_sample_exceeded(
+    shared: &SharedState,
+    axis_idx: usize,
+    abs_steps: u32,
+    prev_step_count: i32,
+    target_step_count: i32,
+) {
     let detail = ((axis_idx as u32 & 0xFF) << 16) | abs_steps.min(0xFFFF);
     shared.fault_detail.store(detail, Ordering::Release);
     shared.last_error.store(
         FaultCode::StepsPerSampleExceeded.as_i32(),
         Ordering::Release,
     );
+    emit_steps_detail(prev_step_count, target_step_count);
     emit_fault_log(FaultCode::StepsPerSampleExceeded, detail);
+}
+
+#[inline]
+fn emit_steps_detail(prev_step_count: i32, target_step_count: i32) {
+    #[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
+    // SAFETY: kalico_log_emit is a pure C logging sink; no aliasing constraints.
+    unsafe {
+        kalico_log_emit(
+            LOG_LEVEL_ERROR,
+            SUBSYSTEM_RUNTIME,
+            crate::log_codes::EVENT_RUNTIME_STEPS_DETAIL,
+            0,
+            prev_step_count as u32,
+            target_step_count as u32,
+        );
+    }
+    #[cfg(not(any(not(any(test, feature = "host")), feature = "mcu-linux")))]
+    {
+        let _ = (prev_step_count, target_step_count);
+    }
 }
 
 /// Latch an `UnknownStepMode` fault. Detail: `((axis_idx & 0xFF) << 16) | (mode & 0xFF)`.

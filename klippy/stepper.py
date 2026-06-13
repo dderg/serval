@@ -343,6 +343,7 @@ AXIS_HOMING_KEYS = (
     "homing_retract_dist",
     "homing_retract_speed",
     "homing_positive_dir",
+    "use_sensorless_homing",
 )
 
 

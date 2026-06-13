@@ -219,3 +219,17 @@ def test_homing_keys_on_motor_section_rejected():
             },
             [motor_section("motor a", position_min=0.0)],
         )
+
+
+def test_use_sensorless_homing_on_motor_section_rejected():
+    with pytest.raises(FakeError, match="belongs on .axis x"):
+        make_axis_rail(
+            {
+                "__name__": "axis x",
+                "position_min": 0.0,
+                "position_max": 300.0,
+                "position_endstop": 0.0,
+                "endstop_pin": "^PE5",
+            },
+            [motor_section("motor a", use_sensorless_homing=True)],
+        )

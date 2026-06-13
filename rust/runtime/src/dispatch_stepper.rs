@@ -160,7 +160,13 @@ fn dispatch_pulse(
         }
         bump_relaxed(&shared.isr_overrun_count);
         axis.last_step_count = prev_step_count;
-        raise_steps_per_sample_exceeded(shared, axis_idx, abs_steps);
+        raise_steps_per_sample_exceeded(
+            shared,
+            axis_idx,
+            abs_steps,
+            prev_step_count,
+            target_step_count,
+        );
         return;
     }
 

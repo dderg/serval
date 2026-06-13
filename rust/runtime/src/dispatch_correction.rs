@@ -134,7 +134,13 @@ fn emit_correction_steps(
     let abs_steps = signed_steps.unsigned_abs();
     if abs_steps > MAX_STEPS_PER_SAMPLE as u32 {
         axis.correction_last_step_count = prev_step_count;
-        raise_steps_per_sample_exceeded(shared, axis_idx, abs_steps);
+        raise_steps_per_sample_exceeded(
+            shared,
+            axis_idx,
+            abs_steps,
+            prev_step_count,
+            target_step_count,
+        );
         return;
     }
 
