@@ -1,7 +1,7 @@
 use nurbs::bezier::BezierPiece;
 
 use super::{EmitContext, ShaperState};
-use crate::emit_shaped::{emit_shaped, emit_shaped_with_left_bc, PerAxisHistory};
+use crate::emit_shaped::{emit_shaped, emit_shaped_with_left_bc, FollowerAnchor, PerAxisHistory};
 use crate::ShapeError;
 use crate::ShapedSegment;
 
@@ -45,16 +45,19 @@ impl ShaperState {
 
         let mut dispatched: Vec<ShapedSegment> = Vec::new();
 
-        let mut freeze_end_velocities: [Option<f64>; 3] = [None; 3];
+        let mut freeze_end_velocities: Vec<Option<f64>> = vec![None; self.axes.len()];
 
         if !self.pending_freeze.is_empty() {
             let pending = std::mem::take(&mut self.pending_freeze);
 
             let last_pending = pending.last();
             if let Some(last_seg) = last_pending {
-                for axis in 0..3 {
-                    freeze_end_velocities[axis] =
-                        Some(shaped_axis_velocity_at(&last_seg.axes[axis], t_freeze));
+                for (axis, slot) in freeze_end_velocities
+                    .iter_mut()
+                    .enumerate()
+                    .take(last_seg.axes.len())
+                {
+                    *slot = Some(shaped_axis_velocity_at(&last_seg.axes[axis], t_freeze));
                 }
             }
 
@@ -108,40 +111,35 @@ impl ShaperState {
             .planned_fitted
             .first()
             .map_or(emit_start, |f| f.t_start.max(emit_start));
-        let history_storage: [Vec<BezierPiece<f64>>; 4] = std::array::from_fn(|axis_idx| {
-            self.axes[axis_idx]
-                .pieces
-                .iter()
-                .filter(|p| p.u_start < window_start + T_EPSILON)
-                .cloned()
-                .collect()
-        });
+        let history_storage = build_history_storage(&self.axes, window_start);
         let history = PerAxisHistory {
-            axes: [
-                history_storage[0].as_slice(),
-                history_storage[1].as_slice(),
-                history_storage[2].as_slice(),
-                history_storage[3].as_slice(),
-            ],
+            axes: history_storage.iter().map(Vec::as_slice).collect(),
         };
 
         let batch_t_end = self.t_appended;
 
-        let left_bc = if dispatched.is_empty() {
-            [None; 3]
+        let left_bc: Vec<Option<f64>> = if dispatched.is_empty() {
+            vec![None; self.axes.len()]
         } else {
             freeze_end_velocities
         };
 
-        let shaped = emit_shaped_with_left_bc(
+        let anchor_values = self.follower_anchor_values(ctx, emit_start);
+        let emission = emit_shaped_with_left_bc(
             &self.planned_fitted,
             &self.planned_meta,
-            ctx.kernels,
+            ctx.chains,
             &history,
+            &FollowerAnchor {
+                t: emit_start.max(self.planned_fitted[0].t_start),
+                values: &anchor_values,
+            },
             emit_start,
             batch_t_end,
-            left_bc,
+            &left_bc,
         )?;
+        let shaped = emission.segments;
+        self.store_follower_ledgers(ctx, emission.follower_inputs);
 
         let new_pending_start = target;
         let new_pending_end = (target + max_h).min(self.t_appended);
@@ -287,22 +285,24 @@ impl ShaperState {
 
             let history_storage = build_history_storage(&self.axes, emit_start);
             let history = PerAxisHistory {
-                axes: [
-                    history_storage[0].as_slice(),
-                    history_storage[1].as_slice(),
-                    history_storage[2].as_slice(),
-                    history_storage[3].as_slice(),
-                ],
+                axes: history_storage.iter().map(Vec::as_slice).collect(),
             };
 
-            let shaped = emit_shaped(
+            let anchor_values = self.follower_anchor_values(ctx, emit_start);
+            let emission = emit_shaped(
                 &self.planned_fitted,
                 &self.planned_meta,
-                ctx.kernels,
+                ctx.chains,
                 &history,
+                &FollowerAnchor {
+                    t: emit_start.max(self.planned_fitted[0].t_start),
+                    values: &anchor_values,
+                },
                 emit_start,
                 self.t_appended,
             )?;
+            let shaped = emission.segments;
+            self.store_follower_ledgers(ctx, emission.follower_inputs);
 
             for seg in shaped {
                 if seg.t_end <= emit_start + T_EPSILON {
@@ -337,23 +337,78 @@ impl ShaperState {
 
         Ok(dispatched)
     }
-}
 
-fn build_history_storage(
-    axes: &[super::AxisShaperQueue; 4],
-    t_start: f64,
-) -> [Vec<BezierPiece<f64>>; 4] {
-    std::array::from_fn(|axis_idx| {
-        axes[axis_idx]
-            .pieces
+    /// Committed ledger value per follower at the emit window start: the lane
+    /// value where prior emissions wrote it. When `anchor_t` falls past the
+    /// lane's committed coverage (e.g. across an idle gap), the follower holds
+    /// its realized endpoint — the ledger never snaps back to the at-rest
+    /// fallback while pieces exist.
+    fn follower_anchor_values(&self, ctx: &EmitContext<'_>, emit_start: f64) -> Vec<f64> {
+        let anchor_t = emit_start.max(
+            self.planned_fitted
+                .first()
+                .map_or(emit_start, |f| f.t_start),
+        );
+        ctx.chains
+            .followers
             .iter()
-            .filter(|p| p.u_start < t_start + T_EPSILON)
-            .cloned()
+            .zip(&self.follower_emit_start)
+            .map(|((f_axis, _), &fallback)| {
+                self.axis_position_at(*f_axis, anchor_t)
+                    .or_else(|| {
+                        self.axes[*f_axis]
+                            .pieces
+                            .back()
+                            .map(|p| p.evaluate(p.u_end))
+                    })
+                    .unwrap_or(fallback)
+            })
             .collect()
-    })
+    }
+
+    /// Replace each follower lane's ledger pieces from the new emission's
+    /// input tracks. Pieces from older emissions are trimmed back to the new
+    /// coverage start so overlap regions always read the freshest plan.
+    fn store_follower_ledgers(
+        &mut self,
+        ctx: &EmitContext<'_>,
+        follower_inputs: Vec<Vec<BezierPiece<f64>>>,
+    ) {
+        for ((f_axis, _), new_pieces) in ctx.chains.followers.iter().zip(follower_inputs) {
+            let Some(first_new) = new_pieces.first() else {
+                continue;
+            };
+            let boundary = first_new.u_start;
+            let lane = &mut self.axes[*f_axis].pieces;
+            while let Some(back) = lane.back() {
+                if back.u_start >= boundary - T_EPSILON {
+                    lane.pop_back();
+                } else if back.u_end > boundary + T_EPSILON {
+                    let (left, _) = nurbs::bezier::split_piece_at(back, boundary);
+                    *lane.back_mut().unwrap() = left;
+                    break;
+                } else {
+                    break;
+                }
+            }
+            lane.extend(new_pieces);
+        }
+    }
 }
 
-fn trim_per_axis_history(axes: &mut [super::AxisShaperQueue; 4], t_dispatched: f64, max_h: f64) {
+fn build_history_storage(axes: &[super::AxisLane], t_start: f64) -> Vec<Vec<BezierPiece<f64>>> {
+    axes.iter()
+        .map(|axis| {
+            axis.pieces
+                .iter()
+                .filter(|p| p.u_start < t_start + T_EPSILON)
+                .cloned()
+                .collect()
+        })
+        .collect()
+}
+
+fn trim_per_axis_history(axes: &mut [super::AxisLane], t_dispatched: f64, max_h: f64) {
     let delta_safety = max_h;
     let trim_cutoff = t_dispatched - max_h - delta_safety;
     for axis in axes {
@@ -379,11 +434,11 @@ fn restrict_segment_lo_hi(
 ) -> Result<ShapedSegment, nurbs::AlgebraError> {
     use nurbs::algebra::restrict_to_domain;
 
-    let restricted_axes: [nurbs::ScalarNurbs<f64>; 3] = [
-        restrict_to_domain(&seg.axes[0], t_lo, t_hi)?,
-        restrict_to_domain(&seg.axes[1], t_lo, t_hi)?,
-        restrict_to_domain(&seg.axes[2], t_lo, t_hi)?,
-    ];
+    let restricted_axes: Vec<nurbs::ScalarNurbs<f64>> = seg
+        .axes
+        .iter()
+        .map(|axis| restrict_to_domain(axis, t_lo, t_hi))
+        .collect::<Result<_, _>>()?;
     Ok(ShapedSegment {
         axes: restricted_axes,
         followers: seg.followers.clone(),

@@ -1,41 +1,31 @@
 use geometry::segment::{CubicSegment, SourceRange};
-use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::VectorNurbs;
-use trajectory::plan_velocity::{PlanShaper, SafetyMode};
+use trajectory::plan_velocity::SafetyMode;
 use trajectory::streaming::{EmitContext, ReplanContext, ShaperState};
-use trajectory::{AxisShaper, ShapedSegment};
+use trajectory::{AxisChainSet, ShapedSegment};
 
-fn live_shapers() -> [Option<AxisShaper>; 4] {
-    [
-        Some(AxisShaper::SmoothMzv {
+fn live_chains() -> AxisChainSet {
+    trajectory::AxisChainSet::spatial(
+        trajectory::PostProcessorType::SmoothMzv {
             frequency_hz: 186.0,
-        }),
-        Some(AxisShaper::SmoothMzv {
+        }
+        .into_chain(),
+        trajectory::PostProcessorType::SmoothMzv {
             frequency_hz: 122.0,
-        }),
-        Some(AxisShaper::Passthrough),
-        None,
-    ]
+        }
+        .into_chain(),
+        trajectory::CompiledChain::default(),
+    )
 }
 
 fn live_ctx() -> ReplanContext {
     ReplanContext {
-        follower_pa: [0.0; temporal::MAX_AXES],
         limits: temporal::Limits::axis_boxes(
             [1000.0, 1000.0, 5.0],
             [70000.0, 70000.0, 100.0],
             [140000.0, 140000.0, 200.0],
         ),
-        kernels: [
-            Some(PlanShaper::SmoothMzv {
-                frequency_hz: 186.0,
-            }),
-            Some(PlanShaper::SmoothMzv {
-                frequency_hz: 122.0,
-            }),
-            Some(PlanShaper::Passthrough),
-            None,
-        ],
+        chains: live_chains(),
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
@@ -50,55 +40,30 @@ fn live_ctx() -> ReplanContext {
     }
 }
 
-fn emit_kernels() -> [Option<PiecewisePolynomialKernel<f64>>; 4] {
-    [
-        AxisShaper::SmoothMzv {
-            frequency_hz: 186.0,
-        }
-        .to_kernel(),
-        AxisShaper::SmoothMzv {
-            frequency_hz: 122.0,
-        }
-        .to_kernel(),
-        None,
-        None,
-    ]
-}
-
-fn passthrough_shapers() -> [Option<AxisShaper>; 4] {
-    [
-        Some(AxisShaper::Passthrough),
-        Some(AxisShaper::Passthrough),
-        Some(AxisShaper::Passthrough),
-        None,
-    ]
+fn passthrough_chains() -> AxisChainSet {
+    trajectory::AxisChainSet::spatial(
+        trajectory::CompiledChain::default(),
+        trajectory::CompiledChain::default(),
+        trajectory::CompiledChain::default(),
+    )
 }
 
 fn passthrough_ctx() -> ReplanContext {
     let mut ctx = live_ctx();
-    ctx.kernels = [
-        Some(PlanShaper::Passthrough),
-        Some(PlanShaper::Passthrough),
-        Some(PlanShaper::Passthrough),
-        None,
-    ];
+    ctx.chains = passthrough_chains();
     ctx
-}
-
-fn passthrough_emit_kernels() -> [Option<PiecewisePolynomialKernel<f64>>; 4] {
-    [None, None, None, None]
 }
 
 fn run_jog_experiment(
     label: &str,
-    shapers: &[Option<AxisShaper>; 4],
     ctx: &ReplanContext,
-    emit: &[Option<PiecewisePolynomialKernel<f64>>; 4],
     strokes: &[(f64, f64)],
     feedrate: f64,
 ) -> Vec<bool> {
-    let mut state = ShaperState::new([0.0; 4], shapers);
-    let ctx_emit = EmitContext { kernels: emit };
+    let mut state = ShaperState::new(&[0.0; 3], &ctx.chains);
+    let ctx_emit = EmitContext {
+        chains: &ctx.chains,
+    };
     let mut converged = Vec::with_capacity(strokes.len());
     eprintln!("--- {label} ---");
     for (i, (from, to)) in strokes.iter().enumerate() {
@@ -142,66 +107,37 @@ fn mid_flight_fast_jog_replan_converges_across_regimes() {
         [140000.0, 140000.0, 200.0],
     );
 
-    let scenarios: [(
-        &str,
-        &[Option<AxisShaper>; 4],
-        &ReplanContext,
-        &[Option<PiecewisePolynomialKernel<f64>>; 4],
-        &[(f64, f64)],
-        f64,
-    ); 6] = [
-        (
-            "shaped+reversal",
-            &live_shapers(),
-            &live_ctx(),
-            &emit_kernels(),
-            &reversal,
-            feedrate,
-        ),
-        (
-            "shaped+continuation",
-            &live_shapers(),
-            &live_ctx(),
-            &emit_kernels(),
-            &continuation,
-            feedrate,
-        ),
+    let scenarios: [(&str, &ReplanContext, &[(f64, f64)], f64); 6] = [
+        ("shaped+reversal", &live_ctx(), &reversal, feedrate),
+        ("shaped+continuation", &live_ctx(), &continuation, feedrate),
         (
             "shaped+continuation_long_200mm",
-            &live_shapers(),
             &live_ctx(),
-            &emit_kernels(),
             &long_continuation,
             feedrate,
         ),
         (
             "shaped+continuation_500mms",
-            &live_shapers(),
             &live_ctx(),
-            &emit_kernels(),
             &continuation,
             500.0,
         ),
         (
             "shaped+continuation_1000mms_of_vmax2000",
-            &live_shapers(),
             &ctx_vmax2000,
-            &emit_kernels(),
             &continuation,
             feedrate,
         ),
         (
             "passthrough+reversal",
-            &passthrough_shapers(),
             &passthrough_ctx(),
-            &passthrough_emit_kernels(),
             &reversal,
             feedrate,
         ),
     ];
 
-    for (label, shapers, ctx, emit, strokes, fr) in scenarios {
-        let converged = run_jog_experiment(label, shapers, ctx, emit, strokes, fr);
+    for (label, ctx, strokes, fr) in scenarios {
+        let converged = run_jog_experiment(label, ctx, strokes, fr);
         assert!(
             converged.iter().all(|&c| c),
             "{label}: a mid-flight replan failed to converge — the empty-history boundary \
@@ -348,10 +284,11 @@ fn probe_stream(label: &str, segments: &[ShapedSegment]) {
 /// and tripped the SegmentLate fatal abort.
 #[test]
 fn back_to_back_fast_jogs_replan_stays_realtime() {
-    let mut state = ShaperState::new([0.0; 4], &live_shapers());
     let ctx = live_ctx();
-    let kernels = emit_kernels();
-    let ctx_emit = EmitContext { kernels: &kernels };
+    let mut state = ShaperState::new(&[0.0; 3], &ctx.chains);
+    let ctx_emit = EmitContext {
+        chains: &ctx.chains,
+    };
 
     let feedrate = 1000.0;
     let jog_mm = 30.0;
@@ -392,10 +329,11 @@ fn back_to_back_fast_jogs_replan_stays_realtime() {
 
 #[test]
 fn live_jog_sequence_velocity_probe() {
-    let mut state = ShaperState::new([0.0; 4], &live_shapers());
     let ctx = live_ctx();
-    let kernels = emit_kernels();
-    let ctx_emit = EmitContext { kernels: &kernels };
+    let mut state = ShaperState::new(&[0.0; 3], &ctx.chains);
+    let ctx_emit = EmitContext {
+        chains: &ctx.chains,
+    };
 
     let mut all: Vec<ShapedSegment> = Vec::new();
 
@@ -419,7 +357,7 @@ fn live_jog_sequence_velocity_probe() {
     probe_stream("jog-sequence", &all);
     cross_axis_contamination("jog-sequence", &all, 0);
 
-    let mut state2 = ShaperState::new([0.0; 4], &live_shapers());
+    let mut state2 = ShaperState::new(&[0.0; 3], &ctx.chains);
     let mut homing: Vec<ShapedSegment> = Vec::new();
     state2
         .append_and_replan(linear_x_segment(0.0, -258.0, 40.0), &ctx)

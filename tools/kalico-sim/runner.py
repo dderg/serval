@@ -458,8 +458,8 @@ def run_simulation(
                 # rejects freq=0, so omitting it causes immediate boot failure.
                 with open(rendered_cfg, "a") as _cfgf:
                     _cfgf.write(
-                        "\n[input_shaper]\nshaper_freq_x: 50\nshaper_freq_y: 50\n"
-                        "shaper_type: smooth_mzv\n\n[pause_resume]\n\n"
+                        "\n[post_processor is_xy]\ntype: smooth_mzv\n"
+                        "frequency_hz: 50\n\n[pause_resume]\n\n"
                         "[display_status]\n\n[exclude_object]\n\n"
                         "[gcode_macro PAUSE]\nrename_existing: BASE_PAUSE\n"
                         "gcode:\n  BASE_PAUSE\n\n"
@@ -1417,10 +1417,9 @@ def _prepare_config(
             and not sensorless_phase_test
         ):
             cfg += """
-[input_shaper]
-shaper_freq_x: 50
-shaper_freq_y: 50
-shaper_type: smooth_mzv
+[post_processor is_xy]
+type: smooth_mzv
+frequency_hz: 50
 """
         cfg_path = tmp_dir / "printer.cfg"
         cfg_path.write_text(cfg)
@@ -1582,7 +1581,11 @@ serial: {h7_pty}
 kinematics: corexy
 
 [axis x]
+post_processors: is_xy
+
 [axis y]
+post_processors: is_xy
+
 [axis z]
 
 [limit gantry]
@@ -1640,10 +1643,9 @@ home_method: proximity
 home_method_when_homed: proximity
 home_autocalibrate: never
 {bed_mesh_section}
-[input_shaper]
-shaper_freq_x: 50
-shaper_freq_y: 50
-shaper_type: smooth_mzv
+[post_processor is_xy]
+type: smooth_mzv
+frequency_hz: 50
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -1851,7 +1853,11 @@ serial: {h7_pty}
 kinematics: cartesian
 
 [axis x]
+post_processors: is_xy
+
 [axis y]
+post_processors: is_xy
+
 [axis z]
 
 [limit gantry]
@@ -1899,10 +1905,9 @@ position_min: -5
 position_max: 250
 homing_speed: 5
 {safe_z_section}{probe_section}{remote_section}{points_sections}
-[input_shaper]
-shaper_freq_x: 50
-shaper_freq_y: 50
-shaper_type: smooth_mzv
+[post_processor is_xy]
+type: smooth_mzv
+frequency_hz: 50
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -2355,7 +2360,11 @@ serial: {h7_pty}
 kinematics: cartesian
 
 [axis x]
+post_processors: is_xy
+
 [axis y]
+post_processors: is_xy
+
 [axis z]
 
 [limit gantry]
@@ -2502,7 +2511,11 @@ serial: {h7_pty}
 kinematics: cartesian
 
 [axis x]
+post_processors: is_xy
+
 [axis y]
+post_processors: is_xy
+
 [axis z]
 
 [limit gantry]
@@ -2558,10 +2571,9 @@ position_endstop: 0
 position_max: 250
 homing_speed: 5
 
-[input_shaper]
-shaper_freq_x: 50
-shaper_freq_y: 50
-shaper_type: smooth_mzv
+[post_processor is_xy]
+type: smooth_mzv
+frequency_hz: 50
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -2590,7 +2602,11 @@ serial: {h7_pty}
 kinematics: cartesian
 
 [axis x]
+post_processors: is_xy
+
 [axis y]
+post_processors: is_xy
+
 [axis z]
 
 [limit gantry]
@@ -2649,10 +2665,9 @@ sense_resistor: 0.075
 diag0_pin: gpiochip0/gpio203
 driver_SGT: 1
 
-[input_shaper]
-shaper_freq_x: 50
-shaper_freq_y: 50
-shaper_type: smooth_mzv
+[post_processor is_xy]
+type: smooth_mzv
+frequency_hz: 50
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -2818,11 +2833,19 @@ serial: /dev/null
 kinematics: corexy
 
 [axis x]
+post_processors: is_xy
+
 [axis y]
+post_processors: is_xy
+
 [axis z]
 
 [axis e]
 follows: x, y, z
+
+[post_processor is_xy]
+type: smooth_mzv
+frequency_hz: 50
 
 [limit extruder]
 axes: e

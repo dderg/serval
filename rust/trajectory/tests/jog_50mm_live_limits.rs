@@ -1,6 +1,6 @@
 use nurbs::VectorNurbs;
 use temporal::multi::{GridStrategy, SegmentInput};
-use trajectory::{AxisShaper, ShapeBatchInput, ShapeSegmentInput, ShaperConfig};
+use trajectory::{ShapeBatchInput, ShapeSegmentInput};
 
 fn x_50mm_collinear_cubic() -> VectorNurbs<f64, 3> {
     VectorNurbs::<f64, 3>::try_new(
@@ -33,13 +33,26 @@ fn jog_50mm_at_100mms_with_live_limits() {
             curve: &curve,
             limits: live_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
+    let chains = trajectory::AxisChainSet::spatial(
+        trajectory::PostProcessorType::SmoothMzv {
+            frequency_hz: 186.0,
+        }
+        .into_chain(),
+        trajectory::PostProcessorType::SmoothMzv {
+            frequency_hz: 122.0,
+        }
+        .into_chain(),
+        trajectory::CompiledChain::default(),
+    );
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
@@ -48,15 +61,6 @@ fn jog_50mm_at_100mms_with_live_limits() {
             target_grid_spacing_mm: 0.5,
         },
         worker_threads: 1,
-        shaper: ShaperConfig {
-            x: AxisShaper::SmoothMzv {
-                frequency_hz: 186.0,
-            },
-            y: AxisShaper::SmoothMzv {
-                frequency_hz: 122.0,
-            },
-            z: AxisShaper::Passthrough,
-        },
         fit_tolerance_mm: 0.005,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,
@@ -98,13 +102,26 @@ fn jog_50mm_with_higher_scv() {
             curve: &curve,
             limits,
             followers: &[],
+            virtual_path: None,
         },
         followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
+    let chains = trajectory::AxisChainSet::spatial(
+        trajectory::PostProcessorType::SmoothMzv {
+            frequency_hz: 186.0,
+        }
+        .into_chain(),
+        trajectory::PostProcessorType::SmoothMzv {
+            frequency_hz: 122.0,
+        }
+        .into_chain(),
+        trajectory::CompiledChain::default(),
+    );
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
@@ -113,15 +130,6 @@ fn jog_50mm_with_higher_scv() {
             target_grid_spacing_mm: 0.5,
         },
         worker_threads: 1,
-        shaper: ShaperConfig {
-            x: AxisShaper::SmoothMzv {
-                frequency_hz: 186.0,
-            },
-            y: AxisShaper::SmoothMzv {
-                frequency_hz: 122.0,
-            },
-            z: AxisShaper::Passthrough,
-        },
         fit_tolerance_mm: 0.005,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,
@@ -159,12 +167,25 @@ fn probe_with_feedrate(feedrate: f64, dist_mm: f64) -> f64 {
             curve: &curve,
             limits,
             followers: &[],
+            virtual_path: None,
         },
         followers: &[],
         feedrate_mm_s: feedrate,
     }];
+    let chains = trajectory::AxisChainSet::spatial(
+        trajectory::PostProcessorType::SmoothMzv {
+            frequency_hz: 186.0,
+        }
+        .into_chain(),
+        trajectory::PostProcessorType::SmoothMzv {
+            frequency_hz: 122.0,
+        }
+        .into_chain(),
+        trajectory::CompiledChain::default(),
+    );
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
@@ -173,15 +194,6 @@ fn probe_with_feedrate(feedrate: f64, dist_mm: f64) -> f64 {
             target_grid_spacing_mm: 0.5,
         },
         worker_threads: 1,
-        shaper: ShaperConfig {
-            x: AxisShaper::SmoothMzv {
-                frequency_hz: 186.0,
-            },
-            y: AxisShaper::SmoothMzv {
-                frequency_hz: 122.0,
-            },
-            z: AxisShaper::Passthrough,
-        },
         fit_tolerance_mm: 0.005,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,
@@ -222,13 +234,26 @@ fn jog_50mm_with_z_jmax_uncapped() {
             curve: &curve,
             limits,
             followers: &[],
+            virtual_path: None,
         },
         followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
+    let chains = trajectory::AxisChainSet::spatial(
+        trajectory::PostProcessorType::SmoothMzv {
+            frequency_hz: 186.0,
+        }
+        .into_chain(),
+        trajectory::PostProcessorType::SmoothMzv {
+            frequency_hz: 122.0,
+        }
+        .into_chain(),
+        trajectory::CompiledChain::default(),
+    );
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
@@ -237,15 +262,6 @@ fn jog_50mm_with_z_jmax_uncapped() {
             target_grid_spacing_mm: 0.5,
         },
         worker_threads: 1,
-        shaper: ShaperConfig {
-            x: AxisShaper::SmoothMzv {
-                frequency_hz: 186.0,
-            },
-            y: AxisShaper::SmoothMzv {
-                frequency_hz: 122.0,
-            },
-            z: AxisShaper::Passthrough,
-        },
         fit_tolerance_mm: 0.005,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,
@@ -292,13 +308,20 @@ fn jog_50mm_low_accel_baseline() {
             curve: &curve,
             limits,
             followers: &[],
+            virtual_path: None,
         },
         followers: &[],
         feedrate_mm_s: 100.0,
     }];
 
+    let chains = trajectory::AxisChainSet::spatial(
+        trajectory::PostProcessorType::SmoothMzv { frequency_hz: 50.0 }.into_chain(),
+        trajectory::PostProcessorType::SmoothMzv { frequency_hz: 50.0 }.into_chain(),
+        trajectory::CompiledChain::default(),
+    );
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Adaptive {
@@ -307,11 +330,6 @@ fn jog_50mm_low_accel_baseline() {
             target_grid_spacing_mm: 0.5,
         },
         worker_threads: 1,
-        shaper: ShaperConfig {
-            x: AxisShaper::SmoothMzv { frequency_hz: 50.0 },
-            y: AxisShaper::SmoothMzv { frequency_hz: 50.0 },
-            z: AxisShaper::Passthrough,
-        },
         fit_tolerance_mm: 0.005,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,

@@ -27,17 +27,5 @@ pub fn build_smooth_mzv_kernel(t_sm: f64) -> PiecewisePolynomialKernel<f64> {
     build_bell_kernel(t_sm)
 }
 
-impl crate::AxisShaper {
-    pub fn to_kernel(&self) -> Option<PiecewisePolynomialKernel<f64>> {
-        match self {
-            Self::SmoothZv { frequency_hz } => Some(build_smooth_zv_kernel(0.8025 / frequency_hz)),
-            Self::SmoothMzv { frequency_hz } => {
-                Some(build_smooth_mzv_kernel(0.95625 / frequency_hz))
-            }
-            Self::Passthrough => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests;

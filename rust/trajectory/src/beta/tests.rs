@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ShapeBatchInput, ShapeSegmentInput, ShaperConfig};
+use crate::{AxisChainSet, ShapeBatchInput, ShapeSegmentInput};
 use geometry::segment::FollowerDemand;
 
 const E_FOLLOWER_04: &[FollowerDemand] = &[FollowerDemand {
@@ -25,16 +25,18 @@ fn default_limits() -> temporal::Limits {
     temporal::Limits::try_new(&sets, 4).unwrap()
 }
 
-fn default_shaper_config() -> ShaperConfig {
-    ShaperConfig {
-        x: crate::AxisShaper::SmoothZv {
+fn default_chain_set() -> AxisChainSet {
+    AxisChainSet::spatial(
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 180.0,
-        },
-        y: crate::AxisShaper::SmoothZv {
+        }
+        .into_chain(),
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 120.0,
-        },
-        z: crate::AxisShaper::Passthrough,
-    }
+        }
+        .into_chain(),
+        crate::CompiledChain::default(),
+    )
 }
 
 fn straight_linear(start: [f64; 3], end: [f64; 3]) -> VectorNurbs<f64, 3> {
@@ -50,18 +52,20 @@ fn single_straight_line_converges() {
             curve: &curve,
             limits: generous_limits,
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
+    let chains = default_chain_set();
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
         follower_history: None,
         segments: &segments,
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         worker_threads: 1,
-        shaper: default_shaper_config(),
+        chains: &chains,
+        follower_start: &[],
         fit_tolerance_mm: 0.5,
         beta_max_iters: 1,
         beta_convergence_ratio: 1.02,
@@ -102,6 +106,7 @@ fn derate_detects_exceeding_peaks() {
         ],
         t_start: 0.0,
         t_end: 1.0,
+        virtual_s_of_t: None,
     }];
     let machine = vec![[5000.0, 5000.0, 5000.0]];
     let peaks_within = vec![[4000.0, 3000.0, 2000.0]];
@@ -163,4 +168,67 @@ fn effective_machine_a_max_worst_case_empty_is_empty() {
     let machine: Vec<[f64; 3]> = vec![];
     let effective = effective_machine_a_max(&machine, SafetyMode::WorstCaseFuture);
     assert!(effective.is_empty());
+}
+
+#[test]
+fn jerk_limited_z_move_converges_under_worst_case_derate() {
+    let curve = straight_linear([0.0, 0.0, 0.0], [0.0, 0.0, 10.0]);
+    let sets = vec![
+        temporal::LimitSet {
+            axes: temporal::AxisSet::from_indices(&[0, 1]),
+            v_max: 800.0,
+            a_max: 30_000.0,
+            j_max: 60_000.0,
+        },
+        temporal::LimitSet {
+            axes: temporal::AxisSet::from_indices(&[2]),
+            v_max: 25.0,
+            a_max: 100.0,
+            j_max: 200.0,
+        },
+    ];
+    let limits = temporal::Limits::try_new(&sets, 3).unwrap();
+    let segments = [ShapeSegmentInput {
+        temporal: temporal::multi::SegmentInput {
+            curve: &curve,
+            limits,
+            followers: &[],
+            virtual_path: None,
+        },
+        followers: &[],
+        feedrate_mm_s: 15.0,
+    }];
+    let chains = AxisChainSet::passthrough_spatial();
+    let input = ShapeBatchInput {
+        follower_history: None,
+        segments: &segments,
+        grid_strategy: temporal::multi::GridStrategy::Adaptive {
+            min_n: 20,
+            max_n: 200,
+            target_grid_spacing_mm: 0.5,
+        },
+        worker_threads: 1,
+        chains: &chains,
+        follower_start: &[],
+        fit_tolerance_mm: 0.005,
+        beta_max_iters: 10,
+        beta_convergence_ratio: 1.02,
+        initial_v: 0.0,
+        initial_a: 0.0,
+        terminal_v: 0.0,
+        start_d2_override: None,
+    };
+
+    let output =
+        plan_velocity_inner(&input, SafetyMode::WorstCaseFuture).expect("plan should succeed");
+    assert!(
+        output.stats.beta_converged,
+        "jerk-limited z move must converge (got {} iterations)",
+        output.stats.beta_iterations
+    );
+    assert!(
+        output.stats.beta_iterations <= 4,
+        "convergence must take a few derate steps, not the full budget (got {})",
+        output.stats.beta_iterations
+    );
 }

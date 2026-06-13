@@ -28,27 +28,27 @@ fn default_limits() -> temporal::Limits {
     temporal::Limits::try_new(&sets, 4).unwrap()
 }
 
-fn default_kernels() -> [Option<PlanShaper>; 4] {
-    [
-        Some(PlanShaper::SmoothZv {
+static DEFAULT_CHAINS: std::sync::LazyLock<crate::AxisChainSet> = std::sync::LazyLock::new(|| {
+    crate::AxisChainSet::spatial(
+        crate::PostProcessorType::SmoothZv {
             frequency_hz: 180.0,
-        }),
-        Some(PlanShaper::SmoothMzv {
+        }
+        .into_chain(),
+        crate::PostProcessorType::SmoothMzv {
             frequency_hz: 120.0,
-        }),
-        Some(PlanShaper::Passthrough),
-        None,
-    ]
-}
+        }
+        .into_chain(),
+        crate::CompiledChain::default(),
+    )
+});
 
 fn default_input<'a>(segments: &'a [PlanSegment<'a>], safety: SafetyMode) -> PlanInput<'a> {
     PlanInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
         follower_history: None,
         segments,
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         worker_threads: 1,
-        kernels: default_kernels(),
+        chains: &DEFAULT_CHAINS,
         fit_tolerance_mm: 0.5,
         beta_max_iters: 5,
         beta_convergence_ratio: 1.02,
@@ -75,6 +75,7 @@ fn rejects_negative_initial_v() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -96,6 +97,7 @@ fn rejects_nan_terminal_v() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -117,6 +119,7 @@ fn nonzero_initial_v_produces_chained_profile() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -151,12 +154,15 @@ fn passthrough_on_x_is_valid() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
+    let mut chains = DEFAULT_CHAINS.clone();
+    chains.chains[0].kernel = None;
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
-    input.kernels[0] = Some(PlanShaper::Passthrough);
+    input.chains = &chains;
     let result = plan_velocity(&input);
     assert!(
         result.is_ok(),
@@ -172,12 +178,15 @@ fn passthrough_on_y_is_valid() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
+    let mut chains = DEFAULT_CHAINS.clone();
+    chains.chains[1].kernel = None;
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
-    input.kernels[1] = Some(PlanShaper::Passthrough);
+    input.chains = &chains;
     let result = plan_velocity(&input);
     assert!(
         result.is_ok(),
@@ -193,12 +202,15 @@ fn none_on_x_treated_as_passthrough() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
+    let mut chains = DEFAULT_CHAINS.clone();
+    chains.chains[0].kernel = None;
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
-    input.kernels[0] = None;
+    input.chains = &chains;
     let result = plan_velocity(&input);
     assert!(
         result.is_ok(),
@@ -214,12 +226,14 @@ fn all_passthrough_produces_fitted_output() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
+    let chains = crate::AxisChainSet::passthrough_spatial();
     let mut input = default_input(&segments, SafetyMode::TerminalKnown);
-    input.kernels = [None, None, None, None];
+    input.chains = &chains;
     let out = plan_velocity(&input).expect("all-passthrough plan must succeed");
     assert_eq!(out.fitted.len(), 1);
     assert!(out.fitted[0].t_end > out.fitted[0].t_start);
@@ -233,6 +247,7 @@ fn returns_one_fitted_per_xy_segment() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -253,6 +268,7 @@ fn worst_case_future_segment_durations_monotone() {
                 curve: &curve0,
                 limits: default_limits(),
                 followers: &[],
+                virtual_path: None,
             },
             followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
@@ -262,6 +278,7 @@ fn worst_case_future_segment_durations_monotone() {
                 curve: &curve1,
                 limits: default_limits(),
                 followers: &[],
+                virtual_path: None,
             },
             followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
@@ -301,6 +318,7 @@ fn worst_case_future_is_no_faster_than_terminal_known() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -330,6 +348,7 @@ fn plan_velocity_rejects_accel_at_rest_start() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
@@ -349,6 +368,7 @@ fn plan_velocity_rejects_nonfinite_accel() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,

@@ -501,11 +501,13 @@ fn batch_tail_exchange_holds_shaped_demand_across_a_stop() {
             curve: &a,
             limits,
             followers: &demand,
+            virtual_path: None,
         },
         SegmentInput {
             curve: &b,
             limits,
             followers: &demand,
+            virtual_path: None,
         },
     ];
     let shaping = BatchShaping {

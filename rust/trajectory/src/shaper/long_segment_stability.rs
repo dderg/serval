@@ -25,6 +25,7 @@ fn constant_segment_69s(x_val: f64) -> FittedSegment {
         ],
         t_start: 0.0,
         t_end: 69.0,
+        virtual_s_of_t: None,
     }
 }
 

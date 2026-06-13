@@ -16,7 +16,7 @@ const E_FOLLOWER_04: &[FollowerDemand] = &[FollowerDemand {
 }];
 use nurbs::{ScalarNurbs, VectorNurbs};
 use temporal::multi::{GridStrategy, SegmentInput};
-use trajectory::{AxisShaper, ShapeBatchInput, ShapeError, ShapeSegmentInput, ShaperConfig};
+use trajectory::{AxisChainSet, PostProcessorType, ShapeBatchInput, ShapeError, ShapeSegmentInput};
 
 fn make_straight_line(from: [f64; 3], to: [f64; 3]) -> VectorNurbs<f64, 3> {
     VectorNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![from, to]).unwrap()
@@ -36,12 +36,12 @@ fn default_limits() -> temporal::Limits {
     temporal::Limits::try_new(&sets, 4).unwrap()
 }
 
-fn test_shaper_config() -> ShaperConfig {
-    ShaperConfig {
-        x: AxisShaper::SmoothZv { frequency_hz: 10.0 },
-        y: AxisShaper::SmoothZv { frequency_hz: 10.0 },
-        z: AxisShaper::Passthrough,
-    }
+fn test_chain_set() -> AxisChainSet {
+    AxisChainSet::spatial(
+        PostProcessorType::SmoothZv { frequency_hz: 10.0 }.into_chain(),
+        PostProcessorType::SmoothZv { frequency_hz: 10.0 }.into_chain(),
+        trajectory::CompiledChain::default(),
+    )
 }
 
 #[test]
@@ -53,18 +53,20 @@ fn shape_batch_straight_line() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
+    let chains = test_chain_set();
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Fixed(20),
         worker_threads: 1,
-        shaper: test_shaper_config(),
         fit_tolerance_mm: 0.5,
         beta_max_iters: 3,
         beta_convergence_ratio: 1.02,
@@ -110,22 +112,24 @@ fn shape_batch_short_low_velocity_line_refits_at_five_microns() {
             curve: &curve,
             limits,
             followers: &[],
+            virtual_path: None,
         },
         followers: &[],
         feedrate_mm_s: 1000.0 / 60.0,
     }];
 
+    let chains = trajectory::AxisChainSet::spatial(
+        trajectory::PostProcessorType::SmoothZv { frequency_hz: 50.0 }.into_chain(),
+        trajectory::PostProcessorType::SmoothZv { frequency_hz: 50.0 }.into_chain(),
+        trajectory::CompiledChain::default(),
+    );
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Fixed(25),
         worker_threads: 1,
-        shaper: ShaperConfig {
-            x: AxisShaper::SmoothZv { frequency_hz: 50.0 },
-            y: AxisShaper::SmoothZv { frequency_hz: 50.0 },
-            z: AxisShaper::Passthrough,
-        },
         fit_tolerance_mm: 0.005,
         beta_max_iters: 3,
         beta_convergence_ratio: 1.02,
@@ -166,6 +170,7 @@ fn shape_batch_two_segments() {
                 curve: &curve1,
                 limits: default_limits(),
                 followers: &[],
+                virtual_path: None,
             },
             followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
@@ -175,19 +180,21 @@ fn shape_batch_two_segments() {
                 curve: &curve2,
                 limits: default_limits(),
                 followers: &[],
+                virtual_path: None,
             },
             followers: E_FOLLOWER_04,
             feedrate_mm_s: 100.0,
         },
     ];
 
+    let chains = test_chain_set();
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Fixed(20),
         worker_threads: 1,
-        shaper: test_shaper_config(),
         fit_tolerance_mm: 0.5,
         beta_max_iters: 3,
         beta_convergence_ratio: 1.02,
@@ -232,18 +239,20 @@ fn shape_batch_beta_warning() {
             curve: &curve,
             limits: default_limits(),
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER_04,
         feedrate_mm_s: 100.0,
     }];
 
+    let chains = test_chain_set();
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &segments,
         grid_strategy: GridStrategy::Fixed(20),
         worker_threads: 1,
-        shaper: test_shaper_config(),
         fit_tolerance_mm: 0.5,
         beta_max_iters: 1,
         beta_convergence_ratio: 1.02,
@@ -277,13 +286,14 @@ fn shape_batch_beta_warning() {
 
 #[test]
 fn shape_batch_empty_input() {
+    let chains = test_chain_set();
     let input = ShapeBatchInput {
-        follower_pa: [0.0; temporal::MAX_AXES],
+        chains: &chains,
+        follower_start: &[],
         follower_history: None,
         segments: &[],
         grid_strategy: GridStrategy::Fixed(20),
         worker_threads: 1,
-        shaper: test_shaper_config(),
         fit_tolerance_mm: 0.5,
         beta_max_iters: 3,
         beta_convergence_ratio: 1.02,

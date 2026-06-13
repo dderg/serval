@@ -8,11 +8,17 @@ fn default_config_has_sensible_values() {
 }
 
 #[test]
-fn default_config_shaper_is_passthrough() {
+fn default_config_chains_are_passthrough() {
     let c = PlannerConfig::default();
-    assert!(matches!(c.shaper.x, AxisShaper::Passthrough));
-    assert!(matches!(c.shaper.y, AxisShaper::Passthrough));
-    assert!(matches!(c.shaper.z, AxisShaper::Passthrough));
+    let chains = c.post_processors.compile(&c.axis_registry).unwrap();
+    assert_eq!(chains.n_axes(), 3);
+    assert!(
+        chains
+            .chains
+            .iter()
+            .all(|ch| ch.kernel.is_none() && ch.gain == 0.0)
+    );
+    assert!(chains.followers.is_empty());
 }
 
 #[test]
@@ -66,50 +72,6 @@ fn section_with_no_caps_is_an_error() {
 }
 
 #[test]
-fn parse_shaper_types() {
-    assert!(matches!(
-        parse_axis_shaper("smooth_mzv", 50.0),
-        Ok(AxisShaper::SmoothMzv { frequency_hz }) if (frequency_hz - 50.0).abs() < 1e-9
-    ));
-    assert!(parse_axis_shaper("smooth_zv", 50.0).is_ok());
-    assert!(parse_axis_shaper("ei", 50.0).is_err());
-
-    // freq ≤ 0 or non-finite → Passthrough, not an error
-    assert!(matches!(
-        parse_axis_shaper("smooth_zv", 0.0),
-        Ok(AxisShaper::Passthrough)
-    ));
-    assert!(matches!(
-        parse_axis_shaper("smooth_mzv", -1.0),
-        Ok(AxisShaper::Passthrough)
-    ));
-    assert!(matches!(
-        parse_axis_shaper("smooth_zv", f64::NAN),
-        Ok(AxisShaper::Passthrough)
-    ));
-    assert!(matches!(
-        parse_axis_shaper("smooth_zv", f64::INFINITY),
-        Ok(AxisShaper::Passthrough)
-    ));
-}
-
-#[test]
-fn parse_explicit_passthrough_names() {
-    assert!(matches!(
-        parse_axis_shaper("", 0.0),
-        Ok(AxisShaper::Passthrough)
-    ));
-    assert!(matches!(
-        parse_axis_shaper("none", 50.0),
-        Ok(AxisShaper::Passthrough)
-    ));
-    assert!(matches!(
-        parse_axis_shaper("passthrough", 50.0),
-        Ok(AxisShaper::Passthrough)
-    ));
-}
-
-#[test]
 fn overlay_above_config_cannot_raise_limits() {
     let mut cfg = PlannerConfig::default();
     cfg.runtime_caps = RuntimeCaps {
@@ -153,6 +115,7 @@ fn decl(name: &str, follows: &[&str]) -> AxisDecl {
         name: name.into(),
         follows: follows.iter().map(|s| s.to_string()).collect(),
         motors: vec![],
+        post_processors: vec![],
     }
 }
 
@@ -289,4 +252,106 @@ fn follower_sections_become_temporal_sets() {
     assert_eq!(set.v_max, 75.0);
     assert_eq!(set.a_max, 1500.0);
     assert_eq!(set.j_max, 3000.0);
+}
+
+fn pp(name: &str, ty: &str, params: &[(&str, f64)]) -> PostProcessorDecl {
+    PostProcessorDecl {
+        name: name.into(),
+        ty: ty.into(),
+        params: params.iter().map(|(k, v)| ((*k).to_string(), *v)).collect(),
+    }
+}
+
+fn registry_with_e(e_post_processors: &[&str]) -> AxisRegistry {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    let mut e = decl("e", &["x", "y", "z"]);
+    e.post_processors = e_post_processors.iter().map(|s| (*s).to_string()).collect();
+    decls.push(e);
+    AxisRegistry::try_new(decls).unwrap()
+}
+
+#[test]
+fn post_processor_unknown_type_rejected() {
+    let registry = registry_with_e(&[]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[pp("is", "zv_classic", &[("frequency_hz", 50.0)])],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("zv_classic"), "got: {err}");
+}
+
+#[test]
+fn post_processor_duplicate_name_rejected() {
+    let registry = registry_with_e(&[]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[
+            pp("is", "smooth_zv", &[("frequency_hz", 50.0)]),
+            pp("is", "smooth_mzv", &[("frequency_hz", 40.0)]),
+        ],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("duplicate"), "got: {err}");
+}
+
+#[test]
+fn axis_referencing_undeclared_post_processor_rejected() {
+    let registry = registry_with_e(&["ghost"]);
+    let err = PostProcessorSet::try_new(&registry, &[]).unwrap_err();
+    assert!(err.to_string().contains("ghost"), "got: {err}");
+}
+
+#[test]
+fn two_kernels_on_one_axis_rejected_with_v1_message() {
+    let registry = registry_with_e(&["is_a", "is_b"]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[
+            pp("is_a", "smooth_zv", &[("frequency_hz", 50.0)]),
+            pp("is_b", "smooth_mzv", &[("frequency_hz", 40.0)]),
+        ],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("v1"), "got: {err}");
+}
+
+#[test]
+fn happy_path_compiles_kernel_and_pa_on_e() {
+    let registry = registry_with_e(&["is", "pa"]);
+    let set = PostProcessorSet::try_new(
+        &registry,
+        &[
+            pp("is", "smooth_zv", &[("frequency_hz", 50.0)]),
+            pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+        ],
+    )
+    .unwrap();
+    let chains = set.compile(&registry).unwrap();
+    assert_eq!(chains.n_axes(), 4);
+    assert!(chains.chains[3].kernel.is_some());
+    assert_eq!(chains.chains[3].gain, 0.04);
+    assert_eq!(chains.followers, vec![(3, vec![0, 1, 2])]);
+}
+
+#[test]
+fn set_param_updates_named_instance_and_recompile_reflects_it() {
+    let registry = registry_with_e(&["pa"]);
+    let mut set = PostProcessorSet::try_new(
+        &registry,
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])],
+    )
+    .unwrap();
+    set.set_param("pa", "k", 0.07).unwrap();
+    let chains = set.compile(&registry).unwrap();
+    assert_eq!(chains.chains[3].gain, 0.07);
+    assert!(set.set_param("nope", "k", 1.0).is_err());
+    assert!(set.set_param("pa", "frequency_hz", 1.0).is_err());
+}
+
+#[test]
+fn post_processor_missing_required_param_rejected() {
+    let registry = registry_with_e(&[]);
+    let err = PostProcessorSet::try_new(&registry, &[pp("is", "smooth_zv", &[])]).unwrap_err();
+    assert!(err.to_string().contains("frequency_hz"), "got: {err}");
 }

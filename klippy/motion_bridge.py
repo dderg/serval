@@ -38,7 +38,7 @@ _STUB_MOTION_METHODS = frozenset(
         "set_position",
         "get_last_move_time",
         "update_runtime_caps",
-        "update_shaper",
+        "update_post_processor",
         "fallback_clock_conversions",
         "dispatched_segment_count",
         "register_phase_bus",
@@ -353,10 +353,7 @@ class MotionBridgeWrapper:
         self,
         axes,
         limits,
-        shaper_type_x,
-        shaper_freq_x,
-        shaper_type_y,
-        shaper_freq_y,
+        post_processors,
         mcus,
         window_capacity=32,
         beta_max_iters=10,
@@ -364,10 +361,7 @@ class MotionBridgeWrapper:
         return self._bridge.init_planner(
             axes,
             limits,
-            shaper_type_x,
-            shaper_freq_x,
-            shaper_type_y,
-            shaper_freq_y,
+            post_processors,
             mcus,
             window_capacity,
             beta_max_iters,
@@ -434,8 +428,8 @@ class MotionBridgeWrapper:
     def update_runtime_caps(self, velocity, accel):
         return self._bridge.update_runtime_caps(velocity, accel)
 
-    def update_shaper(self, type_x, freq_x, type_y, freq_y):
-        return self._bridge.update_shaper(type_x, freq_x, type_y, freq_y)
+    def update_post_processor(self, name, key, value):
+        return self._bridge.update_post_processor(name, key, value)
 
     def get_last_move_time(self):
         return self._bridge.get_last_move_time()

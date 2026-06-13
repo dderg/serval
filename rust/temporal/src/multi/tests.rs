@@ -22,6 +22,7 @@ fn plan_batch_single_segment_works() {
         curve: &curve,
         limits: textbook_limits(),
         followers: &[],
+        virtual_path: None,
     };
     let input = BatchInput {
         segments: &[segment],
@@ -75,11 +76,13 @@ fn smooth_junction_has_no_accel_impulse() {
             curve: &left,
             limits,
             followers: &[],
+            virtual_path: None,
         },
         SegmentInput {
             curve: &right,
             limits,
             followers: &[],
+            virtual_path: None,
         },
     ];
     let out = plan_batch(BatchInput {
@@ -137,6 +140,7 @@ fn plan_batch_threads_nonzero_initial_velocity() {
         curve: &curve,
         limits: textbook_limits(),
         followers: &[],
+        virtual_path: None,
     };
     let input = BatchInput {
         segments: &[segment],
@@ -166,4 +170,70 @@ fn plan_batch_threads_nonzero_initial_velocity() {
         "terminal velocity {v_last} must be ≈ 0 mm/s under terminal_velocity = 0.0",
     );
     assert!(output.junctions.is_empty());
+}
+
+fn zero_curve_at(p: [f64; 3]) -> VectorNurbs<f64, 3> {
+    VectorNurbs::<f64, 3>::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![p, p]).unwrap()
+}
+
+fn limits_with_follower_axis() -> Limits {
+    let mut sets = textbook_limits().sets().to_vec();
+    sets.push(crate::LimitSet {
+        axes: crate::AxisSet::from_indices(&[3]),
+        v_max: 75.0,
+        a_max: 1500.0,
+        j_max: 30_000.0,
+    });
+    Limits::try_new(&sets, 4).unwrap()
+}
+
+#[test]
+fn virtual_path_segment_plans_inside_a_batch() {
+    let spatial = straight_50mm();
+    let parked = zero_curve_at([50.0, 0.0, 0.0]);
+    let followers = [crate::FollowerDemand {
+        axis: 3,
+        ratio: -1.0,
+        pa_k: 0.0,
+    }];
+    let limits = limits_with_follower_axis();
+    let length = 4.0;
+    let segs = [
+        SegmentInput {
+            curve: &spatial,
+            limits,
+            followers: &[],
+            virtual_path: None,
+        },
+        SegmentInput {
+            curve: &parked,
+            limits,
+            followers: &followers,
+            virtual_path: Some(length),
+        },
+    ];
+    let out = plan_batch(BatchInput {
+        segments: &segs,
+        shaping: None,
+        grid_strategy: GridStrategy::Fixed(32),
+        worker_threads: 1,
+        initial_velocity: 0.0,
+        initial_accel: 0.0,
+        terminal_velocity: 0.0,
+    })
+    .expect("plan_batch with a virtual-path segment");
+
+    assert_eq!(out.profiles.len(), 2);
+    let virt = &out.profiles[1];
+    let s_total = virt.samples.last().unwrap().s - virt.samples[0].s;
+    assert!(
+        (s_total - length).abs() < 1e-9,
+        "virtual profile must traverse the full virtual length; got {s_total}"
+    );
+    let v_peak = virt.samples.iter().map(|s| s.v).fold(0.0_f64, f64::max);
+    assert!(
+        v_peak <= 75.0 + 1e-6,
+        "follower v_max must bind the virtual path; peak {v_peak}"
+    );
+    assert!(virt.samples[0].v < 1e-3 && virt.samples.last().unwrap().v < 1e-3);
 }

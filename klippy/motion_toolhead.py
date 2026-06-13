@@ -316,6 +316,7 @@ class MotionToolhead:
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
         self._read_limits(config)
         self._read_axes(config)
+        self._read_post_processors(config)
         self.print_time = 0.0
         self.print_stall = 0
         self.trapq = None
@@ -344,6 +345,11 @@ class MotionToolhead:
             "RESET_VELOCITY_LIMIT",
             self.cmd_RESET_VELOCITY_LIMIT,
             desc=self.cmd_RESET_VELOCITY_LIMIT_help,
+        )
+        gcode.register_command(
+            "SET_POST_PROCESSOR",
+            self.cmd_SET_POST_PROCESSOR,
+            desc=self.cmd_SET_POST_PROCESSOR_help,
         )
         gcode.register_command("M204", self.cmd_M204)
         gcode.register_command(
@@ -669,13 +675,22 @@ class MotionToolhead:
                 "[firmware_retraction] is not supported: it presupposes an "
                 "extruder concept the motion system does not have"
             )
+        if config.has_section("input_shaper"):
+            raise config.error(
+                "[input_shaper] is not supported: declare [post_processor "
+                "<name>] sections and reference them from [axis] "
+                "post_processors"
+            )
         self.axis_sections = []
         for sc in config.get_prefix_sections("axis "):
             name = sc.get_name().split(None, 1)[1]
             follows = [a.strip().lower() for a in sc.getlist("follows", [])]
             motors = [m.strip() for m in sc.getlist("motors", [])]
-            self.axis_sections.append((name, follows, motors))
-        declared = {name for name, _, _ in self.axis_sections}
+            post_processors = [
+                p.strip() for p in sc.getlist("post_processors", [])
+            ]
+            self.axis_sections.append((name, follows, motors, post_processors))
+        declared = {name for name, _, _, _ in self.axis_sections}
         for required in ("x", "y", "z"):
             if required not in declared:
                 raise config.error(
@@ -688,6 +703,27 @@ class MotionToolhead:
                     raise config.error(
                         "[limit] references undeclared axis '%s' "
                         "(declare [axis %s])" % (a, a)
+                    )
+
+    def _read_post_processors(self, config):
+        self.post_processor_sections = []
+        for sc in config.get_prefix_sections("post_processor "):
+            name = sc.get_name().split(None, 1)[1]
+            ty = sc.get("type")
+            params = [
+                (opt, sc.getfloat(opt))
+                for opt in sc.get_prefix_options("")
+                if opt != "type"
+            ]
+            self.post_processor_sections.append((name, ty, params))
+        declared = {name for name, _, _ in self.post_processor_sections}
+        for axis_name, _, _, post_processors in self.axis_sections:
+            for ref in post_processors:
+                if ref not in declared:
+                    raise config.error(
+                        "[axis %s] references undeclared post_processor "
+                        "'%s' (declare [post_processor %s])"
+                        % (axis_name, ref, ref)
                     )
 
     def _read_limits(self, config):
@@ -801,6 +837,30 @@ class MotionToolhead:
             self.runtime_velocity, self.runtime_accel
         )
 
+    cmd_SET_POST_PROCESSOR_help = (
+        "Update a [post_processor] parameter; applies from the next replan"
+    )
+
+    def cmd_SET_POST_PROCESSOR(self, gcmd):
+        name = gcmd.get("NAME")
+        params = {
+            key: value
+            for key, value in gcmd.get_command_parameters().items()
+            if key != "NAME"
+        }
+        if not params:
+            raise gcmd.error(
+                "SET_POST_PROCESSOR NAME=%s: provide at least one "
+                "<PARAM>=<VALUE>" % name
+            )
+        for key, value in params.items():
+            try:
+                self.bridge.update_post_processor(
+                    name, key.lower(), float(value)
+                )
+            except (ValueError, RuntimeError) as e:
+                raise gcmd.error(str(e))
+
     cmd_RESET_VELOCITY_LIMIT_help = "Reset printer velocity limits"
 
     def cmd_RESET_VELOCITY_LIMIT(self, gcmd):
@@ -872,34 +932,11 @@ class MotionToolhead:
             )
             return
 
-        shaper_type_x = "smooth_zv"
-        shaper_freq_x = 0.0
-        shaper_type_y = "smooth_zv"
-        shaper_freq_y = 0.0
-        is_obj = self.printer.lookup_object("input_shaper", None)
-        if is_obj is not None:
-            try:
-                shapers = is_obj.get_shapers()
-                for s in shapers or ():
-                    if s.axis == "x":
-                        shaper_type_x = s.params.shaper_type
-                        shaper_freq_x = s.params.shaper_freq
-                    elif s.axis == "y":
-                        shaper_type_y = s.params.shaper_type
-                        shaper_freq_y = s.params.shaper_freq
-            except Exception:
-                logging.exception(
-                    "MotionToolhead: failed to read input_shaper params"
-                )
-
         try:
             self.bridge.init_planner(
                 list(self.axis_sections),
                 list(self.limit_sections),
-                shaper_type_x,
-                shaper_freq_x,
-                shaper_type_y,
-                shaper_freq_y,
+                list(self.post_processor_sections),
                 topology,
             )
             self._configure_axes_per_mcu(bridge_mcus)

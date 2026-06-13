@@ -2,9 +2,7 @@ use geometry::segment::FollowerDemand;
 use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::VectorNurbs;
 use temporal::multi::{GridStrategy, SegmentInput};
-use trajectory::{
-    shape_batch, AxisShaper, ShapeBatchInput, ShapeBatchOutput, ShapeSegmentInput, ShaperConfig,
-};
+use trajectory::{shape_batch, ShapeBatchInput, ShapeBatchOutput, ShapeSegmentInput};
 
 const E_RATIO: f64 = 0.05;
 const E_V_MAX: f64 = 75.0;
@@ -41,24 +39,29 @@ fn solve(pa_k: f64) -> ShapeBatchOutput {
             curve,
             limits,
             followers: &[],
+            virtual_path: None,
         },
         followers: E_FOLLOWER,
         feedrate_mm_s: 200.0,
     };
     let segments = [seg(&a), seg(&b), seg(&c)];
-    let mut follower_pa = [0.0; temporal::MAX_AXES];
-    follower_pa[3] = pa_k;
+    let mut chains = trajectory::AxisChainSet::spatial(
+        trajectory::PostProcessorType::SmoothZv { frequency_hz: 40.0 }.into_chain(),
+        trajectory::PostProcessorType::SmoothZv { frequency_hz: 40.0 }.into_chain(),
+        trajectory::CompiledChain::default(),
+    );
+    chains.chains.push(trajectory::CompiledChain {
+        kernel: None,
+        gain: pa_k,
+    });
+    chains.followers.push((3, vec![0, 1, 2]));
     let input = ShapeBatchInput {
         segments: &segments,
-        follower_pa,
+        chains: &chains,
+        follower_start: &[0.0],
         follower_history: None,
         grid_strategy: GridStrategy::Fixed(201),
         worker_threads: 1,
-        shaper: ShaperConfig {
-            x: AxisShaper::SmoothZv { frequency_hz: 40.0 },
-            y: AxisShaper::SmoothZv { frequency_hz: 40.0 },
-            z: AxisShaper::Passthrough,
-        },
         fit_tolerance_mm: 0.5,
         beta_max_iters: 3,
         beta_convergence_ratio: 1.02,

@@ -418,7 +418,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
     // pump are even wired — the recv_timeout branch is armed from the start.
     planner
         .submit_move(
-            crate::classify::classify_and_build([0.0; 3], 50.0, 0.0, 0.0, 0.0, 200.0).unwrap(),
+            crate::classify::classify_and_build([0.0; 3], 50.0, 0.0, 0.0, &[], 200.0).unwrap(),
         )
         .unwrap();
     let bridge = Arc::new(bridge);
@@ -461,7 +461,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
                         break; // shutdown() took the planner; stop submitting.
                     };
                     let m =
-                        crate::classify::classify_and_build([0.0; 3], 50.0, 0.0, 0.0, 0.0, 200.0)
+                        crate::classify::classify_and_build([0.0; 3], 50.0, 0.0, 0.0, &[], 200.0)
                             .unwrap();
                     if p.submit_move(m).is_err() {
                         break;

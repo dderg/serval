@@ -91,6 +91,7 @@ fn rung3_micro_arc_0_01mm_via_adaptive_batch() {
         curve: &curve,
         limits,
         followers: &[],
+        virtual_path: None,
     }];
     let output = plan_batch(BatchInput {
         segments: &segments,

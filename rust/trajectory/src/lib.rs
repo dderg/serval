@@ -2,31 +2,36 @@ mod beta;
 pub mod emit_shaped;
 pub mod fit;
 mod kernel;
+pub mod odometer;
 mod pad;
 mod parallel;
 pub mod peak;
 pub mod plan_velocity;
+pub mod post_processor;
 mod reparam;
 mod shaper;
 mod smooth_fit;
 pub mod streaming;
 
-pub use emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory};
-pub use plan_velocity::{
-    plan_velocity, PlanInput, PlanOutput, PlanSegment, PlanShaper, PlanStats, SafetyMode,
+pub use emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory, ShapeEmission};
+pub use plan_velocity::{plan_velocity, PlanInput, PlanOutput, PlanSegment, PlanStats, SafetyMode};
+pub use post_processor::{
+    AxisChainSet, CompiledChain, PostProcessorError, PostProcessorInstance, PostProcessorType,
 };
 pub use streaming::ReplanReport;
 
 #[derive(Debug)]
 pub struct ShapeBatchInput<'a> {
     pub segments: &'a [ShapeSegmentInput<'a>],
-    /// Pressure-advance gain per axis index; zero = no PA.
-    pub follower_pa: [f64; temporal::MAX_AXES],
+    /// Per-axis post-processor chains — the single source for solver shaping,
+    /// PA gains, and emission.
+    pub chains: &'a AxisChainSet,
+    /// Physical start position per follower, parallel to `chains.followers`.
+    pub follower_start: &'a [f64],
     /// Realized pre-batch per-axis velocity for the shaper window's left edge.
     pub follower_history: Option<&'a temporal::FollowerHistory>,
     pub grid_strategy: temporal::multi::GridStrategy,
     pub worker_threads: usize,
-    pub shaper: ShaperConfig,
     pub fit_tolerance_mm: f64,
     pub beta_max_iters: u8,
     pub beta_convergence_ratio: f64,
@@ -48,20 +53,6 @@ pub struct ShapeSegmentInput<'a> {
     pub feedrate_mm_s: f64,
 }
 
-#[derive(Debug, Clone)]
-pub struct ShaperConfig {
-    pub x: AxisShaper,
-    pub y: AxisShaper,
-    pub z: AxisShaper,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum AxisShaper {
-    SmoothZv { frequency_hz: f64 },
-    SmoothMzv { frequency_hz: f64 },
-    Passthrough,
-}
-
 #[derive(Debug)]
 pub struct ShapeBatchOutput {
     pub segments: Vec<ShapedSegment>,
@@ -78,7 +69,8 @@ pub struct BetaWarning {
 
 #[derive(Debug, Clone)]
 pub struct ShapedSegment {
-    pub axes: [nurbs::ScalarNurbs<f64>; 3],
+    /// Index = axis registry index: 0..3 spatial, 3.. followers. Always ≥ 3.
+    pub axes: Vec<nurbs::ScalarNurbs<f64>>,
     pub followers: Vec<geometry::segment::FollowerDemand>,
     pub t_start: f64,
     pub t_end: f64,
@@ -88,11 +80,6 @@ pub struct ShapedSegment {
 pub enum ShapeError {
     #[error("temporal batch error: {0}")]
     TemporalBatch(#[from] temporal::multi::BatchError),
-    #[error(
-        "virtual-path (follower-only) segment reached the live streaming \
-         planner; routing lands with follower emission (plan 4)"
-    )]
-    VirtualPathUnrouted,
     #[error("temporal joining: {0:?}{1}")]
     TemporalJoining(temporal::multi::JoiningStatus, String),
     #[error("segment {index} unsolvable: {status:?}")]

@@ -14,10 +14,9 @@ use kalico_host_rt::host_io::parser::{DataDictionary, FieldValue, MsgProtoParser
 use kalico_host_rt::host_io::{KalicoHostIo, KalicoHostIoConfig};
 use kalico_host_rt::passthrough_queue::{NotifyId, PassthroughEntry, PassthroughRouter};
 use kalico_host_rt::unix_native_conn::UnixNativeConn;
-use trajectory::{AxisShaper, ShaperConfig};
 
 use crate::classify;
-use crate::config::{self, PlannerConfig, parse_axis_shaper};
+use crate::config::{self, PlannerConfig};
 use crate::dispatch::{AXIS_E, McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::planner::{DispatchError, PlannerError, PlannerHandle};
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
@@ -443,19 +442,6 @@ fn planner_err(e: PlannerError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
-fn build_shaper_config(
-    type_x: &str,
-    freq_x: f64,
-    type_y: &str,
-    freq_y: f64,
-) -> Result<ShaperConfig, crate::config::ShaperConfigError> {
-    Ok(ShaperConfig {
-        x: parse_axis_shaper(type_x, freq_x)?,
-        y: parse_axis_shaper(type_y, freq_y)?,
-        z: AxisShaper::Passthrough,
-    })
-}
-
 fn resolve_motion_caps(
     caps: Option<kalico_protocol::messages::RuntimeCapsResponse>,
     label: &str,
@@ -538,13 +524,10 @@ pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::
     configs
         .iter()
         .flat_map(|cfg| {
-            cfg.axes
-                .iter()
-                .filter(|&&a| a < AXIS_E)
-                .map(move |&a| crate::pump::AxisKey {
-                    mcu_id: cfg.mcu_id,
-                    axis: a as u8,
-                })
+            cfg.axes.iter().map(move |&a| crate::pump::AxisKey {
+                mcu_id: cfg.mcu_id,
+                axis: a as u8,
+            })
         })
         .collect()
 }
@@ -567,7 +550,7 @@ mod drip_cohort_participants_tests {
     }
 
     #[test]
-    fn excludes_the_extruder_so_the_homing_floor_can_advance() {
+    fn includes_every_configured_axis_so_lane_3_enqueues_stay_in_cohort() {
         let configs = vec![cfg(0, vec![AXIS_Y, AXIS_Z, AXIS_E]), cfg(1, vec![AXIS_X])];
         let participants = drip_cohort_participants(&configs);
         assert_eq!(
@@ -582,12 +565,15 @@ mod drip_cohort_participants_tests {
                     axis: AXIS_Z as u8
                 },
                 AxisKey {
+                    mcu_id: 0,
+                    axis: AXIS_E as u8
+                },
+                AxisKey {
                     mcu_id: 1,
                     axis: AXIS_X as u8
                 },
             ]
         );
-        assert!(participants.iter().all(|k| k.axis != AXIS_E as u8));
     }
 }
 
@@ -2310,23 +2296,17 @@ impl PyMotionBridge {
     #[pyo3(signature = (
         axes,
         limits,
-        shaper_type_x,
-        shaper_freq_x,
-        shaper_type_y,
-        shaper_freq_y,
+        post_processors,
         mcus,
         window_capacity = 32,
         beta_max_iters = 10,
     ))]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn init_planner(
         &self,
-        axes: Vec<(String, Vec<String>, Vec<String>)>,
+        axes: Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
         limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
-        shaper_type_x: &str,
-        shaper_freq_x: f64,
-        shaper_type_y: &str,
-        shaper_freq_y: f64,
+        post_processors: Vec<(String, String, Vec<(String, f64)>)>,
         mcus: Vec<(u32, Vec<u8>, u8)>,
         window_capacity: usize,
         beta_max_iters: u8,
@@ -2340,20 +2320,26 @@ impl PyMotionBridge {
             return Err(PyRuntimeError::new_err("planner already initialized"));
         }
 
-        let shaper =
-            build_shaper_config(shaper_type_x, shaper_freq_x, shaper_type_y, shaper_freq_y)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
         let axis_registry = config::AxisRegistry::try_new(
             axes.into_iter()
-                .map(|(name, follows, motors)| config::AxisDecl {
-                    name,
-                    follows,
-                    motors,
-                })
+                .map(
+                    |(name, follows, motors, post_processors)| config::AxisDecl {
+                        name,
+                        follows,
+                        motors,
+                        post_processors,
+                    },
+                )
                 .collect(),
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        let pp_decls: Vec<config::PostProcessorDecl> = post_processors
+            .into_iter()
+            .map(|(name, ty, params)| config::PostProcessorDecl { name, ty, params })
+            .collect();
+        let post_processor_set = config::PostProcessorSet::try_new(&axis_registry, &pp_decls)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         let limit_sections: Vec<config::LimitSection> = limits
             .into_iter()
@@ -2378,7 +2364,7 @@ impl PyMotionBridge {
         cfg.limit_sections = limit_sections;
         cfg.to_temporal_limits()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cfg.shaper = shaper;
+        cfg.post_processors = post_processor_set;
         cfg.window_capacity = window_capacity;
         cfg.beta_max_iters = beta_max_iters;
 
@@ -2927,8 +2913,23 @@ impl PyMotionBridge {
             "bridge.submit_move enter"
         );
         py.detach(|| -> PyResult<()> {
+            let followers: Vec<(usize, f64)> = if de.abs() > 0.0 {
+                let cfg = self
+                    .planner_config
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                let axis_index = cfg.axis_registry.axis_index("e").map_err(|_| {
+                    PyRuntimeError::new_err(
+                        "E word on a move but no [axis e] is declared — declare the \
+                         follower axis or stop sending E",
+                    )
+                })?;
+                vec![(axis_index, de)]
+            } else {
+                vec![]
+            };
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            let classified = classify::classify_and_build(pos, dx, dy, dz, de, feedrate)
+            let classified = classify::classify_and_build(pos, dx, dy, dz, &followers, feedrate)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
             {
@@ -3135,6 +3136,30 @@ impl PyMotionBridge {
                     })
                     .collect()
             };
+            let follower_rebases: Vec<(crate::pump::AxisKey, u64)> = {
+                let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+                configs
+                    .iter()
+                    .flat_map(|cfg| {
+                        let handle = crate::types::mcu_handle_from_raw(cfg.mcu_id);
+                        let now_clock =
+                            router.host_time_to_mcu_clock(handle, host_now).unwrap_or(0);
+                        cfg.axes
+                            .iter()
+                            .filter(|&&a| a >= 3)
+                            .map(move |&axis| {
+                                (
+                                    crate::pump::AxisKey {
+                                        mcu_id: cfg.mcu_id,
+                                        axis: axis as u8,
+                                    },
+                                    now_clock,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
             {
                 let mut store = self
                     .motion_history
@@ -3142,6 +3167,10 @@ impl PyMotionBridge {
                     .unwrap_or_else(|p| p.into_inner());
                 for (key, now_clock, pos) in rebases {
                     store.rebase_axis(key, now_clock, pos);
+                }
+                for (key, now_clock) in follower_rebases {
+                    let held_position = store.final_position(key).unwrap_or(0.0);
+                    store.rebase_axis(key, now_clock, held_position);
                 }
             }
         }
@@ -3169,26 +3198,21 @@ impl PyMotionBridge {
         planner.update_runtime_caps(caps).map_err(planner_err)
     }
 
-    fn update_shaper(
-        &self,
-        shaper_type_x: &str,
-        freq_x: f64,
-        shaper_type_y: &str,
-        freq_y: f64,
-    ) -> PyResult<()> {
-        let shaper = build_shaper_config(shaper_type_x, freq_x, shaper_type_y, freq_y)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
+    fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
         self.planner_config
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .shaper = shaper.clone();
+            .post_processors
+            .set_param(name, key, value)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
-        planner.update_shaper(shaper).map_err(planner_err)
+        planner
+            .update_post_processor(name, key, value)
+            .map_err(planner_err)
     }
 
     fn get_last_move_time(&self) -> f64 {

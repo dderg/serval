@@ -186,3 +186,13 @@ fn eviction_keeps_capacity_and_reports_true_window() {
         other => panic!("expected BeforeRetainedWindow, got {other:?}"),
     }
 }
+
+#[test]
+fn rebase_to_earlier_clock_accepts_post_rewind_pieces() {
+    let mut store = HistoryStore::default();
+    store.record(key(), &linear(3_000_000, 1.0, 0.0, 5.0), FREQ);
+    let held = store.final_position(key()).unwrap();
+    store.rebase_axis(key(), 2_000_000, held);
+    store.record(key(), &linear(2_500_000, 1.0, 5.0, 6.0), FREQ);
+    assert_eq!(store.final_position(key()), Some(6.0));
+}
