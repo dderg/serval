@@ -232,6 +232,11 @@ __attribute__((section(".persistent_diag"), used))
 #endif
 static volatile struct diag_event diag_ring[DIAG_RING_LEN];
 
+// Set once a rust fault is recorded so the shutdown-idle USB-gap spam cannot
+// bury the DIAG_EV_RUST_FAULT entry before the next-boot replay reads it.
+// Plain .bss: cleared on every boot, so it only latches within the doomed run.
+static volatile uint8_t diag_ring_frozen;
+
 static struct diag_counters prior_diag;
 static struct diag_event    prior_ring[DIAG_RING_LEN];
 static uint32_t             prior_diag_present;
@@ -241,6 +246,8 @@ void
 diag_ring_push(uint8_t tag, uint32_t a, uint32_t b)
 {
     extern uint32_t timer_read_time(void);
+    if (diag_ring_frozen)
+        return;
     irqstatus_t flag = irq_save();
     uint32_t head = diag.ring_head & DIAG_RING_MASK;
     uint32_t next = (head + 1) & DIAG_RING_MASK;
@@ -255,6 +262,8 @@ diag_ring_push(uint8_t tag, uint32_t a, uint32_t b)
     if (diag.ring_seq > DIAG_RING_LEN
         && (diag.ring_seq - DIAG_RING_LEN) > diag.ring_overflow)
         diag.ring_overflow = diag.ring_seq - DIAG_RING_LEN;
+    if (tag == DIAG_EV_RUST_FAULT)
+        diag_ring_frozen = 1;
     diag_cache_clean();
     irq_restore(flag);
 }
