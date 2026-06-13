@@ -311,7 +311,7 @@ class Motion:
             de,
             feedrate,
         )
-        self._fire_active_callbacks()
+        self._fire_active_callbacks(move.axes_d)
         bridge_lmt_before = self.bridge.get_last_move_time()
         self.bridge.submit_move(dx, dy, dz, de, feedrate)
         self._bump_pending_end_time(
@@ -320,19 +320,28 @@ class Motion:
         self.commanded_pos[:] = move.end_pos
         self._sync_print_time()
 
-    def _fire_active_callbacks(self):
+    def _fire_active_callbacks(self, axes_d):
         if self.kin is None:
             return False
-        fired = False
-        servo_rails = [
+        dx, dy, dz, de = axes_d
+        owners = []
+        for rail in self.kin.active_rails(dx, dy, dz):
+            if isinstance(rail, servo_axis.ServoRail):
+                owners.append(rail)
+            else:
+                owners.extend(rail.get_steppers())
+        if abs(de) > 1e-9:
+            owners.extend(self.follower_steppers)
+        # Motion pieces stream to every queue, including servo axes that hold
+        # still — so every servo must be powered the moment any motion starts,
+        # or the ec-rt torque gate faults on pieces-while-parked.
+        owners.extend(
             rail
             for rail in getattr(self.kin, "rails", ())
             if isinstance(rail, servo_axis.ServoRail)
-        ]
-        # Motion pieces stream to every queue, including servo axes that hold
-        # still — so every motor must be powered the moment any motion starts,
-        # or the ec-rt torque gate faults on pieces-while-parked.
-        for owner in list(self.kin.get_steppers()) + servo_rails:
+        )
+        fired = False
+        for owner in owners:
             if not owner._active_callbacks:
                 continue
             cbs = owner._active_callbacks

@@ -72,8 +72,9 @@ def test_cartesian_rails_are_independent():
 class FakeToolhead:
     _fire_active_callbacks = Motion._fire_active_callbacks
 
-    def __init__(self, kin):
+    def __init__(self, kin, follower_steppers=()):
         self.kin = kin
+        self.follower_steppers = list(follower_steppers)
         self._clock = 100.0
 
     def get_last_move_time(self):
@@ -81,14 +82,63 @@ class FakeToolhead:
         return self._clock
 
 
+def arm_callbacks(steppers):
+    fired = []
+    for s in steppers:
+        s.add_active_callback(lambda pt, n=s.get_name(): fired.append(n))
+    return fired
+
+
+def all_steppers(kin):
+    return [s for rail in kin.rails for s in rail.get_steppers()]
+
+
 def test_each_enable_callback_gets_fresh_print_time():
     kin = make_kin("corexy")
     fired = []
-    for rail in kin.rails:
-        for s in rail.get_steppers():
-            s.add_active_callback(fired.append)
+    for s in all_steppers(kin):
+        s.add_active_callback(fired.append)
     th = FakeToolhead(kin)
-    th._fire_active_callbacks()
+    th._fire_active_callbacks((5.0, 5.0, 5.0, 0.0))
     assert len(fired) == 6
     assert len(set(fired)) == 6, "print_time must be recomputed per callback"
     assert fired == sorted(fired)
+
+
+def test_cartesian_move_enables_only_the_moving_axis():
+    kin = make_kin("cartesian")
+    fired = arm_callbacks(all_steppers(kin))
+    FakeToolhead(kin)._fire_active_callbacks((5.0, 0.0, 0.0, 0.0))
+    assert sorted(fired) == ["stepper_x", "stepper_x1"]
+
+
+def test_corexy_x_move_enables_both_gantry_steppers_not_z():
+    kin = make_kin("corexy")
+    fired = arm_callbacks(all_steppers(kin))
+    FakeToolhead(kin)._fire_active_callbacks((5.0, 0.0, 0.0, 0.0))
+    assert sorted(fired) == [
+        "stepper_x",
+        "stepper_x1",
+        "stepper_y",
+        "stepper_y1",
+    ]
+
+
+def test_extruder_move_enables_follower_not_kinematic_steppers():
+    kin = make_kin("cartesian")
+    follower = FakeStepper("motor_e")
+    fired = arm_callbacks(all_steppers(kin) + [follower])
+    FakeToolhead(kin, follower_steppers=[follower])._fire_active_callbacks(
+        (0.0, 0.0, 0.0, 4.0)
+    )
+    assert fired == ["motor_e"]
+
+
+def test_pure_kinematic_move_leaves_follower_disabled():
+    kin = make_kin("cartesian")
+    follower = FakeStepper("motor_e")
+    fired = arm_callbacks(all_steppers(kin) + [follower])
+    FakeToolhead(kin, follower_steppers=[follower])._fire_active_callbacks(
+        (0.0, 0.0, 5.0, 0.0)
+    )
+    assert fired == ["stepper_z", "stepper_z1"]
