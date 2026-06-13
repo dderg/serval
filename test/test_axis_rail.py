@@ -16,25 +16,12 @@ class FakePinParams:
         return {"pin": self.pin, "invert": False, "chip": self.chip}[key]
 
 
-class FakeMCUEndstop:
-    def __init__(self, pin):
-        self.pin = pin
-        self.steppers = []
-
-    def add_stepper(self, stepper):
-        self.steppers.append(stepper)
-
-
 class FakePins:
     def __init__(self, chip):
         self.chip = chip
 
     def lookup_pin(self, pin, can_invert=False, can_pullup=False):
         return FakePinParams(pin, self.chip)
-
-    def setup_pin(self, pin_type, pin_desc):
-        assert pin_type == "endstop"
-        return FakeMCUEndstop(pin_desc)
 
 
 class FakeMCU:
@@ -202,32 +189,21 @@ def test_axis_rail_multiple_motors_lockstep():
         ],
     )
     assert len(rail.get_steppers()) == 3
-    assert len(rail.get_endstops()) == 1
 
 
-def test_motor_section_per_motor_endstop_override():
+def test_axis_rail_defers_endstops_to_central_homing():
     rail = make_axis_rail(
         {
-            "__name__": "axis z",
+            "__name__": "axis x",
             "position_min": 0.0,
-            "position_max": 200.0,
-            "position_endstop": 0.5,
-            "endstop_pin": "^PD3",
+            "position_max": 300.0,
+            "position_endstop": 0.0,
+            "endstop_pin": "^PE5",
         },
-        [
-            motor_section("motor_z0"),
-            motor_section("motor_z1", endstop_pin="^PD4"),
-        ],
+        [motor_section("motor_a")],
     )
-    assert len(rail.get_steppers()) == 2
-    assert len(rail.get_endstops()) == 2
-
-    motor_z0, motor_z1 = rail.get_steppers()
-    endstops_by_name = {name: mcu for mcu, name in rail.get_endstops()}
-    assert set(endstops_by_name) == {"z", "motor_z1"}
-
-    assert endstops_by_name["motor_z1"].steppers == [motor_z1]
-    assert endstops_by_name["z"].steppers == [motor_z0]
+    assert rail.get_endstops() == []
+    assert rail.endstop_pin == "^PE5"
 
 
 def test_homing_keys_on_motor_section_rejected():

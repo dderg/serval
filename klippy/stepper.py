@@ -363,7 +363,6 @@ class AxisRail(BaseRail):
         self.calc_position_from_coord = primary.calc_position_from_coord
         self._parse_axis_homing(axis_config)
         self.endstops = []
-        self._build_endstops(axis_config, motor_configs)
 
     def _reject_homing_keys_on_motors(self, axis_config, motor_configs):
         for motor_config in motor_configs:
@@ -378,29 +377,13 @@ class AxisRail(BaseRail):
         self.position_endstop = config.getfloat(
             "position_endstop", config.getfloat("position_min", 0.0)
         )
-        endstop_pin = config.get("endstop_pin", None)
+        self.endstop_pin = config.get("endstop_pin", None)
         endstop_is_virtual = (
-            endstop_pin is not None and ":virtual_endstop" in endstop_pin
+            self.endstop_pin is not None
+            and ":virtual_endstop" in self.endstop_pin
         )
         self._parse_position_range(config)
         self._finalize_homing(config, endstop_is_virtual)
-
-    def _build_endstops(self, axis_config, motor_configs):
-        ppins = axis_config.get_printer().lookup_object("pins")
-        motor_pins = [mc.get("endstop_pin", None) for mc in motor_configs]
-        axis_endstop_pin = axis_config.get("endstop_pin", None)
-        if axis_endstop_pin is not None:
-            mcu_endstop = ppins.setup_pin("endstop", axis_endstop_pin)
-            for stepper, motor_pin in zip(self.steppers, motor_pins):
-                if motor_pin is None:
-                    mcu_endstop.add_stepper(stepper)
-            self.endstops.append((mcu_endstop, self.axis_name))
-        for stepper, motor_pin in zip(self.steppers, motor_pins):
-            if motor_pin is None:
-                continue
-            mcu_endstop = ppins.setup_pin("endstop", motor_pin)
-            mcu_endstop.add_stepper(stepper)
-            self.endstops.append((mcu_endstop, stepper.get_name(short=True)))
 
     def get_tmc_current_helpers(self):
         if self._tmc_current_helpers is None:
