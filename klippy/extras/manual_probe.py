@@ -22,19 +22,6 @@ class ManualProbe:
         self.z_position_endstop = zconfig.getfloat(
             "position_endstop", None, note_valid=False
         )
-        # Endstop values for linear delta printers with vertical A,B,C towers
-        a_tower_config = config.getsection("stepper_a")
-        self.a_position_endstop = a_tower_config.getfloat(
-            "position_endstop", None, note_valid=False
-        )
-        b_tower_config = config.getsection("stepper_b")
-        self.b_position_endstop = b_tower_config.getfloat(
-            "position_endstop", None, note_valid=False
-        )
-        c_tower_config = config.getsection("stepper_c")
-        self.c_position_endstop = c_tower_config.getfloat(
-            "position_endstop", None, note_valid=False
-        )
         # Conditionally register appropriate commands depending on printer
         # Cartestian printers with separate Z Axis
         if self.z_position_endstop is not None:

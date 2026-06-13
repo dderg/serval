@@ -705,7 +705,7 @@ class Motion:
             logging.exception("Motion: init_planner failed")
             raise
 
-    def _build_slot_steppers(self, bridge_mcus):
+    def _build_slot_steppers(self):
         slot_steppers = [[], [], [], []]
         for lane_idx, _axis_name, _motor_names in self.kin.lanes():
             slot_steppers[lane_idx] = [
@@ -731,7 +731,7 @@ class Motion:
         coupled = self.kin.coupled_xy()
         awd_default = 0b0011 if coupled else 0b0000
 
-        slot_steppers = self._build_slot_steppers(bridge_mcus)
+        slot_steppers = self._build_slot_steppers()
 
         PHASE_STEPPING_BIT = 0x1  # bit 0 of the IdentifyResponse caps bitmap
 

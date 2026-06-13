@@ -112,7 +112,7 @@ def test_follower_slot_sourced_from_force_move_extruder():
     )
     a2h = motion._build_axis_to_handle()
     assert a2h[3] == 42
-    slot_steppers = motion._build_slot_steppers([])
+    slot_steppers = motion._build_slot_steppers()
     assert [name for name, _ in slot_steppers[3]] == ["extruder"]
 
 
