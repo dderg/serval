@@ -50,16 +50,42 @@ impl Default for McuCaps {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum KinematicsConfigError {
+    #[error("mcu handle {handle}: unknown kinematics tag {tag}; known: 0=corexy, 1=cartesian")]
+    UnknownTag { handle: u32, tag: u8 },
+    #[error(
+        "mcu handle {handle}: corexy kinematics requires both X (axis {AXIS_X}) and \
+         Y (axis {AXIS_Y}) on the same mcu, got axes {axes:?}"
+    )]
+    CorexyMissingXy { handle: u32, axes: Vec<usize> },
+}
+
 pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
     mcus: &[(u32, Vec<u8>, u8)],
     caps_by_handle: &HashMap<u32, McuCaps, S>,
-) -> Vec<McuAxisConfig> {
+) -> Result<Vec<McuAxisConfig>, KinematicsConfigError> {
     mcus.iter()
-        .map(|(handle, axes, tag)| McuAxisConfig {
-            mcu_id: *handle,
-            axes: axes.iter().map(|&a| a as usize).collect(),
-            kinematics: *tag,
-            caps: caps_by_handle.get(handle).copied().unwrap_or_default(),
+        .map(|(handle, axes, tag)| {
+            crate::kinematics::KinematicsModule::from_tag(*tag).map_err(|_| {
+                KinematicsConfigError::UnknownTag {
+                    handle: *handle,
+                    tag: *tag,
+                }
+            })?;
+            let axes: Vec<usize> = axes.iter().map(|&a| a as usize).collect();
+            if *tag == KINEMATICS_COREXY && !(axes.contains(&AXIS_X) && axes.contains(&AXIS_Y)) {
+                return Err(KinematicsConfigError::CorexyMissingXy {
+                    handle: *handle,
+                    axes,
+                });
+            }
+            Ok(McuAxisConfig {
+                mcu_id: *handle,
+                axes,
+                kinematics: *tag,
+                caps: caps_by_handle.get(handle).copied().unwrap_or_default(),
+            })
         })
         .collect()
 }
@@ -156,7 +182,7 @@ mod topology_tests {
             (7u32, vec![AXIS_X as u8, AXIS_Y as u8, AXIS_E as u8], 0u8),
             (9u32, vec![AXIS_Z as u8], 1u8),
         ];
-        let cfgs = build_mcu_configs(&mcus, &caps);
+        let cfgs = build_mcu_configs(&mcus, &caps).unwrap();
         assert_eq!(cfgs.len(), 2);
         assert_eq!(cfgs[0].mcu_id, 7);
         assert_eq!(cfgs[0].axes, vec![AXIS_X, AXIS_Y, AXIS_E]);
@@ -176,9 +202,31 @@ mod topology_tests {
     fn build_mcu_configs_missing_caps_falls_back_to_default() {
         let caps: HashMap<u32, McuCaps> = HashMap::new();
         let mcus = vec![(7u32, vec![AXIS_X as u8, AXIS_Y as u8], 0u8)];
-        let cfgs = build_mcu_configs(&mcus, &caps);
+        let cfgs = build_mcu_configs(&mcus, &caps).unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].caps, McuCaps::default());
+    }
+
+    #[test]
+    fn build_mcu_configs_unknown_tag_is_loud() {
+        let caps: HashMap<u32, McuCaps> = HashMap::new();
+        let mcus = vec![(7u32, vec![AXIS_X as u8], 9u8)];
+        let err = build_mcu_configs(&mcus, &caps).unwrap_err();
+        assert!(matches!(
+            err,
+            KinematicsConfigError::UnknownTag { handle: 7, tag: 9 }
+        ));
+    }
+
+    #[test]
+    fn build_mcu_configs_corexy_without_xy_is_loud() {
+        let caps: HashMap<u32, McuCaps> = HashMap::new();
+        let mcus = vec![(7u32, vec![AXIS_X as u8, AXIS_E as u8], 0u8)];
+        let err = build_mcu_configs(&mcus, &caps).unwrap_err();
+        assert!(matches!(
+            err,
+            KinematicsConfigError::CorexyMissingXy { handle: 7, .. }
+        ));
     }
 }
 

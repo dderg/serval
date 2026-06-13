@@ -2329,7 +2329,8 @@ impl PyMotionBridge {
                 })
                 .collect()
         };
-        let mcu_configs = build_mcu_configs(&mcus, &caps_by_handle);
+        let mcu_configs = build_mcu_configs(&mcus, &caps_by_handle)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         *self
             .mcu_axis_configs
             .lock()
