@@ -297,60 +297,7 @@ class PrinterRail(BaseRail):
         else:
             self.position_min = 0.0
             self.position_max = self.position_endstop
-        if (
-            self.position_endstop < self.position_min
-            or self.position_endstop > self.position_max
-        ):
-            raise config.error(
-                "position_endstop in section '%s' must be between"
-                " position_min and position_max" % config.get_name()
-            )
-        self.use_sensorless_homing = config.getboolean(
-            "use_sensorless_homing", endstop_is_virtual
-        )
-
-        self._parse_homing_speeds(config)
-
-        default_second_homing_speed = self.homing_speed / 2.0
-        if self.use_sensorless_homing:
-            default_second_homing_speed = self.homing_speed
-
-        self.second_homing_speed = config.getfloat(
-            "second_homing_speed", default_second_homing_speed, above=0.0
-        )
-        self.homing_positive_dir = config.getboolean(
-            "homing_positive_dir", None
-        )
-
-        self.min_home_dist = config.getfloat(
-            "min_home_dist", self.homing_retract_dist, minval=0.0
-        )
-
-        self.homing_accel = config.getfloat("homing_accel", None, above=0.0)
-
-        if self.homing_positive_dir is None:
-            axis_len = self.position_max - self.position_min
-            if self.position_endstop <= self.position_min + axis_len / 4.0:
-                self.homing_positive_dir = False
-            elif self.position_endstop >= self.position_max - axis_len / 4.0:
-                self.homing_positive_dir = True
-            else:
-                raise config.error(
-                    "Unable to infer homing_positive_dir in section '%s'"
-                    % (config.get_name(),)
-                )
-            config.getboolean("homing_positive_dir", self.homing_positive_dir)
-        elif (
-            self.homing_positive_dir
-            and self.position_endstop == self.position_min
-        ) or (
-            not self.homing_positive_dir
-            and self.position_endstop == self.position_max
-        ):
-            raise config.error(
-                "Invalid homing_positive_dir / position_endstop in '%s'"
-                % (config.get_name(),)
-            )
+        self._finalize_homing(config, endstop_is_virtual)
 
     def get_tmc_current_helpers(self):
         if self._tmc_current_helpers is None:
@@ -436,68 +383,22 @@ class AxisRail(BaseRail):
             endstop_pin is not None and ":virtual_endstop" in endstop_pin
         )
         self._parse_position_range(config)
-        if (
-            self.position_endstop < self.position_min
-            or self.position_endstop > self.position_max
-        ):
-            raise config.error(
-                "position_endstop in section '%s' must be between"
-                " position_min and position_max" % config.get_name()
-            )
-        self.use_sensorless_homing = config.getboolean(
-            "use_sensorless_homing", endstop_is_virtual
-        )
-        self._parse_homing_speeds(config)
-        default_second_homing_speed = self.homing_speed / 2.0
-        if self.use_sensorless_homing:
-            default_second_homing_speed = self.homing_speed
-        self.second_homing_speed = config.getfloat(
-            "second_homing_speed", default_second_homing_speed, above=0.0
-        )
-        self.homing_positive_dir = config.getboolean(
-            "homing_positive_dir", None
-        )
-        self.min_home_dist = config.getfloat(
-            "min_home_dist", self.homing_retract_dist, minval=0.0
-        )
-        self.homing_accel = config.getfloat("homing_accel", None, above=0.0)
-        if self.homing_positive_dir is None:
-            axis_len = self.position_max - self.position_min
-            if self.position_endstop <= self.position_min + axis_len / 4.0:
-                self.homing_positive_dir = False
-            elif self.position_endstop >= self.position_max - axis_len / 4.0:
-                self.homing_positive_dir = True
-            else:
-                raise config.error(
-                    "Unable to infer homing_positive_dir in section '%s'"
-                    % (config.get_name(),)
-                )
-            config.getboolean("homing_positive_dir", self.homing_positive_dir)
-        elif (
-            self.homing_positive_dir
-            and self.position_endstop == self.position_min
-        ) or (
-            not self.homing_positive_dir
-            and self.position_endstop == self.position_max
-        ):
-            raise config.error(
-                "Invalid homing_positive_dir / position_endstop in '%s'"
-                % (config.get_name(),)
-            )
+        self._finalize_homing(config, endstop_is_virtual)
 
     def _build_endstops(self, axis_config, motor_configs):
         ppins = axis_config.get_printer().lookup_object("pins")
+        motor_pins = [mc.get("endstop_pin", None) for mc in motor_configs]
         axis_endstop_pin = axis_config.get("endstop_pin", None)
         if axis_endstop_pin is not None:
             mcu_endstop = ppins.setup_pin("endstop", axis_endstop_pin)
-            for stepper in self.steppers:
-                mcu_endstop.add_stepper(stepper)
+            for stepper, motor_pin in zip(self.steppers, motor_pins):
+                if motor_pin is None:
+                    mcu_endstop.add_stepper(stepper)
             self.endstops.append((mcu_endstop, self.axis_name))
-        for motor_config, stepper in zip(motor_configs, self.steppers):
-            motor_endstop_pin = motor_config.get("endstop_pin", None)
-            if motor_endstop_pin is None:
+        for stepper, motor_pin in zip(self.steppers, motor_pins):
+            if motor_pin is None:
                 continue
-            mcu_endstop = ppins.setup_pin("endstop", motor_endstop_pin)
+            mcu_endstop = ppins.setup_pin("endstop", motor_pin)
             mcu_endstop.add_stepper(stepper)
             self.endstops.append((mcu_endstop, stepper.get_name(short=True)))
 

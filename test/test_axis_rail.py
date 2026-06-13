@@ -222,6 +222,13 @@ def test_motor_section_per_motor_endstop_override():
     assert len(rail.get_steppers()) == 2
     assert len(rail.get_endstops()) == 2
 
+    motor_z0, motor_z1 = rail.get_steppers()
+    endstops_by_name = {name: mcu for mcu, name in rail.get_endstops()}
+    assert set(endstops_by_name) == {"z", "motor_z1"}
+
+    assert endstops_by_name["motor_z1"].steppers == [motor_z1]
+    assert endstops_by_name["z"].steppers == [motor_z0]
+
 
 def test_homing_keys_on_motor_section_rejected():
     with pytest.raises(FakeError):
