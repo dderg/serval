@@ -111,7 +111,6 @@ def test_extruder_section_with_rotation_distance_rejected():
 def test_extruder_heater_only_section_loads():
     section = make_extruder_section()
     pe = PrinterExtruder(section, 0)
-    assert pe.extruder_stepper is None
     assert pe.get_heater() is not None
     # def_max_cross_section = 4 * 0.4**2 = 0.64; filament_area = pi*0.875**2.
     expected_area = 3.141592653589793 * (1.75 * 0.5) ** 2

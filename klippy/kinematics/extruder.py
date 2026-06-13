@@ -55,9 +55,6 @@ class PrinterExtruder:
         self.trapq_append = lambda *a: None
         self.trapq_finalize_moves = lambda *a: None
 
-        # The E motor is an ordinary [<motor>] section referenced from
-        # [axis e] motors:; [extruder] is heater-only.
-        self.extruder_stepper = None
         for stepper_key in (
             "step_pin",
             "dir_pin",
@@ -92,8 +89,6 @@ class PrinterExtruder:
     def get_status(self, eventtime):
         sts = self.heater.get_status(eventtime)
         sts["can_extrude"] = self.heater.can_extrude
-        if self.extruder_stepper is not None:
-            sts.update(self.extruder_stepper.get_status(eventtime))
         return sts
 
     def get_name(self):
@@ -157,13 +152,6 @@ class PrinterExtruder:
         accel = move.accel * axis_r
         start_v = move.start_v * axis_r
         cruise_v = move.cruise_v * axis_r
-        pressure_advance = 0.0
-        use_pa_from_trapq = 0.0
-        if self.extruder_stepper:
-            if self.extruder_stepper.per_move_pressure_advance:
-                use_pa_from_trapq = 1.0
-            if axis_r > 0.0 and (move.axes_d[0] or move.axes_d[1]):
-                pressure_advance = self.extruder_stepper.pressure_advance
         # Queue movement (x is extruder movement, y is pressure advance flag)
         self.trapq_append(
             self.trapq,
@@ -175,8 +163,8 @@ class PrinterExtruder:
             0.0,
             0.0,
             1.0,
-            pressure_advance,
-            use_pa_from_trapq,
+            0.0,
+            0.0,
             start_v,
             cruise_v,
             accel,
@@ -184,9 +172,7 @@ class PrinterExtruder:
         self.last_position = move.end_pos[3]
 
     def find_past_position(self, print_time):
-        if self.extruder_stepper is None:
-            return 0.0
-        return self.extruder_stepper.find_past_position(print_time)
+        return 0.0
 
     def cmd_M104(self, gcmd, wait=False):
         # Set Extruder Temperature

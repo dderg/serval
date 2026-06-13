@@ -11,6 +11,7 @@ from .kinematics import extruder
 
 BUFFER_TIME_START = 0.250
 DRAIN_TIMEOUT = 60.0
+_SPATIAL_AXIS_NAMES = ("x", "y", "z")
 
 
 def _open_sim_control():
@@ -432,7 +433,7 @@ class Motion:
             ]
             self.axis_sections.append((name, follows, motors, post_processors))
         declared = {name for name, _, _, _ in self.axis_sections}
-        for required in ("x", "y", "z"):
+        for required in _SPATIAL_AXIS_NAMES:
             if required not in declared:
                 raise config.error(
                     "[axis %s] section is required (every axis must be "
@@ -449,7 +450,7 @@ class Motion:
     def _build_follower_steppers(self, config):
         self.follower_steppers = []
         for name, _follows, motors, _pp in self.axis_sections:
-            if name in ("x", "y", "z") or not motors:
+            if name in _SPATIAL_AXIS_NAMES or not motors:
                 continue
             for motor_name in motors:
                 motor_section, drive = motion_kinematics.resolve_motor_section(
