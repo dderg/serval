@@ -1145,10 +1145,10 @@ def _start_chip_emulators(h7_sock_dir, f4_sock_dir, repo_root):
         )
 
         h7_chips = [
-            (5, TMC5160Emulator().transfer),  # stepper_x
-            (4, TMC5160Emulator().transfer),  # stepper_y
-            (6, TMC5160Emulator().transfer),  # stepper_x1
-            (3, TMC5160Emulator().transfer),  # stepper_y1
+            (5, TMC5160Emulator().transfer),
+            (4, TMC5160Emulator().transfer),
+            (6, TMC5160Emulator().transfer),
+            (3, TMC5160Emulator().transfer),
             (40, MAX31865Emulator().transfer),  # extruder_rtd
         ]
         for cs_line, transfer in h7_chips:
@@ -1422,8 +1422,8 @@ type: corexy
 axis_x: x
 axis_y: y
 axis_z: z
-a_motors: motor_x
-b_motors: motor_y
+a_motors: motor_a
+b_motors: motor_b
 z_motors: motor_z
 
 [axis x]
@@ -1456,14 +1456,14 @@ axes: z
 max_velocity: 10
 max_accel: 100
 
-[motor_x]
+[motor_a]
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 40
 
-[motor_y]
+[motor_b]
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
@@ -2631,8 +2631,8 @@ type: corexy
 axis_x: x
 axis_y: y
 axis_z: z
-a_motors: motor_x
-b_motors: motor_y
+a_motors: motor_a
+b_motors: motor_b
 z_motors: motor_z
 
 [axis x]
@@ -2678,14 +2678,14 @@ axes: z
 max_velocity: 30
 max_accel: 100
 
-[motor_x]
+[motor_a]
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 32
 rotation_distance: 40
 
-[motor_y]
+[motor_b]
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
