@@ -145,18 +145,13 @@ class FakeSectionsConfig:
         return name in self._sections
 
 
-def test_endstop_section_finds_stepper():
-    cfg = FakeSectionsConfig({"stepper_x"})
-    assert homing_mod._endstop_section(cfg, "x") == "stepper_x"
-
-
-def test_endstop_section_finds_servo():
-    cfg = FakeSectionsConfig({"servo_x"})
-    assert homing_mod._endstop_section(cfg, "x") == "servo_x"
+def test_endstop_section_finds_axis():
+    cfg = FakeSectionsConfig({"axis x"})
+    assert homing_mod._endstop_section(cfg, "x") == "axis x"
 
 
 def test_endstop_section_none_when_axis_absent():
-    cfg = FakeSectionsConfig({"stepper_y"})
+    cfg = FakeSectionsConfig({"axis y"})
     assert homing_mod._endstop_section(cfg, "x") is None
 
 
