@@ -1,6 +1,6 @@
 from klippy.extras import servo_axis
 from klippy.extras.stepper_enable import EnableTracking, StepperEnablePin
-from klippy.motion import BridgeKinematics, Motion
+from klippy.motion import Motion
 
 
 class FakeLine:
@@ -106,9 +106,6 @@ def test_servo_rail_active_callback_contract():
 
 
 class FakeKin:
-    kinematics = "corexy"
-    active_rails = BridgeKinematics.active_rails
-
     def __init__(self, rails):
         self.rails = rails
 
@@ -125,7 +122,6 @@ def make_servo_rail(axis):
 
 
 class FakeToolhead:
-    kinematics_name = "corexy"
     _fire_active_callbacks = Motion._fire_active_callbacks
 
     def __init__(self, kin):

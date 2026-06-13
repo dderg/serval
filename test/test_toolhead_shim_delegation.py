@@ -2,19 +2,30 @@ import pytest
 
 from klippy import gcode
 from klippy.kinematics import extruder as extruder_mod
-from klippy.motion import BridgeKinematics, Motion, ToolheadShim
+from klippy.motion import Motion, ToolheadShim
 
 EVENTTIME = 100.0
 
 
-class FakeRail:
-    def __init__(self, name, position_min, position_max):
-        self._name = name
-        self.position_min = position_min
-        self.position_max = position_max
+class FakeKin:
+    def __init__(self, ranges):
+        self._ranges = ranges
+        self.limits = [(1.0, -1.0)] * 3
 
-    def get_name(self, short=False):
-        return self._name
+    def get_status(self, eventtime):
+        from klippy import gcode as gcode_mod
+
+        (x_min, x_max), (y_min, y_max), (z_min, z_max) = self._ranges
+        homed = "".join(
+            a
+            for i, a in enumerate("xyz")
+            if self.limits[i][0] <= self.limits[i][1]
+        )
+        return {
+            "homed_axes": homed,
+            "axis_minimum": gcode_mod.Coord(x_min, y_min, z_min, 0.0),
+            "axis_maximum": gcode_mod.Coord(x_max, y_max, z_max, 0.0),
+        }
 
 
 class FakeMcu:
@@ -37,13 +48,7 @@ class FakePrinter:
 def toolhead_fixture():
     printer = FakePrinter()
 
-    kin = BridgeKinematics.__new__(BridgeKinematics)
-    kin.rails = [
-        FakeRail("stepper_x", 0.0, 200.0),
-        FakeRail("stepper_y", 0.0, 200.0),
-        FakeRail("stepper_z", 0.0, 250.0),
-    ]
-    kin.limits = [(1.0, -1.0)] * 3
+    kin = FakeKin([(0.0, 200.0), (0.0, 200.0), (0.0, 250.0)])
 
     motion = Motion.__new__(Motion)
     motion.printer = printer

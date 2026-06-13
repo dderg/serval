@@ -1,4 +1,5 @@
-from klippy.motion import BridgeKinematics, Motion
+from klippy.motion import Motion
+from klippy.motion_kinematics import _LinearKinematics
 
 
 class FakeStepper:
@@ -26,23 +27,27 @@ class FakeRail:
 
 
 class FakeKin:
-    active_rails = BridgeKinematics.active_rails
+    active_rails = _LinearKinematics.active_rails
 
-    def __init__(self, kinematics, rails):
-        self.kinematics = kinematics
+    def __init__(self, kind, rails):
+        self.kind = kind
         self.rails = rails
+        self._lanes = [(0, "x", []), (1, "y", []), (2, "z", [])]
+
+    def coupled_xy(self):
+        return self.kind == "corexy"
 
     def get_steppers(self):
         return [s for rail in self.rails for s in rail.get_steppers()]
 
 
-def make_kin(kinematics):
+def make_kin(kind):
     rails = [
         FakeRail("x", [FakeStepper("stepper_x"), FakeStepper("stepper_x1")]),
         FakeRail("y", [FakeStepper("stepper_y"), FakeStepper("stepper_y1")]),
         FakeRail("z", [FakeStepper("stepper_z"), FakeStepper("stepper_z1")]),
     ]
-    return FakeKin(kinematics, rails)
+    return FakeKin(kind, rails)
 
 
 def rail_names(rails):
@@ -61,13 +66,6 @@ def test_cartesian_rails_are_independent():
     kin = make_kin("cartesian")
     assert rail_names(kin.active_rails(5.0, 0.0, 0.0)) == ["x"]
     assert rail_names(kin.active_rails(0.0, 5.0, 0.0)) == ["y"]
-    assert rail_names(kin.active_rails(0.0, 0.0, 5.0)) == ["z"]
-
-
-def test_hybrid_corexy_y_move_couples_x_motor():
-    kin = make_kin("hybrid_corexy")
-    assert rail_names(kin.active_rails(5.0, 0.0, 0.0)) == ["x"]
-    assert rail_names(kin.active_rails(0.0, 5.0, 0.0)) == ["x", "y"]
     assert rail_names(kin.active_rails(0.0, 0.0, 5.0)) == ["z"]
 
 

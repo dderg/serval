@@ -13,12 +13,14 @@ NEPTUNE_SHAPED_CONFIG = """
 [mcu]
 serial: /tmp/kalico-test-no-such-serial
 
-[printer]
-kinematics: cartesian
-
-[axis x]
-[axis y]
-[axis z]
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: motor_x
+y_motors: motor_y
+z_motors: motor_z
 
 [limit gantry]
 axes: x, y
@@ -30,38 +32,44 @@ axes: z
 max_velocity: 10
 max_accel: 30
 
-[stepper_x]
-step_pin: PC12
-dir_pin: PB3
-enable_pin: !PD2
-microsteps: 16
-rotation_distance: 40
+[axis x]
 endstop_pin: PA13
 position_endstop: 0
 position_max: 235
 homing_speed: 50
 
-[stepper_y]
-step_pin: PC11
-dir_pin: PA15
-enable_pin: !PC10
-microsteps: 16
-rotation_distance: 40
+[axis y]
 endstop_pin: PB8
 position_endstop: 0
 position_max: 234
 homing_speed: 50
 
-[stepper_z]
+[axis z]
+endstop_pin: probe:z_virtual_endstop
+position_min: -5
+position_max: 283
+homing_speed: 10
+
+[motor_x]
+step_pin: PC12
+dir_pin: PB3
+enable_pin: !PD2
+microsteps: 16
+rotation_distance: 40
+
+[motor_y]
+step_pin: PC11
+dir_pin: PA15
+enable_pin: !PC10
+microsteps: 16
+rotation_distance: 40
+
+[motor_z]
 step_pin: PC7
 dir_pin: PC9
 enable_pin: !PC8
 microsteps: 16
 rotation_distance: 8
-endstop_pin: probe:z_virtual_endstop
-position_min: -5
-position_max: 283
-homing_speed: 10
 
 [safe_z_home]
 home_xy_position: 117.5, 117.5
