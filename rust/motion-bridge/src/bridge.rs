@@ -2208,6 +2208,7 @@ impl PyMotionBridge {
         limits,
         post_processors,
         mcus,
+        kinematics_axes,
         window_capacity = 32,
         beta_max_iters = 10,
     ))]
@@ -2218,6 +2219,7 @@ impl PyMotionBridge {
         limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
         post_processors: Vec<(String, String, Vec<(String, f64)>)>,
         mcus: Vec<(u32, Vec<u8>, u8)>,
+        kinematics_axes: Vec<String>,
         window_capacity: usize,
         beta_max_iters: u8,
     ) -> PyResult<()> {
@@ -2243,6 +2245,10 @@ impl PyMotionBridge {
                 .collect(),
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        axis_registry
+            .validate_motor_mapping(&kinematics_axes)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         let pp_decls: Vec<config::PostProcessorDecl> = post_processors
             .into_iter()

@@ -902,6 +902,7 @@ class Motion:
                 list(self.limit_sections),
                 list(self.post_processor_sections),
                 topology,
+                ["x", "y", "z"],
             )
             self._configure_axes_per_mcu(bridge_mcus)
 

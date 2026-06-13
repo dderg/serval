@@ -346,6 +346,7 @@ class MotionBridgeWrapper:
         limits,
         post_processors,
         mcus,
+        kinematics_axes,
         window_capacity=32,
         beta_max_iters=10,
     ):
@@ -354,6 +355,7 @@ class MotionBridgeWrapper:
             limits,
             post_processors,
             mcus,
+            kinematics_axes,
             window_capacity,
             beta_max_iters,
         )

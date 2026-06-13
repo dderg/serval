@@ -254,6 +254,75 @@ fn follower_sections_become_temporal_sets() {
     assert_eq!(set.j_max, 3000.0);
 }
 
+fn decl_with_motors(name: &str, follows: &[&str], motors: &[&str]) -> AxisDecl {
+    AxisDecl {
+        name: name.into(),
+        follows: follows.iter().map(|s| s.to_string()).collect(),
+        motors: motors.iter().map(|s| s.to_string()).collect(),
+        post_processors: vec![],
+    }
+}
+
+#[test]
+fn axis_claimed_by_kinematics_and_motors_key_is_rejected() {
+    let registry = AxisRegistry::try_new(vec![
+        decl("x", &[]),
+        decl("y", &[]),
+        decl_with_motors("z", &[], &["m1"]),
+    ])
+    .unwrap();
+    let kinematics_axes = ["x".to_string(), "y".to_string(), "z".to_string()];
+    let err = registry
+        .validate_motor_mapping(&kinematics_axes)
+        .unwrap_err();
+    assert!(matches!(err, AxisConfigError::MotorMappingDuplicate { axis } if axis == "z"));
+}
+
+#[test]
+fn axis_with_neither_claim_nor_motors_is_rejected() {
+    let registry = AxisRegistry::try_new(vec![
+        decl("x", &[]),
+        decl("y", &[]),
+        decl("z", &[]),
+        decl("e", &["x", "y", "z"]),
+    ])
+    .unwrap();
+    let kinematics_axes = ["x".to_string(), "y".to_string(), "z".to_string()];
+    let err = registry
+        .validate_motor_mapping(&kinematics_axes)
+        .unwrap_err();
+    assert!(matches!(err, AxisConfigError::MotorMappingMissing { axis } if axis == "e"));
+}
+
+#[test]
+fn kinematics_claim_of_undeclared_axis_is_rejected() {
+    let registry =
+        AxisRegistry::try_new(vec![decl("x", &[]), decl("y", &[]), decl("z", &[])]).unwrap();
+    let kinematics_axes = [
+        "x".to_string(),
+        "y".to_string(),
+        "z".to_string(),
+        "w".to_string(),
+    ];
+    let err = registry
+        .validate_motor_mapping(&kinematics_axes)
+        .unwrap_err();
+    assert!(matches!(err, AxisConfigError::UnknownClaimedAxis { axis } if axis == "w"));
+}
+
+#[test]
+fn follower_with_own_motors_and_spatial_claims_pass() {
+    let registry = AxisRegistry::try_new(vec![
+        decl("x", &[]),
+        decl("y", &[]),
+        decl("z", &[]),
+        decl_with_motors("e", &["x", "y", "z"], &["extruder_motor"]),
+    ])
+    .unwrap();
+    let kinematics_axes = ["x".to_string(), "y".to_string(), "z".to_string()];
+    assert!(registry.validate_motor_mapping(&kinematics_axes).is_ok());
+}
+
 fn pp(name: &str, ty: &str, params: &[(&str, f64)]) -> PostProcessorDecl {
     PostProcessorDecl {
         name: name.into(),
