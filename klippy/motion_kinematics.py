@@ -139,6 +139,9 @@ class _LinearKinematics:
     def _handle_motor_off(self, print_time):
         self.clear_homing_state((0, 1, 2))
 
+    def _axis_rails(self):
+        return {i: rail for i, rail in enumerate(self.rails)}
+
     def claimed_axes(self):
         return [axis_name for _, axis_name, _ in self._lanes]
 
