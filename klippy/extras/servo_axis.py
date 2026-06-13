@@ -82,10 +82,10 @@ class ServoRail(BaseRail):
                 self.position_min,
                 self.position_max,
             )
-            self.homing_following_error = axis_config.getfloat(
+            self.homing_following_error = motor_config.getfloat(
                 "homing_following_error", 2.5, above=0.0
             )
-            self.homing_max_torque = axis_config.getfloat(
+            self.homing_max_torque = motor_config.getfloat(
                 "homing_max_torque", 50.0, above=0.0, maxval=400.0
             )
         self.following_error = motor_config.getfloat(

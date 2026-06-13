@@ -83,8 +83,6 @@ AXIS_KEYS = frozenset(
         "homing_speed",
         "homing_retract_dist",
         "homing_retract_speed",
-        "homing_following_error",
-        "homing_max_torque",
     )
 )
 
