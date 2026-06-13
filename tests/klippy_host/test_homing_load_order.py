@@ -18,9 +18,9 @@ type: cartesian
 axis_x: x
 axis_y: y
 axis_z: z
-x_motors: motor_x
-y_motors: motor_y
-z_motors: motor_z
+x_motors: x
+y_motors: y
+z_motors: z
 
 [limit gantry]
 axes: x, y
@@ -50,21 +50,24 @@ position_min: -5
 position_max: 283
 homing_speed: 10
 
-[motor_x]
+[motor x]
+drive: stepper
 step_pin: PC12
 dir_pin: PB3
 enable_pin: !PD2
 microsteps: 16
 rotation_distance: 40
 
-[motor_y]
+[motor y]
+drive: stepper
 step_pin: PC11
 dir_pin: PA15
 enable_pin: !PC10
 microsteps: 16
 rotation_distance: 40
 
-[motor_z]
+[motor z]
+drive: stepper
 step_pin: PC7
 dir_pin: PC9
 enable_pin: !PC8

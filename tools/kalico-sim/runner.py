@@ -1422,9 +1422,9 @@ type: corexy
 axis_x: x
 axis_y: y
 axis_z: z
-a_motors: motor_a
-b_motors: motor_b
-z_motors: motor_z
+a_motors: a
+b_motors: b
+z_motors: z
 
 [axis x]
 position_endstop: 0
@@ -1456,21 +1456,24 @@ axes: z
 max_velocity: 10
 max_accel: 100
 
-[motor_a]
+[motor a]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 40
 
-[motor_b]
+[motor b]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
 microsteps: 16
 rotation_distance: 40
 
-[motor_z]
+[motor z]
+drive: stepper
 step_pin: {z_step_mcu}gpiochip0/gpio0
 dir_pin: {z_step_mcu}gpiochip0/gpio1
 enable_pin: !{z_step_mcu}gpiochip0/gpio2
@@ -1648,12 +1651,13 @@ measured_z: 3.25
 trigger_height: 0
 """
 
-    z_motors = "motor_z"
+    z_motors = "z"
     points_sections = ""
     if variant == "points":
-        z_motors = "motor_z, motor_z1"
+        z_motors = "z, z1"
         points_sections = """
-[motor_z1]
+[motor z1]
+drive: stepper
 step_pin: gpiochip0/gpio9
 dir_pin: gpiochip0/gpio10
 enable_pin: !gpiochip0/gpio11
@@ -1702,8 +1706,8 @@ type: cartesian
 axis_x: x
 axis_y: y
 axis_z: z
-x_motors: motor_x
-y_motors: motor_y
+x_motors: x
+y_motors: y
 z_motors: {z_motors}
 
 [axis x]
@@ -1738,21 +1742,24 @@ axes: z
 max_velocity: 10
 max_accel: 30
 
-[motor_x]
+[motor x]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 40
 
-[motor_y]
+[motor y]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
 microsteps: 16
 rotation_distance: 40
 
-[motor_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio8
@@ -2215,9 +2222,9 @@ type: cartesian
 axis_x: x
 axis_y: y
 axis_z: z
-x_motors: motor_x
-y_motors: motor_y
-z_motors: motor_z
+x_motors: x
+y_motors: y
+z_motors: z
 
 [axis x]
 position_min: 0
@@ -2252,21 +2259,24 @@ axes: z
 max_velocity: 10
 max_accel: 30
 
-[motor_x]
+[motor x]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 40
 
-[motor_y]
+[motor y]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
 microsteps: 16
 rotation_distance: 40
 
-[motor_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio8
@@ -2297,9 +2307,9 @@ type: cartesian
 axis_x: x
 axis_y: y
 axis_z: z
-x_motors: motor_x
-y_motors: motor_y
-z_motors: motor_z
+x_motors: x
+y_motors: y
+z_motors: z
 
 [axis x]
 position_min: 0
@@ -2334,7 +2344,8 @@ axes: z
 max_velocity: 10
 max_accel: 30
 
-[motor_x]
+[motor x]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
@@ -2342,20 +2353,22 @@ microsteps: 256
 rotation_distance: 40
 phase_stepping: True
 
-[tmc5160 motor_x]
+[tmc5160 x]
 spi_bus: spidev0.0
 cs_pin: gpiochip0/gpio5
 run_current: 1.0
 sense_resistor: 0.075
 
-[motor_y]
+[motor y]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio20
 microsteps: 16
 rotation_distance: 40
 
-[motor_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio21
@@ -2394,9 +2407,9 @@ type: cartesian
 axis_x: x
 axis_y: y
 axis_z: z
-x_motors: motor_x
-y_motors: motor_y
-z_motors: motor_z
+x_motors: x
+y_motors: y
+z_motors: z
 
 [axis x]
 position_min: 0
@@ -2418,7 +2431,7 @@ post_processors: is_xy
 position_min: -5
 position_endstop: 0
 position_max: 250
-endstop_pin: tmc5160_motor_z:virtual_endstop
+endstop_pin: tmc5160_z:virtual_endstop
 homing_speed: 5
 homing_retract_dist: 0
 
@@ -2432,21 +2445,24 @@ axes: z
 max_velocity: 10
 max_accel: 30
 
-[motor_x]
+[motor x]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 40
 
-[motor_y]
+[motor y]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio20
 microsteps: 16
 rotation_distance: 40
 
-[motor_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio21
@@ -2454,7 +2470,7 @@ microsteps: 256
 rotation_distance: 40
 phase_stepping: True
 
-[tmc5160 motor_z]
+[tmc5160 z]
 spi_bus: spidev0.0
 cs_pin: gpiochip0/gpio5
 run_current: 1.0
@@ -2631,9 +2647,9 @@ type: corexy
 axis_x: x
 axis_y: y
 axis_z: z
-a_motors: motor_a
-b_motors: motor_b
-z_motors: motor_z
+a_motors: a
+b_motors: b
+z_motors: z
 
 [axis x]
 position_endstop: 0
@@ -2657,7 +2673,7 @@ homing_speed: 8
 
 [axis e]
 follows: x, y, z
-motors: extruder_motor
+motors: e
 
 [post_processor is_xy]
 type: smooth_mzv
@@ -2678,28 +2694,32 @@ axes: z
 max_velocity: 30
 max_accel: 100
 
-[motor_a]
+[motor a]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 32
 rotation_distance: 40
 
-[motor_b]
+[motor b]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
 microsteps: 32
 rotation_distance: 40
 
-[motor_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio8
 microsteps: 32
 rotation_distance: 4
 
-[extruder_motor]
+[motor e]
+drive: stepper
 step_pin: gpiochip0/gpio13
 dir_pin: gpiochip0/gpio14
 enable_pin: !gpiochip0/gpio15
@@ -2707,6 +2727,7 @@ microsteps: 16
 rotation_distance: 22.6789511
 
 [extruder]
+axis: e
 nozzle_diameter: 0.4
 filament_diameter: 1.75
 heater_pin: gpiochip0/gpio20

@@ -7,14 +7,19 @@ _KIN_CARTESIAN = 1
 
 
 def resolve_motor_section(config, name, referenced_by):
-    if not config.has_section(name):
+    section_name = "motor " + name
+    if not config.has_section(section_name):
         raise config.error(
-            "%s references motor '%s' but no [%s] section exists"
+            "%s references motor '%s' but no [motor %s] section exists"
             % (referenced_by, name, name)
         )
-    section = config.getsection(name)
-    drive = section.getchoice("drive", DRIVE_CHOICES, "stepper")
+    section = config.getsection(section_name)
+    drive = section.getchoice("drive", DRIVE_CHOICES)
     return section, drive
+
+
+def motor_short_name(section):
+    return section.get_name().split(None, 1)[1]
 
 
 KINEMATICS_TYPES = {
@@ -46,7 +51,29 @@ def load_kinematics(config, motion):
             "[kinematics] type '%s' is not supported (supported: %s)"
             % (kind, ", ".join(sorted(KINEMATICS_TYPES)))
         )
-    return _LinearKinematics(config, motion, kind, KINEMATICS_TYPES[kind])
+    role_specs = KINEMATICS_TYPES[kind]
+    kin = _LinearKinematics(config, motion, kind, role_specs)
+    _reject_orphan_motors(config, motion, section, role_specs)
+    return kin
+
+
+def _reject_orphan_motors(config, motion, section, role_specs):
+    declared = {
+        sc.get_name().split(None, 1)[1]
+        for sc in config.get_prefix_sections("motor ")
+    }
+    consumed = set()
+    for role_key, _axis_key, _idx in role_specs:
+        consumed.update(section.getlist(role_key, []))
+    for _name, _follows, motors, _pp in motion.axis_sections:
+        consumed.update(motors)
+    orphans = sorted(declared - consumed)
+    if orphans:
+        raise config.error(
+            "motor(s) %s declared but not assigned to any axis (reference them "
+            "from a [kinematics] role list or [axis <name>] motors:)"
+            % ", ".join("[motor %s]" % m for m in orphans)
+        )
 
 
 class _LinearKinematics:
@@ -98,13 +125,13 @@ class _LinearKinematics:
         lane_idx, axis_name, motor_names = lane
         role_motors_key = self._role_specs[lane_idx][0]
         referenced_by = "[kinematics] %s" % role_motors_key
-        motor_sections = []
+        motor_specs = []
         drives = set()
         for motor_name in motor_names:
             motor_section, drive = resolve_motor_section(
                 config, motor_name, referenced_by
             )
-            motor_sections.append(motor_section)
+            motor_specs.append((motor_section, motor_short_name(motor_section)))
             drives.add(drive)
         if len(drives) > 1:
             raise config.error(
@@ -113,9 +140,10 @@ class _LinearKinematics:
             )
         drive = drives.pop()
         if drive == "servo":
+            motor_sections = [section for section, _ in motor_specs]
             return self._build_servo_lane(config, lane, motor_sections)
         rail = stepper.AxisRail(
-            config.getsection("axis " + axis_name), motor_sections
+            config.getsection("axis " + axis_name), motor_specs
         )
         rail.setup_itersolve(
             "cartesian_stepper_alloc", "xyz"[lane_idx].encode()

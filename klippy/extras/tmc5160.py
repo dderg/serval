@@ -397,8 +397,9 @@ class TMC5160:
         # Allow virtual pins to be created
         self._virtual_pin_helper = tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
         stepper_name = " ".join(config.get_name().split()[1:])
-        if config.has_section(stepper_name):
-            stepper_section = config.getsection(stepper_name)
+        motor_section = "motor " + stepper_name
+        if config.has_section(motor_section):
+            stepper_section = config.getsection(motor_section)
         else:
             stepper_section = None
         self.name = stepper_name

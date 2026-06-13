@@ -131,11 +131,12 @@ def make_axis_rail(axis_values, motor_values):
     printer = FakePrinter()
     axis_name = axis_values.pop("__name__")
     axis_config = FakeConfig(printer, axis_name, axis_values)
-    motor_configs = []
+    motor_specs = []
     for mv in motor_values:
         name = mv.pop("__name__")
-        motor_configs.append(FakeConfig(printer, name, mv))
-    return stepper.AxisRail(axis_config, motor_configs)
+        short = name.split(None, 1)[1]
+        motor_specs.append((FakeConfig(printer, name, mv), short))
+    return stepper.AxisRail(axis_config, motor_specs)
 
 
 def motor_section(name, endstop_pin=None, **extra):
@@ -162,12 +163,12 @@ def test_axis_rail_reads_range_from_axis_section():
             "endstop_pin": "^PE5",
             "homing_speed": 50.0,
         },
-        [motor_section("motor_a")],
+        [motor_section("motor a")],
     )
     assert rail.get_range() == (0.0, 300.0)
     assert rail.position_endstop == 0.0
     assert len(rail.get_steppers()) == 1
-    assert rail.get_steppers()[0].get_name() == "motor_a"
+    assert rail.get_steppers()[0].get_name() == "a"
     hi = rail.get_homing_info()
     assert hi.speed == 50.0
     assert hi.positive_dir is False
@@ -183,9 +184,9 @@ def test_axis_rail_multiple_motors_lockstep():
             "endstop_pin": "^PD3",
         },
         [
-            motor_section("motor_z0"),
-            motor_section("motor_z1"),
-            motor_section("motor_z2"),
+            motor_section("motor z0"),
+            motor_section("motor z1"),
+            motor_section("motor z2"),
         ],
     )
     assert len(rail.get_steppers()) == 3
@@ -200,7 +201,7 @@ def test_axis_rail_defers_endstops_to_central_homing():
             "position_endstop": 0.0,
             "endstop_pin": "^PE5",
         },
-        [motor_section("motor_a")],
+        [motor_section("motor a")],
     )
     assert rail.get_endstops() == []
     assert rail.endstop_pin == "^PE5"
@@ -216,5 +217,5 @@ def test_homing_keys_on_motor_section_rejected():
                 "position_endstop": 0.0,
                 "endstop_pin": "^PE5",
             },
-            [motor_section("motor_a", position_min=0.0)],
+            [motor_section("motor a", position_min=0.0)],
         )

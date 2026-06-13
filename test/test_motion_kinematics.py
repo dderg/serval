@@ -210,8 +210,9 @@ class FakeBridge:
 
 
 class FakeMotion:
-    def __init__(self):
+    def __init__(self, axis_sections=()):
         self.bridge = FakeBridge()
+        self.axis_sections = list(axis_sections)
         self._limits = {
             ("z", "max_velocity"): 10.0,
             ("z", "max_accel"): 100.0,
@@ -223,6 +224,7 @@ class FakeMotion:
 
 def motor_section(**extra):
     values = {
+        "drive": "stepper",
         "step_pin": "PF0",
         "dir_pin": "PF1",
         "rotation_distance": 40.0,
@@ -252,17 +254,17 @@ def corexy_sections():
             "axis_x": "x",
             "axis_y": "y",
             "axis_z": "z",
-            "a_motors": "motor_a",
-            "b_motors": "motor_b",
-            "z_motors": "motor_z0, motor_z1",
+            "a_motors": "a",
+            "b_motors": "b",
+            "z_motors": "z0, z1",
         },
         "axis x": axis_section(),
         "axis y": axis_section(),
         "axis z": axis_section(position_max=200.0),
-        "motor_a": motor_section(),
-        "motor_b": motor_section(),
-        "motor_z0": motor_section(),
-        "motor_z1": motor_section(),
+        "motor a": motor_section(),
+        "motor b": motor_section(),
+        "motor z0": motor_section(),
+        "motor z1": motor_section(),
     }
 
 
@@ -274,23 +276,23 @@ def cartesian_sections():
             "axis_x": "x",
             "axis_y": "y",
             "axis_z": "z",
-            "x_motors": "motor_x",
-            "y_motors": "motor_y",
-            "z_motors": "motor_z",
+            "x_motors": "x",
+            "y_motors": "y",
+            "z_motors": "z",
         },
         "axis x": axis_section(),
         "axis y": axis_section(),
         "axis z": axis_section(position_max=200.0),
-        "motor_x": motor_section(),
-        "motor_y": motor_section(),
-        "motor_z": motor_section(),
+        "motor x": motor_section(),
+        "motor y": motor_section(),
+        "motor z": motor_section(),
     }
 
 
-def make_kin(sections):
+def make_kin(sections, axis_sections=()):
     printer = FakePrinter()
     config = FakeConfig(printer, sections)
-    motion = FakeMotion()
+    motion = FakeMotion(axis_sections)
     return motion_kinematics.load_kinematics(config, motion)
 
 
@@ -298,9 +300,9 @@ def test_corexy_section_parses_roles_and_motors():
     kin = make_kin(corexy_sections())
     assert kin.kind == "corexy"
     assert kin.claimed_axes() == ["x", "y", "z"]
-    assert kin.lanes()[0] == (0, "x", ["motor_a"])
-    assert kin.lanes()[1] == (1, "y", ["motor_b"])
-    assert kin.lanes()[2] == (2, "z", ["motor_z0", "motor_z1"])
+    assert kin.lanes()[0] == (0, "x", ["a"])
+    assert kin.lanes()[1] == (1, "y", ["b"])
+    assert kin.lanes()[2] == (2, "z", ["z0", "z1"])
     assert len(kin.rails) == 3
     assert len(kin.rails[2].get_steppers()) == 2
 
@@ -309,9 +311,9 @@ def test_cartesian_uses_xyz_motor_roles():
     kin = make_kin(cartesian_sections())
     assert kin.kind == "cartesian"
     assert kin.claimed_axes() == ["x", "y", "z"]
-    assert kin.lanes()[0] == (0, "x", ["motor_x"])
-    assert kin.lanes()[1] == (1, "y", ["motor_y"])
-    assert kin.lanes()[2] == (2, "z", ["motor_z"])
+    assert kin.lanes()[0] == (0, "x", ["x"])
+    assert kin.lanes()[1] == (1, "y", ["y"])
+    assert kin.lanes()[2] == (2, "z", ["z"])
 
 
 def test_mcu_tag_corexy_needs_both_xy():
@@ -402,7 +404,7 @@ def test_stepper_x_section_rejected():
     with pytest.raises(FakeError) as exc:
         reject_legacy({"stepper_x": motor_section()})
     assert "[kinematics]" in str(exc.value)
-    assert "[motor_a]" in str(exc.value)
+    assert "[motor a]" in str(exc.value)
 
 
 def test_stepper_z2_section_rejected():
@@ -423,3 +425,37 @@ def test_arbitrary_motor_section_not_rejected():
 
 def test_stepper_enable_section_not_rejected():
     reject_legacy({"stepper_enable": {}})
+
+
+def test_arbitrary_motor_name_builds_short_named_stepper():
+    sections = cartesian_sections()
+    del sections["motor x"]
+    sections["motor front_left"] = motor_section()
+    sections["kinematics"]["x_motors"] = "front_left"
+    kin = make_kin(sections)
+    assert kin.lanes()[0] == (0, "x", ["front_left"])
+    assert kin.rails[0].get_steppers()[0].get_name() == "front_left"
+
+
+def test_orphan_motor_rejected():
+    sections = cartesian_sections()
+    sections["motor spare"] = motor_section()
+    with pytest.raises(FakeError) as exc:
+        make_kin(sections)
+    assert "[motor spare]" in str(exc.value)
+    assert "not assigned" in str(exc.value)
+
+
+def test_follower_motor_not_orphan():
+    sections = cartesian_sections()
+    sections["motor e"] = motor_section()
+    axis_sections = [("e", ["x"], ["e"], [])]
+    kin = make_kin(sections, axis_sections=axis_sections)
+    assert kin.kind == "cartesian"
+
+
+def test_missing_drive_rejected():
+    sections = cartesian_sections()
+    del sections["motor x"]["drive"]
+    with pytest.raises(FakeError):
+        make_kin(sections)

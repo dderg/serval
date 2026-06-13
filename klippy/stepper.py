@@ -185,9 +185,10 @@ class MCU_stepper:
         return axis.encode() in self._bridge_active_axes
 
 
-def PrinterStepper(config, units_in_radians=False):
+def PrinterStepper(config, units_in_radians=False, name=None):
     printer = config.get_printer()
-    name = config.get_name()
+    if name is None:
+        name = config.get_name()
     ppins = printer.lookup_object("pins")
     step_pin = config.get("step_pin")
     step_pin_params = ppins.lookup_pin(step_pin, can_invert=True)
@@ -346,16 +347,19 @@ AXIS_HOMING_KEYS = (
 
 
 class AxisRail(BaseRail):
-    def __init__(self, axis_config, motor_configs):
+    def __init__(self, axis_config, motor_specs):
         super().__init__()
-        if not motor_configs:
+        if not motor_specs:
             raise axis_config.error(
                 "[%s] needs at least one motor section"
                 % (axis_config.get_name(),)
             )
         self.axis_name = axis_config.get_name().split()[-1]
-        self._reject_homing_keys_on_motors(axis_config, motor_configs)
-        self.steppers = [PrinterStepper(c) for c in motor_configs]
+        self._reject_homing_keys_on_motors(axis_config, motor_specs)
+        self.steppers = [
+            PrinterStepper(section, name=short)
+            for section, short in motor_specs
+        ]
         primary = self.steppers[0]
         self._tmc_current_helpers = None
         self.get_name = primary.get_name
@@ -364,8 +368,8 @@ class AxisRail(BaseRail):
         self._parse_axis_homing(axis_config)
         self.endstops = []
 
-    def _reject_homing_keys_on_motors(self, axis_config, motor_configs):
-        for motor_config in motor_configs:
+    def _reject_homing_keys_on_motors(self, axis_config, motor_specs):
+        for motor_config, _short in motor_specs:
             for key in AXIS_HOMING_KEYS:
                 if motor_config.get(key, None) is not None:
                     raise motor_config.error(

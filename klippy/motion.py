@@ -30,7 +30,7 @@ def reject_legacy_role_sections(config):
         if _is_legacy_stepper_role_section(sc.get_name()):
             raise config.error(
                 "role-encoding motor sections are not supported: name the "
-                "motor freely (e.g. [motor_a]) and assign it in [kinematics] "
+                "motor freely (e.g. [motor a]) and assign it in [kinematics] "
                 "role lists / [axis <name>] motors:"
             )
     for name in _LEGACY_SERVO_SECTIONS:
@@ -492,7 +492,10 @@ class Motion:
                         % (name, motor_name, drive)
                     )
                 self.follower_steppers.append(
-                    stepper.PrinterStepper(motor_section)
+                    stepper.PrinterStepper(
+                        motor_section,
+                        name=motion_kinematics.motor_short_name(motor_section),
+                    )
                 )
 
     def _read_post_processors(self, config):
