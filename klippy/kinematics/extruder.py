@@ -6,198 +6,6 @@
 import logging
 import math
 
-from klippy import stepper
-
-from ..extras.danger_options import get_danger_options
-
-
-class ExtruderStepper:
-    def __init__(self, config):
-        self.printer = config.get_printer()
-        self.name = config.get_name().split()[-1]
-        self.pressure_advance = self.pressure_advance_smooth_time = 0.0
-        self.config_pa = config.getfloat("pressure_advance", 0.0, minval=0.0)
-        self.config_smooth_time = config.getfloat(
-            "pressure_advance_smooth_time",
-            0.040,
-            above=0.0,
-            maxval=get_danger_options().override_pressure_advance_smooth_time_max,
-        )
-        self.per_move_pressure_advance = config.getboolean(
-            "per_move_pressure_advance", False
-        )
-        # Setup stepper
-        self.stepper = stepper.PrinterStepper(config)
-        # Motion bridge owns extruder kinematics in Rust; the C FFI
-        # extruder_stepper_alloc allocation goes away with the rest of
-        # the host-side kinematic solvers.
-        self.sk_extruder = None
-        self.motion_queue = None
-        # Register commands
-        self.printer.register_event_handler(
-            "klippy:connect", self._handle_connect
-        )
-        gcode = self.printer.lookup_object("gcode")
-        if self.name == "extruder":
-            gcode.register_mux_command(
-                "SET_PRESSURE_ADVANCE",
-                "EXTRUDER",
-                None,
-                self.cmd_default_SET_PRESSURE_ADVANCE,
-                desc=self.cmd_SET_PRESSURE_ADVANCE_help,
-            )
-        gcode.register_mux_command(
-            "SET_PRESSURE_ADVANCE",
-            "EXTRUDER",
-            self.name,
-            self.cmd_SET_PRESSURE_ADVANCE,
-            desc=self.cmd_SET_PRESSURE_ADVANCE_help,
-        )
-        gcode.register_mux_command(
-            "SET_EXTRUDER_ROTATION_DISTANCE",
-            "EXTRUDER",
-            self.name,
-            self.cmd_SET_E_ROTATION_DISTANCE,
-            desc=self.cmd_SET_E_ROTATION_DISTANCE_help,
-        )
-        gcode.register_mux_command(
-            "SYNC_EXTRUDER_MOTION",
-            "EXTRUDER",
-            self.name,
-            self.cmd_SYNC_EXTRUDER_MOTION,
-            desc=self.cmd_SYNC_EXTRUDER_MOTION_help,
-        )
-
-    def _handle_connect(self):
-        toolhead = self.printer.lookup_object("toolhead")
-        toolhead.register_step_generator(self.stepper.generate_steps)
-        self._set_pressure_advance(self.config_pa, self.config_smooth_time)
-
-    def get_status(self, eventtime):
-        return {
-            "pressure_advance": self.pressure_advance,
-            "smooth_time": self.pressure_advance_smooth_time,
-            "motion_queue": self.motion_queue,
-        }
-
-    def find_past_position(self, print_time):
-        bridge = self.printer.lookup_object("motion_bridge")
-        state = bridge.motion_state_at(
-            self.stepper.get_mcu(), print_time=print_time
-        )
-        if "e" not in state:
-            raise self.printer.command_error(
-                "find_past_position: extruder axis is not bridge-dispatched"
-            )
-        return state["e"][0]
-
-    def sync_to_extruder(self, extruder_name):
-        toolhead = self.printer.lookup_object("toolhead")
-        toolhead.flush_step_generation()
-        if not extruder_name:
-            self.stepper.set_trapq(None)
-            self.motion_queue = None
-            return
-        extruder = self.printer.lookup_object(extruder_name, None)
-        if extruder is None or not isinstance(extruder, PrinterExtruder):
-            raise self.printer.command_error(
-                "'%s' is not a valid extruder." % (extruder_name,)
-            )
-        self.stepper.set_position([extruder.last_position, 0.0, 0.0])
-        self.stepper.set_trapq(extruder.get_trapq())
-        self.motion_queue = extruder_name
-
-    def set_rotation_distance(self, rotation_dist):
-        self.stepper.set_rotation_distance(rotation_dist)
-
-    def get_rotation_distance(self):
-        _, rotation_dist = self.stepper.get_rotation_distance()
-        return rotation_dist
-
-    def _set_pressure_advance(self, pressure_advance, smooth_time):
-        old_smooth_time = self.pressure_advance_smooth_time
-        if not self.pressure_advance:
-            old_smooth_time = 0.0
-        new_smooth_time = smooth_time
-        if not pressure_advance:
-            new_smooth_time = 0.0
-        toolhead = self.printer.lookup_object("toolhead")
-        toolhead.note_step_generation_scan_time(
-            new_smooth_time * 0.5, old_delay=old_smooth_time * 0.5
-        )
-        # Pressure-advance handling lives on the Rust side; just store
-        # the requested values so get_status reports them.
-        self.pressure_advance = pressure_advance
-        self.pressure_advance_smooth_time = smooth_time
-
-    cmd_SET_PRESSURE_ADVANCE_help = "Set pressure advance parameters"
-
-    def cmd_default_SET_PRESSURE_ADVANCE(self, gcmd):
-        extruder = self.printer.lookup_object("toolhead").get_extruder()
-        if extruder.extruder_stepper is None:
-            raise gcmd.error("Active extruder does not have a stepper")
-        strapq = extruder.extruder_stepper.stepper.get_trapq()
-        if strapq is not extruder.get_trapq():
-            raise gcmd.error("Unable to infer active extruder stepper")
-        extruder.extruder_stepper.cmd_SET_PRESSURE_ADVANCE(gcmd)
-
-    def cmd_SET_PRESSURE_ADVANCE(self, gcmd):
-        pressure_advance = gcmd.get_float(
-            "ADVANCE", self.pressure_advance, minval=0.0
-        )
-        smooth_time = gcmd.get_float(
-            "SMOOTH_TIME",
-            self.pressure_advance_smooth_time,
-            minval=0.0,
-            maxval=get_danger_options().override_pressure_advance_smooth_time_max,
-        )
-        self._set_pressure_advance(pressure_advance, smooth_time)
-
-        if get_danger_options().log_pressure_advance_changes:
-            msg = (
-                "pressure_advance: %.6f" % pressure_advance,
-                "pressure_advance_smooth_time: %.6f" % smooth_time,
-            )
-            self.printer.set_rollover_info(
-                self.name, "%s: %s" % (self.name, (" ".join(msg)))
-            )
-            gcmd.respond_info("\n".join(msg), log=False)
-
-    cmd_SET_E_ROTATION_DISTANCE_help = "Set extruder rotation distance"
-
-    def cmd_SET_E_ROTATION_DISTANCE(self, gcmd):
-        rotation_dist = gcmd.get_float("DISTANCE", None)
-        if rotation_dist is not None:
-            if not rotation_dist:
-                raise gcmd.error("Rotation distance can not be zero")
-            invert_dir, orig_invert_dir = self.stepper.get_dir_inverted()
-            next_invert_dir = orig_invert_dir
-            if rotation_dist < 0.0:
-                next_invert_dir = not orig_invert_dir
-                rotation_dist = -rotation_dist
-            toolhead = self.printer.lookup_object("toolhead")
-            toolhead.flush_step_generation()
-            self.stepper.set_rotation_distance(rotation_dist)
-            self.stepper.set_dir_inverted(next_invert_dir)
-        else:
-            rotation_dist, spr = self.stepper.get_rotation_distance()
-        invert_dir, orig_invert_dir = self.stepper.get_dir_inverted()
-        if invert_dir != orig_invert_dir:
-            rotation_dist = -rotation_dist
-        gcmd.respond_info(
-            "Extruder '%s' rotation distance set to %0.6f"
-            % (self.name, rotation_dist)
-        )
-
-    cmd_SYNC_EXTRUDER_MOTION_help = "Set extruder stepper motion queue"
-
-    def cmd_SYNC_EXTRUDER_MOTION(self, gcmd):
-        ename = gcmd.get("MOTION_QUEUE")
-        self.sync_to_extruder(ename)
-        gcmd.respond_info(
-            "Extruder '%s' now syncing with '%s'" % (self.name, ename)
-        )
-
 
 # Tracking for hotend heater, extrusion motion queue, and extruder stepper
 class PrinterExtruder:
@@ -247,14 +55,22 @@ class PrinterExtruder:
         self.trapq_append = lambda *a: None
         self.trapq_finalize_moves = lambda *a: None
 
-        # Setup extruder stepper
+        # The E motor is an ordinary [<motor>] section referenced from
+        # [axis e] motors:; [extruder] is heater-only.
         self.extruder_stepper = None
-        if (
-            config.get("step_pin", None) is not None
-            or config.get("dir_pin", None) is not None
-            or config.get("rotation_distance", None) is not None
+        for stepper_key in (
+            "step_pin",
+            "dir_pin",
+            "rotation_distance",
+            "microsteps",
         ):
-            self.extruder_stepper = ExtruderStepper(config)
+            if config.get(stepper_key, None) is not None:
+                raise config.error(
+                    "[%s]: stepper config is not supported here — move "
+                    "step_pin/dir_pin/rotation_distance/microsteps to a "
+                    "[<motor>] section and reference it from "
+                    "[axis e] motors:" % self.name
+                )
         # Register commands
         gcode = self.printer.lookup_object("gcode")
         if self.name == "extruder":

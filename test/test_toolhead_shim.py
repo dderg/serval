@@ -36,7 +36,6 @@ LEGACY_METHODS = [
     "get_max_velocity",
     "get_extruder",
     "set_extruder",
-    "register_step_generator",
     "register_lookahead_callback",
     "note_step_generation_scan_time",
     "note_mcu_movequeue_activity",

@@ -5,7 +5,7 @@ import signal
 import struct
 from collections import defaultdict
 
-from . import motion_kinematics
+from . import motion_kinematics, stepper
 from .extras import servo_axis
 from .kinematics import extruder
 
@@ -93,10 +93,10 @@ class Motion:
         self._read_post_processors(config)
         self.print_time = 0.0
         self.print_stall = 0
-        self.step_generators = []
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
         self.extruder = extruder.DummyExtruder(printer)
+        self._build_follower_steppers(config)
         self.kin = self._load_kinematics(config)
         if (
             config.has_section("dual_carriage")
@@ -216,9 +216,6 @@ class Motion:
 
     def get_kinematics(self):
         return self.kin
-
-    def register_step_generator(self, handler):
-        self.step_generators.append(handler)
 
     def get_max_velocity(self):
         return self.max_velocity, self.max_accel
@@ -448,6 +445,25 @@ class Motion:
                         "[limit] references undeclared axis '%s' "
                         "(declare [axis %s])" % (a, a)
                     )
+
+    def _build_follower_steppers(self, config):
+        self.follower_steppers = []
+        for name, _follows, motors, _pp in self.axis_sections:
+            if name in ("x", "y", "z") or not motors:
+                continue
+            for motor_name in motors:
+                motor_section, drive = motion_kinematics.resolve_motor_section(
+                    config, motor_name, "[axis %s] motors" % name
+                )
+                if drive != "stepper":
+                    raise config.error(
+                        "[axis %s] motors references '%s' with drive: %s — "
+                        "follower axes support stepper motors only"
+                        % (name, motor_name, drive)
+                    )
+                self.follower_steppers.append(
+                    stepper.PrinterStepper(motor_section)
+                )
 
     def _read_post_processors(self, config):
         self.post_processor_sections = []
