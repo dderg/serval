@@ -318,7 +318,6 @@ class Motion:
         self._read_post_processors(config)
         self.print_time = 0.0
         self.print_stall = 0
-        self.trapq = None
         self.step_generators = []
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
@@ -433,9 +432,6 @@ class Motion:
         self.move(curpos, speed)
         self.printer.send_event("toolhead:manual_move")
 
-    def limit_next_junction_speed(self, speed):
-        pass
-
     def set_extruder(self, extruder, extrude_pos):
         self.extruder = extruder
         self.commanded_pos[3] = extrude_pos
@@ -446,17 +442,8 @@ class Motion:
     def get_kinematics(self):
         return self.kin
 
-    def get_trapq(self):
-        return self.trapq
-
     def register_step_generator(self, handler):
         self.step_generators.append(handler)
-
-    def note_step_generation_scan_time(self, delay, old_delay=0.0):
-        self.flush_step_generation()
-
-    def register_lookahead_callback(self, callback):
-        callback(self.get_last_move_time())
 
     def get_max_velocity(self):
         return self.max_velocity, self.max_accel
@@ -772,10 +759,6 @@ class Motion:
             est_print_time,
             self._mcu_pending_end_time,
         )
-
-    def note_mcu_movequeue_activity(self, mq_time, set_step_gen_time=False):
-        # No-op kept for extras (output_pin); the bridge owns flushing.
-        pass
 
     def set_accel(self, accel):
         if accel is not None and accel > 0.0:
@@ -1382,9 +1365,32 @@ class Motion:
             raise gcmd.error("runtime_sim_endstop_set_pin failed: %s" % e)
 
 
+class ToolheadShim:
+    def __init__(self, motion):
+        self.motion = motion
+
+    def register_lookahead_callback(self, callback):
+        callback(self.motion.get_last_move_time())
+
+    def note_step_generation_scan_time(self, delay, old_delay=0.0):
+        self.motion.flush_step_generation()
+
+    def get_trapq(self):
+        return None
+
+    def note_mcu_movequeue_activity(self, mq_time, set_step_gen_time=False):
+        pass
+
+    def limit_next_junction_speed(self, speed):
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self.motion, name)
+
+
 def add_printer_objects(config):
     motion = Motion(config)
     printer = config.get_printer()
     printer.add_object("motion", motion)
-    printer.add_object("toolhead", motion)
+    printer.add_object("toolhead", ToolheadShim(motion))
     extruder.add_printer_objects(config)

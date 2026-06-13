@@ -2,7 +2,7 @@ import pytest
 
 from klippy import gcode
 from klippy.kinematics import extruder as extruder_mod
-from klippy.motion import BridgeKinematics, Motion
+from klippy.motion import BridgeKinematics, Motion, ToolheadShim
 
 EXPECTED_STATUS_KEYS = {
     "homed_axes",
@@ -99,7 +99,7 @@ def toolhead_fixture():
     toolhead.min_cruise_ratio = 0.0
     toolhead.square_corner_velocity = 5.0
 
-    printer.add_object("toolhead", toolhead)
+    printer.add_object("toolhead", ToolheadShim(toolhead))
     return printer
 
 
