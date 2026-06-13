@@ -12,6 +12,34 @@ from .kinematics import extruder
 BUFFER_TIME_START = 0.250
 DRAIN_TIMEOUT = 60.0
 _SPATIAL_AXIS_NAMES = ("x", "y", "z")
+_LEGACY_STEPPER_AXES = frozenset("xyzab")
+_LEGACY_SERVO_SECTIONS = ("servo_x", "servo_y", "servo_z")
+
+
+def _is_legacy_stepper_role_section(name):
+    if not name.startswith("stepper_"):
+        return False
+    suffix = name[len("stepper_") :]
+    if not suffix or suffix[0] not in _LEGACY_STEPPER_AXES:
+        return False
+    return suffix[1:] == "" or suffix[1:].isdigit()
+
+
+def reject_legacy_role_sections(config):
+    for sc in config.get_prefix_sections("stepper_"):
+        if _is_legacy_stepper_role_section(sc.get_name()):
+            raise config.error(
+                "role-encoding motor sections are not supported: name the "
+                "motor freely (e.g. [motor_a]) and assign it in [kinematics] "
+                "role lists / [axis <name>] motors:"
+            )
+    for name in _LEGACY_SERVO_SECTIONS:
+        if config.has_section(name):
+            raise config.error(
+                "role-encoding servo sections are not supported: declare a "
+                "[<motor>] section with 'drive: servo' and assign it in "
+                "[kinematics]"
+            )
 
 
 def _open_sim_control():
@@ -412,6 +440,7 @@ class Motion:
     )
 
     def _read_axes(self, config):
+        reject_legacy_role_sections(config)
         if config.has_section("firmware_retraction"):
             raise config.error(
                 "[firmware_retraction] is not supported: it presupposes an "

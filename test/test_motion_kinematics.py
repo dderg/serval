@@ -1,6 +1,6 @@
 import pytest
 
-from klippy import motion_kinematics
+from klippy import motion, motion_kinematics
 
 
 class FakeError(Exception):
@@ -96,6 +96,13 @@ class FakeConfig:
 
     def has_section(self, name):
         return name in self._sections
+
+    def get_prefix_sections(self, prefix):
+        return [
+            FakeSection(self._printer, name, self._sections[name])
+            for name in self._sections
+            if name.startswith(prefix)
+        ]
 
     def getsection(self, name):
         if name not in self._sections:
@@ -381,3 +388,38 @@ def test_note_z_not_homed_clears_only_z():
     assert kin.limits[0][0] <= kin.limits[0][1]
     assert kin.limits[1][0] <= kin.limits[1][1]
     assert kin.limits[2] == (1.0, -1.0)
+
+
+def reject_legacy(extra_sections):
+    sections = cartesian_sections()
+    sections.update(extra_sections)
+    printer = FakePrinter()
+    config = FakeConfig(printer, sections)
+    motion.reject_legacy_role_sections(config)
+
+
+def test_stepper_x_section_rejected():
+    with pytest.raises(FakeError) as exc:
+        reject_legacy({"stepper_x": motor_section()})
+    assert "[kinematics]" in str(exc.value)
+    assert "[motor_a]" in str(exc.value)
+
+
+def test_stepper_z2_section_rejected():
+    with pytest.raises(FakeError) as exc:
+        reject_legacy({"stepper_z2": motor_section()})
+    assert "role-encoding motor sections" in str(exc.value)
+
+
+def test_servo_x_section_rejected():
+    with pytest.raises(FakeError) as exc:
+        reject_legacy({"servo_x": {}})
+    assert "drive: servo" in str(exc.value)
+
+
+def test_arbitrary_motor_section_not_rejected():
+    reject_legacy({"motor_a": motor_section()})
+
+
+def test_stepper_enable_section_not_rejected():
+    reject_legacy({"stepper_enable": {}})
