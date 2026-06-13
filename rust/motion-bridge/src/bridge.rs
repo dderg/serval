@@ -3035,6 +3035,30 @@ impl PyMotionBridge {
                     })
                     .collect()
             };
+            let follower_rebases: Vec<(crate::pump::AxisKey, u64)> = {
+                let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+                configs
+                    .iter()
+                    .flat_map(|cfg| {
+                        let handle = crate::types::mcu_handle_from_raw(cfg.mcu_id);
+                        let now_clock =
+                            router.host_time_to_mcu_clock(handle, host_now).unwrap_or(0);
+                        cfg.axes
+                            .iter()
+                            .filter(|&&a| a >= 3)
+                            .map(move |&axis| {
+                                (
+                                    crate::pump::AxisKey {
+                                        mcu_id: cfg.mcu_id,
+                                        axis: axis as u8,
+                                    },
+                                    now_clock,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
             {
                 let mut store = self
                     .motion_history
@@ -3042,6 +3066,10 @@ impl PyMotionBridge {
                     .unwrap_or_else(|p| p.into_inner());
                 for (key, now_clock, pos) in rebases {
                     store.rebase_axis(key, now_clock, pos);
+                }
+                for (key, now_clock) in follower_rebases {
+                    let held_position = store.final_position(key).unwrap_or(0.0);
+                    store.rebase_axis(key, now_clock, held_position);
                 }
             }
         }
