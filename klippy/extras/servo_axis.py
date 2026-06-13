@@ -27,41 +27,43 @@ def infer_positive_dir(
     if position_endstop == position_max:
         return True
     raise config.error(
-        "servo_%s: position_endstop %.3f must equal position_min (%.3f) "
+        "[axis %s]: position_endstop %.3f must equal position_min (%.3f) "
         "or position_max (%.3f)"
         % (axis, position_endstop, position_min, position_max)
     )
 
 
 class ServoRail(BaseRail):
-    def __init__(self, config):
+    def __init__(self, axis_config, motor_config):
         super().__init__()
-        self.printer = config.get_printer()
-        self.name = config.get_name()
-        self.axis = self.name.split("_", 1)[1]
+        self.printer = axis_config.get_printer()
+        self.name = axis_config.get_name()
+        self.axis = self.name.split()[-1]
         if self.axis not in ("x", "y", "z"):
-            raise config.error(
-                "servo_%s: axis must be one of x/y/z (got %r)"
+            raise axis_config.error(
+                "[axis %s]: axis must be one of x/y/z (got %r)"
                 % (self.axis, self.axis)
             )
-        protocol = config.get("protocol")
+        protocol = motor_config.get("protocol")
         if protocol != "ethercat":
-            raise config.error(
-                "servo_%s: only 'protocol: ethercat' is supported "
-                "(got %r)" % (self.axis, protocol)
+            raise motor_config.error(
+                "[%s]: only 'protocol: ethercat' is supported "
+                "(got %r)" % (motor_config.get_name(), protocol)
             )
-        self.node_name = config.get("node")
-        self.rotation_distance = config.getfloat("rotation_distance", above=0.0)
-        self.encoder_counts_per_rev = config.getint(
+        self.node_name = motor_config.get("node")
+        self.rotation_distance = motor_config.getfloat(
+            "rotation_distance", above=0.0
+        )
+        self.encoder_counts_per_rev = motor_config.getint(
             "encoder_counts_per_rev", minval=1
         )
-        self.velocity_ff = config.getboolean("velocity_ff", False)
-        self.dynamics_profile = config.get("dynamics_profile", None)
-        self.ff_torque_clamp = config.getfloat(
+        self.velocity_ff = motor_config.getboolean("velocity_ff", False)
+        self.dynamics_profile = motor_config.get("dynamics_profile", None)
+        self.ff_torque_clamp = motor_config.getfloat(
             "ff_torque_clamp", 30.0, above=0.0, maxval=400.0
         )
-        self._parse_position_range(config)
-        self.endstop_pin = config.get("endstop_pin", None)
+        self._parse_position_range(axis_config)
+        self.endstop_pin = axis_config.get("endstop_pin", None)
         if self.endstop_pin is None:
             self.position_endstop = 0.0
             self.homing_speed = 0.0
@@ -71,34 +73,36 @@ class ServoRail(BaseRail):
             self.homing_following_error = 0.0
             self.homing_max_torque = 0.0
         else:
-            self.position_endstop = config.getfloat("position_endstop")
-            self._parse_homing_speeds(config)
+            self.position_endstop = axis_config.getfloat("position_endstop")
+            self._parse_homing_speeds(axis_config)
             self.homing_positive_dir = infer_positive_dir(
-                config,
+                axis_config,
                 self.axis,
                 self.position_endstop,
                 self.position_min,
                 self.position_max,
             )
-            self.homing_following_error = config.getfloat(
+            self.homing_following_error = axis_config.getfloat(
                 "homing_following_error", 2.5, above=0.0
             )
-            self.homing_max_torque = config.getfloat(
+            self.homing_max_torque = axis_config.getfloat(
                 "homing_max_torque", 50.0, above=0.0, maxval=400.0
             )
-        self.following_error = config.getfloat(
+        self.following_error = motor_config.getfloat(
             "following_error", None, above=0.0
         )
-        self.max_torque = config.getfloat(
+        self.max_torque = motor_config.getfloat(
             "max_torque", None, above=0.0, maxval=400.0
         )
         self._active_callbacks = []
         try:
             self.sdo_params = servo_param.parse_params_block(
-                config.get("params", "")
+                motor_config.get("params", "")
             )
         except ValueError as e:
-            raise config.error("servo_%s params: %s" % (self.axis, e))
+            raise motor_config.error(
+                "[%s] params: %s" % (motor_config.get_name(), e)
+            )
 
     def get_name(self, short=False):
         if short:

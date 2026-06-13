@@ -123,10 +123,18 @@ class _LinearKinematics:
         return rail
 
     def _build_servo_lane(self, config, lane, motor_sections):
-        raise config.error(
-            "servo drive lanes are not yet supported in [kinematics] "
-            "(stepper lanes only for now)"
-        )
+        lane_idx, axis_name, motor_names = lane
+        if len(motor_sections) != 1:
+            raise config.error(
+                "[kinematics] servo lane '%s' must reference exactly one "
+                "servo motor" % axis_name
+            )
+        from .extras import servo_axis
+
+        axis_config = config.getsection("axis " + axis_name)
+        rail = servo_axis.ServoRail(axis_config, motor_sections[0])
+        servo_axis.register_torque_enable(self._printer, config, rail)
+        return rail
 
     def _handle_motor_off(self, print_time):
         self.clear_homing_state((0, 1, 2))

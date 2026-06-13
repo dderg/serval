@@ -60,24 +60,50 @@ class FakeRailConfig:
         return default
 
 
-SERVO_Z_OPTIONS = {
-    "protocol": "ethercat",
-    "node": "z_drive",
-    "rotation_distance": 40.0,
-    "encoder_counts_per_rev": 131072,
+AXIS_Z_OPTIONS = {
     "position_min": -6.0,
     "position_max": 235.0,
     "endstop_pin": "ec_z:endstop",
     "position_endstop": -6.0,
 }
 
+MOTOR_Z_OPTIONS = {
+    "protocol": "ethercat",
+    "node": "z_drive",
+    "rotation_distance": 40.0,
+    "encoder_counts_per_rev": 131072,
+}
+
+AXIS_KEYS = frozenset(
+    (
+        "position_min",
+        "position_max",
+        "endstop_pin",
+        "position_endstop",
+        "homing_speed",
+        "homing_retract_dist",
+        "homing_retract_speed",
+        "homing_following_error",
+        "homing_max_torque",
+    )
+)
+
 
 def make_servo_rail(extra=(), drop=()):
-    options = dict(SERVO_Z_OPTIONS)
-    options.update(extra)
+    axis_options = dict(AXIS_Z_OPTIONS)
+    motor_options = dict(MOTOR_Z_OPTIONS)
+    for key, value in dict(extra).items():
+        if key in AXIS_KEYS:
+            axis_options[key] = value
+        else:
+            motor_options[key] = value
     for key in drop:
-        options.pop(key)
-    return servo_axis.ServoRail(FakeRailConfig("servo_z", options))
+        axis_options.pop(key, None)
+        motor_options.pop(key, None)
+    return servo_axis.ServoRail(
+        FakeRailConfig("axis z", axis_options),
+        FakeRailConfig("z_drive", motor_options),
+    )
 
 
 def test_get_homing_info_reflects_homing_config():
