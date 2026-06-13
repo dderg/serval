@@ -60,6 +60,13 @@ class _LinearKinematics:
         section = config.getsection("kinematics")
 
         self._lanes = self._read_lanes(config, section)
+        if [lane_idx for lane_idx, _, _ in self._lanes] != list(
+            range(len(self._lanes))
+        ):
+            raise config.error(
+                "[kinematics] internal error: lanes must be contiguous 0..N "
+                "(got %s)" % ([lane[0] for lane in self._lanes],)
+            )
         self.rails = [self._build_lane(config, lane) for lane in self._lanes]
         self.limits = [(1.0, -1.0)] * 3
 

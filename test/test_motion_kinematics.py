@@ -372,3 +372,12 @@ def test_active_rails_independent_for_cartesian():
     active = kin.active_rails(1.0, 0.0, 0.0)
     assert kin.rails[0] in active
     assert kin.rails[1] not in active
+
+
+def test_note_z_not_homed_clears_only_z():
+    kin = make_kin(corexy_sections())
+    kin.limits = [(0.0, 300.0), (0.0, 300.0), (0.0, 200.0)]
+    kin.note_z_not_homed()
+    assert kin.limits[0][0] <= kin.limits[0][1]
+    assert kin.limits[1][0] <= kin.limits[1][1]
+    assert kin.limits[2] == (1.0, -1.0)
