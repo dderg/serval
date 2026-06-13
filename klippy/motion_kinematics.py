@@ -36,6 +36,22 @@ KINEMATICS_TYPES = {
 }
 
 
+def read_claimed_axes(config):
+    if not config.has_section("kinematics"):
+        raise config.error("[kinematics] section is required")
+    section = config.getsection("kinematics")
+    kind = section.get("type")
+    if kind not in KINEMATICS_TYPES:
+        raise config.error(
+            "[kinematics] type '%s' is not supported (supported: %s)"
+            % (kind, ", ".join(sorted(KINEMATICS_TYPES)))
+        )
+    return [
+        section.get(axis_role_key)
+        for _role_motors_key, axis_role_key, _lane_idx in KINEMATICS_TYPES[kind]
+    ]
+
+
 def load_kinematics(config, motion):
     if config.getsection("printer").get("kinematics", None) is not None:
         raise config.error(
