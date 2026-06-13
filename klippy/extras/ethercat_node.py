@@ -39,12 +39,12 @@ class EtherCatNode:
         self.bridge_handle = None
         # Derived at claim time, not __init__: the [servo_*] sections are parsed
         # by the toolhead AFTER [ethercat_node] sections (printer._read_config
-        # loads prefix sections before motion_toolhead), so the matching
+        # loads prefix sections before motion), so the matching
         # ServoRail does not exist yet here.
         self._counts_per_mm = None
         # Claim during mcu-identify. printer._connect sends
         # "klippy:mcu_identify" before invoking the "klippy:connect"
-        # handlers (klippy/printer.py), and motion_toolhead._init_planner
+        # handlers (klippy/printer.py), and motion._init_planner
         # runs on "klippy:connect" — so the handle is populated before the
         # planner is built. This mirrors MCU._mcu_identify's claim_mcu call.
         self.printer.register_event_handler("klippy:mcu_identify", self._claim)

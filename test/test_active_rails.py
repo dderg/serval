@@ -1,4 +1,4 @@
-from klippy.motion_toolhead import BridgeKinematics, MotionToolhead
+from klippy.motion import BridgeKinematics, Motion
 
 
 class FakeStepper:
@@ -72,7 +72,7 @@ def test_hybrid_corexy_y_move_couples_x_motor():
 
 
 class FakeToolhead:
-    _fire_active_callbacks = MotionToolhead._fire_active_callbacks
+    _fire_active_callbacks = Motion._fire_active_callbacks
 
     def __init__(self, kin):
         self.kin = kin

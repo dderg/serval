@@ -193,6 +193,6 @@ drive being off (the stepper MCU is USB-powered).
   1 GHz clock registration, `attach_heartbeat_callback`, `ethercat_mcu_ids`),
   `ethercat_transport.rs`.
 - **Klippy config:** `[ethercat_node]`, `[servo_<axis>]` / `ServoRail`,
-  `MotionToolhead._register_axis` branch, `configure_axes` binding.
+  `Motion._register_axis` branch, `configure_axes` binding.
 - **Delete:** `curves.rs` `AxisRing` (the casual loop); any dead
   `dispatch_target_tests.rs` from the removed node-trait era.

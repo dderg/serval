@@ -116,7 +116,7 @@ def test_burst_of_linear_moves(sim):
             # Force phase-stepping mode on every Z stepper. The bench's
             # printer.cfg has `phase_stepping: 1` on stepper_z / z1 / z2,
             # which sets step_modes[2]=0 (Modulated) in
-            # MotionToolhead.configure_axes. Bench evidence (klippy.log
+            # Motion.configure_axes. Bench evidence (klippy.log
             # L1522556): `step_modes=[1, 1, 0, 1] mcu_caps=0x1`.
             #
             # Without this override the sim's vendored printer.cfg leaves

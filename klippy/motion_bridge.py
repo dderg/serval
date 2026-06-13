@@ -22,7 +22,7 @@ _PRINT_FINISH_EVENTS = (
 
 
 # Methods that issue real motion/planner/MCU traffic. Under the stub bridge
-# these MUST raise, not return None — a None would make MotionToolhead.move()
+# these MUST raise, not return None — a None would make Motion.move()
 # compute `None - None`, hanging the test suite on a path that reached real
 # motion without a real bridge.
 _STUB_MOTION_METHODS = frozenset(

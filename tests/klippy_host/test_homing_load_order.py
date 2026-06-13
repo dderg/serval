@@ -6,7 +6,7 @@ import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-CONFIG_PHASE_OK = "MotionToolhead: config phase complete"
+CONFIG_PHASE_OK = "Motion: config phase complete"
 CONFIG_PHASE_FAILED = "Config error"
 
 NEPTUNE_SHAPED_CONFIG = """

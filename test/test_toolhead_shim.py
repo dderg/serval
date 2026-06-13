@@ -2,7 +2,7 @@ import pytest
 
 from klippy import gcode
 from klippy.kinematics import extruder as extruder_mod
-from klippy.motion_toolhead import BridgeKinematics, MotionToolhead
+from klippy.motion import BridgeKinematics, Motion
 
 EXPECTED_STATUS_KEYS = {
     "homed_axes",
@@ -85,7 +85,7 @@ def toolhead_fixture():
     ]
     kin.limits = [(1.0, -1.0)] * 3
 
-    toolhead = MotionToolhead.__new__(MotionToolhead)
+    toolhead = Motion.__new__(Motion)
     toolhead.printer = printer
     toolhead.kin = kin
     toolhead.mcu = FakeMcu()
@@ -111,5 +111,7 @@ def test_toolhead_status_keys_exact(toolhead_fixture):
 
 def test_toolhead_method_surface_complete(toolhead_fixture):
     toolhead = toolhead_fixture.lookup_object("toolhead")
-    missing = [m for m in LEGACY_METHODS if not callable(getattr(toolhead, m, None))]
+    missing = [
+        m for m in LEGACY_METHODS if not callable(getattr(toolhead, m, None))
+    ]
     assert missing == []

@@ -15,7 +15,7 @@ fi
 exec docker run --rm \
     -v "$REPO_ROOT/klippy/extras:/work/klippy/extras" \
     -v "$REPO_ROOT/klippy/kinematics:/work/klippy/kinematics" \
-    -v "$REPO_ROOT/klippy/motion_toolhead.py:/work/klippy/motion_toolhead.py" \
+    -v "$REPO_ROOT/klippy/motion.py:/work/klippy/motion.py" \
     -v "$REPO_ROOT/klippy/motion_bridge.py:/work/klippy/motion_bridge.py" \
     -v "$REPO_ROOT/klippy/mcu.py:/work/klippy/mcu.py" \
     -v "$REPO_ROOT/klippy/serialhdl.py:/work/klippy/serialhdl.py" \

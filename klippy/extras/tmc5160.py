@@ -524,7 +524,7 @@ class TMC5160:
         if self._phase_stepper_oid is None:
             raise self.printer.command_error(
                 "phase_stepping: stepper oid not registered for %s "
-                "(motion_toolhead init_planner did not run?)" % (self.name,)
+                "(motion init_planner did not run?)" % (self.name,)
             )
         enable_spi = mcu_obj.lookup_command("kalico_phase_stepping_enable_spi")
         disable_spi = mcu_obj.lookup_command(

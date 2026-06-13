@@ -1,6 +1,6 @@
 import pytest
 
-from klippy.motion_toolhead import MotionToolhead
+from klippy.motion import Motion
 
 
 class ConfigError(Exception):
@@ -60,7 +60,7 @@ def post_processor(name, **opts):
 
 
 def make_toolhead():
-    th = MotionToolhead.__new__(MotionToolhead)
+    th = Motion.__new__(Motion)
     th.limit_sections = []
     return th
 

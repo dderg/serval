@@ -297,7 +297,7 @@ class BridgeKinematics:
         }
 
 
-class MotionToolhead:
+class Motion:
     def __init__(self, config):
         printer = config.get_printer()
         self.printer = printer
@@ -404,14 +404,14 @@ class MotionToolhead:
 
         signal.signal(signal.SIGTERM, _sigterm_handler)
 
-        logging.info("MotionToolhead: config phase complete")
+        logging.info("Motion: config phase complete")
 
     def _handle_disconnect(self):
-        logging.info("MotionToolhead: _handle_disconnect called")
+        logging.info("Motion: _handle_disconnect called")
         if self.bridge is not None:
-            logging.info("MotionToolhead: calling bridge.shutdown()")
+            logging.info("Motion: calling bridge.shutdown()")
             self.bridge.shutdown()
-            logging.info("MotionToolhead: bridge.shutdown() returned")
+            logging.info("Motion: bridge.shutdown() returned")
 
     def _load_kinematics(self, config):
         return BridgeKinematics(self, config)
@@ -870,8 +870,7 @@ class MotionToolhead:
             bridge_mcus.append((name, mcu, handle))
         if not bridge_mcus:
             logging.warning(
-                "MotionToolhead: no MCU bridge handles available; "
-                "skipping init_planner"
+                "Motion: no MCU bridge handles available; skipping init_planner"
             )
             return
 
@@ -909,7 +908,7 @@ class MotionToolhead:
         topology = _derive_mcu_topology(axis_to_handle, self.kinematics_name)
         if not topology:
             logging.warning(
-                "MotionToolhead: no axis->MCU assignment resolved; "
+                "Motion: no axis->MCU assignment resolved; "
                 "skipping init_planner"
             )
             return
@@ -924,7 +923,7 @@ class MotionToolhead:
             self._configure_axes_per_mcu(bridge_mcus)
 
         except Exception:
-            logging.exception("MotionToolhead: init_planner failed")
+            logging.exception("Motion: init_planner failed")
             raise
 
     def _configure_axes_per_mcu(self, bridge_mcus):
@@ -939,7 +938,7 @@ class MotionToolhead:
             awd_default = 0b0000
         else:
             logging.info(
-                "MotionToolhead: kinematics=%r — skipping configure_axes",
+                "Motion: kinematics=%r — skipping configure_axes",
                 kin,
             )
             return
@@ -1057,7 +1056,7 @@ class MotionToolhead:
             awd_mask = awd_default & present_mask
             if present_mask == 0:
                 logging.info(
-                    "MotionToolhead: no steppers matched MCU %s; "
+                    "Motion: no steppers matched MCU %s; "
                     "skipping configure_axes",
                     name,
                 )
@@ -1099,7 +1098,7 @@ class MotionToolhead:
                 )
             except Exception:
                 logging.info(
-                    "MotionToolhead: mcu=%s lacks kalico_configure_axis "
+                    "Motion: mcu=%s lacks kalico_configure_axis "
                     "(no new stepping redesign command); skipping runtime "
                     "binding",
                     name,
@@ -1117,7 +1116,7 @@ class MotionToolhead:
             if reset_cmd is not None:
                 reset_cmd.send([])
                 logging.info(
-                    "MotionToolhead: sent kalico_runtime_reset to mcu=%s",
+                    "Motion: sent kalico_runtime_reset to mcu=%s",
                     name,
                 )
 
@@ -1220,7 +1219,7 @@ class MotionToolhead:
                     ]
                 )
             logging.info(
-                "MotionToolhead: configure_axes mcu=%s kin=%d "
+                "Motion: configure_axes mcu=%s kin=%d "
                 "present=0x%x awd=0x%x invert=0x%x steps_per_mm=%s "
                 "step_modes=%s mcu_caps=0x%x runtime_bindings=%s "
                 "phase_configs=%s any_phase_stepping=%s "
@@ -1384,5 +1383,8 @@ class MotionToolhead:
 
 
 def add_printer_objects(config):
-    config.get_printer().add_object("toolhead", MotionToolhead(config))
+    motion = Motion(config)
+    printer = config.get_printer()
+    printer.add_object("motion", motion)
+    printer.add_object("toolhead", motion)
     extruder.add_printer_objects(config)

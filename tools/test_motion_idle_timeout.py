@@ -5,7 +5,7 @@ import inspect
 
 import pytest
 
-from klippy.motion_toolhead import MotionToolhead
+from klippy.motion import Motion
 
 pytestmark = pytest.mark.sim_unit
 
@@ -45,7 +45,7 @@ class _Stub:
 
 def test_check_busy_reports_idle_when_motion_has_drained():
     stub = _Stub(pending_end=10.0, est=70.0)
-    print_time, est_print_time, lookahead_empty = MotionToolhead.check_busy(
+    print_time, est_print_time, lookahead_empty = Motion.check_busy(
         stub, eventtime=123.0
     )
     assert print_time == 10.0
@@ -56,13 +56,13 @@ def test_check_busy_reports_idle_when_motion_has_drained():
 
 def test_check_busy_reports_busy_while_motion_queued():
     stub = _Stub(pending_end=80.0, est=70.0)
-    _, _, lookahead_empty = MotionToolhead.check_busy(stub, eventtime=123.0)
+    _, _, lookahead_empty = Motion.check_busy(stub, eventtime=123.0)
     assert lookahead_empty is False
 
 
 def test_sync_print_time_emits_event_with_stock_arg_order():
     stub = _Stub(pending_end=80.0, est=70.0, now=1000.0)
-    MotionToolhead._sync_print_time(stub)
+    Motion._sync_print_time(stub)
     assert stub.printer.events == [
         ("toolhead:sync_print_time", 1000.0, 70.0, 80.0)
     ]
@@ -70,7 +70,7 @@ def test_sync_print_time_emits_event_with_stock_arg_order():
 
 def test_move_and_dwell_start_the_idle_timeout_clock():
     for name in ("move", "dwell"):
-        src = inspect.getsource(MotionToolhead.__dict__[name])
+        src = inspect.getsource(Motion.__dict__[name])
         assert "_sync_print_time" in src, (
             "%s must emit toolhead:sync_print_time, or idle_timeout never "
             "starts and motors never disable" % name
