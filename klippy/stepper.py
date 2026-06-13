@@ -386,6 +386,151 @@ class PrinterRail(BaseRail):
             stepper.set_position(coord)
 
 
+AXIS_HOMING_KEYS = (
+    "position_min",
+    "position_max",
+    "position_endstop",
+    "homing_speed",
+    "second_homing_speed",
+    "homing_retract_dist",
+    "homing_retract_speed",
+    "homing_positive_dir",
+)
+
+
+class AxisRail(BaseRail):
+    def __init__(self, axis_config, motor_configs):
+        super().__init__()
+        if not motor_configs:
+            raise axis_config.error(
+                "[%s] needs at least one motor section"
+                % (axis_config.get_name(),)
+            )
+        self.axis_name = axis_config.get_name().split()[-1]
+        self._reject_homing_keys_on_motors(axis_config, motor_configs)
+        self.steppers = [PrinterStepper(c) for c in motor_configs]
+        primary = self.steppers[0]
+        self._tmc_current_helpers = None
+        self.get_name = primary.get_name
+        self.get_commanded_position = primary.get_commanded_position
+        self.calc_position_from_coord = primary.calc_position_from_coord
+        self._parse_axis_homing(axis_config)
+        self.endstops = []
+        self._build_endstops(axis_config, motor_configs)
+
+    def _reject_homing_keys_on_motors(self, axis_config, motor_configs):
+        for motor_config in motor_configs:
+            for key in AXIS_HOMING_KEYS:
+                if motor_config.get(key, None) is not None:
+                    raise motor_config.error(
+                        "'%s' belongs on [axis %s], not on motor section '%s'"
+                        % (key, self.axis_name, motor_config.get_name())
+                    )
+
+    def _parse_axis_homing(self, config):
+        self.position_endstop = config.getfloat(
+            "position_endstop", config.getfloat("position_min", 0.0)
+        )
+        endstop_pin = config.get("endstop_pin", None)
+        endstop_is_virtual = (
+            endstop_pin is not None and ":virtual_endstop" in endstop_pin
+        )
+        self._parse_position_range(config)
+        if (
+            self.position_endstop < self.position_min
+            or self.position_endstop > self.position_max
+        ):
+            raise config.error(
+                "position_endstop in section '%s' must be between"
+                " position_min and position_max" % config.get_name()
+            )
+        self.use_sensorless_homing = config.getboolean(
+            "use_sensorless_homing", endstop_is_virtual
+        )
+        self._parse_homing_speeds(config)
+        default_second_homing_speed = self.homing_speed / 2.0
+        if self.use_sensorless_homing:
+            default_second_homing_speed = self.homing_speed
+        self.second_homing_speed = config.getfloat(
+            "second_homing_speed", default_second_homing_speed, above=0.0
+        )
+        self.homing_positive_dir = config.getboolean(
+            "homing_positive_dir", None
+        )
+        self.min_home_dist = config.getfloat(
+            "min_home_dist", self.homing_retract_dist, minval=0.0
+        )
+        self.homing_accel = config.getfloat("homing_accel", None, above=0.0)
+        if self.homing_positive_dir is None:
+            axis_len = self.position_max - self.position_min
+            if self.position_endstop <= self.position_min + axis_len / 4.0:
+                self.homing_positive_dir = False
+            elif self.position_endstop >= self.position_max - axis_len / 4.0:
+                self.homing_positive_dir = True
+            else:
+                raise config.error(
+                    "Unable to infer homing_positive_dir in section '%s'"
+                    % (config.get_name(),)
+                )
+            config.getboolean("homing_positive_dir", self.homing_positive_dir)
+        elif (
+            self.homing_positive_dir
+            and self.position_endstop == self.position_min
+        ) or (
+            not self.homing_positive_dir
+            and self.position_endstop == self.position_max
+        ):
+            raise config.error(
+                "Invalid homing_positive_dir / position_endstop in '%s'"
+                % (config.get_name(),)
+            )
+
+    def _build_endstops(self, axis_config, motor_configs):
+        ppins = axis_config.get_printer().lookup_object("pins")
+        axis_endstop_pin = axis_config.get("endstop_pin", None)
+        if axis_endstop_pin is not None:
+            mcu_endstop = ppins.setup_pin("endstop", axis_endstop_pin)
+            for stepper in self.steppers:
+                mcu_endstop.add_stepper(stepper)
+            self.endstops.append((mcu_endstop, self.axis_name))
+        for motor_config, stepper in zip(motor_configs, self.steppers):
+            motor_endstop_pin = motor_config.get("endstop_pin", None)
+            if motor_endstop_pin is None:
+                continue
+            mcu_endstop = ppins.setup_pin("endstop", motor_endstop_pin)
+            mcu_endstop.add_stepper(stepper)
+            self.endstops.append((mcu_endstop, stepper.get_name(short=True)))
+
+    def get_tmc_current_helpers(self):
+        if self._tmc_current_helpers is None:
+            self._tmc_current_helpers = [
+                s.get_tmc_current_helper() for s in self.steppers
+            ]
+        return self._tmc_current_helpers
+
+    def get_steppers(self):
+        return list(self.steppers)
+
+    def get_endstops(self):
+        return list(self.endstops)
+
+    def setup_itersolve(self, alloc_func, *params):
+        for stepper in self.steppers:
+            stepper.setup_itersolve(alloc_func, *params)
+
+    def generate_steps(self, flush_time):
+        for stepper in self.steppers:
+            stepper.generate_steps(flush_time)
+
+    def set_trapq(self, trapq):
+        for stepper in self.steppers:
+            stepper.set_trapq(trapq)
+
+    def set_position(self, coord):
+        for stepper in self.steppers:
+            stepper.set_position(coord)
+
+
 def LookupMultiRail(
     config,
     need_position_minmax=True,
