@@ -1,8 +1,42 @@
-use crate::dispatch::{AXIS_X, AXIS_Y, McuAxisConfig, cfg_is_corexy};
+use crate::dispatch::McuAxisConfig;
+use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
 use crate::pump::{AxisKey, EnqueueMsg};
 use nurbs::ScalarNurbs;
 use runtime::piece_ring::PieceEntry;
 use trajectory::ShapedSegment;
+
+fn scale_curve_exact(curve: &ScalarNurbs<f64>, weight: f64) -> ScalarNurbs<f64> {
+    if weight == 1.0 {
+        curve.clone()
+    } else {
+        nurbs::algebra::scalar_multiply(curve, weight)
+    }
+}
+
+pub(crate) fn lane_curve(
+    module: &KinematicsModule,
+    seg_axes: &[ScalarNurbs<f64>],
+    lane: usize,
+) -> ScalarNurbs<f64> {
+    if lane >= SPATIAL_AXES || module.lane_is_identity(lane) {
+        return seg_axes[lane].clone();
+    }
+    let w = module.lane_weights(lane);
+    let mut acc: Option<ScalarNurbs<f64>> = None;
+    for (axis, &weight) in w.iter().enumerate() {
+        if weight == 0.0 {
+            continue;
+        }
+        let term = scale_curve_exact(&seg_axes[axis], weight);
+        acc = Some(match acc {
+            None => term,
+            Some(prev) => nurbs::algebra::add_with_knot_union(&prev, &term).unwrap_or_else(|e| {
+                panic!("lane combine knot-union failed (invariant violation — all ShapedSegment axes share one time domain): {e:?}")
+            }),
+        });
+    }
+    acc.expect("kinematics lane with all-zero weights is a module construction bug")
+}
 
 pub fn enqueue_segment<P>(
     seg: &ShapedSegment,
@@ -20,31 +54,15 @@ where
     let mut out = Vec::new();
 
     for cfg in mcu_configs {
-        let corexy = cfg_is_corexy(cfg) && AXIS_X < seg.axes.len() && AXIS_Y < seg.axes.len();
-
-        let motor: Option<(ScalarNurbs<f64>, ScalarNurbs<f64>)> = if corexy {
-            let x = &seg.axes[AXIS_X];
-            let y = &seg.axes[AXIS_Y];
-            let neg_y = nurbs::algebra::scalar_multiply(y, -1.0_f64);
-            let a = nurbs::algebra::add_with_knot_union(x, y)
-                .unwrap_or_else(|e| panic!("CoreXY motor-A knot-union add failed (invariant violation — all ShapedSegment axes share one time domain): {e:?}"));
-            let b = nurbs::algebra::add_with_knot_union(x, &neg_y)
-                .unwrap_or_else(|e| panic!("CoreXY motor-B knot-union add failed (invariant violation — all ShapedSegment axes share one time domain): {e:?}"));
-            Some((a, b))
-        } else {
-            None
-        };
+        let module = KinematicsModule::from_tag(cfg.kinematics)
+            .expect("build_mcu_configs validated the kinematics tag");
 
         for &axis_idx in &cfg.axes {
             if axis_idx >= seg.axes.len() {
                 continue;
             }
 
-            let curve: &ScalarNurbs<f64> = match (&motor, axis_idx) {
-                (Some((a, _)), idx) if idx == AXIS_X => a,
-                (Some((_, b)), idx) if idx == AXIS_Y => b,
-                _ => &seg.axes[axis_idx],
-            };
+            let curve = lane_curve(&module, &seg.axes, axis_idx);
 
             let key = AxisKey {
                 mcu_id: cfg.mcu_id,
@@ -52,7 +70,7 @@ where
             };
 
             let pieces = flatten_axis(
-                curve,
+                &curve,
                 t0,
                 cfg.mcu_id,
                 axis_idx,

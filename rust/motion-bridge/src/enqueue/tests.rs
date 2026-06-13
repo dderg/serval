@@ -1,5 +1,6 @@
 use super::*;
-use crate::dispatch::{KINEMATICS_COREXY, McuCaps};
+use crate::dispatch::{AXIS_X, AXIS_Y, KINEMATICS_COREXY, McuCaps};
+use crate::kinematics::KinematicsModule;
 
 fn constant_axis(value: f64, n_pieces: usize, piece_dur: f64) -> ScalarNurbs<f64> {
     let bern = [value; 4];
@@ -584,5 +585,62 @@ fn nonzero_curve_base_preserves_host_times() {
         (host1 - (t0 + U_BASE + 0.8)).abs() < 1e-9,
         "motion piece must start at t0 + u_base + 0.8 = {}, got {host1}",
         t0 + U_BASE + 0.8
+    );
+}
+
+#[test]
+fn cartesian_lanes_are_bitwise_passthrough() {
+    let cartesian = KinematicsModule::from_tag(1).unwrap();
+    let seg_axes = vec![
+        linear_axis(0.0, 10.0),
+        linear_axis(0.0, 4.0),
+        linear_axis(0.0, 7.0),
+    ];
+    for lane in [AXIS_X, AXIS_Y, 2] {
+        assert_eq!(
+            lane_curve(&cartesian, &seg_axes, lane),
+            seg_axes[lane],
+            "cartesian lane {lane} must be a bit-identical clone of the source axis"
+        );
+    }
+}
+
+#[test]
+fn corexy_lane_combine_matches_legacy_sum_difference() {
+    let corexy = KinematicsModule::from_tag(KINEMATICS_COREXY).unwrap();
+    let x = linear_axis(0.0, 10.0);
+    let y = linear_axis(0.0, 4.0);
+    let seg_axes = vec![x.clone(), y.clone(), linear_axis(0.0, 0.0)];
+
+    let legacy_a = nurbs::algebra::add_with_knot_union(&x, &y).unwrap();
+    let legacy_b =
+        nurbs::algebra::add_with_knot_union(&x, &nurbs::algebra::scalar_multiply(&y, -1.0))
+            .unwrap();
+
+    assert_eq!(
+        lane_curve(&corexy, &seg_axes, AXIS_X),
+        legacy_a,
+        "corexy motor-A lane must match legacy add_with_knot_union(x, y) bit-for-bit"
+    );
+    assert_eq!(
+        lane_curve(&corexy, &seg_axes, AXIS_Y),
+        legacy_b,
+        "corexy motor-B lane must match legacy add_with_knot_union(x, -y) bit-for-bit"
+    );
+}
+
+#[test]
+fn follower_lanes_never_pass_through_the_spatial_matrix() {
+    let corexy = KinematicsModule::from_tag(KINEMATICS_COREXY).unwrap();
+    let seg_axes = vec![
+        linear_axis(0.0, 10.0),
+        linear_axis(0.0, 4.0),
+        linear_axis(0.0, 7.0),
+        linear_axis(0.0, 2.0),
+    ];
+    assert_eq!(
+        lane_curve(&corexy, &seg_axes, 3),
+        seg_axes[3],
+        "follower lane 3 must be the raw source curve, untouched by the spatial matrix"
     );
 }
