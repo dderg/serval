@@ -37,15 +37,19 @@ class StubSection:
 
 
 class FakeHeater:
-    can_extrude = True
+    def __init__(self, can_extrude=True):
+        self.can_extrude = can_extrude
 
     def get_status(self, eventtime):
         return {}
 
 
 class FakeHeaters:
+    def __init__(self, can_extrude=True):
+        self._can_extrude = can_extrude
+
     def setup_heater(self, config, gcode_id=None):
-        return FakeHeater()
+        return FakeHeater(self._can_extrude)
 
 
 class FakeGcode:
@@ -75,7 +79,7 @@ class FakeMotion:
 class FakePrinter:
     command_error = ConfigError
 
-    def __init__(self, axis_sections=None):
+    def __init__(self, axis_sections=None, can_extrude=True):
         if axis_sections is None:
             axis_sections = [
                 ("x", [], ["x"], []),
@@ -84,7 +88,7 @@ class FakePrinter:
                 ("e", ["x", "y", "z"], ["e"], []),
             ]
         self.objects = {
-            "heaters": FakeHeaters(),
+            "heaters": FakeHeaters(can_extrude),
             "gcode": FakeGcode(),
             "toolhead": FakeToolhead(),
             "motion": FakeMotion(axis_sections),
@@ -98,9 +102,9 @@ class FakePrinter:
 
 
 def make_extruder_section(
-    name="extruder", axis="e", axis_sections=None, **options
+    name="extruder", axis="e", axis_sections=None, can_extrude=True, **options
 ):
-    printer = FakePrinter(axis_sections)
+    printer = FakePrinter(axis_sections, can_extrude)
     base = {
         "nozzle_diameter": 0.4,
         "filament_diameter": 1.75,
@@ -130,9 +134,6 @@ def test_extruder_heater_only_section_loads():
     pe = PrinterExtruder(section, 0)
     assert pe.get_heater() is not None
     assert pe.axis_name == "e"
-    # def_max_cross_section = 4 * 0.4**2 = 0.64; filament_area = pi*0.875**2.
-    expected_area = 3.141592653589793 * (1.75 * 0.5) ** 2
-    assert pe.max_extrude_ratio == pytest.approx((4.0 * 0.4**2) / expected_area)
 
 
 def test_extruder_missing_axis_rejected():
@@ -166,16 +167,44 @@ class FakeMove:
         self.move_d = (axes_d[0] ** 2 + axes_d[1] ** 2) ** 0.5
 
 
-def test_extruder_check_move_overextrusion_fires():
+def test_extruder_check_move_allows_heavy_extrusion():
     section = make_extruder_section()
     pe = PrinterExtruder(section, 0)
-    # XY move of 1mm with extrusion ratio far above max_extrude_ratio.
-    bad_ratio = pe.max_extrude_ratio * 10.0
-    move = FakeMove(
-        axes_d=[1.0, 0.0, 0.0, 1.0], axes_r=[1.0, 0.0, 0.0, bad_ratio]
-    )
-    with pytest.raises(ConfigError, match="maximum extrusion"):
+    # A move that the deleted over-extrusion guard would have rejected:
+    # planner-side limits, not the extruder, govern motion now.
+    move = FakeMove(axes_d=[1.0, 0.0, 0.0, 50.0], axes_r=[1.0, 0.0, 0.0, 50.0])
+    pe.check_move(move)
+
+
+def test_extruder_check_move_cold_extrude_rejected():
+    section = make_extruder_section(can_extrude=False)
+    pe = PrinterExtruder(section, 0)
+    move = FakeMove(axes_d=[0.0, 0.0, 0.0, 1.0], axes_r=[0.0, 0.0, 0.0, 1.0])
+    with pytest.raises(ConfigError, match="minimum temp"):
         pe.check_move(move)
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("max_extrude_cross_section", 1.0),
+        ("instantaneous_corner_velocity", 1.0),
+        ("max_extrude_only_distance", 500.0),
+    ],
+)
+def test_extruder_removed_option_rejected(key, value):
+    section = make_extruder_section(**{key: value})
+    with pytest.raises(ConfigError, match="no longer supported"):
+        PrinterExtruder(section, 0)
+
+
+@pytest.mark.parametrize(
+    "key", ["max_extrude_only_velocity", "max_extrude_only_accel"]
+)
+def test_extruder_extrude_limit_option_points_to_limit_section(key):
+    section = make_extruder_section(**{key: 100.0})
+    with pytest.raises(ConfigError, match=r"\[limit"):
+        PrinterExtruder(section, 0)
 
 
 def test_extruder_stepper_extra_rejected():

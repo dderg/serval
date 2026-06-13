@@ -2978,8 +2978,6 @@ control: pid
 pid_kp: 30
 pid_ki: 2
 pid_kd: 100
-max_extrude_cross_section: 100
-max_extrude_only_distance: 500
 
 [heater_bed]
 heater_pin: gpiochip0/gpio21

@@ -3,8 +3,16 @@
 # Copyright (C) 2016-2022  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging
-import math
+
+_OPTIONS_NOW_IN_LIMIT_SECTIONS = (
+    "max_extrude_only_velocity",
+    "max_extrude_only_accel",
+)
+_OPTIONS_WITHOUT_A_PLANNER_CONCEPT = (
+    "max_extrude_cross_section",
+    "max_extrude_only_distance",
+    "instantaneous_corner_velocity",
+)
 
 
 # Tracking for hotend heater, extrusion motion queue, and extruder stepper
@@ -13,40 +21,14 @@ class PrinterExtruder:
         self.printer = config.get_printer()
         self.name = config.get_name()
         self.last_position = 0.0
+        self._reject_unsupported_options(config)
         # Setup hotend heater
         pheaters = self.printer.load_object(config, "heaters")
         gcode_id = "T%d" % (extruder_num,)
         self.heater = pheaters.setup_heater(config, gcode_id)
-        # Setup kinematic checks
         self.nozzle_diameter = config.getfloat("nozzle_diameter", above=0.0)
-        filament_diameter = config.getfloat(
+        self.filament_diameter = config.getfloat(
             "filament_diameter", minval=self.nozzle_diameter
-        )
-        self.filament_area = math.pi * (filament_diameter * 0.5) ** 2
-        def_max_cross_section = 4.0 * self.nozzle_diameter**2
-        def_max_extrude_ratio = def_max_cross_section / self.filament_area
-        max_cross_section = config.getfloat(
-            "max_extrude_cross_section", def_max_cross_section, above=0.0
-        )
-        self.max_extrude_ratio = max_cross_section / self.filament_area
-        logging.info("Extruder max_extrude_ratio=%.6f", self.max_extrude_ratio)
-        toolhead = self.printer.lookup_object("toolhead")
-        max_velocity, max_accel = toolhead.get_max_velocity()
-        self.max_e_velocity = config.getfloat(
-            "max_extrude_only_velocity",
-            max_velocity * def_max_extrude_ratio,
-            above=0.0,
-        )
-        self.max_e_accel = config.getfloat(
-            "max_extrude_only_accel",
-            max_accel * def_max_extrude_ratio,
-            above=0.0,
-        )
-        self.max_e_dist = config.getfloat(
-            "max_extrude_only_distance", 50.0, minval=0.0
-        )
-        self.instant_corner_v = config.getfloat(
-            "instantaneous_corner_velocity", 1.0, minval=0.0
         )
         # Setup extruder trapq (trapezoidal motion queue). Bridge mode:
         # planner / kinematic state lives in Rust, the host stub is
@@ -93,6 +75,7 @@ class PrinterExtruder:
         # Register commands
         gcode = self.printer.lookup_object("gcode")
         if self.name == "extruder":
+            toolhead = self.printer.lookup_object("toolhead")
             toolhead.set_extruder(self, 0.0)
             gcode.register_command("M104", self.cmd_M104)
             gcode.register_command("M109", self.cmd_M109)
@@ -125,49 +108,29 @@ class PrinterExtruder:
     def stats(self, eventtime):
         return self.heater.stats(eventtime)
 
+    def _reject_unsupported_options(self, config):
+        for key in _OPTIONS_NOW_IN_LIMIT_SECTIONS:
+            if config.get(key, None) is not None:
+                raise config.error(
+                    "[%s] option '%s' is no longer supported: declare the "
+                    "extruder's velocity and acceleration in a [limit <name>] "
+                    "section with 'axes: %s'"
+                    % (self.name, key, config.get("axis", "e"))
+                )
+        for key in _OPTIONS_WITHOUT_A_PLANNER_CONCEPT:
+            if config.get(key, None) is not None:
+                raise config.error(
+                    "[%s] option '%s' is no longer supported: the planner "
+                    "enforces motion through [limit] sections and has no such "
+                    "concept" % (self.name, key)
+                )
+
     def check_move(self, move):
-        axis_r = move.axes_r[3]
         if not self.heater.can_extrude:
             raise self.printer.command_error(
                 "Extrude below minimum temp\n"
                 "See the 'min_extrude_temp' config option for details"
             )
-        if (not move.axes_d[0] and not move.axes_d[1]) or axis_r < 0.0:
-            # Extrude only move (or retraction move) - limit accel and velocity
-            if abs(move.axes_d[3]) > self.max_e_dist:
-                raise self.printer.command_error(
-                    "Extrude only move too long (%.3fmm vs %.3fmm)\n"
-                    "See the 'max_extrude_only_distance' config"
-                    " option for details" % (move.axes_d[3], self.max_e_dist)
-                )
-            inv_extrude_r = 1.0 / abs(axis_r)
-            move.limit_speed(
-                self.max_e_velocity * inv_extrude_r,
-                self.max_e_accel * inv_extrude_r,
-            )
-        elif axis_r > self.max_extrude_ratio:
-            if move.axes_d[3] <= self.nozzle_diameter * self.max_extrude_ratio:
-                # Permit extrusion if amount extruded is tiny
-                return
-            area = axis_r * self.filament_area
-            logging.debug(
-                "Overextrude: %s vs %s (area=%.3f dist=%.3f)",
-                axis_r,
-                self.max_extrude_ratio,
-                area,
-                move.move_d,
-            )
-            raise self.printer.command_error(
-                "Move exceeds maximum extrusion (%.3fmm^2 vs %.3fmm^2)\n"
-                "See the 'max_extrude_cross_section' config option for details"
-                % (area, self.max_extrude_ratio * self.filament_area)
-            )
-
-    def calc_junction(self, prev_move, move):
-        diff_r = move.axes_r[3] - prev_move.axes_r[3]
-        if diff_r:
-            return (self.instant_corner_v / abs(diff_r)) ** 2
-        return move.max_cruise_v2
 
     def move(self, print_time, move):
         axis_r = move.axes_r[3]
@@ -262,9 +225,6 @@ class DummyExtruder:
 
     def find_past_position(self, print_time):
         return 0.0
-
-    def calc_junction(self, prev_move, move):
-        return move.max_cruise_v2
 
     def get_name(self):
         return ""
