@@ -27,7 +27,7 @@ fn line_100mm(direction: [f64; 2]) -> VectorNurbs<f64, 3> {
     VectorNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![[0.0; 3], end]).unwrap()
 }
 
-fn peak_toolhead_accel(curve: &VectorNurbs<f64, 3>) -> f64 {
+fn peak_carriage_accel(curve: &VectorNurbs<f64, 3>) -> f64 {
     let profile = schedule_segment(
         curve,
         &gantry_limits(),
@@ -56,9 +56,9 @@ fn peak_toolhead_accel(curve: &VectorNurbs<f64, 3>) -> f64 {
 
 #[test]
 fn diagonal_move_gets_same_peak_accel_as_axis_aligned() {
-    let pure_x = peak_toolhead_accel(&line_100mm([1.0, 0.0]));
+    let pure_x = peak_carriage_accel(&line_100mm([1.0, 0.0]));
     let frac = std::f64::consts::FRAC_1_SQRT_2;
-    let diagonal = peak_toolhead_accel(&line_100mm([frac, frac]));
+    let diagonal = peak_carriage_accel(&line_100mm([frac, frac]));
 
     assert!(
         (pure_x - diagonal).abs() / pure_x < 0.02,

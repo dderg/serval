@@ -5,7 +5,7 @@
 // per de Casteljau on Bernstein CPs (Mainar & Peña 2004).
 //
 // Stays in Bernstein basis (Farouki–Goodman 1996) to avoid the
-// cancellation in `a = -P0 + 3·P1 - 3·P2 + P3` at toolhead coordinates
+// cancellation in `a = -P0 + 3·P1 - 3·P2 + P3` at axis coordinates
 // around 100 mm that broke the prior Cardano-on-monomial solver.
 //
 // f32 throughout: Cortex-M4F (F446) has hardware FPU for single-precision

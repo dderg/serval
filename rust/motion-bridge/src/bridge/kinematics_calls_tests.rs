@@ -1,7 +1,7 @@
 use crate::dispatch::{AXIS_X, AXIS_Y, KINEMATICS_COREXY};
 
 #[test]
-fn corexy_inverse_maps_motor_to_toolhead() {
+fn corexy_inverse_maps_motor_to_axes() {
     let xyz = crate::kinematics::inverse(KINEMATICS_COREXY, [4.0, 2.0, 0.0, 0.0]);
     assert!(
         (xyz[0] - 3.0).abs() < 1e-9,

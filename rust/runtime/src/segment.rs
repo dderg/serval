@@ -1,9 +1,10 @@
-/// This discriminant is embedded in the MCU wire protocol (see
-/// `dispatch.rs:KINEMATICS_COREXY`) and must never be renumbered without a
-/// matching change on both sides of the host/MCU boundary.
+/// Discriminants are the kinematics tag crossing the Python↔Rust
+/// `init_planner` topology tuples; klippy mirrors them numerically.
+/// Renumbering breaks that contract — dispatch.rs pins them with a
+/// compile-time assert.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KinematicTag {
-    CoreXyAndE = 0,
-    CartesianXyzAndE = 1,
+    CoreXy = 0,
+    Cartesian = 1,
 }

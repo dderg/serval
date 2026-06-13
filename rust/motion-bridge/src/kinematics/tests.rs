@@ -8,7 +8,7 @@ fn corexy_forward_is_sum_and_difference() {
     assert_eq!(forward_corexy(3.0, 1.0), (4.0, 2.0));
 }
 #[test]
-fn corexy_inverse_recovers_toolhead() {
+fn corexy_inverse_recovers_axes() {
     assert_eq!(inverse_corexy(4.0, 2.0), (3.0, 1.0));
 }
 #[test]

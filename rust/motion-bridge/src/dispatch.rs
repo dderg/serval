@@ -1,11 +1,11 @@
 use runtime::segment::KinematicTag;
 use std::collections::{HashMap, HashSet};
 
-pub const KINEMATICS_COREXY: u8 = KinematicTag::CoreXyAndE as u8;
+pub const KINEMATICS_COREXY: u8 = KinematicTag::CoreXy as u8;
 
 const _: () = assert!(
-    KinematicTag::CoreXyAndE as u8 == 0,
-    "wire-ABI invariant broken: KinematicTag::CoreXyAndE discriminant must be 0 \
+    KinematicTag::CoreXy as u8 == 0,
+    "wire-ABI invariant broken: KinematicTag::CoreXy discriminant must be 0 \
      (matches KINEMATICS_COREXY on the host and the MCU firmware's kinematics byte)",
 );
 
