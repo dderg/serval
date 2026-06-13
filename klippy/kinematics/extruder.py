@@ -68,6 +68,28 @@ class PrinterExtruder:
                     "[<motor>] section and reference it from "
                     "[axis e] motors:" % self.name
                 )
+        axis_name = config.get("axis")
+        motion = self.printer.lookup_object("motion", None)
+        if motion is None:
+            raise config.error(
+                "[%s] axis: requires the [motion] object, which was not "
+                "available at extruder load time" % self.name
+            )
+        declared = {
+            n: follows for n, follows, motors, _pp in motion.axis_sections
+        }
+        if axis_name not in declared:
+            raise config.error(
+                "[%s] axis: '%s' is not a declared [axis %s] section"
+                % (self.name, axis_name, axis_name)
+            )
+        if not declared[axis_name]:
+            raise config.error(
+                "[%s] axis: '%s' must be a follower axis "
+                "(declare 'follows:' on [axis %s])"
+                % (self.name, axis_name, axis_name)
+            )
+        self.axis_name = axis_name
         # Register commands
         gcode = self.printer.lookup_object("gcode")
         if self.name == "extruder":

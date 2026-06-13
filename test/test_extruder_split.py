@@ -67,14 +67,27 @@ class FakeToolhead:
         self.extruder = extruder
 
 
+class FakeMotion:
+    def __init__(self, axis_sections):
+        self.axis_sections = axis_sections
+
+
 class FakePrinter:
     command_error = ConfigError
 
-    def __init__(self):
+    def __init__(self, axis_sections=None):
+        if axis_sections is None:
+            axis_sections = [
+                ("x", [], ["x"], []),
+                ("y", [], ["y"], []),
+                ("z", [], ["z"], []),
+                ("e", ["x", "y", "z"], ["e"], []),
+            ]
         self.objects = {
             "heaters": FakeHeaters(),
             "gcode": FakeGcode(),
             "toolhead": FakeToolhead(),
+            "motion": FakeMotion(axis_sections),
         }
 
     def load_object(self, config, name):
@@ -84,12 +97,16 @@ class FakePrinter:
         return self.objects.get(name, default)
 
 
-def make_extruder_section(name="extruder", **options):
-    printer = FakePrinter()
+def make_extruder_section(
+    name="extruder", axis="e", axis_sections=None, **options
+):
+    printer = FakePrinter(axis_sections)
     base = {
         "nozzle_diameter": 0.4,
         "filament_diameter": 1.75,
     }
+    if axis is not None:
+        base["axis"] = axis
     base.update(options)
     section = StubSection(name, base)
     section.printer = printer
@@ -112,9 +129,34 @@ def test_extruder_heater_only_section_loads():
     section = make_extruder_section()
     pe = PrinterExtruder(section, 0)
     assert pe.get_heater() is not None
+    assert pe.axis_name == "e"
     # def_max_cross_section = 4 * 0.4**2 = 0.64; filament_area = pi*0.875**2.
     expected_area = 3.141592653589793 * (1.75 * 0.5) ** 2
     assert pe.max_extrude_ratio == pytest.approx((4.0 * 0.4**2) / expected_area)
+
+
+def test_extruder_missing_axis_rejected():
+    section = make_extruder_section(axis=None)
+    with pytest.raises(ConfigError, match="axis"):
+        PrinterExtruder(section, 0)
+
+
+def test_extruder_axis_not_declared_rejected():
+    section = make_extruder_section(axis="q")
+    with pytest.raises(ConfigError, match="not a declared"):
+        PrinterExtruder(section, 0)
+
+
+def test_extruder_non_follower_axis_rejected():
+    section = make_extruder_section(axis="x")
+    with pytest.raises(ConfigError, match="must be a follower axis"):
+        PrinterExtruder(section, 0)
+
+
+def test_extruder_valid_follower_axis_loads():
+    section = make_extruder_section(axis="e")
+    pe = PrinterExtruder(section, 0)
+    assert pe.axis_name == "e"
 
 
 class FakeMove:
