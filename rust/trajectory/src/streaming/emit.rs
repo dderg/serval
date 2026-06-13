@@ -339,7 +339,10 @@ impl ShaperState {
     }
 
     /// Committed ledger value per follower at the emit window start: the lane
-    /// value where prior emissions wrote it, else the at-rest fallback.
+    /// value where prior emissions wrote it. When `anchor_t` falls past the
+    /// lane's committed coverage (e.g. across an idle gap), the follower holds
+    /// its realized endpoint — the ledger never snaps back to the at-rest
+    /// fallback while pieces exist.
     fn follower_anchor_values(&self, ctx: &EmitContext<'_>, emit_start: f64) -> Vec<f64> {
         let anchor_t = emit_start.max(
             self.planned_fitted
@@ -351,7 +354,14 @@ impl ShaperState {
             .iter()
             .zip(&self.follower_emit_start)
             .map(|((f_axis, _), &fallback)| {
-                self.axis_position_at(*f_axis, anchor_t).unwrap_or(fallback)
+                self.axis_position_at(*f_axis, anchor_t)
+                    .or_else(|| {
+                        self.axes[*f_axis]
+                            .pieces
+                            .back()
+                            .map(|p| p.evaluate(p.u_end))
+                    })
+                    .unwrap_or(fallback)
             })
             .collect()
     }
