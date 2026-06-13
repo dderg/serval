@@ -3542,7 +3542,7 @@ impl PyMotionBridge {
         let motor_frame =
             trip_position_to_motor_frame(ctx.axis, final_motor_pos, &[], ctx.axis_key.mcu_id);
         let cartesian = KinematicsModule::from_tag(kinematics)
-            .expect("kinematics tag validated at planner init")
+            .expect("build_mcu_configs validated the kinematics tag")
             .inverse(motor_frame);
 
         let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
