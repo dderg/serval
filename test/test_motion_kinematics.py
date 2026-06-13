@@ -475,15 +475,11 @@ def test_read_claimed_axes_unknown_type_rejected():
     sections = corexy_sections()
     sections["kinematics"]["type"] = "bogus"
     with pytest.raises(FakeError):
-        motion_kinematics.read_claimed_axes(
-            FakeConfig(FakePrinter(), sections)
-        )
+        motion_kinematics.read_claimed_axes(FakeConfig(FakePrinter(), sections))
 
 
 def test_read_claimed_axes_missing_section_rejected():
     sections = corexy_sections()
     del sections["kinematics"]
     with pytest.raises(FakeError):
-        motion_kinematics.read_claimed_axes(
-            FakeConfig(FakePrinter(), sections)
-        )
+        motion_kinematics.read_claimed_axes(FakeConfig(FakePrinter(), sections))
