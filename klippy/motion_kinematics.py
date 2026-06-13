@@ -205,17 +205,14 @@ class _LinearKinematics:
         return [s for rail in self.rails for s in rail.get_steppers()]
 
     def active_rails(self, dx, dy, dz):
-        moved = {
-            axis: abs(delta) > 1e-9 for axis, delta in zip("xyz", (dx, dy, dz))
-        }
-        coupled = dict(moved)
+        moved = [abs(dx) > 1e-9, abs(dy) > 1e-9, abs(dz) > 1e-9]
         if self.coupled_xy():
-            coupled["x"] = coupled["y"] = moved["x"] or moved["y"]
-        active = []
-        for lane_idx, _, _ in self._lanes:
-            if coupled["xyz"[lane_idx]]:
-                active.append(self.rails[lane_idx])
-        return active
+            moved[0] = moved[1] = moved[0] or moved[1]
+        return [
+            self.rails[lane_idx]
+            for lane_idx, _, _ in self._lanes
+            if moved[lane_idx]
+        ]
 
     def calc_position(self, stepper_positions):
         def rail_pos(rail):
