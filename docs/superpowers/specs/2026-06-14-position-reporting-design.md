@@ -76,14 +76,20 @@ host match-up in `rust/kalico-host-rt/src/host_io/kalico_native.rs`):
   - Position uses the existing Q16 encoding (`encode_q16`, `rust/motion-bridge/src/dispatch.rs:107`;
     decode = `q16 as f32 / 65536.0`). 1 LSB ≈ 15.3 µm — adequate for display and diagnostics.
   - Velocity in mm/s, same Q16 encoding (range ±32k mm/s, fits).
-- MCU handler reads, per configured motor, the executor's **last-tick cached** position
-  and velocity (`tick_caches.p_prev` / `tick_caches.v_prev`, `rust/runtime/src/stepping_state.rs:125`,
-  refreshed every ISR tick via `get_position_and_velocity()` at `rust/runtime/src/motion_core.rs:13`).
-  Rationale: the cache is at most one tick old (tens of µs — effectively "now") and a
-  command-context read of it avoids racing the ISR's traversal of the live piece ring.
-  When idle, the last-tick cache equals the settled endpoint.
-- `motor_index` is the engine's per-MCU motor/axis index (0..`MAX_AXES`=8). The host maps
-  `motor_index` → rail via the oid↔index binding established at `configure_axis`.
+- MCU handler reads, per configured slot, the executor's **last-tick** position and
+  velocity from `engine.stepping_axes[i].p_prev` / `.v_prev` (`rust/runtime/src/stepping_state.rs:77`),
+  which the ISR writes every tick (`engine.rs:452-453`; idle → velocity 0 at `:461`; seeded
+  at `:712-713`). NOTE: `engine.tick_caches.{p_prev,v_prev}` is the *seed snapshot only*
+  (written exclusively by `seed_position`) and is stale during motion — do not read it.
+  Rationale: the per-`AxisState` value is at most one tick old (tens of µs — effectively
+  "now"), and a command-context read of it avoids racing the ISR's traversal of the live
+  piece ring. When idle it equals the settled endpoint.
+- `motor_index` is the engine's per-MCU **slot** index (0..`MAX_AXES`=8), which is a
+  **kinematic motor lane**, not a cartesian axis: the host applies the kinematics transform
+  (`KinematicsModule::forward`, `rust/motion-bridge/src/kinematics.rs:84`) cartesian→motor
+  *before* streaming, so on CoreXY slot 0 = motor A, slot 1 = motor B. The reported value is
+  therefore motor-space and must be converted back to cartesian on the host (see §4). The
+  host maps slots via the binding established at `configure_axis`.
 
 ### 2. EtherCAT position + velocity path
 
@@ -102,13 +108,14 @@ but never surfaced to the host. We add the surfacing and add native velocity:
     mm/s as `(rpm / 60) × rotation_distance`. The exact unit (rpm vs counts/s vs 0.1 rpm)
     is verified against the live drive during implementation; the conversion is a single
     scalar either way.
-- **Surfacing:** the endpoint converts counts→mm (reverse of `CountMap::target_counts`,
+- **Surfacing:** the bridge queries the endpoint over the existing endpoint↔bridge socket
+  (request/response, symmetric with the serial path — there is no per-DC-cycle push channel
+  today, and adding one would be wasteful). The endpoint replies with its latest DC-cycle
+  telemetry; the bridge converts counts→mm (reverse of `CountMap::target_counts`,
   `rust/kalico-ethercat-rt/src/scale.rs`: `mm = origin_mm + (actual - origin_counts) / counts_per_mm`)
-  and rpm→mm/s, then pushes the latest (pos_mm, vel_mm_s, host-stamp) sample to the bridge
-  over the existing endpoint↔bridge socket. The bridge keeps the latest sample per node.
-- For EtherCAT, "blocking fresh" and "cached" collapse to the same value: the DC loop runs
-  at ~kHz, so the latest pushed sample is already sub-ms fresh; there is no per-request
-  round-trip to force.
+  and the drive velocity unit→mm/s.
+- For EtherCAT, "blocking fresh" and "cached" collapse to nearly the same value: the DC loop
+  runs at ~kHz, so the endpoint's latest sample is already sub-ms fresh.
 
 ### 3. Bridge: unified per-axis query + cache
 
@@ -128,28 +135,34 @@ A background pull loop refreshes the cache on a fixed cadence (see §6).
 
 ### 4. Host: assembly, motion_report, GET_POSITION
 
-- **First-motor-per-rail assembly.** Build the `stepper_positions` dict using only the
-  **first motor of each rail**, then call `kin.calc_position(dict)` →
-  cartesian X/Y/Z. Because the dict holds exactly one motor per rail, the existing
-  rail-averaging in `calc_position` (`klippy/motion_kinematics.py:217`) degenerates to
-  "first motor" with no change to `calc_position` semantics. CoreXY still receives both
-  rail primaries (a, b) and mixes correctly; dual-Z receives only the first Z. This
-  realizes "if an axis has multiple motors, use the first one."
+- **Bridge-side motor→cartesian transform (not host `calc_position`).** The MCU returns
+  per-slot **motor-space** positions/velocities. The bridge — which already owns the
+  kinematics matrices — applies `KinematicsModule::inverse(motors)→axes`
+  (`rust/motion-bridge/src/kinematics.rs:88`; CoreXY `motor_to_axis = [[0.5,0.5,0],[0.5,-0.5,0],[0,0,1]]`,
+  identity for Cartesian) to the three spatial slots to recover cartesian X/Y/Z; the E slot
+  passes through. The bridge selects the kinematics per MCU from `McuAxisConfig.kinematics`
+  (`rust/motion-bridge/src/dispatch.rs:21`). The host receives cartesian (pos, vel) per axis
+  and does **not** call `klippy`'s `calc_position`. (The "if an axis has multiple motors, use
+  the first one" rule is moot for steppers — redundant steppers, e.g. dual-Z, are bound to a
+  single engine slot and share its trajectory — and applies only to EtherCAT servos, where
+  each motor has an independent encoder; handled in the EtherCAT plan.)
 - **`motion_report`** (`klippy/extras/motion_report.py`): `get_status` returns the cached
   snapshot assembled into `live_position` (Coord x,y,z,e), `live_velocity`, and
   `live_extruder_velocity`. This is the bracketed `[…]` value in Mainsail. The zero stub
   is replaced by a cache read (non-blocking — never does I/O in `get_status`).
-- **`GET_POSITION`** (`klippy/extras/gcode_move.py:305`): the `mcu` / `stepper` /
-  `kinematic` rungs are filled from the blocking `query_motor_positions()` (replacing the
-  `0.0` stub at `stepper.py:158` and the missing `get_mcu_position`); `toolhead` / `gcode`
-  rungs stay commanded. Divergence between the measured and commanded rungs is the
-  diagnostic signal the command exists to surface.
+- **`GET_POSITION`** (`klippy/extras/gcode_move.py:305`): the `mcu` / `stepper` rungs are
+  filled with the per-slot **motor-space** values from the blocking query (replacing the
+  `0.0` stub at `stepper.py:158` and the missing `get_mcu_position`); the `kinematic` rung
+  shows the inverse-transformed **cartesian** values; `toolhead` / `gcode` rungs stay
+  commanded. Divergence between the measured and commanded rungs is the diagnostic signal
+  the command exists to surface.
 - **Untouched:** M114, `toolhead.position`, `gcode_move.gcode_position` (commanded).
 
 ### 5. Velocity → cartesian
 
-Per-motor velocities run through the **same** kinematic combination as positions (valid
-because the Cartesian/CoreXY maps are linear), giving cartesian (vx, vy, vz):
+Per-slot motor-space velocities run through the **same** `KinematicsModule::inverse`
+transform as positions (valid because the Cartesian/CoreXY maps are linear), giving
+cartesian (vx, vy, vz):
 
 - `live_velocity = ‖(vx, vy, vz)‖`
 - `live_extruder_velocity` = the extruder motor's velocity.
@@ -173,6 +186,18 @@ combination asserts/rejects rather than silently approximating.
     host-stamp (staleness is visible via the timestamp). This is a deliberate, scoped
     exception to fail-loud: a flickering Mainsail readout is not safety-critical, and
     killing a print over a missed status poll is worse than a stale number.
+
+## Delivery (two plans)
+
+This spec is implemented in two independently-testable plans sharing the same host surfaces:
+
+1. **Stepper live position** — the wire primitive (`QueryMotorState`/`MotorStateResponse`),
+   the MCU read path, the bridge cache + blocking/non-blocking query with the
+   `KinematicsModule::inverse` transform, and the `motion_report` / `GET_POSITION` host
+   wiring. Delivers honest live position+velocity for stepper machines end to end.
+2. **EtherCAT servo surfacing** — PDO `606Ch` mapping, `EcTelemetry`/capture/scale
+   additions, the endpoint query handler, and bridge integration so servo axes flow into the
+   *same* cache/query/assembly built in plan 1, including the "first motor per axis" rule.
 
 ## Testing
 
