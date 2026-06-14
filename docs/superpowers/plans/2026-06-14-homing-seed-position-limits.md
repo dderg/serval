@@ -31,14 +31,15 @@
 
 - [ ] **Step 3: Implement.** In `_home_axis`, change the retract to fold in overshoot:
 ```python
+            overshoot = final_pos[axis] - trip_pos[axis]   # bind ONCE; reuse in structured_log too (DRY)
+            ...
             if hi.retract_dist:
-                overshoot = final_pos[axis] - trip_pos[axis]
                 retractpos = list(toolhead.get_position())
-                retractpos[axis] -= direction * (hi.retract_dist + overshoot)
+                retractpos[axis] -= direction * hi.retract_dist + overshoot
                 toolhead.move(retractpos, hi.retract_speed)
                 toolhead.wait_moves()
 ```
-(`set_position` at `:305` stays — the toolhead needs a logical position for the retract move; it already sets `trigger_height + overshoot`, so `get_position()` here is `trigger + overshoot`, and subtracting `retract_dist + overshoot` lands at `trigger − retract_dist`.)
+CORRECTED FORMULA: `overshoot` is OUTSIDE the `direction*` multiply — it already carries the travel-direction sign, and `get_position()[axis] == trigger + overshoot`. The naive `direction*(retract_dist + overshoot)` is WRONG for negative-direction (min-endstop) homes (off by `2*overshoot`). The committed form lands at `trigger − direction*retract_dist` for BOTH directions. (`set_position` at `:305` stays — the toolhead needs a logical position for the retract move.) Provider edge: `_homed_axis_position`'s `measured_trip_position` branch (`:74-77`) is implemented only by `sim_remote_endstop` (sim); real endstops fall through to the `trigger+overshoot` path this formula handles — servo target unaffected.
 
 - [ ] **Step 4: Run test → PASS.** Then `./scripts/ci.sh py` (the homing suite must stay green — this changes stepper homing too).
 
