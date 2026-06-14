@@ -2965,6 +2965,20 @@ impl PyMotionBridge {
         de: f64,
         feedrate: f64,
     ) -> PyResult<()> {
+        tracing::debug!(
+            subsystem = "motion",
+            event = "submit_bezier_enter",
+            i = ?i,
+            j = ?j,
+            p,
+            q,
+            dx,
+            dy,
+            dz,
+            de,
+            feedrate,
+            "bridge.submit_bezier enter"
+        );
         py.detach(|| -> PyResult<()> {
             let followers = self.e_followers(de)?;
             let (ii, jj) = match (i, j) {
@@ -3014,6 +3028,18 @@ impl PyMotionBridge {
         de: f64,
         feedrate: f64,
     ) -> PyResult<()> {
+        tracing::debug!(
+            subsystem = "motion",
+            event = "submit_quadratic_enter",
+            i,
+            j,
+            dx,
+            dy,
+            dz,
+            de,
+            feedrate,
+            "bridge.submit_quadratic enter"
+        );
         py.detach(|| -> PyResult<()> {
             let followers = self.e_followers(de)?;
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
