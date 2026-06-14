@@ -242,6 +242,7 @@ static struct diag_event    prior_ring[DIAG_RING_LEN];
 static uint32_t             prior_diag_present;
 static struct diag_event    dump_ring[DIAG_RING_LEN];
 
+__attribute__((used, externally_visible))
 void
 diag_ring_push(uint8_t tag, uint32_t a, uint32_t b)
 {
