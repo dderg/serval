@@ -129,6 +129,19 @@ class PrinterStepperEnable:
             logging.info("%s has been manually disabled", stepper)
         toolhead.dwell(DISABLE_STALL_TIME)
 
+    def motor_enable_group(self, stepper_names):
+        # Energize several motors at one print_time so they latch together —
+        # enabling them one at a time snaps each rotor to its commutation
+        # phase separately, which on a coupled axis (CoreXY gantry) walks the
+        # toolhead diagonally between snaps.
+        toolhead = self.printer.lookup_object("toolhead")
+        toolhead.dwell(DISABLE_STALL_TIME)
+        print_time = toolhead.get_last_move_time()
+        for name in stepper_names:
+            self.enable_lines[name].motor_enable(print_time)
+            logging.info("%s enabled for homing", name)
+        toolhead.dwell(DISABLE_STALL_TIME)
+
     def get_status(self, eventtime):
         steppers = {
             name: et.is_motor_enabled()

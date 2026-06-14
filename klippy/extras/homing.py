@@ -17,13 +17,11 @@ def _endstop_section(config, axis_name):
     return None
 
 
-def _enable_homing_motors(stepper_enable, rail):
+def _homing_motor_names(rail):
     steppers = rail.get_steppers()
     if not steppers:
-        stepper_enable.motor_debug_enable(rail.get_name(), True)
-        return
-    for s in steppers:
-        stepper_enable.motor_debug_enable(s.get_name(), True)
+        return [rail.get_name()]
+    return [s.get_name() for s in steppers]
 
 
 @contextlib.contextmanager
@@ -264,8 +262,10 @@ class Homing:
         stepper_enable = self.printer.lookup_object("stepper_enable")
         homing_deltas = [0.0, 0.0, 0.0]
         homing_deltas[axis] = 1.0
+        homing_names = []
         for active_rail in kin.active_rails(*homing_deltas):
-            _enable_homing_motors(stepper_enable, active_rail)
+            homing_names.extend(_homing_motor_names(active_rail))
+        stepper_enable.motor_enable_group(homing_names)
 
         servo_handle = None
         servo_limits = None
