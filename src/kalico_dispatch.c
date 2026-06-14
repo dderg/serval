@@ -495,6 +495,18 @@ send_status_heartbeat(void)
     payload[off++] = (uint8_t)((ff_saturation_count >> 8) & 0xFF);
     payload[off++] = (uint8_t)((ff_saturation_count >> 16) & 0xFF);
     payload[off++] = (uint8_t)((ff_saturation_count >> 24) & 0xFF);
+    uint32_t corr[8];
+    int32_t nc = kalico_runtime_get_correction_retired(runtime_handle, corr, 8);
+    if (nc < 0)
+        nc = 0;
+    payload[off++] = (uint8_t)nc;
+    for (int i = 0; i < nc; i++) {
+        uint32_t v = corr[i];
+        payload[off++] = (uint8_t)(v & 0xFF);
+        payload[off++] = (uint8_t)((v >> 8) & 0xFF);
+        payload[off++] = (uint8_t)((v >> 16) & 0xFF);
+        payload[off++] = (uint8_t)((v >> 24) & 0xFF);
+    }
     kalico_transport_send_frame(KALICO_CHANNEL_CONTROL, payload, (uint16_t)off);
 }
 
