@@ -1,9 +1,7 @@
 use crate::multi::junction::JunctionKind;
-use crate::{GridSample, TopProfile};
+use crate::{BindingSummary, GridSample, TopProfile};
 use std::ops::RangeInclusive;
 
-/// Maximal runs of segments joined by Smooth junctions. `kinds[k]` is the
-/// junction between segments k and k+1.
 #[allow(clippy::range_minus_one)]
 pub(crate) fn partition_chains(
     n_segments: usize,
@@ -22,10 +20,6 @@ pub(crate) fn partition_chains(
     chains
 }
 
-/// Slice one chain profile into per-segment profiles. The junction sample is
-/// duplicated into both neighbors; per-segment `s` is rebased to start at 0;
-/// per-segment time is the trapezoid over the slice (same formula as
-/// output::assemble).
 pub(crate) fn slice_chain_profile(
     chain: &TopProfile,
     segment_ranges: &[(usize, usize)],
@@ -62,6 +56,7 @@ pub(crate) fn slice_chain_profile(
                 status: chain.status,
                 grid_scheme: chain.grid_scheme,
                 total_time,
+                binding: BindingSummary::default(),
             }
         })
         .collect()

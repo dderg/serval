@@ -2,7 +2,7 @@ use super::*;
 use crate::topp::path::{ArclengthGrid, InterSample};
 use crate::topp::solver::{SolverResult, SolverStatus};
 use crate::topp::verify::VerifyReport;
-use crate::{BindingConstraint, GridConfig, GridScheme};
+use crate::{BindingConstraint, BindingSummary, GridConfig, GridScheme};
 
 fn dummy_grid(n: usize, length: f64) -> ArclengthGrid {
     let s: Vec<f64> = (0..n).map(|i| length * i as f64 / (n - 1) as f64).collect();
@@ -49,6 +49,7 @@ fn assembles_samples_and_total_time() {
         feasible: true,
         worst_jerk_ratio: 0.0,
         worst_non_jerk_ratio: 0.0,
+        binding_summary: BindingSummary::default(),
     };
     let cfg = GridConfig {
         scheme: GridScheme::UniformArclength,
@@ -69,10 +70,6 @@ fn assembles_samples_and_total_time() {
 
 #[test]
 fn infeasible_solve_reports_infinite_time() {
-    // An infeasible solver answer is garbage primal values that traverse the
-    // path at near-zero speed, which would integrate to an enormous-but-finite
-    // time and read downstream as a real (slow) trajectory. An infeasible solve
-    // must report INFINITY so nothing mistakes it for a schedulable move.
     let grid = dummy_grid(3, 50.0);
     let result = SolverResult {
         b: vec![4e-5, 2e-5, 1e-9],
@@ -86,6 +83,7 @@ fn infeasible_solve_reports_infinite_time() {
         feasible: false,
         worst_jerk_ratio: 1.0,
         worst_non_jerk_ratio: 2.0,
+        binding_summary: BindingSummary::default(),
     };
     let cfg = GridConfig {
         scheme: GridScheme::UniformArclength,

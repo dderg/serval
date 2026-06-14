@@ -1,6 +1,6 @@
 use super::*;
 use crate::multi::junction::JunctionKind;
-use crate::{BindingConstraint, GridSample, GridScheme, SolveStatus, TopProfile};
+use crate::{BindingConstraint, BindingSummary, GridSample, GridScheme, SolveStatus, TopProfile};
 
 #[test]
 fn partition_splits_only_at_corners() {
@@ -48,16 +48,15 @@ fn slice_duplicates_junction_sample_and_splits_time() {
         status: SolveStatus::Solved,
         grid_scheme: GridScheme::UniformArclength,
         total_time: 0.4,
+        binding: BindingSummary::default(),
     };
     let per_segment = slice_chain_profile(&chain_profile, &ranges);
     assert_eq!(per_segment.len(), 2);
     assert_eq!(per_segment[0].samples.len(), 3);
     assert_eq!(per_segment[1].samples.len(), 3);
-    // Junction sample duplicated into both, with per-segment s rebased to 0.
     assert_eq!(per_segment[0].samples[2].v, per_segment[1].samples[0].v);
     assert!((per_segment[1].samples[0].s - 0.0).abs() < 1e-12);
-    assert!((per_segment[0].samples[2].s - 2.0).abs() < 1e-12); // last of seg0
-    // 2 mm at 10 mm/s each → 0.2 s per segment.
+    assert!((per_segment[0].samples[2].s - 2.0).abs() < 1e-12);
     assert!((per_segment[0].total_time - 0.2).abs() < 1e-9);
     assert!((per_segment[1].total_time - 0.2).abs() < 1e-9);
 }

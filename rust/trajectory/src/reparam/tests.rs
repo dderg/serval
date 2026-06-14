@@ -1,5 +1,7 @@
 use super::*;
-use temporal::{BindingConstraint, GridSample, GridScheme, SolveStatus, TopProfile};
+use temporal::{
+    BindingConstraint, BindingSummary, GridSample, GridScheme, SolveStatus, TopProfile,
+};
 
 fn uniform_profile(n: usize, total_length: f64, velocity: f64) -> TopProfile {
     let mut samples = Vec::with_capacity(n);
@@ -20,6 +22,7 @@ fn uniform_profile(n: usize, total_length: f64, velocity: f64) -> TopProfile {
         status: SolveStatus::Solved,
         grid_scheme: GridScheme::UniformArclength,
         total_time,
+        binding: BindingSummary::default(),
     }
 }
 
@@ -69,6 +72,7 @@ fn s_of_t_endpoint_consistency() {
         status: SolveStatus::Solved,
         grid_scheme: GridScheme::UniformArclength,
         total_time: 1.0,
+        binding: BindingSummary::default(),
     };
 
     let s_pieces = build_s_of_t_pieces(&profile, 0.0);
@@ -125,6 +129,7 @@ fn s_of_t_near_zero_handling() {
         status: SolveStatus::Solved,
         grid_scheme: GridScheme::UniformArclength,
         total_time: 100.0,
+        binding: BindingSummary::default(),
     };
 
     let s_pieces = build_s_of_t_pieces(&profile, 0.0);
