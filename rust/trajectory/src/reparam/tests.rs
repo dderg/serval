@@ -1,4 +1,5 @@
 use super::*;
+use nurbs::VectorNurbs;
 use temporal::{
     BindingConstraint, BindingSummary, GridSample, GridScheme, SolveStatus, TopProfile,
 };
@@ -260,4 +261,63 @@ fn compose_diagonal_line() {
     assert!((x_end - 30.0).abs() < 0.5, "x_end = {x_end}, expected ~30");
     assert!((y_end - 40.0).abs() < 0.5, "y_end = {y_end}, expected ~40");
     assert!(z_end.abs() < 1e-6, "z_end = {z_end}, expected ~0");
+}
+
+fn arch() -> VectorNurbs<f64, 3> {
+    VectorNurbs::try_new(
+        3,
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        vec![
+            [150.0, 150.0, 5.0],
+            [150.0, 180.0, 5.0],
+            [200.0, 180.0, 5.0],
+            [200.0, 150.0, 5.0],
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn invert_s_to_u_is_accurate() {
+    let curve = arch();
+    let deriv = nurbs::eval::vector_derivative(&curve);
+    let table = nurbs::arc_length::build_arc_length_table_vector(
+        &curve, super::ARC_TABLE_TOL, super::ARC_TABLE_SAMPLES,
+    )
+    .unwrap();
+    let tv = table.as_view();
+    let reference = nurbs::arc_length::build_arc_length_table_vector(&curve, 1e-10, 16384).unwrap();
+    let rv = reference.as_view();
+
+    for i in 1..20 {
+        let u_true = i as f64 / 20.0;
+        let s = nurbs::arc_length::arc_length_from_param(&rv, u_true);
+        let u_got = super::invert_s_to_u(&tv, &deriv, s, 0).expect("smooth curve must invert");
+        assert!((u_got - u_true).abs() < 1e-7, "u err at u={u_true}: got {u_got}");
+        let p_got = nurbs::eval::vector_eval(&curve, u_got);
+        let p_true = nurbs::eval::vector_eval(&curve, u_true);
+        let perr = ((p_got[0] - p_true[0]).powi(2)
+            + (p_got[1] - p_true[1]).powi(2)
+            + (p_got[2] - p_true[2]).powi(2))
+        .sqrt();
+        assert!(perr < 1e-6, "pos err {perr} mm at u={u_true}");
+    }
+}
+
+#[test]
+fn invert_s_to_u_rejects_cusp() {
+    let curve = VectorNurbs::try_new(
+        3,
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [5.0, 0.0, 0.0]],
+    )
+    .unwrap();
+    let deriv = nurbs::eval::vector_derivative(&curve);
+    let table = nurbs::arc_length::build_arc_length_table_vector(
+        &curve, super::ARC_TABLE_TOL, super::ARC_TABLE_SAMPLES,
+    )
+    .unwrap();
+    let tv = table.as_view();
+    let err = super::invert_s_to_u(&tv, &deriv, 1e-6, 3);
+    assert!(matches!(err, Err(crate::ShapeError::ZeroTangent { index: 3, .. })));
 }

@@ -1,8 +1,88 @@
 use nurbs::bezier::BezierPiece;
+use nurbs::VectorNurbs;
 
 /// Velocity threshold below which a grid interval is treated as near-zero
 /// (constant-position). Both endpoints must be below this threshold.
 const NEAR_ZERO_V: f64 = 0.01;
+
+/// Arc-length table accuracy for the s→u inversion (built once per segment).
+pub(crate) const ARC_TABLE_TOL: f64 = 1e-9;
+pub(crate) const ARC_TABLE_SAMPLES: usize = 16384;
+/// |x'(u)| (mm per unit u) below this is a cusp — not a smooth segment.
+const TANGENT_SPEED_FLOOR: f64 = 1e-6;
+/// Per-piece time-domain position fit: degree and accuracy gate (geometry budget,
+/// far below the 5 µm user fit_tolerance_mm).
+#[allow(dead_code)] // used by Task 3
+const POS_FIT_DEGREE: usize = 9;
+#[allow(dead_code)] // used by Task 3
+const POS_FIT_TOL_MM: f64 = 1e-6;
+#[allow(dead_code)] // used by Task 3
+const POS_FIT_MAX_SUBDIV: usize = 8;
+
+/// 5-point Gauss-Legendre nodes on [-1, 1].
+const GL5_NODES: [f64; 5] = [
+    -0.906_179_845_938_664,
+    -0.538_469_310_105_683_1,
+    0.0,
+    0.538_469_310_105_683_1,
+    0.906_179_845_938_664,
+];
+/// 5-point Gauss-Legendre weights.
+const GL5_WEIGHTS: [f64; 5] = [
+    0.236_926_885_056_189_1,
+    0.478_628_670_499_366_5,
+    0.568_888_888_888_888_9,
+    0.478_628_670_499_366_5,
+    0.236_926_885_056_189_1,
+];
+
+/// Arc length from 0 to `u` via multi-subinterval 5-point GL quadrature.
+/// Uses 64 equal subintervals so that the integrand's nonlinearity (square-root
+/// of a quartic) is resolved well below the 1 nm target accuracy.
+fn arc_length_exact(deriv: &VectorNurbs<f64, 3>, u: f64) -> f64 {
+    const N_SUB: usize = 64;
+    let sub_w = u / N_SUB as f64;
+    let half = sub_w * 0.5;
+    let mut total = 0.0;
+    for k in 0..N_SUB {
+        let mid = sub_w * k as f64 + half;
+        let mut sub = 0.0;
+        for i in 0..5 {
+            let t = mid + half * GL5_NODES[i];
+            let d = nurbs::eval::vector_eval(deriv, t);
+            sub += GL5_WEIGHTS[i] * (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        }
+        total += sub * half;
+    }
+    total
+}
+
+/// Invert arc length `s` to curve parameter `u`: seed from the table, then two
+/// Newton steps using exact analytic arc length. Returns `ZeroTangent` at a cusp.
+#[allow(dead_code)] // used by Task 3
+fn invert_s_to_u(
+    table: &nurbs::ArcLengthTableRef<'_, f64>,
+    deriv: &VectorNurbs<f64, 3>,
+    s: f64,
+    index: usize,
+) -> Result<f64, crate::ShapeError> {
+    let s_clamped = s.clamp(0.0, table.s_max());
+    let u_max = table.u_max();
+
+    let mut u = nurbs::arc_length::param_from_arc_length(table, s_clamped);
+
+    for _ in 0..2 {
+        let d = nurbs::eval::vector_eval(deriv, u);
+        let speed = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if speed < TANGENT_SPEED_FLOOR {
+            return Err(crate::ShapeError::ZeroTangent { index, u });
+        }
+        let s_u = arc_length_exact(deriv, u);
+        u = (u - (s_u - s_clamped) / speed).clamp(0.0, u_max);
+    }
+
+    Ok(u)
+}
 
 #[derive(Debug, Clone)]
 pub struct SOfTPieces {
