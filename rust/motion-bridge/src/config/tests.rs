@@ -424,3 +424,45 @@ fn post_processor_missing_required_param_rejected() {
     let err = PostProcessorSet::try_new(&registry, &[pp("is", "smooth_zv", &[])]).unwrap_err();
     assert!(err.to_string().contains("frequency_hz"), "got: {err}");
 }
+
+#[test]
+fn limit_set_names_follow_section_order() {
+    let reg = AxisRegistry::try_new(vec![
+        decl("x", &[]),
+        decl("y", &[]),
+        decl("z", &[]),
+        decl("e", &["x", "y", "z"]),
+    ])
+    .unwrap();
+    let post_processors = PostProcessorSet::try_new(&reg, &[]).unwrap();
+    let cfg = PlannerConfig {
+        axis_registry: reg,
+        limit_sections: vec![
+            LimitSection {
+                name: "gantry".into(),
+                axes: vec![0, 1],
+                max_velocity: Some(300.0),
+                max_accel: Some(3000.0),
+                max_jerk: None,
+            },
+            LimitSection {
+                name: "extruder".into(),
+                axes: vec![3],
+                max_velocity: Some(75.0),
+                max_accel: Some(1500.0),
+                max_jerk: None,
+            },
+        ],
+        runtime_caps: RuntimeCaps::default(),
+        post_processors,
+        window_capacity: 32,
+        beta_max_iters: 10,
+        beta_convergence_ratio: 0.05,
+        fit_tolerance_mm: 0.005,
+        worker_threads: 3,
+    };
+    assert_eq!(
+        cfg.limit_set_names(),
+        vec!["gantry".to_string(), "extruder".to_string()]
+    );
+}

@@ -739,8 +739,8 @@ git commit -m "feat(motion-bridge): accumulate and emit binding-constraint rollu
 - [ ] **Step 3: Gate** — `./scripts/ci.sh quick` fully green (ruff, rust workspace tests, clippy `-D warnings`, `cargo fmt --check`, watchdog canary). Re-run `cargo fmt --all --check` last, after any late edit.
 
 - [ ] **Step 4: kalico-sim sanity (manual verification).** Use the `kalico-sim` skill to run a migrated fixture (an extruding print with `[axis e]` + a tight `[limit extruder]`) through the host pipeline, then use the `query-logs` skill to confirm the events land and aggregate:
-  - `event:motion.binding_rollup` lines appear during the print, each with `limit`, `derivative`, `via_pa`, `ratio`, `t`, `window_samples`.
-  - `event:motion.binding_hist | stats by limit, derivative sum(count)` returns a non-empty per-limit breakdown.
+  - `subsystem:=motion event:=binding_rollup` lines appear during the print, each with `limit`, `derivative`, `via_pa`, `ratio`, `t`, `window_samples`. (The event field is the bare name `binding_rollup`; `motion` is the separate `subsystem` field, not a name prefix — matches the `replan_stats` precedent.)
+  - `event:=binding_hist | stats by (limit, derivative) sum(count) as total` returns a non-empty per-limit breakdown.
   - A travel-only (non-extruding) fixture still emits spatial rollups (`limit` = the gantry/z section names) and no follower entries.
   Record the LogsQL queries used in the commit message so the observability surface is reproducible.
 
@@ -757,7 +757,7 @@ git commit --allow-empty -m "test: binding-constraint observability verified end
 - §5 "the planner knows which constraint row binds at every point and reports it through the structured log pipeline" → Task 1 computes the per-profile summary from `binding_per_grid`; Tasks 2–4 carry and emit it. ✓
 - §5 example "slowed here by `[limit extruder]` accel via the PA post-processor" → `label_binding` produces `limit=extruder, derivative=accel, via_pa=true` (Task 3); `binding_rollup` carries the motion-timeline `t` for "here". ✓
 - §6 "Binding-constraint reporting via structured logs. Small, rides on 3." → no solver changes; reuses Plan 3's `BindingConstraint`; four small tasks. ✓
-- Plan 3 decision-3 use case "show whether the PA-jerk row ever binds at corners on real prints" → `binding_hist` with `BindingConstraint::PaJerk` tallies; `query-logs … | stats by derivative,via_pa sum(count)` answers it. ✓
+- Plan 3 decision-3 use case "show whether the PA-jerk row ever binds at corners on real prints" → `binding_hist` with `BindingConstraint::PaJerk` tallies; `query-logs … event:=binding_hist | stats by (derivative, via_pa) sum(count) as total` answers it. ✓
 - Planner stays a pure function / oracle API → Task 5 Step 1 guards it; `temporal`/`trajectory` gain no logging deps. ✓
 - Fail loudly, with the one scoped exception → name resolution degrades to `"runtime_caps"`/section-order rather than crashing the planner thread over a log lookup (decision 5, documented). ✓
 - No placeholders: every code step shows complete code; test bodies that depend on existing harness helpers point at the exact sibling test and the grep to find it. ✓

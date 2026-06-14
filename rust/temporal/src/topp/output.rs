@@ -50,6 +50,7 @@ pub(crate) fn assemble(
         status,
         grid_scheme: grid_config.scheme,
         total_time,
+        binding: verify.binding_summary.clone(),
     }
 }
 

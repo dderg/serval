@@ -209,41 +209,48 @@ impl ShaperState {
         };
 
         let solve_start = Instant::now();
-        let (PlanOutput { fitted, stats }, time_offset, fallback_rung) =
-            match plan_velocity(&plan_input) {
-                Ok(out) => (out, t_freeze, 1u8),
-                Err(rung1_err) => {
-                    if let Some(rung2_out) =
-                        try_rung2(was_replace_split, &prior_uncommitted, self, ctx, t_freeze)
-                    {
-                        let (out, offset) = rung2_out;
-                        (out, offset, 2u8)
-                    } else {
-                        match try_rung3(
-                            self,
-                            &prior_uncommitted,
-                            prior_t_appended,
-                            prior_t_decel_start,
-                            &prior_planned_fitted,
-                            &prior_planned_meta,
-                            ctx,
-                        ) {
-                            Ok((out, offset)) => (out, offset, 3u8),
-                            Err(rung3_err) => {
-                                self.uncommitted_moves = prior_uncommitted;
-                                self.t_appended = prior_t_appended;
-                                self.t_decel_start = prior_t_decel_start;
-                                self.planned_fitted = prior_planned_fitted;
-                                self.planned_meta = prior_planned_meta;
-                                return Err(ShapeError::WitnessFallbackFailed {
-                                    rung1: Box::new(rung1_err),
-                                    rung3: Box::new(rung3_err),
-                                });
-                            }
+        let (
+            PlanOutput {
+                fitted,
+                stats,
+                binding,
+            },
+            time_offset,
+            fallback_rung,
+        ) = match plan_velocity(&plan_input) {
+            Ok(out) => (out, t_freeze, 1u8),
+            Err(rung1_err) => {
+                if let Some(rung2_out) =
+                    try_rung2(was_replace_split, &prior_uncommitted, self, ctx, t_freeze)
+                {
+                    let (out, offset) = rung2_out;
+                    (out, offset, 2u8)
+                } else {
+                    match try_rung3(
+                        self,
+                        &prior_uncommitted,
+                        prior_t_appended,
+                        prior_t_decel_start,
+                        &prior_planned_fitted,
+                        &prior_planned_meta,
+                        ctx,
+                    ) {
+                        Ok((out, offset)) => (out, offset, 3u8),
+                        Err(rung3_err) => {
+                            self.uncommitted_moves = prior_uncommitted;
+                            self.t_appended = prior_t_appended;
+                            self.t_decel_start = prior_t_decel_start;
+                            self.planned_fitted = prior_planned_fitted;
+                            self.planned_meta = prior_planned_meta;
+                            return Err(ShapeError::WitnessFallbackFailed {
+                                rung1: Box::new(rung1_err),
+                                rung3: Box::new(rung3_err),
+                            });
                         }
                     }
                 }
-            };
+            }
+        };
         let solve_us = solve_start.elapsed().as_micros() as u64;
 
         let rebuild_start = Instant::now();
@@ -306,6 +313,7 @@ impl ShaperState {
             window_segments,
             plan: stats,
             fallback_rung,
+            binding,
         })
     }
 }

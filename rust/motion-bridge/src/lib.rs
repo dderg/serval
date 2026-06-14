@@ -1,5 +1,7 @@
 #[doc(hidden)]
 pub mod anchor;
+#[doc(hidden)]
+pub mod binding_report;
 mod bridge;
 #[doc(hidden)]
 pub mod classify;
