@@ -92,6 +92,42 @@ fn push_lin(out: &mut Vec<ProfilePiece>, base: f64, sign: f64, p0: f64, v: f64, 
     });
 }
 
+const SEGMENT_EPS_MM: f64 = 1e-5;
+
+/// Plan a gapless piece sequence for relative motor-space moves; sub-epsilon
+/// segments are skipped and at least one real segment is required.
+pub fn plan_correction_sequence(
+    segments: &[f64],
+    speed: f64,
+    accel: f64,
+) -> Result<Vec<ProfilePiece>, String> {
+    if !(speed > 0.0) || !(accel > 0.0) {
+        return Err(format!(
+            "correction sequence needs speed>0, accel>0; got {speed} {accel}"
+        ));
+    }
+    let mut out = Vec::new();
+    let mut pos = 0.0;
+    let mut any = false;
+    for &s in segments {
+        if !s.is_finite() {
+            return Err(format!("correction sequence segment is not finite: {s}"));
+        }
+        if s.abs() < SEGMENT_EPS_MM {
+            continue;
+        }
+        push_segment(&mut out, pos, s, speed, accel);
+        pos += s;
+        any = true;
+    }
+    if !any {
+        return Err(
+            "correction sequence is empty or has no segment above SEGMENT_EPS_MM".to_string(),
+        );
+    }
+    Ok(subdivide_all(out))
+}
+
 const DEMUX_BUFFER_BYTES: usize = 512;
 const FRAME_ENVELOPE_BYTES: usize = 4;
 const FRAME_CRC_BYTES: usize = 2;

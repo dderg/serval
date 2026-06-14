@@ -102,3 +102,44 @@ fn single_segment_profile_has_zero_velocity_ends() {
         "ends at rest"
     );
 }
+
+#[test]
+fn sequence_single_segment_equals_profile() {
+    let a = plan_correction_profile(3.0, 5.0, 100.0).unwrap();
+    let b = plan_correction_sequence(&[3.0], 5.0, 100.0).unwrap();
+    assert_eq!(a.len(), b.len());
+    for (x, y) in a.iter().zip(b.iter()) {
+        assert_eq!(x.coeffs, y.coeffs);
+        assert_eq!(x.duration, y.duration);
+    }
+}
+
+#[test]
+fn sequence_is_globally_contiguous() {
+    let pieces = plan_correction_sequence(&[1.0, -1.0, 0.6, -0.6, 0.3], 50.0, 5000.0).unwrap();
+    for w in pieces.windows(2) {
+        assert!(
+            (w[0].coeffs[3] - w[1].coeffs[0]).abs() < 1e-9,
+            "no gap between segments"
+        );
+        let end_v = 3.0 * (w[0].coeffs[3] - w[0].coeffs[2]) / w[0].duration;
+        let start_v = 3.0 * (w[1].coeffs[1] - w[1].coeffs[0]) / w[1].duration;
+        assert!(
+            (end_v - start_v).abs() < 1e-6,
+            "velocity discontinuity between pieces"
+        );
+    }
+    let sum: f64 = [1.0, -1.0, 0.6, -0.6, 0.3].iter().sum();
+    assert!((pieces.last().unwrap().coeffs[3] - sum).abs() < 1e-6);
+}
+
+#[test]
+fn sequence_drops_subepsilon_and_rejects_all_empty() {
+    let pieces = plan_correction_sequence(&[2.0, 1e-9, -2.0], 50.0, 5000.0).unwrap();
+    assert!((pieces.last().unwrap().coeffs[3]).abs() < 1e-6);
+    assert!(plan_correction_sequence(&[1e-9, -1e-9], 50.0, 5000.0).is_err());
+    assert!(plan_correction_sequence(&[1.0], 0.0, 5000.0).is_err());
+    assert!(plan_correction_sequence(&[], 50.0, 5000.0).is_err());
+    assert!(plan_correction_sequence(&[f64::NAN], 50.0, 5000.0).is_err());
+    assert!(plan_correction_sequence(&[1.0, f64::INFINITY], 50.0, 5000.0).is_err());
+}
