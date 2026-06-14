@@ -3148,7 +3148,9 @@ impl PyMotionBridge {
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
-        planner.dwell(duration_s).map_err(planner_err)
+        planner.dwell(duration_s).map_err(planner_err)?;
+        *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        Ok(())
     }
 
     #[pyo3(signature = (x, y, z, host_now))]
@@ -3157,6 +3159,7 @@ impl PyMotionBridge {
             let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
             *pos = [x, y, z];
         }
+        *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(planner) = planner_guard.as_ref() {
             py.detach(|| planner.flush()).map_err(planner_err)?;
@@ -3767,6 +3770,7 @@ impl PyMotionBridge {
         drop(planner_guard);
 
         *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner()) = cartesian;
+        *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     #[pyo3(signature = (source_mcu, clock, host_now))]
