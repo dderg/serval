@@ -39,7 +39,7 @@ runtime = { path = "../runtime", default-features = false, features = ["host"] }
 kalico-protocol = { path = "../kalico-protocol" }
 kalico-native-transport = { path = "../kalico-native-transport" }
 libc = "0.2"                                       # raw clock_gettime(CLOCK_MONOTONIC)
-log = "0.4"
+tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
