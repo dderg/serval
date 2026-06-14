@@ -1199,10 +1199,11 @@ impl PyMotionBridge {
                 if Instant::now() >= reap_deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    log::warn!(
-                        "release_mcu: ethercat endpoint (pid {}) did not exit \
-                         within 5 s after SIGTERM — SIGKILL sent",
-                        pid
+                    tracing::warn!(
+                        subsystem = "bridge",
+                        event = "release_mcu_endpoint_sigkill",
+                        pid,
+                        "release_mcu: ethercat endpoint did not exit within 5 s after SIGTERM — SIGKILL sent"
                     );
                     break;
                 }
@@ -1259,7 +1260,11 @@ impl PyMotionBridge {
     ///   sends silently return `Err` and are discarded by the callback — harmless.
     fn shutdown(&self) {
         if self.shut_down.swap(true, Ordering::SeqCst) {
-            log::debug!("bridge.shutdown() called twice (idempotent no-op)");
+            tracing::debug!(
+                subsystem = "bridge",
+                event = "shutdown_called_twice",
+                "bridge.shutdown() called twice (idempotent no-op)"
+            );
             return;
         }
 
@@ -1295,7 +1300,12 @@ impl PyMotionBridge {
         };
         if let Some(h) = pump_join {
             if let Err(e) = h.join() {
-                log::error!("bridge.shutdown(): push-pieces-pump join panicked: {e:?}");
+                tracing::error!(
+                    subsystem = "bridge",
+                    event = "shutdown_pump_join_panicked",
+                    error = ?e,
+                    "bridge.shutdown(): push-pieces-pump join panicked"
+                );
             }
         }
 
@@ -1309,7 +1319,13 @@ impl PyMotionBridge {
         for h in handles {
             if let Err(e) = self.release_mcu(h) {
                 // Fail loud: a release error means an fd / child may be leaked.
-                log::error!("bridge.shutdown(): release_mcu({h}) failed: {e}");
+                tracing::error!(
+                    subsystem = "bridge",
+                    event = "shutdown_release_mcu_failed",
+                    mcu_handle = h,
+                    error = %e,
+                    "bridge.shutdown(): release_mcu failed"
+                );
             }
         }
     }
@@ -1527,9 +1543,11 @@ impl PyMotionBridge {
             };
             if let Some(io) = existing_io {
                 if io.is_alive() {
-                    log::info!(
-                        "attach_serial: reusing existing connection for {serial_path} \
-                         (reactor alive, skipping close/reopen)"
+                    tracing::info!(
+                        subsystem = "mcu-comms",
+                        event = "attach_reuse_connection",
+                        serial_path,
+                        "attach_serial: reusing existing connection (reactor alive, skipping close/reopen)"
                     );
 
                     let runtime_rx = io.take_runtime_event_subscription().map_err(|e| {
@@ -1539,27 +1557,33 @@ impl PyMotionBridge {
                     })?;
 
                     let (kalico_native_supported, identify_caps) = if !expect_native {
-                        log::info!(
-                            "attach_serial: kalico identify skipped on reuse for \
-                             {serial_path} (plugin-attached peripheral, not declared \
-                             via an [mcu] section)"
+                        tracing::info!(
+                            subsystem = "mcu-comms",
+                            event = "attach_identify_skipped_reuse",
+                            serial_path,
+                            "attach_serial: kalico identify skipped on reuse (plugin-attached peripheral, not declared via an [mcu] section)"
                         );
                         (false, 0u64)
                     } else {
                         match io.kalico_identify(std::time::Duration::from_secs(5)) {
                             Ok(out) => {
-                                log::info!(
-                                    "attach_serial: kalico re-identified — \
-                                     reset_epoch=0x{:08x} caps=0x{:016x}",
-                                    out.reset_epoch,
-                                    out.capabilities,
+                                tracing::info!(
+                                    subsystem = "mcu-comms",
+                                    event = "attach_reidentified",
+                                    serial_path,
+                                    reset_epoch = out.reset_epoch,
+                                    capabilities = out.capabilities,
+                                    "attach_serial: kalico re-identified (reset_epoch/caps as hex)"
                                 );
                                 (true, out.capabilities)
                             }
                             Err(e) => {
-                                log::warn!(
-                                    "attach_serial: kalico_identify timed out on reuse \
-                                     for {serial_path} ({e}); treating as Klipper-protocol-only"
+                                tracing::warn!(
+                                    subsystem = "mcu-comms",
+                                    event = "attach_identify_timeout_reuse",
+                                    serial_path,
+                                    error = %e,
+                                    "attach_serial: kalico_identify timed out on reuse; treating as Klipper-protocol-only"
                                 );
                                 (false, 0u64)
                             }
@@ -1569,10 +1593,12 @@ impl PyMotionBridge {
                     let runtime_caps = if kalico_native_supported {
                         match query_runtime_caps(&io, std::time::Duration::from_secs(2)) {
                             Ok(caps) => {
-                                log::debug!(
-                                    "[caps-trace] attach_serial reuse: runtime caps \
-                                     for {serial_path}: total_piece_memory={}",
-                                    caps.total_piece_memory,
+                                tracing::debug!(
+                                    subsystem = "mcu-comms",
+                                    event = "attach_runtime_caps_reuse",
+                                    serial_path,
+                                    total_piece_memory = caps.total_piece_memory,
+                                    "[caps-trace] attach_serial reuse: runtime caps"
                                 );
                                 Some(caps)
                             }
@@ -1591,10 +1617,14 @@ impl PyMotionBridge {
 
                     let critical = kalico_native_supported && !klippy_non_critical;
                     io.set_critical(critical);
-                    log::info!(
-                        "attach_serial: reuse — {serial_path} criticality \
-                         critical={critical} (kalico_native={kalico_native_supported} \
-                         klippy_non_critical={klippy_non_critical})"
+                    tracing::info!(
+                        subsystem = "mcu-comms",
+                        event = "attach_criticality_reuse",
+                        serial_path,
+                        critical,
+                        kalico_native = kalico_native_supported,
+                        klippy_non_critical,
+                        "attach_serial: reuse — criticality set"
                     );
 
                     let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
@@ -1651,7 +1681,13 @@ impl PyMotionBridge {
                             "attach_serial: could not open {serial_path} within {timeout_s}s: {e}"
                         )));
                     }
-                    log::warn!("attach_serial: retrying {serial_path}: {e}");
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "attach_open_retry",
+                        serial_path,
+                        error = %e,
+                        "attach_serial: retrying open"
+                    );
                     std::thread::sleep(Duration::from_millis(500));
                 }
             }
@@ -1662,26 +1698,33 @@ impl PyMotionBridge {
         })?;
 
         let (kalico_native_supported, identify_caps) = if !expect_native {
-            log::info!(
-                "attach_serial: kalico identify skipped for {serial_path} \
-                 (plugin-attached peripheral, not declared via an [mcu] section)"
+            tracing::info!(
+                subsystem = "mcu-comms",
+                event = "attach_identify_skipped",
+                serial_path,
+                "attach_serial: kalico identify skipped (plugin-attached peripheral, not declared via an [mcu] section)"
             );
             (false, 0u64)
         } else {
             match host_io.kalico_identify(std::time::Duration::from_secs(5)) {
                 Ok(out) => {
-                    log::info!(
-                        "attach_serial: kalico identified — reset_epoch=0x{:08x} \
-                         caps=0x{:016x}",
-                        out.reset_epoch,
-                        out.capabilities,
+                    tracing::info!(
+                        subsystem = "mcu-comms",
+                        event = "attach_identified",
+                        serial_path,
+                        reset_epoch = out.reset_epoch,
+                        capabilities = out.capabilities,
+                        "attach_serial: kalico identified (reset_epoch/caps as hex)"
                     );
                     (true, out.capabilities)
                 }
                 Err(e) => {
-                    log::warn!(
-                        "attach_serial: kalico_identify timed out for {serial_path} ({e}); \
-                         continuing attach as a Klipper-protocol-only MCU"
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "attach_identify_timeout",
+                        serial_path,
+                        error = %e,
+                        "attach_serial: kalico_identify timed out; continuing attach as a Klipper-protocol-only MCU"
                     );
                     (false, 0u64)
                 }
@@ -1691,10 +1734,12 @@ impl PyMotionBridge {
         let runtime_caps = if kalico_native_supported {
             match query_runtime_caps(&host_io, std::time::Duration::from_secs(2)) {
                 Ok(caps) => {
-                    log::debug!(
-                        "[caps-trace] attach_serial: runtime caps for {serial_path}: \
-                         total_piece_memory={}",
-                        caps.total_piece_memory,
+                    tracing::debug!(
+                        subsystem = "mcu-comms",
+                        event = "attach_runtime_caps",
+                        serial_path,
+                        total_piece_memory = caps.total_piece_memory,
+                        "[caps-trace] attach_serial: runtime caps"
                     );
                     Some(caps)
                 }
@@ -1713,10 +1758,14 @@ impl PyMotionBridge {
 
         let critical = kalico_native_supported && !klippy_non_critical;
         host_io.set_critical(critical);
-        log::info!(
-            "attach_serial: {serial_path} criticality critical={critical} \
-             (kalico_native={kalico_native_supported} \
-             klippy_non_critical={klippy_non_critical})"
+        tracing::info!(
+            subsystem = "mcu-comms",
+            event = "attach_criticality",
+            serial_path,
+            critical,
+            kalico_native = kalico_native_supported,
+            klippy_non_critical,
+            "attach_serial: criticality set"
         );
 
         let host_io_arc = Arc::new(host_io);
@@ -1760,9 +1809,12 @@ impl PyMotionBridge {
                         host_io_arc.set_mcu_log_hook(Box::new(hook));
                     }
                     Err(e) => {
-                        log::warn!(
-                            "attach_serial: mcu-log: failed to open {}: {e}",
-                            jsonl_path.display()
+                        tracing::warn!(
+                            subsystem = "mcu-comms",
+                            event = "attach_mcu_log_open_failed",
+                            jsonl_path = %jsonl_path.display(),
+                            error = %e,
+                            "attach_serial: mcu-log: failed to open jsonl writer"
                         );
                     }
                 }
@@ -2228,13 +2280,15 @@ impl PyMotionBridge {
         static SET_CLOCK_EST_CALLS: AtomicUsize = AtomicUsize::new(0);
         let call_n = SET_CLOCK_EST_CALLS.fetch_add(1, AOrd::Relaxed);
         if call_n < 5 || call_n % 100 == 0 {
-            log::debug!(
-                "[bridge-trace] set_clock_est call#{} mcu={} freq={} offset={:.6} last_clock={}",
+            tracing::debug!(
+                subsystem = "bridge",
+                event = "set_clock_est",
                 call_n,
                 mcu,
-                freq as u64,
+                freq = freq as u64,
                 offset,
                 last_clock,
+                "[bridge-trace] set_clock_est"
             );
         }
         let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
@@ -2412,10 +2466,12 @@ impl PyMotionBridge {
                                  RuntimeCapsResponse; is kalico-ethercat-rt running?"
                         ))
                     })?;
-                log::debug!(
-                    "[caps-trace] init_planner: ethercat mcu {mcu_id} caps \
-                     total_piece_memory={}",
-                    caps.total_piece_memory,
+                tracing::debug!(
+                    subsystem = "bridge",
+                    event = "init_planner_ethercat_caps",
+                    mcu_id,
+                    total_piece_memory = caps.total_piece_memory,
+                    "[caps-trace] init_planner: ethercat mcu caps"
                 );
                 {
                     let mut mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
@@ -2563,10 +2619,11 @@ impl PyMotionBridge {
                             .get(&k)
                             .copied()
                             .unwrap_or_else(|| {
-                                log::error!(
-                                    "pump: no ring_depth for {k:?} — axis absent from \
-                                 init_planner config; using sentinel depth 1 \
-                                 (expect PieceStartInPast fault)"
+                                tracing::error!(
+                                    subsystem = "bridge",
+                                    event = "pump_missing_ring_depth",
+                                    axis_key = ?k,
+                                    "pump: no ring_depth for axis — absent from init_planner config; using sentinel depth 1 (expect PieceStartInPast fault)"
                                 );
                                 1
                             })
@@ -2807,10 +2864,12 @@ impl PyMotionBridge {
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
         > = Arc::new(
             move |seg: &trajectory::ShapedSegment| -> Result<(), DispatchError> {
-                log::debug!(
-                    "[bridge-trace] dispatch entered: seg.t_start={:.6} seg.t_end={:.6}",
-                    seg.t_start,
-                    seg.t_end,
+                tracing::debug!(
+                    subsystem = "bridge",
+                    event = "dispatch_entered",
+                    seg_t_start = seg.t_start,
+                    seg_t_end = seg.t_end,
+                    "[bridge-trace] dispatch entered"
                 );
 
                 let host_now = {

@@ -329,9 +329,11 @@ impl Reactor {
     ) -> Result<(), TransportError> {
         if self.unacked_window.is_full() {
             if self.pending_fire_and_forget.len() >= PENDING_FIRE_AND_FORGET_CEILING {
-                log::error!(
-                    "dispatch_fire_and_forget: pending_fire_and_forget at ceiling ({}); refusing payload",
-                    PENDING_FIRE_AND_FORGET_CEILING,
+                tracing::error!(
+                    subsystem = "mcu-comms",
+                    event = "fire_and_forget_ceiling",
+                    ceiling = PENDING_FIRE_AND_FORGET_CEILING,
+                    "dispatch_fire_and_forget: pending_fire_and_forget at ceiling; refusing payload"
                 );
                 return Err(TransportError::Backpressure);
             }
@@ -379,7 +381,11 @@ impl Reactor {
             match kind {
                 PendingOutboundKind::Submission => {
                     let Some(p) = self.pending_submissions.pop_front() else {
-                        log::error!("pending outbound order referenced missing submission");
+                        tracing::error!(
+                            subsystem = "mcu-comms",
+                            event = "outbound_order_missing_submission",
+                            "pending outbound order referenced missing submission"
+                        );
                         continue;
                     };
                     let completion = p.completion.clone();
@@ -410,7 +416,11 @@ impl Reactor {
                 PendingOutboundKind::FireAndForget => {
                     let Some((payload, is_get_clock)) = self.pending_fire_and_forget.pop_front()
                     else {
-                        log::error!("pending outbound order referenced missing fire-and-forget");
+                        tracing::error!(
+                            subsystem = "mcu-comms",
+                            event = "outbound_order_missing_fire_and_forget",
+                            "pending outbound order referenced missing fire-and-forget"
+                        );
                         continue;
                     };
                     if let Err(e) = self.dispatch_fire_and_forget(payload, is_get_clock) {
@@ -427,8 +437,11 @@ impl Reactor {
                             self.state = ReactorState::Closed;
                             return;
                         }
-                        log::warn!(
-                            "drain_pending_submissions: fire-and-forget redispatch error: {e}"
+                        tracing::warn!(
+                            subsystem = "mcu-comms",
+                            event = "fire_and_forget_redispatch_error",
+                            error = %e,
+                            "drain_pending_submissions: fire-and-forget redispatch error"
                         );
                     }
                 }
@@ -821,7 +834,12 @@ impl Reactor {
                     self.last_recv_time = self.clock.now();
                 }
                 for e in errors {
-                    log::warn!("kalico stream error: {e}");
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "kalico_stream_error",
+                        error = %e,
+                        "kalico stream error"
+                    );
                 }
                 for f in frames {
                     match f {
@@ -847,11 +865,14 @@ impl Reactor {
                 if now.duration_since(first) >= ZERO_BYTE_DEBOUNCE {
                     let silence_ms = now.duration_since(self.last_recv_time).as_millis();
                     let since_write_ms = now.duration_since(self.last_write_time).as_millis();
-                    log::warn!(
-                        "[usb-drop] silence_ms={} since_write_ms={} consec_zero={} err=PhantomZero(Ok(0) for >={ZERO_BYTE_DEBOUNCE:?})",
-                        silence_ms,
-                        since_write_ms,
-                        self.zero_byte_consec,
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "usb_drop_phantom_zero",
+                        silence_ms = %silence_ms,
+                        since_write_ms = %since_write_ms,
+                        consec_zero = self.zero_byte_consec,
+                        debounce = ?ZERO_BYTE_DEBOUNCE,
+                        "[usb-drop] PhantomZero (Ok(0) past debounce window)"
                     );
                     self.pending_host_fault = Some(crate::host_io::runtime_events::FaultEvent {
                         fault_code: FaultCode::HostDisconnect.as_u16(),
@@ -866,12 +887,14 @@ impl Reactor {
                 let now = self.clock.now();
                 let silence_ms = now.duration_since(self.last_recv_time).as_millis();
                 let since_write_ms = now.duration_since(self.last_write_time).as_millis();
-                log::warn!(
-                    "[usb-drop] silence_ms={} since_write_ms={} consec_zero={} err={:?}",
-                    silence_ms,
-                    since_write_ms,
-                    self.zero_byte_consec,
-                    e,
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "usb_drop_poll_error",
+                    silence_ms = %silence_ms,
+                    since_write_ms = %since_write_ms,
+                    consec_zero = self.zero_byte_consec,
+                    error = ?e,
+                    "[usb-drop] poll error"
                 );
                 self.pending_host_fault = Some(crate::host_io::runtime_events::FaultEvent {
                     fault_code: FaultCode::HostDisconnect.as_u16(),
@@ -1067,7 +1090,12 @@ impl Reactor {
             ReactorCommand::FireAndForgetTyped { payload } => {
                 if let Err(e) = self.dispatch_fire_and_forget(payload, false) {
                     let is_io = matches!(e, TransportError::Io(_));
-                    log::warn!("FireAndForgetTyped: send error: {e}");
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "fire_and_forget_typed_send_error",
+                        error = %e,
+                        "FireAndForgetTyped: send error"
+                    );
                     if is_io {
                         self.transition_closed_on_io_fault();
                     }
@@ -1314,7 +1342,12 @@ impl Reactor {
                         "retransmit error"
                     );
                     if matches!(e, TransportError::Io(_)) {
-                        log::warn!("retransmit Io error: {e:?}; transitioning Closed");
+                        tracing::warn!(
+                            subsystem = "mcu-comms",
+                            event = "retransmit_io_error",
+                            error = ?e,
+                            "retransmit Io error; transitioning Closed"
+                        );
                         self.transition_closed_on_io_fault();
                     }
                 }

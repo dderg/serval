@@ -189,7 +189,12 @@ impl Demuxer {
                 }
                 KLIPPER_INTERFRAME_SYNC => Ok(None),
                 other => {
-                    log::trace!("demuxer: dropping out-of-frame byte 0x{other:02x}");
+                    tracing::trace!(
+                        subsystem = "mcu-comms",
+                        event = "out_of_frame_byte_dropped",
+                        byte = other,
+                        "demuxer: dropping out-of-frame byte"
+                    );
                     Ok(None)
                 }
             },
