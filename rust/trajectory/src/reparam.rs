@@ -12,11 +12,8 @@ pub(crate) const ARC_TABLE_SAMPLES: usize = 16384;
 const TANGENT_SPEED_FLOOR: f64 = 1e-6;
 /// Per-piece time-domain position fit: degree and accuracy gate (geometry budget,
 /// far below the 5 µm user fit_tolerance_mm).
-#[allow(dead_code)] // used by Task 3
 const POS_FIT_DEGREE: usize = 9;
-#[allow(dead_code)] // used by Task 3
 const POS_FIT_TOL_MM: f64 = 1e-6;
-#[allow(dead_code)] // used by Task 3
 const POS_FIT_MAX_SUBDIV: usize = 8;
 
 /// 5-point Gauss-Legendre nodes on [-1, 1].
@@ -70,7 +67,6 @@ fn arc_length_to_u(
 /// Invert arc length `s` to curve parameter `u`: seed from the table, then two
 /// Newton steps using O(1) arc-length via table node + local GL residual.
 /// Returns `ZeroTangent` at a cusp.
-#[allow(dead_code)] // used by Task 3
 fn invert_s_to_u(
     table: &nurbs::ArcLengthTableRef<'_, f64>,
     deriv: &VectorNurbs<f64, 3>,
@@ -93,6 +89,120 @@ fn invert_s_to_u(
     }
 
     Ok(u)
+}
+
+/// Solve for power-basis coefficients c[k] of p(x) = Σ c[k] (x - origin)^k that
+/// interpolate (nodes[i], vals[i]). Square system (len == degree+1), Gaussian
+/// elimination with partial pivoting. Nodes must be distinct.
+fn solve_power_basis(nodes: &[f64], vals: &[f64], origin: f64) -> Vec<f64> {
+    let n = nodes.len();
+    let mut a = vec![vec![0.0_f64; n + 1]; n];
+    for i in 0..n {
+        let dx = nodes[i] - origin;
+        let mut p = 1.0;
+        for k in 0..n {
+            a[i][k] = p;
+            p *= dx;
+        }
+        a[i][n] = vals[i];
+    }
+    for col in 0..n {
+        let mut piv = col;
+        for r in (col + 1)..n {
+            if a[r][col].abs() > a[piv][col].abs() {
+                piv = r;
+            }
+        }
+        a.swap(col, piv);
+        let d = a[col][col];
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let f = a[r][col] / d;
+            for c in col..=n {
+                a[r][c] -= f * a[col][c];
+            }
+        }
+    }
+    (0..n).map(|k| a[k][n] / a[k][k]).collect()
+}
+
+/// Fit position-over-time x(t) by sampling the EXACT curve at the inverted
+/// parameter. Bisects the time interval on residual miss. Returns one or more
+/// contiguous [x,y,z] power-basis pieces over s_of_t's time domain.
+fn fit_position_of_t(
+    curve: &VectorNurbs<f64, 3>,
+    deriv: &VectorNurbs<f64, 3>,
+    table: &nurbs::ArcLengthTableRef<'_, f64>,
+    s_of_t: &nurbs::bezier::BezierPiece<f64>,
+    index: usize,
+) -> Result<Vec<[nurbs::bezier::BezierPiece<f64>; 3]>, crate::ShapeError> {
+    fit_position_of_t_rec(curve, deriv, table, s_of_t, index, 0)
+}
+
+fn fit_position_of_t_rec(
+    curve: &VectorNurbs<f64, 3>,
+    deriv: &VectorNurbs<f64, 3>,
+    table: &nurbs::ArcLengthTableRef<'_, f64>,
+    s_of_t: &nurbs::bezier::BezierPiece<f64>,
+    index: usize,
+    depth: usize,
+) -> Result<Vec<[nurbs::bezier::BezierPiece<f64>; 3]>, crate::ShapeError> {
+    let t_lo = s_of_t.u_start;
+    let t_hi = s_of_t.u_end;
+    let n = POS_FIT_DEGREE + 1;
+
+    let mut nodes_t = Vec::with_capacity(n);
+    let mut vals: [Vec<f64>; 3] = [Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n)];
+    let mid = 0.5 * (t_lo + t_hi);
+    let half = 0.5 * (t_hi - t_lo);
+    for i in 0..n {
+        let theta = (i as f64) * std::f64::consts::PI / ((n - 1) as f64);
+        let t = (mid + half * theta.cos()).clamp(t_lo, t_hi);
+        let s = s_of_t.evaluate(t);
+        let u = invert_s_to_u(table, deriv, s, index)?;
+        let p = nurbs::eval::vector_eval(curve, u);
+        nodes_t.push(t);
+        for axis in 0..3 {
+            vals[axis].push(p[axis]);
+        }
+    }
+
+    let axes: [nurbs::bezier::BezierPiece<f64>; 3] = std::array::from_fn(|axis| nurbs::bezier::BezierPiece {
+        u_start: t_lo,
+        u_end: t_hi,
+        coeffs: solve_power_basis(&nodes_t, &vals[axis], t_lo),
+    });
+
+    let mut max_err = 0.0_f64;
+    let checks = 4 * n;
+    for i in 0..=checks {
+        let t = t_lo + (t_hi - t_lo) * (i as f64 / checks as f64);
+        let s = s_of_t.evaluate(t);
+        let u = invert_s_to_u(table, deriv, s, index)?;
+        let truth = nurbs::eval::vector_eval(curve, u);
+        for axis in 0..3 {
+            max_err = max_err.max((axes[axis].evaluate(t) - truth[axis]).abs());
+        }
+    }
+
+    if max_err <= POS_FIT_TOL_MM {
+        return Ok(vec![axes]);
+    }
+    if depth >= POS_FIT_MAX_SUBDIV {
+        return Err(crate::ShapeError::FitFailure {
+            index,
+            detail: nurbs::algebra::FitError::ToleranceNotReached {
+                achieved_mm: max_err,
+                at_degree: POS_FIT_DEGREE as u8,
+            },
+        });
+    }
+    let (left, right) = nurbs::bezier::split_piece_at(s_of_t, mid);
+    let mut out = fit_position_of_t_rec(curve, deriv, table, &left, index, depth + 1)?;
+    out.extend(fit_position_of_t_rec(curve, deriv, table, &right, index, depth + 1)?);
+    Ok(out)
 }
 
 #[derive(Debug, Clone)]

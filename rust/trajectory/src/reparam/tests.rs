@@ -321,3 +321,46 @@ fn invert_s_to_u_rejects_cusp() {
     let err = super::invert_s_to_u(&tv, &deriv, 1e-6, 3);
     assert!(matches!(err, Err(crate::ShapeError::ZeroTangent { index: 3, .. })));
 }
+
+#[test]
+fn fit_position_of_t_tracks_exact_curve() {
+    let curve = arch();
+    let deriv = nurbs::eval::vector_derivative(&curve);
+    let table = nurbs::arc_length::build_arc_length_table_vector(
+        &curve, super::ARC_TABLE_TOL, super::ARC_TABLE_SAMPLES,
+    )
+    .unwrap();
+    let tv = table.as_view();
+    let s_max = tv.s_max();
+
+    // Constant-speed s(t) = s_max * t over t in [0,1] (one piece).
+    let s_of_t = nurbs::bezier::BezierPiece { u_start: 0.0, u_end: 1.0, coeffs: vec![0.0, s_max] };
+
+    let pieces = super::fit_position_of_t(&curve, &deriv, &tv, &s_of_t, 0)
+        .expect("smooth curve must fit");
+    assert!(!pieces.is_empty());
+
+    let mut max_err = 0.0_f64;
+    for j in 0..=400 {
+        let t = j as f64 / 400.0;
+        let arr = pieces
+            .iter()
+            .find(|a| t >= a[0].u_start - 1e-12 && t <= a[0].u_end + 1e-12)
+            .unwrap();
+        let got = [arr[0].evaluate(t), arr[1].evaluate(t), arr[2].evaluate(t)];
+        let s = s_of_t.evaluate(t);
+        let u = super::invert_s_to_u(&tv, &deriv, s, 0).unwrap();
+        let truth = nurbs::eval::vector_eval(&curve, u);
+        let e = ((got[0] - truth[0]).powi(2)
+            + (got[1] - truth[1]).powi(2)
+            + (got[2] - truth[2]).powi(2))
+        .sqrt();
+        max_err = max_err.max(e);
+    }
+    assert!(max_err < super::POS_FIT_TOL_MM * 2.0, "max pos err {max_err} mm");
+
+    let first = &pieces[0];
+    let p0 = [first[0].evaluate(0.0), first[1].evaluate(0.0), first[2].evaluate(0.0)];
+    let c0 = nurbs::eval::vector_eval(&curve, 0.0);
+    assert!((p0[0] - c0[0]).abs() < 1e-9 && (p0[1] - c0[1]).abs() < 1e-9);
+}
