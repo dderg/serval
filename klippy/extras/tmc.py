@@ -460,15 +460,9 @@ class TMCCommandHelper:
 
     def _handle_stepper_enable(self, print_time, is_enable):
         if is_enable:
-            # submit_move dispatches segments to the MCU as soon as
-            # _fire_active_callbacks returns, and the bridge has no
-            # lookahead to defer behind. So whatever a move needs on the
-            # driver before its first step — toff restored for a
-            # virtual-enable driver, phase mode entered for a
-            # phase-stepped one — must run inline here, not on a later
-            # reactor turn (mainline's wait_moves() flush, which the
-            # bridge lacks). A dedicated-enable driver that did not reset
-            # needs nothing: its registers survived the toggle.
+            # Inline, not deferred like disable below: the bridge ships the
+            # move right after this with no lookahead, so deferring to the
+            # reactor loses the first move on a driver not yet ready.
             self._do_enable_bridge(print_time)
             return
 
