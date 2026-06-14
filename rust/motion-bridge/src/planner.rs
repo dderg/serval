@@ -586,6 +586,7 @@ fn run_loop(
                     window_segments,
                     plan,
                     fallback_rung,
+                    binding: _,
                 } = report;
                 let beta_iters = plan.beta_iterations;
                 let beta_converged = plan.beta_converged;

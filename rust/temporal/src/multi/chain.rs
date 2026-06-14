@@ -56,7 +56,7 @@ pub(crate) fn slice_chain_profile(
                 status: chain.status,
                 grid_scheme: chain.grid_scheme,
                 total_time,
-                binding: BindingSummary::default(),
+                binding: chain.binding.clone(),
             }
         })
         .collect()

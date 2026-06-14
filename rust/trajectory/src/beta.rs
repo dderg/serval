@@ -75,6 +75,7 @@ pub struct PlannedBatch {
     pub converged: bool,
     pub beta_iterations: u8,
     pub beta_warning: Option<BetaWarning>,
+    pub binding: ReplanBindingSummary,
 }
 
 pub fn plan_batch_full(
@@ -89,6 +90,7 @@ pub fn plan_batch_full(
         converged: outcome.converged,
         beta_iterations: outcome.iterations,
         beta_warning: outcome.beta_warning,
+        binding: outcome.result.binding,
     })
 }
 
@@ -109,10 +111,45 @@ pub struct PlanStats {
     pub segments: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ReplanWorstBinding {
+    pub constraint: temporal::BindingConstraint,
+    pub ratio: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReplanBindingSummary {
+    pub histogram: Vec<(temporal::BindingConstraint, u32)>,
+    pub worst: Option<ReplanWorstBinding>,
+}
+
+fn aggregate_binding(profiles: &[temporal::TopProfile]) -> ReplanBindingSummary {
+    use std::collections::HashMap;
+    let mut hist: HashMap<temporal::BindingConstraint, u32> = HashMap::new();
+    let mut worst: Option<ReplanWorstBinding> = None;
+    for p in profiles {
+        for (c, n) in &p.binding.histogram {
+            *hist.entry(*c).or_insert(0) += *n;
+        }
+        if let Some(w) = &p.binding.worst {
+            if worst.map_or(true, |cur| w.ratio > cur.ratio) {
+                worst = Some(ReplanWorstBinding {
+                    constraint: w.constraint,
+                    ratio: w.ratio,
+                });
+            }
+        }
+    }
+    let mut histogram: Vec<(temporal::BindingConstraint, u32)> = hist.into_iter().collect();
+    histogram.sort_by(|(ca, na), (cb, nb)| nb.cmp(na).then_with(|| ca.cmp(cb)));
+    ReplanBindingSummary { histogram, worst }
+}
+
 #[derive(Debug)]
 pub struct PlanOutput {
     pub fitted: Vec<FittedSegment>,
     pub stats: PlanStats,
+    pub binding: ReplanBindingSummary,
 }
 
 pub fn plan_velocity_inner(
@@ -127,6 +164,7 @@ pub fn plan_velocity_inner(
                 beta_converged: true,
                 segments: 0,
             },
+            binding: ReplanBindingSummary::default(),
         });
     }
 
@@ -139,6 +177,7 @@ pub fn plan_velocity_inner(
             beta_converged: planned.converged,
             segments,
         },
+        binding: planned.binding,
     })
 }
 
@@ -297,6 +336,7 @@ struct BetaIterResult {
     joining_status: temporal::multi::JoiningStatus,
     _iteration: u8,
     global_ends: Vec<f64>,
+    binding: ReplanBindingSummary,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -457,7 +497,7 @@ fn run_one_iteration(
                     detail: format!("{e}"),
                 })?;
 
-            let arc_fit_tolerance = 1e-4; // mm
+            let arc_fit_tolerance = 1e-4;
             let composed = crate::reparam::compose_segment(
                 curve,
                 &table.as_view(),
@@ -511,12 +551,15 @@ fn run_one_iteration(
         })
         .collect();
 
+    let binding = aggregate_binding(&batch_output.profiles);
+
     Ok(BetaIterResult {
         fitted,
         peaks,
         joining_status: last_joining_status,
         _iteration: 0,
         global_ends,
+        binding,
     })
 }
 

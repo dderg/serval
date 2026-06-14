@@ -13,6 +13,7 @@ mod shaper;
 mod smooth_fit;
 pub mod streaming;
 
+pub use beta::{ReplanBindingSummary, ReplanWorstBinding};
 pub use emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory, ShapeEmission};
 pub use plan_velocity::{plan_velocity, PlanInput, PlanOutput, PlanSegment, PlanStats, SafetyMode};
 pub use post_processor::{
