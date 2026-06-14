@@ -18,7 +18,7 @@ use kalico_ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAUL
 use kalico_ethercat_rt::dynamics::{clamp_torque, DynamicsModel};
 use kalico_ethercat_rt::ffi;
 use kalico_ethercat_rt::mailbox::{MailboxReply, MailboxRequest, MailboxWorker, WorkerScheduling};
-use kalico_ethercat_rt::scale::CountMap;
+use kalico_ethercat_rt::scale::{mm_to_counts, CountMap};
 use kalico_ethercat_rt::sdo::SdoBus;
 use kalico_ethercat_rt::seed_home::{
     ERR_SEED_HOME_BUSY, ERR_SEED_HOME_NOT_ENABLED, ERR_SEED_HOME_RESTORE, ERR_SEED_HOME_STREAMING,
@@ -701,11 +701,15 @@ fn main() {
         let mut motion_active = false;
         if gate.state() == TorqueState::Enabled {
             if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ring.sample(now) {
-                let map = cmap.get_or_insert_with(|| {
-                    let actual = unsafe { ffi::ec_rt_get_position_actual() };
-                    CountMap::new(counts_per_mm, actual, f64::from(pos_mm))
-                });
-                let counts = map.target_counts(f64::from(pos_mm));
+                let counts = if framed {
+                    mm_to_counts(f64::from(pos_mm), counts_per_mm)
+                } else {
+                    let map = cmap.get_or_insert_with(|| {
+                        let actual = unsafe { ffi::ec_rt_get_position_actual() };
+                        CountMap::new(counts_per_mm, actual, f64::from(pos_mm))
+                    });
+                    map.target_counts(f64::from(pos_mm))
+                };
                 let vel_offset = if velocity_ff {
                     (f64::from(vel_mm_s) * counts_per_mm).round() as i32
                 } else {
