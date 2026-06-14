@@ -237,32 +237,93 @@ fn velocity_sweep_single_segment() {
         );
     }
 
-    // 6. Trajectory-time gross-regression guard (hardware-portable).
-    // Strict byte-level neutrality of Levers 1 & 2 is guaranteed at the solver
-    // boundary by the CSC-vs-dense byte-identity debug_assert inside
-    // solve_with_cuts_and_trust_region (it runs on every debug test). A
-    // hardcoded sub-1e-6 lock here is wrong: an interior-point solve converges
-    // to slightly different floats on different CPUs, so it would false-fail on
-    // CI and on the Pi. A converged time-optimal trajectory time is a property
-    // of the problem, not the host, so it is stable across platforms to within
-    // solver tolerance; we only guard against the gross-regression class (e.g.
-    // a damping/restoration change turning 388ms into 998ms) with a generous
-    // band. Reference values are Mac dev-build, recorded in
-    // docs/superpowers/specs/2026-06-14-temporal-solver-throughput-roadmap.md.
-    let reference_ms: [f64; 5] = [445.4, 406.9, 388.3, 998.8, 317.1];
-    for (r, &ref_ms) in rows.iter().zip(reference_ms.iter()) {
-        let rel = (r.total_time_ms - ref_ms).abs() / ref_ms;
+    // 6. NON-REGRESSION HARD GATE (Lever 3).
+    // CLAUDE.md non-negotiable: the planner never ships a measurably slower
+    // trajectory than the best we can compute. So the gate is one-sided — for
+    // EVERY entry velocity, the post-Lever-3 trajectory time must be ≤ the
+    // pre-Lever-3 baseline (within a tiny relative tolerance). No case may get
+    // slower. The 0.75 crawl must get strictly faster.
+    //
+    // PRE_LEVER3_BASELINE: committed Mac dev-build reference, captured before the
+    // seeding + speed-polish + fail-loud work. These are the numbers Lever 3 is
+    // measured against; they are NOT a both-sided target.
+    const PRE_LEVER3_BASELINE_MS: [f64; 5] = [445.426, 406.920, 388.272, 998.769, 317.078];
+    for (r, &base_ms) in rows.iter().zip(PRE_LEVER3_BASELINE_MS.iter()) {
         assert!(
-            rel < 0.10,
-            "trajectory total_time at v_frac={:.2} = {:.3}ms is >10% off the \
-             {:.1}ms reference (rel={:.3}) — either a real regression or a \
-             platform shift large enough to warrant a deliberate re-baseline",
+            r.total_time_ms <= base_ms * (1.0 + 1e-3),
+            "trajectory total_time at v_frac={:.2} = {:.3}ms got SLOWER than the \
+             pre-Lever-3 baseline {:.3}ms — non-negotiable regression",
             r.v_entry_frac,
             r.total_time_ms,
-            ref_ms,
-            rel,
+            base_ms,
         );
     }
+
+    // 6a. Cases that never trigger seeding (0, 0.25, 0.50) converge without
+    // restoration and must stay byte-stable in trajectory time. They may take
+    // FEWER Clarabel calls (a free win from the wider initial trust region), but
+    // the converged time-optimal trajectory is a property of the problem, not the
+    // iteration path, so it is unchanged to within solver tolerance.
+    for i in 0..3 {
+        let rel =
+            (rows[i].total_time_ms - PRE_LEVER3_BASELINE_MS[i]).abs() / PRE_LEVER3_BASELINE_MS[i];
+        assert!(
+            rel < 1e-4,
+            "v_frac={:.2} must be unchanged within tight tol; got {:.3}ms vs \
+             baseline {:.3}ms (rel={:.3e})",
+            rows[i].v_entry_frac,
+            rows[i].total_time_ms,
+            PRE_LEVER3_BASELINE_MS[i],
+            rel,
+        );
+        assert!(
+            !rows[i].restoration_fired,
+            "v_frac={:.2} must not fire restoration",
+            rows[i].v_entry_frac,
+        );
+    }
+
+    // 6b. The 0.75 crawl: seeding + recovery must make it strictly faster than
+    // the 998.8ms baseline (the throughput win), and it must land in the solved
+    // set (feasible). The fail-loud rule means the recovered, not-provably-SLP-
+    // optimal profile wears SolvedInexact rather than the SolvedSlp optimal
+    // badge — it must NOT be SolvedSlp.
+    //
+    // NOTE (honest): the aspirational target was ~360-450ms (in line with the
+    // 0.66-0.70 neighbors, which converge directly to ~370-440ms). The in-scope
+    // SLP linearization hits a hard descent cliff just above v_frac≈0.71: from
+    // the high-entry start it cannot reduce the entry-region axis-jerk ratio at
+    // all (accepted=0), and the feasible recovery seed only reaches the
+    // uniform-dilation feasible point at ~749ms. Closing that gap needs a
+    // warm-start / better SLP, which is explicitly out of scope here. So the
+    // gate we ENFORCE is the non-negotiable one (strictly faster than baseline,
+    // no regression, fail-loud), not the aspirational ~600ms number.
+    assert!(
+        rows[3].total_time_ms < PRE_LEVER3_BASELINE_MS[3],
+        "v_frac=0.75 must be strictly faster than the 998.8ms crawl; got {:.3}ms",
+        rows[3].total_time_ms,
+    );
+    assert!(
+        rows[3].status_ok,
+        "v_frac=0.75 must be in the solved set (feasible); got {}",
+        rows[3].status_label,
+    );
+    assert!(
+        rows[3].status_label != "SolvedSlp",
+        "v_frac=0.75 is a recovered, not-provably-optimal profile and must NOT \
+         wear the SolvedSlp optimal badge (fail-loud); got {}",
+        rows[3].status_label,
+    );
+
+    // 6c. FAIL-LOUD: the genuinely-infeasible 0.95 case (v_start=285mm/s on the
+    // tight-Y-jerk S-curve) must remain a NON-success. Seeding must not launder
+    // it into a fake Converged/SolvedSlp.
+    assert!(
+        !rows[4].status_ok,
+        "v_frac=0.95 is geometrically infeasible and must stay a non-success; \
+         got {} — seeding must not fake feasibility",
+        rows[4].status_label,
+    );
 
     // 8. Report pathology reproduction status (informational).
     let worst = rows.iter().max_by_key(|r| r.clarabel_total).unwrap();

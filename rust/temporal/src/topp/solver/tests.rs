@@ -274,46 +274,11 @@ fn straight_line_solves_to_nontrivial_profile() {
     );
 }
 
-/// `damp_interior_a` must leave `b` and endpoint `a` values unchanged and scale
-/// every interior `a` by the requested factor.
+/// `uniform_damp_for_feasibility` must return a uniform time dilation that
+/// brings the axis-jerk ratio of the damped result to ≤ `SLP9_DAMP_TARGET_RATIO`,
+/// staying on the `b' = 2a` motion manifold (both `b` and `a` scaled by λ²).
 #[test]
-fn damp_interior_a_preserves_endpoints_scales_interior() {
-    let b = vec![0.0, 4.0, 9.0, 16.0, 0.0];
-    let a = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-    let result = SolverResult {
-        b: b.clone(),
-        a: a.clone(),
-        status: SolverStatus::Solved,
-    };
-    let damped = damp_interior_a(&result, 0.5);
-
-    assert_eq!(damped.b, b, "b must be unchanged");
-    assert!(
-        (damped.a[0] - 1.0).abs() < 1e-14,
-        "a[0] (left endpoint) must be unchanged"
-    );
-    assert!(
-        (damped.a[4] - 5.0).abs() < 1e-14,
-        "a[4] (right endpoint) must be unchanged"
-    );
-    for i in 1..4 {
-        let expected = a[i] * 0.5;
-        assert!(
-            (damped.a[i] - expected).abs() < 1e-14,
-            "a[{i}] should be {expected}, got {}",
-            damped.a[i],
-        );
-    }
-}
-
-/// `damp_scale_for_axis_feasibility` must return a scale that brings the axis-jerk
-/// ratio of the damped result to ≤ `SLP9_DAMP_TARGET_RATIO` when the violation
-/// comes from the `3·c''·a·√b` term (a-dependent, so damping is effective).
-///
-/// Geometry: `cppp = 0`, uniform b = b0, large a on all interior points, and
-/// `cpp` sized for an initial max_ratio of 1.8.
-#[test]
-fn damp_scale_for_axis_feasibility_achieves_target() {
+fn uniform_damp_achieves_target_on_manifold() {
     let n = 7_usize;
     let length = 6.0_f64;
 
@@ -374,15 +339,23 @@ fn damp_scale_for_axis_feasibility_achieves_target() {
         "test requires initial_ratio > {SLP9_DAMP_TARGET_RATIO}, got {initial_ratio}",
     );
 
-    let s = damp_scale_for_axis_feasibility(&result, &chain, None, initial_ratio);
-    let damped = damp_interior_a(&result, s);
-    let final_ratio = max_axis_ratio_chain(&damped, &chain, None);
+    let (damped, final_ratio) = uniform_damp_for_feasibility(&result, &chain, None, initial_ratio);
 
     assert!(
         final_ratio <= SLP9_DAMP_TARGET_RATIO,
-        "damp_scale_for_axis_feasibility must bring ratio ≤ {SLP9_DAMP_TARGET_RATIO}; \
-         scale={s:.4}, ratio before={initial_ratio:.4}, after={final_ratio:.4}",
+        "uniform_damp_for_feasibility must bring ratio ≤ {SLP9_DAMP_TARGET_RATIO}; \
+         ratio before={initial_ratio:.4}, after={final_ratio:.4}",
     );
+    for i in 0..n {
+        let lam2 = damped.b[i] / result.b[i].max(1e-30);
+        if result.a[i].abs() > 1e-12 {
+            let lam2_a = damped.a[i] / result.a[i];
+            assert!(
+                (lam2 - lam2_a).abs() < 1e-9,
+                "uniform damp must scale b and a by the same λ² (on-manifold)",
+            );
+        }
+    }
 }
 
 /// `build_axis_jerk_cuts_chain` must place maintenance cuts (j_lim = j_max) for

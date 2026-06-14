@@ -952,22 +952,17 @@ fn set_jerk_projection(
 const SLP9_MAX_OUTER_ITERS: u32 = 30;
 const SLP9_WARN_AT_ITER: u32 = 15;
 pub(crate) const SLP9_EPS_FEAS: f64 = 5e-2;
-const SLP9_RHO_B_INIT: f64 = 0.10;
+const SLP9_RHO_B_INIT: f64 = 0.50;
 const SLP9_RHO_A_INIT: f64 = 0.25;
 const SLP9_RHO_B_MIN: f64 = 0.005;
-const SLP9_RHO_B_MAX: f64 = 0.40;
+const SLP9_RHO_B_MAX: f64 = 0.60;
 const SLP9_RHO_A_MIN: f64 = 0.01;
 const SLP9_RHO_A_MAX: f64 = 1.00;
 const SLP9_MAX_BACKTRACKS: u32 = 3;
 const SLP9_TARGET_DECAY: f64 = 0.85;
 const SLP9_TARGET_MARGIN: f64 = 1e-3;
 const SLP9_CUT_PLACEMENT_FRACTION: f64 = 0.9;
-const SLP9_MAX_RESTORATIONS: u32 = 1;
 const SLP9_DAMP_TARGET_RATIO: f64 = 0.9;
-const SLP9_RESTORE_RHO_B_INIT: f64 = 0.50;
-const SLP9_RESTORE_RHO_A_INIT: f64 = 1.00;
-const SLP9_RESTORE_RHO_B_MAX: f64 = 0.50;
-const SLP9_RESTORE_RHO_A_MAX: f64 = 1.00;
 
 /// Cut builder for a chain grid. Uses per-point stencil weights from
 /// `chain.h_intervals`. Junction dual points receive extra cuts (dual geometry
@@ -1344,9 +1339,8 @@ fn run_slp9_loop(
 }
 
 /// Uniform time dilation of the iterate: `b ← λ²·b`, `a ← λ²·a`. Every
-/// constraint-family ratio decreases monotonically as λ → 0, so this can
-/// always restore a feasible linearization point (unlike `damp_interior_a`,
-/// which leaves `b`-driven families untouched).
+/// constraint-family ratio decreases monotonically as λ → 0, so this can always
+/// restore a feasible point while staying on the `b' = 2a` motion manifold.
 fn damp_profile_uniform(result: &SolverResult, lambda: f64) -> SolverResult {
     let l2 = lambda * lambda;
     SolverResult {
@@ -1376,50 +1370,31 @@ fn uniform_damp_for_feasibility(
     (damped, ratio)
 }
 
-/// Scales all interior `a` values by `scale_factor`, leaving `b` and endpoint
-/// `a` values unchanged. Reduces the `3·c''·a·√b` term in axis-jerk without
-/// disturbing the `c'·s‴` term (which depends only on `b`).
-fn damp_interior_a(result: &SolverResult, scale_factor: f64) -> SolverResult {
-    let n = result.b.len();
-    let b = result.b.clone();
-    let mut a = result.a.clone();
-    for i in 1..n.saturating_sub(1) {
-        a[i] *= scale_factor;
-    }
-    SolverResult {
-        b,
-        a,
-        status: result.status,
-    }
-}
-
-/// Finds the largest `s ≤ 1.0` such that uniformly scaling all interior `a`
-/// values by `s` brings `max_axis_ratio ≤ SLP9_DAMP_TARGET_RATIO`. Analytical
-/// estimate from the linear scaling of the dominant `c''·a·√b` term; refined
-/// by bisection to guarantee the full nonlinear ratio is satisfied.
-fn damp_scale_for_axis_feasibility(
+/// Cheap O(N) feasible seed for the recovery descent when the direct
+/// feasibility descent stalled. Uniform time dilation (`b ← λ²b, a ← λ²a`)
+/// reduces every constraint ratio monotonically and stays on the `b' = 2a`
+/// motion manifold (zero Clarabel calls). Returns `None` when even full
+/// dilation cannot reach `ratio ≤ 1.0` — the curve is genuinely infeasible and
+/// must not be laundered into success.
+fn seed_feasible_point(
     result: &SolverResult,
     chain: &crate::topp::chain::ChainGrid,
     windows: Option<&crate::topp::follower::FollowerWindows>,
     current_ratio: f64,
-) -> f64 {
-    let target_ratio = SLP9_DAMP_TARGET_RATIO;
-    let s_analytical = target_ratio / current_ratio;
-
-    let mut s = s_analytical.min(1.0);
-    for _ in 0..24 {
-        let damped = damp_interior_a(result, s);
-        let ratio = max_axis_ratio_chain(&damped, chain, windows);
-        if ratio <= target_ratio {
-            return s;
-        }
-        s *= 0.75;
-    }
-    s
+) -> Option<SolverResult> {
+    let (uniform, uniform_ratio) =
+        uniform_damp_for_feasibility(result, chain, windows, current_ratio);
+    (uniform_ratio <= 1.0).then_some(uniform)
 }
 
-const SLP9_POLISH_MAX_ITERS: u32 = 5;
+const SLP9_POLISH_MAX_ITERS: u32 = 12;
 const SLP9_POLISH_MIN_GAIN: f64 = 1e-6;
+const SLP9_POLISH_MAX_BACKTRACKS: u32 = 6;
+const SLP9_POLISH_RHO_B_INIT: f64 = 0.25;
+const SLP9_POLISH_RHO_A_INIT: f64 = 0.50;
+const SLP9_POLISH_RHO_B_MAX: f64 = 0.60;
+const SLP9_POLISH_RHO_A_MAX: f64 = 1.00;
+const SLP9_RECOVER_MAX_PROJECTIONS: u32 = 4;
 
 fn profile_time(result: &SolverResult, h_intervals: &[f64]) -> f64 {
     h_intervals
@@ -1440,24 +1415,20 @@ fn profile_time(result: &SolverResult, h_intervals: &[f64]) -> f64 {
 /// follower-free iterate it stops at first feasibility, which can sit a few
 /// percent below the local optimum. Re-maximize speed under full-cap cuts
 /// rebuilt at each accepted iterate while staying feasible.
-fn polish_windowed(
-    bundle: &ConstraintBundle,
+fn build_polish_cuts(
+    current: &SolverResult,
     chain: &crate::topp::chain::ChainGrid,
-    windows: &crate::topp::follower::FollowerWindows,
-    start: SolverResult,
-    tol: f64,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
     scale: &SolverScale,
-) -> Result<SolverResult, SolverSetupError> {
-    let mut current = start;
-    let mut current_time = profile_time(&current, &bundle.h_intervals);
-    for _ in 0..SLP9_POLISH_MAX_ITERS {
-        let mut cuts = build_axis_jerk_cuts_chain(&current, chain, 1.0);
+) -> Vec<SlpCut> {
+    let mut cuts = build_axis_jerk_cuts_chain(current, chain, 1.0);
+    if let Some(w) = windows {
         cuts.extend(
             crate::topp::follower::build_windowed_follower_cuts(
                 &current.b,
                 &current.a,
                 chain,
-                windows,
+                w,
                 1.0,
                 SLP9_EPS_FEAS,
                 SLP9_CUT_PLACEMENT_FRACTION,
@@ -1467,26 +1438,122 @@ fn polish_windowed(
             .into_iter()
             .map(SlpCut::FollowerWindowed),
         );
-        let candidate = solve_with_cuts(bundle, &cuts, tol, scale)?;
+    }
+    cuts
+}
+
+fn polish_axis_jerk(
+    bundle: &ConstraintBundle,
+    chain: &crate::topp::chain::ChainGrid,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
+    start: SolverResult,
+    tol: f64,
+    scale: &SolverScale,
+) -> Result<SolverResult, SolverSetupError> {
+    let mut current = start;
+    let mut current_time = profile_time(&current, &bundle.h_intervals);
+    let mut rho_b = SLP9_POLISH_RHO_B_INIT;
+    let mut rho_a = SLP9_POLISH_RHO_A_INIT;
+    for _ in 0..SLP9_POLISH_MAX_ITERS {
+        let cuts = build_polish_cuts(&current, chain, windows, scale);
+        let mut accepted: Option<(SolverResult, f64)> = None;
+        for backtrack in 0..=SLP9_POLISH_MAX_BACKTRACKS {
+            let bt = i32::try_from(backtrack).unwrap_or(i32::MAX);
+            let tr = if backtrack == 0 {
+                None
+            } else {
+                Some(TrustRegion {
+                    rho_b: rho_b * 0.5_f64.powi(bt - 1),
+                    rho_a: rho_a * 0.5_f64.powi(bt - 1),
+                })
+            };
+            let candidate = solve_with_cuts_and_trust_region(
+                bundle, &cuts, tr, &current.b, &current.a, tol, scale,
+            )?;
+            if matches!(
+                candidate.status,
+                SolverStatus::Infeasible | SolverStatus::MaxIter { .. }
+            ) {
+                continue;
+            }
+            let ratio = max_axis_ratio_chain(&candidate, chain, windows);
+            let t = profile_time(&candidate, &bundle.h_intervals);
+            if ratio <= 1.0 + SLP9_EPS_FEAS && t < current_time * (1.0 - SLP9_POLISH_MIN_GAIN) {
+                accepted = Some((candidate, t));
+                break;
+            }
+        }
+        match accepted {
+            Some((cand, t)) => {
+                current = cand;
+                current_time = t;
+                rho_b = (rho_b * 1.5).min(SLP9_POLISH_RHO_B_MAX);
+                rho_a = (rho_a * 1.5).min(SLP9_POLISH_RHO_A_MAX);
+            }
+            None => break,
+        }
+    }
+    Ok(current)
+}
+
+/// Recovers a feasible, manifold-consistent profile from a uniformly-damped
+/// seed when the direct feasibility descent stalled. The uniform-damp seed is
+/// feasible but off the `b' = 2a` motion manifold and carries a scaled entry
+/// `b[0]`; a short trust-region-boxed cutting-plane projection re-pins
+/// `b[0] = v_start²` and lands on a feasible on-manifold profile (the only kind
+/// valid as an output trajectory) in a handful of Clarabel solves — not a full
+/// `run_slp9_loop` re-descent, which would re-stall and burn the whole budget.
+/// A final time-maximizing polish nudges the projected profile toward the local
+/// time-optimum while staying feasible. Returns the recovered profile and its
+/// axis-jerk ratio; the seed is the feasibility floor.
+fn recover_speed_from_seed(
+    bundle: &ConstraintBundle,
+    chain: &crate::topp::chain::ChainGrid,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
+    seed: SolverResult,
+    tol: f64,
+    scale: &SolverScale,
+) -> Result<(SolverResult, f64), SolverSetupError> {
+    let mut best = seed.clone();
+    let mut best_time = profile_time(&best, &bundle.h_intervals);
+    let mut linearization = seed;
+
+    for _ in 0..SLP9_RECOVER_MAX_PROJECTIONS {
+        let target = max_axis_ratio_chain(&linearization, chain, windows).min(1.0);
+        let cuts = build_axis_jerk_cuts_chain(&linearization, chain, target);
+        let tr = TrustRegion {
+            rho_b: SLP9_RHO_B_MAX,
+            rho_a: SLP9_RHO_A_MAX,
+        };
+        let cand = solve_with_cuts_and_trust_region(
+            bundle,
+            &cuts,
+            Some(tr),
+            &linearization.b,
+            &linearization.a,
+            tol,
+            scale,
+        )?;
         if matches!(
-            candidate.status,
+            cand.status,
             SolverStatus::Infeasible | SolverStatus::MaxIter { .. }
         ) {
             break;
         }
-        let ratio = max_axis_ratio_chain(&candidate, chain, Some(windows));
-        if ratio > 1.0 + SLP9_EPS_FEAS {
-            break;
+        let cand_ratio = max_axis_ratio_chain(&cand, chain, windows);
+        let cand_time = profile_time(&cand, &bundle.h_intervals);
+        if cand_ratio <= 1.0 + SLP9_EPS_FEAS
+            && cand_time <= best_time * (1.0 + SLP9_POLISH_MIN_GAIN)
+        {
+            best = cand.clone();
+            best_time = cand_time;
         }
-        let t = profile_time(&candidate, &bundle.h_intervals);
-        if t < current_time * (1.0 - SLP9_POLISH_MIN_GAIN) {
-            current = candidate;
-            current_time = t;
-        } else {
-            break;
-        }
+        linearization = cand;
     }
-    Ok(current)
+
+    let polished = polish_axis_jerk(bundle, chain, windows, best, tol, scale)?;
+    let polished_ratio = max_axis_ratio_chain(&polished, chain, windows);
+    Ok((polished, polished_ratio))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1500,7 +1567,7 @@ pub(crate) fn slp_solve_with_axis_jerk_chain(
     let (result, outcome) =
         slp_solve_with_axis_jerk_chain_inner(bundle, chain, windows, tol, scale)?;
     if let (Some(w), SlpOutcome::Converged { .. }) = (windows, &outcome) {
-        let polished = polish_windowed(bundle, chain, w, result, tol, scale)?;
+        let polished = polish_axis_jerk(bundle, chain, Some(w), result, tol, scale)?;
         return Ok((polished, outcome));
     }
     Ok((result, outcome))
@@ -1540,85 +1607,58 @@ fn slp_solve_with_axis_jerk_chain_inner(
         ));
     }
 
-    let mut current_start = path_result;
-    let mut outer_iters_consumed: u32 = 0;
-    let mut restorations_used: u32 = 0;
-
-    loop {
-        let (rho_b_i, rho_a_i, rho_b_m, rho_a_m) = if restorations_used == 0 {
-            (
-                SLP9_RHO_B_INIT,
-                SLP9_RHO_A_INIT,
-                SLP9_RHO_B_MAX,
-                SLP9_RHO_A_MAX,
-            )
-        } else {
-            (
-                SLP9_RESTORE_RHO_B_INIT,
-                SLP9_RESTORE_RHO_A_INIT,
-                SLP9_RESTORE_RHO_B_MAX,
-                SLP9_RESTORE_RHO_A_MAX,
-            )
-        };
-        let loop_outcome = run_slp9_loop(
-            bundle,
-            chain,
-            windows,
-            current_start.clone(),
-            tol,
-            scale,
-            path_outer_iters,
-            outer_iters_consumed,
-            rho_b_i,
-            rho_a_i,
-            rho_b_m,
-            rho_a_m,
-        )?;
-        match loop_outcome {
-            Slp9LoopOutcome::Done(result, outcome) => return Ok((result, outcome)),
-            Slp9LoopOutcome::TrFloorStall {
-                best_result,
-                best_ratio,
-                outer_iters,
-                accepted_total: _,
-            } => {
-                if best_ratio <= 1.0 + SLP9_EPS_FEAS {
-                    return Ok((best_result, SlpOutcome::Converged { outer_iters }));
-                }
-                if restorations_used >= SLP9_MAX_RESTORATIONS {
-                    return Ok((
-                        best_result,
-                        SlpOutcome::Diverged {
-                            last_max_ratio: best_ratio,
-                            outer_iters,
-                        },
-                    ));
-                }
-                let damp_s =
-                    damp_scale_for_axis_feasibility(&best_result, chain, windows, best_ratio);
-                let damped = damp_interior_a(&best_result, damp_s);
-                let ratio_after_damp = max_axis_ratio_chain(&damped, chain, windows);
-                let restored = if ratio_after_damp <= 1.0 {
-                    damped
-                } else {
-                    let (uniform, uniform_ratio) =
-                        uniform_damp_for_feasibility(&best_result, chain, windows, best_ratio);
-                    if uniform_ratio > 1.0 {
-                        return Ok((
-                            best_result,
-                            SlpOutcome::Diverged {
-                                last_max_ratio: best_ratio,
-                                outer_iters,
-                            },
-                        ));
-                    }
-                    uniform
-                };
-                current_start = restored;
-                outer_iters_consumed = outer_iters - path_outer_iters;
-                restorations_used += 1;
-                counters::mark_restoration();
+    let loop_outcome = run_slp9_loop(
+        bundle,
+        chain,
+        windows,
+        path_result,
+        tol,
+        scale,
+        path_outer_iters,
+        0,
+        SLP9_RHO_B_INIT,
+        SLP9_RHO_A_INIT,
+        SLP9_RHO_B_MAX,
+        SLP9_RHO_A_MAX,
+    )?;
+    match loop_outcome {
+        Slp9LoopOutcome::Done(result, outcome) => Ok((result, outcome)),
+        Slp9LoopOutcome::TrFloorStall {
+            best_result,
+            best_ratio,
+            outer_iters,
+            accepted_total: _,
+        } => {
+            if best_ratio <= 1.0 + SLP9_EPS_FEAS {
+                let polished = polish_axis_jerk(bundle, chain, windows, best_result, tol, scale)?;
+                let polished_ratio = max_axis_ratio_chain(&polished, chain, windows);
+                return Ok((
+                    polished,
+                    SlpOutcome::Diverged {
+                        last_max_ratio: polished_ratio,
+                        outer_iters,
+                    },
+                ));
             }
+            let Some(seed) = seed_feasible_point(&best_result, chain, windows, best_ratio) else {
+                return Ok((
+                    best_result,
+                    SlpOutcome::Diverged {
+                        last_max_ratio: best_ratio,
+                        outer_iters,
+                    },
+                ));
+            };
+            counters::mark_restoration();
+            let (recovered, recovered_ratio) =
+                recover_speed_from_seed(bundle, chain, windows, seed, tol, scale)?;
+            Ok((
+                recovered,
+                SlpOutcome::Diverged {
+                    last_max_ratio: recovered_ratio,
+                    outer_iters,
+                },
+            ))
         }
     }
 }
