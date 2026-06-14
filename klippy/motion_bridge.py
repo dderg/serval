@@ -28,6 +28,7 @@ _PRINT_FINISH_EVENTS = (
 _STUB_MOTION_METHODS = frozenset(
     {
         "adjust_motor",
+        "submit_correction_sequence",
         "init_planner",
         "submit_move",
         "submit_dwell",
@@ -411,6 +412,18 @@ class MotionBridgeWrapper:
     def adjust_motor(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
         return self._bridge.adjust_motor(
             mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
+        )
+
+    def submit_correction_sequence(
+        self, mcu_id, axis_idx, motor_idx, segments, speed, accel
+    ):
+        return self._bridge.submit_correction_sequence(
+            mcu_id,
+            axis_idx,
+            motor_idx,
+            [float(s) for s in segments],
+            speed,
+            accel,
         )
 
     def home_axis_poll(self):

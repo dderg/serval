@@ -1927,6 +1927,22 @@ impl PyMotionBridge {
         self.stream_correction_entries(py, mcu_handle, axis_idx, motor_idx, &pieces)
     }
 
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, segments, speed, accel))]
+    fn submit_correction_sequence(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        axis_idx: u8,
+        motor_idx: u8,
+        segments: Vec<f64>,
+        speed: f64,
+        accel: f64,
+    ) -> PyResult<f64> {
+        let pieces = crate::correction::plan_correction_sequence(&segments, speed, accel)
+            .map_err(PyRuntimeError::new_err)?;
+        self.stream_correction_entries(py, mcu_handle, axis_idx, motor_idx, &pieces)
+    }
+
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {
         let io = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
