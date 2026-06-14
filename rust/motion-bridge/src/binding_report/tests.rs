@@ -92,3 +92,13 @@ fn flush_emits_and_clears_a_partial_window() {
     acc.flush(t0 + std::time::Duration::from_millis(100), &names);
     assert_eq!(acc.window_count(BindingConstraint::Velocity { set: 0 }), 0);
 }
+
+#[test]
+fn maybe_rollup_on_empty_window_past_interval_is_a_noop() {
+    let t0 = std::time::Instant::now();
+    let names = vec!["gantry".to_string()];
+    let mut acc = BindingAccumulator::new(t0);
+    acc.maybe_rollup(t0 + std::time::Duration::from_millis(1100), &names);
+    assert!(acc.worst().is_none());
+    assert_eq!(acc.window_count(BindingConstraint::Velocity { set: 0 }), 0);
+}
