@@ -70,6 +70,10 @@ double kalico_runtime_get_axis_accumulator(struct KalicoRuntime *rt, uint8_t oid
 
 float kalico_runtime_get_axis_motor(struct KalicoRuntime *rt, uint8_t oid);
 
+int32_t kalico_runtime_get_correction_retired(struct KalicoRuntime *rt,
+                                              uint32_t *out_retired,
+                                              uintptr_t max_axes);
+
 uint32_t kalico_runtime_get_dispatcher_floor_cycles(void);
 
 int32_t kalico_runtime_get_heartbeat(struct KalicoRuntime *rt,
@@ -82,10 +86,6 @@ void kalico_runtime_get_last_timing(struct KalicoRuntime *rt,
                                     uint64_t *now_out,
                                     uint64_t *t_start_out,
                                     uint64_t *duration_out);
-
-int32_t kalico_runtime_get_correction_retired(struct KalicoRuntime *rt,
-                                              uint32_t *out_retired,
-                                              uintptr_t max_axes);
 
 int32_t kalico_runtime_get_occupancy(struct KalicoRuntime *rt,
                                      uint32_t *out_occupancy,
