@@ -594,17 +594,25 @@ send_stop_response(uint32_t correlation_id, int32_t result, uint64_t discard_clo
     kalico_transport_send_frame(KALICO_CHANNEL_CONTROL, payload, sizeof(payload));
 }
 
-static void
-handle_stop(uint32_t correlation_id)
+int32_t
+handle_stop_inner(uint64_t *discard_clock)
 {
     int32_t rc = KALICO_ERR_NOT_INIT;
-    uint64_t discard_clock = 0;
+    *discard_clock = 0;
     if (runtime_handle) {
         irqstatus_t flag = irq_save();
         rc = kalico_runtime_gate_pieces(runtime_handle);
-        discard_clock = kalico_runtime_now_ticks(runtime_handle);
+        *discard_clock = kalico_runtime_now_ticks(runtime_handle);
         irq_restore(flag);
     }
+    return rc;
+}
+
+static void
+handle_stop(uint32_t correlation_id)
+{
+    uint64_t discard_clock = 0;
+    int32_t rc = handle_stop_inner(&discard_clock);
     send_stop_response(correlation_id, rc, discard_clock);
 }
 

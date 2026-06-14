@@ -76,8 +76,10 @@ class FakeToolhead:
         self.kin = kin
         self.follower_steppers = list(follower_steppers)
         self._clock = 100.0
+        self.move_time_calls = 0
 
     def get_last_move_time(self):
+        self.move_time_calls += 1
         self._clock += 0.090
         return self._clock
 
@@ -93,7 +95,7 @@ def all_steppers(kin):
     return [s for rail in kin.rails for s in rail.get_steppers()]
 
 
-def test_each_enable_callback_gets_fresh_print_time():
+def test_all_enable_callbacks_share_one_print_time():
     kin = make_kin("corexy")
     fired = []
     for s in all_steppers(kin):
@@ -101,8 +103,17 @@ def test_each_enable_callback_gets_fresh_print_time():
     th = FakeToolhead(kin)
     th._fire_active_callbacks((5.0, 5.0, 5.0, 0.0))
     assert len(fired) == 6
-    assert len(set(fired)) == 6, "print_time must be recomputed per callback"
-    assert fired == sorted(fired)
+    assert len(set(fired)) == 1, (
+        "every motor of a move energizes at one print_time"
+    )
+    assert th.move_time_calls == 1, "print_time is sampled once, not per motor"
+
+
+def test_no_active_callbacks_does_not_sample_print_time():
+    kin = make_kin("corexy")
+    th = FakeToolhead(kin)
+    assert th._fire_active_callbacks((5.0, 5.0, 5.0, 0.0)) is False
+    assert th.move_time_calls == 0, "no enable to schedule, no clock read"
 
 
 def test_cartesian_move_enables_only_the_moving_axis():

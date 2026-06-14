@@ -72,10 +72,12 @@ impl AxisRing {
     pub fn push_from_bytes(&mut self, piece_count: u8, bytes: &[u8]) -> u8 {
         let n = piece_count as usize;
         if bytes.len() < n * 32 {
-            log::warn!(
-                "AxisRing::push_from_bytes: short payload ({} < {})",
-                bytes.len(),
-                n * 32
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "push_from_bytes_short_payload",
+                payload_len = bytes.len(),
+                required_len = n * 32,
+                "AxisRing::push_from_bytes: short payload"
             );
             return 0;
         }
@@ -83,7 +85,13 @@ impl AxisRing {
         for chunk in bytes[..n * 32].chunks_exact(32) {
             let entry = parse_piece_entry(chunk);
             if self.desc.push(&mut self.storage, entry).is_err() {
-                log::warn!("AxisRing::push_from_bytes: ring full at entry {pushed}/{piece_count}");
+                tracing::warn!(
+                    subsystem = "ethercat",
+                    event = "push_from_bytes_ring_full",
+                    pushed,
+                    piece_count,
+                    "AxisRing::push_from_bytes: ring full"
+                );
                 break;
             }
             pushed += 1;

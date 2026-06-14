@@ -349,12 +349,12 @@ fn rectify_last_move_time(last_move_time_bits: &AtomicU64, delta: f64) -> bool {
             return true;
         }
     }
-    log::debug!(
-        "planner: rectification CAS contended for >{} attempts (delta {} s) — \
-         giving up on this delta; the atomic will reflect the next \
-         caller-side advance only",
-        RECTIFICATION_CAS_MAX_ATTEMPTS,
+    tracing::debug!(
+        subsystem = "motion",
+        event = "rectify_cas_contended",
+        max_attempts = RECTIFICATION_CAS_MAX_ATTEMPTS,
         delta,
+        "planner: rectification CAS contended — giving up on this delta"
     );
     false
 }
@@ -412,14 +412,16 @@ fn run_commit_and_dispatch(
         }
     }
     commit_fire_count.fetch_add(1, Ordering::AcqRel);
-    log::debug!(
-        "[planner-trace] commit drained={} dur_s={:.6} commit_us={} t_app={:.6} t_disp_before={:.6} t_disp_after={:.6}",
-        drained.len(),
-        batch_dur,
-        commit_us,
-        t_app_before,
+    tracing::debug!(
+        subsystem = "motion",
+        event = "commit_trace",
+        drained = drained.len(),
+        dur_s = batch_dur,
+        commit_us = %commit_us,
+        t_app = t_app_before,
         t_disp_before,
-        state.t_dispatched,
+        t_disp_after = state.t_dispatched,
+        "[planner-trace] commit"
     );
 }
 
@@ -461,7 +463,12 @@ fn run_loop(
         let tl = config
             .to_temporal_limits()
             .expect("limit sections validated in init_planner");
-        log::debug!("[planner-trace] startup limits {:?}", tl.sets());
+        tracing::debug!(
+            subsystem = "motion",
+            event = "startup_limits",
+            limits = ?tl.sets(),
+            "[planner-trace] startup limits"
+        );
     }
 
     let mut last_recv_time: Option<Instant> = None;

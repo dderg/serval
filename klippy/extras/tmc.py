@@ -223,6 +223,9 @@ class TMCErrorCheck:
             return self.printer.get_reactor().NEVER
         return eventtime + 1.0
 
+    def reset_detect_supported(self):
+        return self.gstat_reg_info is not None and self.clear_gstat
+
     def stop_checks(self):
         if self.check_timer is None:
             return
@@ -457,17 +460,9 @@ class TMCCommandHelper:
 
     def _handle_stepper_enable(self, print_time, is_enable):
         if is_enable:
-            # In bridge mode, submit_move dispatches segments to the MCU
-            # immediately after _fire_active_callbacks returns. If we
-            # defer _do_enable to the reactor, the MCU steps into an
-            # uninitialised TMC driver and the first move is lost. Run
-            # the register init + phase calibration inline so the driver
-            # is ready before the segment is dispatched. The gcode mutex
-            # and wait_moves() are unnecessary here — the move hasn't
-            # been submitted yet, so there's nothing to flush or wait
-            # for. Mainline defers because the move sits in the
-            # lookahead and _do_enable's wait_moves() IS what flushes it
-            # to the MCU; bridge mode doesn't have that lookahead.
+            # Inline, not deferred like disable below: the bridge ships the
+            # move right after this with no lookahead, so deferring to the
+            # reactor loses the first move on a driver not yet ready.
             self._do_enable_bridge(print_time)
             return
 
@@ -478,13 +473,25 @@ class TMCCommandHelper:
 
     def _do_enable_bridge(self, print_time):
         try:
-            if self.toff is not None:
-                self.fields.set_field("toff", self.toff)
-            self._init_registers()
             if self._post_enable_cb is not None:
+                if self.toff is not None:
+                    self.fields.set_field("toff", self.toff)
+                self._init_registers()
                 self._post_enable_cb()
-            if self._post_enable_cb is None:
-                self.echeck_helper.start_checks()
+                return
+            did_reset = self.echeck_helper.start_checks()
+            reinit = (
+                did_reset or not self.echeck_helper.reset_detect_supported()
+            )
+            if self.toff is not None:
+                val = self.fields.set_field("toff", self.toff)
+                if reinit:
+                    self._init_registers()
+                else:
+                    reg_name = self.fields.lookup_register("toff")
+                    self.mcu_tmc.set_register(reg_name, val, print_time)
+            elif reinit:
+                self._init_registers()
         except (self.printer.command_error, RuntimeError) as e:
             self.printer.invoke_shutdown(
                 "TMC %s _do_enable_bridge failed: %s" % (self.stepper_name, e)

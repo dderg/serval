@@ -134,7 +134,12 @@ fn wait_for_klipper_frame(
         match io.poll_frames_until(deadline)? {
             PollOutcome::Frames { frames, errors } => {
                 for e in errors {
-                    log::warn!("identify stream error: {e}");
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "identify_stream_error",
+                        error = %e,
+                        "identify stream error"
+                    );
                 }
                 let mut saw_nak = false;
                 for f in frames {

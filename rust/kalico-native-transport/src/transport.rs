@@ -209,7 +209,12 @@ impl<C: Connection + 'static> KalicoNativeTransport<C> {
     }
 
     fn dispatch_error(&self, e: StreamError) {
-        log::warn!("kalico stream error: {e}");
+        tracing::warn!(
+            subsystem = "mcu-comms",
+            event = "kalico_stream_error",
+            error = %e,
+            "kalico stream error"
+        );
     }
 
     fn dispatch_frame(&self, f: Frame) {
@@ -223,7 +228,11 @@ impl<C: Connection + 'static> KalicoNativeTransport<C> {
 
     fn dispatch_kalico(&self, channel: u8, payload: &[u8]) {
         let Some((header, body)) = decode_message_header(payload) else {
-            log::warn!("kalico frame too short for header");
+            tracing::warn!(
+                subsystem = "mcu-comms",
+                event = "frame_too_short",
+                "kalico frame too short for header"
+            );
             return;
         };
         let kind_raw = header.kind_raw;
@@ -235,11 +244,21 @@ impl<C: Connection + 'static> KalicoNativeTransport<C> {
             *self.inner.state.lock().unwrap(),
             ConnectionState::Identified { .. }
         ) {
-            log::trace!("dropping kalico frame in non-Identified state, kind 0x{kind_raw:04x}");
+            tracing::trace!(
+                subsystem = "mcu-comms",
+                event = "frame_dropped_non_identified",
+                kind_raw = kind_raw,
+                "dropping kalico frame in non-Identified state"
+            );
             return;
         }
         let Some(kind) = MessageKind::from_u16(kind_raw) else {
-            log::warn!("unknown kalico message kind 0x{kind_raw:04x}");
+            tracing::warn!(
+                subsystem = "mcu-comms",
+                event = "unknown_message_kind",
+                kind_raw = kind_raw,
+                "unknown kalico message kind"
+            );
             return;
         };
 
@@ -252,7 +271,12 @@ impl<C: Connection + 'static> KalicoNativeTransport<C> {
         }
 
         if header.correlation_id == 0 {
-            log::warn!("control-channel response with correlation_id=0 (kind 0x{kind_raw:04x})");
+            tracing::warn!(
+                subsystem = "mcu-comms",
+                event = "response_zero_correlation_id",
+                kind_raw = kind_raw,
+                "control-channel response with correlation_id=0"
+            );
             return;
         }
         let mut pending = self.inner.pending.lock().unwrap();
@@ -262,10 +286,12 @@ impl<C: Connection + 'static> KalicoNativeTransport<C> {
                 body: body.to_vec(),
             });
         } else {
-            log::warn!(
-                "no pending call for correlation_id {} (kind 0x{:04x})",
-                header.correlation_id,
-                kind_raw
+            tracing::warn!(
+                subsystem = "mcu-comms",
+                event = "no_pending_call",
+                correlation_id = header.correlation_id,
+                kind_raw = kind_raw,
+                "no pending call for correlation_id"
             );
         }
     }
@@ -320,7 +346,12 @@ impl<C: Connection + 'static> KalicoNativeTransport<C> {
     }
 
     fn fault(&self, msg: String) {
-        log::error!("kalico transport faulted: {msg}");
+        tracing::error!(
+            subsystem = "mcu-comms",
+            event = "transport_faulted",
+            fault = %msg,
+            "kalico transport faulted"
+        );
         *self.inner.state.lock().unwrap() = ConnectionState::Faulted(msg.clone());
         let drained: Vec<PendingCall> = {
             let mut p = self.inner.pending.lock().unwrap();
