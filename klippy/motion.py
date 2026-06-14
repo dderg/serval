@@ -401,13 +401,16 @@ class Motion:
             if isinstance(rail, servo_axis.ServoRail)
         )
         fired = False
+        move_time = None
         for owner in owners:
             if not owner._active_callbacks:
                 continue
             cbs = owner._active_callbacks
             owner._active_callbacks = []
+            if move_time is None:
+                move_time = self.get_last_move_time()
             for cb in cbs:
-                cb(self.get_last_move_time())
+                cb(move_time)
             fired = True
         return fired
 

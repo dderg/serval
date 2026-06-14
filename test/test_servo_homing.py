@@ -181,20 +181,16 @@ class FakeRail:
         return self._name
 
 
-def test_enable_homing_motors_enables_each_stepper():
-    se = FakeStepperEnable()
+def test_homing_motor_names_lists_each_stepper():
     rail = FakeRail(
         [FakeStepper("stepper_x"), FakeStepper("stepper_x1")], "stepper_x"
     )
-    homing_mod._enable_homing_motors(se, rail)
-    assert se.calls == [("stepper_x", True), ("stepper_x1", True)]
+    assert homing_mod._homing_motor_names(rail) == ["stepper_x", "stepper_x1"]
 
 
-def test_enable_homing_motors_enables_servo_rail_by_name():
-    se = FakeStepperEnable()
+def test_homing_motor_names_uses_servo_rail_name_when_no_steppers():
     rail = FakeRail([], "servo_x")
-    homing_mod._enable_homing_motors(se, rail)
-    assert se.calls == [("servo_x", True)]
+    assert homing_mod._homing_motor_names(rail) == ["servo_x"]
 
 
 def make_homing_servo_rail():
