@@ -27,7 +27,10 @@ In scope:
 - A new geometric bridge entry point carrying control points.
 - Extraction of the one geometry primitive the live engine borrows from
   `compat` into `geometry`, severing the planner's dependency on `compat`.
-- A fail-loud gate rejecting **activation** of a bed mesh.
+- Convex-hull range checking (the curve, not just the endpoint).
+- The extruder ratio computed against true arc length (not the chord).
+- Fail-loud move-transform gates: bed-mesh activation, and an active-transform
+  curve-time gate.
 
 Explicitly out of scope (deferred, not prerequisites):
 
@@ -209,9 +212,22 @@ trajectory time (`planner.rs:524`, `rectify_last_move_time`). The host reads
 For a straight line the chord *is* the path length, so it was exact for free.
 For a curve the chord underestimates, handing the scheduler a known-low number
 every time. Compute the **true arc length**: reuse the `geometry`/`nurbs`
-arc-length facility if it exists (the optimizer needs path length, so it
-likely does); otherwise add an 8-point Gauss-Legendre quadrature on the cubic
-(effectively exact, a handful of flops).
+arc-length facility (`nurbs::arc_length::path_arc_length`, already used by the
+follower pipeline) — it exists; otherwise an 8-point Gauss-Legendre quadrature
+on the cubic (effectively exact, a handful of flops).
+
+### Extruder ratio must use arc length, not chord
+
+The downstream extrusion machinery is already correct for curves: the follower
+pipeline computes `ratio = delta / path_arc_length` (3D arc length,
+`geometry/src/pipeline.rs:260`) and drives E by the integrated path speed
+`E(t) = E_start + ratio·∫√(ẋ²+ẏ²+ż²)dτ` (`emit_shaped.rs:330`), tested on a G5
+helix. **But the live `classify.rs` builds the follower ratio as
+`de / spatial_distance` (the chord)** — correct only because G1 is collinear.
+The new G5 path **must** divide by the **true arc length** (the same value
+computed above), or a curve over-extrudes by exactly the arc/chord ratio. This
+is the one extrusion-correctness requirement of the whole task; the rest is
+already done.
 
 ### Chaining (smooth G5)
 
@@ -246,18 +262,59 @@ Presence/pairing checks live in Python (cheap, has `gcmd.error`); the chain
 availability check lives in the bridge. No silent recovery; every rejected
 command raises with a clear message.
 
-## Bed mesh activation gate
+## Range checking — the curve, not just the endpoint
 
-The move-transform layer (`bed_mesh`, `skew_correction`, `bed_tilt`) warps
-moves above the bridge and has not been ported to the new motion planner —
-for lines or curves. Bed mesh follows the surface by **splitting** a move into
-short pieces (`MoveSplitter`, `split_delta_z = 0.025`), which has not been
-validated against the new planner. Rather than silently print a
-surface-ignoring path, fail loud at activation.
+`kin.check_move` validates the **endpoint** against axis limits. For a straight
+line that suffices (every point lies in the start/end bounding box). **A Bézier
+does not** — control points can push the curve far outside the endpoints (a move
+between two in-range points can bulge off the bed). Endpoint-only validation
+would let the toolhead crash.
 
-Gate point: `bed_mesh.py` `set_mesh(self, mesh)` — the single chokepoint;
-both profile `LOAD` and calibration's `probe_finalize` funnel through it.
-When `mesh is not None`, raise before `self.z_mesh` is assigned:
+A Bézier is contained in the **convex hull of its four control points**, so
+validating all four 3D control points against the axis limits is a
+conservative, sufficient bound. `cmd_G5`/`move_curve` computes the control
+points (it has them) and range-checks each before the move is issued. Fail loud
+on any out-of-range control point.
+
+## Cusps / degenerate control polygons
+
+A console user or buggy macro can submit a G5 whose control points fold back on
+themselves, creating a **cusp** — a point where the geometric tangent `|x'(t)|`
+passes through zero. Physically a cusp is a mandatory full stop (the toolhead
+must decelerate to zero and reverse); that is a valid, in-spec motion. The
+difficulty is **numerical**, not physical: the time-optimal solver measures
+path speed by dividing by `|x'(t)|`, which is a divide-by-zero at the cusp. The
+solver has only ever been fed collinear (regular) curves, so its behavior here
+is **untested**.
+
+Plan: drive the decision by evidence, not assumption.
+
+1. **Experiment first** — add a test that constructs a cusp G5 (control points
+   that fold back) and runs it through the live solver, recording the outcome:
+   clean stop, finite-but-suboptimal, or NaN/stall/SLP-restoration-cap.
+2. If the solver produces a clean stop → cusps already work; no special code.
+3. If not → **split the segment at the cusp** and impose a `v = 0` boundary
+   there (the physically-correct, SOTA handling — it hands the solver the stop
+   instead of a `0/0`). Detection: `min|x'(t)|` below threshold.
+4. **Interim stopgap** only if split-at-cusp is deferred: detect and fail loud
+   (`degenerate G5 control polygon (cusp / zero-velocity) not supported`). Safe
+   because no slicer emits cusps.
+
+## Move-transform gates
+
+`set_move_transform` has seven callers (`bed_mesh`, `skew_correction`,
+`bed_tilt`, `z_thermal_adjust`, `exclude_object`, `mixing_extruder`,
+`tuning_tower`) that warp moves *above* the bridge. None is ported to the new
+planner. Two distinct failure modes need two distinct gates.
+
+### Bed mesh — broken for all moves (gate at activation)
+
+Bed mesh follows the surface by **splitting** a move into short pieces
+(`MoveSplitter`, `split_delta_z = 0.025`), unvalidated against the new planner —
+so it is unsupported for lines *and* curves. Gate at `bed_mesh.py`
+`set_mesh(self, mesh)`, the single activation chokepoint (both profile `LOAD`
+and calibration's `probe_finalize` funnel through it). When `mesh is not None`,
+raise before `self.z_mesh` is assigned:
 
 ```
 bed_mesh: activating a mesh is not supported under the new motion planner
@@ -265,10 +322,26 @@ yet (the surface-following transform layer has not been ported).
 BED_MESH_CLEAR is allowed.
 ```
 
-Consequences, by design: `BED_MESH_PROFILE LOAD` and `BED_MESH_CALIBRATE`
-(which auto-applies via `set_mesh`) are rejected; `set_mesh(None)`
-(`BED_MESH_CLEAR`) is allowed. The gate is removed when the move-transform
-layer is reworked for the new planner (separate project).
+By design: `BED_MESH_PROFILE LOAD` and `BED_MESH_CALIBRATE` (which auto-applies)
+are rejected; `set_mesh(None)` (`BED_MESH_CLEAR`) is allowed.
+
+### Affine transforms — fine for G1, wrong for curves (gate at curve time)
+
+`skew_correction`/`bed_tilt` work for G1 (they transform the endpoint) but a
+curve **bypasses** them → silently wrong geometry. Gate curves, not lines.
+
+A blanket "`move_transform is not None` → reject" over-fires: `bed_mesh`
+installs its transform at load even with no active mesh, and most printers carry
+`[bed_mesh]` in config — that would reject every G5. So the curve-time gate must
+detect an *actually-active* (non-identity) transform: in `cmd_G5`/`cmd_G5.1`,
+probe `position_with_transform()` against the raw toolhead position; if they
+differ beyond epsilon, a transform is bending coordinates → raise
+`G5 not supported with an active move transform yet`. (The single-point probe's
+blind spot — a mesh that is identity at the probe point — is covered by the
+bed-mesh activation gate above, which keeps an inactive mesh a true no-op.)
+
+Both gates are removed when the move-transform layer is reworked for the new
+planner (separate project).
 
 ## Testing
 
@@ -281,6 +354,12 @@ Rust (`cargo nextest run`):
   control points; chaining `(I,J) = -(P_prev,Q_prev)`; chain cleared by an
   intervening `submit_move`/`submit_quadratic`; chain-without-prior-`G5`
   returns an error.
+- **Extruder ratio** uses arc length, not chord: a curved G5 with a given `E`
+  delivers exactly that `E` over the true path (assert against
+  `path_arc_length`, not the chord — the chord would over-extrude).
+- **Cusp experiment**: a fold-back control polygon through the live solver;
+  record outcome (clean stop / suboptimal / NaN-stall). Drives the cusp
+  decision.
 
 Python (`./scripts/ci.sh py`):
 
@@ -288,7 +367,12 @@ Python (`./scripts/ci.sh py`):
   absolute/relative, `base_position`, extrude factor; optional endpoint axes;
   control-point offsets forwarded raw.
 - Each error case raises (`gcmd.error`) with the specified message.
+- **Range check**: a G5 whose endpoints are in range but a control point is
+  out of range raises (convex-hull bound), while an in-hull curve passes.
 - Bed mesh gate: activating a mesh raises; `BED_MESH_CLEAR` does not.
+- Curve-time transform gate: with an active skew/tilt, `G5` raises; with no
+  active transform (incl. `[bed_mesh]` configured but no mesh loaded), it does
+  not.
 
 End-to-end: a `G5` and a `G5.1` through the sim reach the planner as curved
 segments (distinct from the collinear G1 path) and produce the expected step
@@ -302,4 +386,6 @@ stream.
   `MoveSplitter` to subdivide a Bézier (de Casteljau is exact in XY) with
   per-piece Z; remove the activation gate.
 - Affine transforms (skew, bed_tilt) applied exactly to control points
-  without splitting.
+  without splitting (removes the curve-time transform gate).
+- Cusp handling: split a segment at a cusp with a `v = 0` boundary (the SOTA
+  stop-and-reverse), if the cusp experiment shows the solver needs it.
