@@ -455,3 +455,6 @@ class MotionBridgeWrapper:
 
     def live_motor_positions(self):
         return self._bridge.live_motor_positions()
+
+    def query_motor_positions(self, timeout_s=0.25):
+        return self._bridge.query_motor_positions(timeout_s)
