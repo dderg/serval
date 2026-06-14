@@ -68,6 +68,20 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         ],
     },
     SchemaMessage {
+        type_tag: 0x0044,
+        name: "QueryMotorState",
+        version: 1,
+        channel: "control",
+        fields: &[],
+    },
+    SchemaMessage {
+        type_tag: 0x0045,
+        name: "MotorStateResponse",
+        version: 1,
+        channel: "control",
+        fields: &[],
+    },
+    SchemaMessage {
         type_tag: 0x0060,
         name: "PushPieces",
         version: 2,

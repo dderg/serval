@@ -521,6 +521,20 @@ fn get_str_zero_length_decodes_to_empty() {
 }
 
 #[test]
+fn motor_state_kinds_roundtrip() {
+    assert_eq!(
+        MessageKind::from_u16(0x0044),
+        Some(MessageKind::QueryMotorState)
+    );
+    assert_eq!(
+        MessageKind::from_u16(0x0045),
+        Some(MessageKind::MotorStateResponse)
+    );
+    assert_eq!(MessageKind::QueryMotorState.as_u16(), 0x0044);
+    assert_eq!(MessageKind::MotorStateResponse.as_u16(), 0x0045);
+}
+
+#[test]
 fn capture_message_kinds_round_trip_u16() {
     use crate::messages::MessageKind;
     for (kind, raw) in [
