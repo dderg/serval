@@ -282,7 +282,9 @@ fn invert_s_to_u_is_accurate() {
     let curve = arch();
     let deriv = nurbs::eval::vector_derivative(&curve);
     let table = nurbs::arc_length::build_arc_length_table_vector(
-        &curve, super::ARC_TABLE_TOL, super::ARC_TABLE_SAMPLES,
+        &curve,
+        super::ARC_TABLE_TOL,
+        super::ARC_TABLE_SAMPLES,
     )
     .unwrap();
     let tv = table.as_view();
@@ -293,7 +295,10 @@ fn invert_s_to_u_is_accurate() {
         let u_true = i as f64 / 20.0;
         let s = nurbs::arc_length::arc_length_from_param(&rv, u_true);
         let u_got = super::invert_s_to_u(&tv, &deriv, s, 0).expect("smooth curve must invert");
-        assert!((u_got - u_true).abs() < 1e-7, "u err at u={u_true}: got {u_got}");
+        assert!(
+            (u_got - u_true).abs() < 1e-7,
+            "u err at u={u_true}: got {u_got}"
+        );
         let p_got = nurbs::eval::vector_eval(&curve, u_got);
         let p_true = nurbs::eval::vector_eval(&curve, u_true);
         let perr = ((p_got[0] - p_true[0]).powi(2)
@@ -309,17 +314,27 @@ fn invert_s_to_u_rejects_cusp() {
     let curve = VectorNurbs::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
-        vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [5.0, 0.0, 0.0]],
+        vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+        ],
     )
     .unwrap();
     let deriv = nurbs::eval::vector_derivative(&curve);
     let table = nurbs::arc_length::build_arc_length_table_vector(
-        &curve, super::ARC_TABLE_TOL, super::ARC_TABLE_SAMPLES,
+        &curve,
+        super::ARC_TABLE_TOL,
+        super::ARC_TABLE_SAMPLES,
     )
     .unwrap();
     let tv = table.as_view();
     let err = super::invert_s_to_u(&tv, &deriv, 1e-6, 3);
-    assert!(matches!(err, Err(crate::ShapeError::ZeroTangent { index: 3, .. })));
+    assert!(matches!(
+        err,
+        Err(crate::ShapeError::ZeroTangent { index: 3, .. })
+    ));
 }
 
 #[test]
@@ -327,17 +342,23 @@ fn fit_position_of_t_tracks_exact_curve() {
     let curve = arch();
     let deriv = nurbs::eval::vector_derivative(&curve);
     let table = nurbs::arc_length::build_arc_length_table_vector(
-        &curve, super::ARC_TABLE_TOL, super::ARC_TABLE_SAMPLES,
+        &curve,
+        super::ARC_TABLE_TOL,
+        super::ARC_TABLE_SAMPLES,
     )
     .unwrap();
     let tv = table.as_view();
     let s_max = tv.s_max();
 
     // Constant-speed s(t) = s_max * t over t in [0,1] (one piece).
-    let s_of_t = nurbs::bezier::BezierPiece { u_start: 0.0, u_end: 1.0, coeffs: vec![0.0, s_max] };
+    let s_of_t = nurbs::bezier::BezierPiece {
+        u_start: 0.0,
+        u_end: 1.0,
+        coeffs: vec![0.0, s_max],
+    };
 
-    let pieces = super::fit_position_of_t(&curve, &deriv, &tv, &s_of_t, 0)
-        .expect("smooth curve must fit");
+    let pieces =
+        super::fit_position_of_t(&curve, &deriv, &tv, &s_of_t, 0).expect("smooth curve must fit");
     assert!(!pieces.is_empty());
 
     let mut max_err = 0.0_f64;
@@ -357,10 +378,17 @@ fn fit_position_of_t_tracks_exact_curve() {
         .sqrt();
         max_err = max_err.max(e);
     }
-    assert!(max_err < super::POS_FIT_TOL_MM * 2.0, "max pos err {max_err} mm");
+    assert!(
+        max_err < super::POS_FIT_TOL_MM * 2.0,
+        "max pos err {max_err} mm"
+    );
 
     let first = &pieces[0];
-    let p0 = [first[0].evaluate(0.0), first[1].evaluate(0.0), first[2].evaluate(0.0)];
+    let p0 = [
+        first[0].evaluate(0.0),
+        first[1].evaluate(0.0),
+        first[2].evaluate(0.0),
+    ];
     let c0 = nurbs::eval::vector_eval(&curve, 0.0);
     assert!((p0[0] - c0[0]).abs() < 1e-9 && (p0[1] - c0[1]).abs() < 1e-9);
 }

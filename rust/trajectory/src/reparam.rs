@@ -154,7 +154,11 @@ fn fit_position_of_t_rec(
     let n = POS_FIT_DEGREE + 1;
 
     let mut nodes_t = Vec::with_capacity(n);
-    let mut vals: [Vec<f64>; 3] = [Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n)];
+    let mut vals: [Vec<f64>; 3] = [
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    ];
     let mid = 0.5 * (t_lo + t_hi);
     let half = 0.5 * (t_hi - t_lo);
     for i in 0..n {
@@ -169,11 +173,12 @@ fn fit_position_of_t_rec(
         }
     }
 
-    let axes: [nurbs::bezier::BezierPiece<f64>; 3] = std::array::from_fn(|axis| nurbs::bezier::BezierPiece {
-        u_start: t_lo,
-        u_end: t_hi,
-        coeffs: solve_power_basis(&nodes_t, &vals[axis], t_lo),
-    });
+    let axes: [nurbs::bezier::BezierPiece<f64>; 3] =
+        std::array::from_fn(|axis| nurbs::bezier::BezierPiece {
+            u_start: t_lo,
+            u_end: t_hi,
+            coeffs: solve_power_basis(&nodes_t, &vals[axis], t_lo),
+        });
 
     let mut max_err = 0.0_f64;
     let checks = 4 * n;
@@ -201,7 +206,14 @@ fn fit_position_of_t_rec(
     }
     let (left, right) = nurbs::bezier::split_piece_at(s_of_t, mid);
     let mut out = fit_position_of_t_rec(curve, deriv, table, &left, index, depth + 1)?;
-    out.extend(fit_position_of_t_rec(curve, deriv, table, &right, index, depth + 1)?);
+    out.extend(fit_position_of_t_rec(
+        curve,
+        deriv,
+        table,
+        &right,
+        index,
+        depth + 1,
+    )?);
     Ok(out)
 }
 

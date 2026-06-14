@@ -7,12 +7,7 @@ use temporal::multi::{GridStrategy, SegmentInput};
 use trajectory::{AxisChainSet, ShapeBatchInput, ShapeError, ShapeSegmentInput};
 
 fn cubic(p: [[f64; 3]; 4]) -> VectorNurbs<f64, 3> {
-    VectorNurbs::try_new(
-        3,
-        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
-        p.to_vec(),
-    )
-    .unwrap()
+    VectorNurbs::try_new(3, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], p.to_vec()).unwrap()
 }
 
 fn limits() -> temporal::Limits {
@@ -24,7 +19,12 @@ fn limits() -> temporal::Limits {
 
 fn run(curve: &VectorNurbs<f64, 3>, feed: f64) -> Result<trajectory::ShapeBatchOutput, ShapeError> {
     let segments = [ShapeSegmentInput {
-        temporal: SegmentInput { curve, limits: limits(), followers: &[], virtual_path: None },
+        temporal: SegmentInput {
+            curve,
+            limits: limits(),
+            followers: &[],
+            virtual_path: None,
+        },
         followers: &[],
         feedrate_mm_s: feed,
     }];
@@ -38,7 +38,11 @@ fn run(curve: &VectorNurbs<f64, 3>, feed: f64) -> Result<trajectory::ShapeBatchO
         follower_start: &[],
         follower_history: None,
         segments: &segments,
-        grid_strategy: GridStrategy::Adaptive { min_n: 20, max_n: 200, target_grid_spacing_mm: 0.5 },
+        grid_strategy: GridStrategy::Adaptive {
+            min_n: 20,
+            max_n: 200,
+            target_grid_spacing_mm: 0.5,
+        },
         worker_threads: 1,
         fit_tolerance_mm: 0.005,
         beta_max_iters: 5,
@@ -52,10 +56,42 @@ fn run(curve: &VectorNurbs<f64, 3>, feed: f64) -> Result<trajectory::ShapeBatchO
 }
 
 const ARCHES: &[(&str, [[f64; 3]; 4])] = &[
-    ("gentle", [[150., 150., 5.], [150., 180., 5.], [200., 180., 5.], [200., 150., 5.]]),
-    ("wide", [[100., 100., 5.], [100., 200., 5.], [250., 200., 5.], [250., 100., 5.]]),
-    ("tight_loop", [[150., 150., 5.], [165., 210., 5.], [135., 210., 5.], [150., 150.5, 5.]]),
-    ("s_curve", [[100., 150., 5.], [160., 150., 5.], [140., 150., 5.], [200., 150., 5.]]),
+    (
+        "gentle",
+        [
+            [150., 150., 5.],
+            [150., 180., 5.],
+            [200., 180., 5.],
+            [200., 150., 5.],
+        ],
+    ),
+    (
+        "wide",
+        [
+            [100., 100., 5.],
+            [100., 200., 5.],
+            [250., 200., 5.],
+            [250., 100., 5.],
+        ],
+    ),
+    (
+        "tight_loop",
+        [
+            [150., 150., 5.],
+            [165., 210., 5.],
+            [135., 210., 5.],
+            [150., 150.5, 5.],
+        ],
+    ),
+    (
+        "s_curve",
+        [
+            [100., 150., 5.],
+            [160., 150., 5.],
+            [140., 150., 5.],
+            [200., 150., 5.],
+        ],
+    ),
 ];
 
 #[test]
@@ -78,11 +114,14 @@ fn planned_curve_tracks_geometry_and_joints_exact() {
         let out = run(&curve, 25.0).expect("plan ok");
         let seg = &out.segments[0];
 
-        let poly: Vec<[f64; 3]> =
-            (0..=5000).map(|i| vector_eval(&curve, i as f64 / 5000.0)).collect();
+        let poly: Vec<[f64; 3]> = (0..=5000)
+            .map(|i| vector_eval(&curve, i as f64 / 5000.0))
+            .collect();
         let nearest = |p: [f64; 3]| {
             poly.iter()
-                .map(|q| ((p[0]-q[0]).powi(2)+(p[1]-q[1]).powi(2)+(p[2]-q[2]).powi(2)).sqrt())
+                .map(|q| {
+                    ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+                })
                 .fold(f64::INFINITY, f64::min)
         };
 
@@ -110,7 +149,10 @@ fn planned_curve_tracks_geometry_and_joints_exact() {
             nurbs_scalar_eval(&seg.axes[1], t1),
             nurbs_scalar_eval(&seg.axes[2], t1),
         ];
-        assert!(nearest(start) < 1e-4 && nearest(end) < 1e-4, "{name} joints off curve");
+        assert!(
+            nearest(start) < 1e-4 && nearest(end) < 1e-4,
+            "{name} joints off curve"
+        );
     }
 }
 
