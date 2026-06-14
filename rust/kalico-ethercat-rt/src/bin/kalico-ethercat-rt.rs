@@ -1,5 +1,5 @@
 //! Usage: kalico-ethercat-rt <ifname> [--socket PATH] [--cycle-us N]
-//!        [--counts-per-mm F] [--rt-cpu N] [--rt-prio N]
+//!        [--counts-per-mm F] [--rotation-distance F] [--rt-cpu N] [--rt-prio N]
 //!        [--velocity-ff] [--dynamics-profile PATH] [--torque-clamp-pct F]
 #![allow(unsafe_code)]
 
@@ -112,6 +112,9 @@ fn main() {
     let counts_per_mm: f64 = arg_val(&args, "--counts-per-mm")
         .and_then(|s| s.parse().ok())
         .unwrap_or(3276.8);
+    let rotation_distance: f64 = arg_val(&args, "--rotation-distance")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(40.0);
     let rt_cpu: i32 = arg_val(&args, "--rt-cpu")
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
@@ -163,7 +166,8 @@ fn main() {
     let mut server = FrameServer::bind(&socket).expect("bind socket");
     eprintln!(
         "ec-rt: socket {socket}, cycle {cycle_us}us, counts/mm {counts_per_mm} \
-         velocity_ff={velocity_ff} dynamics={} clamp={torque_clamp_tenths}",
+         rotation_distance={rotation_distance} velocity_ff={velocity_ff} \
+         dynamics={} clamp={torque_clamp_tenths}",
         dynamics.is_some()
     );
 

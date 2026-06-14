@@ -138,6 +138,9 @@ class ServoRail(BaseRail):
     def get_counts_per_mm(self):
         return self.encoder_counts_per_rev / self.rotation_distance
 
+    def get_rotation_distance(self):
+        return self.rotation_distance
+
     def get_ff_config(self):
         return (self.velocity_ff, self.dynamics_profile, self.ff_torque_clamp)
 

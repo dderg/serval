@@ -348,6 +348,7 @@ fn spawn_ethercat_endpoint(
     interface: &str,
     socket_path: &str,
     counts_per_mm: f64,
+    rotation_distance: f64,
     velocity_ff: bool,
     dynamics_profile: Option<&str>,
     torque_clamp_pct: f64,
@@ -360,6 +361,8 @@ fn spawn_ethercat_endpoint(
         .arg(socket_path)
         .arg("--counts-per-mm")
         .arg(counts_per_mm.to_string())
+        .arg("--rotation-distance")
+        .arg(rotation_distance.to_string())
         .arg("--torque-clamp-pct")
         .arg(torque_clamp_pct.to_string());
     if velocity_ff {
@@ -893,7 +896,7 @@ impl PyMotionBridge {
         Ok(raw)
     }
 
-    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, counts_per_mm, velocity_ff, dynamics_profile, torque_clamp_pct, following_error_counts=None, max_torque_tenth_pct=None))]
+    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, counts_per_mm, rotation_distance, velocity_ff, dynamics_profile, torque_clamp_pct, following_error_counts=None, max_torque_tenth_pct=None))]
     fn claim_ethercat_node(
         &self,
         label: &str,
@@ -901,6 +904,7 @@ impl PyMotionBridge {
         interface: &str,
         endpoint_binary: &str,
         counts_per_mm: f64,
+        rotation_distance: f64,
         velocity_ff: bool,
         dynamics_profile: Option<String>,
         torque_clamp_pct: f64,
@@ -920,6 +924,7 @@ impl PyMotionBridge {
             interface,
             socket_path,
             counts_per_mm,
+            rotation_distance,
             velocity_ff,
             dynamics_profile.as_deref(),
             torque_clamp_pct,
@@ -4304,6 +4309,7 @@ mod ethercat_endpoint_tests {
             "eth0",
             "/tmp/test.sock",
             1.0,
+            40.0,
             false,
             None,
             30.0,
