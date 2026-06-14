@@ -935,10 +935,10 @@ def run_simulation(
 
                 resp = send_gcode(
                     api_socket,
-                    "MOTOR_ADJUST MOTOR=stepper_z1 DELTA=2.0",
+                    "MOTOR_ADJUST MOTOR=z1 DELTA=2.0",
                     timeout=60,
                 )
-                log.info("MOTOR_ADJUST stepper_z1: %s", resp)
+                log.info("MOTOR_ADJUST z1: %s", resp)
                 if isinstance(resp, dict) and resp.get("error"):
                     ma_error = f"MOTOR_ADJUST failed: {resp['error']}"
                 elif not resp:
@@ -982,7 +982,7 @@ def run_simulation(
                                 log.info("EVENT %s", line)
                         resp2 = send_gcode(
                             api_socket,
-                            "MOTOR_ADJUST MOTOR=stepper_z2 DELTA=0.5",
+                            "MOTOR_ADJUST MOTOR=z2 DELTA=0.5",
                             timeout=60,
                         )
                         log.info("DISCRIMINATOR second adjust: %s", resp2)
@@ -995,8 +995,8 @@ def run_simulation(
 
                 if ma_error is None:
                     for script in (
-                        "MOTOR_ADJUST MOTOR=stepper_z DELTA=1.5 SPEED=5",
-                        "MOTOR_ADJUST MOTOR=stepper_z2 DELTA=0.8 SPEED=5",
+                        "MOTOR_ADJUST MOTOR=z DELTA=1.5 SPEED=5",
+                        "MOTOR_ADJUST MOTOR=z2 DELTA=0.8 SPEED=5",
                         "G1 Z104 F300",
                         "G1 X10 F12000",
                         "M400",
@@ -1013,13 +1013,84 @@ def run_simulation(
                             ma_error = "%s timed out" % (script,)
                             break
 
+                # Paced-refill streaming test: DELTA=40 SPEED=2 ACCEL=100
+                # produces ~82 correction pieces (80 cruise + 2 ramps) across
+                # ~6 chunks. Only 15 pieces fit per MCU message and ring depth
+                # is 16, so chunks 2-6 must wait for ring drain — this is the
+                # code path under test. The move takes ~20s at SPEED=2.
+                # This test runs BEFORE the stepper_q error-path test because
+                # that test triggers a klippy shutdown (config_error is
+                # treated as internal error), which would prevent this test.
+                if ma_error is None:
+                    log.info(
+                        "Paced-refill streaming test: DELTA=40 SPEED=2 ACCEL=100 (~82 pieces)"
+                    )
+                    events_dir_pre = log_dir / "events"
+                    ev_lines_before = set()
+                    for ev_file in sorted(events_dir_pre.glob("*.jsonl")):
+                        for ln in ev_file.read_text(errors="replace").splitlines():
+                            ev_lines_before.add(ln)
+
+                    paced_resp = send_gcode(
+                        api_socket,
+                        "MOTOR_ADJUST MOTOR=z1 DELTA=40 SPEED=2 ACCEL=100",
+                        timeout=90,
+                    )
+                    log.info("MOTOR_ADJUST paced-refill: %s", paced_resp)
+                    if isinstance(paced_resp, dict) and paced_resp.get("error"):
+                        ma_error = (
+                            "paced-refill MOTOR_ADJUST failed: %s"
+                            % paced_resp["error"]
+                        )
+                    elif not paced_resp:
+                        ma_error = "paced-refill MOTOR_ADJUST timed out"
+
+                    if ma_error is None:
+                        time.sleep(2.0)
+                        events_dir = log_dir / "events"
+                        new_ev_text = ""
+                        for ev_file in sorted(events_dir.glob("*.jsonl")):
+                            for ln in ev_file.read_text(errors="replace").splitlines():
+                                if ln not in ev_lines_before:
+                                    new_ev_text += ln + "\n"
+                        log.info(
+                            "Paced-refill new events:\n%s",
+                            new_ev_text or "(none)",
+                        )
+                        if "motion.correction_start" not in new_ev_text:
+                            ma_error = (
+                                "paced-refill: no motion.correction_start in new events"
+                            )
+                        elif "motion.correction_drained" not in new_ev_text:
+                            ma_error = (
+                                "paced-refill: no motion.correction_drained in new events"
+                            )
+                        elif "motion.ring_full" in new_ev_text:
+                            ma_error = (
+                                "paced-refill: motion.ring_full fired — "
+                                "host pacing did not prevent ring overcommit"
+                            )
+                        if "stream_correction rejected" in (
+                            new_ev_text
+                        ):
+                            if ma_error is None:
+                                ma_error = (
+                                    "paced-refill: MCU rejected a correction "
+                                    "chunk (nonzero PushCorrectionPiecesResponse)"
+                                )
+                    if ma_error is None:
+                        log.info(
+                            "Paced-refill streaming test PASSED "
+                            "(~82 pieces streamed, no ring_full, correction_start+drained both fired)"
+                        )
+
                 if ma_error is None:
                     resp = send_gcode(
                         api_socket,
                         "MOTOR_ADJUST MOTOR=stepper_q DELTA=1",
                         timeout=30,
                     )
-                    log.info("MOTOR_ADJUST stepper_q: %s", resp)
+                    log.info("MOTOR_ADJUST stepper_q (expect unknown-motor error): %s", resp)
                     err_text = (
                         resp.get("error", "") if isinstance(resp, dict) else ""
                     )
@@ -2462,57 +2533,80 @@ def _generate_multi_z_config(
 [mcu]
 serial: {h7_pty}
 
-[printer]
-kinematics: corexy
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z, z1, z2
+
+[axis x]
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+
+[limit gantry]
+axes: x, y
 max_velocity: 100
 max_accel: 1000
-max_z_velocity: 10
-max_z_accel: 30
 
-[stepper_x]
+[limit z]
+axes: z
+max_velocity: 10
+max_accel: 30
+
+[motor a]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio10
-position_min: 0
-position_endstop: 0
-position_max: 250
-homing_speed: 10
 
-[stepper_y]
+[motor b]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio11
-position_min: 0
-position_endstop: 0
-position_max: 250
-homing_speed: 10
 
-[stepper_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio8
 microsteps: 16
 rotation_distance: 4
-endstop_pin: ^gpiochip0/gpio12
-position_min: -5
-position_endstop: 0
-position_max: 250
-homing_speed: 5
 
-[stepper_z1]
+[motor z1]
+drive: stepper
 step_pin: gpiochip0/gpio13
 dir_pin: gpiochip0/gpio14
 enable_pin: !gpiochip0/gpio15
 microsteps: 16
 rotation_distance: 4
 
-[stepper_z2]
+[motor z2]
+drive: stepper
 step_pin: gpiochip0/gpio16
 dir_pin: gpiochip0/gpio17
 enable_pin: !gpiochip0/gpio18
@@ -2521,10 +2615,9 @@ rotation_distance: 4
 
 [motor_adjust]
 
-[input_shaper]
-shaper_freq_x: 50
-shaper_freq_y: 50
-shaper_type: smooth_mzv
+[post_processor is_xy]
+type: smooth_mzv
+frequency_hz: 50
 
 [virtual_sdcard]
 path: {gcode_dir}
