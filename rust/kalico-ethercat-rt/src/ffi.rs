@@ -11,6 +11,7 @@ pub struct EcTelemetry {
     pub error_code: u16,
     pub statusword: u16,
     pub position_actual: i32,
+    pub velocity_actual: i32,
     pub torque_actual: i16,
     pub following_error: i32,
     pub position_demand: i32,
@@ -20,7 +21,7 @@ pub struct EcTelemetry {
 }
 
 const _: () = assert!(
-    core::mem::size_of::<EcTelemetry>() == 32,
+    core::mem::size_of::<EcTelemetry>() == 36,
     "EcTelemetry layout must match ec_telemetry_t in bench/libecrt.h"
 );
 
@@ -47,6 +48,8 @@ extern "C" {
     pub fn ec_rt_set_target_position(counts: i32);
 
     pub fn ec_rt_get_position_actual() -> i32;
+
+    pub fn ec_rt_get_velocity_actual() -> i32;
 
     pub fn ec_rt_get_statusword() -> u16;
 
