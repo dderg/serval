@@ -414,6 +414,7 @@ fn main() {
                     target_counts: pos,
                     position_demand: pos,
                     position_actual: pos - 3,
+                    velocity_actual: 0,
                     following_error: 3,
                     torque_actual: 100,
                     statusword: 0x0627,

@@ -14,7 +14,7 @@ pub const ERR_CAPTURE_OVERFLOW: i32 = -323;
 pub const ERR_CAPTURE_BAD_ARG: i32 = -324;
 
 pub const CAPTURE_RING_CAPACITY: usize = 4096;
-pub const RECORD_SIZE: usize = 37;
+pub const RECORD_SIZE: usize = 41;
 pub const FLAG_TORQUE_ENABLED: u8 = 1 << 0;
 pub const FLAG_MOTION_ACTIVE: u8 = 1 << 1;
 
@@ -29,6 +29,7 @@ const OFF_STATUSWORD: usize = 27;
 const OFF_ERROR_CODE: usize = 29;
 const OFF_VELOCITY_OFFSET: usize = 31;
 const OFF_TORQUE_OFFSET: usize = 35;
+const OFF_VELOCITY_ACTUAL: usize = 37;
 
 const WRITER_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 const WRITER_RECV_TIMEOUT: Duration = Duration::from_millis(100);
@@ -39,6 +40,7 @@ pub struct DriveSample {
     pub target_counts: i32,
     pub position_demand: i32,
     pub position_actual: i32,
+    pub velocity_actual: i32,
     pub following_error: i32,
     pub torque_actual: i16,
     pub statusword: u16,
@@ -91,6 +93,8 @@ pub fn encode_record(r: &CaptureRecord) -> [u8; RECORD_SIZE] {
         .copy_from_slice(&r.drive.velocity_offset.to_le_bytes());
     b[OFF_TORQUE_OFFSET..OFF_TORQUE_OFFSET + 2]
         .copy_from_slice(&r.drive.torque_offset.to_le_bytes());
+    b[OFF_VELOCITY_ACTUAL..OFF_VELOCITY_ACTUAL + 4]
+        .copy_from_slice(&r.drive.velocity_actual.to_le_bytes());
     b
 }
 
@@ -113,6 +117,7 @@ pub fn header_json(cfg: &CaptureConfig) -> String {
         ("error_code", "u16", OFF_ERROR_CODE),
         ("velocity_offset", "i32", OFF_VELOCITY_OFFSET),
         ("torque_offset", "i16", OFF_TORQUE_OFFSET),
+        ("velocity_actual", "i32", OFF_VELOCITY_ACTUAL),
     ] {
         if !channels.is_empty() {
             channels.push(',');

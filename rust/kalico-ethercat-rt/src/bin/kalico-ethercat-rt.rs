@@ -710,6 +710,7 @@ fn main() {
                     target_counts: t.target_position,
                     position_demand: t.position_demand,
                     position_actual: t.position_actual,
+                    velocity_actual: t.velocity_actual,
                     following_error: t.following_error,
                     torque_actual: t.torque_actual,
                     statusword: t.statusword,

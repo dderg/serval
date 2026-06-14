@@ -8,6 +8,7 @@ fn sample(n: i32) -> DriveSample {
         target_counts: n,
         position_demand: n + 1,
         position_actual: n + 2,
+        velocity_actual: n + 4,
         following_error: -3,
         torque_actual: 42,
         statusword: 0x0627,
@@ -53,6 +54,7 @@ fn record_encodes_to_fixed_little_endian_layout() {
             target_counts: -2,
             position_demand: 0x11223344,
             position_actual: -1,
+            velocity_actual: 0x55667788u32 as i32,
             following_error: 5,
             torque_actual: -300,
             statusword: 0x0627,
@@ -74,6 +76,7 @@ fn record_encodes_to_fixed_little_endian_layout() {
     assert_eq!(&b[29..31], &0x7380u16.to_le_bytes());
     assert_eq!(&b[31..35], &(-654321i32).to_le_bytes());
     assert_eq!(&b[35..37], &250i16.to_le_bytes());
+    assert_eq!(&b[37..41], &(0x55667788u32 as i32).to_le_bytes());
 }
 
 #[test]
@@ -85,7 +88,7 @@ fn header_is_one_json_line_describing_the_record() {
     for needle in [
         "\"version\":1",
         "\"cycle_ns\":1000000",
-        "\"record_size\":37",
+        "\"record_size\":41",
         "\"started_utc\":\"2026-06-10T12:00:00Z\"",
         "\"started_mono_ns\":7",
         "\"name\":\"x\"",
@@ -101,6 +104,7 @@ fn header_is_one_json_line_describing_the_record() {
         "{\"name\":\"error_code\",\"dtype\":\"u16\",\"offset\":29}",
         "{\"name\":\"velocity_offset\",\"dtype\":\"i32\",\"offset\":31}",
         "{\"name\":\"torque_offset\",\"dtype\":\"i16\",\"offset\":35}",
+        "{\"name\":\"velocity_actual\",\"dtype\":\"i32\",\"offset\":37}",
     ] {
         assert!(h.contains(needle), "header missing {needle}: {h}");
     }
