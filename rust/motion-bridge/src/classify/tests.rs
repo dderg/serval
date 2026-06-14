@@ -62,3 +62,24 @@ fn nominal_duration_uses_3d_distance() {
     let m = classify_and_build([0.0; 3], 3.0, 4.0, 0.0, &[], 5.0).unwrap();
     assert!((m.nominal_duration() - 1.0).abs() < 1e-12);
 }
+
+#[test]
+fn classify_bezier_uses_arc_length_for_distance_and_ratio() {
+    // A curved G5 with an E delta. distance_mm must be the arc length (> chord),
+    // and the follower ratio must be de / arc_length (not de / chord).
+    let start = [0.0, 0.0, 0.0];
+    let m = classify_bezier(start, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 0.0, &[(3usize, 2.0)], 30.0)
+        .expect("curve classifies");
+    let chord = 10.0_f64;
+    assert!(m.distance_mm > chord, "arc length must exceed the chord");
+    let ratio = m.segment.followers[0].ratio;
+    assert!((ratio - 2.0 / m.distance_mm).abs() < 1e-9, "ratio is de/arc_length");
+}
+
+#[test]
+fn classify_quadratic_builds_a_segment() {
+    let m = classify_quadratic([0.0, 0.0, 0.0], 5.0, 5.0, 10.0, 0.0, 0.0, &[], 30.0)
+        .expect("quadratic classifies");
+    assert!(m.distance_mm > 10.0);
+    assert_eq!(m.segment.feedrate_mm_s, 30.0);
+}

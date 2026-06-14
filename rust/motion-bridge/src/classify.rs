@@ -1,4 +1,4 @@
-use geometry::curve::to_collinear_bezier;
+use geometry::curve::{g5_control_points, g51_control_points, to_collinear_bezier};
 use geometry::segment::{CubicSegment, FollowerDemand, SourceRange};
 use nurbs::VectorNurbs;
 
@@ -84,6 +84,75 @@ pub fn classify_and_build(
         segment,
         distance_mm: virtual_path_mm,
     })
+}
+
+fn classify_curve(
+    cps: [[f64; 3]; 4],
+    followers: &[(usize, f64)],
+    feedrate_mm_s: f64,
+) -> Result<ClassifiedMove, ClassifyError> {
+    let xyz = build_cubic(cps)?;
+    let arc_len = nurbs::arc_length::path_arc_length(&xyz);
+    if arc_len <= DISPLACEMENT_EPSILON {
+        return Err(ClassifyError::ZeroDisplacement);
+    }
+    let demands = followers
+        .iter()
+        .copied()
+        .filter(|&(_, d)| d.abs() > DISPLACEMENT_EPSILON)
+        .map(|(axis_index, delta)| FollowerDemand {
+            axis_index,
+            ratio: delta / arc_len,
+        })
+        .collect();
+    let source = SourceRange {
+        start_line: 0,
+        end_line: 0,
+    };
+    let segment = CubicSegment::try_new(xyz, demands, feedrate_mm_s, source, None)
+        .map_err(|e| ClassifyError::SegmentConstruction(format!("{e:?}")))?;
+    Ok(ClassifiedMove {
+        segment,
+        distance_mm: arc_len,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn classify_bezier(
+    start: [f64; 3],
+    i: f64,
+    j: f64,
+    p: f64,
+    q: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    followers: &[(usize, f64)],
+    feedrate_mm_s: f64,
+) -> Result<ClassifiedMove, ClassifyError> {
+    classify_curve(
+        g5_control_points(start, i, j, p, q, dx, dy, dz),
+        followers,
+        feedrate_mm_s,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn classify_quadratic(
+    start: [f64; 3],
+    i: f64,
+    j: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    followers: &[(usize, f64)],
+    feedrate_mm_s: f64,
+) -> Result<ClassifiedMove, ClassifyError> {
+    classify_curve(
+        g51_control_points(start, i, j, dx, dy, dz),
+        followers,
+        feedrate_mm_s,
+    )
 }
 
 fn build_cubic(cps: [[f64; 3]; 4]) -> Result<VectorNurbs<f64, 3>, ClassifyError> {
