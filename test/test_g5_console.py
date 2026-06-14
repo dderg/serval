@@ -218,3 +218,32 @@ def test_cmd_g5_1_dispatches_quadratic():
     newpos, interior, _submit, _speed = args
     # single quadratic control point Q1 = start + (I,J) = (5,5)
     assert interior[0][:2] == [5.0, 5.0]
+
+
+def test_bed_mesh_activation_is_gated():
+    import klippy.extras.bed_mesh as bm
+
+    bedmesh = bm.BedMesh.__new__(bm.BedMesh)
+    bedmesh.z_mesh = None
+    raised = {}
+
+    class G:
+        def error(self, msg):
+            raised["msg"] = msg
+            return RuntimeError(msg)
+
+    bedmesh.gcode = G()
+    # Activating any non-None mesh must raise.
+    try:
+        bedmesh.set_mesh(object())
+        assert False, "expected activation to be gated"
+    except RuntimeError:
+        assert "not supported under the new motion planner" in raised["msg"]
+    # Clearing (None) must NOT trip the gate (it may fail downstream on the
+    # bare __new__ instance, but the GATE message must not be what fires).
+    raised.clear()
+    try:
+        bedmesh.set_mesh(None)
+    except Exception:
+        pass
+    assert "not supported" not in raised.get("msg", "")
