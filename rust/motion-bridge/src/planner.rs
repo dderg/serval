@@ -522,6 +522,9 @@ fn run_loop(
 
         match msg {
             PlannerMsg::Move(m) => {
+                // `submit_move` already advanced `last_move_time_bits` by the nominal.
+                // Rectify if actual diverges: use CAS since submit_move is a concurrent writer.
+                // Rectify against t_appended delta (not dispatched): the decel tail is held back.
                 let nominal = m.nominal_duration();
                 let prior_t_appended = state.t_appended;
                 let prior_t_decel = state.t_decel_start;
@@ -540,6 +543,11 @@ fn run_loop(
                             &commit_fire_count,
                         );
                     }
+                    // Resume with the same dispatch cushion a fresh stream
+                    // gets: anchoring at bare `esc` leaves the upcoming
+                    // append_and_replan solve (observed 100-200 ms) to consume
+                    // the entire lead before seg0 is even emitted, landing
+                    // pieces in the MCU past.
                     state.advance_idle(esc + LEAD);
                 }
 
@@ -650,6 +658,8 @@ fn run_loop(
                     }
                 }
 
+                // Capture sync_instant only on non-empty dispatch, not at append.
+                // Capturing at append would make elapsed_since_sync run ahead of the MCU playhead.
                 if sync_instant.is_none() && !drained.is_empty() {
                     sync_instant = Some(Instant::now());
                 }
@@ -719,6 +729,9 @@ fn run_loop(
             }
 
             PlannerMsg::ClockSyncRearm { new_bias: _ } => {
+                // Pre-swap barrier: flush held-back output under the old clock bias.
+                // Must run before Router::set_clock_est_from_sample — calling after
+                // would shape the drained tail under the new bias.
                 if state.t_dispatched < state.t_appended - 1e-12 {
                     run_commit_and_dispatch(
                         &mut state,
