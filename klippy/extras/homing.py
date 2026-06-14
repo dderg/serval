@@ -320,8 +320,9 @@ class Homing:
                 homed_position=newpos[axis],
             )
             if hi.retract_dist:
+                overshoot = final_pos[axis] - trip_pos[axis]
                 retractpos = list(toolhead.get_position())
-                retractpos[axis] -= direction * hi.retract_dist
+                retractpos[axis] -= direction * hi.retract_dist + overshoot
                 toolhead.move(retractpos, hi.retract_speed)
                 toolhead.wait_moves()
             _check_servo_drive_fault(gcmd, bridge, axis, servo_handle)
