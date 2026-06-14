@@ -491,19 +491,17 @@ fn run_one_iteration(
         let seg_fitted = if input.segments[global_idx].temporal.virtual_path.is_some() {
             virtual_fitted_segment(curve, &s_pieces)
         } else {
-            let table = nurbs::arc_length::build_arc_length_table_vector(curve, 1e-6, 1024)
-                .map_err(|e| ShapeError::ArcLength {
-                    index: global_idx,
-                    detail: format!("{e}"),
-                })?;
-
-            let arc_fit_tolerance = 1e-4;
-            let composed = crate::reparam::compose_segment(
+            let table = nurbs::arc_length::build_arc_length_table_vector(
                 curve,
-                &table.as_view(),
-                &s_pieces,
-                arc_fit_tolerance,
-            )?;
+                crate::reparam::ARC_TABLE_TOL,
+                crate::reparam::ARC_TABLE_SAMPLES,
+            )
+            .map_err(|e| ShapeError::ArcLength {
+                index: global_idx,
+                detail: format!("{e}"),
+            })?;
+
+            let composed = crate::reparam::compose_segment(curve, &table.as_view(), &s_pieces)?;
 
             let seg_d2_override = if global_idx == 0 {
                 input.start_d2_override

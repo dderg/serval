@@ -197,7 +197,7 @@ fn compose_straight_line_constant_velocity() {
     let profile = uniform_profile(11, table.s_max(), 500.0);
     let s_pieces = build_s_of_t_pieces(&profile, 0.0);
 
-    let composed = compose_segment(&curve, &table.as_view(), &s_pieces, 1e-4).unwrap();
+    let composed = compose_segment(&curve, &table.as_view(), &s_pieces).unwrap();
 
     assert_eq!(composed.len(), s_pieces.pieces.len());
 
@@ -251,7 +251,7 @@ fn compose_diagonal_line() {
 
     let profile = uniform_profile(6, table.s_max(), 250.0);
     let s_pieces = build_s_of_t_pieces(&profile, 0.0);
-    let composed = compose_segment(&curve, &table.as_view(), &s_pieces, 1e-4).unwrap();
+    let composed = compose_segment(&curve, &table.as_view(), &s_pieces).unwrap();
 
     let last = &composed[composed.len() - 1];
     let x_end = last[0].evaluate(last[0].u_end);

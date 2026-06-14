@@ -289,8 +289,8 @@ pub fn compose_segment(
     curve: &nurbs::VectorNurbs<f64, 3>,
     table: &nurbs::ArcLengthTableRef<'_, f64>,
     s_pieces: &SOfTPieces,
-    fit_tolerance: f64,
 ) -> Result<Vec<[BezierPiece<f64>; 3]>, crate::ShapeError> {
+    let deriv = nurbs::eval::vector_derivative(curve);
     let mut result = Vec::with_capacity(s_pieces.pieces.len());
 
     for (k, s_piece) in s_pieces.pieces.iter().enumerate() {
@@ -298,7 +298,6 @@ pub fn compose_segment(
             let s_k = s_piece.coeffs[0];
             let u_k = nurbs::arc_length::param_from_arc_length(table, s_k);
             let pos = nurbs::eval::vector_eval(curve, u_k);
-
             let axes: [BezierPiece<f64>; 3] = std::array::from_fn(|axis| BezierPiece {
                 u_start: s_piece.u_start,
                 u_end: s_piece.u_end,
@@ -306,55 +305,8 @@ pub fn compose_segment(
             });
             result.push(axes);
         } else {
-            let s_lo = s_piece.evaluate(s_piece.u_start);
-            let s_hi = s_piece.evaluate(s_piece.u_end);
-            let s_hi_clamped = s_hi.min(table.s_max());
-            let s_lo_safe = s_lo.max(0.0);
-
-            if s_hi_clamped - s_lo_safe < 1e-15 {
-                let u_k = nurbs::arc_length::param_from_arc_length(table, s_lo_safe);
-                let pos = nurbs::eval::vector_eval(curve, u_k);
-                let axes: [BezierPiece<f64>; 3] = std::array::from_fn(|axis| BezierPiece {
-                    u_start: s_piece.u_start,
-                    u_end: s_piece.u_end,
-                    coeffs: vec![pos[axis]],
-                });
-                result.push(axes);
-                continue;
-            }
-
-            let x_of_s: [BezierPiece<f64>; 3] = nurbs::algebra::fit_x_to_arc_length_piece::<3>(
-                curve,
-                table,
-                s_lo_safe,
-                s_hi_clamped,
-                3,
-                5,
-                fit_tolerance,
-            )
-            .map_err(|detail| crate::ShapeError::FitFailure { index: k, detail })?;
-
-            let s_piece_adjusted =
-                if (s_lo_safe - s_lo).abs() > 1e-15 || (s_hi_clamped - s_hi).abs() > 1e-15 {
-                    let mut adj = s_piece.clone();
-                    adj.coeffs[0] = s_lo_safe;
-                    let dt = adj.u_end - adj.u_start;
-                    if dt > 1e-15 && adj.coeffs.len() >= 3 {
-                        let v_k = adj.coeffs[1];
-                        adj.coeffs[2] = (s_hi_clamped - s_lo_safe - v_k * dt) / (dt * dt);
-                    }
-                    adj
-                } else {
-                    s_piece.clone()
-                };
-
-            let outer_refs: [&BezierPiece<f64>; 3] = [&x_of_s[0], &x_of_s[1], &x_of_s[2]];
-
-            let composed =
-                nurbs::algebra::compose_vector_piece::<3>(&outer_refs, &s_piece_adjusted)
-                    .map_err(|detail| crate::ShapeError::Algebra { index: k, detail })?;
-
-            result.push(composed);
+            let pieces = fit_position_of_t(curve, &deriv, table, s_piece, k)?;
+            result.extend(pieces);
         }
     }
 
