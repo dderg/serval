@@ -17,5 +17,23 @@ pub fn to_collinear_bezier(start: [f64; 3], end: [f64; 3]) -> [[f64; 3]; 4] {
     [start, p1, p2, end]
 }
 
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn g5_control_points(
+    start: [f64; 3],
+    i: f64,
+    j: f64,
+    p: f64,
+    q: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+) -> [[f64; 3]; 4] {
+    let end = [start[0] + dx, start[1] + dy, start[2] + dz];
+    let p1 = [start[0] + i, start[1] + j, start[2] + dz / 3.0];
+    let p2 = [end[0] + p, end[1] + q, start[2] + 2.0 * dz / 3.0];
+    [start, p1, p2, end]
+}
+
 #[cfg(test)]
 mod tests;
