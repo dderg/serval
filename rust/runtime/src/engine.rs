@@ -502,6 +502,16 @@ impl Engine {
         out
     }
 
+    pub fn correction_retired_counts(&self) -> [u32; MAX_AXES] {
+        let mut out = [0u32; MAX_AXES];
+        for (slot, entry) in out.iter_mut().zip(self.stepping_axes.iter()) {
+            if let Some(axis) = entry {
+                *slot = axis.correction_ring.retired_count();
+            }
+        }
+        out
+    }
+
     pub fn occupancy_counts(&self) -> [u32; MAX_AXES] {
         let mut out = [0u32; MAX_AXES];
         for (slot, entry) in out.iter_mut().zip(self.stepping_axes.iter()) {

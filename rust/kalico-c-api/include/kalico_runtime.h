@@ -83,6 +83,10 @@ void kalico_runtime_get_last_timing(struct KalicoRuntime *rt,
                                     uint64_t *t_start_out,
                                     uint64_t *duration_out);
 
+int32_t kalico_runtime_get_correction_retired(struct KalicoRuntime *rt,
+                                              uint32_t *out_retired,
+                                              uintptr_t max_axes);
+
 int32_t kalico_runtime_get_occupancy(struct KalicoRuntime *rt,
                                      uint32_t *out_occupancy,
                                      uintptr_t max_axes);

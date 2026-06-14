@@ -1203,6 +1203,34 @@ pub mod exports {
     }
 
     #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kalico_runtime_get_correction_retired(
+        rt: *mut KalicoRuntime,
+        out_retired: *mut u32,
+        max_axes: usize,
+    ) -> i32 {
+        if rt.is_null() || out_retired.is_null() {
+            return KALICO_ERR_NULL_PTR;
+        }
+        if !INIT_DONE.load(Ordering::Acquire) {
+            return KALICO_ERR_NOT_INIT;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        unsafe {
+            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+            let engine = &(*isr_ptr).engine;
+            let num_axes = engine.num_axes as usize;
+            let counts = engine.correction_retired_counts();
+            let n_write = num_axes.min(max_axes);
+            for i in 0..n_write {
+                out_retired.add(i).write(counts[i]);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let result = n_write as i32;
+            result
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kalico_runtime_get_occupancy(
         rt: *mut KalicoRuntime,
         out_occupancy: *mut u32,
