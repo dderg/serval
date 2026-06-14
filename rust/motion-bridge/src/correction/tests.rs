@@ -143,3 +143,38 @@ fn sequence_drops_subepsilon_and_rejects_all_empty() {
     assert!(plan_correction_sequence(&[f64::NAN], 50.0, 5000.0).is_err());
     assert!(plan_correction_sequence(&[1.0, f64::INFINITY], 50.0, 5000.0).is_err());
 }
+
+#[test]
+fn end_host_times_are_cumulative() {
+    let pieces = vec![
+        ProfilePiece {
+            coeffs: [0.0; 4],
+            duration: 0.10,
+        },
+        ProfilePiece {
+            coeffs: [0.0; 4],
+            duration: 0.25,
+        },
+        ProfilePiece {
+            coeffs: [0.0; 4],
+            duration: 0.05,
+        },
+    ];
+    let ends = piece_end_host_times(&pieces, 100.0);
+    assert_eq!(ends.len(), 3);
+    assert!((ends[0] - 100.10).abs() < 1e-9);
+    assert!((ends[1] - 100.35).abs() < 1e-9);
+    assert!((ends[2] - 100.40).abs() < 1e-9);
+    assert!(piece_end_host_times(&[], 0.0).is_empty());
+}
+
+#[test]
+fn release_times_gate_only_overcommitting_chunks() {
+    let ends: Vec<f64> = (1..=5).map(|i| 10.0 + 0.1 * i as f64).collect();
+    let new_heads = [2u32, 3, 4, 5];
+    let rel = chunk_release_times(&ends, 3, &new_heads, 0.02);
+    assert!(rel[0].is_none());
+    assert!(rel[1].is_none(), "h == ring_depth must not gate");
+    assert!((rel[2].unwrap() - (10.1 + 0.02)).abs() < 1e-9);
+    assert!((rel[3].unwrap() - (10.2 + 0.02)).abs() < 1e-9);
+}
