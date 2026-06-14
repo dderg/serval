@@ -115,6 +115,7 @@ fn collect_motor_positions_inner(
     use kalico_protocol::MessageKind;
     use kalico_protocol::codec::{Cursor, Decode};
     use kalico_protocol::messages::MotorStateResponse;
+    use runtime::stepping_state::MAX_AXES;
 
     let configs = mcu_axis_configs
         .lock()
@@ -129,8 +130,8 @@ fn collect_motor_positions_inner(
         .map(|c| c.kinematics)
         .unwrap_or(runtime::segment::KinematicTag::Cartesian as u8);
 
-    let mut motors: [Option<f64>; 8] = [None; 8];
-    let mut vmotors: [Option<f64>; 8] = [None; 8];
+    let mut motors: [Option<f64>; MAX_AXES] = [None; MAX_AXES];
+    let mut vmotors: [Option<f64>; MAX_AXES] = [None; MAX_AXES];
 
     for cfg in &configs {
         let io = {
@@ -160,7 +161,7 @@ fn collect_motor_positions_inner(
             .map_err(|e| format!("query mcu {}: decode {e:?}", cfg.mcu_id))?;
         for m in resp.motors {
             let slot = m.slot as usize;
-            if slot < 8 {
+            if slot < MAX_AXES {
                 motors[slot] = Some(f64::from(m.pos_q16) / 65536.0);
                 vmotors[slot] = Some(f64::from(m.vel_q16) / 65536.0);
             }

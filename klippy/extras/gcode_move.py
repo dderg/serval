@@ -314,9 +314,9 @@ class GCodeMove:
                 for a in ("x", "y", "z", "e")
                 if a in axes
             )
-            kin_pos = measured if measured else "ERR"
+            measured_pos = measured if measured else "ERR"
         except Exception as e:
-            kin_pos = "ERR (%s)" % (e,)
+            measured_pos = "ERR (%s)" % (e,)
         toolhead_pos = " ".join(
             [
                 "%s:%.6f" % (a, v)
@@ -339,7 +339,7 @@ class GCodeMove:
             "gcode base: %s\n"
             "gcode homing: %s"
             % (
-                kin_pos,
+                measured_pos,
                 toolhead_pos,
                 gcode_pos,
                 base_pos,

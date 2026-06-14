@@ -1,4 +1,5 @@
 use crate::kinematics::KinematicsModule;
+use runtime::stepping_state::MAX_AXES;
 use std::collections::HashMap;
 
 const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
@@ -7,12 +8,12 @@ const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
 /// was not reported. `kin_tag` is the kinematics tag of the MCU owning the spatial
 /// axes. Returns cartesian per-axis (pos, vel); axes with no data are omitted.
 pub fn assemble_cartesian(
-    motors: &[Option<f64>; 8],
-    vmotors: &[Option<f64>; 8],
+    motors: &[Option<f64>; MAX_AXES],
+    vmotors: &[Option<f64>; MAX_AXES],
     kin_tag: u8,
 ) -> Result<HashMap<String, (f64, f64)>, String> {
     let kin = KinematicsModule::from_tag(kin_tag).map_err(|e| e.to_string())?;
-    let spat = |arr: &[Option<f64>; 8]| {
+    let spat = |arr: &[Option<f64>; MAX_AXES]| {
         [
             arr[0].unwrap_or(0.0),
             arr[1].unwrap_or(0.0),

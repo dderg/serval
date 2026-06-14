@@ -1,11 +1,12 @@
 use super::*;
 use crate::dispatch::KINEMATICS_COREXY;
 use runtime::segment::KinematicTag;
+use runtime::stepping_state::MAX_AXES;
 
 #[test]
 fn cartesian_identity_passthrough() {
-    let mut m = [None; 8];
-    let mut v = [None; 8];
+    let mut m = [None; MAX_AXES];
+    let mut v = [None; MAX_AXES];
     m[0] = Some(10.0);
     m[1] = Some(20.0);
     m[2] = Some(5.0);
@@ -24,8 +25,8 @@ fn cartesian_identity_passthrough() {
 #[test]
 fn corexy_inverse_mix() {
     // motor A = x + y, motor B = x - y. For x=10, y=4: A=14, B=6.
-    let mut m = [None; 8];
-    let v = [None; 8];
+    let mut m = [None; MAX_AXES];
+    let v = [None; MAX_AXES];
     m[0] = Some(14.0);
     m[1] = Some(6.0);
     m[2] = Some(0.0);
