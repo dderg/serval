@@ -732,6 +732,7 @@ pub struct StatusHeartbeat {
     pub fault_code: u16,
     pub retired_counts: Vec<u32>,
     pub ff_saturation_count: u32,
+    pub correction_retired_counts: Vec<u32>,
 }
 
 impl Encode for StatusHeartbeat {
@@ -744,7 +745,32 @@ impl Encode for StatusHeartbeat {
             put_u32(out, count);
         }
         put_u32(out, self.ff_saturation_count);
+        let num_corr = self.correction_retired_counts.len() as u8;
+        put_u8(out, num_corr);
+        for &count in &self.correction_retired_counts {
+            put_u32(out, count);
+        }
     }
+}
+
+fn decode_u32_array(c: &mut Cursor<'_>, count: u8) -> Result<Vec<u32>, DecodeError> {
+    let need = (count as usize)
+        .checked_mul(4)
+        .ok_or(DecodeError::ArrayLengthExceedsBuffer {
+            claimed: u32::from(count),
+            available: c.remaining(),
+        })?;
+    if need > c.remaining() {
+        return Err(DecodeError::ArrayLengthExceedsBuffer {
+            claimed: u32::from(count),
+            available: c.remaining(),
+        });
+    }
+    let mut v = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        v.push(get_u32(c)?);
+    }
+    Ok(v)
 }
 
 impl Decode for StatusHeartbeat {
@@ -752,29 +778,20 @@ impl Decode for StatusHeartbeat {
         let engine_state = get_u8(c)?;
         let fault_code = get_u16(c)?;
         let num_axes = get_u8(c)?;
-        let counts_len =
-            (num_axes as usize)
-                .checked_mul(4)
-                .ok_or(DecodeError::ArrayLengthExceedsBuffer {
-                    claimed: u32::from(num_axes),
-                    available: c.remaining(),
-                })?;
-        if counts_len > c.remaining() {
-            return Err(DecodeError::ArrayLengthExceedsBuffer {
-                claimed: u32::from(num_axes),
-                available: c.remaining(),
-            });
-        }
-        let mut retired_counts = Vec::with_capacity(num_axes as usize);
-        for _ in 0..num_axes {
-            retired_counts.push(get_u32(c)?);
-        }
+        let retired_counts = decode_u32_array(c, num_axes)?;
         let ff_saturation_count = get_u32(c)?;
+        let correction_retired_counts = if c.remaining() == 0 {
+            Vec::new()
+        } else {
+            let num_corr = get_u8(c)?;
+            decode_u32_array(c, num_corr)?
+        };
         Ok(Self {
             engine_state,
             fault_code,
             retired_counts,
             ff_saturation_count,
+            correction_retired_counts,
         })
     }
 }

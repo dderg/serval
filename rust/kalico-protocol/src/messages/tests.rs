@@ -84,14 +84,16 @@ fn status_heartbeat_roundtrip_empty() {
         fault_code: 0,
         retired_counts: vec![],
         ff_saturation_count: 0,
+        correction_retired_counts: vec![],
     };
     let mut buf = Vec::new();
     msg.encode(&mut buf);
-    assert_eq!(buf.len(), 8);
+    assert_eq!(buf.len(), 9);
     let mut cursor = Cursor::new(&buf);
     let decoded = StatusHeartbeat::decode_from(&mut cursor).unwrap();
     assert_eq!(decoded.retired_counts.len(), 0);
     assert_eq!(decoded.ff_saturation_count, 0);
+    assert_eq!(decoded.correction_retired_counts.len(), 0);
 }
 
 #[test]
@@ -101,16 +103,18 @@ fn status_heartbeat_roundtrip_with_axes() {
         fault_code: 0,
         retired_counts: vec![42, 42, 10, 5],
         ff_saturation_count: 7,
+        correction_retired_counts: vec![],
     };
     let mut buf = Vec::new();
     msg.encode(&mut buf);
-    assert_eq!(buf.len(), 24);
+    assert_eq!(buf.len(), 25);
     let mut cursor = Cursor::new(&buf);
     let decoded = StatusHeartbeat::decode_from(&mut cursor).unwrap();
     assert_eq!(decoded.engine_state, 1);
     assert_eq!(decoded.fault_code, 0);
     assert_eq!(decoded.retired_counts, vec![42, 42, 10, 5]);
     assert_eq!(decoded.ff_saturation_count, 7);
+    assert_eq!(decoded.correction_retired_counts, vec![]);
 }
 
 #[test]
@@ -120,13 +124,44 @@ fn status_heartbeat_short_frame_missing_ff_saturation_is_decode_error() {
         fault_code: 0,
         retired_counts: vec![99],
         ff_saturation_count: 5,
+        correction_retired_counts: vec![],
     };
     let full = msg.encoded_to_vec();
-    let truncated = &full[..full.len() - 1];
+    let truncated = &full[..full.len() - 5];
     assert!(
         StatusHeartbeat::decode(truncated).is_err(),
         "short frame must fail to decode"
     );
+}
+
+#[test]
+fn status_heartbeat_round_trips_correction_counts() {
+    let hb = StatusHeartbeat {
+        engine_state: 2,
+        fault_code: 0,
+        retired_counts: vec![5, 9],
+        ff_saturation_count: 3,
+        correction_retired_counts: vec![7, 0],
+    };
+    let mut buf = Vec::new();
+    hb.encode(&mut buf);
+    let mut c = Cursor::new(&buf);
+    let got = StatusHeartbeat::decode_from(&mut c).unwrap();
+    assert_eq!(got, hb);
+}
+
+#[test]
+fn status_heartbeat_decode_tolerates_missing_correction_tail() {
+    let mut buf = Vec::new();
+    put_u8(&mut buf, 1);
+    put_u16(&mut buf, 0);
+    put_u8(&mut buf, 1);
+    put_u32(&mut buf, 4);
+    put_u32(&mut buf, 0);
+    let mut c = Cursor::new(&buf);
+    let got = StatusHeartbeat::decode_from(&mut c).unwrap();
+    assert_eq!(got.correction_retired_counts, Vec::<u32>::new());
+    assert_eq!(got.retired_counts, vec![4]);
 }
 
 #[test]

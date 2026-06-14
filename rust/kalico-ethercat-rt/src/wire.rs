@@ -250,6 +250,7 @@ pub fn status_heartbeat_frame(
         fault_code,
         retired_counts: retired_counts.to_vec(),
         ff_saturation_count,
+        correction_retired_counts: vec![],
     };
     let body = hb.encoded_to_vec();
     let payload = {
