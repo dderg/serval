@@ -5,6 +5,7 @@ pub use limits::{
 };
 
 pub mod topp;
+pub use topp::counters;
 pub use topp::{
     ScheduleError, ToleranceMode, schedule_segment, schedule_segment_with_followers,
     schedule_segment_with_tolerance,

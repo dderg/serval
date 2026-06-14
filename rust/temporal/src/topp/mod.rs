@@ -10,6 +10,7 @@ pub(crate) mod output;
 pub mod path;
 pub mod scaling;
 pub(crate) mod solver;
+pub use solver::counters;
 pub mod stencil;
 pub(crate) mod verify;
 pub mod window;
@@ -147,6 +148,7 @@ pub(crate) fn schedule_chain_with_refreeze_cap(
             if solver_outcome_is_success(&fast_result, &fast_outcome) {
                 (fast_result, fast_outcome)
             } else {
+                solver::counters::mark_auto_second_pass();
                 call_slp(1e-8)?
             }
         }

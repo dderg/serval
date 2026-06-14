@@ -52,6 +52,117 @@ use clarabel::solver::{
 use crate::topp::constraints::{Cone, ConstraintBundle};
 use crate::topp::scaling::SolverScale;
 
+// ---------------------------------------------------------------------------
+// Per-thread Clarabel call counters — always compiled, near-zero overhead.
+// One Cell<u32> increment per Clarabel call (~1 ns); negligible versus the
+// SOCP solve time (~1-50 ms).  Integration tests read these via the public
+// `counters` module; production code ignores the counts.
+// ---------------------------------------------------------------------------
+use std::cell::Cell;
+
+/// Snapshot of Clarabel invocation counts for one top-level schedule call.
+/// Reset with `counters::reset()` before a solve; read with
+/// `counters::snapshot()` after.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SolveCounters {
+    /// Total `DefaultSolver::new` + `.solve()` invocations.
+    pub clarabel_calls_total: u32,
+    /// Calls with no trust region: base SOCP solve + path-jerk SLP outer iters.
+    pub clarabel_calls_path_jerk: u32,
+    /// SLP9 calls with a trust region box (inner backtrack probes).
+    pub clarabel_calls_slp9_tr: u32,
+    /// SLP9 calls without a trust region (no-TR fallback after failed backtrack).
+    pub clarabel_calls_slp9_no_tr: u32,
+    /// 1 when `run_slp9_loop` triggers the uniform-damp restoration path.
+    pub slp9_restoration_fired: u32,
+    /// 1 when `ToleranceMode::Auto` fires the tight (1e-8) second pass.
+    pub auto_second_pass_fired: u32,
+}
+
+thread_local! {
+    static COUNTERS: Cell<SolveCounters> = const { Cell::new(SolveCounters {
+        clarabel_calls_total: 0,
+        clarabel_calls_path_jerk: 0,
+        clarabel_calls_slp9_tr: 0,
+        clarabel_calls_slp9_no_tr: 0,
+        slp9_restoration_fired: 0,
+        auto_second_pass_fired: 0,
+    })};
+}
+
+/// Public counter accessors.  Integration tests and benchmarks call
+/// `counters::reset()` before a solve and `counters::snapshot()` after.
+pub mod counters {
+    use super::{COUNTERS, Cell, SolveCounters};
+
+    pub fn reset() {
+        COUNTERS.with(|c| c.set(SolveCounters::default()));
+    }
+
+    pub fn snapshot() -> SolveCounters {
+        COUNTERS.with(Cell::get)
+    }
+
+    pub(super) fn inc_clarabel(has_tr: bool) {
+        COUNTERS.with(|c| {
+            let mut s = c.get();
+            s.clarabel_calls_total += 1;
+            let in_slp9 = super::IN_SLP9_PHASE.with(Cell::get);
+            if in_slp9 {
+                if has_tr {
+                    s.clarabel_calls_slp9_tr += 1;
+                } else {
+                    s.clarabel_calls_slp9_no_tr += 1;
+                }
+            } else {
+                s.clarabel_calls_path_jerk += 1;
+            }
+            c.set(s);
+        });
+    }
+
+    pub(super) fn mark_restoration() {
+        COUNTERS.with(|c| {
+            let mut s = c.get();
+            s.slp9_restoration_fired = 1;
+            c.set(s);
+        });
+    }
+
+    pub fn mark_auto_second_pass() {
+        COUNTERS.with(|c| {
+            let mut s = c.get();
+            s.auto_second_pass_fired = 1;
+            c.set(s);
+        });
+    }
+}
+
+// Sentinel: true while execution is inside an SLP9 outer loop.
+thread_local! {
+    static IN_SLP9_PHASE: Cell<bool> = const { Cell::new(false) };
+}
+
+// RAII guard that sets `IN_SLP9_PHASE = true` on construction and restores
+// the previous value on drop — safe even if `run_slp9_loop` nests.
+struct Slp9PhaseGuard {
+    prev: bool,
+}
+
+impl Slp9PhaseGuard {
+    fn enter() -> Self {
+        let prev = IN_SLP9_PHASE.with(Cell::get);
+        IN_SLP9_PHASE.with(|c| c.set(true));
+        Self { prev }
+    }
+}
+
+impl Drop for Slp9PhaseGuard {
+    fn drop(&mut self) {
+        IN_SLP9_PHASE.with(|c| c.set(self.prev));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum SlpCut {
     /// Weight-based path-jerk cut. Rows scaled by `h̄²` to stay O(1).
@@ -395,18 +506,24 @@ fn solve_with_cuts_and_trust_region(
         cones_clarabel.push(NonnegativeConeT(tr_rows));
     }
 
-    let mut rowval_per_col: Vec<Vec<usize>> = vec![Vec::new(); n_vars];
-    let mut nzval_per_col: Vec<Vec<f64>> = vec![Vec::new(); n_vars];
-    let mut n_rows = 0_usize;
+    let mut rowval_per_col: Vec<Vec<usize>> = bundle.base_csc_rowval.clone();
+    let mut nzval_per_col: Vec<Vec<f64>> = bundle.base_csc_nzval.clone();
+    let mut n_rows = bundle.base_n_rows;
 
-    for row in &bundle.a_rows {
-        for (col, &v) in row.iter().enumerate() {
-            if v != 0.0 {
-                rowval_per_col[col].push(n_rows);
-                nzval_per_col[col].push(-v); // sign-convention: A_clarabel = -A_k
+    #[cfg(debug_assertions)]
+    {
+        let mut ref_rowval: Vec<Vec<usize>> = vec![Vec::new(); n_vars];
+        let mut ref_nzval: Vec<Vec<f64>> = vec![Vec::new(); n_vars];
+        for (row_idx, row) in bundle.a_rows.iter().enumerate() {
+            for (col, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    ref_rowval[col].push(row_idx);
+                    ref_nzval[col].push(-v);
+                }
             }
         }
-        n_rows += 1;
+        debug_assert_eq!(rowval_per_col, ref_rowval, "base CSC rowval mismatch");
+        debug_assert_eq!(nzval_per_col, ref_nzval, "base CSC nzval mismatch");
     }
 
     let mut b_rhs: Vec<f64> = bundle.b_rhs.clone();
@@ -555,15 +672,23 @@ fn solve_with_cuts_and_trust_region(
 
     // verbose=false: diagnostics via kalico telemetry.
     // max_iter=1000: SLP-cut SOCPs condition more tightly than the base SOCP;
-    //   200 iters produces InsufficientProgress on the CL-2024 counterexample.
+    //   200 iters produces InsufficientProgress on the CL-2024 counterexample
+    //   (a no-TR / path-jerk SLP case).
+    // max_iter=200 for trust-region subproblems: TR boxes strictly shrink the
+    //   feasible set so feasible TR solves converge faster; a TR subproblem
+    //   hitting MaxIter is discarded by run_slp9_loop's cand_ratio check and
+    //   the no-TR fallback provides an unconditional escape path. This caps
+    //   wasted IPM iterations on infeasible TR probes without affecting the
+    //   CL-2024 case (which is a no-TR solve).
     // reduced_tol_*=1e-3: lets Clarabel report AlmostSolved; dropping these
     //   restores Clarabel defaults and silently changes AlmostSolved semantics.
     // direct_solve_method="qdldl", max_threads=1: determinism pin — single-
     //   threaded QDLDL keeps the joining-loop early-bail deterministic.
+    let max_iter: u32 = if trust_region.is_some() { 200 } else { 1000 };
     #[allow(clippy::similar_names)]
     let settings = DefaultSettings::<f64> {
         verbose: false,
-        max_iter: 1000,
+        max_iter,
         tol_gap_abs: tol,
         tol_gap_rel: tol,
         tol_feas: tol,
@@ -577,6 +702,9 @@ fn solve_with_cuts_and_trust_region(
 
     let mut solver = DefaultSolver::new(&p_zero, q, &a_csc, &b_rhs, &cones_clarabel, settings)
         .map_err(|e| SolverSetupError::InvalidBundle(e.to_string()))?;
+
+    counters::inc_clarabel(trust_region.is_some());
+
     solver.solve();
 
     let soln = &solver.solution;
@@ -1074,6 +1202,8 @@ fn run_slp9_loop(
     rho_b_max: f64,
     rho_a_max: f64,
 ) -> Result<Slp9LoopOutcome, SolverSetupError> {
+    let _phase_guard = Slp9PhaseGuard::enter();
+
     let mut last_result = start.clone();
     let mut best_result = start;
     let mut best_ratio = max_axis_ratio_chain(&last_result, chain, windows);
@@ -1487,6 +1617,7 @@ fn slp_solve_with_axis_jerk_chain_inner(
                 current_start = restored;
                 outer_iters_consumed = outer_iters - path_outer_iters;
                 restorations_used += 1;
+                counters::mark_restoration();
             }
         }
     }

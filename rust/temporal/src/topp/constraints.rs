@@ -23,6 +23,14 @@ pub struct ConstraintBundle {
 
     pub h_intervals: Vec<f64>,
     pub j_path_at: Vec<f64>,
+
+    /// Precomputed column-sparse form of the base constraint matrix.
+    /// Sign convention: `A_clarabel = -A_k`, so `base_csc_nzval[col][k] = -a_rows[row][col]`.
+    /// Length of both outer vecs equals `n_vars`.
+    pub base_csc_rowval: Vec<Vec<usize>>,
+    pub base_csc_nzval: Vec<Vec<f64>>,
+    /// Number of base (non-cut, non-TR) constraint rows; equals `a_rows.len()`.
+    pub base_n_rows: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -762,6 +770,18 @@ pub fn build_chain(
         "all A rows must have width n_vars"
     );
 
+    let base_n_rows = a_rows.len();
+    let mut base_csc_rowval: Vec<Vec<usize>> = vec![Vec::new(); n_vars];
+    let mut base_csc_nzval: Vec<Vec<f64>> = vec![Vec::new(); n_vars];
+    for (row_idx, row) in a_rows.iter().enumerate() {
+        for (col, &v) in row.iter().enumerate() {
+            if v != 0.0 {
+                base_csc_rowval[col].push(row_idx);
+                base_csc_nzval[col].push(-v);
+            }
+        }
+    }
+
     BuildOutcome::Ok(ConstraintBundle {
         n_vars,
         n_grid: n,
@@ -772,6 +792,9 @@ pub fn build_chain(
         b_max_cent,
         h_intervals: chain.h_intervals.clone(),
         j_path_at,
+        base_csc_rowval,
+        base_csc_nzval,
+        base_n_rows,
     })
 }
 
