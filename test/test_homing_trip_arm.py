@@ -4,7 +4,7 @@ from klippy.extras.homing import Homing
 
 
 class ArmReached(Exception):
-    """Sentinel proving trip_move got past the already-triggered check."""
+    """Sentinel proving trip_move armed the endstop instead of erroring."""
 
 
 class FakeGcmd:
@@ -28,6 +28,7 @@ class FakeEndstop:
         return self.triggered_after_wait
 
     def arm(self, poll_period):
+        self.calls.append("arm")
         raise ArmReached()
 
 
@@ -71,22 +72,20 @@ def run_trip_move(endstop):
     )
 
 
-def test_pin_triggered_only_while_moves_queued_does_not_error():
-    # After Z homes on the probe, the head sits at the trigger point while
-    # the lift move is still queued — the live pin must be sampled only
-    # after wait_moves, when the lift has physically completed.
+def test_trip_move_arms_when_endstop_already_triggered():
+    # Matches mainline: an already-triggered endstop is not a precheck error.
+    # The first approach arms the endstop and lets it insta-trip — the MCU
+    # samples the live pin and brakes immediately (src/endstop.c) and the
+    # bridge buffers the early trip.
+    endstop = FakeEndstop(triggered_after_wait=True)
+    with pytest.raises(ArmReached):
+        run_trip_move(endstop)
+    assert "arm" in endstop.calls
+    assert "is_triggered" not in endstop.calls
+
+
+def test_trip_move_waits_for_queued_motion_before_arming():
     endstop = FakeEndstop(triggered_after_wait=False)
     with pytest.raises(ArmReached):
         run_trip_move(endstop)
-    assert endstop.calls.index("wait_moves") < endstop.calls.index(
-        "is_triggered"
-    )
-
-
-def test_pin_still_triggered_after_wait_moves_errors():
-    endstop = FakeEndstop(triggered_after_wait=True)
-    with pytest.raises(RuntimeError, match="already triggered"):
-        run_trip_move(endstop)
-    assert endstop.calls.index("wait_moves") < endstop.calls.index(
-        "is_triggered"
-    )
+    assert endstop.calls.index("wait_moves") < endstop.calls.index("arm")

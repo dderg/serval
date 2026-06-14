@@ -88,3 +88,59 @@ def test_multi_probe_lifecycle_is_noop():
     probe = PrinterProbe.__new__(PrinterProbe)
     assert probe.multi_probe_begin() is None
     assert probe.multi_probe_end() is None
+
+
+class _ProbeError(RuntimeError):
+    pass
+
+
+class _ProbeGCmd:
+    def error(self, msg):
+        return _ProbeError(msg)
+
+
+class _FakeRail:
+    def get_range(self):
+        return (-2.0, 200.0)
+
+
+class _FakeKin:
+    def _axis_rails(self):
+        return {2: _FakeRail()}
+
+
+class _FakeToolhead:
+    def __init__(self, z):
+        self._z = z
+
+    def get_kinematics(self):
+        return _FakeKin()
+
+    def get_position(self):
+        return [0.0, 0.0, self._z, 0.0]
+
+    def set_position(self, newpos):
+        self._z = newpos[2]
+
+
+def _probe_with_trip(trip_z, final_z):
+    from klippy.extras.probe import PrinterProbe
+
+    probe = PrinterProbe.__new__(PrinterProbe)
+    probe._endstop = object()
+
+    class _Homing:
+        def trip_move(self, gcmd, toolhead, bridge, axis, *_args):
+            return [0.0, 0.0, trip_z], [0.0, 0.0, final_z]
+
+    toolhead = _FakeToolhead(z=10.0)
+    return probe._probe_once(_ProbeGCmd(), toolhead, _Homing(), object(), 5.0)
+
+
+def test_probe_rejects_trigger_prior_to_movement():
+    with pytest.raises(_ProbeError, match="prior to movement"):
+        _probe_with_trip(trip_z=10.0, final_z=10.0)
+
+
+def test_probe_returns_trip_height_after_real_movement():
+    assert _probe_with_trip(trip_z=3.5, final_z=3.4) == pytest.approx(3.5)
