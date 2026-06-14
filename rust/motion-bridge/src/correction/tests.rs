@@ -87,3 +87,18 @@ fn no_piece_exceeds_max_piece_duration() {
         assert!(p.duration <= MAX_CORRECTION_PIECE_SECS + 1e-9);
     }
 }
+
+#[test]
+fn single_segment_profile_has_zero_velocity_ends() {
+    let pieces = plan_correction_profile(3.0, 5.0, 100.0).unwrap();
+    let first = pieces.first().unwrap();
+    let last = pieces.last().unwrap();
+    assert!(
+        (first.coeffs[1] - first.coeffs[0]).abs() < 1e-9,
+        "starts at rest"
+    );
+    assert!(
+        (last.coeffs[3] - last.coeffs[2]).abs() < 1e-9,
+        "ends at rest"
+    );
+}

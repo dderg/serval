@@ -27,30 +27,38 @@ pub fn plan_correction_profile(
     accel: f64,
 ) -> Result<Vec<ProfilePiece>, String> {
     profile_duration(delta_mm, speed, accel)?;
-    let sign = delta_mm.signum();
-    let d = delta_mm.abs();
-    let v = speed.min((d * accel).sqrt());
-    let t_ramp = v / accel;
-    let d_ramp = 0.5 * accel * t_ramp * t_ramp;
-    let d_cruise = d - 2.0 * d_ramp;
-
     let mut out = Vec::new();
-    push_quadratic(&mut out, 0.0, 0.0, accel, t_ramp, sign);
-    if d_cruise > 1e-12 {
-        push_linear(&mut out, d_ramp, v, d_cruise / v, sign);
-    }
-    push_quadratic(&mut out, d_ramp + d_cruise, v, -accel, t_ramp, sign);
-    Ok(out
+    push_segment(&mut out, 0.0, delta_mm, speed, accel);
+    Ok(subdivide_all(out))
+}
+
+fn subdivide_all(pieces: Vec<ProfilePiece>) -> Vec<ProfilePiece> {
+    pieces
         .into_iter()
         .flat_map(|p| {
             subdivide_bernstein(p.coeffs, p.duration, MAX_CORRECTION_PIECE_SECS)
                 .into_iter()
                 .map(|(coeffs, duration)| ProfilePiece { coeffs, duration })
         })
-        .collect())
+        .collect()
 }
 
-fn push_quadratic(out: &mut Vec<ProfilePiece>, p0: f64, v0: f64, a: f64, t: f64, sign: f64) {
+/// Append one trapezoid for `delta_mm` starting at absolute position `p_start`.
+fn push_segment(out: &mut Vec<ProfilePiece>, p_start: f64, delta_mm: f64, speed: f64, accel: f64) {
+    let sign = delta_mm.signum();
+    let d = delta_mm.abs();
+    let v = speed.min((d * accel).sqrt());
+    let t_ramp = v / accel;
+    let d_ramp = 0.5 * accel * t_ramp * t_ramp;
+    let d_cruise = d - 2.0 * d_ramp;
+    push_quad(out, p_start, sign, 0.0, 0.0, accel, t_ramp);
+    if d_cruise > 1e-12 {
+        push_lin(out, p_start, sign, d_ramp, v, d_cruise / v);
+    }
+    push_quad(out, p_start, sign, d_ramp + d_cruise, v, -accel, t_ramp);
+}
+
+fn push_quad(out: &mut Vec<ProfilePiece>, base: f64, sign: f64, p0: f64, v0: f64, a: f64, t: f64) {
     if t <= 0.0 {
         return;
     }
@@ -59,23 +67,27 @@ fn push_quadratic(out: &mut Vec<ProfilePiece>, p0: f64, v0: f64, a: f64, t: f64,
     let b2 = p0 + 2.0 * v0 * t / 3.0 + a * t * t / 6.0;
     let b3 = p0 + v0 * t + 0.5 * a * t * t;
     out.push(ProfilePiece {
-        coeffs: [sign * b0, sign * b1, sign * b2, sign * b3],
+        coeffs: [
+            base + sign * b0,
+            base + sign * b1,
+            base + sign * b2,
+            base + sign * b3,
+        ],
         duration: t,
     });
 }
 
-fn push_linear(out: &mut Vec<ProfilePiece>, p0: f64, v: f64, t: f64, sign: f64) {
+fn push_lin(out: &mut Vec<ProfilePiece>, base: f64, sign: f64, p0: f64, v: f64, t: f64) {
     if t <= 0.0 {
         return;
     }
-    let coeffs = [
-        sign * p0,
-        sign * (p0 + v * t / 3.0),
-        sign * (p0 + 2.0 * v * t / 3.0),
-        sign * (p0 + v * t),
-    ];
     out.push(ProfilePiece {
-        coeffs,
+        coeffs: [
+            base + sign * p0,
+            base + sign * (p0 + v * t / 3.0),
+            base + sign * (p0 + 2.0 * v * t / 3.0),
+            base + sign * (p0 + v * t),
+        ],
         duration: t,
     });
 }
