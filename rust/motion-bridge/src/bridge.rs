@@ -1213,7 +1213,7 @@ impl PyMotionBridge {
                 None => return Ok(()),
             }
         };
-        let home_q16 = (pos_mm * 65536.0).round() as i32;
+        let home_q16 = crate::dispatch::encode_q16(pos_mm);
         tracing::info!(
             subsystem = "bridge",
             event = "servo_finalize_home",
