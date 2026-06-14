@@ -36,29 +36,40 @@ const GL5_WEIGHTS: [f64; 5] = [
     0.236_926_885_056_189_1,
 ];
 
-/// Arc length from 0 to `u` via multi-subinterval 5-point GL quadrature.
-/// Uses 64 equal subintervals so that the integrand's nonlinearity (square-root
-/// of a quartic) is resolved well below the 1 nm target accuracy.
-fn arc_length_exact(deriv: &VectorNurbs<f64, 3>, u: f64) -> f64 {
-    const N_SUB: usize = 64;
-    let sub_w = u / N_SUB as f64;
-    let half = sub_w * 0.5;
-    let mut total = 0.0;
-    for k in 0..N_SUB {
-        let mid = sub_w * k as f64 + half;
-        let mut sub = 0.0;
-        for i in 0..5 {
-            let t = mid + half * GL5_NODES[i];
-            let d = nurbs::eval::vector_eval(deriv, t);
-            sub += GL5_WEIGHTS[i] * (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-        }
-        total += sub * half;
+/// Arc length from 0 to `u`: the bracketing table node's stored arc length
+/// (accurate to the table build tolerance) plus one 5-point GL integration
+/// over the short residual interval `[u_node, u]`. O(5) curve evals.
+fn arc_length_to_u(
+    table: &nurbs::ArcLengthTableRef<'_, f64>,
+    deriv: &VectorNurbs<f64, 3>,
+    u: f64,
+) -> f64 {
+    let u_arr = table.u();
+    let s_arr = table.s();
+    let u_c = u.clamp(u_arr[0], u_arr[u_arr.len() - 1]);
+    let idx = match u_arr.binary_search_by(|x| x.partial_cmp(&u_c).unwrap()) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
+    let u_node = u_arr[idx];
+    let s_node = s_arr[idx];
+    let half = 0.5 * (u_c - u_node);
+    if half <= 0.0 {
+        return s_node;
     }
-    total
+    let mid = 0.5 * (u_node + u_c);
+    let mut seg = 0.0;
+    for i in 0..GL5_NODES.len() {
+        let t = mid + half * GL5_NODES[i];
+        let d = nurbs::eval::vector_eval(deriv, t);
+        seg += GL5_WEIGHTS[i] * (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    }
+    s_node + seg * half
 }
 
 /// Invert arc length `s` to curve parameter `u`: seed from the table, then two
-/// Newton steps using exact analytic arc length. Returns `ZeroTangent` at a cusp.
+/// Newton steps using O(1) arc-length via table node + local GL residual.
+/// Returns `ZeroTangent` at a cusp.
 #[allow(dead_code)] // used by Task 3
 fn invert_s_to_u(
     table: &nurbs::ArcLengthTableRef<'_, f64>,
@@ -77,7 +88,7 @@ fn invert_s_to_u(
         if speed < TANGENT_SPEED_FLOOR {
             return Err(crate::ShapeError::ZeroTangent { index, u });
         }
-        let s_u = arc_length_exact(deriv, u);
+        let s_u = arc_length_to_u(table, deriv, u);
         u = (u - (s_u - s_clamped) / speed).clamp(0.0, u_max);
     }
 
