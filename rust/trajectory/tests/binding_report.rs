@@ -69,9 +69,14 @@ fn replan_report_carries_binding_summary() {
     let ctx = extruder_ctx();
     let mut state = ShaperState::new(&[0.0; 4], &ctx.chains);
 
-    // ratio=1.0 at feedrate=200.0 → follower peak demand 200 mm/s >> E_V_MAX=20 mm/s,
-    // so the follower velocity row pins cruise.
-    let mv = extruding_x_segment(0.0, 50.0, 1.0, 200.0);
+    let full_extruder_coupling = 1.0;
+    let feedrate_far_above_e_v_max = 200.0;
+    let mv = extruding_x_segment(
+        0.0,
+        50.0,
+        full_extruder_coupling,
+        feedrate_far_above_e_v_max,
+    );
     let report = state.append_and_replan(mv, &ctx).expect("replan solves");
 
     let worst = report
