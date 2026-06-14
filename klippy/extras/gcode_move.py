@@ -50,6 +50,7 @@ class GCodeMove:
             gcode.register_command(cmd, func, False, desc)
         gcode.register_command("G0", self.cmd_G1)
         gcode.register_command("G5", self.cmd_G5)
+        gcode.register_command("G5.1", self.cmd_G5_1)
         gcode.register_command("M114", self.cmd_M114, True)
         gcode.register_command(
             "GET_POSITION",
@@ -257,6 +258,36 @@ class GCodeMove:
     def _submit_bezier_to_bridge(self, i, j, p, q, dx, dy, dz, de, fr):
         motion = self.printer.lookup_object("motion")
         motion.bridge.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
+
+    def cmd_G5_1(self, gcmd):
+        self._reject_curve_if_transform_active(gcmd)
+        params = gcmd.get_command_parameters()
+        if "I" not in params and "J" not in params:
+            raise gcmd.error("G5.1 requires I and/or J")
+        start = list(self.last_position)
+        self._resolve_curve_endpoint(gcmd, params)
+        try:
+            i = float(params.get("I", 0.0))
+            j = float(params.get("J", 0.0))
+        except ValueError:
+            raise gcmd.error(
+                "Unable to parse curve '%s'" % (gcmd.get_commandline(),)
+            )
+        end = self.last_position
+        dz = end[2] - start[2]
+        interior = [[start[0] + i, start[1] + j, start[2] + dz / 2.0]]
+
+        def submit(sdx, sdy, sdz, sde, fr):
+            self._submit_quadratic_to_bridge(i, j, sdx, sdy, sdz, sde, fr)
+
+        toolhead = self.printer.lookup_object("toolhead")
+        toolhead.move_curve(
+            list(self.last_position), interior, submit, self.speed
+        )
+
+    def _submit_quadratic_to_bridge(self, i, j, dx, dy, dz, de, fr):
+        motion = self.printer.lookup_object("motion")
+        motion.bridge.submit_quadratic(i, j, dx, dy, dz, de, fr)
 
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):

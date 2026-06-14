@@ -199,3 +199,22 @@ def test_cmd_g5_rejects_i_without_j():
         assert False
     except RuntimeError as e:
         assert "both be present or both omitted" in str(e)
+
+
+def test_cmd_g5_1_requires_i_or_j():
+    g = make_full_gcode_move()
+    try:
+        g.cmd_G5_1(ParamGcmd({"X": "10", "Y": "0"}))
+        assert False
+    except RuntimeError as e:
+        assert "I and/or J" in str(e)
+
+
+def test_cmd_g5_1_dispatches_quadratic():
+    g = make_full_gcode_move()
+    g.cmd_G5_1(ParamGcmd({"X": "10", "Y": "0", "I": "5", "J": "5"}))
+    assert g.curve_calls
+    (args, _kwargs) = g.curve_calls[0]
+    newpos, interior, _submit, _speed = args
+    # single quadratic control point Q1 = start + (I,J) = (5,5)
+    assert interior[0][:2] == [5.0, 5.0]
