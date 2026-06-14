@@ -392,3 +392,26 @@ fn fit_position_of_t_tracks_exact_curve() {
     let c0 = nurbs::eval::vector_eval(&curve, 0.0);
     assert!((p0[0] - c0[0]).abs() < 1e-9 && (p0[1] - c0[1]).abs() < 1e-9);
 }
+
+#[test]
+fn fit_position_of_t_rejects_zero_span_piece() {
+    let curve = arch();
+    let deriv = nurbs::eval::vector_derivative(&curve);
+    let table = nurbs::arc_length::build_arc_length_table_vector(
+        &curve,
+        super::ARC_TABLE_TOL,
+        super::ARC_TABLE_SAMPLES,
+    )
+    .unwrap();
+    let tv = table.as_view();
+    let degenerate = nurbs::bezier::BezierPiece {
+        u_start: 0.5,
+        u_end: 0.5,
+        coeffs: vec![10.0, 5.0],
+    };
+    let r = super::fit_position_of_t(&curve, &deriv, &tv, &degenerate, 7);
+    assert!(
+        matches!(r, Err(crate::ShapeError::FitFailure { index: 7, .. })),
+        "zero-span piece must fail loud, got {r:?}"
+    );
+}

@@ -151,6 +151,14 @@ fn fit_position_of_t_rec(
 ) -> Result<Vec<[nurbs::bezier::BezierPiece<f64>; 3]>, crate::ShapeError> {
     let t_lo = s_of_t.u_start;
     let t_hi = s_of_t.u_end;
+    if !(t_hi - t_lo > 0.0) || !t_lo.is_finite() || !t_hi.is_finite() {
+        return Err(crate::ShapeError::FitFailure {
+            index,
+            detail: nurbs::algebra::FitError::DegenerateInput {
+                reason: "fit_position_of_t: degenerate (zero or non-finite) time span",
+            },
+        });
+    }
     let n = POS_FIT_DEGREE + 1;
 
     let mut nodes_t = Vec::with_capacity(n);
@@ -179,6 +187,15 @@ fn fit_position_of_t_rec(
             u_end: t_hi,
             coeffs: solve_power_basis(&nodes_t, &vals[axis], t_lo),
         });
+
+    if axes.iter().any(|p| p.coeffs.iter().any(|c| !c.is_finite())) {
+        return Err(crate::ShapeError::FitFailure {
+            index,
+            detail: nurbs::algebra::FitError::DegenerateInput {
+                reason: "fit_position_of_t: non-finite fit coefficients",
+            },
+        });
+    }
 
     let mut max_err = 0.0_f64;
     let checks = 4 * n;

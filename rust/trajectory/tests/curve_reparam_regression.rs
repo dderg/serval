@@ -160,5 +160,8 @@ fn planned_curve_tracks_geometry_and_joints_exact() {
 fn exact_cusp_still_fails_loud() {
     let curve = cubic([[0., 0., 0.], [0., 0., 0.], [0., 0., 0.], [5., 0., 0.]]);
     let r = run(&curve, 30.0);
-    assert!(r.is_err(), "cusp must fail loud, got {r:?}");
+    assert!(
+        matches!(r, Err(ShapeError::ZeroTangent { .. })),
+        "cusp must fail loud with ZeroTangent, got {r:?}"
+    );
 }
