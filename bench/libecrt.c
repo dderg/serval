@@ -37,14 +37,13 @@ typedef struct {
     int32_t  tp1_pos;
     int32_t  tp2_pos;
     uint32_t digital_inputs;
-    int32_t  position_demand;
 } in_t;
 #pragma pack(pop)
 _Static_assert(sizeof(out_t) == 18,
                "rewrite_1600_entry_table() maps 18 bytes; out_t must match "
                "field-for-field, in order");
-_Static_assert(sizeof(in_t) == 36,
-               "rewrite_1a00_entry_table() maps 36 bytes; in_t must match "
+_Static_assert(sizeof(in_t) == 32,
+               "rewrite_1a00_entry_table() maps 32 bytes; in_t must match "
                "field-for-field, in order");
 
 static char    IOmap[4096];
@@ -110,7 +109,6 @@ static int go_realtime(int cpu, int prio) {
 #define TXPDO_TP1_POS         COE_ENTRY(0x60BA, 0x00, 32)
 #define TXPDO_TP2_POS         COE_ENTRY(0x60BC, 0x00, 32)
 #define TXPDO_DIGITAL_INPUTS  COE_ENTRY(0x60FD, 0x00, 32)
-#define TXPDO_POSITION_DEMAND COE_ENTRY(0x6062, 0x00, 32)
 
 #define RXPDO_CONTROLWORD     COE_ENTRY(0x6040, 0x00, 16)
 #define RXPDO_TARGET_POSITION COE_ENTRY(0x607A, 0x00, 32)
@@ -150,7 +148,6 @@ static int rewrite_1a00_entry_table(void) {
         TXPDO_TP1_POS,
         TXPDO_TP2_POS,
         TXPDO_DIGITAL_INPUTS,
-        TXPDO_POSITION_DEMAND,
     };
     uint8_t no_entries  = 0;
     uint8_t all_entries = sizeof(entries) / sizeof(entries[0]);
@@ -162,9 +159,9 @@ static int rewrite_1a00_entry_table(void) {
     return remap_write(0x1A00, 0x00, &all_entries, sizeof(all_entries));
 }
 
-/* The fixed TxPDO 1B01h cannot carry position_demand (6062h); only the
- * variable 1A00h can, and the drive holds that mapping in RAM only. Group
- * before objects is the A6-EC manual's required write order. */
+/* 1B01h is a fixed TxPDO; the variable 1A00h is the only configurable one and
+ * the drive holds its mapping in RAM only. Group before objects is the A6-EC
+ * manual's required write order. */
 static int remap_volatile_tx_pdo_1a00(void) {
     if (point_group_1c13_at_pdo_0x1a00() != 0) return -1;
     return rewrite_1a00_entry_table();
@@ -473,7 +470,6 @@ void ec_rt_get_telemetry(ec_telemetry_t *out) {
     out->velocity_actual = g_in->velocity_actual;
     out->torque_actual   = g_in->torque_actual;
     out->following_error = g_in->following_error;
-    out->position_demand = g_in->position_demand;
     out->target_position = g_out->target_position;
     out->velocity_offset = g_out->velocity_offset;
     out->torque_offset   = g_out->torque_offset;

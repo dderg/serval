@@ -55,7 +55,6 @@ typedef struct {
     int32_t  velocity_actual;
     int16_t  torque_actual;
     int32_t  following_error;
-    int32_t  position_demand;
     int32_t  target_position;
     int32_t  velocity_offset;
     int16_t  torque_offset;

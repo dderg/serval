@@ -413,7 +413,6 @@ fn main() {
                 flags,
                 drive: DriveSample {
                     target_counts: pos,
-                    position_demand: pos,
                     position_actual: pos - 3,
                     velocity_actual: 0,
                     following_error: 3,

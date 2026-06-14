@@ -14,22 +14,21 @@ pub const ERR_CAPTURE_OVERFLOW: i32 = -323;
 pub const ERR_CAPTURE_BAD_ARG: i32 = -324;
 
 pub const CAPTURE_RING_CAPACITY: usize = 4096;
-pub const RECORD_SIZE: usize = 41;
+pub const RECORD_SIZE: usize = 37;
 pub const FLAG_TORQUE_ENABLED: u8 = 1 << 0;
 pub const FLAG_MOTION_ACTIVE: u8 = 1 << 1;
 
 const OFF_CYCLE_INDEX: usize = 0;
 const OFF_FLAGS: usize = 8;
 const OFF_TARGET_COUNTS: usize = 9;
-const OFF_POSITION_DEMAND: usize = 13;
-const OFF_POSITION_ACTUAL: usize = 17;
-const OFF_FOLLOWING_ERROR: usize = 21;
-const OFF_TORQUE_ACTUAL: usize = 25;
-const OFF_STATUSWORD: usize = 27;
-const OFF_ERROR_CODE: usize = 29;
-const OFF_VELOCITY_OFFSET: usize = 31;
-const OFF_TORQUE_OFFSET: usize = 35;
-const OFF_VELOCITY_ACTUAL: usize = 37;
+const OFF_POSITION_ACTUAL: usize = 13;
+const OFF_FOLLOWING_ERROR: usize = 17;
+const OFF_TORQUE_ACTUAL: usize = 21;
+const OFF_STATUSWORD: usize = 23;
+const OFF_ERROR_CODE: usize = 25;
+const OFF_VELOCITY_OFFSET: usize = 27;
+const OFF_TORQUE_OFFSET: usize = 31;
+const OFF_VELOCITY_ACTUAL: usize = 33;
 
 const WRITER_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 const WRITER_RECV_TIMEOUT: Duration = Duration::from_millis(100);
@@ -38,7 +37,6 @@ const IO_THREAD_STACK: usize = 512 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DriveSample {
     pub target_counts: i32,
-    pub position_demand: i32,
     pub position_actual: i32,
     pub velocity_actual: i32,
     pub following_error: i32,
@@ -79,8 +77,6 @@ pub fn encode_record(r: &CaptureRecord) -> [u8; RECORD_SIZE] {
     b[OFF_FLAGS] = r.flags;
     b[OFF_TARGET_COUNTS..OFF_TARGET_COUNTS + 4]
         .copy_from_slice(&r.drive.target_counts.to_le_bytes());
-    b[OFF_POSITION_DEMAND..OFF_POSITION_DEMAND + 4]
-        .copy_from_slice(&r.drive.position_demand.to_le_bytes());
     b[OFF_POSITION_ACTUAL..OFF_POSITION_ACTUAL + 4]
         .copy_from_slice(&r.drive.position_actual.to_le_bytes());
     b[OFF_FOLLOWING_ERROR..OFF_FOLLOWING_ERROR + 4]
@@ -109,7 +105,6 @@ pub fn header_json(cfg: &CaptureConfig) -> String {
         ("cycle_index", "u64", OFF_CYCLE_INDEX),
         ("flags", "u8", OFF_FLAGS),
         ("target_counts", "i32", OFF_TARGET_COUNTS),
-        ("position_demand", "i32", OFF_POSITION_DEMAND),
         ("position_actual", "i32", OFF_POSITION_ACTUAL),
         ("following_error", "i32", OFF_FOLLOWING_ERROR),
         ("torque_actual", "i16", OFF_TORQUE_ACTUAL),

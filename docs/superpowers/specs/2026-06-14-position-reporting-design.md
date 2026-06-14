@@ -116,6 +116,13 @@ but never surfaced to the host. We add the surfacing and add native velocity:
   and the drive velocity unit→mm/s.
 - For EtherCAT, "blocking fresh" and "cached" collapse to nearly the same value: the DC loop
   runs at ~kHz, so the endpoint's latest sample is already sub-ms fresh.
+- **PDO budget (A6-EC):** the variable `1A00h` TxPDO caps at 10 mappings on the A6-EC drive,
+  and `1A00h` is the only configurable TxPDO on its sync manager. Adding `606Ch` (velocity
+  actual) would have made 11 entries and the drive rejects the remap (`rc=-6`,
+  `EC_RT_ERR_PDO_REMAP`). To stay at 10 we dropped `position_demand (6062h)`: the host already
+  knows the commanded position, and `following_error (60F4h)` already carries demand−actual
+  directly. `position_demand` is removed from the TxPDO, `in_t`/`ec_telemetry_t`/`EcTelemetry`,
+  and the capture record.
 
 ### 3. Bridge: unified per-axis query + cache
 

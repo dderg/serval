@@ -730,7 +730,6 @@ fn main() {
                 flags,
                 drive: DriveSample {
                     target_counts: t.target_position,
-                    position_demand: t.position_demand,
                     position_actual: t.position_actual,
                     velocity_actual: t.velocity_actual,
                     following_error: t.following_error,
