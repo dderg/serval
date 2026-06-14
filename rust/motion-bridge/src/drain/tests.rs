@@ -126,3 +126,43 @@ fn multi_axis_all_must_drain() {
         "all axes drained"
     );
 }
+
+#[test]
+fn wait_room_unblocks_when_retired_advances() {
+    let d = std::sync::Arc::new(DrainSync::new());
+    d.add_sent(0, 0, 16); // ring of 16, fully occupied
+    assert_eq!(d.room(0, 0, 16), 0);
+    let d2 = d.clone();
+    let h = std::thread::spawn(move || {
+        d2.wait_room(0, 0, 16, 4, Duration::from_secs(2)).unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    d.set_retired(0, 0, 5); // 5 drained -> room 5 >= 4
+    h.join().unwrap();
+}
+
+#[test]
+fn wait_room_returns_err_on_timeout() {
+    let d = DrainSync::new();
+    d.add_sent(0, 0, 16);
+    let r = d.wait_room(0, 0, 16, 4, Duration::from_millis(30));
+    assert!(r.is_err(), "should time out when nothing drains");
+}
+
+#[test]
+fn room_accounts_for_baseline_after_reset() {
+    let d = DrainSync::new();
+    // A prior stream drained fully: MCU cumulative retired reached 100.
+    d.add_sent(0, 0, 100);
+    d.set_retired(0, 0, 100);
+    // New stream: reset clears sent, snapshots baseline = 100.
+    d.reset();
+    // Nothing in flight this stream -> full ring, despite retired==100.
+    assert_eq!(d.room(0, 0, 16), 16);
+    // Send 4 this stream; MCU still at cumulative 100.
+    d.add_sent(0, 0, 4);
+    assert_eq!(d.room(0, 0, 16), 12);
+    // MCU retires 2 this stream -> cumulative 102.
+    d.set_retired(0, 0, 102);
+    assert_eq!(d.room(0, 0, 16), 14);
+}
