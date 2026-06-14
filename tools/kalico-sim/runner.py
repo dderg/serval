@@ -1028,7 +1028,9 @@ def run_simulation(
                     events_dir_pre = log_dir / "events"
                     ev_lines_before = set()
                     for ev_file in sorted(events_dir_pre.glob("*.jsonl")):
-                        for ln in ev_file.read_text(errors="replace").splitlines():
+                        for ln in ev_file.read_text(
+                            errors="replace"
+                        ).splitlines():
                             ev_lines_before.add(ln)
 
                     paced_resp = send_gcode(
@@ -1050,7 +1052,9 @@ def run_simulation(
                         events_dir = log_dir / "events"
                         new_ev_text = ""
                         for ev_file in sorted(events_dir.glob("*.jsonl")):
-                            for ln in ev_file.read_text(errors="replace").splitlines():
+                            for ln in ev_file.read_text(
+                                errors="replace"
+                            ).splitlines():
                                 if ln not in ev_lines_before:
                                     new_ev_text += ln + "\n"
                         log.info(
@@ -1058,21 +1062,15 @@ def run_simulation(
                             new_ev_text or "(none)",
                         )
                         if "motion.correction_start" not in new_ev_text:
-                            ma_error = (
-                                "paced-refill: no motion.correction_start in new events"
-                            )
+                            ma_error = "paced-refill: no motion.correction_start in new events"
                         elif "motion.correction_drained" not in new_ev_text:
-                            ma_error = (
-                                "paced-refill: no motion.correction_drained in new events"
-                            )
+                            ma_error = "paced-refill: no motion.correction_drained in new events"
                         elif "motion.ring_full" in new_ev_text:
                             ma_error = (
                                 "paced-refill: motion.ring_full fired — "
                                 "host pacing did not prevent ring overcommit"
                             )
-                        if "stream_correction rejected" in (
-                            new_ev_text
-                        ):
+                        if "stream_correction rejected" in (new_ev_text):
                             if ma_error is None:
                                 ma_error = (
                                     "paced-refill: MCU rejected a correction "
@@ -1090,7 +1088,10 @@ def run_simulation(
                         "MOTOR_ADJUST MOTOR=stepper_q DELTA=1",
                         timeout=30,
                     )
-                    log.info("MOTOR_ADJUST stepper_q (expect unknown-motor error): %s", resp)
+                    log.info(
+                        "MOTOR_ADJUST stepper_q (expect unknown-motor error): %s",
+                        resp,
+                    )
                     err_text = (
                         resp.get("error", "") if isinstance(resp, dict) else ""
                     )
