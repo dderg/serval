@@ -62,3 +62,38 @@ def test_move_curve_submits_and_advances_when_in_range():
     m.move_curve([20.0, 0.0, 0.0, 0.0], interior, submit, 100.0)
     assert m.bridge.calls and m.bridge.calls[0][0] == "bezier"
     assert m.commanded_pos[0] == 20.0
+
+
+def make_gcode_move():
+    import klippy.extras.gcode_move as gm
+
+    g = gm.GCodeMove.__new__(gm.GCodeMove)
+    g.printer = types.SimpleNamespace(
+        lookup_object=lambda name, default=None: g._toolhead
+    )
+    g._toolhead = types.SimpleNamespace(
+        get_position=lambda: [0.0, 0.0, 0.0, 0.0]
+    )
+    g.position_with_transform = lambda: [0.0, 0.0, 0.0, 0.0]
+    return g
+
+
+class FakeGcmd:
+    def error(self, msg):
+        return RuntimeError(msg)
+
+
+def test_transform_gate_passes_when_identity():
+    g = make_gcode_move()
+    # identity: transformed == raw -> no raise
+    g._reject_curve_if_transform_active(FakeGcmd())
+
+
+def test_transform_gate_rejects_when_active():
+    g = make_gcode_move()
+    g.position_with_transform = lambda: [0.0, 2.0, 0.0, 0.0]  # bent in Y
+    try:
+        g._reject_curve_if_transform_active(FakeGcmd())
+        assert False, "expected rejection"
+    except RuntimeError as e:
+        assert "active move transform" in str(e)

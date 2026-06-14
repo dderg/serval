@@ -182,6 +182,16 @@ class GCodeMove:
             )
         self.move_with_transform(self.last_position, self.speed)
 
+    def _reject_curve_if_transform_active(self, gcmd):
+        toolhead = self.printer.lookup_object("toolhead")
+        raw = toolhead.get_position()
+        transformed = self.position_with_transform()
+        if any(abs(a - b) > 1e-9 for a, b in zip(raw[:3], transformed[:3])):
+            raise gcmd.error(
+                "G5/G5.1 not supported with an active move transform yet "
+                "(skew_correction / bed_tilt / bed_mesh)"
+            )
+
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):
         # Set units to inches
