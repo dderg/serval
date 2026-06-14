@@ -159,3 +159,43 @@ def test_cmd_g5_calls_move_curve_with_interior_points():
     # P1 = start+(I,J) = (2,4); P2 = end+(P,Q) = (7,4)
     assert interior[0][:2] == [2.0, 4.0]
     assert interior[1][:2] == [7.0, 4.0]
+
+
+def test_cmd_g5_chained_omits_ij_and_forwards_none():
+    g = make_full_gcode_move()
+    bezier_calls = []
+    fake_motion = types.SimpleNamespace(
+        bridge=types.SimpleNamespace(
+            submit_bezier=lambda *a: bezier_calls.append(a)
+        )
+    )
+    objs = {"toolhead": g._toolhead, "motion": fake_motion}
+    g.printer = types.SimpleNamespace(
+        lookup_object=lambda name, default=None: objs[name]
+    )
+    g.cmd_G5(ParamGcmd({"X": "10", "Y": "0", "P": "-3", "Q": "4"}))
+    (args, _kwargs) = g.curve_calls[0]
+    _newpos, interior, submit, _speed = args
+    # chained: only P2, no P1
+    assert len(interior) == 1
+    assert interior[0][:2] == [7.0, 4.0]
+    # invoke the submit closure and confirm i,j forwarded as None
+    submit(10.0, 0.0, 0.0, 0.0, 50.0)
+    assert bezier_calls, "submit_bezier should be called"
+    i, j, p, q = (
+        bezier_calls[0][0],
+        bezier_calls[0][1],
+        bezier_calls[0][2],
+        bezier_calls[0][3],
+    )
+    assert i is None and j is None
+    assert p == -3.0 and q == 4.0
+
+
+def test_cmd_g5_rejects_i_without_j():
+    g = make_full_gcode_move()
+    try:
+        g.cmd_G5(ParamGcmd({"X": "10", "Y": "0", "I": "1", "P": "0", "Q": "0"}))
+        assert False
+    except RuntimeError as e:
+        assert "both be present or both omitted" in str(e)

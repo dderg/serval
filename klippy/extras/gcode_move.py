@@ -240,7 +240,7 @@ class GCodeMove:
                 "Unable to parse curve '%s'" % (gcmd.get_commandline(),)
             )
         end = self.last_position
-        dx, dy, dz = end[0] - start[0], end[1] - start[1], end[2] - start[2]
+        dz = end[2] - start[2]
         interior = []
         if i is not None:
             interior.append([start[0] + i, start[1] + j, start[2] + dz / 3.0])
