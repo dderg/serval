@@ -107,6 +107,68 @@ fn query_runtime_caps(
     decode_runtime_caps_body(&body)
 }
 
+fn collect_motor_positions_inner(
+    mcu_axis_configs: &Mutex<Vec<crate::dispatch::McuAxisConfig>>,
+    mcus: &Mutex<HashMap<u32, McuConnection>>,
+    timeout: std::time::Duration,
+) -> Result<HashMap<String, (f64, f64)>, String> {
+    use kalico_protocol::MessageKind;
+    use kalico_protocol::codec::{Cursor, Decode};
+    use kalico_protocol::messages::MotorStateResponse;
+
+    let configs = mcu_axis_configs
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if configs.is_empty() {
+        return Err("query_motor_positions: no axes configured".into());
+    }
+    let kin_tag = configs
+        .iter()
+        .find(|c| c.axes.contains(&0usize))
+        .map(|c| c.kinematics)
+        .unwrap_or(runtime::segment::KinematicTag::Cartesian as u8);
+
+    let mut motors: [Option<f64>; 8] = [None; 8];
+    let mut vmotors: [Option<f64>; 8] = [None; 8];
+
+    for cfg in &configs {
+        let io = {
+            let map = mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(conn) = map.get(&cfg.mcu_id) else {
+                continue;
+            };
+            if conn.ethercat_socket.is_some() {
+                continue;
+            }
+            match conn.host_io.as_ref() {
+                Some(io) => Arc::clone(io),
+                None => continue,
+            }
+        };
+        let (kind, body) = io
+            .kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)
+            .map_err(|e| format!("query mcu {}: {e:?}", cfg.mcu_id))?;
+        if kind != MessageKind::MotorStateResponse {
+            return Err(format!(
+                "query mcu {}: unexpected kind {kind:?}",
+                cfg.mcu_id
+            ));
+        }
+        let mut c = Cursor::new(&body);
+        let resp = MotorStateResponse::decode_from(&mut c)
+            .map_err(|e| format!("query mcu {}: decode {e:?}", cfg.mcu_id))?;
+        for m in resp.motors {
+            let slot = m.slot as usize;
+            if slot < 8 {
+                motors[slot] = Some(f64::from(m.pos_q16) / 65536.0);
+                vmotors[slot] = Some(f64::from(m.vel_q16) / 65536.0);
+            }
+        }
+    }
+    crate::position_query::assemble_cartesian(&motors, &vmotors, kin_tag)
+}
+
 fn query_ethercat_runtime_caps(
     conn: &UnixNativeConn,
     timeout: std::time::Duration,
@@ -3738,6 +3800,17 @@ impl PyMotionBridge {
             );
         }
         Ok(out)
+    }
+
+    #[pyo3(signature = (timeout_s=0.25))]
+    fn query_motor_positions(
+        &self,
+        py: Python<'_>,
+        timeout_s: f64,
+    ) -> PyResult<HashMap<String, (f64, f64)>> {
+        let timeout = std::time::Duration::from_secs_f64(timeout_s.max(0.0));
+        py.detach(|| collect_motor_positions_inner(&self.mcu_axis_configs, &self.mcus, timeout))
+            .map_err(PyRuntimeError::new_err)
     }
 }
 
