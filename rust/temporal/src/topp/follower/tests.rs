@@ -621,4 +621,11 @@ fn binding_summary_reports_velocity_pin() {
         velocity_count > 0,
         "cruise samples should tally as Velocity bindings"
     );
+
+    let counts: Vec<u32> = profile.binding.histogram.iter().map(|(_, n)| *n).collect();
+    assert!(
+        counts.windows(2).all(|w| w[0] >= w[1]),
+        "histogram must be sorted by descending count; got {:?}",
+        counts
+    );
 }

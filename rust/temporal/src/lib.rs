@@ -42,7 +42,7 @@ pub enum GridScheme {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BindingConstraint {
     None,
     Velocity { set: usize },

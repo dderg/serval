@@ -257,12 +257,25 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         if let Some(w) = &windows {
             for d in crate::topp::follower::windowed_demands_at(w, chain, &result.b, &result.a, i) {
                 let ratio = d.value / d.cap;
-                if ratio > pr.max_jerk {
-                    pr.max_jerk = ratio;
+                let tag = windowed_tag(&d);
+                let is_jerk_class = matches!(
+                    tag,
+                    BindingConstraint::JerkNorm { .. }
+                        | BindingConstraint::PaJerk { .. }
+                        | BindingConstraint::PaVelocity { .. }
+                        | BindingConstraint::PaAccel { .. }
+                );
+                if is_jerk_class {
+                    if ratio > pr.max_jerk {
+                        pr.max_jerk = ratio;
+                    }
+                } else if ratio > pr.max_non_jerk {
+                    pr.max_non_jerk = ratio;
+                    pr.worst_non_jerk_tag = tag;
                 }
                 if ratio > pr.worst_ratio {
                     pr.worst_ratio = ratio;
-                    pr.worst_tag = windowed_tag(&d);
+                    pr.worst_tag = tag;
                 }
             }
         }
@@ -347,7 +360,8 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             other => *histogram_map.entry(*other).or_insert(0) += 1,
         }
     }
-    let histogram: Vec<(BindingConstraint, u32)> = histogram_map.into_iter().collect();
+    let mut histogram: Vec<(BindingConstraint, u32)> = histogram_map.into_iter().collect();
+    histogram.sort_by(|(ca, na), (cb, nb)| nb.cmp(na).then_with(|| ca.cmp(cb)));
 
     let worst = if worst_non_jerk_ratio >= SLACK_THRESHOLD
         && !matches!(
