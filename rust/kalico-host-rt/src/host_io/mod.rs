@@ -64,7 +64,7 @@ impl Default for KalicoHostIoConfig {
     }
 }
 
-pub struct HeartbeatCallback(pub Arc<dyn Fn(&[u32]) + Send + Sync>);
+pub struct HeartbeatCallback(pub Arc<dyn Fn(&[u32], &[u32]) + Send + Sync>);
 
 impl std::fmt::Debug for HeartbeatCallback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -549,7 +549,7 @@ impl KalicoHostIo {
         self.is_critical.load(Ordering::Acquire)
     }
 
-    pub fn attach_heartbeat_callback(&self, cb: Arc<dyn Fn(&[u32]) + Send + Sync>) {
+    pub fn attach_heartbeat_callback(&self, cb: Arc<dyn Fn(&[u32], &[u32]) + Send + Sync>) {
         let _ = self
             .submission_tx
             .send(ReactorCommand::AttachHeartbeatCallback(HeartbeatCallback(

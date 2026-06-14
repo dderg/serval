@@ -501,6 +501,7 @@ pub struct PyMotionBridge {
     pump_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<crate::pump::PumpMsg>>>>,
     pump_thread: Mutex<Option<JoinHandle<()>>>,
     drain: std::sync::Arc<crate::drain::DrainSync>,
+    correction_drain: std::sync::Arc<crate::drain::DrainSync>,
     active_drip_cohort: Arc<Mutex<Option<u64>>>,
     motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
     homing_run: Arc<Mutex<Option<HomingRun>>>,
@@ -764,6 +765,7 @@ impl PyMotionBridge {
             pump_tx: Arc::new(Mutex::new(None)),
             pump_thread: Mutex::new(None),
             drain: std::sync::Arc::new(crate::drain::DrainSync::new()),
+            correction_drain: std::sync::Arc::new(crate::drain::DrainSync::new()),
             active_drip_cohort: Arc::new(Mutex::new(None)),
             motion_history: Arc::new(Mutex::new(crate::motion_history::HistoryStore::default())),
             homing_run: Arc::new(Mutex::new(None)),
@@ -2569,6 +2571,7 @@ impl PyMotionBridge {
             let mcu_id = cfg_mcu.mcu_id;
             let pump_tx_hb = pump_tx_init.clone();
             let drain_hb = self.drain.clone();
+            let corr_drain_hb = self.correction_drain.clone();
 
             if ethercat_mcu_ids.contains(&mcu_id) {
                 let conn = ec_conns
@@ -2651,6 +2654,9 @@ impl PyMotionBridge {
                         ));
                         for (axis, &r) in hb.retired_counts.iter().enumerate() {
                             drain_hb.set_retired(mcu_id, axis as u8, r);
+                        }
+                        for (axis, &r) in hb.correction_retired_counts.iter().enumerate() {
+                            corr_drain_hb.set_retired(mcu_id, axis as u8, r);
                         }
                     },
                 ));
@@ -2741,17 +2747,22 @@ impl PyMotionBridge {
                     .get(&mcu_id)
                     .expect("host_io map built from mcu_configs")
                     .clone();
-                io.attach_heartbeat_callback(Arc::new(move |retired: &[u32]| {
-                    let _ = pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(
-                        crate::pump::HeartbeatMsg {
-                            mcu_id,
-                            retired_counts: retired.to_vec(),
-                        },
-                    ));
-                    for (axis, &r) in retired.iter().enumerate() {
-                        drain_hb.set_retired(mcu_id, axis as u8, r);
-                    }
-                }));
+                io.attach_heartbeat_callback(Arc::new(
+                    move |retired: &[u32], corr_retired: &[u32]| {
+                        let _ = pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(
+                            crate::pump::HeartbeatMsg {
+                                mcu_id,
+                                retired_counts: retired.to_vec(),
+                            },
+                        ));
+                        for (axis, &r) in retired.iter().enumerate() {
+                            drain_hb.set_retired(mcu_id, axis as u8, r);
+                        }
+                        for (axis, &r) in corr_retired.iter().enumerate() {
+                            corr_drain_hb.set_retired(mcu_id, axis as u8, r);
+                        }
+                    },
+                ));
             }
         }
 

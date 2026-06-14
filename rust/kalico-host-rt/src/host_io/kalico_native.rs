@@ -245,6 +245,7 @@ fn lift_event_to_runtime_event(
         MessageKind::StatusHeartbeat => match KStatusHeartbeat::decode(body) {
             Ok(hb) => KalicoDispatchResult::Event(RuntimeEvent::Heartbeat {
                 retired_counts: hb.retired_counts,
+                correction_retired_counts: hb.correction_retired_counts,
             }),
             Err(e) => {
                 log::warn!("kalico StatusHeartbeat decode failed: {e:?}");

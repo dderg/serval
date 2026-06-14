@@ -18,8 +18,12 @@ fn status_heartbeat_lifts_to_runtime_event() {
     hb.encode(&mut body);
     let mut st = make_state();
     match lift_event_to_runtime_event(&mut st, MessageKind::StatusHeartbeat, &body) {
-        KalicoDispatchResult::Event(RuntimeEvent::Heartbeat { retired_counts }) => {
+        KalicoDispatchResult::Event(RuntimeEvent::Heartbeat {
+            retired_counts,
+            correction_retired_counts,
+        }) => {
             assert_eq!(retired_counts, vec![7, 0, 3]);
+            assert_eq!(correction_retired_counts, Vec::<u32>::new());
         }
         other => panic!("expected Heartbeat event, got {other:?}"),
     }
