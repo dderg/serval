@@ -86,6 +86,15 @@ def test_get_status_without_bridge_returns_safe_defaults():
     assert status["live_extruder_velocity"] == 0.0
 
 
+def test_get_status_partial_axes_dict_defaults_missing():
+    report = _build({"x": (1.0, 0.5)})
+    status = report.get_status(0.0)
+    pos = status["live_position"]
+    assert (pos.x, pos.y, pos.z, pos.e) == (1.0, 0.0, 0.0, 0.0)
+    assert status["live_velocity"] == 0.5
+    assert status["live_extruder_velocity"] == 0.0
+
+
 def test_get_status_keeps_steppers_and_trapq_keys():
     report = _build({"x": (1.0, 0.0)})
     status = report.get_status(0.0)
