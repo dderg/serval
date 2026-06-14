@@ -18,11 +18,6 @@ impl CountMap {
         let delta = (pos_mm - self.origin_mm) * self.counts_per_mm;
         self.origin_counts + delta.round() as i32
     }
-
-    pub fn actual_mm(&self, actual_counts: i32) -> f64 {
-        self.origin_mm
-            + (f64::from(actual_counts) - f64::from(self.origin_counts)) / self.counts_per_mm
-    }
 }
 
 pub fn velocity_mm_s(rpm: i32, rotation_distance: f64) -> f64 {

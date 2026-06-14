@@ -507,15 +507,15 @@ fn main() {
                         msg,
                     });
                 }
-                Command::QueryMotorState { correlation_id } => match cmap.as_ref() {
-                    Some(map) => {
+                Command::QueryMotorState { correlation_id } => {
+                    if framed {
                         let (pos_counts, vel_rpm) = unsafe {
                             (
                                 ffi::ec_rt_get_position_actual(),
                                 ffi::ec_rt_get_velocity_actual(),
                             )
                         };
-                        let pos_mm = map.actual_mm(pos_counts);
+                        let pos_mm = f64::from(pos_counts) / counts_per_mm;
                         let vel_mm_s =
                             kalico_ethercat_rt::scale::velocity_mm_s(vel_rpm, rotation_distance);
                         server.respond(&motor_state_response_frame(
@@ -523,11 +523,10 @@ fn main() {
                             pos_mm,
                             vel_mm_s,
                         ));
-                    }
-                    None => {
+                    } else {
                         server.respond(&motor_state_empty_frame(correlation_id));
                     }
-                },
+                }
                 Command::Unknown { kind_raw, .. } => {
                     eprintln!("ec-rt: ignoring kind 0x{kind_raw:04x}");
                 }

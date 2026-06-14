@@ -49,22 +49,6 @@ fn origin_no_jump() {
 }
 
 #[test]
-fn actual_mm_is_reverse_of_origin() {
-    let m = CountMap::new(100.0, 1000, 5.0);
-    assert!((m.actual_mm(1000) - 5.0).abs() < 1e-9);
-    assert!((m.actual_mm(1100) - 6.0).abs() < 1e-9);
-    assert!((m.actual_mm(900) - 4.0).abs() < 1e-9);
-}
-
-#[test]
-fn actual_mm_round_trips_with_target_counts() {
-    let m = CountMap::new(3276.8, 12345, 10.0);
-    let pos = 42.5;
-    let c = m.target_counts(pos);
-    assert!((m.actual_mm(c) - pos).abs() <= 1.0 / 3276.8 + 1e-9);
-}
-
-#[test]
 fn velocity_mm_s_rpm_to_mm_per_s() {
     assert!((velocity_mm_s(600, 40.0) - 400.0).abs() < 1e-9);
     assert_eq!(velocity_mm_s(0, 40.0), 0.0);
