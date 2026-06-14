@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-pub mod error;
 pub mod curve;
+pub mod error;
 pub mod params;
 pub mod pipeline;
 pub(crate) mod reduce;

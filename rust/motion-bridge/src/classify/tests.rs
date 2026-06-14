@@ -69,12 +69,26 @@ fn classify_bezier_uses_arc_length_for_distance_and_ratio() {
     // A curved G5 with an E delta. distance_mm must be the arc length (> chord),
     // and the follower ratio must be de / arc_length (not de / chord).
     let start = [0.0, 0.0, 0.0];
-    let m = classify_bezier(start, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 0.0, &[(3usize, 2.0)], 30.0)
-        .expect("curve classifies");
+    let m = classify_bezier(
+        start,
+        0.0,
+        10.0,
+        0.0,
+        10.0,
+        10.0,
+        0.0,
+        0.0,
+        &[(3usize, 2.0)],
+        30.0,
+    )
+    .expect("curve classifies");
     let chord = 10.0_f64;
     assert!(m.distance_mm > chord, "arc length must exceed the chord");
     let ratio = m.segment.followers[0].ratio;
-    assert!((ratio - 2.0 / m.distance_mm).abs() < 1e-9, "ratio is de/arc_length");
+    assert!(
+        (ratio - 2.0 / m.distance_mm).abs() < 1e-9,
+        "ratio is de/arc_length"
+    );
 }
 
 #[test]
@@ -95,4 +109,43 @@ fn chain_reflection_negates_previous_pq() {
     assert_eq!(cps[1][0], -3.0);
     assert_eq!(cps[1][1], 2.0);
     assert_eq!(cps[1][2], 0.0);
+}
+
+#[test]
+fn experiment_cusp_and_near_cusp_classification_is_finite() {
+    // Exact cusp: i=j=0 => P1 == P0 (zero start tangent, fold-back curve).
+    // Near-cusp: tiny start leg (i=1e-7).
+    // Both must either (a) classify successfully with finite arc length,
+    // or (b) return ZeroDisplacement — the one case where arc_length <= epsilon.
+    // What must NEVER happen: a panic or a non-finite distance_mm.
+    let exact = classify_bezier(
+        [0.0, 0.0, 0.0],
+        0.0,
+        0.0,
+        -5.0,
+        0.0,
+        5.0,
+        0.0,
+        0.0,
+        &[],
+        30.0,
+    );
+    let near = classify_bezier(
+        [0.0, 0.0, 0.0],
+        1e-7,
+        0.0,
+        -5.0,
+        0.0,
+        5.0,
+        0.0,
+        0.0,
+        &[],
+        30.0,
+    );
+    for m in [&exact, &near] {
+        if let Ok(mv) = m {
+            assert!(mv.distance_mm.is_finite(), "arc length must be finite");
+            assert!(mv.distance_mm >= 0.0);
+        }
+    }
 }
