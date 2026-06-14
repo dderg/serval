@@ -104,6 +104,8 @@ endstop_trip_task(void)
 {
     if (!sched_check_wake(&endstop_trip_wake))
         return;
+    uint64_t discard_clock;
+    (void)handle_stop_inner(&discard_clock);
     uint8_t oid;
     struct endstop *e;
     foreach_oid(oid, e, command_config_endstop) {
