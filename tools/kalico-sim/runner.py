@@ -1015,9 +1015,9 @@ def run_simulation(
 
                 # Paced-refill streaming test: DELTA=40 SPEED=2 ACCEL=100
                 # produces ~82 correction pieces (80 cruise + 2 ramps) across
-                # ~6 chunks. Only 15 pieces fit per MCU message and ring depth
-                # is 16, so chunks 2-6 must wait for ring drain — this is the
-                # code path under test. The move takes ~20s at SPEED=2.
+                # several chunks (15 pieces per MCU message). With a correction
+                # ring depth of 64, later chunks must wait for drain feedback
+                # (feedback-paced) — the code path under test. ~20s at SPEED=2.
                 # This test runs BEFORE the stepper_q error-path test because
                 # that test triggers a klippy shutdown (config_error is
                 # treated as internal error), which would prevent this test.
