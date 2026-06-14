@@ -30,32 +30,11 @@ never fire mid-print.
    spawns `homing-trip-handler`, flushes the pump, and `broadcast_stop` sends a
    blocking `Stop` to every participating stepper MCU. Each `Stop` runs
    `handle_stop` → `kalico_runtime_gate_pieces` (freeze the curve evaluator) and
-   replies with `discard_clock = kalico_runtime_now_ticks`.
-4. **Reconcile.** The host reconstructs the **trip** position at `trip_clock`
-   and the **final** position at `discard_clock` from motion history.
+   replies with `discard_clock`.
 
 For same-MCU homing (endstop pin and homed steppers on one board — the Trident
 X/Y-on-H7 case) the physical brake waits for the full host round-trip in step 3.
 That latency is pure overshoot past the trigger point.
-
-### Why `discard_clock` is load-bearing
-
-`klippy/extras/homing.py:80` sets the post-home position to:
-
-```python
-trigger_height + (final_pos[axis] - trip_pos[axis])
-```
-
-`final_pos − trip_pos` is the **overshoot**, added to the trigger height and
-fed to `toolhead.set_position` (homing.py:305). It is `planned(discard_clock) −
-planned(trip_clock)`. Today this is correct because the MCU follows the planned
-trajectory right up until the host's `Stop`, so `discard_clock` equals the clock
-at which motion actually froze.
-
-If the MCU brakes early (this change) but the host still reads `discard_clock`
-from its *later* `Stop`, the overshoot is overstated by `speed × round-trip` and
-the homed position is wrong by that much — a systematic error. So the brake
-clock must stay honest (see design point 2).
 
 ## Design
 
@@ -65,7 +44,8 @@ Split the gating core out of `handle_stop` in `src/kalico_dispatch.c`. The only
 part `handle_stop` keeps for itself is the host-facing `send_stop_response` — a
 self-triggered stop has no host request to reply to, and sending an unsolicited
 `StopResponse` would desync the control channel (the host correlates responses
-by id).
+by id). `handle_stop_inner` is the existing `handle_stop` body, verbatim, minus
+the response.
 
 `handle_stop_inner` is **not** `static` — `endstop_trip_task` lives in
 `endstop.c`, which already includes `kalico_dispatch.h`, so its prototype goes
@@ -77,21 +57,17 @@ int32_t handle_stop_inner(uint64_t *discard_clock);
 ```
 
 ```c
-static uint64_t s_gate_clock;   // brake clock, captured on the first gate
-
+// kalico_dispatch.c
 int32_t handle_stop_inner(uint64_t *discard_clock) {
     int32_t rc = KALICO_ERR_NOT_INIT;
+    uint64_t dc = 0;
     if (runtime_handle) {
         irqstatus_t flag = irq_save();
-        if (!kalico_runtime_pieces_gated(runtime_handle)) {
-            rc = kalico_runtime_gate_pieces(runtime_handle);
-            s_gate_clock = kalico_runtime_now_ticks(runtime_handle);
-        } else {
-            rc = KALICO_OK;
-        }
+        rc = kalico_runtime_gate_pieces(runtime_handle);
+        dc = kalico_runtime_now_ticks(runtime_handle);
         irq_restore(flag);
     }
-    *discard_clock = s_gate_clock;
+    *discard_clock = dc;
     return rc;
 }
 
@@ -104,18 +80,19 @@ static void handle_stop(uint32_t correlation_id) {
 
 `irq_save`/`irq_restore` is required: `gate_pieces` mutates the engine through a
 raw pointer with no internal lock, and the engine tick runs in the higher-
-priority TIM5 ISR which would otherwise preempt the mutation. This matches what
-`handle_stop` does today.
+priority TIM5 ISR which would otherwise preempt the mutation. This is exactly
+what `handle_stop` does today.
 
-In `endstop_trip_task`, brake locally first (`handle_stop_inner`), then emit the
-trip event(s) as today:
+In `endstop_trip_task`, brake locally (`handle_stop_inner`), then emit the trip
+event(s) as today. The `discard_clock` out-param is ignored on the self-gate
+path — there is no host to report it to.
 
 ```c
 void endstop_trip_task(void) {
     if (!sched_check_wake(&endstop_trip_wake))
         return;
     uint64_t discard_clock;
-    handle_stop_inner(&discard_clock);   // brake locally; return value unused here
+    handle_stop_inner(&discard_clock);   // brake locally; out-param unused here
     uint8_t oid;
     struct endstop *e;
     foreach_oid(oid, e, command_config_endstop) {
@@ -130,57 +107,22 @@ void endstop_trip_task(void) {
 The brake gates the whole engine (not a single axis), matching the existing
 `broadcast_stop` semantics, which already gates each participant's whole engine.
 
-### 2. Keep the brake clock honest
-
-`handle_stop_inner` captures `s_gate_clock` the **first** time it gates and
-returns that stored clock on every subsequent call. So when the host's later
-`Stop` arrives and runs `handle_stop` → `handle_stop_inner`, it finds pieces
-already gated and replies with the **real brake time** instead of a fresh
-`now_ticks`. The host's reconstruction and the wire protocol are unchanged;
-`discard_clock` simply now always means "the clock motion actually froze,"
-whether the freeze was local or host-driven.
-
-No explicit reset is needed across homing cycles: `ResumeStream` ungates after
-homing (`pieces_gated` → false), so the next trip's first gate recaptures a
-fresh `s_gate_clock`.
-
-### 3. The double stop is idempotent
+### 2. The double stop just stops again
 
 After the self-gate, the host *will* send its own `Stop` to every participant —
-including the MCU that already braked. That second stop must be a safe no-op:
+including the MCU that already braked. That second stop simply runs
+`handle_stop_inner` again: `gate_pieces` is idempotent (`discard_pending` +
+set-flag), so re-gating an already-gated engine is a harmless no-op. The host
+gets its `StopResponse` as always. No special-casing, no remembered state.
 
-- **First stop (self-gate):** `pieces_gated` false → gate, capture
-  `s_gate_clock = now`.
-- **Second stop (host `Stop`):** `pieces_gated` true → `else` branch returns
-  `KALICO_OK` and the *stored* `s_gate_clock`. No re-gate, no `gate_pieces`
-  call, no clock overwrite. The host gets the `result=0` it expects and the
-  honest brake clock as `discard_clock`.
+> **Note (out of scope here):** with the self-gate, the host's `discard_clock`
+> (from its own late `Stop`) no longer marks the instant the toolhead actually
+> braked — it brakes earlier, at ≈`trip_clock`. The overshoot / slide-past-stop
+> accounting that consumes `discard_clock` is being reworked by a separate
+> mechanism and is intentionally **not** addressed here. This spec leaves the
+> host's `dispatch_endstop_trip` / position-reconstruction path untouched.
 
-There is no arrival-order hazard: the self-gate runs to completion inside
-`endstop_trip_task` before the main loop processes any incoming `Stop`, so
-"already gated" is always true when the host's `Stop` lands. `gate_pieces` is
-itself idempotent (`discard_pending` + set-flag), so even a direct double-gate
-would be harmless — the `pieces_gated` guard exists to preserve the *clock*, not
-to protect `gate_pieces`.
-
-This is exercised in the Rust tests below (gate, advance clock, gate again →
-`discard_clock` unchanged).
-
-### 4. Expose `pieces_gated` over the FFI
-
-The engine already has `pieces_gated()` (`engine.rs:264`, used internally in
-`runtime_ffi.rs`), but there is no C-callable export. Add one beside
-`kalico_runtime_gate_pieces` in `rust/kalico-c-api/src/runtime_ffi.rs`:
-
-```rust
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kalico_runtime_pieces_gated(rt: *mut KalicoRuntime) -> bool { ... }
-```
-
-and declare it in `rust/kalico-c-api/include/kalico_runtime.h`. Null/`!INIT_DONE`
-guards return `false` (matching the other accessors' conservative defaults).
-
-### 5. Lift the CLAUDE.md constraint
+### 3. Lift the CLAUDE.md constraint
 
 `CLAUDE.md` currently says (line 27-28):
 
@@ -195,10 +137,10 @@ relay still fans the stop out cross-MCU — both paths converge on the same
 
 ## What stays unchanged
 
-- **Host side**: `broadcast_stop`, `dispatch_endstop_trip`, trip/final position
+- **Host side**: `broadcast_stop`, `dispatch_endstop_trip`, position
   reconstruction, `home_axis_start`, `ResumeStream`/ungate. The host still sends
-  `Stop` to every participant including the self-gated MCU; that `Stop` is now
-  idempotent there and returns the honest stored clock.
+  `Stop` to every participant including the self-gated MCU; that `Stop` is now a
+  harmless re-gate there.
 - **Wire protocol**: `kalico_endstop_tripped`, `Stop`/`StopResponse`,
   `endstop_query_state` — no format changes.
 - **Cross-MCU path**: a remote source MCU self-gates its own (idle) engine
@@ -208,43 +150,37 @@ relay still fans the stop out cross-MCU — both paths converge on the same
 
 No new error surface. `handle_stop_inner` preserves the existing `rc`
 (`KALICO_ERR_NOT_INIT` when the runtime handle is absent; `KALICO_OK`
-otherwise). The self-gate path ignores `rc` (there is no host to report to);
-the host `Stop` path reports it exactly as before.
+otherwise). The self-gate path ignores `rc` (there is no host to report to); the
+host `Stop` path reports it exactly as before.
 
 ## Testing
 
-- **Rust (`cargo nextest run`)**:
-  - `kalico_runtime_pieces_gated` returns the engine state (false before gate,
-    true after, false after ungate).
-  - An already-gated `handle_stop_inner`/`Stop` returns the stored first-gate
-    clock, not a fresh `now_ticks` (exercise via the `kalico-c-api`
-    `piece_gate.rs` harness: gate, advance the clock, gate again, assert the
-    returned `discard_clock` is unchanged).
+- **Rust (`cargo nextest run`)**: re-gating an already-gated engine is a
+  harmless no-op (exercise via the `kalico-c-api` `piece_gate.rs` harness: gate,
+  gate again, assert still gated and no error / no corruption).
 - **Existing suites**: `motion-bridge` `homing/tests.rs` and `pump` tests
   continue to pass unchanged (host path untouched).
 - **kalico-sim**: a same-MCU home (endstop + homed stepper on one emulated MCU)
   where the trip event is delivered to the host with deliberate latency; assert
   the curve evaluator freezes at trip time (motion stops before the host's
-  `Stop` lands) and the reported overshoot reflects the true brake, not the
-  host round-trip.
+  `Stop` lands).
 
 ## Files touched
 
 | File | Change |
 |------|--------|
-| `src/kalico_dispatch.c` | extract `handle_stop_inner` (non-`static`: gate + capture/return `s_gate_clock`); `handle_stop` calls it then `send_stop_response`; add `s_gate_clock` static. |
+| `src/kalico_dispatch.c` | extract `handle_stop_inner` (non-`static`, current `handle_stop` body minus the response); `handle_stop` calls it then `send_stop_response`. |
 | `src/kalico_dispatch.h` | declare `handle_stop_inner` (so `endstop.c` can call it). |
-| `src/endstop.c` | `endstop_trip_task` calls `handle_stop_inner` after emitting the trip event. |
-| `rust/kalico-c-api/src/runtime_ffi.rs` | add `kalico_runtime_pieces_gated` export. |
-| `rust/kalico-c-api/include/kalico_runtime.h` | declare `kalico_runtime_pieces_gated`. |
+| `src/endstop.c` | `endstop_trip_task` calls `handle_stop_inner` before emitting the trip event(s). |
 | `CLAUDE.md` | replace the "do not optimize same-MCU homing" note with the self-gate behavior. |
-| (tests) | `kalico-c-api` gate/clock coverage; kalico-sim same-MCU home. |
+| (tests) | `kalico-c-api` idempotent re-gate coverage; kalico-sim same-MCU home. |
 
 ## Out of scope
 
+- Overshoot / slide-past-stop accounting (`discard_clock` consumer) — handled by
+  a separate mechanism; the host path is untouched here.
 - IRQ-immediate gating (braking inside `endstop_event` rather than the
-  foreground task) — a few µs tighter, but the task-level brake is simpler and
-  the freeze clock is captured honestly either way.
+  foreground task) — a few µs tighter, but the task-level brake is simpler.
 - Per-axis gating — `gate_pieces` freezes the whole engine, matching existing
   `broadcast_stop` behavior; multi-endstop simultaneous homing already stops
   together today.
