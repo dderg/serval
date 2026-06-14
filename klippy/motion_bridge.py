@@ -452,3 +452,6 @@ class MotionBridgeWrapper:
         return self._bridge.motion_state_at_clock(
             mcu._bridge_handle, int(clock), self._reactor.monotonic()
         )
+
+    def live_motor_positions(self):
+        return self._bridge.live_motor_positions()

@@ -45,9 +45,28 @@ class PrinterMotionReport:
 
     def _connect(self):
         self.last_status["steppers"] = list(sorted(self.steppers.keys()))
+        self.bridge = self.printer.lookup_object("motion_bridge", None)
 
     def get_status(self, eventtime):
-        return self.last_status
+        bridge = getattr(self, "bridge", None)
+        if bridge is None:
+            return self.last_status
+        axes = bridge.live_motor_positions()
+        if not axes:
+            return self.last_status
+        gcode = self.printer.lookup_object("gcode")
+        x, xv = axes.get("x", (0.0, 0.0))
+        y, yv = axes.get("y", (0.0, 0.0))
+        z, zv = axes.get("z", (0.0, 0.0))
+        e, ev = axes.get("e", (0.0, 0.0))
+        live_velocity = (xv * xv + yv * yv + zv * zv) ** 0.5
+        return {
+            "live_position": gcode.Coord(x, y, z, e),
+            "live_velocity": live_velocity,
+            "live_extruder_velocity": ev,
+            "steppers": self.last_status["steppers"],
+            "trapq": self.last_status["trapq"],
+        }
 
 
 def load_config(config):
