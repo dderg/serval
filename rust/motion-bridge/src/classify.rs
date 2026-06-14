@@ -1,4 +1,4 @@
-use compat::collinear::to_collinear_bezier;
+use geometry::curve::to_collinear_bezier;
 use geometry::segment::{CubicSegment, FollowerDemand, SourceRange};
 use nurbs::VectorNurbs;
 
