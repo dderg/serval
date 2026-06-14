@@ -325,6 +325,10 @@ class Homing:
                 retractpos[axis] -= direction * hi.retract_dist + overshoot
                 toolhead.move(retractpos, hi.retract_speed)
                 toolhead.wait_moves()
+            if servo_handle is not None:
+                bridge.finalize_homed_axis(
+                    servo_handle, axis, toolhead.get_position()[axis]
+                )
             _check_servo_drive_fault(gcmd, bridge, axis, servo_handle)
         except BaseException:
             try:

@@ -61,6 +61,7 @@ _STUB_MOTION_METHODS = frozenset(
         "set_drive_limits",
         "restore_drive_limits",
         "take_drive_fault",
+        "finalize_homed_axis",
         "sdo_read",
         "sdo_write",
     }
@@ -176,6 +177,9 @@ class MotionBridgeWrapper:
 
     def take_drive_fault(self, mcu_handle):
         return self._bridge.take_drive_fault(mcu_handle)
+
+    def finalize_homed_axis(self, mcu_handle, axis, pos_mm):
+        return self._bridge.finalize_homed_axis(mcu_handle, axis, pos_mm)
 
     def set_torque(self, mcu_handle, value, print_time):
         self._bridge.set_torque(mcu_handle, bool(value), print_time)

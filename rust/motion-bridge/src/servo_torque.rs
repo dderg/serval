@@ -4,8 +4,8 @@ use kalico_host_rt::native_call::NativeCall as _;
 use kalico_host_rt::unix_native_conn::UnixNativeConn;
 use kalico_protocol::codec::{Decode as _, Encode as _};
 use kalico_protocol::messages::{
-    MessageKind, RestoreDriveLimitsResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque,
-    SetTorqueResponse,
+    MessageKind, RestoreDriveLimitsResponse, SeedServoHome, SeedServoHomeResponse, SetDriveLimits,
+    SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
 };
 
 /// Worst-case enable: 3000 DC cycles of ladder (~3 s) plus margin.
@@ -77,6 +77,26 @@ pub fn send_restore_drive_limits(conn: &UnixNativeConn) -> Result<i32, String> {
     }
     let r = RestoreDriveLimitsResponse::decode(&resp)
         .map_err(|e| format!("RestoreDriveLimitsResponse decode: {e:?}"))?;
+    Ok(r.result)
+}
+
+pub fn send_seed_servo_home(
+    conn: &UnixNativeConn,
+    home_q16: i32,
+    timeout: Duration,
+) -> Result<i32, String> {
+    let body = SeedServoHome { home_q16 }.encoded_to_vec();
+    let (kind, resp) = conn
+        .kalico_call(MessageKind::SeedServoHome, body, timeout)
+        .map_err(|e| format!("SeedServoHome transport: {e:?}"))?;
+    if kind != MessageKind::SeedServoHomeResponse {
+        return Err(format!(
+            "SeedServoHome: unexpected response kind 0x{:04x}",
+            kind.as_u16()
+        ));
+    }
+    let r = SeedServoHomeResponse::decode(&resp)
+        .map_err(|e| format!("SeedServoHomeResponse decode: {e:?}"))?;
     Ok(r.result)
 }
 

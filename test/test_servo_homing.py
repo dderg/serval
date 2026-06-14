@@ -235,6 +235,9 @@ class FakeLimitsBridge:
     def restore_drive_limits(self, handle):
         self.calls.append(("restore", handle))
 
+    def finalize_homed_axis(self, handle, axis, pos_mm):
+        self.calls.append(("finalize", handle, axis, pos_mm))
+
 
 def test_homing_limits_guard_sets_and_restores():
     bridge = FakeLimitsBridge()

@@ -1191,6 +1191,49 @@ impl PyMotionBridge {
         Ok(())
     }
 
+    #[pyo3(signature = (mcu_handle, axis, pos_mm, timeout_s = 2.0))]
+    fn finalize_homed_axis(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        axis: usize,
+        pos_mm: f64,
+        timeout_s: f64,
+    ) -> PyResult<()> {
+        let _ = axis;
+        let conn = {
+            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mc = mcus.get(&mcu_handle).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "finalize_homed_axis: unknown mcu_handle {mcu_handle}"
+                ))
+            })?;
+            match mc.endpoint_conn.clone() {
+                Some(conn) => conn,
+                None => return Ok(()),
+            }
+        };
+        let home_q16 = (pos_mm * 65536.0).round() as i32;
+        tracing::info!(
+            subsystem = "bridge",
+            event = "servo_finalize_home",
+            mcu_handle,
+            pos_mm,
+            home_q16,
+            "servo home finalize"
+        );
+        let timeout = std::time::Duration::from_secs_f64(timeout_s);
+        let result = py
+            .detach(|| crate::servo_torque::send_seed_servo_home(&conn, home_q16, timeout))
+            .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "finalize_homed_axis: method-35 home-set failed: endpoint result {result}"
+            )));
+        }
+        Ok(())
+    }
+
     fn take_drive_fault(&self, mcu_handle: u32) -> PyResult<Option<u16>> {
         Ok(self
             .latched_drive_fault
