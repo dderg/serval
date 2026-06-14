@@ -1,5 +1,45 @@
 use super::*;
 
+use nurbs::eval::vector_eval;
+
+#[test]
+fn g51_elevation_is_exact_against_the_quadratic() {
+    // Quadratic: Q0=start, Q1=start+(I,J), Q2=end. Sample both, compare.
+    let start = [0.0, 0.0, 0.0];
+    let (i, j, dx, dy, dz) = (3.0, 5.0, 8.0, 0.0, 4.0);
+    let cubic = g51_control_points(start, i, j, dx, dy, dz);
+
+    let q0 = start;
+    let q1 = [start[0] + i, start[1] + j, start[2] + dz / 2.0];
+    let q2 = [start[0] + dx, start[1] + dy, start[2] + dz];
+    let quad = |t: f64| {
+        let mt = 1.0 - t;
+        [0usize, 1, 2].map(|k| mt * mt * q0[k] + 2.0 * mt * t * q1[k] + t * t * q2[k])
+    };
+
+    let cubic_nurbs = nurbs::VectorNurbs::<f64, 3>::try_new(
+        3,
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        cubic.to_vec(),
+    )
+    .unwrap();
+    for n in 0..=10 {
+        let t = f64::from(n) / 10.0;
+        let got = vector_eval(&cubic_nurbs, t);
+        let want = quad(t);
+        for k in 0..3 {
+            assert!((got[k] - want[k]).abs() < 1e-12, "t={t} axis={k}");
+        }
+    }
+}
+
+#[test]
+fn g51_z_is_linear_after_elevation() {
+    let cps = g51_control_points([0.0, 0.0, 0.0], 1.0, 1.0, 0.0, 0.0, 6.0);
+    assert!((cps[1][2] - 2.0).abs() < 1e-12); // dz/3
+    assert!((cps[2][2] - 4.0).abs() < 1e-12); // 2dz/3
+}
+
 #[test]
 fn collinear_places_control_points_at_thirds() {
     let cps = to_collinear_bezier([0.0, 0.0, 0.0], [9.0, 0.0, 0.0]);

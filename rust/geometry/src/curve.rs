@@ -35,5 +35,29 @@ pub fn g5_control_points(
     [start, p1, p2, end]
 }
 
+/// G5.1 quadratic Bézier (single control point `i,j` offset from start),
+/// elevated *exactly* to cubic. Z interpolated linearly.
+#[must_use]
+pub fn g51_control_points(
+    start: [f64; 3],
+    i: f64,
+    j: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+) -> [[f64; 3]; 4] {
+    let q0 = start;
+    let q1 = [start[0] + i, start[1] + j, start[2] + dz / 2.0];
+    let q2 = [start[0] + dx, start[1] + dy, start[2] + dz];
+    let elevate = |a: [f64; 3], mid: [f64; 3]| {
+        [
+            a[0] + 2.0 / 3.0 * (mid[0] - a[0]),
+            a[1] + 2.0 / 3.0 * (mid[1] - a[1]),
+            a[2] + 2.0 / 3.0 * (mid[2] - a[2]),
+        ]
+    };
+    [q0, elevate(q0, q1), elevate(q2, q1), q2]
+}
+
 #[cfg(test)]
 mod tests;
