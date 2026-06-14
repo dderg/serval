@@ -49,6 +49,7 @@ class GCodeMove:
             desc = getattr(self, "cmd_" + cmd + "_help", None)
             gcode.register_command(cmd, func, False, desc)
         gcode.register_command("G0", self.cmd_G1)
+        gcode.register_command("G5", self.cmd_G5)
         gcode.register_command("M114", self.cmd_M114, True)
         gcode.register_command(
             "GET_POSITION",
@@ -191,6 +192,71 @@ class GCodeMove:
                 "G5/G5.1 not supported with an active move transform yet "
                 "(skew_correction / bed_tilt / bed_mesh)"
             )
+
+    def _resolve_curve_endpoint(self, gcmd, params):
+        try:
+            for pos, axis in enumerate("XYZ"):
+                if axis in params:
+                    v = float(params[axis])
+                    if not self.absolute_coord:
+                        self.last_position[pos] += v
+                    else:
+                        self.last_position[pos] = v + self.base_position[pos]
+            if "E" in params:
+                v = float(params["E"]) * self.extrude_factor
+                if not self.absolute_coord or not self.absolute_extrude:
+                    self.last_position[3] += v
+                else:
+                    self.last_position[3] = v + self.base_position[3]
+            if "F" in params:
+                gcode_speed = float(params["F"])
+                if gcode_speed <= 0.0:
+                    raise gcmd.error(
+                        "Invalid speed in '%s'" % (gcmd.get_commandline(),)
+                    )
+                self.speed = gcode_speed * self.speed_factor
+        except ValueError:
+            raise gcmd.error(
+                "Unable to parse curve '%s'" % (gcmd.get_commandline(),)
+            )
+
+    def cmd_G5(self, gcmd):
+        self._reject_curve_if_transform_active(gcmd)
+        params = gcmd.get_command_parameters()
+        if "P" not in params or "Q" not in params:
+            raise gcmd.error("G5 requires P and Q")
+        has_i, has_j = "I" in params, "J" in params
+        if has_i != has_j:
+            raise gcmd.error("G5 I and J must both be present or both omitted")
+        start = list(self.last_position)
+        self._resolve_curve_endpoint(gcmd, params)
+        try:
+            p = float(params["P"])
+            q = float(params["Q"])
+            i = float(params["I"]) if has_i else None
+            j = float(params["J"]) if has_j else None
+        except ValueError:
+            raise gcmd.error(
+                "Unable to parse curve '%s'" % (gcmd.get_commandline(),)
+            )
+        end = self.last_position
+        dx, dy, dz = end[0] - start[0], end[1] - start[1], end[2] - start[2]
+        interior = []
+        if i is not None:
+            interior.append([start[0] + i, start[1] + j, start[2] + dz / 3.0])
+        interior.append([end[0] + p, end[1] + q, start[2] + 2.0 * dz / 3.0])
+
+        def submit(sdx, sdy, sdz, sde, fr):
+            self._submit_bezier_to_bridge(i, j, p, q, sdx, sdy, sdz, sde, fr)
+
+        toolhead = self.printer.lookup_object("toolhead")
+        toolhead.move_curve(
+            list(self.last_position), interior, submit, self.speed
+        )
+
+    def _submit_bezier_to_bridge(self, i, j, p, q, dx, dy, dz, de, fr):
+        motion = self.printer.lookup_object("motion")
+        motion.bridge.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
 
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):

@@ -97,3 +97,65 @@ def test_transform_gate_rejects_when_active():
         assert False, "expected rejection"
     except RuntimeError as e:
         assert "active move transform" in str(e)
+
+
+class ParamGcmd:
+    def __init__(self, params):
+        self._p = params
+
+    def get_command_parameters(self):
+        return self._p
+
+    def get_commandline(self):
+        return "G5 " + " ".join("%s%s" % kv for kv in self._p.items())
+
+    def error(self, msg):
+        return RuntimeError(msg)
+
+
+def make_full_gcode_move():
+    import klippy.extras.gcode_move as gm
+
+    g = gm.GCodeMove.__new__(gm.GCodeMove)
+    g.absolute_coord = True
+    g.absolute_extrude = True
+    g.base_position = [0.0, 0.0, 0.0, 0.0]
+    g.last_position = [0.0, 0.0, 0.0, 0.0]
+    g.extrude_factor = 1.0
+    g.speed = 50.0
+    g.speed_factor = 1.0 / 60.0
+    g.curve_calls = []
+    g._toolhead = types.SimpleNamespace(
+        get_position=lambda: [0.0, 0.0, 0.0, 0.0],
+        move_curve=lambda *a, **k: g.curve_calls.append((a, k)),
+    )
+    g.printer = types.SimpleNamespace(
+        lookup_object=lambda name, default=None: g._toolhead
+    )
+    g.position_with_transform = lambda: [0.0, 0.0, 0.0, 0.0]
+    return g
+
+
+def test_cmd_g5_requires_p_and_q():
+    g = make_full_gcode_move()
+    try:
+        g.cmd_G5(ParamGcmd({"X": "10", "Y": "0", "I": "2", "J": "2"}))
+        assert False
+    except RuntimeError as e:
+        assert "P and Q" in str(e)
+
+
+def test_cmd_g5_calls_move_curve_with_interior_points():
+    g = make_full_gcode_move()
+    g.cmd_G5(
+        ParamGcmd(
+            {"X": "10", "Y": "0", "I": "2", "J": "4", "P": "-3", "Q": "4"}
+        )
+    )
+    assert g.curve_calls, "move_curve should be invoked"
+    (args, _kwargs) = g.curve_calls[0]
+    newpos, interior, _submit, _speed = args
+    assert newpos[0] == 10.0 and newpos[1] == 0.0
+    # P1 = start+(I,J) = (2,4); P2 = end+(P,Q) = (7,4)
+    assert interior[0][:2] == [2.0, 4.0]
+    assert interior[1][:2] == [7.0, 4.0]
