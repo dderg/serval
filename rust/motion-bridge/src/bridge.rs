@@ -562,6 +562,14 @@ pub struct PyMotionBridge {
     events_dir: Mutex<Option<std::path::PathBuf>>,
     pump_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<crate::pump::PumpMsg>>>>,
     pump_thread: Mutex<Option<JoinHandle<()>>>,
+    live_position_cache: Arc<
+        Mutex<(
+            std::collections::HashMap<String, (f64, f64)>,
+            std::time::Instant,
+        )>,
+    >,
+    position_poll_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    position_poll_stop: Arc<std::sync::atomic::AtomicBool>,
     drain: std::sync::Arc<crate::drain::DrainSync>,
     active_drip_cohort: Arc<Mutex<Option<u64>>>,
     motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
@@ -821,6 +829,12 @@ impl PyMotionBridge {
             events_dir: Mutex::new(None),
             pump_tx: Arc::new(Mutex::new(None)),
             pump_thread: Mutex::new(None),
+            live_position_cache: Arc::new(Mutex::new((
+                std::collections::HashMap::new(),
+                std::time::Instant::now(),
+            ))),
+            position_poll_thread: Mutex::new(None),
+            position_poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             drain: std::sync::Arc::new(crate::drain::DrainSync::new()),
             active_drip_cohort: Arc::new(Mutex::new(None)),
             motion_history: Arc::new(Mutex::new(crate::motion_history::HistoryStore::default())),
@@ -1358,6 +1372,19 @@ impl PyMotionBridge {
         if let Some(h) = pump_join {
             if let Err(e) = h.join() {
                 log::error!("bridge.shutdown(): push-pieces-pump join panicked: {e:?}");
+            }
+        }
+
+        self.position_poll_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self
+            .position_poll_thread
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            if let Err(e) = h.join() {
+                log::error!("bridge.shutdown(): live-position-poll join panicked: {e:?}");
             }
         }
 
@@ -2664,6 +2691,45 @@ impl PyMotionBridge {
         *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_tx_init.clone());
         *self.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_thread_handle);
 
+        {
+            let configs = Arc::clone(&self.mcu_axis_configs);
+            let mcus = Arc::clone(&self.mcus);
+            let cache = Arc::clone(&self.live_position_cache);
+            let stop = Arc::clone(&self.position_poll_stop);
+            let handle = std::thread::Builder::new()
+                .name("live-position-poll".into())
+                .spawn(move || {
+                    use std::sync::atomic::Ordering;
+                    let period = std::time::Duration::from_millis(200);
+                    let timeout = std::time::Duration::from_millis(250);
+                    while !stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(period);
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match collect_motor_positions_inner(&configs, &mcus, timeout) {
+                            Ok(map) => {
+                                let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
+                                *c = (map, std::time::Instant::now());
+                            }
+                            Err(e) => {
+                                if !e.contains("no axes configured") {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "live-position poll failed; serving stale cache"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                })
+                .expect("spawn live-position-poll thread");
+            *self
+                .position_poll_thread
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(handle);
+        }
+
         for cfg_mcu in &mcu_configs {
             let mcu_id = cfg_mcu.mcu_id;
             let pump_tx_hb = pump_tx_init.clone();
@@ -3811,6 +3877,14 @@ impl PyMotionBridge {
         let timeout = std::time::Duration::from_secs_f64(timeout_s.max(0.0));
         py.detach(|| collect_motor_positions_inner(&self.mcu_axis_configs, &self.mcus, timeout))
             .map_err(PyRuntimeError::new_err)
+    }
+
+    fn live_motor_positions(&self) -> std::collections::HashMap<String, (f64, f64)> {
+        self.live_position_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .0
+            .clone()
     }
 }
 
