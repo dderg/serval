@@ -42,7 +42,7 @@ pub enum GridScheme {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BindingConstraint {
     None,
     Velocity { set: usize },
@@ -52,6 +52,20 @@ pub enum BindingConstraint {
     PaAccel { set: usize },
     PaJerk { set: usize },
     Boundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorstBinding {
+    pub constraint: BindingConstraint,
+    pub ratio: f64,
+    pub grid_index: usize,
+    pub s: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BindingSummary {
+    pub histogram: Vec<(BindingConstraint, u32)>,
+    pub worst: Option<WorstBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -115,4 +129,5 @@ pub struct TopProfile {
     pub status: SolveStatus,
     pub grid_scheme: GridScheme,
     pub total_time: f64,
+    pub binding: BindingSummary,
 }

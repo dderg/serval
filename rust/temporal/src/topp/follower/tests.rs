@@ -582,3 +582,50 @@ fn virtual_path_plans_under_follower_limits_and_feedrate() {
     }
     assert!(max_dvdt <= 1500.0 * 1.02, "accel {max_dvdt} > 1500");
 }
+
+#[test]
+fn binding_summary_reports_velocity_pin() {
+    let limits = limits_with_follower(50.0, 1.0e9, 1.0e12);
+    let profile = solve_with_followers(
+        &limits,
+        &[FollowerDemand {
+            axis: 3,
+            ratio: 0.5,
+            pa_k: 0.0,
+        }],
+    );
+
+    let worst = profile
+        .binding
+        .worst
+        .expect("a velocity-capped cruise must produce a worst-pinned sample");
+    assert!(
+        matches!(worst.constraint, crate::BindingConstraint::Velocity { .. }),
+        "worst pin should be a velocity row, got {:?}",
+        worst.constraint
+    );
+    assert!(
+        (0.9..=1.05).contains(&worst.ratio),
+        "cruise rides the cap; ratio = {}",
+        worst.ratio
+    );
+
+    let velocity_count: u32 = profile
+        .binding
+        .histogram
+        .iter()
+        .filter(|(c, _)| matches!(c, crate::BindingConstraint::Velocity { .. }))
+        .map(|(_, n)| *n)
+        .sum();
+    assert!(
+        velocity_count > 0,
+        "cruise samples should tally as Velocity bindings"
+    );
+
+    let counts: Vec<u32> = profile.binding.histogram.iter().map(|(_, n)| *n).collect();
+    assert!(
+        counts.windows(2).all(|w| w[0] >= w[1]),
+        "histogram must be sorted by descending count; got {:?}",
+        counts
+    );
+}

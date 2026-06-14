@@ -444,6 +444,10 @@ impl LimitSection {
 }
 
 impl PlannerConfig {
+    pub fn limit_set_names(&self) -> Vec<String> {
+        self.limit_sections.iter().map(|s| s.name.clone()).collect()
+    }
+
     pub fn to_temporal_limits(&self) -> Result<temporal::Limits, LimitConfigError> {
         let mut sets = Vec::with_capacity(self.limit_sections.len() + 1);
         let n_axes = self.axis_registry.n_axes();

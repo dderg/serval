@@ -1,9 +1,7 @@
 use crate::multi::junction::JunctionKind;
-use crate::{GridSample, TopProfile};
+use crate::{BindingSummary, GridSample, TopProfile};
 use std::ops::RangeInclusive;
 
-/// Maximal runs of segments joined by Smooth junctions. `kinds[k]` is the
-/// junction between segments k and k+1.
 #[allow(clippy::range_minus_one)]
 pub(crate) fn partition_chains(
     n_segments: usize,
@@ -22,17 +20,14 @@ pub(crate) fn partition_chains(
     chains
 }
 
-/// Slice one chain profile into per-segment profiles. The junction sample is
-/// duplicated into both neighbors; per-segment `s` is rebased to start at 0;
-/// per-segment time is the trapezoid over the slice (same formula as
-/// output::assemble).
 pub(crate) fn slice_chain_profile(
     chain: &TopProfile,
     segment_ranges: &[(usize, usize)],
 ) -> Vec<TopProfile> {
     segment_ranges
         .iter()
-        .map(|&(lo, hi)| {
+        .enumerate()
+        .map(|(i, &(lo, hi))| {
             let s0 = chain.samples[lo].s;
             let mut samples: Vec<GridSample> = chain.samples[lo..=hi]
                 .iter()
@@ -57,11 +52,17 @@ pub(crate) fn slice_chain_profile(
             if matches!(chain.status, crate::SolveStatus::Infeasible { .. }) {
                 total_time = f64::INFINITY;
             }
+            let binding = if i == 0 {
+                chain.binding.clone()
+            } else {
+                BindingSummary::default()
+            };
             TopProfile {
                 samples,
                 status: chain.status,
                 grid_scheme: chain.grid_scheme,
                 total_time,
+                binding,
             }
         })
         .collect()
