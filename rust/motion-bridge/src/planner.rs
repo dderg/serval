@@ -454,6 +454,8 @@ fn run_loop(
     commit_fire_count: Arc<AtomicU32>,
 ) {
     let mut thread_state = PlannerThreadState::build(&config);
+    let limit_names = config.limit_set_names();
+    let mut binding_acc = crate::binding_report::BindingAccumulator::new(Instant::now());
 
     {
         let tl = config
@@ -586,6 +588,7 @@ fn run_loop(
                     window_segments,
                     plan,
                     fallback_rung,
+                    binding,
                 } = report;
                 let beta_iters = plan.beta_iterations;
                 let beta_converged = plan.beta_converged;
@@ -638,6 +641,9 @@ fn run_loop(
                         "replan overran its real-time budget"
                     );
                 }
+
+                binding_acc.record(&binding, state.t_appended);
+                binding_acc.maybe_rollup(Instant::now(), &limit_names);
 
                 for s in &drained {
                     if let Err(detail) = dispatch(s) {
@@ -710,6 +716,7 @@ fn run_loop(
             }
 
             PlannerMsg::KalicoStreamOpen { home_pos } => {
+                binding_acc.flush(Instant::now(), &limit_names);
                 sync_instant = None;
                 let chains = &thread_state.replan_ctx.chains;
                 state.reset(&home_pos[..chains.n_axes()], chains);
@@ -736,7 +743,10 @@ fn run_loop(
                 }
             }
 
-            PlannerMsg::Shutdown => return,
+            PlannerMsg::Shutdown => {
+                binding_acc.flush(Instant::now(), &limit_names);
+                return;
+            }
 
             PlannerMsg::HomeDrip(p) => {
                 sync_instant = None;

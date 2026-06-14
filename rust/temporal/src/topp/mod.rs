@@ -283,7 +283,7 @@ fn boundary_infeasible_profile(
     mvc_b: f64,
     at_grid: usize,
 ) -> TopProfile {
-    use crate::{BindingConstraint, GridSample, InfeasibleReason, SolveStatus};
+    use crate::{BindingConstraint, BindingSummary, GridSample, InfeasibleReason, SolveStatus};
     let samples = s
         .iter()
         .map(|&si| GridSample {
@@ -302,6 +302,7 @@ fn boundary_infeasible_profile(
         },
         grid_scheme: crate::GridScheme::UniformArclength,
         total_time: f64::INFINITY,
+        binding: BindingSummary::default(),
     }
 }
 
@@ -311,7 +312,7 @@ fn max_reachable_infeasible_profile(
     max_b: f64,
     at_grid: usize,
 ) -> TopProfile {
-    use crate::{BindingConstraint, GridSample, InfeasibleReason, SolveStatus};
+    use crate::{BindingConstraint, BindingSummary, GridSample, InfeasibleReason, SolveStatus};
     let samples = s
         .iter()
         .map(|&si| GridSample {
@@ -330,6 +331,7 @@ fn max_reachable_infeasible_profile(
         },
         grid_scheme: crate::GridScheme::UniformArclength,
         total_time: f64::INFINITY,
+        binding: BindingSummary::default(),
     }
 }
 
@@ -339,7 +341,7 @@ fn min_reachable_infeasible_profile(
     min_b: f64,
     at_grid: usize,
 ) -> TopProfile {
-    use crate::{BindingConstraint, GridSample, InfeasibleReason, SolveStatus};
+    use crate::{BindingConstraint, BindingSummary, GridSample, InfeasibleReason, SolveStatus};
     let samples = s
         .iter()
         .map(|&si| GridSample {
@@ -358,6 +360,7 @@ fn min_reachable_infeasible_profile(
         },
         grid_scheme: crate::GridScheme::UniformArclength,
         total_time: f64::INFINITY,
+        binding: BindingSummary::default(),
     }
 }
 

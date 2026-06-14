@@ -1,28 +1,27 @@
 use crate::topp::chain::ChainGrid;
 use crate::topp::solver::SolverResult;
-use crate::{BindingConstraint, FollowerDemand, Limits, restricted_norm};
+use crate::{
+    BindingConstraint, BindingSummary, FollowerDemand, Limits, WorstBinding, restricted_norm,
+};
 
-/// 0.2% feasibility margin for velocity / accel / centripetal.
 pub(crate) const EPS_FEAS: f64 = 2e-3;
 
-pub(crate) const EPS_FEAS_JERK: f64 = 5e-2; // temporary hack, to be investigated later
+pub(crate) const EPS_FEAS_JERK: f64 = 5e-2; // TODO: investigate jerk tolerance
 
-/// Threshold below which a normalised ratio is treated as fully slack.
 const SLACK_THRESHOLD: f64 = 1e-6;
 
-/// `b_i` below which endpoints are tagged `BindingConstraint::Boundary`.
 const BOUNDARY_B_TOL: f64 = 1e-9;
 
 #[derive(Debug, Clone)]
 pub(crate) struct VerifyReport {
     pub binding_per_grid: Vec<BindingConstraint>,
-    /// `max_i(worst_ratio_at_i) − 1.0`. Positive means infeasible.
     #[allow(dead_code)]
     pub worst_violation: f64,
     pub worst_violation_grid: usize,
     pub feasible: bool,
     pub worst_jerk_ratio: f64,
     pub worst_non_jerk_ratio: f64,
+    pub binding_summary: BindingSummary,
 }
 
 struct PointInputs<'a> {
@@ -42,12 +41,9 @@ struct PointRatios {
     worst_tag: BindingConstraint,
     max_jerk: f64,
     max_non_jerk: f64,
+    worst_non_jerk_tag: BindingConstraint,
 }
 
-/// All constraint ratios at one grid point. Class maxima scan every entry, not
-/// just the per-point winner, so an in-band jerk ratio can't mask a co-located
-/// non-jerk violation. Tie-breaking: Velocity > AccelNorm > JerkNorm; lower
-/// set index wins within a class.
 fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
     let s_dot2 = p.s_dot * p.s_dot;
     let s_dot3 = s_dot2 * p.s_dot;
@@ -143,6 +139,7 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
     let mut worst_tag = BindingConstraint::None;
     let mut max_jerk = 0.0_f64;
     let mut max_non_jerk = 0.0_f64;
+    let mut worst_non_jerk_tag = BindingConstraint::None;
 
     for (ratio, tag) in entries {
         if ratio > worst_ratio {
@@ -161,6 +158,7 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
             }
         } else if ratio > max_non_jerk {
             max_non_jerk = ratio;
+            worst_non_jerk_tag = tag;
         }
     }
 
@@ -169,17 +167,21 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
     } else {
         worst_tag
     };
+    let worst_non_jerk_tag = if max_non_jerk < SLACK_THRESHOLD {
+        BindingConstraint::None
+    } else {
+        worst_non_jerk_tag
+    };
 
     PointRatios {
         worst_ratio,
         worst_tag,
         max_jerk,
         max_non_jerk,
+        worst_non_jerk_tag,
     }
 }
 
-/// Chain-aware verifier. Junction points carry the LEFT segment's limits in the
-/// primary arrays; the dual pass is what enforces the right side.
 pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyReport {
     let n = chain.n_points();
     let has_pa = chain.followers.iter().flatten().any(|f| f.pa_k != 0.0);
@@ -194,6 +196,7 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             feasible: true,
             worst_jerk_ratio: 0.0,
             worst_non_jerk_ratio: 0.0,
+            binding_summary: BindingSummary::default(),
         };
     }
 
@@ -211,6 +214,8 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
     let mut global_worst_idx: usize = 0;
     let mut worst_jerk_ratio: f64 = 0.0;
     let mut worst_non_jerk_ratio: f64 = 0.0;
+    let mut worst_non_jerk_idx: usize = 0;
+    let mut worst_non_jerk_tag: BindingConstraint = BindingConstraint::None;
 
     for i in 0..n {
         let b_i = result.b[i];
@@ -252,12 +257,25 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         if let Some(w) = &windows {
             for d in crate::topp::follower::windowed_demands_at(w, chain, &result.b, &result.a, i) {
                 let ratio = d.value / d.cap;
-                if ratio > pr.max_jerk {
-                    pr.max_jerk = ratio;
+                let tag = windowed_tag(&d);
+                let is_jerk_class = matches!(
+                    tag,
+                    BindingConstraint::JerkNorm { .. }
+                        | BindingConstraint::PaJerk { .. }
+                        | BindingConstraint::PaVelocity { .. }
+                        | BindingConstraint::PaAccel { .. }
+                );
+                if is_jerk_class {
+                    if ratio > pr.max_jerk {
+                        pr.max_jerk = ratio;
+                    }
+                } else if ratio > pr.max_non_jerk {
+                    pr.max_non_jerk = ratio;
+                    pr.worst_non_jerk_tag = tag;
                 }
                 if ratio > pr.worst_ratio {
                     pr.worst_ratio = ratio;
-                    pr.worst_tag = windowed_tag(&d);
+                    pr.worst_tag = tag;
                 }
             }
         }
@@ -277,6 +295,8 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         }
         if pr.max_non_jerk > worst_non_jerk_ratio {
             worst_non_jerk_ratio = pr.max_non_jerk;
+            worst_non_jerk_idx = i;
+            worst_non_jerk_tag = pr.worst_non_jerk_tag;
         }
 
         point_worst_ratio.push(pr.worst_ratio);
@@ -327,8 +347,37 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         }
         if pr.max_non_jerk > worst_non_jerk_ratio {
             worst_non_jerk_ratio = pr.max_non_jerk;
+            worst_non_jerk_idx = i;
+            worst_non_jerk_tag = pr.worst_non_jerk_tag;
         }
     }
+
+    let mut histogram_map: std::collections::HashMap<BindingConstraint, u32> =
+        std::collections::HashMap::new();
+    for tag in &binding_per_grid {
+        match tag {
+            BindingConstraint::None | BindingConstraint::Boundary => {}
+            other => *histogram_map.entry(*other).or_insert(0) += 1,
+        }
+    }
+    let mut histogram: Vec<(BindingConstraint, u32)> = histogram_map.into_iter().collect();
+    histogram.sort_by(|(ca, na), (cb, nb)| nb.cmp(na).then_with(|| ca.cmp(cb)));
+
+    let worst = if worst_non_jerk_ratio >= SLACK_THRESHOLD
+        && !matches!(
+            worst_non_jerk_tag,
+            BindingConstraint::None | BindingConstraint::Boundary
+        ) {
+        Some(WorstBinding {
+            constraint: worst_non_jerk_tag,
+            ratio: worst_non_jerk_ratio,
+            grid_index: worst_non_jerk_idx,
+            s: chain.s[worst_non_jerk_idx],
+        })
+    } else {
+        None
+    };
+    let binding_summary = BindingSummary { histogram, worst };
 
     let worst_violation = global_worst_ratio - 1.0;
     let feasible =
@@ -340,6 +389,7 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         feasible,
         worst_jerk_ratio,
         worst_non_jerk_ratio,
+        binding_summary,
     }
 }
 
