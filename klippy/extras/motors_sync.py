@@ -323,8 +323,9 @@ class KinematicsParser:
         kin_map = {cls.__name__.replace('Kinematics', '').lower(): cls
                    for cls in BaseKinematics.__subclasses__()}
         kin_map.update({'limitedcorexy': CoreXYKinematics})
-        printer_section = config.getsection('printer')
-        conf_kin = printer_section.get('kinematics')
+        if not config.has_section('kinematics'):
+            raise config.error("motors_sync: [kinematics] section is required")
+        conf_kin = config.getsection('kinematics').get('type')
         kin_helper = kin_map.get("".join(conf_kin.split("_")))
         if kin_helper is None:
             raise config.error(f"motors_sync: Not supported "
