@@ -105,16 +105,55 @@ impl SolverScale {
     }
 
     pub fn for_chain(chain: &crate::topp::chain::ChainGrid) -> Self {
-        let sigma = chain
+        let v_ceiling = chain
             .limits
             .iter()
             .map(Limits::v_ceiling)
             .fold(f64::NEG_INFINITY, f64::max);
-        if sigma <= 0.0 || !sigma.is_finite() {
+        if v_ceiling <= 0.0 || !v_ceiling.is_finite() {
             return Self::identity();
         }
+
+        // Scale to the path velocity the trajectory can actually *reach*, not the
+        // raw velocity ceiling. The reachable peak is the high point of the MVC
+        // envelope (velocity ∧ centripetal caps) capped by acceleration-from-rest
+        // reachability over the path length. Scaling by v_ceiling alone over-scales
+        // accel/jerk/centripetal-bound moves by many orders of magnitude — a 1e9
+        // velocity cap with 1e-2 accel collapses b = v² to ~1e-17 scaled units,
+        // far below Clarabel's precision, surfacing as garbage residuals or false
+        // infeasibility.
+        let mut peak_mvc_b = 0.0_f64;
+        let mut a_tan_max = 0.0_f64;
+        for (i, g) in chain.geom.iter().enumerate() {
+            scan_reachable_b(chain.limits_at(i), g, &mut peak_mvc_b, &mut a_tan_max);
+        }
+        for j in &chain.junctions {
+            scan_reachable_b(
+                &chain.limits[j.limits_idx],
+                &j.geom,
+                &mut peak_mvc_b,
+                &mut a_tan_max,
+            );
+        }
+
+        let length =
+            chain.s.last().copied().unwrap_or(0.0) - chain.s.first().copied().unwrap_or(0.0);
+        let b_reach = a_tan_max * length;
+        let peak_b = match (peak_mvc_b > 0.0, b_reach > 0.0) {
+            (true, true) => peak_mvc_b.min(b_reach),
+            (true, false) => peak_mvc_b,
+            (false, true) => b_reach,
+            (false, false) => v_ceiling * v_ceiling,
+        };
+
+        let v_char = peak_b.sqrt().min(v_ceiling);
+        let v_char = if v_char > 0.0 && v_char.is_finite() {
+            v_char
+        } else {
+            v_ceiling
+        };
         Self {
-            mm_per_unit: sigma / V_TARGET_UNITS_PER_S,
+            mm_per_unit: v_char / V_TARGET_UNITS_PER_S,
         }
     }
 
@@ -170,6 +209,28 @@ impl SolverScale {
                 .map(|iv| iv.iter().map(|smp| scale_inter_sample(smp, s)).collect())
                 .collect(),
         }
+    }
+}
+
+/// Accumulate the reachable-velocity envelope at one path point into the
+/// running peak `b = v²` (velocity ∧ centripetal caps) and the running max
+/// tangential-acceleration cap used for accel-from-rest reachability.
+fn scan_reachable_b(
+    limits: &Limits,
+    geom: &crate::topp::chain::PointGeom,
+    peak_mvc_b: &mut f64,
+    a_tan_max: &mut f64,
+) {
+    use crate::topp::constraints::{COMP_FLOOR, KAPPA_FLOOR};
+    let b = limits
+        .mvc_b(&geom.c_prime, COMP_FLOOR)
+        .min(limits.b_cent_cap(&geom.c_prime, &geom.c_double_prime, KAPPA_FLOOR));
+    if b.is_finite() {
+        *peak_mvc_b = peak_mvc_b.max(b);
+    }
+    let a_tan = limits.a_tan_cap(&geom.c_prime, COMP_FLOOR);
+    if a_tan.is_finite() {
+        *a_tan_max = a_tan_max.max(a_tan);
     }
 }
 

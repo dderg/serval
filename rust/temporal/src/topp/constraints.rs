@@ -52,6 +52,16 @@ pub const KAPPA_FLOOR: f64 = 1e-12;
 
 pub const B_MAX_CENT_CAP: f64 = 1e8;
 
+/// Ceiling on the *scaled* `b = v²` cap (`b_cap`) used to bound the centripetal
+/// and velocity constraint rows. `B_MAX_CENT_CAP` is a fixed mm-unit stand-in
+/// for the unbounded centripetal cap on straight segments; dividing it by σ²
+/// inflates it to 1e10+ scaled units on slow machines (tiny σ), and that huge
+/// constraint RHS wrecks Clarabel's equilibration into false infeasibility. The
+/// solver scale normalizes the peak reachable b to ≈`V_TARGET_UNITS_PER_S`², so
+/// clamping `b_cap` here bounds the cap-row dynamic range to a constant
+/// independent of machine speed. A no-op at identity and normal-machine scales.
+pub(crate) const B_CAP_SCALED_CEILING: f64 = 1e8;
+
 pub(crate) const COMP_FLOOR: f64 = 1e-12;
 
 pub fn rest_boundary_b_cap(d: f64, a_env: f64, j_env: f64) -> f64 {
@@ -185,7 +195,7 @@ pub fn build_chain(
     debug_assert!(n >= 2, "ChainGrid must have at least 2 points");
 
     let kappa_floor = scale.to_scaled_kappa(KAPPA_FLOOR);
-    let b_cap = scale.to_scaled_b(B_MAX_CENT_CAP);
+    let b_cap = scale.to_scaled_b(B_MAX_CENT_CAP).min(B_CAP_SCALED_CEILING);
     let h = &chain.h_intervals;
     let h_bar = |i: usize| -> f64 {
         if i == 0 {
