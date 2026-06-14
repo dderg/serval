@@ -251,13 +251,20 @@ class GCodeMove:
             self._submit_bezier_to_bridge(i, j, p, q, sdx, sdy, sdz, sde, fr)
 
         toolhead = self.printer.lookup_object("toolhead")
-        toolhead.move_curve(
-            list(self.last_position), interior, submit, self.speed
-        )
+        try:
+            toolhead.move_curve(
+                list(self.last_position), interior, submit, self.speed
+            )
+        except self.printer.command_error:
+            self.last_position[:] = start
+            raise
 
     def _submit_bezier_to_bridge(self, i, j, p, q, dx, dy, dz, de, fr):
         motion = self.printer.lookup_object("motion")
-        motion.bridge.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
+        try:
+            motion.bridge.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
+        except ValueError as e:
+            raise self.printer.command_error(str(e))
 
     def cmd_G5_1(self, gcmd):
         self._reject_curve_if_transform_active(gcmd)

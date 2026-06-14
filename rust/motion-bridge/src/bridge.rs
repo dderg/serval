@@ -2986,12 +2986,12 @@ impl PyMotionBridge {
                 (None, None) => {
                     let prev = *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner());
                     let (pp, qq) = prev.ok_or_else(|| {
-                        PyRuntimeError::new_err("G5 without I J must follow another G5")
+                        PyValueError::new_err("G5 without I J must follow another G5")
                     })?;
                     (-pp, -qq)
                 }
                 _ => {
-                    return Err(PyRuntimeError::new_err(
+                    return Err(PyValueError::new_err(
                         "G5 I and J must both be present or both omitted",
                     ));
                 }
