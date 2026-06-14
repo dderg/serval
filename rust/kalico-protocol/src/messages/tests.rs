@@ -535,6 +535,40 @@ fn motor_state_kinds_roundtrip() {
 }
 
 #[test]
+fn motor_state_response_roundtrip() {
+    let msg = MotorStateResponse {
+        motors: vec![
+            MotorSample {
+                slot: 0,
+                pos_q16: 123 * 65536,
+                vel_q16: -45 * 65536,
+            },
+            MotorSample {
+                slot: 2,
+                pos_q16: 7,
+                vel_q16: 0,
+            },
+        ],
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf.len(), 1 + 2 * 9);
+    let mut c = Cursor::new(&buf);
+    let got = MotorStateResponse::decode_from(&mut c).unwrap();
+    assert_eq!(got, msg);
+}
+
+#[test]
+fn motor_state_response_empty_roundtrip() {
+    let msg = MotorStateResponse { motors: vec![] };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf, vec![0u8]);
+    let mut c = Cursor::new(&buf);
+    assert_eq!(MotorStateResponse::decode_from(&mut c).unwrap(), msg);
+}
+
+#[test]
 fn capture_message_kinds_round_trip_u16() {
     use crate::messages::MessageKind;
     for (kind, raw) in [

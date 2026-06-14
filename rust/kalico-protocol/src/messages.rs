@@ -844,6 +844,60 @@ impl Decode for EndstopTrip {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MotorSample {
+    pub slot: u8,
+    pub pos_q16: i32,
+    pub vel_q16: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MotorStateResponse {
+    pub motors: Vec<MotorSample>,
+}
+
+impl Encode for MotorStateResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.motors.len() as u8);
+        for m in &self.motors {
+            put_u8(out, m.slot);
+            put_i32(out, m.pos_q16);
+            put_i32(out, m.vel_q16);
+        }
+    }
+}
+
+impl Decode for MotorStateResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let count = get_u8(c)?;
+        let need =
+            (count as usize)
+                .checked_mul(9)
+                .ok_or(DecodeError::ArrayLengthExceedsBuffer {
+                    claimed: u32::from(count),
+                    available: c.remaining(),
+                })?;
+        if need > c.remaining() {
+            return Err(DecodeError::ArrayLengthExceedsBuffer {
+                claimed: u32::from(count),
+                available: c.remaining(),
+            });
+        }
+        let mut motors = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let slot = get_u8(c)?;
+            let pos_q16 = get_i32(c)?;
+            let vel_q16 = get_i32(c)?;
+            motors.push(MotorSample {
+                slot,
+                pos_q16,
+                vel_q16,
+            });
+        }
+        Ok(Self { motors })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SlaveState {
     Ok = 0x00,
