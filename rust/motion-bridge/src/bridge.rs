@@ -684,21 +684,25 @@ mod ring_depth_for_axis_tests {
 
     #[test]
     fn success_two_axis_mcu() {
+        use runtime::stepping_state::CORRECTION_RING_DEPTH;
+        let expected = ((1984 - 2 * CORRECTION_RING_DEPTH as u32) / 2) as u16;
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 1, AXIS_X as u8).unwrap(),
-            976
+            expected
         );
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 1, AXIS_Y as u8).unwrap(),
-            976
+            expected
         );
     }
 
     #[test]
     fn success_single_axis_mcu() {
+        use runtime::stepping_state::CORRECTION_RING_DEPTH;
+        let expected = (1984 - CORRECTION_RING_DEPTH as u32) as u16;
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 2, AXIS_Z as u8).unwrap(),
-            1968
+            expected
         );
     }
 

@@ -11,7 +11,7 @@ pub const N_AXES: usize = MAX_AXES;
 
 pub const MAX_STEPPERS_PER_AXIS: usize = 4;
 
-pub const CORRECTION_RING_DEPTH: usize = 16;
+pub const CORRECTION_RING_DEPTH: usize = 64;
 pub const CORRECTION_MOTOR_NONE: u8 = 0xFF;
 
 #[repr(u8)]

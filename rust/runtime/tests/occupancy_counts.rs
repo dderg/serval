@@ -32,7 +32,7 @@ fn unconfigured_axes_report_zero_occupancy() {
 #[test]
 fn empty_configured_axis_reports_zero_occupancy() {
     let mut e = new_engine();
-    e.configure_axis(0, StepMode::Pulse, 0.01, 8, &[pulse_binding(0)], 64);
+    e.configure_axis(0, StepMode::Pulse, 0.01, 8, &[pulse_binding(0)], 128);
     let occ = e.occupancy_counts();
     assert_eq!(occ[0], 0);
 }
@@ -40,9 +40,9 @@ fn empty_configured_axis_reports_zero_occupancy() {
 #[test]
 fn occupancy_tracks_pushed_and_retired_pieces() {
     let mut e = new_engine();
-    e.configure_axis(0, StepMode::Pulse, 0.01, 8, &[pulse_binding(0)], 64);
+    e.configure_axis(0, StepMode::Pulse, 0.01, 8, &[pulse_binding(0)], 128);
 
-    let mut storage = [zero_entry(); 64];
+    let mut storage = [zero_entry(); 128];
 
     e.push_pieces(0, &[zero_entry(), zero_entry(), zero_entry()], &mut storage);
     assert_eq!(e.occupancy_counts()[0], 3);
@@ -53,9 +53,9 @@ fn occupancy_tracks_pushed_and_retired_pieces() {
 #[test]
 fn unconfigured_slots_remain_zero_when_one_axis_configured() {
     let mut e = new_engine();
-    e.configure_axis(2, StepMode::Pulse, 0.01, 8, &[pulse_binding(0)], 64);
+    e.configure_axis(2, StepMode::Pulse, 0.01, 8, &[pulse_binding(0)], 128);
 
-    let mut storage = [zero_entry(); 64];
+    let mut storage = [zero_entry(); 128];
     e.push_pieces(2, &[zero_entry()], &mut storage);
 
     let occ = e.occupancy_counts();

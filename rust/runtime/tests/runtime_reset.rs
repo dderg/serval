@@ -1,5 +1,7 @@
 use runtime::engine::{Engine, RuntimeStatus};
-use runtime::stepping_state::{StepMode, StepperBindingRust, TMC_CS_OID_NONE};
+use runtime::stepping_state::{
+    CORRECTION_RING_DEPTH, StepMode, StepperBindingRust, TMC_CS_OID_NONE,
+};
 
 fn new_engine() -> Engine {
     Engine::new(520_000_000, 40_000)
@@ -42,16 +44,19 @@ fn reset_clears_axis_state() {
 fn reset_reclaims_ring_allocation() {
     let mut e = new_engine();
     let b = pulse_binding();
+    // Exact two-axis budget (ring_depth 240 + correction reserve, ×2 axes);
+    // the third axis must overflow it.
+    let total = 2 * (240 + CORRECTION_RING_DEPTH);
     assert_eq!(
-        e.configure_axis(0, StepMode::Pulse, 0.0125, 240, &[b], 512),
+        e.configure_axis(0, StepMode::Pulse, 0.0125, 240, &[b], total),
         0
     );
     assert_eq!(
-        e.configure_axis(1, StepMode::Pulse, 0.0125, 240, &[b], 512),
+        e.configure_axis(1, StepMode::Pulse, 0.0125, 240, &[b], total),
         0
     );
     assert_ne!(
-        e.configure_axis(2, StepMode::Pulse, 0.0125, 240, &[b], 512),
+        e.configure_axis(2, StepMode::Pulse, 0.0125, 240, &[b], total),
         0,
         "expected RING_FULL before reset"
     );
@@ -59,11 +64,11 @@ fn reset_reclaims_ring_allocation() {
     e.reset();
 
     assert_eq!(
-        e.configure_axis(0, StepMode::Pulse, 0.0125, 240, &[b], 512),
+        e.configure_axis(0, StepMode::Pulse, 0.0125, 240, &[b], total),
         0
     );
     assert_eq!(
-        e.configure_axis(1, StepMode::Pulse, 0.0125, 240, &[b], 512),
+        e.configure_axis(1, StepMode::Pulse, 0.0125, 240, &[b], total),
         0
     );
 }
@@ -74,7 +79,7 @@ fn reset_is_idempotent_on_fresh_engine() {
     e.reset();
     let b = pulse_binding();
     assert_eq!(
-        e.configure_axis(0, StepMode::Pulse, 0.0125, 496, &[b], 512),
+        e.configure_axis(0, StepMode::Pulse, 0.0125, 448, &[b], 512),
         0
     );
 }
