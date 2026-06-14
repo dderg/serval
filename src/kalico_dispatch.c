@@ -12,10 +12,6 @@
 #include "kalico_runtime.h"
 extern void *runtime_handle;
 
-extern int kalico_runtime_query_motor_state(
-    void *rt, uint8_t *out_slots, int32_t *out_pos_q16,
-    int32_t *out_vel_q16, size_t max);
-
 extern int kalico_console_write_raw(const uint8_t *buf, uint16_t len);
 
 #define KALICO_FRAME_SYNC 0x55
@@ -300,21 +296,25 @@ handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *body,
 
 // MotorStateResponse body (must match Rust decode):
 //   count u8 | count * [slot u8 | pos_q16 i32_le | vel_q16 i32_le] (9 bytes).
+#define KALICO_MOTOR_STATE_MAX_AXES  8u
+#define KALICO_MOTOR_STATE_ENTRY_LEN 9u
 static void
 handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
                          uint16_t body_len)
 {
     (void)body;
     (void)body_len;
-    uint8_t slots[8];
-    int32_t pos[8];
-    int32_t vel[8];
+    uint8_t slots[KALICO_MOTOR_STATE_MAX_AXES];
+    int32_t pos[KALICO_MOTOR_STATE_MAX_AXES];
+    int32_t vel[KALICO_MOTOR_STATE_MAX_AXES];
     int n = 0;
     if (runtime_handle)
-        n = kalico_runtime_query_motor_state(runtime_handle, slots, pos, vel, 8);
+        n = kalico_runtime_query_motor_state(runtime_handle, slots, pos, vel,
+                                             KALICO_MOTOR_STATE_MAX_AXES);
     if (n < 0)
         n = 0;
-    uint8_t payload[PER_MESSAGE_HEADER_LEN + 1 + 8 * 9];
+    uint8_t payload[PER_MESSAGE_HEADER_LEN + 1
+                    + KALICO_MOTOR_STATE_MAX_AXES * KALICO_MOTOR_STATE_ENTRY_LEN];
     encode_message_header(payload, KALICO_MSG_MOTOR_STATE_RESPONSE,
                           MESSAGE_VERSION_DEFAULT, correlation_id);
     uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
@@ -331,7 +331,8 @@ handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
         *p++ = (uint8_t)((vel[i] >> 16) & 0xFF);
         *p++ = (uint8_t)((vel[i] >> 24) & 0xFF);
     }
-    uint16_t used = (uint16_t)(PER_MESSAGE_HEADER_LEN + 1 + n * 9);
+    uint16_t used = (uint16_t)(PER_MESSAGE_HEADER_LEN + 1
+                               + n * KALICO_MOTOR_STATE_ENTRY_LEN);
     kalico_transport_send_frame(KALICO_CHANNEL_CONTROL, payload, used);
 }
 
