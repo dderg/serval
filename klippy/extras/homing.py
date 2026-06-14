@@ -298,6 +298,7 @@ class Homing:
                 ),
             )
 
+            overshoot = final_pos[axis] - trip_pos[axis]
             newpos = list(toolhead.get_position())
             newpos[axis] = _homed_axis_position(
                 entry["provider"], axis, trip_pos, final_pos, trigger_height
@@ -310,17 +311,16 @@ class Homing:
                 % (
                     "XYZ"[axis],
                     trigger_height,
-                    final_pos[axis] - trip_pos[axis],
+                    overshoot,
                     "XYZ"[axis],
                     newpos[axis],
                 ),
                 axis="XYZ"[axis],
                 trigger_height=trigger_height,
-                overshoot=final_pos[axis] - trip_pos[axis],
+                overshoot=overshoot,
                 homed_position=newpos[axis],
             )
             if hi.retract_dist:
-                overshoot = final_pos[axis] - trip_pos[axis]
                 retractpos = list(toolhead.get_position())
                 retractpos[axis] -= direction * hi.retract_dist + overshoot
                 toolhead.move(retractpos, hi.retract_speed)
