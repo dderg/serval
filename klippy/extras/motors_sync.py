@@ -19,6 +19,9 @@ PIN_MIN_TIME = 0.010            # Minimum wait time to enable hardware pin
 MOTOR_STALL_TIME = 0.100        # Minimum wait time to enable motor pin
 SETTLE_PAD = 0.050              # Wall-clock pad after a correction completes
 
+def rail_center(position_min, position_max):
+    return (position_min + position_max) / 2.0
+
 TRINAMIC_DRIVERS = ["tmc2130", "tmc2208", "tmc2209", "tmc2240", "tmc2660",
     "tmc5160"]
 
@@ -177,21 +180,47 @@ class BaseKinematics:
     def get_linked_calibration_axes(self, axis):
         raise self.gcode.error("Not implemented for this kinematics")
 
+    def get_axis_motor_names(self, config, axis):
+        motor_list_key = self.MOTOR_LIST_KEYS.get(axis)
+        if motor_list_key is None:
+            raise config.error(
+                f"motors_sync: axis '{axis}' has no [kinematics] motor list")
+        kin = config.getsection('kinematics')
+        names = kin.getlist(motor_list_key, [])
+        if len(names) != 2:
+            raise config.error(
+                f"motors_sync: axis '{axis}' needs exactly 2 motors in "
+                f"[kinematics] {motor_list_key}, got {len(names)}")
+        return names
+
+    def get_axes_rails_center(self, config, axes):
+        kin = config.getsection('kinematics')
+        positions = {}
+        for axis in axes:
+            axis_name = kin.get('axis_' + axis)
+            ax_section = config.getsection('axis ' + axis_name)
+            positions[axis] = rail_center(
+                ax_section.getfloat('position_min', 0.),
+                ax_section.getfloat('position_max'))
+        return [positions.get(a, None) for a in ['x', 'y', 'z']]
+
+    def discover_belt_steppers(self, config, axis_name):
+        names = self.get_axis_motor_names(config, axis_name)
+        belt = [s for s in self.toolhead_kin.get_steppers()
+                if s.get_name() in names]
+        if len(belt) != 2:
+            raise config.error(
+                f"motors_sync: found {len(belt)} of 2 motors for axis "
+                f"'{axis_name}' ({names})")
+        return belt
+
 
 # Axially uncoupled cartesian kinematics implementation
 class CartesianKinematics(BaseKinematics):
+    MOTOR_LIST_KEYS = {'x': 'x_motors', 'y': 'y_motors'}
+
     def __init__(self, config, sync):
         super().__init__(config, sync)
-
-    @staticmethod
-    def get_axes_rails_center(config, axes):
-        positions = {}
-        for axis in axes:
-            st_section = config.getsection('stepper_' + axis)
-            min_pos = st_section.getfloat('position_min', 0)
-            max_pos = st_section.getfloat('position_max')
-            positions.update({axis: (min_pos + max_pos) / 2})
-        return [positions.get(a, None) for a in ['x', 'y', 'z']]
 
     def _init_axes(self, config, sync):
         valid_axes = ['x', 'y']
@@ -202,17 +231,13 @@ class CartesianKinematics(BaseKinematics):
         ph_offs = self.stats_helper.get_axes_phase_offsets(axes)
         self.motion_axes.update(
             {ax: MotionAxis(config, sync, ax, axes, ph_offs.get(ax),
-                'stepper_' + ax, sync_pos, False) for ax in axes})
+                'motor ' + self.get_axis_motor_names(config, ax)[0],
+                sync_pos, False) for ax in axes})
 
     def _init_axes_steppers(self, config):
         for axis in self.motion_axes.values():
-            belt_steppers = [s for s in self.toolhead_kin.get_steppers()
-                             if 'stepper_' + axis.name in s.get_name()]
-            if len(belt_steppers) not in (2,):
-                raise config.error(
-                    f"motors_sync: Not supported "
-                    f"'{len(belt_steppers)}' count of motors")
-            axis.add_steppers(*belt_steppers, belt_steppers[1], None)
+            belt = self.discover_belt_steppers(config, axis.name)
+            axis.add_steppers(*belt, belt[1], None)
 
     def axes_sync(self, axes):
         # To skip extra measure_deviation() in axis_sync_step()
@@ -234,12 +259,13 @@ class CartesianKinematics(BaseKinematics):
 
 # AWD corexy kinematics implementation
 class CoreXYKinematics(BaseKinematics):
+    MOTOR_LIST_KEYS = {'x': 'a_motors', 'y': 'b_motors'}
+
     def __init__(self, config, sync):
         super().__init__(config, sync)
 
     @staticmethod
     def check_common_attr(config, axes, common_attr):
-        # Apply restrictions for interconnected axes kinematics
         for attr in common_attr:
             diff = {getattr(cls, attr) for cls in axes}
             if len(diff) != 1:
@@ -254,29 +280,21 @@ class CoreXYKinematics(BaseKinematics):
             'axes', count=len(valid_axes), default=valid_axes)])
         if any(a not in valid_axes for a in axes):
             raise config.error(f"motors_sync: Invalid axes '{axes}'")
-        sync_pos = CartesianKinematics.get_axes_rails_center(config, axes)
+        sync_pos = self.get_axes_rails_center(config, axes)
         ph_offs = self.stats_helper.get_axes_phase_offsets(axes)
         self.motion_axes.update(
             {ax: MotionAxis(config, sync, ax, axes, ph_offs.get(ax),
-                'stepper_' + ax, sync_pos, False) for ax in axes})
+                'motor ' + self.get_axis_motor_names(config, ax)[0],
+                sync_pos, False) for ax in axes})
         attr = ['microsteps', 'model_name', 'model_coeffs',
                 'max_step_size', 'axes_steps_diff']
         self.check_common_attr(config, self.motion_axes.values(), attr)
 
     def _init_axes_steppers(self, config):
-        axes_alloc_steppers = []
-        for axis in self.motion_axes.values():
-            belt_steppers = [s for s in self.toolhead_kin.get_steppers()
-                             if 'stepper_' + axis.name in s.get_name()]
-            if len(belt_steppers) not in (2,):
-                raise config.error(
-                    f"motors_sync: Not supported "
-                    f"'{len(belt_steppers)}' count of motors")
-            axes_alloc_steppers.append([axis, belt_steppers])
-        # Add 1 motor from the opposite axis to conflict motors on each
-        # axis. Two enabled motors on the same axis (belt) can twist
-        # the beam due to belt tension desync, distorting measurements.
-        dx, dy = axes_alloc_steppers
+        belts = {a.name: (a, self.discover_belt_steppers(config, a.name))
+                 for a in self.motion_axes.values()}
+        dx = belts['x']
+        dy = belts['y']
         dx[0].add_steppers(dx[1][0], dx[1][1], dx[1][1], [dy[1][0]])
         dy[0].add_steppers(dy[1][0], dy[1][1], dy[1][1], [dx[1][0]])
 
