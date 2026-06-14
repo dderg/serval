@@ -41,7 +41,8 @@ Explicitly out of scope (deferred, not prerequisites):
   `compat`, which is moving to the slicer.
 - Any bed-mesh / skew / bed-tilt interaction with moves. The move-transform
   layer needs rework for G1 too; that is a separate project. Until then bed
-  mesh activation is gated off.
+  mesh activation is gated off and curves are gated against any active
+  transform (see "Move-transform gates").
 
 ## The G5 standard we follow
 
@@ -97,8 +98,8 @@ gcode_move.cmd_G1            # owns g-code coordinate semantics
   -> bridge.submit_move(dx,dy,dz,de,F)        # pyo3 seam; geometry only
   -> classify_and_build(start,dx,dy,dz,...)   # bridge knows `start`
   -> to_collinear_bezier(start,end)           # a degenerate (straight) cubic
-  -> append_and_replan -> plan_velocity       # full SOCP + SLP optimizer,
-       -> temporal::multi::plan_batch              with multi-move lookahead
+  -> append_and_replan -> plan_velocity       # full SOCP + SLP optimizer
+       -> temporal::multi::plan_batch              (smooth runs = one profile)
   -> emit_shaped -> Bernstein pieces -> MCU ring
   -> ISR ~40 kHz: eval_horner -> step times
 ```
@@ -107,6 +108,15 @@ There is no trapezoidal profiler. The planner's native primitive is a cubic
 Bézier; a G1 is just the special case where the four control points are
 collinear, fed to the same optimizer. **G5/G5.1 reach the identical optimizer —
 the only difference is that their control points are not collinear.**
+
+Junction handling (inherited, not G5-specific): segments are partitioned into
+chains by tangent agreement. A *smooth* junction is solved inside one
+continuous chain profile (flows at speed); a *corner* (tangent disagreement,
+including a Z-slope change) is a **full stop** — `corner_caps` is currently
+`vec![0.0]` (`temporal/src/multi/mod.rs:239`), so junction deviation /
+cornering-at-speed is stubbed, not yet implemented. G5 inherits this verbatim
+(a chained, tangent-continuous G5 flows; a G5↔G1 corner stops, exactly like a
+G1↔G1 corner today) and gains cornering automatically when it lands.
 
 ## Architecture: where each responsibility lives
 
@@ -181,6 +191,11 @@ Dispatch: both `G5` and `G5.1` register in `gcode_move.py`
 (`register_command("G5", ...)`, `register_command("G5.1", ...)`); the Python
 dispatcher keeps the `.1` minor intact in the command key.
 
+`Motion.move_curve` must replicate `Motion.move`'s side effects, not just the
+submit: `_fire_active_callbacks` (powers servo/follower axes — a G5 that skips
+it faults a parked servo), the `commanded_pos` update, the pending-end-time
+bump, and `_sync_print_time`.
+
 ### The handoff
 
 `submit_bezier(i, j, p, q, dx, dy, dz, de, feedrate)` — `i, j` are `Option`
@@ -224,10 +239,11 @@ pipeline computes `ratio = delta / path_arc_length` (3D arc length,
 `E(t) = E_start + ratio·∫√(ẋ²+ẏ²+ż²)dτ` (`emit_shaped.rs:330`), tested on a G5
 helix. **But the live `classify.rs` builds the follower ratio as
 `de / spatial_distance` (the chord)** — correct only because G1 is collinear.
-The new G5 path **must** divide by the **true arc length** (the same value
-computed above), or a curve over-extrudes by exactly the arc/chord ratio. This
-is the one extrusion-correctness requirement of the whole task; the rest is
-already done.
+The new G5 path **must** build its followers via the arc-length
+`classify_followers` (`geometry/src/pipeline.rs`) / `path_arc_length` — **not**
+the chord-based ratio in `classify.rs` — or a curve over-extrudes by exactly
+the arc/chord ratio. This is the one extrusion-correctness requirement of the
+whole task; the rest is already done.
 
 ### Chaining (smooth G5)
 
@@ -235,8 +251,12 @@ already done.
 participate). State lives in the bridge, where the running position lives:
 
 - After building any `G5` segment, store its `(P, Q)` offset pair.
-- On `submit_bezier` with `i,j = None`: set `(I, J) = (-P_prev, -Q_prev)`
-  (equivalently `P1 = 2*P0 - prev_P2` — the spec's reflection).
+- On `submit_bezier` with `i,j = None`: set `(I, J) = (-P_prev, -Q_prev)`.
+  This reflects in **XY only** (`I/J/P/Q` are XY offsets). `P1.z` always comes
+  from the linear-Z assembly (`start.z + dz/3`) — **never** the 3D form
+  `P1 = 2*P0 - prev_P2`, which would corrupt linear Z. Standard G5 is planar
+  (XY-only), so the XY reflection is verbatim the standard; our linear Z is a
+  planar-G5 extension (like helical arcs), outside the standard's scope.
 - Any non-`G5` move (`submit_move`, `submit_quadratic`, dwell, …) **clears**
   the stored offsets; chaining only bridges consecutive `G5`s.
 
@@ -271,10 +291,17 @@ between two in-range points can bulge off the bed). Endpoint-only validation
 would let the toolhead crash.
 
 A Bézier is contained in the **convex hull of its four control points**, so
-validating all four 3D control points against the axis limits is a
-conservative, sufficient bound. `cmd_G5`/`move_curve` computes the control
-points (it has them) and range-checks each before the move is issued. Fail loud
-on any out-of-range control point.
+validating all four 3D control points is a conservative, sufficient bound.
+`cmd_G5`/`move_curve` computes the control points and runs each through the
+**kinematic** range check (`kin.check_move`-style, as if each were a move
+endpoint) — not a per-axis min/max box, which would be wrong for delta/corexy
+reachability. Fail loud on any unreachable control point.
+
+This complements the endpoint check. `check_move` on the (chord-based) `Move`
+still does the useful work on the endpoint — unhomed check, endpoint
+reachability, and the feedrate cap (only a cap; the Rust optimizer re-derives
+true limits). The chord `Move`'s direction and length are otherwise unused for
+a curve; the convex-hull pass is what guards the bulge.
 
 ## Cusps / degenerate control polygons
 
@@ -289,9 +316,11 @@ is **untested**.
 
 Plan: drive the decision by evidence, not assumption.
 
-1. **Experiment first** — add a test that constructs a cusp G5 (control points
-   that fold back) and runs it through the live solver, recording the outcome:
-   clean stop, finite-but-suboptimal, or NaN/stall/SLP-restoration-cap.
+1. **Experiment first** — sweep adversarial polygons through the live solver:
+   an exact cusp (fold-back), **near-cusps** (`|x'|` tiny but nonzero —
+   numerically worse: huge-but-finite curvature, ill-conditioned), and
+   high-curvature curves. Record the outcome: clean stop, finite-but-suboptimal,
+   or NaN/stall/SLP-restoration-cap.
 2. If the solver produces a clean stop → cusps already work; no special code.
 3. If not → **split the segment at the cusp** and impose a `v = 0` boundary
    there (the physically-correct, SOTA handling — it hands the solver the stop
