@@ -142,10 +142,8 @@ fn experiment_cusp_and_near_cusp_classification_is_finite() {
         &[],
         30.0,
     );
-    for m in [&exact, &near] {
-        if let Ok(mv) = m {
-            assert!(mv.distance_mm.is_finite(), "arc length must be finite");
-            assert!(mv.distance_mm >= 0.0);
-        }
+    for mv in [&exact, &near].into_iter().flatten() {
+        assert!(mv.distance_mm.is_finite(), "arc length must be finite");
+        assert!(mv.distance_mm >= 0.0);
     }
 }
