@@ -15,10 +15,8 @@
 #define EC_RT_ERR_RT_AFFINITY     (-11)
 #define EC_RT_ERR_RT_SCHED        (-12)
 #define EC_RT_ERR_FF_ROUTING      (-13)
-#define EC_RT_ERR_HOMING_MODE     (-14)
 #define EC_RT_ERR_HOMING_ATTAIN   (-15)
 #define EC_RT_ERR_HOMING_ERROR    (-16)
-#define EC_RT_ERR_HOMING_RESTORE  (-17)
 
 /* Two-phase bring-up. Phase 1 stops at PRE-OP (PDO maps, CSP mode, sync
  * types, FF routing written); the caller does its session SDO work there,
