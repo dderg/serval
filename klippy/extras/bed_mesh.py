@@ -188,6 +188,12 @@ class BedMesh:
             self.bmc.print_generated_points(logging.info, truncate=True)
 
     def set_mesh(self, mesh):
+        if mesh is not None:
+            raise self.gcode.error(
+                "bed_mesh: activating a mesh is not supported under the new "
+                "motion planner yet (the surface-following transform layer has "
+                "not been ported). BED_MESH_CLEAR is allowed."
+            )
         if mesh is not None and self.fade_end != self.FADE_DISABLE:
             self.log_fade_complete = True
             if self.base_fade_target is None:

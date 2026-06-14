@@ -21,7 +21,6 @@ trajectory = { path = "../trajectory" }
 temporal = { path = "../temporal" }
 geometry = { path = "../geometry" }
 gcode = { path = "../gcode" }
-compat = { path = "../compat" }
 nurbs = { path = "../nurbs", features = ["host"] }
 runtime = { path = "../runtime" }
 crossbeam-channel = "0.5"

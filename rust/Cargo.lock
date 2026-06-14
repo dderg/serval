@@ -814,7 +814,6 @@ name = "motion-bridge"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "compat",
  "crossbeam-channel",
  "gcode",
  "geometry",

@@ -342,6 +342,44 @@ class Motion:
         self.commanded_pos[:] = move.end_pos
         self._sync_print_time()
 
+    def move_curve(self, newpos, interior_control_points, submit, speed):
+        # newpos: [x, y, z, e] absolute endpoint (already coordinate-resolved).
+        # interior_control_points: list of [x, y, z] interior CPs to range-check
+        #   (P0=start and the endpoint are covered by the endpoint check below).
+        # submit(dx, dy, dz, de, feedrate): bridge call carrying the curve params.
+        move = Move(self, self.commanded_pos, newpos, speed)
+        if move.is_kinematic_move:
+            self.kin.check_move(move)
+        if move.axes_d[3]:
+            self.extruder.check_move(move)
+        # Convex-hull range guard: a Bézier can bulge outside the endpoint box.
+        for cp in interior_control_points:
+            cp_target = [cp[0], cp[1], cp[2], self.commanded_pos[3]]
+            cp_move = Move(self, self.commanded_pos, cp_target, speed)
+            if cp_move.move_d and cp_move.is_kinematic_move:
+                self.kin.check_move(cp_move)
+        # Deltas come straight from the endpoint, NOT move.axes_d: for a
+        # closed-loop curve (chord ~ 0) Move zeroes axes_d, which would drop the
+        # curve's endpoint delta. The bridge rejects a genuinely zero curve
+        # (arc length 0 -> ZeroDisplacement), so no early-return here.
+        dx = newpos[0] - self.commanded_pos[0]
+        dy = newpos[1] - self.commanded_pos[1]
+        dz = newpos[2] - self.commanded_pos[2]
+        de = newpos[3] - self.commanded_pos[3]
+        # Feedrate is the path-speed cap; the chord length is meaningless for a
+        # curve, so cap directly. The Rust optimizer re-derives per-axis limits.
+        feedrate = min(speed, self.max_velocity)
+        if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            feedrate = min(feedrate, self._axis_limit("z", "max_velocity"))
+        self._fire_active_callbacks([dx, dy, dz, de])
+        bridge_lmt_before = self.bridge.get_last_move_time()
+        submit(dx, dy, dz, de, feedrate)
+        self._bump_pending_end_time(
+            self.bridge.get_last_move_time() - bridge_lmt_before
+        )
+        self.commanded_pos[:] = list(newpos)
+        self._sync_print_time()
+
     def _fire_active_callbacks(self, axes_d):
         if self.kin is None:
             return False
