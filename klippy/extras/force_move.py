@@ -39,7 +39,15 @@ class ForceMove:
         return self.steppers[name]
 
     def manual_move(self, stepper, dist, speed, accel=0.0):
-        raise self.printer.command_error(PHASE5_GATE % ("manual_move",))
+        toolhead = self.printer.lookup_object("toolhead")
+        name = stepper if isinstance(stepper, str) else stepper.get_name()
+        mcu_id, axis_idx, motor_idx = toolhead.get_motor_binding(name)
+        if accel == 0.0:
+            accel = toolhead.get_max_axis_accel(axis_idx)
+        bridge = toolhead.get_bridge()
+        return bridge.submit_correction_sequence(
+            mcu_id, axis_idx, motor_idx, [dist], speed, accel
+        )
 
     cmd_STEPPER_BUZZ_help = "Oscillate a given stepper to help id it"
 
