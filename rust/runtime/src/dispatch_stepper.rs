@@ -35,7 +35,9 @@ unsafe extern "C" {
     fn kalico_kick_step_output(axis_idx: u8, cycle_abs: u32);
 }
 
-#[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
+// Bare-metal MCU only: the MACH_LINUX build links a fault_handler stub without
+// the diag ring, so the survivable capture is hardware-only (like the step kick).
+#[cfg(not(any(test, feature = "host")))]
 unsafe extern "C" {
     fn diag_ring_push(tag: u8, a: u32, b: u32);
 }
@@ -54,7 +56,7 @@ fn capture_steps_fault_context(
     target_step_count: i32,
     abs_steps: u32,
 ) {
-    #[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
+    #[cfg(not(any(test, feature = "host")))]
     // SAFETY: diag_ring_push is a pure irq-guarded C ring writer; no aliasing.
     unsafe {
         let detail = ((axis_idx as u32 & 0xFF) << 16) | abs_steps.min(0xFFFF);
@@ -71,7 +73,7 @@ fn capture_steps_fault_context(
         );
         diag_ring_push(DIAG_TAG_RUST_FAULT, code, detail);
     }
-    #[cfg(not(any(not(any(test, feature = "host")), feature = "mcu-linux")))]
+    #[cfg(any(test, feature = "host"))]
     {
         let _ = (
             axis_idx,
