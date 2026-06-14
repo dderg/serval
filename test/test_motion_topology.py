@@ -116,6 +116,50 @@ def test_follower_slot_sourced_from_force_move_extruder():
     assert [name for name, _ in slot_steppers[3]] == ["extruder"]
 
 
+def test_follower_declared_before_spatial_axes_does_not_clobber_lane_slot():
+    # A follower [axis e] declared before the spatial axes (e.g. via an
+    # [include] processed first) gets declared-order index 0, which must NOT
+    # overwrite corexy lane slot 0 (motor A) with the extruder. Doing so makes
+    # the engine apply the extruder's fine step distance to motor A, so a normal
+    # X move demands >16 microsteps/sample and faults -310 StepsPerSampleExceeded.
+    motion = Motion.__new__(Motion)
+    motion.kin = FakeKin("corexy", SPATIAL_AXES)
+    motion.axis_sections = [
+        ("e", ["x"], ["extruder"], []),  # follower declared FIRST
+        ("x", [], ["m_x"], []),
+        ("y", [], ["m_y"], []),
+        ("z", [], ["m_z"], []),
+    ]
+    fm = FakeForceMove({"extruder": FakeStepper("extruder", 11)})
+    motion.printer = FakePrinter({"force_move": fm})
+
+    slot_steppers = motion._build_slot_steppers()
+
+    assert [name for name, _ in slot_steppers[0]] == ["stepper_x"]
+
+
+def _motion_with_follower_first(follower_handle):
+    motion = Motion.__new__(Motion)
+    motion.kin = FakeKin("corexy", SPATIAL_AXES)
+    motion.axis_sections = [
+        ("e", ["x"], ["extruder"], []),  # follower declared FIRST
+        ("x", [], ["m_x"], []),
+        ("y", [], ["m_y"], []),
+        ("z", [], ["m_z"], []),
+    ]
+    fm = FakeForceMove({"extruder": FakeStepper("extruder", follower_handle)})
+    motion.printer = FakePrinter({"force_move": fm})
+    return motion
+
+
+def test_follower_declared_before_spatial_axes_maps_handle_to_free_slot():
+    # _build_axis_to_handle must agree with _build_slot_steppers: a follower
+    # declared first lands in the free slot (3), not lane slot 0.
+    motion = _motion_with_follower_first(42)
+    a2h = motion._build_axis_to_handle()
+    assert a2h == {0: 11, 1: 11, 2: 11, 3: 42}
+
+
 class CaptureBridge:
     def __init__(self):
         self.init_planner_args = None

@@ -716,12 +716,8 @@ class Motion:
                 continue
             axis_to_handle[lane_idx] = handle
 
-        claimed = set(self.kin.claimed_axes())
-        order = self._declared_axis_order()
         fm = self.printer.lookup_object("force_move", None)
-        for name, _follows, motors, _pp in self.axis_sections:
-            if name in claimed or not motors:
-                continue
+        for _name, motors, slot_idx in self._follower_slots():
             if fm is None:
                 continue
             primary = fm.steppers.get(motors[0])
@@ -730,7 +726,7 @@ class Motion:
             handle = getattr(primary.get_mcu(), "_bridge_handle", None)
             if handle is None:
                 continue
-            axis_to_handle[order.index(name)] = handle
+            axis_to_handle[slot_idx] = handle
         return axis_to_handle
 
     def _derive_mcu_topology(self, axis_to_handle):
@@ -779,6 +775,34 @@ class Motion:
             logging.exception("Motion: init_planner failed")
             raise
 
+    def _follower_slots(self):
+        # Unclaimed follower axes ([axis <name>] with motors, not bound to a
+        # kinematics lane) occupy the motion slots NOT owned by a lane, in
+        # declared order. The slot is the free-slot position, NOT the raw
+        # declared-section index: an [include] that declares the follower before
+        # the spatial axes must not let it overwrite a lane slot (e.g. corexy
+        # motor A on slot 0). One source of truth so the stepper binding and the
+        # MCU-topology handle map cannot disagree.
+        claimed = set(self.kin.claimed_axes())
+        lane_slots = {
+            lane_idx for lane_idx, _axis_name, _motor_names in self.kin.lanes()
+        }
+        free_slots = [i for i in range(4) if i not in lane_slots]
+        followers = [
+            (name, motors)
+            for name, _follows, motors, _pp in self.axis_sections
+            if name not in claimed and motors
+        ]
+        if len(followers) > len(free_slots):
+            raise self.printer.command_error(
+                "%d follower axes declared but only %d motion slot(s) free of "
+                "kinematics lanes" % (len(followers), len(free_slots))
+            )
+        return [
+            (name, motors, slot)
+            for (name, motors), slot in zip(followers, free_slots)
+        ]
+
     def _build_slot_steppers(self):
         slot_steppers = [[], [], [], []]
         for lane_idx, _axis_name, _motor_names in self.kin.lanes():
@@ -786,13 +810,8 @@ class Motion:
                 (s.get_name(), s)
                 for s in self.kin.rails[lane_idx].get_steppers()
             ]
-        claimed = set(self.kin.claimed_axes())
-        order = self._declared_axis_order()
         fm = self.printer.lookup_object("force_move", None)
-        for name, _follows, motors, _pp in self.axis_sections:
-            if name in claimed or not motors:
-                continue
-            slot_idx = order.index(name)
+        for _name, motors, slot_idx in self._follower_slots():
             entries = []
             for motor_name in motors:
                 s = None if fm is None else fm.steppers.get(motor_name)
