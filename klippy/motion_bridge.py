@@ -31,6 +31,8 @@ _STUB_MOTION_METHODS = frozenset(
         "init_planner",
         "submit_move",
         "submit_dwell",
+        "submit_bezier",
+        "submit_quadratic",
         "wait_moves",
         "drain_motion",
         "motion_drain_poll",
@@ -388,6 +390,12 @@ class MotionBridgeWrapper:
 
     def submit_dwell(self, duration_s):
         return self._bridge.submit_dwell(duration_s)
+
+    def submit_bezier(self, i, j, p, q, dx, dy, dz, de, feedrate):
+        return self._bridge.submit_bezier(i, j, p, q, dx, dy, dz, de, feedrate)
+
+    def submit_quadratic(self, i, j, dx, dy, dz, de, feedrate):
+        return self._bridge.submit_quadratic(i, j, dx, dy, dz, de, feedrate)
 
     def set_position(self, x, y, z):
         return self._bridge.set_position(x, y, z, self._reactor.monotonic())
