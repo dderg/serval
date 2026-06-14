@@ -214,6 +214,7 @@ fn main() {
                     let total: u32 = (AXIS_RING_CAPACITY * NUM_AXES * 32) as u32;
                     server.respond(&runtime_caps_response_frame(correlation_id, total));
                 }
+                Command::QueryMotorState { .. } => {}
                 Command::Stop { correlation_id } => {
                     let now_ns = monotonic_ns();
                     ring.reset();

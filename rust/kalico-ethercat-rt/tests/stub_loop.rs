@@ -161,6 +161,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                         let total = (AXIS_RING_CAPACITY * NUM_AXES * 32) as u32;
                         server.respond(&runtime_caps_response_frame(correlation_id, total));
                     }
+                    Command::QueryMotorState { .. } => {}
                     Command::ClaimHandshake { .. } => {}
                     Command::SetTorque { .. } => {}
                     Command::StartCapture { .. } => {}
@@ -187,6 +188,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     Command::Unknown { .. }
                     | Command::Identify { .. }
                     | Command::QueryRuntimeCaps { .. }
+                    | Command::QueryMotorState { .. }
                     | Command::ClaimHandshake { .. }
                     | Command::SetTorque { .. }
                     | Command::StartCapture { .. }
