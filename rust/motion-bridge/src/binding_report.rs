@@ -15,7 +15,11 @@ pub fn label_binding(c: BindingConstraint, names: &[String]) -> Option<BindingLa
         BindingConstraint::PaVelocity { set } => (set, "velocity", true),
         BindingConstraint::PaAccel { set } => (set, "accel", true),
         BindingConstraint::PaJerk { set } => (set, "jerk", true),
-        _ => return None,
+        BindingConstraint::None | BindingConstraint::Boundary => return None,
+        _ => {
+            debug_assert!(false, "unhandled BindingConstraint in label_binding");
+            return None;
+        }
     };
     let limit = names
         .get(set)
