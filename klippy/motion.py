@@ -5,60 +5,40 @@ import signal
 import struct
 from collections import defaultdict
 
-from . import stepper
+from . import motion_kinematics, stepper
 from .extras import servo_axis
 from .kinematics import extruder
 
 BUFFER_TIME_START = 0.250
 DRAIN_TIMEOUT = 60.0
-
-_MOTOR_SLOT_PREFIXES = (
-    (0, "stepper_x"),
-    (1, "stepper_y"),
-    (2, "stepper_z"),
-    (3, "extruder"),
-)
+_LEGACY_STEPPER_AXES = frozenset("xyzab")
+_LEGACY_SERVO_SECTIONS = ("servo_x", "servo_y", "servo_z")
 
 
-def _name_motor_slot(name):
-    for slot_idx, prefix in _MOTOR_SLOT_PREFIXES:
-        if not name.startswith(prefix):
-            continue
-        suffix = name[len(prefix) :]
-        if suffix == "":
-            return (slot_idx, True)
-        if suffix.isdigit():
-            return (slot_idx, False)
-    return None
+def _is_legacy_stepper_role_section(name):
+    if not name.startswith("stepper_"):
+        return False
+    suffix = name[len("stepper_") :]
+    if not suffix or suffix[0] not in _LEGACY_STEPPER_AXES:
+        return False
+    return suffix[1:] == "" or suffix[1:].isdigit()
 
 
-def _stepper_motor_slot(stepper_obj):
-    info = _name_motor_slot(stepper_obj.get_name())
-    return None if info is None else info[0]
-
-
-_AXIS_X = 0
-_AXIS_Y = 1
-
-# Mirror rust KinematicTag discriminants.
-_KIN_COREXY = 0
-_KIN_CARTESIAN = 1
-
-
-def _derive_mcu_topology(axis_to_handle, kinematics_name):
-    by_handle = {}
-    for axis_idx, handle in axis_to_handle.items():
-        by_handle.setdefault(handle, []).append(axis_idx)
-    is_corexy = (kinematics_name or "").lower() == "corexy"
-    topo = []
-    for handle in sorted(by_handle):
-        axes = sorted(by_handle[handle])
-        if is_corexy and _AXIS_X in axes and _AXIS_Y in axes:
-            tag = _KIN_COREXY
-        else:
-            tag = _KIN_CARTESIAN
-        topo.append((handle, axes, tag))
-    return topo
+def reject_legacy_role_sections(config):
+    for sc in config.get_prefix_sections("stepper_"):
+        if _is_legacy_stepper_role_section(sc.get_name()):
+            raise config.error(
+                "role-encoding motor sections are not supported: name the "
+                "motor freely (e.g. [motor a]) and assign it in [kinematics] "
+                "role lists / [axis <name>] motors:"
+            )
+    for name in _LEGACY_SERVO_SECTIONS:
+        if config.has_section(name):
+            raise config.error(
+                "role-encoding servo sections are not supported: declare a "
+                "[<motor>] section with 'drive: servo' and assign it in "
+                "[kinematics]"
+            )
 
 
 def _open_sim_control():
@@ -122,182 +102,7 @@ class Move:
         return self.toolhead.printer.command_error(m)
 
 
-class BridgeKinematics:
-    supports_dual_carriage = False
-
-    def __init__(self, toolhead, config):
-        self._toolhead = toolhead
-        kin_name = config.get("kinematics")
-        if kin_name not in ("cartesian", "corexy", "hybrid_corexy"):
-            raise config.error(
-                "Unsupported bridge kinematics '%s'" % (kin_name,)
-            )
-        self.kinematics = kin_name
-        self.rails = []
-        self._printer = config.get_printer()
-
-        axes = "xy"
-        if kin_name in ("cartesian", "hybrid_corexy"):
-            axes = "xyz"
-        for axis in axes:
-            self._register_axis(config, axis, extras=("1",))
-        if kin_name == "corexy" and config.has_section("stepper_z"):
-            self._register_axis(config, "z", extras=("1", "2", "3"))
-
-        self.limits = [(1.0, -1.0)] * 3
-
-        self._printer.load_object(config, "homing").resolve_endstops()
-
-        self._printer.register_event_handler(
-            "stepper_enable:motor_off",
-            self._handle_motor_off,
-        )
-
-    def _handle_motor_off(self, print_time):
-        self.clear_homing_state((0, 1, 2))
-
-    def _register_axis(self, config, axis, extras=()):
-        servo_sec = "servo_" + axis
-        stepper_sec = "stepper_" + axis
-        has_servo = config.has_section(servo_sec)
-        has_stepper = config.has_section(stepper_sec)
-        if has_servo and has_stepper:
-            raise config.error(
-                "axis %s has both [%s] and [%s]; pick one"
-                % (axis, servo_sec, stepper_sec)
-            )
-        if has_servo:
-            rail = servo_axis.ServoRail(config.getsection(servo_sec))
-            servo_axis.register_torque_enable(self._printer, config, rail)
-            self.rails.append(rail)
-            return
-        rail = stepper.PrinterRail(config.getsection("stepper_" + axis))
-        for suffix in extras:
-            extra_name = "stepper_" + axis + suffix
-            if config.has_section(extra_name):
-                rail.add_extra_stepper(config.getsection(extra_name))
-        for mcu_stepper in rail.get_steppers():
-            mcu_stepper.setup_itersolve(
-                "cartesian_stepper_alloc", axis.encode()
-            )
-        self.rails.append(rail)
-
-    def _axis_rails(self):
-        out = {}
-        for rail in self.rails:
-            name = rail.get_name(short=True) or ""
-            if name and name[0] in "xyz":
-                idx = "xyz".index(name[0])
-                out.setdefault(idx, rail)
-        return out
-
-    def get_steppers(self):
-        return [s for rail in self.rails for s in rail.get_steppers()]
-
-    def active_rails(self, dx, dy, dz):
-        moved = {
-            axis: abs(delta) > 1e-9 for axis, delta in zip("xyz", (dx, dy, dz))
-        }
-        coupled = dict(moved)
-        if self.kinematics == "corexy":
-            coupled["x"] = coupled["y"] = moved["x"] or moved["y"]
-        elif self.kinematics == "hybrid_corexy":
-            coupled["x"] = moved["x"] or moved["y"]
-        active = []
-        for rail in self.rails:
-            if isinstance(rail, servo_axis.ServoRail):
-                if moved[rail.axis]:
-                    active.append(rail)
-            elif coupled[rail.get_name(short=True)[0]]:
-                active.append(rail)
-        return active
-
-    def calc_position(self, stepper_positions):
-        def rail_pos(rail):
-            vals = [
-                stepper_positions.get(s.get_name(), 0.0)
-                for s in rail.get_steppers()
-            ]
-            if not vals:
-                return 0.0
-            return sum(vals) / len(vals)
-
-        axis_rails = self._axis_rails()
-        x = rail_pos(axis_rails.get(0)) if 0 in axis_rails else 0.0
-        y = rail_pos(axis_rails.get(1)) if 1 in axis_rails else 0.0
-        z = rail_pos(axis_rails.get(2)) if 2 in axis_rails else 0.0
-        return [x, y, z]
-
-    def _check_endstops(self, move):
-        end_pos = move.end_pos
-        for i in (0, 1, 2):
-            if move.axes_d[i] and (
-                end_pos[i] < self.limits[i][0] or end_pos[i] > self.limits[i][1]
-            ):
-                if self.limits[i][0] > self.limits[i][1]:
-                    raise move.move_error("Must home axis first")
-                raise move.move_error()
-
-    def check_move(self, move):
-        limits = self.limits
-        xpos, ypos = move.end_pos[:2]
-        if (
-            xpos < limits[0][0]
-            or xpos > limits[0][1]
-            or ypos < limits[1][0]
-            or ypos > limits[1][1]
-        ):
-            self._check_endstops(move)
-        if not move.axes_d[2]:
-            return
-        self._check_endstops(move)
-        z_ratio = move.move_d / abs(move.axes_d[2])
-        move.limit_speed(
-            self._toolhead._axis_limit("z", "max_velocity") * z_ratio,
-            self._toolhead._axis_limit("z", "max_accel") * z_ratio,
-        )
-
-    def set_position(self, newpos, homing_axes=()):
-        self._toolhead.bridge.set_position(newpos[0], newpos[1], newpos[2])
-        for axis in homing_axes:
-            rail = self._axis_rails().get(axis)
-            if rail is not None:
-                self.limits[axis] = rail.get_range()
-
-    def note_z_not_homed(self):
-        # [beacon] prefers this over clear_homing_state("z") when present;
-        # exposing it keeps clear_homing_state on the int-iterable contract.
-        self.clear_homing_state([2])
-
-    def clear_homing_state(self, axes):
-        for i in (0, 1, 2):
-            if i in axes:
-                self.limits[i] = (1.0, -1.0)
-
-    def get_status(self, eventtime):
-        from . import gcode as gcode_mod
-
-        ranges = {}
-        for rail in self.rails:
-            name = rail.get_name(short=True)
-            if name and name[0] in "xyz":
-                ranges[name[0]] = (rail.position_min, rail.position_max)
-        x_min, x_max = ranges.get("x", (0.0, 0.0))
-        y_min, y_max = ranges.get("y", (0.0, 0.0))
-        z_min, z_max = ranges.get("z", (0.0, 0.0))
-        homed = "".join(
-            a
-            for i, a in enumerate("xyz")
-            if self.limits[i][0] <= self.limits[i][1]
-        )
-        return {
-            "homed_axes": homed,
-            "axis_minimum": gcode_mod.Coord(x_min, y_min, z_min, 0.0),
-            "axis_maximum": gcode_mod.Coord(x_max, y_max, z_max, 0.0),
-        }
-
-
-class MotionToolhead:
+class Motion:
     def __init__(self, config):
         printer = config.get_printer()
         self.printer = printer
@@ -307,8 +112,6 @@ class MotionToolhead:
             from . import motion_bridge
 
             self.bridge = motion_bridge._StubBridge()
-        self.kinematics_name = config.get("kinematics", "")
-        self.bridge._kinematics_name = self.kinematics_name
         self._mcu_pending_end_time = 0.0
         self._motor_bindings = {}
         self.all_mcus = [m for n, m in printer.lookup_objects(module="mcu")]
@@ -319,11 +122,10 @@ class MotionToolhead:
         self._read_post_processors(config)
         self.print_time = 0.0
         self.print_stall = 0
-        self.trapq = None
-        self.step_generators = []
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
         self.extruder = extruder.DummyExtruder(printer)
+        self._build_follower_steppers(config)
         self.kin = self._load_kinematics(config)
         if (
             config.has_section("dual_carriage")
@@ -331,7 +133,7 @@ class MotionToolhead:
         ):
             raise config.error(
                 "dual_carriage not compatible with '%s' kinematics system"
-                % (config.get("kinematics"),)
+                % (self.kin.kind,)
             )
 
         gcode.register_command("G4", self.cmd_G4)
@@ -405,17 +207,17 @@ class MotionToolhead:
 
         signal.signal(signal.SIGTERM, _sigterm_handler)
 
-        logging.info("MotionToolhead: config phase complete")
+        logging.info("Motion: config phase complete")
 
     def _handle_disconnect(self):
-        logging.info("MotionToolhead: _handle_disconnect called")
+        logging.info("Motion: _handle_disconnect called")
         if self.bridge is not None:
-            logging.info("MotionToolhead: calling bridge.shutdown()")
+            logging.info("Motion: calling bridge.shutdown()")
             self.bridge.shutdown()
-            logging.info("MotionToolhead: bridge.shutdown() returned")
+            logging.info("Motion: bridge.shutdown() returned")
 
     def _load_kinematics(self, config):
-        return BridgeKinematics(self, config)
+        return motion_kinematics.load_kinematics(config, self)
 
     def get_position(self):
         return list(self.commanded_pos)
@@ -433,9 +235,6 @@ class MotionToolhead:
                 curpos[i] = coord[i]
         self.move(curpos, speed)
         self.printer.send_event("toolhead:manual_move")
-
-    def limit_next_junction_speed(self, speed):
-        pass
 
     def set_extruder(self, extruder, extrude_pos):
         self.extruder = extruder
@@ -460,21 +259,13 @@ class MotionToolhead:
         return binding
 
     def get_max_axis_accel(self, axis_idx):
-        if axis_idx == 2:
-            return self.max_z_accel
-        return self.max_accel
-
-    def get_trapq(self):
-        return self.trapq
-
-    def register_step_generator(self, handler):
-        self.step_generators.append(handler)
-
-    def note_step_generation_scan_time(self, delay, old_delay=0.0):
-        self.flush_step_generation()
-
-    def register_lookahead_callback(self, callback):
-        callback(self.get_last_move_time())
+        axis_name = self._declared_axis_order()[axis_idx]
+        accels = [
+            a
+            for _name, axes, _v, a, _j in self.limit_sections
+            if a is not None and axis_name in axes
+        ]
+        return min(accels) if accels else self.max_accel
 
     def get_max_velocity(self):
         return self.max_velocity, self.max_accel
@@ -542,7 +333,7 @@ class MotionToolhead:
             de,
             feedrate,
         )
-        self._fire_active_callbacks()
+        self._fire_active_callbacks(move.axes_d)
         bridge_lmt_before = self.bridge.get_last_move_time()
         self.bridge.submit_move(dx, dy, dz, de, feedrate)
         self._bump_pending_end_time(
@@ -551,19 +342,28 @@ class MotionToolhead:
         self.commanded_pos[:] = move.end_pos
         self._sync_print_time()
 
-    def _fire_active_callbacks(self):
+    def _fire_active_callbacks(self, axes_d):
         if self.kin is None:
             return False
-        fired = False
-        servo_rails = [
+        dx, dy, dz, de = axes_d
+        owners = []
+        for rail in self.kin.active_rails(dx, dy, dz):
+            if isinstance(rail, servo_axis.ServoRail):
+                owners.append(rail)
+            else:
+                owners.extend(rail.get_steppers())
+        if abs(de) > 1e-9:
+            owners.extend(self.follower_steppers)
+        # Motion pieces stream to every queue, including servo axes that hold
+        # still — so every servo must be powered the moment any motion starts,
+        # or the ec-rt torque gate faults on pieces-while-parked.
+        owners.extend(
             rail
             for rail in getattr(self.kin, "rails", ())
             if isinstance(rail, servo_axis.ServoRail)
-        ]
-        # Motion pieces stream to every queue, including servo axes that hold
-        # still — so every motor must be powered the moment any motion starts,
-        # or the ec-rt torque gate faults on pieces-while-parked.
-        for owner in list(self.kin.get_steppers()) + servo_rails:
+        )
+        fired = False
+        for owner in owners:
             if not owner._active_callbacks:
                 continue
             cbs = owner._active_callbacks
@@ -670,6 +470,7 @@ class MotionToolhead:
     )
 
     def _read_axes(self, config):
+        reject_legacy_role_sections(config)
         if config.has_section("firmware_retraction"):
             raise config.error(
                 "[firmware_retraction] is not supported: it presupposes an "
@@ -691,12 +492,6 @@ class MotionToolhead:
             ]
             self.axis_sections.append((name, follows, motors, post_processors))
         declared = {name for name, _, _, _ in self.axis_sections}
-        for required in ("x", "y", "z"):
-            if required not in declared:
-                raise config.error(
-                    "[axis %s] section is required (every axis must be "
-                    "declared)" % required
-                )
         for _, axes, _, _, _ in self.limit_sections:
             for a in axes:
                 if a not in declared:
@@ -704,6 +499,29 @@ class MotionToolhead:
                         "[limit] references undeclared axis '%s' "
                         "(declare [axis %s])" % (a, a)
                     )
+
+    def _build_follower_steppers(self, config):
+        self.follower_steppers = []
+        claimed = set(motion_kinematics.read_claimed_axes(config))
+        for name, _follows, motors, _pp in self.axis_sections:
+            if name in claimed or not motors:
+                continue
+            for motor_name in motors:
+                motor_section, drive = motion_kinematics.resolve_motor_section(
+                    config, motor_name, "[axis %s] motors" % name
+                )
+                if drive != "stepper":
+                    raise config.error(
+                        "[axis %s] motors references '%s' with drive: %s — "
+                        "follower axes support stepper motors only"
+                        % (name, motor_name, drive)
+                    )
+                self.follower_steppers.append(
+                    stepper.PrinterStepper(
+                        motor_section,
+                        name=motion_kinematics.motor_short_name(motor_section),
+                    )
+                )
 
     def _read_post_processors(self, config):
         self.post_processor_sections = []
@@ -791,10 +609,6 @@ class MotionToolhead:
             self._mcu_pending_end_time,
         )
 
-    def note_mcu_movequeue_activity(self, mq_time, set_step_gen_time=False):
-        # No-op kept for extras (output_pin); the bridge owns flushing.
-        pass
-
     def set_accel(self, accel):
         if accel is not None and accel > 0.0:
             self.runtime_accel = accel
@@ -879,6 +693,52 @@ class MotionToolhead:
             self.print_stall,
         )
 
+    def _declared_axis_order(self):
+        return [name for name, _, _, _ in self.axis_sections]
+
+    def _build_axis_to_handle(self):
+        axis_to_handle = {}
+        for lane_idx, _axis_name, _motor_names in self.kin.lanes():
+            rail = self.kin.rails[lane_idx]
+            if isinstance(rail, servo_axis.ServoRail):
+                node = self.printer.lookup_object(
+                    "ethercat_node " + rail.get_node_name(), None
+                )
+                if node is None:
+                    continue
+                handle = node.get_bridge_handle()
+            else:
+                steppers = rail.get_steppers()
+                if not steppers:
+                    continue
+                handle = getattr(steppers[0].get_mcu(), "_bridge_handle", None)
+            if handle is None:
+                continue
+            axis_to_handle[lane_idx] = handle
+
+        fm = self.printer.lookup_object("force_move", None)
+        for _name, motors, slot_idx in self._follower_slots():
+            if fm is None:
+                continue
+            primary = fm.steppers.get(motors[0])
+            if primary is None:
+                continue
+            handle = getattr(primary.get_mcu(), "_bridge_handle", None)
+            if handle is None:
+                continue
+            axis_to_handle[slot_idx] = handle
+        return axis_to_handle
+
+    def _derive_mcu_topology(self, axis_to_handle):
+        by_handle = {}
+        for axis_idx, handle in axis_to_handle.items():
+            by_handle.setdefault(handle, []).append(axis_idx)
+        topo = []
+        for handle in sorted(by_handle):
+            axes = sorted(by_handle[handle])
+            topo.append((handle, axes, self.kin.mcu_tag(axes)))
+        return topo
+
     def _init_planner(self):
         bridge_mcus = []
         for name, mcu in self.printer.lookup_objects(module="mcu"):
@@ -888,46 +748,15 @@ class MotionToolhead:
             bridge_mcus.append((name, mcu, handle))
         if not bridge_mcus:
             logging.warning(
-                "MotionToolhead: no MCU bridge handles available; "
-                "skipping init_planner"
+                "Motion: no MCU bridge handles available; skipping init_planner"
             )
             return
 
-        axis_to_handle = {}
-        fm = self.printer.lookup_object("force_move", None)
-        if fm is not None:
-            for sname, s in fm.steppers.items():
-                info = _name_motor_slot(sname)
-                if info is None:
-                    continue
-                slot_idx, is_primary = info
-                if not is_primary:
-                    continue
-                s_handle = getattr(s.get_mcu(), "_bridge_handle", None)
-                if s_handle is None:
-                    continue
-                axis_to_handle[slot_idx] = s_handle
-
-        servo_axis_index = {"x": _AXIS_X, "y": _AXIS_Y, "z": 2}
-        for rail in getattr(self.kin, "rails", ()):
-            if not isinstance(rail, servo_axis.ServoRail):
-                continue
-            node = self.printer.lookup_object(
-                "ethercat_node " + rail.get_node_name(), None
-            )
-            if node is None:
-                continue
-            handle = node.get_bridge_handle()
-            if handle is None:
-                continue
-            axis_idx = servo_axis_index.get(rail.axis)
-            if axis_idx is not None:
-                axis_to_handle[axis_idx] = handle
-
-        topology = _derive_mcu_topology(axis_to_handle, self.kinematics_name)
+        axis_to_handle = self._build_axis_to_handle()
+        topology = self._derive_mcu_topology(axis_to_handle)
         if not topology:
             logging.warning(
-                "MotionToolhead: no axis->MCU assignment resolved; "
+                "Motion: no axis->MCU assignment resolved; "
                 "skipping init_planner"
             )
             return
@@ -938,50 +767,64 @@ class MotionToolhead:
                 list(self.limit_sections),
                 list(self.post_processor_sections),
                 topology,
+                self.kin.claimed_axes(),
             )
             self._configure_axes_per_mcu(bridge_mcus)
 
         except Exception:
-            logging.exception("MotionToolhead: init_planner failed")
+            logging.exception("Motion: init_planner failed")
             raise
 
-    def _configure_axes_per_mcu(self, bridge_mcus):
-        self._motor_bindings = {}
-        kin = (self.kinematics_name or "").lower()
-        if kin == "corexy":
-            kin_tag = 0
-            slot_names = ["stepper_x", "stepper_y", "stepper_z", "extruder"]
-            awd_default = 0b0011
-        elif kin == "cartesian":
-            kin_tag = 1
-            slot_names = ["stepper_x", "stepper_y", "stepper_z", "extruder"]
-            awd_default = 0b0000
-        else:
-            logging.info(
-                "MotionToolhead: kinematics=%r — skipping configure_axes",
-                kin,
+    def _follower_slots(self):
+        # Unclaimed follower axes ([axis <name>] with motors, not bound to a
+        # kinematics lane) occupy the motion slots NOT owned by a lane, in
+        # declared order. The slot is the free-slot position, NOT the raw
+        # declared-section index: an [include] that declares the follower before
+        # the spatial axes must not let it overwrite a lane slot (e.g. corexy
+        # motor A on slot 0). One source of truth so the stepper binding and the
+        # MCU-topology handle map cannot disagree.
+        claimed = set(self.kin.claimed_axes())
+        lane_slots = {
+            lane_idx for lane_idx, _axis_name, _motor_names in self.kin.lanes()
+        }
+        free_slots = [i for i in range(4) if i not in lane_slots]
+        followers = [
+            (name, motors)
+            for name, _follows, motors, _pp in self.axis_sections
+            if name not in claimed and motors
+        ]
+        if len(followers) > len(free_slots):
+            raise self.printer.command_error(
+                "%d follower axes declared but only %d motion slot(s) free of "
+                "kinematics lanes" % (len(followers), len(free_slots))
             )
-            return
+        return [
+            (name, motors, slot)
+            for (name, motors), slot in zip(followers, free_slots)
+        ]
 
-        # Primary first, then AWD partners in name order; the runtime drives all
-        # steppers in a slot in lockstep.
+    def _build_slot_steppers(self):
         slot_steppers = [[], [], [], []]
-        slot_primary = [None, None, None, None]
+        for lane_idx, _axis_name, _motor_names in self.kin.lanes():
+            slot_steppers[lane_idx] = [
+                (s.get_name(), s)
+                for s in self.kin.rails[lane_idx].get_steppers()
+            ]
         fm = self.printer.lookup_object("force_move", None)
-        if fm is not None:
-            for name, s in fm.steppers.items():
-                m = _name_motor_slot(name)
-                if m is None:
-                    continue
-                slot_idx, is_primary = m
-                if is_primary:
-                    slot_primary[slot_idx] = (name, s)
-                else:
-                    slot_steppers[slot_idx].append((name, s))
-        for slot_idx in range(4):
-            slot_steppers[slot_idx].sort(key=lambda ns: ns[0])
-            if slot_primary[slot_idx] is not None:
-                slot_steppers[slot_idx].insert(0, slot_primary[slot_idx])
+        for _name, motors, slot_idx in self._follower_slots():
+            entries = []
+            for motor_name in motors:
+                s = None if fm is None else fm.steppers.get(motor_name)
+                if s is not None:
+                    entries.append((motor_name, s))
+            slot_steppers[slot_idx] = entries
+        return slot_steppers
+
+    def _configure_axes_per_mcu(self, bridge_mcus):
+        coupled = self.kin.coupled_xy()
+        awd_default = 0b0011 if coupled else 0b0000
+
+        slot_steppers = self._build_slot_steppers()
 
         PHASE_STEPPING_BIT = 0x1  # bit 0 of the IdentifyResponse caps bitmap
 
@@ -1028,7 +871,7 @@ class MotionToolhead:
             # axis must switch ALL of them out of phase mode — one merged
             # handover group. Cartesian axes move independently: one group
             # per slot.
-            xy_coupled = self.kinematics_name in ("corexy", "hybrid_corexy")
+            xy_coupled = coupled
             phase_groups = {}
             for i, slot in enumerate(slot_steppers):
                 # step_modes[i] != 0 is the load-bearing guard (set to 0 only in
@@ -1076,7 +919,7 @@ class MotionToolhead:
             awd_mask = awd_default & present_mask
             if present_mask == 0:
                 logging.info(
-                    "MotionToolhead: no steppers matched MCU %s; "
+                    "Motion: no steppers matched MCU %s; "
                     "skipping configure_axes",
                     name,
                 )
@@ -1118,7 +961,7 @@ class MotionToolhead:
                 )
             except Exception:
                 logging.info(
-                    "MotionToolhead: mcu=%s lacks kalico_configure_axis "
+                    "Motion: mcu=%s lacks kalico_configure_axis "
                     "(no new stepping redesign command); skipping runtime "
                     "binding",
                     name,
@@ -1136,7 +979,7 @@ class MotionToolhead:
             if reset_cmd is not None:
                 reset_cmd.send([])
                 logging.info(
-                    "MotionToolhead: sent kalico_runtime_reset to mcu=%s",
+                    "Motion: sent kalico_runtime_reset to mcu=%s",
                     name,
                 )
 
@@ -1241,13 +1084,13 @@ class MotionToolhead:
                     ]
                 )
             logging.info(
-                "MotionToolhead: configure_axes mcu=%s kin=%d "
+                "Motion: configure_axes mcu=%s kin=%s "
                 "present=0x%x awd=0x%x invert=0x%x steps_per_mm=%s "
                 "step_modes=%s mcu_caps=0x%x runtime_bindings=%s "
                 "phase_configs=%s any_phase_stepping=%s "
                 "phase_motor_count=%d",
                 name,
-                kin_tag,
+                self.kin.kind,
                 present_mask,
                 awd_mask,
                 invert_mask,
@@ -1404,6 +1247,32 @@ class MotionToolhead:
             raise gcmd.error("runtime_sim_endstop_set_pin failed: %s" % e)
 
 
+class ToolheadShim:
+    def __init__(self, motion):
+        self.motion = motion
+
+    def register_lookahead_callback(self, callback):
+        callback(self.motion.get_last_move_time())
+
+    def note_step_generation_scan_time(self, delay, old_delay=0.0):
+        self.motion.flush_step_generation()
+
+    def get_trapq(self):
+        return None
+
+    def note_mcu_movequeue_activity(self, mq_time, set_step_gen_time=False):
+        pass
+
+    def limit_next_junction_speed(self, speed):
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self.motion, name)
+
+
 def add_printer_objects(config):
-    config.get_printer().add_object("toolhead", MotionToolhead(config))
+    motion = Motion(config)
+    printer = config.get_printer()
+    printer.add_object("motion", motion)
+    printer.add_object("toolhead", ToolheadShim(motion))
     extruder.add_printer_objects(config)

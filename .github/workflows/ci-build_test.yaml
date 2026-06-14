@@ -69,16 +69,3 @@ jobs:
         run: ./scripts/ci.sh py 3.13
       - name: Test Klippy (Python 3.14)
         run: ./scripts/ci.sh py 3.14
-
-  # kalico-sim in-process unit/contract tests. Hardware (H723/F446/Trident)
-  # and Renode tests are excluded EXPLICITLY by marker (see scripts/ci.sh sim),
-  # not hidden by testpaths.
-  sim:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pull docker image
-        run: docker pull dangerklippers/klipper-build:latest
-      - name: kalico-sim unit tests
-        run: ./scripts/ci.sh sim

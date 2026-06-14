@@ -736,12 +736,13 @@ def TMCWaveTableHelper(config, mcu_tmc):
 def TMCMicrostepHelper(config, mcu_tmc):
     fields = mcu_tmc.get_fields()
     stepper_name = " ".join(config.get_name().split()[1:])
-    if not config.has_section(stepper_name):
+    motor_section = "motor " + stepper_name
+    if not config.has_section(motor_section):
         raise config.error(
             "Could not find config section '[%s]' required by tmc driver"
-            % (stepper_name,)
+            % (motor_section,)
         )
-    sconfig = config.getsection(stepper_name)
+    sconfig = config.getsection(motor_section)
     steps = {256: 0, 128: 1, 64: 2, 32: 3, 16: 4, 8: 5, 4: 6, 2: 7, 1: 8}
     mres = sconfig.getchoice("microsteps", steps)
     fields.set_field("mres", mres)
@@ -756,7 +757,7 @@ def TMCtstepHelper(mcu_tmc, velocity, pstepper=None, config=None):
         step_dist = pstepper.get_step_dist()
     else:
         stepper_name = " ".join(config.get_name().split()[1:])
-        sconfig = config.getsection(stepper_name)
+        sconfig = config.getsection("motor " + stepper_name)
         rotation_dist, steps_per_rotation = stepper.parse_step_distance(sconfig)
         step_dist = rotation_dist / steps_per_rotation
     mres = mcu_tmc.get_fields().get_field("mres")

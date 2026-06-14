@@ -217,6 +217,14 @@ pub enum AxisConfigError {
     UnknownFollowTarget { axis: String, target: String },
     #[error("spatial axis '{name}' cannot declare follows")]
     SpatialAxisCannotFollow { name: String },
+    #[error("axis '{axis}' is motor-mapped twice: by [kinematics] and by [axis {axis}] motors:")]
+    MotorMappingDuplicate { axis: String },
+    #[error(
+        "axis '{axis}' is not motor-mapped: claim it in a [kinematics] role or give [axis {axis}] a motors: key"
+    )]
+    MotorMappingMissing { axis: String },
+    #[error("[kinematics] claims axis '{axis}' but no [axis {axis}] section is declared")]
+    UnknownClaimedAxis { axis: String },
 }
 
 impl AxisRegistry {
@@ -265,6 +273,34 @@ impl AxisRegistry {
             ordered.push(d.clone());
         }
         Ok(Self { ordered })
+    }
+
+    pub fn validate_motor_mapping(
+        &self,
+        kinematics_axes: &[String],
+    ) -> Result<(), AxisConfigError> {
+        for claimed in kinematics_axes {
+            if !self.ordered.iter().any(|d| &d.name == claimed) {
+                return Err(AxisConfigError::UnknownClaimedAxis {
+                    axis: claimed.clone(),
+                });
+            }
+        }
+        for d in &self.ordered {
+            let claimed = kinematics_axes.iter().any(|c| c == &d.name);
+            let has_motors = !d.motors.is_empty();
+            if claimed && has_motors {
+                return Err(AxisConfigError::MotorMappingDuplicate {
+                    axis: d.name.clone(),
+                });
+            }
+            if !claimed && !has_motors {
+                return Err(AxisConfigError::MotorMappingMissing {
+                    axis: d.name.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     pub fn axis_index(&self, name: &str) -> Result<usize, AxisConfigError> {

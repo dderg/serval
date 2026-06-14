@@ -1297,10 +1297,10 @@ def _start_chip_emulators(h7_sock_dir, f4_sock_dir, repo_root):
         )
 
         h7_chips = [
-            (5, TMC5160Emulator().transfer),  # stepper_x
-            (4, TMC5160Emulator().transfer),  # stepper_y
-            (6, TMC5160Emulator().transfer),  # stepper_x1
-            (3, TMC5160Emulator().transfer),  # stepper_y1
+            (5, TMC5160Emulator().transfer),
+            (4, TMC5160Emulator().transfer),
+            (6, TMC5160Emulator().transfer),
+            (3, TMC5160Emulator().transfer),
             (40, MAX31865Emulator().transfer),  # extruder_rtd
         ]
         for cs_line, transfer in h7_chips:
@@ -1577,16 +1577,34 @@ probe_count: 3,3
 [mcu]
 serial: {h7_pty}
 {f4_section}
-[printer]
-kinematics: corexy
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
 
 [axis x]
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
 post_processors: is_xy
 
 [axis y]
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
 post_processors: is_xy
 
 [axis z]
+position_min: -5
+position_max: 250
+endstop_pin: probe:z_virtual_endstop
+homing_speed: 5
 
 [limit gantry]
 axes: x, y
@@ -1598,38 +1616,29 @@ axes: z
 max_velocity: 10
 max_accel: 100
 
-[stepper_x]
+[motor a]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio10
-position_endstop: 0
-position_max: 300
-homing_speed: 10
 
-[stepper_y]
+[motor b]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio11
-position_endstop: 0
-position_max: 300
-homing_speed: 10
 
-[stepper_z]
+[motor z]
+drive: stepper
 step_pin: {z_step_mcu}gpiochip0/gpio0
 dir_pin: {z_step_mcu}gpiochip0/gpio1
 enable_pin: !{z_step_mcu}gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 4
-endstop_pin: probe:z_virtual_endstop
-position_min: -5
-position_max: 250
-homing_speed: 5
 
 [beacon]
 serial: {beacon_pty}
@@ -1802,10 +1811,13 @@ measured_z: 3.25
 trigger_height: 0
 """
 
+    z_motors = "z"
     points_sections = ""
     if variant == "points":
+        z_motors = "z, z1"
         points_sections = """
-[stepper_z1]
+[motor z1]
+drive: stepper
 step_pin: gpiochip0/gpio9
 dir_pin: gpiochip0/gpio10
 enable_pin: !gpiochip0/gpio11
@@ -1849,16 +1861,36 @@ calibrate_y: 125
 [mcu]
 serial: {h7_pty}
 
-[printer]
-kinematics: cartesian
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: {z_motors}
 
 [axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio200
+homing_speed: 10
 post_processors: is_xy
 
 [axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio201
+homing_speed: 10
 post_processors: is_xy
 
 [axis z]
+position_min: -5
+position_max: 250
+homing_speed: 5
+{z_endstop}
 
 [limit gantry]
 axes: x, y
@@ -1870,40 +1902,29 @@ axes: z
 max_velocity: 10
 max_accel: 30
 
-[stepper_x]
+[motor x]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio200
-position_min: 0
-position_endstop: 0
-position_max: 250
-homing_speed: 10
 
-[stepper_y]
+[motor y]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio201
-position_min: 0
-position_endstop: 0
-position_max: 250
-homing_speed: 10
 
-[stepper_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio8
 microsteps: 16
 rotation_distance: 4
-{z_endstop}
-position_min: -5
-position_max: 250
-homing_speed: 5
 {safe_z_section}{probe_section}{remote_section}{points_sections}
 [post_processor is_xy]
 type: smooth_mzv
@@ -2356,16 +2377,37 @@ def _generate_minimal_config(
 [mcu]
 serial: {h7_pty}
 
-[printer]
-kinematics: cartesian
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
 
 [axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
 post_processors: is_xy
 
 [axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
 post_processors: is_xy
 
 [axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
 
 [limit gantry]
 axes: x, y
@@ -2377,41 +2419,33 @@ axes: z
 max_velocity: 10
 max_accel: 30
 
-[stepper_x]
+[motor x]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio10
-position_min: 0
-position_endstop: 0
-position_max: 250
-homing_speed: 10
 
-[stepper_y]
+[motor y]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio11
-position_min: 0
-position_endstop: 0
-position_max: 250
-homing_speed: 10
 
-[stepper_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio8
 microsteps: 16
 rotation_distance: 4
-endstop_pin: ^gpiochip0/gpio12
-position_min: -5
-position_endstop: 0
-position_max: 250
-homing_speed: 5
+
+[post_processor is_xy]
+type: smooth_zv
+frequency_hz: 50
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -2507,16 +2541,37 @@ def _generate_phase_stepping_config(
 [mcu]
 serial: {h7_pty}
 
-[printer]
-kinematics: cartesian
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
 
 [axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
 post_processors: is_xy
 
 [axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
 post_processors: is_xy
 
 [axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
 
 [limit gantry]
 axes: x, y
@@ -2528,48 +2583,36 @@ axes: z
 max_velocity: 10
 max_accel: 30
 
-[stepper_x]
+[motor x]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 256
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio10
-position_min: 0
-position_endstop: 0
-position_max: 250
-homing_speed: 10
 phase_stepping: True
 
-[tmc5160 stepper_x]
+[tmc5160 x]
 spi_bus: spidev0.0
 cs_pin: gpiochip0/gpio5
 run_current: 1.0
 sense_resistor: 0.075
 
-[stepper_y]
+[motor y]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio20
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio11
-position_min: 0
-position_endstop: 0
-position_max: 250
-homing_speed: 10
 
-[stepper_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio21
 microsteps: 16
 rotation_distance: 4
-endstop_pin: ^gpiochip0/gpio12
-position_min: -5
-position_endstop: 0
-position_max: 250
-homing_speed: 5
 
 [post_processor is_xy]
 type: smooth_mzv
@@ -2598,16 +2641,38 @@ def _generate_sensorless_phase_config(
 [mcu]
 serial: {h7_pty}
 
-[printer]
-kinematics: cartesian
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
 
 [axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
 post_processors: is_xy
 
 [axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
 post_processors: is_xy
 
 [axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: tmc5160_z:virtual_endstop
+homing_speed: 5
+homing_retract_dist: 0
 
 [limit gantry]
 axes: x, y
@@ -2619,45 +2684,32 @@ axes: z
 max_velocity: 10
 max_accel: 30
 
-[stepper_x]
+[motor x]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio10
-position_min: 0
-position_endstop: 0
-position_max: 250
-homing_speed: 10
 
-[stepper_y]
+[motor y]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio20
 microsteps: 16
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio11
-position_min: 0
-position_endstop: 0
-position_max: 250
-homing_speed: 10
 
-[stepper_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio21
 microsteps: 256
 rotation_distance: 40
-endstop_pin: tmc5160_stepper_z:virtual_endstop
-position_min: -5
-position_endstop: 0
-position_max: 250
-homing_speed: 5
-homing_retract_dist: 0
 phase_stepping: True
 
-[tmc5160 stepper_z]
+[tmc5160 z]
 spi_bus: spidev0.0
 cs_pin: gpiochip0/gpio5
 run_current: 1.0
@@ -2829,19 +2881,38 @@ def _generate_batch_config() -> str:
 [mcu]
 serial: /dev/null
 
-[printer]
-kinematics: corexy
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
 
 [axis x]
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 50
 post_processors: is_xy
 
 [axis y]
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 50
 post_processors: is_xy
 
 [axis z]
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 8
 
 [axis e]
 follows: x, y, z
+motors: e
 
 [post_processor is_xy]
 type: smooth_mzv
@@ -2862,45 +2933,40 @@ axes: z
 max_velocity: 30
 max_accel: 100
 
-[stepper_x]
+[motor a]
+drive: stepper
 step_pin: gpiochip0/gpio0
 dir_pin: gpiochip0/gpio1
 enable_pin: !gpiochip0/gpio2
 microsteps: 32
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio10
-position_endstop: 0
-position_max: 300
-homing_speed: 50
 
-[stepper_y]
+[motor b]
+drive: stepper
 step_pin: gpiochip0/gpio3
 dir_pin: gpiochip0/gpio4
 enable_pin: !gpiochip0/gpio5
 microsteps: 32
 rotation_distance: 40
-endstop_pin: ^gpiochip0/gpio11
-position_endstop: 0
-position_max: 300
-homing_speed: 50
 
-[stepper_z]
+[motor z]
+drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio8
 microsteps: 32
 rotation_distance: 4
-endstop_pin: ^gpiochip0/gpio12
-position_endstop: 0
-position_max: 300
-homing_speed: 8
 
-[extruder]
+[motor e]
+drive: stepper
 step_pin: gpiochip0/gpio13
 dir_pin: gpiochip0/gpio14
 enable_pin: !gpiochip0/gpio15
 microsteps: 16
 rotation_distance: 22.6789511
+
+[extruder]
+axis: e
 nozzle_diameter: 0.4
 filament_diameter: 1.75
 heater_pin: gpiochip0/gpio20
@@ -2912,9 +2978,6 @@ control: pid
 pid_kp: 30
 pid_ki: 2
 pid_kd: 100
-max_extrude_cross_section: 100
-max_extrude_only_distance: 500
-pressure_advance: 0.04
 
 [heater_bed]
 heater_pin: gpiochip0/gpio21

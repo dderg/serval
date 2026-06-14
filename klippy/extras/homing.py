@@ -11,10 +11,9 @@ NO_MOVEMENT_EPSILON = 0.005
 
 
 def _endstop_section(config, axis_name):
-    for prefix in ("stepper_", "servo_"):
-        section = prefix + axis_name
-        if config.has_section(section):
-            return section
+    section = "axis " + axis_name
+    if config.has_section(section):
+        return section
     return None
 
 

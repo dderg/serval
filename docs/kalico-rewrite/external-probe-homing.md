@@ -128,7 +128,7 @@ which iterates stepper configs and knows each stepper's MCU. This is correct
 because the dispatch config (dispatch.rs:463-469) mirrors kinematics axis
 registration — every axis registered in `_register_axis` gets a corresponding
 `McuAxisConfig` entry with `axes: vec![AXIS_Z]` (or `AXIS_X, AXIS_Y`). The
-"passthrough" comment at motion_toolhead.py:115 refers to the kinematic
+"passthrough" comment at motion.py:115 refers to the kinematic
 transform (Z isn't mixed with X/Y in CoreXY), NOT to dispatch — the bridge
 dispatches Z curves to F446 when Z is moving (dispatch.rs:240-258 only skips
 when ALL axes are trivially constant).
@@ -332,7 +332,7 @@ When `drip_move` enters the external-probe path (`active_homing_arms` empty,
 6. `bridge.submit_homing_move_async(pos3, speed, [arm_id])` — new non-blocking
    variant. The current `submit_homing_move` returns `PyResult<()>` and the
    caller immediately blocks on `wait_moves()` (bridge.rs:2592,
-   motion_toolhead.py:483). The new `_async` variant submits the segment and
+   motion.py:483). The new `_async` variant submits the segment and
    returns immediately, exposing a `segment_completion` reactor completion that
    fires when the homing segment retires (natural end-of-travel, deadline
    expiry, or software trip). The existing blocking `submit_homing_move` +
@@ -359,7 +359,7 @@ When `drip_move` enters the external-probe path (`active_homing_arms` empty,
        # Update toolhead print-time projection so get_last_move_time()
        # returns the correct move_end_print_time for home_wait()
        # (homing.py:151). Mirrors the existing GPIO path at
-       # motion_toolhead.py:482-487.
+       # motion.py:482-487.
        bridge_lmt_after = bridge.get_last_move_time()
        duration = bridge_lmt_after - bridge_lmt_before
        self._bump_pending_end_time(duration)
@@ -437,7 +437,7 @@ already in shutdown. Matches mainline's drip-feed safety model.
 **Normal operation margin:** The 25ms extension interval with 50ms deadline
 gives 25ms of slack — ample for normal host operation.
 
-**Files:** `klippy/motion_toolhead.py`, `klippy/motion_bridge.py`,
+**Files:** `klippy/motion.py`, `klippy/motion_bridge.py`,
 `rust/motion-bridge/src/bridge.rs`, `rust/motion-bridge/src/homing.rs`,
 MCU firmware C files
 
@@ -481,7 +481,7 @@ The trigger time crosses three clock domains:
 2. **Klippy print_time** (seconds) — shared across MCUs via clock sync. This is
    what `get_past_mcu_position(trigger_time)` receives.
 3. **Bridge planner time** (seconds since planner start) — the curve is
-   parameterized in this domain. `motion_toolhead._bump_pending_end_time()`
+   parameterized in this domain. `motion._bump_pending_end_time()`
    projects bridge durations onto print_time, but does not retain per-segment
    epoch mappings.
 
@@ -601,7 +601,7 @@ as mainline.
 |------|--------|
 | `klippy/mcu.py` | `TriggerDispatch.__init__` always allocates `_trdispatch`; `start()`/`stop()` runtime-gate on primary MCU `_bridge_drives_steppers`; conditional `_trdispatch_mcu` in `MCU_trsync._build_config`; no-op `start()`/`stop()` for bridge-driven MCU_trsync; `_bridge_drives_steppers` flag set by `_register_axis` |
 | `klippy/stepper.py` | `get_past_mcu_position` dispatches: retained curve → curve eval, no curve → existing MCU snapshot |
-| `klippy/motion_toolhead.py` | `drip_move` credit-extension loop with `drip_completion.wait()` + `test()` for external probes; stepper registration on virtual dispatch |
+| `klippy/motion.py` | `drip_move` credit-extension loop with `drip_completion.wait()` + `test()` for external probes; stepper registration on virtual dispatch |
 | `klippy/motion_bridge.py` | Virtual `BridgeTriggerDispatch` with `Software` source kind; `software_trip()` and `extend_homing_deadline()` wrappers; `BridgeHomingReason` enum (private, separate from trsync reasons) |
 | `rust/motion-bridge/src/bridge.rs` | `submit_homing_move_async()` (non-blocking, returns segment completion); `software_trip()`, `extend_homing_deadline()` FFI surface; retain homing curve, `get_homing_step_count_at_time` evaluation |
 | `rust/motion-bridge/src/homing.rs` | Software source kind in homing state machine; deadline-expired terminal state |

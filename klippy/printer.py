@@ -28,7 +28,7 @@ from . import (
     configfile,
     gcode,
     mcu,
-    motion_toolhead,
+    motion,
     msgproto,
     pins,
     queuelogger,
@@ -354,7 +354,7 @@ class Printer:
             self.load_object(config, section_config, None)
         if self.get_start_args().get("debuginput") is not None:
             self.load_object(config, "testing", None)
-        for m in [motion_toolhead]:
+        for m in [motion]:
             m.add_printer_objects(config)
         # Validate that there are no undefined parameters in the config file
         error_on_unused = get_danger_options().error_on_unused_config_options

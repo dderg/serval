@@ -22,7 +22,7 @@ _PRINT_FINISH_EVENTS = (
 
 
 # Methods that issue real motion/planner/MCU traffic. Under the stub bridge
-# these MUST raise, not return None — a None would make MotionToolhead.move()
+# these MUST raise, not return None — a None would make Motion.move()
 # compute `None - None`, hanging the test suite on a path that reached real
 # motion without a real bridge.
 _STUB_MOTION_METHODS = frozenset(
@@ -355,6 +355,7 @@ class MotionBridgeWrapper:
         limits,
         post_processors,
         mcus,
+        kinematics_axes,
         window_capacity=32,
         beta_max_iters=10,
     ):
@@ -363,6 +364,7 @@ class MotionBridgeWrapper:
             limits,
             post_processors,
             mcus,
+            kinematics_axes,
             window_capacity,
             beta_max_iters,
         )

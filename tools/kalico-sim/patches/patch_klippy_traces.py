@@ -8,7 +8,7 @@ import pathlib
 import sys
 
 
-def patch_motion_toolhead(path):
+def patch_motion(path):
     text = path.read_text()
     old = "            self.bridge.submit_homing_move(pos3, speed, arm_ids)"
     if old not in text:
@@ -56,8 +56,8 @@ def patch_mcu_homing(path):
 if __name__ == "__main__":
     for arg in sys.argv[1:]:
         p = pathlib.Path(arg)
-        if p.name == "motion_toolhead.py":
-            patch_motion_toolhead(p)
+        if p.name == "motion.py":
+            patch_motion(p)
         elif p.name == "motion_bridge.py":
             patch_motion_bridge(p)
         elif p.name == "mcu.py":

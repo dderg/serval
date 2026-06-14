@@ -1,18 +1,18 @@
+use crate::kinematics::SPATIAL_AXES;
 use runtime::segment::KinematicTag;
 use std::collections::{HashMap, HashSet};
 
-pub const KINEMATICS_COREXY: u8 = KinematicTag::CoreXyAndE as u8;
+pub const KINEMATICS_COREXY: u8 = KinematicTag::CoreXy as u8;
 
 const _: () = assert!(
-    KinematicTag::CoreXyAndE as u8 == 0,
-    "wire-ABI invariant broken: KinematicTag::CoreXyAndE discriminant must be 0 \
-     (matches KINEMATICS_COREXY on the host and the MCU firmware's kinematics byte)",
+    KinematicTag::CoreXy as u8 == 0,
+    "KinematicTag::CoreXy discriminant must be 0 — the Python↔Rust init_planner \
+     topology tuples mirror it numerically (see segment.rs); renumbering breaks that contract",
 );
 
 pub const AXIS_X: usize = 0;
 pub const AXIS_Y: usize = 1;
 pub const AXIS_Z: usize = 2;
-pub const AXIS_E: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct McuAxisConfig {
@@ -41,21 +41,48 @@ impl McuCaps {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum KinematicsConfigError {
+    #[error("mcu handle {handle}: unknown kinematics tag {tag}; known: 0=corexy, 1=cartesian")]
+    UnknownTag { handle: u32, tag: u8 },
+    #[error(
+        "mcu handle {handle}: corexy kinematics requires both X (axis {AXIS_X}) and \
+         Y (axis {AXIS_Y}) on the same mcu, got axes {axes:?}"
+    )]
+    CorexyMissingXy { handle: u32, axes: Vec<usize> },
+    #[error(
+        "no runtime caps recorded for mcu_handle {handle} — \
+         refusing to size piece rings by guess"
+    )]
+    CapsMissing { handle: u32 },
+}
+
 pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
     mcus: &[(u32, Vec<u8>, u8)],
     caps_by_handle: &HashMap<u32, McuCaps, S>,
-) -> Result<Vec<McuAxisConfig>, String> {
+) -> Result<Vec<McuAxisConfig>, KinematicsConfigError> {
     mcus.iter()
         .map(|(handle, axes, tag)| {
-            let caps = caps_by_handle.get(handle).copied().ok_or_else(|| {
-                format!(
-                    "no runtime caps recorded for mcu_handle {handle} — \
-                     refusing to size piece rings by guess"
-                )
+            crate::kinematics::KinematicsModule::from_tag(*tag).map_err(|_| {
+                KinematicsConfigError::UnknownTag {
+                    handle: *handle,
+                    tag: *tag,
+                }
             })?;
+            let axes: Vec<usize> = axes.iter().map(|&a| a as usize).collect();
+            if *tag == KINEMATICS_COREXY && !(axes.contains(&AXIS_X) && axes.contains(&AXIS_Y)) {
+                return Err(KinematicsConfigError::CorexyMissingXy {
+                    handle: *handle,
+                    axes,
+                });
+            }
+            let caps = caps_by_handle
+                .get(handle)
+                .copied()
+                .ok_or(KinematicsConfigError::CapsMissing { handle: *handle })?;
             Ok(McuAxisConfig {
                 mcu_id: *handle,
-                axes: axes.iter().map(|&a| a as usize).collect(),
+                axes,
                 kinematics: *tag,
                 caps,
             })
@@ -63,16 +90,10 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
         .collect()
 }
 
-pub fn cfg_is_corexy(cfg: &McuAxisConfig) -> bool {
-    cfg.kinematics == KINEMATICS_COREXY && cfg.axes.contains(&AXIS_X) && cfg.axes.contains(&AXIS_Y)
-}
-
-pub fn motor_frame_xy(cfg: &McuAxisConfig, x: f64, y: f64) -> (f64, f64) {
-    if cfg_is_corexy(cfg) {
-        crate::kinematics::forward_corexy(x, y)
-    } else {
-        (x, y)
-    }
+pub fn motor_frame(cfg: &McuAxisConfig, axes: [f64; SPATIAL_AXES]) -> [f64; SPATIAL_AXES] {
+    crate::kinematics::KinematicsModule::from_tag(cfg.kinematics)
+        .expect("build_mcu_configs validated the kinematics tag")
+        .forward(axes)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,12 +113,12 @@ pub fn build_seed_sends(configs: &[McuAxisConfig], x: f64, y: f64, z: f64) -> Ve
     configs
         .iter()
         .map(|cfg| {
-            let (mx, my) = motor_frame_xy(cfg, x, y);
+            let m = motor_frame(cfg, [x, y, z]);
             SeedSend {
                 mcu_id: cfg.mcu_id,
-                x_q16: encode_q16(mx),
-                y_q16: encode_q16(my),
-                z_q16: encode_q16(z),
+                x_q16: encode_q16(m[0]),
+                y_q16: encode_q16(m[1]),
+                z_q16: encode_q16(m[2]),
             }
         })
         .collect()
@@ -115,12 +136,12 @@ pub fn build_serial_seed_sends<S: ::std::hash::BuildHasher>(
         .iter()
         .filter(|cfg| !ethercat_mcu_ids.contains(&cfg.mcu_id))
         .map(|cfg| {
-            let (mx, my) = motor_frame_xy(cfg, x, y);
+            let m = motor_frame(cfg, [x, y, z]);
             SeedSend {
                 mcu_id: cfg.mcu_id,
-                x_q16: encode_q16(mx),
-                y_q16: encode_q16(my),
-                z_q16: encode_q16(z),
+                x_q16: encode_q16(m[0]),
+                y_q16: encode_q16(m[1]),
+                z_q16: encode_q16(m[2]),
             }
         })
         .collect()
@@ -131,10 +152,7 @@ mod topology_tests {
     use super::*;
     use std::collections::HashMap;
 
-    #[test]
-    fn axis_e_is_three() {
-        assert_eq!(AXIS_E, 3);
-    }
+    const FOLLOWER_E: usize = 3;
 
     #[test]
     fn build_mcu_configs_two_mcu_corexy_with_e() {
@@ -152,13 +170,17 @@ mod topology_tests {
             },
         );
         let mcus = vec![
-            (7u32, vec![AXIS_X as u8, AXIS_Y as u8, AXIS_E as u8], 0u8),
+            (
+                7u32,
+                vec![AXIS_X as u8, AXIS_Y as u8, FOLLOWER_E as u8],
+                0u8,
+            ),
             (9u32, vec![AXIS_Z as u8], 1u8),
         ];
         let cfgs = build_mcu_configs(&mcus, &caps).unwrap();
         assert_eq!(cfgs.len(), 2);
         assert_eq!(cfgs[0].mcu_id, 7);
-        assert_eq!(cfgs[0].axes, vec![AXIS_X, AXIS_Y, AXIS_E]);
+        assert_eq!(cfgs[0].axes, vec![AXIS_X, AXIS_Y, FOLLOWER_E]);
         assert_eq!(cfgs[0].kinematics, 0);
         assert_eq!(
             cfgs[0].caps,
@@ -176,7 +198,32 @@ mod topology_tests {
         let caps: HashMap<u32, McuCaps> = HashMap::new();
         let mcus = vec![(7u32, vec![AXIS_X as u8, AXIS_Y as u8], 0u8)];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
-        assert!(err.contains("mcu_handle 7"), "got: {err}");
+        assert!(matches!(
+            err,
+            KinematicsConfigError::CapsMissing { handle: 7 }
+        ));
+    }
+
+    #[test]
+    fn build_mcu_configs_unknown_tag_is_loud() {
+        let caps: HashMap<u32, McuCaps> = HashMap::new();
+        let mcus = vec![(7u32, vec![AXIS_X as u8], 9u8)];
+        let err = build_mcu_configs(&mcus, &caps).unwrap_err();
+        assert!(matches!(
+            err,
+            KinematicsConfigError::UnknownTag { handle: 7, tag: 9 }
+        ));
+    }
+
+    #[test]
+    fn build_mcu_configs_corexy_without_xy_is_loud() {
+        let caps: HashMap<u32, McuCaps> = HashMap::new();
+        let mcus = vec![(7u32, vec![AXIS_X as u8, FOLLOWER_E as u8], 0u8)];
+        let err = build_mcu_configs(&mcus, &caps).unwrap_err();
+        assert!(matches!(
+            err,
+            KinematicsConfigError::CorexyMissingXy { handle: 7, .. }
+        ));
     }
 }
 
@@ -184,10 +231,12 @@ mod topology_tests {
 mod seed_tests {
     use super::*;
 
+    const FOLLOWER_E: usize = 3;
+
     fn corexy_cfg() -> McuAxisConfig {
         McuAxisConfig {
             mcu_id: 1,
-            axes: vec![AXIS_X, AXIS_Y, AXIS_E],
+            axes: vec![AXIS_X, AXIS_Y, FOLLOWER_E],
             kinematics: KINEMATICS_COREXY,
             caps: McuCaps {
                 total_piece_memory: 62 * 1024,
@@ -206,18 +255,18 @@ mod seed_tests {
     }
 
     #[test]
-    fn cfg_is_corexy_true_only_for_corexy_xy_mcu() {
-        assert!(cfg_is_corexy(&corexy_cfg()));
-        assert!(!cfg_is_corexy(&cartesian_z_cfg()));
-    }
-
-    #[test]
-    fn motor_frame_xy_transforms_corexy_passes_through_cartesian() {
-        assert_eq!(motor_frame_xy(&corexy_cfg(), 150.0, 150.0), (300.0, 0.0));
-        assert_eq!(motor_frame_xy(&corexy_cfg(), 10.0, 4.0), (14.0, 6.0));
+    fn motor_frame_transforms_corexy_passes_through_cartesian() {
         assert_eq!(
-            motor_frame_xy(&cartesian_z_cfg(), 150.0, 150.0),
-            (150.0, 150.0)
+            motor_frame(&corexy_cfg(), [150.0, 150.0, 0.0]),
+            [300.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            motor_frame(&corexy_cfg(), [10.0, 4.0, 0.0]),
+            [14.0, 6.0, 0.0]
+        );
+        assert_eq!(
+            motor_frame(&cartesian_z_cfg(), [150.0, 150.0, 50.0]),
+            [150.0, 150.0, 50.0]
         );
     }
 

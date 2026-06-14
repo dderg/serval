@@ -17,7 +17,8 @@ use kalico_host_rt::unix_native_conn::UnixNativeConn;
 
 use crate::classify;
 use crate::config::{self, PlannerConfig};
-use crate::dispatch::{AXIS_E, McuAxisConfig, McuCaps, build_mcu_configs};
+use crate::dispatch::{McuAxisConfig, McuCaps, build_mcu_configs};
+use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
 use crate::planner::{DispatchError, PlannerError, PlannerHandle};
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
 
@@ -45,11 +46,13 @@ fn trip_position_to_motor_frame(
     motor_pos: f64,
     _configs: &[crate::dispatch::McuAxisConfig],
     _axis_mcu: u32,
-) -> [f64; 4] {
-    let mut frame = [0.0f64; 4];
-    if axis < 4 {
-        frame[axis as usize] = motor_pos;
-    }
+) -> [f64; SPATIAL_AXES] {
+    assert!(
+        (axis as usize) < SPATIAL_AXES,
+        "follower axis {axis} in homing trip is a bug — a follower axis must never reach homing recovery"
+    );
+    let mut frame = [0.0f64; SPATIAL_AXES];
+    frame[axis as usize] = motor_pos;
     frame
 }
 
@@ -535,8 +538,10 @@ pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::
 #[cfg(test)]
 mod drip_cohort_participants_tests {
     use super::drip_cohort_participants;
-    use crate::dispatch::{AXIS_E, AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps};
+    use crate::dispatch::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps};
     use crate::pump::AxisKey;
+
+    const FOLLOWER_E: usize = 3;
 
     fn cfg(mcu_id: u32, axes: Vec<usize>) -> McuAxisConfig {
         McuAxisConfig {
@@ -551,7 +556,10 @@ mod drip_cohort_participants_tests {
 
     #[test]
     fn includes_every_configured_axis_so_lane_3_enqueues_stay_in_cohort() {
-        let configs = vec![cfg(0, vec![AXIS_Y, AXIS_Z, AXIS_E]), cfg(1, vec![AXIS_X])];
+        let configs = vec![
+            cfg(0, vec![AXIS_Y, AXIS_Z, FOLLOWER_E]),
+            cfg(1, vec![AXIS_X]),
+        ];
         let participants = drip_cohort_participants(&configs);
         assert_eq!(
             participants,
@@ -566,7 +574,7 @@ mod drip_cohort_participants_tests {
                 },
                 AxisKey {
                     mcu_id: 0,
-                    axis: AXIS_E as u8
+                    axis: FOLLOWER_E as u8
                 },
                 AxisKey {
                     mcu_id: 1,
@@ -2298,6 +2306,7 @@ impl PyMotionBridge {
         limits,
         post_processors,
         mcus,
+        kinematics_axes,
         window_capacity = 32,
         beta_max_iters = 10,
     ))]
@@ -2308,6 +2317,7 @@ impl PyMotionBridge {
         limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
         post_processors: Vec<(String, String, Vec<(String, f64)>)>,
         mcus: Vec<(u32, Vec<u8>, u8)>,
+        kinematics_axes: Vec<String>,
         window_capacity: usize,
         beta_max_iters: u8,
     ) -> PyResult<()> {
@@ -2333,6 +2343,10 @@ impl PyMotionBridge {
                 .collect(),
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        axis_registry
+            .validate_motor_mapping(&kinematics_axes)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         let pp_decls: Vec<config::PostProcessorDecl> = post_processors
             .into_iter()
@@ -2429,8 +2443,8 @@ impl PyMotionBridge {
                 })
                 .collect::<PyResult<_>>()?
         };
-        let mcu_configs =
-            build_mcu_configs(&mcus, &caps_by_handle).map_err(PyRuntimeError::new_err)?;
+        let mcu_configs = build_mcu_configs(&mcus, &caps_by_handle)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         *self
             .mcu_axis_configs
             .lock()
@@ -3124,7 +3138,7 @@ impl PyMotionBridge {
                             router.host_time_to_mcu_clock(handle, host_now).unwrap_or(0);
                         cfg.axes
                             .iter()
-                            .filter(|&&a| a < 3)
+                            .filter(|&&a| a < SPATIAL_AXES)
                             .map(move |&axis| {
                                 let key = crate::pump::AxisKey {
                                     mcu_id: cfg.mcu_id,
@@ -3633,7 +3647,9 @@ impl PyMotionBridge {
 
         let motor_frame =
             trip_position_to_motor_frame(ctx.axis, final_motor_pos, &[], ctx.axis_key.mcu_id);
-        let cartesian = crate::kinematics::inverse(kinematics, motor_frame);
+        let cartesian = KinematicsModule::from_tag(kinematics)
+            .expect("build_mcu_configs validated the kinematics tag")
+            .inverse(motor_frame);
 
         let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(planner) = planner_guard.as_ref() {
@@ -3939,7 +3955,9 @@ pub(crate) fn dispatch_endstop_trip(
                 )?;
                 let motor_frame =
                     trip_position_to_motor_frame(axis, motor_pos, &configs, axis_key.mcu_id);
-                Ok(crate::kinematics::inverse(kinematics, motor_frame))
+                Ok(KinematicsModule::from_tag(kinematics)
+                    .map_err(|e| e.to_string())?
+                    .inverse(motor_frame))
             };
 
             let outcome = reconstruct_cartesian(run.endstop_mcu, trip_clock).and_then(|trip| {

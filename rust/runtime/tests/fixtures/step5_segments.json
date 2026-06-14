@@ -8,7 +8,7 @@
       "weights": [1, 1],
       "degree": 1,
       "duration_us": 5000,
-      "kinematics": "CoreXyAndE"
+      "kinematics": "CoreXy"
     },
     {
       "name": "rational_quadratic_arc",
@@ -18,7 +18,7 @@
       "weights": [1, 0.7071068, 1],
       "degree": 2,
       "duration_us": 15000,
-      "kinematics": "CoreXyAndE"
+      "kinematics": "CoreXy"
     },
     {
       "name": "smooth_corner_cubic",
@@ -28,7 +28,7 @@
       "weights": [1, 1, 1, 1],
       "degree": 3,
       "duration_us": 10000,
-      "kinematics": "CoreXyAndE"
+      "kinematics": "CoreXy"
     },
     {
       "name": "halt_sentinel",
@@ -38,7 +38,7 @@
       "weights": [1, 1],
       "degree": 1,
       "duration_us": 2000,
-      "kinematics": "CoreXyAndE"
+      "kinematics": "CoreXy"
     }
   ]
 }

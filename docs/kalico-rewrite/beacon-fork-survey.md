@@ -112,12 +112,12 @@ credit-window deadline design (50 ms grants) from
 |---|---|---|---|
 | `homing:home_rails_begin/end` events | Beacon SENDS them itself around its own homing (with minimal `BeaconHomingState`: `get_axes()→[2]`, no-op `set_homed_position`) and LISTENS to adjust position post-G28-Z | Listeners alive (gcode_move.py:27, z_thermal_adjust, z_calibration, endstop_phase). Our G28 emits **nothing** — only trad_rack emits these | Beacon's own synthesis keeps working. The listener path is dead on our G28 → post-home `_sample()` adjustment must move into our provider contract (post-trip hook / measured-position override) — spec B |
 | `homing_state.set_homed_position([None,None,dist])` | Override homed Z with measured distance after G28 | No Homing-state class; our homing.py sets position from `trigger_height + overshoot` | Provider contract extension: provider supplies measured trigger height post-trip (spec B) |
-| `kin.note_z_not_homed()` / `kin.clear_homing_state("z")` / `set_position(homing_axes=…)` | Mark Z unhomed around contact ops | All present on `BridgeKinematics` (motion_toolhead.py:195-210), both string and index forms handled by beacon's own compat shim | Works as-is |
+| `kin.note_z_not_homed()` / `kin.clear_homing_state("z")` / `set_position(homing_axes=…)` | Mark Z unhomed around contact ops | All present on `BridgeKinematics` (motion.py:195-210), both string and index forms handled by beacon's own compat shim | Works as-is |
 
 ### Toolhead surface
 
-All present and semantically compatible — `MotionToolhead(ToolHead)`
-subclasses the legacy class (motion_toolhead.py:235), so `manual_move`,
+All present and semantically compatible — the motion seam
+(`klippy/motion.py`) exposes the toolhead API, so `manual_move`,
 `get_position`, `wait_moves`, `get_kinematics`, `set_position(homing_axes)`,
 `dwell`, `get_status` (incl. `homed_axes` from BridgeKinematics and
 `max_accel`), `move`, `get_extruder`, and
