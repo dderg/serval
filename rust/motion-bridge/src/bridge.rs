@@ -1922,66 +1922,9 @@ impl PyMotionBridge {
         speed: f64,
         accel: f64,
     ) -> PyResult<f64> {
-        const CORRECTION_LEAD_SECS: f64 = 0.15;
-        let profile = crate::correction::plan_correction_profile(delta_mm, speed, accel)
+        let pieces = crate::correction::plan_correction_profile(delta_mm, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
-        let duration = crate::correction::profile_duration(delta_mm, speed, accel)
-            .map_err(PyRuntimeError::new_err)?;
-        let handle = mcu_handle_from_raw(mcu_handle);
-        let entries = {
-            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            let start_secs = router.host_now_secs() + CORRECTION_LEAD_SECS;
-            crate::correction::to_piece_entries(
-                &profile,
-                |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
-                start_secs,
-            )
-        };
-        if entries.iter().any(|e| e.start_time == 0) {
-            return Err(PyRuntimeError::new_err(format!(
-                "adjust_motor: clock unsynced for mcu {mcu_handle}"
-            )));
-        }
-        let io = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-            let conn = mcus.get(&mcu_handle).ok_or_else(|| {
-                PyRuntimeError::new_err(format!("adjust_motor: unknown mcu_handle {mcu_handle}"))
-            })?;
-            conn.host_io
-                .as_ref()
-                .ok_or_else(|| {
-                    PyRuntimeError::new_err(
-                        "adjust_motor: serial transport not attached for this MCU \
-                         (EtherCAT correction moves are not supported yet)",
-                    )
-                })?
-                .clone()
-        };
-        py.detach(|| -> PyResult<()> {
-            for msg in crate::correction::chunk_correction_messages(axis_idx, motor_idx, &entries) {
-                let mut body = Vec::with_capacity(9 + msg.pieces_bytes.len());
-                kalico_protocol::codec::Encode::encode(&msg, &mut body);
-                let (_kind, resp) = io
-                    .kalico_call_on_channel(
-                        kalico_protocol::KALICO_CHANNEL_CONTROL,
-                        kalico_protocol::MessageKind::PushCorrectionPieces,
-                        body,
-                        std::time::Duration::from_secs(2),
-                    )
-                    .map_err(|e| PyRuntimeError::new_err(format!("adjust_motor send: {e:?}")))?;
-                use kalico_protocol::codec::Decode as _;
-                let r = kalico_protocol::messages::PushCorrectionPiecesResponse::decode(&resp)
-                    .map_err(|e| PyRuntimeError::new_err(format!("adjust_motor decode: {e:?}")))?;
-                if r.result != 0 {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "adjust_motor rejected by MCU: error {}",
-                        r.result
-                    )));
-                }
-            }
-            Ok(())
-        })?;
-        Ok(CORRECTION_LEAD_SECS + duration)
+        self.stream_correction_entries(py, mcu_handle, axis_idx, motor_idx, &pieces)
     }
 
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {
@@ -3781,6 +3724,115 @@ impl PyMotionBridge {
             motion_history: Arc::clone(&self.motion_history),
             mcu_axis_configs: Arc::clone(&self.mcu_axis_configs),
         }
+    }
+}
+
+impl PyMotionBridge {
+    fn stream_correction_entries(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        axis_idx: u8,
+        motor_idx: u8,
+        pieces: &[crate::correction::ProfilePiece],
+    ) -> PyResult<f64> {
+        const CORRECTION_LEAD_SECS: f64 = 0.15;
+        const REFILL_MARGIN_SECS: f64 = 0.05;
+        const WAIT_SANITY_SLACK_SECS: f64 = 5.0;
+        let ring_depth = runtime::stepping_state::CORRECTION_RING_DEPTH as u32;
+        let handle = mcu_handle_from_raw(mcu_handle);
+
+        let (start_secs, entries) = {
+            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            let start = router.host_now_secs() + CORRECTION_LEAD_SECS;
+            let entries = crate::correction::to_piece_entries(
+                pieces,
+                |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
+                start,
+            );
+            (start, entries)
+        };
+        if entries.iter().any(|e| e.start_time == 0) {
+            return Err(PyRuntimeError::new_err(format!(
+                "stream_correction: clock unsynced for mcu {mcu_handle}"
+            )));
+        }
+        let end_host = crate::correction::piece_end_host_times(pieces, start_secs);
+        let total_duration = end_host.last().copied().unwrap_or(start_secs) - start_secs;
+        let msgs = crate::correction::chunk_correction_messages(axis_idx, motor_idx, &entries);
+        let new_heads: Vec<u32> = msgs.iter().map(|m| m.new_head).collect();
+        let releases = crate::correction::chunk_release_times(
+            &end_host,
+            ring_depth,
+            &new_heads,
+            REFILL_MARGIN_SECS,
+        );
+
+        let io = {
+            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let conn = mcus.get(&mcu_handle).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "stream_correction: unknown mcu_handle {mcu_handle}"
+                ))
+            })?;
+            conn.host_io
+                .as_ref()
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err(
+                        "stream_correction: serial transport not attached for this MCU \
+                         (EtherCAT correction moves are not supported yet)",
+                    )
+                })?
+                .clone()
+        };
+
+        py.detach(|| -> PyResult<()> {
+            for (msg, release) in msgs.iter().zip(releases) {
+                if let Some(rel) = release {
+                    let wait_deadline = start_secs + total_duration + WAIT_SANITY_SLACK_SECS;
+                    if rel > wait_deadline {
+                        return Err(PyRuntimeError::new_err(format!(
+                            "stream_correction: chunk release time {rel} exceeds schedule bound {wait_deadline} (scheduling bug?)"
+                        )));
+                    }
+                    loop {
+                        let now = {
+                            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+                            router.host_now_secs()
+                        };
+                        if now >= rel {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                }
+                let mut body = Vec::with_capacity(9 + msg.pieces_bytes.len());
+                kalico_protocol::codec::Encode::encode(msg, &mut body);
+                let (_kind, resp) = io
+                    .kalico_call_on_channel(
+                        kalico_protocol::KALICO_CHANNEL_CONTROL,
+                        kalico_protocol::MessageKind::PushCorrectionPieces,
+                        body,
+                        std::time::Duration::from_secs(2),
+                    )
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("stream_correction send: {e:?}"))
+                    })?;
+                use kalico_protocol::codec::Decode as _;
+                let r = kalico_protocol::messages::PushCorrectionPiecesResponse::decode(&resp)
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("stream_correction decode: {e:?}"))
+                    })?;
+                if r.result != 0 {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "stream_correction rejected by MCU: error {} (refill fell behind ring drain?)",
+                        r.result
+                    )));
+                }
+            }
+            Ok(())
+        })?;
+        Ok(CORRECTION_LEAD_SECS + total_duration)
     }
 }
 
