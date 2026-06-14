@@ -338,16 +338,17 @@ impl PassthroughRouter {
         let bridge_now_instant = instant_to_f64(self.clock.now());
         let bridge_now_raw = crate::clock::monotonic_raw_secs();
         let clock_offset = offset_raw - (bridge_now_raw - bridge_now_instant);
-        log::info!(
-            "[clock-seed] set_clock_est_rebased mcu={:?} freq={:.1} offset_raw={:.9} \
-             bridge_now_raw={:.9} bridge_now_instant={:.9} clock_offset={:.9} last_clock={}",
-            mcu,
+        tracing::info!(
+            subsystem = "clocksync",
+            event = "set_clock_est_rebased",
+            mcu = ?mcu,
             freq,
             offset_raw,
             bridge_now_raw,
             bridge_now_instant,
             clock_offset,
-            last_clock
+            last_clock,
+            "[clock-seed] set_clock_est_rebased"
         );
         let rec = self
             .mcus
