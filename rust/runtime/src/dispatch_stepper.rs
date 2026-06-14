@@ -35,6 +35,55 @@ unsafe extern "C" {
     fn kalico_kick_step_output(axis_idx: u8, cycle_abs: u32);
 }
 
+#[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
+unsafe extern "C" {
+    fn diag_ring_push(tag: u8, a: u32, b: u32);
+}
+
+// Must match fault_handler.c's DIAG_EV_* tags.
+const DIAG_TAG_RUST_FAULT: u8 = 8;
+const DIAG_TAG_FAULT_POSITIONS: u8 = 9;
+const DIAG_TAG_FAULT_STEP_COUNTS: u8 = 10;
+
+#[inline]
+fn capture_steps_fault_context(
+    axis_idx: usize,
+    p_end: f32,
+    p_sample_start: f32,
+    prev_step_count: i32,
+    target_step_count: i32,
+    abs_steps: u32,
+) {
+    #[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
+    // SAFETY: diag_ring_push is a pure irq-guarded C ring writer; no aliasing.
+    unsafe {
+        let detail = ((axis_idx as u32 & 0xFF) << 16) | abs_steps.min(0xFFFF);
+        let code = crate::error::FaultCode::StepsPerSampleExceeded.as_i32() as u32;
+        diag_ring_push(
+            DIAG_TAG_FAULT_POSITIONS,
+            p_end.to_bits(),
+            p_sample_start.to_bits(),
+        );
+        diag_ring_push(
+            DIAG_TAG_FAULT_STEP_COUNTS,
+            prev_step_count as u32,
+            target_step_count as u32,
+        );
+        diag_ring_push(DIAG_TAG_RUST_FAULT, code, detail);
+    }
+    #[cfg(not(any(not(any(test, feature = "host")), feature = "mcu-linux")))]
+    {
+        let _ = (
+            axis_idx,
+            p_end,
+            p_sample_start,
+            prev_step_count,
+            target_step_count,
+            abs_steps,
+        );
+    }
+}
+
 #[inline]
 pub(crate) fn kick_per_axis_timer(axis_idx: usize, cycle_abs: u32) {
     #[cfg(not(any(test, feature = "host")))]
@@ -160,6 +209,14 @@ fn dispatch_pulse(
         }
         bump_relaxed(&shared.isr_overrun_count);
         axis.last_step_count = prev_step_count;
+        capture_steps_fault_context(
+            axis_idx,
+            p_end,
+            p_sample_start,
+            prev_step_count,
+            target_step_count,
+            abs_steps,
+        );
         raise_steps_per_sample_exceeded(shared, axis_idx, abs_steps);
         return;
     }
