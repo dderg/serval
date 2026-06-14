@@ -60,6 +60,17 @@ impl DrainSync {
         self.cv.notify_all();
     }
 
+    // Start a fresh stream for one axis without disturbing others' accounting.
+    pub fn reset_axis(&self, mcu: u32, axis: u8) {
+        let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+        let key = (mcu, axis);
+        c.sent.remove(&key);
+        let retired = c.retired.get(&key).copied().unwrap_or(0);
+        c.baseline.insert(key, retired);
+        drop(c);
+        self.cv.notify_all();
+    }
+
     pub fn is_drained_now(&self) -> bool {
         let c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
         Self::is_drained(&c)

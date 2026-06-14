@@ -3768,36 +3768,25 @@ impl PyMotionBridge {
         pieces: &[crate::correction::ProfilePiece],
     ) -> PyResult<f64> {
         const CORRECTION_LEAD_SECS: f64 = 0.15;
-        const REFILL_MARGIN_SECS: f64 = 0.05;
-        const WAIT_SANITY_SLACK_SECS: f64 = 5.0;
         let ring_depth = runtime::stepping_state::CORRECTION_RING_DEPTH as u32;
         let handle = mcu_handle_from_raw(mcu_handle);
 
-        let (start_secs, entries) = {
+        let entries = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
             let start = router.host_now_secs() + CORRECTION_LEAD_SECS;
-            let entries = crate::correction::to_piece_entries(
+            crate::correction::to_piece_entries(
                 pieces,
                 |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
                 start,
-            );
-            (start, entries)
+            )
         };
         if entries.iter().any(|e| e.start_time == 0) {
             return Err(PyRuntimeError::new_err(format!(
                 "stream_correction: clock unsynced for mcu {mcu_handle}"
             )));
         }
-        let end_host = crate::correction::piece_end_host_times(pieces, start_secs);
-        let total_duration = end_host.last().copied().unwrap_or(start_secs) - start_secs;
+        let total_duration = pieces.iter().map(|p| p.duration).sum::<f64>();
         let msgs = crate::correction::chunk_correction_messages(axis_idx, motor_idx, &entries);
-        let new_heads: Vec<u32> = msgs.iter().map(|m| m.new_head).collect();
-        let releases = crate::correction::chunk_release_times(
-            &end_host,
-            ring_depth,
-            &new_heads,
-            REFILL_MARGIN_SECS,
-        );
 
         let io = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
@@ -3817,26 +3806,16 @@ impl PyMotionBridge {
                 .clone()
         };
 
+        const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        let drain = self.correction_drain.clone();
+        drain.reset_axis(mcu_handle, axis_idx);
+
         py.detach(|| -> PyResult<()> {
-            for (msg, release) in msgs.iter().zip(releases) {
-                if let Some(rel) = release {
-                    let wait_deadline = start_secs + total_duration + WAIT_SANITY_SLACK_SECS;
-                    if rel > wait_deadline {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "stream_correction: chunk release time {rel} exceeds schedule bound {wait_deadline} (scheduling bug?)"
-                        )));
-                    }
-                    loop {
-                        let now = {
-                            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-                            router.host_now_secs()
-                        };
-                        if now >= rel {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(2));
-                    }
-                }
+            for msg in &msgs {
+                let n = u32::from(msg.piece_count);
+                drain
+                    .wait_room(mcu_handle, axis_idx, ring_depth, n, DRAIN_TIMEOUT)
+                    .map_err(|e| PyRuntimeError::new_err(format!("stream_correction: {e}")))?;
                 let mut body = Vec::with_capacity(9 + msg.pieces_bytes.len());
                 kalico_protocol::codec::Encode::encode(msg, &mut body);
                 let (_kind, resp) = io
@@ -3856,10 +3835,11 @@ impl PyMotionBridge {
                     })?;
                 if r.result != 0 {
                     return Err(PyRuntimeError::new_err(format!(
-                        "stream_correction rejected by MCU: error {} (refill fell behind ring drain?)",
+                        "stream_correction rejected by MCU: error {}",
                         r.result
                     )));
                 }
+                drain.add_sent(mcu_handle, axis_idx, n);
             }
             Ok(())
         })?;

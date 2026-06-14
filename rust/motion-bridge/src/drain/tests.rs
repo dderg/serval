@@ -150,6 +150,36 @@ fn wait_room_returns_err_on_timeout() {
 }
 
 #[test]
+fn correction_room_accounting_for_chunked_buzz() {
+    let d = DrainSync::new();
+    let depth = runtime::stepping_state::CORRECTION_RING_DEPTH as u32; // 64
+    d.reset();
+    // two 15-piece chunks fit a depth-64 ring with room to spare, no wait needed
+    assert!(d.room(7, 1, depth) >= 15);
+    d.add_sent(7, 1, 15);
+    assert!(d.room(7, 1, depth) >= 15);
+    d.add_sent(7, 1, 15);
+    assert_eq!(d.room(7, 1, depth), depth - 30);
+}
+
+#[test]
+fn reset_axis_only_resets_named_axis() {
+    let d = DrainSync::new();
+    d.add_sent(0, 0, 10);
+    d.add_sent(0, 1, 7);
+    d.set_retired(0, 0, 10);
+    d.set_retired(0, 1, 4);
+    // Fresh stream on axis 0 only.
+    d.reset_axis(0, 0);
+    assert_eq!(d.room(0, 0, 64), 64, "axis 0 reset: empty ring");
+    assert_eq!(
+        d.room(0, 1, 64),
+        64 - 3,
+        "axis 1 untouched: 7 sent, 4 drained"
+    );
+}
+
+#[test]
 fn room_accounts_for_baseline_after_reset() {
     let d = DrainSync::new();
     // A prior stream drained fully: MCU cumulative retired reached 100.

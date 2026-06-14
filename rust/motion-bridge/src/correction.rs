@@ -201,47 +201,5 @@ pub fn chunk_correction_messages(
     out
 }
 
-/// Host-time at which each piece finishes, given the stream start time.
-pub fn piece_end_host_times(pieces: &[ProfilePiece], start_host_secs: f64) -> Vec<f64> {
-    let mut t = start_host_secs;
-    pieces
-        .iter()
-        .map(|p| {
-            t += p.duration;
-            t
-        })
-        .collect()
-}
-
-/// Earliest host-time each chunk may be sent without overcommitting an MCU
-/// correction ring of depth `ring_depth`. A chunk whose cumulative piece count
-/// `new_head` fits within the ring needs no wait (`None`); otherwise it must
-/// wait until the piece that has to drain first has finished, plus a margin to
-/// cover message flight. `piece_end_host` has one entry per piece, where
-/// `piece_end_host[i]` is the host-time at which piece `i` finishes.
-pub fn chunk_release_times(
-    piece_end_host: &[f64],
-    ring_depth: u32,
-    chunk_new_heads: &[u32],
-    safety_margin_secs: f64,
-) -> Vec<Option<f64>> {
-    chunk_new_heads
-        .iter()
-        .map(|&h| {
-            if h <= ring_depth {
-                None
-            } else {
-                let idx = (h - ring_depth - 1) as usize;
-                debug_assert!(
-                    idx < piece_end_host.len(),
-                    "chunk_new_heads value {h} with ring_depth {ring_depth} exceeds piece_end_host len {}",
-                    piece_end_host.len()
-                );
-                Some(piece_end_host[idx] + safety_margin_secs)
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests;
