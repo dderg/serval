@@ -26,7 +26,8 @@ pub(crate) fn slice_chain_profile(
 ) -> Vec<TopProfile> {
     segment_ranges
         .iter()
-        .map(|&(lo, hi)| {
+        .enumerate()
+        .map(|(i, &(lo, hi))| {
             let s0 = chain.samples[lo].s;
             let mut samples: Vec<GridSample> = chain.samples[lo..=hi]
                 .iter()
@@ -51,12 +52,17 @@ pub(crate) fn slice_chain_profile(
             if matches!(chain.status, crate::SolveStatus::Infeasible { .. }) {
                 total_time = f64::INFINITY;
             }
+            let binding = if i == 0 {
+                chain.binding.clone()
+            } else {
+                BindingSummary::default()
+            };
             TopProfile {
                 samples,
                 status: chain.status,
                 grid_scheme: chain.grid_scheme,
                 total_time,
-                binding: chain.binding.clone(),
+                binding,
             }
         })
         .collect()
