@@ -55,6 +55,15 @@ fn one_piece(start_time: u64) -> PieceEntry {
 }
 
 #[test]
+fn motor_state_reads_seeded_position() {
+    let (mut engine, _) = engine_with_z_axis(StepMode::Pulse);
+    engine.seed_position([12.5, -3.0, 7.0]);
+    assert_eq!(engine.motor_state(2), Some((7.0, 0.0)));
+    assert!(engine.motor_state(0).is_none());
+    assert!(engine.motor_state(7).is_none());
+}
+
+#[test]
 fn configure_axis_allocates_correction_ring() {
     let (engine, _) = engine_with_z_axis(StepMode::Pulse);
     let axis = engine.stepping_axes[2].as_ref().unwrap();

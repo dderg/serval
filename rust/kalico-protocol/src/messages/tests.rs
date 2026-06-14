@@ -447,6 +447,27 @@ fn drive_limits_message_kinds_round_trip() {
 }
 
 #[test]
+fn seed_servo_home_round_trips() {
+    let msg = SeedServoHome { home_q16: -123_456 };
+    let bytes = msg.encoded_to_vec();
+    assert_eq!(bytes.len(), 4);
+    assert_eq!(SeedServoHome::decode(&bytes).unwrap(), msg);
+
+    let r = SeedServoHomeResponse { result: -801 };
+    assert_eq!(
+        SeedServoHomeResponse::decode(&r.encoded_to_vec()).unwrap(),
+        r
+    );
+
+    for kind in [
+        MessageKind::SeedServoHome,
+        MessageKind::SeedServoHomeResponse,
+    ] {
+        assert_eq!(MessageKind::from_u16(kind.as_u16()), Some(kind));
+    }
+}
+
+#[test]
 fn endstop_trip_round_trips_and_is_event() {
     let msg = EndstopTrip {
         endstop_id: 3,
@@ -518,6 +539,54 @@ fn get_str_zero_length_decodes_to_empty() {
     let buf = [0u8, 0];
     let mut c = Cursor::new(&buf);
     assert_eq!(get_str(&mut c).unwrap(), "");
+}
+
+#[test]
+fn motor_state_kinds_roundtrip() {
+    assert_eq!(
+        MessageKind::from_u16(0x0044),
+        Some(MessageKind::QueryMotorState)
+    );
+    assert_eq!(
+        MessageKind::from_u16(0x0045),
+        Some(MessageKind::MotorStateResponse)
+    );
+    assert_eq!(MessageKind::QueryMotorState.as_u16(), 0x0044);
+    assert_eq!(MessageKind::MotorStateResponse.as_u16(), 0x0045);
+}
+
+#[test]
+fn motor_state_response_roundtrip() {
+    let msg = MotorStateResponse {
+        motors: vec![
+            MotorSample {
+                slot: 0,
+                pos_q16: 123 * 65536,
+                vel_q16: -45 * 65536,
+            },
+            MotorSample {
+                slot: 2,
+                pos_q16: 7,
+                vel_q16: 0,
+            },
+        ],
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf.len(), 1 + 2 * 9);
+    let mut c = Cursor::new(&buf);
+    let got = MotorStateResponse::decode_from(&mut c).unwrap();
+    assert_eq!(got, msg);
+}
+
+#[test]
+fn motor_state_response_empty_roundtrip() {
+    let msg = MotorStateResponse { motors: vec![] };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf, vec![0u8]);
+    let mut c = Cursor::new(&buf);
+    assert_eq!(MotorStateResponse::decode_from(&mut c).unwrap(), msg);
 }
 
 #[test]

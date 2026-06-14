@@ -15,6 +15,8 @@
 #define EC_RT_ERR_RT_AFFINITY     (-11)
 #define EC_RT_ERR_RT_SCHED        (-12)
 #define EC_RT_ERR_FF_ROUTING      (-13)
+#define EC_RT_ERR_HOMING_ATTAIN   (-15)
+#define EC_RT_ERR_HOMING_ERROR    (-16)
 
 /* Two-phase bring-up. Phase 1 stops at PRE-OP (PDO maps, CSP mode, sync
  * types, FF routing written); the caller does its session SDO work there,
@@ -28,6 +30,14 @@ int  ec_rt_bringup_finish(void);
 
 int  ec_rt_enable(void);
 
+/* Drive-frame via CiA-402 homing method 35 ("current position is home", no
+ * motion). Self-contained DC loop (like ec_rt_enable): pulses 6040h bit 4 and
+ * polls 6041h bit 12/13. Preconditions: mode-of-operation already switched to
+ * Homing (6060h=6, confirmed via 6061h) with 6098h=35 and 607Ch=offset staged
+ * off-loop, and the drive operation-enabled. 0 = homing attained;
+ * EC_RT_ERR_HOMING_* on error/timeout. The caller restores CSP afterward. */
+int  ec_rt_run_homing(void);
+
 /* One steady-state DC cycle: sleep to next deadline, send+recv process data,
  * run the DC PI jitter correction, keep controlword=0x000F. Writes the PI
  * offset to *toff_ns. Returns the working counter (3 == healthy). */
@@ -37,6 +47,7 @@ int  ec_rt_cycle(int64_t *toff_ns);
 void ec_rt_set_target_position(int32_t counts);
 
 int32_t  ec_rt_get_position_actual(void);
+int32_t  ec_rt_get_velocity_actual(void);
 uint16_t ec_rt_get_statusword(void);
 uint16_t ec_rt_get_error_code(void);
 int32_t  ec_rt_get_following_error(void);
@@ -51,9 +62,9 @@ typedef struct {
     uint16_t error_code;
     uint16_t statusword;
     int32_t  position_actual;
+    int32_t  velocity_actual;
     int16_t  torque_actual;
     int32_t  following_error;
-    int32_t  position_demand;
     int32_t  target_position;
     int32_t  velocity_offset;
     int16_t  torque_offset;

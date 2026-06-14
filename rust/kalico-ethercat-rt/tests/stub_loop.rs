@@ -161,6 +161,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                         let total = (AXIS_RING_CAPACITY * NUM_AXES * 32) as u32;
                         server.respond(&runtime_caps_response_frame(correlation_id, total));
                     }
+                    Command::QueryMotorState { .. } => {}
                     Command::ClaimHandshake { .. } => {}
                     Command::SetTorque { .. } => {}
                     Command::StartCapture { .. } => {}
@@ -168,6 +169,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     Command::Stop { .. } => {}
                     Command::ResumeStream { .. } => {}
                     Command::SetDriveLimits { .. } | Command::RestoreDriveLimits { .. } => {}
+                    Command::SeedServoHome { .. } => {}
                     Command::SdoRead { .. } | Command::SdoWrite { .. } => {
                         todo!("wired in the endpoint task")
                     }
@@ -187,6 +189,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     Command::Unknown { .. }
                     | Command::Identify { .. }
                     | Command::QueryRuntimeCaps { .. }
+                    | Command::QueryMotorState { .. }
                     | Command::ClaimHandshake { .. }
                     | Command::SetTorque { .. }
                     | Command::StartCapture { .. }
@@ -195,6 +198,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     | Command::ResumeStream { .. }
                     | Command::SetDriveLimits { .. }
                     | Command::RestoreDriveLimits { .. }
+                    | Command::SeedServoHome { .. }
                     | Command::SdoRead { .. }
                     | Command::SdoWrite { .. }
                     | Command::PushPieces { .. } => {}

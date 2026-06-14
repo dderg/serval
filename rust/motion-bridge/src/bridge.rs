@@ -107,6 +107,109 @@ fn query_runtime_caps(
     decode_runtime_caps_body(&body)
 }
 
+enum MotorQuery {
+    Serial(Arc<KalicoHostIo>),
+    EtherCat(Arc<UnixNativeConn>),
+}
+
+impl MotorQuery {
+    fn is_ethercat(&self) -> bool {
+        matches!(self, MotorQuery::EtherCat(_))
+    }
+}
+
+fn place_motor_response(
+    resp: &kalico_protocol::messages::MotorStateResponse,
+    cfg_axes: &[usize],
+    is_ethercat: bool,
+    motors: &mut [Option<f64>],
+    vmotors: &mut [Option<f64>],
+) {
+    let mut put = |slot: usize, m: &kalico_protocol::messages::MotorSample| {
+        if slot < motors.len() {
+            motors[slot] = Some(f64::from(m.pos_q16) / 65536.0);
+            vmotors[slot] = Some(f64::from(m.vel_q16) / 65536.0);
+        }
+    };
+    if is_ethercat {
+        for (m, &slot) in resp.motors.iter().zip(cfg_axes.iter()) {
+            put(slot, m);
+        }
+    } else {
+        for m in &resp.motors {
+            put(m.slot as usize, m);
+        }
+    }
+}
+
+fn collect_motor_positions_inner(
+    mcu_axis_configs: &Mutex<Vec<crate::dispatch::McuAxisConfig>>,
+    mcus: &Mutex<HashMap<u32, McuConnection>>,
+    timeout: std::time::Duration,
+) -> Result<HashMap<String, (f64, f64)>, String> {
+    use kalico_host_rt::native_call::NativeCall;
+    use kalico_protocol::MessageKind;
+    use kalico_protocol::codec::{Cursor, Decode};
+    use kalico_protocol::messages::MotorStateResponse;
+    use runtime::stepping_state::MAX_AXES;
+
+    let configs = mcu_axis_configs
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if configs.is_empty() {
+        return Err("query_motor_positions: no axes configured".into());
+    }
+    let kin_tag = configs
+        .iter()
+        .find(|c| c.axes.contains(&0usize))
+        .map(|c| c.kinematics)
+        .unwrap_or(runtime::segment::KinematicTag::Cartesian as u8);
+
+    let mut motors: [Option<f64>; MAX_AXES] = [None; MAX_AXES];
+    let mut vmotors: [Option<f64>; MAX_AXES] = [None; MAX_AXES];
+
+    for cfg in &configs {
+        let q = {
+            let map = mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(conn) = map.get(&cfg.mcu_id) else {
+                continue;
+            };
+            if conn.ethercat_socket.is_some() {
+                match conn.endpoint_conn.as_ref() {
+                    Some(ep) => MotorQuery::EtherCat(Arc::clone(ep)),
+                    None => continue,
+                }
+            } else {
+                match conn.host_io.as_ref() {
+                    Some(io) => MotorQuery::Serial(Arc::clone(io)),
+                    None => continue,
+                }
+            }
+        };
+        let (kind, body) = match &q {
+            MotorQuery::Serial(io) => {
+                io.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)
+            }
+            MotorQuery::EtherCat(ep) => {
+                ep.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)
+            }
+        }
+        .map_err(|e| format!("query mcu {}: {e:?}", cfg.mcu_id))?;
+        if kind != MessageKind::MotorStateResponse {
+            return Err(format!(
+                "query mcu {}: unexpected kind {kind:?}",
+                cfg.mcu_id
+            ));
+        }
+        let mut c = Cursor::new(&body);
+        let resp = MotorStateResponse::decode_from(&mut c)
+            .map_err(|e| format!("query mcu {}: decode {e:?}", cfg.mcu_id))?;
+        place_motor_response(&resp, &cfg.axes, q.is_ethercat(), &mut motors, &mut vmotors);
+    }
+    crate::position_query::assemble_cartesian(&motors, &vmotors, kin_tag)
+}
+
 fn query_ethercat_runtime_caps(
     conn: &UnixNativeConn,
     timeout: std::time::Duration,
@@ -285,6 +388,7 @@ fn spawn_ethercat_endpoint(
     interface: &str,
     socket_path: &str,
     counts_per_mm: f64,
+    rotation_distance: f64,
     velocity_ff: bool,
     dynamics_profile: Option<&str>,
     torque_clamp_pct: f64,
@@ -297,6 +401,8 @@ fn spawn_ethercat_endpoint(
         .arg(socket_path)
         .arg("--counts-per-mm")
         .arg(counts_per_mm.to_string())
+        .arg("--rotation-distance")
+        .arg(rotation_distance.to_string())
         .arg("--torque-clamp-pct")
         .arg(torque_clamp_pct.to_string());
     if velocity_ff {
@@ -501,6 +607,14 @@ pub struct PyMotionBridge {
     events_dir: Mutex<Option<std::path::PathBuf>>,
     pump_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<crate::pump::PumpMsg>>>>,
     pump_thread: Mutex<Option<JoinHandle<()>>>,
+    live_position_cache: Arc<
+        Mutex<(
+            std::collections::HashMap<String, (f64, f64)>,
+            std::time::Instant,
+        )>,
+    >,
+    position_poll_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    position_poll_stop: Arc<std::sync::atomic::AtomicBool>,
     drain: std::sync::Arc<crate::drain::DrainSync>,
     active_drip_cohort: Arc<Mutex<Option<u64>>>,
     motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
@@ -761,6 +875,12 @@ impl PyMotionBridge {
             events_dir: Mutex::new(None),
             pump_tx: Arc::new(Mutex::new(None)),
             pump_thread: Mutex::new(None),
+            live_position_cache: Arc::new(Mutex::new((
+                std::collections::HashMap::new(),
+                std::time::Instant::now(),
+            ))),
+            position_poll_thread: Mutex::new(None),
+            position_poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             drain: std::sync::Arc::new(crate::drain::DrainSync::new()),
             active_drip_cohort: Arc::new(Mutex::new(None)),
             motion_history: Arc::new(Mutex::new(crate::motion_history::HistoryStore::default())),
@@ -818,7 +938,7 @@ impl PyMotionBridge {
         Ok(raw)
     }
 
-    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, counts_per_mm, velocity_ff, dynamics_profile, torque_clamp_pct, following_error_counts=None, max_torque_tenth_pct=None))]
+    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, counts_per_mm, rotation_distance, velocity_ff, dynamics_profile, torque_clamp_pct, following_error_counts=None, max_torque_tenth_pct=None))]
     fn claim_ethercat_node(
         &self,
         label: &str,
@@ -826,6 +946,7 @@ impl PyMotionBridge {
         interface: &str,
         endpoint_binary: &str,
         counts_per_mm: f64,
+        rotation_distance: f64,
         velocity_ff: bool,
         dynamics_profile: Option<String>,
         torque_clamp_pct: f64,
@@ -845,6 +966,7 @@ impl PyMotionBridge {
             interface,
             socket_path,
             counts_per_mm,
+            rotation_distance,
             velocity_ff,
             dynamics_profile.as_deref(),
             torque_clamp_pct,
@@ -1064,6 +1186,49 @@ impl PyMotionBridge {
         if result != 0 {
             return Err(PyRuntimeError::new_err(format!(
                 "restore_drive_limits: SDO write failed: endpoint result {result}"
+            )));
+        }
+        Ok(())
+    }
+
+    #[pyo3(signature = (mcu_handle, axis, pos_mm, timeout_s = 2.0))]
+    fn finalize_homed_axis(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        axis: usize,
+        pos_mm: f64,
+        timeout_s: f64,
+    ) -> PyResult<()> {
+        let _ = axis;
+        let conn = {
+            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mc = mcus.get(&mcu_handle).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "finalize_homed_axis: unknown mcu_handle {mcu_handle}"
+                ))
+            })?;
+            match mc.endpoint_conn.clone() {
+                Some(conn) => conn,
+                None => return Ok(()),
+            }
+        };
+        let home_q16 = crate::dispatch::encode_q16(pos_mm);
+        tracing::info!(
+            subsystem = "bridge",
+            event = "servo_finalize_home",
+            mcu_handle,
+            pos_mm,
+            home_q16,
+            "servo home finalize"
+        );
+        let timeout = std::time::Duration::from_secs_f64(timeout_s);
+        let result = py
+            .detach(|| crate::servo_torque::send_seed_servo_home(&conn, home_q16, timeout))
+            .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "finalize_homed_axis: method-35 home-set failed: endpoint result {result}"
             )));
         }
         Ok(())
@@ -1308,6 +1473,19 @@ impl PyMotionBridge {
                     error = ?e,
                     "bridge.shutdown(): push-pieces-pump join panicked"
                 );
+            }
+        }
+
+        self.position_poll_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self
+            .position_poll_thread
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            if let Err(e) = h.join() {
+                log::error!("bridge.shutdown(): live-position-poll join panicked: {e:?}");
             }
         }
 
@@ -2661,6 +2839,45 @@ impl PyMotionBridge {
         *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_tx_init.clone());
         *self.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_thread_handle);
 
+        {
+            let configs = Arc::clone(&self.mcu_axis_configs);
+            let mcus = Arc::clone(&self.mcus);
+            let cache = Arc::clone(&self.live_position_cache);
+            let stop = Arc::clone(&self.position_poll_stop);
+            let handle = std::thread::Builder::new()
+                .name("live-position-poll".into())
+                .spawn(move || {
+                    use std::sync::atomic::Ordering;
+                    let period = std::time::Duration::from_millis(200);
+                    let timeout = std::time::Duration::from_millis(250);
+                    while !stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(period);
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match collect_motor_positions_inner(&configs, &mcus, timeout) {
+                            Ok(map) => {
+                                let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
+                                *c = (map, std::time::Instant::now());
+                            }
+                            Err(e) => {
+                                if !e.contains("no axes configured") {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "live-position poll failed; serving stale cache"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                })
+                .expect("spawn live-position-poll thread");
+            *self
+                .position_poll_thread
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(handle);
+        }
+
         for cfg_mcu in &mcu_configs {
             let mcu_id = cfg_mcu.mcu_id;
             let pump_tx_hb = pump_tx_init.clone();
@@ -3902,6 +4119,25 @@ impl PyMotionBridge {
         }
         Ok(out)
     }
+
+    #[pyo3(signature = (timeout_s=0.25))]
+    fn query_motor_positions(
+        &self,
+        py: Python<'_>,
+        timeout_s: f64,
+    ) -> PyResult<HashMap<String, (f64, f64)>> {
+        let timeout = std::time::Duration::from_secs_f64(timeout_s.max(0.0));
+        py.detach(|| collect_motor_positions_inner(&self.mcu_axis_configs, &self.mcus, timeout))
+            .map_err(PyRuntimeError::new_err)
+    }
+
+    fn live_motor_positions(&self) -> std::collections::HashMap<String, (f64, f64)> {
+        self.live_position_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .0
+            .clone()
+    }
 }
 
 impl Drop for PyMotionBridge {
@@ -4223,6 +4459,9 @@ impl PyMotionBridge {
 mod tests;
 
 #[cfg(test)]
+mod place_motor_response_tests;
+
+#[cfg(test)]
 mod require_events_dir_tests {
     use super::require_events_dir_for_kalico_native;
     use std::path::Path;
@@ -4339,6 +4578,7 @@ mod ethercat_endpoint_tests {
             "eth0",
             "/tmp/test.sock",
             1.0,
+            40.0,
             false,
             None,
             30.0,

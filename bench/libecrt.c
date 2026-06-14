@@ -30,13 +30,13 @@ typedef struct {
     uint16_t error_code;
     uint16_t statusword;
     int32_t  position_actual;
+    int32_t  velocity_actual;
     int16_t  torque_actual;
     int32_t  following_error;
     uint16_t tp_status;
     int32_t  tp1_pos;
     int32_t  tp2_pos;
     uint32_t digital_inputs;
-    int32_t  position_demand;
 } in_t;
 #pragma pack(pop)
 _Static_assert(sizeof(out_t) == 18,
@@ -102,13 +102,13 @@ static int go_realtime(int cpu, int prio) {
 #define TXPDO_ERROR_CODE      COE_ENTRY(0x603F, 0x00, 16)
 #define TXPDO_STATUSWORD      COE_ENTRY(0x6041, 0x00, 16)
 #define TXPDO_POSITION_ACTUAL COE_ENTRY(0x6064, 0x00, 32)
+#define TXPDO_VELOCITY_ACTUAL COE_ENTRY(0x606C, 0x00, 32)
 #define TXPDO_TORQUE_ACTUAL   COE_ENTRY(0x6077, 0x00, 16)
 #define TXPDO_FOLLOWING_ERROR COE_ENTRY(0x60F4, 0x00, 32)
 #define TXPDO_TP_STATUS       COE_ENTRY(0x60B9, 0x00, 16)
 #define TXPDO_TP1_POS         COE_ENTRY(0x60BA, 0x00, 32)
 #define TXPDO_TP2_POS         COE_ENTRY(0x60BC, 0x00, 32)
 #define TXPDO_DIGITAL_INPUTS  COE_ENTRY(0x60FD, 0x00, 32)
-#define TXPDO_POSITION_DEMAND COE_ENTRY(0x6062, 0x00, 32)
 
 #define RXPDO_CONTROLWORD     COE_ENTRY(0x6040, 0x00, 16)
 #define RXPDO_TARGET_POSITION COE_ENTRY(0x607A, 0x00, 32)
@@ -141,13 +141,13 @@ static int rewrite_1a00_entry_table(void) {
         TXPDO_ERROR_CODE,
         TXPDO_STATUSWORD,
         TXPDO_POSITION_ACTUAL,
+        TXPDO_VELOCITY_ACTUAL,
         TXPDO_TORQUE_ACTUAL,
         TXPDO_FOLLOWING_ERROR,
         TXPDO_TP_STATUS,
         TXPDO_TP1_POS,
         TXPDO_TP2_POS,
         TXPDO_DIGITAL_INPUTS,
-        TXPDO_POSITION_DEMAND,
     };
     uint8_t no_entries  = 0;
     uint8_t all_entries = sizeof(entries) / sizeof(entries[0]);
@@ -159,9 +159,9 @@ static int rewrite_1a00_entry_table(void) {
     return remap_write(0x1A00, 0x00, &all_entries, sizeof(all_entries));
 }
 
-/* The fixed TxPDO 1B01h cannot carry position_demand (6062h); only the
- * variable 1A00h can, and the drive holds that mapping in RAM only. Group
- * before objects is the A6-EC manual's required write order. */
+/* 1B01h is a fixed TxPDO; the variable 1A00h is the only configurable one and
+ * the drive holds its mapping in RAM only. Group before objects is the A6-EC
+ * manual's required write order. */
 static int remap_volatile_tx_pdo_1a00(void) {
     if (point_group_1c13_at_pdo_0x1a00() != 0) return -1;
     return rewrite_1a00_entry_table();
@@ -455,6 +455,7 @@ int ec_rt_cycle(int64_t *toff_ns) {
 
 void ec_rt_set_target_position(int32_t counts) { g_out->target_position = counts; }
 int32_t  ec_rt_get_position_actual(void)        { return g_in->position_actual; }
+int32_t  ec_rt_get_velocity_actual(void)        { return g_in->velocity_actual; }
 uint16_t ec_rt_get_statusword(void)             { return g_in->statusword; }
 uint16_t ec_rt_get_error_code(void)             { return g_in->error_code; }
 int32_t  ec_rt_get_following_error(void)        { return g_in->following_error; }
@@ -466,9 +467,9 @@ void ec_rt_get_telemetry(ec_telemetry_t *out) {
     out->error_code      = g_in->error_code;
     out->statusword      = g_in->statusword;
     out->position_actual = g_in->position_actual;
+    out->velocity_actual = g_in->velocity_actual;
     out->torque_actual   = g_in->torque_actual;
     out->following_error = g_in->following_error;
-    out->position_demand = g_in->position_demand;
     out->target_position = g_out->target_position;
     out->velocity_offset = g_out->velocity_offset;
     out->torque_offset   = g_out->torque_offset;
@@ -533,6 +534,50 @@ int ec_rt_sdo_write(uint16_t index, uint8_t sub, const uint8_t *buf, int size,
         return -1;
     }
     return 0;
+}
+
+/*
+ * CiA-402 homing-method-35 ("current position is home") drive-frame, run as a
+ * self-contained DC loop the same way ec_rt_enable() runs its CiA-402 enable
+ * loop: every wait goes through rt_exchange so process data never pauses and
+ * the SYNC0 watchdog (ErC1.1) cannot latch. The blocking mode-of-operation
+ * and method/offset SDO writes are NOT done here — the caller stages them on
+ * the off-loop mailbox thread while the DC loop keeps cycling, and only enters
+ * this function once 6061h reads 6 (Homing). Preconditions: mode = Homing,
+ * 6098h = 35, 607Ch = offset, drive operation-enabled (torque on).
+ *
+ * 6040h homing controlword: bit 4 (0x10) rising edge starts homing and must
+ * stay set throughout; the 0x0F base keeps operation enabled. 6041h: bit 12
+ * (0x1000) = homing attained, bit 13 (0x2000) = homing error.
+ */
+int ec_rt_run_homing(void) {
+    int64_t toff = 0;
+    /* Settle a few cycles with bit 4 clear so the next set is a clean rising
+     * edge regardless of the controlword the enable loop left staged. */
+    for (int i = 0; i < 8; i++) {
+        g_out->controlword     = 0x000F;
+        g_out->target_position = g_in->position_actual;
+        rt_exchange(&toff);
+    }
+    for (int64_t pc = 0; pc < 3000; pc++) {
+        uint16_t sw = g_in->statusword;
+        g_out->controlword     = 0x001F; /* 0x0F + homing-enable (bit 4) */
+        g_out->target_position = g_in->position_actual;
+        if (sw & 0x2000) { /* bit 13: homing error */
+            g_out->controlword = 0x000F;
+            rt_exchange(&toff);
+            return EC_RT_ERR_HOMING_ERROR;
+        }
+        if (sw & 0x1000) { /* bit 12: homing attained */
+            g_out->controlword = 0x000F; /* clear bit 4, stay enabled */
+            rt_exchange(&toff);
+            return 0;
+        }
+        rt_exchange(&toff);
+    }
+    g_out->controlword = 0x000F;
+    rt_exchange(&toff);
+    return EC_RT_ERR_HOMING_ATTAIN;
 }
 
 int ec_rt_park_cycle(int64_t *toff_ns) {

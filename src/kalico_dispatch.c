@@ -31,6 +31,7 @@ static uint8_t tx_buf[KALICO_TX_BUF_SIZE];
 static uint32_t reset_epoch;
 
 static void handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
+static void handle_query_motor_state(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
 static void handle_stop(uint32_t correlation_id);
 static void handle_resume_stream(uint32_t correlation_id);
 static void handle_push_correction_pieces(uint32_t correlation_id,
@@ -187,6 +188,9 @@ kalico_dispatch_frame(uint8_t channel, const uint8_t *payload,
     case KALICO_MSG_QUERY_RUNTIME_CAPS:
         handle_query_runtime_caps(correlation_id, body, body_len);
         return;
+    case KALICO_MSG_QUERY_MOTOR_STATE:
+        handle_query_motor_state(correlation_id, body, body_len);
+        return;
     case KALICO_MSG_STOP:
         handle_stop(correlation_id);
         return;
@@ -288,6 +292,48 @@ handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *body,
     b[3] = (uint8_t)((total_piece_memory >> 24) & 0xFF);
     kalico_transport_send_frame(KALICO_CHANNEL_CONTROL,
                                 payload, sizeof(payload));
+}
+
+// MotorStateResponse body (must match Rust decode):
+//   count u8 | count * [slot u8 | pos_q16 i32_le | vel_q16 i32_le] (9 bytes).
+#define KALICO_MOTOR_STATE_MAX_AXES  8u
+#define KALICO_MOTOR_STATE_ENTRY_LEN 9u
+static void
+handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
+                         uint16_t body_len)
+{
+    (void)body;
+    (void)body_len;
+    uint8_t slots[KALICO_MOTOR_STATE_MAX_AXES];
+    int32_t pos[KALICO_MOTOR_STATE_MAX_AXES];
+    int32_t vel[KALICO_MOTOR_STATE_MAX_AXES];
+    int n = 0;
+    if (runtime_handle)
+        n = kalico_runtime_query_motor_state(runtime_handle, slots, pos, vel,
+                                             KALICO_MOTOR_STATE_MAX_AXES);
+    if (n < 0)
+        n = 0;
+    uint8_t payload[PER_MESSAGE_HEADER_LEN + 1
+                    + KALICO_MOTOR_STATE_MAX_AXES * KALICO_MOTOR_STATE_ENTRY_LEN];
+    encode_message_header(payload, KALICO_MSG_MOTOR_STATE_RESPONSE,
+                          MESSAGE_VERSION_DEFAULT, correlation_id);
+    uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
+    b[0] = (uint8_t)n;
+    uint8_t *p = &b[1];
+    for (int i = 0; i < n; i++) {
+        *p++ = slots[i];
+        *p++ = (uint8_t)(pos[i] & 0xFF);
+        *p++ = (uint8_t)((pos[i] >> 8) & 0xFF);
+        *p++ = (uint8_t)((pos[i] >> 16) & 0xFF);
+        *p++ = (uint8_t)((pos[i] >> 24) & 0xFF);
+        *p++ = (uint8_t)(vel[i] & 0xFF);
+        *p++ = (uint8_t)((vel[i] >> 8) & 0xFF);
+        *p++ = (uint8_t)((vel[i] >> 16) & 0xFF);
+        *p++ = (uint8_t)((vel[i] >> 24) & 0xFF);
+    }
+    uint16_t used = (uint16_t)(PER_MESSAGE_HEADER_LEN + 1
+                               + n * KALICO_MOTOR_STATE_ENTRY_LEN);
+    kalico_transport_send_frame(KALICO_CHANNEL_CONTROL, payload, used);
 }
 
 // Pieces wire layout streamed through piece_sink_feed (the sink sees only the

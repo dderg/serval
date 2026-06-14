@@ -18,9 +18,9 @@ use kalico_ethercat_rt::torque::{
 use kalico_ethercat_rt::wire::{
     claim_handshake_reply_frame, identify_response_frame, push_pieces_response_frame,
     restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
-    sdo_read_response_frame, sdo_write_response_frame, set_drive_limits_response_frame,
-    set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
-    stop_capture_response_frame, stop_response_frame, Command,
+    sdo_read_response_frame, sdo_write_response_frame, seed_servo_home_response_frame,
+    set_drive_limits_response_frame, set_torque_response_frame, start_capture_response_frame,
+    status_heartbeat_frame, stop_capture_response_frame, stop_response_frame, Command,
 };
 use kalico_protocol::messages::{SdoReadResponse, SlaveState, StopCaptureResponse};
 
@@ -214,6 +214,7 @@ fn main() {
                     let total: u32 = (AXIS_RING_CAPACITY * NUM_AXES * 32) as u32;
                     server.respond(&runtime_caps_response_frame(correlation_id, total));
                 }
+                Command::QueryMotorState { .. } => {}
                 Command::Stop { correlation_id } => {
                     let now_ns = monotonic_ns();
                     ring.reset();
@@ -277,6 +278,13 @@ fn main() {
                 Command::RestoreDriveLimits { correlation_id } => {
                     eprintln!("ec-rt-stub: RestoreDriveLimits stored={stored_limits:?}");
                     server.respond(&restore_drive_limits_response_frame(correlation_id, 0));
+                }
+                Command::SeedServoHome {
+                    correlation_id,
+                    home_q16,
+                } => {
+                    eprintln!("ec-rt-stub: SeedServoHome home_q16={home_q16}");
+                    server.respond(&seed_servo_home_response_frame(correlation_id, 0));
                 }
                 Command::SdoRead {
                     correlation_id,
@@ -412,8 +420,8 @@ fn main() {
                 flags,
                 drive: DriveSample {
                     target_counts: pos,
-                    position_demand: pos,
                     position_actual: pos - 3,
+                    velocity_actual: 0,
                     following_error: 3,
                     torque_actual: 100,
                     statusword: 0x0627,

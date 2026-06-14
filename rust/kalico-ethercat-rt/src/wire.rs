@@ -5,10 +5,11 @@ use kalico_native_transport::wire_helpers::{
 use kalico_protocol::bootstrap::{IdentifyResponse, IDENTIFY_RESPONSE_BODY_LEN};
 use kalico_protocol::codec::{Decode, Encode};
 use kalico_protocol::messages::{
-    ClaimHandshakeReply, MessageKind, PushPieces, PushPiecesResponse, RestoreDriveLimitsResponse,
-    ResumeStreamResponse, RuntimeCapsResponse, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
-    StartCapture, StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse,
+    ClaimHandshakeReply, MessageKind, MotorSample, MotorStateResponse, PushPieces,
+    PushPiecesResponse, RestoreDriveLimitsResponse, ResumeStreamResponse, RuntimeCapsResponse,
+    SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StartCapture,
+    StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse,
 };
 use kalico_protocol::KALICO_CHANNEL_PIECES;
 
@@ -23,6 +24,9 @@ pub enum Command {
         msg: PushPieces,
     },
     QueryRuntimeCaps {
+        correlation_id: u32,
+    },
+    QueryMotorState {
         correlation_id: u32,
     },
     ClaimHandshake {
@@ -51,6 +55,10 @@ pub enum Command {
     },
     RestoreDriveLimits {
         correlation_id: u32,
+    },
+    SeedServoHome {
+        correlation_id: u32,
+        home_q16: i32,
     },
     SdoRead {
         correlation_id: u32,
@@ -95,6 +103,9 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
         Some(MessageKind::QueryRuntimeCaps) => Ok(Command::QueryRuntimeCaps {
             correlation_id: cid,
         }),
+        Some(MessageKind::QueryMotorState) => Ok(Command::QueryMotorState {
+            correlation_id: cid,
+        }),
         Some(MessageKind::ClaimHandshake) => Ok(Command::ClaimHandshake {
             correlation_id: cid,
         }),
@@ -131,6 +142,13 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
         Some(MessageKind::RestoreDriveLimits) => Ok(Command::RestoreDriveLimits {
             correlation_id: cid,
         }),
+        Some(MessageKind::SeedServoHome) => {
+            let msg = SeedServoHome::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::SeedServoHome {
+                correlation_id: cid,
+                home_q16: msg.home_q16,
+            })
+        }
         Some(MessageKind::SdoRead) => {
             let msg = SdoRead::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
             Ok(Command::SdoRead {
@@ -239,6 +257,11 @@ pub fn restore_drive_limits_response_frame(cid: u32, result: i32) -> Vec<u8> {
     control_frame(MessageKind::RestoreDriveLimitsResponse, cid, &body)
 }
 
+pub fn seed_servo_home_response_frame(cid: u32, result: i32) -> Vec<u8> {
+    let body = SeedServoHomeResponse { result }.encoded_to_vec();
+    control_frame(MessageKind::SeedServoHomeResponse, cid, &body)
+}
+
 pub fn status_heartbeat_frame(
     engine_state: u8,
     fault_code: u16,
@@ -264,6 +287,35 @@ pub fn status_heartbeat_frame(
 pub fn runtime_caps_response_frame(cid: u32, total_piece_memory: u32) -> Vec<u8> {
     let body = RuntimeCapsResponse { total_piece_memory }.encoded_to_vec();
     control_frame(MessageKind::RuntimeCapsResponse, cid, &body)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn mm_to_q16(mm: f64) -> i32 {
+    (mm * 65536.0).round() as i32
+}
+
+pub fn motor_state_response_frame(correlation_id: u32, pos_mm: f64, vel_mm_s: f64) -> Vec<u8> {
+    let resp = MotorStateResponse {
+        motors: vec![MotorSample {
+            slot: 0,
+            pos_q16: mm_to_q16(pos_mm),
+            vel_q16: mm_to_q16(vel_mm_s),
+        }],
+    };
+    control_frame(
+        MessageKind::MotorStateResponse,
+        correlation_id,
+        &resp.encoded_to_vec(),
+    )
+}
+
+pub fn motor_state_empty_frame(correlation_id: u32) -> Vec<u8> {
+    let resp = MotorStateResponse { motors: vec![] };
+    control_frame(
+        MessageKind::MotorStateResponse,
+        correlation_id,
+        &resp.encoded_to_vec(),
+    )
 }
 
 pub fn claim_handshake_reply_frame(cid: u32, reply: &ClaimHandshakeReply) -> Vec<u8> {

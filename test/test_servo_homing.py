@@ -235,6 +235,9 @@ class FakeLimitsBridge:
     def restore_drive_limits(self, handle):
         self.calls.append(("restore", handle))
 
+    def finalize_homed_axis(self, handle, axis, pos_mm):
+        self.calls.append(("finalize", handle, axis, pos_mm))
+
 
 def test_homing_limits_guard_sets_and_restores():
     bridge = FakeLimitsBridge()
@@ -327,6 +330,152 @@ def run_guarded_trip(bridge, se, servo_handle, servo_limits, trip):
     return homing_mod._run_servo_guarded_trip(
         FakeGcmd(), bridge, 0, se, rail, servo_handle, servo_limits, trip
     )
+
+
+class FakeHomingInfo:
+    def __init__(self, positive_dir, retract_dist, retract_speed):
+        self.positive_dir = positive_dir
+        self.retract_dist = retract_dist
+        self.retract_speed = retract_speed
+        self.position_endstop = -6.0
+        self.speed = 50.0
+
+
+class FakeHomingRail:
+    def __init__(self, hi, pos_min, pos_max):
+        self._hi = hi
+        self._range = (pos_min, pos_max)
+
+    def get_homing_info(self):
+        return self._hi
+
+    def get_range(self):
+        return self._range
+
+    def get_tmc_current_helpers(self):
+        return []
+
+    def get_steppers(self):
+        return [FakeStepper("stepper_z")]
+
+    def get_name(self, short=False):
+        return "stepper_z"
+
+
+class FakeKin:
+    def __init__(self, rail):
+        self._rail = rail
+
+    def _axis_rails(self):
+        return {2: self._rail}
+
+    def active_rails(self, *deltas):
+        return [self._rail]
+
+
+class FakeHomingToolhead:
+    def __init__(self):
+        self._pos = [0.0, 0.0, 0.0, 0.0]
+        self.moves = []
+
+    def get_position(self):
+        return list(self._pos)
+
+    def set_position(self, newpos, homing_axes=()):
+        self._pos = list(newpos)
+
+    def move(self, newpos, speed):
+        self.moves.append((list(newpos), speed))
+        self._pos = list(newpos)
+
+    def wait_moves(self):
+        pass
+
+    def get_last_move_time(self):
+        return 0.0
+
+
+class FakeHomingStepperEnable:
+    def motor_enable_group(self, names):
+        pass
+
+
+class FakeHomingPrinter:
+    def __init__(self, stepper_enable):
+        self._stepper_enable = stepper_enable
+
+    def lookup_object(self, name):
+        assert name == "stepper_enable"
+        return self._stepper_enable
+
+
+def run_home_axis(overshoot, retract_dist, positive_dir):
+    toolhead = FakeHomingToolhead()
+    hi = FakeHomingInfo(positive_dir, retract_dist, retract_speed=10.0)
+    rail = FakeHomingRail(hi, pos_min=-6.0, pos_max=235.0)
+    kin = FakeKin(rail)
+    homer = homing_mod.Homing.__new__(homing_mod.Homing)
+    homer.printer = FakeHomingPrinter(FakeHomingStepperEnable())
+
+    direction = 1.0 if positive_dir else -1.0
+    trigger_height = hi.position_endstop
+    trip_pos = [0.0, 0.0, 100.0]
+    final_pos = [0.0, 0.0, 100.0 + direction * overshoot]
+
+    homer.trip_move = lambda *a, **k: None
+    homer._set_homing_current = lambda *a, **k: None
+
+    def fake_guarded_trip(*args, **kwargs):
+        return trip_pos, final_pos
+
+    orig_guarded = homing_mod._run_servo_guarded_trip
+    orig_fault = homing_mod._check_servo_drive_fault
+    homing_mod._run_servo_guarded_trip = fake_guarded_trip
+    homing_mod._check_servo_drive_fault = lambda *a, **k: None
+    try:
+        homer._home_axis(
+            FakeGcmd(),
+            toolhead,
+            bridge=None,
+            kin=kin,
+            axis=2,
+            entry={"trigger_height": trigger_height, "provider": None},
+        )
+    finally:
+        homing_mod._run_servo_guarded_trip = orig_guarded
+        homing_mod._check_servo_drive_fault = orig_fault
+
+    return toolhead, trigger_height
+
+
+def test_retract_compensates_for_overshoot():
+    overshoot = 0.7
+    retract_dist = 5.0
+    toolhead, trigger_height = run_home_axis(
+        overshoot, retract_dist, positive_dir=False
+    )
+    target, speed = toolhead.moves[-1]
+    assert target[2] == pytest.approx(trigger_height + retract_dist)
+    assert speed == 10.0
+
+
+def test_retract_lands_at_trigger_minus_dist_positive_dir():
+    overshoot = 0.7
+    retract_dist = 5.0
+    toolhead, trigger_height = run_home_axis(
+        overshoot, retract_dist, positive_dir=True
+    )
+    target, _ = toolhead.moves[-1]
+    assert target[2] == pytest.approx(trigger_height - retract_dist)
+
+
+def test_retract_with_zero_overshoot_unchanged():
+    retract_dist = 5.0
+    toolhead, trigger_height = run_home_axis(
+        0.0, retract_dist, positive_dir=False
+    )
+    target, _ = toolhead.moves[-1]
+    assert target[2] == pytest.approx(trigger_height + retract_dist)
 
 
 def test_guarded_trip_failure_disables_servo_motor_and_reraises():

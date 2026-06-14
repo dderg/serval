@@ -26,6 +26,8 @@ pub mod motion_node;
 #[doc(hidden)]
 pub mod planner;
 #[doc(hidden)]
+pub mod position_query;
+#[doc(hidden)]
 pub mod pump;
 pub mod remote_trigger;
 mod router_transport;

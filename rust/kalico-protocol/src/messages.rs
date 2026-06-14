@@ -14,6 +14,8 @@ pub enum MessageKind {
     RuntimeCapsResponse = 0x0041,
     ClaimHandshake = 0x0042,
     ClaimHandshakeReply = 0x0043,
+    QueryMotorState = 0x0044,
+    MotorStateResponse = 0x0045,
     PushPieces = 0x0060,
     PushPiecesResponse = 0x0061,
     PushCorrectionPieces = 0x0062,
@@ -32,6 +34,8 @@ pub enum MessageKind {
     RestoreDriveLimitsResponse = 0x0077,
     ResumeStream = 0x0078,
     ResumeStreamResponse = 0x0079,
+    SeedServoHome = 0x007A,
+    SeedServoHomeResponse = 0x007B,
     SdoRead = 0x007C,
     SdoReadResponse = 0x007D,
     SdoWrite = 0x007E,
@@ -53,6 +57,8 @@ impl MessageKind {
             0x0041 => Self::RuntimeCapsResponse,
             0x0042 => Self::ClaimHandshake,
             0x0043 => Self::ClaimHandshakeReply,
+            0x0044 => Self::QueryMotorState,
+            0x0045 => Self::MotorStateResponse,
             0x0060 => Self::PushPieces,
             0x0061 => Self::PushPiecesResponse,
             0x0062 => Self::PushCorrectionPieces,
@@ -71,6 +77,8 @@ impl MessageKind {
             0x0077 => Self::RestoreDriveLimitsResponse,
             0x0078 => Self::ResumeStream,
             0x0079 => Self::ResumeStreamResponse,
+            0x007A => Self::SeedServoHome,
+            0x007B => Self::SeedServoHomeResponse,
             0x007C => Self::SdoRead,
             0x007D => Self::SdoReadResponse,
             0x007E => Self::SdoWrite,
@@ -670,6 +678,44 @@ impl Decode for RestoreDriveLimitsResponse {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeedServoHome {
+    pub home_q16: i32,
+}
+
+impl Encode for SeedServoHome {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.home_q16);
+    }
+}
+
+impl Decode for SeedServoHome {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            home_q16: get_i32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeedServoHomeResponse {
+    pub result: i32,
+}
+
+impl Encode for SeedServoHomeResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+    }
+}
+
+impl Decode for SeedServoHomeResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResumeStream;
 
 impl Encode for ResumeStream {
@@ -836,6 +882,60 @@ impl Decode for EndstopTrip {
             endstop_id: get_u8(c)?,
             trip_clock: get_u64(c)?,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MotorSample {
+    pub slot: u8,
+    pub pos_q16: i32,
+    pub vel_q16: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MotorStateResponse {
+    pub motors: Vec<MotorSample>,
+}
+
+impl Encode for MotorStateResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.motors.len() as u8);
+        for m in &self.motors {
+            put_u8(out, m.slot);
+            put_i32(out, m.pos_q16);
+            put_i32(out, m.vel_q16);
+        }
+    }
+}
+
+impl Decode for MotorStateResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let count = get_u8(c)?;
+        let need =
+            (count as usize)
+                .checked_mul(9)
+                .ok_or(DecodeError::ArrayLengthExceedsBuffer {
+                    claimed: u32::from(count),
+                    available: c.remaining(),
+                })?;
+        if need > c.remaining() {
+            return Err(DecodeError::ArrayLengthExceedsBuffer {
+                claimed: u32::from(count),
+                available: c.remaining(),
+            });
+        }
+        let mut motors = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let slot = get_u8(c)?;
+            let pos_q16 = get_i32(c)?;
+            let vel_q16 = get_i32(c)?;
+            motors.push(MotorSample {
+                slot,
+                pos_q16,
+                vel_q16,
+            });
+        }
+        Ok(Self { motors })
     }
 }
 

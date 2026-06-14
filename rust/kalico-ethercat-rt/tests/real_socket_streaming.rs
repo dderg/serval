@@ -76,6 +76,7 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                     let total = (AXIS_RING_CAPACITY * NUM_AXES * 32) as u32;
                     server.respond(&runtime_caps_response_frame(correlation_id, total));
                 }
+                Command::QueryMotorState { .. } => {}
                 Command::ClaimHandshake { .. } => {}
                 Command::SetTorque { .. } => {}
                 Command::StartCapture { .. } => {}
@@ -83,6 +84,7 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                 Command::Stop { .. } => {}
                 Command::ResumeStream { .. } => {}
                 Command::SetDriveLimits { .. } | Command::RestoreDriveLimits { .. } => {}
+                Command::SeedServoHome { .. } => {}
                 Command::SdoRead { .. } | Command::SdoWrite { .. } => {
                     todo!("wired in the endpoint task")
                 }

@@ -413,15 +413,17 @@ class GCodeMove:
         toolhead = self.printer.lookup_object("toolhead", None)
         if toolhead is None:
             raise gcmd.error("Printer not ready")
-        kin = toolhead.get_kinematics()
-        steppers = kin.get_steppers()
-        mcu_pos = " ".join(
-            ["%s:%d" % (s.get_name(), s.get_mcu_position()) for s in steppers]
-        )
-        cinfo = [(s.get_name(), s.get_commanded_position()) for s in steppers]
-        stepper_pos = " ".join(["%s:%.6f" % (a, v) for a, v in cinfo])
-        kinfo = zip("XYZ", kin.calc_position(dict(cinfo)))
-        kin_pos = " ".join(["%s:%.6f" % (a, v) for a, v in kinfo])
+        bridge = self.printer.lookup_object("motion_bridge", None)
+        try:
+            axes = bridge.query_motor_positions() if bridge is not None else {}
+            measured = " ".join(
+                "%s:%.6f" % (a.upper(), axes[a][0])
+                for a in ("x", "y", "z", "e")
+                if a in axes
+            )
+            measured_pos = measured if measured else "ERR"
+        except Exception as e:
+            measured_pos = "ERR (%s)" % (e,)
         toolhead_pos = " ".join(
             [
                 "%s:%.6f" % (a, v)
@@ -438,17 +440,13 @@ class GCodeMove:
             ["%s:%.6f" % (a, v) for a, v in zip("XYZ", self.homing_position)]
         )
         gcmd.respond_info(
-            "mcu: %s\n"
-            "stepper: %s\n"
-            "kinematic: %s\n"
+            "measured: %s\n"
             "toolhead: %s\n"
             "gcode: %s\n"
             "gcode base: %s\n"
             "gcode homing: %s"
             % (
-                mcu_pos,
-                stepper_pos,
-                kin_pos,
+                measured_pos,
                 toolhead_pos,
                 gcode_pos,
                 base_pos,
