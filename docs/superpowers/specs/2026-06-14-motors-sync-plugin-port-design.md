@@ -177,18 +177,21 @@ plugins get the upstream-shaped `force_move.manual_move` seam for free.
   the target stepper's correction stream fires (`motion.correction_start` /
   `motion.correction_drained`), no `motion.ring_full`, the partner motor stays
   put, and the reported axis position is unchanged.
-- **Bench (the sign/units risk):** on the Trident, confirm the plugin loads,
-  a buzz runs as one continuous shake on one belt motor with no inter-swing
-  pause, the partner motor stays put, and — the real unknown — that the
-  plugin's `move_d`-derived distances move the motor in the direction the
-  plugin's measurement model expects. The sign convention between the plugin's
-  microstep distances and what the correction primitive applies to a motor can
-  only be confirmed on hardware; a sync that diverges instead of converging is
-  the symptom of an inverted convention.
+- **Bench:** on the Trident, confirm the plugin loads, a buzz runs as one
+  continuous shake on one belt motor with no inter-swing pause, the partner
+  motor stays put, the reported axis position is unchanged, and a sync run
+  converges (magnitude falls).
+
+Direction is not a concern: the motor's `dir_pin` config governs it at the MCU
+step/dir level, both the old trapq path and the correction ring feed the same
+per-motor binding (same inversion bit), and the correction primitive's
+direction is already validated on hardware by z_tilt / `MOTOR_ADJUST`. The port
+touches nothing in that path.
 
 ## Risks
 
-- **Sign / units convention (primary).** Bench-settled, above. If inverted,
-  the fix is a single sign flip at the adapter boundary, not a redesign.
-- **Wall-clock vs print-time interleave.** Covered by the reactor-wait
-  contract above; the bench buzz test confirms no gap and no over-wait.
+- **Wall-clock vs print-time interleave.** Corrections schedule on the host
+  clock; the adapter's reactor-wait contract (above) keeps the move serial
+  with the surrounding enable/measure steps. The bench buzz test confirms no
+  gap and no over-wait. Already exercised by `MOTOR_ADJUST` in kalico-sim, so
+  low risk.
