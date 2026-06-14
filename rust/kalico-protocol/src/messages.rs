@@ -34,6 +34,8 @@ pub enum MessageKind {
     RestoreDriveLimitsResponse = 0x0077,
     ResumeStream = 0x0078,
     ResumeStreamResponse = 0x0079,
+    SeedServoHome = 0x007A,
+    SeedServoHomeResponse = 0x007B,
     SdoRead = 0x007C,
     SdoReadResponse = 0x007D,
     SdoWrite = 0x007E,
@@ -75,6 +77,8 @@ impl MessageKind {
             0x0077 => Self::RestoreDriveLimitsResponse,
             0x0078 => Self::ResumeStream,
             0x0079 => Self::ResumeStreamResponse,
+            0x007A => Self::SeedServoHome,
+            0x007B => Self::SeedServoHomeResponse,
             0x007C => Self::SdoRead,
             0x007D => Self::SdoReadResponse,
             0x007E => Self::SdoWrite,
@@ -666,6 +670,44 @@ impl Encode for RestoreDriveLimitsResponse {
 }
 
 impl Decode for RestoreDriveLimitsResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeedServoHome {
+    pub home_q16: i32,
+}
+
+impl Encode for SeedServoHome {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.home_q16);
+    }
+}
+
+impl Decode for SeedServoHome {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            home_q16: get_i32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeedServoHomeResponse {
+    pub result: i32,
+}
+
+impl Encode for SeedServoHomeResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+    }
+}
+
+impl Decode for SeedServoHomeResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
             result: get_i32(c)?,

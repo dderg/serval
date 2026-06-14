@@ -3,8 +3,9 @@ use kalico_native_transport::demux::{Demuxer, Frame};
 use kalico_native_transport::frame::decode_frame;
 use kalico_protocol::messages::{
     MotorStateResponse, RestoreDriveLimitsResponse, ResumeStreamResponse, SdoRead, SdoReadResponse,
-    SdoWrite, SdoWriteResponse, SetDriveLimits, SetDriveLimitsResponse, SlaveState, SlaveStatus,
-    StartCapture, StartCaptureResponse, StopCaptureResponse, StopResponse,
+    SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse, SetDriveLimits,
+    SetDriveLimitsResponse, SlaveState, SlaveStatus, StartCapture, StartCaptureResponse,
+    StopCaptureResponse, StopResponse,
 };
 
 #[test]
@@ -299,6 +300,33 @@ fn drive_limits_response_frames_round_trip() {
     );
     assert_eq!(RestoreDriveLimitsResponse::decode(body).unwrap().result, 0);
     assert_eq!(hdr.correlation_id, 7);
+}
+
+#[test]
+fn decodes_seed_servo_home_command() {
+    let msg = SeedServoHome { home_q16: -98_304 };
+    let payload = frame_payload(MessageKind::SeedServoHome, 8, &msg.encoded_to_vec());
+    match decode_command(0, &payload).unwrap() {
+        Command::SeedServoHome {
+            correlation_id: 8,
+            home_q16,
+        } => assert_eq!(home_q16, -98_304),
+        other => panic!("expected SeedServoHome, got {other:?}"),
+    }
+}
+
+#[test]
+fn seed_servo_home_response_frame_round_trips() {
+    let frame = seed_servo_home_response_frame(13, -801);
+    let (chan, payload) = decode_frame(&frame).unwrap();
+    assert_eq!(chan, CHANNEL_CONTROL);
+    let (hdr, body) = decode_message_header(payload).unwrap();
+    assert_eq!(hdr.correlation_id, 13);
+    assert_eq!(
+        MessageKind::from_u16(hdr.kind_raw),
+        Some(MessageKind::SeedServoHomeResponse)
+    );
+    assert_eq!(SeedServoHomeResponse::decode(body).unwrap().result, -801);
 }
 
 #[test]

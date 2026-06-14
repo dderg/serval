@@ -536,6 +536,50 @@ int ec_rt_sdo_write(uint16_t index, uint8_t sub, const uint8_t *buf, int size,
     return 0;
 }
 
+/*
+ * CiA-402 homing-method-35 ("current position is home") drive-frame, run as a
+ * self-contained DC loop the same way ec_rt_enable() runs its CiA-402 enable
+ * loop: every wait goes through rt_exchange so process data never pauses and
+ * the SYNC0 watchdog (ErC1.1) cannot latch. The blocking mode-of-operation
+ * and method/offset SDO writes are NOT done here — the caller stages them on
+ * the off-loop mailbox thread while the DC loop keeps cycling, and only enters
+ * this function once 6061h reads 6 (Homing). Preconditions: mode = Homing,
+ * 6098h = 35, 607Ch = offset, drive operation-enabled (torque on).
+ *
+ * 6040h homing controlword: bit 4 (0x10) rising edge starts homing and must
+ * stay set throughout; the 0x0F base keeps operation enabled. 6041h: bit 12
+ * (0x1000) = homing attained, bit 13 (0x2000) = homing error.
+ */
+int ec_rt_run_homing(void) {
+    int64_t toff = 0;
+    /* Settle a few cycles with bit 4 clear so the next set is a clean rising
+     * edge regardless of the controlword the enable loop left staged. */
+    for (int i = 0; i < 8; i++) {
+        g_out->controlword     = 0x000F;
+        g_out->target_position = g_in->position_actual;
+        rt_exchange(&toff);
+    }
+    for (int64_t pc = 0; pc < 3000; pc++) {
+        uint16_t sw = g_in->statusword;
+        g_out->controlword     = 0x001F; /* 0x0F + homing-enable (bit 4) */
+        g_out->target_position = g_in->position_actual;
+        if (sw & 0x2000) { /* bit 13: homing error */
+            g_out->controlword = 0x000F;
+            rt_exchange(&toff);
+            return EC_RT_ERR_HOMING_ERROR;
+        }
+        if (sw & 0x1000) { /* bit 12: homing attained */
+            g_out->controlword = 0x000F; /* clear bit 4, stay enabled */
+            rt_exchange(&toff);
+            return 0;
+        }
+        rt_exchange(&toff);
+    }
+    g_out->controlword = 0x000F;
+    rt_exchange(&toff);
+    return EC_RT_ERR_HOMING_ATTAIN;
+}
+
 int ec_rt_park_cycle(int64_t *toff_ns) {
     if (!g_out || !g_in) {
         fprintf(stderr,

@@ -84,6 +84,7 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                 Command::Stop { .. } => {}
                 Command::ResumeStream { .. } => {}
                 Command::SetDriveLimits { .. } | Command::RestoreDriveLimits { .. } => {}
+                Command::SeedServoHome { .. } => {}
                 Command::SdoRead { .. } | Command::SdoWrite { .. } => {
                     todo!("wired in the endpoint task")
                 }

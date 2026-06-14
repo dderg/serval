@@ -36,6 +36,8 @@ extern "C" {
 
     pub fn ec_rt_enable() -> c_int;
 
+    pub fn ec_rt_run_homing() -> c_int;
+
     pub fn ec_rt_dump_al_state();
 
     pub fn ec_rt_cycle(toff_ns: *mut i64) -> c_int;

@@ -20,6 +20,9 @@ use kalico_ethercat_rt::ffi;
 use kalico_ethercat_rt::mailbox::{MailboxReply, MailboxRequest, MailboxWorker, WorkerScheduling};
 use kalico_ethercat_rt::scale::CountMap;
 use kalico_ethercat_rt::sdo::SdoBus;
+use kalico_ethercat_rt::seed_home::{
+    ERR_SEED_HOME_BUSY, ERR_SEED_HOME_NOT_ENABLED, ERR_SEED_HOME_RESTORE, ERR_SEED_HOME_STREAMING,
+};
 use kalico_ethercat_rt::server::FrameServer;
 use kalico_ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
@@ -28,9 +31,9 @@ use kalico_ethercat_rt::wire::{
     claim_handshake_reply_frame, identify_response_frame, motor_state_empty_frame,
     motor_state_response_frame, push_pieces_response_frame, restore_drive_limits_response_frame,
     resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
-    sdo_write_response_frame, set_drive_limits_response_frame, set_torque_response_frame,
-    start_capture_response_frame, status_heartbeat_frame, stop_capture_response_frame,
-    stop_response_frame, Command,
+    sdo_write_response_frame, seed_servo_home_response_frame, set_drive_limits_response_frame,
+    set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
+    stop_capture_response_frame, stop_response_frame, Command,
 };
 use kalico_protocol::messages::{
     SlaveState, StopCaptureResponse, ERR_SDO_TRANSPORT, ERR_SDO_UNSUPPORTED_SIZE,
@@ -161,6 +164,9 @@ fn main() {
 
     let mut ring = AxisRing::new();
     let mut cmap: Option<CountMap> = None;
+    let mut framed = false;
+    let mut seed_home_inflight: Option<u32> = None;
+    let mut seed_home_homing_rc: i32 = 0;
     let mut last_sent_retired: u32 = 0;
     let mut heartbeat_sent = false;
 
@@ -443,6 +449,46 @@ fn main() {
                         restore: true,
                     });
                 }
+                Command::SeedServoHome {
+                    correlation_id,
+                    home_q16,
+                } => {
+                    if seed_home_inflight.is_some() {
+                        eprintln!("ec-rt: SeedServoHome rejected — handshake already in flight");
+                        server.respond(&seed_servo_home_response_frame(
+                            correlation_id,
+                            ERR_SEED_HOME_BUSY,
+                        ));
+                    } else if gate.state() != TorqueState::Enabled {
+                        eprintln!(
+                            "ec-rt: SeedServoHome rejected — drive not operation-enabled \
+                             (state={:?}); method-35 needs torque on",
+                            gate.state()
+                        );
+                        server.respond(&seed_servo_home_response_frame(
+                            correlation_id,
+                            ERR_SEED_HOME_NOT_ENABLED,
+                        ));
+                    } else if !ring.is_empty() {
+                        eprintln!("ec-rt: SeedServoHome rejected — motion ring not empty");
+                        server.respond(&seed_servo_home_response_frame(
+                            correlation_id,
+                            ERR_SEED_HOME_STREAMING,
+                        ));
+                    } else {
+                        let offset_counts =
+                            ((f64::from(home_q16) / 65536.0) * counts_per_mm).round() as i32;
+                        eprintln!(
+                            "ec-rt: SeedServoHome home_q16={home_q16} -> 607Ch={offset_counts} \
+                             counts; staging method-35 mode switch"
+                        );
+                        seed_home_inflight = Some(correlation_id);
+                        mailbox.submit(MailboxRequest::SeedHomeSetup {
+                            correlation_id,
+                            offset_counts,
+                        });
+                    }
+                }
                 Command::SdoRead {
                     correlation_id,
                     msg,
@@ -578,6 +624,49 @@ fn main() {
                         set_drive_limits_response_frame(correlation_id, rc)
                     };
                     server.respond(&frame);
+                }
+                MailboxReply::SeedHomeSetup {
+                    correlation_id,
+                    rc,
+                    offset_counts,
+                } => {
+                    seed_home_homing_rc = if rc != 0 {
+                        eprintln!(
+                            "ec-rt: SeedServoHome setup failed rc={rc} (offset={offset_counts}); \
+                             restoring CSP and failing"
+                        );
+                        rc
+                    } else {
+                        let hrc = unsafe { ffi::ec_rt_run_homing() };
+                        if hrc != 0 {
+                            eprintln!(
+                                "ec-rt: SeedServoHome controlword phase failed rc={hrc}; \
+                                 restoring CSP and failing"
+                            );
+                        } else {
+                            eprintln!(
+                                "ec-rt: SeedServoHome homing attained (607Ch={offset_counts}); \
+                                 restoring CSP"
+                            );
+                        }
+                        hrc
+                    };
+                    mailbox.submit(MailboxRequest::SeedHomeRestore { correlation_id });
+                }
+                MailboxReply::SeedHomeRestore { correlation_id, rc } => {
+                    seed_home_inflight = None;
+                    let result = if seed_home_homing_rc != 0 {
+                        seed_home_homing_rc
+                    } else if rc != 0 {
+                        eprintln!("ec-rt: SeedServoHome CSP restore failed rc={rc}");
+                        ERR_SEED_HOME_RESTORE
+                    } else {
+                        framed = true;
+                        eprintln!("ec-rt: SeedServoHome complete — framed=true");
+                        0
+                    };
+                    seed_home_homing_rc = 0;
+                    server.respond(&seed_servo_home_response_frame(correlation_id, result));
                 }
             }
         }
@@ -799,7 +888,7 @@ fn main() {
             };
             eprintln!(
                 "ec-rt: wkc={wkc} sw=0x{sw:04x} err=0x{drive_err:04x} pos={pos} ferr={ferr} toff={toff} \
-                 ring_len={} retired={} tq_act={tq_act} ff_sat={ff_saturation}",
+                 ring_len={} retired={} tq_act={tq_act} ff_sat={ff_saturation} framed={framed}",
                 ring.is_empty() as u8 ^ 1,
                 current_retired,
             );

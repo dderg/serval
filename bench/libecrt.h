@@ -15,6 +15,10 @@
 #define EC_RT_ERR_RT_AFFINITY     (-11)
 #define EC_RT_ERR_RT_SCHED        (-12)
 #define EC_RT_ERR_FF_ROUTING      (-13)
+#define EC_RT_ERR_HOMING_MODE     (-14)
+#define EC_RT_ERR_HOMING_ATTAIN   (-15)
+#define EC_RT_ERR_HOMING_ERROR    (-16)
+#define EC_RT_ERR_HOMING_RESTORE  (-17)
 
 /* Two-phase bring-up. Phase 1 stops at PRE-OP (PDO maps, CSP mode, sync
  * types, FF routing written); the caller does its session SDO work there,
@@ -27,6 +31,14 @@ int  ec_rt_bringup_preop(const char *ifname, int64_t cycle_ns, int rt_cpu, int r
 int  ec_rt_bringup_finish(void);
 
 int  ec_rt_enable(void);
+
+/* Drive-frame via CiA-402 homing method 35 ("current position is home", no
+ * motion). Self-contained DC loop (like ec_rt_enable): pulses 6040h bit 4 and
+ * polls 6041h bit 12/13. Preconditions: mode-of-operation already switched to
+ * Homing (6060h=6, confirmed via 6061h) with 6098h=35 and 607Ch=offset staged
+ * off-loop, and the drive operation-enabled. 0 = homing attained;
+ * EC_RT_ERR_HOMING_* on error/timeout. The caller restores CSP afterward. */
+int  ec_rt_run_homing(void);
 
 /* One steady-state DC cycle: sleep to next deadline, send+recv process data,
  * run the DC PI jitter correction, keep controlword=0x000F. Writes the PI

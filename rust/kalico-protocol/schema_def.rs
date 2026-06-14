@@ -255,6 +255,24 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         ],
     },
     SchemaMessage {
+        type_tag: 0x007A,
+        name: "SeedServoHome",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "home_q16", ty: "i32" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x007B,
+        name: "SeedServoHomeResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+        ],
+    },
+    SchemaMessage {
         type_tag: 0x0082,
         name: "FaultEvent",
         version: 1,

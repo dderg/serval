@@ -447,6 +447,27 @@ fn drive_limits_message_kinds_round_trip() {
 }
 
 #[test]
+fn seed_servo_home_round_trips() {
+    let msg = SeedServoHome { home_q16: -123_456 };
+    let bytes = msg.encoded_to_vec();
+    assert_eq!(bytes.len(), 4);
+    assert_eq!(SeedServoHome::decode(&bytes).unwrap(), msg);
+
+    let r = SeedServoHomeResponse { result: -801 };
+    assert_eq!(
+        SeedServoHomeResponse::decode(&r.encoded_to_vec()).unwrap(),
+        r
+    );
+
+    for kind in [
+        MessageKind::SeedServoHome,
+        MessageKind::SeedServoHomeResponse,
+    ] {
+        assert_eq!(MessageKind::from_u16(kind.as_u16()), Some(kind));
+    }
+}
+
+#[test]
 fn endstop_trip_round_trips_and_is_event() {
     let msg = EndstopTrip {
         endstop_id: 3,

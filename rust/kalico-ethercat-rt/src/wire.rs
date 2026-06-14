@@ -7,9 +7,9 @@ use kalico_protocol::codec::{Decode, Encode};
 use kalico_protocol::messages::{
     ClaimHandshakeReply, MessageKind, MotorSample, MotorStateResponse, PushPieces,
     PushPiecesResponse, RestoreDriveLimitsResponse, ResumeStreamResponse, RuntimeCapsResponse,
-    SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SetDriveLimits, SetDriveLimitsResponse,
-    SetTorque, SetTorqueResponse, StartCapture, StartCaptureResponse, StatusHeartbeat,
-    StopCaptureResponse, StopResponse,
+    SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StartCapture,
+    StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse,
 };
 use kalico_protocol::KALICO_CHANNEL_PIECES;
 
@@ -55,6 +55,10 @@ pub enum Command {
     },
     RestoreDriveLimits {
         correlation_id: u32,
+    },
+    SeedServoHome {
+        correlation_id: u32,
+        home_q16: i32,
     },
     SdoRead {
         correlation_id: u32,
@@ -138,6 +142,13 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
         Some(MessageKind::RestoreDriveLimits) => Ok(Command::RestoreDriveLimits {
             correlation_id: cid,
         }),
+        Some(MessageKind::SeedServoHome) => {
+            let msg = SeedServoHome::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::SeedServoHome {
+                correlation_id: cid,
+                home_q16: msg.home_q16,
+            })
+        }
         Some(MessageKind::SdoRead) => {
             let msg = SdoRead::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
             Ok(Command::SdoRead {
@@ -244,6 +255,11 @@ pub fn set_drive_limits_response_frame(cid: u32, result: i32) -> Vec<u8> {
 pub fn restore_drive_limits_response_frame(cid: u32, result: i32) -> Vec<u8> {
     let body = RestoreDriveLimitsResponse { result }.encoded_to_vec();
     control_frame(MessageKind::RestoreDriveLimitsResponse, cid, &body)
+}
+
+pub fn seed_servo_home_response_frame(cid: u32, result: i32) -> Vec<u8> {
+    let body = SeedServoHomeResponse { result }.encoded_to_vec();
+    control_frame(MessageKind::SeedServoHomeResponse, cid, &body)
 }
 
 pub fn status_heartbeat_frame(
