@@ -107,11 +107,47 @@ fn query_runtime_caps(
     decode_runtime_caps_body(&body)
 }
 
+enum MotorQuery {
+    Serial(Arc<KalicoHostIo>),
+    EtherCat(Arc<UnixNativeConn>),
+}
+
+impl MotorQuery {
+    fn is_ethercat(&self) -> bool {
+        matches!(self, MotorQuery::EtherCat(_))
+    }
+}
+
+fn place_motor_response(
+    resp: &kalico_protocol::messages::MotorStateResponse,
+    cfg_axes: &[usize],
+    is_ethercat: bool,
+    motors: &mut [Option<f64>],
+    vmotors: &mut [Option<f64>],
+) {
+    let mut put = |slot: usize, m: &kalico_protocol::messages::MotorSample| {
+        if slot < motors.len() {
+            motors[slot] = Some(f64::from(m.pos_q16) / 65536.0);
+            vmotors[slot] = Some(f64::from(m.vel_q16) / 65536.0);
+        }
+    };
+    if is_ethercat {
+        for (m, &slot) in resp.motors.iter().zip(cfg_axes.iter()) {
+            put(slot, m);
+        }
+    } else {
+        for m in &resp.motors {
+            put(m.slot as usize, m);
+        }
+    }
+}
+
 fn collect_motor_positions_inner(
     mcu_axis_configs: &Mutex<Vec<crate::dispatch::McuAxisConfig>>,
     mcus: &Mutex<HashMap<u32, McuConnection>>,
     timeout: std::time::Duration,
 ) -> Result<HashMap<String, (f64, f64)>, String> {
+    use kalico_host_rt::native_call::NativeCall;
     use kalico_protocol::MessageKind;
     use kalico_protocol::codec::{Cursor, Decode};
     use kalico_protocol::messages::MotorStateResponse;
@@ -134,22 +170,32 @@ fn collect_motor_positions_inner(
     let mut vmotors: [Option<f64>; MAX_AXES] = [None; MAX_AXES];
 
     for cfg in &configs {
-        let io = {
+        let q = {
             let map = mcus.lock().unwrap_or_else(|p| p.into_inner());
             let Some(conn) = map.get(&cfg.mcu_id) else {
                 continue;
             };
             if conn.ethercat_socket.is_some() {
-                continue;
-            }
-            match conn.host_io.as_ref() {
-                Some(io) => Arc::clone(io),
-                None => continue,
+                match conn.endpoint_conn.as_ref() {
+                    Some(ep) => MotorQuery::EtherCat(Arc::clone(ep)),
+                    None => continue,
+                }
+            } else {
+                match conn.host_io.as_ref() {
+                    Some(io) => MotorQuery::Serial(Arc::clone(io)),
+                    None => continue,
+                }
             }
         };
-        let (kind, body) = io
-            .kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)
-            .map_err(|e| format!("query mcu {}: {e:?}", cfg.mcu_id))?;
+        let (kind, body) = match &q {
+            MotorQuery::Serial(io) => {
+                io.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)
+            }
+            MotorQuery::EtherCat(ep) => {
+                ep.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)
+            }
+        }
+        .map_err(|e| format!("query mcu {}: {e:?}", cfg.mcu_id))?;
         if kind != MessageKind::MotorStateResponse {
             return Err(format!(
                 "query mcu {}: unexpected kind {kind:?}",
@@ -159,13 +205,7 @@ fn collect_motor_positions_inner(
         let mut c = Cursor::new(&body);
         let resp = MotorStateResponse::decode_from(&mut c)
             .map_err(|e| format!("query mcu {}: decode {e:?}", cfg.mcu_id))?;
-        for m in resp.motors {
-            let slot = m.slot as usize;
-            if slot < MAX_AXES {
-                motors[slot] = Some(f64::from(m.pos_q16) / 65536.0);
-                vmotors[slot] = Some(f64::from(m.vel_q16) / 65536.0);
-            }
-        }
+        place_motor_response(&resp, &cfg.axes, q.is_ethercat(), &mut motors, &mut vmotors);
     }
     crate::position_query::assemble_cartesian(&motors, &vmotors, kin_tag)
 }
@@ -4191,6 +4231,9 @@ impl PyMotionBridge {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod place_motor_response_tests;
 
 #[cfg(test)]
 mod require_events_dir_tests {
