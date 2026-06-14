@@ -25,11 +25,12 @@ use kalico_ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
 };
 use kalico_ethercat_rt::wire::{
-    claim_handshake_reply_frame, identify_response_frame, push_pieces_response_frame,
-    restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
-    sdo_read_response_frame, sdo_write_response_frame, set_drive_limits_response_frame,
-    set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
-    stop_capture_response_frame, stop_response_frame, Command,
+    claim_handshake_reply_frame, identify_response_frame, motor_state_empty_frame,
+    motor_state_response_frame, push_pieces_response_frame, restore_drive_limits_response_frame,
+    resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
+    sdo_write_response_frame, set_drive_limits_response_frame, set_torque_response_frame,
+    start_capture_response_frame, status_heartbeat_frame, stop_capture_response_frame,
+    stop_response_frame, Command,
 };
 use kalico_protocol::messages::{
     SlaveState, StopCaptureResponse, ERR_SDO_TRANSPORT, ERR_SDO_UNSUPPORTED_SIZE,
@@ -460,6 +461,27 @@ fn main() {
                         msg,
                     });
                 }
+                Command::QueryMotorState { correlation_id } => match cmap.as_ref() {
+                    Some(map) => {
+                        let (pos_counts, vel_rpm) = unsafe {
+                            (
+                                ffi::ec_rt_get_position_actual(),
+                                ffi::ec_rt_get_velocity_actual(),
+                            )
+                        };
+                        let pos_mm = map.actual_mm(pos_counts);
+                        let vel_mm_s =
+                            kalico_ethercat_rt::scale::velocity_mm_s(vel_rpm, rotation_distance);
+                        server.respond(&motor_state_response_frame(
+                            correlation_id,
+                            pos_mm,
+                            vel_mm_s,
+                        ));
+                    }
+                    None => {
+                        server.respond(&motor_state_empty_frame(correlation_id));
+                    }
+                },
                 Command::Unknown { kind_raw, .. } => {
                     eprintln!("ec-rt: ignoring kind 0x{kind_raw:04x}");
                 }
