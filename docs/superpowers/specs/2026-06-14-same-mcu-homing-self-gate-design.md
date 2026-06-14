@@ -107,13 +107,15 @@ raw pointer with no internal lock, and the engine tick runs in the higher-
 priority TIM5 ISR which would otherwise preempt the mutation. This matches what
 `handle_stop` does today.
 
-In `endstop_trip_task`, after the existing `kalico_native_emit_endstop_trip`,
-call `handle_stop_inner`:
+In `endstop_trip_task`, brake locally first (`handle_stop_inner`), then emit the
+trip event(s) as today:
 
 ```c
 void endstop_trip_task(void) {
     if (!sched_check_wake(&endstop_trip_wake))
         return;
+    uint64_t discard_clock;
+    handle_stop_inner(&discard_clock);   // brake locally; return value unused here
     uint8_t oid;
     struct endstop *e;
     foreach_oid(oid, e, command_config_endstop) {
@@ -122,17 +124,11 @@ void endstop_trip_task(void) {
         e->trip_pending = 0;
         kalico_native_emit_endstop_trip(e->endstop_id, e->trip_clock);
     }
-    uint64_t discard_clock;
-    handle_stop_inner(&discard_clock);   // brake locally; return value unused here
 }
 ```
 
-Order: emit first, then brake. The emit gets the trip to the host so it can fan
-the stop out to any genuinely-remote participant MCUs; the local brake follows.
-For same-MCU homing there are no other MCUs to relay to, so emit-first costs
-only a few µs of local overshoot. The brake gating the whole engine (not a
-single axis) matches the existing `broadcast_stop` semantics, which already
-gates each participant's whole engine.
+The brake gates the whole engine (not a single axis), matching the existing
+`broadcast_stop` semantics, which already gates each participant's whole engine.
 
 ### 2. Keep the brake clock honest
 
@@ -148,7 +144,29 @@ No explicit reset is needed across homing cycles: `ResumeStream` ungates after
 homing (`pieces_gated` → false), so the next trip's first gate recaptures a
 fresh `s_gate_clock`.
 
-### 3. Expose `pieces_gated` over the FFI
+### 3. The double stop is idempotent
+
+After the self-gate, the host *will* send its own `Stop` to every participant —
+including the MCU that already braked. That second stop must be a safe no-op:
+
+- **First stop (self-gate):** `pieces_gated` false → gate, capture
+  `s_gate_clock = now`.
+- **Second stop (host `Stop`):** `pieces_gated` true → `else` branch returns
+  `KALICO_OK` and the *stored* `s_gate_clock`. No re-gate, no `gate_pieces`
+  call, no clock overwrite. The host gets the `result=0` it expects and the
+  honest brake clock as `discard_clock`.
+
+There is no arrival-order hazard: the self-gate runs to completion inside
+`endstop_trip_task` before the main loop processes any incoming `Stop`, so
+"already gated" is always true when the host's `Stop` lands. `gate_pieces` is
+itself idempotent (`discard_pending` + set-flag), so even a direct double-gate
+would be harmless — the `pieces_gated` guard exists to preserve the *clock*, not
+to protect `gate_pieces`.
+
+This is exercised in the Rust tests below (gate, advance clock, gate again →
+`discard_clock` unchanged).
+
+### 4. Expose `pieces_gated` over the FFI
 
 The engine already has `pieces_gated()` (`engine.rs:264`, used internally in
 `runtime_ffi.rs`), but there is no C-callable export. Add one beside
@@ -162,7 +180,7 @@ pub unsafe extern "C" fn kalico_runtime_pieces_gated(rt: *mut KalicoRuntime) -> 
 and declare it in `rust/kalico-c-api/include/kalico_runtime.h`. Null/`!INIT_DONE`
 guards return `false` (matching the other accessors' conservative defaults).
 
-### 4. Lift the CLAUDE.md constraint
+### 5. Lift the CLAUDE.md constraint
 
 `CLAUDE.md` currently says (line 27-28):
 
@@ -225,8 +243,8 @@ the host `Stop` path reports it exactly as before.
 ## Out of scope
 
 - IRQ-immediate gating (braking inside `endstop_event` rather than the
-  foreground task) — a few µs tighter, but emit-first in the task is the chosen,
-  simpler ordering.
+  foreground task) — a few µs tighter, but the task-level brake is simpler and
+  the freeze clock is captured honestly either way.
 - Per-axis gating — `gate_pieces` freezes the whole engine, matching existing
   `broadcast_stop` behavior; multi-endstop simultaneous homing already stops
   together today.
