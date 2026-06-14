@@ -37,6 +37,7 @@ int  ec_rt_cycle(int64_t *toff_ns);
 void ec_rt_set_target_position(int32_t counts);
 
 int32_t  ec_rt_get_position_actual(void);
+int32_t  ec_rt_get_velocity_actual(void);
 uint16_t ec_rt_get_statusword(void);
 uint16_t ec_rt_get_error_code(void);
 int32_t  ec_rt_get_following_error(void);
@@ -51,6 +52,7 @@ typedef struct {
     uint16_t error_code;
     uint16_t statusword;
     int32_t  position_actual;
+    int32_t  velocity_actual;
     int16_t  torque_actual;
     int32_t  following_error;
     int32_t  position_demand;

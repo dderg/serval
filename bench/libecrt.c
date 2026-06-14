@@ -30,6 +30,7 @@ typedef struct {
     uint16_t error_code;
     uint16_t statusword;
     int32_t  position_actual;
+    int32_t  velocity_actual;
     int16_t  torque_actual;
     int32_t  following_error;
     uint16_t tp_status;
@@ -42,8 +43,8 @@ typedef struct {
 _Static_assert(sizeof(out_t) == 18,
                "rewrite_1600_entry_table() maps 18 bytes; out_t must match "
                "field-for-field, in order");
-_Static_assert(sizeof(in_t) == 32,
-               "rewrite_1a00_entry_table() maps 32 bytes; in_t must match "
+_Static_assert(sizeof(in_t) == 36,
+               "rewrite_1a00_entry_table() maps 36 bytes; in_t must match "
                "field-for-field, in order");
 
 static char    IOmap[4096];
@@ -102,6 +103,7 @@ static int go_realtime(int cpu, int prio) {
 #define TXPDO_ERROR_CODE      COE_ENTRY(0x603F, 0x00, 16)
 #define TXPDO_STATUSWORD      COE_ENTRY(0x6041, 0x00, 16)
 #define TXPDO_POSITION_ACTUAL COE_ENTRY(0x6064, 0x00, 32)
+#define TXPDO_VELOCITY_ACTUAL COE_ENTRY(0x606C, 0x00, 32)
 #define TXPDO_TORQUE_ACTUAL   COE_ENTRY(0x6077, 0x00, 16)
 #define TXPDO_FOLLOWING_ERROR COE_ENTRY(0x60F4, 0x00, 32)
 #define TXPDO_TP_STATUS       COE_ENTRY(0x60B9, 0x00, 16)
@@ -141,6 +143,7 @@ static int rewrite_1a00_entry_table(void) {
         TXPDO_ERROR_CODE,
         TXPDO_STATUSWORD,
         TXPDO_POSITION_ACTUAL,
+        TXPDO_VELOCITY_ACTUAL,
         TXPDO_TORQUE_ACTUAL,
         TXPDO_FOLLOWING_ERROR,
         TXPDO_TP_STATUS,
@@ -455,6 +458,7 @@ int ec_rt_cycle(int64_t *toff_ns) {
 
 void ec_rt_set_target_position(int32_t counts) { g_out->target_position = counts; }
 int32_t  ec_rt_get_position_actual(void)        { return g_in->position_actual; }
+int32_t  ec_rt_get_velocity_actual(void)        { return g_in->velocity_actual; }
 uint16_t ec_rt_get_statusword(void)             { return g_in->statusword; }
 uint16_t ec_rt_get_error_code(void)             { return g_in->error_code; }
 int32_t  ec_rt_get_following_error(void)        { return g_in->following_error; }
@@ -466,6 +470,7 @@ void ec_rt_get_telemetry(ec_telemetry_t *out) {
     out->error_code      = g_in->error_code;
     out->statusword      = g_in->statusword;
     out->position_actual = g_in->position_actual;
+    out->velocity_actual = g_in->velocity_actual;
     out->torque_actual   = g_in->torque_actual;
     out->following_error = g_in->following_error;
     out->position_demand = g_in->position_demand;
