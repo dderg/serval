@@ -492,6 +492,7 @@ pub struct PyMotionBridge {
     planner: Mutex<Option<PlannerHandle>>,
     planner_config: Mutex<PlannerConfig>,
     commanded_pos: Mutex<[f64; 3]>,
+    last_g5_pq: Mutex<Option<(f64, f64)>>,
     mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
     dispatched_segments: Arc<AtomicU64>,
     fallback_clock_conversions: Arc<AtomicU64>,
@@ -751,6 +752,7 @@ impl PyMotionBridge {
             planner: Mutex::new(None),
             planner_config: Mutex::new(PlannerConfig::default()),
             commanded_pos: Mutex::new([0.0; 3]),
+            last_g5_pq: Mutex::new(None),
             mcu_axis_configs: Arc::new(Mutex::new(Vec::new())),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),
@@ -2927,21 +2929,7 @@ impl PyMotionBridge {
             "bridge.submit_move enter"
         );
         py.detach(|| -> PyResult<()> {
-            let followers: Vec<(usize, f64)> = if de.abs() > 0.0 {
-                let cfg = self
-                    .planner_config
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                let axis_index = cfg.axis_registry.axis_index("e").map_err(|_| {
-                    PyRuntimeError::new_err(
-                        "E word on a move but no [axis e] is declared — declare the \
-                         follower axis or stop sending E",
-                    )
-                })?;
-                vec![(axis_index, de)]
-            } else {
-                vec![]
-            };
+            let followers = self.e_followers(de)?;
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
             let classified = classify::classify_and_build(pos, dx, dy, dz, &followers, feedrate)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -2958,6 +2946,92 @@ impl PyMotionBridge {
             pos[0] += dx;
             pos[1] += dy;
             pos[2] += dz;
+            *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature = (i, j, p, q, dx, dy, dz, de, feedrate))]
+    fn submit_bezier(
+        &self,
+        py: Python<'_>,
+        i: Option<f64>,
+        j: Option<f64>,
+        p: f64,
+        q: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+        de: f64,
+        feedrate: f64,
+    ) -> PyResult<()> {
+        py.detach(|| -> PyResult<()> {
+            let followers = self.e_followers(de)?;
+            let (ii, jj) = match (i, j) {
+                (Some(i), Some(j)) => (i, j),
+                (None, None) => {
+                    let prev = *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner());
+                    let (pp, qq) = prev.ok_or_else(|| {
+                        PyRuntimeError::new_err("G5 without I J must follow another G5")
+                    })?;
+                    (-pp, -qq)
+                }
+                _ => {
+                    return Err(PyRuntimeError::new_err(
+                        "G5 I and J must both be present or both omitted",
+                    ));
+                }
+            };
+            let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+            let classified =
+                classify::classify_bezier(pos, ii, jj, p, q, dx, dy, dz, &followers, feedrate)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            {
+                let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+                let planner = guard.as_ref().ok_or_else(|| {
+                    PyRuntimeError::new_err("planner not initialized — call init_planner first")
+                })?;
+                planner.submit_move(classified).map_err(planner_err)?;
+            }
+            let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+            pos[0] += dx;
+            pos[1] += dy;
+            pos[2] += dz;
+            *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = Some((p, q));
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature = (i, j, dx, dy, dz, de, feedrate))]
+    fn submit_quadratic(
+        &self,
+        py: Python<'_>,
+        i: f64,
+        j: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+        de: f64,
+        feedrate: f64,
+    ) -> PyResult<()> {
+        py.detach(|| -> PyResult<()> {
+            let followers = self.e_followers(de)?;
+            let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+            let classified =
+                classify::classify_quadratic(pos, i, j, dx, dy, dz, &followers, feedrate)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            {
+                let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+                let planner = guard.as_ref().ok_or_else(|| {
+                    PyRuntimeError::new_err("planner not initialized — call init_planner first")
+                })?;
+                planner.submit_move(classified).map_err(planner_err)?;
+            }
+            let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+            pos[0] += dx;
+            pos[1] += dy;
+            pos[2] += dz;
+            *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
             Ok(())
         })
     }
@@ -4033,6 +4107,26 @@ impl PyMotionBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(raw, ETHERCAT_CLOCK_FREQ_HZ);
+    }
+}
+
+impl PyMotionBridge {
+    fn e_followers(&self, de: f64) -> PyResult<Vec<(usize, f64)>> {
+        if de.abs() > 0.0 {
+            let cfg = self
+                .planner_config
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let axis_index = cfg.axis_registry.axis_index("e").map_err(|_| {
+                PyRuntimeError::new_err(
+                    "E word on a move but no [axis e] is declared — declare the \
+                     follower axis or stop sending E",
+                )
+            })?;
+            Ok(vec![(axis_index, de)])
+        } else {
+            Ok(vec![])
+        }
     }
 }
 

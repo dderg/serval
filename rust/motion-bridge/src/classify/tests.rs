@@ -1,4 +1,5 @@
 use super::*;
+use geometry::curve::g5_control_points;
 
 #[test]
 fn xy_travel_classifies_correctly() {
@@ -82,4 +83,16 @@ fn classify_quadratic_builds_a_segment() {
         .expect("quadratic classifies");
     assert!(m.distance_mm > 10.0);
     assert_eq!(m.segment.feedrate_mm_s, 30.0);
+}
+
+#[test]
+fn chain_reflection_negates_previous_pq() {
+    // Chained G5: omitted I/J => (I,J) = (-P_prev, -Q_prev). The reflection is
+    // XY-only; P1.z stays on the linear-Z assembly, NOT a 3D reflection.
+    let prev_pq = (3.0, -2.0);
+    let (i, j) = (-prev_pq.0, -prev_pq.1);
+    let cps = g5_control_points([0.0, 0.0, 0.0], i, j, 1.0, 1.0, 10.0, 0.0, 0.0);
+    assert_eq!(cps[1][0], -3.0);
+    assert_eq!(cps[1][1], 2.0);
+    assert_eq!(cps[1][2], 0.0);
 }
