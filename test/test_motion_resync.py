@@ -102,6 +102,7 @@ class _SubmitBridge(FakeBridge):
 
 class MoveMotion(FakeMotion):
     move = motion.Motion.move
+    _fire_active_callbacks = motion.Motion._fire_active_callbacks
 
     max_accel = 1000.0
     max_velocity = 100.0
@@ -114,9 +115,6 @@ class MoveMotion(FakeMotion):
 
     def _axis_limit(self, axis, kind):
         return 100.0
-
-    def _fire_active_callbacks(self, axes_d):
-        return False
 
     def get_last_move_time(self):
         return 0.0
@@ -133,5 +131,7 @@ def test_move_resyncs_before_computing_deltas():
     m.commanded_pos = [10.0, 20.0, 30.0, 4.0]
     m.move([10.0, 20.0, 140.0, 4.0], 50.0)
     assert m.bridge.queries == 1
-    dz = m.bridge.moves[0][2]
+    dx, dy, dz, de, _feedrate = m.bridge.moves[0]
+    assert (dx, dy) == (0.0, 0.0)
     assert dz == pytest.approx(140.0 - 123.5)
+    assert de == 0.0
