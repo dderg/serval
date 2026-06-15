@@ -772,3 +772,38 @@ fn flush_then_move_dispatches_without_error() {
 
     h.shutdown();
 }
+
+#[test]
+fn nudge_dispatches_masked_pieces_and_advances_last_move_time_only() {
+    let dispatched = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let d2 = Arc::clone(&dispatched);
+    let handle = PlannerHandle::spawn(
+        relaxed_config(),
+        Arc::new(move |seg: &ShapedSegment| {
+            d2.lock().unwrap().push(seg.motor_mask);
+            Ok(())
+        }),
+    );
+    let lmt0 = handle.last_move_time();
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    handle
+        .submit_nudge(NudgeParams {
+            axis: 2,
+            motor_mask: 0b0000_0010,
+            delta_mm: 0.5,
+            speed: 5.0,
+            accel: 100.0,
+            notify: tx,
+        })
+        .unwrap();
+    rx.recv().unwrap().unwrap();
+    assert!(
+        handle.last_move_time() > lmt0,
+        "nudge must advance the time book"
+    );
+    let masks = dispatched.lock().unwrap();
+    assert!(
+        !masks.is_empty() && masks.iter().all(|&m| m == 0b0000_0010),
+        "all dispatched segments must carry motor_mask 0b0000_0010, got: {masks:?}"
+    );
+}

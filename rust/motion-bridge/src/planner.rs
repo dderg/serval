@@ -45,6 +45,27 @@ pub struct HomeDripParams {
     pub notify: crossbeam_channel::Sender<Result<(), String>>,
 }
 
+pub struct NudgeParams {
+    pub axis: u8,
+    pub motor_mask: u8,
+    pub delta_mm: f64,
+    pub speed: f64,
+    pub accel: f64,
+    pub notify: crossbeam_channel::Sender<Result<(), String>>,
+}
+
+impl std::fmt::Debug for NudgeParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NudgeParams")
+            .field("axis", &self.axis)
+            .field("motor_mask", &self.motor_mask)
+            .field("delta_mm", &self.delta_mm)
+            .field("speed", &self.speed)
+            .field("accel", &self.accel)
+            .finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Debug for HomeDripParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HomeDripParams")
@@ -91,6 +112,7 @@ pub enum PlannerMsg {
         new_bias: ClockBias,
     },
     HomeDrip(HomeDripParams),
+    Nudge(NudgeParams),
 }
 
 #[derive(Debug)]
@@ -306,6 +328,12 @@ impl PlannerHandle {
             .map_err(|_| PlannerError::ChannelClosed)
     }
 
+    pub fn submit_nudge(&self, p: NudgeParams) -> Result<(), PlannerError> {
+        self.sender
+            .send(PlannerMsg::Nudge(p))
+            .map_err(|_| PlannerError::ChannelClosed)
+    }
+
     /// Must be called *before* `Router::set_clock_est_from_sample` to drain
     /// held-back output under the old bias first.
     pub fn clock_sync_rearm(&self, new_bias: ClockBias) -> Result<(), PlannerError> {
@@ -506,6 +534,7 @@ fn run_loop(
                     PlannerMsg::ClockSyncRearm { .. } => "ClockSyncRearm",
                     PlannerMsg::Shutdown => "Shutdown",
                     PlannerMsg::HomeDrip(_) => "HomeDrip",
+                    PlannerMsg::Nudge(_) => "Nudge",
                 };
                 tracing::debug!(
                     subsystem = "motion",
@@ -812,6 +841,25 @@ fn run_loop(
                     Ok(())
                 })();
 
+                let _ = p.notify.send(result);
+            }
+
+            PlannerMsg::Nudge(p) => {
+                let result = (|| -> Result<(), String> {
+                    let segs = crate::nudge::plan_nudge_profile(
+                        p.axis,
+                        p.delta_mm,
+                        p.speed,
+                        p.accel,
+                        p.motor_mask,
+                    )?;
+                    let total_dur: f64 = segs.iter().map(|s| s.t_end - s.t_start).sum();
+                    for seg in &segs {
+                        dispatch(seg).map_err(|e| format!("nudge dispatch: {e}"))?;
+                    }
+                    advance_last_move_time(&last_move_time_bits, total_dur);
+                    Ok(())
+                })();
                 let _ = p.notify.send(result);
             }
         }
