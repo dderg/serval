@@ -44,8 +44,7 @@ class ForceMove:
         mcu_id, axis_idx, motor_idx = toolhead.get_motor_binding(name)
         if accel == 0.0:
             accel = toolhead.get_max_axis_accel(axis_idx)
-        bridge = toolhead.get_bridge()
-        return bridge.submit_correction_sequence(
+        return toolhead.submit_correction(
             mcu_id, axis_idx, motor_idx, [dist], speed, accel
         )
 

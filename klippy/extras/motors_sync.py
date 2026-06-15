@@ -383,10 +383,9 @@ class StepperManualMove:
             return
         name = mcu_stepper.get_name()
         mcu_id, axis_idx, motor_idx = self.toolhead.get_motor_binding(name)
-        bridge = self.toolhead.get_bridge()
         reactor = self.printer.get_reactor()
         start = reactor.monotonic()
-        duration = bridge.submit_correction_sequence(
+        duration = self.toolhead.submit_correction(
             mcu_id, axis_idx, motor_idx, segments,
             self.travel_speed, self.travel_accel)
         deadline = start + duration + SETTLE_PAD
