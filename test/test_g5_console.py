@@ -131,6 +131,7 @@ def make_full_gcode_move():
     g._toolhead = types.SimpleNamespace(
         get_position=lambda: [0.0, 0.0, 0.0, 0.0],
         move_curve=lambda *a, **k: g.curve_calls.append((a, k)),
+        resync_parked_servos=lambda: None,
     )
     g.printer = types.SimpleNamespace(
         lookup_object=lambda name, default=None: g._toolhead

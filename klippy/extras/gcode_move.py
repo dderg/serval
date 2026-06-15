@@ -149,9 +149,13 @@ class GCodeMove:
         if self.is_printer_ready:
             self.last_position = self.position_with_transform()
 
+    def _resync_toolhead_before_move(self):
+        self.printer.lookup_object("toolhead").resync_parked_servos()
+
     # G-Code movement commands
     def cmd_G1(self, gcmd):
         # Move
+        self._resync_toolhead_before_move()
         params = gcmd.get_command_parameters()
         try:
             for pos, axis in enumerate("XYZ"):
@@ -222,6 +226,7 @@ class GCodeMove:
             )
 
     def cmd_G5(self, gcmd):
+        self._resync_toolhead_before_move()
         self._reject_curve_if_transform_active(gcmd)
         params = gcmd.get_command_parameters()
         if "P" not in params or "Q" not in params:
@@ -260,6 +265,7 @@ class GCodeMove:
         motion.bridge.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
 
     def cmd_G5_1(self, gcmd):
+        self._resync_toolhead_before_move()
         self._reject_curve_if_transform_active(gcmd)
         params = gcmd.get_command_parameters()
         if "I" not in params and "J" not in params:
