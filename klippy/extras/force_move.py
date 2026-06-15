@@ -44,9 +44,15 @@ class ForceMove:
         mcu_id, axis_idx, motor_idx = toolhead.get_motor_binding(name)
         if accel == 0.0:
             accel = toolhead.get_max_axis_accel(axis_idx)
-        return toolhead.submit_correction(
-            mcu_id, axis_idx, motor_idx, [dist], speed, accel
-        )
+        stepper_enable = self.printer.lookup_object("stepper_enable", None)
+        if stepper_enable is not None:
+            enable_line = stepper_enable.lookup_enable(name)
+            if not enable_line.is_motor_enabled():
+                raise self.printer.command_error(
+                    "manual_move: motor '%s' is disabled; enable it first"
+                    % (name,)
+                )
+        return toolhead.submit_nudge(mcu_id, axis_idx, motor_idx, dist, speed, accel)
 
     cmd_STEPPER_BUZZ_help = "Oscillate a given stepper to help id it"
 
