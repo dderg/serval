@@ -731,14 +731,48 @@ fn consecutive_nudges_get_monotonic_non_overlapping_anchors() {
     let stream_end1 = base1 + 0.05;
     let base2 = nudge_anchor_base(stream_end1, 100.0, lead);
     assert!(
-        base2 >= stream_end1,
-        "nudge 2 base {base2} must be >= nudge 1 end {stream_end1}"
+        (base2 - stream_end1).abs() < 1e-9,
+        "back-to-back nudge must be contiguous, not gapped: base2={base2} stream_end1={stream_end1}"
     );
     let base3 = nudge_anchor_base(stream_end1, 200.0, lead);
     assert!(
         (base3 - (200.0 + lead)).abs() < 1e-9,
         "after a real time gap, base anchors at host_now+lead, got {base3}"
     );
+}
+
+#[test]
+fn buzz_produces_contiguous_strictly_increasing_anchors() {
+    let lead = 0.25;
+    let host_now = 100.0;
+    let nudge_dur = 0.001;
+
+    let mut stream_end = 0.0_f64;
+    let mut bases = Vec::new();
+    for _ in 0..5 {
+        let base = nudge_anchor_base(stream_end, host_now, lead);
+        bases.push(base);
+        stream_end = base + nudge_dur;
+    }
+
+    for i in 1..bases.len() {
+        let gap = bases[i] - (bases[i - 1] + nudge_dur);
+        assert!(
+            gap.abs() < 1e-9,
+            "buzz nudge {i}: inter-nudge gap {gap} must be zero (contiguous), \
+             base[{i}]={} stream_end[{}]={}",
+            bases[i],
+            i - 1,
+            bases[i - 1] + nudge_dur
+        );
+        assert!(
+            bases[i] > bases[i - 1],
+            "buzz nudge {i}: base[{i}]={} must be strictly greater than base[{}]={}",
+            bases[i],
+            i - 1,
+            bases[i - 1]
+        );
+    }
 }
 
 #[test]
@@ -759,13 +793,13 @@ fn nudge_stream_state_accumulates_within_and_across_nudges() {
     // After first nudge: stream_end = t0_a + 0.15.
     let expected_stream_end = t0_a + 0.15;
 
-    // Second nudge arrives immediately (host_now still 100.0): must start no
-    // earlier than the first nudge's end.
+    // Second nudge arrives immediately (host_now still 100.0): must start
+    // exactly at the first nudge's end — contiguous, no gap.
     let (t0_n2, fresh_n2) = st.anchor(0.0, 0.08, 100.0, lead);
     assert!(fresh_n2, "first segment of second nudge must be fresh");
     assert!(
-        t0_n2 >= expected_stream_end,
-        "nudge 2 t0 {t0_n2} must be >= nudge 1 end {expected_stream_end}"
+        (t0_n2 - expected_stream_end).abs() < 1e-9,
+        "back-to-back nudge must be contiguous: t0_n2={t0_n2} expected_stream_end={expected_stream_end}"
     );
 
     // Third nudge after a large time gap: anchors at host_now+lead, not in past.

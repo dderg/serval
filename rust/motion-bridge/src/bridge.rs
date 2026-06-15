@@ -840,11 +840,15 @@ mod ring_depth_for_axis_tests {
     }
 }
 
-/// Absolute host-seconds anchor base for the next nudge: never before the prior
-/// nudge's committed end, and never before `host_now`. Returns the `t0` to pass
-/// to `enqueue_segment` (first piece of this nudge starts at `t0 + 0 = t0`).
+/// Absolute host-seconds anchor base for the next nudge.
+///
+/// First nudge after idle: `host_now + lead_secs` (prev_stream_end is 0 or
+/// stale, so the max selects host_now+lead).
+/// Back-to-back nudge (buzz): `prev_stream_end` — exactly where the previous
+/// nudge ended, no inter-nudge gap, no overlap.
+/// After a real time gap (host_now advanced past stream_end): `host_now + lead_secs`.
 pub(crate) fn nudge_anchor_base(prev_stream_end: f64, host_now: f64, lead_secs: f64) -> f64 {
-    host_now.max(prev_stream_end) + lead_secs
+    (host_now + lead_secs).max(prev_stream_end)
 }
 
 /// Per-nudge-stream timing state. Replaces the per-nudge `Anchor` so that
