@@ -73,14 +73,29 @@ The mask is a small set of localized selections, already in the merged tree:
   the mask; baseline is the motor's `overlay_step_frame` (mask ≠ 0) vs the axis
   `last_step_count` (mask 0); `commit_position_count_masked` scopes the count.
 
-**Relative-curve anchoring (drift-free).** The host emits a relative curve
-`C(t): 0 → Δ` and tracks nothing. The MCU owns the only running state — the
-per-motor `overlay_step_frame` accumulator carrying the running offset **including
-the sub-step fractional part**. On each overlay sample: `absolute = accum + C(t)`,
-steps = `round(absolute) − round(prev_sample)`. Because the fractional part is
-carried, back-to-back overlay moves and long asymmetric chains do not accumulate
-rounding drift, and a host/MCU restart cannot desync (the host never held a copy).
-A symmetric buzz (`+Δ, −Δ`) nets to zero regardless.
+**Relative-curve anchoring (reset-per-piece).** The host emits a relative curve
+`C(t): 0 → Δ` and tracks nothing. The MCU resets the masked motor's
+`overlay_step_frame` to `0` when an overlay piece **arms**, so the curve is
+evaluated in its own zero-based frame: `target = round(C(t)/mstep)`, steps =
+`round(C(t)) − prev`, with `prev` starting at `round(0) = 0`. Because the frame is
+zeroed at arm and `C(t_start) = 0`, there is no step jump at a piece seam, and each
+piece independently emits exactly `round(Δ)` steps. This is exact for every live
+use case — a symmetric buzz (`+Δ, −Δ`) nets to zero, a single MOTOR_ADJUST/z_tilt
+`Δ` is exact, and back-to-back nudges chain cleanly. It also **fixes the original
+"first couple moved then nothing" symptom**: each nudge emits `round(Δ)` regardless
+of accumulated history, so there is no absolute-frame desync to get stuck on (that
+symptom was *caused* by the prior absolute-frame interpretation).
+
+`engine.rs` must supply an overlay-aware `p_sample_start` (the curve's window-start
+value, chained per tick and reset on arm) instead of the axis `p_prev` — which is
+frozen for overlay pieces by the position-book gate — so the sub-sample step
+*timing* is computed over the correct interval. The frame stays `i32`;
+`dispatch_stepper.rs`'s count math is otherwise unchanged.
+
+**Limitation (documented, not a use case):** because each piece rounds
+independently, a long *asymmetric* chain of same-direction nudges accumulates
+sub-step rounding drift (< 1 microstep per piece). A drift-free continuous
+accumulator is deferred until a caller needs such a chain (YAGNI).
 
 **Rejection contract.** A piece with `mask != 0` is only honorable by an MCU that
 can address an individual motor. Any MCU that cannot (EtherCAT/servo) **rejects at
@@ -186,10 +201,10 @@ FORCE_MOVE gcode → force_move.manual_move
 
 ## Testing
 
-- **Runtime unit:** a single-bit-mask piece anchors on `overlay_step_frame`,
-  advances only that motor's `position_count`, leaves `p_prev` untouched; relative
-  back-to-back overlay pieces accumulate drift-free (fractional carry); a symmetric
-  `+Δ, −Δ` pair nets to zero; `mask == 0` behavior unchanged; multi-bit → `-143`.
+- **Runtime unit:** a single-bit-mask piece resets `overlay_step_frame` to 0 at
+  arm, emits `round(Δ)` steps, advances only that motor's `position_count`, leaves
+  `p_prev` untouched; a symmetric `+Δ, −Δ` back-to-back pair nets `position_count`
+  to zero with no seam jump; `mask == 0` behavior unchanged; multi-bit → `-143`.
 - **Planner unit:** `plan_nudge_profile` — `accel == 0` yields one constant-velocity
   piece; `accel > 0` yields a trapezoid whose total displacement = Δ and whose
   cruise = `speed`; short Δ degenerates to a triangle (no cruise); `speed`/`accel`
