@@ -232,3 +232,66 @@ fn jerk_limited_z_move_converges_under_worst_case_derate() {
         output.stats.beta_iterations
     );
 }
+
+#[test]
+fn feed_cruise_reads_full_velocity_utilization() {
+    let base = temporal::Limits::axis_boxes([1000.0; 3], [1.0e9; 3], [1.0e12; 3]);
+    let curve = nurbs::VectorNurbs::try_new(
+        1,
+        vec![0.0, 0.0, 1.0, 1.0],
+        vec![[0.0, 0.0, 0.0], [200.0, 0.0, 0.0]],
+    )
+    .unwrap();
+    let feed = 494.0;
+    let limits = crate::streaming::state::per_segment_limits(&curve, &base, feed);
+
+    let segments = [ShapeSegmentInput {
+        temporal: temporal::multi::SegmentInput {
+            curve: &curve,
+            limits,
+            followers: &[],
+            virtual_path: None,
+        },
+        followers: &[],
+        feedrate_mm_s: feed,
+    }];
+    let chains = AxisChainSet::passthrough_spatial();
+    let input = ShapeBatchInput {
+        follower_history: None,
+        segments: &segments,
+        grid_strategy: temporal::multi::GridStrategy::Adaptive {
+            min_n: 20,
+            max_n: 400,
+            target_grid_spacing_mm: 0.5,
+        },
+        worker_threads: 1,
+        chains: &chains,
+        follower_start: &[],
+        fit_tolerance_mm: 0.005,
+        beta_max_iters: 10,
+        beta_convergence_ratio: 1.02,
+        initial_v: feed,
+        initial_a: 0.0,
+        terminal_v: feed,
+        start_d2_override: None,
+    };
+
+    let output = plan_velocity_inner(&input, SafetyMode::WorstCaseFuture).expect("plan");
+    assert_eq!(
+        output.binding.peak_util_family,
+        Some(crate::utilization::UtilFamily::Velocity),
+        "a feed cruise must be velocity-bound, not jerk/accel"
+    );
+    assert!(
+        (output.binding.peak_utilization - 1.0).abs() < 0.05,
+        "cruising at feed must read ~1.0 (feed credited), not feed/box; got {}",
+        output.binding.peak_utilization,
+    );
+    assert_eq!(
+        output.binding.worst.map(|w| w.kind),
+        Some(temporal::LimitKind::Feedrate),
+        "a feed-bound move (accel/jerk slack) must name the dynamic feedrate set as \
+         its limiter; got {:?}",
+        output.binding.worst,
+    );
+}

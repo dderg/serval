@@ -12,6 +12,7 @@ mod reparam;
 mod shaper;
 mod smooth_fit;
 pub mod streaming;
+pub mod utilization;
 
 pub use beta::{ReplanBindingSummary, ReplanWorstBinding};
 pub use emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory, ShapeEmission};

@@ -10,7 +10,11 @@ pub struct BindingLabel {
     pub via_pa: bool,
 }
 
-pub fn label_binding(c: BindingConstraint, names: &[String]) -> Option<BindingLabel> {
+pub fn label_binding(
+    c: BindingConstraint,
+    kind: temporal::LimitKind,
+    names: &[String],
+) -> Option<BindingLabel> {
     let (set, derivative, via_pa) = match c {
         BindingConstraint::Velocity { set } => (set, "velocity", false),
         BindingConstraint::AccelNorm { set } => (set, "accel", false),
@@ -24,10 +28,14 @@ pub fn label_binding(c: BindingConstraint, names: &[String]) -> Option<BindingLa
             return None;
         }
     };
-    let limit = names
-        .get(set)
-        .cloned()
-        .unwrap_or_else(|| "runtime_caps".to_string());
+    let limit = match kind {
+        temporal::LimitKind::Feedrate => "feedrate".to_string(),
+        temporal::LimitKind::RuntimeCap => "runtime_caps".to_string(),
+        temporal::LimitKind::Config => names
+            .get(set)
+            .cloned()
+            .unwrap_or_else(|| "runtime_caps".to_string()),
+    };
     Some(BindingLabel {
         limit,
         derivative,
@@ -35,14 +43,8 @@ pub fn label_binding(c: BindingConstraint, names: &[String]) -> Option<BindingLa
     })
 }
 
-/// Fields carried by the per-move `replan_anytime` structured event. The gap is
-/// the deterministic closeness-to-limit measure derived from the verified worst
-/// binding ratio: `gap = (1 - ratio).max(0)` — `0` means the trajectory sits on
-/// the kinematic limit, `0.06` means it runs ~6% below. `ratio` and `constraint`
-/// both come from `check_chain`'s `BindingSummary`, so neither is fabricated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnytimeEventFields {
-    pub gap: f64,
     pub limiter_limit: String,
     pub limiter_derivative: &'static str,
     pub limiter_via_pa: bool,
@@ -56,20 +58,15 @@ pub fn anytime_event_fields(
 ) -> AnytimeEventFields {
     match binding
         .worst
-        .and_then(|w| label_binding(w.constraint, names).map(|l| (l, w.ratio)))
+        .and_then(|w| label_binding(w.constraint, w.kind, names).map(|l| (l, w.ratio)))
     {
         Some((l, ratio)) => AnytimeEventFields {
-            gap: (1.0 - ratio).max(0.0),
             limiter_limit: l.limit,
             limiter_derivative: l.derivative,
             limiter_via_pa: l.via_pa,
             binding_ratio: ratio,
         },
-        // No binding reported ⇒ no measurable shortfall. A gap of 0 honestly
-        // says "no conservativeness measured", never inventing 100% from a
-        // missing ratio.
         None => AnytimeEventFields {
-            gap: 0.0,
             limiter_limit: String::from("none"),
             limiter_derivative: "none",
             limiter_via_pa: false,
@@ -83,7 +80,7 @@ pub const ROLLUP_INTERVAL: Duration = Duration::from_secs(1);
 pub struct BindingAccumulator {
     window: HashMap<BindingConstraint, u64>,
     window_samples: u64,
-    worst: Option<(BindingConstraint, f64, f64)>,
+    worst: Option<(BindingConstraint, temporal::LimitKind, f64, f64)>,
     last_rollup: Instant,
 }
 
@@ -103,8 +100,8 @@ impl BindingAccumulator {
             self.window_samples += u64::from(*n);
         }
         if let Some(w) = &summary.worst {
-            if self.worst.is_none_or(|(_, r, _)| w.ratio > r) {
-                self.worst = Some((w.constraint, w.ratio, t));
+            if self.worst.is_none_or(|(_, _, r, _)| w.ratio > r) {
+                self.worst = Some((w.constraint, w.kind, w.ratio, t));
             }
         }
     }
@@ -131,8 +128,8 @@ impl BindingAccumulator {
     }
 
     fn emit(&self, names: &[String]) {
-        if let Some((c, ratio, t)) = self.worst {
-            if let Some(l) = label_binding(c, names) {
+        if let Some((c, kind, ratio, t)) = self.worst {
+            if let Some(l) = label_binding(c, kind, names) {
                 tracing::info!(
                     subsystem = "motion",
                     event = "binding_rollup",
@@ -147,7 +144,7 @@ impl BindingAccumulator {
             }
         }
         for (c, count) in &self.window {
-            if let Some(l) = label_binding(*c, names) {
+            if let Some(l) = label_binding(*c, temporal::LimitKind::Config, names) {
                 tracing::info!(
                     subsystem = "motion",
                     event = "binding_hist",
@@ -167,7 +164,7 @@ impl BindingAccumulator {
     }
 
     #[cfg(test)]
-    pub fn worst(&self) -> Option<(BindingConstraint, f64, f64)> {
+    pub fn worst(&self) -> Option<(BindingConstraint, temporal::LimitKind, f64, f64)> {
         self.worst
     }
 }

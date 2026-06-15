@@ -14,9 +14,10 @@ fn all_labeled_variants_map_to_correct_derivative_and_pa_flag() {
         (BindingConstraint::PaJerk { set: 0 }, "jerk", true),
     ];
     for &(constraint, expected_derivative, expected_via_pa) in cases {
-        let label = label_binding(constraint, &names).unwrap_or_else(|| {
-            panic!("{constraint:?} must produce a label");
-        });
+        let label =
+            label_binding(constraint, temporal::LimitKind::Config, &names).unwrap_or_else(|| {
+                panic!("{constraint:?} must produce a label");
+            });
         assert_eq!(
             label.derivative, expected_derivative,
             "{constraint:?}: wrong derivative"
@@ -31,18 +32,63 @@ fn all_labeled_variants_map_to_correct_derivative_and_pa_flag() {
 #[test]
 fn labeled_set_index_resolves_to_name_or_runtime_caps_fallback() {
     let names = vec!["gantry".to_string()];
-    let resolved = label_binding(BindingConstraint::Velocity { set: 0 }, &names).unwrap();
+    let resolved = label_binding(
+        BindingConstraint::Velocity { set: 0 },
+        temporal::LimitKind::Config,
+        &names,
+    )
+    .unwrap();
     assert_eq!(resolved.limit, "gantry");
 
-    let fallback = label_binding(BindingConstraint::AccelNorm { set: 1 }, &names).unwrap();
+    let fallback = label_binding(
+        BindingConstraint::AccelNorm { set: 1 },
+        temporal::LimitKind::Config,
+        &names,
+    )
+    .unwrap();
     assert_eq!(fallback.limit, "runtime_caps");
+}
+
+#[test]
+fn dynamic_limit_kinds_get_reserved_names() {
+    let names = vec!["gantry".to_string()];
+    let feed = label_binding(
+        BindingConstraint::Velocity { set: 5 },
+        temporal::LimitKind::Feedrate,
+        &names,
+    )
+    .unwrap();
+    assert_eq!(feed.limit, "feedrate");
+
+    let runtime = label_binding(
+        BindingConstraint::AccelNorm { set: 5 },
+        temporal::LimitKind::RuntimeCap,
+        &names,
+    )
+    .unwrap();
+    assert_eq!(runtime.limit, "runtime_caps");
+
+    let config = label_binding(
+        BindingConstraint::Velocity { set: 0 },
+        temporal::LimitKind::Config,
+        &names,
+    )
+    .unwrap();
+    assert_eq!(config.limit, "gantry");
 }
 
 #[test]
 fn none_and_boundary_produce_no_label() {
     let names = vec!["gantry".to_string()];
-    assert!(label_binding(BindingConstraint::None, &names).is_none());
-    assert!(label_binding(BindingConstraint::Boundary, &names).is_none());
+    assert!(label_binding(BindingConstraint::None, temporal::LimitKind::Config, &names).is_none());
+    assert!(
+        label_binding(
+            BindingConstraint::Boundary,
+            temporal::LimitKind::Config,
+            &names
+        )
+        .is_none()
+    );
 }
 
 fn summary(set: usize, count: u32, ratio: f64) -> ReplanBindingSummary {
@@ -51,6 +97,7 @@ fn summary(set: usize, count: u32, ratio: f64) -> ReplanBindingSummary {
         worst: Some(ReplanWorstBinding {
             constraint: BindingConstraint::Velocity { set },
             ratio,
+            kind: temporal::LimitKind::Config,
         }),
         ..Default::default()
     }
@@ -63,7 +110,7 @@ fn record_tallies_window_and_keeps_max_ratio_worst() {
     acc.record(&summary(0, 3, 0.8), 1.0);
     acc.record(&summary(0, 2, 0.95), 2.0);
     assert_eq!(acc.window_count(BindingConstraint::Velocity { set: 0 }), 5);
-    let (constraint, ratio, t) = acc.worst().unwrap();
+    let (constraint, _kind, ratio, t) = acc.worst().unwrap();
     assert_eq!(constraint, BindingConstraint::Velocity { set: 0 });
     assert!((ratio - 0.95).abs() < 1e-12);
     assert!((t - 2.0).abs() < 1e-12);
@@ -94,10 +141,6 @@ fn flush_emits_and_clears_a_partial_window() {
     assert_eq!(acc.window_count(BindingConstraint::Velocity { set: 0 }), 0);
 }
 
-/// G5 — the gap + limiter the `replan_anytime` event carries must match the
-/// actual binding constraint and its verified ratio. With a known XY-velocity
-/// binding at ratio 0.94 (a conservative floor), the event reports the matching
-/// limiter and `gap = 1 - 0.94 = 0.06`.
 #[test]
 fn g5_anytime_event_matches_binding_and_gap() {
     let names = vec!["gantry".to_string(), "extruder".to_string()];
@@ -106,6 +149,7 @@ fn g5_anytime_event_matches_binding_and_gap() {
         worst: Some(ReplanWorstBinding {
             constraint: BindingConstraint::Velocity { set: 0 },
             ratio: 0.94,
+            kind: temporal::LimitKind::Config,
         }),
         ..Default::default()
     };
@@ -116,16 +160,8 @@ fn g5_anytime_event_matches_binding_and_gap() {
     assert_eq!(fields.limiter_derivative, "velocity");
     assert!(!fields.limiter_via_pa);
     assert!((fields.binding_ratio - 0.94).abs() < 1e-12);
-    assert!(
-        (fields.gap - 0.06).abs() < 1e-9,
-        "gap must equal (1 - ratio).max(0); got {}",
-        fields.gap,
-    );
 }
 
-/// G5 — a PA-jerk binding on set 1 (no name → runtime_caps fallback) at ratio
-/// 0.88 produces the matching limiter and gap 0.12. Confirms the event tracks
-/// the actual worst family, not a fixed one.
 #[test]
 fn g5_anytime_event_tracks_pa_jerk_family() {
     let names = vec!["gantry".to_string()];
@@ -134,6 +170,7 @@ fn g5_anytime_event_tracks_pa_jerk_family() {
         worst: Some(ReplanWorstBinding {
             constraint: BindingConstraint::PaJerk { set: 1 },
             ratio: 0.88,
+            kind: temporal::LimitKind::Config,
         }),
         ..Default::default()
     };
@@ -143,11 +180,9 @@ fn g5_anytime_event_tracks_pa_jerk_family() {
     assert_eq!(fields.limiter_limit, "runtime_caps");
     assert_eq!(fields.limiter_derivative, "jerk");
     assert!(fields.limiter_via_pa);
-    assert!((fields.gap - 0.12).abs() < 1e-9);
+    assert!((fields.binding_ratio - 0.88).abs() < 1e-12);
 }
 
-/// G5 — an on-the-limit binding (ratio = 1.0, the converged optimum) reports
-/// gap 0; no binding at all reports the `none` limiter and gap 0.
 #[test]
 fn g5_anytime_event_on_limit_and_no_binding() {
     let names = vec!["gantry".to_string()];
@@ -157,18 +192,23 @@ fn g5_anytime_event_on_limit_and_no_binding() {
         worst: Some(ReplanWorstBinding {
             constraint: BindingConstraint::AccelNorm { set: 0 },
             ratio: 1.0,
+            kind: temporal::LimitKind::Config,
         }),
         ..Default::default()
     };
     let f = anytime_event_fields(&on_limit, &names);
-    assert!(f.gap.abs() < 1e-12, "on-limit gap must be 0; got {}", f.gap);
+    assert!(
+        (f.binding_ratio - 1.0).abs() < 1e-12,
+        "on-limit binding_ratio must be 1.0; got {}",
+        f.binding_ratio,
+    );
     assert_eq!(f.limiter_derivative, "accel");
 
     let none = ReplanBindingSummary::default();
     let f = anytime_event_fields(&none, &names);
     assert_eq!(f.limiter_limit, "none");
     assert_eq!(f.limiter_derivative, "none");
-    assert!(f.gap.abs() < 1e-12);
+    assert!(f.binding_ratio.abs() < 1e-12);
 }
 
 #[test]

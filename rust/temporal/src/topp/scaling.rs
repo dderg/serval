@@ -33,17 +33,12 @@ impl SolverScale {
 
     pub(crate) fn scale_limits(&self, limits: &Limits) -> Limits {
         let s = self.sigma();
-        let sets: Vec<crate::LimitSet> = limits
-            .sets()
-            .iter()
-            .map(|l| crate::LimitSet {
-                axes: l.axes,
-                v_max: l.v_max / s,
-                a_max: l.a_max / s,
-                j_max: l.j_max / s,
-            })
-            .collect();
-        Limits::try_new(&sets, limits.n_axes()).expect("scaling preserves validity")
+        limits.with_sets_mapped(|l| crate::LimitSet {
+            axes: l.axes,
+            v_max: l.v_max / s,
+            a_max: l.a_max / s,
+            j_max: l.j_max / s,
+        })
     }
 
     pub(crate) fn scale_grid(&self, grid: &ArclengthGrid) -> ArclengthGrid {

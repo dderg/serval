@@ -663,12 +663,32 @@ fn run_loop(
                     // Fixed-decimal so the JSON layer stores e.g. "0.5970" instead of
                     // serde's "2.03e-7" — comparable at a glance in the log UI and still
                     // numerically filterable (VL parses numeric-looking strings).
-                    let gap_str = format!("{:.4}", fields.gap);
                     let binding_ratio_str = format!("{:.4}", fields.binding_ratio);
+                    let peak_util_str = format!("{:.4}", binding.peak_utilization);
+                    let peak_util_family = match binding.peak_util_family {
+                        Some(trajectory::utilization::UtilFamily::Velocity) => "velocity",
+                        Some(trajectory::utilization::UtilFamily::Accel) => "accel",
+                        Some(trajectory::utilization::UtilFamily::Jerk) => "jerk",
+                        None => "none",
+                    };
+                    let p = binding.peaks.unwrap_or_default();
+                    let vel_util_str = format!("{:.4}", p.vel_ratio);
+                    let accel_util_str = format!("{:.4}", p.accel_ratio);
+                    let jerk_util_str = format!("{:.4}", p.jerk_ratio);
+                    let vel_mag_str = format!("{:.2}", p.vel_mag);
+                    let accel_mag_str = format!("{:.2}", p.accel_mag);
+                    let jerk_mag_str = format!("{:.2}", p.jerk_mag);
                     tracing::info!(
                         subsystem = "motion",
                         event = "replan_anytime",
-                        gap = %gap_str,
+                        peak_utilization = %peak_util_str,
+                        peak_util_family,
+                        vel_util = %vel_util_str,
+                        accel_util = %accel_util_str,
+                        jerk_util = %jerk_util_str,
+                        vel_mm_s = %vel_mag_str,
+                        accel_mm_s2 = %accel_mag_str,
+                        jerk_mm_s3 = %jerk_mag_str,
                         limiter_limit = %fields.limiter_limit,
                         limiter_derivative = fields.limiter_derivative,
                         limiter_via_pa = fields.limiter_via_pa,

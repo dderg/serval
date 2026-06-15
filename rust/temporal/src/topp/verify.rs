@@ -361,11 +361,24 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
             global_worst_tag,
             BindingConstraint::None | BindingConstraint::Boundary
         ) {
+        let set = match global_worst_tag {
+            BindingConstraint::Velocity { set }
+            | BindingConstraint::AccelNorm { set }
+            | BindingConstraint::JerkNorm { set }
+            | BindingConstraint::PaVelocity { set }
+            | BindingConstraint::PaAccel { set }
+            | BindingConstraint::PaJerk { set } => Some(set),
+            BindingConstraint::None | BindingConstraint::Boundary => None,
+        };
+        let kind = set.map_or(crate::LimitKind::Config, |s| {
+            chain.limits_at(global_worst_idx).kind(s)
+        });
         Some(WorstBinding {
             constraint: global_worst_tag,
             ratio: global_worst_ratio,
             grid_index: global_worst_idx,
             s: chain.s[global_worst_idx],
+            kind,
         })
     } else {
         None

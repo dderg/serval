@@ -493,9 +493,10 @@ impl PlannerConfig {
             }
         }
 
+        let limits = temporal::Limits::try_new(&sets, n_axes.max(temporal::N_SPATIAL))?;
         if self.runtime_caps.velocity.is_some() || self.runtime_caps.accel.is_some() {
             let a = self.runtime_caps.accel.unwrap_or(f64::INFINITY);
-            sets.push(temporal::LimitSet {
+            let runtime_set = temporal::LimitSet {
                 axes: temporal::AxisSet::spatial(),
                 v_max: self.runtime_caps.velocity.unwrap_or(f64::INFINITY),
                 a_max: a,
@@ -504,12 +505,11 @@ impl PlannerConfig {
                 } else {
                     f64::INFINITY
                 },
-            });
+            };
+            Ok(limits.with_extra_sets_of_kind(&[runtime_set], temporal::LimitKind::RuntimeCap))
+        } else {
+            Ok(limits)
         }
-        Ok(temporal::Limits::try_new(
-            &sets,
-            n_axes.max(temporal::N_SPATIAL),
-        )?)
     }
 }
 

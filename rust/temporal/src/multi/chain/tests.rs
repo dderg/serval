@@ -79,6 +79,7 @@ fn binding_summary_assigned_to_first_slice_only() {
             ratio: 1.0,
             grid_index: 2,
             s: 2.0,
+            kind: crate::LimitKind::Config,
         }),
     };
     let chain_profile = TopProfile {
