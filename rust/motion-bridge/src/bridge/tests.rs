@@ -315,6 +315,11 @@ fn counting_dispatch() -> (
     (cb, counter)
 }
 
+fn noop_nudge_dispatch()
+-> Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_mcu_id: u32, _axis: u8, _seg: &ShapedSegment| Ok(()))
+}
+
 /// Loosened fit tolerance for fast planning in tests (mirrors
 /// `planner::tests::relaxed_config`).
 fn relaxed_planner_config() -> PlannerConfig {
@@ -332,8 +337,11 @@ fn relaxed_planner_config() -> PlannerConfig {
 fn shutdown_takes_and_joins_planner() {
     let bridge = PyMotionBridge::new();
     let (dispatch, _counter) = counting_dispatch();
-    *bridge.planner.lock().unwrap_or_else(|p| p.into_inner()) =
-        Some(PlannerHandle::spawn(PlannerConfig::default(), dispatch));
+    *bridge.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(PlannerHandle::spawn(
+        PlannerConfig::default(),
+        dispatch,
+        noop_nudge_dispatch(),
+    ));
 
     assert!(
         bridge
@@ -413,7 +421,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
             Ok(())
         });
 
-    let planner = PlannerHandle::spawn(relaxed_planner_config(), dispatch);
+    let planner = PlannerHandle::spawn(relaxed_planner_config(), dispatch, noop_nudge_dispatch());
     // Prime one move so the planner has a pending tail before the submitter and
     // pump are even wired — the recv_timeout branch is armed from the start.
     planner
@@ -620,8 +628,11 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
 
     // Also seed a planner so the planner-join step of shutdown() is exercised.
     let (dispatch, _counter) = counting_dispatch();
-    *bridge.planner.lock().unwrap_or_else(|p| p.into_inner()) =
-        Some(PlannerHandle::spawn(relaxed_planner_config(), dispatch));
+    *bridge.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(PlannerHandle::spawn(
+        relaxed_planner_config(),
+        dispatch,
+        noop_nudge_dispatch(),
+    ));
 
     bridge.shutdown();
 

@@ -2142,7 +2142,6 @@ impl PyMotionBridge {
         speed: f64,
         accel: f64,
     ) -> PyResult<f64> {
-        let _ = mcu_id;
         if runtime::piece_ring::stepper_sel_from_mask(motor_mask).is_err() {
             return Err(PyRuntimeError::new_err(format!(
                 "submit_nudge: multi-bit motor_mask {motor_mask:#010b} not supported"
@@ -2156,6 +2155,7 @@ impl PyMotionBridge {
             })?;
             planner
                 .submit_nudge(crate::planner::NudgeParams {
+                    mcu_id,
                     axis: axis_idx,
                     motor_mask,
                     delta_mm,
@@ -3035,6 +3035,15 @@ impl PyMotionBridge {
         let motion_history_for_cb = Arc::clone(&self.motion_history);
         let nominal_freqs_for_cb = Arc::clone(&self.nominal_clock_freqs);
 
+        let nudge_mcu_configs = mcu_configs_for_cb.clone();
+        let nudge_router = Arc::clone(&router_for_cb);
+        let nudge_pump_tx = pump_tx_for_cb.clone();
+        let nudge_drain = drain_disp.clone();
+        let nudge_counter = Arc::clone(&counter_for_cb);
+        let nudge_active_drip_cohort = Arc::clone(&active_drip_cohort_for_cb);
+        let nudge_motion_history = Arc::clone(&motion_history_for_cb);
+        let nudge_nominal_freqs = Arc::clone(&nominal_freqs_for_cb);
+
         let dispatch: Arc<
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
         > = Arc::new(
@@ -3128,6 +3137,99 @@ impl PyMotionBridge {
             },
         );
 
+        let nudge_anchor = std::sync::Mutex::new(crate::anchor::Anchor::new());
+        let nudge_dispatch: Arc<
+            dyn Fn(u32, u8, &trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
+        > = Arc::new(
+            move |mcu_id: u32,
+                  axis: u8,
+                  seg: &trajectory::ShapedSegment|
+                  -> Result<(), DispatchError> {
+                let tgt = crate::enqueue::nudge_target_config(&nudge_mcu_configs, mcu_id, axis)
+                    .ok_or(DispatchError::NudgeTargetMissing { mcu_id, axis })?;
+
+                let host_now = {
+                    let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
+                    r.host_now_secs()
+                };
+
+                let (t0, fresh) = nudge_anchor
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .anchor_segment(seg.t_start, seg.t_end, host_now)
+                    .map_err(|late| DispatchError::SegmentLate {
+                        gap_s: late.gap_s,
+                        seg_t_start: late.seg_t_start,
+                    })?;
+
+                if fresh {
+                    let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
+                    let h = crate::types::mcu_handle_from_raw(tgt.mcu_id);
+                    r.log_seg0_deficit(h, t0 + seg.t_start, t0);
+                }
+
+                let project = |proj_mcu_id: u32, host_secs: f64| -> u64 {
+                    let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
+                    r.host_time_to_mcu_clock(
+                        crate::types::mcu_handle_from_raw(proj_mcu_id),
+                        host_secs,
+                    )
+                    .unwrap_or(0)
+                };
+
+                let active_cohort: Option<u64> = *nudge_active_drip_cohort
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+
+                let max_piece_secs = if active_cohort.is_some() {
+                    Some(0.025_f64)
+                } else {
+                    None::<f64>
+                };
+                let lead_secs = if active_cohort.is_some() {
+                    crate::pump::DRIP_WINDOW_SECS
+                } else {
+                    crate::pump::MAX_LEAD_SECS
+                };
+
+                let msgs = crate::enqueue::enqueue_segment(
+                    seg,
+                    std::slice::from_ref(&tgt),
+                    t0,
+                    fresh,
+                    host_now,
+                    lead_secs,
+                    project,
+                    max_piece_secs,
+                );
+
+                let nominal_freqs = nudge_nominal_freqs
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone();
+                for m in msgs {
+                    let nominal_freq = *nominal_freqs
+                        .get(&m.key.mcu_id)
+                        .ok_or(DispatchError::MissingNominalFreq(m.key.mcu_id))?;
+                    {
+                        let mut store = nudge_motion_history
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
+                        for (piece, _host_t) in &m.pieces {
+                            store.record(m.key, piece, nominal_freq);
+                        }
+                    }
+                    nudge_drain.add_sent(m.key.mcu_id, m.key.axis, m.pieces.len() as u32);
+                    nudge_pump_tx
+                        .send(crate::pump::PumpMsg::Enqueue(m))
+                        .map_err(|_| DispatchError::PumpGone)?;
+                }
+
+                nudge_counter.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        );
+
         {
             let mut guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
             if guard.is_some() {
@@ -3135,7 +3237,7 @@ impl PyMotionBridge {
                     "planner already initialized (raced)",
                 ));
             }
-            *guard = Some(PlannerHandle::spawn(cfg, dispatch));
+            *guard = Some(PlannerHandle::spawn(cfg, dispatch, nudge_dispatch));
         }
         Ok(())
     }

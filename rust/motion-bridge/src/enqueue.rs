@@ -38,6 +38,22 @@ pub(crate) fn lane_curve(
     acc.expect("kinematics lane with all-zero weights is a module construction bug")
 }
 
+/// Restrict a full mcu_configs set to a single (mcu, axis) target for an overlay
+/// nudge: returns the one config for `mcu_id` with its axis list narrowed to
+/// `[axis]`, or None if that MCU isn't present. All other per-axis config data
+/// is preserved (enqueue indexes it by global axis index).
+pub fn nudge_target_config(
+    mcu_configs: &[McuAxisConfig],
+    mcu_id: u32,
+    axis: u8,
+) -> Option<McuAxisConfig> {
+    mcu_configs.iter().find(|c| c.mcu_id == mcu_id).map(|c| {
+        let mut cfg = c.clone();
+        cfg.axes = vec![usize::from(axis)];
+        cfg
+    })
+}
+
 pub fn enqueue_segment<P>(
     seg: &ShapedSegment,
     mcu_configs: &[McuAxisConfig],

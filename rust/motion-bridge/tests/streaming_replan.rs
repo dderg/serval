@@ -54,6 +54,11 @@ fn recording_dispatch() -> (
     (cb, recorded)
 }
 
+fn noop_nudge_dispatch()
+-> Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_mcu_id: u32, _axis: u8, _seg: &ShapedSegment| Ok(()))
+}
+
 fn smooth_zv_186hz_config() -> PlannerConfig {
     let mut c = PlannerConfig::default();
     let (registry, post_processors) = smooth_zv_post_processors(55.4, 39.2);
@@ -235,7 +240,7 @@ fn two_jogs_queued_while_first_in_flight_remain_continuous() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = high_speed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, &[], 350.0).unwrap())
         .expect("submit jog 1");
@@ -269,7 +274,7 @@ fn two_jogs_second_queued_before_first_commit_remain_continuous() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = high_speed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, &[], 350.0).unwrap())
         .expect("submit jog 1");
@@ -291,7 +296,7 @@ fn two_jogs_second_queued_right_after_first_commit_remain_continuous() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = high_speed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, &[], 350.0).unwrap())
         .expect("submit jog 1");
@@ -314,7 +319,7 @@ fn cross_move_continuity_within_refit_noise() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
@@ -376,7 +381,7 @@ fn four_consecutive_jogs_chain_continuously() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     for i in 0..4 {
         let start = [(i as f64) * 1.0, 0.0, 0.0];
@@ -482,7 +487,7 @@ fn slow_jogs_decelerate_to_zero_between() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
@@ -566,7 +571,7 @@ fn replan_during_long_cruise_preserves_committed_position() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 200.0, 0.0, 0.0, &[], 200.0).unwrap())
         .expect("submit move 1 (200 mm)");
@@ -622,7 +627,7 @@ fn quiescence_timer_fires_after_single_move() {
     let (dispatch, _recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move");
@@ -646,7 +651,7 @@ fn commit_after_quiescence_dispatches_terminal_decel() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move");
@@ -708,7 +713,7 @@ fn commit_then_new_move_starts_from_rest() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
@@ -798,7 +803,7 @@ fn commit_decel_to_zero_is_idempotent_across_re_armed_timer() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
@@ -828,7 +833,7 @@ fn flush_commits_terminal_decel_synchronously() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move");
@@ -910,7 +915,7 @@ fn kalico_stream_open_resets_planner_state() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
@@ -978,7 +983,7 @@ fn underrun_recovery_resets_to_recovered_position() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
@@ -1044,7 +1049,7 @@ fn force_idle_recovery_resets_to_recovered_position() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
@@ -1089,7 +1094,7 @@ fn update_post_processor_commits_held_output_before_swap() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
@@ -1137,7 +1142,7 @@ fn clock_sync_rearm_commits_old_bias_first() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit move 1");
@@ -1182,7 +1187,7 @@ fn submit_move_advances_last_move_time_synchronously() {
     let (dispatch, _recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     let t0 = h.last_move_time();
     assert!(
@@ -1218,7 +1223,7 @@ fn rectification_corrects_actual_duration() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     let m = classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap();
     let nominal = m.nominal_duration();
@@ -1261,7 +1266,7 @@ fn inline_event_scheduling_uses_queued_time() {
     let (dispatch, _recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     let m1 = classify_and_build([0.0; 3], 1.0, 0.0, 0.0, &[], 100.0).unwrap();
     let nominal1 = m1.nominal_duration();
@@ -1311,7 +1316,7 @@ fn wait_moves_blocks_until_dispatch_catches_up() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = relaxed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     let starts = [[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]];
     let mut cumulative_nominal = 0.0;
@@ -1440,7 +1445,7 @@ fn two_jog_replan_segments_survive_corexy_motor_union() {
 
     cfg.limit_sections = high_speed_limit_sections();
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, &[], 350.0).unwrap())
         .expect("submit jog 1");
@@ -1536,7 +1541,7 @@ fn three_pure_x_jogs_in_flight_corexy_degree_invariant() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = high_speed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 1");
@@ -1568,7 +1573,7 @@ fn three_pure_x_jogs_from_rest_with_quiescence_corexy_degree_invariant() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = high_speed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 1");
@@ -1599,7 +1604,7 @@ fn three_pure_x_jogs_quiescence_timer_corexy_degree_invariant() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = high_speed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 1");
@@ -1633,7 +1638,7 @@ fn three_pure_x_jogs_in_flight_velocity_seam() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = high_speed_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
     h.kalico_stream_open([295.0, 0.0, 0.0, 0.0])
         .expect("stream_open");
 

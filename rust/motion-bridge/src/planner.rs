@@ -46,6 +46,7 @@ pub struct HomeDripParams {
 }
 
 pub struct NudgeParams {
+    pub mcu_id: u32,
     pub axis: u8,
     pub motor_mask: u8,
     pub delta_mm: f64,
@@ -57,6 +58,7 @@ pub struct NudgeParams {
 impl std::fmt::Debug for NudgeParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NudgeParams")
+            .field("mcu_id", &self.mcu_id)
             .field("axis", &self.axis)
             .field("motor_mask", &self.motor_mask)
             .field("delta_mm", &self.delta_mm)
@@ -173,6 +175,8 @@ pub enum DispatchError {
          to keep ahead of playback"
     )]
     SegmentLate { gap_s: f64, seg_t_start: f64 },
+    #[error("nudge target mcu_id={mcu_id} axis={axis} not present in mcu_configs")]
+    NudgeTargetMissing { mcu_id: u32, axis: u8 },
 }
 
 #[allow(missing_debug_implementations)]
@@ -187,6 +191,9 @@ impl PlannerHandle {
     pub fn spawn(
         config: PlannerConfig,
         dispatch: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
+        nudge_dispatch: Arc<
+            dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
+        >,
     ) -> Self {
         let (tx, rx) = unbounded();
         let last_move_time_bits = Arc::new(AtomicU64::new(0u64));
@@ -203,7 +210,15 @@ impl PlannerHandle {
         let join = thread::Builder::new()
             .name("kalico-planner".to_string())
             .spawn(move || {
-                run_loop(rx, config, state, dispatch, last_thread, commit_thread);
+                run_loop(
+                    rx,
+                    config,
+                    state,
+                    dispatch,
+                    nudge_dispatch,
+                    last_thread,
+                    commit_thread,
+                );
             })
             .expect("spawn planner thread");
 
@@ -484,6 +499,7 @@ fn run_loop(
     mut config: PlannerConfig,
     mut state: ShaperState,
     dispatch: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
+    nudge_dispatch: Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
     last_move_time_bits: Arc<AtomicU64>,
     commit_fire_count: Arc<AtomicU32>,
 ) {
@@ -855,7 +871,8 @@ fn run_loop(
                     )?;
                     let total_dur: f64 = segs.iter().map(|s| s.t_end - s.t_start).sum();
                     for seg in &segs {
-                        dispatch(seg).map_err(|e| format!("nudge dispatch: {e}"))?;
+                        nudge_dispatch(p.mcu_id, p.axis, seg)
+                            .map_err(|e| format!("nudge dispatch: {e}"))?;
                     }
                     advance_last_move_time(&last_move_time_bits, total_dur);
                     Ok(())

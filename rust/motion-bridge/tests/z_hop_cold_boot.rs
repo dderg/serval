@@ -49,6 +49,11 @@ fn recording_dispatch() -> (
     (cb, recorded)
 }
 
+fn noop_nudge_dispatch()
+-> Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_mcu_id: u32, _axis: u8, _seg: &ShapedSegment| Ok(()))
+}
+
 fn neptune_config() -> PlannerConfig {
     let mut c = PlannerConfig::default();
     let (registry, post_processors) = smooth_zv_post_processors(55.4, 39.2);
@@ -139,7 +144,7 @@ fn cold_boot_z_hop_first_piece_starts_at_seed_position() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = neptune_config();
     cfg.limit_sections = neptune_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.kalico_stream_open([0.0, 0.0, 0.0, 0.0])
         .expect("kalico_stream_open (cold-boot Z=0)");
@@ -182,7 +187,7 @@ fn cold_boot_z_hop_first_piece_is_cubic() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = neptune_config();
     cfg.limit_sections = neptune_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.kalico_stream_open([0.0, 0.0, 0.0, 0.0])
         .expect("kalico_stream_open (cold-boot Z=0)");
@@ -227,7 +232,7 @@ fn cold_boot_z_hop_steps_per_sample_within_mcu_limit() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = neptune_config();
     cfg.limit_sections = neptune_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.kalico_stream_open([0.0, 0.0, 0.0, 0.0])
         .expect("kalico_stream_open (cold-boot Z=0)");
@@ -267,7 +272,7 @@ fn z_hop_after_stream_open_with_nonzero_seed_starts_at_seed() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = neptune_config();
     cfg.limit_sections = neptune_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.kalico_stream_open([100.0, 200.0, z_seed, 0.0])
         .expect("kalico_stream_open");
@@ -319,7 +324,7 @@ fn z_hop_inter_piece_continuity() {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = neptune_config();
     cfg.limit_sections = neptune_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.kalico_stream_open([0.0, 0.0, 0.0, 0.0])
         .expect("kalico_stream_open");

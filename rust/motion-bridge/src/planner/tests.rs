@@ -16,6 +16,11 @@ fn counting_dispatch() -> (
     (cb, counter)
 }
 
+fn noop_nudge_dispatch()
+-> Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_mcu_id: u32, _axis: u8, _seg: &ShapedSegment| Ok(()))
+}
+
 fn relaxed_config() -> PlannerConfig {
     let mut c = PlannerConfig::default();
     c.fit_tolerance_mm = 0.05;
@@ -29,7 +34,7 @@ fn long_move() -> ClassifiedMove {
 #[test]
 fn submit_and_flush_dispatches_segments() {
     let (dispatch, counter) = counting_dispatch();
-    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch);
+    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, noop_nudge_dispatch());
 
     h.submit_move(long_move()).unwrap();
     h.flush().unwrap();
@@ -43,7 +48,7 @@ fn submit_and_flush_dispatches_segments() {
 #[test]
 fn shutdown_joins_cleanly() {
     let (dispatch, _counter) = counting_dispatch();
-    let mut h = PlannerHandle::spawn(PlannerConfig::default(), dispatch);
+    let mut h = PlannerHandle::spawn(PlannerConfig::default(), dispatch, noop_nudge_dispatch());
     h.shutdown();
     assert!(h.join_handle.is_none());
 }
@@ -51,7 +56,7 @@ fn shutdown_joins_cleanly() {
 #[test]
 fn dwell_advances_print_time_and_unblocks() {
     let (dispatch, _counter) = counting_dispatch();
-    let mut h = PlannerHandle::spawn(PlannerConfig::default(), dispatch);
+    let mut h = PlannerHandle::spawn(PlannerConfig::default(), dispatch, noop_nudge_dispatch());
 
     h.dwell(0.25).unwrap();
     assert!((h.last_move_time() - 0.25).abs() < 1e-9);
@@ -62,7 +67,7 @@ fn dwell_advances_print_time_and_unblocks() {
 #[test]
 fn update_runtime_caps_processed_without_error() {
     let (dispatch, counter) = counting_dispatch();
-    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch);
+    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, noop_nudge_dispatch());
 
     h.update_runtime_caps(RuntimeCaps {
         velocity: Some(200.0),
@@ -121,7 +126,7 @@ fn update_post_processor_processed_without_error() {
     let mut cfg = PlannerConfig::default();
     cfg.post_processors = smooth_mzv_xy_post_processors(60.0, 60.0);
     cfg.axis_registry = mzv_registry();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.update_post_processor("is_x", "frequency_hz", 80.0)
         .unwrap();
@@ -197,7 +202,7 @@ fn peak_x_track_speed(batch: &[ShapedSegment]) -> f64 {
 #[test]
 fn update_post_processor_applies_to_new_plans_only() {
     let (dispatch, captured) = segment_capturing_dispatch();
-    let mut h = PlannerHandle::spawn(pa_on_x_config(0.0), dispatch);
+    let mut h = PlannerHandle::spawn(pa_on_x_config(0.0), dispatch, noop_nudge_dispatch());
 
     h.submit_move(long_move()).unwrap();
     h.flush().unwrap();
@@ -231,7 +236,7 @@ fn update_post_processor_applies_to_new_plans_only() {
 #[test]
 fn submit_triggers_replan_per_move() {
     let (dispatch, counter) = counting_dispatch();
-    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch);
+    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, noop_nudge_dispatch());
 
     h.submit_move(long_move()).unwrap();
     h.flush().unwrap();
@@ -247,7 +252,7 @@ fn submit_triggers_replan_per_move() {
 #[test]
 fn drop_without_explicit_shutdown_does_not_hang() {
     let (dispatch, _counter) = counting_dispatch();
-    let h = PlannerHandle::spawn(PlannerConfig::default(), dispatch);
+    let h = PlannerHandle::spawn(PlannerConfig::default(), dispatch, noop_nudge_dispatch());
     drop(h);
 }
 
@@ -483,7 +488,7 @@ fn capturing_dispatch() -> (
 #[test]
 fn quiescence_keeps_timeline_monotone_next_move_does_not_rewind() {
     let (dispatch, log) = capturing_dispatch();
-    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch);
+    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, noop_nudge_dispatch());
 
     fn wait_for_commits(h: &PlannerHandle, target: u32) {
         let start = std::time::Instant::now();
@@ -534,7 +539,7 @@ fn quiescence_keeps_timeline_monotone_next_move_does_not_rewind() {
 #[test]
 fn move_after_idle_resumes_with_dispatch_lead() {
     let (dispatch, log) = capturing_dispatch();
-    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch);
+    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, noop_nudge_dispatch());
 
     h.submit_move(long_move()).unwrap();
     h.flush().unwrap();
@@ -657,7 +662,7 @@ fn z_only_move_no_prior_xy_motion() {
 #[ignore]
 fn flush_blocks_until_motion_complete_by_clock() {
     let (dispatch, _counter) = counting_dispatch();
-    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch);
+    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, noop_nudge_dispatch());
     let t0 = std::time::Instant::now();
     h.submit_move(long_move()).unwrap();
     h.flush().unwrap();
@@ -742,7 +747,7 @@ fn motion_above_velocity_limit_clamps_to_limit() {
 #[test]
 fn flush_then_move_dispatches_without_error() {
     let (dispatch, log) = capturing_dispatch();
-    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch);
+    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, noop_nudge_dispatch());
 
     h.submit_move(long_move()).unwrap();
     h.flush().unwrap();
@@ -775,19 +780,19 @@ fn flush_then_move_dispatches_without_error() {
 
 #[test]
 fn nudge_dispatches_masked_pieces_and_advances_last_move_time_only() {
-    let dispatched = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let dispatched = Arc::new(std::sync::Mutex::new(Vec::<(u32, u8, u8)>::new()));
     let d2 = Arc::clone(&dispatched);
-    let handle = PlannerHandle::spawn(
-        relaxed_config(),
-        Arc::new(move |seg: &ShapedSegment| {
-            d2.lock().unwrap().push(seg.motor_mask);
+    let nudge_cb: Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
+        Arc::new(move |mcu_id: u32, axis: u8, seg: &ShapedSegment| {
+            d2.lock().unwrap().push((mcu_id, axis, seg.motor_mask));
             Ok(())
-        }),
-    );
+        });
+    let handle = PlannerHandle::spawn(relaxed_config(), noop_dispatch(), nudge_cb);
     let lmt0 = handle.last_move_time();
     let (tx, rx) = crossbeam_channel::bounded(1);
     handle
         .submit_nudge(NudgeParams {
+            mcu_id: 42,
             axis: 2,
             motor_mask: 0b0000_0010,
             delta_mm: 0.5,
@@ -801,9 +806,19 @@ fn nudge_dispatches_masked_pieces_and_advances_last_move_time_only() {
         handle.last_move_time() > lmt0,
         "nudge must advance the time book"
     );
-    let masks = dispatched.lock().unwrap();
+    let calls = dispatched.lock().unwrap();
     assert!(
-        !masks.is_empty() && masks.iter().all(|&m| m == 0b0000_0010),
-        "all dispatched segments must carry motor_mask 0b0000_0010, got: {masks:?}"
+        !calls.is_empty(),
+        "nudge_dispatch must be called at least once"
     );
+    assert!(
+        calls
+            .iter()
+            .all(|&(mid, ax, mask)| mid == 42 && ax == 2 && mask == 0b0000_0010),
+        "nudge_dispatch must receive mcu_id=42, axis=2, motor_mask=0b0000_0010; got: {calls:?}"
+    );
+}
+
+fn noop_dispatch() -> Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_seg: &ShapedSegment| Ok(()))
 }
