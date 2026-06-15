@@ -325,6 +325,21 @@ const _: () = {
     assert!(core::mem::align_of::<PieceEntry>() == 8);
 };
 
+/// Maps a single-motor `motor_mask` to a `StepEntry.stepper_sel`.
+/// `0` => `STEPPER_SEL_ALL` (0). Exactly one bit set => `bit_index + 1`.
+/// More than one bit set is rejected (overlays target one motor; YAGNI).
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+pub fn stepper_sel_from_mask(mask: u8) -> Result<u8, ()> {
+    if mask == 0 {
+        return Ok(0);
+    }
+    if mask.count_ones() != 1 {
+        return Err(());
+    }
+    Ok(mask.trailing_zeros() as u8 + 1)
+}
+
 impl PieceEntry {
     #[inline]
     pub fn to_monomial(&self) -> ([f32; 4], [f32; 3]) {

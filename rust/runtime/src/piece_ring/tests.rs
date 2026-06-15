@@ -36,3 +36,12 @@ fn motor_mask_round_trips_at_byte_28() {
     assert_eq!(r.motor_mask, 0b0000_0100);
     assert_eq!(r.start_time, 7);
 }
+
+#[test]
+fn stepper_sel_from_mask_cases() {
+    assert_eq!(stepper_sel_from_mask(0), Ok(0));
+    assert_eq!(stepper_sel_from_mask(0b0000_0001), Ok(1));
+    assert_eq!(stepper_sel_from_mask(0b0000_1000), Ok(4));
+    assert_eq!(stepper_sel_from_mask(0b1000_0000), Ok(8));
+    assert!(stepper_sel_from_mask(0b0000_0011).is_err());
+}
