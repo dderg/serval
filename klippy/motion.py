@@ -242,12 +242,11 @@ class Motion:
         now = self.reactor.monotonic()
         last_move_time = self.get_last_move_time()
         est = self.mcu.estimated_print_time(now)
-        start_host_secs = now + (last_move_time - est)
-        duration = submit_at(start_host_secs)
+        duration = submit_at(last_move_time)
         correction_end_print_time = last_move_time + duration
         if correction_end_print_time > self._mcu_pending_end_time:
             self._mcu_pending_end_time = correction_end_print_time
-        return (start_host_secs - now) + duration
+        return (last_move_time - est) + duration
 
     def submit_correction(
         self, mcu_id, axis_idx, motor_idx, segments, speed, accel

@@ -431,7 +431,7 @@ class MotionBridgeWrapper:
         delta_mm,
         speed,
         accel,
-        start_host_secs,
+        start_print_time,
     ):
         return self._bridge.adjust_motor(
             mcu_id,
@@ -440,7 +440,7 @@ class MotionBridgeWrapper:
             delta_mm,
             speed,
             accel,
-            float(start_host_secs),
+            float(start_print_time),
         )
 
     def submit_correction_sequence(
@@ -451,7 +451,7 @@ class MotionBridgeWrapper:
         segments,
         speed,
         accel,
-        start_host_secs,
+        start_print_time,
     ):
         return self._bridge.submit_correction_sequence(
             mcu_id,
@@ -460,7 +460,7 @@ class MotionBridgeWrapper:
             [float(s) for s in segments],
             speed,
             accel,
-            float(start_host_secs),
+            float(start_print_time),
         )
 
     def home_axis_poll(self):

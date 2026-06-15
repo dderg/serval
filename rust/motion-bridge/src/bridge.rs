@@ -2149,7 +2149,7 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel, start_host_secs))]
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel, start_print_time))]
     fn adjust_motor(
         &self,
         py: Python<'_>,
@@ -2159,7 +2159,7 @@ impl PyMotionBridge {
         delta_mm: f64,
         speed: f64,
         accel: f64,
-        start_host_secs: f64,
+        start_print_time: f64,
     ) -> PyResult<f64> {
         let pieces = crate::correction::plan_correction_profile(delta_mm, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
@@ -2169,11 +2169,11 @@ impl PyMotionBridge {
             axis_idx,
             motor_idx,
             &pieces,
-            start_host_secs,
+            start_print_time,
         )
     }
 
-    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, segments, speed, accel, start_host_secs))]
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, segments, speed, accel, start_print_time))]
     fn submit_correction_sequence(
         &self,
         py: Python<'_>,
@@ -2183,7 +2183,7 @@ impl PyMotionBridge {
         segments: Vec<f64>,
         speed: f64,
         accel: f64,
-        start_host_secs: f64,
+        start_print_time: f64,
     ) -> PyResult<f64> {
         let pieces = crate::correction::plan_correction_sequence(&segments, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
@@ -2193,7 +2193,7 @@ impl PyMotionBridge {
             axis_idx,
             motor_idx,
             &pieces,
-            start_host_secs,
+            start_print_time,
         )
     }
 
@@ -4185,13 +4185,21 @@ impl PyMotionBridge {
         axis_idx: u8,
         motor_idx: u8,
         pieces: &[crate::correction::ProfilePiece],
-        start_host_secs: f64,
+        start_print_time: f64,
     ) -> PyResult<f64> {
         let ring_depth = runtime::stepping_state::CORRECTION_RING_DEPTH as u32;
         let handle = mcu_handle_from_raw(mcu_handle);
 
         let entries = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            let start_host_secs = match router.print_time_to_host_secs(handle, start_print_time) {
+                Some(secs) => secs,
+                None => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "stream_correction: clock unsynced for mcu {mcu_handle}"
+                    )));
+                }
+            };
             crate::correction::to_piece_entries(
                 pieces,
                 |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),

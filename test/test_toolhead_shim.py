@@ -137,7 +137,7 @@ class _RecordingBridge:
         segments,
         speed,
         accel,
-        start_host_secs,
+        start_print_time,
     ):
         self.last_call = dict(
             kind="correction",
@@ -147,7 +147,7 @@ class _RecordingBridge:
             segments=list(segments),
             speed=speed,
             accel=accel,
-            start_host_secs=start_host_secs,
+            start_print_time=start_print_time,
         )
         return self._duration
 
@@ -159,7 +159,7 @@ class _RecordingBridge:
         delta_mm,
         speed,
         accel,
-        start_host_secs,
+        start_print_time,
     ):
         self.last_call = dict(
             kind="adjust",
@@ -169,7 +169,7 @@ class _RecordingBridge:
             delta_mm=delta_mm,
             speed=speed,
             accel=accel,
-            start_host_secs=start_host_secs,
+            start_print_time=start_print_time,
         )
         return self._duration
 
@@ -199,17 +199,16 @@ def test_get_last_move_time_uses_motion_lead():
 def test_submit_correction_anchors_on_timeline_and_advances_pending():
     th = _make_correction_toolhead(0.6)
     # idle: glmt = est(101.0) + lead(0.25) = 101.25
-    # start_host = now + (glmt - est) = 100 + 0.25 = 100.25
     wait_s = th.submit_correction(7, 1, 0, [0.3, -0.3], 80.0, 5000.0)
     call = th.bridge.last_call
     assert call["kind"] == "correction"
     assert (
         call["mcu_id"] == 7 and call["axis_idx"] == 1 and call["motor_idx"] == 0
     )
-    assert call["start_host_secs"] == pytest.approx(100.25)
+    assert call["start_print_time"] == pytest.approx(101.25)
     # pending advanced past the buzz: glmt + duration = 101.25 + 0.6 = 101.85
     assert th._mcu_pending_end_time == pytest.approx(101.85)
-    # caller wait = (start_host - now) + duration = 0.25 + 0.6 = 0.85
+    # caller wait = (glmt - est) + duration = 0.25 + 0.6 = 0.85
     assert wait_s == pytest.approx(0.85)
 
 
@@ -222,6 +221,6 @@ def test_submit_motor_adjust_anchors_on_timeline_and_advances_pending():
         call["mcu_id"] == 2 and call["axis_idx"] == 0 and call["motor_idx"] == 1
     )
     assert call["delta_mm"] == pytest.approx(0.05)
-    assert call["start_host_secs"] == pytest.approx(100.25)
+    assert call["start_print_time"] == pytest.approx(101.25)
     assert th._mcu_pending_end_time == pytest.approx(101.85)
     assert wait_s == pytest.approx(0.85)
