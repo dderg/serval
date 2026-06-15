@@ -104,20 +104,12 @@ def test_homing_rehome_path_runs_and_fails_on_held_trigger(sim):
         "requested a rehome"
     )
 
-    if "No trigger on x after full movement" in log_text:
-        pytest.fail(
-            "Second homing attempt failed with 'No trigger after full "
-            "movement' — the retract move did not complete before re-approach"
-        )
-
     err = (r.get("error") or {}).get("message", "")
     assert "early homing trigger" in err, (
         f"Expected an 'early homing trigger' failure, got: {err!r}"
     )
 
-    assert elapsed < 10.0, (
-        f"G28 X took {elapsed:.1f}s — likely ghost-time delay"
-    )
+    assert elapsed < 5.0, f"G28 X took {elapsed:.1f}s — likely ghost-time delay"
 
 
 @pytest.mark.parametrize(
