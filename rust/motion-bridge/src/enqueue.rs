@@ -192,7 +192,8 @@ where
                     start_time,
                     coeffs,
                     duration: duration_f32,
-                    _reserved: 0,
+                    motor_mask: 0,
+                    _reserved: [0; 3],
                 },
                 host_secs,
             ));

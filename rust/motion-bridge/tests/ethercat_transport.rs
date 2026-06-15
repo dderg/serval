@@ -14,7 +14,8 @@ fn piece(t: u64) -> (PieceEntry, f64) {
             start_time: t,
             coeffs: [0.0; 4],
             duration: 0.001,
-            _reserved: 0,
+            motor_mask: 0,
+            _reserved: [0; 3],
         },
         t as f64,
     )

@@ -49,7 +49,8 @@ fn entry(start_time: u64, duration: f32, coeffs: [f32; 4]) -> PieceEntry {
         start_time,
         coeffs,
         duration,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 

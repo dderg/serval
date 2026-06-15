@@ -592,7 +592,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
             start_time: 1_000_000,
             coeffs: [0.0; 4],
             duration: 0.001,
-            _reserved: 0,
+            motor_mask: 0,
+            _reserved: [0; 3],
         },
         1.0_f64,
     )];

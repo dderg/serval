@@ -7,7 +7,8 @@ fn ramp_piece(from_mm: f32, to_mm: f32, start_ns: u64) -> PieceEntry {
         start_time: start_ns,
         coeffs: [from_mm, from_mm + d / 3.0, from_mm + 2.0 * d / 3.0, to_mm],
         duration: 0.001_f32,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 

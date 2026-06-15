@@ -165,7 +165,8 @@ pub fn to_piece_entries(
                     p.coeffs[3] as f32,
                 ],
                 duration: p.duration as f32,
-                _reserved: 0,
+                motor_mask: 0,
+                _reserved: [0; 3],
             };
             t += p.duration;
             entry

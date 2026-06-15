@@ -8,7 +8,8 @@ fn q_with_host(ring_depth: u32, starts: &[(u64, f64)]) -> AxisQueue {
                 start_time: s,
                 coeffs: [0.0; 4],
                 duration: 0.001,
-                _reserved: 0,
+                motor_mask: 0,
+                _reserved: [0; 3],
             },
             h,
         ));

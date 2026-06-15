@@ -157,7 +157,8 @@ fn unix_native_conn_and_frame_server_sustain_streaming_past_ring_depth() {
             start_time: BASE_NS + i as u64 * PIECE_DUR_NS,
             coeffs: [0.0_f32; 4],
             duration: PIECE_DUR_NS as f32 / 1_000_000_000.0,
-            _reserved: 0,
+            motor_mask: 0,
+            _reserved: [0; 3],
         })
         .collect();
 
