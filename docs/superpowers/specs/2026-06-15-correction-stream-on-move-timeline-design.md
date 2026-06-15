@@ -79,24 +79,31 @@ MCU clock the enable targets, independent of the epoch. The private
 `Motion._stream_correction_on_timeline` still reads `now`/`est` solely to return
 the caller's wait-until-complete `(glmt - est) + duration`, not for the anchor.
 
-### 2. Advance the toolhead's pending-end past the buzz
+### 2. Reserve the buzz's time with a real dwell, not a phantom pending poke
 
 After streaming, `submit_correction_sequence` returns the buzz duration (it
-already does). `manual_move` advances the toolhead bookkeeping so a subsequent
-`get_last_move_time()` — read by the *disable* and any following move — falls
-after the buzz:
+already does). `_stream_correction_on_timeline` then issues a real
+`toolhead.dwell(duration)` so a subsequent `get_last_move_time()` — read by the
+*disable* and any following move — falls after the buzz:
 
 ```
-toolhead._advance_pending_end_to(start_host_secs_as_print_time + duration)
+duration = submit_at(glmt)     # buzz anchored at glmt (print_time)
+self.dwell(duration)           # proper engine dwell mirroring the buzz window
 ```
 
-Concretely: ensure `_mcu_pending_end_time >= glmt + duration`, so
-`enable@glmt → dwell → buzz@glmt → dwell → disable@(glmt+duration+…)` orders
-strictly, by the same mechanism that already makes `enable → move → disable`
-order strictly. The correction path does **not** advance the planner's
-`last_move_time` — corrections ride a separate ring, and conflating them with the
-planner's anchor/starvation logic would be wrong. Only the toolhead bookkeeping
-that enable/disable depend on is advanced.
+A real `dwell()` goes through `bridge.submit_dwell` (engine-backed, subject to
+the planner's lookahead throttle) plus the toolhead bookkeeping. This is the
+critical correctness point: an earlier version hand-poked
+`_mcu_pending_end_time = glmt + duration` to fake the reservation. That host-only
+write has **no engine backing and no backpressure**, so across motors_sync's many
+enable/dwell/buzz/dwell/disable cycles it let the timeline march arbitrarily
+ahead of real time — scheduling the buzz far in the future, where the
+feedback-paced ring wait blocks the reactor long enough to starve MCU comms and
+drop the USB transport. A real dwell is throttled and executes in real time, so
+`get_last_move_time()` stays bounded (~one lead ahead) and the buzz anchors near
+real-now while still ordering after the enable. The correction path does **not**
+advance the planner's `last_move_time` directly — corrections ride a separate
+ring; the main-ring dwell is what honestly accounts for the buzz's wall-time.
 
 ### 3. One lead constant, no "keep in sync" comment
 

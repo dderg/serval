@@ -125,9 +125,13 @@ class _RecordingBridge:
     def __init__(self, duration):
         self._duration = duration
         self.last_call = None
+        self.dwells = []
 
     def motion_lead_secs(self):
         return 0.25
+
+    def submit_dwell(self, delay):
+        self.dwells.append(delay)
 
     def submit_correction_sequence(
         self,
@@ -179,11 +183,17 @@ class _FixedReactor:
         return 100.0
 
 
+class _NoopPrinter:
+    def send_event(self, *args, **kwargs):
+        return None
+
+
 def _make_correction_toolhead(duration):
     th = Motion.__new__(Motion)
     th.mcu = FakeMcu()  # estimated_print_time(t) = t + 1.0
     th.reactor = _FixedReactor()
     th.bridge = _RecordingBridge(duration)
+    th.printer = _NoopPrinter()
     th.motion_lead = 0.25
     th._mcu_pending_end_time = 0.0
     return th
@@ -206,8 +216,10 @@ def test_submit_correction_anchors_on_timeline_and_advances_pending():
         call["mcu_id"] == 7 and call["axis_idx"] == 1 and call["motor_idx"] == 0
     )
     assert call["start_print_time"] == pytest.approx(101.25)
-    # pending advanced past the buzz: glmt + duration = 101.25 + 0.6 = 101.85
-    assert th._mcu_pending_end_time == pytest.approx(101.85)
+    # buzz time reserved as a real engine dwell, not a phantom pending poke
+    assert th.bridge.dwells == [pytest.approx(0.6)]
+    # dwell bumps pending: max(pending 0, est 101) + duration 0.6 = 101.6
+    assert th._mcu_pending_end_time == pytest.approx(101.6)
     # caller wait = (glmt - est) + duration = 0.25 + 0.6 = 0.85
     assert wait_s == pytest.approx(0.85)
 
@@ -222,5 +234,6 @@ def test_submit_motor_adjust_anchors_on_timeline_and_advances_pending():
     )
     assert call["delta_mm"] == pytest.approx(0.05)
     assert call["start_print_time"] == pytest.approx(101.25)
-    assert th._mcu_pending_end_time == pytest.approx(101.85)
+    assert th.bridge.dwells == [pytest.approx(0.6)]
+    assert th._mcu_pending_end_time == pytest.approx(101.6)
     assert wait_s == pytest.approx(0.85)

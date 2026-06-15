@@ -243,9 +243,7 @@ class Motion:
         last_move_time = self.get_last_move_time()
         est = self.mcu.estimated_print_time(now)
         duration = submit_at(last_move_time)
-        correction_end_print_time = last_move_time + duration
-        if correction_end_print_time > self._mcu_pending_end_time:
-            self._mcu_pending_end_time = correction_end_print_time
+        self.dwell(duration)
         return (last_move_time - est) + duration
 
     def submit_correction(
