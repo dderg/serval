@@ -520,11 +520,15 @@ git commit -m "feat(host): Motion.submit_correction anchors the buzz on the move
 
 ---
 
-## Task 6: Route motors_sync and motor_adjust through the toolhead
+## Task 6: Route motors_sync, motor_adjust, and force_move through the toolhead
 
 **Files:**
 - Modify: `klippy/extras/motors_sync.py:380-394` (`StepperManualMove.manual_move`)
 - Modify: `klippy/extras/motor_adjust.py:42-44` (`MotorAdjust.adjust`)
+- Modify: `klippy/extras/force_move.py:41-50` (`ForceMove.manual_move`)
+- Modify: `test/test_force_move_manual_move.py` (route fakes through `toolhead.submit_correction`)
+
+Note: `force_move.manual_move` is the THIRD caller of `bridge.submit_correction_sequence`. Task 4 made that wrapper's `start_host_secs` argument required, so this call is now broken (6 args vs 7) until it routes through the toolhead. Its test asserts against a `FakeBridge.submit_correction_sequence` and must move to a `FakeToolhead.submit_correction`.
 
 - [ ] **Step 1: Replace the raw-bridge call with the toolhead method**
 
