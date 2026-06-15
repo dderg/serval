@@ -210,37 +210,4 @@ pub(crate) fn exchange_follower_tails(
 }
 
 #[cfg(test)]
-pub(crate) fn forward_sweep(states: &mut [ChainState], corner_caps: &[f64]) -> usize {
-    const EPS_VEL: f64 = 1e-3;
-    let mut dirty_count = 0;
-    for k in 1..states.len() {
-        let proposed_v_start = corner_caps[k - 1].min(states[k - 1].v_end);
-        if (proposed_v_start - states[k].v_start).abs() > EPS_VEL {
-            states[k].v_start = proposed_v_start;
-            states[k].dirty = true;
-            dirty_count += 1;
-        }
-    }
-    dirty_count
-}
-
-#[cfg(test)]
-pub(crate) fn reverse_sweep(states: &mut [ChainState], corner_caps: &[f64]) -> usize {
-    const EPS_VEL: f64 = 1e-3;
-    if states.len() < 2 {
-        return 0;
-    }
-    let mut dirty_count = 0;
-    for k in (0..states.len() - 1).rev() {
-        let proposed_v_end = corner_caps[k].min(states[k + 1].v_start);
-        if (proposed_v_end - states[k].v_end).abs() > EPS_VEL {
-            states[k].v_end = proposed_v_end;
-            states[k].dirty = true;
-            dirty_count += 1;
-        }
-    }
-    dirty_count
-}
-
-#[cfg(test)]
 mod tests;

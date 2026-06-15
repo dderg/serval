@@ -493,7 +493,7 @@ impl ShaperState {
         while idx > 0 {
             let prev = &self.uncommitted_moves[idx - 1].segment.xyz;
             let cur = &self.uncommitted_moves[idx].segment.xyz;
-            if temporal::multi::junction::is_corner_between(prev, cur) {
+            if !temporal::multi::junction::are_collinear(prev, cur) {
                 return idx;
             }
             idx -= 1;
