@@ -42,11 +42,11 @@ class FakeNode:
     def __init__(self, handle):
         self._h = handle
 
-    def get_bridge_handle(self):
+    def get_engine_handle(self):
         return self._h
 
 
-class FakeBridge:
+class FakeEngine:
     def __init__(self):
         self.calls = []
 
@@ -64,37 +64,37 @@ class FakePrinter:
         return self._objs[name]
 
 
-def test_bridge_torque_line_maps_set_digital_to_set_torque():
-    bridge = FakeBridge()
+def test_engine_torque_line_maps_set_digital_to_set_torque():
+    engine = FakeEngine()
     printer = FakePrinter(
-        {"ethercat_node node_y": FakeNode(7), "motion_bridge": bridge}
+        {"ethercat_node node_y": FakeNode(7), "motion_engine": engine}
     )
-    line = servo_axis.BridgeTorqueLine(printer, "node_y")
+    line = servo_axis.MotionTorqueLine(printer, "node_y")
     line.set_digital(20.0, 1)
     line.set_digital(21.0, 0)
-    assert bridge.calls == [(7, True, 20.0), (7, False, 21.0)]
+    assert engine.calls == [(7, True, 20.0), (7, False, 21.0)]
 
 
-def test_bridge_torque_line_fails_loudly_without_handle():
+def test_engine_torque_line_fails_loudly_without_handle():
     printer = FakePrinter(
-        {"ethercat_node node_y": FakeNode(None), "motion_bridge": FakeBridge()}
+        {"ethercat_node node_y": FakeNode(None), "motion_engine": FakeEngine()}
     )
-    line = servo_axis.BridgeTorqueLine(printer, "node_y")
+    line = servo_axis.MotionTorqueLine(printer, "node_y")
     try:
         line.set_digital(20.0, 1)
         raise AssertionError("expected command_error")
     except RuntimeError as e:
-        assert "no bridge handle" in str(e)
+        assert "no engine handle" in str(e)
 
 
-def test_bridge_torque_line_accepts_handle_zero():
-    bridge = FakeBridge()
+def test_engine_torque_line_accepts_handle_zero():
+    engine = FakeEngine()
     printer = FakePrinter(
-        {"ethercat_node node_y": FakeNode(0), "motion_bridge": bridge}
+        {"ethercat_node node_y": FakeNode(0), "motion_engine": engine}
     )
-    line = servo_axis.BridgeTorqueLine(printer, "node_y")
+    line = servo_axis.MotionTorqueLine(printer, "node_y")
     line.set_digital(20.0, 1)
-    assert bridge.calls == [(0, True, 20.0)]
+    assert engine.calls == [(0, True, 20.0)]
 
 
 def test_servo_rail_active_callback_contract():

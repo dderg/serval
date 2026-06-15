@@ -6,7 +6,7 @@
 #include "sched.h"
 #include "board/misc.h"
 #include "kalico_runtime.h"
-#include "kalico_dispatch.h"
+#include "mcu_transport_dispatch.h"
 #if CONFIG_MACH_STM32
 #include "stm32/phase_stepping_spi.h"
 #elif CONFIG_MACH_LINUX

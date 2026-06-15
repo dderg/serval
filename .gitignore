@@ -44,12 +44,12 @@ scripts/fitter_prototype/corpus/
 # MCU firmware build outputs
 firmware/
 
-# Built artifacts (motion-bridge .so, chelper .so) — built per-platform,
+# Built artifacts (motion-engine .so, chelper .so) — built per-platform,
 # never checked in. Keep klippy/ clean across macOS/Linux/Pi dev.
-klippy/motion_bridge*.so
-klippy/motion_bridge*.dylib
-klippy/chelper/c_helper.so
-klippy/chelper/c_helper.so.dSYM/
+klippy/_motion_engine*.so
+klippy/motion_engine*.dylib
+klippy/chelper/c_helper*.so
+klippy/chelper/c_helper*.so.dSYM/
 klippy/chelper/*.dylib
 
 # Sim-only third-party plugin symlinks (created by tools/sim_klippy/conftest.py)

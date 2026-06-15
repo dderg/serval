@@ -2,8 +2,8 @@
 
 src-y += sched.c command.c basecmd.c debugcmds.c
 # Kalico-native transport — stream-level demuxer + Layer 4 dispatcher.
-# Spec: docs/superpowers/specs/2026-05-04-kalico-native-transport-design.md.
-src-y += kalico_demux.c kalico_dispatch.c \
+# Spec: docs/superpowers/specs/2026-05-04-mcu-transport-design.md.
+src-y += mcu_demux.c mcu_transport_dispatch.c \
     runtime_storage.c runtime_panic.c step_queue.c \
     spi_queue.c kalico_log.c
 src-$(CONFIG_HAVE_GPIO) += initial_pins.c gpiocmds.c stepper.c trsync.c endstop.c
@@ -92,7 +92,7 @@ $(KALICO_LIB): FORCE
 		if [ "$$PREV" != "$(KALICO_RUST_FEATURES)" ]; then \
 			echo "kalico-c-api features changed ($$PREV -> $(KALICO_RUST_FEATURES)); cargo clean"; \
 			cargo clean -p kalico-c-api 2>/dev/null || true; \
-			cargo clean -p kalico-host-rt 2>/dev/null || true; \
+			cargo clean -p host-rt 2>/dev/null || true; \
 			cargo clean -p runtime 2>/dev/null || true; \
 			cargo clean -p nurbs 2>/dev/null || true; \
 		fi && \
@@ -110,7 +110,7 @@ ifeq ($(CONFIG_MACH_LINUX),y)
 # First-class Linux MCU build. The `mcu-linux` feature is the f64 host numeric
 # profile (the Pi has an FPU) PLUS the "real MCU firmware" marker that links
 # the C step/SPI FFI (linux/phase_stepping_spi.c) — distinct from a bare `host`
-# build (the motion-bridge planner cdylib / unit tests), which must NOT
+# build (the motion-engine planner cdylib / unit tests), which must NOT
 # reference that symbol. kalico-sim is OPT-IN here exactly like the STM32
 # families (CONFIG_KALICO_SIM), not hardwired: a Linux MCU drives real
 # /dev/gpiochip / /dev/spidev by default.
@@ -121,7 +121,7 @@ endif
 ifeq ($(CONFIG_MOTION_MODULE_STEPPER),y)
 KALICO_RUST_FEATURES := $(KALICO_RUST_FEATURES),motion-module-stepper
 endif
-# Own target dir: the motion-bridge cdylib builds the shared crates (runtime,
+# Own target dir: the motion-engine cdylib builds the shared crates (runtime,
 # nurbs, ...) with different host features into rust/target/, and a kalico-sim
 # flip changes this firmware's feature set — keeping them separate avoids
 # mutual incremental-cache thrash (slow on the Pi). Mirrors the per-arch STM32
@@ -137,7 +137,7 @@ $(KALICO_LIB): FORCE
 		if [ "$$PREV" != "$(KALICO_RUST_FEATURES)" ]; then \
 			echo "kalico-c-api features changed ($$PREV -> $(KALICO_RUST_FEATURES)); cargo clean"; \
 			cargo clean -p kalico-c-api 2>/dev/null || true; \
-			cargo clean -p kalico-host-rt 2>/dev/null || true; \
+			cargo clean -p host-rt 2>/dev/null || true; \
 			cargo clean -p runtime 2>/dev/null || true; \
 			cargo clean -p nurbs 2>/dev/null || true; \
 		fi && \

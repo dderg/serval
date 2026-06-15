@@ -481,8 +481,8 @@ def run_simulation(
                 repo_root,
                 step_sock_path=str(z_sock_dir / "sim_control"),
             )
-            has_motion_bridge = (
-                repo_root / "klippy" / "motion_bridge.py"
+            has_motion_engine = (
+                repo_root / "klippy" / "motion_engine.py"
             ).exists()
 
             rendered_cfg = _prepare_config(
@@ -492,7 +492,7 @@ def run_simulation(
                 h7_pty,
                 f4_pty if dual_mcu else None,
                 beacon_pty,
-                has_motion_bridge=has_motion_bridge,
+                has_motion_engine=has_motion_engine,
                 phase_stepping=phase_stepping,
                 homing_test=homing_test,
                 beacon_test=beacon_test,
@@ -1421,7 +1421,7 @@ def _prepare_config(
     h7_pty: str,
     f4_pty: Optional[str],
     beacon_pty: str,
-    has_motion_bridge: bool = False,
+    has_motion_engine: bool = False,
     phase_stepping: bool = False,
     homing_test: bool = False,
     beacon_test: Optional[str] = None,
@@ -1457,7 +1457,7 @@ def _prepare_config(
                 h7_pty, f4_pty, gcode_dir=str(tmp_dir / "gcodes")
             )
         if (
-            has_motion_bridge
+            has_motion_engine
             and not phase_stepping
             and not homing_test
             and not beacon_test

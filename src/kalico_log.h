@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-// Wire log levels — MUST match rust/motion-bridge/src/mcu_log.rs::mcu_level_str
-// and the McuLog wire layout in rust/kalico-protocol/src/messages.rs.
+// Wire log levels — MUST match rust/motion-engine/src/mcu_log.rs::mcu_level_str
+// and the McuLog wire layout in rust/mcu-protocol/src/messages.rs.
 #define KALICO_LOG_LEVEL_TRACE 0
 #define KALICO_LOG_LEVEL_DEBUG 1
 #define KALICO_LOG_LEVEL_WARN  2

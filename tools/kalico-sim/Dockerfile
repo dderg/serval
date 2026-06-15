@@ -5,7 +5,7 @@
 # stage and everything after it re-executes on a rebuild.
 #
 #   toolchain   apt packages + Rust toolchain  (changes: never)
-#   rust-build  motion-bridge cdylib           (cache-mounted target/+registry)
+#   rust-build  motion-engine cdylib           (cache-mounted target/+registry)
 #   firmware    C firmware ELFs + chelper      (cache-mounted per-MCU OUT)
 #   runtime     final image — no build tools   (changes: klippy/, tools/)
 
@@ -48,7 +48,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # --------------------------------------------------------------------
 # Stage 2 — rust-build
-# Builds the motion-bridge cdylib. BuildKit cache mounts persist the cargo
+# Builds the motion-engine cdylib. BuildKit cache mounts persist the cargo
 # registry and the compiled target/ across builds (in the BuildKit daemon,
 # not the image), so a rebuild after a source edit recompiles only the
 # crates that changed instead of the whole workspace + dep graph. The
@@ -65,14 +65,14 @@ WORKDIR /kalico/rust
 
 COPY rust/ /kalico/rust/
 COPY tools/kalico-sim/patches/patch_rust_traces.py /tmp/patch_rust_traces.py
-RUN python3 /tmp/patch_rust_traces.py /kalico/rust/motion-bridge/src/bridge.rs
+RUN python3 /tmp/patch_rust_traces.py /kalico/rust/motion-engine/src/bridge.rs
 
 RUN --mount=type=cache,target=/kalico/rust/target,id=rust-target-${SIM_CACHE_KEY},sharing=locked \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    cargo build -p motion-bridge --release && \
+    cargo build -p motion-engine --release && \
     mkdir -p /artifacts && \
-    cp /kalico/rust/target/release/libmotion_bridge_native.so /artifacts/
+    cp /kalico/rust/target/release/lib_motion_engine.so /artifacts/
 
 # --------------------------------------------------------------------
 # Stage 3 — firmware
@@ -209,10 +209,10 @@ COPY --from=firmware \
     /kalico/tools/kalico-sim/libvtime/libsim_intercept.so \
     /kalico/tools/kalico-sim/libvtime/
 
-# Overlay motion_bridge_native.so on top of the Python source copy.
+# Overlay _motion_engine.so on top of the Python source copy.
 COPY --from=rust-build \
-    /artifacts/libmotion_bridge_native.so \
-    /kalico/klippy/motion_bridge_native.so
+    /artifacts/lib_motion_engine.so \
+    /kalico/klippy/_motion_engine.so
 
 # Copy third-party plugins fetched during the firmware stage (may not exist).
 COPY --from=firmware /kalico/tools/sim_klippy/printer_real/third_party_repos/ \
@@ -221,7 +221,7 @@ COPY --from=firmware /kalico/tools/sim_klippy/printer_real/third_party_repos/ \
 # Apply sim-only Python traces. Can't go in fix_linux_build.sh because
 # the runtime stage re-copies klippy/ fresh from the build context.
 COPY tools/kalico-sim/patches/patch_klippy_traces.py /tmp/patch_klippy_traces.py
-RUN python3 /tmp/patch_klippy_traces.py klippy/motion.py klippy/motion_bridge.py klippy/mcu.py
+RUN python3 /tmp/patch_klippy_traces.py klippy/motion.py klippy/motion_engine.py klippy/mcu.py
 
 RUN mkdir -p /gcode /tmp/kalico_sim_gcodes
 

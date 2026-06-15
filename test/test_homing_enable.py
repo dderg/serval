@@ -24,6 +24,9 @@ class FakeToolhead:
         self.move_time_calls += 1
         return self._t
 
+    def resync_parked_servos(self):
+        pass
+
 
 class FakePrinter:
     def __init__(self, toolhead):

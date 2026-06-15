@@ -316,9 +316,9 @@ When `drip_move` enters the external-probe path (`active_homing_arms` empty,
    correctly selecting both stepper_x and stepper_y. This matches the same
    kinematic mapping the bridge uses for dispatch.
 3. **Resolve the arm's MCU and queue.** `endstop_arm()` requires a bridge MCU
-   handle and command queue (motion_bridge.py:328). For bridge-native endstops,
+   handle and command queue (motion_engine.py:328). For bridge-native endstops,
    these come from `MCU_endstop`'s MCU. For the virtual arm, they come from
-   the first moving stepper's MCU: `stepper.get_mcu()._bridge_handle` provides
+   the first moving stepper's MCU: `stepper.get_mcu()._engine_handle` provides
    the handle, and `bridge.alloc_command_queue(handle)` provides the queue.
    All Z steppers are on the same MCU (F446) in the current hardware. If
    moving steppers span multiple bridge MCUs, `drip_move` raises
@@ -416,7 +416,7 @@ At 20 mm/s: 0.06mm overshoot. At 1 mm/s contact probe: 0.003mm.
    re-issues G28. Same class of failure as mainline's trsync comms timeout.
 
 `REASON_DEADLINE_EXPIRED` is a bridge-private reason code defined in
-`motion_bridge.py`, NOT in the `MCU_trsync` reason namespace. Klipper's trsync
+`motion_engine.py`, NOT in the `MCU_trsync` reason namespace. Klipper's trsync
 convention treats reasons >= `REASON_COMMS_TIMEOUT` (4) as failures, and probe
 modules already use values 5+ for sensor-specific errors. The bridge reason
 lives in a separate enum (`BridgeHomingReason`) and never crosses into legacy
@@ -437,8 +437,8 @@ already in shutdown. Matches mainline's drip-feed safety model.
 **Normal operation margin:** The 25ms extension interval with 50ms deadline
 gives 25ms of slack — ample for normal host operation.
 
-**Files:** `klippy/motion.py`, `klippy/motion_bridge.py`,
-`rust/motion-bridge/src/bridge.rs`, `rust/motion-bridge/src/homing.rs`,
+**Files:** `klippy/motion.py`, `klippy/motion_engine.py`,
+`rust/motion-engine/src/bridge.rs`, `rust/motion-engine/src/homing.rs`,
 MCU firmware C files
 
 ### Piece C: Trigger-time position from curve evaluation
@@ -591,8 +591,8 @@ trigger position provides the correct `trig_pos` for the homing state machine;
 Beacon's measurement then refines the final Z position. Same two-step process
 as mainline.
 
-**Files:** `rust/motion-bridge/src/bridge.rs` (retain + evaluate homing curve),
-`klippy/motion_bridge.py` (expose `get_homing_step_count_at_time`),
+**Files:** `rust/motion-engine/src/bridge.rs` (retain + evaluate homing curve),
+`klippy/motion_engine.py` (expose `get_homing_step_count_at_time`),
 `klippy/mcu.py` or stepper module (bridge-mode `get_past_mcu_position` override)
 
 ## Change Summary
@@ -602,9 +602,9 @@ as mainline.
 | `klippy/mcu.py` | `TriggerDispatch.__init__` always allocates `_trdispatch`; `start()`/`stop()` runtime-gate on primary MCU `_bridge_drives_steppers`; conditional `_trdispatch_mcu` in `MCU_trsync._build_config`; no-op `start()`/`stop()` for bridge-driven MCU_trsync; `_bridge_drives_steppers` flag set by `_register_axis` |
 | `klippy/stepper.py` | `get_past_mcu_position` dispatches: retained curve → curve eval, no curve → existing MCU snapshot |
 | `klippy/motion.py` | `drip_move` credit-extension loop with `drip_completion.wait()` + `test()` for external probes; stepper registration on virtual dispatch |
-| `klippy/motion_bridge.py` | Virtual `BridgeTriggerDispatch` with `Software` source kind; `software_trip()` and `extend_homing_deadline()` wrappers; `BridgeHomingReason` enum (private, separate from trsync reasons) |
-| `rust/motion-bridge/src/bridge.rs` | `submit_homing_move_async()` (non-blocking, returns segment completion); `software_trip()`, `extend_homing_deadline()` FFI surface; retain homing curve, `get_homing_step_count_at_time` evaluation |
-| `rust/motion-bridge/src/homing.rs` | Software source kind in homing state machine; deadline-expired terminal state |
+| `klippy/motion_engine.py` | Virtual `BridgeTriggerDispatch` with `Software` source kind; `software_trip()` and `extend_homing_deadline()` wrappers; `BridgeHomingReason` enum (private, separate from trsync reasons) |
+| `rust/motion-engine/src/bridge.rs` | `submit_homing_move_async()` (non-blocking, returns segment completion); `software_trip()`, `extend_homing_deadline()` FFI surface; retain homing curve, `get_homing_step_count_at_time` evaluation |
+| `rust/motion-engine/src/homing.rs` | Software source kind in homing state machine; deadline-expired terminal state |
 | MCU firmware (C) | `runtime_software_trip` command, `runtime_extend_homing_deadline arm_id=%u` command (fixed 50ms grant), deadline check in curve evaluator tick |
 
 ## Unchanged

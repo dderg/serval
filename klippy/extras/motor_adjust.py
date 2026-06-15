@@ -37,9 +37,9 @@ class MotorAdjust:
         toolhead.wait_moves_and_mcu()
         mcu_id, axis_idx, motor_idx = toolhead.get_motor_binding(stepper_name)
         self._ensure_motor_enabled(toolhead, stepper_name)
-        bridge = toolhead.get_bridge()
+        engine = toolhead.get_engine()
         reactor = self.printer.get_reactor()
-        duration = bridge.adjust_motor(
+        duration = engine.adjust_motor(
             mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
         )
         deadline = reactor.monotonic() + duration + ADJUST_SETTLE_PAD

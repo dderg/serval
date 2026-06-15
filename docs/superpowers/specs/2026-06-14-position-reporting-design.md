@@ -66,14 +66,14 @@ Rejected alternatives:
 ### 1. MCU position primitive (serial steppers)
 
 Add a request/response message pair to the kalico protocol, modeled on the existing
-`QueryRuntimeCaps`/`RuntimeCapsResponse` round-trip (`src/kalico_dispatch.c:273`,
-host match-up in `rust/kalico-host-rt/src/host_io/kalico_native.rs`):
+`QueryRuntimeCaps`/`RuntimeCapsResponse` round-trip (`src/mcu_transport_dispatch.c:273`,
+host match-up in `rust/host-rt/src/host_io/mcu_transport.rs`):
 
 - **`MessageKind::QueryMotorState` → `MessageKind::MotorStateResponse`**, defined in
-  `rust/kalico-protocol/src/messages.rs` (the `MessageKind` + `Encode`/`Decode`/`Cursor`
+  `rust/mcu-protocol/src/messages.rs` (the `MessageKind` + `Encode`/`Decode`/`Cursor`
   home).
 - Response body: `count:u8`, then per motor `[motor_index:u8, pos_q16:i32, vel_q16:i32]`.
-  - Position uses the existing Q16 encoding (`encode_q16`, `rust/motion-bridge/src/dispatch.rs:107`;
+  - Position uses the existing Q16 encoding (`encode_q16`, `rust/motion-engine/src/dispatch.rs:107`;
     decode = `q16 as f32 / 65536.0`). 1 LSB ≈ 15.3 µm — adequate for display and diagnostics.
   - Velocity in mm/s, same Q16 encoding (range ±32k mm/s, fits).
 - MCU handler reads, per configured slot, the executor's **last-tick** position and
@@ -86,22 +86,22 @@ host match-up in `rust/kalico-host-rt/src/host_io/kalico_native.rs`):
   piece ring. When idle it equals the settled endpoint.
 - `motor_index` is the engine's per-MCU **slot** index (0..`MAX_AXES`=8), which is a
   **kinematic motor lane**, not a cartesian axis: the host applies the kinematics transform
-  (`KinematicsModule::forward`, `rust/motion-bridge/src/kinematics.rs:84`) cartesian→motor
+  (`KinematicsModule::forward`, `rust/motion-engine/src/kinematics.rs:84`) cartesian→motor
   *before* streaming, so on CoreXY slot 0 = motor A, slot 1 = motor B. The reported value is
   therefore motor-space and must be converted back to cartesian on the host (see §4). The
   host maps slots via the binding established at `configure_axis`.
 
 ### 2. EtherCAT position + velocity path
 
-`EcTelemetry.position_actual` (encoder counts, `rust/kalico-ethercat-rt/src/ffi.rs:13`) is
-read every DC cycle in the RT endpoint (`rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs:591`)
+`EcTelemetry.position_actual` (encoder counts, `rust/ethercat-rt/src/ffi.rs:13`) is
+read every DC cycle in the RT endpoint (`rust/ethercat-rt/src/bin/ethercat-rt.rs:591`)
 but never surfaced to the host. We add the surfacing and add native velocity:
 
 - **Velocity (new):** map CiA-402 object **`606Ch` Velocity actual value** (RO, I32,
   TPDO-mappable per the A6-EC manual) into the drive's TPDO. This touches:
   - the C EtherCAT master's PDO map (adds the `606Ch` entry),
   - `EcTelemetry` (`ffi.rs:13`) — add `velocity_actual: i32`,
-  - the capture buffer layout (`rust/kalico-ethercat-rt/src/capture.rs` — new offset
+  - the capture buffer layout (`rust/ethercat-rt/src/capture.rs` — new offset
     alongside `OFF_POSITION_ACTUAL`),
   - a new FFI getter `ec_rt_get_velocity_actual()`.
   - **Unit:** `606Ch` is in the drive's velocity unit (rpm-based on A6-EC). Convert to
@@ -112,7 +112,7 @@ but never surfaced to the host. We add the surfacing and add native velocity:
   (request/response, symmetric with the serial path — there is no per-DC-cycle push channel
   today, and adding one would be wasteful). The endpoint replies with its latest DC-cycle
   telemetry; the bridge converts counts→mm (reverse of `CountMap::target_counts`,
-  `rust/kalico-ethercat-rt/src/scale.rs`: `mm = origin_mm + (actual - origin_counts) / counts_per_mm`)
+  `rust/ethercat-rt/src/scale.rs`: `mm = origin_mm + (actual - origin_counts) / counts_per_mm`)
   and the drive velocity unit→mm/s.
 - For EtherCAT, "blocking fresh" and "cached" collapse to nearly the same value: the DC loop
   runs at ~kHz, so the endpoint's latest sample is already sub-ms fresh.
@@ -145,10 +145,10 @@ A background pull loop refreshes the cache on a fixed cadence (see §6).
 - **Bridge-side motor→cartesian transform (not host `calc_position`).** The MCU returns
   per-slot **motor-space** positions/velocities. The bridge — which already owns the
   kinematics matrices — applies `KinematicsModule::inverse(motors)→axes`
-  (`rust/motion-bridge/src/kinematics.rs:88`; CoreXY `motor_to_axis = [[0.5,0.5,0],[0.5,-0.5,0],[0,0,1]]`,
+  (`rust/motion-engine/src/kinematics.rs:88`; CoreXY `motor_to_axis = [[0.5,0.5,0],[0.5,-0.5,0],[0,0,1]]`,
   identity for Cartesian) to the three spatial slots to recover cartesian X/Y/Z; the E slot
   passes through. The bridge selects the kinematics per MCU from `McuAxisConfig.kinematics`
-  (`rust/motion-bridge/src/dispatch.rs:21`). The host receives cartesian (pos, vel) per axis
+  (`rust/motion-engine/src/dispatch.rs:21`). The host receives cartesian (pos, vel) per axis
   and does **not** call `klippy`'s `calc_position`. (The "if an axis has multiple motors, use
   the first one" rule is moot for steppers — redundant steppers, e.g. dual-Z, are bound to a
   single engine slot and share its trajectory — and applies only to EtherCAT servos, where
@@ -236,11 +236,11 @@ This spec is implemented in two independently-testable plans sharing the same ho
 | GET_POSITION command | `klippy/extras/gcode_move.py:305` |
 | Stepper `0.0` stub | `klippy/stepper.py:158` |
 | Kinematics assembly | `klippy/motion_kinematics.py:217` (`calc_position`) |
-| New protocol message | `rust/kalico-protocol/src/messages.rs` |
-| Existing R/R model | `src/kalico_dispatch.c:273`, `rust/kalico-host-rt/src/host_io/kalico_native.rs` |
+| New protocol message | `rust/mcu-protocol/src/messages.rs` |
+| Existing R/R model | `src/mcu_transport_dispatch.c:273`, `rust/host-rt/src/host_io/mcu_transport.rs` |
 | Executor pos/vel cache | `rust/runtime/src/stepping_state.rs:125`, `rust/runtime/src/motion_core.rs:13` |
-| Q16 codec | `rust/motion-bridge/src/dispatch.rs:107` |
-| EtherCAT telemetry struct | `rust/kalico-ethercat-rt/src/ffi.rs:13` |
-| EtherCAT counts↔mm | `rust/kalico-ethercat-rt/src/scale.rs` |
-| EtherCAT capture layout | `rust/kalico-ethercat-rt/src/capture.rs:25` |
-| EtherCAT DC read site | `rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs:591` |
+| Q16 codec | `rust/motion-engine/src/dispatch.rs:107` |
+| EtherCAT telemetry struct | `rust/ethercat-rt/src/ffi.rs:13` |
+| EtherCAT counts↔mm | `rust/ethercat-rt/src/scale.rs` |
+| EtherCAT capture layout | `rust/ethercat-rt/src/capture.rs:25` |
+| EtherCAT DC read site | `rust/ethercat-rt/src/bin/ethercat-rt.rs:591` |

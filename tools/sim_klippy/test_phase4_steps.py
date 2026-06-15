@@ -115,7 +115,7 @@ def spawn_klippy():
     for _ in range(150):
         if os.path.exists(KLIPPY_API):
             # Wait long enough for klippy's MCU identify + config phase
-            # to complete (Klipper-protocol dictionary download + bridge's
+            # to complete (Klipper-protocol dictionary download + engine's
             # kalico-native identify handshake — ~3s in the sim).
             time.sleep(5.0)
             return proc
@@ -259,9 +259,9 @@ def main():
                         "Traceback",
                         "step",
                         "submit_move",
-                        "bridge-trace",
+                        "engine-trace",
                         "planner",
-                        "bridge-async",
+                        "engine-async",
                         "KALICO_SIM",
                         "homed",
                     )

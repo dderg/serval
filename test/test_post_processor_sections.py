@@ -131,14 +131,14 @@ class StubGcmd:
         return dict(self.params)
 
 
-class RaisingBridge:
+class RaisingEngine:
     def update_post_processor(self, name, key, value):
         raise ValueError("unknown post_processor '%s'" % name)
 
 
-def test_set_post_processor_bridge_error_becomes_command_error():
+def test_set_post_processor_engine_error_becomes_command_error():
     th = make_toolhead()
-    th.bridge = RaisingBridge()
+    th.engine = RaisingEngine()
     gcmd = StubGcmd({"NAME": "ghost", "K": "0.1"})
     with pytest.raises(CommandError, match="ghost"):
         th.cmd_SET_POST_PROCESSOR(gcmd)

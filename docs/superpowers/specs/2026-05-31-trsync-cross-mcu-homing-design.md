@@ -45,7 +45,7 @@ explicitly disabled during bring-up so the relay is what's under test.
 - **No cross-MCU fan-out.** Nothing distributes a trip from the detecting MCU to
   other participating MCUs. `bridge.rs::software_trip` and
   `extend_homing_deadline` each target exactly one MCU.
-- **External-probe path is a special case.** `rust/motion-bridge/src/probe_homing.rs`
+- **External-probe path is a special case.** `rust/motion-engine/src/probe_homing.rs`
   registers a Rust frame interceptor on Beacon's `trsync_state` and, on
   `can_trigger==0`, fires `runtime_software_trip arm_id=N` at the stepper MCU.
   Heavy churn, never confirmed working on hardware (logs show the relay never
@@ -179,7 +179,7 @@ gate flips from "no-op" to "arm with `runtime_stop_on_trigger`."
 
 Generalize `probe_homing.rs` into a per-homing-move `TripDispatch`, the
 `trdispatch` analog. It holds the participant set: for each participant, its
-`KalicoHostIo` handle, its trsync OID, and whether it's a source (reports) and/or
+`McuHostIo` handle, its trsync OID, and whether it's a source (reports) and/or
 a sink (has a trsync to trigger).
 
 - **Register interceptors** on each *source* MCU's reactor for its trip report:
@@ -193,7 +193,7 @@ a sink (has a trsync to trigger).
 - Set the shared "tripped" flag so the host dispatch loop (Part B) stops feeding.
 
 The Python `BridgeTriggerDispatch._on_trip_message` completion handling
-(`motion_bridge.py:577`) is **retained** for host bookkeeping (completion +
+(`motion_engine.py:577`) is **retained** for host bookkeeping (completion +
 trigger-time position). The reactor relay does the *fast stop*; Python does the
 *completion*. Two consumers of the same trip report, each doing its half.
 
@@ -223,7 +223,7 @@ Remove entirely:
   endstop source kind in `endstop.rs` (`tick_software_deadline`, `grant_ticks`,
   `extend_deadline`, `deadline_active`, `store_deadline_clock_seqlocked`).
 - **Host/Rust:** the 25 ms `extend` loop in `probe_homing.rs::run_loop` and
-  `bridge.rs::extend_homing_deadline` + `motion_bridge.py::extend_homing_deadline`.
+  `bridge.rs::extend_homing_deadline` + `motion_engine.py::extend_homing_deadline`.
 
 **Kept:** `kalico_software_trip` (the curve-evaluator *freeze*) — that is the
 stop primitive A1's signal calls. Only the *deadline* half is deleted.
@@ -301,10 +301,10 @@ Per the no-live-test-until-analysis-exhausted rule, verification ladder:
 | `src/runtime_commands.c` | add `runtime_stop_on_trigger arm_id trsync_oid` command + `trsync_signal` callback → `kalico_software_trip` (beside `command_runtime_software_trip`); delete `command_runtime_extend_homing_deadline`; keep `command_runtime_software_trip`. |
 | `src/runtime_tick.c` | delete curve-evaluator `deadline_clock` checks; keep `kalico_endstop_tripped` drain. |
 | `rust/runtime/src/endstop.rs` | disable local `AbortNow` siren (marker comment); delete software-deadline source + `extend_deadline`. |
-| `rust/motion-bridge/src/probe_homing.rs` → `trip_dispatch.rs` | generalize interceptor into `TripDispatch` (sources: `kalico_endstop_tripped` + `trsync_state`; sink: `trsync_trigger`); delete extend loop; add sliced dispatch loop. |
-| `rust/motion-bridge/src/bridge.rs` | `TripDispatch` FFI; sliced homing dispatch; delete `extend_homing_deadline`. |
+| `rust/motion-engine/src/probe_homing.rs` → `trip_dispatch.rs` | generalize interceptor into `TripDispatch` (sources: `kalico_endstop_tripped` + `trsync_state`; sink: `trsync_trigger`); delete extend loop; add sliced dispatch loop. |
+| `rust/motion-engine/src/bridge.rs` | `TripDispatch` FFI; sliced homing dispatch; delete `extend_homing_deadline`. |
 | `klippy/mcu.py` | bridge `MCU_trsync` arms with `runtime_stop_on_trigger` (reverse the ceremonial no-op). |
-| `klippy/motion_bridge.py` | `TripDispatch` wrappers; delete `extend_homing_deadline`; keep `_on_trip_message` completion. |
+| `klippy/motion_engine.py` | `TripDispatch` wrappers; delete `extend_homing_deadline`; keep `_on_trip_message` completion. |
 | `klippy/motion_toolhead.py` | `drip_move` GPIO branch: arm trsyncs + `TripDispatch`, 25 ms wall-clock sliced dispatch loop, stop on trip. |
 | `klippy/extras/homing.py` | unchanged. |
 

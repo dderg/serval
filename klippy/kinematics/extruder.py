@@ -30,7 +30,7 @@ class PrinterExtruder:
         self.filament_diameter = config.getfloat(
             "filament_diameter", minval=self.nozzle_diameter
         )
-        # Setup extruder trapq (trapezoidal motion queue). Bridge mode:
+        # Setup extruder trapq (trapezoidal motion queue). Engine mode:
         # planner / kinematic state lives in Rust, the host stub is
         # callable but never queues real moves.
         self.trapq = None

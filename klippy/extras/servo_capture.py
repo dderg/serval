@@ -70,10 +70,10 @@ class ServoCapture:
                 "SERVO_CAPTURE: NAME must match [A-Za-z0-9_-]+, got %r" % (tag,)
             )
         servo, node = self._resolve_node(gcmd)
-        handle = node.get_bridge_handle()
+        handle = node.get_engine_handle()
         if handle is None:
             raise gcmd.error(
-                "SERVO_CAPTURE: servo %r has no bridge handle (node not "
+                "SERVO_CAPTURE: servo %r has no engine handle (node not "
                 "claimed)" % (servo,)
             )
         path = os.path.join(
@@ -81,9 +81,9 @@ class ServoCapture:
             "%s_%s.scap" % (tag, time.strftime("%Y%m%d_%H%M%S")),
         )
         started_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         try:
-            bridge.start_servo_capture(handle, path, started_utc, servo)
+            engine.start_servo_capture(handle, path, started_utc, servo)
         except RuntimeError as e:
             raise gcmd.error("SERVO_CAPTURE: start failed: %s" % (e,))
         self.active = (servo, path)
@@ -97,13 +97,13 @@ class ServoCapture:
         servo, path = self.active
         self.active = None
         node = self._nodes().get(servo)
-        if node is None or node.get_bridge_handle() is None:
+        if node is None or node.get_engine_handle() is None:
             raise gcmd.error(
                 "SERVO_CAPTURE: servo %r vanished mid-capture" % (servo,)
             )
-        bridge = self.printer.lookup_object("motion_bridge")
-        result, samples, overflow_cycle = bridge.stop_servo_capture(
-            node.get_bridge_handle()
+        engine = self.printer.lookup_object("motion_engine")
+        result, samples, overflow_cycle = engine.stop_servo_capture(
+            node.get_engine_handle()
         )
         if result != 0:
             failed = os.path.splitext(path)[0] + ".failed.scap"

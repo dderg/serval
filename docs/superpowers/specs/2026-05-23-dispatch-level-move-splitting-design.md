@@ -88,9 +88,9 @@ The dispatch clamps the effective split limit to `min(caps.max_pieces_per_curve,
 
 ## Files to modify
 
-1. `rust/motion-bridge/src/dispatch.rs` — add `split_plan_if_needed()` with time-domain splitting, de Casteljau subdivision, post-split validation with recursive re-split fallback, and minimum-cap check
-2. `rust/motion-bridge/src/bridge.rs` — replace `CapsExceeded` error with split + iterate; remove the pre-dispatch cap check; pre-allocate segment IDs for split and mark only the last for homing; clamp effective max_pieces to `min(caps, 255)`; add retry loop for slot allocation (post-Task-10, immediate failure pre-Task-10)
-3. `rust/kalico-host-rt/src/producer.rs` — bump `MAX_PIECES_PER_CURVE` from 96 to 255
+1. `rust/motion-engine/src/dispatch.rs` — add `split_plan_if_needed()` with time-domain splitting, de Casteljau subdivision, post-split validation with recursive re-split fallback, and minimum-cap check
+2. `rust/motion-engine/src/bridge.rs` — replace `CapsExceeded` error with split + iterate; remove the pre-dispatch cap check; pre-allocate segment IDs for split and mark only the last for homing; clamp effective max_pieces to `min(caps, 255)`; add retry loop for slot allocation (post-Task-10, immediate failure pre-Task-10)
+3. `rust/host-rt/src/producer.rs` — bump `MAX_PIECES_PER_CURVE` from 96 to 255
 
 ## Tests
 

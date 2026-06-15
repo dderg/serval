@@ -38,9 +38,9 @@ export RUST_BACKTRACE=1
 export KALICO_NO_EXIT_ON_FAULT=1
 
 if [[ -n "${FILTER}" ]]; then
-  exec cargo test -p motion-bridge --test sim_motion_jogs -- \
+  exec cargo test -p motion-engine --test sim_motion_jogs -- \
     --ignored --test-threads=1 --nocapture "${FILTER}"
 else
-  exec cargo test -p motion-bridge --test sim_motion_jogs -- \
+  exec cargo test -p motion-engine --test sim_motion_jogs -- \
     --ignored --test-threads=1 --nocapture
 fi

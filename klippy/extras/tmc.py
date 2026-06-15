@@ -7,7 +7,7 @@ import collections
 import logging
 
 from klippy import pins, stepper
-from klippy.bridge_endstop import BridgeEndstop, allocate_provider_id
+from klippy.motion_endstop import MotionEndstop, allocate_provider_id
 
 ######################################################################
 # Field helpers
@@ -460,10 +460,10 @@ class TMCCommandHelper:
 
     def _handle_stepper_enable(self, print_time, is_enable):
         if is_enable:
-            # Inline, not deferred like disable below: the bridge ships the
+            # Inline, not deferred like disable below: the engine ships the
             # move right after this with no lookahead, so deferring to the
             # reactor loses the first move on a driver not yet ready.
-            self._do_enable_bridge(print_time)
+            self._do_enable_engine(print_time)
             return
 
         def cb(ev):
@@ -471,7 +471,7 @@ class TMCCommandHelper:
 
         self.printer.get_reactor().register_callback(cb)
 
-    def _do_enable_bridge(self, print_time):
+    def _do_enable_engine(self, print_time):
         try:
             if self._post_enable_cb is not None:
                 if self.toff is not None:
@@ -494,7 +494,7 @@ class TMCCommandHelper:
                 self._init_registers()
         except (self.printer.command_error, RuntimeError) as e:
             self.printer.invoke_shutdown(
-                "TMC %s _do_enable_bridge failed: %s" % (self.stepper_name, e)
+                "TMC %s _do_enable_engine failed: %s" % (self.stepper_name, e)
             )
 
     def _handle_connect(self):
@@ -615,7 +615,7 @@ class TMCVirtualPinHelper:
         ppins = self.printer.lookup_object("pins")
         ppins.register_chip("%s_%s" % (name_parts[0], name_parts[-1]), self)
 
-    def setup_bridge_endstop(self, pin_params, axis):
+    def setup_motion_endstop(self, pin_params, axis):
         if pin_params["pin"] != "virtual_endstop":
             raise pins.error(
                 "tmc drivers only provide the virtual pin 'virtual_endstop',"
@@ -635,7 +635,7 @@ class TMCVirtualPinHelper:
                     "tmc diag pin '%s' must be a GPIO pin on an MCU"
                     % (self.diag_pin,)
                 )
-            self.mcu_endstop = BridgeEndstop(
+            self.mcu_endstop = MotionEndstop(
                 diag_params, allocate_provider_id(self.printer)
             )
         return self.mcu_endstop

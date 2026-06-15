@@ -128,7 +128,7 @@ The pyo3 seam already separates the two jobs, and the split does not move:
   (`M82/M83`), speed factor (`M220`/`F`), `SAVE`/`RESTORE_GCODE_STATE`, and
   the per-move validation (`kin.check_move`, `extruder.check_move`). Shared by
   every motion command; reused by G5/G5.1 unchanged.
-- **Rust (`motion-bridge`) owns curve geometry** — turning control points into
+- **Rust (`motion-engine`) owns curve geometry** — turning control points into
   a `CubicSegment`, the quadratic→cubic elevation, holding the chaining state,
   and feeding the optimizer. The bridge already tracks the running `start`.
 
@@ -153,7 +153,7 @@ on it.
 
 Audit: the live engine's entire compat footprint is one function,
 `to_collinear_bezier` (`compat/src/collinear.rs:20`), called only from
-`motion-bridge/src/classify.rs`. Compat's own logic never calls it (it uses
+`motion-engine/src/classify.rs`. Compat's own logic never calls it (it uses
 `to_collinear_g5`, the text emitter). The control-point primitive is simply
 mis-filed in a g-code-text crate.
 
@@ -161,7 +161,7 @@ Changes:
 
 1. Move `to_collinear_bezier` (and its two unit tests) from `compat` into
    `geometry`; update `classify.rs` to import from `geometry`.
-2. Remove `compat` from `motion-bridge/Cargo.toml`. The planner then has zero
+2. Remove `compat` from `motion-engine/Cargo.toml`. The planner then has zero
    compat edges.
 3. Add the G5 control-point builder and the exact quadratic→cubic elevation
    alongside it in `geometry`.
@@ -379,7 +379,7 @@ Rust (`cargo nextest run`):
 - `geometry`: G5 control-point assembly; G5.1 quadratic→cubic elevation is
   exact (sample both forms, compare); Z thirds/half give linear Z; arc length
   vs chord on a known curve; relocated `to_collinear_bezier` keeps its tests.
-- `motion-bridge` `classify`: builds a non-degenerate `CubicSegment` from
+- `motion-engine` `classify`: builds a non-degenerate `CubicSegment` from
   control points; chaining `(I,J) = -(P_prev,Q_prev)`; chain cleared by an
   intervening `submit_move`/`submit_quadratic`; chain-without-prior-`G5`
   returns an error.

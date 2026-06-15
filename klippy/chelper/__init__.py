@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 import os
+import platform
 
 import cffi
 
@@ -26,7 +27,7 @@ SOURCE_FILES = [
     "msgblock.c",
     "trdispatch.c",
 ]
-DEST_LIB = "c_helper.so"
+DEST_LIB = "c_helper.%s-%s.so" % (platform.system(), platform.machine())
 OTHER_FILES = [
     "list.h",
     "serialqueue.h",

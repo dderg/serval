@@ -96,9 +96,9 @@ Key facts the handover builds on:
 
 The runtime FFI for `set_step_mode` (runtime_ffi.rs:520) and
 `set_stepper_offset` (runtime_ffi.rs:948) exists but is not exposed through
-motion-bridge or Python. New surface:
+motion-engine or Python. New surface:
 
-- Bridge methods + motion_bridge.py wrappers for:
+- Bridge methods + motion_engine.py wrappers for:
   - `set_step_mode(stepper, mode)`
   - `set_stepper_offset(stepper, delta_microsteps, max_per_sample)` —
     ramped jog (exit handover)

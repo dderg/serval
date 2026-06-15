@@ -6,7 +6,7 @@
 
 **Architecture:** Python (`gcode_move.py`/`motion.py`) keeps all g-code coordinate semantics and resolves the endpoint + raw control-point offsets; new pyo3 bridge entries (`submit_bezier`/`submit_quadratic`) carry the control points into Rust, where `classify_bezier`/`classify_quadratic` assemble a `CubicSegment` (control-point math lives in a new `geometry::curve` module) and hand it to the existing optimizer unchanged. Smooth-G5 chaining state and the extruder arc-length ratio live in Rust; range-check, transform gate, and bed-mesh gate live in Python.
 
-**Tech Stack:** Rust (crates `geometry`, `nurbs`, `motion-bridge` with pyo3 0.29), Python (klippy). Rust tests via `cargo nextest run`; Python tests via `./scripts/ci.sh py`. Spec: `docs/superpowers/specs/2026-06-14-live-g5-support-design.md`.
+**Tech Stack:** Rust (crates `geometry`, `nurbs`, `motion-engine` with pyo3 0.29), Python (klippy). Rust tests via `cargo nextest run`; Python tests via `./scripts/ci.sh py`. Spec: `docs/superpowers/specs/2026-06-14-live-g5-support-design.md`.
 
 ---
 
@@ -16,14 +16,14 @@
 - Create `rust/geometry/src/curve.rs` — control-point math: `to_collinear_bezier` (relocated from `compat`), `g5_control_points`, `g51_control_points`.
 - Create `rust/geometry/src/curve/tests.rs` — unit tests for the three functions.
 - Modify `rust/geometry/src/lib.rs` — add `pub mod curve;`.
-- Modify `rust/motion-bridge/src/classify.rs` — swap the `compat` import for `geometry::curve`; add `classify_bezier`, `classify_quadratic`, shared `classify_curve`.
-- Modify `rust/motion-bridge/src/classify/tests.rs` — tests for the new classifiers.
-- Modify `rust/motion-bridge/src/bridge.rs` — add `last_g5_pq` field, `e_followers` helper, `submit_bezier`/`submit_quadratic` pymethods; clear chain in `submit_move`.
-- Modify `rust/motion-bridge/Cargo.toml` — remove the `compat` dependency.
+- Modify `rust/motion-engine/src/classify.rs` — swap the `compat` import for `geometry::curve`; add `classify_bezier`, `classify_quadratic`, shared `classify_curve`.
+- Modify `rust/motion-engine/src/classify/tests.rs` — tests for the new classifiers.
+- Modify `rust/motion-engine/src/bridge.rs` — add `last_g5_pq` field, `e_followers` helper, `submit_bezier`/`submit_quadratic` pymethods; clear chain in `submit_move`.
+- Modify `rust/motion-engine/Cargo.toml` — remove the `compat` dependency.
 - Modify `rust/compat/src/collinear.rs` + `rust/compat/src/collinear/tests.rs` — delete `to_collinear_bezier` and its test (moved to `geometry`).
 
 **Python:**
-- Modify `klippy/motion_bridge.py` — `submit_bezier`/`submit_quadratic` passthroughs; add both to `_STUB_MOTION_METHODS`.
+- Modify `klippy/motion_engine.py` — `submit_bezier`/`submit_quadratic` passthroughs; add both to `_STUB_MOTION_METHODS`.
 - Modify `klippy/motion.py` — `Motion.move_curve(...)`.
 - Modify `klippy/extras/gcode_move.py` — register + implement `cmd_G5`, `cmd_G5_1`, transform-gate helper.
 - Modify `klippy/extras/bed_mesh.py` — activation gate in `set_mesh`.
@@ -291,14 +291,14 @@ git commit -m "feat(geometry): add exact G5.1 quadratic->cubic elevation"
 ### Task 4: Sever the `compat` dependency from the live engine
 
 **Files:**
-- Modify: `rust/motion-bridge/src/classify.rs:1` (import)
-- Modify: `rust/motion-bridge/Cargo.toml` (remove `compat`)
+- Modify: `rust/motion-engine/src/classify.rs:1` (import)
+- Modify: `rust/motion-engine/Cargo.toml` (remove `compat`)
 - Modify: `rust/compat/src/collinear.rs` (delete `to_collinear_bezier`)
 - Modify: `rust/compat/src/collinear/tests.rs` (delete its test)
 
 - [ ] **Step 1: Repoint the import**
 
-In `rust/motion-bridge/src/classify.rs`, change line 1:
+In `rust/motion-engine/src/classify.rs`, change line 1:
 
 ```rust
 use geometry::curve::to_collinear_bezier;
@@ -314,7 +314,7 @@ In `rust/compat/src/collinear/tests.rs`, delete the two tests that reference `to
 
 - [ ] **Step 3: Remove the dependency**
 
-In `rust/motion-bridge/Cargo.toml`, delete the line:
+In `rust/motion-engine/Cargo.toml`, delete the line:
 
 ```toml
 compat = { path = "../compat" }
@@ -322,33 +322,33 @@ compat = { path = "../compat" }
 
 - [ ] **Step 4: Verify the whole workspace builds and tests pass**
 
-Run: `cd rust && cargo nextest run -p geometry -p compat -p motion-bridge && cargo build -p motion-bridge`
+Run: `cd rust && cargo nextest run -p geometry -p compat -p motion-engine && cargo build -p motion-engine`
 Expected: PASS, and no `unused dependency: compat` from clippy.
-Run: `cd rust && cargo clippy -p motion-bridge -- -D warnings`
+Run: `cd rust && cargo clippy -p motion-engine -- -D warnings`
 Expected: clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add rust/motion-bridge/src/classify.rs rust/motion-bridge/Cargo.toml rust/compat/src/collinear.rs rust/compat/src/collinear/tests.rs
-git commit -m "refactor: move to_collinear_bezier to geometry, drop motion-bridge->compat dep"
+git add rust/motion-engine/src/classify.rs rust/motion-engine/Cargo.toml rust/compat/src/collinear.rs rust/compat/src/collinear/tests.rs
+git commit -m "refactor: move to_collinear_bezier to geometry, drop motion-engine->compat dep"
 ```
 
 ---
 
-## Phase 2 — motion-bridge classifiers + pyo3 entries + chaining
+## Phase 2 — motion-engine classifiers + pyo3 entries + chaining
 
 ### Task 5: Add `classify_curve` / `classify_bezier` / `classify_quadratic`
 
 **Files:**
-- Modify: `rust/motion-bridge/src/classify.rs`
-- Modify: `rust/motion-bridge/src/classify/tests.rs`
+- Modify: `rust/motion-engine/src/classify.rs`
+- Modify: `rust/motion-engine/src/classify/tests.rs`
 
 These build a `CubicSegment` from explicit control points, using **true arc length** for both `distance_mm` and the follower ratio (the spec's one extrusion-correctness requirement). They mirror `classify_and_build` but skip `to_collinear_bezier`.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `rust/motion-bridge/src/classify/tests.rs`:
+Append to `rust/motion-engine/src/classify/tests.rs`:
 
 ```rust
 #[test]
@@ -375,12 +375,12 @@ fn classify_quadratic_builds_a_segment() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd rust && cargo nextest run -p motion-bridge -E 'test(classify_bezier_uses_arc_length)'`
+Run: `cd rust && cargo nextest run -p motion-engine -E 'test(classify_bezier_uses_arc_length)'`
 Expected: FAIL — `classify_bezier` not found.
 
 - [ ] **Step 3: Implement**
 
-In `rust/motion-bridge/src/classify.rs`, update imports at the top:
+In `rust/motion-engine/src/classify.rs`, update imports at the top:
 
 ```rust
 use geometry::curve::{g5_control_points, g51_control_points, to_collinear_bezier};
@@ -461,24 +461,24 @@ pub fn classify_quadratic(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd rust && cargo nextest run -p motion-bridge -E 'test(classify_bezier) + test(classify_quadratic)'`
+Run: `cd rust && cargo nextest run -p motion-engine -E 'test(classify_bezier) + test(classify_quadratic)'`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add rust/motion-bridge/src/classify.rs rust/motion-bridge/src/classify/tests.rs
-git commit -m "feat(motion-bridge): classify_bezier/quadratic with arc-length follower ratio"
+git add rust/motion-engine/src/classify.rs rust/motion-engine/src/classify/tests.rs
+git commit -m "feat(motion-engine): classify_bezier/quadratic with arc-length follower ratio"
 ```
 
 ### Task 6: Add the chaining-state field + `e_followers` helper to the bridge
 
 **Files:**
-- Modify: `rust/motion-bridge/src/bridge.rs` (struct fields ~478-518; constructor where `commanded_pos` is initialized; `submit_move` ~2909)
+- Modify: `rust/motion-engine/src/bridge.rs` (struct fields ~478-518; constructor where `commanded_pos` is initialized; `submit_move` ~2909)
 
 - [ ] **Step 1: Add the field**
 
-In the `PyMotionBridge` struct (`rust/motion-bridge/src/bridge.rs`, near `commanded_pos: Mutex<[f64; 3]>,`), add:
+In the `PyMotionEngine` struct (`rust/motion-engine/src/bridge.rs`, near `commanded_pos: Mutex<[f64; 3]>,`), add:
 
 ```rust
     last_g5_pq: Mutex<Option<(f64, f64)>>,
@@ -486,7 +486,7 @@ In the `PyMotionBridge` struct (`rust/motion-bridge/src/bridge.rs`, near `comman
 
 - [ ] **Step 2: Initialize it in the constructor**
 
-Find where `commanded_pos: Mutex::new([0.0, 0.0, 0.0])` is set in the struct literal (run `grep -n "commanded_pos: Mutex::new" rust/motion-bridge/src/bridge.rs`). Add alongside it:
+Find where `commanded_pos: Mutex::new([0.0, 0.0, 0.0])` is set in the struct literal (run `grep -n "commanded_pos: Mutex::new" rust/motion-engine/src/bridge.rs`). Add alongside it:
 
 ```rust
             last_g5_pq: Mutex::new(None),
@@ -494,7 +494,7 @@ Find where `commanded_pos: Mutex::new([0.0, 0.0, 0.0])` is set in the struct lit
 
 - [ ] **Step 3: Add the `e_followers` helper and clear the chain in `submit_move`**
 
-Add this private method inside the same `impl PyMotionBridge` block (near `submit_move`):
+Add this private method inside the same `impl PyMotionEngine` block (near `submit_move`):
 
 ```rust
     fn e_followers(&self, de: f64) -> PyResult<Vec<(usize, f64)>> {
@@ -524,25 +524,25 @@ In `submit_move`, after the position is advanced (`pos[2] += dz;`), clear the ch
 
 - [ ] **Step 4: Build to verify it compiles**
 
-Run: `cd rust && cargo build -p motion-bridge`
+Run: `cd rust && cargo build -p motion-engine`
 Expected: compiles (no test yet — exercised in Task 7 via the pymethods; field is otherwise `dead_code` until then, so this step may emit a dead-code warning, which Task 7 clears).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add rust/motion-bridge/src/bridge.rs
-git commit -m "feat(motion-bridge): add G5 chaining state + e_followers helper; clear chain on linear move"
+git add rust/motion-engine/src/bridge.rs
+git commit -m "feat(motion-engine): add G5 chaining state + e_followers helper; clear chain on linear move"
 ```
 
 ### Task 7: Add `submit_bezier` and `submit_quadratic` pymethods
 
 **Files:**
-- Modify: `rust/motion-bridge/src/bridge.rs` (the `#[pymethods] impl PyMotionBridge`)
-- Modify: `rust/motion-bridge/src/bridge.rs` tests (or `rust/motion-bridge/tests/`) — a Rust-level test is awkward through pyo3; this method is covered by the Python integration test in Phase 5. Add a focused unit test for the chaining math instead (Step 1).
+- Modify: `rust/motion-engine/src/bridge.rs` (the `#[pymethods] impl PyMotionEngine`)
+- Modify: `rust/motion-engine/src/bridge.rs` tests (or `rust/motion-engine/tests/`) — a Rust-level test is awkward through pyo3; this method is covered by the Python integration test in Phase 5. Add a focused unit test for the chaining math instead (Step 1).
 
 - [ ] **Step 1: Write the failing test (chaining reflection math)**
 
-Append to `rust/motion-bridge/src/classify/tests.rs` a test of the reflection convention used by the pymethod, so the math is covered without pyo3:
+Append to `rust/motion-engine/src/classify/tests.rs` a test of the reflection convention used by the pymethod, so the math is covered without pyo3:
 
 ```rust
 #[test]
@@ -560,12 +560,12 @@ fn chain_reflection_negates_previous_pq() {
 
 - [ ] **Step 2: Run test to verify it fails (or compiles)**
 
-Run: `cd rust && cargo nextest run -p motion-bridge -E 'test(chain_reflection_negates_previous_pq)'`
+Run: `cd rust && cargo nextest run -p motion-engine -E 'test(chain_reflection_negates_previous_pq)'`
 Expected: PASS already if `g5_control_points` is public (it is) — this test documents the convention. If it fails, fix the sign convention before proceeding.
 
 - [ ] **Step 3: Implement the two pymethods**
 
-In the `#[pymethods] impl PyMotionBridge` block (where `submit_move` lives), add:
+In the `#[pymethods] impl PyMotionEngine` block (where `submit_move` lives), add:
 
 ```rust
     #[pyo3(signature = (i, j, p, q, dx, dy, dz, de, feedrate))]
@@ -656,14 +656,14 @@ In the `#[pymethods] impl PyMotionBridge` block (where `submit_move` lives), add
 
 - [ ] **Step 4: Build + clippy**
 
-Run: `cd rust && cargo build -p motion-bridge && cargo clippy -p motion-bridge -- -D warnings`
+Run: `cd rust && cargo build -p motion-engine && cargo clippy -p motion-engine -- -D warnings`
 Expected: clean (the `last_g5_pq` dead-code warning from Task 6 is now resolved).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add rust/motion-bridge/src/bridge.rs rust/motion-bridge/src/classify/tests.rs
-git commit -m "feat(motion-bridge): submit_bezier/submit_quadratic pymethods with G5 chaining"
+git add rust/motion-engine/src/bridge.rs rust/motion-engine/src/classify/tests.rs
+git commit -m "feat(motion-engine): submit_bezier/submit_quadratic pymethods with G5 chaining"
 ```
 
 ---
@@ -673,11 +673,11 @@ git commit -m "feat(motion-bridge): submit_bezier/submit_quadratic pymethods wit
 ### Task 8: Wire `submit_bezier`/`submit_quadratic` through the Python wrapper + stub
 
 **Files:**
-- Modify: `klippy/motion_bridge.py` (`_STUB_MOTION_METHODS` ~28-65; `MotionBridgeWrapper` methods after `submit_dwell` ~390)
+- Modify: `klippy/motion_engine.py` (`_STUB_MOTION_METHODS` ~28-65; `MotionEngineWrapper` methods after `submit_dwell` ~390)
 
 - [ ] **Step 1: Add to the stub method set**
 
-In `klippy/motion_bridge.py`, add to the `_STUB_MOTION_METHODS` frozenset (alongside `"submit_move"`, `"submit_dwell"`):
+In `klippy/motion_engine.py`, add to the `_STUB_MOTION_METHODS` frozenset (alongside `"submit_move"`, `"submit_dwell"`):
 
 ```python
         "submit_bezier",
@@ -686,7 +686,7 @@ In `klippy/motion_bridge.py`, add to the `_STUB_MOTION_METHODS` frozenset (along
 
 - [ ] **Step 2: Add the passthrough methods**
 
-In `MotionBridgeWrapper`, after `submit_dwell` (line ~390), add:
+In `MotionEngineWrapper`, after `submit_dwell` (line ~390), add:
 
 ```python
     def submit_bezier(self, i, j, p, q, dx, dy, dz, de, feedrate):
@@ -698,13 +698,13 @@ In `MotionBridgeWrapper`, after `submit_dwell` (line ~390), add:
 
 - [ ] **Step 3: Smoke-check import**
 
-Run: `cd /Users/daniladergachev/Developer/kalico/.worktrees/g2g3g5 && python -c "import klippy.motion_bridge as m; print('submit_bezier' in m._STUB_MOTION_METHODS)"`
+Run: `cd /Users/daniladergachev/Developer/kalico/.worktrees/g2g3g5 && python -c "import klippy.motion_engine as m; print('submit_bezier' in m._STUB_MOTION_METHODS)"`
 Expected: prints `True`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add klippy/motion_bridge.py
+git add klippy/motion_engine.py
 git commit -m "feat(klippy): submit_bezier/submit_quadratic passthroughs + stub entries"
 ```
 
@@ -1262,13 +1262,13 @@ git commit -m "feat(klippy): fail-loud gate on bed-mesh activation (unsupported 
 ### Task 14: Cusp / adversarial-curve experiment (drives the cusp decision)
 
 **Files:**
-- Test: `rust/motion-bridge/src/classify/tests.rs` (or a dedicated test under `rust/trajectory/`)
+- Test: `rust/motion-engine/src/classify/tests.rs` (or a dedicated test under `rust/trajectory/`)
 
 This task is an **experiment**, not a feature: it feeds degenerate polygons through the live solver and records what happens. The outcome decides whether cusp-splitting is needed (spec §"Cusps").
 
 - [ ] **Step 1: Write the experiment test**
 
-Append to `rust/motion-bridge/src/classify/tests.rs`:
+Append to `rust/motion-engine/src/classify/tests.rs`:
 
 ```rust
 #[test]
@@ -1290,7 +1290,7 @@ fn experiment_cusp_and_near_cusp_classification_is_finite() {
 
 - [ ] **Step 2: Run it**
 
-Run: `cd rust && cargo nextest run -p motion-bridge -E 'test(experiment_cusp)'`
+Run: `cd rust && cargo nextest run -p motion-engine -E 'test(experiment_cusp)'`
 Expected: PASS (classify is finite). Record the result.
 
 - [ ] **Step 3: Run the cusp through the real solver and record the outcome**

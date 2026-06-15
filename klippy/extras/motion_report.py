@@ -45,13 +45,13 @@ class PrinterMotionReport:
 
     def _connect(self):
         self.last_status["steppers"] = list(sorted(self.steppers.keys()))
-        self.bridge = self.printer.lookup_object("motion_bridge", None)
+        self.engine = self.printer.lookup_object("motion_engine", None)
 
     def get_status(self, eventtime):
-        bridge = getattr(self, "bridge", None)
-        if bridge is None:
+        engine = getattr(self, "engine", None)
+        if engine is None:
             return self.last_status
-        axes = bridge.live_motor_positions()
+        axes = engine.live_motor_positions()
         if not axes:
             return self.last_status
         gcode = self.printer.lookup_object("gcode")

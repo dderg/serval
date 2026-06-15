@@ -225,7 +225,7 @@ Ranking of candidate causes:
 
 ### Exact Inputs Used
 
-I added the Rust regression test at `rust/trajectory/tests/stall_homing_move.rs` so the test exercises the same public entry point as `motion-bridge::planner::run_pipeline`: `trajectory::shape_batch`.
+I added the Rust regression test at `rust/trajectory/tests/stall_homing_move.rs` so the test exercises the same public entry point as `motion-engine::planner::run_pipeline`: `trajectory::shape_batch`.
 
 The test uses the captured values verbatim:
 
@@ -302,25 +302,25 @@ The remaining divergence is between the live bridge process and the tested `shap
 
 1. **Stale or different loaded Rust extension**: the live Python bridge may not be using the same compiled code as the Rust workspace test. This would explain why the same textual input converges in `cargo test` but stalls in the simulator. The process should log the Rust crate/version/git hash at `init_planner`.
 
-2. **Single-slot planner error replay**: `PlannerHandle::check_error` returns and clears a previously stored planner error at `rust/motion-bridge/src/planner.rs:113-117` before enqueuing later moves. If the observed Python exception is read on a later call, it may describe an earlier `run_pipeline` input, not the currently printed buffer. The run loop stores errors at `rust/motion-bridge/src/planner.rs:320-325`.
+2. **Single-slot planner error replay**: `PlannerHandle::check_error` returns and clears a previously stored planner error at `rust/motion-engine/src/planner.rs:113-117` before enqueuing later moves. If the observed Python exception is read on a later call, it may describe an earlier `run_pipeline` input, not the currently printed buffer. The run loop stores errors at `rust/motion-engine/src/planner.rs:320-325`.
 
-3. **Incomplete captured state around message barriers**: `run_loop` buffers messages at `rust/motion-bridge/src/planner.rs:222-257`, applies `UpdateLimits` / `UpdateShaper` after shaping at `rust/motion-bridge/src/planner.rs:338-345`, and builds the public `ShapeBatchInput` at `rust/motion-bridge/src/planner.rs:399-432`. The capture includes the main segment/config fields but not whether a pending flush, dwell, config update, prior error, or shutdown barrier was present in the same loop turn.
+3. **Incomplete captured state around message barriers**: `run_loop` buffers messages at `rust/motion-engine/src/planner.rs:222-257`, applies `UpdateLimits` / `UpdateShaper` after shaping at `rust/motion-engine/src/planner.rs:338-345`, and builds the public `ShapeBatchInput` at `rust/motion-engine/src/planner.rs:399-432`. The capture includes the main segment/config fields but not whether a pending flush, dwell, config update, prior error, or shutdown barrier was present in the same loop turn.
 
-4. **Bridge commanded-position divergence before classification**: `submit_homing_move_inner` reads bridge-local `commanded_pos` at `rust/motion-bridge/src/bridge.rs:1595-1605`; regular moves advance it at `rust/motion-bridge/src/bridge.rs:1274-1278`; `set_position` overwrites it at `rust/motion-bridge/src/bridge.rs:1429-1431`. On the Python side, `Motion.set_position` mirrors into the bridge at `klippy/motion.py:244-247`, while `drip_move` submits homing at `klippy/motion.py:299-303` without updating Python `commanded_pos` there. If prior `SET_KINEMATIC_POSITION`, `G1`, or homing reconciliation traffic diverges between Python and Rust state, a later captured exception may be associated with a different classified move than expected. The exact captured control points argue against this for this specific dump, but it is still the state boundary to instrument.
+4. **Bridge commanded-position divergence before classification**: `submit_homing_move_inner` reads bridge-local `commanded_pos` at `rust/motion-engine/src/bridge.rs:1595-1605`; regular moves advance it at `rust/motion-engine/src/bridge.rs:1274-1278`; `set_position` overwrites it at `rust/motion-engine/src/bridge.rs:1429-1431`. On the Python side, `Motion.set_position` mirrors into the bridge at `klippy/motion.py:244-247`, while `drip_move` submits homing at `klippy/motion.py:299-303` without updating Python `commanded_pos` there. If prior `SET_KINEMATIC_POSITION`, `G1`, or homing reconciliation traffic diverges between Python and Rust state, a later captured exception may be associated with a different classified move than expected. The exact captured control points argue against this for this specific dump, but it is still the state boundary to instrument.
 
 ### Proposed Minimal Fix Location
 
 No temporal or trajectory fix is justified by the current Rust reproduction result. The minimal next step is instrumentation, not a planner-side workaround:
 
-1. In `rust/motion-bridge/src/planner.rs`, immediately before `run_pipeline(&buffer, &config)`, emit one structured event containing: planner error slot state before shaping, loop turn id, pending barrier kind, full config, every segment's degree/knots/control points/e-mode/feedrate, and a stable hash of the assembled `ShapeBatchInput`.
+1. In `rust/motion-engine/src/planner.rs`, immediately before `run_pipeline(&buffer, &config)`, emit one structured event containing: planner error slot state before shaping, loop turn id, pending barrier kind, full config, every segment's degree/knots/control points/e-mode/feedrate, and a stable hash of the assembled `ShapeBatchInput`.
 
 2. Immediately after `trajectory::shape_batch(&input)` inside `run_pipeline`, emit either `Ok { temporal_status, beta_warning, shaped_count, durations }` or `Err { ShapeError, per-profile status if available }`. The key missing field is the actual `ShapeError` returned by the same compiled extension, not only the input dump.
 
-3. In `rust/motion-bridge/src/bridge.rs`, log `commanded_pos` before and after `submit_move`, `submit_homing_move_inner`, and `set_position`, with a monotonically increasing bridge command id. This ties Python `SET_KINEMATIC_POSITION` / `G1` / homing traffic to the exact segment later seen by the planner.
+3. In `rust/motion-engine/src/bridge.rs`, log `commanded_pos` before and after `submit_move`, `submit_homing_move_inner`, and `set_position`, with a monotonically increasing bridge command id. This ties Python `SET_KINEMATIC_POSITION` / `G1` / homing traffic to the exact segment later seen by the planner.
 
 4. In the Python bridge/toolhead layer, include the same command id in `motion.py::move`, `set_position`, and `drip_move` logs so the Rust position state can be compared against Klippy's `commanded_pos`.
 
-If future instrumentation proves that the same in-process `ShapeBatchInput` fails inside `trajectory::shape_batch`, the fix belongs in `rust/trajectory/` around the beta iteration or shaper pad/trim path, not in `motion-bridge`. With the current Rust evidence, however, the failure is more likely stale-code or state-correlation drift than a deterministic SmoothZv TOPP-RA/shaper infeasibility.
+If future instrumentation proves that the same in-process `ShapeBatchInput` fails inside `trajectory::shape_batch`, the fix belongs in `rust/trajectory/` around the beta iteration or shaper pad/trim path, not in `motion-engine`. With the current Rust evidence, however, the failure is more likely stale-code or state-correlation drift than a deterministic SmoothZv TOPP-RA/shaper infeasibility.
 
 ## Stencil-Agreement Analysis
 

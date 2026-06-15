@@ -40,7 +40,7 @@ klippy owns the endpoint's lifecycle. No systemd unit, no wrapper script.
 
 ## Components
 
-### Endpoint (`rust/kalico-ethercat-rt`)
+### Endpoint (`rust/ethercat-rt`)
 
 - Keep socket-bind-before-bringup order. Replace `exit(1)` on bringup
   failure with: serve the handshake, report the per-drive outcome, exit.
@@ -52,7 +52,7 @@ klippy owns the endpoint's lifecycle. No systemd unit, no wrapper script.
   `setcap cap_net_raw,cap_sys_nice,cap_ipc_lock+ep` to the binary (raw
   EtherCAT socket, `SCHED_FIFO`/affinity, `mlockall`).
 
-### Wire protocol (`kalico-native-transport` / handshake)
+### Wire protocol (`mcu-transport` / handshake)
 
 - The claim handshake reply gains a per-slave status list:
   `[(slave_idx, state)]` where state ∈ ok / offline / fault(code). The shim
@@ -61,7 +61,7 @@ klippy owns the endpoint's lifecycle. No systemd unit, no wrapper script.
 - Fail loudly: an unknown state value or a reply missing the status list is
   a hard protocol error, not a default-to-ok.
 
-### Bridge (`rust/motion-bridge`)
+### Bridge (`rust/motion-engine`)
 
 - `claim_ethercat_node` gains spawn duties: launch the configured binary
   with `<interface>`, `--socket <path>`, and `--counts-per-mm` computed from
@@ -88,7 +88,7 @@ klippy owns the endpoint's lifecycle. No systemd unit, no wrapper script.
 - New flow: power anything in any order; start klipper. Dark drive →
   named error → power the drive → `FIRMWARE_RESTART`.
 - The stub rides the same machinery: a bench config pointing `endpoint:` at
-  `kalico-ethercat-rt-stub` gives drive-off testing with the identical
+  `ethercat-rt-stub` gives drive-off testing with the identical
   lifecycle. No special-casing in the bridge.
 - `docs/kalico-rewrite/ethercat-bench-bringup.md` updated to the new flow.
 

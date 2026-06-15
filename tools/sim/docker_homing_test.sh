@@ -79,8 +79,7 @@ shaper_type_y: smooth_zv
 enable_force_move: True
 CFGEOF
 
-# Remove stale chelper from host volume mount (wrong arch)
-rm -f klippy/chelper/c_helper.so klippy/chelper/*.o
+rm -f klippy/chelper/*.o
 
 echo "=== Starting klippy ==="
 mkdir -p /tmp/logs

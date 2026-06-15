@@ -18,7 +18,7 @@ class FakeEndstop:
         self.triggered_after_wait = triggered_after_wait
         self.calls = []
 
-    def bridge_mcu_handle(self):
+    def engine_mcu_handle(self):
         return object()
 
     def is_triggered(self):
@@ -45,7 +45,7 @@ class FakePrinter:
         return FakeReactor()
 
 
-class FakeBridge:
+class FakeEngine:
     def motion_drained(self):
         return True
 
@@ -68,7 +68,7 @@ def run_trip_move(endstop):
     toolhead = FakeToolhead(endstop)
     entry = {"endstop": endstop, "provider": None}
     homing.trip_move(
-        FakeGcmd(), toolhead, FakeBridge(), 2, -1, 5.0, 40.0, entry
+        FakeGcmd(), toolhead, FakeEngine(), 2, -1, 5.0, 40.0, entry
     )
 
 
@@ -76,7 +76,7 @@ def test_trip_move_arms_when_endstop_already_triggered():
     # Matches mainline: an already-triggered endstop is not a precheck error.
     # The first approach arms the endstop and lets it insta-trip — the MCU
     # samples the live pin and brakes immediately (src/endstop.c) and the
-    # bridge buffers the early trip.
+    # engine buffers the early trip.
     endstop = FakeEndstop(triggered_after_wait=True)
     with pytest.raises(ArmReached):
         run_trip_move(endstop)

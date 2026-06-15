@@ -85,7 +85,7 @@ bash tools/kalico-sim/run.sh --branch <branch-name>
 For branches with `CONFIG_KALICO_RUNTIME=y` (like sota-motion), the Dockerfile:
 1. Installs Rust toolchain
 2. Patches missing Linux stubs (`fix_linux_build.sh`)
-3. Builds the Rust staticlib + motion-bridge PyO3 module
+3. Builds the Rust staticlib + motion-engine PyO3 module
 4. Links everything into `klipper-h7-sim.elf` / `klipper-f4-sim.elf`
 
 ## Files

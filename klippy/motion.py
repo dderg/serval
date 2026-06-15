@@ -107,11 +107,11 @@ class Motion:
         printer = config.get_printer()
         self.printer = printer
         self.reactor = printer.get_reactor()
-        self.bridge = printer.lookup_object("motion_bridge", None)
-        if self.bridge is None:
-            from . import motion_bridge
+        self.engine = printer.lookup_object("motion_engine", None)
+        if self.engine is None:
+            from . import motion_engine
 
-            self.bridge = motion_bridge._StubBridge()
+            self.engine = motion_engine._StubEngine()
         self._mcu_pending_end_time = 0.0
         self._motor_bindings = {}
         self.all_mcus = [m for n, m in printer.lookup_objects(module="mcu")]
@@ -211,10 +211,10 @@ class Motion:
 
     def _handle_disconnect(self):
         logging.info("Motion: _handle_disconnect called")
-        if self.bridge is not None:
-            logging.info("Motion: calling bridge.shutdown()")
-            self.bridge.shutdown()
-            logging.info("Motion: bridge.shutdown() returned")
+        if self.engine is not None:
+            logging.info("Motion: calling engine.shutdown()")
+            self.engine.shutdown()
+            logging.info("Motion: engine.shutdown() returned")
 
     def _load_kinematics(self, config):
         return motion_kinematics.load_kinematics(config, self)
@@ -246,8 +246,8 @@ class Motion:
     def get_kinematics(self):
         return self.kin
 
-    def get_bridge(self):
-        return self.bridge
+    def get_engine(self):
+        return self.engine
 
     def get_motor_binding(self, stepper_name):
         binding = self._motor_bindings.get(stepper_name)
@@ -308,9 +308,21 @@ class Motion:
             accel = min(p, t)
         self.set_accel(accel)
 
+    def resync_parked_servos(self):
+        dirty = self.kin.parked_dirty_axes()
+        if not dirty:
+            return
+        measured = self.engine.query_motor_positions()
+        newpos = list(self.commanded_pos)
+        for axis in dirty:
+            newpos[axis] = measured["xyz"[axis]][0]
+        self.set_position(newpos)
+        self.kin.clear_parked_dirty(dirty)
+
     def move(self, newpos, speed):
-        # The bridge replaces the lookahead, but Move/kin/extruder validation
+        # The engine replaces the lookahead, but Move/kin/extruder validation
         # (unhomed, range checks) must still run before the move is issued.
+        self.resync_parked_servos()
         move = Move(self, self.commanded_pos, newpos, speed)
         if not move.move_d:
             return
@@ -323,7 +335,7 @@ class Motion:
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
             feedrate = min(feedrate, self._axis_limit("z", "max_velocity"))
         logging.info(
-            "[bridge-trace] move: newpos=%s speed=%s dx=%.4f dy=%.4f "
+            "[engine-trace] move: newpos=%s speed=%s dx=%.4f dy=%.4f "
             "dz=%.4f de=%.4f feedrate=%.4f",
             list(newpos),
             speed,
@@ -334,10 +346,10 @@ class Motion:
             feedrate,
         )
         self._fire_active_callbacks(move.axes_d)
-        bridge_lmt_before = self.bridge.get_last_move_time()
-        self.bridge.submit_move(dx, dy, dz, de, feedrate)
+        engine_lmt_before = self.engine.get_last_move_time()
+        self.engine.submit_move(dx, dy, dz, de, feedrate)
         self._bump_pending_end_time(
-            self.bridge.get_last_move_time() - bridge_lmt_before
+            self.engine.get_last_move_time() - engine_lmt_before
         )
         self.commanded_pos[:] = move.end_pos
         self._sync_print_time()
@@ -346,7 +358,8 @@ class Motion:
         # newpos: [x, y, z, e] absolute endpoint (already coordinate-resolved).
         # interior_control_points: list of [x, y, z] interior CPs to range-check
         #   (P0=start and the endpoint are covered by the endpoint check below).
-        # submit(dx, dy, dz, de, feedrate): bridge call carrying the curve params.
+        # submit(dx, dy, dz, de, feedrate): engine call carrying the curve params.
+        self.resync_parked_servos()
         move = Move(self, self.commanded_pos, newpos, speed)
         if move.is_kinematic_move:
             self.kin.check_move(move)
@@ -360,7 +373,7 @@ class Motion:
                 self.kin.check_move(cp_move)
         # Deltas come straight from the endpoint, NOT move.axes_d: for a
         # closed-loop curve (chord ~ 0) Move zeroes axes_d, which would drop the
-        # curve's endpoint delta. The bridge rejects a genuinely zero curve
+        # curve's endpoint delta. The engine rejects a genuinely zero curve
         # (arc length 0 -> ZeroDisplacement), so no early-return here.
         dx = newpos[0] - self.commanded_pos[0]
         dy = newpos[1] - self.commanded_pos[1]
@@ -372,10 +385,10 @@ class Motion:
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
             feedrate = min(feedrate, self._axis_limit("z", "max_velocity"))
         self._fire_active_callbacks([dx, dy, dz, de])
-        bridge_lmt_before = self.bridge.get_last_move_time()
+        engine_lmt_before = self.engine.get_last_move_time()
         submit(dx, dy, dz, de, feedrate)
         self._bump_pending_end_time(
-            self.bridge.get_last_move_time() - bridge_lmt_before
+            self.engine.get_last_move_time() - engine_lmt_before
         )
         self.commanded_pos[:] = list(newpos)
         self._sync_print_time()
@@ -420,17 +433,17 @@ class Motion:
         self.move(newpos, speed)
 
     def dwell(self, delay):
-        self.bridge.submit_dwell(delay)
+        self.engine.submit_dwell(delay)
         if delay > 0.0:
             self._bump_pending_end_time(delay)
             self._sync_print_time()
 
     def wait_moves(self):
-        self.bridge.wait_moves()
+        self.engine.wait_moves()
 
     def wait_moves_and_mcu(self):
         deadline = self.reactor.monotonic() + DRAIN_TIMEOUT
-        while not self.bridge.motion_drain_poll():
+        while not self.engine.motion_drain_poll():
             now = self.reactor.monotonic()
             if now >= deadline:
                 raise self.printer.command_error(
@@ -438,25 +451,25 @@ class Motion:
                     % (DRAIN_TIMEOUT,)
                 )
             self.reactor.pause(now + 0.010)
-        self.bridge.motion_drain_finalize()
-        self._ground_pending_end_time_after_bridge_drain()
+        self.engine.motion_drain_finalize()
+        self._ground_pending_end_time_after_engine_drain()
 
     def cmd_M400(self, gcmd):
         self.wait_moves_and_mcu()
 
-    def _bridge_mcus(self):
-        if not hasattr(self, "_cached_bridge_mcus"):
+    def _engine_mcus(self):
+        if not hasattr(self, "_cached_engine_mcus"):
             mcus = set()
             if self.kin is not None:
                 for s in self.kin.get_steppers():
                     mcus.add(s.get_mcu())
-            self._cached_bridge_mcus = list(mcus) if mcus else [self.mcu]
-        return self._cached_bridge_mcus
+            self._cached_engine_mcus = list(mcus) if mcus else [self.mcu]
+        return self._cached_engine_mcus
 
     def flush_step_generation(self):
-        self.bridge.wait_moves()
+        self.engine.wait_moves()
         if self._mcu_pending_end_time > 0.0:
-            for mcu in self._bridge_mcus():
+            for mcu in self._engine_mcus():
                 while True:
                     est = mcu.estimated_print_time(self.reactor.monotonic())
                     remaining = self._mcu_pending_end_time - est
@@ -465,7 +478,7 @@ class Motion:
                     self.reactor.pause(
                         self.reactor.monotonic() + remaining + 0.010
                     )
-        self._ground_pending_end_time_after_bridge_drain()
+        self._ground_pending_end_time_after_engine_drain()
 
     def get_last_move_time(self):
         est = 0.0
@@ -476,7 +489,7 @@ class Motion:
             return max(self._mcu_pending_end_time, floor)
         return floor
 
-    def _ground_pending_end_time_after_bridge_drain(self):
+    def _ground_pending_end_time_after_engine_drain(self):
         # wait_moves() means dispatched, not executed; ground subsequent
         # cross-MCU scheduling in the live MCU clock rather than a stale,
         # possibly-seconds-ahead projected motion end.
@@ -653,13 +666,13 @@ class Motion:
     def set_accel(self, accel):
         if accel is not None and accel > 0.0:
             self.runtime_accel = accel
-            self.bridge.update_runtime_caps(
+            self.engine.update_runtime_caps(
                 self.runtime_velocity, self.runtime_accel
             )
 
     def reset_accel(self):
         self.runtime_accel = None
-        self.bridge.update_runtime_caps(
+        self.engine.update_runtime_caps(
             self.runtime_velocity, self.runtime_accel
         )
 
@@ -688,7 +701,7 @@ class Motion:
             self.runtime_velocity = v
         if a is not None:
             self.runtime_accel = a
-        self.bridge.update_runtime_caps(
+        self.engine.update_runtime_caps(
             self.runtime_velocity, self.runtime_accel
         )
 
@@ -710,7 +723,7 @@ class Motion:
             )
         for key, value in params.items():
             try:
-                self.bridge.update_post_processor(
+                self.engine.update_post_processor(
                     name, key.lower(), float(value)
                 )
             except (ValueError, RuntimeError) as e:
@@ -721,7 +734,7 @@ class Motion:
     def cmd_RESET_VELOCITY_LIMIT(self, gcmd):
         self.runtime_velocity = None
         self.runtime_accel = None
-        self.bridge.update_runtime_caps(None, None)
+        self.engine.update_runtime_caps(None, None)
 
     def stats(self, eventtime):
         max_queue_time = max(self.print_time, self._mcu_pending_end_time)
@@ -747,12 +760,12 @@ class Motion:
                 )
                 if node is None:
                     continue
-                handle = node.get_bridge_handle()
+                handle = node.get_engine_handle()
             else:
                 steppers = rail.get_steppers()
                 if not steppers:
                     continue
-                handle = getattr(steppers[0].get_mcu(), "_bridge_handle", None)
+                handle = getattr(steppers[0].get_mcu(), "_engine_handle", None)
             if handle is None:
                 continue
             axis_to_handle[lane_idx] = handle
@@ -764,7 +777,7 @@ class Motion:
             primary = fm.steppers.get(motors[0])
             if primary is None:
                 continue
-            handle = getattr(primary.get_mcu(), "_bridge_handle", None)
+            handle = getattr(primary.get_mcu(), "_engine_handle", None)
             if handle is None:
                 continue
             axis_to_handle[slot_idx] = handle
@@ -781,15 +794,15 @@ class Motion:
         return topo
 
     def _init_planner(self):
-        bridge_mcus = []
+        engine_mcus = []
         for name, mcu in self.printer.lookup_objects(module="mcu"):
-            handle = getattr(mcu, "_bridge_handle", None)
+            handle = getattr(mcu, "_engine_handle", None)
             if handle is None:
                 continue
-            bridge_mcus.append((name, mcu, handle))
-        if not bridge_mcus:
+            engine_mcus.append((name, mcu, handle))
+        if not engine_mcus:
             logging.warning(
-                "Motion: no MCU bridge handles available; skipping init_planner"
+                "Motion: no MCU engine handles available; skipping init_planner"
             )
             return
 
@@ -803,14 +816,14 @@ class Motion:
             return
 
         try:
-            self.bridge.init_planner(
+            self.engine.init_planner(
                 list(self.axis_sections),
                 list(self.limit_sections),
                 list(self.post_processor_sections),
                 topology,
                 self.kin.claimed_axes(),
             )
-            self._configure_axes_per_mcu(bridge_mcus)
+            self._configure_axes_per_mcu(engine_mcus)
 
         except Exception:
             logging.exception("Motion: init_planner failed")
@@ -861,7 +874,7 @@ class Motion:
             slot_steppers[slot_idx] = entries
         return slot_steppers
 
-    def _configure_axes_per_mcu(self, bridge_mcus):
+    def _configure_axes_per_mcu(self, engine_mcus):
         coupled = self.kin.coupled_xy()
         awd_default = 0b0011 if coupled else 0b0000
 
@@ -869,7 +882,7 @@ class Motion:
 
         PHASE_STEPPING_BIT = 0x1  # bit 0 of the IdentifyResponse caps bitmap
 
-        for name, mcu_obj, mcu_handle in bridge_mcus:
+        for name, mcu_obj, mcu_handle in engine_mcus:
             present_mask = 0
             invert_mask = 0
             steps_per_mm = [0.0, 0.0, 0.0, 0.0]
@@ -879,7 +892,7 @@ class Motion:
             for i in range(4):
                 on_this_mcu = []
                 for sname, s in slot_steppers[i]:
-                    if len(bridge_mcus) > 1:
+                    if len(engine_mcus) > 1:
                         try:
                             s_mcu = s.get_mcu()
                         except AttributeError:
@@ -949,7 +962,7 @@ class Motion:
                     tmc.set_phase_group(group)
             # Soft cap mirrors firmware-side MAX_STEPPER_OIDS=16 (see
             # rust/runtime/src/state.rs). Reject early with an
-            # operator-friendly message rather than letting the bridge
+            # operator-friendly message rather than letting the engine
             # call return PyRuntimeError.
             if len(phase_configs) > 16:
                 raise self.printer.config_error(
@@ -970,7 +983,7 @@ class Motion:
             # config error. The check happens here (connect time) because MCU
             # capabilities are only known after attach_serial / identify, which
             # runs after config-parse time.
-            mcu_caps = self.bridge.get_mcu_capabilities(mcu_handle)
+            mcu_caps = self.engine.get_mcu_capabilities(mcu_handle)
             for i in range(4):
                 if step_modes[i] == 0 and not (mcu_caps & PHASE_STEPPING_BIT):
                     slot_name = (
@@ -991,7 +1004,7 @@ class Motion:
                     )
             # One kalico_configure_axis per axis carries a 4-byte-per-stepper
             # blob { stepper_oid: u8, dir_invert: u8, tmc_cs_oid: u8, flags: u8 }.
-            # dir_invert (from `dir_pin: !PIN`) is forwarded because bridge mode
+            # dir_invert (from `dir_pin: !PIN`) is forwarded because engine mode
             # bypasses stepcompress's step-count sign flip; without it motors run
             # reversed. MCUs lacking the command skip silently.
             try:
@@ -1038,7 +1051,7 @@ class Motion:
                     logging.info(
                         "register_phase_bus mcu=%s bus_id=%d", name, bus_id
                     )
-                    self.bridge.register_phase_bus(
+                    self.engine.register_phase_bus(
                         mcu_handle,
                         bus_id,
                         rate=2_000_000,
@@ -1057,7 +1070,7 @@ class Motion:
                         cs_pin_id,
                         slot_idx,
                     )
-                    self.bridge.register_phase_motor(
+                    self.engine.register_phase_motor(
                         mcu_handle,
                         motor_idx,
                         bus_id,
@@ -1107,7 +1120,7 @@ class Motion:
                             pass
                     blob.append(tmc_oid)
                     blob.append(FLAGS_DEFAULT)
-                ring_depth = self.bridge.ring_depth_for_axis(
+                ring_depth = self.engine.ring_depth_for_axis(
                     mcu_handle, axis_idx
                 )
                 axis_mode = (
@@ -1173,9 +1186,9 @@ class Motion:
             raise gcmd.error("specify exactly one of PRINT_TIME or T_AGO")
         if t_ago is not None:
             print_time = self.get_last_move_time() - t_ago
-        if self.bridge is None:
-            raise gcmd.error("motion_bridge not available")
-        state = self.bridge.motion_state_at(self.mcu, print_time=print_time)
+        if self.engine is None:
+            raise gcmd.error("motion_engine not available")
+        state = self.engine.motion_state_at(self.mcu, print_time=print_time)
         parts = [
             "%s: pos=%.6f vel=%.6f accel=%.6f" % (name, p, v, a)
             for name, (p, v, a) in sorted(state.items())
@@ -1188,11 +1201,11 @@ class Motion:
         oid = gcmd.get_int("OID", 0, minval=0)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
-        handle = getattr(self.mcu, "_bridge_handle", None)
+        handle = getattr(self.mcu, "_engine_handle", None)
         if handle is None:
-            raise gcmd.error("bridge handle not set")
+            raise gcmd.error("engine handle not set")
         try:
-            resp = self.bridge.bridge_call(
+            resp = self.engine.engine_call(
                 handle,
                 "runtime_sim_stepper_count_query oid=%d" % oid,
                 "runtime_sim_stepper_count_response",
@@ -1200,7 +1213,7 @@ class Motion:
             )
             count = resp.get("count", 0)
             gcmd.respond_info(
-                "[bridge-async] KALICO_SIM_STEP_COUNT oid=%d count=%d"
+                "[engine-async] KALICO_SIM_STEP_COUNT oid=%d count=%d"
                 % (oid, count)
             )
         except Exception as e:
@@ -1210,11 +1223,11 @@ class Motion:
         oid = gcmd.get_int("OID", 0, minval=0, maxval=3)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
-        handle = getattr(self.mcu, "_bridge_handle", None)
+        handle = getattr(self.mcu, "_engine_handle", None)
         if handle is None:
-            raise gcmd.error("bridge handle not set")
+            raise gcmd.error("engine handle not set")
         try:
-            resp = self.bridge.bridge_call(
+            resp = self.engine.engine_call(
                 handle,
                 "runtime_sim_axis_steps_query oid=%d" % oid,
                 "runtime_sim_axis_steps_response",
@@ -1222,7 +1235,7 @@ class Motion:
             )
             milli = resp.get("milli_spm", 0)
             gcmd.respond_info(
-                "[bridge-async] KALICO_SIM_AXIS_STEPS oid=%d "
+                "[engine-async] KALICO_SIM_AXIS_STEPS oid=%d "
                 "steps_per_mm=%.3f" % (oid, milli / 1000.0)
             )
         except Exception as e:
@@ -1232,11 +1245,11 @@ class Motion:
         oid = gcmd.get_int("OID", 0, minval=0, maxval=3)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
-        handle = getattr(self.mcu, "_bridge_handle", None)
+        handle = getattr(self.mcu, "_engine_handle", None)
         if handle is None:
-            raise gcmd.error("bridge handle not set")
+            raise gcmd.error("engine handle not set")
         try:
-            resp = self.bridge.bridge_call(
+            resp = self.engine.engine_call(
                 handle,
                 "runtime_sim_axis_accum_query oid=%d" % oid,
                 "runtime_sim_axis_accum_response",
@@ -1244,7 +1257,7 @@ class Motion:
             )
             milli = resp.get("milli", 0)
             gcmd.respond_info(
-                "[bridge-async] KALICO_SIM_AXIS_ACCUM oid=%d accum=%.3f"
+                "[engine-async] KALICO_SIM_AXIS_ACCUM oid=%d accum=%.3f"
                 % (oid, milli / 1000.0)
             )
         except Exception as e:
@@ -1274,9 +1287,9 @@ class Motion:
                 raise gcmd.error("set_gpio_input failed: %s" % e)
         if self.mcu is None:
             raise gcmd.error("no MCU available for sim endstop set_pin")
-        handle = self.mcu._bridge_handle
+        handle = self.mcu._engine_handle
         try:
-            self.bridge.bridge_send(
+            self.engine.engine_send(
                 handle,
                 "runtime_sim_endstop_set_pin gpio=%d level=%d" % (gpio, level),
             )

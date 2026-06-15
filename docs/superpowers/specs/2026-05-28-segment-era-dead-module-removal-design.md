@@ -25,7 +25,7 @@ The nine modules originally flagged split into three categories:
 ### 1.2 What is explicitly NOT touched
 
 - `geometry::segment` — the live planner geometry crate (`CubicSegment`, `EMode`, `SourceRange`). Unrelated to `runtime::segment`.
-- `motion_bridge::dispatch::McuAxisConfig` — the host-side config type. Unrelated to `runtime::config::McuAxisConfig`.
+- `motion_engine::dispatch::McuAxisConfig` — the host-side config type. Unrelated to `runtime::config::McuAxisConfig`.
 - `rust/runtime/src/phase_lut.rs`, `dispatch_phase`, and the entire pulse/phase output stage in `tick.rs` — confirmed identical across `sota-motion` and HEAD; the phase output logic is the known-good live path and stays.
 - `StatusHeartbeat` telemetry (per-axis consumed counts) — the current and future telemetry path.
 
@@ -103,7 +103,7 @@ Remove these exports and their bodies:
 Remove `DECL_COMMAND`s + handlers:
 
 - `command_runtime_stream_open`, `command_runtime_stream_arm`, `command_runtime_stream_terminal` (`runtime_commands.c`)
-- `command_runtime_configure_axes_blob` (`runtime_commands.c`) and its callers (`kalico_dispatch.c`)
+- `command_runtime_configure_axes_blob` (`runtime_commands.c`) and its callers (`mcu_transport_dispatch.c`)
 - The `kalico_runtime_drain_and_reclaim` call in `runtime_tick.c`
 
 **Keep:** `command_runtime_stream_flush` (calls the kept flush FFI).
@@ -113,14 +113,14 @@ Remove `DECL_COMMAND`s + handlers:
 Delete (they test removed behavior):
 
 - `rust/kalico-c-api/tests/drain_trace_credit.rs`
-- `rust/motion-bridge/tests/bridge_to_runtime_step_chain.rs`
+- `rust/motion-engine/tests/bridge_to_runtime_step_chain.rs`
 - `rust/runtime/tests/modulator_math.rs`
 
 Keep (they test live code):
 
 - `rust/runtime/tests/sub_sample_timing.rs`
 - `rust/runtime/tests/phase_xdirect_dispatch.rs`
-- `rust/motion-bridge/tests/dispatch_corexy.rs` (uses host-side `dispatch::McuAxisConfig` + `geometry::segment`, both live)
+- `rust/motion-engine/tests/dispatch_corexy.rs` (uses host-side `dispatch::McuAxisConfig` + `geometry::segment`, both live)
 
 ---
 
@@ -141,7 +141,7 @@ Each cluster is one reviewable commit. Within each cluster, work leaf-first: rem
 Delete `modulator_math.rs`; remove `phase_modulators` field + import + `runtime_force_idle` reset; delete `modulator.rs` + `lib.rs` line.
 
 **Cluster 2 — Legacy config.**
-Remove the C `command_runtime_configure_axes_blob` + callers in `kalico_dispatch.c`; remove the `kalico_runtime_configure_axes_blob` FFI; remove `engine.configure()` / `mcu_config` / `McuAxisConfig` import; audit and (if vestigial) remove `step_state`; delete `config.rs` + `lib.rs` line.
+Remove the C `command_runtime_configure_axes_blob` + callers in `mcu_transport_dispatch.c`; remove the `kalico_runtime_configure_axes_blob` FFI; remove `engine.configure()` / `mcu_config` / `McuAxisConfig` import; audit and (if vestigial) remove `step_state`; delete `config.rs` + `lib.rs` line.
 
 **Cluster 3 — Segment + trace + reclaim + stream-lifecycle (the coupled cluster).**
 Delete dead tests (`drain_trace_credit.rs`, `bridge_to_runtime_step_chain.rs`); remove C `DECL_COMMAND`s for `stream_open`/`stream_arm`/`stream_terminal` + the `drain_and_reclaim` call in `runtime_tick.c`; remove the corresponding FFI exports (stream open/arm/terminal, drain_and_reclaim, drain_trace, segment-id queries) + `KinematicTag` import; remove `state.rs` fields (`retirement_table`, `trace_*`, `Segment`/`TraceSample` imports); remove engine `_trace` param + trace import; reduce `stream.rs` to the `flush` shell (drop `FgStreamState`, `open`, `arm`, `terminal`, `check_terminal_on_retire`) and remove the `stream_state_machine` field; delete `segment.rs`, `reclaim.rs`, `trace.rs` + `lib.rs` lines.
