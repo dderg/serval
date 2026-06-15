@@ -49,7 +49,7 @@ class DiagStepper:
         # Plain formatted-string MCU command (clocksync.py pattern). The
         # CommandWrapper.encode() path used by mainline Klipper doesn't
         # exist on this fork's serial layer — send_with_response handles
-        # the formatted string directly through the bridge call.
+        # the formatted string directly through the engine call.
         msg_str = (
             "diag_stepper_buzz oid=%d dir=%d step_count=%d period_ticks=%d"
             % (oid, direction, steps, period_ticks)

@@ -37,6 +37,9 @@ class BaseRail:
         self.homing_retract_speed = config.getfloat(
             "homing_retract_speed", self.homing_speed, above=0.0
         )
+        self.min_home_dist = config.getfloat(
+            "min_home_dist", self.homing_retract_dist, minval=0.0
+        )
 
     def _finalize_homing(self, config, endstop_is_virtual):
         if (
@@ -62,10 +65,6 @@ class BaseRail:
         )
         self.homing_positive_dir = config.getboolean(
             "homing_positive_dir", None
-        )
-
-        self.min_home_dist = config.getfloat(
-            "min_home_dist", self.homing_retract_dist, minval=0.0
         )
 
         self.homing_accel = config.getfloat("homing_accel", None, above=0.0)

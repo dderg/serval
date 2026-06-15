@@ -150,13 +150,13 @@ class ServoParam:
 
     def cmd_SERVO_PARAM(self, gcmd):
         node = self._resolve_node(gcmd.get("SERVO"))
-        handle = node.get_bridge_handle()
+        handle = node.get_engine_handle()
         if handle is None:
             raise gcmd.error(
-                "SERVO_PARAM: ethercat_node %s has no bridge handle"
+                "SERVO_PARAM: ethercat_node %s has no engine handle"
                 % (node.name,)
             )
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         get_addr = gcmd.get("GET", None)
         set_addr = gcmd.get("SET", None)
         if (get_addr is None) == (set_addr is None):
@@ -170,7 +170,7 @@ class ServoParam:
         try:
             if get_addr is not None:
                 index, subindex = parse_address(get_addr)
-                size, raw = bridge.sdo_read(handle, index, subindex)
+                size, raw = engine.sdo_read(handle, index, subindex)
                 gcmd.respond_info(
                     format_value(index, subindex, size, raw, type_token)
                 )
@@ -178,7 +178,7 @@ class ServoParam:
                 index, subindex = parse_address(set_addr)
                 value = _parse_int(gcmd.get("VALUE"))
                 size = check_value(value, type_token)
-                rb_size, rb_raw = bridge.sdo_write(
+                rb_size, rb_raw = engine.sdo_write(
                     handle, index, subindex, size, value
                 )
                 settled = format_value(

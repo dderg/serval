@@ -9,14 +9,14 @@ import subprocess
 import time
 
 _DEFAULT_REPO = (
-    pathlib.Path(os.environ.get("KALICO_REPO"))
-    if os.environ.get("KALICO_REPO")
+    pathlib.Path(os.environ.get("SIM_REPO"))
+    if os.environ.get("SIM_REPO")
     else pathlib.Path(__file__).resolve().parents[2]
 )
 REPO = _DEFAULT_REPO
 LOGDIR = pathlib.Path(
     os.environ.get(
-        "KALICO_SIM_LOGDIR", str(REPO / "tools" / "sim_klippy" / ".local-logs")
+        "MCU_SIM_LOGDIR", str(REPO / "tools" / "sim_klippy" / ".local-logs")
     )
 )
 RUNDIR = LOGDIR / "run"

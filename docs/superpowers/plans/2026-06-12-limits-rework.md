@@ -6,7 +6,7 @@
 
 **Architecture:** Spec: `docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md` §3. `temporal::Limits` becomes a collection of `LimitSet { axes, v_max, a_max, j_max }`. Velocity norm caps are linear rows in `b = ṡ²`; multi-axis accel norm caps are SecondOrder cone rows (the solver is already an SOCP); singleton sets reproduce today's per-axis rows. The centripetal cap is subsumed by the accel-norm row's orthogonal component (`κ_S`-derived `b` caps stay as MVC seeds / anti-aliasing rows). Config: klippy parses `[limit <name>]` sections (new `klippy/extras/limit.py`), `MotionToolhead` rejects all legacy `[printer]` limit keys, the bridge receives the section list verbatim, Rust validates coverage and fails loudly. `M204`/`SET_VELOCITY_LIMIT` become a runtime *overlay* cap over all axes (can tighten below config, never exceed it).
 
-**Tech stack:** Rust (temporal/trajectory/motion-bridge crates, Clarabel SOCP), PyO3 bridge, klippy Python. Tests: `cargo nextest run` from `rust/` (never bare `cargo test`); doc-tests via `cargo test --doc` if touched.
+**Tech stack:** Rust (temporal/trajectory/motion-engine crates, Clarabel SOCP), PyO3 bridge, klippy Python. Tests: `cargo nextest run` from `rust/` (never bare `cargo test`); doc-tests via `cargo test --doc` if touched.
 
 **Out of scope (later plans):** follower axes / axis `e` in `[limit]` sections (unknown axis names are errors for now), `steppers:` key, `ELimits`/`e_independent` (untouched, dies in plans 2–4), binding-constraint observability reporting (plan 7 — but `BindingConstraint` carries set indices after this plan, which is its groundwork).
 
@@ -617,11 +617,11 @@ What survives in the module: `classify_junction` with its existing tangent helpe
 
 ---
 
-### Task 4: motion-bridge config model
+### Task 4: motion-engine config model
 
 **Files:**
-- Modify: `rust/motion-bridge/src/config.rs` (replace `PlannerLimits`)
-- Modify: `rust/motion-bridge/src/config/tests.rs` (rewrite limit tests)
+- Modify: `rust/motion-engine/src/config.rs` (replace `PlannerLimits`)
+- Modify: `rust/motion-engine/src/config/tests.rs` (rewrite limit tests)
 
 - [ ] **Step 1: Write failing tests** in `config/tests.rs` (replacing the `to_temporal_limits`, `junction_deviation_mm`, and centripetal tests at lines 19-69):
 
@@ -680,7 +680,7 @@ fn section_with_no_caps_is_an_error() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-bridge -E 'test(config)'` → FAIL
+- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-engine -E 'test(config)'` → FAIL
 - [ ] **Step 3: Implement** in `config.rs` — delete `PlannerLimits`, `to_temporal_limits` (old), `junction_deviation_mm`:
 
 ```rust
@@ -764,16 +764,16 @@ impl PlannerConfig {
 
 Default impl: sections `gantry {x,y}, v=300, a=3000` and `z {z}, v=15, a=100`, `runtime_caps: default`. (Temporal must re-export `AxisSet`, `LimitSet`, `LimitsError` from its lib.rs — add if missing.)
 
-- [ ] **Step 4: Run** — `cargo nextest run -p motion-bridge -E 'test(config)'` → PASS (other motion-bridge code is still broken — that's Task 5; scope the run to the config tests, or accept compile failure here and fold the run into Task 5's verification if the crate won't build test-by-test).
-- [ ] **Step 5: Commit** — `feat(motion-bridge): [limit] section config model with runtime overlay caps`
+- [ ] **Step 4: Run** — `cargo nextest run -p motion-engine -E 'test(config)'` → PASS (other motion-engine code is still broken — that's Task 5; scope the run to the config tests, or accept compile failure here and fold the run into Task 5's verification if the crate won't build test-by-test).
+- [ ] **Step 5: Commit** — `feat(motion-engine): [limit] section config model with runtime overlay caps`
 
 ---
 
 ### Task 5: Bridge entry points and planner plumbing
 
 **Files:**
-- Modify: `rust/motion-bridge/src/bridge.rs` (`init_planner` ~line 2206, `update_limits` ~line 2976)
-- Modify: `rust/motion-bridge/src/planner.rs` (`build_replan_context` ~line 765, `update_limits` on the planner, any `PlannerLimits` mention — `grep -rn "PlannerLimits\|to_temporal_limits\|junction_deviation" rust/motion-bridge/ rust/kalico-host-rt/`)
+- Modify: `rust/motion-engine/src/bridge.rs` (`init_planner` ~line 2206, `update_limits` ~line 2976)
+- Modify: `rust/motion-engine/src/planner.rs` (`build_replan_context` ~line 765, `update_limits` on the planner, any `PlannerLimits` mention — `grep -rn "PlannerLimits\|to_temporal_limits\|junction_deviation" rust/motion-engine/ rust/host-rt/`)
 
 - [ ] **Step 1: `init_planner` signature.** Replace the five scalar limit params with the section list:
 
@@ -819,8 +819,8 @@ Change the planner-side `update_limits` to take `temporal::Limits` directly (it 
 
 - [ ] **Step 3: `build_replan_context`:** `limits: config.to_temporal_limits().expect("limit sections validated in init_planner")`. Delete `junction_chord_tolerance_mm` from `ReplanContext` (trajectory crate) and trace every consumer down to the now-parameterless `compute_junction_velocity` call — `grep -rn "junction_chord_tolerance\|chord_tolerance" rust/`.
 
-- [ ] **Step 4: Whole-workspace build & test** — `cargo nextest run` from `rust/` → PASS (this catches every remaining `PlannerLimits` / old-`Limits` straggler across kalico-host-rt and integration tests, e.g. `rust/trajectory/tests/jog_50mm_live_limits.rs` — port them with `axis_boxes`/`norm_all` or the new sections as fits each test's intent).
-- [ ] **Step 5: Commit** — `feat(motion-bridge): init_planner takes [limit] sections; runtime caps replace update_limits`
+- [ ] **Step 4: Whole-workspace build & test** — `cargo nextest run` from `rust/` → PASS (this catches every remaining `PlannerLimits` / old-`Limits` straggler across host-rt and integration tests, e.g. `rust/trajectory/tests/jog_50mm_live_limits.rs` — port them with `axis_boxes`/`norm_all` or the new sections as fits each test's intent).
+- [ ] **Step 5: Commit** — `feat(motion-engine): init_planner takes [limit] sections; runtime caps replace update_limits`
 
 ---
 
@@ -828,7 +828,7 @@ Change the planner-side `update_limits` to take `temporal::Limits` directly (it 
 
 **Files:**
 - Create: `klippy/extras/limit.py`
-- Modify: `klippy/toolhead.py` (extract `_read_limits`), `klippy/motion_toolhead.py` (override + new init args + command overrides), `klippy/motion_bridge.py` (wrapper + `_StubBridge`)
+- Modify: `klippy/toolhead.py` (extract `_read_limits`), `klippy/motion_toolhead.py` (override + new init args + command overrides), `klippy/motion_engine.py` (wrapper + `_StubEngine`)
 
 - [ ] **Step 1: `klippy/extras/limit.py`** (claims the section so configfile accepts it, validates, exposes status):
 
@@ -985,7 +985,7 @@ def cmd_RESET_VELOCITY_LIMIT(self, gcmd):
 
 Semantics note carried from the spec discussion: the overlay can only *tighten* — an `M204`/`SET_VELOCITY_LIMIT` above the config sections has no effect, because config states physics and rows intersect. This differs from mainline (where SVL could raise the ceiling); it's intentional.
 
-- [ ] **Step 6: `motion_bridge.py`** — update the `init_planner` wrapper signature pass-through, rename `update_limits` → `update_runtime_caps` in the wrapper and in `_StubBridge` (no-op accepting `(velocity, accel)`).
+- [ ] **Step 6: `motion_engine.py`** — update the `init_planner` wrapper signature pass-through, rename `update_limits` → `update_runtime_caps` in the wrapper and in `_StubEngine` (no-op accepting `(velocity, accel)`).
 
 - [ ] **Step 7: Commit** — `feat(klippy): [limit] sections replace [printer] limit keys; SVL/M204 become runtime overlay caps`
 
@@ -998,7 +998,7 @@ Semantics note carried from the spec discussion: the overlay can only *tighten* 
 Run: `grep -rln "max_velocity" --include="*.cfg" . | grep -v test/klippy`
 (Mainline's `test/klippy/*.cfg` regression corpus targets legacy `ToolHead` and is not run by our suites — leave it.)
 
-- [ ] **Step 2:** For each fixture that boots `MotionToolhead` (kalico-sim configs, any rust test fixtures, `config/` examples our benches derive from): delete the legacy `[printer]` limit keys and add equivalent sections, e.g.:
+- [ ] **Step 2:** For each fixture that boots `MotionToolhead` (mcu-sim configs, any rust test fixtures, `config/` examples our benches derive from): delete the legacy `[printer]` limit keys and add equivalent sections, e.g.:
 
 ```ini
 [limit gantry]
@@ -1034,7 +1034,7 @@ Expected survivors only: legacy `toolhead.py` base-class code (legacy `ToolHead`
 ### Task 9: End-to-end verification
 
 - [ ] **Step 1:** `cargo nextest run` from `rust/` → full PASS. `cargo fmt --all --check` → clean.
-- [ ] **Step 2:** Boot a simulated printer via the **kalico-sim** skill with a migrated fixture; verify: clean startup (no config errors), a homing + square + diagonal G-code runs, and a fixture with a deliberate `[printer] max_accel` errors at startup naming `[limit]` sections.
+- [ ] **Step 2:** Boot a simulated printer via the **mcu-sim** skill with a migrated fixture; verify: clean startup (no config errors), a homing + square + diagonal G-code runs, and a fixture with a deliberate `[printer] max_accel` errors at startup naming `[limit]` sections.
 - [ ] **Step 3:** In the sim, exercise `SET_VELOCITY_LIMIT ACCEL=500` mid-stream and `RESET_VELOCITY_LIMIT`; verify no planner error and visibly slower motion under the cap (compare trajectory durations via sim step counts).
 - [ ] **Step 4:** Diagonal-vs-axis sanity check (the √2 bug death): with `[limit gantry] axes: x,y max_accel: 3000`, a pure-X 100 mm move and a 45° 100 mm move should now show the *same* peak toolhead acceleration in planner output (previously the diagonal reached ~4243). A unit-level assertion of this already lives in the Task 3 test updates; this step is the integration confirmation.
 - [ ] **Step 4b:** Corner full-stop check: a two-move L-shaped G-code (90° corner) must come to rest at the corner (velocity → 0 at the junction). Print-time regression on polyline G-code versus pre-rework is **expected and accepted** — it is the honest cost of the deleted junction-deviation pretense, recovered by the future upstream corner-blending plan.

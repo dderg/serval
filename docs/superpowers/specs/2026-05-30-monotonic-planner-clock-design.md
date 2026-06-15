@@ -70,7 +70,7 @@ The planner thread's monotonic clock and the projection's host-time input are th
 
 - `host_now_secs()` = `instant_to_f64(self.clock.now())` — raw monotonic seconds
   off a process-lifetime anchor; "only deltas are meaningful"
-  (`rust/kalico-host-rt/src/passthrough_queue/router.rs:114-123, 436-438`). It is
+  (`rust/host-rt/src/passthrough_queue/router.rs:114-123, 436-438`). It is
   **not** MCU-synced print time.
 - `host_time_to_mcu_clock(host_secs)` maps that value to MCU ticks via
   `(host_secs − clock_offset) * clock_freq` (`router.rs:443-455`), where
@@ -250,7 +250,7 @@ keep them separate:
 
 ## Files touched (anticipated)
 
-- `rust/motion-bridge/src/planner.rs` — `run_loop`: replace the `T_COMMIT`
+- `rust/motion-engine/src/planner.rs` — `run_loop`: replace the `T_COMMIT`
   fixed-timer arm with the clock-derived decel-commit deadline (§ B); add the
   `max(t_appended, elapsed_since_sync)` placement + rest-hold advance (§ A);
   capture/re-capture `sync_instant` (§ F); rewrite the `Flush` arm as the
@@ -259,14 +259,14 @@ keep them separate:
   (`advance_idle`, § A), reusing the existing `axis_position_at` settled-position
   read. `current_position()` is **retained** (public API with tests; its
   underlying read is what the rest-hold reuses).
-- `rust/motion-bridge/src/drain.rs` — **unchanged.** `DrainSync` stays (pump
+- `rust/motion-engine/src/drain.rs` — **unchanged.** `DrainSync` stays (pump
   flow-control accounting + `set_position`'s barrier). Only M400's completion
   semantics move to the clock (§ E).
-- `rust/motion-bridge/src/bridge.rs` — `wait_moves` / `drain_motion` re-pointed
+- `rust/motion-engine/src/bridge.rs` — `wait_moves` / `drain_motion` re-pointed
   at the time-based Flush; heartbeat callback wiring for flow control unchanged.
-- `rust/motion-bridge/src/anchor.rs` — **unchanged** (backward-jump branch now
+- `rust/motion-engine/src/anchor.rs` — **unchanged** (backward-jump branch now
   serves only genuine resets).
-- `rust/motion-bridge/src/planner.rs` + `anchor.rs` — remove the temporary
+- `rust/motion-engine/src/planner.rs` + `anchor.rs` — remove the temporary
   `[idle-reanchor]` / `[anchor]` diag traces (commit 381e8f7eb).
 
 ## Testing

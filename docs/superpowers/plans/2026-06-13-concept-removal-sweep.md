@@ -17,7 +17,7 @@ reserving): rename the klippy seam (`motion_toolhead.py` → `motion.py`, class 
 registry key `"motion"`), i the `"toolhead"` key carrying t
 he legacy method + status surface, and sweep the trivial toolhead/fossil names out of `r
 ust/`. **Phase B**: `Kinemaaxis↔motor transforms) replaces
-the hardcoded corexy branches in `motion-bridge`'s `enqueue.rs`/`dispatch.rs`/`bridge.rs
+the hardcoded corexy branches in `motion-engine`'s `enqueue.rs`/`dispatch.rs`/`bridge.rs
 `/`kinematics.rs`; klippy gmed motor sections + axis-domain
  homing/range keys on `[axis]`; `BridgeKinematics`, `_MOTOR_SLOT_PREFIXES`, and `Extrude
 rStepper` die.
@@ -25,7 +25,7 @@ rStepper` die.
 **Tech stack:** Rust (`motionly), pyo3 (`bridge.rs`), klipp
 y Python (`printer.py`, `motion_toolhead.py` → `motion.py`, `stepper.py`, `kinematics/ex
 truder.py`, new `motion_kinextest run` from `rust/` (never
-bare `cargo test`); Python via `./scripts/ci.sh py`; e2e via the kalico-sim skill.
+bare `cargo test`); Python via `./scripts/ci.sh py`; e2e via the mcu-sim skill.
 
 **PRECONDITION: Plan 4 (`docs/superpowers/plans/2026-06-12-per-axis-emission-chain.md`)
 is fully landed.** Verify beline | head` shows plan 4's fin
@@ -98,7 +98,7 @@ ico-protocol/src/messages.rs`, `kinematics: u8` field) has **zero senders** — 
 e kinematics tag crosses only the Python↔Rust `init_planner` boundary (the `(handle, axe
 s, tag)` topology tuples). The MCU receives pre-transformed motor-frame data (`runtime_s
 eed_position`, per-lane cubic pieces); **zero MCU edits anywhere in this plan** — `src/`
-, `rust/runtime` wire handlers, and `docs/kalico-rewrite/mcu-c-rust-boundary.md` are unt
+, `rust/runtime` wire handlers, and `docs/rewrite/mcu-c-rust-boundary.md` are unt
 ouched (the one `rust/runtime` edit is a doc-comment + enum-variant rename with discrimi
 nants pinned by the existing const assert). `KinematicTag` discriminants (0=corexy, 1=ca
 rtesian) stay frozen as the Python↔Rust contract.
@@ -113,7 +113,7 @@ entity lanes short-circuit in `enqueue.rs` so cartesian output stays bit-identic
 
 7. **Coverage rule lands in Rust config:** every declared axis is motor-mapped exactly o
 nce — claimed by a kinematics role XOR carrying its own `[axis].motors` key. Validated i
-n `motion-bridge/src/config.rs` (the planner-side single source of truth, same home as p
+n `motion-engine/src/config.rs` (the planner-side single source of truth, same home as p
 lan 2's registry rules), fed through `init_planner`; klippy performs the section-level c
 hecks it alone can see (sections exist, drive values valid, no homing keys on followers)
 .
@@ -372,7 +372,7 @@ rface; Motion sheds fossil methods`
 ## Task 5: Phase A gate
 
 - [ ] **Step 1:** `./scripts/ci.sh quick` → green; `./scripts/ci.sh py` → green.
-- [ ] **Step 2:** kalico-sim boot check (see the `kalico-sim` skill): bring the simulate
+- [ ] **Step 2:** mcu-sim boot check (see the `mcu-sim` skill): bring the simulate
 d printer up on this branch, confirm clean connect, `G28`-readiness state via status que
 ry, and that Moonraker-style status (`printer.toolhead.*`) reads identically to a pre-br
 anch capture. No motion commands beyond what the sim harness itself runs.
@@ -385,9 +385,9 @@ anch capture. No motion commands beyond what the sim harness itself runs.
 ## Task 6: Rust `KinematicsModule` — constant-matrix transforms
 
 **Files:**
-- Modify: `rust/motion-bridge/src/kinematics.rs` (rewrite)
-- Modify: `rust/motion-bridge/src/kinematics/tests.rs`
-- Modify: `rust/motion-bridge/src/dispatch.rs` (`SPATIAL_AXES`, loud tag validation, `mo
+- Modify: `rust/motion-engine/src/kinematics.rs` (rewrite)
+- Modify: `rust/motion-engine/src/kinematics/tests.rs`
+- Modify: `rust/motion-engine/src/dispatch.rs` (`SPATIAL_AXES`, loud tag validation, `mo
 tor_frame_xy` via module)
 
 - [ ] **Step 1: Write failing tests** in `kinematics/tests.rs` (keep the existing corexy
@@ -443,7 +443,7 @@ fn corexy_lane_weights_are_sum_and_difference() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-bridge -E 'test(k
+- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-engine -E 'test(k
 inematics)'` → FAIL.
 - [ ] **Step 3: Implement** `kinematics.rs`:
 
@@ -503,8 +503,8 @@ with `KinematicsConfigError` naming the handle and the problem. Chase the (few) 
 cu_configs` callers — `rg -n "build_mcu_configs" rust/` — and propagate the error to a `
 PyErr` in `init_planner`.
 
-- [ ] **Step 4: Run** — `cargo nextest run -p motion-bridge` → PASS.
-- [ ] **Step 5: Commit** — `feat(motion-bridge): KinematicsModule constant-matrix transf
+- [ ] **Step 4: Run** — `cargo nextest run -p motion-engine` → PASS.
+- [ ] **Step 5: Commit** — `feat(motion-engine): KinematicsModule constant-matrix transf
 orms; loud tag validation`
 
 ---
@@ -512,11 +512,11 @@ orms; loud tag validation`
 ## Task 7: generalize emission, seeding, and homing recovery onto the module
 
 **Files:**
-- Modify: `rust/motion-bridge/src/enqueue.rs` (motor-lane combine via `lane_weights`)
-- Modify: `rust/motion-bridge/src/enqueue/tests.rs`
-- Modify: `rust/motion-bridge/src/dispatch.rs` (`motor_frame_xy` → `motor_frame`, `cfg_i
+- Modify: `rust/motion-engine/src/enqueue.rs` (motor-lane combine via `lane_weights`)
+- Modify: `rust/motion-engine/src/enqueue/tests.rs`
+- Modify: `rust/motion-engine/src/dispatch.rs` (`motor_frame_xy` → `motor_frame`, `cfg_i
 s_corexy` dies)
-- Modify: `rust/motion-bridge/src/bridge.rs` (homing inverse + `trip_position_to_motor_f
+- Modify: `rust/motion-engine/src/bridge.rs` (homing inverse + `trip_position_to_motor_f
 rame` + `< AXIS_E` filters; grep anchors below)
 
 - [ ] **Step 1: Write failing tests** in `enqueue/tests.rs`:
@@ -543,7 +543,7 @@ fn follower_lanes_never_pass_through_the_spatial_matrix() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-bridge -E 'test(e
+- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-engine -E 'test(e
 nqueue)'` → FAIL (new assertions against the not-yet-generalized code where they don't a
 lready hold; the legacy-equivalence test may pass trivially before the rewrite — that's
 fine, it's the pin).
@@ -579,23 +579,23 @@ olation — all ShapedSegment axes share one time domain): {e:?}")),
 
   `scale_curve_exact` returns a clone for `weight == 1.0` and the existing negate path f
 or `-1.0` (match whatever the current code calls — `rg -n "neg|negate|scalar_multiply" r
-ust/motion-bridge/src/enqueue.rs rust/nurbs/src/algebra*` — so ±1 weights reproduce toda
+ust/motion-engine/src/enqueue.rs rust/nurbs/src/algebra*` — so ±1 weights reproduce toda
 y's corexy bit-exactly), general `scalar_multiply` otherwise.
   - `dispatch.rs`: `motor_frame_xy(cfg, x, y)` → `motor_frame(cfg, [x, y, z]) -> [f64; 3
 ]` calling `module.forward`; `cfg_is_corexy` deleted; seed builders pass z through the m
 atrix (identity for both shipped modules — behavior unchanged, shape general). `AXIS_E`
-filters in `bridge.rs` (`rg -n "AXIS_E" rust/motion-bridge/src/`) become `SPATIAL_AXES`
+filters in `bridge.rs` (`rg -n "AXIS_E" rust/motion-engine/src/`) become `SPATIAL_AXES`
 comparisons where they mean "spatial only"; `AXIS_E` the constant dies — follower indice
 s come from the registry (`rg -n "AXIS_E" rust/` → empty after, tests use literal `3` wi
 th a name like `FOLLOWER_E` local to the test file if wanted).
   - `bridge.rs` homing (anchors: `rg -n "trip_position_to_motor_frame|kinematics::invers
-e" rust/motion-bridge/src/bridge.rs`): `trip_position_to_motor_frame` returns `[f64; SPA
+e" rust/motion-engine/src/bridge.rs`): `trip_position_to_motor_frame` returns `[f64; SPA
 TIAL_AXES]` and asserts `axis < SPATIAL_AXES` loudly (a follower axis in a homing trip i
 s a bug, not a case); both recovery sites call `KinematicsModule::from_tag(tag)?.inverse
 (frame)`.
 - [ ] **Step 4: Run** — `cargo nextest run` (workspace) → PASS; `rg -n "forward_corexy|i
 nverse_corexy|cfg_is_corexy|AXIS_E" rust/` → empty.
-- [ ] **Step 5: Commit** — `refactor(motion-bridge): emission/seeding/homing run on Kine
+- [ ] **Step 5: Commit** — `refactor(motion-engine): emission/seeding/homing run on Kine
 maticsModule; corexy special-case dies`
 
 ---
@@ -603,12 +603,12 @@ maticsModule; corexy special-case dies`
 ## Task 8: Rust config — motor-mapped-exactly-once coverage
 
 **Files:**
-- Modify: `rust/motion-bridge/src/config.rs` (+ its tests file — anchor: `rg -n "mod tes
-ts|#\[cfg\(test\)\]" rust/motion-bridge/src/config.rs` and the existing `config/tests.rs
+- Modify: `rust/motion-engine/src/config.rs` (+ its tests file — anchor: `rg -n "mod tes
+ts|#\[cfg\(test\)\]" rust/motion-engine/src/config.rs` and the existing `config/tests.rs
 ` if split)
-- Modify: `rust/motion-bridge/src/bridge.rs` (`init_planner` gains `kinematics_axes: Vec
+- Modify: `rust/motion-engine/src/bridge.rs` (`init_planner` gains `kinematics_axes: Vec
 <String>`)
-- Modify: `klippy/motion_bridge.py` (wrapper signature)
+- Modify: `klippy/motion_engine.py` (wrapper signature)
 
 - [ ] **Step 1: Write failing tests** (next to plan 2's `AxisRegistry` tests):
 
@@ -634,23 +634,23 @@ fn follower_with_own_motors_and_spatial_claims_pass() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-bridge -E 'test(c
+- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-engine -E 'test(c
 onfig)'` → FAIL.
 - [ ] **Step 3: Implement.** `AxisRegistry::try_new` (or a sibling `validate_motor_mappi
 ng(decls, kinematics_axes)` called from the same construction path — match plan 2's stru
 cture) enforces: for every declared axis, `claimed XOR !motors.is_empty()`; every claime
 d name is a declared axis. New `AxisConfigError` variants with messages naming the axis
 and both homes (`"axis 'z' is motor-mapped twice: by [kinematics] and by [axis z] motors
-:"`). `init_planner` (anchor: `rg -n "fn init_planner" rust/motion-bridge/src/bridge.rs`
+:"`). `init_planner` (anchor: `rg -n "fn init_planner" rust/motion-engine/src/bridge.rs`
 ; reconcile with plan 4 Task 6's final arg list) gains `kinematics_axes: Vec<String>` an
-d threads it in; `klippy/motion_bridge.py`'s wrapper mirrors. The Python caller side lan
+d threads it in; `klippy/motion_engine.py`'s wrapper mirrors. The Python caller side lan
 ds in Task 10 — until then the wrapper passes `[]`... no: **fail loudly instead** — make
  the argument required and update the single klippy call site in the same commit (Task 1
 0 reworks it again; green at every commit matters more than task isolation here, so this
  task's klippy edit is the minimal `kinematics_axes=["x","y","z"]` hardcode matching cur
 rent behavior, replaced in Task 10).
 - [ ] **Step 4: Run** — `cargo nextest run` → PASS; `./scripts/ci.sh py` → PASS.
-- [ ] **Step 5: Commit** — `feat(motion-bridge): every axis motor-mapped exactly once, v
+- [ ] **Step 5: Commit** — `feat(motion-engine): every axis motor-mapped exactly once, v
 alidated in the registry`
 
 ---
@@ -888,7 +888,7 @@ def test_lane_slot_steppers_ordered_primary_first(fake_motion):
 - [ ] **Step 3: Implement.** Slot map = spatial lanes from `kin.lanes()` + one slot per
 follower axis at its registry index, motors from the `[axis].motors` list (`self.axis_se
 ctions` — parsed since plan 2, consumed here at last). For each slot: primary motor = fi
-rst declared; MCU handle = primary's `get_mcu()._bridge_handle` (servo lanes resolve thr
+rst declared; MCU handle = primary's `get_mcu()._engine_handle` (servo lanes resolve thr
 ough `ethercat_node` exactly as the current servo branch does); per-MCU tag from `kin.mc
 u_tag(...)`. `_configure_axes_per_mcu` builds `slot_steppers` from this map instead of `
 _name_motor_slot` prefix matching — the body downstream (steps_per_mm, invert, phase con
@@ -1029,11 +1029,11 @@ ejected; fixtures speak [kinematics]`
 
 - [ ] **Step 1:** `cargo nextest run` from `rust/` → green; `cargo test --doc` if doc ex
 amples touched; `./scripts/ci.sh quick` → green; `./scripts/ci.sh py` → green.
-- [ ] **Step 2:** kalico-sim end-to-end (see the `kalico-sim` skill): boot the rewritten
+- [ ] **Step 2:** mcu-sim end-to-end (see the `mcu-sim` skill): boot the rewritten
  sim config; run the sim harness's homing flow (G28 path through endstop trip → `Kinemat
 icsModule.inverse` recovery) and a short print stream; assert final positions and step c
-ounts match a pre-branch capture of the same G-code on the plan-4 baseline (`KALICO_SIM_
-STEP_COUNT` / `KALICO_SIM_MOTION_STATE` per the skill). Record numbers in the PR descrip
+ounts match a pre-branch capture of the same G-code on the plan-4 baseline (`MCU_SIM_
+STEP_COUNT` / `MCU_SIM_MOTION_STATE` per the skill). Record numbers in the PR descrip
 tion.
 - [ ] **Step 3:** Snapshot test from Task 1 still green — the published `toolhead` surfa
 ce survived both phases byte-for-byte.
@@ -1051,7 +1051,7 @@ n at flash time, not in this repo.
  kinematic map with explicit motor-to-role assignment replacing role-encoding names (Tas
 ks 6–13). Spec §1 coverage rules: motor-mapped-exactly-once (Task 8), every-axis-in-a-li
 mit and follows-references-declared landed in plans 1–2, letter rules landed in plan 2 (
-`RESERVED_LETTERS`, `rust/motion-bridge/src/config.rs:11`).
+`RESERVED_LETTERS`, `rust/motion-engine/src/config.rs:11`).
 - **MCU untouched:** no task edits `src/`, `rust/runtime` beyond Task 2's comment/varian
 t rename (discriminants pinned), or the boundary doc — checked against every Files list.
 - **Pure-function planner requirement:** untouched — no task changes `temporal`/`traject

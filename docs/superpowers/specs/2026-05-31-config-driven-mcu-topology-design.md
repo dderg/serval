@@ -11,7 +11,7 @@ the printer config:
 - **Python** (`klippy/motion_toolhead.py:_init_planner`): locates exactly two
   MCUs by name (`octopus`/`f446`), passes their handles positionally, and falls
   back to `f446 = octopus` when only one MCU exists.
-- **Rust** (`rust/motion-bridge/src/bridge.rs:init_planner`): takes two named
+- **Rust** (`rust/motion-engine/src/bridge.rs:init_planner`): takes two named
   `octopus_handle` / `f446_handle` parameters, fetches caps as a hand-unrolled
   `(octopus_caps, f446_caps)` tuple, and builds `mcu_configs` as a fixed
   two-element vec with literal axis lists and kinematics tags
@@ -86,14 +86,14 @@ no topology change required.
   two-element `mcu_configs` vec with a loop over `mcus`: per entry, pull
   `runtime_caps` for that handle (same large-profile-default fallback as today),
   and build one `McuAxisConfig`. Everything downstream
-  (`host_ios`, `kalico_native_for_plans`, the dispatch closure) already iterates
+  (`host_ios`, `mcu_transport_for_plans`, the dispatch closure) already iterates
   `mcu_configs`, so no further Rust changes are needed.
 - Add `pub const AXIS_E: usize = 3;` in `dispatch.rs` alongside `AXIS_X`/
   `AXIS_Y`/`AXIS_Z`, completing the axis vocabulary.
 - Rewrite the `init_planner` doc comment from "two-MCU first-print MVP topology"
   to "N-MCU host-supplied topology."
 
-### Layer 3 — Python wrapper (`motion_bridge.py:init_planner`)
+### Layer 3 — Python wrapper (`motion_engine.py:init_planner`)
 
 Change the wrapper signature to forward the descriptor list instead of two
 positional handles.
@@ -122,7 +122,7 @@ assembly when E shaping is implemented. No other behavior changes.
   - corexy, 2 MCUs, extruder on octopus → `[(h0,[X,Y,E],0), (h1,[Z],1)]`
   - cartesian, 1 MCU → `[(h0,[X,Y,Z,E],1)]`
   - corexy, 1 MCU → `[(h0,[X,Y,Z,E],0)]`
-- **Rust** (`rust/motion-bridge/tests/bridge_to_runtime_step_chain.rs` and the
+- **Rust** (`rust/motion-engine/tests/bridge_to_runtime_step_chain.rs` and the
   `sim_motion_jogs` dispatch mirror): update call sites to the list form; assert
   `mcu_configs` built from `[(h0,[X,Y],0), (h1,[Z],1)]` matches the old literals,
   and that an added `AXIS_E` is skipped given 3-axis `shaped`.
@@ -130,9 +130,9 @@ assembly when E shaping is implemented. No other behavior changes.
 ## Files touched
 
 - `klippy/motion_toolhead.py` (`_init_planner`)
-- `klippy/motion_bridge.py` (`init_planner` wrapper)
-- `rust/motion-bridge/src/bridge.rs` (`init_planner`)
-- `rust/motion-bridge/src/dispatch.rs` (`AXIS_E` constant)
-- `rust/motion-bridge/tests/bridge_to_runtime_step_chain.rs`
-- `rust/motion-bridge/tests/sim_motion_jogs.rs`
+- `klippy/motion_engine.py` (`init_planner` wrapper)
+- `rust/motion-engine/src/bridge.rs` (`init_planner`)
+- `rust/motion-engine/src/dispatch.rs` (`AXIS_E` constant)
+- `rust/motion-engine/tests/bridge_to_runtime_step_chain.rs`
+- `rust/motion-engine/tests/sim_motion_jogs.rs`
 - `tools/test_renode_phase2_gate.py` (`init_planner` call site)

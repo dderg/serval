@@ -25,8 +25,7 @@ We are working on a complete rewrite of the motion planner and more:
   The `compat` crate has two callers: the offline Step-13 binary (file → file) and the live bridge (terminal/macro G1/G2/G3 conversion via `compat::collinear::to_collinear_g5`, `compat::arc::arc_to_g5`, `compat::degree_elev::elevate_g51_to_g5`). Both share the lexer.
 
 # Homing
-- We deliberately do not optimize for same mcu endstop+motor homing. All homing works as if mcu with the endstop is a different one than the one that drives the motors. it makes testing easier
-  at this stage of development.
+- Same-MCU endstop+motor homing is optimized: when a locally-armed endstop trips, the MCU brakes its own motion immediately — `endstop_trip_task` calls `handle_stop_inner` (the gating core of the `Stop` handler) before emitting the trip event, so the curve evaluator freezes without a host round-trip. The host's `broadcast_stop` still fans the stop out to any genuinely-remote participant MCUs, and its later `Stop` to the self-gated MCU is a harmless idempotent re-gate. Both paths converge on the same `gate_pieces` freeze.
 
 # Testing
 
@@ -51,12 +50,22 @@ the header of `scripts/ci.sh` for the full list, e.g. `ruff`,
 
 # Observability / structured logging
 
-Log via the structured pipeline (`kalico_log_emit` → `events/*.jsonl`), not
+Log via the structured pipeline (`event_log_emit` → `events/*.jsonl`), not
 `printf`/`output()` — it replaces `klippy.log` for MCU/structured diagnostics;
 the wire-stable event table is `rust/runtime/src/log_codes.rs`. To read or add
-logs — `KALICO_DIAG_DUMP`, crash forensics, filtering — use the `mcu-diagnostics`
+logs — `DIAG_DUMP`, crash forensics, filtering — use the `mcu-diagnostics`
 and `query-logs` skills.
 
 # Reference docs
 
-- **MCU C/Rust boundary — architectural invariant:** [`docs/kalico-rewrite/mcu-c-rust-boundary.md`](docs/kalico-rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
+- **MCU C/Rust boundary — architectural invariant:** [`docs/rewrite/mcu-c-rust-boundary.md`](docs/rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

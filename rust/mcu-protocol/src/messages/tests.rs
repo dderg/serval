@@ -1,0 +1,605 @@
+use super::roundtrip;
+use super::*;
+
+#[test]
+fn message_kind_round_trips_via_u16() {
+    for &k in &[
+        MessageKind::Identify,
+        MessageKind::IdentifyResponse,
+        MessageKind::ConfigureAxes,
+        MessageKind::ConfigureAxesResponse,
+        MessageKind::QueryRuntimeCaps,
+        MessageKind::RuntimeCapsResponse,
+        MessageKind::PushPieces,
+        MessageKind::PushPiecesResponse,
+        MessageKind::FaultEvent,
+        MessageKind::StatusHeartbeat,
+        MessageKind::McuLog,
+        MessageKind::ClaimHandshakeReply,
+        MessageKind::ClaimHandshake,
+        MessageKind::SdoRead,
+        MessageKind::SdoReadResponse,
+        MessageKind::SdoWrite,
+        MessageKind::SdoWriteResponse,
+    ] {
+        assert_eq!(MessageKind::from_u16(k.as_u16()), Some(k));
+    }
+    assert_eq!(MessageKind::from_u16(0x0010), None); // LoadCurveCubic
+    assert_eq!(MessageKind::from_u16(0x0011), None); // LoadCurveResponse
+    assert_eq!(MessageKind::from_u16(0x0020), None); // PushSegment
+    assert_eq!(MessageKind::from_u16(0x0021), None); // PushSegmentResponse
+    assert_eq!(MessageKind::from_u16(0x0050), None); // ResetCurvePool
+    assert_eq!(MessageKind::from_u16(0x0051), None); // ResetCurvePoolResponse
+    assert_eq!(MessageKind::from_u16(0x0080), None); // StatusEvent (old)
+    assert_eq!(MessageKind::from_u16(0x0081), None); // CreditFreed
+    assert_eq!(MessageKind::from_u16(0x0090), None); // ClaimHandshakeReply (old, relocated to 0x0043)
+    assert_eq!(MessageKind::from_u16(0x0091), None); // ClaimHandshake (old, relocated to 0x0042)
+    assert_eq!(MessageKind::from_u16(0xFFFF), None);
+}
+
+#[test]
+fn configure_axes_roundtrip() {
+    let v = ConfigureAxes {
+        kinematics: 0,
+        present_mask: 0b1111,
+        awd_mask: 0b0011,
+        invert_mask: 0b0010,
+        steps_per_mm: [80.0, 80.0, 400.0, 415.0],
+    };
+    assert_eq!(roundtrip(&v), v);
+    assert_eq!(v.encoded_to_vec().len(), 20);
+    let r = ConfigureAxesResponse { result: -7 };
+    assert_eq!(roundtrip(&r), r);
+    assert_eq!(r.encoded_to_vec().len(), 4);
+}
+
+#[test]
+fn fault_event_roundtrip() {
+    let v = FaultEvent {
+        fault_code: 0x0007,
+        fault_detail: 0xBAAD_F00D,
+        segment_id: 11,
+    };
+    assert_eq!(roundtrip(&v), v);
+    assert_eq!(v.encoded_to_vec().len(), 10);
+}
+
+#[test]
+fn runtime_caps_response_new_format() {
+    let msg = RuntimeCapsResponse {
+        total_piece_memory: 63488,
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf.len(), 4);
+    let mut cursor = Cursor::new(&buf);
+    let decoded = RuntimeCapsResponse::decode_from(&mut cursor).unwrap();
+    assert_eq!(decoded.total_piece_memory, 63488);
+}
+
+#[test]
+fn status_heartbeat_roundtrip_empty() {
+    let msg = StatusHeartbeat {
+        engine_state: 0,
+        fault_code: 0,
+        retired_counts: vec![],
+        ff_saturation_count: 0,
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf.len(), 8);
+    let mut cursor = Cursor::new(&buf);
+    let decoded = StatusHeartbeat::decode_from(&mut cursor).unwrap();
+    assert_eq!(decoded.retired_counts.len(), 0);
+    assert_eq!(decoded.ff_saturation_count, 0);
+}
+
+#[test]
+fn status_heartbeat_roundtrip_with_axes() {
+    let msg = StatusHeartbeat {
+        engine_state: 1,
+        fault_code: 0,
+        retired_counts: vec![42, 42, 10, 5],
+        ff_saturation_count: 7,
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf.len(), 24);
+    let mut cursor = Cursor::new(&buf);
+    let decoded = StatusHeartbeat::decode_from(&mut cursor).unwrap();
+    assert_eq!(decoded.engine_state, 1);
+    assert_eq!(decoded.fault_code, 0);
+    assert_eq!(decoded.retired_counts, vec![42, 42, 10, 5]);
+    assert_eq!(decoded.ff_saturation_count, 7);
+}
+
+#[test]
+fn status_heartbeat_short_frame_missing_ff_saturation_is_decode_error() {
+    let msg = StatusHeartbeat {
+        engine_state: 2,
+        fault_code: 0,
+        retired_counts: vec![99],
+        ff_saturation_count: 5,
+    };
+    let full = msg.encoded_to_vec();
+    let truncated = &full[..full.len() - 1];
+    assert!(
+        StatusHeartbeat::decode(truncated).is_err(),
+        "short frame must fail to decode"
+    );
+}
+
+#[test]
+fn push_pieces_roundtrip_single() {
+    let msg = PushPieces {
+        axis_idx: 2,
+        piece_count: 1,
+        start_slot: 0,
+        new_head: 0,
+        pieces_bytes: vec![0xAB; 32],
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf.len(), 40);
+    let mut cursor = Cursor::new(&buf);
+    let decoded = PushPieces::decode_from(&mut cursor).unwrap();
+    assert_eq!(decoded.axis_idx, 2);
+    assert_eq!(decoded.piece_count, 1);
+    assert_eq!(decoded.start_slot, 0);
+    assert_eq!(decoded.new_head, 0);
+    assert_eq!(decoded.pieces_bytes.len(), 32);
+    assert_eq!(decoded.pieces_bytes[0], 0xAB);
+}
+
+#[test]
+fn push_pieces_v2_roundtrip_carries_slot_and_head() {
+    let msg = PushPieces {
+        axis_idx: 2,
+        piece_count: 1,
+        start_slot: 41,
+        new_head: 5000,
+        pieces_bytes: vec![0xAB; 32],
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf.len(), 40);
+    let mut cursor = Cursor::new(&buf);
+    let decoded = PushPieces::decode_from(&mut cursor).unwrap();
+    assert_eq!(decoded.axis_idx, 2);
+    assert_eq!(decoded.piece_count, 1);
+    assert_eq!(decoded.start_slot, 41);
+    assert_eq!(decoded.new_head, 5000);
+    assert_eq!(decoded.pieces_bytes, vec![0xAB; 32]);
+}
+
+#[test]
+fn push_pieces_roundtrip_multiple() {
+    let msg = PushPieces {
+        axis_idx: 0,
+        piece_count: 3,
+        start_slot: 0,
+        new_head: 0,
+        pieces_bytes: vec![0x42; 96],
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf.len(), 8 + 3 * 32);
+    let mut cursor = Cursor::new(&buf);
+    let decoded = PushPieces::decode_from(&mut cursor).unwrap();
+    assert_eq!(decoded.piece_count, 3);
+    assert_eq!(decoded.start_slot, 0);
+    assert_eq!(decoded.new_head, 0);
+    assert_eq!(decoded.pieces_bytes.len(), 96);
+}
+
+#[test]
+fn push_pieces_response_roundtrip() {
+    // Wire layout: result(i32 LE, 4 bytes) | arrival_clock(u64 LE, 8 bytes) |
+    //              front_start_time(u64 LE, 8 bytes) = 20 bytes total.
+    let msg = PushPiecesResponse {
+        result: -2,
+        arrival_clock: 0x0102_0304_0506_0708_u64,
+        front_start_time: 0xDEAD_BEEF_CAFE_1234_u64,
+    };
+    let buf = msg.encoded_to_vec();
+    assert_eq!(
+        buf.len(),
+        20,
+        "PushPiecesResponse body must be exactly 20 bytes"
+    );
+    assert_eq!(&buf[0..4], &0xFFFF_FFFE_u32.to_le_bytes());
+    assert_eq!(&buf[4..12], &0x0102_0304_0506_0708_u64.to_le_bytes());
+    assert_eq!(&buf[12..20], &0xDEAD_BEEF_CAFE_1234_u64.to_le_bytes());
+    let decoded = PushPiecesResponse::decode(&buf).expect("decode ok");
+    assert_eq!(decoded.result, -2);
+    assert_eq!(decoded.arrival_clock, 0x0102_0304_0506_0708_u64);
+    assert_eq!(decoded.front_start_time, 0xDEAD_BEEF_CAFE_1234_u64);
+}
+
+#[test]
+fn push_pieces_response_error_path_zeros() {
+    let msg = PushPiecesResponse {
+        result: -7,
+        arrival_clock: 0,
+        front_start_time: 0,
+    };
+    let buf = msg.encoded_to_vec();
+    assert_eq!(buf.len(), 20);
+    let decoded = PushPiecesResponse::decode(&buf).expect("decode ok");
+    assert_eq!(decoded.result, -7);
+    assert_eq!(decoded.arrival_clock, 0);
+    assert_eq!(decoded.front_start_time, 0);
+}
+
+#[test]
+fn push_pieces_kind_in_message_kind_table() {
+    assert_eq!(MessageKind::from_u16(0x0060), Some(MessageKind::PushPieces));
+    assert_eq!(
+        MessageKind::from_u16(0x0061),
+        Some(MessageKind::PushPiecesResponse)
+    );
+    assert_eq!(MessageKind::PushPieces.as_u16(), 0x0060);
+    assert_eq!(MessageKind::PushPiecesResponse.as_u16(), 0x0061);
+}
+
+#[test]
+fn push_correction_pieces_roundtrip() {
+    let msg = PushCorrectionPieces {
+        axis_idx: 2,
+        motor_idx: 1,
+        piece_count: 2,
+        start_slot: 5,
+        new_head: 7,
+        pieces_bytes: vec![0xAB; 64],
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    let decoded = PushCorrectionPieces::decode(&buf).unwrap();
+    assert_eq!(decoded, msg);
+}
+
+#[test]
+fn push_correction_pieces_response_roundtrip() {
+    let msg = PushCorrectionPiecesResponse {
+        result: -31,
+        arrival_clock: 0x1122_3344_5566_7788,
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    let decoded = PushCorrectionPiecesResponse::decode(&buf).unwrap();
+    assert_eq!(decoded, msg);
+}
+
+#[test]
+fn push_correction_pieces_rejects_short_body() {
+    let msg = PushCorrectionPieces {
+        axis_idx: 2,
+        motor_idx: 1,
+        piece_count: 3,
+        start_slot: 0,
+        new_head: 3,
+        pieces_bytes: vec![0; 64],
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert!(PushCorrectionPieces::decode(&buf).is_err());
+}
+
+#[test]
+fn push_correction_pieces_kind_in_message_kind_table() {
+    assert_eq!(
+        MessageKind::from_u16(0x0062),
+        Some(MessageKind::PushCorrectionPieces)
+    );
+    assert_eq!(
+        MessageKind::from_u16(0x0063),
+        Some(MessageKind::PushCorrectionPiecesResponse)
+    );
+    assert_eq!(MessageKind::PushCorrectionPieces.as_u16(), 0x0062);
+    assert_eq!(MessageKind::PushCorrectionPiecesResponse.as_u16(), 0x0063);
+}
+
+#[test]
+fn set_torque_round_trips() {
+    let msg = SetTorque {
+        value: 1,
+        execute_at_ns: 0xDEAD_BEEF_CAFE_F00D,
+    };
+    let bytes = msg.encoded_to_vec();
+    assert_eq!(bytes.len(), 9, "u8 + u64 = 9 bytes");
+    let back = SetTorque::decode(&bytes).expect("decode");
+    assert_eq!(back, msg);
+}
+
+#[test]
+fn set_torque_response_round_trips() {
+    let msg = SetTorqueResponse { result: -311 };
+    let bytes = msg.encoded_to_vec();
+    assert_eq!(bytes.len(), 4, "i32 = 4 bytes");
+    let back = SetTorqueResponse::decode(&bytes).expect("decode");
+    assert_eq!(back, msg);
+}
+
+#[test]
+fn set_torque_kinds_have_stable_tags() {
+    assert_eq!(MessageKind::SetTorque.as_u16(), 0x0070);
+    assert_eq!(MessageKind::SetTorqueResponse.as_u16(), 0x0071);
+    assert_eq!(MessageKind::from_u16(0x0070), Some(MessageKind::SetTorque));
+    assert_eq!(
+        MessageKind::from_u16(0x0071),
+        Some(MessageKind::SetTorqueResponse)
+    );
+    assert!(!MessageKind::SetTorque.is_event());
+}
+
+#[test]
+fn decode_rejects_trailing_bytes() {
+    let v = FaultEvent {
+        fault_code: 1,
+        fault_detail: 2,
+        segment_id: 3,
+    };
+    let mut bytes = v.encoded_to_vec();
+    bytes.push(0xAA);
+    match FaultEvent::decode(&bytes) {
+        Err(DecodeError::TrailingBytes { remaining: 1 }) => {}
+        other => panic!("expected TrailingBytes(1), got {other:?}"),
+    }
+}
+
+#[test]
+fn stop_round_trips_empty_body() {
+    let bytes = Stop.encoded_to_vec();
+    assert!(bytes.is_empty(), "Stop body is empty");
+    let back = Stop::decode(&bytes).expect("decode");
+    assert_eq!(back, Stop);
+}
+
+#[test]
+fn stop_response_round_trips() {
+    let msg = StopResponse {
+        result: 0,
+        discard_clock: 0x0123_4567_89AB_CDEF,
+    };
+    let bytes = msg.encoded_to_vec();
+    assert_eq!(bytes.len(), 12, "i32 + u64 = 12 bytes");
+    assert_eq!(StopResponse::decode(&bytes).expect("decode"), msg);
+}
+
+#[test]
+fn resume_stream_round_trips_empty_body() {
+    let bytes = ResumeStream.encoded_to_vec();
+    assert!(bytes.is_empty(), "ResumeStream body is empty");
+    let back = ResumeStream::decode(&bytes).expect("decode");
+    assert_eq!(back, ResumeStream);
+}
+
+#[test]
+fn resume_stream_response_round_trips() {
+    let msg = ResumeStreamResponse { result: -142 };
+    let bytes = msg.encoded_to_vec();
+    assert_eq!(bytes.len(), 4, "i32 = 4 bytes");
+    assert_eq!(ResumeStreamResponse::decode(&bytes).expect("decode"), msg);
+}
+
+#[test]
+fn resume_stream_kinds_have_stable_tags() {
+    assert_eq!(MessageKind::ResumeStream.as_u16(), 0x0078);
+    assert_eq!(MessageKind::ResumeStreamResponse.as_u16(), 0x0079);
+    assert_eq!(
+        MessageKind::from_u16(0x0078),
+        Some(MessageKind::ResumeStream)
+    );
+    assert_eq!(
+        MessageKind::from_u16(0x0079),
+        Some(MessageKind::ResumeStreamResponse)
+    );
+    assert!(!MessageKind::ResumeStream.is_event());
+}
+
+#[test]
+fn stop_kinds_have_stable_tags() {
+    assert_eq!(MessageKind::Stop.as_u16(), 0x0072);
+    assert_eq!(MessageKind::StopResponse.as_u16(), 0x0073);
+    assert_eq!(MessageKind::from_u16(0x0072), Some(MessageKind::Stop));
+    assert_eq!(
+        MessageKind::from_u16(0x0073),
+        Some(MessageKind::StopResponse)
+    );
+    assert!(!MessageKind::Stop.is_event());
+}
+
+#[test]
+fn set_drive_limits_round_trips() {
+    let msg = SetDriveLimits {
+        following_error_counts: 8192,
+        max_torque_tenth_pct: 500,
+    };
+    let bytes = msg.encoded_to_vec();
+    let decoded = SetDriveLimits::decode(&bytes).unwrap();
+    assert_eq!(decoded, msg);
+}
+
+#[test]
+fn drive_limits_responses_round_trip() {
+    let r = SetDriveLimitsResponse { result: -315 };
+    assert_eq!(
+        SetDriveLimitsResponse::decode(&r.encoded_to_vec()).unwrap(),
+        r
+    );
+    let r = RestoreDriveLimitsResponse { result: 0 };
+    assert_eq!(
+        RestoreDriveLimitsResponse::decode(&r.encoded_to_vec()).unwrap(),
+        r
+    );
+}
+
+#[test]
+fn drive_limits_message_kinds_round_trip() {
+    for kind in [
+        MessageKind::SetDriveLimits,
+        MessageKind::SetDriveLimitsResponse,
+        MessageKind::RestoreDriveLimits,
+        MessageKind::RestoreDriveLimitsResponse,
+    ] {
+        assert_eq!(MessageKind::from_u16(kind.as_u16()), Some(kind));
+    }
+}
+
+#[test]
+fn seed_servo_home_round_trips() {
+    let msg = SeedServoHome { home_q16: -123_456 };
+    let bytes = msg.encoded_to_vec();
+    assert_eq!(bytes.len(), 4);
+    assert_eq!(SeedServoHome::decode(&bytes).unwrap(), msg);
+
+    let r = SeedServoHomeResponse { result: -801 };
+    assert_eq!(
+        SeedServoHomeResponse::decode(&r.encoded_to_vec()).unwrap(),
+        r
+    );
+
+    for kind in [
+        MessageKind::SeedServoHome,
+        MessageKind::SeedServoHomeResponse,
+    ] {
+        assert_eq!(MessageKind::from_u16(kind.as_u16()), Some(kind));
+    }
+}
+
+#[test]
+fn endstop_trip_round_trips_and_is_event() {
+    let msg = EndstopTrip {
+        endstop_id: 3,
+        trip_clock: 0x0123_4567_89AB_CDEF,
+    };
+    let bytes = msg.encoded_to_vec();
+    assert_eq!(bytes.len(), 9, "u8 + u64 = 9 bytes");
+    assert_eq!(bytes[0], 3);
+    assert_eq!(&bytes[1..9], &0x0123_4567_89AB_CDEF_u64.to_le_bytes());
+    assert_eq!(EndstopTrip::decode(&bytes).expect("decode"), msg);
+    assert!(MessageKind::EndstopTrip.is_event());
+    assert_eq!(MessageKind::EndstopTrip.as_u16(), 0x0085);
+}
+
+#[test]
+fn put_get_str_round_trip() {
+    use crate::codec::{Cursor, get_str, put_str};
+    let mut buf = Vec::new();
+    put_str(&mut buf, "servo_captures/x_20260610.scap");
+    put_str(&mut buf, "");
+    let mut c = Cursor::new(&buf);
+    assert_eq!(get_str(&mut c).unwrap(), "servo_captures/x_20260610.scap");
+    assert_eq!(get_str(&mut c).unwrap(), "");
+}
+
+#[test]
+fn get_str_rejects_truncated_buffer() {
+    use crate::codec::{Cursor, get_str};
+    let length_prefix_overruns_payload = [10u8, 0, b'a', b'b'];
+    let mut c = Cursor::new(&length_prefix_overruns_payload);
+    assert!(get_str(&mut c).is_err());
+}
+
+#[test]
+fn get_str_rejects_invalid_utf8() {
+    use crate::codec::{Cursor, get_str};
+    let buf = [2u8, 0, 0xff, 0xfe];
+    let mut c = Cursor::new(&buf);
+    assert!(get_str(&mut c).is_err());
+}
+
+#[test]
+fn start_capture_round_trip() {
+    use crate::messages::StartCapture;
+    let msg = StartCapture {
+        path: "/home/pi/printer_data/logs/servo_captures/t.scap".into(),
+        started_utc: "2026-06-10T12:00:00Z".into(),
+        drive_name: "x".into(),
+    };
+    let buf = msg.encoded_to_vec();
+    assert_eq!(StartCapture::decode(&buf).unwrap(), msg);
+}
+
+#[test]
+fn stop_capture_response_round_trip() {
+    use crate::messages::StopCaptureResponse;
+    let msg = StopCaptureResponse {
+        result: -323,
+        samples: 12_345,
+        overflow_cycle: StopCaptureResponse::NO_OVERFLOW,
+    };
+    let buf = msg.encoded_to_vec();
+    assert_eq!(StopCaptureResponse::decode(&buf).unwrap(), msg);
+}
+
+#[test]
+fn get_str_zero_length_decodes_to_empty() {
+    use crate::codec::{Cursor, get_str};
+    let buf = [0u8, 0];
+    let mut c = Cursor::new(&buf);
+    assert_eq!(get_str(&mut c).unwrap(), "");
+}
+
+#[test]
+fn motor_state_kinds_roundtrip() {
+    assert_eq!(
+        MessageKind::from_u16(0x0044),
+        Some(MessageKind::QueryMotorState)
+    );
+    assert_eq!(
+        MessageKind::from_u16(0x0045),
+        Some(MessageKind::MotorStateResponse)
+    );
+    assert_eq!(MessageKind::QueryMotorState.as_u16(), 0x0044);
+    assert_eq!(MessageKind::MotorStateResponse.as_u16(), 0x0045);
+}
+
+#[test]
+fn motor_state_response_roundtrip() {
+    let msg = MotorStateResponse {
+        motors: vec![
+            MotorSample {
+                slot: 0,
+                pos_q16: 123 * 65536,
+                vel_q16: -45 * 65536,
+            },
+            MotorSample {
+                slot: 2,
+                pos_q16: 7,
+                vel_q16: 0,
+            },
+        ],
+    };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf.len(), 1 + 2 * 9);
+    let mut c = Cursor::new(&buf);
+    let got = MotorStateResponse::decode_from(&mut c).unwrap();
+    assert_eq!(got, msg);
+}
+
+#[test]
+fn motor_state_response_empty_roundtrip() {
+    let msg = MotorStateResponse { motors: vec![] };
+    let mut buf = Vec::new();
+    msg.encode(&mut buf);
+    assert_eq!(buf, vec![0u8]);
+    let mut c = Cursor::new(&buf);
+    assert_eq!(MotorStateResponse::decode_from(&mut c).unwrap(), msg);
+}
+
+#[test]
+fn capture_message_kinds_round_trip_u16() {
+    use crate::messages::MessageKind;
+    for (kind, raw) in [
+        (MessageKind::StartCapture, 0x0068u16),
+        (MessageKind::StartCaptureResponse, 0x0069),
+        (MessageKind::StopCapture, 0x006A),
+        (MessageKind::StopCaptureResponse, 0x006B),
+    ] {
+        assert_eq!(kind.as_u16(), raw);
+        assert_eq!(MessageKind::from_u16(raw), Some(kind));
+        assert!(!kind.is_event());
+    }
+}

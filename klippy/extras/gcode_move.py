@@ -149,9 +149,13 @@ class GCodeMove:
         if self.is_printer_ready:
             self.last_position = self.position_with_transform()
 
+    def _resync_toolhead_before_move(self):
+        self.printer.lookup_object("toolhead").resync_parked_servos()
+
     # G-Code movement commands
     def cmd_G1(self, gcmd):
         # Move
+        self._resync_toolhead_before_move()
         params = gcmd.get_command_parameters()
         try:
             for pos, axis in enumerate("XYZ"):
@@ -222,6 +226,7 @@ class GCodeMove:
             )
 
     def cmd_G5(self, gcmd):
+        self._resync_toolhead_before_move()
         self._reject_curve_if_transform_active(gcmd)
         params = gcmd.get_command_parameters()
         if "P" not in params or "Q" not in params:
@@ -248,7 +253,7 @@ class GCodeMove:
         interior.append([end[0] + p, end[1] + q, start[2] + 2.0 * dz / 3.0])
 
         def submit(sdx, sdy, sdz, sde, fr):
-            self._submit_bezier_to_bridge(i, j, p, q, sdx, sdy, sdz, sde, fr)
+            self._submit_bezier_to_engine(i, j, p, q, sdx, sdy, sdz, sde, fr)
 
         toolhead = self.printer.lookup_object("toolhead")
         try:
@@ -259,14 +264,15 @@ class GCodeMove:
             self.last_position[:] = start
             raise
 
-    def _submit_bezier_to_bridge(self, i, j, p, q, dx, dy, dz, de, fr):
+    def _submit_bezier_to_engine(self, i, j, p, q, dx, dy, dz, de, fr):
         motion = self.printer.lookup_object("motion")
         try:
-            motion.bridge.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
+            motion.engine.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
         except ValueError as e:
             raise self.printer.command_error(str(e))
 
     def cmd_G5_1(self, gcmd):
+        self._resync_toolhead_before_move()
         self._reject_curve_if_transform_active(gcmd)
         params = gcmd.get_command_parameters()
         if "I" not in params and "J" not in params:
@@ -285,16 +291,16 @@ class GCodeMove:
         interior = [[start[0] + i, start[1] + j, start[2] + dz / 2.0]]
 
         def submit(sdx, sdy, sdz, sde, fr):
-            self._submit_quadratic_to_bridge(i, j, sdx, sdy, sdz, sde, fr)
+            self._submit_quadratic_to_engine(i, j, sdx, sdy, sdz, sde, fr)
 
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.move_curve(
             list(self.last_position), interior, submit, self.speed
         )
 
-    def _submit_quadratic_to_bridge(self, i, j, dx, dy, dz, de, fr):
+    def _submit_quadratic_to_engine(self, i, j, dx, dy, dz, de, fr):
         motion = self.printer.lookup_object("motion")
-        motion.bridge.submit_quadratic(i, j, dx, dy, dz, de, fr)
+        motion.engine.submit_quadratic(i, j, dx, dy, dz, de, fr)
 
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):
@@ -420,15 +426,17 @@ class GCodeMove:
         toolhead = self.printer.lookup_object("toolhead", None)
         if toolhead is None:
             raise gcmd.error("Printer not ready")
-        kin = toolhead.get_kinematics()
-        steppers = kin.get_steppers()
-        mcu_pos = " ".join(
-            ["%s:%d" % (s.get_name(), s.get_mcu_position()) for s in steppers]
-        )
-        cinfo = [(s.get_name(), s.get_commanded_position()) for s in steppers]
-        stepper_pos = " ".join(["%s:%.6f" % (a, v) for a, v in cinfo])
-        kinfo = zip("XYZ", kin.calc_position(dict(cinfo)))
-        kin_pos = " ".join(["%s:%.6f" % (a, v) for a, v in kinfo])
+        engine = self.printer.lookup_object("motion_engine", None)
+        try:
+            axes = engine.query_motor_positions() if engine is not None else {}
+            measured = " ".join(
+                "%s:%.6f" % (a.upper(), axes[a][0])
+                for a in ("x", "y", "z", "e")
+                if a in axes
+            )
+            measured_pos = measured if measured else "ERR"
+        except Exception as e:
+            measured_pos = "ERR (%s)" % (e,)
         toolhead_pos = " ".join(
             [
                 "%s:%.6f" % (a, v)
@@ -445,17 +453,13 @@ class GCodeMove:
             ["%s:%.6f" % (a, v) for a, v in zip("XYZ", self.homing_position)]
         )
         gcmd.respond_info(
-            "mcu: %s\n"
-            "stepper: %s\n"
-            "kinematic: %s\n"
+            "measured: %s\n"
             "toolhead: %s\n"
             "gcode: %s\n"
             "gcode base: %s\n"
             "gcode homing: %s"
             % (
-                mcu_pos,
-                stepper_pos,
-                kin_pos,
+                measured_pos,
                 toolhead_pos,
                 gcode_pos,
                 base_pos,

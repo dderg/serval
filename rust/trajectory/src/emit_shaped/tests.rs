@@ -314,7 +314,7 @@ fn constant_y_axis_emits_cubic_matching_moving_x_corexy_degree_invariant() {
     // bitwise-constant, emit_shaped returned the fitter's native degree-5 curve
     // for Y while fitting X to degree-3 via fit_c2_cubic. The degree mismatch
     // caused add_with_knot_union to return KnotMismatch and panicked at
-    // motion-bridge/src/enqueue.rs:30 on any CoreXY dispatch.
+    // motion-engine/src/enqueue.rs:30 on any CoreXY dispatch.
     //
     // Trigger condition: pure-X jogs queued back-to-back while the first is
     // in flight; the terminal-decel splice rebuilds Y as bitwise-constant.

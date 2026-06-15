@@ -65,7 +65,7 @@ def _spawn_one(
     log_fd = open(log_path, "wb")
     env = os.environ.copy()
     env["LD_PRELOAD"] = shim_so
-    env["KALICO_SIM_SOCK_DIR"] = sock_dir
+    env["MCU_SIM_SOCK_DIR"] = sock_dir
     proc = subprocess.Popen(
         [elf, "-I", socket_path],
         stdout=log_fd,

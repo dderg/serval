@@ -15,7 +15,7 @@ import sys
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from kalico_host_io import HostIoError, KalicoHostIO  # noqa: E402
+from host_io import HostIoError, KalicoHostIO  # noqa: E402
 
 # Spec §12.2 — sliding-window depth.
 WINDOW = 30
@@ -24,7 +24,7 @@ SAMPLE_PERIOD_S = 0.1
 
 class ClockSyncWindow:
     """Sliding-window clock-sync regression (Spec §12.2/§12.4). Not bit-identical to
-    `rust/kalico-host-rt/src/clock_sync.rs`; the Rust impl is the source of truth."""
+    `rust/host-rt/src/clock_sync.rs`; the Rust impl is the source of truth."""
 
     def __init__(self, baseline_freq):
         self.baseline_freq = baseline_freq

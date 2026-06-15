@@ -3,7 +3,7 @@
 Restores the probe orchestration surface that the bridge-native `[probe]`
 rewrite (816846c19) left out, so the probe-consuming extras work again.
 Spec C of the beacon plan
-([`beacon-fork-survey.md`](../../kalico-rewrite/beacon-fork-survey.md));
+([`beacon-fork-survey.md`](../../rewrite/beacon-fork-survey.md));
 no beacon dependency — this fixes our own stranded consumers for any probe.
 
 Reference implementation: this repo's `main` branch is vanilla Kalico, so
@@ -131,7 +131,7 @@ options rejected by the unused-option check.
 - Unit tests (separate file per repo convention) for pure logic:
   `run_probe` result shape and aggregation, helper point/offset
   arithmetic, finalize-retry protocol driven by a stub probe object.
-- kalico-sim end-to-end: config with `[probe]` + `[bed_mesh]` +
+- mcu-sim end-to-end: config with `[probe]` + `[bed_mesh]` +
   `[screws_tilt_adjust]` + `[axis_twist_compensation]` + `[z_tilt]`.
   `BED_MESH_CALIBRATE` and `SCREWS_TILT_ADJUST` complete;
   `Z_TILT_ADJUST` fails with the not-implemented error after probing;

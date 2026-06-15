@@ -19,97 +19,97 @@ pub enum RuntimeError {
 
 // FFI return codes — must match the C-side #define table. All Step-5 numeric
 // values are PRESERVED; do not reorder or renumber.
-pub const KALICO_OK: i32 = 0;
-pub const KALICO_ERR_QUEUE_FULL: i32 = -1;
-pub const KALICO_ERR_INVALID_CURVE: i32 = -2;
-pub const KALICO_ERR_INVALID_HANDLE: i32 = -3;
-pub const KALICO_ERR_INVALID_DURATION: i32 = -4;
-pub const KALICO_ERR_INVALID_KINEMATICS: i32 = -5;
-pub const KALICO_ERR_NULL_PTR: i32 = -6;
-pub const KALICO_ERR_NOT_INIT: i32 = -7;
-pub const KALICO_ERR_FAULT_LATCHED: i32 = -8;
-pub const KALICO_ERR_INTERNAL: i32 = -9;
+pub const RUNTIME_OK: i32 = 0;
+pub const RUNTIME_ERR_QUEUE_FULL: i32 = -1;
+pub const RUNTIME_ERR_INVALID_CURVE: i32 = -2;
+pub const RUNTIME_ERR_INVALID_HANDLE: i32 = -3;
+pub const RUNTIME_ERR_INVALID_DURATION: i32 = -4;
+pub const RUNTIME_ERR_INVALID_KINEMATICS: i32 = -5;
+pub const RUNTIME_ERR_NULL_PTR: i32 = -6;
+pub const RUNTIME_ERR_NOT_INIT: i32 = -7;
+pub const RUNTIME_ERR_FAULT_LATCHED: i32 = -8;
+pub const RUNTIME_ERR_INTERNAL: i32 = -9;
 
-pub const KALICO_ERR_BAD_CRC: i32 = -100;
-pub const KALICO_ERR_FRAMING_VIOLATION: i32 = -101;
-pub const KALICO_ERR_DISCONNECT: i32 = -102;
-pub const KALICO_ERR_PROTOCOL_VERSION_UNSUPPORTED: i32 = -103;
+pub const RUNTIME_ERR_BAD_CRC: i32 = -100;
+pub const RUNTIME_ERR_FRAMING_VIOLATION: i32 = -101;
+pub const RUNTIME_ERR_DISCONNECT: i32 = -102;
+pub const RUNTIME_ERR_PROTOCOL_VERSION_UNSUPPORTED: i32 = -103;
 
-pub const KALICO_ERR_CLOCK_SYNC_QUALITY: i32 = -110;
-pub const KALICO_ERR_CLOCK_SYNC_TIMEOUT: i32 = -111;
+pub const RUNTIME_ERR_CLOCK_SYNC_QUALITY: i32 = -110;
+pub const RUNTIME_ERR_CLOCK_SYNC_TIMEOUT: i32 = -111;
 
-pub const KALICO_ERR_ARM_TIMEOUT: i32 = -120;
-pub const KALICO_ERR_ARM_REJECTED: i32 = -121;
-pub const KALICO_ERR_CROSS_MCU_DESYNC: i32 = -122;
+pub const RUNTIME_ERR_ARM_TIMEOUT: i32 = -120;
+pub const RUNTIME_ERR_ARM_REJECTED: i32 = -121;
+pub const RUNTIME_ERR_CROSS_MCU_DESYNC: i32 = -122;
 
-pub const KALICO_ERR_UNDERRUN: i32 = -130;
-pub const KALICO_ERR_QUEUE_OVERRUN: i32 = -131;
-pub const KALICO_ERR_LIVENESS_STALLED: i32 = -132;
-pub const KALICO_ERR_TRACE_OVERFLOW: i32 = -133;
+pub const RUNTIME_ERR_UNDERRUN: i32 = -130;
+pub const RUNTIME_ERR_QUEUE_OVERRUN: i32 = -131;
+pub const RUNTIME_ERR_LIVENESS_STALLED: i32 = -132;
+pub const RUNTIME_ERR_TRACE_OVERFLOW: i32 = -133;
 
-pub const KALICO_ERR_STREAM_STATE_VIOLATION: i32 = -140;
-pub const KALICO_ERR_SEGMENT_ID_NON_MONOTONIC: i32 = -141;
-pub const KALICO_ERR_STREAM_HALTED: i32 = -142;
+pub const RUNTIME_ERR_STREAM_STATE_VIOLATION: i32 = -140;
+pub const RUNTIME_ERR_SEGMENT_ID_NON_MONOTONIC: i32 = -141;
+pub const RUNTIME_ERR_STREAM_HALTED: i32 = -142;
 
-pub const KALICO_ERR_T_START_IN_PAST: i32 = -150;
-pub const KALICO_ERR_T_END_BEFORE_T_START: i32 = -151;
-pub const KALICO_ERR_SEGMENT_TOO_SHORT: i32 = -152;
-pub const KALICO_ERR_SEGMENT_TOO_LONG: i32 = -153;
+pub const RUNTIME_ERR_T_START_IN_PAST: i32 = -150;
+pub const RUNTIME_ERR_T_END_BEFORE_T_START: i32 = -151;
+pub const RUNTIME_ERR_SEGMENT_TOO_SHORT: i32 = -152;
+pub const RUNTIME_ERR_SEGMENT_TOO_LONG: i32 = -153;
 
-pub const KALICO_ERR_INVALID_CURVE_HANDLE: i32 = -160;
-pub const KALICO_ERR_CURVE_RELOAD_REJECTED: i32 = -161;
-pub const KALICO_ERR_CURVE_FORMAT_INVALID: i32 = -162;
+pub const RUNTIME_ERR_INVALID_CURVE_HANDLE: i32 = -160;
+pub const RUNTIME_ERR_CURVE_RELOAD_REJECTED: i32 = -161;
+pub const RUNTIME_ERR_CURVE_FORMAT_INVALID: i32 = -162;
 
-pub const KALICO_ERR_NAN_INF_OUTPUT: i32 = -170;
-pub const KALICO_ERR_BOUNDARY_LOOP_OVERFLOW: i32 = -171;
-pub const KALICO_ERR_INTERNAL_INVARIANT: i32 = -172;
+pub const RUNTIME_ERR_NAN_INF_OUTPUT: i32 = -170;
+pub const RUNTIME_ERR_BOUNDARY_LOOP_OVERFLOW: i32 = -171;
+pub const RUNTIME_ERR_INTERNAL_INVARIANT: i32 = -172;
 
-pub const KALICO_ERR_STEP_BURST_EXCEEDED: i32 = -21;
-pub const KALICO_ERR_ZERO_DURATION_SEGMENT: i32 = -22;
-pub const KALICO_ERR_HOMING_TRIP: i32 = -23;
-pub const KALICO_ERR_CAPABILITY_MISSING: i32 = -24;
-pub const KALICO_ERR_NO_STEP: i32 = -25;
-pub const KALICO_ERR_INVALID_ARG: i32 = -26;
+pub const RUNTIME_ERR_STEP_BURST_EXCEEDED: i32 = -21;
+pub const RUNTIME_ERR_ZERO_DURATION_SEGMENT: i32 = -22;
+pub const RUNTIME_ERR_HOMING_TRIP: i32 = -23;
+pub const RUNTIME_ERR_CAPABILITY_MISSING: i32 = -24;
+pub const RUNTIME_ERR_NO_STEP: i32 = -25;
+pub const RUNTIME_ERR_INVALID_ARG: i32 = -26;
 
-pub const KALICO_ERR_INVALID_PHASE_AXIS_COUNT: i32 = -27;
-pub const KALICO_ERR_PHASE_BUS_REENTRANT: i32 = -28;
+pub const RUNTIME_ERR_INVALID_PHASE_AXIS_COUNT: i32 = -27;
+pub const RUNTIME_ERR_PHASE_BUS_REENTRANT: i32 = -28;
 
-pub const KALICO_ERR_HOST_DISCONNECT: i32 = -200;
-pub const KALICO_ERR_HOST_RETRANSMIT_EXHAUSTED: i32 = -201;
-pub const KALICO_ERR_HOST_DISPATCHER_TIMEOUT: i32 = -202;
+pub const RUNTIME_ERR_HOST_DISCONNECT: i32 = -200;
+pub const RUNTIME_ERR_HOST_RETRANSMIT_EXHAUSTED: i32 = -201;
+pub const RUNTIME_ERR_HOST_DISPATCHER_TIMEOUT: i32 = -202;
 
-pub const KALICO_ERR_PHASE_MODE_NOT_AVAILABLE: i32 = -29;
-pub const KALICO_ERR_CURVE_LOAD_INVALID: i32 = -30;
-pub const KALICO_ERR_MOTION_IN_PROGRESS: i32 = -31;
+pub const RUNTIME_ERR_PHASE_MODE_NOT_AVAILABLE: i32 = -29;
+pub const RUNTIME_ERR_CURVE_LOAD_INVALID: i32 = -30;
+pub const RUNTIME_ERR_MOTION_IN_PROGRESS: i32 = -31;
 
-pub const KALICO_ERR_STEP_QUEUE_OVERFLOW: i32 = -300;
-pub const KALICO_ERR_SPI_QUEUE_OVERFLOW: i32 = -301;
-pub const KALICO_ERR_MATH_NON_FINITE: i32 = -302;
-pub const KALICO_ERR_PIECE_ADVANCE_UNDERFLOW: i32 = -303;
-pub const KALICO_ERR_SAMPLE_RATE_MISCONFIGURED: i32 = -304;
-pub const KALICO_ERR_POSITION_COUNT_OVERFLOW: i32 = -305;
-pub const KALICO_ERR_JOG_PARAMETERS_INVALID: i32 = -306;
-pub const KALICO_ERR_STEP_RATE_EXCEEDS_MCU_CEILING: i32 = -307;
+pub const RUNTIME_ERR_STEP_QUEUE_OVERFLOW: i32 = -300;
+pub const RUNTIME_ERR_SPI_QUEUE_OVERFLOW: i32 = -301;
+pub const RUNTIME_ERR_MATH_NON_FINITE: i32 = -302;
+pub const RUNTIME_ERR_PIECE_ADVANCE_UNDERFLOW: i32 = -303;
+pub const RUNTIME_ERR_SAMPLE_RATE_MISCONFIGURED: i32 = -304;
+pub const RUNTIME_ERR_POSITION_COUNT_OVERFLOW: i32 = -305;
+pub const RUNTIME_ERR_JOG_PARAMETERS_INVALID: i32 = -306;
+pub const RUNTIME_ERR_STEP_RATE_EXCEEDS_MCU_CEILING: i32 = -307;
 /// ISR reached a piece whose `start_time` is more than 2 ISR ticks in the
 /// past — MCU was not fed in time. Hard fault.
-pub const KALICO_ERR_PIECE_START_IN_PAST: i32 = -308;
-pub const KALICO_ERR_RING_FULL: i32 = -309;
+pub const RUNTIME_ERR_PIECE_START_IN_PAST: i32 = -308;
+pub const RUNTIME_ERR_RING_FULL: i32 = -309;
 /// Steps-per-sample limit exceeded — unrecoverable position-baseline discontinuity.
-pub const KALICO_ERR_STEPS_PER_SAMPLE_EXCEEDED: i32 = -310;
+pub const RUNTIME_ERR_STEPS_PER_SAMPLE_EXCEEDED: i32 = -310;
 /// TIM5 inter-arrival gap exceeded the allowed multiple of `sample_period_cycles`.
 /// ISR was starved; fail loud before acting on stale time.
-pub const KALICO_ERR_TICK_INTERVAL_EXCEEDED: i32 = -311;
+pub const RUNTIME_ERR_TICK_INTERVAL_EXCEEDED: i32 = -311;
 /// `dispatch_axis` encountered a `StepMode` byte that is not `Pulse` (0) or
 /// `Phase` (1). Detail: `((axis_idx & 0xFF) << 16) | (mode & 0xFF)`.
-pub const KALICO_ERR_UNKNOWN_STEP_MODE: i32 = -312;
+pub const RUNTIME_ERR_UNKNOWN_STEP_MODE: i32 = -312;
 /// `dispatch_phase` found a Phase-mode stepper with a TMC CS binding but no
 /// entry in `phase_slot_idx[0..phase_motor_count]` maps it to a registered
 /// SPI motor. Detail: `((axis_idx & 0xFF) << 16) | stepper_oid`.
-pub const KALICO_ERR_PHASE_MOTOR_UNMAPPED: i32 = -313;
+pub const RUNTIME_ERR_PHASE_MOTOR_UNMAPPED: i32 = -313;
 /// Normal PushPieces commit attempted while a correction stream is active
 /// on the axis, or a correction commit attempted while one is already
 /// active elsewhere. Detail: `((axis_idx & 0xFF) << 16) | motor_idx`.
-pub const KALICO_ERR_CORRECTION_IN_PROGRESS: i32 = -314;
+pub const RUNTIME_ERR_CORRECTION_IN_PROGRESS: i32 = -314;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,7 +200,7 @@ impl FaultCode {
         self as i32
     }
 
-    /// Cast to u16 for the `kalico_status` and `kalico_fault` wire formats.
+    /// Cast to u16 for the `runtime_status` and `runtime_fault` wire formats.
     /// Wraps the negative i32 through i16 then u16 so the host can
     /// sign-extend back to i32 if it wants.
     #[inline]
@@ -381,26 +381,26 @@ impl FaultCode {
 impl From<RuntimeError> for i32 {
     fn from(e: RuntimeError) -> i32 {
         match e {
-            RuntimeError::NotInit => KALICO_ERR_NOT_INIT,
-            RuntimeError::NullPtr => KALICO_ERR_NULL_PTR,
-            RuntimeError::QueueFull => KALICO_ERR_QUEUE_FULL,
-            RuntimeError::InvalidCurve => KALICO_ERR_INVALID_CURVE,
-            RuntimeError::InvalidHandle => KALICO_ERR_INVALID_HANDLE,
-            RuntimeError::InvalidDuration => KALICO_ERR_INVALID_DURATION,
-            RuntimeError::InvalidKinematics => KALICO_ERR_INVALID_KINEMATICS,
-            RuntimeError::FaultLatched => KALICO_ERR_FAULT_LATCHED,
-            RuntimeError::Underrun => KALICO_ERR_UNDERRUN,
-            RuntimeError::StepBurstExceeded => KALICO_ERR_STEP_BURST_EXCEEDED,
-            RuntimeError::ZeroDurationSegment => KALICO_ERR_ZERO_DURATION_SEGMENT,
-            RuntimeError::HomingTrip => KALICO_ERR_HOMING_TRIP,
+            RuntimeError::NotInit => RUNTIME_ERR_NOT_INIT,
+            RuntimeError::NullPtr => RUNTIME_ERR_NULL_PTR,
+            RuntimeError::QueueFull => RUNTIME_ERR_QUEUE_FULL,
+            RuntimeError::InvalidCurve => RUNTIME_ERR_INVALID_CURVE,
+            RuntimeError::InvalidHandle => RUNTIME_ERR_INVALID_HANDLE,
+            RuntimeError::InvalidDuration => RUNTIME_ERR_INVALID_DURATION,
+            RuntimeError::InvalidKinematics => RUNTIME_ERR_INVALID_KINEMATICS,
+            RuntimeError::FaultLatched => RUNTIME_ERR_FAULT_LATCHED,
+            RuntimeError::Underrun => RUNTIME_ERR_UNDERRUN,
+            RuntimeError::StepBurstExceeded => RUNTIME_ERR_STEP_BURST_EXCEEDED,
+            RuntimeError::ZeroDurationSegment => RUNTIME_ERR_ZERO_DURATION_SEGMENT,
+            RuntimeError::HomingTrip => RUNTIME_ERR_HOMING_TRIP,
             RuntimeError::BoundaryLoopExhausted
             | RuntimeError::NaNOrInfFromEval
-            | RuntimeError::Internal => KALICO_ERR_INTERNAL,
+            | RuntimeError::Internal => RUNTIME_ERR_INTERNAL,
         }
     }
 }
 
-/// Pack the 32-bit `fault_detail` for `KALICO_FAULT_INVALID_CURVE_HANDLE`:
+/// Pack the 32-bit `fault_detail` for `RUNTIME_FAULT_INVALID_CURVE_HANDLE`:
 /// `(slot_idx << 16) | (observed_gen XOR expected_gen)`.
 #[inline]
 pub const fn encode_invalid_curve_handle(
@@ -411,14 +411,14 @@ pub const fn encode_invalid_curve_handle(
     ((slot_idx as u32) << 16) | ((observed_gen ^ expected_gen) as u32)
 }
 
-/// Pack the 32-bit `fault_detail` for `KALICO_FAULT_CLOCK_SYNC_QUALITY`:
+/// Pack the 32-bit `fault_detail` for `RUNTIME_FAULT_CLOCK_SYNC_QUALITY`:
 /// `(residual_us << 16) | drift_ppm`.
 #[inline]
 pub const fn encode_clock_sync_quality(residual_us: u16, drift_ppm: u16) -> u32 {
     ((residual_us as u32) << 16) | (drift_ppm as u32)
 }
 
-/// Pack the 32-bit `fault_detail` for `KALICO_FAULT_STREAM_STATE_VIOLATION`:
+/// Pack the 32-bit `fault_detail` for `RUNTIME_FAULT_STREAM_STATE_VIOLATION`:
 /// `(observed << 8) | expected`.
 #[inline]
 pub const fn encode_stream_state_violation(observed: u8, expected: u8) -> u32 {

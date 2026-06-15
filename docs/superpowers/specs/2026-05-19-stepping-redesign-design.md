@@ -99,7 +99,7 @@ These cannot be relaxed without re-doing the design.
 
 ### Sample-rate config
 
-Kconfig parameter `CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ`.
+Kconfig parameter `CONFIG_MOTION_SAMPLE_RATE_HZ`.
 
 Defaults:
 - H7: 40000 (40 kHz, 25 µs sample period)
@@ -588,7 +588,7 @@ pub struct BezierPieceMonomial {
 
 ### Per-axis step queue (C-owned shared state)
 
-Per the architectural invariant in `docs/kalico-rewrite/mcu-c-rust-boundary.md`
+Per the architectural invariant in `docs/rewrite/mcu-c-rust-boundary.md`
 (rules **B2** and **B3**), shared state that crosses the C/Rust boundary — or
 even pure-Rust shared state that crosses indirection LLVM is allowed to
 optimize past — **must be defined in C, with a `#[repr(C)]` Rust mirror that
@@ -923,7 +923,7 @@ New fault codes added:
   at `configure_axis` time so misconfigured machines refuse to start motion.
 
 All faults route through existing `shared.fault` mechanism → foreground
-reactor → `kalico_runtime_shutdown_engine` → Klipper shutdown.
+reactor → `runtime_shutdown_engine` → Klipper shutdown.
 
 ---
 

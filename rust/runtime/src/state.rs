@@ -62,7 +62,7 @@ pub struct FgState {
 }
 
 /// ISR-half state. Written exclusively by the TIM5 ISR
-/// (`kalico_runtime_tick_sample`). Mutual exclusion is enforced by
+/// (`runtime_tick_sample`). Mutual exclusion is enforced by
 /// Cortex-M NVIC priority arbitration.
 #[allow(missing_debug_implementations)]
 #[repr(C)]
@@ -413,7 +413,7 @@ impl Default for SharedState {
 ///
 /// C/Rust boundary: `piece_storage` lives inside the C-declared `rt_storage`
 /// buffer; C owns linker-section placement on the MCU
-/// (docs/kalico-rewrite/mcu-c-rust-boundary.md rule B2). No additional
+/// (docs/rewrite/mcu-c-rust-boundary.md rule B2). No additional
 /// `#[link_section]` is needed here.
 #[allow(missing_debug_implementations)]
 pub struct RuntimeContext {
@@ -432,7 +432,7 @@ unsafe impl Sync for RuntimeContext {}
 unsafe extern "C" {
     static runtime_clock_freq: u32;
     /// TIM5 ISR fire rate (Hz). Defined in `src/runtime_tick.c` as
-    /// `CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ` (defaults: 40000 on H7,
+    /// `CONFIG_MOTION_SAMPLE_RATE_HZ` (defaults: 40000 on H7,
     /// 20000 on F4, 10000 on Linux sim).
     static runtime_sample_rate_hz: u32;
 }

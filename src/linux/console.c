@@ -19,8 +19,8 @@
 #include "board/misc.h" // console_sendf
 #include "command.h" // command_find_block
 #include "internal.h" // console_setup
-#include "kalico_demux.h" // kalico_demux_*
-#include "kalico_dispatch.h" // kalico_dispatch_frame
+#include "mcu_demux.h" // mcu_demux_*
+#include "mcu_transport_dispatch.h" // mcu_transport_dispatch_frame
 #include "sched.h" // sched_wake_task
 
 static struct pollfd main_pfd[1];
@@ -172,7 +172,7 @@ console_task(void)
         shutdown("Force shutdown command");
 
     if (ret > 0)
-        kalico_demux_pump(&receive_buf[receive_pos], (uint16_t)ret);
+        mcu_demux_pump(&receive_buf[receive_pos], (uint16_t)ret);
     receive_pos = 0;
 }
 DECL_TASK(console_task);

@@ -20,7 +20,7 @@
 #
 # What this simulates:
 # - Klipper firmware running on a Cortex-M4F with TIM5/DWT/NVIC modeled.
-# - Runtime kalico_runtime_init / TIM5 ISR / engine state machine — these are
+# - Runtime runtime_init / TIM5 ISR / engine state machine — these are
 #   pure Rust + memory-mapped I/O the F429 .repl already covers.
 # - USART2 bridged to a TCP socket so host tools can talk to the MCU
 #   over `socket://localhost:3334`.
@@ -52,7 +52,7 @@ cpu FpuEnabled true
 
 # NOTE on IWDG: Renode's IWDG model doesn't honor Klipper's IWDG->KR=0xAAAA
 # refresh writes the same way real silicon does. For runs longer than ~15 s,
-# build the sim firmware with CONFIG_KALICO_SIM=y to skip watchdog_init /
+# build the sim firmware with CONFIG_MCU_SIM=y to skip watchdog_init /
 # kicks. See tools/sim/sim_f446.config.
 
 # Bridge USART2 (Klipper's CONFIG_STM32_SERIAL_USART2 console + Kalico command

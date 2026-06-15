@@ -6,11 +6,11 @@
 
 **Architecture:** Spec `docs/superpowers/specs/2026-06-13-kinematics-owns-spatial-axes-design.md`. The kinematics module already binds axis roles explicitly (`[kinematics] axis_x: <name>`) and the Rust engine is already name-agnostic (`VectorNurbs<f64,3>` + index-keyed followers). Only the klippy host duplicated the spatial names. This change removes that duplication; it is **behavior-preserving** (every shipped config binds x/y/z, so output is bit-identical). The G-code surface (`homing.py` `G28`, `gcode.py` `Coord`) deliberately keeps X/Y/Z — that is the G-code coordinate standard and is out of scope.
 
-**Tech Stack:** klippy Python (`klippy/motion.py`, `klippy/motion_kinematics.py`); tests via the in-repo `test/test_motion_kinematics.py` `FakeConfig` harness, run in the `dangerklippers/klipper-build` docker image; full gate `./scripts/ci.sh py` + `./scripts/ci.sh ruff`; e2e via the kalico-sim skill.
+**Tech Stack:** klippy Python (`klippy/motion.py`, `klippy/motion_kinematics.py`); tests via the in-repo `test/test_motion_kinematics.py` `FakeConfig` harness, run in the `dangerklippers/klipper-build` docker image; full gate `./scripts/ci.sh py` + `./scripts/ci.sh ruff`; e2e via the mcu-sim skill.
 
 **Branch:** continue on `e-follows-xy` (the branch where the `[motor]`/`[kinematics]`/`[axis]` schema shipped).
 
-**Out of scope:** arbitrary spatial axis *names* at the G-code level (spatial stays X/Y/Z); `homing.py` and `gcode.py` x/y/z usage; named/multi-kinematics ("motion channels", parked in `docs/kalico-rewrite/future-motion-channels-multi-kinematics.md`); `[extruder] axis:` (already shipped, commit `6fbcf7cf4`).
+**Out of scope:** arbitrary spatial axis *names* at the G-code level (spatial stays X/Y/Z); `homing.py` and `gcode.py` x/y/z usage; named/multi-kinematics ("motion channels", parked in `docs/rewrite/future-motion-channels-multi-kinematics.md`); `[extruder] axis:` (already shipped, commit `6fbcf7cf4`).
 
 **Repo rules for every task:** unit tests live in a separate file from the tested code; no explanatory comments — name/extract instead; fail loudly (no silent fallbacks); commit after every task; no Claude/Anthropic commit trailers; `cargo fmt`/ruff clean before any PR push; `./scripts/ci.sh quick` + `./scripts/ci.sh py` green before opening/updating the PR.
 
@@ -121,7 +121,7 @@ git commit -m "feat(klippy): read_claimed_axes — spatial-axis source of truth 
 
 **Files:**
 - Modify: `klippy/motion.py` — delete the constant (line 14), the `_read_axes` spatial loop, and switch `_build_follower_steppers` to the claimed set.
-- Regression guard: `test/test_motion_kinematics.py::test_role_binding_to_undeclared_axis_rejected` (already covers "claimed axis must be declared", via `_read_lanes`), plus the kalico-sim follower boot in Task 4.
+- Regression guard: `test/test_motion_kinematics.py::test_role_binding_to_undeclared_axis_rejected` (already covers "claimed axis must be declared", via `_read_lanes`), plus the mcu-sim follower boot in Task 4.
 
 - [ ] **Step 1: Establish the green baseline**
 
@@ -270,7 +270,7 @@ git commit -m "refactor(klippy): active_rails keys on lane index, not literal x/
 
 ---
 
-## Task 4: Full gates + kalico-sim regression
+## Task 4: Full gates + mcu-sim regression
 
 Behavior-preservation is proven by the whole Python suite plus live cartesian + corexy boots.
 
@@ -292,19 +292,19 @@ Run:
 ```
 Expected: PASS — no failures; the passed count is ≥ the pre-change baseline (275+ passed, with the 3 new `read_claimed_axes` tests added).
 
-- [ ] **Step 3: kalico-sim cartesian self-test (rebuild from HEAD)**
+- [ ] **Step 3: mcu-sim cartesian self-test (rebuild from HEAD)**
 
 Run:
 ```bash
-bash tools/kalico-sim/run.sh 2>&1 | tail -5
+bash tools/mcu-sim/run.sh 2>&1 | tail -5
 ```
 Expected: `SIMULATION RESULT ... Status: PASS` (cartesian boot — followers + spatial axes resolve).
 
-- [ ] **Step 4: kalico-sim corexy phase-stepping test**
+- [ ] **Step 4: mcu-sim corexy phase-stepping test**
 
 Run:
 ```bash
-docker run --rm kalico-sim --phase-test --timeout 120 2>&1 \
+docker run --rm mcu-sim --phase-test --timeout 120 2>&1 \
   | grep -E "Status:|configure_axes|FAIL|Traceback" | tail -6
 ```
 Expected: `Status: PASS`, and `configure_axes ... runtime_bindings=[(0,'x',...),(1,'y',...),(2,'z',...)]` — corexy coupling/phase-handover still forms (lanes 0/1 coupled).

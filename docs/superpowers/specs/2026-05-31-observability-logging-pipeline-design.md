@@ -61,7 +61,7 @@ Logging today is a flat, unstructured text pile that is hard to search and impos
 Emitters produce one structured record; a **sink registry** fans it out to the active sinks (§4.1). This spec ships `text` + `jsonl` active by default. VictoriaLogs is an *external opt-in* fed by the `jsonl` sink — klippy needs no config to enable it, and a host that never installs it pays nothing.
 
 ```
-  Python host (klippy)                         Rust host (motion-bridge / host-rt)
+  Python host (klippy)                         Rust host (motion-engine / host-rt)
   stdlib logging ─ facade swap ─┐              log:: + tracing ─ subscriber ─┐
   structured_log.event(...) ────┤              klog!(...) ──────────────────┤
                                 ▼                                            ▼
@@ -118,7 +118,7 @@ One JSONL line = one event, **always a single physical line** (the `jsonl` sink 
 | `source` | enum: `host-py`/`host-rust`/`mcu-h7`/`mcu-f4`/`sim` | emitter |
 | `subsystem` | string: `motion`/`homing`/`bridge`/`clocksync`/`mcu-comms`/`probe`/`temp`/`config`/… | logical area (replaces the `[bridge-trace]`-style prefixes) |
 | `session_id` | string `k-<unix>-<pid>` | one per klippy lifecycle |
-| `target` | string | Python logger name (`module.Class`) or Rust module path (`motion_bridge::probe_homing`) |
+| `target` | string | Python logger name (`module.Class`) or Rust module path (`motion_engine::probe_homing`) |
 
 **Optional fields:**
 
@@ -141,7 +141,7 @@ One JSONL line = one event, **always a single physical line** (the `jsonl` sink 
  "source":"host-rust","subsystem":"homing","level":"info",
  "session_id":"k-1748700131-4412","print_id":"",
  "event":"homing.endstop_trip","axis":"z","trigger_mm":12.40,
- "target":"motion_bridge::probe_homing"}
+ "target":"motion_engine::probe_homing"}
 ```
 ```json
 {"_time":"2026-05-31T14:18:55.701Z","_msg":"G1 move queued",
@@ -245,9 +245,9 @@ Each unit has one purpose, a defined interface, and explicit deps:
 - **Pipeline self-observability (fail-loudly):** because "VL is down" is exactly the case that cannot self-report, the host runs a lightweight liveness check: (a) a periodic **synthetic heartbeat record** the agent/operator can query to confirm end-to-end health, and (b) a host-side check that the Vector process is alive and its checkpoint lag (bytes behind file EOF) is bounded; staleness/lag beyond threshold is surfaced loudly (warning in the text log + a queryable `subsystem=observability` event). A silent pipeline stall is itself a reportable fault.
 - **Schema drift:** the structured helper enforces required fields; malformed `extra=` is caught at format time.
 
-## 13. kalico-sim integration
+## 13. mcu-sim integration
 
-`kalico-sim` currently greps the text `klippy.log` and injects `[sim-trace]`/`[sim-diag]` markers. Because the text view is preserved, existing grep assertions keep working. New, more precise assertions can query the JSONL directly (or a sim-local VL), and `source="sim"` separates simulator runs. Sim records also carry the **sim git SHA** (as a field) so runs are separable. Sim-trace markers become `subsystem=sim` / `event=…` fields over time.
+`mcu-sim` currently greps the text `klippy.log` and injects `[sim-trace]`/`[sim-diag]` markers. Because the text view is preserved, existing grep assertions keep working. New, more precise assertions can query the JSONL directly (or a sim-local VL), and `source="sim"` separates simulator runs. Sim records also carry the **sim git SHA** (as a field) so runs are separable. Sim-trace markers become `subsystem=sim` / `event=…` fields over time.
 
 ## 14. Testing strategy
 
@@ -255,13 +255,13 @@ Each unit has one purpose, a defined interface, and explicit deps:
 - **Concurrency:** Rust `ArcSwap<SessionContext>` — a log emitted concurrently with a `print_id` swap always carries a coherent (old-or-new, never torn/empty) context; binding-timing invariant (no record before `session_id` bound).
 - **Integration:** emit (Python + Rust) → JSONL on disk → Vector → VL → `query-logs` round-trip returns the expected records by `session_id`/`subsystem`/`event`.
 - **Durability:** kill VL mid-run, confirm JSONL intact and VL backfills on restart from the checkpoint; confirm rotated (uncompressed) files are still picked up; disk-full triggers the hard-error + preflight, not silent loss.
-- **Sim:** existing grep-based `kalico-sim` assertions still pass against the derived text log.
+- **Sim:** existing grep-based `mcu-sim` assertions still pass against the derived text log.
 
 ## 15. Out of scope → follow-on specs
 
 *(Filenames reserved so forward-references don't dangle: `2026-…-mcu-log-endpoint-design.md`, `2026-…-observability-ui-design.md`.)*
 
-- **Spec #2 — MCU log endpoint:** a C-owned structured log frame in the kalico protocol, written by C *and* the Rust staticlib (respecting the C-owns-shared-memory boundary in `docs/kalico-rewrite/mcu-c-rust-boundary.md`), decoded host-side into this same schema — reusing the already-present-but-dropped `RuntimeEvent::Trace` channel and the existing tick→walltime clock-sync. This foundation's schema and host re-emit path are designed to receive it unchanged.
+- **Spec #2 — MCU log endpoint:** a C-owned structured log frame in the kalico protocol, written by C *and* the Rust staticlib (respecting the C-owns-shared-memory boundary in `docs/rewrite/mcu-c-rust-boundary.md`), decoded host-side into this same schema — reusing the already-present-but-dropped `RuntimeEvent::Trace` channel and the existing tick→walltime clock-sync. This foundation's schema and host re-emit path are designed to receive it unchanged.
 - **Spec #3 — UI:** VL built-in Web UI → Grafana (VL datasource plugin) → optional Mainsail panel.
 
 ## 16. Open items (defaults chosen; flag to steer)

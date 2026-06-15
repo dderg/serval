@@ -91,7 +91,7 @@ unsafe fn kalico_step_output_owned_mask() -> u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kalico_step_output_event() -> u32 {
+pub extern "C" fn step_output_event() -> u32 {
     // SAFETY: `timer_read_time` is a single u32 MMIO read (host: a test hook).
     let now = unsafe { timer_read_time() };
     // SAFETY: side-effect-free C getter (host: a test hook).
@@ -245,7 +245,7 @@ pub mod test_hooks {
         });
     }
     /// Returns a raw pointer into the thread-local queue array. The pointer is
-    /// only used synchronously within a single `kalico_step_output_event` call
+    /// only used synchronously within a single `step_output_event` call
     /// on the same thread, so it does not outlive the borrow.
     pub fn queue_for_axis(axis_idx: usize) -> *mut StepQueue {
         if axis_idx >= N_QUEUES {

@@ -35,7 +35,7 @@ class ClockSync:
     def set_clock_est_callback(self, cb):
         # cb(freq, offset, last_clock) — invoked from the serial-reader
         # thread on every regression update.  The callback must be
-        # thread-safe; the motion_bridge wrapper hands the values to a
+        # thread-safe; the motion_engine wrapper hands the values to a
         # Mutex-guarded Rust router.
         self._clock_est_callback = cb
         if cb is not None and self.last_clock:
@@ -83,8 +83,8 @@ class ClockSync:
 
     # MCU clock querying (_handle_clock is invoked from background thread)
     def _get_clock_event(self, eventtime):
-        if hasattr(self.serial, "bridge_get_clock_async"):
-            self.serial.bridge_get_clock_async()
+        if hasattr(self.serial, "engine_get_clock_async"):
+            self.serial.engine_get_clock_async()
         else:
             self.serial.raw_send(self.get_clock_cmd, 0, 0, self.cmd_queue)
         self.queries_pending += 1

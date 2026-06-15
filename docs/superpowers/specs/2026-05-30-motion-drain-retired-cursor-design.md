@@ -93,7 +93,7 @@ The host maintains, per `(mcu, axis)`:
    (exists today; the flush already brings motion to a stop, no new braking
    segment needed).
 2. Block the G-code thread until `retired == sent` for every axis. The
-   heartbeat path runs on `KalicoHostIo`'s own reactor thread (off the GIL), so
+   heartbeat path runs on `McuHostIo`'s own reactor thread (off the GIL), so
    heaters/heartbeats keep flowing while G-code waits.
 
 Where the `sent`/`retired` comparison physically lives (pump-thread-side vs. a
@@ -141,8 +141,8 @@ occur:
 ## Affected files
 
 MCU: `rust/runtime/src/engine.rs`, `rust/runtime/src/piece_ring.rs`,
-`rust/kalico-c-api/src/runtime_ffi.rs`, `rust/kalico-protocol/src/messages.rs`.
-Host: `rust/motion-bridge/src/pump.rs`, `rust/motion-bridge/src/bridge.rs`,
+`rust/c-api/src/runtime_ffi.rs`, `rust/mcu-protocol/src/messages.rs`.
+Host: `rust/motion-engine/src/pump.rs`, `rust/motion-engine/src/bridge.rs`,
 `klippy/motion_toolhead.py` (and the bridge-mode `M400` path).
 
 Both MCUs (H7 + F446) must be reflashed for the new cursor semantics; the host

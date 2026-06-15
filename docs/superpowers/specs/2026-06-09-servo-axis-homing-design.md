@@ -9,7 +9,7 @@ every other axis:
   `[stepper_<axis>]` sections, so a `[servo_<axis>]` axis has no endstop
   entry — `G28` on it is rejected with "axis has no endstop", and there is
   no config surface to even name the endstop pin.
-- `handle_endstop_trip` (`rust/motion-bridge/src/bridge.rs`) broadcasts a
+- `handle_endstop_trip` (`rust/motion-engine/src/bridge.rs`) broadcasts a
   `Stop` to every MCU in the homing run's `all_axis_keys` via `host_io` —
   EtherCAT nodes have no `host_io`, so any trip with a servo configured
   fails with "Stop: no host_io for mcu N". The physical stop on serial MCUs
@@ -45,9 +45,9 @@ What is already transport-agnostic and needs no change:
 
 ## Design
 
-### 1. Endpoint: `Stop` command (`rust/kalico-ethercat-rt`)
+### 1. Endpoint: `Stop` command (`rust/ethercat-rt`)
 
-The endpoint implements the existing `kalico-protocol`
+The endpoint implements the existing `mcu-protocol`
 `Stop` / `StopResponse { result: i32, discard_clock: u64 }` pair —
 the same contract serial MCUs answer:
 
@@ -65,11 +65,11 @@ can answer.
 
 The stub binary implements the same command with simulated state.
 
-### 2. Bridge: per-transport Stop broadcast (`rust/motion-bridge`)
+### 2. Bridge: per-transport Stop broadcast (`rust/motion-engine`)
 
 `handle_endstop_trip`'s stop loop gains the Serial/EtherCAT split the pump
-already uses (`McuTransport`): serial MCUs keep `host_io.kalico_call`,
-EtherCAT nodes send the same `Stop` over their `UnixNativeConn`
+already uses (`McuTransport`): serial MCUs keep `host_io.mcu_call`,
+EtherCAT nodes send the same `Stop` over their `McuSerialConn`
 request-reply (the `query_ethercat_runtime_caps` call pattern, bounded
 timeout). A node with neither transport is a loud error, as today.
 `discard_clock` handling is unchanged — it is already keyed off
@@ -111,7 +111,7 @@ retract/second-pass fields stay at their inert defaults.
 
 ## Testing
 
-- **Endpoint (stub) integration** (`rust/kalico-ethercat-rt/tests/`):
+- **Endpoint (stub) integration** (`rust/ethercat-rt/tests/`):
   Stop mid-stream discards queued pieces and returns a sane
   `discard_clock`; Stop while parked succeeds; piece pushed after Stop
   re-anchors cleanly (existing CountMap behavior).

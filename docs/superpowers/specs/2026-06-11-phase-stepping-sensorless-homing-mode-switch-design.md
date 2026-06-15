@@ -96,9 +96,9 @@ Key facts the handover builds on:
 
 The runtime FFI for `set_step_mode` (runtime_ffi.rs:520) and
 `set_stepper_offset` (runtime_ffi.rs:948) exists but is not exposed through
-motion-bridge or Python. New surface:
+motion-engine or Python. New surface:
 
-- Bridge methods + motion_bridge.py wrappers for:
+- Bridge methods + motion_engine.py wrappers for:
   - `set_step_mode(stepper, mode)`
   - `set_stepper_offset(stepper, delta_microsteps, max_per_sample)` —
     ramped jog (exit handover)
@@ -154,7 +154,7 @@ SGT tuning silently invalid.)
 - Rust unit tests: shortest-signed-phase-delta math; absolute phase-offset
   set is motion-free (no delta accumulates into `position_count`);
   mode-switch seeding of `last_phase_target`; ramp-settled query.
-- kalico-sim: full sequence — home with virtual endstop on a phase-stepped
+- mcu-sim: full sequence — home with virtual endstop on a phase-stepped
   axis, assert mode transitions, assert post-homing commanded position
   matches reconstructed trip position exactly (no phase-snap drift).
 - Bench (Trident): sensorless home with phase stepping enabled; verify DIAG

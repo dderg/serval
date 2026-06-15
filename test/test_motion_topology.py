@@ -4,7 +4,7 @@ from klippy.motion_kinematics import _LinearKinematics
 
 class FakeMcu:
     def __init__(self, handle):
-        self._bridge_handle = handle
+        self._engine_handle = handle
 
 
 class FakeStepper:
@@ -160,7 +160,7 @@ def test_follower_declared_before_spatial_axes_maps_handle_to_free_slot():
     assert a2h == {0: 11, 1: 11, 2: 11, 3: 42}
 
 
-class CaptureBridge:
+class CaptureEngine:
     def __init__(self):
         self.init_planner_args = None
 
@@ -177,8 +177,8 @@ def test_init_planner_passes_claimed_axes():
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
     motion.limit_sections = []
     motion.post_processor_sections = []
-    bridge = CaptureBridge()
-    motion.bridge = bridge
+    engine = CaptureEngine()
+    motion.engine = engine
 
     mcu = FakeMcu(11)
     motion.printer._objs["__mcus"] = [("mcu", mcu)]
@@ -189,8 +189,8 @@ def test_init_planner_passes_claimed_axes():
         return []
 
     motion.printer.lookup_objects = lookup_objects
-    motion._configure_axes_per_mcu = lambda bridge_mcus: None
+    motion._configure_axes_per_mcu = lambda engine_mcus: None
 
     motion._init_planner()
-    assert bridge.init_planner_args["kinematics_axes"] == ["x", "y", "z"]
-    assert bridge.init_planner_args["topology"] == [(11, [0, 1, 2, 3], 0)]
+    assert engine.init_planner_args["kinematics_axes"] == ["x", "y", "z"]
+    assert engine.init_planner_args["topology"] == [(11, [0, 1, 2, 3], 0)]

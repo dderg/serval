@@ -47,7 +47,7 @@ class PrinterCANBusStats:
             "canbus_status rx_error=%u tx_error=%u tx_retries=%u"
             " canbus_bus_state=%u",
         )
-        # Register usb_canbus_state message handling (for usb to canbus bridge)
+        # Register usb_canbus_state message handling (for usb to canbus engine)
         self.mcu.register_response(
             self.handle_usb_canbus_state, "usb_canbus_state"
         )
@@ -58,11 +58,11 @@ class PrinterCANBusStats:
         discard = params["discard"]
         if discard:
             logging.warning(
-                "USB CANBUS bridge '%s' is discarding!" % (self.name,)
+                "USB CANBUS engine '%s' is discarding!" % (self.name,)
             )
         else:
             logging.warning(
-                "USB CANBUS bridge '%s' is no longer discarding." % (self.name,)
+                "USB CANBUS engine '%s' is no longer discarding." % (self.name,)
             )
 
     def query_event(self, eventtime):

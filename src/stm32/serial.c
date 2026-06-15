@@ -8,7 +8,7 @@
 #include "board/armcm_boot.h" // armcm_enable_irq
 #include "board/serial_irq.h" // serial_rx_byte
 #include "command.h" // DECL_CONSTANT_STR
-#include "generic/kalico_nvic_prio.h" // KALICO_MOTION_NVIC_PRIO
+#include "generic/motion_nvic_prio.h" // MOTION_NVIC_PRIO
 #include "internal.h" // enable_pclock
 #include "sched.h" // DECL_INIT
 
@@ -151,7 +151,7 @@ serial_rx_dma_init(void)
         | DMA_SxCR_MINC | DMA_SxCR_CIRC | DMA_SxCR_HTIE | DMA_SxCR_TCIE;
     SERIAL_RX_DMA_STREAM->CR |= DMA_SxCR_EN;
     USARTx->CR3 |= USART_CR3_DMAR;
-    armcm_enable_irq(serial_rx_dma_irq, SERIAL_RX_DMA_IRQn, KALICO_MOTION_NVIC_PRIO);
+    armcm_enable_irq(serial_rx_dma_irq, SERIAL_RX_DMA_IRQn, MOTION_NVIC_PRIO);
 }
 
 #endif
@@ -200,7 +200,7 @@ serial_init(void)
     USARTx->BRR = (((div / 16) << USART_BRR_DIV_Mantissa_Pos)
                    | ((div % 16) << USART_BRR_DIV_Fraction_Pos));
     USARTx->CR1 = CR1_FLAGS;
-    armcm_enable_irq(USARTx_IRQHandler, USARTx_IRQn, KALICO_MOTION_NVIC_PRIO);
+    armcm_enable_irq(USARTx_IRQHandler, USARTx_IRQn, MOTION_NVIC_PRIO);
 
 #if SERIAL_RX_DMA
     serial_rx_dma_init();

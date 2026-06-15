@@ -119,14 +119,26 @@ class PrinterStepperEnable:
     def motor_debug_enable(self, stepper, enable):
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.dwell(DISABLE_STALL_TIME)
-        print_time = toolhead.get_last_move_time()
         el = self.enable_lines[stepper]
         if enable:
+            toolhead.resync_parked_servos()
+            print_time = toolhead.get_last_move_time()
             el.motor_enable(print_time)
             logging.info("%s has been manually enabled", stepper)
         else:
+            print_time = toolhead.get_last_move_time()
             el.motor_disable(print_time)
             logging.info("%s has been manually disabled", stepper)
+        toolhead.dwell(DISABLE_STALL_TIME)
+
+    def motor_enable_group(self, stepper_names):
+        toolhead = self.printer.lookup_object("toolhead")
+        toolhead.dwell(DISABLE_STALL_TIME)
+        toolhead.resync_parked_servos()
+        shared_print_time = toolhead.get_last_move_time()
+        for name in stepper_names:
+            self.enable_lines[name].motor_enable(shared_print_time)
+            logging.info("%s enabled", name)
         toolhead.dwell(DISABLE_STALL_TIME)
 
     def get_status(self, eventtime):

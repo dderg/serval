@@ -21,15 +21,15 @@ const LOG_LEVEL_DEBUG: u8 = 1;
 
 #[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
 unsafe extern "C" {
-    fn kalico_log_emit(level: u8, subsystem: u8, event: u16, code: u16, arg0: u32, arg1: u32);
+    fn event_log_emit(level: u8, subsystem: u8, event: u16, code: u16, arg0: u32, arg1: u32);
 }
 
 pub(crate) fn emit_correction_event(event: u16, arg0: u32, arg1: u32) {
     #[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
-    // SAFETY: kalico_log_emit is a pure C logging sink; no aliasing or
+    // SAFETY: event_log_emit is a pure C logging sink; no aliasing or
     // ownership constraints on its arguments.
     unsafe {
-        kalico_log_emit(LOG_LEVEL_DEBUG, SUBSYSTEM_MOTION, event, 0, arg0, arg1);
+        event_log_emit(LOG_LEVEL_DEBUG, SUBSYSTEM_MOTION, event, 0, arg0, arg1);
     }
     #[cfg(not(any(not(any(test, feature = "host")), feature = "mcu-linux")))]
     {

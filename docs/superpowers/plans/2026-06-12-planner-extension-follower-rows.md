@@ -6,7 +6,7 @@
 
 **Architecture:** Spec: `docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md` §4 (plus §2's follower-only rule). `temporal` gains follower axes (indices ≥ 3 in the existing `AxisSet` bitmask), per-segment `FollowerDemand { axis, ratio, pa_k }`, and a new row-family module `topp/follower.rs`. Without a shaper the rows are convex and join the base SOCP; with a shaper or PA they become iterate-linearized cuts in the existing SLP loop, built on a **frozen time map** (sample times computed from the current `b̄` iterate) that is re-frozen each outer iteration. Path snap (`s⁗`) is one more finite-difference order in `stencil.rs`. The committed tail enters as constant history terms in the window operator; trajectory's streaming layer extracts it from the shaped pieces it already retains for the freeze zone.
 
-**Tech stack:** Rust (`temporal`, `trajectory`, `motion-bridge`, `geometry` crates; Clarabel SOCP). Tests: `cargo nextest run` from `rust/` (never bare `cargo test`); doc-tests via `cargo test --doc` if touched.
+**Tech stack:** Rust (`temporal`, `trajectory`, `motion-engine`, `geometry` crates; Clarabel SOCP). Tests: `cargo nextest run` from `rust/` (never bare `cargo test`); doc-tests via `cargo test --doc` if touched.
 
 **PRECONDITION (satisfied 2026-06-12): Plan 2 is fully landed** — commit `725917f32` (`feat: axis registry + follower segments end-to-end (plan 2)`). This plan builds on `geometry::FollowerDemand`, `CubicSegment.followers`, trajectory's `ShapeSegmentInput.followers`, and the bridge's `AxisRegistry` + follower-coverage validation. Executors still verify `cargo nextest run` passes from `rust/` before starting.
 
@@ -703,16 +703,16 @@ fn virtual_path_plans_under_follower_limits_and_feedrate() {
 
 ---
 
-### Task 10: trajectory + motion-bridge plumbing
+### Task 10: trajectory + motion-engine plumbing
 
 Follower limit sections reach temporal as real sets; segments' `FollowerDemand`s (with `pa_k`) reach `SegmentInput`; kernels and streaming history reach the chain.
 
 **Files:**
-- Modify: `rust/motion-bridge/src/config.rs` (`to_temporal_limits`: follower sections convert instead of coverage-only; `n_axes` from the registry; `MixedSpatialFollower` rejection stays)
-- Modify: `rust/motion-bridge/src/config/tests.rs`
+- Modify: `rust/motion-engine/src/config.rs` (`to_temporal_limits`: follower sections convert instead of coverage-only; `n_axes` from the registry; `MixedSpatialFollower` rejection stays)
+- Modify: `rust/motion-engine/src/config/tests.rs`
 - Modify: `rust/trajectory/src/lib.rs` / `beta.rs` / `plan_velocity.rs` (thread `followers` from `ShapeSegmentInput` into `temporal::SegmentInput`, mapping `geometry::segment::FollowerDemand { axis_index, ratio }` → `temporal::FollowerDemand { axis, ratio, pa_k }`; `pa_k` comes from a new `ReplanContext.follower_pa: Vec<(usize, f64)>` defaulting empty)
 - Modify: `rust/trajectory/src/streaming/state.rs` + `streaming/emit.rs` (history extraction)
-- Tests: `rust/motion-bridge/src/config/tests.rs`, trajectory integration test
+- Tests: `rust/motion-engine/src/config/tests.rs`, trajectory integration test
 
 - [x] **Step 1: Write failing bridge test:**
 
@@ -734,7 +734,7 @@ fn follower_sections_become_temporal_sets() {
 - [x] **Step 5: Integration test** (new `rust/trajectory/tests/follower_rows.rs`): plan a 3-segment batch (straight, corner stop, straight) with an extruder follower (ratio 0.05, `[limit extruder]` v=75 a=1500), X/Y smooth-zv kernels, `pa_k = 0.04`; assert (a) it solves, (b) brute-force shaped-demand check as in Task 8's test holds over the emitted profile, (c) with `pa_k = 0` total time strictly decreases or stays equal (PA rows only ever tighten).
 
 - [x] **Step 6: Run** — `cargo nextest run` from `rust/` → full workspace PASS
-- [x] **Step 7: Commit** — `feat(trajectory,motion-bridge): follower demands, kernels, and history reach the solver`
+- [x] **Step 7: Commit** — `feat(trajectory,motion-engine): follower demands, kernels, and history reach the solver`
 
 ---
 
@@ -742,7 +742,7 @@ fn follower_sections_become_temporal_sets() {
 
 - [x] **Step 1:** `grep -rn "FollowerOnlyMoveUnsupported\|NoFollowerCoverage.*coverage only\|recorded for coverage" rust/ klippy/ --include="*.rs" --include="*.py"` — plan-2 stopgaps must be gone or rewritten; every survivor justified in the commit message.
 - [x] **Step 2:** `cargo nextest run` from `rust/` → PASS; `cargo test --doc` if doc examples touched; `cargo fmt --all --check` → clean. If `klippy/` was touched (it should not be in this plan — confirm with `git status`), run `./scripts/ci.sh py`.
-- [x] **Step 3:** kalico-sim sanity: boot a migrated fixture with `[axis e]` + `[limit extruder]`; travel-only prints behave identically to plan-2 (followers empty on live segments — live extrusion is still rejected until plan 4); a fixture whose `[limit extruder]` declares only `max_jerk` errors at startup naming velocity/accel coverage.
+- [x] **Step 3:** mcu-sim sanity: boot a migrated fixture with `[axis e]` + `[limit extruder]`; travel-only prints behave identically to plan-2 (followers empty on live segments — live extrusion is still rejected until plan 4); a fixture whose `[limit extruder]` declares only `max_jerk` errors at startup naming velocity/accel coverage.
 - [x] **Step 4:** Pure-function check: every new temporal test runs with zero hardware/bridge involvement — the planner remains `(geometry, rows, kernels, history) → profile`. Confirm no new `static`/global entered `temporal` (`grep -rn "static\|lazy_static\|OnceLock" rust/temporal/src/ | grep -v test`).
 - [x] **Step 5: Commit** — `feat: follower/PA/shaper-folded constraint rows end-to-end (plan 3)`
 

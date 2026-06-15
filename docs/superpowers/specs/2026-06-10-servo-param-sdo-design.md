@@ -90,12 +90,12 @@ New SDO path through the four existing layers:
 klippy/extras/servo_param.py       SERVO_PARAM command
 klippy/extras/ethercat_node.py     parses params:, pushes at claim
         │ (cffi)
-rust/motion-bridge/src/bridge.rs   sdo_read / sdo_write entry points
-rust/motion-bridge/src/servo_sdo.rs  marshals over Unix socket
+rust/motion-engine/src/bridge.rs   sdo_read / sdo_write entry points
+rust/motion-engine/src/servo_sdo.rs  marshals over Unix socket
         │ (wire frames)
-rust/kalico-protocol/src/messages.rs  SdoRead / SdoWrite (+ responses)
-rust/kalico-ethercat-rt/src/wire.rs   codec entries
-rust/kalico-ethercat-rt (endpoint)    executes in command-poll path
+rust/mcu-protocol/src/messages.rs  SdoRead / SdoWrite (+ responses)
+rust/ethercat-rt/src/wire.rs   codec entries
+rust/ethercat-rt (endpoint)    executes in command-poll path
         │ (FFI)
 bench/libecrt.c                    ec_rt_sdo_read / ec_rt_sdo_write
         │
@@ -103,7 +103,7 @@ SOEM ec_SDOread / ec_SDOwrite      CoE mailbox, serialized between
                                    process-data exchanges
 ```
 
-### Protocol messages (`kalico-protocol`)
+### Protocol messages (`mcu-protocol`)
 
 - `SdoRead { index: u16, subindex: u8 }`
   → `SdoReadResponse { result: i32, size: u8, data: [u8; 4] }`
@@ -143,7 +143,7 @@ locking.
 Fail loudly, everywhere:
 
 - SDO abort during claim-push → claim failure, log structured event with
-  index/subindex/abort code via `kalico_log_emit`.
+  index/subindex/abort code via `event_log_emit`.
 - Verify mismatch → error with wrote/read values (claim: fatal; console:
   command error).
 - Probe on a write-only object → abort code surfaces with a hint to add an
@@ -153,7 +153,7 @@ Fail loudly, everywhere:
 
 ## Testing
 
-- Wire codec round-trip tests for the four new messages (`kalico-protocol` /
+- Wire codec round-trip tests for the four new messages (`mcu-protocol` /
   `wire.rs`), run via `cargo nextest run`.
 - Stub-endpoint integration: claim with a `params:` block → verify dictionary
   state; clamping object → claim fails; read-only object → claim fails;

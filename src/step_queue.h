@@ -1,10 +1,10 @@
 // SPSC step queue per motor axis. Producer = TIM5 ISR (Rust); consumer =
 // per-axis Klipper timer (Rust, via SysTick dispatch). Storage C-owned per the
-// B2/B3 invariant in docs/kalico-rewrite/mcu-c-rust-boundary.md. The struct
+// B2/B3 invariant in docs/rewrite/mcu-c-rust-boundary.md. The struct
 // layout mirrors Rust #[repr(C)] — keep in sync (static_asserts below).
 
-#ifndef __KALICO_STEP_QUEUE_H
-#define __KALICO_STEP_QUEUE_H
+#ifndef __STEP_QUEUE_H
+#define __STEP_QUEUE_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -35,4 +35,4 @@ _Static_assert(offsetof(StepQueue, buf) == 8, "StepQueue.buf offset drift");
 _Static_assert((STEP_QUEUE_DEPTH & STEP_QUEUE_DEPTH_MASK) == 0,
                "STEP_QUEUE_DEPTH must be power of 2");
 
-#endif // __KALICO_STEP_QUEUE_H
+#endif // __STEP_QUEUE_H

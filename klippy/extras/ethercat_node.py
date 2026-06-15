@@ -9,7 +9,7 @@ _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 _DEFAULT_ENDPOINT = os.path.join(
-    _REPO_ROOT, "rust", "target", "release", "kalico-ethercat-rt"
+    _REPO_ROOT, "rust", "target", "release", "ethercat-rt"
 )
 
 DRIVE_FAULT_POLL_PERIOD = 1.0
@@ -36,7 +36,7 @@ class EtherCatNode:
         self.endpoint = os.path.abspath(
             config.get("endpoint", _DEFAULT_ENDPOINT)
         )
-        self.bridge_handle = None
+        self.engine_handle = None
         # Derived at claim time, not __init__: the [servo_*] sections are parsed
         # by the toolhead AFTER [ethercat_node] sections (printer._read_config
         # loads prefix sections before motion), so the matching
@@ -68,22 +68,24 @@ class EtherCatNode:
         )
 
     def _claim(self):
-        if self.bridge_handle is not None:
+        if self.engine_handle is not None:
             return
         rail = self._find_rail()
         self._counts_per_mm = rail.get_counts_per_mm()
+        rotation_distance = rail.get_rotation_distance()
         velocity_ff, dynamics_profile, ff_torque_clamp = rail.get_ff_config()
         following_error_counts, max_torque_tenth_pct = (
             rail.get_session_drive_limits()
         )
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         try:
-            self.bridge_handle = bridge.claim_ethercat_node(
+            self.engine_handle = engine.claim_ethercat_node(
                 self.name,
                 self.socket_path,
                 self.interface,
                 self.endpoint,
                 self._counts_per_mm,
+                rotation_distance,
                 velocity_ff,
                 dynamics_profile,
                 ff_torque_clamp,
@@ -97,7 +99,7 @@ class EtherCatNode:
             "endpoint=%s counts_per_mm=%s velocity_ff=%s "
             "dynamics_profile=%s ff_torque_clamp=%s",
             self.name,
-            self.bridge_handle,
+            self.engine_handle,
             self.socket_path,
             self.interface,
             self.endpoint,
@@ -114,8 +116,8 @@ class EtherCatNode:
         )
 
     def _poll_drive_fault(self, eventtime):
-        bridge = self.printer.lookup_object("motion_bridge")
-        fault = bridge.take_drive_fault(self.bridge_handle)
+        engine = self.printer.lookup_object("motion_engine")
+        fault = engine.take_drive_fault(self.engine_handle)
         if fault is None:
             return eventtime + DRIVE_FAULT_POLL_PERIOD
         self.printer.invoke_shutdown(
@@ -128,11 +130,11 @@ class EtherCatNode:
         params = rail.get_sdo_params()
         if not params:
             return
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         for index, subindex, size, value in params:
             try:
-                bridge.sdo_write(
-                    self.bridge_handle, index, subindex, size, value
+                engine.sdo_write(
+                    self.engine_handle, index, subindex, size, value
                 )
             except RuntimeError as e:
                 raise self.printer.config_error(
@@ -148,8 +150,8 @@ class EtherCatNode:
                 value,
             )
 
-    def get_bridge_handle(self):
-        return self.bridge_handle
+    def get_engine_handle(self):
+        return self.engine_handle
 
     def get_counts_per_mm(self):
         return self._counts_per_mm

@@ -36,7 +36,7 @@ That baseline is established two ways:
 
 The Task-8 push-pieces rewrite replaced the old dispatch closure (which drained a
 `pending_seed` and sent `runtime_seed_position` with the per-MCU CoreXY transform
-— see `git show sota-motion:rust/motion-bridge/src/bridge.rs`, the
+— see `git show sota-motion:rust/motion-engine/src/bridge.rs`, the
 `if cfg.kinematics == KINEMATICS_COREXY { (x+y, x−y) }` block) with an
 enqueue-only closure that **never drains `pending_seed` and never sends the seed**.
 `bridge.set_position` (`bridge.rs:2709`) still stores the seed in `pending_seed`;
@@ -108,7 +108,7 @@ runs on `klippy:connect` and the planner is up before any gcode/homing
 motion MCU** (`_init_planner` logs "skipping init_planner" when `octopus is None`,
 e.g. a Beacon-only setup) — that config physically cannot drive steppers, so
 seeding is moot. The seed therefore reuses the planner-present guard and is a
-no-op exactly when the neighboring `kalico_stream_open` is.
+no-op exactly when the neighboring `runtime_stream_open` is.
 
 ### Decision 3 — one shared motor-frame helper
 
@@ -180,7 +180,7 @@ SET_KINEMATIC_POSITION / G28 / G92
   and we want it loud, per the "always fail loudly" decision.
 - **Planner absent → skip** (no panic). This is the motion-less config; it already
   logs a warning at `_init_planner` and cannot move, so there is nothing to seed.
-  Consistent with the adjacent `kalico_stream_open` guard.
+  Consistent with the adjacent `runtime_stream_open` guard.
 - **Backstop:** if a seed is ever missed despite this, `StepsPerSampleExceeded`
   (−310) hard-faults on the first oversized sample rather than producing corrupted
   motion.
@@ -210,10 +210,10 @@ SET_KINEMATIC_POSITION / G28 / G92
 
 ## Files touched (anticipated)
 
-- `rust/motion-bridge/src/dispatch.rs` — shared `cfg_is_corexy` / `motor_frame_xy`.
-- `rust/motion-bridge/src/enqueue.rs` — use the shared predicate (behavior
+- `rust/motion-engine/src/dispatch.rs` — shared `cfg_is_corexy` / `motor_frame_xy`.
+- `rust/motion-engine/src/enqueue.rs` — use the shared predicate (behavior
   unchanged).
-- `rust/motion-bridge/src/bridge.rs` — `set_position` sends the seed; retire
+- `rust/motion-engine/src/bridge.rs` — `set_position` sends the seed; retire
   `pending_seed` / `SeedPosition`.
 
 No MCU/C changes (the seed command and engine path already exist and are correct).

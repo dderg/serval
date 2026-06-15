@@ -11,12 +11,12 @@ if [[ "${1:-}" == "--build" ]] || ! docker image inspect "$IMAGE" &>/dev/null; t
 fi
 
 # chelper is NOT mounted — the image has its own Linux build.
-# motion_bridge_native.so is also baked into the image.
+# _motion_engine.so is also baked into the image.
 exec docker run --rm \
     -v "$REPO_ROOT/klippy/extras:/work/klippy/extras" \
     -v "$REPO_ROOT/klippy/kinematics:/work/klippy/kinematics" \
     -v "$REPO_ROOT/klippy/motion.py:/work/klippy/motion.py" \
-    -v "$REPO_ROOT/klippy/motion_bridge.py:/work/klippy/motion_bridge.py" \
+    -v "$REPO_ROOT/klippy/motion_engine.py:/work/klippy/motion_engine.py" \
     -v "$REPO_ROOT/klippy/mcu.py:/work/klippy/mcu.py" \
     -v "$REPO_ROOT/klippy/serialhdl.py:/work/klippy/serialhdl.py" \
     -v "$REPO_ROOT/klippy/stepper.py:/work/klippy/stepper.py" \
