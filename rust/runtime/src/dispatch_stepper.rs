@@ -215,16 +215,16 @@ fn dispatch_pulse(
         Some(stepper) => stepper.overlay_step_frame.store(v, Ordering::Release),
     };
 
-    if overlay_just_armed {
-        if let Some(idx) = overlay_motor_idx {
-            if let Some(stepper) = axis.steppers.get(idx) {
-                stepper.overlay_step_frame.store(0, Ordering::Release);
-            }
-        }
-    }
-    let prev_step_count = load_step_frame(axis);
     #[allow(clippy::cast_possible_truncation)]
     let target_step_count = libm::roundf(p_end / microstep_distance) as i32;
+    // On the arm tick, seed prev from target so signed_steps == 0: a late arm
+    // must not dump the pre-arm curve advance into one sample (-310).
+    // Normal moves always carry their frame; overlay arm must do the same.
+    let prev_step_count = if overlay_just_armed && overlay_motor_idx.is_some() {
+        target_step_count
+    } else {
+        load_step_frame(axis)
+    };
     let signed_steps = target_step_count.wrapping_sub(prev_step_count);
     if axis_idx == AXIS_A {
         shared

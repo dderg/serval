@@ -417,6 +417,80 @@ fn unknown_step_mode_raises_fault() {
 }
 
 #[test]
+fn overlay_arm_emits_zero_steps_when_curve_already_advanced() {
+    // Reproduces the -310 StepsPerSampleExceeded crash: a FORCE_MOVE overlay
+    // piece arms slightly late so the first evaluated sample lands at p_end=0.40mm
+    // (40 microsteps at mstep=0.01mm). The old code reset overlay_step_frame to 0
+    // on arm, giving signed_steps = round(0.40/0.01) - 0 = 40 in one sample —
+    // impossible on a slow move and enough to trip MAX_STEPS_PER_SAMPLE.
+    //
+    // The fix initialises prev_step_count from target_step_count on the arm tick
+    // so signed_steps is always 0 on arm regardless of how far the curve has
+    // advanced before the first sample lands.
+    let mstep: f32 = 0.01;
+    let mut axis = {
+        let mut steppers: heapless::Vec<StepperRef, 4> = heapless::Vec::new();
+        // stepper 0 — the axis "main" motor (mask 0)
+        let _ = steppers.push(make_stepper());
+        // stepper 1 — the overlay motor (mask 0b10 → stepper_sel 2 → idx 1)
+        let _ = steppers.push(make_stepper());
+        AxisConfig {
+            mode: AtomicU8::new(StepMode::Pulse as u8),
+            steppers,
+            microstep_distance: mstep,
+            ..AxisConfig::new_unconfigured()
+        }
+    };
+
+    // Seed overlay_step_frame to a non-zero garbage value so the test would
+    // catch any path that reads the stale frame instead of the computed target.
+    axis.steppers[1]
+        .overlay_step_frame
+        .store(999, Ordering::Release);
+
+    let shared = SharedState::new();
+    let mut q = StepQueue::new();
+    let q_ptr: *mut StepQueue = &mut q;
+
+    // Simulate a late arm: p_end = 0.40mm = 40 microsteps into the curve.
+    // overlay_just_armed = true; motor_mask = 0b10 selects stepper 1.
+    let p_end_at_arm: f32 = 0.40;
+    dispatch_axis(
+        0,
+        &mut axis,
+        /* motor_mask */ 0b10,
+        q_ptr,
+        &shared,
+        /* p_end */ p_end_at_arm,
+        /* v_end */ 2000.0,
+        /* p_sample_start */ 0.0,
+        /* sample_period_sec */ 25e-6,
+        /* sample_start_cycles */ 1_000,
+        /* cycles_per_second */ 520_000_000.0,
+        /* overlay_just_armed */ true,
+    );
+
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        0,
+        "arm tick must not raise any fault"
+    );
+    // The arm tick must emit zero steps: signed_steps = target - target = 0.
+    assert_eq!(
+        q.tail, q.head,
+        "arm tick must enqueue zero steps when curve is already advanced to {p_end_at_arm}mm"
+    );
+    // The frame must be set to the current target position so subsequent ticks
+    // emit only the incremental delta from here.
+    let frame = axis.steppers[1].overlay_step_frame.load(Ordering::Acquire);
+    let expected_frame = libm::roundf(p_end_at_arm / mstep) as i32;
+    assert_eq!(
+        frame, expected_frame,
+        "overlay_step_frame must be set to round(p_end/mstep)={expected_frame} after arm, not 0"
+    );
+}
+
+#[test]
 fn overlay_on_phase_axis_raises_overlay_unsupported_no_slew() {
     use crate::error::FaultCode;
 
