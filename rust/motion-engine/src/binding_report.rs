@@ -28,8 +28,6 @@ pub fn label_binding(
             return None;
         }
     };
-    // Dynamic limit sets have no config name; show their reserved kind. Config
-    // sets resolve to their declared section name by index.
     let limit = match kind {
         temporal::LimitKind::Feedrate => "feedrate".to_string(),
         temporal::LimitKind::RuntimeCap => "runtime_caps".to_string(),

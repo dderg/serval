@@ -664,10 +664,6 @@ fn run_loop(
                     // serde's "2.03e-7" — comparable at a glance in the log UI and still
                     // numerically filterable (VL parses numeric-looking strings).
                     let binding_ratio_str = format!("{:.4}", fields.binding_ratio);
-                    // Peak utilization of the executed trajectory: how hard the
-                    // committed motion actually rides the tightest limit, measured
-                    // at the MCU step rate. <1 ⇒ headroom left; >1 ⇒ over-limit
-                    // between solver grid points.
                     let peak_util_str = format!("{:.4}", binding.peak_utilization);
                     let peak_util_family = match binding.peak_util_family {
                         Some(trajectory::utilization::UtilFamily::Velocity) => "velocity",
@@ -675,9 +671,6 @@ fn run_loop(
                         Some(trajectory::utilization::UtilFamily::Jerk) => "jerk",
                         None => "none",
                     };
-                    // Per-family executed peaks: how hard each derivative rides its
-                    // limit (ratio) and its raw path-frame magnitude. Lets a reader
-                    // see e.g. velocity 1.00 / jerk 1.03 at once, not just the max.
                     let p = binding.peaks.unwrap_or_default();
                     let vel_util_str = format!("{:.4}", p.vel_ratio);
                     let accel_util_str = format!("{:.4}", p.accel_ratio);

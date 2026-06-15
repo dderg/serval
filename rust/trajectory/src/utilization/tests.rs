@@ -27,7 +27,6 @@ fn constant_velocity_reports_velocity_family() {
         "velocity utilization must be v / v_max; got {}",
         w.ratio,
     );
-    // per-family detail: the raw peak velocity is v, accel/jerk are ~0.
     assert!(
         (u.vel_mag - v).abs() < 1e-3,
         "raw peak velocity ≈ v; got {}",
