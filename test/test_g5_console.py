@@ -5,6 +5,9 @@ class FakeKin:
     def __init__(self):
         self.checked = []
 
+    def parked_dirty_axes(self):
+        return []
+
     def check_move(self, move):
         self.checked.append(tuple(move.end_pos))
         # simulate a bed of +/-100 in X/Y, +/-50 in Z
