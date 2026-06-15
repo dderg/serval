@@ -2777,283 +2777,10 @@ enable_force_move: True
 """
 
 
-def run_batch_simulation(
-    repo_root: pathlib.Path,
-    gcode_path: pathlib.Path,
-    config_path: Optional[pathlib.Path] = None,
-    timeout: float = 300.0,
-    verbose: bool = False,
-) -> SimResult:
-    """Runs full motion planner without MCU firmware (~100x real-time).
-    Requires out/klipper.dict built from the firmware.
-    """
-    wall_start = time.monotonic()
-
-    with tempfile.TemporaryDirectory(prefix="kalico_batch_") as tmpdir:
-        tmp = pathlib.Path(tmpdir)
-
-        dict_path = repo_root / "out" / "klipper.dict"
-        if not dict_path.exists():
-            return SimResult(
-                success=False,
-                print_time_s=0,
-                wall_time_s=time.monotonic() - wall_start,
-                speedup=0,
-                error="Missing klipper.dict. Build firmware first.",
-            )
-
-        if config_path is None:
-            cfg_text = _generate_batch_config()
-            cfg_file = tmp / "printer.cfg"
-            cfg_file.write_text(cfg_text)
-            config_path = cfg_file
-
-        debug_output = str(tmp / "debug_output")
-        klippy_log = str(tmp / "klippy.log")
-        cmd = [
-            "python3",
-            str(repo_root / "klippy" / "klippy.py"),
-            str(config_path),
-            "-i",
-            str(gcode_path),
-            "-o",
-            debug_output,
-            "-d",
-            str(dict_path),
-            "-l",
-            klippy_log,
-        ]
-        if verbose:
-            cmd.append("-v")
-
-        preprocessor = (
-            repo_root / "tools" / "kalico-sim" / "preprocess_gcode.py"
-        )
-        if preprocessor.exists():
-            processed = tmp / "processed.gcode"
-            try:
-                subprocess.run(
-                    [
-                        "python3",
-                        str(preprocessor),
-                        str(gcode_path),
-                        str(processed),
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                log.info("Preprocessed: %s", processed.name)
-                cmd[cmd.index(str(gcode_path))] = str(processed)
-            except subprocess.CalledProcessError as e:
-                log.warning("Preprocessor failed: %s", e.stderr[:200])
-
-        log.info("Running batch simulation: %s", gcode_path.name)
-        log.info("Command: %s", " ".join(cmd))
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(repo_root),
-            )
-        except subprocess.TimeoutExpired:
-            return SimResult(
-                success=False,
-                print_time_s=0,
-                wall_time_s=time.monotonic() - wall_start,
-                speedup=0,
-                error=f"Batch simulation timed out after {timeout}s",
-            )
-
-        wall_end = time.monotonic()
-        wall_time = wall_end - wall_start
-
-        print_time = 0.0
-        error = None
-        klippy_content = ""
-        try:
-            klippy_content = pathlib.Path(klippy_log).read_text(
-                errors="replace"
-            )
-        except FileNotFoundError:
-            pass
-
-        if result.returncode != 0:
-            if (
-                "error" in klippy_content.lower()
-                or "shutdown" in klippy_content.lower()
-            ):
-                for line in klippy_content.split("\n"):
-                    if "error" in line.lower() or "shutdown" in line.lower():
-                        error = line.strip()
-                        break
-            if not error:
-                error = f"klippy exited with code {result.returncode}"
-                if result.stderr:
-                    error += f"\n{result.stderr[-500:]}"
-
-        import re
-
-        for line in reversed(klippy_content.split("\n")):
-            m = re.search(r"print time (\d+\.?\d*)s", line)
-            if m:
-                print_time = float(m.group(1))
-                break
-        if print_time == 0:
-            for line in reversed(klippy_content.split("\n")):
-                m = re.search(r"print_time=(\d+\.?\d*)", line)
-                if m:
-                    print_time = float(m.group(1))
-                    break
-
-        speedup = print_time / wall_time if wall_time > 0 else 0
-
-        return SimResult(
-            success=(result.returncode == 0 and error is None),
-            print_time_s=print_time,
-            wall_time_s=wall_time,
-            speedup=speedup,
-            error=error,
-            klippy_log=klippy_content,
-        )
-
-
-def _generate_batch_config() -> str:
-    """Voron Trident 250/300 representative config for batch timing predictions.
-    Limits calibrated to that hardware; adjust if targeting a different machine.
-    """
-    return """\
-[mcu]
-serial: /dev/null
-
-[kinematics]
-type: corexy
-axis_x: x
-axis_y: y
-axis_z: z
-a_motors: a
-b_motors: b
-z_motors: z
-
-[axis x]
-position_endstop: 0
-position_max: 300
-endstop_pin: ^gpiochip0/gpio10
-homing_speed: 50
-post_processors: is_xy
-
-[axis y]
-position_endstop: 0
-position_max: 300
-endstop_pin: ^gpiochip0/gpio11
-homing_speed: 50
-post_processors: is_xy
-
-[axis z]
-position_endstop: 0
-position_max: 300
-endstop_pin: ^gpiochip0/gpio12
-homing_speed: 8
-
-[axis e]
-follows: x, y, z
-motors: e
-
-[post_processor is_xy]
-type: smooth_mzv
-frequency_hz: 50
-
-[limit extruder]
-axes: e
-max_velocity: 75
-max_accel: 1500
-
-[limit gantry]
-axes: x, y
-max_velocity: 500
-max_accel: 25000
-
-[limit z]
-axes: z
-max_velocity: 30
-max_accel: 100
-
-[motor a]
-drive: stepper
-step_pin: gpiochip0/gpio0
-dir_pin: gpiochip0/gpio1
-enable_pin: !gpiochip0/gpio2
-microsteps: 32
-rotation_distance: 40
-
-[motor b]
-drive: stepper
-step_pin: gpiochip0/gpio3
-dir_pin: gpiochip0/gpio4
-enable_pin: !gpiochip0/gpio5
-microsteps: 32
-rotation_distance: 40
-
-[motor z]
-drive: stepper
-step_pin: gpiochip0/gpio6
-dir_pin: gpiochip0/gpio7
-enable_pin: !gpiochip0/gpio8
-microsteps: 32
-rotation_distance: 4
-
-[motor e]
-drive: stepper
-step_pin: gpiochip0/gpio13
-dir_pin: gpiochip0/gpio14
-enable_pin: !gpiochip0/gpio15
-microsteps: 16
-rotation_distance: 22.6789511
-
-[extruder]
-axis: e
-nozzle_diameter: 0.4
-filament_diameter: 1.75
-heater_pin: gpiochip0/gpio20
-sensor_pin: analog0
-sensor_type: EPCOS 100K B57560G104F
-min_temp: -273
-max_temp: 300
-control: pid
-pid_kp: 30
-pid_ki: 2
-pid_kd: 100
-
-[heater_bed]
-heater_pin: gpiochip0/gpio21
-sensor_pin: analog1
-sensor_type: EPCOS 100K B57560G104F
-min_temp: -273
-max_temp: 120
-control: pid
-pid_kp: 60
-pid_ki: 1
-pid_kd: 600
-
-[force_move]
-enable_force_move: True
-"""
-
-
 def main():
     parser = argparse.ArgumentParser(description="Kalico Simulator")
     parser.add_argument("--gcode", type=str, help="G-code file to print")
     parser.add_argument("--config", type=str, help="Config directory or file")
-    parser.add_argument(
-        "--mode",
-        choices=["full", "batch"],
-        default="full",
-        help="Simulation mode: 'full' (MCU firmware) or "
-        "'batch' (timing prediction, faster)",
-    )
     parser.add_argument(
         "--timeout",
         type=float,
@@ -3133,36 +2860,24 @@ def main():
             )
         )
 
-    if args.mode == "batch":
-        if not gcode:
-            print("ERROR: --gcode is required for batch mode")
-            sys.exit(1)
-        result = run_batch_simulation(
-            repo_root=repo,
-            gcode_path=gcode,
-            config_path=config,
-            timeout=args.timeout,
-            verbose=args.verbose,
-        )
-    else:
-        result = run_simulation(
-            repo_root=repo,
-            gcode_path=gcode,
-            config_dir=config,
-            timeout=args.timeout,
-            verbose=args.verbose,
-            phase_stepping=args.phase_test,
-            homing_test=args.homing_test,
-            beacon_test=args.beacon_test,
-            motion_state_test=args.test_motion_state,
-            sensorless_phase_test=args.sensorless_phase_test,
-            motor_adjust_test=args.motor_adjust_test,
-            serve=args.serve,
-            serve_data_dir=args.data_dir,
-        )
+    result = run_simulation(
+        repo_root=repo,
+        gcode_path=gcode,
+        config_dir=config,
+        timeout=args.timeout,
+        verbose=args.verbose,
+        phase_stepping=args.phase_test,
+        homing_test=args.homing_test,
+        beacon_test=args.beacon_test,
+        motion_state_test=args.test_motion_state,
+        sensorless_phase_test=args.sensorless_phase_test,
+        motor_adjust_test=args.motor_adjust_test,
+        serve=args.serve,
+        serve_data_dir=args.data_dir,
+    )
 
     print("\n" + "=" * 60)
-    print(f"SIMULATION RESULT ({args.mode} mode)")
+    print("SIMULATION RESULT (full mode)")
     print("=" * 60)
     print(f"  Status:     {'PASS' if result.success else 'FAIL'}")
     print(

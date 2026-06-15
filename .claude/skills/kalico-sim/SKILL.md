@@ -1,30 +1,31 @@
 ---
 name: kalico-sim
-description: Use when asked to test firmware or host-side changes end-to-end without a physical printer, predict print time for a G-code file, reproduce motion/homing bugs in simulation, validate a branch before merging, run G-code against real firmware, or compare branch behavior (e.g. main vs feature branch). Also use when setting up, debugging, or extending the Docker-based simulator.
+description: Use when asked to test firmware or host-side changes end-to-end without a physical printer, reproduce motion/homing bugs in simulation, validate a branch before merging, run G-code against real firmware, or compare branch behavior (e.g. main vs feature branch). Also use when setting up, debugging, or extending the Docker-based simulator.
 ---
 
 # Kalico Simulator
 
-Full-stack Klipper/Kalico simulator that runs MACH_LINUX firmware + klippy in Docker. Two modes: **full** (real firmware, catches bugs) and **batch** (motion planner only, 300-1200x speedup, predicts print time to seconds).
+Full-stack Klipper/Kalico simulator that runs the real MACH_LINUX firmware + klippy in Docker. It drives the actual MCU step/SPI/GPIO paths through an LD_PRELOAD shim, so it catches firmware bugs, protocol errors, and state-machine/timing issues that unit tests and offline planner runs cannot.
+
+There is **one mode: full** (real firmware). A planner-only "batch" mode used to exist; it was removed — planner *correctness* is covered by the Rust unit tests (`cargo nextest`) and planner *timing* by running the planner directly. The simulator's job is real-firmware end-to-end.
 
 ## Quick Start
 
 ```bash
 # From the simulator worktree or any branch that has tools/kalico-sim/:
 
-# Self-test (generates a test G-code, runs full pipeline):
+# Self-test (generates a test G-code, runs the full pipeline):
 docker run --rm kalico-sim
 
-# Predict print time for a G-code file (~300-1200x faster than real time):
+# Run a G-code file through the virtual SD card:
 docker run --rm -v /path/to/file.gcode:/gcode/print.gcode:ro \
-    kalico-sim --mode batch --gcode /gcode/print.gcode
+    kalico-sim --gcode /gcode/print.gcode --timeout 120
 
-# Test a specific branch (builds firmware from that branch):
+# Build + run for the current branch/worktree (incremental, cache-keyed by branch):
+bash tools/kalico-sim/run.sh
+
+# Build + run for a specific branch:
 bash tools/kalico-sim/run.sh --branch sota-motion
-
-# Full mode with a G-code file (runs through virtual SD card):
-docker run --rm -v /path/to/file.gcode:/gcode/print.gcode:ro \
-    kalico-sim --mode full --gcode /gcode/print.gcode --timeout 120
 ```
 
 ## Architecture
@@ -32,7 +33,6 @@ docker run --rm -v /path/to/file.gcode:/gcode/print.gcode:ro \
 ```
 ┌──────────────────── Docker container ────────────────────┐
 │                                                          │
-│  FULL MODE:                                              │
 │  ┌──────────┐  PTY  ┌────────┐  PTY  ┌──────────┐      │
 │  │ MCU H7   │◄─────►│ klippy │◄─────►│ MCU F4   │      │
 │  │ (klipper │       │(Python)│       │ (klipper │      │
@@ -42,67 +42,71 @@ docker run --rm -v /path/to/file.gcode:/gcode/print.gcode:ro \
 │  libsim_intercept    (real time)      libsim_intercept  │
 │  (GPIO/SPI/PWM)                       (GPIO/SPI/PWM)    │
 │                                                          │
-│  BATCH MODE:                                             │
-│  ┌────────────────────────────────┐                      │
-│  │ klippy --debuginput --debugout │  No MCU firmware     │
-│  │ Full motion planner at CPU     │  300-1200x speedup   │
-│  │ speed. Exact print time.       │  Reports seconds.    │
-│  └────────────────────────────────┘                      │
+│  Virtual clock (libvtime) paces the simulated world.    │
 └──────────────────────────────────────────────────────────┘
 ```
 
-## Modes
-
-### Batch Mode (`--mode batch`)
-
-Runs Klipper's motion planner offline at CPU speed. No MCU firmware involved. Produces exact print time by running the real acceleration/jerk/corner-velocity pipeline.
-
-- **Speed**: 300-1200x real time (a 23-minute print predicts in ~4 seconds)
-- **Output**: Print time in seconds, pass/fail
-- **Use for**: Print time estimation, motion planning validation, slicer comparison
-- **Handles**: Real slicer G-code (OrcaSlicer, PrusaSlicer, etc.) — auto-strips PRINT_START, EXCLUDE_OBJECT, temperature/fan commands via built-in preprocessor
-
-### Full Mode (`--mode full`, default)
-
-Runs real MACH_LINUX firmware + klippy with GPIO/SPI LD_PRELOAD shim. Catches firmware bugs, protocol errors, state machine issues.
-
-- **Speed**: ~1x real time (limited by MCU step execution in Docker VM)
-- **Output**: Print time, pass/fail, error details
-- **Use for**: Firmware bug detection, protocol validation, branch comparison
-- **Multi-MCU**: H7 + F4 both spawn and connect via PTY
-- **Endstops**: Auto-triggered via step counting in the GPIO shim (after N step pulses, linked endstop GPIO triggers)
+- **Speed**: ~1x real time (limited by MCU step execution in the Docker VM)
+- **Output**: print time, pass/fail, error details
+- **Use for**: firmware bug detection, protocol validation, motion/homing repro, branch comparison
+- **Multi-MCU**: H7 + F4 both spawn (concurrently) and connect via PTY
+- **Endstops**: auto-triggered via step counting in the GPIO shim (after N step pulses, the linked endstop GPIO triggers)
 
 ## Building the Docker Image
 
 ```bash
-# Build for current branch:
-docker build -t kalico-sim -f tools/kalico-sim/Dockerfile .
+# Build for current branch (run.sh enables BuildKit + per-branch cache key):
+bash tools/kalico-sim/run.sh
 
-# Build for a specific branch (via run.sh which prepares the build context):
+# Build for a specific branch (run.sh prepares an isolated build context):
 bash tools/kalico-sim/run.sh --branch <branch-name>
+
+# Direct build of the current tree:
+DOCKER_BUILDKIT=1 docker build -t kalico-sim -f tools/kalico-sim/Dockerfile .
 ```
 
-For branches with `CONFIG_KALICO_RUNTIME=y` (like sota-motion), the Dockerfile:
-1. Installs Rust toolchain
+For branches with the Rust motion engine (like sota-motion), the Dockerfile:
+1. Installs the Rust toolchain
 2. Patches missing Linux stubs (`fix_linux_build.sh`)
-3. Builds the Rust staticlib + motion-engine PyO3 module
+3. Builds the Rust staticlib + the `_motion_engine.so` host module
 4. Links everything into `klipper-h7-sim.elf` / `klipper-f4-sim.elf`
+
+### Incremental builds (BuildKit cache mounts)
+
+The Dockerfile uses BuildKit cache mounts so rebuilds recompile only what changed:
+- **Rust `target/` + cargo registry** are cache-mounted (keyed by `SIM_CACHE_KEY` = branch). Editing one crate recompiles that crate, not the workspace.
+- **Per-MCU firmware `OUT` dirs** (`out-h7/`, `out-f4/`) are cache-mounted — no `make clean`, so a C-source edit recompiles only the changed objects.
+- The firmware stage copies only the parts of `tools/` it needs, so editing `runner.py` does **not** invalidate the firmware build.
+
+Typical warm-cache rebuild costs: Python-only edit ~6s; one C file ~H7 11s / F4 1s; one Rust crate seconds. First (cold) build is ~50s.
+
+## Parallel / multi-agent use
+
+Each `docker run` gets fully private namespaces (PIDs, mounts, **its own `/dev/shm`**, sockets, PTYs), so concurrent runs cannot collide — validated with many simultaneous self-tests. `run.sh` extracts each branch build into a **unique, self-cleaning staging dir** and partitions the compile caches by branch (`SIM_CACHE_KEY`), so concurrent builds from different worktrees/branches neither race nor clobber each other's caches.
+
+```bash
+# Run N self-tests / G-code runs in parallel — no cross-talk:
+for f in a.gcode b.gcode c.gcode d.gcode; do
+    docker run --rm -v /path/$f:/gcode/f.gcode:ro \
+        kalico-sim --gcode /gcode/f.gcode &
+done
+wait
+```
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `tools/kalico-sim/Dockerfile` | Docker image — Ubuntu + gcc + Rust + firmware build |
-| `tools/kalico-sim/run.sh` | Convenience launcher: archives branch, overlays sim tools, builds, runs |
+| `tools/kalico-sim/Dockerfile` | Docker image — Ubuntu + gcc + Rust + firmware build (BuildKit cache mounts) |
+| `tools/kalico-sim/run.sh` | Launcher: isolated build context, BuildKit, per-branch cache key, build + run |
 | `tools/kalico-sim/runner.py` | Python orchestrator: spawns MCUs, klippy, monitors, reports |
-| `tools/kalico-sim/preprocess_gcode.py` | Strips slicer macros for batch mode |
 | `tools/kalico-sim/libvtime/libsim_intercept.c` | GPIO/SPI/PWM/IIO LD_PRELOAD shim with auto-endstop |
 | `tools/kalico-sim/libvtime/libvtime.c` | Virtual time shim (shared-memory clock) |
 | `tools/kalico-sim/emulators/beacon_mcu.py` | Full Beacon eddy-current probe MCU emulator |
 | `tools/kalico-sim/emulators/beacon_identify_dict.py` | Beacon firmware identify dictionary |
 | `tools/kalico-sim/configs/h7-sim.config` | MACH_LINUX build config for H7-flavored MCU |
 | `tools/kalico-sim/configs/f4-sim.config` | MACH_LINUX build config for F4-flavored MCU |
-| `tools/kalico-sim/patches/fix_linux_build.sh` | Patches sota-motion for MACH_LINUX link errors |
+| `tools/kalico-sim/patches/fix_linux_build.sh` | Patches the tree for MACH_LINUX link errors |
 
 ## Beacon MCU Emulator
 
@@ -120,7 +124,7 @@ The simulator includes a full Beacon eddy-current probe emulator (`emulators/bea
 - Accelerometer streaming (`beacon_accel_data` at 6 kSps)
 - trsync protocol (config, start, trigger, set_timeout, stepper_stop_on_trigger)
 
-**Usage:** The emulator starts automatically in full mode when klippy's config references a Beacon probe. The runner creates the Beacon PTY and passes it to klippy's config via the serial override system.
+**Usage:** The emulator starts automatically when klippy's config references a Beacon probe. The runner creates the Beacon PTY and passes it to klippy's config via the serial override system.
 
 **Adjusting Z position:**
 ```python
@@ -151,46 +155,24 @@ The simulator generates a minimal config when none is provided. Key constraints:
 - **Pin format**: `gpiochip0/gpioN` (MACH_LINUX, not STM32 `PA3`)
 - **Homing speed**: ≤10 mm/s (Docker VM jitter causes "Stepper too far in past" at higher rates)
 - **`[force_move]` enabled**: Allows `SET_KINEMATIC_POSITION` as homing fallback
-- **`[input_shaper]` with `smooth_mzv`**: Required on sota-motion (Kalico motion bridge rejects freq=0)
+- **`[input_shaper]` with `smooth_mzv`**: Required on sota-motion (the motion engine rejects freq=0)
 - **`[virtual_sdcard]` path**: Must match the directory where G-code files are placed
 
 ## Adding a New Test
 
 1. Create a G-code file in `tools/kalico-sim/tests/`
-2. For batch mode: `docker run --rm -v /path/to/test.gcode:/gcode/t.gcode:ro kalico-sim --mode batch --gcode /gcode/t.gcode`
-3. For full mode: same but `--mode full --timeout 120`
-4. For branch comparison: run the same G-code against two Docker images built from different branches
-
-## Validated Results
-
-| Test | Status | Print Time | Wall Time | Speedup |
-|------|--------|-----------|-----------|---------|
-| Main: full mode (21-move SD card print) | PASS | 26.9s | 28.0s | 1.0x |
-| Main: batch (80-move pattern) | PASS | 383.5s | 0.3s | 1108x |
-| Main: batch (160K-line real slicer) | PASS | 1389.3s | 4.4s | 318x |
-| sota-motion: full mode | FAIL | — | 1.3s | Catches timing bug |
+2. Run it: `docker run --rm -v /path/to/test.gcode:/gcode/t.gcode:ro kalico-sim --gcode /gcode/t.gcode --timeout 120`
+3. For branch comparison: run the same G-code against two Docker images built from different branches
 
 ## Common Issues
 
 | Issue | Fix |
 |-------|-----|
-| "Stepper too far in past" in full mode | Docker VM jitter — use `--privileged` or reduce homing speed. Batch mode unaffected. |
+| "Stepper too far in past" | Docker VM jitter — use `--privileged` or reduce homing speed. |
 | "Unknown pin chip name 'probe'" | Config references Beacon probe. Use minimal config (no `--config` flag). |
 | "shaper frequency must be finite" | Add `[input_shaper]` with `shaper_freq_x/y: 50` and `shaper_type: smooth_mzv` |
-| Rust linking errors on sota-motion | `fix_linux_build.sh` should run automatically. Check Dockerfile for the `RUN bash ... fix_linux_build.sh` step. |
+| Rust linking errors on sota-motion | `fix_linux_build.sh` should run automatically. Check the Dockerfile `RUN bash ... fix_linux_build.sh` step. |
 | SIGSEGV with both LD_PRELOAD shims | Order matters: `libvtime.so:libsim_intercept.so` (vtime FIRST). |
-| G-code uses PRINT_START macro | Batch mode auto-preprocesses. Full mode uses `SET_KINEMATIC_POSITION` instead. |
-| "klippy exited with code 255" | Config error — check klippy log. Usually missing extruder or wrong pin names. |
-
-## Parallel Instances
-
-Each `docker run` gets its own isolated environment (PTYs, sockets, /dev/shm). Run as many as your CPU supports:
-
-```bash
-# Run 4 batch predictions in parallel:
-for f in a.gcode b.gcode c.gcode d.gcode; do
-    docker run --rm -v /path/$f:/gcode/f.gcode:ro \
-        kalico-sim --mode batch --gcode /gcode/f.gcode &
-done
-wait
-```
+| `_motion_engine.so` cannot be loaded | The Rust host module did not build/copy — check the rust-build stage. |
+| "klippy exited with code 255" | Config error — check the klippy log. Usually a missing extruder or wrong pin names. |
+| First two rebuilds after a big merge are slow | BuildKit re-warming its layer cache; it converges to incremental speeds within a couple of builds. |
