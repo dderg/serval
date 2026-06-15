@@ -136,16 +136,24 @@ class ServoParam:
         from . import servo_axis
 
         toolhead = self.printer.lookup_object("toolhead")
-        for rail in getattr(toolhead.get_kinematics(), "rails", ()):
-            if (
-                isinstance(rail, servo_axis.ServoRail)
-                and rail.get_name() == servo_name
+        servo_rails = [
+            rail
+            for rail in getattr(toolhead.get_kinematics(), "rails", ())
+            if isinstance(rail, servo_axis.ServoRail)
+        ]
+        for rail in servo_rails:
+            if servo_name in (
+                rail.get_motor_name(),
+                rail.get_name(),
+                rail.get_name(short=True),
             ):
                 return self.printer.lookup_object(
                     "ethercat_node " + rail.get_node_name()
                 )
+        known = ", ".join(rail.get_motor_name() for rail in servo_rails)
         raise self.printer.command_error(
-            "SERVO_PARAM: no servo rail named %r" % (servo_name,)
+            "SERVO_PARAM: no servo motor named %r (known: %s)"
+            % (servo_name, known or "none")
         )
 
     def cmd_SERVO_PARAM(self, gcmd):

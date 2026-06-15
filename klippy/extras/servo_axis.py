@@ -51,6 +51,7 @@ class ServoRail(BaseRail):
                 "(got %r)" % (motor_config.get_name(), protocol)
             )
         self.node_name = motor_config.get("node")
+        self.motor_name = motor_config.get_name().split(None, 1)[1]
         self.rotation_distance = motor_config.getfloat(
             "rotation_distance", above=0.0
         )
@@ -134,6 +135,9 @@ class ServoRail(BaseRail):
 
     def get_node_name(self):
         return self.node_name
+
+    def get_motor_name(self):
+        return self.motor_name
 
     def get_counts_per_mm(self):
         return self.encoder_counts_per_rev / self.rotation_distance

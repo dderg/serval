@@ -101,7 +101,7 @@ def make_servo_rail(extra=(), drop=()):
         motor_options.pop(key, None)
     return servo_axis.ServoRail(
         FakeRailConfig("axis z", axis_options),
-        FakeRailConfig("z_drive", motor_options),
+        FakeRailConfig("motor z_drive", motor_options),
     )
 
 
