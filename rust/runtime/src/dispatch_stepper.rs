@@ -217,11 +217,8 @@ fn dispatch_pulse(
 
     #[allow(clippy::cast_possible_truncation)]
     let target_step_count = libm::roundf(p_end / microstep_distance) as i32;
-    // On the arm tick, seed prev from target so signed_steps == 0: a late arm
-    // must not dump the pre-arm curve advance into one sample (-310).
-    // Normal moves always carry their frame; overlay arm must do the same.
     let prev_step_count = if overlay_just_armed && overlay_motor_idx.is_some() {
-        target_step_count
+        0
     } else {
         load_step_frame(axis)
     };
