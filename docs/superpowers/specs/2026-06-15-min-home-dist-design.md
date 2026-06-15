@@ -197,17 +197,22 @@ by distance precisely enough to test the 0.5mm tolerance boundary without races.
   the ordering — a pre-retract call would carry the homed, not retracted,
   coordinate); `servo_handle = None` → not called.
 - **Integration smoke — ELF sim (`tools/sim_klippy/tests/test_homing_lag_repro.py`):**
-  rework to match the new semantics —
+  reworked to be **deterministic** (no GPIO-timing races). The sim control API
+  exposes only GPIO/PWM, not live head position, and the happy-path success lands
+  exactly on the 0.5mm tolerance boundary — unhittable reliably via forced-GPIO
+  timing. So the sim covers *path-runs* + *fail-mode*, not boundary-success:
   - `test_homing_retract_timing` gets its **own** override with `min_home_dist=0`
     (it tests retract timing only; sharing `min_home_dist=15` would make its
     held-high pin rehome-then-fail).
-  - `test_homing_retract_and_rehome`: model a real switch — the control thread
-    **releases** the GPIO as the head backs off and **re-triggers** it near the
-    endstop, so the re-approach completes legitimately; assert `"needs rehome:
-    True"` in klippy.log (the `kalico.event` logger routes there) and a fast,
-    successful `G28` (guards the original lag/deadlock bug).
-  - Add a fail-path sim case: GPIO held high across the back-off → re-approach
-    insta-trips → `G28` errors with "early homing trigger ... on re-approach".
+  - `test_homing_retract_and_rehome` → repurposed: GPIO tripped early and **held
+    high** across the back-off → first trip is short (`"needs rehome: True"`
+    logged, the `kalico.event` logger routes to klippy.log) → re-approach
+    insta-trips → `G28` fails with "early homing trigger ... on re-approach". This
+    deterministically exercises the rehome path end-to-end on real firmware and
+    guards the original lag/deadlock bug (must complete fast, not hang).
+  - Happy-path **success** (early transient that clears, re-approach completes) is
+    covered by the deterministic unit tests above and by user-triggered bench
+    verification — not the CI sim.
 
 ## Out of scope
 
