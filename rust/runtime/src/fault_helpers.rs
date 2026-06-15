@@ -206,5 +206,17 @@ pub fn raise_phase_motor_unmapped(shared: &SharedState, axis_idx: usize, stepper
     emit_fault_log(FaultCode::PhaseMotorUnmapped, detail);
 }
 
+/// Latch an `OverlayUnsupported` fault — an overlay (single-motor) piece
+/// cannot be honored on this axis. Detail: `((axis_idx & 0xFF) << 16) | (mask & 0xFF)`.
+#[inline]
+pub fn raise_overlay_unsupported(shared: &SharedState, axis_idx: usize, mask: u8) {
+    let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mask);
+    shared.fault_detail.store(detail, Ordering::Release);
+    shared
+        .last_error
+        .store(FaultCode::OverlayUnsupported.as_i32(), Ordering::Release);
+    emit_fault_log(FaultCode::OverlayUnsupported, detail);
+}
+
 #[cfg(test)]
 mod tests;

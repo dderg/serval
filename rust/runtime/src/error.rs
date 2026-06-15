@@ -107,6 +107,9 @@ pub const KALICO_ERR_UNKNOWN_STEP_MODE: i32 = -312;
 /// entry in `phase_slot_idx[0..phase_motor_count]` maps it to a registered
 /// SPI motor. Detail: `((axis_idx & 0xFF) << 16) | stepper_oid`.
 pub const KALICO_ERR_PHASE_MOTOR_UNMAPPED: i32 = -313;
+/// Overlay (single-motor) piece cannot be honored on this axis. Detail:
+/// `((axis_idx & 0xFF) << 16) | (mask & 0xFF)`.
+pub const KALICO_ERR_OVERLAY_UNSUPPORTED: i32 = -314;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +192,7 @@ pub enum FaultCode {
     TickIntervalExceeded = -311,
     UnknownStepMode = -312,
     PhaseMotorUnmapped = -313,
+    OverlayUnsupported = -314,
 }
 
 impl FaultCode {
@@ -221,6 +225,8 @@ impl FaultCode {
     /// assert_eq!(FaultCode::from_u16(0xFEC8), Some(FaultCode::UnknownStepMode));
     /// // PhaseMotorUnmapped = -313; -313i16 as u16 = 0xFEC7
     /// assert_eq!(FaultCode::from_u16(0xFEC7), Some(FaultCode::PhaseMotorUnmapped));
+    /// // OverlayUnsupported = -314; -314i16 as u16 = 0xFEC6
+    /// assert_eq!(FaultCode::from_u16(0xFEC6), Some(FaultCode::OverlayUnsupported));
     /// assert_eq!(FaultCode::from_u16(0x1234), None);
     /// ```
     #[allow(clippy::cast_possible_wrap)] // intentional: sign-extend u16 → i16 → i32
@@ -291,6 +297,7 @@ impl FaultCode {
             -311 => Self::TickIntervalExceeded,
             -312 => Self::UnknownStepMode,
             -313 => Self::PhaseMotorUnmapped,
+            -314 => Self::OverlayUnsupported,
             _ => return None,
         })
     }
@@ -304,6 +311,7 @@ impl FaultCode {
     /// assert_eq!(FaultCode::None.code_name(), "None");
     /// assert_eq!(FaultCode::PieceStartInPast.code_name(), "PieceStartInPast");
     /// assert_eq!(FaultCode::TickIntervalExceeded.code_name(), "TickIntervalExceeded");
+    /// assert_eq!(FaultCode::OverlayUnsupported.code_name(), "OverlayUnsupported");
     /// ```
     pub fn code_name(self) -> &'static str {
         match self {
@@ -371,6 +379,7 @@ impl FaultCode {
             Self::TickIntervalExceeded => "TickIntervalExceeded",
             Self::UnknownStepMode => "UnknownStepMode",
             Self::PhaseMotorUnmapped => "PhaseMotorUnmapped",
+            Self::OverlayUnsupported => "OverlayUnsupported",
         }
     }
 }
