@@ -73,3 +73,65 @@ def test_resync_query_error_does_not_move():
         m.resync_parked_servos()
     assert m.set_position_calls == []
     assert m.kin.cleared == []
+
+
+class _MoveKin(FakeKin):
+    def check_move(self, move):
+        pass
+
+    def active_rails(self, dx, dy, dz):
+        return []
+
+
+class FakeExtruder:
+    def check_move(self, move):
+        pass
+
+
+class _SubmitBridge(FakeBridge):
+    def __init__(self, measured):
+        super().__init__(measured)
+        self.moves = []
+
+    def get_last_move_time(self):
+        return 0.0
+
+    def submit_move(self, dx, dy, dz, de, feedrate):
+        self.moves.append((dx, dy, dz, de, feedrate))
+
+
+class MoveMotion(FakeMotion):
+    move = motion.Motion.move
+
+    max_accel = 1000.0
+    max_velocity = 100.0
+
+    def __init__(self, dirty, measured):
+        super().__init__(dirty, measured)
+        self.kin = _MoveKin(dirty)
+        self.bridge = _SubmitBridge(measured)
+        self.extruder = FakeExtruder()
+
+    def _axis_limit(self, axis, kind):
+        return 100.0
+
+    def _fire_active_callbacks(self, axes_d):
+        return False
+
+    def get_last_move_time(self):
+        return 0.0
+
+    def _bump_pending_end_time(self, dt):
+        pass
+
+    def _sync_print_time(self):
+        pass
+
+
+def test_move_resyncs_before_computing_deltas():
+    m = MoveMotion(dirty=[2], measured={"z": (123.5, 0.0)})
+    m.commanded_pos = [10.0, 20.0, 30.0, 4.0]
+    m.move([10.0, 20.0, 140.0, 4.0], 50.0)
+    assert m.bridge.queries == 1
+    dz = m.bridge.moves[0][2]
+    assert dz == pytest.approx(140.0 - 123.5)
