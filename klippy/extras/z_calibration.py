@@ -594,4 +594,8 @@ class CalibrationState:
 
 
 def load_config(config):
-    return ZCalibrationHelper(config)
+    raise config.error(
+        "z_calibration is not implemented yet on the motion-engine rewrite: "
+        "it depends on the stepper/microstep model the host no longer has. "
+        "Remove the [z_calibration] section."
+    )
