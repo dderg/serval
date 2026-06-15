@@ -50,22 +50,34 @@ only looked broken because the buzz was off-timeline.
 
 ### 1. Anchor the buzz at the toolhead timeline, not a private lead
 
-`submit_correction_sequence` gains an explicit `start_host_secs` argument.
-`Motion.manual_move` (the per-motor correction caller in `motion.py`) computes
-it from the live toolhead timeline:
+`submit_correction_sequence` gains an explicit `start_print_time` argument — the
+toolhead's `get_last_move_time()` (a *print_time* at the end of queued work).
+`Motion._stream_correction_on_timeline` passes it straight through; the bridge
+converts it to a host-clock anchor **inside the router** via
+`print_time_to_host_secs`, then projects with `host_time_to_mcu_clock`:
 
 ```
-now  = reactor.monotonic()
 glmt = toolhead.get_last_move_time()          # print_time at end of queued work
-est  = mcu.estimated_print_time(now)
-start_host_secs = now + (glmt - est)          # same real instant as the enable
+# bridge, under the router lock:
+start_host = router.print_time_to_host_secs(mcu, glmt)   # router Instant timebase
+clock      = router.host_time_to_mcu_clock(mcu, start_host)
 ```
 
-The bridge converts `start_host_secs` through the existing
-`host_time_to_mcu_clock` — the identical conversion regular motion uses — so the
-buzz lands at the same real instant a move scheduled at `glmt` would. The
-private `CORRECTION_LEAD_SECS` constant is removed; the lead is inherited from
+**Timebase is load-bearing.** The anchor must be a *print_time*, not a host
+value built from `reactor.monotonic()`. `reactor.monotonic()` is
+`CLOCK_MONOTONIC_RAW`, whereas the router's `host_time_to_mcu_clock` expects its
+`Instant` timebase (`clock_offset` is rebased to `Instant` in
+`set_clock_est_rebased`). Feeding a RAW-based host value would offset the buzz by
+the boot-to-process epoch gap (system uptime at klippy start), scheduling it far
+in the future. Routing the *print_time* through `print_time_to_host_secs`
+collapses exactly — `host_time_to_mcu_clock(print_time_to_host_secs(pt)) ==
+pt * freq` — so the buzz lands at precisely `print_time_to_clock(glmt)`, the same
+MCU clock the enable targets, independent of the epoch. The private
+`CORRECTION_LEAD_SECS` constant is removed; the lead is inherited from
 `get_last_move_time()`, which already carries the shared 0.25.
+
+`Motion._stream_correction_on_timeline` still reads `now`/`est` solely to return
+the caller's wait-until-complete `(glmt - est) + duration`, not for the anchor.
 
 ### 2. Advance the toolhead's pending-end past the buzz
 
