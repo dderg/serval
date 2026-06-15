@@ -2,8 +2,6 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-ADJUST_SETTLE_PAD = 0.05
-
 
 class MotorAdjust:
     def __init__(self, config):
@@ -37,13 +35,10 @@ class MotorAdjust:
         toolhead.wait_moves_and_mcu()
         mcu_id, axis_idx, motor_idx = toolhead.get_motor_binding(stepper_name)
         self._ensure_motor_enabled(toolhead, stepper_name)
-        reactor = self.printer.get_reactor()
-        duration = toolhead.submit_motor_adjust(
+        toolhead.submit_motor_adjust(
             mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
         )
-        deadline = reactor.monotonic() + duration + ADJUST_SETTLE_PAD
-        while reactor.monotonic() < deadline:
-            reactor.pause(reactor.monotonic() + 0.01)
+        toolhead.wait_moves()
 
     def cmd_MOTOR_ADJUST(self, gcmd):
         stepper_name = gcmd.get("MOTOR")

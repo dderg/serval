@@ -17,7 +17,6 @@ from .z_tilt import ZAdjustStatus
 PLOT_PATH = '~/printer_data/config/adxl_results/motors_sync'
 PIN_MIN_TIME = 0.010            # Minimum wait time to enable hardware pin
 MOTOR_STALL_TIME = 0.100        # Minimum wait time to enable motor pin
-SETTLE_PAD = 0.050              # Wall-clock pad after a correction completes
 
 def rail_center(position_min, position_max):
     return (position_min + position_max) / 2.0
@@ -383,14 +382,10 @@ class StepperManualMove:
             return
         name = mcu_stepper.get_name()
         mcu_id, axis_idx, motor_idx = self.toolhead.get_motor_binding(name)
-        reactor = self.printer.get_reactor()
-        start = reactor.monotonic()
-        duration = self.toolhead.submit_correction(
+        self.toolhead.submit_correction(
             mcu_id, axis_idx, motor_idx, segments,
             self.travel_speed, self.travel_accel)
-        deadline = start + duration + SETTLE_PAD
-        while reactor.monotonic() < deadline:
-            reactor.pause(reactor.monotonic() + 0.01)
+        self.toolhead.wait_moves()
 
 
 # Base helper class for bulk sensors readings that measure the degree

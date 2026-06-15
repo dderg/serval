@@ -423,35 +423,13 @@ class MotionBridgeWrapper:
             axis, direction, speed_mm_s, max_travel_mm, endstop_id, endstop_mcu
         )
 
-    def adjust_motor(
-        self,
-        mcu_id,
-        axis_idx,
-        motor_idx,
-        delta_mm,
-        speed,
-        accel,
-        start_print_time,
-    ):
+    def adjust_motor(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
         return self._bridge.adjust_motor(
-            mcu_id,
-            axis_idx,
-            motor_idx,
-            delta_mm,
-            speed,
-            accel,
-            float(start_print_time),
+            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
         )
 
     def submit_correction_sequence(
-        self,
-        mcu_id,
-        axis_idx,
-        motor_idx,
-        segments,
-        speed,
-        accel,
-        start_print_time,
+        self, mcu_id, axis_idx, motor_idx, segments, speed, accel
     ):
         return self._bridge.submit_correction_sequence(
             mcu_id,
@@ -460,7 +438,6 @@ class MotionBridgeWrapper:
             [float(s) for s in segments],
             speed,
             accel,
-            float(start_print_time),
         )
 
     def home_axis_poll(self):

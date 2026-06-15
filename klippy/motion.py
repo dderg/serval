@@ -238,31 +238,18 @@ class Motion:
         self.move(curpos, speed)
         self.printer.send_event("toolhead:manual_move")
 
-    def _stream_correction_on_timeline(self, submit_at):
-        self.wait_moves()
-        now = self.reactor.monotonic()
-        last_move_time = self.get_last_move_time()
-        est = self.mcu.estimated_print_time(now)
-        duration = submit_at(last_move_time)
-        self.dwell(duration)
-        return (last_move_time - est) + duration
-
     def submit_correction(
         self, mcu_id, axis_idx, motor_idx, segments, speed, accel
     ):
-        return self._stream_correction_on_timeline(
-            lambda start: self.bridge.submit_correction_sequence(
-                mcu_id, axis_idx, motor_idx, segments, speed, accel, start
-            )
+        return self.bridge.submit_correction_sequence(
+            mcu_id, axis_idx, motor_idx, segments, speed, accel
         )
 
     def submit_motor_adjust(
         self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
     ):
-        return self._stream_correction_on_timeline(
-            lambda start: self.bridge.adjust_motor(
-                mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, start
-            )
+        return self.bridge.adjust_motor(
+            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
         )
 
     def set_extruder(self, extruder, extrude_pos):

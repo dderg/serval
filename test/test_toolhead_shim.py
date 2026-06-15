@@ -138,14 +138,7 @@ class _RecordingBridge:
         self.dwells.append(delay)
 
     def submit_correction_sequence(
-        self,
-        mcu_id,
-        axis_idx,
-        motor_idx,
-        segments,
-        speed,
-        accel,
-        start_print_time,
+        self, mcu_id, axis_idx, motor_idx, segments, speed, accel
     ):
         self.last_call = dict(
             kind="correction",
@@ -155,20 +148,10 @@ class _RecordingBridge:
             segments=list(segments),
             speed=speed,
             accel=accel,
-            start_print_time=start_print_time,
         )
         return self._duration
 
-    def adjust_motor(
-        self,
-        mcu_id,
-        axis_idx,
-        motor_idx,
-        delta_mm,
-        speed,
-        accel,
-        start_print_time,
-    ):
+    def adjust_motor(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
         self.last_call = dict(
             kind="adjust",
             mcu_id=mcu_id,
@@ -177,7 +160,6 @@ class _RecordingBridge:
             delta_mm=delta_mm,
             speed=speed,
             accel=accel,
-            start_print_time=start_print_time,
         )
         return self._duration
 
@@ -210,36 +192,23 @@ def test_get_last_move_time_uses_motion_lead():
     assert th.get_last_move_time() == pytest.approx(101.5)
 
 
-def test_submit_correction_anchors_on_timeline_and_advances_pending():
+def test_submit_correction_is_a_plain_async_forward():
     th = _make_correction_toolhead(0.6)
-    # idle: glmt = est(101.0) + lead(0.25) = 101.25
-    wait_s = th.submit_correction(7, 1, 0, [0.3, -0.3], 80.0, 5000.0)
+    dur = th.submit_correction(7, 1, 0, [0.3, -0.3], 80.0, 5000.0)
     call = th.bridge.last_call
     assert call["kind"] == "correction"
-    assert (
-        call["mcu_id"] == 7 and call["axis_idx"] == 1 and call["motor_idx"] == 0
-    )
-    assert call["start_print_time"] == pytest.approx(101.25)
-    # timeline grounded before anchoring so the buzz starts near real-now
-    assert th.bridge.waits == 1
-    # buzz time reserved as a real engine dwell, not a phantom pending poke
-    assert th.bridge.dwells == [pytest.approx(0.6)]
-    # dwell bumps pending: max(pending 0, est 101) + duration 0.6 = 101.6
-    assert th._mcu_pending_end_time == pytest.approx(101.6)
-    # caller wait = (glmt - est) + duration = 0.25 + 0.6 = 0.85
-    assert wait_s == pytest.approx(0.85)
+    assert (call["mcu_id"], call["axis_idx"], call["motor_idx"]) == (7, 1, 0)
+    assert call["segments"] == [0.3, -0.3]
+    assert dur == pytest.approx(0.6)
+    assert th.bridge.waits == 0 and th.bridge.dwells == []
 
 
-def test_submit_motor_adjust_anchors_on_timeline_and_advances_pending():
+def test_submit_motor_adjust_is_a_plain_async_forward():
     th = _make_correction_toolhead(0.6)
-    wait_s = th.submit_motor_adjust(2, 0, 1, 0.05, 5.0, 100.0)
+    dur = th.submit_motor_adjust(2, 0, 1, 0.05, 5.0, 100.0)
     call = th.bridge.last_call
     assert call["kind"] == "adjust"
-    assert (
-        call["mcu_id"] == 2 and call["axis_idx"] == 0 and call["motor_idx"] == 1
-    )
+    assert (call["mcu_id"], call["axis_idx"], call["motor_idx"]) == (2, 0, 1)
     assert call["delta_mm"] == pytest.approx(0.05)
-    assert call["start_print_time"] == pytest.approx(101.25)
-    assert th.bridge.dwells == [pytest.approx(0.6)]
-    assert th._mcu_pending_end_time == pytest.approx(101.6)
-    assert wait_s == pytest.approx(0.85)
+    assert dur == pytest.approx(0.6)
+    assert th.bridge.waits == 0 and th.bridge.dwells == []
