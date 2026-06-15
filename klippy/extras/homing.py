@@ -3,6 +3,7 @@ import logging
 
 from klippy import structured_log
 from klippy.bridge_endstop import AXIS_ENDSTOP_IDS, BridgeEndstop
+from klippy.extras.danger_options import get_danger_options
 
 HOMING_POLL_PERIOD = 0.001
 TRIP_DEADLINE_MARGIN = 5.0
@@ -75,6 +76,97 @@ def _homed_axis_position(provider, axis, trip_pos, final_pos, trigger_height):
         if measured is not None:
             return measured
     return trigger_height + (final_pos[axis] - trip_pos[axis])
+
+
+def _commit_and_seed(
+    toolhead,
+    bridge,
+    axis,
+    direction,
+    hi,
+    trip_pos,
+    final_pos,
+    trigger_height,
+    provider,
+    servo_handle,
+):
+    overshoot = final_pos[axis] - trip_pos[axis]
+    newpos = list(toolhead.get_position())
+    newpos[axis] = _homed_axis_position(
+        provider, axis, trip_pos, final_pos, trigger_height
+    )
+    toolhead.set_position(newpos, homing_axes=[axis])
+    structured_log.event(
+        "homing",
+        "axis_homed",
+        msg="homing: %s trigger=%.4f overshoot=%+.4f set %s=%.4f"
+        % ("XYZ"[axis], trigger_height, overshoot, "XYZ"[axis], newpos[axis]),
+        axis="XYZ"[axis],
+        trigger_height=trigger_height,
+        overshoot=overshoot,
+        homed_position=newpos[axis],
+    )
+    if hi.retract_dist:
+        retractpos = list(toolhead.get_position())
+        retractpos[axis] -= direction * hi.retract_dist + overshoot
+        toolhead.move(retractpos, hi.retract_speed)
+        toolhead.wait_moves()
+    if servo_handle is not None:
+        bridge.finalize_homed_axis(
+            servo_handle, axis, toolhead.get_position()[axis]
+        )
+
+
+def _run_homing_attempts(
+    gcmd,
+    toolhead,
+    axis,
+    direction,
+    hi,
+    speed,
+    first_max_travel,
+    tolerance,
+    approach,
+):
+    start_pos = toolhead.get_position()
+    trip_pos, final_pos = approach(speed, first_max_travel)
+    traveled = abs(trip_pos[axis] - start_pos[axis])
+    needs_rehome = _trigger_too_early(traveled, hi.min_home_dist, tolerance)
+    structured_log.event(
+        "homing",
+        "needs_rehome",
+        msg="homing: %s needs rehome: %s (traveled=%.4f min_home_dist=%.4f)"
+        % ("XYZ"[axis], needs_rehome, traveled, hi.min_home_dist),
+        axis="XYZ"[axis],
+        needs_rehome=needs_rehome,
+        traveled=traveled,
+        min_home_dist=hi.min_home_dist,
+    )
+    if not needs_rehome:
+        return trip_pos, final_pos
+    haltpos = list(toolhead.get_position())
+    haltpos[axis] = final_pos[axis]
+    toolhead.set_position(haltpos, homing_axes=[axis])
+    backoff = list(toolhead.get_position())
+    backoff[axis] = trip_pos[axis] - direction * hi.min_home_dist
+    toolhead.move(backoff, hi.retract_speed)
+    toolhead.wait_moves()
+    start_pos = toolhead.get_position()
+    trip_pos, final_pos = approach(speed, 2.0 * hi.min_home_dist)
+    traveled = abs(trip_pos[axis] - start_pos[axis])
+    if _trigger_too_early(traveled, hi.min_home_dist, tolerance):
+        raise gcmd.error(
+            "%s early homing trigger: endstop tripped after only %.2fmm on "
+            "re-approach (min_home_dist %.2fmm) — false trigger or "
+            "stuck/miswired endstop" % ("XYZ"[axis], traveled, hi.min_home_dist)
+        )
+    return trip_pos, final_pos
+
+
+def _trigger_too_early(traveled, min_home_dist, tolerance):
+    if min_home_dist <= 0.0:
+        return False
+    return traveled < min_home_dist and (min_home_dist - traveled) >= tolerance
 
 
 def _verify_latched_trip(gcmd, axis, endstop, doorbell_clock):
@@ -231,6 +323,41 @@ class Homing:
             gcmd, toolhead, bridge, kin, axis, entry, speed, max_travel
         )
 
+    def _guarded_approach(
+        self,
+        gcmd,
+        toolhead,
+        bridge,
+        axis,
+        direction,
+        speed,
+        max_travel,
+        entry,
+        stepper_enable,
+        rail,
+        servo_handle,
+        servo_limits,
+    ):
+        return _run_servo_guarded_trip(
+            gcmd,
+            bridge,
+            axis,
+            stepper_enable,
+            rail,
+            servo_handle,
+            servo_limits,
+            lambda: self.trip_move(
+                gcmd,
+                toolhead,
+                bridge,
+                axis,
+                direction,
+                speed,
+                max_travel,
+                entry,
+            ),
+        )
+
     def _home_axis(
         self,
         gcmd,
@@ -277,57 +404,48 @@ class Homing:
 
         self._set_homing_current(toolhead, rail, pre_homing=True)
         try:
-            trip_pos, final_pos = _run_servo_guarded_trip(
-                gcmd,
-                bridge,
-                axis,
-                stepper_enable,
-                rail,
-                servo_handle,
-                servo_limits,
-                lambda: self.trip_move(
+            provider = entry["provider"]
+            tolerance = get_danger_options().homing_elapsed_distance_tolerance
+
+            def approach(spd, mt):
+                return self._guarded_approach(
                     gcmd,
                     toolhead,
                     bridge,
                     axis,
                     direction,
-                    speed,
-                    max_travel,
+                    spd,
+                    mt,
                     entry,
-                ),
-            )
-
-            overshoot = final_pos[axis] - trip_pos[axis]
-            newpos = list(toolhead.get_position())
-            newpos[axis] = _homed_axis_position(
-                entry["provider"], axis, trip_pos, final_pos, trigger_height
-            )
-            toolhead.set_position(newpos, homing_axes=[axis])
-            structured_log.event(
-                "homing",
-                "axis_homed",
-                msg="homing: %s trigger=%.4f overshoot=%+.4f set %s=%.4f"
-                % (
-                    "XYZ"[axis],
-                    trigger_height,
-                    overshoot,
-                    "XYZ"[axis],
-                    newpos[axis],
-                ),
-                axis="XYZ"[axis],
-                trigger_height=trigger_height,
-                overshoot=overshoot,
-                homed_position=newpos[axis],
-            )
-            if hi.retract_dist:
-                retractpos = list(toolhead.get_position())
-                retractpos[axis] -= direction * hi.retract_dist + overshoot
-                toolhead.move(retractpos, hi.retract_speed)
-                toolhead.wait_moves()
-            if servo_handle is not None:
-                bridge.finalize_homed_axis(
-                    servo_handle, axis, toolhead.get_position()[axis]
+                    stepper_enable,
+                    rail,
+                    servo_handle,
+                    servo_limits,
                 )
+
+            trip_pos, final_pos = _run_homing_attempts(
+                gcmd,
+                toolhead,
+                axis,
+                direction,
+                hi,
+                speed,
+                max_travel,
+                tolerance,
+                approach,
+            )
+            _commit_and_seed(
+                toolhead,
+                bridge,
+                axis,
+                direction,
+                hi,
+                trip_pos,
+                final_pos,
+                trigger_height,
+                provider,
+                servo_handle,
+            )
             _check_servo_drive_fault(gcmd, bridge, axis, servo_handle)
         except BaseException:
             try:
@@ -422,9 +540,6 @@ class Homing:
                 provider.trip_move_end(entry)
         trip_pos, final_pos, trip_clock = result
         _verify_latched_trip(gcmd, axis, endstop, trip_clock)
-        # TODO: guard a still-triggered endstop on the second home after
-        # retract (where zero movement is the real stuck/miswired fault) once
-        # second-approach homing lands; the first approach may insta-trip.
         return trip_pos, final_pos
 
 
