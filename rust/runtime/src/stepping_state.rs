@@ -26,6 +26,7 @@ pub enum StepMode {
 pub struct StepperRef {
     pub stepper_oid: u8,
     pub position_count: AtomicI32,
+    pub overlay_step_frame: AtomicI32,
     /// OID of `command_config_spi` for this stepper's TMC driver.
     /// `None` means Pulse-only (no SPI traffic for this stepper).
     pub tmc_cs_oid: Option<u8>,
@@ -41,6 +42,7 @@ impl StepperRef {
         Self {
             stepper_oid,
             position_count: AtomicI32::new(0),
+            overlay_step_frame: AtomicI32::new(0),
             tmc_cs_oid,
             last_coil_A: AtomicI16::new(0),
             last_coil_B: AtomicI16::new(0),

@@ -210,7 +210,7 @@ fn drain_through_piece(
 }
 
 #[test]
-fn overlay_piece_does_not_advance_p_prev() {
+fn overlay_uses_own_step_frame_not_axis_frame() {
     let (mut engine, mut storage) = tickable_z_engine();
     let mut q = StepQueue::new();
     let mut qs: [*mut StepQueue; MAX_AXES] = [core::ptr::null_mut(); MAX_AXES];
@@ -229,6 +229,7 @@ fn overlay_piece_does_not_advance_p_prev() {
         (p_after_normal - 0.0125).abs() < 1e-4,
         "normal piece must advance p_prev"
     );
+    let axis_frame_after_normal = engine.stepping_axes[2].as_ref().unwrap().last_step_count;
     let stepper1_after_normal = engine.stepping_axes[2].as_ref().unwrap().steppers[1]
         .position_count
         .load(Ordering::Acquire);
@@ -236,7 +237,7 @@ fn overlay_piece_does_not_advance_p_prev() {
     let overlay_start = normal_start + 200 * TICK_CYCLES;
     let overlay = PieceEntry {
         start_time: overlay_start,
-        coeffs: [0.0125, 0.0125, 0.015, 0.015],
+        coeffs: [0.0, 0.01, 0.01, 0.01],
         duration: 0.01,
         motor_mask: 0b0000_0010,
         _reserved: [0; 3],
@@ -245,6 +246,11 @@ fn overlay_piece_does_not_advance_p_prev() {
     drain_through_piece(&mut engine, &shared, &mut storage, &mut q, overlay_start);
 
     assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+    assert_eq!(
+        engine.stepping_axes[2].as_ref().unwrap().last_step_count,
+        axis_frame_after_normal,
+        "overlay piece must NOT perturb the axis curve frame"
+    );
     assert_eq!(
         engine.motor_state(2).unwrap().0,
         p_after_normal,

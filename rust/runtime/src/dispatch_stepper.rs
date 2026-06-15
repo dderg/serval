@@ -185,7 +185,30 @@ fn dispatch_pulse(
         }
     };
 
-    let prev_step_count = axis.last_step_count;
+    let overlay_motor_idx: Option<usize> = if motor_mask == 0 {
+        None
+    } else {
+        let idx = (stepper_sel - 1) as usize;
+        if axis.steppers.get(idx).is_none() {
+            raise_multi_motor_mask(shared, axis_idx, motor_mask);
+            return;
+        }
+        Some(idx)
+    };
+    let load_step_frame = |axis: &AxisConfig| -> i32 {
+        match overlay_motor_idx.and_then(|idx| axis.steppers.get(idx)) {
+            None => axis.last_step_count,
+            Some(stepper) => stepper.overlay_step_frame.load(Ordering::Acquire),
+        }
+    };
+    let store_step_frame = |axis: &mut AxisConfig, v: i32| {
+        match overlay_motor_idx.and_then(|idx| axis.steppers.get(idx)) {
+            None => axis.last_step_count = v,
+            Some(stepper) => stepper.overlay_step_frame.store(v, Ordering::Release),
+        }
+    };
+
+    let prev_step_count = load_step_frame(axis);
     #[allow(clippy::cast_possible_truncation)]
     let target_step_count = libm::roundf(p_end / microstep_distance) as i32;
     let signed_steps = target_step_count.wrapping_sub(prev_step_count);
@@ -194,7 +217,7 @@ fn dispatch_pulse(
             .isr_last_p_end_bits
             .store(p_end.to_bits(), Ordering::Relaxed);
     }
-    axis.last_step_count = target_step_count;
+    store_step_frame(axis, target_step_count);
 
     if signed_steps == 0 {
         bump_relaxed(&shared.isr_pulse_zero_step_count);
@@ -221,7 +244,7 @@ fn dispatch_pulse(
             );
         }
         bump_relaxed(&shared.isr_overrun_count);
-        axis.last_step_count = prev_step_count;
+        store_step_frame(axis, prev_step_count);
         capture_steps_fault_context(
             axis_idx,
             p_end,
@@ -283,7 +306,7 @@ fn dispatch_pulse(
                 }
             }
             raise_step_queue_overflow(shared, axis_idx);
-            axis.last_step_count = prev_step_count + committed_delta;
+            store_step_frame(axis, prev_step_count + committed_delta);
             return;
         }
         steps_committed += 1;

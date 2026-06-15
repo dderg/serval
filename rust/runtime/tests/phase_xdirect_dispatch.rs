@@ -15,6 +15,7 @@ fn make_phase_stepper(stepper_oid: u8, tmc_cs_oid: u8) -> StepperRef {
     StepperRef {
         stepper_oid,
         position_count: AtomicI32::new(0),
+        overlay_step_frame: AtomicI32::new(0),
         tmc_cs_oid: Some(tmc_cs_oid),
         last_coil_A: AtomicI16::new(0),
         last_coil_B: AtomicI16::new(0),
@@ -145,6 +146,7 @@ fn phase_dispatch_no_capture_for_pulse_only_stepper() {
     let stepper = StepperRef {
         stepper_oid: 0,
         position_count: AtomicI32::new(0),
+        overlay_step_frame: AtomicI32::new(0),
         tmc_cs_oid: None,
         last_coil_A: AtomicI16::new(0),
         last_coil_B: AtomicI16::new(0),

@@ -11,6 +11,7 @@ fn make_stepper() -> StepperRef {
     StepperRef {
         stepper_oid: 0,
         position_count: AtomicI32::new(0),
+        overlay_step_frame: AtomicI32::new(0),
         tmc_cs_oid: None,
         last_coil_A: AtomicI16::new(0),
         last_coil_B: AtomicI16::new(0),
