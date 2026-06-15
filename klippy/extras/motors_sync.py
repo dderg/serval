@@ -382,9 +382,10 @@ class StepperManualMove:
             return
         name = mcu_stepper.get_name()
         mcu_id, axis_idx, motor_idx = self.toolhead.get_motor_binding(name)
-        self.toolhead.submit_correction(
-            mcu_id, axis_idx, motor_idx, segments,
-            self.travel_speed, self.travel_accel)
+        for dist in segments:
+            self.toolhead.submit_nudge(
+                mcu_id, axis_idx, motor_idx, dist,
+                self.travel_speed, self.travel_accel)
         self.toolhead.wait_moves()
 
 
