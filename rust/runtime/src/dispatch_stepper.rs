@@ -201,11 +201,11 @@ fn dispatch_pulse(
             Some(stepper) => stepper.overlay_step_frame.load(Ordering::Acquire),
         }
     };
-    let store_step_frame = |axis: &mut AxisConfig, v: i32| {
-        match overlay_motor_idx.and_then(|idx| axis.steppers.get(idx)) {
-            None => axis.last_step_count = v,
-            Some(stepper) => stepper.overlay_step_frame.store(v, Ordering::Release),
-        }
+    let store_step_frame = |axis: &mut AxisConfig, v: i32| match overlay_motor_idx
+        .and_then(|idx| axis.steppers.get(idx))
+    {
+        None => axis.last_step_count = v,
+        Some(stepper) => stepper.overlay_step_frame.store(v, Ordering::Release),
     };
 
     let prev_step_count = load_step_frame(axis);
