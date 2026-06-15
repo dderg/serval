@@ -77,6 +77,45 @@ def _homed_axis_position(provider, axis, trip_pos, final_pos, trigger_height):
     return trigger_height + (final_pos[axis] - trip_pos[axis])
 
 
+def _commit_and_seed(
+    toolhead,
+    bridge,
+    axis,
+    direction,
+    hi,
+    trip_pos,
+    final_pos,
+    trigger_height,
+    provider,
+    servo_handle,
+):
+    overshoot = final_pos[axis] - trip_pos[axis]
+    newpos = list(toolhead.get_position())
+    newpos[axis] = _homed_axis_position(
+        provider, axis, trip_pos, final_pos, trigger_height
+    )
+    toolhead.set_position(newpos, homing_axes=[axis])
+    structured_log.event(
+        "homing",
+        "axis_homed",
+        msg="homing: %s trigger=%.4f overshoot=%+.4f set %s=%.4f"
+        % ("XYZ"[axis], trigger_height, overshoot, "XYZ"[axis], newpos[axis]),
+        axis="XYZ"[axis],
+        trigger_height=trigger_height,
+        overshoot=overshoot,
+        homed_position=newpos[axis],
+    )
+    if hi.retract_dist:
+        retractpos = list(toolhead.get_position())
+        retractpos[axis] -= direction * hi.retract_dist + overshoot
+        toolhead.move(retractpos, hi.retract_speed)
+        toolhead.wait_moves()
+    if servo_handle is not None:
+        bridge.finalize_homed_axis(
+            servo_handle, axis, toolhead.get_position()[axis]
+        )
+
+
 def _trigger_too_early(traveled, min_home_dist, tolerance):
     if min_home_dist <= 0.0:
         return False
@@ -303,37 +342,19 @@ class Homing:
                 ),
             )
 
-            overshoot = final_pos[axis] - trip_pos[axis]
-            newpos = list(toolhead.get_position())
-            newpos[axis] = _homed_axis_position(
-                entry["provider"], axis, trip_pos, final_pos, trigger_height
+            provider = entry["provider"]
+            _commit_and_seed(
+                toolhead,
+                bridge,
+                axis,
+                direction,
+                hi,
+                trip_pos,
+                final_pos,
+                trigger_height,
+                provider,
+                servo_handle,
             )
-            toolhead.set_position(newpos, homing_axes=[axis])
-            structured_log.event(
-                "homing",
-                "axis_homed",
-                msg="homing: %s trigger=%.4f overshoot=%+.4f set %s=%.4f"
-                % (
-                    "XYZ"[axis],
-                    trigger_height,
-                    overshoot,
-                    "XYZ"[axis],
-                    newpos[axis],
-                ),
-                axis="XYZ"[axis],
-                trigger_height=trigger_height,
-                overshoot=overshoot,
-                homed_position=newpos[axis],
-            )
-            if hi.retract_dist:
-                retractpos = list(toolhead.get_position())
-                retractpos[axis] -= direction * hi.retract_dist + overshoot
-                toolhead.move(retractpos, hi.retract_speed)
-                toolhead.wait_moves()
-            if servo_handle is not None:
-                bridge.finalize_homed_axis(
-                    servo_handle, axis, toolhead.get_position()[axis]
-                )
             _check_servo_drive_fault(gcmd, bridge, axis, servo_handle)
         except BaseException:
             try:
