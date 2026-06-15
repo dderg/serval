@@ -32,9 +32,8 @@ fn main() {
 
     let mut build = cc::Build::new();
     build
-        .file("csrc/libecrt.c")
+        .file("csrc/libecrt.c") // self-#defines _GNU_SOURCE on line 1, before any include
         .include("csrc")
-        .define("_GNU_SOURCE", None)
         .opt_level(2) // match the bench-proven Makefile (-O2), not cc's release -O3
         .flag("-Wall");
     for inc in soem_includes {
