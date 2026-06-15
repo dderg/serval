@@ -21,7 +21,7 @@ pub struct EcTelemetry {
 
 const _: () = assert!(
     core::mem::size_of::<EcTelemetry>() == 32,
-    "EcTelemetry layout must match ec_telemetry_t in bench/libecrt.h"
+    "EcTelemetry layout must match ec_telemetry_t in csrc/libecrt.h"
 );
 
 extern "C" {

@@ -187,7 +187,7 @@ drive being off (the stepper MCU is USB-powered).
   zero porting.
 - **Endpoint driver-comms:** the SOEM/ecrt DC loop + PDO mapping (`wkc != 3` fault
   halt), `server.rs` non-blocking discipline, `wire`/`scale`/`clock`/`ffi`,
-  `bench/libecrt.h`, stub binary, `ec-test-client`, `stub_loop` test.
+  `csrc/libecrt.h`, stub binary, `ec-test-client`, `stub_loop` test.
 - **Host bridge:** `mcu_serial_conn.rs` (UDS McuCall + heartbeat callback),
   `pump.rs` `WireSink`→`McuTransport` enum, `bridge.rs` branches (`claim_ethercat_node`,
   1 GHz clock registration, `attach_heartbeat_callback`, `ethercat_mcu_ids`),

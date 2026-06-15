@@ -9,10 +9,10 @@ license.workspace = true
 name = "ethercat_rt"
 crate-type = ["rlib"]
 
-# `hw` gates the EtherCAT FFI (`ffi` module) and the native link to libecrt/SOEM.
-# OFF by default so the pure scale/wire/curves unit tests build and run on any
-# machine (and in CI) without the Pi's C libraries. Build with `--features hw`
-# on the target host to produce the hardware endpoint binary.
+# `hw` gates the EtherCAT FFI (`ffi` module), the build.rs compile of
+# csrc/libecrt.c, and the SOEM link. OFF by default so the pure scale/wire/curves
+# unit tests build and run on any machine (and in CI) without the Pi's SOEM
+# install. Build with `--features hw` on the target host for the hardware endpoint.
 [features]
 default = []
 hw = []
@@ -42,6 +42,9 @@ libc = "0.2"                                       # raw clock_gettime(CLOCK_MON
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+
+[build-dependencies]
+cc = "1"                                            # compiles csrc/libecrt.c under `hw`
 
 [dev-dependencies]
 host-rt = { path = "../host-rt" }

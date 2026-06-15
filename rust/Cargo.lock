@@ -453,6 +453,7 @@ dependencies = [
 name = "ethercat-rt"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "host-rt",
  "libc",
  "mcu-protocol",
