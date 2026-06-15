@@ -40,10 +40,10 @@ typedef struct {
 } in_t;
 #pragma pack(pop)
 _Static_assert(sizeof(out_t) == 18,
-               "rewrite_1600_entry_table() maps 18 bytes; out_t must match "
+               "remap_volatile_rx_pdo_1600() maps 18 bytes; out_t must match "
                "field-for-field, in order");
 _Static_assert(sizeof(in_t) == 32,
-               "rewrite_1a00_entry_table() maps 32 bytes; in_t must match "
+               "remap_volatile_tx_pdo_1a00() maps 32 bytes; in_t must match "
                "field-for-field, in order");
 
 static char    IOmap[4096];
@@ -127,16 +127,33 @@ static int remap_write(uint16_t index, uint8_t sub, const void *buf, int size) {
     return 0;
 }
 
-static int point_group_1c13_at_pdo_0x1a00(void) {
-    uint8_t  no_pdos  = 0;
-    uint8_t  one_pdo  = 1;
-    uint16_t pdo_1a00 = 0x1A00;
-    if (remap_write(0x1C13, 0x00, &no_pdos,  sizeof(no_pdos))  != 0) return -1;
-    if (remap_write(0x1C13, 0x01, &pdo_1a00, sizeof(pdo_1a00)) != 0) return -1;
-    return remap_write(0x1C13, 0x00, &one_pdo, sizeof(one_pdo));
+/* Assign a single PDO to a sync-manager assignment object (1C12h RxPDOs,
+ * 1C13h TxPDOs): clear the PDO count, write the PDO index, restore the count.
+ * Group before objects is the A6-EC manual's required write order. */
+static int point_sync_manager_at_pdo(uint16_t sm_assign, uint16_t pdo) {
+    uint8_t no_pdos = 0;
+    uint8_t one_pdo = 1;
+    if (remap_write(sm_assign, 0x00, &no_pdos, sizeof(no_pdos)) != 0) return -1;
+    if (remap_write(sm_assign, 0x01, &pdo,     sizeof(pdo))     != 0) return -1;
+    return remap_write(sm_assign, 0x00, &one_pdo, sizeof(one_pdo));
 }
 
-static int rewrite_1a00_entry_table(void) {
+/* Rewrite a PDO's entry table: clear the entry count, write each COE entry,
+ * then restore the count (same group-before-objects order). */
+static int rewrite_pdo_entry_table(uint16_t pdo, const uint32_t *entries,
+                                   uint8_t count) {
+    uint8_t no_entries = 0;
+    if (remap_write(pdo, 0x00, &no_entries, sizeof(no_entries)) != 0) return -1;
+    for (uint8_t i = 0; i < count; i++) {
+        if (remap_write(pdo, (uint8_t)(i + 1), &entries[i], sizeof(entries[i])) != 0)
+            return -1;
+    }
+    return remap_write(pdo, 0x00, &count, sizeof(count));
+}
+
+/* 1B01h is a fixed TxPDO; the variable 1A00h is the only configurable one and
+ * the drive holds its mapping in RAM only. */
+static int remap_volatile_tx_pdo_1a00(void) {
     static const uint32_t entries[] = {
         TXPDO_ERROR_CODE,
         TXPDO_STATUSWORD,
@@ -149,22 +166,9 @@ static int rewrite_1a00_entry_table(void) {
         TXPDO_TP2_POS,
         TXPDO_DIGITAL_INPUTS,
     };
-    uint8_t no_entries  = 0;
-    uint8_t all_entries = sizeof(entries) / sizeof(entries[0]);
-    if (remap_write(0x1A00, 0x00, &no_entries, sizeof(no_entries)) != 0) return -1;
-    for (uint8_t i = 0; i < all_entries; i++) {
-        if (remap_write(0x1A00, (uint8_t)(i + 1), &entries[i], sizeof(entries[i])) != 0)
-            return -1;
-    }
-    return remap_write(0x1A00, 0x00, &all_entries, sizeof(all_entries));
-}
-
-/* 1B01h is a fixed TxPDO; the variable 1A00h is the only configurable one and
- * the drive holds its mapping in RAM only. Group before objects is the A6-EC
- * manual's required write order. */
-static int remap_volatile_tx_pdo_1a00(void) {
-    if (point_group_1c13_at_pdo_0x1a00() != 0) return -1;
-    return rewrite_1a00_entry_table();
+    if (point_sync_manager_at_pdo(0x1C13, 0x1A00) != 0) return -1;
+    return rewrite_pdo_entry_table(0x1A00, entries,
+                                   sizeof(entries) / sizeof(entries[0]));
 }
 
 /* If the deadline has gone stale (a blocking SDO transaction or a wait
@@ -193,16 +197,10 @@ static int rt_exchange(int64_t *toff) {
     return wkc;
 }
 
-static int point_group_1c12_at_pdo_0x1600(void) {
-    uint8_t  no_pdos  = 0;
-    uint8_t  one_pdo  = 1;
-    uint16_t pdo_1600 = 0x1600;
-    if (remap_write(0x1C12, 0x00, &no_pdos,  sizeof(no_pdos))  != 0) return -1;
-    if (remap_write(0x1C12, 0x01, &pdo_1600, sizeof(pdo_1600)) != 0) return -1;
-    return remap_write(0x1C12, 0x00, &one_pdo, sizeof(one_pdo));
-}
-
-static int rewrite_1600_entry_table(void) {
+/* The fixed RxPDO 1701h cannot carry the CiA402 feedforward offsets 60B1h /
+ * 60B2h; only the variable 1600h can, and the drive holds that mapping in
+ * RAM only. */
+static int remap_volatile_rx_pdo_1600(void) {
     static const uint32_t entries[] = {
         RXPDO_CONTROLWORD,
         RXPDO_TARGET_POSITION,
@@ -211,22 +209,9 @@ static int rewrite_1600_entry_table(void) {
         RXPDO_VELOCITY_OFFSET,
         RXPDO_TORQUE_OFFSET,
     };
-    uint8_t no_entries  = 0;
-    uint8_t all_entries = sizeof(entries) / sizeof(entries[0]);
-    if (remap_write(0x1600, 0x00, &no_entries, sizeof(no_entries)) != 0) return -1;
-    for (uint8_t i = 0; i < all_entries; i++) {
-        if (remap_write(0x1600, (uint8_t)(i + 1), &entries[i], sizeof(entries[i])) != 0)
-            return -1;
-    }
-    return remap_write(0x1600, 0x00, &all_entries, sizeof(all_entries));
-}
-
-/* The fixed RxPDO 1701h cannot carry the CiA402 feedforward offsets 60B1h /
- * 60B2h; only the variable 1600h can, and the drive holds that mapping in
- * RAM only. Group before objects is the A6-EC manual's required write order. */
-static int remap_volatile_rx_pdo_1600(void) {
-    if (point_group_1c12_at_pdo_0x1600() != 0) return -1;
-    return rewrite_1600_entry_table();
+    if (point_sync_manager_at_pdo(0x1C12, 0x1600) != 0) return -1;
+    return rewrite_pdo_entry_table(0x1600, entries,
+                                   sizeof(entries) / sizeof(entries[0]));
 }
 
 /* FF sources to "communication" (60B1h/60B2h).
@@ -336,6 +321,12 @@ int ec_rt_bringup_preop(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt
     return 0;
 }
 
+/* CiA402 fault reset (6040h bit 7) needs a rising edge: hold it low and high on
+ * alternating ~10-cycle windows so a latched fault clears within the walk loop. */
+static uint16_t fault_reset_pulse(int64_t cycle) {
+    return ((cycle / 10) % 2) ? 0x0080 : 0x0000;
+}
+
 /* Phase 2: DC config, SAFE-OP, stabilize, OP, CiA402 park. From the moment
  * SYNC0 starts here, the caller must never pause process data — every wait
  * goes through ec_rt_cycle. */
@@ -394,7 +385,7 @@ int ec_rt_bringup_finish(void) {
         uint16_t sw = g_in->statusword;
         g_out->target_position = g_in->position_actual;
         if (sw & 0x0008) {
-            g_out->controlword = ((pc / 10) % 2) ? 0x0080 : 0x0000; /* pulse fault reset */
+            g_out->controlword = fault_reset_pulse(pc);
         } else if ((sw & 0x006F) == 0x0021) {
             g_out->controlword = 0x0006;
             rt_exchange(&toff);
@@ -423,7 +414,7 @@ int ec_rt_enable(void) {
         uint16_t sw = g_in->statusword;
         g_out->target_position = g_in->position_actual;
         if (sw & 0x0008) {
-            g_out->controlword = ((pc / 10) % 2) ? 0x0080 : 0x0000; /* pulse fault reset */
+            g_out->controlword = fault_reset_pulse(pc);
         } else if ((sw & 0x004F) == 0x0040) {
             g_out->controlword = 0x0006;
         } else if ((sw & 0x006F) == 0x0021) {

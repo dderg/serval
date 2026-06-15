@@ -183,7 +183,7 @@ klippy.
 
 ### 2. Build the endpoint binaries (on the Pi)
 ```sh
-# hw endpoint — links bench/libecrt.a + SOEM. Build on the Pi (never in CI):
+# hw endpoint — build.rs compiles csrc/libecrt.c + links SOEM. On the Pi (never CI):
 make -f Makefile.kalico ethercat-endpoint-hw
 # Grant capabilities so it runs unprivileged. sudo, ONCE PER REBUILD of the binary:
 make -f Makefile.kalico setcap-ethercat   # cap_net_raw, cap_sys_nice, cap_ipc_lock
