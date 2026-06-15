@@ -117,6 +117,119 @@ fn replan_context() -> ReplanContext {
     }
 }
 
+fn emit_all_after_idle_resume(resume_target_t: f64) -> Vec<crate::ShapedSegment> {
+    let mut state = ShaperState::new(&[0.0; 3], &replan_chains());
+    let ctx_replan = replan_context();
+    let emit_chains = replan_chains();
+    let ctx_emit = emit_context_default(&emit_chains);
+
+    let m1 = linear_x_segment(0.0, 50.0, 100.0);
+    state
+        .append_and_replan(m1, &ctx_replan)
+        .expect("first move");
+    let committed_end = state.t_appended;
+    state.t_dispatched = committed_end;
+    state.t_decel_start = committed_end;
+    state.t_shaped = committed_end;
+    state.uncommitted_moves.clear();
+    state.planned_fitted.clear();
+    state.planned_meta.clear();
+    state.pending_freeze.clear();
+
+    state.advance_idle(resume_target_t);
+
+    let resumed = linear_x_segment(50.0, 100.0, 100.0);
+    state
+        .append_and_replan(resumed, &ctx_replan)
+        .expect("resumed move");
+
+    state.emit_committed(&ctx_emit).expect("emit resumed batch")
+}
+
+#[test]
+fn idle_resume_lead_is_trajectory_neutral() {
+    let small_cushion = 0.25;
+    let large_cushion = 0.95;
+
+    let base_target = 5.0;
+    let out_small = emit_all_after_idle_resume(base_target + small_cushion);
+    let out_large = emit_all_after_idle_resume(base_target + large_cushion);
+
+    let offset = large_cushion - small_cushion;
+
+    assert!(
+        !out_small.is_empty(),
+        "small-cushion resume must emit pieces"
+    );
+    assert_eq!(
+        out_small.len(),
+        out_large.len(),
+        "the resumed batch must split into the same number of pieces \
+         regardless of cushion",
+    );
+
+    for (i, (s, l)) in out_small.iter().zip(out_large.iter()).enumerate() {
+        assert!(
+            (l.t_start - (s.t_start + offset)).abs() < 1e-9,
+            "piece {i}: t_start must shift by exactly the cushion offset \
+             ({offset}); small={} large={}",
+            s.t_start,
+            l.t_start,
+        );
+        assert!(
+            (l.t_end - (s.t_end + offset)).abs() < 1e-9,
+            "piece {i}: t_end must shift by exactly the cushion offset; \
+             small={} large={}",
+            s.t_end,
+            l.t_end,
+        );
+        assert_eq!(
+            s.axes.len(),
+            l.axes.len(),
+            "piece {i}: axis count must match",
+        );
+        for (ai, (sa, la)) in s.axes.iter().zip(l.axes.iter()).enumerate() {
+            assert_eq!(
+                sa.degree(),
+                la.degree(),
+                "piece {i} axis {ai}: degree must be identical",
+            );
+            assert_eq!(
+                sa.control_points().len(),
+                la.control_points().len(),
+                "piece {i} axis {ai}: control-point count must match",
+            );
+            for (ci, (sc, lc)) in sa
+                .control_points()
+                .iter()
+                .zip(la.control_points().iter())
+                .enumerate()
+            {
+                assert!(
+                    (sc - lc).abs() <= 1e-7,
+                    "piece {i} axis {ai} cp {ci}: control point (position \
+                     geometry) must be unchanged by the cushion to within \
+                     f64 shaper round-off; small={sc} large={lc} \
+                     delta={}",
+                    (sc - lc).abs(),
+                );
+            }
+            assert_eq!(
+                sa.knots().len(),
+                la.knots().len(),
+                "piece {i} axis {ai}: knot count must match",
+            );
+            for (ki, (sk, lk)) in sa.knots().iter().zip(la.knots().iter()).enumerate() {
+                assert!(
+                    (lk - (sk + offset)).abs() < 1e-9,
+                    "piece {i} axis {ai} knot {ki}: parameter-domain knot must \
+                     shift by exactly the cushion offset; small={sk} large={lk}",
+                );
+            }
+        }
+    }
+}
+
 fn linear_x_segment(start_x: f64, end_x: f64, feedrate: f64) -> CubicSegment {
     use geometry::segment::SourceRange;
     use nurbs::VectorNurbs;
