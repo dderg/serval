@@ -2131,36 +2131,45 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel))]
-    fn adjust_motor(
+    #[pyo3(signature = (mcu_id, axis_idx, motor_mask, delta_mm, speed, accel))]
+    fn submit_nudge(
         &self,
         _py: Python<'_>,
-        mcu_handle: u32,
+        mcu_id: u32,
         axis_idx: u8,
-        motor_idx: u8,
+        motor_mask: u8,
         delta_mm: f64,
         speed: f64,
         accel: f64,
     ) -> PyResult<f64> {
-        let pieces = crate::correction::plan_correction_profile(delta_mm, speed, accel)
+        let _ = mcu_id;
+        if runtime::piece_ring::stepper_sel_from_mask(motor_mask).is_err() {
+            return Err(PyRuntimeError::new_err(format!(
+                "submit_nudge: multi-bit motor_mask {motor_mask:#010b} not supported"
+            )));
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        {
+            let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            let planner = guard.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err("planner not initialized — call init_planner first")
+            })?;
+            planner
+                .submit_nudge(crate::planner::NudgeParams {
+                    axis: axis_idx,
+                    motor_mask,
+                    delta_mm,
+                    speed,
+                    accel,
+                    notify: tx,
+                })
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
+        rx.recv()
+            .map_err(|_| PyRuntimeError::new_err("nudge notify dropped"))?
             .map_err(PyRuntimeError::new_err)?;
-        self.pump_correction_overlay(mcu_handle, axis_idx, motor_idx, &pieces)
-    }
-
-    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, segments, speed, accel))]
-    fn submit_correction_sequence(
-        &self,
-        _py: Python<'_>,
-        mcu_handle: u32,
-        axis_idx: u8,
-        motor_idx: u8,
-        segments: Vec<f64>,
-        speed: f64,
-        accel: f64,
-    ) -> PyResult<f64> {
-        let pieces = crate::correction::plan_correction_sequence(&segments, speed, accel)
-            .map_err(PyRuntimeError::new_err)?;
-        self.pump_correction_overlay(mcu_handle, axis_idx, motor_idx, &pieces)
+        let (accel_t, cruise_t, _v) = crate::nudge::calc_move_time(delta_mm, speed, accel);
+        Ok(accel_t + cruise_t + accel_t)
     }
 
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {
@@ -4135,61 +4144,6 @@ impl PyMotionBridge {
 }
 
 impl PyMotionBridge {
-    fn pump_correction_overlay(
-        &self,
-        mcu_handle: u32,
-        axis_idx: u8,
-        motor_idx: u8,
-        pieces: &[crate::correction::ProfilePiece],
-    ) -> PyResult<f64> {
-        if usize::from(motor_idx) >= runtime::stepping_state::MAX_STEPPERS_PER_AXIS {
-            return Err(PyRuntimeError::new_err(format!(
-                "adjust_motor: motor_idx {motor_idx} out of range (max {})",
-                runtime::stepping_state::MAX_STEPPERS_PER_AXIS
-            )));
-        }
-        let motor_mask: u8 = 1u8 << motor_idx;
-        let handle = mcu_handle_from_raw(mcu_handle);
-
-        let entries = {
-            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            let start_host_secs = router.host_now_secs() + crate::anchor::DEFAULT_LEAD_SECS;
-            crate::correction::to_overlay_piece_entries(
-                pieces,
-                |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
-                start_host_secs,
-                motor_mask,
-            )
-        };
-        if entries.iter().any(|(e, _)| e.start_time == 0) {
-            return Err(PyRuntimeError::new_err(format!(
-                "adjust_motor: clock unsynced for mcu {mcu_handle}"
-            )));
-        }
-        let total_duration = pieces.iter().map(|p| p.duration).sum::<f64>();
-
-        let msg = crate::pump::EnqueueMsg {
-            key: crate::pump::AxisKey {
-                mcu_id: mcu_handle,
-                axis: axis_idx,
-            },
-            pieces: entries,
-            fresh_stream: true,
-            lead_secs: crate::anchor::DEFAULT_LEAD_SECS,
-        };
-        {
-            let guard = self.pump_tx.lock().unwrap_or_else(|p| p.into_inner());
-            let tx = guard
-                .as_ref()
-                .ok_or_else(|| PyRuntimeError::new_err("adjust_motor: pump not running"))?;
-            tx.send(crate::pump::PumpMsg::Enqueue(msg))
-                .map_err(|_| PyRuntimeError::new_err("adjust_motor: pump channel closed"))?;
-        }
-        Ok(total_duration)
-    }
-}
-
-impl PyMotionBridge {
     fn finish_homing(&self) {
         *self
             .active_drip_cohort
@@ -4831,3 +4785,13 @@ mod ethercat_endpoint_tests {
 
 #[cfg(test)]
 mod kinematics_calls_tests;
+
+#[cfg(test)]
+mod submit_nudge_validation_tests {
+    #[test]
+    fn multi_bit_mask_is_rejected_by_stepper_sel() {
+        assert!(runtime::piece_ring::stepper_sel_from_mask(0b0000_0011).is_err());
+        assert!(runtime::piece_ring::stepper_sel_from_mask(0b0000_0010).is_ok());
+        assert!(runtime::piece_ring::stepper_sel_from_mask(0).is_ok());
+    }
+}
