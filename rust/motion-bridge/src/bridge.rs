@@ -2149,52 +2149,36 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel, start_print_time))]
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel))]
     fn adjust_motor(
         &self,
-        py: Python<'_>,
+        _py: Python<'_>,
         mcu_handle: u32,
         axis_idx: u8,
         motor_idx: u8,
         delta_mm: f64,
         speed: f64,
         accel: f64,
-        start_print_time: f64,
     ) -> PyResult<f64> {
         let pieces = crate::correction::plan_correction_profile(delta_mm, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
-        self.stream_correction_entries(
-            py,
-            mcu_handle,
-            axis_idx,
-            motor_idx,
-            &pieces,
-            start_print_time,
-        )
+        self.pump_correction_overlay(mcu_handle, axis_idx, motor_idx, &pieces)
     }
 
-    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, segments, speed, accel, start_print_time))]
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, segments, speed, accel))]
     fn submit_correction_sequence(
         &self,
-        py: Python<'_>,
+        _py: Python<'_>,
         mcu_handle: u32,
         axis_idx: u8,
         motor_idx: u8,
         segments: Vec<f64>,
         speed: f64,
         accel: f64,
-        start_print_time: f64,
     ) -> PyResult<f64> {
         let pieces = crate::correction::plan_correction_sequence(&segments, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
-        self.stream_correction_entries(
-            py,
-            mcu_handle,
-            axis_idx,
-            motor_idx,
-            &pieces,
-            start_print_time,
-        )
+        self.pump_correction_overlay(mcu_handle, axis_idx, motor_idx, &pieces)
     }
 
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {
@@ -4178,6 +4162,60 @@ impl PyMotionBridge {
 }
 
 impl PyMotionBridge {
+    fn pump_correction_overlay(
+        &self,
+        mcu_handle: u32,
+        axis_idx: u8,
+        motor_idx: u8,
+        pieces: &[crate::correction::ProfilePiece],
+    ) -> PyResult<f64> {
+        if usize::from(motor_idx) >= runtime::stepping_state::MAX_STEPPERS_PER_AXIS {
+            return Err(PyRuntimeError::new_err(format!(
+                "adjust_motor: motor_idx {motor_idx} out of range (max {})",
+                runtime::stepping_state::MAX_STEPPERS_PER_AXIS
+            )));
+        }
+        let motor_mask: u8 = 1u8 << motor_idx;
+        let handle = mcu_handle_from_raw(mcu_handle);
+
+        let entries = {
+            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            let start_host_secs = router.host_now_secs() + crate::anchor::DEFAULT_LEAD_SECS;
+            crate::correction::to_overlay_piece_entries(
+                pieces,
+                |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
+                start_host_secs,
+                motor_mask,
+            )
+        };
+        if entries.iter().any(|(e, _)| e.start_time == 0) {
+            return Err(PyRuntimeError::new_err(format!(
+                "adjust_motor: clock unsynced for mcu {mcu_handle}"
+            )));
+        }
+        let total_duration = pieces.iter().map(|p| p.duration).sum::<f64>();
+
+        let msg = crate::pump::EnqueueMsg {
+            key: crate::pump::AxisKey {
+                mcu_id: mcu_handle,
+                axis: axis_idx,
+            },
+            pieces: entries,
+            fresh_stream: true,
+            lead_secs: crate::anchor::DEFAULT_LEAD_SECS,
+        };
+        {
+            let guard = self.pump_tx.lock().unwrap_or_else(|p| p.into_inner());
+            let tx = guard
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("adjust_motor: pump not running"))?;
+            tx.send(crate::pump::PumpMsg::Enqueue(msg))
+                .map_err(|_| PyRuntimeError::new_err("adjust_motor: pump channel closed"))?;
+        }
+        Ok(total_duration)
+    }
+
+    #[allow(dead_code)]
     fn stream_correction_entries(
         &self,
         py: Python<'_>,

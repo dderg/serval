@@ -174,6 +174,36 @@ pub fn to_piece_entries(
         .collect()
 }
 
+pub fn to_overlay_piece_entries(
+    pieces: &[ProfilePiece],
+    project: impl Fn(f64) -> u64,
+    start_host_secs: f64,
+    motor_mask: u8,
+) -> Vec<(runtime::piece_ring::PieceEntry, f64)> {
+    let mut t = start_host_secs;
+    pieces
+        .iter()
+        .map(|p| {
+            #[allow(clippy::cast_possible_truncation)]
+            let entry = runtime::piece_ring::PieceEntry {
+                start_time: project(t),
+                coeffs: [
+                    p.coeffs[0] as f32,
+                    p.coeffs[1] as f32,
+                    p.coeffs[2] as f32,
+                    p.coeffs[3] as f32,
+                ],
+                duration: p.duration as f32,
+                motor_mask,
+                _reserved: [0; 3],
+            };
+            let host_secs = t;
+            t += p.duration;
+            (entry, host_secs)
+        })
+        .collect()
+}
+
 pub fn chunk_correction_messages(
     axis_idx: u8,
     motor_idx: u8,

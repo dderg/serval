@@ -145,6 +145,28 @@ fn sequence_drops_subepsilon_and_rejects_all_empty() {
 }
 
 #[test]
+fn overlay_piece_entries_stamp_mask_and_monotonic_start_times() {
+    let pieces = plan_correction_profile(2.0, 5.0, 100.0).unwrap();
+    let mask = 1u8 << 3;
+    let entries = to_overlay_piece_entries(&pieces, |secs| (secs * 1e6) as u64, 7.0, mask);
+    assert_eq!(entries.len(), pieces.len());
+    let mut t = 7.0_f64;
+    let mut prev_start = 0u64;
+    for ((entry, host_secs), piece) in entries.iter().zip(&pieces) {
+        assert_eq!(entry.motor_mask, mask);
+        assert_eq!(entry.start_time, (t * 1e6) as u64);
+        assert!((host_secs - t).abs() < 1e-12);
+        assert!((f64::from(entry.duration) - piece.duration).abs() < 1e-6);
+        assert!(
+            entry.start_time >= prev_start,
+            "start_times must be monotonic"
+        );
+        prev_start = entry.start_time;
+        t += piece.duration;
+    }
+}
+
+#[test]
 fn piece_entries_anchor_at_explicit_start() {
     let pieces = vec![
         ProfilePiece {
