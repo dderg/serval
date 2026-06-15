@@ -468,10 +468,12 @@ impl Engine {
                 let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
                     continue;
                 };
+                let active_mask = axis.ring.peek(storage).map_or(0, |p| p.motor_mask);
                 let queue_ptr = get_queue(i);
                 dispatch_axis(
                     i,
                     axis,
+                    active_mask,
                     queue_ptr,
                     shared,
                     p_end,

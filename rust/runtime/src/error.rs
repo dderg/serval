@@ -50,6 +50,7 @@ pub const KALICO_ERR_TRACE_OVERFLOW: i32 = -133;
 pub const KALICO_ERR_STREAM_STATE_VIOLATION: i32 = -140;
 pub const KALICO_ERR_SEGMENT_ID_NON_MONOTONIC: i32 = -141;
 pub const KALICO_ERR_STREAM_HALTED: i32 = -142;
+pub const KALICO_ERR_MULTI_MOTOR_MASK: i32 = -143;
 
 pub const KALICO_ERR_T_START_IN_PAST: i32 = -150;
 pub const KALICO_ERR_T_END_BEFORE_T_START: i32 = -151;
@@ -145,6 +146,7 @@ pub enum FaultCode {
 
     StreamStateViolation = -140,
     SegmentIdNonMonotonic = -141,
+    MultiMotorMask = -143,
 
     TStartInPast = -150,
     TEndBeforeTStart = -151,
@@ -266,6 +268,7 @@ impl FaultCode {
             -133 => Self::TraceOverflow,
             -140 => Self::StreamStateViolation,
             -141 => Self::SegmentIdNonMonotonic,
+            -143 => Self::MultiMotorMask,
             -150 => Self::TStartInPast,
             -151 => Self::TEndBeforeTStart,
             -152 => Self::SegmentTooShort,
@@ -346,6 +349,7 @@ impl FaultCode {
             Self::TraceOverflow => "TraceOverflow",
             Self::StreamStateViolation => "StreamStateViolation",
             Self::SegmentIdNonMonotonic => "SegmentIdNonMonotonic",
+            Self::MultiMotorMask => "MultiMotorMask",
             Self::TStartInPast => "TStartInPast",
             Self::TEndBeforeTStart => "TEndBeforeTStart",
             Self::SegmentTooShort => "SegmentTooShort",

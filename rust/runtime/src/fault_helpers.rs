@@ -166,6 +166,23 @@ pub fn raise_steps_per_sample_exceeded(shared: &SharedState, axis_idx: usize, ab
     emit_fault_log(FaultCode::StepsPerSampleExceeded, detail);
 }
 
+/// Latch a `MultiMotorMask` fault — a main-ring piece carried a `motor_mask`
+/// with more than one bit set, which `dispatch_pulse` cannot map to a single
+/// `stepper_sel`.
+///
+/// `fault_detail` encoding:
+/// - bits 16..24: `axis_idx`
+/// - bits  0..8:  `mask`
+#[inline]
+pub fn raise_multi_motor_mask(shared: &SharedState, axis_idx: usize, mask: u8) {
+    let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mask);
+    shared.fault_detail.store(detail, Ordering::Release);
+    shared
+        .last_error
+        .store(FaultCode::MultiMotorMask.as_i32(), Ordering::Release);
+    emit_fault_log(FaultCode::MultiMotorMask, detail);
+}
+
 /// Latch an `UnknownStepMode` fault. Detail: `((axis_idx & 0xFF) << 16) | (mode & 0xFF)`.
 #[inline]
 pub fn raise_unknown_step_mode(shared: &SharedState, axis_idx: usize, mode: u8) {

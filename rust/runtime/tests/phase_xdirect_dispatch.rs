@@ -66,6 +66,7 @@ fn phase_dispatch_records_correct_coils_for_motor_0() {
     dispatch_axis(
         axis_idx,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         p_end,
@@ -110,6 +111,7 @@ fn phase_dispatch_resolves_motor_idx_from_slot_table() {
     dispatch_axis(
         axis_idx,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         p_end,
@@ -158,6 +160,7 @@ fn phase_dispatch_no_capture_for_pulse_only_stepper() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         256.0 * 0.0125,
@@ -212,6 +215,7 @@ fn phase_dispatch_two_steppers_two_captures() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         256.0 * 0.0125,
@@ -255,6 +259,7 @@ fn phase_dispatch_at_phase_zero() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr_from(&mut q),
         &shared,
         0.0,
@@ -287,6 +292,7 @@ fn phase_dispatch_empty_slot_table_latches_phase_motor_unmapped() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr_from(&mut q),
         &shared,
         256.0 * 0.0125,

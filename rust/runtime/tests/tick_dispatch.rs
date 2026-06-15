@@ -43,6 +43,7 @@ fn pulse_zero_motion_no_steps_scheduled() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         0.0,
@@ -68,6 +69,7 @@ fn pulse_positive_motion_enqueues_n_steps() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         0.05,
@@ -96,6 +98,7 @@ fn pulse_partial_push_commits_position_count_for_pushed_steps() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         0.05,
@@ -138,6 +141,7 @@ fn pulse_queue_overflow_latches_fault() {
     dispatch_axis(
         2,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         0.0125,
@@ -165,6 +169,7 @@ fn pulse_steps_per_sample_exceeded_hard_faults() {
     dispatch_axis(
         1,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         0.5,
@@ -202,6 +207,7 @@ fn phase_mode_updates_coil_state_no_queue_writes() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         256.0 * 0.0125,
@@ -236,6 +242,7 @@ fn phase_mode_honors_phase_offset() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         256.0 * 0.0125,

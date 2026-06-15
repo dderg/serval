@@ -47,6 +47,89 @@ fn commit_masked_scopes_position_count() {
 }
 
 #[test]
+fn dispatch_pulse_honors_motor_mask() {
+    use crate::error::FaultCode;
+
+    // Single-bit mask 0b10 => stepper_sel 2 (motor 1); only motor 1's
+    // position_count advances.
+    {
+        let shared = SharedState::new();
+        let mut q = StepQueue::new();
+        let mut axis = make_axis(StepMode::Pulse, 0.0125);
+        let _ = axis.steppers.push(make_stepper());
+
+        let q_ptr: *mut StepQueue = &mut q;
+        dispatch_axis(
+            0,
+            &mut axis,
+            /* motor_mask */ 0b10,
+            q_ptr,
+            &shared,
+            /* p_end */ 0.05,
+            /* v_end */ 2000.0,
+            /* p_sample_start */ 0.0,
+            /* sample_period_sec */ 25e-6,
+            /* sample_start_cycles */ 1_000,
+            /* cycles_per_second */ 520_000_000.0,
+        );
+
+        let enq = q.tail.wrapping_sub(q.head);
+        assert_eq!(enq, 4, "expected 4 step entries, got {enq}");
+        for i in q.head..q.tail {
+            let entry = q.buf[(i % crate::step_queue::STEP_QUEUE_DEPTH as u16) as usize];
+            assert_eq!(entry.stepper_sel, 2, "single-bit mask 0b10 => sel 2");
+        }
+        assert_eq!(
+            axis.steppers[0].position_count.load(Ordering::Acquire),
+            0,
+            "motor 0 must not advance under mask 0b10"
+        );
+        assert_eq!(
+            axis.steppers[1].position_count.load(Ordering::Acquire),
+            4,
+            "only motor 1 advances under mask 0b10"
+        );
+        assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+    }
+
+    // Multi-bit mask 0b11 => MultiMotorMask fault, no steps enqueued.
+    {
+        let shared = SharedState::new();
+        let mut q = StepQueue::new();
+        let mut axis = make_axis(StepMode::Pulse, 0.0125);
+        let _ = axis.steppers.push(make_stepper());
+
+        let q_ptr: *mut StepQueue = &mut q;
+        let axis_idx: usize = 1;
+        dispatch_axis(
+            axis_idx,
+            &mut axis,
+            /* motor_mask */ 0b11,
+            q_ptr,
+            &shared,
+            /* p_end */ 0.05,
+            /* v_end */ 2000.0,
+            /* p_sample_start */ 0.0,
+            /* sample_period_sec */ 25e-6,
+            /* sample_start_cycles */ 1_000,
+            /* cycles_per_second */ 520_000_000.0,
+        );
+
+        assert_eq!(q.tail, q.head, "no steps for a multi-bit mask");
+        assert_eq!(
+            shared.last_error.load(Ordering::Acquire),
+            FaultCode::MultiMotorMask.as_i32(),
+            "multi-bit mask must raise MultiMotorMask"
+        );
+        let detail = shared.fault_detail.load(Ordering::Acquire);
+        let expected_detail = ((axis_idx as u32 & 0xFF) << 16) | 0b11;
+        assert_eq!(detail, expected_detail);
+        assert_eq!(axis.steppers[0].position_count.load(Ordering::Acquire), 0);
+        assert_eq!(axis.steppers[1].position_count.load(Ordering::Acquire), 0);
+    }
+}
+
+#[test]
 fn pulse_zero_motion_no_steps_scheduled() {
     let shared = SharedState::new();
     let mut q = StepQueue::new();
@@ -56,6 +139,7 @@ fn pulse_zero_motion_no_steps_scheduled() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         /* p_end */ 0.0,
@@ -85,6 +169,7 @@ fn pulse_positive_motion_enqueues_n_steps() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         /* p_end */ 0.05,
@@ -115,6 +200,7 @@ fn pulse_below_displacement_threshold_uses_uniform_fallback() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         /* p_end */ tiny,
@@ -140,6 +226,7 @@ fn phase_mode_updates_coil_state_no_queue_writes() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         /* p_end */ 256.0 * 0.0125,
@@ -178,6 +265,7 @@ fn phase_mode_ramps_offset_toward_target_at_max_per_sample() {
         dispatch_axis(
             0,
             &mut axis,
+            0,
             q_ptr,
             &shared,
             /* p_end */ 256.0 * 0.0125,
@@ -213,6 +301,7 @@ fn phase_mode_ramp_disabled_when_max_per_sample_is_zero() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         /* p_end */ 256.0 * 0.0125,
@@ -245,6 +334,7 @@ fn phase_mode_honors_phase_offset() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         /* p_end */ 256.0 * 0.0125,
@@ -284,6 +374,7 @@ fn unknown_step_mode_raises_fault() {
     dispatch_axis(
         axis_idx,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         /* p_end */ 1.0,
