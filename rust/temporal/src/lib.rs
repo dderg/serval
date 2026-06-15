@@ -15,8 +15,7 @@ pub use topp::{
 
 pub mod multi;
 pub use multi::{
-    BatchError, BatchInput, BatchOutput, GridStrategy, JoiningStatus, JunctionInfo, SegmentInput,
-    plan_batch,
+    BatchError, BatchInput, BatchOutput, GridStrategy, JoiningStatus, SegmentInput, plan_batch,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]

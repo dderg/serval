@@ -169,7 +169,6 @@ fn plan_batch_threads_nonzero_initial_velocity() {
         v_last < 1.0,
         "terminal velocity {v_last} must be ≈ 0 mm/s under terminal_velocity = 0.0",
     );
-    assert!(output.junctions.is_empty());
 }
 
 fn zero_curve_at(p: [f64; 3]) -> VectorNurbs<f64, 3> {

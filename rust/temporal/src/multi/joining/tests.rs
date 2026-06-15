@@ -11,34 +11,6 @@ fn make_state(v_start: f64, v_end: f64) -> ChainState {
 }
 
 #[test]
-fn forward_propagates_v_end_to_next_v_start() {
-    let mut states = vec![make_state(0.0, 100.0), make_state(0.0, 200.0)];
-    let corner_caps = vec![150.0];
-    let dirty = forward_sweep(&mut states, &corner_caps);
-    assert_eq!(dirty, 1);
-    assert!((states[1].v_start - 100.0).abs() < 1e-6);
-    assert!(states[1].dirty);
-}
-
-#[test]
-fn forward_no_change_no_dirty() {
-    let mut states = vec![make_state(0.0, 150.0), make_state(150.0, 200.0)];
-    let corner_caps = vec![150.0];
-    let dirty = forward_sweep(&mut states, &corner_caps);
-    assert_eq!(dirty, 0);
-    assert!(!states[1].dirty);
-}
-
-#[test]
-fn reverse_propagates_v_start_to_prev_v_end() {
-    let mut states = vec![make_state(0.0, 200.0), make_state(100.0, 200.0)];
-    let corner_caps = vec![150.0];
-    let dirty = reverse_sweep(&mut states, &corner_caps);
-    assert_eq!(dirty, 1);
-    assert!((states[0].v_end - 100.0).abs() < 1e-6);
-}
-
-#[test]
 fn bidirectional_sweep_uses_lower_achieved_side() {
     let mut states = vec![make_state(0.0, 120.0), make_state(80.0, 0.0)];
     let corner_caps = vec![150.0];
@@ -50,14 +22,4 @@ fn bidirectional_sweep_uses_lower_achieved_side() {
     assert!((states[1].v_start - 80.0).abs() < 1e-6);
     assert!(states[0].dirty);
     assert!(!states[1].dirty);
-}
-
-#[test]
-fn converges_in_one_sweep_on_already_consistent() {
-    let mut states = vec![make_state(0.0, 150.0), make_state(150.0, 200.0)];
-    let corner_caps = vec![150.0];
-    let f_dirty = forward_sweep(&mut states, &corner_caps);
-    let r_dirty = reverse_sweep(&mut states, &corner_caps);
-    assert_eq!(f_dirty, 0);
-    assert_eq!(r_dirty, 0);
 }

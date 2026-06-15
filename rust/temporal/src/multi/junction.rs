@@ -1,46 +1,35 @@
 use nurbs::VectorNurbs;
 use nurbs::eval::{vector_derivative, vector_eval};
 
-/// Fuse threshold: junctions with tangent disagreement at or below this are
-/// chain-fused (treated G1-continuous). Purely a numerical collinearity
-/// epsilon — anything sharper is a corner and comes to a full stop.
-const THETA_FUSE_RAD: f64 = 1e-3;
+/// Two adjacent curves count as collinear when the forward unit tangent at the
+/// left curve's end and at the right curve's start disagree by at most this
+/// angle. Purely a numerical collinearity epsilon — anything sharper is a
+/// full-stop junction the blender did not round away.
+const THETA_COLLINEAR_RAD: f64 = 1e-3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JunctionKind {
-    Smooth,
-    Corner,
-}
-
-pub(crate) fn classify_junction_curves(
-    left: &VectorNurbs<f64, 3>,
-    right: &VectorNurbs<f64, 3>,
-) -> JunctionKind {
+/// `true` when the path is tangent-continuous (G1) across the junction between
+/// two adjacent curves, within `THETA_COLLINEAR_RAD`. A degenerate (zero)
+/// tangent on either side is never collinear — an undefined direction cannot be
+/// parallel to anything — which is also what isolates zero-displacement
+/// (virtual-path) segments into their own chains.
+///
+/// This is the sole junction predicate: a non-collinear junction is exactly a
+/// chain boundary / full stop. The batch solver partitions chains on it and the
+/// streaming planner snaps its re-solve window to it.
+#[must_use]
+pub fn are_collinear(left: &VectorNurbs<f64, 3>, right: &VectorNurbs<f64, 3>) -> bool {
     let t_left = forward_unit_tangent_at_end(left);
     let t_right = forward_unit_tangent_at_start(right);
-    classify_junction(&t_left, &t_right)
+    tangents_collinear(&t_left, &t_right)
 }
 
-/// `true` when the junction between two adjacent curves is a corner (full-stop
-/// boundary) under the exact same classification the batch solver uses to
-/// partition chains. The streaming planner uses this to snap its bounded
-/// re-solve sub-window to a chain boundary.
-#[must_use]
-pub fn is_corner_between(left: &VectorNurbs<f64, 3>, right: &VectorNurbs<f64, 3>) -> bool {
-    classify_junction_curves(left, right) == JunctionKind::Corner
-}
-
-fn classify_junction(t_left: &[f64; 3], t_right: &[f64; 3]) -> JunctionKind {
+fn tangents_collinear(t_left: &[f64; 3], t_right: &[f64; 3]) -> bool {
     let left_degenerate = t_left[0].abs() + t_left[1].abs() + t_left[2].abs() < 1e-12;
     let right_degenerate = t_right[0].abs() + t_right[1].abs() + t_right[2].abs() < 1e-12;
     if left_degenerate || right_degenerate {
-        return JunctionKind::Corner;
+        return false;
     }
-    if turn_angle(t_left, t_right) <= THETA_FUSE_RAD {
-        JunctionKind::Smooth
-    } else {
-        JunctionKind::Corner
-    }
+    turn_angle(t_left, t_right) <= THETA_COLLINEAR_RAD
 }
 
 fn turn_angle(t_left: &[f64; 3], t_right: &[f64; 3]) -> f64 {
