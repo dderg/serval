@@ -339,6 +339,7 @@ class FakeHomingInfo:
         self.retract_speed = retract_speed
         self.position_endstop = -6.0
         self.speed = 50.0
+        self.min_home_dist = 0.0
 
 
 class FakeHomingRail:
@@ -428,10 +429,15 @@ def run_home_axis(overshoot, retract_dist, positive_dir):
     def fake_guarded_trip(*args, **kwargs):
         return trip_pos, final_pos
 
+    class FakeDangerOptions:
+        homing_elapsed_distance_tolerance = 0.5
+
     orig_guarded = homing_mod._run_servo_guarded_trip
     orig_fault = homing_mod._check_servo_drive_fault
+    orig_danger = homing_mod.get_danger_options
     homing_mod._run_servo_guarded_trip = fake_guarded_trip
     homing_mod._check_servo_drive_fault = lambda *a, **k: None
+    homing_mod.get_danger_options = lambda: FakeDangerOptions()
     try:
         homer._home_axis(
             FakeGcmd(),
@@ -444,6 +450,7 @@ def run_home_axis(overshoot, retract_dist, positive_dir):
     finally:
         homing_mod._run_servo_guarded_trip = orig_guarded
         homing_mod._check_servo_drive_fault = orig_fault
+        homing_mod.get_danger_options = orig_danger
 
     return toolhead, trigger_height
 

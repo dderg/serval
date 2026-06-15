@@ -1,3 +1,5 @@
+import pytest
+
 from klippy.extras import homing as homing_mod
 
 
@@ -104,3 +106,106 @@ def test_commit_and_seed_no_servo_does_not_seed():
         servo_handle=None,
     )
     assert bridge.finalize_calls == []
+
+
+class FakeGcmd:
+    error = RuntimeError
+
+
+def _approach_script(toolhead, axis, traveled_per_call, overshoot=0.0):
+    state = {"i": 0}
+    calls = []
+
+    def approach(speed, max_travel):
+        i = state["i"]
+        state["i"] += 1
+        calls.append((speed, max_travel))
+        cur = toolhead.get_position()
+        trip = list(cur)
+        trip[axis] = cur[axis] + traveled_per_call[i]
+        final = list(trip)
+        final[axis] = trip[axis] + overshoot
+        return trip, final
+
+    return approach, calls
+
+
+def test_no_rehome_when_first_travel_exceeds_min():
+    axis = 0
+    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    approach, calls = _approach_script(toolhead, axis, [100.0])
+    trip, final = homing_mod._run_homing_attempts(
+        FakeGcmd(),
+        toolhead,
+        axis,
+        1.0,
+        _hi(min_home_dist=15.0),
+        trigger_height=20.0,
+        provider=None,
+        first_max_travel=200.0,
+        tolerance=0.5,
+        approach=approach,
+    )
+    assert len(calls) == 1
+    assert trip[axis] == 100.0
+
+
+def test_rehome_then_legit_returns_second_trip():
+    axis = 0
+    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    approach, calls = _approach_script(toolhead, axis, [2.0, 20.0])
+    trip, final = homing_mod._run_homing_attempts(
+        FakeGcmd(),
+        toolhead,
+        axis,
+        1.0,
+        _hi(min_home_dist=15.0),
+        trigger_height=20.0,
+        provider=None,
+        first_max_travel=200.0,
+        tolerance=0.5,
+        approach=approach,
+    )
+    assert len(calls) == 2
+    assert calls[1][1] == 30.0
+    assert ("move", [-13.0, 0.0, 0.0], 25.0) in toolhead.events
+    assert trip[axis] == 7.0
+
+
+def test_rehome_then_still_early_raises():
+    axis = 0
+    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    approach, calls = _approach_script(toolhead, axis, [2.0, 1.0])
+    with pytest.raises(RuntimeError, match="early homing trigger"):
+        homing_mod._run_homing_attempts(
+            FakeGcmd(),
+            toolhead,
+            axis,
+            1.0,
+            _hi(min_home_dist=15.0),
+            trigger_height=20.0,
+            provider=None,
+            first_max_travel=200.0,
+            tolerance=0.5,
+            approach=approach,
+        )
+    assert len(calls) == 2
+
+
+def test_min_home_dist_zero_never_rehomes():
+    axis = 0
+    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    approach, calls = _approach_script(toolhead, axis, [0.0])
+    homing_mod._run_homing_attempts(
+        FakeGcmd(),
+        toolhead,
+        axis,
+        1.0,
+        _hi(min_home_dist=0.0),
+        trigger_height=20.0,
+        provider=None,
+        first_max_travel=200.0,
+        tolerance=0.5,
+        approach=approach,
+    )
+    assert len(calls) == 1
