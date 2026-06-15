@@ -180,10 +180,10 @@ impl RingDescriptor {
 /// ```rust
 /// use runtime::piece_ring::{PieceEntry, PieceRing};
 ///
-/// let mut storage = [PieceEntry { start_time: 0, coeffs: [0.0; 4], duration: 0.0, _reserved: 0 }; 4];
+/// let mut storage = [PieceEntry { start_time: 0, coeffs: [0.0; 4], duration: 0.0, motor_mask: 0, _reserved: [0; 3] }; 4];
 /// let mut ring = PieceRing::new(&mut storage);
 ///
-/// let entry = PieceEntry { start_time: 1000, coeffs: [0.0; 4], duration: 0.001, _reserved: 0 };
+/// let entry = PieceEntry { start_time: 1000, coeffs: [0.0; 4], duration: 0.001, motor_mask: 0, _reserved: [0; 3] };
 /// assert!(ring.push(entry).is_ok());
 /// assert_eq!(ring.peek().unwrap().start_time, 1000);
 /// ring.pop();
@@ -286,7 +286,8 @@ impl<'a> PieceRing<'a> {
 /// offset 16 .. 19 : coeffs[2]   (f32, Bernstein b2)
 /// offset 20 .. 23 : coeffs[3]   (f32, Bernstein b3)
 /// offset 24 .. 27 : duration     (f32, piece duration in seconds)
-/// offset 28 .. 31 : _reserved   (u32, must be zero)
+/// offset 28      : motor_mask  (u8, 0 => normal full-axis move)
+/// offset 29 .. 31 : _reserved   ([u8; 3], must be zero)
 /// total           : 32 bytes, align 8
 /// ```
 ///
@@ -299,7 +300,8 @@ impl<'a> PieceRing<'a> {
 ///     start_time: 0,
 ///     coeffs: [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
 ///     duration: 0.01,
-///     _reserved: 0,
+///     motor_mask: 0,
+///     _reserved: [0; 3],
 /// };
 /// let (pos, vel) = entry.to_monomial();
 /// assert!((pos[1] - 100.0).abs() < 1e-3);
@@ -310,11 +312,12 @@ pub struct PieceEntry {
     pub start_time: u64,
     pub coeffs: [f32; 4],
     pub duration: f32,
-    // The underscore prefix signals "intentionally unused by Rust callers"
-    // but the field must remain `pub` for `#[repr(C)]` ABI stability (the C
-    // side reads this word). The allow suppresses `pub_underscore_fields`.
+    /// Bit i set => motor i of this axis runs this piece. `0` => all motors
+    /// (a normal full-axis move that advances `p_prev`). Non-zero => overlay:
+    /// only those motors step+count, `p_prev` is not advanced.
+    pub motor_mask: u8,
     #[allow(clippy::pub_underscore_fields)]
-    pub _reserved: u32,
+    pub _reserved: [u8; 3],
 }
 
 const _: () = {
@@ -346,7 +349,7 @@ impl PieceEntry {
     /// ```rust
     /// use runtime::piece_ring::PieceEntry;
     ///
-    /// let p = PieceEntry { start_time: 1, coeffs: [0.0; 4], duration: 0.001, _reserved: 0 };
+    /// let p = PieceEntry { start_time: 1, coeffs: [0.0; 4], duration: 0.001, motor_mask: 0, _reserved: [0; 3] };
     /// let b = p.to_le_bytes();
     /// assert_eq!(b.len(), 32);
     /// assert_eq!(&b[0..8], &1u64.to_le_bytes());
@@ -360,8 +363,59 @@ impl PieceEntry {
         b[16..20].copy_from_slice(&self.coeffs[2].to_le_bytes());
         b[20..24].copy_from_slice(&self.coeffs[3].to_le_bytes());
         b[24..28].copy_from_slice(&self.duration.to_le_bytes());
-        b[28..32].copy_from_slice(&self._reserved.to_le_bytes());
+        b[28] = self.motor_mask;
+        b[29..32].copy_from_slice(&self._reserved);
         b
+    }
+
+    #[inline]
+    pub fn from_le_bytes(b: &[u8; 32]) -> Self {
+        let &[
+            t0,
+            t1,
+            t2,
+            t3,
+            t4,
+            t5,
+            t6,
+            t7,
+            c00,
+            c01,
+            c02,
+            c03,
+            c10,
+            c11,
+            c12,
+            c13,
+            c20,
+            c21,
+            c22,
+            c23,
+            c30,
+            c31,
+            c32,
+            c33,
+            d0,
+            d1,
+            d2,
+            d3,
+            motor_mask,
+            r0,
+            r1,
+            r2,
+        ] = b;
+        Self {
+            start_time: u64::from_le_bytes([t0, t1, t2, t3, t4, t5, t6, t7]),
+            coeffs: [
+                f32::from_le_bytes([c00, c01, c02, c03]),
+                f32::from_le_bytes([c10, c11, c12, c13]),
+                f32::from_le_bytes([c20, c21, c22, c23]),
+                f32::from_le_bytes([c30, c31, c32, c33]),
+            ],
+            duration: f32::from_le_bytes([d0, d1, d2, d3]),
+            motor_mask,
+            _reserved: [r0, r1, r2],
+        }
     }
 }
 

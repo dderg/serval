@@ -23,7 +23,8 @@ fn make_storage() -> Vec<PieceEntry> {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0,
+            motor_mask: 0,
+            _reserved: [0; 3],
         };
         TOTAL_RING_PIECES
     ]
@@ -70,7 +71,8 @@ fn const_piece(start_time: u64, dur_s: f32) -> PieceEntry {
         start_time,
         coeffs: [0.0; 4],
         duration: dur_s,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 

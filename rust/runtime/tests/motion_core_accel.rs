@@ -13,7 +13,8 @@ fn entry() -> PieceEntry {
         start_time: 5_000_000,
         coeffs: [1.0, 2.5, -3.0, 4.0],
         duration: 0.5,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 

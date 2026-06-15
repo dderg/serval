@@ -50,7 +50,8 @@ fn walker_at_t0_returns_c0_and_c1() {
         start_time: start,
         coeffs,
         duration: duration_s,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
 
     let mut storage = vec![entry; 4];

@@ -27,7 +27,8 @@ fn blank_storage() -> Vec<PieceEntry> {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TEST_TOTAL_RING_PIECES
     ]
@@ -66,7 +67,8 @@ fn smooth_piece(start_time: u64, delta_mm: f32, duration: f32) -> PieceEntry {
         start_time,
         coeffs: [0.0, 0.0, delta_mm, delta_mm],
         duration,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 

@@ -16,7 +16,8 @@ fn piece_entry_to_monomial_constant() {
         start_time: 0,
         coeffs: [5.0, 5.0, 5.0, 5.0],
         duration: 0.001,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
     let (pos, vel) = entry.to_monomial();
 
@@ -46,7 +47,8 @@ fn piece_entry_to_monomial_linear() {
         start_time: 0,
         coeffs: [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
         duration: 0.01,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
     let (pos, vel) = entry.to_monomial();
 
@@ -94,7 +96,8 @@ fn piece_entry_end_time() {
         start_time: 1000,
         coeffs: [0.0; 4],
         duration: 0.001,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
     let end = entry.end_time(550_000_000.0_f32);
     assert_eq!(end, 551_000, "end_time mismatch: got {end}");
@@ -107,7 +110,8 @@ fn make_piece(start: u64, duration: f32) -> PieceEntry {
         start_time: start,
         coeffs: [0.0, 0.0, 0.0, 0.0],
         duration,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 
@@ -116,7 +120,8 @@ fn make_storage<const N: usize>() -> [PieceEntry; N] {
         start_time: 0,
         coeffs: [0.0; 4],
         duration: 0.0,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }; N]
 }
 
@@ -214,7 +219,8 @@ fn make_rd_storage<const N: usize>() -> [PieceEntry; N] {
         start_time: 0,
         coeffs: [0.0; 4],
         duration: 0.0,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }; N]
 }
 
@@ -223,7 +229,8 @@ fn pe(start: u64) -> PieceEntry {
         start_time: start,
         coeffs: [0.0; 4],
         duration: 0.0,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 

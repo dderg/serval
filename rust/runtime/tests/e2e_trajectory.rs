@@ -52,7 +52,8 @@ fn make_storage() -> Vec<PieceEntry> {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0,
+            motor_mask: 0,
+            _reserved: [0; 3],
         };
         TOTAL_RING_PIECES
     ]
@@ -109,7 +110,8 @@ fn e2e_linear_ramp_full_window() {
         start_time: TICK_CYCLES,
         coeffs: [0.0, TARGET_MM / 3.0, 2.0 * TARGET_MM / 3.0, TARGET_MM],
         duration: DURATION_S,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
     let rc = engine.push_pieces(0, &[piece], &mut storage);
     assert_eq!(rc, 0, "push_pieces failed");
@@ -202,7 +204,8 @@ fn e2e_ease_ramp_full_window() {
         start_time: TICK_CYCLES,
         coeffs: [0.0, 0.0, TARGET_MM, TARGET_MM],
         duration: DURATION_S,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
     let rc = engine.push_pieces(0, &[piece], &mut storage);
     assert_eq!(rc, 0);
@@ -284,7 +287,8 @@ fn e2e_two_consecutive_moving_pieces() {
         start_time: a_start,
         coeffs: [0.0, half_mm / 3.0, 2.0 * half_mm / 3.0, half_mm],
         duration: half_dur,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
     let piece_b = PieceEntry {
         start_time: b_start,
@@ -295,7 +299,8 @@ fn e2e_two_consecutive_moving_pieces() {
             TARGET_MM,
         ],
         duration: half_dur,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
 
     let rc = engine.push_pieces(0, &[piece_a, piece_b], &mut storage);

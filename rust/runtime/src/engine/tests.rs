@@ -19,7 +19,8 @@ fn engine_with_z_axis(mode: StepMode) -> (Engine, Vec<PieceEntry>) {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TEST_TOTAL_RING_PIECES
     ];
@@ -50,7 +51,8 @@ fn one_piece(start_time: u64) -> PieceEntry {
         start_time,
         coeffs: [0.0, 0.5, 1.0, 1.5],
         duration: 0.5,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 
