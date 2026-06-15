@@ -2149,7 +2149,7 @@ impl PyMotionBridge {
         Ok(())
     }
 
-    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel))]
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel, start_host_secs))]
     fn adjust_motor(
         &self,
         py: Python<'_>,
@@ -2159,13 +2159,16 @@ impl PyMotionBridge {
         delta_mm: f64,
         speed: f64,
         accel: f64,
+        start_host_secs: f64,
     ) -> PyResult<f64> {
         let pieces = crate::correction::plan_correction_profile(delta_mm, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
-        self.stream_correction_entries(py, mcu_handle, axis_idx, motor_idx, &pieces)
+        self.stream_correction_entries(
+            py, mcu_handle, axis_idx, motor_idx, &pieces, start_host_secs,
+        )
     }
 
-    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, segments, speed, accel))]
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, segments, speed, accel, start_host_secs))]
     fn submit_correction_sequence(
         &self,
         py: Python<'_>,
@@ -2175,10 +2178,13 @@ impl PyMotionBridge {
         segments: Vec<f64>,
         speed: f64,
         accel: f64,
+        start_host_secs: f64,
     ) -> PyResult<f64> {
         let pieces = crate::correction::plan_correction_sequence(&segments, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
-        self.stream_correction_entries(py, mcu_handle, axis_idx, motor_idx, &pieces)
+        self.stream_correction_entries(
+            py, mcu_handle, axis_idx, motor_idx, &pieces, start_host_secs,
+        )
     }
 
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {
@@ -4165,18 +4171,17 @@ impl PyMotionBridge {
         axis_idx: u8,
         motor_idx: u8,
         pieces: &[crate::correction::ProfilePiece],
+        start_host_secs: f64,
     ) -> PyResult<f64> {
-        const CORRECTION_LEAD_SECS: f64 = 0.15;
         let ring_depth = runtime::stepping_state::CORRECTION_RING_DEPTH as u32;
         let handle = mcu_handle_from_raw(mcu_handle);
 
         let entries = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            let start = router.host_now_secs() + CORRECTION_LEAD_SECS;
             crate::correction::to_piece_entries(
                 pieces,
                 |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
-                start,
+                start_host_secs,
             )
         };
         if entries.iter().any(|e| e.start_time == 0) {
@@ -4242,7 +4247,7 @@ impl PyMotionBridge {
             }
             Ok(())
         })?;
-        Ok(CORRECTION_LEAD_SECS + total_duration)
+        Ok(total_duration)
     }
 }
 

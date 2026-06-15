@@ -143,3 +143,14 @@ fn sequence_drops_subepsilon_and_rejects_all_empty() {
     assert!(plan_correction_sequence(&[f64::NAN], 50.0, 5000.0).is_err());
     assert!(plan_correction_sequence(&[1.0, f64::INFINITY], 50.0, 5000.0).is_err());
 }
+
+#[test]
+fn piece_entries_anchor_at_explicit_start() {
+    let pieces = vec![
+        ProfilePiece { coeffs: [0.0, 1.0, 2.0, 3.0], duration: 0.4 },
+        ProfilePiece { coeffs: [3.0, 3.0, 3.0, 3.0], duration: 0.6 },
+    ];
+    let entries = to_piece_entries(&pieces, |secs| (secs * 1000.0).round() as u64, 12.5);
+    assert_eq!(entries[0].start_time, 12_500);
+    assert_eq!(entries[1].start_time, 12_900);
+}
