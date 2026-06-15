@@ -20,12 +20,24 @@ fn constant_velocity_reports_velocity_family() {
 
     let u = segment_peak_utilization(&axes, &limits(300.0, 10_000.0, 50_000.0))
         .expect("a moving segment must report utilization");
-    assert_eq!(u.family, UtilFamily::Velocity);
+    let w = u.worst().expect("a moving segment has a worst family");
+    assert_eq!(w.family, UtilFamily::Velocity);
     assert!(
-        (u.ratio - v / 300.0).abs() < 1e-6,
+        (w.ratio - v / 300.0).abs() < 1e-6,
         "velocity utilization must be v / v_max; got {}",
-        u.ratio,
+        w.ratio,
     );
+    // per-family detail: the raw peak velocity is v, accel/jerk are ~0.
+    assert!(
+        (u.vel_mag - v).abs() < 1e-3,
+        "raw peak velocity ≈ v; got {}",
+        u.vel_mag
+    );
+    assert!((u.vel_ratio - v / 300.0).abs() < 1e-6);
+    // accel/jerk are zero up to finite-difference floating-point noise (the jerk
+    // stencil divides by dt³ ≈ 1.5e-14, so a true-zero rounds to ~6e-5 of cap) —
+    // negligible against the 0.33 velocity ratio.
+    assert!(u.accel_ratio < 1e-3 && u.jerk_ratio < 1e-3);
 }
 
 /// Axis 0 under constant acceleration `a` (x = ½ a t²). With caps chosen so the
@@ -47,11 +59,18 @@ fn constant_accel_reports_accel_family_exactly() {
     // accel ratio of a / a_max = 1.0.
     let u = segment_peak_utilization(&axes, &limits(600.0, a, 50_000.0))
         .expect("a moving segment must report utilization");
-    assert_eq!(u.family, UtilFamily::Accel);
+    let w = u.worst().expect("a moving segment has a worst family");
+    assert_eq!(w.family, UtilFamily::Accel);
     assert!(
-        (u.ratio - 1.0).abs() < 1e-6,
+        (w.ratio - 1.0).abs() < 1e-6,
         "accel utilization must be a / a_max = 1.0; got {}",
-        u.ratio,
+        w.ratio,
+    );
+    // raw peak accel is exactly a (second difference of a quadratic is exact).
+    assert!(
+        (u.accel_mag - a).abs() < 1e-3,
+        "raw peak accel ≈ a; got {}",
+        u.accel_mag
     );
 }
 
@@ -71,10 +90,11 @@ fn over_limit_segment_reports_ratio_above_one() {
 
     let u = segment_peak_utilization(&axes, &limits(600.0, 2_500.0, 50_000.0))
         .expect("a moving segment must report utilization");
+    let w = u.worst().expect("a moving segment has a worst family");
     assert!(
-        u.ratio > 1.0,
+        w.ratio > 1.0,
         "an over-limit segment must report utilization > 1; got {}",
-        u.ratio,
+        w.ratio,
     );
 }
 
@@ -100,11 +120,12 @@ fn utilization_credits_the_feedrate_path_speed_set() {
     }]);
 
     let u = segment_peak_utilization(&axes, &lim).expect("util");
-    assert_eq!(u.family, UtilFamily::Velocity);
+    let w = u.worst().expect("a moving segment has a worst family");
+    assert_eq!(w.family, UtilFamily::Velocity);
     assert!(
-        (u.ratio - 1.0).abs() < 1e-6,
+        (w.ratio - 1.0).abs() < 1e-6,
         "must credit the feed set (1.0), not feed/machine (0.5); got {}",
-        u.ratio,
+        w.ratio,
     );
 }
 
@@ -134,9 +155,14 @@ fn window_peak_takes_the_max_segment() {
 
     let u = window_peak_utilization([(seg_slow.as_slice(), &lim), (seg_fast.as_slice(), &lim)])
         .expect("window must report utilization");
+    let w = u.worst().expect("window has a worst family");
     assert!(
-        (u.ratio - 200.0 / 300.0).abs() < 1e-6,
+        (w.ratio - 200.0 / 300.0).abs() < 1e-6,
         "window peak must be the faster segment; got {}",
-        u.ratio,
+        w.ratio,
+    );
+    assert!(
+        (u.vel_mag - 200.0).abs() < 1e-3,
+        "window raw peak velocity is the faster segment"
     );
 }

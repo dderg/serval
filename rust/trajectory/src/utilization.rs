@@ -22,26 +22,69 @@ pub enum UtilFamily {
     Jerk,
 }
 
-/// Peak limit utilization over a trajectory: the largest `|executed| / cap` ratio
-/// reached on any axis-set and family, and which family it was.
+/// The overall worst utilization over a trajectory: the largest `|executed|/cap`
+/// ratio reached on any axis-set and family, and which family it was.
 #[derive(Debug, Clone, Copy)]
 pub struct PeakUtilization {
     pub ratio: f64,
     pub family: UtilFamily,
 }
 
+/// Per-family executed peaks over a trajectory: the worst `|executed|/cap` ratio
+/// per family, and the raw peak path-frame magnitudes (mm/s, mm/s², mm/s³). All
+/// measured on the committed time polynomials at the MCU sample rate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UtilizationPeaks {
+    pub vel_ratio: f64,
+    pub accel_ratio: f64,
+    pub jerk_ratio: f64,
+    pub vel_mag: f64,
+    pub accel_mag: f64,
+    pub jerk_mag: f64,
+}
+
+impl UtilizationPeaks {
+    fn merge_max(&mut self, o: &UtilizationPeaks) {
+        self.vel_ratio = self.vel_ratio.max(o.vel_ratio);
+        self.accel_ratio = self.accel_ratio.max(o.accel_ratio);
+        self.jerk_ratio = self.jerk_ratio.max(o.jerk_ratio);
+        self.vel_mag = self.vel_mag.max(o.vel_mag);
+        self.accel_mag = self.accel_mag.max(o.accel_mag);
+        self.jerk_mag = self.jerk_mag.max(o.jerk_mag);
+    }
+
+    /// The overall worst family and its ratio — the headline utilization.
+    #[must_use]
+    pub fn worst(&self) -> Option<PeakUtilization> {
+        let mut best = (self.vel_ratio, UtilFamily::Velocity);
+        if self.accel_ratio > best.0 {
+            best = (self.accel_ratio, UtilFamily::Accel);
+        }
+        if self.jerk_ratio > best.0 {
+            best = (self.jerk_ratio, UtilFamily::Jerk);
+        }
+        (best.0 > 0.0).then_some(PeakUtilization {
+            ratio: best.0,
+            family: best.1,
+        })
+    }
+}
+
 /// MCU stepping period (40 kHz), matching `peak::peak_accel`.
 const MCU_DT: f64 = 25e-6;
 
-/// Peak utilization of one committed segment, sampling the per-axis time
-/// polynomials at the MCU rate and forming `restricted_norm / cap` for each
-/// spatial limit set and family. Returns `None` for a segment too short to carry
-/// a jerk stencil or one whose caps are all non-finite.
+fn norm3(x: &[f64; 3]) -> f64 {
+    (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt()
+}
+
+/// Per-family executed peaks of one committed segment, sampling the per-axis time
+/// polynomials at the MCU rate. Returns `None` for a segment too short to carry a
+/// jerk stencil.
 #[must_use]
 pub fn segment_peak_utilization(
     axes: &[ScalarNurbs<f64>],
     limits: &Limits,
-) -> Option<PeakUtilization> {
+) -> Option<UtilizationPeaks> {
     if axes.len() < 3 {
         return None;
     }
@@ -66,13 +109,7 @@ pub fn segment_peak_utilization(
     };
     let x: Vec<[f64; 3]> = (0..=n).map(|i| sample(t0 + dt * i as f64)).collect();
 
-    let mut best: Option<PeakUtilization> = None;
-    let mut consider = |ratio: f64, family: UtilFamily| {
-        if ratio.is_finite() && best.is_none_or(|b| ratio > b.ratio) {
-            best = Some(PeakUtilization { ratio, family });
-        }
-    };
-
+    let mut p = UtilizationPeaks::default();
     for i in 2..=n - 2 {
         let mut v = [0.0_f64; 3];
         let mut a = [0.0_f64; 3];
@@ -83,40 +120,42 @@ pub fn segment_peak_utilization(
             j[k] = (x[i + 2][k] - 2.0 * x[i + 1][k] + 2.0 * x[i - 1][k] - x[i - 2][k])
                 / (2.0 * dt * dt * dt);
         }
+        p.vel_mag = p.vel_mag.max(norm3(&v));
+        p.accel_mag = p.accel_mag.max(norm3(&a));
+        p.jerk_mag = p.jerk_mag.max(norm3(&j));
         for (_, set) in limits.spatial_sets() {
             if set.v_max.is_finite() {
-                consider(
-                    restricted_norm(&v, set.axes) / set.v_max,
-                    UtilFamily::Velocity,
-                );
+                p.vel_ratio = p.vel_ratio.max(restricted_norm(&v, set.axes) / set.v_max);
             }
             if set.a_max.is_finite() {
-                consider(restricted_norm(&a, set.axes) / set.a_max, UtilFamily::Accel);
+                p.accel_ratio = p.accel_ratio.max(restricted_norm(&a, set.axes) / set.a_max);
             }
             if set.j_max.is_finite() {
-                consider(restricted_norm(&j, set.axes) / set.j_max, UtilFamily::Jerk);
+                p.jerk_ratio = p.jerk_ratio.max(restricted_norm(&j, set.axes) / set.j_max);
             }
         }
     }
 
-    best
+    Some(p)
 }
 
-/// Peak utilization across a window of committed segments, each checked against
-/// its own true (un-derated) limits. `None` when no segment yields a sample.
+/// Per-family executed peaks across a window of committed segments, each checked
+/// against its own true (un-derated) limits — the max of each field over the
+/// window. `None` when no segment yields a sample.
 #[must_use]
 pub fn window_peak_utilization<'a>(
     segments: impl IntoIterator<Item = (&'a [ScalarNurbs<f64>], &'a Limits)>,
-) -> Option<PeakUtilization> {
-    let mut best: Option<PeakUtilization> = None;
+) -> Option<UtilizationPeaks> {
+    let mut acc: Option<UtilizationPeaks> = None;
     for (axes, limits) in segments {
-        if let Some(u) = segment_peak_utilization(axes, limits) {
-            if best.is_none_or(|b| u.ratio > b.ratio) {
-                best = Some(u);
+        if let Some(p) = segment_peak_utilization(axes, limits) {
+            match &mut acc {
+                Some(a) => a.merge_max(&p),
+                None => acc = Some(p),
             }
         }
     }
-    best
+    acc
 }
 
 #[cfg(test)]

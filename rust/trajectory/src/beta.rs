@@ -137,6 +137,9 @@ pub struct ReplanBindingSummary {
     pub peak_utilization: f64,
     /// Which kinematic family the peak utilization landed on.
     pub peak_util_family: Option<crate::utilization::UtilFamily>,
+    /// Per-family executed peaks (velocity/accel/jerk ratios and raw magnitudes)
+    /// over the window. `peak_utilization` is the max of the three ratios.
+    pub peaks: Option<crate::utilization::UtilizationPeaks>,
 }
 
 fn aggregate_binding(profiles: &[temporal::TopProfile]) -> ReplanBindingSummary {
@@ -167,6 +170,7 @@ fn aggregate_binding(profiles: &[temporal::TopProfile]) -> ReplanBindingSummary 
         deadline_truncated,
         peak_utilization: 0.0,
         peak_util_family: None,
+        peaks: None,
     }
 }
 
@@ -575,14 +579,17 @@ fn run_one_iteration(
         .collect();
 
     let mut binding = aggregate_binding(&batch_output.profiles);
-    if let Some(u) = crate::utilization::window_peak_utilization(
+    if let Some(peaks) = crate::utilization::window_peak_utilization(
         emitted
             .iter()
             .zip(input.segments.iter())
             .map(|(seg, src)| (seg.axes.as_slice(), &src.temporal.limits)),
     ) {
-        binding.peak_utilization = u.ratio;
-        binding.peak_util_family = Some(u.family);
+        if let Some(w) = peaks.worst() {
+            binding.peak_utilization = w.ratio;
+            binding.peak_util_family = Some(w.family);
+        }
+        binding.peaks = Some(peaks);
     }
 
     Ok(BetaIterResult {
