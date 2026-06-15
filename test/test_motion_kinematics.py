@@ -1,6 +1,7 @@
 import pytest
 
 from klippy import motion, motion_kinematics
+from klippy.extras import servo_axis
 
 
 class FakeError(Exception):
@@ -483,3 +484,76 @@ def test_read_claimed_axes_missing_section_rejected():
     del sections["kinematics"]
     with pytest.raises(FakeError):
         motion_kinematics.read_claimed_axes(FakeConfig(FakePrinter(), sections))
+
+
+def _servo_rail():
+    axis_opts = {
+        "position_min": -6.0,
+        "position_max": 235.0,
+        "endstop_pin": "ec_z:endstop",
+        "position_endstop": -6.0,
+    }
+    motor_opts = {
+        "protocol": "ethercat",
+        "node": "z_drive",
+        "rotation_distance": 40.0,
+        "encoder_counts_per_rev": 131072,
+    }
+    from test_servo_homing import FakeRailConfig
+
+    return servo_axis.ServoRail(
+        FakeRailConfig("axis z", axis_opts),
+        FakeRailConfig("z_drive", motor_opts),
+    )
+
+
+def _homed_cartesian_with_servo_z():
+    kin = make_kin(cartesian_sections())
+    kin.rails[2] = _servo_rail()
+    kin.limits = [(0.0, 300.0), (0.0, 300.0), (-6.0, 235.0)]
+    return kin
+
+
+def test_motor_off_keeps_homed_servo_axis_and_marks_dirty():
+    kin = _homed_cartesian_with_servo_z()
+    kin._handle_motor_off(0.0)
+    assert kin.limits[2] == (-6.0, 235.0)
+    assert kin.parked_dirty_axes() == [2]
+
+
+def test_motor_off_clears_stepper_axes_and_never_dirties_them():
+    kin = _homed_cartesian_with_servo_z()
+    kin._handle_motor_off(0.0)
+    assert kin.limits[0] == (1.0, -1.0)
+    assert kin.limits[1] == (1.0, -1.0)
+    assert 0 not in kin.parked_dirty_axes()
+    assert 1 not in kin.parked_dirty_axes()
+
+
+def test_motor_off_does_not_dirty_unhomed_servo_axis():
+    kin = _homed_cartesian_with_servo_z()
+    kin.limits[2] = (1.0, -1.0)
+    kin._handle_motor_off(0.0)
+    assert kin.parked_dirty_axes() == []
+
+
+def test_set_position_clears_parked_dirty_for_homed_axes():
+    kin = _homed_cartesian_with_servo_z()
+    kin._handle_motor_off(0.0)
+    assert kin.parked_dirty_axes() == [2]
+    kin.set_position([0.0, 0.0, 100.0, 0.0], homing_axes=[2])
+    assert kin.parked_dirty_axes() == []
+
+
+def test_set_position_without_homing_axes_keeps_dirty():
+    kin = _homed_cartesian_with_servo_z()
+    kin._handle_motor_off(0.0)
+    kin.set_position([0.0, 0.0, 100.0, 0.0])
+    assert kin.parked_dirty_axes() == [2]
+
+
+def test_clear_parked_dirty_subset():
+    kin = _homed_cartesian_with_servo_z()
+    kin._parked_dirty = [True, False, True]
+    kin.clear_parked_dirty([0])
+    assert kin.parked_dirty_axes() == [2]
