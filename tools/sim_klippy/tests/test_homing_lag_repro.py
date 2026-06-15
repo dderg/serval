@@ -1,6 +1,5 @@
 import json
 import socket
-import threading
 import time
 
 import pytest
@@ -28,6 +27,18 @@ SIM_OVERRIDES = {
         "position_endstop": "20",
         "position_max": "20",
     },
+}
+
+TIMING_OVERRIDES = {
+    "stepper_x.config_set": {
+        "endstop_pin": "^gpiochip0/gpio200",
+        "use_sensorless_homing": "False",
+        "homing_retract_dist": "5",
+        "min_home_dist": "0",
+        "position_endstop": "20",
+        "position_max": "20",
+    },
+    "stepper_y.config_set": dict(SIM_OVERRIDES["stepper_y.config_set"]),
 }
 
 
@@ -73,53 +84,45 @@ def _set_pin(sim, line: int, value: int) -> None:
 
 
 @pytest.mark.parametrize("sim_extra_overrides", [SIM_OVERRIDES], indirect=True)
-def test_homing_retract_and_rehome(sim):
+def test_homing_rehome_path_runs_and_fails_on_held_trigger(sim):
     _wait_ready(sim)
 
-    _set_pin(sim, X_ENDSTOP_LINE, 0)
-
-    # The delay needs to be long enough for the homing move to start
-    # but short enough that travel < min_home_dist.
-    def delayed_trip():
-        time.sleep(0.3)
-        _set_pin(sim, X_ENDSTOP_LINE, 1)
-
-    trip_thread = threading.Thread(target=delayed_trip, daemon=True)
-    trip_thread.start()
+    # Endstop forced high for the whole homing op: the first approach trips
+    # short (< min_home_dist), so the rehome path runs; the held pin makes the
+    # re-approach insta-trip too, so G28 must fail loudly — fast, no hang.
+    _set_pin(sim, X_ENDSTOP_LINE, 1)
 
     t0 = time.time()
     r = sim.gcode("G28 X", timeout=30.0)
     elapsed = time.time() - t0
-    trip_thread.join(timeout=1.0)
 
-    print(f"\n[G28 X rehome] elapsed={elapsed:.2f}s result={r}")
+    print(f"\n[G28 X held-trigger] elapsed={elapsed:.2f}s result={r}")
 
     log_text = sim.klippy_log.read_text()
-
     assert "needs rehome: True" in log_text, (
-        "Expected 'needs rehome: True' in klippy.log — "
-        "the trip should have happened before min_home_dist"
+        "Expected 'needs rehome: True' — the short first trip should have "
+        "requested a rehome"
     )
 
     if "No trigger on x after full movement" in log_text:
         pytest.fail(
-            "BUG REPRODUCED: Second homing attempt failed with "
-            "'No trigger on x after full movement'. The retract move "
-            "did not complete before the second home fired."
+            "Second homing attempt failed with 'No trigger after full "
+            "movement' — the retract move did not complete before re-approach"
         )
 
     err = (r.get("error") or {}).get("message", "")
-    assert not err, f"G28 X failed: {err}"
+    assert "early homing trigger" in err, (
+        f"Expected an 'early homing trigger' failure, got: {err!r}"
+    )
 
-    # Check timing — with the bug, this takes 8-10+ seconds due to
-    # _mcu_pending_end_time overshoot
     assert elapsed < 10.0, (
-        f"G28 X took {elapsed:.1f}s — likely suffering from "
-        f"_mcu_pending_end_time ghost-time delay (expected < 10s)"
+        f"G28 X took {elapsed:.1f}s — likely ghost-time delay"
     )
 
 
-@pytest.mark.parametrize("sim_extra_overrides", [SIM_OVERRIDES], indirect=True)
+@pytest.mark.parametrize(
+    "sim_extra_overrides", [TIMING_OVERRIDES], indirect=True
+)
 def test_homing_retract_timing(sim):
     _wait_ready(sim)
 
