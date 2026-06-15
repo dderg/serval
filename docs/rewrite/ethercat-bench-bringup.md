@@ -51,7 +51,7 @@ process SCHED_FIFO (`klipper_mcu -r`) instead of self-demoting to nice+19. A rea
 STM32 (hardware TIM5) never had this issue.
 
 **Verified on the Pi 3B (2026-06-01)** with the real non-sim build (`mcu-linux`,
-`KALICO_SIM=n`): klippy reaches `ready` driving real `/dev/gpiochip0`, and a
+`MCU_SIM=n`): klippy reaches `ready` driving real `/dev/gpiochip0`, and a
 stepper move now *executes* (`G1 Y110` moved Y 100→110) where the old binary
 retired 0 pieces and instant-faulted `-311`. The runtime `-311` is resolved. A
 **separate** residual remains: *sustained* motion still trips Klipper's **base**
@@ -63,8 +63,8 @@ path — the actual bench target — is unaffected and streams cleanly. See
 [`docs/superpowers/specs/2026-06-01-mach-linux-first-class-mcu-design.md`](../superpowers/specs/2026-06-01-mach-linux-first-class-mcu-design.md).
 
 **Building a real (non-sim) Linux MCU:** `make` with `CONFIG_MACH_LINUX=y` and
-`CONFIG_KALICO_SIM` **unset** drives real `/dev/gpiochip` / `/dev/spidev`
-(`test/configs/kalico-linux.config`). `CONFIG_KALICO_SIM=y` (`.config.linux`,
+`CONFIG_MCU_SIM` **unset** drives real `/dev/gpiochip` / `/dev/spidev`
+(`test/configs/linux.config`). `CONFIG_MCU_SIM=y` (`.config.linux`,
 used by `tools/sim_klippy`) selects the in-memory sim shims. The Rust `mcu-linux`
 feature carries the f64 host numeric profile plus the real-firmware marker that
 links the C step/SPI FFI. Note: raw STEP/DIR GPIO pulse emission on a Linux MCU

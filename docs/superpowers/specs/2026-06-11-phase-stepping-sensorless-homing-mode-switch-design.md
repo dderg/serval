@@ -154,7 +154,7 @@ SGT tuning silently invalid.)
 - Rust unit tests: shortest-signed-phase-delta math; absolute phase-offset
   set is motion-free (no delta accumulates into `position_count`);
   mode-switch seeding of `last_phase_target`; ramp-settled query.
-- kalico-sim: full sequence — home with virtual endstop on a phase-stepped
+- mcu-sim: full sequence — home with virtual endstop on a phase-stepped
   axis, assert mode transitions, assert post-homing commanded position
   matches reconstructed trip position exactly (no phase-snap drift).
 - Bench (Trident): sensorless home with phase stepping enabled; verify DIAG

@@ -1,10 +1,10 @@
-#ifndef KALICO_VTIME_H
-#define KALICO_VTIME_H
+#ifndef VTIME_H
+#define VTIME_H
 
 #include <stdint.h>
 #include <stdatomic.h>
 
-#define VTIME_SHM_NAME "/kalico_vtime"
+#define VTIME_SHM_NAME "/vtime"
 #define VTIME_MAX_PACERS 8
 
 // A pacer is a thread that must observe every period of virtual time

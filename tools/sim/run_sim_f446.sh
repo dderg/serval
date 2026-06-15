@@ -5,7 +5,7 @@
 #   - renode (brew install renode) on PATH
 #   - A simulator-mode F446 firmware build at out/klipper.elf with
 #     CONFIG_STM32_SERIAL_USART2=y, and
-#     CONFIG_KALICO_SIM=y. See tools/sim/sim_f446.config and
+#     CONFIG_MCU_SIM=y. See tools/sim/sim_f446.config and
 #     tools/sim/build_sim_firmware_f446.sh.
 #
 # After launch, USART2 is available at tcp localhost:3334.

@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-IMAGE_TAG="kalico-sim${TAG_SUFFIX}"
+IMAGE_TAG="mcu-sim${TAG_SUFFIX}"
 
 # Cache key partitions the BuildKit compile caches (Rust target/, per-MCU
 # firmware OUT dirs) by branch, so two different branches building in parallel
@@ -79,20 +79,20 @@ if [[ -n "$BRANCH" ]]; then
     # never race on a shared context dir. BuildKit keys its layer cache on
     # file *content* hashes, not the context path, so a fresh temp dir does
     # not defeat caching.
-    BUILD_CTX="$(mktemp -d "${TMPDIR:-/tmp}/kalico-sim-ctx.XXXXXX")"
+    BUILD_CTX="$(mktemp -d "${TMPDIR:-/tmp}/mcu-sim-ctx.XXXXXX")"
     trap 'rm -rf "$BUILD_CTX"' EXIT
     echo "Extracting branch '$BRANCH' to $BUILD_CTX ..."
     (cd "$MAIN_REPO" && git archive "$BRANCH") | tar -x -C "$BUILD_CTX"
     # Overlay current simulator tools from the worktree so local edits to
     # run.sh / Dockerfile / configs are tested without committing.
-    mkdir -p "$BUILD_CTX/tools/kalico-sim"
-    cp -a "$SCRIPT_DIR"/. "$BUILD_CTX/tools/kalico-sim/"
+    mkdir -p "$BUILD_CTX/tools/mcu-sim"
+    cp -a "$SCRIPT_DIR"/. "$BUILD_CTX/tools/mcu-sim/"
     echo "Building Docker image '$IMAGE_TAG' from $BUILD_CTX ..."
     # shellcheck disable=SC2086
     docker build \
         $DOCKER_BUILD_ARGS \
         -t "$IMAGE_TAG" \
-        -f "$BUILD_CTX/tools/kalico-sim/Dockerfile" \
+        -f "$BUILD_CTX/tools/mcu-sim/Dockerfile" \
         "$BUILD_CTX"
 else
     echo "Building Docker image '$IMAGE_TAG' from repo root ..."

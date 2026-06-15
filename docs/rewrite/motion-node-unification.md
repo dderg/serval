@@ -108,14 +108,14 @@ boundary honest.
 
 ## Kconfig dispatch-module selection
 
-Mirror the existing `mcu-h7` / `kalico-sim` passthrough exactly:
+Mirror the existing `mcu-h7` / `mcu-sim` passthrough exactly:
 
 - `src/Kconfig`: a "Motion dispatch modules" menu with
   `CONFIG_MOTION_MODULE_STEPPER` (default y on STM32) and
   `CONFIG_MOTION_MODULE_ETHERCAT` (default n), guarded `depends on` the runtime
   targets.
 - `src/Makefile`: comma-append `motion-module-stepper` / `motion-module-ethercat`
-  to `MCU_RUST_FEATURES` (same pattern as `kalico-sim`, lines 74-76).
+  to `MCU_RUST_FEATURES` (same pattern as `mcu-sim`, lines 74-76).
 - `rust/c-api/Cargo.toml`: passthrough features →
   `runtime/motion-module-*`. `rust/runtime/Cargo.toml`: leaf features gating the
   `#[cfg(feature = "motion-module-*")]` dispatch impls.

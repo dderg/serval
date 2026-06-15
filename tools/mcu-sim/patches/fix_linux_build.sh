@@ -20,7 +20,7 @@
 #    exported symbol.
 #
 # Usage (called from Dockerfile before make):
-#   bash tools/kalico-sim/patches/fix_linux_build.sh
+#   bash tools/mcu-sim/patches/fix_linux_build.sh
 #
 # Idempotent: re-running after a partial apply is safe.
 

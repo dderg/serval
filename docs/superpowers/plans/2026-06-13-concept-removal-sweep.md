@@ -25,7 +25,7 @@ rStepper` die.
 **Tech stack:** Rust (`motionly), pyo3 (`bridge.rs`), klipp
 y Python (`printer.py`, `motion_toolhead.py` → `motion.py`, `stepper.py`, `kinematics/ex
 truder.py`, new `motion_kinextest run` from `rust/` (never
-bare `cargo test`); Python via `./scripts/ci.sh py`; e2e via the kalico-sim skill.
+bare `cargo test`); Python via `./scripts/ci.sh py`; e2e via the mcu-sim skill.
 
 **PRECONDITION: Plan 4 (`docs/superpowers/plans/2026-06-12-per-axis-emission-chain.md`)
 is fully landed.** Verify beline | head` shows plan 4's fin
@@ -372,7 +372,7 @@ rface; Motion sheds fossil methods`
 ## Task 5: Phase A gate
 
 - [ ] **Step 1:** `./scripts/ci.sh quick` → green; `./scripts/ci.sh py` → green.
-- [ ] **Step 2:** kalico-sim boot check (see the `kalico-sim` skill): bring the simulate
+- [ ] **Step 2:** mcu-sim boot check (see the `mcu-sim` skill): bring the simulate
 d printer up on this branch, confirm clean connect, `G28`-readiness state via status que
 ry, and that Moonraker-style status (`printer.toolhead.*`) reads identically to a pre-br
 anch capture. No motion commands beyond what the sim harness itself runs.
@@ -1029,11 +1029,11 @@ ejected; fixtures speak [kinematics]`
 
 - [ ] **Step 1:** `cargo nextest run` from `rust/` → green; `cargo test --doc` if doc ex
 amples touched; `./scripts/ci.sh quick` → green; `./scripts/ci.sh py` → green.
-- [ ] **Step 2:** kalico-sim end-to-end (see the `kalico-sim` skill): boot the rewritten
+- [ ] **Step 2:** mcu-sim end-to-end (see the `mcu-sim` skill): boot the rewritten
  sim config; run the sim harness's homing flow (G28 path through endstop trip → `Kinemat
 icsModule.inverse` recovery) and a short print stream; assert final positions and step c
-ounts match a pre-branch capture of the same G-code on the plan-4 baseline (`KALICO_SIM_
-STEP_COUNT` / `KALICO_SIM_MOTION_STATE` per the skill). Record numbers in the PR descrip
+ounts match a pre-branch capture of the same G-code on the plan-4 baseline (`MCU_SIM_
+STEP_COUNT` / `MCU_SIM_MOTION_STATE` per the skill). Record numbers in the PR descrip
 tion.
 - [ ] **Step 3:** Snapshot test from Task 1 still green — the published `toolhead` surfa
 ce survived both phases byte-for-byte.

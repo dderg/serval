@@ -482,7 +482,7 @@ config RUNTIME_STORAGE_SIZE_SMALL
       36864 to leave the C-side dynamic pool ~17 KB. Const_assert on
       Rust catches RuntimeContext growth at compile time.
 
-config KALICO_SIM
+config MCU_SIM
     bool "Build for simulator (disables IWDG, enables Linux sim shims)"
     default n
     help
@@ -494,14 +494,14 @@ config KALICO_SIM
       silicon build — it leaves the IWDG effectively off, which is
       unsafe on real hardware.
 
-config KALICO_SIM_TMCUART_BYPASS
+config MCU_SIM_TMCUART_BYPASS
     bool "Bypass tmcuart bit-bang and write bytes to a Unix socket"
     depends on MACH_LINUX
     default n
     help
       Sim-only escape hatch for the tmcuart driver. When enabled, the
       tmcuart_send command bypasses the GPIO bit-bang and writes raw
-      bytes directly to ${KALICO_SIM_SOCK_DIR}/tmcuart_<oid>. This is
+      bytes directly to ${MCU_SIM_SOCK_DIR}/tmcuart_<oid>. This is
       the one architectural exception to the otherwise-clean
       "production firmware knows nothing about sim" rule for MACH_LINUX
       builds — the bit-bang's timing fragility under Linux scheduler

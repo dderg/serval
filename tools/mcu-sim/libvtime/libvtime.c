@@ -4,7 +4,7 @@
 // Intercepts: clock_gettime, clock_nanosleep, nanosleep, ppoll, poll,
 //             select, timer_create, timer_settime.
 //
-// Virtual clock lives in /dev/shm/kalico_vtime as an atomic uint64
+// Virtual clock lives in /dev/shm/vtime as an atomic uint64
 // (nanoseconds). Time advances when processes "sleep" — the clock is
 // bumped by the requested amount and the call returns immediately.
 // I/O waits (poll/ppoll/select) do NOT advance virtual time; they
@@ -168,7 +168,7 @@ vtime_advance_by(uint64_t delta_ns)
 static void vtimer_check_and_fire(void);
 
 __attribute__((visibility("default"))) int
-kalico_vtime_pacer_register(uint64_t period_ns)
+vtime_pacer_register(uint64_t period_ns)
 {
     if (!vshm || period_ns == 0)
         return -1;
@@ -187,7 +187,7 @@ kalico_vtime_pacer_register(uint64_t period_ns)
 }
 
 __attribute__((visibility("default"))) void
-kalico_vtime_pacer_advance(int slot, uint64_t target_ns, uint64_t period_ns)
+vtime_pacer_advance(int slot, uint64_t target_ns, uint64_t period_ns)
 {
     if (!vshm || slot < 0 || slot >= VTIME_MAX_PACERS)
         return;
@@ -234,10 +234,10 @@ __attribute__((constructor(102)))
 static void
 vtime_init(void)
 {
-    const char *v = getenv("KALICO_VTIME_DEBUG");
+    const char *v = getenv("VTIME_DEBUG");
     vtime_debug = (v && v[0] == '1');
 
-    const char *speed_env = getenv("KALICO_VTIME_SPEED");
+    const char *speed_env = getenv("VTIME_SPEED");
     if (speed_env)
         vtime_speed = atof(speed_env);
     if (vtime_speed <= 0.0)

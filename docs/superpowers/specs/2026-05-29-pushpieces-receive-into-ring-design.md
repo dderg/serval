@@ -9,7 +9,7 @@
 
 A jog reproducibly crashed the bench with a `PieceStartInPast` (-308) shutdown. Full diagnosis this session:
 
-- The host pump sent the H7 a single `PushPieces` frame of **182 pieces (~5.8 KB)**. The frame fit the ring (per-axis depth ≈ 661) but exceeded the MCU's **separate, smaller demux staging buffer** (`KALICO_MAX_PIECES_PER_FRAME = 128`, `MCU_DEMUX_MCU_BUF_SIZE = 4132 B`, `src/mcu_demux.h`).
+- The host pump sent the H7 a single `PushPieces` frame of **182 pieces (~5.8 KB)**. The frame fit the ring (per-axis depth ≈ 661) but exceeded the MCU's **separate, smaller demux staging buffer** (`SIM_MAX_PIECES_PER_FRAME = 128`, `MCU_DEMUX_MCU_BUF_SIZE = 4132 B`, `src/mcu_demux.h`).
 - The demux dropped the oversized frame as `MCU_DEMUX_OUT_ERROR` (`src/mcu_demux.c:137`) **silently — no response**.
 - The host's `send_frame` is a **synchronous, blocking `mcu_call` with a 5 s timeout** (`rust/motion-engine/src/pump.rs`). With no response it blocked the full 5 s (journalctl: `pump send_frame failed … PushPieces: Timeout`).
 - The pump is single-threaded, so that 5 s stall **delayed delivery of the other MCU's (the F446 Z-hold) continuation pieces.** The anchor keeps `t0` fixed for a stream (`rust/motion-engine/src/anchor.rs:31`), so the late Z pieces carried `start_time` ≈ 4.57 s in the past → `PieceStartInPast` → klippy shutdown.

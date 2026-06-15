@@ -11,7 +11,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 sys.path.insert(0, str(REPO_ROOT / "klippy"))
 
-from kalico_host_io import KalicoHostIO  # noqa: E402
+from host_io import KalicoHostIO  # noqa: E402
 
 pytestmark = pytest.mark.needs_renode
 

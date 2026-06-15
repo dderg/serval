@@ -1,5 +1,5 @@
 ---
-name: kalico-sim
+name: mcu-sim
 description: Use when asked to test firmware or host-side changes end-to-end without a physical printer, reproduce motion/homing bugs in simulation, validate a branch before merging, run G-code against real firmware, or compare branch behavior (e.g. main vs feature branch). Also use when setting up, debugging, or extending the Docker-based simulator.
 ---
 
@@ -12,20 +12,20 @@ There is **one mode: full** (real firmware). A planner-only "batch" mode used to
 ## Quick Start
 
 ```bash
-# From the simulator worktree or any branch that has tools/kalico-sim/:
+# From the simulator worktree or any branch that has tools/mcu-sim/:
 
 # Self-test (generates a test G-code, runs the full pipeline):
-docker run --rm kalico-sim
+docker run --rm mcu-sim
 
 # Run a G-code file through the virtual SD card:
 docker run --rm -v /path/to/file.gcode:/gcode/print.gcode:ro \
-    kalico-sim --gcode /gcode/print.gcode --timeout 120
+    mcu-sim --gcode /gcode/print.gcode --timeout 120
 
 # Build + run for the current branch/worktree (incremental, cache-keyed by branch):
-bash tools/kalico-sim/run.sh
+bash tools/mcu-sim/run.sh
 
 # Build + run for a specific branch:
-bash tools/kalico-sim/run.sh --branch sota-motion
+bash tools/mcu-sim/run.sh --branch sota-motion
 ```
 
 ## Architecture
@@ -56,13 +56,13 @@ bash tools/kalico-sim/run.sh --branch sota-motion
 
 ```bash
 # Build for current branch (run.sh enables BuildKit + per-branch cache key):
-bash tools/kalico-sim/run.sh
+bash tools/mcu-sim/run.sh
 
 # Build for a specific branch (run.sh prepares an isolated build context):
-bash tools/kalico-sim/run.sh --branch <branch-name>
+bash tools/mcu-sim/run.sh --branch <branch-name>
 
 # Direct build of the current tree:
-DOCKER_BUILDKIT=1 docker build -t kalico-sim -f tools/kalico-sim/Dockerfile .
+DOCKER_BUILDKIT=1 docker build -t mcu-sim -f tools/mcu-sim/Dockerfile .
 ```
 
 For branches with the Rust motion engine (like sota-motion), the Dockerfile:
@@ -88,7 +88,7 @@ Each `docker run` gets fully private namespaces (PIDs, mounts, **its own `/dev/s
 # Run N self-tests / G-code runs in parallel — no cross-talk:
 for f in a.gcode b.gcode c.gcode d.gcode; do
     docker run --rm -v /path/$f:/gcode/f.gcode:ro \
-        kalico-sim --gcode /gcode/f.gcode &
+        mcu-sim --gcode /gcode/f.gcode &
 done
 wait
 ```
@@ -97,16 +97,16 @@ wait
 
 | File | Purpose |
 |------|---------|
-| `tools/kalico-sim/Dockerfile` | Docker image — Ubuntu + gcc + Rust + firmware build (BuildKit cache mounts) |
-| `tools/kalico-sim/run.sh` | Launcher: isolated build context, BuildKit, per-branch cache key, build + run |
-| `tools/kalico-sim/runner.py` | Python orchestrator: spawns MCUs, klippy, monitors, reports |
-| `tools/kalico-sim/libvtime/libsim_intercept.c` | GPIO/SPI/PWM/IIO LD_PRELOAD shim with auto-endstop |
-| `tools/kalico-sim/libvtime/libvtime.c` | Virtual time shim (shared-memory clock) |
-| `tools/kalico-sim/emulators/beacon_mcu.py` | Full Beacon eddy-current probe MCU emulator |
-| `tools/kalico-sim/emulators/beacon_identify_dict.py` | Beacon firmware identify dictionary |
-| `tools/kalico-sim/configs/h7-sim.config` | MACH_LINUX build config for H7-flavored MCU |
-| `tools/kalico-sim/configs/f4-sim.config` | MACH_LINUX build config for F4-flavored MCU |
-| `tools/kalico-sim/patches/fix_linux_build.sh` | Patches the tree for MACH_LINUX link errors |
+| `tools/mcu-sim/Dockerfile` | Docker image — Ubuntu + gcc + Rust + firmware build (BuildKit cache mounts) |
+| `tools/mcu-sim/run.sh` | Launcher: isolated build context, BuildKit, per-branch cache key, build + run |
+| `tools/mcu-sim/runner.py` | Python orchestrator: spawns MCUs, klippy, monitors, reports |
+| `tools/mcu-sim/libvtime/libsim_intercept.c` | GPIO/SPI/PWM/IIO LD_PRELOAD shim with auto-endstop |
+| `tools/mcu-sim/libvtime/libvtime.c` | Virtual time shim (shared-memory clock) |
+| `tools/mcu-sim/emulators/beacon_mcu.py` | Full Beacon eddy-current probe MCU emulator |
+| `tools/mcu-sim/emulators/beacon_identify_dict.py` | Beacon firmware identify dictionary |
+| `tools/mcu-sim/configs/h7-sim.config` | MACH_LINUX build config for H7-flavored MCU |
+| `tools/mcu-sim/configs/f4-sim.config` | MACH_LINUX build config for F4-flavored MCU |
+| `tools/mcu-sim/patches/fix_linux_build.sh` | Patches the tree for MACH_LINUX link errors |
 
 ## Beacon MCU Emulator
 
@@ -141,7 +141,7 @@ beacon_stub.set_z(5.0)  # 5mm above bed — affects frequency samples
 
 **Auto-endstop**: The shim counts rising edges on step pins. After N steps (default 50), it sets the linked endstop GPIO to triggered. After the endstop triggers, it clears after 10 retract steps. This simulates physical endstop contact during homing.
 
-**Control socket**: Each MCU gets a `sim_control` Unix socket at `$KALICO_SIM_SOCK_DIR/sim_control` for runtime GPIO/ADC injection:
+**Control socket**: Each MCU gets a `sim_control` Unix socket at `$MCU_SIM_SOCK_DIR/sim_control` for runtime GPIO/ADC injection:
 ```
 set_gpio_input chip=0 line=10 value=1   # trigger endstop
 set_adc channel=0 value=3900            # set ADC reading
@@ -160,8 +160,8 @@ The simulator generates a minimal config when none is provided. Key constraints:
 
 ## Adding a New Test
 
-1. Create a G-code file in `tools/kalico-sim/tests/`
-2. Run it: `docker run --rm -v /path/to/test.gcode:/gcode/t.gcode:ro kalico-sim --gcode /gcode/t.gcode --timeout 120`
+1. Create a G-code file in `tools/mcu-sim/tests/`
+2. Run it: `docker run --rm -v /path/to/test.gcode:/gcode/t.gcode:ro mcu-sim --gcode /gcode/t.gcode --timeout 120`
 3. For branch comparison: run the same G-code against two Docker images built from different branches
 
 ## Common Issues

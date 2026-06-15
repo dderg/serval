@@ -199,7 +199,7 @@ calibration descents — all Z-only) map 1:1 onto this in Spec D.
 - **Firmware/host protocol**: `endstop_state` response extension exercised in
   sim; cross-check equality on GPIO trips (every existing sim homing test now
   validates it implicitly).
-- **kalico-sim**: a minimal synthetic remote-trsync provider extra (sim-only)
+- **mcu-sim**: a minimal synthetic remote-trsync provider extra (sim-only)
   plus an emulated second MCU that fires `trsync_state` on command:
   - end-to-end Z home through the relay (arm → trigger → stop →
     reconstruction → measured override applied);
@@ -207,7 +207,7 @@ calibration descents — all Z-only) map 1:1 onto this in Spec D.
     error names the latched trip);
   - terminal-with-error-reason scenario (motion stops, reason surfaced).
 - Full beacon-fork validation (scanning, contact calibration, temp comp) is
-  Spec E, against `tools/kalico-sim/emulators/beacon_mcu.py`.
+  Spec E, against `tools/mcu-sim/emulators/beacon_mcu.py`.
 
 ## Out of scope
 

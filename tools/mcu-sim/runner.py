@@ -22,10 +22,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="[sim %(levelname)s] %(message)s",
 )
-log = logging.getLogger("kalico-sim")
+log = logging.getLogger("mcu-sim")
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-VTIME_SHM = "/dev/shm/kalico_vtime"
+VTIME_SHM = "/dev/shm/vtime"
 VTIME_SHM_SIZE = 256
 VTIME_STRUCT_FMT = "<QIIII"
 
@@ -75,7 +75,7 @@ def vtime_destroy() -> None:
 def build_firmware(
     repo_root: pathlib.Path, config_name: str, output_name: str
 ) -> pathlib.Path:
-    config_src = repo_root / "tools" / "kalico-sim" / "configs" / config_name
+    config_src = repo_root / "tools" / "mcu-sim" / "configs" / config_name
     if not config_src.exists():
         config_src = (
             repo_root / "tools" / "sim_klippy" / "configs" / config_name
@@ -117,7 +117,7 @@ def build_firmware(
 
 
 def ensure_shims_built(repo_root: pathlib.Path) -> tuple:
-    shim_dir = repo_root / "tools" / "kalico-sim" / "libvtime"
+    shim_dir = repo_root / "tools" / "mcu-sim" / "libvtime"
     shim_so = shim_dir / "libsim_intercept.so"
     vtime_so = shim_dir / "libvtime.so"
     if not shim_so.exists() or not vtime_so.exists():
@@ -147,11 +147,11 @@ def spawn_mcu(
     # runs the simulated world at 1/5 real speed, inflating every host-side
     # latency budget (drip window, trsync timeouts) 5x against Docker jitter.
     env["LD_PRELOAD"] = "%s:%s" % (vtime_so, shim_so)
-    env.setdefault("KALICO_VTIME_SPEED", "1")
-    env["KALICO_SIM_SOCK_DIR"] = sock_dir
+    env.setdefault("VTIME_SPEED", "1")
+    env["MCU_SIM_SOCK_DIR"] = sock_dir
     if verbose:
-        env["KALICO_SIM_SHIM_VERBOSE"] = "1"
-        env["KALICO_VTIME_DEBUG"] = "1"
+        env["MCU_SIM_SHIM_VERBOSE"] = "1"
+        env["VTIME_DEBUG"] = "1"
 
     proc = subprocess.Popen(
         [str(elf_path), "-I", pty_path],
@@ -350,7 +350,7 @@ def run_simulation(
 ) -> SimResult:
     wall_start = time.monotonic()
 
-    with tempfile.TemporaryDirectory(prefix="kalico_sim_") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="mcu_sim_") as tmpdir:
         tmp = (
             pathlib.Path(serve_data_dir)
             if serve_data_dir
@@ -533,8 +533,8 @@ def run_simulation(
             # process commands instantly. Loading vtime in klippy too causes a
             # deadlock where both sides block on I/O and neither advances time.
             if verbose:
-                env["KALICO_VTIME_DEBUG"] = "1"
-            env["KALICO_SIM_SOCK_DIR"] = str(h7_sock_dir)
+                env["VTIME_DEBUG"] = "1"
+            env["MCU_SIM_SOCK_DIR"] = str(h7_sock_dir)
 
             third_party = (
                 repo_root
@@ -1120,10 +1120,10 @@ def run_simulation(
 
                 offset = len(klippy_log.read_bytes())
                 resp = send_gcode(
-                    api_socket, "KALICO_SIM_MOTION_STATE T_AGO=1.0", timeout=15
+                    api_socket, "MCU_SIM_MOTION_STATE T_AGO=1.0", timeout=15
                 )
                 out, offset = _log_tail_since(klippy_log, offset)
-                log.info("KALICO_SIM_MOTION_STATE: %s", out or resp)
+                log.info("MCU_SIM_MOTION_STATE: %s", out or resp)
 
                 klippy_content = (
                     klippy_log.read_text(errors="replace")
@@ -1133,9 +1133,7 @@ def run_simulation(
 
                 ms_error = None
                 if isinstance(resp, dict) and resp.get("error"):
-                    ms_error = (
-                        f"KALICO_SIM_MOTION_STATE failed: {resp['error']}"
-                    )
+                    ms_error = f"MCU_SIM_MOTION_STATE failed: {resp['error']}"
                 elif "shutdown:" in klippy_content.lower():
                     for line in klippy_content.split("\n"):
                         if "shutdown:" in line.lower():
@@ -1384,9 +1382,9 @@ def _start_chip_emulators(h7_sock_dir, f4_sock_dir, repo_root):
 def _start_beacon(beacon_pty, log_dir, repo_root, step_sock_path=None):
     try:
         sys.path.insert(0, str(repo_root))
-        # tools/kalico-sim is not importable as a module (hyphen in name),
+        # tools/mcu-sim is not importable as a module (hyphen in name),
         # so the emulators/ subdir is added to sys.path directly.
-        emulators_dir = repo_root / "tools" / "kalico-sim" / "emulators"
+        emulators_dir = repo_root / "tools" / "mcu-sim" / "emulators"
         if emulators_dir.exists():
             sys.path.insert(0, str(emulators_dir))
         try:
@@ -1594,7 +1592,7 @@ def _generate_beacon_homing_config(
     h7_pty: str,
     f4_pty: str,
     beacon_pty: str,
-    gcode_dir: str = "/tmp/kalico_sim_gcodes",
+    gcode_dir: str = "/tmp/mcu_sim_gcodes",
     bed_mesh: bool = False,
 ) -> str:
     """SAVE_CONFIG beacon model must match the stub's frequency model.
@@ -2116,7 +2114,7 @@ def run_probe_test(
 
             env = os.environ.copy()
             if expect_boot_error is None:
-                env["KALICO_SIM_SOCK_DIR"] = str(tmp / "sim" / "h7")
+                env["MCU_SIM_SOCK_DIR"] = str(tmp / "sim" / "h7")
             klippy_stdout = open(log_dir / "klippy.stdout", "wb")
             klippy_proc = subprocess.Popen(
                 [
@@ -2418,7 +2416,7 @@ def run_probe_test(
 
 
 def _generate_minimal_config(
-    h7_pty: str, f4_pty: str, gcode_dir: str = "/tmp/kalico_sim_gcodes"
+    h7_pty: str, f4_pty: str, gcode_dir: str = "/tmp/mcu_sim_gcodes"
 ) -> str:
     """Pin names must use gpiochip0/gpioN format, not STM32 PA3 style."""
     return f"""\
@@ -2504,7 +2502,7 @@ enable_force_move: True
 
 
 def _generate_multi_z_config(
-    h7_pty: str, gcode_dir: str = "/tmp/kalico_sim_gcodes"
+    h7_pty: str, gcode_dir: str = "/tmp/mcu_sim_gcodes"
 ) -> str:
     return f"""\
 [mcu]
@@ -2583,7 +2581,7 @@ enable_force_move: True
 
 
 def _generate_phase_stepping_config(
-    h7_pty: str, f4_pty: str, gcode_dir: str = "/tmp/kalico_sim_gcodes"
+    h7_pty: str, f4_pty: str, gcode_dir: str = "/tmp/mcu_sim_gcodes"
 ) -> str:
     return f"""\
 [mcu]
@@ -2675,7 +2673,7 @@ enable_force_move: True
 
 
 def _generate_sensorless_phase_config(
-    h7_pty: str, gcode_dir: str = "/tmp/kalico_sim_gcodes"
+    h7_pty: str, gcode_dir: str = "/tmp/mcu_sim_gcodes"
 ) -> str:
     """Phase-stepping Z with a TMC5160 virtual (StallGuard) endstop.
 

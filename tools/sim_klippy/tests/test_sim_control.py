@@ -27,7 +27,7 @@ def shim_under_sleep(tmp_path):
     )
     env = os.environ.copy()
     env["LD_PRELOAD"] = shim
-    env["KALICO_SIM_SOCK_DIR"] = str(sock_dir)
+    env["MCU_SIM_SOCK_DIR"] = str(sock_dir)
     p = subprocess.Popen(["/bin/sleep", "10"], env=env)
     deadline = time.time() + 3.0
     sock_path = sock_dir / "sim_control"

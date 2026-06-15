@@ -160,7 +160,7 @@ host `Stop` path reports it exactly as before.
   gate again, assert still gated and no error / no corruption).
 - **Existing suites**: `motion-engine` `homing/tests.rs` and `pump` tests
   continue to pass unchanged (host path untouched).
-- **kalico-sim**: a same-MCU home (endstop + homed stepper on one emulated MCU)
+- **mcu-sim**: a same-MCU home (endstop + homed stepper on one emulated MCU)
   where the trip event is delivered to the host with deliberate latency; assert
   the curve evaluator freezes at trip time (motion stops before the host's
   `Stop` lands).
@@ -173,7 +173,7 @@ host `Stop` path reports it exactly as before.
 | `src/mcu_transport_dispatch.h` | declare `handle_stop_inner` (so `endstop.c` can call it). |
 | `src/endstop.c` | `endstop_trip_task` calls `handle_stop_inner` before emitting the trip event(s). |
 | `CLAUDE.md` | replace the "do not optimize same-MCU homing" note with the self-gate behavior. |
-| (tests) | `c-api` idempotent re-gate coverage; kalico-sim same-MCU home. |
+| (tests) | `c-api` idempotent re-gate coverage; mcu-sim same-MCU home. |
 
 ## Out of scope
 

@@ -42,7 +42,7 @@ def reject_legacy_role_sections(config):
 
 
 def _open_sim_control():
-    sock_dir = os.environ.get("KALICO_SIM_SOCK_DIR")
+    sock_dir = os.environ.get("MCU_SIM_SOCK_DIR")
     if not sock_dir:
         return None
     sock_path = os.path.join(sock_dir, "sim_control")
@@ -155,28 +155,28 @@ class Motion:
         )
         gcode.register_command("M204", self.cmd_M204)
         gcode.register_command(
-            "KALICO_SIM_STEP_COUNT",
-            self.cmd_KALICO_SIM_STEP_COUNT,
+            "MCU_SIM_STEP_COUNT",
+            self.cmd_MCU_SIM_STEP_COUNT,
             desc="[sim] Query cumulative step count for a stepper OID",
         )
         gcode.register_command(
-            "KALICO_SIM_AXIS_STEPS",
-            self.cmd_KALICO_SIM_AXIS_STEPS,
+            "MCU_SIM_AXIS_STEPS",
+            self.cmd_MCU_SIM_AXIS_STEPS,
             desc="[sim] Query configured steps_per_mm for an axis OID",
         )
         gcode.register_command(
-            "KALICO_SIM_AXIS_ACCUM",
-            self.cmd_KALICO_SIM_AXIS_ACCUM,
+            "MCU_SIM_AXIS_ACCUM",
+            self.cmd_MCU_SIM_AXIS_ACCUM,
             desc="[sim] Query step accumulator for an axis OID",
         )
         gcode.register_command(
-            "KALICO_SIM_ENDSTOP_SET_PIN",
-            self.cmd_KALICO_SIM_ENDSTOP_SET_PIN,
+            "MCU_SIM_ENDSTOP_SET_PIN",
+            self.cmd_MCU_SIM_ENDSTOP_SET_PIN,
             desc="[sim] Drive a Linux-MCU GPIO level (test fixture)",
         )
         gcode.register_command(
-            "KALICO_SIM_MOTION_STATE",
-            self.cmd_KALICO_SIM_MOTION_STATE,
+            "MCU_SIM_MOTION_STATE",
+            self.cmd_MCU_SIM_MOTION_STATE,
             desc="[sim] Query commanded motion state at a past print_time",
         )
         gcode.register_command(
@@ -1177,7 +1177,7 @@ class Motion:
         else:
             gcmd.respond_info("DIAG_DUMP: no MCU exposes runtime_diag_dump")
 
-    def cmd_KALICO_SIM_MOTION_STATE(self, gcmd):
+    def cmd_MCU_SIM_MOTION_STATE(self, gcmd):
         print_time = gcmd.get_float("PRINT_TIME", None)
         t_ago = gcmd.get_float("T_AGO", None)
         if (print_time is None) == (t_ago is None):
@@ -1195,7 +1195,7 @@ class Motion:
             "motion_state @%.6f: %s" % (print_time, " | ".join(parts))
         )
 
-    def cmd_KALICO_SIM_STEP_COUNT(self, gcmd):
+    def cmd_MCU_SIM_STEP_COUNT(self, gcmd):
         oid = gcmd.get_int("OID", 0, minval=0)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
@@ -1211,13 +1211,13 @@ class Motion:
             )
             count = resp.get("count", 0)
             gcmd.respond_info(
-                "[engine-async] KALICO_SIM_STEP_COUNT oid=%d count=%d"
+                "[engine-async] MCU_SIM_STEP_COUNT oid=%d count=%d"
                 % (oid, count)
             )
         except Exception as e:
             raise gcmd.error("step count query failed: %s" % e)
 
-    def cmd_KALICO_SIM_AXIS_STEPS(self, gcmd):
+    def cmd_MCU_SIM_AXIS_STEPS(self, gcmd):
         oid = gcmd.get_int("OID", 0, minval=0, maxval=3)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
@@ -1233,13 +1233,13 @@ class Motion:
             )
             milli = resp.get("milli_spm", 0)
             gcmd.respond_info(
-                "[engine-async] KALICO_SIM_AXIS_STEPS oid=%d "
+                "[engine-async] MCU_SIM_AXIS_STEPS oid=%d "
                 "steps_per_mm=%.3f" % (oid, milli / 1000.0)
             )
         except Exception as e:
             raise gcmd.error("axis steps query failed: %s" % e)
 
-    def cmd_KALICO_SIM_AXIS_ACCUM(self, gcmd):
+    def cmd_MCU_SIM_AXIS_ACCUM(self, gcmd):
         oid = gcmd.get_int("OID", 0, minval=0, maxval=3)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
@@ -1255,13 +1255,13 @@ class Motion:
             )
             milli = resp.get("milli", 0)
             gcmd.respond_info(
-                "[engine-async] KALICO_SIM_AXIS_ACCUM oid=%d accum=%.3f"
+                "[engine-async] MCU_SIM_AXIS_ACCUM oid=%d accum=%.3f"
                 % (oid, milli / 1000.0)
             )
         except Exception as e:
             raise gcmd.error("axis accum query failed: %s" % e)
 
-    def cmd_KALICO_SIM_ENDSTOP_SET_PIN(self, gcmd):
+    def cmd_MCU_SIM_ENDSTOP_SET_PIN(self, gcmd):
         gpio = gcmd.get_int("GPIO", minval=0, maxval=0xFFFF)
         level = gcmd.get_int("LEVEL", minval=0, maxval=1)
         client = _open_sim_control()
@@ -1277,7 +1277,7 @@ class Motion:
                         value=level,
                     )
                 gcmd.respond_info(
-                    "KALICO_SIM_ENDSTOP_SET_PIN gpio=%d level=%d -> ok (shim)"
+                    "MCU_SIM_ENDSTOP_SET_PIN gpio=%d level=%d -> ok (shim)"
                     % (gpio, level)
                 )
                 return
@@ -1292,7 +1292,7 @@ class Motion:
                 "runtime_sim_endstop_set_pin gpio=%d level=%d" % (gpio, level),
             )
             gcmd.respond_info(
-                "KALICO_SIM_ENDSTOP_SET_PIN gpio=%d level=%d -> ok (fw)"
+                "MCU_SIM_ENDSTOP_SET_PIN gpio=%d level=%d -> ok (fw)"
                 % (gpio, level)
             )
         except Exception as e:

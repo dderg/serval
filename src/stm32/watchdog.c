@@ -19,7 +19,7 @@ volatile uint8_t runtime_liveness_ok __attribute__((used, externally_visible))
 void
 watchdog_reset(void)
 {
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
     return;  // Renode's IWDG model misbehaves; sim build is silicon-unsafe
 #endif
     if (!runtime_liveness_ok) return;
@@ -30,7 +30,7 @@ DECL_TASK(watchdog_reset);
 void
 watchdog_init(void)
 {
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
     return;  // Don't arm IWDG in sim — see watchdog_reset
 #endif
     IWDG->KR = 0x5555;

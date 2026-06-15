@@ -625,7 +625,7 @@ If it reports diffs, apply them and re-run until clean, then amend the relevant 
 
 - [ ] **Step 4: (Optional, when a bench/sim is available) end-to-end check**
 
-Using the `kalico-sim` skill or a servo bench: home a servo axis, `M84`, hand-move (or
+Using the `mcu-sim` skill or a servo bench: home a servo axis, `M84`, hand-move (or
 simulate displacement), confirm `homed_axes` still includes the servo axis, then issue a
 `G1` on that axis and confirm the drive resyncs (no full-force yank) and moves from the true
 position. Then repeat with `G28` to confirm the homing energize no longer yanks. Do **not**

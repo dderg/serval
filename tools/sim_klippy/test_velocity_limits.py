@@ -16,7 +16,7 @@ import pytest
 # from the CI sim_unit selection). Run directly: `python3 <this file>`.
 pytestmark = pytest.mark.needs_elf
 
-REPO = pathlib.Path(os.environ.get("KALICO_REPO", "/work"))
+REPO = pathlib.Path(os.environ.get("SIM_REPO", "/work"))
 LOGDIR = REPO / "tools" / "sim_klippy" / ".local-logs"
 KLIPPER_ELF = REPO / "out" / "klipper.elf"
 PRINTER_CFG = REPO / "tools" / "sim_klippy" / "printer.cfg"

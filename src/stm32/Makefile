@@ -71,8 +71,8 @@ src-y += runtime_commands.c
 # Phase-stepping XDIRECT SPI helper (Step 7-D / phase-stepping sim slice).
 # Called from the Rust modulator via FFI; see src/stm32/phase_stepping_spi.h.
 src-y += stm32/phase_stepping_spi.c
-# Sim-only: software CYCCNT under CONFIG_KALICO_SIM. Per Step-6 spec §3.1.
-src-$(CONFIG_KALICO_SIM) += stm32/kalico_sim_clock.c
+# Sim-only: software CYCCNT under CONFIG_MCU_SIM. Per Step-6 spec §3.1.
+src-$(CONFIG_MCU_SIM) += stm32/mcu_sim_clock.c
 
 src-$(CONFIG_MACH_STM32F0) += stm32/stm32f0.c ../lib/stm32f0/system_stm32f0xx.c
 src-$(CONFIG_MACH_STM32F1) += stm32/stm32f1.c ../lib/stm32f1/system_stm32f1xx.c

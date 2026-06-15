@@ -998,7 +998,7 @@ Semantics note carried from the spec discussion: the overlay can only *tighten* 
 Run: `grep -rln "max_velocity" --include="*.cfg" . | grep -v test/klippy`
 (Mainline's `test/klippy/*.cfg` regression corpus targets legacy `ToolHead` and is not run by our suites — leave it.)
 
-- [ ] **Step 2:** For each fixture that boots `MotionToolhead` (kalico-sim configs, any rust test fixtures, `config/` examples our benches derive from): delete the legacy `[printer]` limit keys and add equivalent sections, e.g.:
+- [ ] **Step 2:** For each fixture that boots `MotionToolhead` (mcu-sim configs, any rust test fixtures, `config/` examples our benches derive from): delete the legacy `[printer]` limit keys and add equivalent sections, e.g.:
 
 ```ini
 [limit gantry]
@@ -1034,7 +1034,7 @@ Expected survivors only: legacy `toolhead.py` base-class code (legacy `ToolHead`
 ### Task 9: End-to-end verification
 
 - [ ] **Step 1:** `cargo nextest run` from `rust/` → full PASS. `cargo fmt --all --check` → clean.
-- [ ] **Step 2:** Boot a simulated printer via the **kalico-sim** skill with a migrated fixture; verify: clean startup (no config errors), a homing + square + diagonal G-code runs, and a fixture with a deliberate `[printer] max_accel` errors at startup naming `[limit]` sections.
+- [ ] **Step 2:** Boot a simulated printer via the **mcu-sim** skill with a migrated fixture; verify: clean startup (no config errors), a homing + square + diagonal G-code runs, and a fixture with a deliberate `[printer] max_accel` errors at startup naming `[limit]` sections.
 - [ ] **Step 3:** In the sim, exercise `SET_VELOCITY_LIMIT ACCEL=500` mid-stream and `RESET_VELOCITY_LIMIT`; verify no planner error and visibly slower motion under the cap (compare trajectory durations via sim step counts).
 - [ ] **Step 4:** Diagonal-vs-axis sanity check (the √2 bug death): with `[limit gantry] axes: x,y max_accel: 3000`, a pure-X 100 mm move and a 45° 100 mm move should now show the *same* peak toolhead acceleration in planner output (previously the diagonal reached ~4243). A unit-level assertion of this already lives in the Task 3 test updates; this step is the integration confirmation.
 - [ ] **Step 4b:** Corner full-stop check: a two-move L-shaped G-code (90° corner) must come to rest at the corner (velocity → 0 at the junction). Print-time regression on polyline G-code versus pre-rework is **expected and accepted** — it is the honest cost of the deleted junction-deviation pretense, recovered by the future upstream corner-blending plan.

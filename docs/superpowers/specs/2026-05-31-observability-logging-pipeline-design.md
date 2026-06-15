@@ -245,9 +245,9 @@ Each unit has one purpose, a defined interface, and explicit deps:
 - **Pipeline self-observability (fail-loudly):** because "VL is down" is exactly the case that cannot self-report, the host runs a lightweight liveness check: (a) a periodic **synthetic heartbeat record** the agent/operator can query to confirm end-to-end health, and (b) a host-side check that the Vector process is alive and its checkpoint lag (bytes behind file EOF) is bounded; staleness/lag beyond threshold is surfaced loudly (warning in the text log + a queryable `subsystem=observability` event). A silent pipeline stall is itself a reportable fault.
 - **Schema drift:** the structured helper enforces required fields; malformed `extra=` is caught at format time.
 
-## 13. kalico-sim integration
+## 13. mcu-sim integration
 
-`kalico-sim` currently greps the text `klippy.log` and injects `[sim-trace]`/`[sim-diag]` markers. Because the text view is preserved, existing grep assertions keep working. New, more precise assertions can query the JSONL directly (or a sim-local VL), and `source="sim"` separates simulator runs. Sim records also carry the **sim git SHA** (as a field) so runs are separable. Sim-trace markers become `subsystem=sim` / `event=…` fields over time.
+`mcu-sim` currently greps the text `klippy.log` and injects `[sim-trace]`/`[sim-diag]` markers. Because the text view is preserved, existing grep assertions keep working. New, more precise assertions can query the JSONL directly (or a sim-local VL), and `source="sim"` separates simulator runs. Sim records also carry the **sim git SHA** (as a field) so runs are separable. Sim-trace markers become `subsystem=sim` / `event=…` fields over time.
 
 ## 14. Testing strategy
 
@@ -255,7 +255,7 @@ Each unit has one purpose, a defined interface, and explicit deps:
 - **Concurrency:** Rust `ArcSwap<SessionContext>` — a log emitted concurrently with a `print_id` swap always carries a coherent (old-or-new, never torn/empty) context; binding-timing invariant (no record before `session_id` bound).
 - **Integration:** emit (Python + Rust) → JSONL on disk → Vector → VL → `query-logs` round-trip returns the expected records by `session_id`/`subsystem`/`event`.
 - **Durability:** kill VL mid-run, confirm JSONL intact and VL backfills on restart from the checkpoint; confirm rotated (uncompressed) files are still picked up; disk-full triggers the hard-error + preflight, not silent loss.
-- **Sim:** existing grep-based `kalico-sim` assertions still pass against the derived text log.
+- **Sim:** existing grep-based `mcu-sim` assertions still pass against the derived text log.
 
 ## 15. Out of scope → follow-on specs
 

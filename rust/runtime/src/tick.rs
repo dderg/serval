@@ -12,7 +12,7 @@ pub use crate::stepping_state::N_AXES;
 
 // C-side scheduler accessor for the most-recently-dispatched timer func.
 // Read only on the `-311` fault path. MCU/sim link only; host/test → 0.
-#[cfg(any(not(any(test, feature = "host")), feature = "kalico-sim"))]
+#[cfg(any(not(any(test, feature = "host")), feature = "mcu-sim"))]
 unsafe extern "C" {
     fn sched_last_dispatched_func() -> u32;
 }
@@ -21,7 +21,7 @@ unsafe extern "C" {
 // (src/stm32/runtime_tick_*.c). Read only on the `-311` fault path:
 //   - `runtime_tim5_stacked_pc()`: instruction about to execute when TIM5 preempted.
 //   - `runtime_tim5_stacked_exc()`: stacked xPSR exception number (0 = thread).
-#[cfg(any(not(any(test, feature = "host")), feature = "kalico-sim"))]
+#[cfg(any(not(any(test, feature = "host")), feature = "mcu-sim"))]
 unsafe extern "C" {
     fn runtime_tim5_stacked_pc() -> u32;
     fn runtime_tim5_stacked_exc() -> u32;
@@ -29,12 +29,12 @@ unsafe extern "C" {
 
 #[inline]
 fn tim5_stacked_pc() -> u32 {
-    #[cfg(any(not(any(test, feature = "host")), feature = "kalico-sim"))]
+    #[cfg(any(not(any(test, feature = "host")), feature = "mcu-sim"))]
     // SAFETY: side-effect-free volatile frame read. Safe from the TIM5 ISR.
     unsafe {
         runtime_tim5_stacked_pc()
     }
-    #[cfg(not(any(not(any(test, feature = "host")), feature = "kalico-sim")))]
+    #[cfg(not(any(not(any(test, feature = "host")), feature = "mcu-sim")))]
     {
         0
     }
@@ -42,12 +42,12 @@ fn tim5_stacked_pc() -> u32 {
 
 #[inline]
 fn tim5_stacked_exc() -> u32 {
-    #[cfg(any(not(any(test, feature = "host")), feature = "kalico-sim"))]
+    #[cfg(any(not(any(test, feature = "host")), feature = "mcu-sim"))]
     // SAFETY: side-effect-free volatile frame read. Safe from the TIM5 ISR.
     unsafe {
         runtime_tim5_stacked_exc()
     }
-    #[cfg(not(any(not(any(test, feature = "host")), feature = "kalico-sim")))]
+    #[cfg(not(any(not(any(test, feature = "host")), feature = "mcu-sim")))]
     {
         0
     }
@@ -55,12 +55,12 @@ fn tim5_stacked_exc() -> u32 {
 
 #[inline]
 fn last_dispatched_func() -> u32 {
-    #[cfg(any(not(any(test, feature = "host")), feature = "kalico-sim"))]
+    #[cfg(any(not(any(test, feature = "host")), feature = "mcu-sim"))]
     // SAFETY: side-effect-free ring-buffer index read. Safe from the TIM5 ISR.
     unsafe {
         sched_last_dispatched_func()
     }
-    #[cfg(not(any(not(any(test, feature = "host")), feature = "kalico-sim")))]
+    #[cfg(not(any(not(any(test, feature = "host")), feature = "mcu-sim")))]
     {
         0
     }

@@ -35,7 +35,7 @@ timer_is_before(uint32_t time1, uint32_t time2)
     return (int32_t)(time1 - time2) < 0;
 }
 
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
 // Remember the value last passed to `timer_set_diff` so SysTick_Handler can
 // advance runtime_sim_cyccnt by exactly the cycles that elapsed since the
 // last reload. `timer_set_diff` zeros LOAD after the one-shot reload, so the
@@ -47,7 +47,7 @@ volatile uint32_t timer_last_diff;
 static void
 timer_set_diff(uint32_t value)
 {
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
     // Cap SysTick wait at ~1 ms of virtual time (520k cycles at 520 MHz).
     // Without this, a far-future Klipper timer (e.g. status_drain's 100 ms
     // gate) sets SysTick LOAD to 52 M+ cycles. Renode's sim runs at <1×
@@ -66,13 +66,13 @@ timer_set_diff(uint32_t value)
     SysTick->LOAD = 0;
 }
 
-// Under CONFIG_KALICO_SIM (Renode), DWT->CYCCNT is unmodeled and reads as
+// Under CONFIG_MCU_SIM (Renode), DWT->CYCCNT is unmodeled and reads as
 // 0. Fork to the software CYCCNT (runtime_sim_cyccnt, bumped from the TIM5
 // ISR by cycles-per-tick per fire — see src/stm32/runtime_tick_h7.c) so
 // timer_dispatch_many() and the engine's widen state both observe forward
-// progress. Production builds (CONFIG_KALICO_SIM=n) read the hardware register
+// progress. Production builds (CONFIG_MCU_SIM=n) read the hardware register
 // directly. NEVER flash
-// a CONFIG_KALICO_SIM=y image to silicon — IWDG-disable + software CYCCNT
+// a CONFIG_MCU_SIM=y image to silicon — IWDG-disable + software CYCCNT
 // is a debugging build only.
 // `used, externally_visible` keeps the out-of-line copy alive under
 // -ffunction-sections + --gc-sections so the Rust kalico runtime archive
@@ -82,7 +82,7 @@ __attribute__((used, externally_visible))
 uint32_t
 timer_read_time(void)
 {
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
     extern volatile uint32_t runtime_sim_cyccnt;
     return runtime_sim_cyccnt;
 #else
@@ -251,8 +251,8 @@ SysTick_Handler(void)
     extern void diag_systick_account(uint32_t enter, uint32_t exit);
     uint32_t diag_systick_enter = DWT->CYCCNT;
 #endif
-#if CONFIG_KALICO_SIM
-    // CONFIG_KALICO_SIM uses a software CYCCNT (runtime_sim_cyccnt) because
+#if CONFIG_MCU_SIM
+    // CONFIG_MCU_SIM uses a software CYCCNT (runtime_sim_cyccnt) because
     // Renode's H7 model returns 0 from DWT->CYCCNT. SysTick fires
     // unconditionally regardless of TIM5 state, so we piggyback time
     // advance here.
@@ -261,11 +261,11 @@ SysTick_Handler(void)
     // would otherwise take ~40 s wall to retire even with perfect cyccnt
     // accounting, and 5–10× longer once producer / status / clock_sync
     // ISRs eat into that budget. We deliberately advance cyccnt by
-    // `KALICO_SIM_CLOCK_MULT × timer_last_diff` to compress MCU virtual
+    // `MCU_SIM_CLOCK_MULT × timer_last_diff` to compress MCU virtual
     // time into a tractable wall budget. The host's clock-sync estimator
     // tracks whatever rate the MCU reports, so segment t_start values
     // computed by the planner stay in-phase with the sped-up clock.
-    // KALICO_SIM_CLOCK_MULT=16 turns a 40 s real-time trajectory into
+    // MCU_SIM_CLOCK_MULT=16 turns a 40 s real-time trajectory into
     // ~2.5 s wall when sim runs at 1× real, ~5 s wall at 0.5×, etc.
     extern volatile uint32_t runtime_sim_cyccnt;
     extern volatile uint32_t timer_last_diff;

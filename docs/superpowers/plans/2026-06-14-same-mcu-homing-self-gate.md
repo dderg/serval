@@ -6,11 +6,11 @@
 
 **Architecture:** Extract the gating core of the host `Stop` handler into `handle_stop_inner` (everything except the host-facing `send_stop_response`). Call it from `endstop_trip_task` so a local trip freezes the curve evaluator immediately. The host's existing `broadcast_stop` is untouched; its later `Stop` to the already-braked MCU is a harmless idempotent re-gate. Overshoot/slide accounting is out of scope (handled by a separate mechanism), so the host's position-reconstruction path is left as-is.
 
-**Tech Stack:** C firmware (`src/*.c`), Rust runtime FFI (`rust/c-api`), the kalico-sim full-mode simulator (real firmware + klippy in Docker).
+**Tech Stack:** C firmware (`src/*.c`), Rust runtime FFI (`rust/c-api`), the mcu-sim full-mode simulator (real firmware + klippy in Docker).
 
 **Reference spec:** [`docs/superpowers/specs/2026-06-14-same-mcu-homing-self-gate-design.md`](../specs/2026-06-14-same-mcu-homing-self-gate-design.md)
 
-**Testing note:** `src/mcu_transport_dispatch.c` and `src/endstop.c` are MCU firmware glue with no standalone C unit harness in this repo. Verification is therefore: (a) the existing Rust idempotency test that already proves a repeated gate is a safe no-op (`rust/c-api/tests/piece_gate.rs::gate_is_idempotent_like_a_repeated_stop`), and (b) end-to-end homing in kalico-sim full mode, which compiles `src/*.c` into the simulated firmware and auto-triggers the endstop during `G28`. This matches the project's established testing model for firmware glue. **Docker is required** for the kalico-sim verification.
+**Testing note:** `src/mcu_transport_dispatch.c` and `src/endstop.c` are MCU firmware glue with no standalone C unit harness in this repo. Verification is therefore: (a) the existing Rust idempotency test that already proves a repeated gate is a safe no-op (`rust/c-api/tests/piece_gate.rs::gate_is_idempotent_like_a_repeated_stop`), and (b) end-to-end homing in mcu-sim full mode, which compiles `src/*.c` into the simulated firmware and auto-triggers the endstop during `G28`. This matches the project's established testing model for firmware glue. **Docker is required** for the mcu-sim verification.
 
 ---
 
@@ -106,11 +106,11 @@ handle_stop(uint32_t correlation_id)
 
 Note: `handle_stop_inner` is intentionally non-`static` (so `endstop.c` can call it). It keeps the exact `irq_save`/`irq_restore` critical section the original had — required because `gate_pieces` mutates the engine and the TIM5 ISR could otherwise preempt it.
 
-- [ ] **Step 4: Verify the firmware still compiles (kalico-sim build)**
+- [ ] **Step 4: Verify the firmware still compiles (mcu-sim build)**
 
 Run (Docker required):
 ```bash
-bash tools/kalico-sim/run.sh --privileged --homing-test --mode full --timeout 120
+bash tools/mcu-sim/run.sh --privileged --homing-test --mode full --timeout 120
 ```
 Expected: the image builds (compiles `src/mcu_transport_dispatch.c`) and the beacon Z homing test reports PASS. A compile error in the extraction shows up here as a build failure.
 
@@ -135,7 +135,7 @@ git commit -m "refactor(mcu): extract handle_stop_inner from the Stop handler"
 
 **Files:**
 - Modify: `src/endstop.c:102-116` (the `endstop_trip_task` function)
-- End-to-end test: kalico-sim full mode (`--sensorless-phase-test` = same-MCU G28 X; `--homing-test` = cross-MCU beacon Z regression)
+- End-to-end test: mcu-sim full mode (`--sensorless-phase-test` = same-MCU G28 X; `--homing-test` = cross-MCU beacon Z regression)
 
 - [ ] **Step 1: Add the local brake to `endstop_trip_task`**
 
@@ -185,7 +185,7 @@ endstop_trip_task(void)
 
 Run (Docker required):
 ```bash
-bash tools/kalico-sim/run.sh --privileged --sensorless-phase-test --mode full --timeout 180
+bash tools/mcu-sim/run.sh --privileged --sensorless-phase-test --mode full --timeout 180
 ```
 Expected: PASS. This homes X with a TMC virtual endstop on the *same* MCU as the X stepper, so the trip now self-gates locally. A pass confirms the engine freezes cleanly on the trip and the host's subsequent `Stop` is a harmless re-gate (a broken double-stop would shut klippy down and fail the run).
 
@@ -193,7 +193,7 @@ Expected: PASS. This homes X with a TMC virtual endstop on the *same* MCU as the
 
 Run (Docker required):
 ```bash
-bash tools/kalico-sim/run.sh --privileged --homing-test --mode full --timeout 180
+bash tools/mcu-sim/run.sh --privileged --homing-test --mode full --timeout 180
 ```
 Expected: PASS. Beacon Z homing is genuinely cross-MCU; the source MCU self-gates its own idle engine harmlessly and the sink MCU still stops via the host relay.
 
@@ -252,8 +252,8 @@ Expected: green (ruff, Rust workspace tests, clippy `-D warnings`, `cargo fmt --
 
 Run (Docker required):
 ```bash
-bash tools/kalico-sim/run.sh --no-cache --privileged --sensorless-phase-test --mode full --timeout 180
-bash tools/kalico-sim/run.sh --privileged --homing-test --mode full --timeout 180
+bash tools/mcu-sim/run.sh --no-cache --privileged --sensorless-phase-test --mode full --timeout 180
+bash tools/mcu-sim/run.sh --privileged --homing-test --mode full --timeout 180
 ```
 Expected: both PASS.
 

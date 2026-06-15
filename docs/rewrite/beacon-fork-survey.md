@@ -205,7 +205,7 @@ those above. Expected to merge-and-run; validated in spec E.
    simplification).
 5. **Spec E — capability validation tail**: scanning/bed-mesh, contact
    calibration flows, accel/resonance, temp comp — sim-first with the
-   beacon emulator (`tools/kalico-sim/emulators/beacon_mcu.py` +
+   beacon emulator (`tools/mcu-sim/emulators/beacon_mcu.py` +
    `third_party/beacon_klipper` symlink path already exist in the
    runner), then bench.
 

@@ -65,7 +65,7 @@ prescaler down to ~977 Hz; below that the init sets a prescaler.)
 ### CYCCNT → software counter driven by the motion ISR
 On G0, `runtime_cyccnt_read()` returns a software counter that the motion ISR advances by
 `runtime_clock_freq / CONFIG_MOTION_SAMPLE_RATE_HZ` cycles per fire. This is exactly
-the mechanism the existing `CONFIG_KALICO_SIM` path uses (Renode also returns 0 for DWT).
+the mechanism the existing `CONFIG_MCU_SIM` path uses (Renode also returns 0 for DWT).
 It gives the widening clock a monotonic source at real cadence, so segment timing advances
 correctly. No DWT register is touched on G0. When the timer is disabled (idle), the clock
 freezes — identical to existing F4 behavior; re-enable reseeds via the existing
