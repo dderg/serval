@@ -118,6 +118,14 @@ def _no_trigger_error_message(axis, endstop, max_travel):
     return base
 
 
+class HomingState:
+    def __init__(self, axes):
+        self._axes = list(axes)
+
+    def get_axes(self):
+        return list(self._axes)
+
+
 class Homing:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -212,6 +220,7 @@ class Homing:
             if entry is None:
                 raise gcmd.error("G28: axis %s has no endstop" % ("XYZ"[axis],))
             self._home_axis(gcmd, toolhead, bridge, kin, axis, entry)
+        self._emit_home_rails_end(kin, requested)
 
     def cmd_HOME_TEST(self, gcmd):
         if self._axes is None:
@@ -230,6 +239,14 @@ class Homing:
         kin = toolhead.get_kinematics()
         self._home_axis(
             gcmd, toolhead, bridge, kin, axis, entry, speed, max_travel
+        )
+        self._emit_home_rails_end(kin, [axis])
+
+    def _emit_home_rails_end(self, kin, homed_axes):
+        axis_rails = kin._axis_rails()
+        rails = [axis_rails[axis] for axis in homed_axes]
+        self.printer.send_event(
+            "homing:home_rails_end", HomingState(homed_axes), rails
         )
 
     def _home_axis(
@@ -340,9 +357,6 @@ class Homing:
             raise
         else:
             self._set_homing_current(toolhead, rail, pre_homing=False)
-            gcode_move = self.printer.lookup_object("gcode_move", None)
-            if gcode_move is not None:
-                gcode_move.reset_last_position()
 
     def _set_homing_current(self, toolhead, rail, pre_homing):
         print_time = toolhead.get_last_move_time()

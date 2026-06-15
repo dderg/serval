@@ -400,33 +400,22 @@ class FakeHomingStepperEnable:
         pass
 
 
-class FakeGcodeMove:
-    def __init__(self, toolhead):
-        self._toolhead = toolhead
-        self.reset_positions = []
-
-    def reset_last_position(self):
-        self.reset_positions.append(self._toolhead.get_position())
-
-
 class FakeHomingPrinter:
-    def __init__(self, stepper_enable, gcode_move=None):
-        self._objects = {"stepper_enable": stepper_enable}
-        if gcode_move is not None:
-            self._objects["gcode_move"] = gcode_move
+    def __init__(self, stepper_enable):
+        self._stepper_enable = stepper_enable
 
-    def lookup_object(self, name, default=None):
-        return self._objects.get(name, default)
+    def lookup_object(self, name):
+        assert name == "stepper_enable"
+        return self._stepper_enable
 
 
 def run_home_axis(overshoot, retract_dist, positive_dir):
     toolhead = FakeHomingToolhead()
-    gcode_move = FakeGcodeMove(toolhead)
     hi = FakeHomingInfo(positive_dir, retract_dist, retract_speed=10.0)
     rail = FakeHomingRail(hi, pos_min=-6.0, pos_max=235.0)
     kin = FakeKin(rail)
     homer = homing_mod.Homing.__new__(homing_mod.Homing)
-    homer.printer = FakeHomingPrinter(FakeHomingStepperEnable(), gcode_move)
+    homer.printer = FakeHomingPrinter(FakeHomingStepperEnable())
 
     direction = 1.0 if positive_dir else -1.0
     trigger_height = hi.position_endstop
@@ -456,13 +445,13 @@ def run_home_axis(overshoot, retract_dist, positive_dir):
         homing_mod._run_servo_guarded_trip = orig_guarded
         homing_mod._check_servo_drive_fault = orig_fault
 
-    return toolhead, trigger_height, gcode_move
+    return toolhead, trigger_height
 
 
 def test_retract_compensates_for_overshoot():
     overshoot = 0.7
     retract_dist = 5.0
-    toolhead, trigger_height, _ = run_home_axis(
+    toolhead, trigger_height = run_home_axis(
         overshoot, retract_dist, positive_dir=False
     )
     target, speed = toolhead.moves[-1]
@@ -473,7 +462,7 @@ def test_retract_compensates_for_overshoot():
 def test_retract_lands_at_trigger_minus_dist_positive_dir():
     overshoot = 0.7
     retract_dist = 5.0
-    toolhead, trigger_height, _ = run_home_axis(
+    toolhead, trigger_height = run_home_axis(
         overshoot, retract_dist, positive_dir=True
     )
     target, _ = toolhead.moves[-1]
@@ -482,22 +471,11 @@ def test_retract_lands_at_trigger_minus_dist_positive_dir():
 
 def test_retract_with_zero_overshoot_unchanged():
     retract_dist = 5.0
-    toolhead, trigger_height, _ = run_home_axis(
+    toolhead, trigger_height = run_home_axis(
         0.0, retract_dist, positive_dir=False
     )
     target, _ = toolhead.moves[-1]
     assert target[2] == pytest.approx(trigger_height + retract_dist)
-
-
-def test_home_axis_refreshes_gcode_position_after_retract():
-    retract_dist = 5.0
-    toolhead, trigger_height, gcode_move = run_home_axis(
-        0.0, retract_dist, positive_dir=False
-    )
-    assert gcode_move.reset_positions
-    assert gcode_move.reset_positions[-1][2] == pytest.approx(
-        trigger_height + retract_dist
-    )
 
 
 def test_guarded_trip_failure_disables_servo_motor_and_reraises():

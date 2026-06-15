@@ -133,3 +133,13 @@ def test_g5_1_resyncs_before_resolving():
     )
     gm.cmd_G5_1(FakeGCmd({"X": "50", "I": "5", "J": "0"}))
     assert th.calls[0] == "resync"
+
+
+def test_home_rails_end_refreshes_last_position():
+    from klippy.extras.homing import HomingState
+
+    gm, th = _build(
+        actual=[37.27, 0.0, 10.0, 0.0], stale=[999.0, 0.0, 10.0, 0.0]
+    )
+    gm._handle_home_rails_end(HomingState([2]), rails=None)
+    assert gm.last_position == [37.27, 0.0, 10.0, 0.0]
