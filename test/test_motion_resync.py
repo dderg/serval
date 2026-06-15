@@ -102,6 +102,7 @@ class _SubmitBridge(FakeBridge):
 
 class MoveMotion(FakeMotion):
     move = motion.Motion.move
+    move_curve = motion.Motion.move_curve
     _fire_active_callbacks = motion.Motion._fire_active_callbacks
 
     max_accel = 1000.0
@@ -132,6 +133,22 @@ def test_move_resyncs_before_computing_deltas():
     m.move([10.0, 20.0, 140.0, 4.0], 50.0)
     assert m.bridge.queries == 1
     dx, dy, dz, de, _feedrate = m.bridge.moves[0]
+    assert (dx, dy) == (0.0, 0.0)
+    assert dz == pytest.approx(140.0 - 123.5)
+    assert de == 0.0
+
+
+def test_move_curve_resyncs_before_computing_deltas():
+    m = MoveMotion(dirty=[2], measured={"z": (123.5, 0.0)})
+    m.commanded_pos = [10.0, 20.0, 30.0, 4.0]
+    submitted = []
+
+    def submit(dx, dy, dz, de, feedrate):
+        submitted.append((dx, dy, dz, de, feedrate))
+
+    m.move_curve([10.0, 20.0, 140.0, 4.0], [], submit, 50.0)
+    assert m.bridge.queries == 1
+    dx, dy, dz, de, _feedrate = submitted[0]
     assert (dx, dy) == (0.0, 0.0)
     assert dz == pytest.approx(140.0 - 123.5)
     assert de == 0.0
