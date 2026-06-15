@@ -7,6 +7,7 @@ from . import manual_probe
 
 Z_AXIS = 2
 ACCURACY_DEFAULT_SAMPLES = 10
+NO_MOVEMENT_EPSILON = 0.005
 
 
 def calc_probe_z_result(values, method):
@@ -152,6 +153,11 @@ class PrinterProbe:
                 "trigger_height": None,
             },
         )
+        if abs(trip_pos[Z_AXIS] - current_z) < NO_MOVEMENT_EPSILON:
+            raise gcmd.error(
+                "Probe triggered prior to movement — probe is already in"
+                " contact or the trigger is stuck"
+            )
         newpos = list(toolhead.get_position())
         newpos[Z_AXIS] = final_pos[Z_AXIS]
         toolhead.set_position(newpos)

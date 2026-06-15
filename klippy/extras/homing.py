@@ -7,7 +7,6 @@ from klippy.bridge_endstop import AXIS_ENDSTOP_IDS, BridgeEndstop
 HOMING_POLL_PERIOD = 0.001
 TRIP_DEADLINE_MARGIN = 5.0
 _DRAIN_PAUSE_TIMEOUT = 60.0
-NO_MOVEMENT_EPSILON = 0.005
 
 
 def _endstop_section(config, axis_name):
@@ -377,12 +376,6 @@ class Homing:
             )
         toolhead.wait_moves()
         self._drain_motion_before_arming_device(gcmd, bridge, axis)
-        if endstop.is_triggered():
-            raise gcmd.error(
-                "%s endstop already triggered — move off the trigger before"
-                " homing or probing" % ("XYZ"[axis],)
-            )
-        start_axis_pos = toolhead.get_position()[axis]
         provider = entry["provider"]
         if provider is not None and hasattr(provider, "trip_move_begin"):
             provider.trip_move_begin(entry)
@@ -429,11 +422,9 @@ class Homing:
                 provider.trip_move_end(entry)
         trip_pos, final_pos, trip_clock = result
         _verify_latched_trip(gcmd, axis, endstop, trip_clock)
-        if abs(trip_pos[axis] - start_axis_pos) < NO_MOVEMENT_EPSILON:
-            raise gcmd.error(
-                "%s endstop triggered prior to movement — trigger is stuck"
-                " or miswired" % ("XYZ"[axis],)
-            )
+        # TODO: guard a still-triggered endstop on the second home after
+        # retract (where zero movement is the real stuck/miswired fault) once
+        # second-approach homing lands; the first approach may insta-trip.
         return trip_pos, final_pos
 
 
