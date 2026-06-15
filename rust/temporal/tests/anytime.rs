@@ -56,11 +56,82 @@ fn straight_50mm() -> VectorNurbs<f64, 3> {
     .unwrap()
 }
 
+/// A short 4mm rest-to-rest straight move. Too short to reach v_max=300 under
+/// the accel/jerk caps, so velocity tops out well below its limit and the move
+/// is accel/jerk-limited — the exact shape that exposed the velocity-only worst-
+/// binding report on the bench.
+fn short_straight_4mm() -> VectorNurbs<f64, 3> {
+    VectorNurbs::<f64, 3>::try_new(
+        1,
+        vec![0.0, 0.0, 1.0, 1.0],
+        vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+    )
+    .unwrap()
+}
+
 fn is_success(status: SolveStatus) -> bool {
     matches!(
         status,
         SolveStatus::Solved | SolveStatus::SolvedInexact { .. } | SolveStatus::SolvedSlp { .. }
     )
+}
+
+/// Regression — the reported worst binding spans all families. A short rest-to-
+/// rest move is jerk-limited: velocity peaks far below its cap (~0.4-0.5) while
+/// jerk is the highest-ratio family. The old report considered only velocity/
+/// accel, so it surfaced the velocity ratio and a gap inflated by the unseen
+/// jerk. The fix surfaces jerk as the worst — the gap is computed against the
+/// genuinely-tightest constraint, not a blind-spot family.
+///
+/// Note this move does NOT ride jerk at ratio 1.0 (it converges near 0.6); that
+/// residual gap is a real property of the relaxed solve on a short isolated
+/// rest-to-rest segment, tracked separately. This test only locks that the
+/// report no longer hides the tighter family behind velocity.
+#[test]
+fn converged_short_move_worst_spans_all_families() {
+    let curve = short_straight_4mm();
+    let limits = velocity_bound_limits();
+    let grid = GridConfig {
+        scheme: GridScheme::UniformArclength,
+        n: 80,
+    };
+
+    let profile =
+        schedule_segment_with_tolerance(&curve, &limits, &grid, 0.0, 0.0, ToleranceMode::Auto)
+            .expect("short move must solve");
+
+    assert!(
+        is_success(profile.status),
+        "short move must converge to a feasible profile; got {:?}",
+        profile.status,
+    );
+
+    let worst = profile
+        .binding
+        .worst
+        .expect("a converged move must report a worst binding");
+
+    // The peak velocity ratio on this short move is well below 1; if the report
+    // still keyed on velocity it would sit near that. Jerk is the tighter family,
+    // so the reported worst must be jerk (or accel) at a ratio above the velocity
+    // peak — proving the all-family worst, not the velocity-only blind spot.
+    assert!(
+        matches!(
+            worst.constraint,
+            temporal::BindingConstraint::JerkNorm { .. }
+                | temporal::BindingConstraint::AccelNorm { .. }
+        ),
+        "worst on a jerk-limited short move must be the jerk/accel family, not the \
+         velocity blind spot; got {:?} at ratio {}",
+        worst.constraint,
+        worst.ratio,
+    );
+    let velocity_peak = profile.samples.iter().map(|s| s.v).fold(0.0_f64, f64::max);
+    assert!(
+        velocity_peak < 0.9 * V_MAX,
+        "the move must be genuinely sub-velocity-cap for this to test the blind spot; \
+         peak v = {velocity_peak}",
+    );
 }
 
 /// G1 + G2 — forcing an already-expired deadline on the 46mm@50 sharp curve
