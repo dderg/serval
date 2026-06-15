@@ -9,8 +9,6 @@ fn constant(value: f64, t_end: f64) -> ScalarNurbs<f64> {
     ScalarNurbs::try_new(1, vec![0.0, 0.0, t_end, t_end], vec![value, value]).unwrap()
 }
 
-/// Axis 0 moves at constant velocity `v`; axes 1,2 are still. The executed
-/// trajectory rides velocity at `v / v_max` and nothing else.
 #[test]
 fn constant_velocity_reports_velocity_family() {
     let t_end = 0.1;
@@ -33,15 +31,9 @@ fn constant_velocity_reports_velocity_family() {
         u.vel_mag
     );
     assert!((u.vel_ratio - v / 300.0).abs() < 1e-6);
-    // accel/jerk are zero up to finite-difference floating-point noise (the jerk
-    // stencil divides by dt³ ≈ 1.5e-14, so a true-zero rounds to ~6e-5 of cap) —
-    // negligible against the 0.33 velocity ratio.
     assert!(u.accel_ratio < 1e-3 && u.jerk_ratio < 1e-3);
 }
 
-/// Axis 0 under constant acceleration `a` (x = ½ a t²). With caps chosen so the
-/// accel ratio dominates the velocity ratio, the peak family is Accel and the
-/// ratio is exact (the second difference of a quadratic is exact).
 #[test]
 fn constant_accel_reports_accel_family_exactly() {
     let t_end = 0.1;
@@ -54,8 +46,6 @@ fn constant_accel_reports_accel_family_exactly() {
     .unwrap();
     let axes = [ax0, constant(0.0, t_end), constant(0.0, t_end)];
 
-    // peak velocity is a*t_end = 500; v_max = 600 keeps velocity ratio below the
-    // accel ratio of a / a_max = 1.0.
     let u = segment_peak_utilization(&axes, &limits(600.0, a, 50_000.0))
         .expect("a moving segment must report utilization");
     let w = u.worst().expect("a moving segment has a worst family");
@@ -65,7 +55,6 @@ fn constant_accel_reports_accel_family_exactly() {
         "accel utilization must be a / a_max = 1.0; got {}",
         w.ratio,
     );
-    // raw peak accel is exactly a (second difference of a quadratic is exact).
     assert!(
         (u.accel_mag - a).abs() < 1e-3,
         "raw peak accel ≈ a; got {}",
@@ -73,8 +62,6 @@ fn constant_accel_reports_accel_family_exactly() {
     );
 }
 
-/// A segment exceeding its accel cap reports utilization above 1 — the executed
-/// trajectory is over the limit, which a feasibility check must surface.
 #[test]
 fn over_limit_segment_reports_ratio_above_one() {
     let t_end = 0.1;
@@ -97,16 +84,10 @@ fn over_limit_segment_reports_ratio_above_one() {
     );
 }
 
-/// The requested feedrate is wired as a separate full-spatial path-speed set
-/// (v_max = feed) by `per_segment_limits`. A move cruising at the feed must read
-/// utilization 1.0 against that set — NOT feed/machine against the per-axis box.
-/// This locks that utilization is measured against the effective limit, so a move
-/// running exactly at its requested feed reports as riding its limit, not as
-/// leaving (machine - feed) headroom.
 #[test]
 fn utilization_credits_the_feedrate_path_speed_set() {
     let t_end = 0.1;
-    let feed = 150.0; // half the machine cap of 300
+    let feed = 150.0;
     let ax0 =
         ScalarNurbs::try_new(1, vec![0.0, 0.0, t_end, t_end], vec![0.0, feed * t_end]).unwrap();
     let axes = [ax0, constant(0.0, t_end), constant(0.0, t_end)];
@@ -128,10 +109,9 @@ fn utilization_credits_the_feedrate_path_speed_set() {
     );
 }
 
-/// A segment too short to carry a jerk stencil yields no utilization sample.
 #[test]
 fn segment_too_short_is_none() {
-    let t_end = 1e-5; // < 4 * MCU_DT
+    let t_end = 1e-5;
     let axes = [
         ScalarNurbs::try_new(1, vec![0.0, 0.0, t_end, t_end], vec![0.0, 1.0]).unwrap(),
         constant(0.0, t_end),
@@ -140,7 +120,6 @@ fn segment_too_short_is_none() {
     assert!(segment_peak_utilization(&axes, &limits(300.0, 10_000.0, 50_000.0)).is_none());
 }
 
-/// The window peak is the max over its segments.
 #[test]
 fn window_peak_takes_the_max_segment() {
     let t_end = 0.1;

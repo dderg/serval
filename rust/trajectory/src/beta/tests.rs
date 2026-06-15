@@ -233,18 +233,8 @@ fn jerk_limited_z_move_converges_under_worst_case_derate() {
     );
 }
 
-/// A move cruising at its requested feed (below the per-axis box cap) reports
-/// peak utilization ≈ 1.0 on velocity — the feed path-speed set added by
-/// `per_segment_limits` is honored end-to-end through the real plan path, so
-/// riding the feed reads as "at the limit", not as `feed / box_cap`. This locks
-/// that the utilization metric measures against the effective (feed-inclusive)
-/// velocity limit, not just the machine box.
 #[test]
 fn feed_cruise_reads_full_velocity_utilization() {
-    // Accel/jerk caps are set far above anything this cruise can reach, so the
-    // feed path-speed set is the unambiguous binding limit (the worst), letting us
-    // assert its kind. (With tight jerk, a boundary jerk transient would outrank
-    // the feed velocity — correctly tagged Config — which is a different test.)
     let base = temporal::Limits::axis_boxes([1000.0; 3], [1.0e9; 3], [1.0e12; 3]);
     let curve = nurbs::VectorNurbs::try_new(
         1,

@@ -1,20 +1,7 @@
-//! Executed-trajectory limit utilization: how close to the kinematic limits the
-//! committed per-axis time-polynomials actually ride, measured the way the MCU
-//! steps them (finite differences at the 40 kHz sample rate).
-//!
-//! Unlike a grid-sampled solver diagnostic, this evaluates the exact committed
-//! trajectory — the `FittedSegment`/emitted axes are polynomials in time, so
-//! their velocity/accel/jerk are exact for any geometry and include the behavior
-//! between solver grid points. By the maximum principle a time-optimal trajectory
-//! rides some limit at (almost) every instant, so the peak utilization is both an
-//! optimality signal (well below 1 ⇒ headroom left on the table) and a feasibility
-//! check (above 1 ⇒ the executed motion exceeds a limit the grid never sampled).
-
 use nurbs::bezier::extract_bezier_pieces;
 use nurbs::ScalarNurbs;
 use temporal::{restricted_norm, Limits};
 
-/// The kinematic family a peak utilization was reached on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UtilFamily {
     Velocity,
@@ -22,17 +9,12 @@ pub enum UtilFamily {
     Jerk,
 }
 
-/// The overall worst utilization over a trajectory: the largest `|executed|/cap`
-/// ratio reached on any axis-set and family, and which family it was.
 #[derive(Debug, Clone, Copy)]
 pub struct PeakUtilization {
     pub ratio: f64,
     pub family: UtilFamily,
 }
 
-/// Per-family executed peaks over a trajectory: the worst `|executed|/cap` ratio
-/// per family, and the raw peak path-frame magnitudes (mm/s, mm/s², mm/s³). All
-/// measured on the committed time polynomials at the MCU sample rate.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UtilizationPeaks {
     pub vel_ratio: f64,
@@ -53,7 +35,6 @@ impl UtilizationPeaks {
         self.jerk_mag = self.jerk_mag.max(o.jerk_mag);
     }
 
-    /// The overall worst family and its ratio — the headline utilization.
     #[must_use]
     pub fn worst(&self) -> Option<PeakUtilization> {
         let mut best = (self.vel_ratio, UtilFamily::Velocity);
@@ -70,16 +51,12 @@ impl UtilizationPeaks {
     }
 }
 
-/// MCU stepping period (40 kHz), matching `peak::peak_accel`.
 const MCU_DT: f64 = 25e-6;
 
 fn norm3(x: &[f64; 3]) -> f64 {
     (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt()
 }
 
-/// Per-family executed peaks of one committed segment, sampling the per-axis time
-/// polynomials at the MCU rate. Returns `None` for a segment too short to carry a
-/// jerk stencil.
 #[must_use]
 pub fn segment_peak_utilization(
     axes: &[ScalarNurbs<f64>],
@@ -139,9 +116,6 @@ pub fn segment_peak_utilization(
     Some(p)
 }
 
-/// Per-family executed peaks across a window of committed segments, each checked
-/// against its own true (un-derated) limits — the max of each field over the
-/// window. `None` when no segment yields a sample.
 #[must_use]
 pub fn window_peak_utilization<'a>(
     segments: impl IntoIterator<Item = (&'a [ScalarNurbs<f64>], &'a Limits)>,

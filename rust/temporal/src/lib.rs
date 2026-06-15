@@ -63,8 +63,6 @@ pub struct WorstBinding {
     pub ratio: f64,
     pub grid_index: usize,
     pub s: f64,
-    /// Provenance of the binding limit set — lets diagnostics name a config limit
-    /// (by its section name) apart from the dynamic feedrate or runtime-cap sets.
     pub kind: LimitKind,
 }
 

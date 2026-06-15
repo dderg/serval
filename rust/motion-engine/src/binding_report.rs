@@ -43,12 +43,6 @@ pub fn label_binding(
     })
 }
 
-/// Fields carried by the per-move `replan_anytime` structured event. `limiter_*`
-/// names which kinematic limit the solver pinned (the family/derivative, and
-/// whether via pressure-advance); `binding_ratio` is the solver's grid-measured
-/// peak ratio for that limit. Both come from `check_chain`'s `BindingSummary`, so
-/// neither is fabricated. Comparing `binding_ratio` against the executed
-/// `peak_utilization` surfaces any grid-vs-executed measurement divergence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnytimeEventFields {
     pub limiter_limit: String,

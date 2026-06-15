@@ -49,8 +49,6 @@ fn labeled_set_index_resolves_to_name_or_runtime_caps_fallback() {
     assert_eq!(fallback.limit, "runtime_caps");
 }
 
-/// Dynamic limit sets show their reserved kind name; config sets resolve to the
-/// declared section name by index.
 #[test]
 fn dynamic_limit_kinds_get_reserved_names() {
     let names = vec!["gantry".to_string()];
@@ -143,10 +141,6 @@ fn flush_emits_and_clears_a_partial_window() {
     assert_eq!(acc.window_count(BindingConstraint::Velocity { set: 0 }), 0);
 }
 
-/// G5 — the gap + limiter the `replan_anytime` event carries must match the
-/// actual binding constraint and its verified ratio. With a known XY-velocity
-/// binding at ratio 0.94 (a conservative floor), the event reports the matching
-/// limiter and `gap = 1 - 0.94 = 0.06`.
 #[test]
 fn g5_anytime_event_matches_binding_and_gap() {
     let names = vec!["gantry".to_string(), "extruder".to_string()];
@@ -168,9 +162,6 @@ fn g5_anytime_event_matches_binding_and_gap() {
     assert!((fields.binding_ratio - 0.94).abs() < 1e-12);
 }
 
-/// G5 — a PA-jerk binding on set 1 (no name → runtime_caps fallback) at ratio
-/// 0.88 produces the matching limiter and binding_ratio. Confirms the event
-/// tracks the actual worst family, not a fixed one.
 #[test]
 fn g5_anytime_event_tracks_pa_jerk_family() {
     let names = vec!["gantry".to_string()];
@@ -192,8 +183,6 @@ fn g5_anytime_event_tracks_pa_jerk_family() {
     assert!((fields.binding_ratio - 0.88).abs() < 1e-12);
 }
 
-/// G5 — an on-the-limit binding (ratio = 1.0, the converged optimum) and the
-/// no-binding case both report their `binding_ratio` and limiter correctly.
 #[test]
 fn g5_anytime_event_on_limit_and_no_binding() {
     let names = vec!["gantry".to_string()];
