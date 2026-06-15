@@ -308,6 +308,17 @@ class Motion:
             accel = min(p, t)
         self.set_accel(accel)
 
+    def resync_parked_servos(self):
+        dirty = self.kin.parked_dirty_axes()
+        if not dirty:
+            return
+        measured = self.bridge.query_motor_positions()
+        newpos = list(self.commanded_pos)
+        for axis in dirty:
+            newpos[axis] = measured["xyz"[axis]][0]
+        self.set_position(newpos)
+        self.kin.clear_parked_dirty(dirty)
+
     def move(self, newpos, speed):
         # The bridge replaces the lookahead, but Move/kin/extruder validation
         # (unhomed, range checks) must still run before the move is issued.
