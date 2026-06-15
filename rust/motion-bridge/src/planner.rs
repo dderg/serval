@@ -653,14 +653,19 @@ fn run_loop(
                 {
                     let fields =
                         crate::binding_report::anytime_event_fields(&binding, &limit_names);
+                    // Fixed-decimal so the JSON layer stores e.g. "0.5970" instead of
+                    // serde's "2.03e-7" — comparable at a glance in the log UI and still
+                    // numerically filterable (VL parses numeric-looking strings).
+                    let gap_str = format!("{:.4}", fields.gap);
+                    let binding_ratio_str = format!("{:.4}", fields.binding_ratio);
                     tracing::info!(
                         subsystem = "motion",
                         event = "replan_anytime",
-                        gap = fields.gap,
+                        gap = %gap_str,
                         limiter_limit = %fields.limiter_limit,
                         limiter_derivative = fields.limiter_derivative,
                         limiter_via_pa = fields.limiter_via_pa,
-                        binding_ratio = fields.binding_ratio,
+                        binding_ratio = %binding_ratio_str,
                         converged = !deadline_limited,
                         deadline_limited,
                         refine_iters = beta_iters,
