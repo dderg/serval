@@ -27,6 +27,7 @@ class FakeToolhead:
 
     def resync_parked_servos(self):
         self.events.append(("resync", self._t))
+        self._t += 1.0
 
 
 class FakePrinter:
@@ -53,9 +54,10 @@ def test_debug_enable_resyncs_before_energize():
     se.motor_debug_enable("servo_z", True)
     kinds = [e[0] for e in th.events]
     assert "resync" in kinds
-    assert se.enable_lines["servo_z"].enabled_at, "motor was energized"
+    enabled_at = se.enable_lines["servo_z"].enabled_at
+    assert enabled_at, "motor was energized"
     resync_t = next(e[1] for e in th.events if e[0] == "resync")
-    assert resync_t <= se.enable_lines["servo_z"].enabled_at[0]
+    assert enabled_at[0] > resync_t
 
 
 def test_debug_disable_does_not_resync():
@@ -73,4 +75,4 @@ def test_group_enable_resyncs_before_energize():
     assert any(e[0] == "resync" for e in th.events)
     resync_t = next(e[1] for e in th.events if e[0] == "resync")
     for el in se.enable_lines.values():
-        assert resync_t <= el.enabled_at[0]
+        assert el.enabled_at[0] > resync_t
