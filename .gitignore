@@ -48,8 +48,8 @@ firmware/
 # never checked in. Keep klippy/ clean across macOS/Linux/Pi dev.
 klippy/motion_bridge*.so
 klippy/motion_bridge*.dylib
-klippy/chelper/c_helper.so
-klippy/chelper/c_helper.so.dSYM/
+klippy/chelper/c_helper*.so
+klippy/chelper/c_helper*.so.dSYM/
 klippy/chelper/*.dylib
 
 # Sim-only third-party plugin symlinks (created by tools/sim_klippy/conftest.py)

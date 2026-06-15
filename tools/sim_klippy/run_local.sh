@@ -26,11 +26,6 @@ docker run --rm -i \
       make olddefconfig >/dev/null
       make -j\$(nproc) 2>&1 | tail -5
       make -f Makefile.kalico motion-bridge 2>&1 | tail -3
-      # macOS-host dev keeps a Mach-O c_helper.so in the tree; delete it
-      # unconditionally so klippy/chelper rebuilds it for this container's
-      # ELF environment. Cheap rebuild (~2s) and avoids architecture skew.
-      rm -f klippy/chelper/c_helper.so klippy/chelper/c_helper.so.dSYM 2>/dev/null
-      rm -rf klippy/chelper/c_helper.so.dSYM 2>/dev/null || true
       # Remove any stale misnamed motion_bridge.so that shadows motion_bridge.py.
       # The correct native module is always motion_bridge_native.so (built above).
       rm -f klippy/motion_bridge.so 2>/dev/null || true
