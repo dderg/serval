@@ -4,7 +4,7 @@
 #include "command.h"
 #include "sched.h"
 #include "kalico_runtime.h"
-#include "kalico_dispatch.h"
+#include "mcu_transport_dispatch.h"
 
 extern void *runtime_handle;
 
@@ -24,7 +24,7 @@ struct endstop {
 static struct task_wake endstop_trip_wake;
 
 // Timer context (IRQ): capture the trip clock here for accuracy, but defer
-// the transport write to endstop_trip_task — kalico_transport_send_frame uses
+// the transport write to endstop_trip_task — mcu_transport_send_frame uses
 // a shared tx_buf and the USB transmit cursor, neither safe against the
 // foreground from IRQ.
 static uint_fast8_t
@@ -112,7 +112,7 @@ endstop_trip_task(void)
         if (!e->trip_pending)
             continue;
         e->trip_pending = 0;
-        kalico_native_emit_endstop_trip(e->endstop_id, e->trip_clock);
+        mcu_transport_emit_endstop_trip(e->endstop_id, e->trip_clock);
     }
 }
 DECL_TASK(endstop_trip_task);

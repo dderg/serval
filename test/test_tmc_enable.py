@@ -50,7 +50,7 @@ class FakePrinter:
 
 
 class FakeTMC:
-    _do_enable_bridge = tmc.TMCCommandHelper._do_enable_bridge
+    _do_enable_engine = tmc.TMCCommandHelper._do_enable_engine
 
     def __init__(
         self, toff=None, did_reset=False, supported=True, post_cb=None
@@ -70,7 +70,7 @@ class FakeTMC:
 
 def test_dedicated_enable_no_reset_skips_reinit():
     t = FakeTMC(toff=None, did_reset=False)
-    t._do_enable_bridge(0.0)
+    t._do_enable_engine(0.0)
     assert t.init_calls == 0, "registers persist across a dedicated-pin toggle"
     assert t.mcu_tmc.writes == []
     assert t.echeck_helper.start_calls == 1, "status/reset check still runs"
@@ -79,13 +79,13 @@ def test_dedicated_enable_no_reset_skips_reinit():
 
 def test_dedicated_enable_reset_reinits():
     t = FakeTMC(toff=None, did_reset=True)
-    t._do_enable_bridge(0.0)
+    t._do_enable_engine(0.0)
     assert t.init_calls == 1, "driver lost its registers — restore them"
 
 
 def test_virtual_enable_no_reset_restores_toff_only():
     t = FakeTMC(toff=3, did_reset=False)
-    t._do_enable_bridge(1.5)
+    t._do_enable_engine(1.5)
     assert t.init_calls == 0, "no full re-init when the driver did not reset"
     assert t.fields.set_field_calls == [("toff", 3)]
     assert t.mcu_tmc.writes == [("CHOPCONF", 3, 1.5)], "only toff is rewritten"
@@ -93,7 +93,7 @@ def test_virtual_enable_no_reset_restores_toff_only():
 
 def test_virtual_enable_reset_reinits_and_restores_toff():
     t = FakeTMC(toff=3, did_reset=True)
-    t._do_enable_bridge(0.0)
+    t._do_enable_engine(0.0)
     assert t.init_calls == 1
     assert ("toff", 3) in t.fields.set_field_calls
     assert t.mcu_tmc.writes == [], (
@@ -103,7 +103,7 @@ def test_virtual_enable_reset_reinits_and_restores_toff():
 
 def test_unsupported_reset_detection_always_reinits():
     t = FakeTMC(toff=None, did_reset=False, supported=False)
-    t._do_enable_bridge(0.0)
+    t._do_enable_engine(0.0)
     assert t.init_calls == 1, (
         "tmc2130-style drivers can't prove no-reset; be safe"
     )
@@ -112,7 +112,7 @@ def test_unsupported_reset_detection_always_reinits():
 def test_phase_stepping_path_inits_and_calls_post_enable():
     calls = []
     t = FakeTMC(toff=None, post_cb=lambda: calls.append("cb"))
-    t._do_enable_bridge(0.0)
+    t._do_enable_engine(0.0)
     assert t.init_calls == 1, "phase-mode entry needs the full register setup"
     assert calls == ["cb"]
     assert t.echeck_helper.start_calls == 0, "post-enable cb owns the checks"

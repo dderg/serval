@@ -125,12 +125,12 @@ else
     echo "fix_linux_build: console_wake gate already removed, skipping."
 fi
 
-DISPATCH_FILE="$REPO_ROOT/src/kalico_dispatch.c"
+DISPATCH_FILE="$REPO_ROOT/src/mcu_transport_dispatch.c"
 if grep -q 'handle_push_segment_calls_total' "$DISPATCH_FILE" 2>/dev/null && \
    ! grep -q 'mcu-push-diag' "$DISPATCH_FILE" 2>/dev/null; then
-    echo "fix_linux_build: adding push_segment + kalico_dispatch traces"
+    echo "fix_linux_build: adding push_segment + mcu_transport_dispatch traces"
     sed -i 's/handle_push_segment_calls_total++;/handle_push_segment_calls_total++; fprintf(stderr, "[mcu-push-diag] push total=%u body_len=%u\\n", handle_push_segment_calls_total, body_len); fflush(stderr);/' "$DISPATCH_FILE"
-    if grep -q 'kalico_dispatch_frame' "$DISPATCH_FILE" && ! grep -q 'mcu-kalico-diag' "$DISPATCH_FILE"; then
+    if grep -q 'mcu_transport_dispatch_frame' "$DISPATCH_FILE" && ! grep -q 'mcu-kalico-diag' "$DISPATCH_FILE"; then
         sed -i '/uint16_t body_len = payload_len - PER_MESSAGE_HEADER_LEN;/a\
     fprintf(stderr, "[mcu-kalico-diag] dispatch kind=0x%04x body_len=%u\\n", kind, body_len); fflush(stderr);' "$DISPATCH_FILE"
     fi

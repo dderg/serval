@@ -62,7 +62,7 @@ COPY rust/Cargo.toml rust/Cargo.lock /kalico/rust/
 
 # Copy each member's Cargo.toml into place, then stub its source.
 # Members with [[bin]] targets need a src/main.rs; lib-only members
-# need a src/lib.rs. cdylib crates (motion-bridge) also need lib.rs.
+# need a src/lib.rs. cdylib crates (motion-engine) also need lib.rs.
 COPY rust/nurbs/Cargo.toml              /kalico/rust/nurbs/Cargo.toml
 COPY rust/kalico-c-api/Cargo.toml       /kalico/rust/kalico-c-api/Cargo.toml
 COPY rust/gcode/Cargo.toml              /kalico/rust/gcode/Cargo.toml
@@ -70,19 +70,19 @@ COPY rust/geometry/Cargo.toml           /kalico/rust/geometry/Cargo.toml
 COPY rust/temporal/Cargo.toml           /kalico/rust/temporal/Cargo.toml
 COPY rust/trajectory/Cargo.toml         /kalico/rust/trajectory/Cargo.toml
 COPY rust/runtime/Cargo.toml            /kalico/rust/runtime/Cargo.toml
-COPY rust/kalico-host-rt/Cargo.toml     /kalico/rust/kalico-host-rt/Cargo.toml
+COPY rust/host-rt/Cargo.toml     /kalico/rust/host-rt/Cargo.toml
 COPY rust/compat/Cargo.toml             /kalico/rust/compat/Cargo.toml
-COPY rust/motion-bridge/Cargo.toml      /kalico/rust/motion-bridge/Cargo.toml
-COPY rust/kalico-native-transport/Cargo.toml /kalico/rust/kalico-native-transport/Cargo.toml
-COPY rust/kalico-protocol/Cargo.toml    /kalico/rust/kalico-protocol/Cargo.toml
+COPY rust/motion-engine/Cargo.toml      /kalico/rust/motion-engine/Cargo.toml
+COPY rust/mcu-transport/Cargo.toml /kalico/rust/mcu-transport/Cargo.toml
+COPY rust/mcu-protocol/Cargo.toml    /kalico/rust/mcu-protocol/Cargo.toml
 
 # Stub every crate. lib-only crates get src/lib.rs; crates with [[bin]]
 # also get src/main.rs (compat, kalico-c-api). kalico-c-api has an
 # additional bin at src/bin/gen_headers.rs.
 RUN set -e; \
     for crate in nurbs gcode geometry temporal trajectory runtime \
-                 kalico-host-rt motion-bridge kalico-native-transport \
-                 kalico-protocol; do \
+                 host-rt motion-engine mcu-transport \
+                 mcu-protocol; do \
         mkdir -p /kalico/rust/$crate/src; \
         echo "" > /kalico/rust/$crate/src/lib.rs; \
     done; \
@@ -98,22 +98,22 @@ RUN set -e; \
 # graph but produce no real code. Errors from stub compilation are
 # expected and intentionally suppressed; we only care that dep crates
 # are compiled and cached in /root/.cargo and the target directory.
-RUN cargo build -p motion-bridge --release 2>&1 || true
+RUN cargo build -p motion-engine --release 2>&1 || true
 # Wipe stub artifacts so the real build in rust-build starts clean for
 # workspace crates, but leaves dep artifacts untouched. Both the compiled
 # outputs AND the .fingerprint entries must go — stale fingerprints make
 # cargo believe the stub output is still valid and skip recompilation.
 RUN set -e; \
     for pat in \
-        libmotion_bridge libkalico libnurbs libgcode libgeometry \
+        libmotion_engine libkalico libnurbs libgcode libgeometry \
         libtemporal libtrajectory libruntime libcompat \
-        libkalico_host_rt libkalico_native_transport libkalico_protocol; do \
+        libhost_rt libmcu_transport libmcu_protocol; do \
         rm -f /kalico/rust/target/release/${pat}*; \
     done; \
     for pat in \
-        motion_bridge kalico nurbs gcode geometry \
+        motion_engine kalico nurbs gcode geometry \
         temporal trajectory runtime compat \
-        kalico_host_rt kalico_native_transport kalico_protocol; do \
+        host_rt mcu_transport mcu_protocol; do \
         rm -f /kalico/rust/target/release/deps/${pat}* \
               /kalico/rust/target/release/deps/lib${pat}*; \
     done; \
@@ -123,16 +123,16 @@ RUN set -e; \
            /kalico/rust/target/release/.fingerprint/temporal-* \
            /kalico/rust/target/release/.fingerprint/trajectory-* \
            /kalico/rust/target/release/.fingerprint/runtime-* \
-           /kalico/rust/target/release/.fingerprint/kalico-host-rt-* \
+           /kalico/rust/target/release/.fingerprint/host-rt-* \
            /kalico/rust/target/release/.fingerprint/kalico-c-api-* \
            /kalico/rust/target/release/.fingerprint/compat-* \
-           /kalico/rust/target/release/.fingerprint/motion-bridge-* \
-           /kalico/rust/target/release/.fingerprint/kalico-native-transport-* \
-           /kalico/rust/target/release/.fingerprint/kalico-protocol-*
+           /kalico/rust/target/release/.fingerprint/motion-engine-* \
+           /kalico/rust/target/release/.fingerprint/mcu-transport-* \
+           /kalico/rust/target/release/.fingerprint/mcu-protocol-*
 
 # --------------------------------------------------------------------
 # Stage 3 — rust-build
-# Copies the real Rust source and builds motion-bridge for real.
+# Copies the real Rust source and builds motion-engine for real.
 # Only workspace-local crates are recompiled; all external deps are
 # already in the cache from stage 2.
 # --------------------------------------------------------------------
@@ -140,10 +140,10 @@ FROM rust-deps AS rust-build
 
 COPY rust/ /kalico/rust/
 COPY tools/kalico-sim/patches/patch_rust_traces.py /tmp/patch_rust_traces.py
-RUN python3 /tmp/patch_rust_traces.py /kalico/rust/motion-bridge/src/bridge.rs
+RUN python3 /tmp/patch_rust_traces.py /kalico/rust/motion-engine/src/bridge.rs
 
 RUN cd /kalico/rust && \
-    cargo build -p motion-bridge --release 2>&1 | tail -20
+    cargo build -p motion-engine --release 2>&1 | tail -20
 
 # --------------------------------------------------------------------
 # Stage 4 — firmware
@@ -253,10 +253,10 @@ COPY --from=firmware \
     /kalico/tools/kalico-sim/libvtime/libsim_intercept.so \
     /kalico/tools/kalico-sim/libvtime/
 
-# Overlay motion_bridge_native.so on top of the Python source copy.
+# Overlay _motion_engine.so on top of the Python source copy.
 COPY --from=rust-build \
-    /kalico/rust/target/release/libmotion_bridge_native.so \
-    /kalico/klippy/motion_bridge_native.so
+    /kalico/rust/target/release/lib_motion_engine.so \
+    /kalico/klippy/_motion_engine.so
 
 # Copy third-party plugins fetched during the firmware stage (may not exist).
 COPY --from=firmware /kalico/tools/sim_klippy/printer_real/third_party_repos/ \
@@ -265,7 +265,7 @@ COPY --from=firmware /kalico/tools/sim_klippy/printer_real/third_party_repos/ \
 # Apply sim-only Python traces. Can't go in fix_linux_build.sh because
 # the runtime stage re-copies klippy/ fresh from the build context.
 COPY tools/kalico-sim/patches/patch_klippy_traces.py /tmp/patch_klippy_traces.py
-RUN python3 /tmp/patch_klippy_traces.py klippy/motion.py klippy/motion_bridge.py klippy/mcu.py
+RUN python3 /tmp/patch_klippy_traces.py klippy/motion.py klippy/motion_engine.py klippy/mcu.py
 
 RUN mkdir -p /gcode /tmp/kalico_sim_gcodes
 

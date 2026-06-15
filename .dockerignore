@@ -10,8 +10,8 @@ out/
 klippy/chelper/*.so
 klippy/chelper/*.dylib
 klippy/chelper/c_helper.so.dSYM/
-klippy/motion_bridge*.so
-klippy/motion_bridge*.dylib
+klippy/_motion_engine*.so
+klippy/motion_engine*.dylib
 
 .git/
 *.pyc

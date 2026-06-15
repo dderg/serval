@@ -11,16 +11,16 @@
 On `sota-motion`, `runtime_tick_enable` (h7 + f4) armed TIM5 when **either** of two conditions held:
 
 ```c
-if (count_modulated_steppers == 0 && kalico_native_queue_len() == 0)
+if (count_modulated_steppers == 0 && mcu_transport_queue_len() == 0)
     return; // stay disabled
 ```
 
 - Clause 1 (`count_modulated_steppers > 0`) — a phase-stepping consumer needs per-sample writes.
-- Clause 2 (`kalico_native_queue_len() > 0`) — a segment is pending in the C bridge queue. `push_segment_impl` called `runtime_tick_enable` on **every** enqueue.
+- Clause 2 (`mcu_transport_queue_len() > 0`) — a segment is pending in the C bridge queue. `push_segment_impl` called `runtime_tick_enable` on **every** enqueue.
 
 Pulse-mode (regular-stepping) motion worked entirely through **clause 2**: pushing a segment armed TIM5 regardless of stepping mode. The Modulated count was only the alternate entry point for phase stepping.
 
-This branch removed segments and the curve pool (`0af240a6f`, `60f32e162`). With them went the segment queue, `kalico_native_queue_len()`, and the `push_segment`-driven arm. What remains is the lonely **clause 1** (`count_modulated_steppers == 0`) whose only caller is `set_step_mode` (`rust/kalico-c-api/src/runtime_ffi.rs:1832`). Consequence: **on a pulse-only machine nothing arms TIM5, so the engine never ticks and no motion is produced.**
+This branch removed segments and the curve pool (`0af240a6f`, `60f32e162`). With them went the segment queue, `mcu_transport_queue_len()`, and the `push_segment`-driven arm. What remains is the lonely **clause 1** (`count_modulated_steppers == 0`) whose only caller is `set_step_mode` (`rust/kalico-c-api/src/runtime_ffi.rs:1832`). Consequence: **on a pulse-only machine nothing arms TIM5, so the engine never ticks and no motion is produced.**
 
 The original lazy-arm scheme was a compute / USB-CDC-starvation mitigation (the legacy modulator did SPI writes in the ISR). The redesigned unified tick does no SPI work in the ISR body, so that pressure is gone. The piece-ring model also has no per-push event to lazily arm the timer. Therefore the correct model is: **the ISR free-runs from boot.**
 
@@ -56,7 +56,7 @@ The original lazy-arm scheme was a compute / USB-CDC-starvation mitigation (the 
 
 - **No `runtime_status` writes anywhere.** The field stays dormant and untouched. The broader status machine (Running / Drained wiring, liveness) is out of scope.
 - **Hard-fault helpers unchanged:** they keep latching `last_error` + `fault_detail` (`rust/runtime/src/fault_helpers.rs`).
-- **`runtime_drain` (foreground):** read `runtime_handle_last_error()`. On a fresh nonzero hard fault (edge-detected against the previously-reported error code), emit the async fault event (`kalico_native_emit_fault_event`, carrying the precise `FaultCode` + axis detail) and then call `shutdown("kalico runtime fault")`.
+- **`runtime_drain` (foreground):** read `runtime_handle_last_error()`. On a fresh nonzero hard fault (edge-detected against the previously-reported error code), emit the async fault event (`mcu_transport_emit_fault_event`, carrying the precise `FaultCode` + axis detail) and then call `shutdown("kalico runtime fault")`.
 - **Why foreground, not the fault site:** `shutdown()` does `irq_disable()` + `longjmp` to `sched_main`'s `setjmp`. Calling it from the fault site would (a) unwind through Rust ISR frames — the C/Rust boundary hazard called out in `docs/kalico-rewrite/mcu-c-rust-boundary.md` — and (b) on Linux the fault fires in the `host_tick` pthread, where a `longjmp` to `sched_main`'s `setjmp` in a different thread is undefined behavior. `runtime_drain` runs in `sched_main`'s task loop on every platform, so `shutdown()` there is the established, safe Klipper pattern (mirrors `try_shutdown("Timer too close")`).
 - **Latency:** `runtime_drain` runs at 1 kHz, so ≤1 ms from fault to shutdown. The faulted axis already idles immediately (the fault-raising path returns `None` for that axis every tick); other axes only play valid, already-queued pieces in that window — bounded and non-garbage motion, which is acceptable.
 - **Edge detection:** the drain must track the last error code it acted on so it does not re-emit / re-`shutdown` every tick once `last_error` is latched. (The first call to `shutdown` longjmps away regardless, but the edge guard keeps the pre-shutdown logic correct and avoids duplicate fault events.)

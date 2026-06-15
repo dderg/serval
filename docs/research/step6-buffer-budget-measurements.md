@@ -3,7 +3,7 @@
 **Status: PLACEHOLDER — measurements pending hardware run by user.**
 
 Per Step-6 plan §7.3, three measurement protocols quantify the assumptions
-the buffer-budget defaults in `rust/kalico-host-rt/src/clock_sync.rs` and
+the buffer-budget defaults in `rust/host-rt/src/clock_sync.rs` and
 `rust/runtime/src/state.rs` rest on. The runners ship with the Step-6
 implementation; the actual long-running soaks (8h Pi, 24h dual-MCU) are
 user-run on representative hardware. Once executed, the user replaces the
@@ -135,7 +135,7 @@ state.
 
 **Recipe:** issues `kalico_clock_sync_request` round-trips at 10 Hz to
 each MCU port for 24 hours, runs the host-side sliding-window regression
-(`ClockSyncWindow` matches `rust/kalico-host-rt/src/clock_sync.rs`
+(`ClockSyncWindow` matches `rust/host-rt/src/clock_sync.rs`
 spec-side; not bit-identical), records p99.99 of residual / drift /
 sample-age.
 
@@ -167,7 +167,7 @@ parallel workstream not yet ready)
 **Action items if any p99.99 exceeds its default threshold:**
 
   - mild excess (p99.99 just over threshold but max well under): bump
-    the default in `rust/kalico-host-rt/src/clock_sync.rs` and document
+    the default in `rust/host-rt/src/clock_sync.rs` and document
     the empirical justification here
   - large excess (max significantly over threshold): investigate
     upstream — the regression is failing to settle, or the MCU clock is
@@ -184,7 +184,7 @@ When the user runs M1 / M2 / M3 and lands actuals here:
 
   1. Replace `TODO_USER_RUN` with the recorded value (preserve format).
   2. If any default constant in
-     `rust/kalico-host-rt/src/clock_sync.rs::MAX_*_DEFAULT`
+     `rust/host-rt/src/clock_sync.rs::MAX_*_DEFAULT`
      or `rust/runtime/src/spsc.rs::Q_N_MAX`
      diverges from what the measurement supports, update the constant
      in a separate commit and reference the M-number here.

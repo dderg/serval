@@ -46,7 +46,7 @@ def run_sim(klipper_root, label):
         "klipper-sim CLI invocation pending — klipper-sim currently emits "
         f"100-µs trajectory samples, not step-pulse events. See "
         f"{KLIPPER_SIM_DIR}/README.md and STATUS.md for current CSV schema; "
-        "this test is a documentation placeholder until a step-event bridge "
+        "this test is a documentation placeholder until a step-event engine "
         "(either a klipper-sim feature or a local stepcompress wrapper) "
         "exists."
     )

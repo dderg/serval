@@ -608,7 +608,7 @@ git commit -m "test(trajectory): curved-segment fit regression (arches + joints 
 
 - [ ] **Step 1: Confirm no remaining live callers**
 
-Run: `cd rust && grep -rn "fit_x_to_arc_length_piece" nurbs/src trajectory/src motion-bridge/src`
+Run: `cd rust && grep -rn "fit_x_to_arc_length_piece" nurbs/src trajectory/src motion-engine/src`
 Expected: only the definition in `nurbs/src/algebra.rs`. (If anything else appears, stop and reassess.)
 
 - [ ] **Step 2: Delete the dead function and its scratch/test files**

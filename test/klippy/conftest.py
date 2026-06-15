@@ -9,15 +9,15 @@ import tempfile
 import pytest
 
 
-def _native_bridge_available() -> bool:
+def _native_engine_available() -> bool:
     try:
-        from klippy import motion_bridge
+        from klippy import motion_engine
     except Exception:
         return False
-    return motion_bridge._native is not None
+    return motion_engine._native is not None
 
 
-_BRIDGE_AVAILABLE = _native_bridge_available()
+_BRIDGE_AVAILABLE = _native_engine_available()
 
 
 def pytest_collect_file(parent, file_path):
@@ -127,15 +127,15 @@ class KlippyTestItem(pytest.Item):
     def setup(self):
         if not _BRIDGE_AVAILABLE and not self.should_fail:
             pytest.skip(
-                "requires native motion_bridge_native (PyO3 cdylib not built); "
+                "requires native _motion_engine (PyO3 cdylib not built); "
                 "build it to exercise the motion engine — see "
-                "docs/kalico-rewrite/ci.md (make -f Makefile.kalico motion-bridge)"
+                "docs/kalico-rewrite/ci.md (make -f Makefile.kalico motion-engine)"
             )
         self.tmp_dir = pathlib.Path(tempfile.mkdtemp())
 
     def teardown(self):
         # setup() may have bailed via pytest.skip() before assigning tmp_dir
-        # (bridge-absent skip-gate); guard so skipped items don't raise an
+        # (engine-absent skip-gate); guard so skipped items don't raise an
         # AttributeError at teardown and turn a clean skip into an ERROR.
         tmp_dir = getattr(self, "tmp_dir", None)
         if tmp_dir is not None:

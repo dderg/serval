@@ -36,7 +36,7 @@ That baseline is established two ways:
 
 The Task-8 push-pieces rewrite replaced the old dispatch closure (which drained a
 `pending_seed` and sent `runtime_seed_position` with the per-MCU CoreXY transform
-— see `git show sota-motion:rust/motion-bridge/src/bridge.rs`, the
+— see `git show sota-motion:rust/motion-engine/src/bridge.rs`, the
 `if cfg.kinematics == KINEMATICS_COREXY { (x+y, x−y) }` block) with an
 enqueue-only closure that **never drains `pending_seed` and never sends the seed**.
 `bridge.set_position` (`bridge.rs:2709`) still stores the seed in `pending_seed`;
@@ -210,10 +210,10 @@ SET_KINEMATIC_POSITION / G28 / G92
 
 ## Files touched (anticipated)
 
-- `rust/motion-bridge/src/dispatch.rs` — shared `cfg_is_corexy` / `motor_frame_xy`.
-- `rust/motion-bridge/src/enqueue.rs` — use the shared predicate (behavior
+- `rust/motion-engine/src/dispatch.rs` — shared `cfg_is_corexy` / `motor_frame_xy`.
+- `rust/motion-engine/src/enqueue.rs` — use the shared predicate (behavior
   unchanged).
-- `rust/motion-bridge/src/bridge.rs` — `set_position` sends the seed; retire
+- `rust/motion-engine/src/bridge.rs` — `set_position` sends the seed; retire
   `pending_seed` / `SeedPosition`.
 
 No MCU/C changes (the seed command and engine path already exist and are correct).

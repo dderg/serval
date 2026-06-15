@@ -28,7 +28,7 @@ Both MCUs latched `-308`: `bottom` (F446) on `fault_detail=0x20000` → axis 2 (
 
 ### Root cause
 
-The host maps planner-time → MCU clock through `Anchor` (`rust/motion-bridge/src/anchor.rs`):
+The host maps planner-time → MCU clock through `Anchor` (`rust/motion-engine/src/anchor.rs`):
 a piece at planner-time `u` is scheduled at host wall-clock `t0 + u`, then projected
 onto the MCU clock. `t0` is established once per stream and only re-established on a
 **backward** planner-time jump.
@@ -84,7 +84,7 @@ indirectly-triggered code path.
 
 ### Trigger: the `T_COMMIT` quiescence timer
 
-The planner run-loop (`rust/motion-bridge/src/planner.rs`) arms a 50 ms quiescence timer
+The planner run-loop (`rust/motion-engine/src/planner.rs`) arms a 50 ms quiescence timer
 (`T_COMMIT`) after every `Move`. When it fires (no follow-on move arrived), the existing
 `run_commit_and_dispatch` flushes the held-back decel-to-zero tail to the wire — i.e. the
 toolhead is now physically stopped — and the loop sets `last_append_time = None`.
@@ -143,7 +143,7 @@ machinery. B follows this precedent and introduces no new desync.
 
 ### `anchor.rs` is unchanged
 
-B requires no change to `rust/motion-bridge/src/anchor.rs` — the existing backward-jump
+B requires no change to `rust/motion-engine/src/anchor.rs` — the existing backward-jump
 branch does the re-anchoring once the planner clock is rewound. (An exploratory Choice-A
 edit was made and then reverted; the file matches `HEAD`.)
 
@@ -180,7 +180,7 @@ edit was made and then reverted; the file matches `HEAD`.)
 ## Files touched
 
 - `rust/trajectory/src/streaming/state.rs` — add `current_position()`.
-- `rust/motion-bridge/src/planner.rs` — call `state.reset(state.current_position())` in the
+- `rust/motion-engine/src/planner.rs` — call `state.reset(state.current_position())` in the
   `T_COMMIT` (`RecvTimeoutError::Timeout`) arm, after `run_commit_and_dispatch`.
 
-`rust/motion-bridge/src/anchor.rs` is intentionally **not** touched.
+`rust/motion-engine/src/anchor.rs` is intentionally **not** touched.

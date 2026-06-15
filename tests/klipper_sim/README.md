@@ -28,7 +28,7 @@ Exit codes:
 
 - `0` with `SKIP: klipper-sim not installed` — harness OK, klipper-sim missing.
 - `0` with `PASS: max drift ... ns` — comparison succeeded under threshold.
-- Non-zero — drift exceeded threshold, or the CLI bridge is not yet wired
+- Non-zero — drift exceeded threshold, or the CLI engine is not yet wired
   (currently the expected state — see below).
 
 ## Current status: stub

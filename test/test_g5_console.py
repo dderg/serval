@@ -27,10 +27,10 @@ def make_motion():
     m.max_accel = 3000.0
     m.kin = FakeKin()
     m.extruder = types.SimpleNamespace(check_move=lambda mv: None)
-    m.bridge = types.SimpleNamespace(
+    m.engine = types.SimpleNamespace(
         calls=[],
         get_last_move_time=lambda: 0.0,
-        submit_bezier=lambda *a: m.bridge.calls.append(("bezier", a)),
+        submit_bezier=lambda *a: m.engine.calls.append(("bezier", a)),
     )
     m.mcu = None
     m._mcu_pending_end_time = 0.0
@@ -45,7 +45,7 @@ def test_move_curve_rejects_out_of_range_control_point():
 
     # endpoints in range, but P1 control point at Y=500 bulges off the bed
     def submit(dx, dy, dz, de, fr):
-        m.bridge.submit_bezier(dx, dy, dz, de, fr)
+        m.engine.submit_bezier(dx, dy, dz, de, fr)
 
     interior = [[10.0, 500.0, 0.0], [10.0, 0.0, 0.0]]
     try:
@@ -59,11 +59,11 @@ def test_move_curve_submits_and_advances_when_in_range():
     m = make_motion()
 
     def submit(dx, dy, dz, de, fr):
-        m.bridge.submit_bezier(dx, dy, dz, de, fr)
+        m.engine.submit_bezier(dx, dy, dz, de, fr)
 
     interior = [[10.0, 5.0, 0.0], [10.0, -5.0, 0.0]]
     m.move_curve([20.0, 0.0, 0.0, 0.0], interior, submit, 100.0)
-    assert m.bridge.calls and m.bridge.calls[0][0] == "bezier"
+    assert m.engine.calls and m.engine.calls[0][0] == "bezier"
     assert m.commanded_pos[0] == 20.0
 
 
@@ -169,7 +169,7 @@ def test_cmd_g5_chained_omits_ij_and_forwards_none():
     g = make_full_gcode_move()
     bezier_calls = []
     fake_motion = types.SimpleNamespace(
-        bridge=types.SimpleNamespace(
+        engine=types.SimpleNamespace(
             submit_bezier=lambda *a: bezier_calls.append(a)
         )
     )

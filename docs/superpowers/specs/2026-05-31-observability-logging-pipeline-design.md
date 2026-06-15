@@ -61,7 +61,7 @@ Logging today is a flat, unstructured text pile that is hard to search and impos
 Emitters produce one structured record; a **sink registry** fans it out to the active sinks (§4.1). This spec ships `text` + `jsonl` active by default. VictoriaLogs is an *external opt-in* fed by the `jsonl` sink — klippy needs no config to enable it, and a host that never installs it pays nothing.
 
 ```
-  Python host (klippy)                         Rust host (motion-bridge / host-rt)
+  Python host (klippy)                         Rust host (motion-engine / host-rt)
   stdlib logging ─ facade swap ─┐              log:: + tracing ─ subscriber ─┐
   structured_log.event(...) ────┤              klog!(...) ──────────────────┤
                                 ▼                                            ▼
@@ -118,7 +118,7 @@ One JSONL line = one event, **always a single physical line** (the `jsonl` sink 
 | `source` | enum: `host-py`/`host-rust`/`mcu-h7`/`mcu-f4`/`sim` | emitter |
 | `subsystem` | string: `motion`/`homing`/`bridge`/`clocksync`/`mcu-comms`/`probe`/`temp`/`config`/… | logical area (replaces the `[bridge-trace]`-style prefixes) |
 | `session_id` | string `k-<unix>-<pid>` | one per klippy lifecycle |
-| `target` | string | Python logger name (`module.Class`) or Rust module path (`motion_bridge::probe_homing`) |
+| `target` | string | Python logger name (`module.Class`) or Rust module path (`motion_engine::probe_homing`) |
 
 **Optional fields:**
 
@@ -141,7 +141,7 @@ One JSONL line = one event, **always a single physical line** (the `jsonl` sink 
  "source":"host-rust","subsystem":"homing","level":"info",
  "session_id":"k-1748700131-4412","print_id":"",
  "event":"homing.endstop_trip","axis":"z","trigger_mm":12.40,
- "target":"motion_bridge::probe_homing"}
+ "target":"motion_engine::probe_homing"}
 ```
 ```json
 {"_time":"2026-05-31T14:18:55.701Z","_msg":"G1 move queued",

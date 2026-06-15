@@ -15,8 +15,8 @@ if [[ ! -f out/klipper.elf ]]; then
   echo "error: out/klipper.elf not found. Run tools/sim/build_sim_firmware.sh first." >&2
   exit 2
 fi
-if [[ ! -f klippy/motion_bridge.so ]]; then
-  echo "error: klippy/motion_bridge.so not found. Run 'make -f Makefile.kalico motion-bridge' first." >&2
+if [[ ! -f klippy/motion_engine.so ]]; then
+  echo "error: klippy/motion_engine.so not found. Run 'make -f Makefile.kalico motion-engine' first." >&2
   exit 2
 fi
 if ! command -v renode >/dev/null 2>&1; then

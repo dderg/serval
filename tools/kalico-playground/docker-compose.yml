@@ -30,7 +30,7 @@ services:
       # through. Read by the Rust tracing EnvFilter (spec §9 drop-at-emit).
       # NOTE: a cleaner fix is lowering those log::info! to debug in the Rust
       # source; this env pin is the no-rebuild stopgap.
-      RUST_LOG: "info,motion_bridge_native::pump=warn,motion_bridge_native::bridge=warn"
+      RUST_LOG: "info,_motion_engine::pump=warn,_motion_engine::bridge=warn"
     restart: unless-stopped
 
   # --- the queryable log store ----------------------------------------------

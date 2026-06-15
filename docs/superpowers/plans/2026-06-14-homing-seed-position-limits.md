@@ -6,16 +6,16 @@
 
 **Architecture:** Klipper homing stays as-is (endstop trip, servo-guarded reduced-torque trip — already in `sota`). Two changes: (1) the retract folds in the measured overshoot; (2) after the final retract, the host calls a uniform `finalize_homed_axis(handle, axis, pos_mm)`; the bridge dispatches per type — stepper no-op (already seeded by the move), EtherCAT → endpoint runs method 35 (`6098=35`, `607C=pos×cpm`, control-word `0x0F→0x1F`, wait status-word bit 12, back to CSP), zeroing `6064h` to our frame. The endpoint then reports `6064h / counts_per_mm` (drop the transient `cmap`).
 
-**Tech:** Python (`klippy/extras/homing.py`), Rust (`kalico-protocol`, `motion-bridge`, `kalico-ethercat-rt` endpoint + `bench/libecrt.c` FFI).
+**Tech:** Python (`klippy/extras/homing.py`), Rust (`mcu-protocol`, `motion-engine`, `ethercat-rt` endpoint + `bench/libecrt.c` FFI).
 
 **Spec:** `docs/superpowers/specs/2026-06-14-homing-seed-position-limits-design.md`.
 
 **Conventions:** `cargo nextest run` from `rust/`; `./scripts/ci.sh quick` (+ `py` if `klippy/` touched); `cargo fmt --all --check` last. Comments discouraged; tests in separate files; fail-loud. No Co-Authored-By trailer.
 
 **Post-merge integration (already exists — reuse, don't duplicate):**
-- `homing.py:270-327` servo path: `servo_handle = node.get_bridge_handle()`, `servo_limits = rail.get_homing_drive_limits()` (torque/ferr), `_run_servo_guarded_trip` (reduced-torque trip), `set_position` at `:305`, retract at `:322-326`, `overshoot = final_pos[axis] - trip_pos[axis]`.
+- `homing.py:270-327` servo path: `servo_handle = node.get_engine_handle()`, `servo_limits = rail.get_homing_drive_limits()` (torque/ferr), `_run_servo_guarded_trip` (reduced-torque trip), `set_position` at `:305`, retract at `:322-326`, `overshoot = final_pos[axis] - trip_pos[axis]`.
 - `bridge.set_drive_limits/restore_drive_limits` → SDO `0x6065`/`0x6072` (torque/ferr — NOT position; unrelated to this work).
-- Endpoint: `ec_rt_sdo_write(index, sub, buf, abort)` exists (`bench/libecrt.c`), `ec_rt_get_position_actual` (`6064h`), `ec_rt_get_velocity_actual` (`606Ch`). The `cmap` reporting bug: `kalico-ethercat-rt.rs:163` (decl), `:464-476` (QueryMotorState), `:616-619` (create), reset at `:396,593,656,705`.
+- Endpoint: `ec_rt_sdo_write(index, sub, buf, abort)` exists (`bench/libecrt.c`), `ec_rt_get_position_actual` (`6064h`), `ec_rt_get_velocity_actual` (`606Ch`). The `cmap` reporting bug: `ethercat-rt.rs:163` (decl), `:464-476` (QueryMotorState), `:616-619` (create), reset at `:396,593,656,705`.
 
 **Out of scope:** software position limits (`607D`), `min_homing_distance`, drive sensorless homing.
 
@@ -49,7 +49,7 @@ CORRECTED FORMULA: `overshoot` is OUTSIDE the `direction*` multiply — it alrea
 
 ## Task 2: Endpoint method-35 home-set (protocol + wire + FFI + handshake)
 
-**Files:** `rust/kalico-protocol/src/messages.rs` (+ `schema_def.rs`), `rust/kalico-ethercat-rt/src/wire.rs` (+ tests), `bench/libecrt.c`/`.h` + `rust/kalico-ethercat-rt/src/ffi.rs`, `rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs`.
+**Files:** `rust/mcu-protocol/src/messages.rs` (+ `schema_def.rs`), `rust/ethercat-rt/src/wire.rs` (+ tests), `bench/libecrt.c`/`.h` + `rust/ethercat-rt/src/ffi.rs`, `rust/ethercat-rt/src/bin/ethercat-rt.rs`.
 
 This is the riskiest task (live mode-switch). Build it incrementally.
 
@@ -73,7 +73,7 @@ This is the riskiest task (live mode-switch). Build it incrementally.
   7. Set a persistent `framed: bool = true` (used by Task 3 reporting). Respond ack.
   Coordinate with the gate/torque state machine: the toolhead is parked (no streaming) at this point; ensure the DC exchange continues during the handshake. Reference the control-word constants and the `0x0F→0x1F` pattern from the A6-EC manual (§homing mode control word).
 
-- [ ] **Step 5: Build + endpoint tests.** `cargo build -p kalico-ethercat-rt`; `cargo nextest run -p kalico-ethercat-rt`; clippy `-D warnings`; fmt. (The handshake itself is bench-verified; unit-test the wire/codec + any pure helpers.)
+- [ ] **Step 5: Build + endpoint tests.** `cargo build -p ethercat-rt`; `cargo nextest run -p ethercat-rt`; clippy `-D warnings`; fmt. (The handshake itself is bench-verified; unit-test the wire/codec + any pure helpers.)
 
 - [ ] **Step 6: Commit** `feat(ethercat): SeedServoHome via CiA-402 method 35 (drive-frames 6064h)`.
 
@@ -81,16 +81,16 @@ This is the riskiest task (live mode-switch). Build it incrementally.
 
 ## Task 3: Bridge dispatch + host finalize-after-retract
 
-**Files:** `rust/motion-bridge/src/bridge.rs` (+ `klippy/motion_bridge.py` passthrough), `klippy/extras/homing.py`.
+**Files:** `rust/motion-engine/src/bridge.rs` (+ `klippy/motion_engine.py` passthrough), `klippy/extras/homing.py`.
 
 - [ ] **Step 1: Bridge method.** Add pyo3 `finalize_homed_axis(&self, mcu_handle, axis, pos_mm)`:
   - EtherCAT handle (`ethercat_socket.is_some()`): `kalico_call(MessageKind::SeedServoHome, encode(home_q16 = pos_mm*65536), timeout)` on `endpoint_conn`; error on non-ack/`result<0` (fail-loud). Model on `set_drive_limits` (`bridge.rs:1121`).
   - Non-EtherCAT handle: **no-op** (stepper already seeded by `set_position` + the retract move). Return Ok.
-  Add the `klippy/motion_bridge.py` `MotionBridgeWrapper` passthrough (mirror `set_drive_limits`).
+  Add the `klippy/motion_engine.py` `MotionEngineWrapper` passthrough (mirror `set_drive_limits`).
 
 - [ ] **Step 2: Host call after the final retract.** In `homing.py` `_home_axis`, after the retract `wait_moves()` (`:326`) and before `_check_servo_drive_fault`, add a uniform finalize using the handle the servo path already resolves (`servo_handle`); for steppers pass the stepper MCU handle (or skip — no-op). Keep it uniform: resolve the axis's bridge handle and call `bridge.finalize_homed_axis(handle, axis, toolhead.get_position()[axis])`. (For servo, `servo_handle` is already in scope at `:276`.) This is host-uniform; the per-type behavior is in the bridge.
 
-- [ ] **Step 3: Build + tests.** `cargo build -p motion-bridge`; `cargo nextest run -p motion-bridge`; `./scripts/ci.sh py` (homing green). clippy/fmt.
+- [ ] **Step 3: Build + tests.** `cargo build -p motion-engine`; `cargo nextest run -p motion-engine`; `./scripts/ci.sh py` (homing green). clippy/fmt.
 
 - [ ] **Step 4: Commit** `feat(bridge): finalize_homed_axis — EtherCAT method-35 home-set after retract; stepper no-op`.
 
@@ -98,7 +98,7 @@ This is the riskiest task (live mode-switch). Build it incrementally.
 
 ## Task 4: Drive-framed EtherCAT reporting (remove transient cmap)
 
-**Files:** `rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs`.
+**Files:** `rust/ethercat-rt/src/bin/ethercat-rt.rs`.
 
 - [ ] **Step 1: Report from the drive frame.** Change `QueryMotorState` (`:464-476`): if `framed` (set by Task 2 method-35), report `pos_mm = 6064h / counts_per_mm` (drive-framed, absolute, persistent) and `vel_mm_s = velocity_mm_s(606Ch, rotation_distance)`; if not yet `framed`, respond empty (unhomed — honest, no fabricated number).
 ```rust
@@ -108,7 +108,7 @@ Command::QueryMotorState { correlation_id } => {
             (ffi::ec_rt_get_position_actual(), ffi::ec_rt_get_velocity_actual())
         };
         let pos_mm = f64::from(pos_counts) / counts_per_mm;
-        let vel_mm_s = kalico_ethercat_rt::scale::velocity_mm_s(vel_rpm, rotation_distance);
+        let vel_mm_s = ethercat_rt::scale::velocity_mm_s(vel_rpm, rotation_distance);
         server.respond(&motor_state_response_frame(correlation_id, pos_mm, vel_mm_s));
     } else {
         server.respond(&motor_state_empty_frame(correlation_id));
@@ -118,7 +118,7 @@ Command::QueryMotorState { correlation_id } => {
 
 - [ ] **Step 2: Remove the transient cmap *reporting* dependency.** The `cmap` is still used for *commanding* (`target_counts`, `:616-620`) — KEEP that. Only the *reporting* path moves off `cmap` (Step 1). Do not remove `cmap` itself. Remove `CountMap::actual_mm` use from the reporting path (it may become unused → drop it + its test only if nothing else uses it).
 
-- [ ] **Step 3: Build + tests + clippy/fmt.** `cargo nextest run -p kalico-ethercat-rt`.
+- [ ] **Step 3: Build + tests + clippy/fmt.** `cargo nextest run -p ethercat-rt`.
 
 - [ ] **Step 4: Commit** `fix(ethercat): report drive-framed 6064h/cpm after method-35; drop transient-cmap reporting`.
 

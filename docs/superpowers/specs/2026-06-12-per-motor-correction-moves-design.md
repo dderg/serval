@@ -65,7 +65,7 @@ tracked: the move is not part of the axis's story.
 ## Wire contract
 
 New request message (and response), mirroring `PushPieces`
-(`rust/kalico-protocol/src/messages.rs:175`):
+(`rust/mcu-protocol/src/messages.rs:175`):
 
 ```rust
 pub struct PushCorrectionPieces {
@@ -186,7 +186,7 @@ enforces it regardless.
 
 ## Testing
 
-- `kalico-protocol`: encode/decode round-trip unit tests for the new
+- `mcu-protocol`: encode/decode round-trip unit tests for the new
   messages (separate test file, per repo convention).
 - `runtime`: unit tests for validation rejections (busy axis, bad motor_idx,
   overlap, stale start_time) and for scratch evaluation producing

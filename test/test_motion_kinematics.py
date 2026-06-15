@@ -202,7 +202,7 @@ class FakeSection:
         return self._raw(option, default)
 
 
-class FakeBridge:
+class FakeEngine:
     def __init__(self):
         self.set_position_calls = []
 
@@ -212,7 +212,7 @@ class FakeBridge:
 
 class FakeMotion:
     def __init__(self, axis_sections=()):
-        self.bridge = FakeBridge()
+        self.engine = FakeEngine()
         self.axis_sections = list(axis_sections)
         self._limits = {
             ("z", "max_velocity"): 10.0,

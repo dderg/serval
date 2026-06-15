@@ -17,7 +17,7 @@ Four deliverables:
 
 1. **Drive PDO change** — TxPDO gains 6062h (position reference), via the
    variable mapping 1A00h.
-2. **Capture engine** in `kalico-ethercat-rt` — SPSC ring filled by the RT
+2. **Capture engine** in `ethercat-rt` — SPSC ring filled by the RT
    loop, drained by a writer thread into a file under
    `~/printer_data/logs/servo_captures/`.
 3. **Protocol + klippy surface** — `StartCapture`/`StopCapture` wire commands;
@@ -87,7 +87,7 @@ Whether this A6-EC firmware accepts the 1A00h remap exactly as documented
 assert turns a bad remap into a clean bringup error rather than data
 corruption.
 
-## 2. Endpoint: capture engine in `kalico-ethercat-rt`
+## 2. Endpoint: capture engine in `ethercat-rt`
 
 New `capture` module owning:
 
@@ -187,7 +187,7 @@ family listed in §2. The wire carries a single `drive_name`; the file format
 drive list when a multi-slave endpoint exists.
 
 Adding message kinds changes `SCHEMA_HASH` (generated from
-`rust/kalico-protocol/schema_def.rs`), so rollout requires reflashing BOTH
+`rust/mcu-protocol/schema_def.rs`), so rollout requires reflashing BOTH
 MCUs together with the host rebuild — a stale MCU fails the schema handshake.
 
 ### Motion-bridge (PyO3)

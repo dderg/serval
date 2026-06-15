@@ -60,7 +60,7 @@ pins registry (`ppins.parse_pin`). Two cases on the resolved chip:
 - **Bridge MCU** → today's GPIO path, unchanged: build a `config_endstop`
   entry directly.
 - **Virtual endstop provider** → the chip object must implement
-  `setup_bridge_endstop(pin_params, axis)`, returning its `BridgeEndstop`.
+  `setup_bridge_endstop(pin_params, axis)`, returning its `MotionEndstop`.
   The provider validates its own pin-name string (e.g. probe accepts only
   `z_virtual_endstop` on the Z axis) and rejects `^`/`!` modifiers on the
   virtual pin — those belong on the provider's own pin option.
@@ -77,7 +77,7 @@ same as GPIO axes — `QUERY_ENDSTOPS` on the Neptune shows `x`, `y`, `z`
 Provider interface, duck-typed like mainline's `setup_pin`:
 
 - `setup_bridge_endstop(pin_params, axis)` — required. Validates the request and
-  returns the provider's already-built `BridgeEndstop`; it does not create it.
+  returns the provider's already-built `MotionEndstop`; it does not create it.
   The endstop must exist independently of homing, because a provider may be
   configured without backing any axis (e.g. `[probe]` alongside a GPIO Z
   endstop, probe used only for `PROBE`/`PROBE_ACCURACY`).

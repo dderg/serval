@@ -46,13 +46,13 @@ reference implementation `klippy/extras/sim_remote_endstop.py`):
 
 - `setup_bridge_endstop(pin_params, axis)` — validates
   `probe:z_virtual_endstop` on Z, returns
-  `RemoteBridgeEndstop(printer, beacon_mcu, trsync_oid)`
+  `RemoteMotionEndstop(printer, beacon_mcu, trsync_oid)`
   (`klippy/bridge_endstop.py:62`). One trsync total, allocated on the
   beacon MCU at config time with `config_trsync` sent directly
   (`MCU_trsync` is not reused — its constructor demands a trdispatch).
   The secondary per-stepper trsyncs and the trdispatch C relay are gone;
   the Rust RX-thread interceptor (`arm_remote_trigger`,
-  `rust/motion-bridge/src/bridge.rs:3217`) is the relay.
+  `rust/motion-engine/src/bridge.rs:3217`) is the relay.
 - `trip_move_begin(entry)` — device arming, mode-dependent.
   Proximity: `trsync_start` + `beacon_home trsync_oid=… trigger_reason=…
   trigger_invert=…`. Contact: latency commands +
@@ -94,7 +94,7 @@ replaced by one call:
 `bridge.motion_state_at(beacon_mcu, clock=sample_clock64)` —
 beacon-domain ticks passed straight in; cross-MCU clock conversion
 happens inside the bridge (`clock_between_mcus`,
-`rust/motion-bridge/src/motion_history.rs:218`). The per-stepper
+`rust/motion-engine/src/motion_history.rs:218`). The per-stepper
 `get_past_mcu_position` → `mcu_to_commanded_position` →
 `kin.calc_position` round trip disappears.
 

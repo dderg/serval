@@ -7,7 +7,7 @@ use crate::error::FaultCode;
 use crate::log_codes::{EVENT_RUNTIME_FAULT_LATCHED, SUBSYSTEM_RUNTIME};
 use crate::state::SharedState;
 
-/// Wire log levels — must match motion-bridge's mcu_level_str (0=trace,1=debug,2=warn,3=error).
+/// Wire log levels — must match motion-engine's mcu_level_str (0=trace,1=debug,2=warn,3=error).
 const LOG_LEVEL_ERROR: u8 = 3;
 
 static MIN_LEVEL: AtomicU8 = AtomicU8::new(2);

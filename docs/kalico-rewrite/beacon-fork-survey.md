@@ -181,7 +181,7 @@ those above. Expected to merge-and-run; validated in spec E.
 - **P2 — External-trigger homing**: software-trip homing arms (no GPIO
   source), MCU-side credit-window deadman, trigger relay (Python observer
   vs Rust router relay — decision in spec), provider-contract extensions
-  (software-armed `BridgeEndstop` variant, post-trip measured-position
+  (software-armed `MotionEndstop` variant, post-trip measured-position
   override), and a probing-move primitive replacing beacon's direct
   `HomingMove` usage.
 - **P3 — Probe ecosystem restoration**: native ProbePointsHelper/session

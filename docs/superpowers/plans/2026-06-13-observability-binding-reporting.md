@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Surface the per-grid binding-constraint data the planner already computes (which `[limit]` row pins the speed where) up through the trajectory API to motion-bridge, where it is aggregated per print and emitted as structured logs — answering "how often does each limit bind?" and "why is the machine slow here?" from `query-logs`.
+**Goal:** Surface the per-grid binding-constraint data the planner already computes (which `[limit]` row pins the speed where) up through the trajectory API to motion-engine, where it is aggregated per print and emitted as structured logs — answering "how often does each limit bind?" and "why is the machine slow here?" from `query-logs`.
 
-**Architecture:** `temporal` already fills `VerifyReport.binding_per_grid` (per-sample winning `BindingConstraint`) and computes the worst-pinned sample (`global_worst_idx` / `global_worst_ratio`) inside `check_chain`. This plan: (1) `temporal` tallies a small per-profile `BindingSummary { histogram, worst }` in that same pass and hangs it on `TopProfile` — pure data, no logging deps; (2) `trajectory` merges the per-segment summaries into one `ReplanBindingSummary` per replan batch and carries it on `ReplanReport`; (3) `motion-bridge` resolves limit-set indices to config names, accumulates summaries into a per-window/per-print tally, and emits two host-tracing events (`binding_rollup`, `binding_hist`) on a ~1s cadence. The pure planner (`temporal`/`trajectory`) stays log-free; the decision to emit lives only at the motion-bridge boundary.
+**Architecture:** `temporal` already fills `VerifyReport.binding_per_grid` (per-sample winning `BindingConstraint`) and computes the worst-pinned sample (`global_worst_idx` / `global_worst_ratio`) inside `check_chain`. This plan: (1) `temporal` tallies a small per-profile `BindingSummary { histogram, worst }` in that same pass and hangs it on `TopProfile` — pure data, no logging deps; (2) `trajectory` merges the per-segment summaries into one `ReplanBindingSummary` per replan batch and carries it on `ReplanReport`; (3) `motion-engine` resolves limit-set indices to config names, accumulates summaries into a per-window/per-print tally, and emits two host-tracing events (`binding_rollup`, `binding_hist`) on a ~1s cadence. The pure planner (`temporal`/`trajectory`) stays log-free; the decision to emit lives only at the motion-engine boundary.
 
-**Tech stack:** Rust (`temporal`, `trajectory`, `motion-bridge` crates). Host structured logs via `tracing` → `events/host-rust.jsonl` (the existing `replan_stats` path; **no `log_codes.rs` edits** — that table is the MCU wire protocol, host events use free-form `event=` strings). Tests: `cargo nextest run` from `rust/` (never bare `cargo test`); `cargo test --doc` if doc examples are touched.
+**Tech stack:** Rust (`temporal`, `trajectory`, `motion-engine` crates). Host structured logs via `tracing` → `events/host-rust.jsonl` (the existing `replan_stats` path; **no `log_codes.rs` edits** — that table is the MCU wire protocol, host events use free-form `event=` strings). Tests: `cargo nextest run` from `rust/` (never bare `cargo test`); `cargo test --doc` if doc examples are touched.
 
 **Spec:** `docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md` §5 (Observability paragraph) and §6 work-item 6. Builds directly on the `BindingConstraint` groundwork from Plan 3 (`docs/superpowers/plans/2026-06-12-planner-extension-follower-rows.md`).
 
@@ -43,10 +43,10 @@ The spec says only "the planner knows which constraint row binds at every point 
 - `rust/trajectory/src/streaming/mod.rs` — `ReplanReport.binding` (drop `Copy`).
 - `rust/trajectory/src/streaming/state.rs` — wire the summary onto the returned `ReplanReport`.
 - `rust/trajectory/tests/binding_report.rs` — new integration test (created).
-- `rust/motion-bridge/src/config.rs` — `PlannerConfig::limit_set_names`.
-- `rust/motion-bridge/src/binding_report.rs` — new module: `label_binding` + `BindingAccumulator` (created).
-- `rust/motion-bridge/src/lib.rs` — `mod binding_report;`.
-- `rust/motion-bridge/src/planner.rs` — accumulator wiring in `run_loop` (Move cadence + StreamOpen/Shutdown flush).
+- `rust/motion-engine/src/config.rs` — `PlannerConfig::limit_set_names`.
+- `rust/motion-engine/src/binding_report.rs` — new module: `label_binding` + `BindingAccumulator` (created).
+- `rust/motion-engine/src/lib.rs` — `mod binding_report;`.
+- `rust/motion-engine/src/planner.rs` — accumulator wiring in `run_loop` (Move cadence + StreamOpen/Shutdown flush).
 
 ---
 
@@ -342,7 +342,7 @@ pub struct ReplanReport {
 }
 ```
 
-`grep -rn "ReplanReport" rust/` — fix any site that relied on `Copy` (used the value twice after a move). The production consumer (`motion-bridge` planner) destructures it once; expect zero or trivial fixes.
+`grep -rn "ReplanReport" rust/` — fix any site that relied on `Copy` (used the value twice after a move). The production consumer (`motion-engine` planner) destructures it once; expect zero or trivial fixes.
 
 - [ ] **Step 3f: Wire it in `rust/trajectory/src/streaming/state.rs`.** Change the destructure (anchor: `let (PlanOutput { fitted, stats }, time_offset, fallback_rung) =`) to include `binding`:
 
@@ -368,19 +368,19 @@ git commit -m "feat(trajectory): aggregate per-batch binding summary onto Replan
 
 ---
 
-### Task 3: `motion-bridge` — limit-set names + binding label formatter
+### Task 3: `motion-engine` — limit-set names + binding label formatter
 
 Two pure pieces: a config method exposing limit-section names in temporal's set order, and a formatter turning a `BindingConstraint` into structured label fields.
 
 **Files:**
-- Modify: `rust/motion-bridge/src/config.rs` (`limit_set_names`)
-- Create: `rust/motion-bridge/src/binding_report.rs` (`label_binding` + `BindingLabel`)
-- Modify: `rust/motion-bridge/src/lib.rs` (`mod binding_report;`)
-- Test: `rust/motion-bridge/src/config/tests.rs`, `rust/motion-bridge/src/binding_report.rs` (`#[cfg(test)]` mod)
+- Modify: `rust/motion-engine/src/config.rs` (`limit_set_names`)
+- Create: `rust/motion-engine/src/binding_report.rs` (`label_binding` + `BindingLabel`)
+- Modify: `rust/motion-engine/src/lib.rs` (`mod binding_report;`)
+- Test: `rust/motion-engine/src/config/tests.rs`, `rust/motion-engine/src/binding_report.rs` (`#[cfg(test)]` mod)
 
 - [ ] **Step 1: Write the failing tests.**
 
-In `rust/motion-bridge/src/config/tests.rs` (anchor an existing limit-config test with `grep -n "limit_sections\|LimitSection" rust/motion-bridge/src/config/tests.rs` and reuse its `PlannerConfig` builder):
+In `rust/motion-engine/src/config/tests.rs` (anchor an existing limit-config test with `grep -n "limit_sections\|LimitSection" rust/motion-engine/src/config/tests.rs` and reuse its `PlannerConfig` builder):
 
 ```rust
 #[test]
@@ -392,7 +392,7 @@ fn limit_set_names_follow_section_order() {
 }
 ```
 
-In a new `#[cfg(test)] mod tests;` at the bottom of `rust/motion-bridge/src/binding_report.rs`, in `rust/motion-bridge/src/binding_report/tests.rs`:
+In a new `#[cfg(test)] mod tests;` at the bottom of `rust/motion-engine/src/binding_report.rs`, in `rust/motion-engine/src/binding_report/tests.rs`:
 
 ```rust
 use super::*;
@@ -431,10 +431,10 @@ fn none_and_boundary_have_no_label() {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail** — `cargo nextest run -p motion-bridge -E 'test(limit_set_names_follow_section_order) or test(labels_) or test(trailing_set) or test(none_and_boundary)'`
+- [ ] **Step 2: Run to verify they fail** — `cargo nextest run -p motion-engine -E 'test(limit_set_names_follow_section_order) or test(labels_) or test(trailing_set) or test(none_and_boundary)'`
   Expected: FAIL to compile (`limit_set_names` / `binding_report` do not exist).
 
-- [ ] **Step 3a: Add `limit_set_names` in `rust/motion-bridge/src/config.rs`.** Inside `impl PlannerConfig` (the same block as `to_temporal_limits`), add — the order mirrors `to_temporal_limits`'s `sets` push order; the optional trailing runtime-caps set has no section name and is resolved at lookup, so it is intentionally omitted here:
+- [ ] **Step 3a: Add `limit_set_names` in `rust/motion-engine/src/config.rs`.** Inside `impl PlannerConfig` (the same block as `to_temporal_limits`), add — the order mirrors `to_temporal_limits`'s `sets` push order; the optional trailing runtime-caps set has no section name and is resolved at lookup, so it is intentionally omitted here:
 
 ```rust
     pub fn limit_set_names(&self) -> Vec<String> {
@@ -442,7 +442,7 @@ fn none_and_boundary_have_no_label() {
     }
 ```
 
-- [ ] **Step 3b: Create `rust/motion-bridge/src/binding_report.rs`** with the formatter (the accumulator is added in Task 4 — this step is the label half only):
+- [ ] **Step 3b: Create `rust/motion-engine/src/binding_report.rs`** with the formatter (the accumulator is added in Task 4 — this step is the label half only):
 
 ```rust
 use temporal::BindingConstraint;
@@ -479,34 +479,34 @@ pub fn label_binding(c: BindingConstraint, names: &[String]) -> Option<BindingLa
 mod tests;
 ```
 
-- [ ] **Step 3c: Register the module** in `rust/motion-bridge/src/lib.rs` next to the other `mod` declarations (`grep -n "^mod \|^pub mod " rust/motion-bridge/src/lib.rs`):
+- [ ] **Step 3c: Register the module** in `rust/motion-engine/src/lib.rs` next to the other `mod` declarations (`grep -n "^mod \|^pub mod " rust/motion-engine/src/lib.rs`):
 
 ```rust
 mod binding_report;
 ```
 
-- [ ] **Step 4: Run to verify they pass** — `cargo nextest run -p motion-bridge -E 'test(limit_set_names_follow_section_order) or test(labels_) or test(trailing_set) or test(none_and_boundary)'`
+- [ ] **Step 4: Run to verify they pass** — `cargo nextest run -p motion-engine -E 'test(limit_set_names_follow_section_order) or test(labels_) or test(trailing_set) or test(none_and_boundary)'`
   Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add rust/motion-bridge/src/config.rs rust/motion-bridge/src/binding_report.rs rust/motion-bridge/src/binding_report/tests.rs rust/motion-bridge/src/config/tests.rs rust/motion-bridge/src/lib.rs
-git commit -m "feat(motion-bridge): limit-set names and binding label formatter"
+git add rust/motion-engine/src/config.rs rust/motion-engine/src/binding_report.rs rust/motion-engine/src/binding_report/tests.rs rust/motion-engine/src/config/tests.rs rust/motion-engine/src/lib.rs
+git commit -m "feat(motion-engine): limit-set names and binding label formatter"
 ```
 
 ---
 
-### Task 4: `motion-bridge` — `BindingAccumulator` and emit wiring
+### Task 4: `motion-engine` — `BindingAccumulator` and emit wiring
 
 Accumulate per-replan summaries into a per-window tally, emit `binding_rollup` + `binding_hist` on a ~1s cadence, flush at stream-open and shutdown.
 
 **Files:**
-- Modify: `rust/motion-bridge/src/binding_report.rs` (accumulator)
-- Modify: `rust/motion-bridge/src/binding_report/tests.rs` (accumulator tests)
-- Modify: `rust/motion-bridge/src/planner.rs` (wiring in `run_loop`)
+- Modify: `rust/motion-engine/src/binding_report.rs` (accumulator)
+- Modify: `rust/motion-engine/src/binding_report/tests.rs` (accumulator tests)
+- Modify: `rust/motion-engine/src/planner.rs` (wiring in `run_loop`)
 
-- [ ] **Step 1: Write the failing accumulator tests.** Append to `rust/motion-bridge/src/binding_report/tests.rs`:
+- [ ] **Step 1: Write the failing accumulator tests.** Append to `rust/motion-engine/src/binding_report/tests.rs`:
 
 ```rust
 use std::time::{Duration, Instant};
@@ -561,10 +561,10 @@ fn flush_emits_and_clears_a_partial_window() {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail** — `cargo nextest run -p motion-bridge -E 'test(record_tallies) or test(maybe_rollup) or test(flush_emits)'`
+- [ ] **Step 2: Run to verify they fail** — `cargo nextest run -p motion-engine -E 'test(record_tallies) or test(maybe_rollup) or test(flush_emits)'`
   Expected: FAIL to compile (`BindingAccumulator` does not exist).
 
-- [ ] **Step 3: Implement the accumulator** in `rust/motion-bridge/src/binding_report.rs`. Add the imports at the top and the struct below `label_binding`:
+- [ ] **Step 3: Implement the accumulator** in `rust/motion-engine/src/binding_report.rs`. Add the imports at the top and the struct below `label_binding`:
 
 ```rust
 use std::collections::HashMap;
@@ -668,10 +668,10 @@ impl BindingAccumulator {
 
 (If clippy's MSRV lint rejects `Option::is_none_or`, swap to `self.worst.map_or(true, |(_, r, _)| w.ratio > r)`.)
 
-- [ ] **Step 4: Run to verify they pass** — `cargo nextest run -p motion-bridge -E 'test(record_tallies) or test(maybe_rollup) or test(flush_emits)'`
+- [ ] **Step 4: Run to verify they pass** — `cargo nextest run -p motion-engine -E 'test(record_tallies) or test(maybe_rollup) or test(flush_emits)'`
   Expected: PASS.
 
-- [ ] **Step 5: Wire into `rust/motion-bridge/src/planner.rs` `run_loop`.** After `let mut thread_state = PlannerThreadState::build(&config);` (anchor line ~456), add the names table and accumulator (both live for the loop's lifetime; `limit_sections` is config-static, so the names need no rebuild):
+- [ ] **Step 5: Wire into `rust/motion-engine/src/planner.rs` `run_loop`.** After `let mut thread_state = PlannerThreadState::build(&config);` (anchor line ~456), add the names table and accumulator (both live for the loop's lifetime; `limit_sections` is config-static, so the names need no rebuild):
 
 ```rust
     let limit_names = config.limit_set_names();
@@ -699,7 +699,7 @@ Immediately after the existing `replan_stats` `tracing::debug!(…)` call in tha
                 binding_acc.maybe_rollup(Instant::now(), &limit_names);
 ```
 
-In the `PlannerMsg::KalicoStreamOpen { home_pos }` arm (anchor line ~712), **before** the existing state reset, flush the finished print's partial window:
+In the `PlannerMsg::McuStreamOpen { home_pos }` arm (anchor line ~712), **before** the existing state reset, flush the finished print's partial window:
 
 ```rust
                 binding_acc.flush(Instant::now(), &limit_names);
@@ -716,14 +716,14 @@ In the `PlannerMsg::Shutdown` arm (anchor: `PlannerMsg::Shutdown => return,`), f
 
 (`Instant` is already imported in `planner.rs`.)
 
-- [ ] **Step 6: Run** — `cargo nextest run -p motion-bridge`
+- [ ] **Step 6: Run** — `cargo nextest run -p motion-engine`
   Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add rust/motion-bridge/src/binding_report.rs rust/motion-bridge/src/binding_report/tests.rs rust/motion-bridge/src/planner.rs
-git commit -m "feat(motion-bridge): accumulate and emit binding-constraint rollups"
+git add rust/motion-engine/src/binding_report.rs rust/motion-engine/src/binding_report/tests.rs rust/motion-engine/src/planner.rs
+git commit -m "feat(motion-engine): accumulate and emit binding-constraint rollups"
 ```
 
 ---
@@ -731,7 +731,7 @@ git commit -m "feat(motion-bridge): accumulate and emit binding-constraint rollu
 ### Task 5: End-to-end verification, sim sanity, and gate
 
 - [ ] **Step 1: Purity guard.** Confirm no logging dependency leaked into the pure crates:
-  `grep -rn "tracing\|kalico_log\|klog" rust/temporal/src/ rust/trajectory/src/` → expect zero hits (binding data is plain returned structs; emission lives only in motion-bridge).
+  `grep -rn "tracing\|kalico_log\|klog" rust/temporal/src/ rust/trajectory/src/` → expect zero hits (binding data is plain returned structs; emission lives only in motion-engine).
   `grep -rn "static\|lazy_static\|OnceLock" rust/temporal/src/ | grep -v test` → no new globals.
 
 - [ ] **Step 2: Full workspace suite** — `cargo nextest run` from `rust/` → PASS. `cargo test --doc` if any doc example was touched. If `klippy/` was touched (it must NOT be in this plan — confirm `git status`), also run `./scripts/ci.sh py`.
@@ -764,5 +764,5 @@ git commit --allow-empty -m "test: binding-constraint observability verified end
 
 **Known-approximation register (each conscious, none silent):**
 1. Worst-pin time anchor is `state.t_appended` (window-end planner clock), not the exact sample time — coarse but correlatable; xyz deferred (decision 4).
-2. A print's final sub-second window may be flushed at the next `KalicoStreamOpen` and so tagged with the next print's `print_id`; negligible for "how-often" aggregates, and `binding_rollup`/`binding_hist` during the print carry the correct live `print_id` (decision 2).
+2. A print's final sub-second window may be flushed at the next `McuStreamOpen` and so tagged with the next print's `print_id`; negligible for "how-often" aggregates, and `binding_rollup`/`binding_hist` during the print carry the correct live `print_id` (decision 2).
 3. `binding_hist` line count per window scales with the number of distinct `(constraint, set)` pins (typically <10 on a real machine), not with move count — flat host cost (decision 1).

@@ -15,7 +15,7 @@ class FakeKin:
         self.cleared.append(list(axes))
 
 
-class FakeBridge:
+class FakeEngine:
     def __init__(self, measured, raises=None):
         self._measured = measured
         self._raises = raises
@@ -33,7 +33,7 @@ class FakeMotion:
 
     def __init__(self, dirty, measured, raises=None):
         self.kin = FakeKin(dirty)
-        self.bridge = FakeBridge(measured, raises)
+        self.engine = FakeEngine(measured, raises)
         self.commanded_pos = [10.0, 20.0, 30.0, 4.0]
         self.set_position_calls = []
 
@@ -45,14 +45,14 @@ class FakeMotion:
 def test_resync_no_dirty_axes_does_not_query():
     m = FakeMotion(dirty=[], measured={})
     m.resync_parked_servos()
-    assert m.bridge.queries == 0
+    assert m.engine.queries == 0
     assert m.set_position_calls == []
 
 
 def test_resync_dirty_z_reseats_only_z():
     m = FakeMotion(dirty=[2], measured={"z": (123.5, 0.0)})
     m.resync_parked_servos()
-    assert m.bridge.queries == 1
+    assert m.engine.queries == 1
     newpos, homing_axes = m.set_position_calls[0]
     assert newpos == [10.0, 20.0, 123.5, 4.0]
     assert homing_axes == ()
@@ -88,7 +88,7 @@ class FakeExtruder:
         pass
 
 
-class _SubmitBridge(FakeBridge):
+class _SubmitEngine(FakeEngine):
     def __init__(self, measured):
         super().__init__(measured)
         self.moves = []
@@ -111,7 +111,7 @@ class MoveMotion(FakeMotion):
     def __init__(self, dirty, measured):
         super().__init__(dirty, measured)
         self.kin = _MoveKin(dirty)
-        self.bridge = _SubmitBridge(measured)
+        self.engine = _SubmitEngine(measured)
         self.extruder = FakeExtruder()
 
     def _axis_limit(self, axis, kind):
@@ -131,8 +131,8 @@ def test_move_resyncs_before_computing_deltas():
     m = MoveMotion(dirty=[2], measured={"z": (123.5, 0.0)})
     m.commanded_pos = [10.0, 20.0, 30.0, 4.0]
     m.move([10.0, 20.0, 140.0, 4.0], 50.0)
-    assert m.bridge.queries == 1
-    dx, dy, dz, de, _feedrate = m.bridge.moves[0]
+    assert m.engine.queries == 1
+    dx, dy, dz, de, _feedrate = m.engine.moves[0]
     assert (dx, dy) == (0.0, 0.0)
     assert dz == pytest.approx(140.0 - 123.5)
     assert de == 0.0
@@ -147,7 +147,7 @@ def test_move_curve_resyncs_before_computing_deltas():
         submitted.append((dx, dy, dz, de, feedrate))
 
     m.move_curve([10.0, 20.0, 140.0, 4.0], [], submit, 50.0)
-    assert m.bridge.queries == 1
+    assert m.engine.queries == 1
     dx, dy, dz, de, _feedrate = submitted[0]
     assert (dx, dy) == (0.0, 0.0)
     assert dz == pytest.approx(140.0 - 123.5)

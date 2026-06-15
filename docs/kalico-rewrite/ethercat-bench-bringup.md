@@ -9,20 +9,20 @@
 ## What's already proven without hardware
 - MCU stepper hot-path codegen is **byte-identical** to pristine sota-motion (disasm-verified). Flashing this branch will not change stepper behavior.
 - The servo runs the **same hardened walker** as the MCU (`runtime::motion_core`); its trajectory eval, origin/no-jump mapping, piece-boundary continuity, and the `PieceStartInPast` fault boundary are unit-tested.
-- Sustained streaming past one ring depth works over the real `UnixNativeConn ↔ FrameServer` socket (no stall — the "stopped after first move" class is covered).
-- `klippy → motion-bridge → endpoint` host wiring is ported and the stepper-path tests still pass.
+- Sustained streaming past one ring depth works over the real `McuSerialConn ↔ FrameServer` socket (no stall — the "stopped after first move" class is covered).
+- `klippy → motion-engine → endpoint` host wiring is ported and the stepper-path tests still pass.
 
 ## Stub validation: results (2026-06-01, no second MCU)
 
 Validated the whole host path on the Pi 3B with **no second STM32** — a
 Linux-process MCU (`klipper_mcu`, MACH_LINUX build) as the primary clock + Y/Z
-steppers, and the EtherCAT servo on X talking to the `kalico-ethercat-rt-stub`.
+steppers, and the EtherCAT servo on X talking to the `ethercat-rt-stub`.
 
 **Proven end-to-end (servo path):**
 - klippy reaches `ready`; `[ethercat_node]` + `[servo_x]` parse; the servo axis
   binds correctly (X excluded from stepper `runtime_bindings`: `present=0x6`,
   `steps_per_mm[0]=0`); the bridge claims the node (`claimed handle=1`) and
-  `UnixNativeConn` connects to the stub (`client connected`).
+  `McuSerialConn` connects to the stub (`client connected`).
 - `SET_KINEMATIC_POSITION` → position updates, axes home (`xyz`), no crash.
 - `G1 X…` streams `PushPieces` to the endpoint; the stub's `retired_count`
   advances steadily; `M400` drain completes for servo-only moves; the endpoint
@@ -80,9 +80,9 @@ stepping path today.
 socket: /tmp/kalico-ethercat.sock   # required; the Unix socket klippy connects on
 interface: eth0                     # required; NIC the drive is wired to (raw EtherCAT)
 # endpoint: optional. Absolute or repo-relative path to the binary klippy spawns.
-#   Default: rust/target/release/kalico-ethercat-rt (the hw binary). Point this at
+#   Default: rust/target/release/ethercat-rt (the hw binary). Point this at
 #   the stub for drive-off validation (see below).
-#endpoint: rust/target/release/kalico-ethercat-rt-stub
+#endpoint: rust/target/release/ethercat-rt-stub
 
 # A position-commanded servo presented as the X axis. No step/dir, no microsteps.
 [servo_x]
@@ -197,7 +197,7 @@ Confirm the whole host path before energizing anything. Point the node at the st
 [ethercat_node node_x]
 socket: /tmp/kalico-ethercat.sock
 interface: eth0
-endpoint: rust/target/release/kalico-ethercat-rt-stub
+endpoint: rust/target/release/ethercat-rt-stub
 ```
 - Start klippy. It **spawns the stub itself** at claim time — you do not launch it.
   Confirm klippy reaches **`ready`**.
@@ -208,7 +208,7 @@ endpoint: rust/target/release/kalico-ethercat-rt-stub
 
 ### 4. Real drive (supervised)
 - Switch `endpoint:` back to the hw binary (or drop the key to use the default
-  `rust/target/release/kalico-ethercat-rt`) and restart klippy.
+  `rust/target/release/ethercat-rt`) and restart klippy.
 - **Dark drive (powered off / disconnected):** with the drive as the only slave on
   the bus, a powered-off drive means SOEM finds no slaves at all (rc=-2); klippy
   fails the claim loudly with:
@@ -296,10 +296,10 @@ harmless, since file-caps already include `cap_sys_nice`.)
 **Verify it is actually in force** — a green *warm* restart only proves the cap
 took; only a **cold reboot** proves the loop holds cadence under boot load:
 
-    pid=$(pgrep -f release/kalico-ethercat-rt)
+    pid=$(pgrep -f release/ethercat-rt)
     chrt -p $pid                                     # want: SCHED_FIFO priority 80
     grep Cpus_allowed_list /proc/$pid/status         # want: 3 (the isolated core)
-    /usr/sbin/getcap rust/target/release/kalico-ethercat-rt   # want: ...cap_sys_nice=ep
+    /usr/sbin/getcap rust/target/release/ethercat-rt   # want: ...cap_sys_nice=ep
     sudo journalctl -b | grep -c 'al=0x001a'         # want: 0
 
 `SCHED_OTHER` + `cpus 0-1` on the live endpoint is the bug, not health — the cap
@@ -330,6 +330,6 @@ on the drive's retained state. A failure to write that remap is `rc=-6`
 - If `engine_state=Fault` fires during a *healthy* stream, the 2 ms tolerance may be too tight for your RT scheduling — that's a tuning knob (`EC_DC_PERIOD_NS` in `curves.rs`), not a logic change.
 
 ## If something's off
-- Re-run `cargo test -p kalico-ethercat-rt -p motion-bridge` on the Pi — these are the host-path regression tests.
+- Re-run `cargo test -p ethercat-rt -p motion-engine` on the Pi — these are the host-path regression tests.
 - The stub-level path (step 2) isolates host bugs from drive/EtherCAT bugs — always confirm it green before blaming the drive.
-- Per-piece dispatch projection diagnostics (`[dispatch-margin]` and `[project]`) are emitted at **trace** level to avoid flooding production logs. Enable them with `RUST_LOG=trace` (or a targeted filter such as `RUST_LOG=motion_bridge=trace,kalico_host_rt=trace`). `RUST_LOG` is read by the `EnvFilter` in `rust/motion-bridge/src/logging/mod.rs` at bridge startup.
+- Per-piece dispatch projection diagnostics (`[dispatch-margin]` and `[project]`) are emitted at **trace** level to avoid flooding production logs. Enable them with `RUST_LOG=trace` (or a targeted filter such as `RUST_LOG=motion_engine=trace,host_rt=trace`). `RUST_LOG` is read by the `EnvFilter` in `rust/motion-engine/src/logging/mod.rs` at bridge startup.

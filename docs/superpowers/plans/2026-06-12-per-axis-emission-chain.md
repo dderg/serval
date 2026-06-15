@@ -4,9 +4,9 @@
 
 **Goal:** Every axis runs the same emission chain — input track → post-processor chain → fit — with the follower's input track built by odometer quadrature over the followed axes' realized curves; `[post_processor]` config objects unify shaper kernels and linear pressure advance with runtime-tunable parameters; the live-path `ExtrusionNotSupported` rejection dies and follower pieces flow down the already-existing lane 3.
 
-**Architecture:** Spec: `docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md` §4 (post-processor abstraction, post-chain limits) and §5 (emission chain, two ledgers). `trajectory` gains a `post_processor` module (trait + `smooth_zv`/`smooth_mzv`/`linear_pressure_advance` types, per-axis compiled chains) and an `odometer` module (Gauss–Legendre arc length over exact polynomial derivatives); `emit_shaped` becomes a two-pass per-axis loop over registry-indexed tracks (`ShapedSegment.axes: Vec<_>`). `motion-bridge` parses `[post_processor]` sections, compiles chains, generalizes `update_shaper` → `update_post_processor`, and lifts the classify rejection. klippy parses the sections, rejects `[input_shaper]`, and gains `SET_POST_PROCESSOR`.
+**Architecture:** Spec: `docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md` §4 (post-processor abstraction, post-chain limits) and §5 (emission chain, two ledgers). `trajectory` gains a `post_processor` module (trait + `smooth_zv`/`smooth_mzv`/`linear_pressure_advance` types, per-axis compiled chains) and an `odometer` module (Gauss–Legendre arc length over exact polynomial derivatives); `emit_shaped` becomes a two-pass per-axis loop over registry-indexed tracks (`ShapedSegment.axes: Vec<_>`). `motion-engine` parses `[post_processor]` sections, compiles chains, generalizes `update_shaper` → `update_post_processor`, and lifts the classify rejection. klippy parses the sections, rejects `[input_shaper]`, and gains `SET_POST_PROCESSOR`.
 
-**Tech stack:** Rust (`trajectory`, `motion-bridge`, `geometry` crates), pyo3 bridge (`bridge.rs`), klippy Python (`motion_toolhead.py`, `motion_bridge.py`). Tests: `cargo nextest run` from `rust/` (never bare `cargo test`); Python via `./scripts/ci.sh py`.
+**Tech stack:** Rust (`trajectory`, `motion-engine`, `geometry` crates), pyo3 bridge (`bridge.rs`), klippy Python (`motion_toolhead.py`, `motion_engine.py`). Tests: `cargo nextest run` from `rust/` (never bare `cargo test`); Python via `./scripts/ci.sh py`.
 
 **PRECONDITION: Plan 3 (`docs/superpowers/plans/2026-06-12-planner-extension-follower-rows.md`) is fully landed.** Executors verify before starting: `git log --oneline | head` shows plan 3's final commit, `rg "follower_pa" rust/trajectory/src/lib.rs` hits (`ShapeBatchInput.follower_pa: [f64; temporal::MAX_AXES]`), and `cargo nextest run` from `rust/` is green. Plan 3 was in flight while this plan was written — **all code excerpts here are anchors, not gospel; anchor by symbol name and the given grep commands, never by line, and re-read every touched file before editing.**
 
@@ -28,9 +28,9 @@
 
 4. **Odometer mirrors plan 3's rows.** Realized speed is `‖v(t)‖` over the followed axes' *post-chain* tracks; follower velocity is `ratio(t)·‖v(t)‖` with `ratio(t)` piecewise per segment — exactly the solver's row definition, so plan and emission agree by construction. Distance via Gauss–Legendre over exact polynomial derivatives per Bézier piece, host f64.
 
-5. **Runtime tuning generalizes the existing path.** `Planner::update_shaper` / `PlannerMsg::UpdateShaper` (see `rust/motion-bridge/src/planner.rs`, `grep -n "fn update_shaper" rust/motion-bridge/src/planner.rs`) becomes `update_post_processor(name, param, value)`; the change lands in the planner thread's config and takes effect at the next replan — committed trajectory is never rewritten. klippy command: `SET_POST_PROCESSOR NAME=<instance> <PARAM>=<value>`.
+5. **Runtime tuning generalizes the existing path.** `Planner::update_shaper` / `PlannerMsg::UpdateShaper` (see `rust/motion-engine/src/planner.rs`, `grep -n "fn update_shaper" rust/motion-engine/src/planner.rs`) becomes `update_post_processor(name, param, value)`; the change lands in the planner thread's config and takes effect at the next replan — committed trajectory is never rewritten. klippy command: `SET_POST_PROCESSOR NAME=<instance> <PARAM>=<value>`.
 
-6. **Two ledgers need no new machinery.** Nominal: klippy's existing absolute→delta normalization (plan 2) is untouched. Physical: once lane 3 flows, `HistoryStore` (`rust/motion-bridge/src/motion_history.rs`) records follower pieces per `AxisKey` like any axis; the physical endpoint is its per-axis endpoint. Plan 4 adds tests, not surface.
+6. **Two ledgers need no new machinery.** Nominal: klippy's existing absolute→delta normalization (plan 2) is untouched. Physical: once lane 3 flows, `HistoryStore` (`rust/motion-engine/src/motion_history.rs`) records follower pieces per `AxisKey` like any axis; the physical endpoint is its per-axis endpoint. Plan 4 adds tests, not surface.
 
 7. **Follower-only moves** (`CubicSegment.virtual_path_mm: Some(len)`): the follower track comes straight from the plan — `track = start + ratio × s(t)` with `s(t)` the planned path progress; no odometer (the spatial curve is identically zero). This retires `ShapeError::VirtualPathUnrouted`.
 
@@ -298,10 +298,10 @@ Pure representation change, no behavior: `[ScalarNurbs<f64>; 3]` → `Vec<Scalar
 
 **Files:**
 - Modify: `rust/trajectory/src/lib.rs` (`ShapedSegment`)
-- Modify: every consumer — find them all: `rg -ln "ShapedSegment" rust/` (expect: `trajectory/src/{emit_shaped,beta,streaming/*}`, `motion-bridge/src/{planner,enqueue,dispatch}` + tests)
+- Modify: every consumer — find them all: `rg -ln "ShapedSegment" rust/` (expect: `trajectory/src/{emit_shaped,beta,streaming/*}`, `motion-engine/src/{planner,enqueue,dispatch}` + tests)
 
 - [ ] **Step 1: Write failing test** (in `rust/trajectory/src/tests.rs`): construct a `ShapedSegment` with 4 axes; assert `seg.axes.len() == 4`. → does not compile against the array type.
-- [ ] **Step 2: Change the field, chase compiler errors.** `emit_shaped` builds `vec![x, y, z]`; `enqueue_segment`'s existing `axis_idx >= seg.axes.len()` guard and corexy indexing (`rust/motion-bridge/src/enqueue.rs`) survive unchanged. No site may silently truncate or pad — where a consumer assumed exactly 3, keep the assumption as an explicit `assert!`/error if it is real, otherwise generalize.
+- [ ] **Step 2: Change the field, chase compiler errors.** `emit_shaped` builds `vec![x, y, z]`; `enqueue_segment`'s existing `axis_idx >= seg.axes.len()` guard and corexy indexing (`rust/motion-engine/src/enqueue.rs`) survive unchanged. No site may silently truncate or pad — where a consumer assumed exactly 3, keep the assumption as an explicit `assert!`/error if it is real, otherwise generalize.
 - [ ] **Step 3: Run** — `cargo nextest run` (workspace) → PASS, zero behavior change.
 - [ ] **Step 4: Commit** — `refactor(trajectory): ShapedSegment carries registry-indexed track vector`
 
@@ -399,18 +399,18 @@ fn follower_only_move_emits_planned_track() {
 
 ---
 
-## Task 6: motion-bridge config — `[post_processor]` sections, chain compilation, planner init
+## Task 6: motion-engine config — `[post_processor]` sections, chain compilation, planner init
 
 **Files:**
-- Modify: `rust/motion-bridge/src/config.rs` (+ `config/tests.rs`): `AxisDecl` gains `post_processors: Vec<String>`; new `PostProcessorDecl { name, ty: String, params: Vec<(String, f64)> }`; `AxisRegistry::try_new` (or a sibling `compile_chains`) validates — every referenced name declared, unknown `type:` rejected (`UnsupportedKind` exists, repoint its message at `[post_processor]`), `CompiledChain::compile` errors surfaced verbatim at load
-- Modify: `rust/motion-bridge/src/planner.rs`: `PlannerConfig` drops `shaper: ShaperConfig` for `chains: AxisChainSet` + named instances `Vec<PostProcessorInstance>`; `build_replan_context` / `shaper_config_to_plan_shapers` / `emit_kernels` derive from chains (`grep -n "shaper" rust/motion-bridge/src/planner.rs`); `update_shaper`/`PlannerMsg::UpdateShaper` → `update_post_processor(name: &str, key: &str, value: f64)` / `PlannerMsg::UpdatePostProcessor` — handler mutates the named instance, recompiles chains, rebuilds the replan context **for subsequent replans only**; unknown name/key → loud `PlannerError`
-- Modify: `rust/motion-bridge/src/bridge.rs`: pyo3 `init_planner` (grep `fn init_planner`) replaces `shaper_type_x/freq_x/y` args with `post_processors: Vec<(String, String, Vec<(String, f64)>)>` and per-axis `post_processors` lists arriving inside the existing `axes` arg; `update_shaper` pyfunction → `update_post_processor(name, key, value)`
+- Modify: `rust/motion-engine/src/config.rs` (+ `config/tests.rs`): `AxisDecl` gains `post_processors: Vec<String>`; new `PostProcessorDecl { name, ty: String, params: Vec<(String, f64)> }`; `AxisRegistry::try_new` (or a sibling `compile_chains`) validates — every referenced name declared, unknown `type:` rejected (`UnsupportedKind` exists, repoint its message at `[post_processor]`), `CompiledChain::compile` errors surfaced verbatim at load
+- Modify: `rust/motion-engine/src/planner.rs`: `PlannerConfig` drops `shaper: ShaperConfig` for `chains: AxisChainSet` + named instances `Vec<PostProcessorInstance>`; `build_replan_context` / `shaper_config_to_plan_shapers` / `emit_kernels` derive from chains (`grep -n "shaper" rust/motion-engine/src/planner.rs`); `update_shaper`/`PlannerMsg::UpdateShaper` → `update_post_processor(name: &str, key: &str, value: f64)` / `PlannerMsg::UpdatePostProcessor` — handler mutates the named instance, recompiles chains, rebuilds the replan context **for subsequent replans only**; unknown name/key → loud `PlannerError`
+- Modify: `rust/motion-engine/src/bridge.rs`: pyo3 `init_planner` (grep `fn init_planner`) replaces `shaper_type_x/freq_x/y` args with `post_processors: Vec<(String, String, Vec<(String, f64)>)>` and per-axis `post_processors` lists arriving inside the existing `axes` arg; `update_shaper` pyfunction → `update_post_processor(name, key, value)`
 
 - [ ] **Step 1: Write failing tests** in `config/tests.rs` (axis with unknown chain name; duplicate `[post_processor]` name; two kernels on one axis → `UnsupportedComposition` text mentions "v1"; happy path compiles `is`+`pa` on axis `e`).
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-bridge -E 'test(post_processor)'` → FAIL
+- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-engine -E 'test(post_processor)'` → FAIL
 - [ ] **Step 3: Implement**, deleting `ShaperConfig`/`AxisShaper` from `trajectory/src/lib.rs` once nothing references them (`rg -ln "ShaperConfig|AxisShaper" rust/` must come back empty outside git history).
 - [ ] **Step 4: Run** — `cargo nextest run` (workspace) → PASS
-- [ ] **Step 5: Commit** — `feat(motion-bridge): [post_processor] chains replace ShaperConfig; runtime update_post_processor`
+- [ ] **Step 5: Commit** — `feat(motion-engine): [post_processor] chains replace ShaperConfig; runtime update_post_processor`
 
 ---
 
@@ -418,7 +418,7 @@ fn follower_only_move_emits_planned_track() {
 
 **Files:**
 - Modify: `klippy/motion_toolhead.py` — next to the existing `[axis]`/`[limit]` parsing (`grep -n "axis_sections\|limit_sections" klippy/motion_toolhead.py`): parse `[post_processor <name>]` (`type:` + numeric params, pass through verbatim — klippy validates nothing the bridge already validates); axis sections gain `post_processors:`; `_init_planner` ships both through the new `init_planner` signature
-- Modify: `klippy/motion_bridge.py` — `init_planner` wrapper matches Task 6's signature; `update_shaper` wrapper → `update_post_processor`
+- Modify: `klippy/motion_engine.py` — `init_planner` wrapper matches Task 6's signature; `update_shaper` wrapper → `update_post_processor`
 - Modify/Delete: `klippy/extras/input_shaper.py` — the section joins the rejected-legacy list: loading `[input_shaper]` raises a config error pointing at `[post_processor]` (follow the existing legacy-rejection pattern, `grep -n "is not supported" klippy/motion_toolhead.py`)
 - Add: `SET_POST_PROCESSOR NAME=<name> <PARAM>=<VALUE>` gcode command in `motion_toolhead.py` → `bridge.update_post_processor(name, param.lower(), float(value))`; errors propagate to the console verbatim
 - Modify: config fixtures — `rg -l "input_shaper" test/ config/ printer*.cfg` and the fixtures plan 2 touched (`git show cc8d5167e --stat` for the list); declare `[post_processor]` sections where shapers were configured
@@ -435,21 +435,21 @@ fn follower_only_move_emits_planned_track() {
 ## Task 8: runtime tuning end-to-end test
 
 **Files:**
-- Modify: `rust/motion-bridge/src/planner/tests.rs` (or the integration-test home `rust/tests/` — match where planner-thread tests live: `rg -ln "update_shaper" rust/motion-bridge/src/planner/tests.rs rust/tests/`)
+- Modify: `rust/motion-engine/src/planner/tests.rs` (or the integration-test home `rust/tests/` — match where planner-thread tests live: `rg -ln "update_shaper" rust/motion-engine/src/planner/tests.rs rust/tests/`)
 
 - [ ] **Step 1: Write failing test:** start a planner with `pa` gain 0.0; submit extruding batch A; `update_post_processor("pa", "k", 0.05)`; submit batch B. Assert batch A's emitted follower pieces show no PA boost and batch B's do (compare follower velocity at mid-accel between batches); assert nothing already dispatched was re-emitted (piece counts/ids stable). Unknown name errors loudly.
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-bridge -E 'test(update_post_processor)'` → FAIL
+- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-engine -E 'test(update_post_processor)'` → FAIL
 - [ ] **Step 3: Implement** whatever plumbing gaps the test exposes (expected: none beyond Task 6).
-- [ ] **Step 4: Run** — `cargo nextest run -p motion-bridge` → PASS
-- [ ] **Step 5: Commit** — `test(motion-bridge): runtime post-processor tuning applies to new plans only`
+- [ ] **Step 4: Run** — `cargo nextest run -p motion-engine` → PASS
+- [ ] **Step 5: Commit** — `test(motion-engine): runtime post-processor tuning applies to new plans only`
 
 ---
 
 ## Task 9: lift `ExtrusionNotSupported`; follower demands and virtual paths in classify
 
 **Files:**
-- Modify: `rust/motion-bridge/src/classify.rs` + `classify/tests.rs`
-- Modify: `rust/motion-bridge/src/bridge.rs` `submit_move` (grep `fn submit_move`) — resolve the follower axis index from the planner's `AxisRegistry` instead of assuming; `de ≠ 0` with no declared follower axis is a loud error (the registry rule, not a silent drop)
+- Modify: `rust/motion-engine/src/classify.rs` + `classify/tests.rs`
+- Modify: `rust/motion-engine/src/bridge.rs` `submit_move` (grep `fn submit_move`) — resolve the follower axis index from the planner's `AxisRegistry` instead of assuming; `de ≠ 0` with no declared follower axis is a loud error (the registry rule, not a silent drop)
 
 New classify contract:
 
@@ -468,10 +468,10 @@ pub fn classify_and_build(
 - `ClassifyError::ExtrusionNotSupported` deleted; the enum variant's absence must break every reference (`rg -n "ExtrusionNotSupported" rust/ klippy/` → empty after)
 
 - [ ] **Step 1: Write failing tests** (extruding XY move carries ratio `de/dist`; retract-with-hop carries negative ratio over 3D length; follower-only move builds virtual path; `de≠0` without follower axis errors).
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-bridge -E 'test(classify)'` → FAIL
+- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-engine -E 'test(classify)'` → FAIL
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** — `cargo nextest run` (workspace) → PASS
-- [ ] **Step 5: Commit** — `feat(motion-bridge): extruding and follower-only moves flow; ExtrusionNotSupported dies`
+- [ ] **Step 5: Commit** — `feat(motion-engine): extruding and follower-only moves flow; ExtrusionNotSupported dies`
 
 ---
 
@@ -479,13 +479,13 @@ pub fn classify_and_build(
 
 **Files:**
 - Modify: the end-to-end home `rust/runtime/tests/e2e_trajectory.rs` or `rust/tests/` (match existing extrusionless e2e idioms: `rg -ln "submit_move" rust/runtime/tests/ rust/tests/`)
-- Modify: `rust/motion-bridge/src/motion_history/tests.rs`
+- Modify: `rust/motion-engine/src/motion_history/tests.rs`
 
 - [ ] **Step 1: Write failing tests:**
   - e2e: configured follower axis `e` follows x,y,z with a `pa` chain; submit a corner print path; assert `PushPieces` arrive with `axis_idx == 3`, the follower lane's `HistoryStore` endpoint equals the odometer prediction, and with a smoothing kernel on x/y the physical endpoint is **less** than the nominal ledger total (the accepted shortfall, spec §5) — assert the inequality and that nobody "corrects" it.
   - history: `state_at_clock` on the follower axis mid-move returns position between start and end, monotone for positive ratio.
 - [ ] **Step 2: Run to verify failure** — `cargo nextest run -E 'test(e2e) and test(follower)'` → FAIL
-- [ ] **Step 3: Implement** remaining wiring gaps (expected: MCU axis config for lane 3 in test harness fixtures — `rg -n "axes" rust/motion-bridge/src/test_support.rs`).
+- [ ] **Step 3: Implement** remaining wiring gaps (expected: MCU axis config for lane 3 in test harness fixtures — `rg -n "axes" rust/motion-engine/src/test_support.rs`).
 - [ ] **Step 4: Run** — `cargo nextest run` → PASS
 - [ ] **Step 5: Commit** — `test: follower lane end-to-end; physical-vs-nominal ledger shortfall asserted`
 
