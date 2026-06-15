@@ -143,28 +143,19 @@ fn heartbeat_callback_fires_with_retired_counts() {
     let status = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
     let mut d = EventDispatcher::new(status, 16, 8);
 
-    let recorder: Arc<Mutex<Vec<(Vec<u32>, Vec<u32>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder: Arc<Mutex<Vec<Vec<u32>>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder2 = Arc::clone(&recorder);
-    d.heartbeat_callback = Some(Arc::new(move |counts: &[u32], corr: &[u32]| {
-        recorder2
-            .lock()
-            .unwrap()
-            .push((counts.to_vec(), corr.to_vec()));
+    d.heartbeat_callback = Some(Arc::new(move |counts: &[u32]| {
+        recorder2.lock().unwrap().push(counts.to_vec());
     }));
 
     d.dispatch(RuntimeEvent::Heartbeat {
         retired_counts: vec![5, 1],
-        correction_retired_counts: vec![2, 3],
     });
 
     let got = recorder.lock().unwrap();
     assert_eq!(got.len(), 1, "callback must fire exactly once");
-    assert_eq!(got[0].0, vec![5, 1]);
-    assert_eq!(
-        got[0].1,
-        vec![2, 3],
-        "correction array must reach the callback"
-    );
+    assert_eq!(got[0], vec![5, 1]);
 }
 
 #[test]
@@ -179,7 +170,6 @@ fn heartbeat_is_not_forwarded_to_runtime_rx() {
 
     d.dispatch(RuntimeEvent::Heartbeat {
         retired_counts: vec![3, 7],
-        correction_retired_counts: vec![],
     });
 
     assert!(

@@ -265,16 +265,6 @@ runtime_drain(void)
                     last_retired_seen[i] = retired[i];
                 }
             }
-            static uint32_t last_corr_retired_seen[KALICO_FAST_STATUS_MAX_AXES];
-            uint32_t corr_retired[KALICO_FAST_STATUS_MAX_AXES];
-            int32_t ncorr = kalico_runtime_get_correction_retired(
-                runtime_handle, corr_retired, KALICO_FAST_STATUS_MAX_AXES);
-            for (int32_t i = 0; i < ncorr; i++) {
-                if (corr_retired[i] != last_corr_retired_seen[i]) {
-                    pending_advance = 1;
-                    last_corr_retired_seen[i] = corr_retired[i];
-                }
-            }
             uint32_t elapsed = cur_time - last_status_emit_time;
             if (pending_advance
                 && elapsed >= KALICO_FAST_STATUS_RETIREMENT_MIN_TICKS) {

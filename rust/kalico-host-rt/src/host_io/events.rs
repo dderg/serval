@@ -237,7 +237,7 @@ pub struct EventDispatcher {
     pub runtime_event_dispatcher: RuntimeEventDispatcher,
     pub host_event_dispatcher: HostEventDispatcher,
     status_retired_watermark: u32,
-    pub heartbeat_callback: Option<Arc<dyn Fn(&[u32], &[u32]) + Send + Sync>>,
+    pub heartbeat_callback: Option<Arc<dyn Fn(&[u32]) + Send + Sync>>,
     pub mcu_log_hook: Option<Box<dyn Fn(McuLogEvent) + Send + Sync>>,
 }
 
@@ -309,12 +309,9 @@ impl EventDispatcher {
                     self.dispatch(RuntimeEvent::CreditFreed(c));
                 }
             }
-            RuntimeEvent::Heartbeat {
-                retired_counts,
-                correction_retired_counts,
-            } => {
+            RuntimeEvent::Heartbeat { retired_counts } => {
                 if let Some(cb) = &self.heartbeat_callback {
-                    cb(&retired_counts, &correction_retired_counts);
+                    cb(&retired_counts);
                 }
             }
             RuntimeEvent::EndstopTrip(_)

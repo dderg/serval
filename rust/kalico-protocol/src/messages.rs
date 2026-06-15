@@ -18,8 +18,6 @@ pub enum MessageKind {
     MotorStateResponse = 0x0045,
     PushPieces = 0x0060,
     PushPiecesResponse = 0x0061,
-    PushCorrectionPieces = 0x0062,
-    PushCorrectionPiecesResponse = 0x0063,
     StartCapture = 0x0068,
     StartCaptureResponse = 0x0069,
     StopCapture = 0x006A,
@@ -61,8 +59,6 @@ impl MessageKind {
             0x0045 => Self::MotorStateResponse,
             0x0060 => Self::PushPieces,
             0x0061 => Self::PushPiecesResponse,
-            0x0062 => Self::PushCorrectionPieces,
-            0x0063 => Self::PushCorrectionPiecesResponse,
             0x0068 => Self::StartCapture,
             0x0069 => Self::StartCaptureResponse,
             0x006A => Self::StopCapture,
@@ -255,83 +251,6 @@ impl Decode for PushPiecesResponse {
             result: get_i32(c)?,
             arrival_clock: get_u64(c)?,
             front_start_time: get_u64(c)?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PushCorrectionPieces {
-    pub axis_idx: u8,
-    pub motor_idx: u8,
-    pub piece_count: u8,
-    pub start_slot: u16,
-    pub new_head: u32,
-    pub pieces_bytes: Vec<u8>,
-}
-
-impl Encode for PushCorrectionPieces {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.axis_idx);
-        put_u8(out, self.motor_idx);
-        put_u8(out, self.piece_count);
-        put_u16(out, self.start_slot);
-        put_u32(out, self.new_head);
-        out.extend_from_slice(&self.pieces_bytes);
-    }
-}
-
-impl Decode for PushCorrectionPieces {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        let axis_idx = get_u8(c)?;
-        let motor_idx = get_u8(c)?;
-        let piece_count = get_u8(c)?;
-        let start_slot = get_u16(c)?;
-        let new_head = get_u32(c)?;
-        let pieces_len = (piece_count as usize).checked_mul(32).ok_or(
-            DecodeError::ArrayLengthExceedsBuffer {
-                claimed: u32::from(piece_count),
-                available: c.remaining(),
-            },
-        )?;
-        if pieces_len > c.remaining() {
-            return Err(DecodeError::ArrayLengthExceedsBuffer {
-                claimed: u32::from(piece_count),
-                available: c.remaining(),
-            });
-        }
-        let mut pieces_bytes = vec![0u8; pieces_len];
-        for b in &mut pieces_bytes {
-            *b = get_u8(c)?;
-        }
-        Ok(Self {
-            axis_idx,
-            motor_idx,
-            piece_count,
-            start_slot,
-            new_head,
-            pieces_bytes,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PushCorrectionPiecesResponse {
-    pub result: i32,
-    pub arrival_clock: u64,
-}
-
-impl Encode for PushCorrectionPiecesResponse {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_i32(out, self.result);
-        put_u64(out, self.arrival_clock);
-    }
-}
-
-impl Decode for PushCorrectionPiecesResponse {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            result: get_i32(c)?,
-            arrival_clock: get_u64(c)?,
         })
     }
 }
@@ -778,7 +697,6 @@ pub struct StatusHeartbeat {
     pub fault_code: u16,
     pub retired_counts: Vec<u32>,
     pub ff_saturation_count: u32,
-    pub correction_retired_counts: Vec<u32>,
 }
 
 impl Encode for StatusHeartbeat {
@@ -791,11 +709,6 @@ impl Encode for StatusHeartbeat {
             put_u32(out, count);
         }
         put_u32(out, self.ff_saturation_count);
-        let num_corr = self.correction_retired_counts.len() as u8;
-        put_u8(out, num_corr);
-        for &count in &self.correction_retired_counts {
-            put_u32(out, count);
-        }
     }
 }
 
@@ -826,18 +739,11 @@ impl Decode for StatusHeartbeat {
         let num_axes = get_u8(c)?;
         let retired_counts = decode_u32_array(c, num_axes)?;
         let ff_saturation_count = get_u32(c)?;
-        let correction_retired_counts = if c.remaining() == 0 {
-            Vec::new()
-        } else {
-            let num_corr = get_u8(c)?;
-            decode_u32_array(c, num_corr)?
-        };
         Ok(Self {
             engine_state,
             fault_code,
             retired_counts,
             ff_saturation_count,
-            correction_retired_counts,
         })
     }
 }

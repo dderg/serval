@@ -59,18 +59,9 @@ pub enum RuntimeEvent {
     Trace(TraceEvent),
     EndstopTrip(EndstopTripEvent),
     McuLog(McuLogEvent),
-    Heartbeat {
-        retired_counts: Vec<u32>,
-        correction_retired_counts: Vec<u32>,
-    },
-    UnknownOutput {
-        format: String,
-        msg: String,
-    },
-    PassthroughResponse {
-        name: String,
-        params: MessageParams,
-    },
+    Heartbeat { retired_counts: Vec<u32> },
+    UnknownOutput { format: String, msg: String },
+    PassthroughResponse { name: String, params: MessageParams },
 }
 
 impl RuntimeEvent {

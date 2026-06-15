@@ -34,9 +34,6 @@ static void handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *bo
 static void handle_query_motor_state(uint32_t correlation_id, const uint8_t *body, uint16_t body_len);
 static void handle_stop(uint32_t correlation_id);
 static void handle_resume_stream(uint32_t correlation_id);
-static void handle_push_correction_pieces(uint32_t correlation_id,
-                                          const uint8_t *body,
-                                          uint16_t body_len);
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
@@ -197,9 +194,6 @@ kalico_dispatch_frame(uint8_t channel, const uint8_t *payload,
     case KALICO_MSG_RESUME_STREAM:
         handle_resume_stream(correlation_id);
         return;
-    case KALICO_MSG_PUSH_CORRECTION_PIECES:
-        handle_push_correction_pieces(correlation_id, body, body_len);
-        return;
     default:
         return;
     }
@@ -208,70 +202,6 @@ kalico_dispatch_frame(uint8_t channel, const uint8_t *payload,
 extern uint32_t stats_send_time;
 extern uint32_t stats_send_time_high;
 uint32_t timer_read_time(void);
-
-// PushCorrectionPieces body: axis_idx u8 | motor_idx u8 | piece_count u8
-// | start_slot u16_le | new_head u32_le | piece_count * 32 bytes.
-#define CORRECTION_HEADER_LEN 9u
-
-static void
-send_push_correction_pieces_response(uint32_t correlation_id, int32_t result,
-                                     uint64_t arrival_clock)
-{
-    uint8_t payload[PER_MESSAGE_HEADER_LEN + 4 + 8];
-    encode_message_header(payload, KALICO_MSG_PUSH_CORRECTION_PIECES_RESPONSE,
-                          MESSAGE_VERSION_DEFAULT, correlation_id);
-    uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
-    b[0] = (uint8_t)(result & 0xFF);
-    b[1] = (uint8_t)((result >> 8) & 0xFF);
-    b[2] = (uint8_t)((result >> 16) & 0xFF);
-    b[3] = (uint8_t)((result >> 24) & 0xFF);
-    for (int i = 0; i < 8; i++)
-        b[4 + i] = (uint8_t)((arrival_clock >> (8 * i)) & 0xFF);
-    kalico_transport_send_frame(KALICO_CHANNEL_CONTROL, payload, sizeof(payload));
-}
-
-static void
-handle_push_correction_pieces(uint32_t correlation_id, const uint8_t *body,
-                              uint16_t body_len)
-{
-    uint32_t clk_lo = timer_read_time();
-    uint32_t clk_hi = stats_send_time_high + (clk_lo < stats_send_time);
-    uint64_t arrival_clock = ((uint64_t)clk_hi << 32) | (uint64_t)clk_lo;
-
-    if (!runtime_handle) {
-        send_push_correction_pieces_response(correlation_id,
-                                             KALICO_ERR_NOT_INIT, 0);
-        return;
-    }
-    if (body_len < CORRECTION_HEADER_LEN) {
-        send_push_correction_pieces_response(correlation_id,
-                                             KALICO_ERR_INVALID_CURVE, 0);
-        return;
-    }
-    uint8_t axis_idx = body[0];
-    uint8_t motor_idx = body[1];
-    uint8_t piece_count = body[2];
-    uint16_t start_slot = (uint16_t)body[3] | ((uint16_t)body[4] << 8);
-    uint32_t new_head = (uint32_t)body[5] | ((uint32_t)body[6] << 8)
-                      | ((uint32_t)body[7] << 16) | ((uint32_t)body[8] << 24);
-    if (body_len != CORRECTION_HEADER_LEN + (uint16_t)piece_count * 32u) {
-        send_push_correction_pieces_response(correlation_id,
-                                             KALICO_ERR_INVALID_CURVE, 0);
-        return;
-    }
-    int32_t rc = 0;
-    for (uint8_t i = 0; i < piece_count && rc == 0; i++)
-        rc = kalico_runtime_write_correction_piece(
-            runtime_handle, axis_idx, start_slot, i,
-            &body[CORRECTION_HEADER_LEN + (uint32_t)i * 32u]);
-    if (rc == 0) {
-        irqstatus_t flag = irq_save();
-        rc = kalico_runtime_commit_correction(runtime_handle, axis_idx,
-                                              motor_idx, new_head);
-        irq_restore(flag);
-    }
-    send_push_correction_pieces_response(correlation_id, rc, arrival_clock);
-}
 
 static void
 handle_query_runtime_caps(uint32_t correlation_id, const uint8_t *body,
@@ -541,18 +471,6 @@ send_status_heartbeat(void)
     payload[off++] = (uint8_t)((ff_saturation_count >> 8) & 0xFF);
     payload[off++] = (uint8_t)((ff_saturation_count >> 16) & 0xFF);
     payload[off++] = (uint8_t)((ff_saturation_count >> 24) & 0xFF);
-    uint32_t corr[8];
-    int32_t nc = kalico_runtime_get_correction_retired(runtime_handle, corr, 8);
-    if (nc < 0)
-        nc = 0;
-    payload[off++] = (uint8_t)nc;
-    for (int i = 0; i < nc; i++) {
-        uint32_t v = corr[i];
-        payload[off++] = (uint8_t)(v & 0xFF);
-        payload[off++] = (uint8_t)((v >> 8) & 0xFF);
-        payload[off++] = (uint8_t)((v >> 16) & 0xFF);
-        payload[off++] = (uint8_t)((v >> 24) & 0xFF);
-    }
     kalico_transport_send_frame(KALICO_CHANNEL_CONTROL, payload, (uint16_t)off);
 }
 

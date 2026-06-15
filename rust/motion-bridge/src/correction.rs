@@ -128,52 +128,6 @@ pub fn plan_correction_sequence(
     Ok(subdivide_all(out))
 }
 
-const DEMUX_BUFFER_BYTES: usize = 512;
-const FRAME_ENVELOPE_BYTES: usize = 4;
-const FRAME_CRC_BYTES: usize = 2;
-const MESSAGE_HEADER_BYTES: usize = 7;
-const CORRECTION_BODY_HEADER_BYTES: usize = 9;
-const PIECE_BYTES: usize = 32;
-
-pub const MAX_CORRECTION_PIECES_PER_MSG: usize = (DEMUX_BUFFER_BYTES
-    - FRAME_ENVELOPE_BYTES
-    - FRAME_CRC_BYTES
-    - MESSAGE_HEADER_BYTES
-    - CORRECTION_BODY_HEADER_BYTES)
-    / PIECE_BYTES;
-const _: () = assert!(
-    MAX_CORRECTION_PIECES_PER_MSG < runtime::stepping_state::CORRECTION_RING_DEPTH,
-    "each chunk must fit the MCU correction ring"
-);
-
-pub fn to_piece_entries(
-    pieces: &[ProfilePiece],
-    project: impl Fn(f64) -> u64,
-    start_host_secs: f64,
-) -> Vec<runtime::piece_ring::PieceEntry> {
-    let mut t = start_host_secs;
-    pieces
-        .iter()
-        .map(|p| {
-            #[allow(clippy::cast_possible_truncation)]
-            let entry = runtime::piece_ring::PieceEntry {
-                start_time: project(t),
-                coeffs: [
-                    p.coeffs[0] as f32,
-                    p.coeffs[1] as f32,
-                    p.coeffs[2] as f32,
-                    p.coeffs[3] as f32,
-                ],
-                duration: p.duration as f32,
-                motor_mask: 0,
-                _reserved: [0; 3],
-            };
-            t += p.duration;
-            entry
-        })
-        .collect()
-}
-
 pub fn to_overlay_piece_entries(
     pieces: &[ProfilePiece],
     project: impl Fn(f64) -> u64,
@@ -202,34 +156,6 @@ pub fn to_overlay_piece_entries(
             (entry, host_secs)
         })
         .collect()
-}
-
-pub fn chunk_correction_messages(
-    axis_idx: u8,
-    motor_idx: u8,
-    entries: &[runtime::piece_ring::PieceEntry],
-) -> Vec<kalico_protocol::messages::PushCorrectionPieces> {
-    let mut out = Vec::new();
-    let mut head: u32 = 0;
-    for chunk in entries.chunks(MAX_CORRECTION_PIECES_PER_MSG) {
-        #[allow(clippy::cast_possible_truncation)]
-        let start_slot = (head % runtime::stepping_state::CORRECTION_RING_DEPTH as u32) as u16;
-        let mut pieces_bytes = Vec::with_capacity(chunk.len() * 32);
-        for e in chunk {
-            pieces_bytes.extend_from_slice(&e.to_le_bytes());
-        }
-        head += chunk.len() as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        out.push(kalico_protocol::messages::PushCorrectionPieces {
-            axis_idx,
-            motor_idx,
-            piece_count: chunk.len() as u8,
-            start_slot,
-            new_head: head,
-            pieces_bytes,
-        });
-    }
-    out
 }
 
 #[cfg(test)]

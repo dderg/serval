@@ -1,7 +1,5 @@
 use runtime::engine::{Engine, RuntimeStatus};
-use runtime::stepping_state::{
-    CORRECTION_RING_DEPTH, StepMode, StepperBindingRust, TMC_CS_OID_NONE,
-};
+use runtime::stepping_state::{StepMode, StepperBindingRust, TMC_CS_OID_NONE};
 
 fn new_engine() -> Engine {
     Engine::new(520_000_000, 40_000)
@@ -44,9 +42,8 @@ fn reset_clears_axis_state() {
 fn reset_reclaims_ring_allocation() {
     let mut e = new_engine();
     let b = pulse_binding();
-    // Exact two-axis budget (ring_depth 240 + correction reserve, ×2 axes);
-    // the third axis must overflow it.
-    let total = 2 * (240 + CORRECTION_RING_DEPTH);
+    // Exact two-axis budget (ring_depth 240 ×2 axes); the third axis must overflow it.
+    let total = 2 * 240;
     assert_eq!(
         e.configure_axis(0, StepMode::Pulse, 0.0125, 240, &[b], total),
         0

@@ -7,17 +7,11 @@
 use core::sync::atomic::Ordering;
 
 use crate::engine::Engine;
-use crate::error::{
-    KALICO_ERR_CORRECTION_IN_PROGRESS, KALICO_ERR_INVALID_ARG, KALICO_ERR_MOTION_IN_PROGRESS,
-    KALICO_OK,
-};
+use crate::error::KALICO_OK;
 use crate::piece_ring::PieceEntry;
 use crate::state::SharedState;
 use crate::step_queue::{StepQueue, pop as queue_pop};
-use crate::stepping_state::{
-    CORRECTION_MOTOR_NONE, CORRECTION_RING_DEPTH, MAX_AXES, StepMode, StepperBindingRust,
-    TMC_CS_OID_NONE,
-};
+use crate::stepping_state::{MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
 
 const TEST_TOTAL_RING_PIECES: usize = 256;
 const TICK_CLOCK_FREQ: u32 = 520_000_000;
@@ -58,16 +52,6 @@ fn engine_with_z_axis(mode: StepMode) -> (Engine, Vec<PieceEntry>) {
     (engine, storage)
 }
 
-fn one_piece(start_time: u64) -> PieceEntry {
-    PieceEntry {
-        start_time,
-        coeffs: [0.0, 0.5, 1.0, 1.5],
-        duration: 0.5,
-        motor_mask: 0,
-        _reserved: [0; 3],
-    }
-}
-
 #[test]
 fn motor_state_reads_seeded_position() {
     let (mut engine, _) = engine_with_z_axis(StepMode::Pulse);
@@ -75,70 +59,6 @@ fn motor_state_reads_seeded_position() {
     assert_eq!(engine.motor_state(2), Some((7.0, 0.0)));
     assert!(engine.motor_state(0).is_none());
     assert!(engine.motor_state(7).is_none());
-}
-
-#[test]
-fn configure_axis_allocates_correction_ring() {
-    let (engine, _) = engine_with_z_axis(StepMode::Pulse);
-    let axis = engine.stepping_axes[2].as_ref().unwrap();
-    assert_eq!(axis.correction_ring.ring_depth, CORRECTION_RING_DEPTH);
-    assert!(axis.correction_ring.ring_offset >= axis.ring.ring_offset + axis.ring.ring_depth);
-}
-
-#[test]
-fn commit_correction_rejects_bad_motor_idx() {
-    let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
-    assert_eq!(
-        engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage),
-        KALICO_OK
-    );
-    assert_eq!(engine.commit_correction(2, 3, 1), KALICO_ERR_INVALID_ARG);
-}
-
-#[test]
-fn commit_correction_rejects_busy_axis() {
-    let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
-    assert_eq!(
-        engine.push_pieces(2, &[one_piece(1000)], &mut storage),
-        KALICO_OK
-    );
-    engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
-    assert_eq!(
-        engine.commit_correction(2, 1, 1),
-        KALICO_ERR_MOTION_IN_PROGRESS
-    );
-}
-
-#[test]
-fn commit_correction_rejects_second_stream_other_motor() {
-    let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
-    engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 1), KALICO_OK);
-    engine.write_correction_piece(2, 1, 0, one_piece(2000), &mut storage);
-    assert_eq!(
-        engine.commit_correction(2, 2, 2),
-        KALICO_ERR_CORRECTION_IN_PROGRESS
-    );
-}
-
-#[test]
-fn commit_correction_allows_streaming_same_motor() {
-    let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
-    engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 1), KALICO_OK);
-    engine.write_correction_piece(2, 1, 0, one_piece(2000), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 2), KALICO_OK);
-}
-
-#[test]
-fn normal_commit_rejected_while_correction_active() {
-    let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
-    engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 1), KALICO_OK);
-    assert_eq!(
-        engine.guard_normal_commit(2),
-        KALICO_ERR_CORRECTION_IN_PROGRESS
-    );
 }
 
 fn tickable_z_engine() -> (Engine, Vec<PieceEntry>) {
@@ -263,21 +183,4 @@ fn overlay_uses_own_step_frame_not_axis_frame() {
         stepper1_after_overlay, stepper1_after_normal,
         "overlay must still step its targeted motor"
     );
-}
-
-#[test]
-fn commit_correction_seeds_motor_tracking_state() {
-    let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
-    assert_eq!(
-        engine.stepping_axes[2]
-            .as_ref()
-            .unwrap()
-            .correction_motor_idx,
-        CORRECTION_MOTOR_NONE
-    );
-    engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 1), KALICO_OK);
-    let axis = engine.stepping_axes[2].as_ref().unwrap();
-    assert_eq!(axis.correction_motor_idx, 1);
-    assert!(axis.correction_active());
 }

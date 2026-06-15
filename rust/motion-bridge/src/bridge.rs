@@ -616,7 +616,6 @@ pub struct PyMotionBridge {
     position_poll_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     position_poll_stop: Arc<std::sync::atomic::AtomicBool>,
     drain: std::sync::Arc<crate::drain::DrainSync>,
-    correction_drain: std::sync::Arc<crate::drain::DrainSync>,
     active_drip_cohort: Arc<Mutex<Option<u64>>>,
     motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
     homing_run: Arc<Mutex<Option<HomingRun>>>,
@@ -634,9 +633,7 @@ pub struct PyMotionBridge {
 }
 
 pub(crate) fn axis_ring_depth(total_pieces: u32, num_axes: u32) -> u32 {
-    let correction_reserve =
-        num_axes.max(1) * runtime::stepping_state::CORRECTION_RING_DEPTH as u32;
-    (total_pieces.saturating_sub(correction_reserve) / num_axes.max(1)).max(1)
+    (total_pieces / num_axes.max(1)).max(1)
 }
 
 pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::pump::AxisKey> {
@@ -705,36 +702,24 @@ mod drip_cohort_participants_tests {
 mod axis_ring_depth_tests {
     use super::axis_ring_depth;
 
-    use runtime::stepping_state::CORRECTION_RING_DEPTH;
-
     #[test]
-    fn typical_two_axis_mcu_reserves_correction_rings() {
-        assert_eq!(
-            axis_ring_depth(1984, 2),
-            (1984 - 2 * CORRECTION_RING_DEPTH as u32) / 2
-        );
+    fn typical_two_axis_mcu_splits_evenly() {
+        assert_eq!(axis_ring_depth(1984, 2), 1984 / 2);
     }
 
     #[test]
-    fn single_axis_mcu_reserves_correction_ring() {
-        assert_eq!(
-            axis_ring_depth(1984, 1),
-            1984 - CORRECTION_RING_DEPTH as u32
-        );
+    fn single_axis_mcu_gets_full_depth() {
+        assert_eq!(axis_ring_depth(1984, 1), 1984);
     }
 
     #[test]
-    fn lower_clamp_when_reserve_exceeds_total() {
-        assert_eq!(axis_ring_depth(5, 2), 1);
+    fn lower_clamp_keeps_at_least_one() {
         assert_eq!(axis_ring_depth(0, 2), 1);
     }
 
     #[test]
     fn zero_num_axes_treated_as_one() {
-        assert_eq!(
-            axis_ring_depth(1000, 0),
-            1000 - CORRECTION_RING_DEPTH as u32
-        );
+        assert_eq!(axis_ring_depth(1000, 0), 1000);
     }
 }
 
@@ -800,8 +785,7 @@ mod ring_depth_for_axis_tests {
 
     #[test]
     fn success_two_axis_mcu() {
-        use runtime::stepping_state::CORRECTION_RING_DEPTH;
-        let expected = ((1984 - 2 * CORRECTION_RING_DEPTH as u32) / 2) as u16;
+        let expected = (1984 / 2) as u16;
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 1, AXIS_X as u8).unwrap(),
             expected
@@ -814,8 +798,7 @@ mod ring_depth_for_axis_tests {
 
     #[test]
     fn success_single_axis_mcu() {
-        use runtime::stepping_state::CORRECTION_RING_DEPTH;
-        let expected = (1984 - CORRECTION_RING_DEPTH as u32) as u16;
+        let expected = 1984u16;
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 2, AXIS_Z as u8).unwrap(),
             expected
@@ -887,7 +870,6 @@ impl PyMotionBridge {
             position_poll_thread: Mutex::new(None),
             position_poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             drain: std::sync::Arc::new(crate::drain::DrainSync::new()),
-            correction_drain: std::sync::Arc::new(crate::drain::DrainSync::new()),
             active_drip_cohort: Arc::new(Mutex::new(None)),
             motion_history: Arc::new(Mutex::new(crate::motion_history::HistoryStore::default())),
             homing_run: Arc::new(Mutex::new(None)),
@@ -2847,7 +2829,6 @@ impl PyMotionBridge {
             let mcu_id = cfg_mcu.mcu_id;
             let pump_tx_hb = pump_tx_init.clone();
             let drain_hb = self.drain.clone();
-            let corr_drain_hb = self.correction_drain.clone();
 
             if ethercat_mcu_ids.contains(&mcu_id) {
                 let conn = ec_conns
@@ -2930,9 +2911,6 @@ impl PyMotionBridge {
                         ));
                         for (axis, &r) in hb.retired_counts.iter().enumerate() {
                             drain_hb.set_retired(mcu_id, axis as u8, r);
-                        }
-                        for (axis, &r) in hb.correction_retired_counts.iter().enumerate() {
-                            corr_drain_hb.set_retired(mcu_id, axis as u8, r);
                         }
                     },
                 ));
@@ -3023,22 +3001,17 @@ impl PyMotionBridge {
                     .get(&mcu_id)
                     .expect("host_io map built from mcu_configs")
                     .clone();
-                io.attach_heartbeat_callback(Arc::new(
-                    move |retired: &[u32], corr_retired: &[u32]| {
-                        let _ = pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(
-                            crate::pump::HeartbeatMsg {
-                                mcu_id,
-                                retired_counts: retired.to_vec(),
-                            },
-                        ));
-                        for (axis, &r) in retired.iter().enumerate() {
-                            drain_hb.set_retired(mcu_id, axis as u8, r);
-                        }
-                        for (axis, &r) in corr_retired.iter().enumerate() {
-                            corr_drain_hb.set_retired(mcu_id, axis as u8, r);
-                        }
-                    },
-                ));
+                io.attach_heartbeat_callback(Arc::new(move |retired: &[u32]| {
+                    let _ = pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(
+                        crate::pump::HeartbeatMsg {
+                            mcu_id,
+                            retired_counts: retired.to_vec(),
+                        },
+                    ));
+                    for (axis, &r) in retired.iter().enumerate() {
+                        drain_hb.set_retired(mcu_id, axis as u8, r);
+                    }
+                }));
             }
         }
 
@@ -4212,101 +4185,6 @@ impl PyMotionBridge {
             tx.send(crate::pump::PumpMsg::Enqueue(msg))
                 .map_err(|_| PyRuntimeError::new_err("adjust_motor: pump channel closed"))?;
         }
-        Ok(total_duration)
-    }
-
-    #[allow(dead_code)]
-    fn stream_correction_entries(
-        &self,
-        py: Python<'_>,
-        mcu_handle: u32,
-        axis_idx: u8,
-        motor_idx: u8,
-        pieces: &[crate::correction::ProfilePiece],
-        start_print_time: f64,
-    ) -> PyResult<f64> {
-        let ring_depth = runtime::stepping_state::CORRECTION_RING_DEPTH as u32;
-        let handle = mcu_handle_from_raw(mcu_handle);
-
-        let entries = {
-            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            let start_host_secs = match router.print_time_to_host_secs(handle, start_print_time) {
-                Some(secs) => secs,
-                None => {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "stream_correction: clock unsynced for mcu {mcu_handle}"
-                    )));
-                }
-            };
-            crate::correction::to_piece_entries(
-                pieces,
-                |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
-                start_host_secs,
-            )
-        };
-        if entries.iter().any(|e| e.start_time == 0) {
-            return Err(PyRuntimeError::new_err(format!(
-                "stream_correction: clock unsynced for mcu {mcu_handle}"
-            )));
-        }
-        let total_duration = pieces.iter().map(|p| p.duration).sum::<f64>();
-        let msgs = crate::correction::chunk_correction_messages(axis_idx, motor_idx, &entries);
-
-        let io = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-            let conn = mcus.get(&mcu_handle).ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "stream_correction: unknown mcu_handle {mcu_handle}"
-                ))
-            })?;
-            conn.host_io
-                .as_ref()
-                .ok_or_else(|| {
-                    PyRuntimeError::new_err(
-                        "stream_correction: serial transport not attached for this MCU \
-                         (EtherCAT correction moves are not supported yet)",
-                    )
-                })?
-                .clone()
-        };
-
-        const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-        let drain = self.correction_drain.clone();
-        drain.reset_axis(mcu_handle, axis_idx);
-
-        py.detach(|| -> PyResult<()> {
-            for msg in &msgs {
-                let n = u32::from(msg.piece_count);
-                drain
-                    .wait_room(mcu_handle, axis_idx, ring_depth, n, DRAIN_TIMEOUT)
-                    .map_err(|e| PyRuntimeError::new_err(format!("stream_correction: {e}")))?;
-                let mut body = Vec::with_capacity(9 + msg.pieces_bytes.len());
-                kalico_protocol::codec::Encode::encode(msg, &mut body);
-                let (_kind, resp) = io
-                    .kalico_call_on_channel(
-                        kalico_protocol::KALICO_CHANNEL_CONTROL,
-                        kalico_protocol::MessageKind::PushCorrectionPieces,
-                        body,
-                        std::time::Duration::from_secs(2),
-                    )
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("stream_correction send: {e:?}"))
-                    })?;
-                use kalico_protocol::codec::Decode as _;
-                let r = kalico_protocol::messages::PushCorrectionPiecesResponse::decode(&resp)
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("stream_correction decode: {e:?}"))
-                    })?;
-                if r.result != 0 {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "stream_correction rejected by MCU: error {}",
-                        r.result
-                    )));
-                }
-                drain.add_sent(mcu_handle, axis_idx, n);
-            }
-            Ok(())
-        })?;
         Ok(total_duration)
     }
 }

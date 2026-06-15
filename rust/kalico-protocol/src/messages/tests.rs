@@ -84,16 +84,14 @@ fn status_heartbeat_roundtrip_empty() {
         fault_code: 0,
         retired_counts: vec![],
         ff_saturation_count: 0,
-        correction_retired_counts: vec![],
     };
     let mut buf = Vec::new();
     msg.encode(&mut buf);
-    assert_eq!(buf.len(), 9);
+    assert_eq!(buf.len(), 8);
     let mut cursor = Cursor::new(&buf);
     let decoded = StatusHeartbeat::decode_from(&mut cursor).unwrap();
     assert_eq!(decoded.retired_counts.len(), 0);
     assert_eq!(decoded.ff_saturation_count, 0);
-    assert_eq!(decoded.correction_retired_counts.len(), 0);
 }
 
 #[test]
@@ -103,18 +101,16 @@ fn status_heartbeat_roundtrip_with_axes() {
         fault_code: 0,
         retired_counts: vec![42, 42, 10, 5],
         ff_saturation_count: 7,
-        correction_retired_counts: vec![],
     };
     let mut buf = Vec::new();
     msg.encode(&mut buf);
-    assert_eq!(buf.len(), 25);
+    assert_eq!(buf.len(), 24);
     let mut cursor = Cursor::new(&buf);
     let decoded = StatusHeartbeat::decode_from(&mut cursor).unwrap();
     assert_eq!(decoded.engine_state, 1);
     assert_eq!(decoded.fault_code, 0);
     assert_eq!(decoded.retired_counts, vec![42, 42, 10, 5]);
     assert_eq!(decoded.ff_saturation_count, 7);
-    assert_eq!(decoded.correction_retired_counts, vec![]);
 }
 
 #[test]
@@ -124,7 +120,6 @@ fn status_heartbeat_short_frame_missing_ff_saturation_is_decode_error() {
         fault_code: 0,
         retired_counts: vec![99],
         ff_saturation_count: 5,
-        correction_retired_counts: vec![],
     };
     let full = msg.encoded_to_vec();
     let truncated = &full[..full.len() - 5];
@@ -132,36 +127,6 @@ fn status_heartbeat_short_frame_missing_ff_saturation_is_decode_error() {
         StatusHeartbeat::decode(truncated).is_err(),
         "short frame must fail to decode"
     );
-}
-
-#[test]
-fn status_heartbeat_round_trips_correction_counts() {
-    let hb = StatusHeartbeat {
-        engine_state: 2,
-        fault_code: 0,
-        retired_counts: vec![5, 9],
-        ff_saturation_count: 3,
-        correction_retired_counts: vec![7, 0],
-    };
-    let mut buf = Vec::new();
-    hb.encode(&mut buf);
-    let mut c = Cursor::new(&buf);
-    let got = StatusHeartbeat::decode_from(&mut c).unwrap();
-    assert_eq!(got, hb);
-}
-
-#[test]
-fn status_heartbeat_decode_tolerates_missing_correction_tail() {
-    let mut buf = Vec::new();
-    put_u8(&mut buf, 1);
-    put_u16(&mut buf, 0);
-    put_u8(&mut buf, 1);
-    put_u32(&mut buf, 4);
-    put_u32(&mut buf, 0);
-    let mut c = Cursor::new(&buf);
-    let got = StatusHeartbeat::decode_from(&mut c).unwrap();
-    assert_eq!(got.correction_retired_counts, Vec::<u32>::new());
-    assert_eq!(got.retired_counts, vec![4]);
 }
 
 #[test]
@@ -275,63 +240,6 @@ fn push_pieces_kind_in_message_kind_table() {
     );
     assert_eq!(MessageKind::PushPieces.as_u16(), 0x0060);
     assert_eq!(MessageKind::PushPiecesResponse.as_u16(), 0x0061);
-}
-
-#[test]
-fn push_correction_pieces_roundtrip() {
-    let msg = PushCorrectionPieces {
-        axis_idx: 2,
-        motor_idx: 1,
-        piece_count: 2,
-        start_slot: 5,
-        new_head: 7,
-        pieces_bytes: vec![0xAB; 64],
-    };
-    let mut buf = Vec::new();
-    msg.encode(&mut buf);
-    let decoded = PushCorrectionPieces::decode(&buf).unwrap();
-    assert_eq!(decoded, msg);
-}
-
-#[test]
-fn push_correction_pieces_response_roundtrip() {
-    let msg = PushCorrectionPiecesResponse {
-        result: -31,
-        arrival_clock: 0x1122_3344_5566_7788,
-    };
-    let mut buf = Vec::new();
-    msg.encode(&mut buf);
-    let decoded = PushCorrectionPiecesResponse::decode(&buf).unwrap();
-    assert_eq!(decoded, msg);
-}
-
-#[test]
-fn push_correction_pieces_rejects_short_body() {
-    let msg = PushCorrectionPieces {
-        axis_idx: 2,
-        motor_idx: 1,
-        piece_count: 3,
-        start_slot: 0,
-        new_head: 3,
-        pieces_bytes: vec![0; 64],
-    };
-    let mut buf = Vec::new();
-    msg.encode(&mut buf);
-    assert!(PushCorrectionPieces::decode(&buf).is_err());
-}
-
-#[test]
-fn push_correction_pieces_kind_in_message_kind_table() {
-    assert_eq!(
-        MessageKind::from_u16(0x0062),
-        Some(MessageKind::PushCorrectionPieces)
-    );
-    assert_eq!(
-        MessageKind::from_u16(0x0063),
-        Some(MessageKind::PushCorrectionPiecesResponse)
-    );
-    assert_eq!(MessageKind::PushCorrectionPieces.as_u16(), 0x0062);
-    assert_eq!(MessageKind::PushCorrectionPiecesResponse.as_u16(), 0x0063);
 }
 
 #[test]

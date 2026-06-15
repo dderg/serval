@@ -60,17 +60,6 @@ impl DrainSync {
         self.cv.notify_all();
     }
 
-    // Start a fresh stream for one axis without disturbing others' accounting.
-    pub fn reset_axis(&self, mcu: u32, axis: u8) {
-        let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        let key = (mcu, axis);
-        c.sent.remove(&key);
-        let retired = c.retired.get(&key).copied().unwrap_or(0);
-        c.baseline.insert(key, retired);
-        drop(c);
-        self.cv.notify_all();
-    }
-
     pub fn is_drained_now(&self) -> bool {
         let c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
         Self::is_drained(&c)
@@ -87,54 +76,6 @@ impl DrainSync {
     pub fn drained(&self) -> bool {
         let c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
         Self::is_drained(&c)
-    }
-
-    // In-flight pieces this stream = sent - (retired - baseline). `retired` is
-    // the MCU's cumulative counter; `baseline` is its value at the last reset(),
-    // so `retired - baseline` is what drained THIS stream. Matches is_drained's
-    // `retired - baseline == sent` invariant.
-    fn room_locked(c: &Counts, mcu: u32, axis: u8, ring_depth: u32) -> u32 {
-        let key = (mcu, axis);
-        let sent = c.sent.get(&key).copied().unwrap_or(0);
-        let retired = c.retired.get(&key).copied().unwrap_or(0);
-        let baseline = c.baseline.get(&key).copied().unwrap_or(0);
-        let drained = retired.wrapping_sub(baseline);
-        let in_flight = sent.wrapping_sub(drained);
-        ring_depth.saturating_sub(in_flight)
-    }
-
-    pub fn room(&self, mcu: u32, axis: u8, ring_depth: u32) -> u32 {
-        let c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        Self::room_locked(&c, mcu, axis, ring_depth)
-    }
-
-    pub fn wait_room(
-        &self,
-        mcu: u32,
-        axis: u8,
-        ring_depth: u32,
-        needed: u32,
-        timeout: Duration,
-    ) -> Result<(), String> {
-        let deadline = Instant::now() + timeout;
-        let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        loop {
-            let room = Self::room_locked(&c, mcu, axis, ring_depth);
-            if room >= needed {
-                return Ok(());
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(format!(
-                    "wait_room timeout mcu{mcu} axis{axis}: room {room} < needed {needed}"
-                ));
-            }
-            let (guard, _) = self
-                .cv
-                .wait_timeout(c, deadline - now)
-                .unwrap_or_else(|p| p.into_inner());
-            c = guard;
-        }
     }
 
     pub fn wait_drained(&self, timeout: Duration) -> Result<(), String> {
