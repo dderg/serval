@@ -2164,7 +2164,12 @@ impl PyMotionBridge {
         let pieces = crate::correction::plan_correction_profile(delta_mm, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
         self.stream_correction_entries(
-            py, mcu_handle, axis_idx, motor_idx, &pieces, start_host_secs,
+            py,
+            mcu_handle,
+            axis_idx,
+            motor_idx,
+            &pieces,
+            start_host_secs,
         )
     }
 
@@ -2183,7 +2188,12 @@ impl PyMotionBridge {
         let pieces = crate::correction::plan_correction_sequence(&segments, speed, accel)
             .map_err(PyRuntimeError::new_err)?;
         self.stream_correction_entries(
-            py, mcu_handle, axis_idx, motor_idx, &pieces, start_host_secs,
+            py,
+            mcu_handle,
+            axis_idx,
+            motor_idx,
+            &pieces,
+            start_host_secs,
         )
     }
 

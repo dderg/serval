@@ -147,8 +147,14 @@ fn sequence_drops_subepsilon_and_rejects_all_empty() {
 #[test]
 fn piece_entries_anchor_at_explicit_start() {
     let pieces = vec![
-        ProfilePiece { coeffs: [0.0, 1.0, 2.0, 3.0], duration: 0.4 },
-        ProfilePiece { coeffs: [3.0, 3.0, 3.0, 3.0], duration: 0.6 },
+        ProfilePiece {
+            coeffs: [0.0, 1.0, 2.0, 3.0],
+            duration: 0.4,
+        },
+        ProfilePiece {
+            coeffs: [3.0, 3.0, 3.0, 3.0],
+            duration: 0.6,
+        },
     ];
     let entries = to_piece_entries(&pieces, |secs| (secs * 1000.0).round() as u64, 12.5);
     assert_eq!(entries[0].start_time, 12_500);
