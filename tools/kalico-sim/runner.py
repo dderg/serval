@@ -186,26 +186,26 @@ def spawn_mcu(
 def send_gcode(api_socket: str, script: str, timeout: float = 30.0) -> dict:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
-    sock.connect(api_socket)
-    req = {
-        "id": 1,
-        "method": "gcode/script",
-        "params": {"script": script},
-    }
-    sock.sendall(json.dumps(req).encode() + b"\x03")
     buf = b""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            chunk = sock.recv(4096)
-        except socket.timeout:
-            break
-        if not chunk:
-            break
-        buf += chunk
-        if b"\x03" in buf:
-            break
-    sock.close()
+    with sock:
+        sock.connect(api_socket)
+        req = {
+            "id": 1,
+            "method": "gcode/script",
+            "params": {"script": script},
+        }
+        sock.sendall(json.dumps(req).encode() + b"\x03")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if b"\x03" in buf:
+                break
     if b"\x03" in buf:
         body = buf.split(b"\x03", 1)[0]
         try:
@@ -218,40 +218,40 @@ def send_gcode(api_socket: str, script: str, timeout: float = 30.0) -> dict:
 def query_status(api_socket: str, timeout: float = 5.0) -> dict:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
-    try:
-        sock.connect(api_socket)
-    except (
-        ConnectionRefusedError,
-        FileNotFoundError,
-        BlockingIOError,
-        OSError,
-    ):
-        return {}
-    req = {
-        "id": 1,
-        "method": "objects/query",
-        "params": {
-            "objects": {
-                "print_stats": None,
-                "toolhead": None,
-                "virtual_sdcard": None,
-            }
-        },
-    }
-    sock.sendall(json.dumps(req).encode() + b"\x03")
     buf = b""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    with sock:
         try:
-            chunk = sock.recv(4096)
-        except socket.timeout:
-            break
-        if not chunk:
-            break
-        buf += chunk
-        if b"\x03" in buf:
-            break
-    sock.close()
+            sock.connect(api_socket)
+        except (
+            ConnectionRefusedError,
+            FileNotFoundError,
+            BlockingIOError,
+            OSError,
+        ):
+            return {}
+        req = {
+            "id": 1,
+            "method": "objects/query",
+            "params": {
+                "objects": {
+                    "print_stats": None,
+                    "toolhead": None,
+                    "virtual_sdcard": None,
+                }
+            },
+        }
+        sock.sendall(json.dumps(req).encode() + b"\x03")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if b"\x03" in buf:
+                break
     if b"\x03" in buf:
         body = buf.split(b"\x03", 1)[0]
         try:
@@ -280,7 +280,7 @@ def wait_for_klippy_ready(
                 return False
         elif klippy_proc.poll() is not None:
             return False
-        time.sleep(0.1)
+        time.sleep(0.05)
     return False
 
 
@@ -291,32 +291,46 @@ def wait_for_print_done(
     timeout: float = 600.0,
 ) -> tuple:
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if klippy_proc.poll() is not None:
-            return False, "klippy exited unexpectedly"
+    log_fh = None
+    carry = b""
+    try:
+        while time.monotonic() < deadline:
+            if klippy_proc.poll() is not None:
+                return False, "klippy exited unexpectedly"
 
-        if klippy_log.exists():
-            content = klippy_log.read_bytes()
-            if b"shutdown:" in content:
-                for line in content.decode(errors="replace").split("\n"):
-                    if "shutdown:" in line.lower():
-                        return False, f"Printer shutdown: {line.strip()}"
-                return False, "Printer shutdown (unknown reason)"
+            if log_fh is None and klippy_log.exists():
+                log_fh = open(klippy_log, "rb")
+            if log_fh is not None:
+                new = log_fh.read()
+                if new:
+                    chunk = carry + new
+                    if b"shutdown:" in chunk:
+                        for line in chunk.decode(errors="replace").split("\n"):
+                            if "shutdown:" in line.lower():
+                                return (
+                                    False,
+                                    f"Printer shutdown: {line.strip()}",
+                                )
+                        return False, "Printer shutdown (unknown reason)"
+                    carry = chunk[-4096:]
 
-        status = query_status(api_socket)
-        if status:
-            result = status.get("result", {}).get("status", {})
-            ps = result.get("print_stats", {})
-            state = ps.get("state", "")
-            if state == "complete":
-                return True, None
-            if state == "error":
-                return False, ps.get("message", "print error")
-            if state == "cancelled":
-                return False, "print cancelled"
+            status = query_status(api_socket)
+            if status:
+                result = status.get("result", {}).get("status", {})
+                ps = result.get("print_stats", {})
+                state = ps.get("state", "")
+                if state == "complete":
+                    return True, None
+                if state == "error":
+                    return False, ps.get("message", "print error")
+                if state == "cancelled":
+                    return False, "print cancelled"
 
-        time.sleep(0.2)
-    return False, "timeout waiting for print"
+            time.sleep(0.05)
+        return False, "timeout waiting for print"
+    finally:
+        if log_fh is not None:
+            log_fh.close()
 
 
 def run_simulation(
@@ -396,32 +410,65 @@ def run_simulation(
             f4_pty = str(tmp / "klipper_sim_f4")
             dual_mcu = f4_elf.exists()
 
-            h7 = spawn_mcu(
-                "h7",
-                h7_elf,
-                h7_pty,
-                str(log_dir / "h7.log"),
-                str(h7_sock_dir),
-                shim_so,
-                vtime_so,
-                verbose,
-            )
-            mcus.append(h7)
-            log.info("H7 MCU spawned (pid=%d)", h7.process.pid)
-
+            # Spawn the MCUs concurrently. Each spawn_mcu() blocks up to 10s
+            # waiting for its PTY to appear; running them in parallel overlaps
+            # those waits instead of paying them back-to-back.
+            spawn_specs = [
+                (
+                    "h7",
+                    h7_elf,
+                    h7_pty,
+                    str(log_dir / "h7.log"),
+                    str(h7_sock_dir),
+                ),
+            ]
             if dual_mcu:
-                f4 = spawn_mcu(
-                    "f4",
-                    f4_elf,
-                    f4_pty,
-                    str(log_dir / "f4.log"),
-                    str(f4_sock_dir),
-                    shim_so,
-                    vtime_so,
-                    verbose,
+                spawn_specs.append(
+                    (
+                        "f4",
+                        f4_elf,
+                        f4_pty,
+                        str(log_dir / "f4.log"),
+                        str(f4_sock_dir),
+                    )
                 )
-                mcus.append(f4)
-                log.info("F4 MCU spawned (pid=%d)", f4.process.pid)
+
+            spawned: dict = {}
+            spawn_errors: dict = {}
+
+            def _spawn(name, elf, pty, log_path, sock_dir):
+                try:
+                    spawned[name] = spawn_mcu(
+                        name,
+                        elf,
+                        pty,
+                        log_path,
+                        sock_dir,
+                        shim_so,
+                        vtime_so,
+                        verbose,
+                    )
+                except Exception as exc:
+                    spawn_errors[name] = exc
+
+            spawn_threads = [
+                threading.Thread(target=_spawn, args=spec)
+                for spec in spawn_specs
+            ]
+            for t in spawn_threads:
+                t.start()
+            for t in spawn_threads:
+                t.join()
+            if spawn_errors:
+                raise next(iter(spawn_errors.values()))
+
+            for spec in spawn_specs:
+                name = spec[0]
+                mcu = spawned[name]
+                mcus.append(mcu)
+                log.info(
+                    "%s MCU spawned (pid=%d)", name.upper(), mcu.process.pid
+                )
 
             chip_servers = _start_chip_emulators(
                 h7_sock_dir, f4_sock_dir, repo_root
@@ -521,6 +568,7 @@ def run_simulation(
                         except OSError:
                             pass
 
+            klippy_stdout = open(log_dir / "klippy.stdout", "wb")
             klippy_proc = subprocess.Popen(
                 [
                     "python3",
@@ -532,10 +580,11 @@ def run_simulation(
                     api_socket,
                 ],
                 env=env,
-                stdout=open(log_dir / "klippy.stdout", "wb"),
+                stdout=klippy_stdout,
                 stderr=subprocess.STDOUT,
                 cwd=str(repo_root),
             )
+            klippy_stdout.close()
             log.info("Klippy spawned (pid=%d)", klippy_proc.pid)
 
             if not wait_for_klippy_ready(klippy_log, klippy_proc, timeout=120):
@@ -563,7 +612,7 @@ def run_simulation(
                 )
                 try:
                     while klippy_proc.poll() is None:
-                        time.sleep(1.0)
+                        time.sleep(0.1)
                 except KeyboardInterrupt:
                     pass
                 return SimResult(
@@ -681,8 +730,6 @@ def run_simulation(
 
                     t = threading.Thread(target=_run, daemon=True)
                     t.start()
-
-                import threading
 
                 cmds = BEACON_TEST_SCRIPTS[beacon_test]
                 for idx, (script, cmd_timeout) in enumerate(cmds):
@@ -1499,14 +1546,13 @@ class EndstopTrigger:
             self._thread.join(timeout=2)
 
     def _send_cmd(self, cmd: str) -> str:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(1.0)
         try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(1.0)
-            sock.connect(self.sim_control_path)
-            sock.sendall((cmd + "\n").encode())
-            resp = sock.recv(256).decode().strip()
-            sock.close()
-            return resp
+            with sock:
+                sock.connect(self.sim_control_path)
+                sock.sendall((cmd + "\n").encode())
+                return sock.recv(256).decode().strip()
         except (ConnectionRefusedError, FileNotFoundError, socket.timeout):
             return ""
 
@@ -2071,6 +2117,7 @@ def run_probe_test(
             env = os.environ.copy()
             if expect_boot_error is None:
                 env["KALICO_SIM_SOCK_DIR"] = str(tmp / "sim" / "h7")
+            klippy_stdout = open(log_dir / "klippy.stdout", "wb")
             klippy_proc = subprocess.Popen(
                 [
                     "python3",
@@ -2082,10 +2129,11 @@ def run_probe_test(
                     api_socket,
                 ],
                 env=env,
-                stdout=open(log_dir / "klippy.stdout", "wb"),
+                stdout=klippy_stdout,
                 stderr=subprocess.STDOUT,
                 cwd=str(repo_root),
             )
+            klippy_stdout.close()
             log.info(
                 "Klippy spawned (pid=%d), variant=%s", klippy_proc.pid, variant
             )
@@ -2729,283 +2777,10 @@ enable_force_move: True
 """
 
 
-def run_batch_simulation(
-    repo_root: pathlib.Path,
-    gcode_path: pathlib.Path,
-    config_path: Optional[pathlib.Path] = None,
-    timeout: float = 300.0,
-    verbose: bool = False,
-) -> SimResult:
-    """Runs full motion planner without MCU firmware (~100x real-time).
-    Requires out/klipper.dict built from the firmware.
-    """
-    wall_start = time.monotonic()
-
-    with tempfile.TemporaryDirectory(prefix="kalico_batch_") as tmpdir:
-        tmp = pathlib.Path(tmpdir)
-
-        dict_path = repo_root / "out" / "klipper.dict"
-        if not dict_path.exists():
-            return SimResult(
-                success=False,
-                print_time_s=0,
-                wall_time_s=time.monotonic() - wall_start,
-                speedup=0,
-                error="Missing klipper.dict. Build firmware first.",
-            )
-
-        if config_path is None:
-            cfg_text = _generate_batch_config()
-            cfg_file = tmp / "printer.cfg"
-            cfg_file.write_text(cfg_text)
-            config_path = cfg_file
-
-        debug_output = str(tmp / "debug_output")
-        klippy_log = str(tmp / "klippy.log")
-        cmd = [
-            "python3",
-            str(repo_root / "klippy" / "klippy.py"),
-            str(config_path),
-            "-i",
-            str(gcode_path),
-            "-o",
-            debug_output,
-            "-d",
-            str(dict_path),
-            "-l",
-            klippy_log,
-        ]
-        if verbose:
-            cmd.append("-v")
-
-        preprocessor = (
-            repo_root / "tools" / "kalico-sim" / "preprocess_gcode.py"
-        )
-        if preprocessor.exists():
-            processed = tmp / "processed.gcode"
-            try:
-                subprocess.run(
-                    [
-                        "python3",
-                        str(preprocessor),
-                        str(gcode_path),
-                        str(processed),
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                log.info("Preprocessed: %s", processed.name)
-                cmd[cmd.index(str(gcode_path))] = str(processed)
-            except subprocess.CalledProcessError as e:
-                log.warning("Preprocessor failed: %s", e.stderr[:200])
-
-        log.info("Running batch simulation: %s", gcode_path.name)
-        log.info("Command: %s", " ".join(cmd))
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(repo_root),
-            )
-        except subprocess.TimeoutExpired:
-            return SimResult(
-                success=False,
-                print_time_s=0,
-                wall_time_s=time.monotonic() - wall_start,
-                speedup=0,
-                error=f"Batch simulation timed out after {timeout}s",
-            )
-
-        wall_end = time.monotonic()
-        wall_time = wall_end - wall_start
-
-        print_time = 0.0
-        error = None
-        klippy_content = ""
-        try:
-            klippy_content = pathlib.Path(klippy_log).read_text(
-                errors="replace"
-            )
-        except FileNotFoundError:
-            pass
-
-        if result.returncode != 0:
-            if (
-                "error" in klippy_content.lower()
-                or "shutdown" in klippy_content.lower()
-            ):
-                for line in klippy_content.split("\n"):
-                    if "error" in line.lower() or "shutdown" in line.lower():
-                        error = line.strip()
-                        break
-            if not error:
-                error = f"klippy exited with code {result.returncode}"
-                if result.stderr:
-                    error += f"\n{result.stderr[-500:]}"
-
-        import re
-
-        for line in reversed(klippy_content.split("\n")):
-            m = re.search(r"print time (\d+\.?\d*)s", line)
-            if m:
-                print_time = float(m.group(1))
-                break
-        if print_time == 0:
-            for line in reversed(klippy_content.split("\n")):
-                m = re.search(r"print_time=(\d+\.?\d*)", line)
-                if m:
-                    print_time = float(m.group(1))
-                    break
-
-        speedup = print_time / wall_time if wall_time > 0 else 0
-
-        return SimResult(
-            success=(result.returncode == 0 and error is None),
-            print_time_s=print_time,
-            wall_time_s=wall_time,
-            speedup=speedup,
-            error=error,
-            klippy_log=klippy_content,
-        )
-
-
-def _generate_batch_config() -> str:
-    """Voron Trident 250/300 representative config for batch timing predictions.
-    Limits calibrated to that hardware; adjust if targeting a different machine.
-    """
-    return """\
-[mcu]
-serial: /dev/null
-
-[kinematics]
-type: corexy
-axis_x: x
-axis_y: y
-axis_z: z
-a_motors: a
-b_motors: b
-z_motors: z
-
-[axis x]
-position_endstop: 0
-position_max: 300
-endstop_pin: ^gpiochip0/gpio10
-homing_speed: 50
-post_processors: is_xy
-
-[axis y]
-position_endstop: 0
-position_max: 300
-endstop_pin: ^gpiochip0/gpio11
-homing_speed: 50
-post_processors: is_xy
-
-[axis z]
-position_endstop: 0
-position_max: 300
-endstop_pin: ^gpiochip0/gpio12
-homing_speed: 8
-
-[axis e]
-follows: x, y, z
-motors: e
-
-[post_processor is_xy]
-type: smooth_mzv
-frequency_hz: 50
-
-[limit extruder]
-axes: e
-max_velocity: 75
-max_accel: 1500
-
-[limit gantry]
-axes: x, y
-max_velocity: 500
-max_accel: 25000
-
-[limit z]
-axes: z
-max_velocity: 30
-max_accel: 100
-
-[motor a]
-drive: stepper
-step_pin: gpiochip0/gpio0
-dir_pin: gpiochip0/gpio1
-enable_pin: !gpiochip0/gpio2
-microsteps: 32
-rotation_distance: 40
-
-[motor b]
-drive: stepper
-step_pin: gpiochip0/gpio3
-dir_pin: gpiochip0/gpio4
-enable_pin: !gpiochip0/gpio5
-microsteps: 32
-rotation_distance: 40
-
-[motor z]
-drive: stepper
-step_pin: gpiochip0/gpio6
-dir_pin: gpiochip0/gpio7
-enable_pin: !gpiochip0/gpio8
-microsteps: 32
-rotation_distance: 4
-
-[motor e]
-drive: stepper
-step_pin: gpiochip0/gpio13
-dir_pin: gpiochip0/gpio14
-enable_pin: !gpiochip0/gpio15
-microsteps: 16
-rotation_distance: 22.6789511
-
-[extruder]
-axis: e
-nozzle_diameter: 0.4
-filament_diameter: 1.75
-heater_pin: gpiochip0/gpio20
-sensor_pin: analog0
-sensor_type: EPCOS 100K B57560G104F
-min_temp: -273
-max_temp: 300
-control: pid
-pid_kp: 30
-pid_ki: 2
-pid_kd: 100
-
-[heater_bed]
-heater_pin: gpiochip0/gpio21
-sensor_pin: analog1
-sensor_type: EPCOS 100K B57560G104F
-min_temp: -273
-max_temp: 120
-control: pid
-pid_kp: 60
-pid_ki: 1
-pid_kd: 600
-
-[force_move]
-enable_force_move: True
-"""
-
-
 def main():
     parser = argparse.ArgumentParser(description="Kalico Simulator")
     parser.add_argument("--gcode", type=str, help="G-code file to print")
     parser.add_argument("--config", type=str, help="Config directory or file")
-    parser.add_argument(
-        "--mode",
-        choices=["full", "batch"],
-        default="full",
-        help="Simulation mode: 'full' (MCU firmware) or "
-        "'batch' (timing prediction, faster)",
-    )
     parser.add_argument(
         "--timeout",
         type=float,
@@ -3085,36 +2860,24 @@ def main():
             )
         )
 
-    if args.mode == "batch":
-        if not gcode:
-            print("ERROR: --gcode is required for batch mode")
-            sys.exit(1)
-        result = run_batch_simulation(
-            repo_root=repo,
-            gcode_path=gcode,
-            config_path=config,
-            timeout=args.timeout,
-            verbose=args.verbose,
-        )
-    else:
-        result = run_simulation(
-            repo_root=repo,
-            gcode_path=gcode,
-            config_dir=config,
-            timeout=args.timeout,
-            verbose=args.verbose,
-            phase_stepping=args.phase_test,
-            homing_test=args.homing_test,
-            beacon_test=args.beacon_test,
-            motion_state_test=args.test_motion_state,
-            sensorless_phase_test=args.sensorless_phase_test,
-            motor_adjust_test=args.motor_adjust_test,
-            serve=args.serve,
-            serve_data_dir=args.data_dir,
-        )
+    result = run_simulation(
+        repo_root=repo,
+        gcode_path=gcode,
+        config_dir=config,
+        timeout=args.timeout,
+        verbose=args.verbose,
+        phase_stepping=args.phase_test,
+        homing_test=args.homing_test,
+        beacon_test=args.beacon_test,
+        motion_state_test=args.test_motion_state,
+        sensorless_phase_test=args.sensorless_phase_test,
+        motor_adjust_test=args.motor_adjust_test,
+        serve=args.serve,
+        serve_data_dir=args.data_dir,
+    )
 
     print("\n" + "=" * 60)
-    print(f"SIMULATION RESULT ({args.mode} mode)")
+    print("SIMULATION RESULT (full mode)")
     print("=" * 60)
     print(f"  Status:     {'PASS' if result.success else 'FAIL'}")
     print(

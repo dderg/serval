@@ -10,6 +10,9 @@
 
 set -euo pipefail
 
+# BuildKit is required for the Dockerfile's cache mounts (--mount=type=cache).
+export DOCKER_BUILDKIT=1
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -55,22 +58,30 @@ done
 
 IMAGE_TAG="kalico-sim${TAG_SUFFIX}"
 
+# Cache key partitions the BuildKit compile caches (Rust target/, per-MCU
+# firmware OUT dirs) by branch, so two different branches building in parallel
+# get independent caches instead of serializing or clobbering each other.
+CACHE_KEY="${BRANCH:-$(cd "$REPO_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)}"
+CACHE_KEY="${CACHE_KEY//\//-}"
+DOCKER_BUILD_ARGS="$DOCKER_BUILD_ARGS --build-arg SIM_CACHE_KEY=${CACHE_KEY}"
+
 echo "=== Kalico Simulator ==="
 echo "  Branch:    ${BRANCH:-HEAD}"
 echo "  Image:     $IMAGE_TAG"
+echo "  Cache key: $CACHE_KEY"
 echo "  Main repo: $MAIN_REPO"
 echo "  G-code:    ${GCODE:-none (basic test)}"
 echo ""
 
 if [[ -n "$BRANCH" ]]; then
-    # For a named branch: extract into a stable, deterministic directory so
-    # Docker can diff the context against its layer cache across runs.
-    # A mktemp path defeats the cache because Docker hashes the context path
-    # (or its contents) — same files at a different temp path = full rebuild.
-    BUILD_CTX="$REPO_ROOT/.cache/kalico-sim/build-ctx-${BRANCH//\//-}"
+    # Extract the branch into a unique, self-cleaning staging dir. A unique
+    # path per invocation means concurrent builds (same or different branch)
+    # never race on a shared context dir. BuildKit keys its layer cache on
+    # file *content* hashes, not the context path, so a fresh temp dir does
+    # not defeat caching.
+    BUILD_CTX="$(mktemp -d "${TMPDIR:-/tmp}/kalico-sim-ctx.XXXXXX")"
+    trap 'rm -rf "$BUILD_CTX"' EXIT
     echo "Extracting branch '$BRANCH' to $BUILD_CTX ..."
-    rm -rf "$BUILD_CTX"
-    mkdir -p "$BUILD_CTX"
     (cd "$MAIN_REPO" && git archive "$BRANCH") | tar -x -C "$BUILD_CTX"
     # Overlay current simulator tools from the worktree so local edits to
     # run.sh / Dockerfile / configs are tested without committing.
