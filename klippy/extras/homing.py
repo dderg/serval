@@ -77,6 +77,12 @@ def _homed_axis_position(provider, axis, trip_pos, final_pos, trigger_height):
     return trigger_height + (final_pos[axis] - trip_pos[axis])
 
 
+def _trigger_too_early(traveled, min_home_dist, tolerance):
+    if min_home_dist <= 0.0:
+        return False
+    return traveled < min_home_dist and (min_home_dist - traveled) >= tolerance
+
+
 def _verify_latched_trip(gcmd, axis, endstop, doorbell_clock):
     query = getattr(endstop, "query_trip_state", None)
     if query is None:
