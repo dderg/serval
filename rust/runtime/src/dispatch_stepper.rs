@@ -311,6 +311,37 @@ pub(crate) fn commit_position_count(
     }
 }
 
+pub(crate) fn commit_position_count_masked(
+    axis: &AxisConfig,
+    axis_idx: usize,
+    shared: &SharedState,
+    motor_mask: u8,
+    delta: i32,
+) {
+    if delta == 0 {
+        return;
+    }
+    if shared.step_modes.get(axis_idx).map_or(false, |m| {
+        m.load(Ordering::Acquire) == crate::state::StepMode::Modulated as u8
+    }) {
+        return;
+    }
+    for (i, stepper) in axis.steppers.iter().enumerate() {
+        if i >= 8 {
+            break;
+        }
+        if motor_mask != 0 && (motor_mask & (1u8 << i)) == 0 {
+            continue;
+        }
+        let prev = stepper.position_count.load(Ordering::Acquire);
+        let Some(next) = prev.checked_add(delta) else {
+            raise_position_count_overflow(shared, axis_idx);
+            return;
+        };
+        stepper.position_count.store(next, Ordering::Release);
+    }
+}
+
 fn ramp_phase_offset(stepper: &crate::stepping_state::StepperRef, max_per_sample: i32) {
     if max_per_sample == 0 {
         return;

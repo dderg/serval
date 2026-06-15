@@ -1,6 +1,6 @@
 #![allow(clippy::indexing_slicing)]
 
-use super::{DISPLACEMENT_THRESHOLD_MM, dispatch_axis};
+use super::{DISPLACEMENT_THRESHOLD_MM, commit_position_count_masked, dispatch_axis};
 use crate::state::SharedState;
 use crate::step_queue::StepQueue;
 use crate::stepping_state::{AxisConfig, StepMode, StepperRef};
@@ -29,6 +29,21 @@ fn make_axis(mode: StepMode, microstep_distance: f32) -> AxisConfig {
         microstep_distance,
         ..AxisConfig::new_unconfigured()
     }
+}
+
+#[test]
+fn commit_masked_scopes_position_count() {
+    let shared = SharedState::new();
+    let mut axis = make_axis(StepMode::Pulse, 0.0125);
+    let _ = axis.steppers.push(make_stepper());
+
+    commit_position_count_masked(&axis, 0, &shared, 0, 5);
+    assert_eq!(axis.steppers[0].position_count.load(Ordering::Acquire), 5);
+    assert_eq!(axis.steppers[1].position_count.load(Ordering::Acquire), 5);
+
+    commit_position_count_masked(&axis, 0, &shared, 0b10, 3);
+    assert_eq!(axis.steppers[0].position_count.load(Ordering::Acquire), 5);
+    assert_eq!(axis.steppers[1].position_count.load(Ordering::Acquire), 8);
 }
 
 #[test]
