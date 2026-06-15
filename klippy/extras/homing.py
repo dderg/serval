@@ -340,6 +340,9 @@ class Homing:
             raise
         else:
             self._set_homing_current(toolhead, rail, pre_homing=False)
+            gcode_move = self.printer.lookup_object("gcode_move", None)
+            if gcode_move is not None:
+                gcode_move.reset_last_position()
 
     def _set_homing_current(self, toolhead, rail, pre_homing):
         print_time = toolhead.get_last_move_time()
