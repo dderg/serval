@@ -1,4 +1,4 @@
-const CONTIGUITY_EPS: f64 = 1e-6;
+pub(crate) const CONTIGUITY_EPS: f64 = 1e-6;
 pub const DEFAULT_LEAD_SECS: f64 = 0.25;
 
 #[derive(Debug, Clone, Copy)]

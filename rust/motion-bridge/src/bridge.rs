@@ -840,6 +840,68 @@ mod ring_depth_for_axis_tests {
     }
 }
 
+/// Absolute host-seconds anchor base for the next nudge: never before the prior
+/// nudge's committed end, and never before `host_now`. Returns the `t0` to pass
+/// to `enqueue_segment` (first piece of this nudge starts at `t0 + 0 = t0`).
+pub(crate) fn nudge_anchor_base(prev_stream_end: f64, host_now: f64, lead_secs: f64) -> f64 {
+    host_now.max(prev_stream_end) + lead_secs
+}
+
+/// Per-nudge-stream timing state. Replaces the per-nudge `Anchor` so that
+/// back-to-back nudges (buzz) never overlap on the wire.
+///
+/// Invariant: nudge N+1's first piece start_time >= nudge N's last piece end.
+struct NudgeStreamState {
+    /// Absolute host-seconds end of the last fully dispatched nudge. 0.0 until
+    /// the first nudge lands.
+    stream_end: f64,
+    /// t0 for the nudge currently being dispatched (reset on each new nudge).
+    current_t0: Option<f64>,
+    /// Nudge-local t_end of the last dispatched segment of the current nudge,
+    /// used to detect segment continuity vs a new nudge (same logic as Anchor).
+    prev_seg_t_end: f64,
+}
+
+impl NudgeStreamState {
+    fn new() -> Self {
+        Self {
+            stream_end: 0.0,
+            current_t0: None,
+            prev_seg_t_end: 0.0,
+        }
+    }
+
+    /// Return `(t0, fresh)` for a nudge segment, advancing state.
+    ///
+    /// `fresh` is true on the first segment of each new nudge (same semantics
+    /// as `Anchor::anchor_segment`'s `fresh` flag).
+    fn anchor(
+        &mut self,
+        seg_t_start: f64,
+        seg_t_end: f64,
+        host_now: f64,
+        lead_secs: f64,
+    ) -> (f64, bool) {
+        let is_new_nudge = match self.current_t0 {
+            None => true,
+            Some(_) => seg_t_start + crate::anchor::CONTIGUITY_EPS < self.prev_seg_t_end,
+        };
+
+        if is_new_nudge {
+            let t0 = nudge_anchor_base(self.stream_end, host_now, lead_secs);
+            self.current_t0 = Some(t0);
+            self.prev_seg_t_end = seg_t_end;
+            self.stream_end = t0 + seg_t_end;
+            (t0, true)
+        } else {
+            let t0 = self.current_t0.expect("current_t0 set above");
+            self.prev_seg_t_end = seg_t_end;
+            self.stream_end = t0 + seg_t_end;
+            (t0, false)
+        }
+    }
+}
+
 #[pymethods]
 impl PyMotionBridge {
     #[new]
@@ -3137,7 +3199,7 @@ impl PyMotionBridge {
             },
         );
 
-        let nudge_anchor = std::sync::Mutex::new(crate::anchor::Anchor::new());
+        let nudge_stream = std::sync::Mutex::new(NudgeStreamState::new());
         let nudge_dispatch: Arc<
             dyn Fn(u32, u8, &trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
         > = Arc::new(
@@ -3153,14 +3215,20 @@ impl PyMotionBridge {
                     r.host_now_secs()
                 };
 
-                let (t0, fresh) = nudge_anchor
+                let active_cohort: Option<u64> = *nudge_active_drip_cohort
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+
+                let lead_secs = if active_cohort.is_some() {
+                    crate::pump::DRIP_WINDOW_SECS
+                } else {
+                    crate::pump::MAX_LEAD_SECS
+                };
+
+                let (t0, fresh) = nudge_stream
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .anchor_segment(seg.t_start, seg.t_end, host_now)
-                    .map_err(|late| DispatchError::SegmentLate {
-                        gap_s: late.gap_s,
-                        seg_t_start: late.seg_t_start,
-                    })?;
+                    .anchor(seg.t_start, seg.t_end, host_now, lead_secs);
 
                 if fresh {
                     let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
@@ -3177,19 +3245,10 @@ impl PyMotionBridge {
                     .unwrap_or(0)
                 };
 
-                let active_cohort: Option<u64> = *nudge_active_drip_cohort
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-
                 let max_piece_secs = if active_cohort.is_some() {
                     Some(0.025_f64)
                 } else {
                     None::<f64>
-                };
-                let lead_secs = if active_cohort.is_some() {
-                    crate::pump::DRIP_WINDOW_SECS
-                } else {
-                    crate::pump::MAX_LEAD_SECS
                 };
 
                 let msgs = crate::enqueue::enqueue_segment(
