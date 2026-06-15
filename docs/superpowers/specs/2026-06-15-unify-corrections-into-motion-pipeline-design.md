@@ -78,10 +78,29 @@ there is one evaluator. Per piece, keyed off `motor_mask`:
 - **Position count:** advance `position_count` for exactly the masked steppers
   (`mask == 0` → all, via the existing `commit_position_count` loop; subset →
   only those, via the existing `commit_motor_position_count`).
+- **Step-frame register (the one piece of `dispatch_correction` that survives,
+  not deletes).** Steps are emitted as `round(curve_now) − frame_prev`, so the
+  evaluator needs a "previous curve sample" to diff against. A full-axis move
+  diffs against the per-axis `last_step_count` (the axis curve's frame). An
+  overlay is a *different* curve, so it must diff against its **own** frame — a
+  free-running per-stepper `overlay_step_frame: i32`, **never reset**. When
+  `mask != 0`, `dispatch_pulse` reads/writes the targeted motor's
+  `overlay_step_frame` and **leaves `axis.last_step_count` untouched** (so the
+  next full-axis move computes its delta against an un-perturbed axis frame and
+  the per-motor offset persists). The motors_sync buzz is net-zero, so this
+  register returns to its starting value after every buzz — consecutive buzzes,
+  even on different motors, line up with no reset. (The old per-axis
+  `correction_last_step_count` + `finish_stream` reset is replaced by this
+  per-stepper free-running register; the reset existed only to guard a
+  half-aborted stream and is dropped. A net-nonzero one-shot like MOTOR_ADJUST
+  leaves a persistent per-motor frame, which is correct — the host continues
+  from the offset it already tracks.)
 - **Axis accumulator:** advance `p_prev`/`v_prev` (engine.rs:452) **only when
   `mask == 0`.** A correction leaves `p_prev` untouched, so it is invisible to
   homing / `get_position` / `SET_KINEMATIC_POSITION` / `query_motor_state` (all
-  read `p_prev`, not per-stepper `position_count`).
+  read `p_prev`, not per-stepper `position_count`). This is the *position-of-
+  record*; the persistent per-motor offset lives implicitly in the divergence of
+  `position_count` from the axis frame.
 - **Phase-mode motors:** the existing `phase_offset_target` advance
   (dispatch_correction.rs:220) and `ramp_phase_offset` (dispatch_stepper.rs:314)
   are preserved for masked phase-mode motors. Dormant on non-phase benches.

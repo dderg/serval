@@ -369,6 +369,42 @@ git commit -m "feat(runtime): overlay pieces leave the axis p_prev accumulator u
 
 ---
 
+## Task A6: Overlay step-frame register (free-running, no reset)
+
+**Why:** A4 made masked pieces diff their steps against the per-axis
+`last_step_count` and write it back — but an overlay is a *different curve* on
+*one* motor; perturbing the axis frame would make the next full-axis move
+mis-step the overlaid motor (correcting the offset back out). Overlays need their
+own per-stepper "previous curve sample" register, free-running, never reset. A5's
+test currently hides this by hand-fitting the overlay coeffs to the axis frame.
+
+**Files:**
+- Modify: `rust/runtime/src/stepping_state.rs` (`StepperRef`: add `overlay_step_frame`)
+- Modify: `rust/runtime/src/dispatch_stepper.rs` (`dispatch_pulse`: mask-conditional frame)
+- Modify: `rust/runtime/src/engine/tests.rs` (fix A5's test to a real 0-based overlay curve)
+
+- [ ] **Step 1: Add the per-stepper register.** In `StepperRef` (the per-motor struct in `stepping_state.rs` that holds `position_count`/`phase_offset_*`), add `pub overlay_step_frame: AtomicI32` (match the `position_count` field's type/atomic + its `new()`/`reset()` initialization to `0`). It is NOT reset between overlays — initialize to 0 once.
+
+- [ ] **Step 2: Write the failing test.** Rewrite A5's `overlay_piece_does_not_advance_p_prev` (and/or add `overlay_uses_own_step_frame`) so the overlay piece is a real **0-based** buzz curve (coeffs starting at 0, e.g. `[0.0, x, x, 0.0]`-style net-zero), NOT hand-fitted to the axis frame. Assert:
+  - after the overlay, `axis.last_step_count` is UNCHANGED (the overlay didn't touch the axis frame);
+  - the targeted stepper's `position_count` moved by the overlay's steps;
+  - `p_prev` unchanged (from A5).
+  Run it; expect FAIL (current A4 code writes `axis.last_step_count` for the overlay, so the axis frame changes).
+
+- [ ] **Step 3: Make `dispatch_pulse` mask-conditional on the frame.** In `dispatch_pulse`, replace the single `axis.last_step_count` use with a frame chosen by the mask. For `mask == 0`: read/write `axis.last_step_count` (unchanged). For `mask != 0`: derive the motor index (`stepper_sel - 1`), and read/write that stepper's `overlay_step_frame`; do NOT touch `axis.last_step_count`. Apply the same selection to the overflow-rollback path (roll back the overlay frame, not the axis frame, for masked pieces). Concretely the `prev_step_count`/`target_step_count`/write-back trio and the two rollback assignments (`axis.last_step_count = ...`) become conditional on the mask. Keep the math identical; only the backing register changes.
+
+- [ ] **Step 4: Run tests + clippy + MCU build.** `cd rust && cargo nextest run -p runtime && cargo clippy -p runtime --all-targets -- -D warnings && ./scripts/ci.sh rust-mcu-h7`. Expected PASS (the corrected test now passes; full suite green).
+
+- [ ] **Step 5: Commit.**
+```bash
+git add rust/runtime/src/stepping_state.rs rust/runtime/src/dispatch_stepper.rs rust/runtime/src/engine/tests.rs
+git commit -m "feat(runtime): overlays use a free-running per-stepper step frame, not the axis frame"
+```
+
+Note for Phase C: the old per-axis `correction_last_step_count` is deleted (C1); this per-stepper `overlay_step_frame` replaces it. Do NOT delete `overlay_step_frame` in C1.
+
+---
+
 # Phase B — Corrections through the async pump
 
 ## Task B1: `PlannerMsg::AxisOverlay` + `submit_axis_overlay`
