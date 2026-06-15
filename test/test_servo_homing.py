@@ -83,6 +83,7 @@ AXIS_KEYS = frozenset(
         "homing_speed",
         "homing_retract_dist",
         "homing_retract_speed",
+        "min_home_dist",
     )
 )
 
@@ -133,6 +134,16 @@ def test_no_endstop_pin_means_zero_retract():
     hi = rail.get_homing_info()
     assert hi.retract_dist == 0.0
     assert rail.second_homing_speed == 0.0
+
+
+def test_min_home_dist_parsed_from_axis_config():
+    rail = make_servo_rail(extra={"min_home_dist": 12.0})
+    assert rail.get_homing_info().min_home_dist == 12.0
+
+
+def test_min_home_dist_defaults_to_retract_dist():
+    rail = make_servo_rail(extra={"homing_retract_dist": 3.0})
+    assert rail.get_homing_info().min_home_dist == 3.0
 
 
 class FakeSectionsConfig:
