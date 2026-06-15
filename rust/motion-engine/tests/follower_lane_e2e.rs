@@ -274,6 +274,7 @@ fn probe_report(cfg: &PlannerConfig) -> trajectory::streaming::ReplanReport {
         },
         fallback_initial_v: 0.0,
         safety_mode: trajectory::plan_velocity::SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     };
     let home = vec![0.0; chains.n_axes()];
     let mut state = trajectory::streaming::ShaperState::new(&home, &chains);

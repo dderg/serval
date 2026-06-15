@@ -24,6 +24,7 @@ fn uniform_profile(n: usize, total_length: f64, velocity: f64) -> TopProfile {
         grid_scheme: GridScheme::UniformArclength,
         total_time,
         binding: BindingSummary::default(),
+        deadline_truncated: false,
     }
 }
 
@@ -74,6 +75,7 @@ fn s_of_t_endpoint_consistency() {
         grid_scheme: GridScheme::UniformArclength,
         total_time: 1.0,
         binding: BindingSummary::default(),
+        deadline_truncated: false,
     };
 
     let s_pieces = build_s_of_t_pieces(&profile, 0.0);
@@ -131,6 +133,7 @@ fn s_of_t_near_zero_handling() {
         grid_scheme: GridScheme::UniformArclength,
         total_time: 100.0,
         binding: BindingSummary::default(),
+        deadline_truncated: false,
     };
 
     let s_pieces = build_s_of_t_pieces(&profile, 0.0);

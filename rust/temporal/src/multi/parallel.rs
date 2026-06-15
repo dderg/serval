@@ -34,9 +34,12 @@ pub(crate) fn fan_out_solves(
     let v_ends: Vec<f64> = states.iter().map(|s| s.v_end).collect();
     let a_starts: Vec<Option<f64>> = states.iter().map(|s| s.a_start).collect();
 
+    let deadline = crate::deadline::current();
+
     thread::scope(|s| {
         for _ in 0..n_threads {
             s.spawn(|| {
+                let _deadline_guard = crate::deadline::scope(deadline);
                 loop {
                     let Some(idx) = queue.lock().unwrap().pop() else {
                         break;

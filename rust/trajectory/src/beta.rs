@@ -121,13 +121,20 @@ pub struct ReplanWorstBinding {
 pub struct ReplanBindingSummary {
     pub histogram: Vec<(temporal::BindingConstraint, u32)>,
     pub worst: Option<ReplanWorstBinding>,
+    /// True when any segment in the window shipped a deadline-truncated profile,
+    /// i.e. the real-time budget — not convergence — ended refinement. This is
+    /// the authoritative `deadline_limited` signal, replacing the wall-clock
+    /// heuristic that misfired on slow-but-converged solves under host load.
+    pub deadline_truncated: bool,
 }
 
 fn aggregate_binding(profiles: &[temporal::TopProfile]) -> ReplanBindingSummary {
     use std::collections::HashMap;
     let mut hist: HashMap<temporal::BindingConstraint, u32> = HashMap::new();
     let mut worst: Option<ReplanWorstBinding> = None;
+    let mut deadline_truncated = false;
     for p in profiles {
+        deadline_truncated |= p.deadline_truncated;
         for (c, n) in &p.binding.histogram {
             *hist.entry(*c).or_insert(0) += *n;
         }
@@ -142,7 +149,11 @@ fn aggregate_binding(profiles: &[temporal::TopProfile]) -> ReplanBindingSummary 
     }
     let mut histogram: Vec<(temporal::BindingConstraint, u32)> = hist.into_iter().collect();
     histogram.sort_by(|(ca, na), (cb, nb)| nb.cmp(na).then_with(|| ca.cmp(cb)));
-    ReplanBindingSummary { histogram, worst }
+    ReplanBindingSummary {
+        histogram,
+        worst,
+        deadline_truncated,
+    }
 }
 
 #[derive(Debug)]

@@ -21,6 +21,15 @@ pub(crate) fn classify_junction_curves(
     classify_junction(&t_left, &t_right)
 }
 
+/// `true` when the junction between two adjacent curves is a corner (full-stop
+/// boundary) under the exact same classification the batch solver uses to
+/// partition chains. The streaming planner uses this to snap its bounded
+/// re-solve sub-window to a chain boundary.
+#[must_use]
+pub fn is_corner_between(left: &VectorNurbs<f64, 3>, right: &VectorNurbs<f64, 3>) -> bool {
+    classify_junction_curves(left, right) == JunctionKind::Corner
+}
+
 fn classify_junction(t_left: &[f64; 3], t_right: &[f64; 3]) -> JunctionKind {
     let left_degenerate = t_left[0].abs() + t_left[1].abs() + t_left[2].abs() < 1e-12;
     let right_degenerate = t_right[0].abs() + t_right[1].abs() + t_right[2].abs() < 1e-12;

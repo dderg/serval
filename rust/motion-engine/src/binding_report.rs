@@ -35,6 +35,49 @@ pub fn label_binding(c: BindingConstraint, names: &[String]) -> Option<BindingLa
     })
 }
 
+/// Fields carried by the per-move `replan_anytime` structured event. The gap is
+/// the deterministic closeness-to-limit measure derived from the verified worst
+/// binding ratio: `gap = (1 - ratio).max(0)` — `0` means the trajectory sits on
+/// the kinematic limit, `0.06` means it runs ~6% below. `ratio` and `constraint`
+/// both come from `check_chain`'s `BindingSummary`, so neither is fabricated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnytimeEventFields {
+    pub gap: f64,
+    pub limiter_limit: String,
+    pub limiter_derivative: &'static str,
+    pub limiter_via_pa: bool,
+    pub binding_ratio: f64,
+}
+
+#[must_use]
+pub fn anytime_event_fields(
+    binding: &ReplanBindingSummary,
+    names: &[String],
+) -> AnytimeEventFields {
+    match binding
+        .worst
+        .and_then(|w| label_binding(w.constraint, names).map(|l| (l, w.ratio)))
+    {
+        Some((l, ratio)) => AnytimeEventFields {
+            gap: (1.0 - ratio).max(0.0),
+            limiter_limit: l.limit,
+            limiter_derivative: l.derivative,
+            limiter_via_pa: l.via_pa,
+            binding_ratio: ratio,
+        },
+        // No binding reported ⇒ no measurable shortfall. A gap of 0 honestly
+        // says "no conservativeness measured", never inventing 100% from a
+        // missing ratio.
+        None => AnytimeEventFields {
+            gap: 0.0,
+            limiter_limit: String::from("none"),
+            limiter_derivative: "none",
+            limiter_via_pa: false,
+            binding_ratio: 0.0,
+        },
+    }
+}
+
 pub const ROLLUP_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct BindingAccumulator {

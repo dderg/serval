@@ -63,6 +63,7 @@ pub(crate) fn slice_chain_profile(
                 grid_scheme: chain.grid_scheme,
                 total_time,
                 binding,
+                deadline_truncated: chain.deadline_truncated,
             }
         })
         .collect()

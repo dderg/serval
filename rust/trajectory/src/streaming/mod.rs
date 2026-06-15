@@ -62,6 +62,10 @@ pub struct ReplanContext {
     /// Fallback path speed at `t_dispatched` when the cursor is outside the `pieces` domain.
     pub fallback_initial_v: f64,
     pub safety_mode: SafetyMode,
+    /// Test/diagnostic hook: force the legacy whole-window re-solve (no bounded
+    /// front-freeze). Production always leaves this `false`; the trajectory-
+    /// neutrality tests flip it to compare bounded vs full committed output.
+    pub force_full_resolve: bool,
 }
 
 #[derive(Debug, Clone, Copy)]

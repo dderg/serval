@@ -27,6 +27,7 @@ fn binding_events_land_in_host_rust_jsonl_tagged_with_print_id() {
             constraint: BindingConstraint::PaAccel { set: 1 },
             ratio: 0.98,
         }),
+        ..Default::default()
     };
 
     let start = std::time::Instant::now();

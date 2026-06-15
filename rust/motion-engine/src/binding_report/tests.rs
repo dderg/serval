@@ -52,6 +52,7 @@ fn summary(set: usize, count: u32, ratio: f64) -> ReplanBindingSummary {
             constraint: BindingConstraint::Velocity { set },
             ratio,
         }),
+        ..Default::default()
     }
 }
 
@@ -91,6 +92,83 @@ fn flush_emits_and_clears_a_partial_window() {
     acc.record(&summary(0, 1, 0.9), 1.0);
     acc.flush(t0 + std::time::Duration::from_millis(100), &names);
     assert_eq!(acc.window_count(BindingConstraint::Velocity { set: 0 }), 0);
+}
+
+/// G5 — the gap + limiter the `replan_anytime` event carries must match the
+/// actual binding constraint and its verified ratio. With a known XY-velocity
+/// binding at ratio 0.94 (a conservative floor), the event reports the matching
+/// limiter and `gap = 1 - 0.94 = 0.06`.
+#[test]
+fn g5_anytime_event_matches_binding_and_gap() {
+    let names = vec!["gantry".to_string(), "extruder".to_string()];
+    let binding = ReplanBindingSummary {
+        histogram: vec![(BindingConstraint::Velocity { set: 0 }, 7)],
+        worst: Some(ReplanWorstBinding {
+            constraint: BindingConstraint::Velocity { set: 0 },
+            ratio: 0.94,
+        }),
+        ..Default::default()
+    };
+
+    let fields = anytime_event_fields(&binding, &names);
+
+    assert_eq!(fields.limiter_limit, "gantry");
+    assert_eq!(fields.limiter_derivative, "velocity");
+    assert!(!fields.limiter_via_pa);
+    assert!((fields.binding_ratio - 0.94).abs() < 1e-12);
+    assert!(
+        (fields.gap - 0.06).abs() < 1e-9,
+        "gap must equal (1 - ratio).max(0); got {}",
+        fields.gap,
+    );
+}
+
+/// G5 — a PA-jerk binding on set 1 (no name → runtime_caps fallback) at ratio
+/// 0.88 produces the matching limiter and gap 0.12. Confirms the event tracks
+/// the actual worst family, not a fixed one.
+#[test]
+fn g5_anytime_event_tracks_pa_jerk_family() {
+    let names = vec!["gantry".to_string()];
+    let binding = ReplanBindingSummary {
+        histogram: vec![(BindingConstraint::PaJerk { set: 1 }, 3)],
+        worst: Some(ReplanWorstBinding {
+            constraint: BindingConstraint::PaJerk { set: 1 },
+            ratio: 0.88,
+        }),
+        ..Default::default()
+    };
+
+    let fields = anytime_event_fields(&binding, &names);
+
+    assert_eq!(fields.limiter_limit, "runtime_caps");
+    assert_eq!(fields.limiter_derivative, "jerk");
+    assert!(fields.limiter_via_pa);
+    assert!((fields.gap - 0.12).abs() < 1e-9);
+}
+
+/// G5 — an on-the-limit binding (ratio = 1.0, the converged optimum) reports
+/// gap 0; no binding at all reports the `none` limiter and gap 0.
+#[test]
+fn g5_anytime_event_on_limit_and_no_binding() {
+    let names = vec!["gantry".to_string()];
+
+    let on_limit = ReplanBindingSummary {
+        histogram: vec![(BindingConstraint::AccelNorm { set: 0 }, 1)],
+        worst: Some(ReplanWorstBinding {
+            constraint: BindingConstraint::AccelNorm { set: 0 },
+            ratio: 1.0,
+        }),
+        ..Default::default()
+    };
+    let f = anytime_event_fields(&on_limit, &names);
+    assert!(f.gap.abs() < 1e-12, "on-limit gap must be 0; got {}", f.gap);
+    assert_eq!(f.limiter_derivative, "accel");
+
+    let none = ReplanBindingSummary::default();
+    let f = anytime_event_fields(&none, &names);
+    assert_eq!(f.limiter_limit, "none");
+    assert_eq!(f.limiter_derivative, "none");
+    assert!(f.gap.abs() < 1e-12);
 }
 
 #[test]

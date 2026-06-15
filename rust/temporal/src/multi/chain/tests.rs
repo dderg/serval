@@ -52,6 +52,7 @@ fn slice_duplicates_junction_sample_and_splits_time() {
         grid_scheme: GridScheme::UniformArclength,
         total_time: 0.4,
         binding: BindingSummary::default(),
+        deadline_truncated: false,
     };
     let per_segment = slice_chain_profile(&chain_profile, &ranges);
     assert_eq!(per_segment.len(), 2);
@@ -91,6 +92,7 @@ fn binding_summary_assigned_to_first_slice_only() {
         grid_scheme: GridScheme::UniformArclength,
         total_time: 1.2,
         binding: chain_binding,
+        deadline_truncated: false,
     };
     let per_segment = slice_chain_profile(&chain_profile, &ranges);
     assert_eq!(per_segment.len(), 3);
