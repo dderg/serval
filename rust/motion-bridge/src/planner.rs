@@ -20,22 +20,6 @@ const LEAD: f64 = 0.25;
 
 const SAFETY_MARGIN: f64 = 0.2;
 
-const INITIAL_WORST_REPLAN_SECS: f64 = 0.9;
-
-const WORST_REPLAN_DECAY: f64 = 0.97;
-
-const RESUME_SAFETY_FACTOR: f64 = 1.5;
-
-const RESUME_LEAD_MARGIN: f64 = 0.05;
-
-const MAX_RESUME_LEAD_SECS: f64 = crate::pump::MAX_LEAD_SECS - 0.05;
-
-fn resume_lead_secs(worst_replan_secs: f64) -> f64 {
-    (worst_replan_secs * RESUME_SAFETY_FACTOR + RESUME_LEAD_MARGIN)
-        .max(LEAD)
-        .min(MAX_RESUME_LEAD_SECS)
-}
-
 const REPLAN_WARN_BUDGET_US: u64 = ((LEAD - SAFETY_MARGIN) * 1e6) as u64;
 
 #[derive(Debug, Clone, Copy)]
@@ -482,7 +466,6 @@ fn run_loop(
 
     let mut last_recv_time: Option<Instant> = None;
     let mut sync_instant: Option<Instant> = None;
-    let mut worst_replan_secs: f64 = INITIAL_WORST_REPLAN_SECS;
 
     loop {
         let next_timeout = if state.t_dispatched < state.t_appended - 1e-12 {
@@ -560,16 +543,12 @@ fn run_loop(
                             &commit_fire_count,
                         );
                     }
-                    let resume_lead = resume_lead_secs(worst_replan_secs);
-                    tracing::debug!(
-                        subsystem = "motion",
-                        event = "idle_resume_lead",
-                        resume_lead,
-                        worst_replan_secs,
-                        capped = resume_lead >= MAX_RESUME_LEAD_SECS - 1e-9,
-                        "idle-resume cushion sized to cover worst recent solve"
-                    );
-                    state.advance_idle(esc + resume_lead);
+                    // Resume with the same dispatch cushion a fresh stream
+                    // gets: anchoring at bare `esc` leaves the upcoming
+                    // append_and_replan solve (observed 100-200 ms) to consume
+                    // the entire lead before seg0 is even emitted, landing
+                    // pieces in the MCU past.
+                    state.advance_idle(esc + LEAD);
                 }
 
                 let replan_start = Instant::now();
@@ -581,8 +560,6 @@ fn run_loop(
                     }
                 };
                 let replan_us = replan_start.elapsed().as_micros() as u64;
-                let replan_secs = replan_us as f64 * 1e-6;
-                worst_replan_secs = replan_secs.max(worst_replan_secs * WORST_REPLAN_DECAY);
                 let emit_start = Instant::now();
                 let drained = match state.emit_committed(&thread_state.emit_ctx()) {
                     Ok(out) => out,

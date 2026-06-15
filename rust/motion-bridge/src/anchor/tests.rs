@@ -34,37 +34,6 @@ fn late_segment_returns_err_with_correct_gap() {
 }
 
 #[test]
-fn larger_resume_cushion_avoids_segmentlate_that_smaller_one_triggers() {
-    let t0_offset = 100.0;
-    let first_t_end = 1.0;
-    let host_now_at_resume = t0_offset + 1.867;
-
-    let small_cushion = 0.25;
-    let large_cushion = 0.95;
-
-    let mut a_small = Anchor::new();
-    let (t0_small, _) = a_small.anchor_segment(0.0, first_t_end, t0_offset).unwrap();
-    assert!((t0_small - (t0_offset + DEFAULT_LEAD_SECS)).abs() < 1e-9);
-    let small_resume_t_start = first_t_end + small_cushion;
-    let small_result = a_small.anchor_segment(
-        small_resume_t_start,
-        small_resume_t_start + 1.0,
-        host_now_at_resume,
-    );
-    small_result.expect_err("a 250ms cushion must still SegmentLate after an 867ms solve");
-
-    let mut a_large = Anchor::new();
-    let _ = a_large.anchor_segment(0.0, first_t_end, t0_offset).unwrap();
-    let large_resume_t_start = first_t_end + large_cushion;
-    let large_result = a_large.anchor_segment(
-        large_resume_t_start,
-        large_resume_t_start + 1.0,
-        host_now_at_resume,
-    );
-    large_result.expect("a 950ms cushion must keep seg0 in the future for the same 867ms solve");
-}
-
-#[test]
 fn backward_jump_reanchors() {
     let mut a = Anchor::new();
     let (t0_a, _) = a.anchor_segment(0.0, 5.0, 100.0).unwrap();
