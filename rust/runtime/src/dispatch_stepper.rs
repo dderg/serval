@@ -3,8 +3,8 @@
 use core::sync::atomic::Ordering;
 
 use crate::fault_helpers::{
-    raise_multi_motor_mask, raise_position_count_overflow, raise_step_queue_overflow,
-    raise_steps_per_sample_exceeded, raise_unknown_step_mode,
+    raise_multi_motor_mask, raise_overlay_unsupported, raise_position_count_overflow,
+    raise_step_queue_overflow, raise_steps_per_sample_exceeded, raise_unknown_step_mode,
 };
 use crate::phase_lut::{PHASE_LUT, PHASE_LUT_SIZE};
 use crate::state::SharedState;
@@ -145,6 +145,10 @@ pub fn dispatch_axis(
             overlay_just_armed,
         ),
         m if m == StepMode::Phase as u8 => {
+            if motor_mask != 0 {
+                raise_overlay_unsupported(shared, axis_idx, motor_mask);
+                return;
+            }
             bump_relaxed(&shared.isr_phase_call_count);
             dispatch_phase(axis_idx, axis, shared, p_end);
         }
