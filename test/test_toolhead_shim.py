@@ -119,3 +119,109 @@ def test_toolhead_method_surface_complete(toolhead_fixture):
         m for m in LEGACY_METHODS if not callable(getattr(toolhead, m, None))
     ]
     assert missing == []
+
+
+class _RecordingBridge:
+    def __init__(self, duration):
+        self._duration = duration
+        self.last_call = None
+
+    def motion_lead_secs(self):
+        return 0.25
+
+    def submit_correction_sequence(
+        self,
+        mcu_id,
+        axis_idx,
+        motor_idx,
+        segments,
+        speed,
+        accel,
+        start_host_secs,
+    ):
+        self.last_call = dict(
+            kind="correction",
+            mcu_id=mcu_id,
+            axis_idx=axis_idx,
+            motor_idx=motor_idx,
+            segments=list(segments),
+            speed=speed,
+            accel=accel,
+            start_host_secs=start_host_secs,
+        )
+        return self._duration
+
+    def adjust_motor(
+        self,
+        mcu_id,
+        axis_idx,
+        motor_idx,
+        delta_mm,
+        speed,
+        accel,
+        start_host_secs,
+    ):
+        self.last_call = dict(
+            kind="adjust",
+            mcu_id=mcu_id,
+            axis_idx=axis_idx,
+            motor_idx=motor_idx,
+            delta_mm=delta_mm,
+            speed=speed,
+            accel=accel,
+            start_host_secs=start_host_secs,
+        )
+        return self._duration
+
+
+class _FixedReactor:
+    def monotonic(self):
+        return 100.0
+
+
+def _make_correction_toolhead(duration):
+    th = Motion.__new__(Motion)
+    th.mcu = FakeMcu()  # estimated_print_time(t) = t + 1.0
+    th.reactor = _FixedReactor()
+    th.bridge = _RecordingBridge(duration)
+    th.motion_lead = 0.25
+    th._mcu_pending_end_time = 0.0
+    return th
+
+
+def test_get_last_move_time_uses_motion_lead():
+    th = _make_correction_toolhead(0.0)
+    th.motion_lead = 0.5
+    # est = 100 + 1 = 101; floor = est + 0.5 = 101.5; pending 0 < est -> floor
+    assert th.get_last_move_time() == pytest.approx(101.5)
+
+
+def test_submit_correction_anchors_on_timeline_and_advances_pending():
+    th = _make_correction_toolhead(0.6)
+    # idle: glmt = est(101.0) + lead(0.25) = 101.25
+    # start_host = now + (glmt - est) = 100 + 0.25 = 100.25
+    wait_s = th.submit_correction(7, 1, 0, [0.3, -0.3], 80.0, 5000.0)
+    call = th.bridge.last_call
+    assert call["kind"] == "correction"
+    assert (
+        call["mcu_id"] == 7 and call["axis_idx"] == 1 and call["motor_idx"] == 0
+    )
+    assert call["start_host_secs"] == pytest.approx(100.25)
+    # pending advanced past the buzz: glmt + duration = 101.25 + 0.6 = 101.85
+    assert th._mcu_pending_end_time == pytest.approx(101.85)
+    # caller wait = (start_host - now) + duration = 0.25 + 0.6 = 0.85
+    assert wait_s == pytest.approx(0.85)
+
+
+def test_submit_motor_adjust_anchors_on_timeline_and_advances_pending():
+    th = _make_correction_toolhead(0.6)
+    wait_s = th.submit_motor_adjust(2, 0, 1, 0.05, 5.0, 100.0)
+    call = th.bridge.last_call
+    assert call["kind"] == "adjust"
+    assert (
+        call["mcu_id"] == 2 and call["axis_idx"] == 0 and call["motor_idx"] == 1
+    )
+    assert call["delta_mm"] == pytest.approx(0.05)
+    assert call["start_host_secs"] == pytest.approx(100.25)
+    assert th._mcu_pending_end_time == pytest.approx(101.85)
+    assert wait_s == pytest.approx(0.85)

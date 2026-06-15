@@ -9,7 +9,6 @@ from . import motion_kinematics, stepper
 from .extras import servo_axis
 from .kinematics import extruder
 
-BUFFER_TIME_START = 0.250
 DRAIN_TIMEOUT = 60.0
 _LEGACY_STEPPER_AXES = frozenset("xyzab")
 _LEGACY_SERVO_SECTIONS = ("servo_x", "servo_y", "servo_z")
@@ -113,6 +112,9 @@ class Motion:
 
             self.bridge = motion_bridge._StubBridge()
         self._mcu_pending_end_time = 0.0
+        self.motion_lead = self.bridge.motion_lead_secs()
+        if self.motion_lead is None:
+            self.motion_lead = 0.25
         self._motor_bindings = {}
         self.all_mcus = [m for n, m in printer.lookup_objects(module="mcu")]
         self.mcu = self.all_mcus[0]
@@ -235,6 +237,35 @@ class Motion:
                 curpos[i] = coord[i]
         self.move(curpos, speed)
         self.printer.send_event("toolhead:manual_move")
+
+    def _stream_correction_on_timeline(self, submit_at):
+        now = self.reactor.monotonic()
+        last_move_time = self.get_last_move_time()
+        est = self.mcu.estimated_print_time(now)
+        start_host_secs = now + (last_move_time - est)
+        duration = submit_at(start_host_secs)
+        correction_end_print_time = last_move_time + duration
+        if correction_end_print_time > self._mcu_pending_end_time:
+            self._mcu_pending_end_time = correction_end_print_time
+        return (start_host_secs - now) + duration
+
+    def submit_correction(
+        self, mcu_id, axis_idx, motor_idx, segments, speed, accel
+    ):
+        return self._stream_correction_on_timeline(
+            lambda start: self.bridge.submit_correction_sequence(
+                mcu_id, axis_idx, motor_idx, segments, speed, accel, start
+            )
+        )
+
+    def submit_motor_adjust(
+        self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
+    ):
+        return self._stream_correction_on_timeline(
+            lambda start: self.bridge.adjust_motor(
+                mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, start
+            )
+        )
 
     def set_extruder(self, extruder, extrude_pos):
         self.extruder = extruder
@@ -471,7 +502,7 @@ class Motion:
         est = 0.0
         if self.mcu is not None:
             est = self.mcu.estimated_print_time(self.reactor.monotonic())
-        floor = est + BUFFER_TIME_START
+        floor = est + self.motion_lead
         if self._mcu_pending_end_time > est:
             return max(self._mcu_pending_end_time, floor)
         return floor
@@ -483,7 +514,7 @@ class Motion:
         if self.mcu is None:
             return
         est = self.mcu.estimated_print_time(self.reactor.monotonic())
-        command_time = est + BUFFER_TIME_START
+        command_time = est + self.motion_lead
         if self._mcu_pending_end_time > command_time:
             self._mcu_pending_end_time = command_time
 
