@@ -449,8 +449,10 @@ impl Engine {
                     Some((p_end, v_end)) => {
                         active = true;
                         let p_sample_start = axis.p_prev;
-                        axis.p_prev = p_end;
-                        axis.v_prev = v_end;
+                        if axis.ring.peek(storage).map_or(0, |p| p.motor_mask) == 0 {
+                            axis.p_prev = p_end;
+                            axis.v_prev = v_end;
+                        }
                         (p_end, v_end, p_sample_start)
                     }
                     None => {
