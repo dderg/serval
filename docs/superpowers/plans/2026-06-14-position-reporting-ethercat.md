@@ -336,7 +336,7 @@ git commit -m "feat(bridge): route live position query to EtherCAT endpoints"
 **Files:** none (verification only)
 
 - [ ] **Step 1: CI gates.** `./scripts/ci.sh quick` green; `./scripts/ci.sh py` green (use the `c_helper.so` arm64/amd64 workaround if needed — see Plan 1 Task 11); `cargo fmt --all --check` clean.
-- [ ] **Step 2: Sim/topology check (no servo hardware needed).** With the kalico-sim skill, run a **mixed** config (a servo axis + stepper axes if the sim supports an EtherCAT stub; otherwise an all-stepper config to confirm no regression from the `collect_motor_positions_inner` refactor). Confirm `motion_report.live_position` and `GET_POSITION` still report correctly for steppers and that the EtherCAT branch doesn't break startup.
+- [ ] **Step 2: Sim/topology check (no servo hardware needed).** With the mcu-sim skill, run a **mixed** config (a servo axis + stepper axes if the sim supports an EtherCAT stub; otherwise an all-stepper config to confirm no regression from the `collect_motor_positions_inner` refactor). Confirm `motion_report.live_position` and `GET_POSITION` still report correctly for steppers and that the EtherCAT branch doesn't break startup.
 - [ ] **Step 3: On a real A6-EC drive (bench firmware flow), VERIFY THE VELOCITY SCALE — this is the "real deal" gate.**
   - Use the existing servo-capture telemetry (now carrying `velocity_actual`, Task 4): command a steady move at a known commanded velocity `v_cmd` mm/s.
   - From a capture file, compute mm/s three ways and confirm they agree within tolerance:

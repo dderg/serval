@@ -738,7 +738,7 @@ git commit -m "feat(motion-engine): accumulate and emit binding-constraint rollu
 
 - [ ] **Step 3: Gate** — `./scripts/ci.sh quick` fully green (ruff, rust workspace tests, clippy `-D warnings`, `cargo fmt --check`, watchdog canary). Re-run `cargo fmt --all --check` last, after any late edit.
 
-- [ ] **Step 4: kalico-sim sanity (manual verification).** Use the `kalico-sim` skill to run a migrated fixture (an extruding print with `[axis e]` + a tight `[limit extruder]`) through the host pipeline, then use the `query-logs` skill to confirm the events land and aggregate:
+- [ ] **Step 4: mcu-sim sanity (manual verification).** Use the `mcu-sim` skill to run a migrated fixture (an extruding print with `[axis e]` + a tight `[limit extruder]`) through the host pipeline, then use the `query-logs` skill to confirm the events land and aggregate:
   - `subsystem:=motion event:=binding_rollup` lines appear during the print, each with `limit`, `derivative`, `via_pa`, `ratio`, `t`, `window_samples`. (The event field is the bare name `binding_rollup`; `motion` is the separate `subsystem` field, not a name prefix — matches the `replan_stats` precedent.)
   - `event:=binding_hist | stats by (limit, derivative) sum(count) as total` returns a non-empty per-limit breakdown.
   - A travel-only (non-extruding) fixture still emits spatial rollups (`limit` = the gantry/z section names) and no follower entries.

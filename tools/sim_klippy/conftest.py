@@ -290,7 +290,7 @@ def sim(tmp_path, sim_extra_overrides):
                 ],
             )
         )
-        env["KALICO_SIM_SOCK_DIR"] = str(h7_sock)
+        env["MCU_SIM_SOCK_DIR"] = str(h7_sock)
 
         klippy_log = log_dir / "klippy.log"
         api_socket = str(tmp_path / "klippy.sock")

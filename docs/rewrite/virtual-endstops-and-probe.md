@@ -228,7 +228,7 @@ and `get_position_endstop()` exposed for `homing.py` now and bed_mesh later.
 - Unit tests (separate files, per repo convention) for the pure logic:
   sample aggregation (average/median), tolerance/retry behavior, virtual
   endstop string validation, allocator.
-- **kalico-sim**: Neptune-shaped config (`[probe]` +
+- **mcu-sim**: Neptune-shaped config (`[probe]` +
   `probe:z_virtual_endstop`) running `G28`, `PROBE`, `PROBE_ACCURACY`,
   `QUERY_PROBE`; a `[probe]`-with-GPIO-Z-endstop config (probe used for
   `PROBE` only, no virtual endstop); failure cases: missing `[probe]`,

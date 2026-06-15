@@ -9,7 +9,7 @@
 set -euo pipefail
 
 REPO="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd )"
-IMG="kalico-sim:latest"
+IMG="mcu-sim:latest"
 CONTAINER_HOME=/work
 SCRIPT_ARGS="${*:-G28 X}"
 

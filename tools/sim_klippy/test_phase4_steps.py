@@ -11,7 +11,7 @@ import pytest
 
 pytestmark = pytest.mark.needs_elf
 
-REPO = pathlib.Path(os.environ.get("KALICO_REPO", "/work"))
+REPO = pathlib.Path(os.environ.get("SIM_REPO", "/work"))
 LOGDIR = REPO / "tools" / "sim_klippy" / ".local-logs"
 KLIPPER_ELF = REPO / "out" / "klipper.elf"
 PRINTER_CFG = REPO / "tools" / "sim_klippy" / "printer.cfg"
@@ -43,12 +43,12 @@ def cleanup_prior():
             pass
 
 
-SIM_SOCK_DIR = pathlib.Path("/tmp/kalico_sim_socks")
+SIM_SOCK_DIR = pathlib.Path("/tmp/mcu_sim_socks")
 
 
 def spawn_tmc_emulators():
     SIM_SOCK_DIR.mkdir(exist_ok=True)
-    emu_script = REPO / "tools" / "kalico-sim" / "emulators" / "tmc5160_emu.py"
+    emu_script = REPO / "tools" / "mcu-sim" / "emulators" / "tmc5160_emu.py"
     procs = []
     for line in (27, 26):
         sock_path = SIM_SOCK_DIR / f"spi_cs_0_{line}"
@@ -69,7 +69,7 @@ def spawn_tmc_emulators():
 def spawn_elf():
     LOGDIR.mkdir(parents=True, exist_ok=True)
     elf_log = open(ELF_LOG, "wb")
-    shim_so = REPO / "tools" / "kalico-sim" / "libvtime" / "libsim_intercept.so"
+    shim_so = REPO / "tools" / "mcu-sim" / "libvtime" / "libsim_intercept.so"
     if not shim_so.exists():
         subprocess.check_call(
             ["make", "-C", str(shim_so.parent)],
@@ -78,8 +78,8 @@ def spawn_elf():
         )
     env = os.environ.copy()
     env["LD_PRELOAD"] = str(shim_so)
-    env["KALICO_SIM_SOCK_DIR"] = str(SIM_SOCK_DIR)
-    env["KALICO_SIM_SHIM_VERBOSE"] = "1"
+    env["MCU_SIM_SOCK_DIR"] = str(SIM_SOCK_DIR)
+    env["MCU_SIM_SHIM_VERBOSE"] = "1"
     proc = subprocess.Popen(
         [str(KLIPPER_ELF), "-I", SIM_SOCKET],
         stdout=elf_log,
@@ -214,13 +214,13 @@ def main():
         print("[phase4] querying axis accumulators (post-move)")
         try:
             for axis in (0, 1, 2):
-                r = send_gcode("KALICO_SIM_AXIS_ACCUM OID=%d" % axis)
+                r = send_gcode("MCU_SIM_AXIS_ACCUM OID=%d" % axis)
                 print(f"  AXIS_ACCUM={axis}: {r}")
             print("[phase4] querying step count for OID 0 (X stepper)")
-            x_resp = send_gcode("KALICO_SIM_STEP_COUNT OID=0")
+            x_resp = send_gcode("MCU_SIM_STEP_COUNT OID=0")
             print(f"  OID=0 response: {x_resp}")
             print("[phase4] querying step count for OID 1 (Y stepper)")
-            y_resp = send_gcode("KALICO_SIM_STEP_COUNT OID=1")
+            y_resp = send_gcode("MCU_SIM_STEP_COUNT OID=1")
             print(f"  OID=1 response: {y_resp}")
         except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
             print(f"  query failed (klippy disconnected): {e}")
@@ -229,12 +229,12 @@ def main():
         x_count = 0
         y_count = 0
         for line in log.splitlines():
-            if "KALICO_SIM_STEP_COUNT oid=0" in line:
+            if "MCU_SIM_STEP_COUNT oid=0" in line:
                 try:
                     x_count = int(line.split("count=")[1].split()[0])
                 except (IndexError, ValueError):
                     pass
-            if "KALICO_SIM_STEP_COUNT oid=1" in line:
+            if "MCU_SIM_STEP_COUNT oid=1" in line:
                 try:
                     y_count = int(line.split("count=")[1].split()[0])
                 except (IndexError, ValueError):
@@ -262,7 +262,7 @@ def main():
                         "engine-trace",
                         "planner",
                         "engine-async",
-                        "KALICO_SIM",
+                        "MCU_SIM",
                         "homed",
                     )
                 ):

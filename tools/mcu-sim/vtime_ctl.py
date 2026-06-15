@@ -4,7 +4,7 @@ import mmap
 import os
 import struct
 
-SHM_NAME = "/kalico_vtime"
+SHM_NAME = "/vtime"
 SHM_SIZE = 32  # sizeof(struct vtime_shm): 4 x uint64/uint32 aligned
 
 # Match struct vtime_shm layout: nanos(u64), num_sleepers(u32),

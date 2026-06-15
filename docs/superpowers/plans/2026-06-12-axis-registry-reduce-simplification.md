@@ -718,7 +718,7 @@ Run: `grep -rn "EMode\|e_mode\|extrusion_per_xy_mm\|e_independent\|ELimits\|e_li
 Every hit dies or gets a written justification in the commit message. Expected legitimate survivors: none in `rust/`; legacy `ToolHead`-path code in `klippy/` keeps its behavior (legacy class untouched, as in plan 1).
 
 - [ ] **Step 2:** `cargo nextest run` from `rust/` → full PASS; `cargo test --doc` if doc examples were touched; `cargo fmt --all --check` → clean.
-- [ ] **Step 3: Sim verification** (kalico-sim skill):
+- [ ] **Step 3: Sim verification** (mcu-sim skill):
   - Migrated fixture boots clean; homing + travel square runs (behavior identical to pre-plan-2).
   - Fixture missing `[axis x]` → startup error naming the section.
   - Fixture with `[firmware_retraction]` → startup error.

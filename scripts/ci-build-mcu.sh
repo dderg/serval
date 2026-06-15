@@ -6,9 +6,9 @@ DICTDIR="${DICTDIR:-${MAIN_DIR}/out/ci-mcu-kalico-dicts}"
 mkdir -p "${DICTDIR}"
 
 shopt -s nullglob
-CONFIGS=(test/configs/kalico-*.config)
+CONFIGS=(test/configs/*.config)
 if [ ${#CONFIGS[@]} -eq 0 ]; then
-    echo "ERROR: no test/configs/kalico-*.config found" >&2
+    echo "ERROR: no test/configs/*.config found" >&2
     exit 1
 fi
 

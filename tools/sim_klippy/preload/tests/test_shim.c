@@ -70,8 +70,8 @@ static int test_pwm_write_absorbed(void) {
 }
 
 static int test_control_socket_ping(void) {
-    const char *dir = getenv("KALICO_SIM_SOCK_DIR");
-    if (!dir) { fprintf(stderr, "SKIP: KALICO_SIM_SOCK_DIR not set\n"); return 0; }
+    const char *dir = getenv("MCU_SIM_SOCK_DIR");
+    if (!dir) { fprintf(stderr, "SKIP: MCU_SIM_SOCK_DIR not set\n"); return 0; }
     char path[256];
     snprintf(path, sizeof(path), "%s/sim_control", dir);
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);

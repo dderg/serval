@@ -52,7 +52,7 @@ cpu FpuEnabled true
 
 # NOTE on IWDG: Renode's IWDG model doesn't honor Klipper's IWDG->KR=0xAAAA
 # refresh writes the same way real silicon does. For runs longer than ~15 s,
-# build the sim firmware with CONFIG_KALICO_SIM=y to skip watchdog_init /
+# build the sim firmware with CONFIG_MCU_SIM=y to skip watchdog_init /
 # kicks. See tools/sim/sim_f446.config.
 
 # Bridge USART2 (Klipper's CONFIG_STM32_SERIAL_USART2 console + Kalico command

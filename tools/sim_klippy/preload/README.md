@@ -10,11 +10,11 @@ device access with shim-internal state plus per-chip Unix sockets.
 
 ## Use
     LD_PRELOAD=$PWD/libsim_intercept.so \
-    KALICO_SIM_SOCK_DIR=/tmp/sim/ \
+    MCU_SIM_SOCK_DIR=/tmp/sim/ \
     /path/to/klipper.elf -I /tmp/klipper_sim_pty
 
 ## Debug
-    KALICO_SIM_SHIM_VERBOSE=1 LD_PRELOAD=...
+    MCU_SIM_SHIM_VERBOSE=1 LD_PRELOAD=...
 
 Each intercept logs a one-line trace to stderr.
 

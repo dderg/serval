@@ -64,7 +64,7 @@ ARG SIM_CACHE_KEY=default
 WORKDIR /kalico/rust
 
 COPY rust/ /kalico/rust/
-COPY tools/kalico-sim/patches/patch_rust_traces.py /tmp/patch_rust_traces.py
+COPY tools/mcu-sim/patches/patch_rust_traces.py /tmp/patch_rust_traces.py
 RUN python3 /tmp/patch_rust_traces.py /kalico/rust/motion-engine/src/bridge.rs
 
 RUN --mount=type=cache,target=/kalico/rust/target,id=rust-target-${SIM_CACHE_KEY},sharing=locked \
@@ -96,19 +96,19 @@ COPY klippy/ /kalico/klippy/
 # one-character edit to runner.py invalidated this layer and forced a full
 # firmware (H7 + F4 + chelper) rebuild on every Python-only change.
 COPY tools/check_async_event_registration.py /kalico/tools/check_async_event_registration.py
-COPY tools/kalico-sim/libvtime/ /kalico/tools/kalico-sim/libvtime/
-COPY tools/kalico-sim/configs/ /kalico/tools/kalico-sim/configs/
-COPY tools/kalico-sim/patches/ /kalico/tools/kalico-sim/patches/
+COPY tools/mcu-sim/libvtime/ /kalico/tools/mcu-sim/libvtime/
+COPY tools/mcu-sim/configs/ /kalico/tools/mcu-sim/configs/
+COPY tools/mcu-sim/patches/ /kalico/tools/mcu-sim/patches/
 COPY tools/sim_klippy/ /kalico/tools/sim_klippy/
 
 # Build shims (libvtime.so + libsim_intercept.so)
-RUN make -C tools/kalico-sim/libvtime
+RUN make -C tools/mcu-sim/libvtime
 
 # Copy Rust source for c-api build (make needs `cd rust`)
 COPY rust/ /kalico/rust/
 
 # Patch source tree for MACH_LINUX builds (idempotent).
-RUN bash tools/kalico-sim/patches/fix_linux_build.sh /kalico
+RUN bash tools/mcu-sim/patches/fix_linux_build.sh /kalico
 
 RUN mkdir -p /sim_elfs
 
@@ -130,7 +130,7 @@ RUN --mount=type=cache,target=/kalico/out-h7,id=fw-h7-${SIM_CACHE_KEY},sharing=l
     if [ -f tools/sim_klippy/configs/h7-sim.config ]; then \
         cp tools/sim_klippy/configs/h7-sim.config .config; \
     else \
-        cp tools/kalico-sim/configs/h7-sim.config .config; \
+        cp tools/mcu-sim/configs/h7-sim.config .config; \
     fi; \
     make olddefconfig OUT=out-h7/ 2>/dev/null || true; \
     make -j$(nproc) OUT=out-h7/; \
@@ -145,7 +145,7 @@ RUN --mount=type=cache,target=/kalico/out-f4,id=fw-f4-${SIM_CACHE_KEY},sharing=l
     if [ -f tools/sim_klippy/configs/f4-sim.config ]; then \
         cp tools/sim_klippy/configs/f4-sim.config .config; \
     else \
-        cp tools/kalico-sim/configs/f4-sim.config .config; \
+        cp tools/mcu-sim/configs/f4-sim.config .config; \
     fi; \
     make olddefconfig OUT=out-f4/ 2>/dev/null || true; \
     make -j$(nproc) OUT=out-f4/; \
@@ -193,7 +193,7 @@ WORKDIR /kalico
 
 # Python source first — artifacts copied after so they are not overwritten.
 COPY klippy/ /kalico/klippy/
-COPY tools/kalico-sim/ /kalico/tools/kalico-sim/
+COPY tools/mcu-sim/ /kalico/tools/mcu-sim/
 COPY tools/sim_klippy/ /kalico/tools/sim_klippy/
 
 # Copy firmware ELFs
@@ -204,10 +204,10 @@ COPY --from=firmware /kalico/klippy/chelper/ /kalico/klippy/chelper/
 
 # Copy libvtime shims
 COPY --from=firmware \
-    /kalico/tools/kalico-sim/libvtime/libvtime.so \
-    /kalico/tools/kalico-sim/libvtime/libvtime_clock_only.so \
-    /kalico/tools/kalico-sim/libvtime/libsim_intercept.so \
-    /kalico/tools/kalico-sim/libvtime/
+    /kalico/tools/mcu-sim/libvtime/libvtime.so \
+    /kalico/tools/mcu-sim/libvtime/libvtime_clock_only.so \
+    /kalico/tools/mcu-sim/libvtime/libsim_intercept.so \
+    /kalico/tools/mcu-sim/libvtime/
 
 # Overlay _motion_engine.so on top of the Python source copy.
 COPY --from=rust-build \
@@ -220,10 +220,10 @@ COPY --from=firmware /kalico/tools/sim_klippy/printer_real/third_party_repos/ \
 
 # Apply sim-only Python traces. Can't go in fix_linux_build.sh because
 # the runtime stage re-copies klippy/ fresh from the build context.
-COPY tools/kalico-sim/patches/patch_klippy_traces.py /tmp/patch_klippy_traces.py
+COPY tools/mcu-sim/patches/patch_klippy_traces.py /tmp/patch_klippy_traces.py
 RUN python3 /tmp/patch_klippy_traces.py klippy/motion.py klippy/motion_engine.py klippy/mcu.py
 
-RUN mkdir -p /gcode /tmp/kalico_sim_gcodes
+RUN mkdir -p /gcode /tmp/mcu_sim_gcodes
 
-ENTRYPOINT ["python3", "tools/kalico-sim/runner.py"]
+ENTRYPOINT ["python3", "tools/mcu-sim/runner.py"]
 CMD []

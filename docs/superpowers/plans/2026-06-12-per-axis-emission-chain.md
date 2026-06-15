@@ -494,7 +494,7 @@ pub fn classify_and_build(
 ## Task 11: offline validation + gates
 
 - [ ] **Step 1:** `./scripts/ci.sh quick` → green; `./scripts/ci.sh py` → green; `cargo test --doc` if any doc examples were touched.
-- [ ] **Step 2:** klipper-sim sanity (see the `kalico-sim` skill): run a real sliced G-code file (G5-converted via `compat`) through the simulator on this branch; confirm follower lane pieces appear and total extrusion ≈ slicer total minus shaping shortfall. Record numbers in the PR description.
+- [ ] **Step 2:** klipper-sim sanity (see the `mcu-sim` skill): run a real sliced G-code file (G5-converted via `compat`) through the simulator on this branch; confirm follower lane pieces appear and total extrusion ≈ slicer total minus shaping shortfall. Record numbers in the PR description.
 - [ ] **Step 3:** `cargo fmt --all --check`, then commit any stragglers and open/update the PR (base: `sota-motion`).
 
 ---

@@ -191,7 +191,7 @@ enforces it regardless.
 - `runtime`: unit tests for validation rejections (busy axis, bad motor_idx,
   overlap, stale start_time) and for scratch evaluation producing
   single-motor step output in pulse mode and folded offsets in phase mode.
-- End-to-end: kalico-sim scenario — push correction pieces to an idle axis,
+- End-to-end: mcu-sim scenario — push correction pieces to an idle axis,
   assert only the target stepper's pin toggles and the axis tracker is
   unchanged; assert hard errors when the axis is moving.
 - Bench, manual: a debug command ships with the bridge API, before any

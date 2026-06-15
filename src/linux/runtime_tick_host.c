@@ -71,7 +71,7 @@ runtime_host_widened_clock_now(void)
     return timer_read_time_u64();
 }
 
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
 static const int step_gpio_lines[N_AXIS_STEP_QUEUES] = { 18, 7, 15, -1 };
 
 static void (*sim_notify_step)(int chip, int line, int32_t n_steps);
@@ -104,15 +104,15 @@ host_tick_main(void *arg)
 {
     (void)arg;
 
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
     // The main thread's ppoll must advance virtual time, so deprioritise this
     // tick thread below it (throughput is irrelevant in sim).
     pid_t tid = (pid_t)syscall(SYS_gettid);
     setpriority(PRIO_PROCESS, tid, 19);
 
     sim_notify_step = dlsym(RTLD_DEFAULT, "sim_intercept_notify_step");
-    vtime_pacer_register = dlsym(RTLD_DEFAULT, "kalico_vtime_pacer_register");
-    vtime_pacer_advance = dlsym(RTLD_DEFAULT, "kalico_vtime_pacer_advance");
+    vtime_pacer_register = dlsym(RTLD_DEFAULT, "vtime_pacer_register");
+    vtime_pacer_advance = dlsym(RTLD_DEFAULT, "vtime_pacer_advance");
     if (vtime_pacer_register && vtime_pacer_advance)
         vtime_pacer_slot = vtime_pacer_register(HOST_TICK_NS);
 #else
@@ -130,7 +130,7 @@ host_tick_main(void *arg)
             next.tv_nsec -= 1000000000L;
             next.tv_sec  += 1;
         }
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
         if (vtime_pacer_slot >= 0) {
             uint64_t target = (uint64_t)next.tv_sec * 1000000000ULL
                               + (uint64_t)next.tv_nsec;
@@ -156,12 +156,12 @@ host_tick_main(void *arg)
         for (int axis = 0; axis < N_AXIS_STEP_QUEUES; axis++) {
             StepQueue *q = &step_queues[axis];
             while (q->head != q->tail) {
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
                 uint16_t idx = q->head & (STEP_QUEUE_DEPTH - 1);
                 int8_t dir = q->buf[idx].dir;
 #endif
                 q->head++;
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
                 if (sim_notify_step && step_gpio_lines[axis] >= 0)
                     sim_notify_step(0, step_gpio_lines[axis],
                                     dir ? -1 : 1);

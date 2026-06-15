@@ -12,7 +12,7 @@ from typing import Optional
 from klippy import msgproto
 
 try:
-    from tools.kalico_sim.emulators.beacon_identify_dict import (
+    from tools.mcu_sim.emulators.beacon_identify_dict import (
         CLOCK_FREQ,
         IDENTIFY_BLOB,
     )

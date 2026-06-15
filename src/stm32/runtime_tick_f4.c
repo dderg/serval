@@ -35,12 +35,12 @@ runtime_tick_disable(void)
     NVIC_DisableIRQ(TIM5_IRQn);
 }
 
-// NEVER flash CONFIG_KALICO_SIM=y to silicon (IWDG-disabled debug build).
+// NEVER flash CONFIG_MCU_SIM=y to silicon (IWDG-disabled debug build).
 __attribute__((used, externally_visible))
 uint32_t
 runtime_cyccnt_read(void)
 {
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
     extern volatile uint32_t runtime_sim_cyccnt;
     return runtime_sim_cyccnt;
 #else
@@ -147,7 +147,7 @@ TIM5_IRQHandler_body(uint32_t *frame)
 
     TIM5->SR = ~TIM_SR_UIF;            // entry-time ack
 
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
     extern volatile uint32_t runtime_sim_cyccnt;
     runtime_sim_cyccnt += (runtime_clock_freq / 40000U);
 #endif

@@ -9,7 +9,7 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
-from kalico_host_io import KalicoHostIO  # noqa: E402
+from host_io import KalicoHostIO  # noqa: E402
 from test_renode_gpio_injection import RenodeMonitor  # noqa: E402
 
 pytestmark = pytest.mark.needs_renode
@@ -261,7 +261,7 @@ def run(args):
             "runtime_sim_engine_tick_start",
         ):
             assert need in names, (
-                "%s missing from data dict; rebuild with CONFIG_KALICO_SIM=y"
+                "%s missing from data dict; rebuild with CONFIG_MCU_SIM=y"
                 % (need,)
             )
         print("[e2e] data dict OK")

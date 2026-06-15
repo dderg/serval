@@ -217,7 +217,7 @@ This spec is implemented in two independently-testable plans sharing the same ho
 - **Host (python):** assembly for CoreXY and dual-Z (first-motor); `motion_report.get_status`
   returns non-zero live position/velocity from a populated cache; `GET_POSITION` rungs
   populated and `GET_POSITION` error path reports `ERR` without raising; M114 unchanged.
-- **End-to-end:** via the kalico-sim simulator where feasible (live position non-zero
+- **End-to-end:** via the mcu-sim simulator where feasible (live position non-zero
   during a move; settles to endpoint when idle).
 
 ## Out of scope

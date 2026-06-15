@@ -99,12 +99,12 @@ sysbus Tag <0x58024400 4> "RCC_CR" 0x02000003
 # IWDG->KR = 0xAAAA refresh writes the same way real silicon does. With the
 # default config the model fires a reset ~20 s into the sim, halting the CPU
 # (the .repl has no `reset` macro). For runs longer than ~15 s, build the
-# sim firmware with CONFIG_KALICO_SIM=y to skip watchdog_init / kicks. See
+# sim firmware with CONFIG_MCU_SIM=y to skip watchdog_init / kicks. See
 # tools/sim/sim.config for the recommended flag set; tools/sim/README.md
 # explains the trade-off.
 
 # Bridge USART2 (Klipper's CONFIG_STM32_SERIAL_USART2 console + Kalico command
-# surface) to a TCP socket. Host-side `kalico_host_io.py` connects via
+# surface) to a TCP socket. Host-side `host_io.py` connects via
 # `socket://localhost:3334`. Default baud 250 kbaud is set in the firmware;
 # Renode's UART model ignores baud rate (timing is virtual).
 emulation CreateServerSocketTerminal 3334 "uart_term" false
@@ -120,7 +120,7 @@ connector Connect sysbus.usart2 uart_term
 # on 700+ byte frames like LoadCurve.
 emulation SetGlobalQuantum "0.000001"
 
-# Expose Renode's GDB server (port 3333) for the kalico-sim load_curve hang
+# Expose Renode's GDB server (port 3333) for the mcu-sim load_curve hang
 # investigation (Step-6 plan Phase 0 Task 0.2). Attach with:
 #   arm-none-eabi-gdb out/klipper.elf -ex "target remote :3333"
 # The `true` arg means the CPU starts halted; type `continue` in gdb to run.

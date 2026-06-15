@@ -129,7 +129,7 @@ Command::QueryMotorState { correlation_id } => {
 **Files:** none.
 
 - [ ] **Step 1: CI.** `./scripts/ci.sh quick` + `./scripts/ci.sh py` green (`.so` workaround if needed); `cargo fmt --all --check`.
-- [ ] **Step 2: Sim regression (steppers).** kalico-sim: home + a move on an all-stepper config — confirm the overshoot-corrected retract didn't regress stepper homing, and stepper live position still reads correctly. (Sim can't model the A6-EC servo.)
+- [ ] **Step 2: Sim regression (steppers).** mcu-sim: home + a move on an all-stepper config — confirm the overshoot-corrected retract didn't regress stepper homing, and stepper live position still reads correctly. (Sim can't model the A6-EC servo.)
 - [ ] **Step 3: Bench (A6-EC, Neptune — user-triggered flash).** Home X. Verify: live position reads **absolute and correct at rest** (was 0) **and tracks while moving** (was the diff); `GET_POSITION` agrees; after a power-cycle the position persists (absolute encoder); the retract clears the rammed end (servo backs off, not pushing). Confirm `home is at <configured>` reads right (test a non-zero home offset).
 - [ ] **Step 4: Bench velocity scale check** (carried from the earlier plan): confirm `velocity_mm_s(606C rpm, rotation_distance)` ≈ `Δpos/Δt` ≈ commanded during a steady move; adjust the rpm/gear factor if off.
 

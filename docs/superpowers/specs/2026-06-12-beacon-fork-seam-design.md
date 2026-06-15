@@ -133,7 +133,7 @@ never silent glue in the fork.
 
 ## Validation (the merged Spec E)
 
-Sim-first against `tools/kalico-sim/emulators/beacon_mcu.py` via the
+Sim-first against `tools/mcu-sim/emulators/beacon_mcu.py` via the
 existing `third_party/beacon_klipper` symlink path in the runner.
 First step is an emulator gap assessment: which of the flows below the
 emulator already supports (likely: proximity homing, streaming) and

@@ -1,10 +1,10 @@
-name: kalico-playground
+name: playground
 
 # Interactive Kalico playground: our klippy (+ simulated MCUs) driven via
 # Mainsail, with structured logs flowing into VictoriaLogs so you can watch
 # them light up as you click. See README.md for build + run.
-#   up:     docker compose -f tools/kalico-playground/docker-compose.yml up -d
-#   reset:  docker compose -f tools/kalico-playground/docker-compose.yml down -v
+#   up:     docker compose -f tools/playground/docker-compose.yml up -d
+#   reset:  docker compose -f tools/playground/docker-compose.yml down -v
 #   Mainsail:   http://localhost:8080
 #   VL web UI:  http://localhost:9428/select/vmui
 #
@@ -16,7 +16,7 @@ name: kalico-playground
 services:
   # --- our klippy + sim MCUs + Moonraker + Mainsail (supervisor), one box ----
   printer:
-    image: kalico-playground:latest
+    image: playground:latest
     container_name: kpg-printer
     volumes:
       - printer_data:/printer_data

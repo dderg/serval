@@ -47,7 +47,7 @@ sim_uart_lookup_fd(uint8_t oid) {
                     sim_chip_socket_connect(sim_uart_routes[i].socket_path);
             return sim_uart_routes[i].fd;
         }
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
     // Auto-route: any tmcuart oid with no explicit route falls back to
     // a canonical per-MCU socket path. The flavor prefix (`h7` for the
     // RUNTIME-enabled H7 build, `f4` otherwise) differentiates
@@ -70,12 +70,12 @@ sim_uart_lookup_fd(uint8_t oid) {
 }
 #endif
 
-#if CONFIG_KALICO_SIM_TMCUART_BYPASS
+#if CONFIG_MCU_SIM_TMCUART_BYPASS
 #include <stdio.h>     // snprintf
 #include <stdlib.h>    // getenv
 #include "linux/sim_chip_socket.h"
 
-// Per-oid socket fd cache. Path computed from KALICO_SIM_SOCK_DIR env var
+// Per-oid socket fd cache. Path computed from MCU_SIM_SOCK_DIR env var
 // at first use; orchestrator binds matching paths before spawn.
 #define MAX_TMCUART_OIDS 8
 static int sim_tmcuart_fds[MAX_TMCUART_OIDS];
@@ -88,7 +88,7 @@ static int sim_tmcuart_lookup_fd(uint8_t oid) {
         sim_tmcuart_fds_initialized = 1;
     }
     if (sim_tmcuart_fds[oid] >= 0) return sim_tmcuart_fds[oid];
-    const char *sock_dir = getenv("KALICO_SIM_SOCK_DIR");
+    const char *sock_dir = getenv("MCU_SIM_SOCK_DIR");
     if (!sock_dir) return -1;
     char path[256];
     snprintf(path, sizeof(path), "%s/tmcuart_%u", sock_dir, (unsigned)oid);
@@ -275,7 +275,7 @@ DECL_COMMAND(command_config_tmcuart,
 void
 command_tmcuart_send(uint32_t *args)
 {
-#if CONFIG_KALICO_SIM_TMCUART_BYPASS
+#if CONFIG_MCU_SIM_TMCUART_BYPASS
     {
         uint8_t oid = args[0];
         int sfd = sim_tmcuart_lookup_fd(oid);

@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-import kalico_host_io  # noqa: E402
+import host_io  # noqa: E402
 import msgproto  # noqa: E402
 
 pytestmark = pytest.mark.sim_unit
@@ -36,16 +36,16 @@ class _ReadSerial:
 
 
 def test_stale_empty_ack_does_not_rewind_at_seq_wrap():
-    io = kalico_host_io.KalicoHostIO.__new__(kalico_host_io.KalicoHostIO)
+    io = host_io.KalicoHostIO.__new__(host_io.KalicoHostIO)
     io._parser = msgproto.MessageParser()
-    io._rxbuf = kalico_host_io._RxBuffer(io._parser)
+    io._rxbuf = host_io._RxBuffer(io._parser)
     io._seq = 0
     io._lock = threading.Lock()
     io._ser = _ReadSerial([_frame(15)])
 
     params = io._wait_packet_sync(
         "identify_response",
-        kalico_host_io.time.monotonic() + 0.01,
+        host_io.time.monotonic() + 0.01,
         sync_seq=True,
         sent_seq=15,
     )
@@ -59,16 +59,16 @@ def test_empty_identify_response_is_parsed_not_classified_as_nak():
     payload = parser.messages_by_name["identify_response"].encode_by_name(
         offset=2080, data=b""
     )
-    io = kalico_host_io.KalicoHostIO.__new__(kalico_host_io.KalicoHostIO)
+    io = host_io.KalicoHostIO.__new__(host_io.KalicoHostIO)
     io._parser = parser
-    io._rxbuf = kalico_host_io._RxBuffer(parser)
+    io._rxbuf = host_io._RxBuffer(parser)
     io._seq = 0
     io._lock = threading.Lock()
     io._ser = _ReadSerial([_frame(1, payload)])
 
     params = io._wait_packet_sync(
         "identify_response",
-        kalico_host_io.time.monotonic() + 0.01,
+        host_io.time.monotonic() + 0.01,
         sync_seq=True,
         sent_seq=0,
     )
@@ -195,9 +195,9 @@ class _NoEofDecompressor:
 
 
 def test_identify_sweeps_seq_after_host_restart(monkeypatch):
-    monkeypatch.setattr(kalico_host_io, "serial", _FakeSerialModule(4))
+    monkeypatch.setattr(host_io, "serial", _FakeSerialModule(4))
 
-    io = kalico_host_io.KalicoHostIO("fake-port", identify_timeout=2.0)
+    io = host_io.KalicoHostIO("fake-port", identify_timeout=2.0)
     try:
         assert io.get_msgparser().get_app_info() == "fake"
     finally:
@@ -206,14 +206,14 @@ def test_identify_sweeps_seq_after_host_restart(monkeypatch):
 
 def test_identify_terminates_on_partial_final_chunk(monkeypatch):
     fake_serial = _FakeSerialModule(0, pad_len=55, past_end="silent")
-    monkeypatch.setattr(kalico_host_io, "serial", fake_serial)
+    monkeypatch.setattr(host_io, "serial", fake_serial)
     monkeypatch.setattr(
-        kalico_host_io.zlib,
+        host_io.zlib,
         "decompressobj",
         lambda: _NoEofDecompressor(),
     )
 
-    io = kalico_host_io.KalicoHostIO("fake-port", identify_timeout=2.0)
+    io = host_io.KalicoHostIO("fake-port", identify_timeout=2.0)
     try:
         assert io.get_msgparser().get_app_info() == "fake"
         assert fake_serial.last_serial.requests[-1][0] == 200
@@ -226,14 +226,14 @@ def test_identify_terminates_on_partial_final_chunk(monkeypatch):
 
 def test_identify_terminates_on_empty_response(monkeypatch):
     fake_serial = _FakeSerialModule(0, pad_len=9, past_end="empty")
-    monkeypatch.setattr(kalico_host_io, "serial", fake_serial)
+    monkeypatch.setattr(host_io, "serial", fake_serial)
     monkeypatch.setattr(
-        kalico_host_io.zlib,
+        host_io.zlib,
         "decompressobj",
         lambda: _NoEofDecompressor(),
     )
 
-    io = kalico_host_io.KalicoHostIO("fake-port", identify_timeout=2.0)
+    io = host_io.KalicoHostIO("fake-port", identify_timeout=2.0)
     try:
         assert io.get_msgparser().get_app_info() == "fake"
         assert fake_serial.last_serial.requests[-1][0] == 160
@@ -243,9 +243,9 @@ def test_identify_terminates_on_empty_response(monkeypatch):
 
 def test_identify_uses_zlib_eof_before_silent_past_end(monkeypatch):
     fake_serial = _FakeSerialModule(0, pad_len=9, past_end="silent")
-    monkeypatch.setattr(kalico_host_io, "serial", fake_serial)
+    monkeypatch.setattr(host_io, "serial", fake_serial)
 
-    io = kalico_host_io.KalicoHostIO("fake-port", identify_timeout=2.0)
+    io = host_io.KalicoHostIO("fake-port", identify_timeout=2.0)
     try:
         assert io.get_msgparser().get_app_info() == "fake"
         assert fake_serial.last_serial.requests[-1][0] == 120
@@ -258,9 +258,9 @@ def test_identify_uses_zlib_eof_before_silent_past_end(monkeypatch):
 
 def test_identify_retransmits_same_seq_once_after_dropped_response(monkeypatch):
     fake_serial = _FakeSerialModule(0, pad_len=2600, drop_every_response=2)
-    monkeypatch.setattr(kalico_host_io, "serial", fake_serial)
+    monkeypatch.setattr(host_io, "serial", fake_serial)
 
-    io = kalico_host_io.KalicoHostIO("fake-port", identify_timeout=2.0)
+    io = host_io.KalicoHostIO("fake-port", identify_timeout=2.0)
     try:
         assert io.get_msgparser().get_app_info() == "fake"
         requests = fake_serial.last_serial.requests

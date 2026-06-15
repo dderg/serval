@@ -742,7 +742,7 @@ fn follower_sections_become_temporal_sets() {
 
 - [x] **Step 1:** `grep -rn "FollowerOnlyMoveUnsupported\|NoFollowerCoverage.*coverage only\|recorded for coverage" rust/ klippy/ --include="*.rs" --include="*.py"` — plan-2 stopgaps must be gone or rewritten; every survivor justified in the commit message.
 - [x] **Step 2:** `cargo nextest run` from `rust/` → PASS; `cargo test --doc` if doc examples touched; `cargo fmt --all --check` → clean. If `klippy/` was touched (it should not be in this plan — confirm with `git status`), run `./scripts/ci.sh py`.
-- [x] **Step 3:** kalico-sim sanity: boot a migrated fixture with `[axis e]` + `[limit extruder]`; travel-only prints behave identically to plan-2 (followers empty on live segments — live extrusion is still rejected until plan 4); a fixture whose `[limit extruder]` declares only `max_jerk` errors at startup naming velocity/accel coverage.
+- [x] **Step 3:** mcu-sim sanity: boot a migrated fixture with `[axis e]` + `[limit extruder]`; travel-only prints behave identically to plan-2 (followers empty on live segments — live extrusion is still rejected until plan 4); a fixture whose `[limit extruder]` declares only `max_jerk` errors at startup naming velocity/accel coverage.
 - [x] **Step 4:** Pure-function check: every new temporal test runs with zero hardware/bridge involvement — the planner remains `(geometry, rows, kernels, history) → profile`. Confirm no new `static`/global entered `temporal` (`grep -rn "static\|lazy_static\|OnceLock" rust/temporal/src/ | grep -v test`).
 - [x] **Step 5: Commit** — `feat: follower/PA/shaper-folded constraint rows end-to-end (plan 3)`
 

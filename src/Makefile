@@ -41,7 +41,7 @@ src-$(CONFIG_NEED_LOAD_CELL_PROBE) += load_cell_probe.c
 # cargo is invoked every build — cargo itself handles up-to-date checks
 # (incremental compilation), so this is cheap on no-op builds.
 # Production firmware: thumbv7em + per-MCU-family Rust features. Sim build
-# (CONFIG_KALICO_SIM=y) appends `kalico-sim` to keep MCU-style tick paths
+# (CONFIG_MCU_SIM=y) appends `mcu-sim` to keep MCU-style tick paths
 # active under the sim clock. Never in production firmware.
 ifeq ($(CONFIG_MACH_STM32H7),y)
 MCU_RUST_FEATURES := mcu-h7,header-nurbs,header-runtime
@@ -66,8 +66,8 @@ MCU_RUST_FEATURES := mcu-g0,header-nurbs,header-runtime
 MCU_CARGO_TARGET_DIR := target-g0
 MCU_RUST_TARGET := thumbv6m-none-eabi
 endif
-ifeq ($(CONFIG_KALICO_SIM),y)
-MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),kalico-sim
+ifeq ($(CONFIG_MCU_SIM),y)
+MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),mcu-sim
 endif
 ifeq ($(CONFIG_MOTION_MODULE_STEPPER),y)
 MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),motion-module-stepper
@@ -80,7 +80,7 @@ ifneq (,$(filter y,$(CONFIG_MACH_STM32H7) $(CONFIG_MACH_STM32F4) $(CONFIG_MACH_S
 MCU_RUST_LIB := rust/$(MCU_CARGO_TARGET_DIR)/$(MCU_RUST_TARGET)/release/libc_api.a
 
 # Per-MCU target dir gives H7 and F4 their own caches (see above). Within
-# a single MCU's dir, the kalico-sim feature toggle is the only remaining
+# a single MCU's dir, the mcu-sim feature toggle is the only remaining
 # feature-set change cargo sees; the stamp guard catches the rare case
 # where cargo's incremental cache misses a feature flip and forces a
 # targeted clean of just the affected crates.
@@ -111,18 +111,18 @@ ifeq ($(CONFIG_MACH_LINUX),y)
 # profile (the Pi has an FPU) PLUS the "real MCU firmware" marker that links
 # the C step/SPI FFI (linux/phase_stepping_spi.c) — distinct from a bare `host`
 # build (the motion-engine planner cdylib / unit tests), which must NOT
-# reference that symbol. kalico-sim is OPT-IN here exactly like the STM32
-# families (CONFIG_KALICO_SIM), not hardwired: a Linux MCU drives real
+# reference that symbol. mcu-sim is OPT-IN here exactly like the STM32
+# families (CONFIG_MCU_SIM), not hardwired: a Linux MCU drives real
 # /dev/gpiochip / /dev/spidev by default.
 MCU_RUST_FEATURES := mcu-linux,header-nurbs,header-runtime
-ifeq ($(CONFIG_KALICO_SIM),y)
-MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),kalico-sim
+ifeq ($(CONFIG_MCU_SIM),y)
+MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),mcu-sim
 endif
 ifeq ($(CONFIG_MOTION_MODULE_STEPPER),y)
 MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),motion-module-stepper
 endif
 # Own target dir: the motion-engine cdylib builds the shared crates (runtime,
-# nurbs, ...) with different host features into rust/target/, and a kalico-sim
+# nurbs, ...) with different host features into rust/target/, and a mcu-sim
 # flip changes this firmware's feature set — keeping them separate avoids
 # mutual incremental-cache thrash (slow on the Pi). Mirrors the per-arch STM32
 # dirs. Exported for src/linux/Makefile's link rule.

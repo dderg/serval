@@ -36,7 +36,7 @@ import struct
 import sys
 import time
 
-KALICO_SYNC = 0x55
+SIM_SYNC = 0x55
 KLIPPER_SYNC = 0x7E
 KIND_QUERY_RUNTIME_CAPS = 0x0040
 KIND_RUNTIME_CAPS_RESPONSE = 0x0041
@@ -68,9 +68,7 @@ def build_kalico_frame(
     msg = struct.pack("<HBI", kind, version, correlation_id) + body
     len_field = 2 + 1 + len(msg) + 2
     header = (
-        struct.pack("<BH", KALICO_SYNC, len_field)
-        + bytes([CHANNEL_CONTROL])
-        + msg
+        struct.pack("<BH", SIM_SYNC, len_field) + bytes([CHANNEL_CONTROL]) + msg
     )
     crc = crc16_ccitt(header[1:])
     return header + struct.pack("<H", crc)
@@ -79,7 +77,7 @@ def build_kalico_frame(
 def parse_kalico_frame(buf: bytes) -> tuple[int, int, int, bytes] | None:
     i = 0
     while i < len(buf):
-        if buf[i] != KALICO_SYNC:
+        if buf[i] != SIM_SYNC:
             i += 1
             continue
         if i + 3 > len(buf):

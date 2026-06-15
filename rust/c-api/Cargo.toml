@@ -22,15 +22,15 @@ mcu-f4 = ["nurbs/mcu-f4", "runtime/mcu-f4"]
 mcu-g0 = ["nurbs/mcu-g0", "runtime/mcu-g0"]
 host = ["nurbs/host", "runtime/host", "dep:cbindgen"]
 # Marker feature for real Linux-MCU firmware builds (MACH_LINUX without
-# CONFIG_KALICO_SIM).  Implies `host` and threads runtime/mcu-linux so the
+# CONFIG_MCU_SIM).  Implies `host` and threads runtime/mcu-linux so the
 # phase_stepping_write_xdirect FFI is emitted rather than the in-memory
 # capture sink.  Set only by the MACH_LINUX Makefile path.
 mcu-linux = ["host", "runtime/mcu-linux"]
 header-nurbs = []
 header-runtime = []
-# Pass-through to runtime/kalico-sim. See runtime/Cargo.toml for the
+# Pass-through to runtime/mcu-sim. See runtime/Cargo.toml for the
 # rationale and the production-firmware safety boundary.
-kalico-sim = ["runtime/kalico-sim"]
+mcu-sim = ["runtime/mcu-sim"]
 # Pass-through: enables the stepper pulse/phase dispatch backend in the
 # runtime crate.  The Makefile appends `motion-module-stepper` to
 # MCU_RUST_FEATURES when CONFIG_MOTION_MODULE_STEPPER=y.

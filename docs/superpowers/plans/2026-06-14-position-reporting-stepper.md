@@ -883,7 +883,7 @@ git commit -m "feat(gcode_move): GET_POSITION reports measured position, ERR on 
 
 **Files:** none (verification only)
 
-Use the `kalico-sim` skill to run firmware + host against G-code and observe live position.
+Use the `mcu-sim` skill to run firmware + host against G-code and observe live position.
 
 - [ ] **Step 1: Build everything**
 
@@ -892,7 +892,7 @@ Expected: green.
 
 - [ ] **Step 2: Run a move in sim and observe live position**
 
-Per the `kalico-sim` skill, start the simulator, home, and stream a slow `G1` move. During the move:
+Per the `mcu-sim` skill, start the simulator, home, and stream a slow `G1` move. During the move:
 - query `motion_report` status (the bracketed value path) and confirm `live_position` is **non-zero and changing**, trending toward the target;
 - run `GET_POSITION` and confirm the `kinematic` rung is populated (non-zero), and `toolhead`/`gcode` rungs match commanded.
 

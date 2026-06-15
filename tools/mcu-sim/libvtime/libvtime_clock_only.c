@@ -23,7 +23,7 @@ static void vtime_clock_init(void)
 {
     real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
 
-    int fd = open("/dev/shm/kalico_vtime", O_RDWR);
+    int fd = open("/dev/shm/vtime", O_RDWR);
     if (fd < 0)
         return;
     void *p = mmap(NULL, 32, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);

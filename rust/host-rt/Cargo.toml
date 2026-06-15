@@ -11,7 +11,7 @@ license.workspace = true
 # (connect/identify/send/recv-with-timeout) implementing the `Transport` trait.
 # Production-grade hardening (NAK retransmit, async event dispatch thread,
 # reconnect race recovery) is Step 7 MVP work. The optional `python-engine`
-# feature is reserved for a future PyO3 shim against `tools/kalico_host_io.py`;
+# feature is reserved for a future PyO3 shim against `tools/host_io.py`;
 # Step 6 only declares the dependency.
 
 [dependencies]

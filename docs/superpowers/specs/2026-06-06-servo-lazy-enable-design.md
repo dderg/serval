@@ -182,7 +182,7 @@ bench for stepper-like behavior.
   (`rust/ethercat-rt/tests/torque_lifecycle.rs`) plus the Python unit
   tests (`test/test_servo_torque.py`) — M84 → `get_status` shows
   `servo_x: false` → next G1 re-enables; idle_timeout path. End-to-end
-  behavior is validated on the EtherCAT workbench (kalico-sim does not
+  behavior is validated on the EtherCAT workbench (mcu-sim does not
   exercise EtherCAT endpoints yet).
 - **Bench**: claim leaves the shaft free, first move stiffens it, M84 frees
   it (with 605Ch=0). Host-side only: bridge cdylib rebuild on the Pi, no MCU
