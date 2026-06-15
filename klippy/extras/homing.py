@@ -123,12 +123,13 @@ def _run_homing_attempts(
     axis,
     direction,
     hi,
+    speed,
     first_max_travel,
     tolerance,
     approach,
 ):
     start_pos = toolhead.get_position()
-    trip_pos, final_pos = approach(hi.speed, first_max_travel)
+    trip_pos, final_pos = approach(speed, first_max_travel)
     traveled = abs(trip_pos[axis] - start_pos[axis])
     needs_rehome = _trigger_too_early(traveled, hi.min_home_dist, tolerance)
     structured_log.event(
@@ -151,7 +152,7 @@ def _run_homing_attempts(
     toolhead.move(backoff, hi.retract_speed)
     toolhead.wait_moves()
     start_pos = toolhead.get_position()
-    trip_pos, final_pos = approach(hi.speed, 2.0 * hi.min_home_dist)
+    trip_pos, final_pos = approach(speed, 2.0 * hi.min_home_dist)
     traveled = abs(trip_pos[axis] - start_pos[axis])
     if _trigger_too_early(traveled, hi.min_home_dist, tolerance):
         raise gcmd.error(
@@ -428,6 +429,7 @@ class Homing:
                 axis,
                 direction,
                 hi,
+                speed,
                 max_travel,
                 tolerance,
                 approach,

@@ -140,6 +140,7 @@ def test_no_rehome_when_first_travel_exceeds_min():
         axis,
         1.0,
         _hi(min_home_dist=15.0),
+        speed=50.0,
         first_max_travel=200.0,
         tolerance=0.5,
         approach=approach,
@@ -158,12 +159,15 @@ def test_rehome_then_legit_returns_second_trip():
         axis,
         1.0,
         _hi(min_home_dist=15.0),
+        speed=50.0,
         first_max_travel=200.0,
         tolerance=0.5,
         approach=approach,
     )
     assert len(calls) == 2
     assert calls[1][1] == 30.0
+    assert calls[0][0] == 50.0
+    assert calls[1][0] == 50.0
     assert ("move", [-13.0, 0.0, 0.0], 25.0) in toolhead.events
     assert trip[axis] == 7.0
 
@@ -179,6 +183,7 @@ def test_rehome_then_still_early_raises():
             axis,
             1.0,
             _hi(min_home_dist=15.0),
+            speed=50.0,
             first_max_travel=200.0,
             tolerance=0.5,
             approach=approach,
@@ -196,6 +201,7 @@ def test_min_home_dist_zero_never_rehomes():
         axis,
         1.0,
         _hi(min_home_dist=0.0),
+        speed=50.0,
         first_max_travel=200.0,
         tolerance=0.5,
         approach=approach,
