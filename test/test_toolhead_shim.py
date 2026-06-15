@@ -126,9 +126,13 @@ class _RecordingBridge:
         self._duration = duration
         self.last_call = None
         self.dwells = []
+        self.waits = 0
 
     def motion_lead_secs(self):
         return 0.25
+
+    def wait_moves(self):
+        self.waits += 1
 
     def submit_dwell(self, delay):
         self.dwells.append(delay)
@@ -216,6 +220,8 @@ def test_submit_correction_anchors_on_timeline_and_advances_pending():
         call["mcu_id"] == 7 and call["axis_idx"] == 1 and call["motor_idx"] == 0
     )
     assert call["start_print_time"] == pytest.approx(101.25)
+    # timeline grounded before anchoring so the buzz starts near real-now
+    assert th.bridge.waits == 1
     # buzz time reserved as a real engine dwell, not a phantom pending poke
     assert th.bridge.dwells == [pytest.approx(0.6)]
     # dwell bumps pending: max(pending 0, est 101) + duration 0.6 = 101.6

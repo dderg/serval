@@ -79,6 +79,17 @@ MCU clock the enable targets, independent of the epoch. The private
 `Motion._stream_correction_on_timeline` still reads `now`/`est` solely to return
 the caller's wait-until-complete `(glmt - est) + duration`, not for the anchor.
 
+**Ground before anchoring.** `_stream_correction_on_timeline` calls
+`wait_moves()` first, so the queued enable + settle dwells actually *execute* (the
+motor energizes in real time) and `get_last_move_time()` collapses back to
+~`now + lead` before the buzz is anchored. Without this, motors_sync's
+dwell-built enable→buzz gaps leave `glmt` reserved well ahead of real time; the
+buzz pieces are then scheduled into the future and **never retire**, so the
+correction ring fills and the MCU rejects the next push with `-309` (RING_FULL).
+Grounding keeps the buzz near real-now so its pieces retire promptly and the ring
+drains between buzzes. The enable still precedes the buzz (its dwell executed
+during the drain), so the de-energize-mid-shake fix holds.
+
 ### 2. Reserve the buzz's time with a real dwell, not a phantom pending poke
 
 After streaming, `submit_correction_sequence` returns the buzz duration (it

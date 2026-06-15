@@ -239,6 +239,7 @@ class Motion:
         self.printer.send_event("toolhead:manual_move")
 
     def _stream_correction_on_timeline(self, submit_at):
+        self.wait_moves()
         now = self.reactor.monotonic()
         last_move_time = self.get_last_move_time()
         est = self.mcu.estimated_print_time(now)
