@@ -79,7 +79,7 @@ def test_linear_move_after_set_kinematic_position(sim):
 def test_burst_of_linear_moves(sim):
     """Stress-test: many linear moves back to back. If the engine-call
     race exists, this will hit it eventually — accumulating concurrent
-    kalico_call traffic against tmc periodic stallguard queries.
+    mcu_call traffic against tmc periodic stallguard queries.
     """
     _wait_ready(sim)
 
@@ -143,7 +143,7 @@ def test_same_direction_jogs_reproduce_slot_pool_exhaustion(sim):
 
     Observed (klippy.log L1617041):
         RuntimeError: dispatch error: slot pool exhausted for mcu=1
-        (capacity=4, in_flight=4); awaiting kalico_credit_freed
+        (capacity=4, in_flight=4); awaiting runtime_credit_freed
         retirement events
 
     Engine transitions to shutdown; H7 'mcu' and F4 'bottom' both get
@@ -154,7 +154,7 @@ def test_same_direction_jogs_reproduce_slot_pool_exhaustion(sim):
         advances its runtime engine past segment_id=0 across the entire
         session — verified across ~105k log lines after configure_axes,
         F4 status frames only ever report current_segment_id=0.
-      - F4 therefore never emits kalico_credit_freed, so the host's
+      - F4 therefore never emits runtime_credit_freed, so the host's
         F4 slot pool never retires.
       - Per the 2026-05-11 dispatch fix (rust/motion-engine/src/dispatch.rs:
         ``x_move_sends_curves_for_every_kinematic_axis_on_each_mcu``), every
@@ -172,7 +172,7 @@ def test_same_direction_jogs_reproduce_slot_pool_exhaustion(sim):
     Asserted behavior: with the 2026-05-17 fix in place, all 10 jogs
     must succeed. The fix has two parts in rust/runtime/src/engine.rs:
       - Engine::push_segment no longer CASes producer_pending. Previously
-        it raced the C-side `kalico_runtime_kick_producer` CAS; Engine
+        it raced the C-side `runtime_kick_producer` CAS; Engine
         always won, leaving the C-side's `arm_producer_timer_if_kicked`
         with a failed CAS and no scheduled producer timer. On pure-
         Modulated MCUs (F4 phase-stepped Z with no StepTime motor to

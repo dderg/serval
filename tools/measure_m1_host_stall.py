@@ -177,7 +177,7 @@ def main():
             if rc != 0:
                 io.send("runtime_query_status")
                 try:
-                    s = io.wait_for_response("kalico_status", 1.0)
+                    s = io.wait_for_response("runtime_status", 1.0)
                     if int(s["status"]) == 3:
                         raise SystemExit(
                             f"FAIL: engine FAULT during soak (last_err="

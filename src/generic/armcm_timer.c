@@ -11,7 +11,7 @@
 #include "board/misc.h" // timer_from_us
 #include "command.h" // shutdown
 #include "sched.h" // sched_timer_dispatch
-#include "generic/kalico_nvic_prio.h" // KALICO_SCHED_NVIC_PRIO
+#include "generic/motion_nvic_prio.h" // SCHED_NVIC_PRIO
 
 DECL_CONSTANT("CLOCK_FREQ", CONFIG_CLOCK_FREQ);
 
@@ -138,7 +138,7 @@ timer_init(void)
     timer_reset();
 
     irqstatus_t flag = irq_save();
-    NVIC_SetPriority(SysTick_IRQn, KALICO_SCHED_NVIC_PRIO);
+    NVIC_SetPriority(SysTick_IRQn, SCHED_NVIC_PRIO);
     SysTick->CTRL = (SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_TICKINT_Msk
                      | SysTick_CTRL_ENABLE_Msk);
     timer_kick();
@@ -241,7 +241,7 @@ void __visible __aligned(16) // aligning helps stabilize perf benchmarks
 SysTick_Handler(void)
 {
     irq_disable();
-    // SysTick and TIM5 share the same NVIC priority (KALICO_MOTION_NVIC_PRIO).
+    // SysTick and TIM5 share the same NVIC priority (MOTION_NVIC_PRIO).
     // Same-priority interrupts cannot nest, so a TIM5 tick that comes due
     // during this handler stays pending until SysTick returns — even across
     // the irq_enable() windows in timer_dispatch_many (PRIMASK cleared there

@@ -139,7 +139,7 @@ FFI:
 
 ```rust
 pub unsafe extern "C" fn runtime_handle_load_curve_cubic(
-    rt: *mut KalicoRuntime,
+    rt: *mut Runtime,
     slot_idx: u16,
     axis_idx: u8,
     piece_count: u8,
@@ -148,7 +148,7 @@ pub unsafe extern "C" fn runtime_handle_load_curve_cubic(
 ) -> i32;
 ```
 
-Returns `KALICO_OK` and writes `(generation << 16) | slot_idx` into `out_handle_packed` on success. Atomic: slot transitions to "valid" only after all pieces written and `current_gen += 1`.
+Returns `RUNTIME_OK` and writes `(generation << 16) | slot_idx` into `out_handle_packed` on success. Atomic: slot transitions to "valid" only after all pieces written and `current_gen += 1`.
 
 Validation (Phase 1, before any slot mutation):
 
@@ -158,15 +158,15 @@ Validation (Phase 1, before any slot mutation):
 
 **No minimum-duration check at load.** Earlier drafts proposed a lower bound on `piece.duration` relative to the sample period to keep the piece-advancement loop bounded. That's not necessary: the loop's hard cap is `MAX_PIECES_PER_CURVE` (16) iterations, and a sample can structurally never advance past the curve's end. Validating `duration > 0 && is_finite()` is sufficient — a piece with `duration = 1 ns` is legal-but-pathological and the iter cap handles it.
 
-Failure → `KALICO_ERR_INVALID_CURVE` (or new `CurveLoadInvalid`), no slot mutation, no generation bump.
+Failure → `RUNTIME_ERR_INVALID_CURVE` (or new `CurveLoadInvalid`), no slot mutation, no generation bump.
 
 ### 3.3 `runtime_handle_push_segment` — semantics extended, wire unchanged
 
-The existing wire/FFI signature is preserved verbatim — all fields stay (see `rust/kalico-c-api/src/runtime_ffi.rs:206` for the live signature):
+The existing wire/FFI signature is preserved verbatim — all fields stay (see `rust/c-api/src/runtime_ffi.rs:206` for the live signature):
 
 ```c
 int32_t runtime_handle_push_segment(
-    KalicoRuntime *rt,
+    Runtime *rt,
     uint32_t id,
     uint32_t x_handle_packed, uint32_t y_handle_packed,
     uint32_t z_handle_packed, uint32_t e_handle_packed,
@@ -266,13 +266,13 @@ The `participating_mask` is built per-axis using both the handle and e_mode (see
 | Symbol | Reason |
 |---|---|
 | `runtime_handle_load_curve` (NURBS variant) | Replaced by `_load_curve_cubic` |
-| `kalico_runtime_producer_step` | Legacy Newton-fill loop |
-| `kalico_runtime_step_ring_peek_head` | Legacy step-ring consumer |
-| `kalico_runtime_step_ring_peek_next` | Legacy step-ring consumer |
-| `kalico_runtime_step_ring_advance` | Legacy step-ring consumer |
-| `kalico_runtime_modulated_tick` | Legacy TIM5 ISR entry (replaced by `_tick_sample`, already in place) |
+| `runtime_producer_step` | Legacy Newton-fill loop |
+| `runtime_step_ring_peek_head` | Legacy step-ring consumer |
+| `runtime_step_ring_peek_next` | Legacy step-ring consumer |
+| `runtime_step_ring_advance` | Legacy step-ring consumer |
+| `runtime_modulated_tick` | Legacy TIM5 ISR entry (replaced by `_tick_sample`, already in place) |
 
-`cbindgen.toml` updated accordingly; the generated `kalico_runtime.h` regenerated.
+`cbindgen.toml` updated accordingly; the generated `runtime.h` regenerated.
 
 ---
 
@@ -335,7 +335,7 @@ Down from 12 to 8 bytes. The `SpiQueue` slot count stays the same (16 entries pe
 
 **Phase mode is rejected at `configure_axis` time in this cutover.** The SPI dispatch path (`runtime_tick.c::spi_drain_event` calling `oid_lookup` + `spidev_transfer`) is NOT implemented as part of this spec. The current stub that drops entries without dispatching stays as-is. Letting `configure_axis(mode=Phase)` succeed while SPI dispatch is a no-op would produce architecturally-green firmware that silently fails to move Phase-mode motors — exactly the kind of dishonest state this redesign rejects.
 
-Concretely: `kalico_runtime_configure_axis` returns `KALICO_ERR_PHASE_MODE_NOT_AVAILABLE` (new fault code, foreground-visible, no shutdown) when `mode == Phase`. Pulse mode works end-to-end through this spec; Phase mode lights up in the follow-up plan that implements real SPI dispatch + the TMC5160 register sequencing the bench needs (chopconf, stallguard pre-config, XDIRECT toggling — all out-of-scope here).
+Concretely: `runtime_configure_axis` returns `RUNTIME_ERR_PHASE_MODE_NOT_AVAILABLE` (new fault code, foreground-visible, no shutdown) when `mode == Phase`. Pulse mode works end-to-end through this spec; Phase mode lights up in the follow-up plan that implements real SPI dispatch + the TMC5160 register sequencing the bench needs (chopconf, stallguard pre-config, XDIRECT toggling — all out-of-scope here).
 
 This means Stage 5+ from the original bench-bringup spec are unreachable until the follow-up. The cutover doesn't gain Phase mode; it gains a correct cubic-Bezier Pulse path on all axes that today have no working motion at all.
 
@@ -636,7 +636,7 @@ void command_kalico_configure_axis(uint32_t *args) {
     for (uint8_t i = 0; i < stepper_count; i++) {
         bindings[i].tmc_cs_oid = staged[i].tmc_cs_oid;
     }
-    int32_t rc = kalico_runtime_configure_axis(
+    int32_t rc = runtime_configure_axis(
         runtime_handle, axis_idx, mode, mstep_bits, extrusion_bits,
         stepper_count, bindings);
     if (rc != 0) shutdown("configure_axis rejected by runtime");
@@ -659,7 +659,7 @@ DECL_COMMAND(command_kalico_configure_axis,
 **`StepperBindingRust` ABI** — defined in C (and mirrored to Rust with `#[repr(C)]` + `_Static_assert(sizeof) == sizeof()` cross-checks):
 
 ```c
-// In rust/kalico-c-api/include/kalico_runtime.h
+// In rust/c-api/include/runtime.h
 struct StepperBindingRust {
     uint8_t tmc_cs_oid;     // 0xFF = none (Pulse-only stepper)
     uint8_t _pad[3];
@@ -713,13 +713,13 @@ Identical to today: `runtime_emit_step_pulses` reads `invert_dir` from the C-sid
 - `stepper.c::command_config_runtime_stepper` — replaced by `command_kalico_configure_axis` sub-message.
 - All `step_time_event_*` and `runtime_producer_*` diag counters and their packed-fault tags (`0xE3`, `0xE7`, `0xE8`).
 
-### 6.3 Firmware FFI (`rust/kalico-c-api/`)
+### 6.3 Firmware FFI (`rust/c-api/`)
 
 - `runtime_handle_load_curve` (NURBS).
-- `kalico_runtime_producer_step`.
-- `kalico_runtime_step_ring_peek_head` / `_peek_next` / `_advance`.
-- `kalico_runtime_modulated_tick`.
-- `cbindgen.toml` updated, `include/kalico_runtime.h` regenerated.
+- `runtime_producer_step`.
+- `runtime_step_ring_peek_head` / `_peek_next` / `_advance`.
+- `runtime_modulated_tick`.
+- `cbindgen.toml` updated, `include/runtime.h` regenerated.
 
 ### 6.4 Host (`rust/motion-engine/`, `klippy/`)
 
@@ -744,7 +744,7 @@ Identical to today: `runtime_emit_step_pulses` reads `invert_dir` from the C-sid
 
 ## 7. Cross-MCU coordination
 
-**No architectural change.** Each MCU runs its own TIM5 ISR independently and evaluates only its own axes (H7: motors A/B/E for CoreXY X/Y/E; F4: motor Z). The host coordinates by sending per-MCU segments through the existing `accepted_segment_id` / `credit_epoch` telemetry path. The `kalico_status` frame already reports per-MCU engine state.
+**No architectural change.** Each MCU runs its own TIM5 ISR independently and evaluates only its own axes (H7: motors A/B/E for CoreXY X/Y/E; F4: motor Z). The host coordinates by sending per-MCU segments through the existing `accepted_segment_id` / `credit_epoch` telemetry path. The `runtime_status` frame already reports per-MCU engine state.
 
 The new `kalico_configure_axis` is emitted per MCU, per axis-on-that-MCU, with the steppers that physically live on that MCU. Klippy's existing `motion_toolhead.py` already does this partitioning for the legacy `configure_axes_blob`; the new emit path reuses the same partitioning.
 
@@ -765,8 +765,8 @@ All faults from firmware Task 6 carry over:
 
 **New faults:**
 
-- `CurveLoadInvalid` — fires from `runtime_handle_load_curve_cubic` on non-finite Bernstein, `piece_count` out of range, or `duration <= 0`. Foreground reject (returns `KALICO_ERR_INVALID_CURVE` to host), no shutdown.
-- `PhaseModeNotAvailable` — fires from `kalico_runtime_configure_axis` when `mode == Phase`. Phase mode requires the SPI dispatch path which is deferred to a follow-up plan; rejecting at configure-time keeps the firmware honest about what it can drive. Foreground reject (returns `KALICO_ERR_PHASE_MODE_NOT_AVAILABLE` to host), no shutdown.
+- `CurveLoadInvalid` — fires from `runtime_handle_load_curve_cubic` on non-finite Bernstein, `piece_count` out of range, or `duration <= 0`. Foreground reject (returns `RUNTIME_ERR_INVALID_CURVE` to host), no shutdown.
+- `PhaseModeNotAvailable` — fires from `runtime_configure_axis` when `mode == Phase`. Phase mode requires the SPI dispatch path which is deferred to a follow-up plan; rejecting at configure-time keeps the firmware honest about what it can drive. Foreground reject (returns `RUNTIME_ERR_PHASE_MODE_NOT_AVAILABLE` to host), no shutdown.
 
 **Piece-queue overflow.** The original brainstorming considered this. Verdict: not a runtime condition — pieces live in slots, slots are tracked via the credit-epoch protocol. A "queue full" condition would be a slot-allocation failure from `try_alloc_and_load`, returned to the host as an error from the `_load_curve_cubic` FFI. Host backs off via the credit-epoch mechanism that already exists. No new fault code needed.
 
@@ -783,7 +783,7 @@ Two tiers, neither bench-dependent:
 Each new module gets isolated coverage:
 
 - `curve_pool` retyped for cubic pieces — `try_alloc_and_load` with `LoadedCubicCurve`, `lookup` with generation match, `confirm_retired` slot reclamation.
-- `configure_axis` stepper-binding decoder — round-trip blob encoding/decoding, multiple stepper counts, edge cases (`count=0`, `tmc_cs_oid=0xFF` meaning none, `tmc_cs_oid=0` meaning valid SPI OID 0, max `stepper_count`), reserved-flag-byte rejection, validation-failure cases leave both C-side and Rust-side state untouched (the two-phase commit guarantee). Phase-mode reject test: `configure_axis(mode=Phase)` returns `KALICO_ERR_PHASE_MODE_NOT_AVAILABLE` and no state mutates.
+- `configure_axis` stepper-binding decoder — round-trip blob encoding/decoding, multiple stepper counts, edge cases (`count=0`, `tmc_cs_oid=0xFF` meaning none, `tmc_cs_oid=0` meaning valid SPI OID 0, max `stepper_count`), reserved-flag-byte rejection, validation-failure cases leave both C-side and Rust-side state untouched (the two-phase commit guarantee). Phase-mode reject test: `configure_axis(mode=Phase)` returns `RUNTIME_ERR_PHASE_MODE_NOT_AVAILABLE` and no state mutates.
 - Piece-advancement cursor walking — single-piece curve, multi-piece curve advancing through all pieces, cursor past `piece_count` triggers `axis.piece = None`, the `MAX_PIECES_PER_CURVE` runaway-loop cap, and the post-pass early-exhaustion fault (test simultaneous A+B exhaustion does NOT fault; test A-exhausts-while-B-pending DOES fault; test CoupledToXy E exhausting while XY pending does NOT fault).
 - End-to-end single-MCU ISR — feed a 1-piece linear curve through `dispatch_axis` (Pulse mode), confirm step_queue entries with expected `cycle_abs` + `dir`.
 
@@ -805,7 +805,7 @@ Flag-day cutover. Build will fail mid-sequence (and that's OK because the curren
 
 1. **Reshape `curve_pool` slot type** — `LoadedCubicCurve` replaces NURBS struct fields. Delete NURBS sizing constants from `runtime/build.rs` and `src/Makefile` envvars. Build broken: nothing yet calls the new shape.
 2. **Delete legacy Rust** — `step_ring.rs`, `step_time.rs`, `step_producer.rs`, `Engine::producer_step`, `Engine::arm_step_timer*`, vestigial `StepperRef` fields. Build still broken: FFI consumers of those symbols won't link.
-3. **Update FFI surface** — drop NURBS `runtime_handle_load_curve`, add `_load_curve_cubic`, extend `kalico_runtime_configure_axis` for stepper bindings. Rebuild `cbindgen` header. Build closer to green: only C-side stragglers remain.
+3. **Update FFI surface** — drop NURBS `runtime_handle_load_curve`, add `_load_curve_cubic`, extend `runtime_configure_axis` for stepper bindings. Rebuild `cbindgen` header. Build closer to green: only C-side stragglers remain.
 4. **Delete legacy C** — `step_time_event`, `runtime_producer_event`, `init_step_time_timers`, `command_config_runtime_stepper`, the `SF_RESCHEDULE_FLOOR` family of defines, diag counters. Firmware builds green.
 5. **Bridge migration** — `motion-engine` emits cubic curves via the new FFI, no NURBS path. `host-rt` updates. Host-side compiles.
 6. **Klippy migration** — `motion_toolhead.py` emits the new `configure_axis` per axis, not legacy `config_runtime_stepper`. End-to-end host + firmware build green.
@@ -817,7 +817,7 @@ Bench validation is a separate follow-up plan started only after step 7 passes.
 
 ## Out of scope
 
-- **Phase mode end-to-end.** Configure_axis rejects `mode=Phase` with `KALICO_ERR_PHASE_MODE_NOT_AVAILABLE`. Real SPI dispatch (`spidev_transfer` from `spi_drain_event`), TMC5160 register pre-config, XDIRECT toggle validation — all moved to a follow-up plan. The `SpiQueue` / `dispatch_phase` infrastructure stays in firmware (already built) so the follow-up has a smaller delta.
+- **Phase mode end-to-end.** Configure_axis rejects `mode=Phase` with `RUNTIME_ERR_PHASE_MODE_NOT_AVAILABLE`. Real SPI dispatch (`spidev_transfer` from `spi_drain_event`), TMC5160 register pre-config, XDIRECT toggle validation — all moved to a follow-up plan. The `SpiQueue` / `dispatch_phase` infrastructure stays in firmware (already built) so the follow-up has a smaller delta.
 - Bench bring-up Stages 1–7 from the original redesign spec.
 - TMC5160 register pre-config (chopconf, stallguard) — printer.cfg's existing TMC config handles it for Pulse mode steppers; Phase-mode register pre-config is a follow-up topic.
 - klippy-side host planner changes beyond the bridge serialization layer. The planner's internal math already operates on cubics for most of the pipeline.

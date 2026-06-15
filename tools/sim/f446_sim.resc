@@ -20,7 +20,7 @@
 #
 # What this simulates:
 # - Klipper firmware running on a Cortex-M4F with TIM5/DWT/NVIC modeled.
-# - Runtime kalico_runtime_init / TIM5 ISR / engine state machine — these are
+# - Runtime runtime_init / TIM5 ISR / engine state machine — these are
 #   pure Rust + memory-mapped I/O the F429 .repl already covers.
 # - USART2 bridged to a TCP socket so host tools can talk to the MCU
 #   over `socket://localhost:3334`.

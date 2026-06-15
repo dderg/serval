@@ -56,12 +56,12 @@ fn wait_for_socket(path: &str, deadline: Instant) {
 
 fn do_handshake(conn: &McuSerialConn) -> ClaimHandshakeReply {
     let (kind, body) = conn
-        .kalico_call(
+        .mcu_call(
             MessageKind::ClaimHandshake,
             Vec::new(),
             Duration::from_secs(5),
         )
-        .expect("ClaimHandshake kalico_call must succeed");
+        .expect("ClaimHandshake mcu_call must succeed");
 
     assert_eq!(
         kind,
@@ -92,7 +92,7 @@ fn wait_for_exit(child: &mut Child, deadline: Instant) -> std::process::ExitStat
 
 fn send_stop(conn: &McuSerialConn) -> (i32, u64) {
     let (kind, resp) = conn
-        .kalico_call(MessageKind::Stop, Vec::new(), Duration::from_secs(5))
+        .mcu_call(MessageKind::Stop, Vec::new(), Duration::from_secs(5))
         .expect("Stop call must succeed");
     assert_eq!(
         kind,
@@ -111,7 +111,7 @@ fn set_torque(conn: &McuSerialConn, value: bool, execute_at_ns: u64) -> i32 {
     }
     .encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::SetTorque, body, Duration::from_secs(5))
+        .mcu_call(MessageKind::SetTorque, body, Duration::from_secs(5))
         .expect("SetTorque call must succeed");
     assert_eq!(
         kind,
@@ -146,7 +146,7 @@ fn push_one_piece(conn: &McuSerialConn, start_time: u64) -> i32 {
     };
     let body = msg.encoded_to_vec();
     let (_, resp) = conn
-        .kalico_call(MessageKind::PushPieces, body, Duration::from_secs(5))
+        .mcu_call(MessageKind::PushPieces, body, Duration::from_secs(5))
         .expect("PushPieces call must succeed");
     PushPiecesResponse::decode(&resp)
         .expect("PushPiecesResponse must decode")
@@ -336,7 +336,7 @@ fn set_drive_limits(conn: &McuSerialConn, counts: u32, tenth_pct: u16) -> i32 {
     }
     .encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::SetDriveLimits, body, Duration::from_secs(5))
+        .mcu_call(MessageKind::SetDriveLimits, body, Duration::from_secs(5))
         .expect("SetDriveLimits call must succeed");
     assert_eq!(kind, MessageKind::SetDriveLimitsResponse);
     SetDriveLimitsResponse::decode(&resp)
@@ -346,7 +346,7 @@ fn set_drive_limits(conn: &McuSerialConn, counts: u32, tenth_pct: u16) -> i32 {
 
 fn restore_drive_limits(conn: &McuSerialConn) -> i32 {
     let (kind, resp) = conn
-        .kalico_call(
+        .mcu_call(
             MessageKind::RestoreDriveLimits,
             Vec::new(),
             Duration::from_secs(5),

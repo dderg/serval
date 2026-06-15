@@ -128,7 +128,7 @@ but never surfaced to the host. We add the surfacing and add native velocity:
 
 The bridge hides the serial/EtherCAT split behind one interface:
 
-- serial-stepper motor → `kalico_call(QueryMotorState)` to that motor's MCU;
+- serial-stepper motor → `mcu_call(QueryMotorState)` to that motor's MCU;
 - EtherCAT motor → read the latest pushed telemetry sample.
 
 Two pyo3 methods over the same data:
@@ -189,7 +189,7 @@ combination asserts/rejects rather than silently approximating.
     raising. A diagnostic command surfacing an error to the console is loud enough; it must
     not take down the printer.
   - **Background display cache:** a dropped poll **does not abort the print**. It emits a
-    structured log event (`kalico_log_emit`) and serves the last-known sample with its
+    structured log event (`event_log_emit`) and serves the last-known sample with its
     host-stamp (staleness is visible via the timestamp). This is a deliberate, scoped
     exception to fail-loud: a flickering Mainsail readout is not safety-critical, and
     killing a print over a missed status poll is worse than a stale number.

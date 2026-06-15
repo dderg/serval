@@ -12,9 +12,9 @@
 #    sched_writable_* stubs are empty; the timer_wrap_event stub
 #    reschedules exactly as the real Cortex-M implementation does.
 #
-# 2. Rename kalico_runtime_modulated_tick → kalico_runtime_tick_sample.
+# 2. Rename runtime_modulated_tick → runtime_tick_sample.
 #    The Rust API was renamed in the 2026-05-20 stepping redesign
-#    (see rust/kalico-c-api/src/runtime_ffi.rs, near line 629) but the
+#    (see rust/c-api/src/runtime_ffi.rs, near line 629) but the
 #    host-tick driver (src/linux/runtime_tick_host.c) still calls the
 #    old name.  A single sed substitution aligns the call site with the
 #    exported symbol.
@@ -80,13 +80,13 @@ fi
 
 TICK_FILE="$REPO_ROOT/src/linux/runtime_tick_host.c"
 
-if grep -q "kalico_runtime_modulated_tick" "$TICK_FILE" 2>/dev/null; then
-    echo "fix_linux_build: renaming kalico_runtime_modulated_tick in $TICK_FILE"
+if grep -q "runtime_modulated_tick" "$TICK_FILE" 2>/dev/null; then
+    echo "fix_linux_build: renaming runtime_modulated_tick in $TICK_FILE"
     sed -i \
-        's/kalico_runtime_modulated_tick/kalico_runtime_tick_sample/g' \
+        's/runtime_modulated_tick/runtime_tick_sample/g' \
         "$TICK_FILE"
 else
-    echo "fix_linux_build: runtime_tick_host.c already uses kalico_runtime_tick_sample, skipping."
+    echo "fix_linux_build: runtime_tick_host.c already uses runtime_tick_sample, skipping."
 fi
 
 # On real MCU hardware the timer-in-past check catches runaway timers — the

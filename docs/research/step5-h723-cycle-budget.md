@@ -43,7 +43,7 @@ refuse with `KALICO_BENCH_ERR_LIVENESS (-100)` until power-cycle.
 
 Mitigation options for the M2 follow-up:
 1. Drain trace inside `command_kalico_bench_run` between sendfs (call
-   `kalico_runtime_drain_trace` periodically). Adds inline trace
+   `runtime_drain_trace` periodically). Adds inline trace
    responses to the wire during the bench; host parser already
    tolerates this since `kalico_trace` and `kalico_bench_sample` have
    distinct msg IDs.

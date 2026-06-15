@@ -90,7 +90,7 @@ klippy owns the endpoint's lifecycle. No systemd unit, no wrapper script.
 - The stub rides the same machinery: a bench config pointing `endpoint:` at
   `ethercat-rt-stub` gives drive-off testing with the identical
   lifecycle. No special-casing in the bridge.
-- `docs/kalico-rewrite/ethercat-bench-bringup.md` updated to the new flow.
+- `docs/rewrite/ethercat-bench-bringup.md` updated to the new flow.
 
 ## Mid-session faults (unchanged)
 

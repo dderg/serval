@@ -50,15 +50,15 @@ the header of `scripts/ci.sh` for the full list, e.g. `ruff`,
 
 # Observability / structured logging
 
-Log via the structured pipeline (`kalico_log_emit` → `events/*.jsonl`), not
+Log via the structured pipeline (`event_log_emit` → `events/*.jsonl`), not
 `printf`/`output()` — it replaces `klippy.log` for MCU/structured diagnostics;
 the wire-stable event table is `rust/runtime/src/log_codes.rs`. To read or add
-logs — `KALICO_DIAG_DUMP`, crash forensics, filtering — use the `mcu-diagnostics`
+logs — `DIAG_DUMP`, crash forensics, filtering — use the `mcu-diagnostics`
 and `query-logs` skills.
 
 # Reference docs
 
-- **MCU C/Rust boundary — architectural invariant:** [`docs/kalico-rewrite/mcu-c-rust-boundary.md`](docs/kalico-rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
+- **MCU C/Rust boundary — architectural invariant:** [`docs/rewrite/mcu-c-rust-boundary.md`](docs/rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
 
 ## graphify
 

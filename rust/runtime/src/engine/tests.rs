@@ -2,8 +2,8 @@
 
 use crate::engine::Engine;
 use crate::error::{
-    KALICO_ERR_CORRECTION_IN_PROGRESS, KALICO_ERR_INVALID_ARG, KALICO_ERR_MOTION_IN_PROGRESS,
-    KALICO_OK,
+    RUNTIME_ERR_CORRECTION_IN_PROGRESS, RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_MOTION_IN_PROGRESS,
+    RUNTIME_OK,
 };
 use crate::piece_ring::PieceEntry;
 use crate::stepping_state::{
@@ -41,7 +41,7 @@ fn engine_with_z_axis(mode: StepMode) -> (Engine, Vec<PieceEntry>) {
         },
     ];
     let rc = engine.configure_axis(2, mode, 0.00125, 64, &bindings, TEST_TOTAL_RING_PIECES);
-    assert_eq!(rc, KALICO_OK);
+    assert_eq!(rc, RUNTIME_OK);
     (engine, storage)
 }
 
@@ -76,9 +76,9 @@ fn commit_correction_rejects_bad_motor_idx() {
     let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
     assert_eq!(
         engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage),
-        KALICO_OK
+        RUNTIME_OK
     );
-    assert_eq!(engine.commit_correction(2, 3, 1), KALICO_ERR_INVALID_ARG);
+    assert_eq!(engine.commit_correction(2, 3, 1), RUNTIME_ERR_INVALID_ARG);
 }
 
 #[test]
@@ -86,12 +86,12 @@ fn commit_correction_rejects_busy_axis() {
     let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
     assert_eq!(
         engine.push_pieces(2, &[one_piece(1000)], &mut storage),
-        KALICO_OK
+        RUNTIME_OK
     );
     engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
     assert_eq!(
         engine.commit_correction(2, 1, 1),
-        KALICO_ERR_MOTION_IN_PROGRESS
+        RUNTIME_ERR_MOTION_IN_PROGRESS
     );
 }
 
@@ -99,11 +99,11 @@ fn commit_correction_rejects_busy_axis() {
 fn commit_correction_rejects_second_stream_other_motor() {
     let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
     engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 1), KALICO_OK);
+    assert_eq!(engine.commit_correction(2, 1, 1), RUNTIME_OK);
     engine.write_correction_piece(2, 1, 0, one_piece(2000), &mut storage);
     assert_eq!(
         engine.commit_correction(2, 2, 2),
-        KALICO_ERR_CORRECTION_IN_PROGRESS
+        RUNTIME_ERR_CORRECTION_IN_PROGRESS
     );
 }
 
@@ -111,19 +111,19 @@ fn commit_correction_rejects_second_stream_other_motor() {
 fn commit_correction_allows_streaming_same_motor() {
     let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
     engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 1), KALICO_OK);
+    assert_eq!(engine.commit_correction(2, 1, 1), RUNTIME_OK);
     engine.write_correction_piece(2, 1, 0, one_piece(2000), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 2), KALICO_OK);
+    assert_eq!(engine.commit_correction(2, 1, 2), RUNTIME_OK);
 }
 
 #[test]
 fn normal_commit_rejected_while_correction_active() {
     let (mut engine, mut storage) = engine_with_z_axis(StepMode::Pulse);
     engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 1), KALICO_OK);
+    assert_eq!(engine.commit_correction(2, 1, 1), RUNTIME_OK);
     assert_eq!(
         engine.guard_normal_commit(2),
-        KALICO_ERR_CORRECTION_IN_PROGRESS
+        RUNTIME_ERR_CORRECTION_IN_PROGRESS
     );
 }
 
@@ -138,7 +138,7 @@ fn commit_correction_seeds_motor_tracking_state() {
         CORRECTION_MOTOR_NONE
     );
     engine.write_correction_piece(2, 0, 0, one_piece(1000), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 1), KALICO_OK);
+    assert_eq!(engine.commit_correction(2, 1, 1), RUNTIME_OK);
     let axis = engine.stepping_axes[2].as_ref().unwrap();
     assert_eq!(axis.correction_motor_idx, 1);
     assert!(axis.correction_active());

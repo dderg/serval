@@ -11,7 +11,7 @@
 #include "generic/armcm_boot.h"
 #include "internal.h"
 #include "runtime_tick_timer.h"
-#include "kalico_runtime.h"
+#include "runtime.h"
 #include "generic/runtime_tick.h"
 
 #if CONFIG_MACH_STM32G0
@@ -26,7 +26,7 @@ extern void* runtime_handle;
 static volatile uint32_t runtime_g0_sw_cyccnt;
 
 #define RUNTIME_G0_CYC_PER_TICK \
-    (CONFIG_CLOCK_FREQ / CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ)
+    (CONFIG_CLOCK_FREQ / CONFIG_MOTION_SAMPLE_RATE_HZ)
 
 __attribute__((used, externally_visible))
 void
@@ -51,7 +51,7 @@ runtime_tick_enable(void)
         return;
     }
     MOTION_TIM->CR1 &= ~TIM_CR1_CEN;
-    MOTION_TIM->ARR  = (runtime_clock_freq / CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ) - 1U;
+    MOTION_TIM->ARR  = (runtime_clock_freq / CONFIG_MOTION_SAMPLE_RATE_HZ) - 1U;
     MOTION_TIM->EGR  = TIM_EGR_UG;
     MOTION_TIM->SR   = 0;
     MOTION_TIM->SR   = ~TIM_SR_UIF;     // clear stale UIF before enabling
@@ -73,7 +73,7 @@ runtime_tick_init(void)
     MOTION_TIM->SR = 0;
 
     MOTION_TIM->PSC = 0;
-    MOTION_TIM->ARR = (runtime_clock_freq / CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ) - 1U;
+    MOTION_TIM->ARR = (runtime_clock_freq / CONFIG_MOTION_SAMPLE_RATE_HZ) - 1U;
 
     MOTION_TIM->CR1 = TIM_CR1_ARPE;
     MOTION_TIM->DIER = TIM_DIER_UIE;
@@ -121,7 +121,7 @@ MOTION_TIM_IRQHandler(void)
 
     uint32_t before = runtime_cyccnt_read();
     if (runtime_handle) {
-        kalico_runtime_tick_sample(runtime_handle);
+        runtime_tick_sample(runtime_handle);
     }
     uint32_t after = runtime_cyccnt_read();
 

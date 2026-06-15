@@ -398,9 +398,9 @@ config RUNTIME_PIECE_RING_SIZE
       RingDescriptor. Default 63488 (62 KB) gives 1984 entries spread
       across 4 axes (496 entries each) — sufficient for lookahead at
       40 kHz with typical slicer output. Exported to the Rust build as
-      KALICO_RUNTIME_PIECE_RING_SIZE.
+      RUNTIME_PIECE_RING_SIZE.
 
-config KALICO_MOTION_SAMPLE_RATE_HZ
+config MOTION_SAMPLE_RATE_HZ
     int "Motion engine sample rate in Hz (motion-timer ISR fire rate)"
     depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32G0 || MACH_LINUX
     default 40000 if MACH_STM32H7
@@ -436,7 +436,7 @@ config KALICO_MOTION_SAMPLE_RATE_HZ
 # shared-vector neighbor is LPTIM2, unused on a toolhead board).
 choice
     prompt "Motion-engine ISR timer (STM32G0)"
-    default KALICO_MOTION_TIMER_TIM7
+    default MOTION_TIMER_TIM7
     depends on MACH_STM32G0
     help
       Selects which hardware timer drives the motion-engine sample ISR on
@@ -444,10 +444,10 @@ choice
       TIM6 and TIM7 are basic timers (no PWM channels) and are the
       recommended choices.
 
-    config KALICO_MOTION_TIMER_TIM7
+    config MOTION_TIMER_TIM7
         bool "TIM7 (basic timer, shares vector with LPTIM2)"
 
-    config KALICO_MOTION_TIMER_TIM6
+    config MOTION_TIMER_TIM6
         bool "TIM6 (basic timer, shares vector with DAC/LPTIM1)"
 endchoice
 

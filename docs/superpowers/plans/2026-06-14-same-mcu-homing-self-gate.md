@@ -6,11 +6,11 @@
 
 **Architecture:** Extract the gating core of the host `Stop` handler into `handle_stop_inner` (everything except the host-facing `send_stop_response`). Call it from `endstop_trip_task` so a local trip freezes the curve evaluator immediately. The host's existing `broadcast_stop` is untouched; its later `Stop` to the already-braked MCU is a harmless idempotent re-gate. Overshoot/slide accounting is out of scope (handled by a separate mechanism), so the host's position-reconstruction path is left as-is.
 
-**Tech Stack:** C firmware (`src/*.c`), Rust runtime FFI (`rust/kalico-c-api`), the kalico-sim full-mode simulator (real firmware + klippy in Docker).
+**Tech Stack:** C firmware (`src/*.c`), Rust runtime FFI (`rust/c-api`), the kalico-sim full-mode simulator (real firmware + klippy in Docker).
 
 **Reference spec:** [`docs/superpowers/specs/2026-06-14-same-mcu-homing-self-gate-design.md`](../specs/2026-06-14-same-mcu-homing-self-gate-design.md)
 
-**Testing note:** `src/mcu_transport_dispatch.c` and `src/endstop.c` are MCU firmware glue with no standalone C unit harness in this repo. Verification is therefore: (a) the existing Rust idempotency test that already proves a repeated gate is a safe no-op (`rust/kalico-c-api/tests/piece_gate.rs::gate_is_idempotent_like_a_repeated_stop`), and (b) end-to-end homing in kalico-sim full mode, which compiles `src/*.c` into the simulated firmware and auto-triggers the endstop during `G28`. This matches the project's established testing model for firmware glue. **Docker is required** for the kalico-sim verification.
+**Testing note:** `src/mcu_transport_dispatch.c` and `src/endstop.c` are MCU firmware glue with no standalone C unit harness in this repo. Verification is therefore: (a) the existing Rust idempotency test that already proves a repeated gate is a safe no-op (`rust/c-api/tests/piece_gate.rs::gate_is_idempotent_like_a_repeated_stop`), and (b) end-to-end homing in kalico-sim full mode, which compiles `src/*.c` into the simulated firmware and auto-triggers the endstop during `G28`. This matches the project's established testing model for firmware glue. **Docker is required** for the kalico-sim verification.
 
 ---
 
@@ -34,15 +34,15 @@ This task does NOT change any behavior — it only splits `handle_stop` so the g
 **Files:**
 - Modify: `src/mcu_transport_dispatch.h` (add prototype after line 27)
 - Modify: `src/mcu_transport_dispatch.c:551-563` (the `handle_stop` function)
-- Regression test (existing): `rust/kalico-c-api/tests/piece_gate.rs`
+- Regression test (existing): `rust/c-api/tests/piece_gate.rs`
 
 - [ ] **Step 1: Confirm the regression guard passes before the change**
 
 Run:
 ```bash
-cd rust && cargo nextest run -p kalico-c-api -E 'test(gate_is_idempotent_like_a_repeated_stop)'
+cd rust && cargo nextest run -p c-api -E 'test(gate_is_idempotent_like_a_repeated_stop)'
 ```
-Expected: PASS (1 test run). This is the property the refactor must preserve — gating an already-gated engine returns `KALICO_OK`.
+Expected: PASS (1 test run). This is the property the refactor must preserve — gating an already-gated engine returns `RUNTIME_OK`.
 
 - [ ] **Step 2: Declare `handle_stop_inner` in the header**
 
@@ -66,12 +66,12 @@ Replace the current `handle_stop` (lines 551-563):
 static void
 handle_stop(uint32_t correlation_id)
 {
-    int32_t rc = KALICO_ERR_NOT_INIT;
+    int32_t rc = RUNTIME_ERR_NOT_INIT;
     uint64_t discard_clock = 0;
     if (runtime_handle) {
         irqstatus_t flag = irq_save();
-        rc = kalico_runtime_gate_pieces(runtime_handle);
-        discard_clock = kalico_runtime_now_ticks(runtime_handle);
+        rc = runtime_gate_pieces(runtime_handle);
+        discard_clock = runtime_now_ticks(runtime_handle);
         irq_restore(flag);
     }
     send_stop_response(correlation_id, rc, discard_clock);
@@ -84,12 +84,12 @@ with:
 int32_t
 handle_stop_inner(uint64_t *discard_clock)
 {
-    int32_t rc = KALICO_ERR_NOT_INIT;
+    int32_t rc = RUNTIME_ERR_NOT_INIT;
     *discard_clock = 0;
     if (runtime_handle) {
         irqstatus_t flag = irq_save();
-        rc = kalico_runtime_gate_pieces(runtime_handle);
-        *discard_clock = kalico_runtime_now_ticks(runtime_handle);
+        rc = runtime_gate_pieces(runtime_handle);
+        *discard_clock = runtime_now_ticks(runtime_handle);
         irq_restore(flag);
     }
     return rc;
@@ -118,7 +118,7 @@ Expected: the image builds (compiles `src/mcu_transport_dispatch.c`) and the bea
 
 Run:
 ```bash
-cd rust && cargo nextest run -p kalico-c-api -E 'test(gate)'
+cd rust && cargo nextest run -p c-api -E 'test(gate)'
 ```
 Expected: all `gate*` tests PASS (the refactor touched no Rust, so behavior is unchanged).
 

@@ -264,9 +264,9 @@ git commit -m "feat(ethercat): endpoint answers QueryMotorState with actual mm p
 
 **Files:** `rust/motion-engine/src/bridge.rs`
 
-Remove the EtherCAT skip in `collect_motor_positions_inner` (bridge.rs ~142) and, for EtherCAT configs, `kalico_call(QueryMotorState)` on the endpoint connection, mapping the reply onto the servo's cartesian slot(s) via `cfg.axes`.
+Remove the EtherCAT skip in `collect_motor_positions_inner` (bridge.rs ~142) and, for EtherCAT configs, `mcu_call(QueryMotorState)` on the endpoint connection, mapping the reply onto the servo's cartesian slot(s) via `cfg.axes`.
 
-- [ ] **Step 1: Replace the skip with endpoint handling.** In `collect_motor_positions_inner`, the per-config loop currently does `if conn.ethercat_socket.is_some() { continue; }`. Replace the EtherCAT branch so that, for an EtherCAT connection, it obtains `conn.endpoint_conn` (an `Arc<McuSerialConn>` — Plan-1 exploration confirmed it implements the same `kalico_call`), drops the `mcus` lock, and issues the query. Structure (mirror the serial branch's lock-scoping — clone the `Arc` inside the lock, call outside):
+- [ ] **Step 1: Replace the skip with endpoint handling.** In `collect_motor_positions_inner`, the per-config loop currently does `if conn.ethercat_socket.is_some() { continue; }`. Replace the EtherCAT branch so that, for an EtherCAT connection, it obtains `conn.endpoint_conn` (an `Arc<McuSerialConn>` — Plan-1 exploration confirmed it implements the same `mcu_call`), drops the `mcus` lock, and issues the query. Structure (mirror the serial branch's lock-scoping — clone the `Arc` inside the lock, call outside):
 ```rust
 for cfg in &configs {
     // Decide transport under the lock, then call outside it.
@@ -287,8 +287,8 @@ for cfg in &configs {
         }
     };
     let (kind, body) = match &q {
-        Q::Serial(io) => io.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout),
-        Q::EtherCat(ep) => ep.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout),
+        Q::Serial(io) => io.mcu_call(MessageKind::QueryMotorState, Vec::new(), timeout),
+        Q::EtherCat(ep) => ep.mcu_call(MessageKind::QueryMotorState, Vec::new(), timeout),
     }.map_err(|e| format!("query mcu {}: {e:?}", cfg.mcu_id))?;
     if kind != MessageKind::MotorStateResponse {
         return Err(format!("query mcu {}: unexpected kind {kind:?}", cfg.mcu_id));
@@ -319,7 +319,7 @@ for cfg in &configs {
     }
 }
 ```
-Adapt the connection field names (`endpoint_conn`, `McuSerialConn`, `McuHostIo`) and the `McuCall`/`kalico_call` trait import to what actually exists (Plan-1 exploration: `endpoint_conn: Some(Arc<McuSerialConn>)`, and `McuSerialConn` impls `McuCall::kalico_call`). If both `McuHostIo` and `McuSerialConn` impl a common `McuCall` trait, you may unify the call via `dyn McuCall` instead of the enum — use whichever is cleaner given the real types. Keep the lock dropped before the blocking call.
+Adapt the connection field names (`endpoint_conn`, `McuSerialConn`, `McuHostIo`) and the `McuCall`/`mcu_call` trait import to what actually exists (Plan-1 exploration: `endpoint_conn: Some(Arc<McuSerialConn>)`, and `McuSerialConn` impls `McuCall::mcu_call`). If both `McuHostIo` and `McuSerialConn` impl a common `McuCall` trait, you may unify the call via `dyn McuCall` instead of the enum — use whichever is cleaner given the real types. Keep the lock dropped before the blocking call.
 - [ ] **Step 2: Build + regressions.**
 Run: `cd rust && cargo build -p motion-engine && cargo nextest run -p motion-engine` → no regressions. `cargo clippy -p motion-engine -- -D warnings` clean.
 - [ ] **Step 3: Unit test the EtherCAT slot mapping if feasible.** If `assemble_cartesian` + the mapping logic can be exercised without a live endpoint (e.g. by factoring the "map MotorStateResponse onto motors[] given cfg + transport-kind" into a pure helper), add a separate-file test for it (servo on slot 0 → `motors[0]` set). If it can't be cleanly isolated without a live endpoint, rely on Task 9 e2e and note it.

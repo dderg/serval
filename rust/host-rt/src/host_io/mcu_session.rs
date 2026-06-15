@@ -105,7 +105,7 @@ pub enum McuDispatchResult {
     Ignored,
 }
 
-pub fn dispatch_kalico_frame(
+pub fn dispatch_mcu_frame(
     state: &mut McuTransportState,
     channel: u8,
     payload: &[u8],

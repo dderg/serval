@@ -143,7 +143,7 @@ locking.
 Fail loudly, everywhere:
 
 - SDO abort during claim-push → claim failure, log structured event with
-  index/subindex/abort code via `kalico_log_emit`.
+  index/subindex/abort code via `event_log_emit`.
 - Verify mismatch → error with wrote/read values (claim: fatal; console:
   command error).
 - Probe on a write-only object → abort code surfaces with a hint to add an

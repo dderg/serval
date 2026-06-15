@@ -100,7 +100,7 @@ class SerialReader:
                 # Handled directly by Rust EventDispatcher; skip Python routing.
                 continue
             elif ev_type == "fault":
-                name = "kalico_fault"
+                name = "runtime_fault"
             elif ev_type == "endstop_tripped":
                 name = "kalico_endstop_tripped"
             elif ev_type == "output":

@@ -54,20 +54,20 @@ impl Write for TcpSerialPort {
     // Throttled chunk-write: Renode 1.16 STM32F7_USART raises ORE on every byte after the first
     // when a large frame arrives faster than USART2_IRQHandler drains RDR. OVRDIS (CR3 bit 12)
     // would suppress ORE but Renode 1.16 ignores it. Chunk/delay tunable via
-    // KALICO_TCP_WRITE_CHUNK / KALICO_TCP_WRITE_DELAY_US.
+    // TCP_WRITE_CHUNK / TCP_WRITE_DELAY_US.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         use std::sync::OnceLock;
         static CHUNK: OnceLock<usize> = OnceLock::new();
         static DELAY: OnceLock<Duration> = OnceLock::new();
         let chunk = *CHUNK.get_or_init(|| {
-            std::env::var("KALICO_TCP_WRITE_CHUNK")
+            std::env::var("TCP_WRITE_CHUNK")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|&n| n > 0)
                 .unwrap_or(1)
         });
         let delay = *DELAY.get_or_init(|| {
-            let us: u64 = std::env::var("KALICO_TCP_WRITE_DELAY_US")
+            let us: u64 = std::env::var("TCP_WRITE_DELAY_US")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(100);

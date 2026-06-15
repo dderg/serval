@@ -101,7 +101,7 @@ def import_motion_engine():
     except ImportError as exc:
         raise SystemExit(
             "FAIL: motion_engine native module not importable. "
-            "Build it first: `make -f Makefile.kalico motion-engine`. (%s)"
+            "Build it first: `make -f Makefile.rust motion-engine`. (%s)"
             % (exc,)
         )
 

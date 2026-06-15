@@ -36,7 +36,7 @@ trajectory starts from the true position, no yank, no re-home required.
 - **`motion.set_position(newpos, homing_axes=())`** (`klippy/motion.py:225`) reseats the
   whole stack in one call: updates `commanded_pos`, calls `kin.set_position` →
   `bridge.set_position` (`rust/motion-bridge/src/bridge.rs:3433`) which flushes/drains,
-  `kalico_stream_open`s at the new origin, and seeds the serial MCUs / EtherCAT drive
+  `runtime_stream_open`s at the new origin, and seeds the serial MCUs / EtherCAT drive
   frame. With `homing_axes=()` it does **not** touch `self.limits`, so the homed state
   survives. It fires `toolhead:set_position`, which `gcode_move` already handles by calling
   `reset_last_position()` — so the gcode coordinate layer resyncs automatically.

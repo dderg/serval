@@ -129,7 +129,7 @@ class KlippyTestItem(pytest.Item):
             pytest.skip(
                 "requires native _motion_engine (PyO3 cdylib not built); "
                 "build it to exercise the motion engine — see "
-                "docs/kalico-rewrite/ci.md (make -f Makefile.kalico motion-engine)"
+                "docs/rewrite/ci.md (make -f Makefile.rust motion-engine)"
             )
         self.tmp_dir = pathlib.Path(tempfile.mkdtemp())
 

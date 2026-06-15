@@ -141,7 +141,7 @@ occur:
 ## Affected files
 
 MCU: `rust/runtime/src/engine.rs`, `rust/runtime/src/piece_ring.rs`,
-`rust/kalico-c-api/src/runtime_ffi.rs`, `rust/mcu-protocol/src/messages.rs`.
+`rust/c-api/src/runtime_ffi.rs`, `rust/mcu-protocol/src/messages.rs`.
 Host: `rust/motion-engine/src/pump.rs`, `rust/motion-engine/src/bridge.rs`,
 `klippy/motion_toolhead.py` (and the bridge-mode `M400` path).
 

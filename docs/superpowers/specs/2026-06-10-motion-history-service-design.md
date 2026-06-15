@@ -1,7 +1,7 @@
 # Executed-Motion History Service (`motion_state_at`)
 
 Spec A of the beacon-support program
-([survey](../../kalico-rewrite/beacon-fork-survey.md)). Everything here
+([survey](../../rewrite/beacon-fork-survey.md)). Everything here
 lives in this repo; external consumers (the beacon_klipper fork) only call
 the published query.
 

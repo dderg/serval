@@ -17,7 +17,7 @@ rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
 # IMPORTANT: target-cpu is set conservatively to cortex-m4 because the same
 # rust target (thumbv7em-none-eabi) is used for BOTH H7 (cortex-m7) and F4
 # (cortex-m4) Klipper builds. The Makefile-driven cargo invocation tunes
-# this per-target via the KALICO_RUST_FEATURES path (mcu-h7 / mcu-f4),
+# this per-target via the MCU_RUST_FEATURES path (mcu-h7 / mcu-f4),
 # but `target-cpu` is a rustflag not a feature, so it has to be safe for
 # every architecture this target supports. Cortex-M4F is a strict subset
 # of Cortex-M7's ISA, so cortex-m4 codegen runs fine on both — whereas

@@ -4,7 +4,7 @@
 - **Branch / worktree:** `observability` (`.worktrees/observability`)
 - **Status:** Design — **adversarially reviewed (multi-agent workflow); rework applied**; pending user review before plan/implementation.
 - **Depends on:** the host pipeline (Stages 1–3, shipped on this branch) — schema, `events/*.jsonl`, Vector→VictoriaLogs, the `query-logs` skill. This spec adds `source = mcu-h7` / `mcu-f4` to that pipeline.
-- **Boundary doc (binding):** `docs/kalico-rewrite/mcu-c-rust-boundary.md`.
+- **Boundary doc (binding):** `docs/rewrite/mcu-c-rust-boundary.md`.
 
 > **Review-driven revisions (v2).** A code-grounded review found the v1 timestamping path was built on a non-existent "PushPiecesResponse host-side widening heuristic" (a wrong recon fact). v2 corrections: (1) the **MCU pre-widens** the log tick to `u64` before transmit (the real `arrival_clock` pattern) — `mcu_tick` is `u64` on the wire, no host widener; (2) `wall_time_at_mcu` returns a **fallible wall-clock** (`Option<(OffsetDateTime, bool)>`) backed by a new `(SystemTime, Instant)` anchor — not an `Instant` (which can't be RFC3339-formatted); (3) the C enqueue uses **`irq_save`/`irq_restore`** (not `irq_disable`), matching `diag_ring_push`, because OTG (NVIC prio 1) preempts TIM5 (prio 2); (4) the schema hash is bumped by editing **`schema_def.rs`** (not `messages.rs`) — with a **precondition** to fix the already-stale `PushPiecesResponse` entry; (5) the host hook is a concrete `EventDispatcher` field (mirroring `heartbeat_callback`) with a shared `Arc<RwLock<ClockSyncEstimator>>` and a dedicated `Arc<Mutex<RotatingJsonlWriter>>`. The `Trace`-is-vestigial decision stands, but on the correct grounds (no MCU emitter / no native message), not "dropped on the host."
 
@@ -39,10 +39,10 @@ The MCU is the one place the observability pipeline can't see. Its diagnostics a
 
 ```
   Rust engine: fault_helpers.rs raise_*()  ──┐
-   (called from tick.rs/engine.rs)           │  extern "C" kalico_log_emit(level, subsystem, event, code, a0, a1)
+   (called from tick.rs/engine.rs)           │  extern "C" event_log_emit(level, subsystem, event, code, a0, a1)
   C foreground/dispatch ─────────────────────┤    captures raw 32-bit timer_read_time(); irq_save; push; irq_restore
                                               ▼
-                  ┌──────────── C-OWNED log ring (src/kalico_log.c) ────────────┐
+                  ┌──────────── C-OWNED log ring (src/event_log.c) ────────────┐
                   │  #[repr(C)] ring in a C linker section (.bss / DTCM on H7)    │
                   │  producers: Rust engine + C (irq_save enqueue, à la           │
                   │  diag_ring_push) ; consumer: the existing runtime_drain task  │
@@ -69,7 +69,7 @@ The MCU is the one place the observability pipeline can't see. Its diagnostics a
 ```
 
 ### 4.1 The C-owned log ring (boundary §B2/§B3)
-`src/kalico_log.c` declares `struct kalico_log_entry` (`#[repr(C)]` mirror in Rust) and a fixed-size ring in a C linker section (regular `.bss`; DTCM on H7). Enqueue is a thin `extern "C" kalico_log_emit(...)` that captures the **raw 32-bit `timer_read_time()`** and pushes under an **`irq_save`/`irq_restore`** critical section — **not** `irq_disable`/`irq_enable`: on this firmware OTG_FS is NVIC priority 1 (`usbotg.c:514`), higher-urgency than TIM5 priority 2 (`runtime_tick_h7.c:122`), so OTG preempts TIM5; an unconditional `irq_enable()` inside `kalico_log_emit` called from the TIM5 ISR would unmask interrupts mid-section and let OTG touch `transmit_buf` non-atomically. `irq_save`/`irq_restore` is the idempotent form every multi-context ring push uses (canonical: `diag_ring_push`, `fault_handler.c:335`). Rust **never holds a borrow into the ring** — it calls the C function; no Rust-typed structure crosses the ABI (§B3, the 2026-05-18 SPSC lesson). Multi-producer (ISR engine + C foreground) is fine under `irq_save` (B3 mandates no-Rust-borrow, not single-producer).
+`src/event_log.c` declares `struct event_log_entry` (`#[repr(C)]` mirror in Rust) and a fixed-size ring in a C linker section (regular `.bss`; DTCM on H7). Enqueue is a thin `extern "C" event_log_emit(...)` that captures the **raw 32-bit `timer_read_time()`** and pushes under an **`irq_save`/`irq_restore`** critical section — **not** `irq_disable`/`irq_enable`: on this firmware OTG_FS is NVIC priority 1 (`usbotg.c:514`), higher-urgency than TIM5 priority 2 (`runtime_tick_h7.c:122`), so OTG preempts TIM5; an unconditional `irq_enable()` inside `event_log_emit` called from the TIM5 ISR would unmask interrupts mid-section and let OTG touch `transmit_buf` non-atomically. `irq_save`/`irq_restore` is the idempotent form every multi-context ring push uses (canonical: `diag_ring_push`, `fault_handler.c:335`). Rust **never holds a borrow into the ring** — it calls the C function; no Rust-typed structure crosses the ABI (§B3, the 2026-05-18 SPSC lesson). Multi-producer (ISR engine + C foreground) is fine under `irq_save` (B3 mandates no-Rust-borrow, not single-producer).
 
 `timer_read_time()` is **ISR-safe** here: on H7 it is `DWT->CYCCNT`, a single-cycle read. The "foreground-only" warning at `runtime_tick.c:71` applies to `runtime_host_now_us` (the wrapper that *divides* after the read), not the raw read; under `CONFIG_KALICO_SIM` the software CYCCNT is also ISR-safe.
 
@@ -123,8 +123,8 @@ Per re-emitted record: `_time` (RFC3339 from `wall_time_at_mcu(mcu_tick)`, or `h
 ## 9. Component boundaries
 | Unit | Purpose | Lang | Notes |
 |---|---|---|---|
-| `src/kalico_log.c` (+ `.h`) | C-owned ring + `kalico_log_emit` (`irq_save`) + drain extension in `runtime_drain` (pre-widen + TX) | C | reference: `diag_ring_push` |
-| `fault_helpers.rs` `raise_*` | emit at fault-raise (canonical site) | Rust (MCU) | calls `extern "C" kalico_log_emit` |
+| `src/event_log.c` (+ `.h`) | C-owned ring + `event_log_emit` (`irq_save`) + drain extension in `runtime_drain` (pre-widen + TX) | C | reference: `diag_ring_push` |
+| `fault_helpers.rs` `raise_*` | emit at fault-raise (canonical site) | Rust (MCU) | calls `extern "C" event_log_emit` |
 | `messages.rs` + `schema_def.rs` | wire codec + **hash/header source** | Rust | both edited (§4.2) |
 | `FaultCode::from_u16`/`code_name` + subsystem/event tables | resolution | Rust (`runtime`, no_std+host) | sign-wrap aware |
 | `ClockSyncEstimator::wall_time_at_mcu` + `(SystemTime,Instant)` anchor | tick → RFC3339 | Rust (`host-rt`) | `Option<(OffsetDateTime,bool)>` |
@@ -134,8 +134,8 @@ Per re-emitted record: `_time` (RFC3339 from `wall_time_at_mcu(mcu_tick)`, or `h
 
 ## 10. Implementation staging
 1. **Protocol + host decode (no MCU behavior change).** **Precondition:** fix the stale `schema_def.rs` `PushPiecesResponse` (+`arrival_clock`,+`front_start_time`, bump version), regenerate, update the schema-hash test. Then: add `MCU_MSG_LOG` to `messages.rs` (+`from_u16`+codec) **and** `schema_def.rs` (bumps hash + emits C define); `build.rs` fail-loud fix; `RuntimeEvent::McuLog`(+`host_recv`) + decode; `from_u16`/`code_name` + subsystem/event tables; `wall_time_at_mcu` + the `(SystemTime,Instant)` anchor; `EventDispatcher.mcu_log_hook` + setter; the re-emit closure + dedicated `mcu-*.jsonl` writer + `Arc<RwLock<ClockSyncEstimator>>` sharing. Host-unit-testable with synthetic frames; nothing emits yet.
-2. **MCU transport.** `src/kalico_log.c` ring + `kalico_log_emit` (`irq_save`) + the `runtime_drain` extension (pre-widen via `runtime_widened_host_clock()` + TX) + the C schema define. Emit a test frame from C to prove the wire path end-to-end in the playground.
-3. **Rust engine emit sites.** Wire `kalico_log_emit` into the `raise_*` helpers in `fault_helpers.rs` (one canonical site, not each `tick.rs`/`engine.rs` call site) + level gating + ring-overflow accounting. The "why did it fault" payoff; verified in the playground.
+2. **MCU transport.** `src/event_log.c` ring + `event_log_emit` (`irq_save`) + the `runtime_drain` extension (pre-widen via `runtime_widened_host_clock()` + TX) + the C schema define. Emit a test frame from C to prove the wire path end-to-end in the playground.
+3. **Rust engine emit sites.** Wire `event_log_emit` into the `raise_*` helpers in `fault_helpers.rs` (one canonical site, not each `tick.rs`/`engine.rs` call site) + level gating + ring-overflow accounting. The "why did it fault" payoff; verified in the playground.
 4. **Level control + dedup pass.** Runtime min-level; confirm no triple-emit with `FaultEvent`/`output()`.
 
 Each stage is independently testable in the sim playground.

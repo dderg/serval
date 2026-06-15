@@ -22,7 +22,7 @@ pub fn send_set_torque(
     }
     .encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::SetTorque, body, SET_TORQUE_TIMEOUT)
+        .mcu_call(MessageKind::SetTorque, body, SET_TORQUE_TIMEOUT)
         .map_err(|e| format!("SetTorque transport: {e:?}"))?;
     if kind != MessageKind::SetTorqueResponse {
         return Err(format!(
@@ -48,7 +48,7 @@ pub fn send_drive_limits(
     }
     .encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::SetDriveLimits, body, DRIVE_LIMITS_TIMEOUT)
+        .mcu_call(MessageKind::SetDriveLimits, body, DRIVE_LIMITS_TIMEOUT)
         .map_err(|e| format!("SetDriveLimits transport: {e:?}"))?;
     if kind != MessageKind::SetDriveLimitsResponse {
         return Err(format!(
@@ -63,7 +63,7 @@ pub fn send_drive_limits(
 
 pub fn send_restore_drive_limits(conn: &McuSerialConn) -> Result<i32, String> {
     let (kind, resp) = conn
-        .kalico_call(
+        .mcu_call(
             MessageKind::RestoreDriveLimits,
             Vec::new(),
             DRIVE_LIMITS_TIMEOUT,
@@ -87,7 +87,7 @@ pub fn send_seed_servo_home(
 ) -> Result<i32, String> {
     let body = SeedServoHome { home_q16 }.encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::SeedServoHome, body, timeout)
+        .mcu_call(MessageKind::SeedServoHome, body, timeout)
         .map_err(|e| format!("SeedServoHome transport: {e:?}"))?;
     if kind != MessageKind::SeedServoHomeResponse {
         return Err(format!(

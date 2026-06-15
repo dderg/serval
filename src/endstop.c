@@ -3,7 +3,7 @@
 #include "board/misc.h"
 #include "command.h"
 #include "sched.h"
-#include "kalico_runtime.h"
+#include "runtime.h"
 #include "mcu_transport_dispatch.h"
 
 extern void *runtime_handle;
@@ -34,7 +34,7 @@ endstop_event(struct timer *t)
     uint8_t raw = gpio_in_read(e->pin) ? 1 : 0;
     uint8_t active = raw ^ e->invert;
     if (active && e->armed) {
-        e->trip_clock = kalico_runtime_now_ticks(runtime_handle);
+        e->trip_clock = runtime_now_ticks(runtime_handle);
         e->armed = 0;
         e->trip_pending = 1;
         e->tripped = 1;

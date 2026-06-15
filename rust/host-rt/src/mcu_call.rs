@@ -5,7 +5,7 @@ use mcu_protocol::MessageKind;
 use crate::transport::TransportError;
 
 pub trait McuCall: Send + Sync {
-    fn kalico_call(
+    fn mcu_call(
         &self,
         kind: MessageKind,
         body: Vec<u8>,
@@ -14,12 +14,12 @@ pub trait McuCall: Send + Sync {
 }
 
 impl McuCall for crate::host_io::McuHostIo {
-    fn kalico_call(
+    fn mcu_call(
         &self,
         kind: MessageKind,
         body: Vec<u8>,
         timeout: Duration,
     ) -> Result<(MessageKind, Vec<u8>), TransportError> {
-        crate::host_io::McuHostIo::kalico_call(self, kind, body, timeout)
+        crate::host_io::McuHostIo::mcu_call(self, kind, body, timeout)
     }
 }

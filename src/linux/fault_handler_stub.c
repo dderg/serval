@@ -106,7 +106,7 @@ void diag_record_engine_xition(uint8_t prev, uint8_t cur,
 // ring. The Linux MCU has no persisted crash-diag RAM (no NOLOAD section that
 // survives a reset, no BKPSRAM), so there is nothing to replay — no-op stubs.
 // Referenced unconditionally from src/stepper.c (configure-axis "runtime ready"
-// path and the kalico_diag_dump command), so they must link.
+// path and the runtime_diag_dump command), so they must link.
 void kalico_diag_emit_prior_crash(void)
 {
 }

@@ -377,8 +377,8 @@ fn scenario_three_x_jogs_in_flight(label: &'static str) -> Vec<PieceStreamEntry>
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = bench_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
-    h.kalico_stream_open([295.0, 0.0, 0.0, 0.0])
-        .expect("kalico_stream_open");
+    h.runtime_stream_open([295.0, 0.0, 0.0, 0.0])
+        .expect("runtime_stream_open");
 
     h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog 1");

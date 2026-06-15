@@ -540,7 +540,7 @@ fn broken_pipe_latches_host_disconnect_fault() {
     assert_eq!(
         cell.fault_code,
         FaultCode::HostDisconnect.as_u16(),
-        "fault_code must be KALICO_ERR_HOST_DISCONNECT"
+        "fault_code must be RUNTIME_ERR_HOST_DISCONNECT"
     );
     assert!(
         !cell.synthesized,

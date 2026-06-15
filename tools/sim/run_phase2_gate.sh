@@ -16,7 +16,7 @@ if [[ ! -f out/klipper.elf ]]; then
   exit 2
 fi
 if [[ ! -f klippy/motion_engine.so ]]; then
-  echo "error: klippy/motion_engine.so not found. Run 'make -f Makefile.kalico motion-engine' first." >&2
+  echo "error: klippy/motion_engine.so not found. Run 'make -f Makefile.rust motion-engine' first." >&2
   exit 2
 fi
 if ! command -v renode >/dev/null 2>&1; then

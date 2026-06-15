@@ -63,11 +63,11 @@ Each sub-plan copies `e_mode` and `extrusion_ratio` from the original plan. The 
 
 ### Slot pool limits and retirement dependency
 
-**Current state**: slot retirement via `on_credit_freed` → `SlotPool::retire_through_segment` is functionally unreachable at runtime (`slot_pool.rs:37-45`). The `EventDispatcher` that lifts `kalico_credit_freed` events from the serial path is not yet wired up (Task 10 dependency). The current bridge works only because short moves never exhaust the pool.
+**Current state**: slot retirement via `on_credit_freed` → `SlotPool::retire_through_segment` is functionally unreachable at runtime (`slot_pool.rs:37-45`). The `EventDispatcher` that lifts `runtime_credit_freed` events from the serial path is not yet wired up (Task 10 dependency). The current bridge works only because short moves never exhaust the pool.
 
 **Implication for splitting**: until Task 10 lands, the split depth is hard-limited by the pool capacity. With `CURVE_POOL_N = 16` and 2 axes per segment (CoreXY motor curves), at most 8 sub-segments can be in-flight. This covers the 119-piece crash (2 sub-segments) but not the 672-piece homing crash (6 sub-segments × 2 axes = 12 slots). The 672-piece homing move additionally requires retirement to work.
 
-**Post-Task-10**: `on_credit_freed` is called from the Python reactor thread (klippy event loop), which runs concurrently with the planner thread. Both access `SlotPool` through `Arc<Mutex<SlotPool>>` (bridge.rs:1977). Once wired, the retry loop works: the planner thread spins on `try_alloc()` while the reactor thread processes `kalico_credit_freed` events and calls `retire_through_segment()` to free slots.
+**Post-Task-10**: `on_credit_freed` is called from the Python reactor thread (klippy event loop), which runs concurrently with the planner thread. Both access `SlotPool` through `Arc<Mutex<SlotPool>>` (bridge.rs:1977). Once wired, the retry loop works: the planner thread spins on `try_alloc()` while the reactor thread processes `runtime_credit_freed` events and calls `retire_through_segment()` to free slots.
 
 **Retry loop** (post-Task-10): replace bare `try_alloc()` with a retry loop that sleeps 1ms between attempts with a **60-second** timeout (matching the existing credit-acquire timeout in `push_segment_with_timeout`). If the timeout expires, return `SlotPoolExhausted`.
 

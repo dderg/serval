@@ -9,7 +9,7 @@
 #include "sched.h"
 #include "autoconf.h"
 
-#include "kalico_runtime.h"
+#include "runtime.h"
 extern void *runtime_handle;
 
 extern int kalico_console_write_raw(const uint8_t *buf, uint16_t len);
@@ -17,8 +17,8 @@ extern int kalico_console_write_raw(const uint8_t *buf, uint16_t len);
 #define MCU_FRAME_SYNC 0x55
 #define MESSAGE_VERSION_DEFAULT 0x01
 
-#define KALICO_ERR_INVALID_CURVE -2
-#define KALICO_ERR_NOT_INIT      -7
+#define RUNTIME_ERR_INVALID_CURVE -2
+#define RUNTIME_ERR_NOT_INIT      -7
 
 // type:u16_le | version:u8 | corr_id:u32_le.
 #define PER_MESSAGE_HEADER_LEN 7
@@ -240,12 +240,12 @@ handle_push_correction_pieces(uint32_t correlation_id, const uint8_t *body,
 
     if (!runtime_handle) {
         send_push_correction_pieces_response(correlation_id,
-                                             KALICO_ERR_NOT_INIT, 0);
+                                             RUNTIME_ERR_NOT_INIT, 0);
         return;
     }
     if (body_len < CORRECTION_HEADER_LEN) {
         send_push_correction_pieces_response(correlation_id,
-                                             KALICO_ERR_INVALID_CURVE, 0);
+                                             RUNTIME_ERR_INVALID_CURVE, 0);
         return;
     }
     uint8_t axis_idx = body[0];
@@ -256,17 +256,17 @@ handle_push_correction_pieces(uint32_t correlation_id, const uint8_t *body,
                       | ((uint32_t)body[7] << 16) | ((uint32_t)body[8] << 24);
     if (body_len != CORRECTION_HEADER_LEN + (uint16_t)piece_count * 32u) {
         send_push_correction_pieces_response(correlation_id,
-                                             KALICO_ERR_INVALID_CURVE, 0);
+                                             RUNTIME_ERR_INVALID_CURVE, 0);
         return;
     }
     int32_t rc = 0;
     for (uint8_t i = 0; i < piece_count && rc == 0; i++)
-        rc = kalico_runtime_write_correction_piece(
+        rc = runtime_write_correction_piece(
             runtime_handle, axis_idx, start_slot, i,
             &body[CORRECTION_HEADER_LEN + (uint32_t)i * 32u]);
     if (rc == 0) {
         irqstatus_t flag = irq_save();
-        rc = kalico_runtime_commit_correction(runtime_handle, axis_idx,
+        rc = runtime_commit_correction(runtime_handle, axis_idx,
                                               motor_idx, new_head);
         irq_restore(flag);
     }
@@ -309,7 +309,7 @@ handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
     int32_t vel[MCU_MOTOR_STATE_MAX_AXES];
     int n = 0;
     if (runtime_handle)
-        n = kalico_runtime_query_motor_state(runtime_handle, slots, pos, vel,
+        n = runtime_query_motor_state(runtime_handle, slots, pos, vel,
                                              MCU_MOTOR_STATE_MAX_AXES);
     if (n < 0)
         n = 0;
@@ -459,7 +459,7 @@ piece_sink_feed(uint8_t b)
         // Written pre-CRC; the slot stays invisible to the ISR until commit
         // advances the frontier.
         if (runtime_handle && piece_sink.pieces_seen < PIECE_SINK_MAX_PIECES) {
-            int32_t r = kalico_runtime_write_piece(
+            int32_t r = runtime_write_piece(
                 runtime_handle, piece_sink.axis_idx, piece_sink.start_slot,
                 (uint8_t)piece_sink.pieces_seen, piece_sink.scratch);
             if (r != 0 && piece_sink.write_rc == 0)
@@ -478,11 +478,11 @@ piece_sink_commit(void)
 
     if (!runtime_handle) {
         send_push_pieces_response(piece_sink.correlation_id,
-                                  KALICO_ERR_NOT_INIT, 0, 0);
+                                  RUNTIME_ERR_NOT_INIT, 0, 0);
         return;
     }
     if (!piece_sink.header_parsed) {
-        send_push_pieces_response(0, KALICO_ERR_INVALID_CURVE, 0, 0);
+        send_push_pieces_response(0, RUNTIME_ERR_INVALID_CURVE, 0, 0);
         return;
     }
     // CRC catches bit-corruption but not a count/length logic mismatch; if the
@@ -490,12 +490,12 @@ piece_sink_commit(void)
     // advance the frontier (partial slots stay below the head, ISR-invisible).
     if (piece_sink.pieces_seen != (uint32_t)piece_sink.piece_count) {
         send_push_pieces_response(piece_sink.correlation_id,
-                                  KALICO_ERR_INVALID_CURVE, 0, 0);
+                                  RUNTIME_ERR_INVALID_CURVE, 0, 0);
         return;
     }
     int32_t rc = piece_sink.write_rc;
     if (rc == 0) {
-        rc = kalico_runtime_commit_head(
+        rc = runtime_commit_head(
             runtime_handle, piece_sink.axis_idx, piece_sink.new_head);
     }
     send_push_pieces_response(piece_sink.correlation_id, rc,
@@ -511,7 +511,7 @@ send_status_heartbeat(void)
     uint8_t st = 0;
     uint16_t fc = 0;
     uint32_t counts[8];
-    int32_t n = kalico_runtime_get_heartbeat(runtime_handle,
+    int32_t n = runtime_get_heartbeat(runtime_handle,
                                              &st, &fc, counts, 8);
     if (n < 0)
         return;
@@ -597,12 +597,12 @@ send_stop_response(uint32_t correlation_id, int32_t result, uint64_t discard_clo
 int32_t
 handle_stop_inner(uint64_t *discard_clock)
 {
-    int32_t rc = KALICO_ERR_NOT_INIT;
+    int32_t rc = RUNTIME_ERR_NOT_INIT;
     *discard_clock = 0;
     if (runtime_handle) {
         irqstatus_t flag = irq_save();
-        rc = kalico_runtime_gate_pieces(runtime_handle);
-        *discard_clock = kalico_runtime_now_ticks(runtime_handle);
+        rc = runtime_gate_pieces(runtime_handle);
+        *discard_clock = runtime_now_ticks(runtime_handle);
         irq_restore(flag);
     }
     return rc;
@@ -633,10 +633,10 @@ send_resume_stream_response(uint32_t correlation_id, int32_t result)
 static void
 handle_resume_stream(uint32_t correlation_id)
 {
-    int32_t rc = KALICO_ERR_NOT_INIT;
+    int32_t rc = RUNTIME_ERR_NOT_INIT;
     if (runtime_handle) {
         irqstatus_t flag = irq_save();
-        rc = kalico_runtime_ungate_pieces(runtime_handle);
+        rc = runtime_ungate_pieces(runtime_handle);
         irq_restore(flag);
     }
     send_resume_stream_response(correlation_id, rc);

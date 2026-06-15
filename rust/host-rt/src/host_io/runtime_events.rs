@@ -67,11 +67,11 @@ pub enum RuntimeEvent {
 impl RuntimeEvent {
     pub fn lift(name: &str, params: MessageParams) -> Self {
         match name {
-            "kalico_credit_freed" => Self::CreditFreed(CreditFreedEvent {
+            "runtime_credit_freed" => Self::CreditFreed(CreditFreedEvent {
                 retired_through_segment_id: params.get_u32("retired_through_segment_id"),
                 free_slots: params.get_u32("free_slots") as u8,
             }),
-            "kalico_fault" => Self::Fault(FaultEvent {
+            "runtime_fault" => Self::Fault(FaultEvent {
                 fault_code: params.get_u32("fault_code") as u16,
                 fault_detail: params.get_u32("fault_detail"),
                 segment_id: params.get_u32("segment_id"),

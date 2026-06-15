@@ -261,7 +261,7 @@ Each unit has one purpose, a defined interface, and explicit deps:
 
 *(Filenames reserved so forward-references don't dangle: `2026-…-mcu-log-endpoint-design.md`, `2026-…-observability-ui-design.md`.)*
 
-- **Spec #2 — MCU log endpoint:** a C-owned structured log frame in the kalico protocol, written by C *and* the Rust staticlib (respecting the C-owns-shared-memory boundary in `docs/kalico-rewrite/mcu-c-rust-boundary.md`), decoded host-side into this same schema — reusing the already-present-but-dropped `RuntimeEvent::Trace` channel and the existing tick→walltime clock-sync. This foundation's schema and host re-emit path are designed to receive it unchanged.
+- **Spec #2 — MCU log endpoint:** a C-owned structured log frame in the kalico protocol, written by C *and* the Rust staticlib (respecting the C-owns-shared-memory boundary in `docs/rewrite/mcu-c-rust-boundary.md`), decoded host-side into this same schema — reusing the already-present-but-dropped `RuntimeEvent::Trace` channel and the existing tick→walltime clock-sync. This foundation's schema and host re-emit path are designed to receive it unchanged.
 - **Spec #3 — UI:** VL built-in Web UI → Grafana (VL datasource plugin) → optional Mainsail panel.
 
 ## 16. Open items (defaults chosen; flag to steer)

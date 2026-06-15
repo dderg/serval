@@ -2,7 +2,7 @@
 // ISR) and consumer (step-output timer ISR) to share one NVIC priority so they
 // never interleave. If that ever splits, the volatile-u16 + fence discipline is
 // insufficient (torn slot/counter) — upgrade to a true-atomic SPSC. Invariant
-// + priority map: `src/generic/kalico_nvic_prio.h`.
+// + priority map: `src/generic/motion_nvic_prio.h`.
 
 #![allow(unsafe_code)]
 
@@ -103,7 +103,7 @@ pub fn queue_for_axis(i: usize) -> *mut StepQueue {
 
 /// Clear all per-axis step queues. MCU-only.
 ///
-/// The caller (`kalico_runtime_reset`) holds the IRQ guard, so no producer
+/// The caller (`runtime_reset`) holds the IRQ guard, so no producer
 /// ISR or consumer timer runs concurrently with these writes.
 #[cfg(not(any(test, feature = "host")))]
 pub fn reset_all_queues() {

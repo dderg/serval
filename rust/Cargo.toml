@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "nurbs",
-    "kalico-c-api",
+    "c-api",
     "gcode",
     "geometry",
     "temporal",
@@ -168,7 +168,7 @@ overflow-checks = false
 opt-level = 0
 debug = false
 
-# `cbindgen` is a normal `[dependencies]` entry (kalico-c-api, behind the
+# `cbindgen` is a normal `[dependencies]` entry (c-api, behind the
 # `dep:cbindgen` feature, used by the gen-headers binary), so cargo's
 # build-override above does NOT cover it. `syn` is pulled in again via
 # cbindgen → serde_derive on that path and compiles at opt-level=3 under the

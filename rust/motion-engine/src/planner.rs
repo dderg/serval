@@ -278,7 +278,7 @@ impl PlannerHandle {
             .map_err(PlannerError::Config)
     }
 
-    pub fn kalico_stream_open(&self, home_pos: [f64; 4]) -> Result<(), PlannerError> {
+    pub fn runtime_stream_open(&self, home_pos: [f64; 4]) -> Result<(), PlannerError> {
         self.sender
             .send(PlannerMsg::McuStreamOpen { home_pos })
             .map_err(|_| PlannerError::ChannelClosed)

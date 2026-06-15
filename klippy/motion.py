@@ -180,8 +180,8 @@ class Motion:
             desc="[sim] Query commanded motion state at a past print_time",
         )
         gcode.register_command(
-            "KALICO_DIAG_DUMP",
-            self.cmd_KALICO_DIAG_DUMP,
+            "DIAG_DUMP",
+            self.cmd_DIAG_DUMP,
             desc="Emit the live MCU diag snapshot (cause discriminators + "
             "event ring) to the structured-log store; no reset required",
         )
@@ -997,8 +997,8 @@ class Motion:
                         "in its IdentifyResponse (caps=0x%x). This usually "
                         "means kalico-native identify timed out, which in "
                         "turn usually means the MCU's firmware was built "
-                        "without CONFIG_KALICO_RUNTIME=y. Rebuild that MCU "
-                        "with CONFIG_KALICO_RUNTIME=y (and the small or "
+                        "without CONFIG_RUNTIME=y. Rebuild that MCU "
+                        "with CONFIG_RUNTIME=y (and the small or "
                         "large runtime profile for the chip family) and "
                         "reflash." % (slot_name, name, mcu_caps)
                     )
@@ -1027,13 +1027,13 @@ class Motion:
             # reconnect without an MCU reboot would overflow the pool. Idempotent
             # on a fresh MCU; same queue, so it runs before configure_axis.
             try:
-                reset_cmd = mcu_obj.lookup_command("kalico_runtime_reset")
+                reset_cmd = mcu_obj.lookup_command("runtime_reset")
             except Exception:
                 reset_cmd = None
             if reset_cmd is not None:
                 reset_cmd.send([])
                 logging.info(
-                    "Motion: sent kalico_runtime_reset to mcu=%s",
+                    "Motion: sent runtime_reset to mcu=%s",
                     name,
                 )
 
@@ -1159,25 +1159,23 @@ class Motion:
             # phase_stepping_enable_spi is sent later from
             # TMC5160._xdirect_preload, after TMC register init.
 
-    def cmd_KALICO_DIAG_DUMP(self, gcmd):
+    def cmd_DIAG_DUMP(self, gcmd):
         sent = []
         for name, mcu_obj in self.printer.lookup_objects(module="mcu"):
             try:
-                cmd = mcu_obj.lookup_command("kalico_diag_dump")
+                cmd = mcu_obj.lookup_command("runtime_diag_dump")
             except Exception:
                 continue
             cmd.send([])
             sent.append(name)
         if sent:
             gcmd.respond_info(
-                "KALICO_DIAG_DUMP: requested live diag from %s "
+                "DIAG_DUMP: requested live diag from %s "
                 "(see printer_data/logs/events/<mcu>.jsonl)"
                 % (", ".join(sent),)
             )
         else:
-            gcmd.respond_info(
-                "KALICO_DIAG_DUMP: no MCU exposes kalico_diag_dump"
-            )
+            gcmd.respond_info("DIAG_DUMP: no MCU exposes runtime_diag_dump")
 
     def cmd_KALICO_SIM_MOTION_STATE(self, gcmd):
         print_time = gcmd.get_float("PRINT_TIME", None)

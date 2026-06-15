@@ -210,7 +210,7 @@ impl McuSerialConn {
 }
 
 impl McuCall for McuSerialConn {
-    fn kalico_call(&self, kind: MessageKind, body: Vec<u8>, timeout: Duration) -> CallResult {
+    fn mcu_call(&self, kind: MessageKind, body: Vec<u8>, timeout: Duration) -> CallResult {
         let cid = self.next_cid.fetch_add(1, Ordering::Relaxed);
         let frame = build_kalico_control_frame(kind, cid, &body);
         self.call(&frame, cid, timeout)

@@ -53,28 +53,28 @@ job_rust_loom() {
         --test loom
 }
 
-KALICO_MCU_ENV=(KALICO_RUNTIME_STORAGE_SIZE=122880 KALICO_RUNTIME_PIECE_RING_SIZE=63488)
+MCU_ENV=(RUNTIME_STORAGE_SIZE=122880 RUNTIME_PIECE_RING_SIZE=63488)
 
 job_rust_mcu_h7() {
     cd "$RUST"
-    env "${KALICO_MCU_ENV[@]}" \
-        cargo build -p kalico-c-api --no-default-features \
+    env "${MCU_ENV[@]}" \
+        cargo build -p c-api --no-default-features \
         --features mcu-h7,header-nurbs,header-runtime,motion-module-stepper \
         --target thumbv7em-none-eabi
 }
 
 job_rust_mcu_f4() {
     cd "$RUST"
-    env "${KALICO_MCU_ENV[@]}" \
-        cargo build -p kalico-c-api --no-default-features \
+    env "${MCU_ENV[@]}" \
+        cargo build -p c-api --no-default-features \
         --features mcu-f4,header-nurbs,header-runtime,motion-module-stepper \
         --target thumbv7em-none-eabi
 }
 
 job_rust_mcu_g0() {
     cd "$RUST"
-    env "${KALICO_MCU_ENV[@]}" \
-        cargo build -p kalico-c-api --no-default-features \
+    env "${MCU_ENV[@]}" \
+        cargo build -p c-api --no-default-features \
         --features mcu-g0,header-nurbs,header-runtime,motion-module-stepper \
         --target thumbv6m-none-eabi
 }
@@ -87,14 +87,14 @@ job_rust_no_stepper() {
 
 job_cbindgen_drift() {
     "$ROOT/tools/regen_headers.sh"
-    git -C "$ROOT" diff --exit-code rust/kalico-c-api/include/
+    git -C "$ROOT" diff --exit-code rust/c-api/include/
 }
 
 job_c_smoke() {
     cd "$RUST"
-    cargo build -p kalico-c-api --no-default-features \
+    cargo build -p c-api --no-default-features \
         --features host,header-nurbs,header-runtime --release
-    cargo test -p kalico-c-api --no-default-features \
+    cargo test -p c-api --no-default-features \
         --features host,header-nurbs,header-runtime \
         --test c_smoke_build
 }
@@ -118,8 +118,8 @@ job_miri() {
 
 job_panic_grep() {
     cd "$RUST"
-    env "${KALICO_MCU_ENV[@]}" \
-        cargo rustc -p kalico-c-api --release \
+    env "${MCU_ENV[@]}" \
+        cargo rustc -p c-api --release \
         --no-default-features \
         --features mcu-h7,header-nurbs,header-runtime,motion-module-stepper \
         --target thumbv7em-none-eabi -- --emit=llvm-ir

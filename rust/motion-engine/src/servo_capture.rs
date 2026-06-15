@@ -22,7 +22,7 @@ pub fn send_start_capture(
     }
     .encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::StartCapture, body, CAPTURE_TIMEOUT)
+        .mcu_call(MessageKind::StartCapture, body, CAPTURE_TIMEOUT)
         .map_err(|e| format!("StartCapture transport: {e:?}"))?;
     if kind != MessageKind::StartCaptureResponse {
         return Err(format!(
@@ -37,7 +37,7 @@ pub fn send_start_capture(
 
 pub fn send_stop_capture(conn: &McuSerialConn) -> Result<StopCaptureResponse, String> {
     let (kind, resp) = conn
-        .kalico_call(
+        .mcu_call(
             MessageKind::StopCapture,
             StopCapture.encoded_to_vec(),
             CAPTURE_TIMEOUT,

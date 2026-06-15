@@ -262,6 +262,6 @@ never an assumed 1 kHz.
 
 ## 7. Documentation
 
-`docs/kalico-rewrite/servo-telemetry-capture.md`: command reference, file
+`docs/rewrite/servo-telemetry-capture.md`: command reference, file
 format spec, the M400 footgun, a reference tuning macro, analysis script
 usage. No code comments.

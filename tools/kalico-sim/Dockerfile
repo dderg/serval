@@ -104,7 +104,7 @@ COPY tools/sim_klippy/ /kalico/tools/sim_klippy/
 # Build shims (libvtime.so + libsim_intercept.so)
 RUN make -C tools/kalico-sim/libvtime
 
-# Copy Rust source for kalico-c-api build (make needs `cd rust`)
+# Copy Rust source for c-api build (make needs `cd rust`)
 COPY rust/ /kalico/rust/
 
 # Patch source tree for MACH_LINUX builds (idempotent).
