@@ -210,7 +210,34 @@ Delete the `const CORRECTION_LEAD_SECS: f64 = 0.15;` line (was bridge.rs:4169). 
 Run: `cd rust && cargo nextest run -p motion-bridge -E 'test(correction) + test(piece_entries_anchor_at_explicit_start)' && cargo clippy -p motion-bridge -- -D warnings`
 Expected: PASS, no warnings. (`CORRECTION_LEAD_SECS` removed → no dead-code/unused warning.)
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Parameterize the sibling `adjust_motor` the same way**
+
+`adjust_motor` (bridge.rs, used by the MOTOR_ADJUST plugin) is the other caller of `stream_correction_entries` and the same correction primitive with the same off-timeline flaw. Make it symmetric with `submit_correction_sequence` — add `start_host_secs` and drop the private `host_now + 0.15` lead. Change its `#[pyo3(signature = (...))]` to include `start_host_secs`, its fn params to add `start_host_secs: f64`, and its body to pass it through:
+
+```rust
+    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel, start_host_secs))]
+    fn adjust_motor(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        axis_idx: u8,
+        motor_idx: u8,
+        delta_mm: f64,
+        speed: f64,
+        accel: f64,
+        start_host_secs: f64,
+    ) -> PyResult<f64> {
+        let pieces = crate::correction::plan_correction_profile(delta_mm, speed, accel)
+            .map_err(PyRuntimeError::new_err)?;
+        self.stream_correction_entries(
+            py, mcu_handle, axis_idx, motor_idx, &pieces, start_host_secs,
+        )
+    }
+```
+
+No private lead constant anywhere in the correction path after this.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add rust/motion-bridge/src/bridge.rs rust/motion-bridge/src/correction/tests.rs
@@ -278,7 +305,20 @@ In `klippy/motion_bridge.py:431-440`, change:
         )
 ```
 
-- [ ] **Step 2: Add the `motion_lead_secs` delegation**
+- [ ] **Step 2: Add `start_host_secs` to the wrapper's `adjust_motor`**
+
+In `klippy/motion_bridge.py:426-429`, change `MotionBridgeWrapper.adjust_motor` to accept and forward `start_host_secs`:
+
+```python
+    def adjust_motor(
+        self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, start_host_secs
+    ):
+        return self._bridge.adjust_motor(
+            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, float(start_host_secs)
+        )
+```
+
+- [ ] **Step 3: Add the `motion_lead_secs` delegation**
 
 In `klippy/motion_bridge.py`, immediately after the `get_last_move_time` method (the one delegating to `self._bridge.get_last_move_time()`), add:
 
@@ -287,12 +327,12 @@ In `klippy/motion_bridge.py`, immediately after the `get_last_move_time` method 
         return self._bridge.motion_lead_secs()
 ```
 
-- [ ] **Step 3: Verify import still loads**
+- [ ] **Step 4: Verify import still loads**
 
 Run: `python -c "import klippy.motion_bridge"`
 Expected: no error.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add klippy/motion_bridge.py
@@ -327,8 +367,18 @@ class _RecordingBridge:
         self, mcu_id, axis_idx, motor_idx, segments, speed, accel, start_host_secs
     ):
         self.last_call = dict(
-            mcu_id=mcu_id, axis_idx=axis_idx, motor_idx=motor_idx,
+            kind="correction", mcu_id=mcu_id, axis_idx=axis_idx, motor_idx=motor_idx,
             segments=list(segments), speed=speed, accel=accel,
+            start_host_secs=start_host_secs,
+        )
+        return self._duration
+
+    def adjust_motor(
+        self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, start_host_secs
+    ):
+        self.last_call = dict(
+            kind="adjust", mcu_id=mcu_id, axis_idx=axis_idx, motor_idx=motor_idx,
+            delta_mm=delta_mm, speed=speed, accel=accel,
             start_host_secs=start_host_secs,
         )
         return self._duration
@@ -362,18 +412,31 @@ def test_submit_correction_anchors_on_timeline_and_advances_pending():
     # start_host = now + (glmt - est) = 100 + 0.25 = 100.25
     wait_s = th.submit_correction(7, 1, 0, [0.3, -0.3], 80.0, 5000.0)
     call = th.bridge.last_call
+    assert call["kind"] == "correction"
     assert call["mcu_id"] == 7 and call["axis_idx"] == 1 and call["motor_idx"] == 0
     assert call["start_host_secs"] == pytest.approx(100.25)
     # pending advanced past the buzz: glmt + duration = 101.25 + 0.6 = 101.85
     assert th._mcu_pending_end_time == pytest.approx(101.85)
     # caller wait = (start_host - now) + duration = 0.25 + 0.6 = 0.85
     assert wait_s == pytest.approx(0.85)
+
+
+def test_submit_motor_adjust_anchors_on_timeline_and_advances_pending():
+    th = _make_correction_toolhead(0.6)
+    wait_s = th.submit_motor_adjust(2, 0, 1, 0.05, 5.0, 100.0)
+    call = th.bridge.last_call
+    assert call["kind"] == "adjust"
+    assert call["mcu_id"] == 2 and call["axis_idx"] == 0 and call["motor_idx"] == 1
+    assert call["delta_mm"] == pytest.approx(0.05)
+    assert call["start_host_secs"] == pytest.approx(100.25)
+    assert th._mcu_pending_end_time == pytest.approx(101.85)
+    assert wait_s == pytest.approx(0.85)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest test/test_toolhead_shim.py::test_submit_correction_anchors_on_timeline_and_advances_pending test/test_toolhead_shim.py::test_get_last_move_time_uses_motion_lead -v`
-Expected: FAIL — `Motion` has no `submit_correction`, and `get_last_move_time` uses the module constant `BUFFER_TIME_START`, not `self.motion_lead`.
+Run: `python -m pytest test/test_toolhead_shim.py::test_submit_correction_anchors_on_timeline_and_advances_pending test/test_toolhead_shim.py::test_submit_motor_adjust_anchors_on_timeline_and_advances_pending test/test_toolhead_shim.py::test_get_last_move_time_uses_motion_lead -v`
+Expected: FAIL — `Motion` has no `submit_correction` / `submit_motor_adjust`, and `get_last_move_time` uses the module constant `BUFFER_TIME_START`, not `self.motion_lead`.
 
 - [ ] **Step 3: Fetch the lead at init and delete the module constant**
 
@@ -407,23 +470,35 @@ In `klippy/motion.py:486`, change `command_time = est + BUFFER_TIME_START` to:
         command_time = est + self.motion_lead
 ```
 
-- [ ] **Step 5: Add `Motion.submit_correction`**
+- [ ] **Step 5: Add the timeline helper plus `submit_correction` and `submit_motor_adjust`**
 
-In `klippy/motion.py`, after `manual_move` (ends line 237), add:
+Both the buzz (`submit_correction_sequence`) and MOTOR_ADJUST (`adjust_motor`) need the identical timeline math, so factor it into one private helper that takes a closure issuing the actual bridge call. In `klippy/motion.py`, after `manual_move` (ends line 237), add:
 
 ```python
-    def submit_correction(self, mcu_id, axis_idx, motor_idx, segments, speed, accel):
+    def _stream_correction_on_timeline(self, invoke):
         now = self.reactor.monotonic()
         glmt = self.get_last_move_time()
         est = self.mcu.estimated_print_time(now)
         start_host_secs = now + (glmt - est)
-        duration = self.bridge.submit_correction_sequence(
-            mcu_id, axis_idx, motor_idx, segments, speed, accel, start_host_secs
-        )
+        duration = invoke(start_host_secs)
         buzz_end_print_time = glmt + duration
         if buzz_end_print_time > self._mcu_pending_end_time:
             self._mcu_pending_end_time = buzz_end_print_time
         return (start_host_secs - now) + duration
+
+    def submit_correction(self, mcu_id, axis_idx, motor_idx, segments, speed, accel):
+        return self._stream_correction_on_timeline(
+            lambda start: self.bridge.submit_correction_sequence(
+                mcu_id, axis_idx, motor_idx, segments, speed, accel, start
+            )
+        )
+
+    def submit_motor_adjust(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
+        return self._stream_correction_on_timeline(
+            lambda start: self.bridge.adjust_motor(
+                mcu_id, axis_idx, motor_idx, delta_mm, speed, accel, start
+            )
+        )
 ```
 
 - [ ] **Step 6: Run tests to verify they pass**
@@ -445,10 +520,11 @@ git commit -m "feat(host): Motion.submit_correction anchors the buzz on the move
 
 ---
 
-## Task 6: Route motors_sync through the toolhead
+## Task 6: Route motors_sync and motor_adjust through the toolhead
 
 **Files:**
 - Modify: `klippy/extras/motors_sync.py:380-394` (`StepperManualMove.manual_move`)
+- Modify: `klippy/extras/motor_adjust.py:42-44` (`MotorAdjust.adjust`)
 
 - [ ] **Step 1: Replace the raw-bridge call with the toolhead method**
 
@@ -473,21 +549,44 @@ In `klippy/extras/motors_sync.py:380-394`, change the body of `manual_move`:
 
 This drops the `bridge = self.toolhead.get_bridge()` lookup (the toolhead now owns the call) and the direct `bridge.submit_correction_sequence(...)`. `duration` is now "seconds from the call until the buzz completes," so the existing `deadline` wait is still correct.
 
-- [ ] **Step 2: Confirm the module imports**
+- [ ] **Step 2: Route MOTOR_ADJUST through the toolhead too**
 
-Run: `python -c "import klippy.extras.motors_sync"`
+In `klippy/extras/motor_adjust.py`, the `adjust` method currently calls the raw bridge:
+
+```python
+        bridge = toolhead.get_bridge()
+        reactor = self.printer.get_reactor()
+        duration = bridge.adjust_motor(
+            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
+        )
+```
+
+Change it to call the toolhead's timeline-aware method (drop the `bridge` lookup):
+
+```python
+        reactor = self.printer.get_reactor()
+        duration = toolhead.submit_motor_adjust(
+            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
+        )
+```
+
+The `deadline`/wait loop below it is unchanged; `duration` is still "seconds from the call until the adjust completes." Leave `_ensure_motor_enabled` and `wait_moves_and_mcu()` as-is.
+
+- [ ] **Step 3: Confirm the modules import**
+
+Run: `python -c "import klippy.extras.motors_sync; import klippy.extras.motor_adjust"`
 Expected: no error.
 
-- [ ] **Step 3: Run any motors_sync unit tests present**
+- [ ] **Step 4: Run any motors_sync / motor_adjust unit tests present**
 
-Run: `python -m pytest test/ -k motors_sync -v`
-Expected: PASS, or "no tests ran" if none exist (acceptable — the behavior is covered by Task 5's `submit_correction` tests; the bench validates the end-to-end buzz).
+Run: `python -m pytest test/ -k "motors_sync or motor_adjust" -v`
+Expected: PASS, or "no tests ran" if none exist (acceptable — the behavior is covered by Task 5's `submit_correction` / `submit_motor_adjust` tests; the bench validates the end-to-end buzz).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add klippy/extras/motors_sync.py
-git commit -m "feat(motors_sync): issue the buzz through the toolhead correction timeline"
+git add klippy/extras/motors_sync.py klippy/extras/motor_adjust.py
+git commit -m "feat(host): issue corrections through the toolhead correction timeline"
 ```
 
 ---
