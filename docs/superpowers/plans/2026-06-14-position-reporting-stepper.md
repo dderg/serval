@@ -4,9 +4,9 @@
 
 **Goal:** Make Mainsail's bracketed `[live]` position (and velocity) honest for stepper machines by asking each MCU "where are you now?" instead of reporting the planner's intent.
 
-**Architecture:** A new kalico-protocol request/response pair (`QueryMotorState`/`MotorStateResponse`) returns each MCU's per-slot executor position+velocity (motor-space, mm, Q16). The host bridge converts motor-space → cartesian via the existing `KinematicsModule::inverse`, caches a snapshot updated by a background poll thread (non-blocking, feeds `motion_report`), and exposes a blocking query (feeds `GET_POSITION`). M114 and the commanded surfaces are untouched.
+**Architecture:** A new mcu-protocol request/response pair (`QueryMotorState`/`MotorStateResponse`) returns each MCU's per-slot executor position+velocity (motor-space, mm, Q16). The host bridge converts motor-space → cartesian via the existing `KinematicsModule::inverse`, caches a snapshot updated by a background poll thread (non-blocking, feeds `motion_report`), and exposes a blocking query (feeds `GET_POSITION`). M114 and the commanded surfaces are untouched.
 
-**Tech Stack:** Rust (kalico-protocol, runtime, kalico-c-api, motion-bridge/pyo3), C (MCU dispatch), Python (klippy `motion_report` + `gcode_move`).
+**Tech Stack:** Rust (mcu-protocol, runtime, kalico-c-api, motion-engine/pyo3), C (MCU dispatch), Python (klippy `motion_report` + `gcode_move`).
 
 **Spec:** `docs/superpowers/specs/2026-06-14-position-reporting-design.md` (this is Plan 1 of 2; Plan 2 = EtherCAT servo surfacing).
 
@@ -23,14 +23,14 @@
 
 | File | Change |
 |---|---|
-| `rust/kalico-protocol/src/messages.rs` | Add `QueryMotorState`/`MotorStateResponse` `MessageKind` variants + `from_u16`; add `MotorStateResponse` body struct + `Encode`/`Decode` |
-| `rust/kalico-protocol/build.rs` | Add the two kinds to the generated C `#define` table |
+| `rust/mcu-protocol/src/messages.rs` | Add `QueryMotorState`/`MotorStateResponse` `MessageKind` variants + `from_u16`; add `MotorStateResponse` body struct + `Encode`/`Decode` |
+| `rust/mcu-protocol/build.rs` | Add the two kinds to the generated C `#define` table |
 | `rust/runtime/src/engine.rs` | Add `Engine::motor_state(i) -> Option<(f32,f32)>` |
 | `rust/runtime/src/engine_tests.rs` (or the engine's existing test module) | Test `motor_state` |
 | `rust/kalico-c-api/src/runtime_ffi.rs` | Add `kalico_runtime_query_motor_state(...)` FFI |
-| `src/kalico_dispatch.c` | Add `handle_query_motor_state` + dispatch case + extern decl |
-| `rust/motion-bridge/src/position_query.rs` (new) | Pure `assemble_cartesian(...)` motor→cartesian helper + tests |
-| `rust/motion-bridge/src/bridge.rs` | `collect_motor_positions` (internal), `query_motor_positions` (pyo3 blocking), position cache + background poll thread, `live_motor_positions` (pyo3 non-blocking) |
+| `src/mcu_transport_dispatch.c` | Add `handle_query_motor_state` + dispatch case + extern decl |
+| `rust/motion-engine/src/position_query.rs` (new) | Pure `assemble_cartesian(...)` motor→cartesian helper + tests |
+| `rust/motion-engine/src/bridge.rs` | `collect_motor_positions` (internal), `query_motor_positions` (pyo3 blocking), position cache + background poll thread, `live_motor_positions` (pyo3 non-blocking) |
 | `klippy/extras/motion_report.py` | Replace zero stub: `get_status` serves cached live position/velocity |
 | `klippy/extras/gcode_move.py` | `GET_POSITION` rungs from blocking query; error → `ERR` line, no raise |
 
@@ -39,12 +39,12 @@
 ## Task 1: Protocol message kinds
 
 **Files:**
-- Modify: `rust/kalico-protocol/src/messages.rs` (the `MessageKind` enum + `from_u16`)
-- Modify: `rust/kalico-protocol/build.rs` (C `#define` generation table)
+- Modify: `rust/mcu-protocol/src/messages.rs` (the `MessageKind` enum + `from_u16`)
+- Modify: `rust/mcu-protocol/build.rs` (C `#define` generation table)
 
 - [ ] **Step 1: Read the enum and pick discriminants**
 
-Read `rust/kalico-protocol/src/messages.rs` — find the `MessageKind` enum and confirm `0x0044`/`0x0045` are unused (existing: `QueryRuntimeCaps=0x0040`, `RuntimeCapsResponse=0x0041`, `ClaimHandshake=0x0042`, `ClaimHandshakeReply=0x0043`). If `0x0044`/`0x0045` are taken, use the next free request/response pair and keep the rest of this plan's hex in sync.
+Read `rust/mcu-protocol/src/messages.rs` — find the `MessageKind` enum and confirm `0x0044`/`0x0045` are unused (existing: `QueryRuntimeCaps=0x0040`, `RuntimeCapsResponse=0x0041`, `ClaimHandshake=0x0042`, `ClaimHandshakeReply=0x0043`). If `0x0044`/`0x0045` are taken, use the next free request/response pair and keep the rest of this plan's hex in sync.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -62,7 +62,7 @@ fn motor_state_kinds_roundtrip() {
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `cd rust && cargo nextest run -p kalico-protocol -E 'test(motor_state_kinds_roundtrip)'`
+Run: `cd rust && cargo nextest run -p mcu-protocol -E 'test(motor_state_kinds_roundtrip)'`
 Expected: FAIL — `no variant named QueryMotorState`.
 
 - [ ] **Step 4: Add the variants and from_u16 arms**
@@ -83,30 +83,30 @@ In `from_u16`, add the matching arms next to the other `0x004x` arms:
 
 - [ ] **Step 5: Run test to verify it passes**
 
-Run: `cd rust && cargo nextest run -p kalico-protocol -E 'test(motor_state_kinds_roundtrip)'`
+Run: `cd rust && cargo nextest run -p mcu-protocol -E 'test(motor_state_kinds_roundtrip)'`
 Expected: PASS.
 
 - [ ] **Step 6: Add the kinds to the generated C header**
 
-Read `rust/kalico-protocol/build.rs` and find the table it iterates to emit `#define KALICO_MSG_*` lines (around line 60, the `BOOTSTRAP_TAGS` loop, and/or a per-message-kind loop). Add entries so the generator emits:
+Read `rust/mcu-protocol/build.rs` and find the table it iterates to emit `#define MCU_MSG_*` lines (around line 60, the `BOOTSTRAP_TAGS` loop, and/or a per-message-kind loop). Add entries so the generator emits:
 
 ```c
-#define KALICO_MSG_QUERY_MOTOR_STATE 0x0044
-#define KALICO_MSG_MOTOR_STATE_RESPONSE 0x0045
+#define MCU_MSG_QUERY_MOTOR_STATE 0x0044
+#define MCU_MSG_MOTOR_STATE_RESPONSE 0x0045
 ```
 
-Follow the exact tuple/format the existing `KALICO_MSG_QUERY_RUNTIME_CAPS` line uses in that table. If the table is keyed off the `MessageKind` enum automatically, no edit is needed here — verify by Step 7.
+Follow the exact tuple/format the existing `MCU_MSG_QUERY_RUNTIME_CAPS` line uses in that table. If the table is keyed off the `MessageKind` enum automatically, no edit is needed here — verify by Step 7.
 
 - [ ] **Step 7: Regenerate and verify the header**
 
-Run: `cd rust && cargo build -p kalico-protocol`
-Then: `grep -n "QUERY_MOTOR_STATE\|MOTOR_STATE_RESPONSE" ../src/kalico_protocol_schema.h`
+Run: `cd rust && cargo build -p mcu-protocol`
+Then: `grep -n "QUERY_MOTOR_STATE\|MOTOR_STATE_RESPONSE" ../src/mcu_protocol_schema.h`
 Expected: both `#define`s present with values `0x0044` / `0x0045`.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add rust/kalico-protocol/src/messages.rs rust/kalico-protocol/build.rs src/kalico_protocol_schema.h
+git add rust/mcu-protocol/src/messages.rs rust/mcu-protocol/build.rs src/mcu_protocol_schema.h
 git commit -m "feat(protocol): add QueryMotorState/MotorStateResponse message kinds"
 ```
 
@@ -115,7 +115,7 @@ git commit -m "feat(protocol): add QueryMotorState/MotorStateResponse message ki
 ## Task 2: MotorStateResponse body codec
 
 **Files:**
-- Modify: `rust/kalico-protocol/src/messages.rs`
+- Modify: `rust/mcu-protocol/src/messages.rs`
 
 Wire format: `count: u8`, then `count` repetitions of `[slot: u8, pos_q16: i32, vel_q16: i32]` (9 bytes each, little-endian). `QueryMotorState` has an empty body, so it needs no struct.
 
@@ -155,7 +155,7 @@ fn motor_state_response_empty_roundtrip() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd rust && cargo nextest run -p kalico-protocol -E 'test(motor_state_response)'`
+Run: `cd rust && cargo nextest run -p mcu-protocol -E 'test(motor_state_response)'`
 Expected: FAIL — `cannot find type MotorStateResponse`.
 
 - [ ] **Step 3: Implement the structs and codec**
@@ -213,17 +213,17 @@ impl Decode for MotorStateResponse {
 }
 ```
 
-If `put_i32`/`get_i32` are not already in scope in messages.rs, add them to the `use crate::codec::{...}` line (they exist in `rust/kalico-protocol/src/codec.rs`).
+If `put_i32`/`get_i32` are not already in scope in messages.rs, add them to the `use crate::codec::{...}` line (they exist in `rust/mcu-protocol/src/codec.rs`).
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd rust && cargo nextest run -p kalico-protocol -E 'test(motor_state_response)'`
+Run: `cd rust && cargo nextest run -p mcu-protocol -E 'test(motor_state_response)'`
 Expected: PASS (both tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add rust/kalico-protocol/src/messages.rs
+git add rust/mcu-protocol/src/messages.rs
 git commit -m "feat(protocol): MotorStateResponse body codec"
 ```
 
@@ -355,13 +355,13 @@ git commit -m "feat(c-api): kalico_runtime_query_motor_state FFI"
 ## Task 5: MCU C dispatch handler
 
 **Files:**
-- Modify: `src/kalico_dispatch.c`
+- Modify: `src/mcu_transport_dispatch.c`
 
-Model on `handle_query_runtime_caps` (kalico_dispatch.c:272) and `send_push_correction_pieces_response` (multi-byte body packing, :213).
+Model on `handle_query_runtime_caps` (mcu_transport_dispatch.c:272) and `send_push_correction_pieces_response` (multi-byte body packing, :213).
 
 - [ ] **Step 1: Add the extern declaration**
 
-Near the top of `kalico_dispatch.c` (where `extern void *runtime_handle;` is declared, ~line 13), add:
+Near the top of `mcu_transport_dispatch.c` (where `extern void *runtime_handle;` is declared, ~line 13), add:
 
 ```c
 extern int kalico_runtime_query_motor_state(
@@ -389,7 +389,7 @@ handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
     if (n < 0)
         n = 0;
     uint8_t payload[PER_MESSAGE_HEADER_LEN + 1 + 8 * 9];
-    encode_message_header(payload, KALICO_MSG_MOTOR_STATE_RESPONSE,
+    encode_message_header(payload, MCU_MSG_MOTOR_STATE_RESPONSE,
                           MESSAGE_VERSION_DEFAULT, correlation_id);
     uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
     b[0] = (uint8_t)n;
@@ -406,16 +406,16 @@ handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
         *p++ = (uint8_t)((vel[i] >> 24) & 0xFF);
     }
     uint16_t used = (uint16_t)(PER_MESSAGE_HEADER_LEN + 1 + n * 9);
-    kalico_transport_send_frame(KALICO_CHANNEL_CONTROL, payload, used);
+    mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, used);
 }
 ```
 
 - [ ] **Step 3: Wire into the dispatch switch**
 
-In the `switch (kind)` block (kalico_dispatch.c:183), add:
+In the `switch (kind)` block (mcu_transport_dispatch.c:183), add:
 
 ```c
-case KALICO_MSG_QUERY_MOTOR_STATE:
+case MCU_MSG_QUERY_MOTOR_STATE:
     handle_query_motor_state(correlation_id, body, body_len);
     return;
 ```
@@ -428,7 +428,7 @@ Expected: builds clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kalico_dispatch.c
+git add src/mcu_transport_dispatch.c
 git commit -m "feat(mcu): handle_query_motor_state dispatch"
 ```
 
@@ -437,14 +437,14 @@ git commit -m "feat(mcu): handle_query_motor_state dispatch"
 ## Task 6: Pure motor→cartesian assembly helper
 
 **Files:**
-- Create: `rust/motion-bridge/src/position_query.rs`
-- Modify: `rust/motion-bridge/src/lib.rs` (add `mod position_query;`)
+- Create: `rust/motion-engine/src/position_query.rs`
+- Modify: `rust/motion-engine/src/lib.rs` (add `mod position_query;`)
 
 Isolates the testable math: given per-slot motor-space (pos,vel) and the kinematics tag that owns X, produce a cartesian `{axis_name: (pos_mm, vel_mm_s)}` map. Uses `KinematicsModule::inverse` (kinematics.rs:88).
 
 - [ ] **Step 1: Write the failing test**
 
-Create `rust/motion-bridge/src/position_query.rs`:
+Create `rust/motion-engine/src/position_query.rs`:
 
 ```rust
 use crate::kinematics::KinematicsModule;
@@ -510,7 +510,7 @@ mod tests {
 
 - [ ] **Step 2: Register the module**
 
-In `rust/motion-bridge/src/lib.rs`, add alongside the other `mod` lines:
+In `rust/motion-engine/src/lib.rs`, add alongside the other `mod` lines:
 
 ```rust
 mod position_query;
@@ -520,13 +520,13 @@ mod position_query;
 
 - [ ] **Step 3: Run test to verify it fails, then passes**
 
-Run: `cd rust && cargo nextest run -p motion-bridge -E 'test(position_query)'`
+Run: `cd rust && cargo nextest run -p motion-engine -E 'test(position_query)'`
 Expected first run: FAIL (module/test new) → after Steps 1–2 compile, PASS both tests. Fix the `KinematicsModule::inverse` / `from_tag` call sites if signatures differ (see kinematics.rs:46,88).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add rust/motion-bridge/src/position_query.rs rust/motion-bridge/src/lib.rs
+git add rust/motion-engine/src/position_query.rs rust/motion-engine/src/lib.rs
 git commit -m "feat(bridge): pure motor->cartesian position assembly helper"
 ```
 
@@ -535,22 +535,22 @@ git commit -m "feat(bridge): pure motor->cartesian position assembly helper"
 ## Task 7: Bridge blocking query (`query_motor_positions`)
 
 **Files:**
-- Modify: `rust/motion-bridge/src/bridge.rs`
+- Modify: `rust/motion-engine/src/bridge.rs`
 
 Model on `motion_state_at_clock` (bridge.rs:3672) for iterating `mcu_axis_configs` and returning a `HashMap<String,(f64,f64)>` to Python, and on `set_position` (bridge.rs:3055) for locking `mcus`, identifying serial vs EtherCAT (`conn.ethercat_socket.is_some()`), and reaching `conn.host_io`. Use `io.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)` (host_io/mod.rs:725) and decode with `MotorStateResponse::decode_from`.
 
 - [ ] **Step 1: Add an internal collector (no Python)**
 
-Add a private method on `PyMotionBridge` (NOT `#[pyo3]`) so the background thread (Task 8) can reuse it:
+Add a private method on `PyMotionEngine` (NOT `#[pyo3]`) so the background thread (Task 8) can reuse it:
 
 ```rust
 fn collect_motor_positions(
     &self,
     timeout: std::time::Duration,
 ) -> Result<std::collections::HashMap<String, (f64, f64)>, String> {
-    use kalico_protocol::codec::{Cursor, Decode};
-    use kalico_protocol::messages::MotorStateResponse;
-    use kalico_protocol::MessageKind;
+    use mcu_protocol::codec::{Cursor, Decode};
+    use mcu_protocol::messages::MotorStateResponse;
+    use mcu_protocol::MessageKind;
 
     // Snapshot config + serial host_io handles under the locks, then release.
     let configs = self
@@ -602,11 +602,11 @@ fn collect_motor_positions(
 }
 ```
 
-NOTE on locking: `kalico_call` blocks on a round-trip; the snippet above scopes the `mcus` lock to just obtaining `io` then calls outside — verify `conn.host_io` (`KalicoHostIo`) can be cloned/Arc'd so the call happens after the lock drops. If `host_io` is not cloneable, restructure to collect `(mcu_id, io_handle)` clones first. Read the `Mcu`/connection struct in bridge.rs (search `host_io`) and adapt.
+NOTE on locking: `kalico_call` blocks on a round-trip; the snippet above scopes the `mcus` lock to just obtaining `io` then calls outside — verify `conn.host_io` (`McuHostIo`) can be cloned/Arc'd so the call happens after the lock drops. If `host_io` is not cloneable, restructure to collect `(mcu_id, io_handle)` clones first. Read the `Mcu`/connection struct in bridge.rs (search `host_io`) and adapt.
 
 - [ ] **Step 2: Add the pyo3 wrapper**
 
-In the `#[pymethods] impl PyMotionBridge` block, add:
+In the `#[pymethods] impl PyMotionEngine` block, add:
 
 ```rust
 #[pyo3(signature = (timeout_s=0.25))]
@@ -623,13 +623,13 @@ fn query_motor_positions(
 
 - [ ] **Step 3: Build and run bridge tests**
 
-Run: `cd rust && cargo build -p motion-bridge && cargo nextest run -p motion-bridge`
+Run: `cd rust && cargo build -p motion-engine && cargo nextest run -p motion-engine`
 Expected: builds clean; existing tests pass. (The collector itself needs an MCU; it's exercised in Task 11. The math is covered by Task 6.)
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add rust/motion-bridge/src/bridge.rs
+git add rust/motion-engine/src/bridge.rs
 git commit -m "feat(bridge): query_motor_positions blocking live position query"
 ```
 
@@ -638,13 +638,13 @@ git commit -m "feat(bridge): query_motor_positions blocking live position query"
 ## Task 8: Position cache + background poll thread + `live_motor_positions`
 
 **Files:**
-- Modify: `rust/motion-bridge/src/bridge.rs`
+- Modify: `rust/motion-engine/src/bridge.rs`
 
 Adds a cached snapshot updated on a fixed cadence by a dedicated thread; `get_status` reads it without blocking. On poll failure: log + keep last (fail-loud exception per spec §6).
 
 - [ ] **Step 1: Add the cache field**
 
-In the `PyMotionBridge` struct, add (alongside `motion_history`):
+In the `PyMotionEngine` struct, add (alongside `motion_history`):
 
 ```rust
 // (axis_map, host_monotonic_secs_of_last_successful_poll)
@@ -717,13 +717,13 @@ fn live_motor_positions(&self) -> std::collections::HashMap<String, (f64, f64)> 
 
 - [ ] **Step 5: Build and test**
 
-Run: `cd rust && cargo build -p motion-bridge && cargo nextest run -p motion-bridge`
+Run: `cd rust && cargo build -p motion-engine && cargo nextest run -p motion-engine`
 Expected: builds clean; tests pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add rust/motion-bridge/src/bridge.rs
+git add rust/motion-engine/src/bridge.rs
 git commit -m "feat(bridge): background live-position cache + live_motor_positions"
 ```
 
@@ -755,7 +755,7 @@ def _status(monkeypatched_report):
 
 def test_live_position_from_bridge(make_motion_report):
     # make_motion_report: a fixture/helper that builds PrinterMotionReport with
-    # a fake printer whose lookup_object("motion_bridge") returns _FakeBridge.
+    # a fake printer whose lookup_object("motion_engine") returns _FakeBridge.
     rep = make_motion_report(_FakeBridge({
         "x": (10.0, 1.0), "y": (20.0, 0.0), "z": (5.0, 0.0), "e": (2.0, 3.0),
     }))
@@ -781,7 +781,7 @@ Replace `PrinterMotionReport.get_status` (motion_report.py:49) and cache the bri
 ```python
     def _connect(self):
         self.last_status["steppers"] = list(sorted(self.steppers.keys()))
-        self.bridge = self.printer.lookup_object("motion_bridge", None)
+        self.bridge = self.printer.lookup_object("motion_engine", None)
 
     def get_status(self, eventtime):
         gcode = self.printer.lookup_object("gcode")
@@ -803,7 +803,7 @@ Replace `PrinterMotionReport.get_status` (motion_report.py:49) and cache the bri
         }
 ```
 
-(Confirm the `motion_bridge` object name with `grep -rn 'lookup_object("motion_bridge"' klippy/`; use the exact registered name.)
+(Confirm the `motion_engine` object name with `grep -rn 'lookup_object("motion_engine"' klippy/`; use the exact registered name.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -849,7 +849,7 @@ Rewrite the measured rungs of `cmd_GET_POSITION` (keep the `toolhead`/`gcode`/`b
         toolhead = self.printer.lookup_object("toolhead", None)
         if toolhead is None:
             raise gcmd.error("Printer not ready")
-        bridge = self.printer.lookup_object("motion_bridge", None)
+        bridge = self.printer.lookup_object("motion_engine", None)
         try:
             axes = bridge.query_motor_positions() if bridge is not None else {}
             measured = " ".join(
@@ -918,4 +918,4 @@ Open/update the PR once green.
 
 - **Spec coverage:** §1 MCU primitive → Tasks 1–5; §3 bridge query+cache → Tasks 6–8; §4 motion_report+GET_POSITION → Tasks 9–10; §5 velocity via `inverse` → Tasks 6,9; §6 cadence + fail handling → Task 8 (cache log+stale) and Task 10 (`ERR` no-raise); testing → Task 11. EtherCAT (§2) is Plan 2 — intentionally excluded.
 - **Type consistency:** `MotorStateResponse{motors: Vec<MotorSample{slot,pos_q16,vel_q16}>}` is used identically in Tasks 2, 7; `assemble_cartesian(&[Option<f64>;8], &[Option<f64>;8], u8)` consistent across Tasks 6–8; `query_motor_positions`/`live_motor_positions` names consistent across Tasks 7–10.
-- **Known adaptation points (read-the-code, not placeholders):** exact engine-test construction (Task 3), `KalicoHostIo` cloneability for lock scoping (Task 7), the monotonic host-clock helper for the staleness stamp (Task 8), and this fork's klippy test harness conventions (Tasks 9–10). Each step says what to read and what to write.
+- **Known adaptation points (read-the-code, not placeholders):** exact engine-test construction (Task 3), `McuHostIo` cloneability for lock scoping (Task 7), the monotonic host-clock helper for the staleness stamp (Task 8), and this fork's klippy test harness conventions (Tasks 9–10). Each step says what to read and what to write.

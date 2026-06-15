@@ -273,7 +273,7 @@ class _LinearKinematics:
         )
 
     def set_position(self, newpos, homing_axes=()):
-        self._motion.bridge.set_position(newpos[0], newpos[1], newpos[2])
+        self._motion.engine.set_position(newpos[0], newpos[1], newpos[2])
         for axis in homing_axes:
             self.limits[axis] = self.rails[axis].get_range()
             self._parked_dirty[axis] = False

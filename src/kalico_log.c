@@ -10,8 +10,8 @@
 
 #include "board/irq.h"
 #include "board/misc.h"
-#include "kalico_dispatch.h"
-#include "kalico_protocol_schema.h"
+#include "mcu_transport_dispatch.h"
+#include "mcu_protocol_schema.h"
 #include "kalico_log.h"
 
 // Foreground-safe, defined in src/runtime_tick.c; no public header declares it.
@@ -90,8 +90,8 @@ send_log_frame(const struct kalico_log_entry *e)
     uint64_t mcu_tick = widen_log_tick(e->tick);
 
     uint8_t payload[KALICO_LOG_HEADER_LEN + KALICO_LOG_BODY_LEN];
-    payload[0] = (uint8_t)(KALICO_MSG_MCU_LOG & 0xFF);
-    payload[1] = (uint8_t)((KALICO_MSG_MCU_LOG >> 8) & 0xFF);
+    payload[0] = (uint8_t)(MCU_MSG_MCU_LOG & 0xFF);
+    payload[1] = (uint8_t)((MCU_MSG_MCU_LOG >> 8) & 0xFF);
     payload[2] = KALICO_LOG_MSG_VERSION;
     payload[3] = 0;
     payload[4] = 0;
@@ -125,7 +125,7 @@ send_log_frame(const struct kalico_log_entry *e)
     b[22] = (uint8_t)((e->args[1] >> 16) & 0xFF);
     b[23] = (uint8_t)((e->args[1] >> 24) & 0xFF);
 
-    return kalico_transport_send_frame(KALICO_CHANNEL_EVENTS, payload,
+    return mcu_transport_send_frame(MCU_CHANNEL_EVENTS, payload,
                                        (uint16_t)sizeof(payload));
 }
 

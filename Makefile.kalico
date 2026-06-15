@@ -1,31 +1,31 @@
-# Makefile.kalico — build the PyO3 motion-bridge module.
+# Makefile.kalico — build the PyO3 motion-engine module.
 #
-# Builds the Rust cdylib and copies it to klippy/motion_bridge_native.so so
+# Builds the Rust cdylib and copies it to klippy/_motion_engine.so so
 # that klippy can import it as a normal Python extension module.  Python
 # requires the .so extension on all platforms; on macOS the Rust toolchain
 # produces a .dylib which we rename on copy.
 #
 # Usage:
-#   make -f Makefile.kalico motion-bridge
-#   make -f Makefile.kalico clean-motion-bridge
+#   make -f Makefile.kalico motion-engine
+#   make -f Makefile.kalico clean-motion-engine
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
-  MOTION_BRIDGE_EXT = dylib
+  MOTION_ENGINE_EXT = dylib
 else
-  MOTION_BRIDGE_EXT = so
+  MOTION_ENGINE_EXT = so
 endif
 
-MOTION_BRIDGE_SRC  = rust/target/release/libmotion_bridge_native.$(MOTION_BRIDGE_EXT)
-MOTION_BRIDGE_DEST = klippy/motion_bridge_native.so
+MOTION_ENGINE_SRC  = rust/target/release/lib_motion_engine.$(MOTION_ENGINE_EXT)
+MOTION_ENGINE_DEST = klippy/_motion_engine.so
 
-motion-bridge:
-	cd rust && cargo build -p motion-bridge --release --features extension-module
-	cp $(MOTION_BRIDGE_SRC) $(MOTION_BRIDGE_DEST)
+motion-engine:
+	cd rust && cargo build -p motion-engine --release --features extension-module
+	cp $(MOTION_ENGINE_SRC) $(MOTION_ENGINE_DEST)
 
-clean-motion-bridge:
-	rm -f $(MOTION_BRIDGE_DEST)
-	cd rust && cargo clean -p motion-bridge
+clean-motion-engine:
+	rm -f $(MOTION_ENGINE_DEST)
+	cd rust && cargo clean -p motion-engine
 
 # Hardware EtherCAT endpoint — links bench/libecrt.a + SOEM; build on the Pi.
 # Never built in CI (CI builds without --features hw). ECRT_LIB_DIR is omitted:
@@ -34,15 +34,15 @@ clean-motion-bridge:
 ethercat-endpoint-hw:
 	$(MAKE) -C bench
 	cd rust && SOEM_LIB_DIR=$(HOME)/ethercat/SOEM/build \
-		cargo build -p kalico-ethercat-rt --features hw --bin kalico-ethercat-rt --release
+		cargo build -p ethercat-rt --features hw --bin ethercat-rt --release
 
 # Capabilities so the endpoint runs unprivileged (raw socket, RT sched, mlockall).
 # sudo, once per rebuild of the binary. Not run in CI.
 setcap-ethercat:
-	sudo setcap cap_net_raw,cap_sys_nice,cap_ipc_lock+ep rust/target/release/kalico-ethercat-rt
+	sudo setcap cap_net_raw,cap_sys_nice,cap_ipc_lock+ep rust/target/release/ethercat-rt
 
 ethercat-stub:
-	cd rust && cargo build -p kalico-ethercat-rt --bin kalico-ethercat-rt-stub --release
+	cd rust && cargo build -p ethercat-rt --bin ethercat-rt-stub --release
 
-.PHONY: motion-bridge clean-motion-bridge \
+.PHONY: motion-engine clean-motion-engine \
 	ethercat-endpoint-hw setcap-ethercat ethercat-stub

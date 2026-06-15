@@ -23,7 +23,7 @@ def patch_motion(path):
     print(f"patch_klippy_traces: patched {path}")
 
 
-def patch_motion_bridge(path):
+def patch_motion_engine(path):
     """Increase attach_serial timeout for sim (vtime makes clock advance faster)."""
     text = path.read_text()
     old = "return self._bridge.attach_serial(mcu_handle, serial_path, baud, timeout_s)"
@@ -58,7 +58,7 @@ if __name__ == "__main__":
         p = pathlib.Path(arg)
         if p.name == "motion.py":
             patch_motion(p)
-        elif p.name == "motion_bridge.py":
-            patch_motion_bridge(p)
+        elif p.name == "motion_engine.py":
+            patch_motion_engine(p)
         elif p.name == "mcu.py":
             patch_mcu_homing(p)

@@ -4,9 +4,9 @@ verify the response carries the SMALL-profile sizing constants.
 
 Runs against the booted F446 Renode sim (USART2 → tcp://localhost:3334).
 Hand-frames the kalico-native packet directly so this stays decoupled from
-the higher-level kalico-host-rt Rust code.
+the higher-level host-rt Rust code.
 
-Wire format (per src/kalico_dispatch.c + rust/kalico-protocol/src/messages.rs):
+Wire format (per src/mcu_transport_dispatch.c + rust/mcu-protocol/src/messages.rs):
 
   Outer frame:
     sync         u8   = 0x55
@@ -53,7 +53,7 @@ EXPECTED_SMALL = {
 def crc16_ccitt(data: bytes) -> int:
     """CRC-16/CCITT (poly 0x1021, init 0xFFFF, no reflection, no final xor) —
     byte-at-a-time variant. Matches src/generic/crc16_ccitt.c (firmware) and
-    rust/kalico-native-transport/src/frame.rs::crc16_ccitt (host)."""
+    rust/mcu-transport/src/frame.rs::crc16_ccitt (host)."""
     crc = 0xFFFF
     for byte in data:
         d = byte ^ (crc & 0x00FF)

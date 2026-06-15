@@ -14,7 +14,7 @@
 #include "fault_handler.h" // diag_task_heartbeat, diag_record_tx_drop_*
 #include "generic/usbstd.h" // struct usb_device_descriptor
 #include "generic/usbstd_cdc.h" // struct usb_cdc_header_descriptor
-#include "kalico_demux.h" // kalico_demux_pump
+#include "mcu_demux.h" // mcu_demux_pump
 #include "sched.h" // sched_wake_task
 #include "usb_cdc.h" // usb_notify_ep0
 
@@ -147,7 +147,7 @@ usb_bulk_out_task(void)
     } else {
         usb_notify_bulk_out();
     }
-    kalico_demux_pump(receive_buf, rpos);
+    mcu_demux_pump(receive_buf, rpos);
     receive_pos = 0;
 }
 DECL_TASK(usb_bulk_out_task);

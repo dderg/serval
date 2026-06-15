@@ -13,7 +13,7 @@ already diverged:
   (the hardened four-branch walker carrying the ⚠️ DO-NOT-MODIFY banner that fixes
   the `PieceStartInPast` hardware regression). Returns `(pos, vel)`, then
   `dispatch_axis` turns that into step pulses.
-- **`kalico-ethercat-rt::curves::AxisRing::sample`** — a *re-implementation* of the
+- **`ethercat-rt::curves::AxisRing::sample`** — a *re-implementation* of the
   same walk + Horner eval, but thinner and already drifted: throws velocity away,
   has no `PieceStartInPast` fault, slightly different boundary semantics. Then it
   writes the position to a servo PDO.
@@ -173,7 +173,7 @@ drive being off (the stepper MCU is USB-powered).
    "stopped after first move" class). ✅ DONE — no bugs found in core logic.
 
 ### Deferred / next
-- **`#38` host bridge + klippy wiring** — additive port onto the shared `motion-bridge`;
+- **`#38` host bridge + klippy wiring** — additive port onto the shared `motion-engine`;
   the one remaining piece for end-to-end "usable." Touches the bridge shared with the
   stepper path, so it must be kept strictly additive (EtherCAT-only branches) and reviewed
   for stepper-path safety; full validation is hardware-gated.
@@ -188,7 +188,7 @@ drive being off (the stepper MCU is USB-powered).
 - **Endpoint driver-comms:** the SOEM/ecrt DC loop + PDO mapping (`wkc != 3` fault
   halt), `server.rs` non-blocking discipline, `wire`/`scale`/`clock`/`ffi`,
   `bench/libecrt.h`, stub binary, `ec-test-client`, `stub_loop` test.
-- **Host bridge:** `unix_native_conn.rs` (UDS NativeCall + heartbeat callback),
+- **Host bridge:** `mcu_serial_conn.rs` (UDS McuCall + heartbeat callback),
   `pump.rs` `WireSink`→`McuTransport` enum, `bridge.rs` branches (`claim_ethercat_node`,
   1 GHz clock registration, `attach_heartbeat_callback`, `ethercat_mcu_ids`),
   `ethercat_transport.rs`.

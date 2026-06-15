@@ -49,7 +49,7 @@ Constraint: callbacks run in the reactor thread and must be non-blocking.
 **2. Homing loop thread**
 
 A scoped thread spawned by `run_probe_homing`. Owns:
-- Bottom MCU's `Arc<KalicoHostIo>` (for `extend_homing_deadline`)
+- Bottom MCU's `Arc<McuHostIo>` (for `extend_homing_deadline`)
 - Shared `AtomicBool` (set by interceptor on trigger)
 - Move parameters and sensor-fault timeout
 
@@ -154,7 +154,7 @@ The interceptor callback for homing:
 3. If `can_trigger == 1` (periodic heartbeat): no-op
 
 The callback captures:
-- `Arc<KalicoHostIo>` for the bottom MCU
+- `Arc<McuHostIo>` for the bottom MCU
 - `Arc<AtomicBool>` shared with the homing loop thread
 - `arm_id: u32`
 
@@ -196,10 +196,10 @@ code. Renamed to `sensor_fault_timeout` to make the distinction clear.
 ## Files to Modify
 
 **Rust (new/modified):**
-- `rust/kalico-host-rt/src/host_io/reactor.rs` — interceptor table + dispatch
-- `rust/kalico-host-rt/src/host_io/mod.rs` — interceptor registration API
-- `rust/motion-bridge/src/bridge.rs` — `run_probe_homing` pymethod
-- `rust/motion-bridge/src/probe_homing.rs` — new module: loop thread + interceptor setup
+- `rust/host-rt/src/host_io/reactor.rs` — interceptor table + dispatch
+- `rust/host-rt/src/host_io/mod.rs` — interceptor registration API
+- `rust/motion-engine/src/bridge.rs` — `run_probe_homing` pymethod
+- `rust/motion-engine/src/probe_homing.rs` — new module: loop thread + interceptor setup
 
 **Python (modified):**
 - `klippy/motion_toolhead.py` — `_drip_move_software_trip` simplified to call `run_probe_homing`

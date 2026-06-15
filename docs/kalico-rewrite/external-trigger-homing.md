@@ -122,7 +122,7 @@ back-dated to contact onset, immune to braking distance.
 
 ### 3. Remote endstop variant (Python)
 
-`RemoteBridgeEndstop` (sibling of `BridgeEndstop` in `bridge_endstop.py`):
+`RemoteMotionEndstop` (sibling of `MotionEndstop` in `bridge_endstop.py`):
 
 - Constructed by a provider with `(probe_mcu, trsync_oid)`; `endstop_id`
   from the shared provider allocator (ids ≥ 3).

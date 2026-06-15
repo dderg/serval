@@ -63,7 +63,7 @@ Match existing `CURVE_POOL_N` Kconfig values:
 | H7 (LARGE) | 16 | 16 | ~516 | ~8.2 KB |
 | F4 (SMALL) | 8 | 16 | ~516 | ~4.1 KB |
 
-The curve pool lives inside `RuntimeContext` (the C-owned `rt_storage` buffer per the §11.2 storage-ownership invariant — NOT in `kalico_buf`, which is the unrelated native-transport demux receive buffer in `src/kalico_demux.c`). Today's NURBS curve-pool footprint inside `RuntimeContext` is sized by `MAX_CONTROL_POINTS` × `MAX_KNOT_VECTOR_LEN` × `CURVE_POOL_N` (LARGE: 1830 × 4 + 1850 × 4 = 14720 bytes per slot × 16 slots ≈ 235 KB of `RuntimeContext`). The cubic-piece replacement is ~516 bytes per slot. Net savings inside `RuntimeContext`:
+The curve pool lives inside `RuntimeContext` (the C-owned `rt_storage` buffer per the §11.2 storage-ownership invariant — NOT in `kalico_buf`, which is the unrelated native-transport demux receive buffer in `src/mcu_demux.c`). Today's NURBS curve-pool footprint inside `RuntimeContext` is sized by `MAX_CONTROL_POINTS` × `MAX_KNOT_VECTOR_LEN` × `CURVE_POOL_N` (LARGE: 1830 × 4 + 1850 × 4 = 14720 bytes per slot × 16 slots ≈ 235 KB of `RuntimeContext`). The cubic-piece replacement is ~516 bytes per slot. Net savings inside `RuntimeContext`:
 
 - H7: NURBS curve-pool portion ~235 KB → cubic-piece portion ~8.2 KB. `RUNTIME_STORAGE_SIZE_LARGE` Kconfig can drop dramatically (current 307712 → expected ~80–100 KB after migration, exact number TBD from `size_of::<RuntimeContext>()` measurement). The `kalico_buf` and other `.axi_bss` occupants stay unchanged.
 - F4: NURBS curve-pool portion ~16 KB → cubic-piece portion ~4.1 KB. `RUNTIME_STORAGE_SIZE_SMALL` Kconfig drops accordingly.
@@ -111,7 +111,7 @@ The `%*s` tail is exactly `stepper_count * 4` bytes. Firmware C handler validate
 
 ### 3.2 `runtime_handle_load_curve_cubic` — new, replaces NURBS load_curve
 
-One-shot upload. The kalico-native-transport carries frames up to 64 KB; a 16-piece × 32-byte curve plus a small header fits trivially in one frame. The C dispatch handler reads the full frame and calls the FFI once.
+One-shot upload. The mcu-transport carries frames up to 64 KB; a 16-piece × 32-byte curve plus a small header fits trivially in one frame. The C dispatch handler reads the full frame and calls the FFI once.
 
 Wire frame body:
 
@@ -721,10 +721,10 @@ Identical to today: `runtime_emit_step_pulses` reads `invert_dir` from the C-sid
 - `kalico_runtime_modulated_tick`.
 - `cbindgen.toml` updated, `include/kalico_runtime.h` regenerated.
 
-### 6.4 Host (`rust/motion-bridge/`, `klippy/`)
+### 6.4 Host (`rust/motion-engine/`, `klippy/`)
 
-- `motion-bridge/src/bridge.rs` + `producer.rs`: NURBS upload paths (begin/chunk/finalize over control points + knots + weights + degree).
-- `motion-bridge` planner serialization: stop shaping segments as NURBS, start emitting cubic Bezier per-axis pieces.
+- `motion-engine/src/bridge.rs` + `producer.rs`: NURBS upload paths (begin/chunk/finalize over control points + knots + weights + degree).
+- `motion-engine` planner serialization: stop shaping segments as NURBS, start emitting cubic Bezier per-axis pieces.
 - `klippy/motion_toolhead.py`: drop the `config_runtime_stepper` emit; emit `kalico_configure_axis` per axis instead.
 
 ### 6.5 What stays unchanged
@@ -807,7 +807,7 @@ Flag-day cutover. Build will fail mid-sequence (and that's OK because the curren
 2. **Delete legacy Rust** — `step_ring.rs`, `step_time.rs`, `step_producer.rs`, `Engine::producer_step`, `Engine::arm_step_timer*`, vestigial `StepperRef` fields. Build still broken: FFI consumers of those symbols won't link.
 3. **Update FFI surface** — drop NURBS `runtime_handle_load_curve`, add `_load_curve_cubic`, extend `kalico_runtime_configure_axis` for stepper bindings. Rebuild `cbindgen` header. Build closer to green: only C-side stragglers remain.
 4. **Delete legacy C** — `step_time_event`, `runtime_producer_event`, `init_step_time_timers`, `command_config_runtime_stepper`, the `SF_RESCHEDULE_FLOOR` family of defines, diag counters. Firmware builds green.
-5. **Bridge migration** — `motion-bridge` emits cubic curves via the new FFI, no NURBS path. `host-rt` updates. Host-side compiles.
+5. **Bridge migration** — `motion-engine` emits cubic curves via the new FFI, no NURBS path. `host-rt` updates. Host-side compiles.
 6. **Klippy migration** — `motion_toolhead.py` emits the new `configure_axis` per axis, not legacy `config_runtime_stepper`. End-to-end host + firmware build green.
 7. **Tests + klipper-sim** — unit tests pass on host, klipper-sim apples-to-apples comparison ≤ 500 ns step-time drift across the Stage-1..7 G-code matrix.
 

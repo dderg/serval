@@ -38,7 +38,7 @@ PY
 echo "  host-py.jsonl: $(wc -l < "$EVENTS/host-py.jsonl") lines"
 
 echo "== 3. emit host-rust.jsonl via the real Rust serializer (integration test) =="
-( cd "$ROOT/rust" && cargo test -p motion-bridge --test logging_integration >/dev/null 2>&1 )
+( cd "$ROOT/rust" && cargo test -p motion-engine --test logging_integration >/dev/null 2>&1 )
 RUST_OUT="$(find "${TMPDIR:-/tmp}" -name host-rust.jsonl -path '*kalico-log-it*' 2>/dev/null | xargs ls -t 2>/dev/null | head -1)"
 cp "$RUST_OUT" "$EVENTS/host-rust.jsonl"
 echo "  host-rust.jsonl: $(wc -l < "$EVENTS/host-rust.jsonl") lines"

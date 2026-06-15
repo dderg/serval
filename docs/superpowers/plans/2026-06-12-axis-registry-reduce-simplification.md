@@ -4,11 +4,11 @@
 
 **Goal:** Make axes config-declared objects (`[axis <name>]` with `follows`/`motors`), replace the E-mode zoo with one follower rule (ratio = delta / 3D path length), and delete every E-special code path — leaving loud errors where plans 3–4 will land.
 
-**Architecture:** Spec: `docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md` §1–§2. A `CubicSegment` carries `followers: Vec<FollowerDemand { axis_index, ratio }>` instead of `e_mode`/`extrusion_per_xy_mm`/`e_independent`. The reduce boundary computes per-follower deltas from a config-derived word list (`FollowerWord { letter, axis_index }`) against a per-follower nominal ledger; ratio uses **3D** arc length, so vase mode and hop-retracts become ordinary moves. `e_independent.rs` (trapezoid scheduler), `ELimits`, and `partition.rs` (E-gap machinery) are deleted with nothing replacing them: follower-only moves are a fatal reduce error until plan 3; the live-path `ExtrusionNotSupported` rejection stays until plan 4. The axis registry lives in `motion-bridge/src/config.rs` next to plan 1's `LimitSection`; klippy gains `[axis]` sections and rejects `[firmware_retraction]`.
+**Architecture:** Spec: `docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md` §1–§2. A `CubicSegment` carries `followers: Vec<FollowerDemand { axis_index, ratio }>` instead of `e_mode`/`extrusion_per_xy_mm`/`e_independent`. The reduce boundary computes per-follower deltas from a config-derived word list (`FollowerWord { letter, axis_index }`) against a per-follower nominal ledger; ratio uses **3D** arc length, so vase mode and hop-retracts become ordinary moves. `e_independent.rs` (trapezoid scheduler), `ELimits`, and `partition.rs` (E-gap machinery) are deleted with nothing replacing them: follower-only moves are a fatal reduce error until plan 3; the live-path `ExtrusionNotSupported` rejection stays until plan 4. The axis registry lives in `motion-engine/src/config.rs` next to plan 1's `LimitSection`; klippy gains `[axis]` sections and rejects `[firmware_retraction]`.
 
-**Tech stack:** Rust (nurbs/geometry/trajectory/motion-bridge), PyO3 bridge, klippy Python. Tests: `cargo nextest run` from `rust/` (never bare `cargo test`).
+**Tech stack:** Rust (nurbs/geometry/trajectory/motion-engine), PyO3 bridge, klippy Python. Tests: `cargo nextest run` from `rust/` (never bare `cargo test`).
 
-**PRECONDITION: Plan 1 (`docs/superpowers/plans/2026-06-12-limits-rework.md`) must be fully landed** — this plan builds on `temporal::Limits` as `LimitSet` collections, `LimitSection`/`axis_index` in motion-bridge config, and the plan-1 `init_planner` signature. Verify before starting: `git log --oneline | head -20` shows plan 1's final commit (`feat: unified [limit] sections end-to-end`) and `cargo nextest run` passes from `rust/`.
+**PRECONDITION: Plan 1 (`docs/superpowers/plans/2026-06-12-limits-rework.md`) must be fully landed** — this plan builds on `temporal::Limits` as `LimitSet` collections, `LimitSection`/`axis_index` in motion-engine config, and the plan-1 `init_planner` signature. Verify before starting: `git log --oneline | head -20` shows plan 1's final commit (`feat: unified [limit] sections end-to-end`) and `cargo nextest run` passes from `rust/`.
 
 **Line numbers in this plan are pre-plan-1 approximations — always anchor by symbol name and the given grep commands, never by line.**
 
@@ -359,13 +359,13 @@ In `emit_shaped.rs`, `ShapedSegment` (fields at `grep -n "e_mode\|extrusion" rus
 
 ---
 
-### Task 4: motion-bridge — axis registry and config integration
+### Task 4: motion-engine — axis registry and config integration
 
 **Files:**
-- Modify: `rust/motion-bridge/src/config.rs` (registry beside plan 1's `LimitSection`; replace plan 1's hardcoded `axis_index`)
-- Modify: `rust/motion-bridge/src/classify.rs` (segment construction; rejection stays)
-- Modify: `rust/motion-bridge/src/bridge.rs` (`init_planner` gains the axes param), `rust/motion-bridge/src/planner.rs` (follow compiler: `e_limits` removal, `ShapeSegmentInput` construction sites — `grep -rn "e_limits\|ELimits\|e_mode" rust/motion-bridge/ rust/kalico-host-rt/`)
-- Test: `rust/motion-bridge/src/config/tests.rs`
+- Modify: `rust/motion-engine/src/config.rs` (registry beside plan 1's `LimitSection`; replace plan 1's hardcoded `axis_index`)
+- Modify: `rust/motion-engine/src/classify.rs` (segment construction; rejection stays)
+- Modify: `rust/motion-engine/src/bridge.rs` (`init_planner` gains the axes param), `rust/motion-engine/src/planner.rs` (follow compiler: `e_limits` removal, `ShapeSegmentInput` construction sites — `grep -rn "e_limits\|ELimits\|e_mode" rust/motion-engine/ rust/host-rt/`)
+- Test: `rust/motion-engine/src/config/tests.rs`
 
 - [ ] **Step 1: Write failing registry tests** in `config/tests.rs`:
 
@@ -474,7 +474,7 @@ fn follower_axis_without_limit_coverage_is_an_error() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-bridge -E 'test(config)'` → FAIL
+- [ ] **Step 2: Run to verify failure** — `cargo nextest run -p motion-engine -E 'test(config)'` → FAIL
 
 - [ ] **Step 3: Implement the registry** in `config.rs` (delete plan 1's free `axis_index` fn; `SPATIAL` order is the fixed Cartesian frame the geometry pipeline emits):
 
@@ -597,10 +597,10 @@ NoFollowerCoverage { axis: String },
 
 Coverage rule: every non-spatial registry axis must appear in ≥1 section carrying finite `max_velocity` AND ≥1 carrying finite `max_accel` (jerk not required until plan 3). The runtime-caps overlay (plan 1) stays spatial-only — it uses `AxisSet::all()`, which is the spatial set.
 
-- [ ] **Step 5: classify.rs + plumbing.** `CubicSegment::try_new(xyz, vec![], feedrate_mm_s, source, None)` at the construction site; `MoveClass`/`ExtrusionNotSupported` untouched. `bridge.rs::init_planner` gains a leading param `axes: Vec<(String, Vec<String>, Vec<String>)>` (name, follows, motors) → `AxisDecl`s → `AxisRegistry::try_new` → store in config → eager `cfg.to_temporal_limits()?` validation as plan 1 established. Everywhere `ShapeSegmentInput`/plan-input structs are built (`grep -rn "e_limits\|e_mode\|extrusion_per_xy_mm" rust/motion-bridge/ rust/kalico-host-rt/`), apply the Task 3 shapes; delete the `PlannerConfig` `e_limits` field and its default.
+- [ ] **Step 5: classify.rs + plumbing.** `CubicSegment::try_new(xyz, vec![], feedrate_mm_s, source, None)` at the construction site; `MoveClass`/`ExtrusionNotSupported` untouched. `bridge.rs::init_planner` gains a leading param `axes: Vec<(String, Vec<String>, Vec<String>)>` (name, follows, motors) → `AxisDecl`s → `AxisRegistry::try_new` → store in config → eager `cfg.to_temporal_limits()?` validation as plan 1 established. Everywhere `ShapeSegmentInput`/plan-input structs are built (`grep -rn "e_limits\|e_mode\|extrusion_per_xy_mm" rust/motion-engine/ rust/host-rt/`), apply the Task 3 shapes; delete the `PlannerConfig` `e_limits` field and its default.
 
-- [ ] **Step 6: Run** — `cargo nextest run -p motion-bridge` → PASS, then full workspace `cargo nextest run` from `rust/` → PASS (catches stragglers in kalico-host-rt and integration tests).
-- [ ] **Step 7: Commit** — `feat(motion-bridge): axis registry; follower-aware [limit] validation; e_limits dies`
+- [ ] **Step 6: Run** — `cargo nextest run -p motion-engine` → PASS, then full workspace `cargo nextest run` from `rust/` → PASS (catches stragglers in host-rt and integration tests).
+- [ ] **Step 7: Commit** — `feat(motion-engine): axis registry; follower-aware [limit] validation; e_limits dies`
 
 ---
 
@@ -610,7 +610,7 @@ Coverage rule: every non-spatial registry axis must appear in ≥1 section carry
 - Create: `klippy/extras/axis.py`
 - Modify: `klippy/motion_toolhead.py` (read axes, pass to bridge, reject `[firmware_retraction]`, validate limit-section axis names against declarations)
 - Modify: `klippy/extras/limit.py` (drop the hardcoded `SUPPORTED_AXES` check — authority moves to the declared-axes validation)
-- Modify: `klippy/motion_bridge.py` (wrapper + `_StubBridge` signatures)
+- Modify: `klippy/motion_engine.py` (wrapper + `_StubEngine` signatures)
 
 - [ ] **Step 1: `klippy/extras/axis.py`:**
 
@@ -673,7 +673,7 @@ for _, axes, _, _, _ in self.limit_sections:
 
 - [ ] **Step 3: `limit.py`** — delete the `SUPPORTED_AXES` tuple and its loop; keep non-empty/at-least-one-cap checks.
 
-- [ ] **Step 4: `motion_bridge.py`** — `init_planner` wrapper passes the axes list through; `_StubBridge.init_planner` accepts it (no-op).
+- [ ] **Step 4: `motion_engine.py`** — `init_planner` wrapper passes the axes list through; `_StubEngine.init_planner` accepts it (no-op).
 
 - [ ] **Step 5: Commit** — `feat(klippy): [axis] sections; reject [firmware_retraction]; limit axes validated against declarations`
 

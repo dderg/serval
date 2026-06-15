@@ -51,7 +51,7 @@ class MCU_stepper:
         self._step_both_edge = False
         self._req_step_both_edge = False
         self._active_callbacks = []
-        self._bridge_active_axes = b""
+        self._engine_active_axes = b""
         self._stepper_kinematics = None
         self._trapq = None
         self._tmc_current_helper = None
@@ -84,7 +84,7 @@ class MCU_stepper:
     def setup_itersolve(self, alloc_func, *params):
         for p in params:
             if isinstance(p, (bytes, bytearray)):
-                self._bridge_active_axes = bytes(p)
+                self._engine_active_axes = bytes(p)
                 break
 
     def _build_config(self):
@@ -142,13 +142,13 @@ class MCU_stepper:
     def calc_position_from_coord(self, coord):
         raise error(
             "MCU_stepper.calc_position_from_coord is host step generation; "
-            "motion runs on the bridge runtime engine"
+            "motion runs on the engine runtime engine"
         )
 
     def get_past_mcu_position(self, print_time):
         raise error(
-            "MCU_stepper.get_past_mcu_position is host step history; the bridge"
-            " keeps no motor-space step history. Use motion_bridge"
+            "MCU_stepper.get_past_mcu_position is host step history; the engine"
+            " keeps no motor-space step history. Use motion_engine"
             ".motion_state_at for toolhead-space history."
         )
 
@@ -182,7 +182,7 @@ class MCU_stepper:
             self._active_callbacks = []
 
     def is_active_axis(self, axis):
-        return axis.encode() in self._bridge_active_axes
+        return axis.encode() in self._engine_active_axes
 
 
 def PrinterStepper(config, units_in_radians=False, name=None):

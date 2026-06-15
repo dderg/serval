@@ -10,7 +10,7 @@
 
 **Reference spec:** [`docs/superpowers/specs/2026-06-14-same-mcu-homing-self-gate-design.md`](../specs/2026-06-14-same-mcu-homing-self-gate-design.md)
 
-**Testing note:** `src/kalico_dispatch.c` and `src/endstop.c` are MCU firmware glue with no standalone C unit harness in this repo. Verification is therefore: (a) the existing Rust idempotency test that already proves a repeated gate is a safe no-op (`rust/kalico-c-api/tests/piece_gate.rs::gate_is_idempotent_like_a_repeated_stop`), and (b) end-to-end homing in kalico-sim full mode, which compiles `src/*.c` into the simulated firmware and auto-triggers the endstop during `G28`. This matches the project's established testing model for firmware glue. **Docker is required** for the kalico-sim verification.
+**Testing note:** `src/mcu_transport_dispatch.c` and `src/endstop.c` are MCU firmware glue with no standalone C unit harness in this repo. Verification is therefore: (a) the existing Rust idempotency test that already proves a repeated gate is a safe no-op (`rust/kalico-c-api/tests/piece_gate.rs::gate_is_idempotent_like_a_repeated_stop`), and (b) end-to-end homing in kalico-sim full mode, which compiles `src/*.c` into the simulated firmware and auto-triggers the endstop during `G28`. This matches the project's established testing model for firmware glue. **Docker is required** for the kalico-sim verification.
 
 ---
 
@@ -18,8 +18,8 @@
 
 | File | Responsibility | Change |
 |------|----------------|--------|
-| `src/kalico_dispatch.c` | Host-command dispatch on the MCU (incl. `Stop`). | Extract `handle_stop_inner`; `handle_stop` calls it then `send_stop_response`. |
-| `src/kalico_dispatch.h` | Public prototypes for dispatch glue. | Declare `handle_stop_inner` so `endstop.c` can call it. |
+| `src/mcu_transport_dispatch.c` | Host-command dispatch on the MCU (incl. `Stop`). | Extract `handle_stop_inner`; `handle_stop` calls it then `send_stop_response`. |
+| `src/mcu_transport_dispatch.h` | Public prototypes for dispatch glue. | Declare `handle_stop_inner` so `endstop.c` can call it. |
 | `src/endstop.c` | Endstop arm/detect/report on the MCU. | `endstop_trip_task` brakes locally via `handle_stop_inner` before emitting the trip event. |
 | `CLAUDE.md` | Project constraints. | Replace the "do not optimize same-MCU homing" note with the self-gate behavior. |
 
@@ -32,8 +32,8 @@ No host-side or wire-protocol files change.
 This task does NOT change any behavior — it only splits `handle_stop` so the gating core can be reused. The regression guard is the existing Rust idempotency test, which must stay green.
 
 **Files:**
-- Modify: `src/kalico_dispatch.h` (add prototype after line 27)
-- Modify: `src/kalico_dispatch.c:551-563` (the `handle_stop` function)
+- Modify: `src/mcu_transport_dispatch.h` (add prototype after line 27)
+- Modify: `src/mcu_transport_dispatch.c:551-563` (the `handle_stop` function)
 - Regression test (existing): `rust/kalico-c-api/tests/piece_gate.rs`
 
 - [ ] **Step 1: Confirm the regression guard passes before the change**
@@ -46,10 +46,10 @@ Expected: PASS (1 test run). This is the property the refactor must preserve —
 
 - [ ] **Step 2: Declare `handle_stop_inner` in the header**
 
-In `src/kalico_dispatch.h`, add the prototype right after the `kalico_native_emit_endstop_trip` declaration (after line 27):
+In `src/mcu_transport_dispatch.h`, add the prototype right after the `mcu_transport_emit_endstop_trip` declaration (after line 27):
 
 ```c
-void kalico_native_emit_endstop_trip(uint8_t endstop_id, uint64_t trip_clock);
+void mcu_transport_emit_endstop_trip(uint8_t endstop_id, uint64_t trip_clock);
 
 // Gate the curve evaluator and report the discard clock, without sending a
 // StopResponse. Shared by the host `Stop` handler and the local endstop
@@ -58,7 +58,7 @@ void kalico_native_emit_endstop_trip(uint8_t endstop_id, uint64_t trip_clock);
 int32_t handle_stop_inner(uint64_t *discard_clock);
 ```
 
-- [ ] **Step 3: Extract the function in `kalico_dispatch.c`**
+- [ ] **Step 3: Extract the function in `mcu_transport_dispatch.c`**
 
 Replace the current `handle_stop` (lines 551-563):
 
@@ -112,7 +112,7 @@ Run (Docker required):
 ```bash
 bash tools/kalico-sim/run.sh --privileged --homing-test --mode full --timeout 120
 ```
-Expected: the image builds (compiles `src/kalico_dispatch.c`) and the beacon Z homing test reports PASS. A compile error in the extraction shows up here as a build failure.
+Expected: the image builds (compiles `src/mcu_transport_dispatch.c`) and the beacon Z homing test reports PASS. A compile error in the extraction shows up here as a build failure.
 
 - [ ] **Step 5: Re-run the Rust idempotency guard**
 
@@ -125,7 +125,7 @@ Expected: all `gate*` tests PASS (the refactor touched no Rust, so behavior is u
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/kalico_dispatch.c src/kalico_dispatch.h
+git add src/mcu_transport_dispatch.c src/mcu_transport_dispatch.h
 git commit -m "refactor(mcu): extract handle_stop_inner from the Stop handler"
 ```
 
@@ -153,7 +153,7 @@ endstop_trip_task(void)
         if (!e->trip_pending)
             continue;
         e->trip_pending = 0;
-        kalico_native_emit_endstop_trip(e->endstop_id, e->trip_clock);
+        mcu_transport_emit_endstop_trip(e->endstop_id, e->trip_clock);
     }
 }
 ```
@@ -174,12 +174,12 @@ endstop_trip_task(void)
         if (!e->trip_pending)
             continue;
         e->trip_pending = 0;
-        kalico_native_emit_endstop_trip(e->endstop_id, e->trip_clock);
+        mcu_transport_emit_endstop_trip(e->endstop_id, e->trip_clock);
     }
 }
 ```
 
-`endstop.c` already includes `kalico_dispatch.h` (line 7), so `handle_stop_inner` is in scope with no new include.
+`endstop.c` already includes `mcu_transport_dispatch.h` (line 7), so `handle_stop_inner` is in scope with no new include.
 
 - [ ] **Step 2: Verify same-MCU homing end-to-end (the new behavior)**
 
@@ -277,4 +277,4 @@ Expected: no output (clean).
 
 **Placeholder scan:** No TBD/TODO; every code step shows the full before/after; every command has an expected result. ✓
 
-**Type/name consistency:** `handle_stop_inner(uint64_t *discard_clock) -> int32_t` is declared identically in the header (Task 1 Step 2), defined identically in `kalico_dispatch.c` (Task 1 Step 3), and called identically in `endstop.c` (Task 2 Step 1) and `handle_stop` (Task 1 Step 3). ✓
+**Type/name consistency:** `handle_stop_inner(uint64_t *discard_clock) -> int32_t` is declared identically in the header (Task 1 Step 2), defined identically in `mcu_transport_dispatch.c` (Task 1 Step 3), and called identically in `endstop.c` (Task 2 Step 1) and `handle_stop` (Task 1 Step 3). ✓

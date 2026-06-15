@@ -253,16 +253,16 @@ class GCodeMove:
         interior.append([end[0] + p, end[1] + q, start[2] + 2.0 * dz / 3.0])
 
         def submit(sdx, sdy, sdz, sde, fr):
-            self._submit_bezier_to_bridge(i, j, p, q, sdx, sdy, sdz, sde, fr)
+            self._submit_bezier_to_engine(i, j, p, q, sdx, sdy, sdz, sde, fr)
 
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.move_curve(
             list(self.last_position), interior, submit, self.speed
         )
 
-    def _submit_bezier_to_bridge(self, i, j, p, q, dx, dy, dz, de, fr):
+    def _submit_bezier_to_engine(self, i, j, p, q, dx, dy, dz, de, fr):
         motion = self.printer.lookup_object("motion")
-        motion.bridge.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
+        motion.engine.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
 
     def cmd_G5_1(self, gcmd):
         self._resync_toolhead_before_move()
@@ -284,16 +284,16 @@ class GCodeMove:
         interior = [[start[0] + i, start[1] + j, start[2] + dz / 2.0]]
 
         def submit(sdx, sdy, sdz, sde, fr):
-            self._submit_quadratic_to_bridge(i, j, sdx, sdy, sdz, sde, fr)
+            self._submit_quadratic_to_engine(i, j, sdx, sdy, sdz, sde, fr)
 
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.move_curve(
             list(self.last_position), interior, submit, self.speed
         )
 
-    def _submit_quadratic_to_bridge(self, i, j, dx, dy, dz, de, fr):
+    def _submit_quadratic_to_engine(self, i, j, dx, dy, dz, de, fr):
         motion = self.printer.lookup_object("motion")
-        motion.bridge.submit_quadratic(i, j, dx, dy, dz, de, fr)
+        motion.engine.submit_quadratic(i, j, dx, dy, dz, de, fr)
 
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):
@@ -419,9 +419,9 @@ class GCodeMove:
         toolhead = self.printer.lookup_object("toolhead", None)
         if toolhead is None:
             raise gcmd.error("Printer not ready")
-        bridge = self.printer.lookup_object("motion_bridge", None)
+        engine = self.printer.lookup_object("motion_engine", None)
         try:
-            axes = bridge.query_motor_positions() if bridge is not None else {}
+            axes = engine.query_motor_positions() if engine is not None else {}
             measured = " ".join(
                 "%s:%.6f" % (a.upper(), axes[a][0])
                 for a in ("x", "y", "z", "e")

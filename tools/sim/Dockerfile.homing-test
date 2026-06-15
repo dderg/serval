@@ -51,9 +51,9 @@ RUN cp tools/sim/sim_f446.config .config && \
     cp out/klipper.elf out/klipper-f4-sim.elf && \
     cp /tmp/klipper-h7-sim.elf out/klipper-h7-sim.elf
 
-# Build motion-bridge for host (Linux)
-RUN cd rust && cargo build -p motion-bridge --release && \
-    cp target/release/libmotion_bridge_native.so ../klippy/motion_bridge_native.so
+# Build motion-engine for host (Linux)
+RUN cd rust && cargo build -p motion-engine --release && \
+    cp target/release/lib_motion_engine.so ../klippy/_motion_engine.so
 
 # Remove stale chelper (will be auto-built on first klippy start)
 RUN rm -f klippy/chelper/c_helper.so

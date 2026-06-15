@@ -93,15 +93,15 @@ def push_segment(
     return int(resp["result"])
 
 
-def import_motion_bridge():
+def import_motion_engine():
     try:
-        import motion_bridge as native  # noqa: F401
+        import motion_engine as native  # noqa: F401
 
         return native
     except ImportError as exc:
         raise SystemExit(
-            "FAIL: motion_bridge native module not importable. "
-            "Build it first: `make -f Makefile.kalico motion-bridge`. (%s)"
+            "FAIL: motion_engine native module not importable. "
+            "Build it first: `make -f Makefile.kalico motion-engine`. (%s)"
             % (exc,)
         )
 
@@ -111,7 +111,7 @@ def main():
     p.add_argument(
         "--port",
         default="socket://localhost:3334",
-        help="pyserial URL of the Renode USART2 bridge",
+        help="pyserial URL of the Renode USART2 engine",
     )
     p.add_argument(
         "--identify-timeout",
@@ -132,22 +132,22 @@ def main():
             raw_dict = raw_dict.encode("utf-8")
         print("[gate] identify ok (%d bytes raw dict)" % (len(raw_dict),))
 
-        native = import_motion_bridge()
-        bridge = native.MotionBridge()
-        bridge.set_msgproto_dict(raw_dict)
-        print("[gate] bridge.set_msgproto_dict ok")
+        native = import_motion_engine()
+        engine = native.MotionEngine()
+        engine.set_msgproto_dict(raw_dict)
+        print("[gate] engine.set_msgproto_dict ok")
 
-        octopus = bridge.claim_mcu("octopus", args.port, 0)
-        f446 = bridge.claim_mcu("f446", args.port, 0)
+        octopus = engine.claim_mcu("octopus", args.port, 0)
+        f446 = engine.claim_mcu("f446", args.port, 0)
         print(
-            "[gate] bridge.claim_mcu ok (octopus=%d, f446=%d)" % (octopus, f446)
+            "[gate] engine.claim_mcu ok (octopus=%d, f446=%d)" % (octopus, f446)
         )
 
         topology = [
             (octopus, [0, 1, 3], 0),
             (f446, [2], 1),
         ]
-        bridge.init_planner(
+        engine.init_planner(
             300.0,
             5000.0,
             10.0,
@@ -159,17 +159,17 @@ def main():
             40.0,
             topology,
         )
-        print("[gate] bridge.init_planner ok")
+        print("[gate] engine.init_planner ok")
 
-        if bridge.dispatched_segment_count() != 0:
+        if engine.dispatched_segment_count() != 0:
             raise SystemExit(
                 "FAIL: dispatched_segment_count=%d expected 0"
-                % (bridge.dispatched_segment_count(),)
+                % (engine.dispatched_segment_count(),)
             )
-        if bridge.fallback_clock_conversions() != 0:
+        if engine.fallback_clock_conversions() != 0:
             raise SystemExit(
                 "FAIL: fallback_clock_conversions=%d expected 0"
-                % (bridge.fallback_clock_conversions(),)
+                % (engine.fallback_clock_conversions(),)
             )
 
         rc_x, x_handle = load_curve(io, slot=0, fixture=FIXTURE_SCALAR_CUBIC)
@@ -208,7 +208,7 @@ def main():
 
         time.sleep(0.05)
 
-        print("PASS: Renode Phase-2 gate (wire-level via bridge)")
+        print("PASS: Renode Phase-2 gate (wire-level via engine)")
         return 0
     finally:
         try:

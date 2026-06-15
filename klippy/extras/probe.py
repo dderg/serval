@@ -1,7 +1,7 @@
 import math
 
 from klippy import pins
-from klippy.bridge_endstop import BridgeEndstop, allocate_provider_id
+from klippy.motion_endstop import MotionEndstop, allocate_provider_id
 
 from . import manual_probe
 
@@ -53,7 +53,7 @@ class PrinterProbe:
                 "[probe] pin must be a GPIO pin on an MCU, not '%s'"
                 % (pin_desc,)
             )
-        self._endstop = BridgeEndstop(
+        self._endstop = MotionEndstop(
             pin_params, allocate_provider_id(self.printer)
         )
 
@@ -95,7 +95,7 @@ class PrinterProbe:
         query_endstops = self.printer.load_object(config, "query_endstops")
         query_endstops.register_endstop(self._endstop, "probe")
 
-    def setup_bridge_endstop(self, pin_params, axis):
+    def setup_motion_endstop(self, pin_params, axis):
         validate_virtual_endstop_request(pin_params, axis)
         return self._endstop
 
@@ -129,7 +129,7 @@ class PrinterProbe:
         if "z" not in kin_status["homed_axes"]:
             raise gcmd.error("Must home before probe")
 
-    def _probe_once(self, gcmd, toolhead, homing_obj, bridge, speed):
+    def _probe_once(self, gcmd, toolhead, homing_obj, engine, speed):
         kin = toolhead.get_kinematics()
         rail = kin._axis_rails().get(Z_AXIS)
         if rail is None:
@@ -142,7 +142,7 @@ class PrinterProbe:
         trip_pos, final_pos = homing_obj.trip_move(
             gcmd,
             toolhead,
-            bridge,
+            engine,
             Z_AXIS,
             -1.0,
             speed,
@@ -172,7 +172,7 @@ class PrinterProbe:
     def run_probe(self, gcmd):
         toolhead = self.printer.lookup_object("toolhead")
         homing_obj = self.printer.lookup_object("homing")
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.0)
         lift_speed = gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.0)
         sample_count = gcmd.get_int("SAMPLES", self.samples, minval=1)
@@ -192,7 +192,7 @@ class PrinterProbe:
         retries = 0
         measured = []
         while True:
-            z = self._probe_once(gcmd, toolhead, homing_obj, bridge, speed)
+            z = self._probe_once(gcmd, toolhead, homing_obj, engine, speed)
             measured.append(z)
             if max(measured) - min(measured) > tolerance:
                 if retries >= max_retries:
@@ -222,7 +222,7 @@ class PrinterProbe:
     def cmd_PROBE_ACCURACY(self, gcmd):
         toolhead = self.printer.lookup_object("toolhead")
         homing_obj = self.printer.lookup_object("homing")
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.0)
         lift_speed = gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.0)
         sample_count = gcmd.get_int(
@@ -240,7 +240,7 @@ class PrinterProbe:
         )
         measured = []
         for _ in range(sample_count):
-            z = self._probe_once(gcmd, toolhead, homing_obj, bridge, speed)
+            z = self._probe_once(gcmd, toolhead, homing_obj, engine, speed)
             measured.append(z)
             self._retract(toolhead, z + retract, lift_speed)
         average = calc_probe_z_result(measured, "average")

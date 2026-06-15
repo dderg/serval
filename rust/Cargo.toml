@@ -7,12 +7,12 @@ members = [
     "temporal",
     "trajectory",
     "runtime",
-    "kalico-host-rt",
+    "host-rt",
     "compat",
-    "motion-bridge",
-    "kalico-native-transport",
-    "kalico-protocol",
-    "kalico-ethercat-rt",
+    "motion-engine",
+    "mcu-transport",
+    "mcu-protocol",
+    "ethercat-rt",
     "servo-ident",
 ]
 exclude = ["gcode/fuzz"]

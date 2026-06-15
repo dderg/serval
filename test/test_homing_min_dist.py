@@ -45,7 +45,7 @@ class FakeToolhead:
         self.events.append(("wait_moves",))
 
 
-class FakeBridge:
+class FakeEngine:
     def __init__(self):
         self.finalize_calls = []
 
@@ -72,11 +72,11 @@ def _hi(min_home_dist=15.0, speed=50.0, retract_speed=25.0, retract_dist=5.0):
 def test_commit_and_seed_seeds_post_retract_position():
     axis = 0
     toolhead = FakeToolhead([0.0, 0.0, 0.0])
-    bridge = FakeBridge()
+    engine = FakeEngine()
     hi = _hi(retract_dist=5.0)
     homing_mod._commit_and_seed(
         toolhead,
-        bridge,
+        engine,
         axis,
         1.0,
         hi,
@@ -87,15 +87,15 @@ def test_commit_and_seed_seeds_post_retract_position():
         servo_handle="h",
     )
     assert toolhead.get_position()[axis] == 15.0
-    assert bridge.finalize_calls == [("h", 0, 15.0)]
+    assert engine.finalize_calls == [("h", 0, 15.0)]
 
 
 def test_commit_and_seed_no_servo_does_not_seed():
     toolhead = FakeToolhead([0.0, 0.0, 0.0])
-    bridge = FakeBridge()
+    engine = FakeEngine()
     homing_mod._commit_and_seed(
         toolhead,
-        bridge,
+        engine,
         0,
         1.0,
         _hi(),
@@ -105,7 +105,7 @@ def test_commit_and_seed_no_servo_does_not_seed():
         provider=None,
         servo_handle=None,
     )
-    assert bridge.finalize_calls == []
+    assert engine.finalize_calls == []
 
 
 class FakeGcmd:

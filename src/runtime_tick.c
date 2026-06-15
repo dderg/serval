@@ -11,7 +11,7 @@
 #include "command.h"
 #include "sched.h"
 #include "kalico_runtime.h"
-#include "kalico_dispatch.h"
+#include "mcu_transport_dispatch.h"
 #include "kalico_log.h"
 #include "generic/runtime_tick.h"
 #include "generic/fault_handler.h"
@@ -215,7 +215,7 @@ runtime_drain(void)
             int32_t fault_code = runtime_handle_last_error(runtime_handle);
             uint32_t fault_detail = runtime_handle_fault_detail(runtime_handle);
             uint32_t tick_blocker_pc = runtime_handle_tick_blocker_pc(runtime_handle);
-            kalico_native_emit_fault_event((uint16_t)fault_code, fault_detail,
+            mcu_transport_emit_fault_event((uint16_t)fault_code, fault_detail,
                                            tick_blocker_pc);
         }
     }
@@ -227,7 +227,7 @@ runtime_drain(void)
         last_acted_error = cur_error;
         uint32_t fdetail = runtime_handle_fault_detail(runtime_handle);
         uint32_t tick_blocker_pc = runtime_handle_tick_blocker_pc(runtime_handle);
-        kalico_native_emit_fault_event((uint16_t)cur_error, fdetail,
+        mcu_transport_emit_fault_event((uint16_t)cur_error, fdetail,
                                        tick_blocker_pc);
         // Persist before shutdown resets the USB stack.
         diag_ring_push(DIAG_EV_RUST_FAULT, (uint32_t)cur_error, fdetail);

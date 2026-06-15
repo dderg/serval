@@ -2,8 +2,8 @@ import contextlib
 import logging
 
 from klippy import structured_log
-from klippy.bridge_endstop import AXIS_ENDSTOP_IDS, BridgeEndstop
 from klippy.extras.danger_options import get_danger_options
+from klippy.motion_endstop import AXIS_ENDSTOP_IDS, MotionEndstop
 
 HOMING_POLL_PERIOD = 0.001
 TRIP_DEADLINE_MARGIN = 5.0
@@ -25,16 +25,16 @@ def _homing_motor_names(rail):
 
 
 @contextlib.contextmanager
-def _servo_drive_limits(bridge, handle, limits):
+def _servo_drive_limits(engine, handle, limits):
     if handle is None or limits is None:
         yield
         return
-    bridge.set_drive_limits(handle, limits[0], limits[1])
+    engine.set_drive_limits(handle, limits[0], limits[1])
     try:
         yield
     except BaseException:
         try:
-            bridge.restore_drive_limits(handle)
+            engine.restore_drive_limits(handle)
         except Exception:
             logging.warning(
                 "homing: restore_drive_limits failed while handling a"
@@ -42,16 +42,16 @@ def _servo_drive_limits(bridge, handle, limits):
                 exc_info=True,
             )
         raise
-    bridge.restore_drive_limits(handle)
+    engine.restore_drive_limits(handle)
 
 
 def _run_servo_guarded_trip(
-    gcmd, bridge, axis, stepper_enable, rail, servo_handle, servo_limits, trip
+    gcmd, engine, axis, stepper_enable, rail, servo_handle, servo_limits, trip
 ):
     try:
-        with _servo_drive_limits(bridge, servo_handle, servo_limits):
+        with _servo_drive_limits(engine, servo_handle, servo_limits):
             result = trip()
-        _check_servo_drive_fault(gcmd, bridge, axis, servo_handle)
+        _check_servo_drive_fault(gcmd, engine, axis, servo_handle)
     except BaseException:
         if servo_handle is not None:
             stepper_enable.motor_debug_enable(rail.get_name(), False)
@@ -59,10 +59,10 @@ def _run_servo_guarded_trip(
     return result
 
 
-def _check_servo_drive_fault(gcmd, bridge, axis, servo_handle):
+def _check_servo_drive_fault(gcmd, engine, axis, servo_handle):
     if servo_handle is None:
         return
-    fault = bridge.take_drive_fault(servo_handle)
+    fault = engine.take_drive_fault(servo_handle)
     if fault is not None:
         raise gcmd.error(
             "%s homing: drive fault 0x%04x at endstop contact — "
@@ -80,7 +80,7 @@ def _homed_axis_position(provider, axis, trip_pos, final_pos, trigger_height):
 
 def _commit_and_seed(
     toolhead,
-    bridge,
+    engine,
     axis,
     direction,
     hi,
@@ -112,7 +112,7 @@ def _commit_and_seed(
         toolhead.move(retractpos, hi.retract_speed)
         toolhead.wait_moves()
     if servo_handle is not None:
-        bridge.finalize_homed_axis(
+        engine.finalize_homed_axis(
             servo_handle, axis, toolhead.get_position()[axis]
         )
 
@@ -252,13 +252,13 @@ class Homing:
                 endstop_pin, can_invert=True, can_pullup=True
             )
             chip = pin_params["chip"]
-            if hasattr(chip, "setup_bridge_endstop"):
+            if hasattr(chip, "setup_motion_endstop"):
                 entry = self._provider_entry(
                     axis_config, axis_index, chip, pin_params
                 )
             elif hasattr(chip, "create_oid"):
                 entry = {
-                    "endstop": BridgeEndstop(
+                    "endstop": MotionEndstop(
                         pin_params, AXIS_ENDSTOP_IDS[axis_index]
                     ),
                     "provider": None,
@@ -279,7 +279,7 @@ class Homing:
             )
 
     def _provider_entry(self, axis_config, axis_index, chip, pin_params):
-        endstop = chip.setup_bridge_endstop(pin_params, axis_index)
+        endstop = chip.setup_motion_endstop(pin_params, axis_index)
         trigger_height = None
         if hasattr(chip, "get_position_endstop"):
             trigger_height = chip.get_position_endstop()
@@ -304,13 +304,13 @@ class Homing:
         if not requested:
             requested = sorted(self._axes.keys())
         toolhead = self.printer.lookup_object("toolhead")
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         kin = toolhead.get_kinematics()
         for axis in requested:
             entry = self._axes.get(axis)
             if entry is None:
                 raise gcmd.error("G28: axis %s has no endstop" % ("XYZ"[axis],))
-            self._home_axis(gcmd, toolhead, bridge, kin, axis, entry)
+            self._home_axis(gcmd, toolhead, engine, kin, axis, entry)
         self._emit_home_rails_end(kin, requested)
 
     def cmd_HOME_TEST(self, gcmd):
@@ -326,10 +326,10 @@ class Homing:
         speed = gcmd.get_float("SPEED", None, above=0.0)
         max_travel = gcmd.get_float("MAX_TRAVEL", None, above=0.0)
         toolhead = self.printer.lookup_object("toolhead")
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         kin = toolhead.get_kinematics()
         self._home_axis(
-            gcmd, toolhead, bridge, kin, axis, entry, speed, max_travel
+            gcmd, toolhead, engine, kin, axis, entry, speed, max_travel
         )
         self._emit_home_rails_end(kin, [axis])
 
@@ -344,7 +344,7 @@ class Homing:
         self,
         gcmd,
         toolhead,
-        bridge,
+        engine,
         axis,
         direction,
         speed,
@@ -357,7 +357,7 @@ class Homing:
     ):
         return _run_servo_guarded_trip(
             gcmd,
-            bridge,
+            engine,
             axis,
             stepper_enable,
             rail,
@@ -366,7 +366,7 @@ class Homing:
             lambda: self.trip_move(
                 gcmd,
                 toolhead,
-                bridge,
+                engine,
                 axis,
                 direction,
                 speed,
@@ -379,7 +379,7 @@ class Homing:
         self,
         gcmd,
         toolhead,
-        bridge,
+        engine,
         kin,
         axis,
         entry,
@@ -416,7 +416,7 @@ class Homing:
             node = self.printer.lookup_object(
                 "ethercat_node " + rail.get_node_name()
             )
-            servo_handle = node.get_bridge_handle()
+            servo_handle = node.get_engine_handle()
             servo_limits = rail.get_homing_drive_limits()
 
         self._set_homing_current(toolhead, rail, pre_homing=True)
@@ -428,7 +428,7 @@ class Homing:
                 return self._guarded_approach(
                     gcmd,
                     toolhead,
-                    bridge,
+                    engine,
                     axis,
                     direction,
                     spd,
@@ -453,7 +453,7 @@ class Homing:
             )
             _commit_and_seed(
                 toolhead,
-                bridge,
+                engine,
                 axis,
                 direction,
                 hi,
@@ -463,7 +463,7 @@ class Homing:
                 provider,
                 servo_handle,
             )
-            _check_servo_drive_fault(gcmd, bridge, axis, servo_handle)
+            _check_servo_drive_fault(gcmd, engine, axis, servo_handle)
         except BaseException:
             try:
                 self._set_homing_current(toolhead, rail, pre_homing=False)
@@ -488,10 +488,10 @@ class Homing:
         if dwell_time:
             toolhead.dwell(dwell_time)
 
-    def _drain_motion_before_arming_device(self, gcmd, bridge, axis):
+    def _drain_motion_before_arming_device(self, gcmd, engine, axis):
         reactor = self.printer.get_reactor()
         deadline = reactor.monotonic() + _DRAIN_PAUSE_TIMEOUT
-        while not bridge.motion_drained():
+        while not engine.motion_drained():
             if reactor.monotonic() > deadline:
                 raise gcmd.error(
                     "%s trip move: motion did not drain within %.0fs before"
@@ -500,23 +500,23 @@ class Homing:
             reactor.pause(reactor.monotonic() + 0.005)
 
     def trip_move(
-        self, gcmd, toolhead, bridge, axis, direction, speed, max_travel, entry
+        self, gcmd, toolhead, engine, axis, direction, speed, max_travel, entry
     ):
         endstop = entry["endstop"]
-        endstop_mcu = endstop.bridge_mcu_handle()
+        endstop_mcu = endstop.engine_mcu_handle()
         if endstop_mcu is None:
             raise gcmd.error(
                 "trip_move: endstop MCU for axis %s is not attached to the"
-                " bridge" % ("XYZ"[axis],)
+                " engine" % ("XYZ"[axis],)
             )
         toolhead.wait_moves()
-        self._drain_motion_before_arming_device(gcmd, bridge, axis)
+        self._drain_motion_before_arming_device(gcmd, engine, axis)
         provider = entry["provider"]
         if provider is not None and hasattr(provider, "trip_move_begin"):
             provider.trip_move_begin(entry)
         try:
             endstop.arm(HOMING_POLL_PERIOD)
-            bridge.home_axis_start(
+            engine.home_axis_start(
                 axis,
                 direction,
                 speed,
@@ -530,16 +530,16 @@ class Homing:
             )
             while True:
                 try:
-                    result = bridge.home_axis_poll()
+                    result = engine.home_axis_poll()
                 except Exception as e:
-                    bridge.home_abort()
+                    engine.home_abort()
                     raise gcmd.error(
                         "%s trip move failed: %s" % ("XYZ"[axis], e)
                     )
                 if result is not None:
                     break
                 if reactor.monotonic() > deadline:
-                    bridge.home_abort()
+                    engine.home_abort()
                     raise gcmd.error(
                         _no_trigger_error_message(axis, endstop, max_travel)
                     )

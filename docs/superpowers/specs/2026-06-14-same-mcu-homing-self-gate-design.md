@@ -22,7 +22,7 @@ never fire mid-print.
    On an armed pin going active it latches `trip_clock`
    (`kalico_runtime_now_ticks`), disarms, sets `trip_pending`, and wakes
    `endstop_trip_task`. **It does not stop motion.** The emit is deferred to the
-   foreground task because `kalico_transport_send_frame` uses a shared `tx_buf`
+   foreground task because `mcu_transport_send_frame` uses a shared `tx_buf`
    and the USB transmit cursor, neither safe from IRQ (`endstop.c:26-29`).
 2. **Report (task).** `endstop_trip_task` ships `kalico_endstop_tripped`
    (`trip_clock`) to the host.
@@ -40,7 +40,7 @@ That latency is pure overshoot past the trigger point.
 
 ### 1. Extract `handle_stop_inner` and call it on a local trip
 
-Split the gating core out of `handle_stop` in `src/kalico_dispatch.c`. The only
+Split the gating core out of `handle_stop` in `src/mcu_transport_dispatch.c`. The only
 part `handle_stop` keeps for itself is the host-facing `send_stop_response` — a
 self-triggered stop has no host request to reply to, and sending an unsolicited
 `StopResponse` would desync the control channel (the host correlates responses
@@ -48,16 +48,16 @@ by id). `handle_stop_inner` is the existing `handle_stop` body, verbatim, minus
 the response.
 
 `handle_stop_inner` is **not** `static` — `endstop_trip_task` lives in
-`endstop.c`, which already includes `kalico_dispatch.h`, so its prototype goes
-there (beside `kalico_native_emit_endstop_trip`):
+`endstop.c`, which already includes `mcu_transport_dispatch.h`, so its prototype goes
+there (beside `mcu_transport_emit_endstop_trip`):
 
 ```c
-// kalico_dispatch.h
+// mcu_transport_dispatch.h
 int32_t handle_stop_inner(uint64_t *discard_clock);
 ```
 
 ```c
-// kalico_dispatch.c
+// mcu_transport_dispatch.c
 int32_t handle_stop_inner(uint64_t *discard_clock) {
     int32_t rc = KALICO_ERR_NOT_INIT;
     uint64_t dc = 0;
@@ -99,7 +99,7 @@ void endstop_trip_task(void) {
         if (!e->trip_pending)
             continue;
         e->trip_pending = 0;
-        kalico_native_emit_endstop_trip(e->endstop_id, e->trip_clock);
+        mcu_transport_emit_endstop_trip(e->endstop_id, e->trip_clock);
     }
 }
 ```
@@ -158,7 +158,7 @@ host `Stop` path reports it exactly as before.
 - **Rust (`cargo nextest run`)**: re-gating an already-gated engine is a
   harmless no-op (exercise via the `kalico-c-api` `piece_gate.rs` harness: gate,
   gate again, assert still gated and no error / no corruption).
-- **Existing suites**: `motion-bridge` `homing/tests.rs` and `pump` tests
+- **Existing suites**: `motion-engine` `homing/tests.rs` and `pump` tests
   continue to pass unchanged (host path untouched).
 - **kalico-sim**: a same-MCU home (endstop + homed stepper on one emulated MCU)
   where the trip event is delivered to the host with deliberate latency; assert
@@ -169,8 +169,8 @@ host `Stop` path reports it exactly as before.
 
 | File | Change |
 |------|--------|
-| `src/kalico_dispatch.c` | extract `handle_stop_inner` (non-`static`, current `handle_stop` body minus the response); `handle_stop` calls it then `send_stop_response`. |
-| `src/kalico_dispatch.h` | declare `handle_stop_inner` (so `endstop.c` can call it). |
+| `src/mcu_transport_dispatch.c` | extract `handle_stop_inner` (non-`static`, current `handle_stop` body minus the response); `handle_stop` calls it then `send_stop_response`. |
+| `src/mcu_transport_dispatch.h` | declare `handle_stop_inner` (so `endstop.c` can call it). |
 | `src/endstop.c` | `endstop_trip_task` calls `handle_stop_inner` before emitting the trip event(s). |
 | `CLAUDE.md` | replace the "do not optimize same-MCU homing" note with the self-gate behavior. |
 | (tests) | `kalico-c-api` idempotent re-gate coverage; kalico-sim same-MCU home. |

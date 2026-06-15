@@ -4,9 +4,9 @@
 
 **Goal:** Report the honest *actual encoder* position and *native drive velocity* of EtherCAT servo axes, feeding the SAME host surfaces Plan 1 built for steppers (`motion_report` live value, `GET_POSITION`). The velocity must be the drive's real `606Ch` value (intended for tuning, not just display).
 
-**Architecture:** The EtherCAT endpoint already speaks the same `kalico_protocol` request/response as serial MCUs. So the endpoint gains a `QueryMotorState` handler that reads `6064h` (position, reference-unit) and `606Ch` (velocity, rpm), converts both to mm / mm·s⁻¹ using its `CountMap` + `rotation_distance`, and replies with the **same `MotorStateResponse`** Plan 1 defined. The host bridge drops its EtherCAT skip and routes the live-position query to the endpoint, mapping the reply onto the servo's cartesian slot. The host assembly (`assemble_cartesian`, slot→cartesian, the cache + poll thread, `motion_report`, `GET_POSITION`) is **unchanged** — servo slots fill the same `motors[]` array as stepper slots, so mixed stepper+servo machines work automatically.
+**Architecture:** The EtherCAT endpoint already speaks the same `mcu_protocol` request/response as serial MCUs. So the endpoint gains a `QueryMotorState` handler that reads `6064h` (position, reference-unit) and `606Ch` (velocity, rpm), converts both to mm / mm·s⁻¹ using its `CountMap` + `rotation_distance`, and replies with the **same `MotorStateResponse`** Plan 1 defined. The host bridge drops its EtherCAT skip and routes the live-position query to the endpoint, mapping the reply onto the servo's cartesian slot. The host assembly (`assemble_cartesian`, slot→cartesian, the cache + poll thread, `motion_report`, `GET_POSITION`) is **unchanged** — servo slots fill the same `motors[]` array as stepper slots, so mixed stepper+servo machines work automatically.
 
-**Tech Stack:** C (EtherCAT master PDO map — `bench/libecrt.c`/`.h`), Rust (`kalico-ethercat-rt`: ffi/capture/scale/wire/endpoint, `motion-bridge`), Python (`servo_axis`/`ethercat_node`/`motion_bridge` plumbing).
+**Tech Stack:** C (EtherCAT master PDO map — `bench/libecrt.c`/`.h`), Rust (`ethercat-rt`: ffi/capture/scale/wire/endpoint, `motion-engine`), Python (`servo_axis`/`ethercat_node`/`motion_engine` plumbing).
 
 **Spec:** `docs/superpowers/specs/2026-06-14-position-reporting-design.md` §2. This is Plan 2 of 2; Plan 1 (stepper path, merged on this branch) defined `QueryMotorState`/`MotorStateResponse`, `assemble_cartesian`, the cache + poll thread, and the host surfaces.
 
@@ -29,20 +29,20 @@
 |---|---|
 | `klippy/extras/servo_axis.py` | expose `get_rotation_distance()` |
 | `klippy/extras/ethercat_node.py` | pass `rotation_distance` to `claim_ethercat_node` |
-| `klippy/motion_bridge.py` | `claim_ethercat_node` passthrough gains `rotation_distance` |
-| `rust/motion-bridge/src/bridge.rs` | `claim_ethercat_node` + `spawn_ethercat_endpoint` thread `rotation_distance` through; remove EtherCAT skip in `collect_motor_positions_inner`, route to endpoint |
+| `klippy/motion_engine.py` | `claim_ethercat_node` passthrough gains `rotation_distance` |
+| `rust/motion-engine/src/bridge.rs` | `claim_ethercat_node` + `spawn_ethercat_endpoint` thread `rotation_distance` through; remove EtherCAT skip in `collect_motor_positions_inner`, route to endpoint |
 | `bench/libecrt.c`, `bench/libecrt.h` | map `0x606C` into TXPDO; add `velocity_actual` to `in_t`/`ec_telemetry_t`; `ec_rt_get_velocity_actual`; size asserts |
-| `rust/kalico-ethercat-rt/src/ffi.rs` | `EcTelemetry.velocity_actual` + `ec_rt_get_velocity_actual`; size assert 32→36 |
-| `rust/kalico-ethercat-rt/src/capture.rs` (+`capture/tests.rs`) | `velocity_actual` field + offset + encode + header_json |
-| `rust/kalico-ethercat-rt/src/scale.rs` (+tests) | `CountMap::actual_mm`; `velocity_mm_s(rpm, rotation_distance)` |
-| `rust/kalico-ethercat-rt/src/wire.rs` (+tests) | `Command::QueryMotorState`; `motor_state_response_frame(...)` |
-| `rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs` | parse `rotation_distance` arg; handle `QueryMotorState` |
+| `rust/ethercat-rt/src/ffi.rs` | `EcTelemetry.velocity_actual` + `ec_rt_get_velocity_actual`; size assert 32→36 |
+| `rust/ethercat-rt/src/capture.rs` (+`capture/tests.rs`) | `velocity_actual` field + offset + encode + header_json |
+| `rust/ethercat-rt/src/scale.rs` (+tests) | `CountMap::actual_mm`; `velocity_mm_s(rpm, rotation_distance)` |
+| `rust/ethercat-rt/src/wire.rs` (+tests) | `Command::QueryMotorState`; `motor_state_response_frame(...)` |
+| `rust/ethercat-rt/src/bin/ethercat-rt.rs` | parse `rotation_distance` arg; handle `QueryMotorState` |
 
 ---
 
 ## Task 1: Thread `rotation_distance` to the endpoint
 
-**Files:** `klippy/extras/servo_axis.py`, `klippy/extras/ethercat_node.py`, `klippy/motion_bridge.py`, `rust/motion-bridge/src/bridge.rs`, `rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs`
+**Files:** `klippy/extras/servo_axis.py`, `klippy/extras/ethercat_node.py`, `klippy/motion_engine.py`, `rust/motion-engine/src/bridge.rs`, `rust/ethercat-rt/src/bin/ethercat-rt.rs`
 
 The endpoint needs `rotation_distance` (mm per motor rev) to convert `606Ch` rpm → mm/s. `counts_per_mm` is already passed at claim time; add `rotation_distance` alongside it.
 
@@ -52,17 +52,17 @@ The endpoint needs `rotation_distance` (mm per motor rev) to convert `606Ch` rpm
         return self.rotation_distance
 ```
 - [ ] **Step 2: Pass from the node claim.** In `ethercat_node.py` `_claim` (~line 74, where `self._counts_per_mm = rail.get_counts_per_mm()`), add `rotation_distance = rail.get_rotation_distance()` and pass it into the `bridge.claim_ethercat_node(...)` call (add the arg in the position the wrapper/bridge expects — keep ordering consistent across Steps 3–4).
-- [ ] **Step 3: Python wrapper passthrough.** In `klippy/motion_bridge.py`, the `claim_ethercat_node` wrapper forwards args to `self._bridge.claim_ethercat_node(...)`. Add `rotation_distance` to the wrapper signature and forward it.
-- [ ] **Step 4: Bridge pyo3 + spawn.** In `rust/motion-bridge/src/bridge.rs`, add `rotation_distance: f64` to the `claim_ethercat_node` pyo3 signature (after `counts_per_mm`), and pass it into `spawn_ethercat_endpoint(...)` as a new CLI argument (mirror exactly how `counts_per_mm` is passed as a CLI arg — find `spawn_ethercat_endpoint` and the arg vector). Use a distinct flag name, e.g. `--rotation-distance`.
-- [ ] **Step 5: Endpoint parses it.** In `rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs`, parse the new `--rotation-distance` arg into an `f64` next to where `counts_per_mm` is parsed, and bind it for later use (Task 7). Mirror the existing arg-parsing style.
+- [ ] **Step 3: Python wrapper passthrough.** In `klippy/motion_engine.py`, the `claim_ethercat_node` wrapper forwards args to `self._bridge.claim_ethercat_node(...)`. Add `rotation_distance` to the wrapper signature and forward it.
+- [ ] **Step 4: Bridge pyo3 + spawn.** In `rust/motion-engine/src/bridge.rs`, add `rotation_distance: f64` to the `claim_ethercat_node` pyo3 signature (after `counts_per_mm`), and pass it into `spawn_ethercat_endpoint(...)` as a new CLI argument (mirror exactly how `counts_per_mm` is passed as a CLI arg — find `spawn_ethercat_endpoint` and the arg vector). Use a distinct flag name, e.g. `--rotation-distance`.
+- [ ] **Step 5: Endpoint parses it.** In `rust/ethercat-rt/src/bin/ethercat-rt.rs`, parse the new `--rotation-distance` arg into an `f64` next to where `counts_per_mm` is parsed, and bind it for later use (Task 7). Mirror the existing arg-parsing style.
 - [ ] **Step 6: Build both sides.**
-Run: `cd rust && cargo build -p motion-bridge -p kalico-ethercat-rt`
+Run: `cd rust && cargo build -p motion-engine -p ethercat-rt`
 Expected: clean. (No behavior yet — `rotation_distance` is parsed and stored; used in Task 7.)
 - [ ] **Step 7: Python lint + bridge tests.**
-Run: `./scripts/ci.sh ruff` (clean) and `cargo nextest run -p motion-bridge` (no regressions).
+Run: `./scripts/ci.sh ruff` (clean) and `cargo nextest run -p motion-engine` (no regressions).
 - [ ] **Step 8: Commit**
 ```bash
-git add klippy/extras/servo_axis.py klippy/extras/ethercat_node.py klippy/motion_bridge.py rust/motion-bridge/src/bridge.rs rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs
+git add klippy/extras/servo_axis.py klippy/extras/ethercat_node.py klippy/motion_engine.py rust/motion-engine/src/bridge.rs rust/ethercat-rt/src/bin/ethercat-rt.rs
 git commit -m "feat(ethercat): thread rotation_distance to the servo endpoint"
 ```
 
@@ -108,7 +108,7 @@ git commit -m "feat(ethercat): map 606Ch velocity actual into TXPDO"
 
 ## Task 3: Rust FFI `EcTelemetry.velocity_actual` + getter
 
-**Files:** `rust/kalico-ethercat-rt/src/ffi.rs`
+**Files:** `rust/ethercat-rt/src/ffi.rs`
 
 - [ ] **Step 1: Add the field.** In `EcTelemetry` (ffi.rs:8-20), add after `pub position_actual: i32,`:
 ```rust
@@ -121,11 +121,11 @@ The struct must stay `#[repr(C)]` and field order must match the C `ec_telemetry
     pub fn ec_rt_get_velocity_actual() -> i32;
 ```
 - [ ] **Step 4: Build.**
-Run: `cd rust && cargo build -p kalico-ethercat-rt`
+Run: `cd rust && cargo build -p ethercat-rt`
 Expected: clean (the `repr(C)` layout + size assert compile-checks the C/Rust agreement).
 - [ ] **Step 5: Commit**
 ```bash
-git add rust/kalico-ethercat-rt/src/ffi.rs
+git add rust/ethercat-rt/src/ffi.rs
 git commit -m "feat(ethercat): EcTelemetry.velocity_actual + ec_rt_get_velocity_actual FFI"
 ```
 
@@ -133,19 +133,19 @@ git commit -m "feat(ethercat): EcTelemetry.velocity_actual + ec_rt_get_velocity_
 
 ## Task 4: Capture buffer carries `velocity_actual`
 
-**Files:** `rust/kalico-ethercat-rt/src/capture.rs`, `rust/kalico-ethercat-rt/src/capture/tests.rs`
+**Files:** `rust/ethercat-rt/src/capture.rs`, `rust/ethercat-rt/src/capture/tests.rs`
 
 So the existing servo-capture telemetry (used in Task 9 verification) records the new field.
 
 - [ ] **Step 1: Write the failing test.** In `capture/tests.rs`, extend the `sample(n)` helper (tests.rs:6-18) to set `velocity_actual: n + 4,` (after `position_actual`), and extend the encode round-trip test to assert the velocity field survives encode→decode and lands at its offset. Run it — expect FAIL (no field yet).
 - [ ] **Step 2: Add the offset constant.** In `capture.rs`, after `OFF_POSITION_ACTUAL` (line 25), add `const OFF_VELOCITY_ACTUAL: usize = <next free offset>;` — place velocity_actual at the END of the record to avoid shifting existing offsets (set it to the current `RECORD_SIZE`), then bump `RECORD_SIZE` by 4.
 - [ ] **Step 3: Struct + encode + header.** Add `pub velocity_actual: i32,` to `DriveSample` (after `position_actual`). In `encode_record`, write it at `OFF_VELOCITY_ACTUAL` (4 LE bytes) mirroring the other i32 fields. In `header_json`, add `("velocity_actual", "i32", OFF_VELOCITY_ACTUAL),` to the field-descriptor list.
-- [ ] **Step 4: Populate from telemetry.** Find where `DriveSample` is built from `EcTelemetry` (the DC-loop capture push, `kalico-ethercat-rt.rs` ~708) — add `velocity_actual: t.velocity_actual,`. (This is in the bin; if the bin doesn't compile until Task 7, it's fine to add the field here and let Task 7 finish the bin — but prefer adding just this field now so capture is complete.)
+- [ ] **Step 4: Populate from telemetry.** Find where `DriveSample` is built from `EcTelemetry` (the DC-loop capture push, `ethercat-rt.rs` ~708) — add `velocity_actual: t.velocity_actual,`. (This is in the bin; if the bin doesn't compile until Task 7, it's fine to add the field here and let Task 7 finish the bin — but prefer adding just this field now so capture is complete.)
 - [ ] **Step 5: Run tests.**
-Run: `cd rust && cargo nextest run -p kalico-ethercat-rt -E 'test(capture)'` → PASS. Then `cargo nextest run -p kalico-ethercat-rt` → no regressions. `cargo clippy -p kalico-ethercat-rt -- -D warnings` clean.
+Run: `cd rust && cargo nextest run -p ethercat-rt -E 'test(capture)'` → PASS. Then `cargo nextest run -p ethercat-rt` → no regressions. `cargo clippy -p ethercat-rt -- -D warnings` clean.
 - [ ] **Step 6: Commit**
 ```bash
-git add rust/kalico-ethercat-rt/src/capture.rs rust/kalico-ethercat-rt/src/capture/tests.rs rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs
+git add rust/ethercat-rt/src/capture.rs rust/ethercat-rt/src/capture/tests.rs rust/ethercat-rt/src/bin/ethercat-rt.rs
 git commit -m "feat(ethercat): capture velocity_actual telemetry"
 ```
 
@@ -153,7 +153,7 @@ git commit -m "feat(ethercat): capture velocity_actual telemetry"
 
 ## Task 5: Counts→mm and rpm→mm/s conversions
 
-**Files:** `rust/kalico-ethercat-rt/src/scale.rs`, `rust/kalico-ethercat-rt/src/scale/tests.rs` (create if absent, per separate-test-file convention)
+**Files:** `rust/ethercat-rt/src/scale.rs`, `rust/ethercat-rt/src/scale/tests.rs` (create if absent, per separate-test-file convention)
 
 - [ ] **Step 1: Write the failing tests.** Add tests for:
   - `CountMap::actual_mm`: with `CountMap::new(counts_per_mm=100.0, actual_counts=1000, pos_mm=5.0)` (origin), `actual_mm(1000) == 5.0` and `actual_mm(1100) == 6.0` (i.e. `5.0 + (1100-1000)/100`). Also assert it's the inverse of `target_counts` on a round-trip.
@@ -173,10 +173,10 @@ pub fn velocity_mm_s(rpm: i32, rotation_distance: f64) -> f64 {
 }
 ```
 - [ ] **Step 3: Run tests + lint.**
-Run: `cd rust && cargo nextest run -p kalico-ethercat-rt -E 'test(scale)'` → PASS. `cargo clippy -p kalico-ethercat-rt -- -D warnings` clean.
+Run: `cd rust && cargo nextest run -p ethercat-rt -E 'test(scale)'` → PASS. `cargo clippy -p ethercat-rt -- -D warnings` clean.
 - [ ] **Step 4: Commit**
 ```bash
-git add rust/kalico-ethercat-rt/src/scale.rs rust/kalico-ethercat-rt/src/scale/tests.rs
+git add rust/ethercat-rt/src/scale.rs rust/ethercat-rt/src/scale/tests.rs
 git commit -m "feat(ethercat): CountMap::actual_mm + velocity_mm_s conversions"
 ```
 
@@ -184,9 +184,9 @@ git commit -m "feat(ethercat): CountMap::actual_mm + velocity_mm_s conversions"
 
 ## Task 6: Endpoint wire — `QueryMotorState` command + response frame
 
-**Files:** `rust/kalico-ethercat-rt/src/wire.rs`, `rust/kalico-ethercat-rt/src/wire/tests.rs` (or the crate's wire test location)
+**Files:** `rust/ethercat-rt/src/wire.rs`, `rust/ethercat-rt/src/wire/tests.rs` (or the crate's wire test location)
 
-The endpoint must decode an incoming `QueryMotorState` control frame and be able to build a `MotorStateResponse` frame — reusing `kalico_protocol::messages::MotorStateResponse`/`MotorSample` from Plan 1.
+The endpoint must decode an incoming `QueryMotorState` control frame and be able to build a `MotorStateResponse` frame — reusing `mcu_protocol::messages::MotorStateResponse`/`MotorSample` from Plan 1.
 
 - [ ] **Step 1: Read the existing pattern.** In `wire.rs`, read the `Command` enum + `decode_command` (how `QueryRuntimeCaps`/`Identify` commands are decoded with their `correlation_id`) and an existing `*_response_frame` builder (e.g. `runtime_caps_response_frame`) to mirror framing exactly (`encode_message_header` + `encode_frame(CHANNEL_CONTROL, ...)`).
 - [ ] **Step 2: Write the failing test.** Add a test that:
@@ -198,7 +198,7 @@ The endpoint must decode an incoming `QueryMotorState` control frame and be able
   - Add:
 ```rust
 pub fn motor_state_response_frame(correlation_id: u32, pos_mm: f64, vel_mm_s: f64) -> Vec<u8> {
-    use kalico_protocol::messages::{Encode, MotorSample, MotorStateResponse};
+    use mcu_protocol::messages::{Encode, MotorSample, MotorStateResponse};
     let resp = MotorStateResponse {
         motors: vec![MotorSample {
             slot: 0,
@@ -214,10 +214,10 @@ pub fn motor_state_response_frame(correlation_id: u32, pos_mm: f64, vel_mm_s: f6
 ```
   Also add an EMPTY-response helper or a flag so the endpoint can reply with `motors: vec![]` when no `CountMap` exists yet (pre-home) — e.g. `motor_state_empty_frame(correlation_id)`. (Adapt the exact header/encode calls to the real `wire.rs` helpers; the slot is `0` because the bridge remaps to the cartesian slot via `cfg.axes` in Task 8.)
 - [ ] **Step 4: Run tests + lint.**
-Run: `cd rust && cargo nextest run -p kalico-ethercat-rt -E 'test(wire)'` → PASS (round-trip the q16 values). `cargo clippy -p kalico-ethercat-rt -- -D warnings` clean.
+Run: `cd rust && cargo nextest run -p ethercat-rt -E 'test(wire)'` → PASS (round-trip the q16 values). `cargo clippy -p ethercat-rt -- -D warnings` clean.
 - [ ] **Step 5: Commit**
 ```bash
-git add rust/kalico-ethercat-rt/src/wire.rs rust/kalico-ethercat-rt/src/wire/tests.rs
+git add rust/ethercat-rt/src/wire.rs rust/ethercat-rt/src/wire/tests.rs
 git commit -m "feat(ethercat): QueryMotorState command + MotorStateResponse frame"
 ```
 
@@ -225,7 +225,7 @@ git commit -m "feat(ethercat): QueryMotorState command + MotorStateResponse fram
 
 ## Task 7: Endpoint handles `QueryMotorState`
 
-**Files:** `rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs`
+**Files:** `rust/ethercat-rt/src/bin/ethercat-rt.rs`
 
 In the command-dispatch loop (where `Command::QueryRuntimeCaps`/`Identify`/`SetTorque` are handled), add a `Command::QueryMotorState` arm that reads the live drive position+velocity, converts to mm/mm·s⁻¹, and responds.
 
@@ -250,11 +250,11 @@ Command::QueryMotorState { correlation_id } => {
 ```
 Adapt `cmap` access to its real type (it may be `Option<CountMap>` or similar). `rotation_distance` is the value parsed in Task 1 Step 5.
 - [ ] **Step 3: Build the endpoint.**
-Run: `cd rust && cargo build -p kalico-ethercat-rt`
-Expected: clean. (Also `cargo nextest run -p kalico-ethercat-rt` → no regressions; `cargo clippy -p kalico-ethercat-rt -- -D warnings` clean.)
+Run: `cd rust && cargo build -p ethercat-rt`
+Expected: clean. (Also `cargo nextest run -p ethercat-rt` → no regressions; `cargo clippy -p ethercat-rt -- -D warnings` clean.)
 - [ ] **Step 4: Commit**
 ```bash
-git add rust/kalico-ethercat-rt/src/bin/kalico-ethercat-rt.rs
+git add rust/ethercat-rt/src/bin/ethercat-rt.rs
 git commit -m "feat(ethercat): endpoint answers QueryMotorState with actual mm pos/vel"
 ```
 
@@ -262,15 +262,15 @@ git commit -m "feat(ethercat): endpoint answers QueryMotorState with actual mm p
 
 ## Task 8: Bridge routes the live query to EtherCAT endpoints
 
-**Files:** `rust/motion-bridge/src/bridge.rs`
+**Files:** `rust/motion-engine/src/bridge.rs`
 
 Remove the EtherCAT skip in `collect_motor_positions_inner` (bridge.rs ~142) and, for EtherCAT configs, `kalico_call(QueryMotorState)` on the endpoint connection, mapping the reply onto the servo's cartesian slot(s) via `cfg.axes`.
 
-- [ ] **Step 1: Replace the skip with endpoint handling.** In `collect_motor_positions_inner`, the per-config loop currently does `if conn.ethercat_socket.is_some() { continue; }`. Replace the EtherCAT branch so that, for an EtherCAT connection, it obtains `conn.endpoint_conn` (an `Arc<UnixNativeConn>` — Plan-1 exploration confirmed it implements the same `kalico_call`), drops the `mcus` lock, and issues the query. Structure (mirror the serial branch's lock-scoping — clone the `Arc` inside the lock, call outside):
+- [ ] **Step 1: Replace the skip with endpoint handling.** In `collect_motor_positions_inner`, the per-config loop currently does `if conn.ethercat_socket.is_some() { continue; }`. Replace the EtherCAT branch so that, for an EtherCAT connection, it obtains `conn.endpoint_conn` (an `Arc<McuSerialConn>` — Plan-1 exploration confirmed it implements the same `kalico_call`), drops the `mcus` lock, and issues the query. Structure (mirror the serial branch's lock-scoping — clone the `Arc` inside the lock, call outside):
 ```rust
 for cfg in &configs {
     // Decide transport under the lock, then call outside it.
-    enum Q { Serial(Arc<KalicoHostIo>), EtherCat(Arc<UnixNativeConn>) }
+    enum Q { Serial(Arc<McuHostIo>), EtherCat(Arc<McuSerialConn>) }
     let q = {
         let map = mcus.lock().unwrap_or_else(|p| p.into_inner());
         let Some(conn) = map.get(&cfg.mcu_id) else { continue };
@@ -319,13 +319,13 @@ for cfg in &configs {
     }
 }
 ```
-Adapt the connection field names (`endpoint_conn`, `UnixNativeConn`, `KalicoHostIo`) and the `NativeCall`/`kalico_call` trait import to what actually exists (Plan-1 exploration: `endpoint_conn: Some(Arc<UnixNativeConn>)`, and `UnixNativeConn` impls `NativeCall::kalico_call`). If both `KalicoHostIo` and `UnixNativeConn` impl a common `NativeCall` trait, you may unify the call via `dyn NativeCall` instead of the enum — use whichever is cleaner given the real types. Keep the lock dropped before the blocking call.
+Adapt the connection field names (`endpoint_conn`, `McuSerialConn`, `McuHostIo`) and the `McuCall`/`kalico_call` trait import to what actually exists (Plan-1 exploration: `endpoint_conn: Some(Arc<McuSerialConn>)`, and `McuSerialConn` impls `McuCall::kalico_call`). If both `McuHostIo` and `McuSerialConn` impl a common `McuCall` trait, you may unify the call via `dyn McuCall` instead of the enum — use whichever is cleaner given the real types. Keep the lock dropped before the blocking call.
 - [ ] **Step 2: Build + regressions.**
-Run: `cd rust && cargo build -p motion-bridge && cargo nextest run -p motion-bridge` → no regressions. `cargo clippy -p motion-bridge -- -D warnings` clean.
+Run: `cd rust && cargo build -p motion-engine && cargo nextest run -p motion-engine` → no regressions. `cargo clippy -p motion-engine -- -D warnings` clean.
 - [ ] **Step 3: Unit test the EtherCAT slot mapping if feasible.** If `assemble_cartesian` + the mapping logic can be exercised without a live endpoint (e.g. by factoring the "map MotorStateResponse onto motors[] given cfg + transport-kind" into a pure helper), add a separate-file test for it (servo on slot 0 → `motors[0]` set). If it can't be cleanly isolated without a live endpoint, rely on Task 9 e2e and note it.
 - [ ] **Step 4: Commit**
 ```bash
-git add rust/motion-bridge/src/bridge.rs
+git add rust/motion-engine/src/bridge.rs
 git commit -m "feat(bridge): route live position query to EtherCAT endpoints"
 ```
 
@@ -356,4 +356,4 @@ git commit -m "feat(bridge): route live position query to EtherCAT endpoints"
 - **Reuse, not divergence:** `MotorStateResponse`, `assemble_cartesian`, the cache + poll thread, `motion_report`, and `GET_POSITION` are all Plan 1 artifacts used unchanged — the only host edit is the transport branch in `collect_motor_positions_inner`.
 - **Type/name consistency:** `velocity_actual` (C `in_t`/`ec_telemetry_t` ↔ Rust `EcTelemetry` ↔ `DriveSample`), `ec_rt_get_velocity_actual`, `CountMap::actual_mm`, `velocity_mm_s(rpm, rotation_distance)`, `Command::QueryMotorState`, `motor_state_response_frame` used consistently across tasks.
 - **Hardware-dependent step:** Task 9 Step 3 needs a real A6-EC drive; everything else is unit/CI/sim-verifiable. The velocity scale is treated as unverified until the on-drive cross-check passes, matching the "real deal / tuning" requirement.
-- **Known read-the-code points (not placeholders):** exact `cmap`/`rotation_distance` binding in the endpoint (Task 7), the `endpoint_conn`/`NativeCall` real types for the bridge branch (Task 8), the `spawn_ethercat_endpoint` arg vector + endpoint arg parser (Task 1), and `capture.rs` exact offsets (Task 4). Each step says what to read and what to write.
+- **Known read-the-code points (not placeholders):** exact `cmap`/`rotation_distance` binding in the endpoint (Task 7), the `endpoint_conn`/`McuCall` real types for the bridge branch (Task 8), the `spawn_ethercat_endpoint` arg vector + endpoint arg parser (Task 1), and `capture.rs` exact offsets (Task 4). Each step says what to read and what to write.

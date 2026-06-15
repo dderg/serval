@@ -9,7 +9,7 @@ class FakeGCode:
     Coord = Coord
 
 
-class FakeBridge:
+class FakeEngine:
     def __init__(self, axes):
         self._axes = axes
 
@@ -43,13 +43,13 @@ class FakeConfig:
 def _build(axes=None):
     printer = FakePrinter()
     if axes is not None:
-        printer.add_object("motion_bridge", FakeBridge(axes))
+        printer.add_object("motion_engine", FakeEngine(axes))
     report = PrinterMotionReport(FakeConfig(printer))
     printer.event_handlers["klippy:connect"]()
     return report
 
 
-def test_get_status_serves_live_position_from_bridge():
+def test_get_status_serves_live_position_from_engine():
     report = _build(
         {
             "x": (10.0, 1.0),
@@ -77,7 +77,7 @@ def test_get_status_velocity_is_cartesian_magnitude():
     assert report.get_status(0.0)["live_velocity"] == 5.0
 
 
-def test_get_status_without_bridge_returns_safe_defaults():
+def test_get_status_without_engine_returns_safe_defaults():
     report = _build(axes=None)
     status = report.get_status(0.0)
     pos = status["live_position"]
