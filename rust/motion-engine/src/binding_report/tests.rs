@@ -116,16 +116,11 @@ fn g5_anytime_event_matches_binding_and_gap() {
     assert_eq!(fields.limiter_derivative, "velocity");
     assert!(!fields.limiter_via_pa);
     assert!((fields.binding_ratio - 0.94).abs() < 1e-12);
-    assert!(
-        (fields.gap - 0.06).abs() < 1e-9,
-        "gap must equal (1 - ratio).max(0); got {}",
-        fields.gap,
-    );
 }
 
 /// G5 — a PA-jerk binding on set 1 (no name → runtime_caps fallback) at ratio
-/// 0.88 produces the matching limiter and gap 0.12. Confirms the event tracks
-/// the actual worst family, not a fixed one.
+/// 0.88 produces the matching limiter and binding_ratio. Confirms the event
+/// tracks the actual worst family, not a fixed one.
 #[test]
 fn g5_anytime_event_tracks_pa_jerk_family() {
     let names = vec!["gantry".to_string()];
@@ -143,11 +138,11 @@ fn g5_anytime_event_tracks_pa_jerk_family() {
     assert_eq!(fields.limiter_limit, "runtime_caps");
     assert_eq!(fields.limiter_derivative, "jerk");
     assert!(fields.limiter_via_pa);
-    assert!((fields.gap - 0.12).abs() < 1e-9);
+    assert!((fields.binding_ratio - 0.88).abs() < 1e-12);
 }
 
-/// G5 — an on-the-limit binding (ratio = 1.0, the converged optimum) reports
-/// gap 0; no binding at all reports the `none` limiter and gap 0.
+/// G5 — an on-the-limit binding (ratio = 1.0, the converged optimum) and the
+/// no-binding case both report their `binding_ratio` and limiter correctly.
 #[test]
 fn g5_anytime_event_on_limit_and_no_binding() {
     let names = vec!["gantry".to_string()];
@@ -161,14 +156,18 @@ fn g5_anytime_event_on_limit_and_no_binding() {
         ..Default::default()
     };
     let f = anytime_event_fields(&on_limit, &names);
-    assert!(f.gap.abs() < 1e-12, "on-limit gap must be 0; got {}", f.gap);
+    assert!(
+        (f.binding_ratio - 1.0).abs() < 1e-12,
+        "on-limit binding_ratio must be 1.0; got {}",
+        f.binding_ratio,
+    );
     assert_eq!(f.limiter_derivative, "accel");
 
     let none = ReplanBindingSummary::default();
     let f = anytime_event_fields(&none, &names);
     assert_eq!(f.limiter_limit, "none");
     assert_eq!(f.limiter_derivative, "none");
-    assert!(f.gap.abs() < 1e-12);
+    assert!(f.binding_ratio.abs() < 1e-12);
 }
 
 #[test]

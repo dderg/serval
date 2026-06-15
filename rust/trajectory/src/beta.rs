@@ -126,6 +126,15 @@ pub struct ReplanBindingSummary {
     /// the authoritative `deadline_limited` signal, replacing the wall-clock
     /// heuristic that misfired on slow-but-converged solves under host load.
     pub deadline_truncated: bool,
+    /// Peak limit utilization of the committed (executed) trajectory across the
+    /// window: the largest `|executed| / cap` ratio reached on any axis-set and
+    /// family, measured the way the MCU steps it. Below 1 means headroom was left
+    /// on the table (the solver could ride a limit harder); above 1 means the
+    /// executed motion exceeds a limit between solver grid points. 0 when no
+    /// segment yields a sample. See [`crate::utilization`].
+    pub peak_utilization: f64,
+    /// Which kinematic family the peak utilization landed on.
+    pub peak_util_family: Option<crate::utilization::UtilFamily>,
 }
 
 fn aggregate_binding(profiles: &[temporal::TopProfile]) -> ReplanBindingSummary {
@@ -153,6 +162,8 @@ fn aggregate_binding(profiles: &[temporal::TopProfile]) -> ReplanBindingSummary 
         histogram,
         worst,
         deadline_truncated,
+        peak_utilization: 0.0,
+        peak_util_family: None,
     }
 }
 
@@ -560,7 +571,16 @@ fn run_one_iteration(
         })
         .collect();
 
-    let binding = aggregate_binding(&batch_output.profiles);
+    let mut binding = aggregate_binding(&batch_output.profiles);
+    if let Some(u) = crate::utilization::window_peak_utilization(
+        emitted
+            .iter()
+            .zip(input.segments.iter())
+            .map(|(seg, src)| (seg.axes.as_slice(), &src.temporal.limits)),
+    ) {
+        binding.peak_utilization = u.ratio;
+        binding.peak_util_family = Some(u.family);
+    }
 
     Ok(BetaIterResult {
         fitted,
