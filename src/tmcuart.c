@@ -50,7 +50,7 @@ sim_uart_lookup_fd(uint8_t oid) {
 #if CONFIG_KALICO_SIM
     // Auto-route: any tmcuart oid with no explicit route falls back to
     // a canonical per-MCU socket path. The flavor prefix (`h7` for the
-    // KALICO_RUNTIME-enabled H7 build, `f4` otherwise) differentiates
+    // RUNTIME-enabled H7 build, `f4` otherwise) differentiates
     // sockets so the H7 extruder TMC2209 (oid=0) and the F4 stepper_z
     // TMC2209 (also oid=0) talk to distinct emulators. The orchestrator
     // binds matching paths in conftest.py before klippy attaches.

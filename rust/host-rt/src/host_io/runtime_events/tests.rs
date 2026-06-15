@@ -6,7 +6,7 @@ fn lifts_credit_freed() {
     let mut p = MessageParams::new();
     p.insert("retired_through_segment_id", MessageValue::U32(42));
     p.insert("free_slots", MessageValue::U32(11));
-    match RuntimeEvent::lift("kalico_credit_freed", p) {
+    match RuntimeEvent::lift("runtime_credit_freed", p) {
         RuntimeEvent::CreditFreed(e) => {
             assert_eq!(e.retired_through_segment_id, 42);
             assert_eq!(e.free_slots, 11);
@@ -21,7 +21,7 @@ fn lifts_fault_with_synthesized_false() {
     p.insert("fault_code", MessageValue::U32(17));
     p.insert("fault_detail", MessageValue::U32(0));
     p.insert("segment_id", MessageValue::U32(42));
-    match RuntimeEvent::lift("kalico_fault", p) {
+    match RuntimeEvent::lift("runtime_fault", p) {
         RuntimeEvent::Fault(e) => {
             assert_eq!(e.fault_code, 17);
             assert_eq!(e.synthesized, false);

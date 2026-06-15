@@ -78,7 +78,7 @@ fn decode_output_recovers_field_names() {
         license: None,
     };
     d.output.insert(
-        "kalico_credit_freed retired_through_segment_id=%u free_slots=%c".into(),
+        "runtime_credit_freed retired_through_segment_id=%u free_slots=%c".into(),
         50,
     );
     let p = MsgProtoParser::from_dictionary(d).unwrap();
@@ -90,7 +90,7 @@ fn decode_output_recovers_field_names() {
 
     match p.decode(&packet).unwrap() {
         DecodedFrame::Output { name, params } => {
-            assert_eq!(name, "kalico_credit_freed");
+            assert_eq!(name, "runtime_credit_freed");
             assert_eq!(params.get_u32("retired_through_segment_id"), 42);
             assert_eq!(params.get_u32("free_slots"), 11);
         }
@@ -112,7 +112,7 @@ fn decode_output_canonical_produces_msg_form() {
         license: None,
     };
     d.output.insert(
-        "kalico_credit_freed retired_through_segment_id=%u free_slots=%c".into(),
+        "runtime_credit_freed retired_through_segment_id=%u free_slots=%c".into(),
         50,
     );
     let p = MsgProtoParser::from_dictionary(d).unwrap();
@@ -125,7 +125,7 @@ fn decode_output_canonical_produces_msg_form() {
     let (name, params) = p.decode_output_canonical(&packet).unwrap();
     assert_eq!(name, "#output");
     let msg = params.try_get_str("#msg").unwrap();
-    assert!(msg.contains("kalico_credit_freed"));
+    assert!(msg.contains("runtime_credit_freed"));
     assert!(msg.contains("42"));
     assert!(msg.contains("11"));
 }

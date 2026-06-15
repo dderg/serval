@@ -33,7 +33,7 @@ impl core::fmt::Debug for EtherCatFaultSink<'_> {
 impl FaultSink for EtherCatFaultSink<'_> {
     fn piece_start_in_past(&self, _axis_idx: usize, deficit_us: u32) {
         // Wire layout: bits[31:16] = deficit_us saturated to u16::MAX,
-        // bits[15:0] = KALICO_ERR_PIECE_START_IN_PAST (-308 as u16 = 0xFECC).
+        // bits[15:0] = RUNTIME_ERR_PIECE_START_IN_PAST (-308 as u16 = 0xFECC).
         // Must match host's StatusHeartbeat decoder.
         #[allow(clippy::cast_sign_loss)]
         let code_u16 = (-308_i32 as i16) as u16;

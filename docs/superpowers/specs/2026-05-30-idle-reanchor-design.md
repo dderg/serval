@@ -35,7 +35,7 @@ onto the MCU clock. `t0` is established once per stream and only re-established 
 
 The planner timeline (`ShaperState::t_appended` and the per-segment `t_start`/`t_end`)
 is a monotonic accumulator. It is zeroed only by `ShaperState::reset(...)`, which today
-runs on `kalico_stream_open`, homing / `SET_KINEMATIC_POSITION`, engine `Underrun`,
+runs on `runtime_stream_open`, homing / `SET_KINEMATIC_POSITION`, engine `Underrun`,
 `force_idle`, and klippy reconnect — **never on a plain idle gap between moves.**
 
 So:

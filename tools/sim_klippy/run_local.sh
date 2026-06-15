@@ -25,7 +25,7 @@ docker run --rm -i \
       cp .config.linux .config
       make olddefconfig >/dev/null
       make -j\$(nproc) 2>&1 | tail -5
-      make -f Makefile.kalico motion-engine 2>&1 | tail -3
+      make -f Makefile.rust motion-engine 2>&1 | tail -3
       # Remove any stale misnamed motion_engine.so that shadows motion_engine.py.
       # The correct native module is always _motion_engine.so (built above).
       rm -f klippy/motion_engine.so 2>/dev/null || true

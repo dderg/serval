@@ -3,7 +3,7 @@
 - **Date:** 2026-05-29
 - **Branch:** `simple-mcu-contract`
 - **Status:** Design — pending implementation plan
-- **Related:** `docs/superpowers/specs/2026-05-04-mcu-transport-design.md` (§6 demux), `docs/superpowers/specs/2026-05-28-push-pieces-wiring-design.md` (pump), `docs/kalico-rewrite/mcu-c-rust-boundary.md`
+- **Related:** `docs/superpowers/specs/2026-05-04-mcu-transport-design.md` (§6 demux), `docs/superpowers/specs/2026-05-28-push-pieces-wiring-design.md` (pump), `docs/rewrite/mcu-c-rust-boundary.md`
 
 ## 1. Problem & root cause
 
@@ -11,7 +11,7 @@ A jog reproducibly crashed the bench with a `PieceStartInPast` (-308) shutdown. 
 
 - The host pump sent the H7 a single `PushPieces` frame of **182 pieces (~5.8 KB)**. The frame fit the ring (per-axis depth ≈ 661) but exceeded the MCU's **separate, smaller demux staging buffer** (`KALICO_MAX_PIECES_PER_FRAME = 128`, `MCU_DEMUX_MCU_BUF_SIZE = 4132 B`, `src/mcu_demux.h`).
 - The demux dropped the oversized frame as `MCU_DEMUX_OUT_ERROR` (`src/mcu_demux.c:137`) **silently — no response**.
-- The host's `send_frame` is a **synchronous, blocking `kalico_call` with a 5 s timeout** (`rust/motion-engine/src/pump.rs`). With no response it blocked the full 5 s (journalctl: `pump send_frame failed … PushPieces: Timeout`).
+- The host's `send_frame` is a **synchronous, blocking `mcu_call` with a 5 s timeout** (`rust/motion-engine/src/pump.rs`). With no response it blocked the full 5 s (journalctl: `pump send_frame failed … PushPieces: Timeout`).
 - The pump is single-threaded, so that 5 s stall **delayed delivery of the other MCU's (the F446 Z-hold) continuation pieces.** The anchor keeps `t0` fixed for a stream (`rust/motion-engine/src/anchor.rs:31`), so the late Z pieces carried `start_time` ≈ 4.57 s in the past → `PieceStartInPast` → klippy shutdown.
 - The MCU motion loop was healthy throughout: max ISR inter-fire gap **103 µs**, **0 µs** USB interference. This was never a "motion loop can't keep up" problem.
 
@@ -54,7 +54,7 @@ Three consequences fall out for free, eliminating all the machinery an "MCU vali
 
 The destination axis ring is a shared array of `N` `PieceEntry` slots in `rt_storage`. The host addresses pieces by **physical slot index** (it owns the wrap arithmetic — see §4.4), sends them in CRC-protected frames on a **dedicated transport channel**, and advances the ring's **valid frontier (`head`)**. The MCU consumer plays the window `[consumed, head)` (reading physical slot `tail`), advances `consumed` and `tail` together, and reports `consumed` in the heartbeat. The MCU applies a frame by writing its addressed slots and advancing `head` — **no write-time guard**; the active piece is protected structurally (cached out of the ring before the slot is freed) and the host's flow control cannot address a live slot. Consumed slots are never cleared — they are overwritten by a later lap, and any slot that ends up stale is caught by the `PieceStartInPast` guard.
 
-The C/Rust split is unchanged in shape: C owns USB framing, the demux, CRC, channel routing, and the physical memory the ring lives in; Rust owns the ring data structure and is the sole *writer* of ring contents. The new operation is a **method on the existing `KalicoRuntime` handle** (boundary rule B1 — not a new seam).
+The C/Rust split is unchanged in shape: C owns USB framing, the demux, CRC, channel routing, and the physical memory the ring lives in; Rust owns the ring data structure and is the sole *writer* of ring contents. The new operation is a **method on the existing `Runtime` handle** (boundary rule B1 — not a new seam).
 
 ## 4. Components & changes
 
@@ -76,16 +76,16 @@ The ring tracks `ring_offset`, `ring_depth (N)`, and three live cursors, deliber
 
 The append-style `push()` (write at the producer cursor, increment by 1) is removed from the live path — writes are now absolute-addressed by physical slot and `head` is host-driven (set, not incremented).
 
-### 4.2 The write seam — stream-write + post-CRC commit (`rust/kalico-c-api/src/runtime_ffi.rs`, `rust/runtime/src/engine.rs`)
+### 4.2 The write seam — stream-write + post-CRC commit (`rust/c-api/src/runtime_ffi.rs`, `rust/runtime/src/engine.rs`)
 
-Replaces the non-atomic per-piece loop over a contiguous buffer (`kalico_runtime_push_pieces` at runtime_ffi.rs:1488 / `engine::push_pieces` at engine.rs:250). **Crucially the seam must not take a pointer to the whole frame** — that would require the frame to be buffered until CRC, reintroducing the staging buffer this design deletes. Instead the seam is two operations matching the streaming transport (§4.3):
+Replaces the non-atomic per-piece loop over a contiguous buffer (`runtime_push_pieces` at runtime_ffi.rs:1488 / `engine::push_pieces` at engine.rs:250). **Crucially the seam must not take a pointer to the whole frame** — that would require the frame to be buffered until CRC, reintroducing the staging buffer this design deletes. Instead the seam is two operations matching the streaming transport (§4.3):
 
 ```
 // per piece, as it streams in (pre-CRC); Rust owns the slot math
-kalico_runtime_write_piece(rt, axis_idx: u8, start_slot: u16, index: u8,
+runtime_write_piece(rt, axis_idx: u8, start_slot: u16, index: u8,
                            piece_ptr: *const u8 /* 32 bytes */) -> i32
 // once, after the trailing CRC validates — the commit
-kalico_runtime_commit_head(rt, axis_idx: u8, new_head: u32) -> i32
+runtime_commit_head(rt, axis_idx: u8, new_head: u32) -> i32
 ```
 
 `write_piece` copies one 32-byte `PieceEntry` from the sink's scratch into `storage[ring_offset + ((start_slot + index) mod N)]` — unconditionally, no cursor read, no active-slot check (Rust computes the slot, so C does no ring arithmetic; B2). `commit_head` advances `head = max(head, new_head)` (monotone — a stray lower value from an out-of-order re-send is ignored, one wrapping comparison). Both are `extern "C"` with scalar + ptr params (B4), methods on the existing handle (B1). No reserve, feed, or abort.
@@ -99,8 +99,8 @@ This is **atomic by construction**: slot bytes stream into the ring *before* CRC
 Pieces move on a **new, dedicated transport channel** (`MCU_CHANNEL_PIECES`). The demux already routes by *channel* (`[sync][len][channel][payload][crc]`) — a pure transport concern — so the new channel id plus the streaming sink it routes to are the genuinely new transport code; the routing dispatch itself is unchanged. For the piece channel the demux does not accumulate into `kalico_buf`; it **streams the payload to a thin piece sink**:
 
 1. The sink reads the small frame header (`correlation_id`, `axis_idx`, `start_slot`, `new_head`, `piece_count`) and captures the `correlation_id` for the response.
-2. As complete 32-byte pieces arrive (assembled in a 32-byte scratch across USB-chunk boundaries), each is written straight into its ring slot via `kalico_runtime_write_piece(...)` (§4.2) — pre-CRC, no frame buffering; the demux folds CRC over every frame byte.
-3. On the trailing CRC: **match** → `kalico_runtime_commit_head(axis, new_head)` (the commit) then emit `PushPiecesResponse(OK)` via `send_push_pieces_response` with the captured `correlation_id`. **Mismatch** → discard (slots may have been written but `head` is **not** committed, so they are never played; a re-send overwrites them); resync; no response (correlation_id untrusted).
+2. As complete 32-byte pieces arrive (assembled in a 32-byte scratch across USB-chunk boundaries), each is written straight into its ring slot via `runtime_write_piece(...)` (§4.2) — pre-CRC, no frame buffering; the demux folds CRC over every frame byte.
+3. On the trailing CRC: **match** → `runtime_commit_head(axis, new_head)` (the commit) then emit `PushPiecesResponse(OK)` via `send_push_pieces_response` with the captured `correlation_id`. **Mismatch** → discard (slots may have been written but `head` is **not** committed, so they are never played; a re-send overwrites them); resync; no response (correlation_id untrusted).
 4. The existing 100 ms idle-reset resyncs a truncated frame; since nothing is applied until CRC, there is nothing to undo.
 
 Non-piece kalico frames (control: `configure_axis`, caps query, clear) are unchanged — they accumulate in the now-small `kalico_buf` and route through `mcu_transport_dispatch_frame` as today. `handle_push_pieces` is retired.
@@ -131,13 +131,13 @@ No other host change is required; `schedule()` already gates on `room()` and spl
 USB bytes ─[C serial_irq]─► receive_buf
           ─[C demux]─► route by channel == PIECES → piece sink (no kalico_buf)
                        │  read header (axis, start_slot, new_head, count); fold CRC
-                       │  per piece → kalico_runtime_write_piece(...)  [Rust, pre-CRC]
+                       │  per piece → runtime_write_piece(...)  [Rust, pre-CRC]
                        │       └─ write physical slot (start_slot+i) mod N (no cursor read)
                        └─ trailing CRC matches?
-                              ├─ yes → kalico_runtime_commit_head(axis,new_head); send PushPiecesResponse(OK)
+                              ├─ yes → runtime_commit_head(axis,new_head); send PushPiecesResponse(OK)
                               └─ no  → discard (slots written but head NOT committed → never played); resync; no response
 
-TIM5 ISR ─[C]─► kalico_runtime_tick_sample ─[Rust]─► play slot tail while count>0 (head!=consumed);
+TIM5 ISR ─[C]─► runtime_tick_sample ─[Rust]─► play slot tail while count>0 (head!=consumed);
                                                      advance tail (mod N); bump consumed
 Heartbeat ─[Rust→host]─► consumed (monotonic)
 ```
@@ -169,9 +169,9 @@ Standing preconditions (true today; stated so they're not silently broken): the 
 
 MCU reboot recovery is **out of scope (§9):** a reboot is a reconnect event, after which the host re-queries caps and re-allocates / re-configures the per-axis ring — which re-establishes the shared origin (all cursors zero) as a matter of course. This spec covers the steady-state receive path within one session.
 
-## 8. C/Rust boundary compliance (`docs/kalico-rewrite/mcu-c-rust-boundary.md`)
+## 8. C/Rust boundary compliance (`docs/rewrite/mcu-c-rust-boundary.md`)
 
-- **B1 (narrow seam):** `write_piece` and `commit_head` are methods on the existing `KalicoRuntime` handle — not a new logical seam.
+- **B1 (narrow seam):** `write_piece` and `commit_head` are methods on the existing `Runtime` handle — not a new logical seam.
 - **B2 (C owns shared memory):** the ring lives in C-placed `rt_storage`; Rust overlays `RuntimeContext`, computes slot indices, and remains the sole *writer* of ring contents (C passes 32-byte payloads; it never writes ring memory or does ring arithmetic).
 - **B3 / B4 (no Rust types cross the ABI):** the seam passes `u8`/`u16`/`u32`/`*const u8` only.
 - **B5 (ordering — by preemption, not atomics).** The ring cursors (`head`/`tail`/`consumed`/`count`) are **plain non-atomic** `RingDescriptor` fields (`piece_ring.rs:52-65`), per boundary rule B5 ("where C uses a plain shared word, Rust does too"). Ordering is carried by **same-core asymmetric preemption**, not acquire/release: the foreground producer writes all addressed slots and then `commit_head` advances `head`, in program order; the TIM5 ISR consumer (NVIC priority 2) preempts the foreground producer but is **never** preempted by it, so on its synchronous exception entry it observes the producer's completed slot writes before any `head` it reads. `head` is a single aligned `u32` (atomic LDR/STR on ARMv7E-M). No `core::sync::atomic`, no explicit fence — adding one would be misleading no-op work. The producer reads no consumer cursor at all; `consumed` is MCU-owned and surfaced to the host only via the heartbeat; `tail` is purely internal.

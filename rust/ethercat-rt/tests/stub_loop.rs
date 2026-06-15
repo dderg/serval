@@ -383,12 +383,12 @@ fn ethercat_endpoint_query_runtime_caps_round_trip() {
     let conn = McuSerialConn::connect(&socket_path).expect("McuSerialConn::connect must succeed");
 
     let (resp_kind, resp_body) = conn
-        .kalico_call(
+        .mcu_call(
             MessageKind::QueryRuntimeCaps,
             vec![],
             Duration::from_secs(5),
         )
-        .expect("QueryRuntimeCaps kalico_call must succeed");
+        .expect("QueryRuntimeCaps mcu_call must succeed");
 
     assert_eq!(
         resp_kind,

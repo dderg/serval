@@ -32,13 +32,13 @@ CFLAGS-$(CONFIG_MACH_STM32L4) += -mcpu=cortex-m4 -Ilib/stm32l4/include
 CFLAGS-$(CONFIG_MACH_AT32F403) = -mcpu=cortex-m4 -Ilib/stm32f1/include
 CFLAGS += $(CFLAGS-y) -D$(MCU_UPPER) -mthumb -Ilib/cmsis-core -Ilib/fast-hash
 
-CFLAGS += -Irust/kalico-c-api/include
+CFLAGS += -Irust/c-api/include
 
 CFLAGS_klipper.elf += -nostdlib -lgcc -lc_nano
 CFLAGS_klipper.elf += -T $(OUT)src/generic/armcm_link.ld
 $(OUT)klipper.elf: $(OUT)src/generic/armcm_link.ld
 
-# Link libkalico_c_api.a. Place ahead of -lgcc/-lc_nano on the link line —
+# Link libc_api.a. Place ahead of -lgcc/-lc_nano on the link line —
 # archive extraction is demand-driven and order-sensitive (spec §2.4 link-line
 # pitfalls). Empirically, prepending to CFLAGS_klipper.elf works because
 # Klipper's link rule is `$(CC) $(OBJS) $(CFLAGS_klipper.elf) -o $@` and
@@ -48,10 +48,10 @@ $(OUT)klipper.elf: $(OUT)src/generic/armcm_link.ld
 # reference C symbols (e.g. `timer_read_time`, `stats_send_time`) that GNU ld
 # has already passed in its single forward sweep. The grouped pair forces ld
 # to iterate archives until cross-references settle. Matches src/linux/Makefile.
-# KALICO_LIB is set by src/Makefile based on the active MCU (target-h7 vs
+# MCU_RUST_LIB is set by src/Makefile based on the active MCU (target-h7 vs
 # target-f4 cargo target dir); see comments there.
-CFLAGS_klipper.elf := -Wl,--start-group $(KALICO_LIB) -Wl,--end-group $(CFLAGS_klipper.elf)
-$(OUT)klipper.elf: $(KALICO_LIB)
+CFLAGS_klipper.elf := -Wl,--start-group $(MCU_RUST_LIB) -Wl,--end-group $(CFLAGS_klipper.elf)
+$(OUT)klipper.elf: $(MCU_RUST_LIB)
 
 # Add source files
 src-y += stm32/watchdog.c stm32/clockline.c stm32/dfu_reboot.c

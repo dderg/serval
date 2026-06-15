@@ -55,7 +55,7 @@ fn wait_for_socket(path: &str, deadline: Instant) {
 }
 
 fn do_handshake(conn: &McuSerialConn) {
-    conn.kalico_call(
+    conn.mcu_call(
         MessageKind::ClaimHandshake,
         Vec::new(),
         Duration::from_secs(5),

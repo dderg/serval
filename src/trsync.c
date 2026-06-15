@@ -9,7 +9,7 @@
 #include "board/irq.h" // irq_disable
 #include "board/misc.h" // timer_read_time
 #include "command.h" // DECL_COMMAND
-#include "kalico_log.h"
+#include "event_log.h"
 #include "sched.h" // struct timer
 #include "trsync.h" // trsync_do_trigger
 
@@ -30,8 +30,8 @@ trsync_do_trigger(struct trsync *ts, uint8_t reason)
 {
     irqstatus_t flag = irq_save();
     uint8_t flags = ts->flags;
-    kalico_log_emit(KALICO_LOG_LEVEL_DEBUG, KALICO_LOG_SUBSYS_ENDSTOP,
-                    KALICO_LOG_EVENT_ENDSTOP_TRSYNC_DO_TRIGGER, 0,
+    event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_ENDSTOP,
+                    EVENT_LOG_EVENT_ENDSTOP_TRSYNC_DO_TRIGGER, 0,
                     (uint32_t)flags, (uint32_t)reason);
     if (!(flags & TSF_CAN_TRIGGER))
         goto done;
@@ -163,8 +163,8 @@ command_trsync_trigger(uint32_t *args)
 {
     uint8_t oid = args[0];
     struct trsync *ts = trsync_oid_lookup(oid);
-    kalico_log_emit(KALICO_LOG_LEVEL_DEBUG, KALICO_LOG_SUBSYS_ENDSTOP,
-                    KALICO_LOG_EVENT_ENDSTOP_TRSYNC_TRIGGER_CMD, 0,
+    event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_ENDSTOP,
+                    EVENT_LOG_EVENT_ENDSTOP_TRSYNC_TRIGGER_CMD, 0,
                     (uint32_t)oid, (uint32_t)args[1]);
     irq_disable();
     trsync_do_trigger(ts, args[1]);

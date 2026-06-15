@@ -108,7 +108,7 @@ runs on `klippy:connect` and the planner is up before any gcode/homing
 motion MCU** (`_init_planner` logs "skipping init_planner" when `octopus is None`,
 e.g. a Beacon-only setup) — that config physically cannot drive steppers, so
 seeding is moot. The seed therefore reuses the planner-present guard and is a
-no-op exactly when the neighboring `kalico_stream_open` is.
+no-op exactly when the neighboring `runtime_stream_open` is.
 
 ### Decision 3 — one shared motor-frame helper
 
@@ -180,7 +180,7 @@ SET_KINEMATIC_POSITION / G28 / G92
   and we want it loud, per the "always fail loudly" decision.
 - **Planner absent → skip** (no panic). This is the motion-less config; it already
   logs a warning at `_init_planner` and cannot move, so there is nothing to seed.
-  Consistent with the adjacent `kalico_stream_open` guard.
+  Consistent with the adjacent `runtime_stream_open` guard.
 - **Backstop:** if a seed is ever missed despite this, `StepsPerSampleExceeded`
   (−310) hard-faults on the first oversized sample rather than producing corrupted
   motion.

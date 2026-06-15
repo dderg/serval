@@ -11,7 +11,7 @@ use crate::host_io::events::EventDispatcher;
 use crate::host_io::identify::IdentifySeqState;
 use crate::host_io::mcu_session::{
     McuDispatchResult, McuTransportState, PendingMcuCall, build_kalico_frame,
-    build_kalico_identify_frame, dispatch_kalico_frame,
+    build_kalico_identify_frame, dispatch_mcu_frame,
 };
 use crate::host_io::parser::MsgProtoParser;
 use crate::host_io::rtt::RttEstimator;
@@ -67,7 +67,7 @@ pub struct Reactor {
     pub(crate) passthrough_router: Option<PassthroughRouter>,
     pub(crate) passthrough_notify_map: std::collections::HashMap<u64, (McuHandle, NotifyId)>,
     pub(crate) passthrough_mcu: Option<McuHandle>,
-    pub(crate) kalico_state: McuTransportState,
+    pub(crate) transport_state: McuTransportState,
     pub(crate) interceptors: crate::host_io::interceptor::InterceptorTable,
 }
 
@@ -157,7 +157,7 @@ impl Reactor {
             passthrough_router: None,
             passthrough_notify_map: std::collections::HashMap::new(),
             passthrough_mcu: None,
-            kalico_state: McuTransportState::default(),
+            transport_state: McuTransportState::default(),
             interceptors: crate::host_io::interceptor::InterceptorTable::new(),
         }
     }
@@ -796,7 +796,7 @@ impl Reactor {
     }
 
     pub(crate) fn handle_kalico_frame(&mut self, channel: u8, payload: &[u8]) {
-        match dispatch_kalico_frame(&mut self.kalico_state, channel, payload) {
+        match dispatch_mcu_frame(&mut self.transport_state, channel, payload) {
             McuDispatchResult::Handled | McuDispatchResult::Ignored => {}
             McuDispatchResult::Event(ev) => {
                 self.dispatch_runtime_event(ev);
@@ -993,7 +993,7 @@ impl Reactor {
                 tracing::info!(
                     subsystem = "mcu-comms",
                     event = "expected_disconnect",
-                    kalico_pending = self.kalico_state.pending.len(),
+                    transport_pending = self.transport_state.pending.len(),
                     await_n = self.awaiting_response.len(),
                     unacked_n = self.unacked_window.len(),
                     "MarkExpectedDisconnect received"
@@ -1105,16 +1105,16 @@ impl Reactor {
                 completion,
                 deadline: _,
             } => {
-                let cid = self.kalico_state.allocate_correlation_id();
+                let cid = self.transport_state.allocate_correlation_id();
                 let frame = build_kalico_identify_frame(cid);
-                if self.kalico_state.identify_pending.is_some() {
+                if self.transport_state.identify_pending.is_some() {
                     let _ = completion.send(Err(TransportError::Backpressure));
                     return;
                 }
-                self.kalico_state.identify_pending = Some(completion);
+                self.transport_state.identify_pending = Some(completion);
                 if let Err(e) = self.write_frame(&frame) {
                     let is_io = matches!(e, TransportError::Io(_));
-                    if let Some(c) = self.kalico_state.identify_pending.take() {
+                    if let Some(c) = self.transport_state.identify_pending.take() {
                         let _ = c.send(Err(e));
                     }
                     if is_io {
@@ -1122,22 +1122,22 @@ impl Reactor {
                     }
                 }
             }
-            ReactorCommand::KalicoCall {
+            ReactorCommand::McuCall {
                 channel,
                 kind,
                 body,
                 completion,
                 deadline,
             } => {
-                if !self.kalico_state.identified {
+                if !self.transport_state.identified {
                     let _ = completion.send(Err(TransportError::Parse(
                         "kalico transport not yet identified".into(),
                     )));
                     return;
                 }
-                let cid = self.kalico_state.allocate_correlation_id();
+                let cid = self.transport_state.allocate_correlation_id();
                 let frame = build_kalico_frame(channel, kind, cid, &body);
-                self.kalico_state.pending.insert(
+                self.transport_state.pending.insert(
                     cid,
                     PendingMcuCall {
                         completion: completion.clone(),
@@ -1146,7 +1146,7 @@ impl Reactor {
                 );
                 if let Err(e) = self.write_frame(&frame) {
                     let is_io = matches!(e, TransportError::Io(_));
-                    if let Some(p) = self.kalico_state.pending.remove(&cid) {
+                    if let Some(p) = self.transport_state.pending.remove(&cid) {
                         let _ = p.completion.send(Err(e));
                     }
                     if is_io {
@@ -1252,26 +1252,30 @@ impl Reactor {
         self.pending_outbound_order.clear();
         self.passthrough_notify_map.clear();
 
-        let drained: Vec<PendingMcuCall> =
-            self.kalico_state.pending.drain().map(|(_, v)| v).collect();
+        let drained: Vec<PendingMcuCall> = self
+            .transport_state
+            .pending
+            .drain()
+            .map(|(_, v)| v)
+            .collect();
         for p in drained {
             let _ = p.completion.send(Err(TransportError::Closed));
         }
-        if let Some(c) = self.kalico_state.identify_pending.take() {
+        if let Some(c) = self.transport_state.identify_pending.take() {
             let _ = c.send(Err(TransportError::Closed));
         }
     }
 
-    pub(crate) fn gc_kalico_pending(&mut self) {
+    pub(crate) fn gc_transport_pending(&mut self) {
         let now = self.clock.now();
         let expired: Vec<u32> = self
-            .kalico_state
+            .transport_state
             .pending
             .iter()
             .filter_map(|(cid, p)| if p.deadline <= now { Some(*cid) } else { None })
             .collect();
         for cid in expired {
-            if let Some(p) = self.kalico_state.pending.remove(&cid) {
+            if let Some(p) = self.transport_state.pending.remove(&cid) {
                 let _ = p.completion.send(Err(TransportError::Timeout));
             }
         }
@@ -1369,7 +1373,7 @@ impl Reactor {
                 .send(Err(TransportError::DispatcherTimeout));
         }
 
-        self.gc_kalico_pending();
+        self.gc_transport_pending();
 
         if self.state == ReactorState::Closed {
             self.flush_all_completions();

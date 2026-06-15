@@ -84,7 +84,7 @@ This is the riskiest task (live mode-switch). Build it incrementally.
 **Files:** `rust/motion-engine/src/bridge.rs` (+ `klippy/motion_engine.py` passthrough), `klippy/extras/homing.py`.
 
 - [ ] **Step 1: Bridge method.** Add pyo3 `finalize_homed_axis(&self, mcu_handle, axis, pos_mm)`:
-  - EtherCAT handle (`ethercat_socket.is_some()`): `kalico_call(MessageKind::SeedServoHome, encode(home_q16 = pos_mm*65536), timeout)` on `endpoint_conn`; error on non-ack/`result<0` (fail-loud). Model on `set_drive_limits` (`bridge.rs:1121`).
+  - EtherCAT handle (`ethercat_socket.is_some()`): `mcu_call(MessageKind::SeedServoHome, encode(home_q16 = pos_mm*65536), timeout)` on `endpoint_conn`; error on non-ack/`result<0` (fail-loud). Model on `set_drive_limits` (`bridge.rs:1121`).
   - Non-EtherCAT handle: **no-op** (stepper already seeded by `set_position` + the retract move). Return Ok.
   Add the `klippy/motion_engine.py` `MotionEngineWrapper` passthrough (mirror `set_drive_limits`).
 

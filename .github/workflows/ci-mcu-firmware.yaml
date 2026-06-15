@@ -107,7 +107,7 @@ jobs:
           # 'T'-in-elf check alone would still pass if that gate regressed
           # (phase_stepping_spi.c keeps the symbol live via __attribute__((used))),
           # silently losing FFI-edge coverage — this asserts the edge is real.
-          nm rust/target-linux/release/libkalico_c_api.a 2>/dev/null | grep -qE ' U _?phase_stepping_write_xdirect' \
+          nm rust/target-linux/release/libc_api.a 2>/dev/null | grep -qE ' U _?phase_stepping_write_xdirect' \
             || { echo "ERROR: Rust staticlib has no UNDEFINED phase_stepping_write_xdirect ref — mcu-linux FFI gate not emitting the call"; exit 1; }
           echo "OK: real Linux MCU linked; FFI edge live (Rust U -> C T phase_stepping_write_xdirect)"
 

@@ -35,7 +35,7 @@ fi
 export RUST_BACKTRACE=1
 # Without this, a transport fault SIGABRTs the reactor thread and bypasses
 # test cleanup before the assertion can report.
-export KALICO_NO_EXIT_ON_FAULT=1
+export NO_EXIT_ON_FAULT=1
 
 if [[ -n "${FILTER}" ]]; then
   exec cargo test -p motion-engine --test sim_motion_jogs -- \

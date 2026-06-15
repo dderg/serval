@@ -52,12 +52,12 @@ fn wait_for_socket(path: &str, deadline: Instant) {
 
 fn do_handshake(conn: &McuSerialConn) -> ClaimHandshakeReply {
     let (kind, body) = conn
-        .kalico_call(
+        .mcu_call(
             MessageKind::ClaimHandshake,
             Vec::new(),
             Duration::from_secs(5),
         )
-        .expect("ClaimHandshake kalico_call must succeed");
+        .expect("ClaimHandshake mcu_call must succeed");
 
     assert_eq!(
         kind,

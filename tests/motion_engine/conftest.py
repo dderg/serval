@@ -24,7 +24,7 @@ def pytest_collection_modifyitems(config, items):
     skip = pytest.mark.skip(
         reason="_motion_engine cdylib not built — raw-engine "
         "integration tests need it; build it to exercise the engine "
-        "(see docs/kalico-rewrite/ci.md)."
+        "(see docs/rewrite/ci.md)."
     )
     for item in items:
         try:

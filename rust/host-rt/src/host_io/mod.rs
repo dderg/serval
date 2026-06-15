@@ -132,7 +132,7 @@ pub enum ReactorCommand {
             SyncSender<Result<crate::host_io::mcu_session::IdentifyOutcome, TransportError>>,
         deadline: std::time::Instant,
     },
-    KalicoCall {
+    McuCall {
         channel: u8,
         kind: mcu_protocol::MessageKind,
         body: Vec<u8>,
@@ -377,7 +377,7 @@ impl McuHostIo {
                 );
                 let _ = std::io::Write::flush(&mut std::io::stderr());
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                if std::env::var_os("KALICO_NO_EXIT_ON_FAULT").is_none() {
+                if std::env::var_os("NO_EXIT_ON_FAULT").is_none() {
                     std::process::abort();
                 }
             }
@@ -721,7 +721,7 @@ impl McuHostIo {
         }
     }
 
-    pub fn kalico_call(
+    pub fn mcu_call(
         &self,
         kind: mcu_protocol::MessageKind,
         body: Vec<u8>,
@@ -740,7 +740,7 @@ impl McuHostIo {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let deadline = self.clock.now() + timeout;
         self.submission_tx
-            .send(ReactorCommand::KalicoCall {
+            .send(ReactorCommand::McuCall {
                 channel,
                 kind,
                 body,

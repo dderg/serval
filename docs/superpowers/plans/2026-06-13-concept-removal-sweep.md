@@ -98,7 +98,7 @@ ico-protocol/src/messages.rs`, `kinematics: u8` field) has **zero senders** — 
 e kinematics tag crosses only the Python↔Rust `init_planner` boundary (the `(handle, axe
 s, tag)` topology tuples). The MCU receives pre-transformed motor-frame data (`runtime_s
 eed_position`, per-lane cubic pieces); **zero MCU edits anywhere in this plan** — `src/`
-, `rust/runtime` wire handlers, and `docs/kalico-rewrite/mcu-c-rust-boundary.md` are unt
+, `rust/runtime` wire handlers, and `docs/rewrite/mcu-c-rust-boundary.md` are unt
 ouched (the one `rust/runtime` edit is a doc-comment + enum-variant rename with discrimi
 nants pinned by the existing const assert). `KinematicTag` discriminants (0=corexy, 1=ca
 rtesian) stay frozen as the Python↔Rust contract.

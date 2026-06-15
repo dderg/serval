@@ -923,7 +923,8 @@ fn kalico_stream_open_resets_planner_state() {
     );
 
     let new_home = [10.0, 20.0, 30.0, 0.0];
-    h.kalico_stream_open(new_home).expect("kalico_stream_open");
+    h.runtime_stream_open(new_home)
+        .expect("runtime_stream_open");
 
     h.submit_move(
         classify_and_build(
@@ -1634,7 +1635,7 @@ fn three_pure_x_jogs_in_flight_velocity_seam() {
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = high_speed_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch);
-    h.kalico_stream_open([295.0, 0.0, 0.0, 0.0])
+    h.runtime_stream_open([295.0, 0.0, 0.0, 0.0])
         .expect("stream_open");
 
     h.submit_move(classify_and_build([295.0, 0.0, 0.0], -20.0, 0.0, 0.0, &[], 100.0).unwrap())

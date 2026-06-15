@@ -192,11 +192,11 @@ fn fire_and_forget_typed_io_error_transitions_closed() {
 fn kalico_call_io_error_transitions_closed() {
     use mcu_protocol::MessageKind;
     let (mut reactor, tx) = fresh_reactor_with_broken_write();
-    reactor.kalico_state.identified = true;
-    reactor.kalico_state.reset_epoch = Some(0);
+    reactor.transport_state.identified = true;
+    reactor.transport_state.reset_epoch = Some(0);
 
     let (completion_tx, completion_rx) = sync_channel(1);
-    tx.send(ReactorCommand::KalicoCall {
+    tx.send(ReactorCommand::McuCall {
         channel: mcu_transport::CHANNEL_CONTROL,
         kind: MessageKind::PushPieces,
         body: vec![0; 16],
@@ -215,7 +215,7 @@ fn kalico_call_io_error_transitions_closed() {
     assert_eq!(
         reactor.state,
         ReactorState::Closed,
-        "Fix 1: KalicoCall's Io error MUST transition Closed"
+        "Fix 1: McuCall's Io error MUST transition Closed"
     );
     assert!(
         reactor.event_dispatcher.fault_latch.cell.is_some(),
@@ -223,7 +223,7 @@ fn kalico_call_io_error_transitions_closed() {
     );
     assert_eq!(outcome, TickOutcome::Closed);
     assert!(
-        reactor.kalico_state.pending.is_empty(),
+        reactor.transport_state.pending.is_empty(),
         "pending entry cleaned up before Closed"
     );
 }

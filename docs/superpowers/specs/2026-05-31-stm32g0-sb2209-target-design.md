@@ -17,21 +17,21 @@ ARMv7-M (`thumbv7em`) used by H7/F4**, and three engine assumptions are ARMv7-M-
 
 1. **No atomic read-modify-write.** ARMv6-M has no `LDREX`/`STREX`, so
    `core::sync::atomic`'s `fetch_add` / `compare_exchange` / `swap` do not exist on
-   `thumbv6m`. The MCU-compiled crates (`runtime`, `kalico-c-api`) use these in ~15 sites.
+   `thumbv6m`. The MCU-compiled crates (`runtime`, `c-api`) use these in ~15 sites.
 2. **No TIM5.** The motion ISR timer is hardcoded to TIM5 in `runtime_tick_{h7,f4}.c`.
    G0B1 has no TIM5.
 3. **No DWT/CYCCNT.** ARMv6-M has no DWT cycle counter. The engine's internal time-base
    (`clock.rs`) is the *CYCCNT-widened* `now: u64`, so a missing cycle source is not just a
    loss of profiling — it freezes engine time and motion never advances.
 
-This matches the `docs/kalico-rewrite/mcu-c-rust-boundary.md` "When to revisit" trigger:
+This matches the `docs/rewrite/mcu-c-rust-boundary.md` "When to revisit" trigger:
 *"An MCU target with a different C compiler / linker model lands … Boundary assumptions
 about ELF sections and ARMv7-M atomics need re-checking."* This is that re-check.
 
 ## Decisions
 
 ### Atomics → `portable_atomic` + single-core cfg
-Route the RMW sites in `runtime` and `kalico-c-api` through `portable_atomic` (already a
+Route the RMW sites in `runtime` and `c-api` through `portable_atomic` (already a
 dependency of `runtime`; `state.rs` uses `portable_atomic::AtomicU64`). Build the
 `thumbv6m` target with `--cfg portable_atomic_unsafe_assume_single_core`, which lowers RMW
 to brief interrupt-disable critical sections. This is **sound** — the MCU is single-core
@@ -50,7 +50,7 @@ The C-side segment queue (`kalico_segment_queue.c`) uses atomic load/store for h
 
 ### Motion timer → configurable alias, default TIM7 on G0
 Introduce a per-architecture **timer alias** so the physical timer for the motion ISR is
-chosen per board rather than hardcoded. A Kconfig choice `KALICO_MOTION_TIMER` selects it
+chosen per board rather than hardcoded. A Kconfig choice `MOTION_TIMER` selects it
 (default TIM5 on H7/F4 — unchanged; default **TIM7** on G0), and a header
 (`src/stm32/runtime_tick_timer.h`) maps the choice to the concrete
 `{TIM instance, IRQn, IRQ-handler name, RCC-enable}` per MCU family.
@@ -64,7 +64,7 @@ prescaler down to ~977 Hz; below that the init sets a prescaler.)
 
 ### CYCCNT → software counter driven by the motion ISR
 On G0, `runtime_cyccnt_read()` returns a software counter that the motion ISR advances by
-`runtime_clock_freq / CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ` cycles per fire. This is exactly
+`runtime_clock_freq / CONFIG_MOTION_SAMPLE_RATE_HZ` cycles per fire. This is exactly
 the mechanism the existing `CONFIG_KALICO_SIM` path uses (Renode also returns 0 for DWT).
 It gives the widening clock a monotonic source at real cadence, so segment timing advances
 correctly. No DWT register is touched on G0. When the timer is disabled (idle), the clock
@@ -81,14 +81,14 @@ the milestone goal is "fits and runs," not throughput. Exact values are set in t
 - `rust/rust-toolchain.toml`: add `thumbv6m-none-eabi`.
 - `rust/.cargo/config.toml`: add `[target.thumbv6m-none-eabi]` — `target-cpu=cortex-m0plus`,
   `link-arg=--nmagic`, `--cfg portable_atomic_unsafe_assume_single_core`.
-- `nurbs` / `runtime` / `kalico-c-api` `Cargo.toml`: add `mcu-g0` feature (mirrors `mcu-f4`,
+- `nurbs` / `runtime` / `c-api` `Cargo.toml`: add `mcu-g0` feature (mirrors `mcu-f4`,
   pulls `libm`). Extend the "exactly one of host/mcu-*" `compile_error!` gates to include it.
-- `src/Makefile`: add a `CONFIG_MACH_STM32G0` branch (`KALICO_RUST_FEATURES := mcu-g0,…`,
-  `KALICO_CARGO_TARGET_DIR := target-g0`) and parameterize the rustc target triple
-  (`thumbv6m-none-eabi` for G0, `thumbv7em-none-eabi` otherwise) in the `KALICO_LIB` path,
+- `src/Makefile`: add a `CONFIG_MACH_STM32G0` branch (`MCU_RUST_FEATURES := mcu-g0,…`,
+  `MCU_CARGO_TARGET_DIR := target-g0`) and parameterize the rustc target triple
+  (`thumbv6m-none-eabi` for G0, `thumbv7em-none-eabi` otherwise) in the `MCU_RUST_LIB` path,
   the `cargo --target` flag, and the cargo-clean list.
 - `src/stm32/Makefile`: select `runtime_tick_g0.c` for `CONFIG_MACH_STM32G0`.
-- `src/Kconfig`: `KALICO_MOTION_TIMER` choice; allow `KALICO_MOTION_SAMPLE_RATE_HZ` on
+- `src/Kconfig`: `MOTION_TIMER` choice; allow `MOTION_SAMPLE_RATE_HZ` on
   `MACH_STM32G0` with a low default; default G0 to the small runtime profile.
 
 ## New / changed C files
@@ -102,7 +102,7 @@ Phase stepping / current synthesis on G0, performance tuning, CAN transport (USB
 hardware profiling/bench (no DWT). These are deliberately deferred.
 
 ## Verification
-1. Local: `cargo build -p kalico-c-api --no-default-features --features mcu-g0,header-nurbs,header-runtime --target thumbv6m-none-eabi --release` succeeds (validates atomics + features off-bench).
+1. Local: `cargo build -p c-api --no-default-features --features mcu-g0,header-nurbs,header-runtime --target thumbv6m-none-eabi --release` succeeds (validates atomics + features off-bench).
 2. Pi: full firmware build for the G0B1 config (arm-none-eabi-gcc + cross-compiled staticlib).
 3. Bench: flash over USB via katapult, confirm USB enumeration + Klipper `identify`/config
    handshake, then confirm the motion ISR ticks (engine time advances; no fault on zero motion).

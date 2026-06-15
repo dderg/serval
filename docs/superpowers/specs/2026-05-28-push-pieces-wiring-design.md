@@ -20,7 +20,7 @@ The host never caught up: the dispatch closure still builds the old `McuPushPlan
 - **Idle = hold.** `engine.rs::get_position_and_velocity` returns `None` when an axis has no current piece (or the next hasn't started); the tick loop `continue`s, `p_prev` untouched, no steps. An axis with no piece freezes — it does **not** snap to zero. (Covers genuinely pieceless axes, e.g. E on a travel move.)
 - **Every segment carries X/Y/Z.** `emit_shaped` always builds `ShapedSegment.axes[0..2]`; a non-moving axis gets a *constant* curve → one constant piece. E is separate and may be absent.
 - **A late piece aborts the print.** `now − start_time > FAULT_TOLERANCE` (`engine.rs:654`) faults the MCU and stops the print (via Klipper `shutdown()` — not a clean engine stop, but it stops). The mechanism isn't this spec's concern; the obligation is to never underrun (§5).
-- **Wire send exists, but blocks.** `McuHostIo::kalico_call(MessageKind::PushPieces, body, timeout)` sends one frame and awaits `PushPiecesResponse`; `PushPieces` already has an `Encode` impl. It is a blocking round-trip (`host_io/mod.rs:780`) — see §3.5.
+- **Wire send exists, but blocks.** `McuHostIo::mcu_call(MessageKind::PushPieces, body, timeout)` sends one frame and awaits `PushPiecesResponse`; `PushPieces` already has an `Encode` impl. It is a blocking round-trip (`host_io/mod.rs:780`) — see §3.5.
 - **Heartbeat is currently DROPPED.** `StatusHeartbeat` decodes as a struct but `lift_event_to_runtime_event` (`mcu_transport.rs`) routes it to the `_ =>` discard arm; there is no `RuntimeEvent::Heartbeat`. Routing it is new work (§3.4), and skipping it is a guaranteed halt: with `consumed` frozen, `room` hits 0 after the first `ring_depth` pieces and the pump stalls forever while heartbeats are thrown away.
 - **Host→MCU clock conversion already exists.** The clock-sync subsystem maintains a per-MCU estimate off one shared host clock; converting a host time to a given MCU's clock is an existing operation (`host_time_to_mcu_clock`). This spec consumes it and adds no clock machinery — see §3.2.1.
 - **`consumed` is a wrapping `u32`** (`piece_ring.rs:64,160`). Host `room` and `pushed` must use matching wrapping `u32` (§3.3).
@@ -121,16 +121,16 @@ On each heartbeat the pump updates per-`(mcu, axis)` `consumed` and re-evaluates
 
 Three actors touch ring state: the planner thread (enqueue), the pump, and the heartbeat handler (reactor path). Two non-negotiables:
 
-1. **Never hold a lock across the blocking `kalico_call`** (`host_io/mod.rs:780`) — it would serialize the planner and heartbeat handler behind wire RTT and starve the very heartbeats the pump depends on.
+1. **Never hold a lock across the blocking `mcu_call`** (`host_io/mod.rs:780`) — it would serialize the planner and heartbeat handler behind wire RTT and starve the very heartbeats the pump depends on.
 2. **The dual wakeup must be lost-wakeup-safe** — a naive condvar can miss a wake firing between the stall check and the wait.
 
-**Model: the pump owns the queues and all accounting, fed by channels.** Planner sends pieces over one channel; the heartbeat handler sends `(mcu, axis, consumed)` over another. The pump selects over both and mutates only its own state — nobody blocks on the pump, the lost-wakeup problem becomes channel readiness, and the only blocking call (`kalico_call`) holds nothing the others need.
+**Model: the pump owns the queues and all accounting, fed by channels.** Planner sends pieces over one channel; the heartbeat handler sends `(mcu, axis, consumed)` over another. The pump selects over both and mutates only its own state — nobody blocks on the pump, the lost-wakeup problem becomes channel readiness, and the only blocking call (`mcu_call`) holds nothing the others need.
 
 ## 4. Wire send
 
-Per frame: `kalico_call(MessageKind::PushPieces, body, timeout)`; `body` is `axis_idx: u8, piece_count: u8, pieces[count × 32]` via the existing `Encode`. Response `PushPiecesResponse`.
+Per frame: `mcu_call(MessageKind::PushPieces, body, timeout)`; `body` is `axis_idx: u8, piece_count: u8, pieces[count × 32]` via the existing `Encode`. Response `PushPiecesResponse`.
 
-**Result codes** must be shared named constants (host ↔ MCU), defined once in `mcu_protocol` and referenced from both sides so a renumber can't desync: `OK` / `RING_FULL` / `INVALID_AXIS` (MCU returns these from `handle_push_pieces`, cf. `KALICO_ERR_*` in `mcu_transport_dispatch.c`). Normal operation is always `OK`; `RING_FULL` is the safety net.
+**Result codes** must be shared named constants (host ↔ MCU), defined once in `mcu_protocol` and referenced from both sides so a renumber can't desync: `OK` / `RING_FULL` / `INVALID_AXIS` (MCU returns these from `handle_push_pieces`, cf. `RUNTIME_ERR_*` in `mcu_transport_dispatch.c`). Normal operation is always `OK`; `RING_FULL` is the safety net.
 
 **Throughput (CLAUDE.md constraint #1).** A serial blocking pump caps at ~`1/RTT` *frames*/s per MCU; batching makes the unit frames not pieces, so coalesced frames stay well ahead of the shaped piece rate for bring-up. Validate on the bench; if a workload later nears the ceiling, pipelining is the lever (a tweak, not a redesign).
 
@@ -199,4 +199,4 @@ Unit / integration:
 - Heartbeat routing: a `StatusHeartbeat` reaches the pump and advances `consumed` (regression guard against the `_ =>` discard).
 - Result codes: host/MCU agree on shared `OK`/`RING_FULL`/`INVALID_AXIS`.
 - Ring allocation: divides by actual per-MCU `num_axes`, not `/4`.
-- Concurrency: pump holds no shared lock across `kalico_call` (assert via the channel-owned model).
+- Concurrency: pump holds no shared lock across `mcu_call` (assert via the channel-owned model).

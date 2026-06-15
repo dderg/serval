@@ -6,7 +6,7 @@
 
 **Architecture:** A new mcu-protocol request/response pair (`QueryMotorState`/`MotorStateResponse`) returns each MCU's per-slot executor position+velocity (motor-space, mm, Q16). The host bridge converts motor-space → cartesian via the existing `KinematicsModule::inverse`, caches a snapshot updated by a background poll thread (non-blocking, feeds `motion_report`), and exposes a blocking query (feeds `GET_POSITION`). M114 and the commanded surfaces are untouched.
 
-**Tech Stack:** Rust (mcu-protocol, runtime, kalico-c-api, motion-engine/pyo3), C (MCU dispatch), Python (klippy `motion_report` + `gcode_move`).
+**Tech Stack:** Rust (mcu-protocol, runtime, c-api, motion-engine/pyo3), C (MCU dispatch), Python (klippy `motion_report` + `gcode_move`).
 
 **Spec:** `docs/superpowers/specs/2026-06-14-position-reporting-design.md` (this is Plan 1 of 2; Plan 2 = EtherCAT servo surfacing).
 
@@ -27,7 +27,7 @@
 | `rust/mcu-protocol/build.rs` | Add the two kinds to the generated C `#define` table |
 | `rust/runtime/src/engine.rs` | Add `Engine::motor_state(i) -> Option<(f32,f32)>` |
 | `rust/runtime/src/engine_tests.rs` (or the engine's existing test module) | Test `motor_state` |
-| `rust/kalico-c-api/src/runtime_ffi.rs` | Add `kalico_runtime_query_motor_state(...)` FFI |
+| `rust/c-api/src/runtime_ffi.rs` | Add `runtime_query_motor_state(...)` FFI |
 | `src/mcu_transport_dispatch.c` | Add `handle_query_motor_state` + dispatch case + extern decl |
 | `rust/motion-engine/src/position_query.rs` (new) | Pure `assemble_cartesian(...)` motor→cartesian helper + tests |
 | `rust/motion-engine/src/bridge.rs` | `collect_motor_positions` (internal), `query_motor_positions` (pyo3 blocking), position cache + background poll thread, `live_motor_positions` (pyo3 non-blocking) |
@@ -289,9 +289,9 @@ git commit -m "feat(runtime): Engine::motor_state per-slot live pos/vel accessor
 ## Task 4: Runtime FFI
 
 **Files:**
-- Modify: `rust/kalico-c-api/src/runtime_ffi.rs`
+- Modify: `rust/c-api/src/runtime_ffi.rs`
 
-Model on `kalico_runtime_get_heartbeat` (runtime_ffi.rs:1154) for the `RuntimeContext`→`IsrState`→`engine` access pattern. Returns the count of motors written (≥0) or a negative `KALICO_ERR_*`.
+Model on `runtime_get_heartbeat` (runtime_ffi.rs:1154) for the `RuntimeContext`→`IsrState`→`engine` access pattern. Returns the count of motors written (≥0) or a negative `RUNTIME_ERR_*`.
 
 - [ ] **Step 1: Implement the FFI**
 
@@ -299,8 +299,8 @@ Add (import `MAX_AXES` from the runtime crate's stepping_state if not already in
 
 ```rust
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kalico_runtime_query_motor_state(
-    rt: *mut KalicoRuntime,
+pub unsafe extern "C" fn runtime_query_motor_state(
+    rt: *mut Runtime,
     out_slots: *mut u8,
     out_pos_q16: *mut i32,
     out_vel_q16: *mut i32,
@@ -311,10 +311,10 @@ pub unsafe extern "C" fn kalico_runtime_query_motor_state(
         || out_pos_q16.is_null()
         || out_vel_q16.is_null()
     {
-        return KALICO_ERR_NULL_PTR;
+        return RUNTIME_ERR_NULL_PTR;
     }
     if !INIT_DONE.load(Ordering::Acquire) {
-        return KALICO_ERR_NOT_INIT;
+        return RUNTIME_ERR_NOT_INIT;
     }
     let ctx = rt.cast::<RuntimeContext>();
     unsafe {
@@ -340,14 +340,14 @@ pub unsafe extern "C" fn kalico_runtime_query_motor_state(
 
 - [ ] **Step 2: Build to verify it compiles**
 
-Run: `cd rust && cargo build -p kalico-c-api`
+Run: `cd rust && cargo build -p c-api`
 Expected: builds clean. (No unit test here — exercised end-to-end via the sim in Task 11; the engine math is covered by Task 3.)
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add rust/kalico-c-api/src/runtime_ffi.rs
-git commit -m "feat(c-api): kalico_runtime_query_motor_state FFI"
+git add rust/c-api/src/runtime_ffi.rs
+git commit -m "feat(c-api): runtime_query_motor_state FFI"
 ```
 
 ---
@@ -364,7 +364,7 @@ Model on `handle_query_runtime_caps` (mcu_transport_dispatch.c:272) and `send_pu
 Near the top of `mcu_transport_dispatch.c` (where `extern void *runtime_handle;` is declared, ~line 13), add:
 
 ```c
-extern int kalico_runtime_query_motor_state(
+extern int runtime_query_motor_state(
     void *rt, uint8_t *out_slots, int32_t *out_pos_q16,
     int32_t *out_vel_q16, size_t max);
 ```
@@ -385,7 +385,7 @@ handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
     int32_t vel[8];
     int n = 0;
     if (runtime_handle)
-        n = kalico_runtime_query_motor_state(runtime_handle, slots, pos, vel, 8);
+        n = runtime_query_motor_state(runtime_handle, slots, pos, vel, 8);
     if (n < 0)
         n = 0;
     uint8_t payload[PER_MESSAGE_HEADER_LEN + 1 + 8 * 9];
@@ -537,7 +537,7 @@ git commit -m "feat(bridge): pure motor->cartesian position assembly helper"
 **Files:**
 - Modify: `rust/motion-engine/src/bridge.rs`
 
-Model on `motion_state_at_clock` (bridge.rs:3672) for iterating `mcu_axis_configs` and returning a `HashMap<String,(f64,f64)>` to Python, and on `set_position` (bridge.rs:3055) for locking `mcus`, identifying serial vs EtherCAT (`conn.ethercat_socket.is_some()`), and reaching `conn.host_io`. Use `io.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)` (host_io/mod.rs:725) and decode with `MotorStateResponse::decode_from`.
+Model on `motion_state_at_clock` (bridge.rs:3672) for iterating `mcu_axis_configs` and returning a `HashMap<String,(f64,f64)>` to Python, and on `set_position` (bridge.rs:3055) for locking `mcus`, identifying serial vs EtherCAT (`conn.ethercat_socket.is_some()`), and reaching `conn.host_io`. Use `io.mcu_call(MessageKind::QueryMotorState, Vec::new(), timeout)` (host_io/mod.rs:725) and decode with `MotorStateResponse::decode_from`.
 
 - [ ] **Step 1: Add an internal collector (no Python)**
 
@@ -580,7 +580,7 @@ fn collect_motor_positions(
                 continue;
             }
             let Some(io) = conn.host_io.as_ref() else { continue };
-            io.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)
+            io.mcu_call(MessageKind::QueryMotorState, Vec::new(), timeout)
         };
         let (kind, body) =
             call.map_err(|e| format!("query mcu {}: {e:?}", cfg.mcu_id))?;
@@ -602,7 +602,7 @@ fn collect_motor_positions(
 }
 ```
 
-NOTE on locking: `kalico_call` blocks on a round-trip; the snippet above scopes the `mcus` lock to just obtaining `io` then calls outside — verify `conn.host_io` (`McuHostIo`) can be cloned/Arc'd so the call happens after the lock drops. If `host_io` is not cloneable, restructure to collect `(mcu_id, io_handle)` clones first. Read the `Mcu`/connection struct in bridge.rs (search `host_io`) and adapt.
+NOTE on locking: `mcu_call` blocks on a round-trip; the snippet above scopes the `mcus` lock to just obtaining `io` then calls outside — verify `conn.host_io` (`McuHostIo`) can be cloned/Arc'd so the call happens after the lock drops. If `host_io` is not cloneable, restructure to collect `(mcu_id, io_handle)` clones first. Read the `Mcu`/connection struct in bridge.rs (search `host_io`) and adapt.
 
 - [ ] **Step 2: Add the pyo3 wrapper**
 

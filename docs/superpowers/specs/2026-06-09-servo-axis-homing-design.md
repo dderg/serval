@@ -68,7 +68,7 @@ The stub binary implements the same command with simulated state.
 ### 2. Bridge: per-transport Stop broadcast (`rust/motion-engine`)
 
 `handle_endstop_trip`'s stop loop gains the Serial/EtherCAT split the pump
-already uses (`McuTransport`): serial MCUs keep `host_io.kalico_call`,
+already uses (`McuTransport`): serial MCUs keep `host_io.mcu_call`,
 EtherCAT nodes send the same `Stop` over their `McuSerialConn`
 request-reply (the `query_ethercat_runtime_caps` call pattern, bounded
 timeout). A node with neither transport is a loud error, as today.

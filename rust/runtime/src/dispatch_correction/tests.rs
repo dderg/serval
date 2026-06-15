@@ -7,7 +7,7 @@
 use core::sync::atomic::Ordering;
 
 use crate::engine::Engine;
-use crate::error::KALICO_OK;
+use crate::error::RUNTIME_OK;
 use crate::piece_ring::PieceEntry;
 use crate::state::SharedState;
 use crate::step_queue::{StepQueue, pop as queue_pop};
@@ -57,7 +57,7 @@ fn engine_with_z_axis(mode: StepMode) -> Engine {
         },
     ];
     let rc = engine.configure_axis(2, mode, MICROSTEP_MM, 64, &bindings, TEST_TOTAL_RING_PIECES);
-    assert_eq!(rc, KALICO_OK);
+    assert_eq!(rc, RUNTIME_OK);
     engine
 }
 
@@ -109,9 +109,9 @@ fn pulse_correction_steps_only_selected_stepper() {
     let piece = smooth_piece(start, 0.0125, 0.01);
     assert_eq!(
         engine.write_correction_piece(2, 0, 0, piece, &mut storage),
-        KALICO_OK
+        RUNTIME_OK
     );
-    assert_eq!(engine.commit_correction(2, 1, 1), KALICO_OK);
+    assert_eq!(engine.commit_correction(2, 1, 1), RUNTIME_OK);
 
     let mut drained = Vec::new();
     tick_through_stream(
@@ -147,7 +147,7 @@ fn pulse_correction_stream_end_resets_relative_frame() {
 
     let start = TICK_CYCLES;
     engine.write_correction_piece(2, 0, 0, smooth_piece(start, 0.0125, 0.01), &mut storage);
-    assert_eq!(engine.commit_correction(2, 1, 1), KALICO_OK);
+    assert_eq!(engine.commit_correction(2, 1, 1), RUNTIME_OK);
     let mut drained = Vec::new();
     tick_through_stream(
         &mut engine,
@@ -175,7 +175,7 @@ fn pulse_correction_stream_end_resets_relative_frame() {
         smooth_piece(second_start, 0.0125, 0.01),
         &mut storage,
     );
-    assert_eq!(engine.commit_correction(2, 0, 1), KALICO_OK);
+    assert_eq!(engine.commit_correction(2, 0, 1), RUNTIME_OK);
     let mut drained2 = Vec::new();
     tick_through_stream(
         &mut engine,
@@ -207,7 +207,7 @@ fn phase_correction_moves_only_selected_offset_target() {
 
     let start = TICK_CYCLES;
     engine.write_correction_piece(2, 0, 0, smooth_piece(start, 0.0125, 0.01), &mut storage);
-    assert_eq!(engine.commit_correction(2, 0, 1), KALICO_OK);
+    assert_eq!(engine.commit_correction(2, 0, 1), RUNTIME_OK);
     let mut drained = Vec::new();
     tick_through_stream(
         &mut engine,
@@ -252,7 +252,7 @@ fn correction_does_not_mark_axis_position() {
 
     let start = TICK_CYCLES;
     engine.write_correction_piece(2, 0, 0, smooth_piece(start, 0.0125, 0.01), &mut storage);
-    assert_eq!(engine.commit_correction(2, 2, 1), KALICO_OK);
+    assert_eq!(engine.commit_correction(2, 2, 1), RUNTIME_OK);
     let mut drained = Vec::new();
     tick_through_stream(
         &mut engine,

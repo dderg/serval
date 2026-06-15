@@ -104,7 +104,7 @@ COPY tools/sim_klippy/ /kalico/tools/sim_klippy/
 # Build shims (libvtime.so + libsim_intercept.so)
 RUN make -C tools/kalico-sim/libvtime
 
-# Copy Rust source for kalico-c-api build (make needs `cd rust`)
+# Copy Rust source for c-api build (make needs `cd rust`)
 COPY rust/ /kalico/rust/
 
 # Patch source tree for MACH_LINUX builds (idempotent).
@@ -120,7 +120,7 @@ RUN mkdir -p /sim_elfs
 # objects persist in a BuildKit cache mount for incremental rebuilds. The
 # cache is keyed by SIM_CACHE_KEY (branch) so parallel branch builds stay
 # isolated. Both MCUs are MACH_LINUX sim builds with identical Rust features,
-# so they share one target-linux cache for the kalico-c-api staticlib (built
+# so they share one target-linux cache for the c-api staticlib (built
 # by src/Makefile into rust/target-linux/) — no per-MCU thrash, and H7 (which
 # runs first) keeps its cache warm across builds instead of rebuilding cold.
 RUN --mount=type=cache,target=/kalico/out-h7,id=fw-h7-${SIM_CACHE_KEY},sharing=locked \

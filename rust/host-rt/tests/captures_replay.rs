@@ -60,8 +60,8 @@ const REQUIRED_SURFACES: &[&str] = &[
     "kalico_load_curve_response",
     "kalico_stream_arm",
     "kalico_stream_arm_response",
-    "kalico_credit_freed",
-    "kalico_fault",
+    "runtime_credit_freed",
+    "runtime_fault",
     "kalico_status_v6",
     "kalico_trace",
 ];

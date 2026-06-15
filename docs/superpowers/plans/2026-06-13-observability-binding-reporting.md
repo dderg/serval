@@ -731,7 +731,7 @@ git commit -m "feat(motion-engine): accumulate and emit binding-constraint rollu
 ### Task 5: End-to-end verification, sim sanity, and gate
 
 - [ ] **Step 1: Purity guard.** Confirm no logging dependency leaked into the pure crates:
-  `grep -rn "tracing\|kalico_log\|klog" rust/temporal/src/ rust/trajectory/src/` → expect zero hits (binding data is plain returned structs; emission lives only in motion-engine).
+  `grep -rn "tracing\|event_log\|klog" rust/temporal/src/ rust/trajectory/src/` → expect zero hits (binding data is plain returned structs; emission lives only in motion-engine).
   `grep -rn "static\|lazy_static\|OnceLock" rust/temporal/src/ | grep -v test` → no new globals.
 
 - [ ] **Step 2: Full workspace suite** — `cargo nextest run` from `rust/` → PASS. `cargo test --doc` if any doc example was touched. If `klippy/` was touched (it must NOT be in this plan — confirm `git status`), also run `./scripts/ci.sh py`.

@@ -41,7 +41,7 @@ void diag_ring_push(uint8_t tag, uint32_t a, uint32_t b);
 // Call once from the post-host-connect path (host mcu-log hook must be up).
 void kalico_diag_emit_prior_crash(void);
 
-// On-demand live snapshot (KALICO_DIAG_DUMP). Foreground-only.
+// On-demand live snapshot (DIAG_DUMP). Foreground-only.
 void kalico_diag_emit_live(void);
 
 // event_tag=0 suppresses event emission (counters still update).

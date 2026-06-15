@@ -61,7 +61,7 @@ __attribute__((section(".axi_bss")))
 #endif
 static uint8_t kalico_buf[MCU_DEMUX_MCU_BUF_SIZE];
 static uint16_t kalico_pos;
-static uint16_t kalico_total_len; // 0 means header not yet known
+static uint16_t transport_total_len; // 0 means header not yet known
 
 void
 mcu_demux_init(void)
@@ -70,7 +70,7 @@ mcu_demux_init(void)
     klipper_pos = 0;
     klipper_remaining = 0;
     kalico_pos = 0;
-    kalico_total_len = 0;
+    transport_total_len = 0;
 }
 DECL_INIT(mcu_demux_init);
 
@@ -111,7 +111,7 @@ mcu_demux_feed_byte(uint8_t b)
         if (b == MCU_FRAME_SYNC) {
             kalico_buf[0] = b;
             kalico_pos = 1;
-            kalico_total_len = 0;
+            transport_total_len = 0;
             state = DEMUX_S_KALICO;
             return MCU_DEMUX_OUT_NONE;
         }
@@ -132,7 +132,7 @@ mcu_demux_feed_byte(uint8_t b)
             return MCU_DEMUX_OUT_ERROR;
         }
         kalico_buf[kalico_pos++] = b;
-        if (kalico_total_len == 0 && kalico_pos >= 3) {
+        if (transport_total_len == 0 && kalico_pos >= 3) {
             uint16_t len_field = (uint16_t)kalico_buf[1]
                                | ((uint16_t)kalico_buf[2] << 8);
             if (len_field < MCU_FRAME_MIN_LEN_FIELD) {
@@ -147,12 +147,12 @@ mcu_demux_feed_byte(uint8_t b)
                 state = DEMUX_S_WAITING;
                 return MCU_DEMUX_OUT_ERROR;
             }
-            kalico_total_len = (uint16_t)total;
+            transport_total_len = (uint16_t)total;
         }
         if (kalico_pos == 4 && kalico_buf[3] == MCU_CHANNEL_PIECES
-            && kalico_total_len > 0) {
+            && transport_total_len > 0) {
             pieces_payload_remaining =
-                (uint16_t)(kalico_total_len - MCU_FRAME_OVERHEAD);
+                (uint16_t)(transport_total_len - MCU_FRAME_OVERHEAD);
             pieces_crc = 0xffff;
             pieces_crc = crc16_ccitt_update(pieces_crc, kalico_buf[1]);
             pieces_crc = crc16_ccitt_update(pieces_crc, kalico_buf[2]);
@@ -163,11 +163,11 @@ mcu_demux_feed_byte(uint8_t b)
             return MCU_DEMUX_OUT_NONE;
         }
         if (kalico_pos == 4 && kalico_buf[3] != MCU_CHANNEL_PIECES
-            && kalico_total_len > MCU_DEMUX_MCU_BUF_SIZE) {
+            && transport_total_len > MCU_DEMUX_MCU_BUF_SIZE) {
             state = DEMUX_S_WAITING;
             return MCU_DEMUX_OUT_ERROR;
         }
-        if (kalico_total_len > 0 && kalico_pos == kalico_total_len) {
+        if (transport_total_len > 0 && kalico_pos == transport_total_len) {
             mcu_demux_output_t out = finalize_kalico_frame();
             state = DEMUX_S_WAITING;
             return out;
@@ -192,10 +192,10 @@ mcu_demux_feed_byte(uint8_t b)
                                   | ((uint16_t)b << 8);
             // The pieces path commits inline and returns OUT_NONE, bypassing
             // mcu_demux_consume(); this is the only reset of kalico_pos /
-            // kalico_total_len for a committed pieces frame.
+            // transport_total_len for a committed pieces frame.
             state = DEMUX_S_WAITING;
             kalico_pos = 0;
-            kalico_total_len = 0;
+            transport_total_len = 0;
             if (crc_expected == pieces_crc) {
                 piece_sink_commit();
                 return MCU_DEMUX_OUT_NONE;
@@ -214,7 +214,7 @@ mcu_demux_consume(void)
     klipper_pos = 0;
     klipper_remaining = 0;
     kalico_pos = 0;
-    kalico_total_len = 0;
+    transport_total_len = 0;
 }
 
 const uint8_t *
@@ -267,7 +267,7 @@ mcu_demux_pump(const uint8_t *buf, uint16_t len)
             klipper_pos = 0;
             klipper_remaining = 0;
             kalico_pos = 0;
-            kalico_total_len = 0;
+            transport_total_len = 0;
         }
     }
     last_byte_time = now;

@@ -59,7 +59,7 @@ During scoping we reviewed whether `dispatch_phase` had diverged from the older 
 
 **Reduce:**
 
-- `stream.rs` → keep only `flush` (the `KALICO_OK` no-op shell), decoupled from removed state. Remove `FgStreamState`, `open`, `arm`, `terminal`, and `check_terminal_on_retire`.
+- `stream.rs` → keep only `flush` (the `RUNTIME_OK` no-op shell), decoupled from removed state. Remove `FgStreamState`, `open`, `arm`, `terminal`, and `check_terminal_on_retire`.
 
 **Keep untouched:**
 
@@ -86,17 +86,17 @@ Remove fields and their construction in `new` / `init_in_place` / `sim_fixtures`
 
 > **Trace is collateral-dead, removed with the segment cluster.** The engine already ignores the trace producer (`_trace` is unused). The trace ring's only consumers are the `reclaim`/drain FFI handlers. `TraceSample` carries a `segment::CurveHandle`. Removing `segment` forces decoupling `trace`; removing `reclaim` removes trace's only consumer. Therefore `segment` + `trace` + `reclaim` must be removed as one coupled cluster (§5, cluster 3).
 
-### 3.4 FFI (`rust/kalico-c-api/src/runtime_ffi.rs`)
+### 3.4 FFI (`rust/c-api/src/runtime_ffi.rs`)
 
 Remove these exports and their bodies:
 
-- `kalico_runtime_stream_open`, `kalico_runtime_stream_arm`, `kalico_runtime_stream_terminal`
-- `kalico_runtime_drain_and_reclaim`, `runtime_handle_drain_trace`
-- `kalico_runtime_configure_axes_blob`
-- Segment-id query handlers: `runtime_handle_accepted_segment_id`, `runtime_handle_retired_through_segment_id`, `runtime_handle_current_segment_id`, `kalico_runtime_pending_segment_is_some`, `runtime_handle_credit_epoch`
+- `runtime_stream_open`, `runtime_stream_arm`, `runtime_stream_terminal`
+- `runtime_drain_and_reclaim`, `runtime_handle_drain_trace`
+- `runtime_configure_axes_blob`
+- Segment-id query handlers: `runtime_handle_accepted_segment_id`, `runtime_handle_retired_through_segment_id`, `runtime_handle_current_segment_id`, `runtime_pending_segment_is_some`, `runtime_handle_credit_epoch`
 - The `use runtime::segment::KinematicTag` and `use runtime::config::{...}` imports
 
-**Keep:** `kalico_runtime_stream_flush` (decoupled to call the `stream::flush` shell). Keep `kalico_runtime_configure_axis` (the new per-axis path) and its siblings `configure_kinematics` / `configure_pressure_advance` (already no-op ABI stubs; leave unless the host rewrite removes them).
+**Keep:** `runtime_stream_flush` (decoupled to call the `stream::flush` shell). Keep `runtime_configure_axis` (the new per-axis path) and its siblings `configure_kinematics` / `configure_pressure_advance` (already no-op ABI stubs; leave unless the host rewrite removes them).
 
 ### 3.5 C firmware (`src/`)
 
@@ -104,7 +104,7 @@ Remove `DECL_COMMAND`s + handlers:
 
 - `command_runtime_stream_open`, `command_runtime_stream_arm`, `command_runtime_stream_terminal` (`runtime_commands.c`)
 - `command_runtime_configure_axes_blob` (`runtime_commands.c`) and its callers (`mcu_transport_dispatch.c`)
-- The `kalico_runtime_drain_and_reclaim` call in `runtime_tick.c`
+- The `runtime_drain_and_reclaim` call in `runtime_tick.c`
 
 **Keep:** `command_runtime_stream_flush` (calls the kept flush FFI).
 
@@ -112,7 +112,7 @@ Remove `DECL_COMMAND`s + handlers:
 
 Delete (they test removed behavior):
 
-- `rust/kalico-c-api/tests/drain_trace_credit.rs`
+- `rust/c-api/tests/drain_trace_credit.rs`
 - `rust/motion-engine/tests/bridge_to_runtime_step_chain.rs`
 - `rust/runtime/tests/modulator_math.rs`
 
@@ -141,7 +141,7 @@ Each cluster is one reviewable commit. Within each cluster, work leaf-first: rem
 Delete `modulator_math.rs`; remove `phase_modulators` field + import + `runtime_force_idle` reset; delete `modulator.rs` + `lib.rs` line.
 
 **Cluster 2 — Legacy config.**
-Remove the C `command_runtime_configure_axes_blob` + callers in `mcu_transport_dispatch.c`; remove the `kalico_runtime_configure_axes_blob` FFI; remove `engine.configure()` / `mcu_config` / `McuAxisConfig` import; audit and (if vestigial) remove `step_state`; delete `config.rs` + `lib.rs` line.
+Remove the C `command_runtime_configure_axes_blob` + callers in `mcu_transport_dispatch.c`; remove the `runtime_configure_axes_blob` FFI; remove `engine.configure()` / `mcu_config` / `McuAxisConfig` import; audit and (if vestigial) remove `step_state`; delete `config.rs` + `lib.rs` line.
 
 **Cluster 3 — Segment + trace + reclaim + stream-lifecycle (the coupled cluster).**
 Delete dead tests (`drain_trace_credit.rs`, `bridge_to_runtime_step_chain.rs`); remove C `DECL_COMMAND`s for `stream_open`/`stream_arm`/`stream_terminal` + the `drain_and_reclaim` call in `runtime_tick.c`; remove the corresponding FFI exports (stream open/arm/terminal, drain_and_reclaim, drain_trace, segment-id queries) + `KinematicTag` import; remove `state.rs` fields (`retirement_table`, `trace_*`, `Segment`/`TraceSample` imports); remove engine `_trace` param + trace import; reduce `stream.rs` to the `flush` shell (drop `FgStreamState`, `open`, `arm`, `terminal`, `check_terminal_on_retire`) and remove the `stream_state_machine` field; delete `segment.rs`, `reclaim.rs`, `trace.rs` + `lib.rs` lines.

@@ -45,7 +45,7 @@ fn round_trips_a_call_by_correlation_id() {
     );
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     let (kind, _body) = conn
-        .kalico_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(2))
+        .mcu_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(2))
         .expect("call ok");
     assert_eq!(kind, MessageKind::PushPiecesResponse);
 }
@@ -57,7 +57,7 @@ fn timeout_still_timeout_when_peer_alive_silent() {
     // which would fire on EOF).
     let (client, server) = UnixStream::pair().unwrap();
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
-    let r = conn.kalico_call(MessageKind::PushPieces, vec![], Duration::from_millis(150));
+    let r = conn.mcu_call(MessageKind::PushPieces, vec![], Duration::from_millis(150));
     assert!(matches!(r, Err(TransportError::Timeout)), "got {r:?}");
     drop(server);
 }
@@ -76,7 +76,7 @@ fn reader_death_wakes_waiter_with_closed() {
     });
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     let start = Instant::now();
-    let r = conn.kalico_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(10));
+    let r = conn.mcu_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(10));
     assert!(matches!(r, Err(TransportError::Closed)), "got {r:?}");
     assert!(
         start.elapsed() < Duration::from_secs(2),
@@ -155,7 +155,7 @@ fn heartbeat_event_during_call_invokes_callback() {
     }));
 
     let (kind, _body) = conn
-        .kalico_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(2))
+        .mcu_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(2))
         .expect("call ok");
     assert_eq!(kind, MessageKind::PushPiecesResponse);
 
@@ -345,7 +345,7 @@ fn concurrent_call_does_not_inflate_rtt_while_heartbeats_flow() {
     let start = Instant::now();
     for _ in 0..CALLS {
         let (kind, _b) = conn
-            .kalico_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(2))
+            .mcu_call(MessageKind::PushPieces, vec![0; 8], Duration::from_secs(2))
             .expect("call ok");
         assert_eq!(kind, MessageKind::PushPiecesResponse);
     }

@@ -1024,8 +1024,7 @@ class MCU:
 
     def _recover_latched_peripheral_shutdown(self, get_config_cmd, exc):
         is_motion_mcu = (
-            "kalico_runtime_reset"
-            in self._serial.get_msgparser().messages_by_name
+            "runtime_reset" in self._serial.get_msgparser().messages_by_name
         )
         if is_motion_mcu:
             raise error(

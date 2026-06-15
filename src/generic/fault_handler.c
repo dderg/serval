@@ -5,7 +5,7 @@
 #include "board/irq.h"
 #include "command.h"
 #include "sched.h"
-#include "kalico_log.h"
+#include "event_log.h"
 
 extern volatile uint8_t runtime_liveness_ok;
 extern void *runtime_handle;
@@ -164,7 +164,7 @@ struct diag_counters {
 
     uint32_t tx_drops_kalico;
     uint32_t tx_drops_klipper;
-    uint32_t tx_drops_kalico_last_len;
+    uint32_t tx_drops_transport_last_len;
     uint32_t tx_drops_klipper_last_max;
 
     uint32_t ring_head;
@@ -568,7 +568,7 @@ void
 diag_record_tx_drop_kalico(uint32_t len, uint32_t tpos)
 {
     diag.tx_drops_kalico++;
-    diag.tx_drops_kalico_last_len = len;
+    diag.tx_drops_transport_last_len = len;
     diag_ring_push(DIAG_EV_TX_DROP_KAL, len, tpos);
 }
 
@@ -899,7 +899,7 @@ fault_handler_report_task(void)
             prior_diag.runtime_status_max_gap_ticks = diag.runtime_status_max_gap_ticks;
             prior_diag.tx_drops_kalico        = diag.tx_drops_kalico;
             prior_diag.tx_drops_klipper       = diag.tx_drops_klipper;
-            prior_diag.tx_drops_kalico_last_len = diag.tx_drops_kalico_last_len;
+            prior_diag.tx_drops_transport_last_len = diag.tx_drops_transport_last_len;
             prior_diag.tx_drops_klipper_last_max = diag.tx_drops_klipper_last_max;
             prior_diag.ring_head            = diag.ring_head;
             prior_diag.ring_seq             = diag.ring_seq;
@@ -1100,7 +1100,7 @@ fault_handler_report_task(void)
                prior_diag.tim5_ia_min_cyc,
                prior_diag.tim5_ia_max_cyc,
                prior_diag.tim5_ia_last_cyc,
-               (uint32_t)(CONFIG_CLOCK_FREQ / CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ));
+               (uint32_t)(CONFIG_CLOCK_FREQ / CONFIG_MOTION_SAMPLE_RATE_HZ));
         output("prior_diag_summary_usb in_busy %u gintsts_sticky %u gintsts %u"
                " gintmsk %u in_diepctl %u in_diepint %u in_dtxfsts %u"
                " out_doepctl %u out_doepint %u",
@@ -1126,7 +1126,7 @@ fault_handler_report_task(void)
         output("prior_diag_drops kalico %u last_len %u klipper %u last_max %u"
                " ring_seq %u ring_overflow %u",
                prior_diag.tx_drops_kalico,
-               prior_diag.tx_drops_kalico_last_len,
+               prior_diag.tx_drops_transport_last_len,
                prior_diag.tx_drops_klipper,
                prior_diag.tx_drops_klipper_last_max,
                prior_diag.ring_seq,
@@ -1164,14 +1164,14 @@ diag_ring_tag_level(uint8_t tag)
 {
     switch (tag) {
     case DIAG_EV_RUST_FAULT:
-        return KALICO_LOG_LEVEL_ERROR;
+        return EVENT_LOG_LEVEL_ERROR;
     case DIAG_EV_TIM5_LONG:
     case DIAG_EV_OTG_LONG:
     case DIAG_EV_TX_DROP_KAL:
     case DIAG_EV_TX_DROP_KLP:
-        return KALICO_LOG_LEVEL_WARN;
+        return EVENT_LOG_LEVEL_WARN;
     default:
-        return KALICO_LOG_LEVEL_DEBUG;
+        return EVENT_LOG_LEVEL_DEBUG;
     }
 }
 
@@ -1192,22 +1192,22 @@ kalico_diag_emit_prior_crash(void)
     // drop it from this condition.
     uint8_t abnormal = iwdg || had_fault || prior_run_froze;
 
-    kalico_log_emit(abnormal ? KALICO_LOG_LEVEL_WARN : KALICO_LOG_LEVEL_DEBUG,
-                    KALICO_LOG_SUBSYS_RUNTIME, KALICO_LOG_EVENT_RUNTIME_MCU_RESET,
+    event_log_emit(abnormal ? EVENT_LOG_LEVEL_WARN : EVENT_LOG_LEVEL_DEBUG,
+                    EVENT_LOG_SUBSYS_RUNTIME, EVENT_LOG_EVENT_RUNTIME_MCU_RESET,
                     0, reset_cause_snapshot, live_snap.iwdg_reset_count);
 
     if (had_fault) {
-        kalico_log_emit(KALICO_LOG_LEVEL_ERROR, KALICO_LOG_SUBSYS_RUNTIME,
-                        KALICO_LOG_EVENT_RUNTIME_HARD_FAULT,
+        event_log_emit(EVENT_LOG_LEVEL_ERROR, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_HARD_FAULT,
                         (uint16_t)fault_rec.exc_kind, fault_rec.pc, fault_rec.lr);
-        kalico_log_emit(KALICO_LOG_LEVEL_ERROR, KALICO_LOG_SUBSYS_RUNTIME,
-                        KALICO_LOG_EVENT_RUNTIME_FAULT_STATUS, 0,
+        event_log_emit(EVENT_LOG_LEVEL_ERROR, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FAULT_STATUS, 0,
                         fault_rec.cfsr, fault_rec.hfsr);
     }
 
     if (live_snap.worst_fg_stall_ticks) {
-        kalico_log_emit(KALICO_LOG_LEVEL_WARN, KALICO_LOG_SUBSYS_RUNTIME,
-                        KALICO_LOG_EVENT_RUNTIME_FG_FREEZE, 0,
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_FREEZE, 0,
                         live_snap.worst_fg_stall_pc,
                         live_snap.worst_fg_stall_ticks);
     }
@@ -1215,32 +1215,32 @@ kalico_diag_emit_prior_crash(void)
     if (abnormal) {
         extern volatile uint32_t runtime_diag_prior_packed_raw;
         uint32_t fc = had_fault ? fault_rec.fault_count : 0u;
-        kalico_log_emit(KALICO_LOG_LEVEL_WARN, KALICO_LOG_SUBSYS_RUNTIME,
-                        KALICO_LOG_EVENT_RUNTIME_RT_PROGRESS, 0,
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_RT_PROGRESS, 0,
                         runtime_diag_prior_packed_raw, fc);
 
-        kalico_log_emit(KALICO_LOG_LEVEL_WARN, KALICO_LOG_SUBSYS_RUNTIME,
-                        KALICO_LOG_EVENT_RUNTIME_LAST_DISPATCH, 0,
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_LAST_DISPATCH, 0,
                         saved_prior_last_dispatch_func,
                         saved_prior_last_dispatch_addr);
 
         if (prior_diag_present) {
-            kalico_log_emit(KALICO_LOG_LEVEL_WARN, KALICO_LOG_SUBSYS_RUNTIME,
-                            KALICO_LOG_EVENT_RUNTIME_ISR_PHASE, 0,
+            event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                            EVENT_LOG_EVENT_RUNTIME_ISR_PHASE, 0,
                             prior_diag.rt_isr_phase, prior_diag.ring_overflow);
-            kalico_log_emit(KALICO_LOG_LEVEL_WARN, KALICO_LOG_SUBSYS_RUNTIME,
-                            KALICO_LOG_EVENT_RUNTIME_BLOCK_SOURCE, 0,
+            event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                            EVENT_LOG_EVENT_RUNTIME_BLOCK_SOURCE, 0,
                             prior_diag.usb_burst_max_cyc,
                             prior_diag.stepout_burst_max_cyc);
-            kalico_log_emit(KALICO_LOG_LEVEL_WARN, KALICO_LOG_SUBSYS_RUNTIME,
-                            KALICO_LOG_EVENT_RUNTIME_TIM5_IA, 0,
+            event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                            EVENT_LOG_EVENT_RUNTIME_TIM5_IA, 0,
                             prior_diag.tim5_ia_min_cyc,
                             prior_diag.tim5_ia_max_cyc);
             {
                 uint32_t packed = (prior_diag.stepout_late_count << 16)
                                   | (prior_diag.stepout_late_max_drained & 0xFFFFu);
-                kalico_log_emit(KALICO_LOG_LEVEL_WARN, KALICO_LOG_SUBSYS_RUNTIME,
-                                KALICO_LOG_EVENT_RUNTIME_STEPOUT_LATE, 0,
+                event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                                EVENT_LOG_EVENT_RUNTIME_STEPOUT_LATE, 0,
                                 prior_diag.stepout_late_max_cyc, packed);
             }
 
@@ -1250,7 +1250,7 @@ kalico_diag_emit_prior_crash(void)
                 uint8_t tag = prior_ring[idx].tag;
                 if (tag == DIAG_EV_NONE)
                     continue;
-                kalico_log_emit(diag_ring_tag_level(tag), KALICO_LOG_SUBSYS_DIAG,
+                event_log_emit(diag_ring_tag_level(tag), EVENT_LOG_SUBSYS_DIAG,
                                 tag, 0, prior_ring[idx].a, prior_ring[idx].b);
             }
         }
@@ -1277,17 +1277,17 @@ kalico_diag_emit_live(void)
     uint32_t uptime_us = boot_tick_initialized
         ? (uint32_t)((uint64_t)(now - boot_first_tick) * 1000000u / CONFIG_CLOCK_FREQ)
         : 0u;
-    kalico_log_emit(KALICO_LOG_LEVEL_DEBUG, KALICO_LOG_SUBSYS_RUNTIME,
-                    KALICO_LOG_EVENT_RUNTIME_DIAG_DUMP, 0, uptime_us, ring_seq);
+    event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                    EVENT_LOG_EVENT_RUNTIME_DIAG_DUMP, 0, uptime_us, ring_seq);
 
-    kalico_log_emit(KALICO_LOG_LEVEL_DEBUG, KALICO_LOG_SUBSYS_RUNTIME,
-                    KALICO_LOG_EVENT_RUNTIME_ISR_PHASE, 0,
+    event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                    EVENT_LOG_EVENT_RUNTIME_ISR_PHASE, 0,
                     diag.rt_isr_phase, ring_overflow);
-    kalico_log_emit(KALICO_LOG_LEVEL_DEBUG, KALICO_LOG_SUBSYS_RUNTIME,
-                    KALICO_LOG_EVENT_RUNTIME_BLOCK_SOURCE, 0,
+    event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                    EVENT_LOG_EVENT_RUNTIME_BLOCK_SOURCE, 0,
                     diag.usb_burst_max_cyc, diag.stepout_burst_max_cyc);
-    kalico_log_emit(KALICO_LOG_LEVEL_DEBUG, KALICO_LOG_SUBSYS_RUNTIME,
-                    KALICO_LOG_EVENT_RUNTIME_TIM5_IA, 0,
+    event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                    EVENT_LOG_EVENT_RUNTIME_TIM5_IA, 0,
                     diag.tim5_ia_min_cyc, diag.tim5_ia_max_cyc);
     {
         extern void kalico_stepout_late_get(uint32_t *out_max_late,
@@ -1299,14 +1299,14 @@ kalico_diag_emit_live(void)
         diag.stepout_late_count      = late_count;
         diag.stepout_late_max_drained = late_drained;
         uint32_t packed = (late_count << 16) | (late_drained & 0xFFFFu);
-        kalico_log_emit(KALICO_LOG_LEVEL_DEBUG, KALICO_LOG_SUBSYS_RUNTIME,
-                        KALICO_LOG_EVENT_RUNTIME_STEPOUT_LATE, 0,
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_STEPOUT_LATE, 0,
                         late_max, packed);
     }
 
     if (live_snap.worst_fg_stall_ticks) {
-        kalico_log_emit(KALICO_LOG_LEVEL_DEBUG, KALICO_LOG_SUBSYS_RUNTIME,
-                        KALICO_LOG_EVENT_RUNTIME_FG_FREEZE, 0,
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_FREEZE, 0,
                         live_snap.worst_fg_stall_pc,
                         live_snap.worst_fg_stall_ticks);
     }
@@ -1316,7 +1316,7 @@ kalico_diag_emit_live(void)
         uint8_t tag = dump_ring[idx].tag;
         if (tag == DIAG_EV_NONE)
             continue;
-        kalico_log_emit(diag_ring_tag_level(tag), KALICO_LOG_SUBSYS_DIAG,
+        event_log_emit(diag_ring_tag_level(tag), EVENT_LOG_SUBSYS_DIAG,
                         tag, 0, dump_ring[idx].a, dump_ring[idx].b);
     }
 }

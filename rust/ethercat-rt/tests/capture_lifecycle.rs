@@ -64,12 +64,12 @@ fn wait_for_socket(path: &str, deadline: Instant) {
 
 fn do_handshake(conn: &McuSerialConn) -> ClaimHandshakeReply {
     let (kind, body) = conn
-        .kalico_call(
+        .mcu_call(
             MessageKind::ClaimHandshake,
             Vec::new(),
             Duration::from_secs(5),
         )
-        .expect("ClaimHandshake kalico_call must succeed");
+        .expect("ClaimHandshake mcu_call must succeed");
 
     assert_eq!(
         kind,
@@ -109,7 +109,7 @@ fn start_capture(conn: &McuSerialConn, path: &str) -> i32 {
     }
     .encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::StartCapture, body, Duration::from_secs(5))
+        .mcu_call(MessageKind::StartCapture, body, Duration::from_secs(5))
         .expect("StartCapture call must succeed");
     assert_eq!(
         kind,
@@ -126,7 +126,7 @@ fn start_capture(conn: &McuSerialConn, path: &str) -> i32 {
 fn stop_capture(conn: &McuSerialConn) -> StopCaptureResponse {
     let body = StopCapture.encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::StopCapture, body, Duration::from_secs(5))
+        .mcu_call(MessageKind::StopCapture, body, Duration::from_secs(5))
         .expect("StopCapture call must succeed");
     assert_eq!(
         kind,

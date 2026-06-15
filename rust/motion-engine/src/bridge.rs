@@ -36,7 +36,7 @@ struct HomingRun {
 fn abort_after_tracing_appender_drains() {
     let _ = std::io::Write::flush(&mut std::io::stderr());
     std::thread::sleep(std::time::Duration::from_millis(100));
-    if std::env::var_os("KALICO_NO_EXIT_ON_FAULT").is_none() {
+    if std::env::var_os("NO_EXIT_ON_FAULT").is_none() {
         std::process::abort();
     }
 }
@@ -76,7 +76,7 @@ const ETHERCAT_CLOCK_FREQ_HZ: u32 = 1_000_000_000;
 
 #[derive(Debug, thiserror::Error)]
 enum RuntimeCapsError {
-    #[error("kalico_call QueryRuntimeCaps: {0}")]
+    #[error("mcu_call QueryRuntimeCaps: {0}")]
     Call(String),
     #[error("QueryRuntimeCaps: unexpected response kind {got:?}")]
     UnexpectedKind { got: mcu_protocol::MessageKind },
@@ -99,7 +99,7 @@ fn query_runtime_caps(
 ) -> Result<mcu_protocol::messages::RuntimeCapsResponse, RuntimeCapsError> {
     use mcu_protocol::MessageKind;
     let (kind, body) = io
-        .kalico_call(MessageKind::QueryRuntimeCaps, Vec::new(), timeout)
+        .mcu_call(MessageKind::QueryRuntimeCaps, Vec::new(), timeout)
         .map_err(|e| RuntimeCapsError::Call(format!("{e:?}")))?;
     if kind != MessageKind::RuntimeCapsResponse {
         return Err(RuntimeCapsError::UnexpectedKind { got: kind });
@@ -189,10 +189,10 @@ fn collect_motor_positions_inner(
         };
         let (kind, body) = match &q {
             MotorQuery::Serial(io) => {
-                io.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)
+                io.mcu_call(MessageKind::QueryMotorState, Vec::new(), timeout)
             }
             MotorQuery::EtherCat(ep) => {
-                ep.kalico_call(MessageKind::QueryMotorState, Vec::new(), timeout)
+                ep.mcu_call(MessageKind::QueryMotorState, Vec::new(), timeout)
             }
         }
         .map_err(|e| format!("query mcu {}: {e:?}", cfg.mcu_id))?;
@@ -217,7 +217,7 @@ fn query_ethercat_runtime_caps(
     use host_rt::mcu_call::McuCall;
     use mcu_protocol::MessageKind;
     let (kind, body) = conn
-        .kalico_call(MessageKind::QueryRuntimeCaps, Vec::new(), timeout)
+        .mcu_call(MessageKind::QueryRuntimeCaps, Vec::new(), timeout)
         .map_err(|e| RuntimeCapsError::Call(format!("{e:?}")))?;
     if kind != MessageKind::RuntimeCapsResponse {
         return Err(RuntimeCapsError::UnexpectedKind { got: kind });
@@ -485,7 +485,7 @@ fn handshake_ethercat_endpoint(
 
     let remaining = deadline.saturating_duration_since(Instant::now());
     let (kind, body) = conn
-        .kalico_call(MessageKind::ClaimHandshake, Vec::new(), remaining)
+        .mcu_call(MessageKind::ClaimHandshake, Vec::new(), remaining)
         .map_err(|e| EndpointClaimError::Protocol(format!("ClaimHandshake call: {e:?}")))?;
 
     if kind != MessageKind::ClaimHandshakeReply {
@@ -3446,7 +3446,7 @@ impl PyMotionEngine {
             }
 
             planner
-                .kalico_stream_open([x, y, z, 0.0])
+                .runtime_stream_open([x, y, z, 0.0])
                 .map_err(planner_err)?;
 
             self.drain.reset();
@@ -4033,10 +4033,10 @@ impl PyMotionEngine {
         let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(planner) = planner_guard.as_ref() {
             let open_result =
-                planner.kalico_stream_open([cartesian[0], cartesian[1], cartesian[2], 0.0]);
+                planner.runtime_stream_open([cartesian[0], cartesian[1], cartesian[2], 0.0]);
             if let Err(e) = open_result {
                 tracing::error!(
-                    "home_abort: kalico_stream_open failed after drain — \
+                    "home_abort: runtime_stream_open failed after drain — \
                      commanded_pos is STALE; a firmware restart is required: {e:?}"
                 );
                 return;
@@ -4312,7 +4312,7 @@ pub(crate) fn dispatch_endstop_trip(
                     .get(&mcu_id)
                     .ok_or_else(|| format!("Stop: no transport for mcu {mcu_id}"))?;
                 let (_kind, body) = transport
-                    .kalico_call(mcu_protocol::MessageKind::Stop, Vec::new(), stop_timeout)
+                    .mcu_call(mcu_protocol::MessageKind::Stop, Vec::new(), stop_timeout)
                     .map_err(|e| format!("Stop call failed for mcu {mcu_id}: {e:?}"))?;
                 mcu_protocol::messages::StopResponse::decode(&body)
                     .map_err(|e| format!("Stop decode failed for mcu {mcu_id}: {e:?}"))
@@ -4372,7 +4372,7 @@ pub(crate) fn dispatch_endstop_trip(
                         .get(&mcu_id)
                         .ok_or_else(|| format!("ResumeStream: no transport for mcu {mcu_id}"))?;
                     let (_kind, body) = transport
-                        .kalico_call(
+                        .mcu_call(
                             mcu_protocol::MessageKind::ResumeStream,
                             Vec::new(),
                             stop_timeout,
@@ -4706,7 +4706,7 @@ mod ethercat_endpoint_tests {
                     let reply = encode_claim_handshake_reply(cid);
                     let _ = stream.write_all(&reply);
                     // Shutdown the write half — sends a clean FIN so the
-                    // foreground's kalico_call read loop exits on EOF (Closed)
+                    // foreground's mcu_call read loop exits on EOF (Closed)
                     // *after* it has already matched the correlated reply frame
                     // and returned Ok.  Without this, dropping the stream under
                     // parallel load can race with the foreground's read.

@@ -84,7 +84,7 @@ points at. No change to the extruder here.
 
 - Arbitrary spatial axis **names** at the G-code level (spatial stays X/Y/Z).
 - Named / multi-kinematics ("motion channels") — parked in
-  `docs/kalico-rewrite/future-motion-channels-multi-kinematics.md`.
+  `docs/rewrite/future-motion-channels-multi-kinematics.md`.
 - The `follows:` shorthand discussion — keep `[axis e] follows: x, y, z`.
 
 ## Tests

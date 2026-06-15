@@ -3,7 +3,7 @@
 Restores the probe orchestration surface that the bridge-native `[probe]`
 rewrite (816846c19) left out, so the probe-consuming extras work again.
 Spec C of the beacon plan
-([`beacon-fork-survey.md`](../../kalico-rewrite/beacon-fork-survey.md));
+([`beacon-fork-survey.md`](../../rewrite/beacon-fork-survey.md));
 no beacon dependency — this fixes our own stranded consumers for any probe.
 
 Reference implementation: this repo's `main` branch is vanilla Kalico, so

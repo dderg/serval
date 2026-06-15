@@ -117,7 +117,7 @@ code when:
 
 The inverse door is guarded too: **`PushPieces` arriving while a correction
 stream is active is a hard error.** Both rejections emit structured log
-events (`kalico_log_emit`).
+events (`event_log_emit`).
 
 ### Completion
 
@@ -155,7 +155,7 @@ applies position:
 - **Servo (future)**: scratch position added to the setpoint, folded at
   stream end. Same shape; no contract change.
 
-C/Rust boundary: per `docs/kalico-rewrite/mcu-c-rust-boundary.md`, the
+C/Rust boundary: per `docs/rewrite/mcu-c-rust-boundary.md`, the
 correction ring placement follows the same ownership rules as the existing
 piece ring (C owns shared-memory placement; Rust owns the evaluation).
 

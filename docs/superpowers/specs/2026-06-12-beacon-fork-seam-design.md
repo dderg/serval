@@ -3,7 +3,7 @@
 Rewrite of the `dderg/beacon_klipper` integration layer onto this tree's
 primitives, plus full capability validation (this merges the survey's
 Spec D and Spec E into one project). Supersedes the per-seam resolutions
-in [`beacon-fork-survey.md`](../../kalico-rewrite/beacon-fork-survey.md) where they differ;
+in [`beacon-fork-survey.md`](../../rewrite/beacon-fork-survey.md) where they differ;
 the survey's audit ledger remains the touchpoint inventory.
 
 ## Scope

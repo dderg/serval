@@ -13,7 +13,7 @@
 #include <unistd.h>
 
 #include "autoconf.h"
-#include "kalico_runtime.h"
+#include "runtime.h"
 #include "sched.h"
 #include "step_queue.h"
 
@@ -35,7 +35,7 @@ uint32_t runtime_tim5_stacked_exc(void) { return 0; }
 // runtime's TickIntervalExceeded guard on the first active tick. Stock Pi
 // kernels floor at ~1 kHz (clock_nanosleep); higher rates need PREEMPT_RT +
 // SCHED_FIFO (-r).
-#define HOST_TICK_HZ ((unsigned long)CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ)
+#define HOST_TICK_HZ ((unsigned long)CONFIG_MOTION_SAMPLE_RATE_HZ)
 #define HOST_TICK_NS (1000000000UL / HOST_TICK_HZ)
 
 static atomic_int host_tick_enabled = 0;
@@ -150,7 +150,7 @@ host_tick_main(void *arg)
         tick_trace_times[tick_trace_seq % TICK_TRACE_DEPTH] =
             runtime_cyccnt_read();
         tick_trace_seq++;
-        kalico_runtime_tick_sample(runtime_handle);
+        runtime_tick_sample(runtime_handle);
 
         // Must drain every tick or the queue overflows (StepQueueOverflow).
         for (int axis = 0; axis < N_AXIS_STEP_QUEUES; axis++) {
@@ -207,7 +207,7 @@ runtime_tick_enable(void)
         uint32_t high = stats_send_time_high + (low < stats_send_time);
         uint64_t baseline = ((uint64_t)high) << 32 | (uint64_t)low;
         runtime_handle_seed_widen(runtime_handle, baseline);
-        kalico_runtime_install_step_queues(runtime_handle,
+        runtime_install_step_queues(runtime_handle,
                                            (uint8_t *)step_queues);
     }
     atomic_store_explicit(&host_tick_enabled, 1, memory_order_release);

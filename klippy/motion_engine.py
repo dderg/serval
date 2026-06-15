@@ -109,7 +109,7 @@ class _StubEngine:
                     "_motion_engine not built: cannot call "
                     "%r on the stub engine. The klippy motion path was "
                     "exercised without the real Rust engine. Build the "
-                    "cdylib (e.g. `make -f Makefile.kalico motion-engine`) "
+                    "cdylib (e.g. `make -f Makefile.rust motion-engine`) "
                     "to exercise real motion, or restrict this test to "
                     "import/boot/config only." % (name,)
                 )

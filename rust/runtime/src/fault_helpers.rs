@@ -14,7 +14,7 @@ static MIN_LEVEL: AtomicU8 = AtomicU8::new(2);
 
 #[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
 unsafe extern "C" {
-    fn kalico_log_emit(level: u8, subsystem: u8, event: u16, code: u16, arg0: u32, arg1: u32);
+    fn event_log_emit(level: u8, subsystem: u8, event: u16, code: u16, arg0: u32, arg1: u32);
 }
 
 #[inline]
@@ -23,10 +23,10 @@ fn emit_fault_log(fault: FaultCode, detail: u32) {
         return;
     }
     #[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
-    // SAFETY: kalico_log_emit is a pure C logging sink; no aliasing or
+    // SAFETY: event_log_emit is a pure C logging sink; no aliasing or
     // ownership constraints on its arguments.
     unsafe {
-        kalico_log_emit(
+        event_log_emit(
             LOG_LEVEL_ERROR,
             SUBSYSTEM_RUNTIME,
             EVENT_RUNTIME_FAULT_LATCHED,

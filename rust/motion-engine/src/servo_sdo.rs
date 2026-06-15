@@ -19,7 +19,7 @@ pub fn send_sdo_read(
 ) -> Result<SdoReadResponse, String> {
     let body = SdoRead { index, subindex }.encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::SdoRead, body, SDO_TIMEOUT)
+        .mcu_call(MessageKind::SdoRead, body, SDO_TIMEOUT)
         .map_err(|e| format!("SdoRead transport: {e:?}"))?;
     if kind != MessageKind::SdoReadResponse {
         return Err(format!(
@@ -45,7 +45,7 @@ pub fn send_sdo_write(
     }
     .encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::SdoWrite, body, SDO_TIMEOUT)
+        .mcu_call(MessageKind::SdoWrite, body, SDO_TIMEOUT)
         .map_err(|e| format!("SdoWrite transport: {e:?}"))?;
     if kind != MessageKind::SdoWriteResponse {
         return Err(format!(

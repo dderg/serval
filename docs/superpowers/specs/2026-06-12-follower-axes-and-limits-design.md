@@ -297,7 +297,7 @@ the path it follows downstream of that path's own post-processor chain; the
 follower's own chain runs downstream of the sampling, like any axis.
 
 The MCU is untouched: per-axis cubic tapes, no knowledge of followers or
-post-processors. `docs/kalico-rewrite/mcu-c-rust-boundary.md` requires zero
+post-processors. `docs/rewrite/mcu-c-rust-boundary.md` requires zero
 edits.
 
 **Two ledgers, by intention** (any follower axis; the extruder is the

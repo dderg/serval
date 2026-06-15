@@ -18,16 +18,16 @@ src-y += runtime_commands.c
 src-y += linux/phase_stepping_spi.c
 
 # Generated FFI header (cbindgen) shared with the H7 build.
-CFLAGS += -Irust/kalico-c-api/include
+CFLAGS += -Irust/c-api/include
 
-# Link libkalico_c_api.a. The Linux build has a mutual-callback edge:
-# host_tick.o calls into libkalico (kalico_runtime_tick) and libkalico
+# Link libc_api.a. The Linux build has a mutual-callback edge:
+# host_tick.o calls into libkalico (runtime_tick) and libkalico
 # calls back out (runtime_tick_enable / read_cyccnt). Wrap with
 # --start-group/--end-group so ld iterates until both sides resolve.
-# KALICO_LIB is set by src/Makefile's MACH_LINUX block (its own target-linux
+# MCU_RUST_LIB is set by src/Makefile's MACH_LINUX block (its own target-linux
 # dir, mirroring the per-arch STM32 paths) — included before this file.
-CFLAGS_klipper.elf := -Wl,--start-group $(KALICO_LIB) -Wl,--end-group $(CFLAGS_klipper.elf)
-$(OUT)klipper.elf: $(KALICO_LIB)
+CFLAGS_klipper.elf := -Wl,--start-group $(MCU_RUST_LIB) -Wl,--end-group $(CFLAGS_klipper.elf)
+$(OUT)klipper.elf: $(MCU_RUST_LIB)
 
 CFLAGS_klipper.elf += -lutil -lrt -lpthread
 

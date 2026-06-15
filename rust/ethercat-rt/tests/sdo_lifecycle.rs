@@ -42,7 +42,7 @@ fn spawn_and_claim(tag: &str) -> (ChildGuard, McuSerialConn) {
     }
     let conn = McuSerialConn::connect(&path).expect("connect must succeed");
     let (kind, _) = conn
-        .kalico_call(
+        .mcu_call(
             MessageKind::ClaimHandshake,
             Vec::new(),
             Duration::from_secs(5),
@@ -55,7 +55,7 @@ fn spawn_and_claim(tag: &str) -> (ChildGuard, McuSerialConn) {
 fn sdo_read(conn: &McuSerialConn, index: u16, subindex: u8) -> SdoReadResponse {
     let body = SdoRead { index, subindex }.encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::SdoRead, body, Duration::from_secs(5))
+        .mcu_call(MessageKind::SdoRead, body, Duration::from_secs(5))
         .expect("SdoRead call must succeed");
     assert_eq!(kind, MessageKind::SdoReadResponse);
     SdoReadResponse::decode(&resp).expect("SdoReadResponse must decode")
@@ -76,7 +76,7 @@ fn sdo_write(
     }
     .encoded_to_vec();
     let (kind, resp) = conn
-        .kalico_call(MessageKind::SdoWrite, body, Duration::from_secs(5))
+        .mcu_call(MessageKind::SdoWrite, body, Duration::from_secs(5))
         .expect("SdoWrite call must succeed");
     assert_eq!(kind, MessageKind::SdoWriteResponse);
     SdoWriteResponse::decode(&resp).expect("SdoWriteResponse must decode")

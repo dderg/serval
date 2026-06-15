@@ -10,7 +10,7 @@
 
 **Branch:** continue on `e-follows-xy` (the branch where the `[motor]`/`[kinematics]`/`[axis]` schema shipped).
 
-**Out of scope:** arbitrary spatial axis *names* at the G-code level (spatial stays X/Y/Z); `homing.py` and `gcode.py` x/y/z usage; named/multi-kinematics ("motion channels", parked in `docs/kalico-rewrite/future-motion-channels-multi-kinematics.md`); `[extruder] axis:` (already shipped, commit `6fbcf7cf4`).
+**Out of scope:** arbitrary spatial axis *names* at the G-code level (spatial stays X/Y/Z); `homing.py` and `gcode.py` x/y/z usage; named/multi-kinematics ("motion channels", parked in `docs/rewrite/future-motion-channels-multi-kinematics.md`); `[extruder] axis:` (already shipped, commit `6fbcf7cf4`).
 
 **Repo rules for every task:** unit tests live in a separate file from the tested code; no explanatory comments — name/extract instead; fail loudly (no silent fallbacks); commit after every task; no Claude/Anthropic commit trailers; `cargo fmt`/ruff clean before any PR push; `./scripts/ci.sh quick` + `./scripts/ci.sh py` green before opening/updating the PR.
 

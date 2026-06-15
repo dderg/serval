@@ -92,7 +92,7 @@ re-runs without power-cycle work; `kalico_set_homed` is sent before
 **Recipe:** runs the standard 1024-sample bench 977 times back-to-back
 (977 × 1024 ≈ 1.0M ticks total) on flashed H723 hardware. With
 `--m2-stir-protocol`, fires `kalico_query_status` /
-`kalico_stream_open` / `kalico_stream_flush` between rounds so the ISR
+`runtime_stream_open` / `kalico_stream_flush` between rounds so the ISR
 observes the post-Step-6 protocol-handler additions in their natural
 state.
 
