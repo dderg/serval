@@ -278,5 +278,5 @@ mod tests;
 mod chain;
 mod grid;
 mod joining;
-mod junction;
+pub mod junction;
 mod parallel;

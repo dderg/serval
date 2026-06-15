@@ -38,6 +38,7 @@ fn extruder_ctx() -> ReplanContext {
         grid_strategy: temporal::multi::GridStrategy::Fixed(40),
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     }
 }
 

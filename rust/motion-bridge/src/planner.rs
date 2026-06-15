@@ -850,6 +850,7 @@ fn build_replan_context(config: &PlannerConfig) -> ReplanContext {
         },
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     }
 }
 

@@ -59,6 +59,7 @@ use crate::topp::scaling::SolverScale;
 // `counters` module; production code ignores the counts.
 // ---------------------------------------------------------------------------
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Snapshot of Clarabel invocation counts for one top-level schedule call.
 /// Reset with `counters::reset()` before a solve; read with
@@ -77,6 +78,12 @@ pub struct SolveCounters {
     pub slp9_restoration_fired: u32,
     /// 1 when `ToleranceMode::Auto` fires the tight (1e-8) second pass.
     pub auto_second_pass_fired: u32,
+    /// Number of `schedule_chain_*` invocations (one per chain solve, including
+    /// the velocity-clamp re-solves inside the parallel joining loop).
+    pub chains_scheduled: u32,
+    /// Sum of `ChainGrid::n_points()` over every `schedule_chain_*` invocation.
+    /// This is the total number of discretization nodes the solver touched.
+    pub grid_points_scheduled: u64,
 }
 
 thread_local! {
@@ -87,23 +94,52 @@ thread_local! {
         clarabel_calls_slp9_no_tr: 0,
         slp9_restoration_fired: 0,
         auto_second_pass_fired: 0,
+        chains_scheduled: 0,
+        grid_points_scheduled: 0,
     })};
 }
 
 /// Public counter accessors.  Integration tests and benchmarks call
 /// `counters::reset()` before a solve and `counters::snapshot()` after.
 pub mod counters {
-    use super::{COUNTERS, Cell, SolveCounters};
+    use super::{
+        COUNTERS, Cell, G_CHAINS_SCHEDULED, G_CLARABEL_PATH_JERK, G_CLARABEL_SLP9_NO_TR,
+        G_CLARABEL_SLP9_TR, G_CLARABEL_TOTAL, G_GRID_POINTS_SCHEDULED, Ordering, SolveCounters,
+    };
 
     pub fn reset() {
         COUNTERS.with(|c| c.set(SolveCounters::default()));
+        G_CLARABEL_TOTAL.store(0, Ordering::Relaxed);
+        G_CLARABEL_PATH_JERK.store(0, Ordering::Relaxed);
+        G_CLARABEL_SLP9_TR.store(0, Ordering::Relaxed);
+        G_CLARABEL_SLP9_NO_TR.store(0, Ordering::Relaxed);
+        G_CHAINS_SCHEDULED.store(0, Ordering::Relaxed);
+        G_GRID_POINTS_SCHEDULED.store(0, Ordering::Relaxed);
     }
 
     pub fn snapshot() -> SolveCounters {
         COUNTERS.with(Cell::get)
     }
 
+    /// Process-global aggregate across every worker thread that ran a chain
+    /// since the last [`reset`]. Use this — not [`snapshot`] — when the solve
+    /// fans out across threads (it always does via `multi::parallel`).
+    pub fn snapshot_global() -> SolveCounters {
+        let thread_local = COUNTERS.with(Cell::get);
+        SolveCounters {
+            clarabel_calls_total: G_CLARABEL_TOTAL.load(Ordering::Relaxed),
+            clarabel_calls_path_jerk: G_CLARABEL_PATH_JERK.load(Ordering::Relaxed),
+            clarabel_calls_slp9_tr: G_CLARABEL_SLP9_TR.load(Ordering::Relaxed),
+            clarabel_calls_slp9_no_tr: G_CLARABEL_SLP9_NO_TR.load(Ordering::Relaxed),
+            chains_scheduled: G_CHAINS_SCHEDULED.load(Ordering::Relaxed),
+            grid_points_scheduled: G_GRID_POINTS_SCHEDULED.load(Ordering::Relaxed),
+            slp9_restoration_fired: thread_local.slp9_restoration_fired,
+            auto_second_pass_fired: thread_local.auto_second_pass_fired,
+        }
+    }
+
     pub(super) fn inc_clarabel(has_tr: bool) {
+        G_CLARABEL_TOTAL.fetch_add(1, Ordering::Relaxed);
         COUNTERS.with(|c| {
             let mut s = c.get();
             s.clarabel_calls_total += 1;
@@ -111,11 +147,14 @@ pub mod counters {
             if in_slp9 {
                 if has_tr {
                     s.clarabel_calls_slp9_tr += 1;
+                    G_CLARABEL_SLP9_TR.fetch_add(1, Ordering::Relaxed);
                 } else {
                     s.clarabel_calls_slp9_no_tr += 1;
+                    G_CLARABEL_SLP9_NO_TR.fetch_add(1, Ordering::Relaxed);
                 }
             } else {
                 s.clarabel_calls_path_jerk += 1;
+                G_CLARABEL_PATH_JERK.fetch_add(1, Ordering::Relaxed);
             }
             c.set(s);
         });
@@ -136,9 +175,33 @@ pub mod counters {
             c.set(s);
         });
     }
+
+    pub(crate) fn inc_chain_schedule(grid_points: usize) {
+        G_CHAINS_SCHEDULED.fetch_add(1, Ordering::Relaxed);
+        G_GRID_POINTS_SCHEDULED.fetch_add(grid_points as u64, Ordering::Relaxed);
+        COUNTERS.with(|c| {
+            let mut s = c.get();
+            s.chains_scheduled += 1;
+            s.grid_points_scheduled += grid_points as u64;
+            c.set(s);
+        });
+    }
 }
 
 // Sentinel: true while execution is inside an SLP9 outer loop.
+// Process-global mirror of the per-call counters. The schedule fans out across
+// worker threads (`thread::scope` in `multi::parallel`), so the thread-local
+// `COUNTERS` only ever see the work done on the thread that happened to run a
+// given chain. The globals aggregate across all worker threads so a caller on
+// the orchestrating thread can read total per-append solver WORK. Reset before
+// a top-level solve, snapshot after; cross-thread visibility is the point.
+static G_CLARABEL_TOTAL: AtomicU32 = AtomicU32::new(0);
+static G_CLARABEL_PATH_JERK: AtomicU32 = AtomicU32::new(0);
+static G_CLARABEL_SLP9_TR: AtomicU32 = AtomicU32::new(0);
+static G_CLARABEL_SLP9_NO_TR: AtomicU32 = AtomicU32::new(0);
+static G_CHAINS_SCHEDULED: AtomicU32 = AtomicU32::new(0);
+static G_GRID_POINTS_SCHEDULED: AtomicU64 = AtomicU64::new(0);
+
 thread_local! {
     static IN_SLP9_PHASE: Cell<bool> = const { Cell::new(false) };
 }

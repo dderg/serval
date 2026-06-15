@@ -114,6 +114,7 @@ fn replan_context() -> ReplanContext {
         grid_strategy: temporal::multi::GridStrategy::Fixed(20),
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     }
 }
 
@@ -1290,6 +1291,7 @@ fn single_axis_harness(v_max: f64, a_max: f64) -> (ShaperState, ReplanContext) {
         grid_strategy: temporal::multi::GridStrategy::Fixed(40),
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     };
 
     (state, ctx)
@@ -1365,6 +1367,7 @@ fn replan_with_positive_boundary_accel_and_short_first_segment_succeeds() {
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     };
 
     let mut state = ShaperState::new(&[0.0; 3], &ctx.chains);
@@ -1424,6 +1427,7 @@ fn corner_context_passthrough() -> ReplanContext {
         },
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     }
 }
 
@@ -1483,6 +1487,7 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
         },
         fallback_initial_v: 270.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     };
 
     let mut state = ShaperState::new(&[0.0; 3], &ctx.chains);
@@ -1696,6 +1701,7 @@ fn follower_replan_context(kernel_hz: Option<f64>, pa_gain: f64) -> ReplanContex
         grid_strategy: temporal::multi::GridStrategy::Fixed(20),
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     }
 }
 

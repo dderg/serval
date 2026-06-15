@@ -58,6 +58,8 @@ pub(crate) fn schedule_chain_with_refreeze_cap(
     tolerance: ToleranceMode,
     refreeze_max: u32,
 ) -> Result<TopProfile, ScheduleError> {
+    solver::counters::inc_chain_schedule(chain.n_points());
+
     let v_start = endpoints.v_start;
     let v_end = endpoints.v_end;
 
