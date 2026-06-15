@@ -142,12 +142,14 @@ desync offset motors_sync intends, and it persists on the targeted motor only.
 
 ## Open questions to resolve first (in the plan)
 
-1. **Multi-bit masks vs `stepper_sel`.** `StepEntry.stepper_sel` today encodes
-   "all (0) or one (idx+1)". Live callers only ever target one motor, so the plan
-   can implement single-bit masks (mask with exactly one bit → `stepper_sel =
-   idx+1`; `mask == 0` → ALL) and explicitly defer/forbid multi-bit masks with a
-   loud error, OR emit one `StepEntry` per set bit. Decide in the plan; default
-   to single-bit + loud rejection of multi-bit (YAGNI, fail-loud).
+1. **Multi-bit masks vs `stepper_sel`. [DECIDED — single-bit + fail-loud.]**
+   `StepEntry.stepper_sel` today encodes "all (0) or one (idx+1)". Live callers
+   (motors_sync, MOTOR_ADJUST, force_move) only ever target one motor. So:
+   `mask == 0` → `STEPPER_SEL_ALL`; mask with exactly one bit set → that motor's
+   `stepper_sel = idx+1`; **mask with >1 bit set → loud error** at the submit
+   boundary (`KALICO_ERR_…`), not silently mishandled. If we ever need multi-bit
+   overlays we revisit then (YAGNI). No `stepper_sel` widening, no per-bit step
+   entries in this work.
 2. **`_reserved` zero-check.** Anything that asserts `_reserved == 0` on decode
    must be relaxed to ignore the mask byte. Audit `piece_ring.rs` and the
    protocol decode.
