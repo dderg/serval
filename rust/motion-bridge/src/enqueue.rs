@@ -77,6 +77,7 @@ where
                 host_now,
                 &project,
                 max_piece_secs,
+                seg.motor_mask,
             );
             if !pieces.is_empty() {
                 out.push(EnqueueMsg {
@@ -112,6 +113,7 @@ fn flatten_axis<P>(
     host_now: f64,
     project: &P,
     max_piece_secs: Option<f64>,
+    motor_mask: u8,
 ) -> Vec<(PieceEntry, f64)>
 where
     P: Fn(u32, f64) -> u64,
@@ -192,7 +194,7 @@ where
                     start_time,
                     coeffs,
                     duration: duration_f32,
-                    motor_mask: 0,
+                    motor_mask,
                     _reserved: [0; 3],
                 },
                 host_secs,

@@ -42,6 +42,7 @@ fn seg_x_move() -> ShapedSegment {
         followers: vec![],
         t_start: 0.0,
         t_end: 1.0,
+        motor_mask: 0,
     }
 }
 
@@ -112,6 +113,7 @@ fn corexy_x_slot_is_x_plus_y() {
         followers: vec![],
         t_start: 0.0,
         t_end: 1.0,
+        motor_mask: 0,
     };
 
     let msgs = enqueue_segment(
@@ -210,6 +212,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         followers: vec![],
         t_start: 0.0,
         t_end: 0.2,
+        motor_mask: 0,
     };
 
     let msgs = enqueue_segment(
@@ -277,6 +280,7 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
         followers: vec![],
         t_start: 0.0,
         t_end: total,
+        motor_mask: 0,
     };
 
     let msgs = enqueue_segment(
@@ -335,6 +339,7 @@ fn motion_constant_motion_merges_only_the_constant_run() {
         followers: vec![],
         t_start: 0.0,
         t_end: 5.0 * dur,
+        motor_mask: 0,
     };
 
     let msgs = enqueue_segment(
@@ -403,6 +408,7 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
         followers: vec![],
         t_start: 0.0,
         t_end: 4.0 * dur,
+        motor_mask: 0,
     };
 
     let msgs = enqueue_segment(
@@ -477,6 +483,7 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
         followers: vec![],
         t_start: 0.0,
         t_end: total,
+        motor_mask: 0,
     };
 
     let max_piece = 0.025_f64;
@@ -551,6 +558,7 @@ fn nonzero_curve_base_preserves_host_times() {
         followers: vec![],
         t_start: U_BASE,
         t_end: U_BASE + total,
+        motor_mask: 0,
     };
 
     let t0 = 100.0;
@@ -643,4 +651,58 @@ fn follower_lanes_never_pass_through_the_spatial_matrix() {
         seg_axes[3],
         "follower lane 3 must be the raw source curve, untouched by the spatial matrix"
     );
+}
+
+fn test_mcu_configs_one_axis(axis: usize) -> Vec<McuAxisConfig> {
+    vec![McuAxisConfig {
+        mcu_id: 1,
+        axes: vec![axis],
+        kinematics: 1,
+        caps: McuCaps {
+            total_piece_memory: 62 * 1024,
+        },
+    }]
+}
+
+fn test_shaped_segment_single_axis(axis: usize, motor_mask: u8) -> ShapedSegment {
+    let mut axes: Vec<_> = (0..=axis)
+        .map(|i| {
+            if i == axis {
+                linear_axis(0.0, 10.0)
+            } else {
+                linear_axis(0.0, 0.0)
+            }
+        })
+        .collect();
+    if axes.len() < 3 {
+        while axes.len() < 3 {
+            axes.push(linear_axis(0.0, 0.0));
+        }
+    }
+    ShapedSegment {
+        axes,
+        followers: vec![],
+        t_start: 0.0,
+        t_end: 1.0,
+        motor_mask,
+    }
+}
+
+#[test]
+fn enqueue_stamps_motor_mask_onto_every_piece() {
+    let seg = test_shaped_segment_single_axis(2, 0b0000_0010);
+    let cfgs = test_mcu_configs_one_axis(2);
+    let msgs = enqueue_segment(
+        &seg,
+        &cfgs,
+        0.0,
+        true,
+        0.0,
+        0.25,
+        |_id, s| (s * 1e6) as u64,
+        None,
+    );
+    let all_pieces: Vec<_> = msgs.iter().flat_map(|m| m.pieces.iter()).collect();
+    assert!(!all_pieces.is_empty());
+    assert!(all_pieces.iter().all(|(p, _)| p.motor_mask == 0b0000_0010));
 }

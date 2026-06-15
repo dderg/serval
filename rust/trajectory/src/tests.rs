@@ -47,6 +47,7 @@ fn shaped_segment_carries_registry_indexed_tracks() {
         followers: vec![],
         t_start: 0.0,
         t_end: 1.0,
+        motor_mask: 0,
     };
     assert_eq!(seg.axes.len(), 4);
 }

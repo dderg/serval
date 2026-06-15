@@ -75,6 +75,8 @@ pub struct ShapedSegment {
     pub followers: Vec<geometry::segment::FollowerDemand>,
     pub t_start: f64,
     pub t_end: f64,
+    /// 0 => normal full-axis move. Single bit i set => overlay on motor i.
+    pub motor_mask: u8,
 }
 
 #[derive(Debug, thiserror::Error)]
