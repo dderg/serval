@@ -552,6 +552,15 @@ def test_set_position_without_homing_axes_keeps_dirty():
     assert kin.parked_dirty_axes() == [2]
 
 
+def test_clear_homing_state_clears_parked_dirty():
+    kin = _homed_cartesian_with_servo_z()
+    kin._handle_motor_off(0.0)
+    assert kin.parked_dirty_axes() == [2]
+    kin.clear_homing_state([2])
+    assert kin.parked_dirty_axes() == []
+    assert kin.limits[2] == (1.0, -1.0)
+
+
 def test_clear_parked_dirty_subset():
     kin = _homed_cartesian_with_servo_z()
     kin._parked_dirty = [True, False, True]

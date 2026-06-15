@@ -285,6 +285,7 @@ class _LinearKinematics:
         for i in (0, 1, 2):
             if i in axes:
                 self.limits[i] = (1.0, -1.0)
+                self._parked_dirty[i] = False
 
     def get_status(self, eventtime):
         from . import gcode as gcode_mod
