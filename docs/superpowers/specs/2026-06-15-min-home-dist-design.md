@@ -96,19 +96,22 @@ structured_log.event("homing", "needs_rehome",
     ...)                                                    # msg contains "needs rehome: True/False"
 
 if needs_rehome:
-    overshoot = final_pos[axis] - trip_pos[axis]
-    homed = _homed_axis_position(provider, axis, trip_pos, final_pos, trigger_height)
-    set_position(... axis = homed ...)                      # frame for the back-off move
-    retractpos[axis] -= direction * min_home_dist + overshoot
-    toolhead.move(retractpos, hi.retract_speed); wait_moves()
-    if endstop still tripped (query_trip_state):           # resolves homing.py:425 TODO
-        raise gcmd.error("%s endstop still triggered after retract — stuck/miswired?")
+    # Work in the REAL motion frame, not the configured-endstop frame: the
+    # suspect trip is NOT trusted to be the true endstop, so we must not
+    # declare trigger_height yet. Inform the toolhead of its actual halt
+    # position (like mainline's haltpos), then back off relative to the trip.
+    haltpos = list(toolhead.get_position()); haltpos[axis] = final_pos[axis]
+    toolhead.set_position(haltpos, homing_axes=[axis])
+    backoff = list(toolhead.get_position())
+    backoff[axis] = trip_pos[axis] - direction * min_home_dist
+    toolhead.move(backoff, hi.retract_speed); wait_moves()
     start_pos = toolhead.get_position()
     trip_pos, final_pos = approach(speed, 2 * min_home_dist)  # guarded; bounded, mainline parity
     traveled = abs(trip_pos[axis] - start_pos[axis])
-    if early(traveled):
-        raise gcmd.error("%s early homing trigger: traveled %.2fmm < min_home_dist "
-                         "%.2fmm on re-approach")
+    if early(traveled):                                     # resolves homing.py:425 TODO
+        raise gcmd.error("%s early homing trigger: endstop tripped after only "
+                         "%.2fmm on re-approach (min_home_dist %.2fmm) — false "
+                         "trigger or stuck/miswired endstop")
 
 # --- shared tail (single path for both rehome and no-rehome) ---
 overshoot = final_pos[axis] - trip_pos[axis]
@@ -131,13 +134,20 @@ Notes:
   EtherCAT axes get torque-reduced trips and following-error detection on the
   re-approach too. Factor the single-approach body into a helper invoked once or
   twice.
-- The intermediate `set_position` before the back-off establishes the toolhead's
-  frame (the trigger position) so the back-off `toolhead.move` is well-defined —
-  consistent with how the no-rehome path already informs the toolhead of its
-  position after a trip.
-- **Fail loudly** (per CLAUDE.md): a still-short re-approach and a
-  still-triggered endstop after back-off both raise `gcmd.error`; no silent
-  recovery.
+- **Real-frame back-off (critical).** The suspect first trip is NOT declared as
+  `trigger_height`. We `set_position(final_pos)` (actual reconstructed halt, the
+  motion frame the trip was measured in) and back off relative to `trip_pos`
+  (`backoff[axis] = trip_pos[axis] - direction*min_home_dist`). `trigger_height`
+  is declared only in the shared tail, after a *validated* trip. Declaring the
+  configured endstop coordinate off a bogus trigger would make the back-off move
+  the wrong distance.
+- **Fail loudly** (per CLAUDE.md): a still-short re-approach raises
+  `gcmd.error`; no silent recovery. This is the *universal* guard — a
+  stuck/held-closed endstop insta-trips on the re-approach (`traveled ≈ 0`), so
+  it falls under the same too-short failure. We deliberately do **not** add a
+  type-specific live-pin / latch query (latch stays set from the first trip
+  until re-arm; live-pin state is meaningless for sensorless/virtual endstops),
+  which would not be uniform across endstop types.
 
 ### 4. EtherCAT seed ordering — unchanged, made explicit
 
@@ -153,24 +163,51 @@ intermediate back-off retract. Because the seed lives in the shared tail after
 the rehome branch, this is automatic; the spec makes it explicit and a test
 guards it.
 
+## Scope & assumptions
+
+`min_home_dist` is a safety check for a suspect trigger that is **near the true
+endstop** — head parked on/against the switch at `G28`, or an early sensorless
+stall on acceleration. The re-approach is bounded to `2 × min_home_dist`, which
+reaches the real endstop only if it lies within ~`min_home_dist` of the suspect
+trigger. A genuine *mid-travel* false trigger far from the endstop is **out of
+scope**: the re-approach will exhaust its bound and fail loudly with the existing
+"no trigger within travel" error (or a position-limit error on the back-off).
+This matches mainline's implicit assumption and is the intended fail-loud
+behavior, not a regression.
+
 ## Testing
 
-- **Happy path (already written):**
-  `tools/sim_klippy/tests/test_homing_lag_repro.py::test_homing_retract_and_rehome`
-  (`needs_elf` sim) — `min_home_dist=15`, early trip, expects `"needs rehome:
-  True"` in klippy.log and a successful `G28`. `structured_log.event` routes
-  through Python logging (`kalico.event` logger → klippy.log), so the `msg`
-  string satisfies the grep.
-- **Decision logic (new unit test file):** early / not-early / tolerance-boundary
-  (`traveled` within 0.5mm of `min_home_dist` → not early) / `min_home_dist = 0`
-  disabled. Tested-code/test separation per CLAUDE.md.
-- **Fail path (new sim test):** endstop trips early on *both* approaches → `G28`
-  raises the "early homing trigger ... on re-approach" error.
-- **Still-triggered-after-retract (new sim test):** endstop held closed across
-  the back-off → raises "still triggered after retract".
-- **Seed ordering (new test):** in the rehome case, `finalize_homed_axis` is
-  called once and its position argument equals the post-final-retract toolhead
-  position (not the back-off-retract position, not a pre-retract position).
+Semantic correctness lives in **deterministic host unit tests** (exact control of
+per-approach trigger distances); the ELF sim test is an integration smoke. This
+split is deliberate: the time-based GPIO sim cannot place the re-approach trigger
+by distance precisely enough to test the 0.5mm tolerance boundary without races.
+
+- **Decision logic — unit (`test/test_homing_min_dist.py`, new):** pure
+  `_trigger_too_early(traveled, min_home_dist, tolerance)`: early / not-early /
+  tolerance-boundary (`min_home_dist−traveled` just below vs. at the tolerance) /
+  `min_home_dist = 0` disabled.
+- **Rehome orchestration — unit (same file):** drive `_run_homing_attempts` with
+  an injected `approach` callable and a fake toolhead: (a) not-early → no rehome,
+  approach called once, returns first trip; (b) early-then-legit → rehome, returns
+  second trip, back-off move recorded relative to `trip_pos`; (c) early-then-early
+  → raises; (d) `min_home_dist = 0` → never rehomes.
+- **Seed ordering — unit (same file):** `_commit_and_seed` with a fake
+  toolhead/bridge: `finalize_homed_axis` is called once and its position argument
+  equals the **post-final-retract** toolhead position (asserting the value pins
+  the ordering — a pre-retract call would carry the homed, not retracted,
+  coordinate); `servo_handle = None` → not called.
+- **Integration smoke — ELF sim (`tools/sim_klippy/tests/test_homing_lag_repro.py`):**
+  rework to match the new semantics —
+  - `test_homing_retract_timing` gets its **own** override with `min_home_dist=0`
+    (it tests retract timing only; sharing `min_home_dist=15` would make its
+    held-high pin rehome-then-fail).
+  - `test_homing_retract_and_rehome`: model a real switch — the control thread
+    **releases** the GPIO as the head backs off and **re-triggers** it near the
+    endstop, so the re-approach completes legitimately; assert `"needs rehome:
+    True"` in klippy.log (the `kalico.event` logger routes there) and a fast,
+    successful `G28` (guards the original lag/deadlock bug).
+  - Add a fail-path sim case: GPIO held high across the back-off → re-approach
+    insta-trips → `G28` errors with "early homing trigger ... on re-approach".
 
 ## Out of scope
 
