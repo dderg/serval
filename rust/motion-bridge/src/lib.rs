@@ -24,6 +24,8 @@ pub mod motion_history;
 #[doc(hidden)]
 pub mod motion_node;
 #[doc(hidden)]
+pub mod nudge;
+#[doc(hidden)]
 pub mod planner;
 #[doc(hidden)]
 pub mod position_query;
