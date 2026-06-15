@@ -1,3 +1,5 @@
+pub mod deadline;
+
 pub mod limits;
 pub use limits::{
     AxisSet, LimitSet, Limits, LimitsError, MAX_AXES, MAX_LIMIT_SETS, N_SPATIAL, kappa_set,

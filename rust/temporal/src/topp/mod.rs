@@ -147,7 +147,8 @@ pub(crate) fn schedule_chain_with_refreeze_cap(
         ToleranceMode::Fast => call_slp(1e-5)?,
         ToleranceMode::Auto => {
             let (fast_result, fast_outcome) = call_slp(1e-5)?;
-            if solver_outcome_is_success(&fast_result, &fast_outcome) {
+            if solver_outcome_is_success(&fast_result, &fast_outcome) || crate::deadline::expired()
+            {
                 (fast_result, fast_outcome)
             } else {
                 solver::counters::mark_auto_second_pass();
@@ -193,6 +194,9 @@ fn solve_with_refreeze(
         let drift = follower::refreeze_drift(&windows, &r2.b, scaled);
         last_worst = follower::max_windowed_ratio(&windows, scaled, &r2.b, &r2.a);
         if drift < follower::REFREEZE_DRIFT_TOL && last_worst <= 1.0 + solver::SLP9_EPS_FEAS {
+            return Ok((r2, o2));
+        }
+        if crate::deadline::expired() && last_worst <= 1.0 + solver::SLP9_EPS_FEAS {
             return Ok((r2, o2));
         }
         for (f, n) in b_freeze.iter_mut().zip(&r2.b) {

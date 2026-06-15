@@ -552,14 +552,19 @@ fn run_loop(
                 }
 
                 let replan_start = Instant::now();
-                let report = match state.append_and_replan(m.segment, &thread_state.replan_ctx) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::error!(subsystem = "motion", event = "move_arm_error", phase = "append_and_replan", error = ?e, "Move arm: append_and_replan failed");
-                        fatal(&PlannerError::Shape(e));
+                let solve_deadline = replan_start + Duration::from_micros(REPLAN_WARN_BUDGET_US);
+                let report = {
+                    let _deadline = temporal::deadline::scope(Some(solve_deadline));
+                    match state.append_and_replan(m.segment, &thread_state.replan_ctx) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::error!(subsystem = "motion", event = "move_arm_error", phase = "append_and_replan", error = ?e, "Move arm: append_and_replan failed");
+                            fatal(&PlannerError::Shape(e));
+                        }
                     }
                 };
                 let replan_us = replan_start.elapsed().as_micros() as u64;
+                let deadline_limited = replan_us >= REPLAN_WARN_BUDGET_US;
                 let emit_start = Instant::now();
                 let drained = match state.emit_committed(&thread_state.emit_ctx()) {
                     Ok(out) => out,
@@ -644,6 +649,27 @@ fn run_loop(
 
                 binding_acc.record(&binding, state.t_appended);
                 binding_acc.maybe_rollup(Instant::now(), &limit_names);
+
+                {
+                    let fields =
+                        crate::binding_report::anytime_event_fields(&binding, &limit_names);
+                    tracing::info!(
+                        subsystem = "motion",
+                        event = "replan_anytime",
+                        gap = fields.gap,
+                        limiter_limit = %fields.limiter_limit,
+                        limiter_derivative = fields.limiter_derivative,
+                        limiter_via_pa = fields.limiter_via_pa,
+                        binding_ratio = fields.binding_ratio,
+                        converged = !deadline_limited,
+                        deadline_limited,
+                        refine_iters = beta_iters,
+                        total_time_s = state.t_appended - prior_t_appended,
+                        solve_us,
+                        window_segments,
+                        "anytime temporal replan"
+                    );
+                }
 
                 for s in &drained {
                     if let Err(detail) = dispatch(s) {

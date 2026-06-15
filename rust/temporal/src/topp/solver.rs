@@ -1154,6 +1154,15 @@ pub(crate) fn slp_solve_chain(
     let b_cut_floor = scale.to_scaled_b(SLP_B_CUT_FLOOR);
 
     for outer in 1..=SLP_MAX_OUTER_ITERS {
+        if crate::deadline::expired() {
+            return Ok((
+                best_result,
+                SlpOutcome::Diverged {
+                    last_max_ratio: best_ratio_so_far,
+                    outer_iters: outer - 1,
+                },
+            ));
+        }
         cuts.clear();
         let mut added = 0_usize;
         for i in 1..n - 1 {
@@ -1271,6 +1280,15 @@ fn run_slp9_loop(
 
     for outer in 1..=SLP9_MAX_OUTER_ITERS {
         let global_outer = outer_iters_already + outer;
+        if crate::deadline::expired() {
+            return Ok(Slp9LoopOutcome::Done(
+                best_result,
+                SlpOutcome::Diverged {
+                    last_max_ratio: best_ratio,
+                    outer_iters: path_outer_iters + global_outer - 1,
+                },
+            ));
+        }
         if global_outer == SLP9_WARN_AT_ITER {
             eprintln!(
                 "slp9_chain warning: per-axis SLP not converged at iter {global_outer} \
@@ -1450,6 +1468,30 @@ fn seed_feasible_point(
     (uniform_ratio <= 1.0).then_some(uniform)
 }
 
+/// Always-available feasibility floor for the anytime path. Uniformly
+/// time-dilates an MVC-respecting base iterate until every constraint-family
+/// ratio sits at or below the kinematic limit, with zero Clarabel solves.
+///
+/// `base` must already satisfy the velocity / accel / centripetal cones (the
+/// path-jerk SLP iterate does — it only ever adds jerk cuts, never relaxing the
+/// SOCP cones), so `damp_profile_uniform` lowers `b,a` monotonically and drives
+/// jerk down as `λ³`, the fastest-shrinking family. Returns `None` only when
+/// even full dilation cannot reach `ratio ≤ 1` — a genuine infeasibility that
+/// must never be laundered into a feasible-looking profile.
+///
+/// The damped seed starts slower than the committed boundary (`b[0]` is scaled),
+/// which is strictly safe: slower start, lower accel/jerk demand. The streaming
+/// boundary logic clamps the dispatched front downward only, so a slower floor
+/// start never violates the committed past.
+fn feasibility_floor(
+    base: &SolverResult,
+    chain: &crate::topp::chain::ChainGrid,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
+) -> Option<SolverResult> {
+    let current_ratio = max_axis_ratio_chain(base, chain, windows);
+    seed_feasible_point(base, chain, windows, current_ratio)
+}
+
 const SLP9_POLISH_MAX_ITERS: u32 = 12;
 const SLP9_POLISH_MIN_GAIN: f64 = 1e-6;
 const SLP9_POLISH_MAX_BACKTRACKS: u32 = 6;
@@ -1619,6 +1661,46 @@ fn recover_speed_from_seed(
     Ok((polished, polished_ratio))
 }
 
+/// Anytime exit reconciliation. When the SLP stopped early on a deadline and
+/// the best iterate it holds is not yet feasible, substitute the feasibility
+/// floor (feasible by construction). Leaves a genuine, non-time-budget failure
+/// untouched so it still maps to a non-success status and fails loud:
+///
+/// - already feasible → unchanged (the ample-deadline / normal path is bit-identical).
+/// - infeasible, deadline NOT expired → unchanged (genuine SLP failure, fail loud).
+/// - infeasible, deadline expired, floor exists → ship the floor as `Diverged`,
+///   which `map_status` maps to a feasible `SolvedInexact` success.
+/// - infeasible, deadline expired, floor `None` → unchanged (genuine
+///   infeasibility — never laundered into a feasible-looking profile).
+fn ship_feasible_or_floor(
+    result: SolverResult,
+    outcome: SlpOutcome,
+    chain: &crate::topp::chain::ChainGrid,
+    windows: Option<&crate::topp::follower::FollowerWindows>,
+) -> (SolverResult, SlpOutcome) {
+    let ratio = max_axis_ratio_chain(&result, chain, windows);
+    if ratio <= 1.0 + SLP9_EPS_FEAS || !crate::deadline::expired() {
+        return (result, outcome);
+    }
+    match feasibility_floor(&result, chain, windows) {
+        Some(floor) => {
+            counters::mark_restoration();
+            let outer_iters = match outcome {
+                SlpOutcome::Diverged { outer_iters, .. } => outer_iters,
+                _ => 0,
+            };
+            (
+                floor,
+                SlpOutcome::Diverged {
+                    last_max_ratio: 1.0,
+                    outer_iters,
+                },
+            )
+        }
+        None => (result, outcome),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn slp_solve_with_axis_jerk_chain(
     bundle: &ConstraintBundle,
@@ -1646,11 +1728,19 @@ fn slp_solve_with_axis_jerk_chain_inner(
 ) -> Result<(SolverResult, SlpOutcome), SolverSetupError> {
     let (path_result, path_outcome) = slp_solve_chain(bundle, tol, scale)?;
 
+    if matches!(path_outcome, SlpOutcome::InnerSolverFailure) {
+        return Ok((path_result, path_outcome));
+    }
     if matches!(
         path_outcome,
-        SlpOutcome::InnerSolverFailure | SlpOutcome::Diverged { .. } | SlpOutcome::MaxIters { .. }
+        SlpOutcome::Diverged { .. } | SlpOutcome::MaxIters { .. }
     ) {
-        return Ok((path_result, path_outcome));
+        return Ok(ship_feasible_or_floor(
+            path_result,
+            path_outcome,
+            chain,
+            windows,
+        ));
     }
 
     debug_assert_eq!(chain.s.len(), path_result.b.len());
@@ -1685,7 +1775,9 @@ fn slp_solve_with_axis_jerk_chain_inner(
         SLP9_RHO_A_MAX,
     )?;
     match loop_outcome {
-        Slp9LoopOutcome::Done(result, outcome) => Ok((result, outcome)),
+        Slp9LoopOutcome::Done(result, outcome) => {
+            Ok(ship_feasible_or_floor(result, outcome, chain, windows))
+        }
         Slp9LoopOutcome::TrFloorStall {
             best_result,
             best_ratio,
