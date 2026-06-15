@@ -55,3 +55,9 @@ fn backward_jump_while_late_reanchors_silently() {
         "t0_new={t0_new}"
     );
 }
+
+#[test]
+fn default_lead_is_quarter_second_and_shared_with_planner() {
+    assert_eq!(super::DEFAULT_LEAD_SECS, 0.25);
+    assert_eq!(crate::planner::lead_secs(), super::DEFAULT_LEAD_SECS);
+}

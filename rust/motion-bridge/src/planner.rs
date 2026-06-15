@@ -15,8 +15,12 @@ use trajectory::streaming::{EmitContext, ReplanContext, ReplanReport, ShaperStat
 
 const T_IDLE: Duration = Duration::from_secs(3600);
 
-/// Must equal `anchor::DEFAULT_LEAD_SECS`. Keep in sync with anchor.rs.
-const LEAD: f64 = 0.25;
+const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
+
+#[cfg(test)]
+pub(crate) fn lead_secs() -> f64 {
+    LEAD
+}
 
 const SAFETY_MARGIN: f64 = 0.2;
 
