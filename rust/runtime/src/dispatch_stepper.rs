@@ -121,6 +121,7 @@ pub fn dispatch_axis(
     sample_period_sec: f32,
     sample_start_cycles: u32,
     cycles_per_second: f32,
+    overlay_just_armed: bool,
 ) {
     let _ = v_end;
 
@@ -141,6 +142,7 @@ pub fn dispatch_axis(
             sample_period_sec,
             sample_start_cycles,
             cycles_per_second,
+            overlay_just_armed,
         ),
         m if m == StepMode::Phase as u8 => {
             bump_relaxed(&shared.isr_phase_call_count);
@@ -164,6 +166,7 @@ fn dispatch_pulse(
     sample_period_sec: f32,
     sample_start_cycles: u32,
     cycles_per_second: f32,
+    overlay_just_armed: bool,
 ) {
     bump_relaxed(&shared.isr_pulse_call_count);
     let microstep_distance = axis.microstep_distance;
@@ -208,6 +211,13 @@ fn dispatch_pulse(
         Some(stepper) => stepper.overlay_step_frame.store(v, Ordering::Release),
     };
 
+    if overlay_just_armed {
+        if let Some(idx) = overlay_motor_idx {
+            if let Some(stepper) = axis.steppers.get(idx) {
+                stepper.overlay_step_frame.store(0, Ordering::Release);
+            }
+        }
+    }
     let prev_step_count = load_step_frame(axis);
     #[allow(clippy::cast_possible_truncation)]
     let target_step_count = libm::roundf(p_end / microstep_distance) as i32;

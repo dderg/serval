@@ -72,6 +72,7 @@ fn dispatch_pulse_honors_motor_mask() {
             /* sample_period_sec */ 25e-6,
             /* sample_start_cycles */ 1_000,
             /* cycles_per_second */ 520_000_000.0,
+            /* overlay_just_armed */ false,
         );
 
         let enq = q.tail.wrapping_sub(q.head);
@@ -114,6 +115,7 @@ fn dispatch_pulse_honors_motor_mask() {
             /* sample_period_sec */ 25e-6,
             /* sample_start_cycles */ 1_000,
             /* cycles_per_second */ 520_000_000.0,
+            /* overlay_just_armed */ false,
         );
 
         assert_eq!(q.tail, q.head, "no steps for a multi-bit mask");
@@ -149,6 +151,7 @@ fn pulse_zero_motion_no_steps_scheduled() {
         /* sample_period_sec */ 25e-6,
         /* sample_start_cycles */ 0,
         /* cycles_per_second */ 520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(q.tail, q.head, "no steps should be enqueued");
@@ -179,6 +182,7 @@ fn pulse_positive_motion_enqueues_n_steps() {
         /* sample_period_sec */ 25e-6,
         /* sample_start_cycles */ 1_000,
         /* cycles_per_second */ 520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     let enq = q.tail.wrapping_sub(q.head);
@@ -210,6 +214,7 @@ fn pulse_below_displacement_threshold_uses_uniform_fallback() {
         /* sample_period_sec */ 25e-6,
         /* sample_start_cycles */ 0,
         /* cycles_per_second */ 520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     let enq = q.tail.wrapping_sub(q.head);
@@ -236,6 +241,7 @@ fn phase_mode_updates_coil_state_no_queue_writes() {
         /* sample_period_sec */ 25e-6,
         /* sample_start_cycles */ 0,
         /* cycles_per_second */ 520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(q.tail, q.head, "phase mode must not enqueue step pulses");
@@ -275,6 +281,7 @@ fn phase_mode_ramps_offset_toward_target_at_max_per_sample() {
             /* sample_period_sec */ 25e-6,
             /* sample_start_cycles */ 0,
             /* cycles_per_second */ 520_000_000.0,
+            /* overlay_just_armed */ false,
         );
         assert_eq!(
             axis.steppers[0]
@@ -311,6 +318,7 @@ fn phase_mode_ramp_disabled_when_max_per_sample_is_zero() {
         /* sample_period_sec */ 25e-6,
         /* sample_start_cycles */ 0,
         /* cycles_per_second */ 520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(
@@ -344,6 +352,7 @@ fn phase_mode_honors_phase_offset() {
         /* sample_period_sec */ 25e-6,
         /* sample_start_cycles */ 0,
         /* cycles_per_second */ 520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(
@@ -384,6 +393,7 @@ fn unknown_step_mode_raises_fault() {
         /* sample_period_sec */ 25e-6,
         /* sample_start_cycles */ 0,
         /* cycles_per_second */ 520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(

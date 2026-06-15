@@ -184,3 +184,140 @@ fn overlay_uses_own_step_frame_not_axis_frame() {
         "overlay must still step its targeted motor"
     );
 }
+
+struct OverlayHarness {
+    engine: Engine,
+    storage: Vec<PieceEntry>,
+    shared: SharedState,
+    q: Box<StepQueue>,
+    overlay_axis: usize,
+    next_start: u64,
+    last_motor_idx: usize,
+    last_signed_steps: i32,
+}
+
+impl OverlayHarness {
+    fn new_single_motor(mstep_mm: f32) -> Self {
+        let axis = 2usize;
+        let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+        let storage = vec![
+            PieceEntry {
+                start_time: 0,
+                coeffs: [0.0; 4],
+                duration: 0.0,
+                motor_mask: 0,
+                _reserved: [0; 3]
+            };
+            TEST_TOTAL_RING_PIECES
+        ];
+        let bindings = [
+            StepperBindingRust {
+                stepper_oid: 10,
+                tmc_cs_oid: TMC_CS_OID_NONE,
+                _pad: [0; 2],
+            },
+            StepperBindingRust {
+                stepper_oid: 11,
+                tmc_cs_oid: TMC_CS_OID_NONE,
+                _pad: [0; 2],
+            },
+        ];
+        let rc = engine.configure_axis(
+            axis as u8,
+            StepMode::Pulse,
+            mstep_mm,
+            64,
+            &bindings,
+            TEST_TOTAL_RING_PIECES,
+        );
+        assert_eq!(rc, KALICO_OK);
+
+        let mut q = Box::new(StepQueue::new());
+        let mut qs: [*mut StepQueue; MAX_AXES] = [core::ptr::null_mut(); MAX_AXES];
+        qs[axis] = q.as_mut();
+        engine.test_install_step_queues(qs);
+
+        Self {
+            engine,
+            storage,
+            shared: SharedState::new(),
+            q,
+            overlay_axis: axis,
+            next_start: TICK_CYCLES,
+            last_motor_idx: 1,
+            last_signed_steps: 0,
+        }
+    }
+
+    fn arm_overlay_piece(&mut self, motor_idx: usize, delta_mm: f32) {
+        let mask: u8 = 1u8 << motor_idx;
+        let piece = moving_piece(self.next_start, delta_mm, mask);
+        assert_eq!(
+            self.engine
+                .push_pieces(self.overlay_axis as u8, &[piece], &mut self.storage),
+            KALICO_OK
+        );
+        self.last_motor_idx = motor_idx;
+    }
+
+    #[allow(unsafe_code)]
+    fn run_piece_collect_signed_steps(&mut self) -> i32 {
+        let before = self.position_count(self.last_motor_idx);
+        let ticks = (0.01 * TICK_CLOCK_FREQ as f32) as u64 / TICK_CYCLES + 2;
+        for n in 0..=ticks {
+            self.engine.tick(
+                self.next_start + n * TICK_CYCLES,
+                &self.shared,
+                &mut self.storage,
+            );
+            let q_ptr: *mut StepQueue = self.q.as_mut();
+            // SAFETY: host test queue, sole consumer here.
+            while unsafe { queue_pop(q_ptr) }.is_some() {}
+        }
+        self.next_start += (ticks + 1) * TICK_CYCLES;
+        assert_eq!(self.shared.last_error.load(Ordering::Acquire), 0);
+        let after = self.position_count(self.last_motor_idx);
+        self.last_signed_steps = after - before;
+        self.last_signed_steps
+    }
+
+    fn position_count(&self, motor_idx: usize) -> i32 {
+        self.engine.stepping_axes[self.overlay_axis]
+            .as_ref()
+            .unwrap()
+            .steppers[motor_idx]
+            .position_count
+            .load(Ordering::Acquire)
+    }
+
+    fn p_prev(&self) -> f32 {
+        self.engine.stepping_axes[self.overlay_axis]
+            .as_ref()
+            .unwrap()
+            .p_prev
+    }
+}
+
+#[test]
+fn overlay_piece_resets_frame_at_arm_and_emits_round_delta() {
+    let mut h = OverlayHarness::new_single_motor(0.01);
+    h.arm_overlay_piece(1, 0.50);
+    let s1 = h.run_piece_collect_signed_steps();
+    assert_eq!(s1, 50);
+    h.arm_overlay_piece(1, 0.50);
+    let s2 = h.run_piece_collect_signed_steps();
+    assert_eq!(s2, 50, "second piece must reset frame and emit +50, not 0");
+    assert_eq!(h.position_count(1), 100);
+    assert_eq!(h.p_prev(), 0.0);
+}
+
+#[test]
+fn symmetric_buzz_nets_position_count_to_zero() {
+    let mut h = OverlayHarness::new_single_motor(0.01);
+    h.arm_overlay_piece(1, 0.50);
+    h.run_piece_collect_signed_steps();
+    h.arm_overlay_piece(1, -0.50);
+    h.run_piece_collect_signed_steps();
+    assert_eq!(h.position_count(1), 0);
+    assert_eq!(h.p_prev(), 0.0);
+}

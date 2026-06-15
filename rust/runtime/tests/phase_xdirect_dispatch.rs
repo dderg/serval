@@ -76,6 +76,7 @@ fn phase_dispatch_records_correct_coils_for_motor_0() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     let records = test_xdirect_capture::drain();
@@ -121,6 +122,7 @@ fn phase_dispatch_resolves_motor_idx_from_slot_table() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     let records = test_xdirect_capture::drain();
@@ -171,6 +173,7 @@ fn phase_dispatch_no_capture_for_pulse_only_stepper() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     let records = test_xdirect_capture::drain();
@@ -226,6 +229,7 @@ fn phase_dispatch_two_steppers_two_captures() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     let records = test_xdirect_capture::drain();
@@ -270,6 +274,7 @@ fn phase_dispatch_at_phase_zero() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     let records = test_xdirect_capture::drain();
@@ -303,6 +308,7 @@ fn phase_dispatch_empty_slot_table_latches_phase_motor_unmapped() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     let records = test_xdirect_capture::drain();

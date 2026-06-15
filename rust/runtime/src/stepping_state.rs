@@ -75,6 +75,7 @@ pub struct AxisState {
     pub last_step_count: i32,
     pub p_prev: f32,
     pub v_prev: f32,
+    pub overlay_last_p: f32,
 }
 
 impl AxisState {
@@ -88,6 +89,7 @@ impl AxisState {
             last_step_count: 0,
             p_prev: 0.0,
             v_prev: 0.0,
+            overlay_last_p: 0.0,
         }
     }
 
@@ -96,6 +98,7 @@ impl AxisState {
         self.last_step_count = 0;
         self.p_prev = 0.0;
         self.v_prev = 0.0;
+        self.overlay_last_p = 0.0;
     }
 }
 

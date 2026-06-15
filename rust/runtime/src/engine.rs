@@ -301,13 +301,14 @@ impl Engine {
         let mut active = false;
 
         for i in 0..(self.num_axes as usize) {
-            let (p_end, v_end, p_sample_start) = {
+            let (p_end, v_end, p_sample_start, overlay_just_armed) = {
                 let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
                     continue;
                 };
                 let cps = self.cycles_per_second;
                 let fault = SharedFaultSink { shared };
-                match crate::motion_core::get_position_and_velocity(
+                let mut just_armed = false;
+                match crate::motion_core::get_position_and_velocity_armed(
                     &mut axis.armed,
                     &mut axis.ring,
                     storage,
@@ -316,22 +317,31 @@ impl Engine {
                     cps,
                     i,
                     &fault,
+                    &mut just_armed,
                 ) {
                     Some((p_end, v_end)) => {
                         active = true;
-                        let p_sample_start = axis.p_prev;
-                        if axis.ring.peek(storage).map_or(0, |p| p.motor_mask) == 0 {
+                        let is_overlay = axis.ring.peek(storage).map_or(0, |p| p.motor_mask) != 0;
+                        if is_overlay {
+                            if just_armed {
+                                axis.overlay_last_p = 0.0;
+                            }
+                            let p_sample_start = axis.overlay_last_p;
+                            axis.overlay_last_p = p_end;
+                            (p_end, v_end, p_sample_start, just_armed)
+                        } else {
+                            let p_sample_start = axis.p_prev;
                             axis.p_prev = p_end;
                             axis.v_prev = v_end;
+                            (p_end, v_end, p_sample_start, false)
                         }
-                        (p_end, v_end, p_sample_start)
                     }
                     None => {
                         if !idle_phase_slew_pending(axis) {
                             continue;
                         }
                         active = true;
-                        (axis.p_prev, 0.0, axis.p_prev)
+                        (axis.p_prev, 0.0, axis.p_prev, false)
                     }
                 }
             };
@@ -355,12 +365,13 @@ impl Engine {
                     sample_period_sec,
                     now_lo,
                     self.cycles_per_second,
+                    overlay_just_armed,
                 );
             }
 
             #[cfg(not(feature = "motion-module-stepper"))]
             {
-                let _ = (p_end, v_end, p_sample_start);
+                let _ = (p_end, v_end, p_sample_start, overlay_just_armed);
             }
         }
 
