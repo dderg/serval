@@ -5,9 +5,8 @@
 # stage and everything after it re-executes on a rebuild.
 #
 #   toolchain   apt packages + Rust toolchain  (changes: never)
-#   rust-deps   cargo dep graph compiled       (changes: Cargo.lock)
-#   rust-build  workspace crates compiled      (changes: rust/ source)
-#   firmware    C firmware ELFs + chelper      (changes: src/, klippy/)
+#   rust-build  motion-bridge cdylib           (cache-mounted target/+registry)
+#   firmware    C firmware ELFs + chelper      (cache-mounted per-MCU OUT)
 #   runtime     final image — no build tools   (changes: klippy/, tools/)
 
 # --------------------------------------------------------------------
@@ -48,109 +47,41 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # --------------------------------------------------------------------
-# Stage 2 — rust-deps
-# Copies only the Cargo manifests and stubs every crate with a minimal
-# source file so `cargo build` can download and compile all external
-# dependencies without touching workspace source. This layer is
-# invalidated only when Cargo.lock changes, not when .rs files change.
+# Stage 2 — rust-build
+# Builds the motion-bridge cdylib. BuildKit cache mounts persist the cargo
+# registry and the compiled target/ across builds (in the BuildKit daemon,
+# not the image), so a rebuild after a source edit recompiles only the
+# crates that changed instead of the whole workspace + dep graph. The
+# target cache is keyed by SIM_CACHE_KEY (branch) so two branches building
+# in parallel get independent caches; the registry is content-addressed and
+# safe to share concurrently. The built .so is copied out of the (ephemeral)
+# cache mount into a real layer path so the runtime stage can COPY --from it.
 # --------------------------------------------------------------------
-FROM toolchain AS rust-deps
+FROM toolchain AS rust-build
+
+ARG SIM_CACHE_KEY=default
 
 WORKDIR /kalico/rust
-
-COPY rust/Cargo.toml rust/Cargo.lock /kalico/rust/
-
-# Copy each member's Cargo.toml into place, then stub its source.
-# Members with [[bin]] targets need a src/main.rs; lib-only members
-# need a src/lib.rs. cdylib crates (motion-bridge) also need lib.rs.
-COPY rust/nurbs/Cargo.toml              /kalico/rust/nurbs/Cargo.toml
-COPY rust/kalico-c-api/Cargo.toml       /kalico/rust/kalico-c-api/Cargo.toml
-COPY rust/gcode/Cargo.toml              /kalico/rust/gcode/Cargo.toml
-COPY rust/geometry/Cargo.toml           /kalico/rust/geometry/Cargo.toml
-COPY rust/temporal/Cargo.toml           /kalico/rust/temporal/Cargo.toml
-COPY rust/trajectory/Cargo.toml         /kalico/rust/trajectory/Cargo.toml
-COPY rust/runtime/Cargo.toml            /kalico/rust/runtime/Cargo.toml
-COPY rust/kalico-host-rt/Cargo.toml     /kalico/rust/kalico-host-rt/Cargo.toml
-COPY rust/compat/Cargo.toml             /kalico/rust/compat/Cargo.toml
-COPY rust/motion-bridge/Cargo.toml      /kalico/rust/motion-bridge/Cargo.toml
-COPY rust/kalico-native-transport/Cargo.toml /kalico/rust/kalico-native-transport/Cargo.toml
-COPY rust/kalico-protocol/Cargo.toml    /kalico/rust/kalico-protocol/Cargo.toml
-
-# Stub every crate. lib-only crates get src/lib.rs; crates with [[bin]]
-# also get src/main.rs (compat, kalico-c-api). kalico-c-api has an
-# additional bin at src/bin/gen_headers.rs.
-RUN set -e; \
-    for crate in nurbs gcode geometry temporal trajectory runtime \
-                 kalico-host-rt motion-bridge kalico-native-transport \
-                 kalico-protocol; do \
-        mkdir -p /kalico/rust/$crate/src; \
-        echo "" > /kalico/rust/$crate/src/lib.rs; \
-    done; \
-    mkdir -p /kalico/rust/compat/src; \
-    echo "" > /kalico/rust/compat/src/lib.rs; \
-    echo "fn main() {}" > /kalico/rust/compat/src/main.rs; \
-    mkdir -p /kalico/rust/kalico-c-api/src/bin; \
-    echo "" > /kalico/rust/kalico-c-api/src/lib.rs; \
-    echo "fn main() {}" > /kalico/rust/kalico-c-api/src/main.rs; \
-    echo "fn main() {}" > /kalico/rust/kalico-c-api/src/bin/gen_headers.rs
-
-# Compile dependencies only. The stubs make cargo resolve the full dep
-# graph but produce no real code. Errors from stub compilation are
-# expected and intentionally suppressed; we only care that dep crates
-# are compiled and cached in /root/.cargo and the target directory.
-RUN cargo build -p motion-bridge --release 2>&1 || true
-# Wipe stub artifacts so the real build in rust-build starts clean for
-# workspace crates, but leaves dep artifacts untouched. Both the compiled
-# outputs AND the .fingerprint entries must go — stale fingerprints make
-# cargo believe the stub output is still valid and skip recompilation.
-RUN set -e; \
-    for pat in \
-        libmotion_bridge libkalico libnurbs libgcode libgeometry \
-        libtemporal libtrajectory libruntime libcompat \
-        libkalico_host_rt libkalico_native_transport libkalico_protocol; do \
-        rm -f /kalico/rust/target/release/${pat}*; \
-    done; \
-    for pat in \
-        motion_bridge kalico nurbs gcode geometry \
-        temporal trajectory runtime compat \
-        kalico_host_rt kalico_native_transport kalico_protocol; do \
-        rm -f /kalico/rust/target/release/deps/${pat}* \
-              /kalico/rust/target/release/deps/lib${pat}*; \
-    done; \
-    rm -rf /kalico/rust/target/release/.fingerprint/nurbs-* \
-           /kalico/rust/target/release/.fingerprint/gcode-* \
-           /kalico/rust/target/release/.fingerprint/geometry-* \
-           /kalico/rust/target/release/.fingerprint/temporal-* \
-           /kalico/rust/target/release/.fingerprint/trajectory-* \
-           /kalico/rust/target/release/.fingerprint/runtime-* \
-           /kalico/rust/target/release/.fingerprint/kalico-host-rt-* \
-           /kalico/rust/target/release/.fingerprint/kalico-c-api-* \
-           /kalico/rust/target/release/.fingerprint/compat-* \
-           /kalico/rust/target/release/.fingerprint/motion-bridge-* \
-           /kalico/rust/target/release/.fingerprint/kalico-native-transport-* \
-           /kalico/rust/target/release/.fingerprint/kalico-protocol-*
-
-# --------------------------------------------------------------------
-# Stage 3 — rust-build
-# Copies the real Rust source and builds motion-bridge for real.
-# Only workspace-local crates are recompiled; all external deps are
-# already in the cache from stage 2.
-# --------------------------------------------------------------------
-FROM rust-deps AS rust-build
 
 COPY rust/ /kalico/rust/
 COPY tools/kalico-sim/patches/patch_rust_traces.py /tmp/patch_rust_traces.py
 RUN python3 /tmp/patch_rust_traces.py /kalico/rust/motion-bridge/src/bridge.rs
 
-RUN cd /kalico/rust && \
-    cargo build -p motion-bridge --release 2>&1 | tail -20
+RUN --mount=type=cache,target=/kalico/rust/target,id=rust-target-${SIM_CACHE_KEY},sharing=locked \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    cargo build -p motion-bridge --release && \
+    mkdir -p /artifacts && \
+    cp /kalico/rust/target/release/libmotion_bridge_native.so /artifacts/
 
 # --------------------------------------------------------------------
-# Stage 4 — firmware
+# Stage 3 — firmware
 # Builds the two MACH_LINUX ELFs (H7, F4), the libvtime shims, and
 # the klippy chelper .so. Completely independent of Rust source.
 # --------------------------------------------------------------------
 FROM toolchain AS firmware
+
+ARG SIM_CACHE_KEY=default
 
 WORKDIR /kalico
 
@@ -160,7 +91,15 @@ COPY src/ /kalico/src/
 COPY lib/ /kalico/lib/
 COPY scripts/ /kalico/scripts/
 COPY klippy/ /kalico/klippy/
-COPY tools/ /kalico/tools/
+# Only the parts of tools/ the firmware build actually touches — deliberately
+# NOT the volatile runner.py / emulators. Copying all of tools/ here meant a
+# one-character edit to runner.py invalidated this layer and forced a full
+# firmware (H7 + F4 + chelper) rebuild on every Python-only change.
+COPY tools/check_async_event_registration.py /kalico/tools/check_async_event_registration.py
+COPY tools/kalico-sim/libvtime/ /kalico/tools/kalico-sim/libvtime/
+COPY tools/kalico-sim/configs/ /kalico/tools/kalico-sim/configs/
+COPY tools/kalico-sim/patches/ /kalico/tools/kalico-sim/patches/
+COPY tools/sim_klippy/ /kalico/tools/sim_klippy/
 
 # Build shims (libvtime.so + libsim_intercept.so)
 RUN make -C tools/kalico-sim/libvtime
@@ -173,28 +112,45 @@ RUN bash tools/kalico-sim/patches/fix_linux_build.sh /kalico
 
 RUN mkdir -p /sim_elfs
 
-# Build H7 MACH_LINUX ELF
-RUN set -e; \
+# Build H7 MACH_LINUX ELF.
+#
+# Each MCU builds into its own OUT dir (out-h7/, out-f4/) so the two configs
+# never share object/descriptor state — this replaces the old `make clean`
+# (needed only because both built into a shared out/) and lets each MCU's
+# objects persist in a BuildKit cache mount for incremental rebuilds. The
+# cache is keyed by SIM_CACHE_KEY (branch) so parallel branch builds stay
+# isolated. Both MCUs are MACH_LINUX sim builds with identical Rust features,
+# so they share one target-linux cache for the kalico-c-api staticlib (built
+# by src/Makefile into rust/target-linux/) — no per-MCU thrash, and H7 (which
+# runs first) keeps its cache warm across builds instead of rebuilding cold.
+RUN --mount=type=cache,target=/kalico/out-h7,id=fw-h7-${SIM_CACHE_KEY},sharing=locked \
+    --mount=type=cache,target=/kalico/rust/target-linux,id=fw-rust-linux-${SIM_CACHE_KEY},sharing=locked \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    set -e; \
     if [ -f tools/sim_klippy/configs/h7-sim.config ]; then \
         cp tools/sim_klippy/configs/h7-sim.config .config; \
     else \
         cp tools/kalico-sim/configs/h7-sim.config .config; \
     fi; \
-    make olddefconfig 2>/dev/null || true; \
-    make clean && make -j$(nproc); \
-    cp out/klipper.elf /sim_elfs/klipper-h7-sim.elf
+    make olddefconfig OUT=out-h7/ 2>/dev/null || true; \
+    make -j$(nproc) OUT=out-h7/; \
+    cp out-h7/klipper.elf /sim_elfs/klipper-h7-sim.elf
 
-# Build F4 MACH_LINUX ELF
-RUN set -e; \
+# Build F4 MACH_LINUX ELF (independent OUT dir; shares the target-linux
+# c-api cache with H7 — same MACH_LINUX features, so no thrash).
+RUN --mount=type=cache,target=/kalico/out-f4,id=fw-f4-${SIM_CACHE_KEY},sharing=locked \
+    --mount=type=cache,target=/kalico/rust/target-linux,id=fw-rust-linux-${SIM_CACHE_KEY},sharing=locked \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    set -e; \
     if [ -f tools/sim_klippy/configs/f4-sim.config ]; then \
         cp tools/sim_klippy/configs/f4-sim.config .config; \
     else \
         cp tools/kalico-sim/configs/f4-sim.config .config; \
     fi; \
-    make olddefconfig 2>/dev/null || true; \
-    make clean && make -j$(nproc); \
-    cp out/klipper.elf /sim_elfs/klipper-f4-sim.elf; \
-    cp out/klipper.dict /sim_elfs/klipper.dict
+    make olddefconfig OUT=out-f4/ 2>/dev/null || true; \
+    make -j$(nproc) OUT=out-f4/; \
+    cp out-f4/klipper.elf /sim_elfs/klipper-f4-sim.elf; \
+    cp out-f4/klipper.dict /sim_elfs/klipper.dict
 
 # Build klippy chelper .so
 RUN cd klippy && python3 chelper/__init__.py
@@ -207,7 +163,7 @@ RUN mkdir -p tools/sim_klippy/printer_real/third_party_repos; \
     fi
 
 # --------------------------------------------------------------------
-# Stage 5 — runtime (final image)
+# Stage 4 — runtime (final image)
 # No build toolchain. Copies only the artifacts and Python sources
 # needed to run the simulator.
 # --------------------------------------------------------------------
@@ -255,7 +211,7 @@ COPY --from=firmware \
 
 # Overlay motion_bridge_native.so on top of the Python source copy.
 COPY --from=rust-build \
-    /kalico/rust/target/release/libmotion_bridge_native.so \
+    /artifacts/libmotion_bridge_native.so \
     /kalico/klippy/motion_bridge_native.so
 
 # Copy third-party plugins fetched during the firmware stage (may not exist).
