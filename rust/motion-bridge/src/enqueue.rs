@@ -191,6 +191,12 @@ where
             for k in 0..4 {
                 coeffs[k] = sub_coeffs[k] as f32;
             }
+            if motor_mask != 0 {
+                let b0 = coeffs[0];
+                for c in &mut coeffs {
+                    *c -= b0;
+                }
+            }
             let duration_f32 = *sub_dur as f32;
 
             let margin_us = (host_secs - host_now) * 1e6;

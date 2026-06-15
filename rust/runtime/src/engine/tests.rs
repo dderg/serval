@@ -384,19 +384,137 @@ fn symmetric_buzz_nets_position_count_to_zero() {
 }
 
 #[test]
-fn overlay_arms_from_its_start_even_when_late_and_emits_full_delta() {
-    // A +1.0mm overlay (mstep 0.01mm → 100 steps) whose scheduled start is
-    // already 40% elapsed when it arms. Old behavior (seed-to-target): moves
-    // short (only 60% of steps). Older (reset-to-0 without clock re-anchor):
-    // fires ~40 steps in one sample (-310 fault). New: first sample = 0, full
-    // 100 steps over the piece.
-    let mut h = OverlayHarness::new_single_motor(0.01);
-    let r = h.run_overlay_piece_armed_late(
-        /*motor_idx=*/ 1, /*delta_mm=*/ 1.0, /*late_by_fraction=*/ 0.4,
-    );
-    assert_eq!(r.first_sample_steps, 0, "arm tick emits 0 steps (no jump)");
+fn overlay_multi_piece_no_sample_exceeds_max_steps() {
+    // Reproduces the crash: a 3-piece overlay whose cumulative curve means the
+    // decel chunk's b0 was ~0.998mm (non-relativized).  With relativization
+    // (Part A) each piece starts at 0 and each piece's per-sample step count
+    // must never exceed MAX_STEPS_PER_SAMPLE.
+    //
+    // Pieces (mstep=0.01mm, 100 msteps/mm):
+    //   accel: 0 → 0.08mm (8 steps over 8ms)
+    //   cruise: 0 → 0.84mm (84 steps over 84ms)
+    //   decel: 0 → 0.08mm (8 steps over 8ms)
+    // Without relativization the decel piece arrives with b0≈0.92mm → 92 steps
+    // in the first sample → -310 fault.
+    use crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE;
+
+    let mstep: f32 = 0.01;
+    let axis_idx = 2usize;
+    let mask: u8 = 0b0000_0010;
+
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    let mut storage = vec![
+        PieceEntry {
+            start_time: 0,
+            coeffs: [0.0; 4],
+            duration: 0.0,
+            motor_mask: 0,
+            _reserved: [0; 3],
+        };
+        TEST_TOTAL_RING_PIECES
+    ];
+    let bindings = [
+        StepperBindingRust {
+            stepper_oid: 10,
+            tmc_cs_oid: TMC_CS_OID_NONE,
+            _pad: [0; 2],
+        },
+        StepperBindingRust {
+            stepper_oid: 11,
+            tmc_cs_oid: TMC_CS_OID_NONE,
+            _pad: [0; 2],
+        },
+    ];
     assert_eq!(
-        r.cumulative_steps, 100,
-        "plays full delta from its start, not short"
+        engine.configure_axis(
+            axis_idx as u8,
+            StepMode::Pulse,
+            mstep,
+            64,
+            &bindings,
+            TEST_TOTAL_RING_PIECES
+        ),
+        KALICO_OK
+    );
+
+    let mut q = StepQueue::new();
+    let mut qs: [*mut StepQueue; MAX_AXES] = [core::ptr::null_mut(); MAX_AXES];
+    qs[axis_idx] = &mut q;
+    engine.test_install_step_queues(qs);
+    let shared = SharedState::new();
+
+    // Relativized pieces: each starts at 0, ends at its own span.
+    // These represent the 3 chunks of a 1mm trapezoid nudge.
+    let mk_piece = |start: u64, span: f32, dur: f32| PieceEntry {
+        start_time: start,
+        coeffs: [0.0_f32, 0.0, span, span],
+        duration: dur,
+        motor_mask: mask,
+        _reserved: [0; 3],
+    };
+
+    let accel_dur = 0.008_f32;
+    let cruise_dur = 0.084_f32;
+    let decel_dur = 0.008_f32;
+    let t0 = TICK_CYCLES;
+    let accel_cycles = (accel_dur * TICK_CLOCK_FREQ as f32) as u64;
+    let cruise_cycles = (cruise_dur * TICK_CLOCK_FREQ as f32) as u64;
+    let decel_cycles = (decel_dur * TICK_CLOCK_FREQ as f32) as u64;
+
+    let accel_piece = mk_piece(t0, 0.08, accel_dur);
+    let cruise_piece = mk_piece(t0 + accel_cycles, 0.84, cruise_dur);
+    let decel_piece = mk_piece(t0 + accel_cycles + cruise_cycles, 0.08, decel_dur);
+
+    assert_eq!(
+        engine.push_pieces(
+            axis_idx as u8,
+            &[accel_piece, cruise_piece, decel_piece],
+            &mut storage
+        ),
+        KALICO_OK
+    );
+
+    let total_cycles = accel_cycles + cruise_cycles + decel_cycles;
+    let ticks = total_cycles / TICK_CYCLES + 4;
+
+    let mut max_steps_in_sample: u32 = 0;
+    let stepper_before = engine.stepping_axes[axis_idx].as_ref().unwrap().steppers[1]
+        .position_count
+        .load(Ordering::Acquire);
+
+    for n in 0..=ticks {
+        let before = engine.stepping_axes[axis_idx].as_ref().unwrap().steppers[1]
+            .position_count
+            .load(Ordering::Acquire);
+        engine.tick(t0 + n * TICK_CYCLES, &shared, &mut storage);
+        let after = engine.stepping_axes[axis_idx].as_ref().unwrap().steppers[1]
+            .position_count
+            .load(Ordering::Acquire);
+        let steps_this_sample = (after - before).unsigned_abs();
+        if steps_this_sample > max_steps_in_sample {
+            max_steps_in_sample = steps_this_sample;
+        }
+        let q_ptr: *mut StepQueue = &mut q;
+        #[allow(unsafe_code)]
+        while unsafe { queue_pop(q_ptr) }.is_some() {}
+    }
+
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        0,
+        "no -310 StepsPerSampleExceeded fault must fire for relativized overlay pieces"
+    );
+    assert!(
+        max_steps_in_sample <= MAX_STEPS_PER_SAMPLE as u32,
+        "max steps in any single sample must be ≤ {MAX_STEPS_PER_SAMPLE}, got {max_steps_in_sample}"
+    );
+
+    let stepper_after = engine.stepping_axes[axis_idx].as_ref().unwrap().steppers[1]
+        .position_count
+        .load(Ordering::Acquire);
+    let total_steps = stepper_after - stepper_before;
+    assert_eq!(
+        total_steps, 100,
+        "total steps across all 3 pieces must equal 100 (1mm / 0.01mm/step), got {total_steps}"
     );
 }

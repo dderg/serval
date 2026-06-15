@@ -84,7 +84,7 @@ pub fn get_position_and_velocity_armed<F: FaultSink>(
     // always holds (tail advances mod ring_depth). Therefore `slot <
     // storage.len()`.
     #[allow(clippy::indexing_slicing)]
-    let p = arm_and_load(armed, &storage[slot], cycles_per_second, now);
+    let p = arm_and_load(armed, &storage[slot], cycles_per_second);
     *just_armed = true;
     crate::isr_phase::monomial_account(crate::isr_phase::cyccnt().wrapping_sub(mono_start));
 
@@ -139,20 +139,13 @@ fn arm_and_load<'a>(
     armed: &'a mut Option<ArmedPiece>,
     entry: &PieceEntry,
     cycles_per_second: f32,
-    now: u64,
 ) -> &'a ArmedPiece {
     let (mono, vel) = entry.to_monomial();
-    let (piece_start_cycles, piece_end_cycles) = if entry.motor_mask != 0 {
-        let duration_cycles = (entry.duration * cycles_per_second) as u64;
-        (now, now + duration_cycles)
-    } else {
-        (entry.start_time, entry.end_time(cycles_per_second))
-    };
     armed.insert(ArmedPiece {
         mono_coeffs: mono,
         vel_coeffs: vel,
-        piece_start_cycles,
-        piece_end_cycles,
+        piece_start_cycles: entry.start_time,
+        piece_end_cycles: entry.end_time(cycles_per_second),
     })
 }
 

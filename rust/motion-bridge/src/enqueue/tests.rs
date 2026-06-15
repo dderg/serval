@@ -737,6 +737,151 @@ fn nudge_target_config_isolates_one_mcu_and_one_axis() {
 }
 
 #[test]
+fn overlay_pieces_are_relativized_to_start_at_zero() {
+    // A curve whose first piece starts at b0=0.5mm (non-zero) must be shifted
+    // so the emitted coeffs[0]==0 and the span (coeffs[3]-coeffs[0]) equals
+    // the original Bernstein displacement.  A normal piece (motor_mask==0) must
+    // be emitted with its absolute coefficients unchanged.
+    let b0 = 0.5_f64;
+    let b3 = 0.6_f64;
+    let bern: [f64; 4] = [b0, b0 + (b3 - b0) / 3.0, b0 + 2.0 * (b3 - b0) / 3.0, b3];
+    let piece = nurbs::bezier::BezierPiece::from_bernstein(&bern, 0.0_f64, 0.5_f64);
+    let curve = nurbs::bezier::bezier_pieces_to_nurbs(&[piece]);
+
+    let make_seg = |motor_mask: u8| ShapedSegment {
+        axes: vec![curve.clone(), linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
+        followers: vec![],
+        t_start: 0.0,
+        t_end: 0.5,
+        motor_mask,
+    };
+
+    let cfg = axis_cfg_single(0);
+
+    let overlay_msgs = enqueue_segment(
+        &make_seg(0b0000_0001),
+        &cfg,
+        0.0,
+        true,
+        0.0,
+        crate::pump::MAX_LEAD_SECS,
+        |_, hs| (hs * 1e9) as u64,
+        None,
+    );
+    let overlay_piece = &overlay_msgs[0].pieces[0].0;
+    assert!(
+        overlay_piece.coeffs[0].abs() < 1e-6,
+        "overlay piece must start at 0, got {}",
+        overlay_piece.coeffs[0]
+    );
+    let span = overlay_piece.coeffs[3] - overlay_piece.coeffs[0];
+    let expected_span = (b3 - b0) as f32;
+    assert!(
+        (span - expected_span).abs() < 1e-5,
+        "overlay span must equal original displacement {expected_span}, got {span}"
+    );
+
+    let normal_msgs = enqueue_segment(
+        &make_seg(0),
+        &cfg,
+        0.0,
+        true,
+        0.0,
+        crate::pump::MAX_LEAD_SECS,
+        |_, hs| (hs * 1e9) as u64,
+        None,
+    );
+    let normal_piece = &normal_msgs[0].pieces[0].0;
+    assert!(
+        (normal_piece.coeffs[0] - b0 as f32).abs() < 1e-5,
+        "normal piece must keep absolute b0={b0}, got {}",
+        normal_piece.coeffs[0]
+    );
+    assert!(
+        (normal_piece.coeffs[3] - b3 as f32).abs() < 1e-5,
+        "normal piece must keep absolute b3={b3}, got {}",
+        normal_piece.coeffs[3]
+    );
+}
+
+#[test]
+fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
+    // A 3-piece overlay representing a trapezoid: the cumulative curve goes
+    // 0→accel_end→accel_end+cruise→total, so each later piece's b0 is large.
+    // After relativization every piece starts at 0 and its coeffs[3] equals
+    // its own span only.
+    let accel_end = 0.2_f64;
+    let cruise_span = 0.6_f64;
+    let decel_span = 0.2_f64;
+
+    let mk = |p0: f64, p1: f64, dur: f64| {
+        let d = p1 - p0;
+        let bern = [p0, p0 + d / 3.0, p0 + 2.0 * d / 3.0, p1];
+        nurbs::bezier::BezierPiece::from_bernstein(&bern, 0.0_f64, dur)
+    };
+
+    let accel = mk(0.0, accel_end, 0.1);
+    let cruise = mk(accel_end, accel_end + cruise_span, 0.2);
+    let decel = mk(
+        accel_end + cruise_span,
+        accel_end + cruise_span + decel_span,
+        0.1,
+    );
+
+    let mut u = 0.0_f64;
+    let pieces_with_u: Vec<nurbs::bezier::BezierPiece<f64>> =
+        [(accel, 0.1_f64), (cruise, 0.2), (decel, 0.1)]
+            .iter()
+            .map(|(bp, dur)| {
+                let p = nurbs::bezier::BezierPiece::from_bernstein(&bp.to_bernstein(), u, u + dur);
+                u += dur;
+                p
+            })
+            .collect();
+    let curve = nurbs::bezier::bezier_pieces_to_nurbs(&pieces_with_u);
+
+    let seg = ShapedSegment {
+        axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
+        followers: vec![],
+        t_start: 0.0,
+        t_end: 0.4,
+        motor_mask: 0b0000_0001,
+    };
+
+    let cfg = axis_cfg_single(0);
+    let msgs = enqueue_segment(
+        &seg,
+        &cfg,
+        0.0,
+        true,
+        0.0,
+        crate::pump::MAX_LEAD_SECS,
+        |_, hs| (hs * 1e9) as u64,
+        None,
+    );
+    let all_pieces: Vec<_> = msgs.iter().flat_map(|m| m.pieces.iter()).collect();
+    assert_eq!(all_pieces.len(), 3, "trapezoid must yield 3 pieces");
+
+    let spans: Vec<f32> = all_pieces
+        .iter()
+        .map(|(p, _)| p.coeffs[3] - p.coeffs[0])
+        .collect();
+    let expected = [accel_end as f32, cruise_span as f32, decel_span as f32];
+
+    for (i, (got, &exp)) in spans.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - exp).abs() < 1e-5,
+            "piece {i} span must be {exp}, got {got}"
+        );
+        let b0 = all_pieces[i].0.coeffs[0];
+        assert!(
+            b0.abs() < 1e-6,
+            "piece {i} must start at 0 (relativized), got b0={b0}"
+        );
+    }
+}
+
+#[test]
 fn nudge_segment_through_restricted_config_emits_single_axis_only() {
     // A masked segment (curve on axis 2) restricted to the F446 (axes [2]) must
     // produce pieces ONLY for axis 2 — not the constant-0 axes 0/1 — and only
