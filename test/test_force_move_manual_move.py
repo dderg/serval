@@ -73,7 +73,7 @@ def make_force_move(enabled=True, return_toolhead=False, max_axis_accel=3000.0):
 
 def test_manual_move_raises_when_motor_disabled():
     fm = make_force_move(enabled=False)
-    with pytest.raises(Exception):
+    with pytest.raises(CommandError):
         fm.manual_move("stepper_z1", 0.5, 5.0, 100.0)
 
 
@@ -91,3 +91,20 @@ def test_manual_move_defaults_accel_when_zero():
     )
     fm.manual_move("stepper_z1", 0.5, 5.0, 0.0)
     assert toolhead.last_nudge["accel"] == pytest.approx(3000.0)
+
+
+def test_manual_move_accepts_stepper_object():
+    fm, toolhead = make_force_move(enabled=True, return_toolhead=True)
+
+    class FakeStepper:
+        def get_name(self):
+            return "stepper_z1"
+
+    fm.manual_move(FakeStepper(), 0.5, 5.0, 100.0)
+    assert toolhead.last_nudge["motor_idx"] == 1
+
+
+def test_manual_move_passes_negative_accel_through():
+    fm, toolhead = make_force_move(enabled=True, return_toolhead=True)
+    fm.manual_move("stepper_z1", 0.5, 5.0, -10.0)
+    assert toolhead.last_nudge["accel"] == pytest.approx(-10.0)
