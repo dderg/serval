@@ -12,9 +12,7 @@ excellent results with just a few minutes of time. No special probing
 hardware is necessary.
 
 Ultimately, the delta calibration is dependent on the precision of the
-tower endstop switches. If one is using Trinamic stepper motor drivers
-then consider enabling [endstop phase](Endstop_Phase.md) detection to
-improve the accuracy of those switches.
+tower endstop switches.
 
 ## Automatic vs manual probing
 

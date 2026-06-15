@@ -308,9 +308,21 @@ class Motion:
             accel = min(p, t)
         self.set_accel(accel)
 
+    def resync_parked_servos(self):
+        dirty = self.kin.parked_dirty_axes()
+        if not dirty:
+            return
+        measured = self.bridge.query_motor_positions()
+        newpos = list(self.commanded_pos)
+        for axis in dirty:
+            newpos[axis] = measured["xyz"[axis]][0]
+        self.set_position(newpos)
+        self.kin.clear_parked_dirty(dirty)
+
     def move(self, newpos, speed):
         # The bridge replaces the lookahead, but Move/kin/extruder validation
         # (unhomed, range checks) must still run before the move is issued.
+        self.resync_parked_servos()
         move = Move(self, self.commanded_pos, newpos, speed)
         if not move.move_d:
             return
@@ -347,6 +359,7 @@ class Motion:
         # interior_control_points: list of [x, y, z] interior CPs to range-check
         #   (P0=start and the endpoint are covered by the endpoint check below).
         # submit(dx, dy, dz, de, feedrate): bridge call carrying the curve params.
+        self.resync_parked_servos()
         move = Move(self, self.commanded_pos, newpos, speed)
         if move.is_kinematic_move:
             self.kin.check_move(move)
