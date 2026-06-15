@@ -2,9 +2,10 @@ use super::*;
 use kalico_native_transport::demux::{Demuxer, Frame};
 use kalico_native_transport::frame::decode_frame;
 use kalico_protocol::messages::{
-    RestoreDriveLimitsResponse, ResumeStreamResponse, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDriveLimits, SetDriveLimitsResponse, SlaveState, SlaveStatus,
-    StartCapture, StartCaptureResponse, StopCaptureResponse, StopResponse,
+    MotorStateResponse, RestoreDriveLimitsResponse, ResumeStreamResponse, SdoRead, SdoReadResponse,
+    SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse, SetDriveLimits,
+    SetDriveLimitsResponse, SlaveState, SlaveStatus, StartCapture, StartCaptureResponse,
+    StopCaptureResponse, StopResponse,
 };
 
 #[test]
@@ -302,6 +303,33 @@ fn drive_limits_response_frames_round_trip() {
 }
 
 #[test]
+fn decodes_seed_servo_home_command() {
+    let msg = SeedServoHome { home_q16: -98_304 };
+    let payload = frame_payload(MessageKind::SeedServoHome, 8, &msg.encoded_to_vec());
+    match decode_command(0, &payload).unwrap() {
+        Command::SeedServoHome {
+            correlation_id: 8,
+            home_q16,
+        } => assert_eq!(home_q16, -98_304),
+        other => panic!("expected SeedServoHome, got {other:?}"),
+    }
+}
+
+#[test]
+fn seed_servo_home_response_frame_round_trips() {
+    let frame = seed_servo_home_response_frame(13, -801);
+    let (chan, payload) = decode_frame(&frame).unwrap();
+    assert_eq!(chan, CHANNEL_CONTROL);
+    let (hdr, body) = decode_message_header(payload).unwrap();
+    assert_eq!(hdr.correlation_id, 13);
+    assert_eq!(
+        MessageKind::from_u16(hdr.kind_raw),
+        Some(MessageKind::SeedServoHomeResponse)
+    );
+    assert_eq!(SeedServoHomeResponse::decode(body).unwrap().result, -801);
+}
+
+#[test]
 fn status_heartbeat_frame_carries_fault_code() {
     let frame = status_heartbeat_frame(1, 0x8611, &[5u32], 0);
     let (_, payload) = decode_frame(&frame).unwrap();
@@ -359,6 +387,51 @@ fn decodes_sdo_write_command() {
         } => assert_eq!(m, msg),
         other => panic!("wrong variant: {other:?}"),
     }
+}
+
+#[test]
+fn decodes_query_motor_state_command() {
+    let payload = frame_payload(MessageKind::QueryMotorState, 55, &[]);
+    match decode_command(0, &payload).unwrap() {
+        Command::QueryMotorState { correlation_id: 55 } => {}
+        other => panic!("expected QueryMotorState, got {other:?}"),
+    }
+}
+
+#[test]
+fn motor_state_response_frame_round_trips() {
+    let pos_mm: f64 = 12.5;
+    let vel_mm_s: f64 = -400.0;
+    let frame = motor_state_response_frame(33, pos_mm, vel_mm_s);
+    let (chan, payload) = decode_frame(&frame).unwrap();
+    assert_eq!(chan, CHANNEL_CONTROL);
+    let (hdr, body) = decode_message_header(payload).unwrap();
+    assert_eq!(hdr.correlation_id, 33);
+    assert_eq!(
+        MessageKind::from_u16(hdr.kind_raw),
+        Some(MessageKind::MotorStateResponse)
+    );
+    let resp = MotorStateResponse::decode(body).unwrap();
+    assert_eq!(resp.motors.len(), 1);
+    let sample = resp.motors[0];
+    assert_eq!(sample.slot, 0);
+    assert_eq!(sample.pos_q16, (pos_mm * 65536.0).round() as i32);
+    assert_eq!(sample.vel_q16, (vel_mm_s * 65536.0).round() as i32);
+}
+
+#[test]
+fn motor_state_empty_frame_round_trips() {
+    let frame = motor_state_empty_frame(34);
+    let (chan, payload) = decode_frame(&frame).unwrap();
+    assert_eq!(chan, CHANNEL_CONTROL);
+    let (hdr, body) = decode_message_header(payload).unwrap();
+    assert_eq!(hdr.correlation_id, 34);
+    assert_eq!(
+        MessageKind::from_u16(hdr.kind_raw),
+        Some(MessageKind::MotorStateResponse)
+    );
+    let resp = MotorStateResponse::decode(body).unwrap();
+    assert!(resp.motors.is_empty());
 }
 
 #[test]

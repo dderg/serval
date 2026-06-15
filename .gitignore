@@ -66,3 +66,5 @@ tools/sim_klippy/printer_real/third_party_repos/
 # Local test-bench notes (passwords, mDNS hostnames, board-specific quirks).
 # Not checked in — they describe physical hardware on a specific desk.
 test-benches/
+
+graphify-out/

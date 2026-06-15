@@ -1191,6 +1191,46 @@ pub mod exports {
     }
 
     #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kalico_runtime_query_motor_state(
+        rt: *mut KalicoRuntime,
+        out_slots: *mut u8,
+        out_pos_q16: *mut i32,
+        out_vel_q16: *mut i32,
+        max: usize,
+    ) -> i32 {
+        use runtime::stepping_state::MAX_AXES;
+        if rt.is_null() || out_slots.is_null() || out_pos_q16.is_null() || out_vel_q16.is_null() {
+            return KALICO_ERR_NULL_PTR;
+        }
+        if !INIT_DONE.load(Ordering::Acquire) {
+            return KALICO_ERR_NOT_INIT;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        unsafe {
+            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+            let engine = &(*isr_ptr).engine;
+            let num = (engine.num_axes as usize).min(MAX_AXES);
+            let mut n = 0usize;
+            for i in 0..num {
+                if n >= max {
+                    break;
+                }
+                if let Some((p, v)) = engine.motor_state(i) {
+                    out_slots.add(n).write(i as u8);
+                    #[allow(clippy::cast_possible_truncation)]
+                    out_pos_q16.add(n).write((p * 65536.0) as i32);
+                    #[allow(clippy::cast_possible_truncation)]
+                    out_vel_q16.add(n).write((v * 65536.0) as i32);
+                    n += 1;
+                }
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let result = n as i32;
+            result
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kalico_runtime_now_ticks(rt: *mut KalicoRuntime) -> u64 {
         if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) {
             return 0;

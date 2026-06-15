@@ -8,6 +8,7 @@ pub mod ffi;
 pub mod mailbox;
 pub mod scale;
 pub mod sdo;
+pub mod seed_home;
 pub mod server;
 pub mod thread_prio;
 pub mod torque;

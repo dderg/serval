@@ -32,6 +32,8 @@ _STUB_MOTION_METHODS = frozenset(
         "init_planner",
         "submit_move",
         "submit_dwell",
+        "submit_bezier",
+        "submit_quadratic",
         "wait_moves",
         "drain_motion",
         "motion_drain_poll",
@@ -60,6 +62,7 @@ _STUB_MOTION_METHODS = frozenset(
         "set_drive_limits",
         "restore_drive_limits",
         "take_drive_fault",
+        "finalize_homed_axis",
         "sdo_read",
         "sdo_write",
     }
@@ -142,6 +145,7 @@ class MotionBridgeWrapper:
         interface,
         endpoint,
         counts_per_mm,
+        rotation_distance,
         velocity_ff,
         dynamics_profile,
         torque_clamp_pct,
@@ -154,6 +158,7 @@ class MotionBridgeWrapper:
             interface,
             endpoint,
             counts_per_mm,
+            rotation_distance,
             velocity_ff,
             dynamics_profile,
             torque_clamp_pct,
@@ -173,6 +178,9 @@ class MotionBridgeWrapper:
 
     def take_drive_fault(self, mcu_handle):
         return self._bridge.take_drive_fault(mcu_handle)
+
+    def finalize_homed_axis(self, mcu_handle, axis, pos_mm):
+        return self._bridge.finalize_homed_axis(mcu_handle, axis, pos_mm)
 
     def set_torque(self, mcu_handle, value, print_time):
         self._bridge.set_torque(mcu_handle, bool(value), print_time)
@@ -390,6 +398,12 @@ class MotionBridgeWrapper:
     def submit_dwell(self, duration_s):
         return self._bridge.submit_dwell(duration_s)
 
+    def submit_bezier(self, i, j, p, q, dx, dy, dz, de, feedrate):
+        return self._bridge.submit_bezier(i, j, p, q, dx, dy, dz, de, feedrate)
+
+    def submit_quadratic(self, i, j, dx, dy, dz, de, feedrate):
+        return self._bridge.submit_quadratic(i, j, dx, dy, dz, de, feedrate)
+
     def set_position(self, x, y, z):
         return self._bridge.set_position(x, y, z, self._reactor.monotonic())
 
@@ -465,3 +479,9 @@ class MotionBridgeWrapper:
         return self._bridge.motion_state_at_clock(
             mcu._bridge_handle, int(clock), self._reactor.monotonic()
         )
+
+    def live_motor_positions(self):
+        return self._bridge.live_motor_positions()
+
+    def query_motor_positions(self, timeout_s=0.25):
+        return self._bridge.query_motor_positions(timeout_s)

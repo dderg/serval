@@ -663,11 +663,11 @@ dependencies = [
  "kalico-native-transport",
  "kalico-protocol",
  "libc",
- "log",
  "runtime",
  "serde",
  "servo-ident",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
@@ -701,8 +701,8 @@ dependencies = [
  "env_logger",
  "kalico-protocol",
  "libc",
- "log",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -814,7 +814,6 @@ name = "motion-bridge"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "compat",
  "crossbeam-channel",
  "gcode",
  "geometry",

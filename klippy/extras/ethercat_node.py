@@ -72,6 +72,7 @@ class EtherCatNode:
             return
         rail = self._find_rail()
         self._counts_per_mm = rail.get_counts_per_mm()
+        rotation_distance = rail.get_rotation_distance()
         velocity_ff, dynamics_profile, ff_torque_clamp = rail.get_ff_config()
         following_error_counts, max_torque_tenth_pct = (
             rail.get_session_drive_limits()
@@ -84,6 +85,7 @@ class EtherCatNode:
                 self.interface,
                 self.endpoint,
                 self._counts_per_mm,
+                rotation_distance,
                 velocity_ff,
                 dynamics_profile,
                 ff_torque_clamp,

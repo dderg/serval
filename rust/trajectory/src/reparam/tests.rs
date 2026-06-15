@@ -1,5 +1,8 @@
 use super::*;
-use temporal::{BindingConstraint, GridSample, GridScheme, SolveStatus, TopProfile};
+use nurbs::VectorNurbs;
+use temporal::{
+    BindingConstraint, BindingSummary, GridSample, GridScheme, SolveStatus, TopProfile,
+};
 
 fn uniform_profile(n: usize, total_length: f64, velocity: f64) -> TopProfile {
     let mut samples = Vec::with_capacity(n);
@@ -20,6 +23,7 @@ fn uniform_profile(n: usize, total_length: f64, velocity: f64) -> TopProfile {
         status: SolveStatus::Solved,
         grid_scheme: GridScheme::UniformArclength,
         total_time,
+        binding: BindingSummary::default(),
     }
 }
 
@@ -69,6 +73,7 @@ fn s_of_t_endpoint_consistency() {
         status: SolveStatus::Solved,
         grid_scheme: GridScheme::UniformArclength,
         total_time: 1.0,
+        binding: BindingSummary::default(),
     };
 
     let s_pieces = build_s_of_t_pieces(&profile, 0.0);
@@ -125,6 +130,7 @@ fn s_of_t_near_zero_handling() {
         status: SolveStatus::Solved,
         grid_scheme: GridScheme::UniformArclength,
         total_time: 100.0,
+        binding: BindingSummary::default(),
     };
 
     let s_pieces = build_s_of_t_pieces(&profile, 0.0);
@@ -191,7 +197,7 @@ fn compose_straight_line_constant_velocity() {
     let profile = uniform_profile(11, table.s_max(), 500.0);
     let s_pieces = build_s_of_t_pieces(&profile, 0.0);
 
-    let composed = compose_segment(&curve, &table.as_view(), &s_pieces, 1e-4).unwrap();
+    let composed = compose_segment(&curve, &table.as_view(), &s_pieces).unwrap();
 
     assert_eq!(composed.len(), s_pieces.pieces.len());
 
@@ -245,7 +251,7 @@ fn compose_diagonal_line() {
 
     let profile = uniform_profile(6, table.s_max(), 250.0);
     let s_pieces = build_s_of_t_pieces(&profile, 0.0);
-    let composed = compose_segment(&curve, &table.as_view(), &s_pieces, 1e-4).unwrap();
+    let composed = compose_segment(&curve, &table.as_view(), &s_pieces).unwrap();
 
     let last = &composed[composed.len() - 1];
     let x_end = last[0].evaluate(last[0].u_end);
@@ -255,4 +261,157 @@ fn compose_diagonal_line() {
     assert!((x_end - 30.0).abs() < 0.5, "x_end = {x_end}, expected ~30");
     assert!((y_end - 40.0).abs() < 0.5, "y_end = {y_end}, expected ~40");
     assert!(z_end.abs() < 1e-6, "z_end = {z_end}, expected ~0");
+}
+
+fn arch() -> VectorNurbs<f64, 3> {
+    VectorNurbs::try_new(
+        3,
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        vec![
+            [150.0, 150.0, 5.0],
+            [150.0, 180.0, 5.0],
+            [200.0, 180.0, 5.0],
+            [200.0, 150.0, 5.0],
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn invert_s_to_u_is_accurate() {
+    let curve = arch();
+    let deriv = nurbs::eval::vector_derivative(&curve);
+    let table = nurbs::arc_length::build_arc_length_table_vector(
+        &curve,
+        super::ARC_TABLE_TOL,
+        super::ARC_TABLE_SAMPLES,
+    )
+    .unwrap();
+    let tv = table.as_view();
+    let reference = nurbs::arc_length::build_arc_length_table_vector(&curve, 1e-10, 16384).unwrap();
+    let rv = reference.as_view();
+
+    for i in 1..20 {
+        let u_true = i as f64 / 20.0;
+        let s = nurbs::arc_length::arc_length_from_param(&rv, u_true);
+        let u_got = super::invert_s_to_u(&tv, &deriv, s, 0).expect("smooth curve must invert");
+        assert!(
+            (u_got - u_true).abs() < 1e-7,
+            "u err at u={u_true}: got {u_got}"
+        );
+        let p_got = nurbs::eval::vector_eval(&curve, u_got);
+        let p_true = nurbs::eval::vector_eval(&curve, u_true);
+        let perr = ((p_got[0] - p_true[0]).powi(2)
+            + (p_got[1] - p_true[1]).powi(2)
+            + (p_got[2] - p_true[2]).powi(2))
+        .sqrt();
+        assert!(perr < 1e-6, "pos err {perr} mm at u={u_true}");
+    }
+}
+
+#[test]
+fn invert_s_to_u_rejects_cusp() {
+    let curve = VectorNurbs::try_new(
+        3,
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+        ],
+    )
+    .unwrap();
+    let deriv = nurbs::eval::vector_derivative(&curve);
+    let table = nurbs::arc_length::build_arc_length_table_vector(
+        &curve,
+        super::ARC_TABLE_TOL,
+        super::ARC_TABLE_SAMPLES,
+    )
+    .unwrap();
+    let tv = table.as_view();
+    let err = super::invert_s_to_u(&tv, &deriv, 1e-6, 3);
+    assert!(matches!(
+        err,
+        Err(crate::ShapeError::ZeroTangent { index: 3, .. })
+    ));
+}
+
+#[test]
+fn fit_position_of_t_tracks_exact_curve() {
+    let curve = arch();
+    let deriv = nurbs::eval::vector_derivative(&curve);
+    let table = nurbs::arc_length::build_arc_length_table_vector(
+        &curve,
+        super::ARC_TABLE_TOL,
+        super::ARC_TABLE_SAMPLES,
+    )
+    .unwrap();
+    let tv = table.as_view();
+    let s_max = tv.s_max();
+
+    // Constant-speed s(t) = s_max * t over t in [0,1] (one piece).
+    let s_of_t = nurbs::bezier::BezierPiece {
+        u_start: 0.0,
+        u_end: 1.0,
+        coeffs: vec![0.0, s_max],
+    };
+
+    let pieces =
+        super::fit_position_of_t(&curve, &deriv, &tv, &s_of_t, 0).expect("smooth curve must fit");
+    assert!(!pieces.is_empty());
+
+    let mut max_err = 0.0_f64;
+    for j in 0..=400 {
+        let t = j as f64 / 400.0;
+        let arr = pieces
+            .iter()
+            .find(|a| t >= a[0].u_start - 1e-12 && t <= a[0].u_end + 1e-12)
+            .unwrap();
+        let got = [arr[0].evaluate(t), arr[1].evaluate(t), arr[2].evaluate(t)];
+        let s = s_of_t.evaluate(t);
+        let u = super::invert_s_to_u(&tv, &deriv, s, 0).unwrap();
+        let truth = nurbs::eval::vector_eval(&curve, u);
+        let e = ((got[0] - truth[0]).powi(2)
+            + (got[1] - truth[1]).powi(2)
+            + (got[2] - truth[2]).powi(2))
+        .sqrt();
+        max_err = max_err.max(e);
+    }
+    assert!(
+        max_err < super::POS_FIT_TOL_MM * 2.0,
+        "max pos err {max_err} mm"
+    );
+
+    let first = &pieces[0];
+    let p0 = [
+        first[0].evaluate(0.0),
+        first[1].evaluate(0.0),
+        first[2].evaluate(0.0),
+    ];
+    let c0 = nurbs::eval::vector_eval(&curve, 0.0);
+    assert!((p0[0] - c0[0]).abs() < 1e-9 && (p0[1] - c0[1]).abs() < 1e-9);
+}
+
+#[test]
+fn fit_position_of_t_rejects_zero_span_piece() {
+    let curve = arch();
+    let deriv = nurbs::eval::vector_derivative(&curve);
+    let table = nurbs::arc_length::build_arc_length_table_vector(
+        &curve,
+        super::ARC_TABLE_TOL,
+        super::ARC_TABLE_SAMPLES,
+    )
+    .unwrap();
+    let tv = table.as_view();
+    let degenerate = nurbs::bezier::BezierPiece {
+        u_start: 0.5,
+        u_end: 0.5,
+        coeffs: vec![10.0, 5.0],
+    };
+    let r = super::fit_position_of_t(&curve, &deriv, &tv, &degenerate, 7);
+    assert!(
+        matches!(r, Err(crate::ShapeError::FitFailure { index: 7, .. })),
+        "zero-span piece must fail loud, got {r:?}"
+    );
 }

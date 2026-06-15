@@ -68,6 +68,20 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         ],
     },
     SchemaMessage {
+        type_tag: 0x0044,
+        name: "QueryMotorState",
+        version: 1,
+        channel: "control",
+        fields: &[],
+    },
+    SchemaMessage {
+        type_tag: 0x0045,
+        name: "MotorStateResponse",
+        version: 1,
+        channel: "control",
+        fields: &[],
+    },
+    SchemaMessage {
         type_tag: 0x0060,
         name: "PushPieces",
         version: 2,
@@ -234,6 +248,24 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x0079,
         name: "ResumeStreamResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x007A,
+        name: "SeedServoHome",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "home_q16", ty: "i32" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x007B,
+        name: "SeedServoHomeResponse",
         version: 1,
         channel: "control",
         fields: &[

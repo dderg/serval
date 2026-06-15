@@ -129,6 +129,12 @@ int32_t kalico_runtime_phase_jog_to(struct KalicoRuntime *rt,
 
 uint32_t kalico_runtime_push_seg_all_unused_lo(struct KalicoRuntime *rt);
 
+int32_t kalico_runtime_query_motor_state(struct KalicoRuntime *rt,
+                                         uint8_t *out_slots,
+                                         int32_t *out_pos_q16,
+                                         int32_t *out_vel_q16,
+                                         uintptr_t max);
+
 int32_t kalico_runtime_reset(struct KalicoRuntime *rt);
 
 int32_t kalico_runtime_seed_position(struct KalicoRuntime *rt,

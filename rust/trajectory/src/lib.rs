@@ -13,6 +13,7 @@ mod shaper;
 mod smooth_fit;
 pub mod streaming;
 
+pub use beta::{ReplanBindingSummary, ReplanWorstBinding};
 pub use emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory, ShapeEmission};
 pub use plan_velocity::{plan_velocity, PlanInput, PlanOutput, PlanSegment, PlanStats, SafetyMode};
 pub use post_processor::{
@@ -97,6 +98,11 @@ pub enum ShapeError {
         index: usize,
         detail: nurbs::AlgebraError,
     },
+    #[error(
+        "segment {index}: zero tangent (cusp) at u={u} — the curve has a stationary \
+         point and is not plannable as a single smooth segment"
+    )]
+    ZeroTangent { index: usize, u: f64 },
     #[error("arc-length table error on segment {index}: {detail}")]
     ArcLength { index: usize, detail: String },
     #[error("empty segment buffer")]

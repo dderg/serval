@@ -296,12 +296,14 @@ impl PassthroughRouter {
         offset: f64,
         last_clock: u64,
     ) -> Result<(), RouterError> {
-        log::info!(
-            "[clock-seed] set_clock_est mcu={:?} freq={:.1} offset={:.9} last_clock={}",
-            mcu,
+        tracing::info!(
+            subsystem = "clocksync",
+            event = "set_clock_est",
+            mcu = ?mcu,
             freq,
             offset,
-            last_clock
+            last_clock,
+            "[clock-seed] set_clock_est"
         );
         let rec = self
             .mcus
@@ -338,16 +340,17 @@ impl PassthroughRouter {
         let bridge_now_instant = instant_to_f64(self.clock.now());
         let bridge_now_raw = crate::clock::monotonic_raw_secs();
         let clock_offset = offset_raw - (bridge_now_raw - bridge_now_instant);
-        log::info!(
-            "[clock-seed] set_clock_est_rebased mcu={:?} freq={:.1} offset_raw={:.9} \
-             bridge_now_raw={:.9} bridge_now_instant={:.9} clock_offset={:.9} last_clock={}",
-            mcu,
+        tracing::info!(
+            subsystem = "clocksync",
+            event = "set_clock_est_rebased",
+            mcu = ?mcu,
             freq,
             offset_raw,
             bridge_now_raw,
             bridge_now_instant,
             clock_offset,
-            last_clock
+            last_clock,
+            "[clock-seed] set_clock_est_rebased"
         );
         let rec = self
             .mcus
@@ -367,13 +370,14 @@ impl PassthroughRouter {
         mcu_at_send: u64,
     ) -> Result<(), RouterError> {
         let clock_offset = instant_to_f64(host_send);
-        log::info!(
-            "[clock-seed] set_clock_est_from_sample mcu={:?} freq={:.1} \
-             clock_offset={:.9} mcu_at_send={}",
-            mcu,
+        tracing::info!(
+            subsystem = "clocksync",
+            event = "set_clock_est_from_sample",
+            mcu = ?mcu,
             freq,
             clock_offset,
-            mcu_at_send
+            mcu_at_send,
+            "[clock-seed] set_clock_est_from_sample"
         );
         let rec = self
             .mcus
@@ -483,15 +487,16 @@ impl PassthroughRouter {
         let delta = (host_time_secs - rec.clock_offset) * rec.clock_freq;
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let projected = rec.last_clock.wrapping_add(delta.max(0.0) as u64);
-        log::trace!(
-            "[project] host_time_to_mcu_clock mcu={:?} host_secs={:.9} clock_offset={:.9} \
-             last_clock={} clock_freq={:.1} result_ns={}",
-            mcu,
+        tracing::trace!(
+            subsystem = "motion",
+            event = "host_time_to_mcu_clock",
+            mcu = ?mcu,
             host_time_secs,
-            rec.clock_offset,
-            rec.last_clock,
-            rec.clock_freq,
-            projected
+            clock_offset = rec.clock_offset,
+            last_clock = rec.last_clock,
+            clock_freq = rec.clock_freq,
+            result_ns = projected,
+            "[project] host_time_to_mcu_clock"
         );
         Ok(projected)
     }
@@ -500,16 +505,23 @@ impl PassthroughRouter {
         let rec = match self.mcus.get(&mcu) {
             Some(r) => r,
             None => {
-                log::warn!("[seg0-deficit] mcu={:?} UNKNOWN", mcu);
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "seg0_deficit_unknown_mcu",
+                    mcu = ?mcu,
+                    "[seg0-deficit] UNKNOWN mcu"
+                );
                 return;
             }
         };
         if rec.clock_freq == 0.0 {
-            log::warn!(
-                "[seg0-deficit] mcu={:?} clock_freq=0 (not yet synced) t0={:.6} seg0_host={:.6}",
-                mcu,
+            tracing::warn!(
+                subsystem = "motion",
+                event = "seg0_deficit_not_synced",
+                mcu = ?mcu,
                 t0,
-                seg0_host_secs
+                seg0_host_secs,
+                "[seg0-deficit] clock_freq=0 (not yet synced)"
             );
             return;
         }
@@ -519,18 +531,20 @@ impl PassthroughRouter {
         let ack_now = self.compute_ack_clock(mcu).unwrap_or(0);
         let deficit_ticks = start_time as i64 - ack_now as i64;
         let deficit_us = (deficit_ticks as f64 / rec.clock_freq) * 1e6;
-        log::warn!(
-            "[seg0-deficit] mcu={:?} freq={:.1} offset={:.6} last_clock={} t0={:.6} seg0_host={:.6} start_time={} ack_now={} deficit_ticks={} deficit_us={:.1} (negative=>in past)",
-            mcu,
-            rec.clock_freq,
-            rec.clock_offset,
-            rec.last_clock,
+        tracing::warn!(
+            subsystem = "motion",
+            event = "seg0_deficit",
+            mcu = ?mcu,
+            freq = rec.clock_freq,
+            offset = rec.clock_offset,
+            last_clock = rec.last_clock,
             t0,
             seg0_host_secs,
             start_time,
             ack_now,
             deficit_ticks,
-            deficit_us
+            deficit_us,
+            "[seg0-deficit] (negative deficit_us => in past)"
         );
     }
 

@@ -748,6 +748,13 @@ impl Engine {
         self.last_motors.get(i).copied().unwrap_or(0.0)
     }
 
+    pub fn motor_state(&self, i: usize) -> Option<(f32, f32)> {
+        self.stepping_axes
+            .get(i)
+            .and_then(|s| s.as_ref())
+            .map(|axis| (axis.p_prev, axis.v_prev))
+    }
+
     pub fn debug_last_timing(&self) -> (u64, u64, u64) {
         (0, 0, 0)
     }

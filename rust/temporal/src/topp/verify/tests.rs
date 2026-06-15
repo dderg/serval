@@ -333,3 +333,68 @@ fn jerk_riding_does_not_mask_accel_violation() {
         report.worst_violation,
     );
 }
+
+#[test]
+fn histogram_counts_are_non_increasing() {
+    let grid = dummy_straight_grid(5, 100.0);
+    let limits = textbook_limits();
+    let chain = chain_of_one(grid, limits);
+    let result = SolverResult {
+        b: vec![10_000.0; 5],
+        a: vec![10_000.0; 5],
+        status: SolverStatus::Solved,
+    };
+    let report = check_chain(&chain, &result);
+    let counts: Vec<u32> = report
+        .binding_summary
+        .histogram
+        .iter()
+        .map(|(_, n)| *n)
+        .collect();
+    assert!(
+        counts.windows(2).all(|w| w[0] >= w[1]),
+        "histogram must be sorted by descending count; got {counts:?}"
+    );
+}
+
+#[test]
+fn histogram_ties_broken_by_constraint_ord() {
+    let grid = dummy_straight_grid(5, 100.0);
+    let limits = textbook_limits();
+    let chain = chain_of_one(grid, limits);
+    let result = SolverResult {
+        b: vec![0.0, 250_000.0, 250_000.0, 250_000.0, 0.0],
+        a: vec![0.0; 5],
+        status: SolverStatus::Solved,
+    };
+    let report = check_chain(&chain, &result);
+    let counts: Vec<u32> = report
+        .binding_summary
+        .histogram
+        .iter()
+        .map(|(_, n)| *n)
+        .collect();
+    assert!(
+        counts.windows(2).all(|w| w[0] >= w[1]),
+        "histogram must be sorted by descending count; got {counts:?}"
+    );
+    let tie_groups: Vec<&[(BindingConstraint, u32)]> = {
+        let h = &report.binding_summary.histogram;
+        let mut groups: Vec<&[(BindingConstraint, u32)]> = Vec::new();
+        let mut start = 0;
+        while start < h.len() {
+            let count = h[start].1;
+            let end = h[start..].partition_point(|(_, n)| *n == count) + start;
+            groups.push(&h[start..end]);
+            start = end;
+        }
+        groups
+    };
+    for group in tie_groups {
+        let constraints: Vec<BindingConstraint> = group.iter().map(|(c, _)| *c).collect();
+        assert!(
+            constraints.windows(2).all(|w| w[0] <= w[1]),
+            "equal-count entries must be sorted by BindingConstraint ord; got {constraints:?}"
+        );
+    }
+}

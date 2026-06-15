@@ -349,12 +349,12 @@ fn rectify_last_move_time(last_move_time_bits: &AtomicU64, delta: f64) -> bool {
             return true;
         }
     }
-    log::debug!(
-        "planner: rectification CAS contended for >{} attempts (delta {} s) — \
-         giving up on this delta; the atomic will reflect the next \
-         caller-side advance only",
-        RECTIFICATION_CAS_MAX_ATTEMPTS,
+    tracing::debug!(
+        subsystem = "motion",
+        event = "rectify_cas_contended",
+        max_attempts = RECTIFICATION_CAS_MAX_ATTEMPTS,
         delta,
+        "planner: rectification CAS contended — giving up on this delta"
     );
     false
 }
@@ -412,14 +412,16 @@ fn run_commit_and_dispatch(
         }
     }
     commit_fire_count.fetch_add(1, Ordering::AcqRel);
-    log::debug!(
-        "[planner-trace] commit drained={} dur_s={:.6} commit_us={} t_app={:.6} t_disp_before={:.6} t_disp_after={:.6}",
-        drained.len(),
-        batch_dur,
-        commit_us,
-        t_app_before,
+    tracing::debug!(
+        subsystem = "motion",
+        event = "commit_trace",
+        drained = drained.len(),
+        dur_s = batch_dur,
+        commit_us = %commit_us,
+        t_app = t_app_before,
         t_disp_before,
-        state.t_dispatched,
+        t_disp_after = state.t_dispatched,
+        "[planner-trace] commit"
     );
 }
 
@@ -454,12 +456,19 @@ fn run_loop(
     commit_fire_count: Arc<AtomicU32>,
 ) {
     let mut thread_state = PlannerThreadState::build(&config);
+    let limit_names = config.limit_set_names();
+    let mut binding_acc = crate::binding_report::BindingAccumulator::new(Instant::now());
 
     {
         let tl = config
             .to_temporal_limits()
             .expect("limit sections validated in init_planner");
-        log::debug!("[planner-trace] startup limits {:?}", tl.sets());
+        tracing::debug!(
+            subsystem = "motion",
+            event = "startup_limits",
+            limits = ?tl.sets(),
+            "[planner-trace] startup limits"
+        );
     }
 
     let mut last_recv_time: Option<Instant> = None;
@@ -586,6 +595,7 @@ fn run_loop(
                     window_segments,
                     plan,
                     fallback_rung,
+                    binding,
                 } = report;
                 let beta_iters = plan.beta_iterations;
                 let beta_converged = plan.beta_converged;
@@ -638,6 +648,9 @@ fn run_loop(
                         "replan overran its real-time budget"
                     );
                 }
+
+                binding_acc.record(&binding, state.t_appended);
+                binding_acc.maybe_rollup(Instant::now(), &limit_names);
 
                 for s in &drained {
                     if let Err(detail) = dispatch(s) {
@@ -710,6 +723,7 @@ fn run_loop(
             }
 
             PlannerMsg::KalicoStreamOpen { home_pos } => {
+                binding_acc.flush(Instant::now(), &limit_names);
                 sync_instant = None;
                 let chains = &thread_state.replan_ctx.chains;
                 state.reset(&home_pos[..chains.n_axes()], chains);
@@ -736,7 +750,10 @@ fn run_loop(
                 }
             }
 
-            PlannerMsg::Shutdown => return,
+            PlannerMsg::Shutdown => {
+                binding_acc.flush(Instant::now(), &limit_names);
+                return;
+            }
 
             PlannerMsg::HomeDrip(p) => {
                 sync_instant = None;

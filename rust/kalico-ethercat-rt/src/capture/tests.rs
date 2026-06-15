@@ -6,8 +6,8 @@ use super::*;
 fn sample(n: i32) -> DriveSample {
     DriveSample {
         target_counts: n,
-        position_demand: n + 1,
         position_actual: n + 2,
+        velocity_actual: n + 4,
         following_error: -3,
         torque_actual: 42,
         statusword: 0x0627,
@@ -51,8 +51,8 @@ fn record_encodes_to_fixed_little_endian_layout() {
         flags: 0x03,
         drive: DriveSample {
             target_counts: -2,
-            position_demand: 0x11223344,
             position_actual: -1,
+            velocity_actual: 0x55667788u32 as i32,
             following_error: 5,
             torque_actual: -300,
             statusword: 0x0627,
@@ -66,14 +66,14 @@ fn record_encodes_to_fixed_little_endian_layout() {
     assert_eq!(&b[0..8], &0x0102030405060708u64.to_le_bytes());
     assert_eq!(b[8], 0x03);
     assert_eq!(&b[9..13], &(-2i32).to_le_bytes());
-    assert_eq!(&b[13..17], &0x11223344i32.to_le_bytes());
-    assert_eq!(&b[17..21], &(-1i32).to_le_bytes());
-    assert_eq!(&b[21..25], &5i32.to_le_bytes());
-    assert_eq!(&b[25..27], &(-300i16).to_le_bytes());
-    assert_eq!(&b[27..29], &0x0627u16.to_le_bytes());
-    assert_eq!(&b[29..31], &0x7380u16.to_le_bytes());
-    assert_eq!(&b[31..35], &(-654321i32).to_le_bytes());
-    assert_eq!(&b[35..37], &250i16.to_le_bytes());
+    assert_eq!(&b[13..17], &(-1i32).to_le_bytes());
+    assert_eq!(&b[17..21], &5i32.to_le_bytes());
+    assert_eq!(&b[21..23], &(-300i16).to_le_bytes());
+    assert_eq!(&b[23..25], &0x0627u16.to_le_bytes());
+    assert_eq!(&b[25..27], &0x7380u16.to_le_bytes());
+    assert_eq!(&b[27..31], &(-654321i32).to_le_bytes());
+    assert_eq!(&b[31..33], &250i16.to_le_bytes());
+    assert_eq!(&b[33..37], &(0x55667788u32 as i32).to_le_bytes());
 }
 
 #[test]
@@ -93,14 +93,14 @@ fn header_is_one_json_line_describing_the_record() {
         "{\"name\":\"cycle_index\",\"dtype\":\"u64\",\"offset\":0}",
         "{\"name\":\"flags\",\"dtype\":\"u8\",\"offset\":8}",
         "{\"name\":\"target_counts\",\"dtype\":\"i32\",\"offset\":9}",
-        "{\"name\":\"position_demand\",\"dtype\":\"i32\",\"offset\":13}",
-        "{\"name\":\"position_actual\",\"dtype\":\"i32\",\"offset\":17}",
-        "{\"name\":\"following_error\",\"dtype\":\"i32\",\"offset\":21}",
-        "{\"name\":\"torque_actual\",\"dtype\":\"i16\",\"offset\":25}",
-        "{\"name\":\"statusword\",\"dtype\":\"u16\",\"offset\":27}",
-        "{\"name\":\"error_code\",\"dtype\":\"u16\",\"offset\":29}",
-        "{\"name\":\"velocity_offset\",\"dtype\":\"i32\",\"offset\":31}",
-        "{\"name\":\"torque_offset\",\"dtype\":\"i16\",\"offset\":35}",
+        "{\"name\":\"position_actual\",\"dtype\":\"i32\",\"offset\":13}",
+        "{\"name\":\"following_error\",\"dtype\":\"i32\",\"offset\":17}",
+        "{\"name\":\"torque_actual\",\"dtype\":\"i16\",\"offset\":21}",
+        "{\"name\":\"statusword\",\"dtype\":\"u16\",\"offset\":23}",
+        "{\"name\":\"error_code\",\"dtype\":\"u16\",\"offset\":25}",
+        "{\"name\":\"velocity_offset\",\"dtype\":\"i32\",\"offset\":27}",
+        "{\"name\":\"torque_offset\",\"dtype\":\"i16\",\"offset\":31}",
+        "{\"name\":\"velocity_actual\",\"dtype\":\"i32\",\"offset\":33}",
     ] {
         assert!(h.contains(needle), "header missing {needle}: {h}");
     }

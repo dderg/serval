@@ -7,7 +7,6 @@ from klippy.bridge_endstop import AXIS_ENDSTOP_IDS, BridgeEndstop
 HOMING_POLL_PERIOD = 0.001
 TRIP_DEADLINE_MARGIN = 5.0
 _DRAIN_PAUSE_TIMEOUT = 60.0
-NO_MOVEMENT_EPSILON = 0.005
 
 
 def _endstop_section(config, axis_name):
@@ -17,13 +16,11 @@ def _endstop_section(config, axis_name):
     return None
 
 
-def _enable_homing_motors(stepper_enable, rail):
+def _homing_motor_names(rail):
     steppers = rail.get_steppers()
     if not steppers:
-        stepper_enable.motor_debug_enable(rail.get_name(), True)
-        return
-    for s in steppers:
-        stepper_enable.motor_debug_enable(s.get_name(), True)
+        return [rail.get_name()]
+    return [s.get_name() for s in steppers]
 
 
 @contextlib.contextmanager
@@ -264,8 +261,10 @@ class Homing:
         stepper_enable = self.printer.lookup_object("stepper_enable")
         homing_deltas = [0.0, 0.0, 0.0]
         homing_deltas[axis] = 1.0
+        homing_names = []
         for active_rail in kin.active_rails(*homing_deltas):
-            _enable_homing_motors(stepper_enable, active_rail)
+            homing_names.extend(_homing_motor_names(active_rail))
+        stepper_enable.motor_enable_group(homing_names)
 
         servo_handle = None
         servo_limits = None
@@ -298,6 +297,7 @@ class Homing:
                 ),
             )
 
+            overshoot = final_pos[axis] - trip_pos[axis]
             newpos = list(toolhead.get_position())
             newpos[axis] = _homed_axis_position(
                 entry["provider"], axis, trip_pos, final_pos, trigger_height
@@ -310,20 +310,24 @@ class Homing:
                 % (
                     "XYZ"[axis],
                     trigger_height,
-                    final_pos[axis] - trip_pos[axis],
+                    overshoot,
                     "XYZ"[axis],
                     newpos[axis],
                 ),
                 axis="XYZ"[axis],
                 trigger_height=trigger_height,
-                overshoot=final_pos[axis] - trip_pos[axis],
+                overshoot=overshoot,
                 homed_position=newpos[axis],
             )
             if hi.retract_dist:
                 retractpos = list(toolhead.get_position())
-                retractpos[axis] -= direction * hi.retract_dist
+                retractpos[axis] -= direction * hi.retract_dist + overshoot
                 toolhead.move(retractpos, hi.retract_speed)
                 toolhead.wait_moves()
+            if servo_handle is not None:
+                bridge.finalize_homed_axis(
+                    servo_handle, axis, toolhead.get_position()[axis]
+                )
             _check_servo_drive_fault(gcmd, bridge, axis, servo_handle)
         except BaseException:
             try:
@@ -372,12 +376,6 @@ class Homing:
             )
         toolhead.wait_moves()
         self._drain_motion_before_arming_device(gcmd, bridge, axis)
-        if endstop.is_triggered():
-            raise gcmd.error(
-                "%s endstop already triggered — move off the trigger before"
-                " homing or probing" % ("XYZ"[axis],)
-            )
-        start_axis_pos = toolhead.get_position()[axis]
         provider = entry["provider"]
         if provider is not None and hasattr(provider, "trip_move_begin"):
             provider.trip_move_begin(entry)
@@ -424,11 +422,9 @@ class Homing:
                 provider.trip_move_end(entry)
         trip_pos, final_pos, trip_clock = result
         _verify_latched_trip(gcmd, axis, endstop, trip_clock)
-        if abs(trip_pos[axis] - start_axis_pos) < NO_MOVEMENT_EPSILON:
-            raise gcmd.error(
-                "%s endstop triggered prior to movement — trigger is stuck"
-                " or miswired" % ("XYZ"[axis],)
-            )
+        # TODO: guard a still-triggered endstop on the second home after
+        # retract (where zero movement is the real stuck/miswired fault) once
+        # second-approach homing lands; the first approach may insta-trip.
         return trip_pos, final_pos
 
 

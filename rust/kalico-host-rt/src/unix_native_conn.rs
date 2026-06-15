@@ -285,7 +285,12 @@ fn route_frame(
         pending.waiters.remove(&cid)
     };
     let Some(tx) = tx else {
-        log::warn!("UnixNativeConn: response for unknown correlation_id {cid} dropped");
+        tracing::warn!(
+            subsystem = "mcu-comms",
+            event = "unknown_correlation_id",
+            correlation_id = cid,
+            "UnixNativeConn: response for unknown correlation_id dropped"
+        );
         return;
     };
     let result = match MessageKind::from_u16(hdr.kind_raw) {

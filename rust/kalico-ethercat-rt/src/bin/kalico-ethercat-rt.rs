@@ -1,5 +1,5 @@
 //! Usage: kalico-ethercat-rt <ifname> [--socket PATH] [--cycle-us N]
-//!        [--counts-per-mm F] [--rt-cpu N] [--rt-prio N]
+//!        [--counts-per-mm F] [--rotation-distance F] [--rt-cpu N] [--rt-prio N]
 //!        [--velocity-ff] [--dynamics-profile PATH] [--torque-clamp-pct F]
 #![allow(unsafe_code)]
 
@@ -18,16 +18,20 @@ use kalico_ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAUL
 use kalico_ethercat_rt::dynamics::{clamp_torque, DynamicsModel};
 use kalico_ethercat_rt::ffi;
 use kalico_ethercat_rt::mailbox::{MailboxReply, MailboxRequest, MailboxWorker, WorkerScheduling};
-use kalico_ethercat_rt::scale::CountMap;
+use kalico_ethercat_rt::scale::{mm_to_counts, CountMap};
 use kalico_ethercat_rt::sdo::SdoBus;
+use kalico_ethercat_rt::seed_home::{
+    ERR_SEED_HOME_BUSY, ERR_SEED_HOME_NOT_ENABLED, ERR_SEED_HOME_RESTORE, ERR_SEED_HOME_STREAMING,
+};
 use kalico_ethercat_rt::server::FrameServer;
 use kalico_ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
 };
 use kalico_ethercat_rt::wire::{
-    claim_handshake_reply_frame, identify_response_frame, push_pieces_response_frame,
-    restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
-    sdo_read_response_frame, sdo_write_response_frame, set_drive_limits_response_frame,
+    claim_handshake_reply_frame, identify_response_frame, motor_state_empty_frame,
+    motor_state_response_frame, push_pieces_response_frame, restore_drive_limits_response_frame,
+    resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
+    sdo_write_response_frame, seed_servo_home_response_frame, set_drive_limits_response_frame,
     set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
     stop_capture_response_frame, stop_response_frame, Command,
 };
@@ -112,6 +116,9 @@ fn main() {
     let counts_per_mm: f64 = arg_val(&args, "--counts-per-mm")
         .and_then(|s| s.parse().ok())
         .unwrap_or(3276.8);
+    let rotation_distance: f64 = arg_val(&args, "--rotation-distance")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(40.0);
     let rt_cpu: i32 = arg_val(&args, "--rt-cpu")
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
@@ -157,13 +164,17 @@ fn main() {
 
     let mut ring = AxisRing::new();
     let mut cmap: Option<CountMap> = None;
+    let mut framed = false;
+    let mut seed_home_inflight: Option<u32> = None;
+    let mut seed_home_homing_rc: i32 = 0;
     let mut last_sent_retired: u32 = 0;
     let mut heartbeat_sent = false;
 
     let mut server = FrameServer::bind(&socket).expect("bind socket");
     eprintln!(
         "ec-rt: socket {socket}, cycle {cycle_us}us, counts/mm {counts_per_mm} \
-         velocity_ff={velocity_ff} dynamics={} clamp={torque_clamp_tenths}",
+         rotation_distance={rotation_distance} velocity_ff={velocity_ff} \
+         dynamics={} clamp={torque_clamp_tenths}",
         dynamics.is_some()
     );
 
@@ -438,6 +449,46 @@ fn main() {
                         restore: true,
                     });
                 }
+                Command::SeedServoHome {
+                    correlation_id,
+                    home_q16,
+                } => {
+                    if seed_home_inflight.is_some() {
+                        eprintln!("ec-rt: SeedServoHome rejected — handshake already in flight");
+                        server.respond(&seed_servo_home_response_frame(
+                            correlation_id,
+                            ERR_SEED_HOME_BUSY,
+                        ));
+                    } else if gate.state() != TorqueState::Enabled {
+                        eprintln!(
+                            "ec-rt: SeedServoHome rejected — drive not operation-enabled \
+                             (state={:?}); method-35 needs torque on",
+                            gate.state()
+                        );
+                        server.respond(&seed_servo_home_response_frame(
+                            correlation_id,
+                            ERR_SEED_HOME_NOT_ENABLED,
+                        ));
+                    } else if !ring.is_empty() {
+                        eprintln!("ec-rt: SeedServoHome rejected — motion ring not empty");
+                        server.respond(&seed_servo_home_response_frame(
+                            correlation_id,
+                            ERR_SEED_HOME_STREAMING,
+                        ));
+                    } else {
+                        let offset_counts =
+                            ((f64::from(home_q16) / 65536.0) * counts_per_mm).round() as i32;
+                        eprintln!(
+                            "ec-rt: SeedServoHome home_q16={home_q16} -> 607Ch={offset_counts} \
+                             counts; staging method-35 mode switch"
+                        );
+                        seed_home_inflight = Some(correlation_id);
+                        mailbox.submit(MailboxRequest::SeedHomeSetup {
+                            correlation_id,
+                            offset_counts,
+                        });
+                    }
+                }
                 Command::SdoRead {
                     correlation_id,
                     msg,
@@ -455,6 +506,26 @@ fn main() {
                         correlation_id,
                         msg,
                     });
+                }
+                Command::QueryMotorState { correlation_id } => {
+                    if framed {
+                        let (pos_counts, vel_rpm) = unsafe {
+                            (
+                                ffi::ec_rt_get_position_actual(),
+                                ffi::ec_rt_get_velocity_actual(),
+                            )
+                        };
+                        let pos_mm = f64::from(pos_counts) / counts_per_mm;
+                        let vel_mm_s =
+                            kalico_ethercat_rt::scale::velocity_mm_s(vel_rpm, rotation_distance);
+                        server.respond(&motor_state_response_frame(
+                            correlation_id,
+                            pos_mm,
+                            vel_mm_s,
+                        ));
+                    } else {
+                        server.respond(&motor_state_empty_frame(correlation_id));
+                    }
                 }
                 Command::Unknown { kind_raw, .. } => {
                     eprintln!("ec-rt: ignoring kind 0x{kind_raw:04x}");
@@ -553,6 +624,49 @@ fn main() {
                     };
                     server.respond(&frame);
                 }
+                MailboxReply::SeedHomeSetup {
+                    correlation_id,
+                    rc,
+                    offset_counts,
+                } => {
+                    seed_home_homing_rc = if rc != 0 {
+                        eprintln!(
+                            "ec-rt: SeedServoHome setup failed rc={rc} (offset={offset_counts}); \
+                             restoring CSP and failing"
+                        );
+                        rc
+                    } else {
+                        let hrc = unsafe { ffi::ec_rt_run_homing() };
+                        if hrc != 0 {
+                            eprintln!(
+                                "ec-rt: SeedServoHome controlword phase failed rc={hrc}; \
+                                 restoring CSP and failing"
+                            );
+                        } else {
+                            eprintln!(
+                                "ec-rt: SeedServoHome homing attained (607Ch={offset_counts}); \
+                                 restoring CSP"
+                            );
+                        }
+                        hrc
+                    };
+                    mailbox.submit(MailboxRequest::SeedHomeRestore { correlation_id });
+                }
+                MailboxReply::SeedHomeRestore { correlation_id, rc } => {
+                    seed_home_inflight = None;
+                    let result = if seed_home_homing_rc != 0 {
+                        seed_home_homing_rc
+                    } else if rc != 0 {
+                        eprintln!("ec-rt: SeedServoHome CSP restore failed rc={rc}");
+                        ERR_SEED_HOME_RESTORE
+                    } else {
+                        framed = true;
+                        eprintln!("ec-rt: SeedServoHome complete — framed=true");
+                        0
+                    };
+                    seed_home_homing_rc = 0;
+                    server.respond(&seed_servo_home_response_frame(correlation_id, result));
+                }
             }
         }
 
@@ -587,11 +701,15 @@ fn main() {
         let mut motion_active = false;
         if gate.state() == TorqueState::Enabled {
             if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ring.sample(now) {
-                let map = cmap.get_or_insert_with(|| {
-                    let actual = unsafe { ffi::ec_rt_get_position_actual() };
-                    CountMap::new(counts_per_mm, actual, f64::from(pos_mm))
-                });
-                let counts = map.target_counts(f64::from(pos_mm));
+                let counts = if framed {
+                    mm_to_counts(f64::from(pos_mm), counts_per_mm)
+                } else {
+                    let map = cmap.get_or_insert_with(|| {
+                        let actual = unsafe { ffi::ec_rt_get_position_actual() };
+                        CountMap::new(counts_per_mm, actual, f64::from(pos_mm))
+                    });
+                    map.target_counts(f64::from(pos_mm))
+                };
                 let vel_offset = if velocity_ff {
                     (f64::from(vel_mm_s) * counts_per_mm).round() as i32
                 } else {
@@ -704,8 +822,8 @@ fn main() {
                 flags,
                 drive: DriveSample {
                     target_counts: t.target_position,
-                    position_demand: t.position_demand,
                     position_actual: t.position_actual,
+                    velocity_actual: t.velocity_actual,
                     following_error: t.following_error,
                     torque_actual: t.torque_actual,
                     statusword: t.statusword,
@@ -773,7 +891,7 @@ fn main() {
             };
             eprintln!(
                 "ec-rt: wkc={wkc} sw=0x{sw:04x} err=0x{drive_err:04x} pos={pos} ferr={ferr} toff={toff} \
-                 ring_len={} retired={} tq_act={tq_act} ff_sat={ff_saturation}",
+                 ring_len={} retired={} tq_act={tq_act} ff_sat={ff_saturation} framed={framed}",
                 ring.is_empty() as u8 ^ 1,
                 current_retired,
             );

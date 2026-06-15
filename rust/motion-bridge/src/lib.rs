@@ -1,5 +1,7 @@
 #[doc(hidden)]
 pub mod anchor;
+#[doc(hidden)]
+pub mod binding_report;
 mod bridge;
 #[doc(hidden)]
 pub mod classify;
@@ -23,6 +25,8 @@ pub mod motion_history;
 pub mod motion_node;
 #[doc(hidden)]
 pub mod planner;
+#[doc(hidden)]
+pub mod position_query;
 #[doc(hidden)]
 pub mod pump;
 pub mod remote_trigger;

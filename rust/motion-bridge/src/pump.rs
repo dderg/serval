@@ -323,9 +323,16 @@ fn check_junction_position_continuity(
         );
     }
     if jump >= JUNCTION_POSITION_LOG_MM {
-        log::error!(
-            "[junction-pos] key={key:?} prev_end={prev_end_pos} next_start={next_start_pos} \
-             jump_mm={jump} prev_end_host={prev_end_host:.6} next_start_host={next_start_host:.6}"
+        tracing::error!(
+            subsystem = "motion",
+            event = "junction_position_discontinuity",
+            key = ?key,
+            prev_end = prev_end_pos,
+            next_start = next_start_pos,
+            jump_mm = jump,
+            prev_end_host = prev_end_host,
+            next_start_host = next_start_host,
+            "[junction-pos] position discontinuity"
         );
     }
 }
@@ -454,12 +461,14 @@ pub fn run_pump<S, F, C, A, O, D>(
                             let anomalous =
                                 tick_jump_us < -50.0 || (tick_jump_us - host_jump_us).abs() > 50.0;
                             if fresh_stream || !anomalous {
-                                log::debug!(
-                                    "[junction] key={:?} tick_jump_us={:.1} host_jump_us={:.1} fresh={}",
-                                    key,
+                                tracing::debug!(
+                                    subsystem = "motion",
+                                    event = "junction_jump",
+                                    key = ?key,
                                     tick_jump_us,
                                     host_jump_us,
-                                    fresh_stream,
+                                    fresh = fresh_stream,
+                                    "[junction] jump"
                                 );
                             } else {
                                 let reason = if tick_jump_us < -50.0 {
@@ -467,13 +476,15 @@ pub fn run_pump<S, F, C, A, O, D>(
                                 } else {
                                     "projection_divergence"
                                 };
-                                log::warn!(
-                                    "[junction] key={:?} tick_jump_us={:.1} host_jump_us={:.1} fresh={} reason={}",
-                                    key,
+                                tracing::warn!(
+                                    subsystem = "motion",
+                                    event = "junction_jump_anomalous",
+                                    key = ?key,
                                     tick_jump_us,
                                     host_jump_us,
-                                    fresh_stream,
+                                    fresh = fresh_stream,
                                     reason,
+                                    "[junction] anomalous jump"
                                 );
                             }
                         }
@@ -680,16 +691,24 @@ pub fn run_pump<S, F, C, A, O, D>(
                                 q.advance_write_cursor(n);
                             }
                             Err(SendError::Fatal(ref e)) => {
-                                log::error!(
-                                    "pump send_frame FATAL transport error for {:?}: {e} \
-                                     — invoking fatal-transport action",
-                                    f.key
+                                tracing::error!(
+                                    subsystem = "motion",
+                                    event = "send_frame_fatal",
+                                    key = ?f.key,
+                                    error = %e,
+                                    "pump send_frame FATAL transport error — invoking fatal-transport action"
                                 );
                                 on_fatal_transport(f.key);
                                 return;
                             }
                             Err(SendError::Transient(ref e)) => {
-                                log::error!("pump send_frame failed for {:?}: {e}", f.key);
+                                tracing::error!(
+                                    subsystem = "motion",
+                                    event = "send_frame_transient",
+                                    key = ?f.key,
+                                    error = %e,
+                                    "pump send_frame failed"
+                                );
                                 break 'send;
                             }
                         }
@@ -863,44 +882,40 @@ impl PieceSink for WireSink {
                 .map(|f| format!("{:.1}", (arrival_lead_ticks as f64 / f) * 1e6))
                 .unwrap_or_else(|| "N/A".to_owned());
             if zero_st || past_arrival {
-                log::warn!(
-                    "[transit-diag] mcu={} axis={} \
-                     host_front_start_time={} mcu_front_start_time={} \
-                     arrival_clock={} \
-                     arrival_lead_ticks={} arrival_lead_us={} \
-                     host_send_unix_secs={:.6} \
-                     ALERT: {}",
-                    key.mcu_id,
-                    key.axis,
+                let alert = if zero_st && past_arrival {
+                    "host_start_time=0 (clock-sync gap) AND piece in MCU past"
+                } else if zero_st {
+                    "host_start_time=0 (router clock_freq=0 at dispatch — clock-sync gap)"
+                } else {
+                    "piece arrived in MCU past (arrival_lead<0) — PieceStartInPast risk"
+                };
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "transit_diag_alert",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
                     host_front_start_time,
-                    r.front_start_time,
-                    r.arrival_clock,
+                    mcu_front_start_time = r.front_start_time,
+                    arrival_clock = r.arrival_clock,
                     arrival_lead_ticks,
-                    arrival_lead_us,
-                    host_send_secs,
-                    if zero_st && past_arrival {
-                        "host_start_time=0 (clock-sync gap) AND piece in MCU past"
-                    } else if zero_st {
-                        "host_start_time=0 (router clock_freq=0 at dispatch — clock-sync gap)"
-                    } else {
-                        "piece arrived in MCU past (arrival_lead<0) — PieceStartInPast risk"
-                    },
+                    arrival_lead_us = %arrival_lead_us,
+                    host_send_unix_secs = host_send_secs,
+                    alert,
+                    "[transit-diag] alert"
                 );
             } else {
-                log::info!(
-                    "[transit-diag] mcu={} axis={} \
-                     host_front_start_time={} mcu_front_start_time={} \
-                     arrival_clock={} \
-                     arrival_lead_ticks={} arrival_lead_us={} \
-                     host_send_unix_secs={:.6}",
-                    key.mcu_id,
-                    key.axis,
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "transit_diag",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
                     host_front_start_time,
-                    r.front_start_time,
-                    r.arrival_clock,
+                    mcu_front_start_time = r.front_start_time,
+                    arrival_clock = r.arrival_clock,
                     arrival_lead_ticks,
-                    arrival_lead_us,
-                    host_send_secs,
+                    arrival_lead_us = %arrival_lead_us,
+                    host_send_unix_secs = host_send_secs,
+                    "[transit-diag]"
                 );
             }
         }

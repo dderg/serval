@@ -111,7 +111,11 @@ pub fn dispatch_kalico_frame(
     payload: &[u8],
 ) -> KalicoDispatchResult {
     let Some((header, body)) = decode_message_header(payload) else {
-        log::warn!("kalico frame too short for per-message header");
+        tracing::warn!(
+            subsystem = "mcu-comms",
+            event = "header_too_short",
+            "kalico frame too short for per-message header"
+        );
         return KalicoDispatchResult::Ignored;
     };
 
@@ -120,7 +124,12 @@ pub fn dispatch_kalico_frame(
     }
 
     let Some(kind) = MessageKind::from_u16(header.kind_raw) else {
-        log::warn!("unknown kalico message kind 0x{:04x}", header.kind_raw);
+        tracing::warn!(
+            subsystem = "mcu-comms",
+            event = "unknown_message_kind",
+            kind_raw = header.kind_raw,
+            "unknown kalico message kind"
+        );
         return KalicoDispatchResult::Ignored;
     };
 
@@ -129,9 +138,11 @@ pub fn dispatch_kalico_frame(
     }
 
     if header.correlation_id == 0 {
-        log::warn!(
-            "kalico control-channel frame with correlation_id=0 (kind 0x{:04x})",
-            header.kind_raw
+        tracing::warn!(
+            subsystem = "mcu-comms",
+            event = "control_frame_zero_correlation_id",
+            kind_raw = header.kind_raw,
+            "kalico control-channel frame with correlation_id=0"
         );
         return KalicoDispatchResult::Ignored;
     }
@@ -142,10 +153,12 @@ pub fn dispatch_kalico_frame(
         }));
         KalicoDispatchResult::Handled
     } else {
-        log::warn!(
-            "no pending kalico call for correlation_id {} (kind 0x{:04x})",
-            header.correlation_id,
-            header.kind_raw
+        tracing::warn!(
+            subsystem = "mcu-comms",
+            event = "no_pending_call",
+            correlation_id = header.correlation_id,
+            kind_raw = header.kind_raw,
+            "no pending kalico call for correlation_id"
         );
         KalicoDispatchResult::Ignored
     }
@@ -153,10 +166,12 @@ pub fn dispatch_kalico_frame(
 
 fn handle_identify_response(state: &mut KalicoNativeState, payload: &[u8]) -> KalicoDispatchResult {
     if payload.len() != BOOTSTRAP_IDENTIFY_RESPONSE_LEN {
-        log::error!(
-            "kalico IdentifyResponse wrong length: got {}, expected {}",
-            payload.len(),
-            BOOTSTRAP_IDENTIFY_RESPONSE_LEN
+        tracing::error!(
+            subsystem = "mcu-comms",
+            event = "identify_response_wrong_length",
+            got = payload.len(),
+            expected = BOOTSTRAP_IDENTIFY_RESPONSE_LEN,
+            "kalico IdentifyResponse wrong length"
         );
         if let Some(c) = state.identify_pending.take() {
             let _ = c.send(Err(TransportError::Parse(format!(
@@ -168,7 +183,11 @@ fn handle_identify_response(state: &mut KalicoNativeState, payload: &[u8]) -> Ka
         return KalicoDispatchResult::Ignored;
     }
     let Some((_cid, resp)) = decode_identify_response(payload) else {
-        log::error!("kalico IdentifyResponse failed to decode");
+        tracing::error!(
+            subsystem = "mcu-comms",
+            event = "identify_response_decode_failed",
+            "kalico IdentifyResponse failed to decode"
+        );
         if let Some(c) = state.identify_pending.take() {
             let _ = c.send(Err(TransportError::Parse(
                 "IdentifyResponse failed to decode".into(),
@@ -182,7 +201,12 @@ fn handle_identify_response(state: &mut KalicoNativeState, payload: &[u8]) -> Ka
             "kalico proto_version mismatch — host 0x{:02x}, MCU 0x{:02x}",
             PROTO_VERSION, resp.proto_version
         );
-        log::error!("{msg}");
+        tracing::error!(
+            subsystem = "mcu-comms",
+            event = "proto_version_mismatch",
+            error = %msg,
+            "kalico proto_version mismatch"
+        );
         if let Some(c) = state.identify_pending.take() {
             let _ = c.send(Err(TransportError::Parse(msg)));
         }
@@ -192,7 +216,12 @@ fn handle_identify_response(state: &mut KalicoNativeState, payload: &[u8]) -> Ka
         let host_hex = hex32(&SCHEMA_HASH);
         let mcu_hex = hex32(&resp.schema_hash);
         let msg = format!("kalico schema_hash mismatch — host {host_hex}, MCU {mcu_hex}");
-        log::error!("{msg}");
+        tracing::error!(
+            subsystem = "mcu-comms",
+            event = "schema_hash_mismatch",
+            error = %msg,
+            "kalico schema_hash mismatch"
+        );
         if let Some(c) = state.identify_pending.take() {
             let _ = c.send(Err(TransportError::Parse(msg)));
         }
@@ -215,10 +244,12 @@ fn handle_identify_response(state: &mut KalicoNativeState, payload: &[u8]) -> Ka
         state_epoch = ?state.reset_epoch,
         "kalico identify complete"
     );
-    log::info!(
-        "kalico identified: reset_epoch=0x{:08x}, caps=0x{:016x}, schema_hash matches",
-        resp.reset_epoch,
-        resp.capabilities,
+    tracing::info!(
+        subsystem = "mcu-comms",
+        event = "identified",
+        reset_epoch = resp.reset_epoch,
+        capabilities = resp.capabilities,
+        "kalico identified, schema_hash matches"
     );
     KalicoDispatchResult::Handled
 }
@@ -238,7 +269,12 @@ fn lift_event_to_runtime_event(
                 synthesized: false,
             })),
             Err(e) => {
-                log::warn!("kalico FaultEvent decode failed: {e:?}");
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "fault_event_decode_failed",
+                    error = ?e,
+                    "kalico FaultEvent decode failed"
+                );
                 KalicoDispatchResult::Ignored
             }
         },
@@ -248,7 +284,12 @@ fn lift_event_to_runtime_event(
                 correction_retired_counts: hb.correction_retired_counts,
             }),
             Err(e) => {
-                log::warn!("kalico StatusHeartbeat decode failed: {e:?}");
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "status_heartbeat_decode_failed",
+                    error = ?e,
+                    "kalico StatusHeartbeat decode failed"
+                );
                 KalicoDispatchResult::Ignored
             }
         },
@@ -264,7 +305,12 @@ fn lift_event_to_runtime_event(
                 host_recv: Instant::now(),
             })),
             Err(e) => {
-                log::warn!("kalico McuLog decode failed: {e:?}");
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "mcu_log_decode_failed",
+                    error = ?e,
+                    "kalico McuLog decode failed"
+                );
                 KalicoDispatchResult::Ignored
             }
         },
@@ -274,12 +320,22 @@ fn lift_event_to_runtime_event(
                 trip_clock: t.trip_clock,
             })),
             Err(e) => {
-                log::warn!("kalico EndstopTrip decode failed: {e:?}");
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "endstop_trip_decode_failed",
+                    error = ?e,
+                    "kalico EndstopTrip decode failed"
+                );
                 KalicoDispatchResult::Ignored
             }
         },
         _ => {
-            log::warn!("unexpected event kind on events channel: {kind:?}");
+            tracing::warn!(
+                subsystem = "mcu-comms",
+                event = "unexpected_event_kind",
+                kind = ?kind,
+                "unexpected event kind on events channel"
+            );
             KalicoDispatchResult::Ignored
         }
     }
