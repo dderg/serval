@@ -1829,3 +1829,19 @@ fn follower_only_retract_then_idle_then_move_holds_ledger() {
         "two -1mm retracts must leave the ledger at -2, got {end}"
     );
 }
+
+#[test]
+fn per_segment_limits_adds_feedrate_path_speed_set() {
+    let base = temporal::Limits::axis_boxes([1000.0; 3], [500_000.0; 3], [1.0e7; 3]);
+    let curve = nurbs::VectorNurbs::try_new(
+        1,
+        vec![0.0, 0.0, 1.0, 1.0],
+        vec![[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]],
+    )
+    .unwrap();
+    let feed = 494.0;
+    let limits = super::state::per_segment_limits(&curve, &base, feed);
+    let caps: Vec<f64> = limits.spatial_sets().map(|(_, s)| s.v_max).collect();
+    let has_feed = caps.iter().any(|v| (v - feed).abs() < 1e-6);
+    assert!(has_feed, "feed set missing; spatial v_max caps = {caps:?}");
+}

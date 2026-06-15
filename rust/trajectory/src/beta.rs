@@ -115,6 +115,8 @@ pub struct PlanStats {
 pub struct ReplanWorstBinding {
     pub constraint: temporal::BindingConstraint,
     pub ratio: f64,
+    /// Provenance of the binding limit set (config / dynamic feedrate / runtime cap).
+    pub kind: temporal::LimitKind,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -152,6 +154,7 @@ fn aggregate_binding(profiles: &[temporal::TopProfile]) -> ReplanBindingSummary 
                 worst = Some(ReplanWorstBinding {
                     constraint: w.constraint,
                     ratio: w.ratio,
+                    kind: w.kind,
                 });
             }
         }

@@ -14,9 +14,10 @@ fn all_labeled_variants_map_to_correct_derivative_and_pa_flag() {
         (BindingConstraint::PaJerk { set: 0 }, "jerk", true),
     ];
     for &(constraint, expected_derivative, expected_via_pa) in cases {
-        let label = label_binding(constraint, &names).unwrap_or_else(|| {
-            panic!("{constraint:?} must produce a label");
-        });
+        let label =
+            label_binding(constraint, temporal::LimitKind::Config, &names).unwrap_or_else(|| {
+                panic!("{constraint:?} must produce a label");
+            });
         assert_eq!(
             label.derivative, expected_derivative,
             "{constraint:?}: wrong derivative"
@@ -31,18 +32,65 @@ fn all_labeled_variants_map_to_correct_derivative_and_pa_flag() {
 #[test]
 fn labeled_set_index_resolves_to_name_or_runtime_caps_fallback() {
     let names = vec!["gantry".to_string()];
-    let resolved = label_binding(BindingConstraint::Velocity { set: 0 }, &names).unwrap();
+    let resolved = label_binding(
+        BindingConstraint::Velocity { set: 0 },
+        temporal::LimitKind::Config,
+        &names,
+    )
+    .unwrap();
     assert_eq!(resolved.limit, "gantry");
 
-    let fallback = label_binding(BindingConstraint::AccelNorm { set: 1 }, &names).unwrap();
+    let fallback = label_binding(
+        BindingConstraint::AccelNorm { set: 1 },
+        temporal::LimitKind::Config,
+        &names,
+    )
+    .unwrap();
     assert_eq!(fallback.limit, "runtime_caps");
+}
+
+/// Dynamic limit sets show their reserved kind name; config sets resolve to the
+/// declared section name by index.
+#[test]
+fn dynamic_limit_kinds_get_reserved_names() {
+    let names = vec!["gantry".to_string()];
+    let feed = label_binding(
+        BindingConstraint::Velocity { set: 5 },
+        temporal::LimitKind::Feedrate,
+        &names,
+    )
+    .unwrap();
+    assert_eq!(feed.limit, "feedrate");
+
+    let runtime = label_binding(
+        BindingConstraint::AccelNorm { set: 5 },
+        temporal::LimitKind::RuntimeCap,
+        &names,
+    )
+    .unwrap();
+    assert_eq!(runtime.limit, "runtime_caps");
+
+    let config = label_binding(
+        BindingConstraint::Velocity { set: 0 },
+        temporal::LimitKind::Config,
+        &names,
+    )
+    .unwrap();
+    assert_eq!(config.limit, "gantry");
 }
 
 #[test]
 fn none_and_boundary_produce_no_label() {
     let names = vec!["gantry".to_string()];
-    assert!(label_binding(BindingConstraint::None, &names).is_none());
-    assert!(label_binding(BindingConstraint::Boundary, &names).is_none());
+    assert!(label_binding(BindingConstraint::None, temporal::LimitKind::Config, &names).is_none());
+    assert!(
+        label_binding(
+            BindingConstraint::Boundary,
+            temporal::LimitKind::Config,
+            &names
+        )
+        .is_none()
+    );
 }
 
 fn summary(set: usize, count: u32, ratio: f64) -> ReplanBindingSummary {
@@ -51,6 +99,7 @@ fn summary(set: usize, count: u32, ratio: f64) -> ReplanBindingSummary {
         worst: Some(ReplanWorstBinding {
             constraint: BindingConstraint::Velocity { set },
             ratio,
+            kind: temporal::LimitKind::Config,
         }),
         ..Default::default()
     }
@@ -63,7 +112,7 @@ fn record_tallies_window_and_keeps_max_ratio_worst() {
     acc.record(&summary(0, 3, 0.8), 1.0);
     acc.record(&summary(0, 2, 0.95), 2.0);
     assert_eq!(acc.window_count(BindingConstraint::Velocity { set: 0 }), 5);
-    let (constraint, ratio, t) = acc.worst().unwrap();
+    let (constraint, _kind, ratio, t) = acc.worst().unwrap();
     assert_eq!(constraint, BindingConstraint::Velocity { set: 0 });
     assert!((ratio - 0.95).abs() < 1e-12);
     assert!((t - 2.0).abs() < 1e-12);
@@ -106,6 +155,7 @@ fn g5_anytime_event_matches_binding_and_gap() {
         worst: Some(ReplanWorstBinding {
             constraint: BindingConstraint::Velocity { set: 0 },
             ratio: 0.94,
+            kind: temporal::LimitKind::Config,
         }),
         ..Default::default()
     };
@@ -129,6 +179,7 @@ fn g5_anytime_event_tracks_pa_jerk_family() {
         worst: Some(ReplanWorstBinding {
             constraint: BindingConstraint::PaJerk { set: 1 },
             ratio: 0.88,
+            kind: temporal::LimitKind::Config,
         }),
         ..Default::default()
     };
@@ -152,6 +203,7 @@ fn g5_anytime_event_on_limit_and_no_binding() {
         worst: Some(ReplanWorstBinding {
             constraint: BindingConstraint::AccelNorm { set: 0 },
             ratio: 1.0,
+            kind: temporal::LimitKind::Config,
         }),
         ..Default::default()
     };

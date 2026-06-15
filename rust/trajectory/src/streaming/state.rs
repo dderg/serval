@@ -1054,12 +1054,15 @@ fn plan_segment_for<'a>(m: &'a UncommittedMove, base: &temporal::Limits) -> Plan
         && m.segment.feedrate_mm_s > 0.0
     {
         let follower_axes: Vec<usize> = m.segment.followers.iter().map(|f| f.axis_index).collect();
-        limits = limits.with_extra_sets(&[temporal::LimitSet {
-            axes: temporal::AxisSet::from_indices(&follower_axes),
-            v_max: m.segment.feedrate_mm_s,
-            a_max: f64::INFINITY,
-            j_max: f64::INFINITY,
-        }]);
+        limits = limits.with_extra_sets_of_kind(
+            &[temporal::LimitSet {
+                axes: temporal::AxisSet::from_indices(&follower_axes),
+                v_max: m.segment.feedrate_mm_s,
+                a_max: f64::INFINITY,
+                j_max: f64::INFINITY,
+            }],
+            temporal::LimitKind::Feedrate,
+        );
     }
     PlanSegment {
         temporal: temporal::multi::SegmentInput {
@@ -1124,12 +1127,15 @@ pub(crate) fn per_segment_limits(
     }
 
     if feedrate_mm_s > 0.0 && chord_len > AXIS_INACTIVE_SPAN_EPS_MM {
-        limits = limits.with_extra_sets(&[temporal::LimitSet {
-            axes: temporal::AxisSet::spatial(),
-            v_max: feedrate_mm_s,
-            a_max: f64::INFINITY,
-            j_max: f64::INFINITY,
-        }]);
+        limits = limits.with_extra_sets_of_kind(
+            &[temporal::LimitSet {
+                axes: temporal::AxisSet::spatial(),
+                v_max: feedrate_mm_s,
+                a_max: f64::INFINITY,
+                j_max: f64::INFINITY,
+            }],
+            temporal::LimitKind::Feedrate,
+        );
     }
 
     limits

@@ -2,8 +2,8 @@ pub mod deadline;
 
 pub mod limits;
 pub use limits::{
-    AxisSet, LimitSet, Limits, LimitsError, MAX_AXES, MAX_LIMIT_SETS, N_SPATIAL, kappa_set,
-    restricted_norm,
+    AxisSet, LimitKind, LimitSet, Limits, LimitsError, MAX_AXES, MAX_LIMIT_SETS, N_SPATIAL,
+    kappa_set, restricted_norm,
 };
 
 pub mod topp;
@@ -63,6 +63,9 @@ pub struct WorstBinding {
     pub ratio: f64,
     pub grid_index: usize,
     pub s: f64,
+    /// Provenance of the binding limit set — lets diagnostics name a config limit
+    /// (by its section name) apart from the dynamic feedrate or runtime-cap sets.
+    pub kind: LimitKind,
 }
 
 #[derive(Debug, Clone, Default)]

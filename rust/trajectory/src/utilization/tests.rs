@@ -78,6 +78,36 @@ fn over_limit_segment_reports_ratio_above_one() {
     );
 }
 
+/// The requested feedrate is wired as a separate full-spatial path-speed set
+/// (v_max = feed) by `per_segment_limits`. A move cruising at the feed must read
+/// utilization 1.0 against that set — NOT feed/machine against the per-axis box.
+/// This locks that utilization is measured against the effective limit, so a move
+/// running exactly at its requested feed reports as riding its limit, not as
+/// leaving (machine - feed) headroom.
+#[test]
+fn utilization_credits_the_feedrate_path_speed_set() {
+    let t_end = 0.1;
+    let feed = 150.0; // half the machine cap of 300
+    let ax0 =
+        ScalarNurbs::try_new(1, vec![0.0, 0.0, t_end, t_end], vec![0.0, feed * t_end]).unwrap();
+    let axes = [ax0, constant(0.0, t_end), constant(0.0, t_end)];
+
+    let lim = limits(300.0, 10_000.0, 50_000.0).with_extra_sets(&[temporal::LimitSet {
+        axes: temporal::AxisSet::spatial(),
+        v_max: feed,
+        a_max: f64::INFINITY,
+        j_max: f64::INFINITY,
+    }]);
+
+    let u = segment_peak_utilization(&axes, &lim).expect("util");
+    assert_eq!(u.family, UtilFamily::Velocity);
+    assert!(
+        (u.ratio - 1.0).abs() < 1e-6,
+        "must credit the feed set (1.0), not feed/machine (0.5); got {}",
+        u.ratio,
+    );
+}
+
 /// A segment too short to carry a jerk stencil yields no utilization sample.
 #[test]
 fn segment_too_short_is_none() {
