@@ -137,26 +137,12 @@ class _RecordingBridge:
     def submit_dwell(self, delay):
         self.dwells.append(delay)
 
-    def submit_correction_sequence(
-        self, mcu_id, axis_idx, motor_idx, segments, speed, accel
-    ):
+    def submit_nudge(self, mcu_id, axis_idx, motor_mask, delta_mm, speed, accel):
         self.last_call = dict(
-            kind="correction",
+            kind="nudge",
             mcu_id=mcu_id,
             axis_idx=axis_idx,
-            motor_idx=motor_idx,
-            segments=list(segments),
-            speed=speed,
-            accel=accel,
-        )
-        return self._duration
-
-    def adjust_motor(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
-        self.last_call = dict(
-            kind="adjust",
-            mcu_id=mcu_id,
-            axis_idx=axis_idx,
-            motor_idx=motor_idx,
+            motor_mask=motor_mask,
             delta_mm=delta_mm,
             speed=speed,
             accel=accel,
@@ -192,23 +178,12 @@ def test_get_last_move_time_uses_motion_lead():
     assert th.get_last_move_time() == pytest.approx(101.5)
 
 
-def test_submit_correction_is_a_plain_async_forward():
+def test_submit_nudge_builds_single_bit_mask_and_forwards():
     th = _make_correction_toolhead(0.6)
-    dur = th.submit_correction(7, 1, 0, [0.3, -0.3], 80.0, 5000.0)
+    dur = th.submit_nudge(7, 1, 2, 0.3, 80.0, 5000.0)  # motor_idx=2 -> mask 0b100
     call = th.bridge.last_call
-    assert call["kind"] == "correction"
-    assert (call["mcu_id"], call["axis_idx"], call["motor_idx"]) == (7, 1, 0)
-    assert call["segments"] == [0.3, -0.3]
-    assert dur == pytest.approx(0.6)
-    assert th.bridge.waits == 0 and th.bridge.dwells == []
-
-
-def test_submit_motor_adjust_is_a_plain_async_forward():
-    th = _make_correction_toolhead(0.6)
-    dur = th.submit_motor_adjust(2, 0, 1, 0.05, 5.0, 100.0)
-    call = th.bridge.last_call
-    assert call["kind"] == "adjust"
-    assert (call["mcu_id"], call["axis_idx"], call["motor_idx"]) == (2, 0, 1)
-    assert call["delta_mm"] == pytest.approx(0.05)
+    assert call["kind"] == "nudge"
+    assert (call["mcu_id"], call["axis_idx"], call["motor_mask"]) == (7, 1, 0b100)
+    assert call["delta_mm"] == pytest.approx(0.3)
     assert dur == pytest.approx(0.6)
     assert th.bridge.waits == 0 and th.bridge.dwells == []

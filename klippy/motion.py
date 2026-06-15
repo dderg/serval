@@ -238,18 +238,10 @@ class Motion:
         self.move(curpos, speed)
         self.printer.send_event("toolhead:manual_move")
 
-    def submit_correction(
-        self, mcu_id, axis_idx, motor_idx, segments, speed, accel
-    ):
-        return self.bridge.submit_correction_sequence(
-            mcu_id, axis_idx, motor_idx, segments, speed, accel
-        )
-
-    def submit_motor_adjust(
-        self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
-    ):
-        return self.bridge.adjust_motor(
-            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
+    def submit_nudge(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
+        motor_mask = 1 << motor_idx
+        return self.bridge.submit_nudge(
+            mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
         )
 
     def set_extruder(self, extruder, extrude_pos):
