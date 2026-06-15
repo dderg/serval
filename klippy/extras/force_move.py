@@ -62,7 +62,19 @@ class ForceMove:
     cmd_FORCE_MOVE_help = "Manually move a stepper; invalidates kinematics"
 
     def cmd_FORCE_MOVE(self, gcmd):
-        raise gcmd.error(PHASE5_GATE % ("FORCE_MOVE",))
+        name = gcmd.get("STEPPER")
+        distance = gcmd.get_float("DISTANCE")
+        speed = gcmd.get_float("VELOCITY", above=0.0)
+        accel = gcmd.get_float("ACCEL", 0.0, minval=0.0)
+        logging.info(
+            "FORCE_MOVE %s distance=%.6f velocity=%.6f accel=%.6f",
+            name,
+            distance,
+            speed,
+            accel,
+        )
+        self.manual_move(name, distance, speed, accel)
+        gcmd.respond_info("FORCE_MOVE %s by %.3f mm" % (name, distance))
 
     cmd_SET_KINEMATIC_POSITION_help = "Force a low-level kinematic position"
 
