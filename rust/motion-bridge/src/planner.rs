@@ -564,7 +564,7 @@ fn run_loop(
                     }
                 };
                 let replan_us = replan_start.elapsed().as_micros() as u64;
-                let deadline_limited = replan_us >= REPLAN_WARN_BUDGET_US;
+                let deadline_limited = report.binding.deadline_truncated;
                 let emit_start = Instant::now();
                 let drained = match state.emit_committed(&thread_state.emit_ctx()) {
                     Ok(out) => out,

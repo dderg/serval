@@ -128,6 +128,10 @@ fn g1_g2_expired_deadline_ships_feasible_floor() {
         (gap - (1.0 - worst.ratio).max(0.0)).abs() < 1e-12,
         "the gap must be derived from the verified binding ratio, not fabricated",
     );
+    assert!(
+        profile.deadline_truncated,
+        "a floor shipped because the deadline expired must be flagged deadline_truncated",
+    );
 }
 
 /// G1 — the floor is feasible for a representative rest-to-rest straight move
@@ -197,6 +201,12 @@ fn g3_ample_deadline_converges_to_optimum() {
         bounded.total_time,
         rel,
     );
+    assert!(
+        !unbounded.deadline_truncated && !bounded.deadline_truncated,
+        "a converged solve is never deadline_truncated, no matter how long it takes — \
+         this is the bench bug: a slow-but-converged homing solve was falsely flagged \
+         by the old wall-clock heuristic",
+    );
 
     assert_eq!(bounded.samples.len(), unbounded.samples.len());
     for (i, (b, u)) in bounded
@@ -249,5 +259,10 @@ fn g4_genuine_infeasibility_still_fails_loud() {
     assert!(
         !is_success(profile.status),
         "genuine infeasibility must not be laundered into a success",
+    );
+    assert!(
+        !profile.deadline_truncated,
+        "a hard boundary infeasibility is not a deadline truncation — the deadline \
+         did not cause it, so it must not be flagged",
     );
 }

@@ -51,6 +51,7 @@ pub(crate) fn assemble(
         grid_scheme: grid_config.scheme,
         total_time,
         binding: verify.binding_summary.clone(),
+        deadline_truncated: crate::deadline::truncated(),
     }
 }
 

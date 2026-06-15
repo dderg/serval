@@ -133,4 +133,8 @@ pub struct TopProfile {
     pub grid_scheme: GridScheme,
     pub total_time: f64,
     pub binding: BindingSummary,
+    /// True when this profile's solve stopped refining because the real-time
+    /// deadline expired, so it may sit further below the kinematic limit than
+    /// a time-unbounded solve would. A slow-but-converged solve is `false`.
+    pub deadline_truncated: bool,
 }

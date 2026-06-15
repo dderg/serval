@@ -3,6 +3,7 @@ use std::time::Instant;
 
 thread_local! {
     static SOLVE_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static DEADLINE_TRUNCATED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// RAII guard restoring the previous deadline on drop. The solve deadline is an
@@ -40,4 +41,25 @@ pub fn current() -> Option<Instant> {
 #[must_use]
 pub fn expired() -> bool {
     matches!(current(), Some(d) if Instant::now() >= d)
+}
+
+/// Resets the per-thread truncation flag. Called at the start of every single
+/// segment solve so the flag reflects only that solve. A solve runs start-to-
+/// finish on one worker thread, so this thread-local is the correct scope —
+/// it never crosses threads or leaks between concurrently-running tests.
+pub fn clear_truncation() {
+    DEADLINE_TRUNCATED.with(|t| t.set(false));
+}
+
+/// Records that the active solve stopped refining because the deadline expired,
+/// so the shipped profile may be more conservative than the time-unbounded
+/// optimum. Distinct from a slow-but-converged solve, which never marks.
+pub fn mark_truncated() {
+    DEADLINE_TRUNCATED.with(|t| t.set(true));
+}
+
+/// Whether the current segment solve was cut short by the deadline.
+#[must_use]
+pub fn truncated() -> bool {
+    DEADLINE_TRUNCATED.with(Cell::get)
 }

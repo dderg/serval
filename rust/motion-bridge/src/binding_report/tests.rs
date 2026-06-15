@@ -52,6 +52,7 @@ fn summary(set: usize, count: u32, ratio: f64) -> ReplanBindingSummary {
             constraint: BindingConstraint::Velocity { set },
             ratio,
         }),
+        ..Default::default()
     }
 }
 
@@ -106,6 +107,7 @@ fn g5_anytime_event_matches_binding_and_gap() {
             constraint: BindingConstraint::Velocity { set: 0 },
             ratio: 0.94,
         }),
+        ..Default::default()
     };
 
     let fields = anytime_event_fields(&binding, &names);
@@ -133,6 +135,7 @@ fn g5_anytime_event_tracks_pa_jerk_family() {
             constraint: BindingConstraint::PaJerk { set: 1 },
             ratio: 0.88,
         }),
+        ..Default::default()
     };
 
     let fields = anytime_event_fields(&binding, &names);
@@ -155,6 +158,7 @@ fn g5_anytime_event_on_limit_and_no_binding() {
             constraint: BindingConstraint::AccelNorm { set: 0 },
             ratio: 1.0,
         }),
+        ..Default::default()
     };
     let f = anytime_event_fields(&on_limit, &names);
     assert!(f.gap.abs() < 1e-12, "on-limit gap must be 0; got {}", f.gap);

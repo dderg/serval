@@ -1155,6 +1155,7 @@ pub(crate) fn slp_solve_chain(
 
     for outer in 1..=SLP_MAX_OUTER_ITERS {
         if crate::deadline::expired() {
+            crate::deadline::mark_truncated();
             return Ok((
                 best_result,
                 SlpOutcome::Diverged {
@@ -1281,6 +1282,7 @@ fn run_slp9_loop(
     for outer in 1..=SLP9_MAX_OUTER_ITERS {
         let global_outer = outer_iters_already + outer;
         if crate::deadline::expired() {
+            crate::deadline::mark_truncated();
             return Ok(Slp9LoopOutcome::Done(
                 best_result,
                 SlpOutcome::Diverged {
@@ -1685,6 +1687,7 @@ fn ship_feasible_or_floor(
     match feasibility_floor(&result, chain, windows) {
         Some(floor) => {
             counters::mark_restoration();
+            crate::deadline::mark_truncated();
             let outer_iters = match outcome {
                 SlpOutcome::Diverged { outer_iters, .. } => outer_iters,
                 _ => 0,

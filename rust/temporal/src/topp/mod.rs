@@ -59,6 +59,7 @@ pub(crate) fn schedule_chain_with_refreeze_cap(
     refreeze_max: u32,
 ) -> Result<TopProfile, ScheduleError> {
     solver::counters::inc_chain_schedule(chain.n_points());
+    crate::deadline::clear_truncation();
 
     let v_start = endpoints.v_start;
     let v_end = endpoints.v_end;
@@ -147,8 +148,10 @@ pub(crate) fn schedule_chain_with_refreeze_cap(
         ToleranceMode::Fast => call_slp(1e-5)?,
         ToleranceMode::Auto => {
             let (fast_result, fast_outcome) = call_slp(1e-5)?;
-            if solver_outcome_is_success(&fast_result, &fast_outcome) || crate::deadline::expired()
-            {
+            if solver_outcome_is_success(&fast_result, &fast_outcome) {
+                (fast_result, fast_outcome)
+            } else if crate::deadline::expired() {
+                crate::deadline::mark_truncated();
                 (fast_result, fast_outcome)
             } else {
                 solver::counters::mark_auto_second_pass();
@@ -197,6 +200,7 @@ fn solve_with_refreeze(
             return Ok((r2, o2));
         }
         if crate::deadline::expired() && last_worst <= 1.0 + solver::SLP9_EPS_FEAS {
+            crate::deadline::mark_truncated();
             return Ok((r2, o2));
         }
         for (f, n) in b_freeze.iter_mut().zip(&r2.b) {
@@ -311,6 +315,7 @@ fn boundary_infeasible_profile(
         grid_scheme: crate::GridScheme::UniformArclength,
         total_time: f64::INFINITY,
         binding: BindingSummary::default(),
+        deadline_truncated: false,
     }
 }
 
@@ -340,6 +345,7 @@ fn max_reachable_infeasible_profile(
         grid_scheme: crate::GridScheme::UniformArclength,
         total_time: f64::INFINITY,
         binding: BindingSummary::default(),
+        deadline_truncated: false,
     }
 }
 
@@ -369,6 +375,7 @@ fn min_reachable_infeasible_profile(
         grid_scheme: crate::GridScheme::UniformArclength,
         total_time: f64::INFINITY,
         binding: BindingSummary::default(),
+        deadline_truncated: false,
     }
 }
 
