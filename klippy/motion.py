@@ -112,7 +112,7 @@ class Motion:
 
             self.engine = motion_engine._StubEngine()
         self._mcu_pending_end_time = 0.0
-        self.motion_lead = self.bridge.motion_lead_secs()
+        self.motion_lead = self.engine.motion_lead_secs()
         if self.motion_lead is None:
             self.motion_lead = 0.25
         self._motor_bindings = {}
@@ -240,7 +240,7 @@ class Motion:
 
     def submit_nudge(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
         motor_mask = 1 << motor_idx
-        return self.bridge.submit_nudge(
+        return self.engine.submit_nudge(
             mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
         )
 
