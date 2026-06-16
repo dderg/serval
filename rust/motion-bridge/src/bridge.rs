@@ -3139,14 +3139,13 @@ impl PyMotionBridge {
         );
 
         let nudge_dispatch: Arc<
-            dyn Fn(u32, u8, &trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
+            dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync,
         > = Arc::new(
-            move |mcu_id: u32,
-                  axis: u8,
-                  seg: &trajectory::ShapedSegment|
-                  -> Result<(), DispatchError> {
-                let tgt = crate::enqueue::nudge_target_config(&nudge_mcu_configs, mcu_id, axis)
-                    .ok_or(DispatchError::NudgeTargetMissing { mcu_id, axis })?;
+            move |mcu_id: u32, np: &crate::nudge::NudgePiece| -> Result<(), DispatchError> {
+                let axis = np.axis;
+                if !nudge_mcu_configs.iter().any(|c| c.mcu_id == mcu_id) {
+                    return Err(DispatchError::NudgeTargetMissing { mcu_id, axis });
+                }
 
                 let host_now = {
                     let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
@@ -3166,7 +3165,7 @@ impl PyMotionBridge {
                 let (t0, fresh) = nudge_anchor_arc
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .anchor_segment(seg.t_start, seg.t_end, host_now)
+                    .anchor_segment(np.piece.u_start, np.piece.u_end, host_now)
                     .map_err(|late| DispatchError::SegmentLate {
                         gap_s: late.gap_s,
                         seg_t_start: late.seg_t_start,
@@ -3174,8 +3173,8 @@ impl PyMotionBridge {
 
                 if fresh {
                     let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
-                    let h = crate::types::mcu_handle_from_raw(tgt.mcu_id);
-                    r.log_seg0_deficit(h, t0 + seg.t_start, t0);
+                    let h = crate::types::mcu_handle_from_raw(mcu_id);
+                    r.log_seg0_deficit(h, t0 + np.piece.u_start, t0);
                 }
 
                 let project = |proj_mcu_id: u32, host_secs: f64| -> u64 {
@@ -3193,36 +3192,43 @@ impl PyMotionBridge {
                     None::<f64>
                 };
 
-                let msgs = crate::enqueue::enqueue_segment(
-                    seg,
-                    std::slice::from_ref(&tgt),
+                let pieces = crate::enqueue::flatten_bezier_pieces(
+                    std::slice::from_ref(&np.piece),
                     t0,
-                    fresh,
+                    mcu_id,
+                    axis as usize,
                     host_now,
-                    lead_secs,
-                    project,
+                    &project,
                     max_piece_secs,
+                    np.motor_mask,
                 );
 
-                let nominal_freqs = nudge_nominal_freqs
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .clone();
-                for m in msgs {
-                    let nominal_freq = *nominal_freqs
-                        .get(&m.key.mcu_id)
-                        .ok_or(DispatchError::MissingNominalFreq(m.key.mcu_id))?;
+                if !pieces.is_empty() {
+                    let key = crate::pump::AxisKey { mcu_id, axis };
+                    let nominal_freq = {
+                        let freqs = nudge_nominal_freqs
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
+                        *freqs
+                            .get(&mcu_id)
+                            .ok_or(DispatchError::MissingNominalFreq(mcu_id))?
+                    };
                     {
                         let mut store = nudge_motion_history
                             .lock()
                             .unwrap_or_else(|p| p.into_inner());
-                        for (piece, _host_t) in &m.pieces {
-                            store.record(m.key, piece, nominal_freq);
+                        for (piece, _host_t) in &pieces {
+                            store.record(key, piece, nominal_freq);
                         }
                     }
-                    nudge_drain.add_sent(m.key.mcu_id, m.key.axis, m.pieces.len() as u32);
+                    nudge_drain.add_sent(mcu_id, axis, pieces.len() as u32);
                     nudge_pump_tx
-                        .send(crate::pump::PumpMsg::Enqueue(m))
+                        .send(crate::pump::PumpMsg::Enqueue(crate::pump::EnqueueMsg {
+                            key,
+                            pieces,
+                            fresh_stream: fresh,
+                            lead_secs,
+                        }))
                         .map_err(|_| DispatchError::PumpGone)?;
                 }
 

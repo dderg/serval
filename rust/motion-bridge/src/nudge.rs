@@ -1,10 +1,19 @@
 use crate::kinematics::SPATIAL_AXES;
-use nurbs::ScalarNurbs;
-use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
-use trajectory::ShapedSegment;
+use nurbs::bezier::BezierPiece;
 
 #[cfg(test)]
 mod tests;
+
+/// One trapezoid phase ready for dispatch: a monomial cubic in planner time
+/// (`piece.u_start`/`u_end` are absolute planner-time bounds) tagged with the
+/// target motor. Carries no `ScalarNurbs` — the phase rides straight into
+/// `flatten_bezier_pieces`, so a nudge never builds a knot vector.
+#[derive(Debug, Clone)]
+pub struct NudgePiece {
+    pub axis: u8,
+    pub motor_mask: u8,
+    pub piece: BezierPiece<f64>,
+}
 
 /// Returns `(accel_t, cruise_t, cruise_v)`.
 /// `accel <= 0` collapses to a single constant-velocity phase (`accel_t == 0`).
@@ -30,46 +39,13 @@ fn monomial_piece(t_start: f64, t_end: f64, c0: f64, c1: f64, c2: f64) -> Bezier
     }
 }
 
-fn linear_scalar_nurbs(t_start: f64, t_end: f64, pos_start: f64, vel: f64) -> ScalarNurbs<f64> {
-    bezier_pieces_to_nurbs(&[monomial_piece(t_start, t_end, pos_start, vel, 0.0)])
-}
-
-fn quad_scalar_nurbs(
-    t_start: f64,
-    t_end: f64,
-    pos_start: f64,
-    vel: f64,
-    half_accel: f64,
-) -> ScalarNurbs<f64> {
-    bezier_pieces_to_nurbs(&[monomial_piece(t_start, t_end, pos_start, vel, half_accel)])
-}
-
-fn constant_zero_nurbs(t_start: f64, t_end: f64) -> ScalarNurbs<f64> {
-    bezier_pieces_to_nurbs(&[BezierPiece::zero(t_start, t_end, 3)])
-}
-
-fn shaped_segment(
-    axis_idx: usize,
-    t_start: f64,
-    t_end: f64,
-    axis_curve: ScalarNurbs<f64>,
-    motor_mask: u8,
-) -> ShapedSegment {
-    let axes: Vec<ScalarNurbs<f64>> = (0..SPATIAL_AXES)
-        .map(|ax| {
-            if ax == axis_idx {
-                axis_curve.clone()
-            } else {
-                constant_zero_nurbs(t_start, t_end)
-            }
-        })
-        .collect();
-    ShapedSegment {
-        axes,
-        followers: vec![],
-        t_start,
-        t_end,
-        motor_mask,
+fn push_phase(out: &mut Vec<NudgePiece>, axis: u8, motor_mask: u8, piece: BezierPiece<f64>) {
+    if piece.u_end > piece.u_start {
+        out.push(NudgePiece {
+            axis,
+            motor_mask,
+            piece,
+        });
     }
 }
 
@@ -80,7 +56,7 @@ pub fn plan_nudge_profile(
     accel: f64,
     motor_mask: u8,
     t_start_base: f64,
-) -> Result<Vec<ShapedSegment>, String> {
+) -> Result<Vec<NudgePiece>, String> {
     if !delta_mm.is_finite() || !speed.is_finite() || speed <= 0.0 {
         return Err(format!("nudge: bad speed {speed} / delta {delta_mm}"));
     }
@@ -96,59 +72,69 @@ pub fn plan_nudge_profile(
     let sign = delta_mm.signum();
     let (accel_t, cruise_t, cruise_v) = calc_move_time(delta_mm, speed, accel);
 
+    let mut segs = Vec::with_capacity(3);
+
     if accel_t == 0.0 {
         let t0 = t_start_base;
         let t1 = t_start_base + cruise_t;
-        let curve = linear_scalar_nurbs(t0, t1, 0.0, sign * speed);
-        return Ok(vec![shaped_segment(ax, t0, t1, curve, motor_mask)]);
+        push_phase(
+            &mut segs,
+            axis_idx,
+            motor_mask,
+            monomial_piece(t0, t1, 0.0, sign * speed, 0.0),
+        );
+    } else {
+        let half_accel = 0.5 * accel * sign;
+        let accel_end_pos = half_accel * accel_t * accel_t;
+
+        let accel_t0 = t_start_base;
+        let accel_t1 = t_start_base + accel_t;
+        push_phase(
+            &mut segs,
+            axis_idx,
+            motor_mask,
+            monomial_piece(accel_t0, accel_t1, 0.0, 0.0, half_accel),
+        );
+
+        if cruise_t > 0.0 {
+            let cruise_start = t_start_base + accel_t;
+            let cruise_end = t_start_base + accel_t + cruise_t;
+            push_phase(
+                &mut segs,
+                axis_idx,
+                motor_mask,
+                monomial_piece(
+                    cruise_start,
+                    cruise_end,
+                    accel_end_pos,
+                    sign * cruise_v,
+                    0.0,
+                ),
+            );
+        }
+
+        let decel_start = t_start_base + accel_t + cruise_t;
+        let decel_end = decel_start + accel_t;
+        let cruise_end_pos = accel_end_pos + sign * cruise_v * cruise_t;
+        push_phase(
+            &mut segs,
+            axis_idx,
+            motor_mask,
+            monomial_piece(
+                decel_start,
+                decel_end,
+                cruise_end_pos,
+                sign * cruise_v,
+                -half_accel,
+            ),
+        );
     }
 
-    let half_accel = 0.5 * accel * sign;
-    let accel_end_pos = half_accel * accel_t * accel_t;
-
-    let mut segs = Vec::with_capacity(3);
-
-    let accel_t0 = t_start_base;
-    let accel_t1 = t_start_base + accel_t;
-    let accel_seg = shaped_segment(
-        ax,
-        accel_t0,
-        accel_t1,
-        quad_scalar_nurbs(accel_t0, accel_t1, 0.0, 0.0, half_accel),
-        motor_mask,
-    );
-    segs.push(accel_seg);
-
-    if cruise_t > 0.0 {
-        let cruise_start = t_start_base + accel_t;
-        let cruise_end = t_start_base + accel_t + cruise_t;
-        let curve = linear_scalar_nurbs(cruise_start, cruise_end, accel_end_pos, sign * cruise_v);
-        segs.push(shaped_segment(
-            ax,
-            cruise_start,
-            cruise_end,
-            curve,
-            motor_mask,
+    if segs.is_empty() {
+        return Err(format!(
+            "nudge: degenerate move (delta {delta_mm}, speed {speed}, accel {accel}) produced no phases"
         ));
     }
-
-    let decel_start = t_start_base + accel_t + cruise_t;
-    let decel_end = decel_start + accel_t;
-    let cruise_end_pos = accel_end_pos + sign * cruise_v * cruise_t;
-    let decel_curve = quad_scalar_nurbs(
-        decel_start,
-        decel_end,
-        cruise_end_pos,
-        sign * cruise_v,
-        -half_accel,
-    );
-    segs.push(shaped_segment(
-        ax,
-        decel_start,
-        decel_end,
-        decel_curve,
-        motor_mask,
-    ));
 
     Ok(segs)
 }

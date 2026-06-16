@@ -316,8 +316,8 @@ fn counting_dispatch() -> (
 }
 
 fn noop_nudge_dispatch()
--> Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> {
-    Arc::new(|_mcu_id: u32, _axis: u8, _seg: &ShapedSegment| Ok(()))
+-> Arc<dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_mcu_id: u32, _np: &crate::nudge::NudgePiece| Ok(()))
 }
 
 /// Loosened fit tolerance for fast planning in tests (mirrors

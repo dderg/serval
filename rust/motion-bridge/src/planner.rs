@@ -192,7 +192,7 @@ impl PlannerHandle {
         config: PlannerConfig,
         dispatch: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
         nudge_dispatch: Arc<
-            dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
+            dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync,
         >,
     ) -> Self {
         let (tx, rx) = unbounded();
@@ -499,7 +499,9 @@ fn run_loop(
     mut config: PlannerConfig,
     mut state: ShaperState,
     dispatch: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
-    nudge_dispatch: Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
+    nudge_dispatch: Arc<
+        dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync,
+    >,
     last_move_time_bits: Arc<AtomicU64>,
     commit_fire_count: Arc<AtomicU32>,
 ) {
@@ -893,9 +895,9 @@ fn run_loop(
                         p.motor_mask,
                         t_base,
                     )?;
-                    let total_dur: f64 = segs.iter().map(|s| s.t_end - s.t_start).sum();
+                    let total_dur: f64 = segs.iter().map(|s| s.piece.u_end - s.piece.u_start).sum();
                     for seg in &segs {
-                        nudge_dispatch(p.mcu_id, p.axis, seg)
+                        nudge_dispatch(p.mcu_id, seg)
                             .map_err(|e| format!("nudge dispatch: {e}"))?;
                     }
                     state.advance_idle(t_base + total_dur);

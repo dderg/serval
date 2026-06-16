@@ -17,8 +17,8 @@ fn counting_dispatch() -> (
 }
 
 fn noop_nudge_dispatch()
--> Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> {
-    Arc::new(|_mcu_id: u32, _axis: u8, _seg: &ShapedSegment| Ok(()))
+-> Arc<dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_mcu_id: u32, _np: &crate::nudge::NudgePiece| Ok(()))
 }
 
 fn relaxed_config() -> PlannerConfig {
@@ -782,11 +782,12 @@ fn flush_then_move_dispatches_without_error() {
 fn nudge_dispatches_masked_pieces_and_advances_last_move_time_only() {
     let dispatched = Arc::new(std::sync::Mutex::new(Vec::<(u32, u8, u8)>::new()));
     let d2 = Arc::clone(&dispatched);
-    let nudge_cb: Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
-        Arc::new(move |mcu_id: u32, axis: u8, seg: &ShapedSegment| {
-            d2.lock().unwrap().push((mcu_id, axis, seg.motor_mask));
-            Ok(())
-        });
+    let nudge_cb: Arc<
+        dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync,
+    > = Arc::new(move |mcu_id: u32, np: &crate::nudge::NudgePiece| {
+        d2.lock().unwrap().push((mcu_id, np.axis, np.motor_mask));
+        Ok(())
+    });
     let handle = PlannerHandle::spawn(relaxed_config(), noop_dispatch(), nudge_cb);
     let lmt0 = handle.last_move_time();
     let (tx, rx) = crossbeam_channel::bounded(1);
@@ -827,11 +828,12 @@ fn noop_dispatch() -> Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + 
 fn nudge_after_move_not_in_past() {
     let nudge_log = Arc::new(std::sync::Mutex::new(Vec::<(f64, f64)>::new()));
     let nl = Arc::clone(&nudge_log);
-    let nudge_cb: Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
-        Arc::new(move |_mcu_id: u32, _axis: u8, seg: &ShapedSegment| {
-            nl.lock().unwrap().push((seg.t_start, seg.t_end));
-            Ok(())
-        });
+    let nudge_cb: Arc<
+        dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync,
+    > = Arc::new(move |_mcu_id: u32, np: &crate::nudge::NudgePiece| {
+        nl.lock().unwrap().push((np.piece.u_start, np.piece.u_end));
+        Ok(())
+    });
     let (dispatch, move_log) = capturing_dispatch();
     let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, nudge_cb);
 
@@ -877,11 +879,12 @@ fn move_after_nudge_timeline_monotone() {
     let (dispatch, move_log) = capturing_dispatch();
     let nudge_log = Arc::new(std::sync::Mutex::new(Vec::<(f64, f64)>::new()));
     let nl = Arc::clone(&nudge_log);
-    let nudge_cb: Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
-        Arc::new(move |_mcu_id: u32, _axis: u8, seg: &ShapedSegment| {
-            nl.lock().unwrap().push((seg.t_start, seg.t_end));
-            Ok(())
-        });
+    let nudge_cb: Arc<
+        dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync,
+    > = Arc::new(move |_mcu_id: u32, np: &crate::nudge::NudgePiece| {
+        nl.lock().unwrap().push((np.piece.u_start, np.piece.u_end));
+        Ok(())
+    });
     let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, nudge_cb);
 
     let (tx, rx) = crossbeam_channel::bounded(1);

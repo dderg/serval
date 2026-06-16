@@ -2,6 +2,7 @@ use crate::dispatch::McuAxisConfig;
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
 use crate::pump::{AxisKey, EnqueueMsg};
 use nurbs::ScalarNurbs;
+use nurbs::bezier::BezierPiece;
 use runtime::piece_ring::PieceEntry;
 use trajectory::ShapedSegment;
 
@@ -36,22 +37,6 @@ pub(crate) fn lane_curve(
         });
     }
     acc.expect("kinematics lane with all-zero weights is a module construction bug")
-}
-
-/// Restrict a full mcu_configs set to a single (mcu, axis) target for an overlay
-/// nudge: returns the one config for `mcu_id` with its axis list narrowed to
-/// `[axis]`, or None if that MCU isn't present. All other per-axis config data
-/// is preserved (enqueue indexes it by global axis index).
-pub fn nudge_target_config(
-    mcu_configs: &[McuAxisConfig],
-    mcu_id: u32,
-    axis: u8,
-) -> Option<McuAxisConfig> {
-    mcu_configs.iter().find(|c| c.mcu_id == mcu_id).map(|c| {
-        let mut cfg = c.clone();
-        cfg.axes = vec![usize::from(axis)];
-        cfg
-    })
 }
 
 pub fn enqueue_segment<P>(
@@ -135,6 +120,36 @@ where
     P: Fn(u32, f64) -> u64,
 {
     let bps = nurbs::bezier::extract_bezier_pieces(curve);
+    flatten_bezier_pieces(
+        &bps,
+        t0,
+        mcu_id,
+        axis_idx,
+        host_now,
+        project,
+        max_piece_secs,
+        motor_mask,
+    )
+}
+
+/// Flatten a contiguous run of monomial Bézier pieces straight into dispatchable
+/// `PieceEntry`s — the polynomial path a nudge uses to skip the `ScalarNurbs`
+/// round-trip entirely. `flatten_axis` reaches this after extracting pieces from
+/// a curve; a nudge builds its trapezoid phases directly and calls in here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn flatten_bezier_pieces<P>(
+    bps: &[BezierPiece<f64>],
+    t0: f64,
+    mcu_id: u32,
+    axis_idx: usize,
+    host_now: f64,
+    project: &P,
+    max_piece_secs: Option<f64>,
+    motor_mask: u8,
+) -> Vec<(PieceEntry, f64)>
+where
+    P: Fn(u32, f64) -> u64,
+{
     let mut merged: Vec<MergedPiece> = Vec::with_capacity(bps.len());
 
     for bp in bps.iter() {

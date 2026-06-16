@@ -180,8 +180,10 @@ fn main() {
         });
 
     let noop_nudge: Arc<
-        dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
-    > = Arc::new(|_mcu_id: u32, _axis: u8, _seg: &ShapedSegment| Ok(()));
+        dyn Fn(u32, &motion_bridge_native::nudge::NudgePiece) -> Result<(), DispatchError>
+            + Send
+            + Sync,
+    > = Arc::new(|_mcu_id: u32, _np: &motion_bridge_native::nudge::NudgePiece| Ok(()));
     let mut cfg = trident_config();
     cfg.limit_sections = trident_limit_sections();
     let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge);

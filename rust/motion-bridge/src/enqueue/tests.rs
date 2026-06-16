@@ -1,6 +1,5 @@
 use super::*;
 use crate::dispatch::{AXIS_X, AXIS_Y, KINEMATICS_COREXY, McuCaps};
-use crate::enqueue::nudge_target_config;
 use crate::kinematics::KinematicsModule;
 
 fn constant_axis(value: f64, n_pieces: usize, piece_dur: f64) -> ScalarNurbs<f64> {
@@ -708,34 +707,6 @@ fn enqueue_stamps_motor_mask_onto_every_piece() {
     assert!(all_pieces.iter().all(|(p, _)| p.motor_mask == 0b0000_0010));
 }
 
-fn test_mcu_config(mcu_id: u32, axes: Vec<usize>) -> McuAxisConfig {
-    McuAxisConfig {
-        mcu_id,
-        axes,
-        kinematics: 1,
-        caps: McuCaps {
-            total_piece_memory: 62 * 1024,
-        },
-    }
-}
-
-#[test]
-fn nudge_target_config_isolates_one_mcu_and_one_axis() {
-    // Two MCUs: H7 has axes [0,1] (A/B), F446 has axis [2] (Z). A nudge for
-    // a Z motor on the F446 must NOT touch the H7, and must restrict to axis 2.
-    let cfgs = vec![
-        test_mcu_config(10, vec![0, 1]),
-        test_mcu_config(20, vec![2]),
-    ];
-    let tgt = nudge_target_config(&cfgs, 20, 2).expect("F446 present");
-    assert_eq!(tgt.mcu_id, 20);
-    assert_eq!(tgt.axes, vec![2usize]);
-
-    assert!(nudge_target_config(&cfgs, 99, 2).is_none());
-    let h7 = nudge_target_config(&cfgs, 10, 0).unwrap();
-    assert_eq!(h7.axes, vec![0usize]);
-}
-
 #[test]
 fn overlay_pieces_are_relativized_to_start_at_zero() {
     // A curve whose first piece starts at b0=0.5mm (non-zero) must be shifted
@@ -879,40 +850,4 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
             "piece {i} must start at 0 (relativized), got b0={b0}"
         );
     }
-}
-
-#[test]
-fn nudge_segment_through_restricted_config_emits_single_axis_only() {
-    // A masked segment (curve on axis 2) restricted to the F446 (axes [2]) must
-    // produce pieces ONLY for axis 2 — not the constant-0 axes 0/1 — and only
-    // for mcu 20. This is the exact fan-out that faulted the H7.
-    let seg = test_shaped_segment_single_axis(2, 0b0000_0100);
-    let cfgs = vec![
-        test_mcu_config(10, vec![0, 1]),
-        test_mcu_config(20, vec![2]),
-    ];
-    let tgt = nudge_target_config(&cfgs, 20, 2).unwrap();
-    let msgs = enqueue_segment(
-        &seg,
-        std::slice::from_ref(&tgt),
-        0.0,
-        true,
-        0.0,
-        0.25,
-        |_id, s| (s * 1e6) as u64,
-        None,
-    );
-    assert!(!msgs.is_empty(), "nudge must produce at least one piece");
-    assert!(
-        msgs.iter().all(|m| m.key.mcu_id == 20 && m.key.axis == 2),
-        "all pieces must be on mcu_id=20 axis=2, got: {:?}",
-        msgs.iter()
-            .map(|m| (m.key.mcu_id, m.key.axis))
-            .collect::<Vec<_>>()
-    );
-    let all: Vec<_> = msgs.iter().flat_map(|m| m.pieces.iter()).collect();
-    assert!(
-        all.iter().all(|(p, _)| p.motor_mask == 0b0000_0100),
-        "all pieces must carry motor_mask=4"
-    );
 }

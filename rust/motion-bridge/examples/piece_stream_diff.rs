@@ -61,9 +61,12 @@ fn recording_dispatch() -> (
     (cb, recorded)
 }
 
-fn noop_nudge_dispatch()
--> Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> {
-    Arc::new(|_mcu_id: u32, _axis: u8, _seg: &ShapedSegment| Ok(()))
+fn noop_nudge_dispatch() -> Arc<
+    dyn Fn(u32, &motion_bridge_native::nudge::NudgePiece) -> Result<(), DispatchError>
+        + Send
+        + Sync,
+> {
+    Arc::new(|_mcu_id: u32, _np: &motion_bridge_native::nudge::NudgePiece| Ok(()))
 }
 
 fn smooth_zv_186hz_config() -> PlannerConfig {
