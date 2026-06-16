@@ -1,31 +1,26 @@
 use super::*;
-use crate::multi::junction::JunctionKind;
 use crate::{
     BindingConstraint, BindingSummary, GridSample, GridScheme, SolveStatus, TopProfile,
     WorstBinding,
 };
 
 #[test]
-fn partition_splits_only_at_corners() {
-    let kinds = [
-        JunctionKind::Smooth,
-        JunctionKind::Corner,
-        JunctionKind::Smooth,
-    ];
-    let chains = partition_chains(4, &kinds);
+fn partition_splits_only_at_non_collinear() {
+    let collinear = [true, false, true];
+    let chains = partition_chains(4, &collinear);
     assert_eq!(chains, vec![0..=1, 2..=3]);
 }
 
 #[test]
-fn partition_all_smooth_is_one_chain() {
-    let kinds = [JunctionKind::Smooth, JunctionKind::Smooth];
-    assert_eq!(partition_chains(3, &kinds), vec![0..=2]);
+fn partition_all_collinear_is_one_chain() {
+    let collinear = [true, true];
+    assert_eq!(partition_chains(3, &collinear), vec![0..=2]);
 }
 
 #[test]
-fn partition_all_corners_is_all_singletons() {
-    let kinds = [JunctionKind::Corner, JunctionKind::Corner];
-    assert_eq!(partition_chains(3, &kinds), vec![0..=0, 1..=1, 2..=2]);
+fn partition_none_collinear_is_all_singletons() {
+    let collinear = [false, false];
+    assert_eq!(partition_chains(3, &collinear), vec![0..=0, 1..=1, 2..=2]);
 }
 
 #[test]
@@ -52,6 +47,7 @@ fn slice_duplicates_junction_sample_and_splits_time() {
         grid_scheme: GridScheme::UniformArclength,
         total_time: 0.4,
         binding: BindingSummary::default(),
+        deadline_truncated: false,
     };
     let per_segment = slice_chain_profile(&chain_profile, &ranges);
     assert_eq!(per_segment.len(), 2);
@@ -83,6 +79,7 @@ fn binding_summary_assigned_to_first_slice_only() {
             ratio: 1.0,
             grid_index: 2,
             s: 2.0,
+            kind: crate::LimitKind::Config,
         }),
     };
     let chain_profile = TopProfile {
@@ -91,6 +88,7 @@ fn binding_summary_assigned_to_first_slice_only() {
         grid_scheme: GridScheme::UniformArclength,
         total_time: 1.2,
         binding: chain_binding,
+        deadline_truncated: false,
     };
     let per_segment = slice_chain_profile(&chain_profile, &ranges);
     assert_eq!(per_segment.len(), 3);

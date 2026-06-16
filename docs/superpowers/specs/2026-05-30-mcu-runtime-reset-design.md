@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-30
 **Status:** Design — approved, pending spec review
-**Area:** MCU motion engine (`rust/runtime`, `rust/kalico-c-api`), C command surface (`src/stepper.c`), host init (`klippy/motion_toolhead.py`)
+**Area:** MCU motion engine (`rust/runtime`, `rust/c-api`), C command surface (`src/stepper.c`), host init (`klippy/motion_toolhead.py`)
 
 ## Problem
 
@@ -12,7 +12,7 @@ only ever grows:
 ```rust
 // rust/runtime/src/engine.rs:196-201
 if self.ring_alloc_cursor + ring_depth > total_ring_pieces {
-    return KALICO_ERR_RING_FULL;
+    return RUNTIME_ERR_RING_FULL;
 }
 let offset = self.ring_alloc_cursor;
 self.ring_alloc_cursor += ring_depth;
@@ -33,7 +33,7 @@ them.
 So on any reconnect-without-reboot — the in-console `RESTART` gcode, a
 `systemctl restart klipper`, or a klippy crash + reconnect — the cursor is already at
 or near `total_ring_pieces`, the re-emitted `configure_axis` overflows, returns
-`KALICO_ERR_RING_FULL`, and the C handler calls
+`RUNTIME_ERR_RING_FULL`, and the C handler calls
 `shutdown("configure_axis rejected by runtime")`.
 
 The case that actually bites in practice is the **service / cold-process restart**: a
@@ -130,25 +130,25 @@ host-testable unit.
 This is a "full reset" per the agreed scope: it returns the engine to the same state
 `init_in_place` leaves it in, minus the immutable HW config and the running clock.
 
-### 2. FFI `kalico_runtime_reset` — `rust/kalico-c-api/src/runtime_ffi.rs`
+### 2. FFI `runtime_reset` — `rust/c-api/src/runtime_ffi.rs`
 
 ```rust
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kalico_runtime_reset(rt: *mut KalicoRuntime) -> i32
+pub unsafe extern "C" fn runtime_reset(rt: *mut Runtime) -> i32
 ```
 
-- Null + `INIT_DONE` checks (return `KALICO_ERR_NULL_PTR` / `KALICO_ERR_NOT_INIT`),
-  mirroring `kalico_runtime_configure_axis`.
+- Null + `INIT_DONE` checks (return `RUNTIME_ERR_NULL_PTR` / `RUNTIME_ERR_NOT_INIT`),
+  mirroring `runtime_configure_axis`.
 - Project `&mut IsrState` via `UnsafeCell::raw_get(addr_of!((*ctx).isr))` (same pattern
   as `configure_axis`), call `(*isr_ptr).engine.reset()`.
 - Clear the per-axis step queues (MCU build only): see §3.
-- Return `KALICO_OK`.
+- Return `RUNTIME_OK`.
 
 The FFI body assumes it runs inside the IRQ-disabled window the C caller establishes
 (§4); it performs only memory writes, no blocking.
 
 After regenerating, the prototype lands in the cbindgen header (do **not** hand-edit;
-regenerate via `cargo run -p kalico-c-api --bin gen-headers`).
+regenerate via `cargo run -p c-api --bin gen-headers`).
 
 ### 3. Step-queue clear — `rust/runtime/src/step_queue.rs`
 
@@ -174,22 +174,22 @@ counters is a complete clear. The FFI (§2) calls `reset_all_queues()` on MCU bu
 on host/test builds there is no `step_queues` global, so the call is `#[cfg]`-compiled
 out (matching how `queue_for_axis` / `resolve_queue_ptr` are gated).
 
-### 4. C command `kalico_runtime_reset` — `src/stepper.c`
+### 4. C command `runtime_reset` — `src/stepper.c`
 
 Thin foreground `DECL_COMMAND`, no args:
 
 ```c
-void command_kalico_runtime_reset(uint32_t *args) {
+void command_runtime_reset(uint32_t *args) {
     (void)args;
     if (!runtime_handle)
         shutdown("runtime reset before runtime init");
     irqstatus_t flag = irq_save();
-    int32_t rc = kalico_runtime_reset(runtime_handle);
+    int32_t rc = runtime_reset(runtime_handle);
     irq_restore(flag);
     if (rc != 0)
         shutdown("runtime reset rejected");
 }
-DECL_COMMAND(command_kalico_runtime_reset, "kalico_runtime_reset");
+DECL_COMMAND(command_runtime_reset, "runtime_reset");
 ```
 
 - **IRQ guard in C** (`irq_save`/`irq_restore`, `board/irq.h`, already included in
@@ -211,7 +211,7 @@ the MCU speaks the new protocol) and **before** the per-axis configure loop:
 
 ```python
 try:
-    reset_cmd = mcu_obj.lookup_command("kalico_runtime_reset")
+    reset_cmd = mcu_obj.lookup_command("runtime_reset")
 except Exception:
     reset_cmd = None  # older firmware without the reset command
 if reset_cmd is not None:
@@ -237,7 +237,7 @@ consistent; no additional host-side accounting change is required.
 ## Build / wiring
 
 - Add the `#[unsafe(no_mangle)]` FFI, then regenerate the cbindgen header:
-  `cargo run -p kalico-c-api --bin gen-headers` (header is `DO NOT EDIT`).
+  `cargo run -p c-api --bin gen-headers` (header is `DO NOT EDIT`).
 - `make clean` between H7 and F446 C builds (msgid descriptors / oid types differ).
 - Both MCUs run the fork's firmware; the new command must be present on both.
 
@@ -272,8 +272,8 @@ consistent; no additional host-side accounting change is required.
 |---|---|
 | `rust/runtime/src/engine.rs` | Add `Engine::reset(&mut self)`. |
 | `rust/runtime/src/step_queue.rs` | Add MCU-gated `reset_all_queues()`. |
-| `rust/kalico-c-api/src/runtime_ffi.rs` | Add `kalico_runtime_reset` FFI. |
-| `rust/kalico-c-api/include/kalico_runtime.h` | Regenerate (cbindgen). |
-| `src/stepper.c` | Add `command_kalico_runtime_reset` + `DECL_COMMAND`. |
-| `klippy/motion_toolhead.py` | Send `kalico_runtime_reset` per MCU before the configure loop. |
+| `rust/c-api/src/runtime_ffi.rs` | Add `runtime_reset` FFI. |
+| `rust/c-api/include/runtime.h` | Regenerate (cbindgen). |
+| `src/stepper.c` | Add `command_runtime_reset` + `DECL_COMMAND`. |
+| `klippy/motion_toolhead.py` | Send `runtime_reset` per MCU before the configure loop. |
 | `rust/runtime/tests/` | Regression + idempotency + preservation tests. |

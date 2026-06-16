@@ -11,7 +11,7 @@ import pytest
 
 pytestmark = pytest.mark.needs_elf
 
-REPO = pathlib.Path(os.environ.get("KALICO_REPO", "/work"))
+REPO = pathlib.Path(os.environ.get("SIM_REPO", "/work"))
 LOGDIR = REPO / "tools" / "sim_klippy" / ".local-logs"
 KLIPPER_ELF = REPO / "out" / "klipper.elf"
 PRINTER_CFG = REPO / "tools" / "sim_klippy" / "printer.cfg"
@@ -20,7 +20,7 @@ KLIPPY_INPUT_TTY = "/tmp/klippy_sim_printer"
 KLIPPY_API = "/tmp/klippy_sim_api"
 KLIPPY_LOG = LOGDIR / "klippy.log"
 ELF_LOG = LOGDIR / "klipper_elf.log"
-SIM_SOCK_DIR = pathlib.Path("/tmp/kalico_sim_socks")
+SIM_SOCK_DIR = pathlib.Path("/tmp/mcu_sim_socks")
 
 
 def cleanup_prior():
@@ -46,7 +46,7 @@ def cleanup_prior():
 
 def spawn_tmc_emulators():
     SIM_SOCK_DIR.mkdir(exist_ok=True)
-    emu_script = REPO / "tools" / "kalico-sim" / "emulators" / "tmc5160_emu.py"
+    emu_script = REPO / "tools" / "mcu-sim" / "emulators" / "tmc5160_emu.py"
     procs = []
     for line in (27, 26):
         sock_path = SIM_SOCK_DIR / f"spi_cs_0_{line}"
@@ -67,7 +67,7 @@ def spawn_tmc_emulators():
 def spawn_elf():
     LOGDIR.mkdir(parents=True, exist_ok=True)
     elf_log = open(ELF_LOG, "wb")
-    shim_so = REPO / "tools" / "kalico-sim" / "libvtime" / "libsim_intercept.so"
+    shim_so = REPO / "tools" / "mcu-sim" / "libvtime" / "libsim_intercept.so"
     if not shim_so.exists():
         subprocess.check_call(
             ["make", "-C", str(shim_so.parent)],
@@ -76,8 +76,8 @@ def spawn_elf():
         )
     env = os.environ.copy()
     env["LD_PRELOAD"] = str(shim_so)
-    env["KALICO_SIM_SOCK_DIR"] = str(SIM_SOCK_DIR)
-    env["KALICO_SIM_SHIM_VERBOSE"] = "1"
+    env["MCU_SIM_SOCK_DIR"] = str(SIM_SOCK_DIR)
+    env["MCU_SIM_SHIM_VERBOSE"] = "1"
     proc = subprocess.Popen(
         [str(KLIPPER_ELF), "-I", SIM_SOCKET],
         stdout=elf_log,

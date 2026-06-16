@@ -7,7 +7,7 @@
 use core::sync::atomic::Ordering;
 
 use crate::engine::Engine;
-use crate::error::KALICO_OK;
+use crate::error::RUNTIME_OK;
 use crate::piece_ring::PieceEntry;
 use crate::state::SharedState;
 use crate::step_queue::{StepQueue, pop as queue_pop};
@@ -48,7 +48,7 @@ fn engine_with_z_axis(mode: StepMode) -> (Engine, Vec<PieceEntry>) {
         },
     ];
     let rc = engine.configure_axis(2, mode, 0.00125, 64, &bindings, TEST_TOTAL_RING_PIECES);
-    assert_eq!(rc, KALICO_OK);
+    assert_eq!(rc, RUNTIME_OK);
     (engine, storage)
 }
 
@@ -98,7 +98,7 @@ fn tickable_z_engine() -> (Engine, Vec<PieceEntry>) {
         &bindings,
         TEST_TOTAL_RING_PIECES,
     );
-    assert_eq!(rc, KALICO_OK);
+    assert_eq!(rc, RUNTIME_OK);
     (engine, storage)
 }
 
@@ -141,7 +141,7 @@ fn overlay_uses_own_step_frame_not_axis_frame() {
     let normal_start = TICK_CYCLES;
     assert_eq!(
         engine.push_pieces(2, &[moving_piece(normal_start, 0.0125, 0)], &mut storage),
-        KALICO_OK
+        RUNTIME_OK
     );
     drain_through_piece(&mut engine, &shared, &mut storage, &mut q, normal_start);
     let p_after_normal = engine.motor_state(2).unwrap().0;
@@ -162,7 +162,7 @@ fn overlay_uses_own_step_frame_not_axis_frame() {
         motor_mask: 0b0000_0010,
         _reserved: [0; 3],
     };
-    assert_eq!(engine.push_pieces(2, &[overlay], &mut storage), KALICO_OK);
+    assert_eq!(engine.push_pieces(2, &[overlay], &mut storage), RUNTIME_OK);
     drain_through_piece(&mut engine, &shared, &mut storage, &mut q, overlay_start);
 
     assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
@@ -235,7 +235,7 @@ impl OverlayHarness {
             &bindings,
             TEST_TOTAL_RING_PIECES,
         );
-        assert_eq!(rc, KALICO_OK);
+        assert_eq!(rc, RUNTIME_OK);
 
         let mut q = Box::new(StepQueue::new());
         let mut qs: [*mut StepQueue; MAX_AXES] = [core::ptr::null_mut(); MAX_AXES];
@@ -260,7 +260,7 @@ impl OverlayHarness {
         assert_eq!(
             self.engine
                 .push_pieces(self.overlay_axis as u8, &[piece], &mut self.storage),
-            KALICO_OK
+            RUNTIME_OK
         );
         self.last_motor_idx = motor_idx;
     }
@@ -325,7 +325,7 @@ impl OverlayHarness {
         assert_eq!(
             self.engine
                 .push_pieces(self.overlay_axis as u8, &[piece], &mut self.storage),
-            KALICO_OK
+            RUNTIME_OK
         );
         self.last_motor_idx = motor_idx;
 
@@ -434,7 +434,7 @@ fn overlay_multi_piece_no_sample_exceeds_max_steps() {
             &bindings,
             TEST_TOTAL_RING_PIECES
         ),
-        KALICO_OK
+        RUNTIME_OK
     );
 
     let mut q = StepQueue::new();
@@ -471,7 +471,7 @@ fn overlay_multi_piece_no_sample_exceeds_max_steps() {
             &[accel_piece, cruise_piece, decel_piece],
             &mut storage
         ),
-        KALICO_OK
+        RUNTIME_OK
     );
 
     let total_cycles = accel_cycles + cruise_cycles + decel_cycles;

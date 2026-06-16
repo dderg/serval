@@ -5,13 +5,13 @@ description: Use when reading MCU diagnostics / crash forensics from the kalico 
 
 # Reading MCU diagnostics & crash forensics
 
-The MCU emits structured records (no `printf`) over `KALICO_MSG_LOG` → the host
+The MCU emits structured records (no `printf`) over `MCU_MSG_LOG` → the host
 writes them to `~/printer_data/logs/events/<source>.jsonl`. **This is the source
 of truth for MCU diagnostics — it supersedes the old `klippy.log` text dump.**
 
 Sources: `mcu` (H7 / main), `bottom` (F4) — the value is each MCU's klippy name.
 Also present: `host-py` (mirrors klippy.log content, structured), `host-rust`
-(motion-bridge). Rotating: 32 MB × 5 backups (`.1`..`.5`) per source.
+(motion-engine). Rotating: 32 MB × 5 backups (`.1`..`.5`) per source.
 
 **For querying by session/print/level/field, use the `query-logs` skill** (LogsQL
 over VictoriaLogs). This skill covers the MCU-specific *features and event

@@ -41,7 +41,6 @@ struct PointRatios {
     worst_tag: BindingConstraint,
     max_jerk: f64,
     max_non_jerk: f64,
-    worst_non_jerk_tag: BindingConstraint,
 }
 
 fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
@@ -139,7 +138,6 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
     let mut worst_tag = BindingConstraint::None;
     let mut max_jerk = 0.0_f64;
     let mut max_non_jerk = 0.0_f64;
-    let mut worst_non_jerk_tag = BindingConstraint::None;
 
     for (ratio, tag) in entries {
         if ratio > worst_ratio {
@@ -158,7 +156,6 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
             }
         } else if ratio > max_non_jerk {
             max_non_jerk = ratio;
-            worst_non_jerk_tag = tag;
         }
     }
 
@@ -167,18 +164,12 @@ fn ratios_at(p: &PointInputs<'_>) -> PointRatios {
     } else {
         worst_tag
     };
-    let worst_non_jerk_tag = if max_non_jerk < SLACK_THRESHOLD {
-        BindingConstraint::None
-    } else {
-        worst_non_jerk_tag
-    };
 
     PointRatios {
         worst_ratio,
         worst_tag,
         max_jerk,
         max_non_jerk,
-        worst_non_jerk_tag,
     }
 }
 
@@ -212,10 +203,9 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
     let mut point_worst_ratio: Vec<f64> = Vec::with_capacity(n);
     let mut global_worst_ratio: f64 = f64::NEG_INFINITY;
     let mut global_worst_idx: usize = 0;
+    let mut global_worst_tag: BindingConstraint = BindingConstraint::None;
     let mut worst_jerk_ratio: f64 = 0.0;
     let mut worst_non_jerk_ratio: f64 = 0.0;
-    let mut worst_non_jerk_idx: usize = 0;
-    let mut worst_non_jerk_tag: BindingConstraint = BindingConstraint::None;
 
     for i in 0..n {
         let b_i = result.b[i];
@@ -271,7 +261,6 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
                     }
                 } else if ratio > pr.max_non_jerk {
                     pr.max_non_jerk = ratio;
-                    pr.worst_non_jerk_tag = tag;
                 }
                 if ratio > pr.worst_ratio {
                     pr.worst_ratio = ratio;
@@ -289,14 +278,13 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         if pr.worst_ratio > global_worst_ratio {
             global_worst_ratio = pr.worst_ratio;
             global_worst_idx = i;
+            global_worst_tag = pr.worst_tag;
         }
         if pr.max_jerk > worst_jerk_ratio {
             worst_jerk_ratio = pr.max_jerk;
         }
         if pr.max_non_jerk > worst_non_jerk_ratio {
             worst_non_jerk_ratio = pr.max_non_jerk;
-            worst_non_jerk_idx = i;
-            worst_non_jerk_tag = pr.worst_non_jerk_tag;
         }
 
         point_worst_ratio.push(pr.worst_ratio);
@@ -337,6 +325,7 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         if pr.worst_ratio > global_worst_ratio {
             global_worst_ratio = pr.worst_ratio;
             global_worst_idx = i;
+            global_worst_tag = pr.worst_tag;
         }
         if pr.worst_ratio > point_worst_ratio[i] {
             point_worst_ratio[i] = pr.worst_ratio;
@@ -347,8 +336,6 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
         }
         if pr.max_non_jerk > worst_non_jerk_ratio {
             worst_non_jerk_ratio = pr.max_non_jerk;
-            worst_non_jerk_idx = i;
-            worst_non_jerk_tag = pr.worst_non_jerk_tag;
         }
     }
 
@@ -363,16 +350,35 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
     let mut histogram: Vec<(BindingConstraint, u32)> = histogram_map.into_iter().collect();
     histogram.sort_by(|(ca, na), (cb, nb)| nb.cmp(na).then_with(|| ca.cmp(cb)));
 
-    let worst = if worst_non_jerk_ratio >= SLACK_THRESHOLD
+    // The reported worst binding spans ALL families (velocity, accel, jerk, and
+    // the PA families) — it answers "which limit is this move riding, and how
+    // close." A jerk-limited move sits on the jerk ceiling at ratio≈1; reporting
+    // only the non-jerk half (as the feasibility split does, for its looser jerk
+    // tolerance) made such moves falsely report velocity at ~0.5 and a bogus
+    // gap≈0.5. Feasibility still uses the jerk/non-jerk split below.
+    let worst = if global_worst_ratio >= SLACK_THRESHOLD
         && !matches!(
-            worst_non_jerk_tag,
+            global_worst_tag,
             BindingConstraint::None | BindingConstraint::Boundary
         ) {
+        let set = match global_worst_tag {
+            BindingConstraint::Velocity { set }
+            | BindingConstraint::AccelNorm { set }
+            | BindingConstraint::JerkNorm { set }
+            | BindingConstraint::PaVelocity { set }
+            | BindingConstraint::PaAccel { set }
+            | BindingConstraint::PaJerk { set } => Some(set),
+            BindingConstraint::None | BindingConstraint::Boundary => None,
+        };
+        let kind = set.map_or(crate::LimitKind::Config, |s| {
+            chain.limits_at(global_worst_idx).kind(s)
+        });
         Some(WorstBinding {
-            constraint: worst_non_jerk_tag,
-            ratio: worst_non_jerk_ratio,
-            grid_index: worst_non_jerk_idx,
-            s: chain.s[worst_non_jerk_idx],
+            constraint: global_worst_tag,
+            ratio: global_worst_ratio,
+            grid_index: global_worst_idx,
+            s: chain.s[global_worst_idx],
+            kind,
         })
     } else {
         None

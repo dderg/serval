@@ -114,6 +114,7 @@ fn replan_context() -> ReplanContext {
         grid_strategy: temporal::multi::GridStrategy::Fixed(20),
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     }
 }
 
@@ -1177,6 +1178,7 @@ fn single_axis_harness(v_max: f64, a_max: f64) -> (ShaperState, ReplanContext) {
         grid_strategy: temporal::multi::GridStrategy::Fixed(40),
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     };
 
     (state, ctx)
@@ -1252,6 +1254,7 @@ fn replan_with_positive_boundary_accel_and_short_first_segment_succeeds() {
         grid_strategy: temporal::multi::GridStrategy::Fixed(10),
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     };
 
     let mut state = ShaperState::new(&[0.0; 3], &ctx.chains);
@@ -1311,6 +1314,7 @@ fn corner_context_passthrough() -> ReplanContext {
         },
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     }
 }
 
@@ -1370,6 +1374,7 @@ fn witness_fallback_rung3_fires_when_rung1_and_rung2_both_infeasible() {
         },
         fallback_initial_v: 270.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     };
 
     let mut state = ShaperState::new(&[0.0; 3], &ctx.chains);
@@ -1583,6 +1588,7 @@ fn follower_replan_context(kernel_hz: Option<f64>, pa_gain: f64) -> ReplanContex
         grid_strategy: temporal::multi::GridStrategy::Fixed(20),
         fallback_initial_v: 0.0,
         safety_mode: SafetyMode::WorstCaseFuture,
+        force_full_resolve: false,
     }
 }
 
@@ -1822,4 +1828,20 @@ fn follower_only_retract_then_idle_then_move_holds_ledger() {
         (end - (-2.0)).abs() < 1e-3,
         "two -1mm retracts must leave the ledger at -2, got {end}"
     );
+}
+
+#[test]
+fn per_segment_limits_adds_feedrate_path_speed_set() {
+    let base = temporal::Limits::axis_boxes([1000.0; 3], [500_000.0; 3], [1.0e7; 3]);
+    let curve = nurbs::VectorNurbs::try_new(
+        1,
+        vec![0.0, 0.0, 1.0, 1.0],
+        vec![[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]],
+    )
+    .unwrap();
+    let feed = 494.0;
+    let limits = super::state::per_segment_limits(&curve, &base, feed);
+    let caps: Vec<f64> = limits.spatial_sets().map(|(_, s)| s.v_max).collect();
+    let has_feed = caps.iter().any(|v| (v - feed).abs() < 1e-6);
+    assert!(has_feed, "feed set missing; spatial v_max caps = {caps:?}");
 }

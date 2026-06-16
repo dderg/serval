@@ -130,7 +130,7 @@ def _probe_with_trip(trip_z, final_z):
     probe._endstop = object()
 
     class _Homing:
-        def trip_move(self, gcmd, toolhead, bridge, axis, *_args):
+        def trip_move(self, gcmd, toolhead, engine, axis, *_args):
             return [0.0, 0.0, trip_z], [0.0, 0.0, final_z]
 
     toolhead = _FakeToolhead(z=10.0)

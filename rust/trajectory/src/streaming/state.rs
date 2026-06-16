@@ -118,19 +118,11 @@ impl ShaperState {
                 self.t_dispatched
             };
 
-        let initial_v_raw = self.read_path_speed_at(t_freeze, ctx.fallback_initial_v);
         let a_max_path = (0..3)
             .map(|ax| ctx.limits.axis_accel_cap(ax))
             .fold(f64::MAX, f64::min);
-        let (initial_a, start_d2_override) = if initial_v_raw > 0.0 {
-            let axis_accels = self.read_axis_accels_at(t_freeze);
-            let path_a = self
-                .read_path_accel_at(t_freeze, 0.0)
-                .clamp(-a_max_path, a_max_path);
-            (path_a, axis_accels)
-        } else {
-            (0.0, None)
-        };
+        let (initial_v_raw, initial_a, start_d2_override) =
+            self.boundary_pin_at(t_freeze, ctx.fallback_initial_v, a_max_path);
 
         let prior_uncommitted = self.uncommitted_moves.clone();
         let prior_t_appended = self.t_appended;
@@ -168,30 +160,44 @@ impl ShaperState {
         });
         let split_us = split_start.elapsed().as_micros() as u64;
 
-        let window_segments = self.uncommitted_moves.len();
+        let freeze_idx = if ctx.force_full_resolve {
+            0
+        } else {
+            self.bounded_freeze_idx(t_freeze, prior_t_decel_start, &ctx.limits)
+        };
+
+        let (sub_initial_v_raw, sub_initial_a, sub_d2_override, t_sub) = if freeze_idx == 0 {
+            (initial_v_raw, initial_a, start_d2_override, t_freeze)
+        } else {
+            let t_sub = self.uncommitted_moves[freeze_idx].t_start;
+            let (v, a, d2) = self.boundary_pin_at(t_sub, ctx.fallback_initial_v, a_max_path);
+            (v, a, d2, t_sub)
+        };
+
+        let window_segments = self.uncommitted_moves.len() - freeze_idx;
 
         let plan_segments: Vec<PlanSegment<'_>> = self
             .uncommitted_moves
-            .iter()
+            .range(freeze_idx..)
             .map(|m| plan_segment_for(m, &ctx.limits))
             .collect();
 
         let boundary_v_cap = plan_segments
             .first()
             .map_or(f64::INFINITY, |s| boundary_path_speed_cap(s));
-        let initial_v = initial_v_raw.min(boundary_v_cap);
+        let initial_v = sub_initial_v_raw.min(boundary_v_cap);
 
         const REST_THRESHOLD_MM_S: f64 = 0.1;
 
         let (initial_v, initial_a, start_d2_override) = if initial_v < REST_THRESHOLD_MM_S {
             (0.0, 0.0, None)
-        } else if initial_a > 0.0 {
-            (initial_v, 0.0, start_d2_override)
+        } else if sub_initial_a > 0.0 {
+            (initial_v, 0.0, sub_d2_override)
         } else {
-            (initial_v, initial_a, start_d2_override)
+            (initial_v, sub_initial_a, sub_d2_override)
         };
 
-        let follower_history = self.follower_history_at(t_freeze, max_h, &self.uncommitted_moves);
+        let follower_history = self.follower_history_at(t_sub, max_h, &self.uncommitted_moves);
         let plan_input = PlanInput {
             segments: &plan_segments,
             grid_strategy: ctx.grid_strategy,
@@ -217,14 +223,15 @@ impl ShaperState {
             },
             time_offset,
             fallback_rung,
+            rebuild_freeze_idx,
         ) = match plan_velocity(&plan_input) {
-            Ok(out) => (out, t_freeze, 1u8),
+            Ok(out) => (out, t_sub, 1u8, freeze_idx),
             Err(rung1_err) => {
                 if let Some(rung2_out) =
                     try_rung2(was_replace_split, &prior_uncommitted, self, ctx, t_freeze)
                 {
                     let (out, offset) = rung2_out;
-                    (out, offset, 2u8)
+                    (out, offset, 2u8, 0)
                 } else {
                     match try_rung3(
                         self,
@@ -235,7 +242,7 @@ impl ShaperState {
                         &prior_planned_meta,
                         ctx,
                     ) {
-                        Ok((out, offset)) => (out, offset, 3u8),
+                        Ok((out, offset)) => (out, offset, 3u8, 0),
                         Err(rung3_err) => {
                             self.uncommitted_moves = prior_uncommitted;
                             self.t_appended = prior_t_appended;
@@ -259,8 +266,16 @@ impl ShaperState {
             self.replace_uncommitted_axis_pieces(axis_idx, time_offset, time_offset, &fitted);
         }
 
-        debug_assert_eq!(fitted.len(), self.uncommitted_moves.len());
-        for (m, f) in self.uncommitted_moves.iter_mut().zip(fitted.iter()) {
+        debug_assert_eq!(
+            fitted.len(),
+            self.uncommitted_moves.len() - rebuild_freeze_idx,
+            "bounded fitted count must match the re-solved tail length"
+        );
+        for (m, f) in self
+            .uncommitted_moves
+            .range_mut(rebuild_freeze_idx..)
+            .zip(fitted.iter())
+        {
             m.t_start = f.t_start + time_offset;
             m.t_end = f.t_end + time_offset;
         }
@@ -272,22 +287,22 @@ impl ShaperState {
 
         self.t_decel_start = find_decel_start_time(&fitted) + time_offset;
 
-        let new_fitted: Vec<FittedSegment> = fitted
-            .into_iter()
-            .map(|f| FittedSegment {
-                axes: [
-                    shift_nurbs_in_time(&f.axes[0], time_offset),
-                    shift_nurbs_in_time(&f.axes[1], time_offset),
-                    shift_nurbs_in_time(&f.axes[2], time_offset),
-                ],
-                t_start: f.t_start + time_offset,
-                t_end: f.t_end + time_offset,
-                virtual_s_of_t: f
-                    .virtual_s_of_t
-                    .as_ref()
-                    .map(|s| shift_nurbs_in_time(s, time_offset)),
-            })
-            .collect();
+        let tail_fitted = fitted.into_iter().map(|f| FittedSegment {
+            axes: [
+                shift_nurbs_in_time(&f.axes[0], time_offset),
+                shift_nurbs_in_time(&f.axes[1], time_offset),
+                shift_nurbs_in_time(&f.axes[2], time_offset),
+            ],
+            t_start: f.t_start + time_offset,
+            t_end: f.t_end + time_offset,
+            virtual_s_of_t: f
+                .virtual_s_of_t
+                .as_ref()
+                .map(|s| shift_nurbs_in_time(s, time_offset)),
+        });
+
+        self.planned_fitted.truncate(rebuild_freeze_idx);
+        self.planned_fitted.extend(tail_fitted);
 
         let new_meta: Vec<EmitSegmentMeta> = self
             .uncommitted_moves
@@ -297,7 +312,6 @@ impl ShaperState {
             })
             .collect();
 
-        self.planned_fitted = new_fitted;
         self.planned_meta = new_meta;
 
         if !freeze_zone_active {
@@ -408,6 +422,107 @@ impl ShaperState {
         Some(temporal::FollowerHistory { dt, axis_velocity })
     }
 
+    /// Smallest tail-start index whose `[t_sub, t_appended]` sub-window
+    /// provably contains the backward deceleration-reach of the just-appended
+    /// terminal `v=0` boundary, so freezing the prior solution's `(v,a)` at
+    /// `t_sub` is trajectory-neutral. Returns `0` (full window) for the cold
+    /// start / short-window case.
+    ///
+    /// The reach left-edge is the prior solve's terminal decel onset
+    /// (`prior_t_decel_start`, itself moved earlier by the new news on each
+    /// append) extended backward by `JERK_RAMP_SAFETY` analytic full-speed→0
+    /// braking intervals `v_cruise / a_brake`, where `v_cruise`/`a_brake` are
+    /// the spatial-XY velocity ceiling and tightest accel cap (Z is excluded —
+    /// its slow caps would otherwise blow the horizon up to the whole window).
+    /// The safety multiplier pads the analytic constant-accel braking time for
+    /// the jerk-limited S-curve ramp; the neutrality tests pin it down — at the
+    /// shipped value the bounded committed trajectory matches the full re-solve
+    /// to solver tolerance on both a smooth chain and the decel-to-corner stress
+    /// case. Because the new terminal is always `v=0` — the most aggressive
+    /// possible terminal — the new backward reach can never exceed this. If a
+    /// corner (chain boundary) sits at or
+    /// behind the reach-derived index, `t_sub` is snapped back to it — the
+    /// cleanest freeze point, where the prior solve pinned `v=0`. Snapping only
+    /// ever grows the sub-window. When no corner lies in the reach window (a
+    /// purely smooth chain), the reach-derived segment boundary is itself a
+    /// valid pin: the prior solution's `(v,a)` at that interior node is
+    /// invariant to the new terminal because the node sits before the backward
+    /// reach, so re-solving the suffix from that pinned boundary reproduces the
+    /// downstream profile to solver tolerance.
+    fn bounded_freeze_idx(
+        &self,
+        t_freeze: f64,
+        prior_t_decel_start: f64,
+        limits: &temporal::Limits,
+    ) -> usize {
+        let n = self.uncommitted_moves.len();
+        if n <= 1 {
+            return 0;
+        }
+        let v_cruise = (0..2)
+            .map(|ax| limits.axis_velocity_cap(ax))
+            .filter(|v| v.is_finite())
+            .fold(0.0_f64, f64::max);
+        let a_brake = (0..2)
+            .map(|ax| limits.axis_accel_cap(ax))
+            .filter(|a| a.is_finite())
+            .fold(f64::MAX, f64::min);
+        if v_cruise <= 0.0 || !a_brake.is_finite() || a_brake <= 0.0 {
+            return 0;
+        }
+        const JERK_RAMP_SAFETY: f64 = 10.0;
+        let braking_time = JERK_RAMP_SAFETY * v_cruise / a_brake;
+        let t_new_seg_start = self
+            .uncommitted_moves
+            .back()
+            .map_or(t_freeze, |m| m.t_start);
+        let t_subwindow_start =
+            prior_t_decel_start.min(t_new_seg_start) - braking_time - TIME_LOOKUP_TOLERANCE;
+
+        if t_subwindow_start <= t_freeze {
+            return 0;
+        }
+
+        let reach_idx = self
+            .uncommitted_moves
+            .iter()
+            .position(|m| m.t_end > t_subwindow_start)
+            .unwrap_or(0);
+
+        let mut idx = reach_idx;
+        while idx > 0 {
+            let prev = &self.uncommitted_moves[idx - 1].segment.xyz;
+            let cur = &self.uncommitted_moves[idx].segment.xyz;
+            if !temporal::multi::junction::are_collinear(prev, cur) {
+                return idx;
+            }
+            idx -= 1;
+        }
+        reach_idx
+    }
+
+    /// Reads the prior solution's `(path_speed, path_accel, per_axis_accels)`
+    /// at absolute time `t` from `planned_fitted`/`axes`. This is the boundary
+    /// state pinned into the next solve — at `t_freeze` for the dispatched
+    /// front, or at the bounded sub-window start `t_sub` for the frozen front.
+    fn boundary_pin_at(
+        &self,
+        t: f64,
+        fallback_v: f64,
+        a_max_path: f64,
+    ) -> (f64, f64, Option<[f64; 3]>) {
+        let v = self.read_path_speed_at(t, fallback_v);
+        if v > 0.0 {
+            let axis_accels = self.read_axis_accels_at(t);
+            let path_a = self
+                .read_path_accel_at(t, 0.0)
+                .clamp(-a_max_path, a_max_path);
+            (v, path_a, axis_accels)
+        } else {
+            (v, 0.0, None)
+        }
+    }
+
     pub(crate) fn read_path_speed_at(&self, t: f64, fallback: f64) -> f64 {
         let vx = self.axis_velocity_at(0, t);
         let vy = self.axis_velocity_at(1, t);
@@ -443,6 +558,18 @@ impl ShaperState {
         (0..self.axes.len())
             .map(|i| self.axis_position_at(i, self.t_appended).unwrap_or(0.0))
             .collect()
+    }
+
+    /// Diagnostic sampler over the unshaped planned pieces: `(position, velocity)`
+    /// for `axis_idx` at absolute planner time `t`, or `None` outside the
+    /// piece domain. Used by trajectory-neutrality tests to compare the bounded
+    /// and full re-solve committed output.
+    #[must_use]
+    pub fn sample_axis(&self, axis_idx: usize, t: f64) -> Option<(f64, f64)> {
+        Some((
+            self.axis_position_at(axis_idx, t)?,
+            self.axis_velocity_at(axis_idx, t).unwrap_or(0.0),
+        ))
     }
 
     pub fn advance_idle(&mut self, target_t: f64) {
@@ -927,12 +1054,15 @@ fn plan_segment_for<'a>(m: &'a UncommittedMove, base: &temporal::Limits) -> Plan
         && m.segment.feedrate_mm_s > 0.0
     {
         let follower_axes: Vec<usize> = m.segment.followers.iter().map(|f| f.axis_index).collect();
-        limits = limits.with_extra_sets(&[temporal::LimitSet {
-            axes: temporal::AxisSet::from_indices(&follower_axes),
-            v_max: m.segment.feedrate_mm_s,
-            a_max: f64::INFINITY,
-            j_max: f64::INFINITY,
-        }]);
+        limits = limits.with_extra_sets_of_kind(
+            &[temporal::LimitSet {
+                axes: temporal::AxisSet::from_indices(&follower_axes),
+                v_max: m.segment.feedrate_mm_s,
+                a_max: f64::INFINITY,
+                j_max: f64::INFINITY,
+            }],
+            temporal::LimitKind::Feedrate,
+        );
     }
     PlanSegment {
         temporal: temporal::multi::SegmentInput {
@@ -997,12 +1127,15 @@ pub(crate) fn per_segment_limits(
     }
 
     if feedrate_mm_s > 0.0 && chord_len > AXIS_INACTIVE_SPAN_EPS_MM {
-        limits = limits.with_extra_sets(&[temporal::LimitSet {
-            axes: temporal::AxisSet::spatial(),
-            v_max: feedrate_mm_s,
-            a_max: f64::INFINITY,
-            j_max: f64::INFINITY,
-        }]);
+        limits = limits.with_extra_sets_of_kind(
+            &[temporal::LimitSet {
+                axes: temporal::AxisSet::spatial(),
+                v_max: feedrate_mm_s,
+                a_max: f64::INFINITY,
+                j_max: f64::INFINITY,
+            }],
+            temporal::LimitKind::Feedrate,
+        );
     }
 
     limits

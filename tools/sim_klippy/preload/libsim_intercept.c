@@ -293,7 +293,7 @@ static void *control_accept_loop(void *unused) {
 
 __attribute__((constructor))
 static void shim_init(void) {
-    const char *v = getenv("KALICO_SIM_SHIM_VERBOSE");
+    const char *v = getenv("MCU_SIM_SHIM_VERBOSE");
     verbose = (v && v[0] == '1');
     real_open    = dlsym(RTLD_NEXT, "open");
     real_openat  = dlsym(RTLD_NEXT, "openat");
@@ -304,7 +304,7 @@ static void shim_init(void) {
     real_write   = dlsym(RTLD_NEXT, "write");
     real_fcntl   = dlsym(RTLD_NEXT, "fcntl");
     real_access  = dlsym(RTLD_NEXT, "access");
-    const char *sock_dir = getenv("KALICO_SIM_SOCK_DIR");
+    const char *sock_dir = getenv("MCU_SIM_SOCK_DIR");
     if (sock_dir) {
         snprintf(control_path, sizeof(control_path), "%s/sim_control", sock_dir);
         unlink(control_path);
@@ -559,9 +559,9 @@ static int spi_get_chip_socket(struct sim_fd_slot *slot) {
         errno = EIO;
         return -1;
     }
-    const char *sock_dir = getenv("KALICO_SIM_SOCK_DIR");
+    const char *sock_dir = getenv("MCU_SIM_SOCK_DIR");
     if (!sock_dir) {
-        LOG("KALICO_SIM_SOCK_DIR not set");
+        LOG("MCU_SIM_SOCK_DIR not set");
         errno = EIO;
         return -1;
     }

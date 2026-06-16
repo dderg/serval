@@ -74,7 +74,7 @@ skip_firmware_version_check = "True"
 # pins on the H7 sim. The real config wires endstop_pin to
 # ``tmc5160_stepper_<axis>1:virtual_endstop`` (DIAG line via SG_RESULT
 # threshold inside the TMC5160 emulator); under sim we trade fidelity
-# for coverage of the trsync / bridge / runtime homing path by
+# for coverage of the trsync / engine / runtime homing path by
 # repointing endstop_pin at a regular gpiochip line.
 #
 # Tests (see tools/sim_klippy/tests/test_g28_homing_actual.py) drive
@@ -92,8 +92,8 @@ skip_firmware_version_check = "True"
 # position_max / position_endstop are also shrunk (from 300 → 20). The
 # unmodified range produced a ~4.5 s homing move (corexy doubles the
 # stepper distance) which raced klippy's ~1 Hz tmc.py periodic stallguard
-# query against the bridge — a separate sim-infra bug surfaces as
-# "RuntimeError: bridge_call: transport closed" mid-homing, before
+# query against the engine — a separate sim-infra bug surfaces as
+# "RuntimeError: engine_call: transport closed" mid-homing, before
 # past-end-time can fire. Shrinking the range keeps the no-trigger move
 # under ~0.3 s so it completes inside one tmc-poll window.
 [stepper_x.config_set]

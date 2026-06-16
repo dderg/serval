@@ -4,7 +4,7 @@
 
 The EtherCAT servo drive energizes at claim time and stays energized for the
 session. `ec_rt_bringup()` runs the CiA 402 ladder to Operation Enabled before
-the endpoint even answers the claim handshake (`kalico-ethercat-rt.rs:70-89`,
+the endpoint even answers the claim handshake (`ethercat-rt.rs:70-89`,
 `bench/libecrt.c:186-206`), and every DC cycle re-asserts controlword `0x000F`
 (`libecrt.c:209-212`). De-energization happens only on endpoint process death.
 M84/M18, `SET_STEPPER_ENABLE`, idle_timeout, and `stepper_enable` status are
@@ -55,7 +55,7 @@ run unmodified for the servo.
 
 ### Host: the two genuinely new pieces
 
-- **`BridgeTorqueLine`** — exposes `set_digital(print_time, value)`, the same
+- **`MotionTorqueLine`** — exposes `set_digital(print_time, value)`, the same
   contract as `MCU_digital_out`, and forwards to the bridge as a SetTorque
   command. This is the transport adapter: the only place where "GPIO edge"
   becomes "CiA 402 transition". `StepperEnablePin` only ever calls
@@ -121,7 +121,7 @@ domain via the same mapping trajectory pieces already use for start times.
   execution — the ladder runs synchronously before the reply, so the result
   reflects whether Operation Enabled was reached (or the ladder failed). **For
   disable it is sent on acceptance** — validation passed and the ramp is
-  scheduled. The transport forces this asymmetry: `UnixNativeConn` is a
+  scheduled. The transport forces this asymmetry: `McuSerialConn` is a
   mutex-serialized request-reply socket that discards any frame not correlated
   to the in-flight call, so a response emitted after a future scheduled ramp
   would simply be dropped. Execution-time disable failures (pieces still
@@ -165,7 +165,7 @@ bench for stepper-like behavior.
 - Unchanged backstops: SIGTERM → graceful `ec_rt_disable()`; SIGKILL → the
   drive's SM communication watchdog (~100 ms); WKC loss ×2 → halt.
 - The bridge logs torque commands and rejections through its structured
-  tracing layer (`rust/motion-bridge/src/logging/`, JSONL pipeline; events
+  tracing layer (`rust/motion-engine/src/logging/`, JSONL pipeline; events
   `servo_torque_command` / `servo_torque_rejected`, subsystem `bridge`) — not
   `log_codes.rs`, which is the MCU wire-event table and is not routed for the
   endpoint (the endpoint is not an MCU). The endpoint itself keeps stderr
@@ -179,10 +179,10 @@ bench for stepper-like behavior.
   heartbeat). Extends `stub_loop` / `stub_lifecycle` /
   `endpoint_supervision`.
 - **Lifecycle coverage**: the stub integration tests
-  (`rust/kalico-ethercat-rt/tests/torque_lifecycle.rs`) plus the Python unit
+  (`rust/ethercat-rt/tests/torque_lifecycle.rs`) plus the Python unit
   tests (`test/test_servo_torque.py`) — M84 → `get_status` shows
   `servo_x: false` → next G1 re-enables; idle_timeout path. End-to-end
-  behavior is validated on the EtherCAT workbench (kalico-sim does not
+  behavior is validated on the EtherCAT workbench (mcu-sim does not
   exercise EtherCAT endpoints yet).
 - **Bench**: claim leaves the shaft free, first move stiffens it, M84 frees
   it (with 605Ch=0). Host-side only: bridge cdylib rebuild on the Pi, no MCU

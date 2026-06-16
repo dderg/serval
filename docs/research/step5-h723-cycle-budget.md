@@ -16,7 +16,7 @@ Pass A and Pass B above were collected in separate invocations (Pass B via
 `--skip-isolate` first, then Pass A by itself). Running both passes in one
 invocation trips a sticky liveness fault: Pass A's ~25 ms busy-wait stalls
 kalico's foreground heartbeat → `kalico_liveness_ok=false` → Pass B then
-refuses with `KALICO_BENCH_ERR_LIVENESS (-100)`. Power-cycle clears it.
+refuses with `SIM_BENCH_ERR_LIVENESS (-100)`. Power-cycle clears it.
 
 The bench command also needed a firmware fix: the original tight `sendf`
 loop emitting `kalico_bench_sample` responses overflowed the 192-byte
@@ -39,11 +39,11 @@ can't pull `TraceSample`s off the SPSC ring. The ring is sized 1199
 event-sampling rate this is enough for one round but cumulatively
 overflows after a couple. Overflow → engine FAULT → sticky
 `kalico_liveness_ok=0` → subsequent `kalico_bench_run` invocations
-refuse with `KALICO_BENCH_ERR_LIVENESS (-100)` until power-cycle.
+refuse with `SIM_BENCH_ERR_LIVENESS (-100)` until power-cycle.
 
 Mitigation options for the M2 follow-up:
 1. Drain trace inside `command_kalico_bench_run` between sendfs (call
-   `kalico_runtime_drain_trace` periodically). Adds inline trace
+   `runtime_drain_trace` periodically). Adds inline trace
    responses to the wire during the bench; host parser already
    tolerates this since `kalico_trace` and `kalico_bench_sample` have
    distinct msg IDs.

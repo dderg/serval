@@ -1,9 +1,9 @@
 #include "autoconf.h"
 #include "generic/armcm_boot.h"
 #include "internal.h"
-#include "kalico_runtime.h"
+#include "runtime.h"
 #include "generic/runtime_tick.h"
-#include "generic/kalico_nvic_prio.h"
+#include "generic/motion_nvic_prio.h"
 
 #if CONFIG_MACH_STM32F4
 
@@ -35,12 +35,12 @@ runtime_tick_disable(void)
     NVIC_DisableIRQ(TIM5_IRQn);
 }
 
-// NEVER flash CONFIG_KALICO_SIM=y to silicon (IWDG-disabled debug build).
+// NEVER flash CONFIG_MCU_SIM=y to silicon (IWDG-disabled debug build).
 __attribute__((used, externally_visible))
 uint32_t
 runtime_cyccnt_read(void)
 {
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
     extern volatile uint32_t runtime_sim_cyccnt;
     return runtime_sim_cyccnt;
 #else
@@ -56,7 +56,7 @@ runtime_tick_enable(void)
         return;
     }
     TIM5->CR1 &= ~TIM_CR1_CEN;
-    TIM5->ARR  = (motion_timer_clk() / CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ) - 1U;
+    TIM5->ARR  = (motion_timer_clk() / CONFIG_MOTION_SAMPLE_RATE_HZ) - 1U;
     TIM5->EGR  = TIM_EGR_UG;
     TIM5->SR   = 0;
     TIM5->SR   = ~TIM_SR_UIF;
@@ -77,7 +77,7 @@ runtime_tick_init(void)
     TIM5->SR = 0;
 
     TIM5->PSC = 0;
-    TIM5->ARR = (motion_timer_clk() / CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ) - 1U;
+    TIM5->ARR = (motion_timer_clk() / CONFIG_MOTION_SAMPLE_RATE_HZ) - 1U;
 
     TIM5->CR1 = TIM_CR1_ARPE;
     TIM5->DIER = TIM_DIER_UIE;
@@ -87,8 +87,8 @@ runtime_tick_init(void)
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 
     // TIM5 and the step-output timer must be EQUAL priority (SPSC invariant;
-    // see kalico_nvic_prio.h).
-    NVIC_SetPriority(TIM5_IRQn, KALICO_MOTION_NVIC_PRIO);
+    // see motion_nvic_prio.h).
+    NVIC_SetPriority(TIM5_IRQn, MOTION_NVIC_PRIO);
 
     TIM5->EGR  = TIM_EGR_UG;
     TIM5->SR   = ~TIM_SR_UIF;
@@ -147,14 +147,14 @@ TIM5_IRQHandler_body(uint32_t *frame)
 
     TIM5->SR = ~TIM_SR_UIF;            // entry-time ack
 
-#if CONFIG_KALICO_SIM
+#if CONFIG_MCU_SIM
     extern volatile uint32_t runtime_sim_cyccnt;
     runtime_sim_cyccnt += (runtime_clock_freq / 40000U);
 #endif
 
     uint32_t before = runtime_cyccnt_read();
     if (runtime_handle) {
-        kalico_runtime_tick_sample(runtime_handle);
+        runtime_tick_sample(runtime_handle);
     }
     uint32_t after = runtime_cyccnt_read();
 
@@ -175,7 +175,7 @@ __attribute__((used, externally_visible))
 void
 step_output_timer_arm(uint32_t cycle_abs)
 {
-    if (cycle_abs == KALICO_STEP_OUTPUT_DISABLE) {
+    if (cycle_abs == STEP_OUTPUT_DISABLE) {
         TIM2->DIER &= ~TIM_DIER_CC1IE;
         step_out_running = 0;
         return;
@@ -237,7 +237,7 @@ step_output_timer_init(void)
     step_out_target = 0;
     step_out_clkdiv = CONFIG_CLOCK_FREQ / motion_timer_clk();
 
-    NVIC_SetPriority(TIM2_IRQn, KALICO_MOTION_NVIC_PRIO);
+    NVIC_SetPriority(TIM2_IRQn, MOTION_NVIC_PRIO);
     NVIC_EnableIRQ(TIM2_IRQn);
 }
 
@@ -249,8 +249,8 @@ TIM2_IRQHandler(void)
 
     TIM2->SR = ~TIM_SR_CC1IF;
 
-    extern uint32_t kalico_step_output_event(void);
-    uint32_t next = kalico_step_output_event();
+    extern uint32_t step_output_event(void);
+    uint32_t next = step_output_event();
     step_output_timer_arm(next);
 
     diag_stepout_account(diag_enter, DWT->CYCCNT);

@@ -140,6 +140,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "c-api"
+version = "0.1.0"
+dependencies = [
+ "cbindgen",
+ "nurbs",
+ "portable-atomic",
+ "runtime",
+]
+
+[[package]]
 name = "cbindgen"
 version = "0.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -450,6 +460,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethercat-rt"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "host-rt",
+ "libc",
+ "mcu-protocol",
+ "mcu-transport",
+ "runtime",
+ "serde",
+ "servo-ident",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -563,6 +589,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "host-rt"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "flate2",
+ "indexmap",
+ "libc",
+ "log",
+ "mcu-protocol",
+ "mcu-transport",
+ "nurbs",
+ "proptest",
+ "pyo3",
+ "runtime",
+ "serde",
+ "serde_json",
+ "serialport",
+ "thiserror 2.0.18",
+ "time",
+ "tracing",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -643,73 +692,6 @@ checksum = "2964e92d1d9dc3364cae4d718d93f227e3abb088e747d92e0395bfdedf1c12ca"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "kalico-c-api"
-version = "0.1.0"
-dependencies = [
- "cbindgen",
- "nurbs",
- "portable-atomic",
- "runtime",
-]
-
-[[package]]
-name = "kalico-ethercat-rt"
-version = "0.1.0"
-dependencies = [
- "kalico-host-rt",
- "kalico-native-transport",
- "kalico-protocol",
- "libc",
- "runtime",
- "serde",
- "servo-ident",
- "toml 0.8.23",
- "tracing",
-]
-
-[[package]]
-name = "kalico-host-rt"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "flate2",
- "indexmap",
- "kalico-native-transport",
- "kalico-protocol",
- "libc",
- "log",
- "nurbs",
- "proptest",
- "pyo3",
- "runtime",
- "serde",
- "serde_json",
- "serialport",
- "thiserror 2.0.18",
- "time",
- "tracing",
-]
-
-[[package]]
-name = "kalico-native-transport"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "env_logger",
- "kalico-protocol",
- "libc",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "kalico-protocol"
-version = "0.1.0"
-dependencies = [
- "sha2",
 ]
 
 [[package]]
@@ -794,6 +776,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcu-protocol"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
+name = "mcu-transport"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "env_logger",
+ "libc",
+ "mcu-protocol",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -810,7 +811,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "motion-bridge"
+name = "motion-engine"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -818,12 +819,12 @@ dependencies = [
  "gcode",
  "geometry",
  "heapless",
- "kalico-host-rt",
- "kalico-native-transport",
- "kalico-protocol",
+ "host-rt",
  "libc",
  "log",
- "motion-bridge",
+ "mcu-protocol",
+ "mcu-transport",
+ "motion-engine",
  "nurbs",
  "pyo3",
  "runtime",

@@ -4,8 +4,8 @@ import sys
 
 # spec §1.1 item 11
 KNOWN_ASYNC_EVENTS = {
-    "kalico_credit_freed",
-    "kalico_fault",
+    "runtime_credit_freed",
+    "runtime_fault",
     "kalico_status_v6",
     "kalico_trace",
 }

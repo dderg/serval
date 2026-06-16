@@ -6,7 +6,7 @@ import struct
 import sys
 import time
 
-KALICO_SYNC = 0x55
+SIM_SYNC = 0x55
 CHANNEL_CONTROL = 0x00
 KIND_CONFIGURE_AXES = 0x0030
 KIND_CONFIGURE_AXES_RESPONSE = 0x0031
@@ -27,9 +27,7 @@ def build_kalico_frame(
     msg = struct.pack("<HBI", kind, version, correlation_id) + body
     len_field = 2 + 1 + len(msg) + 2
     header = (
-        struct.pack("<BH", KALICO_SYNC, len_field)
-        + bytes([CHANNEL_CONTROL])
-        + msg
+        struct.pack("<BH", SIM_SYNC, len_field) + bytes([CHANNEL_CONTROL]) + msg
     )
     crc = crc16_ccitt(header[1:])
     return header + struct.pack("<H", crc)
@@ -41,7 +39,7 @@ def parse_one_kalico_frame(buf: bytes, start: int):
     by one byte to skip junk."""
     if start + 3 > len(buf):
         return 0, None
-    if buf[start] != KALICO_SYNC:
+    if buf[start] != SIM_SYNC:
         return 1, None
     len_field = struct.unpack_from("<H", buf, start + 1)[0]
     total = 1 + len_field

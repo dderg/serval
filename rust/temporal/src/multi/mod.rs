@@ -48,7 +48,6 @@ pub struct BatchShaping {
 #[derive(Debug)]
 pub struct BatchOutput {
     pub profiles: Vec<TopProfile>,
-    pub junctions: Vec<JunctionInfo>,
     pub joining_sweeps: u32,
     pub joining_status: JoiningStatus,
 }
@@ -59,12 +58,6 @@ pub enum JoiningStatus {
     Converged,
     StalledOnInfeasibleSegment { last_dirty_count: usize },
     CappedAtMaxSweeps { last_dirty_count: usize },
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct JunctionInfo {
-    pub between_segments: (usize, usize),
-    pub v_junction: f64,
 }
 
 #[derive(Debug, Error)]
@@ -122,12 +115,10 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
 
     let k = input.segments.len();
 
-    let kinds: Vec<junction::JunctionKind> = (0..k - 1)
-        .map(|i| {
-            junction::classify_junction_curves(input.segments[i].curve, input.segments[i + 1].curve)
-        })
+    let collinear: Vec<bool> = (0..k - 1)
+        .map(|i| junction::are_collinear(input.segments[i].curve, input.segments[i + 1].curve))
         .collect();
-    let chain_ranges = chain::partition_chains(k, &kinds);
+    let chain_ranges = chain::partition_chains(k, &collinear);
     let n_chains = chain_ranges.len();
 
     let grid_max_n = match input.grid_strategy {
@@ -257,16 +248,8 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
         })
         .collect();
 
-    let junction_infos: Vec<JunctionInfo> = (0..k - 1)
-        .map(|j| JunctionInfo {
-            between_segments: (j, j + 1),
-            v_junction: profiles[j].samples.last().map_or(0.0, |s| s.v),
-        })
-        .collect();
-
     Ok(BatchOutput {
         profiles,
-        junctions: junction_infos,
         joining_sweeps: sweeps,
         joining_status,
     })
@@ -278,5 +261,5 @@ mod tests;
 mod chain;
 mod grid;
 mod joining;
-mod junction;
+pub mod junction;
 mod parallel;

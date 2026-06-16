@@ -14,7 +14,7 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
-from kalico_host_io import KalicoHostIO  # noqa: E402
+from host_io import KalicoHostIO  # noqa: E402
 
 pytestmark = pytest.mark.needs_renode
 
@@ -324,7 +324,7 @@ def test_gpio_injection_fixture(args):
         ):
             raise AssertionError(
                 "runtime_sim_gpio_sample is missing from identify dict; "
-                "rebuild with CONFIG_KALICO_SIM=y"
+                "rebuild with CONFIG_MCU_SIM=y"
             )
 
         # Move to paused, deterministic monitor-controlled time. PC13 is a

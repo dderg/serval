@@ -1,5 +1,5 @@
-#ifndef KALICO_SIM_CHIP_SOCKET_H
-#define KALICO_SIM_CHIP_SOCKET_H
+#ifndef MCU_SIM_CHIP_SOCKET_H
+#define MCU_SIM_CHIP_SOCKET_H
 #include <stdint.h>
 #include <stddef.h>
 

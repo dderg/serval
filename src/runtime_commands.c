@@ -5,8 +5,8 @@
 #include "command.h"
 #include "sched.h"
 #include "board/misc.h"
-#include "kalico_runtime.h"
-#include "kalico_dispatch.h"
+#include "runtime.h"
+#include "mcu_transport_dispatch.h"
 #if CONFIG_MACH_STM32
 #include "stm32/phase_stepping_spi.h"
 #elif CONFIG_MACH_LINUX
@@ -20,7 +20,7 @@ void
 command_runtime_query_status(uint32_t *args)
 {
     if (!runtime_handle) {
-        sendf("kalico_status status=%c last_err=%i phase_spi_skip_count=%u",
+        sendf("runtime_status status=%c last_err=%i phase_spi_skip_count=%u",
               (uint8_t)255, -7, 0u);
         return;
     }
@@ -30,7 +30,7 @@ command_runtime_query_status(uint32_t *args)
 #if CONFIG_MACH_STM32 || CONFIG_MACH_LINUX
     phase_skip = phase_spi_get_skip_count();
 #endif
-    sendf("kalico_status status=%c last_err=%i phase_spi_skip_count=%u",
+    sendf("runtime_status status=%c last_err=%i phase_spi_skip_count=%u",
           status, last_err, phase_skip);
 }
 DECL_COMMAND(command_runtime_query_status, "runtime_query_status");
@@ -43,7 +43,7 @@ command_runtime_seed_position(uint32_t *args)
     int32_t z_q16 = (int32_t)args[2];
     if (!runtime_handle)
         return;
-    (void)kalico_runtime_seed_position(runtime_handle, x_q16, y_q16, z_q16);
+    (void)runtime_seed_position(runtime_handle, x_q16, y_q16, z_q16);
 }
 DECL_COMMAND(command_runtime_seed_position,
     "runtime_seed_position x_q16=%i y_q16=%i z_q16=%i");
@@ -57,7 +57,7 @@ command_runtime_stream_flush(uint32_t *args)
         return;
     }
     uint32_t credit_epoch = 0;
-    int32_t r = kalico_runtime_stream_flush(runtime_handle, &credit_epoch);
+    int32_t r = runtime_stream_flush(runtime_handle, &credit_epoch);
     sendf("kalico_stream_flush_response result=%i credit_epoch=%u",
           r, credit_epoch);
 }
@@ -112,7 +112,7 @@ command_runtime_register_phase_motor(uint32_t *args)
     if (!runtime_handle)
         shutdown("register_phase_motor before runtime init");
     phase_stepping_register_motor(motor_idx, bus_id, cs_pin_id);
-    int32_t rc = kalico_runtime_bind_phase_motor(runtime_handle,
+    int32_t rc = runtime_bind_phase_motor(runtime_handle,
                                                  motor_idx, slot_idx);
     if (rc != 0)
         shutdown("register_phase_motor bind rejected by runtime");

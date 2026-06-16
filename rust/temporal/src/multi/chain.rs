@@ -1,17 +1,16 @@
-use crate::multi::junction::JunctionKind;
 use crate::{BindingSummary, GridSample, TopProfile};
 use std::ops::RangeInclusive;
 
 #[allow(clippy::range_minus_one)]
 pub(crate) fn partition_chains(
     n_segments: usize,
-    kinds: &[JunctionKind],
+    collinear: &[bool],
 ) -> Vec<RangeInclusive<usize>> {
-    debug_assert_eq!(kinds.len() + 1, n_segments);
+    debug_assert_eq!(collinear.len() + 1, n_segments);
     let mut chains = Vec::new();
     let mut start = 0;
-    for (k, kind) in kinds.iter().enumerate() {
-        if *kind == JunctionKind::Corner {
+    for (k, &is_collinear) in collinear.iter().enumerate() {
+        if !is_collinear {
             chains.push(start..=k);
             start = k + 1;
         }
@@ -63,6 +62,7 @@ pub(crate) fn slice_chain_profile(
                 grid_scheme: chain.grid_scheme,
                 total_time,
                 binding,
+                deadline_truncated: chain.deadline_truncated,
             }
         })
         .collect()

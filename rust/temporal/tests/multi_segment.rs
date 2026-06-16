@@ -1,6 +1,10 @@
 use nurbs::VectorNurbs;
 use temporal::{BatchInput, GridStrategy, JoiningStatus, Limits, SegmentInput, plan_batch};
 
+fn v_junction_at(output: &temporal::BatchOutput, k: usize) -> f64 {
+    output.profiles[k].samples.last().unwrap().v
+}
+
 fn textbook_limits() -> Limits {
     Limits::axis_boxes([500.0; 3], [5_000.0; 3], [100_000.0; 3])
 }
@@ -14,8 +18,8 @@ fn adaptive() -> GridStrategy {
 }
 
 fn assert_junction_continuity_for_all(output: &temporal::BatchOutput, eps_mm_s: f64) {
-    for (k, junction) in output.junctions.iter().enumerate() {
-        let v_jct = junction.v_junction;
+    for k in 0..output.profiles.len().saturating_sub(1) {
+        let v_jct = v_junction_at(output, k);
         let v_end_left = output.profiles[k].samples.last().unwrap().v;
         let v_start_right = output.profiles[k + 1].samples[0].v;
         assert!(
@@ -75,7 +79,7 @@ mod fixture_1_two_g1_sharp_corner {
         assert_eq!(output.profiles.len(), 2);
 
         assert_junction_continuity_for_all(&output, 1.0);
-        let v_jct = output.junctions[0].v_junction;
+        let v_jct = v_junction_at(&output, 0);
         assert!(
             v_jct.abs() < 0.1,
             "tangent-discontinuous junction must come to a full stop, got {v_jct}"
@@ -134,7 +138,7 @@ mod fixture_2_g1_to_g5_smooth {
         };
         let output = plan_batch(input).expect("should succeed");
 
-        let v_jct = output.junctions[0].v_junction;
+        let v_jct = v_junction_at(&output, 0);
         assert!(
             v_jct > 1.0,
             "smooth G1→G5 junction must carry speed through the fuse, got {v_jct}"

@@ -84,12 +84,12 @@ points at. No change to the extruder here.
 
 - Arbitrary spatial axis **names** at the G-code level (spatial stays X/Y/Z).
 - Named / multi-kinematics ("motion channels") — parked in
-  `docs/kalico-rewrite/future-motion-channels-multi-kinematics.md`.
+  `docs/rewrite/future-motion-channels-multi-kinematics.md`.
 - The `follows:` shorthand discussion — keep `[axis e] follows: x, y, z`.
 
 ## Tests
 
-- Regression: `x/y/z` cartesian boot + corexy boot (kalico-sim self-test +
+- Regression: `x/y/z` cartesian boot + corexy boot (mcu-sim self-test +
   phase-stepping test) — coupling/phase-handover still forms.
 - Unit: the spatial set is sourced from the kinematics bindings (not a host
   constant); follower classification is "declared but not claimed."
@@ -97,5 +97,5 @@ points at. No change to the extruder here.
 
 ## Gates
 
-`./scripts/ci.sh quick` + `./scripts/ci.sh py` green; kalico-sim cartesian +
+`./scripts/ci.sh quick` + `./scripts/ci.sh py` green; mcu-sim cartesian +
 corexy + phase-stepping boots PASS.

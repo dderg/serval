@@ -115,19 +115,30 @@ pub struct PlanStats {
 pub struct ReplanWorstBinding {
     pub constraint: temporal::BindingConstraint,
     pub ratio: f64,
+    pub kind: temporal::LimitKind,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ReplanBindingSummary {
     pub histogram: Vec<(temporal::BindingConstraint, u32)>,
     pub worst: Option<ReplanWorstBinding>,
+    /// True when any segment in the window shipped a deadline-truncated profile,
+    /// i.e. the real-time budget — not convergence — ended refinement. This is
+    /// the authoritative `deadline_limited` signal, replacing the wall-clock
+    /// heuristic that misfired on slow-but-converged solves under host load.
+    pub deadline_truncated: bool,
+    pub peak_utilization: f64,
+    pub peak_util_family: Option<crate::utilization::UtilFamily>,
+    pub peaks: Option<crate::utilization::UtilizationPeaks>,
 }
 
 fn aggregate_binding(profiles: &[temporal::TopProfile]) -> ReplanBindingSummary {
     use std::collections::HashMap;
     let mut hist: HashMap<temporal::BindingConstraint, u32> = HashMap::new();
     let mut worst: Option<ReplanWorstBinding> = None;
+    let mut deadline_truncated = false;
     for p in profiles {
+        deadline_truncated |= p.deadline_truncated;
         for (c, n) in &p.binding.histogram {
             *hist.entry(*c).or_insert(0) += *n;
         }
@@ -136,13 +147,21 @@ fn aggregate_binding(profiles: &[temporal::TopProfile]) -> ReplanBindingSummary 
                 worst = Some(ReplanWorstBinding {
                     constraint: w.constraint,
                     ratio: w.ratio,
+                    kind: w.kind,
                 });
             }
         }
     }
     let mut histogram: Vec<(temporal::BindingConstraint, u32)> = hist.into_iter().collect();
     histogram.sort_by(|(ca, na), (cb, nb)| nb.cmp(na).then_with(|| ca.cmp(cb)));
-    ReplanBindingSummary { histogram, worst }
+    ReplanBindingSummary {
+        histogram,
+        worst,
+        deadline_truncated,
+        peak_utilization: 0.0,
+        peak_util_family: None,
+        peaks: None,
+    }
 }
 
 #[derive(Debug)]
@@ -549,7 +568,19 @@ fn run_one_iteration(
         })
         .collect();
 
-    let binding = aggregate_binding(&batch_output.profiles);
+    let mut binding = aggregate_binding(&batch_output.profiles);
+    if let Some(peaks) = crate::utilization::window_peak_utilization(
+        emitted
+            .iter()
+            .zip(input.segments.iter())
+            .map(|(seg, src)| (seg.axes.as_slice(), &src.temporal.limits)),
+    ) {
+        if let Some(w) = peaks.worst() {
+            binding.peak_utilization = w.ratio;
+            binding.peak_util_family = Some(w.family);
+        }
+        binding.peaks = Some(peaks);
+    }
 
     Ok(BetaIterResult {
         fitted,

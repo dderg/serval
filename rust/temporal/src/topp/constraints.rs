@@ -23,6 +23,14 @@ pub struct ConstraintBundle {
 
     pub h_intervals: Vec<f64>,
     pub j_path_at: Vec<f64>,
+
+    /// Precomputed column-sparse form of the base constraint matrix.
+    /// Sign convention: `A_clarabel = -A_k`, so `base_csc_nzval[col][k] = -a_rows[row][col]`.
+    /// Length of both outer vecs equals `n_vars`.
+    pub base_csc_rowval: Vec<Vec<usize>>,
+    pub base_csc_nzval: Vec<Vec<f64>>,
+    /// Number of base (non-cut, non-TR) constraint rows; equals `a_rows.len()`.
+    pub base_n_rows: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,6 +59,16 @@ pub struct EndpointConditions {
 pub const KAPPA_FLOOR: f64 = 1e-12;
 
 pub const B_MAX_CENT_CAP: f64 = 1e8;
+
+/// Ceiling on the *scaled* `b = v²` cap (`b_cap`) used to bound the centripetal
+/// and velocity constraint rows. `B_MAX_CENT_CAP` is a fixed mm-unit stand-in
+/// for the unbounded centripetal cap on straight segments; dividing it by σ²
+/// inflates it to 1e10+ scaled units on slow machines (tiny σ), and that huge
+/// constraint RHS wrecks Clarabel's equilibration into false infeasibility. The
+/// solver scale normalizes the peak reachable b to ≈`V_TARGET_UNITS_PER_S`², so
+/// clamping `b_cap` here bounds the cap-row dynamic range to a constant
+/// independent of machine speed. A no-op at identity and normal-machine scales.
+pub(crate) const B_CAP_SCALED_CEILING: f64 = 1e8;
 
 pub(crate) const COMP_FLOOR: f64 = 1e-12;
 
@@ -185,7 +203,7 @@ pub fn build_chain(
     debug_assert!(n >= 2, "ChainGrid must have at least 2 points");
 
     let kappa_floor = scale.to_scaled_kappa(KAPPA_FLOOR);
-    let b_cap = scale.to_scaled_b(B_MAX_CENT_CAP);
+    let b_cap = scale.to_scaled_b(B_MAX_CENT_CAP).min(B_CAP_SCALED_CEILING);
     let h = &chain.h_intervals;
     let h_bar = |i: usize| -> f64 {
         if i == 0 {
@@ -752,6 +770,18 @@ pub fn build_chain(
         "all A rows must have width n_vars"
     );
 
+    let base_n_rows = a_rows.len();
+    let mut base_csc_rowval: Vec<Vec<usize>> = vec![Vec::new(); n_vars];
+    let mut base_csc_nzval: Vec<Vec<f64>> = vec![Vec::new(); n_vars];
+    for (row_idx, row) in a_rows.iter().enumerate() {
+        for (col, &v) in row.iter().enumerate() {
+            if v != 0.0 {
+                base_csc_rowval[col].push(row_idx);
+                base_csc_nzval[col].push(-v);
+            }
+        }
+    }
+
     BuildOutcome::Ok(ConstraintBundle {
         n_vars,
         n_grid: n,
@@ -762,6 +792,9 @@ pub fn build_chain(
         b_max_cent,
         h_intervals: chain.h_intervals.clone(),
         j_path_at,
+        base_csc_rowval,
+        base_csc_nzval,
+        base_n_rows,
     })
 }
 

@@ -1,7 +1,7 @@
 # Executed-Motion History Service (`motion_state_at`)
 
 Spec A of the beacon-support program
-([survey](../../kalico-rewrite/beacon-fork-survey.md)). Everything here
+([survey](../../rewrite/beacon-fork-survey.md)). Everything here
 lives in this repo; external consumers (the beacon_klipper fork) only call
 the published query.
 
@@ -123,7 +123,7 @@ set_position, and homing trip reconstruction runs before homing.py calls
 
 ### Query
 
-Rust core (in `rust/motion-bridge/src/motion_history.rs`):
+Rust core (in `rust/motion-engine/src/motion_history.rs`):
 
 ```rust
 pub struct AxisState { pub position: f64, pub velocity: f64, pub acceleration: f64 }
@@ -137,7 +137,7 @@ Evaluation in f64 from the f32 control points (the
 Bernstein derivative forms scaled by `1/duration` and `1/duration²`,
 where duration-in-seconds uses the nominal frequency (estimate-free).
 
-Bridge FFI / Python surface (on the `motion_bridge` object):
+Bridge FFI / Python surface (on the `motion_engine` object):
 
 ```python
 bridge.motion_state_at(print_time=...)          # Python extras

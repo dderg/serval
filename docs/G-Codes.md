@@ -452,20 +452,6 @@ use the rail homing speed. Note that the carriages restore their positions
 only over their own axis, which may be necessary to correctly restore COPY
 and MIRROR mode of the dual carraige.
 
-### [endstop_phase]
-
-The following commands are available when an
-[endstop_phase config section](Config_Reference.md#endstop_phase) is
-enabled (also see the [endstop phase guide](Endstop_Phase.md)).
-
-#### ENDSTOP_PHASE_CALIBRATE
-`ENDSTOP_PHASE_CALIBRATE [STEPPER=<config_name>]`: If no STEPPER
-parameter is provided then this command will reports statistics on
-endstop stepper phases during past homing operations. When a STEPPER
-parameter is provided it arranges for the given endstop phase setting
-to be written to the config file (in conjunction with the SAVE_CONFIG
-command).
-
 ### [exclude_object]
 
 The following commands are available when an

@@ -1,0 +1,54 @@
+#[doc(hidden)]
+pub mod anchor;
+#[doc(hidden)]
+pub mod binding_report;
+mod bridge;
+#[doc(hidden)]
+pub mod classify;
+#[doc(hidden)]
+pub mod config;
+#[doc(hidden)]
+pub mod dispatch;
+pub mod drain;
+#[doc(hidden)]
+pub mod enqueue;
+#[doc(hidden)]
+pub mod homing;
+#[doc(hidden)]
+pub mod kinematics;
+pub mod logging;
+pub mod mcu_log;
+pub mod motion_history;
+#[doc(hidden)]
+pub mod motion_node;
+#[doc(hidden)]
+pub mod nudge;
+#[doc(hidden)]
+pub mod planner;
+#[doc(hidden)]
+pub mod position_query;
+#[doc(hidden)]
+pub mod pump;
+pub mod remote_trigger;
+mod router_transport;
+#[doc(hidden)]
+pub mod servo_capture;
+#[doc(hidden)]
+pub mod servo_sdo;
+#[doc(hidden)]
+pub mod servo_torque;
+mod types;
+
+pub mod test_support;
+
+use pyo3::prelude::*;
+
+use bridge::PyMotionEngine;
+
+// Underscore-prefixed so the compiled extension (_motion_engine) does not
+// shadow the pure-Python wrapper klippy/motion_engine.py that imports it.
+#[pymodule]
+fn _motion_engine(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyMotionEngine>()?;
+    Ok(())
+}

@@ -19,7 +19,7 @@ fn lookup(name: &str, default: &str, is_mcu: bool) -> String {
                      memory corruption at runtime (observed on F4 with stale `.config`:\n\
                      C buffer = 73728 bytes, Rust constant fell back to 122880 bytes).\n\
                      Fix: ensure `make` is run from the Klipper tree with a current\n\
-                     `.config` so the KALICO_RUNTIME_* vars are in the environment\n\
+                     `.config` so the RUNTIME_* vars are in the environment\n\
                      when Cargo is invoked.\n"
                 );
             }
@@ -36,14 +36,14 @@ fn main() {
         .map(|v| v == "none")
         .unwrap_or(false);
 
-    let rss = lookup("KALICO_RUNTIME_STORAGE_SIZE", "122880", is_mcu);
-    let prs = lookup("KALICO_RUNTIME_PIECE_RING_SIZE", "63488", is_mcu);
+    let rss = lookup("RUNTIME_STORAGE_SIZE", "122880", is_mcu);
+    let prs = lookup("RUNTIME_PIECE_RING_SIZE", "63488", is_mcu);
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
 
     let prs_bytes: usize = prs
         .parse()
-        .unwrap_or_else(|_| panic!("KALICO_RUNTIME_PIECE_RING_SIZE is not a valid usize: {prs}"));
+        .unwrap_or_else(|_| panic!("RUNTIME_PIECE_RING_SIZE is not a valid usize: {prs}"));
     let total_ring_pieces = prs_bytes / 32; // each PieceEntry is 32 bytes
 
     let sizing_body = format!(

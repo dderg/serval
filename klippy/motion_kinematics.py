@@ -112,6 +112,7 @@ class _LinearKinematics:
             )
         self.rails = [self._build_lane(config, lane) for lane in self._lanes]
         self.limits = [(1.0, -1.0)] * 3
+        self._parked_dirty = [False, False, False]
 
         self._printer.load_object(config, "homing").resolve_endstops()
         self._printer.register_event_handler(
@@ -181,7 +182,23 @@ class _LinearKinematics:
         return rail
 
     def _handle_motor_off(self, print_time):
-        self.clear_homing_state((0, 1, 2))
+        for i in (0, 1, 2):
+            if self._is_servo(i) and self.limits[i][0] <= self.limits[i][1]:
+                self._parked_dirty[i] = True
+            else:
+                self.clear_homing_state([i])
+
+    def _is_servo(self, axis):
+        from .extras import servo_axis
+
+        return isinstance(self.rails[axis], servo_axis.ServoRail)
+
+    def parked_dirty_axes(self):
+        return [i for i in (0, 1, 2) if self._parked_dirty[i]]
+
+    def clear_parked_dirty(self, axes):
+        for i in axes:
+            self._parked_dirty[i] = False
 
     def _axis_rails(self):
         return {i: rail for i, rail in enumerate(self.rails)}
@@ -256,9 +273,10 @@ class _LinearKinematics:
         )
 
     def set_position(self, newpos, homing_axes=()):
-        self._motion.bridge.set_position(newpos[0], newpos[1], newpos[2])
+        self._motion.engine.set_position(newpos[0], newpos[1], newpos[2])
         for axis in homing_axes:
             self.limits[axis] = self.rails[axis].get_range()
+            self._parked_dirty[axis] = False
 
     def note_z_not_homed(self):
         self.clear_homing_state([2])
@@ -267,6 +285,7 @@ class _LinearKinematics:
         for i in (0, 1, 2):
             if i in axes:
                 self.limits[i] = (1.0, -1.0)
+                self._parked_dirty[i] = False
 
     def get_status(self, eventtime):
         from . import gcode as gcode_mod

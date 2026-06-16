@@ -38,7 +38,7 @@ bash tools/sim/build_sim_firmware.sh
 # 2. Launch Renode. UART2 is bridged to tcp://localhost:3334.
 bash tools/sim/run_sim.sh &
 
-# 3. Talk to the sim (kalico_host_io accepts pyserial URL syntax, e.g.
+# 3. Talk to the sim (host_io accepts pyserial URL syntax, e.g.
 #    socket://localhost:3334), or run the phase-2 gate:
 bash tools/sim/run_phase2_gate.sh
 ```
@@ -62,7 +62,7 @@ bash tools/sim/run_phase2_gate.sh
   H743 .repl; the kalico runtime widens that to a u64 that never advances,
   so segment durations don't elapse meaningfully.
 - USB-CDC enumeration is part of what you're testing. We use USART2 in sim.
-- IWDG behavior matters. We disable IWDG in sim builds (CONFIG_KALICO_SIM=y).
+- IWDG behavior matters. We disable IWDG in sim builds (CONFIG_MCU_SIM=y).
 - You need to validate Surface-C bench numbers, real-time deadline
   guarantees, or anything that depends on actual cycle pacing.
 
@@ -86,17 +86,17 @@ bash tools/sim/run_phase2_gate.sh
    in `src/stm32/runtime_tick_h7.c::runtime_cyccnt_read()` returns a
    software counter (`runtime_sim_cyccnt` in `src/stm32/runtime_sim_clock.c`)
    bumped from the TIM5 ISR by `kalico_clock_freq / 40000` cycles per fire.
-   Production builds (CONFIG_KALICO_SIM=n) read `DWT->CYCCNT` directly.
+   Production builds (CONFIG_MCU_SIM=n) read `DWT->CYCCNT` directly.
 
 (The `runtime_load_fixture_curve` escape hatch that once backed up the FPU
 fix has been removed along with the rest of the legacy msgproto streaming
-surface.) NEVER flash a `CONFIG_KALICO_SIM=y` image to silicon —
+surface.) NEVER flash a `CONFIG_MCU_SIM=y` image to silicon —
 IWDG-disable + sim CYCCNT is a debugging build only.
 
 ## Known limitations
 
 1. **Renode's IWDG model misbehaves.** We work around by skipping
-   `watchdog_init` / kicks via CONFIG_KALICO_SIM=y. Never flash an image
+   `watchdog_init` / kicks via CONFIG_MCU_SIM=y. Never flash an image
    built this way to real silicon — IWDG is the only thing that catches a
    hung MCU mid-print, and disabling it is unsafe.
 
@@ -105,7 +105,7 @@ IWDG-disable + sim CYCCNT is a debugging build only.
    timing. Renode hasn't shipped an H723-specific .repl as of v1.16.1.
 
 3. **Cycle-count benchmarks are meaningless.** Both the software CYCCNT
-   path under CONFIG_KALICO_SIM and Renode's virtual-time CPU model produce
+   path under CONFIG_MCU_SIM and Renode's virtual-time CPU model produce
    numbers that don't map to silicon timing. Run cycle benches against real
    hardware.
 
@@ -121,7 +121,7 @@ IWDG-disable + sim CYCCNT is a debugging build only.
 - `run_sim.sh` — Launcher. Pass `--gui` to keep the Renode monitor window.
 - `build_sim_firmware.sh` — One-shot builder for the sim-flavor firmware.
 - `sim.config` — Saved Klipper `.config` for the sim build (USART2,
-  CONFIG_KALICO_SIM=y, no USB).
+  CONFIG_MCU_SIM=y, no USB).
 
 ## Other future improvements
 

@@ -544,7 +544,7 @@ class TMC5160:
         if self._phase_state_query is None:
             self._phase_state_query = mcu_obj.lookup_query_command(
                 "kalico_get_phase_state oid=%c",
-                "kalico_phase_state oid=%c axis_idx=%c mode=%c phase=%hu"
+                "motion_phase_state oid=%c axis_idx=%c mode=%c phase=%hu"
                 " settled=%c",
                 oid=self._phase_stepper_oid,
             )

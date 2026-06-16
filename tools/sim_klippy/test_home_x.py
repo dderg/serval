@@ -12,7 +12,7 @@ import pytest
 
 pytestmark = pytest.mark.needs_elf
 
-REPO = pathlib.Path(os.environ.get("KALICO_REPO", "/work"))
+REPO = pathlib.Path(os.environ.get("SIM_REPO", "/work"))
 LOGDIR = REPO / "tools" / "sim_klippy" / ".local-logs"
 KLIPPER_ELF = REPO / "out" / "klipper.elf"
 PRINTER_CFG = REPO / "tools" / "sim_klippy" / "printer.cfg"
@@ -122,7 +122,7 @@ def run_scenario(name, trip_at_arm):
     klippy = spawn_klippy()
     try:
         send_gcode(
-            "KALICO_SIM_ENDSTOP_SET_PIN GPIO=20 LEVEL=%d"
+            "MCU_SIM_ENDSTOP_SET_PIN GPIO=20 LEVEL=%d"
             % (1 if trip_at_arm else 0)
         )
         t0 = time.time()

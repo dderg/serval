@@ -51,6 +51,7 @@ class ServoRail(BaseRail):
                 "(got %r)" % (motor_config.get_name(), protocol)
             )
         self.node_name = motor_config.get("node")
+        self.motor_name = motor_config.get_name().split(None, 1)[1]
         self.rotation_distance = motor_config.getfloat(
             "rotation_distance", above=0.0
         )
@@ -135,6 +136,9 @@ class ServoRail(BaseRail):
     def get_node_name(self):
         return self.node_name
 
+    def get_motor_name(self):
+        return self.motor_name
+
     def get_counts_per_mm(self):
         return self.encoder_counts_per_rev / self.rotation_distance
 
@@ -165,27 +169,27 @@ class ServoRail(BaseRail):
         return counts, tenth_pct
 
 
-class BridgeTorqueLine:
+class MotionTorqueLine:
     def __init__(self, printer, node_name):
         self._printer = printer
         self._node_name = node_name
 
     def set_digital(self, print_time, value):
         node = self._printer.lookup_object("ethercat_node " + self._node_name)
-        handle = node.get_bridge_handle()
+        handle = node.get_engine_handle()
         if handle is None:
             raise self._printer.command_error(
-                "servo torque: ethercat_node %s has no bridge handle"
+                "servo torque: ethercat_node %s has no engine handle"
                 % (self._node_name,)
             )
-        bridge = self._printer.lookup_object("motion_bridge")
-        bridge.set_torque(handle, bool(value), print_time)
+        engine = self._printer.lookup_object("motion_engine")
+        engine.set_torque(handle, bool(value), print_time)
 
 
 def register_torque_enable(printer, config, rail):
     from . import stepper_enable
 
-    line = BridgeTorqueLine(printer, rail.get_node_name())
+    line = MotionTorqueLine(printer, rail.get_node_name())
     enable = stepper_enable.StepperEnablePin(line, 0)
     printer.load_object(config, "stepper_enable").register_motor(
         rail.get_name(), rail, enable

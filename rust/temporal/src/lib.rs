@@ -1,10 +1,13 @@
+pub mod deadline;
+
 pub mod limits;
 pub use limits::{
-    AxisSet, LimitSet, Limits, LimitsError, MAX_AXES, MAX_LIMIT_SETS, N_SPATIAL, kappa_set,
-    restricted_norm,
+    AxisSet, LimitKind, LimitSet, Limits, LimitsError, MAX_AXES, MAX_LIMIT_SETS, N_SPATIAL,
+    kappa_set, restricted_norm,
 };
 
 pub mod topp;
+pub use topp::counters;
 pub use topp::{
     ScheduleError, ToleranceMode, schedule_segment, schedule_segment_with_followers,
     schedule_segment_with_tolerance,
@@ -12,8 +15,7 @@ pub use topp::{
 
 pub mod multi;
 pub use multi::{
-    BatchError, BatchInput, BatchOutput, GridStrategy, JoiningStatus, JunctionInfo, SegmentInput,
-    plan_batch,
+    BatchError, BatchInput, BatchOutput, GridStrategy, JoiningStatus, SegmentInput, plan_batch,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,6 +62,7 @@ pub struct WorstBinding {
     pub ratio: f64,
     pub grid_index: usize,
     pub s: f64,
+    pub kind: LimitKind,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,4 +133,8 @@ pub struct TopProfile {
     pub grid_scheme: GridScheme,
     pub total_time: f64,
     pub binding: BindingSummary,
+    /// True when this profile's solve stopped refining because the real-time
+    /// deadline expired, so it may sit further below the kinematic limit than
+    /// a time-unbounded solve would. A slow-but-converged solve is `false`.
+    pub deadline_truncated: bool,
 }

@@ -65,7 +65,7 @@ tracked: the move is not part of the axis's story.
 ## Wire contract
 
 New request message (and response), mirroring `PushPieces`
-(`rust/kalico-protocol/src/messages.rs:175`):
+(`rust/mcu-protocol/src/messages.rs:175`):
 
 ```rust
 pub struct PushCorrectionPieces {
@@ -117,7 +117,7 @@ code when:
 
 The inverse door is guarded too: **`PushPieces` arriving while a correction
 stream is active is a hard error.** Both rejections emit structured log
-events (`kalico_log_emit`).
+events (`event_log_emit`).
 
 ### Completion
 
@@ -155,7 +155,7 @@ applies position:
 - **Servo (future)**: scratch position added to the setpoint, folded at
   stream end. Same shape; no contract change.
 
-C/Rust boundary: per `docs/kalico-rewrite/mcu-c-rust-boundary.md`, the
+C/Rust boundary: per `docs/rewrite/mcu-c-rust-boundary.md`, the
 correction ring placement follows the same ownership rules as the existing
 piece ring (C owns shared-memory placement; Rust owns the evaluation).
 
@@ -186,12 +186,12 @@ enforces it regardless.
 
 ## Testing
 
-- `kalico-protocol`: encode/decode round-trip unit tests for the new
+- `mcu-protocol`: encode/decode round-trip unit tests for the new
   messages (separate test file, per repo convention).
 - `runtime`: unit tests for validation rejections (busy axis, bad motor_idx,
   overlap, stale start_time) and for scratch evaluation producing
   single-motor step output in pulse mode and folded offsets in phase mode.
-- End-to-end: kalico-sim scenario — push correction pieces to an idle axis,
+- End-to-end: mcu-sim scenario — push correction pieces to an idle axis,
   assert only the target stepper's pin toggles and the axis tracker is
   unchanged; assert hard errors when the axis is moving.
 - Bench, manual: a debug command ships with the bridge API, before any

@@ -10,9 +10,9 @@
 #include "board/misc.h"
 #include "command.h"
 #include "sched.h"
-#include "kalico_runtime.h"
-#include "kalico_dispatch.h"
-#include "kalico_log.h"
+#include "runtime.h"
+#include "mcu_transport_dispatch.h"
+#include "event_log.h"
 #include "generic/runtime_tick.h"
 #include "generic/fault_handler.h"
 
@@ -22,7 +22,7 @@ const uint32_t runtime_clock_freq __attribute__((used, externally_visible))
     = CONFIG_CLOCK_FREQ;
 
 const uint32_t runtime_sample_rate_hz __attribute__((used, externally_visible))
-    = CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ;
+    = CONFIG_MOTION_SAMPLE_RATE_HZ;
 
 
 extern volatile uint8_t runtime_liveness_ok;  // defined in src/stm32/watchdog.c
@@ -172,12 +172,12 @@ runtime_init(void)
 }
 DECL_INIT(runtime_init);
 
-#define KALICO_LIVENESS_THRESHOLD_MS 25
-#define KALICO_LIVENESS_THRESHOLD_TICKS  \
-    ((KALICO_LIVENESS_THRESHOLD_MS) * (CONFIG_CLOCK_FREQ / 1000))
+#define LIVENESS_THRESHOLD_MS 25
+#define LIVENESS_THRESHOLD_TICKS  \
+    ((LIVENESS_THRESHOLD_MS) * (CONFIG_CLOCK_FREQ / 1000))
 
-#define KALICO_FAST_STATUS_MAX_AXES 8
-#define KALICO_FAST_STATUS_RETIREMENT_MIN_TICKS \
+#define FAST_STATUS_MAX_AXES 8
+#define FAST_STATUS_RETIREMENT_MIN_TICKS \
     ((uint32_t)((CONFIG_CLOCK_FREQ) / 100))
 
 void
@@ -201,7 +201,7 @@ runtime_drain(void)
         if (cur_counter != last_seen_tick_counter) {
             last_seen_tick_counter = cur_counter;
             last_progress_time = cur_time;
-        } else if ((cur_time - last_progress_time) > KALICO_LIVENESS_THRESHOLD_TICKS) {
+        } else if ((cur_time - last_progress_time) > LIVENESS_THRESHOLD_TICKS) {
             runtime_liveness_ok = 0;
         }
     } else {
@@ -215,7 +215,7 @@ runtime_drain(void)
             int32_t fault_code = runtime_handle_last_error(runtime_handle);
             uint32_t fault_detail = runtime_handle_fault_detail(runtime_handle);
             uint32_t tick_blocker_pc = runtime_handle_tick_blocker_pc(runtime_handle);
-            kalico_native_emit_fault_event((uint16_t)fault_code, fault_detail,
+            mcu_transport_emit_fault_event((uint16_t)fault_code, fault_detail,
                                            tick_blocker_pc);
         }
     }
@@ -227,7 +227,7 @@ runtime_drain(void)
         last_acted_error = cur_error;
         uint32_t fdetail = runtime_handle_fault_detail(runtime_handle);
         uint32_t tick_blocker_pc = runtime_handle_tick_blocker_pc(runtime_handle);
-        kalico_native_emit_fault_event((uint16_t)cur_error, fdetail,
+        mcu_transport_emit_fault_event((uint16_t)cur_error, fdetail,
                                        tick_blocker_pc);
         // Persist before shutdown resets the USB stack.
         diag_ring_push(DIAG_EV_RUST_FAULT, (uint32_t)cur_error, fdetail);
@@ -250,13 +250,13 @@ runtime_drain(void)
     }
 
     {
-        static uint32_t last_retired_seen[KALICO_FAST_STATUS_MAX_AXES];
-        uint32_t retired[KALICO_FAST_STATUS_MAX_AXES];
+        static uint32_t last_retired_seen[FAST_STATUS_MAX_AXES];
+        uint32_t retired[FAST_STATUS_MAX_AXES];
         uint8_t st = 0;
         uint16_t fc = 0;
-        int32_t nr = kalico_runtime_get_heartbeat(runtime_handle, &st, &fc,
+        int32_t nr = runtime_get_heartbeat(runtime_handle, &st, &fc,
                                                   retired,
-                                                  KALICO_FAST_STATUS_MAX_AXES);
+                                                  FAST_STATUS_MAX_AXES);
         static uint8_t pending_advance;
         if (nr > 0) {
             for (int32_t i = 0; i < nr; i++) {
@@ -267,7 +267,7 @@ runtime_drain(void)
             }
             uint32_t elapsed = cur_time - last_status_emit_time;
             if (pending_advance
-                && elapsed >= KALICO_FAST_STATUS_RETIREMENT_MIN_TICKS) {
+                && elapsed >= FAST_STATUS_RETIREMENT_MIN_TICKS) {
                 send_status_heartbeat();
                 last_status_emit_time = cur_time;
                 pending_advance = 0;
@@ -275,7 +275,7 @@ runtime_drain(void)
         }
     }
 
-    kalico_log_drain();
+    event_log_drain();
 }
 DECL_TASK(runtime_drain);
 
@@ -305,11 +305,11 @@ runtime_status_drain(void)
 
 #if defined(__linux__) || defined(__APPLE__)
     uint8_t status = runtime_handle_status(runtime_handle);
-    int32_t c0 = kalico_runtime_get_stepper_count(runtime_handle, 0);
-    int32_t c1 = kalico_runtime_get_stepper_count(runtime_handle, 1);
-    int32_t c2 = kalico_runtime_get_stepper_count(runtime_handle, 2);
-    extern uint32_t kalico_runtime_get_xdirect_write_count(void);
-    uint32_t spi_writes = kalico_runtime_get_xdirect_write_count();
+    int32_t c0 = runtime_get_stepper_count(runtime_handle, 0);
+    int32_t c1 = runtime_get_stepper_count(runtime_handle, 1);
+    int32_t c2 = runtime_get_stepper_count(runtime_handle, 2);
+    extern uint32_t runtime_get_xdirect_write_count(void);
+    uint32_t spi_writes = runtime_get_xdirect_write_count();
     fprintf(stderr,
         "[sim-progress] status=%u counts=[%d,%d,%d]"
         " spi_writes=%u\n",
@@ -324,7 +324,7 @@ extern void runtime_emit_step_pulses(uint8_t motor_idx, int32_t n_steps,
 
 // Step-output timer wiring (TIM3 on H7, TIM2 on F4). Step-output ISR runs at
 // the same NVIC priority as TIM5, so the kick from the TIM5 ISR is SPSC-safe
-// (see kalico_nvic_prio.h).
+// (see motion_nvic_prio.h).
 
 extern void step_output_timer_arm(uint32_t cycle_abs);
 extern uint32_t step_output_timer_armed_target(void);

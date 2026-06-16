@@ -34,9 +34,12 @@ pub(crate) fn fan_out_solves(
     let v_ends: Vec<f64> = states.iter().map(|s| s.v_end).collect();
     let a_starts: Vec<Option<f64>> = states.iter().map(|s| s.a_start).collect();
 
+    let deadline = crate::deadline::current();
+
     thread::scope(|s| {
         for _ in 0..n_threads {
             s.spawn(|| {
+                let _deadline_guard = crate::deadline::scope(deadline);
                 loop {
                     let Some(idx) = queue.lock().unwrap().pop() else {
                         break;
@@ -345,18 +348,12 @@ fn scale_chain_v_max(chain: &ChainGrid, factor: f64) -> ChainGrid {
     let factor = factor.max(V_SCALE_FACTOR_FLOOR);
     let mut scaled = chain.clone();
     for l in &mut scaled.limits {
-        let sets: Vec<crate::LimitSet> = l
-            .sets()
-            .iter()
-            .map(|s| crate::LimitSet {
-                axes: s.axes,
-                v_max: s.v_max * factor,
-                a_max: s.a_max,
-                j_max: s.j_max,
-            })
-            .collect();
-        *l =
-            crate::Limits::try_new(&sets, l.n_axes()).expect("velocity rescale preserves validity");
+        *l = l.with_sets_mapped(|s| crate::LimitSet {
+            axes: s.axes,
+            v_max: s.v_max * factor,
+            a_max: s.a_max,
+            j_max: s.j_max,
+        });
     }
     scaled
 }

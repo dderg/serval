@@ -1,8 +1,8 @@
 import pytest
 
 from klippy import pins
-from klippy.bridge_endstop import PROVIDER_ID_FIRST
 from klippy.extras import tmc, tmc2130, tmc2208, tmc2209
+from klippy.motion_endstop import PROVIDER_ID_FIRST
 
 
 class _FakeMcu:
@@ -165,28 +165,28 @@ def test_arm_on_driver_without_sgthrs_register_skips_threshold_write():
     assert fields.get_field("diag1_stall") == 1
 
 
-def test_setup_bridge_endstop_builds_endstop_from_diag_pin():
+def test_setup_motion_endstop_builds_endstop_from_diag_pin():
     helper, fields, mcu_tmc = _helper_2130({"diag1_pin": "^!PG9"})
 
-    endstop = helper.setup_bridge_endstop(_virtual_endstop_params(), 0)
+    endstop = helper.setup_motion_endstop(_virtual_endstop_params(), 0)
 
     assert endstop.endstop_id == PROVIDER_ID_FIRST
     assert endstop.pin == "PG9"
     assert endstop.pullup == 1
     assert endstop.invert == 1
-    assert helper.setup_bridge_endstop(_virtual_endstop_params(), 0) is endstop
+    assert helper.setup_motion_endstop(_virtual_endstop_params(), 0) is endstop
 
 
-def test_setup_bridge_endstop_rejects_bad_requests():
+def test_setup_motion_endstop_rejects_bad_requests():
     helper, fields, mcu_tmc = _helper_2130({"diag1_pin": "PG9"})
     with pytest.raises(pins.error):
-        helper.setup_bridge_endstop(_virtual_endstop_params(pin="PA0"), 0)
+        helper.setup_motion_endstop(_virtual_endstop_params(pin="PA0"), 0)
     with pytest.raises(pins.error):
-        helper.setup_bridge_endstop(_virtual_endstop_params(invert=1), 0)
+        helper.setup_motion_endstop(_virtual_endstop_params(invert=1), 0)
 
     no_diag, fields, mcu_tmc = _helper_2130({})
     with pytest.raises(pins.error):
-        no_diag.setup_bridge_endstop(_virtual_endstop_params(), 0)
+        no_diag.setup_motion_endstop(_virtual_endstop_params(), 0)
 
 
 def test_trip_move_hooks_arm_and_disarm():

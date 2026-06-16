@@ -239,12 +239,15 @@ impl ChainGrid {
         );
         let limits = if feedrate_mm_s.is_finite() && feedrate_mm_s > 0.0 {
             let axes: Vec<usize> = followers.iter().map(|f| f.axis).collect();
-            limits.with_extra_sets(&[crate::LimitSet {
-                axes: crate::AxisSet::from_indices(&axes),
-                v_max: feedrate_mm_s,
-                a_max: f64::INFINITY,
-                j_max: f64::INFINITY,
-            }])
+            limits.with_extra_sets_of_kind(
+                &[crate::LimitSet {
+                    axes: crate::AxisSet::from_indices(&axes),
+                    v_max: feedrate_mm_s,
+                    a_max: f64::INFINITY,
+                    j_max: f64::INFINITY,
+                }],
+                crate::LimitKind::Feedrate,
+            )
         } else {
             limits
         };

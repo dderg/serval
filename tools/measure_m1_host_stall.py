@@ -7,7 +7,7 @@ import sys
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from kalico_host_io import HostIoError, KalicoHostIO  # noqa: E402
+from host_io import HostIoError, KalicoHostIO  # noqa: E402
 
 CLOCK_FREQ = 520_000_000  # H723 default
 TICK_HZ = 40_000
@@ -177,7 +177,7 @@ def main():
             if rc != 0:
                 io.send("runtime_query_status")
                 try:
-                    s = io.wait_for_response("kalico_status", 1.0)
+                    s = io.wait_for_response("runtime_status", 1.0)
                     if int(s["status"]) == 3:
                         raise SystemExit(
                             f"FAIL: engine FAULT during soak (last_err="

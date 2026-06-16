@@ -49,9 +49,18 @@ pub struct LimitSet {
     pub j_max: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LimitKind {
+    #[default]
+    Config,
+    Feedrate,
+    RuntimeCap,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Limits {
     sets: [LimitSet; MAX_LIMIT_SETS],
+    kinds: [LimitKind; MAX_LIMIT_SETS],
     n_sets: u8,
     n_axes: u8,
 }
@@ -115,9 +124,15 @@ impl Limits {
         arr[..sets.len()].copy_from_slice(sets);
         Ok(Self {
             sets: arr,
+            kinds: [LimitKind::Config; MAX_LIMIT_SETS],
             n_sets: sets.len() as u8,
             n_axes: n_axes as u8,
         })
+    }
+
+    #[must_use]
+    pub fn kind(&self, set: usize) -> LimitKind {
+        self.kinds.get(set).copied().unwrap_or(LimitKind::Config)
     }
 
     #[must_use]
@@ -254,14 +269,27 @@ impl Limits {
     #[must_use]
     pub fn with_sets_mapped(&self, f: impl Fn(&LimitSet) -> LimitSet) -> Self {
         let sets: Vec<LimitSet> = self.sets().iter().map(f).collect();
-        Self::try_new(&sets, self.n_axes()).expect("set mapping preserves validity")
+        let mut out = Self::try_new(&sets, self.n_axes()).expect("set mapping preserves validity");
+        out.kinds = self.kinds;
+        out
     }
 
     #[must_use]
     pub fn with_extra_sets(&self, extra: &[LimitSet]) -> Self {
+        self.with_extra_sets_of_kind(extra, LimitKind::Config)
+    }
+
+    #[must_use]
+    pub fn with_extra_sets_of_kind(&self, extra: &[LimitSet], kind: LimitKind) -> Self {
         let mut sets: Vec<LimitSet> = self.sets().to_vec();
         sets.extend_from_slice(extra);
-        Self::try_new(&sets, self.n_axes()).expect("appending sets preserves validity")
+        let mut out =
+            Self::try_new(&sets, self.n_axes()).expect("appending sets preserves validity");
+        out.kinds = self.kinds;
+        for slot in out.kinds[self.n_sets as usize..sets.len()].iter_mut() {
+            *slot = kind;
+        }
+        out
     }
 
     #[must_use]

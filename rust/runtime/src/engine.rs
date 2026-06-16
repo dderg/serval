@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 use crate::clock::TickCounter;
-use crate::error::{KALICO_ERR_INVALID_ARG, KALICO_ERR_RING_FULL, KALICO_OK};
+use crate::error::{RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_RING_FULL, RUNTIME_OK};
 use crate::fault_sink::FaultSink;
 use crate::piece_ring::PieceEntry;
 use crate::state::{MAX_STEPPER_OIDS, SharedState};
@@ -162,13 +162,13 @@ impl Engine {
         total_ring_pieces: usize,
     ) -> i32 {
         if (axis_idx as usize) >= MAX_AXES {
-            return KALICO_ERR_INVALID_ARG;
+            return RUNTIME_ERR_INVALID_ARG;
         }
         if !microstep_distance.is_finite() || microstep_distance <= 0.0 {
-            return KALICO_ERR_INVALID_ARG;
+            return RUNTIME_ERR_INVALID_ARG;
         }
         if self.ring_alloc_cursor + ring_depth > total_ring_pieces {
-            return KALICO_ERR_RING_FULL;
+            return RUNTIME_ERR_RING_FULL;
         }
 
         let offset = self.ring_alloc_cursor;
@@ -202,7 +202,7 @@ impl Engine {
             }
         }
 
-        KALICO_OK
+        RUNTIME_OK
     }
 
     /// Preserves `sample_period_cycles`, `cycles_per_second`, and the running
@@ -239,11 +239,11 @@ impl Engine {
 
     pub fn ungate_pieces(&mut self) -> i32 {
         if !self.pieces_gated {
-            return crate::error::KALICO_ERR_STREAM_STATE_VIOLATION;
+            return crate::error::RUNTIME_ERR_STREAM_STATE_VIOLATION;
         }
         self.discard_pending();
         self.pieces_gated = false;
-        crate::error::KALICO_OK
+        crate::error::RUNTIME_OK
     }
 
     pub fn pieces_gated(&self) -> bool {
@@ -261,14 +261,14 @@ impl Engine {
             .get_mut(axis_idx as usize)
             .and_then(|s| s.as_mut())
         else {
-            return KALICO_ERR_INVALID_ARG;
+            return RUNTIME_ERR_INVALID_ARG;
         };
         for &piece in pieces {
             if axis.ring.push(storage, piece).is_err() {
-                return KALICO_ERR_RING_FULL;
+                return RUNTIME_ERR_RING_FULL;
             }
         }
-        KALICO_OK
+        RUNTIME_OK
     }
 
     pub fn tick(&mut self, now: u64, shared: &SharedState, storage: &mut [PieceEntry]) -> bool {
