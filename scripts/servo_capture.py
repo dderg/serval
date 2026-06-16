@@ -7,7 +7,6 @@ time-series dashboard.
 """
 
 import argparse
-import glob
 import json
 import os
 import re
@@ -29,11 +28,16 @@ SETTLE_HOLD_MS = 50
 
 
 def resolve_newest_capture(captures_dir, name):
-    pattern = os.path.join(os.path.expanduser(captures_dir), name + "_*.scap")
-    matches = [p for p in glob.glob(pattern) if CAPTURE_TS_RE.search(p)]
-    if not matches:
+    directory = os.path.expanduser(captures_dir)
+    name_re = re.compile(r"^%s_(\d{8}_\d{6})\.scap$" % re.escape(name))
+    stamped = []
+    for entry in os.listdir(directory):
+        match = name_re.match(entry)
+        if match:
+            stamped.append((match.group(1), os.path.join(directory, entry)))
+    if not stamped:
         raise SystemExit("no capture named %r in %s" % (name, captures_dir))
-    return max(matches)
+    return max(stamped)[1]
 
 
 def load_capture(path):

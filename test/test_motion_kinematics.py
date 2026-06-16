@@ -503,7 +503,7 @@ def _servo_rail():
 
     return servo_axis.ServoRail(
         FakeRailConfig("axis z", axis_opts),
-        FakeRailConfig("z_drive", motor_opts),
+        FakeRailConfig("motor z_drive", motor_opts),
     )
 
 

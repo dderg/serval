@@ -154,9 +154,10 @@ class FakePrinter:
 
 def make_servo_param(engine, node):
     rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
-    rail.name = "servo_x"
+    rail.name = "axis x"
     rail.axis = "x"
     rail.node_name = "node_x"
+    rail.motor_name = "motor_x"
     sp = servo_param.ServoParam.__new__(servo_param.ServoParam)
     sp.printer = FakePrinter(
         {
@@ -171,7 +172,7 @@ def make_servo_param(engine, node):
 def test_cmd_get_reads_and_formats():
     engine = FakeEngine()
     sp = make_servo_param(engine, FakeNode(7))
-    gcmd = FakeGcmd({"SERVO": "servo_x", "GET": "0x2002.0"})
+    gcmd = FakeGcmd({"SERVO": "motor_x", "GET": "0x2002.0"})
     sp.cmd_SERVO_PARAM(gcmd)
     assert engine.reads == [(7, 0x2002, 0)]
     assert gcmd.responses == ["0x2002.0 = 0x0064 (u16: 100, i16: 100)"]
@@ -182,7 +183,7 @@ def test_cmd_set_typed_passes_size():
     engine.write_result = (2, 250)
     sp = make_servo_param(engine, FakeNode(7))
     gcmd = FakeGcmd(
-        {"SERVO": "servo_x", "SET": "0x2002.0", "VALUE": "250", "TYPE": "u16"}
+        {"SERVO": "motor_x", "SET": "0x2002.0", "VALUE": "250", "TYPE": "u16"}
     )
     sp.cmd_SERVO_PARAM(gcmd)
     assert engine.writes == [(7, 0x2002, 0, 2, 250)]
@@ -192,7 +193,7 @@ def test_cmd_set_typed_passes_size():
 def test_cmd_set_untyped_passes_size_zero():
     engine = FakeEngine()
     sp = make_servo_param(engine, FakeNode(7))
-    gcmd = FakeGcmd({"SERVO": "servo_x", "SET": "0x2002.0", "VALUE": "100"})
+    gcmd = FakeGcmd({"SERVO": "motor_x", "SET": "0x2002.0", "VALUE": "100"})
     sp.cmd_SERVO_PARAM(gcmd)
     assert engine.writes == [(7, 0x2002, 0, 0, 100)]
 
@@ -200,12 +201,12 @@ def test_cmd_set_untyped_passes_size_zero():
 def test_cmd_requires_exactly_one_of_get_set():
     sp = make_servo_param(FakeEngine(), FakeNode(7))
     with pytest.raises(RuntimeError, match="exactly one"):
-        sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": "servo_x"}))
+        sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": "motor_x"}))
     with pytest.raises(RuntimeError, match="exactly one"):
         sp.cmd_SERVO_PARAM(
             FakeGcmd(
                 {
-                    "SERVO": "servo_x",
+                    "SERVO": "motor_x",
                     "GET": "0x2002.0",
                     "SET": "0x2002.0",
                     "VALUE": "1",
@@ -217,13 +218,21 @@ def test_cmd_requires_exactly_one_of_get_set():
 def test_cmd_fails_without_engine_handle():
     sp = make_servo_param(FakeEngine(), FakeNode(None))
     with pytest.raises(RuntimeError, match="no engine handle"):
-        sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": "servo_x", "GET": "0x2002.0"}))
+        sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": "motor_x", "GET": "0x2002.0"}))
 
 
 def test_cmd_unknown_servo_fails():
     sp = make_servo_param(FakeEngine(), FakeNode(7))
-    with pytest.raises(RuntimeError, match="no servo rail"):
+    with pytest.raises(RuntimeError, match="no servo motor"):
         sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": "servo_q", "GET": "0x2002.0"}))
+
+
+@pytest.mark.parametrize("servo", ["motor_x", "axis x", "x"])
+def test_cmd_resolves_by_motor_axis_or_short_name(servo):
+    engine = FakeEngine()
+    sp = make_servo_param(engine, FakeNode(7))
+    sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": servo, "GET": "0x2002.0"}))
+    assert engine.reads == [(7, 0x2002, 0)]
 
 
 def test_cmd_propagates_engine_failure():
@@ -234,7 +243,7 @@ def test_cmd_propagates_engine_failure():
     sp = make_servo_param(FailingEngine(), FakeNode(7))
     with pytest.raises(RuntimeError, match="CoE abort"):
         sp.cmd_SERVO_PARAM(
-            FakeGcmd({"SERVO": "servo_x", "SET": "0x6041.0", "VALUE": "1"})
+            FakeGcmd({"SERVO": "motor_x", "SET": "0x6041.0", "VALUE": "1"})
         )
 
 
