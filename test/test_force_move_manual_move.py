@@ -143,7 +143,11 @@ def test_cmd_force_move_parses_and_calls_manual_move():
 
 
 def test_cmd_force_move_defaults_accel_when_omitted():
-    fm, toolhead = make_force_move(enabled=True, return_toolhead=True, max_axis_accel=3000.0)
-    gcmd = FakeGCmd({"STEPPER": "stepper_z1"}, floats={"DISTANCE": 0.5, "VELOCITY": 5.0})
+    fm, toolhead = make_force_move(
+        enabled=True, return_toolhead=True, max_axis_accel=3000.0
+    )
+    gcmd = FakeGCmd(
+        {"STEPPER": "stepper_z1"}, floats={"DISTANCE": 0.5, "VELOCITY": 5.0}
+    )
     fm.cmd_FORCE_MOVE(gcmd)
     assert toolhead.last_nudge["accel"] == pytest.approx(3000.0)

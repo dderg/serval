@@ -22,9 +22,19 @@ class FakeNativeHandle:
         self.calls = []
         self.return_value = return_value
 
-    def submit_nudge(self, mcu_id, axis_idx, motor_mask, delta_mm, speed, accel):
+    def submit_nudge(
+        self, mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
+    ):
         self.calls.append(
-            ("submit_nudge", mcu_id, axis_idx, motor_mask, delta_mm, speed, accel)
+            (
+                "submit_nudge",
+                mcu_id,
+                axis_idx,
+                motor_mask,
+                delta_mm,
+                speed,
+                accel,
+            )
         )
         return self.return_value
 

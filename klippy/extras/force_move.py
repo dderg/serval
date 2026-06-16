@@ -52,7 +52,9 @@ class ForceMove:
                     "manual_move: motor '%s' is disabled; enable it first"
                     % (name,)
                 )
-        return toolhead.submit_nudge(mcu_id, axis_idx, motor_idx, dist, speed, accel)
+        return toolhead.submit_nudge(
+            mcu_id, axis_idx, motor_idx, dist, speed, accel
+        )
 
     cmd_STEPPER_BUZZ_help = "Oscillate a given stepper to help id it"
 

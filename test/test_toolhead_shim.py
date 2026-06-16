@@ -137,7 +137,9 @@ class _RecordingBridge:
     def submit_dwell(self, delay):
         self.dwells.append(delay)
 
-    def submit_nudge(self, mcu_id, axis_idx, motor_mask, delta_mm, speed, accel):
+    def submit_nudge(
+        self, mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
+    ):
         self.last_call = dict(
             kind="nudge",
             mcu_id=mcu_id,
@@ -180,10 +182,16 @@ def test_get_last_move_time_uses_motion_lead():
 
 def test_submit_nudge_builds_single_bit_mask_and_forwards():
     th = _make_correction_toolhead(0.6)
-    dur = th.submit_nudge(7, 1, 2, 0.3, 80.0, 5000.0)  # motor_idx=2 -> mask 0b100
+    dur = th.submit_nudge(
+        7, 1, 2, 0.3, 80.0, 5000.0
+    )  # motor_idx=2 -> mask 0b100
     call = th.bridge.last_call
     assert call["kind"] == "nudge"
-    assert (call["mcu_id"], call["axis_idx"], call["motor_mask"]) == (7, 1, 0b100)
+    assert (call["mcu_id"], call["axis_idx"], call["motor_mask"]) == (
+        7,
+        1,
+        0b100,
+    )
     assert call["delta_mm"] == pytest.approx(0.3)
     assert dur == pytest.approx(0.6)
     assert th.bridge.waits == 0 and th.bridge.dwells == []
