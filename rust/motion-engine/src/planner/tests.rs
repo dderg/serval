@@ -65,6 +65,41 @@ fn dwell_advances_print_time_and_unblocks() {
 }
 
 #[test]
+fn dwell_inserts_gap_into_motion_stream() {
+    let (dispatch, captured) = segment_capturing_dispatch();
+    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, noop_nudge_dispatch());
+
+    h.submit_move(long_move()).unwrap();
+    h.flush().unwrap();
+    let count_a = captured.lock().unwrap().len();
+    let a_end = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.t_end)
+        .fold(0.0_f64, f64::max);
+    assert!(a_end > 0.0);
+
+    let dwell_s = 0.5;
+    h.dwell(dwell_s).unwrap();
+
+    h.submit_move(long_move()).unwrap();
+    h.flush().unwrap();
+    let b_start = captured.lock().unwrap()[count_a..]
+        .iter()
+        .map(|s| s.t_start)
+        .fold(f64::INFINITY, f64::min);
+
+    assert!(
+        b_start >= a_end + dwell_s - 1e-6,
+        "dwell must gap the next move in the motion stream: \
+         a_end={a_end}, dwell={dwell_s}, b_start={b_start}"
+    );
+
+    h.shutdown();
+}
+
+#[test]
 fn update_runtime_caps_processed_without_error() {
     let (dispatch, counter) = counting_dispatch();
     let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, noop_nudge_dispatch());

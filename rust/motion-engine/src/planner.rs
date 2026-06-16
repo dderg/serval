@@ -798,6 +798,20 @@ fn run_loop(
             }
 
             PlannerMsg::Dwell { duration_s, notify } => {
+                if state.t_dispatched < state.t_appended - 1e-12 {
+                    run_commit_and_dispatch(
+                        &mut state,
+                        &thread_state,
+                        &dispatch,
+                        &last_move_time_bits,
+                        &commit_fire_count,
+                    );
+                }
+                let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                if esc > state.t_appended {
+                    state.advance_idle(esc + LEAD);
+                }
+                state.advance_idle(state.t_appended + duration_s);
                 advance_last_move_time(&last_move_time_bits, duration_s);
                 let _ = notify.send(());
             }
