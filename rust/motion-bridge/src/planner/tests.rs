@@ -822,3 +822,106 @@ fn nudge_dispatches_masked_pieces_and_advances_last_move_time_only() {
 fn noop_dispatch() -> Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync> {
     Arc::new(|_seg: &ShapedSegment| Ok(()))
 }
+
+#[test]
+fn nudge_after_move_not_in_past() {
+    let nudge_log = Arc::new(std::sync::Mutex::new(Vec::<(f64, f64)>::new()));
+    let nl = Arc::clone(&nudge_log);
+    let nudge_cb: Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
+        Arc::new(move |_mcu_id: u32, _axis: u8, seg: &ShapedSegment| {
+            nl.lock().unwrap().push((seg.t_start, seg.t_end));
+            Ok(())
+        });
+    let (dispatch, move_log) = capturing_dispatch();
+    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, nudge_cb);
+
+    h.submit_move(long_move()).unwrap();
+    h.flush().unwrap();
+    let move_t_end = move_log
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|&(_, e)| e)
+        .fold(0.0_f64, f64::max);
+    assert!(move_t_end > 0.0, "move produced no segments");
+
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    h.submit_nudge(NudgeParams {
+        mcu_id: 42,
+        axis: 2,
+        motor_mask: 0b0000_0010,
+        delta_mm: 0.5,
+        speed: 5.0,
+        accel: 100.0,
+        notify: tx,
+    })
+    .unwrap();
+    rx.recv().unwrap().expect("nudge must not error");
+
+    let nudge_segs = nudge_log.lock().unwrap().clone();
+    assert!(!nudge_segs.is_empty(), "nudge dispatch not called");
+    let nudge_t_start = nudge_segs
+        .iter()
+        .map(|&(s, _)| s)
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        nudge_t_start >= move_t_end - 1e-6,
+        "nudge started at {nudge_t_start:.6} before move ended at {move_t_end:.6} — segment in the past"
+    );
+
+    h.shutdown();
+}
+
+#[test]
+fn move_after_nudge_timeline_monotone() {
+    let (dispatch, move_log) = capturing_dispatch();
+    let nudge_log = Arc::new(std::sync::Mutex::new(Vec::<(f64, f64)>::new()));
+    let nl = Arc::clone(&nudge_log);
+    let nudge_cb: Arc<dyn Fn(u32, u8, &ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
+        Arc::new(move |_mcu_id: u32, _axis: u8, seg: &ShapedSegment| {
+            nl.lock().unwrap().push((seg.t_start, seg.t_end));
+            Ok(())
+        });
+    let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, nudge_cb);
+
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    h.submit_nudge(NudgeParams {
+        mcu_id: 42,
+        axis: 2,
+        motor_mask: 0b0000_0010,
+        delta_mm: 0.5,
+        speed: 5.0,
+        accel: 100.0,
+        notify: tx,
+    })
+    .unwrap();
+    rx.recv().unwrap().expect("nudge must not error");
+
+    let nudge_t_end = nudge_log
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|&(_, e)| e)
+        .fold(0.0_f64, f64::max);
+    assert!(nudge_t_end > 0.0, "nudge produced no segments");
+
+    h.submit_move(long_move()).unwrap();
+    h.flush().unwrap();
+
+    let move_t_start = move_log
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|&(s, _)| s)
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        move_t_start.is_finite(),
+        "move after nudge produced no segments"
+    );
+    assert!(
+        move_t_start >= nudge_t_end - 1e-6,
+        "move started at {move_t_start:.6} before nudge ended at {nudge_t_end:.6}"
+    );
+
+    h.shutdown();
+}

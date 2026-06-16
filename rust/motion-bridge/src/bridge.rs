@@ -840,72 +840,6 @@ mod ring_depth_for_axis_tests {
     }
 }
 
-/// Absolute host-seconds anchor base for the next nudge.
-///
-/// First nudge after idle: `host_now + lead_secs` (prev_stream_end is 0 or
-/// stale, so the max selects host_now+lead).
-/// Back-to-back nudge (buzz): `prev_stream_end` — exactly where the previous
-/// nudge ended, no inter-nudge gap, no overlap.
-/// After a real time gap (host_now advanced past stream_end): `host_now + lead_secs`.
-pub(crate) fn nudge_anchor_base(prev_stream_end: f64, host_now: f64, lead_secs: f64) -> f64 {
-    (host_now + lead_secs).max(prev_stream_end)
-}
-
-/// Per-nudge-stream timing state. Replaces the per-nudge `Anchor` so that
-/// back-to-back nudges (buzz) never overlap on the wire.
-///
-/// Invariant: nudge N+1's first piece start_time >= nudge N's last piece end.
-struct NudgeStreamState {
-    /// Absolute host-seconds end of the last fully dispatched nudge. 0.0 until
-    /// the first nudge lands.
-    stream_end: f64,
-    /// t0 for the nudge currently being dispatched (reset on each new nudge).
-    current_t0: Option<f64>,
-    /// Nudge-local t_end of the last dispatched segment of the current nudge,
-    /// used to detect segment continuity vs a new nudge (same logic as Anchor).
-    prev_seg_t_end: f64,
-}
-
-impl NudgeStreamState {
-    fn new() -> Self {
-        Self {
-            stream_end: 0.0,
-            current_t0: None,
-            prev_seg_t_end: 0.0,
-        }
-    }
-
-    /// Return `(t0, fresh)` for a nudge segment, advancing state.
-    ///
-    /// `fresh` is true on the first segment of each new nudge (same semantics
-    /// as `Anchor::anchor_segment`'s `fresh` flag).
-    fn anchor(
-        &mut self,
-        seg_t_start: f64,
-        seg_t_end: f64,
-        host_now: f64,
-        lead_secs: f64,
-    ) -> (f64, bool) {
-        let is_new_nudge = match self.current_t0 {
-            None => true,
-            Some(_) => seg_t_start + crate::anchor::CONTIGUITY_EPS < self.prev_seg_t_end,
-        };
-
-        if is_new_nudge {
-            let t0 = nudge_anchor_base(self.stream_end, host_now, lead_secs);
-            self.current_t0 = Some(t0);
-            self.prev_seg_t_end = seg_t_end;
-            self.stream_end = t0 + seg_t_end;
-            (t0, true)
-        } else {
-            let t0 = self.current_t0.expect("current_t0 set above");
-            self.prev_seg_t_end = seg_t_end;
-            self.stream_end = t0 + seg_t_end;
-            (t0, false)
-        }
-    }
-}
-
 #[pymethods]
 impl PyMotionBridge {
     #[new]
@@ -3093,7 +3027,7 @@ impl PyMotionBridge {
         let mcu_configs_for_cb = mcu_configs;
         let router_for_cb = Arc::clone(&router_arc);
 
-        let anchor_mutex = std::sync::Mutex::new(crate::anchor::Anchor::new());
+        let anchor_mutex = Arc::new(std::sync::Mutex::new(crate::anchor::Anchor::new()));
         let pump_tx_for_cb = pump_tx_init.clone();
         let drain_disp = self.drain.clone();
         let counter_for_cb = Arc::clone(&counter);
@@ -3109,6 +3043,7 @@ impl PyMotionBridge {
         let nudge_active_drip_cohort = Arc::clone(&active_drip_cohort_for_cb);
         let nudge_motion_history = Arc::clone(&motion_history_for_cb);
         let nudge_nominal_freqs = Arc::clone(&nominal_freqs_for_cb);
+        let nudge_anchor_arc = Arc::clone(&anchor_mutex);
 
         let dispatch: Arc<
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
@@ -3203,7 +3138,6 @@ impl PyMotionBridge {
             },
         );
 
-        let nudge_stream = std::sync::Mutex::new(NudgeStreamState::new());
         let nudge_dispatch: Arc<
             dyn Fn(u32, u8, &trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
         > = Arc::new(
@@ -3229,10 +3163,14 @@ impl PyMotionBridge {
                     crate::pump::MAX_LEAD_SECS
                 };
 
-                let (t0, fresh) = nudge_stream
+                let (t0, fresh) = nudge_anchor_arc
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .anchor(seg.t_start, seg.t_end, host_now, lead_secs);
+                    .anchor_segment(seg.t_start, seg.t_end, host_now)
+                    .map_err(|late| DispatchError::SegmentLate {
+                        gap_s: late.gap_s,
+                        seg_t_start: late.seg_t_start,
+                    })?;
 
                 if fresh {
                     let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());

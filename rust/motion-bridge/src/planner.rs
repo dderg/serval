@@ -862,18 +862,43 @@ fn run_loop(
 
             PlannerMsg::Nudge(p) => {
                 let result = (|| -> Result<(), String> {
+                    let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                    if esc > state.t_appended + 1e-6 {
+                        if state.t_dispatched < state.t_appended - 1e-12 {
+                            run_commit_and_dispatch(
+                                &mut state,
+                                &thread_state,
+                                &dispatch,
+                                &last_move_time_bits,
+                                &commit_fire_count,
+                            );
+                        }
+                        state.advance_idle(esc + LEAD);
+                    }
+                    if state.t_dispatched < state.t_appended - 1e-12 {
+                        run_commit_and_dispatch(
+                            &mut state,
+                            &thread_state,
+                            &dispatch,
+                            &last_move_time_bits,
+                            &commit_fire_count,
+                        );
+                    }
+                    let t_base = state.t_appended;
                     let segs = crate::nudge::plan_nudge_profile(
                         p.axis,
                         p.delta_mm,
                         p.speed,
                         p.accel,
                         p.motor_mask,
+                        t_base,
                     )?;
                     let total_dur: f64 = segs.iter().map(|s| s.t_end - s.t_start).sum();
                     for seg in &segs {
                         nudge_dispatch(p.mcu_id, p.axis, seg)
                             .map_err(|e| format!("nudge dispatch: {e}"))?;
                     }
+                    state.advance_idle(t_base + total_dur);
                     advance_last_move_time(&last_move_time_bits, total_dur);
                     Ok(())
                 })();

@@ -73,14 +73,13 @@ fn shaped_segment(
     }
 }
 
-/// Build the relative `0 → delta_mm` overlay as cubic `ShapedSegment`(s) on `axis_idx`,
-/// stamped with `motor_mask`. No solver — closed-form box or trapezoid profile.
 pub fn plan_nudge_profile(
     axis_idx: u8,
     delta_mm: f64,
     speed: f64,
     accel: f64,
     motor_mask: u8,
+    t_start_base: f64,
 ) -> Result<Vec<ShapedSegment>, String> {
     if !delta_mm.is_finite() || !speed.is_finite() || speed <= 0.0 {
         return Err(format!("nudge: bad speed {speed} / delta {delta_mm}"));
@@ -98,8 +97,10 @@ pub fn plan_nudge_profile(
     let (accel_t, cruise_t, cruise_v) = calc_move_time(delta_mm, speed, accel);
 
     if accel_t == 0.0 {
-        let curve = linear_scalar_nurbs(0.0, cruise_t, 0.0, sign * speed);
-        return Ok(vec![shaped_segment(ax, 0.0, cruise_t, curve, motor_mask)]);
+        let t0 = t_start_base;
+        let t1 = t_start_base + cruise_t;
+        let curve = linear_scalar_nurbs(t0, t1, 0.0, sign * speed);
+        return Ok(vec![shaped_segment(ax, t0, t1, curve, motor_mask)]);
     }
 
     let half_accel = 0.5 * accel * sign;
@@ -107,18 +108,20 @@ pub fn plan_nudge_profile(
 
     let mut segs = Vec::with_capacity(3);
 
+    let accel_t0 = t_start_base;
+    let accel_t1 = t_start_base + accel_t;
     let accel_seg = shaped_segment(
         ax,
-        0.0,
-        accel_t,
-        quad_scalar_nurbs(0.0, accel_t, 0.0, 0.0, half_accel),
+        accel_t0,
+        accel_t1,
+        quad_scalar_nurbs(accel_t0, accel_t1, 0.0, 0.0, half_accel),
         motor_mask,
     );
     segs.push(accel_seg);
 
     if cruise_t > 0.0 {
-        let cruise_start = accel_t;
-        let cruise_end = accel_t + cruise_t;
+        let cruise_start = t_start_base + accel_t;
+        let cruise_end = t_start_base + accel_t + cruise_t;
         let curve = linear_scalar_nurbs(cruise_start, cruise_end, accel_end_pos, sign * cruise_v);
         segs.push(shaped_segment(
             ax,
@@ -129,7 +132,7 @@ pub fn plan_nudge_profile(
         ));
     }
 
-    let decel_start = accel_t + cruise_t;
+    let decel_start = t_start_base + accel_t + cruise_t;
     let decel_end = decel_start + accel_t;
     let cruise_end_pos = accel_end_pos + sign * cruise_v * cruise_t;
     let decel_curve = quad_scalar_nurbs(
