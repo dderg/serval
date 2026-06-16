@@ -410,6 +410,10 @@ fn advance_last_move_time(last_move_time_bits: &AtomicU64, delta: f64) {
     rectify_last_move_time(last_move_time_bits, delta);
 }
 
+fn dwell_target_time(t_appended: f64, duration_s: f64, esc: f64) -> f64 {
+    (t_appended + duration_s).max(esc + LEAD)
+}
+
 fn fatal(e: &PlannerError) -> ! {
     eprintln!("kalico planner fatal error: {e}");
     tracing::error!(
@@ -808,10 +812,7 @@ fn run_loop(
                     );
                 }
                 let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
-                if esc > state.t_appended {
-                    state.advance_idle(esc + LEAD);
-                }
-                state.advance_idle(state.t_appended + duration_s);
+                state.advance_idle(dwell_target_time(state.t_appended, duration_s, esc));
                 advance_last_move_time(&last_move_time_bits, duration_s);
                 let _ = notify.send(());
             }

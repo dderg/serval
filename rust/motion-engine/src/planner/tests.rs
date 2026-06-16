@@ -65,6 +65,28 @@ fn dwell_advances_print_time_and_unblocks() {
 }
 
 #[test]
+fn dwell_target_does_not_stack_lead_on_duration() {
+    let e = 5.0;
+    let drained = dwell_target_time(e, 0.1, e);
+    assert!(
+        (drained - (e + LEAD)).abs() < 1e-9,
+        "drained sub-LEAD dwell stacked the cushion onto the duration: {drained}"
+    );
+
+    let mid_stream = dwell_target_time(10.0, 0.1, 0.05);
+    assert!(
+        (mid_stream - 10.1).abs() < 1e-9,
+        "mid-stream dwell dropped its duration: {mid_stream}"
+    );
+
+    let long_drained = dwell_target_time(e, 1.0, e);
+    assert!(
+        (long_drained - (e + 1.0)).abs() < 1e-9,
+        "drained dwell longer than LEAD must still hold its full duration: {long_drained}"
+    );
+}
+
+#[test]
 fn dwell_inserts_gap_into_motion_stream() {
     let (dispatch, captured) = segment_capturing_dispatch();
     let mut h = PlannerHandle::spawn(relaxed_config(), dispatch, noop_nudge_dispatch());
