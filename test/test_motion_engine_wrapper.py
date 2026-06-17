@@ -1,19 +1,6 @@
-import sys
-import types
-
-_fake_native_mod = types.ModuleType("klippy.motion_bridge_native")
-
-
-class _FakeMotionBridge:
-    pass
-
-
-_fake_native_mod.MotionBridge = _FakeMotionBridge
-sys.modules.setdefault("klippy.motion_bridge_native", _fake_native_mod)
-
-from klippy.motion_bridge import (  # noqa: E402
+from klippy.motion_engine import (
     _STUB_MOTION_METHODS,
-    MotionBridgeWrapper,
+    MotionEngineWrapper,
 )
 
 
@@ -40,8 +27,8 @@ class FakeNativeHandle:
 
 
 def make_wrapper(native_handle):
-    wrapper = MotionBridgeWrapper.__new__(MotionBridgeWrapper)
-    wrapper._bridge = native_handle
+    wrapper = MotionEngineWrapper.__new__(MotionEngineWrapper)
+    wrapper._engine = native_handle
     return wrapper
 
 
@@ -57,8 +44,8 @@ def test_submit_nudge_forwards_verbatim():
 
 
 def test_dead_forwarders_removed():
-    assert not hasattr(MotionBridgeWrapper, "adjust_motor")
-    assert not hasattr(MotionBridgeWrapper, "submit_correction_sequence")
+    assert not hasattr(MotionEngineWrapper, "adjust_motor")
+    assert not hasattr(MotionEngineWrapper, "submit_correction_sequence")
 
 
 def test_stub_motion_methods_updated():

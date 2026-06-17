@@ -121,7 +121,7 @@ def test_toolhead_method_surface_complete(toolhead_fixture):
     assert missing == []
 
 
-class _RecordingBridge:
+class _RecordingEngine:
     def __init__(self, duration):
         self._duration = duration
         self.last_call = None
@@ -166,7 +166,7 @@ def _make_correction_toolhead(duration):
     th = Motion.__new__(Motion)
     th.mcu = FakeMcu()  # estimated_print_time(t) = t + 1.0
     th.reactor = _FixedReactor()
-    th.bridge = _RecordingBridge(duration)
+    th.engine = _RecordingEngine(duration)
     th.printer = _NoopPrinter()
     th.motion_lead = 0.25
     th._mcu_pending_end_time = 0.0
@@ -185,7 +185,7 @@ def test_submit_nudge_builds_single_bit_mask_and_forwards():
     dur = th.submit_nudge(
         7, 1, 2, 0.3, 80.0, 5000.0
     )  # motor_idx=2 -> mask 0b100
-    call = th.bridge.last_call
+    call = th.engine.last_call
     assert call["kind"] == "nudge"
     assert (call["mcu_id"], call["axis_idx"], call["motor_mask"]) == (
         7,
@@ -194,4 +194,4 @@ def test_submit_nudge_builds_single_bit_mask_and_forwards():
     )
     assert call["delta_mm"] == pytest.approx(0.3)
     assert dur == pytest.approx(0.6)
-    assert th.bridge.waits == 0 and th.bridge.dwells == []
+    assert th.engine.waits == 0 and th.engine.dwells == []
