@@ -3,8 +3,8 @@
 use core::sync::atomic::Ordering;
 
 use crate::fault_helpers::{
-    raise_position_count_overflow, raise_step_queue_overflow, raise_steps_per_sample_exceeded,
-    raise_unknown_step_mode,
+    raise_multi_motor_mask, raise_overlay_unsupported, raise_position_count_overflow,
+    raise_step_queue_overflow, raise_steps_per_sample_exceeded, raise_unknown_step_mode,
 };
 use crate::phase_lut::{PHASE_LUT, PHASE_LUT_SIZE};
 use crate::state::SharedState;
@@ -112,6 +112,7 @@ pub const AXIS_E: usize = 3;
 pub fn dispatch_axis(
     axis_idx: usize,
     axis: &mut AxisConfig,
+    motor_mask: u8,
     queue_ptr: *mut StepQueue,
     shared: &SharedState,
     p_end: f32,
@@ -120,6 +121,7 @@ pub fn dispatch_axis(
     sample_period_sec: f32,
     sample_start_cycles: u32,
     cycles_per_second: f32,
+    overlay_just_armed: bool,
 ) {
     let _ = v_end;
 
@@ -132,6 +134,7 @@ pub fn dispatch_axis(
         m if m == StepMode::Pulse as u8 => dispatch_pulse(
             axis_idx,
             axis,
+            motor_mask,
             queue_ptr,
             shared,
             p_end,
@@ -139,8 +142,13 @@ pub fn dispatch_axis(
             sample_period_sec,
             sample_start_cycles,
             cycles_per_second,
+            overlay_just_armed,
         ),
         m if m == StepMode::Phase as u8 => {
+            if motor_mask != 0 {
+                raise_overlay_unsupported(shared, axis_idx, motor_mask);
+                return;
+            }
             bump_relaxed(&shared.isr_phase_call_count);
             dispatch_phase(axis_idx, axis, shared, p_end);
         }
@@ -154,6 +162,7 @@ pub fn dispatch_axis(
 fn dispatch_pulse(
     axis_idx: usize,
     axis: &mut AxisConfig,
+    motor_mask: u8,
     queue_ptr: *mut StepQueue,
     shared: &SharedState,
     p_end: f32,
@@ -161,6 +170,7 @@ fn dispatch_pulse(
     sample_period_sec: f32,
     sample_start_cycles: u32,
     cycles_per_second: f32,
+    overlay_just_armed: bool,
 ) {
     bump_relaxed(&shared.isr_pulse_call_count);
     let microstep_distance = axis.microstep_distance;
@@ -174,16 +184,51 @@ fn dispatch_pulse(
         return;
     }
 
-    let prev_step_count = axis.last_step_count;
+    let stepper_sel = match crate::piece_ring::stepper_sel_from_mask(motor_mask) {
+        Ok(sel) => sel,
+        Err(()) => {
+            raise_multi_motor_mask(shared, axis_idx, motor_mask);
+            return;
+        }
+    };
+
+    let overlay_motor_idx: Option<usize> = if motor_mask == 0 {
+        None
+    } else {
+        let idx = (stepper_sel - 1) as usize;
+        if axis.steppers.get(idx).is_none() {
+            raise_multi_motor_mask(shared, axis_idx, motor_mask);
+            return;
+        }
+        Some(idx)
+    };
+    let load_step_frame = |axis: &AxisConfig| -> i32 {
+        match overlay_motor_idx.and_then(|idx| axis.steppers.get(idx)) {
+            None => axis.last_step_count,
+            Some(stepper) => stepper.overlay_step_frame.load(Ordering::Acquire),
+        }
+    };
+    let store_step_frame = |axis: &mut AxisConfig, v: i32| match overlay_motor_idx
+        .and_then(|idx| axis.steppers.get(idx))
+    {
+        None => axis.last_step_count = v,
+        Some(stepper) => stepper.overlay_step_frame.store(v, Ordering::Release),
+    };
+
     #[allow(clippy::cast_possible_truncation)]
     let target_step_count = libm::roundf(p_end / microstep_distance) as i32;
+    let prev_step_count = if overlay_just_armed && overlay_motor_idx.is_some() {
+        0
+    } else {
+        load_step_frame(axis)
+    };
     let signed_steps = target_step_count.wrapping_sub(prev_step_count);
     if axis_idx == AXIS_A {
         shared
             .isr_last_p_end_bits
             .store(p_end.to_bits(), Ordering::Relaxed);
     }
-    axis.last_step_count = target_step_count;
+    store_step_frame(axis, target_step_count);
 
     if signed_steps == 0 {
         bump_relaxed(&shared.isr_pulse_zero_step_count);
@@ -210,7 +255,7 @@ fn dispatch_pulse(
             );
         }
         bump_relaxed(&shared.isr_overrun_count);
-        axis.last_step_count = prev_step_count;
+        store_step_frame(axis, prev_step_count);
         capture_steps_fault_context(
             axis_idx,
             p_end,
@@ -255,7 +300,7 @@ fn dispatch_pulse(
         let entry = StepEntry {
             cycle_abs,
             dir,
-            stepper_sel: crate::step_queue::STEPPER_SEL_ALL,
+            stepper_sel,
             _pad: [0; 2],
         };
         // SAFETY: `queue_ptr` is supplied by the TIM5 ISR, sole producer.
@@ -265,14 +310,14 @@ fn dispatch_pulse(
         }
         if push_res.is_err() {
             let committed_delta = steps_committed * (i32::from(dir));
-            commit_position_count(axis, axis_idx, shared, committed_delta);
+            commit_position_count_masked(axis, axis_idx, shared, motor_mask, committed_delta);
             if was_empty && steps_committed > 0 {
                 if let Some(wt) = first_cycle_abs {
                     kick_per_axis_timer(axis_idx, wt);
                 }
             }
             raise_step_queue_overflow(shared, axis_idx);
-            axis.last_step_count = prev_step_count + committed_delta;
+            store_step_frame(axis, prev_step_count + committed_delta);
             return;
         }
         steps_committed += 1;
@@ -284,13 +329,14 @@ fn dispatch_pulse(
         }
     }
 
-    commit_position_count(axis, axis_idx, shared, signed_steps);
+    commit_position_count_masked(axis, axis_idx, shared, motor_mask, signed_steps);
 }
 
-pub(crate) fn commit_position_count(
+pub(crate) fn commit_position_count_masked(
     axis: &AxisConfig,
     axis_idx: usize,
     shared: &SharedState,
+    motor_mask: u8,
     delta: i32,
 ) {
     if delta == 0 {
@@ -301,7 +347,13 @@ pub(crate) fn commit_position_count(
     }) {
         return;
     }
-    for stepper in &axis.steppers {
+    for (i, stepper) in axis.steppers.iter().enumerate() {
+        if i >= 8 {
+            break;
+        }
+        if motor_mask != 0 && (motor_mask & (1u8 << i)) == 0 {
+            continue;
+        }
         let prev = stepper.position_count.load(Ordering::Acquire);
         let Some(next) = prev.checked_add(delta) else {
             raise_position_count_overflow(shared, axis_idx);

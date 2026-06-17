@@ -20,6 +20,34 @@ pub fn get_position_and_velocity<F: FaultSink>(
     axis_idx: usize,
     fault: &F,
 ) -> Option<(f32, f32)> {
+    let mut just_armed = false;
+    get_position_and_velocity_armed(
+        armed,
+        ring,
+        storage,
+        now,
+        sample_period_cycles,
+        cycles_per_second,
+        axis_idx,
+        fault,
+        &mut just_armed,
+    )
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn get_position_and_velocity_armed<F: FaultSink>(
+    armed: &mut Option<ArmedPiece>,
+    ring: &mut RingDescriptor,
+    storage: &[PieceEntry],
+    now: u64,
+    sample_period_cycles: u32,
+    cycles_per_second: f32,
+    axis_idx: usize,
+    fault: &F,
+    just_armed: &mut bool,
+) -> Option<(f32, f32)> {
+    *just_armed = false;
     if let Some(p) = &*armed {
         if now < p.piece_end_cycles {
             crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_HORNER);
@@ -57,6 +85,7 @@ pub fn get_position_and_velocity<F: FaultSink>(
     // storage.len()`.
     #[allow(clippy::indexing_slicing)]
     let p = arm_and_load(armed, &storage[slot], cycles_per_second);
+    *just_armed = true;
     crate::isr_phase::monomial_account(crate::isr_phase::cyccnt().wrapping_sub(mono_start));
 
     crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_HORNER);

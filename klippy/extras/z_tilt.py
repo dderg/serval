@@ -46,13 +46,14 @@ class ZAdjustHelper:
         gcode.respond_info(
             "Making the following Z adjustments:\n%s" % ("\n".join(stepstrs),)
         )
-        adjuster = self.printer.load_object(self.config, "motor_adjust")
+        force_move = self.printer.load_object(self.config, "force_move")
         toolhead = self.printer.lookup_object("toolhead")
         accel = toolhead.get_max_axis_accel(2)
         for stepper, delta in zip(self.z_steppers, deltas):
             if delta < 1e-6:
                 continue
-            adjuster.adjust(stepper.get_name(), delta, speed, accel)
+            force_move.manual_move(stepper, delta, speed, accel)
+        toolhead.wait_moves()
 
 
 class ZAdjustStatus:

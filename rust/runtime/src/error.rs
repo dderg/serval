@@ -50,6 +50,7 @@ pub const RUNTIME_ERR_TRACE_OVERFLOW: i32 = -133;
 pub const RUNTIME_ERR_STREAM_STATE_VIOLATION: i32 = -140;
 pub const RUNTIME_ERR_SEGMENT_ID_NON_MONOTONIC: i32 = -141;
 pub const RUNTIME_ERR_STREAM_HALTED: i32 = -142;
+pub const RUNTIME_ERR_MULTI_MOTOR_MASK: i32 = -143;
 
 pub const RUNTIME_ERR_T_START_IN_PAST: i32 = -150;
 pub const RUNTIME_ERR_T_END_BEFORE_T_START: i32 = -151;
@@ -106,10 +107,7 @@ pub const RUNTIME_ERR_UNKNOWN_STEP_MODE: i32 = -312;
 /// entry in `phase_slot_idx[0..phase_motor_count]` maps it to a registered
 /// SPI motor. Detail: `((axis_idx & 0xFF) << 16) | stepper_oid`.
 pub const RUNTIME_ERR_PHASE_MOTOR_UNMAPPED: i32 = -313;
-/// Normal PushPieces commit attempted while a correction stream is active
-/// on the axis, or a correction commit attempted while one is already
-/// active elsewhere. Detail: `((axis_idx & 0xFF) << 16) | motor_idx`.
-pub const RUNTIME_ERR_CORRECTION_IN_PROGRESS: i32 = -314;
+pub const RUNTIME_ERR_OVERLAY_UNSUPPORTED: i32 = -314;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +143,7 @@ pub enum FaultCode {
 
     StreamStateViolation = -140,
     SegmentIdNonMonotonic = -141,
+    MultiMotorMask = -143,
 
     TStartInPast = -150,
     TEndBeforeTStart = -151,
@@ -191,7 +190,7 @@ pub enum FaultCode {
     TickIntervalExceeded = -311,
     UnknownStepMode = -312,
     PhaseMotorUnmapped = -313,
-    CorrectionInProgress = -314,
+    OverlayUnsupported = -314,
 }
 
 impl FaultCode {
@@ -216,15 +215,12 @@ impl FaultCode {
     /// ```
     /// # use runtime::error::FaultCode;
     /// assert_eq!(FaultCode::from_u16(0), Some(FaultCode::None));
-    /// // PieceStartInPast = -308; -308i16 as u16 = 0xFECC
-    /// assert_eq!(FaultCode::from_u16(0xFECC), Some(FaultCode::PieceStartInPast));
-    /// // TickIntervalExceeded = -311; -311i16 as u16 = 0xFEC9
-    /// assert_eq!(FaultCode::from_u16(0xFEC9), Some(FaultCode::TickIntervalExceeded));
-    /// // UnknownStepMode = -312; -312i16 as u16 = 0xFEC8
-    /// assert_eq!(FaultCode::from_u16(0xFEC8), Some(FaultCode::UnknownStepMode));
-    /// // PhaseMotorUnmapped = -313; -313i16 as u16 = 0xFEC7
-    /// assert_eq!(FaultCode::from_u16(0xFEC7), Some(FaultCode::PhaseMotorUnmapped));
-    /// assert_eq!(FaultCode::from_u16(0x1234), None);
+    /// assert_eq!(FaultCode::from_u16(-308i16 as u16), Some(FaultCode::PieceStartInPast));
+    /// assert_eq!(FaultCode::from_u16(-311i16 as u16), Some(FaultCode::TickIntervalExceeded));
+    /// assert_eq!(FaultCode::from_u16(-312i16 as u16), Some(FaultCode::UnknownStepMode));
+    /// assert_eq!(FaultCode::from_u16(-313i16 as u16), Some(FaultCode::PhaseMotorUnmapped));
+    /// assert_eq!(FaultCode::from_u16(-314i16 as u16), Some(FaultCode::OverlayUnsupported));
+    /// assert_eq!(FaultCode::from_u16(1), None);
     /// ```
     #[allow(clippy::cast_possible_wrap)] // intentional: sign-extend u16 → i16 → i32
     pub fn from_u16(v: u16) -> Option<Self> {
@@ -266,6 +262,7 @@ impl FaultCode {
             -133 => Self::TraceOverflow,
             -140 => Self::StreamStateViolation,
             -141 => Self::SegmentIdNonMonotonic,
+            -143 => Self::MultiMotorMask,
             -150 => Self::TStartInPast,
             -151 => Self::TEndBeforeTStart,
             -152 => Self::SegmentTooShort,
@@ -293,7 +290,7 @@ impl FaultCode {
             -311 => Self::TickIntervalExceeded,
             -312 => Self::UnknownStepMode,
             -313 => Self::PhaseMotorUnmapped,
-            -314 => Self::CorrectionInProgress,
+            -314 => Self::OverlayUnsupported,
             _ => return None,
         })
     }
@@ -307,6 +304,7 @@ impl FaultCode {
     /// assert_eq!(FaultCode::None.code_name(), "None");
     /// assert_eq!(FaultCode::PieceStartInPast.code_name(), "PieceStartInPast");
     /// assert_eq!(FaultCode::TickIntervalExceeded.code_name(), "TickIntervalExceeded");
+    /// assert_eq!(FaultCode::OverlayUnsupported.code_name(), "OverlayUnsupported");
     /// ```
     pub fn code_name(self) -> &'static str {
         match self {
@@ -346,6 +344,7 @@ impl FaultCode {
             Self::TraceOverflow => "TraceOverflow",
             Self::StreamStateViolation => "StreamStateViolation",
             Self::SegmentIdNonMonotonic => "SegmentIdNonMonotonic",
+            Self::MultiMotorMask => "MultiMotorMask",
             Self::TStartInPast => "TStartInPast",
             Self::TEndBeforeTStart => "TEndBeforeTStart",
             Self::SegmentTooShort => "SegmentTooShort",
@@ -373,7 +372,7 @@ impl FaultCode {
             Self::TickIntervalExceeded => "TickIntervalExceeded",
             Self::UnknownStepMode => "UnknownStepMode",
             Self::PhaseMotorUnmapped => "PhaseMotorUnmapped",
-            Self::CorrectionInProgress => "CorrectionInProgress",
+            Self::OverlayUnsupported => "OverlayUnsupported",
         }
     }
 }

@@ -133,7 +133,8 @@ fn push_one_piece(conn: &McuSerialConn, start_time: u64) -> i32 {
         start_time,
         coeffs: [0.0_f32; 4],
         duration: 0.001,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
     let mut pieces_bytes = Vec::with_capacity(32);
     pieces_bytes.extend_from_slice(&entry.to_le_bytes());

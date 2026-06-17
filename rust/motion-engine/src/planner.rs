@@ -15,8 +15,12 @@ use trajectory::streaming::{EmitContext, ReplanContext, ReplanReport, ShaperStat
 
 const T_IDLE: Duration = Duration::from_secs(3600);
 
-/// Must equal `anchor::DEFAULT_LEAD_SECS`. Keep in sync with anchor.rs.
-const LEAD: f64 = 0.25;
+const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
+
+#[cfg(test)]
+pub(crate) fn lead_secs() -> f64 {
+    LEAD
+}
 
 const SAFETY_MARGIN: f64 = 0.2;
 
@@ -39,6 +43,29 @@ pub struct HomeDripParams {
     pub cohort: u64,
     pub participants: Vec<AxisKey>,
     pub notify: crossbeam_channel::Sender<Result<(), String>>,
+}
+
+pub struct NudgeParams {
+    pub mcu_id: u32,
+    pub axis: u8,
+    pub motor_mask: u8,
+    pub delta_mm: f64,
+    pub speed: f64,
+    pub accel: f64,
+    pub notify: crossbeam_channel::Sender<Result<(), String>>,
+}
+
+impl std::fmt::Debug for NudgeParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NudgeParams")
+            .field("mcu_id", &self.mcu_id)
+            .field("axis", &self.axis)
+            .field("motor_mask", &self.motor_mask)
+            .field("delta_mm", &self.delta_mm)
+            .field("speed", &self.speed)
+            .field("accel", &self.accel)
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for HomeDripParams {
@@ -87,6 +114,7 @@ pub enum PlannerMsg {
         new_bias: ClockBias,
     },
     HomeDrip(HomeDripParams),
+    Nudge(NudgeParams),
 }
 
 #[derive(Debug)]
@@ -147,6 +175,8 @@ pub enum DispatchError {
          to keep ahead of playback"
     )]
     SegmentLate { gap_s: f64, seg_t_start: f64 },
+    #[error("nudge target mcu_id={mcu_id} axis={axis} not present in mcu_configs")]
+    NudgeTargetMissing { mcu_id: u32, axis: u8 },
 }
 
 #[allow(missing_debug_implementations)]
@@ -161,6 +191,9 @@ impl PlannerHandle {
     pub fn spawn(
         config: PlannerConfig,
         dispatch: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
+        nudge_dispatch: Arc<
+            dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync,
+        >,
     ) -> Self {
         let (tx, rx) = unbounded();
         let last_move_time_bits = Arc::new(AtomicU64::new(0u64));
@@ -177,7 +210,15 @@ impl PlannerHandle {
         let join = thread::Builder::new()
             .name("kalico-planner".to_string())
             .spawn(move || {
-                run_loop(rx, config, state, dispatch, last_thread, commit_thread);
+                run_loop(
+                    rx,
+                    config,
+                    state,
+                    dispatch,
+                    nudge_dispatch,
+                    last_thread,
+                    commit_thread,
+                );
             })
             .expect("spawn planner thread");
 
@@ -302,6 +343,12 @@ impl PlannerHandle {
             .map_err(|_| PlannerError::ChannelClosed)
     }
 
+    pub fn submit_nudge(&self, p: NudgeParams) -> Result<(), PlannerError> {
+        self.sender
+            .send(PlannerMsg::Nudge(p))
+            .map_err(|_| PlannerError::ChannelClosed)
+    }
+
     /// Must be called *before* `Router::set_clock_est_from_sample` to drain
     /// held-back output under the old bias first.
     pub fn clock_sync_rearm(&self, new_bias: ClockBias) -> Result<(), PlannerError> {
@@ -361,6 +408,10 @@ fn rectify_last_move_time(last_move_time_bits: &AtomicU64, delta: f64) -> bool {
 
 fn advance_last_move_time(last_move_time_bits: &AtomicU64, delta: f64) {
     rectify_last_move_time(last_move_time_bits, delta);
+}
+
+fn dwell_target_time(t_appended: f64, duration_s: f64, esc: f64) -> f64 {
+    (t_appended + duration_s).max(esc + LEAD)
 }
 
 fn fatal(e: &PlannerError) -> ! {
@@ -452,6 +503,9 @@ fn run_loop(
     mut config: PlannerConfig,
     mut state: ShaperState,
     dispatch: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
+    nudge_dispatch: Arc<
+        dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync,
+    >,
     last_move_time_bits: Arc<AtomicU64>,
     commit_fire_count: Arc<AtomicU32>,
 ) {
@@ -502,6 +556,7 @@ fn run_loop(
                     PlannerMsg::ClockSyncRearm { .. } => "ClockSyncRearm",
                     PlannerMsg::Shutdown => "Shutdown",
                     PlannerMsg::HomeDrip(_) => "HomeDrip",
+                    PlannerMsg::Nudge(_) => "Nudge",
                 };
                 tracing::debug!(
                     subsystem = "motion",
@@ -747,6 +802,17 @@ fn run_loop(
             }
 
             PlannerMsg::Dwell { duration_s, notify } => {
+                if state.t_dispatched < state.t_appended - 1e-12 {
+                    run_commit_and_dispatch(
+                        &mut state,
+                        &thread_state,
+                        &dispatch,
+                        &last_move_time_bits,
+                        &commit_fire_count,
+                    );
+                }
+                let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                state.advance_idle(dwell_target_time(state.t_appended, duration_s, esc));
                 advance_last_move_time(&last_move_time_bits, duration_s);
                 let _ = notify.send(());
             }
@@ -859,6 +925,51 @@ fn run_loop(
                     Ok(())
                 })();
 
+                let _ = p.notify.send(result);
+            }
+
+            PlannerMsg::Nudge(p) => {
+                let result = (|| -> Result<(), String> {
+                    let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                    if esc > state.t_appended + 1e-6 {
+                        if state.t_dispatched < state.t_appended - 1e-12 {
+                            run_commit_and_dispatch(
+                                &mut state,
+                                &thread_state,
+                                &dispatch,
+                                &last_move_time_bits,
+                                &commit_fire_count,
+                            );
+                        }
+                        state.advance_idle(esc + LEAD);
+                    }
+                    if state.t_dispatched < state.t_appended - 1e-12 {
+                        run_commit_and_dispatch(
+                            &mut state,
+                            &thread_state,
+                            &dispatch,
+                            &last_move_time_bits,
+                            &commit_fire_count,
+                        );
+                    }
+                    let t_base = state.t_appended;
+                    let segs = crate::nudge::plan_nudge_profile(
+                        p.axis,
+                        p.delta_mm,
+                        p.speed,
+                        p.accel,
+                        p.motor_mask,
+                        t_base,
+                    )?;
+                    let total_dur: f64 = segs.iter().map(|s| s.piece.u_end - s.piece.u_start).sum();
+                    for seg in &segs {
+                        nudge_dispatch(p.mcu_id, seg)
+                            .map_err(|e| format!("nudge dispatch: {e}"))?;
+                    }
+                    state.advance_idle(t_base + total_dur);
+                    advance_last_move_time(&last_move_time_bits, total_dur);
+                    Ok(())
+                })();
                 let _ = p.notify.send(result);
             }
         }

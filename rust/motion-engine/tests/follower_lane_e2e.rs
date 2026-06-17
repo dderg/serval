@@ -103,13 +103,22 @@ fn recording_dispatch() -> (
     (cb, recorded)
 }
 
+fn noop_nudge_dispatch()
+-> Arc<dyn Fn(u32, &_motion_engine::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_mcu_id: u32, _np: &_motion_engine::nudge::NudgePiece| Ok(()))
+}
+
 fn run_two_leg_print(
     with_kernel: bool,
     pa_k: f64,
     second_leg: (f64, f64),
 ) -> (Vec<ShapedSegment>, f64) {
     let (dispatch, recorded) = recording_dispatch();
-    let mut h = PlannerHandle::spawn(follower_config(with_kernel, pa_k), dispatch);
+    let mut h = PlannerHandle::spawn(
+        follower_config(with_kernel, pa_k),
+        dispatch,
+        noop_nudge_dispatch(),
+    );
     let leg2_len = (second_leg.0 * second_leg.0 + second_leg.1 * second_leg.1).sqrt();
     h.submit_move(
         classify_and_build(

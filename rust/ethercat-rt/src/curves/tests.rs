@@ -5,7 +5,8 @@ fn ease_entry(from: f32, to: f32, start_time_ns: u64, dur_s: f32) -> PieceEntry 
         start_time: start_time_ns,
         coeffs: [from, from, to, to],
         duration: dur_s,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 
@@ -164,7 +165,8 @@ fn no_jump_at_origin_capture() {
         start_time: t0,
         coeffs: [pos_mm; 4],
         duration: dur_s,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     })
     .unwrap();
 
@@ -202,14 +204,16 @@ fn piece_boundary_c0_c1_continuity() {
         start_time: t0,
         coeffs: b0_piece0,
         duration: dur_s,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     })
     .unwrap();
     ring.push_entry(PieceEntry {
         start_time: boundary_ns,
         coeffs: b0_piece1,
         duration: dur_s,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     })
     .unwrap();
 
@@ -279,7 +283,8 @@ fn fault_boundary_exact() {
             start_time: start_a,
             coeffs: [0.0_f32; 4],
             duration: 10.0_f32,
-            _reserved: 0,
+            motor_mask: 0,
+            _reserved: [0; 3],
         })
         .unwrap();
 
@@ -302,7 +307,8 @@ fn fault_boundary_exact() {
             start_time: start_b,
             coeffs: [0.0_f32; 4],
             duration: 10.0_f32,
-            _reserved: 0,
+            motor_mask: 0,
+            _reserved: [0; 3],
         })
         .unwrap();
 
@@ -340,7 +346,8 @@ fn end_time_ns_precision() {
         start_time: start,
         coeffs: [0.0_f32; 4],
         duration: 0.001_f32,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
 
     let end = entry.end_time(CLOCK_FREQ_HZ);

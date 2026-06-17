@@ -191,6 +191,7 @@ pub fn emit_shaped_with_left_bc(
             followers: m.followers.clone(),
             t_start: fitted.t_start,
             t_end: fitted.t_end,
+            motor_mask: 0,
         })
         .collect();
 

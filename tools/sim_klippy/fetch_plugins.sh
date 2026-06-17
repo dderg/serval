@@ -18,7 +18,6 @@ DEST="${1:-$REPO_ROOT/tools/sim_klippy/printer_real/third_party_repos}"
 # url | dir name | pinned rev
 PLUGINS=(
   "https://github.com/beacon3d/beacon_klipper.git|beacon_klipper|ef987001b85e9cf18cb4029d89d8d1d97dec6cc9"
-  "https://github.com/MRX8024/motors-sync.git|motors-sync|4372a220f45454f256974780f7b840bf407ceb44"
   "https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging.git|Klipper-Adaptive-Meshing-Purging|b0dad8ec9ee31cb644b94e39d4b8a8fb9d6c9ba0"
   "https://github.com/mainsail-crew/mainsail-config.git|mainsail-config|ff3869a621db17ce3ef660adbbd3fa321995ac42"
   "https://github.com/mainsail-crew/moonraker-timelapse.git|moonraker-timelapse|c7fff11e542b95e0e15b8bb1443cea8159ac0274"

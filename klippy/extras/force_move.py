@@ -39,7 +39,22 @@ class ForceMove:
         return self.steppers[name]
 
     def manual_move(self, stepper, dist, speed, accel=0.0):
-        raise self.printer.command_error(PHASE5_GATE % ("manual_move",))
+        toolhead = self.printer.lookup_object("toolhead")
+        name = stepper if isinstance(stepper, str) else stepper.get_name()
+        mcu_id, axis_idx, motor_idx = toolhead.get_motor_binding(name)
+        if accel == 0.0:
+            accel = toolhead.get_max_axis_accel(axis_idx)
+        stepper_enable = self.printer.lookup_object("stepper_enable", None)
+        if stepper_enable is not None:
+            enable_line = stepper_enable.lookup_enable(name)
+            if not enable_line.is_motor_enabled():
+                raise self.printer.command_error(
+                    "manual_move: motor '%s' is disabled; enable it first"
+                    % (name,)
+                )
+        return toolhead.submit_nudge(
+            mcu_id, axis_idx, motor_idx, dist, speed, accel
+        )
 
     cmd_STEPPER_BUZZ_help = "Oscillate a given stepper to help id it"
 
@@ -49,7 +64,19 @@ class ForceMove:
     cmd_FORCE_MOVE_help = "Manually move a stepper; invalidates kinematics"
 
     def cmd_FORCE_MOVE(self, gcmd):
-        raise gcmd.error(PHASE5_GATE % ("FORCE_MOVE",))
+        name = gcmd.get("STEPPER")
+        distance = gcmd.get_float("DISTANCE")
+        speed = gcmd.get_float("VELOCITY", above=0.0)
+        accel = gcmd.get_float("ACCEL", 0.0, minval=0.0)
+        logging.info(
+            "FORCE_MOVE %s distance=%.6f velocity=%.6f accel=%.6f",
+            name,
+            distance,
+            speed,
+            accel,
+        )
+        self.manual_move(name, distance, speed, accel)
+        gcmd.respond_info("FORCE_MOVE %s by %.3f mm" % (name, distance))
 
     cmd_SET_KINEMATIC_POSITION_help = "Force a low-level kinematic position"
 

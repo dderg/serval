@@ -16,7 +16,8 @@ fn const_piece(start_time: u64, duration: f32) -> PieceEntry {
         start_time,
         coeffs: [0.0; 4],
         duration,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 
@@ -54,7 +55,8 @@ fn tick_arms_piece_when_start_time_reached() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TOTAL_RING_PIECES
     ];
@@ -100,7 +102,8 @@ fn tick_holds_at_t0_before_start_time() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TOTAL_RING_PIECES
     ];
@@ -151,7 +154,8 @@ fn tick_idle_when_ring_empty() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TOTAL_RING_PIECES
     ];
@@ -182,7 +186,8 @@ fn tick_faults_on_piece_start_in_past() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TOTAL_RING_PIECES
     ];
@@ -218,7 +223,8 @@ fn tick_within_fault_tolerance_arms_ok() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TOTAL_RING_PIECES
     ];
@@ -259,7 +265,8 @@ fn tick_advances_through_consecutive_pieces() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TOTAL_RING_PIECES
     ];
@@ -320,7 +327,8 @@ fn retired_count_bumps_at_window_end_not_arm() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0,
+            motor_mask: 0,
+            _reserved: [0; 3],
         };
         TOTAL_RING_PIECES
     ];
@@ -335,13 +343,15 @@ fn retired_count_bumps_at_window_end_not_arm() {
         start_time: p0_start,
         coeffs: [0.0; 4],
         duration: 0.010,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
     let piece1 = PieceEntry {
         start_time: p1_start,
         coeffs: [0.0; 4],
         duration: 0.010,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
 
     let rc = engine.push_pieces(0, &[piece0, piece1], &mut storage);
@@ -419,7 +429,8 @@ fn push_pieces_rejects_when_ring_full() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TOTAL_RING_PIECES
     ];

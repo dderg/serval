@@ -27,7 +27,7 @@ _PRINT_FINISH_EVENTS = (
 # motion without a real engine.
 _STUB_MOTION_METHODS = frozenset(
     {
-        "adjust_motor",
+        "submit_nudge",
         "init_planner",
         "submit_move",
         "submit_dwell",
@@ -422,9 +422,11 @@ class MotionEngineWrapper:
             axis, direction, speed_mm_s, max_travel_mm, endstop_id, endstop_mcu
         )
 
-    def adjust_motor(self, mcu_id, axis_idx, motor_idx, delta_mm, speed, accel):
-        return self._engine.adjust_motor(
-            mcu_id, axis_idx, motor_idx, delta_mm, speed, accel
+    def submit_nudge(
+        self, mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
+    ):
+        return self._engine.submit_nudge(
+            mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
         )
 
     def home_axis_poll(self):
@@ -449,6 +451,9 @@ class MotionEngineWrapper:
 
     def get_last_move_time(self):
         return self._engine.get_last_move_time()
+
+    def motion_lead_secs(self):
+        return self._engine.motion_lead_secs()
 
     def fallback_clock_conversions(self):
         return self._engine.fallback_clock_conversions()

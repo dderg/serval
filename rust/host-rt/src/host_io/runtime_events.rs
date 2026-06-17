@@ -65,6 +65,10 @@ pub enum RuntimeEvent {
 }
 
 impl RuntimeEvent {
+    pub fn is_bulk_data(&self) -> bool {
+        matches!(self, RuntimeEvent::PassthroughResponse { name, .. } if name != "clock")
+    }
+
     pub fn lift(name: &str, params: MessageParams) -> Self {
         match name {
             "runtime_credit_freed" => Self::CreditFreed(CreditFreedEvent {

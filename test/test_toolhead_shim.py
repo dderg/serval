@@ -119,3 +119,78 @@ def test_toolhead_method_surface_complete(toolhead_fixture):
         m for m in LEGACY_METHODS if not callable(getattr(toolhead, m, None))
     ]
     assert missing == []
+
+
+class _RecordingEngine:
+    def __init__(self, duration):
+        self._duration = duration
+        self.last_call = None
+        self.dwells = []
+        self.waits = 0
+
+    def motion_lead_secs(self):
+        return 0.25
+
+    def wait_moves(self):
+        self.waits += 1
+
+    def submit_dwell(self, delay):
+        self.dwells.append(delay)
+
+    def submit_nudge(
+        self, mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
+    ):
+        self.last_call = dict(
+            kind="nudge",
+            mcu_id=mcu_id,
+            axis_idx=axis_idx,
+            motor_mask=motor_mask,
+            delta_mm=delta_mm,
+            speed=speed,
+            accel=accel,
+        )
+        return self._duration
+
+
+class _FixedReactor:
+    def monotonic(self):
+        return 100.0
+
+
+class _NoopPrinter:
+    def send_event(self, *args, **kwargs):
+        return None
+
+
+def _make_correction_toolhead(duration):
+    th = Motion.__new__(Motion)
+    th.mcu = FakeMcu()  # estimated_print_time(t) = t + 1.0
+    th.reactor = _FixedReactor()
+    th.engine = _RecordingEngine(duration)
+    th.printer = _NoopPrinter()
+    th.motion_lead = 0.25
+    th._mcu_pending_end_time = 0.0
+    return th
+
+
+def test_get_last_move_time_uses_motion_lead():
+    th = _make_correction_toolhead(0.0)
+    th.motion_lead = 0.5
+    assert th.get_last_move_time() == pytest.approx(101.5)
+
+
+def test_submit_nudge_builds_single_bit_mask_and_forwards():
+    th = _make_correction_toolhead(0.6)
+    dur = th.submit_nudge(
+        7, 1, 2, 0.3, 80.0, 5000.0
+    )  # motor_idx=2 -> mask 0b100
+    call = th.engine.last_call
+    assert call["kind"] == "nudge"
+    assert (call["mcu_id"], call["axis_idx"], call["motor_mask"]) == (
+        7,
+        1,
+        0b100,
+    )
+    assert call["delta_mm"] == pytest.approx(0.3)
+    assert dur == pytest.approx(0.6)
+    assert th.engine.waits == 0 and th.engine.dwells == []

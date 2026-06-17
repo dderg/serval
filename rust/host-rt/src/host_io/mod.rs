@@ -108,7 +108,8 @@ pub enum ReactorCommand {
         reply: SyncSender<Result<(), SubscribeError>>,
     },
     SubscribeRuntimeEvents {
-        sender: SyncSender<RuntimeEvent>,
+        priority: SyncSender<RuntimeEvent>,
+        bulk: SyncSender<RuntimeEvent>,
         reply: SyncSender<Result<(), SubscribeError>>,
     },
     SubscribeHostEvents {
@@ -592,17 +593,26 @@ impl McuHostIo {
 
     pub fn take_runtime_event_subscription(
         &self,
-    ) -> Result<std::sync::mpsc::Receiver<RuntimeEvent>, SubscribeError> {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(self.config.runtime_event_capacity);
+    ) -> Result<
+        (
+            std::sync::mpsc::Receiver<RuntimeEvent>,
+            std::sync::mpsc::Receiver<RuntimeEvent>,
+        ),
+        SubscribeError,
+    > {
+        let cap = self.config.runtime_event_capacity;
+        let (priority_tx, priority_rx) = std::sync::mpsc::sync_channel(cap);
+        let (bulk_tx, bulk_rx) = std::sync::mpsc::sync_channel(cap);
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         self.submission_tx
             .send(ReactorCommand::SubscribeRuntimeEvents {
-                sender,
+                priority: priority_tx,
+                bulk: bulk_tx,
                 reply: reply_tx,
             })
             .map_err(|_| SubscribeError::Closed)?;
         reply_rx.recv().map_err(|_| SubscribeError::Closed)??;
-        Ok(receiver)
+        Ok((priority_rx, bulk_rx))
     }
 
     pub fn take_host_event_subscription(
