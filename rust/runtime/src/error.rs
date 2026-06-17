@@ -215,13 +215,9 @@ impl FaultCode {
     /// ```
     /// # use runtime::error::FaultCode;
     /// assert_eq!(FaultCode::from_u16(0), Some(FaultCode::None));
-    /// // PieceStartInPast = -308; -308i16 as u16 = 0xFECC
     /// assert_eq!(FaultCode::from_u16(0xFECC), Some(FaultCode::PieceStartInPast));
-    /// // TickIntervalExceeded = -311; -311i16 as u16 = 0xFEC9
     /// assert_eq!(FaultCode::from_u16(0xFEC9), Some(FaultCode::TickIntervalExceeded));
-    /// // UnknownStepMode = -312; -312i16 as u16 = 0xFEC8
     /// assert_eq!(FaultCode::from_u16(0xFEC8), Some(FaultCode::UnknownStepMode));
-    /// // PhaseMotorUnmapped = -313; -313i16 as u16 = 0xFEC7
     /// assert_eq!(FaultCode::from_u16(0xFEC7), Some(FaultCode::PhaseMotorUnmapped));
     /// assert_eq!(FaultCode::from_u16(0xFEC6), Some(FaultCode::OverlayUnsupported));
     /// assert_eq!(FaultCode::from_u16(0x1234), None);
