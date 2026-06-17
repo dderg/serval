@@ -1015,11 +1015,15 @@ impl Reactor {
                 let result = self.event_dispatcher.trace_ring.subscribe(sender);
                 let _ = reply.send(result);
             }
-            ReactorCommand::SubscribeRuntimeEvents { sender, reply } => {
+            ReactorCommand::SubscribeRuntimeEvents {
+                priority,
+                bulk,
+                reply,
+            } => {
                 let result = self
                     .event_dispatcher
                     .runtime_event_dispatcher
-                    .subscribe(sender);
+                    .subscribe(priority, bulk);
                 let _ = reply.send(result);
             }
             ReactorCommand::SubscribeHostEvents { sender, reply } => {

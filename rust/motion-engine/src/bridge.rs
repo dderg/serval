@@ -61,7 +61,8 @@ struct McuConnection {
     serial_path: String,
     baud: u32,
     host_io: Option<Arc<McuHostIo>>,
-    runtime_rx: Option<Receiver<host_rt::host_io::runtime_events::RuntimeEvent>>,
+    runtime_rx_priority: Option<Receiver<host_rt::host_io::runtime_events::RuntimeEvent>>,
+    runtime_rx_bulk: Option<Receiver<host_rt::host_io::runtime_events::RuntimeEvent>>,
     runtime_caps: Option<mcu_protocol::messages::RuntimeCapsResponse>,
     identify_caps: u64,
     mcu_transport_supported: bool,
@@ -914,7 +915,8 @@ impl PyMotionEngine {
                 serial_path: serial_path.to_owned(),
                 baud,
                 host_io: None,
-                runtime_rx: None,
+                runtime_rx_priority: None,
+                runtime_rx_bulk: None,
                 runtime_caps: None,
                 identify_caps: 0,
                 mcu_transport_supported: false,
@@ -1682,7 +1684,8 @@ impl PyMotionEngine {
     fn detach_serial(&self, mcu_handle: u32) -> PyResult<()> {
         let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(conn) = mcus.get_mut(&mcu_handle) {
-            conn.runtime_rx = None;
+            conn.runtime_rx_priority = None;
+            conn.runtime_rx_bulk = None;
             conn.host_io = None;
         }
         Ok(())
@@ -1718,11 +1721,12 @@ impl PyMotionEngine {
                         "attach_serial: reusing existing connection (reactor alive, skipping close/reopen)"
                     );
 
-                    let runtime_rx = io.take_runtime_event_subscription().map_err(|e| {
-                        PyRuntimeError::new_err(format!(
-                            "attach_serial: runtime_event re-subscribe: {e:?}"
-                        ))
-                    })?;
+                    let (rx_priority, rx_bulk) =
+                        io.take_runtime_event_subscription().map_err(|e| {
+                            PyRuntimeError::new_err(format!(
+                                "attach_serial: runtime_event re-subscribe: {e:?}"
+                            ))
+                        })?;
 
                     let (mcu_transport_supported, identify_caps) = if !expect_native {
                         tracing::info!(
@@ -1801,7 +1805,8 @@ impl PyMotionEngine {
                             "attach_serial: unknown mcu_handle {mcu_handle}"
                         ))
                     })?;
-                    conn.runtime_rx = Some(runtime_rx);
+                    conn.runtime_rx_priority = Some(rx_priority);
+                    conn.runtime_rx_bulk = Some(rx_bulk);
                     conn.runtime_caps = runtime_caps;
                     conn.identify_caps = identify_caps;
                     conn.mcu_transport_supported = mcu_transport_supported;
@@ -1817,7 +1822,8 @@ impl PyMotionEngine {
                     "attach_serial: unknown mcu_handle {mcu_handle} (claim_mcu not called)"
                 ))
             })?;
-            conn.runtime_rx = None;
+            conn.runtime_rx_priority = None;
+            conn.runtime_rx_bulk = None;
             conn.host_io = None;
             conn.label.clone()
         };
@@ -1861,7 +1867,7 @@ impl PyMotionEngine {
             }
         };
 
-        let runtime_rx = host_io.take_runtime_event_subscription().map_err(|e| {
+        let (rx_priority, rx_bulk) = host_io.take_runtime_event_subscription().map_err(|e| {
             PyRuntimeError::new_err(format!("attach_serial: runtime_event subscribe: {e:?}"))
         })?;
 
@@ -2000,7 +2006,8 @@ impl PyMotionEngine {
             PyRuntimeError::new_err(format!("attach_serial: unknown mcu_handle {mcu_handle}"))
         })?;
         conn.host_io = Some(host_io_arc);
-        conn.runtime_rx = Some(runtime_rx);
+        conn.runtime_rx_priority = Some(rx_priority);
+        conn.runtime_rx_bulk = Some(rx_bulk);
         conn.runtime_caps = runtime_caps;
         conn.identify_caps = identify_caps;
         conn.mcu_transport_supported = mcu_transport_supported;
@@ -2261,13 +2268,18 @@ impl PyMotionEngine {
                     "take_runtime_event: unknown mcu_handle {mcu_handle}"
                 ))
             })?;
-            match conn.runtime_rx.as_mut() {
+            let mut taken = None;
+            for lane in [&mut conn.runtime_rx_priority, &mut conn.runtime_rx_bulk] {
+                if let Some(rx) = lane.as_mut() {
+                    if let Ok(ev) = rx.try_recv() {
+                        taken = Some(ev);
+                        break;
+                    }
+                }
+            }
+            match taken {
+                Some(ev) => ev,
                 None => return Ok(None),
-                Some(rx) => match rx.try_recv() {
-                    Ok(ev) => ev,
-                    Err(TryRecvError::Empty) => return Ok(None),
-                    Err(TryRecvError::Disconnected) => return Ok(None),
-                },
             }
         };
 
@@ -4481,7 +4493,8 @@ impl PyMotionEngine {
                 serial_path: String::new(),
                 baud: 0,
                 host_io: None,
-                runtime_rx: None,
+                runtime_rx_priority: None,
+                runtime_rx_bulk: None,
                 runtime_caps: None,
                 identify_caps: 0,
                 mcu_transport_supported: true,
