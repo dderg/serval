@@ -172,11 +172,6 @@ fn make_piece_pos(t: u64, mask: u8, c0: f32, c3: f32) -> (PieceEntry, f64) {
 
 #[test]
 fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
-    // A normal move ends the axis ring at 11mm; then a relativized overlay
-    // (nudge) piece starts at 0 — an 11mm "jump" that previously panicked the
-    // pump's junction-continuity guard. Overlay pieces are off the position
-    // book (the MCU's per-piece frame reset absorbs it), so they must be exempt:
-    // both pieces dispatch and the pump never panics.
     let sink = RecordingSink::new();
     let (tx, rx) = mpsc::channel::<PumpMsg>();
     let sink_clone = sink.clone();
@@ -185,7 +180,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
             rx,
             sink_clone,
             |_key| 8,
-            |_mcu| Some((0u64, 180_000_000.0)), // clock synced -> junction check runs
+            |_mcu| Some((0u64, 180_000_000.0)),
             |_| {},
             |_, _| {},
             |_| {},
@@ -193,7 +188,6 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
     });
     let key = AxisKey { mcu_id: 1, axis: 2 };
 
-    // Normal move ending at 11.0mm.
     tx.send(make_enqueue(
         key,
         vec![make_piece_pos(0, 0, 0.0, 11.0)],
@@ -209,7 +203,6 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
         std::thread::yield_now();
     }
 
-    // Masked overlay piece starting at 0.0 -> 11mm jump from the move; exempt.
     tx.send(make_enqueue(
         key,
         vec![make_piece_pos(10_000, 0b10, 0.0, 0.5)],

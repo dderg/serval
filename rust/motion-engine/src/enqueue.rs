@@ -132,10 +132,6 @@ where
     )
 }
 
-/// Flatten a contiguous run of monomial Bézier pieces straight into dispatchable
-/// `PieceEntry`s — the polynomial path a nudge uses to skip the `ScalarNurbs`
-/// round-trip entirely. `flatten_axis` reaches this after extracting pieces from
-/// a curve; a nudge builds its trapezoid phases directly and calls in here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn flatten_bezier_pieces<P>(
     bps: &[BezierPiece<f64>],

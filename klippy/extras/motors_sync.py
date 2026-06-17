@@ -17,7 +17,7 @@ from .z_tilt import ZAdjustStatus
 PLOT_PATH = '~/printer_data/config/adxl_results/motors_sync'
 PIN_MIN_TIME = 0.010            # Minimum wait time to enable hardware pin
 MOTOR_STALL_TIME = 0.100        # Minimum wait time to enable motor pin
-MEASURE_SETTLE_TIME = 0.250     # Settle before sampling the measurement window
+MEASURE_SETTLE_TIME = 0.250
 
 def rail_center(position_min, position_max):
     return (position_min + position_max) / 2.0

@@ -65,10 +65,6 @@ pub enum RuntimeEvent {
 }
 
 impl RuntimeEvent {
-    /// High-volume sensor-stream data (e.g. accelerometer batches). Everything
-    /// else — clock responses, faults, endstop trips, status — is low-volume
-    /// control that rides a separate priority lane so a bulk flood can neither
-    /// delay nor overflow-drop it.
     pub fn is_bulk_data(&self) -> bool {
         matches!(self, RuntimeEvent::PassthroughResponse { name, .. } if name != "clock")
     }

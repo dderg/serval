@@ -4,10 +4,6 @@ use nurbs::bezier::BezierPiece;
 #[cfg(test)]
 mod tests;
 
-/// One trapezoid phase ready for dispatch: a monomial cubic in planner time
-/// (`piece.u_start`/`u_end` are absolute planner-time bounds) tagged with the
-/// target motor. Carries no `ScalarNurbs` — the phase rides straight into
-/// `flatten_bezier_pieces`, so a nudge never builds a knot vector.
 #[derive(Debug, Clone)]
 pub struct NudgePiece {
     pub axis: u8,
@@ -15,8 +11,6 @@ pub struct NudgePiece {
     pub piece: BezierPiece<f64>,
 }
 
-/// Returns `(accel_t, cruise_t, cruise_v)`.
-/// `accel <= 0` collapses to a single constant-velocity phase (`accel_t == 0`).
 pub(crate) fn calc_move_time(dist: f64, speed: f64, accel: f64) -> (f64, f64, f64) {
     let dist = dist.abs();
     if accel <= 0.0 || dist == 0.0 {

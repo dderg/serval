@@ -709,10 +709,6 @@ fn enqueue_stamps_motor_mask_onto_every_piece() {
 
 #[test]
 fn overlay_pieces_are_relativized_to_start_at_zero() {
-    // A curve whose first piece starts at b0=0.5mm (non-zero) must be shifted
-    // so the emitted coeffs[0]==0 and the span (coeffs[3]-coeffs[0]) equals
-    // the original Bernstein displacement.  A normal piece (motor_mask==0) must
-    // be emitted with its absolute coefficients unchanged.
     let b0 = 0.5_f64;
     let b3 = 0.6_f64;
     let bern: [f64; 4] = [b0, b0 + (b3 - b0) / 3.0, b0 + 2.0 * (b3 - b0) / 3.0, b3];
@@ -777,10 +773,6 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
 
 #[test]
 fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
-    // A 3-piece overlay representing a trapezoid: the cumulative curve goes
-    // 0→accel_end→accel_end+cruise→total, so each later piece's b0 is large.
-    // After relativization every piece starts at 0 and its coeffs[3] equals
-    // its own span only.
     let accel_end = 0.2_f64;
     let cruise_span = 0.6_f64;
     let decel_span = 0.2_f64;

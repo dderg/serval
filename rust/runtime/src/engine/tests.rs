@@ -124,7 +124,6 @@ fn drain_through_piece(
     for n in 0..=ticks {
         engine.tick(start + n * TICK_CYCLES, shared, storage);
         let q_ptr: *mut StepQueue = q;
-        // SAFETY: host test queue, sole consumer here.
         while unsafe { queue_pop(q_ptr) }.is_some() {}
     }
 }
@@ -276,7 +275,6 @@ impl OverlayHarness {
                 &mut self.storage,
             );
             let q_ptr: *mut StepQueue = self.q.as_mut();
-            // SAFETY: host test queue, sole consumer here.
             while unsafe { queue_pop(q_ptr) }.is_some() {}
         }
         self.next_start += (ticks + 1) * TICK_CYCLES;
@@ -334,7 +332,6 @@ impl OverlayHarness {
         self.engine
             .tick(self.next_start, &self.shared, &mut self.storage);
         let q_ptr: *mut StepQueue = self.q.as_mut();
-        // SAFETY: host test queue, sole consumer here.
         while unsafe { queue_pop(q_ptr) }.is_some() {}
         let first_sample_steps = self.position_count(motor_idx) - before;
 
@@ -345,7 +342,6 @@ impl OverlayHarness {
                 &self.shared,
                 &mut self.storage,
             );
-            // SAFETY: host test queue, sole consumer here.
             while unsafe { queue_pop(q_ptr) }.is_some() {}
         }
         self.next_start += (ticks + 1) * TICK_CYCLES;
@@ -385,17 +381,6 @@ fn symmetric_buzz_nets_position_count_to_zero() {
 
 #[test]
 fn overlay_multi_piece_no_sample_exceeds_max_steps() {
-    // Reproduces the crash: a 3-piece overlay whose cumulative curve means the
-    // decel chunk's b0 was ~0.998mm (non-relativized).  With relativization
-    // (Part A) each piece starts at 0 and each piece's per-sample step count
-    // must never exceed MAX_STEPS_PER_SAMPLE.
-    //
-    // Pieces (mstep=0.01mm, 100 msteps/mm):
-    //   accel: 0 → 0.08mm (8 steps over 8ms)
-    //   cruise: 0 → 0.84mm (84 steps over 84ms)
-    //   decel: 0 → 0.08mm (8 steps over 8ms)
-    // Without relativization the decel piece arrives with b0≈0.92mm → 92 steps
-    // in the first sample → -310 fault.
     use crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE;
 
     let mstep: f32 = 0.01;
@@ -443,8 +428,6 @@ fn overlay_multi_piece_no_sample_exceeds_max_steps() {
     engine.test_install_step_queues(qs);
     let shared = SharedState::new();
 
-    // Relativized pieces: each starts at 0, ends at its own span.
-    // These represent the 3 chunks of a 1mm trapezoid nudge.
     let mk_piece = |start: u64, span: f32, dur: f32| PieceEntry {
         start_time: start,
         coeffs: [0.0_f32, 0.0, span, span],

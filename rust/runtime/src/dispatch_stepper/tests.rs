@@ -51,8 +51,6 @@ fn commit_masked_scopes_position_count() {
 fn dispatch_pulse_honors_motor_mask() {
     use crate::error::FaultCode;
 
-    // Single-bit mask 0b10 => stepper_sel 2 (motor 1); only motor 1's
-    // position_count advances.
     {
         let shared = SharedState::new();
         let mut q = StepQueue::new();
@@ -94,7 +92,6 @@ fn dispatch_pulse_honors_motor_mask() {
         assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
     }
 
-    // Multi-bit mask 0b11 => MultiMotorMask fault, no steps enqueued.
     {
         let shared = SharedState::new();
         let mut q = StepQueue::new();
@@ -418,10 +415,6 @@ fn unknown_step_mode_raises_fault() {
 
 #[test]
 fn overlay_arm_emits_zero_steps_and_seeds_frame_to_zero() {
-    // motion_core guarantees p_end=0 at the overlay arm tick (piece_start_cycles=now,
-    // so eval_horner evaluates at u=0 — the curve's own origin).
-    // dispatch_pulse must use prev_step_count=0 on arm so signed_steps = 0 - 0 = 0,
-    // and store frame 0 so subsequent ticks emit the full Δ from there.
     let mstep: f32 = 0.01;
     let mut axis = {
         let mut steppers: heapless::Vec<StepperRef, 4> = heapless::Vec::new();

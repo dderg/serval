@@ -438,9 +438,6 @@ pub fn run_pump<S, F, C, A, O, D>(
                     // meaningless without a real frequency and end_time needs it too.
                     if let Some((_ack_now, freq)) = mcu_clock_of(key.mcu_id) {
                         let (first_entry, first_host) = &pieces[0];
-                        // Overlay (nudge) pieces ride relative curves off the position
-                        // book; the MCU's per-piece frame reset absorbs the apparent
-                        // jump, so exempt them from axis position-continuity tracking.
                         if first_entry.motor_mask == 0 {
                             if let Some(&JunctionEnd {
                                 end_ticks: prev_end_ticks,

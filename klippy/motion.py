@@ -478,10 +478,6 @@ class Motion:
         self._drain_to_mcu_execution()
 
     def _drain_to_mcu_execution(self):
-        # Mainline wait_moves() contract: return only once the queued motion
-        # has actually executed.  engine.wait_moves() drains the planner to
-        # dispatch; the loop then waits for each engine MCU's clock to reach
-        # the last queued move's end time.
         self.engine.wait_moves()
         if self._mcu_pending_end_time > 0.0:
             for mcu in self._engine_mcus():

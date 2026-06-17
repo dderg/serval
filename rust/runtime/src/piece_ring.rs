@@ -312,9 +312,6 @@ pub struct PieceEntry {
     pub start_time: u64,
     pub coeffs: [f32; 4],
     pub duration: f32,
-    /// Bit i set => motor i of this axis runs this piece. `0` => all motors
-    /// (a normal full-axis move that advances `p_prev`). Non-zero => overlay:
-    /// only those motors step+count, `p_prev` is not advanced.
     pub motor_mask: u8,
     #[allow(clippy::pub_underscore_fields)]
     pub _reserved: [u8; 3],
@@ -325,9 +322,6 @@ const _: () = {
     assert!(core::mem::align_of::<PieceEntry>() == 8);
 };
 
-/// Maps a single-motor `motor_mask` to a `StepEntry.stepper_sel`.
-/// `0` => `STEPPER_SEL_ALL` (0). Exactly one bit set => `bit_index + 1`.
-/// More than one bit set is rejected (overlays target one motor; YAGNI).
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
 pub fn stepper_sel_from_mask(mask: u8) -> Result<u8, ()> {

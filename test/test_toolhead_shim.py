@@ -176,7 +176,6 @@ def _make_correction_toolhead(duration):
 def test_get_last_move_time_uses_motion_lead():
     th = _make_correction_toolhead(0.0)
     th.motion_lead = 0.5
-    # est = 100 + 1 = 101; floor = est + 0.5 = 101.5; pending 0 < est -> floor
     assert th.get_last_move_time() == pytest.approx(101.5)
 
 

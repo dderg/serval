@@ -42,7 +42,6 @@ fn reset_clears_axis_state() {
 fn reset_reclaims_ring_allocation() {
     let mut e = new_engine();
     let b = pulse_binding();
-    // Exact two-axis budget (ring_depth 240 ×2 axes); the third axis must overflow it.
     let total = 2 * 240;
     assert_eq!(
         e.configure_axis(0, StepMode::Pulse, 0.0125, 240, &[b], total),

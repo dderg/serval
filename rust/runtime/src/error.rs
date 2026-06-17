@@ -107,8 +107,6 @@ pub const RUNTIME_ERR_UNKNOWN_STEP_MODE: i32 = -312;
 /// entry in `phase_slot_idx[0..phase_motor_count]` maps it to a registered
 /// SPI motor. Detail: `((axis_idx & 0xFF) << 16) | stepper_oid`.
 pub const RUNTIME_ERR_PHASE_MOTOR_UNMAPPED: i32 = -313;
-/// Overlay (single-motor) piece cannot be honored on this axis. Detail:
-/// `((axis_idx & 0xFF) << 16) | (mask & 0xFF)`.
 pub const RUNTIME_ERR_OVERLAY_UNSUPPORTED: i32 = -314;
 
 #[repr(i32)]
@@ -225,7 +223,6 @@ impl FaultCode {
     /// assert_eq!(FaultCode::from_u16(0xFEC8), Some(FaultCode::UnknownStepMode));
     /// // PhaseMotorUnmapped = -313; -313i16 as u16 = 0xFEC7
     /// assert_eq!(FaultCode::from_u16(0xFEC7), Some(FaultCode::PhaseMotorUnmapped));
-    /// // OverlayUnsupported = -314; -314i16 as u16 = 0xFEC6
     /// assert_eq!(FaultCode::from_u16(0xFEC6), Some(FaultCode::OverlayUnsupported));
     /// assert_eq!(FaultCode::from_u16(0x1234), None);
     /// ```

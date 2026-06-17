@@ -166,13 +166,6 @@ pub fn raise_steps_per_sample_exceeded(shared: &SharedState, axis_idx: usize, ab
     emit_fault_log(FaultCode::StepsPerSampleExceeded, detail);
 }
 
-/// Latch a `MultiMotorMask` fault — a main-ring piece carried a `motor_mask`
-/// with more than one bit set, which `dispatch_pulse` cannot map to a single
-/// `stepper_sel`.
-///
-/// `fault_detail` encoding:
-/// - bits 16..24: `axis_idx`
-/// - bits  0..8:  `mask`
 #[inline]
 pub fn raise_multi_motor_mask(shared: &SharedState, axis_idx: usize, mask: u8) {
     let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mask);
@@ -206,8 +199,6 @@ pub fn raise_phase_motor_unmapped(shared: &SharedState, axis_idx: usize, stepper
     emit_fault_log(FaultCode::PhaseMotorUnmapped, detail);
 }
 
-/// Latch an `OverlayUnsupported` fault — an overlay (single-motor) piece
-/// cannot be honored on this axis. Detail: `((axis_idx & 0xFF) << 16) | (mask & 0xFF)`.
 #[inline]
 pub fn raise_overlay_unsupported(shared: &SharedState, axis_idx: usize, mask: u8) {
     let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mask);

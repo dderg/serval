@@ -90,7 +90,6 @@ def make_z_tilt_ng_helper(z_names, max_accel=500.0):
 def test_z_tilt_adjust_steppers_calls_force_move_per_nonzero_delta():
     helper, fm, toolhead = make_z_tilt_helper(z_names=["z", "z1", "z2"])
     helper.adjust_steppers([5.0, 5.0009, 5.002], speed=10.0)
-    # delta for "z" is 0 (min, skipped via < 1e-6); "z1"=0.0009; "z2"=0.002
     assert [c["name"] for c in fm.calls] == ["z1", "z2"]
     assert fm.calls[0]["dist"] == pytest.approx(0.0009)
     assert fm.calls[1]["dist"] == pytest.approx(0.002)
