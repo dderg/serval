@@ -215,12 +215,12 @@ impl FaultCode {
     /// ```
     /// # use runtime::error::FaultCode;
     /// assert_eq!(FaultCode::from_u16(0), Some(FaultCode::None));
-    /// assert_eq!(FaultCode::from_u16(0xFECC), Some(FaultCode::PieceStartInPast));
-    /// assert_eq!(FaultCode::from_u16(0xFEC9), Some(FaultCode::TickIntervalExceeded));
-    /// assert_eq!(FaultCode::from_u16(0xFEC8), Some(FaultCode::UnknownStepMode));
-    /// assert_eq!(FaultCode::from_u16(0xFEC7), Some(FaultCode::PhaseMotorUnmapped));
-    /// assert_eq!(FaultCode::from_u16(0xFEC6), Some(FaultCode::OverlayUnsupported));
-    /// assert_eq!(FaultCode::from_u16(0x1234), None);
+    /// assert_eq!(FaultCode::from_u16(-308i16 as u16), Some(FaultCode::PieceStartInPast));
+    /// assert_eq!(FaultCode::from_u16(-311i16 as u16), Some(FaultCode::TickIntervalExceeded));
+    /// assert_eq!(FaultCode::from_u16(-312i16 as u16), Some(FaultCode::UnknownStepMode));
+    /// assert_eq!(FaultCode::from_u16(-313i16 as u16), Some(FaultCode::PhaseMotorUnmapped));
+    /// assert_eq!(FaultCode::from_u16(-314i16 as u16), Some(FaultCode::OverlayUnsupported));
+    /// assert_eq!(FaultCode::from_u16(1), None);
     /// ```
     #[allow(clippy::cast_possible_wrap)] // intentional: sign-extend u16 → i16 → i32
     pub fn from_u16(v: u16) -> Option<Self> {
