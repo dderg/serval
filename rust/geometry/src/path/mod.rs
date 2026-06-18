@@ -2,6 +2,7 @@ pub mod arc;
 mod basis;
 pub mod clothoid;
 pub mod line;
+pub mod lowering;
 pub mod profile;
 
 pub use arc::Arc;

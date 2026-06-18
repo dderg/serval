@@ -80,6 +80,7 @@ pub enum GeometryError {
     NonPlanarBasis { reason: &'static str },
     DegenerateArc { reason: &'static str },
     DegenerateClothoid { reason: &'static str },
+    InvalidLowering { reason: &'static str },
 }
 
 #[cfg(test)]
