@@ -430,7 +430,7 @@ def run_home_axis(overshoot, retract_dist, positive_dir):
     homer.printer = FakeHomingPrinter(FakeHomingStepperEnable())
 
     direction = 1.0 if positive_dir else -1.0
-    trigger_height = hi.position_endstop
+    trigger_position = hi.position_endstop
     trip_pos = [0.0, 0.0, 100.0]
     final_pos = [0.0, 0.0, 100.0 + direction * overshoot]
 
@@ -456,44 +456,44 @@ def run_home_axis(overshoot, retract_dist, positive_dir):
             engine=None,
             kin=kin,
             axis=2,
-            entry={"trigger_height": trigger_height, "provider": None},
+            entry={"trigger_position": trigger_position, "provider": None},
         )
     finally:
         homing_mod._run_servo_guarded_trip = orig_guarded
         homing_mod._check_servo_drive_fault = orig_fault
         homing_mod.get_danger_options = orig_danger
 
-    return toolhead, trigger_height
+    return toolhead, trigger_position
 
 
 def test_retract_compensates_for_overshoot():
     overshoot = 0.7
     retract_dist = 5.0
-    toolhead, trigger_height = run_home_axis(
+    toolhead, trigger_position = run_home_axis(
         overshoot, retract_dist, positive_dir=False
     )
     target, speed = toolhead.moves[-1]
-    assert target[2] == pytest.approx(trigger_height + retract_dist)
+    assert target[2] == pytest.approx(trigger_position + retract_dist)
     assert speed == 10.0
 
 
 def test_retract_lands_at_trigger_minus_dist_positive_dir():
     overshoot = 0.7
     retract_dist = 5.0
-    toolhead, trigger_height = run_home_axis(
+    toolhead, trigger_position = run_home_axis(
         overshoot, retract_dist, positive_dir=True
     )
     target, _ = toolhead.moves[-1]
-    assert target[2] == pytest.approx(trigger_height - retract_dist)
+    assert target[2] == pytest.approx(trigger_position - retract_dist)
 
 
 def test_retract_with_zero_overshoot_unchanged():
     retract_dist = 5.0
-    toolhead, trigger_height = run_home_axis(
+    toolhead, trigger_position = run_home_axis(
         0.0, retract_dist, positive_dir=False
     )
     target, _ = toolhead.moves[-1]
-    assert target[2] == pytest.approx(trigger_height + retract_dist)
+    assert target[2] == pytest.approx(trigger_position + retract_dist)
 
 
 def test_guarded_trip_failure_disables_servo_motor_and_reraises():
