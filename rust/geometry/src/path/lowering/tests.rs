@@ -311,3 +311,51 @@ fn invalid_rate_rejected() {
         );
     }
 }
+
+#[test]
+fn non_finite_anchor_rejected() {
+    let followers = || {
+        vec![FollowerDemand {
+            axis_index: 3,
+            ratio: 0.3,
+        }]
+    };
+    let nan_line = Line::try_new([f64::NAN, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap();
+    let nan_origin_arc = Arc::try_new([f64::NAN, 0.0, 0.0], UNIT_U, UNIT_V, 2.0, 0.0, 1.0).unwrap();
+    let nan_angle_arc = Arc::try_new(ORIGIN, UNIT_U, UNIT_V, 2.0, f64::NAN, 1.0).unwrap();
+    let nan_clothoid =
+        Clothoid::try_new([f64::NAN, 0.0, 0.0], UNIT_U, UNIT_V, 0.1, 0.05, 3.0).unwrap();
+
+    for spatial in [
+        Segment::Line(nan_line),
+        Segment::Arc(nan_origin_arc),
+        Segment::Arc(nan_angle_arc),
+        Segment::Clothoid(nan_clothoid),
+    ] {
+        let seg = PathSegment::try_new(spatial, followers()).unwrap();
+        assert_eq!(
+            lower_constant_speed(&seg, 5.0, 10.0),
+            Err(GeometryError::InvalidLowering {
+                reason: "spatial anchor is not finite",
+            })
+        );
+    }
+}
+
+#[test]
+fn unaddressable_sample_count_rejected() {
+    let seg = PathSegment::try_new(
+        Segment::Line(make_line()),
+        vec![FollowerDemand {
+            axis_index: 3,
+            ratio: 0.3,
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        lower_constant_speed(&seg, 1e-20, 1e10),
+        Err(GeometryError::InvalidLowering {
+            reason: "sample count exceeds addressable range",
+        })
+    );
+}

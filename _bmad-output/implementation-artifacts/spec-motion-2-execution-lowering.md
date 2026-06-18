@@ -149,3 +149,11 @@ context:
 
 - Additive registration.
   [`mod.rs:5`](../../rust/geometry/src/path/mod.rs#L5)
+
+### Review Findings (code review 2026-06-18)
+
+- [x] [Review][Decision→Patch] **Anchor-finiteness fail-loud ownership.** A Line/Arc/Clothoid built with a non-finite anchor coordinate lowered to silent NaN positions — `Line::try_new` rejects only `len == 0.0`, so a NaN coordinate (`len == NaN`) slipped through; `Arc::start_angle`/`origin` and `Clothoid::start_pose` were likewise unchecked. **Resolved (option 1):** `lower_constant_speed` now rejects non-finite spatial anchors with `InvalidLowering`, covering Line start/end, Arc origin+start_angle, and Clothoid start_pose; paired test `non_finite_anchor_rejected`. Closes the step-1 hand-off without touching frozen step-1 constructors. [`lowering.rs:51`]
+- [x] [Review][Patch] Saturating `as usize` on an unbounded sample count → fail loud with `InvalidLowering` instead of an abort. [`lowering.rs:56`] — applied + paired test.
+- [x] [Review][Patch] Document the Cephes Fresnel accuracy bound (~2e-17, ≤1e-9) in code, per the "Always" requirement. [`fresnel.rs:1`] — applied.
+- [x] [Review][Defer] Small-σ Fresnel precision cliff (σ=0 limit fires only at exact `==0.0`; err ~3e-9 at σ=1e-9). [`fresnel.rs`] — deferred (sub-physical; inherent to completion-of-square).
+- [x] [Review][Defer] `LoweredSample.followers` drops `axis_index` (positional `Vec<f64>` only). [`lowering.rs`] — deferred (revisit when a real follower consumer lands, step 3+).

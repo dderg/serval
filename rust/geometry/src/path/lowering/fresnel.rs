@@ -1,5 +1,6 @@
-// Coefficients are verbatim Cephes `fresnl` constants; preserve full precision.
-#![allow(clippy::excessive_precision)]
+//! Fresnel integrals `C(x)`/`S(x)` via the Cephes rational approximation:
+//! max abs error ~2e-17, uniform over all finite x (no domain restriction).
+#![allow(clippy::excessive_precision)] // verbatim Cephes coefficients
 
 use core::f64::consts::{FRAC_PI_2, PI};
 

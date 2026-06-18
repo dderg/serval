@@ -31,11 +31,24 @@ pub fn lower_constant_speed(
             reason: "rate must be finite and positive",
         });
     }
+    if let Some(spatial) = &seg.spatial {
+        if !spatial_anchors_finite(spatial) {
+            return Err(GeometryError::InvalidLowering {
+                reason: "spatial anchor is not finite",
+            });
+        }
+    }
 
     let s_len = seg.s_len();
     let dt = 1.0 / rate_hz;
     let total_t = s_len / speed_mm_s;
-    let n = (total_t / dt).ceil() as usize;
+    let count = total_t / dt;
+    if count >= usize::MAX as f64 {
+        return Err(GeometryError::InvalidLowering {
+            reason: "sample count exceeds addressable range",
+        });
+    }
+    let n = count.ceil() as usize;
 
     let mut samples = Vec::with_capacity(n + 1);
     for k in 0..=n {
@@ -50,6 +63,14 @@ pub fn lower_constant_speed(
         });
     }
     Ok(samples)
+}
+
+fn spatial_anchors_finite(seg: &Segment) -> bool {
+    match seg {
+        Segment::Line(l) => l.start.iter().chain(l.end.iter()).all(|c| c.is_finite()),
+        Segment::Arc(a) => a.start_angle.is_finite() && a.origin.iter().all(|c| c.is_finite()),
+        Segment::Clothoid(c) => c.start_pose.iter().all(|p| p.is_finite()),
+    }
 }
 
 fn axpby(a: f64, u: [f64; 3], b: f64, v: [f64; 3]) -> [f64; 3] {
