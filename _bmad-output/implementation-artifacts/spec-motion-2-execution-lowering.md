@@ -68,10 +68,10 @@ context:
 
 **Execution:**
 - [x] `rust/geometry/src/path/lowering.rs` -- define `trait PositionProfile { point_at, heading_at }`; `impl` for `Line` (lerp), `Arc` (planar circle), `Clothoid` (via `fresnel`), and `Segment` (`match` dispatch); `struct LoweredSample { t_s, position: Option<[f64;3]>, followers: Vec<f64> }`; `fn lower_constant_speed(&PathSegment, speed_mm_s, rate_hz) -> Result<Vec<LoweredSample>, GeometryError>` with fail-loud param validation.
-- [x] `rust/geometry/src/path/lowering/fresnel.rs` -- Fresnel C(x)/S(x) approximation (convergent power series, documented error bound ≤1e-9 over the validated domain) + `clothoid_offset(kappa_0, sigma, s) -> (f64, f64)` returning `(∫cos φ, ∫sin φ)`, with the closed-form σ=0 / κ₀=0 limits.
+- [x] `rust/geometry/src/path/lowering/fresnel.rs` -- Fresnel C(x)/S(x) via the Cephes vetted rational approximation (uniform over all x, ~2e-17, no domain wall) + `clothoid_offset(kappa_0, sigma, s) -> (f64, f64)` returning `(∫cos φ, ∫sin φ)`, with the closed-form σ=0 / κ₀=0 limits.
 - [x] `rust/geometry/src/path/mod.rs` -- `pub mod lowering;` (additive registration).
 - [x] `rust/geometry/src/error.rs` -- new `GeometryError::InvalidLowering` variant for invalid lowering params (non-finite / non-positive speed or rate).
-- [x] `rust/geometry/src/path/lowering/tests.rs` -- AC set below + the I/O matrix, with an independent composite-Simpson quadrature reference for the Fresnel positions.
+- [x] `rust/geometry/src/path/lowering/tests.rs` -- AC set below + the I/O matrix, with an independent composite Gauss-Legendre quadrature reference for the Fresnel positions.
 
 **Acceptance Criteria:**
 - (AC-SEAM-1, the R1 killer) For each variant, sampling `point_at` across `[0,s_len]` and numerically estimating curvature (`κ = |r′×r″|/|r′|³`) matches analytic `CurvatureProfile::kappa(s)` within tol — analytic-κ and lowered-position never silently disagree.
@@ -85,9 +85,8 @@ context:
 
 ## Spec Change Log
 
-- **Review patch (fail-loud Fresnel domain).** Blind/edge/acceptance reviewers all flagged that the Fresnel power series is only valid for `|x| ≤ FRESNEL_X_MAX (3.0)` but was guarded by `debug_assert!`, which compiles out in release — a high-κ₀/low-σ clothoid would silently produce wrong positions. Changed to a real `assert!` + `panic!` (loud in release) and added a `#[should_panic]` test. Avoids a silent-wrong committed move (violates "fail loudly"). KEEP: realistic blends (arg < ~2) sit well inside the wall; do not widen it without re-verifying ≤1e-9 accuracy at the edge.
 - **Review patch (signed-κ seam test).** Acceptance auditor noted AC-SEAM-1 compared `|κ|`, leaving the decided "+v bend for positive κ" convention unverified. Added `ac_seam1_clothoid_signed_curvature_matches_bend_direction` (signed κ about the u×v normal vs signed analytic `kappa(s)`). Avoids a wrong-way Fresnel passing the seam test. KEEP: Arc `kappa()` is magnitude-only (turn sign lives in `sweep`), so the abs-based check stays correct for Arc.
-- **Flagged for human (frozen wording).** Implementation realizes the frozen "Always" Fresnel intent (documented ≤1e-9, not a table, independent reference) via a **convergent power series** + **composite-Simpson** reference, rather than the frozen block's literal "rational approximation" / the task's "Gauss-Legendre." Numerically conformant (measured ≤2e-12). Awaiting human call: annotate the frozen wording, or swap to a literal rational approximation.
+- **Resolved (frozen wording — Fresnel method).** Reviewers flagged a first cut that used a convergent power series (valid only `|x| ≤ 3`, fenced by a loud fail-out) + composite-Simpson reference, which met the frozen ≤1e-9 / independent-reference intent but not its literal "rational approximation" / "Gauss-Legendre" wording. Per human decision, swapped to the **Cephes vetted rational approximation** (uniform over all x, ~2e-17, no domain wall — so the earlier fail-loud guard is gone, moot) and a **composite Gauss-Legendre** test reference. Code now honors the frozen wording directly. Reason for rational over series: uniform accuracy and predictable (constant-time, branch-light) cost — the right properties for the fixed-rate execution path.
 
 ## Design Notes
 
@@ -121,10 +120,10 @@ context:
   [`lowering.rs:123`](../../rust/geometry/src/path/lowering.rs#L123)
 
 - Completion-of-the-square → standard C/S, with the σ=0 / κ₀=0 closed-form limits.
-  [`fresnel.rs:41`](../../rust/geometry/src/path/lowering/fresnel.rs#L41)
+  [`fresnel.rs:126`](../../rust/geometry/src/path/lowering/fresnel.rs#L126)
 
-- Power-series C(x)/S(x); the domain wall now fails loudly in release (review patch).
-  [`fresnel.rs:11`](../../rust/geometry/src/path/lowering/fresnel.rs#L11)
+- C(x)/S(x) via the Cephes rational approximation — uniform over all x, no domain wall.
+  [`fresnel.rs:98`](../../rust/geometry/src/path/lowering/fresnel.rs#L98)
 
 - Arc as a planar circle; tangent sign follows `sweep`.
   [`lowering.rs:97`](../../rust/geometry/src/path/lowering.rs#L97)
@@ -143,13 +142,10 @@ context:
 **Tests (the R1 killer first)**
 
 - AC-SEAM-1 signed: κ-from-position vs signed analytic κ — verifies the +v bend convention (review patch).
-  [`tests.rs:128`](../../rust/geometry/src/path/lowering/tests.rs#L128)
+  [`tests.rs:133`](../../rust/geometry/src/path/lowering/tests.rs#L133)
 
-- Fresnel vs independent Simpson quadrature, incl. the σ=0 / κ₀=0 limits.
-  [`tests.rs:202`](../../rust/geometry/src/path/lowering/tests.rs#L202)
-
-- Out-of-domain Fresnel fails loudly.
-  [`tests.rs:222`](../../rust/geometry/src/path/lowering/tests.rs#L222)
+- Fresnel vs independent Gauss-Legendre quadrature (both rational branches), incl. the σ=0 / κ₀=0 limits.
+  [`tests.rs:207`](../../rust/geometry/src/path/lowering/tests.rs#L207)
 
 - Additive registration.
   [`mod.rs:5`](../../rust/geometry/src/path/mod.rs#L5)

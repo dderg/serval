@@ -58,25 +58,30 @@ where
     }
 }
 
-fn simpson_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
-    let n = 20_000;
-    let dt = s / (n as f64);
+fn gauss_legendre_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
+    let a = (5.0 - 2.0 * (10.0 / 7.0_f64).sqrt()).sqrt() / 3.0;
+    let b = (5.0 + 2.0 * (10.0 / 7.0_f64).sqrt()).sqrt() / 3.0;
+    let nodes = [-b, -a, 0.0, a, b];
+    let w_a = (322.0 + 13.0 * 70.0_f64.sqrt()) / 900.0;
+    let w_b = (322.0 - 13.0 * 70.0_f64.sqrt()) / 900.0;
+    let weights = [w_b, w_a, 128.0 / 225.0, w_a, w_b];
+
     let phi = |t: f64| kappa_0 * t + 0.5 * sigma * t * t;
+    let m = 2000;
+    let h = s / (m as f64);
+    let half = h * 0.5;
     let mut cx = 0.0;
     let mut cy = 0.0;
-    for k in 0..=n {
-        let t = (k as f64) * dt;
-        let w = if k == 0 || k == n {
-            1.0
-        } else if k % 2 == 1 {
-            4.0
-        } else {
-            2.0
-        };
-        cx += w * phi(t).cos();
-        cy += w * phi(t).sin();
+    for j in 0..m {
+        let mid = (j as f64 + 0.5) * h;
+        for k in 0..5 {
+            let t = mid + half * nodes[k];
+            let w = weights[k] * half;
+            cx += w * phi(t).cos();
+            cy += w * phi(t).sin();
+        }
     }
-    (cx * dt / 3.0, cy * dt / 3.0)
+    (cx, cy)
 }
 
 fn make_line() -> Line {
@@ -206,21 +211,18 @@ fn ac_fres1_clothoid_offset_matches_quadrature() {
         (-0.2, 0.3, 2.5),
         (0.4, 0.0, 1.5),
         (0.0, 0.0, 2.0),
+        (0.0, std::f64::consts::PI, 4.0),
+        (1.0, 0.5, 5.0),
+        (0.0, 2.0, 6.0),
     ];
     for (kappa_0, sigma, s) in cases {
         let (cx, cy) = clothoid_offset(kappa_0, sigma, s);
-        let (rx, ry) = simpson_offset(kappa_0, sigma, s);
+        let (rx, ry) = gauss_legendre_offset(kappa_0, sigma, s);
         assert!(
             (cx - rx).abs() < 1e-9 && (cy - ry).abs() < 1e-9,
             "offset mismatch k0={kappa_0} sigma={sigma}: ({cx},{cy}) vs ({rx},{ry})"
         );
     }
-}
-
-#[test]
-#[should_panic(expected = "exceeds validated power-series domain")]
-fn fresnel_out_of_domain_fails_loudly() {
-    clothoid_offset(0.0, std::f64::consts::PI, 4.0);
 }
 
 #[test]
