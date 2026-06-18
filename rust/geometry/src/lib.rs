@@ -2,6 +2,7 @@
 
 pub mod curve;
 pub mod error;
+pub mod execution;
 pub mod fitter;
 pub mod frontend;
 pub mod params;
@@ -14,6 +15,7 @@ pub mod telemetry;
 pub mod velocity;
 
 pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, SlotDegeneracy};
+pub use execution::lower_profile;
 pub use fitter::{
     ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, UnblendReason,
     UnblendedJunction, fit_chain, fit_corners,
