@@ -3,6 +3,7 @@
 pub mod curve;
 pub mod error;
 pub mod params;
+pub mod path;
 pub mod pipeline;
 pub(crate) mod reduce;
 pub mod segment;
