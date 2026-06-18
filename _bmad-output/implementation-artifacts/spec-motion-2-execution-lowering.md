@@ -157,3 +157,5 @@ context:
 - [x] [Review][Patch] Document the Cephes Fresnel accuracy bound (~2e-17, ≤1e-9) in code, per the "Always" requirement. [`fresnel.rs:1`] — applied.
 - [x] [Review][Defer] Small-σ Fresnel precision cliff (σ=0 limit fires only at exact `==0.0`; err ~3e-9 at σ=1e-9). [`fresnel.rs`] — deferred (sub-physical; inherent to completion-of-square).
 - [x] [Review][Defer] `LoweredSample.followers` drops `axis_index` (positional `Vec<f64>` only). [`lowering.rs`] — deferred (revisit when a real follower consumer lands, step 3+).
+
+**Second pass (code review 2026-06-18): clean.** Re-review of the hardened state surfaced no actionable findings. The only new flags (NaN-`count` bypassing the sample-count guard; `spatial_anchors_finite` "missing" Arc radius/sweep/u/v and Clothoid κ₀/σ/u/v) were false positives — `count` is finite because the anchor check precedes `s_len`, and the omitted fields are all construction-validated finite (orthonormality rejects NaN *and* inf bases). Acceptance Auditor verdict: ACCEPT, no true violations.
