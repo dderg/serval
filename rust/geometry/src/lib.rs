@@ -2,6 +2,7 @@
 
 pub mod curve;
 pub mod error;
+pub mod frontend;
 pub mod params;
 pub mod path;
 pub mod pipeline;
@@ -11,6 +12,7 @@ pub mod splitter;
 pub mod telemetry;
 
 pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, SlotDegeneracy};
+pub use frontend::{FrontendError, Move, MoveContext, VelocityLimits, arc_move, line_move};
 pub use params::FitterParams;
 pub use pipeline::{GeometryPipeline, Item, Segments, degree_elevate_2_to_3};
 pub use segment::{

@@ -1,0 +1,326 @@
+use super::*;
+
+use std::f64::consts::{FRAC_PI_2, TAU};
+
+use crate::GeometryError;
+use crate::path::lowering::PositionProfile;
+use crate::path::{Arc, CurvatureProfile, Line, Segment};
+
+fn limits() -> VelocityLimits {
+    VelocityLimits {
+        max_velocity_mm_s: 300.0,
+        accel_mm_s2: 3000.0,
+        square_corner_velocity_mm_s: 5.0,
+    }
+}
+
+fn ctx() -> MoveContext {
+    MoveContext {
+        extruder_axis: 3,
+        feedrate_mm_s: 30.0,
+        limits: limits(),
+        source: SourceRange {
+            start_line: 7,
+            end_line: 7,
+        },
+    }
+}
+
+fn assert_close(a: f64, b: f64, tol: f64) {
+    assert!((a - b).abs() <= tol, "expected {a} ≈ {b} (tol {tol})");
+}
+
+fn assert_vec_close(a: [f64; 3], b: [f64; 3], tol: f64) {
+    for k in 0..3 {
+        assert_close(a[k], b[k], tol);
+    }
+}
+
+fn spatial(m: &Move) -> &Segment {
+    m.segment.spatial.as_ref().expect("spatial segment present")
+}
+
+fn arc_of(m: &Move) -> &Arc {
+    match spatial(m) {
+        Segment::Arc(a) => a,
+        other => panic!("expected Arc, got {other:?}"),
+    }
+}
+
+fn line_of(m: &Move) -> &Line {
+    match spatial(m) {
+        Segment::Line(l) => l,
+        other => panic!("expected Line, got {other:?}"),
+    }
+}
+
+#[test]
+fn line_move_builds_line_with_extruder_follower() {
+    let m = line_move([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 1.0, ctx()).unwrap();
+
+    let line = line_of(&m);
+    assert_eq!(line.start, [0.0, 0.0, 0.0]);
+    assert_eq!(line.end, [10.0, 0.0, 0.0]);
+
+    assert_eq!(m.segment.followers.len(), 1);
+    let f = m.segment.followers[0];
+    assert_eq!(f.axis_index, 3);
+    assert_close(f.ratio * m.segment.s_len(), 1.0, 1e-12);
+
+    assert_close(m.feedrate_mm_s, 30.0, 0.0);
+    assert_eq!(m.limits, limits());
+    assert_eq!(m.source.start_line, 7);
+}
+
+#[test]
+fn line_move_travel_has_no_follower() {
+    let m = line_move([0.0, 0.0, 0.0], [3.0, 4.0, 0.0], 0.0, ctx()).unwrap();
+    assert!(m.segment.followers.is_empty());
+    assert_close(m.segment.s_len(), 5.0, 1e-12);
+}
+
+#[test]
+fn line_move_pure_retraction_is_virtual() {
+    let m = line_move([1.0, 2.0, 3.0], [1.0, 2.0, 3.0], -2.0, ctx()).unwrap();
+    assert!(m.segment.spatial.is_none());
+    assert_eq!(m.segment.virtual_path_mm, Some(2.0));
+    assert_eq!(m.segment.followers.len(), 1);
+    let f = m.segment.followers[0];
+    assert_close(f.ratio, -1.0, 0.0);
+    assert_close(f.ratio * m.segment.s_len(), -2.0, 1e-12);
+}
+
+#[test]
+fn line_move_zero_motion_rejected() {
+    let err = line_move([5.0, 5.0, 5.0], [5.0, 5.0, 5.0], 0.0, ctx()).unwrap_err();
+    assert_eq!(err, FrontendError::ZeroMotion { line_no: 7 });
+}
+
+#[test]
+fn arc_move_ccw_quarter_positive_sweep() {
+    let m = arc_move(
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        -1.0,
+        0.0,
+        true,
+        0.0,
+        ctx(),
+    )
+    .unwrap();
+    let a = arc_of(&m);
+    assert_close(a.radius, 1.0, 1e-12);
+    assert!(a.sweep > 0.0);
+    assert_close(a.sweep, FRAC_PI_2, 1e-12);
+    assert_close(a.kappa(0.0), 1.0, 1e-12);
+    assert_close(m.segment.s_len(), FRAC_PI_2, 1e-12);
+}
+
+#[test]
+fn arc_move_cw_quarter_negative_sweep() {
+    let m = arc_move(
+        [1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0],
+        -1.0,
+        0.0,
+        false,
+        0.0,
+        ctx(),
+    )
+    .unwrap();
+    let a = arc_of(&m);
+    assert!(a.sweep < 0.0);
+    assert_close(a.sweep, -FRAC_PI_2, 1e-12);
+    assert_close(m.segment.s_len(), FRAC_PI_2, 1e-12);
+}
+
+#[test]
+fn arc_move_full_circle_sweeps_tau() {
+    let ccw = arc_move(
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        -1.0,
+        0.0,
+        true,
+        0.0,
+        ctx(),
+    )
+    .unwrap();
+    assert_close(arc_of(&ccw).sweep, TAU, 1e-12);
+
+    let cw = arc_move(
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        -1.0,
+        0.0,
+        false,
+        0.0,
+        ctx(),
+    )
+    .unwrap();
+    assert_close(arc_of(&cw).sweep, -TAU, 1e-12);
+}
+
+#[test]
+fn arc_move_lowers_to_gcode_endpoints() {
+    let start = [2.0, 1.0, 0.0];
+    let end = [1.0, 2.0, 0.0];
+    let m = arc_move(start, end, -1.0, 0.0, true, 0.0, ctx()).unwrap();
+    let a = arc_of(&m);
+    assert_vec_close(a.point_at(0.0), start, 1e-9);
+    assert_vec_close(a.point_at(a.s_len()), end, 1e-9);
+}
+
+#[test]
+fn arc_move_extruder_follower_recovers_delta() {
+    let m = arc_move(
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        -1.0,
+        0.0,
+        true,
+        0.5,
+        ctx(),
+    )
+    .unwrap();
+    let f = m.segment.followers[0];
+    assert_eq!(f.axis_index, 3);
+    assert_close(f.ratio * m.segment.s_len(), 0.5, 1e-12);
+}
+
+#[test]
+fn arc_move_helical_rejected() {
+    let err = arc_move(
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 1.0],
+        -1.0,
+        0.0,
+        true,
+        0.0,
+        ctx(),
+    )
+    .unwrap_err();
+    assert_eq!(err, FrontendError::HelicalArc { line_no: 7 });
+}
+
+#[test]
+fn arc_move_radius_mismatch_rejected() {
+    let err = arc_move(
+        [1.0, 0.0, 0.0],
+        [5.0, 0.0, 0.0],
+        -1.0,
+        0.0,
+        true,
+        0.0,
+        ctx(),
+    )
+    .unwrap_err();
+    match err {
+        FrontendError::ArcRadiusMismatch {
+            line_no,
+            radius,
+            end_radius,
+        } => {
+            assert_eq!(line_no, 7);
+            assert_close(radius, 1.0, 1e-12);
+            assert_close(end_radius, 5.0, 1e-12);
+        }
+        other => panic!("expected ArcRadiusMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn arc_move_zero_radius_rejected_as_degenerate() {
+    let err = arc_move([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0, true, 0.0, ctx()).unwrap_err();
+    assert_eq!(
+        err,
+        FrontendError::Segment {
+            line_no: 7,
+            source: GeometryError::DegenerateArc {
+                reason: "radius must be positive and finite",
+            },
+        }
+    );
+}
+
+#[test]
+fn line_move_non_finite_coordinate_rejected() {
+    let err = line_move([0.0, 0.0, 0.0], [f64::NAN, 0.0, 0.0], 0.0, ctx()).unwrap_err();
+    assert_eq!(err, FrontendError::NonFiniteInput { line_no: 7 });
+
+    let err = line_move([0.0, 0.0, 0.0], [f64::INFINITY, 0.0, 0.0], 1.0, ctx()).unwrap_err();
+    assert_eq!(err, FrontendError::NonFiniteInput { line_no: 7 });
+
+    let err = line_move([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], f64::NAN, ctx()).unwrap_err();
+    assert_eq!(err, FrontendError::NonFiniteInput { line_no: 7 });
+}
+
+#[test]
+fn arc_move_non_finite_rejected_before_helical_check() {
+    let err = arc_move(
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, f64::NAN],
+        -1.0,
+        0.0,
+        true,
+        0.0,
+        ctx(),
+    )
+    .unwrap_err();
+    assert_eq!(err, FrontendError::NonFiniteInput { line_no: 7 });
+
+    let err = arc_move(
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        f64::NAN,
+        0.0,
+        true,
+        0.0,
+        ctx(),
+    )
+    .unwrap_err();
+    assert_eq!(err, FrontendError::NonFiniteInput { line_no: 7 });
+}
+
+#[test]
+fn invalid_feedrate_rejected_before_geometry() {
+    let mut bad = ctx();
+    bad.feedrate_mm_s = 0.0;
+    let err = arc_move([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], -1.0, 0.0, true, 0.0, bad).unwrap_err();
+    assert_eq!(err, FrontendError::InvalidFeedrate { line_no: 7 });
+
+    bad.feedrate_mm_s = f64::NAN;
+    let err = line_move([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.0, bad).unwrap_err();
+    assert_eq!(err, FrontendError::InvalidFeedrate { line_no: 7 });
+}
+
+#[test]
+fn invalid_limits_rejected() {
+    for (mv, ac, scv) in [
+        (0.0, 3000.0, 5.0),
+        (300.0, 0.0, 5.0),
+        (300.0, 3000.0, -1.0),
+        (f64::INFINITY, 3000.0, 5.0),
+    ] {
+        let mut bad = ctx();
+        bad.limits = VelocityLimits {
+            max_velocity_mm_s: mv,
+            accel_mm_s2: ac,
+            square_corner_velocity_mm_s: scv,
+        };
+        let err = line_move([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.0, bad).unwrap_err();
+        assert!(matches!(
+            err,
+            FrontendError::InvalidLimits { line_no: 7, .. }
+        ));
+    }
+}
+
+#[test]
+fn velocity_limits_try_new_validates() {
+    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0).is_ok());
+    assert!(VelocityLimits::try_new(300.0, 3000.0, 0.0).is_ok());
+    assert!(VelocityLimits::try_new(0.0, 3000.0, 5.0).is_err());
+    assert!(VelocityLimits::try_new(300.0, -1.0, 5.0).is_err());
+    assert!(VelocityLimits::try_new(300.0, 3000.0, f64::NAN).is_err());
+}
