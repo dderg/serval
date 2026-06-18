@@ -86,7 +86,7 @@ Mainline applies every transform at the front — `gcode_move` → transform cha
 5. Velocity planning: forward-backward sweep + closed-form caps (corner caps **and** residual-κ-step caps), **constant-speed-per-feature** rule (mainline-parity skeleton).
 6. Tangential 1-D S-curve (jerk) in the lookahead.
 7. **Limit-riding through clothoids** (the budget-trading speed upgrade) — swap the per-feature velocity rule without touching the fitter or the S-curve. Measure the gain against the skeleton. **(Implemented — continuous constant-|a| disk profile replaces the per-move trapezoid; closed-form line/arc + adaptive ODE per clothoid; jerk composed by min; gain reported via `traversal_time_s`/`limit_ride`. See "Limit-riding is live" above.)**
-8. **Fitter upgrade: global continuous-κ(s) chain fit** (clothoid spline through runs of corners, faceted-chain detection) — raises chain speed and reduces how often the residual-κ cap binds, without touching the solver. Measure against the per-corner fitter.
+8. **Fitter upgrade: global continuous-κ(s) chain fit** (clothoid spline through runs of corners, faceted-chain detection) — raises chain speed and reduces how often the residual-κ cap binds, without touching the solver. Measure against the per-corner fitter. **(Implemented — `fit_chain` detects maximal runs of co-circular, same-turn `Line` facets and reconstructs each as one `Clothoid(0→κ)·Arc(κ)·Clothoid(κ→0)` transition-spiral easement: κ continuous through the whole run, `κ=0` at both boundaries, cruising at `√(a·R)` instead of the per-corner sawtooth's `√(a/κ_peak)` apex dips. Isolated corners / non-circular / over-budget runs fall through to the unchanged step-4 per-corner biclothoid, retained as the measured baseline. The reconstruction arc is the facet-line **incircle** — exact easement closure rests on the incircle's equidistant property — so the un-faceting tube is the faceting amplitude, not the per-corner δ (δ bounds only the transition shift `p=L_t²/24R`). Variable-κ, non-circular clothoid splines remain deferred. `rust/geometry/src/fitter/chain.rs`.)**
 
 ## Decided non-goals (and why they're safe to drop)
 
@@ -104,7 +104,7 @@ Mainline applies every transform at the front — `gcode_move` → transform cha
 
 ## Carried, not yet pressure-tested
 
-These remain from the original map and have **not** been examined in discussion — treat as provisional until challenged: the convex-body shape (global scalar XY disk × Z), the 3D planar pairwise-blend solver (2-D solve embedded via a basis transform, "no torsion"), and dumb-gcode chain-vs-corner reconstruction. (Bed-mesh-Z as a dependent axis is no longer provisional — see "Coordinate transforms" above.)
+These remain from the original map and have **not** been examined in discussion — treat as provisional until challenged: the convex-body shape (global scalar XY disk × Z), the 3D planar pairwise-blend solver (2-D solve embedded via a basis transform, "no torsion"). (Bed-mesh-Z as a dependent axis is no longer provisional — see "Coordinate transforms" above. Dumb-gcode chain-vs-corner reconstruction is no longer provisional for the co-circular case — build step 8 pressure-tested it: same-turn co-circular `Line`-facet runs reconstruct to a transition-spiral arc; non-circular runs fall through. Variable-κ chain reconstruction remains future work.)
 
 ## References (research pass 2026-06-18)
 
