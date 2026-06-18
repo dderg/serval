@@ -77,7 +77,7 @@ class FakeProviderDeclines:
         return None
 
 
-def test_homed_position_default_is_trigger_height_plus_overshoot():
+def test_homed_position_default_is_trigger_position_plus_overshoot():
     pos = _homed_axis_position(
         FakeProviderNoHook(), 2, [0, 0, 1.0], [0, 0, 0.9], 0.5
     )

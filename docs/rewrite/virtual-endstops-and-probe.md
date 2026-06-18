@@ -120,9 +120,9 @@ method on `Homing` that both `G28` and the probe commands call:
 7. Return `(trip_pos, final_pos)`.
 
 Callers differ only in what they do with the result:
-- `G28`: `newpos[axis] = trigger_height + overshoot`,
+- `G28`: `newpos[axis] = trigger_position + overshoot`,
   `toolhead.set_position(newpos, homing_axes=[axis])`, where
-  `trigger_height` is the provider override if present, else
+  `trigger_position` is the provider override if present, else
   `hi.position_endstop`.
 - `PROBE`: resync toolhead to `final_pos` (frame already established, no
   `homing_axes`), record `trip_pos[2]` as the measurement.

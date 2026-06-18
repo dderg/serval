@@ -150,7 +150,7 @@ class PrinterProbe:
             {
                 "endstop": self._endstop,
                 "provider": self,
-                "trigger_height": None,
+                "trigger_position": None,
             },
         )
         if abs(trip_pos[Z_AXIS] - current_z) < NO_MOVEMENT_EPSILON:

@@ -70,12 +70,12 @@ def _check_servo_drive_fault(gcmd, engine, axis, servo_handle):
         )
 
 
-def _homed_axis_position(provider, axis, trip_pos, final_pos, trigger_height):
+def _homed_axis_position(provider, axis, trip_pos, final_pos, trigger_position):
     if provider is not None and hasattr(provider, "measured_trip_position"):
         measured = provider.measured_trip_position(axis, trip_pos, final_pos)
         if measured is not None:
             return measured
-    return trigger_height + (final_pos[axis] - trip_pos[axis])
+    return trigger_position + (final_pos[axis] - trip_pos[axis])
 
 
 def _commit_and_seed(
@@ -86,23 +86,23 @@ def _commit_and_seed(
     hi,
     trip_pos,
     final_pos,
-    trigger_height,
+    trigger_position,
     provider,
     servo_handle,
 ):
     overshoot = final_pos[axis] - trip_pos[axis]
     newpos = list(toolhead.get_position())
     newpos[axis] = _homed_axis_position(
-        provider, axis, trip_pos, final_pos, trigger_height
+        provider, axis, trip_pos, final_pos, trigger_position
     )
     toolhead.set_position(newpos, homing_axes=[axis])
     structured_log.event(
         "homing",
         "axis_homed",
         msg="homing: %s trigger=%.4f overshoot=%+.4f set %s=%.4f"
-        % ("XYZ"[axis], trigger_height, overshoot, "XYZ"[axis], newpos[axis]),
+        % ("XYZ"[axis], trigger_position, overshoot, "XYZ"[axis], newpos[axis]),
         axis="XYZ"[axis],
-        trigger_height=trigger_height,
+        trigger_position=trigger_position,
         overshoot=overshoot,
         homed_position=newpos[axis],
     )
@@ -126,6 +126,7 @@ def _run_homing_attempts(
     speed,
     first_max_travel,
     tolerance,
+    trigger_position,
     approach,
 ):
     start_pos = toolhead.get_position()
@@ -145,10 +146,10 @@ def _run_homing_attempts(
     if not needs_rehome:
         return trip_pos, final_pos
     haltpos = list(toolhead.get_position())
-    haltpos[axis] = final_pos[axis]
+    haltpos[axis] = trigger_position + (final_pos[axis] - trip_pos[axis])
     toolhead.set_position(haltpos, homing_axes=[axis])
     backoff = list(toolhead.get_position())
-    backoff[axis] = trip_pos[axis] - direction * hi.min_home_dist
+    backoff[axis] = trigger_position - direction * hi.min_home_dist
     toolhead.move(backoff, hi.retract_speed)
     toolhead.wait_moves()
     start_pos = toolhead.get_position()
@@ -262,7 +263,7 @@ class Homing:
                         pin_params, AXIS_ENDSTOP_IDS[axis_index]
                     ),
                     "provider": None,
-                    "trigger_height": None,
+                    "trigger_position": None,
                 }
             else:
                 raise config.error(
@@ -280,19 +281,19 @@ class Homing:
 
     def _provider_entry(self, axis_config, axis_index, chip, pin_params):
         endstop = chip.setup_motion_endstop(pin_params, axis_index)
-        trigger_height = None
+        trigger_position = None
         if hasattr(chip, "get_position_endstop"):
-            trigger_height = chip.get_position_endstop()
+            trigger_position = chip.get_position_endstop()
             if axis_config.get("position_endstop", None) is not None:
                 raise axis_config.error(
                     "[%s] must not set position_endstop: its virtual endstop"
-                    " '%s' supplies the trigger height"
+                    " '%s' supplies the trigger position"
                     % (axis_config.get_name(), pin_params["chip_name"])
                 )
         return {
             "endstop": endstop,
             "provider": chip,
-            "trigger_height": trigger_height,
+            "trigger_position": trigger_position,
         }
 
     def cmd_G28(self, gcmd):
@@ -391,9 +392,9 @@ class Homing:
             raise gcmd.error("G28: no rail for axis %s" % ("XYZ"[axis],))
         hi = rail.get_homing_info()
         pos_min, pos_max = rail.get_range()
-        trigger_height = entry["trigger_height"]
-        if trigger_height is None:
-            trigger_height = hi.position_endstop
+        trigger_position = entry["trigger_position"]
+        if trigger_position is None:
+            trigger_position = hi.position_endstop
         direction = 1.0 if hi.positive_dir else -1.0
         speed = speed_override if speed_override is not None else hi.speed
         max_travel = (
@@ -449,6 +450,7 @@ class Homing:
                 speed,
                 max_travel,
                 tolerance,
+                trigger_position,
                 approach,
             )
             _commit_and_seed(
@@ -459,7 +461,7 @@ class Homing:
                 hi,
                 trip_pos,
                 final_pos,
-                trigger_height,
+                trigger_position,
                 provider,
                 servo_handle,
             )

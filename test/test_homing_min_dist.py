@@ -82,7 +82,7 @@ def test_commit_and_seed_seeds_post_retract_position():
         hi,
         trip_pos=[20.0, 0.0, 0.0],
         final_pos=[20.0, 0.0, 0.0],
-        trigger_height=20.0,
+        trigger_position=20.0,
         provider=None,
         servo_handle="h",
     )
@@ -101,7 +101,7 @@ def test_commit_and_seed_no_servo_does_not_seed():
         _hi(),
         trip_pos=[20.0, 0.0, 0.0],
         final_pos=[20.0, 0.0, 0.0],
-        trigger_height=20.0,
+        trigger_position=20.0,
         provider=None,
         servo_handle=None,
     )
@@ -143,13 +143,14 @@ def test_no_rehome_when_first_travel_exceeds_min():
         speed=50.0,
         first_max_travel=200.0,
         tolerance=0.5,
+        trigger_position=20.0,
         approach=approach,
     )
     assert len(calls) == 1
     assert trip[axis] == 100.0
 
 
-def test_rehome_then_legit_returns_second_trip():
+def test_rehome_backoff_stays_within_axis_bounds():
     axis = 0
     toolhead = FakeToolhead([0.0, 0.0, 0.0])
     approach, calls = _approach_script(toolhead, axis, [2.0, 20.0])
@@ -162,14 +163,41 @@ def test_rehome_then_legit_returns_second_trip():
         speed=50.0,
         first_max_travel=200.0,
         tolerance=0.5,
+        trigger_position=20.0,
         approach=approach,
     )
     assert len(calls) == 2
     assert calls[1][1] == 30.0
     assert calls[0][0] == 50.0
     assert calls[1][0] == 50.0
-    assert ("move", [-13.0, 0.0, 0.0], 25.0) in toolhead.events
-    assert trip[axis] == 7.0
+    # Backoff is computed from the endstop position (20) minus min_home_dist
+    # (15), landing at +5 inside the axis range rather than a negative
+    # raw-frame coordinate.
+    assert ("move", [5.0, 0.0, 0.0], 25.0) in toolhead.events
+    assert ("set_position", [20.0, 0.0, 0.0]) in toolhead.events
+    assert trip[axis] == 25.0
+
+
+def test_rehome_backoff_within_bounds_for_min_endstop():
+    axis = 0
+    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    approach, calls = _approach_script(toolhead, axis, [-2.0, -20.0])
+    hi = _hi(min_home_dist=15.0)
+    hi = hi._replace(positive_dir=False, position_endstop=0.0)
+    homing_mod._run_homing_attempts(
+        FakeGcmd(),
+        toolhead,
+        axis,
+        -1.0,
+        hi,
+        speed=50.0,
+        first_max_travel=200.0,
+        tolerance=0.5,
+        trigger_position=0.0,
+        approach=approach,
+    )
+    # Min endstop at 0, direction -1: backoff = 0 - (-1)*15 = +15, in range.
+    assert ("move", [15.0, 0.0, 0.0], 25.0) in toolhead.events
 
 
 def test_rehome_then_still_early_raises():
@@ -186,6 +214,7 @@ def test_rehome_then_still_early_raises():
             speed=50.0,
             first_max_travel=200.0,
             tolerance=0.5,
+            trigger_position=20.0,
             approach=approach,
         )
     assert len(calls) == 2
@@ -204,6 +233,7 @@ def test_min_home_dist_zero_never_rehomes():
         speed=50.0,
         first_max_travel=200.0,
         tolerance=0.5,
+        trigger_position=20.0,
         approach=approach,
     )
     assert len(calls) == 1
