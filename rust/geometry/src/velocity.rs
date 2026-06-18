@@ -4,15 +4,20 @@ use crate::fitter::{FitOutcome, UnblendReason};
 use crate::path::{CurvatureProfile, Segment};
 use crate::segment::SourceRange;
 
+mod disk;
 mod scurve;
+
+use disk::Kinematics;
 
 const LENGTH_EPS_MM: f64 = 1e-9;
 const VELOCITY_EPS_MM_S: f64 = 1e-9;
+const MIN_INTEGRATION_TOL: f64 = 1e-9;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelocityConfig {
     pub consistency_tol: f64,
     pub max_jerk_mm_s3: f64,
+    pub integration_tol: f64,
 }
 
 impl Default for VelocityConfig {
@@ -21,28 +26,37 @@ impl Default for VelocityConfig {
             consistency_tol: 1e-6,
             // TODO: jerk-limit floor is an open tuning question (spec-motion-6).
             max_jerk_mm_s3: 100_000.0,
+            integration_tol: 1e-7,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VelSample {
+    pub s: f64,
+    pub v: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct MoveVelocity {
-    pub start_v: f64,
-    pub cruise_v: f64,
-    pub end_v: f64,
-    pub ceiling: f64,
+    pub entry_v: f64,
+    pub exit_v: f64,
+    pub peak_v: f64,
+    pub samples: Vec<VelSample>,
     pub accel: f64,
     pub jerk: f64,
     pub length: f64,
     pub source: SourceRange,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct VelocityReport {
     pub stops: u32,
     pub curvature_bound: u32,
     pub feedrate_bound: u32,
     pub jerk_bound: u32,
+    pub limit_ride: u32,
+    pub traversal_time_s: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,13 +70,13 @@ pub enum VelocityError {
     Inconsistent { line_no: u32 },
     NonAlphabet { line_no: u32 },
     NonFinite { line_no: u32 },
+    Diverged { line_no: u32 },
     InvalidConfig,
 }
 
 struct MoveCaps {
-    length: f64,
-    accel: f64,
-    ceiling: f64,
+    kin: Kinematics,
+    kappa_peak: f64,
 }
 
 pub fn plan_velocity(
@@ -71,6 +85,10 @@ pub fn plan_velocity(
 ) -> Result<VelocityProfile, VelocityError> {
     let jerk = config.max_jerk_mm_s3;
     if jerk.is_nan() || jerk <= 0.0 {
+        return Err(VelocityError::InvalidConfig);
+    }
+    let tol = config.integration_tol;
+    if !(tol.is_finite() && tol >= MIN_INTEGRATION_TOL) {
         return Err(VelocityError::InvalidConfig);
     }
 
@@ -96,17 +114,14 @@ pub fn plan_velocity(
     for m in moves {
         let line_no = m.source.start_line;
         let accel = m.limits.accel_mm_s2;
-        let (length, curvature_cap) = match &m.segment.spatial {
+        let (length, kappa0, sigma, kappa_peak) = match &m.segment.spatial {
             Some(seg) => {
                 let length = seg.s_len();
                 validate_segment(seg, length, line_no, config.consistency_tol)?;
+                let (kappa_start, _) = seg.kappa_endpoints();
+                let sigma = seg.dkappa_ds(0.0);
                 let (_, kappa_peak) = seg.kappa_peak();
-                let cap = if kappa_peak > 0.0 {
-                    (accel / kappa_peak).sqrt()
-                } else {
-                    f64::INFINITY
-                };
-                (length, cap)
+                (length, kappa_start, sigma, kappa_peak)
             }
             None => {
                 let length = m
@@ -116,21 +131,26 @@ pub fn plan_velocity(
                 if !(length.is_finite() && length > LENGTH_EPS_MM) {
                     return Err(VelocityError::NonFinite { line_no });
                 }
-                (length, f64::INFINITY)
+                (length, 0.0, 0.0, 0.0)
             }
         };
 
-        let feed = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
-        let ceiling = feed.min(curvature_cap);
-        if curvature_cap < feed {
+        let flat_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
+        if disk::limit_speed(kappa_peak, accel) < flat_ceiling {
             report.curvature_bound += 1;
         } else {
             report.feedrate_bound += 1;
         }
         caps.push(MoveCaps {
-            length,
-            accel,
-            ceiling,
+            kin: Kinematics {
+                length,
+                accel,
+                jerk,
+                kappa0,
+                sigma,
+                flat_ceiling,
+            },
+            kappa_peak,
         });
     }
 
@@ -141,52 +161,78 @@ pub fn plan_velocity(
         if stop_lines.contains(&downstream.source.start_line) && !blend_half {
             report.stops += 1;
         } else {
-            v[k] = caps[k - 1].ceiling.min(caps[k].ceiling);
+            let up = &caps[k - 1].kin;
+            let dn = &caps[k].kin;
+            let kappa_up = (up.kappa0 + up.sigma * up.length).abs();
+            let kappa_dn = dn.kappa0.abs();
+            let boundary_vlim =
+                disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
+            v[k] = up.flat_ceiling.min(dn.flat_ceiling).min(boundary_vlim);
         }
     }
 
     for k in 1..=n {
-        let reachable =
-            scurve::max_reachable_velocity(v[k - 1], caps[k - 1].length, caps[k - 1].accel, jerk);
+        let line_no = moves[k - 1].source.start_line;
+        let reachable = disk::reach_v(&caps[k - 1].kin, v[k - 1], tol)
+            .ok_or(VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(reachable);
     }
     for k in (0..n).rev() {
-        let reachable =
-            scurve::max_reachable_velocity(v[k + 1], caps[k].length, caps[k].accel, jerk);
+        let line_no = moves[k].source.start_line;
+        let reachable = disk::reach_v_rev(&caps[k].kin, v[k + 1], tol)
+            .ok_or(VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(reachable);
     }
 
     let mut out = Vec::with_capacity(n);
     for (j, m) in moves.iter().enumerate() {
-        let start_v = v[j];
-        let end_v = v[j + 1];
-        let accel_apex = caps[j].ceiling.min(
-            (0.5 * (start_v * start_v + end_v * end_v) + caps[j].accel * caps[j].length).sqrt(),
-        );
-        let cruise_v = scurve::peak_velocity(
-            start_v,
-            end_v,
-            caps[j].length,
-            caps[j].accel,
-            jerk,
-            caps[j].ceiling,
-        );
-        if cruise_v + VELOCITY_EPS_MM_S < accel_apex {
+        let kin = &caps[j].kin;
+        let line_no = m.source.start_line;
+        let entry_v = v[j];
+        let exit_v = v[j + 1];
+        let samples: Vec<VelSample> = disk::sample_profile(kin, entry_v, exit_v, tol)
+            .ok_or(VelocityError::Diverged { line_no })?
+            .into_iter()
+            .map(|(s, v)| VelSample { s, v })
+            .collect();
+        let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
+        report.traversal_time_s += traversal_time(&samples);
+
+        let disk_only = disk::disk_reach_v(kin, entry_v, kin.length, tol)
+            .ok_or(VelocityError::Diverged { line_no })?;
+        let jerk_only = scurve::max_reachable_velocity(entry_v, kin.length, kin.accel, kin.jerk);
+        if jerk_only + VELOCITY_EPS_MM_S < disk_only {
             report.jerk_bound += 1;
         }
+        let curvature_ceiling = disk::limit_speed(caps[j].kappa_peak, kin.accel);
+        if caps[j].kappa_peak > 0.0 && peak_v > curvature_ceiling + VELOCITY_EPS_MM_S {
+            report.limit_ride += 1;
+        }
+
         out.push(MoveVelocity {
-            start_v,
-            cruise_v,
-            end_v,
-            ceiling: caps[j].ceiling,
-            accel: caps[j].accel,
-            jerk,
-            length: caps[j].length,
+            entry_v,
+            exit_v,
+            peak_v,
+            samples,
+            accel: kin.accel,
+            jerk: kin.jerk,
+            length: kin.length,
             source: m.source,
         });
     }
 
     Ok(VelocityProfile { moves: out, report })
+}
+
+fn traversal_time(samples: &[VelSample]) -> f64 {
+    samples
+        .windows(2)
+        .map(|w| {
+            let ds = w[1].s - w[0].s;
+            let v_sum = w[0].v + w[1].v;
+            if v_sum > 0.0 { 2.0 * ds / v_sum } else { 0.0 }
+        })
+        .sum()
 }
 
 fn validate_segment<P: CurvatureProfile>(
