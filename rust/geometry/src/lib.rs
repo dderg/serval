@@ -2,6 +2,7 @@
 
 pub mod curve;
 pub mod error;
+pub mod fitter;
 pub mod frontend;
 pub mod params;
 pub mod path;
@@ -12,6 +13,9 @@ pub mod splitter;
 pub mod telemetry;
 
 pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, SlotDegeneracy};
+pub use fitter::{
+    CornerFitConfig, FitError, FitOutcome, FitReport, UnblendReason, UnblendedJunction, fit_corners,
+};
 pub use frontend::{FrontendError, Move, MoveContext, VelocityLimits, arc_move, line_move};
 pub use params::FitterParams;
 pub use pipeline::{GeometryPipeline, Item, Segments, degree_elevate_2_to_3};
