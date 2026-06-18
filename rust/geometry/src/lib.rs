@@ -11,6 +11,7 @@ pub(crate) mod reduce;
 pub mod segment;
 pub mod splitter;
 pub mod telemetry;
+pub mod velocity;
 
 pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, SlotDegeneracy};
 pub use fitter::{
@@ -32,3 +33,6 @@ pub struct FollowerWord {
 pub use splitter::{SplitError, split_segment_to_cap};
 
 pub use telemetry::TelemetryEvent;
+pub use velocity::{
+    MoveVelocity, VelocityConfig, VelocityError, VelocityProfile, VelocityReport, plan_velocity,
+};
