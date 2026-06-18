@@ -74,7 +74,8 @@ fn make_piece(t: u64) -> (PieceEntry, f64) {
             start_time: t,
             coeffs: [0.0; 4],
             duration: 0.001,
-            _reserved: 0,
+            motor_mask: 0,
+            _reserved: [0; 3],
         },
         t as f64,
     )
@@ -156,6 +157,72 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
     assert_eq!(h1, N * 2, "second new_head should be {}", N * 2);
 }
 
+fn make_piece_pos(t: u64, mask: u8, c0: f32, c3: f32) -> (PieceEntry, f64) {
+    (
+        PieceEntry {
+            start_time: t,
+            coeffs: [c0, c0, c3, c3],
+            duration: 0.001,
+            motor_mask: mask,
+            _reserved: [0; 3],
+        },
+        t as f64,
+    )
+}
+
+#[test]
+fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
+    let sink = RecordingSink::new();
+    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let sink_clone = sink.clone();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            rx,
+            sink_clone,
+            |_key| 8,
+            |_mcu| Some((0u64, 180_000_000.0)),
+            |_| {},
+            |_, _| {},
+            |_| {},
+        );
+    });
+    let key = AxisKey { mcu_id: 1, axis: 2 };
+
+    tx.send(make_enqueue(
+        key,
+        vec![make_piece_pos(0, 0, 0.0, 11.0)],
+        false,
+    ))
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while sink.recorded().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first piece never sent"
+        );
+        std::thread::yield_now();
+    }
+
+    tx.send(make_enqueue(
+        key,
+        vec![make_piece_pos(10_000, 0b10, 0.0, 0.5)],
+        false,
+    ))
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while sink.recorded().len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "overlay piece never sent — pump likely panicked on the junction check"
+        );
+        std::thread::yield_now();
+    }
+
+    tx.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+    assert_eq!(sink.recorded().len(), 2, "both pieces dispatched, no panic");
+}
+
 #[test]
 fn junction_jumps_math() {
     let (tick_us, host_us) = junction_jumps(2000, 2.0e-3, 1000, 1.0e-3, 1_000_000.0);
@@ -225,7 +292,8 @@ fn flush_clears_queued_pieces_and_junctions() {
                         start_time: gated_tick + i,
                         coeffs: [0.0; 4],
                         duration: 0.001,
-                        _reserved: 0,
+                        motor_mask: 0,
+                        _reserved: [0; 3],
                     },
                     (gated_tick + i) as f64,
                 )
@@ -250,7 +318,8 @@ fn flush_clears_queued_pieces_and_junctions() {
                 start_time: 1,
                 coeffs: [0.0; 4],
                 duration: 0.001,
-                _reserved: 0,
+                motor_mask: 0,
+                _reserved: [0; 3],
             },
             1.0,
         )],
@@ -322,7 +391,8 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
                         start_time: gated_tick + i,
                         coeffs: [0.0; 4],
                         duration: 0.001,
-                        _reserved: 0,
+                        motor_mask: 0,
+                        _reserved: [0; 3],
                     },
                     (gated_tick + i) as f64,
                 )
@@ -345,7 +415,8 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
                 start_time: 1,
                 coeffs: [0.0; 4],
                 duration: 0.001,
-                _reserved: 0,
+                motor_mask: 0,
+                _reserved: [0; 3],
             },
             1.0,
         )],

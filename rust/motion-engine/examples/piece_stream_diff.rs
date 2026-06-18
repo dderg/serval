@@ -61,6 +61,11 @@ fn recording_dispatch() -> (
     (cb, recorded)
 }
 
+fn noop_nudge_dispatch()
+-> Arc<dyn Fn(u32, &_motion_engine::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_mcu_id: u32, _np: &_motion_engine::nudge::NudgePiece| Ok(()))
+}
+
 fn smooth_zv_186hz_config() -> PlannerConfig {
     let mut c = PlannerConfig::default();
     let (registry, post_processors) = smooth_zv_post_processors(55.4, 39.2);
@@ -343,7 +348,7 @@ fn scenario_single_x_jog(label: &'static str) -> Vec<PieceStreamEntry> {
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = bench_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
 
     h.submit_move(classify_and_build([0.0; 3], 25.0, 0.0, 0.0, &[], 100.0).unwrap())
         .expect("submit jog");
@@ -376,7 +381,7 @@ fn scenario_three_x_jogs_in_flight(label: &'static str) -> Vec<PieceStreamEntry>
     let (dispatch, recorded) = recording_dispatch();
     let mut cfg = smooth_zv_186hz_config();
     cfg.limit_sections = bench_limit_sections();
-    let mut h = PlannerHandle::spawn(cfg, dispatch);
+    let mut h = PlannerHandle::spawn(cfg, dispatch, noop_nudge_dispatch());
     h.runtime_stream_open([295.0, 0.0, 0.0, 0.0])
         .expect("runtime_stream_open");
 

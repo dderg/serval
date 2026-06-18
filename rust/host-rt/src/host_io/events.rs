@@ -107,24 +107,34 @@ impl TraceRing {
 
 #[derive(Debug, Default)]
 pub struct RuntimeEventDispatcher {
-    subscriber: Option<SyncSender<RuntimeEvent>>,
+    priority: Option<SyncSender<RuntimeEvent>>,
+    bulk: Option<SyncSender<RuntimeEvent>>,
 }
 
 impl RuntimeEventDispatcher {
     pub fn dispatch(&mut self, event: RuntimeEvent) {
-        if let Some(tx) = &self.subscriber {
+        if event.is_bulk_data() {
+            Self::send_lane(&mut self.bulk, event, "bulk");
+        } else {
+            Self::send_lane(&mut self.priority, event, "priority");
+        }
+    }
+
+    fn send_lane(lane: &mut Option<SyncSender<RuntimeEvent>>, event: RuntimeEvent, which: &str) {
+        if let Some(tx) = lane.as_ref() {
             match tx.try_send(event) {
                 Ok(()) => {}
                 Err(TrySendError::Full(e)) => {
                     tracing::warn!(
                         subsystem = "mcu-comms",
                         event = "runtime_event_subscriber_overflow",
+                        lane = which,
                         error = ?e,
                         "runtime-event subscriber overflow; dropping"
                     );
                 }
                 Err(TrySendError::Disconnected(_)) => {
-                    self.subscriber = None;
+                    *lane = None;
                 }
             }
         }
@@ -132,14 +142,16 @@ impl RuntimeEventDispatcher {
 
     pub fn subscribe(
         &mut self,
-        tx: SyncSender<RuntimeEvent>,
+        priority: SyncSender<RuntimeEvent>,
+        bulk: SyncSender<RuntimeEvent>,
     ) -> Result<(), crate::transport::SubscribeError> {
-        if self.subscriber.is_some() {
+        if self.priority.is_some() || self.bulk.is_some() {
             return Err(crate::transport::SubscribeError::AlreadySubscribed {
                 channel: "runtime_event",
             });
         }
-        self.subscriber = Some(tx);
+        self.priority = Some(priority);
+        self.bulk = Some(bulk);
         Ok(())
     }
 }

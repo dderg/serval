@@ -57,7 +57,8 @@ fn make_entry(start: u64, coeffs: [f32; 4], duration: f32) -> PieceEntry {
         start_time: start,
         coeffs,
         duration,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 
@@ -173,7 +174,8 @@ fn walker_branch2_configured_empty_ring_returns_none() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         8
     ];
@@ -324,7 +326,8 @@ proptest! {
                 start_time: 0,
                 coeffs: [0.0; 4],
                 duration: 0.0,
-                _reserved: 0,
+                motor_mask: 0,
+            _reserved: [0; 3],
             });
         }
 
@@ -345,7 +348,8 @@ proptest! {
                     offset + target_mm,
                 ],
                 duration: duration_s,
-                _reserved: 0,
+                motor_mask: 0,
+            _reserved: [0; 3],
             };
             ring.push(&mut storage_vec, entry)
                 .expect("ring must not be full while filling");

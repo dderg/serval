@@ -81,7 +81,8 @@ fn status_watermark_advance_synthesizes_credit_freed() {
     let mut d = make_dispatcher();
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    d.runtime_event_dispatcher.subscribe(tx).unwrap();
+    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(status_with_watermark(2, 5));
 
@@ -104,7 +105,8 @@ fn status_watermark_unchanged_does_not_synthesize() {
     let mut d = make_dispatcher();
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    d.runtime_event_dispatcher.subscribe(tx).unwrap();
+    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(status_with_watermark(0, 5));
     let _ = rx.recv().unwrap();
@@ -124,7 +126,8 @@ fn status_watermark_regression_does_not_synthesize() {
     let mut d = make_dispatcher();
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    d.runtime_event_dispatcher.subscribe(tx).unwrap();
+    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(status_with_watermark(0, 10));
     let _ = rx.recv().unwrap();
@@ -166,7 +169,8 @@ fn heartbeat_is_not_forwarded_to_runtime_rx() {
     let mut d = EventDispatcher::new(status, 16, 8);
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    d.runtime_event_dispatcher.subscribe(tx).unwrap();
+    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    d.runtime_event_dispatcher.subscribe(tx, bulk_tx).unwrap();
 
     d.dispatch(RuntimeEvent::Heartbeat {
         retired_counts: vec![3, 7],
@@ -238,7 +242,11 @@ fn mcu_log_also_forwarded_to_runtime_rx() {
     let mut dispatcher = EventDispatcher::new(snapshot, 16, 8);
 
     let (tx, rx) = sync_channel::<RuntimeEvent>(8);
-    dispatcher.runtime_event_dispatcher.subscribe(tx).unwrap();
+    let (bulk_tx, _bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    dispatcher
+        .runtime_event_dispatcher
+        .subscribe(tx, bulk_tx)
+        .unwrap();
 
     dispatcher.dispatch(RuntimeEvent::McuLog(McuLogEvent {
         mcu_tick: 99,
@@ -254,5 +262,55 @@ fn mcu_log_also_forwarded_to_runtime_rx() {
     match rx.recv().unwrap() {
         RuntimeEvent::McuLog(e) => assert_eq!(e.mcu_tick, 99),
         other => panic!("expected McuLog on runtime_rx, got {other:?}"),
+    }
+}
+
+#[test]
+fn is_bulk_data_treats_only_non_clock_passthrough_as_bulk() {
+    use crate::transport::MessageParams;
+    let clock = RuntimeEvent::PassthroughResponse {
+        name: "clock".into(),
+        params: MessageParams::new(),
+    };
+    let accel = RuntimeEvent::PassthroughResponse {
+        name: "beacon_data".into(),
+        params: MessageParams::new(),
+    };
+    assert!(!clock.is_bulk_data());
+    assert!(accel.is_bulk_data());
+    assert!(!RuntimeEvent::Status(StatusEvent::default()).is_bulk_data());
+}
+
+#[test]
+fn clock_reaches_priority_lane_even_when_bulk_dispatched_first() {
+    use crate::transport::MessageParams;
+    use std::sync::mpsc::sync_channel;
+    let mut d = make_dispatcher();
+    let (pri_tx, pri_rx) = sync_channel::<RuntimeEvent>(8);
+    let (bulk_tx, bulk_rx) = sync_channel::<RuntimeEvent>(8);
+    d.runtime_event_dispatcher
+        .subscribe(pri_tx, bulk_tx)
+        .unwrap();
+
+    d.dispatch(RuntimeEvent::PassthroughResponse {
+        name: "beacon_data".into(),
+        params: MessageParams::new(),
+    });
+    d.dispatch(RuntimeEvent::PassthroughResponse {
+        name: "clock".into(),
+        params: MessageParams::new(),
+    });
+
+    match pri_rx.try_recv() {
+        Ok(RuntimeEvent::PassthroughResponse { name, .. }) => assert_eq!(name, "clock"),
+        other => panic!("expected clock on priority lane, got {other:?}"),
+    }
+    assert!(
+        pri_rx.try_recv().is_err(),
+        "bulk data must not land on the priority lane"
+    );
+    match bulk_rx.try_recv() {
+        Ok(RuntimeEvent::PassthroughResponse { name, .. }) => assert_eq!(name, "beacon_data"),
+        other => panic!("expected accel on bulk lane, got {other:?}"),
     }
 }

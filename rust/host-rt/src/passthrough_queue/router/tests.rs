@@ -573,3 +573,19 @@ fn wall_time_at_mcu_no_record_returns_none() {
         "must return None when no clock record has been set"
     );
 }
+
+#[test]
+fn correction_anchor_round_trips_print_time_to_mcu_clock() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    let freq = 48_000_000.0;
+    let offset = 5.0;
+    let last_clock = 1_000_000u64;
+    router.set_clock_est(mcu, freq, offset, last_clock).unwrap();
+    let glmt_print_time = 7.5;
+    let host = router
+        .print_time_to_host_secs(mcu, glmt_print_time)
+        .unwrap();
+    let clock = router.host_time_to_mcu_clock(mcu, host).unwrap();
+    assert_eq!(clock, (glmt_print_time * freq) as u64);
+}

@@ -438,68 +438,70 @@ pub fn run_pump<S, F, C, A, O, D>(
                     // meaningless without a real frequency and end_time needs it too.
                     if let Some((_ack_now, freq)) = mcu_clock_of(key.mcu_id) {
                         let (first_entry, first_host) = &pieces[0];
-                        if let Some(&JunctionEnd {
-                            end_ticks: prev_end_ticks,
-                            end_host: prev_end_host,
-                            end_pos: prev_end_pos,
-                        }) = junction_ends.get(&key)
-                        {
-                            check_junction_position_continuity(
-                                key,
-                                prev_end_pos,
-                                first_entry.coeffs[0],
-                                prev_end_host,
-                                *first_host,
-                            );
-                            let (tick_jump_us, host_jump_us) = junction_jumps(
-                                first_entry.start_time,
-                                *first_host,
-                                prev_end_ticks,
-                                prev_end_host,
-                                freq,
-                            );
-                            let anomalous =
-                                tick_jump_us < -50.0 || (tick_jump_us - host_jump_us).abs() > 50.0;
-                            if fresh_stream || !anomalous {
-                                tracing::debug!(
-                                    subsystem = "motion",
-                                    event = "junction_jump",
-                                    key = ?key,
-                                    tick_jump_us,
-                                    host_jump_us,
-                                    fresh = fresh_stream,
-                                    "[junction] jump"
+                        if first_entry.motor_mask == 0 {
+                            if let Some(&JunctionEnd {
+                                end_ticks: prev_end_ticks,
+                                end_host: prev_end_host,
+                                end_pos: prev_end_pos,
+                            }) = junction_ends.get(&key)
+                            {
+                                check_junction_position_continuity(
+                                    key,
+                                    prev_end_pos,
+                                    first_entry.coeffs[0],
+                                    prev_end_host,
+                                    *first_host,
                                 );
-                            } else {
-                                let reason = if tick_jump_us < -50.0 {
-                                    "overlap_risk"
+                                let (tick_jump_us, host_jump_us) = junction_jumps(
+                                    first_entry.start_time,
+                                    *first_host,
+                                    prev_end_ticks,
+                                    prev_end_host,
+                                    freq,
+                                );
+                                let anomalous = tick_jump_us < -50.0
+                                    || (tick_jump_us - host_jump_us).abs() > 50.0;
+                                if fresh_stream || !anomalous {
+                                    tracing::debug!(
+                                        subsystem = "motion",
+                                        event = "junction_jump",
+                                        key = ?key,
+                                        tick_jump_us,
+                                        host_jump_us,
+                                        fresh = fresh_stream,
+                                        "[junction] jump"
+                                    );
                                 } else {
-                                    "projection_divergence"
-                                };
-                                tracing::warn!(
-                                    subsystem = "motion",
-                                    event = "junction_jump_anomalous",
-                                    key = ?key,
-                                    tick_jump_us,
-                                    host_jump_us,
-                                    fresh = fresh_stream,
-                                    reason,
-                                    "[junction] anomalous jump"
-                                );
+                                    let reason = if tick_jump_us < -50.0 {
+                                        "overlap_risk"
+                                    } else {
+                                        "projection_divergence"
+                                    };
+                                    tracing::warn!(
+                                        subsystem = "motion",
+                                        event = "junction_jump_anomalous",
+                                        key = ?key,
+                                        tick_jump_us,
+                                        host_jump_us,
+                                        fresh = fresh_stream,
+                                        reason,
+                                        "[junction] anomalous jump"
+                                    );
+                                }
                             }
+                            let (last_entry, last_host) = pieces.last().unwrap();
+                            #[allow(clippy::cast_possible_truncation)]
+                            let last_end_ticks = last_entry.end_time(freq as f32);
+                            let last_end_host = last_host + last_entry.duration as f64;
+                            junction_ends.insert(
+                                key,
+                                JunctionEnd {
+                                    end_ticks: last_end_ticks,
+                                    end_host: last_end_host,
+                                    end_pos: last_entry.coeffs[3],
+                                },
+                            );
                         }
-                        let (last_entry, last_host) = pieces.last().unwrap();
-                        #[allow(clippy::cast_possible_truncation)]
-                        let last_end_ticks = last_entry.end_time(freq as f32);
-                        let last_end_host = last_host + last_entry.duration as f64;
-                        junction_ends.insert(
-                            key,
-                            JunctionEnd {
-                                end_ticks: last_end_ticks,
-                                end_host: last_end_host,
-                                end_pos: last_entry.coeffs[3],
-                            },
-                        );
                     }
                 }
                 let q = queues

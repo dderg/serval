@@ -2,6 +2,7 @@ use crate::dispatch::McuAxisConfig;
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
 use crate::pump::{AxisKey, EnqueueMsg};
 use nurbs::ScalarNurbs;
+use nurbs::bezier::BezierPiece;
 use runtime::piece_ring::PieceEntry;
 use trajectory::ShapedSegment;
 
@@ -77,6 +78,7 @@ where
                 host_now,
                 &project,
                 max_piece_secs,
+                seg.motor_mask,
             );
             if !pieces.is_empty() {
                 out.push(EnqueueMsg {
@@ -112,11 +114,38 @@ fn flatten_axis<P>(
     host_now: f64,
     project: &P,
     max_piece_secs: Option<f64>,
+    motor_mask: u8,
 ) -> Vec<(PieceEntry, f64)>
 where
     P: Fn(u32, f64) -> u64,
 {
     let bps = nurbs::bezier::extract_bezier_pieces(curve);
+    flatten_bezier_pieces(
+        &bps,
+        t0,
+        mcu_id,
+        axis_idx,
+        host_now,
+        project,
+        max_piece_secs,
+        motor_mask,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn flatten_bezier_pieces<P>(
+    bps: &[BezierPiece<f64>],
+    t0: f64,
+    mcu_id: u32,
+    axis_idx: usize,
+    host_now: f64,
+    project: &P,
+    max_piece_secs: Option<f64>,
+    motor_mask: u8,
+) -> Vec<(PieceEntry, f64)>
+where
+    P: Fn(u32, f64) -> u64,
+{
     let mut merged: Vec<MergedPiece> = Vec::with_capacity(bps.len());
 
     for bp in bps.iter() {
@@ -173,6 +202,12 @@ where
             for k in 0..4 {
                 coeffs[k] = sub_coeffs[k] as f32;
             }
+            if motor_mask != 0 {
+                let b0 = coeffs[0];
+                for c in &mut coeffs {
+                    *c -= b0;
+                }
+            }
             let duration_f32 = *sub_dur as f32;
 
             let margin_us = (host_secs - host_now) * 1e6;
@@ -192,7 +227,8 @@ where
                     start_time,
                     coeffs,
                     duration: duration_f32,
-                    _reserved: 0,
+                    motor_mask,
+                    _reserved: [0; 3],
                 },
                 host_secs,
             ));

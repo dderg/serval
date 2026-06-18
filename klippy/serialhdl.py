@@ -79,7 +79,12 @@ class SerialReader:
             return self.reactor.NEVER
         now = eventtime
         for _ in range(32):
-            ev = engine.take_runtime_event(handle)
+            try:
+                ev = engine.take_runtime_event(handle)
+            except RuntimeError as e:
+                if not self._is_engine_transport_drop(e):
+                    raise
+                break
             if ev is None:
                 break
             ev_type = ev.get("type")
@@ -521,6 +526,12 @@ class SerialReader:
         if self.mcu is not None and self.mcu.non_critical_disconnected:
             self._error("non-critical MCU is disconnected")
 
+    def _is_engine_transport_drop(self, exc):
+        if "transport closed" not in str(exc):
+            return False
+        self._engine_detached = True
+        return True
+
     # Command sending
     def engine_get_clock_async(self):
         """Send a get_clock request through the engine with RAW timestamp
@@ -540,7 +551,11 @@ class SerialReader:
         handle = self.mcu._engine_handle
         if handle is None:
             return
-        engine.engine_get_clock_async(handle)
+        try:
+            engine.engine_get_clock_async(handle)
+        except RuntimeError as e:
+            if not self._is_engine_transport_drop(e):
+                raise
 
     def raw_send(self, cmd, minclock, reqclock, cmd_queue):
         self._check_noncritical_disconnected()
@@ -580,7 +595,11 @@ class SerialReader:
             if self._engine_detached:
                 return
             handle = self.mcu._engine_handle
-            engine.engine_send(handle, msg)
+            try:
+                engine.engine_send(handle, msg)
+            except RuntimeError as e:
+                if not self._is_engine_transport_drop(e):
+                    raise
         elif self.serialqueue is not None:
             cmd = self.msgparser.create_command(msg)
             self.ffi_lib.serialqueue_send(
@@ -598,11 +617,16 @@ class SerialReader:
         if engine is not None:
             if self._engine_detached:
                 raise error("serial connection closed")
-            params = engine.engine_call(
-                self.mcu._engine_handle,
-                msg,
-                response,
-            )
+            try:
+                params = engine.engine_call(
+                    self.mcu._engine_handle,
+                    msg,
+                    response,
+                )
+            except RuntimeError as e:
+                if not self._is_engine_transport_drop(e):
+                    raise
+                raise error("serial connection closed")
             # Use CLOCK_MONOTONIC_RAW timestamps if the Rust engine supplied them
             # (non-zero means a real RTT was measured on the wire).  Fall back to
             # reactor.monotonic() only when both sides stamp the same instant (the

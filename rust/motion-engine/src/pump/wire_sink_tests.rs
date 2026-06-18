@@ -21,7 +21,8 @@ fn one_piece() -> Vec<runtime::piece_ring::PieceEntry> {
         start_time: 1000,
         coeffs: [0.0; 4],
         duration: 0.001,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }]
 }
 

@@ -138,6 +138,34 @@ fn unknown_step_mode_publishes_code_and_detail() {
 }
 
 #[test]
+fn multi_motor_mask_publishes_code_and_detail() {
+    let shared = SharedState::new();
+    raise_multi_motor_mask(&shared, 1, 0b0000_0011);
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        FaultCode::MultiMotorMask.as_i32()
+    );
+    assert_eq!(
+        shared.fault_detail.load(Ordering::Acquire),
+        (1 << 16) | 0b0000_0011
+    );
+}
+
+#[test]
+fn overlay_unsupported_publishes_code_and_detail() {
+    let shared = SharedState::new();
+    raise_overlay_unsupported(&shared, 2, 0b0000_0010);
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        FaultCode::OverlayUnsupported.as_i32()
+    );
+    assert_eq!(
+        shared.fault_detail.load(Ordering::Acquire),
+        (2 << 16) | 0b0000_0010
+    );
+}
+
+#[test]
 fn emit_fault_log_stub_does_not_panic() {
     emit_fault_log(FaultCode::PieceStartInPast, 0x1_0000);
 }

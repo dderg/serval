@@ -14,25 +14,32 @@ class _FakeStepper:
         return self._name
 
 
-class _FakeAdjuster:
+class _FakeForceMoveRecorder:
     def __init__(self):
         self.calls = []
 
-    def adjust(self, stepper_name, delta_mm, speed, accel):
-        self.calls.append((stepper_name, delta_mm, speed, accel))
+    def manual_move(self, stepper, dist, speed, accel):
+        name = stepper if isinstance(stepper, str) else stepper.get_name()
+        self.calls.append((name, dist, speed, accel))
 
 
 class _FakeToolhead:
+    def __init__(self):
+        self.wait_moves_called = 0
+
     def get_max_axis_accel(self, axis_idx):
         assert axis_idx == 2
         return 100.0
+
+    def wait_moves(self):
+        self.wait_moves_called += 1
 
 
 class _FakePrinter:
     def __init__(self):
         self.gcode = _FakeGCode()
         self.toolhead = _FakeToolhead()
-        self.adjuster = _FakeAdjuster()
+        self.force_move = _FakeForceMoveRecorder()
         self.handlers = []
 
     def register_event_handler(self, event, handler):
@@ -42,8 +49,8 @@ class _FakePrinter:
         return {"gcode": self.gcode, "toolhead": self.toolhead}[name]
 
     def load_object(self, config, name):
-        assert name == "motor_adjust"
-        return self.adjuster
+        assert name == "force_move"
+        return self.force_move
 
 
 class _FakeConfig:
@@ -68,11 +75,12 @@ def test_adjust_steppers_applies_min_relative_deltas():
         _FakeStepper("stepper_z2"),
     ]
     helper.adjust_steppers([5.76, -7.80, 7.69], 5.0)
-    assert printer.adjuster.calls == [
+    assert printer.force_move.calls == [
         ("stepper_z", 5.76 - -7.80, 5.0, 100.0),
         ("stepper_z2", 7.69 - -7.80, 5.0, 100.0),
     ]
     assert any("stepper_z1 = 0.0" in m for m in printer.gcode.messages)
+    assert printer.toolhead.wait_moves_called == 1
 
 
 def test_adjust_steppers_skips_all_when_level():
@@ -82,4 +90,5 @@ def test_adjust_steppers_skips_all_when_level():
     helper = ZAdjustHelper(_FakeConfig(printer), 2)
     helper.z_steppers = [_FakeStepper("stepper_z"), _FakeStepper("stepper_z1")]
     helper.adjust_steppers([3.0, 3.0], 5.0)
-    assert printer.adjuster.calls == []
+    assert printer.force_move.calls == []
+    assert printer.toolhead.wait_moves_called == 1

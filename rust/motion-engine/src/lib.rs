@@ -8,8 +8,6 @@ pub mod classify;
 #[doc(hidden)]
 pub mod config;
 #[doc(hidden)]
-pub mod correction;
-#[doc(hidden)]
 pub mod dispatch;
 pub mod drain;
 #[doc(hidden)]
@@ -23,6 +21,8 @@ pub mod mcu_log;
 pub mod motion_history;
 #[doc(hidden)]
 pub mod motion_node;
+#[doc(hidden)]
+pub mod nudge;
 #[doc(hidden)]
 pub mod planner;
 #[doc(hidden)]

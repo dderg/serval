@@ -21,7 +21,8 @@ fn make_linear_piece(
         start_time,
         coeffs: [pos_start, pos_start, pos_end, pos_end],
         duration: duration_secs,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 
@@ -347,7 +348,8 @@ fn trajectory_final_position_constant_piece() {
         start_time: 0,
         coeffs: [99.0_f32; 4],
         duration: 0.01,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     };
     let mut store = HistoryStore::default();
     store.record(key, &piece, FREQ);

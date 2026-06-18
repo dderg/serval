@@ -167,16 +167,12 @@ impl Engine {
         if !microstep_distance.is_finite() || microstep_distance <= 0.0 {
             return RUNTIME_ERR_INVALID_ARG;
         }
-        if self.ring_alloc_cursor + ring_depth + crate::stepping_state::CORRECTION_RING_DEPTH
-            > total_ring_pieces
-        {
+        if self.ring_alloc_cursor + ring_depth > total_ring_pieces {
             return RUNTIME_ERR_RING_FULL;
         }
 
         let offset = self.ring_alloc_cursor;
         self.ring_alloc_cursor += ring_depth;
-        let correction_offset = self.ring_alloc_cursor;
-        self.ring_alloc_cursor += crate::stepping_state::CORRECTION_RING_DEPTH;
 
         let idx = axis_idx as usize;
         // SAFETY: `idx < MAX_AXES` is guaranteed by the bounds check above.
@@ -186,10 +182,6 @@ impl Engine {
 
         axis.microstep_distance = microstep_distance;
         axis.ring = crate::piece_ring::RingDescriptor::new(offset, ring_depth);
-        axis.correction_ring = crate::piece_ring::RingDescriptor::new(
-            correction_offset,
-            crate::stepping_state::CORRECTION_RING_DEPTH,
-        );
         axis.reset_isr_cache();
         axis.steppers.clear();
         for b in bindings {
@@ -237,13 +229,6 @@ impl Engine {
                 axis.ring.advance_counter();
             }
             axis.armed = None;
-            while axis.correction_ring.front_slot().is_some() {
-                axis.correction_ring.advance_counter();
-            }
-            axis.correction_armed = None;
-            axis.correction_motor_idx = crate::stepping_state::CORRECTION_MOTOR_NONE;
-            axis.correction_last_step_count = 0;
-            axis.correction_p_prev = 0.0;
         }
     }
 
@@ -286,83 +271,6 @@ impl Engine {
         RUNTIME_OK
     }
 
-    pub fn write_correction_piece(
-        &mut self,
-        axis_idx: u8,
-        start_slot: u16,
-        index: u8,
-        entry: PieceEntry,
-        storage: &mut [PieceEntry],
-    ) -> i32 {
-        let Some(axis) = self
-            .stepping_axes
-            .get_mut(axis_idx as usize)
-            .and_then(|s| s.as_mut())
-        else {
-            return RUNTIME_ERR_INVALID_ARG;
-        };
-        if !axis.correction_ring.is_configured() {
-            return RUNTIME_ERR_INVALID_ARG;
-        }
-        let slot = (start_slot as usize + index as usize) % axis.correction_ring.ring_depth;
-        axis.correction_ring.write_slot(storage, slot, entry);
-        RUNTIME_OK
-    }
-
-    pub fn commit_correction(&mut self, axis_idx: u8, motor_idx: u8, new_head: u32) -> i32 {
-        let any_other_active = self.stepping_axes.iter().enumerate().any(|(i, a)| {
-            i != axis_idx as usize && a.as_ref().map_or(false, |ax| ax.correction_active())
-        });
-        let Some(axis) = self
-            .stepping_axes
-            .get_mut(axis_idx as usize)
-            .and_then(|s| s.as_mut())
-        else {
-            return RUNTIME_ERR_INVALID_ARG;
-        };
-        if !axis.correction_ring.is_configured() {
-            return RUNTIME_ERR_INVALID_ARG;
-        }
-        if (motor_idx as usize) >= axis.steppers.len() {
-            return RUNTIME_ERR_INVALID_ARG;
-        }
-        if !axis.ring.is_empty() || axis.armed.is_some() {
-            return crate::error::RUNTIME_ERR_MOTION_IN_PROGRESS;
-        }
-        if any_other_active {
-            return crate::error::RUNTIME_ERR_CORRECTION_IN_PROGRESS;
-        }
-        if axis.correction_active() && axis.correction_motor_idx != motor_idx {
-            return crate::error::RUNTIME_ERR_CORRECTION_IN_PROGRESS;
-        }
-        if !axis.correction_active() {
-            axis.correction_ring.reset_cursors();
-            axis.correction_motor_idx = motor_idx;
-            axis.correction_last_step_count = 0;
-            axis.correction_p_prev = 0.0;
-            crate::dispatch_correction::emit_correction_start(axis_idx, motor_idx);
-        }
-        match axis.correction_ring.commit_head(new_head) {
-            crate::piece_ring::CommitOutcome::Applied | crate::piece_ring::CommitOutcome::Stale => {
-                RUNTIME_OK
-            }
-            crate::piece_ring::CommitOutcome::Overcommit => RUNTIME_ERR_RING_FULL,
-        }
-    }
-
-    pub fn guard_normal_commit(&self, axis_idx: u8) -> i32 {
-        let active = self
-            .stepping_axes
-            .get(axis_idx as usize)
-            .and_then(|s| s.as_ref())
-            .map_or(false, |ax| ax.correction_active());
-        if active {
-            crate::error::RUNTIME_ERR_CORRECTION_IN_PROGRESS
-        } else {
-            RUNTIME_OK
-        }
-    }
-
     pub fn tick(&mut self, now: u64, shared: &SharedState, storage: &mut [PieceEntry]) -> bool {
         #[cfg(feature = "motion-module-stepper")]
         use crate::dispatch_stepper::dispatch_axis;
@@ -390,53 +298,17 @@ impl Engine {
         #[allow(clippy::cast_possible_truncation)]
         let now_lo = now as u32;
 
-        let corr_sample_period_sec =
-            if self.sample_period_cycles == 0 || self.cycles_per_second == 0.0 {
-                0.0_f32
-            } else {
-                self.sample_period_cycles as f32 / self.cycles_per_second
-            };
-        #[allow(clippy::cast_possible_truncation)]
-        let corr_now_lo = now as u32;
-
         let mut active = false;
 
         for i in 0..(self.num_axes as usize) {
-            {
-                #[cfg(feature = "motion-module-stepper")]
-                let corr_queue = get_queue(i);
-                #[cfg(not(feature = "motion-module-stepper"))]
-                let corr_queue = core::ptr::null_mut();
-                let sample_period_cycles = self.sample_period_cycles;
-                let cps = self.cycles_per_second;
-                let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
-                    continue;
-                };
-                let fault = SharedFaultSink { shared };
-                if crate::dispatch_correction::tick_correction(
-                    i,
-                    axis,
-                    corr_queue,
-                    shared,
-                    storage,
-                    now,
-                    sample_period_cycles,
-                    corr_sample_period_sec,
-                    corr_now_lo,
-                    cps,
-                    &fault,
-                ) {
-                    active = true;
-                }
-            }
-
-            let (p_end, v_end, p_sample_start) = {
+            let (p_end, v_end, p_sample_start, overlay_just_armed) = {
                 let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
                     continue;
                 };
                 let cps = self.cycles_per_second;
                 let fault = SharedFaultSink { shared };
-                match crate::motion_core::get_position_and_velocity(
+                let mut just_armed = false;
+                match crate::motion_core::get_position_and_velocity_armed(
                     &mut axis.armed,
                     &mut axis.ring,
                     storage,
@@ -445,20 +317,31 @@ impl Engine {
                     cps,
                     i,
                     &fault,
+                    &mut just_armed,
                 ) {
                     Some((p_end, v_end)) => {
                         active = true;
-                        let p_sample_start = axis.p_prev;
-                        axis.p_prev = p_end;
-                        axis.v_prev = v_end;
-                        (p_end, v_end, p_sample_start)
+                        let is_overlay = axis.ring.peek(storage).map_or(0, |p| p.motor_mask) != 0;
+                        if is_overlay {
+                            if just_armed {
+                                axis.overlay_last_p = 0.0;
+                            }
+                            let p_sample_start = axis.overlay_last_p;
+                            axis.overlay_last_p = p_end;
+                            (p_end, v_end, p_sample_start, just_armed)
+                        } else {
+                            let p_sample_start = axis.p_prev;
+                            axis.p_prev = p_end;
+                            axis.v_prev = v_end;
+                            (p_end, v_end, p_sample_start, false)
+                        }
                     }
                     None => {
                         if !idle_phase_slew_pending(axis) {
                             continue;
                         }
                         active = true;
-                        (axis.p_prev, 0.0, axis.p_prev)
+                        (axis.p_prev, 0.0, axis.p_prev, false)
                     }
                 }
             };
@@ -468,10 +351,12 @@ impl Engine {
                 let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
                     continue;
                 };
+                let active_mask = axis.ring.peek(storage).map_or(0, |p| p.motor_mask);
                 let queue_ptr = get_queue(i);
                 dispatch_axis(
                     i,
                     axis,
+                    active_mask,
                     queue_ptr,
                     shared,
                     p_end,
@@ -480,12 +365,13 @@ impl Engine {
                     sample_period_sec,
                     now_lo,
                     self.cycles_per_second,
+                    overlay_just_armed,
                 );
             }
 
             #[cfg(not(feature = "motion-module-stepper"))]
             {
-                let _ = (p_end, v_end, p_sample_start);
+                let _ = (p_end, v_end, p_sample_start, overlay_just_armed);
             }
         }
 
@@ -694,13 +580,6 @@ impl Engine {
                 axis.ring.advance_counter();
             }
             axis.armed = None;
-            while axis.correction_ring.front_slot().is_some() {
-                axis.correction_ring.advance_counter();
-            }
-            axis.correction_armed = None;
-            axis.correction_motor_idx = crate::stepping_state::CORRECTION_MOTOR_NONE;
-            axis.correction_last_step_count = 0;
-            axis.correction_p_prev = 0.0;
             let axis_pos_mm = motor_positions.get(i).copied().unwrap_or(0.0);
             let microstep_distance = axis.microstep_distance;
             if !microstep_distance.is_finite() || microstep_distance <= 0.0 {
@@ -757,7 +636,6 @@ impl Engine {
             if let Some(axis) = axis_opt.as_mut() {
                 axis.reset_isr_cache();
                 axis.ring.drain();
-                axis.correction_ring.drain();
             }
         }
         self.last_motors = [0.0; MAX_AXES];

@@ -61,7 +61,8 @@ struct McuConnection {
     serial_path: String,
     baud: u32,
     host_io: Option<Arc<McuHostIo>>,
-    runtime_rx: Option<Receiver<host_rt::host_io::runtime_events::RuntimeEvent>>,
+    runtime_rx_priority: Option<Receiver<host_rt::host_io::runtime_events::RuntimeEvent>>,
+    runtime_rx_bulk: Option<Receiver<host_rt::host_io::runtime_events::RuntimeEvent>>,
     runtime_caps: Option<mcu_protocol::messages::RuntimeCapsResponse>,
     identify_caps: u64,
     mcu_transport_supported: bool,
@@ -633,9 +634,7 @@ pub struct PyMotionEngine {
 }
 
 pub(crate) fn axis_ring_depth(total_pieces: u32, num_axes: u32) -> u32 {
-    let correction_reserve =
-        num_axes.max(1) * runtime::stepping_state::CORRECTION_RING_DEPTH as u32;
-    (total_pieces.saturating_sub(correction_reserve) / num_axes.max(1)).max(1)
+    (total_pieces / num_axes.max(1)).max(1)
 }
 
 pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::pump::AxisKey> {
@@ -704,36 +703,24 @@ mod drip_cohort_participants_tests {
 mod axis_ring_depth_tests {
     use super::axis_ring_depth;
 
-    use runtime::stepping_state::CORRECTION_RING_DEPTH;
-
     #[test]
-    fn typical_two_axis_mcu_reserves_correction_rings() {
-        assert_eq!(
-            axis_ring_depth(1984, 2),
-            (1984 - 2 * CORRECTION_RING_DEPTH as u32) / 2
-        );
+    fn typical_two_axis_mcu_splits_evenly() {
+        assert_eq!(axis_ring_depth(1984, 2), 1984 / 2);
     }
 
     #[test]
-    fn single_axis_mcu_reserves_correction_ring() {
-        assert_eq!(
-            axis_ring_depth(1984, 1),
-            1984 - CORRECTION_RING_DEPTH as u32
-        );
+    fn single_axis_mcu_gets_full_depth() {
+        assert_eq!(axis_ring_depth(1984, 1), 1984);
     }
 
     #[test]
-    fn lower_clamp_when_reserve_exceeds_total() {
-        assert_eq!(axis_ring_depth(5, 2), 1);
+    fn lower_clamp_keeps_at_least_one() {
         assert_eq!(axis_ring_depth(0, 2), 1);
     }
 
     #[test]
     fn zero_num_axes_treated_as_one() {
-        assert_eq!(
-            axis_ring_depth(1000, 0),
-            1000 - CORRECTION_RING_DEPTH as u32
-        );
+        assert_eq!(axis_ring_depth(1000, 0), 1000);
     }
 }
 
@@ -799,21 +786,23 @@ mod ring_depth_for_axis_tests {
 
     #[test]
     fn success_two_axis_mcu() {
+        let expected = (1984 / 2) as u16;
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 1, AXIS_X as u8).unwrap(),
-            976
+            expected
         );
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 1, AXIS_Y as u8).unwrap(),
-            976
+            expected
         );
     }
 
     #[test]
     fn success_single_axis_mcu() {
+        let expected = 1984u16;
         assert_eq!(
             ring_depth_for_axis_inner(&configs(), 2, AXIS_Z as u8).unwrap(),
-            1968
+            expected
         );
     }
 
@@ -926,7 +915,8 @@ impl PyMotionEngine {
                 serial_path: serial_path.to_owned(),
                 baud,
                 host_io: None,
-                runtime_rx: None,
+                runtime_rx_priority: None,
+                runtime_rx_bulk: None,
                 runtime_caps: None,
                 identify_caps: 0,
                 mcu_transport_supported: false,
@@ -1694,7 +1684,8 @@ impl PyMotionEngine {
     fn detach_serial(&self, mcu_handle: u32) -> PyResult<()> {
         let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(conn) = mcus.get_mut(&mcu_handle) {
-            conn.runtime_rx = None;
+            conn.runtime_rx_priority = None;
+            conn.runtime_rx_bulk = None;
             conn.host_io = None;
         }
         Ok(())
@@ -1730,11 +1721,12 @@ impl PyMotionEngine {
                         "attach_serial: reusing existing connection (reactor alive, skipping close/reopen)"
                     );
 
-                    let runtime_rx = io.take_runtime_event_subscription().map_err(|e| {
-                        PyRuntimeError::new_err(format!(
-                            "attach_serial: runtime_event re-subscribe: {e:?}"
-                        ))
-                    })?;
+                    let (rx_priority, rx_bulk) =
+                        io.take_runtime_event_subscription().map_err(|e| {
+                            PyRuntimeError::new_err(format!(
+                                "attach_serial: runtime_event re-subscribe: {e:?}"
+                            ))
+                        })?;
 
                     let (mcu_transport_supported, identify_caps) = if !expect_native {
                         tracing::info!(
@@ -1813,7 +1805,8 @@ impl PyMotionEngine {
                             "attach_serial: unknown mcu_handle {mcu_handle}"
                         ))
                     })?;
-                    conn.runtime_rx = Some(runtime_rx);
+                    conn.runtime_rx_priority = Some(rx_priority);
+                    conn.runtime_rx_bulk = Some(rx_bulk);
                     conn.runtime_caps = runtime_caps;
                     conn.identify_caps = identify_caps;
                     conn.mcu_transport_supported = mcu_transport_supported;
@@ -1829,7 +1822,8 @@ impl PyMotionEngine {
                     "attach_serial: unknown mcu_handle {mcu_handle} (claim_mcu not called)"
                 ))
             })?;
-            conn.runtime_rx = None;
+            conn.runtime_rx_priority = None;
+            conn.runtime_rx_bulk = None;
             conn.host_io = None;
             conn.label.clone()
         };
@@ -1873,7 +1867,7 @@ impl PyMotionEngine {
             }
         };
 
-        let runtime_rx = host_io.take_runtime_event_subscription().map_err(|e| {
+        let (rx_priority, rx_bulk) = host_io.take_runtime_event_subscription().map_err(|e| {
             PyRuntimeError::new_err(format!("attach_serial: runtime_event subscribe: {e:?}"))
         })?;
 
@@ -2012,7 +2006,8 @@ impl PyMotionEngine {
             PyRuntimeError::new_err(format!("attach_serial: unknown mcu_handle {mcu_handle}"))
         })?;
         conn.host_io = Some(host_io_arc);
-        conn.runtime_rx = Some(runtime_rx);
+        conn.runtime_rx_priority = Some(rx_priority);
+        conn.runtime_rx_bulk = Some(rx_bulk);
         conn.runtime_caps = runtime_caps;
         conn.identify_caps = identify_caps;
         conn.mcu_transport_supported = mcu_transport_supported;
@@ -2143,77 +2138,45 @@ impl PyMotionEngine {
         Ok(())
     }
 
-    #[pyo3(signature = (mcu_handle, axis_idx, motor_idx, delta_mm, speed, accel))]
-    fn adjust_motor(
+    #[pyo3(signature = (mcu_id, axis_idx, motor_mask, delta_mm, speed, accel))]
+    fn submit_nudge(
         &self,
-        py: Python<'_>,
-        mcu_handle: u32,
+        _py: Python<'_>,
+        mcu_id: u32,
         axis_idx: u8,
-        motor_idx: u8,
+        motor_mask: u8,
         delta_mm: f64,
         speed: f64,
         accel: f64,
     ) -> PyResult<f64> {
-        const CORRECTION_LEAD_SECS: f64 = 0.15;
-        let profile = crate::correction::plan_correction_profile(delta_mm, speed, accel)
-            .map_err(PyRuntimeError::new_err)?;
-        let duration = crate::correction::profile_duration(delta_mm, speed, accel)
-            .map_err(PyRuntimeError::new_err)?;
-        let handle = mcu_handle_from_raw(mcu_handle);
-        let entries = {
-            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            let start_secs = router.host_now_secs() + CORRECTION_LEAD_SECS;
-            crate::correction::to_piece_entries(
-                &profile,
-                |secs| router.host_time_to_mcu_clock(handle, secs).unwrap_or(0),
-                start_secs,
-            )
-        };
-        if entries.iter().any(|e| e.start_time == 0) {
+        if runtime::piece_ring::stepper_sel_from_mask(motor_mask).is_err() {
             return Err(PyRuntimeError::new_err(format!(
-                "adjust_motor: clock unsynced for mcu {mcu_handle}"
+                "submit_nudge: multi-bit motor_mask {motor_mask:#010b} not supported"
             )));
         }
-        let io = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-            let conn = mcus.get(&mcu_handle).ok_or_else(|| {
-                PyRuntimeError::new_err(format!("adjust_motor: unknown mcu_handle {mcu_handle}"))
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        {
+            let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            let planner = guard.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err("planner not initialized — call init_planner first")
             })?;
-            conn.host_io
-                .as_ref()
-                .ok_or_else(|| {
-                    PyRuntimeError::new_err(
-                        "adjust_motor: serial transport not attached for this MCU \
-                         (EtherCAT correction moves are not supported yet)",
-                    )
-                })?
-                .clone()
-        };
-        py.detach(|| -> PyResult<()> {
-            for msg in crate::correction::chunk_correction_messages(axis_idx, motor_idx, &entries) {
-                let mut body = Vec::with_capacity(9 + msg.pieces_bytes.len());
-                mcu_protocol::codec::Encode::encode(&msg, &mut body);
-                let (_kind, resp) = io
-                    .kalico_call_on_channel(
-                        mcu_protocol::MCU_CHANNEL_CONTROL,
-                        mcu_protocol::MessageKind::PushCorrectionPieces,
-                        body,
-                        std::time::Duration::from_secs(2),
-                    )
-                    .map_err(|e| PyRuntimeError::new_err(format!("adjust_motor send: {e:?}")))?;
-                use mcu_protocol::codec::Decode as _;
-                let r = mcu_protocol::messages::PushCorrectionPiecesResponse::decode(&resp)
-                    .map_err(|e| PyRuntimeError::new_err(format!("adjust_motor decode: {e:?}")))?;
-                if r.result != 0 {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "adjust_motor rejected by MCU: error {}",
-                        r.result
-                    )));
-                }
-            }
-            Ok(())
-        })?;
-        Ok(CORRECTION_LEAD_SECS + duration)
+            planner
+                .submit_nudge(crate::planner::NudgeParams {
+                    mcu_id,
+                    axis: axis_idx,
+                    motor_mask,
+                    delta_mm,
+                    speed,
+                    accel,
+                    notify: tx,
+                })
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
+        rx.recv()
+            .map_err(|_| PyRuntimeError::new_err("nudge notify dropped"))?
+            .map_err(PyRuntimeError::new_err)?;
+        let (accel_t, cruise_t, _v) = crate::nudge::calc_move_time(delta_mm, speed, accel);
+        Ok(accel_t + cruise_t + accel_t)
     }
 
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {
@@ -2305,13 +2268,18 @@ impl PyMotionEngine {
                     "take_runtime_event: unknown mcu_handle {mcu_handle}"
                 ))
             })?;
-            match conn.runtime_rx.as_mut() {
+            let mut taken = None;
+            for lane in [&mut conn.runtime_rx_priority, &mut conn.runtime_rx_bulk] {
+                if let Some(rx) = lane.as_mut() {
+                    if let Ok(ev) = rx.try_recv() {
+                        taken = Some(ev);
+                        break;
+                    }
+                }
+            }
+            match taken {
+                Some(ev) => ev,
                 None => return Ok(None),
-                Some(rx) => match rx.try_recv() {
-                    Ok(ev) => ev,
-                    Err(TryRecvError::Empty) => return Ok(None),
-                    Err(TryRecvError::Disconnected) => return Ok(None),
-                },
             }
         };
 
@@ -3071,13 +3039,23 @@ impl PyMotionEngine {
         let mcu_configs_for_cb = mcu_configs;
         let router_for_cb = Arc::clone(&router_arc);
 
-        let anchor_mutex = std::sync::Mutex::new(crate::anchor::Anchor::new());
+        let anchor_mutex = Arc::new(std::sync::Mutex::new(crate::anchor::Anchor::new()));
         let pump_tx_for_cb = pump_tx_init.clone();
         let drain_disp = self.drain.clone();
         let counter_for_cb = Arc::clone(&counter);
         let active_drip_cohort_for_cb = Arc::clone(&self.active_drip_cohort);
         let motion_history_for_cb = Arc::clone(&self.motion_history);
         let nominal_freqs_for_cb = Arc::clone(&self.nominal_clock_freqs);
+
+        let nudge_mcu_configs = mcu_configs_for_cb.clone();
+        let nudge_router = Arc::clone(&router_for_cb);
+        let nudge_pump_tx = pump_tx_for_cb.clone();
+        let nudge_drain = drain_disp.clone();
+        let nudge_counter = Arc::clone(&counter_for_cb);
+        let nudge_active_drip_cohort = Arc::clone(&active_drip_cohort_for_cb);
+        let nudge_motion_history = Arc::clone(&motion_history_for_cb);
+        let nudge_nominal_freqs = Arc::clone(&nominal_freqs_for_cb);
+        let nudge_anchor_arc = Arc::clone(&anchor_mutex);
 
         let dispatch: Arc<
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
@@ -3172,6 +3150,105 @@ impl PyMotionEngine {
             },
         );
 
+        let nudge_dispatch: Arc<
+            dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync,
+        > = Arc::new(
+            move |mcu_id: u32, np: &crate::nudge::NudgePiece| -> Result<(), DispatchError> {
+                let axis = np.axis;
+                if !nudge_mcu_configs.iter().any(|c| c.mcu_id == mcu_id) {
+                    return Err(DispatchError::NudgeTargetMissing { mcu_id, axis });
+                }
+
+                let host_now = {
+                    let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
+                    r.host_now_secs()
+                };
+
+                let active_cohort: Option<u64> = *nudge_active_drip_cohort
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+
+                let lead_secs = if active_cohort.is_some() {
+                    crate::pump::DRIP_WINDOW_SECS
+                } else {
+                    crate::pump::MAX_LEAD_SECS
+                };
+
+                let (t0, fresh) = nudge_anchor_arc
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .anchor_segment(np.piece.u_start, np.piece.u_end, host_now)
+                    .map_err(|late| DispatchError::SegmentLate {
+                        gap_s: late.gap_s,
+                        seg_t_start: late.seg_t_start,
+                    })?;
+
+                if fresh {
+                    let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
+                    let h = crate::types::mcu_handle_from_raw(mcu_id);
+                    r.log_seg0_deficit(h, t0 + np.piece.u_start, t0);
+                }
+
+                let project = |proj_mcu_id: u32, host_secs: f64| -> u64 {
+                    let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
+                    r.host_time_to_mcu_clock(
+                        crate::types::mcu_handle_from_raw(proj_mcu_id),
+                        host_secs,
+                    )
+                    .unwrap_or(0)
+                };
+
+                let max_piece_secs = if active_cohort.is_some() {
+                    Some(0.025_f64)
+                } else {
+                    None::<f64>
+                };
+
+                let pieces = crate::enqueue::flatten_bezier_pieces(
+                    std::slice::from_ref(&np.piece),
+                    t0,
+                    mcu_id,
+                    axis as usize,
+                    host_now,
+                    &project,
+                    max_piece_secs,
+                    np.motor_mask,
+                );
+
+                if !pieces.is_empty() {
+                    let key = crate::pump::AxisKey { mcu_id, axis };
+                    let nominal_freq = {
+                        let freqs = nudge_nominal_freqs
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
+                        *freqs
+                            .get(&mcu_id)
+                            .ok_or(DispatchError::MissingNominalFreq(mcu_id))?
+                    };
+                    {
+                        let mut store = nudge_motion_history
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
+                        for (piece, _host_t) in &pieces {
+                            store.record(key, piece, nominal_freq);
+                        }
+                    }
+                    nudge_drain.add_sent(mcu_id, axis, pieces.len() as u32);
+                    nudge_pump_tx
+                        .send(crate::pump::PumpMsg::Enqueue(crate::pump::EnqueueMsg {
+                            key,
+                            pieces,
+                            fresh_stream: fresh,
+                            lead_secs,
+                        }))
+                        .map_err(|_| DispatchError::PumpGone)?;
+                }
+
+                nudge_counter.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        );
+
         {
             let mut guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
             if guard.is_some() {
@@ -3179,7 +3256,7 @@ impl PyMotionEngine {
                     "planner already initialized (raced)",
                 ));
             }
-            *guard = Some(PlannerHandle::spawn(cfg, dispatch));
+            *guard = Some(PlannerHandle::spawn(cfg, dispatch, nudge_dispatch));
         }
         Ok(())
     }
@@ -3618,6 +3695,10 @@ impl PyMotionEngine {
             Some(p) => p.last_move_time(),
             None => 0.0,
         }
+    }
+
+    fn motion_lead_secs(&self) -> f64 {
+        crate::anchor::DEFAULT_LEAD_SECS
     }
 
     fn dispatched_segment_count(&self) -> u64 {
@@ -4412,7 +4493,8 @@ impl PyMotionEngine {
                 serial_path: String::new(),
                 baud: 0,
                 host_io: None,
-                runtime_rx: None,
+                runtime_rx_priority: None,
+                runtime_rx_bulk: None,
                 runtime_caps: None,
                 identify_caps: 0,
                 mcu_transport_supported: true,
@@ -4814,3 +4896,13 @@ mod ethercat_endpoint_tests {
 
 #[cfg(test)]
 mod kinematics_calls_tests;
+
+#[cfg(test)]
+mod submit_nudge_validation_tests {
+    #[test]
+    fn multi_bit_mask_is_rejected_by_stepper_sel() {
+        assert!(runtime::piece_ring::stepper_sel_from_mask(0b0000_0011).is_err());
+        assert!(runtime::piece_ring::stepper_sel_from_mask(0b0000_0010).is_ok());
+        assert!(runtime::piece_ring::stepper_sel_from_mask(0).is_ok());
+    }
+}

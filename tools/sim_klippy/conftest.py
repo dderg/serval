@@ -32,7 +32,6 @@ _THIRD_PARTY = (
 
 _THIRD_PARTY_PLUGINS = {
     "beacon": _THIRD_PARTY / "beacon_klipper" / "beacon.py",
-    "motors_sync": _THIRD_PARTY / "motors-sync" / "motors_sync.py",
     "autotune_tmc": _THIRD_PARTY / "klipper_tmc_autotune" / "autotune_tmc.py",
     "motor_constants": _THIRD_PARTY
     / "klipper_tmc_autotune"
@@ -277,7 +276,6 @@ def sim(tmp_path, sim_extra_overrides):
         )
 
         beacon_klipper_path = _THIRD_PARTY / "beacon_klipper"
-        motors_sync_path = _THIRD_PARTY / "motors-sync"
         env = os.environ.copy()
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = ":".join(
@@ -285,7 +283,6 @@ def sim(tmp_path, sim_extra_overrides):
                 None,
                 [
                     str(beacon_klipper_path),
-                    str(motors_sync_path),
                     existing,
                 ],
             )

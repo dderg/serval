@@ -87,7 +87,8 @@ fn serial_mcu_conn(label: &str, slave_path: &str, host_io: Arc<McuHostIo>) -> Mc
         serial_path: slave_path.to_owned(),
         baud: 0,
         host_io: Some(host_io),
-        runtime_rx: None,
+        runtime_rx_priority: None,
+        runtime_rx_bulk: None,
         runtime_caps: None,
         identify_caps: 0,
         mcu_transport_supported: false,
@@ -218,7 +219,8 @@ fn shutdown_releases_ethercat_socket_and_child() {
         serial_path: String::new(),
         baud: 0,
         host_io: None,
-        runtime_rx: None,
+        runtime_rx_priority: None,
+        runtime_rx_bulk: None,
         runtime_caps: None,
         identify_caps: 0,
         mcu_transport_supported: true,
@@ -315,6 +317,11 @@ fn counting_dispatch() -> (
     (cb, counter)
 }
 
+fn noop_nudge_dispatch()
+-> Arc<dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_mcu_id: u32, _np: &crate::nudge::NudgePiece| Ok(()))
+}
+
 /// Loosened fit tolerance for fast planning in tests (mirrors
 /// `planner::tests::relaxed_config`).
 fn relaxed_planner_config() -> PlannerConfig {
@@ -332,8 +339,11 @@ fn relaxed_planner_config() -> PlannerConfig {
 fn shutdown_takes_and_joins_planner() {
     let engine = PyMotionEngine::new();
     let (dispatch, _counter) = counting_dispatch();
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) =
-        Some(PlannerHandle::spawn(PlannerConfig::default(), dispatch));
+    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(PlannerHandle::spawn(
+        PlannerConfig::default(),
+        dispatch,
+        noop_nudge_dispatch(),
+    ));
 
     assert!(
         engine
@@ -413,7 +423,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
             Ok(())
         });
 
-    let planner = PlannerHandle::spawn(relaxed_planner_config(), dispatch);
+    let planner = PlannerHandle::spawn(relaxed_planner_config(), dispatch, noop_nudge_dispatch());
     // Prime one move so the planner has a pending tail before the submitter and
     // pump are even wired — the recv_timeout branch is armed from the start.
     planner
@@ -592,7 +602,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
             start_time: 1_000_000,
             coeffs: [0.0; 4],
             duration: 0.001,
-            _reserved: 0,
+            motor_mask: 0,
+            _reserved: [0; 3],
         },
         1.0_f64,
     )];
@@ -619,8 +630,11 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
 
     // Also seed a planner so the planner-join step of shutdown() is exercised.
     let (dispatch, _counter) = counting_dispatch();
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) =
-        Some(PlannerHandle::spawn(relaxed_planner_config(), dispatch));
+    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(PlannerHandle::spawn(
+        relaxed_planner_config(),
+        dispatch,
+        noop_nudge_dispatch(),
+    ));
 
     engine.shutdown();
 

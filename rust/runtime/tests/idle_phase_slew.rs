@@ -45,7 +45,8 @@ fn jog_slews_to_target_while_no_motion_is_armed() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TOTAL_RING_PIECES
     ];
@@ -101,7 +102,8 @@ fn idle_pulse_axis_does_not_dispatch() {
             start_time: 0,
             coeffs: [0.0; 4],
             duration: 0.0,
-            _reserved: 0
+            motor_mask: 0,
+            _reserved: [0; 3]
         };
         TOTAL_RING_PIECES
     ];

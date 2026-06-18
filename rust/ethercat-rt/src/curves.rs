@@ -57,7 +57,8 @@ impl AxisRing {
                 start_time: 0,
                 coeffs: [0.0; 4],
                 duration: 0.0,
-                _reserved: 0,
+                motor_mask: 0,
+                _reserved: [0; 3],
             }; AXIS_RING_CAPACITY],
             desc: RingDescriptor::new(0, AXIS_RING_CAPACITY),
             armed: None,
@@ -179,7 +180,8 @@ fn parse_piece_entry(chunk: &[u8]) -> PieceEntry {
         start_time,
         coeffs: [c0, c1, c2, c3],
         duration,
-        _reserved: 0,
+        motor_mask: 0,
+        _reserved: [0; 3],
     }
 }
 

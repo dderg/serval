@@ -444,5 +444,6 @@ fn restrict_segment_lo_hi(
         followers: seg.followers.clone(),
         t_start: t_lo,
         t_end: t_hi,
+        motor_mask: seg.motor_mask,
     })
 }

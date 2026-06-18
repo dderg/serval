@@ -76,6 +76,7 @@ pub struct ShapedSegment {
     pub followers: Vec<geometry::segment::FollowerDemand>,
     pub t_start: f64,
     pub t_end: f64,
+    pub motor_mask: u8,
 }
 
 #[derive(Debug, thiserror::Error)]

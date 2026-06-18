@@ -41,7 +41,9 @@ funding = "https://docs.kalico.gg/Sponsors.html"
 [tool.ruff]
 line-length = 80
 indent-width = 4
-exclude = ["./.github", "./.history", "./config", "./docs", "./lib", "./src"]
+# motors_sync.py is vendored third-party code (see docs/kalico-rewrite/credits.md);
+# kept close to upstream for provenance/diffing rather than reformatted to house style.
+exclude = ["./.github", "./.history", "./config", "./docs", "./lib", "./src", "./klippy/extras/motors_sync.py"]
 
 [tool.ruff.lint]
 extend-select = [

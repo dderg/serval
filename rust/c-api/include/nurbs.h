@@ -42,11 +42,6 @@ int32_t runtime_clock_sync_request(nurbs_Runtime *rt,
                                    uint32_t host_send_time_hi,
                                    uint64_t *out_mcu_clock);
 
-int32_t runtime_commit_correction(nurbs_Runtime *rt,
-                                  uint8_t axis_idx,
-                                  uint8_t motor_idx,
-                                  uint32_t new_head);
-
 int32_t runtime_commit_head(nurbs_Runtime *rt, uint8_t axis_idx, uint32_t new_head);
 
 int32_t runtime_configure_axis(nurbs_Runtime *rt,
@@ -171,12 +166,6 @@ int32_t runtime_stream_flush(nurbs_Runtime *rt, uint32_t *out_credit_epoch);
 void runtime_tick_sample(nurbs_Runtime *rt);
 
 int32_t runtime_ungate_pieces(nurbs_Runtime *rt);
-
-int32_t runtime_write_correction_piece(nurbs_Runtime *rt,
-                                       uint8_t axis_idx,
-                                       uint16_t start_slot,
-                                       uint8_t index,
-                                       const uint8_t *piece_ptr);
 
 int32_t runtime_write_piece(nurbs_Runtime *rt,
                             uint8_t axis_idx,
