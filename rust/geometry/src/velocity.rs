@@ -4,17 +4,23 @@ use crate::fitter::{FitOutcome, UnblendReason};
 use crate::path::{CurvatureProfile, Segment};
 use crate::segment::SourceRange;
 
+mod scurve;
+
 const LENGTH_EPS_MM: f64 = 1e-9;
+const VELOCITY_EPS_MM_S: f64 = 1e-9;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelocityConfig {
     pub consistency_tol: f64,
+    pub max_jerk_mm_s3: f64,
 }
 
 impl Default for VelocityConfig {
     fn default() -> Self {
         Self {
             consistency_tol: 1e-6,
+            // TODO: jerk-limit floor is an open tuning question (spec-motion-6).
+            max_jerk_mm_s3: 100_000.0,
         }
     }
 }
@@ -26,6 +32,7 @@ pub struct MoveVelocity {
     pub end_v: f64,
     pub ceiling: f64,
     pub accel: f64,
+    pub jerk: f64,
     pub length: f64,
     pub source: SourceRange,
 }
@@ -35,6 +42,7 @@ pub struct VelocityReport {
     pub stops: u32,
     pub curvature_bound: u32,
     pub feedrate_bound: u32,
+    pub jerk_bound: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +56,7 @@ pub enum VelocityError {
     Inconsistent { line_no: u32 },
     NonAlphabet { line_no: u32 },
     NonFinite { line_no: u32 },
+    InvalidConfig,
 }
 
 struct MoveCaps {
@@ -60,6 +69,11 @@ pub fn plan_velocity(
     outcome: &FitOutcome,
     config: VelocityConfig,
 ) -> Result<VelocityProfile, VelocityError> {
+    let jerk = config.max_jerk_mm_s3;
+    if jerk.is_nan() || jerk <= 0.0 {
+        return Err(VelocityError::InvalidConfig);
+    }
+
     let moves = &outcome.moves;
     let n = moves.len();
     if n == 0 {
@@ -132,11 +146,13 @@ pub fn plan_velocity(
     }
 
     for k in 1..=n {
-        let reachable = (v[k - 1] * v[k - 1] + 2.0 * caps[k - 1].accel * caps[k - 1].length).sqrt();
+        let reachable =
+            scurve::max_reachable_velocity(v[k - 1], caps[k - 1].length, caps[k - 1].accel, jerk);
         v[k] = v[k].min(reachable);
     }
     for k in (0..n).rev() {
-        let reachable = (v[k + 1] * v[k + 1] + 2.0 * caps[k].accel * caps[k].length).sqrt();
+        let reachable =
+            scurve::max_reachable_velocity(v[k + 1], caps[k].length, caps[k].accel, jerk);
         v[k] = v[k].min(reachable);
     }
 
@@ -144,14 +160,27 @@ pub fn plan_velocity(
     for (j, m) in moves.iter().enumerate() {
         let start_v = v[j];
         let end_v = v[j + 1];
-        let apex =
-            (0.5 * (start_v * start_v + end_v * end_v) + caps[j].accel * caps[j].length).sqrt();
+        let accel_apex = caps[j].ceiling.min(
+            (0.5 * (start_v * start_v + end_v * end_v) + caps[j].accel * caps[j].length).sqrt(),
+        );
+        let cruise_v = scurve::peak_velocity(
+            start_v,
+            end_v,
+            caps[j].length,
+            caps[j].accel,
+            jerk,
+            caps[j].ceiling,
+        );
+        if cruise_v + VELOCITY_EPS_MM_S < accel_apex {
+            report.jerk_bound += 1;
+        }
         out.push(MoveVelocity {
             start_v,
-            cruise_v: caps[j].ceiling.min(apex),
+            cruise_v,
             end_v,
             ceiling: caps[j].ceiling,
             accel: caps[j].accel,
+            jerk,
             length: caps[j].length,
             source: m.source,
         });

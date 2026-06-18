@@ -199,14 +199,52 @@ fn collinear_junction_is_not_a_stop() {
 }
 
 #[test]
-fn short_move_apex_below_ceiling() {
+fn short_move_apex_trimmed_by_jerk_below_accel_apex() {
     let (len, accel) = (0.5, 1000.0);
     let out = outcome(vec![line_move(len, 300.0, 300.0, accel, 1)], Vec::new());
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let cfg = VelocityConfig::default();
+    let plan = plan_velocity(&out, cfg).unwrap();
     let m = plan.moves[0];
-    let apex = (accel * len).sqrt();
+    let accel_apex = (accel * len).sqrt();
     assert!(m.cruise_v < m.ceiling);
-    assert!((m.cruise_v - apex).abs() < 1e-6);
+    assert!(m.cruise_v < accel_apex);
+    assert_eq!(plan.report.jerk_bound, 1);
+    let round_trip =
+        scurve::velocity_change_distance(m.start_v, m.cruise_v, accel, cfg.max_jerk_mm_s3)
+            + scurve::velocity_change_distance(m.cruise_v, m.end_v, accel, cfg.max_jerk_mm_s3);
+    assert!((round_trip - len).abs() < 1e-6 * len);
+}
+
+#[test]
+fn infinite_jerk_recovers_constant_accel_apex() {
+    let (len, accel) = (0.5, 1000.0);
+    let out = outcome(vec![line_move(len, 300.0, 300.0, accel, 1)], Vec::new());
+    let cfg = VelocityConfig {
+        max_jerk_mm_s3: f64::INFINITY,
+        ..VelocityConfig::default()
+    };
+    let plan = plan_velocity(&out, cfg).unwrap();
+    let m = plan.moves[0];
+    let accel_apex = (accel * len).sqrt();
+    assert!((m.cruise_v - accel_apex).abs() < 1e-6);
+    assert_eq!(plan.report.jerk_bound, 0);
+}
+
+#[test]
+fn invalid_jerk_config_is_rejected() {
+    let out = outcome(vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)], Vec::new());
+    for bad in [0.0, -1.0, f64::NAN] {
+        let cfg = VelocityConfig {
+            max_jerk_mm_s3: bad,
+            ..VelocityConfig::default()
+        };
+        assert_eq!(plan_velocity(&out, cfg), Err(VelocityError::InvalidConfig));
+    }
+    let ok = VelocityConfig {
+        max_jerk_mm_s3: f64::INFINITY,
+        ..VelocityConfig::default()
+    };
+    assert!(plan_velocity(&out, ok).is_ok());
 }
 
 #[test]
@@ -288,6 +326,44 @@ fn forward_backward_feasibility_holds_chainwide() {
     }
     assert_eq!(plan.moves[2].end_v, 0.0);
     assert_eq!(plan.moves[3].start_v, 0.0);
+}
+
+#[test]
+fn infinite_jerk_recovers_constant_accel_plan_chainwide() {
+    let accel = 1500.0;
+    let clo = Clothoid::try_new(
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.0,
+        0.1,
+        6.0,
+    )
+    .unwrap();
+    let out = outcome(
+        vec![
+            line_move(60.0, 250.0, 300.0, accel, 1),
+            arc_move(15.0, std::f64::consts::FRAC_PI_2, 250.0, 300.0, accel, 2),
+            spatial_move(Segment::Clothoid(clo), 250.0, 300.0, accel, 3),
+            line_move(20.0, 250.0, 300.0, accel, 4),
+        ],
+        vec![UnblendedJunction {
+            line_no: 4,
+            reason: UnblendReason::NoBudget,
+        }],
+    );
+    let cfg = VelocityConfig {
+        max_jerk_mm_s3: f64::INFINITY,
+        ..VelocityConfig::default()
+    };
+    let plan = plan_velocity(&out, cfg).unwrap();
+    assert_eq!(plan.report.jerk_bound, 0);
+    for m in &plan.moves {
+        let accel_apex = m
+            .ceiling
+            .min((0.5 * (m.start_v * m.start_v + m.end_v * m.end_v) + m.accel * m.length).sqrt());
+        assert!((m.cruise_v - accel_apex).abs() < 1e-9 * accel_apex.max(1.0));
+    }
 }
 
 #[test]
