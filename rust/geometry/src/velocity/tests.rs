@@ -79,6 +79,7 @@ fn outcome(moves: Vec<Move>, unblended: Vec<UnblendedJunction>) -> FitOutcome {
             blended: 0,
             unblended,
             consumed_legs: 0,
+            chains: 0,
         },
     }
 }

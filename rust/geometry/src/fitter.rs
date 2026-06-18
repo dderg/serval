@@ -1,4 +1,5 @@
 mod biclothoid;
+mod chain;
 
 use std::f64::consts::{PI, SQRT_2};
 
@@ -27,6 +28,26 @@ impl Default for CornerFitConfig {
     }
 }
 
+const COCIRCULAR_TOL_MM: f64 = 5e-3;
+const MIN_RUN_JUNCTIONS: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChainFitConfig {
+    pub corner: CornerFitConfig,
+    pub min_run_junctions: u32,
+    pub cocircular_tol: f64,
+}
+
+impl Default for ChainFitConfig {
+    fn default() -> Self {
+        Self {
+            corner: CornerFitConfig::default(),
+            min_run_junctions: MIN_RUN_JUNCTIONS,
+            cocircular_tol: COCIRCULAR_TOL_MM,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnblendReason {
     Collinear,
@@ -48,6 +69,7 @@ pub struct FitReport {
     pub blended: u32,
     pub unblended: Vec<UnblendedJunction>,
     pub consumed_legs: u32,
+    pub chains: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +133,142 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
     }
 
     Ok(FitOutcome { moves: out, report })
+}
+
+enum RunRole<'a> {
+    None,
+    Start(&'a chain::ChainRun),
+    Interior,
+    End(&'a chain::ChainRun),
+}
+
+fn run_role(runs: &[chain::ChainRun], i: usize) -> RunRole<'_> {
+    for r in runs {
+        if i == r.start {
+            return RunRole::Start(r);
+        }
+        if i == r.end {
+            return RunRole::End(r);
+        }
+        if i > r.start && i < r.end {
+            return RunRole::Interior;
+        }
+    }
+    RunRole::None
+}
+
+fn junction_internal(runs: &[chain::ChainRun], k: usize) -> bool {
+    runs.iter().any(|r| r.start <= k && k < r.end)
+}
+
+pub fn fit_chain(moves: &[Move], config: ChainFitConfig) -> Result<FitOutcome, FitError> {
+    if moves.len() <= 1 {
+        return Ok(FitOutcome {
+            moves: moves.to_vec(),
+            report: FitReport::default(),
+        });
+    }
+
+    let mut plans = Vec::with_capacity(moves.len() - 1);
+    for pair in moves.windows(2) {
+        plans.push(classify_junction(&pair[0], &pair[1], config.corner)?);
+    }
+
+    let runs: Vec<chain::ChainRun> = chain::detect_runs(moves, config)?
+        .into_iter()
+        .filter(|r| {
+            let head_reserve = moves[r.start].segment.s_len() - r.recon.head_consumption;
+            let tail_reserve = moves[r.end].segment.s_len() - r.recon.tail_consumption;
+            let in_ok =
+                r.start == 0 || blend_trim(&plans[r.start - 1]) <= head_reserve + BUDGET_EPS_MM;
+            let out_ok =
+                r.end >= plans.len() || blend_trim(&plans[r.end]) <= tail_reserve + BUDGET_EPS_MM;
+            in_ok && out_ok
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    let mut report = FitReport::default();
+    for (i, m) in moves.iter().enumerate() {
+        match run_role(&runs, i) {
+            RunRole::Interior => report.consumed_legs += 1,
+            RunRole::Start(r) => {
+                let trim_start = if i > 0 {
+                    blend_trim(&plans[i - 1])
+                } else {
+                    0.0
+                };
+                if emit_move(&mut out, m, trim_start, r.recon.head_consumption)? {
+                    report.consumed_legs += 1;
+                }
+                emit_reconstruction(&mut out, &r.recon, m, &moves[r.end])?;
+                report.chains += 1;
+            }
+            RunRole::End(r) => {
+                let trim_end = if i < plans.len() {
+                    blend_trim(&plans[i])
+                } else {
+                    0.0
+                };
+                if emit_move(&mut out, m, r.recon.tail_consumption, trim_end)? {
+                    report.consumed_legs += 1;
+                }
+            }
+            RunRole::None => {
+                let trim_start = if i > 0 {
+                    blend_trim(&plans[i - 1])
+                } else {
+                    0.0
+                };
+                let trim_end = if i < plans.len() {
+                    blend_trim(&plans[i])
+                } else {
+                    0.0
+                };
+                if emit_move(&mut out, m, trim_start, trim_end)? {
+                    report.consumed_legs += 1;
+                }
+            }
+        }
+
+        if i < plans.len() && !junction_internal(&runs, i) {
+            match &plans[i] {
+                JunctionPlan::Blend(bi) => {
+                    report.blended += 1;
+                    emit_blend(&mut out, bi, m, &moves[i + 1])?;
+                }
+                JunctionPlan::Unblended(reason) => report.unblended.push(UnblendedJunction {
+                    line_no: moves[i + 1].source.start_line,
+                    reason: *reason,
+                }),
+            }
+        }
+    }
+
+    Ok(FitOutcome { moves: out, report })
+}
+
+fn emit_reconstruction(
+    out: &mut Vec<Move>,
+    recon: &chain::Reconstruction,
+    m_in: &Move,
+    m_out: &Move,
+) -> Result<(), FitError> {
+    let mut push = |spatial: Segment, src: &Move| -> Result<(), FitError> {
+        let segment = PathSegment::try_new(spatial, recon.followers.clone())
+            .map_err(internal(src.source.start_line))?;
+        out.push(Move {
+            segment,
+            feedrate_mm_s: src.feedrate_mm_s,
+            limits: src.limits,
+            source: src.source,
+        });
+        Ok(())
+    };
+    push(Segment::Clothoid(recon.up.clone()), m_in)?;
+    push(Segment::Arc(recon.arc.clone()), m_in)?;
+    push(Segment::Clothoid(recon.down.clone()), m_out)?;
+    Ok(())
 }
 
 fn classify_junction(
