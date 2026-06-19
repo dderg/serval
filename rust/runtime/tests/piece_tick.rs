@@ -203,7 +203,7 @@ fn tick_faults_on_piece_start_in_past() {
     engine.test_install_step_queues(qs);
 
     let shared = SharedState::new();
-    let now = start + (CLOCK_FREQ as u64 / 50);
+    let now = start + (CLOCK_FREQ as u64 / 20);
     engine.tick(now, &shared, &mut storage);
 
     assert_eq!(
