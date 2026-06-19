@@ -474,6 +474,8 @@ class TMCCommandHelper:
     def _do_enable_engine(self, print_time):
         try:
             if self._post_enable_cb is not None:
+                if getattr(self, '_phase_mode_active', False):
+                    return
                 if self.toff is not None:
                     self.fields.set_field("toff", self.toff)
                 self._init_registers()
