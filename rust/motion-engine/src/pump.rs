@@ -718,7 +718,17 @@ pub fn run_pump<S, F, C, A, O, D>(
                     );
                     break 'send;
                 }
-                Schedule::StallAhead(_stall_key) => {
+                Schedule::StallAhead(stall_key) => {
+                    let q = queues.get(&stall_key);
+                    let head_ticks = q.and_then(|q| q.pieces.front().map(|(p, _)| p.start_time));
+                    let hz = q.map(|q| horizon_of(&stall_key, q, &cohort));
+                    tracing::warn!(
+                        subsystem = "motion", event = "pump_stall_ahead",
+                        mcu = stall_key.mcu_id, axis = stall_key.axis,
+                        head_ticks = ?head_ticks, horizon = ?hz,
+                        lead_secs = q.map(|q| q.lead_secs),
+                        "[pump] StallAhead"
+                    );
                     holding_ahead = true;
                     break 'send;
                 }
