@@ -572,7 +572,7 @@ class TMC5160:
         self._lookup_set_axis_mode_group().send(
             [0, self.PHASE_MODE_PHASE_ENTER, oids]
         )
-        self.printer.lookup_object("motion_engine").warmup_pump()
+        self.printer.lookup_object("motion_engine").get_engine().warmup_pump()
         for t in members:
             t._phase_mode_active = True
 
