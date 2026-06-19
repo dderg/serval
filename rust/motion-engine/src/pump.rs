@@ -656,6 +656,7 @@ pub fn run_pump<S, F, C, A, O, D>(
         }
 
         holding_ahead = false;
+        let mut first_send_done = false;
         'send: loop {
             let hz_of = |k: &AxisKey, q: &AxisQueue| horizon_of(k, q, &cohort);
             match schedule(&queues, MAX_PER_FRAME, hz_of, |_| usize::MAX) {
@@ -683,8 +684,21 @@ pub fn run_pump<S, F, C, A, O, D>(
                             f.start_slot = q.physical_write_cursor as u16;
                             q.pushed.wrapping_add(n)
                         };
+                        let sf_t = Instant::now();
                         match sink.send_frame(f.key, &f.pieces, f.start_slot, new_head) {
                             Ok(_) => {
+                                if !first_send_done {
+                                    first_send_done = true;
+                                    tracing::warn!(
+                                        subsystem = "motion",
+                                        event = "pump_first_send",
+                                        mcu = f.key.mcu_id,
+                                        axis = f.key.axis,
+                                        pieces = f.pieces.len(),
+                                        send_us = sf_t.elapsed().as_micros() as u64,
+                                        "[pump] first send_frame"
+                                    );
+                                }
                                 let q = queues.get_mut(&f.key).expect("planned key exists");
                                 for _ in 0..f.pieces.len() {
                                     q.pieces.pop_front();
