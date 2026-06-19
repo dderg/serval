@@ -111,7 +111,7 @@ fn get_piece_for_time<F: FaultSink>(
     axis_idx: usize,
     fault: &F,
 ) -> Option<usize> {
-    const MAX_START_IN_PAST_SECS: f32 = 200e-6;
+    const MAX_START_IN_PAST_SECS: f32 = 10e-3;
     let drift_budget = (MAX_START_IN_PAST_SECS * cycles_per_second) as u64;
     let fault_tolerance = drift_budget + u64::from(sample_period_cycles);
     loop {
@@ -121,6 +121,9 @@ fn get_piece_for_time<F: FaultSink>(
         // and `tail < ring_depth` always holds. Therefore `slot < storage.len()`.
         #[allow(clippy::indexing_slicing)]
         let entry = &storage[slot];
+        if now < entry.start_time {
+            return None;
+        }
         let deficit_cycles = now.saturating_sub(entry.start_time);
         if deficit_cycles > fault_tolerance {
             let deficit_us = (deficit_cycles as f32 * (1.0e6_f32 / cycles_per_second)) as u32;

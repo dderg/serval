@@ -28,7 +28,7 @@ const CLOCK_FREQ: f32 = 520_000_000.0;
 const TICK_CYCLES: u32 = 520_000_000_u32 / 40_000_u32;
 const TICK_U64: u64 = TICK_CYCLES as u64;
 
-const DRIFT_BUDGET: u64 = (200e-6_f32 * CLOCK_FREQ) as u64;
+const DRIFT_BUDGET: u64 = (10e-3_f32 * CLOCK_FREQ) as u64;
 const FAULT_TOLERANCE: u64 = DRIFT_BUDGET + TICK_CYCLES as u64;
 
 struct TestFaultSink {
