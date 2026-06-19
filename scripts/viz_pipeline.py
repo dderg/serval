@@ -141,44 +141,40 @@ def parse_gcode(
     return waypoints
 
 
-def _build_time_series(segments, vel_s_raw, vel_v_raw):
+def _build_time_series(snapshot):
     import numpy as np
 
-    all_s, all_x, all_y = [], [], []
-    for seg in segments:
-        all_s.extend(seg["s"])
-        all_x.extend(seg["x"])
-        all_y.extend(seg["y"])
-    s_raw = np.array(all_s)
-    x_raw = np.array(all_x)
-    y_raw = np.array(all_y)
+    s = np.array(snapshot["kin_s"])
+    v = np.array(snapshot["kin_v"])
+    hx = np.array(snapshot["kin_heading_x"])
+    hy = np.array(snapshot["kin_heading_y"])
+    kappa = np.array(snapshot["kin_kappa"])
 
-    mask = np.concatenate([[True], np.diff(s_raw) > 1e-9])
-    s = s_raw[mask]
-    x = x_raw[mask]
-    y = y_raw[mask]
+    mask = np.concatenate([[True], np.diff(s) > 1e-9])
+    s, v, hx, hy, kappa = s[mask], v[mask], hx[mask], hy[mask], kappa[mask]
 
-    v_interp = np.interp(s, vel_s_raw, vel_v_raw)
-    v_interp = np.maximum(v_interp, 1e-6)
-
+    v_safe = np.maximum(v, 1e-6)
     ds = np.diff(s)
-    v_avg = 0.5 * (v_interp[:-1] + v_interp[1:])
-    dt = ds / v_avg
-    t = np.concatenate([[0.0], np.cumsum(dt)])
+    v_avg = 0.5 * (v_safe[:-1] + v_safe[1:])
+    t = np.concatenate([[0.0], np.cumsum(ds / v_avg)])
 
-    vx = np.gradient(x, t)
-    vy = np.gradient(y, t)
-    v_scalar = np.sqrt(vx**2 + vy**2)
+    vx = v * hx
+    vy = v * hy
+    v_scalar = v
 
-    ax = np.gradient(vx, t)
-    ay = np.gradient(vy, t)
-    a_scalar = np.sqrt(ax**2 + ay**2)
+    dv_ds = np.gradient(v, s)
+    a_tangential = v * dv_ds
+    a_centripetal = v**2 * kappa
+    nx, ny = -hy, hx
+    a_x = a_tangential * hx + a_centripetal * nx
+    a_y = a_tangential * hy + a_centripetal * ny
+    a_scalar = np.sqrt(a_x**2 + a_y**2)
 
-    jx = np.gradient(ax, t)
-    jy = np.gradient(ay, t)
+    jx = np.gradient(a_x, t)
+    jy = np.gradient(a_y, t)
     j_scalar = np.sqrt(jx**2 + jy**2)
 
-    return t, vx, vy, v_scalar, ax, ay, a_scalar, jx, jy, j_scalar
+    return t, vx, vy, v_scalar, a_x, a_y, a_scalar, jx, jy, j_scalar
 
 
 def _plot_derivative(ax, t, comp_x, comp_y, scalar, ylabel, title):
@@ -196,12 +192,9 @@ def _plot_derivative(ax, t, comp_x, comp_y, scalar, ylabel, title):
 def render(snapshot, out_path, stem, ts):
     raw_x, raw_y = snapshot["raw_x"], snapshot["raw_y"]
     segments = list(snapshot["fitted_segments"])
-    vel_s, vel_v = snapshot["vel_s"], snapshot["vel_v"]
 
     t, vx, vy, v_sc, ax_d, ay, a_sc, jx, jy, j_sc = _build_time_series(
-        segments,
-        vel_s,
-        vel_v,
+        snapshot,
     )
 
     fig, axes = plt.subplots(

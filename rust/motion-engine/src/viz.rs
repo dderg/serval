@@ -30,7 +30,7 @@ pub fn pipeline_snapshot(
 
     let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default())
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
-    let velocity_samples = extract_velocity_profile(&profile);
+    let kinematics = sample_kinematics(&outcome, &profile);
 
     let dict = PyDict::new(py);
     dict.set_item("raw_x", raw_points.iter().map(|p| p.0).collect::<Vec<_>>())?;
@@ -47,14 +47,12 @@ pub fn pipeline_snapshot(
     }
     dict.set_item("fitted_segments", seg_list)?;
 
-    dict.set_item(
-        "vel_s",
-        velocity_samples.iter().map(|p| p.0).collect::<Vec<_>>(),
-    )?;
-    dict.set_item(
-        "vel_v",
-        velocity_samples.iter().map(|p| p.1).collect::<Vec<_>>(),
-    )?;
+    dict.set_item("kin_s", &kinematics.s)?;
+    dict.set_item("kin_v", &kinematics.v)?;
+    dict.set_item("kin_heading_x", &kinematics.heading_x)?;
+    dict.set_item("kin_heading_y", &kinematics.heading_y)?;
+    dict.set_item("kin_kappa", &kinematics.kappa)?;
+
     dict.set_item("blended_corners", outcome.report.blended)?;
     dict.set_item("unblended_corners", outcome.report.unblended.len())?;
     dict.set_item("chain_fits", outcome.report.chains)?;
@@ -157,16 +155,41 @@ fn sample_fitted_segments(outcome: &geometry::FitOutcome) -> Vec<TypedSegment> {
     segments
 }
 
-fn extract_velocity_profile(profile: &geometry::VelocityProfile) -> Vec<(f64, f64)> {
-    let mut samples = Vec::new();
+struct KinematicSamples {
+    s: Vec<f64>,
+    v: Vec<f64>,
+    heading_x: Vec<f64>,
+    heading_y: Vec<f64>,
+    kappa: Vec<f64>,
+}
+
+fn sample_kinematics(
+    outcome: &geometry::FitOutcome,
+    profile: &geometry::VelocityProfile,
+) -> KinematicSamples {
+    let mut kin = KinematicSamples {
+        s: Vec::new(),
+        v: Vec::new(),
+        heading_x: Vec::new(),
+        heading_y: Vec::new(),
+        kappa: Vec::new(),
+    };
     let mut s_offset = 0.0;
-    for mv in &profile.moves {
-        for sample in &mv.samples {
-            samples.push((s_offset + sample.s, sample.v));
+    for (geo_move, vel_move) in outcome.moves.iter().zip(profile.moves.iter()) {
+        if let Some(spatial) = &geo_move.segment.spatial {
+            for sample in &vel_move.samples {
+                let s_local = sample.s.clamp(0.0, spatial.s_len());
+                let heading = spatial.heading_at(s_local);
+                kin.s.push(s_offset + sample.s);
+                kin.v.push(sample.v);
+                kin.heading_x.push(heading[0]);
+                kin.heading_y.push(heading[1]);
+                kin.kappa.push(spatial.kappa(s_local));
+            }
         }
-        s_offset += mv.length;
+        s_offset += vel_move.length;
     }
-    samples
+    kin
 }
 
 #[cfg(test)]
