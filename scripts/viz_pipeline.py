@@ -94,6 +94,8 @@ def parse_gcode(
         m = motion_cmd.match(line)
         if not m:
             continue
+        if not waypoints:
+            waypoints.append((x, y, z, max_velocity))
         cmd = int(m.group(1))
         params = {
             c.group(1).upper(): float(c.group(2)) for c in coord.finditer(line)
