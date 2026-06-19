@@ -250,13 +250,17 @@ def main():
         scv,
     )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = run_dir / f"{gcode_path.stem}_{ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
     stem = gcode_path.stem
 
     fig, ax = plt.subplots(figsize=(8, 8))
     plot_raw_path(ax, snapshot["raw_x"], snapshot["raw_y"])
     fig.tight_layout()
-    fig.savefig(args.output_dir / f"{stem}.01-raw-path.png", dpi=150)
+    fig.savefig(run_dir / f"{stem}.01-raw-path.png", dpi=150)
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -267,7 +271,7 @@ def main():
         snapshot["raw_y"],
     )
     fig.tight_layout()
-    fig.savefig(args.output_dir / f"{stem}.02-fitted-path.png", dpi=150)
+    fig.savefig(run_dir / f"{stem}.02-fitted-path.png", dpi=150)
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(10, 4))
@@ -278,7 +282,7 @@ def main():
         snapshot["traversal_time_s"],
     )
     fig.tight_layout()
-    fig.savefig(args.output_dir / f"{stem}.03-velocity-profile.png", dpi=150)
+    fig.savefig(run_dir / f"{stem}.03-velocity-profile.png", dpi=150)
     plt.close(fig)
 
     seg_counts = {}
@@ -287,7 +291,7 @@ def main():
     seg_summary = ", ".join(f"{v} {k}" for k, v in sorted(seg_counts.items()))
 
     print(
-        f"Wrote 3 PNGs to {args.output_dir}/\n"
+        f"Wrote 3 PNGs to {run_dir}/\n"
         f"  segments: {seg_summary}\n"
         f"  corners: {snapshot['blended_corners']} blended, "
         f"{snapshot['unblended_corners']} unblended, "
