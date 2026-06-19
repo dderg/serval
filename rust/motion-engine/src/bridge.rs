@@ -3124,6 +3124,18 @@ impl PyMotionEngine {
                     max_piece_secs,
                 );
 
+                if fresh {
+                    let n_msgs = msgs.len();
+                    let total_pieces: usize = msgs.iter().map(|m| m.pieces.len()).sum();
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "dispatch_piece_counts",
+                        n_msgs,
+                        total_pieces,
+                        seg_t_start = seg.t_start,
+                        "[dispatch] fresh piece distribution"
+                    );
+                }
                 let nominal_freqs = nominal_freqs_for_cb
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
