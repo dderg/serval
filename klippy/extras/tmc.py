@@ -522,9 +522,10 @@ class TMCCommandHelper:
                     self.mcu_tmc.mcu.get_name(),
                 )
             else:
-                self._init_registers()
-                if self._post_enable_cb is not None:
-                    self._post_enable_cb()
+                if not getattr(self, '_phase_mode_active', False):
+                    self._init_registers()
+                    if self._post_enable_cb is not None:
+                        self._post_enable_cb()
         except self.printer.command_error as e:
             logging.info("TMC %s failed to init: %s", self.name, str(e))
 
