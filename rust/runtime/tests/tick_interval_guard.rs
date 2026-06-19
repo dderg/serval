@@ -116,7 +116,7 @@ fn active_motion_gap_latches_tick_interval_exceeded() {
     let shared = SharedState::new();
     let mut storage = make_storage();
 
-    let piece_start: u64 = 0;
+    let piece_start: u64 = TICK_CYCLES as u64;
     let piece = const_piece(piece_start, 10.0);
     let rc = isr.engine.push_pieces(0, &[piece], &mut storage);
     assert_eq!(rc, 0, "push_pieces failed");
@@ -125,7 +125,7 @@ fn active_motion_gap_latches_tick_interval_exceeded() {
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
         0,
-        "first active tick must not fault"
+        "first active tick (future piece held at t=0) must not fault"
     );
     assert!(
         isr.last_tick_now.is_some(),
