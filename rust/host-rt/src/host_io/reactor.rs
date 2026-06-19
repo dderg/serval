@@ -1143,6 +1143,16 @@ impl Reactor {
                 let frame = build_kalico_frame(channel, kind, cid, &body);
                 let pending_count = self.transport_state.pending.len();
                 let unacked_len = self.unacked_window.len();
+                self.transport_state.pending.insert(
+                    cid,
+                    PendingMcuCall {
+                        completion: completion.clone(),
+                        deadline,
+                    },
+                );
+                let write_t0 = std::time::Instant::now();
+                let write_result = self.write_frame(&frame);
+                let write_us = write_t0.elapsed().as_micros() as u64;
                 tracing::warn!(
                     subsystem = "mcu-comms",
                     event = "mcu_call_write",
@@ -1151,16 +1161,10 @@ impl Reactor {
                     body_len = body.len(),
                     pending_count,
                     unacked_len,
-                    "[reactor] writing McuCall frame"
+                    write_us,
+                    "[reactor] McuCall frame written"
                 );
-                self.transport_state.pending.insert(
-                    cid,
-                    PendingMcuCall {
-                        completion: completion.clone(),
-                        deadline,
-                    },
-                );
-                if let Err(e) = self.write_frame(&frame) {
+                if let Err(e) = write_result {
                     let is_io = matches!(e, TransportError::Io(_));
                     if let Some(p) = self.transport_state.pending.remove(&cid) {
                         let _ = p.completion.send(Err(e));
