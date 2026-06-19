@@ -127,6 +127,9 @@ fn get_piece_for_time<F: FaultSink>(
             fault.piece_start_in_past(axis_idx, deficit_us);
             return None;
         }
+        if now < entry.start_time {
+            return None;
+        }
         if now < entry.end_time(cycles_per_second) {
             return Some(slot);
         }

@@ -249,7 +249,7 @@ const MCU_SILENCE_FOR_CLOSE: Duration = Duration::from_secs(120);
 const MAX_SUBMITS_PER_ITER: usize = 4;
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1);
 const PASSTHROUGH_SUPPRESS_AFTER_MCUCALL: std::time::Duration =
-    std::time::Duration::from_secs(3600);
+    std::time::Duration::from_millis(300);
 const ZERO_BYTE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl Reactor {
