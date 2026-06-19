@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 PRINTER_DATA = Path.home() / "printer_data"
 DEFAULT_CONFIG = PRINTER_DATA / "config" / "printer.cfg"
 DEFAULT_GCODES = PRINTER_DATA / "gcodes"
+DEFAULT_OUTPUT = PRINTER_DATA / "config" / "viz"
 
 SEGMENT_COLORS = {
     "line": "C0",
@@ -202,8 +203,8 @@ def main():
         "-o",
         "--output-dir",
         type=Path,
-        default=Path("."),
-        help="directory for output PNGs (default: cwd)",
+        default=DEFAULT_OUTPUT,
+        help=f"directory for output PNGs (default: {DEFAULT_OUTPUT})",
     )
     parser.add_argument(
         "-c",
