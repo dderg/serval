@@ -606,7 +606,7 @@ class TMC5160:
         self._query_phase_state()
         # EXPERIMENT: let serial port drain after phase enter SPI traffic
         import time
-        time.sleep(0.350)
+        time.sleep(0.050)
         # Stop the periodic DRV_STATUS/GSTAT checks while the ISR is
         # writing XDIRECT. The ISR's inline SPI manipulates the SPI
         # peripheral registers directly — foreground register reads
