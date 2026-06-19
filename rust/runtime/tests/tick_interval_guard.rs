@@ -132,17 +132,17 @@ fn active_motion_gap_latches_tick_interval_exceeded() {
         "first active tick must set last_tick_now to Some"
     );
 
-    let gap_raw = TICK_CYCLES * 3;
+    let gap_raw = TICK_CYCLES * 5;
     isr_sample_tick(&mut isr, &shared, &mut storage, gap_raw);
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
         FaultCode::TickIntervalExceeded.as_i32(),
-        "gap > 2×period during active motion must latch TickIntervalExceeded"
+        "gap > 4×period during active motion must latch TickIntervalExceeded"
     );
     let detail = shared.fault_detail.load(Ordering::Acquire);
     assert_eq!(
-        detail, 3,
-        "fault_detail must equal gap_ticks (gap/period = 3*TICK_CYCLES/TICK_CYCLES = 3), got {detail}"
+        detail, 5,
+        "fault_detail must equal gap_ticks (gap/period = 5*TICK_CYCLES/TICK_CYCLES = 5), got {detail}"
     );
 }
 
