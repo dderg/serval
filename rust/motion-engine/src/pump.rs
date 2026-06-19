@@ -611,11 +611,15 @@ pub fn run_pump<S, F, C, A, O, D>(
             }
         };
 
+        let recv_instant = Instant::now();
+        let mut got_enqueue = false;
         if let Some(msg) = first {
+            got_enqueue = matches!(&msg, PumpMsg::Enqueue(_));
             if !apply(msg, &mut queues, &mut junction_ends, &mut cohort) {
                 return;
             }
             while let Ok(m) = rx.try_recv() {
+                got_enqueue |= matches!(&m, PumpMsg::Enqueue(_));
                 if !apply(m, &mut queues, &mut junction_ends, &mut cohort) {
                     return;
                 }
@@ -655,6 +659,20 @@ pub fn run_pump<S, F, C, A, O, D>(
             }
         }
 
+        if got_enqueue {
+            let total_queued: usize = queues.values().map(|q| q.pieces.len()).sum();
+            let pre_send_us = recv_instant.elapsed().as_micros() as u64;
+            tracing::warn!(
+                subsystem = "motion",
+                event = "pump_recv_to_send",
+                total_queued,
+                pre_send_us,
+                holding_ahead,
+                cohort_active,
+                "[pump-timing] enqueue→send"
+            );
+        }
+
         holding_ahead = false;
         'send: loop {
             let hz_of = |k: &AxisKey, q: &AxisQueue| horizon_of(k, q, &cohort);
@@ -663,7 +681,21 @@ pub fn run_pump<S, F, C, A, O, D>(
                 Schedule::StallFull(_stall_key) => {
                     break 'send;
                 }
-                Schedule::StallAhead(_stall_key) => {
+                Schedule::StallAhead(stall_key) => {
+                    if got_enqueue {
+                        let stall_q = queues.get(&stall_key);
+                        let stall_start_ticks = stall_q.and_then(|q| q.pieces.front().map(|(p, _)| p.start_time));
+                        let stall_horizon = stall_q.map(|q| horizon_of(&stall_key, q, &cohort));
+                        tracing::warn!(
+                            subsystem = "motion",
+                            event = "pump_stall_ahead",
+                            mcu = stall_key.mcu_id,
+                            axis = stall_key.axis,
+                            stall_start_ticks = ?stall_start_ticks,
+                            stall_horizon = ?stall_horizon,
+                            "[pump-timing] StallAhead — pump holding pieces"
+                        );
+                    }
                     holding_ahead = true;
                     break 'send;
                 }
