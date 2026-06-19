@@ -872,17 +872,15 @@ impl WireSink {
         };
 
         let rpc_us = rpc_t0.elapsed().as_micros() as u64;
-        if rpc_us > 5_000 {
-            tracing::warn!(
-                subsystem = "motion",
-                event = "push_pieces_rpc_slow",
-                mcu = key.mcu_id,
-                axis = key.axis,
-                rpc_us,
-                pieces = pieces.len(),
-                "[pump-timing] PushPieces RPC > 5ms"
-            );
-        }
+        tracing::warn!(
+            subsystem = "motion",
+            event = "push_pieces_rpc",
+            mcu = key.mcu_id,
+            axis = key.axis,
+            rpc_us,
+            pieces = pieces.len(),
+            "[pump-timing] PushPieces RPC"
+        );
 
         use mcu_protocol::codec::Decode as _;
         mcu_protocol::messages::PushPiecesResponse::decode(&resp_body).map_err(|e| {
