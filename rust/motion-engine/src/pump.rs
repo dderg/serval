@@ -847,14 +847,26 @@ impl PieceSink for WireSink {
         for &mcu_id in self.transports.keys() {
             let key = AxisKey { mcu_id, axis: 0 };
             let t0 = std::time::Instant::now();
-            let _ = self.call_push_pieces(key, &[], 0, 0);
-            tracing::info!(
-                subsystem = "motion",
-                event = "pump_warmup",
-                mcu = mcu_id,
-                warmup_us = t0.elapsed().as_micros() as u64,
-                "[pump] transport warmup"
-            );
+            let result = self.call_push_pieces(key, &[], 0, 0);
+            let us = t0.elapsed().as_micros() as u64;
+            match &result {
+                Ok(r) => tracing::warn!(
+                    subsystem = "motion",
+                    event = "pump_warmup",
+                    mcu = mcu_id,
+                    warmup_us = us,
+                    result = r.result,
+                    "[pump] transport warmup OK"
+                ),
+                Err(e) => tracing::warn!(
+                    subsystem = "motion",
+                    event = "pump_warmup_err",
+                    mcu = mcu_id,
+                    warmup_us = us,
+                    error = %e,
+                    "[pump] transport warmup FAILED"
+                ),
+            }
         }
     }
 
