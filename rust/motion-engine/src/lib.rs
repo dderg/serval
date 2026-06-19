@@ -17,6 +17,7 @@ pub mod homing;
 #[doc(hidden)]
 pub mod kinematics;
 pub mod logging;
+pub mod lowering;
 pub mod mcu_log;
 pub mod motion_history;
 #[doc(hidden)]
@@ -37,6 +38,8 @@ pub mod servo_capture;
 pub mod servo_sdo;
 #[doc(hidden)]
 pub mod servo_torque;
+pub mod stream;
+pub mod stream_planner;
 mod types;
 
 pub mod test_support;

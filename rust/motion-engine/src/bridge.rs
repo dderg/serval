@@ -19,7 +19,8 @@ use crate::classify;
 use crate::config::{self, PlannerConfig};
 use crate::dispatch::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
-use crate::planner::{DispatchError, PlannerError, PlannerHandle};
+use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
+use crate::stream_planner::{StreamPlannerError, StreamPlannerHandle};
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
 
 struct HomingRun {
@@ -548,9 +549,14 @@ fn router_err(e: host_rt::passthrough_queue::RouterError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
-fn planner_err(e: PlannerError) -> PyErr {
+fn planner_err(e: StreamPlannerError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
+
+/// Look-ahead horizon the streaming planner holds back from each non-forced
+/// commit, so newly-arriving moves are planned with their predecessors still
+/// buffered. Drained to rest on flush/dwell/idle.
+const STREAM_KEEP_SECS: f64 = 0.5;
 
 fn resolve_motion_caps(
     caps: Option<mcu_protocol::messages::RuntimeCapsResponse>,
@@ -596,7 +602,7 @@ pub struct PyMotionEngine {
     // and join the `kalico-planner` thread. A `OnceLock` cannot be drained, so
     // the planner thread would only be joined when the whole engine dropped —
     // which never happens on klippy's in-process FIRMWARE_RESTART loop.
-    planner: Mutex<Option<PlannerHandle>>,
+    planner: Mutex<Option<StreamPlannerHandle>>,
     planner_config: Mutex<PlannerConfig>,
     commanded_pos: Mutex<[f64; 3]>,
     last_g5_pq: Mutex<Option<(f64, f64)>>,
@@ -3256,7 +3262,22 @@ impl PyMotionEngine {
                     "planner already initialized (raced)",
                 ));
             }
-            *guard = Some(PlannerHandle::spawn(cfg, dispatch, nudge_dispatch));
+            let stream_cfg = crate::stream::StreamConfig {
+                chain: geometry::ChainFitConfig::default(),
+                velocity: cfg.path_velocity_config(),
+                fit_tol_mm: cfg.fit_tolerance_mm,
+                keep_secs: STREAM_KEEP_SECS,
+                limits: cfg
+                    .path_velocity_limits()
+                    .map_err(PyRuntimeError::new_err)?,
+            };
+            let home = vec![0.0; cfg.axis_registry.n_axes()];
+            *guard = Some(StreamPlannerHandle::spawn(
+                stream_cfg,
+                home,
+                dispatch,
+                nudge_dispatch,
+            ));
         }
         Ok(())
     }
@@ -3283,16 +3304,32 @@ impl PyMotionEngine {
         );
         py.detach(|| -> PyResult<()> {
             let followers = self.e_followers(de)?;
+            let (extruder_axis, e_delta) = match followers.as_slice() {
+                [] => (0usize, 0.0),
+                [(axis, delta)] => (*axis, *delta),
+                _ => {
+                    return Err(PyRuntimeError::new_err(
+                        "submit_move: multiple follower axes not yet supported by the new pipeline",
+                    ));
+                }
+            };
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            let classified = classify::classify_and_build(pos, dx, dy, dz, &followers, feedrate)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let limits = self
+                .planner_config
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .path_velocity_limits()
+                .map_err(PyRuntimeError::new_err)?;
+            let m =
+                classify::build_move(pos, dx, dy, dz, extruder_axis, e_delta, limits, feedrate, 0)
+                    .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
 
             {
                 let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
                 let planner = guard.as_ref().ok_or_else(|| {
                     PyRuntimeError::new_err("planner not initialized — call init_planner first")
                 })?;
-                planner.submit_move(classified).map_err(planner_err)?;
+                planner.submit_move(m).map_err(planner_err)?;
             }
 
             let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
@@ -3333,39 +3370,11 @@ impl PyMotionEngine {
             "engine.submit_bezier enter"
         );
         py.detach(|| -> PyResult<()> {
-            let followers = self.e_followers(de)?;
-            let (ii, jj) = match (i, j) {
-                (Some(i), Some(j)) => (i, j),
-                (None, None) => {
-                    let prev = *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner());
-                    let (pp, qq) = prev.ok_or_else(|| {
-                        PyValueError::new_err("G5 without I J must follow another G5")
-                    })?;
-                    (-pp, -qq)
-                }
-                _ => {
-                    return Err(PyValueError::new_err(
-                        "G5 I and J must both be present or both omitted",
-                    ));
-                }
-            };
-            let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            let classified =
-                classify::classify_bezier(pos, ii, jj, p, q, dx, dy, dz, &followers, feedrate)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            {
-                let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
-                let planner = guard.as_ref().ok_or_else(|| {
-                    PyRuntimeError::new_err("planner not initialized — call init_planner first")
-                })?;
-                planner.submit_move(classified).map_err(planner_err)?;
-            }
-            let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            pos[0] += dx;
-            pos[1] += dy;
-            pos[2] += dz;
-            *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = Some((p, q));
-            Ok(())
+            Err(PyRuntimeError::new_err(
+                "submit_bezier (G5 cubic) is not yet supported by the new geometry pipeline \
+                 — V1 streams G0/G1 line moves (and reconstructs arcs from facets); curve \
+                 faceting is a follow-up. Slice without G5.",
+            ))
         })
     }
 
@@ -3394,24 +3403,11 @@ impl PyMotionEngine {
             "engine.submit_quadratic enter"
         );
         py.detach(|| -> PyResult<()> {
-            let followers = self.e_followers(de)?;
-            let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            let classified =
-                classify::classify_quadratic(pos, i, j, dx, dy, dz, &followers, feedrate)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            {
-                let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
-                let planner = guard.as_ref().ok_or_else(|| {
-                    PyRuntimeError::new_err("planner not initialized — call init_planner first")
-                })?;
-                planner.submit_move(classified).map_err(planner_err)?;
-            }
-            let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            pos[0] += dx;
-            pos[1] += dy;
-            pos[2] += dz;
-            *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
-            Ok(())
+            Err(PyRuntimeError::new_err(
+                "submit_quadratic (G2/G3 arc as quadratic) is not yet supported by the new \
+                 geometry pipeline — V1 streams G0/G1 line moves; curve faceting is a \
+                 follow-up. Decompose arcs into line segments upstream.",
+            ))
         })
     }
 
@@ -3523,7 +3519,7 @@ impl PyMotionEngine {
             }
 
             planner
-                .runtime_stream_open([x, y, z, 0.0])
+                .stream_open(vec![x, y, z, 0.0])
                 .map_err(planner_err)?;
 
             self.drain.reset();
@@ -3650,39 +3646,31 @@ impl PyMotionEngine {
 
     #[pyo3(signature = (velocity, accel))]
     fn update_runtime_caps(&self, velocity: Option<f64>, accel: Option<f64>) -> PyResult<()> {
+        // The streaming pipeline reads its per-move limits from `planner_config`
+        // at submit time (`path_velocity_limits`), so updating the stored config
+        // is sufficient — no planner-thread message needed.
         let caps = config::RuntimeCaps { velocity, accel };
-        {
-            let mut cfg = self
-                .planner_config
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            cfg.runtime_caps = caps;
-            cfg.to_temporal_limits()
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        }
-
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
-        let planner = guard.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err("planner not initialized — call init_planner first")
-        })?;
-        planner.update_runtime_caps(caps).map_err(planner_err)
+        let mut cfg = self
+            .planner_config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        cfg.runtime_caps = caps;
+        cfg.to_temporal_limits()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(())
     }
 
     fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
+        // Input shaping is not applied by the V1 streaming pipeline; record the
+        // parameter on the config so it round-trips, but there is no planner
+        // kernel to update yet.
         self.planner_config
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .post_processors
             .set_param(name, key, value)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
-        let planner = guard.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err("planner not initialized — call init_planner first")
-        })?;
-        planner
-            .update_post_processor(name, key, value)
-            .map_err(planner_err)
+        Ok(())
     }
 
     fn get_last_move_time(&self) -> f64 {
@@ -4114,7 +4102,7 @@ impl PyMotionEngine {
         let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(planner) = planner_guard.as_ref() {
             let open_result =
-                planner.runtime_stream_open([cartesian[0], cartesian[1], cartesian[2], 0.0]);
+                planner.stream_open(vec![cartesian[0], cartesian[1], cartesian[2], 0.0]);
             if let Err(e) = open_result {
                 tracing::error!(
                     "home_abort: runtime_stream_open failed after drain — \

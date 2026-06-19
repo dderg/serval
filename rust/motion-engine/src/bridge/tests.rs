@@ -24,7 +24,8 @@ use host_rt::host_io::{McuHostIo, McuHostIoConfig};
 use host_rt::mcu_serial_conn::McuSerialConn;
 
 use crate::config::PlannerConfig;
-use crate::planner::{DispatchError, PlannerHandle};
+use crate::planner::DispatchError;
+use crate::stream_planner::StreamPlannerHandle;
 use trajectory::ShapedSegment;
 
 use super::{McuConnection, PyMotionEngine};
@@ -330,6 +331,21 @@ fn relaxed_planner_config() -> PlannerConfig {
     c
 }
 
+fn test_limits() -> geometry::VelocityLimits {
+    geometry::VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap()
+}
+
+fn stream_config_from(cfg: &PlannerConfig) -> (crate::stream::StreamConfig, Vec<f64>) {
+    let sc = crate::stream::StreamConfig {
+        chain: geometry::ChainFitConfig::default(),
+        velocity: geometry::VelocityConfig::default(),
+        fit_tol_mm: cfg.fit_tolerance_mm,
+        keep_secs: 0.5,
+        limits: test_limits(),
+    };
+    (sc, vec![0.0; cfg.axis_registry.n_axes().max(3)])
+}
+
 /// `shutdown()` must drain the `Mutex<Option<PlannerHandle>>` and join the
 /// `kalico-planner` thread. The OnceLock→Mutex<Option> migration is the
 /// centerpiece of this change; this is the engine-level proof that
@@ -339,8 +355,10 @@ fn relaxed_planner_config() -> PlannerConfig {
 fn shutdown_takes_and_joins_planner() {
     let engine = PyMotionEngine::new();
     let (dispatch, _counter) = counting_dispatch();
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(PlannerHandle::spawn(
-        PlannerConfig::default(),
+    let (sc, home) = stream_config_from(&PlannerConfig::default());
+    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamPlannerHandle::spawn(
+        sc,
+        home,
         dispatch,
         noop_nudge_dispatch(),
     ));
@@ -423,12 +441,14 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
             Ok(())
         });
 
-    let planner = PlannerHandle::spawn(relaxed_planner_config(), dispatch, noop_nudge_dispatch());
+    let (sc, home) = stream_config_from(&relaxed_planner_config());
+    let planner = StreamPlannerHandle::spawn(sc, home, dispatch, noop_nudge_dispatch());
     // Prime one move so the planner has a pending tail before the submitter and
     // pump are even wired — the recv_timeout branch is armed from the start.
     planner
         .submit_move(
-            crate::classify::classify_and_build([0.0; 3], 50.0, 0.0, 0.0, &[], 200.0).unwrap(),
+            crate::classify::build_move([0.0; 3], 50.0, 0.0, 0.0, 0, 0.0, test_limits(), 200.0, 0)
+                .unwrap(),
         )
         .unwrap();
     let engine = Arc::new(engine);
@@ -470,9 +490,18 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
                     let Some(p) = guard.as_ref() else {
                         break; // shutdown() took the planner; stop submitting.
                     };
-                    let m =
-                        crate::classify::classify_and_build([0.0; 3], 50.0, 0.0, 0.0, &[], 200.0)
-                            .unwrap();
+                    let m = crate::classify::build_move(
+                        [0.0; 3],
+                        50.0,
+                        0.0,
+                        0.0,
+                        0,
+                        0.0,
+                        test_limits(),
+                        200.0,
+                        0,
+                    )
+                    .unwrap();
                     if p.submit_move(m).is_err() {
                         break;
                     }
@@ -630,8 +659,10 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
 
     // Also seed a planner so the planner-join step of shutdown() is exercised.
     let (dispatch, _counter) = counting_dispatch();
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(PlannerHandle::spawn(
-        relaxed_planner_config(),
+    let (sc, home) = stream_config_from(&relaxed_planner_config());
+    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamPlannerHandle::spawn(
+        sc,
+        home,
         dispatch,
         noop_nudge_dispatch(),
     ));

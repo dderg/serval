@@ -507,3 +507,73 @@ fn non_finite_curvature_is_rejected() {
         Err(VelocityError::NonFinite { line_no: 12 })
     );
 }
+
+#[test]
+fn warm_start_zero_matches_rest_to_rest() {
+    let build = || {
+        outcome(
+            vec![
+                line_move(60.0, 250.0, 300.0, 1500.0, 1),
+                arc_move(15.0, 1.0, 250.0, 300.0, 1500.0, 2),
+            ],
+            Vec::new(),
+        )
+    };
+    let rest = plan_velocity(&build(), VelocityConfig::default()).unwrap();
+    let warm0 = plan_velocity_warm_start(&build(), VelocityConfig::default(), 0.0).unwrap();
+    assert_eq!(rest, warm0);
+}
+
+#[test]
+fn warm_start_enters_at_the_given_velocity() {
+    let out = outcome(vec![line_move(100.0, 30.0, 200.0, 1000.0, 1)], Vec::new());
+    let entry_v = 20.0;
+    let plan = plan_velocity_warm_start(&out, VelocityConfig::default(), entry_v).unwrap();
+    let m = &plan.moves[0];
+    assert_eq!(m.entry_v, entry_v);
+    assert_eq!(m.samples.first().unwrap().v, entry_v);
+    assert_eq!(m.exit_v, 0.0);
+    assert_disk_feasible(m, 0.0, 0.0);
+}
+
+#[test]
+fn warm_start_is_faster_than_starting_from_rest() {
+    let out = || outcome(vec![line_move(100.0, 30.0, 200.0, 1000.0, 1)], Vec::new());
+    let rest = plan_velocity(&out(), VelocityConfig::default()).unwrap();
+    let warm = plan_velocity_warm_start(&out(), VelocityConfig::default(), 20.0).unwrap();
+    assert!(warm.report.traversal_time_s < rest.report.traversal_time_s);
+}
+
+#[test]
+fn warm_start_over_commit_cannot_brake_in_window() {
+    // 1 mm at a_max 1000 brakes from at most sqrt(2*1000*1) ≈ 44.7 mm/s; the
+    // feed ceiling (200) admits the 100 mm/s entry, so this exercises the
+    // can't-stop guard, not the ceiling guard.
+    let out = outcome(vec![line_move(1.0, 200.0, 200.0, 1000.0, 5)], Vec::new());
+    assert_eq!(
+        plan_velocity_warm_start(&out, VelocityConfig::default(), 100.0),
+        Err(VelocityError::OverCommitted { line_no: 5 })
+    );
+}
+
+#[test]
+fn warm_start_entry_above_move_ceiling_fails_loudly() {
+    let out = outcome(vec![line_move(100.0, 30.0, 200.0, 1000.0, 7)], Vec::new());
+    assert_eq!(
+        plan_velocity_warm_start(&out, VelocityConfig::default(), 50.0),
+        Err(VelocityError::OverCommitted { line_no: 7 })
+    );
+}
+
+#[test]
+fn warm_start_negative_or_nan_entry_is_invalid_config() {
+    let out = outcome(vec![line_move(100.0, 30.0, 200.0, 1000.0, 1)], Vec::new());
+    assert_eq!(
+        plan_velocity_warm_start(&out, VelocityConfig::default(), -1.0),
+        Err(VelocityError::InvalidConfig)
+    );
+    assert_eq!(
+        plan_velocity_warm_start(&out, VelocityConfig::default(), f64::NAN),
+        Err(VelocityError::InvalidConfig)
+    );
+}

@@ -71,6 +71,7 @@ pub enum VelocityError {
     NonAlphabet { line_no: u32 },
     NonFinite { line_no: u32 },
     Diverged { line_no: u32 },
+    OverCommitted { line_no: u32 },
     InvalidConfig,
 }
 
@@ -83,12 +84,31 @@ pub fn plan_velocity(
     outcome: &FitOutcome,
     config: VelocityConfig,
 ) -> Result<VelocityProfile, VelocityError> {
+    plan_velocity_warm_start(outcome, config, 0.0)
+}
+
+/// Streaming variant: the trajectory enters the first move at `entry_v`
+/// (the velocity already dispatched to the MCU at the commit boundary) rather
+/// than from rest. The terminal velocity stays pinned to zero (worst-case
+/// future), so a partially-known look-ahead window is always plannable to a
+/// stop. Fails loudly with [`VelocityError::OverCommitted`] when the pinned
+/// entry cannot brake to rest within the window — that is an over-commit
+/// (the planner emitted faster than the remaining look-ahead can absorb), not
+/// something to silently clamp. `entry_v == 0.0` reproduces [`plan_velocity`].
+pub fn plan_velocity_warm_start(
+    outcome: &FitOutcome,
+    config: VelocityConfig,
+    entry_v: f64,
+) -> Result<VelocityProfile, VelocityError> {
     let jerk = config.max_jerk_mm_s3;
     if jerk.is_nan() || jerk <= 0.0 {
         return Err(VelocityError::InvalidConfig);
     }
     let tol = config.integration_tol;
     if !(tol.is_finite() && tol >= MIN_INTEGRATION_TOL) {
+        return Err(VelocityError::InvalidConfig);
+    }
+    if !(entry_v.is_finite() && entry_v >= 0.0) {
         return Err(VelocityError::InvalidConfig);
     }
 
@@ -154,7 +174,19 @@ pub fn plan_velocity(
         });
     }
 
+    let entry_ceiling = {
+        let kin0 = &caps[0].kin;
+        kin0.flat_ceiling
+            .min(disk::limit_speed(kin0.kappa0.abs(), kin0.accel))
+    };
+    if entry_v > entry_ceiling + VELOCITY_EPS_MM_S {
+        return Err(VelocityError::OverCommitted {
+            line_no: moves[0].source.start_line,
+        });
+    }
+
     let mut v = vec![0.0_f64; n + 1];
+    v[0] = entry_v;
     for k in 1..n {
         let downstream = &moves[k];
         let blend_half = matches!(downstream.segment.spatial, Some(Segment::Clothoid(_)));
@@ -177,11 +209,21 @@ pub fn plan_velocity(
             .ok_or(VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(reachable);
     }
-    for k in (0..n).rev() {
+    for k in (1..n).rev() {
         let line_no = moves[k].source.start_line;
         let reachable = disk::reach_v_rev(&caps[k].kin, v[k + 1], tol)
             .ok_or(VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(reachable);
+    }
+    let entry_line_no = moves[0].source.start_line;
+    let entry_brake =
+        disk::reach_v_rev(&caps[0].kin, v[1], tol).ok_or(VelocityError::Diverged {
+            line_no: entry_line_no,
+        })?;
+    if entry_v > entry_brake + VELOCITY_EPS_MM_S {
+        return Err(VelocityError::OverCommitted {
+            line_no: entry_line_no,
+        });
     }
 
     let mut out = Vec::with_capacity(n);
