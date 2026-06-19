@@ -358,6 +358,14 @@ fn run_loop(
 
         match msg {
             StreamMsg::Move(m) => {
+                // If the stream went idle and the machine has caught up to the
+                // committed horizon, re-anchor the planner clock to the live
+                // playhead + lead so this move is scheduled ahead of the MCU,
+                // not in its past (which would fail loud as stream starvation).
+                let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                if state.is_empty() && esc > state.t_committed() + 1e-6 {
+                    state.advance_idle(esc + LEAD);
+                }
                 state.push(m);
                 let segs = state
                     .commit(false)

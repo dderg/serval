@@ -115,3 +115,24 @@ fn committed_trajectory_is_time_contiguous() {
         );
     }
 }
+
+#[test]
+fn advance_idle_reanchors_committed_time_after_a_gap() {
+    let mut s = StreamState::new(cfg(1.0), &[0.0, 0.0, 0.0], 0.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0));
+    let first = s.commit(true).unwrap();
+    let after_first = first.last().unwrap().t_end;
+
+    // Long idle gap: the machine has caught up well past the committed horizon.
+    s.advance_idle(after_first + 50.0);
+    s.push(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 0.0));
+    let second = s.commit(true).unwrap();
+    assert!(
+        second[0].t_start >= after_first + 50.0 - 1e-9,
+        "second move must start at the re-anchored time, got {}",
+        second[0].t_start
+    );
+    // never rewinds:
+    s.advance_idle(0.0);
+    assert!(s.t_committed() >= second.last().unwrap().t_end - 1e-9);
+}

@@ -114,6 +114,22 @@ impl StreamState {
         }
     }
 
+    /// Re-anchor the committed time cursor to `target_t` (the live MCU playhead
+    /// plus lead) after the stream has gone idle and the machine has caught up.
+    /// Without this, a move submitted after an idle gap is planned at a stale
+    /// planner time and lands in the MCU's past. Only valid at rest with a
+    /// drained buffer; never moves the cursor backward.
+    pub fn advance_idle(&mut self, target_t: f64) {
+        debug_assert!(
+            self.buffer.is_empty(),
+            "advance_idle requires a drained buffer"
+        );
+        debug_assert_eq!(self.entry_v, 0.0, "advance_idle requires rest at the seam");
+        if target_t > self.t_committed {
+            self.t_committed = target_t;
+        }
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
