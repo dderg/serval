@@ -601,6 +601,9 @@ class TMC5160:
         align.send([self._phase_stepper_oid, mscnt])
         enable_spi.send([])
         set_axis_mode.send([self._phase_axis_idx, 1])
+        # EXPERIMENT: sync barrier — block until MCU has processed
+        # set_axis_mode, so pieces can't arrive before mode switch.
+        self._query_phase_state()
         # Stop the periodic DRV_STATUS/GSTAT checks while the ISR is
         # writing XDIRECT. The ISR's inline SPI manipulates the SPI
         # peripheral registers directly — foreground register reads
