@@ -2428,7 +2428,7 @@ impl PyMotionEngine {
         static SET_CLOCK_EST_CALLS: AtomicUsize = AtomicUsize::new(0);
         let call_n = SET_CLOCK_EST_CALLS.fetch_add(1, AOrd::Relaxed);
         if call_n < 5 || call_n % 100 == 0 {
-            tracing::debug!(
+            tracing::warn!(
                 subsystem = "engine",
                 event = "set_clock_est",
                 call_n,
