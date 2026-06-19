@@ -1,7 +1,7 @@
 use geometry::path::CurvatureProfile;
 use geometry::path::lowering::PositionProfile;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 #[pyfunction]
 #[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity))]
@@ -26,7 +26,7 @@ pub fn pipeline_snapshot(
 
     let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default())
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
-    let fitted_points = sample_fitted_path(&outcome);
+    let fitted_segments = sample_fitted_segments(&outcome);
 
     let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default())
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
@@ -35,14 +35,17 @@ pub fn pipeline_snapshot(
     let dict = PyDict::new(py);
     dict.set_item("raw_x", raw_points.iter().map(|p| p.0).collect::<Vec<_>>())?;
     dict.set_item("raw_y", raw_points.iter().map(|p| p.1).collect::<Vec<_>>())?;
-    dict.set_item(
-        "fitted_x",
-        fitted_points.iter().map(|p| p.0).collect::<Vec<_>>(),
-    )?;
-    dict.set_item(
-        "fitted_y",
-        fitted_points.iter().map(|p| p.1).collect::<Vec<_>>(),
-    )?;
+
+    let seg_list = PyList::empty(py);
+    for seg in &fitted_segments {
+        let d = PyDict::new(py);
+        d.set_item("type", seg.kind)?;
+        d.set_item("x", &seg.xs)?;
+        d.set_item("y", &seg.ys)?;
+        seg_list.append(d)?;
+    }
+    dict.set_item("fitted_segments", seg_list)?;
+
     dict.set_item(
         "vel_s",
         velocity_samples.iter().map(|p| p.0).collect::<Vec<_>>(),
@@ -110,22 +113,37 @@ fn extract_raw_path(moves: &[geometry::Move]) -> Vec<(f64, f64)> {
     points
 }
 
+struct TypedSegment {
+    kind: &'static str,
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+}
+
 const SAMPLES_PER_MM: f64 = 2.0;
 
-fn sample_fitted_path(outcome: &geometry::FitOutcome) -> Vec<(f64, f64)> {
-    let mut points = Vec::new();
+fn sample_fitted_segments(outcome: &geometry::FitOutcome) -> Vec<TypedSegment> {
+    let mut segments = Vec::new();
     for m in &outcome.moves {
         if let Some(spatial) = &m.segment.spatial {
+            let kind = match spatial {
+                geometry::path::Segment::Line(_) => "line",
+                geometry::path::Segment::Arc(_) => "arc",
+                geometry::path::Segment::Clothoid(_) => "clothoid",
+            };
             let len = spatial.s_len();
             let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(2);
+            let mut xs = Vec::with_capacity(n);
+            let mut ys = Vec::with_capacity(n);
             for k in 0..n {
                 let s = len * (k as f64) / ((n - 1) as f64);
                 let pt = spatial.point_at(s);
-                points.push((pt[0], pt[1]));
+                xs.push(pt[0]);
+                ys.push(pt[1]);
             }
+            segments.push(TypedSegment { kind, xs, ys });
         }
     }
-    points
+    segments
 }
 
 fn extract_velocity_profile(profile: &geometry::VelocityProfile) -> Vec<(f64, f64)> {
