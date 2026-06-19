@@ -4,13 +4,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 #[pyfunction]
-#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity))]
+#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, arc_fit = None))]
 pub fn pipeline_snapshot(
     py: Python<'_>,
     waypoints: Vec<(f64, f64, f64, f64)>,
     max_velocity: f64,
     max_accel: f64,
     square_corner_velocity: f64,
+    arc_fit: Option<(f64, f64)>,
 ) -> PyResult<Py<PyDict>> {
     if waypoints.len() < 2 {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -20,11 +21,12 @@ pub fn pipeline_snapshot(
 
     let limits = geometry::VelocityLimits::try_new(max_velocity, max_accel, square_corner_velocity)
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let chain_cfg = arc_fit_config(arc_fit)?;
 
     let moves = build_moves(&waypoints, limits)?;
     let raw_points = extract_raw_path(&moves);
 
-    let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default())
+    let outcome = geometry::fit_chain(&moves, chain_cfg)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
     let fitted_segments = sample_fitted_segments(&outcome);
 
@@ -58,6 +60,26 @@ pub fn pipeline_snapshot(
     dict.set_item("chain_fits", outcome.report.chains)?;
     dict.set_item("traversal_time_s", profile.report.traversal_time_s)?;
     Ok(dict.into())
+}
+
+fn arc_fit_config(arc_fit: Option<(f64, f64)>) -> PyResult<geometry::ChainFitConfig> {
+    let Some((facet_length_mm, max_angle_deg)) = arc_fit else {
+        return Ok(geometry::ChainFitConfig::default());
+    };
+    if !(facet_length_mm.is_finite() && facet_length_mm > 0.0) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "[arc_fit] facet_length_mm must be finite and positive",
+        ));
+    }
+    if !(max_angle_deg.is_finite() && max_angle_deg > 0.0 && max_angle_deg < 180.0) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "[arc_fit] max_angle_deg must be finite and in (0, 180)",
+        ));
+    }
+    Ok(geometry::ChainFitConfig::with_arc_fit(
+        facet_length_mm,
+        max_angle_deg.to_radians(),
+    ))
 }
 
 fn build_moves(

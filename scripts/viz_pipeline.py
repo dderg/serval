@@ -42,6 +42,17 @@ def read_printer_limits(cfg_path: Path):
     )
 
 
+def read_arc_fit(cfg_path: Path):
+    cp = configparser.RawConfigParser()
+    cp.read(cfg_path)
+    if not cp.has_section("arc_fit"):
+        return None
+    return (
+        cp.getfloat("arc_fit", "facet_length_mm", fallback=1.0),
+        cp.getfloat("arc_fit", "max_angle_deg", fallback=12.0),
+    )
+
+
 def _linearize_arc(x0, y0, z0, x1, y1, z1, i, j, ccw, feedrate):
     cx, cy = x0 + i, y0 + j
     r = math.hypot(i, j)
@@ -301,6 +312,7 @@ def main():
         sys.exit(1)
 
     max_velocity, max_accel, scv = read_printer_limits(args.config)
+    arc_fit = read_arc_fit(args.config)
 
     gcode_path = Path(args.gcode)
     if not gcode_path.exists():
@@ -328,6 +340,7 @@ def main():
         max_velocity,
         max_accel,
         scv,
+        arc_fit=arc_fit,
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
