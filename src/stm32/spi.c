@@ -163,3 +163,10 @@ spi_transfer(struct spi_config config, uint8_t receive_data,
             shutdown("spi bsy timeout");
     }
 }
+
+void
+spi_transfer_locked(struct spi_config config, uint8_t receive_data,
+                    uint8_t len, uint8_t *data)
+{
+    spi_transfer(config, receive_data, len, data);
+}

@@ -197,9 +197,6 @@ bail:
 
 #define TMC_WRITE_BIT 0x80
 
-// Spin until the busy flag is ours or a 1 ms deadline passes. The ISR XDIRECT
-// writes are suppressed (phase_stepping_disable_writes) across a handover, so
-// real contention is nil; the deadline only guards against a wedged peer.
 static int
 phase_spi_acquire_blocking(void)
 {
@@ -223,75 +220,13 @@ phase_motor_bus(uint8_t motor_idx, uint8_t *bus_out)
     return 0;
 }
 
-// One 5-byte TMC datagram. Caller MUST already hold phase_spi_busy. With
-// `capture`, the received bytes overwrite `buf` (a TMC read returns the
-// previously-addressed register on the *next* access, so a register read is
-// two of these: prime, then capture). Returns 0 or -1 on a per-byte timeout.
-static int
-phase_spi_xfer5_locked(uint8_t bus_id, uint8_t motor_idx, uint8_t *buf,
-                       uint8_t capture)
+static void
+phase_reg_xfer(uint8_t bus_id, uint8_t motor_idx, uint8_t *buf, uint8_t capture)
 {
-#if CONFIG_MACH_STM32H7
-    struct spi_config fast = phase_buses[bus_id].fast_cfg;
-    SPI_TypeDef *spi = fast.spi;
-
-    spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
-              | (7 << SPI_CFG1_DSIZE_Pos);
-    spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
-              | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
-              | SPI_CFG2_SSOE;
-
-    gpio_out_write(phase_motors[motor_idx].cs, 0);
-
-    spi->CR2 = 5u << SPI_CR2_TSIZE_Pos;
-    spi->CR1 = SPI_CR1_SSI | SPI_CR1_SPE;
-    spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
-
-    int timed_out = 0;
-    for (int i = 0; i < 5; i++) {
-        uint32_t deadline = timer_read_time() + timer_from_us(100);
-        while (!(spi->SR & SPI_SR_TXP)) {
-            if (!timer_is_before(timer_read_time(), deadline)) {
-                timed_out = 1;
-                goto done;
-            }
-        }
-        *(volatile uint8_t *)&spi->TXDR = buf[i];
-    }
-    for (int i = 0; i < 5; i++) {
-        uint32_t deadline = timer_read_time() + timer_from_us(100);
-        while (!(spi->SR & SPI_SR_RXP)) {
-            if (!timer_is_before(timer_read_time(), deadline)) {
-                timed_out = 1;
-                goto done;
-            }
-        }
-        uint8_t rx = *(volatile uint8_t *)&spi->RXDR;
-        if (capture)
-            buf[i] = rx;
-    }
-    {
-        uint32_t deadline = timer_read_time() + timer_from_us(100);
-        while (!(spi->SR & SPI_SR_EOT)) {
-            if (!timer_is_before(timer_read_time(), deadline)) {
-                timed_out = 1;
-                goto done;
-            }
-        }
-    }
-
-done:
-    spi->IFCR = 0xFFFFFFFF;
-    spi->CR1 = SPI_CR1_SSI;
-    gpio_out_write(phase_motors[motor_idx].cs, 1);
-    return timed_out ? -1 : 0;
-#else
     spi_prepare(phase_buses[bus_id].fast_cfg);
     gpio_out_write(phase_motors[motor_idx].cs, 0);
     spi_transfer_locked(phase_buses[bus_id].fast_cfg, capture, 5, buf);
     gpio_out_write(phase_motors[motor_idx].cs, 1);
-    return 0;
-#endif
 }
 
 __attribute__((used, externally_visible))
@@ -308,11 +243,13 @@ phase_spi_write_register(uint8_t motor_idx, uint8_t addr, uint32_t val)
         (uint8_t)(val >> 24), (uint8_t)(val >> 16),
         (uint8_t)(val >> 8), (uint8_t)val,
     };
-    int rc = phase_spi_xfer5_locked(bus_id, motor_idx, buf, 0);
+    phase_reg_xfer(bus_id, motor_idx, buf, 0);
     phase_spi_release();
-    return rc;
+    return 0;
 }
 
+// A TMC read returns the addressed register on the *next* datagram, so the
+// first transfer only primes the address and the second captures the value.
 __attribute__((used, externally_visible))
 int
 phase_spi_read_register(uint8_t motor_idx, uint8_t addr, uint32_t *out)
@@ -323,15 +260,11 @@ phase_spi_read_register(uint8_t motor_idx, uint8_t addr, uint32_t *out)
     if (phase_spi_acquire_blocking())
         return -1;
     uint8_t buf[5] = { (uint8_t)(addr & 0x7F), 0, 0, 0, 0 };
-    int rc = phase_spi_xfer5_locked(bus_id, motor_idx, buf, 0);
-    if (!rc) {
-        buf[0] = (uint8_t)(addr & 0x7F);
-        buf[1] = buf[2] = buf[3] = buf[4] = 0;
-        rc = phase_spi_xfer5_locked(bus_id, motor_idx, buf, 1);
-    }
+    phase_reg_xfer(bus_id, motor_idx, buf, 0);
+    buf[0] = (uint8_t)(addr & 0x7F);
+    buf[1] = buf[2] = buf[3] = buf[4] = 0;
+    phase_reg_xfer(bus_id, motor_idx, buf, 1);
     phase_spi_release();
-    if (rc)
-        return -1;
     *out = ((uint32_t)buf[1] << 24) | ((uint32_t)buf[2] << 16)
          | ((uint32_t)buf[3] << 8) | (uint32_t)buf[4];
     return 0;
