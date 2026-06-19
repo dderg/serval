@@ -3,8 +3,8 @@
 use core::sync::atomic::Ordering;
 
 use crate::fault_helpers::{
-    raise_multi_motor_mask, raise_overlay_unsupported, raise_position_count_overflow,
-    raise_step_queue_overflow, raise_steps_per_sample_exceeded, raise_unknown_step_mode,
+    raise_multi_motor_mask, raise_position_count_overflow, raise_step_queue_overflow,
+    raise_steps_per_sample_exceeded, raise_unknown_step_mode,
 };
 use crate::phase_lut::{PHASE_LUT, PHASE_LUT_SIZE};
 use crate::state::SharedState;
@@ -145,12 +145,19 @@ pub fn dispatch_axis(
             overlay_just_armed,
         ),
         m if m == StepMode::Phase as u8 => {
-            if motor_mask != 0 {
-                raise_overlay_unsupported(shared, axis_idx, motor_mask);
-                return;
-            }
             bump_relaxed(&shared.isr_phase_call_count);
-            dispatch_phase(axis_idx, axis, shared, p_end);
+            if motor_mask != 0 {
+                dispatch_phase_overlay(
+                    axis_idx,
+                    axis,
+                    shared,
+                    p_end,
+                    motor_mask,
+                    overlay_just_armed,
+                );
+            } else {
+                dispatch_phase(axis_idx, axis, shared, p_end);
+            }
         }
         _ => {
             raise_unknown_step_mode(shared, axis_idx, mode);
@@ -385,6 +392,50 @@ fn ramp_phase_offset(stepper: &crate::stepping_state::StepperRef, max_per_sample
         .store(current.wrapping_add(step), Ordering::Release);
 }
 
+fn dispatch_phase_overlay(
+    axis_idx: usize,
+    axis: &mut AxisConfig,
+    shared: &SharedState,
+    p_end: f32,
+    motor_mask: u8,
+    overlay_just_armed: bool,
+) {
+    let microstep_distance = axis.microstep_distance;
+    if !microstep_distance.is_finite() || microstep_distance == 0.0 {
+        return;
+    }
+    let sel = match crate::piece_ring::stepper_sel_from_mask(motor_mask) {
+        Ok(sel) => sel,
+        Err(()) => {
+            raise_multi_motor_mask(shared, axis_idx, motor_mask);
+            return;
+        }
+    };
+    let idx = (sel - 1) as usize;
+    let Some(stepper) = axis.steppers.get(idx) else {
+        raise_multi_motor_mask(shared, axis_idx, motor_mask);
+        return;
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let target = libm::roundf(p_end / microstep_distance) as i32;
+    let prev = if overlay_just_armed {
+        0
+    } else {
+        stepper.overlay_step_frame.load(Ordering::Acquire)
+    };
+    stepper.overlay_step_frame.store(target, Ordering::Release);
+    let delta = target.wrapping_sub(prev);
+    let cur = stepper.phase_offset_microsteps.load(Ordering::Acquire);
+    let new_off = cur.wrapping_add(delta);
+    stepper
+        .phase_offset_microsteps
+        .store(new_off, Ordering::Release);
+    stepper
+        .phase_offset_target
+        .store(new_off, Ordering::Release);
+    write_phase_coils(axis_idx, axis, shared);
+}
+
 fn dispatch_phase(axis_idx: usize, axis: &mut AxisConfig, shared: &SharedState, p_end: f32) {
     let microstep_distance = axis.microstep_distance;
     if !microstep_distance.is_finite() || microstep_distance == 0.0 {
@@ -400,11 +451,19 @@ fn dispatch_phase(axis_idx: usize, axis: &mut AxisConfig, shared: &SharedState, 
             .max_phase_offset_ramp_per_sample
             .load(Ordering::Acquire),
     );
-
     for stepper in &axis.steppers {
         ramp_phase_offset(stepper, max_ramp);
+    }
+
+    write_phase_coils(axis_idx, axis, shared);
+}
+
+fn write_phase_coils(axis_idx: usize, axis: &AxisConfig, shared: &SharedState) {
+    let base = axis.last_step_count;
+
+    for stepper in &axis.steppers {
         let phase_offset = stepper.phase_offset_microsteps.load(Ordering::Acquire);
-        let target_stepper = target_microsteps_axis.wrapping_add(phase_offset);
+        let target_stepper = base.wrapping_add(phase_offset);
         let prev_stepper = stepper.last_phase_target.load(Ordering::Acquire);
         let delta_stepper = target_stepper.wrapping_sub(prev_stepper);
         stepper

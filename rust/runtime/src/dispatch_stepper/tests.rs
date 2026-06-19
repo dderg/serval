@@ -465,56 +465,132 @@ fn overlay_arm_emits_zero_steps_and_seeds_frame_to_zero() {
 }
 
 #[test]
-fn overlay_on_phase_axis_raises_overlay_unsupported_no_slew() {
-    use crate::error::FaultCode;
-
+fn overlay_on_phase_axis_applies_phase_offset() {
     let shared = SharedState::new();
     let mut q = StepQueue::new();
-    let mut axis = make_axis(StepMode::Phase, 0.0125);
-    let last_coil_a_before = axis.steppers[0].last_coil_A.load(Ordering::Acquire);
-    let last_coil_b_before = axis.steppers[0].last_coil_B.load(Ordering::Acquire);
-    let pos_before = axis.steppers[0].position_count.load(Ordering::Acquire);
+    let msd = 0.0125_f32;
+    let mut axis = make_axis(StepMode::Phase, msd);
 
     let q_ptr: *mut StepQueue = &mut q;
     let axis_idx: usize = 1;
     let motor_mask: u8 = 0b01;
+    let overlay_msteps: i32 = 5;
+    let p_end = overlay_msteps as f32 * msd;
+
     dispatch_axis(
         axis_idx,
         &mut axis,
         motor_mask,
         q_ptr,
         &shared,
-        /* p_end */ 256.0 * 0.0125,
+        p_end,
         /* v_end */ 0.0,
         /* p_sample_start */ 0.0,
         /* sample_period_sec */ 25e-6,
         /* sample_start_cycles */ 0,
         /* cycles_per_second */ 520_000_000.0,
-        /* overlay_just_armed */ false,
+        /* overlay_just_armed */ true,
     );
 
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
-        FaultCode::OverlayUnsupported.as_i32(),
-        "overlay on phase axis must latch OverlayUnsupported"
-    );
-    let detail = shared.fault_detail.load(Ordering::Acquire);
-    let expected_detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(motor_mask);
-    assert_eq!(detail, expected_detail);
-    assert_eq!(
-        axis.steppers[0].last_coil_A.load(Ordering::Acquire),
-        last_coil_a_before,
-        "no phase slew: coil_A must not change"
+        0,
+        "overlay on phase axis must not fault"
     );
     assert_eq!(
-        axis.steppers[0].last_coil_B.load(Ordering::Acquire),
-        last_coil_b_before,
-        "no phase slew: coil_B must not change"
+        axis.steppers[0]
+            .phase_offset_microsteps
+            .load(Ordering::Acquire),
+        overlay_msteps,
+    );
+    assert_eq!(
+        axis.steppers[0].phase_offset_target.load(Ordering::Acquire),
+        overlay_msteps,
+    );
+    assert_eq!(
+        axis.steppers[0].overlay_step_frame.load(Ordering::Acquire),
+        overlay_msteps,
     );
     assert_eq!(
         axis.steppers[0].position_count.load(Ordering::Acquire),
-        pos_before,
-        "no phase slew: position_count must not change"
+        overlay_msteps,
     );
-    assert_eq!(q.tail, q.head, "no steps must be enqueued");
+    assert_eq!(q.tail, q.head, "no steps must be enqueued in phase mode");
+}
+
+#[test]
+fn overlay_on_phase_axis_accumulates_across_samples() {
+    let shared = SharedState::new();
+    let mut q = StepQueue::new();
+    let msd = 0.0125_f32;
+    let mut axis = make_axis(StepMode::Phase, msd);
+
+    let q_ptr: *mut StepQueue = &mut q;
+    let axis_idx: usize = 0;
+    let motor_mask: u8 = 0b01;
+
+    dispatch_axis(
+        axis_idx,
+        &mut axis,
+        motor_mask,
+        q_ptr,
+        &shared,
+        3.0 * msd,
+        0.0,
+        0.0,
+        25e-6,
+        0,
+        520_000_000.0,
+        /* overlay_just_armed */ true,
+    );
+    assert_eq!(
+        axis.steppers[0]
+            .phase_offset_microsteps
+            .load(Ordering::Acquire),
+        3,
+    );
+
+    dispatch_axis(
+        axis_idx,
+        &mut axis,
+        motor_mask,
+        q_ptr,
+        &shared,
+        7.0 * msd,
+        0.0,
+        0.0,
+        25e-6,
+        0,
+        520_000_000.0,
+        /* overlay_just_armed */ false,
+    );
+    assert_eq!(
+        axis.steppers[0]
+            .phase_offset_microsteps
+            .load(Ordering::Acquire),
+        7,
+        "second sample moves offset from 3 to 7 (delta 4 added to 3)"
+    );
+
+    dispatch_axis(
+        axis_idx,
+        &mut axis,
+        motor_mask,
+        q_ptr,
+        &shared,
+        2.0 * msd,
+        0.0,
+        0.0,
+        25e-6,
+        0,
+        520_000_000.0,
+        /* overlay_just_armed */ true,
+    );
+    assert_eq!(
+        axis.steppers[0]
+            .phase_offset_microsteps
+            .load(Ordering::Acquire),
+        9,
+        "new overlay armed: delta from 0 baseline, adds 2 to existing 7"
+    );
 }
