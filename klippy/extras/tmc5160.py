@@ -572,14 +572,10 @@ class TMC5160:
         self._lookup_set_axis_mode_group().send(
             [0, self.PHASE_MODE_PHASE_ENTER, oids]
         )
+        engine = self.printer.lookup_object("motion")._engine
+        engine.warmup_pump()
         for t in members:
             t._phase_mode_active = True
-            structured_log.event(
-                "phase_stepping",
-                "enter",
-                msg="phase mode entered (mcu handover)",
-                stepper=t.name,
-            )
 
     def exit_phase_mode(self):
         active = [

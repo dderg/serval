@@ -2179,6 +2179,25 @@ impl PyMotionEngine {
         Ok(accel_t + cruise_t + accel_t)
     }
 
+    fn warmup_pump(&self) -> PyResult<()> {
+        let tx = self
+            .pump_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("pump not started"))?
+            .clone();
+        tx.send(crate::pump::PumpMsg::Warmup)
+            .map_err(|_| PyRuntimeError::new_err("pump channel closed"))?;
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(crate::pump::PumpMsg::Barrier(ack_tx))
+            .map_err(|_| PyRuntimeError::new_err("pump channel closed"))?;
+        ack_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| PyRuntimeError::new_err("warmup_pump: barrier timeout"))?;
+        Ok(())
+    }
+
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {
         let io = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());

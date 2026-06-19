@@ -232,6 +232,7 @@ pub enum PumpMsg {
     DripArm(DripArm),
     DripDisarm(u64),
     Barrier(std::sync::mpsc::SyncSender<()>),
+    Warmup,
     Shutdown,
 }
 
@@ -569,6 +570,7 @@ pub fn run_pump<S, F, C, A, O, D>(
             PumpMsg::Barrier(ack) => {
                 let _ = ack.send(());
             }
+            PumpMsg::Warmup => unreachable!("handled before apply"),
         }
         true
     };
@@ -591,7 +593,6 @@ pub fn run_pump<S, F, C, A, O, D>(
     };
 
     let mut holding_ahead = false;
-    sink.warmup();
 
     loop {
         let cohort_active = cohort.is_some();
@@ -615,11 +616,15 @@ pub fn run_pump<S, F, C, A, O, D>(
         };
 
         if let Some(msg) = first {
-            if !apply(msg, &mut queues, &mut junction_ends, &mut cohort) {
+            if matches!(&msg, PumpMsg::Warmup) {
+                sink.warmup();
+            } else if !apply(msg, &mut queues, &mut junction_ends, &mut cohort) {
                 return;
             }
             while let Ok(m) = rx.try_recv() {
-                if !apply(m, &mut queues, &mut junction_ends, &mut cohort) {
+                if matches!(&m, PumpMsg::Warmup) {
+                    sink.warmup();
+                } else if !apply(m, &mut queues, &mut junction_ends, &mut cohort) {
                     return;
                 }
             }
