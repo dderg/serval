@@ -5,7 +5,20 @@ use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use trajectory::ShapedSegment;
 
 const MIN_PIECE_DURATION_S: f64 = 1e-9;
-const MAX_SUBDIVISION_DEPTH: u32 = 16;
+const MAX_SUBDIVISION_DEPTH: u32 = 22;
+
+/// Minimum duration of an emitted cubic piece. The MCU consumes pieces against
+/// a fixed step-sample clock (tens of µs); a piece shorter than several samples
+/// makes the MCU evaluate one cubic across a sample boundary and extrapolate it
+/// — corrupting the dispatched polynomial (Neptune steps-per-sample fault). The
+/// velocity profile can carry thousands of samples per move, so we fit *coarse*
+/// pieces to tolerance and never subdivide below this floor.
+const MIN_FIT_PIECE_S: f64 = 5e-4;
+
+/// Interior fractions sampled when testing a candidate cubic against the true
+/// trajectory over a span; a span passes only if every sampled axis is within
+/// `fit_tol_mm`.
+const RESIDUAL_PROBES: [f64; 3] = [0.25, 0.5, 0.75];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoweringError {
@@ -111,9 +124,63 @@ fn hermite_cubic(u_start: f64, u_end: f64, p0: f64, v0: f64, p1: f64, v1: f64) -
     }
 }
 
-fn refine_bounds(
-    phase: &Phase,
-    spatial: Option<&geometry::path::Segment>,
+struct Sampler<'a> {
+    phases: &'a [Phase],
+    spatial: Option<&'a geometry::path::Segment>,
+    start_pos: &'a [f64],
+    followers: &'a [geometry::FollowerDemand],
+}
+
+impl Sampler<'_> {
+    /// Absolute (position, velocity) for one registry axis at move-local time
+    /// `t`. Spatial axes ride the path; followers pay out `start + ratio·s`;
+    /// every other axis holds at its start position.
+    fn axis_state(&self, axis: usize, t: f64) -> (f64, f64) {
+        let (s, v) = locate(self.phases, t).s_v_at(t);
+        if axis < 3 {
+            match self.spatial {
+                Some(seg) => (seg.point_at(s)[axis], seg.heading_at(s)[axis] * v),
+                None => (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0),
+            }
+        } else if let Some(f) = self.followers.iter().find(|f| f.axis_index == axis) {
+            (f.ratio.mul_add(s, self.start_pos[axis]), f.ratio * v)
+        } else {
+            (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0)
+        }
+    }
+
+    /// Worst-axis deviation of the candidate cubic over `[ta, tb]` from the true
+    /// trajectory, sampled at the interior probes.
+    fn span_residual(&self, driven: &[usize], ta: f64, tb: f64) -> f64 {
+        let mut worst = 0.0_f64;
+        for &axis in driven {
+            let (pa, va) = self.axis_state(axis, ta);
+            let (pb, vb) = self.axis_state(axis, tb);
+            let piece = hermite_cubic(ta, tb, pa, va, pb, vb);
+            for &frac in &RESIDUAL_PROBES {
+                let tm = frac.mul_add(tb - ta, ta);
+                let (truth, _) = self.axis_state(axis, tm);
+                worst = worst.max((piece.evaluate(tm) - truth).abs());
+            }
+        }
+        worst
+    }
+}
+
+fn locate(phases: &[Phase], t: f64) -> &Phase {
+    phases
+        .iter()
+        .find(|p| t < p.t0 + p.dt)
+        .unwrap_or(&phases[phases.len() - 1])
+}
+
+/// Adaptively split `[ta, tb]` into spans each fittable by a single cubic within
+/// `tol_mm`, never going below `MIN_FIT_PIECE_S`. Appends the right edge of each
+/// accepted span to `out`. This fits *coarse* pieces that span many velocity
+/// samples — the MCU step clock cannot consume sub-sample pieces.
+fn refine_span(
+    sampler: &Sampler<'_>,
+    driven: &[usize],
     tol_mm: f64,
     ta: f64,
     tb: f64,
@@ -121,34 +188,16 @@ fn refine_bounds(
     out: &mut Vec<f64>,
 ) {
     let h = tb - ta;
-    let split = depth < MAX_SUBDIVISION_DEPTH
-        && h > 2.0 * MIN_PIECE_DURATION_S
-        && spatial.is_some_and(|seg| hermite_residual(phase, seg, ta, tb) > tol_mm);
-    if split {
-        let tm = 0.5 * (ta + tb);
-        refine_bounds(phase, spatial, tol_mm, ta, tm, depth + 1, out);
-        refine_bounds(phase, spatial, tol_mm, tm, tb, depth + 1, out);
-    } else {
+    let accept = depth >= MAX_SUBDIVISION_DEPTH
+        || h <= 2.0 * MIN_FIT_PIECE_S
+        || sampler.span_residual(driven, ta, tb) <= tol_mm;
+    if accept {
         out.push(tb);
+    } else {
+        let tm = 0.5 * (ta + tb);
+        refine_span(sampler, driven, tol_mm, ta, tm, depth + 1, out);
+        refine_span(sampler, driven, tol_mm, tm, tb, depth + 1, out);
     }
-}
-
-fn hermite_residual(phase: &Phase, seg: &geometry::path::Segment, ta: f64, tb: f64) -> f64 {
-    let (sa, va) = phase.s_v_at(ta);
-    let (sb, vb) = phase.s_v_at(tb);
-    let tm = 0.5 * (ta + tb);
-    let (sm, _) = phase.s_v_at(tm);
-    let pa = seg.point_at(sa);
-    let ha = seg.heading_at(sa);
-    let pb = seg.point_at(sb);
-    let hb = seg.heading_at(sb);
-    let truth = seg.point_at(sm);
-    (0..3)
-        .map(|axis| {
-            let piece = hermite_cubic(ta, tb, pa[axis], ha[axis] * va, pb[axis], hb[axis] * vb);
-            (piece.evaluate(tm) - truth[axis]).abs()
-        })
-        .fold(0.0_f64, f64::max)
 }
 
 /// Lower a single planned move into a per-axis position-vs-time [`ShapedSegment`]
@@ -179,78 +228,33 @@ pub fn lower_move(
         }
     }
 
+    let sampler = Sampler {
+        phases: &phases,
+        spatial,
+        start_pos,
+        followers: &gm.segment.followers,
+    };
+    let mut driven: Vec<usize> = (0..3).collect();
+    driven.extend(gm.segment.followers.iter().map(|f| f.axis_index));
+
+    // Coarse time grid shared by every axis: fit cubic pieces to tolerance over
+    // the whole move (spanning many velocity samples), never below the
+    // minimum-duration floor. One piece per velocity sample would emit thousands
+    // of sub-sample pieces the MCU cannot consume.
+    let mut bounds = vec![0.0];
+    refine_span(&sampler, &driven, fit_tol_mm, 0.0, total_t, 0, &mut bounds);
+
     let mut axes_pieces: Vec<Vec<BezierPiece<f64>>> = vec![Vec::new(); n_axes];
-    let mut driven = vec![false; n_axes];
-    for axis in 0..3 {
-        driven[axis] = true;
-    }
-    for f in &gm.segment.followers {
-        driven[f.axis_index] = true;
-    }
-
-    for phase in &phases {
-        let mut bounds = vec![phase.t0];
-        refine_bounds(
-            phase,
-            spatial,
-            fit_tol_mm,
-            phase.t0,
-            phase.t0 + phase.dt,
-            0,
-            &mut bounds,
-        );
-        for w in bounds.windows(2) {
-            let (ta, tb) = (w[0], w[1]);
-            if tb - ta <= MIN_PIECE_DURATION_S {
-                continue;
-            }
-            let (sa, va) = phase.s_v_at(ta);
-            let (sb, vb) = phase.s_v_at(tb);
-            let (ua, ub) = (t_start + ta, t_start + tb);
-
-            for axis in 0..3 {
-                let piece = match spatial {
-                    Some(seg) => {
-                        let pa = seg.point_at(sa);
-                        let ha = seg.heading_at(sa);
-                        let pb = seg.point_at(sb);
-                        let hb = seg.heading_at(sb);
-                        hermite_cubic(ua, ub, pa[axis], ha[axis] * va, pb[axis], hb[axis] * vb)
-                    }
-                    None => {
-                        let hold = start_pos.get(axis).copied().unwrap_or(0.0);
-                        hermite_cubic(ua, ub, hold, 0.0, hold, 0.0)
-                    }
-                };
-                axes_pieces[axis].push(piece);
-            }
-
-            for f in &gm.segment.followers {
-                let base = start_pos[f.axis_index];
-                let piece = hermite_cubic(
-                    ua,
-                    ub,
-                    f.ratio.mul_add(sa, base),
-                    f.ratio * va,
-                    f.ratio.mul_add(sb, base),
-                    f.ratio * vb,
-                );
-                axes_pieces[f.axis_index].push(piece);
-            }
+    for w in bounds.windows(2) {
+        let (ta, tb) = (w[0], w[1]);
+        if tb - ta <= MIN_PIECE_DURATION_S {
+            continue;
         }
-    }
-
-    for axis in 0..n_axes {
-        if !driven[axis] {
-            let hold = start_pos[axis];
-            axes_pieces[axis].push(hermite_cubic(
-                t_start,
-                t_start + total_t,
-                hold,
-                0.0,
-                hold,
-                0.0,
-            ));
+        let (ua, ub) = (t_start + ta, t_start + tb);
+        for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
+            let (pa, va) = sampler.axis_state(axis, ta);
+            let (pb, vb) = sampler.axis_state(axis, tb);
+            pieces.push(hermite_cubic(ua, ub, pa, va, pb, vb));
         }
     }
 

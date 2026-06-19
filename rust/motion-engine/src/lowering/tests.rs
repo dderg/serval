@@ -4,7 +4,54 @@ use geometry::{
     ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, arc_move, fit_chain, line_move,
     plan_velocity,
 };
+use nurbs::bezier::extract_bezier_pieces;
 use nurbs::eval::eval;
+
+/// Regression for the Neptune steps-per-sample fault: the velocity profile can
+/// carry thousands of samples per move, but the MCU consumes pieces against a
+/// fixed ~tens-of-µs step clock. A piece shorter than several samples makes the
+/// MCU extrapolate one cubic across a sample boundary and blow up the step rate.
+/// Lowering must emit *coarse* pieces (bounded count, every piece ≥ the floor),
+/// not one per velocity sample.
+#[test]
+fn lowering_emits_coarse_pieces_above_the_sample_floor() {
+    for (start, end) in [
+        ([100.0, 100.0, 10.0], [100.0, 90.0, 10.0]), // the bench Y jog
+        ([0.0, 0.0, 0.0], [200.0, 0.0, 0.0]),        // long fast line
+        ([0.0, 0.0, 0.0], [0.5, 0.0, 0.0]),          // short line
+    ] {
+        let m = line_move(start, end, 0.0, ctx(1, 100.0)).unwrap();
+        let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).unwrap();
+        let profile = plan_velocity(&outcome, VelocityConfig::default()).unwrap();
+        let seg = lower_move(
+            &outcome.moves[0],
+            &profile.moves[0],
+            0.0,
+            &[0.0; 4],
+            FIT_TOL_MM,
+        )
+        .unwrap();
+        for axis in 0..3 {
+            let pieces = extract_bezier_pieces(&seg.axes[axis]);
+            assert!(
+                pieces.len() < 256,
+                "axis {axis}: {} pieces for {start:?}->{end:?} — should be coarse",
+                pieces.len()
+            );
+            for p in &pieces {
+                // A single whole-move piece may be shorter than the floor; only
+                // multi-piece fits must respect it (no sub-sample subdivision).
+                if pieces.len() > 1 {
+                    assert!(
+                        p.u_end - p.u_start >= MIN_FIT_PIECE_S - 1e-9,
+                        "axis {axis}: piece {:.6}us below the floor",
+                        (p.u_end - p.u_start) * 1e6
+                    );
+                }
+            }
+        }
+    }
+}
 
 const FIT_TOL_MM: f64 = 1e-3;
 
