@@ -1386,7 +1386,7 @@ impl Reactor {
 
         let dt_tick = t_tick.elapsed();
         if dt_tick > std::time::Duration::from_millis(5) {
-            tracing::debug!(
+            tracing::warn!(
                 subsystem = "mcu-comms",
                 event = "slow_tick",
                 dt_ms = dt_tick.as_secs_f64() * 1000.0,
