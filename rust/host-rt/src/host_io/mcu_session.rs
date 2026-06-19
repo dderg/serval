@@ -147,6 +147,13 @@ pub fn dispatch_mcu_frame(
         return McuDispatchResult::Ignored;
     }
     if let Some(p) = state.pending.remove(&header.correlation_id) {
+        tracing::warn!(
+            subsystem = "mcu-comms",
+            event = "mcu_call_response",
+            correlation_id = header.correlation_id,
+            kind_raw = header.kind_raw,
+            "[reactor] McuCall response dispatched"
+        );
         let _ = p.completion.send(Ok(McuCallOutcome::Response {
             kind,
             body: body.to_vec(),

@@ -1141,6 +1141,18 @@ impl Reactor {
                 }
                 let cid = self.transport_state.allocate_correlation_id();
                 let frame = build_kalico_frame(channel, kind, cid, &body);
+                let pending_count = self.transport_state.pending.len();
+                let unacked_len = self.unacked_window.len();
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "mcu_call_write",
+                    kind_raw = kind as u16,
+                    cid,
+                    body_len = body.len(),
+                    pending_count,
+                    unacked_len,
+                    "[reactor] writing McuCall frame"
+                );
                 self.transport_state.pending.insert(
                     cid,
                     PendingMcuCall {
@@ -1386,7 +1398,7 @@ impl Reactor {
 
         let dt_tick = t_tick.elapsed();
         if dt_tick > std::time::Duration::from_millis(5) {
-            tracing::debug!(
+            tracing::warn!(
                 subsystem = "mcu-comms",
                 event = "slow_tick",
                 dt_ms = dt_tick.as_secs_f64() * 1000.0,
