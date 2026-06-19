@@ -2527,7 +2527,7 @@ impl PyMotionEngine {
         post_processors: Vec<(String, String, Vec<(String, f64)>)>,
         mcus: Vec<(u32, Vec<u8>, u8)>,
         kinematics_axes: Vec<String>,
-        cartesian_limits: (f64, f64, f64, f64, f64),
+        cartesian_limits: (f64, f64, f64, f64, f64, f64),
         window_capacity: usize,
         beta_max_iters: u8,
     ) -> PyResult<()> {
@@ -2583,13 +2583,21 @@ impl PyMotionEngine {
             })
             .collect::<PyResult<_>>()?;
 
-        let (max_velocity, max_accel, max_jerk, max_z_velocity, max_z_accel) = cartesian_limits;
+        let (
+            max_velocity,
+            max_accel,
+            max_jerk,
+            max_z_velocity,
+            max_z_accel,
+            square_corner_velocity,
+        ) = cartesian_limits;
         let cartesian = config::CartesianLimits {
             max_velocity,
             max_accel,
             max_jerk,
             max_z_velocity,
             max_z_accel,
+            square_corner_velocity,
         };
         cartesian.validate().map_err(PyValueError::new_err)?;
 
@@ -3288,7 +3296,7 @@ impl PyMotionEngine {
                 limits: geometry::VelocityLimits::try_new(
                     cart.max_velocity,
                     cart.max_accel,
-                    config::DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
+                    cart.square_corner_velocity,
                 )
                 .map_err(PyRuntimeError::new_err)?,
             };
@@ -3335,7 +3343,7 @@ impl PyMotionEngine {
                 }
             };
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            let (max_v, max_a) = {
+            let (max_v, max_a, scv) = {
                 let cfg = self
                     .planner_config
                     .lock()
@@ -3347,14 +3355,10 @@ impl PyMotionEngine {
                 if let Some(ra) = cfg.runtime_caps.accel {
                     a = a.min(ra);
                 }
-                (v, a)
+                (v, a, cfg.cartesian.square_corner_velocity)
             };
-            let limits = geometry::VelocityLimits::try_new(
-                max_v,
-                max_a,
-                config::DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
-            )
-            .map_err(PyRuntimeError::new_err)?;
+            let limits = geometry::VelocityLimits::try_new(max_v, max_a, scv)
+                .map_err(PyRuntimeError::new_err)?;
             let m =
                 classify::build_move(pos, dx, dy, dz, extruder_axis, e_delta, limits, feedrate, 0)
                     .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;

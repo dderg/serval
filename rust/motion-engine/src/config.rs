@@ -419,6 +419,7 @@ pub struct CartesianLimits {
     pub max_jerk: f64,
     pub max_z_velocity: f64,
     pub max_z_accel: f64,
+    pub square_corner_velocity: f64,
 }
 
 impl Default for CartesianLimits {
@@ -429,6 +430,7 @@ impl Default for CartesianLimits {
             max_jerk: 100_000.0,
             max_z_velocity: 15.0,
             max_z_accel: 100.0,
+            square_corner_velocity: DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
         }
     }
 }
@@ -443,6 +445,9 @@ impl CartesianLimits {
             && ok(self.max_z_accel))
         {
             return Err("[printer] motion limits must be finite and positive");
+        }
+        if !(self.square_corner_velocity.is_finite() && self.square_corner_velocity >= 0.0) {
+            return Err("[printer] square_corner_velocity must be finite and non-negative");
         }
         Ok(())
     }
@@ -500,10 +505,10 @@ impl LimitSection {
     }
 }
 
-/// Square-corner velocity for the new geometry pipeline. The pipeline blends
-/// corners and caps their speed by curvature (`sqrt(a/κ)`), so this is not the
-/// primary corner limiter; it satisfies `VelocityLimits`' contract and is the
-/// floor applied to near-reversal junctions. Not yet a configurable field.
+/// Square-corner velocity used when `[printer]` omits `square_corner_velocity`.
+/// The pipeline blends corners and caps their speed by curvature (`sqrt(a/κ)`),
+/// so this is not the primary corner limiter; it satisfies `VelocityLimits`'
+/// contract and is the floor applied to near-reversal junctions.
 pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
 
 impl PlannerConfig {

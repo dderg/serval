@@ -8,6 +8,33 @@ fn default_config_has_sensible_values() {
 }
 
 #[test]
+fn cartesian_default_square_corner_velocity_matches_const() {
+    let c = CartesianLimits::default();
+    assert_eq!(
+        c.square_corner_velocity,
+        DEFAULT_SQUARE_CORNER_VELOCITY_MM_S
+    );
+}
+
+#[test]
+fn cartesian_validate_accepts_zero_and_positive_scv() {
+    let mut c = CartesianLimits::default();
+    c.square_corner_velocity = 0.0;
+    assert!(c.validate().is_ok());
+    c.square_corner_velocity = 8.0;
+    assert!(c.validate().is_ok());
+}
+
+#[test]
+fn cartesian_validate_rejects_negative_or_nan_scv() {
+    let mut c = CartesianLimits::default();
+    c.square_corner_velocity = -1.0;
+    assert!(c.validate().is_err());
+    c.square_corner_velocity = f64::NAN;
+    assert!(c.validate().is_err());
+}
+
+#[test]
 fn default_config_chains_are_passthrough() {
     let c = PlannerConfig::default();
     let chains = c.post_processors.compile(&c.axis_registry).unwrap();

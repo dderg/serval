@@ -527,7 +527,6 @@ class Motion:
     UNSUPPORTED_LIMIT_KEYS = (
         "max_accel_to_decel",
         "minimum_cruise_ratio",
-        "square_corner_velocity",
     )
 
     def _read_axes(self, config):
@@ -634,7 +633,9 @@ class Motion:
             j = sc.getfloat("max_jerk", None, above=0.0)
             self.limit_sections.append((name, axes, v, a, j))
         self.min_cruise_ratio = 0.0
-        self.square_corner_velocity = 0.0
+        self.square_corner_velocity = config.getfloat(
+            "square_corner_velocity", 5.0, minval=0.0
+        )
         self.orig_cfg = {}
         self.runtime_velocity = None
         self.runtime_accel = None
@@ -830,6 +831,7 @@ class Motion:
                     self.max_jerk,
                     self.max_z_velocity,
                     self.max_z_accel,
+                    self.square_corner_velocity,
                 ),
             )
             self._configure_axes_per_mcu(engine_mcus)
