@@ -462,20 +462,9 @@ impl Reactor {
 
         let _ = router.promote_all(mcu, 0);
 
-        let mut passthrough_written = 0u32;
         loop {
             if self.unacked_window.is_full() {
                 break;
-            }
-            if passthrough_written > 0 {
-                if let Ok(cmd) = self.submission_rx.try_recv() {
-                    self.passthrough_router = Some(router);
-                    self.handle_command(cmd);
-                    router = match self.passthrough_router.take() {
-                        Some(r) => r,
-                        None => return,
-                    };
-                }
             }
             let entry = match router.pop_next_for_emission(mcu) {
                 Ok(Some(e)) => e,
@@ -519,7 +508,6 @@ impl Reactor {
                 self.rtt_sample_seq = seq;
                 self.rtt_sample_armed = true;
             }
-            passthrough_written += 1;
         }
 
         self.passthrough_router = Some(router);
@@ -1400,7 +1388,7 @@ impl Reactor {
 
         let dt_tick = t_tick.elapsed();
         if dt_tick > std::time::Duration::from_millis(5) {
-            tracing::warn!(
+            tracing::debug!(
                 subsystem = "mcu-comms",
                 event = "slow_tick",
                 dt_ms = dt_tick.as_secs_f64() * 1000.0,

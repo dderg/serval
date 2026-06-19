@@ -611,9 +611,7 @@ pub fn run_pump<S, F, C, A, O, D>(
             }
         };
 
-        let recv_wall = Instant::now();
         if let Some(msg) = first {
-            let is_enqueue = matches!(&msg, PumpMsg::Enqueue(_));
             if !apply(msg, &mut queues, &mut junction_ends, &mut cohort) {
                 return;
             }
@@ -621,18 +619,6 @@ pub fn run_pump<S, F, C, A, O, D>(
                 if !apply(m, &mut queues, &mut junction_ends, &mut cohort) {
                     return;
                 }
-            }
-            if is_enqueue {
-                let has_pieces = queues.values().any(|q| !q.pieces.is_empty());
-                tracing::warn!(
-                    subsystem = "motion",
-                    event = "pump_recv_timing",
-                    recv_us = recv_wall.elapsed().as_micros() as u64,
-                    holding_ahead,
-                    cohort_active = cohort.is_some(),
-                    has_pieces,
-                    "[pump-timing] enqueue received"
-                );
             }
         }
 
@@ -670,17 +656,6 @@ pub fn run_pump<S, F, C, A, O, D>(
         }
 
         holding_ahead = false;
-        let send_loop_start = Instant::now();
-        let since_recv = recv_wall.elapsed().as_micros() as u64;
-        if since_recv > 1000 {
-            tracing::warn!(
-                subsystem = "motion",
-                event = "pump_pre_send_delay",
-                since_recv_us = since_recv,
-                "[pump-timing] delay between recv and send loop entry"
-            );
-        }
-        let mut send_loop_round = 0u32;
         'send: loop {
             let hz_of = |k: &AxisKey, q: &AxisQueue| horizon_of(k, q, &cohort);
             match schedule(&queues, MAX_PER_FRAME, hz_of, |_| usize::MAX) {
@@ -688,23 +663,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                 Schedule::StallFull(_stall_key) => {
                     break 'send;
                 }
-                Schedule::StallAhead(stall_key) => {
-                    if send_loop_round == 0 {
-                        let q = queues.get(&stall_key);
-                        let head_ticks = q.and_then(|q| q.pieces.front().map(|p| p.0.start_time)).unwrap_or(0);
-                        let hz = horizon_of(&stall_key, q.unwrap(), &cohort).unwrap_or(0);
-                        tracing::warn!(
-                            subsystem = "motion",
-                            event = "pump_stall_ahead",
-                            mcu = stall_key.mcu_id,
-                            axis = stall_key.axis,
-                            head_ticks,
-                            horizon = hz,
-                            gap_ticks = head_ticks.saturating_sub(hz),
-                            since_recv_us = recv_wall.elapsed().as_micros() as u64,
-                            "[pump-timing] StallAhead on first round"
-                        );
-                    }
+                Schedule::StallAhead(_stall_key) => {
                     holding_ahead = true;
                     break 'send;
                 }
@@ -712,7 +671,6 @@ pub fn run_pump<S, F, C, A, O, D>(
                     if frames.is_empty() {
                         break 'send;
                     }
-                    send_loop_round += 1;
                     for mut f in frames {
                         let n = f.pieces.len() as u32;
                         let new_head = {
@@ -725,23 +683,8 @@ pub fn run_pump<S, F, C, A, O, D>(
                             f.start_slot = q.physical_write_cursor as u16;
                             q.pushed.wrapping_add(n)
                         };
-                        let sf_start = Instant::now();
                         match sink.send_frame(f.key, &f.pieces, f.start_slot, new_head) {
                             Ok(_) => {
-                                let sf_us = sf_start.elapsed().as_micros() as u64;
-                                if send_loop_round <= 2 {
-                                    tracing::warn!(
-                                        subsystem = "motion",
-                                        event = "pump_send_frame_timing",
-                                        mcu = f.key.mcu_id,
-                                        axis = f.key.axis,
-                                        pieces = f.pieces.len(),
-                                        send_frame_us = sf_us,
-                                        since_recv_us = recv_wall.elapsed().as_micros() as u64,
-                                        round = send_loop_round,
-                                        "[pump-timing] send_frame done"
-                                    );
-                                }
                                 let q = queues.get_mut(&f.key).expect("planned key exists");
                                 for _ in 0..f.pieces.len() {
                                     q.pieces.pop_front();
