@@ -843,7 +843,7 @@ class Motion:
 
     def _enter_phase_stepping(self):
         entered = set()
-        all_tmcs = self.printer.lookup_objects("tmc5160 ")
+        all_tmcs = self.printer.lookup_objects("tmc5160")
         logging.info("_enter_phase_stepping: found %d tmc5160 objects", len(all_tmcs))
         for obj_name, tmc in all_tmcs:
             oid = getattr(tmc, '_phase_stepper_oid', None)
