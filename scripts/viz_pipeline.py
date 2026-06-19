@@ -232,6 +232,8 @@ def render(snapshot, out_path, stem, ts):
     )
     ax_path, ax_vel, ax_acc, ax_jrk = axes
 
+    from matplotlib.patches import Arc as ArcPatch
+
     ax_path.plot(
         raw_x,
         raw_y,
@@ -242,28 +244,64 @@ def render(snapshot, out_path, stem, ts):
         label="raw",
     )
     drawn = set()
+    first_pt = None
     for seg in segments:
         kind = seg["type"]
         color = SEGMENT_COLORS.get(kind, "C4")
         label = kind if kind not in drawn else None
         drawn.add(kind)
+        if kind == "line":
+            xs = [seg["x0"], seg["x1"]]
+            ys = [seg["y0"], seg["y1"]]
+            ax_path.plot(
+                xs, ys, "-", linewidth=1.0, color=color, label=label, zorder=2
+            )
+            if first_pt is None:
+                first_pt = (seg["x0"], seg["y0"])
+        elif kind == "arc":
+            r = seg["radius"]
+            t1 = seg["theta1_deg"] + seg["angle_deg"]
+            t2 = seg["theta2_deg"] + seg["angle_deg"]
+            if t2 < t1:
+                t1, t2 = t2, t1
+            patch = ArcPatch(
+                (seg["cx"], seg["cy"]),
+                2 * r,
+                2 * r,
+                angle=0,
+                theta1=t1,
+                theta2=t2,
+                linewidth=1.0,
+                color=color,
+                fill=False,
+                label=label,
+                zorder=2,
+            )
+            ax_path.add_patch(patch)
+            if first_pt is None:
+                import math
+
+                a = math.radians(seg["theta1_deg"] + seg["angle_deg"])
+                first_pt = (
+                    seg["cx"] + r * math.cos(a),
+                    seg["cy"] + r * math.sin(a),
+                )
+        elif kind == "clothoid":
+            ax_path.plot(
+                seg["x"],
+                seg["y"],
+                "-",
+                linewidth=1.0,
+                color=color,
+                label=label,
+                zorder=2,
+            )
+            if first_pt is None:
+                first_pt = (seg["x"][0], seg["y"][0])
+    if first_pt:
         ax_path.plot(
-            seg["x"],
-            seg["y"],
-            "-",
-            linewidth=1.0,
-            color=color,
-            label=label,
-            zorder=2,
+            first_pt[0], first_pt[1], "o", color="C3", markersize=5, zorder=3
         )
-    ax_path.plot(
-        segments[0]["x"][0],
-        segments[0]["y"][0],
-        "o",
-        color="C3",
-        markersize=5,
-        zorder=3,
-    )
     ax_path.set_aspect("equal")
     ax_path.set_xlabel("X (mm)")
     ax_path.set_ylabel("Y (mm)")

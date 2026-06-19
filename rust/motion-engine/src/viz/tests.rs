@@ -36,32 +36,15 @@ fn raw_path_starts_at_origin() {
 }
 
 #[test]
-fn fitted_segments_carry_type_tags() {
+fn fitted_outcome_has_spatial_segments() {
     let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
     let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
-    let segments = sample_fitted_segments(&outcome);
-    assert!(!segments.is_empty());
-    for seg in &segments {
-        assert!(
-            seg.kind == "line" || seg.kind == "arc" || seg.kind == "clothoid",
-            "unexpected segment type: {}",
-            seg.kind
-        );
-        assert_eq!(seg.xs.len(), seg.ys.len());
-        assert!(seg.xs.len() >= 2);
-    }
-}
-
-#[test]
-fn fitted_segments_have_more_points_than_raw() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
-    let raw_count = extract_raw_path(&moves).len();
-    let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
-    let fitted_count: usize = sample_fitted_segments(&outcome)
+    let spatial_count = outcome
+        .moves
         .iter()
-        .map(|s| s.xs.len())
-        .sum();
-    assert!(fitted_count > raw_count);
+        .filter(|m| m.segment.spatial.is_some())
+        .count();
+    assert!(spatial_count > 0);
 }
 
 #[test]

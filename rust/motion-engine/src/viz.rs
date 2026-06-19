@@ -28,7 +28,6 @@ pub fn pipeline_snapshot(
 
     let outcome = geometry::fit_chain(&moves, chain_cfg)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
-    let fitted_segments = sample_fitted_segments(&outcome);
 
     let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default())
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
@@ -39,13 +38,11 @@ pub fn pipeline_snapshot(
     dict.set_item("raw_y", raw_points.iter().map(|p| p.1).collect::<Vec<_>>())?;
 
     let seg_list = PyList::empty(py);
-    for seg in &fitted_segments {
-        let d = PyDict::new(py);
-        d.set_item("type", seg.kind)?;
-        d.set_item("x", &seg.xs)?;
-        d.set_item("y", &seg.ys)?;
-        d.set_item("s", &seg.s_values)?;
-        seg_list.append(d)?;
+    for m in &outcome.moves {
+        if let Some(spatial) = &m.segment.spatial {
+            let d = segment_to_pydict(py, spatial)?;
+            seg_list.append(d)?;
+        }
     }
     dict.set_item("fitted_segments", seg_list)?;
 
@@ -60,6 +57,49 @@ pub fn pipeline_snapshot(
     dict.set_item("chain_fits", outcome.report.chains)?;
     dict.set_item("traversal_time_s", profile.report.traversal_time_s)?;
     Ok(dict.into())
+}
+
+fn segment_to_pydict<'py>(
+    py: Python<'py>,
+    spatial: &geometry::path::Segment,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    match spatial {
+        geometry::path::Segment::Line(line) => {
+            d.set_item("type", "line")?;
+            d.set_item("x0", line.start[0])?;
+            d.set_item("y0", line.start[1])?;
+            d.set_item("x1", line.end[0])?;
+            d.set_item("y1", line.end[1])?;
+        }
+        geometry::path::Segment::Arc(arc) => {
+            d.set_item("type", "arc")?;
+            d.set_item("cx", arc.origin[0])?;
+            d.set_item("cy", arc.origin[1])?;
+            d.set_item("radius", arc.radius)?;
+            let basis_angle_deg = arc.u[1].atan2(arc.u[0]).to_degrees();
+            d.set_item("angle_deg", basis_angle_deg)?;
+            d.set_item("theta1_deg", arc.start_angle.to_degrees())?;
+            let theta2 = arc.start_angle + arc.sweep;
+            d.set_item("theta2_deg", theta2.to_degrees())?;
+        }
+        geometry::path::Segment::Clothoid(_) => {
+            d.set_item("type", "clothoid")?;
+            let len = spatial.s_len();
+            let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(20);
+            let mut xs = Vec::with_capacity(n);
+            let mut ys = Vec::with_capacity(n);
+            for k in 0..n {
+                let s = len * (k as f64) / ((n - 1) as f64);
+                let pt = spatial.point_at(s);
+                xs.push(pt[0]);
+                ys.push(pt[1]);
+            }
+            d.set_item("x", xs)?;
+            d.set_item("y", ys)?;
+        }
+    }
+    Ok(d)
 }
 
 fn arc_fit_config(arc_fit: Option<(f64, f64)>) -> PyResult<geometry::ChainFitConfig> {
@@ -134,52 +174,7 @@ fn extract_raw_path(moves: &[geometry::Move]) -> Vec<(f64, f64)> {
     points
 }
 
-struct TypedSegment {
-    kind: &'static str,
-    xs: Vec<f64>,
-    ys: Vec<f64>,
-    s_values: Vec<f64>,
-}
-
 const SAMPLES_PER_MM: f64 = 2.0;
-
-fn sample_fitted_segments(outcome: &geometry::FitOutcome) -> Vec<TypedSegment> {
-    let mut segments = Vec::new();
-    let mut s_offset = 0.0;
-    for m in &outcome.moves {
-        if let Some(spatial) = &m.segment.spatial {
-            let kind = match spatial {
-                geometry::path::Segment::Line(_) => "line",
-                geometry::path::Segment::Arc(_) => "arc",
-                geometry::path::Segment::Clothoid(_) => "clothoid",
-            };
-            let len = spatial.s_len();
-            let min_samples = match spatial {
-                geometry::path::Segment::Clothoid(_) => 20,
-                _ => 2,
-            };
-            let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(min_samples);
-            let mut xs = Vec::with_capacity(n);
-            let mut ys = Vec::with_capacity(n);
-            let mut s_values = Vec::with_capacity(n);
-            for k in 0..n {
-                let s = len * (k as f64) / ((n - 1) as f64);
-                let pt = spatial.point_at(s);
-                xs.push(pt[0]);
-                ys.push(pt[1]);
-                s_values.push(s_offset + s);
-            }
-            s_offset += len;
-            segments.push(TypedSegment {
-                kind,
-                xs,
-                ys,
-                s_values,
-            });
-        }
-    }
-    segments
-}
 
 struct KinematicSamples {
     s: Vec<f64>,
