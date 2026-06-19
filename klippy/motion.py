@@ -843,20 +843,24 @@ class Motion:
 
     def _enter_phase_stepping(self):
         entered = set()
-        for name in self.printer.lookup_objects("tmc5160 "):
-            tmc = self.printer.lookup_object(name[0])
-            if not hasattr(tmc, '_phase_stepper_oid'):
-                continue
-            if tmc._phase_stepper_oid is None:
+        all_tmcs = self.printer.lookup_objects("tmc5160 ")
+        logging.info("_enter_phase_stepping: found %d tmc5160 objects", len(all_tmcs))
+        for obj_name, tmc in all_tmcs:
+            oid = getattr(tmc, '_phase_stepper_oid', None)
+            logging.info("  %s: _phase_stepper_oid=%s", obj_name, oid)
+            if oid is None:
                 continue
             group = tmc._phase_group_members()
             group_key = id(group)
             if group_key in entered:
                 continue
             entered.add(group_key)
+            logging.info("  entering phase mode for group (via %s)", obj_name)
             tmc.enter_phase_mode()
         if entered:
+            logging.info("_enter_phase_stepping: warming up pump")
             self.engine.warmup_pump()
+        logging.info("_enter_phase_stepping: done, %d groups entered", len(entered))
 
     def _follower_slots(self):
         # Unclaimed follower axes ([axis <name>] with motors, not bound to a
