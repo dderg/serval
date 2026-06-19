@@ -859,7 +859,7 @@ class Motion:
             tmc.enter_phase_mode()
         if entered:
             logging.info("_enter_phase_stepping: warming up pump")
-            self.engine.warmup_pump()
+            self.engine.get_engine().warmup_pump()
         logging.info("_enter_phase_stepping: done, %d groups entered", len(entered))
 
     def _follower_slots(self):
