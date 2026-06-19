@@ -616,12 +616,32 @@ pub fn run_pump<S, F, C, A, O, D>(
         };
 
         if let Some(msg) = first {
+            let tag = match &msg {
+                PumpMsg::Enqueue(e) => {
+                    tracing::warn!(subsystem="motion", event="pump_got_enqueue",
+                        mcu=e.key.mcu_id, axis=e.key.axis, n=e.pieces.len(),
+                        "[pump] received Enqueue");
+                    "enqueue"
+                }
+                PumpMsg::Warmup => "warmup",
+                PumpMsg::Heartbeat(_) => "heartbeat",
+                PumpMsg::Barrier(_) => "barrier",
+                PumpMsg::Shutdown => "shutdown",
+                PumpMsg::Flush(_) => "flush",
+                PumpMsg::DripArm(_) => "drip_arm",
+                PumpMsg::DripDisarm(_) => "drip_disarm",
+            };
+            let _ = tag;
             if matches!(&msg, PumpMsg::Warmup) {
                 sink.warmup();
             } else if !apply(msg, &mut queues, &mut junction_ends, &mut cohort) {
                 return;
             }
             while let Ok(m) = rx.try_recv() {
+                if matches!(&m, PumpMsg::Enqueue(_)) {
+                    tracing::warn!(subsystem="motion", event="pump_got_enqueue",
+                        "[pump] received Enqueue (batch)");
+                }
                 if matches!(&m, PumpMsg::Warmup) {
                     sink.warmup();
                 } else if !apply(m, &mut queues, &mut junction_ends, &mut cohort) {
