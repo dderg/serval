@@ -663,6 +663,11 @@ pub fn run_pump<S, F, C, A, O, D>(
             }
         }
 
+        let has_pieces = queues.values().any(|q| !q.pieces.is_empty());
+        if has_pieces {
+            sink.warmup();
+        }
+
         holding_ahead = false;
         'send: loop {
             let hz_of = |k: &AxisKey, q: &AxisQueue| horizon_of(k, q, &cohort);
