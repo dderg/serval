@@ -65,15 +65,17 @@ fn fitted_segments_have_more_points_than_raw() {
 }
 
 #[test]
-fn velocity_profile_has_samples() {
+fn kinematics_has_samples_with_valid_heading() {
     let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
     let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
     let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
-    let samples = extract_velocity_profile(&profile);
-    assert!(!samples.is_empty());
-    for &(s, v) in &samples {
-        assert!(s >= 0.0);
-        assert!(v >= 0.0);
+    let kin = sample_kinematics(&outcome, &profile);
+    assert!(!kin.s.is_empty());
+    for i in 0..kin.s.len() {
+        assert!(kin.s[i] >= 0.0);
+        assert!(kin.v[i] >= 0.0);
+        let h_len = (kin.heading_x[i].powi(2) + kin.heading_y[i].powi(2)).sqrt();
+        assert!((h_len - 1.0).abs() < 1e-6, "heading not unit: {h_len}");
     }
 }
 
