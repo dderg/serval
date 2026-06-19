@@ -364,6 +364,7 @@ class MotionEngineWrapper:
         post_processors,
         mcus,
         kinematics_axes,
+        cartesian_limits,
         window_capacity=32,
         beta_max_iters=10,
     ):
@@ -373,6 +374,7 @@ class MotionEngineWrapper:
             post_processors,
             mcus,
             kinematics_axes,
+            cartesian_limits,
             window_capacity,
             beta_max_iters,
         )

@@ -165,11 +165,18 @@ class CaptureEngine:
         self.init_planner_args = None
 
     def init_planner(
-        self, axis_sections, limit_sections, pp_sections, topology, kin_axes
+        self,
+        axis_sections,
+        limit_sections,
+        pp_sections,
+        topology,
+        kin_axes,
+        cartesian_limits,
     ):
         self.init_planner_args = {
             "topology": topology,
             "kinematics_axes": kin_axes,
+            "cartesian_limits": cartesian_limits,
         }
 
 
@@ -177,6 +184,11 @@ def test_init_planner_passes_claimed_axes():
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
     motion.limit_sections = []
     motion.post_processor_sections = []
+    motion.max_velocity = 300.0
+    motion.max_accel = 3000.0
+    motion.max_jerk = 6000.0
+    motion.max_z_velocity = 15.0
+    motion.max_z_accel = 100.0
     engine = CaptureEngine()
     motion.engine = engine
 

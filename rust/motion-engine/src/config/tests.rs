@@ -453,6 +453,7 @@ fn limit_set_names_follow_section_order() {
                 max_jerk: None,
             },
         ],
+        cartesian: CartesianLimits::default(),
         runtime_caps: RuntimeCaps::default(),
         post_processors,
         window_capacity: 32,

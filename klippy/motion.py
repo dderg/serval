@@ -341,7 +341,7 @@ class Motion:
         dx, dy, dz, de = move.axes_d
         feedrate = move.move_d / move.min_move_t
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
-            feedrate = min(feedrate, self._axis_limit("z", "max_velocity"))
+            feedrate = min(feedrate, self.max_z_velocity)
         logging.info(
             "[engine-trace] move: newpos=%s speed=%s dx=%.4f dy=%.4f "
             "dz=%.4f de=%.4f feedrate=%.4f",
@@ -391,7 +391,7 @@ class Motion:
         # curve, so cap directly. The Rust optimizer re-derives per-axis limits.
         feedrate = min(speed, self.max_velocity)
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
-            feedrate = min(feedrate, self._axis_limit("z", "max_velocity"))
+            feedrate = min(feedrate, self.max_z_velocity)
         self._fire_active_callbacks([dx, dy, dz, de])
         engine_lmt_before = self.engine.get_last_move_time()
         submit(dx, dy, dz, de, feedrate)
@@ -524,14 +524,10 @@ class Motion:
         lookahead_empty = print_time <= est_print_time
         return print_time, est_print_time, lookahead_empty
 
-    LEGACY_LIMIT_KEYS = (
-        "max_velocity",
-        "max_accel",
+    UNSUPPORTED_LIMIT_KEYS = (
         "max_accel_to_decel",
         "minimum_cruise_ratio",
         "square_corner_velocity",
-        "max_z_velocity",
-        "max_z_accel",
     )
 
     def _read_axes(self, config):
@@ -610,15 +606,26 @@ class Motion:
                     )
 
     def _read_limits(self, config):
-        for key in self.LEGACY_LIMIT_KEYS:
+        for key in self.UNSUPPORTED_LIMIT_KEYS:
             if config.get(key, None) is not None:
-                raise config.error(
-                    "[printer] %s is not supported: declare motion limits in "
-                    "[limit <name>] sections (axes + max_velocity/max_accel/"
-                    "max_jerk)" % key
-                )
+                raise config.error("[printer] %s is not supported" % key)
+        self.max_velocity = config.getfloat("max_velocity", above=0.0)
+        self.max_accel = config.getfloat("max_accel", above=0.0)
+        self.max_jerk = config.getfloat(
+            "max_jerk", self.max_accel * 2.0, above=0.0
+        )
+        self.max_z_velocity = config.getfloat(
+            "max_z_velocity",
+            self.max_velocity,
+            above=0.0,
+            maxval=self.max_velocity,
+        )
+        self.max_z_accel = config.getfloat(
+            "max_z_accel", self.max_accel, above=0.0, maxval=self.max_accel
+        )
+        # [limit <name>] sections are still parsed so existing configs load,
+        # but the planner now reads its motion limits from [printer] above.
         self.limit_sections = []
-        velocities, accels = [], []
         for sc in config.get_prefix_sections("limit "):
             name = sc.get_name().split(None, 1)[1]
             axes = [a.strip().lower() for a in sc.getlist("axes")]
@@ -626,22 +633,6 @@ class Motion:
             a = sc.getfloat("max_accel", None, above=0.0)
             j = sc.getfloat("max_jerk", None, above=0.0)
             self.limit_sections.append((name, axes, v, a, j))
-            if v is not None:
-                velocities.append(v)
-            if a is not None:
-                accels.append(a)
-        if not self.limit_sections:
-            raise config.error(
-                "at least one [limit <name>] section is required "
-                "(every axis needs max_velocity and max_accel coverage)"
-            )
-        if not velocities or not accels:
-            raise config.error(
-                "[limit] sections must declare max_velocity and max_accel "
-                "coverage"
-            )
-        self.max_velocity = max(velocities)
-        self.max_accel = max(accels)
         self.min_cruise_ratio = 0.0
         self.square_corner_velocity = 0.0
         self.orig_cfg = {}
@@ -833,6 +824,13 @@ class Motion:
                 list(self.post_processor_sections),
                 topology,
                 self.kin.claimed_axes(),
+                (
+                    self.max_velocity,
+                    self.max_accel,
+                    self.max_jerk,
+                    self.max_z_velocity,
+                    self.max_z_accel,
+                ),
             )
             self._configure_axes_per_mcu(engine_mcus)
 

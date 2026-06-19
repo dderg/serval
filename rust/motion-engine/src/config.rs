@@ -383,6 +383,7 @@ impl Default for AxisRegistry {
 pub struct PlannerConfig {
     pub axis_registry: AxisRegistry,
     pub limit_sections: Vec<LimitSection>,
+    pub cartesian: CartesianLimits,
     pub runtime_caps: RuntimeCaps,
     pub post_processors: PostProcessorSet,
     pub window_capacity: usize,
@@ -405,6 +406,62 @@ pub struct LimitSection {
 pub struct RuntimeCaps {
     pub velocity: Option<f64>,
     pub accel: Option<f64>,
+}
+
+/// Mainline-style global motion limits read from `[printer]`: one velocity /
+/// accel / jerk for the XY plane plus separate Z caps. The streaming geometry
+/// pipeline projects these per move (Z caps bind only on Z-bearing moves), so
+/// an XY move never inherits the slower Z limit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CartesianLimits {
+    pub max_velocity: f64,
+    pub max_accel: f64,
+    pub max_jerk: f64,
+    pub max_z_velocity: f64,
+    pub max_z_accel: f64,
+}
+
+impl Default for CartesianLimits {
+    fn default() -> Self {
+        Self {
+            max_velocity: 300.0,
+            max_accel: 3000.0,
+            max_jerk: 100_000.0,
+            max_z_velocity: 15.0,
+            max_z_accel: 100.0,
+        }
+    }
+}
+
+impl CartesianLimits {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let ok = |c: f64| c.is_finite() && c > 0.0;
+        if !(ok(self.max_velocity)
+            && ok(self.max_accel)
+            && ok(self.max_jerk)
+            && ok(self.max_z_velocity)
+            && ok(self.max_z_accel))
+        {
+            return Err("[printer] motion limits must be finite and positive");
+        }
+        Ok(())
+    }
+
+    /// The scalar path caps for a move with spatial deltas `(dx, dy, dz)`. The Z
+    /// caps project onto the path by the move's Z direction cosine, mirroring
+    /// mainline's `move.limit_speed(max_z_* / |z_unit|)`.
+    #[must_use]
+    pub fn for_move(&self, dx: f64, dy: f64, dz: f64) -> (f64, f64) {
+        let d = (dx * dx + dy * dy + dz * dz).sqrt();
+        let mut v = self.max_velocity;
+        let mut a = self.max_accel;
+        if d > 1e-9 && dz.abs() > 1e-9 {
+            let z_unit = dz.abs() / d;
+            v = v.min(self.max_z_velocity / z_unit);
+            a = a.min(self.max_z_accel / z_unit);
+        }
+        (v, a)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -604,6 +661,7 @@ impl Default for PlannerConfig {
                     max_jerk: None,
                 },
             ],
+            cartesian: CartesianLimits::default(),
             runtime_caps: RuntimeCaps::default(),
             post_processors,
             window_capacity: 32,

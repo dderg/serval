@@ -2515,6 +2515,7 @@ impl PyMotionEngine {
         post_processors,
         mcus,
         kinematics_axes,
+        cartesian_limits,
         window_capacity = 32,
         beta_max_iters = 10,
     ))]
@@ -2526,6 +2527,7 @@ impl PyMotionEngine {
         post_processors: Vec<(String, String, Vec<(String, f64)>)>,
         mcus: Vec<(u32, Vec<u8>, u8)>,
         kinematics_axes: Vec<String>,
+        cartesian_limits: (f64, f64, f64, f64, f64),
         window_capacity: usize,
         beta_max_iters: u8,
     ) -> PyResult<()> {
@@ -2581,11 +2583,26 @@ impl PyMotionEngine {
             })
             .collect::<PyResult<_>>()?;
 
+        let (max_velocity, max_accel, max_jerk, max_z_velocity, max_z_accel) = cartesian_limits;
+        let cartesian = config::CartesianLimits {
+            max_velocity,
+            max_accel,
+            max_jerk,
+            max_z_velocity,
+            max_z_accel,
+        };
+        cartesian.validate().map_err(PyValueError::new_err)?;
+
         let mut cfg = config::PlannerConfig::default();
         cfg.axis_registry = axis_registry;
         cfg.limit_sections = limit_sections;
-        cfg.to_temporal_limits()
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cfg.cartesian = cartesian;
+        // [limit <name>] sections are no longer the motion-limit source ([printer]
+        // is), but when present they must still be internally consistent.
+        if !cfg.limit_sections.is_empty() {
+            cfg.to_temporal_limits()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        }
         cfg.post_processors = post_processor_set;
         cfg.window_capacity = window_capacity;
         cfg.beta_max_iters = beta_max_iters;
@@ -3262,14 +3279,21 @@ impl PyMotionEngine {
                     "planner already initialized (raced)",
                 ));
             }
+            let cart = cfg.cartesian;
             let stream_cfg = crate::stream::StreamConfig {
                 chain: geometry::ChainFitConfig::default(),
-                velocity: cfg.path_velocity_config(),
+                velocity: geometry::VelocityConfig {
+                    max_jerk_mm_s3: cart.max_jerk,
+                    ..geometry::VelocityConfig::default()
+                },
                 fit_tol_mm: cfg.fit_tolerance_mm,
                 keep_secs: STREAM_KEEP_SECS,
-                limits: cfg
-                    .path_velocity_limits()
-                    .map_err(PyRuntimeError::new_err)?,
+                limits: geometry::VelocityLimits::try_new(
+                    cart.max_velocity,
+                    cart.max_accel,
+                    config::DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
+                )
+                .map_err(PyRuntimeError::new_err)?,
             };
             let home = vec![0.0; cfg.axis_registry.n_axes()];
             *guard = Some(StreamPlannerHandle::spawn(
@@ -3314,12 +3338,18 @@ impl PyMotionEngine {
                 }
             };
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            let limits = self
+            let (max_v, max_a) = self
                 .planner_config
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .path_velocity_limits()
-                .map_err(PyRuntimeError::new_err)?;
+                .cartesian
+                .for_move(dx, dy, dz);
+            let limits = geometry::VelocityLimits::try_new(
+                max_v,
+                max_a,
+                config::DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
+            )
+            .map_err(PyRuntimeError::new_err)?;
             let m =
                 classify::build_move(pos, dx, dy, dz, extruder_axis, e_delta, limits, feedrate, 0)
                     .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
