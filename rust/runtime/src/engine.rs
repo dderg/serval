@@ -129,8 +129,14 @@ impl Engine {
     }
 }
 
-fn idle_phase_active(axis: &AxisState) -> bool {
-    axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8
+fn idle_phase_slew_pending(axis: &AxisState) -> bool {
+    if axis.mode.load(Ordering::Acquire) != StepMode::Phase as u8 {
+        return false;
+    }
+    axis.steppers.iter().any(|s| {
+        s.phase_offset_microsteps.load(Ordering::Acquire)
+            != s.phase_offset_target.load(Ordering::Acquire)
+    })
 }
 
 impl Engine {
@@ -331,7 +337,7 @@ impl Engine {
                         }
                     }
                     None => {
-                        if !idle_phase_active(axis) {
+                        if !idle_phase_slew_pending(axis) {
                             continue;
                         }
                         active = true;
