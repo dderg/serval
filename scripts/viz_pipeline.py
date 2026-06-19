@@ -14,20 +14,21 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-KLIPPY_ENV_PYTHON = Path.home() / "klippy-env" / "bin" / "python"
+KLIPPY_ENV = Path.home() / "klippy-env"
 
 
 def _reexec_in_printer_env():
     # Run under the printer's virtualenv so viz shares the planner's exact
     # interpreter (cffi/chelper + klippy's config loader). Before importing
-    # matplotlib, which the launching interpreter may not have.
-    if (
-        KLIPPY_ENV_PYTHON.exists()
-        and Path(sys.executable).resolve() != KLIPPY_ENV_PYTHON.resolve()
-    ):
+    # matplotlib, which the launching interpreter may not have. Compare
+    # sys.prefix, not the executable: a venv's bin/python is a symlink to the
+    # base interpreter, so resolving the path can't tell the two apart.
+    venv_python = KLIPPY_ENV / "bin" / "python"
+    in_venv = Path(sys.prefix).resolve() == KLIPPY_ENV.resolve()
+    if venv_python.exists() and not in_venv:
         os.execv(
-            str(KLIPPY_ENV_PYTHON),
-            [str(KLIPPY_ENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]],
+            str(venv_python),
+            [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
         )
 
 
