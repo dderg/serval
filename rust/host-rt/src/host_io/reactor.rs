@@ -1309,9 +1309,13 @@ impl Reactor {
         let t_tick = std::time::Instant::now();
 
         let s1 = std::time::Instant::now();
+        let mut had_mcu_call = false;
         for _ in 0..MAX_SUBMITS_PER_ITER {
             match self.submission_rx.try_recv() {
-                Ok(cmd) => self.handle_command(cmd),
+                Ok(cmd) => {
+                    had_mcu_call |= matches!(&cmd, ReactorCommand::McuCall { .. });
+                    self.handle_command(cmd);
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.state = ReactorState::Closed;
@@ -1331,7 +1335,7 @@ impl Reactor {
         let t_step3 = s3.elapsed();
 
         let s3b = std::time::Instant::now();
-        if self.transport_state.pending.is_empty() {
+        if !had_mcu_call && self.transport_state.pending.is_empty() {
             self.drain_passthrough();
         }
         let t_step3b = s3b.elapsed();
