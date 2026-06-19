@@ -420,38 +420,9 @@ fn dispatch_phase(axis_idx: usize, axis: &mut AxisConfig, shared: &SharedState, 
         stepper.last_coil_B.store(coil_b, Ordering::Release);
 
         if stepper.tmc_cs_oid.is_some() {
-            let phase_motor_count = shared.phase_motor_count.load(Ordering::Acquire) as usize;
-            let mut found_motor_idx: Option<u8> = None;
-            {
-                let mut j: usize = 0;
-                for earlier in &axis.steppers {
-                    if core::ptr::eq(earlier as *const _, stepper as *const _) {
-                        break;
-                    }
-                    if earlier.tmc_cs_oid.is_some() {
-                        j += 1;
-                    }
-                }
-                let mut match_count: usize = 0;
-                for m in 0..phase_motor_count.min(crate::state::MAX_STEPPER_OIDS) {
-                    // SAFETY: `m < phase_motor_count.min(MAX_STEPPER_OIDS)`, so
-                    // `m < MAX_STEPPER_OIDS == phase_slot_idx.len()`.
-                    #[allow(clippy::indexing_slicing)]
-                    let slot = shared.phase_slot_idx[m].load(Ordering::Acquire);
-                    if slot as usize == axis_idx {
-                        if match_count == j {
-                            #[allow(clippy::cast_possible_truncation)]
-                            {
-                                found_motor_idx = Some(m as u8);
-                            }
-                            break;
-                        }
-                        match_count += 1;
-                    }
-                }
-            }
-
-            let Some(motor_idx) = found_motor_idx else {
+            let Some(motor_idx) =
+                crate::phase_handover::motor_idx_for(shared, axis_idx, axis, stepper)
+            else {
                 crate::fault_helpers::raise_phase_motor_unmapped(
                     shared,
                     axis_idx,

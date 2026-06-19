@@ -29,5 +29,19 @@ pub fn lookup(mscount: u16, _direction: i8) -> (i16, i16) {
     LUT_ENTRIES[idx]
 }
 
+/// `(coil_A, coil_B)` to preload into a TMC5160's XDIRECT register so the
+/// driven coil currents already match the chip's microstep counter `mscnt`
+/// at the instant `direct_mode` latches — no torque step entering phase mode.
+///
+/// Reads the same `PHASE_LUT` the TIM5 dispatch path indexes, so the preload
+/// is bit-identical to the value the ISR would drive at that phase. `mscnt` is
+/// masked to the 10-bit electrical-cycle width.
+#[inline]
+pub fn coil_for_phase(mscnt: u16) -> (i16, i16) {
+    let idx = (mscnt as usize) & (MOTOR_PERIOD - 1);
+    #[allow(clippy::indexing_slicing)] // idx masked to in-bounds by the line above
+    PHASE_LUT[idx]
+}
+
 #[cfg(test)]
 mod tests;

@@ -176,5 +176,50 @@ pub fn raise_overlay_unsupported(shared: &SharedState, axis_idx: usize, mask: u8
     emit_fault_log(FaultCode::OverlayUnsupported, detail);
 }
 
+#[inline]
+pub fn raise_phase_enter_precondition_failed(
+    shared: &SharedState,
+    axis_idx: usize,
+    stepper_oid: u8,
+) {
+    let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(stepper_oid);
+    shared.fault_detail.store(detail, Ordering::Release);
+    shared.last_error.store(
+        FaultCode::PhaseEnterPreconditionFailed.as_i32(),
+        Ordering::Release,
+    );
+    emit_fault_log(FaultCode::PhaseEnterPreconditionFailed, detail);
+}
+
+#[inline]
+pub fn raise_gconf_verify_failed(shared: &SharedState, motor_idx: u8, observed: u32) {
+    let detail = (u32::from(motor_idx) << 24) | (observed & 0x00FF_FFFF);
+    shared.fault_detail.store(detail, Ordering::Release);
+    shared
+        .last_error
+        .store(FaultCode::GconfVerifyFailed.as_i32(), Ordering::Release);
+    emit_fault_log(FaultCode::GconfVerifyFailed, detail);
+}
+
+#[inline]
+pub fn raise_mscnt_read_timeout(shared: &SharedState, motor_idx: u8) {
+    let detail = u32::from(motor_idx) << 24;
+    shared.fault_detail.store(detail, Ordering::Release);
+    shared
+        .last_error
+        .store(FaultCode::MscntReadTimeout.as_i32(), Ordering::Release);
+    emit_fault_log(FaultCode::MscntReadTimeout, detail);
+}
+
+#[inline]
+pub fn raise_phase_exit_desync(shared: &SharedState, axis_idx: usize, observed_phase: u16) {
+    let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(observed_phase);
+    shared.fault_detail.store(detail, Ordering::Release);
+    shared
+        .last_error
+        .store(FaultCode::PhaseExitDesync.as_i32(), Ordering::Release);
+    emit_fault_log(FaultCode::PhaseExitDesync, detail);
+}
+
 #[cfg(test)]
 mod tests;

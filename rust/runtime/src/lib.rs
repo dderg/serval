@@ -39,6 +39,7 @@ pub mod motion_core;
 pub mod per_axis_timer;
 pub mod phase_handover;
 pub mod phase_lut;
+pub mod phase_spi;
 pub mod piece_ring;
 pub mod spi_queue;
 pub mod state;

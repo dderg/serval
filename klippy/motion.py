@@ -1167,8 +1167,6 @@ class Motion:
                 any_phase_stepping,
                 len(phase_configs),
             )
-            # phase_stepping_enable_spi is sent later from
-            # TMC5160._xdirect_preload, after TMC register init.
 
     def cmd_DIAG_DUMP(self, gcmd):
         sent = []

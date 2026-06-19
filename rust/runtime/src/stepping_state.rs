@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicI16, AtomicI32, AtomicU8};
+use core::sync::atomic::{AtomicBool, AtomicI16, AtomicI32, AtomicU8, AtomicU32};
 use heapless::Vec;
 
 use crate::motion_core::ArmedPiece;
@@ -32,6 +32,15 @@ pub struct StepperRef {
     pub phase_offset_microsteps: AtomicI32,
     pub phase_offset_target: AtomicI32,
     pub last_phase_target: AtomicI32,
+    /// MSCNT read from the chip when this stepper entered phase mode. The
+    /// chip's microstep counter is frozen by `direct_mode`, so exit walks the
+    /// driven angle back to this value before clearing `direct_mode` —
+    /// no torque step. `-1` until the first enter.
+    pub phase_enter_mscnt: AtomicI32,
+    /// GCONF read from the chip immediately before `direct_mode` was set on
+    /// enter. Restored verbatim on exit so `en_pwm_mode` (and every other bit
+    /// the host configured) reconverges with the host's field cache.
+    pub phase_enter_gconf: AtomicU32,
 }
 
 impl StepperRef {
@@ -46,6 +55,8 @@ impl StepperRef {
             phase_offset_microsteps: AtomicI32::new(0),
             phase_offset_target: AtomicI32::new(0),
             last_phase_target: AtomicI32::new(0),
+            phase_enter_mscnt: AtomicI32::new(-1),
+            phase_enter_gconf: AtomicU32::new(0),
         }
     }
 }
@@ -76,6 +87,10 @@ pub struct AxisState {
     pub p_prev: f32,
     pub v_prev: f32,
     pub overlay_last_p: f32,
+    /// Set across a phase-mode enter/exit register dance so the piece-arm
+    /// path refuses to arm this axis mid-handover (closes the TOCTOU between
+    /// the motion-idle gate and the `mode` flip while the SPI sequence runs).
+    pub handover_in_progress: AtomicBool,
 }
 
 impl AxisState {
@@ -90,6 +105,7 @@ impl AxisState {
             p_prev: 0.0,
             v_prev: 0.0,
             overlay_last_p: 0.0,
+            handover_in_progress: AtomicBool::new(false),
         }
     }
 

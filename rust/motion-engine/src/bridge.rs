@@ -3091,8 +3091,6 @@ impl PyMotionEngine {
                     }
                 }
 
-                let dispatch_wall_start = std::time::Instant::now();
-
                 let project = |mcu_id: u32, host_secs: f64| -> u64 {
                     let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
                     r.host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(mcu_id), host_secs)
@@ -3145,19 +3143,6 @@ impl PyMotionEngine {
                     pump_tx_for_cb
                         .send(crate::pump::PumpMsg::Enqueue(m))
                         .map_err(|_| DispatchError::PumpGone)?;
-                }
-
-                let dispatch_wall_us = dispatch_wall_start.elapsed().as_micros() as u64;
-                if fresh {
-                    tracing::warn!(
-                        subsystem = "motion",
-                        event = "dispatch_fresh_timing",
-                        dispatch_wall_us,
-                        host_now,
-                        t0,
-                        seg_t_start = seg.t_start,
-                        "[dispatch-timing] fresh segment pipeline"
-                    );
                 }
 
                 counter_for_cb.fetch_add(1, Ordering::Relaxed);

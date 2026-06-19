@@ -191,6 +191,10 @@ pub enum FaultCode {
     UnknownStepMode = -312,
     PhaseMotorUnmapped = -313,
     OverlayUnsupported = -314,
+    PhaseEnterPreconditionFailed = -315,
+    GconfVerifyFailed = -316,
+    MscntReadTimeout = -317,
+    PhaseExitDesync = -318,
 }
 
 impl FaultCode {
@@ -220,6 +224,7 @@ impl FaultCode {
     /// assert_eq!(FaultCode::from_u16(-312i16 as u16), Some(FaultCode::UnknownStepMode));
     /// assert_eq!(FaultCode::from_u16(-313i16 as u16), Some(FaultCode::PhaseMotorUnmapped));
     /// assert_eq!(FaultCode::from_u16(-314i16 as u16), Some(FaultCode::OverlayUnsupported));
+    /// assert_eq!(FaultCode::from_u16(-318i16 as u16), Some(FaultCode::PhaseExitDesync));
     /// assert_eq!(FaultCode::from_u16(1), None);
     /// ```
     #[allow(clippy::cast_possible_wrap)] // intentional: sign-extend u16 → i16 → i32
@@ -291,6 +296,10 @@ impl FaultCode {
             -312 => Self::UnknownStepMode,
             -313 => Self::PhaseMotorUnmapped,
             -314 => Self::OverlayUnsupported,
+            -315 => Self::PhaseEnterPreconditionFailed,
+            -316 => Self::GconfVerifyFailed,
+            -317 => Self::MscntReadTimeout,
+            -318 => Self::PhaseExitDesync,
             _ => return None,
         })
     }
@@ -373,6 +382,10 @@ impl FaultCode {
             Self::UnknownStepMode => "UnknownStepMode",
             Self::PhaseMotorUnmapped => "PhaseMotorUnmapped",
             Self::OverlayUnsupported => "OverlayUnsupported",
+            Self::PhaseEnterPreconditionFailed => "PhaseEnterPreconditionFailed",
+            Self::GconfVerifyFailed => "GconfVerifyFailed",
+            Self::MscntReadTimeout => "MscntReadTimeout",
+            Self::PhaseExitDesync => "PhaseExitDesync",
         }
     }
 }

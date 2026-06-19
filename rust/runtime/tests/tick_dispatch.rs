@@ -20,6 +20,8 @@ fn make_stepper() -> StepperRef {
         phase_offset_microsteps: AtomicI32::new(0),
         phase_offset_target: AtomicI32::new(0),
         last_phase_target: AtomicI32::new(0),
+        phase_enter_mscnt: AtomicI32::new(-1),
+        phase_enter_gconf: core::sync::atomic::AtomicU32::new(0),
     }
 }
 

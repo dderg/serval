@@ -26,6 +26,25 @@ fn all_entries_within_amplitude() {
 }
 
 #[test]
+fn coil_for_phase_matches_dispatch_table() {
+    use super::coil_for_phase;
+    for i in 0..PHASE_LUT_SIZE {
+        assert_eq!(
+            coil_for_phase(i as u16),
+            PHASE_LUT[i],
+            "coil_for_phase({i}) diverged from PHASE_LUT[{i}]"
+        );
+    }
+}
+
+#[test]
+fn coil_for_phase_wraps_past_one_cycle() {
+    use super::coil_for_phase;
+    assert_eq!(coil_for_phase(PHASE_LUT_SIZE as u16), PHASE_LUT[0]);
+    assert_eq!(coil_for_phase(PHASE_LUT_SIZE as u16 + 7), PHASE_LUT[7]);
+}
+
+#[test]
 fn legacy_lut_entries_anchors() {
     use super::{CURRENT_AMPLITUDE, LUT_ENTRIES, MOTOR_PERIOD};
     // LUT_ENTRIES[i] = (sin, cos)

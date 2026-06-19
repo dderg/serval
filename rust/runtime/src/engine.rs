@@ -553,6 +553,34 @@ impl Engine {
         crate::phase_handover::query(&self.stepping_axes, stepper_oid)
     }
 
+    /// Switch a phase-stepping handover group between Pulse and Phase entirely
+    /// on the MCU. `mode`: [`MODE_PHASE_ENTER`], [`MODE_BEGIN_EXIT_WALK`], or
+    /// [`MODE_PULSE_FINALIZE`]. `oids` lists every stepper of the group (the
+    /// corexy A/B pair is one group). Returns `0` or a negative [`FaultCode`].
+    ///
+    /// [`MODE_PHASE_ENTER`]: crate::phase_handover::MODE_PHASE_ENTER
+    /// [`MODE_BEGIN_EXIT_WALK`]: crate::phase_handover::MODE_BEGIN_EXIT_WALK
+    /// [`MODE_PULSE_FINALIZE`]: crate::phase_handover::MODE_PULSE_FINALIZE
+    /// [`FaultCode`]: crate::error::FaultCode
+    pub fn set_axis_mode_group(
+        &self,
+        shared: &SharedState,
+        axis_idx: u8,
+        mode: u8,
+        oids: &[u8],
+    ) -> i32 {
+        use crate::phase_handover::{
+            MODE_BEGIN_EXIT_WALK, MODE_PHASE_ENTER, MODE_PULSE_FINALIZE, enter_group,
+            exit_begin_group, exit_finalize_group,
+        };
+        match mode {
+            MODE_PHASE_ENTER => enter_group(&self.stepping_axes, shared, axis_idx, oids),
+            MODE_BEGIN_EXIT_WALK => exit_begin_group(&self.stepping_axes, shared, oids),
+            MODE_PULSE_FINALIZE => exit_finalize_group(&self.stepping_axes, shared, oids),
+            _ => crate::error::FaultCode::InvalidArg.as_i32(),
+        }
+    }
+
     pub fn seed_position(&mut self, xyz: [f32; 3]) {
         use core::sync::atomic::Ordering;
         let motor_positions = [xyz[0], xyz[1], xyz[2], 0.0_f32, 0.0, 0.0, 0.0, 0.0];

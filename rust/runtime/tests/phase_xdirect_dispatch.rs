@@ -22,6 +22,8 @@ fn make_phase_stepper(stepper_oid: u8, tmc_cs_oid: u8) -> StepperRef {
         phase_offset_microsteps: AtomicI32::new(0),
         phase_offset_target: AtomicI32::new(0),
         last_phase_target: AtomicI32::new(0),
+        phase_enter_mscnt: AtomicI32::new(-1),
+        phase_enter_gconf: core::sync::atomic::AtomicU32::new(0),
     }
 }
 
@@ -155,6 +157,8 @@ fn phase_dispatch_no_capture_for_pulse_only_stepper() {
         phase_offset_microsteps: AtomicI32::new(0),
         phase_offset_target: AtomicI32::new(0),
         last_phase_target: AtomicI32::new(0),
+        phase_enter_mscnt: AtomicI32::new(-1),
+        phase_enter_gconf: core::sync::atomic::AtomicU32::new(0),
     };
 
     configure_phase_slot(&shared, 0, 0);

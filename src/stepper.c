@@ -286,26 +286,6 @@ command_runtime_diag_dump(uint32_t *args)
 DECL_COMMAND(command_runtime_diag_dump, "runtime_diag_dump");
 
 void
-command_kalico_phase_stepping_enable_spi(uint32_t *args)
-{
-    (void)args;
-    extern void phase_stepping_enable_writes(void);
-    phase_stepping_enable_writes();
-}
-DECL_COMMAND(command_kalico_phase_stepping_enable_spi,
-             "kalico_phase_stepping_enable_spi");
-
-void
-command_kalico_phase_stepping_disable_spi(uint32_t *args)
-{
-    (void)args;
-    extern void phase_stepping_disable_writes(void);
-    phase_stepping_disable_writes();
-}
-DECL_COMMAND(command_kalico_phase_stepping_disable_spi,
-             "kalico_phase_stepping_disable_spi");
-
-void
 command_kalico_set_axis_mode(uint32_t *args)
 {
     if (!runtime_handle)
@@ -318,6 +298,40 @@ command_kalico_set_axis_mode(uint32_t *args)
 }
 DECL_COMMAND(command_kalico_set_axis_mode,
              "kalico_set_axis_mode axis_idx=%c mode=%c");
+
+void
+command_kalico_set_axis_mode_group(uint32_t *args)
+{
+    if (!runtime_handle)
+        shutdown("kalico_set_axis_mode_group before runtime init");
+    uint8_t axis_idx = args[0];
+    uint8_t mode = args[1];
+    uint8_t oid_len = args[2];
+    uint8_t *oids = command_decode_ptr(args[3]);
+    int32_t rc = runtime_set_axis_mode_group(
+        runtime_handle, axis_idx, mode, oids, oid_len);
+    switch (rc) {
+    case 0:
+        break;
+    case -31:
+        shutdown("kalico_set_axis_mode_group: motion in progress");
+    case -313:
+        shutdown("kalico_set_axis_mode_group: phase motor unmapped");
+    case -315:
+        shutdown("kalico_set_axis_mode_group: precondition failed"
+                 " (CHOPCONF toff=0 or stepper has no TMC)");
+    case -316:
+        shutdown("kalico_set_axis_mode_group: GCONF direct_mode verify failed");
+    case -317:
+        shutdown("kalico_set_axis_mode_group: TMC register SPI timeout");
+    case -318:
+        shutdown("kalico_set_axis_mode_group: phase exit desync");
+    default:
+        shutdown("kalico_set_axis_mode_group rejected");
+    }
+}
+DECL_COMMAND(command_kalico_set_axis_mode_group,
+             "kalico_set_axis_mode_group axis_idx=%c mode=%c stepper_oids=%*s");
 
 void
 command_kalico_set_stepper_offset(uint32_t *args)
@@ -352,21 +366,6 @@ command_kalico_phase_jog_to(uint32_t *args)
 DECL_COMMAND(command_kalico_phase_jog_to,
              "kalico_phase_jog_to oid=%c target_phase=%hu"
              " max_microsteps_per_sample=%hu");
-
-void
-command_kalico_phase_align_to(uint32_t *args)
-{
-    if (!runtime_handle)
-        shutdown("kalico_phase_align_to before runtime init");
-    uint8_t stepper_oid = args[0];
-    uint16_t target_phase = args[1];
-    int32_t rc = runtime_phase_align_to(
-        runtime_handle, stepper_oid, target_phase);
-    if (rc != 0)
-        shutdown("kalico_phase_align_to rejected (motion in progress or bad args)");
-}
-DECL_COMMAND(command_kalico_phase_align_to,
-             "kalico_phase_align_to oid=%c target_phase=%hu");
 
 void
 command_kalico_get_phase_state(uint32_t *args)

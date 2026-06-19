@@ -45,6 +45,17 @@ uint32_t phase_spi_get_write_count(void);
 void phase_stepping_enable_writes(void);
 void phase_stepping_disable_writes(void);
 
+// Blocking TMC5160 register access for the MCU-resident phase-mode handover,
+// each acquiring phase_spi_busy once (mutual exclusion with the TIM5 ISR
+// XDIRECT writer). Called from the Klipper task via Rust FFI, never the ISR.
+// Return 0 on success, -1 on a per-byte SPI timeout (caller fails loud).
+// A TMC read returns the previously-addressed register on the next access, so
+// phase_spi_read_register issues a prime then a capture transfer internally.
+int phase_spi_write_register(uint8_t motor_idx, uint8_t addr, uint32_t val);
+int phase_spi_read_register(uint8_t motor_idx, uint8_t addr, uint32_t *out);
+int phase_spi_rmw_register(uint8_t motor_idx, uint8_t addr, uint32_t mask,
+                           uint32_t set_bits, uint32_t *verified);
+
 // Bare transfer for ISR callers that already hold phase_spi_busy. External
 // callers MUST use spi_transfer instead — calling spi_transfer while holding
 // the flag deadlocks on the spin-acquire. H7-only (only stm32h7_spi.c gates on

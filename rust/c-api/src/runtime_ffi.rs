@@ -907,6 +907,9 @@ pub mod exports {
             else {
                 return RUNTIME_ERR_INVALID_ARG;
             };
+            if axis.handover_in_progress.load(Ordering::Acquire) {
+                return runtime::error::FaultCode::MotionInProgress.as_i32();
+            }
             if !axis.ring.is_configured() {
                 return RUNTIME_ERR_INVALID_ARG;
             }
@@ -948,6 +951,38 @@ pub mod exports {
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
             (*isr_ptr).engine.set_axis_mode(axis_idx, new_mode)
+        }
+    }
+
+    /// Switch a phase-stepping handover group between Pulse and Phase. `oids`
+    /// points to `oid_len` stepper OIDs (the whole group); the MCU runs the
+    /// register dance locally. Foreground-only.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn runtime_set_axis_mode_group(
+        rt: *mut Runtime,
+        axis_idx: u8,
+        mode: u8,
+        oids: *const u8,
+        oid_len: u8,
+    ) -> i32 {
+        if rt.is_null() || (oids.is_null() && oid_len != 0) {
+            return RUNTIME_ERR_NULL_PTR;
+        }
+        if !INIT_DONE.load(Ordering::Acquire) {
+            return RUNTIME_ERR_NOT_INIT;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        // SAFETY: foreground-only; §11.2 raw-pointer projection. `oids`/`oid_len`
+        // describe a host-owned byte buffer valid for this call (boundary B4);
+        // &SharedState is atomics-only, independent of &mut IsrState.
+        unsafe {
+            let slice = core::slice::from_raw_parts(oids, oid_len as usize);
+            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+            let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
+            let shared: &SharedState = &*shared_ptr;
+            (*isr_ptr)
+                .engine
+                .set_axis_mode_group(shared, axis_idx, mode, slice)
         }
     }
 

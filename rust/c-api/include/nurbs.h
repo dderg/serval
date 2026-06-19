@@ -151,6 +151,17 @@ int32_t runtime_seed_position(nurbs_Runtime *rt, int32_t x_q16, int32_t y_q16, i
 
 int32_t runtime_set_axis_mode(nurbs_Runtime *rt, uint8_t axis_idx, uint8_t new_mode);
 
+/**
+ * Switch a phase-stepping handover group between Pulse and Phase. `oids`
+ * points to `oid_len` stepper OIDs (the whole group); the MCU runs the
+ * register dance locally. Foreground-only.
+ */
+int32_t runtime_set_axis_mode_group(nurbs_Runtime *rt,
+                                    uint8_t axis_idx,
+                                    uint8_t mode,
+                                    const uint8_t *oids,
+                                    uint8_t oid_len);
+
 int32_t runtime_set_step_mode(nurbs_Runtime *rt,
                               uint8_t stepper_idx,
                               uint8_t mode,
