@@ -175,6 +175,33 @@ fn seam_velocity_is_continuous_across_the_chain() {
 }
 
 #[test]
+fn decel_into_clothoid_holds_acceleration_across_the_seam() {
+    let (kappa_peak, length, accel) = (0.8_f64, 4.0_f64, 2000.0_f64);
+    let out = outcome(
+        vec![
+            line_move(60.0, 300.0, 300.0, accel, 1),
+            clothoid_move(kappa_peak, length, 300.0, accel, 2),
+            line_move(60.0, 300.0, 300.0, accel, 3),
+        ],
+        Vec::new(),
+    );
+    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let line = &plan.moves[0];
+    assert!(
+        line.exit_v < line.peak_v - 1.0,
+        "the approach line must be decelerating into the clothoid"
+    );
+    let s = &line.samples;
+    let n = s.len();
+    let a_t = s[n - 1].v * (s[n - 1].v - s[n - 2].v) / (s[n - 1].s - s[n - 2].s);
+    assert!(
+        a_t < -0.5 * accel,
+        "tangential accel must ride near -a_max at the clothoid seam (jerk must not \
+         ramp it to zero before the curve); got a_t={a_t}"
+    );
+}
+
+#[test]
 fn sharp_corner_pins_zero() {
     let out = outcome(
         vec![

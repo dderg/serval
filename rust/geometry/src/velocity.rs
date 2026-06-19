@@ -187,11 +187,15 @@ pub fn plan_velocity_warm_start(
 
     let mut v = vec![0.0_f64; n + 1];
     v[0] = entry_v;
+    let mut is_anchor = vec![false; n + 1];
+    is_anchor[0] = true;
+    is_anchor[n] = true;
     for k in 1..n {
         let downstream = &moves[k];
         let blend_half = matches!(downstream.segment.spatial, Some(Segment::Clothoid(_)));
         if stop_lines.contains(&downstream.source.start_line) && !blend_half {
             report.stops += 1;
+            is_anchor[k] = true;
         } else {
             let up = &caps[k - 1].kin;
             let dn = &caps[k].kin;
@@ -203,23 +207,76 @@ pub fn plan_velocity_warm_start(
         }
     }
 
+    let mut run_start_v = vec![0.0_f64; n];
+    let mut arc_from_run_start = vec![0.0_f64; n];
+    {
+        let mut anchor_v = v[0];
+        let mut cum = 0.0;
+        for j in 0..n {
+            if is_anchor[j] {
+                anchor_v = v[j];
+                cum = 0.0;
+            }
+            run_start_v[j] = anchor_v;
+            arc_from_run_start[j] = cum;
+            cum += caps[j].kin.length;
+        }
+    }
+    let mut arc_to_run_end = vec![0.0_f64; n];
+    {
+        let mut cum = 0.0;
+        for j in (0..n).rev() {
+            if is_anchor[j + 1] {
+                cum = 0.0;
+            }
+            arc_to_run_end[j] = cum;
+            cum += caps[j].kin.length;
+        }
+    }
+
     for k in 1..=n {
-        let line_no = moves[k - 1].source.start_line;
-        let reachable = disk::reach_v(&caps[k - 1].kin, v[k - 1], tol)
+        let j = k - 1;
+        let line_no = moves[j].source.start_line;
+        let kin = &caps[j].kin;
+        let disk = disk::disk_reach_v(kin, v[j], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
-        v[k] = v[k].min(reachable);
+        let jerk = scurve::max_reachable_velocity(
+            run_start_v[j],
+            arc_from_run_start[j] + kin.length,
+            kin.accel,
+            kin.jerk,
+        );
+        v[k] = v[k].min(disk).min(jerk);
     }
     for k in (1..n).rev() {
-        let line_no = moves[k].source.start_line;
-        let reachable = disk::reach_v_rev(&caps[k].kin, v[k + 1], tol)
+        let j = k;
+        let line_no = moves[j].source.start_line;
+        let kin = &caps[j].kin;
+        let disk = disk::disk_reach_v_rev(kin, v[k + 1], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
-        v[k] = v[k].min(reachable);
+        let jerk = scurve::max_reachable_velocity(
+            0.0,
+            arc_to_run_end[j] + kin.length,
+            kin.accel,
+            kin.jerk,
+        );
+        v[k] = v[k].min(disk).min(jerk);
     }
     let entry_line_no = moves[0].source.start_line;
-    let entry_brake =
-        disk::reach_v_rev(&caps[0].kin, v[1], tol).ok_or(VelocityError::Diverged {
-            line_no: entry_line_no,
-        })?;
+    let entry_brake = {
+        let kin = &caps[0].kin;
+        let disk =
+            disk::disk_reach_v_rev(kin, v[1], kin.length, tol).ok_or(VelocityError::Diverged {
+                line_no: entry_line_no,
+            })?;
+        let jerk = scurve::max_reachable_velocity(
+            0.0,
+            arc_to_run_end[0] + kin.length,
+            kin.accel,
+            kin.jerk,
+        );
+        disk.min(jerk)
+    };
     if entry_v > entry_brake + VELOCITY_EPS_MM_S {
         return Err(VelocityError::OverCommitted {
             line_no: entry_line_no,
@@ -232,11 +289,18 @@ pub fn plan_velocity_warm_start(
         let line_no = m.source.start_line;
         let entry_v = v[j];
         let exit_v = v[j + 1];
-        let samples: Vec<VelSample> = disk::sample_profile(kin, entry_v, exit_v, tol)
-            .ok_or(VelocityError::Diverged { line_no })?
-            .into_iter()
-            .map(|(s, v)| VelSample { s, v })
-            .collect();
+        let jerk_anchors = disk::JerkAnchors {
+            fwd_v: run_start_v[j],
+            fwd_s: arc_from_run_start[j],
+            bwd_v: 0.0,
+            bwd_s: arc_to_run_end[j],
+        };
+        let samples: Vec<VelSample> =
+            disk::sample_profile(kin, entry_v, exit_v, &jerk_anchors, tol)
+                .ok_or(VelocityError::Diverged { line_no })?
+                .into_iter()
+                .map(|(s, v)| VelSample { s, v })
+                .collect();
         let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
         report.traversal_time_s += traversal_time(&samples);
 

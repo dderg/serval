@@ -11,6 +11,15 @@ fn kin(kappa0: f64, sigma: f64, length: f64, accel: f64, jerk: f64, flat: f64) -
     }
 }
 
+fn single_move_anchors(entry: f64, exit: f64) -> JerkAnchors {
+    JerkAnchors {
+        fwd_v: entry,
+        fwd_s: 0.0,
+        bwd_v: exit,
+        bwd_s: 0.0,
+    }
+}
+
 fn numeric_const_kappa_w(w_in: f64, length: f64, accel: f64, kappa: f64) -> f64 {
     let f = |w: f64| 2.0 * (accel * accel - (kappa * kappa) * (w * w)).max(0.0).sqrt();
     let steps = 200_000u32;
@@ -47,15 +56,17 @@ fn line_reach_is_constant_accel() {
 fn infinite_jerk_reach_is_pure_disk() {
     let k = kin(0.0, 0.05, 4.0, 1000.0, f64::INFINITY, 300.0);
     let pure = disk_reach_v(&k, 50.0, k.length, 1e-7).unwrap();
-    let reached = reach_v(&k, 50.0, 1e-7).unwrap();
+    let jerk = scurve::max_reachable_velocity(50.0, k.length, k.accel, k.jerk);
+    let reached = pure.min(jerk);
     assert!((reached - pure).abs() < 1e-9 * pure.max(1.0));
 }
 
 #[test]
 fn zero_curvature_reach_is_scurve() {
     let k = kin(0.0, 0.0, 4.0, 1000.0, 60_000.0, 300.0);
-    let reached = reach_v(&k, 20.0, 1e-7).unwrap();
+    let disk = disk_reach_v(&k, 20.0, k.length, 1e-7).unwrap();
     let jerk = scurve::max_reachable_velocity(20.0, k.length, k.accel, k.jerk);
+    let reached = disk.min(jerk);
     assert!((reached - jerk).abs() < 1e-9 * jerk);
 }
 
@@ -63,7 +74,7 @@ fn zero_curvature_reach_is_scurve() {
 fn clothoid_samples_respect_the_acceleration_disk() {
     let accel = 1000.0;
     let k = kin(0.0, 0.05, 4.0, accel, f64::INFINITY, 300.0);
-    let samples = sample_profile(&k, 250.0, 70.0, 1e-8).unwrap();
+    let samples = sample_profile(&k, 250.0, 70.0, &single_move_anchors(250.0, 70.0), 1e-8).unwrap();
     for &(s, v) in &samples {
         let kappa = (k.kappa0 + k.sigma * s).abs();
         let a_c = v * v * kappa;
@@ -74,15 +85,15 @@ fn clothoid_samples_respect_the_acceleration_disk() {
 #[test]
 fn sample_profile_is_deterministic() {
     let k = kin(0.0, 0.05, 4.0, 1000.0, 80_000.0, 300.0);
-    let a = sample_profile(&k, 250.0, 70.0, 1e-8);
-    let b = sample_profile(&k, 250.0, 70.0, 1e-8);
+    let a = sample_profile(&k, 250.0, 70.0, &single_move_anchors(250.0, 70.0), 1e-8);
+    let b = sample_profile(&k, 250.0, 70.0, &single_move_anchors(250.0, 70.0), 1e-8);
     assert_eq!(a, b);
 }
 
 #[test]
 fn sample_profile_endpoints_are_entry_and_exit() {
     let k = kin(0.0, 0.05, 4.0, 1000.0, 80_000.0, 300.0);
-    let s = sample_profile(&k, 250.0, 70.0, 1e-8).unwrap();
+    let s = sample_profile(&k, 250.0, 70.0, &single_move_anchors(250.0, 70.0), 1e-8).unwrap();
     assert_eq!(s.first().unwrap().0, 0.0);
     assert_eq!(s.last().unwrap().0, k.length);
     assert_eq!(s.first().unwrap().1, 250.0);

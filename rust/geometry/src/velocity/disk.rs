@@ -122,24 +122,38 @@ pub(super) fn disk_reach_v(kin: &Kinematics, v_in: f64, s: f64, tol: f64) -> Opt
     Some(disk_reach_w(kin, v_in * v_in, s, tol)?.max(0.0).sqrt())
 }
 
-pub(super) fn reach_v(kin: &Kinematics, v_in: f64, tol: f64) -> Option<f64> {
-    let disk = disk_reach_v(kin, v_in, kin.length, tol)?;
-    let jerk = scurve::max_reachable_velocity(v_in, kin.length, kin.accel, kin.jerk);
-    Some(disk.min(jerk))
+pub(super) fn disk_reach_v_rev(kin: &Kinematics, v_in: f64, s: f64, tol: f64) -> Option<f64> {
+    disk_reach_v(&kin.reversed(), v_in, s, tol)
 }
 
-pub(super) fn reach_v_rev(kin: &Kinematics, v_in: f64, tol: f64) -> Option<f64> {
-    let disk = disk_reach_v(&kin.reversed(), v_in, kin.length, tol)?;
-    let jerk = scurve::max_reachable_velocity(v_in, kin.length, kin.accel, kin.jerk);
-    Some(disk.min(jerk))
+/// Run-anchored tangential-jerk context for one move's profile reconstruction.
+/// The forward jerk ramp is measured from the run's start anchor velocity
+/// `fwd_v` over cumulative arc `fwd_s + s`; the backward ramp from the run's
+/// end anchor velocity `bwd_v` over `bwd_s + (length - s)`. The jerk magnitude
+/// therefore only relaxes to zero at the run's rest anchors (stops / chain
+/// ends), not at internal clothoid seams.
+pub(super) struct JerkAnchors {
+    pub fwd_v: f64,
+    pub fwd_s: f64,
+    pub bwd_v: f64,
+    pub bwd_s: f64,
 }
 
-fn profile_speed(kin: &Kinematics, entry: f64, exit: f64, s: f64, tol: f64) -> Option<f64> {
+fn profile_speed(
+    kin: &Kinematics,
+    entry: f64,
+    exit: f64,
+    jerk: &JerkAnchors,
+    s: f64,
+    tol: f64,
+) -> Option<f64> {
     let rest = kin.length - s;
     let forward = disk_reach_v(kin, entry, s, tol)?;
     let backward = disk_reach_v(&kin.reversed(), exit, rest, tol)?;
-    let jerk_forward = scurve::max_reachable_velocity(entry, s, kin.accel, kin.jerk);
-    let jerk_backward = scurve::max_reachable_velocity(exit, rest, kin.accel, kin.jerk);
+    let jerk_forward =
+        scurve::max_reachable_velocity(jerk.fwd_v, jerk.fwd_s + s, kin.accel, kin.jerk);
+    let jerk_backward =
+        scurve::max_reachable_velocity(jerk.bwd_v, jerk.bwd_s + rest, kin.accel, kin.jerk);
     let ceiling = kin
         .flat_ceiling
         .min(limit_speed(kin.kappa_abs(s), kin.accel));
@@ -157,6 +171,7 @@ fn refine(
     kin: &Kinematics,
     entry: f64,
     exit: f64,
+    jerk: &JerkAnchors,
     tol: f64,
     s0: f64,
     v0: f64,
@@ -166,13 +181,37 @@ fn refine(
     out: &mut Vec<(f64, f64)>,
 ) -> Option<()> {
     let mid = 0.5 * (s0 + s1);
-    let actual = profile_speed(kin, entry, exit, mid, tol)?;
+    let actual = profile_speed(kin, entry, exit, jerk, mid, tol)?;
     let interp = 0.5 * (v0 + v1);
     let needs_refine = (actual - interp).abs() > tol * (1.0 + actual.abs());
     if needs_refine && depth < SAMPLE_MAX_DEPTH && out.len() < SAMPLE_MAX_POINTS {
-        refine(kin, entry, exit, tol, s0, v0, mid, actual, depth + 1, out)?;
+        refine(
+            kin,
+            entry,
+            exit,
+            jerk,
+            tol,
+            s0,
+            v0,
+            mid,
+            actual,
+            depth + 1,
+            out,
+        )?;
         out.push((mid, actual));
-        refine(kin, entry, exit, tol, mid, actual, s1, v1, depth + 1, out)?;
+        refine(
+            kin,
+            entry,
+            exit,
+            jerk,
+            tol,
+            mid,
+            actual,
+            s1,
+            v1,
+            depth + 1,
+            out,
+        )?;
     } else if needs_refine {
         out.push((mid, actual));
     }
@@ -183,11 +222,12 @@ pub(super) fn sample_profile(
     kin: &Kinematics,
     entry: f64,
     exit: f64,
+    jerk: &JerkAnchors,
     tol: f64,
 ) -> Option<Vec<(f64, f64)>> {
     let mut out = vec![(0.0, entry)];
     refine(
-        kin, entry, exit, tol, 0.0, entry, kin.length, exit, 0, &mut out,
+        kin, entry, exit, jerk, tol, 0.0, entry, kin.length, exit, 0, &mut out,
     )?;
     out.push((kin.length, exit));
     Some(out)
