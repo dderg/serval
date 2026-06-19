@@ -111,7 +111,7 @@ fn get_piece_for_time<F: FaultSink>(
     axis_idx: usize,
     fault: &F,
 ) -> Option<usize> {
-    const MAX_START_IN_PAST_SECS: f32 = 50e-3;
+    const MAX_START_IN_PAST_SECS: f32 = 500e-3;
     let drift_budget = (MAX_START_IN_PAST_SECS * cycles_per_second) as u64;
     let fault_tolerance = drift_budget + u64::from(sample_period_cycles);
     loop {
