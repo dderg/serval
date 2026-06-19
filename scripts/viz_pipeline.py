@@ -8,15 +8,35 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
-import matplotlib
+KLIPPY_ENV_PYTHON = Path.home() / "klippy-env" / "bin" / "python"
+
+
+def _reexec_in_printer_env():
+    # Run under the printer's virtualenv so viz shares the planner's exact
+    # interpreter (cffi/chelper + klippy's config loader). Before importing
+    # matplotlib, which the launching interpreter may not have.
+    if (
+        KLIPPY_ENV_PYTHON.exists()
+        and Path(sys.executable).resolve() != KLIPPY_ENV_PYTHON.resolve()
+    ):
+        os.execv(
+            str(KLIPPY_ENV_PYTHON),
+            [str(KLIPPY_ENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+
+
+_reexec_in_printer_env()
+
+import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
 PRINTER_DATA = Path.home() / "printer_data"
 DEFAULT_CONFIG = PRINTER_DATA / "config" / "printer.cfg"
