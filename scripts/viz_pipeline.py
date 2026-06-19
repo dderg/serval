@@ -182,8 +182,10 @@ def _build_time_series(segments, vel_s_raw, vel_v_raw):
 
 
 def _plot_derivative(ax, t, comp_x, comp_y, scalar, ylabel, title):
-    ax.plot(t, comp_x, "-", linewidth=0.6, color="C0", label="X")
-    ax.plot(t, comp_y, "-", linewidth=0.6, color="C1", label="Y")
+    import numpy as np
+
+    ax.plot(t, np.abs(comp_x), "-", linewidth=0.6, color="C0", label="|X|")
+    ax.plot(t, np.abs(comp_y), "-", linewidth=0.6, color="C1", label="|Y|")
     ax.plot(t, scalar, "-", linewidth=0.8, color="C3", label="scalar")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(ylabel)
