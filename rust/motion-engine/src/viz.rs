@@ -154,7 +154,11 @@ fn sample_fitted_segments(outcome: &geometry::FitOutcome) -> Vec<TypedSegment> {
                 geometry::path::Segment::Clothoid(_) => "clothoid",
             };
             let len = spatial.s_len();
-            let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(2);
+            let min_samples = match spatial {
+                geometry::path::Segment::Clothoid(_) => 20,
+                _ => 2,
+            };
+            let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(min_samples);
             let mut xs = Vec::with_capacity(n);
             let mut ys = Vec::with_capacity(n);
             let mut s_values = Vec::with_capacity(n);
