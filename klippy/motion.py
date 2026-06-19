@@ -835,10 +835,28 @@ class Motion:
                 self.kin.claimed_axes(),
             )
             self._configure_axes_per_mcu(engine_mcus)
+            self._enter_phase_stepping()
 
         except Exception:
             logging.exception("Motion: init_planner failed")
             raise
+
+    def _enter_phase_stepping(self):
+        entered = set()
+        for name in self.printer.lookup_objects("tmc5160 "):
+            tmc = self.printer.lookup_object(name[0])
+            if not hasattr(tmc, '_phase_stepper_oid'):
+                continue
+            if tmc._phase_stepper_oid is None:
+                continue
+            group = tmc._phase_group_members()
+            group_key = id(group)
+            if group_key in entered:
+                continue
+            entered.add(group_key)
+            tmc.enter_phase_mode()
+        if entered:
+            self.engine.warmup_pump()
 
     def _follower_slots(self):
         # Unclaimed follower axes ([axis <name>] with motors, not bound to a
