@@ -269,6 +269,8 @@ pub trait PieceSink: Send {
         start_slot: u16,
         new_head: u32,
     ) -> Result<i32, SendError>;
+
+    fn warmup(&self) {}
 }
 
 /// Compute the tick-domain and host-domain gaps at a batch boundary.
@@ -589,6 +591,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     };
 
     let mut holding_ahead = false;
+    sink.warmup();
 
     loop {
         let cohort_active = cohort.is_some();
@@ -611,15 +614,11 @@ pub fn run_pump<S, F, C, A, O, D>(
             }
         };
 
-        let recv_instant = Instant::now();
-        let mut got_enqueue = false;
         if let Some(msg) = first {
-            got_enqueue = matches!(&msg, PumpMsg::Enqueue(_));
             if !apply(msg, &mut queues, &mut junction_ends, &mut cohort) {
                 return;
             }
             while let Ok(m) = rx.try_recv() {
-                got_enqueue |= matches!(&m, PumpMsg::Enqueue(_));
                 if !apply(m, &mut queues, &mut junction_ends, &mut cohort) {
                     return;
                 }
@@ -659,20 +658,6 @@ pub fn run_pump<S, F, C, A, O, D>(
             }
         }
 
-        if got_enqueue {
-            let total_queued: usize = queues.values().map(|q| q.pieces.len()).sum();
-            let pre_send_us = recv_instant.elapsed().as_micros() as u64;
-            tracing::warn!(
-                subsystem = "motion",
-                event = "pump_recv_to_send",
-                total_queued,
-                pre_send_us,
-                holding_ahead,
-                cohort_active,
-                "[pump-timing] enqueue→send"
-            );
-        }
-
         holding_ahead = false;
         'send: loop {
             let hz_of = |k: &AxisKey, q: &AxisQueue| horizon_of(k, q, &cohort);
@@ -681,21 +666,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                 Schedule::StallFull(_stall_key) => {
                     break 'send;
                 }
-                Schedule::StallAhead(stall_key) => {
-                    if got_enqueue {
-                        let stall_q = queues.get(&stall_key);
-                        let stall_start_ticks = stall_q.and_then(|q| q.pieces.front().map(|(p, _)| p.start_time));
-                        let stall_horizon = stall_q.map(|q| horizon_of(&stall_key, q, &cohort));
-                        tracing::warn!(
-                            subsystem = "motion",
-                            event = "pump_stall_ahead",
-                            mcu = stall_key.mcu_id,
-                            axis = stall_key.axis,
-                            stall_start_ticks = ?stall_start_ticks,
-                            stall_horizon = ?stall_horizon,
-                            "[pump-timing] StallAhead — pump holding pieces"
-                        );
-                    }
+                Schedule::StallAhead(_stall_key) => {
                     holding_ahead = true;
                     break 'send;
                 }
@@ -777,15 +748,6 @@ pub struct WireSink {
 }
 
 impl WireSink {
-    /// Call `PushPieces` on the transport for the given axis.
-    ///
-    /// Returns `Err(SendError::Fatal(...))` for EtherCAT transport errors that
-    /// represent permanent connection loss (`Closed` or `Io`); all other
-    /// failures map to `Err(SendError::Transient(...))`.
-    ///
-    /// The reader thread owns all socket reads; `WouldBlock`/`TimedOut` never
-    /// surface here.  `TransportError::Timeout` (deadline exhausted on the
-    /// caller's `recv_timeout`) is transient — the session may still be alive.
     fn call_push_pieces(
         &self,
         key: AxisKey,
@@ -819,7 +781,6 @@ impl WireSink {
             ))
         })?;
 
-        let rpc_t0 = std::time::Instant::now();
         let resp_body = match transport {
             McuTransport::Serial(weak) => {
                 let io = weak.upgrade().ok_or_else(|| {
@@ -871,17 +832,6 @@ impl WireSink {
             }
         };
 
-        let rpc_us = rpc_t0.elapsed().as_micros() as u64;
-        tracing::warn!(
-            subsystem = "motion",
-            event = "push_pieces_rpc",
-            mcu = key.mcu_id,
-            axis = key.axis,
-            rpc_us,
-            pieces = pieces.len(),
-            "[pump-timing] PushPieces RPC"
-        );
-
         use mcu_protocol::codec::Decode as _;
         mcu_protocol::messages::PushPiecesResponse::decode(&resp_body).map_err(|e| {
             SendError::Transient(format!(
@@ -893,6 +843,21 @@ impl WireSink {
 }
 
 impl PieceSink for WireSink {
+    fn warmup(&self) {
+        for &mcu_id in self.transports.keys() {
+            let key = AxisKey { mcu_id, axis: 0 };
+            let t0 = std::time::Instant::now();
+            let _ = self.call_push_pieces(key, &[], 0, 0);
+            tracing::info!(
+                subsystem = "motion",
+                event = "pump_warmup",
+                mcu = mcu_id,
+                warmup_us = t0.elapsed().as_micros() as u64,
+                "[pump] transport warmup"
+            );
+        }
+    }
+
     fn send_frame(
         &self,
         key: AxisKey,
