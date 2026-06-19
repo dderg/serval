@@ -3061,12 +3061,13 @@ impl PyMotionEngine {
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
         > = Arc::new(
             move |seg: &trajectory::ShapedSegment| -> Result<(), DispatchError> {
-                tracing::debug!(
+                tracing::warn!(
                     subsystem = "engine",
                     event = "dispatch_entered",
                     seg_t_start = seg.t_start,
                     seg_t_end = seg.t_end,
-                    "[engine-trace] dispatch entered"
+                    n_axes = seg.axes.len(),
+                    "[dispatch] segment entered"
                 );
 
                 let host_now = {
