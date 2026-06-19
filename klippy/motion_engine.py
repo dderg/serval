@@ -369,6 +369,7 @@ class MotionEngineWrapper:
         cartesian_limits,
         window_capacity=32,
         beta_max_iters=10,
+        arc_fit=None,
     ):
         return self._engine.init_planner(
             axes,
@@ -379,6 +380,7 @@ class MotionEngineWrapper:
             cartesian_limits,
             window_capacity,
             beta_max_iters,
+            arc_fit,
         )
 
     def submit_move(self, dx, dy, dz, de, feedrate):

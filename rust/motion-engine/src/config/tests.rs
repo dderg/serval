@@ -516,6 +516,7 @@ fn limit_set_names_follow_section_order() {
         cartesian: CartesianLimits::default(),
         runtime_caps: RuntimeCaps::default(),
         runtime_square_corner_velocity: None,
+        chain: geometry::ChainFitConfig::default(),
         post_processors,
         window_capacity: 32,
         beta_max_iters: 10,

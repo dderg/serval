@@ -32,10 +32,17 @@ const COCIRCULAR_TOL_MM: f64 = 5e-3;
 const MIN_RUN_JUNCTIONS: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArcFitConfig {
+    pub facet_len_max_mm: f64,
+    pub max_turn_rad: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChainFitConfig {
     pub corner: CornerFitConfig,
     pub min_run_junctions: u32,
     pub cocircular_tol: f64,
+    pub arc_fit: Option<ArcFitConfig>,
 }
 
 impl Default for ChainFitConfig {
@@ -44,6 +51,19 @@ impl Default for ChainFitConfig {
             corner: CornerFitConfig::default(),
             min_run_junctions: MIN_RUN_JUNCTIONS,
             cocircular_tol: COCIRCULAR_TOL_MM,
+            arc_fit: None,
+        }
+    }
+}
+
+impl ChainFitConfig {
+    pub fn with_arc_fit(facet_len_max_mm: f64, max_turn_rad: f64) -> Self {
+        Self {
+            arc_fit: Some(ArcFitConfig {
+                facet_len_max_mm,
+                max_turn_rad,
+            }),
+            ..Self::default()
         }
     }
 }

@@ -2529,6 +2529,7 @@ impl PyMotionEngine {
         cartesian_limits,
         window_capacity = 32,
         beta_max_iters = 10,
+        arc_fit = None,
     ))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn init_planner(
@@ -2541,6 +2542,7 @@ impl PyMotionEngine {
         cartesian_limits: (f64, f64, f64, f64, f64, f64),
         window_capacity: usize,
         beta_max_iters: u8,
+        arc_fit: Option<(f64, f64)>,
     ) -> PyResult<()> {
         if self
             .planner
@@ -2622,6 +2624,22 @@ impl PyMotionEngine {
         cfg.post_processors = post_processor_set;
         cfg.window_capacity = window_capacity;
         cfg.beta_max_iters = beta_max_iters;
+        cfg.chain = match arc_fit {
+            Some((facet_length_mm, max_angle_deg)) => {
+                if !(facet_length_mm.is_finite() && facet_length_mm > 0.0) {
+                    return Err(PyValueError::new_err(
+                        "[arc_fit] facet_length_mm must be finite and positive",
+                    ));
+                }
+                if !(max_angle_deg.is_finite() && max_angle_deg > 0.0 && max_angle_deg < 180.0) {
+                    return Err(PyValueError::new_err(
+                        "[arc_fit] max_angle_deg must be finite and in (0, 180)",
+                    ));
+                }
+                geometry::ChainFitConfig::with_arc_fit(facet_length_mm, max_angle_deg.to_radians())
+            }
+            None => geometry::ChainFitConfig::default(),
+        };
 
         *self
             .planner_config
@@ -3297,7 +3315,7 @@ impl PyMotionEngine {
             }
             let cart = cfg.cartesian;
             let stream_cfg = crate::stream::StreamConfig {
-                chain: geometry::ChainFitConfig::default(),
+                chain: cfg.chain,
                 velocity: geometry::VelocityConfig {
                     max_jerk_mm_s3: cart.max_jerk,
                     ..geometry::VelocityConfig::default()

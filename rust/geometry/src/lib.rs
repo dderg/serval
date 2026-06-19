@@ -17,7 +17,7 @@ pub mod velocity;
 pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, SlotDegeneracy};
 pub use execution::lower_profile;
 pub use fitter::{
-    ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, UnblendReason,
+    ArcFitConfig, ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, UnblendReason,
     UnblendedJunction, fit_chain, fit_corners,
 };
 pub use frontend::{FrontendError, Move, MoveContext, VelocityLimits, arc_move, line_move};

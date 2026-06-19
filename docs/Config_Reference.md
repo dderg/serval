@@ -245,6 +245,30 @@ max_accel:
 #   This parameter is deprecated and should no longer be used.
 ```
 
+### [arc_fit]
+
+Opt-in faceted-arc recovery. Some slicers emit a curve as a run of many
+short straight `G1` segments instead of a `G2`/`G3` arc. When this section
+is present, the planner detects runs of such facets and reconstructs them
+as a single smooth arc, so the toolhead cruises the curve instead of
+dipping at every facet. **The section is off by default**: with no
+`[arc_fit]` section the planner never reconstructs arcs from straight
+segments, so an intentional polygon (e.g. a square) keeps its corners.
+Arcs you actually want are best emitted directly as `G2`/`G3`.
+
+```
+[arc_fit]
+#facet_length_mm: 1.0
+#   Only runs whose every segment is no longer than this (in mm) are
+#   considered faceting. Longer segments are treated as intentional
+#   straight moves and are never merged into an arc. The default is 1.0.
+#max_angle_deg: 12.0
+#   Only runs whose every corner turns by no more than this (in degrees)
+#   are considered faceting. Sharper corners are treated as intentional
+#   and are never merged into an arc; this is what keeps a square square.
+#   Must be greater than 0 and less than 180. The default is 12.0.
+```
+
 ### [stepper]
 
 Stepper motor definitions. Different printer types (as specified by

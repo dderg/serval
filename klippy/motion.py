@@ -123,6 +123,7 @@ class Motion:
         self._read_limits(config)
         self._read_axes(config)
         self._read_post_processors(config)
+        self._read_arc_fit(config)
         self.print_time = 0.0
         self.print_stall = 0
         gcode = printer.lookup_object("gcode")
@@ -628,6 +629,15 @@ class Motion:
                         % (axis_name, ref, ref)
                     )
 
+    def _read_arc_fit(self, config):
+        sc = config.getsection("arc_fit") if config.has_section("arc_fit") else None
+        if sc is None:
+            self.arc_fit = None
+            return
+        facet_length_mm = sc.getfloat("facet_length_mm", 1.0, above=0.0)
+        max_angle_deg = sc.getfloat("max_angle_deg", 12.0, above=0.0, below=180.0)
+        self.arc_fit = (facet_length_mm, max_angle_deg)
+
     def _read_limits(self, config):
         for key in self.UNSUPPORTED_LIMIT_KEYS:
             if config.get(key, None) is not None:
@@ -849,6 +859,7 @@ class Motion:
                     self.max_z_accel,
                     self._square_corner_velocity,
                 ),
+                arc_fit=self.arc_fit,
             )
             self._configure_axes_per_mcu(engine_mcus)
             self._planner_ready = True

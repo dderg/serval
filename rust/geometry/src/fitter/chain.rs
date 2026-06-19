@@ -5,8 +5,8 @@ use crate::path::{Arc, Clothoid, CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 
 use super::{
-    BUDGET_EPS_MM, ChainFitConfig, FitError, dot, internal, junction_deviation, line_of, madd,
-    norm, turn_normal,
+    ArcFitConfig, BUDGET_EPS_MM, ChainFitConfig, FitError, dot, internal, junction_deviation,
+    line_of, madd, norm, turn_normal,
 };
 
 const COPLANAR_TOL: f64 = 1e-6;
@@ -33,6 +33,9 @@ pub(super) fn detect_runs(
     moves: &[Move],
     config: ChainFitConfig,
 ) -> Result<Vec<ChainRun>, FitError> {
+    let Some(arc) = config.arc_fit else {
+        return Ok(Vec::new());
+    };
     let mut runs = Vec::new();
     let n = moves.len();
     let mut i = 0;
@@ -41,7 +44,7 @@ pub(super) fn detect_runs(
             i += 1;
             continue;
         }
-        let (end, turning) = grow_run(moves, i, config);
+        let (end, turning) = grow_run(moves, i, config, arc);
         if turning >= config.min_run_junctions {
             if let Some(recon) = reconstruct(&moves[i..=end], config)? {
                 runs.push(ChainRun {
@@ -58,7 +61,12 @@ pub(super) fn detect_runs(
     Ok(runs)
 }
 
-fn grow_run(moves: &[Move], start: usize, config: ChainFitConfig) -> (usize, u32) {
+fn grow_run(
+    moves: &[Move],
+    start: usize,
+    config: ChainFitConfig,
+    arc: ArcFitConfig,
+) -> (usize, u32) {
     let n = moves.len();
     let mut end = start;
     let mut turning = 0u32;
@@ -69,10 +77,16 @@ fn grow_run(moves: &[Move], start: usize, config: ChainFitConfig) -> (usize, u32
             (Some(a), Some(b)) => (a, b),
             _ => break,
         };
+        if la.s_len() > arc.facet_len_max_mm || lb.s_len() > arc.facet_len_max_mm {
+            break;
+        }
         let t_in = la.heading_at(la.s_len());
         let t_out = lb.heading_at(0.0);
         let theta = dot(t_in, t_out).clamp(-1.0, 1.0).acos();
         if theta >= config.corner.theta_max_rad {
+            break;
+        }
+        if theta > arc.max_turn_rad {
             break;
         }
         if theta <= config.corner.theta_min_rad {

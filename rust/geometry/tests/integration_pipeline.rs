@@ -200,10 +200,10 @@ fn cornered_polyline_blends_and_slows_through_corners() {
 }
 
 #[test]
-fn cocircular_square_reconstructs_as_chain() {
-    // A square's four corners lie on one circle, so the chain fitter (step 8)
-    // reconstructs the faceted run as a transition-spiral arc instead of
-    // per-corner blends.
+fn square_stays_sharp_without_arc_fit() {
+    // A square's four corners are co-circular, but arc fitting is off by
+    // default, so the chain fitter must not collapse the square into a circle:
+    // the corners stay per-corner rather than reconstructing as a chain.
     let verts = [
         [0.0, 0.0, 0.0],
         [50.0, 0.0, 0.0],
@@ -213,9 +213,9 @@ fn cocircular_square_reconstructs_as_chain() {
     ];
     let p = plan(&polyline(200.0, &verts));
 
-    assert!(
-        p.geometry.report.chains > 0,
-        "co-circular square should reconstruct as a chain, got report {:?}",
+    assert_eq!(
+        p.geometry.report.chains, 0,
+        "square must not reconstruct as a chain with arc fitting off, got report {:?}",
         p.geometry.report
     );
     assert_trajectory_invariants(&p);
