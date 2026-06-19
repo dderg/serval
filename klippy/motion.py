@@ -6,6 +6,7 @@ import struct
 from collections import defaultdict
 
 from . import motion_kinematics, stepper
+from .arc_fit_config import arc_fit_from_config
 from .extras import servo_axis
 from .kinematics import extruder
 
@@ -630,13 +631,7 @@ class Motion:
                     )
 
     def _read_arc_fit(self, config):
-        sc = config.getsection("arc_fit") if config.has_section("arc_fit") else None
-        if sc is None:
-            self.arc_fit = None
-            return
-        facet_length_mm = sc.getfloat("facet_length_mm", 1.0, above=0.0)
-        max_angle_deg = sc.getfloat("max_angle_deg", 12.0, above=0.0, below=180.0)
-        self.arc_fit = (facet_length_mm, max_angle_deg)
+        self.arc_fit = arc_fit_from_config(config)
 
     def _read_limits(self, config):
         for key in self.UNSUPPORTED_LIMIT_KEYS:

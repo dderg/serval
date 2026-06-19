@@ -7,7 +7,6 @@ Runs on the printer host where _motion_engine.so and printer.cfg live.
 from __future__ import annotations
 
 import argparse
-import configparser
 import math
 import re
 import sys
@@ -31,25 +30,21 @@ SEGMENT_COLORS = {
 }
 
 
-def read_printer_limits(cfg_path: Path):
-    cp = configparser.RawConfigParser()
-    cp.read(cfg_path)
-    section = "printer"
-    return (
-        cp.getfloat(section, "max_velocity"),
-        cp.getfloat(section, "max_accel"),
-        cp.getfloat(section, "square_corner_velocity", fallback=5.0),
-    )
+def read_printer_config(cfg_path: Path):
+    # Parse through klippy's own loader so includes resolve and the keys,
+    # defaults, and the [arc_fit] knobs match the live printer exactly.
+    from klippy import configfile
+    from klippy.arc_fit_config import arc_fit_from_config
 
-
-def read_arc_fit(cfg_path: Path):
-    cp = configparser.RawConfigParser()
-    cp.read(cfg_path)
-    if not cp.has_section("arc_fit"):
-        return None
+    loader = configfile.PrinterConfig.__new__(configfile.PrinterConfig)
+    loader.printer = None
+    config = loader.read_config(str(cfg_path))
+    printer = config.getsection("printer")
     return (
-        cp.getfloat("arc_fit", "facet_length_mm", fallback=1.0),
-        cp.getfloat("arc_fit", "max_angle_deg", fallback=12.0),
+        printer.getfloat("max_velocity", above=0.0),
+        printer.getfloat("max_accel", above=0.0),
+        printer.getfloat("square_corner_velocity", 5.0, minval=0.0),
+        arc_fit_from_config(config),
     )
 
 
@@ -311,8 +306,11 @@ def main():
         print(f"Config not found: {args.config}", file=sys.stderr)
         sys.exit(1)
 
-    max_velocity, max_accel, scv = read_printer_limits(args.config)
-    arc_fit = read_arc_fit(args.config)
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root / "klippy"))
+    sys.path.insert(0, str(repo_root))
+
+    max_velocity, max_accel, scv, arc_fit = read_printer_config(args.config)
 
     gcode_path = Path(args.gcode)
     if not gcode_path.exists():
@@ -326,7 +324,6 @@ def main():
         print("No spatial moves found in G-code.", file=sys.stderr)
         sys.exit(1)
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "klippy"))
     try:
         import _motion_engine
     except ModuleNotFoundError:
