@@ -3338,12 +3338,20 @@ impl PyMotionEngine {
                 }
             };
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            let (max_v, max_a) = self
-                .planner_config
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .cartesian
-                .for_move(dx, dy, dz);
+            let (max_v, max_a) = {
+                let cfg = self
+                    .planner_config
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                let (mut v, mut a) = cfg.cartesian.for_move(dx, dy, dz);
+                if let Some(rv) = cfg.runtime_caps.velocity {
+                    v = v.min(rv);
+                }
+                if let Some(ra) = cfg.runtime_caps.accel {
+                    a = a.min(ra);
+                }
+                (v, a)
+            };
             let limits = geometry::VelocityLimits::try_new(
                 max_v,
                 max_a,
@@ -3677,16 +3685,13 @@ impl PyMotionEngine {
     #[pyo3(signature = (velocity, accel))]
     fn update_runtime_caps(&self, velocity: Option<f64>, accel: Option<f64>) -> PyResult<()> {
         // The streaming pipeline reads its per-move limits from `planner_config`
-        // at submit time (`path_velocity_limits`), so updating the stored config
-        // is sufficient — no planner-thread message needed.
+        // at submit time (`CartesianLimits::for_move` + these caps), so updating
+        // the stored config is sufficient — no planner-thread message needed.
         let caps = config::RuntimeCaps { velocity, accel };
-        let mut cfg = self
-            .planner_config
+        self.planner_config
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        cfg.runtime_caps = caps;
-        cfg.to_temporal_limits()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .unwrap_or_else(|p| p.into_inner())
+            .runtime_caps = caps;
         Ok(())
     }
 
