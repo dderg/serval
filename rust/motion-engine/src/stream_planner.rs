@@ -341,6 +341,14 @@ fn run_loop(
         let msg = match rx.recv_timeout(next_timeout) {
             Ok(m) => m,
             Err(RecvTimeoutError::Timeout) => {
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "idle_drain",
+                    buffered = state.buffered(),
+                    t_committed = state.t_committed(),
+                    sync_set = sync_instant.is_some(),
+                    "[idle-drain]"
+                );
                 let segs = state
                     .commit(true)
                     .unwrap_or_else(|e| fatal(&format!("idle drain: {e}")));
@@ -358,12 +366,20 @@ fn run_loop(
 
         match msg {
             StreamMsg::Move(m) => {
-                // If the stream went idle and the machine has caught up to the
-                // committed horizon, re-anchor the planner clock to the live
-                // playhead + lead so this move is scheduled ahead of the MCU,
-                // not in its past (which would fail loud as stream starvation).
                 let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
-                if state.is_empty() && esc > state.t_committed() + 1e-6 {
+                let reanchor = state.is_empty() && esc > state.t_committed() + 1e-6;
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "reanchor_decision",
+                    esc,
+                    sync_set = sync_instant.is_some(),
+                    is_empty = state.is_empty(),
+                    buffered = state.buffered(),
+                    t_committed = state.t_committed(),
+                    reanchor,
+                    "[reanchor-decision]"
+                );
+                if reanchor {
                     state.advance_idle(esc + LEAD);
                 }
                 state.push(m);
