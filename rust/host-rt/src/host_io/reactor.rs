@@ -64,7 +64,6 @@ pub struct Reactor {
     pub(crate) last_write_time: Instant,
     pub(crate) zero_byte_consec: u32,
     pub(crate) clock: Arc<dyn Clock>,
-    pub(crate) passthrough_suppress_until: Option<std::time::Instant>,
     pub(crate) passthrough_router: Option<PassthroughRouter>,
     pub(crate) passthrough_notify_map: std::collections::HashMap<u64, (McuHandle, NotifyId)>,
     pub(crate) passthrough_mcu: Option<McuHandle>,
@@ -155,7 +154,6 @@ impl Reactor {
             last_write_time: clock.now(),
             zero_byte_consec: 0,
             clock,
-            passthrough_suppress_until: None,
             passthrough_router: None,
             passthrough_notify_map: std::collections::HashMap::new(),
             passthrough_mcu: None,
@@ -248,8 +246,6 @@ const MCU_SILENCE_FOR_CLOSE: Duration = Duration::from_secs(120);
 
 const MAX_SUBMITS_PER_ITER: usize = 4;
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1);
-const PASSTHROUGH_SUPPRESS_AFTER_MCUCALL: std::time::Duration =
-    std::time::Duration::from_millis(300);
 const ZERO_BYTE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl Reactor {
@@ -1315,13 +1311,7 @@ impl Reactor {
         let s1 = std::time::Instant::now();
         for _ in 0..MAX_SUBMITS_PER_ITER {
             match self.submission_rx.try_recv() {
-                Ok(cmd) => {
-                    if matches!(&cmd, ReactorCommand::McuCall { .. }) {
-                        self.passthrough_suppress_until =
-                            Some(self.clock.now() + PASSTHROUGH_SUPPRESS_AFTER_MCUCALL);
-                    }
-                    self.handle_command(cmd);
-                }
+                Ok(cmd) => self.handle_command(cmd),
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.state = ReactorState::Closed;
@@ -1341,12 +1331,7 @@ impl Reactor {
         let t_step3 = s3.elapsed();
 
         let s3b = std::time::Instant::now();
-        let suppress = self
-            .passthrough_suppress_until
-            .map_or(false, |deadline| self.clock.now() < deadline);
-        if !suppress && self.transport_state.pending.is_empty() {
-            self.drain_passthrough();
-        }
+        self.drain_passthrough();
         let t_step3b = s3b.elapsed();
 
         let s4 = std::time::Instant::now();
