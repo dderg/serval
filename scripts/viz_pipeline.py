@@ -149,9 +149,14 @@ def _build_time_series(segments, vel_s_raw, vel_v_raw):
         all_s.extend(seg["s"])
         all_x.extend(seg["x"])
         all_y.extend(seg["y"])
-    s = np.array(all_s)
-    x = np.array(all_x)
-    y = np.array(all_y)
+    s_raw = np.array(all_s)
+    x_raw = np.array(all_x)
+    y_raw = np.array(all_y)
+
+    mask = np.concatenate([[True], np.diff(s_raw) > 1e-9])
+    s = s_raw[mask]
+    x = x_raw[mask]
+    y = y_raw[mask]
 
     v_interp = np.interp(s, vel_s_raw, vel_v_raw)
     v_interp = np.maximum(v_interp, 1e-6)
