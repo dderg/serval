@@ -1343,7 +1343,9 @@ impl Reactor {
         let t_step3 = s3.elapsed();
 
         let s3b = std::time::Instant::now();
-        self.drain_passthrough();
+        if self.transport_state.pending.is_empty() {
+            self.drain_passthrough();
+        }
         let t_step3b = s3b.elapsed();
 
         let s4 = std::time::Instant::now();
