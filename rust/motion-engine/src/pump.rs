@@ -687,6 +687,14 @@ pub fn run_pump<S, F, C, A, O, D>(
         'send: loop {
             let hz_of = |k: &AxisKey, q: &AxisQueue| horizon_of(k, q, &cohort);
             let total_queued: usize = queues.values().map(|q| q.pieces.len()).sum();
+            if total_queued > 0 {
+                tracing::warn!(
+                    subsystem = "motion", event = "pump_pre_schedule",
+                    total_queued,
+                    n_queues = queues.len(),
+                    "[pump] about to schedule"
+                );
+            }
             match schedule(&queues, MAX_PER_FRAME, hz_of, |_| usize::MAX) {
                 Schedule::Idle => {
                     if total_queued > 0 {
