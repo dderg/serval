@@ -184,12 +184,13 @@ def test_init_planner_passes_claimed_axes():
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
     motion.limit_sections = []
     motion.post_processor_sections = []
-    motion.max_velocity = 300.0
-    motion.max_accel = 3000.0
+    motion._max_velocity = 300.0
+    motion._max_accel = 3000.0
     motion.max_jerk = 6000.0
     motion.max_z_velocity = 15.0
     motion.max_z_accel = 100.0
-    motion.square_corner_velocity = 8.0
+    motion._square_corner_velocity = 8.0
+    motion._planner_ready = False
     engine = CaptureEngine()
     motion.engine = engine
 

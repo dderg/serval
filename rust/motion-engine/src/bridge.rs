@@ -86,6 +86,17 @@ enum RuntimeCapsError {
     Decode(String),
 }
 
+fn require_positive(value: Option<f64>, name: &str) -> PyResult<()> {
+    if let Some(v) = value {
+        if !(v.is_finite() && v > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "{name} must be finite and positive"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn decode_runtime_caps_body(
     body: &[u8],
 ) -> Result<mcu_protocol::messages::RuntimeCapsResponse, RuntimeCapsError> {
@@ -3355,7 +3366,7 @@ impl PyMotionEngine {
                 if let Some(ra) = cfg.runtime_caps.accel {
                     a = a.min(ra);
                 }
-                (v, a, cfg.cartesian.square_corner_velocity)
+                (v, a, cfg.square_corner_velocity())
             };
             let limits = geometry::VelocityLimits::try_new(max_v, max_a, scv)
                 .map_err(PyRuntimeError::new_err)?;
@@ -3683,16 +3694,48 @@ impl PyMotionEngine {
         Ok(())
     }
 
-    #[pyo3(signature = (velocity, accel))]
-    fn update_runtime_caps(&self, velocity: Option<f64>, accel: Option<f64>) -> PyResult<()> {
-        // The streaming pipeline reads its per-move limits from `planner_config`
-        // at submit time (`CartesianLimits::for_move` + these caps), so updating
-        // the stored config is sufficient — no planner-thread message needed.
-        let caps = config::RuntimeCaps { velocity, accel };
+    fn effective_limits(&self) -> (f64, f64, f64) {
         self.planner_config
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .runtime_caps = caps;
+            .effective_limits()
+    }
+
+    #[pyo3(signature = (velocity))]
+    fn set_velocity_cap(&self, velocity: Option<f64>) -> PyResult<()> {
+        require_positive(velocity, "velocity")?;
+        self.planner_config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .runtime_caps
+            .velocity = velocity;
+        Ok(())
+    }
+
+    #[pyo3(signature = (accel))]
+    fn set_accel_cap(&self, accel: Option<f64>) -> PyResult<()> {
+        require_positive(accel, "accel")?;
+        self.planner_config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .runtime_caps
+            .accel = accel;
+        Ok(())
+    }
+
+    #[pyo3(signature = (square_corner_velocity))]
+    fn set_square_corner_velocity(&self, square_corner_velocity: Option<f64>) -> PyResult<()> {
+        if let Some(scv) = square_corner_velocity {
+            if !(scv.is_finite() && scv >= 0.0) {
+                return Err(PyValueError::new_err(
+                    "square_corner_velocity must be finite and non-negative",
+                ));
+            }
+        }
+        self.planner_config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .runtime_square_corner_velocity = square_corner_velocity;
         Ok(())
     }
 

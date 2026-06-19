@@ -39,7 +39,9 @@ _STUB_MOTION_METHODS = frozenset(
         "motion_drain_finalize",
         "set_position",
         "get_last_move_time",
-        "update_runtime_caps",
+        "set_velocity_cap",
+        "set_accel_cap",
+        "set_square_corner_velocity",
         "update_post_processor",
         "fallback_clock_conversions",
         "dispatched_segment_count",
@@ -445,8 +447,17 @@ class MotionEngineWrapper:
     def disarm_remote_trigger(self, endstop_id):
         return self._engine.disarm_remote_trigger(endstop_id)
 
-    def update_runtime_caps(self, velocity, accel):
-        return self._engine.update_runtime_caps(velocity, accel)
+    def effective_limits(self):
+        return self._engine.effective_limits()
+
+    def set_velocity_cap(self, velocity):
+        return self._engine.set_velocity_cap(velocity)
+
+    def set_accel_cap(self, accel):
+        return self._engine.set_accel_cap(accel)
+
+    def set_square_corner_velocity(self, square_corner_velocity):
+        return self._engine.set_square_corner_velocity(square_corner_velocity)
 
     def update_post_processor(self, name, key, value):
         return self._engine.update_post_processor(name, key, value)

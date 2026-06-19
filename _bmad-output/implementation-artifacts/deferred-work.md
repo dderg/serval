@@ -34,3 +34,9 @@ Findings surfaced during review that are real but out of the originating story's
 ## From spec-wire-square-corner-velocity-from-printer (review 2026-06-19)
 
 - **`path_velocity_limits()` still hardcodes the SCV default.** `rust/motion-engine/src/config.rs` `PlannerConfig::path_velocity_limits()` calls `geometry::VelocityLimits::try_new(max_v, max_a, DEFAULT_SQUARE_CORNER_VELOCITY_MM_S)` rather than `self.cartesian.square_corner_velocity`. After this change the two live SCV consumers (stream init + `submit_move`) read the configured value, but this method would silently revert to 5.0. It is currently **dead code — zero callers** (verified by workspace grep), so no runtime impact, and the originating spec explicitly scoped it out (`Never: do not touch the dead path_velocity_limits() path`). Route it through `self.cartesian.square_corner_velocity` or delete the method if/when it is resurrected.
+
+## From spec-motion-pipeline-viz (review 2026-06-19)
+
+- **G91 relative positioning not handled.** `scripts/viz_pipeline.py` parser assumes G90 absolute mode. If G-code uses G91, coordinates are interpreted as absolute, producing wrong geometry. Slicer output is almost always G90 so low-priority. Detect G91 and fail loudly.
+- **Opaque error messages.** Rust-side errors surface as `Debug` format (`InvalidFeedrate { line_no: 42 }`) rather than user-friendly text. Track source G-code line numbers through the parser and use `Display` formatting.
+- **Large file performance.** No `--max-moves` flag or subsampling. Files with 100k+ moves produce ~1M sample points, slow matplotlib render and large PNGs. Add optional move limit and point downsampling.

@@ -59,10 +59,11 @@ def toolhead_fixture():
     motion.print_time = 0.0
     motion.print_stall = 0
     motion.extruder = extruder_mod.DummyExtruder(printer)
-    motion.max_velocity = 300.0
-    motion.max_accel = 3000.0
+    motion._max_velocity = 300.0
+    motion._max_accel = 3000.0
     motion.min_cruise_ratio = 0.0
-    motion.square_corner_velocity = 5.0
+    motion._square_corner_velocity = 5.0
+    motion._planner_ready = False
 
     printer.add_object("motion", motion)
     printer.add_object("toolhead", ToolheadShim(motion))

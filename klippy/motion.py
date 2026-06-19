@@ -119,6 +119,7 @@ class Motion:
         self.all_mcus = [m for n, m in printer.lookup_objects(module="mcu")]
         self.mcu = self.all_mcus[0]
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
+        self._planner_ready = False
         self._read_limits(config)
         self._read_axes(config)
         self._read_post_processors(config)
@@ -275,12 +276,35 @@ class Motion:
         ]
         return min(accels) if accels else self.max_accel
 
+    def _effective_limits(self):
+        if self._planner_ready:
+            return self.engine.effective_limits()
+        return (
+            self._max_velocity,
+            self._max_accel,
+            self._square_corner_velocity,
+        )
+
+    @property
+    def max_velocity(self):
+        return self._effective_limits()[0]
+
+    @property
+    def max_accel(self):
+        return self._effective_limits()[1]
+
+    @property
+    def square_corner_velocity(self):
+        return self._effective_limits()[2]
+
     def get_max_velocity(self):
-        return self.max_velocity, self.max_accel
+        velocity, accel, _scv = self._effective_limits()
+        return velocity, accel
 
     def get_status(self, eventtime):
         print_time = self.print_time
         estimated_print_time = self.mcu.estimated_print_time(eventtime)
+        velocity, accel, scv = self._effective_limits()
         res = dict(self.kin.get_status(eventtime))
         res.update(
             {
@@ -289,10 +313,10 @@ class Motion:
                 "estimated_print_time": estimated_print_time,
                 "extruder": self.extruder.get_name(),
                 "position": self.Coord(*self.commanded_pos),
-                "max_velocity": self.max_velocity,
-                "max_accel": self.max_accel,
+                "max_velocity": velocity,
+                "max_accel": accel,
                 "minimum_cruise_ratio": self.min_cruise_ratio,
-                "square_corner_velocity": self.square_corner_velocity,
+                "square_corner_velocity": scv,
             }
         )
         return res
@@ -608,19 +632,22 @@ class Motion:
         for key in self.UNSUPPORTED_LIMIT_KEYS:
             if config.get(key, None) is not None:
                 raise config.error("[printer] %s is not supported" % key)
-        self.max_velocity = config.getfloat("max_velocity", above=0.0)
-        self.max_accel = config.getfloat("max_accel", above=0.0)
+        self._max_velocity = config.getfloat("max_velocity", above=0.0)
+        self._max_accel = config.getfloat("max_accel", above=0.0)
+        self._square_corner_velocity = config.getfloat(
+            "square_corner_velocity", 5.0, minval=0.0
+        )
         self.max_jerk = config.getfloat(
-            "max_jerk", self.max_accel * 2.0, above=0.0
+            "max_jerk", self._max_accel * 2.0, above=0.0
         )
         self.max_z_velocity = config.getfloat(
             "max_z_velocity",
-            self.max_velocity,
+            self._max_velocity,
             above=0.0,
-            maxval=self.max_velocity,
+            maxval=self._max_velocity,
         )
         self.max_z_accel = config.getfloat(
-            "max_z_accel", self.max_accel, above=0.0, maxval=self.max_accel
+            "max_z_accel", self._max_accel, above=0.0, maxval=self._max_accel
         )
         # [limit <name>] sections are still parsed so existing configs load,
         # but the planner now reads its motion limits from [printer] above.
@@ -633,12 +660,7 @@ class Motion:
             j = sc.getfloat("max_jerk", None, above=0.0)
             self.limit_sections.append((name, axes, v, a, j))
         self.min_cruise_ratio = 0.0
-        self.square_corner_velocity = config.getfloat(
-            "square_corner_velocity", 5.0, minval=0.0
-        )
         self.orig_cfg = {}
-        self.runtime_velocity = None
-        self.runtime_accel = None
 
     def _axis_limit(self, axis, kind):
         kind_idx = {"max_velocity": 2, "max_accel": 3, "max_jerk": 4}[kind]
@@ -668,22 +690,15 @@ class Motion:
 
     def set_accel(self, accel):
         if accel is not None and accel > 0.0:
-            self.runtime_accel = accel
-            self.engine.update_runtime_caps(
-                self.runtime_velocity, self.runtime_accel
-            )
+            self.engine.set_accel_cap(accel)
 
     def reset_accel(self):
-        self.runtime_accel = None
-        self.engine.update_runtime_caps(
-            self.runtime_velocity, self.runtime_accel
-        )
+        self.engine.set_accel_cap(None)
 
     cmd_SET_VELOCITY_LIMIT_help = "Set printer velocity limits"
 
     def cmd_SET_VELOCITY_LIMIT(self, gcmd):
         for unsupported in (
-            "SQUARE_CORNER_VELOCITY",
             "MINIMUM_CRUISE_RATIO",
             "ACCEL_TO_DECEL",
         ):
@@ -694,19 +709,20 @@ class Motion:
                 )
         v = gcmd.get_float("VELOCITY", None, above=0.0)
         a = gcmd.get_float("ACCEL", None, above=0.0)
-        if v is None and a is None:
+        scv = gcmd.get_float("SQUARE_CORNER_VELOCITY", None, minval=0.0)
+        if v is None and a is None and scv is None:
+            velocity, accel, corner = self._effective_limits()
             gcmd.respond_info(
-                "runtime caps: velocity=%s accel=%s"
-                % (self.runtime_velocity, self.runtime_accel)
+                "velocity=%s accel=%s square_corner_velocity=%s"
+                % (velocity, accel, corner)
             )
             return
         if v is not None:
-            self.runtime_velocity = v
+            self.engine.set_velocity_cap(v)
         if a is not None:
-            self.runtime_accel = a
-        self.engine.update_runtime_caps(
-            self.runtime_velocity, self.runtime_accel
-        )
+            self.engine.set_accel_cap(a)
+        if scv is not None:
+            self.engine.set_square_corner_velocity(scv)
 
     cmd_SET_POST_PROCESSOR_help = (
         "Update a [post_processor] parameter; applies from the next replan"
@@ -735,9 +751,9 @@ class Motion:
     cmd_RESET_VELOCITY_LIMIT_help = "Reset printer velocity limits"
 
     def cmd_RESET_VELOCITY_LIMIT(self, gcmd):
-        self.runtime_velocity = None
-        self.runtime_accel = None
-        self.engine.update_runtime_caps(None, None)
+        self.engine.set_velocity_cap(None)
+        self.engine.set_accel_cap(None)
+        self.engine.set_square_corner_velocity(None)
 
     def stats(self, eventtime):
         max_queue_time = max(self.print_time, self._mcu_pending_end_time)
@@ -826,15 +842,16 @@ class Motion:
                 topology,
                 self.kin.claimed_axes(),
                 (
-                    self.max_velocity,
-                    self.max_accel,
+                    self._max_velocity,
+                    self._max_accel,
                     self.max_jerk,
                     self.max_z_velocity,
                     self.max_z_accel,
-                    self.square_corner_velocity,
+                    self._square_corner_velocity,
                 ),
             )
             self._configure_axes_per_mcu(engine_mcus)
+            self._planner_ready = True
 
         except Exception:
             logging.exception("Motion: init_planner failed")

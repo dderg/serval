@@ -35,6 +35,39 @@ fn cartesian_validate_rejects_negative_or_nan_scv() {
 }
 
 #[test]
+fn effective_limits_without_overrides_are_the_config_base() {
+    let cfg = PlannerConfig::default();
+    let (v, a, scv) = cfg.effective_limits();
+    assert_eq!(v, cfg.cartesian.max_velocity);
+    assert_eq!(a, cfg.cartesian.max_accel);
+    assert_eq!(scv, cfg.cartesian.square_corner_velocity);
+}
+
+#[test]
+fn effective_limits_runtime_caps_clamp_but_never_raise() {
+    let mut cfg = PlannerConfig::default();
+    cfg.runtime_caps = RuntimeCaps {
+        velocity: Some(50.0),
+        accel: Some(10_000_000.0),
+    };
+    let (v, a, _) = cfg.effective_limits();
+    assert_eq!(v, 50.0);
+    assert_eq!(a, cfg.cartesian.max_accel);
+}
+
+#[test]
+fn effective_limits_runtime_scv_replaces_the_base() {
+    let mut cfg = PlannerConfig::default();
+    cfg.runtime_square_corner_velocity = Some(1.0);
+    assert_eq!(cfg.effective_limits().2, 1.0);
+    cfg.runtime_square_corner_velocity = None;
+    assert_eq!(
+        cfg.effective_limits().2,
+        cfg.cartesian.square_corner_velocity
+    );
+}
+
+#[test]
 fn default_config_chains_are_passthrough() {
     let c = PlannerConfig::default();
     let chains = c.post_processors.compile(&c.axis_registry).unwrap();
@@ -482,6 +515,7 @@ fn limit_set_names_follow_section_order() {
         ],
         cartesian: CartesianLimits::default(),
         runtime_caps: RuntimeCaps::default(),
+        runtime_square_corner_velocity: None,
         post_processors,
         window_capacity: 32,
         beta_max_iters: 10,

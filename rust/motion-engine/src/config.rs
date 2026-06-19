@@ -385,6 +385,7 @@ pub struct PlannerConfig {
     pub limit_sections: Vec<LimitSection>,
     pub cartesian: CartesianLimits,
     pub runtime_caps: RuntimeCaps,
+    pub runtime_square_corner_velocity: Option<f64>,
     pub post_processors: PostProcessorSet,
     pub window_capacity: usize,
     pub beta_max_iters: u8,
@@ -514,6 +515,22 @@ pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
 impl PlannerConfig {
     pub fn limit_set_names(&self) -> Vec<String> {
         self.limit_sections.iter().map(|s| s.name.clone()).collect()
+    }
+
+    #[must_use]
+    pub fn square_corner_velocity(&self) -> f64 {
+        self.runtime_square_corner_velocity
+            .unwrap_or(self.cartesian.square_corner_velocity)
+    }
+
+    #[must_use]
+    pub fn effective_limits(&self) -> (f64, f64, f64) {
+        let clamp = |cap: Option<f64>, base: f64| cap.map_or(base, |c| c.min(base));
+        (
+            clamp(self.runtime_caps.velocity, self.cartesian.max_velocity),
+            clamp(self.runtime_caps.accel, self.cartesian.max_accel),
+            self.square_corner_velocity(),
+        )
     }
 
     /// Collapse the spatial limit sections (most-restrictive across them) plus
@@ -668,6 +685,7 @@ impl Default for PlannerConfig {
             ],
             cartesian: CartesianLimits::default(),
             runtime_caps: RuntimeCaps::default(),
+            runtime_square_corner_velocity: None,
             post_processors,
             window_capacity: 32,
             beta_max_iters: 10,
