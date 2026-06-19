@@ -66,7 +66,7 @@ fn last_dispatched_func() -> u32 {
     }
 }
 
-const TICK_GAP_FAULT_MULT: u64 = 3;
+const TICK_GAP_FAULT_MULT: u64 = 2;
 
 pub fn isr_sample_tick(
     isr: &mut crate::state::IsrState,

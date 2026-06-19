@@ -116,7 +116,7 @@ fn active_motion_gap_latches_tick_interval_exceeded() {
     let shared = SharedState::new();
     let mut storage = make_storage();
 
-    let piece_start: u64 = 0;
+    let piece_start: u64 = TICK_CYCLES as u64;
     let piece = const_piece(piece_start, 10.0);
     let rc = isr.engine.push_pieces(0, &[piece], &mut storage);
     assert_eq!(rc, 0, "push_pieces failed");
@@ -125,24 +125,24 @@ fn active_motion_gap_latches_tick_interval_exceeded() {
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
         0,
-        "first active tick must not fault"
+        "first active tick (future piece held at t=0) must not fault"
     );
     assert!(
         isr.last_tick_now.is_some(),
         "first active tick must set last_tick_now to Some"
     );
 
-    let gap_raw = TICK_CYCLES * 4;
+    let gap_raw = TICK_CYCLES * 3;
     isr_sample_tick(&mut isr, &shared, &mut storage, gap_raw);
     assert_eq!(
         shared.last_error.load(Ordering::Acquire),
         FaultCode::TickIntervalExceeded.as_i32(),
-        "gap > 3×period during active motion must latch TickIntervalExceeded"
+        "gap > 2×period during active motion must latch TickIntervalExceeded"
     );
     let detail = shared.fault_detail.load(Ordering::Acquire);
     assert_eq!(
-        detail, 4,
-        "fault_detail must equal gap_ticks (gap/period = 4*TICK_CYCLES/TICK_CYCLES = 4), got {detail}"
+        detail, 3,
+        "fault_detail must equal gap_ticks (gap/period = 3*TICK_CYCLES/TICK_CYCLES = 3), got {detail}"
     );
 }
 
