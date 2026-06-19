@@ -2,7 +2,7 @@
 title: 'Motion pipeline visualization tool'
 type: 'feature'
 created: '2026-06-19'
-status: 'in-review'
+status: 'done'
 baseline_commit: '04c823c5c'
 context: []
 ---
@@ -68,3 +68,34 @@ The bridge method evaluates curves to point arrays on the Rust side (avoids expo
 **Commands:**
 - `cargo nextest run -p motion-engine` -- expected: existing tests pass
 - `python scripts/viz_pipeline.py test.gcode -o /tmp/viz/` -- expected: 3 PNGs created
+
+## Suggested Review Order
+
+**Pipeline snapshot (Rust entry point)**
+
+- Standalone PyO3 function; takes waypoints + limits, returns dict of point arrays
+  [`viz.rs:8`](../../rust/motion-engine/src/viz.rs#L8)
+
+- Builds geometry::Move objects from consecutive waypoint pairs, filters zero-displacement
+  [`viz.rs:61`](../../rust/motion-engine/src/viz.rs#L61)
+
+- Samples fitted path at 2 pts/mm by evaluating PositionProfile::point_at along each segment
+  [`viz.rs:115`](../../rust/motion-engine/src/viz.rs#L115)
+
+**G-code parser (Python)**
+
+- Handles G0/G00 (rapid), G1/G01 (linear), G2/G02/G3/G03 (arcs via linearization)
+  [`viz_pipeline.py:50`](../../scripts/viz_pipeline.py#L50)
+
+- Arc linearization: samples arc into 0.5mm chord segments for the fitting pipeline
+  [`viz_pipeline.py:18`](../../scripts/viz_pipeline.py#L18)
+
+**Module registration**
+
+- Two-line addition: module declaration + pyfunction export
+  [`lib.rs:44`](../../rust/motion-engine/src/lib.rs#L44)
+
+**Tests**
+
+- 7 unit tests: move construction, raw/fitted point counts, velocity samples, edge cases
+  [`tests.rs:1`](../../rust/motion-engine/src/viz/tests.rs#L1)
