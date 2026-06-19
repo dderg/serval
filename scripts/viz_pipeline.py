@@ -11,6 +11,7 @@ import configparser
 import math
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -140,23 +141,25 @@ def parse_gcode(
     return waypoints
 
 
-def plot_raw_path(ax, raw_x, raw_y):
-    ax.plot(raw_x, raw_y, "-", linewidth=0.5, color="C0")
-    ax.plot(raw_x[0], raw_y[0], "o", color="C2", markersize=5, zorder=5)
-    ax.set_aspect("equal")
-    ax.set_title("Raw G-code path (before fitting)")
-    ax.set_xlabel("X (mm)")
-    ax.set_ylabel("Y (mm)")
+def render(snapshot, out_path, stem, ts):
+    raw_x, raw_y = snapshot["raw_x"], snapshot["raw_y"]
+    segments = list(snapshot["fitted_segments"])
+    vel_s, vel_v = snapshot["vel_s"], snapshot["vel_v"]
 
+    fig, (ax_path, ax_vel) = plt.subplots(
+        2,
+        1,
+        figsize=(10, 12),
+        gridspec_kw={"height_ratios": [3, 1]},
+    )
 
-def plot_fitted_path(ax, segments, raw_x, raw_y):
-    ax.plot(
+    ax_path.plot(
         raw_x,
         raw_y,
         "-",
-        linewidth=0.3,
-        color="C7",
-        alpha=0.4,
+        linewidth=0.8,
+        color="#d0d0d0",
+        zorder=1,
         label="raw",
     )
     drawn = set()
@@ -165,30 +168,53 @@ def plot_fitted_path(ax, segments, raw_x, raw_y):
         color = SEGMENT_COLORS.get(kind, "C4")
         label = kind if kind not in drawn else None
         drawn.add(kind)
-        ax.plot(
-            seg["x"], seg["y"], "-", linewidth=0.6, color=color, label=label
+        ax_path.plot(
+            seg["x"],
+            seg["y"],
+            "-",
+            linewidth=1.0,
+            color=color,
+            label=label,
+            zorder=2,
         )
-    ax.plot(
+    ax_path.plot(
         segments[0]["x"][0],
         segments[0]["y"][0],
         "o",
         color="C3",
         markersize=5,
-        zorder=5,
+        zorder=3,
     )
-    ax.set_aspect("equal")
-    ax.set_title("Fitted path (after corner blending)")
-    ax.set_xlabel("X (mm)")
-    ax.set_ylabel("Y (mm)")
-    ax.legend(fontsize=8)
+    ax_path.set_aspect("equal")
+    ax_path.set_xlabel("X (mm)")
+    ax_path.set_ylabel("Y (mm)")
+    ax_path.legend(fontsize=8, loc="upper right")
 
+    seg_counts = {}
+    for seg in segments:
+        seg_counts[seg["type"]] = seg_counts.get(seg["type"], 0) + 1
+    seg_summary = ", ".join(f"{v} {k}" for k, v in sorted(seg_counts.items()))
+    ax_path.set_title(
+        f"{stem}  [{seg_summary}]  "
+        f"{snapshot['blended_corners']} blended, "
+        f"{snapshot['chain_fits']} chains",
+        fontsize=9,
+    )
 
-def plot_velocity(ax, vel_s, vel_v, traversal_time):
-    ax.plot(vel_s, vel_v, "-", linewidth=0.6, color="C3")
-    ax.set_title(f"Velocity profile (t={traversal_time:.3f}s)")
-    ax.set_xlabel("Arc-length s (mm)")
-    ax.set_ylabel("Velocity (mm/s)")
-    ax.set_ylim(bottom=0)
+    ax_vel.plot(vel_s, vel_v, "-", linewidth=0.8, color="C3")
+    ax_vel.set_xlabel("Arc-length s (mm)")
+    ax_vel.set_ylabel("Velocity (mm/s)")
+    ax_vel.set_ylim(bottom=0)
+    ax_vel.set_title(
+        f"Velocity profile  (t={snapshot['traversal_time_s']:.3f}s)",
+        fontsize=9,
+    )
+
+    fig.tight_layout()
+    out_file = out_path / f"{stem}_{ts}.png"
+    fig.savefig(out_file, dpi=150)
+    plt.close(fig)
+    return out_file
 
 
 def main():
@@ -220,7 +246,6 @@ def main():
         sys.exit(1)
 
     max_velocity, max_accel, scv = read_printer_limits(args.config)
-    print(f"Config: v={max_velocity} mm/s, a={max_accel} mm/s², scv={scv} mm/s")
 
     gcode_path = Path(args.gcode)
     if not gcode_path.exists():
@@ -250,53 +275,14 @@ def main():
         scv,
     )
 
-    from datetime import datetime
-
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = run_dir / f"{gcode_path.stem}_{ts}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    stem = gcode_path.stem
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    plot_raw_path(ax, snapshot["raw_x"], snapshot["raw_y"])
-    fig.tight_layout()
-    fig.savefig(run_dir / f"{stem}.01-raw-path.png", dpi=150)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    plot_fitted_path(
-        ax,
-        list(snapshot["fitted_segments"]),
-        snapshot["raw_x"],
-        snapshot["raw_y"],
-    )
-    fig.tight_layout()
-    fig.savefig(run_dir / f"{stem}.02-fitted-path.png", dpi=150)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    plot_velocity(
-        ax,
-        snapshot["vel_s"],
-        snapshot["vel_v"],
-        snapshot["traversal_time_s"],
-    )
-    fig.tight_layout()
-    fig.savefig(run_dir / f"{stem}.03-velocity-profile.png", dpi=150)
-    plt.close(fig)
-
-    seg_counts = {}
-    for seg in snapshot["fitted_segments"]:
-        seg_counts[seg["type"]] = seg_counts.get(seg["type"], 0) + 1
-    seg_summary = ", ".join(f"{v} {k}" for k, v in sorted(seg_counts.items()))
+    out_file = render(snapshot, args.output_dir, gcode_path.stem, ts)
 
     print(
-        f"Wrote 3 PNGs to {run_dir}/\n"
-        f"  segments: {seg_summary}\n"
-        f"  corners: {snapshot['blended_corners']} blended, "
-        f"{snapshot['unblended_corners']} unblended, "
-        f"{snapshot['chain_fits']} chain fits\n"
-        f"  traversal: {snapshot['traversal_time_s']:.3f}s"
+        f"{out_file}\n"
+        f"  v={max_velocity} a={max_accel} scv={scv}  "
+        f"t={snapshot['traversal_time_s']:.3f}s"
     )
 
 
