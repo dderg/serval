@@ -2597,12 +2597,9 @@ impl PyMotionEngine {
         cfg.axis_registry = axis_registry;
         cfg.limit_sections = limit_sections;
         cfg.cartesian = cartesian;
-        // [limit <name>] sections are no longer the motion-limit source ([printer]
-        // is), but when present they must still be internally consistent.
-        if !cfg.limit_sections.is_empty() {
-            cfg.to_temporal_limits()
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        }
+        // [limit <name>] sections are parsed so existing configs load, but they
+        // are no longer the motion-limit source ([printer] is) and the live
+        // stream pipeline never consults them — so they are left unvalidated.
         cfg.post_processors = post_processor_set;
         cfg.window_capacity = window_capacity;
         cfg.beta_max_iters = beta_max_iters;
