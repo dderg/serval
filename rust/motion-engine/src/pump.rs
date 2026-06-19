@@ -997,7 +997,7 @@ impl PieceSink for WireSink {
                     "[transit-diag] alert"
                 );
             } else {
-                tracing::info!(
+                tracing::warn!(
                     subsystem = "motion",
                     event = "transit_diag",
                     mcu = key.mcu_id,
