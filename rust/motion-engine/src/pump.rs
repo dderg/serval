@@ -666,9 +666,36 @@ pub fn run_pump<S, F, C, A, O, D>(
         holding_ahead = false;
         'send: loop {
             let hz_of = |k: &AxisKey, q: &AxisQueue| horizon_of(k, q, &cohort);
+            let total_queued: usize = queues.values().map(|q| q.pieces.len()).sum();
             match schedule(&queues, MAX_PER_FRAME, hz_of, |_| usize::MAX) {
-                Schedule::Idle => break 'send,
-                Schedule::StallFull(_stall_key) => {
+                Schedule::Idle => {
+                    if total_queued > 0 {
+                        for (k, q) in &queues {
+                            if !q.pieces.is_empty() {
+                                tracing::warn!(
+                                    subsystem = "motion", event = "pump_sched_idle_with_pieces",
+                                    mcu = k.mcu_id, axis = k.axis,
+                                    queued = q.pieces.len(), room = q.room(),
+                                    pushed = q.pushed, retired = q.retired,
+                                    ring_depth = q.ring_depth,
+                                    "[pump] Idle but pieces queued"
+                                );
+                            }
+                        }
+                    }
+                    break 'send;
+                }
+                Schedule::StallFull(stall_key) => {
+                    let q = queues.get(&stall_key);
+                    tracing::warn!(
+                        subsystem = "motion", event = "pump_stall_full",
+                        mcu = stall_key.mcu_id, axis = stall_key.axis,
+                        room = q.map(|q| q.room()),
+                        pushed = q.map(|q| q.pushed),
+                        retired = q.map(|q| q.retired),
+                        ring_depth = q.map(|q| q.ring_depth),
+                        "[pump] StallFull"
+                    );
                     break 'send;
                 }
                 Schedule::StallAhead(_stall_key) => {
