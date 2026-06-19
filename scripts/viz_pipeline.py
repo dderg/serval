@@ -141,17 +141,69 @@ def parse_gcode(
     return waypoints
 
 
+def _build_time_series(segments, vel_s_raw, vel_v_raw):
+    import numpy as np
+
+    all_s, all_x, all_y = [], [], []
+    for seg in segments:
+        all_s.extend(seg["s"])
+        all_x.extend(seg["x"])
+        all_y.extend(seg["y"])
+    s = np.array(all_s)
+    x = np.array(all_x)
+    y = np.array(all_y)
+
+    v_interp = np.interp(s, vel_s_raw, vel_v_raw)
+    v_interp = np.maximum(v_interp, 1e-6)
+
+    ds = np.diff(s)
+    v_avg = 0.5 * (v_interp[:-1] + v_interp[1:])
+    dt = ds / v_avg
+    t = np.concatenate([[0.0], np.cumsum(dt)])
+
+    vx = np.gradient(x, t)
+    vy = np.gradient(y, t)
+    v_scalar = np.sqrt(vx**2 + vy**2)
+
+    ax = np.gradient(vx, t)
+    ay = np.gradient(vy, t)
+    a_scalar = np.sqrt(ax**2 + ay**2)
+
+    jx = np.gradient(ax, t)
+    jy = np.gradient(ay, t)
+    j_scalar = np.sqrt(jx**2 + jy**2)
+
+    return t, vx, vy, v_scalar, ax, ay, a_scalar, jx, jy, j_scalar
+
+
+def _plot_derivative(ax, t, comp_x, comp_y, scalar, ylabel, title):
+    ax.plot(t, comp_x, "-", linewidth=0.6, color="C0", label="X")
+    ax.plot(t, comp_y, "-", linewidth=0.6, color="C1", label="Y")
+    ax.plot(t, scalar, "-", linewidth=0.8, color="C3", label="scalar")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=9)
+    ax.legend(fontsize=7, loc="upper right")
+
+
 def render(snapshot, out_path, stem, ts):
     raw_x, raw_y = snapshot["raw_x"], snapshot["raw_y"]
     segments = list(snapshot["fitted_segments"])
     vel_s, vel_v = snapshot["vel_s"], snapshot["vel_v"]
 
-    fig, (ax_path, ax_vel) = plt.subplots(
-        2,
-        1,
-        figsize=(10, 12),
-        gridspec_kw={"height_ratios": [3, 1]},
+    t, vx, vy, v_sc, ax_d, ay, a_sc, jx, jy, j_sc = _build_time_series(
+        segments,
+        vel_s,
+        vel_v,
     )
+
+    fig, axes = plt.subplots(
+        4,
+        1,
+        figsize=(10, 18),
+        gridspec_kw={"height_ratios": [3, 1, 1, 1]},
+    )
+    ax_path, ax_vel, ax_acc, ax_jrk = axes
 
     ax_path.plot(
         raw_x,
@@ -201,14 +253,17 @@ def render(snapshot, out_path, stem, ts):
         fontsize=9,
     )
 
-    ax_vel.plot(vel_s, vel_v, "-", linewidth=0.8, color="C3")
-    ax_vel.set_xlabel("Arc-length s (mm)")
-    ax_vel.set_ylabel("Velocity (mm/s)")
-    ax_vel.set_ylim(bottom=0)
-    ax_vel.set_title(
-        f"Velocity profile  (t={snapshot['traversal_time_s']:.3f}s)",
-        fontsize=9,
+    _plot_derivative(
+        ax_vel,
+        t,
+        vx,
+        vy,
+        v_sc,
+        "mm/s",
+        f"Velocity  (t={snapshot['traversal_time_s']:.3f}s)",
     )
+    _plot_derivative(ax_acc, t, ax_d, ay, a_sc, "mm/s²", "Acceleration")
+    _plot_derivative(ax_jrk, t, jx, jy, j_sc, "mm/s³", "Jerk")
 
     fig.tight_layout()
     out_file = out_path / f"{stem}_{ts}.png"

@@ -42,6 +42,7 @@ pub fn pipeline_snapshot(
         d.set_item("type", seg.kind)?;
         d.set_item("x", &seg.xs)?;
         d.set_item("y", &seg.ys)?;
+        d.set_item("s", &seg.s_values)?;
         seg_list.append(d)?;
     }
     dict.set_item("fitted_segments", seg_list)?;
@@ -117,12 +118,14 @@ struct TypedSegment {
     kind: &'static str,
     xs: Vec<f64>,
     ys: Vec<f64>,
+    s_values: Vec<f64>,
 }
 
 const SAMPLES_PER_MM: f64 = 2.0;
 
 fn sample_fitted_segments(outcome: &geometry::FitOutcome) -> Vec<TypedSegment> {
     let mut segments = Vec::new();
+    let mut s_offset = 0.0;
     for m in &outcome.moves {
         if let Some(spatial) = &m.segment.spatial {
             let kind = match spatial {
@@ -134,13 +137,21 @@ fn sample_fitted_segments(outcome: &geometry::FitOutcome) -> Vec<TypedSegment> {
             let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(2);
             let mut xs = Vec::with_capacity(n);
             let mut ys = Vec::with_capacity(n);
+            let mut s_values = Vec::with_capacity(n);
             for k in 0..n {
                 let s = len * (k as f64) / ((n - 1) as f64);
                 let pt = spatial.point_at(s);
                 xs.push(pt[0]);
                 ys.push(pt[1]);
+                s_values.push(s_offset + s);
             }
-            segments.push(TypedSegment { kind, xs, ys });
+            s_offset += len;
+            segments.push(TypedSegment {
+                kind,
+                xs,
+                ys,
+                s_values,
+            });
         }
     }
     segments
