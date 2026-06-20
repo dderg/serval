@@ -1,14 +1,21 @@
 // Exact-crossing buzz streaming: the producer half of the resonance excitation.
 //
 // `arm` (foreground, via the engine) latches one immutable `ToneParams` per
-// excited axis into the per-axis stream slot, anchored on the current MCU cycle,
-// then kicks the step-output timer. `refill_step_axis` runs inside the
-// step-output consumer ISR (see `per_axis_timer::step_output_event`): it drives
+// excited axis into the per-axis stream slot. `refill_step_axis` is the SOLE
+// PRODUCER and runs ONLY in the FOREGROUND — the engine's initial fill plus the
+// `runtime_buzz_refill_foreground` task (see `src/runtime_tick.c`). It drives
 // `buzz_gen::next_crossing` and pushes `StepEntry`s into the axis ring up to a
-// high-water mark, always keeping the next crossing queued so the timer stays
-// armed across the carrier's turnaround gaps. All ring pushes therefore happen
-// in the consumer context — producer and consumer share one NVIC priority, so
-// the SPSC ring never sees a racing producer.
+// high-water mark, always keeping the next crossing queued so the step-output
+// timer stays armed across the carrier's turnaround gaps. The step-output ISR
+// (`per_axis_timer::step_output_event`) is the SOLE CONSUMER: it only pops, fires
+// GPIO, and re-arms the compare to the next queued crossing — it never produces.
+//
+// SPSC discipline: foreground writes `tail`, the ISR writes `head`; the
+// volatile + fence ordering in `step_queue` makes this safe across the split
+// NVIC priorities without masking the ring. The one cross-priority hazard is the
+// compare-register poke: the foreground kick and the ISR re-arm both write the
+// step-output timer compare, so the foreground kick is the ONLY thing guarded by
+// an `irq_disable`/`irq_enable` window — never the solver compute.
 //
 // The stream is decoupled from the motion ISR tick rate: a crossing's
 // `cycle_abs` depends only on the curve, the anchor, and `cycles_per_second`.
@@ -20,7 +27,8 @@ use core::sync::atomic::{AtomicI32, Ordering};
 use crate::buzz_gen::{ToneCursor, ToneError, ToneParams, next_crossing};
 use crate::error::FaultCode;
 use crate::step_queue::{
-    N_AXIS_STEP_QUEUES, STEPPER_SEL_ALL, StepEntry, StepQueue, len as queue_len, push as queue_push,
+    N_AXIS_STEP_QUEUES, STEPPER_SEL_ALL, StepEntry, StepQueue, len as queue_len,
+    peek as queue_peek, push as queue_push,
 };
 
 /// Latched refill fault code (0 == none). The consumer ISR has no `SharedState`
@@ -45,15 +53,18 @@ pub fn take_refill_fault() -> i32 {
 }
 
 /// Keep the ring comfortably below `STEP_QUEUE_DEPTH` (32). Refill tops up to
-/// this on each consumer pass; the gap to depth absorbs the in-flight pops.
-const HIGH_WATER: u16 = 8;
+/// this on each foreground pass; the gap to depth absorbs the in-flight pops the
+/// step-output ISR performs between refills.
+const HIGH_WATER: u16 = 24;
 
-/// Bound on pushes per `refill_step_axis` call so a single consumer pass cannot
-/// monopolise the ISR generating a long run of crossings. The solver runs in
-/// the step-output ISR, which competes with the 10 kHz motion timer (~100 us
-/// period), so this is kept small: a few f32 crossings stay well inside one
-/// motion tick. The queue refills incrementally across consumer passes.
-const REFILL_BATCH: u16 = 4;
+/// Bound on pushes per `refill_step_axis` call. Refill now runs in the
+/// FOREGROUND (the engine's initial fill plus the `runtime_buzz_refill_foreground`
+/// task), not the step-output ISR, so there is no ISR budget to protect — the
+/// batch only bounds a single call's worst-case so the foreground loop stays
+/// responsive. The sub-millisecond main loop refills far faster than the ring
+/// drains at audio-rate crossings, so a depth-32 / `HIGH_WATER`-24 ring never
+/// underruns.
+const REFILL_BATCH: u16 = 16;
 
 /// One axis's resumable excitation: the latched curve and the cursor threaded
 /// through `next_crossing`. `anchored` flips on the first refill, where the
@@ -74,9 +85,9 @@ pub enum RefillError {
     /// The solver faulted (non-monotonic time or a diverged refinement). The
     /// caller raises `InternalInvariant` — never silently recovered.
     Solver(ToneError),
-    /// A ring push failed. The stream is the sole producer and tops up only to
-    /// `HIGH_WATER < STEP_QUEUE_DEPTH`, so this is impossible; surfaced so the
-    /// consumer can raise `StepQueueOverflow` rather than drop edges.
+    /// A ring push failed. The foreground is the sole producer and tops up only
+    /// to `HIGH_WATER < STEP_QUEUE_DEPTH`, so this is impossible; surfaced so the
+    /// caller can raise `StepQueueOverflow` rather than drop edges.
     QueueFull,
 }
 
@@ -140,6 +151,13 @@ mod store {
 #[cfg(any(test, feature = "host"))]
 pub use store::reset_for_test;
 
+/// The refill high-water mark, exposed for the gating tests.
+#[cfg(any(test, feature = "host"))]
+#[must_use]
+pub fn test_high_water() -> u16 {
+    HIGH_WATER
+}
+
 /// Latch one axis's excitation curve and arm its stream. Called from the
 /// foreground arm path with the curve already expressed in absolute seconds.
 /// `params.anchor_cycle` is provisional: the first refill rebinds it to the
@@ -175,28 +193,30 @@ pub fn axis_active(axis_idx: usize) -> bool {
 }
 
 /// Push pending crossings for one axis up to `HIGH_WATER`, bounded by
-/// `REFILL_BATCH`. Runs in the consumer ISR (sole producer there). Keeps the
-/// next crossing queued whenever the stream is live so the timer re-arms across
-/// turnaround gaps; emits the closing net-zero edge then marks the stream done.
+/// `REFILL_BATCH`. Runs in the FOREGROUND (sole producer there). Keeps the next
+/// crossing queued whenever the stream is live so the step-output timer re-arms
+/// across turnaround gaps; emits the closing net-zero edge then marks the stream
+/// done. Returns `Ok(true)` when at least one entry was pushed this call (the
+/// caller uses that to decide whether a drained, disarmed timer needs a kick).
 ///
 /// # Safety
 ///
 /// `queue_ptr` must be a non-null, live `StepQueue` for `axis_idx`, and the
-/// caller must be the sole producer for it (the step-output ISR).
+/// caller must be the sole producer for it (the foreground refill path).
 pub unsafe fn refill_step_axis(
     axis_idx: usize,
     queue_ptr: *mut StepQueue,
     now: u32,
-) -> Result<(), RefillError> {
+) -> Result<bool, RefillError> {
     if axis_idx >= N_AXIS_STEP_QUEUES || queue_ptr.is_null() {
-        return Ok(());
+        return Ok(false);
     }
     store::with_slot(axis_idx, |slot| {
         let Some(stream) = slot.as_mut() else {
-            return Ok(());
+            return Ok(false);
         };
         if stream.closed {
-            return Ok(());
+            return Ok(false);
         }
         if !stream.anchored {
             stream.params.anchor_cycle = now;
@@ -207,7 +227,7 @@ pub unsafe fn refill_step_axis(
             // SAFETY: caller guarantees `queue_ptr` is live; `len` is racy-safe.
             let occupancy = unsafe { queue_len(queue_ptr) };
             if occupancy >= HIGH_WATER || pushed >= REFILL_BATCH {
-                return Ok(());
+                return Ok(pushed > 0);
             }
             match next_crossing(&stream.params, stream.cursor) {
                 Ok(crossing) => {
@@ -217,7 +237,7 @@ pub unsafe fn refill_step_axis(
                         stepper_sel: STEPPER_SEL_ALL,
                         _pad: [0; 2],
                     };
-                    // SAFETY: sole producer (consumer ISR); `queue_ptr` live.
+                    // SAFETY: sole producer (foreground); `queue_ptr` live.
                     if unsafe { queue_push(queue_ptr, entry) }.is_err() {
                         return Err(RefillError::QueueFull);
                     }
@@ -229,12 +249,83 @@ pub unsafe fn refill_step_axis(
                 }
                 Err(ToneError::Done) => {
                     stream.closed = true;
-                    return Ok(());
+                    return Ok(pushed > 0);
                 }
                 Err(other) => return Err(RefillError::Solver(other)),
             }
         }
     })
+}
+
+/// Foreground refill pass over every axis: for each one resolve its queue, note
+/// whether it had drained empty (the step-output ISR would have disarmed its
+/// compare), top it up to `HIGH_WATER`, and — only if it HAD drained — re-arm the
+/// step-output timer to the new front crossing via `kick` (guarded against the
+/// ISR re-arm by the caller's IRQ window). Refill faults are latched (fail loud)
+/// for the foreground fault path to surface.
+///
+/// `resolve` yields a non-null, live `StepQueue` pointer for an axis (or null to
+/// skip). `kick` arms the step-output compare for `(axis_idx, cycle_abs)`. Both
+/// are injected so the host/test build can exercise this against the same
+/// thread-local queues the consumer uses, with a no-op kick.
+///
+/// # Safety
+///
+/// `resolve` must return either null or a pointer to a live `StepQueue` owned by
+/// `axis_idx`, and the foreground must be the sole producer for every such queue.
+pub unsafe fn refill_foreground_all(
+    now: u32,
+    resolve: impl Fn(usize) -> *mut StepQueue,
+    kick: impl Fn(usize, u32),
+) {
+    for axis_idx in 0..N_AXIS_STEP_QUEUES {
+        if !axis_active(axis_idx) {
+            continue;
+        }
+        let q = resolve(axis_idx);
+        if q.is_null() {
+            continue;
+        }
+        // SAFETY: `q` is live (caller contract) and `len`/`peek` are racy-safe
+        // single-consumer-tolerant reads.
+        let was_empty = unsafe { queue_len(q) } == 0;
+        // SAFETY: foreground is the sole producer for `q`.
+        match unsafe { refill_step_axis(axis_idx, q, now) } {
+            Ok(pushed) => {
+                if was_empty && pushed {
+                    // SAFETY: `q` live; sole consumer is the step-output ISR.
+                    if let Some(front) = unsafe { queue_peek(q) } {
+                        kick(axis_idx, front.cycle_abs);
+                    }
+                }
+            }
+            Err(err) => latch_refill_fault(err),
+        }
+    }
+}
+
+/// MCU foreground entry: called every main-loop pass by the
+/// `runtime_buzz_refill_foreground` C task. Reads the cycle clock, resolves the
+/// real per-axis `step_queues`, and re-arms via the IRQ-guarded compare kick.
+#[cfg(not(any(test, feature = "host")))]
+#[unsafe(no_mangle)]
+pub extern "C" fn runtime_buzz_refill_foreground() {
+    // SAFETY: `timer_read_time` is a single u32 MMIO read.
+    let now = unsafe { timer_read_time() };
+    // SAFETY: `queue_for_axis` returns null or a live `step_queues` entry; the
+    // foreground is the sole producer; the kick is IRQ-guarded.
+    unsafe {
+        refill_foreground_all(
+            now,
+            crate::step_queue::queue_for_axis,
+            crate::dispatch_stepper::kick_per_axis_timer_foreground,
+        );
+    }
+}
+
+#[cfg(not(any(test, feature = "host")))]
+unsafe extern "C" {
+    fn timer_read_time() -> u32;
 }
 
 #[cfg(test)]

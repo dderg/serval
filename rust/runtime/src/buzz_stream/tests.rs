@@ -1,12 +1,24 @@
-// Gating oracle for the exact-crossing buzz stream. Every test drives the real
-// consumer ISR (`per_axis_timer::step_output_event`), which is where refill (the
-// sole producer) runs, so these exercise the production push/pop path.
+// Gating oracle for the exact-crossing buzz stream. The producer (refill) now
+// runs in the FOREGROUND and the step-output ISR (`step_output_event`) is a pure
+// consumer, so every test drives the two separately: `refill_foreground` tops up
+// the rings, `step_output_event` only pops + fires.
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
 use crate::buzz_gen::{ToneCursor, ToneParams, next_crossing};
-use crate::buzz_stream::{arm_axis, reset_for_test};
+use crate::buzz_stream::{arm_axis, refill_foreground_all, reset_for_test};
 use crate::per_axis_timer::{step_output_event, test_hooks};
 use std::vec::Vec;
+
+/// Foreground refill against the same thread-local queues `step_output_event`
+/// consumes, with a no-op kick (the host build arms no real timer). This is the
+/// sole producer in the new model.
+fn refill_foreground(now: u32) {
+    // SAFETY: `test_hooks::queue_for_axis` yields null or a live thread-local
+    // `StepQueue`; the test thread is the sole producer; the kick is a no-op.
+    unsafe {
+        refill_foreground_all(now, test_hooks::queue_for_axis, |_axis, _cycle| {});
+    }
+}
 
 const CPS: f64 = 520_000_000.0;
 const AXIS: usize = 2;
@@ -68,10 +80,12 @@ fn drain_via_consumer(start_now: u32, end_now: u32, now_step: u32) -> Vec<i8> {
     let mut now = start_now;
     while (end_now.wrapping_sub(now) as i32) > 0 {
         test_hooks::set_now(now);
+        refill_foreground(now);
         let _ = step_output_event();
         now = now.wrapping_add(now_step);
     }
     test_hooks::set_now(end_now);
+    refill_foreground(end_now);
     let _ = step_output_event();
     test_hooks::take_emits()
         .into_iter()
@@ -174,6 +188,7 @@ fn oscillates_then_returns_via_consumer_no_fault() {
     let end = last.wrapping_add(20_000);
     while (end.wrapping_sub(now) as i32) > 0 {
         test_hooks::set_now(now);
+        refill_foreground(now);
         let _ = step_output_event();
         for (_axis, dir, _sel) in test_hooks::take_emits() {
             pos += dir;
@@ -217,6 +232,7 @@ fn bench_scale_consumer_driven_by_next_wake_does_not_spin() {
     let (mut events, mut pos): (u64, i32) = (0, 0);
     loop {
         test_hooks::set_now(now);
+        refill_foreground(now);
         let next = step_output_event();
         for (_a, dir, _s) in test_hooks::take_emits() {
             pos += dir;
@@ -241,4 +257,60 @@ fn bench_scale_consumer_driven_by_next_wake_does_not_spin() {
     assert_eq!(pos, 0, "net-zero");
     assert_eq!(crate::buzz_stream::take_refill_fault(), 0);
     std::eprintln!("bench-scale: {events} events, net pos {pos}");
+}
+
+/// The step-output ISR is a PURE CONSUMER: it never produces. After ONE
+/// foreground refill primes the ring, draining via `step_output_event` alone
+/// (no further foreground refill) empties the ring and stalls the buzz — the ISR
+/// neither tops the queue up nor advances the solver, even though the stream is
+/// still nominally active.
+#[test]
+fn step_output_event_is_pure_consumer_no_refill() {
+    let anchor = 7_000_000u32;
+    let p = tone_params(anchor);
+    let edges = solver_edges(&p);
+    let last = edges.iter().map(|(c, _)| *c).max().unwrap();
+    assert!(edges.len() > crate::buzz_stream::test_high_water() as usize);
+
+    setup();
+    arm_axis(AXIS, p);
+    test_hooks::set_owned_mask(1u8 << AXIS);
+    test_hooks::set_late_threshold(u32::MAX);
+
+    // Foreground refill primes the ring up to HIGH_WATER (a single call is
+    // REFILL_BATCH-bounded, so loop a few passes as the real foreground does).
+    test_hooks::set_now(anchor);
+    for _ in 0..4 {
+        refill_foreground(anchor);
+    }
+    let primed = unsafe { crate::step_queue::len(test_hooks::queue_for_axis(AXIS)) };
+    assert_eq!(primed, crate::buzz_stream::test_high_water());
+
+    // Drive the consumer ISR to the end WITHOUT any further refill. It can only
+    // emit what was primed; once those pop it has nothing left to fire.
+    let mut now = anchor;
+    let mut emitted = 0usize;
+    let end = last.wrapping_add(20_000);
+    while (end.wrapping_sub(now) as i32) > 0 {
+        test_hooks::set_now(now);
+        let _ = step_output_event();
+        emitted += test_hooks::take_emits().len();
+        now = now.wrapping_add(13_000);
+    }
+
+    // At most the primed depth was ever emitted (the ISR produced nothing), the
+    // ring is now empty, and the solver never closed the stream — it stalled.
+    assert!(
+        emitted <= crate::buzz_stream::test_high_water() as usize,
+        "ISR produced edges: emitted {emitted} > primed {}",
+        crate::buzz_stream::test_high_water()
+    );
+    assert!(emitted < edges.len(), "ISR drained the whole tone unaided");
+    let remaining = unsafe { crate::step_queue::len(test_hooks::queue_for_axis(AXIS)) };
+    assert_eq!(remaining, 0, "ring not drained");
+    assert!(
+        crate::buzz_stream::axis_active(AXIS),
+        "stream closed without foreground refill — ISR must have produced"
+    );
+    assert_eq!(crate::buzz_stream::take_refill_fault(), 0);
 }

@@ -98,8 +98,6 @@ pub extern "C" fn step_output_event() -> u32 {
     let owned = unsafe { kalico_step_output_owned_mask() };
     crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_STEPOUT_ENTER);
 
-    refill_owned_buzz_streams(now, owned);
-
     let threshold = late_threshold_12p5_us_in_cycles();
     let mut emitted: u32 = 0;
     'outer: loop {
@@ -153,30 +151,6 @@ pub extern "C" fn step_output_event() -> u32 {
 
     crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_STEPOUT_EXIT);
     next_wake_across_owned(now, owned).unwrap_or(STEP_OUTPUT_DISABLE)
-}
-
-/// Top up the buzz step queues for every owned, actively-buzzing axis. Runs at
-/// the head of the consumer ISR so all ring pushes happen in the sole-producer
-/// context (no SPSC race). A refill fault is latched globally (fail loud) for
-/// the foreground to surface; it never silently drops edges.
-fn refill_owned_buzz_streams(now: u32, owned: u8) {
-    for axis_idx in 0..N_AXIS_STEP_QUEUES {
-        if owned & (1u8 << axis_idx) == 0 {
-            continue;
-        }
-        if !crate::buzz_stream::axis_active(axis_idx) {
-            continue;
-        }
-        let q = resolve_queue_ptr(axis_idx);
-        if q.is_null() {
-            continue;
-        }
-        // SAFETY: `q` is non-null (checked) and live; this ISR is the sole
-        // producer for the buzz stream (same NVIC priority as the consumer).
-        if let Err(err) = unsafe { crate::buzz_stream::refill_step_axis(axis_idx, q, now) } {
-            crate::buzz_stream::latch_refill_fault(err);
-        }
-    }
 }
 
 fn next_wake_across_owned(now: u32, owned: u8) -> Option<u32> {

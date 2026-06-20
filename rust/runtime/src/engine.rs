@@ -613,7 +613,22 @@ impl Engine {
                 now_cycle,
             );
             crate::buzz_stream::arm_axis(ex.axis_idx, params);
-            crate::dispatch_stepper::kick_per_axis_timer(ex.axis_idx, params.anchor_cycle);
+        }
+        // Initial fill in the FOREGROUND (command context): top each armed axis
+        // to HIGH_WATER and arm its step-output compare to the front crossing
+        // under the IRQ guard. The solver cost here is harmless — it is not in
+        // any ISR. Thereafter the `runtime_buzz_refill_foreground` task keeps the
+        // rings topped up; the step-output ISR only pops + fires + re-arms.
+        // SAFETY: `queue_for_axis` returns null or a live `step_queues` entry,
+        // the foreground is the sole producer, and the kick is IRQ-guarded.
+        #[cfg(not(any(test, feature = "host")))]
+        #[allow(unsafe_code)]
+        unsafe {
+            crate::buzz_stream::refill_foreground_all(
+                now_cycle,
+                crate::step_queue::queue_for_axis,
+                crate::dispatch_stepper::kick_per_axis_timer_foreground,
+            );
         }
         0
     }
