@@ -1,4 +1,8 @@
-#![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation
+)]
 
 use super::*;
 
@@ -122,6 +126,6 @@ fn into_params_carries_engine_owned_fields() {
     assert_eq!(p.microstep_distance, 0.000_781_25);
     assert_eq!(p.cycles_per_second, 520_000_000.0);
     assert_eq!(p.anchor_cycle, 7_777);
-    assert_eq!(p.omega, ex[0].omega);
-    assert_eq!(p.sign, ex[0].sign);
+    assert_eq!(p.omega, ex[0].omega as f32);
+    assert_eq!(p.sign, ex[0].sign as f32);
 }

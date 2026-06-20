@@ -1,12 +1,23 @@
 // Brute-force oracle math mirrors the solver's own bounded casts (round to a
 // small level, time-to-cycle within a 0.1 s tone); truncation/sign-loss are
 // safe by the same construction as the production path.
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::panic
+)]
 
 use crate::buzz_gen::*;
 
 const NM_PER_MM: f64 = 1.0e6;
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
+
+/// f32 crossing-time jitter budget when comparing the f32 analytic solver to the
+/// f64 brute-force oracle. f32 carries ~7 significant digits, so a crossing time
+/// near the upper end of a ~0.1 s window resolves to ~1e-7 s; 2 us comfortably
+/// covers that plus the solver's own f32 refine tolerance, while staying far
+/// tighter than a microstep half-period so a genuine misplacement still fails.
+const F32_TIME_SLACK: f64 = 2.0e-6;
 
 /// Brute-force reference: sample q(t) on a fine grid and record every
 /// `round(q/m)` change as a ground-truth (time, dir) edge. `t_lo`/`t_hi`
@@ -20,6 +31,7 @@ struct OracleEdge {
     level: i32,
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn make_params(
     freq_hz: f64,
     amplitude_nm: f64,
@@ -29,15 +41,15 @@ fn make_params(
 ) -> ToneParams {
     let total_seconds = 0.1;
     ToneParams {
-        omega: TWO_PI * freq_hz,
+        omega: (TWO_PI * freq_hz) as f32,
         mu: 0.0,
-        amplitude_mm: amplitude_nm / NM_PER_MM,
-        sign,
-        base_mm,
-        microstep_distance: 0.0125 / 16.0,
+        amplitude_mm: (amplitude_nm / NM_PER_MM) as f32,
+        sign: sign as f32,
+        base_mm: base_mm as f32,
+        microstep_distance: (0.0125 / 16.0) as f32,
         anchor_cycle: 1_000,
         cycles_per_second,
-        total_seconds,
+        total_seconds: total_seconds as f32,
         ramp_seconds: 0.01,
     }
 }
@@ -45,6 +57,7 @@ fn make_params(
 /// A linear chirp from `f_start` to `f_end` over `total_seconds`. `mu` is the
 /// host's exact `2*pi*(f_end - f_start)/total` slope, so `omega_inst(0)`/`(total)`
 /// land on `2*pi*f_start` / `2*pi*f_end`.
+#[allow(clippy::cast_possible_truncation)]
 fn make_chirp(
     f_start_hz: f64,
     f_end_hz: f64,
@@ -56,44 +69,65 @@ fn make_chirp(
     let omega0 = TWO_PI * f_start_hz;
     let mu = TWO_PI * (f_end_hz - f_start_hz) / total_seconds;
     ToneParams {
-        omega: omega0,
-        mu,
-        amplitude_mm: amplitude_nm / NM_PER_MM,
-        sign,
+        omega: omega0 as f32,
+        mu: mu as f32,
+        amplitude_mm: (amplitude_nm / NM_PER_MM) as f32,
+        sign: sign as f32,
         base_mm: 0.0,
-        microstep_distance: 0.0125 / 16.0,
+        microstep_distance: (0.0125 / 16.0) as f32,
         anchor_cycle: 1_000,
         cycles_per_second: 64_000_000.0,
-        total_seconds,
-        ramp_seconds,
+        total_seconds: total_seconds as f32,
+        ramp_seconds: ramp_seconds as f32,
     }
 }
 
-/// Reference curve mirrored from the solver: `q = sign*env*A_eff(t)*sin(phi(t))`,
-/// with `phi = omega*t + 0.5*mu*t^2` and `A_eff = A*omega/(omega+mu*t)`. The tone
-/// case (`mu == 0`) collapses to `A*sin(omega*t)`.
+/// High-precision f64 reference curve mirrored from the solver:
+/// `q = sign*env*A_eff(t)*sin(phi(t))`, with `phi = omega*t + 0.5*mu*t^2` and
+/// `A_eff = A*omega/(omega+mu*t)`. The tone case (`mu == 0`) collapses to
+/// `A*sin(omega*t)`. The solver's curve parameters are f32; this ground truth
+/// promotes them to f64 so the oracle stays the exact reference the f32 analytic
+/// solver is judged against.
 fn position_rel_ref(p: &ToneParams, t: f64) -> f64 {
-    let phi = (p.omega + 0.5 * p.mu * t) * t;
-    let amp = if p.mu == 0.0 {
-        p.amplitude_mm
+    let omega = f64::from(p.omega);
+    let mu = f64::from(p.mu);
+    let amplitude_mm = f64::from(p.amplitude_mm);
+    let phi = (omega + 0.5 * mu * t) * t;
+    let amp = if mu == 0.0 {
+        amplitude_mm
     } else {
-        let w = p.omega + p.mu * t;
-        p.amplitude_mm * p.omega / w
+        let w = omega + mu * t;
+        amplitude_mm * omega / w
     };
-    p.sign * envelope(t, p.total_seconds, p.ramp_seconds) * amp * libm::sin(phi)
+    let env = envelope_ref(t, f64::from(p.total_seconds), f64::from(p.ramp_seconds));
+    f64::from(p.sign) * env * amp * libm::sin(phi)
+}
+
+/// f64 ground-truth trapezoidal envelope (the f64 mirror of `buzz_gen::envelope`,
+/// which is now f32). Keeping the reference envelope in f64 keeps the oracle
+/// high-precision.
+fn envelope_ref(t: f64, total: f64, ramp: f64) -> f64 {
+    if total <= 0.0 || t <= 0.0 || t >= total {
+        return 0.0;
+    }
+    let ramp = ramp.max(f64::MIN_POSITIVE);
+    let up = (t / ramp).min(1.0);
+    let down = ((total - t) / ramp).min(1.0);
+    up.min(down).max(0.0)
 }
 
 /// Build the ground-truth crossing sequence at >= 1 MHz equivalent resolution.
 fn brute_force(p: &ToneParams, grid_hz: f64) -> Vec<OracleEdge> {
     let dt = 1.0 / grid_hz;
-    let m = p.microstep_distance;
+    let m = f64::from(p.microstep_distance);
+    let total = f64::from(p.total_seconds);
     let round_level = |q: f64| (q / m).round() as i32;
     let mut edges = Vec::new();
     let mut t_prev = 0.0;
     let mut level = round_level(position_rel_ref(p, 0.0));
     let mut t = dt;
-    while t <= p.total_seconds + dt * 0.5 {
-        let tc = t.min(p.total_seconds);
+    while t <= total + dt * 0.5 {
+        let tc = t.min(total);
         let new_level = round_level(position_rel_ref(p, tc));
         while new_level != level {
             let dir: i8 = if new_level > level { 1 } else { -1 };
@@ -173,9 +207,12 @@ fn matches_brute_force_across_sweep() {
                             a.t
                         );
                         // Analytic time must fall within the oracle's detection
-                        // bracket, widened by one grid step of slack each side.
+                        // bracket, widened by one grid step plus the f32 jitter
+                        // budget each side.
+                        let at = f64::from(a.t);
+                        let slack = grid_dt + F32_TIME_SLACK;
                         assert!(
-                            a.t >= o.t_lo - grid_dt && a.t <= o.t_hi + grid_dt,
+                            at >= o.t_lo - slack && at <= o.t_hi + slack,
                             "time {} outside oracle bracket [{}, {}] \
                              f={freq} steps={target_microsteps}",
                             a.t,
@@ -226,8 +263,10 @@ fn grazing_peak_amplitudes_match_brute_force() {
                         "grazing level mismatch f={freq} at t={}",
                         a.t
                     );
+                    let at = f64::from(a.t);
+                    let slack = grid_dt + F32_TIME_SLACK;
                     assert!(
-                        a.t >= o.t_lo - grid_dt && a.t <= o.t_hi + grid_dt,
+                        at >= o.t_lo - slack && at <= o.t_hi + slack,
                         "grazing time {} outside oracle bracket [{}, {}] f={freq}",
                         a.t,
                         o.t_lo,
@@ -334,8 +373,9 @@ fn cycle_abs_depends_only_on_time_and_rate() {
         assert_eq!(s.t.to_bits(), f.t.to_bits(), "time must not depend on rate");
         let d_slow = s.cycle_abs.wrapping_sub(base.anchor_cycle);
         let d_fast = f.cycle_abs.wrapping_sub(fast.anchor_cycle);
-        assert_eq!(d_slow, (s.t * 10_000.0) as u32);
-        assert_eq!(d_fast, (f.t * 40_000.0) as u32);
+        // Mirror cycle_at's f64-promoted time->cycle conversion exactly.
+        assert_eq!(d_slow, (f64::from(s.t) * 10_000.0) as u32);
+        assert_eq!(d_fast, (f64::from(f.t) * 40_000.0) as u32);
     }
 }
 
@@ -488,8 +528,10 @@ fn chirp_matches_brute_force() {
                             "chirp level mismatch f0={f0} f1={f1} at t={}",
                             a.t
                         );
+                        let at = f64::from(a.t);
+                        let slack = grid_dt + F32_TIME_SLACK;
                         assert!(
-                            a.t >= o.t_lo - grid_dt && a.t <= o.t_hi + grid_dt,
+                            at >= o.t_lo - slack && at <= o.t_hi + slack,
                             "chirp time {} outside oracle bracket [{}, {}] \
                              f0={f0} f1={f1} steps={target_microsteps}",
                             a.t,
@@ -565,7 +607,48 @@ fn chirp_cycle_abs_is_rate_only() {
         );
         let d_slow = s.cycle_abs.wrapping_sub(slow.anchor_cycle);
         let d_fast = f.cycle_abs.wrapping_sub(fast.anchor_cycle);
-        assert_eq!(d_slow, (s.t * 10_000.0) as u32);
-        assert_eq!(d_fast, (f.t * 40_000.0) as u32);
+        // Mirror cycle_at's f64-promoted time->cycle conversion exactly.
+        assert_eq!(d_slow, (f64::from(s.t) * 10_000.0) as u32);
+        assert_eq!(d_fast, (f64::from(f.t) * 40_000.0) as u32);
     }
+}
+
+#[test]
+fn bench_params_stream_is_bounded_and_sane() {
+    // Exact bench tone: 54.3 Hz, ~0.035 mm (5.6 microsteps at 0.00625 mm),
+    // DURATION=4 s, ramp ~55 ms, sub-microstep base — the case that crashed.
+    let p = ToneParams {
+        omega: (TWO_PI * 54.3) as f32,
+        mu: 0.0,
+        amplitude_mm: 0.035,
+        sign: 1.0,
+        base_mm: 0.137,
+        microstep_distance: 0.00625,
+        anchor_cycle: 0,
+        cycles_per_second: 520_000_000.0,
+        total_seconds: 4.0,
+        ramp_seconds: 0.055,
+    };
+    let mut cursor = ToneCursor::start();
+    let (mut n, mut last_t, mut max_gap) = (0u32, 0.0f32, 0.0f32);
+    loop {
+        match next_crossing(&p, cursor) {
+            Ok(c) => {
+                max_gap = max_gap.max(c.t - last_t);
+                last_t = c.t;
+                cursor = ToneCursor {
+                    level: c.level,
+                    t_cursor: c.t,
+                };
+                n += 1;
+                assert!(n <= 200_000, "runaway: >200k crossings");
+            }
+            Err(ToneError::Done) => break,
+            Err(e) => panic!("solver error {:?} at t={}", e, last_t),
+        }
+    }
+    assert!(
+        (1000..50_000).contains(&n) && max_gap < 0.05,
+        "crossings={n} max_gap={max_gap}s (Done early or scan traverses a big gap)"
+    );
 }

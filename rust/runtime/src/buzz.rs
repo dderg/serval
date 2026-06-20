@@ -214,6 +214,7 @@ impl AxisExcitation {
     /// Complete the curve with the engine-owned per-axis base, microstep grid,
     /// MCU cycle rate, and the arm-time anchor cycle.
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn into_params(
         self,
         base_mm: f64,
@@ -221,17 +222,20 @@ impl AxisExcitation {
         cycles_per_second: f64,
         anchor_cycle: u32,
     ) -> ToneParams {
+        // The arm-time curve derivation runs in f64 (millihz/nm wire values, the
+        // chirp slope), then narrows to the solver's f32 hot-path numerics here.
+        // `cycles_per_second` stays f64 for the per-crossing `cycle_at` promotion.
         ToneParams {
-            omega: self.omega,
-            mu: self.mu,
-            amplitude_mm: self.amplitude_mm,
-            sign: self.sign,
-            base_mm,
-            microstep_distance,
+            omega: self.omega as f32,
+            mu: self.mu as f32,
+            amplitude_mm: self.amplitude_mm as f32,
+            sign: self.sign as f32,
+            base_mm: base_mm as f32,
+            microstep_distance: microstep_distance as f32,
             anchor_cycle,
             cycles_per_second,
-            total_seconds: self.total_seconds,
-            ramp_seconds: self.ramp_seconds,
+            total_seconds: self.total_seconds as f32,
+            ramp_seconds: self.ramp_seconds as f32,
         }
     }
 }
@@ -248,8 +252,13 @@ impl Default for Buzz {
 /// crossing solver and its brute-force oracle.
 #[inline]
 #[must_use]
+#[allow(clippy::cast_possible_truncation)]
 pub fn envelope(t: f64, total: f64, ramp: f64) -> f64 {
-    crate::buzz_gen::envelope(t, total, ramp)
+    f64::from(crate::buzz_gen::envelope(
+        t as f32,
+        total as f32,
+        ramp as f32,
+    ))
 }
 
 #[cfg(test)]

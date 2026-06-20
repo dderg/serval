@@ -13,7 +13,7 @@ const AXIS: usize = 2;
 
 fn tone_params(anchor: u32) -> ToneParams {
     ToneParams {
-        omega: 2.0 * core::f64::consts::PI * 100.0,
+        omega: 2.0 * core::f32::consts::PI * 100.0,
         mu: 0.0,
         amplitude_mm: 0.1,
         sign: 1.0,
@@ -27,12 +27,12 @@ fn tone_params(anchor: u32) -> ToneParams {
 }
 
 fn chirp_params(anchor: u32) -> ToneParams {
-    let f0 = 40.0;
-    let f1 = 160.0;
-    let total = 0.05;
+    let f0 = 40.0f32;
+    let f1 = 160.0f32;
+    let total = 0.05f32;
     ToneParams {
-        omega: 2.0 * core::f64::consts::PI * f0,
-        mu: 2.0 * core::f64::consts::PI * (f1 - f0) / total,
+        omega: 2.0 * core::f32::consts::PI * f0,
+        mu: 2.0 * core::f32::consts::PI * (f1 - f0) / total,
         amplitude_mm: 0.1,
         sign: 1.0,
         base_mm: 0.0,
@@ -191,4 +191,54 @@ fn oscillates_then_returns_via_consumer_no_fault() {
     assert_eq!(crate::buzz_stream::take_refill_fault(), 0);
     // Stream is closed.
     assert!(!crate::buzz_stream::axis_active(AXIS));
+}
+
+#[test]
+fn bench_scale_consumer_driven_by_next_wake_does_not_spin() {
+    reset_for_test();
+    let anchor = 6_000_000u32;
+    let p = ToneParams {
+        omega: 2.0 * core::f32::consts::PI * 54.3,
+        mu: 0.0,
+        amplitude_mm: 0.035,
+        sign: 1.0,
+        base_mm: 0.137,
+        microstep_distance: 0.00625,
+        anchor_cycle: anchor,
+        cycles_per_second: 520_000_000.0,
+        total_seconds: 4.0,
+        ramp_seconds: 0.055,
+    };
+    arm_axis(AXIS, p);
+    test_hooks::set_owned_mask(1u8 << AXIS);
+    test_hooks::set_late_threshold(u32::MAX);
+
+    let mut now = anchor;
+    let (mut events, mut pos): (u64, i32) = (0, 0);
+    loop {
+        test_hooks::set_now(now);
+        let next = step_output_event();
+        for (_a, dir, _s) in test_hooks::take_emits() {
+            pos += dir;
+        }
+        events += 1;
+        assert!(events < 5_000_000, "runaway: {events} events");
+        if next == crate::per_axis_timer::STEP_OUTPUT_DISABLE {
+            assert!(
+                !crate::buzz_stream::axis_active(AXIS),
+                "disabled but still active"
+            );
+            break;
+        }
+        // The hardware arms the compare timer to `next`; it MUST be strictly in
+        // the future or the timer re-fires immediately and the ISR spins.
+        assert!(
+            (next.wrapping_sub(now) as i32) > 0,
+            "SPIN at event {events}: next_wake {next} <= now {now}"
+        );
+        now = next;
+    }
+    assert_eq!(pos, 0, "net-zero");
+    assert_eq!(crate::buzz_stream::take_refill_fault(), 0);
+    std::eprintln!("bench-scale: {events} events, net pos {pos}");
 }
