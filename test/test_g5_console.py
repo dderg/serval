@@ -23,8 +23,10 @@ def make_motion():
 
     m = motion.Motion.__new__(motion.Motion)
     m.commanded_pos = [0.0, 0.0, 0.0, 0.0]
-    m.max_velocity = 300.0
-    m.max_accel = 3000.0
+    m._max_velocity = 300.0
+    m._max_accel = 3000.0
+    m._square_corner_velocity = 5.0
+    m._planner_ready = False
     m.kin = FakeKin()
     m.extruder = types.SimpleNamespace(check_move=lambda mv: None)
     m.engine = types.SimpleNamespace(

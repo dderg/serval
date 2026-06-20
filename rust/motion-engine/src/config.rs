@@ -383,7 +383,10 @@ impl Default for AxisRegistry {
 pub struct PlannerConfig {
     pub axis_registry: AxisRegistry,
     pub limit_sections: Vec<LimitSection>,
+    pub cartesian: CartesianLimits,
     pub runtime_caps: RuntimeCaps,
+    pub runtime_square_corner_velocity: Option<f64>,
+    pub chain: geometry::ChainFitConfig,
     pub post_processors: PostProcessorSet,
     pub window_capacity: usize,
     pub beta_max_iters: u8,
@@ -405,6 +408,67 @@ pub struct LimitSection {
 pub struct RuntimeCaps {
     pub velocity: Option<f64>,
     pub accel: Option<f64>,
+}
+
+/// Mainline-style global motion limits read from `[printer]`: one velocity /
+/// accel / jerk for the XY plane plus separate Z caps. The streaming geometry
+/// pipeline projects these per move (Z caps bind only on Z-bearing moves), so
+/// an XY move never inherits the slower Z limit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CartesianLimits {
+    pub max_velocity: f64,
+    pub max_accel: f64,
+    pub max_jerk: f64,
+    pub max_z_velocity: f64,
+    pub max_z_accel: f64,
+    pub square_corner_velocity: f64,
+}
+
+impl Default for CartesianLimits {
+    fn default() -> Self {
+        Self {
+            max_velocity: 300.0,
+            max_accel: 3000.0,
+            max_jerk: 100_000.0,
+            max_z_velocity: 15.0,
+            max_z_accel: 100.0,
+            square_corner_velocity: DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
+        }
+    }
+}
+
+impl CartesianLimits {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let ok = |c: f64| c.is_finite() && c > 0.0;
+        if !(ok(self.max_velocity)
+            && ok(self.max_accel)
+            && ok(self.max_jerk)
+            && ok(self.max_z_velocity)
+            && ok(self.max_z_accel))
+        {
+            return Err("[printer] motion limits must be finite and positive");
+        }
+        if !(self.square_corner_velocity.is_finite() && self.square_corner_velocity >= 0.0) {
+            return Err("[printer] square_corner_velocity must be finite and non-negative");
+        }
+        Ok(())
+    }
+
+    /// The scalar path caps for a move with spatial deltas `(dx, dy, dz)`. The Z
+    /// caps project onto the path by the move's Z direction cosine, mirroring
+    /// mainline's `move.limit_speed(max_z_* / |z_unit|)`.
+    #[must_use]
+    pub fn for_move(&self, dx: f64, dy: f64, dz: f64) -> (f64, f64) {
+        let d = (dx * dx + dy * dy + dz * dz).sqrt();
+        let mut v = self.max_velocity;
+        let mut a = self.max_accel;
+        if d > 1e-9 && dz.abs() > 1e-9 {
+            let z_unit = dz.abs() / d;
+            v = v.min(self.max_z_velocity / z_unit);
+            a = a.min(self.max_z_accel / z_unit);
+        }
+        (v, a)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -443,9 +507,93 @@ impl LimitSection {
     }
 }
 
+/// Square-corner velocity used when `[printer]` omits `square_corner_velocity`.
+/// The pipeline blends corners and caps their speed by curvature (`sqrt(a/κ)`),
+/// so this is not the primary corner limiter; it satisfies `VelocityLimits`'
+/// contract and is the floor applied to near-reversal junctions.
+pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
+
 impl PlannerConfig {
     pub fn limit_set_names(&self) -> Vec<String> {
         self.limit_sections.iter().map(|s| s.name.clone()).collect()
+    }
+
+    #[must_use]
+    pub fn square_corner_velocity(&self) -> f64 {
+        self.runtime_square_corner_velocity
+            .unwrap_or(self.cartesian.square_corner_velocity)
+    }
+
+    #[must_use]
+    pub fn effective_limits(&self) -> (f64, f64, f64) {
+        let clamp = |cap: Option<f64>, base: f64| cap.map_or(base, |c| c.min(base));
+        (
+            clamp(self.runtime_caps.velocity, self.cartesian.max_velocity),
+            clamp(self.runtime_caps.accel, self.cartesian.max_accel),
+            self.square_corner_velocity(),
+        )
+    }
+
+    /// Collapse the spatial limit sections (most-restrictive across them) plus
+    /// any runtime-caps override into the scalar path limits the geometry
+    /// pipeline consumes per move.
+    pub fn path_velocity_limits(&self) -> Result<geometry::VelocityLimits, &'static str> {
+        let mut max_v = f64::INFINITY;
+        let mut max_a = f64::INFINITY;
+        for section in &self.limit_sections {
+            if !section
+                .axes
+                .iter()
+                .all(|&i| self.axis_registry.is_spatial(i))
+            {
+                continue;
+            }
+            if let Some(v) = section.max_velocity {
+                max_v = max_v.min(v);
+            }
+            if let Some(a) = section.max_accel {
+                max_a = max_a.min(a);
+            }
+        }
+        if let Some(v) = self.runtime_caps.velocity {
+            max_v = max_v.min(v);
+        }
+        if let Some(a) = self.runtime_caps.accel {
+            max_a = max_a.min(a);
+        }
+        geometry::VelocityLimits::try_new(max_v, max_a, DEFAULT_SQUARE_CORNER_VELOCITY_MM_S)
+    }
+
+    /// Most-restrictive spatial jerk cap (falling back to `accel × default
+    /// multiple`, then a finite engine default) for the geometry velocity
+    /// planner's jerk-limited s-curve.
+    #[must_use]
+    pub fn path_velocity_config(&self) -> geometry::VelocityConfig {
+        let mut max_j = f64::INFINITY;
+        for section in &self.limit_sections {
+            if !section
+                .axes
+                .iter()
+                .all(|&i| self.axis_registry.is_spatial(i))
+            {
+                continue;
+            }
+            let j = section
+                .max_jerk
+                .or(section.max_accel.map(|a| a * JERK_DEFAULT_ACCEL_MULTIPLE));
+            if let Some(j) = j {
+                max_j = max_j.min(j);
+            }
+        }
+        let default = geometry::VelocityConfig::default();
+        geometry::VelocityConfig {
+            max_jerk_mm_s3: if max_j.is_finite() {
+                max_j
+            } else {
+                default.max_jerk_mm_s3
+            },
+            ..default
+        }
     }
 
     pub fn to_temporal_limits(&self) -> Result<temporal::Limits, LimitConfigError> {
@@ -536,7 +684,10 @@ impl Default for PlannerConfig {
                     max_jerk: None,
                 },
             ],
+            cartesian: CartesianLimits::default(),
             runtime_caps: RuntimeCaps::default(),
+            runtime_square_corner_velocity: None,
+            chain: geometry::ChainFitConfig::default(),
             post_processors,
             window_capacity: 32,
             beta_max_iters: 10,
