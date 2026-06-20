@@ -13,6 +13,12 @@ NEPTUNE_SHAPED_CONFIG = """
 [mcu]
 serial: /tmp/kalico-test-no-such-serial
 
+[printer]
+max_velocity: 100
+max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
+
 [kinematics]
 type: cartesian
 axis_x: x
@@ -21,16 +27,6 @@ axis_z: z
 x_motors: x
 y_motors: y
 z_motors: z
-
-[limit gantry]
-axes: x, y
-max_velocity: 100
-max_accel: 1000
-
-[limit z]
-axes: z
-max_velocity: 10
-max_accel: 30
 
 [axis x]
 endstop_pin: PA13

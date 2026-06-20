@@ -107,6 +107,7 @@ class MoveMotion(FakeMotion):
 
     max_accel = 1000.0
     max_velocity = 100.0
+    max_z_velocity = 100.0
 
     def __init__(self, dirty, measured):
         super().__init__(dirty, measured)
