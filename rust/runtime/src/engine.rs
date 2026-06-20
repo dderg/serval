@@ -56,6 +56,7 @@ pub struct Engine {
     pub(crate) last_motors: [f32; MAX_AXES],
     pub tick_caches: crate::stepping_state::TickCaches,
     pieces_gated: bool,
+    pub(crate) buzz: crate::buzz::Buzz,
     #[cfg(any(test, feature = "host"))]
     test_queue_ptrs: [*mut crate::step_queue::StepQueue; MAX_AXES],
 }
@@ -76,6 +77,7 @@ impl Engine {
             last_motors: [0.0; MAX_AXES],
             tick_caches: crate::stepping_state::TickCaches::new(),
             pieces_gated: false,
+            buzz: crate::buzz::Buzz::new(),
             #[cfg(any(test, feature = "host"))]
             test_queue_ptrs: [core::ptr::null_mut(); MAX_AXES],
         }
@@ -116,6 +118,7 @@ impl Engine {
             addr_of_mut!((*ptr).last_motors).write([0.0; MAX_AXES]);
             addr_of_mut!((*ptr).tick_caches).write(crate::stepping_state::TickCaches::new());
             addr_of_mut!((*ptr).pieces_gated).write(false);
+            addr_of_mut!((*ptr).buzz).write(crate::buzz::Buzz::new());
             #[cfg(any(test, feature = "host"))]
             addr_of_mut!((*ptr).test_queue_ptrs).write([core::ptr::null_mut(); MAX_AXES]);
         }
@@ -300,7 +303,33 @@ impl Engine {
 
         let mut active = false;
 
+        let sample_rate_hz = if self.sample_period_cycles == 0 {
+            0.0
+        } else {
+            self.cycles_per_second / self.sample_period_cycles as f32
+        };
+        self.buzz.poll(sample_rate_hz);
+        let mut buzz_axis = [false; MAX_AXES];
+        let mut buzz_samples = [crate::buzz::BuzzSample::ZERO; MAX_AXES];
+        if self.buzz.is_active() {
+            for (i, (flag, samp)) in buzz_axis
+                .iter_mut()
+                .zip(buzz_samples.iter_mut())
+                .enumerate()
+                .take(self.num_axes as usize)
+            {
+                *flag = self.buzz.affects_axis(i);
+                *samp = self.buzz.sample(i);
+            }
+            self.buzz.advance();
+        }
+
         for i in 0..(self.num_axes as usize) {
+            let bz_axis = buzz_axis.get(i).copied().unwrap_or(false);
+            let bz = buzz_samples
+                .get(i)
+                .copied()
+                .unwrap_or(crate::buzz::BuzzSample::ZERO);
             let (p_end, v_end, p_sample_start, overlay_just_armed) = {
                 let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
                     continue;
@@ -337,7 +366,7 @@ impl Engine {
                         }
                     }
                     None => {
-                        if !idle_phase_slew_pending(axis) {
+                        if !idle_phase_slew_pending(axis) && !bz_axis {
                             continue;
                         }
                         active = true;
@@ -345,6 +374,10 @@ impl Engine {
                     }
                 }
             };
+
+            let p_end = p_end + bz.offset;
+            let v_end = v_end + bz.velocity;
+            let p_sample_start = p_sample_start + bz.sample_start_offset;
 
             #[cfg(feature = "motion-module-stepper")]
             {
@@ -527,6 +560,26 @@ impl Engine {
         }
         crate::fault_helpers::raise_jog_parameters_invalid(shared);
         -1
+    }
+
+    pub fn resonance_buzz(
+        &self,
+        axis_mask: u8,
+        sign_mask: u8,
+        freq_millihz: u32,
+        amplitude_nm: u32,
+        duration_ms: u32,
+        ramp_ms: u32,
+    ) -> i32 {
+        self.buzz.arm(
+            self.num_axes,
+            axis_mask,
+            sign_mask,
+            freq_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+        )
     }
 
     pub fn phase_jog_to(

@@ -379,6 +379,81 @@ fn symmetric_buzz_nets_position_count_to_zero() {
     assert_eq!(h.p_prev(), 0.0);
 }
 
+#[allow(unsafe_code)]
+#[test]
+fn mcu_buzz_oscillates_then_returns_pulse_axis_to_base() {
+    // A buzz on an otherwise-idle Pulse axis must (a) actually move the
+    // stepper mid-run and (b) land back exactly on the base step count when
+    // the envelope closes — net-zero excitation, no drift.
+    let axis = 2usize;
+    let mstep = 0.01f32;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    let mut storage = vec![
+        PieceEntry {
+            start_time: 0,
+            coeffs: [0.0; 4],
+            duration: 0.0,
+            motor_mask: 0,
+            _reserved: [0; 3],
+        };
+        TEST_TOTAL_RING_PIECES
+    ];
+    let bindings = [StepperBindingRust {
+        stepper_oid: 10,
+        tmc_cs_oid: TMC_CS_OID_NONE,
+        _pad: [0; 2],
+    }];
+    assert_eq!(
+        engine.configure_axis(
+            axis as u8,
+            StepMode::Pulse,
+            mstep,
+            64,
+            &bindings,
+            TEST_TOTAL_RING_PIECES
+        ),
+        RUNTIME_OK
+    );
+
+    let mut q = Box::new(StepQueue::new());
+    let mut qs: [*mut StepQueue; MAX_AXES] = [core::ptr::null_mut(); MAX_AXES];
+    qs[axis] = q.as_mut();
+    engine.test_install_step_queues(qs);
+    let shared = SharedState::new();
+
+    // 100 Hz, 0.1 mm (= 10 microsteps) amplitude, 20 ms duration (= 800 ticks /
+    // 2 periods at the harness 40 kHz sample rate), 2 ms ramps.
+    let axis_mask = 1u8 << axis;
+    let total_ticks = 800u32; // 20 ms * 40 kHz
+    assert_eq!(
+        engine.resonance_buzz(axis_mask, 0, 100_000, 100_000, 20, 2),
+        0
+    );
+
+    let read_pos = |engine: &Engine| -> i32 {
+        engine.stepping_axes[axis].as_ref().unwrap().steppers[0]
+            .position_count
+            .load(Ordering::Acquire)
+    };
+
+    let mut peak = 0i32;
+    let q_ptr: *mut StepQueue = q.as_mut();
+    for n in 0..(total_ticks as u64 + 4) {
+        engine.tick(TICK_CYCLES + n * TICK_CYCLES, &shared, &mut storage);
+        while unsafe { queue_pop(q_ptr) }.is_some() {}
+        peak = peak.max(read_pos(&engine).abs());
+    }
+
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+    assert!(
+        peak >= 8,
+        "buzz barely moved (peak {peak} microsteps); expected ~10"
+    );
+    assert_eq!(read_pos(&engine), 0, "position did not return to base");
+    assert_eq!(engine.stepping_axes[axis].as_ref().unwrap().p_prev, 0.0);
+    assert!(!engine.buzz.is_active(), "buzz should have completed");
+}
+
 #[test]
 fn overlay_multi_piece_no_sample_exceeds_max_steps() {
     use crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE;

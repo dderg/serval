@@ -15,6 +15,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/**
+ * Per-axis additive contribution a buzz makes to one tick's dispatch inputs.
+ */
+typedef struct BuzzSample BuzzSample;
+
 typedef struct Runtime {
   uint8_t _private[0];
 } Runtime;
@@ -27,6 +32,8 @@ typedef struct StepperBindingRust {
   uint8_t tmc_cs_oid;
   uint8_t _pad[2];
 } StepperBindingRust;
+
+
 
 extern void event_log_emit(uint8_t level,
                            uint8_t subsystem,
@@ -157,6 +164,14 @@ int32_t runtime_query_motor_state(struct Runtime *rt,
                                   uintptr_t max);
 
 int32_t runtime_reset(struct Runtime *rt);
+
+int32_t runtime_resonance_buzz(struct Runtime *rt,
+                               uint8_t axis_mask,
+                               uint8_t sign_mask,
+                               uint32_t freq_millihz,
+                               uint32_t amplitude_nm,
+                               uint32_t duration_ms,
+                               uint32_t ramp_ms);
 
 int32_t runtime_seed_position(struct Runtime *rt, int32_t x_q16, int32_t y_q16, int32_t z_q16);
 

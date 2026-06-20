@@ -244,6 +244,44 @@ class Motion:
             mcu_id, axis_idx, motor_mask, delta_mm, speed, accel
         )
 
+    def submit_resonance_buzz(
+        self,
+        axis_mask,
+        sign_mask,
+        freq_millihz,
+        amplitude_nm,
+        duration_ms,
+        ramp_ms,
+    ):
+        # Direct MCU command (not routed through the host engine): the firmware
+        # synthesizes the per-tick sinusoid itself. Sent to every engine MCU;
+        # one that lacks the target axes simply no-ops them.
+        sent = False
+        for mcu_obj in self._engine_mcus():
+            try:
+                cmd = mcu_obj.lookup_command(
+                    "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
+                    " freq_millihz=%u amplitude_nm=%u duration_ms=%u ramp_ms=%u"
+                )
+            except Exception:
+                continue
+            cmd.send(
+                [
+                    axis_mask,
+                    sign_mask,
+                    freq_millihz,
+                    amplitude_nm,
+                    duration_ms,
+                    ramp_ms,
+                ]
+            )
+            sent = True
+        if not sent:
+            raise self.printer.command_error(
+                "No engine MCU advertises kalico_resonance_buzz; rebuild and "
+                "reflash MCU firmware with CONFIG_RUNTIME=y"
+            )
+
     def set_extruder(self, extruder, extrude_pos):
         self.extruder = extruder
         self.commanded_pos[3] = extrude_pos

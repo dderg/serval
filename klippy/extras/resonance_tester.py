@@ -289,6 +289,28 @@ class ResonanceTestExecutor:
             toolhead.move([X + decel_X, Y + decel_Y, Z, E], abs(last_v))
 
 
+def buzz_axis_to_motor_mask(axis, coupled):
+    # Engine axis index == motor slot: 0=A, 1=B, 2=Z. On CoreXY a cartesian
+    # X move drives A and B in phase; a Y move drives them anti-phase (B sign
+    # bit set). Cartesian kinematics map one axis to one slot.
+    axis = axis.lower()
+    if coupled:
+        mapping = {
+            "x": (0b011, 0b000),
+            "y": (0b011, 0b010),
+            "z": (0b100, 0b000),
+        }
+    else:
+        mapping = {
+            "x": (0b001, 0b000),
+            "y": (0b010, 0b000),
+            "z": (0b100, 0b000),
+        }
+    if axis not in mapping:
+        raise ValueError("unsupported buzz axis %r" % (axis,))
+    return mapping[axis]
+
+
 class ResonanceTester:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -341,6 +363,11 @@ class ResonanceTester:
             "SHAPER_CALIBRATE",
             self.cmd_SHAPER_CALIBRATE,
             desc=self.cmd_SHAPER_CALIBRATE_help,
+        )
+        self.gcode.register_command(
+            "RESONANCE_BUZZ",
+            self.cmd_RESONANCE_BUZZ,
+            desc=self.cmd_RESONANCE_BUZZ_help,
         )
         self.printer.register_event_handler("klippy:connect", self.connect)
 
@@ -606,6 +633,74 @@ class ResonanceTester:
             "The SAVE_CONFIG command will update the printer config file\n"
             "with these parameters and restart the printer."
         )
+
+    cmd_RESONANCE_BUZZ_help = (
+        "Excite a single resonance frequency on one axis via the MCU-resident "
+        "buzz generator"
+    )
+
+    def cmd_RESONANCE_BUZZ(self, gcmd):
+        axis_name = gcmd.get("AXIS", "x").lower()
+        if axis_name not in ("x", "y", "z"):
+            raise gcmd.error("AXIS must be x, y, or z")
+        freq = gcmd.get_float("FREQ", 50.0, above=0.0)
+        duration = gcmd.get_float("DURATION", 1.0, above=0.0)
+        accel_per_hz = gcmd.get_float("ACCEL_PER_HZ", 75.0, above=0.0)
+        amplitude_mm = gcmd.get_float("AMPLITUDE", 0.0, minval=0.0)
+
+        toolhead = self.printer.lookup_object("toolhead")
+        motion = self.printer.lookup_object("motion")
+        kin = toolhead.get_kinematics()
+        coupled = bool(getattr(kin, "coupled_xy", lambda: False)())
+        try:
+            axis_mask, sign_mask = buzz_axis_to_motor_mask(axis_name, coupled)
+        except ValueError as e:
+            raise gcmd.error(str(e))
+
+        # Derive amplitude from accel_per_hz unless AMPLITUDE was given. Peak
+        # accel = accel_per_hz * freq scales with f^2 for fixed displacement, so
+        # cap it; peak velocity = accel_per_hz / 2pi is freq-independent.
+        max_peak_accel = 15000.0  # mm/s^2, ~1.5 g
+        if amplitude_mm <= 0.0:
+            peak_accel = accel_per_hz * freq
+            if peak_accel > max_peak_accel:
+                accel_per_hz = max_peak_accel / freq
+                gcmd.respond_info(
+                    "RESONANCE_BUZZ: clamped accel_per_hz to %.1f to keep peak "
+                    "accel <= %.0f mm/s^2" % (accel_per_hz, max_peak_accel)
+                )
+            amplitude_mm = accel_per_hz / (4.0 * math.pi**2 * freq)
+        max_amplitude_mm = 5.0
+        if amplitude_mm > max_amplitude_mm:
+            raise gcmd.error(
+                "RESONANCE_BUZZ amplitude %.3f mm exceeds %.1f mm ceiling"
+                % (amplitude_mm, max_amplitude_mm)
+            )
+
+        ramp = gcmd.get_float(
+            "RAMP", min(duration * 0.25, 3.0 / freq), above=0.0
+        )
+
+        toolhead.wait_moves()
+        motion.submit_resonance_buzz(
+            axis_mask,
+            sign_mask,
+            int(round(freq * 1000.0)),
+            int(round(amplitude_mm * 1e6)),
+            int(round(duration * 1000.0)),
+            int(round(ramp * 1000.0)),
+        )
+        phasing = ""
+        if coupled and axis_name in ("x", "y"):
+            phasing = " (corexy A/B %s)" % (
+                "in-phase" if axis_name == "x" else "anti-phase"
+            )
+        gcmd.respond_info(
+            "RESONANCE_BUZZ axis=%s freq=%.1fHz amplitude=%.1fum duration=%.2fs%s"
+            % (axis_name, freq, amplitude_mm * 1000.0, duration, phasing)
+        )
+        reactor = self.printer.get_reactor()
+        reactor.pause(reactor.monotonic() + duration + 0.1)
 
     cmd_MEASURE_AXES_NOISE_help = (
         "Measures noise of all enabled accelerometer chips"

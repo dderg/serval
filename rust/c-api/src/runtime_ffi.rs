@@ -1008,6 +1008,37 @@ pub mod exports {
     }
 
     #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn runtime_resonance_buzz(
+        rt: *mut Runtime,
+        axis_mask: u8,
+        sign_mask: u8,
+        freq_millihz: u32,
+        amplitude_nm: u32,
+        duration_ms: u32,
+        ramp_ms: u32,
+    ) -> i32 {
+        if rt.is_null() {
+            return RUNTIME_ERR_NULL_PTR;
+        }
+        if !INIT_DONE.load(Ordering::Acquire) {
+            return RUNTIME_ERR_NOT_INIT;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        // SAFETY: foreground-only; arms ISR-read atomics inside the engine.
+        unsafe {
+            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+            (*isr_ptr).engine.resonance_buzz(
+                axis_mask,
+                sign_mask,
+                freq_millihz,
+                amplitude_nm,
+                duration_ms,
+                ramp_ms,
+            )
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_phase_align_to(
         rt: *mut Runtime,
         stepper_oid: u8,
