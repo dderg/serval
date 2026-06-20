@@ -576,14 +576,19 @@ impl Engine {
             }
             return 0;
         }
+        // The buzz command is broadcast to every engine MCU; act only on axes
+        // configured HERE and silently ignore excitations whose motors live on
+        // another MCU (their axis index is valid but unconfigured here). An axis
+        // index past the serviceable step queues can never be refilled — that is
+        // a genuine bug, so fault loud. Only a real producer conflict on a
+        // configured axis is otherwise fatal.
         for ex in &excitations {
             if ex.axis_idx >= crate::step_queue::N_AXIS_STEP_QUEUES {
                 crate::fault_helpers::raise_jog_parameters_invalid(shared);
                 return -1;
             }
             let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
-                crate::fault_helpers::raise_jog_parameters_invalid(shared);
-                return -1;
+                continue;
             };
             // A buzz stream is the sole producer for the axis StepQueue. Reject a
             // non-idle axis — not just an armed one: pieces merely QUEUED in the

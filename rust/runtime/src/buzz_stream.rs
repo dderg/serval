@@ -46,11 +46,14 @@ pub fn take_refill_fault() -> i32 {
 
 /// Keep the ring comfortably below `STEP_QUEUE_DEPTH` (32). Refill tops up to
 /// this on each consumer pass; the gap to depth absorbs the in-flight pops.
-const HIGH_WATER: u16 = 24;
+const HIGH_WATER: u16 = 8;
 
 /// Bound on pushes per `refill_step_axis` call so a single consumer pass cannot
-/// monopolise the ISR generating a long run of dense crossings.
-const REFILL_BATCH: u16 = 16;
+/// monopolise the ISR generating a long run of crossings. The solver runs in
+/// the step-output ISR, which competes with the 10 kHz motion timer (~100 us
+/// period), so this is kept small: a few f32 crossings stay well inside one
+/// motion tick. The queue refills incrementally across consumer passes.
+const REFILL_BATCH: u16 = 4;
 
 /// One axis's resumable excitation: the latched curve and the cursor threaded
 /// through `next_crossing`. `anchored` flips on the first refill, where the

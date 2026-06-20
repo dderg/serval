@@ -548,6 +548,33 @@ fn resonance_buzz_rejects_axis_without_step_queue() {
 }
 
 #[test]
+fn resonance_buzz_skips_axis_unconfigured_on_this_mcu() {
+    // Broadcast tolerance: the buzz command is sent to EVERY engine MCU. An
+    // excitation for a valid axis index whose motors live on another MCU (so it
+    // is unconfigured here) must be silently ignored — NOT faulted, which would
+    // shut this MCU down and cascade the whole machine. This is the bug that
+    // crashed the F446 (it has no A/B axes) on the first RESONANCE_BUZZ.
+    crate::buzz_stream::reset_for_test();
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    // Only axis 2 is configured here; axes 0 and 1 are valid indices but live
+    // elsewhere (unconfigured), as on an MCU without the CoreXY A/B motors.
+    configure_pulse_axis(&mut engine, 2, 0.01);
+    let shared = SharedState::new();
+    assert_eq!(
+        engine.resonance_buzz(&shared, 0b001, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        0,
+        "an unconfigured-here axis must be ignored, not rejected"
+    );
+    assert!(!crate::buzz_stream::axis_active(0));
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        0,
+        "no fault latched"
+    );
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
 fn overlay_multi_piece_no_sample_exceeds_max_steps() {
     use crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE;
 
