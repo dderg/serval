@@ -168,7 +168,8 @@ int32_t runtime_reset(struct Runtime *rt);
 int32_t runtime_resonance_buzz(struct Runtime *rt,
                                uint8_t axis_mask,
                                uint8_t sign_mask,
-                               uint32_t freq_millihz,
+                               uint32_t freq_start_millihz,
+                               uint32_t freq_end_millihz,
                                uint32_t amplitude_nm,
                                uint32_t duration_ms,
                                uint32_t ramp_ms);

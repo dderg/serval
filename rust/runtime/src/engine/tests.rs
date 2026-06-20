@@ -426,7 +426,7 @@ fn mcu_buzz_oscillates_then_returns_pulse_axis_to_base() {
     let axis_mask = 1u8 << axis;
     let total_ticks = 800u32; // 20 ms * 40 kHz
     assert_eq!(
-        engine.resonance_buzz(axis_mask, 0, 100_000, 100_000, 20, 2),
+        engine.resonance_buzz(axis_mask, 0, 100_000, 100_000, 100_000, 20, 2),
         0
     );
 

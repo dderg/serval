@@ -562,11 +562,13 @@ impl Engine {
         -1
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn resonance_buzz(
         &self,
         axis_mask: u8,
         sign_mask: u8,
-        freq_millihz: u32,
+        freq_start_millihz: u32,
+        freq_end_millihz: u32,
         amplitude_nm: u32,
         duration_ms: u32,
         ramp_ms: u32,
@@ -575,7 +577,8 @@ impl Engine {
             self.num_axes,
             axis_mask,
             sign_mask,
-            freq_millihz,
+            freq_start_millihz,
+            freq_end_millihz,
             amplitude_nm,
             duration_ms,
             ramp_ms,

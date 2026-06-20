@@ -248,20 +248,22 @@ class Motion:
         self,
         axis_mask,
         sign_mask,
-        freq_millihz,
+        freq_start_millihz,
+        freq_end_millihz,
         amplitude_nm,
         duration_ms,
         ramp_ms,
     ):
         # Direct MCU command (not routed through the host engine): the firmware
-        # synthesizes the per-tick sinusoid itself. Sent to every engine MCU;
-        # one that lacks the target axes simply no-ops them.
+        # synthesizes the per-tick sinusoid (or linear chirp) itself. Sent to
+        # every engine MCU; one that lacks the target axes simply no-ops them.
         sent = False
         for mcu_obj in self._engine_mcus():
             try:
                 cmd = mcu_obj.lookup_command(
                     "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
-                    " freq_millihz=%u amplitude_nm=%u duration_ms=%u ramp_ms=%u"
+                    " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
+                    " duration_ms=%u ramp_ms=%u"
                 )
             except Exception:
                 continue
@@ -269,7 +271,8 @@ class Motion:
                 [
                     axis_mask,
                     sign_mask,
-                    freq_millihz,
+                    freq_start_millihz,
+                    freq_end_millihz,
                     amplitude_nm,
                     duration_ms,
                     ramp_ms,

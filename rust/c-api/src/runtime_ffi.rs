@@ -1008,11 +1008,13 @@ pub mod exports {
     }
 
     #[unsafe(no_mangle)]
+    #[allow(clippy::too_many_arguments)]
     pub unsafe extern "C" fn runtime_resonance_buzz(
         rt: *mut Runtime,
         axis_mask: u8,
         sign_mask: u8,
-        freq_millihz: u32,
+        freq_start_millihz: u32,
+        freq_end_millihz: u32,
         amplitude_nm: u32,
         duration_ms: u32,
         ramp_ms: u32,
@@ -1030,7 +1032,8 @@ pub mod exports {
             (*isr_ptr).engine.resonance_buzz(
                 axis_mask,
                 sign_mask,
-                freq_millihz,
+                freq_start_millihz,
+                freq_end_millihz,
                 amplitude_nm,
                 duration_ms,
                 ramp_ms,

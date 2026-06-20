@@ -12,7 +12,9 @@ fn armed(
     ramp_ms: u32,
 ) {
     assert_eq!(
-        buzz.arm(4, axis_mask, sign_mask, freq_mhz, amp_nm, dur_ms, ramp_ms),
+        buzz.arm(
+            4, axis_mask, sign_mask, freq_mhz, freq_mhz, amp_nm, dur_ms, ramp_ms
+        ),
         0
     );
     buzz.poll(SAMPLE_RATE);
@@ -42,14 +44,25 @@ fn envelope_never_exceeds_unity_or_drops_below_zero() {
 #[test]
 fn arm_rejects_out_of_range_arguments() {
     let buzz = Buzz::new();
-    // zero frequency
-    assert_eq!(buzz.arm(4, 0b1, 0, 0, 10_000, 1000, 100), -1);
+    // zero start frequency
+    assert_eq!(buzz.arm(4, 0b1, 0, 0, 100_000, 10_000, 1000, 100), -1);
+    // zero end frequency
+    assert_eq!(buzz.arm(4, 0b1, 0, 100_000, 0, 10_000, 1000, 100), -1);
     // frequency above ceiling
-    assert_eq!(buzz.arm(4, 0b1, 0, 9_000_000, 10_000, 1000, 100), -1);
+    assert_eq!(
+        buzz.arm(4, 0b1, 0, 9_000_000, 9_000_000, 10_000, 1000, 100),
+        -1
+    );
     // amplitude above ceiling
-    assert_eq!(buzz.arm(4, 0b1, 0, 100_000, 9_000_000, 1000, 100), -1);
+    assert_eq!(
+        buzz.arm(4, 0b1, 0, 100_000, 100_000, 9_000_000, 1000, 100),
+        -1
+    );
     // axis bit beyond num_axes (axis 4 set, only 0..3 valid)
-    assert_eq!(buzz.arm(4, 0b1_0000, 0, 100_000, 10_000, 1000, 100), -1);
+    assert_eq!(
+        buzz.arm(4, 0b1_0000, 0, 100_000, 100_000, 10_000, 1000, 100),
+        -1
+    );
 }
 
 #[test]
@@ -58,7 +71,7 @@ fn arm_disarm_form_is_accepted_and_deactivates() {
     armed(&mut buzz, 0b11, 0, 100_000, 10_000, 100, 10);
     assert!(buzz.is_active());
     // amplitude 0 == disarm; must be accepted (returns 0) and clear activity.
-    assert_eq!(buzz.arm(4, 0b11, 0, 100_000, 0, 100, 10), 0);
+    assert_eq!(buzz.arm(4, 0b11, 0, 100_000, 100_000, 0, 100, 10), 0);
     buzz.poll(SAMPLE_RATE);
     assert!(!buzz.is_active());
 }
@@ -120,6 +133,40 @@ fn full_run_ends_at_zero_offset_and_deactivates() {
     assert_eq!(last_offset, 0.0);
     assert!(!buzz.is_active());
     assert_eq!(buzz.sample(0), BuzzSample::ZERO);
+}
+
+#[test]
+fn chirp_tapers_displacement_as_frequency_rises() {
+    // 20 -> 120 Hz over 200 ms (2000 ticks @ 10 kHz), 20 ms ramps. The
+    // displacement amplitude must taper as 1/f, so the low-frequency end of the
+    // sweep swings visibly wider than the high-frequency end — this is the
+    // safety property that keeps peak acceleration bounded across the band.
+    let mut buzz = Buzz::new();
+    assert_eq!(buzz.arm(4, 0b01, 0, 20_000, 120_000, 100_000, 200, 20), 0);
+    buzz.poll(SAMPLE_RATE);
+    let mut peak_low = 0.0f32;
+    let mut peak_high = 0.0f32;
+    let mut last = f32::NAN;
+    for t in 0..2000u32 {
+        let off = buzz.sample(0).offset;
+        if (300..900).contains(&t) {
+            peak_low = peak_low.max(off.abs());
+        }
+        if (1400..1800).contains(&t) {
+            peak_high = peak_high.max(off.abs());
+        }
+        last = off;
+        buzz.advance();
+    }
+    assert!(
+        peak_low > 1.8 * peak_high,
+        "low-freq swing {peak_low} not >1.8x high-freq swing {peak_high}"
+    );
+    assert_eq!(
+        last, 0.0,
+        "chirp must still close at exactly zero (net-zero)"
+    );
+    assert!(!buzz.is_active());
 }
 
 #[test]
