@@ -14,6 +14,7 @@ pub mod drain;
 pub mod enqueue;
 #[doc(hidden)]
 pub mod homing;
+pub mod jerk_probe;
 #[doc(hidden)]
 pub mod kinematics;
 pub mod logging;

@@ -61,10 +61,12 @@ def read_printer_config(cfg_path: Path):
     loader.printer = None
     config = loader.read_config(str(cfg_path))
     printer = config.getsection("printer")
+    max_accel = printer.getfloat("max_accel", above=0.0)
     return (
         printer.getfloat("max_velocity", above=0.0),
-        printer.getfloat("max_accel", above=0.0),
+        max_accel,
         printer.getfloat("square_corner_velocity", 5.0, minval=0.0),
+        printer.getfloat("max_jerk", max_accel * 2.0, above=0.0),
         arc_fit_from_config(config),
     )
 
@@ -369,7 +371,9 @@ def main():
     sys.path.insert(0, str(repo_root / "klippy"))
     sys.path.insert(0, str(repo_root))
 
-    max_velocity, max_accel, scv, arc_fit = read_printer_config(args.config)
+    max_velocity, max_accel, scv, max_jerk, arc_fit = read_printer_config(
+        args.config
+    )
 
     gcode_path = Path(args.gcode)
     if not gcode_path.exists():
@@ -396,6 +400,7 @@ def main():
         max_velocity,
         max_accel,
         scv,
+        max_jerk,
         arc_fit=arc_fit,
     )
 
