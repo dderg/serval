@@ -165,11 +165,20 @@ class CaptureEngine:
         self.init_planner_args = None
 
     def init_planner(
-        self, axis_sections, limit_sections, pp_sections, topology, kin_axes
+        self,
+        axis_sections,
+        limit_sections,
+        pp_sections,
+        topology,
+        kin_axes,
+        cartesian_limits,
+        arc_fit=None,
     ):
         self.init_planner_args = {
             "topology": topology,
             "kinematics_axes": kin_axes,
+            "cartesian_limits": cartesian_limits,
+            "arc_fit": arc_fit,
         }
 
 
@@ -177,6 +186,14 @@ def test_init_planner_passes_claimed_axes():
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
     motion.limit_sections = []
     motion.post_processor_sections = []
+    motion._max_velocity = 300.0
+    motion._max_accel = 3000.0
+    motion.max_jerk = 6000.0
+    motion.max_z_velocity = 15.0
+    motion.max_z_accel = 100.0
+    motion._square_corner_velocity = 8.0
+    motion.arc_fit = None
+    motion._planner_ready = False
     engine = CaptureEngine()
     motion.engine = engine
 
@@ -194,3 +211,6 @@ def test_init_planner_passes_claimed_axes():
     motion._init_planner()
     assert engine.init_planner_args["kinematics_axes"] == ["x", "y", "z"]
     assert engine.init_planner_args["topology"] == [(11, [0, 1, 2, 3], 0)]
+    cartesian_limits = engine.init_planner_args["cartesian_limits"]
+    assert cartesian_limits == (300.0, 3000.0, 6000.0, 15.0, 100.0, 8.0)
+    assert engine.init_planner_args["arc_fit"] is None
