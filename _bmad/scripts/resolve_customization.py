@@ -67,7 +67,9 @@ def find_project_root(start: Path):
 def load_toml(file_path: Path, required: bool = False) -> dict:
     if not file_path.exists():
         if required:
-            sys.stderr.write(f"error: required customization file not found: {file_path}\n")
+            sys.stderr.write(
+                f"error: required customization file not found: {file_path}\n"
+            )
             sys.exit(1)
         return {}
     try:
@@ -75,7 +77,9 @@ def load_toml(file_path: Path, required: bool = False) -> dict:
             parsed = tomllib.load(f)
         if not isinstance(parsed, dict):
             if required:
-                sys.stderr.write(f"error: {file_path} did not parse to a table\n")
+                sys.stderr.write(
+                    f"error: {file_path} did not parse to a table\n"
+                )
                 sys.exit(1)
             return {}
         return parsed
@@ -191,11 +195,16 @@ def main():
         add_help=True,
     )
     parser.add_argument(
-        "--skill", "-s", required=True,
+        "--skill",
+        "-s",
+        required=True,
         help="Absolute path to the skill directory (must contain customize.toml)",
     )
     parser.add_argument(
-        "--key", "-k", action="append", default=[],
+        "--key",
+        "-k",
+        action="append",
+        default=[],
         help="Dotted field path to resolve (repeatable). Omit for full dump.",
     )
     args = parser.parse_args()
