@@ -380,7 +380,8 @@ fn run_loop(
                     "[reanchor-decision]"
                 );
                 if reanchor {
-                    state.advance_idle(esc + LEAD);
+                    sync_instant = None;
+                    state.restart_idle_timeline();
                 }
                 state.push(m);
                 let segs = state

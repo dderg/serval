@@ -130,6 +130,26 @@ impl StreamState {
         }
     }
 
+    /// Restart the committed timeline at the origin after the machine has gone
+    /// idle and the playhead has caught up. The next dispatched segment then
+    /// re-anchors against the live playhead at dispatch time — like a freshly
+    /// opened stream — instead of inheriting the prior run's stale anchor, which
+    /// would land the resumed move in the MCU's past. Position is preserved;
+    /// only the time cursor resets. The caller must also drop its wall-clock
+    /// sync so the playhead and committed clocks realign at the origin. Valid
+    /// only at rest with a drained buffer.
+    pub fn restart_idle_timeline(&mut self) {
+        debug_assert!(
+            self.buffer.is_empty(),
+            "restart_idle_timeline requires a drained buffer"
+        );
+        debug_assert_eq!(
+            self.entry_v, 0.0,
+            "restart_idle_timeline requires rest at the seam"
+        );
+        self.t_committed = 0.0;
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
