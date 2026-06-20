@@ -590,6 +590,16 @@ impl Engine {
             let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
                 continue;
             };
+            // The buzz drives this axis via STEP/DIR pulses through its StepQueue.
+            // In Phase mode the motor is held by XDIRECT SPI coil currents and the
+            // driver ignores STEP/DIR, so a buzz here would silently desync the
+            // tracked position. The host switches the axis to Pulse
+            // (exit_phase_mode) before buzzing; if one still reaches a Phase-mode
+            // axis, fail loud rather than corrupt.
+            if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
+                crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
+                return -1;
+            }
             // A buzz stream is the sole producer for the axis StepQueue. Reject a
             // non-idle axis — not just an armed one: pieces merely QUEUED in the
             // ring (not yet pulled into `armed` by the motion ISR) would arm on

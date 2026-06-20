@@ -684,30 +684,70 @@ class ResonanceTester:
             )
 
         toolhead.wait_moves()
-        motion.submit_resonance_buzz(
-            axis_mask,
-            sign_mask,
-            int(round(freq_start * 1000.0)),
-            int(round(freq_end * 1000.0)),
-            int(round(amplitude_mm * 1e6)),
-            int(round(duration * 1000.0)),
-            int(round(ramp * 1000.0)),
-        )
-        phasing = ""
-        if coupled and axis_name in ("x", "y"):
-            phasing = " (corexy A/B %s)" % (
-                "in-phase" if axis_name == "x" else "anti-phase"
+        # The buzz drives motors via STEP/DIR pulses. A motor in phase stepping is
+        # held by XDIRECT SPI coil currents with its driver in direct_mode, where
+        # STEP/DIR is ignored — so switch every active phase group back to regular
+        # stepping for the buzz and restore it afterward, the same handover homing
+        # uses. wait_moves() above guarantees the motors are idle for the switch.
+        exited = self._exit_phase_stepping_for_buzz(gcmd)
+        try:
+            motion.submit_resonance_buzz(
+                axis_mask,
+                sign_mask,
+                int(round(freq_start * 1000.0)),
+                int(round(freq_end * 1000.0)),
+                int(round(amplitude_mm * 1e6)),
+                int(round(duration * 1000.0)),
+                int(round(ramp * 1000.0)),
             )
-        if abs(freq_end - freq_start) < 1e-6:
-            freq_desc = "freq=%.1fHz" % (freq_start,)
-        else:
-            freq_desc = "sweep=%.1f->%.1fHz" % (freq_start, freq_end)
-        gcmd.respond_info(
-            "RESONANCE_BUZZ axis=%s %s amplitude@start=%.1fum duration=%.2fs%s"
-            % (axis_name, freq_desc, amplitude_mm * 1000.0, duration, phasing)
-        )
-        reactor = self.printer.get_reactor()
-        reactor.pause(reactor.monotonic() + duration + 0.1)
+            phasing = ""
+            if coupled and axis_name in ("x", "y"):
+                phasing = " (corexy A/B %s)" % (
+                    "in-phase" if axis_name == "x" else "anti-phase"
+                )
+            if abs(freq_end - freq_start) < 1e-6:
+                freq_desc = "freq=%.1fHz" % (freq_start,)
+            else:
+                freq_desc = "sweep=%.1f->%.1fHz" % (freq_start, freq_end)
+            gcmd.respond_info(
+                "RESONANCE_BUZZ axis=%s %s amplitude@start=%.1fum duration=%.2fs%s"
+                % (
+                    axis_name,
+                    freq_desc,
+                    amplitude_mm * 1000.0,
+                    duration,
+                    phasing,
+                )
+            )
+            reactor = self.printer.get_reactor()
+            reactor.pause(reactor.monotonic() + duration + 0.1)
+        finally:
+            self._reenter_phase_stepping_after_buzz(exited)
+
+    def _exit_phase_stepping_for_buzz(self, gcmd):
+        # Switch every active phase-stepping group out to regular (STEP/DIR)
+        # stepping. exit_phase_mode acts on the whole coupled group (e.g. the
+        # CoreXY A/B pair), so the first member clears all of them and the rest
+        # then report inactive — leaving exactly one representative per group.
+        exited = []
+        for name, obj in self.printer.lookup_objects():
+            if not name.startswith("tmc5160 "):
+                continue
+            is_active = getattr(obj, "phase_stepping_active", None)
+            if is_active is None or not is_active():
+                continue
+            obj.exit_phase_mode()
+            exited.append(obj)
+        if exited:
+            gcmd.respond_info(
+                "RESONANCE_BUZZ: %d phase-stepping group(s) -> regular stepping "
+                "for the buzz" % (len(exited),)
+            )
+        return exited
+
+    def _reenter_phase_stepping_after_buzz(self, exited):
+        for obj in exited:
+            obj.enter_phase_mode()
 
     cmd_RESONANCE_BUZZ_help = (
         "Excite a single resonance frequency on one axis via the MCU-resident "
