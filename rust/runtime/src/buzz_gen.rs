@@ -112,13 +112,19 @@ pub enum ToneError {
     /// Time did not advance strictly (next crossing <= cursor). A monotonicity
     /// violation; never clamp, always fault.
     NonMonotonic,
+    /// A single forward scan exceeded its iteration budget without resolving the
+    /// next crossing. Defense in depth: correct operation advances the scan state
+    /// every iteration and converges far below the budget, so hitting it means an
+    /// f32 boundary coincidence pinned the scan in place. Fault instead of looping
+    /// so the refill latches a clean fault rather than starving the IWDG feeder.
+    ScanStalled,
 }
 
 impl ToneError {
     pub fn fault_code(self) -> Option<FaultCode> {
         match self {
             ToneError::Done => None,
-            ToneError::RefineDiverged | ToneError::NonMonotonic => {
+            ToneError::RefineDiverged | ToneError::NonMonotonic | ToneError::ScanStalled => {
                 Some(FaultCode::InternalInvariant)
             }
         }
@@ -469,9 +475,25 @@ fn emit_level_change(
 /// as an extra checkpoint: the apex is the only place such a hidden touch can
 /// occur, and checking its level catches it. On the first level departure the
 /// exact crossing of the specific half-gridline passed is refined. Returns
-/// `(t, new_level)`, or `None` once the curve closes on base for the remainder.
-#[must_use]
-fn scan_next_change(p: &ToneParams, level: i32, after: f32) -> Option<(f32, i32)> {
+/// `Ok(Some((t, new_level)))`, `Ok(None)` once the curve closes on base for the
+/// remainder, or a fault when the scan stalls or a bracket is malformed.
+///
+/// Forward progress is structural. Every iteration either returns, or makes one
+/// of two bounded moves: a carrier extremum splits the interval at `ext` with
+/// `ext` STRICTLY greater than `t_prev`, advancing the lower bound; or the tracked
+/// level is reconciled one step toward the sampled level while `t_prev` moves to
+/// `sample` (never backward). Reconciliation is bounded by the level gap — at most
+/// one gridline per grid step by the traverse cap — after which the levels agree
+/// and the scan steps `t` forward by `dt`. An f32 refine that pins `ext` to a
+/// bracket end yields no interior split, so it falls through to that grid step
+/// instead of re-processing the same `t`. The lower bound therefore never stalls,
+/// and the `scan_budget` guard below is defense in depth, not the termination
+/// argument.
+fn scan_next_change(
+    p: &ToneParams,
+    level: i32,
+    after: f32,
+) -> Result<Option<(f32, i32)>, ToneError> {
     // The period grid uses the FASTEST instantaneous frequency over the window
     // so the sampling stays fine at a chirp's high-frequency end. The traverse
     // cap keeps the per-sample carrier motion small (peak carrier velocity is the
@@ -495,29 +517,50 @@ fn scan_next_change(p: &ToneParams, level: i32, after: f32) -> Option<(f32, i32)
         .min(p.total_seconds / 4.0)
         .min(traverse_cap)
         .max(REFINE_TIME_TOL);
+
+    // A correct scan advances `t_prev` by `dt` toward the next crossing or
+    // `total_seconds`, so the grid-step count is bounded by `remaining / dt`. The
+    // budget is that span with generous head room for the bounded per-step level
+    // reconciliation; a scan that exceeds it has been pinned by an f32 boundary
+    // coincidence and faults loud rather than starving the IWDG feeder.
+    let grid_steps = (remaining / dt) + 1.0;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let scan_budget = (grid_steps as u64).saturating_mul(64).saturating_add(1_000);
+
     let mut t_prev = after;
     let mut level_prev = level;
     let mut v_prev = velocity_rel(p, after);
     let mut t = after + dt;
+    let mut iters: u64 = 0;
     loop {
+        iters += 1;
+        if iters > scan_budget {
+            return Err(ToneError::ScanStalled);
+        }
         let sample = t.min(p.total_seconds);
         let v_sample = velocity_rel(p, sample);
 
-        // A carrier extremum inside (t_prev, sample): check its level first, so a
-        // grazing peak that crosses a gridline and returns is not skipped.
+        // A carrier extremum strictly inside (t_prev, sample): check its level
+        // first, so a grazing peak that crosses a gridline and returns is not
+        // skipped. The split point `ext` must lie STRICTLY inside (t_prev, sample)
+        // for the carry to make progress and for the post-apex return crossing to
+        // bracket cleanly in (ext, sample]; an f32 refine that pins `ext` to either
+        // bracket end yields no usable interior extremum, so fall through to the
+        // grid-step path that advances `t` instead of re-splitting in place.
         if v_prev != 0.0 && v_sample != 0.0 && v_prev * v_sample < 0.0 {
-            let ext = refine_extremum(p, t_prev, sample).ok()?;
-            let ext_level = microstep_level(p, ext);
-            if ext_level != level_prev {
-                if let Some(found) = emit_level_change(p, level_prev, after, t_prev, ext, ext_level)
-                {
-                    return Some(found);
+            let Ok(ext) = refine_extremum(p, t_prev, sample) else {
+                return Ok(None);
+            };
+            if ext > t_prev && ext < sample {
+                let ext_level = microstep_level(p, ext);
+                if ext_level != level_prev {
+                    if let Some(found) =
+                        emit_level_change(p, level_prev, after, t_prev, ext, ext_level)
+                    {
+                        return Ok(Some(found));
+                    }
+                    level_prev += (ext_level - level_prev).signum();
                 }
-                level_prev = if ext_level > level_prev {
-                    level_prev + 1
-                } else {
-                    level_prev - 1
-                };
                 t_prev = ext;
                 v_prev = velocity_rel(p, ext);
                 continue;
@@ -528,23 +571,21 @@ fn scan_next_change(p: &ToneParams, level: i32, after: f32) -> Option<(f32, i32)
         if cur_level != level_prev {
             if let Some(found) = emit_level_change(p, level_prev, after, t_prev, sample, cur_level)
             {
-                return Some(found);
+                return Ok(Some(found));
             }
-            // A root pinned to `after` means we re-detected the boundary just
-            // crossed; step the tracked level one toward `cur_level` and keep
-            // scanning from this sample.
-            level_prev = if cur_level > level_prev {
-                level_prev + 1
-            } else {
-                level_prev - 1
-            };
+            // A root pinned at/before `after` means we re-detected the boundary
+            // just crossed; step the tracked level one toward `cur_level` and keep
+            // scanning from this sample. `t_prev` advances to `sample` (never
+            // backward), so the level gap is consumed in a bounded number of
+            // same-`sample` iterations and the scan then steps forward by `dt`.
+            level_prev += (cur_level - level_prev).signum();
             t_prev = sample;
             v_prev = v_sample;
             continue;
         }
 
         if sample >= p.total_seconds {
-            return None;
+            return Ok(None);
         }
         t_prev = sample;
         v_prev = v_sample;
@@ -570,7 +611,11 @@ pub fn next_crossing(p: &ToneParams, cursor: ToneCursor) -> Result<ToneCrossing,
     } else {
         None
     };
-    let (t, next_level) = match candidate.or_else(|| scan_next_change(p, cursor.level, after)) {
+    let resolved = match candidate {
+        Some(v) => Some(v),
+        None => scan_next_change(p, cursor.level, after)?,
+    };
+    let (t, next_level) = match resolved {
         Some(v) => v,
         None => return Err(ToneError::Done),
     };
