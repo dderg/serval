@@ -1,5 +1,6 @@
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
+use crate::buzz_gen::ToneParams;
 use crate::stepping_state::MAX_AXES;
 
 /// Absolute sanity ceilings. These are NOT the physical safety policy (peak
@@ -13,8 +14,8 @@ const MAX_AMPLITUDE_NM: u32 = 5_000_000;
 // in a single continuous chirp rather than being chunked.
 const MAX_DURATION_MS: u32 = 300_000;
 
-const TWO_PI: f32 = 2.0 * core::f32::consts::PI;
-const NM_PER_MM: f32 = 1.0e6;
+const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
+const NM_PER_MM: f64 = 1.0e6;
 
 /// Foreground-written, ISR-read excitation request. Only `seq` plus the scalar
 /// parameters cross the task/ISR boundary, all as atomics (boundary rule B5).
@@ -56,101 +57,46 @@ impl Default for BuzzControl {
     }
 }
 
-/// ISR-private latched parameters. Recomputed only when a new `seq` is observed.
-/// A linear chirp: the per-tick phase increment slews from `omega_tick_start` to
-/// `omega_tick_end` across `total_ticks`. `amp_mm` is the displacement amplitude
-/// at `freq_start`; the running amplitude is scaled by `f_start / f(t)` so peak
-/// velocity stays constant and peak acceleration grows only linearly with
-/// frequency (the constant-`accel_per_hz` regime). A fixed-frequency buzz is the
-/// degenerate case `omega_tick_start == omega_tick_end`.
+/// One axis's resolved excitation curve plus the signed axis index, ready to
+/// latch into a `buzz_stream` slot. `sign` folds the per-axis excitation sign;
+/// the per-axis `base_mm`/`microstep_distance`/`anchor_cycle` are filled in by
+/// the engine, which owns those, before arming the stream.
 #[derive(Debug, Clone, Copy)]
-struct BuzzParams {
-    omega_tick_start: f32,
-    omega_tick_end: f32,
-    omega_sec_start: f32,
-    amp_mm: [f32; MAX_AXES],
-    total_ticks: u32,
-    ramp_ticks: u32,
+pub struct AxisExcitation {
+    pub axis_idx: usize,
+    pub omega: f64,
+    pub mu: f64,
+    pub amplitude_mm: f64,
+    pub sign: f64,
+    pub total_seconds: f64,
+    pub ramp_seconds: f64,
 }
 
-impl BuzzParams {
-    const fn idle() -> Self {
-        Self {
-            omega_tick_start: 0.0,
-            omega_tick_end: 0.0,
-            omega_sec_start: 0.0,
-            amp_mm: [0.0; MAX_AXES],
-            total_ticks: 0,
-            ramp_ticks: 0,
-        }
-    }
-}
-
-/// Per-axis additive contribution a buzz makes to one tick's dispatch inputs.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BuzzSample {
-    /// Added to `p_end` (end-of-sample target position, mm).
-    pub offset: f32,
-    /// Added to `p_sample_start` (start-of-sample position, mm).
-    pub sample_start_offset: f32,
-    /// Added to `v_end` (end-of-sample velocity, mm/s).
-    pub velocity: f32,
-}
-
-impl BuzzSample {
-    pub const ZERO: Self = Self {
-        offset: 0.0,
-        sample_start_offset: 0.0,
-        velocity: 0.0,
-    };
-}
-
-/// Engine-resident excitation generator. One excitation event at a time (a
-/// resonance test drives a single cartesian axis, which maps to one or two
-/// motor axes that must stay phase-coherent — so they share this one phase
-/// accumulator rather than arming independently).
+/// Engine-resident excitation arm. One excitation event at a time (a resonance
+/// test drives a single cartesian axis, which maps to one or two motor axes that
+/// must stay phase-coherent — they share one carrier phase by construction, the
+/// same `omega`/`mu`/anchor). Holds only the foreground seqlock; the streaming
+/// state lives per-axis in `buzz_stream`.
 #[allow(missing_debug_implementations)]
 pub struct Buzz {
     control: BuzzControl,
-    params: BuzzParams,
     last_seq: u32,
-    active: bool,
-    phase: f32,
-    tick: u32,
-    prev_offset: [f32; MAX_AXES],
 }
 
 impl Buzz {
     pub const fn new() -> Self {
         Self {
             control: BuzzControl::new(),
-            params: BuzzParams::idle(),
             last_seq: 0,
-            active: false,
-            phase: 0.0,
-            tick: 0,
-            prev_offset: [0.0; MAX_AXES],
         }
     }
 
-    #[inline]
-    pub fn is_active(&self) -> bool {
-        self.active
-    }
-
-    #[inline]
-    pub fn affects_axis(&self, axis_idx: usize) -> bool {
-        self.active && self.params.amp_mm.get(axis_idx).is_some_and(|a| *a != 0.0)
-    }
-
     /// Foreground entry: stage a new excitation request. Writes parameters then
-    /// bumps `seq` (Release) so the ISR latches a consistent set. Returns 0 on
+    /// bumps `seq` (Release) so a consistent set is observable. Returns 0 on
     /// success, -1 on out-of-range arguments (caller shuts down loudly).
     ///
     /// `amplitude_nm == 0` or `duration_ms == 0` is the disarm form: a fresh
-    /// `seq` with zero work, which the ISR latches as "inactive". Duration and
-    /// ramp are physical milliseconds; the ISR converts them to sample ticks
-    /// using its own clock, so the host never needs to know the tick rate.
+    /// `seq` with zero work. Duration and ramp are physical milliseconds.
     #[allow(clippy::too_many_arguments)]
     pub fn arm(
         &self,
@@ -199,21 +145,19 @@ impl Buzz {
         0
     }
 
-    /// ISR entry, once per tick before the per-axis dispatch loop. Latches a new
-    /// request if `seq` changed, then advances the phase/tick state for THIS
-    /// tick. Must be paired with `sample(axis_idx)` reads for the same tick.
-    pub fn poll(&mut self, sample_rate_hz: f32) {
-        let seq = self.control.seq.load(Ordering::Acquire);
-        if seq != self.last_seq {
-            self.latch(seq, sample_rate_hz);
-        }
+    /// True if `arm` published a request not yet consumed by `take_excitations`.
+    #[inline]
+    pub fn has_pending(&self) -> bool {
+        self.control.seq.load(Ordering::Acquire) != self.last_seq
     }
 
-    fn latch(&mut self, seq: u32, sample_rate_hz: f32) {
+    /// Consume the latest request and resolve it into per-axis excitation
+    /// curves (absolute seconds, signed amplitude). Returns an empty list for
+    /// the disarm form. The engine fills the per-axis base/microstep/anchor and
+    /// arms the streams. Marks the request consumed so `has_pending` clears.
+    pub fn take_excitations(&mut self) -> heapless::Vec<AxisExcitation, MAX_AXES> {
+        let seq = self.control.seq.load(Ordering::Acquire);
         self.last_seq = seq;
-        self.phase = 0.0;
-        self.tick = 0;
-        self.prev_offset = [0.0; MAX_AXES];
 
         let c = &self.control;
         let axis_mask = c.axis_mask.load(Ordering::Relaxed);
@@ -224,123 +168,70 @@ impl Buzz {
         let duration_ms = c.duration_ms.load(Ordering::Relaxed);
         let ramp_ms = c.ramp_ms.load(Ordering::Relaxed);
 
-        let ms_to_ticks = |ms: u32| (ms as f32 * sample_rate_hz / 1000.0) as u32;
-        let total_ticks = ms_to_ticks(duration_ms);
-
+        let mut out = heapless::Vec::new();
         if axis_mask == 0
             || amplitude_nm == 0
             || freq_start_millihz == 0
             || freq_end_millihz == 0
-            || total_ticks < 2
-            || sample_rate_hz <= 0.0
+            || duration_ms == 0
         {
-            self.active = false;
-            self.params = BuzzParams::idle();
-            return;
+            return out;
         }
 
-        let freq_start_hz = freq_start_millihz as f32 * 1.0e-3;
-        let freq_end_hz = freq_end_millihz as f32 * 1.0e-3;
-        let amp_mag = amplitude_nm as f32 / NM_PER_MM;
-        let mut amp_mm = [0.0f32; MAX_AXES];
-        for (i, slot) in amp_mm.iter_mut().enumerate() {
-            if axis_mask & (1 << i) != 0 {
-                let sign = if sign_mask & (1 << i) != 0 { -1.0 } else { 1.0 };
-                *slot = sign * amp_mag;
-            }
-        }
+        let freq_start_hz = f64::from(freq_start_millihz) * 1.0e-3;
+        let freq_end_hz = f64::from(freq_end_millihz) * 1.0e-3;
+        let total_seconds = f64::from(duration_ms) * 1.0e-3;
+        let omega = TWO_PI * freq_start_hz;
+        let mu = TWO_PI * (freq_end_hz - freq_start_hz) / total_seconds;
+        let amp_mag = f64::from(amplitude_nm) / NM_PER_MM;
 
         // Clamp the ramp so up- and down-ramps never overlap; a triangular
         // envelope (ramp == total/2) is the degenerate-but-valid floor.
-        #[allow(clippy::integer_division)]
-        let half = total_ticks / 2;
-        let ramp = ms_to_ticks(ramp_ms).min(half).max(1);
+        let ramp_seconds = (f64::from(ramp_ms) * 1.0e-3)
+            .min(0.5 * total_seconds)
+            .max(f64::MIN_POSITIVE);
 
-        self.params = BuzzParams {
-            omega_tick_start: TWO_PI * freq_start_hz / sample_rate_hz,
-            omega_tick_end: TWO_PI * freq_end_hz / sample_rate_hz,
-            omega_sec_start: TWO_PI * freq_start_hz,
-            amp_mm,
-            total_ticks,
-            ramp_ticks: ramp,
-        };
-        self.active = true;
+        for i in 0..MAX_AXES {
+            if axis_mask & (1 << i) == 0 {
+                continue;
+            }
+            let sign = if sign_mask & (1 << i) != 0 { -1.0 } else { 1.0 };
+            let _ = out.push(AxisExcitation {
+                axis_idx: i,
+                omega,
+                mu,
+                amplitude_mm: amp_mag,
+                sign,
+                total_seconds,
+                ramp_seconds,
+            });
+        }
+        out
     }
+}
 
-    /// Instantaneous per-tick phase increment for the linear chirp at `tick`.
-    #[inline]
-    fn omega_tick_at(&self, tick: u32) -> f32 {
-        let p = &self.params;
-        if p.total_ticks <= 1 {
-            return p.omega_tick_start;
-        }
-        let frac = tick as f32 / p.total_ticks as f32;
-        p.omega_tick_start + (p.omega_tick_end - p.omega_tick_start) * frac
-    }
-
-    /// Amplitude scale `f_start / f(t)` that tapers displacement as the chirp
-    /// climbs, holding peak velocity constant. Unity for a fixed-frequency buzz.
-    #[inline]
-    fn amp_scale_at(&self, tick: u32) -> f32 {
-        let omega = self.omega_tick_at(tick);
-        if omega != 0.0 {
-            self.params.omega_tick_start / omega
-        } else {
-            1.0
-        }
-    }
-
-    /// Per-axis additive contribution for the current tick. Call after `poll`
-    /// and before `advance`, once per affected axis.
-    #[inline]
-    pub fn sample(&self, axis_idx: usize) -> BuzzSample {
-        if !self.active {
-            return BuzzSample::ZERO;
-        }
-        let Some(&amp) = self.params.amp_mm.get(axis_idx) else {
-            return BuzzSample::ZERO;
-        };
-        if amp == 0.0 {
-            return BuzzSample::ZERO;
-        }
-        let env = envelope(self.tick, self.params.total_ticks, self.params.ramp_ticks);
-        let scale = self.amp_scale_at(self.tick);
-        let (sin, cos) = (libm::sinf(self.phase), libm::cosf(self.phase));
-        let prev = self.prev_offset.get(axis_idx).copied().unwrap_or(0.0);
-        // velocity amplitude amp*scale*omega(t) == amp*omega_sec_start (constant
-        // across the chirp), so the displacement taper and the rising frequency
-        // cancel in the velocity term.
-        BuzzSample {
-            offset: env * amp * scale * sin,
-            sample_start_offset: prev,
-            velocity: env * amp * self.params.omega_sec_start * cos,
-        }
-    }
-
-    /// Advance phase/tick after all per-axis samples for this tick are taken.
-    /// Records this tick's offsets as the next tick's sample-start, and
-    /// deactivates once the duration is spent (final emitted offset is exactly
-    /// zero, so accumulated step counts return to base — net-zero excitation).
-    pub fn advance(&mut self) {
-        if !self.active {
-            return;
-        }
-        let env = envelope(self.tick, self.params.total_ticks, self.params.ramp_ticks);
-        let omega_tick = self.omega_tick_at(self.tick);
-        let scale = self.amp_scale_at(self.tick);
-        let factor = env * scale * libm::sinf(self.phase);
-        for (i, slot) in self.prev_offset.iter_mut().enumerate() {
-            let amp = self.params.amp_mm.get(i).copied().unwrap_or(0.0);
-            *slot = amp * factor;
-        }
-        self.phase += omega_tick;
-        if self.phase >= TWO_PI {
-            self.phase -= TWO_PI;
-        }
-        self.tick += 1;
-        if self.tick >= self.params.total_ticks {
-            self.active = false;
-            self.params = BuzzParams::idle();
+impl AxisExcitation {
+    /// Complete the curve with the engine-owned per-axis base, microstep grid,
+    /// MCU cycle rate, and the arm-time anchor cycle.
+    #[must_use]
+    pub fn into_params(
+        self,
+        base_mm: f64,
+        microstep_distance: f64,
+        cycles_per_second: f64,
+        anchor_cycle: u32,
+    ) -> ToneParams {
+        ToneParams {
+            omega: self.omega,
+            mu: self.mu,
+            amplitude_mm: self.amplitude_mm,
+            sign: self.sign,
+            base_mm,
+            microstep_distance,
+            anchor_cycle,
+            cycles_per_second,
+            total_seconds: self.total_seconds,
+            ramp_seconds: self.ramp_seconds,
         }
     }
 }
@@ -351,28 +242,14 @@ impl Default for Buzz {
     }
 }
 
-/// Trapezoidal amplitude envelope in [0, 1]. Zero at the first tick and at the
-/// final tick (`total - 1`), so a buzz both starts and ends with no offset:
-/// clean spectral content (no step transient) and exact net-zero displacement.
+/// Continuous-time trapezoidal envelope in [0, 1], parameterized in seconds.
+/// Zero at `t == 0` and `t == total`, unity across the flat top. This is the
+/// canonical envelope; `buzz_gen::envelope` is the same shape used by the
+/// crossing solver and its brute-force oracle.
 #[inline]
-pub fn envelope(tick: u32, total: u32, ramp: u32) -> f32 {
-    if total == 0 || tick >= total {
-        return 0.0;
-    }
-    let ramp = ramp.max(1);
-    let up = if tick < ramp {
-        tick as f32 / ramp as f32
-    } else {
-        1.0
-    };
-    let down_start = total.saturating_sub(ramp);
-    let down = if tick >= down_start {
-        let into = (tick - down_start) as f32 + 1.0;
-        1.0 - into / ramp as f32
-    } else {
-        1.0
-    };
-    up.min(down).max(0.0)
+#[must_use]
+pub fn envelope(t: f64, total: f64, ramp: f64) -> f64 {
+    crate::buzz_gen::envelope(t, total, ramp)
 }
 
 #[cfg(test)]

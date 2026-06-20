@@ -15,11 +15,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-/**
- * Per-axis additive contribution a buzz makes to one tick's dispatch inputs.
- */
-typedef struct BuzzSample BuzzSample;
-
 typedef struct Runtime {
   uint8_t _private[0];
 } Runtime;
@@ -32,8 +27,6 @@ typedef struct StepperBindingRust {
   uint8_t tmc_cs_oid;
   uint8_t _pad[2];
 } StepperBindingRust;
-
-
 
 extern void event_log_emit(uint8_t level,
                            uint8_t subsystem,

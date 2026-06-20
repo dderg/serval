@@ -259,6 +259,9 @@ impl Engine {
         pieces: &[PieceEntry],
         storage: &mut [PieceEntry],
     ) -> i32 {
+        if crate::buzz_stream::axis_active(axis_idx as usize) {
+            return RUNTIME_ERR_INVALID_ARG;
+        }
         let Some(axis) = self
             .stepping_axes
             .get_mut(axis_idx as usize)
@@ -275,6 +278,11 @@ impl Engine {
     }
 
     pub fn tick(&mut self, now: u64, shared: &SharedState, storage: &mut [PieceEntry]) -> bool {
+        let refill_fault = crate::buzz_stream::take_refill_fault();
+        if refill_fault != 0 {
+            shared.last_error.store(refill_fault, Ordering::Release);
+        }
+
         #[cfg(feature = "motion-module-stepper")]
         use crate::dispatch_stepper::dispatch_axis;
 
@@ -303,33 +311,7 @@ impl Engine {
 
         let mut active = false;
 
-        let sample_rate_hz = if self.sample_period_cycles == 0 {
-            0.0
-        } else {
-            self.cycles_per_second / self.sample_period_cycles as f32
-        };
-        self.buzz.poll(sample_rate_hz);
-        let mut buzz_axis = [false; MAX_AXES];
-        let mut buzz_samples = [crate::buzz::BuzzSample::ZERO; MAX_AXES];
-        if self.buzz.is_active() {
-            for (i, (flag, samp)) in buzz_axis
-                .iter_mut()
-                .zip(buzz_samples.iter_mut())
-                .enumerate()
-                .take(self.num_axes as usize)
-            {
-                *flag = self.buzz.affects_axis(i);
-                *samp = self.buzz.sample(i);
-            }
-            self.buzz.advance();
-        }
-
         for i in 0..(self.num_axes as usize) {
-            let bz_axis = buzz_axis.get(i).copied().unwrap_or(false);
-            let bz = buzz_samples
-                .get(i)
-                .copied()
-                .unwrap_or(crate::buzz::BuzzSample::ZERO);
             let (p_end, v_end, p_sample_start, overlay_just_armed) = {
                 let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
                     continue;
@@ -366,7 +348,7 @@ impl Engine {
                         }
                     }
                     None => {
-                        if !idle_phase_slew_pending(axis) && !bz_axis {
+                        if !idle_phase_slew_pending(axis) {
                             continue;
                         }
                         active = true;
@@ -374,10 +356,6 @@ impl Engine {
                     }
                 }
             };
-
-            let p_end = p_end + bz.offset;
-            let v_end = v_end + bz.velocity;
-            let p_sample_start = p_sample_start + bz.sample_start_offset;
 
             #[cfg(feature = "motion-module-stepper")]
             {
@@ -564,7 +542,8 @@ impl Engine {
 
     #[allow(clippy::too_many_arguments)]
     pub fn resonance_buzz(
-        &self,
+        &mut self,
+        shared: &SharedState,
         axis_mask: u8,
         sign_mask: u8,
         freq_start_millihz: u32,
@@ -572,8 +551,9 @@ impl Engine {
         amplitude_nm: u32,
         duration_ms: u32,
         ramp_ms: u32,
+        now_cycle: u32,
     ) -> i32 {
-        self.buzz.arm(
+        let rc = self.buzz.arm(
             self.num_axes,
             axis_mask,
             sign_mask,
@@ -582,7 +562,55 @@ impl Engine {
             amplitude_nm,
             duration_ms,
             ramp_ms,
-        )
+        );
+        if rc != 0 {
+            return rc;
+        }
+        if !self.buzz.has_pending() {
+            return 0;
+        }
+        let excitations = self.buzz.take_excitations();
+        if excitations.is_empty() {
+            for i in 0..crate::step_queue::N_AXIS_STEP_QUEUES {
+                crate::buzz_stream::clear_axis(i);
+            }
+            return 0;
+        }
+        for ex in &excitations {
+            if ex.axis_idx >= crate::step_queue::N_AXIS_STEP_QUEUES {
+                crate::fault_helpers::raise_jog_parameters_invalid(shared);
+                return -1;
+            }
+            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
+                crate::fault_helpers::raise_jog_parameters_invalid(shared);
+                return -1;
+            };
+            // A buzz stream is the sole producer for the axis StepQueue. Reject a
+            // non-idle axis — not just an armed one: pieces merely QUEUED in the
+            // ring (not yet pulled into `armed` by the motion ISR) would arm on
+            // the next motion tick and have dispatch_pulse push motion edges into
+            // the same SPSC ring the buzz refill produces into, violating the
+            // single-producer invariant. Fail loud rather than interleave.
+            if axis.armed.is_some() || !axis.ring.is_empty() {
+                crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
+                return -1;
+            }
+        }
+        let cps = f64::from(self.cycles_per_second);
+        for ex in &excitations {
+            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
+                continue;
+            };
+            let params = ex.into_params(
+                f64::from(axis.p_prev),
+                f64::from(axis.microstep_distance),
+                cps,
+                now_cycle,
+            );
+            crate::buzz_stream::arm_axis(ex.axis_idx, params);
+            crate::dispatch_stepper::kick_per_axis_timer(ex.axis_idx, params.anchor_cycle);
+        }
+        0
     }
 
     pub fn phase_jog_to(

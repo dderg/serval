@@ -379,25 +379,7 @@ fn symmetric_buzz_nets_position_count_to_zero() {
     assert_eq!(h.p_prev(), 0.0);
 }
 
-#[allow(unsafe_code)]
-#[test]
-fn mcu_buzz_oscillates_then_returns_pulse_axis_to_base() {
-    // A buzz on an otherwise-idle Pulse axis must (a) actually move the
-    // stepper mid-run and (b) land back exactly on the base step count when
-    // the envelope closes — net-zero excitation, no drift.
-    let axis = 2usize;
-    let mstep = 0.01f32;
-    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3],
-        };
-        TEST_TOTAL_RING_PIECES
-    ];
+fn configure_pulse_axis(engine: &mut Engine, axis: usize, mstep: f32) {
     let bindings = [StepperBindingRust {
         stepper_oid: 10,
         tmc_cs_oid: TMC_CS_OID_NONE,
@@ -414,44 +396,155 @@ fn mcu_buzz_oscillates_then_returns_pulse_axis_to_base() {
         ),
         RUNTIME_OK
     );
+}
 
-    let mut q = Box::new(StepQueue::new());
-    let mut qs: [*mut StepQueue; MAX_AXES] = [core::ptr::null_mut(); MAX_AXES];
-    qs[axis] = q.as_mut();
-    engine.test_install_step_queues(qs);
+#[test]
+fn resonance_buzz_arm_activates_per_axis_stream() {
+    // Arming on a configured, idle Pulse axis latches a buzz_stream for that
+    // axis (the producer the consumer ISR will refill). The full oscillate /
+    // return-to-base integration lives in the buzz_stream gating tests.
+    crate::buzz_stream::reset_for_test();
+    let axis = 2usize;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
     let shared = SharedState::new();
 
-    // 100 Hz, 0.1 mm (= 10 microsteps) amplitude, 20 ms duration (= 800 ticks /
-    // 2 periods at the harness 40 kHz sample rate), 2 ms ramps.
-    let axis_mask = 1u8 << axis;
-    let total_ticks = 800u32; // 20 ms * 40 kHz
     assert_eq!(
-        engine.resonance_buzz(axis_mask, 0, 100_000, 100_000, 100_000, 20, 2),
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
         0
     );
-
-    let read_pos = |engine: &Engine| -> i32 {
-        engine.stepping_axes[axis].as_ref().unwrap().steppers[0]
-            .position_count
-            .load(Ordering::Acquire)
-    };
-
-    let mut peak = 0i32;
-    let q_ptr: *mut StepQueue = q.as_mut();
-    for n in 0..(total_ticks as u64 + 4) {
-        engine.tick(TICK_CYCLES + n * TICK_CYCLES, &shared, &mut storage);
-        while unsafe { queue_pop(q_ptr) }.is_some() {}
-        peak = peak.max(read_pos(&engine).abs());
-    }
-
     assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
-    assert!(
-        peak >= 8,
-        "buzz barely moved (peak {peak} microsteps); expected ~10"
+    assert!(crate::buzz_stream::axis_active(axis));
+    assert!(!crate::buzz_stream::axis_active(0));
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_disarm_form_clears_streams() {
+    crate::buzz_stream::reset_for_test();
+    let axis = 2usize;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let shared = SharedState::new();
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        0
     );
-    assert_eq!(read_pos(&engine), 0, "position did not return to base");
-    assert_eq!(engine.stepping_axes[axis].as_ref().unwrap().p_prev, 0.0);
-    assert!(!engine.buzz.is_active(), "buzz should have completed");
+    assert!(crate::buzz_stream::axis_active(axis));
+    // amplitude 0 == disarm: accepted, clears every stream.
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 0, 20, 2, 0),
+        0
+    );
+    assert!(!crate::buzz_stream::axis_active(axis));
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_conflicts_with_armed_piece_on_same_axis() {
+    use crate::error::FaultCode;
+    crate::buzz_stream::reset_for_test();
+    let axis = 2usize;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let shared = SharedState::new();
+
+    // Force the axis to look like it is running a planned piece.
+    engine.stepping_axes[axis].as_mut().unwrap().armed = Some(crate::motion_core::ArmedPiece {
+        mono_coeffs: [0.0; 4],
+        vel_coeffs: [0.0; 3],
+        piece_start_cycles: 0,
+        piece_end_cycles: 0,
+    });
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        -1
+    );
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        FaultCode::BuzzAxisConflict.as_i32()
+    );
+    assert!(!crate::buzz_stream::axis_active(axis));
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_conflicts_with_queued_piece_on_same_axis() {
+    use crate::error::FaultCode;
+    // A piece merely QUEUED in the ring (not yet pulled into `armed` by the
+    // motion ISR) would arm on the next tick and have dispatch_pulse push motion
+    // edges into the same SPSC StepQueue the buzz refill produces into. Arming a
+    // buzz on a non-idle axis must therefore fail loud, not just when `armed` is
+    // already set.
+    crate::buzz_stream::reset_for_test();
+    let axis = 2usize;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let mut storage = vec![moving_piece(0, 0.0, 0); TEST_TOTAL_RING_PIECES];
+    let shared = SharedState::new();
+
+    assert_eq!(
+        engine.push_pieces(axis as u8, &[moving_piece(1_000, 0.0125, 0)], &mut storage),
+        RUNTIME_OK
+    );
+    assert!(engine.stepping_axes[axis].as_ref().unwrap().armed.is_none());
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        -1
+    );
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        FaultCode::BuzzAxisConflict.as_i32()
+    );
+    assert!(!crate::buzz_stream::axis_active(axis));
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn push_pieces_rejected_while_buzz_active_on_axis() {
+    // The reciprocal guard: once a buzz stream owns an axis StepQueue, loading a
+    // motion piece onto that axis must be rejected so the single-producer
+    // invariant holds on both entry paths.
+    crate::buzz_stream::reset_for_test();
+    let axis = 2usize;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let mut storage = vec![moving_piece(0, 0.0, 0); TEST_TOTAL_RING_PIECES];
+    let shared = SharedState::new();
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        0
+    );
+    assert!(crate::buzz_stream::axis_active(axis));
+    assert_eq!(
+        engine.push_pieces(axis as u8, &[moving_piece(1_000, 0.0125, 0)], &mut storage),
+        crate::error::RUNTIME_ERR_INVALID_ARG
+    );
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_rejects_axis_without_step_queue() {
+    // There are only N_AXIS_STEP_QUEUES StepQueues; the consumer ISR refills only
+    // those axes. An excitation on an axis index >= N_AXIS_STEP_QUEUES has no
+    // serviceable queue, so it must fault loud rather than silently arm an
+    // unrefillable, never-closing stream.
+    crate::buzz_stream::reset_for_test();
+    let axis = crate::step_queue::N_AXIS_STEP_QUEUES; // first axis without a queue
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let shared = SharedState::new();
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        -1
+    );
+    assert!(!crate::buzz_stream::axis_active(0));
+    crate::buzz_stream::reset_for_test();
 }
 
 #[test]

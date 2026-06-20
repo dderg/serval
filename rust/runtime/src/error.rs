@@ -191,6 +191,7 @@ pub enum FaultCode {
     UnknownStepMode = -312,
     PhaseMotorUnmapped = -313,
     OverlayUnsupported = -314,
+    BuzzAxisConflict = -315,
 }
 
 impl FaultCode {
@@ -291,6 +292,7 @@ impl FaultCode {
             -312 => Self::UnknownStepMode,
             -313 => Self::PhaseMotorUnmapped,
             -314 => Self::OverlayUnsupported,
+            -315 => Self::BuzzAxisConflict,
             _ => return None,
         })
     }
@@ -373,6 +375,7 @@ impl FaultCode {
             Self::UnknownStepMode => "UnknownStepMode",
             Self::PhaseMotorUnmapped => "PhaseMotorUnmapped",
             Self::OverlayUnsupported => "OverlayUnsupported",
+            Self::BuzzAxisConflict => "BuzzAxisConflict",
         }
     }
 }

@@ -147,6 +147,15 @@ int32_t runtime_query_motor_state(nurbs_Runtime *rt,
 
 int32_t runtime_reset(nurbs_Runtime *rt);
 
+int32_t runtime_resonance_buzz(nurbs_Runtime *rt,
+                               uint8_t axis_mask,
+                               uint8_t sign_mask,
+                               uint32_t freq_start_millihz,
+                               uint32_t freq_end_millihz,
+                               uint32_t amplitude_nm,
+                               uint32_t duration_ms,
+                               uint32_t ramp_ms);
+
 int32_t runtime_seed_position(nurbs_Runtime *rt, int32_t x_q16, int32_t y_q16, int32_t z_q16);
 
 int32_t runtime_set_axis_mode(nurbs_Runtime *rt, uint8_t axis_idx, uint8_t new_mode);

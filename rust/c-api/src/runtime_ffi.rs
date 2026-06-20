@@ -1026,10 +1026,18 @@ pub mod exports {
             return RUNTIME_ERR_NOT_INIT;
         }
         let ctx = rt.cast::<RuntimeContext>();
-        // SAFETY: foreground-only; arms ISR-read atomics inside the engine.
+        // SAFETY: foreground-only; arms ISR-read atomics inside the engine and
+        // latches the per-axis buzz streams. The engine projection is the sole
+        // mutable view; `shared` is read-only atomics.
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+            let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
+            // Anchor the buzz stream and the timer kick to the live DWT cycle
+            // counter, not the ISR tick count — the step-output compare timer
+            // schedules in cycles.
+            let now_cycle = runtime_cyccnt_read();
             (*isr_ptr).engine.resonance_buzz(
+                &*shared_ptr,
                 axis_mask,
                 sign_mask,
                 freq_start_millihz,
@@ -1037,6 +1045,7 @@ pub mod exports {
                 amplitude_nm,
                 duration_ms,
                 ramp_ms,
+                now_cycle,
             )
         }
     }
