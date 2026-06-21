@@ -22,7 +22,9 @@
 
 #![allow(unsafe_code)]
 
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::Ordering;
+
+use portable_atomic::AtomicI32;
 
 use crate::buzz_gen::{ToneCursor, ToneError, ToneParams, next_crossing};
 use crate::error::FaultCode;

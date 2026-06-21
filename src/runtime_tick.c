@@ -285,6 +285,11 @@ DECL_TASK(runtime_drain);
 // the depth-32 rings up to HIGH_WATER far faster than they drain at audio-rate
 // crossings, so they never underrun. The Rust entry IRQ-guards only its compare
 // re-arm; the solver compute runs fully preemptible.
+//
+// MACH_LINUX has only a stub step-output timer (step_output_timer_arm stores a
+// target but never fires step_output_event), so the buzz cannot run there;
+// omit the task rather than reference step-output FFI the Linux MCU can't use.
+#if !CONFIG_MACH_LINUX
 extern void runtime_buzz_refill_foreground(void);
 
 void
@@ -294,6 +299,7 @@ runtime_buzz_refill(void)
     runtime_buzz_refill_foreground();
 }
 DECL_TASK(runtime_buzz_refill);
+#endif
 
 void
 runtime_tick_shutdown(void)

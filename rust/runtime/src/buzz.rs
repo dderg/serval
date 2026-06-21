@@ -1,4 +1,6 @@
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::Ordering;
+
+use portable_atomic::{AtomicU8, AtomicU32};
 
 use crate::buzz_gen::ToneParams;
 use crate::stepping_state::MAX_AXES;
