@@ -214,13 +214,8 @@ class FakeMotion:
     def __init__(self, axis_sections=()):
         self.engine = FakeEngine()
         self.axis_sections = list(axis_sections)
-        self._limits = {
-            ("z", "max_velocity"): 10.0,
-            ("z", "max_accel"): 100.0,
-        }
-
-    def _axis_limit(self, axis, kind):
-        return self._limits[(axis, kind)]
+        self.max_z_velocity = 10.0
+        self.max_z_accel = 100.0
 
 
 def motor_section(**extra):
