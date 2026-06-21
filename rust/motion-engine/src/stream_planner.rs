@@ -392,16 +392,10 @@ fn run_loop(
                     state.restart_idle_timeline();
                 }
                 state.push(m);
-                let segs = state
-                    .commit(false)
-                    .unwrap_or_else(|e| fatal(&format!("commit: {e}")));
-                dispatch_committed(
-                    &segs,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
+                // Do NOT re-plan on every move: commit() re-fits + re-plans +
+                // re-lowers the whole buffer, so calling it per move is O(n²) and
+                // makes the planner fall behind playback (stream starvation). Plan
+                // only once per chunk, when the buffer reaches the cap.
                 if state.buffered() >= state.max_buffer_moves() {
                     tracing::info!(
                         subsystem = "motion",
