@@ -604,3 +604,38 @@ fn warm_start_negative_or_nan_entry_is_invalid_config() {
         Err(VelocityError::InvalidConfig)
     );
 }
+
+#[test]
+fn pin_rest_anchor_raises_on_nonzero_entry_accel() {
+    let mut s = VelSample {
+        s: 0.0,
+        v: 0.0,
+        a: 5.0,
+    };
+    assert_eq!(
+        pin_rest_anchor(Some(&mut s), 7, 1.0e5),
+        Err(VelocityError::RestAnchorAccel { line_no: 7 })
+    );
+}
+
+#[test]
+fn pin_rest_anchor_zeroes_small_accel() {
+    let mut s = VelSample {
+        s: 0.0,
+        v: 0.0,
+        a: 1e-9,
+    };
+    assert_eq!(pin_rest_anchor(Some(&mut s), 7, 1.0e5), Ok(()));
+    assert_eq!(s.a, 0.0);
+}
+
+#[test]
+fn pin_rest_anchor_tolerates_infinite_jerk_step() {
+    let mut s = VelSample {
+        s: 0.0,
+        v: 0.0,
+        a: 200.0,
+    };
+    assert_eq!(pin_rest_anchor(Some(&mut s), 7, f64::INFINITY), Ok(()));
+    assert_eq!(s.a, 0.0);
+}

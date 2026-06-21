@@ -37,7 +37,10 @@ fn planned(moves: Vec<Move>) -> (FitOutcome, VelocityProfile) {
 }
 
 fn vmove(length: f64, samples: &[(f64, f64)], accel: f64, line_no: u32) -> MoveVelocity {
-    let samples: Vec<VelSample> = samples.iter().map(|&(s, v)| VelSample { s, v }).collect();
+    let samples: Vec<VelSample> = samples
+        .iter()
+        .map(|&(s, v)| VelSample { s, v, a: 0.0 })
+        .collect();
     MoveVelocity {
         entry_v: samples.first().map_or(0.0, |x| x.v),
         exit_v: samples.last().map_or(0.0, |x| x.v),
