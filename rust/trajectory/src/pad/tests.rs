@@ -53,9 +53,6 @@ fn pad_single_segment_extends_left_by_velocity_right_by_constant() {
         pieces.last().unwrap().u_end
     );
 
-    // The left pad is a constant-velocity continuation of the entry motion (slope 10 through
-    // position 0 at the t=0 seam), NOT a constant-position hold: holding position injects a
-    // phantom velocity step that the shaper convolves into a spurious acceleration spike.
     let left = &pieces[0];
     assert!(
         left.evaluate(0.0).abs() < 1e-9,
@@ -68,7 +65,6 @@ fn pad_single_segment_extends_left_by_velocity_right_by_constant() {
         "left pad must continue at the entry velocity 10, got slope {left_slope}",
     );
 
-    // The trailing edge faces an unknown future, so it still holds the end position constant.
     let right_val = pieces
         .last()
         .unwrap()

@@ -84,10 +84,6 @@ impl ShaperState {
         self.t_dispatched = 0.0;
     }
 
-    /// Swap in recompiled chains after a runtime post-processor parameter
-    /// change. Lane histories survive — they hold pre-kernel input pieces;
-    /// only the kernels and their half-supports refresh. Takes effect at the
-    /// next replan; committed trajectory is never rewritten.
     pub fn update_chains(&mut self, chains: &AxisChainSet) {
         assert_eq!(
             self.axes.len(),
@@ -392,10 +388,6 @@ impl ShaperState {
         Some(accel)
     }
 
-    /// Realized per-axis velocities over `[t_freeze - max_h, t_freeze]` from
-    /// the retained shaped pieces, for the shaper window's left edge. `None`
-    /// when no kernel is active or no uncommitted segment carries followers;
-    /// all-zero samples before any motion exists (cold start at rest).
     fn follower_history_at(
         &self,
         t_freeze: f64,
@@ -422,33 +414,6 @@ impl ShaperState {
         Some(temporal::FollowerHistory { dt, axis_velocity })
     }
 
-    /// Smallest tail-start index whose `[t_sub, t_appended]` sub-window
-    /// provably contains the backward deceleration-reach of the just-appended
-    /// terminal `v=0` boundary, so freezing the prior solution's `(v,a)` at
-    /// `t_sub` is trajectory-neutral. Returns `0` (full window) for the cold
-    /// start / short-window case.
-    ///
-    /// The reach left-edge is the prior solve's terminal decel onset
-    /// (`prior_t_decel_start`, itself moved earlier by the new news on each
-    /// append) extended backward by `JERK_RAMP_SAFETY` analytic full-speed→0
-    /// braking intervals `v_cruise / a_brake`, where `v_cruise`/`a_brake` are
-    /// the spatial-XY velocity ceiling and tightest accel cap (Z is excluded —
-    /// its slow caps would otherwise blow the horizon up to the whole window).
-    /// The safety multiplier pads the analytic constant-accel braking time for
-    /// the jerk-limited S-curve ramp; the neutrality tests pin it down — at the
-    /// shipped value the bounded committed trajectory matches the full re-solve
-    /// to solver tolerance on both a smooth chain and the decel-to-corner stress
-    /// case. Because the new terminal is always `v=0` — the most aggressive
-    /// possible terminal — the new backward reach can never exceed this. If a
-    /// corner (chain boundary) sits at or
-    /// behind the reach-derived index, `t_sub` is snapped back to it — the
-    /// cleanest freeze point, where the prior solve pinned `v=0`. Snapping only
-    /// ever grows the sub-window. When no corner lies in the reach window (a
-    /// purely smooth chain), the reach-derived segment boundary is itself a
-    /// valid pin: the prior solution's `(v,a)` at that interior node is
-    /// invariant to the new terminal because the node sits before the backward
-    /// reach, so re-solving the suffix from that pinned boundary reproduces the
-    /// downstream profile to solver tolerance.
     fn bounded_freeze_idx(
         &self,
         t_freeze: f64,
@@ -501,10 +466,6 @@ impl ShaperState {
         reach_idx
     }
 
-    /// Reads the prior solution's `(path_speed, path_accel, per_axis_accels)`
-    /// at absolute time `t` from `planned_fitted`/`axes`. This is the boundary
-    /// state pinned into the next solve — at `t_freeze` for the dispatched
-    /// front, or at the bounded sub-window start `t_sub` for the frozen front.
     fn boundary_pin_at(
         &self,
         t: f64,
@@ -560,10 +521,6 @@ impl ShaperState {
             .collect()
     }
 
-    /// Diagnostic sampler over the unshaped planned pieces: `(position, velocity)`
-    /// for `axis_idx` at absolute planner time `t`, or `None` outside the
-    /// piece domain. Used by trajectory-neutrality tests to compare the bounded
-    /// and full re-solve committed output.
     #[must_use]
     pub fn sample_axis(&self, axis_idx: usize, t: f64) -> Option<(f64, f64)> {
         Some((

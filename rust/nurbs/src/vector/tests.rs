@@ -44,8 +44,6 @@ fn as_view_provides_borrowed_access() {
 
 #[test]
 fn try_from_wire_parses_3d_unweighted_linear() {
-    // Layout: u8 version, u8 degree, u8 has_weights, u8 axes_n,
-    //         u16 knot_count, u16 cp_count, then knots + cps (interleaved).
     let mut buf = Vec::new();
     buf.extend_from_slice(&[1, 1, 0, 3]); // version, degree, has_weights, axes_n
     buf.extend_from_slice(&4u16.to_ne_bytes()); // knot_count
@@ -65,8 +63,6 @@ fn try_from_wire_parses_3d_unweighted_linear() {
 
 #[test]
 fn try_from_wire_rejects_has_weights_flag() {
-    // Legacy rational header (has_weights=1) must be rejected loudly, not
-    // parsed with a misaligned payload assumption.
     let mut buf = Vec::new();
     buf.extend_from_slice(&[1, 1, 1, 3]); // version, degree, has_weights=1, axes_n
     buf.extend_from_slice(&4u16.to_ne_bytes());
@@ -83,7 +79,6 @@ fn try_from_wire_rejects_axis_mismatch() {
     buf.extend_from_slice(&[1, 1, 0, 4]);
     buf.extend_from_slice(&4u16.to_ne_bytes());
     buf.extend_from_slice(&2u16.to_ne_bytes());
-    // pad to enough bytes so we get past the axis check
     buf.resize(64, 0);
     let aligned = test_align_buf(&buf, 4);
     let result = VectorNurbsRef::<f32, 3>::try_from_wire(aligned.as_slice());
@@ -103,7 +98,8 @@ struct AlignedBytes {
 
 impl AlignedBytes {
     fn as_slice(&self) -> &[u8] {
-        // SAFETY: `Vec<u32>` is 4-byte aligned; len <= backing.len()*4.
+        debug_assert!(self.backing.as_ptr() as usize % core::mem::align_of::<u32>() == 0);
+        debug_assert!(self.len <= self.backing.len() * 4);
         #[allow(unsafe_code)]
         unsafe {
             core::slice::from_raw_parts(self.backing.as_ptr().cast::<u8>(), self.len)
@@ -114,7 +110,7 @@ impl AlignedBytes {
 fn test_align_buf(data: &[u8], _align: usize) -> AlignedBytes {
     let n = data.len().div_ceil(4);
     let mut backing: Vec<u32> = vec![0; n];
-    // SAFETY: backing owns n*4 bytes 4-byte aligned; we write data.len() <= n*4.
+    debug_assert!(data.len() <= n * 4);
     #[allow(unsafe_code)]
     let bytes: &mut [u8] =
         unsafe { core::slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), n * 4) };

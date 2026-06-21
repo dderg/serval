@@ -1,7 +1,3 @@
-//! Cross-check our eval against NURBS-Python (geomdl) on a fixed corpus.
-//! Corpus file: `tests/data/geomdl_corpus.json` (regenerated via the
-//! Python script in `tests/scripts/`).
-
 #![cfg(feature = "host")]
 
 use serde_json::Value;

@@ -1779,9 +1779,6 @@ fn streaming_routes_follower_only_virtual_move() {
 
 #[test]
 fn follower_only_retract_then_idle_then_move_holds_ledger() {
-    // Reproduces the bench crash: `M83; G1 E-1` (follower-only retract) leaves the
-    // follower ledger at -1; after an idle gap the next move must anchor the
-    // follower at -1, not snap back to the at-rest 0 (a 1mm pump junction fault).
     let ctx = follower_replan_context(None, 0.0);
     let mut state = ShaperState::new(&[0.0; 4], &ctx.chains);
     let ctx_emit = EmitContext {
@@ -1814,8 +1811,6 @@ fn follower_only_retract_then_idle_then_move_holds_ledger() {
     all.extend(state.emit_committed(&ctx_emit).expect("emit second"));
     all.extend(state.commit_decel_to_zero(&ctx_emit).expect("flush second"));
 
-    // The follower holds its ledger across the idle gap: the first post-idle
-    // segment must start where the pre-idle stream ended (-1), not snap to 0.
     let post_idle_start = nurbs::eval::eval(&all[before_idle].axes[3], all[before_idle].t_start);
     assert!(
         (post_idle_start - (-1.0)).abs() < 1e-3,

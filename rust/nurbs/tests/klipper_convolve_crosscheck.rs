@@ -1,8 +1,3 @@
-//! Note on file location: the plan called for `rust/tests/`, but the workspace
-//! `Cargo.toml` is workspace-only (no `[lib]`/`[[bin]]`), so there is no
-//! workspace-level test crate. This integration test lives in `rust/nurbs/tests/`
-//! instead.
-
 #![cfg(feature = "host")]
 
 use serde_json::Value;

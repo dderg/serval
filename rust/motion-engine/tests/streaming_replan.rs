@@ -1,8 +1,5 @@
 use std::sync::{Arc, Mutex};
 
-// The crate is `motion-engine` (package) but exposes its rlib under the
-// name `_motion_engine` (because `[lib].name` must match the
-// `#[pymodule]` fn — see Cargo.toml).
 use _motion_engine::classify::classify_and_build;
 use _motion_engine::config::{
     AxisDecl, AxisRegistry, LimitSection, PlannerConfig, PostProcessorDecl, PostProcessorSet,
@@ -509,18 +506,6 @@ fn slow_jogs_decelerate_to_zero_between() {
          append",
     );
 
-    // Task 6 — time-based flush: `flush` sleeps until `sync_instant +
-    // t_appended + LEAD`, so the second move arrives after real wall-clock
-    // time has advanced past move 1's planner-time end. The placement rule
-    // (spec §A) then inserts a rest-hold (advance_idle) bridging the gap,
-    // meaning move 2's segments start at a higher planner-time than move 1's
-    // segments end. Temporal contiguity therefore holds **within** each
-    // move's segment batch but NOT across the cross-flush boundary.
-    //
-    // Position continuity at the cross-flush boundary still holds: move 1
-    // ends at X=1.0 mm and move 2 starts from X=1.0 mm (the rest-hold is
-    // zero velocity, same position). All other adjacent seams remain both
-    // temporally and positionally contiguous.
     const SEAM_BUDGET_MM: f64 = 5.0e-2;
     let cross_flush = count_after_first.saturating_sub(1);
     for i in 0..segs.len().saturating_sub(1) {

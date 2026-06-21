@@ -4,7 +4,6 @@ use nurbs::eval::vector_eval;
 
 #[test]
 fn g51_elevation_is_exact_against_the_quadratic() {
-    // Quadratic: Q0=start, Q1=start+(I,J), Q2=end. Sample both, compare.
     let start = [0.0, 0.0, 0.0];
     let (i, j, dx, dy, dz) = (3.0, 5.0, 8.0, 0.0, 4.0);
     let cubic = g51_control_points(start, i, j, dx, dy, dz);
@@ -58,7 +57,6 @@ fn collinear_handles_3d_diagonal() {
 
 #[test]
 fn g5_assembles_control_points_with_linear_z() {
-    // start (0,0,0), endpoint delta (10,0,6), I/J=(2,4), P/Q=(-3,4)
     let cps = g5_control_points([0.0, 0.0, 0.0], 2.0, 4.0, -3.0, 4.0, 10.0, 0.0, 6.0);
     assert_eq!(cps[0], [0.0, 0.0, 0.0]); // P0 = start
     assert_eq!(cps[1], [2.0, 4.0, 2.0]); // P1 = start+(I,J), z = dz/3

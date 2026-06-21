@@ -32,26 +32,6 @@ pub fn add<T: Float>(
         .map_err(|_| AlgebraError::KnotMismatch)
 }
 
-/// ```rust
-/// # use nurbs::algebra::add_with_knot_union;
-/// # use nurbs::ScalarNurbs;
-/// // X: two Bézier pieces. Y: one piece.
-/// let x = ScalarNurbs::try_new(
-///     1,
-///     vec![0.0_f64, 0.0, 0.5, 1.0, 1.0],
-///     vec![0.0, 5.0, 10.0],
-/// ).unwrap();
-/// let y = ScalarNurbs::try_new(
-///     1,
-///     vec![0.0_f64, 0.0, 1.0, 1.0],
-///     vec![20.0, 20.0],
-/// ).unwrap();
-/// let sum = add_with_knot_union(&x, &y).unwrap();
-/// let v0 = nurbs::eval::eval(&sum.as_view(), 0.0_f64);
-/// let v1 = nurbs::eval::eval(&sum.as_view(), 1.0_f64);
-/// assert!((v0 - 20.0).abs() < 1e-12);
-/// assert!((v1 - 30.0).abs() < 1e-12);
-/// ```
 #[cfg(feature = "host")]
 pub fn add_with_knot_union<T: Float>(
     a: &crate::ScalarNurbs<T>,
@@ -176,16 +156,6 @@ pub fn fit_hermite_c1<const D: usize>(
     Ok(result)
 }
 
-/// Hermite C1 fit with optional 2nd-derivative pins at the global start and end.
-///
-/// Identical to [`fit_hermite_c1`] when both `d2_start` and `d2_end` are `None`.
-/// When a pin is `Some([a0, a1, …])`, the first (or last) output piece is constructed
-/// as degree-5 so that its 2nd derivative at the outer endpoint equals the pin exactly.
-/// Interior piece joints remain C1 only.
-///
-/// The minimum `target_degree` is 3 when no pins are supplied, or 5 when at least one
-/// pin is supplied (the extra two DOF are needed to accommodate the f'' constraint while
-/// keeping the two-endpoint C1 conditions).
 #[cfg(feature = "host")]
 pub fn fit_hermite_c1_clamped<const D: usize>(
     pieces: &[[crate::bezier::BezierPiece<f64>; D]],
@@ -418,9 +388,6 @@ fn hermite_fit_one_piece_clamped<const D: usize>(
     }
 }
 
-/// Degree-5 Hermite piece with both endpoint 2nd derivatives pinned.
-/// 6 constraints (f_lo, f'_lo, f''_lo, f_hi, f'_hi, f''_hi) exactly determine
-/// the 6 coefficients of a degree-5 polynomial.
 #[cfg(feature = "host")]
 #[allow(clippy::cast_possible_wrap)]
 fn hermite_construct_poly_both_clamped(
@@ -433,8 +400,6 @@ fn hermite_construct_poly_both_clamped(
     d2_lo: f64,
     d2_hi: f64,
 ) -> crate::bezier::BezierPiece<f64> {
-    // p(u) = c0 + c1*h + c2*h² + c3*h³ + c4*h⁴ + c5*h⁵,  h = u - u_lo
-    // p''(u_lo) = 2*c2  →  c2 = d2_lo/2
     let c0 = f_lo;
     let c1 = df_lo;
     let c2 = d2_lo * 0.5;
@@ -447,7 +412,6 @@ fn hermite_construct_poly_both_clamped(
         };
     }
 
-    // Residuals after subtracting fixed coefficients:
     let h2 = h * h;
     let h3 = h2 * h;
     let h4 = h3 * h;
@@ -457,23 +421,14 @@ fn hermite_construct_poly_both_clamped(
     let v_res = df_hi - c1 - 2.0 * c2 * h;
     let a_res = d2_hi - 2.0 * c2;
 
-    // 3×3 system for (q = c3*h³, r = c4*h⁴, s = c5*h⁵):
-    //   q    +  r   +  s   = P
-    //   3q   + 4r   + 5s   = V*H
-    //   6q   + 12r  + 20s  = A*H²
-    // det = 2 (computed below)
     let rhs0 = p_res;
     let rhs1 = v_res * h;
     let rhs2 = a_res * h2;
 
-    // Verified Cramer solution (det=2):
-    //   q = (20*P - 8*V*H + A*H²) / 2
-    //   r = (-30*P + 14*V*H - 2*A*H²) / 2
-    //   s = (12*P - 6*V*H + A*H²) / 2
-    let det = 2.0;
-    let q = (20.0 * rhs0 - 8.0 * rhs1 + rhs2) / det;
-    let r = (-30.0 * rhs0 + 14.0 * rhs1 - 2.0 * rhs2) / det;
-    let s = (12.0 * rhs0 - 6.0 * rhs1 + rhs2) / det;
+    let cramer_det = 2.0;
+    let q = (20.0 * rhs0 - 8.0 * rhs1 + rhs2) / cramer_det;
+    let r = (-30.0 * rhs0 + 14.0 * rhs1 - 2.0 * rhs2) / cramer_det;
+    let s = (12.0 * rhs0 - 6.0 * rhs1 + rhs2) / cramer_det;
 
     let c3 = q / h3;
     let c4 = r / h4;
@@ -486,9 +441,6 @@ fn hermite_construct_poly_both_clamped(
     }
 }
 
-/// Degree-`d` (>=5) Hermite piece with start 2nd-derivative pinned.
-/// c0, c1 fixed; c2 = d2_lo/2; c3 = free minimax DOF (= `c3_val`);
-/// c_{d-1} and c_d solved from C1 at the end.
 #[cfg(feature = "host")]
 #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
 fn hermite_construct_poly_start_clamped(
@@ -547,11 +499,6 @@ fn hermite_construct_poly_start_clamped(
     }
 }
 
-/// Degree-`d` (>=4) Hermite piece with end 2nd-derivative pinned.
-/// c0, c1 fixed from start; c2 is the free minimax DOF (= `c2_val`);
-/// c_{d-2}, c_{d-1}, c_d solved from f_hi, f'_hi, f''_hi.
-/// For d=4 the 3×3 system covers coefficients 2..4, and c2_val shifts the
-/// solution family (no separate free DOF for the minimax caller).
 #[cfg(feature = "host")]
 #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
 fn hermite_construct_poly_end_clamped(
@@ -578,26 +525,18 @@ fn hermite_construct_poly_end_clamped(
         };
     }
 
-    // c0 = f_lo, c1 = df_lo, c2 = c2_val (minimax free DOF)
-    // coeffs[3..d-3] = 0 (no higher free DOFs)
-    // Last three: c_{d-2}, c_{d-1}, c_d from 3 constraints at h:
-    //   f(h)   = f_hi
-    //   f'(h)  = df_hi
-    //   f''(h) = d2_hi
     let mut coeffs = vec![0.0f64; d + 1];
     coeffs[0] = f_lo;
     coeffs[1] = df_lo;
     coeffs[2] = c2_val;
-    // coeffs[3..d-2] already 0
 
-    // Subtract known-coefficient contributions from each residual
     let mut pos_residual = f_hi - f_lo - df_lo * h - c2_val * h * h;
     let mut vel_residual = df_hi - df_lo - 2.0 * c2_val * h;
     let mut acc_residual = d2_hi - 2.0 * c2_val;
 
-    let mut h_pow = h * h * h; // h^3
-    let mut h_pow_d = h * h; // h^2
-    let mut h_pow_dd = h; // h^1
+    let mut h_pow = h * h * h;
+    let mut h_pow_d = h * h;
+    let mut h_pow_dd = h;
     for k in 3..d.saturating_sub(2) {
         pos_residual -= coeffs[k] * h_pow;
         vel_residual -= (k as f64) * coeffs[k] * h_pow_d;
@@ -607,15 +546,6 @@ fn hermite_construct_poly_end_clamped(
         h_pow_dd *= h;
     }
 
-    // Solve 3×3 for (c_{d-2}, c_{d-1}, c_d) using d=5 pattern generalized:
-    // Let a = d-2, b = d-1, e = d.
-    // p(h)   = c_a*h^a + c_b*h^b + c_e*h^e = P
-    // p'(h)  = a*c_a*h^{a-1} + b*c_b*h^{b-1} + e*c_e*h^{e-1} = V
-    // p''(h) = a*(a-1)*c_a*h^{a-2} + b*(b-1)*c_b*h^{b-2} + e*(e-1)*c_e*h^{e-2} = A
-    // Substituting q=c_a*h^a, r=c_b*h^b, s=c_e*h^e:
-    // q + r + s = P
-    // a*q/h + b*r/h + e*s/h = V  →  a*q + b*r + e*s = V*h
-    // a*(a-1)*q/h² + ... = A    →  a*(a-1)*q + b*(b-1)*r + e*(e-1)*s = A*h²
     let a = (d - 2) as f64;
     let b = (d - 1) as f64;
     let e = d as f64;
@@ -1296,14 +1226,10 @@ fn integrate_product_piece<T: Float>(
     let d_w = w.degree();
     let out_degree = d_x + d_w + 1;
 
-    // s_lo(u) = max(x.u_start, u - w.u_end); s_hi(u) = min(x.u_end, u - w.u_start).
-    // Active branch is constant on [α, β] by construction; determine from midpoint.
     let u_mid = (alpha + beta) * T::from_f64(0.5);
-    let lo_branch_curve = u_mid - w.u_end > x.u_start; // true → s_lo(u) = u - w.u_end
-    let hi_branch_curve = u_mid - w.u_start < x.u_end; // true → s_hi(u) = u - w.u_start
+    let lo_branch_curve = u_mid - w.u_end > x.u_start;
+    let hi_branch_curve = u_mid - w.u_start < x.u_end;
 
-    // Work in shifted frame v = u − α, r = s − α to avoid catastrophic cancellation
-    // when α is large. Result is already in (u − α)^k basis; no re-shift needed.
     let x_abs_r = pascal_shift_to_absolute(&x.coeffs, x.u_start - alpha);
     let w_abs_z = pascal_shift_to_absolute(&w.coeffs, w.u_start);
 

@@ -1,5 +1,3 @@
-// `unsafe_code` is workspace-denied; targeted exception for MCU hot-path arc-length
-// lookup — release builds must not call the panic symbol from inside binary search.
 #![allow(unsafe_code)]
 
 use crate::Float;
@@ -136,10 +134,6 @@ use crate::eval::{eval, vector_derivative, vector_eval};
 #[cfg(feature = "host")]
 use crate::{ArcLengthError, NurbsView, VectorNurbsView};
 
-// SAFETY invariant for param_from_arc_length and arc_length_from_param:
-// Table construction asserts len >= 2. Binary search maintains lo = 0, hi = last = len-1;
-// loop exits with hi - lo == 1, so lo ∈ [0, last-1] and lo+1 ≤ last < len.
-// All get_unchecked accesses are to indices in [0, last].
 #[inline]
 pub fn param_from_arc_length<T: Float>(table: &ArcLengthTableRef<'_, T>, s: T) -> T {
     debug_assert!(s >= T::ZERO);
@@ -150,12 +144,10 @@ pub fn param_from_arc_length<T: Float>(table: &ArcLengthTableRef<'_, T>, s: T) -
     let u_arr = table.u();
     debug_assert!(s_arr.len() >= 2);
     debug_assert_eq!(s_arr.len(), u_arr.len());
-    // SAFETY: len >= 2 → index 0 is valid.
     if s_clamped <= unsafe { *s_arr.get_unchecked(0) } {
         return unsafe { *u_arr.get_unchecked(0) };
     }
     let last = s_arr.len() - 1;
-    // SAFETY: last = len-1 < len.
     if s_clamped >= unsafe { *s_arr.get_unchecked(last) } {
         return unsafe { *u_arr.get_unchecked(last) };
     }
@@ -164,14 +156,13 @@ pub fn param_from_arc_length<T: Float>(table: &ArcLengthTableRef<'_, T>, s: T) -
     let mut hi = last;
     while hi - lo > 1 {
         let mid = usize::midpoint(lo, hi);
-        // SAFETY: mid ∈ (lo, hi) ⊆ [0, last] < len.
         if unsafe { *s_arr.get_unchecked(mid) } <= s_clamped {
             lo = mid;
         } else {
             hi = mid;
         }
     }
-    // SAFETY: loop invariant → lo ∈ [0, last-1], lo+1 ≤ last < len; u_arr same length.
+    debug_assert!(lo < last);
     let s_lo = unsafe { *s_arr.get_unchecked(lo) };
     let s_hi = unsafe { *s_arr.get_unchecked(lo + 1) };
     let u_lo = unsafe { *u_arr.get_unchecked(lo) };
@@ -193,12 +184,10 @@ pub fn arc_length_from_param<T: Float>(table: &ArcLengthTableRef<'_, T>, u: T) -
     let u_arr = table.u();
     debug_assert!(u_arr.len() >= 2);
     debug_assert_eq!(s_arr.len(), u_arr.len());
-    // SAFETY: len >= 2 → index 0 is valid.
     if u_clamped <= unsafe { *u_arr.get_unchecked(0) } {
         return unsafe { *s_arr.get_unchecked(0) };
     }
     let last = u_arr.len() - 1;
-    // SAFETY: last = len-1 < len.
     if u_clamped >= unsafe { *u_arr.get_unchecked(last) } {
         return unsafe { *s_arr.get_unchecked(last) };
     }
@@ -207,14 +196,13 @@ pub fn arc_length_from_param<T: Float>(table: &ArcLengthTableRef<'_, T>, u: T) -
     let mut hi = last;
     while hi - lo > 1 {
         let mid = usize::midpoint(lo, hi);
-        // SAFETY: mid ∈ (lo, hi) ⊆ [0, last] < len.
         if unsafe { *u_arr.get_unchecked(mid) } <= u_clamped {
             lo = mid;
         } else {
             hi = mid;
         }
     }
-    // SAFETY: loop invariant → lo ∈ [0, last-1], lo+1 ≤ last < len.
+    debug_assert!(lo < last);
     let u_lo = unsafe { *u_arr.get_unchecked(lo) };
     let u_hi = unsafe { *u_arr.get_unchecked(lo + 1) };
     let s_lo = unsafe { *s_arr.get_unchecked(lo) };
@@ -349,10 +337,6 @@ impl<'a> ArcLengthTableRef<'a, f32> {
             });
         }
 
-        // SAFETY: alignment of `buf` to `align_of::<f32>()` is checked above; the
-        // header is 8 bytes (multiple of 4) so `s_ptr` and `u_ptr` remain 4-byte
-        // aligned. The total length covers `2 * sample_count * size_of::<f32>()`
-        // bytes after the header. Lifetime `'a` is inherited from `buf`.
         #[allow(unsafe_code)]
         let (s, u) = unsafe {
             let s_ptr = buf.as_ptr().add(ARC_LENGTH_HEADER_BYTES).cast::<f32>();

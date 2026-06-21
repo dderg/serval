@@ -1,20 +1,3 @@
-//! T3 acceptance: the live velocity planner is C2-within-run / C1-at-rest.
-//!
-//! Reproduces the demo4 serpentine and asserts, reading the planned analytic
-//! `a_t` (never finite-differenced):
-//!   * accel-from-rest is a full-jerk trapezoid, not the C1 `(2/9)*jerk`
-//!     velocity-ceiling ride (`max_reachable_velocity`);
-//!   * tangential acceleration is continuous across mid-run junctions — the
-//!     `+max -> -max` cruise/decel crossover step is dissolved by the bridge;
-//!   * `|a_t| <= a_max` everywhere and `(v,a)=(0,0)` is pinned at rest anchors.
-//!
-//! Carve-out: the biclothoid corner apex carries a small tangential `a_t` step
-//! (`a_t` tracks the curvature speed-limit slope `v*dv_lim/ds`, which inherits
-//! the clothoid's `dkappa/ds` jump — a G2-not-G3 property). Per spec-motion-12
-//! that lateral-jerk-induced step is the fitter shape's responsibility, not a
-//! tangential-jerk-feasibility bug; it is bounded by `a_max` and is far below
-//! the `2*a_max` C1 crossover step this work targets.
-
 use geometry::path::CurvatureProfile;
 use geometry::{
     ChainFitConfig, Move, MoveContext, SourceRange, VelocityConfig, VelocityLimits, fit_chain,
@@ -84,15 +67,12 @@ fn plan_samples() -> Vec<Sample> {
 
 #[test]
 fn c2_accel_from_rest_is_full_jerk_trapezoid() {
-    // By s=0.5mm a full-jerk ramp has long since reached the accel plateau
-    // (a=a_max at s~0.08mm). The C1 (2/9)*jerk ceiling-ride is still climbing
-    // there: a ~ (2/3)*jerk^(2/3)*s^(1/3) ~ 0.66*a_max. Reading the plateau
-    // separates the two unambiguously.
+    let accel_plateau_probe_mm = 0.5;
     let s = plan_samples();
     let probe = s
         .iter()
-        .find(|p| p.s >= 0.5)
-        .expect("profile reaches 0.5mm");
+        .find(|p| p.s >= accel_plateau_probe_mm)
+        .expect("profile reaches the accel plateau probe distance");
     assert!(
         probe.a >= 0.9 * ACCEL,
         "accel-from-rest a_t={:.2} at s={:.3} should be on the a_max plateau \
@@ -106,9 +86,6 @@ fn c2_accel_from_rest_is_full_jerk_trapezoid() {
 
 #[test]
 fn c2_no_crossover_accel_step() {
-    // The C1 cruise/decel crossover steps a_t by 2*a_max (+max -> -max). After
-    // bridging, no adjacent pair may step by even a_max — the corner κ' carve-out
-    // stays well under that bound.
     let s = plan_samples();
     for w in s.windows(2) {
         let step = (w[1].a - w[0].a).abs();
@@ -136,9 +113,6 @@ fn c2_accel_within_envelope() {
 
 #[test]
 fn c2_tangential_within_acceleration_disk() {
-    // a_t^2 + a_n^2 <= a_max^2 everywhere: the reported tangential accel may not
-    // borrow against the centripetal budget. Catches the biclothoid-apex spike
-    // where curvature-ceiling tracking would otherwise push |a| past a_max.
     let moves = serpentine();
     let outcome = fit_chain(&moves, ChainFitConfig::default()).unwrap();
     let profile = plan_velocity(

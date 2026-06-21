@@ -66,8 +66,6 @@ fn nominal_duration_uses_3d_distance() {
 
 #[test]
 fn classify_bezier_uses_arc_length_for_distance_and_ratio() {
-    // A curved G5 with an E delta. distance_mm must be the arc length (> chord),
-    // and the follower ratio must be de / arc_length (not de / chord).
     let start = [0.0, 0.0, 0.0];
     let m = classify_bezier(
         start,
@@ -101,8 +99,6 @@ fn classify_quadratic_builds_a_segment() {
 
 #[test]
 fn chain_reflection_negates_previous_pq() {
-    // Chained G5: omitted I/J => (I,J) = (-P_prev, -Q_prev). The reflection is
-    // XY-only; P1.z stays on the linear-Z assembly, NOT a 3D reflection.
     let prev_pq = (3.0, -2.0);
     let (i, j) = (-prev_pq.0, -prev_pq.1);
     let cps = g5_control_points([0.0, 0.0, 0.0], i, j, 1.0, 1.0, 10.0, 0.0, 0.0);
@@ -113,11 +109,6 @@ fn chain_reflection_negates_previous_pq() {
 
 #[test]
 fn experiment_cusp_and_near_cusp_classification_is_finite() {
-    // Exact cusp: i=j=0 => P1 == P0 (zero start tangent, fold-back curve).
-    // Near-cusp: tiny start leg (i=1e-7).
-    // Both must either (a) classify successfully with finite arc length,
-    // or (b) return ZeroDisplacement — the one case where arc_length <= epsilon.
-    // What must NEVER happen: a panic or a non-finite distance_mm.
     let exact = classify_bezier(
         [0.0, 0.0, 0.0],
         0.0,

@@ -350,12 +350,6 @@ pub(crate) fn check_chain(chain: &ChainGrid, result: &SolverResult) -> VerifyRep
     let mut histogram: Vec<(BindingConstraint, u32)> = histogram_map.into_iter().collect();
     histogram.sort_by(|(ca, na), (cb, nb)| nb.cmp(na).then_with(|| ca.cmp(cb)));
 
-    // The reported worst binding spans ALL families (velocity, accel, jerk, and
-    // the PA families) — it answers "which limit is this move riding, and how
-    // close." A jerk-limited move sits on the jerk ceiling at ratio≈1; reporting
-    // only the non-jerk half (as the feasibility split does, for its looser jerk
-    // tolerance) made such moves falsely report velocity at ~0.5 and a bogus
-    // gap≈0.5. Feasibility still uses the jerk/non-jerk split below.
     let worst = if global_worst_ratio >= SLACK_THRESHOLD
         && !matches!(
             global_worst_tag,

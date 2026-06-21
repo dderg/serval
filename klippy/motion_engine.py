@@ -5,14 +5,10 @@ except ImportError:
 
 from . import structured_log
 
-# print_id is already bound when these fire, so the handler pushes the current
-# session + print context.
 _PRINT_ACTIVE_EVENTS = (
     "print_stats:start_printing",
     "print_stats:paused_printing",
 )
-# These fire BEFORE print_id is cleared, so the handler must push an explicit
-# empty print_id rather than read the still-stale module global.
 _PRINT_FINISH_EVENTS = (
     "print_stats:complete_printing",
     "print_stats:error_printing",
@@ -21,10 +17,6 @@ _PRINT_FINISH_EVENTS = (
 )
 
 
-# Methods that issue real motion/planner/MCU traffic. Under the stub engine
-# these MUST raise, not return None — a None would make Motion.move()
-# compute `None - None`, hanging the test suite on a path that reached real
-# motion without a real engine.
 _STUB_MOTION_METHODS = frozenset(
     {
         "submit_nudge",
@@ -71,10 +63,6 @@ _STUB_MOTION_METHODS = frozenset(
 
 
 def attach_structured_logging(native, printer, events_dir):
-    # Must run after session_id is bound (printer.py startup) and before any MCU
-    # attach/configure that could emit a Rust log. events_dir is None with no
-    # logfile (--debugoutput): the jsonl sink is skipped but session context is
-    # still pushed.
     if events_dir:
         native.init_logging(events_dir)
     native.set_session_context(
@@ -296,12 +284,9 @@ class MotionEngineWrapper:
         return bytes(self._engine.get_identify_data(mcu_handle))
 
     def get_mcu_capabilities(self, mcu_handle):
-        # Bit 0 = PHASE_STEPPING_CAPABLE; 0 for stock-Klipper MCUs or before
-        # attach_serial completes.
         return self._engine.get_mcu_capabilities(mcu_handle)
 
     def ring_depth_for_axis(self, mcu_handle, axis_idx):
-        # Requires init_planner first.
         return self._engine.ring_depth_for_axis(mcu_handle, axis_idx)
 
     def register_phase_bus(self, mcu_handle, bus_id, rate, timeout_s=5.0):

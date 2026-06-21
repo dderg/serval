@@ -57,9 +57,18 @@ fn kernel_derivative_vanishes_at_boundaries() {
     let kernel = build_smooth_zv_kernel(0.8025 / 150.0);
     let (lo, hi) = kernel.support();
     let dk = kernel.pieces[0].differentiate();
-    // hi: large-magnitude terms cancel at s=2h, so float error ≈ 1e-8, not 1e-12.
-    assert!(dk.evaluate(lo).abs() < 1e-10, "lo = {}", dk.evaluate(lo));
-    assert!(dk.evaluate(hi).abs() < 1e-8, "hi = {}", dk.evaluate(hi));
+    let lo_tolerance = 1e-10;
+    let hi_tolerance_after_cancellation_at_2h = 1e-8;
+    assert!(
+        dk.evaluate(lo).abs() < lo_tolerance,
+        "lo = {}",
+        dk.evaluate(lo)
+    );
+    assert!(
+        dk.evaluate(hi).abs() < hi_tolerance_after_cancellation_at_2h,
+        "hi = {}",
+        dk.evaluate(hi)
+    );
 }
 
 #[test]

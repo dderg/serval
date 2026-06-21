@@ -67,11 +67,8 @@ def load_kinematics(config, motion):
             "[kinematics] type '%s' is not supported (supported: %s)"
             % (kind, ", ".join(sorted(KINEMATICS_TYPES)))
         )
-    # Frontends (Moonraker/Mainsail) read [printer] kinematics to detect a
-    # motion system and hide the movement panel when it resolves to 'none'.
-    # [kinematics] stays authoritative; mirror its type onto [printer]'s
-    # reported settings so the frontend sees a real kinematics.
-    config.getsection("printer").get("kinematics", kind)
+    frontend_visible_kinematics = kind
+    config.getsection("printer").get("kinematics", frontend_visible_kinematics)
     role_specs = KINEMATICS_TYPES[kind]
     kin = _LinearKinematics(config, motion, kind, role_specs)
     _reject_orphan_motors(config, motion, section, role_specs)

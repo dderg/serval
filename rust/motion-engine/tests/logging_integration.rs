@@ -21,8 +21,8 @@ fn end_to_end_jsonl_has_schema_and_context() {
         "endstop trip on Z"
     );
 
-    // Allow the non-blocking worker to flush.
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    let non_blocking_worker_flush = std::time::Duration::from_millis(250);
+    std::thread::sleep(non_blocking_worker_flush);
 
     let contents = std::fs::read_to_string(dir.join("host-rust.jsonl")).unwrap();
     let lines: Vec<serde_json::Value> = contents

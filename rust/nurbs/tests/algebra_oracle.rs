@@ -1,7 +1,3 @@
-//! Cross-check our algebra ops against a sympy-generated oracle corpus.
-//! Corpus file: `tests/data/algebra_corpus.json` (regenerated via the
-//! Python script in `tests/scripts/`).
-
 #![cfg(feature = "host")]
 
 use serde_json::Value;

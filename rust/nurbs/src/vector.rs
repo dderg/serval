@@ -164,8 +164,12 @@ impl<'a, const N: usize> VectorNurbsRef<'a, f32, N> {
             });
         }
 
-        // SAFETY: alignment checked; lengths checked; f32 has no invalid bit patterns;
-        // [f32; N] has same layout as N consecutive f32 values (no inter-element padding).
+        debug_assert_eq!((buf.as_ptr() as usize) % core::mem::align_of::<f32>(), 0);
+        debug_assert!(buf.len() >= total);
+        debug_assert_eq!(
+            core::mem::size_of::<[f32; N]>(),
+            N * core::mem::size_of::<f32>()
+        );
         #[allow(unsafe_code)]
         let (knots, cps) = unsafe {
             let knots_ptr = buf.as_ptr().add(VECTOR_HEADER_BYTES).cast::<f32>();

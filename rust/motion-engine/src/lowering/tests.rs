@@ -7,12 +7,6 @@ use geometry::{
 use nurbs::bezier::extract_bezier_pieces;
 use nurbs::eval::eval;
 
-/// Regression for the Neptune steps-per-sample fault: the velocity profile can
-/// carry thousands of samples per move, but the MCU consumes pieces against a
-/// fixed ~tens-of-µs step clock. A piece shorter than several samples makes the
-/// MCU extrapolate one cubic across a sample boundary and blow up the step rate.
-/// Lowering must emit *coarse* pieces (bounded count, every piece ≥ the floor),
-/// not one per velocity sample.
 #[test]
 fn lowering_emits_coarse_pieces_above_the_sample_floor() {
     for (start, end) in [
@@ -39,9 +33,8 @@ fn lowering_emits_coarse_pieces_above_the_sample_floor() {
                 pieces.len()
             );
             for p in &pieces {
-                // A single whole-move piece may be shorter than the floor; only
-                // multi-piece fits must respect it (no sub-sample subdivision).
-                if pieces.len() > 1 {
+                let fit_was_subdivided = pieces.len() > 1;
+                if fit_was_subdivided {
                     assert!(
                         p.u_end - p.u_start >= MIN_FIT_PIECE_S - 1e-9,
                         "axis {axis}: piece {:.6}us below the floor",

@@ -1,22 +1,15 @@
 use nurbs::bezier::BezierPiece;
 use nurbs::VectorNurbs;
 
-/// Velocity threshold below which a grid interval is treated as near-zero
-/// (constant-position). Both endpoints must be below this threshold.
 const NEAR_ZERO_V: f64 = 0.01;
 
-/// Arc-length table accuracy for the s→u inversion (built once per segment).
 pub(crate) const ARC_TABLE_TOL: f64 = 1e-9;
 pub(crate) const ARC_TABLE_SAMPLES: usize = 16384;
-/// |x'(u)| (mm per unit u) below this is a cusp — not a smooth segment.
 const TANGENT_SPEED_FLOOR: f64 = 1e-6;
-/// Per-piece time-domain position fit: degree and accuracy gate (geometry budget,
-/// far below the 5 µm user fit_tolerance_mm).
 const POS_FIT_DEGREE: usize = 9;
 const POS_FIT_TOL_MM: f64 = 1e-6;
 const POS_FIT_MAX_SUBDIV: usize = 8;
 
-/// 5-point Gauss-Legendre nodes on [-1, 1].
 const GL5_NODES: [f64; 5] = [
     -0.906_179_845_938_664,
     -0.538_469_310_105_683_1,
@@ -24,7 +17,6 @@ const GL5_NODES: [f64; 5] = [
     0.538_469_310_105_683_1,
     0.906_179_845_938_664,
 ];
-/// 5-point Gauss-Legendre weights.
 const GL5_WEIGHTS: [f64; 5] = [
     0.236_926_885_056_189_1,
     0.478_628_670_499_366_5,
@@ -33,9 +25,6 @@ const GL5_WEIGHTS: [f64; 5] = [
     0.236_926_885_056_189_1,
 ];
 
-/// Arc length from 0 to `u`: the bracketing table node's stored arc length
-/// (accurate to the table build tolerance) plus one 5-point GL integration
-/// over the short residual interval `[u_node, u]`. O(5) curve evals.
 fn arc_length_to_u(
     table: &nurbs::ArcLengthTableRef<'_, f64>,
     deriv: &VectorNurbs<f64, 3>,
@@ -64,9 +53,6 @@ fn arc_length_to_u(
     s_node + seg * half
 }
 
-/// Invert arc length `s` to curve parameter `u`: seed from the table, then two
-/// Newton steps using O(1) arc-length via table node + local GL residual.
-/// Returns `ZeroTangent` at a cusp.
 fn invert_s_to_u(
     table: &nurbs::ArcLengthTableRef<'_, f64>,
     deriv: &VectorNurbs<f64, 3>,
@@ -91,9 +77,6 @@ fn invert_s_to_u(
     Ok(u)
 }
 
-/// Solve for power-basis coefficients c[k] of p(x) = Σ c[k] (x - origin)^k that
-/// interpolate (nodes[i], vals[i]). Square system (len == degree+1), Gaussian
-/// elimination with partial pivoting. Nodes must be distinct.
 fn solve_power_basis(nodes: &[f64], vals: &[f64], origin: f64) -> Vec<f64> {
     let n = nodes.len();
     let mut a = vec![vec![0.0_f64; n + 1]; n];
@@ -128,9 +111,6 @@ fn solve_power_basis(nodes: &[f64], vals: &[f64], origin: f64) -> Vec<f64> {
     (0..n).map(|k| a[k][n] / a[k][k]).collect()
 }
 
-/// Fit position-over-time x(t) by sampling the EXACT curve at the inverted
-/// parameter. Bisects the time interval on residual miss. Returns one or more
-/// contiguous [x,y,z] power-basis pieces over s_of_t's time domain.
 fn fit_position_of_t(
     curve: &VectorNurbs<f64, 3>,
     deriv: &VectorNurbs<f64, 3>,

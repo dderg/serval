@@ -21,7 +21,6 @@ fn identity_composition_returns_outer() {
         u_end: 1.0,
         coeffs: vec![5.0, 0.0, 0.0, 0.0], // p(s) = 5
     };
-    // identity(t) = t in Pascal-shifted basis on [0, 1] is [0, 1].
     let inner = BezierPiece::<f64> {
         u_start: 0.0,
         u_end: 1.0,
@@ -60,7 +59,6 @@ fn linear_inner_is_parameter_rescaling() {
         u_end: 1.0,
         coeffs: vec![0.0, 1.0, 0.0, 1.0], // p(s) = s + s³
     };
-    // inner(t) = 0.5 * t = t/2: maps [0, 1] → [0, 0.5].
     let inner = BezierPiece::<f64> {
         u_start: 0.0,
         u_end: 1.0,
@@ -87,13 +85,11 @@ fn linear_inner_is_parameter_rescaling() {
 
 #[test]
 fn cubic_outer_quadratic_inner_yields_degree_6() {
-    // outer(s) = 1 + s + s² + s³ on s ∈ [0, 1].
     let outer = BezierPiece::<f64> {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![1.0, 1.0, 1.0, 1.0],
     };
-    // inner(t) = t² on t ∈ [0, 1] (Pascal-shifted around 0): coeffs = [0, 0, 1].
     let inner = BezierPiece::<f64> {
         u_start: 0.0,
         u_end: 1.0,
@@ -109,7 +105,6 @@ fn cubic_outer_quadratic_inner_yields_degree_6() {
         composed[0].degree()
     );
 
-    // Sample values must match outer(inner(t)) = 1 + t² + t⁴ + t⁶.
     for i in 0..=100 {
         let t = i as f64 / 100.0;
         let composed_val = composed[0].evaluate(t);

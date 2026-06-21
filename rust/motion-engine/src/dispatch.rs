@@ -124,7 +124,6 @@ pub fn build_seed_sends(configs: &[McuAxisConfig], x: f64, y: f64, z: f64) -> Ve
         .collect()
 }
 
-// `runtime_seed_position` is serial-only; EtherCAT nodes are position-commanded with no serial transport.
 pub fn build_serial_seed_sends<S: ::std::hash::BuildHasher>(
     configs: &[McuAxisConfig],
     ethercat_mcu_ids: &HashSet<u32, S>,
@@ -132,9 +131,11 @@ pub fn build_serial_seed_sends<S: ::std::hash::BuildHasher>(
     y: f64,
     z: f64,
 ) -> Vec<SeedSend> {
+    let reachable_over_serial_transport =
+        |cfg: &&McuAxisConfig| !ethercat_mcu_ids.contains(&cfg.mcu_id);
     configs
         .iter()
-        .filter(|cfg| !ethercat_mcu_ids.contains(&cfg.mcu_id))
+        .filter(reachable_over_serial_transport)
         .map(|cfg| {
             let m = motor_frame(cfg, [x, y, z]);
             SeedSend {

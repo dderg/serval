@@ -65,11 +65,8 @@ fn trident_limit_sections() -> Vec<LimitSection> {
     ]
 }
 
-// Three-element array: segment count, total pieces summed per axis [x, y, z], max pieces per
-// segment per axis — all accessed by index so a single atomic array suffices.
 struct DispatchStats {
     segments: AtomicU64,
-    // pieces_total[ax] and pieces_max[ax] each hold per-axis values.
     pieces_total: [AtomicU64; 3],
     pieces_max: [AtomicU64; 3],
 }

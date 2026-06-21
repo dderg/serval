@@ -4,9 +4,6 @@ use std::collections::HashMap;
 
 const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
 
-/// `motors[slot]` / `vmotors[slot]` are motor-space mm / mm-s, `None` if that slot
-/// was not reported. `kin_tag` is the kinematics tag of the MCU owning the spatial
-/// axes. Returns cartesian per-axis (pos, vel); axes with no data are omitted.
 pub fn assemble_cartesian(
     motors: &[Option<f64>; MAX_AXES],
     vmotors: &[Option<f64>; MAX_AXES],

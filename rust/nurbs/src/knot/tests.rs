@@ -131,13 +131,6 @@ fn remove_knot_undoes_insertion_for_cubic_with_irregular_cps() {
 
 #[test]
 fn remove_knot_two_round_trips_for_cubic_with_irregular_cps() {
-    // Degree-4 curve with no interior knots, irregular non-symmetric CPs.
-    // Insert at u=0.4 twice to lift multiplicity to 2, then attempt to
-    // remove both. With p=4 and s=2, iteration t=1 of remove_knot exits its
-    // inner loop with j == i (i.e. j < i + t strictly), exercising the
-    // convergence-branch predicate. With the buggy `j + t < i` predicate
-    // this routes to the else branch, reads outside the temp window, and
-    // either panics or returns count=1 with displaced cps.
     let curve = ScalarNurbs::<f64>::try_new(
         4,
         vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
@@ -281,9 +274,6 @@ fn refined_to_full_multiplicity_matches_reference_on_mixed_multiplicity_curve() 
 
 #[test]
 fn insert_knot_multifold_at_existing_preserves_evaluation_for_failing_case() {
-    // From the algebra_proptest shrunk failure: cubic with interior knot at 0.1
-    // (multiplicity 1), inserted twice — Boehm A5.3 multi-fold + existing path
-    // produced wrong control points pre-fix.
     use crate::eval::eval;
     let curve = ScalarNurbs::<f64>::try_new(
         3,

@@ -1,21 +1,3 @@
-//! Teardown-determinism tests for the EtherCAT FIRMWARE_RESTART wedge fix.
-//!
-//! Root cause: on klippy's in-process FIRMWARE_RESTART loop the old
-//! `PyMotionEngine` was never dropped, so its `McuHostIo` reactor kept the
-//! pts fd open (with TIOCEXCL on Linux), and the next process's `attach_serial`
-//! spun on EBUSY. These tests pin the fixed contract: `shutdown()` is the single
-//! complete, ordered, idempotent teardown — it drops the host_io Arc (closing
-//! the fd), reaps the EtherCAT child, closes the EtherCAT socket, and joins the
-//! pump/planner threads, on every call and safely more than once.
-//!
-//! Note on the fd-release assertion: `TTYPort::from_raw_fd`'s TIOCEXCL only
-//! makes a second `open()` of the same pts return EBUSY on Linux; macOS pts do
-//! not honour TIOCEXCL that way (verified on the bench). So the load-bearing,
-//! portable proof of fd release is "the last `Arc<McuHostIo>` is dropped" —
-//! observed via a `Weak` that no longer upgrades — because `McuHostIo::Drop`
-//! is exactly what closes the fd. The live Linux bench check (a fresh open
-//! succeeding first-try) is in the design's verification section.
-
 use std::os::unix::io::FromRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -30,13 +12,9 @@ use trajectory::ShapedSegment;
 
 use super::{McuConnection, PyMotionEngine};
 
-/// Open a pty pair and return (master_fd, slave_path). The master fd is kept
-/// open by the caller so the slave stays valid; close it at end of test.
 fn open_pty() -> (libc::c_int, String) {
     let mut master: libc::c_int = 0;
     let mut slave: libc::c_int = 0;
-    // SAFETY: openpty writes two valid fds; the name buffer is large enough for
-    // any pts path. We check the return code before using the fds.
     #[allow(unsafe_code)]
     let path = unsafe {
         let mut name_buf = [0i8; 256];
@@ -48,23 +26,15 @@ fn open_pty() -> (libc::c_int, String) {
             std::ptr::null_mut(),
         );
         assert_eq!(r, 0, "openpty failed: {}", std::io::Error::last_os_error());
-        // We build McuHostIo from the slave fd; the master fd is the "peer".
-        // The slave path is what a real attach_serial would open.
         let cstr = std::ffi::CStr::from_ptr(name_buf.as_ptr());
         let p = cstr.to_str().expect("pts path is utf-8").to_owned();
-        // Close the slave fd we got from openpty — McuHostIo opens its own
-        // handle to the slave via the path below, mirroring attach_serial.
         libc::close(slave);
         p
     };
     (master, path)
 }
 
-/// Build a `McuHostIo` bound to `slave_path` (the reactor owns a real fd),
-/// skipping the wire identify handshake. Returns the Arc plus a Weak to observe
-/// the Arc's strong-count dropping to zero on teardown.
 fn host_io_on_pty(slave_path: &str) -> (Arc<McuHostIo>, Weak<McuHostIo>) {
-    // SAFETY: open + from_raw_fd are FFI boundaries; we check `fd >= 0`.
     #[allow(unsafe_code)]
     let port: Box<dyn serialport::SerialPort> = unsafe {
         let cpath = std::ffi::CString::new(slave_path).unwrap();
@@ -115,9 +85,6 @@ fn mcus_is_empty(engine: &PyMotionEngine) -> bool {
         .is_empty()
 }
 
-/// Seed a real pump channel + thread into the engine, mirroring the wiring
-/// init_planner installs, so `shutdown()`'s pump-join path is exercised.
-/// The thread runs until it receives `PumpMsg::Shutdown`.
 fn seed_pump_thread(engine: &PyMotionEngine) -> Arc<std::sync::atomic::AtomicBool> {
     let (tx, rx) = std::sync::mpsc::channel::<crate::pump::PumpMsg>();
     let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -138,10 +105,6 @@ fn seed_pump_thread(engine: &PyMotionEngine) -> Arc<std::sync::atomic::AtomicBoo
     exited
 }
 
-/// (a) The host_io Arc is the last strong ref and is dropped by `shutdown()`,
-/// which is exactly what `McuHostIo::Drop` uses to close the pts fd — the
-/// direct EBUSY-release proof. (b) The pump thread is joined (Shutdown sent,
-/// handle taken → None, thread observed exited). (c) The mcus map is emptied.
 #[test]
 fn shutdown_releases_pty_and_joins_threads() {
     let engine = PyMotionEngine::new();
@@ -149,9 +112,6 @@ fn shutdown_releases_pty_and_joins_threads() {
 
     let (io_arc, io_weak) = host_io_on_pty(&slave_path);
     insert_mcu(&engine, 1, serial_mcu_conn("mcu", &slave_path, io_arc));
-    // Drop our own strong ref: the only remaining strong ref is inside the
-    // McuConnection, mirroring production where attach_serial's local Arcs have
-    // already been dropped and pump/heartbeat hold Weak only.
     assert!(
         io_weak.upgrade().is_some(),
         "host_io must be alive pre-shutdown"
@@ -187,15 +147,12 @@ fn shutdown_releases_pty_and_joins_threads() {
         "shut_down flag must be latched"
     );
 
-    // SAFETY: master_fd is the pty master we kept open; close it now.
     #[allow(unsafe_code)]
     unsafe {
         libc::close(master_fd);
     }
 }
 
-/// `shutdown()` must reap the EtherCAT child and close the endpoint socket so
-/// the peer sees EOF.
 #[test]
 fn shutdown_releases_ethercat_socket_and_child() {
     use std::io::Read;
@@ -203,12 +160,9 @@ fn shutdown_releases_ethercat_socket_and_child() {
 
     let engine = PyMotionEngine::new();
 
-    // socketpair: one end becomes the McuSerialConn (endpoint_conn), the other
-    // is the test-held "peer" that must observe EOF when the conn is dropped.
     let (conn_stream, peer_stream) = UnixStream::pair().expect("socketpair must be available");
     let native = McuSerialConn::from_stream(conn_stream).expect("from_stream");
 
-    // A long-lived child that SIGTERM will terminate (mirrors the endpoint).
     let child = std::process::Command::new("sh")
         .args(["-c", "sleep 30"])
         .spawn()
@@ -233,11 +187,6 @@ fn shutdown_releases_ethercat_socket_and_child() {
 
     engine.shutdown();
 
-    // Peer sees EOF: the conn's socket (and its try_clones) are all closed.
-    // `shutdown()` synchronously joins McuSerialConn's reader (Drop does
-    // shutdown(Both)+join), so the socket is fully closed before it returns and
-    // this read returns EOF immediately. Run it in a watchdog thread so a
-    // regression (socket left open) surfaces as a test failure, not a hang.
     let (done_tx, done_rx) = std::sync::mpsc::channel::<std::io::Result<usize>>();
     std::thread::spawn(move || {
         let mut peer = peer_stream;
@@ -253,9 +202,6 @@ fn shutdown_releases_ethercat_socket_and_child() {
         "peer must see EOF (0 bytes) after endpoint_conn dropped"
     );
 
-    // Child is reaped: the pid is no longer a live process we can signal
-    // (SIGTERM was sent + reaped by release_mcu). kill(pid, 0) must fail ESRCH.
-    // SAFETY: signal 0 only probes existence; it never delivers a signal.
     #[allow(unsafe_code)]
     let alive = unsafe { libc::kill(child_pid as libc::pid_t, 0) };
     assert_eq!(
@@ -274,8 +220,6 @@ fn shutdown_releases_ethercat_socket_and_child() {
     );
 }
 
-/// `shutdown(); shutdown();` — the second call is a clean no-op: no panic, no
-/// double-join, and the `shut_down` flag is observed on entry.
 #[test]
 fn double_shutdown_is_safe() {
     let engine = PyMotionEngine::new();
@@ -290,20 +234,15 @@ fn double_shutdown_is_safe() {
     );
     assert!(engine.shut_down.load(std::sync::atomic::Ordering::SeqCst));
 
-    // Second call must short-circuit on the latched flag and not panic.
     engine.shutdown();
     assert!(mcus_is_empty(&engine));
 
-    // SAFETY: master_fd is the pty master we kept open; close it now.
     #[allow(unsafe_code)]
     unsafe {
         libc::close(master_fd);
     }
 }
 
-/// A no-op dispatch closure paired with an invocation counter — the trivial
-/// seam (mirrors `planner::tests::counting_dispatch`) for spawning a real
-/// `kalico-planner` thread without a transport behind it.
 fn counting_dispatch() -> (
     Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
     Arc<AtomicUsize>,
@@ -323,8 +262,6 @@ fn noop_nudge_dispatch()
     Arc::new(|_mcu_id: u32, _np: &crate::nudge::NudgePiece| Ok(()))
 }
 
-/// Loosened fit tolerance for fast planning in tests (mirrors
-/// `planner::tests::relaxed_config`).
 fn relaxed_planner_config() -> PlannerConfig {
     let mut c = PlannerConfig::default();
     c.fit_tolerance_mm = 0.05;
@@ -346,11 +283,6 @@ fn stream_config_from(cfg: &PlannerConfig) -> (crate::stream::StreamConfig, Vec<
     (sc, vec![0.0; cfg.axis_registry.n_axes().max(3)])
 }
 
-/// `shutdown()` must drain the `Mutex<Option<PlannerHandle>>` and join the
-/// `kalico-planner` thread. The OnceLock→Mutex<Option> migration is the
-/// centerpiece of this change; this is the engine-level proof that
-/// `shutdown()`'s planner take()+`PlannerHandle::shutdown()` path actually runs
-/// (planner::tests only covers `PlannerHandle::shutdown()` in isolation).
 #[test]
 fn shutdown_takes_and_joins_planner() {
     let engine = PyMotionEngine::new();
@@ -385,35 +317,10 @@ fn shutdown_takes_and_joins_planner() {
     );
 }
 
-/// Regression test for the teardown-ordering blocker: the planner must be joined
-/// BEFORE the pump's `Receiver` is dropped.
-///
-/// Mechanism guarded against: while the planner holds an uncommitted decel tail
-/// (`t_dispatched < t_appended`), its `recv_timeout` fires
-/// `run_commit_and_dispatch`, which calls the dispatch closure → `pump_tx.send`.
-/// If the pump's `Receiver` were already gone, that send fails →
-/// `DispatchError::PumpGone` → the real planner calls `fatal()` →
-/// `std::process::abort()`, which skips every `Drop` and re-leaks the pts fd.
-///
-/// We reproduce the exact dependency WITHOUT the real abort path so the bug
-/// surfaces as a clean assertion failure, not a test-binary abort: the test's
-/// dispatch sends into the same channel whose `Receiver` `shutdown()` drops, and
-/// on a send failure it *records a flag and returns Ok* (so the real planner's
-/// `fatal()`/`abort()` is never reached). A background thread keeps submitting
-/// moves so the planner always holds a pending tail and is continuously firing
-/// timeout-commit dispatches across the teardown window. With the fixed order
-/// (planner joined first), the pump's Receiver outlives every dispatch and
-/// `saw_pump_gone` stays false; with the pre-fix pump-first order the planner
-/// dispatches into the already-dropped Receiver and the flag flips true.
 #[test]
 fn shutdown_joins_planner_before_dropping_pump_receiver() {
     let engine = PyMotionEngine::new();
 
-    // The channel the dispatch closure sends into. Its Receiver lives in the
-    // pump thread we seed below; `shutdown()` drops it when it tears the pump.
-    // A clone goes into engine.pump_tx so shutdown()'s `Shutdown` reaches the
-    // pump thread (mirroring production: pump_tx and the dispatch's tx are the
-    // same channel; the pump owns the single Receiver).
     let (pump_tx, pump_rx) = std::sync::mpsc::channel::<crate::pump::PumpMsg>();
     let pump_tx_for_engine = pump_tx.clone();
 
@@ -424,13 +331,6 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
     let dispatch: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
         Arc::new(move |_seg: &ShapedSegment| {
             dispatch_count_cb.fetch_add(1, Ordering::SeqCst);
-            // Mirror the production dispatch's pump-send. We send a (cheap)
-            // Heartbeat, NOT Shutdown — Shutdown is the pump's own exit signal,
-            // which only `engine.shutdown()` may send. A failed send means the
-            // pump's Receiver is already dropped — the exact condition that yields
-            // DispatchError::PumpGone in production. We record it and return Ok so
-            // the real planner never reaches fatal()/abort() and the test can
-            // assert cleanly.
             let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
                 mcu_id: 0,
                 retired_counts: Vec::new(),
@@ -443,8 +343,6 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
 
     let (sc, home) = stream_config_from(&relaxed_planner_config());
     let planner = StreamPlannerHandle::spawn(sc, home, dispatch, noop_nudge_dispatch());
-    // Prime one move so the planner has a pending tail before the submitter and
-    // pump are even wired — the recv_timeout branch is armed from the start.
     planner
         .submit_move(
             crate::classify::build_move([0.0; 3], 50.0, 0.0, 0.0, 0, 0.0, test_limits(), 200.0, 0)
@@ -454,11 +352,6 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
     let engine = Arc::new(engine);
     *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(planner);
 
-    // Seed the pump thread holding the matching Receiver, mirroring production:
-    // run_pump owns pump_rx by value and exits on PumpMsg::Shutdown — at which
-    // point pump_rx is dropped *while the dispatch closure's Sender is still
-    // alive*. That is precisely the window in which the wrong teardown order lets
-    // the planner's next timeout-commit dispatch hit a dead Receiver.
     let pump_handle = std::thread::Builder::new()
         .name("push-pieces-pump".into())
         .spawn(move || {
@@ -473,11 +366,6 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
     *engine.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_handle);
     *engine.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_tx_for_engine);
 
-    // Background submitter: keep the planner perpetually holding an uncommitted
-    // decel tail so its recv_timeout branch stays armed and it fires timeout-
-    // commit dispatches continuously — including through the teardown window. It
-    // drives the planner through the engine's Mutex<Option<PlannerHandle>>; once
-    // shutdown() take()s the planner it observes None and stops.
     let stop = Arc::new(AtomicBool::new(false));
     let stop_sub = Arc::clone(&stop);
     let engine_sub = Arc::clone(&engine);
@@ -511,7 +399,6 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
         })
         .expect("spawn test submitter");
 
-    // Let the planner run long enough to be actively firing timeout-commits.
     std::thread::sleep(std::time::Duration::from_millis(300));
     assert!(
         dispatch_count.load(Ordering::SeqCst) > 0,
@@ -540,30 +427,6 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
     );
 }
 
-/// Regression for the EtherCAT pump-abort ordering bug:
-///
-/// With the old ordering (`release_mcu` first, pump last), a pump that still
-/// holds queued pieces for an EtherCAT MCU would call `send_frame` after the
-/// last strong `Arc<McuSerialConn>` was dropped by `release_mcu`. The
-/// `Weak::upgrade()` returns `None` → `SendError::Fatal` → `on_fatal_transport`
-/// → `std::process::abort()`, which skips every `Drop` and re-leaks the pts fd.
-///
-/// With the fixed ordering (planner join → pump join → release_mcu), the pump
-/// receives `PumpMsg::Shutdown` and exits before any send can fire against a
-/// dead transport. This test pins that contract without touching production
-/// abort semantics:
-///
-///   (a) A `WireSink` is wired with a detached EtherCAT `Weak` (no strong Arc)
-///       and an injectable `on_fatal_transport` that sets a flag instead of
-///       aborting — identical to the seam used in pump's own unit tests.
-///   (b) Pieces for the dead mcu_id are enqueued into the pump BEFORE
-///       `shutdown()` is called. The pump is held in `StallAhead` (clock
-///       horizon is behind the pieces' start-time) so it cannot drain the
-///       queue before `Shutdown` arrives.
-///   (c) `engine.shutdown()` runs: planner join → pump Shutdown+join →
-///       release_mcu.  The `on_fatal_transport` flag must remain `false`
-///       throughout — proving the pump exited via `Shutdown` before it could
-///       touch the dead transport.
 #[test]
 fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     use runtime::piece_ring::PieceEntry;
@@ -574,9 +437,6 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
 
     const EC_MCU_ID: u32 = 42;
 
-    // Detached Weak: the strong Arc is never stored anywhere, so upgrade() always
-    // returns None → Fatal.  This mirrors the state after the old release_mcu had
-    // dropped the last strong Arc while the pump was still alive.
     let detached_weak: std::sync::Weak<host_rt::mcu_serial_conn::McuSerialConn> =
         std::sync::Weak::new();
 
@@ -593,16 +453,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
         freq_of: Arc::new(|_| None),
     };
 
-    // mcu_clock_of returns a horizon behind any realistic start_time so that
-    // schedule() always returns StallAhead — pieces stay queued, send_frame is
-    // never called, and the pump blocks on recv_timeout(50ms) waiting for more
-    // messages.  When Shutdown arrives via recv_timeout, run_pump returns
-    // immediately without touching the dead transport.
-    let mcu_clock_of = |_mcu_id: u32| -> Option<(u64, f64)> {
-        // ack_now=1, freq=1.0 → horizon = 1 + 1 = 2. Any piece with
-        // start_time > 2 stalls.
-        Some((1, 1.0))
-    };
+    let mcu_clock_of = |_mcu_id: u32| -> Option<(u64, f64)> { Some((1, 1.0)) };
 
     let (pump_tx, pump_rx) = std::sync::mpsc::channel::<PumpMsg>();
 
@@ -623,9 +474,6 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
         })
         .expect("spawn test pump thread");
 
-    // Enqueue pieces with start_time well above the horizon (2) so schedule()
-    // stalls rather than sending. The pump enters StallAhead and blocks on
-    // recv_timeout(50ms) — pieces are live in the queue when shutdown() runs.
     let pieces_to_enqueue = vec![(
         PieceEntry {
             start_time: 1_000_000,
@@ -648,16 +496,12 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
         }))
         .expect("enqueue must succeed before shutdown");
 
-    // Give the pump time to process the Enqueue message and enter StallAhead
-    // so it is blocking on recv_timeout when Shutdown arrives.
     std::thread::sleep(Duration::from_millis(30));
 
-    // Seed the pump into the engine so shutdown() drives it.
     let engine = Arc::new(PyMotionEngine::new());
     *engine.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_tx);
     *engine.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_handle);
 
-    // Also seed a planner so the planner-join step of shutdown() is exercised.
     let (dispatch, _counter) = counting_dispatch();
     let (sc, home) = stream_config_from(&relaxed_planner_config());
     *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamPlannerHandle::spawn(
@@ -748,7 +592,6 @@ fn partial_state_teardown_at_exit() {
     );
     assert!(mcus_is_empty(&engine));
 
-    // SAFETY: master_fd is the pty master we kept open; close it now.
     #[allow(unsafe_code)]
     unsafe {
         libc::close(master_fd);

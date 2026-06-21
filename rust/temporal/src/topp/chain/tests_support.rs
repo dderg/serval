@@ -11,9 +11,6 @@ pub(crate) fn line_50mm() -> VectorNurbs<f64, 3> {
     line([0.0; 3], [50.0, 0.0, 0.0])
 }
 
-/// 40 mm + 60 mm collinear lines with different v_max per side
-/// (300 / 150 mm/s); 11 + 13 grid points → junction at index 10,
-/// h = 4 mm left, 5 mm right.
 pub(crate) fn two_segment_chain_with_junction() -> ChainGrid {
     let ga =
         crate::topp::path::sample_arclength_grid(&line([0.0; 3], [40.0, 0.0, 0.0]), 11).unwrap();

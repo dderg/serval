@@ -8,8 +8,10 @@ use mcu_protocol::messages::{
     SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
 };
 
-/// Worst-case enable: 3000 DC cycles of ladder (~3 s) plus margin.
-const SET_TORQUE_TIMEOUT: Duration = Duration::from_secs(8);
+const WORST_CASE_LADDER_ENABLE: Duration = Duration::from_secs(3);
+const SET_TORQUE_TIMEOUT_MARGIN: Duration = Duration::from_secs(5);
+const SET_TORQUE_TIMEOUT: Duration =
+    WORST_CASE_LADDER_ENABLE.saturating_add(SET_TORQUE_TIMEOUT_MARGIN);
 
 pub fn send_set_torque(
     conn: &McuSerialConn,

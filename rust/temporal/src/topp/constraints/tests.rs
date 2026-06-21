@@ -95,10 +95,6 @@ fn boundary_above_mvc_returns_boundary_outcome() {
 
 #[test]
 fn start_above_per_axis_velocity_cap_is_boundary_infeasible() {
-    // Straight line (kappa = 0): centripetal MVC is effectively unbounded, so
-    // only the per-axis velocity cap binds. A v_start a hair above v_max (the
-    // streaming-replan ripple that crashed the bridge) must be caught here, not
-    // handed to the SOCP to emit a frozen garbage profile.
     let grid = dummy_straight_grid(10, 100.0);
     let limits = Limits::axis_boxes(
         [200.0, 300.0, 15.0],
@@ -236,10 +232,6 @@ fn n_eq_2_minimum_grid_no_interior_points() {
     assert!(bundle.objective.iter().all(|c| c.abs() < 1e-12));
 }
 
-// -------------------------------------------------------------------------
-// Test 5: rest_boundary_b_cap — formula continuity and scaling
-// -------------------------------------------------------------------------
-
 #[test]
 fn env_b_continuity_at_s1_and_scaling() {
     use super::rest_boundary_b_cap;
@@ -249,7 +241,6 @@ fn env_b_continuity_at_s1_and_scaling() {
     let s1 = a * a * a / (6.0 * j * j);
     let v1_sq = (a * a / (2.0 * j)).powi(2);
 
-    // Continuity: both branches return the same value at d = s1.
     let left = rest_boundary_b_cap(s1 * (1.0 - 1e-9), a, j);
     let right = rest_boundary_b_cap(s1 * (1.0 + 1e-9), a, j);
     assert!(
@@ -257,7 +248,6 @@ fn env_b_continuity_at_s1_and_scaling() {
         "discontinuity at s1: left={left}, right={right}"
     );
 
-    // v² ∝ d^(4/3) in the jerk phase: env_b(4d)/env_b(d) = 4^(4/3).
     let d_small = s1 * 0.1;
     let ratio = rest_boundary_b_cap(4.0 * d_small, a, j) / rest_boundary_b_cap(d_small, a, j);
     let expected_ratio = 4.0_f64.powf(4.0 / 3.0);
@@ -266,7 +256,6 @@ fn env_b_continuity_at_s1_and_scaling() {
         "jerk-phase scaling: ratio={ratio}, expected {expected_ratio}"
     );
 
-    // Accel-phase value at d = s1 + Δ matches closed-form v1² + 2AΔ.
     let delta = 10.0_f64;
     let cap = rest_boundary_b_cap(s1 + delta, a, j);
     let expected = v1_sq + 2.0 * a * delta;
@@ -275,10 +264,6 @@ fn env_b_continuity_at_s1_and_scaling() {
         "accel-phase value: cap={cap}, expected={expected}"
     );
 }
-
-// -------------------------------------------------------------------------
-// Test 6: straight-line grid, zero endpoints → envelope rows emitted
-// -------------------------------------------------------------------------
 
 #[test]
 fn zero_endpoints_emit_envelope_rows() {
@@ -298,8 +283,6 @@ fn zero_endpoints_emit_envelope_rows() {
         BuildOutcome::Boundary(_) => panic!("zero endpoints should be feasible"),
     };
 
-    // Block (e2) must contribute at least one nonneg row (envelope rows exist
-    // for d values below b_cap).
     let nonneg_rows: usize = bundle
         .cones
         .iter()
@@ -307,23 +290,16 @@ fn zero_endpoints_emit_envelope_rows() {
         .map(|(_, n)| *n)
         .sum();
 
-    // Old nonneg count for zero-endpoint N=10 X-line without (e2):
-    //   (c) 10, (d) 20, (e) 10, (f) 16, (g) 16 = 72.
-    // Block (e2) adds > 0 rows (both endpoints at rest).
+    let nonneg_rows_without_envelope = 72;
     assert!(
-        nonneg_rows > 72,
+        nonneg_rows > nonneg_rows_without_envelope,
         "expected envelope rows to be added, nonneg={nonneg_rows}"
     );
 
-    // Dimension consistency holds.
     let total_cone_dim: usize = bundle.cones.iter().map(|(_, d)| d).sum();
     assert_eq!(bundle.a_rows.len(), total_cone_dim);
     assert_eq!(bundle.b_rhs.len(), total_cone_dim);
 }
-
-// -------------------------------------------------------------------------
-// Test 7: junction velocities (v > 0) → zero envelope rows
-// -------------------------------------------------------------------------
 
 #[test]
 fn nonzero_endpoints_emit_no_envelope_rows() {
@@ -343,24 +319,18 @@ fn nonzero_endpoints_emit_no_envelope_rows() {
         BuildOutcome::Boundary(_) => panic!("should be feasible for v=100 on straight X-line"),
     };
 
-    // No (e2) rows: neither endpoint is at rest.
-    // Old nonneg count for this config (no e2): 10+20+10+16+16 = 72.
     let nonneg_rows: usize = bundle
         .cones
         .iter()
         .filter(|(c, _)| matches!(c, Cone::Nonneg))
         .map(|(_, n)| *n)
         .sum();
-    assert_eq!(nonneg_rows, 72, "no envelope rows for nonzero endpoints");
+    let nonneg_rows_without_envelope = 72;
+    assert_eq!(
+        nonneg_rows, nonneg_rows_without_envelope,
+        "no envelope rows for nonzero endpoints"
+    );
 }
-
-// -------------------------------------------------------------------------
-// Test 8: diagonal X=Y line yields A_env ≈ √2 · a_max (projected cap)
-// -------------------------------------------------------------------------
-
-// -------------------------------------------------------------------------
-// Task 5 tests: junction dual rows
-// -------------------------------------------------------------------------
 
 #[test]
 fn junction_point_gets_dual_velocity_rows() {
@@ -377,9 +347,6 @@ fn junction_point_gets_dual_velocity_rows() {
         BuildOutcome::Ok(b) => b,
         other => panic!("{other:?}"),
     };
-    // Count rows whose ONLY nonzero is −1 at the junction b-column (off_b+10)
-    // with rhs in {300², 150²}: the left-side (block c) and right-side (dual)
-    // velocity caps must both be present.
     let jidx = chain.junctions[0].idx;
     let mut rhs_seen = vec![];
     for (row, rhs) in bundle.a_rows.iter().zip(&bundle.b_rhs) {
@@ -424,9 +391,6 @@ fn a_start_pin_at_rest_panics() {
 
 #[test]
 fn a_start_tube_replaces_hard_pin() {
-    // With a_start=Some and v_start>0, block (a) emits only the 2 boundary
-    // equalities (no third pin row), and the tube rows appear as Nonneg rows
-    // that bound b_1 from above and below.
     let chain = two_segment_chain_with_junction();
     let v_start = 50.0_f64;
     let a0 = -2_000.0_f64;
@@ -443,11 +407,8 @@ fn a_start_tube_replaces_hard_pin() {
         other => panic!("{other:?}"),
     };
 
-    // Zero cone must be exactly 2 rows (no hard pin).
     assert_eq!(bundle.cones[0], (Cone::Zero, 2));
 
-    // The tube emits at least one Nonneg row touching b_1 (off_b+1 = 1).
-    // Upper rows have coefficient -1 on b_1; lower rows have +1.
     let has_upper_at_b1 = bundle
         .a_rows
         .iter()
@@ -464,7 +425,6 @@ fn diagonal_line_a_env_is_projected() {
     let length = 100.0_f64;
     let sqrt2 = std::f64::consts::SQRT_2;
 
-    // Diagonal X=Y: tangent = [1/√2, 1/√2, 0].
     let s: Vec<f64> = (0..n).map(|i| length * i as f64 / (n - 1) as f64).collect();
     let c_prime = vec![[1.0 / sqrt2, 1.0 / sqrt2, 0.0]; n];
     let grid = ArclengthGrid {
@@ -499,36 +459,22 @@ fn diagonal_line_a_env_is_projected() {
         BuildOutcome::Boundary(_) => panic!("should be feasible"),
     };
 
-    // a_env from build is internal; verify via envelope cap magnitudes.
-    // For the diagonal, projected a_tan = min(a_max[0]/(1/√2), a_max[1]/(1/√2))
-    //                                   = a_max · √2.
-    // The first envelope row (i=1, d = s[1]-s[0]) should correspond to a_env ≈ √2·a_max.
     let a_env_expected = 5_000.0 * sqrt2;
     let j_env_expected = 100_000.0 * sqrt2;
-    let d1 = grid.total_length / (n - 1) as f64; // = 25.0
+    let d1 = grid.total_length / (n - 1) as f64;
     let cap_expected = super::rest_boundary_b_cap(d1, a_env_expected, j_env_expected);
 
-    // Find the first (e2) row in the bundle: it is the row immediately after
-    // block (e)'s N rows, with coefficient -1.0 on b_1 (off_b+1 = 1).
-    // A_env = √2·5000 ≈ 7071, J_env = √2·100000 ≈ 141421.
-    // s1 = A³/(6J²) ≈ 7071³/(6·141421²) ≈ 2.08 mm, d1=25mm >> s1.
-    // cap_expected = v1² + 2·A_env·(d1 - s1).
-    let _ = bundle; // bundle used only to verify Ok; formula verified analytically
+    let _ = bundle;
     assert!(
         (cap_expected - (500.0_f64 * sqrt2).powi(2)).abs() / (500.0_f64 * sqrt2).powi(2) < 1.0,
         "projected cap for diagonal should be in v_max range: cap={cap_expected}"
     );
-    // More precisely: cap must be strictly larger than the axis-min cap.
     let cap_axis_min = super::rest_boundary_b_cap(d1, 5_000.0, 100_000.0);
     assert!(
         cap_expected > cap_axis_min,
         "diagonal projected cap {cap_expected} must exceed axis-min cap {cap_axis_min}"
     );
 }
-
-// -------------------------------------------------------------------------
-// Task 5 accel-dual coverage: curved junction with distinct a_max per side
-// -------------------------------------------------------------------------
 
 fn two_segment_chain_curved_junction() -> crate::topp::chain::ChainGrid {
     use crate::topp::chain::ChainGrid;
@@ -594,13 +540,6 @@ fn junction_dual_accel_rows_use_right_limits() {
     );
 }
 
-// -------------------------------------------------------------------------
-// Jerk-reachability tube: forward-simulation oracle + closed-form tests
-// -------------------------------------------------------------------------
-
-/// Ground-truth reachability by small-step forward integration. sign=+1 →
-/// accelerate hardest (upper), sign=-1 → decelerate hardest (lower). Returns
-/// v² at the first time s(t) ≥ s_target. Floors v at 0 for the decel branch.
 fn simulate_reachable_b(s_target: f64, v0: f64, a0: f64, a_max: f64, j_max: f64, sign: f64) -> f64 {
     let dt = 1e-6;
     let (mut s, mut v, mut a) = (0.0_f64, v0, a0);

@@ -13,7 +13,6 @@ pub enum PostProcessorType {
 }
 
 impl PostProcessorType {
-    /// Single-instance chain — the common test/config shorthand.
     #[must_use]
     pub fn into_chain(self) -> CompiledChain {
         CompiledChain::compile(&[PostProcessorInstance::new("inline", self)])
@@ -147,9 +146,7 @@ impl CompiledChain {
 
 #[derive(Debug, Clone, Default)]
 pub struct AxisChainSet {
-    /// Index = axis registry index; spatial 0..3 then followers.
     pub chains: Vec<CompiledChain>,
-    /// `(follower_axis_index, followed_axis_indices)` — from the axis registry.
     pub followers: Vec<(usize, Vec<usize>)>,
 }
 
@@ -170,8 +167,6 @@ impl AxisChainSet {
         }
     }
 
-    /// Legacy bridge: spatial-only chain set from the `[X, Y, Z, E]` kernel
-    /// array. The E slot must be empty — followers carry their own chains.
     #[must_use]
     pub fn spatial_from_kernels(kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4]) -> Self {
         assert!(

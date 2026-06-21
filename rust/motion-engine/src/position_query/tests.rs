@@ -24,13 +24,16 @@ fn cartesian_identity_passthrough() {
 
 #[test]
 fn corexy_inverse_mix() {
-    // motor A = x + y, motor B = x - y. For x=10, y=4: A=14, B=6.
+    let expected_x = 10.0;
+    let expected_y = 4.0;
+    let motor_a = expected_x + expected_y;
+    let motor_b = expected_x - expected_y;
     let mut m = [None; MAX_AXES];
     let v = [None; MAX_AXES];
-    m[0] = Some(14.0);
-    m[1] = Some(6.0);
+    m[0] = Some(motor_a);
+    m[1] = Some(motor_b);
     m[2] = Some(0.0);
     let out = assemble_cartesian(&m, &v, KINEMATICS_COREXY).unwrap();
-    assert!((out["x"].0 - 10.0).abs() < 1e-9);
-    assert!((out["y"].0 - 4.0).abs() < 1e-9);
+    assert!((out["x"].0 - expected_x).abs() < 1e-9);
+    assert!((out["y"].0 - expected_y).abs() < 1e-9);
 }
