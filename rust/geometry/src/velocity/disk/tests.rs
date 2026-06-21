@@ -75,7 +75,7 @@ fn clothoid_samples_respect_the_acceleration_disk() {
     let accel = 1000.0;
     let k = kin(0.0, 0.05, 4.0, accel, f64::INFINITY, 300.0);
     let samples = sample_profile(&k, 250.0, 70.0, &single_move_anchors(250.0, 70.0), 1e-8).unwrap();
-    for &(s, v) in &samples {
+    for &(s, v, _a) in &samples {
         let kappa = (k.kappa0 + k.sigma * s).abs();
         let a_c = v * v * kappa;
         assert!(a_c <= accel + 1e-3, "a_c={a_c} at s={s}");
