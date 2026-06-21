@@ -2790,7 +2790,7 @@ impl PyMotionEngine {
             r.host_now_secs()
         };
         let frontier_bits = Arc::new(AtomicU64::new(initial_frontier.to_bits()));
-        let draining = Arc::new(AtomicBool::new(false));
+        let gate_bypass = Arc::new(AtomicBool::new(false));
 
         let wire_transports: HashMap<u32, crate::pump::McuTransport> = {
             let mut t = HashMap::new();
@@ -3128,7 +3128,7 @@ impl PyMotionEngine {
         let motion_history_for_cb = Arc::clone(&self.motion_history);
         let nominal_freqs_for_cb = Arc::clone(&self.nominal_clock_freqs);
         let frontier_for_cb = Arc::clone(&frontier_bits);
-        let draining_for_cb = Arc::clone(&draining);
+        let gate_bypass_for_cb = Arc::clone(&gate_bypass);
 
         let nudge_mcu_configs = mcu_configs_for_cb.clone();
         let nudge_router = Arc::clone(&router_for_cb);
@@ -3161,7 +3161,7 @@ impl PyMotionEngine {
                 let mut anchor = anchor_mutex.lock().unwrap_or_else(|p| p.into_inner());
                 let seg_host_start = anchor.projected_host_start(seg.t_start, host_now);
                 let gate_limit = frontier + crate::pump::LOOKAHEAD_SECS;
-                if !draining_for_cb.load(Ordering::Acquire) && seg_host_start > gate_limit {
+                if !gate_bypass_for_cb.load(Ordering::Acquire) && seg_host_start > gate_limit {
                     return Err(DispatchError::Gated);
                 }
                 let (t0, fresh) = anchor
@@ -3370,7 +3370,7 @@ impl PyMotionEngine {
                 nudge_dispatch,
                 credit_rx,
                 frontier_bits,
-                draining,
+                gate_bypass,
                 frontier_keys,
             ));
         }

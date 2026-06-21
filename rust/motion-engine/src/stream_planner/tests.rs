@@ -25,10 +25,10 @@ impl Capture {
             Ok(())
         })
     }
-    fn gated_dispatch(&self, draining: Arc<AtomicBool>) -> DispatchFn {
+    fn gated_dispatch(&self, gate_bypass: Arc<AtomicBool>) -> DispatchFn {
         let segs = Arc::clone(&self.segs);
         Arc::new(move |seg: &ShapedSegment| {
-            if !draining.load(Ordering::Acquire) {
+            if !gate_bypass.load(Ordering::Acquire) {
                 return Err(DispatchError::Gated);
             }
             let x_end = eval(&seg.axes[0], seg.t_end);
@@ -392,15 +392,15 @@ fn backpressure_frontier_is_min_across_axes() {
 fn drain_pending_flushes_gated_segments_past_a_barrier() {
     let cap = Capture::default();
     let (_credit_tx, credit_rx, frontier_bits) = credit_inputs();
-    let draining = Arc::new(AtomicBool::new(false));
+    let gate_bypass = Arc::new(AtomicBool::new(false));
     let mut h = StreamPlannerHandle::spawn(
         cfg(1.0),
         vec![0.0, 0.0, 0.0],
-        cap.gated_dispatch(Arc::clone(&draining)),
+        cap.gated_dispatch(Arc::clone(&gate_bypass)),
         cap.nudge_dispatch(),
         credit_rx,
         Arc::clone(&frontier_bits),
-        Arc::clone(&draining),
+        Arc::clone(&gate_bypass),
         vec![AxisKey { mcu_id: 1, axis: 0 }],
     );
 
@@ -417,6 +417,45 @@ fn drain_pending_flushes_gated_segments_past_a_barrier() {
         !cap.snapshot().is_empty(),
         "drain_pending must force gated segments out across a homing barrier"
     );
+
+    h.shutdown();
+}
+
+#[test]
+fn home_drip_dispatch_is_not_subject_to_the_consumption_gate() {
+    let cap = Capture::default();
+    let (_credit_tx, credit_rx, frontier_bits) = credit_inputs();
+    let gate_bypass = Arc::new(AtomicBool::new(false));
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(1.0),
+        vec![0.0, 0.0, 0.0, 0.0],
+        cap.gated_dispatch(Arc::clone(&gate_bypass)),
+        cap.nudge_dispatch(),
+        credit_rx,
+        Arc::clone(&frontier_bits),
+        Arc::clone(&gate_bypass),
+        Vec::new(),
+    );
+
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    h.home_drip(HomeDripParams {
+        home_pos: [0.0, 0.0, 0.0, 0.0],
+        start: [0.0, 0.0, 0.0],
+        axis: 0,
+        direction: 1.0,
+        speed_mm_s: 50.0,
+        max_travel_mm: 20.0,
+        cohort: 0,
+        participants: Vec::new(),
+        notify: tx,
+    })
+    .unwrap();
+
+    assert!(
+        rx.recv().unwrap().is_ok(),
+        "homing drip must dispatch even while the consumption gate holds the stream"
+    );
+    assert!(!cap.snapshot().is_empty(), "homing dispatched nothing");
 
     h.shutdown();
 }

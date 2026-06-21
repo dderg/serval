@@ -65,7 +65,7 @@ impl StreamPlannerHandle {
         nudge_dispatch: NudgeDispatchFn,
         credit_rx: Receiver<FrontierMsg>,
         frontier_bits: Arc<AtomicU64>,
-        draining: Arc<AtomicBool>,
+        gate_bypass: Arc<AtomicBool>,
         frontier_keys: Vec<AxisKey>,
     ) -> Self {
         let (move_tx, move_rx) = bounded(SUBMIT_CHANNEL_BOUND);
@@ -90,7 +90,7 @@ impl StreamPlannerHandle {
                     &last_thread,
                     &commit_thread,
                     &frontier_thread,
-                    &draining,
+                    &gate_bypass,
                     frontier_keys,
                 );
             })
@@ -395,7 +395,7 @@ fn run_loop(
     last_move_time_bits: &AtomicU64,
     commit_fire_count: &AtomicU32,
     frontier_bits: &AtomicU64,
-    draining: &AtomicBool,
+    gate_bypass: &AtomicBool,
     frontier_keys: Vec<AxisKey>,
 ) {
     let mut sync_instant: Option<Instant> = None;
@@ -571,14 +571,14 @@ fn run_loop(
                 state.reset(&recovered_pos, 0.0);
             }
             StreamMsg::DrainPending { notify } => {
-                draining.store(true, Ordering::Release);
+                gate_bypass.store(true, Ordering::Release);
                 try_dispatch_pending(
                     &mut pending_segs,
                     &dispatch,
                     &mut sync_instant,
                     last_move_time_bits,
                 );
-                draining.store(false, Ordering::Release);
+                gate_bypass.store(false, Ordering::Release);
                 if !pending_segs.is_empty() {
                     fatal("drain_pending could not flush all gated segments");
                 }
@@ -590,6 +590,7 @@ fn run_loop(
                 }
                 sync_instant = None;
                 state.reset(&p.home_pos, 0.0);
+                gate_bypass.store(true, Ordering::Release);
                 let result = run_home_drip(
                     &mut state,
                     &p,
@@ -598,6 +599,7 @@ fn run_loop(
                     last_move_time_bits,
                     commit_fire_count,
                 );
+                gate_bypass.store(false, Ordering::Release);
                 let _ = p.notify.send(result);
             }
             StreamMsg::Nudge(p) => {
