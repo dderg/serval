@@ -289,22 +289,26 @@ class ResonanceTestExecutor:
             toolhead.move([X + decel_X, Y + decel_Y, Z, E], abs(last_v))
 
 
+MOTOR_A = 0b001
+MOTOR_B = 0b010
+MOTOR_Z = 0b100
+
+
 def buzz_axis_to_motor_mask(axis, coupled):
-    # Engine axis index == motor slot: 0=A, 1=B, 2=Z. On CoreXY a cartesian
-    # X move drives A and B in phase; a Y move drives them anti-phase (B sign
-    # bit set). Cartesian kinematics map one axis to one slot.
     axis = axis.lower()
     if coupled:
+        corexy_in_phase = (MOTOR_A | MOTOR_B, 0)
+        corexy_anti_phase = (MOTOR_A | MOTOR_B, MOTOR_B)
         mapping = {
-            "x": (0b011, 0b000),
-            "y": (0b011, 0b010),
-            "z": (0b100, 0b000),
+            "x": corexy_in_phase,
+            "y": corexy_anti_phase,
+            "z": (MOTOR_Z, 0),
         }
     else:
         mapping = {
-            "x": (0b001, 0b000),
-            "y": (0b010, 0b000),
-            "z": (0b100, 0b000),
+            "x": (MOTOR_A, 0),
+            "y": (MOTOR_B, 0),
+            "z": (MOTOR_Z, 0),
         }
     if axis not in mapping:
         raise ValueError("unsupported buzz axis %r" % (axis,))

@@ -279,16 +279,6 @@ runtime_drain(void)
 }
 DECL_TASK(runtime_drain);
 
-// Foreground producer for the resonance-buzz step streams. The solver +
-// StepQueue refill run HERE, never in the step-output ISR (which is now a pure
-// pop+fire+re-arm consumer). Polled every main-loop pass: the sub-ms loop tops
-// the depth-32 rings up to HIGH_WATER far faster than they drain at audio-rate
-// crossings, so they never underrun. The Rust entry IRQ-guards only its compare
-// re-arm; the solver compute runs fully preemptible.
-//
-// MACH_LINUX has only a stub step-output timer (step_output_timer_arm stores a
-// target but never fires step_output_event), so the buzz cannot run there;
-// omit the task rather than reference step-output FFI the Linux MCU can't use.
 #if !CONFIG_MACH_LINUX
 extern void runtime_buzz_refill_foreground(void);
 

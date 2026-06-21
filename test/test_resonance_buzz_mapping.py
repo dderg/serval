@@ -12,7 +12,6 @@ def test_corexy_x_drives_both_motors_in_phase():
 def test_corexy_y_drives_both_motors_anti_phase():
     axis_mask, sign_mask = buzz_axis_to_motor_mask("y", coupled=True)
     assert axis_mask == 0b011
-    # B (slot 1) carries the negative sign.
     assert sign_mask == 0b010
 
 

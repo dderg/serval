@@ -5,27 +5,13 @@ use portable_atomic::{AtomicU8, AtomicU32};
 use crate::buzz_gen::ToneParams;
 use crate::stepping_state::MAX_AXES;
 
-/// Absolute sanity ceilings. These are NOT the physical safety policy (peak
-/// acceleration / velocity clamping) — that lives on the host, which derives
-/// amplitude from `accel_per_hz` and refuses anything violent. These bounds
-/// only reject obviously-corrupt command arguments so a wire glitch cannot ask
-/// the MCU to oscillate at kHz or by meters.
 const MAX_FREQ_MILLIHZ: u32 = 2_000_000;
 const MAX_AMPLITUDE_NM: u32 = 5_000_000;
-// Up to a few minutes so a slow full-band sweep (e.g. 5->135 Hz at 1 Hz/s) fits
-// in a single continuous chirp rather than being chunked.
 const MAX_DURATION_MS: u32 = 300_000;
 
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
 const NM_PER_MM: f64 = 1.0e6;
 
-/// Foreground-written, ISR-read excitation request. Only `seq` plus the scalar
-/// parameters cross the task/ISR boundary, all as atomics (boundary rule B5).
-/// `seq` is bumped last with `Release`; the ISR loads it first with `Acquire`,
-/// so observing a new `seq` guarantees every parameter write is visible — a
-/// seqlock-lite handshake with no torn reads. `amplitude_nm` is the displacement
-/// at `freq_start`; `freq_start == freq_end` is a fixed-frequency buzz, otherwise
-/// a linear chirp.
 #[derive(Debug)]
 pub struct BuzzControl {
     seq: AtomicU32,
@@ -59,10 +45,6 @@ impl Default for BuzzControl {
     }
 }
 
-/// One axis's resolved excitation curve plus the signed axis index, ready to
-/// latch into a `buzz_stream` slot. `sign` folds the per-axis excitation sign;
-/// the per-axis `base_mm`/`microstep_distance`/`anchor_cycle` are filled in by
-/// the engine, which owns those, before arming the stream.
 #[derive(Debug, Clone, Copy)]
 pub struct AxisExcitation {
     pub axis_idx: usize,
@@ -74,11 +56,6 @@ pub struct AxisExcitation {
     pub ramp_seconds: f64,
 }
 
-/// Engine-resident excitation arm. One excitation event at a time (a resonance
-/// test drives a single cartesian axis, which maps to one or two motor axes that
-/// must stay phase-coherent — they share one carrier phase by construction, the
-/// same `omega`/`mu`/anchor). Holds only the foreground seqlock; the streaming
-/// state lives per-axis in `buzz_stream`.
 #[allow(missing_debug_implementations)]
 pub struct Buzz {
     control: BuzzControl,
@@ -93,12 +70,6 @@ impl Buzz {
         }
     }
 
-    /// Foreground entry: stage a new excitation request. Writes parameters then
-    /// bumps `seq` (Release) so a consistent set is observable. Returns 0 on
-    /// success, -1 on out-of-range arguments (caller shuts down loudly).
-    ///
-    /// `amplitude_nm == 0` or `duration_ms == 0` is the disarm form: a fresh
-    /// `seq` with zero work. Duration and ramp are physical milliseconds.
     #[allow(clippy::too_many_arguments)]
     pub fn arm(
         &self,
@@ -147,16 +118,11 @@ impl Buzz {
         0
     }
 
-    /// True if `arm` published a request not yet consumed by `take_excitations`.
     #[inline]
     pub fn has_pending(&self) -> bool {
         self.control.seq.load(Ordering::Acquire) != self.last_seq
     }
 
-    /// Consume the latest request and resolve it into per-axis excitation
-    /// curves (absolute seconds, signed amplitude). Returns an empty list for
-    /// the disarm form. The engine fills the per-axis base/microstep/anchor and
-    /// arms the streams. Marks the request consumed so `has_pending` clears.
     pub fn take_excitations(&mut self) -> heapless::Vec<AxisExcitation, MAX_AXES> {
         let seq = self.control.seq.load(Ordering::Acquire);
         self.last_seq = seq;
@@ -187,10 +153,9 @@ impl Buzz {
         let mu = TWO_PI * (freq_end_hz - freq_start_hz) / total_seconds;
         let amp_mag = f64::from(amplitude_nm) / NM_PER_MM;
 
-        // Clamp the ramp so up- and down-ramps never overlap; a triangular
-        // envelope (ramp == total/2) is the degenerate-but-valid floor.
+        let max_non_overlapping_ramp = 0.5 * total_seconds;
         let ramp_seconds = (f64::from(ramp_ms) * 1.0e-3)
-            .min(0.5 * total_seconds)
+            .min(max_non_overlapping_ramp)
             .max(f64::MIN_POSITIVE);
 
         for i in 0..MAX_AXES {
@@ -213,8 +178,6 @@ impl Buzz {
 }
 
 impl AxisExcitation {
-    /// Complete the curve with the engine-owned per-axis base, microstep grid,
-    /// MCU cycle rate, and the arm-time anchor cycle.
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
     pub fn into_params(
@@ -224,9 +187,6 @@ impl AxisExcitation {
         cycles_per_second: f64,
         anchor_cycle: u32,
     ) -> ToneParams {
-        // The arm-time curve derivation runs in f64 (millihz/nm wire values, the
-        // chirp slope), then narrows to the solver's f32 hot-path numerics here.
-        // `cycles_per_second` stays f64 for the per-crossing `cycle_at` promotion.
         ToneParams {
             omega: self.omega as f32,
             mu: self.mu as f32,
@@ -248,10 +208,6 @@ impl Default for Buzz {
     }
 }
 
-/// Continuous-time trapezoidal envelope in [0, 1], parameterized in seconds.
-/// Zero at `t == 0` and `t == total`, unity across the flat top. This is the
-/// canonical envelope; `buzz_gen::envelope` is the same shape used by the
-/// crossing solver and its brute-force oracle.
 #[inline]
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]

@@ -40,12 +40,10 @@ fn step_times_in_sample_for_constant_velocity() {
 
     assert_eq!(times.len(), 4, "expected exactly 4 step times");
 
-    // Steps fire when the trajectory crosses the half-step thresholds that
-    // round() uses to trigger them: positions 0.125, 0.375, 0.625, 0.875 over a
-    // displacement of 1.0, i.e. (2k+1)/8 of the sample period (NOT (k+1)/4, which
-    // would be the microstep centers and fire half a step late).
     for k in 0..4u32 {
-        let expected = ((2 * k + 1) as u64 * SAMPLE_PERIOD_CYCLES as u64 / 8u64) as u32;
+        let half_step_threshold_cycles =
+            ((2 * k + 1) as u64 * SAMPLE_PERIOD_CYCLES as u64 / 8u64) as u32;
+        let expected = half_step_threshold_cycles;
         let got = times[k as usize];
         let drift = if got > expected {
             got - expected

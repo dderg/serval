@@ -257,9 +257,6 @@ class Motion:
         duration_ms,
         ramp_ms,
     ):
-        # Direct MCU command (not routed through the host engine): the firmware
-        # synthesizes the per-tick sinusoid (or linear chirp) itself. Sent to
-        # every engine MCU; one that lacks the target axes simply no-ops them.
         sent = False
         for mcu_obj in self._engine_mcus():
             try:

@@ -82,17 +82,11 @@ pub fn compute_step_times(inp: &StepTimeInputs) -> StepTimingResult {
         // `n_steps` ≤ MAX_STEPS_PER_SAMPLE = 16; cast cannot wrap.
         #[allow(clippy::cast_possible_wrap)]
         let step_idx = inp.prev_step_count + ((k as i32) + 1) * sign;
-        // Solve for the time the trajectory crosses the SAME boundary that
-        // `target_step_count = round(p_end / microstep_distance)` (dispatch) uses
-        // to trigger this step: the half-step threshold at (step_idx - 0.5·sign).
-        // Targeting the microstep CENTER (step_idx·m) instead made every edge land
-        // ~0.5·m/|per-tick velocity| late — a turnaround-concentrated, half-wave
-        // symmetric phase error that injected excess odd harmonics.
-        // i32/f32 casts: step_idx within ±MAX_STEPS_PER_SAMPLE of prev_step_count,
-        // sign is ±1; precision loss is far below the microstep grid.
         #[allow(clippy::cast_precision_loss)]
-        let step_pos_k = ((step_idx as f32) - 0.5 * (sign as f32)) * inp.microstep_distance;
-        let t_local_sec = (step_pos_k - inp.p_start) * inp.sample_period_sec / displacement;
+        let half_step_threshold_pos =
+            ((step_idx as f32) - 0.5 * (sign as f32)) * inp.microstep_distance;
+        let t_local_sec =
+            (half_step_threshold_pos - inp.p_start) * inp.sample_period_sec / displacement;
         // f32 → u32: t_local_sec ∈ [0, sample_period_sec], bounded well below u32::MAX.
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let cycle_abs = inp

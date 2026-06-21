@@ -400,9 +400,6 @@ fn configure_pulse_axis(engine: &mut Engine, axis: usize, mstep: f32) {
 
 #[test]
 fn resonance_buzz_arm_activates_per_axis_stream() {
-    // Arming on a configured, idle Pulse axis latches a buzz_stream for that
-    // axis (the producer the consumer ISR will refill). The full oscillate /
-    // return-to-base integration lives in the buzz_stream gating tests.
     crate::buzz_stream::reset_for_test();
     let axis = 2usize;
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
@@ -432,7 +429,6 @@ fn resonance_buzz_disarm_form_clears_streams() {
         0
     );
     assert!(crate::buzz_stream::axis_active(axis));
-    // amplitude 0 == disarm: accepted, clears every stream.
     assert_eq!(
         engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 0, 20, 2, 0),
         0
@@ -450,7 +446,6 @@ fn resonance_buzz_conflicts_with_armed_piece_on_same_axis() {
     configure_pulse_axis(&mut engine, axis, 0.01);
     let shared = SharedState::new();
 
-    // Force the axis to look like it is running a planned piece.
     engine.stepping_axes[axis].as_mut().unwrap().armed = Some(crate::motion_core::ArmedPiece {
         mono_coeffs: [0.0; 4],
         vel_coeffs: [0.0; 3],
@@ -473,11 +468,6 @@ fn resonance_buzz_conflicts_with_armed_piece_on_same_axis() {
 #[test]
 fn resonance_buzz_conflicts_with_queued_piece_on_same_axis() {
     use crate::error::FaultCode;
-    // A piece merely QUEUED in the ring (not yet pulled into `armed` by the
-    // motion ISR) would arm on the next tick and have dispatch_pulse push motion
-    // edges into the same SPSC StepQueue the buzz refill produces into. Arming a
-    // buzz on a non-idle axis must therefore fail loud, not just when `armed` is
-    // already set.
     crate::buzz_stream::reset_for_test();
     let axis = 2usize;
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
@@ -505,9 +495,6 @@ fn resonance_buzz_conflicts_with_queued_piece_on_same_axis() {
 
 #[test]
 fn push_pieces_rejected_while_buzz_active_on_axis() {
-    // The reciprocal guard: once a buzz stream owns an axis StepQueue, loading a
-    // motion piece onto that axis must be rejected so the single-producer
-    // invariant holds on both entry paths.
     crate::buzz_stream::reset_for_test();
     let axis = 2usize;
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
@@ -529,12 +516,9 @@ fn push_pieces_rejected_while_buzz_active_on_axis() {
 
 #[test]
 fn resonance_buzz_rejects_axis_without_step_queue() {
-    // There are only N_AXIS_STEP_QUEUES StepQueues; the consumer ISR refills only
-    // those axes. An excitation on an axis index >= N_AXIS_STEP_QUEUES has no
-    // serviceable queue, so it must fault loud rather than silently arm an
-    // unrefillable, never-closing stream.
     crate::buzz_stream::reset_for_test();
-    let axis = crate::step_queue::N_AXIS_STEP_QUEUES; // first axis without a queue
+    let first_axis_without_queue = crate::step_queue::N_AXIS_STEP_QUEUES;
+    let axis = first_axis_without_queue;
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
     configure_pulse_axis(&mut engine, axis, 0.01);
     let shared = SharedState::new();
@@ -549,15 +533,8 @@ fn resonance_buzz_rejects_axis_without_step_queue() {
 
 #[test]
 fn resonance_buzz_skips_axis_unconfigured_on_this_mcu() {
-    // Broadcast tolerance: the buzz command is sent to EVERY engine MCU. An
-    // excitation for a valid axis index whose motors live on another MCU (so it
-    // is unconfigured here) must be silently ignored — NOT faulted, which would
-    // shut this MCU down and cascade the whole machine. This is the bug that
-    // crashed the F446 (it has no A/B axes) on the first RESONANCE_BUZZ.
     crate::buzz_stream::reset_for_test();
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
-    // Only axis 2 is configured here; axes 0 and 1 are valid indices but live
-    // elsewhere (unconfigured), as on an MCU without the CoreXY A/B motors.
     configure_pulse_axis(&mut engine, 2, 0.01);
     let shared = SharedState::new();
     assert_eq!(

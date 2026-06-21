@@ -1,6 +1,3 @@
-// Brute-force oracle math mirrors the solver's own bounded casts (round to a
-// small level, time-to-cycle within a 0.1 s tone); truncation/sign-loss are
-// safe by the same construction as the production path.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -12,17 +9,8 @@ use crate::buzz_gen::*;
 const NM_PER_MM: f64 = 1.0e6;
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
 
-/// f32 crossing-time jitter budget when comparing the f32 analytic solver to the
-/// f64 brute-force oracle. f32 carries ~7 significant digits, so a crossing time
-/// near the upper end of a ~0.1 s window resolves to ~1e-7 s; 2 us comfortably
-/// covers that plus the solver's own f32 refine tolerance, while staying far
-/// tighter than a microstep half-period so a genuine misplacement still fails.
 const F32_TIME_SLACK: f64 = 2.0e-6;
 
-/// Brute-force reference: sample q(t) on a fine grid and record every
-/// `round(q/m)` change as a ground-truth (time, dir) edge. `t_lo`/`t_hi`
-/// bracket the grid interval the crossing was detected in, so an analytic
-/// crossing time can be checked to fall inside (plus one grid step of slack).
 #[derive(Clone, Copy, Debug)]
 struct OracleEdge {
     t_lo: f64,
@@ -54,9 +42,6 @@ fn make_params(
     }
 }
 
-/// A linear chirp from `f_start` to `f_end` over `total_seconds`. `mu` is the
-/// host's exact `2*pi*(f_end - f_start)/total` slope, so `omega_inst(0)`/`(total)`
-/// land on `2*pi*f_start` / `2*pi*f_end`.
 #[allow(clippy::cast_possible_truncation)]
 fn make_chirp(
     f_start_hz: f64,
@@ -82,12 +67,6 @@ fn make_chirp(
     }
 }
 
-/// High-precision f64 reference curve mirrored from the solver:
-/// `q = sign*env*A_eff(t)*sin(phi(t))`, with `phi = omega*t + 0.5*mu*t^2` and
-/// `A_eff = A*omega/(omega+mu*t)`. The tone case (`mu == 0`) collapses to
-/// `A*sin(omega*t)`. The solver's curve parameters are f32; this ground truth
-/// promotes them to f64 so the oracle stays the exact reference the f32 analytic
-/// solver is judged against.
 fn position_rel_ref(p: &ToneParams, t: f64) -> f64 {
     let omega = f64::from(p.omega);
     let mu = f64::from(p.mu);
@@ -103,9 +82,6 @@ fn position_rel_ref(p: &ToneParams, t: f64) -> f64 {
     f64::from(p.sign) * env * amp * libm::sin(phi)
 }
 
-/// f64 ground-truth trapezoidal envelope (the f64 mirror of `buzz_gen::envelope`,
-/// which is now f32). Keeping the reference envelope in f64 keeps the oracle
-/// high-precision.
 fn envelope_ref(t: f64, total: f64, ramp: f64) -> f64 {
     if total <= 0.0 || t <= 0.0 || t >= total {
         return 0.0;
@@ -116,7 +92,6 @@ fn envelope_ref(t: f64, total: f64, ramp: f64) -> f64 {
     up.min(down).max(0.0)
 }
 
-/// Build the ground-truth crossing sequence at >= 1 MHz equivalent resolution.
 fn brute_force(p: &ToneParams, grid_hz: f64) -> Vec<OracleEdge> {
     let dt = 1.0 / grid_hz;
     let m = f64::from(p.microstep_distance);
@@ -181,7 +156,6 @@ fn matches_brute_force_across_sweep() {
     for &freq in &[20.0, 47.0, 73.0, 100.0, 130.0] {
         for &target_microsteps in &[1.0, 5.0, 17.0, 40.0] {
             for &base_off in &[0.0, 0.3 * microstep, -0.45 * microstep] {
-                // amplitude that yields ~target_microsteps of peak displacement.
                 let amplitude_nm = target_microsteps * microstep * NM_PER_MM;
                 for &sign in &[1.0, -1.0] {
                     let p = make_params(freq, amplitude_nm, sign, base_off, 64_000_000.0);
@@ -206,9 +180,6 @@ fn matches_brute_force_across_sweep() {
                             "level mismatch f={freq} steps={target_microsteps} at t={}",
                             a.t
                         );
-                        // Analytic time must fall within the oracle's detection
-                        // bracket, widened by one grid step plus the f32 jitter
-                        // budget each side.
                         let at = f64::from(a.t);
                         let slack = grid_dt + F32_TIME_SLACK;
                         assert!(
@@ -228,15 +199,6 @@ fn matches_brute_force_across_sweep() {
 
 #[test]
 fn grazing_peak_amplitudes_match_brute_force() {
-    // Amplitudes whose peak displacement clears a half-microstep line by a hair
-    // (target_microsteps = k + 0.5 + tiny). The carrier apex then crosses that
-    // gridline and returns within microseconds — a genuine re-crossing that a
-    // coarse period-scaled floor in flat_top_root_after would silently drop,
-    // breaking net-zero. The integer-amplitude sweep above never exercises this
-    // (its peaks sit 0.5 microstep from any half-line). A peak landing EXACTLY on
-    // the half-line is a measure-zero tangent whose crossing is rounding-noise
-    // dependent, so the apex is nudged just past the line where the crossing is
-    // unambiguous and the fine-grid oracle must agree edge-for-edge.
     let grid_hz = 8.0e6;
     let grid_dt = 1.0 / grid_hz;
     let microstep = 0.0125 / 16.0;
@@ -285,15 +247,6 @@ fn grazing_peak_amplitudes_match_brute_force() {
 
 #[test]
 fn cycle_abs_strictly_monotonic_long_high_cps() {
-    // u32 cycle counter wraps every ~8.26 s at H7-class 520 MHz; a long sweep
-    // therefore crosses the wrap many times. cycle_at must reduce the offset
-    // modulo 2^32 so each crossing maps to the correct (wrapped) cycle. Verify
-    // strict monotonicity in the wrapping sense across a > 8 s chirp: a saturated
-    // `as u32` (the bug) would collapse every post-8.26 s crossing to a single
-    // value and run the delta backwards.
-    // A constant tone keeps full amplitude across the whole duration, so
-    // crossings persist past the ~8.26 s u32 wrap (a chirp's amplitude taper
-    // would die out first). 20 s at 520 MHz spans ~1.04e10 cycles, > 2 * 2^32.
     let microstep = 0.0125 / 16.0;
     let amplitude_nm = 8.0 * microstep * NM_PER_MM;
     let mut hi_cps = make_params(30.0, amplitude_nm, 1.0, 0.0, 520_000_000.0);
@@ -327,12 +280,6 @@ fn cycle_abs_strictly_monotonic_long_high_cps() {
 
 #[test]
 fn rate_invariant_cycle_deltas() {
-    // A 10 kHz and a 40 kHz motion engine must produce bit-identical cycle_abs
-    // deltas. The solver takes NO motion-sample-rate input — its only clock is
-    // the MCU `cycles_per_second`. So the same curve under both engines (same
-    // MCU cycle rate, which both share) yields the identical crossing-time and
-    // cycle stream by construction, proving the deltas never depend on the tick
-    // grid the motion ISR happens to run at.
     let engine_10khz = make_params(
         83.0,
         12.0 * (0.0125 / 16.0) * NM_PER_MM,
@@ -360,8 +307,6 @@ fn rate_invariant_cycle_deltas() {
 
 #[test]
 fn cycle_abs_depends_only_on_time_and_rate() {
-    // Two distinct MCU cycle rates: the cycle delta from the anchor must equal
-    // round(t * rate) for each, independent of any motion sample rate.
     let base = make_params(60.0, 20.0 * (0.0125 / 16.0) * NM_PER_MM, 1.0, 0.0, 10_000.0);
     let mut fast = base;
     fast.cycles_per_second = 40_000.0;
@@ -373,7 +318,6 @@ fn cycle_abs_depends_only_on_time_and_rate() {
         assert_eq!(s.t.to_bits(), f.t.to_bits(), "time must not depend on rate");
         let d_slow = s.cycle_abs.wrapping_sub(base.anchor_cycle);
         let d_fast = f.cycle_abs.wrapping_sub(fast.anchor_cycle);
-        // Mirror cycle_at's f64-promoted time->cycle conversion exactly.
         assert_eq!(d_slow, (f64::from(s.t) * 10_000.0) as u32);
         assert_eq!(d_fast, (f64::from(f.t) * 40_000.0) as u32);
     }
@@ -381,8 +325,6 @@ fn cycle_abs_depends_only_on_time_and_rate() {
 
 #[test]
 fn sum_of_dirs_is_zero_over_full_tone() {
-    // The trapezoidal envelope forces q back to exactly base at t == total, so
-    // the net microstep displacement over a full tone is zero.
     for &freq in &[23.0, 64.0, 119.0] {
         for &steps in &[3.0, 11.0, 31.0] {
             let p = make_params(
@@ -425,8 +367,6 @@ fn cycle_abs_strictly_monotonic() {
                 prev.t,
                 c.t
             );
-            // cycle_abs is monotonic so long as no full u32 wrap occurs inside
-            // one tone (true for any realistic rate * 0.1 s).
             assert!(
                 c.cycle_abs > prev.cycle_abs,
                 "cycle_abs not strictly increasing"
@@ -451,8 +391,6 @@ fn non_monotonic_cursor_faults() {
         Ok(c) => c.level,
         Err(_) => 0,
     };
-    // A cursor parked past `total_seconds`: no crossing can follow, so the
-    // stream reports exhaustion rather than fabricating an out-of-order edge.
     let past_end = ToneCursor {
         level,
         t_cursor: p.total_seconds + 1.0,
@@ -466,8 +404,6 @@ fn non_monotonic_cursor_faults() {
 
 #[test]
 fn tone_is_mu_zero_specialization_of_chirp() {
-    // A chirp with f_start == f_end has mu == 0 and must reproduce, bit for bit,
-    // the tone built by make_params: the chirp path is a strict generalization.
     let microstep = 0.0125 / 16.0;
     let amplitude_nm = 12.0 * microstep * NM_PER_MM;
     let tone = make_params(70.0, amplitude_nm, 1.0, 0.0, 64_000_000.0);
@@ -485,9 +421,6 @@ fn tone_is_mu_zero_specialization_of_chirp() {
 
 #[test]
 fn chirp_matches_brute_force() {
-    // Fine-grid oracle cross-check across up-sweeps and down-sweeps, several
-    // amplitudes and durations. The same brute_force/position_rel_ref machinery
-    // the tone uses, now exercising the chirp curve (mu != 0).
     let grid_hz = 4.0e6;
     let grid_dt = 1.0 / grid_hz;
     let microstep = 0.0125 / 16.0;
@@ -499,8 +432,6 @@ fn chirp_matches_brute_force() {
         (20.0, 21.0),
     ];
     for &(f0, f1) in &sweeps {
-        // 1.0 stresses grazing peaks (apex barely touches a gridline and
-        // returns); 25.0 exercises many crossings per carrier cycle.
         for &target_microsteps in &[1.0, 2.0, 8.0, 25.0] {
             for &sign in &[1.0, -1.0] {
                 for &(total, ramp) in &[(0.08, 0.012), (0.15, 0.03)] {
@@ -547,10 +478,6 @@ fn chirp_matches_brute_force() {
 
 #[test]
 fn chirp_sum_of_dirs_is_zero_and_monotonic() {
-    // The closing envelope drives A_eff*env -> 0 at t == total regardless of the
-    // sweep, so a full chirp nets zero microsteps and closes on base; and every
-    // crossing time / cycle is strictly increasing (a non-monotone cycle_abs
-    // would corrupt the SPSC ring downstream).
     let microstep = 0.0125 / 16.0;
     for &(f0, f1) in &[(5.0, 135.0), (40.0, 100.0), (110.0, 30.0)] {
         for &steps in &[6.0, 18.0] {
@@ -587,9 +514,6 @@ fn chirp_sum_of_dirs_is_zero_and_monotonic() {
 
 #[test]
 fn chirp_cycle_abs_is_rate_only() {
-    // cycle_abs must track round(t * cycles_per_second) for a chirp exactly as
-    // for a tone: the sweep changes the crossing TIMES but never how a time maps
-    // to a cycle. Two MCU rates, same time stream.
     let microstep = 0.0125 / 16.0;
     let amplitude_nm = 14.0 * microstep * NM_PER_MM;
     let mut slow = make_chirp(20.0, 90.0, amplitude_nm, 1.0, 0.1, 0.015);
@@ -607,7 +531,6 @@ fn chirp_cycle_abs_is_rate_only() {
         );
         let d_slow = s.cycle_abs.wrapping_sub(slow.anchor_cycle);
         let d_fast = f.cycle_abs.wrapping_sub(fast.anchor_cycle);
-        // Mirror cycle_at's f64-promoted time->cycle conversion exactly.
         assert_eq!(d_slow, (f64::from(s.t) * 10_000.0) as u32);
         assert_eq!(d_fast, (f64::from(f.t) * 40_000.0) as u32);
     }
@@ -615,8 +538,6 @@ fn chirp_cycle_abs_is_rate_only() {
 
 #[test]
 fn bench_params_stream_is_bounded_and_sane() {
-    // Exact bench tone: 54.3 Hz, ~0.035 mm (5.6 microsteps at 0.00625 mm),
-    // DURATION=4 s, ramp ~55 ms, sub-microstep base — the case that crashed.
     let p = ToneParams {
         omega: (TWO_PI * 54.3) as f32,
         mu: 0.0,

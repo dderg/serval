@@ -100,19 +100,9 @@ pub(crate) fn kick_per_axis_timer(axis_idx: usize, cycle_abs: u32) {
     }
 }
 
-/// Kick the step-output compare from the FOREGROUND under an IRQ guard.
-///
-/// The buzz refill now runs in the foreground, so the producer kick races the
-/// step-output ISR's own compare re-arm: both write the same timer compare
-/// register. The `irq_disable`/`irq_enable` window (Klipper's `irq_save` /
-/// `irq_restore` via the LTO-safe wrappers) is the ONLY mask in the buzz path —
-/// the solver compute outside this window runs fully preemptible.
 #[inline]
 pub(crate) fn kick_per_axis_timer_foreground(axis_idx: usize, cycle_abs: u32) {
     #[cfg(not(any(test, feature = "host")))]
-    // SAFETY: `runtime_irq_save`/`runtime_irq_restore` are the LTO-safe Klipper
-    // IRQ-mask wrappers; the masked region writes only the timer compare and the
-    // owned-mask bit, so the step-output ISR cannot interleave the re-arm.
     unsafe {
         let flags = crate::state::runtime_irq_save();
         kalico_kick_step_output(axis_idx as u8, cycle_abs);
