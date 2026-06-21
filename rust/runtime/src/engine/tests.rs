@@ -576,6 +576,7 @@ fn resonance_buzz_skips_axis_unconfigured_on_this_mcu() {
 
 #[test]
 fn resonance_buzz_rejects_phase_mode_axis() {
+    use crate::error::FaultCode;
     // A buzz drives STEP/DIR pulses; a Phase-mode axis is held by XDIRECT SPI
     // currents with the driver ignoring STEP/DIR, so the MCU must refuse rather
     // than silently desync position. The host switches the axis to Pulse
@@ -595,10 +596,10 @@ fn resonance_buzz_rejects_phase_mode_axis() {
         "buzz on a Phase-mode axis must be rejected"
     );
     assert!(!crate::buzz_stream::axis_active(0));
-    assert_ne!(
+    assert_eq!(
         shared.last_error.load(Ordering::Acquire),
-        0,
-        "a fault must be latched"
+        FaultCode::BuzzInPhaseMode.as_i32(),
+        "phase-mode refusal must latch its own distinct code, not BuzzAxisConflict"
     );
     crate::buzz_stream::reset_for_test();
 }

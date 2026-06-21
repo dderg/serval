@@ -597,7 +597,7 @@ impl Engine {
             // (exit_phase_mode) before buzzing; if one still reaches a Phase-mode
             // axis, fail loud rather than corrupt.
             if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
-                crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
+                crate::fault_helpers::raise_buzz_in_phase_mode(shared, ex.axis_idx);
                 return -1;
             }
             // A buzz stream is the sole producer for the axis StepQueue. Reject a
