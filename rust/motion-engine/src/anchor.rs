@@ -63,14 +63,6 @@ impl Anchor {
         self.last_t_end = seg_t_end;
         Ok((self.t0.unwrap(), reanchor))
     }
-
-    pub fn projected_host_start(&self, seg_t_start: f64, host_now: f64) -> f64 {
-        match self.t0 {
-            None => host_now + self.lead_secs,
-            Some(_) if seg_t_start + CONTIGUITY_EPS < self.last_t_end => host_now + self.lead_secs,
-            Some(t0) => t0 + seg_t_start,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -101,10 +101,10 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
 }
 
 #[test]
-fn pump_publishes_freed_time_from_retired_pushed_pieces() {
+fn pump_publishes_dispatch_room_on_enqueue_and_retire() {
     let rec = Arc::new(Mutex::new(Vec::new()));
-    let frontiers = Arc::new(Mutex::new(Vec::new()));
-    let frontiers_for_pump = Arc::clone(&frontiers);
+    let rooms = Arc::new(Mutex::new(Vec::new()));
+    let rooms_for_pump = Arc::clone(&rooms);
     let (tx, rx) = mpsc::channel();
     let sink = RecordingSink(rec);
     let handle = std::thread::spawn(move || {
@@ -116,8 +116,8 @@ fn pump_publishes_freed_time_from_retired_pushed_pieces() {
             |_| {},
             |_, _| {},
             |_| {},
-            move |key, freed_time| {
-                frontiers_for_pump.lock().unwrap().push((key, freed_time));
+            move |key, room| {
+                rooms_for_pump.lock().unwrap().push((key, room));
             },
         )
     });
@@ -151,15 +151,16 @@ fn pump_publishes_freed_time_from_retired_pushed_pieces() {
     }))
     .unwrap();
 
+    // ring_depth = 8. Room = depth - (enqueued - retired).
     for _ in 0..20 {
-        let snapshot = frontiers.lock().unwrap().clone();
+        let snapshot = rooms.lock().unwrap().clone();
         if snapshot.len() >= 3 {
-            // x retires 1 of 2 pushed -> still pending -> real freed time.
-            assert_eq!(snapshot[0], (x, 0.25));
-            // y retires its only piece -> caught up -> non-binding (+inf).
-            assert_eq!(snapshot[1], (y, f64::INFINITY));
-            // x retires its 2nd of 2 -> caught up -> non-binding (+inf).
-            assert_eq!(snapshot[2], (x, f64::INFINITY));
+            // enqueue x (2 pieces): 8 - 2 = 6 room left.
+            assert_eq!(snapshot[0], (x, 6.0));
+            // enqueue y (1 piece): 8 - 1 = 7 room left.
+            assert_eq!(snapshot[1], (y, 7.0));
+            // x retires 1 of 2: outstanding 1 -> 8 - 1 = 7 room freed.
+            assert_eq!(snapshot[2], (x, 7.0));
             tx.send(PumpMsg::Shutdown).unwrap();
             handle.join().unwrap();
             return;

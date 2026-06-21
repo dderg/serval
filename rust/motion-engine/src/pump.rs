@@ -5,8 +5,6 @@ use std::sync::Weak;
 use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-pub const LOOKAHEAD_SECS: f64 = 5.0;
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct AxisKey {
     pub mcu_id: u32,
@@ -16,31 +14,37 @@ pub struct AxisKey {
 #[derive(Debug)]
 pub struct AxisQueue {
     pub pieces: VecDeque<(PieceEntry, f64)>,
+    pub enqueued: u32,
     pub pushed: u32,
     pub retired: u32,
     pub ring_depth: u32,
     pub physical_write_cursor: u32,
     pub lead_secs: f64,
-    pub pushed_end_times: VecDeque<f64>,
-    pub last_freed_time: f64,
 }
 
 impl AxisQueue {
     pub fn new(ring_depth: u32) -> Self {
         Self {
             pieces: VecDeque::new(),
+            enqueued: 0,
             pushed: 0,
             retired: 0,
             ring_depth,
             physical_write_cursor: 0,
             lead_secs: MAX_LEAD_SECS,
-            pushed_end_times: VecDeque::new(),
-            last_freed_time: f64::NEG_INFINITY,
         }
     }
     pub fn room(&self) -> u32 {
         let in_flight = self.pushed.wrapping_sub(self.retired);
         self.ring_depth.saturating_sub(in_flight)
+    }
+    /// Headroom for the *planner*: pieces it may still dispatch before the
+    /// total outstanding (enqueued but not yet retired) reaches the ring depth.
+    /// This is the depth-based backpressure credit — full ring keeps the MCU fed
+    /// without letting the host race unboundedly ahead.
+    pub fn dispatch_room(&self) -> u32 {
+        let outstanding = self.enqueued.wrapping_sub(self.retired);
+        self.ring_depth.saturating_sub(outstanding)
     }
     pub fn advance_write_cursor(&mut self, n: u32) {
         if self.ring_depth == 0 {
@@ -234,7 +238,7 @@ pub struct HeartbeatMsg {
 #[derive(Clone, Copy, Debug)]
 pub struct FrontierMsg {
     pub key: AxisKey,
-    pub freed_time: f64,
+    pub room: f64,
 }
 
 pub enum PumpMsg {
@@ -522,7 +526,10 @@ pub fn run_pump<S, F, C, A, O, D, P>(
                     .entry(key)
                     .or_insert_with(|| AxisQueue::new(ring_depth_of(key)));
                 q.lead_secs = lead_secs;
+                let added = pieces.len() as u32;
                 q.pieces.extend(pieces);
+                q.enqueued = q.enqueued.wrapping_add(added);
+                on_frontier(key, f64::from(q.dispatch_room()));
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
@@ -554,40 +561,14 @@ pub fn run_pump<S, F, C, A, O, D, P>(
                         }
                         if c > q.pushed {
                             panic!(
-                                "freed-time accounting mismatch on mcu{} axis{}: retired {} \
+                                "retired accounting mismatch on mcu{} axis{}: retired {} \
                                  exceeds pushed {}",
                                 key.mcu_id, key.axis, c, q.pushed
                             );
                         }
                         q.retired = c;
                         if c != old_retired {
-                            let delta = c - old_retired;
-                            let mut last_freed = q.last_freed_time;
-                            for _ in 0..delta {
-                                match q.pushed_end_times.pop_front() {
-                                    Some(end_time) => last_freed = end_time,
-                                    None => panic!(
-                                        "freed-time accounting mismatch on mcu{} axis{}: \
-                                         retired advanced by {delta} but only {} end-times buffered",
-                                        key.mcu_id,
-                                        key.axis,
-                                        q.pushed_end_times.len()
-                                    ),
-                                }
-                            }
-                            if last_freed < q.last_freed_time
-                                && q.last_freed_time != f64::NEG_INFINITY
-                            {
-                                panic!(
-                                    "freed-time regression on mcu{} axis{}: \
-                                     was {} now {}",
-                                    key.mcu_id, key.axis, q.last_freed_time, last_freed
-                                );
-                            }
-                            q.last_freed_time = last_freed;
-                            let caught_up = q.retired == q.pushed;
-                            let published = if caught_up { f64::INFINITY } else { last_freed };
-                            on_frontier(key, published);
+                            on_frontier(key, f64::from(q.dispatch_room()));
                         }
                     }
                     if let Some(co) = cohort {
@@ -754,15 +735,13 @@ pub fn run_pump<S, F, C, A, O, D, P>(
                             Ok(_) => {
                                 let q = queues.get_mut(&f.key).expect("planned key exists");
                                 for _ in 0..f.pieces.len() {
-                                    let (piece, host_t) = q.pieces.pop_front().unwrap_or_else(|| {
+                                    q.pieces.pop_front().unwrap_or_else(|| {
                                         panic!(
-                                            "pushed_end_times: piece queue underflow on mcu{} axis{} \
+                                            "piece queue underflow on mcu{} axis{} \
                                              while advancing pushed by {n}",
                                             f.key.mcu_id, f.key.axis
                                         )
                                     });
-                                    let end_host = host_t + f64::from(piece.duration);
-                                    q.pushed_end_times.push_back(end_host);
                                 }
                                 q.pushed = q.pushed.wrapping_add(n);
                                 q.advance_write_cursor(n);

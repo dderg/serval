@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::planner::{HomeDripParams, NudgeParams};
-use crate::pump::{AxisKey, FrontierMsg, LOOKAHEAD_SECS};
+use crate::pump::{AxisKey, FrontierMsg};
 use crate::stream::StreamConfig;
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
@@ -280,20 +280,21 @@ fn nudge_dispatches_pieces_and_advances_time() {
 }
 
 #[test]
-fn backpressure_parks_dispatch_services_flush_and_resumes_on_frontier() {
+fn backpressure_parks_dispatch_services_flush_and_resumes_on_room() {
     let cap = Capture::default();
     let (credit_tx, credit_rx, frontier_bits) = credit_inputs();
     let gate_bits = Arc::clone(&frontier_bits);
     let segs = Arc::clone(&cap.segs);
     let dispatch: DispatchFn = Arc::new(move |seg: &ShapedSegment| {
-        let frontier = f64::from_bits(gate_bits.load(Ordering::Acquire));
-        if seg.t_start > frontier + LOOKAHEAD_SECS {
+        let room = f64::from_bits(gate_bits.load(Ordering::Acquire));
+        if room <= 0.0 {
             return Err(DispatchError::Gated);
         }
         let x_end = eval(&seg.axes[0], seg.t_end);
         segs.lock().unwrap().push((seg.t_start, seg.t_end, x_end));
         Ok(())
     });
+    let key = AxisKey { mcu_id: 1, axis: 0 };
     let mut h = StreamPlannerHandle::spawn(
         cfg(1.0),
         vec![0.0, 0.0, 0.0],
@@ -302,21 +303,34 @@ fn backpressure_parks_dispatch_services_flush_and_resumes_on_frontier() {
         credit_rx,
         frontier_bits,
         Arc::new(AtomicBool::new(false)),
-        vec![AxisKey { mcu_id: 1, axis: 0 }],
+        vec![key],
     );
 
+    // Room starts non-binding (+inf), so the first move dispatches.
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();
-    h.dwell(6.0).unwrap();
+    let mut dispatched = false;
+    for _ in 0..50 {
+        if !cap.snapshot().is_empty() {
+            dispatched = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        dispatched,
+        "first segment should dispatch while room is open"
+    );
+
+    // The ring is now full: no room. The second move must park.
+    credit_tx.send(FrontierMsg { key, room: 0.0 }).unwrap();
     h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
         .unwrap();
 
     std::thread::sleep(Duration::from_millis(50));
-    let parked = cap.snapshot();
-    assert!(!parked.is_empty(), "first segment should dispatch");
     assert!(
-        parked.iter().all(|(_, _, x)| *x < 60.0),
-        "second move dispatched before the frontier advanced"
+        cap.snapshot().iter().all(|(_, _, x)| *x < 60.0),
+        "second move dispatched while the ring had no room"
     );
 
     let flush_rx = h.flush_start().unwrap();
@@ -324,13 +338,8 @@ fn backpressure_parks_dispatch_services_flush_and_resumes_on_frontier() {
         .recv_timeout(Duration::from_millis(250))
         .expect("flush should be serviced while dispatch is parked");
 
-    credit_tx
-        .send(FrontierMsg {
-            key: AxisKey { mcu_id: 1, axis: 0 },
-            freed_time: 2.0,
-        })
-        .unwrap();
-
+    // Retirement frees room: the parked move resumes.
+    credit_tx.send(FrontierMsg { key, room: 8.0 }).unwrap();
     for _ in 0..20 {
         if cap
             .snapshot()
@@ -343,7 +352,7 @@ fn backpressure_parks_dispatch_services_flush_and_resumes_on_frontier() {
         std::thread::sleep(Duration::from_millis(10));
     }
     h.shutdown();
-    panic!("dispatch did not resume after frontier advanced");
+    panic!("dispatch did not resume after room was freed");
 }
 
 #[test]
@@ -367,13 +376,13 @@ fn backpressure_frontier_is_min_across_axes() {
     credit_tx
         .send(FrontierMsg {
             key: AxisKey { mcu_id: 1, axis: 0 },
-            freed_time: 8.0,
+            room: 8.0,
         })
         .unwrap();
     credit_tx
         .send(FrontierMsg {
             key: AxisKey { mcu_id: 1, axis: 1 },
-            freed_time: 3.0,
+            room: 3.0,
         })
         .unwrap();
 
@@ -465,7 +474,7 @@ fn idle_axis_does_not_drag_the_frontier() {
     credit_tx
         .send(FrontierMsg {
             key: AxisKey { mcu_id: 1, axis: 0 },
-            freed_time: 8.0,
+            room: 8.0,
         })
         .unwrap();
 
@@ -498,18 +507,18 @@ fn caught_up_axis_publishes_non_binding_frontier() {
         ],
     );
 
-    // Bottleneck axis 1 lags at 3.0; once axis 0 catches up the pump reports it
-    // as non-binding (+inf), so the gate follows the still-lagging axis 1.
+    // Axis 1 is the bottleneck with little room (3 pieces); axis 0 has caught up
+    // and reports a full ring of room. The gate follows the cramped axis 1.
     credit_tx
         .send(FrontierMsg {
             key: AxisKey { mcu_id: 1, axis: 1 },
-            freed_time: 3.0,
+            room: 3.0,
         })
         .unwrap();
     credit_tx
         .send(FrontierMsg {
             key: AxisKey { mcu_id: 1, axis: 0 },
-            freed_time: f64::INFINITY,
+            room: 1000.0,
         })
         .unwrap();
 

@@ -2863,18 +2863,15 @@ impl PyMotionEngine {
                         );
                         abort_after_tracing_appender_drains();
                     },
-                    move |key: crate::pump::AxisKey, freed_time: f64| {
+                    move |key: crate::pump::AxisKey, room: f64| {
                         if credit_tx
-                            .send(crate::pump::FrontierMsg {
-                                key,
-                                freed_time,
-                            })
+                            .send(crate::pump::FrontierMsg { key, room })
                             .is_err()
                         {
                             tracing::error!(
                                 key = ?key,
-                                freed_time,
-                                "EXIT_ON_FAULT — stream planner frontier receiver closed; \
+                                room,
+                                "EXIT_ON_FAULT — stream planner credit receiver closed; \
                                  aborting klippy so systemd restarts it"
                             );
                             abort_after_tracing_appender_drains();
@@ -3156,13 +3153,11 @@ impl PyMotionEngine {
                     r.host_now_secs()
                 };
 
-                let frontier = f64::from_bits(frontier_for_cb.load(Ordering::Acquire));
-                let mut anchor = anchor_mutex.lock().unwrap_or_else(|p| p.into_inner());
-                let seg_host_start = anchor.projected_host_start(seg.t_start, host_now);
-                let gate_limit = frontier + crate::pump::LOOKAHEAD_SECS;
-                if !gate_bypass_for_cb.load(Ordering::Acquire) && seg_host_start > gate_limit {
+                let room = f64::from_bits(frontier_for_cb.load(Ordering::Acquire));
+                if !gate_bypass_for_cb.load(Ordering::Acquire) && room <= 0.0 {
                     return Err(DispatchError::Gated);
                 }
+                let mut anchor = anchor_mutex.lock().unwrap_or_else(|p| p.into_inner());
                 let (t0, fresh) = anchor
                     .anchor_segment(seg.t_start, seg.t_end, host_now)
                     .map_err(|late| DispatchError::SegmentLate {

@@ -412,8 +412,8 @@ fn run_loop(
         .map(|key| (key, f64::INFINITY))
         .collect();
     // Publish the ledger's initial min so the dispatch gate matches the planner
-    // before any credit arrives — otherwise the gate reads a stale seed and bars
-    // the first move once it sits idle longer than LOOKAHEAD.
+    // before any credit arrives — every axis starts with full (infinite) room so
+    // the first move always dispatches.
     if let Some(frontier) = axis_frontiers.values().copied().min_by(f64::total_cmp) {
         frontier_bits.store(frontier.to_bits(), Ordering::Release);
     }
@@ -423,21 +423,13 @@ fn run_loop(
 
     loop {
         while let Ok(msg) = credit_rx.try_recv() {
-            if msg.freed_time.is_nan() || msg.freed_time == f64::NEG_INFINITY {
+            if msg.room.is_nan() || msg.room < 0.0 {
                 fatal(&format!(
-                    "invalid frontier {} on mcu{} axis{}",
-                    msg.freed_time, msg.key.mcu_id, msg.key.axis
+                    "invalid dispatch room {} on mcu{} axis{}",
+                    msg.room, msg.key.mcu_id, msg.key.axis
                 ));
             }
-            if let Some(&previous) = axis_frontiers.get(&msg.key) {
-                if previous.is_finite() && msg.freed_time < previous {
-                    fatal(&format!(
-                        "frontier regression: was {previous} now {} on mcu{} axis{}",
-                        msg.freed_time, msg.key.mcu_id, msg.key.axis
-                    ));
-                }
-            }
-            axis_frontiers.insert(msg.key, msg.freed_time);
+            axis_frontiers.insert(msg.key, msg.room);
             if let Some(frontier) = axis_frontiers.values().copied().min_by(f64::total_cmp) {
                 frontier_bits.store(frontier.to_bits(), Ordering::Release);
                 if frontier > last_frontier {
@@ -460,13 +452,13 @@ fn run_loop(
         );
 
         if frontier_stalled(!pending_segs.is_empty(), frontier_advanced_at.elapsed()) {
-            let (bottleneck, frozen) = axis_frontiers
+            let (bottleneck, room) = axis_frontiers
                 .iter()
                 .min_by(|a, b| f64::total_cmp(a.1, b.1))
                 .map(|(k, v)| (*k, *v))
                 .expect("frontier ledger is never empty");
             fatal(&format!(
-                "stream stalled: consumption frontier frozen at {frozen} for {:.1}s with \
+                "stream stalled: dispatch room stuck at {room} pieces for {:.1}s with \
                  {} gated segments (oldest t_start={}); bottleneck mcu{} axis{} is not retiring \
                  — MCU motion stream is not advancing",
                 frontier_advanced_at.elapsed().as_secs_f64(),
