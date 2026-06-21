@@ -134,6 +134,12 @@ class Motion:
         self._validate_pump_watermarks(
             config, self.pump_backlog_low, self.pump_backlog_high
         )
+        self.buffer_time_high = config.getfloat(
+            "buffer_time_high", 2.0, above=0.0
+        )
+        self.buffer_time_low = config.getfloat(
+            "buffer_time_low", 1.0, minval=0.0, maxval=self.buffer_time_high
+        )
         self._drip_active = False
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
@@ -388,11 +394,8 @@ class Motion:
             feedrate,
         )
         self._fire_active_callbacks(move.axes_d)
-        engine_lmt_before = self.engine.get_last_move_time()
         self.engine.submit_move(dx, dy, dz, de, feedrate)
-        self._bump_pending_end_time(
-            self.engine.get_last_move_time() - engine_lmt_before
-        )
+        self._bump_pending_end_time(move.min_move_t)
         self.commanded_pos[:] = move.end_pos
         self._sync_print_time()
         self._check_pause()
@@ -428,11 +431,8 @@ class Motion:
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
             feedrate = min(feedrate, self.max_z_velocity)
         self._fire_active_callbacks([dx, dy, dz, de])
-        engine_lmt_before = self.engine.get_last_move_time()
         submit(dx, dy, dz, de, feedrate)
-        self._bump_pending_end_time(
-            self.engine.get_last_move_time() - engine_lmt_before
-        )
+        self._bump_pending_end_time(move.min_move_t)
         self.commanded_pos[:] = list(newpos)
         self._sync_print_time()
         self._check_pause()
@@ -570,19 +570,30 @@ class Motion:
     def _check_pause(self):
         if self.mcu is None or self._drip_active:
             return
+        now = self.reactor.monotonic()
+        est = self.mcu.estimated_print_time(now)
+        buffer_time = self._mcu_pending_end_time - est
         backlog = self.engine.pump_backlog()
-        if backlog <= self.pump_backlog_high:
+        if (
+            buffer_time <= self.buffer_time_high
+            and backlog <= self.pump_backlog_high
+        ):
             return
-        deadline = self.reactor.monotonic() + DRAIN_TIMEOUT
-        while backlog > self.pump_backlog_low:
+        deadline = now + DRAIN_TIMEOUT
+        while (
+            buffer_time > self.buffer_time_low
+            or backlog > self.pump_backlog_low
+        ):
             now = self.reactor.monotonic()
             if now >= deadline:
                 raise self.printer.command_error(
-                    "motion backpressure: pump backlog %d did not drain "
-                    "within %.0fs (MCU not retiring moves)"
-                    % (backlog, DRAIN_TIMEOUT)
+                    "motion backpressure: buffer_time=%.3fs backlog=%d did not "
+                    "drain within %.0fs (MCU not retiring moves)"
+                    % (buffer_time, backlog, DRAIN_TIMEOUT)
                 )
             self.reactor.pause(now + 0.010)
+            est = self.mcu.estimated_print_time(now)
+            buffer_time = self._mcu_pending_end_time - est
             backlog = self.engine.pump_backlog()
 
     def check_busy(self, eventtime):
@@ -793,12 +804,18 @@ class Motion:
             if getattr(m, "non_critical_disconnected", False):
                 continue
             m.check_active(max_queue_time, eventtime)
-        pump_backlog = self.engine.pump_backlog() if self.mcu is not None else 0
+        buffer_time = 0.0
+        pump_backlog = 0
+        if self.mcu is not None:
+            est = self.mcu.estimated_print_time(eventtime)
+            buffer_time = self._mcu_pending_end_time - est
+            pump_backlog = self.engine.pump_backlog()
         return (
             False,
-            "print_time=%.3f buffer_time=0.000 pump_backlog=%d print_stall=%d"
+            "print_time=%.3f buffer_time=%.3f pump_backlog=%d print_stall=%d"
             % (
-                self.print_time,
+                self._mcu_pending_end_time,
+                buffer_time,
                 pump_backlog,
                 self.print_stall,
             ),

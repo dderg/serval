@@ -21,20 +21,17 @@ class FakePrinter:
 
 
 class FakeEngine:
-    def __init__(self, backlogs):
-        self._backlogs = list(backlogs)
-        self.calls = 0
+    def __init__(self, backlog=0):
+        self._backlog = backlog
 
     def pump_backlog(self):
-        self.calls += 1
-        idx = min(self.calls, len(self._backlogs)) - 1
-        return self._backlogs[idx]
+        return self._backlog
 
 
 class FakeReactor:
-    def __init__(self, time_per_pause=0.010):
+    def __init__(self, step=0.5):
         self.now = 0.0
-        self.time_per_pause = time_per_pause
+        self.step = step
         self.pauses = 0
 
     def monotonic(self):
@@ -42,7 +39,16 @@ class FakeReactor:
 
     def pause(self, wake_time):
         self.pauses += 1
-        self.now = max(wake_time, self.now + self.time_per_pause)
+        self.now = max(wake_time, self.now + self.step)
+
+
+class FakeMcu:
+    # estimated_print_time advances with wall time at `rate` (rate=0 => stalled).
+    def __init__(self, rate=1.0):
+        self.rate = rate
+
+    def estimated_print_time(self, eventtime):
+        return eventtime * self.rate
 
 
 class FakeMotion:
@@ -50,33 +56,67 @@ class FakeMotion:
 
     def __init__(
         self,
-        backlogs,
-        high=200,
-        low=100,
+        frontier=0.0,
+        backlog=0,
+        rate=1.0,
         mcu=True,
         drip=False,
-        time_per_pause=0.010,
+        buffer_time_high=2.0,
+        buffer_time_low=1.0,
+        pump_backlog_high=200,
+        pump_backlog_low=100,
     ):
-        self.engine = FakeEngine(backlogs)
-        self.reactor = FakeReactor(time_per_pause)
+        self.reactor = FakeReactor()
+        self.engine = FakeEngine(backlog)
         self.printer = FakePrinter()
-        self.mcu = mcu
+        self.mcu = FakeMcu(rate) if mcu else None
+        self._mcu_pending_end_time = frontier
         self._drip_active = drip
-        self.pump_backlog_high = high
-        self.pump_backlog_low = low
+        self.buffer_time_high = buffer_time_high
+        self.buffer_time_low = buffer_time_low
+        self.pump_backlog_high = pump_backlog_high
+        self.pump_backlog_low = pump_backlog_low
 
 
-def test_no_pause_when_below_high():
-    m = FakeMotion(backlogs=[50])
+def test_no_pause_when_within_buffer():
+    m = FakeMotion(frontier=1.0, backlog=0)
     m._check_pause()
     assert m.reactor.pauses == 0
-    assert m.engine.calls == 1
 
 
-def test_pauses_until_drained_to_low():
-    m = FakeMotion(backlogs=[250, 150, 80])
+def test_pauses_until_buffer_drains_to_low():
+    m = FakeMotion(frontier=5.0, backlog=0)
     m._check_pause()
-    assert m.reactor.pauses == 2
+    assert m.reactor.pauses > 0
+    # drained to <= buffer_time_low: est (== reactor.now at rate 1) >= 4.0
+    assert m._mcu_pending_end_time - m.reactor.now <= m.buffer_time_low
+
+
+def test_pauses_on_pump_backlog_even_when_buffer_ok():
+    m = FakeMotion(frontier=0.0, backlog=300, pump_backlog_high=200)
+    # backlog never drains in this fake -> must time out, proving it engaged
+    with pytest.raises(FakeCommandError):
+        m._check_pause()
+    assert m.reactor.pauses > 0
+
+
+def test_timeout_when_mcu_not_advancing():
+    m = FakeMotion(frontier=5.0, backlog=0, rate=0.0)
+    m.reactor.step = 10.0
+    with pytest.raises(FakeCommandError):
+        m._check_pause()
+
+
+def test_skips_during_drip():
+    m = FakeMotion(frontier=5.0, backlog=300, drip=True)
+    m._check_pause()
+    assert m.reactor.pauses == 0
+
+
+def test_skips_when_no_mcu():
+    m = FakeMotion(frontier=5.0, backlog=300, mcu=False)
+    m._check_pause()
+    assert m.reactor.pauses == 0
 
 
 def test_inverted_watermarks_rejected():
@@ -89,23 +129,3 @@ def test_valid_watermarks_accepted():
     cfg = FakeConfig()
     motion.Motion._validate_pump_watermarks(cfg, 100, 200)
     motion.Motion._validate_pump_watermarks(cfg, 200, 200)
-
-
-def test_timeout_raises_when_backlog_never_drains():
-    m = FakeMotion(backlogs=[250], time_per_pause=100.0)
-    with pytest.raises(FakeCommandError):
-        m._check_pause()
-
-
-def test_skips_during_drip():
-    m = FakeMotion(backlogs=[250], drip=True)
-    m._check_pause()
-    assert m.reactor.pauses == 0
-    assert m.engine.calls == 0
-
-
-def test_skips_when_no_mcu():
-    m = FakeMotion(backlogs=[250], mcu=None)
-    m._check_pause()
-    assert m.reactor.pauses == 0
-    assert m.engine.calls == 0
