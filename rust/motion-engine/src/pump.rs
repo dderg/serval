@@ -422,6 +422,12 @@ pub fn run_pump<S, F, C, A, O, D, P>(
                     if let Some(q) = queues.get_mut(&key) {
                         let dropped = q.pieces.len() as u32;
                         q.pieces.clear();
+                        // Abandoned backlog was counted in `enqueued` but never
+                        // sent; resync to `pushed` so it stops counting as
+                        // outstanding and dispatch_room recovers. Only the
+                        // in-ring pieces (pushed - retired) remain outstanding
+                        // until the MCU discards them on the trip.
+                        q.enqueued = q.pushed;
                         if dropped > 0 {
                             on_abandon(key, dropped);
                         }

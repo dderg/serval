@@ -170,7 +170,70 @@ fn pump_publishes_dispatch_room_on_enqueue_and_retire() {
 
     tx.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
-    panic!("pump did not publish all expected freed-time frontiers");
+    panic!("pump did not publish the expected dispatch-room credits");
+}
+
+#[test]
+fn flush_resyncs_enqueued_so_dispatch_room_recovers_after_abort() {
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let rooms = Arc::new(Mutex::new(Vec::new()));
+    let rooms_for_pump = Arc::clone(&rooms);
+    let (tx, rx) = mpsc::channel();
+    let sink = RecordingSink(rec);
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            rx,
+            sink,
+            |_k| 2u32,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            move |key, room| {
+                rooms_for_pump.lock().unwrap().push((key, room));
+            },
+        )
+    });
+
+    // ring_depth = 2 but 5 pieces enqueued: 2 fit the ring, 3 stay backlogged.
+    let x = AxisKey { mcu_id: 1, axis: 0 };
+    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+        key: x,
+        pieces: (0..5)
+            .map(|i| timed_piece(f64::from(i) * 0.25, 0.25))
+            .collect(),
+        fresh_stream: true,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+    }))
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // A homing trip aborts: flush drops the backlog. The abandoned pieces must
+    // stop counting as outstanding, otherwise dispatch_room stays pinned at 0.
+    tx.send(PumpMsg::Flush(vec![x])).unwrap();
+    // The MCU discards its ring: retired advances to what was pushed (2).
+    tx.send(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 1,
+        retired_counts: vec![2],
+    }))
+    .unwrap();
+
+    for _ in 0..30 {
+        if rooms
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|&(_, room)| (room - 2.0).abs() < 1e-9)
+        {
+            tx.send(PumpMsg::Shutdown).unwrap();
+            handle.join().unwrap();
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    tx.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+    panic!("dispatch room did not recover after the flush abandoned the backlog");
 }
 
 fn piece_at(start: u64, host: f64, start_pos: f32, end_pos: f32) -> (PieceEntry, f64) {
