@@ -142,6 +142,26 @@ pub(super) struct JerkAnchors {
 const BRIDGE_EPS_A: f64 = 1e-6;
 const BRIDGE_MIN_ARC_FRAC: f64 = 1e-4;
 const ROOT_ITERS: u32 = 80;
+const CEILING_V_EPS: f64 = 1e-6;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BridgeKind {
+    SignFlip,
+    CeilingEntry,
+    CeilingExit,
+}
+
+impl BridgeKind {
+    fn is_ceiling(self) -> bool {
+        matches!(self, BridgeKind::CeilingEntry | BridgeKind::CeilingExit)
+    }
+
+    // The entry roll-off departs the forward branch below the cruise rail (the
+    // rising accel ramp); the exit roll-off departs the rail itself.
+    fn departs_below_ceiling(self) -> bool {
+        matches!(self, BridgeKind::CeilingEntry)
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct ProfilePoint {
@@ -487,13 +507,56 @@ fn shoot(
         Some(a - right_a(s)?)
     };
     let tau_max = 1.05 * (a0.abs() + accel_bound) / j.abs();
-    let tau = scan_root(&gap, 0.0, tau_max, 32)?;
+    let tau = scan_cross(&gap, 0.0, tau_max, 32, j < 0.0)?;
     let (s_end, v_end, a_end) = arc_at(tau);
     Some(Shot {
         s_end,
         v_end,
         a_end,
     })
+}
+
+/// Bracket the first zero of `f` crossed in a chosen direction: `descending`
+/// keeps the `+ -> -` crossing, otherwise the `- -> +` one. The `shoot` arc's
+/// accel moves monotonically with `sign(j)`, so its genuine landing on the
+/// target branch crosses in that direction; a discontinuity in the target
+/// (e.g. the backward branch's own cruise-exit step) throws an opposite-sign
+/// crossing that this rejects.
+fn scan_cross<F: Fn(f64) -> Option<f64>>(
+    f: &F,
+    x0: f64,
+    x1: f64,
+    k: usize,
+    descending: bool,
+) -> Option<f64> {
+    let mut prev_x = x0;
+    let mut prev = f(x0);
+    for i in 1..=k {
+        let x = x0 + (x1 - x0) * (i as f64) / (k as f64);
+        let cur = f(x);
+        if let (Some(p), Some(c)) = (prev, cur) {
+            let crosses = if descending {
+                p > 0.0 && c < 0.0
+            } else {
+                p < 0.0 && c > 0.0
+            };
+            if crosses {
+                let (mut lo, mut hi) = (prev_x, x);
+                for _ in 0..ROOT_ITERS {
+                    let mid = 0.5 * (lo + hi);
+                    match f(mid) {
+                        Some(m) if (m > 0.0) == descending => lo = mid,
+                        Some(_) => hi = mid,
+                        None => return None,
+                    }
+                }
+                return Some(0.5 * (lo + hi));
+            }
+        }
+        prev_x = x;
+        prev = cur;
+    }
+    None
 }
 
 fn scan_root<F: Fn(f64) -> Option<f64>>(f: &F, x0: f64, x1: f64, k: usize) -> Option<f64> {
@@ -535,6 +598,7 @@ fn build_run_bridge(
     sa: f64,
     sb: f64,
     apex: f64,
+    kind: BridgeKind,
 ) -> Option<(f64, f64, Vec<(f64, f64, f64)>)> {
     let (mid_i, _) = locate(ctxs, 0.5 * (sa + sb));
     let jerk_mag = ctxs[mid_i].m.kin.jerk;
@@ -565,15 +629,40 @@ fn build_run_bridge(
         let l = left(0.5 * (sa + sb)).map_or(1.0, |p| p.v);
         l.max(1.0) * (2.0 * accel / jerk_mag)
     };
-    let s_star = scan_root(&gap, sa - half_max, sb + half_max, 16)?;
+    let fc = ctxs[mid_i].m.kin.flat_ceiling;
+    let s_star = match kind {
+        BridgeKind::SignFlip => scan_root(&gap, sa - half_max, sb + half_max, 16)?,
+        _ => 0.5 * (sa + sb),
+    };
     let window = (3.0 * half_max).max(2.0 * (sb - sa));
 
+    // A ceiling roll-off departs the forward branch on a fixed side of the
+    // cruise rail: the entry leaves the rising accel ramp (`v < flat_ceiling`),
+    // the exit leaves the rail itself (`v >= flat_ceiling`). Pinning `s_left` to
+    // that side selects the single physical root and lands the arc past the
+    // transition `s_star`, never on the opposite edge of the plateau.
+    let on_departure_side = |v: f64| -> bool {
+        if !kind.is_ceiling() {
+            return true;
+        }
+        let below = v < fc - CEILING_V_EPS * (1.0 + fc);
+        below == kind.departs_below_ceiling()
+    };
     let residual = |s_left: f64| -> Option<f64> {
         let l = left(s_left)?;
+        if !on_departure_side(l.v) {
+            return None;
+        }
         let shot = shoot(ctxs, tol, s_left, l.v, l.a, j, accel, apex <= 0.0)?;
+        if kind.is_ceiling() && shot.s_end < s_star {
+            return None;
+        }
         Some(shot.v_end - right_v(shot.s_end)?)
     };
-    let s_left = scan_root(&residual, (s_star - window).max(0.0), s_star, 48)?;
+    let s_left = match kind {
+        BridgeKind::SignFlip => scan_root(&residual, (s_star - window).max(0.0), s_star, 48)?,
+        _ => scan_root(&residual, s_star, (s_star - window).max(0.0), 48)?,
+    };
     let l = left(s_left)?;
     let shot = shoot(ctxs, tol, s_left, l.v, l.a, j, accel, apex <= 0.0)?;
     let s_right = shot.s_end;
@@ -604,25 +693,87 @@ fn build_run_bridge(
     Some((s_left, s_right, pts))
 }
 
+fn at_flat_ceiling(ctxs: &[MemberCtx], s: f64, v: f64) -> bool {
+    let (i, _) = locate(ctxs, s);
+    let fc = ctxs[i].m.kin.flat_ceiling;
+    v >= fc - CEILING_V_EPS * (1.0 + fc)
+}
+
+struct Transition {
+    sa: f64,
+    sb: f64,
+    apex: f64,
+    kind: BridgeKind,
+}
+
 fn reconstruct_flat(ctxs: &[MemberCtx], tol: f64) -> Option<Vec<(f64, f64, f64)>> {
     let base = base_samples(ctxs, tol)?;
-    let mut bridges: Vec<(f64, f64, Vec<(f64, f64, f64)>)> = Vec::new();
+    let mut trans: Vec<Transition> = Vec::new();
     for w in base.windows(2) {
         let aa = w[0].2;
         let ab = w[1].2;
         if (aa - ab).abs() <= BRIDGE_EPS_A {
             continue;
         }
-        let apex = if aa > 0.0 && ab < 0.0 {
-            1.0
+        let (apex, kind) = if aa > 0.0 && ab < 0.0 {
+            (1.0, BridgeKind::SignFlip)
         } else if aa < 0.0 && ab > 0.0 {
-            -1.0
+            (-1.0, BridgeKind::SignFlip)
+        } else if aa > BRIDGE_EPS_A
+            && ab.abs() <= BRIDGE_EPS_A
+            && at_flat_ceiling(ctxs, w[1].0, w[1].1)
+        {
+            (1.0, BridgeKind::CeilingEntry)
+        } else if aa.abs() <= BRIDGE_EPS_A
+            && ab < -BRIDGE_EPS_A
+            && at_flat_ceiling(ctxs, w[0].0, w[0].1)
+        {
+            (1.0, BridgeKind::CeilingExit)
         } else {
             continue;
         };
-        if let Some(bridge) = build_run_bridge(ctxs, tol, w[0].0, w[1].0, apex) {
+        trans.push(Transition {
+            sa: w[0].0,
+            sb: w[1].0,
+            apex,
+            kind,
+        });
+    }
+
+    let mut bridges: Vec<(f64, f64, Vec<(f64, f64, f64)>)> = Vec::new();
+    let mut t = 0;
+    while t < trans.len() {
+        let cur = &trans[t];
+        // A cruise entry immediately followed by its exit on a plateau too short
+        // to hold both roll-offs is a move the base sweep reports as reaching
+        // `flat_ceiling` but which is not jerk-feasible there (it needs >2x the
+        // jerk-limited accel distance). No valid arc lands on that over-reported
+        // ceiling, so the roll-offs overlap; leaving both out keeps the base
+        // profile rather than emitting interleaved garbage. Realistic high-jerk
+        // configs never hit this (roll-offs are sub-millimetre); the real fix is
+        // jerk-aware peak estimation in the velocity sweep — tracked separately.
+        if cur.kind == BridgeKind::CeilingEntry
+            && trans
+                .get(t + 1)
+                .is_some_and(|n| n.kind == BridgeKind::CeilingExit)
+        {
+            let exit = &trans[t + 1];
+            let entry_arc =
+                build_run_bridge(ctxs, tol, cur.sa, cur.sb, 1.0, BridgeKind::CeilingEntry);
+            let exit_arc =
+                build_run_bridge(ctxs, tol, exit.sa, exit.sb, 1.0, BridgeKind::CeilingExit);
+            let overlaps = matches!((&entry_arc, &exit_arc), (Some(e), Some(x)) if e.1 > x.0);
+            if !overlaps {
+                bridges.extend(entry_arc);
+                bridges.extend(exit_arc);
+            }
+            t += 2;
+            continue;
+        }
+        if let Some(bridge) = build_run_bridge(ctxs, tol, cur.sa, cur.sb, cur.apex, cur.kind) {
             bridges.push(bridge);
         }
+        t += 1;
     }
 
     let mut out: Vec<(f64, f64, f64)> = base
@@ -634,6 +785,26 @@ fn reconstruct_flat(ctxs: &[MemberCtx], tol: f64) -> Option<Vec<(f64, f64, f64)>
     }
     out.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
     Some(out)
+}
+
+/// Linearly interpolate the reconstructed (bridged) flat profile at run-arc `s`.
+/// Member boundaries must read this, not the base `run_eval`: when a ceiling
+/// roll-off arc straddles a collinear junction, `run_eval` would return the
+/// un-bridged cruise rail (`a=0`) and splice that step back into the arc.
+fn interp_flat(flat: &[(f64, f64, f64)], s: f64) -> Option<(f64, f64)> {
+    let first = flat.first()?;
+    let last = flat.last()?;
+    if s <= first.0 {
+        return Some((first.1, first.2));
+    }
+    if s >= last.0 {
+        return Some((last.1, last.2));
+    }
+    let i = flat.partition_point(|p| p.0 < s);
+    let (lo, hi) = (flat[i - 1], flat[i]);
+    let span = hi.0 - lo.0;
+    let t = if span > 1e-12 { (s - lo.0) / span } else { 0.0 };
+    Some((lo.1 + t * (hi.1 - lo.1), lo.2 + t * (hi.2 - lo.2)))
 }
 
 pub(super) fn reconstruct_run(
@@ -655,15 +826,15 @@ pub(super) fn reconstruct_run(
             .collect();
         local.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-12);
         if local.first().is_none_or(|p| p.0 > 1e-9) {
-            let pt = run_eval(&ctxs, s0, tol)?;
-            local.insert(0, (0.0, pt.v, pt.a));
+            let (v, a) = interp_flat(&flat, s0)?;
+            local.insert(0, (0.0, v, a));
         }
         if local
             .last()
             .is_none_or(|p| (p.0 - c.m.kin.length).abs() > 1e-9)
         {
-            let pt = run_eval(&ctxs, s1, tol)?;
-            local.push((c.m.kin.length, pt.v, pt.a));
+            let (v, a) = interp_flat(&flat, s1)?;
+            local.push((c.m.kin.length, v, a));
         }
         if let Some(first) = local.first_mut() {
             first.0 = 0.0;
