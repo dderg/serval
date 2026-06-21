@@ -154,6 +154,16 @@ fn disk_rail_accel(accel: f64, kappa_abs: f64, v: f64) -> f64 {
     (accel * accel - a_n * a_n).max(0.0).sqrt()
 }
 
+/// Tangential acceleration cannot exceed the acceleration disk's remaining
+/// budget once centripetal `a_n = kappa*v^2` is spent: `a_t^2 + a_n^2 <= a^2`.
+/// At a biclothoid apex `a_n` saturates the disk, so the budget collapses to
+/// ~0 and the curvature-rate kink in `a_t` is pinned out instead of poking the
+/// reported acceleration past `a_max`.
+fn clamp_to_disk(a_t: f64, accel: f64, kappa_abs: f64, v: f64) -> f64 {
+    let budget = disk_rail_accel(accel, kappa_abs, v);
+    a_t.clamp(-budget, budget)
+}
+
 fn forward_seg(kin: &Kinematics, jerk: &JerkAnchors) -> Option<scurve::SevenSeg> {
     scurve::breakpoints(
         jerk.fwd_v,
@@ -662,6 +672,9 @@ pub(super) fn reconstruct_run(
         if let Some(last) = local.last_mut() {
             last.0 = c.m.kin.length;
             last.1 = c.m.exit_v;
+        }
+        for p in &mut local {
+            p.2 = clamp_to_disk(p.2, c.m.kin.accel, c.m.kin.kappa_abs(p.0), p.1);
         }
         per_member.push(local);
     }

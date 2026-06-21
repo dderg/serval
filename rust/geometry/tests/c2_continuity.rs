@@ -15,6 +15,7 @@
 //! tangential-jerk-feasibility bug; it is bounded by `a_max` and is far below
 //! the `2*a_max` C1 crossover step this work targets.
 
+use geometry::path::CurvatureProfile;
 use geometry::{
     ChainFitConfig, Move, MoveContext, SourceRange, VelocityConfig, VelocityLimits, fit_chain,
     line_move, plan_velocity,
@@ -130,6 +131,38 @@ fn c2_accel_within_envelope() {
             smp.a.abs(),
             smp.s
         );
+    }
+}
+
+#[test]
+fn c2_tangential_within_acceleration_disk() {
+    // a_t^2 + a_n^2 <= a_max^2 everywhere: the reported tangential accel may not
+    // borrow against the centripetal budget. Catches the biclothoid-apex spike
+    // where curvature-ceiling tracking would otherwise push |a| past a_max.
+    let moves = serpentine();
+    let outcome = fit_chain(&moves, ChainFitConfig::default()).unwrap();
+    let profile = plan_velocity(
+        &outcome,
+        VelocityConfig {
+            consistency_tol: 1e-6,
+            max_jerk_mm_s3: JERK,
+            integration_tol: 1e-7,
+        },
+    )
+    .unwrap();
+    for (gm, vm) in outcome.moves.iter().zip(profile.moves.iter()) {
+        let seg = gm.segment.spatial.as_ref().unwrap();
+        for smp in &vm.samples {
+            let kappa = seg.kappa(smp.s.clamp(0.0, seg.s_len())).abs();
+            let a_n = kappa * smp.v * smp.v;
+            let disk = (smp.a * smp.a + a_n * a_n).sqrt();
+            assert!(
+                disk <= ACCEL + 1e-3,
+                "disk magnitude {disk:.3} exceeds a_max={ACCEL} at s={:.4} (a_t={:.2}, a_n={a_n:.2})",
+                smp.s,
+                smp.a
+            );
+        }
     }
 }
 
