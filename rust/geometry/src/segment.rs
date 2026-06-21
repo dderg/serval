@@ -42,8 +42,6 @@ pub struct CubicSegment {
     pub feedrate_mm_s: f64,
     pub source: SourceRange,
     pub split_info: Option<SplitInfo>,
-    /// `Some(length)` marks a follower-only move planned on a virtual path of
-    /// this arclength; the xyz curve has zero displacement.
     pub virtual_path_mm: Option<f64>,
 }
 

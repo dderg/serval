@@ -573,12 +573,22 @@ fn warm_start_is_faster_than_starting_from_rest() {
 
 #[test]
 fn warm_start_over_commit_cannot_brake_in_window() {
-    // 1 mm at a_max 1000 brakes from at most sqrt(2*1000*1) ≈ 44.7 mm/s; the
-    // feed ceiling (200) admits the 100 mm/s entry, so this exercises the
-    // can't-stop guard, not the ceiling guard.
-    let out = outcome(vec![line_move(1.0, 200.0, 200.0, 1000.0, 5)], Vec::new());
+    let (length, accel, feed_ceiling, entry_v) = (1.0_f64, 1000.0_f64, 200.0_f64, 100.0_f64);
+    let max_brakeable_entry_v = (2.0 * accel * length).sqrt();
+    assert!(
+        entry_v <= feed_ceiling,
+        "entry must clear the feed ceiling so this exercises the can't-stop guard, not the ceiling guard"
+    );
+    assert!(
+        entry_v > max_brakeable_entry_v,
+        "entry must exceed the braking-distance budget so the can't-stop guard trips"
+    );
+    let out = outcome(
+        vec![line_move(length, feed_ceiling, feed_ceiling, accel, 5)],
+        Vec::new(),
+    );
     assert_eq!(
-        plan_velocity_warm_start(&out, VelocityConfig::default(), 100.0),
+        plan_velocity_warm_start(&out, VelocityConfig::default(), entry_v),
         Err(VelocityError::OverCommitted { line_no: 5 })
     );
 }

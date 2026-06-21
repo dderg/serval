@@ -2,14 +2,13 @@ use gcode::lex;
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
+const REGRESSIONS_RELATIVE_TO_CRATE_ROOT: &str = "proptest-regressions/property_lex.txt";
+
 proptest! {
-    // The default SourceParallel persistence cannot locate a source root for
-    // integration tests (no lib.rs/main.rs above tests/), so failing seeds
-    // were silently never saved; Direct resolves relative to the crate root.
     #![proptest_config(ProptestConfig {
         cases: 1024,
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
-            "proptest-regressions/property_lex.txt",
+            REGRESSIONS_RELATIVE_TO_CRATE_ROOT,
         ))),
         ..Default::default()
     })]

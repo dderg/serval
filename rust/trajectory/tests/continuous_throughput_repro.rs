@@ -1,35 +1,8 @@
-//! Faithful offline reproduction of the continuous-streaming throughput
-//! problem, instrumented in DETERMINISTIC, LOAD-INDEPENDENT COUNTS.
-//!
-//! The streaming planner re-plans its entire uncommitted lookahead window every
-//! time a curve arrives: `append_and_replan` builds `plan_segments` from ALL
-//! uncommitted moves (`state.rs` ~line 173) and calls `plan_velocity` on the
-//! whole window. A move only leaves the window when it commits
-//! (`uncommitted_moves.retain(|m| m.t_end > t_freeze)`, driven by
-//! `t_dispatched`). So per-append solver WORK grows with live window depth.
-//!
-//! WALL-CLOCK IS NOT A GATE HERE. This machine runs many things at once and
-//! background load drifts, so the gate is on COUNTS that are identical
-//! regardless of CPU load:
-//!   - `window_segments` fed to the solver per append,
-//!   - total grid points solved per append (Σ chain `n_points()`),
-//!   - Clarabel solve count per append (`clarabel_calls_total`),
-//!   - SLP / SLP9 outer-iteration counts per append.
-//!
-//! These are read from `temporal::counters` (thread-local, reset before each
-//! append, snapshotted after) plus `ReplanReport`. A single isolated wall-time
-//! estimate is printed but explicitly labeled rough / non-gating.
-//!
-//! Run with:
-//!   cargo nextest run -p trajectory -E 'test(continuous_throughput)' --no-capture
-
 use geometry::segment::{CubicSegment, SourceRange};
 use nurbs::VectorNurbs;
 use trajectory::streaming::{ReplanContext, ShaperState};
 use trajectory::{AxisChainSet, CompiledChain, PostProcessorType};
 
-/// Trident-like asymmetric CoreXY limit set (X/Y identical, Z slow).
-/// v in mm/s, a in mm/s^2, j in mm/s^3.
 fn trident_limits() -> temporal::Limits {
     temporal::Limits::axis_boxes(
         [500.0, 500.0, 10.0],
@@ -61,17 +34,12 @@ fn replan_ctx() -> ReplanContext {
     }
 }
 
-/// Baseline-measurement context: forces the legacy whole-window re-solve so
-/// Measurements 1-5 keep characterizing the ORIGINAL O(window-depth) behavior
-/// they were written to expose. The bounded front-freeze (now the production
-/// default) is measured separately by the `bounded_*` tests below.
 fn baseline_full_ctx() -> ReplanContext {
     let mut ctx = replan_ctx();
     ctx.force_full_resolve = true;
     ctx
 }
 
-/// Build one planar cubic Bézier from 4 explicit control points (z = 0).
 fn cubic_from_cps(cps: [[f64; 2]; 4], feedrate: f64) -> CubicSegment {
     let cp3 = |p: [f64; 2]| [p[0], p[1], 0.0];
     let control = vec![cp3(cps[0]), cp3(cps[1]), cp3(cps[2]), cp3(cps[3])];
@@ -91,9 +59,6 @@ fn cubic_from_cps(cps: [[f64; 2]; 4], feedrate: f64) -> CubicSegment {
     .unwrap()
 }
 
-/// Generate a tangent-continuous (G1/C1) chain of `k` planar cubic Béziers
-/// approximating a sine wave the toolhead sweeps in +X. Returns chord length
-/// per segment (mm) so playback duration can be estimated.
 fn chained_curves(
     k: usize,
     dx_mm: f64,
@@ -123,12 +88,6 @@ fn chained_curves(
     (segments, chords)
 }
 
-/// A decel-to-corner chain: a long straight run-up followed by a hard ~90°
-/// corner, then a short outgoing leg. The corner forces a deep backward
-/// velocity-propagation (deceleration-reach) horizon — the worst case for the
-/// "freeze the front" sub-window cap, because the decel ramp that must brake
-/// for the corner can reach many segments back. Used to stress how far the
-/// backward horizon extends relative to window depth.
 fn decel_to_corner_chain(
     run_up_segments: usize,
     leg_mm: f64,
@@ -157,38 +116,24 @@ fn decel_to_corner_chain(
     (segments, chords)
 }
 
-/// Per-append deterministic WORK COUNTS. Identical regardless of CPU load.
 #[derive(Debug, Clone, Copy)]
 struct WorkCounts {
-    /// Segments fed to the whole-window re-solve this append.
     window_segments: usize,
-    /// Σ ChainGrid::n_points() over every chain scheduled this append.
     grid_points: u64,
-    /// Number of chain schedules (≈ Clarabel-bearing chain solves).
     chains_scheduled: u32,
-    /// Total Clarabel SOCP solves (base + path-jerk SLP + SLP9 probes).
     clarabel_total: u32,
-    /// Clarabel solves outside SLP9: base SOCP + path-jerk SLP outer iters.
     clarabel_path_jerk: u32,
-    /// SLP9 (axis-jerk) trust-region Clarabel probes.
     clarabel_slp9_tr: u32,
-    /// SLP9 no-trust-region fallback Clarabel solves.
     clarabel_slp9_no_tr: u32,
-    /// β-medium outer iteration count for this append.
     beta_iterations: u8,
-    /// Rough wall-clock for the solve only (NON-GATING; load-dependent).
     solve_us: u64,
 }
 
-/// Append one curve with the counters reset immediately before, snapshotted
-/// immediately after, so every count is attributed to exactly this append.
 fn append_counted(state: &mut ShaperState, ctx: &ReplanContext, seg: CubicSegment) -> WorkCounts {
     temporal::counters::reset();
     let report = state
         .append_and_replan(seg, ctx)
         .expect("append should plan");
-    // snapshot_global aggregates across the worker threads the solve fans out
-    // to; the thread-local snapshot would read 0 on the orchestrating thread.
     let c = temporal::counters::snapshot_global();
     WorkCounts {
         window_segments: report.window_segments,
@@ -203,14 +148,6 @@ fn append_counted(state: &mut ShaperState, ctx: &ReplanContext, seg: CubicSegmen
     }
 }
 
-// ---------------------------------------------------------------------------
-// Measurement 1: per-append WORK COUNTS vs LIVE WINDOW DEPTH (no drain)
-// ---------------------------------------------------------------------------
-//
-// t_dispatched stays at 0, so nothing commits and the window grows to depth K.
-// Each row is the deterministic work the solver did on that append. The point:
-// grid_points / clarabel_total / chains_scheduled grow ~linearly with
-// window_segments => cumulative work over the chain is ~quadratic.
 #[test]
 fn continuous_throughput_window_depth_scaling() {
     const K: usize = 16;
@@ -260,7 +197,8 @@ fn continuous_throughput_window_depth_scaling() {
     println!("{}", "-".repeat(96));
 
     let n = rows.len();
-    let first = rows[1]; // append #2: first append with a real window > 1
+    const FIRST_REAL_WINDOW_APPEND: usize = 1;
+    let first = rows[FIRST_REAL_WINDOW_APPEND];
     let last = rows[n - 1];
     let d_depth = (last.window_segments - first.window_segments) as f64;
     let grid_slope = (last.grid_points as f64 - first.grid_points as f64) / d_depth;
@@ -286,8 +224,6 @@ fn continuous_throughput_window_depth_scaling() {
     );
     println!();
 
-    // Deterministic gate: the marginal grid-point cost per added segment must be
-    // strictly positive — i.e. work demonstrably scales with depth, not flat.
     assert!(
         last.grid_points > first.grid_points,
         "expected grid points to grow with window depth (last {} > first {})",
@@ -298,8 +234,6 @@ fn continuous_throughput_window_depth_scaling() {
         last.clarabel_total >= first.clarabel_total,
         "expected Clarabel solves to grow with window depth",
     );
-    // Per-segment grid density is ~constant (whole-window re-solve), so grid
-    // points must track window_segments closely.
     let approx_per_seg = last.grid_points as f64 / last.window_segments as f64;
     assert!(
         approx_per_seg > 1.0,
@@ -307,28 +241,12 @@ fn continuous_throughput_window_depth_scaling() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Measurement 2: STEADY-STATE WINDOW DEPTH per feedrate WITH REALISTIC DRAIN
-// ---------------------------------------------------------------------------
-//
-// Models a real host buffer: the toolhead plays back at `feed`, and the host
-// keeps a bounded lookahead of ~`buffer_s` seconds of motion queued ahead of
-// playback. We advance a simulated playback clock and set `t_dispatched` to it
-// before each append, so committed moves drop out of the window
-// (`retain(|m| m.t_end > t_freeze)`). The window reaches a steady-state depth
-// bounded by how many curves fit in `buffer_s` at that feedrate. We report
-// that steady-state depth AND the per-append WORK COUNTS at steady state.
 #[test]
 fn continuous_throughput_steady_state_depth_with_drain() {
     const DX_MM: f64 = 12.0;
     const AMP_MM: f64 = 6.0;
     const K: usize = 18;
 
-    // Host buffer depths in SECONDS of queued motion ahead of playback. 1.0s at
-    // 500mm/s would need depth ~20 > K to reach steady state; we keep the sweep
-    // within K so every reported steady depth is buffer-limited, not chain-
-    // length-limited, and the test stays fast. The trend (depth grows with feed
-    // and buffer) is fully visible at these points.
     let buffers_s = [0.25_f64, 0.5, 1.0];
     let feedrates = [50.0_f64, 100.0, 200.0, 350.0];
 
@@ -359,13 +277,6 @@ fn continuous_throughput_steady_state_depth_with_drain() {
             let mut steady_work: Vec<WorkCounts> = Vec::new();
 
             for (i, seg) in curves.into_iter().enumerate() {
-                // Drain: the toolhead has played everything more than buffer_s
-                // behind the most-recent planned append end. t_dispatched is the
-                // absolute planner time playback has reached; trailing the
-                // actual planned front by buffer_s (using real segment end times,
-                // which include accel/decel, not nominal chord time) commits and
-                // drops those moves on the next append's
-                // `retain(|m| m.t_end > t_freeze)`.
                 let playback_t = (state.t_appended - buffer_s).max(0.0);
                 if playback_t > state.t_dispatched {
                     state.t_dispatched = playback_t.min(state.t_appended);
@@ -373,9 +284,8 @@ fn continuous_throughput_steady_state_depth_with_drain() {
 
                 let w = append_counted(&mut state, &ctx, seg);
 
-                // Collect the back half as "steady state" (front transient
-                // while the buffer fills is excluded).
-                if i >= K / 2 {
+                let in_steady_state = i >= K / 2;
+                if in_steady_state {
                     steady_depths.push(w.window_segments);
                     steady_work.push(w);
                 }
@@ -413,15 +323,6 @@ fn continuous_throughput_steady_state_depth_with_drain() {
     println!();
 }
 
-// ---------------------------------------------------------------------------
-// Measurement 3: keep-ahead picture in COUNT terms (no-drain worst case)
-// ---------------------------------------------------------------------------
-//
-// COUNT-based keep-ahead: Σgrid_points (total deterministic solver work to plan
-// the chain) vs Σplayback (toolhead execution time at feed). The ratio of
-// solver work to available real-time scales with feedrate because faster feeds
-// shrink Σplayback while the no-drain window grows. This is the worst-case
-// burst (back-to-back curves while nothing has played yet).
 #[test]
 fn continuous_throughput_keep_ahead_counts() {
     const K: usize = 12;
@@ -474,15 +375,6 @@ fn continuous_throughput_keep_ahead_counts() {
     println!();
 }
 
-// ---------------------------------------------------------------------------
-// Measurement 4: decel-to-corner backward horizon (worst case for front-freeze)
-// ---------------------------------------------------------------------------
-//
-// A long straight run-up into a hard corner. The corner forces deceleration
-// that propagates backward many segments — this is the LARGEST backward
-// velocity-propagation horizon, the case where freezing the sub-window front
-// must include the deepest tail to stay trajectory-neutral. We report per-append
-// work counts; the corner append is where backward propagation is deepest.
 #[test]
 fn continuous_throughput_decel_to_corner_counts() {
     const RUN_UP: usize = 12;
@@ -531,13 +423,6 @@ fn continuous_throughput_decel_to_corner_counts() {
     println!();
 }
 
-// ---------------------------------------------------------------------------
-// Measurement 5: ISOLATED wall-time estimate (ROUGH, NON-GATING)
-// ---------------------------------------------------------------------------
-//
-// Single-process median of >= 5 reps of the per-append solve at a fixed window
-// depth. Labeled rough; this is NOT a gate. The real real-time validation
-// happens later on the actual Pi bench. Counts above are the gate.
 #[test]
 fn continuous_throughput_isolated_walltime_estimate() {
     const DEPTH: usize = 8;
@@ -585,13 +470,6 @@ fn continuous_throughput_isolated_walltime_estimate() {
     println!();
 }
 
-// ---------------------------------------------------------------------------
-// THE FIX — trajectory-neutrality + bounded-work tests (DETERMINISTIC GATE)
-// ---------------------------------------------------------------------------
-
-/// Sample the committed (unshaped planned) trajectory of `state` on a dense
-/// time grid over `[0, t_end]`, returning per-axis `(pos, vel)` rows. This is
-/// the deterministic value used to compare bounded vs full re-solve output.
 fn sample_committed(state: &ShaperState, t_end: f64, n: usize) -> Vec<[(f64, f64); 2]> {
     let mut rows = Vec::with_capacity(n + 1);
     for i in 0..=n {
@@ -605,10 +483,6 @@ fn sample_committed(state: &ShaperState, t_end: f64, n: usize) -> Vec<[(f64, f64
     rows
 }
 
-/// Run a chain of curves through `append_and_replan`, advancing a simulated
-/// playback clock so moves commit and drop out of the window (realistic drain),
-/// and after every append capture the committed trajectory and the per-append
-/// `window_segments`. `force_full` selects the legacy whole-window re-solve.
 fn run_chain_capture(
     curves: &[CubicSegment],
     feed: f64,
@@ -625,36 +499,27 @@ fn run_chain_capture(
     let _ = chords;
 
     for seg in curves {
-        // Drain to a WHOLE-segment boundary: snap the playback clock back to the
-        // most recent uncommitted move start that is still ≤ the buffer-trailing
-        // time. This commits whole segments and avoids the mid-segment Bézier
-        // split (a separate, pre-existing Newton-inversion path) so the test
-        // isolates the bounded re-solve's trajectory-neutrality.
-        let raw_playback = (state.t_appended - buffer_s).max(0.0);
-        let snapped = state
+        let buffer_trailing_time = (state.t_appended - buffer_s).max(0.0);
+        let snapped_to_segment_boundary = state
             .uncommitted_moves
             .iter()
             .map(|m| m.t_start)
-            .filter(|&t| t <= raw_playback)
+            .filter(|&t| t <= buffer_trailing_time)
             .fold(0.0_f64, f64::max);
-        if snapped > state.t_dispatched {
-            state.t_dispatched = snapped.min(state.t_appended);
+        if snapped_to_segment_boundary > state.t_dispatched {
+            state.t_dispatched = snapped_to_segment_boundary.min(state.t_appended);
         }
         let report = state
             .append_and_replan(seg.clone(), &ctx)
             .expect("append should plan");
         win_segs.push(report.window_segments);
-        // Compare only the immutable / dispatched region — everything at or
-        // before t_dispatched is committed and must be bit-stable between the
-        // bounded and full re-solve.
-        let t_cmp = state.t_dispatched.max(0.0);
-        committed_snaps.push(sample_committed(&state, t_cmp, 200));
+        let committed_region_end = state.t_dispatched.max(0.0);
+        committed_snaps.push(sample_committed(&state, committed_region_end, 200));
     }
     let _ = feed;
     (committed_snaps, win_segs, state)
 }
 
-/// Max abs (position, velocity) difference between two committed snapshots.
 fn snap_diff(a: &[Vec<[(f64, f64); 2]>], b: &[Vec<[(f64, f64); 2]>]) -> (f64, f64) {
     let mut dp = 0.0_f64;
     let mut dv = 0.0_f64;
@@ -696,10 +561,6 @@ fn bounded_equals_full_smooth_chain() {
     const DX_MM: f64 = 12.0;
     const AMP_MM: f64 = 6.0;
     const FEEDRATE: f64 = 200.0;
-    // Shallow buffer keeps the drain shaper-split-free (the SmoothZV kernel
-    // half-support pushes the freeze point mid-segment at deeper buffers,
-    // exercising an unrelated Bézier-split path). The work-bound win is shown
-    // by the no-drain and decel-to-corner tests; this test's job is neutrality.
     const BUFFER_S: f64 = 0.25;
 
     let (curves, chords) = chained_curves(K, DX_MM, AMP_MM, FEEDRATE);
@@ -791,13 +652,6 @@ fn bounded_equals_full_decel_to_corner() {
         dv < VEL_TOL_MM_S,
         "decel-to-corner bounded drifted committed velocity by {dv} mm/s (> {VEL_TOL_MM_S})"
     );
-    // t_appended is the frontier of the still-MUTABLE tail, not the committed
-    // region. Its absolute value carries the frozen-front segment durations
-    // from the appends in which those segments were last the live tail, so it
-    // differs from the full re-solve by accumulated per-segment solver-timing
-    // noise (≈50 µs/segment). Trajectory-neutrality is defined on the COMMITTED
-    // (dispatched, immutable) region, asserted tightly above; here we only
-    // bound the tail-frontier drift to confirm it is solver-noise small.
     const TAIL_FRONTIER_TOL_S: f64 = 2.0e-3;
     assert!(
         (full_state.t_appended - bnd_state.t_appended).abs() < TAIL_FRONTIER_TOL_S,
@@ -805,8 +659,6 @@ fn bounded_equals_full_decel_to_corner() {
         full_state.t_appended,
         bnd_state.t_appended,
     );
-    // Adaptive-K: the corner append must grow the bounded window well beyond the
-    // smooth steady-state cap to cover the corner's deep backward decel reach.
     let bnd_corner = *bnd_win.last().unwrap();
     let bnd_steady = bnd_win[..bnd_win.len() - 1]
         .iter()
@@ -822,9 +674,6 @@ fn bounded_equals_full_decel_to_corner() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// THE GATE — per-append WORK COUNTS are bounded (capped ~K) vs growing depth
-// ---------------------------------------------------------------------------
 #[test]
 fn bounded_work_is_capped_vs_depth() {
     const K: usize = 28;
@@ -881,7 +730,6 @@ fn bounded_work_is_capped_vs_depth() {
     let full_max_gp = full_rows.iter().map(|w| w.grid_points).max().unwrap();
     let bnd_max_gp = bnd_rows.iter().map(|w| w.grid_points).max().unwrap();
 
-    // Steady-state (back half) bounded window must be flat, not growing.
     let back = &bnd_rows[K / 2..];
     let back_min = back.iter().map(|w| w.window_segments).min().unwrap();
     let back_max = back.iter().map(|w| w.window_segments).max().unwrap();
@@ -897,20 +745,15 @@ fn bounded_work_is_capped_vs_depth() {
     );
     println!();
 
-    // The full re-solve must grow with depth (baseline behaviour).
     assert_eq!(
         full_rows.last().unwrap().window_segments,
         K,
         "full re-solve window must reach the whole chain depth"
     );
-    // The bounded re-solve must NOT grow to full depth — it is capped.
     assert!(
         bnd_max_seg < full_max_seg,
         "bounded window_segments ({bnd_max_seg}) must be strictly below full depth ({full_max_seg})"
     );
-    // And the steady-state bounded window must be flat: the range over the back
-    // half must be small (a constant cap), proving work does not scale with
-    // accumulated window depth.
     assert!(
         back_max - back_min <= 2,
         "bounded steady-state window must be flat (cap), got range [{back_min}, {back_max}]"

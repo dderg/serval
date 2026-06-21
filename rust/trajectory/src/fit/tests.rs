@@ -190,10 +190,6 @@ fn fit_and_split_reduces_piece_count() {
 
 #[test]
 fn fit_and_split_start_d2_matches_composed_input() {
-    // Verify that fit_and_split pins the output's 2nd derivative at the global
-    // start to match the composed input's start 2nd derivative.
-    // Source: x(t) = 0.5*t², y(t) = t, z(t) = 0 on [0, 2].
-    // x''(0) = 1 (constant curvature); y''(0) = 0.
     let composed: Vec<[BezierPiece<f64>; 3]> = (0..2)
         .map(|i| {
             let s = f64::from(i);
@@ -238,11 +234,6 @@ fn fit_and_split_start_d2_matches_composed_input() {
 
 #[test]
 fn fit_and_split_end_d2_matches_composed_input() {
-    // Symmetric to the start-pin test: fit_and_split must also pin the output's
-    // 2nd derivative at the global end to match the composed input's end d2.
-    // Source: x(t) = 50*t² on [0, 1] followed by [1, 2].
-    // Pascal-shifted at s: coeffs = [50*s², 100*s, 50].
-    // x''(t) = 100 everywhere; composed end d2 = 100.
     let a = 50.0_f64;
     let composed: Vec<[BezierPiece<f64>; 3]> = (0..2)
         .map(|i| {
@@ -290,15 +281,6 @@ fn fit_and_split_end_d2_matches_composed_input() {
 
 #[test]
 fn fit_and_split_junction_c2_continuity() {
-    // Fused 2-segment accelerating chain.  Both segments represent uniform
-    // acceleration (x'' = 100 everywhere) so the SOCP boundary condition makes
-    // the composed d2 equal on both sides of the junction.  After fitting each
-    // segment independently through fit_and_split, the fitted end d2 of seg0
-    // must equal the fitted start d2 of seg1.
-    //
-    // Seg0: x(t) = 50*t² on [0, 1].  Pascal-shifted: [0, 0, 50].
-    // Seg1: x(t) = 50 + 100*(t-1) + 50*(t-1)² on [1, 2].
-    //        Pascal-shifted at 1: [50, 100, 50].
     let a = 50.0_f64;
     let seg0: Vec<[BezierPiece<f64>; 3]> = vec![[
         BezierPiece {
@@ -361,23 +343,9 @@ fn fit_and_split_junction_c2_continuity() {
 
 #[test]
 fn junction_accel_step_before_vs_after_both_pin() {
-    // Honest measurement: how much does the junction acceleration gap shrink
-    // when the end-accel pin is added?
-    //
-    // Geometry: a degree-6 x-axis composed piece (sin approximation) whose
-    // 2nd derivative at the end is NOT zero.  A degree-4 start-only fit cannot
-    // reproduce the end curvature exactly; the end d2 will drift.  The
-    // both-pin fit (fit_and_split) must nail the end d2 to the composed value.
-    //
-    // Source curve: f(t) = sin(t) on [0, π/3].  f''(π/3) = -sin(π/3) ≈ −0.866.
-    // We represent it with a degree-6 Pascal-shifted polynomial computed from
-    // the Taylor expansion at t=0.  The position error of this truncated series
-    // is small over [0, π/3] but nonzero, giving the fitter genuine work to do.
     use nurbs::algebra::fit_hermite_c1_clamped;
 
     let t_end = std::f64::consts::PI / 3.0;
-    // Taylor coefficients of sin(t) at 0: t - t^3/6 + t^5/120 - t^7/5040
-    // Pascal-shifted at 0 these are the raw coefficients:
     let sin_coeffs = vec![
         0.0_f64,     // c0 = sin(0)
         1.0,         // c1 = cos(0)
@@ -415,8 +383,6 @@ fn junction_accel_step_before_vs_after_both_pin() {
         p.differentiate().differentiate().evaluate(p.u_end)
     };
 
-    // "Before": start-pin-only fit at degree-4.  The fitter is free to choose
-    // any end d2 it likes in order to minimise position residual.
     let before_fit =
         fit_hermite_c1_clamped::<3>(&composed_seg0, 0.005, 4, Some(composed_d2_start), None)
             .unwrap();
@@ -425,7 +391,6 @@ fn junction_accel_step_before_vs_after_both_pin() {
         p.differentiate().differentiate().evaluate(p.u_end)
     };
 
-    // "After": both pins via fit_and_split.
     let after_fit = fit_and_split(&composed_seg0, 0.005, None).unwrap();
     let after_pieces = nurbs::bezier::extract_bezier_pieces(&after_fit.axes[0]);
     let after_end_d2 = {
@@ -436,12 +401,10 @@ fn junction_accel_step_before_vs_after_both_pin() {
     let gap_before = (before_end_d2 - composed_d2_end).abs();
     let gap_after = (after_end_d2 - composed_d2_end).abs();
 
-    // After must nail the end accel to the composed value.
     assert!(
         gap_after < 1e-4,
         "After both-pin fit: end d2 gap={gap_after:.6e} (expected < 1e-4)"
     );
-    // Before must show a larger gap (demonstrating the improvement).
     assert!(
         gap_before > gap_after,
         "Before gap ({gap_before:.6}) should exceed after gap ({gap_after:.6e}); \

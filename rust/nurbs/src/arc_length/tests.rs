@@ -22,7 +22,6 @@ fn owned_as_view_round_trips() {
 #[cfg(feature = "host")]
 #[test]
 fn integrate_constant_returns_length_times_constant() {
-    // ∫_0^1 of f(u)=2 should be 2.
     let result = integrate_arc_length(|_u: f64| 2.0_f64, 0.0, 1.0, 5);
     assert!((result - 2.0).abs() < 1e-12);
 }
@@ -30,7 +29,6 @@ fn integrate_constant_returns_length_times_constant() {
 #[cfg(feature = "host")]
 #[test]
 fn integrate_linear_matches_closed_form() {
-    // ∫_0^1 of f(u)=u should be 0.5.
     let result = integrate_arc_length(|u: f64| u, 0.0, 1.0, 5);
     assert!((result - 0.5).abs() < 1e-12);
 }
@@ -38,7 +36,6 @@ fn integrate_linear_matches_closed_form() {
 #[cfg(feature = "host")]
 #[test]
 fn integrate_quadratic_matches_closed_form() {
-    // ∫_0^1 of f(u)=u^2 should be 1/3. 5-point Gauss-Legendre is exact for degree <= 9.
     let result = integrate_arc_length(|u: f64| u * u, 0.0, 1.0, 5);
     assert!((result - 1.0 / 3.0).abs() < 1e-12);
 }
@@ -71,8 +68,8 @@ fn param_from_arc_length_at_endpoints() {
 #[test]
 fn param_from_arc_length_interpolates_linearly() {
     let table = ArcLengthTableRef::new(&[0.0_f64, 0.5, 1.0], &[0.0, 0.6, 1.0]);
-    // s = 0.25 lies between (0.0 -> 0.0) and (0.5 -> 0.6); linear interp gives 0.3.
-    assert!((param_from_arc_length(&table, 0.25_f64) - 0.3).abs() < 1e-12);
+    let expected_interp = 0.3;
+    assert!((param_from_arc_length(&table, 0.25_f64) - expected_interp).abs() < 1e-12);
 }
 
 #[allow(clippy::float_cmp)]
@@ -107,8 +104,6 @@ fn build_vector_table_for_3d_linear_curve() {
 
 #[test]
 fn try_from_wire_parses_small_table() {
-    // Layout: u8 version, u8 reserved, u16 sample_count, u32 reserved2,
-    //         T[sample_count] s, T[sample_count] u
     let mut buf = Vec::new();
     buf.extend_from_slice(&[1u8, 0]); // version, reserved
     buf.extend_from_slice(&3u16.to_ne_bytes()); // sample_count
@@ -133,8 +128,7 @@ struct AlignedBytes {
 
 impl AlignedBytes {
     fn as_slice(&self) -> &[u8] {
-        // SAFETY: `Vec<u32>` is 4-byte aligned and `len <= backing.len() * 4`.
-        // `u32` has no padding and any bit pattern is a valid `u8` byte.
+        debug_assert!(self.len <= self.backing.len() * core::mem::size_of::<u32>());
         #[allow(unsafe_code)]
         unsafe {
             core::slice::from_raw_parts(self.backing.as_ptr().cast::<u8>(), self.len)
@@ -145,8 +139,7 @@ impl AlignedBytes {
 fn test_align(data: &[u8], _align: usize) -> AlignedBytes {
     let n = data.len().div_ceil(4);
     let mut backing: Vec<u32> = vec![0; n];
-    // SAFETY: `backing` owns `n*4` bytes 4-byte aligned; `data.len() <= n*4`.
-    // `u32` has no padding so writing arbitrary bytes is well-defined.
+    debug_assert!(data.len() <= n * core::mem::size_of::<u32>());
     #[allow(unsafe_code)]
     let bytes: &mut [u8] =
         unsafe { core::slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), n * 4) };

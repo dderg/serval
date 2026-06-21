@@ -264,17 +264,15 @@ fn pos_vel_accel_on_cubic_polynomial() {
 
 #[test]
 fn pos_vel_accel_on_linear_polynomial_returns_zero_accel() {
-    // f(u) = u, degree-1 Bézier cps=[0,1], knots=[0,0,1,1].
-    // Note: 0.3_f32 widens to ~0.30000001192 in f64, so position tolerance
-    // accommodates the f32→f64 round-trip on u (~1.2e-8). Velocity and
-    // acceleration are exact (rational arithmetic on exact knots/cps).
     let cps = vec![0.0_f32, 1.0];
     let knots = vec![0.0_f32, 0.0, 1.0, 1.0];
+    let f32_round_trip_tol = 1e-6;
+    let exact_arithmetic_tol = 1e-9;
     let (p, v, a) = eval_polynomial_f32_with_pos_vel_accel_f64(&cps, &knots, 1, 0.3);
-    assert!((p - 0.3).abs() < 1e-6, "pos={}", p);
-    assert!((v - 1.0_f64).abs() < 1e-9, "vel={}", v);
+    assert!((p - 0.3).abs() < f32_round_trip_tol, "pos={}", p);
+    assert!((v - 1.0_f64).abs() < exact_arithmetic_tol, "vel={}", v);
     assert!(
-        a.abs() < 1e-9,
+        a.abs() < exact_arithmetic_tol,
         "linear curve must have zero second derivative; got {}",
         a
     );

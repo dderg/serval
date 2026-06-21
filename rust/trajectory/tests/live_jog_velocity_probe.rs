@@ -86,14 +86,6 @@ fn run_jog_experiment(
     converged
 }
 
-/// Mid-flight replan of back-to-back fast moves used to drive the jerk-relaxation
-/// derate loop to its iteration cap without converging: the feasibility emit padded
-/// the first window segment's left edge against empty shaper history, fabricating a
-/// velocity step at the dispatch seam whose convolution looked like a ~2x acceleration
-/// spike. Derating planning accel could not move a boundary artifact, so the loop spun
-/// to the cap (~294 ms on the Pi) and starved playback. With the left pad extrapolated
-/// at the entry velocity instead, the phantom is gone and every regime converges in one
-/// iteration — regardless of direction reversal, segment length, or feedrate-to-vmax ratio.
 #[test]
 fn mid_flight_fast_jog_replan_converges_across_regimes() {
     let feedrate = 1000.0;
@@ -279,10 +271,6 @@ fn probe_stream(label: &str, segments: &[ShapedSegment]) {
     }
 }
 
-/// Regression for the 2026-06-11 Trident crash: back-to-back +30/-30 mm jogs at the
-/// 1000 mm/s axis limit. Each mid-flight replan must converge within the iteration cap;
-/// non-convergence is what blew the real-time budget (294 ms solve for 30 ms of motion)
-/// and tripped the SegmentLate fatal abort.
 #[test]
 fn back_to_back_fast_jogs_replan_stays_realtime() {
     let ctx = live_ctx();

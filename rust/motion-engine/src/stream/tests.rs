@@ -36,16 +36,13 @@ fn collinear_jogs_commit_at_the_seam_without_stopping() {
     s.push(line(2, [50.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.0));
 
     let committed = s.commit(false).unwrap();
-    // The collinear junction is a clean seam: the first jog commits, the second is kept.
     assert!(!committed.is_empty());
     assert_eq!(s.buffered(), 1);
-    // No stop between the jogs: the carried seam velocity is well above rest.
     assert!(
         s.entry_velocity() > 1.0,
         "seam velocity {} should be cruising, not stopped",
         s.entry_velocity()
     );
-    // Committed boundary position is the seam (x = 50).
     let last = committed.last().unwrap();
     assert!((eval(&last.axes[0], last.t_end) - 50.0).abs() < 1e-6);
 }
@@ -56,7 +53,6 @@ fn flush_commits_everything_to_rest() {
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.0));
 
-    // keep_secs large => nothing commits without force.
     assert!(s.commit(false).unwrap().is_empty());
 
     let committed = s.commit(true).unwrap();
@@ -69,8 +65,6 @@ fn flush_commits_everything_to_rest() {
 
 #[test]
 fn blended_corner_is_never_split_by_a_commit() {
-    // A 90-degree corner is blended (clothoid); there is no clean seam, so a
-    // non-forced commit must emit nothing rather than split the blend.
     let mut s = StreamState::new(cfg(0.0), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 0.0));
@@ -81,7 +75,6 @@ fn blended_corner_is_never_split_by_a_commit() {
     );
     assert_eq!(s.buffered(), 2);
 
-    // Force still drains it to rest.
     assert!(!s.commit(true).unwrap().is_empty());
     assert!(s.is_empty());
 }
@@ -95,7 +88,6 @@ fn odometer_accumulates_extrusion_across_commits() {
     let committed = s.commit(true).unwrap();
     assert!(s.is_empty());
     let last = committed.last().unwrap();
-    // Extruder (axis 3) reached the cumulative delta 8.0 at the final boundary.
     assert!((eval(&last.axes[3], last.t_end) - 8.0).abs() < 1e-3);
 }
 
@@ -123,16 +115,15 @@ fn advance_idle_reanchors_committed_time_after_a_gap() {
     let first = s.commit(true).unwrap();
     let after_first = first.last().unwrap().t_end;
 
-    // Long idle gap: the machine has caught up well past the committed horizon.
-    s.advance_idle(after_first + 50.0);
+    let idle_gap_past_horizon_secs = 50.0;
+    s.advance_idle(after_first + idle_gap_past_horizon_secs);
     s.push(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 0.0));
     let second = s.commit(true).unwrap();
     assert!(
-        second[0].t_start >= after_first + 50.0 - 1e-9,
+        second[0].t_start >= after_first + idle_gap_past_horizon_secs - 1e-9,
         "second move must start at the re-anchored time, got {}",
         second[0].t_start
     );
-    // never rewinds:
     s.advance_idle(0.0);
     assert!(s.t_committed() >= second.last().unwrap().t_end - 1e-9);
 }

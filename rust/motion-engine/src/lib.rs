@@ -50,8 +50,6 @@ use pyo3::prelude::*;
 
 use bridge::PyMotionEngine;
 
-// Underscore-prefixed so the compiled extension (_motion_engine) does not
-// shadow the pure-Python wrapper klippy/motion_engine.py that imports it.
 #[pymodule]
 fn _motion_engine(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMotionEngine>()?;

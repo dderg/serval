@@ -81,7 +81,6 @@ fn jog_50mm_at_100mms_with_live_limits() {
         result.beta_warning,
     );
     eprintln!("[probe] temporal_status={:?}", result.temporal_status);
-    // No assertion — pure probe. CARGO_LOG=1 cargo test prints duration.
     assert!(
         duration < 5.0,
         "trajectory exploded to {duration}s — probe needs adjustment"

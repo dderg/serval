@@ -99,20 +99,12 @@ fn smooth_junction_has_no_accel_impulse() {
     let a_end_left = out.profiles[0].samples.last().unwrap().a;
     let a_start_right = out.profiles[1].samples[0].a;
 
-    // Pre-fix: independent FD endpoints, V-profile makes them differ by
-    // O(a_max) — expect this assert to fail with step ≈ 1e3..1e4.
-    // Post-fix: structural check only — slicing duplicates the single shared
-    // junction variable into both profiles, so step == 0 by construction.
-    // The PHYSICAL test is the contract-(b) jerk assertion below.
     let step = (a_end_left - a_start_right).abs();
     assert!(
         step < 1.0,
         "junction accel step {step:.1} mm/s² — boundary accels are decoupled"
     );
 
-    // Contract (b): the junction-spanning discrete jerk obeys j_max. Build
-    // the spanning second difference from the two slices (junction sample
-    // duplicated, so left[n-2], junction, right[1]).
     let left = &out.profiles[0].samples;
     let right = &out.profiles[1].samples;
     let (bl, bj, br) = (left[left.len() - 2].b, left[left.len() - 1].b, right[1].b);

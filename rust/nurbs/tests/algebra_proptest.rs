@@ -20,8 +20,6 @@ fn arb_simple_polynomial_curve() -> impl Strategy<Value = nurbs::ScalarNurbs<f64
 }
 
 fn arb_multi_piece_curve() -> impl Strategy<Value = nurbs::ScalarNurbs<f64>> {
-    // Generates curves with 1-2 interior knots, well-separated (>0.1 apart) to
-    // avoid coincident-knot collisions during proptest shrinking.
     (1u8..=4, 1usize..=2).prop_flat_map(|(p, num_interior)| {
         let pad = p as usize + 1;
         let n = p as usize + 1 + num_interior;
@@ -52,11 +50,6 @@ fn arb_single_poly_kernel() -> impl Strategy<Value = nurbs::algebra::PiecewisePo
 
 fn arb_curve_with_existing_interior_multiplicity()
 -> impl Strategy<Value = (nurbs::ScalarNurbs<f64>, f64, usize, usize)> {
-    // Generates (curve, u_knot, p, existing_mult_at_u) with TWO interior knots:
-    // the target knot at `existing_mult_at_u >= 1` plus one other. Without the
-    // second knot the local CP polygon is constrained by uniform surrounding knots
-    // and the A5.3 bug produces the right eval by accident. Constraint
-    // `existing <= p - 2` ensures r_max >= 2, the regime that triggered A5.3.
     (3u8..=4, 0.1..0.45_f64, 0.55..0.9_f64, prop::bool::ANY).prop_flat_map(|(p, ka, kb, swap)| {
         let (u_knot, other_knot) = if swap { (ka, kb) } else { (kb, ka) };
         let existing_strategy: BoxedStrategy<usize> = (1usize..=(p as usize - 2)).boxed();
@@ -229,8 +222,6 @@ proptest! {
 }
 
 proptest! {
-    // Knot values propagate bit-exact through insertion / Bezier extraction in
-    // our pipeline; the exact equality check is intentional structural verification.
     #[test]
     #[allow(clippy::float_cmp)]
     fn multiply_product_has_morken_multiplicities_at_kinks(

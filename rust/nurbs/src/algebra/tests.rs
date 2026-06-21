@@ -53,8 +53,6 @@ fn integrate_product_constant_input_constant_kernel_yields_linear_result() {
 
     let contribution = integrate_product_piece(&x, &w, 0.5, 1.0);
 
-    // y(u) = 6 * (1.5 − u) for u ∈ [0.5, 1.0].
-    // Pascal-shifted at u_start = 0.5: y = 6 − 6·(u − 0.5), so coeffs = [6.0, −6.0].
     assert!((contribution.coeffs[0] - 6.0).abs() < 1e-10);
     assert!((contribution.coeffs[1] - (-6.0)).abs() < 1e-10);
 }
@@ -241,11 +239,6 @@ fn single_poly_from_absolute_round_trips_via_evaluate() {
 
 #[test]
 fn multiply_regression_proptest_shrunk_failing_input() {
-    // Captured from algebra_proptest::multiply_multi_piece_eval_matches_pointwise_product
-    // pre-Fix-1 (Mørken-bounded knot removal). At u=0.1, b has C⁰ kink (m_b=1, d_b=1)
-    // and a has interior multiplicity-1 knot (m_a=1, d_a=3). Per Mørken Eq. (1):
-    // μ_target(0.1) = max(3+1, 1+1) = 4. Pre-Fix-1 the unbounded knot_remove_redundant
-    // peeled below 4, smearing the C⁰ kink and producing wrong eval at u=0.1.
     let a = crate::ScalarNurbs::<f64>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 0.1, 0.55, 1.0, 1.0, 1.0, 1.0],
@@ -259,8 +252,6 @@ fn multiply_regression_proptest_shrunk_failing_input() {
     )
     .unwrap();
     let c = multiply(&a, &b).unwrap();
-    // Pointwise product at u=0.1 should be ≈ 0.014107177131003477.
-    // Pre-fix `multiply` returned ≈ 0.007758947422051913.
     let exp = eval(&a.as_view(), 0.1) * eval(&b.as_view(), 0.1);
     let got = eval(&c.as_view(), 0.1);
     assert!(
@@ -291,17 +282,6 @@ fn multiply_quadratic_x_linear_gives_cubic() {
     }
 }
 
-// Note: this test deliberately does NOT assert μ_y = 0 at the boundary
-// cross-sums u ∈ {0.1, 0.9}. The spec's convolution-continuity rule
-// predicts μ_y = 0 there (no real continuity break), but in practice the
-// post-pass knot_remove_redundant (Tiller A5.8 with chord-error tol)
-// can only peel a knot when both polynomial pieces match as polynomial
-// expressions, not just as functions agreeing at the join. At a boundary
-// cross-sum the left and right pieces of y differ by (u − u_break)^k
-// terms that vanish at the join but not elsewhere, so Tiller refuses
-// removal even though geometrically the curve is C-infinity there. This
-// leaves extra multiplicity at boundary cross-sums; harmless (eval is
-// correct, downstream ops don't care) and not the bug class tested here.
 #[test]
 fn convolve_multi_piece_input_with_c0_kink_preserves_natural_multiplicity() {
     let x = crate::ScalarNurbs::<f64>::try_new(
@@ -329,14 +309,6 @@ fn convolve_multi_piece_input_with_c0_kink_preserves_natural_multiplicity() {
         "expected μ_y(0.4) = m_x = 2 (kink image), got {mult_at_04}; full interior = {interior:?}",
     );
 
-    // x_1(s) = (20/3) s + (200/9) s² on [0, 0.3];
-    // x_2(s) = 4 − 10 (s − 0.3) + (320/49) (s − 0.3)² on [0.3, 1.0].
-    //   y(0.2) = ∫_{0.1}^{0.3} x_1(s) ds
-    //          = (10/3)(0.09 − 0.01) + (200/27)(0.027 − 0.001)
-    //          = 0.8/3 + 5.2/27.
-    //   y(0.4) = ∫_{0.3}^{0.5} x_2(s) ds
-    //          = 4·0.2 − 5·(0.2)² + (320/147)·(0.2)³
-    //          = 0.6 + 2.56/147.
     let exp_02 = 0.8 / 3.0 + 5.2 / 27.0;
     let exp_04 = 0.6 + 2.56 / 147.0;
     let got_02 = eval(&y.as_view(), 0.2);
@@ -352,11 +324,6 @@ fn convolve_multi_piece_input_with_c0_kink_preserves_natural_multiplicity() {
         (got_04 - exp_04).abs(),
     );
 
-    //   y(0.5) = ∫_{0.4}^{0.6} x_2(s) ds
-    //          = ∫_{0.1}^{0.3} (4 − 10·v + (320/49)·v²) dv  (v = s − 0.3)
-    //          = 4·0.2 − 5·(0.09 − 0.01) + (320/147)·(0.027 − 0.001)
-    //          = 0.8 − 0.4 + (320·0.026)/147
-    //          = 0.4 + 8.32/147.
     let exp_05 = 0.4 + 8.32 / 147.0;
     let got_05 = eval(&y.as_view(), 0.5);
     assert!(
@@ -418,6 +385,19 @@ fn add_with_knot_union_mismatched_knots_union_path() {
             "union-path u={u}: expected {expected}, got {got}",
         );
     }
+}
+
+#[test]
+fn add_with_knot_union_doc_example() {
+    use crate::ScalarNurbs;
+    let x =
+        ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 0.5, 1.0, 1.0], vec![0.0, 5.0, 10.0]).unwrap();
+    let y = ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 1.0, 1.0], vec![20.0, 20.0]).unwrap();
+    let sum = add_with_knot_union(&x, &y).unwrap();
+    let v0 = crate::eval::eval(&sum.as_view(), 0.0_f64);
+    let v1 = crate::eval::eval(&sum.as_view(), 1.0_f64);
+    assert!((v0 - 20.0).abs() < 1e-12);
+    assert!((v1 - 30.0).abs() < 1e-12);
 }
 
 #[test]

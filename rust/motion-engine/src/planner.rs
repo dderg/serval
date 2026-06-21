@@ -240,8 +240,6 @@ impl PlannerHandle {
             "planner.submit_move enter"
         );
 
-        // Advance before channel send so the atomic is fresh when submit_move returns.
-        // CAS guards against concurrent rectification from the planner thread.
         let nominal = m.nominal_duration();
         advance_last_move_time(&self.last_move_time_bits, nominal);
 
@@ -349,8 +347,6 @@ impl PlannerHandle {
             .map_err(|_| PlannerError::ChannelClosed)
     }
 
-    /// Must be called *before* `Router::set_clock_est_from_sample` to drain
-    /// held-back output under the old bias first.
     pub fn clock_sync_rearm(&self, new_bias: ClockBias) -> Result<(), PlannerError> {
         self.sender
             .send(PlannerMsg::ClockSyncRearm { new_bias })
@@ -422,8 +418,8 @@ fn fatal(e: &PlannerError) -> ! {
         error = %e,
         "planner encountered an unrecoverable error — aborting"
     );
-    // abort() skips the non_blocking appender's flush; let the worker drain.
-    std::thread::sleep(Duration::from_millis(100));
+    let log_appender_flush_drain = Duration::from_millis(100);
+    std::thread::sleep(log_appender_flush_drain);
     std::process::abort();
 }
 
@@ -584,9 +580,6 @@ fn run_loop(
 
         match msg {
             PlannerMsg::Move(m) => {
-                // `submit_move` already advanced `last_move_time_bits` by the nominal.
-                // Rectify if actual diverges: use CAS since submit_move is a concurrent writer.
-                // Rectify against t_appended delta (not dispatched): the decel tail is held back.
                 let nominal = m.nominal_duration();
                 let prior_t_appended = state.t_appended;
                 let prior_t_decel = state.t_decel_start;
@@ -605,12 +598,8 @@ fn run_loop(
                             &commit_fire_count,
                         );
                     }
-                    // Resume with the same dispatch cushion a fresh stream
-                    // gets: anchoring at bare `esc` leaves the upcoming
-                    // append_and_replan solve (observed 100-200 ms) to consume
-                    // the entire lead before seg0 is even emitted, landing
-                    // pieces in the MCU past.
-                    state.advance_idle(esc + LEAD);
+                    let resume_with_dispatch_cushion = esc + LEAD;
+                    state.advance_idle(resume_with_dispatch_cushion);
                 }
 
                 let replan_start = Instant::now();
@@ -715,9 +704,6 @@ fn run_loop(
                 {
                     let fields =
                         crate::binding_report::anytime_event_fields(&binding, &limit_names);
-                    // Fixed-decimal so the JSON layer stores e.g. "0.5970" instead of
-                    // serde's "2.03e-7" — comparable at a glance in the log UI and still
-                    // numerically filterable (VL parses numeric-looking strings).
                     let binding_ratio_str = format!("{:.4}", fields.binding_ratio);
                     let peak_util_str = format!("{:.4}", binding.peak_utilization);
                     let peak_util_family = match binding.peak_util_family {
@@ -771,9 +757,8 @@ fn run_loop(
                     }
                 }
 
-                // Capture sync_instant only on non-empty dispatch, not at append.
-                // Capturing at append would make elapsed_since_sync run ahead of the MCU playhead.
-                if sync_instant.is_none() && !drained.is_empty() {
+                let pieces_reached_mcu = !drained.is_empty();
+                if sync_instant.is_none() && pieces_reached_mcu {
                     sync_instant = Some(Instant::now());
                 }
 
@@ -853,9 +838,6 @@ fn run_loop(
             }
 
             PlannerMsg::ClockSyncRearm { new_bias: _ } => {
-                // Pre-swap barrier: flush held-back output under the old clock bias.
-                // Must run before Router::set_clock_est_from_sample — calling after
-                // would shape the drained tail under the new bias.
                 if state.t_dispatched < state.t_appended - 1e-12 {
                     run_commit_and_dispatch(
                         &mut state,

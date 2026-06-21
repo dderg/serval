@@ -330,7 +330,6 @@ impl AxisRegistry {
         &self.ordered
     }
 
-    /// `(follower_axis_index, followed_axis_indices)` per non-spatial axis.
     #[must_use]
     pub fn follower_index_map(&self) -> Vec<(usize, Vec<usize>)> {
         self.ordered
@@ -410,10 +409,6 @@ pub struct RuntimeCaps {
     pub accel: Option<f64>,
 }
 
-/// Mainline-style global motion limits read from `[printer]`: one velocity /
-/// accel / jerk for the XY plane plus separate Z caps. The streaming geometry
-/// pipeline projects these per move (Z caps bind only on Z-bearing moves), so
-/// an XY move never inherits the slower Z limit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CartesianLimits {
     pub max_velocity: f64,
@@ -454,9 +449,6 @@ impl CartesianLimits {
         Ok(())
     }
 
-    /// The scalar path caps for a move with spatial deltas `(dx, dy, dz)`. The Z
-    /// caps project onto the path by the move's Z direction cosine, mirroring
-    /// mainline's `move.limit_speed(max_z_* / |z_unit|)`.
     #[must_use]
     pub fn for_move(&self, dx: f64, dy: f64, dz: f64) -> (f64, f64) {
         let d = (dx * dx + dy * dy + dz * dz).sqrt();
@@ -507,10 +499,6 @@ impl LimitSection {
     }
 }
 
-/// Square-corner velocity used when `[printer]` omits `square_corner_velocity`.
-/// The pipeline blends corners and caps their speed by curvature (`sqrt(a/κ)`),
-/// so this is not the primary corner limiter; it satisfies `VelocityLimits`'
-/// contract and is the floor applied to near-reversal junctions.
 pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
 
 impl PlannerConfig {
@@ -534,9 +522,6 @@ impl PlannerConfig {
         )
     }
 
-    /// Collapse the spatial limit sections (most-restrictive across them) plus
-    /// any runtime-caps override into the scalar path limits the geometry
-    /// pipeline consumes per move.
     pub fn path_velocity_limits(&self) -> Result<geometry::VelocityLimits, &'static str> {
         let mut max_v = f64::INFINITY;
         let mut max_a = f64::INFINITY;
@@ -564,9 +549,6 @@ impl PlannerConfig {
         geometry::VelocityLimits::try_new(max_v, max_a, DEFAULT_SQUARE_CORNER_VELOCITY_MM_S)
     }
 
-    /// Most-restrictive spatial jerk cap (falling back to `accel × default
-    /// multiple`, then a finite engine default) for the geometry velocity
-    /// planner's jerk-limited s-curve.
     #[must_use]
     pub fn path_velocity_config(&self) -> geometry::VelocityConfig {
         let mut max_j = f64::INFINITY;

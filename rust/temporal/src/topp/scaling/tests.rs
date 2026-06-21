@@ -55,7 +55,6 @@ fn grid_scaling_fields_have_correct_power_of_sigma() {
     let grid = tiny_grid(raw_s, raw_kappa);
     let scaled = scale.scale_grid(&grid);
 
-    // s ÷ σ
     for (raw, sc) in grid.s.iter().zip(scaled.s.iter()) {
         assert!(
             (sc - raw / sigma).abs() < 1e-12,
@@ -65,12 +64,10 @@ fn grid_scaling_fields_have_correct_power_of_sigma() {
         );
     }
 
-    // u unchanged
     for (raw, sc) in grid.u.iter().zip(scaled.u.iter()) {
         assert!((sc - raw).abs() < 1e-12, "u field should be unchanged");
     }
 
-    // c ÷ σ
     for (raw, sc) in grid.c.iter().zip(scaled.c.iter()) {
         for ax in 0..3 {
             assert!(
@@ -82,7 +79,6 @@ fn grid_scaling_fields_have_correct_power_of_sigma() {
         }
     }
 
-    // c_prime unchanged (dimensionless dC/ds)
     for (raw, sc) in grid.c_prime.iter().zip(scaled.c_prime.iter()) {
         for ax in 0..3 {
             assert!(
@@ -92,7 +88,6 @@ fn grid_scaling_fields_have_correct_power_of_sigma() {
         }
     }
 
-    // c_double_prime ×σ
     for (raw, sc) in grid.c_double_prime.iter().zip(scaled.c_double_prime.iter()) {
         for ax in 0..3 {
             let expected = raw[ax] * sigma;
@@ -105,7 +100,6 @@ fn grid_scaling_fields_have_correct_power_of_sigma() {
         }
     }
 
-    // c_triple_prime ×σ²
     for (raw, sc) in grid.c_triple_prime.iter().zip(scaled.c_triple_prime.iter()) {
         for ax in 0..3 {
             let expected = raw[ax] * sigma * sigma;
@@ -118,7 +112,6 @@ fn grid_scaling_fields_have_correct_power_of_sigma() {
         }
     }
 
-    // total_length ÷ σ
     assert!(
         (scaled.total_length - raw_s / sigma).abs() < 1e-12,
         "total_length: expected {}, got {}",

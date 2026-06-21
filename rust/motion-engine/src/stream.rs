@@ -14,14 +14,7 @@ pub struct StreamConfig {
     pub chain: ChainFitConfig,
     pub velocity: VelocityConfig,
     pub fit_tol_mm: f64,
-    /// Look-ahead margin held back from each non-forced commit. The trailing
-    /// `keep_secs` of planned trajectory stays uncommitted so committed
-    /// junction velocities were planned with enough downstream context and are
-    /// not pulled down by the buffer's pessimistic terminal-`v=0`.
     pub keep_secs: f64,
-    /// Path limits for planner-internal moves (homing). Stream moves submitted
-    /// through the bridge carry their own per-move limits; this is the fallback
-    /// the planner uses when it constructs a move itself.
     pub limits: VelocityLimits,
 }
 
@@ -60,19 +53,10 @@ impl From<LoweringError> for StreamError {
     }
 }
 
-/// Streaming look-ahead planner over the new geometry pipeline. Buffers
-/// submitted moves, re-plans the uncommitted window warm-started from the
-/// dispatched velocity, and commits prefixes at clean (non-blended) seams so
-/// the trajectory stays velocity-continuous across consecutive moves without
-/// re-emitting committed pieces. Commit timing (real-time cadence) is the
-/// caller's; this type owns the geometry/velocity state.
 pub struct StreamState {
     buffer: VecDeque<Move>,
-    /// Absolute velocity at the committed seam (entry of the buffer's first move).
     entry_v: f64,
-    /// Absolute registry position at the committed seam (index = registry axis).
     odometer: Vec<f64>,
-    /// Absolute planner time of the committed seam.
     t_committed: f64,
     config: StreamConfig,
 }
@@ -100,9 +84,6 @@ impl StreamState {
         self.buffer.push_back(m);
     }
 
-    /// Advance the committed time cursor by an idle gap (a dwell) without
-    /// emitting motion. Only valid when fully committed (buffer empty); the
-    /// seam velocity must already be at rest.
     pub fn advance_time(&mut self, dt: f64) {
         debug_assert!(
             self.buffer.is_empty(),
@@ -114,11 +95,6 @@ impl StreamState {
         }
     }
 
-    /// Re-anchor the committed time cursor to `target_t` (the live MCU playhead
-    /// plus lead) after the stream has gone idle and the machine has caught up.
-    /// Without this, a move submitted after an idle gap is planned at a stale
-    /// planner time and lands in the MCU's past. Only valid at rest with a
-    /// drained buffer; never moves the cursor backward.
     pub fn advance_idle(&mut self, target_t: f64) {
         debug_assert!(
             self.buffer.is_empty(),
@@ -130,14 +106,6 @@ impl StreamState {
         }
     }
 
-    /// Restart the committed timeline at the origin after the machine has gone
-    /// idle and the playhead has caught up. The next dispatched segment then
-    /// re-anchors against the live playhead at dispatch time — like a freshly
-    /// opened stream — instead of inheriting the prior run's stale anchor, which
-    /// would land the resumed move in the MCU's past. Position is preserved;
-    /// only the time cursor resets. The caller must also drop its wall-clock
-    /// sync so the playhead and committed clocks realign at the origin. Valid
-    /// only at rest with a drained buffer.
     pub fn restart_idle_timeline(&mut self) {
         debug_assert!(
             self.buffer.is_empty(),
@@ -175,10 +143,6 @@ impl StreamState {
         self.config.limits
     }
 
-    /// Plan the buffer and commit a prefix at the latest clean seam. `force`
-    /// (flush / dwell / idle drain / shutdown) commits the entire buffer to
-    /// rest. Returns the `ShapedSegment`s to dispatch, in order; empty when
-    /// nothing is committable yet.
     pub fn commit(&mut self, force: bool) -> Result<Vec<ShapedSegment>, StreamError> {
         if self.buffer.is_empty() {
             return Ok(Vec::new());

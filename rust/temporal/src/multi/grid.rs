@@ -22,31 +22,6 @@ pub(crate) fn compute_n(strategy: &GridStrategy, curve: &VectorNurbs<f64, 3>) ->
     }
 }
 
-/// Adjust per-segment node counts so that at every junction the boundary
-/// interval ratio stays within `MAX_JUNCTION_SPACING_RATIO`. Each entry in
-/// `ns` corresponds to the matching entry in `curves`; the two slices must be
-/// the same length and represent consecutive segments in one chain.
-///
-/// Strategy (single forward pass, then single backward pass):
-///
-/// For each junction (i, i+1) the boundary spacing is `h = L/(n-1)` where L
-/// is the control-polygon length.  When `h[i]/h[i+1] > MAX`:
-/// 1. Increase `n[i]` toward `max_n` to reduce `h[i]`.
-/// 2. If `max_n` is insufficient, reduce `n[i+1]` (floor toward 2) to raise
-///    `h[i+1]` until the ratio is within bound.
-///
-/// This never increases n beyond `max_n` and never decreases n below 2, so
-/// the resulting grids are always valid inputs to `sample_arclength_grid`.
-/// `Fixed` grids are left unchanged.
-///
-/// Returns a mask of segments to absorb — contributing no grid nodes to the
-/// chain — because their spacing deficit is length-determined: even with the
-/// segment at n=2 (one interval spanning its whole arclength) and its
-/// neighbor refined to `max_n`, the junction ratio exceeds
-/// `MAX_JUNCTION_SPACING_RATIO`. Runs on the natural (pre-reconcile) node
-/// counts; reconciliation afterwards must skip absorbed segments, otherwise
-/// it inflates a neighbor's n chasing a segment that will not exist in the
-/// grid. At least one segment always stays non-absorbed.
 pub(crate) fn classify_absorbed(
     ns: &[usize],
     curves: &[&VectorNurbs<f64, 3>],
@@ -164,11 +139,6 @@ pub(crate) fn reconcile_junction_n(
     }
 }
 
-/// Control-polygon length (sum of `‖cp[i+1] − cp[i]‖`).
-///
-/// For non-rational degree-1 NURBS this equals arclength exactly; for
-/// higher-degree or rational curves it is a strict upper bound — used only
-/// as a heuristic for grid-density.
 fn control_polygon_length_mm(curve: &VectorNurbs<f64, 3>) -> f64 {
     let cps = curve.control_points();
     cps.windows(2)

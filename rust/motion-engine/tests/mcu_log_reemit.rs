@@ -11,10 +11,7 @@ use host_rt::clock::RealClock;
 use host_rt::host_io::runtime_events::McuLogEvent;
 use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
 
-/// Serialise tests that call `context::set_context` so they don't race on the
-/// process-global `ArcSwap<SessionContext>`.  Integration tests run in the same
-/// binary (one process), so a per-file mutex is sufficient.
-static CTX_LOCK: Mutex<()> = Mutex::new(());
+static GLOBAL_CONTEXT_SERIALISER: Mutex<()> = Mutex::new(());
 
 fn tmp_jsonl(dir_suffix: &str, filename: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -50,7 +47,9 @@ fn make_empty_router(label: &str) -> (Arc<Mutex<PassthroughRouter>>, McuHandle) 
 
 #[test]
 fn re_emit_closure_produces_schema_conformant_line() {
-    let _ctx_guard = CTX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _ctx_guard = GLOBAL_CONTEXT_SERIALISER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     context::set_context("k-test-session".to_string(), "print-42".to_string());
 
     let path = tmp_jsonl("reemit", "mcu-h7.jsonl");
@@ -114,7 +113,9 @@ fn re_emit_closure_produces_schema_conformant_line() {
 
 #[test]
 fn fallback_stamps_time_estimated_true_when_no_clock_sync_samples() {
-    let _ctx_guard = CTX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _ctx_guard = GLOBAL_CONTEXT_SERIALISER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     context::set_context(
         "k-fallback-session".to_string(),
         "print-fallback".to_string(),
@@ -174,7 +175,9 @@ fn fallback_stamps_time_estimated_true_when_no_clock_sync_samples() {
 
 #[test]
 fn source_matches_label() {
-    let _ctx_guard = CTX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _ctx_guard = GLOBAL_CONTEXT_SERIALISER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     context::set_context("k-label-test".to_string(), "print-label".to_string());
 
     for label in &["mcu-h7", "mcu-f4"] {

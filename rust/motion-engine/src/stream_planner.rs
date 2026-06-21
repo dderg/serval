@@ -113,9 +113,6 @@ impl StreamPlannerHandle {
         }
     }
 
-    /// Non-blocking flush: returns a receiver that yields the play-out
-    /// completion deadline (`None` if the stream was idle). Mirrors the old
-    /// planner's `flush_start`/`wait_moves_poll` protocol.
     pub fn flush_start(
         &self,
     ) -> Result<crossbeam_channel::Receiver<Option<Instant>>, StreamPlannerError> {

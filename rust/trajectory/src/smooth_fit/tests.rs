@@ -40,15 +40,11 @@ fn duplicate_knot_guard_no_panic_finite_error() {
 
 #[test]
 fn thomas_solves_known_system() {
-    // Tridiagonal system:
-    // [ 2 1 0 ] [x0]   [3]
-    // [ 1 2 1 ] [x1] = [4]   -> solution x = [1, 1, 1]
-    // [ 0 1 2 ] [x2]   [3]
-    let a = [0.0, 1.0, 1.0]; // sub-diagonal (a[0] unused)
-    let b = [2.0, 2.0, 2.0]; // diagonal
-    let c = [1.0, 1.0, 0.0]; // super-diagonal (c[n-1] unused)
-    let d = [3.0, 4.0, 3.0];
-    let x = solve_tridiagonal(&a, &b, &c, &d);
+    let sub_diagonal = [0.0, 1.0, 1.0];
+    let diagonal = [2.0, 2.0, 2.0];
+    let super_diagonal = [1.0, 1.0, 0.0];
+    let rhs = [3.0, 4.0, 3.0];
+    let x = solve_tridiagonal(&sub_diagonal, &diagonal, &super_diagonal, &rhs);
     for xi in &x {
         assert!((xi - 1.0).abs() < 1e-12, "x = {x:?}");
     }
@@ -56,7 +52,6 @@ fn thomas_solves_known_system() {
 
 #[test]
 fn clamped_spline_interpolates_and_is_c2() {
-    // Fit f(t) = sin(t) on [0, PI] with 5 equal knots, clamped to f'=cos at ends.
     let knots: Vec<f64> = (0..5)
         .map(|i| std::f64::consts::PI * i as f64 / 4.0)
         .collect();
@@ -67,12 +62,10 @@ fn clamped_spline_interpolates_and_is_c2() {
 
     assert_eq!(pieces.len(), 4);
 
-    // Interpolation: each piece hits its endpoint knot values.
     for (i, p) in pieces.iter().enumerate() {
         assert!((p.evaluate(knots[i]) - values[i]).abs() < 1e-12);
         assert!((p.evaluate(knots[i + 1]) - values[i + 1]).abs() < 1e-12);
     }
-    // C2: 2nd derivative continuous across interior joints.
     for i in 0..pieces.len() - 1 {
         let left = pieces[i].differentiate().differentiate();
         let right = pieces[i + 1].differentiate().differentiate();
@@ -89,12 +82,10 @@ use nurbs::eval::eval;
 
 #[test]
 fn fit_c2_cubic_matches_smooth_fn_with_few_pieces() {
-    // Target: a smooth bump on [0, 1]. Fit to 0.1 um tolerance.
     let f = |t: f64| (3.0 * t).sin() * (1.0 - t) * t;
     let tol = 1e-4;
     let curve = fit_c2_cubic(&f, 0.0, 1.0, tol).expect("fit succeeds");
 
-    // Accuracy sampled densely WITHIN pieces (not just at knots).
     for i in 0..=2000 {
         let t = i as f64 / 2000.0;
         assert!(
@@ -102,7 +93,6 @@ fn fit_c2_cubic_matches_smooth_fn_with_few_pieces() {
             "error at t={t}",
         );
     }
-    // Compactness: a smooth bump needs few pieces, nowhere near hundreds.
     let n = extract_bezier_pieces(&curve).len();
     assert!(n < 40, "expected few pieces, got {n}");
 }

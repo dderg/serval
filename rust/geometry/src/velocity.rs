@@ -24,8 +24,7 @@ impl Default for VelocityConfig {
     fn default() -> Self {
         Self {
             consistency_tol: 1e-6,
-            // TODO: jerk-limit floor is an open tuning question (spec-motion-6).
-            max_jerk_mm_s3: 100_000.0,
+            max_jerk_mm_s3: 100_000.0, // TODO: jerk-limit floor is an open tuning question (spec-motion-6)
             integration_tol: 1e-7,
         }
     }
@@ -105,14 +104,6 @@ pub fn plan_velocity(
     plan_velocity_warm_start(outcome, config, 0.0)
 }
 
-/// Streaming variant: the trajectory enters the first move at `entry_v`
-/// (the velocity already dispatched to the MCU at the commit boundary) rather
-/// than from rest. The terminal velocity stays pinned to zero (worst-case
-/// future), so a partially-known look-ahead window is always plannable to a
-/// stop. Fails loudly with [`VelocityError::OverCommitted`] when the pinned
-/// entry cannot brake to rest within the window — that is an over-commit
-/// (the planner emitted faster than the remaining look-ahead can absorb), not
-/// something to silently clamp. `entry_v == 0.0` reproduces [`plan_velocity`].
 pub fn plan_velocity_warm_start(
     outcome: &FitOutcome,
     config: VelocityConfig,

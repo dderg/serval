@@ -465,11 +465,10 @@ mod fixture_6_long_realistic_chain {
 
         assert!(output.joining_sweeps <= 3);
 
+        const G5_CUBIC_ARC_PROFILE_INDEX: usize = 7;
+        const SLP_JERK_LINEARIZATION_RESIDUAL_BUDGET: f64 = 1e-6;
         for (i, profile) in output.profiles.iter().enumerate() {
-            // Profile 7 (a G5 cubic) hits the SLP per-axis-jerk linearization
-            // gap and may surface MaxIter with a tiny residual; all others must
-            // be in the solved set.
-            let is_curved_arc = i == 7;
+            let is_curved_arc = i == G5_CUBIC_ARC_PROFILE_INDEX;
             let acceptable = matches!(
                 profile.status,
                 temporal::SolveStatus::Solved
@@ -478,7 +477,8 @@ mod fixture_6_long_realistic_chain {
             ) || (is_curved_arc
                 && matches!(
                     profile.status,
-                    temporal::SolveStatus::MaxIter { last_residual } if last_residual < 1e-6
+                    temporal::SolveStatus::MaxIter { last_residual }
+                        if last_residual < SLP_JERK_LINEARIZATION_RESIDUAL_BUDGET
                 ));
             assert!(
                 acceptable,
@@ -494,7 +494,7 @@ mod fixture_6_long_realistic_chain {
                     last_dirty_count: 1
                 }
             ) && output.profiles.iter().enumerate().all(|(i, p)| {
-                let is_curved_arc = i == 7;
+                let is_curved_arc = i == G5_CUBIC_ARC_PROFILE_INDEX;
                 matches!(
                     p.status,
                     temporal::SolveStatus::Solved
@@ -503,7 +503,8 @@ mod fixture_6_long_realistic_chain {
                 ) || (is_curved_arc
                     && matches!(
                         p.status,
-                        temporal::SolveStatus::MaxIter { last_residual } if last_residual < 1e-6
+                        temporal::SolveStatus::MaxIter { last_residual }
+                            if last_residual < SLP_JERK_LINEARIZATION_RESIDUAL_BUDGET
                     ))
             }));
         assert!(
@@ -583,16 +584,6 @@ mod fixture_7_curvature_spike_intergrid_sanity {
         GridConfig, GridSample, GridScheme, ToleranceMode, schedule_segment_with_tolerance,
     };
 
-    /// Residual centripetal slack after the inter-grid SOCP rows are enforced.
-    /// Sources of remaining gap:
-    ///   (a) Hermite interpolation of v between solver samples is not exact —
-    ///       the SOCP minimizes ∫ dt via piecewise-linear b, but the Hermite
-    ///       cubic can overshoot v by the inter-sample b curvature (~0.5%).
-    ///   (b) κ evaluated at 3 interior θ positions per SOCP interval;
-    ///       the true κ peak between samples can exceed the sampled κ by
-    ///       at most half the sample spacing (~0.4% for this fixture at n=10).
-    /// Combined budget: empirically ≤ 1.5% on the fixture_7 geometry; 1.02 is
-    /// the tightest factor that the solver + interpolation residuals honestly allow.
     const CENTRIPETAL_RESIDUAL_FACTOR: f64 = 1.02;
 
     #[test]
@@ -697,8 +688,6 @@ mod fixture_7_curvature_spike_intergrid_sanity {
         );
     }
 
-    /// Piecewise-cubic Hermite interpolation of (v, a) solver samples at t ∈ [0,1].
-    /// Treats `sample.v` as function value and `sample.a` as its time-derivative.
     fn hermite_interp(samples: &[GridSample], t: f64) -> (f64, f64) {
         let n = samples.len();
         if n < 2 {

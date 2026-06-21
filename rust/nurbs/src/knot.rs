@@ -46,7 +46,6 @@ impl<T: Float> KnotVector<T> {
     }
 }
 
-// Piegl & Tiller Algorithm A2.1.
 pub fn find_knot_span<T: Float>(knots: &[T], p: usize, n: usize, u: T) -> usize {
     debug_assert!(knots.len() == n + p + 1);
     if u >= knots[n] {
@@ -275,7 +274,6 @@ fn refine_knot_vect_curve<T: Float>(knots: &[T], cps: &[T], p: usize, x: &[T]) -
     (new_knots, new_cps)
 }
 
-// Tiller knot removal: Piegl & Tiller Algorithm A5.8.
 pub fn remove_knot<T: Float>(
     curve: &ScalarNurbs<T>,
     u: T,

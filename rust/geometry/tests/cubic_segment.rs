@@ -178,10 +178,6 @@ fn live_reduce_rejects_g2() {
 fn live_g0_then_g5_aborts_before_emitting_stale_cubic() {
     use geometry::{Fatal, FitterParams, GeometryPipeline, Item, Segment, TelemetryEvent};
 
-    // Pre-fix bug: G0 X10 was rejected without updating state.position, so
-    // the subsequent G5 emitted a cubic with cps[0] = [0,0,0] instead of
-    // [10,0,0] — silent 10mm geometric corruption. Post-fix: G0 produces
-    // Item::Fatal which terminates the iterator before the G5 is processed.
     let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut sink = |_e: TelemetryEvent| {};
     let src = "G0 X10 Y0\nG5 X20 Y0 I3 J3 P-3 Q3 F1000\n";
@@ -211,8 +207,6 @@ fn live_g0_then_g5_aborts_before_emitting_stale_cubic() {
 fn z_plus_e_classifies_as_ordinary_move_with_3d_ratio() {
     use geometry::{FitterParams, FollowerWord, GeometryPipeline, Item, Segment, TelemetryEvent};
 
-    // Previously Fatal::HelicalExtrusionUnsupported; the follower ratio is
-    // delta over 3D path length, so Z+E is an ordinary move.
     let mut p = GeometryPipeline::new(
         FitterParams::default(),
         vec![FollowerWord {
@@ -241,8 +235,6 @@ fn z_plus_e_classifies_as_ordinary_move_with_3d_ratio() {
 fn helical_move_with_follower_classifies_and_pipeline_continues() {
     use geometry::{FitterParams, FollowerWord, GeometryPipeline, Item, Segment, TelemetryEvent};
 
-    // Previously the first move was a fatal helical rejection; now both
-    // moves classify and the pipeline keeps going.
     let mut p = GeometryPipeline::new(
         FitterParams::default(),
         vec![FollowerWord {
@@ -273,10 +265,6 @@ fn g92_resets_modal_position_for_subsequent_g5() {
     use geometry::{FitterParams, GeometryPipeline, Item, Segment, TelemetryEvent};
     use nurbs::eval::vector_eval;
 
-    // Pre-fix bug: G92 X10 Y20 didn't update state.position. The subsequent
-    // G5 emitted P0 = [0,0,0] instead of [10,20,0] — silent geometric
-    // corruption. Post-fix: G92 binds params and writes them through to
-    // state.position before the marker break.
     let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut sink = |_: TelemetryEvent| {};
     let src = "G92 X10 Y20\nG5 X20 Y30 I0 J5 P0 Q-5 F1500\n";
@@ -301,8 +289,6 @@ fn g92_resets_modal_position_for_subsequent_g5() {
 fn g92_e_resets_follower_ledger_for_subsequent_g5_delta() {
     use geometry::{FitterParams, FollowerWord, GeometryPipeline, Item, Segment, TelemetryEvent};
 
-    // Pre-fix: G92 E5 didn't update the ledger. The next G5 with E10 computed
-    // delta = 10 - <stale>, instead of 10 - 5.
     let mut p = GeometryPipeline::new(
         FitterParams::default(),
         vec![FollowerWord {
@@ -335,8 +321,6 @@ fn g92_e_resets_follower_ledger_for_subsequent_g5_delta() {
 fn g18_then_g5_emits_plane_mismatch_recovery() {
     use geometry::{FitterParams, GeometryPipeline, Item, Recovery, TelemetryEvent};
 
-    // Pre-fix: G5 ignored active_plane and emitted a CurveGeom::Cubic as if
-    // XY. Post-fix: mirrors G5.1's plane check; emits Recovery::G5PlaneMismatch.
     let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut sink = |_: TelemetryEvent| {};
     let src = "G18\nG5 X10 Y0 I3 J3 P-3 Q3 F1500\n";
@@ -385,15 +369,6 @@ fn g19_then_g5_emits_plane_mismatch_recovery() {
 fn nan_g5_produces_malformed_params_recovery_not_silent_drop() {
     use geometry::{FitterParams, GeometryPipeline, Item, Recovery, TelemetryEvent};
 
-    // Pre-Fix-H: silent ZeroMotion drop. Rust's f64::FromStr accepts "NaN",
-    // so the lexer surfaced the move with NaN-poisoned XY params. The
-    // pipeline's ZeroMotion classifier then dropped the move (NaN > 1e-6
-    // is false), and modal state.position became NaN-poisoned for every
-    // subsequent G5 — silent geometric corruption with zero telemetry.
-    //
-    // Post-Fix-H: lexer rejects NaN as MalformedNumber, the geometry
-    // pipeline maps the parse error to Recovery::MalformedParams via the
-    // existing handle_event::ParseError path.
     let mut p = GeometryPipeline::new(FitterParams::default(), vec![]);
     let mut sink = |_e: TelemetryEvent| {};
     let src = "G5 XNaN Y0 I0 J3 P0 Q-3 F1500\n";

@@ -353,7 +353,6 @@ fn fit_position_of_t_tracks_exact_curve() {
     let tv = table.as_view();
     let s_max = tv.s_max();
 
-    // Constant-speed s(t) = s_max * t over t in [0,1] (one piece).
     let s_of_t = nurbs::bezier::BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
