@@ -170,7 +170,7 @@ fn trip_outside_trajectory_window_holds_last_position() {
 }
 
 #[test]
-fn trip_before_trajectory_window_errors() {
+fn trip_before_the_arm_clock_errors() {
     const MCU_ID: u32 = 4;
     const FREQ_F64: f64 = 180_000_000.0;
 
@@ -186,12 +186,42 @@ fn trip_before_trajectory_window_errors() {
     let mut store = HistoryStore::default();
     store.record(key, &piece, FREQ);
 
+    // A trip clock at/before the arm clock is stale or mis-synced and must fail.
     let before = piece_start - 1;
-    let err =
-        reconstruct_axis_position(MCU_ID, before, key, &router, &shared(store), 0).unwrap_err();
+    let err = reconstruct_axis_position(MCU_ID, before, key, &router, &shared(store), before)
+        .unwrap_err();
     assert!(
-        err.contains("precedes retained"),
-        "expected 'precedes retained' in error, got: {err}"
+        err.contains("predates this homing move"),
+        "expected stale-trip error, got: {err}"
+    );
+}
+
+#[test]
+fn trip_during_preroll_before_first_piece_returns_start() {
+    const MCU_ID: u32 = 6;
+    const FREQ_F64: f64 = 180_000_000.0;
+
+    let router = router_with_clock(MCU_ID, FREQ_F64);
+
+    let piece_start: u64 = 1_000_000_000;
+    let piece = make_linear_piece(piece_start, 0.025, 0.0, 10.0);
+
+    let key = AxisKey {
+        mcu_id: MCU_ID,
+        axis: AXIS_X as u8,
+    };
+    let mut store = HistoryStore::default();
+    store.record(key, &piece, FREQ);
+
+    // Armed before the trip, but the endstop tripped during the pre-roll lead,
+    // before the first recorded piece: the axis was still held at its start.
+    let arm = piece_start - 1_000_000;
+    let trip = piece_start - 1;
+    let pos = reconstruct_axis_position(MCU_ID, trip, key, &router, &shared(store), arm)
+        .expect("pre-roll trip must return the held start position");
+    assert!(
+        pos.abs() < 0.5,
+        "expected held start position 0mm, got {pos:.4}"
     );
 }
 

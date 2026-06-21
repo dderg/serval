@@ -73,6 +73,16 @@ pub fn reconstruct_axis_position(
     let store = history.lock().unwrap_or_else(|p| p.into_inner());
     store
         .state_at_clock(axis_key, axis_clock, None)
+        .or_else(|e| match e {
+            // The endstop tripped during the move's pre-roll lead, before the
+            // first recorded piece — the axis was still held at its start
+            // position (e.g. it was already resting on the switch). Read that
+            // start instead of failing.
+            crate::motion_history::HistoryError::BeforeRetainedWindow { window_start, .. } => {
+                store.state_at_clock(axis_key, window_start, None)
+            }
+            other => Err(other),
+        })
         .map(|st| st.position)
         .map_err(|e| e.to_string())
 }
