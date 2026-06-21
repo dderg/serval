@@ -40,6 +40,7 @@ class PrinterProbe:
     cmd_PROBE_help = "Probe Z-height at the current XY position"
     cmd_QUERY_PROBE_help = "Return the current probe state"
     cmd_PROBE_ACCURACY_help = "Probe Z-height repeatedly and report statistics"
+    cmd_Z_OFFSET_APPLY_PROBE_help = "Adjust the probe's z_offset"
 
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -79,6 +80,8 @@ class PrinterProbe:
         self.last_query = False
         self.last_z_result = 0.0
 
+        self.name = config.get_name()
+        self.gcode_move = self.printer.load_object(config, "gcode_move")
         ppins.register_chip("probe", self)
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
@@ -91,6 +94,11 @@ class PrinterProbe:
             "PROBE_ACCURACY",
             self.cmd_PROBE_ACCURACY,
             desc=self.cmd_PROBE_ACCURACY_help,
+        )
+        gcode.register_command(
+            "Z_OFFSET_APPLY_PROBE",
+            self.cmd_Z_OFFSET_APPLY_PROBE,
+            desc=self.cmd_Z_OFFSET_APPLY_PROBE_help,
         )
         query_endstops = self.printer.load_object(config, "query_endstops")
         query_endstops.register_endstop(self._endstop, "probe")
@@ -260,6 +268,21 @@ class PrinterProbe:
                 sigma,
             )
         )
+
+    def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd):
+        offset = self.gcode_move.get_status()["homing_origin"].z
+        if offset == 0.0:
+            gcmd.respond_info("Nothing to do: Z Offset is 0")
+            return
+        new_calibrate = self.z_offset - offset
+        gcmd.respond_info(
+            "%s: z_offset: %.3f\n"
+            "The SAVE_CONFIG command will update the printer config file\n"
+            "with the above and restart the printer."
+            % (self.name, new_calibrate)
+        )
+        configfile = self.printer.lookup_object("configfile")
+        configfile.set(self.name, "z_offset", "%.3f" % (new_calibrate,))
 
 
 class ProbePointsHelper:
