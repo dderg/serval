@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ pub enum StreamMsg {
     Dwell { duration_s: f64, notify: Sender<()> },
     StreamOpen { home_pos: Vec<f64> },
     Reset { recovered_pos: Vec<f64> },
-    SeedFrontier { host_time: f64 },
+    DrainPending { notify: Sender<()> },
     HomeDrip(HomeDripParams),
     Nudge(NudgeParams),
     Shutdown,
@@ -65,6 +65,7 @@ impl StreamPlannerHandle {
         nudge_dispatch: NudgeDispatchFn,
         credit_rx: Receiver<FrontierMsg>,
         frontier_bits: Arc<AtomicU64>,
+        draining: Arc<AtomicBool>,
         frontier_keys: Vec<AxisKey>,
     ) -> Self {
         let (move_tx, move_rx) = bounded(SUBMIT_CHANNEL_BOUND);
@@ -89,6 +90,7 @@ impl StreamPlannerHandle {
                     &last_thread,
                     &commit_thread,
                     &frontier_thread,
+                    &draining,
                     frontier_keys,
                 );
             })
@@ -165,10 +167,15 @@ impl StreamPlannerHandle {
             .map_err(|_| StreamPlannerError::ChannelClosed)
     }
 
-    pub fn seed_frontier(&self, host_time: f64) -> Result<(), StreamPlannerError> {
+    /// Force every backpressure-gated segment out to the pump and block until
+    /// the planner pipeline is empty. Barriers like homing require an empty
+    /// `pending_segs`; the consumption gate must not hold work back across one.
+    pub fn drain_pending(&self) -> Result<(), StreamPlannerError> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
         self.control_sender
-            .send(StreamMsg::SeedFrontier { host_time })
-            .map_err(|_| StreamPlannerError::ChannelClosed)
+            .send(StreamMsg::DrainPending { notify: tx })
+            .map_err(|_| StreamPlannerError::ChannelClosed)?;
+        rx.recv().map_err(|_| StreamPlannerError::ChannelClosed)
     }
 
     pub fn home_drip(&self, p: HomeDripParams) -> Result<(), StreamPlannerError> {
@@ -388,6 +395,7 @@ fn run_loop(
     last_move_time_bits: &AtomicU64,
     commit_fire_count: &AtomicU32,
     frontier_bits: &AtomicU64,
+    draining: &AtomicBool,
     frontier_keys: Vec<AxisKey>,
 ) {
     let mut sync_instant: Option<Instant> = None;
@@ -562,14 +570,19 @@ fn run_loop(
                 sync_instant = None;
                 state.reset(&recovered_pos, 0.0);
             }
-            StreamMsg::SeedFrontier { host_time } => {
-                if !host_time.is_finite() {
-                    fatal(&format!("non-finite seed frontier {host_time}"));
+            StreamMsg::DrainPending { notify } => {
+                draining.store(true, Ordering::Release);
+                try_dispatch_pending(
+                    &mut pending_segs,
+                    &dispatch,
+                    &mut sync_instant,
+                    last_move_time_bits,
+                );
+                draining.store(false, Ordering::Release);
+                if !pending_segs.is_empty() {
+                    fatal("drain_pending could not flush all gated segments");
                 }
-                for frontier in axis_frontiers.values_mut() {
-                    *frontier = host_time;
-                }
-                frontier_bits.store(host_time.to_bits(), Ordering::Release);
+                let _ = notify.send(());
             }
             StreamMsg::HomeDrip(p) => {
                 if !pending_segs.is_empty() {

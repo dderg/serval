@@ -367,6 +367,7 @@ fn shutdown_takes_and_joins_planner() {
         noop_nudge_dispatch(),
         credit_rx,
         frontier_bits,
+        Arc::new(AtomicBool::new(false)),
         Vec::new(),
     ));
 
@@ -460,6 +461,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
         noop_nudge_dispatch(),
         credit_rx,
         frontier_bits,
+        Arc::new(AtomicBool::new(false)),
         Vec::new(),
     );
     // Prime one move so the planner has a pending tail before the submitter and
@@ -691,6 +693,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
         noop_nudge_dispatch(),
         credit_rx,
         frontier_bits,
+        Arc::new(AtomicBool::new(false)),
         Vec::new(),
     ));
 

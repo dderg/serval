@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +20,17 @@ impl Capture {
     fn dispatch(&self) -> DispatchFn {
         let segs = Arc::clone(&self.segs);
         Arc::new(move |seg: &ShapedSegment| {
+            let x_end = eval(&seg.axes[0], seg.t_end);
+            segs.lock().unwrap().push((seg.t_start, seg.t_end, x_end));
+            Ok(())
+        })
+    }
+    fn gated_dispatch(&self, draining: Arc<AtomicBool>) -> DispatchFn {
+        let segs = Arc::clone(&self.segs);
+        Arc::new(move |seg: &ShapedSegment| {
+            if !draining.load(Ordering::Acquire) {
+                return Err(DispatchError::Gated);
+            }
             let x_end = eval(&seg.axes[0], seg.t_end);
             segs.lock().unwrap().push((seg.t_start, seg.t_end, x_end));
             Ok(())
@@ -97,6 +108,7 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
         cap.nudge_dispatch(),
         credit_rx,
         frontier_bits,
+        Arc::new(AtomicBool::new(false)),
         Vec::new(),
     );
 
@@ -137,6 +149,7 @@ fn dwell_inserts_a_time_gap_then_resumes() {
         cap.nudge_dispatch(),
         credit_rx,
         frontier_bits,
+        Arc::new(AtomicBool::new(false)),
         Vec::new(),
     );
 
@@ -171,6 +184,7 @@ fn stream_open_restarts_the_timeline_at_zero() {
         cap.nudge_dispatch(),
         credit_rx,
         frontier_bits,
+        Arc::new(AtomicBool::new(false)),
         Vec::new(),
     );
 
@@ -205,6 +219,7 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
         cap.nudge_dispatch(),
         credit_rx,
         frontier_bits,
+        Arc::new(AtomicBool::new(false)),
         Vec::new(),
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
@@ -241,6 +256,7 @@ fn nudge_dispatches_pieces_and_advances_time() {
         cap.nudge_dispatch(),
         credit_rx,
         frontier_bits,
+        Arc::new(AtomicBool::new(false)),
         Vec::new(),
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
@@ -285,6 +301,7 @@ fn backpressure_parks_dispatch_services_flush_and_resumes_on_frontier() {
         cap.nudge_dispatch(),
         credit_rx,
         frontier_bits,
+        Arc::new(AtomicBool::new(false)),
         vec![AxisKey { mcu_id: 1, axis: 0 }],
     );
 
@@ -340,6 +357,7 @@ fn backpressure_frontier_is_min_across_axes() {
         cap.nudge_dispatch(),
         credit_rx,
         Arc::clone(&frontier_bits),
+        Arc::new(AtomicBool::new(false)),
         vec![
             AxisKey { mcu_id: 1, axis: 0 },
             AxisKey { mcu_id: 1, axis: 1 },
@@ -371,30 +389,34 @@ fn backpressure_frontier_is_min_across_axes() {
 }
 
 #[test]
-fn backpressure_seed_frontier_resets_configured_axis_minimum() {
+fn drain_pending_flushes_gated_segments_past_a_barrier() {
     let cap = Capture::default();
     let (_credit_tx, credit_rx, frontier_bits) = credit_inputs();
+    let draining = Arc::new(AtomicBool::new(false));
     let mut h = StreamPlannerHandle::spawn(
         cfg(1.0),
         vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
+        cap.gated_dispatch(Arc::clone(&draining)),
         cap.nudge_dispatch(),
         credit_rx,
         Arc::clone(&frontier_bits),
-        vec![
-            AxisKey { mcu_id: 1, axis: 0 },
-            AxisKey { mcu_id: 1, axis: 1 },
-        ],
+        Arc::clone(&draining),
+        vec![AxisKey { mcu_id: 1, axis: 0 }],
     );
 
-    h.seed_frontier(12.0).unwrap();
-    for _ in 0..20 {
-        if (h.frontier() - 12.0).abs() < 1e-9 {
-            h.shutdown();
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    assert!(
+        cap.snapshot().is_empty(),
+        "consumption gate must hold the committed segment back"
+    );
+
+    h.drain_pending().unwrap();
+    assert!(
+        !cap.snapshot().is_empty(),
+        "drain_pending must force gated segments out across a homing barrier"
+    );
+
     h.shutdown();
-    panic!("seeded frontier did not update configured axis minimum");
 }
