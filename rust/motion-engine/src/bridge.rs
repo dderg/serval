@@ -3999,6 +3999,7 @@ impl PyMotionEngine {
                 self.finish_homing();
                 let (trip_pos, final_pos, trip_clock) = result.map_err(PyRuntimeError::new_err)?;
                 *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner()) = final_pos;
+                self.reanchor_after_trip(final_pos)?;
                 Ok(Some((trip_pos, final_pos, trip_clock)))
             }
         }
@@ -4357,6 +4358,16 @@ impl PyMotionEngine {
             .unwrap_or_else(|p| p.into_inner()) = None;
         *self.homing_run.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *self.homing_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    fn reanchor_after_trip(&self, stop_pos: [f64; 3]) -> PyResult<()> {
+        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.as_ref() {
+            Some(planner) => planner
+                .reset(vec![stop_pos[0], stop_pos[1], stop_pos[2], 0.0])
+                .map_err(planner_err),
+            None => Ok(()),
+        }
     }
 
     fn ethercat_conn(&self, mcu_handle: u32, what: &str) -> PyResult<Arc<McuSerialConn>> {

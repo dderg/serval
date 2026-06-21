@@ -667,20 +667,6 @@ class Motion:
         self.min_cruise_ratio = 0.0
         self.orig_cfg = {}
 
-    def _axis_limit(self, axis, kind):
-        kind_idx = {"max_velocity": 2, "max_accel": 3, "max_jerk": 4}[kind]
-        caps = [
-            section[kind_idx]
-            for section in self.limit_sections
-            if axis in section[1] and section[kind_idx] is not None
-        ]
-        if not caps:
-            raise self.printer.config_error(
-                "no [limit] section declares %s covering axis '%s'"
-                % (kind, axis)
-            )
-        return min(caps)
-
     def _sync_print_time(self):
         if self.mcu is None:
             return
