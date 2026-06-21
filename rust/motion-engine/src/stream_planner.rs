@@ -10,7 +10,11 @@ use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
 use crate::stream::{StreamConfig, StreamState};
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
-const SAFETY_MARGIN: f64 = 0.05;
+// Time reserved before the committed frontier runs dry to build+dispatch the
+// next chunk. Must exceed the worst-case commit cost (fit+plan+lower of a
+// full buffer on the host) or the idle/paused commit lands in the MCU's past
+// (PieceStartInPast). Observed ~0.68s for a 32-move chunk on a Pi.
+const SAFETY_MARGIN: f64 = 1.5;
 const T_IDLE: Duration = Duration::from_secs(3600);
 
 type DispatchFn = Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>;
