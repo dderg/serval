@@ -819,6 +819,12 @@ pub(super) fn reconstruct_run(
     for c in &ctxs {
         let s0 = c.m.fwd_s;
         let s1 = c.m.fwd_s + c.m.kin.length;
+        // Boundary samples read the reconstructed (bridged) profile, not the
+        // nominal junction velocity `entry_v`/`exit_v`: a roll-off straddling a
+        // collinear junction dips below the cruise speed, so pinning the nominal
+        // there would spike `v` back to the ceiling. Off a bridge these agree.
+        let (v0, _) = interp_flat(&flat, s0)?;
+        let (v1, _) = interp_flat(&flat, s1)?;
         let mut local: Vec<(f64, f64, f64)> = flat
             .iter()
             .filter(|p| p.0 >= s0 - 1e-9 && p.0 <= s1 + 1e-9)
@@ -838,11 +844,11 @@ pub(super) fn reconstruct_run(
         }
         if let Some(first) = local.first_mut() {
             first.0 = 0.0;
-            first.1 = c.m.entry_v;
+            first.1 = v0;
         }
         if let Some(last) = local.last_mut() {
             last.0 = c.m.kin.length;
-            last.1 = c.m.exit_v;
+            last.1 = v1;
         }
         for p in &mut local {
             p.2 = clamp_to_disk(p.2, c.m.kin.accel, c.m.kin.kappa_abs(p.0), p.1);

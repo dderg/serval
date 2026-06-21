@@ -142,6 +142,18 @@ fn cruise_onset_tracks_ceiling_not_collinear_junction() {
             "L1={l1:.2}: run must reach cruise"
         );
         assert_no_step(&samples, EPS_A, &format!("collinear straights, L1={l1:.2}"));
+        // The roll-off straddles the junction; v must stay monotone up to cruise
+        // (no boundary sample snapping back to the nominal cruise speed).
+        for w in samples.windows(2).take_while(|w| w[0].v < MAX_V - 1e-9) {
+            assert!(
+                w[1].v + 1e-6 >= w[0].v,
+                "L1={l1:.2}: v regressed at s={:.4} ({:.5} -> {:.5}) — junction \
+                 boundary spiked back to the ceiling",
+                w[0].s,
+                w[0].v,
+                w[1].v
+            );
+        }
     }
 }
 
