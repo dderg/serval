@@ -394,6 +394,25 @@ fn run_loop(
                     last_move_time_bits,
                     commit_fire_count,
                 );
+                if state.buffered() >= state.max_buffer_moves() {
+                    tracing::info!(
+                        subsystem = "motion",
+                        event = "buffer_cap_drain",
+                        buffered = state.buffered(),
+                        t_committed = state.t_committed(),
+                        "[buffer-cap-drain] no committable seam — draining to rest"
+                    );
+                    let segs = state
+                        .commit(true)
+                        .unwrap_or_else(|e| fatal(&format!("buffer-cap drain: {e}")));
+                    dispatch_committed(
+                        &segs,
+                        &dispatch,
+                        &mut sync_instant,
+                        last_move_time_bits,
+                        commit_fire_count,
+                    );
+                }
             }
             StreamMsg::Flush { notify } => {
                 let segs = state

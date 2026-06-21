@@ -9,6 +9,7 @@ fn cfg(keep_secs: f64) -> StreamConfig {
         velocity: VelocityConfig::default(),
         fit_tol_mm: 1e-3,
         keep_secs,
+        max_buffer_moves: 64,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
     }
 }

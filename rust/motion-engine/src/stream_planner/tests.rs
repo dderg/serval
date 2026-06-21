@@ -38,11 +38,16 @@ impl Capture {
 }
 
 fn cfg(keep_secs: f64) -> StreamConfig {
+    cfg_cap(keep_secs, 64)
+}
+
+fn cfg_cap(keep_secs: f64, max_buffer_moves: usize) -> StreamConfig {
     StreamConfig {
         chain: ChainFitConfig::default(),
         velocity: VelocityConfig::default(),
         fit_tol_mm: 1e-3,
         keep_secs,
+        max_buffer_moves,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
     }
 }
@@ -217,5 +222,50 @@ fn nudge_dispatches_pieces_and_advances_time() {
         h.last_move_time() > 0.0,
         "time did not advance past the nudge"
     );
+    h.shutdown();
+}
+
+#[test]
+fn continuous_blend_run_drains_at_buffer_cap_without_flush() {
+    let cap = Capture::default();
+    let max_buffer_moves = 6;
+    let mut h = StreamPlannerHandle::spawn(
+        cfg_cap(0.5, max_buffer_moves),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+    );
+
+    // A gentle zig-zag: every vertex blends (no unblended seam), so commit(false)
+    // can never commit. Without the buffer-cap fallback the buffer would grow
+    // forever and nothing would dispatch until an explicit flush/idle.
+    let n = (max_buffer_moves + 4) as u32;
+    let mut prev = [0.0, 0.0, 0.0];
+    for i in 0..n {
+        let x = f64::from(i + 1) * 5.0;
+        let y = if i % 2 == 0 { 1.0 } else { 0.0 };
+        let end = [x, y, 0.0];
+        h.submit_move(line(i + 1, prev, end)).unwrap();
+        prev = end;
+    }
+
+    // No flush: dispatch must happen via the buffer-cap drain alone.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while cap.snapshot().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "buffer-cap drain never dispatched a continuous-blend run"
+        );
+        std::thread::yield_now();
+    }
+
+    let segs = cap.snapshot();
+    assert!(
+        (segs[0].0 - 0.0).abs() < 1e-9,
+        "first segment starts at t=0"
+    );
+    for w in segs.windows(2) {
+        assert!((w[1].0 - w[0].1).abs() < 1e-9, "time gap between segments");
+    }
     h.shutdown();
 }

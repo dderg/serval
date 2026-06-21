@@ -19,6 +19,14 @@ pub struct StreamConfig {
     /// junction velocities were planned with enough downstream context and are
     /// not pulled down by the buffer's pessimistic terminal-`v=0`.
     pub keep_secs: f64,
+    /// PROTOTYPE cap: a continuous all-blended path has no unblended seam, so
+    /// the clean-seam `commit(false)` can never commit and the buffer grows
+    /// without bound while nothing reaches the MCU. Once the buffer exceeds this
+    /// many moves, the planner force-drains the whole buffer to rest (a brief
+    /// stop at the chunk boundary) so motion keeps flowing and the pump-backlog
+    /// backpressure can engage. TODO: replace with a continuity-preserving
+    /// mid-chain commit (fitter entry tangent+curvature) to remove the stop.
+    pub max_buffer_moves: usize,
     /// Path limits for planner-internal moves (homing). Stream moves submitted
     /// through the bridge carry their own per-move limits; this is the fallback
     /// the planner uses when it constructs a move itself.
@@ -173,6 +181,11 @@ impl StreamState {
     #[must_use]
     pub fn limits(&self) -> VelocityLimits {
         self.config.limits
+    }
+
+    #[must_use]
+    pub fn max_buffer_moves(&self) -> usize {
+        self.config.max_buffer_moves
     }
 
     /// Plan the buffer and commit a prefix at the latest clean seam. `force`
