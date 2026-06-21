@@ -11,6 +11,7 @@ from .extras import servo_axis
 from .kinematics import extruder
 
 DRAIN_TIMEOUT = 60.0
+REACTOR_YIELD_INTERVAL = 0.020
 _LEGACY_STEPPER_AXES = frozenset("xyzab")
 _LEGACY_SERVO_SECTIONS = ("servo_x", "servo_y", "servo_z")
 
@@ -141,6 +142,7 @@ class Motion:
             "buffer_time_low", 1.0, minval=0.0, maxval=self.buffer_time_high
         )
         self._drip_active = False
+        self._last_reactor_yield = 0.0
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
         self.extruder = extruder.DummyExtruder(printer)
@@ -571,6 +573,15 @@ class Motion:
         if self.mcu is None or self._drip_active:
             return
         now = self.reactor.monotonic()
+        # Yield to the reactor on a wall-clock cadence so MCU comms / clocksync
+        # stay serviced during a fast burst of (often very short) moves. The
+        # buffer-time throttle bounds how far ahead we plan, but not the
+        # wall-clock duration of a burst; without this the single-threaded
+        # reactor stalls and dispatched pieces land in the MCU's past.
+        if now - self._last_reactor_yield > REACTOR_YIELD_INTERVAL:
+            self.reactor.pause(self.reactor.NOW)
+            now = self.reactor.monotonic()
+            self._last_reactor_yield = now
         est = self.mcu.estimated_print_time(now)
         buffer_time = self._mcu_pending_end_time - est
         backlog = self.engine.pump_backlog()
@@ -592,6 +603,7 @@ class Motion:
                     % (buffer_time, backlog, DRAIN_TIMEOUT)
                 )
             self.reactor.pause(now + 0.010)
+            self._last_reactor_yield = self.reactor.monotonic()
             est = self.mcu.estimated_print_time(now)
             buffer_time = self._mcu_pending_end_time - est
             backlog = self.engine.pump_backlog()

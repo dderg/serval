@@ -29,6 +29,8 @@ class FakeEngine:
 
 
 class FakeReactor:
+    NOW = 0.0
+
     def __init__(self, step=0.5):
         self.now = 0.0
         self.step = step
@@ -76,12 +78,20 @@ class FakeMotion:
         self.buffer_time_low = buffer_time_low
         self.pump_backlog_high = pump_backlog_high
         self.pump_backlog_low = pump_backlog_low
+        self._last_reactor_yield = 0.0
 
 
 def test_no_pause_when_within_buffer():
     m = FakeMotion(frontier=1.0, backlog=0)
     m._check_pause()
     assert m.reactor.pauses == 0
+
+
+def test_periodic_reactor_yield_even_when_within_buffer():
+    m = FakeMotion(frontier=1.0, backlog=0)
+    m._last_reactor_yield = -1.0  # last yield long ago => due for a yield
+    m._check_pause()
+    assert m.reactor.pauses == 1
 
 
 def test_pauses_until_buffer_drains_to_low():
