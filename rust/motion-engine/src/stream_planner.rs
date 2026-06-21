@@ -399,23 +399,25 @@ fn run_loop(
     frontier_keys: Vec<AxisKey>,
 ) {
     let mut sync_instant: Option<Instant> = None;
-    let initial_frontier = f64::from_bits(frontier_bits.load(Ordering::Acquire));
+    // Idle axes start non-binding (+inf): an axis that never streams pieces must
+    // not drag the min-across-axes frontier down and gate the moving axes. The
+    // pump publishes +inf for any axis that has retired everything pushed to it.
     let mut axis_frontiers: BTreeMap<AxisKey, f64> = frontier_keys
         .into_iter()
-        .map(|key| (key, initial_frontier))
+        .map(|key| (key, f64::INFINITY))
         .collect();
     let mut pending_segs: VecDeque<ShapedSegment> = VecDeque::new();
 
     loop {
         while let Ok(msg) = credit_rx.try_recv() {
-            if !msg.freed_time.is_finite() {
+            if msg.freed_time.is_nan() || msg.freed_time == f64::NEG_INFINITY {
                 fatal(&format!(
-                    "non-finite frontier {} on mcu{} axis{}",
+                    "invalid frontier {} on mcu{} axis{}",
                     msg.freed_time, msg.key.mcu_id, msg.key.axis
                 ));
             }
             if let Some(&previous) = axis_frontiers.get(&msg.key) {
-                if msg.freed_time < previous {
+                if previous.is_finite() && msg.freed_time < previous {
                     fatal(&format!(
                         "frontier regression: was {previous} now {} on mcu{} axis{}",
                         msg.freed_time, msg.key.mcu_id, msg.key.axis
@@ -615,6 +617,7 @@ fn run_loop(
                 let _ = p.notify.send(result);
             }
             StreamMsg::Shutdown => {
+                gate_bypass.store(true, Ordering::Release);
                 let segs = state
                     .commit(true)
                     .unwrap_or_else(|e| fatal(&format!("shutdown drain: {e}")));

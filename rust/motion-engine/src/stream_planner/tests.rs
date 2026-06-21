@@ -389,6 +389,89 @@ fn backpressure_frontier_is_min_across_axes() {
 }
 
 #[test]
+fn idle_axis_does_not_drag_the_frontier() {
+    let cap = Capture::default();
+    let (credit_tx, credit_rx, frontier_bits) = credit_inputs();
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(1.0),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        credit_rx,
+        Arc::clone(&frontier_bits),
+        Arc::new(AtomicBool::new(false)),
+        vec![
+            AxisKey { mcu_id: 1, axis: 0 },
+            AxisKey { mcu_id: 1, axis: 1 },
+        ],
+    );
+
+    // Only axis 0 streams pieces; axis 1 stays idle and never publishes a
+    // frontier. The idle axis must not pin the gate at its stale start value —
+    // the frontier follows the one axis that is actually moving.
+    credit_tx
+        .send(FrontierMsg {
+            key: AxisKey { mcu_id: 1, axis: 0 },
+            freed_time: 8.0,
+        })
+        .unwrap();
+
+    for _ in 0..20 {
+        if (h.frontier() - 8.0).abs() < 1e-9 {
+            h.shutdown();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.shutdown();
+    panic!("idle axis pinned the frontier instead of following the moving axis");
+}
+
+#[test]
+fn caught_up_axis_publishes_non_binding_frontier() {
+    let cap = Capture::default();
+    let (credit_tx, credit_rx, frontier_bits) = credit_inputs();
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(1.0),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        credit_rx,
+        Arc::clone(&frontier_bits),
+        Arc::new(AtomicBool::new(false)),
+        vec![
+            AxisKey { mcu_id: 1, axis: 0 },
+            AxisKey { mcu_id: 1, axis: 1 },
+        ],
+    );
+
+    // Bottleneck axis 1 lags at 3.0; once axis 0 catches up the pump reports it
+    // as non-binding (+inf), so the gate follows the still-lagging axis 1.
+    credit_tx
+        .send(FrontierMsg {
+            key: AxisKey { mcu_id: 1, axis: 1 },
+            freed_time: 3.0,
+        })
+        .unwrap();
+    credit_tx
+        .send(FrontierMsg {
+            key: AxisKey { mcu_id: 1, axis: 0 },
+            freed_time: f64::INFINITY,
+        })
+        .unwrap();
+
+    for _ in 0..20 {
+        if (h.frontier() - 3.0).abs() < 1e-9 {
+            h.shutdown();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.shutdown();
+    panic!("caught-up axis did not become non-binding");
+}
+
+#[test]
 fn drain_pending_flushes_gated_segments_past_a_barrier() {
     let cap = Capture::default();
     let (_credit_tx, credit_rx, frontier_bits) = credit_inputs();

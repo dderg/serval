@@ -154,9 +154,12 @@ fn pump_publishes_freed_time_from_retired_pushed_pieces() {
     for _ in 0..20 {
         let snapshot = frontiers.lock().unwrap().clone();
         if snapshot.len() >= 3 {
+            // x retires 1 of 2 pushed -> still pending -> real freed time.
             assert_eq!(snapshot[0], (x, 0.25));
-            assert_eq!(snapshot[1], (y, 0.75));
-            assert_eq!(snapshot[2], (x, 0.5));
+            // y retires its only piece -> caught up -> non-binding (+inf).
+            assert_eq!(snapshot[1], (y, f64::INFINITY));
+            // x retires its 2nd of 2 -> caught up -> non-binding (+inf).
+            assert_eq!(snapshot[2], (x, f64::INFINITY));
             tx.send(PumpMsg::Shutdown).unwrap();
             handle.join().unwrap();
             return;

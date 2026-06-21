@@ -585,7 +585,9 @@ pub fn run_pump<S, F, C, A, O, D, P>(
                                 );
                             }
                             q.last_freed_time = last_freed;
-                            on_frontier(key, last_freed);
+                            let caught_up = q.retired == q.pushed;
+                            let published = if caught_up { f64::INFINITY } else { last_freed };
+                            on_frontier(key, published);
                         }
                     }
                     if let Some(co) = cohort {
