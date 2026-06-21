@@ -234,6 +234,20 @@ impl StreamState {
             chosen
         };
 
+        tracing::info!(
+            subsystem = "motion",
+            event = "commit_decision",
+            force,
+            n,
+            unblended = outcome.report.unblended.len(),
+            commit_count,
+            total_t,
+            keep_secs = self.config.keep_secs,
+            entry_v = self.entry_v,
+            t_committed = self.t_committed,
+            "[commit-decision]"
+        );
+
         if commit_count == 0 {
             return Ok(Vec::new());
         }

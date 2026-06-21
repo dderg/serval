@@ -209,6 +209,14 @@ fn dispatch_committed(
     if segs.is_empty() {
         return;
     }
+    tracing::info!(
+        subsystem = "motion",
+        event = "dispatch_committed",
+        n = segs.len(),
+        t_start = segs[0].t_start,
+        t_end = segs[segs.len() - 1].t_end,
+        "[dispatch-committed]"
+    );
     for s in segs {
         if let Err(e) = dispatch(s) {
             fatal(&format!("dispatch failed: {e}"));
