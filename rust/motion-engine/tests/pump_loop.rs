@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -39,8 +40,18 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     let (tx, rx) = mpsc::channel();
     let depth = |_k: AxisKey| 2u32;
     let sink = RecordingSink(rec.clone());
-    let handle =
-        std::thread::spawn(move || run_pump(rx, sink, depth, |_| None, |_| {}, |_, _| {}, |_| {}));
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            rx,
+            sink,
+            depth,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        )
+    });
 
     tx.send(PumpMsg::Enqueue(EnqueueMsg {
         key: AxisKey { mcu_id: 1, axis: 0 },
@@ -103,6 +114,7 @@ fn run_pump_with_clock(
             |_| {},
             |_, _| {},
             |_| {},
+            Arc::new(AtomicU64::new(0)),
         )
     })
 }

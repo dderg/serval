@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -98,6 +99,7 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
             |_| {},
             |_, _| {},
             |_| {},
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -184,6 +186,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
             |_| {},
             |_, _| {},
             |_| {},
+            Arc::new(AtomicU64::new(0)),
         );
     });
     let key = AxisKey { mcu_id: 1, axis: 2 };
@@ -280,6 +283,7 @@ fn flush_clears_queued_pieces_and_junctions() {
             |_| {},
             |_, _| {},
             |_| {},
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -379,6 +383,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
                 *abandoned_pump.lock().unwrap() += n;
             },
             |_| {},
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -457,6 +462,7 @@ fn flush_unknown_key_is_noop() {
             |_| {},
             |_, _| {},
             |_| {},
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -488,7 +494,16 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
 
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(rx, sink_clone, |_| 8, |_| None, |_| {}, |_, _| {}, |_| {});
+        run_pump(
+            rx,
+            sink_clone,
+            |_| 8,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        );
     });
 
     ack_rx
@@ -518,6 +533,7 @@ fn barrier_acks_on_idle_pump() {
             |_| {},
             |_, _| {},
             |_| {},
+            Arc::new(AtomicU64::new(0)),
         );
     });
     let (ack_tx, ack_rx) = mpsc::sync_channel(1);
@@ -525,6 +541,85 @@ fn barrier_acks_on_idle_pump() {
     ack_rx
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("barrier on an idle pump must ack promptly");
+    tx.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+fn poll_until<F: Fn() -> bool>(pred: F, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !pred() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn pump_backlog_reflects_unpushed_pieces() {
+    let backlog = Arc::new(AtomicU64::new(0));
+    let backlog_thread = Arc::clone(&backlog);
+    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            rx,
+            RecordingSink::new(),
+            |_key| 0,
+            |_mcu| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            backlog_thread,
+        );
+    });
+
+    tx.send(make_enqueue(
+        AxisKey { mcu_id: 1, axis: 0 },
+        (0..3).map(|i| make_piece(i as u64)).collect(),
+        false,
+    ))
+    .unwrap();
+
+    poll_until(
+        || backlog.load(Ordering::Acquire) == 3,
+        "ring-full pump never reported the 3 unpushed pieces",
+    );
+
+    tx.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn pump_backlog_drains_to_zero_when_pushed() {
+    let backlog = Arc::new(AtomicU64::new(0));
+    let backlog_thread = Arc::clone(&backlog);
+    let sink = RecordingSink::new();
+    let sink_clone = sink.clone();
+    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            rx,
+            sink_clone,
+            |_key| 8,
+            |_mcu| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            backlog_thread,
+        );
+    });
+
+    tx.send(make_enqueue(
+        AxisKey { mcu_id: 1, axis: 0 },
+        (0..3).map(|i| make_piece(i as u64)).collect(),
+        false,
+    ))
+    .unwrap();
+
+    poll_until(|| !sink.recorded().is_empty(), "pump never pushed pieces");
+    poll_until(
+        || backlog.load(Ordering::Acquire) == 0,
+        "backlog never returned to zero after the ring accepted the pieces",
+    );
+
     tx.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }

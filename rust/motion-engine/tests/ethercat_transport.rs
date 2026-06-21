@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -94,7 +95,16 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
 
     let (tx, rx) = mpsc::channel::<PumpMsg>();
     let handle = std::thread::spawn(move || {
-        run_pump(rx, sink, |_k| 8u32, |_| None, |_| {}, |_, _| {}, |_| {});
+        run_pump(
+            rx,
+            sink,
+            |_k| 8u32,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        );
     });
 
     tx.send(PumpMsg::Enqueue(EnqueueMsg {

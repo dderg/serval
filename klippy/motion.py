@@ -127,6 +127,14 @@ class Motion:
         self._read_arc_fit(config)
         self.print_time = 0.0
         self.print_stall = 0
+        self.pump_backlog_high = config.getint(
+            "pump_backlog_high", 200, minval=1
+        )
+        self.pump_backlog_low = config.getint("pump_backlog_low", 100, minval=0)
+        self._validate_pump_watermarks(
+            config, self.pump_backlog_low, self.pump_backlog_high
+        )
+        self._drip_active = False
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
         self.extruder = extruder.DummyExtruder(printer)
@@ -387,6 +395,7 @@ class Motion:
         )
         self.commanded_pos[:] = move.end_pos
         self._sync_print_time()
+        self._check_pause()
 
     def move_curve(self, newpos, interior_control_points, submit, speed):
         # newpos: [x, y, z, e] absolute endpoint (already coordinate-resolved).
@@ -426,6 +435,7 @@ class Motion:
         )
         self.commanded_pos[:] = list(newpos)
         self._sync_print_time()
+        self._check_pause()
 
     def _fire_active_callbacks(self, axes_d):
         if self.kin is None:
@@ -464,13 +474,18 @@ class Motion:
     def drip_move(self, newpos, speed, drip_completion):
         if drip_completion is not None and drip_completion.test():
             return
-        self.move(newpos, speed)
+        self._drip_active = True
+        try:
+            self.move(newpos, speed)
+        finally:
+            self._drip_active = False
 
     def dwell(self, delay):
         self.engine.submit_dwell(delay)
         if delay > 0.0:
             self._bump_pending_end_time(delay)
             self._sync_print_time()
+        self._check_pause()
 
     def wait_moves(self):
         self._drain_to_mcu_execution()
@@ -543,6 +558,32 @@ class Motion:
         est = self.mcu.estimated_print_time(self.reactor.monotonic())
         base = max(self._mcu_pending_end_time, est)
         self._mcu_pending_end_time = base + duration_added
+
+    @staticmethod
+    def _validate_pump_watermarks(config, low, high):
+        if low > high:
+            raise config.error(
+                "pump_backlog_low (%d) must not exceed pump_backlog_high (%d)"
+                % (low, high)
+            )
+
+    def _check_pause(self):
+        if self.mcu is None or self._drip_active:
+            return
+        backlog = self.engine.pump_backlog()
+        if backlog <= self.pump_backlog_high:
+            return
+        deadline = self.reactor.monotonic() + DRAIN_TIMEOUT
+        while backlog > self.pump_backlog_low:
+            now = self.reactor.monotonic()
+            if now >= deadline:
+                raise self.printer.command_error(
+                    "motion backpressure: pump backlog %d did not drain "
+                    "within %.0fs (MCU not retiring moves)"
+                    % (backlog, DRAIN_TIMEOUT)
+                )
+            self.reactor.pause(now + 0.010)
+            backlog = self.engine.pump_backlog()
 
     def check_busy(self, eventtime):
         est_print_time = self.mcu.estimated_print_time(eventtime)
@@ -752,9 +793,15 @@ class Motion:
             if getattr(m, "non_critical_disconnected", False):
                 continue
             m.check_active(max_queue_time, eventtime)
-        return False, "print_time=%.3f buffer_time=0.000 print_stall=%d" % (
-            self.print_time,
-            self.print_stall,
+        pump_backlog = self.engine.pump_backlog() if self.mcu is not None else 0
+        return (
+            False,
+            "print_time=%.3f buffer_time=0.000 pump_backlog=%d print_stall=%d"
+            % (
+                self.print_time,
+                pump_backlog,
+                self.print_stall,
+            ),
         )
 
     def _declared_axis_order(self):

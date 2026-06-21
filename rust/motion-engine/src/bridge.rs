@@ -619,6 +619,7 @@ pub struct PyMotionEngine {
     last_g5_pq: Mutex<Option<(f64, f64)>>,
     mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
     dispatched_segments: Arc<AtomicU64>,
+    pump_backlog: Arc<AtomicU64>,
     fallback_clock_conversions: Arc<AtomicU64>,
     clock_freqs: Arc<Mutex<HashMap<u32, f64>>>,
     nominal_clock_freqs: Arc<Mutex<HashMap<u32, u32>>>,
@@ -875,6 +876,7 @@ impl PyMotionEngine {
             last_g5_pq: Mutex::new(None),
             mcu_axis_configs: Arc::new(Mutex::new(Vec::new())),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
+            pump_backlog: Arc::new(AtomicU64::new(0)),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),
             clock_freqs: Arc::new(Mutex::new(HashMap::new())),
             nominal_clock_freqs: Arc::new(Mutex::new(HashMap::new())),
@@ -2803,6 +2805,7 @@ impl PyMotionEngine {
         let ring_depth_table_for_pump = ring_depth_table.clone();
         let router_for_pump = Arc::clone(&self.router);
         let drain_for_pump = self.drain.clone();
+        let pump_backlog_for_pump = Arc::clone(&self.pump_backlog);
         let router_for_freq = Arc::clone(&self.router);
         let pump_thread_handle = std::thread::Builder::new()
             .name("push-pieces-pump".into())
@@ -2857,6 +2860,7 @@ impl PyMotionEngine {
                         );
                         abort_after_tracing_appender_drains();
                     },
+                    pump_backlog_for_pump,
                 );
             })
             .expect("spawn push-pieces-pump thread");
@@ -3780,6 +3784,10 @@ impl PyMotionEngine {
             Some(p) => p.last_move_time(),
             None => 0.0,
         }
+    }
+
+    fn pump_backlog(&self) -> u64 {
+        self.pump_backlog.load(Ordering::Acquire)
     }
 
     fn motion_lead_secs(&self) -> f64 {

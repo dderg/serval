@@ -2,6 +2,7 @@ use runtime::piece_ring::PieceEntry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Weak;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -379,6 +380,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     on_fatal_transport: A,
     on_abandon: O,
     on_drip_stall: D,
+    backlog: Arc<AtomicU64>,
 ) where
     S: PieceSink,
     F: Fn(AxisKey) -> u32,
@@ -718,6 +720,9 @@ pub fn run_pump<S, F, C, A, O, D>(
                 }
             }
         }
+
+        let unpushed: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
+        backlog.store(unpushed, Ordering::Release);
     }
 }
 

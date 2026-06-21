@@ -103,6 +103,9 @@ class _StubEngine:
     helpers stay no-ops so config-only boots tear down cleanly.
     """
 
+    def pump_backlog(self):
+        return 0
+
     def __getattr__(self, name):
         if name in _STUB_MOTION_METHODS:
 
@@ -466,6 +469,9 @@ class MotionEngineWrapper:
 
     def get_last_move_time(self):
         return self._engine.get_last_move_time()
+
+    def pump_backlog(self):
+        return self._engine.pump_backlog() or 0
 
     def motion_lead_secs(self):
         return self._engine.motion_lead_secs()

@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -85,6 +86,7 @@ fn stall_detection_fires_when_floor_stuck() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -160,6 +162,7 @@ fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            Arc::new(AtomicU64::new(0)),
         );
     });
     handle.join().unwrap();
@@ -196,6 +199,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
             |_| {},
             |_, _| {},
             |_| {},
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -262,7 +266,16 @@ fn unsynced_clock_releases_nothing_for_participants() {
 
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(rx, sink_clone, |_| 64, |_| None, |_| {}, |_, _| {}, |_| {});
+        run_pump(
+            rx,
+            sink_clone,
+            |_| 64,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        );
     });
     std::thread::sleep(Duration::from_millis(100));
     tx.send(PumpMsg::Shutdown).unwrap();
@@ -293,6 +306,7 @@ fn retired_regression_triggers_on_drip_stall() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -346,6 +360,7 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -407,6 +422,7 @@ fn drip_disarm_clears_cohort() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -475,6 +491,7 @@ fn drip_disarm_wrong_cohort_id_is_noop() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            Arc::new(AtomicU64::new(0)),
         );
     });
     handle.join().unwrap();

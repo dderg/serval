@@ -17,7 +17,7 @@
 //! succeeding first-try) is in the design's verification section.
 
 use std::os::unix::io::FromRawFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use host_rt::host_io::{McuHostIo, McuHostIoConfig};
@@ -619,6 +619,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                 },
                 |_key: AxisKey, _n: u32| {},
                 |_msg: String| {},
+                Arc::new(AtomicU64::new(0)),
             );
         })
         .expect("spawn test pump thread");
