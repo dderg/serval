@@ -389,6 +389,26 @@ fn backpressure_frontier_is_min_across_axes() {
 }
 
 #[test]
+fn frontier_stall_fires_only_with_gated_work_past_the_timeout() {
+    assert!(
+        frontier_stalled(true, STALL_TIMEOUT),
+        "gated work with a frozen frontier past the timeout must abort"
+    );
+    assert!(
+        frontier_stalled(true, STALL_TIMEOUT + Duration::from_secs(1)),
+        "well past the timeout must abort"
+    );
+    assert!(
+        !frontier_stalled(false, STALL_TIMEOUT + Duration::from_secs(60)),
+        "no gated work is never a stall, however long the frontier sits"
+    );
+    assert!(
+        !frontier_stalled(true, STALL_TIMEOUT - Duration::from_millis(1)),
+        "gated work below the timeout is not yet a stall"
+    );
+}
+
+#[test]
 fn idle_axis_does_not_drag_the_frontier() {
     let cap = Capture::default();
     let (credit_tx, credit_rx, frontier_bits) = credit_inputs();
