@@ -409,6 +409,39 @@ fn frontier_stall_fires_only_with_gated_work_past_the_timeout() {
 }
 
 #[test]
+fn startup_frontier_is_non_binding_so_the_first_move_is_not_gated() {
+    let cap = Capture::default();
+    // Seed the shared bits with a stale finite value, as the bridge once did.
+    let (_credit_tx, credit_rx) = crossbeam_channel::unbounded::<FrontierMsg>();
+    let frontier_bits = Arc::new(AtomicU64::new(1.0f64.to_bits()));
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(1.0),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        credit_rx,
+        Arc::clone(&frontier_bits),
+        Arc::new(AtomicBool::new(false)),
+        vec![
+            AxisKey { mcu_id: 1, axis: 0 },
+            AxisKey { mcu_id: 1, axis: 1 },
+        ],
+    );
+
+    // No credits ever arrive. The planner must republish the non-binding ledger
+    // min (+inf) over the stale seed so the gate stays open.
+    for _ in 0..20 {
+        if h.frontier() == f64::INFINITY {
+            h.shutdown();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.shutdown();
+    panic!("planner left the gate pinned at the stale startup seed");
+}
+
+#[test]
 fn idle_axis_does_not_drag_the_frontier() {
     let cap = Capture::default();
     let (credit_tx, credit_rx, frontier_bits) = credit_inputs();

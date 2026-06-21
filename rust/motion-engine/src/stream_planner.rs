@@ -411,6 +411,12 @@ fn run_loop(
         .into_iter()
         .map(|key| (key, f64::INFINITY))
         .collect();
+    // Publish the ledger's initial min so the dispatch gate matches the planner
+    // before any credit arrives — otherwise the gate reads a stale seed and bars
+    // the first move once it sits idle longer than LOOKAHEAD.
+    if let Some(frontier) = axis_frontiers.values().copied().min_by(f64::total_cmp) {
+        frontier_bits.store(frontier.to_bits(), Ordering::Release);
+    }
     let mut pending_segs: VecDeque<ShapedSegment> = VecDeque::new();
     let mut last_frontier = f64::NEG_INFINITY;
     let mut frontier_advanced_at = Instant::now();

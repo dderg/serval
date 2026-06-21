@@ -2785,11 +2785,10 @@ impl PyMotionEngine {
 
         let (pump_tx_init, pump_rx) = std::sync::mpsc::channel::<crate::pump::PumpMsg>();
         let (credit_tx, credit_rx) = crossbeam_channel::unbounded::<crate::pump::FrontierMsg>();
-        let initial_frontier = {
-            let r = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            r.host_now_secs()
-        };
-        let frontier_bits = Arc::new(AtomicU64::new(initial_frontier.to_bits()));
+        // Start non-binding (+inf): with no consumption reported yet the gate must
+        // be open, matching the planner's idle-axis ledger. A stale finite seed
+        // would gate the first move once it sat unused for longer than LOOKAHEAD.
+        let frontier_bits = Arc::new(AtomicU64::new(f64::INFINITY.to_bits()));
         let gate_bypass = Arc::new(AtomicBool::new(false));
 
         let wire_transports: HashMap<u32, crate::pump::McuTransport> = {
