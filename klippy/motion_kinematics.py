@@ -67,6 +67,11 @@ def load_kinematics(config, motion):
             "[kinematics] type '%s' is not supported (supported: %s)"
             % (kind, ", ".join(sorted(KINEMATICS_TYPES)))
         )
+    # Frontends (Moonraker/Mainsail) read [printer] kinematics to detect a
+    # motion system and hide the movement panel when it resolves to 'none'.
+    # [kinematics] stays authoritative; mirror its type onto [printer]'s
+    # reported settings so the frontend sees a real kinematics.
+    config.getsection("printer").get("kinematics", kind)
     role_specs = KINEMATICS_TYPES[kind]
     kin = _LinearKinematics(config, motion, kind, role_specs)
     _reject_orphan_motors(config, motion, section, role_specs)
@@ -268,8 +273,8 @@ class _LinearKinematics:
         self._check_endstops(move)
         z_ratio = move.move_d / abs(move.axes_d[2])
         move.limit_speed(
-            self._motion._axis_limit("z", "max_velocity") * z_ratio,
-            self._motion._axis_limit("z", "max_accel") * z_ratio,
+            self._motion.max_z_velocity * z_ratio,
+            self._motion.max_z_accel * z_ratio,
         )
 
     def set_position(self, newpos, homing_axes=()):

@@ -86,6 +86,35 @@ pub fn classify_and_build(
     })
 }
 
+/// Build a geometry-pipeline `Move` (line, with an optional extruder follower)
+/// from a start position and per-axis deltas. This is the new-pipeline
+/// counterpart to `classify_and_build`: instead of a host-NURBS `CubicSegment`
+/// it produces a `frontend::Move` the streaming planner buffers and blends.
+#[allow(clippy::too_many_arguments)]
+pub fn build_move(
+    start: [f64; 3],
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    extruder_axis: usize,
+    e_delta: f64,
+    limits: geometry::VelocityLimits,
+    feedrate_mm_s: f64,
+    line_no: u32,
+) -> Result<geometry::Move, geometry::FrontendError> {
+    let end = [start[0] + dx, start[1] + dy, start[2] + dz];
+    let ctx = geometry::MoveContext {
+        extruder_axis,
+        feedrate_mm_s,
+        limits,
+        source: SourceRange {
+            start_line: line_no,
+            end_line: line_no,
+        },
+    };
+    geometry::line_move(start, end, e_delta, ctx)
+}
+
 fn classify_curve(
     cps: [[f64; 3]; 4],
     followers: &[(usize, f64)],
