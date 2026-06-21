@@ -94,7 +94,16 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
 
     let (tx, rx) = mpsc::channel::<PumpMsg>();
     let handle = std::thread::spawn(move || {
-        run_pump(rx, sink, |_k| 8u32, |_| None, |_| {}, |_, _| {}, |_| {});
+        run_pump(
+            rx,
+            sink,
+            |_k| 8u32,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            |_, _| {},
+        );
     });
 
     tx.send(PumpMsg::Enqueue(EnqueueMsg {

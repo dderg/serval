@@ -98,6 +98,7 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
             |_| {},
             |_, _| {},
             |_| {},
+            |_, _| {},
         );
     });
 
@@ -184,6 +185,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
             |_| {},
             |_, _| {},
             |_| {},
+            |_, _| {},
         );
     });
     let key = AxisKey { mcu_id: 1, axis: 2 };
@@ -280,6 +282,7 @@ fn flush_clears_queued_pieces_and_junctions() {
             |_| {},
             |_, _| {},
             |_| {},
+            |_, _| {},
         );
     });
 
@@ -379,6 +382,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
                 *abandoned_pump.lock().unwrap() += n;
             },
             |_| {},
+            |_, _| {},
         );
     });
 
@@ -457,6 +461,7 @@ fn flush_unknown_key_is_noop() {
             |_| {},
             |_, _| {},
             |_| {},
+            |_, _| {},
         );
     });
 
@@ -488,7 +493,16 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
 
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(rx, sink_clone, |_| 8, |_| None, |_| {}, |_, _| {}, |_| {});
+        run_pump(
+            rx,
+            sink_clone,
+            |_| 8,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            |_, _| {},
+        );
     });
 
     ack_rx
@@ -518,6 +532,7 @@ fn barrier_acks_on_idle_pump() {
             |_| {},
             |_, _| {},
             |_| {},
+            |_, _| {},
         );
     });
     let (ack_tx, ack_rx) = mpsc::sync_channel(1);

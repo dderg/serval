@@ -85,6 +85,7 @@ fn stall_detection_fires_when_floor_stuck() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            |_, _| {},
         );
     });
 
@@ -160,6 +161,7 @@ fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            |_, _| {},
         );
     });
     handle.join().unwrap();
@@ -196,6 +198,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
             |_| {},
             |_, _| {},
             |_| {},
+            |_, _| {},
         );
     });
 
@@ -262,7 +265,16 @@ fn unsynced_clock_releases_nothing_for_participants() {
 
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
-        run_pump(rx, sink_clone, |_| 64, |_| None, |_| {}, |_, _| {}, |_| {});
+        run_pump(
+            rx,
+            sink_clone,
+            |_| 64,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            |_, _| {},
+        );
     });
     std::thread::sleep(Duration::from_millis(100));
     tx.send(PumpMsg::Shutdown).unwrap();
@@ -293,6 +305,7 @@ fn retired_regression_triggers_on_drip_stall() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            |_, _| {},
         );
     });
 
@@ -346,16 +359,21 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            |_, _| {},
         );
     });
 
     tx.send(PumpMsg::Enqueue(EnqueueMsg {
         key: ka,
-        pieces: vec![make_piece(10)],
+        pieces: (0..40).map(make_piece).collect(),
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
     }))
     .unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    let (barrier_tx, barrier_rx) = std::sync::mpsc::sync_channel(1);
+    tx.send(PumpMsg::Barrier(barrier_tx)).unwrap();
+    barrier_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     tx.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
         retired_counts: vec![40],
@@ -407,6 +425,7 @@ fn drip_disarm_clears_cohort() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            |_, _| {},
         );
     });
 
@@ -475,6 +494,7 @@ fn drip_disarm_wrong_cohort_id_is_noop() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            |_, _| {},
         );
     });
     handle.join().unwrap();

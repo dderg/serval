@@ -33,14 +33,37 @@ fn p(start: u64) -> (PieceEntry, f64) {
     )
 }
 
+fn timed_piece(host: f64, duration: f32) -> (PieceEntry, f64) {
+    (
+        PieceEntry {
+            start_time: (host * 1_000_000.0) as u64,
+            coeffs: [0.0; 4],
+            duration,
+            motor_mask: 0,
+            _reserved: [0; 3],
+        },
+        host,
+    )
+}
+
 #[test]
 fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = mpsc::channel();
     let depth = |_k: AxisKey| 2u32;
     let sink = RecordingSink(rec.clone());
-    let handle =
-        std::thread::spawn(move || run_pump(rx, sink, depth, |_| None, |_| {}, |_, _| {}, |_| {}));
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            rx,
+            sink,
+            depth,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            |_, _| {},
+        )
+    });
 
     tx.send(PumpMsg::Enqueue(EnqueueMsg {
         key: AxisKey { mcu_id: 1, axis: 0 },
@@ -77,6 +100,75 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     handle.join().unwrap();
 }
 
+#[test]
+fn pump_publishes_freed_time_from_retired_pushed_pieces() {
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let frontiers = Arc::new(Mutex::new(Vec::new()));
+    let frontiers_for_pump = Arc::clone(&frontiers);
+    let (tx, rx) = mpsc::channel();
+    let sink = RecordingSink(rec);
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            rx,
+            sink,
+            |_k| 8u32,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            move |key, freed_time| {
+                frontiers_for_pump.lock().unwrap().push((key, freed_time));
+            },
+        )
+    });
+
+    let x = AxisKey { mcu_id: 1, axis: 0 };
+    let y = AxisKey { mcu_id: 1, axis: 1 };
+    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+        key: x,
+        pieces: vec![timed_piece(0.0, 0.25), timed_piece(0.25, 0.25)],
+        fresh_stream: true,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+    }))
+    .unwrap();
+    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+        key: y,
+        pieces: vec![timed_piece(0.0, 0.75)],
+        fresh_stream: true,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+    }))
+    .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    tx.send(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 1,
+        retired_counts: vec![1, 1],
+    }))
+    .unwrap();
+    tx.send(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 1,
+        retired_counts: vec![2, 1],
+    }))
+    .unwrap();
+
+    for _ in 0..20 {
+        let snapshot = frontiers.lock().unwrap().clone();
+        if snapshot.len() >= 3 {
+            assert_eq!(snapshot[0], (x, 0.25));
+            assert_eq!(snapshot[1], (y, 0.75));
+            assert_eq!(snapshot[2], (x, 0.5));
+            tx.send(PumpMsg::Shutdown).unwrap();
+            handle.join().unwrap();
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    tx.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+    panic!("pump did not publish all expected freed-time frontiers");
+}
+
 fn piece_at(start: u64, host: f64, start_pos: f32, end_pos: f32) -> (PieceEntry, f64) {
     (
         PieceEntry {
@@ -103,6 +195,7 @@ fn run_pump_with_clock(
             |_| {},
             |_, _| {},
             |_| {},
+            |_, _| {},
         )
     })
 }

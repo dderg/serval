@@ -1,7 +1,10 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use super::*;
 use crate::planner::{HomeDripParams, NudgeParams};
+use crate::pump::{AxisKey, FrontierMsg, LOOKAHEAD_SECS};
 use crate::stream::StreamConfig;
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
@@ -9,7 +12,7 @@ use nurbs::eval::eval;
 
 #[derive(Clone, Default)]
 struct Capture {
-    segs: Arc<Mutex<Vec<(f64, f64, f64)>>>, // (t_start, t_end, x_at_end)
+    segs: Arc<Mutex<Vec<(f64, f64, f64)>>>,
     nudges: Arc<Mutex<usize>>,
 }
 
@@ -63,14 +66,38 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
     line_move(start, end, 0.0, ctx(line_no)).unwrap()
 }
 
+fn credit_inputs() -> (
+    crossbeam_channel::Sender<FrontierMsg>,
+    crossbeam_channel::Receiver<FrontierMsg>,
+    Arc<AtomicU64>,
+) {
+    let (credit_tx, credit_rx) = crossbeam_channel::unbounded();
+    let frontier_bits = Arc::new(AtomicU64::new(0.0f64.to_bits()));
+    (credit_tx, credit_rx, frontier_bits)
+}
+
+fn default_inputs() -> (
+    crossbeam_channel::Sender<FrontierMsg>,
+    crossbeam_channel::Receiver<FrontierMsg>,
+    Arc<AtomicU64>,
+) {
+    let (credit_tx, credit_rx) = crossbeam_channel::unbounded();
+    let frontier_bits = Arc::new(AtomicU64::new(f64::NEG_INFINITY.to_bits()));
+    (credit_tx, credit_rx, frontier_bits)
+}
+
 #[test]
 fn streams_collinear_moves_to_a_contiguous_trajectory() {
     let cap = Capture::default();
+    let (_credit_tx, credit_rx, frontier_bits) = default_inputs();
     let mut h = StreamPlannerHandle::spawn(
         cfg(1.0),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        credit_rx,
+        frontier_bits,
+        Vec::new(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -102,11 +129,15 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
 #[test]
 fn dwell_inserts_a_time_gap_then_resumes() {
     let cap = Capture::default();
+    let (_credit_tx, credit_rx, frontier_bits) = default_inputs();
     let mut h = StreamPlannerHandle::spawn(
         cfg(1.0),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        credit_rx,
+        frontier_bits,
+        Vec::new(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -132,11 +163,15 @@ fn dwell_inserts_a_time_gap_then_resumes() {
 #[test]
 fn stream_open_restarts_the_timeline_at_zero() {
     let cap = Capture::default();
+    let (_credit_tx, credit_rx, frontier_bits) = default_inputs();
     let mut h = StreamPlannerHandle::spawn(
         cfg(1.0),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        credit_rx,
+        frontier_bits,
+        Vec::new(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -162,11 +197,15 @@ fn stream_open_restarts_the_timeline_at_zero() {
 #[test]
 fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
     let cap = Capture::default();
+    let (_credit_tx, credit_rx, frontier_bits) = default_inputs();
     let mut h = StreamPlannerHandle::spawn(
         cfg(1.0),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        credit_rx,
+        frontier_bits,
+        Vec::new(),
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
     h.home_drip(HomeDripParams {
@@ -194,11 +233,15 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
 #[test]
 fn nudge_dispatches_pieces_and_advances_time() {
     let cap = Capture::default();
+    let (_credit_tx, credit_rx, frontier_bits) = default_inputs();
     let mut h = StreamPlannerHandle::spawn(
         cfg(1.0),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        credit_rx,
+        frontier_bits,
+        Vec::new(),
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
     h.submit_nudge(NudgeParams {
@@ -218,4 +261,111 @@ fn nudge_dispatches_pieces_and_advances_time() {
         "time did not advance past the nudge"
     );
     h.shutdown();
+}
+
+#[test]
+fn backpressure_parks_dispatch_services_flush_and_resumes_on_frontier() {
+    let cap = Capture::default();
+    let (credit_tx, credit_rx, frontier_bits) = credit_inputs();
+    let gate_bits = Arc::clone(&frontier_bits);
+    let segs = Arc::clone(&cap.segs);
+    let dispatch: DispatchFn = Arc::new(move |seg: &ShapedSegment| {
+        let frontier = f64::from_bits(gate_bits.load(Ordering::Acquire));
+        if seg.t_start > frontier + LOOKAHEAD_SECS {
+            return Err(DispatchError::Gated);
+        }
+        let x_end = eval(&seg.axes[0], seg.t_end);
+        segs.lock().unwrap().push((seg.t_start, seg.t_end, x_end));
+        Ok(())
+    });
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(1.0),
+        vec![0.0, 0.0, 0.0],
+        dispatch,
+        cap.nudge_dispatch(),
+        credit_rx,
+        frontier_bits,
+        vec![AxisKey { mcu_id: 1, axis: 0 }],
+    );
+
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.dwell(6.0).unwrap();
+    h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(50));
+    let parked = cap.snapshot();
+    assert!(!parked.is_empty(), "first segment should dispatch");
+    assert!(
+        parked.iter().all(|(_, _, x)| *x < 60.0),
+        "second move dispatched before the frontier advanced"
+    );
+
+    let flush_rx = h.flush_start().unwrap();
+    flush_rx
+        .recv_timeout(Duration::from_millis(250))
+        .expect("flush should be serviced while dispatch is parked");
+
+    credit_tx
+        .send(FrontierMsg {
+            key: AxisKey { mcu_id: 1, axis: 0 },
+            freed_time: 2.0,
+        })
+        .unwrap();
+
+    for _ in 0..20 {
+        if cap
+            .snapshot()
+            .iter()
+            .any(|(_, _, x)| (*x - 60.0).abs() < 1e-6)
+        {
+            h.shutdown();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.shutdown();
+    panic!("dispatch did not resume after frontier advanced");
+}
+
+#[test]
+fn backpressure_frontier_is_min_across_axes() {
+    let cap = Capture::default();
+    let (credit_tx, credit_rx, frontier_bits) = credit_inputs();
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(1.0),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        credit_rx,
+        Arc::clone(&frontier_bits),
+        vec![
+            AxisKey { mcu_id: 1, axis: 0 },
+            AxisKey { mcu_id: 1, axis: 1 },
+        ],
+    );
+
+    credit_tx
+        .send(FrontierMsg {
+            key: AxisKey { mcu_id: 1, axis: 0 },
+            freed_time: 8.0,
+        })
+        .unwrap();
+    credit_tx
+        .send(FrontierMsg {
+            key: AxisKey { mcu_id: 1, axis: 1 },
+            freed_time: 3.0,
+        })
+        .unwrap();
+
+    for _ in 0..20 {
+        if (h.frontier() - 3.0).abs() < 1e-9 {
+            h.shutdown();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.shutdown();
+    panic!("frontier did not settle to bottleneck axis");
 }

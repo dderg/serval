@@ -5,6 +5,8 @@ use std::sync::Weak;
 use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+pub const LOOKAHEAD_SECS: f64 = 5.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct AxisKey {
     pub mcu_id: u32,
@@ -19,6 +21,8 @@ pub struct AxisQueue {
     pub ring_depth: u32,
     pub physical_write_cursor: u32,
     pub lead_secs: f64,
+    pub pushed_end_times: VecDeque<f64>,
+    pub last_freed_time: f64,
 }
 
 impl AxisQueue {
@@ -30,6 +34,8 @@ impl AxisQueue {
             ring_depth,
             physical_write_cursor: 0,
             lead_secs: MAX_LEAD_SECS,
+            pushed_end_times: VecDeque::new(),
+            last_freed_time: f64::NEG_INFINITY,
         }
     }
     pub fn room(&self) -> u32 {
@@ -225,6 +231,12 @@ pub struct HeartbeatMsg {
     pub retired_counts: Vec<u32>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct FrontierMsg {
+    pub key: AxisKey,
+    pub freed_time: f64,
+}
+
 pub enum PumpMsg {
     Enqueue(EnqueueMsg),
     Heartbeat(HeartbeatMsg),
@@ -371,7 +383,7 @@ impl DripCohort {
 /// channel-send or a flag-set so they can assert detection without terminating
 /// the process.  After the callback returns the pump loop exits.
 #[allow(clippy::too_many_lines)]
-pub fn run_pump<S, F, C, A, O, D>(
+pub fn run_pump<S, F, C, A, O, D, P>(
     rx: Receiver<PumpMsg>,
     sink: S,
     ring_depth_of: F,
@@ -379,6 +391,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     on_fatal_transport: A,
     on_abandon: O,
     on_drip_stall: D,
+    on_frontier: P,
 ) where
     S: PieceSink,
     F: Fn(AxisKey) -> u32,
@@ -386,6 +399,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     A: Fn(AxisKey) + Send + 'static,
     O: Fn(AxisKey, u32),
     D: Fn(String) + Send,
+    P: Fn(AxisKey, f64),
 {
     let mut queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
     let mut junction_ends: BTreeMap<AxisKey, JunctionEnd> = BTreeMap::new();
@@ -514,14 +528,65 @@ pub fn run_pump<S, F, C, A, O, D>(
                 mcu_id,
                 retired_counts,
             }) => {
-                // retired_counts[i] is axis index i; same numbering as PushPieces.axis_idx in runtime_ffi.rs — do not reorder either side.
                 for (axis, &c) in retired_counts.iter().enumerate() {
                     let key = AxisKey {
                         mcu_id,
                         axis: axis as u8,
                     };
                     if let Some(q) = queues.get_mut(&key) {
+                        let old_retired = q.retired;
+                        if c < old_retired {
+                            if let Some(co) = cohort {
+                                if co.participants.contains(&key) {
+                                    on_drip_stall(format!(
+                                        "drip cohort {}: retired regression on mcu{} axis{}: \
+                                         was {old_retired} now {c} — MCU retired counter must not decrease",
+                                        co.id, mcu_id, axis
+                                    ));
+                                    *cohort = None;
+                                    continue;
+                                }
+                            }
+                            panic!(
+                                "retired counter regression on mcu{} axis{}: was {} now {}",
+                                key.mcu_id, key.axis, old_retired, c
+                            );
+                        }
+                        if c > q.pushed {
+                            panic!(
+                                "freed-time accounting mismatch on mcu{} axis{}: retired {} \
+                                 exceeds pushed {}",
+                                key.mcu_id, key.axis, c, q.pushed
+                            );
+                        }
                         q.retired = c;
+                        if c != old_retired {
+                            let delta = c - old_retired;
+                            let mut last_freed = q.last_freed_time;
+                            for _ in 0..delta {
+                                match q.pushed_end_times.pop_front() {
+                                    Some(end_time) => last_freed = end_time,
+                                    None => panic!(
+                                        "freed-time accounting mismatch on mcu{} axis{}: \
+                                         retired advanced by {delta} but only {} end-times buffered",
+                                        key.mcu_id,
+                                        key.axis,
+                                        q.pushed_end_times.len()
+                                    ),
+                                }
+                            }
+                            if last_freed < q.last_freed_time
+                                && q.last_freed_time != f64::NEG_INFINITY
+                            {
+                                panic!(
+                                    "freed-time regression on mcu{} axis{}: \
+                                     was {} now {}",
+                                    key.mcu_id, key.axis, q.last_freed_time, last_freed
+                                );
+                            }
+                            q.last_freed_time = last_freed;
+                            on_frontier(key, last_freed);
+                        }
                     }
                     if let Some(co) = cohort {
                         if co.participants.contains(&key) {
@@ -687,7 +752,15 @@ pub fn run_pump<S, F, C, A, O, D>(
                             Ok(_) => {
                                 let q = queues.get_mut(&f.key).expect("planned key exists");
                                 for _ in 0..f.pieces.len() {
-                                    q.pieces.pop_front();
+                                    let (piece, host_t) = q.pieces.pop_front().unwrap_or_else(|| {
+                                        panic!(
+                                            "pushed_end_times: piece queue underflow on mcu{} axis{} \
+                                             while advancing pushed by {n}",
+                                            f.key.mcu_id, f.key.axis
+                                        )
+                                    });
+                                    let end_host = host_t + f64::from(piece.duration);
+                                    q.pushed_end_times.push_back(end_host);
                                 }
                                 q.pushed = q.pushed.wrapping_add(n);
                                 q.advance_write_cursor(n);

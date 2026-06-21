@@ -177,6 +177,10 @@ pub enum DispatchError {
     SegmentLate { gap_s: f64, seg_t_start: f64 },
     #[error("nudge target mcu_id={mcu_id} axis={axis} not present in mcu_configs")]
     NudgeTargetMissing { mcu_id: u32, axis: u8 },
+    #[error(
+        "dispatch gated by consumption backpressure: segment host time exceeds frontier + LOOKAHEAD"
+    )]
+    Gated,
 }
 
 #[allow(missing_debug_implementations)]

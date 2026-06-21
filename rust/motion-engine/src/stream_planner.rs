@@ -1,17 +1,20 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, select, unbounded};
 use trajectory::ShapedSegment;
 
 use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
+use crate::pump::{AxisKey, FrontierMsg};
 use crate::stream::{StreamConfig, StreamState};
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
 const SAFETY_MARGIN: f64 = 0.05;
 const T_IDLE: Duration = Duration::from_secs(3600);
+const SUBMIT_CHANNEL_BOUND: usize = 1024;
 
 type DispatchFn = Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>;
 type NudgeDispatchFn =
@@ -19,7 +22,6 @@ type NudgeDispatchFn =
 
 #[derive(Debug)]
 pub enum StreamMsg {
-    Move(geometry::Move),
     Flush { notify: Sender<Option<Instant>> },
     Dwell { duration_s: f64, notify: Sender<()> },
     StreamOpen { home_pos: Vec<f64> },
@@ -31,10 +33,12 @@ pub enum StreamMsg {
 
 #[allow(missing_debug_implementations)]
 pub struct StreamPlannerHandle {
-    sender: Sender<StreamMsg>,
+    move_sender: Sender<geometry::Move>,
+    control_sender: Sender<StreamMsg>,
     join_handle: Option<JoinHandle<()>>,
     last_move_time_bits: Arc<AtomicU64>,
     commit_fire_count: Arc<AtomicU32>,
+    frontier_bits: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -58,45 +62,56 @@ impl StreamPlannerHandle {
         home_pos: Vec<f64>,
         dispatch: DispatchFn,
         nudge_dispatch: NudgeDispatchFn,
+        credit_rx: Receiver<FrontierMsg>,
+        frontier_bits: Arc<AtomicU64>,
+        frontier_keys: Vec<AxisKey>,
     ) -> Self {
-        let (tx, rx) = unbounded();
+        let (move_tx, move_rx) = bounded(SUBMIT_CHANNEL_BOUND);
+        let (control_tx, control_rx) = unbounded();
         let last_move_time_bits = Arc::new(AtomicU64::new(0));
         let commit_fire_count = Arc::new(AtomicU32::new(0));
 
         let last_thread = Arc::clone(&last_move_time_bits);
         let commit_thread = Arc::clone(&commit_fire_count);
+        let frontier_thread = Arc::clone(&frontier_bits);
         let join = thread::Builder::new()
             .name("kalico-stream-planner".to_string())
             .spawn(move || {
                 let state = StreamState::new(config, &home_pos, 0.0);
                 run_loop(
-                    rx,
+                    move_rx,
+                    control_rx,
+                    credit_rx,
                     dispatch,
                     nudge_dispatch,
                     state,
                     &last_thread,
                     &commit_thread,
+                    &frontier_thread,
+                    frontier_keys,
                 );
             })
             .expect("spawn stream planner thread");
 
         Self {
-            sender: tx,
+            move_sender: move_tx,
+            control_sender: control_tx,
             join_handle: Some(join),
             last_move_time_bits,
             commit_fire_count,
+            frontier_bits,
         }
     }
 
     pub fn submit_move(&self, m: geometry::Move) -> Result<(), StreamPlannerError> {
-        self.sender
-            .send(StreamMsg::Move(m))
+        self.move_sender
+            .send(m)
             .map_err(|_| StreamPlannerError::ChannelClosed)
     }
 
     pub fn flush(&self) -> Result<(), StreamPlannerError> {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        self.sender
+        self.control_sender
             .send(StreamMsg::Flush { notify: tx })
             .map_err(|_| StreamPlannerError::ChannelClosed)?;
         match rx.recv() {
@@ -120,7 +135,7 @@ impl StreamPlannerHandle {
         &self,
     ) -> Result<crossbeam_channel::Receiver<Option<Instant>>, StreamPlannerError> {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        self.sender
+        self.control_sender
             .send(StreamMsg::Flush { notify: tx })
             .map_err(|_| StreamPlannerError::ChannelClosed)?;
         Ok(rx)
@@ -128,7 +143,7 @@ impl StreamPlannerHandle {
 
     pub fn dwell(&self, duration_s: f64) -> Result<(), StreamPlannerError> {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        self.sender
+        self.control_sender
             .send(StreamMsg::Dwell {
                 duration_s,
                 notify: tx,
@@ -138,25 +153,25 @@ impl StreamPlannerHandle {
     }
 
     pub fn stream_open(&self, home_pos: Vec<f64>) -> Result<(), StreamPlannerError> {
-        self.sender
+        self.control_sender
             .send(StreamMsg::StreamOpen { home_pos })
             .map_err(|_| StreamPlannerError::ChannelClosed)
     }
 
     pub fn reset(&self, recovered_pos: Vec<f64>) -> Result<(), StreamPlannerError> {
-        self.sender
+        self.control_sender
             .send(StreamMsg::Reset { recovered_pos })
             .map_err(|_| StreamPlannerError::ChannelClosed)
     }
 
     pub fn home_drip(&self, p: HomeDripParams) -> Result<(), StreamPlannerError> {
-        self.sender
+        self.control_sender
             .send(StreamMsg::HomeDrip(p))
             .map_err(|_| StreamPlannerError::ChannelClosed)
     }
 
     pub fn submit_nudge(&self, p: NudgeParams) -> Result<(), StreamPlannerError> {
-        self.sender
+        self.control_sender
             .send(StreamMsg::Nudge(p))
             .map_err(|_| StreamPlannerError::ChannelClosed)
     }
@@ -167,12 +182,17 @@ impl StreamPlannerHandle {
     }
 
     #[must_use]
+    pub fn frontier(&self) -> f64 {
+        f64::from_bits(self.frontier_bits.load(Ordering::Acquire))
+    }
+
+    #[must_use]
     pub fn commit_fire_count(&self) -> u32 {
         self.commit_fire_count.load(Ordering::Acquire)
     }
 
     pub fn shutdown(&mut self) {
-        let _ = self.sender.send(StreamMsg::Shutdown);
+        let _ = self.control_sender.send(StreamMsg::Shutdown);
         if let Some(h) = self.join_handle.take() {
             let _ = h.join();
         }
@@ -221,6 +241,38 @@ fn dispatch_committed(
         last_move_time_bits.store(last.t_end.to_bits(), Ordering::Release);
     }
     commit_fire_count.fetch_add(1, Ordering::AcqRel);
+}
+
+fn track_committed(
+    segs: &[ShapedSegment],
+    _last_move_time_bits: &AtomicU64,
+    commit_fire_count: &AtomicU32,
+) {
+    if segs.is_empty() {
+        return;
+    }
+    commit_fire_count.fetch_add(1, Ordering::AcqRel);
+}
+
+fn try_dispatch_pending(
+    pending: &mut VecDeque<ShapedSegment>,
+    dispatch: &DispatchFn,
+    sync_instant: &mut Option<Instant>,
+    last_move_time_bits: &AtomicU64,
+) {
+    while let Some(seg) = pending.front() {
+        match dispatch(seg) {
+            Ok(()) => {
+                last_move_time_bits.store(seg.t_end.to_bits(), Ordering::Release);
+                if sync_instant.is_none() {
+                    *sync_instant = Some(Instant::now());
+                }
+                pending.pop_front();
+            }
+            Err(DispatchError::Gated) => break,
+            Err(e) => fatal(&format!("dispatch failed: {e}")),
+        }
+    }
 }
 
 fn dispatch_or_err(
@@ -320,17 +372,62 @@ fn run_nudge(
 }
 
 fn run_loop(
-    rx: Receiver<StreamMsg>,
+    move_rx: Receiver<geometry::Move>,
+    control_rx: Receiver<StreamMsg>,
+    credit_rx: Receiver<FrontierMsg>,
     dispatch: DispatchFn,
     nudge_dispatch: NudgeDispatchFn,
     mut state: StreamState,
     last_move_time_bits: &AtomicU64,
     commit_fire_count: &AtomicU32,
+    frontier_bits: &AtomicU64,
+    frontier_keys: Vec<AxisKey>,
 ) {
     let mut sync_instant: Option<Instant> = None;
+    let initial_frontier = f64::from_bits(frontier_bits.load(Ordering::Acquire));
+    let mut axis_frontiers: BTreeMap<AxisKey, f64> = frontier_keys
+        .into_iter()
+        .map(|key| (key, initial_frontier))
+        .collect();
+    let mut pending_segs: VecDeque<ShapedSegment> = VecDeque::new();
 
     loop {
-        let next_timeout = if state.is_empty() {
+        while let Ok(msg) = credit_rx.try_recv() {
+            if !msg.freed_time.is_finite() {
+                fatal(&format!(
+                    "non-finite frontier {} on mcu{} axis{}",
+                    msg.freed_time, msg.key.mcu_id, msg.key.axis
+                ));
+            }
+            if let Some(&previous) = axis_frontiers.get(&msg.key) {
+                if msg.freed_time < previous {
+                    fatal(&format!(
+                        "frontier regression: was {previous} now {} on mcu{} axis{}",
+                        msg.freed_time, msg.key.mcu_id, msg.key.axis
+                    ));
+                }
+            }
+            axis_frontiers.insert(msg.key, msg.freed_time);
+            if let Some(frontier) = axis_frontiers.values().copied().min_by(f64::total_cmp) {
+                frontier_bits.store(frontier.to_bits(), Ordering::Release);
+            } else {
+                fatal(&format!(
+                    "empty frontier ledger after update on mcu{} axis{}",
+                    msg.key.mcu_id, msg.key.axis
+                ));
+            }
+        }
+
+        try_dispatch_pending(
+            &mut pending_segs,
+            &dispatch,
+            &mut sync_instant,
+            last_move_time_bits,
+        );
+
+        let next_timeout = if !pending_segs.is_empty() {
+            Duration::from_millis(10)
+        } else if state.is_empty() {
             T_IDLE
         } else {
             let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
@@ -338,73 +435,90 @@ fn run_loop(
             Duration::try_from_secs_f64(remaining.max(0.0)).unwrap_or(Duration::ZERO)
         };
 
-        let msg = match rx.recv_timeout(next_timeout) {
-            Ok(m) => m,
-            Err(RecvTimeoutError::Timeout) => {
-                tracing::info!(
-                    subsystem = "motion",
-                    event = "idle_drain",
-                    buffered = state.buffered(),
-                    t_committed = state.t_committed(),
-                    sync_set = sync_instant.is_some(),
-                    "[idle-drain]"
-                );
-                let segs = state
-                    .commit(true)
-                    .unwrap_or_else(|e| fatal(&format!("idle drain: {e}")));
-                dispatch_committed(
-                    &segs,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
-                continue;
+        let msg = if pending_segs.is_empty() {
+            select! {
+                recv(control_rx) -> msg => match msg {
+                    Ok(m) => Some(m),
+                    Err(_) => return,
+                },
+                recv(move_rx) -> msg => match msg {
+                    Ok(m) => {
+                        let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                        let reanchor = state.is_empty() && esc > state.t_committed() + 1e-6;
+                        tracing::info!(
+                            subsystem = "motion",
+                            event = "reanchor_decision",
+                            esc,
+                            sync_set = sync_instant.is_some(),
+                            is_empty = state.is_empty(),
+                            buffered = state.buffered(),
+                            t_committed = state.t_committed(),
+                            reanchor,
+                            "[reanchor-decision]"
+                        );
+                        if reanchor {
+                            sync_instant = None;
+                            state.restart_idle_timeline();
+                        }
+                        state.push(m);
+                        let segs = state
+                            .commit(false)
+                            .unwrap_or_else(|e| fatal(&format!("commit: {e}")));
+                        track_committed(&segs, last_move_time_bits, commit_fire_count);
+                        pending_segs.extend(segs);
+                        try_dispatch_pending(
+                            &mut pending_segs,
+                            &dispatch,
+                            &mut sync_instant,
+                            last_move_time_bits,
+                        );
+                        continue;
+                    }
+                    Err(_) => return,
+                },
+                default(next_timeout) => {
+                    tracing::info!(
+                        subsystem = "motion",
+                        event = "idle_drain",
+                        buffered = state.buffered(),
+                        t_committed = state.t_committed(),
+                        sync_set = sync_instant.is_some(),
+                        "[idle-drain]"
+                    );
+                    let segs = state
+                        .commit(true)
+                        .unwrap_or_else(|e| fatal(&format!("idle drain: {e}")));
+                    track_committed(&segs, last_move_time_bits, commit_fire_count);
+                    pending_segs.extend(segs);
+                    try_dispatch_pending(
+                        &mut pending_segs,
+                        &dispatch,
+                        &mut sync_instant,
+                        last_move_time_bits,
+                    );
+                    continue;
+                }
             }
-            Err(RecvTimeoutError::Disconnected) => return,
+        } else {
+            match control_rx.recv_timeout(next_timeout) {
+                Ok(m) => Some(m),
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
         };
 
-        match msg {
-            StreamMsg::Move(m) => {
-                let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
-                let reanchor = state.is_empty() && esc > state.t_committed() + 1e-6;
-                tracing::info!(
-                    subsystem = "motion",
-                    event = "reanchor_decision",
-                    esc,
-                    sync_set = sync_instant.is_some(),
-                    is_empty = state.is_empty(),
-                    buffered = state.buffered(),
-                    t_committed = state.t_committed(),
-                    reanchor,
-                    "[reanchor-decision]"
-                );
-                if reanchor {
-                    sync_instant = None;
-                    state.restart_idle_timeline();
-                }
-                state.push(m);
-                let segs = state
-                    .commit(false)
-                    .unwrap_or_else(|e| fatal(&format!("commit: {e}")));
-                dispatch_committed(
-                    &segs,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
-            }
+        match msg.expect("control message") {
             StreamMsg::Flush { notify } => {
                 let segs = state
                     .commit(true)
                     .unwrap_or_else(|e| fatal(&format!("flush: {e}")));
-                dispatch_committed(
-                    &segs,
+                track_committed(&segs, last_move_time_bits, commit_fire_count);
+                pending_segs.extend(segs);
+                try_dispatch_pending(
+                    &mut pending_segs,
                     &dispatch,
                     &mut sync_instant,
                     last_move_time_bits,
-                    commit_fire_count,
                 );
                 let finish = sync_instant.map(|t| {
                     t + Duration::try_from_secs_f64((state.t_committed() + LEAD).max(0.0))
@@ -416,25 +530,35 @@ fn run_loop(
                 let segs = state
                     .commit(true)
                     .unwrap_or_else(|e| fatal(&format!("dwell drain: {e}")));
-                dispatch_committed(
-                    &segs,
+                track_committed(&segs, last_move_time_bits, commit_fire_count);
+                pending_segs.extend(segs);
+                try_dispatch_pending(
+                    &mut pending_segs,
                     &dispatch,
                     &mut sync_instant,
                     last_move_time_bits,
-                    commit_fire_count,
                 );
                 state.advance_time(duration_s);
                 let _ = notify.send(());
             }
             StreamMsg::StreamOpen { home_pos } => {
+                if !pending_segs.is_empty() {
+                    fatal("stream_open with gated pending segments");
+                }
                 sync_instant = None;
                 state.reset(&home_pos, 0.0);
             }
             StreamMsg::Reset { recovered_pos } => {
+                if !pending_segs.is_empty() {
+                    fatal("reset with gated pending segments");
+                }
                 sync_instant = None;
                 state.reset(&recovered_pos, 0.0);
             }
             StreamMsg::HomeDrip(p) => {
+                if !pending_segs.is_empty() {
+                    fatal("home_drip with gated pending segments");
+                }
                 sync_instant = None;
                 state.reset(&p.home_pos, 0.0);
                 let result = run_home_drip(
@@ -470,6 +594,14 @@ fn run_loop(
                     last_move_time_bits,
                     commit_fire_count,
                 );
+                for seg in pending_segs.drain(..) {
+                    if let Err(e) = dispatch(&seg) {
+                        fatal(&format!("shutdown dispatch failed: {e}"));
+                    }
+                    if sync_instant.is_none() {
+                        sync_instant = Some(Instant::now());
+                    }
+                }
                 return;
             }
         }

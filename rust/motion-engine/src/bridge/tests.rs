@@ -356,11 +356,18 @@ fn shutdown_takes_and_joins_planner() {
     let engine = PyMotionEngine::new();
     let (dispatch, _counter) = counting_dispatch();
     let (sc, home) = stream_config_from(&PlannerConfig::default());
+    let (_credit_tx, credit_rx) = crossbeam_channel::unbounded::<crate::pump::FrontierMsg>();
+    let frontier_bits = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        f64::NEG_INFINITY.to_bits(),
+    ));
     *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamPlannerHandle::spawn(
         sc,
         home,
         dispatch,
         noop_nudge_dispatch(),
+        credit_rx,
+        frontier_bits,
+        Vec::new(),
     ));
 
     assert!(
@@ -442,7 +449,19 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
         });
 
     let (sc, home) = stream_config_from(&relaxed_planner_config());
-    let planner = StreamPlannerHandle::spawn(sc, home, dispatch, noop_nudge_dispatch());
+    let (_credit_tx, credit_rx) = crossbeam_channel::unbounded::<crate::pump::FrontierMsg>();
+    let frontier_bits = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        f64::NEG_INFINITY.to_bits(),
+    ));
+    let planner = StreamPlannerHandle::spawn(
+        sc,
+        home,
+        dispatch,
+        noop_nudge_dispatch(),
+        credit_rx,
+        frontier_bits,
+        Vec::new(),
+    );
     // Prime one move so the planner has a pending tail before the submitter and
     // pump are even wired — the recv_timeout branch is armed from the start.
     planner
@@ -619,6 +638,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                 },
                 |_key: AxisKey, _n: u32| {},
                 |_msg: String| {},
+                |_, _| {},
             );
         })
         .expect("spawn test pump thread");
@@ -660,11 +680,18 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     // Also seed a planner so the planner-join step of shutdown() is exercised.
     let (dispatch, _counter) = counting_dispatch();
     let (sc, home) = stream_config_from(&relaxed_planner_config());
+    let (_credit_tx, credit_rx) = crossbeam_channel::unbounded::<crate::pump::FrontierMsg>();
+    let frontier_bits = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        f64::NEG_INFINITY.to_bits(),
+    ));
     *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamPlannerHandle::spawn(
         sc,
         home,
         dispatch,
         noop_nudge_dispatch(),
+        credit_rx,
+        frontier_bits,
+        Vec::new(),
     ));
 
     engine.shutdown();

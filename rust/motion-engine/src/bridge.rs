@@ -2784,6 +2784,12 @@ impl PyMotionEngine {
         }
 
         let (pump_tx_init, pump_rx) = std::sync::mpsc::channel::<crate::pump::PumpMsg>();
+        let (credit_tx, credit_rx) = crossbeam_channel::unbounded::<crate::pump::FrontierMsg>();
+        let initial_frontier = {
+            let r = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            r.host_now_secs()
+        };
+        let frontier_bits = Arc::new(AtomicU64::new(initial_frontier.to_bits()));
 
         let wire_transports: HashMap<u32, crate::pump::McuTransport> = {
             let mut t = HashMap::new();
@@ -2856,6 +2862,23 @@ impl PyMotionEngine {
                              aborting klippy so systemd restarts it"
                         );
                         abort_after_tracing_appender_drains();
+                    },
+                    move |key: crate::pump::AxisKey, freed_time: f64| {
+                        if credit_tx
+                            .send(crate::pump::FrontierMsg {
+                                key,
+                                freed_time,
+                            })
+                            .is_err()
+                        {
+                            tracing::error!(
+                                key = ?key,
+                                freed_time,
+                                "EXIT_ON_FAULT — stream planner frontier receiver closed; \
+                                 aborting klippy so systemd restarts it"
+                            );
+                            abort_after_tracing_appender_drains();
+                        }
                     },
                 );
             })
@@ -3103,6 +3126,7 @@ impl PyMotionEngine {
         let active_drip_cohort_for_cb = Arc::clone(&self.active_drip_cohort);
         let motion_history_for_cb = Arc::clone(&self.motion_history);
         let nominal_freqs_for_cb = Arc::clone(&self.nominal_clock_freqs);
+        let frontier_for_cb = Arc::clone(&frontier_bits);
 
         let nudge_mcu_configs = mcu_configs_for_cb.clone();
         let nudge_router = Arc::clone(&router_for_cb);
@@ -3131,14 +3155,20 @@ impl PyMotionEngine {
                     r.host_now_secs()
                 };
 
-                let (t0, fresh) = anchor_mutex
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
+                let frontier = f64::from_bits(frontier_for_cb.load(Ordering::Acquire));
+                let mut anchor = anchor_mutex.lock().unwrap_or_else(|p| p.into_inner());
+                let seg_host_start = anchor.projected_host_start(seg.t_start, host_now);
+                let gate_limit = frontier + crate::pump::LOOKAHEAD_SECS;
+                if seg_host_start > gate_limit {
+                    return Err(DispatchError::Gated);
+                }
+                let (t0, fresh) = anchor
                     .anchor_segment(seg.t_start, seg.t_end, host_now)
                     .map_err(|late| DispatchError::SegmentLate {
                         gap_s: late.gap_s,
                         seg_t_start: late.seg_t_start,
                     })?;
+                drop(anchor);
 
                 if fresh {
                     let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
@@ -3330,11 +3360,15 @@ impl PyMotionEngine {
                 .map_err(PyRuntimeError::new_err)?,
             };
             let home = vec![0.0; cfg.axis_registry.n_axes()];
+            let frontier_keys = ring_depth_table.keys().copied().collect();
             *guard = Some(StreamPlannerHandle::spawn(
                 stream_cfg,
                 home,
                 dispatch,
                 nudge_dispatch,
+                credit_rx,
+                frontier_bits,
+                frontier_keys,
             ));
         }
         Ok(())
