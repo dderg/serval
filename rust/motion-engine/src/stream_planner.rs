@@ -26,6 +26,7 @@ pub enum StreamMsg {
     Dwell { duration_s: f64, notify: Sender<()> },
     StreamOpen { home_pos: Vec<f64> },
     Reset { recovered_pos: Vec<f64> },
+    SeedFrontier { host_time: f64 },
     HomeDrip(HomeDripParams),
     Nudge(NudgeParams),
     Shutdown,
@@ -161,6 +162,12 @@ impl StreamPlannerHandle {
     pub fn reset(&self, recovered_pos: Vec<f64>) -> Result<(), StreamPlannerError> {
         self.control_sender
             .send(StreamMsg::Reset { recovered_pos })
+            .map_err(|_| StreamPlannerError::ChannelClosed)
+    }
+
+    pub fn seed_frontier(&self, host_time: f64) -> Result<(), StreamPlannerError> {
+        self.control_sender
+            .send(StreamMsg::SeedFrontier { host_time })
             .map_err(|_| StreamPlannerError::ChannelClosed)
     }
 
@@ -554,6 +561,15 @@ fn run_loop(
                 }
                 sync_instant = None;
                 state.reset(&recovered_pos, 0.0);
+            }
+            StreamMsg::SeedFrontier { host_time } => {
+                if !host_time.is_finite() {
+                    fatal(&format!("non-finite seed frontier {host_time}"));
+                }
+                for frontier in axis_frontiers.values_mut() {
+                    *frontier = host_time;
+                }
+                frontier_bits.store(host_time.to_bits(), Ordering::Release);
             }
             StreamMsg::HomeDrip(p) => {
                 if !pending_segs.is_empty() {

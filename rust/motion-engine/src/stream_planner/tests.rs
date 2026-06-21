@@ -369,3 +369,32 @@ fn backpressure_frontier_is_min_across_axes() {
     h.shutdown();
     panic!("frontier did not settle to bottleneck axis");
 }
+
+#[test]
+fn backpressure_seed_frontier_resets_configured_axis_minimum() {
+    let cap = Capture::default();
+    let (_credit_tx, credit_rx, frontier_bits) = credit_inputs();
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(1.0),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        credit_rx,
+        Arc::clone(&frontier_bits),
+        vec![
+            AxisKey { mcu_id: 1, axis: 0 },
+            AxisKey { mcu_id: 1, axis: 1 },
+        ],
+    );
+
+    h.seed_frontier(12.0).unwrap();
+    for _ in 0..20 {
+        if (h.frontier() - 12.0).abs() < 1e-9 {
+            h.shutdown();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.shutdown();
+    panic!("seeded frontier did not update configured axis minimum");
+}

@@ -3897,6 +3897,14 @@ impl PyMotionEngine {
                 .map_err(PyRuntimeError::new_err)?;
         }
 
+        {
+            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            planner.seed_frontier(router.host_now_secs()).map_err(|e| {
+                self.finish_homing();
+                planner_err(e)
+            })?;
+        }
+
         let window_start_clock_in_drip_piece_era = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
             let host_now = router.host_now_secs();
