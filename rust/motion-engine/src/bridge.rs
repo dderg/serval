@@ -3897,19 +3897,59 @@ impl PyMotionEngine {
                 .map_err(PyRuntimeError::new_err)?;
         }
 
-        {
+        let homing_host_now = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            planner.seed_frontier(router.host_now_secs()).map_err(|e| {
-                self.finish_homing();
-                planner_err(e)
-            })?;
+            router.host_now_secs()
+        };
+        planner.seed_frontier(homing_host_now).map_err(|e| {
+            self.finish_homing();
+            planner_err(e)
+        })?;
+
+        {
+            let rebases: Vec<(crate::pump::AxisKey, u64, f64)> = {
+                let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+                let store = self
+                    .motion_history
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                all_axis_keys
+                    .iter()
+                    .map(|&key| {
+                        let clock = router
+                            .host_time_to_mcu_clock(
+                                mcu_handle_from_raw(key.mcu_id),
+                                homing_host_now,
+                            )
+                            .map_err(|e| {
+                                PyRuntimeError::new_err(format!(
+                                    "home_axis history rebase: clock projection failed for \
+                                     mcu {} axis {}: {e:?}",
+                                    key.mcu_id, key.axis
+                                ))
+                            })?;
+                        let position = if usize::from(key.axis) < SPATIAL_AXES {
+                            start_pos[usize::from(key.axis)]
+                        } else {
+                            store.final_position(key).unwrap_or(0.0)
+                        };
+                        Ok((key, clock, position))
+                    })
+                    .collect::<PyResult<Vec<_>>>()?
+            };
+            let mut store = self
+                .motion_history
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for (key, clock, position) in rebases {
+                store.rebase_axis(key, clock, position);
+            }
         }
 
         let window_start_clock_in_drip_piece_era = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            let host_now = router.host_now_secs();
             router
-                .host_time_to_mcu_clock(mcu_handle_from_raw(axis_key.mcu_id), host_now)
+                .host_time_to_mcu_clock(mcu_handle_from_raw(axis_key.mcu_id), homing_host_now)
                 .map_err(|e| {
                     PyRuntimeError::new_err(format!(
                         "home_axis: cannot project arm-time clock for axis mcu {}: {e:?}",
