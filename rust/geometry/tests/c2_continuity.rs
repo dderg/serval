@@ -48,6 +48,7 @@ fn plan_samples() -> Vec<Sample> {
         consistency_tol: 1e-6,
         max_jerk_mm_s3: JERK,
         integration_tol: 1e-7,
+        ..VelocityConfig::default()
     };
     let profile = plan_velocity(&outcome, config).unwrap();
     let mut out = Vec::new();
@@ -121,6 +122,7 @@ fn c2_tangential_within_acceleration_disk() {
             consistency_tol: 1e-6,
             max_jerk_mm_s3: JERK,
             integration_tol: 1e-7,
+            ..VelocityConfig::default()
         },
     )
     .unwrap();

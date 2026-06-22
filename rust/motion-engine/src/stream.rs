@@ -5,7 +5,7 @@ use geometry::{
     ChainFitConfig, FitError, Move, VelocityConfig, VelocityError, VelocityLimits, fit_chain,
     plan_velocity_warm_start,
 };
-use trajectory::ShapedSegment;
+use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::lowering::{LoweringError, lower_move};
 
@@ -59,18 +59,29 @@ pub struct StreamState {
     odometer: Vec<f64>,
     t_committed: f64,
     config: StreamConfig,
+    axis_chains: AxisChainSet,
 }
 
 impl StreamState {
     #[must_use]
-    pub fn new(config: StreamConfig, home_pos: &[f64], t_start: f64) -> Self {
+    pub fn new(
+        config: StreamConfig,
+        axis_chains: AxisChainSet,
+        home_pos: &[f64],
+        t_start: f64,
+    ) -> Self {
         Self {
             buffer: VecDeque::new(),
             entry_v: 0.0,
             odometer: home_pos.to_vec(),
             t_committed: t_start,
             config,
+            axis_chains,
         }
+    }
+
+    pub fn set_axis_chains(&mut self, axis_chains: AxisChainSet) {
+        self.axis_chains = axis_chains;
     }
 
     pub fn reset(&mut self, home_pos: &[f64], t_start: f64) {
@@ -159,7 +170,14 @@ impl StreamState {
         let mut start_times: Vec<f64> = Vec::with_capacity(n);
         for (gm, vm) in outcome.moves.iter().zip(&profile.moves) {
             start_times.push(t);
-            let seg = lower_move(gm, vm, t, &pos, self.config.fit_tol_mm)?;
+            let seg = lower_move(
+                gm,
+                vm,
+                t,
+                &pos,
+                self.config.fit_tol_mm,
+                &self.axis_chains.chains,
+            )?;
             t = seg.t_end;
             advance_odometer(&mut pos, gm);
             segs.push(seg);

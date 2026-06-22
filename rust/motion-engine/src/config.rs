@@ -162,6 +162,9 @@ fn build_instance(
         _ => unreachable!("ty validated above"),
     };
     let mut inst = PostProcessorInstance::new(&d.name, ty);
+    if d.ty == "linear_pressure_advance" {
+        inst.set_param(required_param, required_value)?;
+    }
     for (key, value) in &d.params {
         if key == required_param {
             continue;
@@ -387,6 +390,8 @@ pub struct PlannerConfig {
     pub runtime_square_corner_velocity: Option<f64>,
     pub chain: geometry::ChainFitConfig,
     pub post_processors: PostProcessorSet,
+    pub max_extrude_only_velocity: Option<f64>,
+    pub max_extrude_only_accel: Option<f64>,
     pub window_capacity: usize,
     pub beta_max_iters: u8,
     pub beta_convergence_ratio: f64,
@@ -671,6 +676,8 @@ impl Default for PlannerConfig {
             runtime_square_corner_velocity: None,
             chain: geometry::ChainFitConfig::default(),
             post_processors,
+            max_extrude_only_velocity: None,
+            max_extrude_only_accel: None,
             window_capacity: 32,
             beta_max_iters: 10,
             beta_convergence_ratio: 0.05,

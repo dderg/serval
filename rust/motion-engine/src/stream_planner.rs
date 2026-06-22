@@ -4,7 +4,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
-use trajectory::ShapedSegment;
+use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
 use crate::stream::{StreamConfig, StreamState};
@@ -24,6 +24,7 @@ pub enum StreamMsg {
     Dwell { duration_s: f64, notify: Sender<()> },
     StreamOpen { home_pos: Vec<f64> },
     Reset { recovered_pos: Vec<f64> },
+    SetAxisChains(AxisChainSet),
     HomeDrip(HomeDripParams),
     Nudge(NudgeParams),
     Shutdown,
@@ -55,6 +56,7 @@ impl std::error::Error for StreamPlannerError {}
 impl StreamPlannerHandle {
     pub fn spawn(
         config: StreamConfig,
+        axis_chains: AxisChainSet,
         home_pos: Vec<f64>,
         dispatch: DispatchFn,
         nudge_dispatch: NudgeDispatchFn,
@@ -68,7 +70,7 @@ impl StreamPlannerHandle {
         let join = thread::Builder::new()
             .name("kalico-stream-planner".to_string())
             .spawn(move || {
-                let state = StreamState::new(config, &home_pos, 0.0);
+                let state = StreamState::new(config, axis_chains, &home_pos, 0.0);
                 run_loop(
                     rx,
                     dispatch,
@@ -143,6 +145,12 @@ impl StreamPlannerHandle {
     pub fn reset(&self, recovered_pos: Vec<f64>) -> Result<(), StreamPlannerError> {
         self.sender
             .send(StreamMsg::Reset { recovered_pos })
+            .map_err(|_| StreamPlannerError::ChannelClosed)
+    }
+
+    pub fn update_axis_chains(&self, chains: AxisChainSet) -> Result<(), StreamPlannerError> {
+        self.sender
+            .send(StreamMsg::SetAxisChains(chains))
             .map_err(|_| StreamPlannerError::ChannelClosed)
     }
 
@@ -430,6 +438,9 @@ fn run_loop(
             StreamMsg::Reset { recovered_pos } => {
                 sync_instant = None;
                 state.reset(&recovered_pos, 0.0);
+            }
+            StreamMsg::SetAxisChains(chains) => {
+                state.set_axis_chains(chains);
             }
             StreamMsg::HomeDrip(p) => {
                 sync_instant = None;

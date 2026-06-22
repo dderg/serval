@@ -31,7 +31,7 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> geometry::Move 
 
 #[test]
 fn collinear_jogs_commit_at_the_seam_without_stopping() {
-    let mut s = StreamState::new(cfg(0.0), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(0.0), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.0));
 
@@ -49,7 +49,7 @@ fn collinear_jogs_commit_at_the_seam_without_stopping() {
 
 #[test]
 fn flush_commits_everything_to_rest() {
-    let mut s = StreamState::new(cfg(1.0), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(1.0), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.0));
 
@@ -65,7 +65,7 @@ fn flush_commits_everything_to_rest() {
 
 #[test]
 fn blended_corner_is_never_split_by_a_commit() {
-    let mut s = StreamState::new(cfg(0.0), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(0.0), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 0.0));
 
@@ -81,7 +81,12 @@ fn blended_corner_is_never_split_by_a_commit() {
 
 #[test]
 fn odometer_accumulates_extrusion_across_commits() {
-    let mut s = StreamState::new(cfg(1.0), &[0.0, 0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(
+        cfg(1.0),
+        AxisChainSet::default(),
+        &[0.0, 0.0, 0.0, 0.0],
+        0.0,
+    );
     s.push(line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0));
     s.push(line(2, [40.0, 0.0, 0.0], [80.0, 0.0, 0.0], 4.0));
 
@@ -93,7 +98,7 @@ fn odometer_accumulates_extrusion_across_commits() {
 
 #[test]
 fn committed_trajectory_is_time_contiguous() {
-    let mut s = StreamState::new(cfg(1.0), &[0.0, 0.0, 0.0], 2.0);
+    let mut s = StreamState::new(cfg(1.0), AxisChainSet::default(), &[0.0, 0.0, 0.0], 2.0);
     s.push(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0));
     s.push(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 0.0));
     s.push(line(3, [60.0, 0.0, 0.0], [90.0, 0.0, 0.0], 0.0));
@@ -110,7 +115,7 @@ fn committed_trajectory_is_time_contiguous() {
 
 #[test]
 fn advance_idle_reanchors_committed_time_after_a_gap() {
-    let mut s = StreamState::new(cfg(1.0), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(1.0), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0));
     let first = s.commit(true).unwrap();
     let after_first = first.last().unwrap().t_end;

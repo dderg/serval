@@ -2484,6 +2484,8 @@ impl PyMotionEngine {
         window_capacity = 32,
         beta_max_iters = 10,
         arc_fit = None,
+        max_extrude_only_velocity = None,
+        max_extrude_only_accel = None,
     ))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn init_planner(
@@ -2497,6 +2499,8 @@ impl PyMotionEngine {
         window_capacity: usize,
         beta_max_iters: u8,
         arc_fit: Option<(f64, f64)>,
+        max_extrude_only_velocity: Option<f64>,
+        max_extrude_only_accel: Option<f64>,
     ) -> PyResult<()> {
         if self
             .planner
@@ -2568,11 +2572,26 @@ impl PyMotionEngine {
         };
         cartesian.validate().map_err(PyValueError::new_err)?;
 
+        for (label, value) in [
+            ("max_extrude_only_velocity", max_extrude_only_velocity),
+            ("max_extrude_only_accel", max_extrude_only_accel),
+        ] {
+            if let Some(v) = value {
+                if !(v.is_finite() && v > 0.0) {
+                    return Err(PyValueError::new_err(format!(
+                        "[extruder] {label} must be finite and positive, got {v}"
+                    )));
+                }
+            }
+        }
+
         let mut cfg = config::PlannerConfig::default();
         cfg.axis_registry = axis_registry;
         cfg.limit_sections = limit_sections;
         cfg.cartesian = cartesian;
         cfg.post_processors = post_processor_set;
+        cfg.max_extrude_only_velocity = max_extrude_only_velocity;
+        cfg.max_extrude_only_accel = max_extrude_only_accel;
         cfg.window_capacity = window_capacity;
         cfg.beta_max_iters = beta_max_iters;
         cfg.chain = match arc_fit {
@@ -3241,6 +3260,12 @@ impl PyMotionEngine {
                 chain: cfg.chain,
                 velocity: geometry::VelocityConfig {
                     max_jerk_mm_s3: cart.max_jerk,
+                    max_extrude_only_velocity_mm_s: cfg
+                        .max_extrude_only_velocity
+                        .unwrap_or(f64::INFINITY),
+                    max_extrude_only_accel_mm_s2: cfg
+                        .max_extrude_only_accel
+                        .unwrap_or(f64::INFINITY),
                     ..geometry::VelocityConfig::default()
                 },
                 fit_tol_mm: cfg.fit_tolerance_mm,
@@ -3252,9 +3277,14 @@ impl PyMotionEngine {
                 )
                 .map_err(PyRuntimeError::new_err)?,
             };
+            let axis_chains = cfg
+                .post_processors
+                .compile(&cfg.axis_registry)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
             let home = vec![0.0; cfg.axis_registry.n_axes()];
             *guard = Some(StreamPlannerHandle::spawn(
                 stream_cfg,
+                axis_chains,
                 home,
                 dispatch,
                 nudge_dispatch,
@@ -3681,12 +3711,28 @@ impl PyMotionEngine {
     }
 
     fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
-        self.planner_config
+        let axis_chains = {
+            let mut cfg = self
+                .planner_config
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            cfg.post_processors
+                .set_param(name, key, value)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cfg.post_processors
+                .compile(&cfg.axis_registry)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+        };
+        if let Some(handle) = self
+            .planner
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .post_processors
-            .set_param(name, key, value)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            .as_ref()
+        {
+            handle
+                .update_axis_chains(axis_chains)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
         Ok(())
     }
 
