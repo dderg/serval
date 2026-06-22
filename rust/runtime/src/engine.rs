@@ -590,16 +590,9 @@ impl Engine {
             let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
                 continue;
             };
-            // The buzz drives this axis via STEP/DIR pulses through its StepQueue.
-            // In Phase mode the motor is held by XDIRECT SPI coil currents and the
-            // driver ignores STEP/DIR, so a buzz here would silently desync the
-            // tracked position. The host switches the axis to Pulse
-            // (exit_phase_mode) before buzzing; if one still reaches a Phase-mode
-            // axis, fail loud rather than corrupt.
-            if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
-                crate::fault_helpers::raise_buzz_in_phase_mode(shared, ex.axis_idx);
-                return -1;
-            }
+            // Mode selects the buzz delivery: Pulse drives STEP/DIR edges through
+            // the StepQueue; Phase stays in phase stepping and drives XDIRECT coil
+            // updates from the same queue (the `arm` loop below routes on mode).
             // A buzz stream is the sole producer for the axis StepQueue. Reject a
             // non-idle axis — not just an armed one: pieces merely QUEUED in the
             // ring (not yet pulled into `armed` by the motion ISR) would arm on
@@ -622,7 +615,17 @@ impl Engine {
                 cps,
                 now_cycle,
             );
-            crate::buzz_stream::arm_axis(ex.axis_idx, params);
+            if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
+                let cfg = crate::buzz_xdirect::XdirectConfig::for_rate(
+                    axis.microstep_distance,
+                    params.amplitude_mm,
+                    params.omega,
+                    crate::buzz_xdirect::DEFAULT_XDIRECT_UPDATE_HZ,
+                );
+                crate::buzz_stream::arm_axis_xdirect(ex.axis_idx, params, cfg);
+            } else {
+                crate::buzz_stream::arm_axis(ex.axis_idx, params);
+            }
         }
         // Initial fill in the FOREGROUND (command context): top each armed axis
         // to HIGH_WATER and arm its step-output compare to the front crossing
@@ -641,6 +644,16 @@ impl Engine {
             );
         }
         0
+    }
+
+    /// Write one XDIRECT buzz update: drive every motor on `axis_idx` to the
+    /// parked base plus `offset_steps` (LUT microsteps) via the coil LUT. Called
+    /// from the step-output consumer for a phase-mode buzz; reuses the coil-write
+    /// core directly (NOT `dispatch_phase`, whose per-sample slew is tick-tied).
+    pub fn emit_xdirect_buzz(&self, axis_idx: usize, offset_steps: i32, shared: &SharedState) {
+        if let Some(Some(axis)) = self.stepping_axes.get(axis_idx) {
+            crate::dispatch_stepper::write_phase_coils(axis_idx, axis, shared, offset_steps);
+        }
     }
 
     pub fn phase_jog_to(

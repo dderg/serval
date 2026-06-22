@@ -81,12 +81,12 @@ fn drain_via_consumer(start_now: u32, end_now: u32, now_step: u32) -> Vec<i8> {
     while (end_now.wrapping_sub(now) as i32) > 0 {
         test_hooks::set_now(now);
         refill_foreground(now);
-        let _ = step_output_event();
+        let _ = step_output_event(core::ptr::null_mut());
         now = now.wrapping_add(now_step);
     }
     test_hooks::set_now(end_now);
     refill_foreground(end_now);
-    let _ = step_output_event();
+    let _ = step_output_event(core::ptr::null_mut());
     test_hooks::take_emits()
         .into_iter()
         .map(|(_axis, dir, _sel)| dir as i8)
@@ -189,7 +189,7 @@ fn oscillates_then_returns_via_consumer_no_fault() {
     while (end.wrapping_sub(now) as i32) > 0 {
         test_hooks::set_now(now);
         refill_foreground(now);
-        let _ = step_output_event();
+        let _ = step_output_event(core::ptr::null_mut());
         for (_axis, dir, _sel) in test_hooks::take_emits() {
             pos += dir;
             peak = peak.max(pos.abs());
@@ -233,7 +233,7 @@ fn bench_scale_consumer_driven_by_next_wake_does_not_spin() {
     loop {
         test_hooks::set_now(now);
         refill_foreground(now);
-        let next = step_output_event();
+        let next = step_output_event(core::ptr::null_mut());
         for (_a, dir, _s) in test_hooks::take_emits() {
             pos += dir;
         }
@@ -293,7 +293,7 @@ fn step_output_event_is_pure_consumer_no_refill() {
     let end = last.wrapping_add(20_000);
     while (end.wrapping_sub(now) as i32) > 0 {
         test_hooks::set_now(now);
-        let _ = step_output_event();
+        let _ = step_output_event(core::ptr::null_mut());
         emitted += test_hooks::take_emits().len();
         now = now.wrapping_add(13_000);
     }
@@ -313,4 +313,60 @@ fn step_output_event_is_pure_consumer_no_refill() {
         "stream closed without foreground refill — ISR must have produced"
     );
     assert_eq!(crate::buzz_stream::take_refill_fault(), 0);
+}
+
+#[test]
+fn xdirect_refill_produces_offset_entries_matching_the_generator() {
+    use crate::buzz_stream::{arm_axis_xdirect, axis_active};
+    use crate::buzz_xdirect::{XdirectConfig, XdirectCursor, next_update};
+
+    const START: u32 = 1_000_000;
+    let cfg = XdirectConfig {
+        lut_step_mm: 0.01,
+        grid_steps: 4,
+    };
+
+    // Ground truth: thread next_update directly with the anchor the first refill
+    // will bind (= START).
+    let p = tone_params(START);
+    let mut truth: Vec<(u32, i32)> = Vec::new();
+    let mut cursor = XdirectCursor::start(&p);
+    while let Ok((u, next)) = next_update(&p, &cfg, cursor) {
+        truth.push((u.cycle_abs, u.offset_steps));
+        cursor = next;
+    }
+    assert!(
+        truth.len() > 15,
+        "expected a multi-period stream, got {}",
+        truth.len()
+    );
+
+    // Drive the stream: arm (anchor provisional), refill at now=START (binds the
+    // anchor), drain the queue each pass until the stream closes.
+    reset_for_test();
+    arm_axis_xdirect(AXIS, tone_params(0), cfg);
+    let mut got: Vec<(u32, i32)> = Vec::new();
+    loop {
+        refill_foreground(START);
+        let q = test_hooks::queue_for_axis(AXIS);
+        // SAFETY: host thread-local queue, sole consumer here.
+        while let Some(e) = unsafe { crate::step_queue::pop(q) } {
+            got.push((e.cycle_abs, e.offset_steps()));
+        }
+        if !axis_active(AXIS) {
+            break;
+        }
+        assert!(got.len() < 1_000_000, "runaway");
+    }
+
+    assert_eq!(
+        got, truth,
+        "queued xdirect entries must match the generator"
+    );
+    // The stream returns to base (net-zero) at the close.
+    assert_eq!(
+        got.last().map(|&(_, o)| o),
+        Some(0),
+        "buzz must close on base"
+    );
 }

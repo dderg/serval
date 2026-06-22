@@ -575,12 +575,10 @@ fn resonance_buzz_skips_axis_unconfigured_on_this_mcu() {
 }
 
 #[test]
-fn resonance_buzz_rejects_phase_mode_axis() {
-    use crate::error::FaultCode;
-    // A buzz drives STEP/DIR pulses; a Phase-mode axis is held by XDIRECT SPI
-    // currents with the driver ignoring STEP/DIR, so the MCU must refuse rather
-    // than silently desync position. The host switches the axis to Pulse
-    // (exit_phase_mode) before buzzing — this is the fail-loud backstop.
+fn resonance_buzz_routes_phase_mode_axis_to_xdirect() {
+    // A Phase-mode axis stays in phase stepping and buzzes via XDIRECT coil
+    // updates — not STEP/DIR. The buzz must arm (not fault) and mark the axis as
+    // an XDIRECT stream so the consumer routes its entries to the coil write.
     crate::buzz_stream::reset_for_test();
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
     configure_pulse_axis(&mut engine, 0, 0.01);
@@ -592,14 +590,14 @@ fn resonance_buzz_rejects_phase_mode_axis() {
     let shared = SharedState::new();
     assert_eq!(
         engine.resonance_buzz(&shared, 0b001, 0, 100_000, 100_000, 100_000, 20, 2, 0),
-        -1,
-        "buzz on a Phase-mode axis must be rejected"
+        0,
+        "buzz on a Phase-mode axis must arm via XDIRECT, not fault"
     );
-    assert!(!crate::buzz_stream::axis_active(0));
-    assert_eq!(
-        shared.last_error.load(Ordering::Acquire),
-        FaultCode::BuzzInPhaseMode.as_i32(),
-        "phase-mode refusal must latch its own distinct code, not BuzzAxisConflict"
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0, "no fault");
+    assert!(crate::buzz_stream::axis_active(0));
+    assert!(
+        crate::buzz_stream::is_xdirect(0),
+        "phase-mode axis must be marked an XDIRECT buzz stream"
     );
     crate::buzz_stream::reset_for_test();
 }

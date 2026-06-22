@@ -170,6 +170,11 @@ pub fn dispatch_axis(
         ),
         m if m == StepMode::Phase as u8 => {
             bump_relaxed(&shared.isr_phase_call_count);
+            // An XDIRECT buzz owns this axis's coils via the step-output timer;
+            // the motion tick must not overwrite them with the parked position.
+            if crate::buzz_stream::is_xdirect(axis_idx) {
+                return;
+            }
             if motor_mask != 0 {
                 dispatch_phase_overlay(
                     axis_idx,
@@ -328,12 +333,7 @@ fn dispatch_pulse(
     let mut steps_committed: i32 = 0;
     #[allow(clippy::explicit_counter_loop)]
     for cycle_abs in times.iter().copied() {
-        let entry = StepEntry {
-            cycle_abs,
-            dir,
-            stepper_sel,
-            _pad: [0; 2],
-        };
+        let entry = StepEntry::pulse(cycle_abs, dir, stepper_sel);
         // SAFETY: `queue_ptr` is supplied by the TIM5 ISR, sole producer.
         let push_res = unsafe { queue_push(queue_ptr, entry) };
         if push_res.is_ok() {
@@ -457,7 +457,7 @@ fn dispatch_phase_overlay(
     stepper
         .phase_offset_target
         .store(new_off, Ordering::Release);
-    write_phase_coils(axis_idx, axis, shared);
+    write_phase_coils(axis_idx, axis, shared, 0);
 }
 
 fn dispatch_phase(axis_idx: usize, axis: &mut AxisConfig, shared: &SharedState, p_end: f32) {
@@ -479,15 +479,20 @@ fn dispatch_phase(axis_idx: usize, axis: &mut AxisConfig, shared: &SharedState, 
         ramp_phase_offset(stepper, max_ramp);
     }
 
-    write_phase_coils(axis_idx, axis, shared);
+    write_phase_coils(axis_idx, axis, shared, 0);
 }
 
-fn write_phase_coils(axis_idx: usize, axis: &AxisConfig, shared: &SharedState) {
+pub(crate) fn write_phase_coils(
+    axis_idx: usize,
+    axis: &AxisConfig,
+    shared: &SharedState,
+    buzz_offset: i32,
+) {
     let base = axis.last_step_count;
 
     for stepper in &axis.steppers {
         let phase_offset = stepper.phase_offset_microsteps.load(Ordering::Acquire);
-        let target_stepper = base.wrapping_add(phase_offset);
+        let target_stepper = base.wrapping_add(phase_offset).wrapping_add(buzz_offset);
         let prev_stepper = stepper.last_phase_target.load(Ordering::Acquire);
         let delta_stepper = target_stepper.wrapping_sub(prev_stepper);
         stepper

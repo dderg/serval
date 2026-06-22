@@ -22,9 +22,10 @@
 
 #![allow(unsafe_code)]
 
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 use crate::buzz_gen::{ToneCursor, ToneError, ToneParams, next_crossing};
+use crate::buzz_xdirect::{XdirectConfig, XdirectCursor, next_update};
 use crate::error::FaultCode;
 use crate::step_queue::{
     N_AXIS_STEP_QUEUES, STEPPER_SEL_ALL, StepEntry, StepQueue, len as queue_len,
@@ -52,6 +53,40 @@ pub fn take_refill_fault() -> i32 {
     REFILL_FAULT.swap(0, Ordering::AcqRel)
 }
 
+/// Per-axis bit set while an axis runs the XDIRECT (phase-stepping) buzz. Two
+/// readers: the step-output ISR routes a popped entry to the coil-write emit
+/// instead of STEP/DIR, and the motion tick skips its normal phase dispatch for
+/// the axis so the buzz — not the parked-position write — owns the coils.
+static XDIRECT_MASK: AtomicU8 = AtomicU8::new(0);
+
+fn set_xdirect_bit(axis_idx: usize, on: bool) {
+    if axis_idx >= N_AXIS_STEP_QUEUES {
+        return;
+    }
+    let bit = 1u8 << axis_idx;
+    if on {
+        XDIRECT_MASK.fetch_or(bit, Ordering::Release);
+    } else {
+        XDIRECT_MASK.fetch_and(!bit, Ordering::Release);
+    }
+}
+
+/// Set/clear the XDIRECT routing bit directly — for consumer-routing tests that
+/// exercise `step_output_event` without arming a full stream.
+#[cfg(any(test, feature = "host"))]
+pub fn set_xdirect_for_test(axis_idx: usize, on: bool) {
+    set_xdirect_bit(axis_idx, on);
+}
+
+/// True while `axis_idx` is running the XDIRECT buzz (coil-write delivery).
+#[must_use]
+pub fn is_xdirect(axis_idx: usize) -> bool {
+    if axis_idx >= N_AXIS_STEP_QUEUES {
+        return false;
+    }
+    XDIRECT_MASK.load(Ordering::Acquire) & (1u8 << axis_idx) != 0
+}
+
 /// Keep the ring comfortably below `STEP_QUEUE_DEPTH` (32). Refill tops up to
 /// this on each foreground pass; the gap to depth absorbs the in-flight pops the
 /// step-output ISR performs between refills.
@@ -66,16 +101,29 @@ const HIGH_WATER: u16 = 24;
 /// underruns.
 const REFILL_BATCH: u16 = 16;
 
-/// One axis's resumable excitation: the latched curve and the cursor threaded
-/// through `next_crossing`. `anchored` flips on the first refill, where the
-/// anchor cycle is bound to the consumer's `now` so the first crossing is never
-/// already in the past; thereafter `cycle_abs` depends only on curve + anchor +
-/// `cycles_per_second`. `closed` flips once the final net-zero edge has been
-/// emitted, after which the slot stays inert until re-armed.
+/// The resumable generator state, selected by the axis `StepMode`. `Pulse` emits
+/// STEP/DIR edges at microstep crossings (`buzz_gen`); `Xdirect` emits absolute
+/// coil-position updates on a displacement grid + extrema (`buzz_xdirect`). Both
+/// stamp `cycle_abs` from the curve + anchor + `cycles_per_second` only — never a
+/// tick rate — so the stream stays decoupled from the ISR cadence either way.
+#[derive(Clone, Copy, Debug)]
+enum StreamGen {
+    Pulse(ToneCursor),
+    Xdirect {
+        cfg: XdirectConfig,
+        cursor: XdirectCursor,
+    },
+}
+
+/// One axis's resumable excitation: the latched curve and its mode-tagged
+/// generator cursor. `anchored` flips on the first refill, where the anchor cycle
+/// is bound to the consumer's `now` so the first update is never already in the
+/// past. `closed` flips once the final net-zero update has been emitted, after
+/// which the slot stays inert until re-armed.
 #[derive(Clone, Copy, Debug)]
 struct AxisStream {
     params: ToneParams,
-    cursor: ToneCursor,
+    generator: StreamGen,
     anchored: bool,
     closed: bool,
 }
@@ -166,14 +214,36 @@ pub fn arm_axis(axis_idx: usize, params: ToneParams) {
     if axis_idx >= N_AXIS_STEP_QUEUES {
         return;
     }
+    set_xdirect_bit(axis_idx, false);
     store::with_slot(axis_idx, |slot| {
         *slot = Some(AxisStream {
             params,
-            cursor: ToneCursor::start(),
+            generator: StreamGen::Pulse(ToneCursor::start()),
             anchored: false,
             closed: false,
         });
     });
+}
+
+/// Arm an axis for the phase-stepping (XDIRECT) buzz: absolute coil-position
+/// updates on the `cfg` displacement grid plus carrier extrema. Same anchor /
+/// net-zero discipline as `arm_axis`; only the generator differs.
+pub fn arm_axis_xdirect(axis_idx: usize, params: ToneParams, cfg: XdirectConfig) {
+    if axis_idx >= N_AXIS_STEP_QUEUES {
+        return;
+    }
+    store::with_slot(axis_idx, |slot| {
+        *slot = Some(AxisStream {
+            params,
+            generator: StreamGen::Xdirect {
+                cfg,
+                cursor: XdirectCursor::start(&params),
+            },
+            anchored: false,
+            closed: false,
+        });
+    });
+    set_xdirect_bit(axis_idx, true);
 }
 
 /// Drop any stream on the axis. Used to disarm and by the test reset.
@@ -181,6 +251,7 @@ pub fn clear_axis(axis_idx: usize) {
     if axis_idx >= N_AXIS_STEP_QUEUES {
         return;
     }
+    set_xdirect_bit(axis_idx, false);
     store::with_slot(axis_idx, |slot| *slot = None);
 }
 
@@ -229,25 +300,44 @@ pub unsafe fn refill_step_axis(
             if occupancy >= HIGH_WATER || pushed >= REFILL_BATCH {
                 return Ok(pushed > 0);
             }
-            match next_crossing(&stream.params, stream.cursor) {
-                Ok(crossing) => {
-                    let entry = StepEntry {
-                        cycle_abs: crossing.cycle_abs,
-                        dir: crossing.dir,
-                        stepper_sel: STEPPER_SEL_ALL,
-                        _pad: [0; 2],
-                    };
+            // Pure: compute the next entry + advanced generator without mutating
+            // the stream, so a `QueueFull` push leaves the cursor un-advanced and
+            // the entry is re-derived on the next refill.
+            let params = stream.params;
+            let next = match &stream.generator {
+                StreamGen::Pulse(cursor) => match next_crossing(&params, *cursor) {
+                    Ok(c) => Ok(Some((
+                        StepEntry::pulse(c.cycle_abs, c.dir, STEPPER_SEL_ALL),
+                        StreamGen::Pulse(ToneCursor {
+                            level: c.level,
+                            t_cursor: c.t,
+                        }),
+                    ))),
+                    Err(ToneError::Done) => Ok(None),
+                    Err(e) => Err(e),
+                },
+                StreamGen::Xdirect { cfg, cursor } => match next_update(&params, cfg, *cursor) {
+                    Ok((u, advanced)) => Ok(Some((
+                        StepEntry::xdirect(u.cycle_abs, u.offset_steps),
+                        StreamGen::Xdirect {
+                            cfg: *cfg,
+                            cursor: advanced,
+                        },
+                    ))),
+                    Err(ToneError::Done) => Ok(None),
+                    Err(e) => Err(e),
+                },
+            };
+            match next {
+                Ok(Some((entry, advanced))) => {
                     // SAFETY: sole producer (foreground); `queue_ptr` live.
                     if unsafe { queue_push(queue_ptr, entry) }.is_err() {
                         return Err(RefillError::QueueFull);
                     }
-                    stream.cursor = ToneCursor {
-                        level: crossing.level,
-                        t_cursor: crossing.t,
-                    };
+                    stream.generator = advanced;
                     pushed += 1;
                 }
-                Err(ToneError::Done) => {
+                Ok(None) => {
                     stream.closed = true;
                     return Ok(pushed > 0);
                 }

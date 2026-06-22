@@ -14,12 +14,7 @@ use std::cell::UnsafeCell;
 use runtime::step_queue::{STEP_QUEUE_DEPTH, StepEntry, StepQueue, StepQueueFull, len, pop, push};
 
 fn entry(cycle_abs: u32, dir: i8) -> StepEntry {
-    StepEntry {
-        cycle_abs,
-        dir,
-        stepper_sel: 0,
-        _pad: [0; 2],
-    }
+    StepEntry::pulse(cycle_abs, dir, 0)
 }
 
 #[test]
@@ -36,7 +31,7 @@ fn fifo_order_under_random_push_pop() {
     for i in 0..30u32 {
         let got = unsafe { pop(qp) }.expect("pop should yield entry");
         assert_eq!(got.cycle_abs, 1000 + i, "FIFO order broken at {i}");
-        assert_eq!(got.dir, if i % 2 == 0 { 1 } else { -1 });
+        assert_eq!(got.dir(), if i % 2 == 0 { 1 } else { -1 });
     }
     assert_eq!(unsafe { len(qp) }, 0);
     assert!(unsafe { pop(qp) }.is_none());

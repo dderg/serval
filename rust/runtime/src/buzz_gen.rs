@@ -196,7 +196,7 @@ fn amp_eff_rate(p: &ToneParams, t: f32) -> f32 {
 
 #[inline]
 #[must_use]
-fn position_rel(p: &ToneParams, t: f32) -> f32 {
+pub(crate) fn position_rel(p: &ToneParams, t: f32) -> f32 {
     p.sign * envelope(t, p.total_seconds, p.ramp_seconds) * amp_eff(p, t) * libm::sinf(phase(p, t))
 }
 
@@ -207,7 +207,7 @@ fn position_rel(p: &ToneParams, t: f32) -> f32 {
 /// peak across a chirp by construction.
 #[inline]
 #[must_use]
-fn velocity_rel(p: &ToneParams, t: f32) -> f32 {
+pub(crate) fn velocity_rel(p: &ToneParams, t: f32) -> f32 {
     let total = p.total_seconds;
     let ramp = p.ramp_seconds.max(f32::MIN_POSITIVE);
     let env = envelope(t, total, ramp);
@@ -253,7 +253,7 @@ const U32_MODULUS: f64 = 4_294_967_296.0;
 /// CROSSING, not per scan iteration; the per-iteration scan math stays f32.
 #[inline]
 #[must_use]
-fn cycle_at(p: &ToneParams, t: f32) -> u32 {
+pub(crate) fn cycle_at(p: &ToneParams, t: f32) -> u32 {
     let offset = libm::fmod(f64::from(t) * p.cycles_per_second, U32_MODULUS);
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     let cycles = offset as u32;
@@ -407,7 +407,7 @@ fn flat_top_next_change(p: &ToneParams, level: i32, after: f32) -> Option<(f32, 
 /// bracket exactly one sign change of `velocity_rel`. Bisection only — the
 /// second derivative is not maintained and Newton on a velocity root near a
 /// peak is ill-conditioned. Fails loud on a malformed bracket.
-fn refine_extremum(p: &ToneParams, lo: f32, hi: f32) -> Result<f32, ToneError> {
+pub(crate) fn refine_extremum(p: &ToneParams, lo: f32, hi: f32) -> Result<f32, ToneError> {
     let (mut a, mut b) = (lo, hi);
     let (mut va, vb) = (velocity_rel(p, a), velocity_rel(p, b));
     if !va.is_finite() || !vb.is_finite() || va * vb > 0.0 {
