@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::collections::VecDeque;
 
 use geometry::segment::CubicSegment;

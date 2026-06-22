@@ -1,4 +1,8 @@
+#![allow(deprecated)]
+
+#[deprecated(note = "legacy planner stack only; live path must not depend on beta")]
 mod beta;
+#[deprecated(note = "legacy planner stack only; live path must not depend on emit_shaped")]
 pub mod emit_shaped;
 pub mod fit;
 mod kernel;
@@ -11,6 +15,7 @@ pub mod post_processor;
 mod reparam;
 mod shaper;
 mod smooth_fit;
+#[deprecated(note = "legacy planner stack only; live path must not depend on streaming")]
 pub mod streaming;
 pub mod utilization;
 
@@ -18,8 +23,10 @@ pub use beta::{ReplanBindingSummary, ReplanWorstBinding};
 pub use emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory, ShapeEmission};
 pub use plan_velocity::{plan_velocity, PlanInput, PlanOutput, PlanSegment, PlanStats, SafetyMode};
 pub use post_processor::{
-    AxisChainSet, CompiledChain, PostProcessorError, PostProcessorInstance, PostProcessorType,
+    apply_derivative_gain, AxisChainSet, ChainStage, CompiledChain, PostProcessorError,
+    PostProcessorInstance, PostProcessorType,
 };
+pub use shaper::ShapedSignal;
 pub use streaming::ReplanReport;
 
 #[derive(Debug)]

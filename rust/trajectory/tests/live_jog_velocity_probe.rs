@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use geometry::segment::{CubicSegment, SourceRange};
 use nurbs::VectorNurbs;
 use trajectory::plan_velocity::SafetyMode;

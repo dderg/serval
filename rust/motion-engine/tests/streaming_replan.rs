@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::sync::{Arc, Mutex};
 
 use _motion_engine::classify::classify_and_build;
