@@ -26,6 +26,10 @@ pub mod motion_node;
 #[doc(hidden)]
 pub mod nudge;
 #[doc(hidden)]
+#[cfg_attr(
+    not(test),
+    deprecated(note = "legacy planner stack only; live path uses stream_planner")
+)]
 pub mod planner;
 #[doc(hidden)]
 pub mod position_query;

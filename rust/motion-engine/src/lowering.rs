@@ -2,7 +2,7 @@ use geometry::path::lowering::PositionProfile;
 use geometry::{Move, MoveVelocity, VelSample};
 use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
-use trajectory::{CompiledChain, ShapedSegment};
+use trajectory::{ChainStage, CompiledChain, ShapedSegment};
 
 const MIN_PIECE_DURATION_S: f64 = 1e-9;
 const MAX_SUBDIVISION_DEPTH: u32 = 22;
@@ -90,7 +90,14 @@ fn build_phases(samples: &[VelSample]) -> Result<(Vec<Phase>, f64), LoweringErro
     Ok((phases, t_acc))
 }
 
-fn hermite_cubic(u_start: f64, u_end: f64, p0: f64, v0: f64, p1: f64, v1: f64) -> BezierPiece<f64> {
+pub(crate) fn hermite_cubic(
+    u_start: f64,
+    u_end: f64,
+    p0: f64,
+    v0: f64,
+    p1: f64,
+    v1: f64,
+) -> BezierPiece<f64> {
     let h = u_end - u_start;
     if h <= 0.0 {
         return BezierPiece {
@@ -115,35 +122,60 @@ struct Sampler<'a> {
     spatial: Option<&'a geometry::path::Segment>,
     start_pos: &'a [f64],
     followers: &'a [geometry::FollowerDemand],
-    follower_gains: &'a [f64],
+    axis_chains: &'a [CompiledChain],
 }
 
 impl Sampler<'_> {
-    fn axis_state(&self, axis: usize, t: f64, with_pa: bool) -> (f64, f64) {
+    fn axis_base_state(&self, axis: usize, t: f64) -> (f64, f64, f64) {
         let phase = locate(self.phases, t);
         let (s, v) = phase.s_v_at(t);
         if axis < 3 {
             match self.spatial {
-                Some(seg) => (seg.point_at(s)[axis], seg.heading_at(s)[axis] * v),
-                None => (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0),
+                Some(seg) => {
+                    let h = (phase.dt * 1e-4).clamp(1e-9, 1e-4);
+                    let t_lo = (t - h).max(phase.t0);
+                    let t_hi = (t + h).min(phase.t0 + phase.dt);
+                    let (s_lo, v_lo) = phase.s_v_at(t_lo);
+                    let (s_hi, v_hi) = phase.s_v_at(t_hi);
+                    let vel_lo = seg.heading_at(s_lo)[axis] * v_lo;
+                    let vel_hi = seg.heading_at(s_hi)[axis] * v_hi;
+                    let denom = t_hi - t_lo;
+                    let accel = if denom > 0.0 {
+                        (vel_hi - vel_lo) / denom
+                    } else {
+                        0.0
+                    };
+                    (seg.point_at(s)[axis], seg.heading_at(s)[axis] * v, accel)
+                }
+                None => (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0, 0.0),
             }
         } else if let Some(f) = self.followers.iter().find(|f| f.axis_index == axis) {
             let pos = f.ratio.mul_add(s, self.start_pos[axis]);
             let e_dot = f.ratio * v;
-            let k = if with_pa {
-                self.follower_gains.get(axis).copied().unwrap_or(0.0)
-            } else {
-                0.0
-            };
-            if k == 0.0 {
-                (pos, e_dot)
-            } else {
-                let e_ddot = f.ratio * phase.accel;
-                (k.mul_add(e_dot, pos), k.mul_add(e_ddot, e_dot))
-            }
+            let e_ddot = f.ratio * phase.accel;
+            (pos, e_dot, e_ddot)
         } else {
-            (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0)
+            (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0, 0.0)
         }
+    }
+
+    fn axis_state(&self, axis: usize, t: f64, apply_zero_support: bool) -> (f64, f64) {
+        let (mut pos, mut vel, mut accel) = self.axis_base_state(axis, t);
+        if apply_zero_support {
+            if let Some(chain) = self.axis_chains.get(axis) {
+                for stage in &chain.stages {
+                    match stage {
+                        ChainStage::LinearPressureAdvance { k } => {
+                            pos = k.mul_add(vel, pos);
+                            vel = k.mul_add(accel, vel);
+                            accel = 0.0;
+                        }
+                        ChainStage::SmoothKernel(_) => break,
+                    }
+                }
+            }
+        }
+        (pos, vel)
     }
 
     fn span_residual(&self, driven: &[usize], ta: f64, tb: f64) -> f64 {
@@ -214,16 +246,12 @@ pub fn lower_move(
         }
     }
 
-    let follower_gains: Vec<f64> = (0..n_axes)
-        .map(|axis| axis_chains.get(axis).map_or(0.0, |c| c.gain))
-        .collect();
-
     let sampler = Sampler {
         phases: &phases,
         spatial,
         start_pos,
         followers: &gm.segment.followers,
-        follower_gains: &follower_gains,
+        axis_chains,
     };
     let mut driven: Vec<usize> = (0..3).collect();
     driven.extend(gm.segment.followers.iter().map(|f| f.axis_index));

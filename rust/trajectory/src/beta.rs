@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory};
 use crate::fit::FittedSegment;
 use crate::plan_velocity::SafetyMode;

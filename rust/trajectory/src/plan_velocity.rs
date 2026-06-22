@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::fit::FittedSegment;
 use crate::post_processor::AxisChainSet;
 use crate::{ShapeBatchInput, ShapeError, ShapeSegmentInput};
