@@ -134,7 +134,6 @@ class Motion:
             "buffer_time_low", 1.0, minval=0.0, maxval=self.buffer_time_high
         )
         self._drip_active = False
-        self._pretend_print = True
         self._last_reactor_yield = 0.0
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
@@ -338,12 +337,6 @@ class Motion:
         delay = gcmd.get_float("P", 0.0, minval=0.0) / 1000.0
         self.dwell(delay)
 
-    def _pretend_consume(self, move_t):
-        self._bump_pending_end_time(move_t)
-        self._sync_print_time()
-        if move_t > 0.0:
-            self.reactor.pause(self.reactor.monotonic() + move_t)
-
     def cmd_M204(self, gcmd):
         # Use S for accel
         accel = gcmd.get_float("S", None, above=0.0)
@@ -381,10 +374,6 @@ class Motion:
             self.kin.check_move(move)
         if move.axes_d[3]:
             self.extruder.check_move(move)
-        if self._pretend_print:
-            self.commanded_pos[:] = move.end_pos
-            self._pretend_consume(move.min_move_t)
-            return
         dx, dy, dz, de = move.axes_d
         feedrate = move.move_d / move.min_move_t
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
@@ -424,10 +413,6 @@ class Motion:
             cp_move = Move(self, self.commanded_pos, cp_target, speed)
             if cp_move.move_d and cp_move.is_kinematic_move:
                 self.kin.check_move(cp_move)
-        if self._pretend_print:
-            self.commanded_pos[:] = list(newpos)
-            self._pretend_consume(move.min_move_t)
-            return
         # Deltas come straight from the endpoint, NOT move.axes_d: for a
         # closed-loop curve (chord ~ 0) Move zeroes axes_d, which would drop the
         # curve's endpoint delta. The engine rejects a genuinely zero curve
@@ -492,9 +477,6 @@ class Motion:
             self._drip_active = False
 
     def dwell(self, delay):
-        if self._pretend_print:
-            self._pretend_consume(delay)
-            return
         self.engine.submit_dwell(delay)
         if delay > 0.0:
             self._bump_pending_end_time(delay)
@@ -584,7 +566,8 @@ class Motion:
         if self.mcu is None or self._drip_active:
             return
         now = self._yield_to_reactor_if_due(self.reactor.monotonic())
-        buffer_time = self.engine.queued_motion_secs()
+        est = self.mcu.estimated_print_time(now)
+        buffer_time = self._mcu_pending_end_time - est
         if buffer_time <= self.buffer_time_high:
             return
         wait_start = now
@@ -592,8 +575,8 @@ class Motion:
             "motion",
             "feed_throttle_enter",
             buffer_time=round(buffer_time, 4),
-            est=round(self.mcu.estimated_print_time(now), 4),
-            engine_frontier=round(self.engine.get_last_move_time(), 4),
+            est=round(est, 4),
+            pending_end=round(self._mcu_pending_end_time, 4),
         )
         deadline = now + DRAIN_TIMEOUT
         while buffer_time > self.buffer_time_low:
@@ -606,16 +589,15 @@ class Motion:
                 )
             self.reactor.pause(now + 0.010)
             self._last_reactor_yield = self.reactor.monotonic()
-            buffer_time = self.engine.queued_motion_secs()
+            est = self.mcu.estimated_print_time(self._last_reactor_yield)
+            buffer_time = self._mcu_pending_end_time - est
         structured_log.event(
             "motion",
             "feed_throttle_exit",
             waited_s=round(self.reactor.monotonic() - wait_start, 4),
             buffer_time=round(buffer_time, 4),
-            est=round(
-                self.mcu.estimated_print_time(self.reactor.monotonic()), 4
-            ),
-            engine_frontier=round(self.engine.get_last_move_time(), 4),
+            est=round(est, 4),
+            pending_end=round(self._mcu_pending_end_time, 4),
         )
 
     def check_busy(self, eventtime):
@@ -829,7 +811,8 @@ class Motion:
         buffer_time = 0.0
         pump_backlog = 0
         if self.mcu is not None:
-            buffer_time = self.engine.queued_motion_secs()
+            est = self.mcu.estimated_print_time(eventtime)
+            buffer_time = self._mcu_pending_end_time - est
             pump_backlog = self.engine.pump_backlog()
         return (
             False,
