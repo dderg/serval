@@ -9,6 +9,7 @@ fn extruder_chains() -> AxisChainSet {
     chains.chains.push(CompiledChain {
         kernel: None,
         gain: 0.0,
+        smooth_time: 0.0,
     });
     chains.followers.push((3, vec![0, 1, 2]));
     chains

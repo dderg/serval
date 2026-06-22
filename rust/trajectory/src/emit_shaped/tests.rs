@@ -536,9 +536,11 @@ fn e_follower_chains(
     kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4],
 ) -> AxisChainSet {
     let mut chains = AxisChainSet::spatial_from_kernels(kernels);
-    chains
-        .chains
-        .push(crate::CompiledChain { kernel: None, gain });
+    chains.chains.push(crate::CompiledChain {
+        kernel: None,
+        gain,
+        smooth_time: 0.0,
+    });
     chains.followers.push((3, vec![0, 1, 2]));
     chains
 }

@@ -1,6 +1,8 @@
 use thiserror::Error;
 use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, PostProcessorType};
 
+pub const DEFAULT_PA_SMOOTH_TIME: f64 = 0.04;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PostProcessorDecl {
     pub name: String,
@@ -158,7 +160,10 @@ fn build_instance(
                 frequency_hz: required_value,
             }
         }
-        "linear_pressure_advance" => PostProcessorType::LinearPressureAdvance { k: required_value },
+        "linear_pressure_advance" => PostProcessorType::LinearPressureAdvance {
+            k: required_value,
+            smooth_time: DEFAULT_PA_SMOOTH_TIME,
+        },
         _ => unreachable!("ty validated above"),
     };
     let mut inst = PostProcessorInstance::new(&d.name, ty);

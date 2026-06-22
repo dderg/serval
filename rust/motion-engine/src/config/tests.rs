@@ -106,6 +106,65 @@ fn linear_pressure_advance_rejects_negative_or_non_finite_k() {
     );
 }
 
+fn registry_with_pa_extruder() -> AxisRegistry {
+    AxisRegistry::try_new(vec![
+        decl("x", &[]),
+        decl("y", &[]),
+        decl("z", &[]),
+        AxisDecl {
+            name: "e".into(),
+            follows: vec!["x".into(), "y".into(), "z".into()],
+            motors: vec![],
+            post_processors: vec!["pa".into()],
+        },
+    ])
+    .unwrap()
+}
+
+fn pa_decl(params: Vec<(String, f64)>) -> Vec<PostProcessorDecl> {
+    vec![PostProcessorDecl {
+        name: "pa".into(),
+        ty: "linear_pressure_advance".into(),
+        params,
+    }]
+}
+
+#[test]
+fn linear_pressure_advance_defaults_smooth_time_to_klipper_value() {
+    let reg = registry_with_pa_extruder();
+    let set = PostProcessorSet::try_new(&reg, &pa_decl(vec![("k".into(), 0.05)])).unwrap();
+    let chains = set.compile(&reg).unwrap();
+    assert_eq!(chains.chains[3].gain, 0.05);
+    assert_eq!(chains.chains[3].smooth_time, DEFAULT_PA_SMOOTH_TIME);
+}
+
+#[test]
+fn linear_pressure_advance_smooth_time_override_is_honored() {
+    let reg = registry_with_pa_extruder();
+    let set = PostProcessorSet::try_new(
+        &reg,
+        &pa_decl(vec![("k".into(), 0.05), ("smooth_time".into(), 0.01)]),
+    )
+    .unwrap();
+    let chains = set.compile(&reg).unwrap();
+    assert_eq!(chains.chains[3].smooth_time, 0.01);
+}
+
+#[test]
+fn linear_pressure_advance_rejects_negative_or_non_finite_smooth_time() {
+    let reg = registry_with_pa_extruder();
+    for bad in [-0.01, f64::NAN, f64::INFINITY] {
+        assert!(
+            PostProcessorSet::try_new(
+                &reg,
+                &pa_decl(vec![("k".into(), 0.05), ("smooth_time".into(), bad)]),
+            )
+            .is_err(),
+            "smooth_time={bad} should be rejected"
+        );
+    }
+}
+
 #[test]
 fn sections_convert_to_temporal_sets() {
     let cfg = PlannerConfig::default();

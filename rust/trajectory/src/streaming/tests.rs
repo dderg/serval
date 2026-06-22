@@ -1561,6 +1561,7 @@ fn follower_chains(kernel_hz: Option<f64>, pa_gain: f64) -> AxisChainSet {
     chains.chains.push(crate::CompiledChain {
         kernel: None,
         gain: pa_gain,
+        smooth_time: 0.0,
     });
     chains.followers.push((3, vec![0, 1, 2]));
     chains

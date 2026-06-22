@@ -7,7 +7,7 @@ use geometry::{
 };
 use trajectory::{AxisChainSet, ShapedSegment};
 
-use crate::lowering::{LoweringError, lower_move};
+use crate::lowering::{LoweringError, lower_batch};
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamConfig {
@@ -164,25 +164,16 @@ impl StreamState {
         let profile = plan_velocity_warm_start(&outcome, self.config.velocity, self.entry_v)?;
 
         let n = outcome.moves.len();
-        let mut pos = self.odometer.clone();
-        let mut t = self.t_committed;
-        let mut segs: Vec<ShapedSegment> = Vec::with_capacity(n);
-        let mut start_times: Vec<f64> = Vec::with_capacity(n);
-        for (gm, vm) in outcome.moves.iter().zip(&profile.moves) {
-            start_times.push(t);
-            let seg = lower_move(
-                gm,
-                vm,
-                t,
-                &pos,
-                self.config.fit_tol_mm,
-                &self.axis_chains.chains,
-            )?;
-            t = seg.t_end;
-            advance_odometer(&mut pos, gm);
-            segs.push(seg);
-        }
-        let total_t = t - self.t_committed;
+        let segs = lower_batch(
+            &outcome.moves,
+            &profile.moves,
+            self.t_committed,
+            &self.odometer,
+            self.config.fit_tol_mm,
+            &self.axis_chains.chains,
+        )?;
+        let start_times: Vec<f64> = segs.iter().map(|s| s.t_start).collect();
+        let total_t = segs.last().map_or(0.0, |s| s.t_end) - self.t_committed;
 
         let commit_count = if force {
             n

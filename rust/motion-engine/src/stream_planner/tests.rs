@@ -259,6 +259,7 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
     chains[3] = trajectory::CompiledChain {
         kernel: None,
         gain: 0.2,
+        smooth_time: 0.0,
     };
     h.update_axis_chains(AxisChainSet {
         chains,

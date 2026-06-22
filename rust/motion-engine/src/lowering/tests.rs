@@ -202,10 +202,15 @@ fn source_mismatch_is_rejected() {
 }
 
 fn linear_pa_chains(extruder_axis: usize, k: f64) -> Vec<CompiledChain> {
+    pa_chains(extruder_axis, k, 0.0)
+}
+
+fn pa_chains(extruder_axis: usize, k: f64, smooth_time: f64) -> Vec<CompiledChain> {
     let mut chains = vec![CompiledChain::default(); extruder_axis + 1];
     chains[extruder_axis] = CompiledChain {
         kernel: None,
         gain: k,
+        smooth_time,
     };
     chains
 }
@@ -303,6 +308,70 @@ fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
             extract_bezier_pieces(&none.axes[axis]),
             extract_bezier_pieces(&zero.axes[axis]),
             "axis {axis} differs between no-PP and k=0"
+        );
+    }
+}
+
+#[test]
+fn smooth_time_matches_mainline_triangular_average_and_leaves_xyz_identical() {
+    let m = line_move([0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0, ctx(1, 100.0)).unwrap();
+    let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).unwrap();
+    let profile = plan_velocity(&outcome, VelocityConfig::default()).unwrap();
+    let start = [0.0; 4];
+
+    let base = lower_move(
+        &outcome.moves[0],
+        &profile.moves[0],
+        0.0,
+        &start,
+        FIT_TOL_MM,
+        &[],
+    )
+    .unwrap();
+
+    let (k, smooth_time) = (0.05, 0.02);
+    let smoothed = lower_move(
+        &outcome.moves[0],
+        &profile.moves[0],
+        0.0,
+        &start,
+        FIT_TOL_MM,
+        &pa_chains(3, k, smooth_time),
+    )
+    .unwrap();
+
+    for axis in 0..3 {
+        assert_eq!(
+            extract_bezier_pieces(&base.axes[axis]),
+            extract_bezier_pieces(&smoothed.axes[axis]),
+            "axis {axis} XYZ changed under smoothed PA"
+        );
+    }
+
+    // Mainline reference: smooth_pos(t) = (1/hst^2) * integral over [t-hst, t+hst] of
+    //   (hst - |t-x|) * (base_e(x) + k * base_e'(x)) dx   (kin_extruder.c).
+    let (t0, t1) = (base.t_start, base.t_end);
+    let base_e = |x: f64| eval(&base.axes[3], x.clamp(t0, t1));
+    let base_v = |x: f64| (base_e(x + 1e-6) - base_e(x - 1e-6)) / 2e-6;
+    let pa_pos = |x: f64| k.mul_add(base_v(x), base_e(x));
+    let hst = 0.5 * smooth_time;
+    let reference = |t: f64| {
+        let n = 4000;
+        let dx = 2.0 * hst / f64::from(n);
+        let mut acc = 0.0;
+        for i in 0..n {
+            let x = (f64::from(i) + 0.5).mul_add(dx, t - hst);
+            acc += (hst - (t - x).abs()) * pa_pos(x) * dx;
+        }
+        acc / (hst * hst)
+    };
+    for frac in [0.3_f64, 0.5, 0.7] {
+        let t = frac.mul_add(t1 - t0, t0);
+        let got = eval(&smoothed.axes[3], t);
+        let want = reference(t);
+        assert!(
+            (got - want).abs() < 5e-3,
+            "smoothed E at t={t}: got {got}, mainline reference {want}"
         );
     }
 }

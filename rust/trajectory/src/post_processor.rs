@@ -9,7 +9,7 @@ pub const SMOOTH_MZV_T_SM_PER_HZ: f64 = 0.95625;
 pub enum PostProcessorType {
     SmoothZv { frequency_hz: f64 },
     SmoothMzv { frequency_hz: f64 },
-    LinearPressureAdvance { k: f64 },
+    LinearPressureAdvance { k: f64, smooth_time: f64 },
 }
 
 impl PostProcessorType {
@@ -29,13 +29,14 @@ pub struct PostProcessorInstance {
 #[derive(Debug, Clone)]
 pub enum PlanAction {
     Kernel(PiecewisePolynomialKernel<f64>),
-    DerivativeGain { k: f64 },
+    DerivativeGain { k: f64, smooth_time: f64 },
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct CompiledChain {
     pub kernel: Option<PiecewisePolynomialKernel<f64>>,
     pub gain: f64,
+    pub smooth_time: f64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,7 +83,9 @@ impl PostProcessorInstance {
             PostProcessorType::SmoothMzv { frequency_hz } => PlanAction::Kernel(
                 build_smooth_mzv_kernel(SMOOTH_MZV_T_SM_PER_HZ / frequency_hz),
             ),
-            PostProcessorType::LinearPressureAdvance { k } => PlanAction::DerivativeGain { k },
+            PostProcessorType::LinearPressureAdvance { k, smooth_time } => {
+                PlanAction::DerivativeGain { k, smooth_time }
+            }
         }
     }
 
@@ -101,20 +104,21 @@ impl PostProcessorInstance {
                     Err(unknown())
                 }
             }
-            PostProcessorType::LinearPressureAdvance { k } => {
-                if key == "k" {
-                    if !(value.is_finite() && value >= 0.0) {
-                        return Err(PostProcessorError::BadParam {
-                            name: self.name.clone(),
-                            key: key.to_string(),
-                            value,
-                        });
-                    }
-                    *k = value;
-                    Ok(())
-                } else {
-                    Err(unknown())
+            PostProcessorType::LinearPressureAdvance { k, smooth_time } => {
+                let target = match key {
+                    "k" => k,
+                    "smooth_time" => smooth_time,
+                    _ => return Err(unknown()),
+                };
+                if !(value.is_finite() && value >= 0.0) {
+                    return Err(PostProcessorError::BadParam {
+                        name: self.name.clone(),
+                        key: key.to_string(),
+                        value,
+                    });
                 }
+                *target = value;
+                Ok(())
             }
         }
     }
@@ -139,7 +143,7 @@ impl CompiledChain {
                     kernel_source = Some(inst.name());
                     compiled.kernel = Some(kernel);
                 }
-                PlanAction::DerivativeGain { k } => {
+                PlanAction::DerivativeGain { k, smooth_time } => {
                     if let Some(prev) = gain_source {
                         return Err(PostProcessorError::UnsupportedComposition {
                             detail: format!(
@@ -150,6 +154,7 @@ impl CompiledChain {
                     }
                     gain_source = Some(inst.name());
                     compiled.gain = k;
+                    compiled.smooth_time = smooth_time;
                 }
             }
         }
@@ -193,6 +198,7 @@ impl AxisChainSet {
                 .map(|k| CompiledChain {
                     kernel: k.clone(),
                     gain: 0.0,
+                    smooth_time: 0.0,
                 })
                 .collect(),
             followers: Vec::new(),

@@ -53,6 +53,7 @@ fn solve(pa_k: f64) -> ShapeBatchOutput {
     chains.chains.push(trajectory::CompiledChain {
         kernel: None,
         gain: pa_k,
+        smooth_time: 0.0,
     });
     chains.followers.push((3, vec![0, 1, 2]));
     let input = ShapeBatchInput {

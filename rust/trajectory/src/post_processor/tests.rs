@@ -1,7 +1,13 @@
 use super::*;
 
 fn pa(k: f64) -> PostProcessorInstance {
-    PostProcessorInstance::new("pa", PostProcessorType::LinearPressureAdvance { k })
+    PostProcessorInstance::new(
+        "pa",
+        PostProcessorType::LinearPressureAdvance {
+            k,
+            smooth_time: 0.0,
+        },
+    )
 }
 fn zv(hz: f64) -> PostProcessorInstance {
     PostProcessorInstance::new("is", PostProcessorType::SmoothZv { frequency_hz: hz })
@@ -76,6 +82,25 @@ fn set_param_rejects_negative_and_non_finite_gain() {
     let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
     assert_eq!(c.gain, 0.04, "rejected updates must not mutate the gain");
     inst.set_param("k", 0.0).expect("k=0 is a valid no-op gain");
+}
+
+#[test]
+fn set_param_updates_smooth_time_and_rejects_bad_values() {
+    let mut inst = pa(0.04);
+    inst.set_param("smooth_time", 0.03).unwrap();
+    let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
+    assert_eq!(c.smooth_time, 0.03);
+    for bad in [-0.01, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            inst.set_param("smooth_time", bad),
+            Err(PostProcessorError::BadParam { .. })
+        ));
+    }
+    let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
+    assert_eq!(
+        c.smooth_time, 0.03,
+        "rejected updates must not mutate smooth_time"
+    );
 }
 
 fn t_squared_cubic() -> nurbs::ScalarNurbs<f64> {
