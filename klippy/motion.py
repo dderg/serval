@@ -198,6 +198,7 @@ class Motion:
             "manual_probe",
             "tuning_tower",
             "garbage_collection",
+            "resonance_buzz",
         ):
             printer.load_object(config, module_name)
 
@@ -256,7 +257,7 @@ class Motion:
         duration_ms,
         ramp_ms,
     ):
-        from .extras.resonance_tester import buzz_axis_to_motor_mask
+        from .extras.resonance_buzz import buzz_axis_to_motor_mask
 
         stepper_mask = axis_mask
         sent = False
