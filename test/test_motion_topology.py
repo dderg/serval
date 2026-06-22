@@ -173,12 +173,16 @@ class CaptureEngine:
         kin_axes,
         cartesian_limits,
         arc_fit=None,
+        max_extrude_only_velocity=None,
+        max_extrude_only_accel=None,
     ):
         self.init_planner_args = {
             "topology": topology,
             "kinematics_axes": kin_axes,
             "cartesian_limits": cartesian_limits,
             "arc_fit": arc_fit,
+            "max_extrude_only_velocity": max_extrude_only_velocity,
+            "max_extrude_only_accel": max_extrude_only_accel,
         }
 
 

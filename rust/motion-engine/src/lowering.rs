@@ -2,7 +2,7 @@ use geometry::path::lowering::PositionProfile;
 use geometry::{Move, MoveVelocity, VelSample};
 use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
-use trajectory::ShapedSegment;
+use trajectory::{CompiledChain, ShapedSegment};
 
 const MIN_PIECE_DURATION_S: f64 = 1e-9;
 const MAX_SUBDIVISION_DEPTH: u32 = 22;
@@ -115,18 +115,32 @@ struct Sampler<'a> {
     spatial: Option<&'a geometry::path::Segment>,
     start_pos: &'a [f64],
     followers: &'a [geometry::FollowerDemand],
+    follower_gains: &'a [f64],
 }
 
 impl Sampler<'_> {
-    fn axis_state(&self, axis: usize, t: f64) -> (f64, f64) {
-        let (s, v) = locate(self.phases, t).s_v_at(t);
+    fn axis_state(&self, axis: usize, t: f64, with_pa: bool) -> (f64, f64) {
+        let phase = locate(self.phases, t);
+        let (s, v) = phase.s_v_at(t);
         if axis < 3 {
             match self.spatial {
                 Some(seg) => (seg.point_at(s)[axis], seg.heading_at(s)[axis] * v),
                 None => (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0),
             }
         } else if let Some(f) = self.followers.iter().find(|f| f.axis_index == axis) {
-            (f.ratio.mul_add(s, self.start_pos[axis]), f.ratio * v)
+            let pos = f.ratio.mul_add(s, self.start_pos[axis]);
+            let e_dot = f.ratio * v;
+            let k = if with_pa {
+                self.follower_gains.get(axis).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            if k == 0.0 {
+                (pos, e_dot)
+            } else {
+                let e_ddot = f.ratio * phase.accel;
+                (k.mul_add(e_dot, pos), k.mul_add(e_ddot, e_dot))
+            }
         } else {
             (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0)
         }
@@ -135,12 +149,12 @@ impl Sampler<'_> {
     fn span_residual(&self, driven: &[usize], ta: f64, tb: f64) -> f64 {
         let mut worst = 0.0_f64;
         for &axis in driven {
-            let (pa, va) = self.axis_state(axis, ta);
-            let (pb, vb) = self.axis_state(axis, tb);
+            let (pa, va) = self.axis_state(axis, ta, false);
+            let (pb, vb) = self.axis_state(axis, tb, false);
             let piece = hermite_cubic(ta, tb, pa, va, pb, vb);
             for &frac in &RESIDUAL_PROBES {
                 let tm = frac.mul_add(tb - ta, ta);
-                let (truth, _) = self.axis_state(axis, tm);
+                let (truth, _) = self.axis_state(axis, tm, false);
                 worst = worst.max((piece.evaluate(tm) - truth).abs());
             }
         }
@@ -183,6 +197,7 @@ pub fn lower_move(
     t_start: f64,
     start_pos: &[f64],
     fit_tol_mm: f64,
+    axis_chains: &[CompiledChain],
 ) -> Result<ShapedSegment, LoweringError> {
     if gm.source != vm.source {
         return Err(LoweringError::SourceMismatch);
@@ -199,11 +214,16 @@ pub fn lower_move(
         }
     }
 
+    let follower_gains: Vec<f64> = (0..n_axes)
+        .map(|axis| axis_chains.get(axis).map_or(0.0, |c| c.gain))
+        .collect();
+
     let sampler = Sampler {
         phases: &phases,
         spatial,
         start_pos,
         followers: &gm.segment.followers,
+        follower_gains: &follower_gains,
     };
     let mut driven: Vec<usize> = (0..3).collect();
     driven.extend(gm.segment.followers.iter().map(|f| f.axis_index));
@@ -228,8 +248,8 @@ pub fn lower_move(
         }
         let (ua, ub) = (t_start + ta, t_start + tb);
         for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
-            let (pa, va) = sampler.axis_state(axis, ta);
-            let (pb, vb) = sampler.axis_state(axis, tb);
+            let (pa, va) = sampler.axis_state(axis, ta, true);
+            let (pb, vb) = sampler.axis_state(axis, tb, true);
             pieces.push(hermite_cubic(ua, ub, pa, va, pb, vb));
         }
     }

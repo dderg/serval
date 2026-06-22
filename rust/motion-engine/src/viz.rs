@@ -34,6 +34,7 @@ pub fn pipeline_snapshot(
         consistency_tol: VELOCITY_CONSISTENCY_TOL,
         max_jerk_mm_s3: max_jerk,
         integration_tol: VELOCITY_INTEGRATION_TOL,
+        ..geometry::VelocityConfig::default()
     };
     let profile = geometry::plan_velocity(&outcome, velocity_config)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;

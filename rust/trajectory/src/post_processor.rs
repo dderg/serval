@@ -42,6 +42,12 @@ pub struct CompiledChain {
 pub enum PostProcessorError {
     #[error("post_processor '{name}': unknown parameter '{key}'")]
     UnknownParam { name: String, key: String },
+    #[error("post_processor '{name}': '{key}' must be finite and >= 0, got {value}")]
+    BadParam {
+        name: String,
+        key: String,
+        value: f64,
+    },
     #[error(
         "axis chain unsupported: {detail}. v1 allows at most one kernel and one \
          derivative-gain post-processor per axis"
@@ -97,6 +103,13 @@ impl PostProcessorInstance {
             }
             PostProcessorType::LinearPressureAdvance { k } => {
                 if key == "k" {
+                    if !(value.is_finite() && value >= 0.0) {
+                        return Err(PostProcessorError::BadParam {
+                            name: self.name.clone(),
+                            key: key.to_string(),
+                            value,
+                        });
+                    }
                     *k = value;
                     Ok(())
                 } else {

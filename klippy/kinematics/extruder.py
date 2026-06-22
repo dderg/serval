@@ -4,10 +4,6 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-_OPTIONS_NOW_IN_LIMIT_SECTIONS = (
-    "max_extrude_only_velocity",
-    "max_extrude_only_accel",
-)
 _OPTIONS_WITHOUT_A_PLANNER_CONCEPT = (
     "max_extrude_cross_section",
     "max_extrude_only_distance",
@@ -29,6 +25,12 @@ class PrinterExtruder:
         self.nozzle_diameter = config.getfloat("nozzle_diameter", above=0.0)
         self.filament_diameter = config.getfloat(
             "filament_diameter", minval=self.nozzle_diameter
+        )
+        self.max_extrude_only_velocity = config.getfloat(
+            "max_extrude_only_velocity", None, above=0.0
+        )
+        self.max_extrude_only_accel = config.getfloat(
+            "max_extrude_only_accel", None, above=0.0
         )
         # Setup extruder trapq (trapezoidal motion queue). Engine mode:
         # planner / kinematic state lives in Rust, the host stub is
@@ -109,14 +111,6 @@ class PrinterExtruder:
         return self.heater.stats(eventtime)
 
     def _reject_unsupported_options(self, config):
-        for key in _OPTIONS_NOW_IN_LIMIT_SECTIONS:
-            if config.get(key, None) is not None:
-                raise config.error(
-                    "[%s] option '%s' is no longer supported: declare the "
-                    "extruder's velocity and acceleration in a [limit <name>] "
-                    "section with 'axes: %s'"
-                    % (self.name, key, config.get("axis", "e"))
-                )
         for key in _OPTIONS_WITHOUT_A_PLANNER_CONCEPT:
             if config.get(key, None) is not None:
                 raise config.error(

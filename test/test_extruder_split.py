@@ -201,10 +201,18 @@ def test_extruder_removed_option_rejected(key, value):
 @pytest.mark.parametrize(
     "key", ["max_extrude_only_velocity", "max_extrude_only_accel"]
 )
-def test_extruder_extrude_limit_option_points_to_limit_section(key):
+def test_extruder_extrude_only_limit_is_read_into_attribute(key):
     section = make_extruder_section(**{key: 100.0})
-    with pytest.raises(ConfigError, match=r"\[limit"):
-        PrinterExtruder(section, 0)
+    pe = PrinterExtruder(section, 0)
+    assert getattr(pe, key) == 100.0
+
+
+@pytest.mark.parametrize(
+    "key", ["max_extrude_only_velocity", "max_extrude_only_accel"]
+)
+def test_extruder_extrude_only_limit_defaults_to_none(key):
+    pe = PrinterExtruder(make_extruder_section(), 0)
+    assert getattr(pe, key) is None
 
 
 def test_extruder_stepper_extra_rejected():

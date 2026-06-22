@@ -840,6 +840,14 @@ class Motion:
             )
             return
 
+        extruder = self.printer.lookup_object("extruder", None)
+        max_extrude_only_velocity = getattr(
+            extruder, "max_extrude_only_velocity", None
+        )
+        max_extrude_only_accel = getattr(
+            extruder, "max_extrude_only_accel", None
+        )
+
         try:
             self.engine.init_planner(
                 list(self.axis_sections),
@@ -856,6 +864,8 @@ class Motion:
                     self._square_corner_velocity,
                 ),
                 arc_fit=self.arc_fit,
+                max_extrude_only_velocity=max_extrude_only_velocity,
+                max_extrude_only_accel=max_extrude_only_accel,
             )
             self._configure_axes_per_mcu(engine_mcus)
             self._planner_ready = True

@@ -61,6 +61,23 @@ fn set_param_unknown_key_fails() {
     assert!(inst.set_param("k", 1.0).is_err());
 }
 
+#[test]
+fn set_param_rejects_negative_and_non_finite_gain() {
+    let mut inst = pa(0.04);
+    for bad in [-0.01, f64::NAN, f64::INFINITY] {
+        assert!(
+            matches!(
+                inst.set_param("k", bad),
+                Err(PostProcessorError::BadParam { .. })
+            ),
+            "k={bad} should be rejected"
+        );
+    }
+    let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
+    assert_eq!(c.gain, 0.04, "rejected updates must not mutate the gain");
+    inst.set_param("k", 0.0).expect("k=0 is a valid no-op gain");
+}
+
 fn t_squared_cubic() -> nurbs::ScalarNurbs<f64> {
     nurbs::ScalarNurbs::try_new(
         3,
