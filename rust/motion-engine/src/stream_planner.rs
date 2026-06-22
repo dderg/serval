@@ -10,11 +10,13 @@ use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
 use crate::stream::{StreamConfig, StreamState};
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
-// Time reserved before the committed frontier runs dry to build+dispatch the
-// next chunk. Must exceed the worst-case commit cost (fit+plan+lower of a
-// full buffer on the host) or the idle/paused commit lands in the MCU's past
-// (PieceStartInPast). Observed ~0.68s for a 32-move chunk on a Pi.
-const SAFETY_MARGIN: f64 = 1.5;
+// When the input goes quiet, drain the uncommitted look-ahead tail to rest this
+// long before the committed frontier would run dry. It must exceed the cost of
+// that final fit+plan+lower (only the `keep_secs` tail now, since moves commit
+// continuously — not a whole chunk) so the idle drain never lands in the MCU's
+// past (PieceStartInPast). Kept small so a brief input stall does not trip a
+// premature drain-to-rest mid-stream.
+const SAFETY_MARGIN: f64 = 0.25;
 const T_IDLE: Duration = Duration::from_secs(3600);
 
 type DispatchFn = Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>;
@@ -396,11 +398,25 @@ fn run_loop(
                     state.restart_idle_timeline();
                 }
                 state.push(m);
-                // Do NOT re-plan on every move: commit() re-fits + re-plans +
-                // re-lowers the whole buffer, so calling it per move is O(n²) and
-                // makes the planner fall behind playback (stream starvation). Plan
-                // only once per chunk, when the buffer reaches the cap.
+                // Commit on every move. The continuity commit drains at every
+                // zero-curvature seam (each blend exit), so the uncommitted
+                // window stays bounded near the `keep_secs` look-ahead tail and
+                // this re-fit is O(window), not O(whole stream). Motion flows
+                // continuously instead of in to-rest chunks.
+                let segs = state
+                    .commit(false)
+                    .unwrap_or_else(|e| fatal(&format!("commit: {e}")));
+                dispatch_committed(
+                    &segs,
+                    &dispatch,
+                    &mut sync_instant,
+                    last_move_time_bits,
+                    commit_fire_count,
+                );
                 if state.buffered() >= state.max_buffer_moves() {
+                    // Backstop only: no committable seam within reach (e.g. one
+                    // move longer than the whole look-ahead window). Drain to
+                    // rest so motion keeps flowing and memory stays bounded.
                     tracing::info!(
                         subsystem = "motion",
                         event = "buffer_cap_drain",

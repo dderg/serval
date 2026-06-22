@@ -226,35 +226,37 @@ fn nudge_dispatches_pieces_and_advances_time() {
 }
 
 #[test]
-fn continuous_blend_run_drains_at_buffer_cap_without_flush() {
+fn continuous_blend_run_dispatches_continuously_without_flush() {
     let cap = Capture::default();
-    let max_buffer_moves = 6;
+    // Generous cap so the buffer-cap backstop never fires: the continuity commit
+    // alone must drain the run.
     let mut h = StreamPlannerHandle::spawn(
-        cfg_cap(0.5, max_buffer_moves),
+        cfg_cap(0.5, 256),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
     );
 
-    // A gentle zig-zag: every vertex blends (no unblended seam), so commit(false)
-    // can never commit. Without the buffer-cap fallback the buffer would grow
-    // forever and nothing would dispatch until an explicit flush/idle.
-    let n = (max_buffer_moves + 4) as u32;
+    // A gentle zig-zag: every vertex blends (no unblended seam). The old
+    // clean-seam-only commit hung here forever; the continuity commit cuts at
+    // each blend exit (zero curvature) and dispatches as moves arrive.
+    let n: u32 = 40;
     let mut prev = [0.0, 0.0, 0.0];
     for i in 0..n {
-        let x = f64::from(i + 1) * 5.0;
-        let y = if i % 2 == 0 { 1.0 } else { 0.0 };
+        let x = f64::from(i + 1) * 20.0;
+        let y = if i % 2 == 0 { 3.0 } else { 0.0 };
         let end = [x, y, 0.0];
         h.submit_move(line(i + 1, prev, end)).unwrap();
         prev = end;
     }
 
-    // No flush: dispatch must happen via the buffer-cap drain alone.
+    // No flush, no waiting on the cap: dispatch happens via commit(false).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while cap.snapshot().is_empty() {
+    while cap.snapshot().len() < 10 {
         assert!(
             std::time::Instant::now() < deadline,
-            "buffer-cap drain never dispatched a continuous-blend run"
+            "continuity commit never dispatched a continuous-blend run (got {})",
+            cap.snapshot().len()
         );
         std::thread::yield_now();
     }

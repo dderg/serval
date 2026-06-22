@@ -69,22 +69,125 @@ fn flush_commits_everything_to_rest() {
 }
 
 #[test]
-fn blended_corner_is_never_split_by_a_commit() {
-    // A 90-degree corner is blended (clothoid); there is no clean seam, so a
-    // non-forced commit must emit nothing rather than split the blend.
+fn blended_corner_commits_through_the_blend_without_stopping() {
+    // A 90-degree corner is blended (a biclothoid). The blend rejoins the
+    // outgoing line at zero curvature, so the commit runs through the whole
+    // blend and keeps the outgoing move as a head-trimmed remainder — never
+    // splitting the blend itself, and never stopping at the corner.
     let mut s = StreamState::new(cfg(0.0), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 0.0));
 
-    assert!(
-        s.commit(false).unwrap().is_empty(),
-        "must not commit across a blended corner"
+    let committed = s.commit(false).unwrap();
+    assert!(!committed.is_empty(), "the blend must commit");
+    assert_eq!(
+        s.buffered(),
+        1,
+        "outgoing move kept as a head-trimmed remainder"
     );
-    assert_eq!(s.buffered(), 2);
+    assert!(
+        s.entry_velocity() > 1.0,
+        "corner is rounded, not stopped: seam velocity {}",
+        s.entry_velocity()
+    );
 
-    // Force still drains it to rest.
-    assert!(!s.commit(true).unwrap().is_empty());
+    // The kept remainder still ends at the original move endpoint.
+    let rest = s.commit(true).unwrap();
     assert!(s.is_empty());
+    let last = rest.last().unwrap();
+    assert!((eval(&last.axes[0], last.t_end) - 50.0).abs() < 1e-6);
+    assert!((eval(&last.axes[1], last.t_end) - 50.0).abs() < 1e-6);
+}
+
+#[test]
+fn continuous_blended_chain_drains_without_a_single_stop() {
+    // A gentle zigzag: every corner is shallow enough to blend, so there is no
+    // unblended seam anywhere. The continuity commit must still drain it (the
+    // old clean-seam-only commit would hang here forever), and no interior seam
+    // may drop to rest — that would be the stutter we are eliminating.
+    let mut s = StreamState::new(cfg(0.05), &[0.0, 0.0, 0.0], 0.0);
+    let pts = [
+        [0.0, 0.0, 0.0],
+        [20.0, 0.0, 0.0],
+        [40.0, 3.0, 0.0],
+        [60.0, 0.0, 0.0],
+        [80.0, 3.0, 0.0],
+        [100.0, 0.0, 0.0],
+        [120.0, 3.0, 0.0],
+    ];
+    for (i, w) in pts.windows(2).enumerate() {
+        s.push(line(i as u32 + 1, w[0], w[1], 0.0));
+    }
+    let pushed = pts.len() - 1;
+
+    let mut all: Vec<trajectory::ShapedSegment> = Vec::new();
+    let mut progressed = true;
+    while progressed {
+        let committed = s.commit(false).unwrap();
+        progressed = !committed.is_empty();
+        for seg in committed {
+            if let Some(prev) = all.last() {
+                assert!(
+                    s.entry_velocity() >= 0.0,
+                    "entry velocity must stay defined"
+                );
+                assert!(
+                    (seg.t_start - prev.t_end).abs() < 1e-9,
+                    "time gap between committed segments"
+                );
+            }
+            all.push(seg);
+        }
+    }
+    assert!(
+        s.buffered() < pushed,
+        "continuity commit must drain a fully-blended chain ({} of {} left)",
+        s.buffered(),
+        pushed
+    );
+    // Every interior seam carried real speed: the planner never paused.
+    assert!(
+        s.entry_velocity() > 1.0,
+        "final carried seam velocity {} should be cruising",
+        s.entry_velocity()
+    );
+
+    let rest = s.commit(true).unwrap();
+    for w in rest.windows(2) {
+        assert!((w[1].t_start - w[0].t_end).abs() < 1e-9);
+    }
+    if let (Some(prev), Some(first)) = (all.last(), rest.first()) {
+        assert!((first.t_start - prev.t_end).abs() < 1e-9);
+    }
+    assert!(s.is_empty());
+}
+
+#[test]
+fn head_trim_preserves_position_and_extrusion_continuity() {
+    // Commit through a blend with extrusion, then verify the kept remainder
+    // resumes exactly where the committed trajectory ended (no gap, no overlap)
+    // in both the spatial axes and the extruder.
+    let mut s = StreamState::new(cfg(0.05), &[0.0, 0.0, 0.0, 0.0], 0.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 5.0));
+    s.push(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 5.0));
+    s.push(line(3, [50.0, 50.0, 0.0], [100.0, 50.0, 0.0], 5.0));
+
+    let first = s.commit(false).unwrap();
+    assert!(!first.is_empty());
+    let seam = first.last().unwrap();
+    let seam_x = eval(&seam.axes[0], seam.t_end);
+    let seam_y = eval(&seam.axes[1], seam.t_end);
+    let seam_e = eval(&seam.axes[3], seam.t_end);
+
+    let rest = s.commit(true).unwrap();
+    let resume = rest.first().unwrap();
+    assert!((eval(&resume.axes[0], resume.t_start) - seam_x).abs() < 1e-6);
+    assert!((eval(&resume.axes[1], resume.t_start) - seam_y).abs() < 1e-6);
+    assert!((eval(&resume.axes[3], resume.t_start) - seam_e).abs() < 1e-6);
+
+    // Total extrusion across the whole (3-move) path is conserved: 15 mm.
+    let last = rest.last().unwrap();
+    assert!((eval(&last.axes[3], last.t_end) - 15.0).abs() < 1e-3);
 }
 
 #[test]

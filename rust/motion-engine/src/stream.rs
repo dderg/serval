@@ -1,9 +1,10 @@
 use std::collections::{HashSet, VecDeque};
 
 use geometry::path::lowering::PositionProfile;
+use geometry::path::{Line, Segment};
 use geometry::{
-    ChainFitConfig, FitError, Move, VelocityConfig, VelocityError, VelocityLimits, fit_chain,
-    plan_velocity_warm_start,
+    ChainFitConfig, FitError, GeometryError, Move, VelocityConfig, VelocityError, VelocityLimits,
+    fit_chain, plan_velocity_warm_start,
 };
 use trajectory::ShapedSegment;
 
@@ -19,13 +20,13 @@ pub struct StreamConfig {
     /// junction velocities were planned with enough downstream context and are
     /// not pulled down by the buffer's pessimistic terminal-`v=0`.
     pub keep_secs: f64,
-    /// PROTOTYPE cap: a continuous all-blended path has no unblended seam, so
-    /// the clean-seam `commit(false)` can never commit and the buffer grows
-    /// without bound while nothing reaches the MCU. Once the buffer exceeds this
-    /// many moves, the planner force-drains the whole buffer to rest (a brief
-    /// stop at the chunk boundary) so motion keeps flowing and the pump-backlog
-    /// backpressure can engage. TODO: replace with a continuity-preserving
-    /// mid-chain commit (fitter entry tangent+curvature) to remove the stop.
+    /// Backstop cap. The continuity commit drains at every blend (each
+    /// biclothoid rejoins the outgoing line at zero curvature, a clean seam), so
+    /// a normal continuous path commits without ever stopping. This force-drain
+    /// to rest only fires for a pathological buffer that has no clean seam within
+    /// reach at all (e.g. a single move longer than the whole look-ahead window)
+    /// — without it such a buffer would grow unbounded while nothing reaches the
+    /// MCU. It is a safety net, not the steady-state path.
     pub max_buffer_moves: usize,
     /// Path limits for planner-internal moves (homing). Stream moves submitted
     /// through the bridge carry their own per-move limits; this is the fallback
@@ -38,6 +39,7 @@ pub enum StreamError {
     Fit(FitError),
     Velocity(VelocityError),
     Lowering(LoweringError),
+    Geometry(GeometryError),
 }
 
 impl std::fmt::Display for StreamError {
@@ -46,7 +48,14 @@ impl std::fmt::Display for StreamError {
             Self::Fit(e) => write!(f, "chain fit: {e:?}"),
             Self::Velocity(e) => write!(f, "velocity plan: {e:?}"),
             Self::Lowering(e) => write!(f, "lowering: {e}"),
+            Self::Geometry(e) => write!(f, "head-trim geometry: {e:?}"),
         }
+    }
+}
+
+impl From<GeometryError> for StreamError {
+    fn from(e: GeometryError) -> Self {
+        Self::Geometry(e)
     }
 }
 
@@ -70,10 +79,15 @@ impl From<LoweringError> for StreamError {
 
 /// Streaming look-ahead planner over the new geometry pipeline. Buffers
 /// submitted moves, re-plans the uncommitted window warm-started from the
-/// dispatched velocity, and commits prefixes at clean (non-blended) seams so
-/// the trajectory stays velocity-continuous across consecutive moves without
-/// re-emitting committed pieces. Commit timing (real-time cadence) is the
-/// caller's; this type owns the geometry/velocity state.
+/// dispatched velocity, and commits prefixes at zero-curvature seams so the
+/// trajectory stays velocity-continuous across consecutive moves without
+/// re-emitting committed pieces. A seam is committable wherever the fit output
+/// resumes a straight line body: that holds at unblended junctions and equally
+/// at the exit of every blend, since a biclothoid rejoins the outgoing line at
+/// zero curvature. Committing through a blend consumes the next move's head, so
+/// that move is replaced in the buffer by its head-trimmed remainder before the
+/// next re-fit. Commit timing (real-time cadence) is the caller's; this type
+/// owns the geometry/velocity state.
 pub struct StreamState {
     buffer: VecDeque<Move>,
     /// Absolute velocity at the committed seam (entry of the buffer's first move).
@@ -188,9 +202,9 @@ impl StreamState {
         self.config.max_buffer_moves
     }
 
-    /// Plan the buffer and commit a prefix at the latest clean seam. `force`
-    /// (flush / dwell / idle drain / shutdown) commits the entire buffer to
-    /// rest. Returns the `ShapedSegment`s to dispatch, in order; empty when
+    /// Plan the buffer and commit a prefix at the latest zero-curvature seam.
+    /// `force` (flush / dwell / idle drain / shutdown) commits the entire buffer
+    /// to rest. Returns the `ShapedSegment`s to dispatch, in order; empty when
     /// nothing is committable yet.
     pub fn commit(&mut self, force: bool) -> Result<Vec<ShapedSegment>, StreamError> {
         if self.buffer.is_empty() {
@@ -223,7 +237,7 @@ impl StreamState {
             let limit_t = self.t_committed + (total_t - self.config.keep_secs);
             let mut chosen = 0usize;
             for i in 1..n {
-                if unblended.contains(&outcome.moves[i].source.start_line) {
+                if is_clean_seam(&outcome.moves, i, &unblended) {
                     if start_times[i] <= limit_t {
                         chosen = i;
                     } else {
@@ -270,6 +284,7 @@ impl StreamState {
             self.buffer.clear();
         } else {
             let keep_line = outcome.moves[commit_count].source.start_line;
+            let head_consumed = blend_consumed_head(&outcome.moves, commit_count);
             while self
                 .buffer
                 .front()
@@ -277,10 +292,60 @@ impl StreamState {
             {
                 self.buffer.pop_front();
             }
+            if head_consumed {
+                self.trim_front_to_seam()?;
+            }
         }
 
         Ok(committed)
     }
+
+    /// Replace the front buffer move with the portion that survives the seam: a
+    /// line from the committed position to the move's original end. The committed
+    /// blend already paid out the head (spatial and, proportionally, followers),
+    /// so the per-mm follower ratios carry over unchanged.
+    fn trim_front_to_seam(&mut self) -> Result<(), StreamError> {
+        let front = self
+            .buffer
+            .front()
+            .expect("trim requires a kept front move");
+        let Some(Segment::Line(line)) = &front.segment.spatial else {
+            return Err(StreamError::Geometry(GeometryError::ZeroMotion));
+        };
+        let new_start = [self.odometer[0], self.odometer[1], self.odometer[2]];
+        let trimmed = Line::try_new(new_start, line.end)?;
+        let segment = geometry::path::PathSegment::try_new(
+            Segment::Line(trimmed),
+            front.segment.followers.clone(),
+        )?;
+        let replacement = Move {
+            segment,
+            feedrate_mm_s: front.feedrate_mm_s,
+            limits: front.limits,
+            source: front.source,
+        };
+        *self.buffer.front_mut().expect("front checked above") = replacement;
+        Ok(())
+    }
+}
+
+/// A non-forced commit may cut wherever the fit output resumes a straight line
+/// body (zero curvature: an unblended seam or the exit of a blend) — never
+/// inside a blend, where curvature is nonzero and the velocity warm-start, which
+/// carries only a scalar entry speed, would be invalid.
+fn is_clean_seam(moves: &[Move], i: usize, unblended: &HashSet<u32>) -> bool {
+    unblended.contains(&moves[i].source.start_line)
+        || matches!(moves[i].segment.spatial, Some(Segment::Line(_)))
+}
+
+/// Whether the seam before output index `i` is the exit of a blend, i.e. the
+/// blend consumed the head of the move resuming at `i`. The preceding output is
+/// then the blend's trailing clothoid half, which shares the resuming move's
+/// source line; an unblended seam is preceded by a different move's body.
+fn blend_consumed_head(moves: &[Move], i: usize) -> bool {
+    i > 0
+        && matches!(moves[i - 1].segment.spatial, Some(Segment::Clothoid(_)))
+        && moves[i - 1].source.start_line == moves[i].source.start_line
 }
 
 fn advance_odometer(pos: &mut [f64], gm: &Move) {

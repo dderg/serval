@@ -568,7 +568,11 @@ fn planner_err(e: StreamPlannerError) -> PyErr {
 /// commit, so newly-arriving moves are planned with their predecessors still
 /// buffered. Drained to rest on flush/dwell/idle.
 const STREAM_KEEP_SECS: f64 = 0.5;
-const STREAM_MAX_BUFFER_MOVES: usize = 32;
+/// Backstop only. The continuity commit drains at every blend, so the buffer
+/// normally hovers near the `keep_secs` look-ahead tail; this force-drain to
+/// rest fires solely when no clean seam exists within reach. Set well above a
+/// realistic look-ahead tail so a dense (but normal) stream never trips it.
+const STREAM_MAX_BUFFER_MOVES: usize = 512;
 
 fn resolve_motion_caps(
     caps: Option<mcu_protocol::messages::RuntimeCapsResponse>,
