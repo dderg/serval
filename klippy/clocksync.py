@@ -9,7 +9,6 @@ import traceback
 
 RTT_AGE = 0.000010 / (60.0 * 60.0)
 DECAY = 1.0 / 30.0
-TRANSMIT_EXTRA = 0.001
 
 
 class ClockSync:
@@ -168,20 +167,11 @@ class ClockSync:
         )
         # Update prediction from linear regression
         new_freq = self.clock_covariance / self.time_variance
-        pred_stddev = math.sqrt(self.prediction_variance)
-        self.serial.set_clock_est(
-            new_freq,
-            self.time_avg + TRANSMIT_EXTRA,
-            int(self.clock_avg - 3.0 * pred_stddev),
-            clock,
-        )
         self.clock_est = (
             self.time_avg + self.min_half_rtt,
             self.clock_avg,
             new_freq,
         )
-        # TRANSMIT_EXTRA is a serialqueue scheduling bias — not a projection
-        # parameter — and must not contaminate the router anchor.
         cb = self._clock_est_callback
         if cb is not None:
             try:
@@ -192,8 +182,6 @@ class ClockSync:
                 )
             except Exception:
                 logging.exception("clocksync: set_clock_est callback")
-        # logging.debug("regr %.3f: freq=%.3f d=%d(%.3f)",
-        #              sent_time, new_freq, clock - exp_clock, pred_stddev)
 
     # clock frequency conversions
     def print_time_to_clock(self, print_time):
