@@ -126,7 +126,6 @@ class Motion:
         self._read_axes(config)
         self._read_post_processors(config)
         self._read_arc_fit(config)
-        self.print_time = 0.0
         self.print_stall = 0
         self.pump_backlog_high = config.getint(
             "pump_backlog_high", 200, minval=1
@@ -320,7 +319,9 @@ class Motion:
         return velocity, accel
 
     def get_status(self, eventtime):
-        print_time = self.print_time
+        # print_time is the MCU-clock end of the last queued move (the frontier),
+        # like mainline's toolhead.print_time — not a constant.
+        print_time = self._mcu_pending_end_time
         estimated_print_time = self.mcu.estimated_print_time(eventtime)
         velocity, accel, scv = self._effective_limits()
         res = dict(self.kin.get_status(eventtime))
@@ -811,7 +812,7 @@ class Motion:
         self.engine.set_square_corner_velocity(None)
 
     def stats(self, eventtime):
-        max_queue_time = max(self.print_time, self._mcu_pending_end_time)
+        max_queue_time = self._mcu_pending_end_time
         for m in self.all_mcus:
             if getattr(m, "non_critical_disconnected", False):
                 continue

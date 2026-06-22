@@ -124,7 +124,49 @@ Regression tests (motion-engine):
 | Exact triggering move geometry | Confirms Hypothesis 1; lets us decide whether the refused boundary should instead be supported (general non-line trim) | Bench run → capture `event=head_trim_refused` |
 | Why Mainsail "actual" leads "requested" (symptom #2) | Separate UX/correctness bug | Trace `gcode_move`/`motion_report` vs `commanded_pos`/`print_time` on host |
 
+## Follow-up: 2026-06-22 — symptom #2 (Mainsail "actual" leads/lags "requested")
+
+### Finding 4: live position came from a 200ms hardware poll, not the trajectory
+
+**Evidence:** `rust/motion-engine/src/bridge.rs:2879` spawns a `live-position-poll`
+thread sampling `collect_motor_positions_inner` (physical motor positions) every
+200ms into `live_position_cache`; `motion_report.get_status` served that via
+`engine.live_motor_positions()` (`klippy/extras/motion_report.py:54`, pre-fix).
+
+**Detail:** "actual" (Mainsail live_position) was a 200ms-quantized hardware poll
+on the MCU/encoder clock; "requested" (`gcode_move.gcode_position`) is set at
+parse on the host clock. Different source, granularity, and clock → the two
+drift. Homing moves the motors before `gcode_position` resets (actual leads);
+printing lags by up to 200ms (actual delayed). Mainline instead evaluates the
+*commanded* trajectory at `estimated_print_time` (trapq), which tracks
+`gcode_position` in one clock domain.
+
+### Finding 5: toolhead `print_time` status was hard-zero
+
+**Evidence:** `klippy/motion.py` set `self.print_time = 0.0` in `__init__` and
+never updated it; `get_status` reported it verbatim.
+
+### Fix (landed, host-only — needs a klippy restart, no MCU/Rust rebuild)
+
+- `motion_report.get_status` now evaluates the committed trajectory at
+  `estimated_print_time` via the existing `engine.motion_state_at(print_time=…)`
+  (mainline parity), falling back to the last good sample on error/empty; missing
+  axes hold their previous value. (`klippy/extras/motion_report.py`)
+- `motion.get_status` reports `print_time = self._mcu_pending_end_time` (the
+  frontier), not a constant 0. (`klippy/motion.py`)
+- Tests rewritten: `test/test_motion_report.py`.
+
+### Deferred
+
+- `live_motor_positions()` and the 200ms `live-position-poll` thread are now
+  dead (no callers). Removing them sheds needless MCU bus traffic; left as a
+  focused follow-up (Rust change → bench rebuild). `query_motor_positions`
+  (on-demand) stays — used by parked-servo resync and gcode_move.
+- Semantic note: live_position is now the *commanded* trajectory. If the bench
+  wants the EtherCAT servo's *actual encoder* (following error) surfaced, add it
+  as a separate status field rather than overloading live_position.
+
 ## Status
 
-Active — fix landed (abort prevented by construction); exact trigger geometry to
-be confirmed from the next run's `head_trim_refused` warn.
+Active — crash fix landed (abort prevented by construction, exact trigger to be
+confirmed from `head_trim_refused`); symptom #2 fix landed (host-only).
