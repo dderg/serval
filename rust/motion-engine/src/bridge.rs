@@ -573,6 +573,15 @@ const STREAM_KEEP_SECS: f64 = 0.5;
 /// rest fires solely when no clean seam exists within reach. Set well above a
 /// realistic look-ahead tail so a dense (but normal) stream never trips it.
 const STREAM_MAX_BUFFER_MOVES: usize = 512;
+/// Velocity-profile ODE/sampling tolerance for the streaming planner, in v²
+/// units. The offline default (1e-7) drives the adaptive RK4 to a precision far
+/// below the physical noise floor — ~0.015 mm/s velocity error at this value on
+/// a 300 mm/s move — at ~9× the host cost. Streaming runs on the Pi against a
+/// real-time playhead, so it is tuned to the hardware budget: at 1e-4 a 40-move
+/// burst plans in ~0.4 s instead of ~3.8 s, with trajectory time unchanged to
+/// five significant figures (the residual is non-monotonic integration noise,
+/// not a slower path).
+const STREAM_INTEGRATION_TOL: f64 = 1e-4;
 
 fn resolve_motion_caps(
     caps: Option<mcu_protocol::messages::RuntimeCapsResponse>,
@@ -3327,6 +3336,7 @@ impl PyMotionEngine {
                 chain: cfg.chain,
                 velocity: geometry::VelocityConfig {
                     max_jerk_mm_s3: cart.max_jerk,
+                    integration_tol: STREAM_INTEGRATION_TOL,
                     ..geometry::VelocityConfig::default()
                 },
                 fit_tol_mm: cfg.fit_tolerance_mm,
