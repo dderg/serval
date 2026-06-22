@@ -616,10 +616,8 @@ impl Engine {
                 now_cycle,
             );
             if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
-                let cfg = crate::buzz_xdirect::XdirectConfig::for_rate(
+                let cfg = crate::buzz_xdirect::XdirectConfig::new(
                     axis.microstep_distance,
-                    params.amplitude_mm,
-                    params.omega,
                     crate::buzz_xdirect::DEFAULT_XDIRECT_UPDATE_HZ,
                 );
                 crate::buzz_stream::arm_axis_xdirect(ex.axis_idx, params, cfg);

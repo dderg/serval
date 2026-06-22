@@ -157,7 +157,7 @@ fn phase(p: &ToneParams, t: f32) -> f32 {
 /// Instantaneous angular frequency `omega + mu*t`. Constant for a tone.
 #[inline]
 #[must_use]
-fn omega_inst(p: &ToneParams, t: f32) -> f32 {
+pub(crate) fn omega_inst(p: &ToneParams, t: f32) -> f32 {
     p.omega + p.mu * t
 }
 
@@ -167,7 +167,7 @@ fn omega_inst(p: &ToneParams, t: f32) -> f32 {
 /// positive-frequency validation forbids — guarded here against div-by-zero).
 #[inline]
 #[must_use]
-fn amp_eff(p: &ToneParams, t: f32) -> f32 {
+pub(crate) fn amp_eff(p: &ToneParams, t: f32) -> f32 {
     if p.mu == 0.0 {
         return p.amplitude_mm;
     }

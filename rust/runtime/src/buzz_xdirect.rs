@@ -2,41 +2,85 @@
 //
 // Where the STEP/DIR exact-crossing buzz (`buzz_gen`) emits one incremental step
 // per microstep crossing — an interrupt rate that scales 1:1 with microstepping
-// and overruns the delivery path at 256 — this generator instead schedules
-// *absolute position* updates and lets the leaf write coil currents directly.
-// An XDIRECT write says "be at this position now", so a late write degrades to
-// mild phase noise instead of a lost step, and microstepping drops out (the
-// PHASE_LUT is the resolution).
+// and overruns the delivery path at 256 — this generator schedules *absolute
+// position* updates and lets the leaf write coil currents directly. An XDIRECT
+// write says "be at this position now", so a late write degrades to mild phase
+// noise instead of a lost step, and microstepping drops out (the PHASE_LUT is the
+// resolution).
 //
-// Update instants are the union of:
-//   * level changes on a chosen displacement grid `grid_mm` (≈ constant distance
-//     between updates -> in the constant-`accel_per_hz` regime, constant update
-//     rate across a whole sweep, because peak carrier velocity is constant), and
-//   * carrier extrema (velocity zeros) — emitted exactly so the commanded
-//     amplitude is pinned, not clipped to the nearest grid line.
+// Updates land on a uniform CARRIER-PHASE grid: spacing `dphi = 2*pi/N`, so the
+// realized update rate is exactly `N * f_inst(t)` and sweeps lock-step with the
+// buzz frequency. Uniform-in-phase (hence uniform-in-time within a segment) keeps
+// the zero-order-hold spectral images at clean harmonics of the tone instead of
+// smearing them into the audible/measurement band — which a displacement grid,
+// being uniform in space and so non-uniform in time, does not. `N` is divisible by
+// 4 with the grid anchored at a turning point, so every quarter-phase (both
+// extrema and both zero crossings) is a grid point: amplitude is pinned at the
+// extrema with no special case, and the alignment survives an `N` change because
+// `N` only ever changes at a turning point (velocity zero), where a spacing change
+// costs no movement artefact.
 //
 // The emitted value is the signed axis offset in PHASE_LUT microsteps; the leaf
 // adds it to the parked base and each motor's phase offset.
 
-use crate::buzz_gen::{
-    ToneError, ToneParams, cycle_at, position_rel, refine_extremum, velocity_rel,
-};
+use crate::buzz_gen::{ToneError, ToneParams, amp_eff, cycle_at, omega_inst, position_rel};
+use core::f32::consts::PI;
 
-/// Resumable position in the update stream.
+const TWO_PI: f32 = 2.0 * PI;
+
+/// Default target update rate (Hz) for a host-armed XDIRECT buzz; it bounds `N`
+/// from above so the SPI/IRQ load stays capped at any microstep size. The realized
+/// rate is the exact multiple `N * f_inst` at or just under this — never this value
+/// itself, because a rate that does not divide the carrier period is what smears
+/// the spectrum. Set near the motion sample rate (the cadence normal phase motion
+/// already drives smoothly) and just under the step-output timer's re-arm cap.
+pub const DEFAULT_XDIRECT_UPDATE_HZ: f32 = 10_000.0;
+
+/// Static config for the update stream, alongside the shared `ToneParams`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct XdirectConfig {
+    /// PHASE_LUT microstep size in mm (rotation_distance / (full_steps * 256)).
+    pub lut_step_mm: f32,
+    /// Upper bound on the realized update rate (Hz). Caps `N`; never the rate.
+    pub target_rate_hz: f32,
+}
+
+impl XdirectConfig {
+    #[must_use]
+    pub fn new(lut_step_mm: f32, target_rate_hz: f32) -> Self {
+        Self {
+            lut_step_mm,
+            target_rate_hz,
+        }
+    }
+}
+
+/// Resumable position in the update stream. The grid is anchored at `seg_phi0` (a
+/// quarter-phase point) and advances by `2*pi/seg_n` until it reaches the segment's
+/// closing turning point `seg_end`, where `seg_n` is recomputed for the next
+/// half-cycle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct XdirectCursor {
     pub t: f32,
+    seg_phi0: f32,
+    seg_end: f32,
+    seg_n: i32,
+    k: i32,
     pub last_offset: i32,
-    pub v_prev: f32,
 }
 
 impl XdirectCursor {
     #[must_use]
-    pub fn start(p: &ToneParams) -> Self {
+    pub fn start(p: &ToneParams, cfg: &XdirectConfig) -> Self {
+        // Anchor at the opening zero crossing (phi = 0); the first turning point is
+        // pi/2. With seg_n divisible by 4 the turning point is a grid point.
         Self {
             t: 0.0,
+            seg_phi0: 0.0,
+            seg_end: 0.5 * PI,
+            seg_n: choose_n(p, cfg, 0.0),
+            k: 0,
             last_offset: 0,
-            v_prev: velocity_rel(p, 0.0),
         }
     }
 }
@@ -51,151 +95,128 @@ pub struct XdirectUpdate {
     pub t: f32,
 }
 
-/// Default target update rate (Hz) for a host-armed XDIRECT buzz; `grid_steps` is
-/// derived from it so the SPI/IRQ load stays bounded across any microstep size.
-/// Set near the motion sample rate: that is the cadence normal phase-stepping
-/// motion already drives smoothly, and it stays just under the step-output timer's
-/// re-arm cap. Lower rates leave the fast (near-zero-crossing) sections too coarse.
-pub const DEFAULT_XDIRECT_UPDATE_HZ: f32 = 10000.0;
-
-/// Static config for the update stream, alongside the shared `ToneParams`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct XdirectConfig {
-    /// PHASE_LUT microstep size in mm (rotation_distance / (full_steps * 256)).
-    pub lut_step_mm: f32,
-    /// Emit a grid update once the offset has moved this many LUT microsteps from
-    /// the last emitted one. `1` == one update per LUT microstep (finest);
-    /// larger coarsens the rate. Extrema are emitted regardless.
-    pub grid_steps: i32,
+/// Invert `phi = omega*t + 0.5*mu*t^2` for the positive-frequency branch, `t >= 0`.
+/// The `2*phi / (omega + omega_inst)` form avoids the small-`mu` cancellation of
+/// the bare quadratic root and unifies the `mu == 0` (tone) case to `phi/omega`.
+#[inline]
+#[must_use]
+fn time_at_phase(p: &ToneParams, phi: f32) -> f32 {
+    let disc = (p.omega * p.omega + 2.0 * p.mu * phi).max(0.0);
+    let root = libm::sqrtf(disc);
+    2.0 * phi / (p.omega + root).max(f32::MIN_POSITIVE)
 }
 
-impl XdirectConfig {
-    /// Derive `grid_steps` so the peak update rate ≈ `target_rate_hz`. Peak carrier
-    /// velocity `A*omega` is constant across a constant-`accel_per_hz` sweep, so a
-    /// fixed grid span gives a flat rate; this just inverts `rate = v_peak / (grid *
-    /// lut_step)` for `grid`.
-    #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn for_rate(lut_step_mm: f32, amplitude_mm: f32, omega: f32, target_rate_hz: f32) -> Self {
-        let v_peak = (amplitude_mm * omega).abs().max(f32::MIN_POSITIVE);
-        let raw = v_peak / (target_rate_hz.max(1.0) * lut_step_mm.max(f32::MIN_POSITIVE));
-        let grid_steps = (libm::roundf(raw) as i32).max(1);
-        Self {
-            lut_step_mm,
-            grid_steps,
-        }
-    }
+/// Per-cycle update count for the segment starting at time `t`: the exact multiple
+/// of the instantaneous frequency that fits under `target_rate`, capped so the grid
+/// is never finer than LUT resolution, floored at 4, and rounded up to a multiple
+/// of 4 so the quarter-phases stay grid points.
+#[inline]
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+fn choose_n(p: &ToneParams, cfg: &XdirectConfig, t: f32) -> i32 {
+    let f_inst = (omega_inst(p, t).abs() / TWO_PI).max(f32::MIN_POSITIVE);
+    let n_rate = libm::roundf(cfg.target_rate_hz.max(1.0) / f_inst) as i32;
+    let levels =
+        (libm::roundf(amp_eff(p, t).abs() / cfg.lut_step_mm.max(f32::MIN_POSITIVE)) as i32).max(1);
+    let n = n_rate.min(4 * levels).max(4);
+    n + (4 - n % 4) % 4
 }
 
 #[inline]
 #[must_use]
+#[allow(clippy::cast_possible_truncation)]
 fn offset_at(p: &ToneParams, cfg: &XdirectConfig, t: f32) -> i32 {
-    #[allow(clippy::cast_possible_truncation)]
-    let o = libm::roundf(position_rel(p, t) / cfg.lut_step_mm) as i32;
-    o
+    libm::roundf(position_rel(p, t) / cfg.lut_step_mm) as i32
 }
 
-/// Fine forward-scan step: small enough that the offset moves at most ~one grid
-/// span per step (so no grid line is skipped near the fast zero-crossings) and a
-/// fraction of the fastest carrier half-period (so two samples never straddle
-/// more than one extremum), capped by the remaining window.
+/// Grid-step count from `seg_phi0` to `seg_end`. The span is `pi/2` (the opening
+/// segment) or `pi` (a full half-cycle); both are integer multiples of `2*pi/seg_n`
+/// because `seg_n` is divisible by 4.
 #[inline]
 #[must_use]
-fn scan_dt(p: &ToneParams, cfg: &XdirectConfig, after: f32) -> f32 {
-    let omega_hi = (p.omega.abs() + p.mu.abs() * p.total_seconds).max(f32::MIN_POSITIVE);
-    let half_period = core::f32::consts::PI / omega_hi;
-    // Bound on |dq/dt|: carrier term `A*omega_inst` plus the envelope-ramp slope
-    // `A/ramp` (only nonzero on the ramps, but bounding it everywhere is safe).
-    let ramp = p.ramp_seconds.max(f32::MIN_POSITIVE);
-    let v_max = (p.amplitude_mm.abs() * (omega_hi + 1.0 / ramp)).max(f32::MIN_POSITIVE);
-    // Target ~half a grid span per step so the emit never overshoots a full span.
-    let grid_traverse = 0.5 * (cfg.grid_steps.max(1) as f32) * cfg.lut_step_mm / v_max;
-    let remaining = (p.total_seconds - after).max(f32::MIN_POSITIVE);
-    (half_period / 8.0)
-        .min(grid_traverse)
-        .min(remaining)
-        .max(1.0e-7)
+#[allow(clippy::cast_possible_truncation)]
+fn seg_steps(seg_phi0: f32, seg_end: f32, seg_n: i32) -> i32 {
+    libm::roundf((seg_end - seg_phi0) * seg_n as f32 / TWO_PI) as i32
 }
 
 /// Next update strictly after `cursor`, or `Err(Done)` once the window closes.
 ///
-/// Forward progress is structural: `t` advances by at least `scan_dt` each
-/// iteration (an extremum split lands strictly inside the step), so the loop is
-/// bounded by `remaining / dt`.
+/// One grid point per call: advance `k`, snap to the segment's turning point when
+/// `k` reaches it (recomputing `seg_n` there), solve the time from the phase, and
+/// emit. When the next grid time would pass `total_seconds`, a single net-zero
+/// update parks the axis exactly on base.
 pub fn next_update(
     p: &ToneParams,
     cfg: &XdirectConfig,
     cursor: XdirectCursor,
 ) -> Result<(XdirectUpdate, XdirectCursor), ToneError> {
-    let mut t = cursor.t;
-    let mut v_prev = cursor.v_prev;
     let total = p.total_seconds;
-
-    loop {
-        if t >= total {
-            return Err(ToneError::Done);
-        }
-        let dt = scan_dt(p, cfg, t);
-        let sample = (t + dt).min(total);
-        let v_sample = velocity_rel(p, sample);
-
-        // A carrier extremum strictly inside (t, sample): emit it exactly so the
-        // peak amplitude is pinned, not rounded to a grid line.
-        if v_prev != 0.0 && v_sample != 0.0 && v_prev * v_sample < 0.0 {
-            if let Ok(ext) = refine_extremum(p, t, sample) {
-                if ext > t && ext < sample {
-                    let offset = offset_at(p, cfg, ext);
-                    if offset != cursor.last_offset {
-                        let next = XdirectCursor {
-                            t: ext,
-                            last_offset: offset,
-                            v_prev: velocity_rel(p, ext),
-                        };
-                        return Ok((
-                            XdirectUpdate {
-                                cycle_abs: cycle_at(p, ext),
-                                offset_steps: offset,
-                                t: ext,
-                            },
-                            next,
-                        ));
-                    }
-                    t = ext;
-                    v_prev = velocity_rel(p, ext);
-                    continue;
-                }
-            }
-        }
-
-        let offset = offset_at(p, cfg, sample);
-        let at_end = sample >= total;
-        // Grid line crossed, OR the closing sample: the envelope returns to base
-        // (offset 0) at `total`, and that net-zero update must fire even when it is
-        // within `grid_steps` of the last one, so the motor parks exactly on base.
-        let emit = (offset - cursor.last_offset).abs() >= cfg.grid_steps
-            || (at_end && offset != cursor.last_offset);
-        if emit {
-            let next = XdirectCursor {
-                t: sample,
-                last_offset: offset,
-                v_prev: v_sample,
-            };
-            return Ok((
-                XdirectUpdate {
-                    cycle_abs: cycle_at(p, sample),
-                    offset_steps: offset,
-                    t: sample,
-                },
-                next,
-            ));
-        }
-        if at_end {
-            return Err(ToneError::Done);
-        }
-
-        t = sample;
-        v_prev = v_sample;
+    if cursor.t >= total {
+        return Err(ToneError::Done);
     }
+
+    let steps = seg_steps(cursor.seg_phi0, cursor.seg_end, cursor.seg_n);
+    let k1 = cursor.k + 1;
+    let at_turn = k1 >= steps;
+    #[allow(clippy::cast_precision_loss)]
+    let phi = if at_turn {
+        cursor.seg_end
+    } else {
+        cursor.seg_phi0 + k1 as f32 * (TWO_PI / cursor.seg_n as f32)
+    };
+    let t = time_at_phase(p, phi);
+
+    if t >= total {
+        // Net-zero close: the envelope reaches 0 at `total`, so land one update
+        // exactly there to park on base. Off the phase grid by design; the top
+        // guard (`cursor.t >= total`) makes it fire exactly once.
+        let next = XdirectCursor {
+            t: total,
+            last_offset: 0,
+            k: k1,
+            ..cursor
+        };
+        return Ok((
+            XdirectUpdate {
+                cycle_abs: cycle_at(p, total),
+                offset_steps: 0,
+                t: total,
+            },
+            next,
+        ));
+    }
+    if t <= cursor.t {
+        return Err(ToneError::NonMonotonic);
+    }
+
+    let offset = offset_at(p, cfg, t);
+    let next = if at_turn {
+        // Turning points are exactly pi apart; advance by pi (not a floor-based
+        // search) so an f32-exact turning phase never collapses the next segment.
+        XdirectCursor {
+            t,
+            seg_phi0: phi,
+            seg_end: phi + PI,
+            seg_n: choose_n(p, cfg, t),
+            k: 0,
+            last_offset: offset,
+        }
+    } else {
+        XdirectCursor {
+            t,
+            k: k1,
+            last_offset: offset,
+            ..cursor
+        }
+    };
+    Ok((
+        XdirectUpdate {
+            cycle_abs: cycle_at(p, t),
+            offset_steps: offset,
+            t,
+        },
+        next,
+    ))
 }
 
 #[cfg(test)]

@@ -237,7 +237,7 @@ pub fn arm_axis_xdirect(axis_idx: usize, params: ToneParams, cfg: XdirectConfig)
             params,
             generator: StreamGen::Xdirect {
                 cfg,
-                cursor: XdirectCursor::start(&params),
+                cursor: XdirectCursor::start(&params, &cfg),
             },
             anchored: false,
             closed: false,

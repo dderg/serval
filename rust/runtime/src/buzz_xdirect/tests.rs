@@ -12,6 +12,10 @@ use std::vec::Vec;
 
 const LUT_STEP_MM: f32 = 40.0 / (200.0 * 256.0); // 0.78125 um — XDIRECT native res
 
+fn cfg() -> XdirectConfig {
+    XdirectConfig::new(LUT_STEP_MM, 10_000.0)
+}
+
 fn tone(freq_hz: f32, amplitude_mm: f32, total: f32, ramp: f32) -> ToneParams {
     ToneParams {
         omega: 2.0 * core::f32::consts::PI * freq_hz,
@@ -44,7 +48,7 @@ fn chirp(f0: f32, f1: f32, amplitude_mm: f32, total: f32, ramp: f32) -> TonePara
 
 fn collect(p: &ToneParams, cfg: &XdirectConfig) -> Vec<XdirectUpdate> {
     let mut out = Vec::new();
-    let mut cursor = XdirectCursor::start(p);
+    let mut cursor = XdirectCursor::start(p, cfg);
     loop {
         match next_update(p, cfg, cursor) {
             Ok((u, next)) => {
@@ -61,13 +65,11 @@ fn collect(p: &ToneParams, cfg: &XdirectConfig) -> Vec<XdirectUpdate> {
 
 #[test]
 fn tone_pins_peak_amplitude_exactly() {
+    // CAP-3: the carrier extrema are grid points, so the commanded peak equals the
+    // analytic peak exactly — never clipped below it.
     let amp = 0.0461_f32;
     let p = tone(55.0, amp, 0.2, 0.02);
-    let cfg = XdirectConfig {
-        lut_step_mm: LUT_STEP_MM,
-        grid_steps: 4,
-    };
-    let ups = collect(&p, &cfg);
+    let ups = collect(&p, &cfg());
     assert!(
         ups.len() > 100,
         "expected a dense stream, got {}",
@@ -76,29 +78,73 @@ fn tone_pins_peak_amplitude_exactly() {
 
     let peak_steps = (amp / LUT_STEP_MM).round() as i32;
     let max_seen = ups.iter().map(|u| u.offset_steps.abs()).max().unwrap();
-    // The forced-extrema emission must reach the true peak, not clip below it.
     assert_eq!(
         max_seen, peak_steps,
         "peak offset {max_seen} must equal the analytic peak {peak_steps}"
     );
+    // Both turning points are sampled: +peak and -peak both appear.
+    let min_seen = ups.iter().map(|u| u.offset_steps).min().unwrap();
+    assert_eq!(
+        min_seen, -peak_steps,
+        "the negative extremum must be pinned too"
+    );
 }
 
 #[test]
-fn tone_respects_grid_spacing_and_monotonic_time() {
+fn tone_update_rate_is_exact_integer_multiple_of_frequency() {
+    // CAP-2: a fixed tone has constant N, so the grid is uniform in time and the
+    // realized rate is N*f with zero remainder. We recover N from the spacing and
+    // confirm it is an integer multiple of 4 whose product with f sits at/under the
+    // budget — not pinned to 10 kHz (which does not divide the period).
+    let f = 55.0_f32;
+    let p = tone(f, 0.0461, 0.3, 0.02);
+    let ups = collect(&p, &cfg());
+
+    // Interior gaps (drop the first transient and the net-zero close) are uniform.
+    let gaps: Vec<f32> = ups
+        .windows(2)
+        .map(|w| w[1].t - w[0].t)
+        .filter(|g| *g > 0.0)
+        .collect();
+    let interior = &gaps[2..gaps.len() - 2];
+    let gmin = interior.iter().copied().fold(f32::INFINITY, f32::min);
+    let gmax = interior.iter().copied().fold(0.0_f32, f32::max);
+    assert!(
+        gmax / gmin < 1.001,
+        "constant-frequency spacing must be uniform: min={gmin:.3e} max={gmax:.3e}"
+    );
+
+    let n = (1.0 / (gmin * f)).round() as i32;
+    assert_eq!(n % 4, 0, "N must be a multiple of 4, got {n}");
+    let rate = n as f32 * f;
+    assert!(
+        rate <= 10_000.0 * 1.02,
+        "realized rate {rate:.0} must sit at/under the budget"
+    );
+    // Exactness: the recovered N reproduces the spacing to f32 precision.
+    assert!((gmin - 1.0 / (n as f32 * f)).abs() < gmin * 1e-3);
+}
+
+#[test]
+fn tone_zero_crossings_are_grid_points() {
+    // CAP-3: with N divisible by 4 and the grid anchored at a zero crossing, every
+    // quarter-phase lands on a sample — so an update sits at zero around each
+    // crossing.
     let p = tone(55.0, 0.0461, 0.2, 0.02);
-    let cfg = XdirectConfig {
-        lut_step_mm: LUT_STEP_MM,
-        grid_steps: 4,
-    };
-    let ups = collect(&p, &cfg);
+    let ups = collect(&p, &cfg());
+    let at_zero = ups.iter().filter(|u| u.offset_steps == 0).count();
+    assert!(
+        at_zero >= 10,
+        "expected a sample at each zero crossing, saw {at_zero}"
+    );
+}
+
+#[test]
+fn time_is_strictly_monotonic_and_in_window() {
+    let p = tone(55.0, 0.0461, 0.2, 0.02);
+    let ups = collect(&p, &cfg());
     for w in ups.windows(2) {
         assert!(w[1].t > w[0].t, "time must strictly advance");
-        let d = (w[1].offset_steps - w[0].offset_steps).abs();
-        assert!(
-            d <= cfg.grid_steps + 1,
-            "offset jumped {d} > grid_steps {} — a grid line was skipped",
-            cfg.grid_steps
-        );
     }
     for u in &ups {
         assert!(u.t >= 0.0 && u.t <= p.total_seconds);
@@ -108,11 +154,7 @@ fn tone_respects_grid_spacing_and_monotonic_time() {
 #[test]
 fn emitted_offsets_reconstruct_the_analytic_sine() {
     let p = tone(55.0, 0.0461, 0.2, 0.02);
-    let cfg = XdirectConfig {
-        lut_step_mm: LUT_STEP_MM,
-        grid_steps: 4,
-    };
-    for u in collect(&p, &cfg) {
+    for u in collect(&p, &cfg()) {
         let exact = position_rel(&p, u.t);
         let cmd = u.offset_steps as f32 * LUT_STEP_MM;
         assert!(
@@ -124,23 +166,47 @@ fn emitted_offsets_reconstruct_the_analytic_sine() {
 }
 
 #[test]
+fn offset_jump_per_update_is_bounded() {
+    // Capping N at the LUT-resolution rate keeps the per-update displacement near
+    // one LUT step even at the fast zero crossings, so no offset leaps a big gap.
+    let p = tone(55.0, 0.0461, 0.2, 0.02);
+    for w in collect(&p, &cfg()).windows(2) {
+        let d = (w[1].offset_steps - w[0].offset_steps).abs();
+        assert!(
+            d <= 3,
+            "offset jumped {d} steps in one update — grid too coarse"
+        );
+    }
+}
+
+#[test]
+fn tone_parks_on_base_at_the_end() {
+    // CAP-6: the final update is the net-zero close at exactly `total`, offset 0.
+    let p = tone(55.0, 0.0461, 0.2, 0.02);
+    let ups = collect(&p, &cfg());
+    let last = ups.last().unwrap();
+    assert_eq!(last.offset_steps, 0, "axis must park on base");
+    assert!(
+        (last.t - p.total_seconds).abs() < 1e-6,
+        "the close must land at the window end, got t={}",
+        last.t
+    );
+}
+
+#[test]
 fn sweep_holds_a_flat_update_rate_not_a_rising_one() {
-    // 5 -> 135 Hz: amplitude tapers ~27x, but constant peak velocity means a
-    // constant-displacement grid yields a ~flat update rate. A fixed-N scheme
-    // would instead rise ~27x with frequency.
+    // 5 -> 135 Hz: N steps down (~round(target/f)) as f rises, so N*f stays pinned
+    // near the budget — a flat realized rate, exactly locked to the buzz frequency
+    // at every point rather than a fixed 10 kHz.
     let p = chirp(5.0, 135.0, 0.507, 1.0, 0.05);
-    let cfg = XdirectConfig {
-        lut_step_mm: LUT_STEP_MM,
-        grid_steps: 8,
-    };
-    let ups = collect(&p, &cfg);
+    let ups = collect(&p, &cfg());
 
     let rate_in = |lo: f32, hi: f32| -> f32 {
         let n = ups.iter().filter(|u| u.t >= lo && u.t < hi).count();
         n as f32 / (hi - lo)
     };
-    let early = rate_in(0.1, 0.3); // ~12-30 Hz
-    let late = rate_in(0.7, 0.9); // ~95-120 Hz
+    let early = rate_in(0.1, 0.3);
+    let late = rate_in(0.7, 0.9);
     assert!(
         early > 0.0 && late > 0.0,
         "expected updates in both windows"
@@ -155,11 +221,7 @@ fn sweep_holds_a_flat_update_rate_not_a_rising_one() {
 #[test]
 fn sweep_peak_offsets_taper_with_amplitude() {
     let p = chirp(5.0, 135.0, 0.507, 1.0, 0.05);
-    let cfg = XdirectConfig {
-        lut_step_mm: LUT_STEP_MM,
-        grid_steps: 8,
-    };
-    let ups = collect(&p, &cfg);
+    let ups = collect(&p, &cfg());
     let peak_in = |lo: f32, hi: f32| -> i32 {
         ups.iter()
             .filter(|u| u.t >= lo && u.t < hi)
@@ -173,4 +235,37 @@ fn sweep_peak_offsets_taper_with_amplitude() {
         early_peak > late_peak * 3,
         "amplitude should taper over the sweep: early peak {early_peak} vs late {late_peak}"
     );
+}
+
+#[test]
+fn sweep_changes_n_only_at_turning_points() {
+    // CAP-7: N (hence the phase spacing Δφ) changes only at a carrier turning point.
+    // Work in the phase domain, which is envelope-independent: map each update time
+    // back to carrier phase φ(t), and where the phase step Δφ changes, the phase
+    // there must sit on a turning point (π/2 + nπ). Offsets would confound this on
+    // the ramps, where the displacement peak drifts off φ = π/2; phase does not.
+    let p = chirp(5.0, 135.0, 0.507, 1.0, 0.05);
+    let ups = collect(&p, &cfg());
+
+    let phi_of = |t: f32| (p.omega + 0.5 * p.mu * t) * t;
+    // Drop the net-zero close (last point is off-grid).
+    let phis: Vec<f32> = ups[..ups.len() - 1].iter().map(|u| phi_of(u.t)).collect();
+    let dphi: Vec<f32> = phis.windows(2).map(|w| w[1] - w[0]).collect();
+
+    let half_pi = core::f32::consts::FRAC_PI_2;
+    let pi = core::f32::consts::PI;
+    let mut seams = 0;
+    for i in 1..dphi.len() {
+        // A real Δφ step (N change) dwarfs the f32 round-trip noise within a segment.
+        if (dphi[i] - dphi[i - 1]).abs() > dphi[i - 1] * 0.02 {
+            let phi = phis[i]; // the boundary update — must be a turning point
+            let nearest = (((phi - half_pi) / pi).round()) * pi + half_pi;
+            assert!(
+                (phi - nearest).abs() < 0.05,
+                "Δφ changed at φ={phi:.4}, not a turning point (nearest {nearest:.4})"
+            );
+            seams += 1;
+        }
+    }
+    assert!(seams > 0, "the sweep should cross several N seams");
 }

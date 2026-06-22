@@ -321,16 +321,13 @@ fn xdirect_refill_produces_offset_entries_matching_the_generator() {
     use crate::buzz_xdirect::{XdirectConfig, XdirectCursor, next_update};
 
     const START: u32 = 1_000_000;
-    let cfg = XdirectConfig {
-        lut_step_mm: 0.01,
-        grid_steps: 4,
-    };
+    let cfg = XdirectConfig::new(0.01, 10_000.0);
 
     // Ground truth: thread next_update directly with the anchor the first refill
     // will bind (= START).
     let p = tone_params(START);
     let mut truth: Vec<(u32, i32)> = Vec::new();
-    let mut cursor = XdirectCursor::start(&p);
+    let mut cursor = XdirectCursor::start(&p, &cfg);
     while let Ok((u, next)) = next_update(&p, &cfg, cursor) {
         truth.push((u.cycle_abs, u.offset_steps));
         cursor = next;
