@@ -3820,6 +3820,18 @@ impl PyMotionEngine {
         }
     }
 
+    fn queued_motion_secs(&self, est_anchor: f64) -> f64 {
+        match self
+            .planner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            Some(p) => ((p.last_move_time() - est_anchor) + p.uncommitted_intake_secs()).max(0.0),
+            None => 0.0,
+        }
+    }
+
     fn pump_backlog(&self) -> u64 {
         self.pump_backlog.load(Ordering::Acquire)
     }

@@ -7,25 +7,19 @@ class FakeCommandError(Exception):
     pass
 
 
-class FakeConfigError(Exception):
-    pass
-
-
-class FakeConfig:
-    def error(self, msg):
-        return FakeConfigError(msg)
-
-
 class FakePrinter:
     command_error = FakeCommandError
 
 
 class FakeEngine:
-    def __init__(self, backlog=0):
-        self._backlog = backlog
+    def __init__(self, frontier=0.0):
+        self.frontier = frontier
 
-    def pump_backlog(self):
-        return self._backlog
+    def queued_motion_secs(self, est_anchor):
+        return max(self.frontier - est_anchor, 0.0)
+
+    def get_last_move_time(self):
+        return self.frontier
 
 
 class FakeReactor:
@@ -45,7 +39,6 @@ class FakeReactor:
 
 
 class FakeMcu:
-    # estimated_print_time advances with wall time at `rate` (rate=0 => stalled).
     def __init__(self, rate=1.0):
         self.rate = rate
 
@@ -55,87 +48,63 @@ class FakeMcu:
 
 class FakeMotion:
     _check_pause = motion.Motion._check_pause
+    _yield_to_reactor_if_due = motion.Motion._yield_to_reactor_if_due
 
     def __init__(
         self,
         frontier=0.0,
-        backlog=0,
         rate=1.0,
         mcu=True,
         drip=False,
         buffer_time_high=2.0,
         buffer_time_low=1.0,
-        pump_backlog_high=200,
-        pump_backlog_low=100,
     ):
         self.reactor = FakeReactor()
-        self.engine = FakeEngine(backlog)
+        self.engine = FakeEngine(frontier)
         self.printer = FakePrinter()
         self.mcu = FakeMcu(rate) if mcu else None
-        self._mcu_pending_end_time = frontier
         self._drip_active = drip
         self.buffer_time_high = buffer_time_high
         self.buffer_time_low = buffer_time_low
-        self.pump_backlog_high = pump_backlog_high
-        self.pump_backlog_low = pump_backlog_low
         self._last_reactor_yield = 0.0
 
 
 def test_no_pause_when_within_buffer():
-    m = FakeMotion(frontier=1.0, backlog=0)
+    m = FakeMotion(frontier=1.0)
     m._check_pause()
     assert m.reactor.pauses == 0
 
 
 def test_periodic_reactor_yield_even_when_within_buffer():
-    m = FakeMotion(frontier=1.0, backlog=0)
+    m = FakeMotion(frontier=1.0)
     m._last_reactor_yield = -1.0  # last yield long ago => due for a yield
     m._check_pause()
     assert m.reactor.pauses == 1
 
 
 def test_pauses_until_buffer_drains_to_low():
-    m = FakeMotion(frontier=5.0, backlog=0)
+    m = FakeMotion(frontier=5.0)
     m._check_pause()
     assert m.reactor.pauses > 0
-    # drained to <= buffer_time_low: est (== reactor.now at rate 1) >= 4.0
-    assert m._mcu_pending_end_time - m.reactor.now <= m.buffer_time_low
-
-
-def test_pauses_on_pump_backlog_even_when_buffer_ok():
-    m = FakeMotion(frontier=0.0, backlog=300, pump_backlog_high=200)
-    # backlog never drains in this fake -> must time out, proving it engaged
-    with pytest.raises(FakeCommandError):
-        m._check_pause()
-    assert m.reactor.pauses > 0
+    # drained to <= buffer_time_low: queued_motion_secs(est) <= low
+    est = m.mcu.estimated_print_time(m.reactor.now)
+    assert m.engine.queued_motion_secs(est) <= m.buffer_time_low
 
 
 def test_timeout_when_mcu_not_advancing():
-    m = FakeMotion(frontier=5.0, backlog=0, rate=0.0)
+    m = FakeMotion(frontier=5.0, rate=0.0)
     m.reactor.step = 10.0
     with pytest.raises(FakeCommandError):
         m._check_pause()
 
 
 def test_skips_during_drip():
-    m = FakeMotion(frontier=5.0, backlog=300, drip=True)
+    m = FakeMotion(frontier=5.0, drip=True)
     m._check_pause()
     assert m.reactor.pauses == 0
 
 
 def test_skips_when_no_mcu():
-    m = FakeMotion(frontier=5.0, backlog=300, mcu=False)
+    m = FakeMotion(frontier=5.0, mcu=False)
     m._check_pause()
     assert m.reactor.pauses == 0
-
-
-def test_inverted_watermarks_rejected():
-    cfg = FakeConfig()
-    with pytest.raises(FakeConfigError):
-        motion.Motion._validate_pump_watermarks(cfg, 100, 50)
-
-
-def test_valid_watermarks_accepted():
-    cfg = FakeConfig()
-    motion.Motion._validate_pump_watermarks(cfg, 100, 200)
-    motion.Motion._validate_pump_watermarks(cfg, 200, 200)

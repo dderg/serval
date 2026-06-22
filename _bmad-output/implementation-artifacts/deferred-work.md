@@ -67,3 +67,30 @@ Pre-existing / hardening items surfaced while adding the opt-in `[arc_fit]` gate
 
 - **Redundant re-lowering of the held-back look-ahead tail.** `StreamState::commit` re-fits, re-plans, and re-lowers the *entire* uncommitted buffer on every call, but the trailing `keep_secs` window is held back (not committed) and then re-lowered identically on the next commit. With per-move committing in `run_loop`, that tail is lowered once per incoming move. Cost is O(tail) per move — bounded and cheap for representative slicer density (the tail is a handful of moves), but genuinely wasteful and the dominant per-move cost for very dense streams. Principled fix: cache the lowered/planned tail and only re-lower the dirty suffix (the new move + the δ-reach of the previous tail end), or fit incrementally. Pin the cache-invalidation boundary to the fitter's δ-locality reach. (`rust/motion-engine/src/stream.rs`, `stream_planner.rs` move handler)
 - **Continuity commit across arc-run reconstructions is unverified by test.** The head-trim logic (`blend_consumed_head` + `trim_front_to_seam`) is derived to also cover arc runs (the run-end down-clothoid shares its source line with the run-end move body, so head-trim triggers and the run-end move is trimmed to the seam), but `arc_fit` is off by default and no test exercises a mid-run continuity commit. Add coverage when arc-fit is enabled in production, asserting position/extrusion continuity across a commit that lands at a reconstructed-arc exit.
+
+## 2026-06-22 — from take-3 review (spec-fit-front-edge-blend-budget)
+
+- **Run-head reserve not window-invariant (analogous to the biclothoid fix).**
+  `fit_chain_with_head_restore` restores the committed head length into the
+  leading *biclothoid* junction's budget (classify_junction), but the arc-*run*
+  head reserve / `head_consumption` (rust/geometry/src/fitter.rs:200-205,
+  rust/geometry/src/fitter/chain.rs ~164-224) is computed from the trimmed
+  leading move's `s_len()` with no restore. If a corner just after a committed
+  seam is reconstructed as a run head rather than a single biclothoid, the same
+  window-front curvature jitter can recur → potential `OverCommitted`. Not hit by
+  cold_run (its binding corner is a biclothoid; full suite + regression green),
+  so deferred. Follow-up: thread the same head-length restore into the run
+  reconstruction, and add a regression case where the leading corner is a run head.
+- **Defensive asserts (robustness, fail-loud).** The `committed_head_len`
+  carry-forward relies on the invariant "front move == the move trimmed by
+  committed_head_len" (holds today). Consider a `debug_assert` in
+  `StreamState::commit` / `classify_junction` that restore is only applied to the
+  trimmed leading Line, and clearing `committed_head_len` in the at-rest helpers
+  (advance_time/advance_idle/restart_idle_timeline) for defense in depth.
+
+## 2026-06-22 — from submission-aware backpressure review (spec-submission-aware-backpressure)
+
+- **`queued_motion_secs` reads two atomics without a consistent snapshot.** `bridge.rs` computes `(last_move_time() - est) + uncommitted_intake_secs()` as two separate Acquire loads of two independently-updated atomics (`last_move_time_bits` and the tally), both written by the planner thread but not under one lock. A read can straddle a commit and momentarily mix a new frontier with an old tally (double-count) or vice-versa (under-count). Bounded by one batch, self-correcting on the next ~10 ms `_check_pause` tick, so the gate impact is negligible — but a future maintainer relying on this signal for anything sharper should publish (frontier, tally) atomically together (e.g. a seqlock or a single packed value). (`rust/motion-engine/src/bridge.rs` `queued_motion_secs`)
+- **Stale `last_move_time` is exposed across `Reset`/`StreamOpen` by the new signal.** On reset/stream-open `t_committed` and the tally go to 0 but `last_move_time_bits` keeps the pre-reset frontier until the next dispatch re-anchors it. `queued_motion_secs` (and the `stats()` `buffer_time` it now feeds, plus `get_status`) can therefore read `(stale_frontier - est)` in that window. In practice est tracks the MCU which has played out to ~the old frontier by the time a new stream opens, so the difference is ~0 and any spurious pause self-heals on the first post-reset commit — but nothing enforces that ordering. Consider zeroing/re-anchoring `last_move_time_bits` on the reset paths (the tally already resets there). Interacts with the second-run-reanchor logic — verify against that spec before changing. (`rust/motion-engine/src/stream_planner.rs` reset paths)
+- **A single move whose nominal exceeds `DRAIN_TIMEOUT` (60 s) false-trips the gate.** One very long, very slow move can make `queued_motion_secs > buffer_time_high` and not drain within `DRAIN_TIMEOUT`, raising the "MCU not retiring moves" `command_error` even though nothing is stalled (the move is simply playing out). Exotic (a >60 s single move), so deferred; if it ever surfaces, exempt single-move backlogs or scale the deadline by the lead move's nominal. (`klippy/motion.py` `_check_pause`)
+- **`ChannelFull` host handling + the gate's blindness to in-channel depth.** The bounded planner channel (`INPUT_CHANNEL_CAP = 8192`) raises `ChannelFull` → `PyRuntimeError` → printer shutdown when full. The gate counts only moves the planner has *intaken* (the tally), not moves still queued in the channel, so a CPU-bound planner that falls behind a fast feeder can fill the channel while the gate stays open — tripping the fail-loud backstop on a throughput situation rather than a true MCU stall. This is consistent with the project's "fail loud if the host can't keep up" philosophy, but: (a) there is no host-side test that `submit_move` raising `ChannelFull` surfaces cleanly, and (b) if benches hit it on dense short-move bursts, revisit (raise CAP, or fold channel depth into the signal). (`rust/motion-engine/src/{bridge,stream_planner}.rs`, `klippy/motion.py`)

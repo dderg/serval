@@ -1,9 +1,10 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use trajectory::ShapedSegment;
 
 use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
@@ -29,6 +30,8 @@ const T_IDLE: Duration = Duration::from_secs(3600);
 // the memory backstop for the rare no-clean-seam case.
 const COALESCE_BATCH_MOVES: usize = 64;
 
+const INPUT_CHANNEL_CAP: usize = 8192;
+
 type DispatchFn = Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>;
 type NudgeDispatchFn =
     Arc<dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync>;
@@ -51,17 +54,24 @@ pub struct StreamPlannerHandle {
     join_handle: Option<JoinHandle<()>>,
     last_move_time_bits: Arc<AtomicU64>,
     commit_fire_count: Arc<AtomicU32>,
+    uncommitted_intake_secs: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
 pub enum StreamPlannerError {
     ChannelClosed,
+    ChannelFull,
 }
 
 impl std::fmt::Display for StreamPlannerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ChannelClosed => write!(f, "stream planner channel closed"),
+            Self::ChannelFull => write!(
+                f,
+                "stream planner input channel full ({INPUT_CHANNEL_CAP} \
+                 moves) — host backpressure gate bypassed"
+            ),
         }
     }
 }
@@ -75,12 +85,14 @@ impl StreamPlannerHandle {
         dispatch: DispatchFn,
         nudge_dispatch: NudgeDispatchFn,
     ) -> Self {
-        let (tx, rx) = unbounded();
+        let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let last_move_time_bits = Arc::new(AtomicU64::new(0));
         let commit_fire_count = Arc::new(AtomicU32::new(0));
+        let uncommitted_intake_secs = Arc::new(AtomicU64::new(0));
 
         let last_thread = Arc::clone(&last_move_time_bits);
         let commit_thread = Arc::clone(&commit_fire_count);
+        let intake_thread = Arc::clone(&uncommitted_intake_secs);
         let join = thread::Builder::new()
             .name("kalico-stream-planner".to_string())
             .spawn(move || {
@@ -92,6 +104,7 @@ impl StreamPlannerHandle {
                     state,
                     &last_thread,
                     &commit_thread,
+                    &intake_thread,
                 );
             })
             .expect("spawn stream planner thread");
@@ -101,13 +114,12 @@ impl StreamPlannerHandle {
             join_handle: Some(join),
             last_move_time_bits,
             commit_fire_count,
+            uncommitted_intake_secs,
         }
     }
 
     pub fn submit_move(&self, m: geometry::Move) -> Result<(), StreamPlannerError> {
-        self.sender
-            .send(StreamMsg::Move(m))
-            .map_err(|_| StreamPlannerError::ChannelClosed)
+        try_submit_move(&self.sender, m)
     }
 
     pub fn flush(&self) -> Result<(), StreamPlannerError> {
@@ -187,6 +199,11 @@ impl StreamPlannerHandle {
         self.commit_fire_count.load(Ordering::Acquire)
     }
 
+    #[must_use]
+    pub fn uncommitted_intake_secs(&self) -> f64 {
+        f64::from_bits(self.uncommitted_intake_secs.load(Ordering::Acquire))
+    }
+
     pub fn shutdown(&mut self) {
         let _ = self.sender.send(StreamMsg::Shutdown);
         if let Some(h) = self.join_handle.take() {
@@ -200,6 +217,75 @@ impl Drop for StreamPlannerHandle {
         if self.join_handle.is_some() {
             self.shutdown();
         }
+    }
+}
+
+fn try_submit_move(
+    sender: &Sender<StreamMsg>,
+    m: geometry::Move,
+) -> Result<(), StreamPlannerError> {
+    sender.try_send(StreamMsg::Move(m)).map_err(|e| match e {
+        TrySendError::Full(_) => StreamPlannerError::ChannelFull,
+        TrySendError::Disconnected(_) => StreamPlannerError::ChannelClosed,
+    })
+}
+
+fn nominal_t(m: &geometry::Move) -> Option<f64> {
+    if m.feedrate_mm_s > 0.0 {
+        Some(m.segment.s_len() / m.feedrate_mm_s)
+    } else {
+        None
+    }
+}
+
+struct IntakeTally<'a> {
+    per_move: VecDeque<f64>,
+    secs: f64,
+    atomic: &'a AtomicU64,
+}
+
+impl<'a> IntakeTally<'a> {
+    fn new(atomic: &'a AtomicU64) -> Self {
+        Self {
+            per_move: VecDeque::new(),
+            secs: 0.0,
+            atomic,
+        }
+    }
+
+    fn publish(&self) {
+        self.atomic.store(self.secs.to_bits(), Ordering::Release);
+    }
+
+    fn record_intake(&mut self, m: &geometry::Move) {
+        let Some(dt) = nominal_t(m) else {
+            fatal(&format!(
+                "intake tally: non-positive feedrate {} on line {}",
+                m.feedrate_mm_s, m.source.start_line
+            ));
+        };
+        self.per_move.push_back(dt);
+        self.secs += dt;
+        self.publish();
+    }
+
+    fn subtract_committed(&mut self, popped: usize) {
+        for _ in 0..popped {
+            match self.per_move.pop_front() {
+                Some(dt) => self.secs -= dt,
+                None => fatal("intake tally underflow: committed more moves than recorded"),
+            }
+        }
+        if self.per_move.is_empty() {
+            self.secs = 0.0;
+        }
+        self.publish();
+    }
+
+    fn reset(&mut self) {
+        self.per_move.clear();
+        self.secs = 0.0;
+        self.publish();
     }
 }
 
@@ -381,6 +467,7 @@ fn handle_move_arrival(
     state: &mut StreamState,
     m: geometry::Move,
     sync_instant: &mut Option<Instant>,
+    tally: &mut IntakeTally,
 ) {
     tracing::info!(
         subsystem = "motion",
@@ -403,6 +490,7 @@ fn handle_move_arrival(
         *sync_instant = None;
         state.restart_idle_timeline();
     }
+    tally.record_intake(&m);
     state.push(m);
 }
 
@@ -416,6 +504,7 @@ fn handle_control(
     sync_instant: &mut Option<Instant>,
     last_move_time_bits: &AtomicU64,
     commit_fire_count: &AtomicU32,
+    tally: &mut IntakeTally,
 ) -> bool {
     match msg {
         StreamMsg::Move(_) => unreachable!("moves handled by the coalescing path"),
@@ -430,6 +519,7 @@ fn handle_control(
                 last_move_time_bits,
                 commit_fire_count,
             );
+            tally.reset();
             let finish = sync_instant.map(|t| {
                 t + Duration::try_from_secs_f64((state.t_committed() + LEAD).max(0.0))
                     .unwrap_or(Duration::ZERO)
@@ -447,20 +537,24 @@ fn handle_control(
                 last_move_time_bits,
                 commit_fire_count,
             );
+            tally.reset();
             state.advance_time(duration_s);
             let _ = notify.send(());
         }
         StreamMsg::StreamOpen { home_pos } => {
             *sync_instant = None;
             state.reset(&home_pos, 0.0);
+            tally.reset();
         }
         StreamMsg::Reset { recovered_pos } => {
             *sync_instant = None;
             state.reset(&recovered_pos, 0.0);
+            tally.reset();
         }
         StreamMsg::HomeDrip(p) => {
             *sync_instant = None;
             state.reset(&p.home_pos, 0.0);
+            tally.reset();
             let result = run_home_drip(
                 state,
                 &p,
@@ -481,6 +575,7 @@ fn handle_control(
                 last_move_time_bits,
                 commit_fire_count,
             );
+            tally.reset();
             let _ = p.notify.send(result);
         }
         StreamMsg::Shutdown => {
@@ -494,6 +589,7 @@ fn handle_control(
                 last_move_time_bits,
                 commit_fire_count,
             );
+            tally.reset();
             return true;
         }
     }
@@ -507,8 +603,10 @@ fn run_loop(
     mut state: StreamState,
     last_move_time_bits: &AtomicU64,
     commit_fire_count: &AtomicU32,
+    uncommitted_intake_secs: &AtomicU64,
 ) {
     let mut sync_instant: Option<Instant> = None;
+    let mut tally = IntakeTally::new(uncommitted_intake_secs);
 
     loop {
         let next_timeout = if state.is_empty() {
@@ -540,6 +638,7 @@ fn run_loop(
                     last_move_time_bits,
                     commit_fire_count,
                 );
+                tally.reset();
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => return,
@@ -547,7 +646,7 @@ fn run_loop(
 
         match msg {
             StreamMsg::Move(m) => {
-                handle_move_arrival(&mut state, m, &mut sync_instant);
+                handle_move_arrival(&mut state, m, &mut sync_instant, &mut tally);
                 // Coalesce the burst up to COALESCE_BATCH_MOVES, then fit that
                 // batch ONCE. Committing per move re-fits the growing buffer each
                 // time (O(n²)); one fit per bounded batch is O(n) and keeps each
@@ -558,7 +657,7 @@ fn run_loop(
                 while state.buffered() < coalesce_cap {
                     match rx.try_recv() {
                         Ok(StreamMsg::Move(m2)) => {
-                            handle_move_arrival(&mut state, m2, &mut sync_instant);
+                            handle_move_arrival(&mut state, m2, &mut sync_instant, &mut tally);
                         }
                         Ok(other) => {
                             deferred = Some(other);
@@ -567,9 +666,11 @@ fn run_loop(
                         Err(_) => break,
                     }
                 }
+                let buffered_before = state.buffered();
                 let segs = state
                     .commit(false)
                     .unwrap_or_else(|e| fatal(&format!("commit: {e}")));
+                tally.subtract_committed(buffered_before - state.buffered());
                 dispatch_committed(
                     &segs,
                     &dispatch,
@@ -598,6 +699,7 @@ fn run_loop(
                         last_move_time_bits,
                         commit_fire_count,
                     );
+                    tally.reset();
                 }
                 if let Some(other) = deferred {
                     if handle_control(
@@ -608,6 +710,7 @@ fn run_loop(
                         &mut sync_instant,
                         last_move_time_bits,
                         commit_fire_count,
+                        &mut tally,
                     ) {
                         return;
                     }
@@ -622,6 +725,7 @@ fn run_loop(
                     &mut sync_instant,
                     last_move_time_bits,
                     commit_fire_count,
+                    &mut tally,
                 ) {
                     return;
                 }
