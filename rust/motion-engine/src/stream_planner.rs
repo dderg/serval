@@ -18,6 +18,16 @@ const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
 // premature drain-to-rest mid-stream.
 const SAFETY_MARGIN: f64 = 0.25;
 const T_IDLE: Duration = Duration::from_secs(3600);
+// Cap the moves coalesced into one commit. fit+plan+lower cost is ~linear in
+// segments, so a single commit's wall-clock latency scales with the batch size.
+// Draining all the way to `max_buffer_moves` builds 500+-move batches whose plan
+// alone runs multiple seconds — longer than the MCU's buffered lead — so the
+// ring drains to a fault (PieceStartInPast) while the planner is blocked in that
+// one commit. A bounded batch keeps each commit well under the lead, so dispatch
+// stays frequent, the pump backlog reflects reality, and the host's backlog
+// throttle engages instead of flooding the channel. `max_buffer_moves` remains
+// the memory backstop for the rare no-clean-seam case.
+const COALESCE_BATCH_MOVES: usize = 64;
 
 type DispatchFn = Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>;
 type NudgeDispatchFn =
@@ -517,13 +527,14 @@ fn run_loop(
         match msg {
             StreamMsg::Move(m) => {
                 handle_move_arrival(&mut state, m, &mut sync_instant);
-                // Coalesce the rest of the burst: drain every queued move into
-                // the buffer, then fit the whole batch ONCE. Committing per move
-                // re-fits the growing buffer each time (O(n²)) and lets the
-                // planner fall behind playback during ramp-up. One fit per batch
-                // is O(n) and dispatches a deep buffer in a single pass.
+                // Coalesce the burst up to COALESCE_BATCH_MOVES, then fit that
+                // batch ONCE. Committing per move re-fits the growing buffer each
+                // time (O(n²)); one fit per bounded batch is O(n) and keeps each
+                // commit's latency under the MCU's buffered lead so dispatch stays
+                // continuous instead of stalling in one multi-second mega-commit.
                 let mut deferred: Option<StreamMsg> = None;
-                while state.buffered() < state.max_buffer_moves() {
+                let coalesce_cap = COALESCE_BATCH_MOVES.min(state.max_buffer_moves());
+                while state.buffered() < coalesce_cap {
                     match rx.try_recv() {
                         Ok(StreamMsg::Move(m2)) => {
                             handle_move_arrival(&mut state, m2, &mut sync_instant);
