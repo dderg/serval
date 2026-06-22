@@ -289,7 +289,15 @@ pub fn junction_jumps(
     (tick_jump_us, host_jump_us)
 }
 
-pub const MAX_LEAD_SECS: f64 = 1.0;
+// How far ahead of the MCU playhead the pump pushes pieces — the depth of the
+// MCU-side buffer that absorbs host-side scheduling hiccups. A piece that lands
+// past the playhead faults (PieceStartInPast → stream halt), so this must exceed
+// the worst-case host stall between pump pushes. The per-axis ring (≈496 pieces)
+// is the hard cap; for dense piece streams the pump stalls on a full ring well
+// before this horizon, so raising it only deepens the buffer for sparse (long,
+// slow) moves where stalls are otherwise most likely to slip a piece into the
+// past.
+pub const MAX_LEAD_SECS: f64 = 2.0;
 
 #[derive(Clone, Copy)]
 struct JunctionEnd {
