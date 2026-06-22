@@ -68,6 +68,75 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
     line_move(start, end, 0.0, ctx(line_no)).unwrap()
 }
 
+fn line_e(line_no: u32, feed: f64, start: [f64; 3], end: [f64; 3], e: f64) -> geometry::Move {
+    let mut c = ctx(line_no);
+    c.feedrate_mm_s = feed;
+    line_move(start, end, e, c).unwrap()
+}
+
+// One Voron-cube perimeter loop (the print that aborted on the bench), as
+// (x, y, e_delta) with the closing point returning to the start neighbourhood.
+const VORON_PERIMETER: [(f64, f64, f64); 17] = [
+    (102.008, 96.308, 0.14859),
+    (103.2, 95.814, 0.04756),
+    (121.8, 95.814, 0.68571),
+    (122.992, 96.308, 0.04756),
+    (128.692, 102.008, 0.29718),
+    (129.186, 103.2, 0.04756),
+    (129.186, 121.8, 0.68571),
+    (128.692, 122.992, 0.04756),
+    (122.992, 128.692, 0.29718),
+    (121.8, 129.186, 0.04756),
+    (103.2, 129.186, 0.68571),
+    (102.008, 128.692, 0.04756),
+    (96.308, 122.992, 0.29718),
+    (95.814, 121.8, 0.04756),
+    (95.814, 103.2, 0.68571),
+    (96.308, 102.008, 0.04756),
+    (99.158, 99.158, 0.14711),
+];
+
+#[test]
+fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
+    // Drive the real planner thread with a continuous, back-to-back flood of the
+    // Voron perimeter (the geometry that aborted with "head-trim geometry:
+    // ZeroMotion"). The host normally throttles, but here we push as fast as the
+    // channel accepts to stress the coalescing/commit path. The planner aborts
+    // the process on any commit error, so reaching the flush and seeing a
+    // contiguous, complete trajectory is the pass condition.
+    let cap = Capture::default();
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(0.5),
+        vec![99.158, 99.158, 0.2, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+    );
+
+    let mut prev = [99.158, 99.158, 0.2];
+    let mut line_no = 1u32;
+    for _loop_idx in 0..12 {
+        for (x, y, e) in VORON_PERIMETER {
+            let end = [x, y, 0.2];
+            h.submit_move(line_e(line_no, 50.0, prev, end, e)).unwrap();
+            prev = end;
+            line_no += 1;
+        }
+    }
+    h.flush().unwrap();
+
+    let segs = cap.snapshot();
+    assert!(!segs.is_empty(), "flood dispatched nothing");
+    for w in segs.windows(2) {
+        assert!(
+            (w[1].0 - w[0].1).abs() < 1e-6,
+            "time gap between committed segments: {} -> {}",
+            w[0].1,
+            w[1].0
+        );
+    }
+    h.shutdown();
+}
+
 #[test]
 fn streams_collinear_moves_to_a_contiguous_trajectory() {
     let cap = Capture::default();

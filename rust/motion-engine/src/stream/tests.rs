@@ -31,6 +31,46 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> geometry::Move 
 }
 
 #[test]
+fn voron_cube_perimeter_streams_without_degenerate_trim() {
+    // Real first perimeter from a Voron cube print (Neptune bench) — the print
+    // that aborted with "head-trim geometry: ZeroMotion". 135° chamfer corners
+    // blend; short ~1.3mm chamfer segments sit between long ~18.6mm edges.
+    // Replays the moves through incremental commits like the planner loop and
+    // asserts no commit ever errors.
+    let start = [99.158, 99.158, 0.2];
+    let mut s = StreamState::new(cfg(0.5), &[start[0], start[1], start[2], 0.0], 0.0);
+    let pts: [(f64, f64, f64); 17] = [
+        (102.008, 96.308, 0.14859),
+        (103.2, 95.814, 0.04756),
+        (121.8, 95.814, 0.68571),
+        (122.992, 96.308, 0.04756),
+        (128.692, 102.008, 0.29718),
+        (129.186, 103.2, 0.04756),
+        (129.186, 121.8, 0.68571),
+        (128.692, 122.992, 0.04756),
+        (122.992, 128.692, 0.29718),
+        (121.8, 129.186, 0.04756),
+        (103.2, 129.186, 0.68571),
+        (102.008, 128.692, 0.04756),
+        (96.308, 122.992, 0.29718),
+        (95.814, 121.8, 0.04756),
+        (95.814, 103.2, 0.68571),
+        (96.308, 102.008, 0.04756),
+        (99.13, 99.186, 0.14711),
+    ];
+    let mut prev = start;
+    for (i, (x, y, e)) in pts.into_iter().enumerate() {
+        let end = [x, y, 0.2];
+        s.push(line(i as u32 + 1, prev, end, e));
+        prev = end;
+        s.commit(false)
+            .unwrap_or_else(|err| panic!("commit at move {i} errored: {err}"));
+    }
+    s.commit(true).expect("final flush must not error");
+    assert!(s.is_empty());
+}
+
+#[test]
 fn collinear_jogs_commit_at_the_seam_without_stopping() {
     let mut s = StreamState::new(cfg(0.0), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));

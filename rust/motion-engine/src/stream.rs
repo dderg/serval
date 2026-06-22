@@ -220,8 +220,10 @@ impl StreamState {
         let mut t = self.t_committed;
         let mut segs: Vec<ShapedSegment> = Vec::with_capacity(n);
         let mut start_times: Vec<f64> = Vec::with_capacity(n);
+        let mut seam_xyz: Vec<[f64; 3]> = Vec::with_capacity(n);
         for (gm, vm) in outcome.moves.iter().zip(&profile.moves) {
             start_times.push(t);
+            seam_xyz.push([pos[0], pos[1], pos[2]]);
             let seg = lower_move(gm, vm, t, &pos, self.config.fit_tol_mm)?;
             t = seg.t_end;
             advance_odometer(&mut pos, gm);
@@ -237,12 +239,13 @@ impl StreamState {
             let limit_t = self.t_committed + (total_t - self.config.keep_secs);
             let mut chosen = 0usize;
             for i in 1..n {
-                if is_clean_seam(&outcome.moves, i, &unblended) {
-                    if start_times[i] <= limit_t {
-                        chosen = i;
-                    } else {
-                        break;
-                    }
+                if start_times[i] > limit_t {
+                    break;
+                }
+                if is_clean_seam(&outcome.moves, i, &unblended)
+                    && self.head_trim_feasible(&outcome.moves, i, seam_xyz[i])
+                {
+                    chosen = i;
                 }
             }
             chosen
@@ -300,10 +303,69 @@ impl StreamState {
         Ok(committed)
     }
 
+    /// Whether committing through the blend at output index `i` would leave a
+    /// head-trimmable remainder. Committing through a blend consumes the kept
+    /// move's head, so that move must be a `Line` (line-line blend) with a
+    /// non-degenerate portion left past the seam. A boundary that fails this is
+    /// refused by selection so the planner never produces a zero-length or
+    /// non-line trim (which would otherwise abort the stream). The warn fires
+    /// only on the rare refusal and records the geometry that triggered it.
+    fn head_trim_feasible(&self, moves: &[Move], i: usize, seam_xyz: [f64; 3]) -> bool {
+        if !blend_consumed_head(moves, i) {
+            return true;
+        }
+        let keep_line = moves[i].source.start_line;
+        let Some(front) = self
+            .buffer
+            .iter()
+            .find(|m| m.source.start_line == keep_line)
+        else {
+            tracing::warn!(
+                subsystem = "motion",
+                event = "head_trim_refused",
+                keep_line,
+                reason = "no buffer move for kept line",
+                "[head-trim-refused]"
+            );
+            return false;
+        };
+        match &front.segment.spatial {
+            Some(Segment::Line(line)) => {
+                let remainder = dist3(seam_xyz, line.end);
+                if remainder <= TRIM_EPS_MM {
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "head_trim_refused",
+                        keep_line,
+                        remainder,
+                        reason = "degenerate remainder",
+                        "[head-trim-refused]"
+                    );
+                    false
+                } else {
+                    true
+                }
+            }
+            other => {
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "head_trim_refused",
+                    keep_line,
+                    spatial = ?other.as_ref().map(std::mem::discriminant),
+                    reason = "kept move is not a line",
+                    "[head-trim-refused]"
+                );
+                false
+            }
+        }
+    }
+
     /// Replace the front buffer move with the portion that survives the seam: a
     /// line from the committed position to the move's original end. The committed
     /// blend already paid out the head (spatial and, proportionally, followers),
-    /// so the per-mm follower ratios carry over unchanged.
+    /// so the per-mm follower ratios carry over unchanged. Selection has already
+    /// proven this is a `Line` with a non-degenerate remainder
+    /// ([`Self::head_trim_feasible`]).
     fn trim_front_to_seam(&mut self) -> Result<(), StreamError> {
         let front = self
             .buffer
@@ -346,6 +408,17 @@ fn blend_consumed_head(moves: &[Move], i: usize) -> bool {
     i > 0
         && matches!(moves[i - 1].segment.spatial, Some(Segment::Clothoid(_)))
         && moves[i - 1].source.start_line == moves[i].source.start_line
+}
+
+/// Minimum surviving spatial length of a head-trimmed move. Below this the
+/// remainder is degenerate and the commit boundary is refused.
+const TRIM_EPS_MM: f64 = 1e-6;
+
+fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 fn advance_odometer(pos: &mut [f64], gm: &Move) {
