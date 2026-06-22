@@ -188,6 +188,28 @@ class MotionEngineWrapper:
     def sdo_write(self, mcu_handle, index, subindex, size, value):
         return self._engine.sdo_write(mcu_handle, index, subindex, size, value)
 
+    def resonance_buzz(
+        self,
+        mcu_handle,
+        axis_mask,
+        sign_mask,
+        freq_start_millihz,
+        freq_end_millihz,
+        amplitude_nm,
+        duration_ms,
+        ramp_ms,
+    ):
+        return self._engine.resonance_buzz(
+            mcu_handle,
+            axis_mask,
+            sign_mask,
+            freq_start_millihz,
+            freq_end_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+        )
+
     def release_mcu(self, handle):
         return self._engine.release_mcu(handle)
 

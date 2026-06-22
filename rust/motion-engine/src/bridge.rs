@@ -1301,6 +1301,55 @@ impl PyMotionEngine {
         Ok((r.readback_size, u32::from_le_bytes(r.readback_data)))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn resonance_buzz(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        axis_mask: u8,
+        sign_mask: u8,
+        freq_start_millihz: u32,
+        freq_end_millihz: u32,
+        amplitude_nm: u32,
+        duration_ms: u32,
+        ramp_ms: u32,
+    ) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "resonance_buzz")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "servo_resonance_buzz",
+            mcu_handle,
+            axis_mask,
+            sign_mask,
+            freq_start_millihz,
+            freq_end_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+            "servo resonance buzz"
+        );
+        let result = py
+            .detach(|| {
+                crate::servo_torque::send_resonance_buzz(
+                    &conn,
+                    axis_mask,
+                    sign_mask,
+                    freq_start_millihz,
+                    freq_end_millihz,
+                    amplitude_nm,
+                    duration_ms,
+                    ramp_ms,
+                )
+            })
+            .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "resonance_buzz: endpoint rejected (result {result})"
+            )));
+        }
+        Ok(())
+    }
+
     fn release_mcu(&self, handle: u32) -> PyResult<()> {
         let Some(mut conn) = ({
             let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());

@@ -256,32 +256,72 @@ class Motion:
         duration_ms,
         ramp_ms,
     ):
+        from .extras.resonance_tester import buzz_axis_to_motor_mask
+
+        stepper_mask = axis_mask
         sent = False
-        for mcu_obj in self._engine_mcus():
-            try:
-                cmd = mcu_obj.lookup_command(
-                    "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
-                    " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
-                    " duration_ms=%u ramp_ms=%u"
+        if self.kin is not None:
+            for lane_idx, _axis_name, _motors in self.kin.lanes():
+                rail = self.kin.rails[lane_idx]
+                if not isinstance(rail, servo_axis.ServoRail):
+                    continue
+                rail_mask, _ = buzz_axis_to_motor_mask(rail.axis, False)
+                if not (axis_mask & rail_mask):
+                    continue
+                stepper_mask &= ~rail_mask
+                node = self.printer.lookup_object(
+                    "ethercat_node " + rail.get_node_name(), None
                 )
-            except Exception:
-                continue
-            cmd.send(
-                [
-                    axis_mask,
-                    sign_mask,
+                handle = node.get_engine_handle() if node is not None else None
+                if handle is None:
+                    raise self.printer.command_error(
+                        "RESONANCE_BUZZ: servo axis %s has no live EtherCAT "
+                        "engine handle" % rail.axis
+                    )
+                self.engine.resonance_buzz(
+                    handle,
+                    1,
+                    1 if (sign_mask & rail_mask) else 0,
                     freq_start_millihz,
                     freq_end_millihz,
                     amplitude_nm,
                     duration_ms,
                     ramp_ms,
-                ]
-            )
+                )
+                sent = True
+        if stepper_mask:
+            stepper_sent = False
+            for mcu_obj in self._engine_mcus():
+                try:
+                    cmd = mcu_obj.lookup_command(
+                        "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
+                        " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
+                        " duration_ms=%u ramp_ms=%u"
+                    )
+                except Exception:
+                    continue
+                cmd.send(
+                    [
+                        stepper_mask,
+                        sign_mask,
+                        freq_start_millihz,
+                        freq_end_millihz,
+                        amplitude_nm,
+                        duration_ms,
+                        ramp_ms,
+                    ]
+                )
+                stepper_sent = True
+            if not stepper_sent:
+                raise self.printer.command_error(
+                    "No engine MCU advertises kalico_resonance_buzz; rebuild and "
+                    "reflash MCU firmware with CONFIG_RUNTIME=y"
+                )
             sent = True
         if not sent:
             raise self.printer.command_error(
-                "No engine MCU advertises kalico_resonance_buzz; rebuild and "
-                "reflash MCU firmware with CONFIG_RUNTIME=y"
+                "RESONANCE_BUZZ: no target engine for axis_mask=0x%02x"
+                % axis_mask
             )
 
     def set_extruder(self, extruder, extrude_pos):

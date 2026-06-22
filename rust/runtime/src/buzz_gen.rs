@@ -114,6 +114,20 @@ fn amp_eff_rate(p: &ToneParams, t: f32) -> f32 {
 
 #[inline]
 #[must_use]
+fn amp_eff_accel(p: &ToneParams, t: f32) -> f32 {
+    if p.mu == 0.0 {
+        return 0.0;
+    }
+    let w = omega_inst(p, t);
+    if w.abs() <= f32::MIN_POSITIVE {
+        0.0
+    } else {
+        2.0 * p.amplitude_mm * p.omega * p.mu * p.mu / (w * w * w)
+    }
+}
+
+#[inline]
+#[must_use]
 fn position_rel(p: &ToneParams, t: f32) -> f32 {
     p.sign * envelope(t, p.total_seconds, p.ramp_seconds) * amp_eff(p, t) * libm::sinf(phase(p, t))
 }
@@ -139,6 +153,38 @@ fn velocity_rel(p: &ToneParams, t: f32) -> f32 {
     let s = libm::sinf(phi);
     let c = libm::cosf(phi);
     p.sign * (denv * a * s + env * da * s + env * a * omega_inst(p, t) * c)
+}
+
+#[inline]
+#[must_use]
+fn accel_rel(p: &ToneParams, t: f32) -> f32 {
+    let total = p.total_seconds;
+    let ramp = p.ramp_seconds.max(f32::MIN_POSITIVE);
+    let env = envelope(t, total, ramp);
+    let denv = if t <= 0.0 || t >= total {
+        0.0
+    } else if t < ramp {
+        1.0 / ramp
+    } else if t > total - ramp {
+        -1.0 / ramp
+    } else {
+        0.0
+    };
+    let a = amp_eff(p, t);
+    let da = amp_eff_rate(p, t);
+    let dda = amp_eff_accel(p, t);
+    let w = omega_inst(p, t);
+    let phi = phase(p, t);
+    let s = libm::sinf(phi);
+    let c = libm::cosf(phi);
+    let s_coeff = 2.0 * denv * da + env * dda - env * a * w * w;
+    let c_coeff = 2.0 * denv * a * w + 2.0 * env * da * w + env * a * p.mu;
+    p.sign * (s_coeff * s + c_coeff * c)
+}
+
+#[must_use]
+pub fn sample_rel(p: &ToneParams, t: f32) -> (f32, f32, f32) {
+    (position_rel(p, t), velocity_rel(p, t), accel_rel(p, t))
 }
 
 #[inline]
