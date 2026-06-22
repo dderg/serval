@@ -279,6 +279,18 @@ runtime_drain(void)
 }
 DECL_TASK(runtime_drain);
 
+#if !CONFIG_MACH_LINUX
+extern void runtime_buzz_refill_foreground(void);
+
+void
+runtime_buzz_refill(void)
+{
+    if (!runtime_handle) return;
+    runtime_buzz_refill_foreground();
+}
+DECL_TASK(runtime_buzz_refill);
+#endif
+
 void
 runtime_tick_shutdown(void)
 {

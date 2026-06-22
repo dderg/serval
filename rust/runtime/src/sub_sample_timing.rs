@@ -82,11 +82,11 @@ pub fn compute_step_times(inp: &StepTimeInputs) -> StepTimingResult {
         // `n_steps` ≤ MAX_STEPS_PER_SAMPLE = 16; cast cannot wrap.
         #[allow(clippy::cast_possible_wrap)]
         let step_idx = inp.prev_step_count + ((k as i32) + 1) * sign;
-        // i32 → f32: step_idx ranges over at most ±MAX_STEPS_PER_SAMPLE
-        // around `prev_step_count`; precision loss is far below the microstep grid.
         #[allow(clippy::cast_precision_loss)]
-        let step_pos_k = (step_idx as f32) * inp.microstep_distance;
-        let t_local_sec = (step_pos_k - inp.p_start) * inp.sample_period_sec / displacement;
+        let half_step_threshold_pos =
+            ((step_idx as f32) - 0.5 * (sign as f32)) * inp.microstep_distance;
+        let t_local_sec =
+            (half_step_threshold_pos - inp.p_start) * inp.sample_period_sec / displacement;
         // f32 → u32: t_local_sec ∈ [0, sample_period_sec], bounded well below u32::MAX.
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let cycle_abs = inp

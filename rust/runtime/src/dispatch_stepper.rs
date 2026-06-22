@@ -100,6 +100,20 @@ pub(crate) fn kick_per_axis_timer(axis_idx: usize, cycle_abs: u32) {
     }
 }
 
+#[inline]
+pub(crate) fn kick_per_axis_timer_foreground(axis_idx: usize, cycle_abs: u32) {
+    #[cfg(not(any(test, feature = "host")))]
+    unsafe {
+        let flags = crate::state::runtime_irq_save();
+        kalico_kick_step_output(axis_idx as u8, cycle_abs);
+        crate::state::runtime_irq_restore(flags);
+    }
+    #[cfg(any(test, feature = "host"))]
+    {
+        let _ = (axis_idx, cycle_abs);
+    }
+}
+
 pub const DISPLACEMENT_THRESHOLD_MM: f32 = 1e-4;
 
 pub use crate::stepping_state::N_AXES;
