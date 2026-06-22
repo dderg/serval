@@ -53,7 +53,10 @@ pub struct XdirectUpdate {
 
 /// Default target update rate (Hz) for a host-armed XDIRECT buzz; `grid_steps` is
 /// derived from it so the SPI/IRQ load stays bounded across any microstep size.
-pub const DEFAULT_XDIRECT_UPDATE_HZ: f32 = 6000.0;
+/// Set near the motion sample rate: that is the cadence normal phase-stepping
+/// motion already drives smoothly, and it stays just under the step-output timer's
+/// re-arm cap. Lower rates leave the fast (near-zero-crossing) sections too coarse.
+pub const DEFAULT_XDIRECT_UPDATE_HZ: f32 = 10000.0;
 
 /// Static config for the update stream, alongside the shared `ToneParams`.
 #[derive(Clone, Copy, Debug, PartialEq)]
