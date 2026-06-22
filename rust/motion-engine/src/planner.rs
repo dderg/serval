@@ -169,12 +169,6 @@ pub enum DispatchError {
          — set_nominal_clock_freq was not called"
     )]
     MissingNominalFreq(u32),
-    #[error(
-        "planner stream starvation: segment (stream t={seg_t_start:.3}s) scheduled \
-         {gap_s:.3}s in the past; refusing to silently re-anchor — planner failed \
-         to keep ahead of playback"
-    )]
-    SegmentLate { gap_s: f64, seg_t_start: f64 },
     #[error("nudge target mcu_id={mcu_id} axis={axis} not present in mcu_configs")]
     NudgeTargetMissing { mcu_id: u32, axis: u8 },
 }

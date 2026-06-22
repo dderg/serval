@@ -333,6 +333,125 @@ fn run_nudge(
     Ok(())
 }
 
+/// Re-anchor the stream timeline if the buffer drained and the machine caught
+/// up (an idle gap), then buffer the move. Re-anchoring only fires on the first
+/// move of a batch — once the buffer is non-empty, subsequent coalesced moves
+/// just push.
+fn handle_move_arrival(
+    state: &mut StreamState,
+    m: geometry::Move,
+    sync_instant: &mut Option<Instant>,
+) {
+    let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+    let reanchor = state.is_empty() && esc > state.t_committed() + 1e-6;
+    if reanchor {
+        tracing::info!(
+            subsystem = "motion",
+            event = "reanchor_decision",
+            esc,
+            t_committed = state.t_committed(),
+            "[reanchor-decision]"
+        );
+        *sync_instant = None;
+        state.restart_idle_timeline();
+    }
+    state.push(m);
+}
+
+/// Handle one non-move control message. Returns `true` when the loop should
+/// exit (shutdown).
+fn handle_control(
+    msg: StreamMsg,
+    state: &mut StreamState,
+    dispatch: &DispatchFn,
+    nudge_dispatch: &NudgeDispatchFn,
+    sync_instant: &mut Option<Instant>,
+    last_move_time_bits: &AtomicU64,
+    commit_fire_count: &AtomicU32,
+) -> bool {
+    match msg {
+        StreamMsg::Move(_) => unreachable!("moves handled by the coalescing path"),
+        StreamMsg::Flush { notify } => {
+            let segs = state
+                .commit(true)
+                .unwrap_or_else(|e| fatal(&format!("flush: {e}")));
+            dispatch_committed(
+                &segs,
+                dispatch,
+                sync_instant,
+                last_move_time_bits,
+                commit_fire_count,
+            );
+            let finish = sync_instant.map(|t| {
+                t + Duration::try_from_secs_f64((state.t_committed() + LEAD).max(0.0))
+                    .unwrap_or(Duration::ZERO)
+            });
+            let _ = notify.send(finish);
+        }
+        StreamMsg::Dwell { duration_s, notify } => {
+            let segs = state
+                .commit(true)
+                .unwrap_or_else(|e| fatal(&format!("dwell drain: {e}")));
+            dispatch_committed(
+                &segs,
+                dispatch,
+                sync_instant,
+                last_move_time_bits,
+                commit_fire_count,
+            );
+            state.advance_time(duration_s);
+            let _ = notify.send(());
+        }
+        StreamMsg::StreamOpen { home_pos } => {
+            *sync_instant = None;
+            state.reset(&home_pos, 0.0);
+        }
+        StreamMsg::Reset { recovered_pos } => {
+            *sync_instant = None;
+            state.reset(&recovered_pos, 0.0);
+        }
+        StreamMsg::HomeDrip(p) => {
+            *sync_instant = None;
+            state.reset(&p.home_pos, 0.0);
+            let result = run_home_drip(
+                state,
+                &p,
+                dispatch,
+                sync_instant,
+                last_move_time_bits,
+                commit_fire_count,
+            );
+            let _ = p.notify.send(result);
+        }
+        StreamMsg::Nudge(p) => {
+            let result = run_nudge(
+                state,
+                &p,
+                dispatch,
+                nudge_dispatch,
+                sync_instant,
+                last_move_time_bits,
+                commit_fire_count,
+            );
+            let _ = p.notify.send(result);
+        }
+        StreamMsg::Shutdown => {
+            let segs = state
+                .commit(true)
+                .unwrap_or_else(|e| fatal(&format!("shutdown drain: {e}")));
+            dispatch_committed(
+                &segs,
+                dispatch,
+                sync_instant,
+                last_move_time_bits,
+                commit_fire_count,
+            );
+            return true;
+        }
+    }
+    false
+}
+
 fn run_loop(
     rx: Receiver<StreamMsg>,
     dispatch: DispatchFn,
@@ -380,29 +499,25 @@ fn run_loop(
 
         match msg {
             StreamMsg::Move(m) => {
-                let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
-                let reanchor = state.is_empty() && esc > state.t_committed() + 1e-6;
-                tracing::info!(
-                    subsystem = "motion",
-                    event = "reanchor_decision",
-                    esc,
-                    sync_set = sync_instant.is_some(),
-                    is_empty = state.is_empty(),
-                    buffered = state.buffered(),
-                    t_committed = state.t_committed(),
-                    reanchor,
-                    "[reanchor-decision]"
-                );
-                if reanchor {
-                    sync_instant = None;
-                    state.restart_idle_timeline();
+                handle_move_arrival(&mut state, m, &mut sync_instant);
+                // Coalesce the rest of the burst: drain every queued move into
+                // the buffer, then fit the whole batch ONCE. Committing per move
+                // re-fits the growing buffer each time (O(n²)) and lets the
+                // planner fall behind playback during ramp-up. One fit per batch
+                // is O(n) and dispatches a deep buffer in a single pass.
+                let mut deferred: Option<StreamMsg> = None;
+                while state.buffered() < state.max_buffer_moves() {
+                    match rx.try_recv() {
+                        Ok(StreamMsg::Move(m2)) => {
+                            handle_move_arrival(&mut state, m2, &mut sync_instant);
+                        }
+                        Ok(other) => {
+                            deferred = Some(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
                 }
-                state.push(m);
-                // Commit on every move. The continuity commit drains at every
-                // zero-curvature seam (each blend exit), so the uncommitted
-                // window stays bounded near the `keep_secs` look-ahead tail and
-                // this re-fit is O(window), not O(whole stream). Motion flows
-                // continuously instead of in to-rest chunks.
                 let segs = state
                     .commit(false)
                     .unwrap_or_else(|e| fatal(&format!("commit: {e}")));
@@ -435,83 +550,32 @@ fn run_loop(
                         commit_fire_count,
                     );
                 }
+                if let Some(other) = deferred {
+                    if handle_control(
+                        other,
+                        &mut state,
+                        &dispatch,
+                        &nudge_dispatch,
+                        &mut sync_instant,
+                        last_move_time_bits,
+                        commit_fire_count,
+                    ) {
+                        return;
+                    }
+                }
             }
-            StreamMsg::Flush { notify } => {
-                let segs = state
-                    .commit(true)
-                    .unwrap_or_else(|e| fatal(&format!("flush: {e}")));
-                dispatch_committed(
-                    &segs,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
-                let finish = sync_instant.map(|t| {
-                    t + Duration::try_from_secs_f64((state.t_committed() + LEAD).max(0.0))
-                        .unwrap_or(Duration::ZERO)
-                });
-                let _ = notify.send(finish);
-            }
-            StreamMsg::Dwell { duration_s, notify } => {
-                let segs = state
-                    .commit(true)
-                    .unwrap_or_else(|e| fatal(&format!("dwell drain: {e}")));
-                dispatch_committed(
-                    &segs,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
-                state.advance_time(duration_s);
-                let _ = notify.send(());
-            }
-            StreamMsg::StreamOpen { home_pos } => {
-                sync_instant = None;
-                state.reset(&home_pos, 0.0);
-            }
-            StreamMsg::Reset { recovered_pos } => {
-                sync_instant = None;
-                state.reset(&recovered_pos, 0.0);
-            }
-            StreamMsg::HomeDrip(p) => {
-                sync_instant = None;
-                state.reset(&p.home_pos, 0.0);
-                let result = run_home_drip(
+            other => {
+                if handle_control(
+                    other,
                     &mut state,
-                    &p,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
-                let _ = p.notify.send(result);
-            }
-            StreamMsg::Nudge(p) => {
-                let result = run_nudge(
-                    &mut state,
-                    &p,
                     &dispatch,
                     &nudge_dispatch,
                     &mut sync_instant,
                     last_move_time_bits,
                     commit_fire_count,
-                );
-                let _ = p.notify.send(result);
-            }
-            StreamMsg::Shutdown => {
-                let segs = state
-                    .commit(true)
-                    .unwrap_or_else(|e| fatal(&format!("shutdown drain: {e}")));
-                dispatch_committed(
-                    &segs,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
-                return;
+                ) {
+                    return;
+                }
             }
         }
     }
