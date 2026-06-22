@@ -655,6 +655,13 @@ pub struct PyMotionEngine {
     pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
     pending_flushes: Mutex<HashMap<u64, FlushWait>>,
     next_flush_id: std::sync::atomic::AtomicU64,
+    // Monotonic id stamped on every streamed move as its `source.start_line`.
+    // The continuity-commit drains the look-ahead buffer by line number
+    // (`front.start_line < keep_line`) and detects consumed blend heads by line
+    // equality, so each move MUST carry a distinct increasing id. Passing a
+    // constant (0) makes the drain a no-op — the buffer never empties and every
+    // commit re-dispatches the whole accumulated path from the start.
+    move_seq: std::sync::atomic::AtomicU64,
     homing_result:
         Mutex<Option<crossbeam_channel::Receiver<Result<([f64; 3], [f64; 3], u64), String>>>>,
     latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
@@ -910,6 +917,7 @@ impl PyMotionEngine {
             pending_trip: Arc::new(Mutex::new(None)),
             pending_flushes: Mutex::new(HashMap::new()),
             next_flush_id: std::sync::atomic::AtomicU64::new(1),
+            move_seq: std::sync::atomic::AtomicU64::new(0),
             homing_result: Mutex::new(None),
             latched_drive_fault: Arc::new(Mutex::new(HashMap::new())),
             remote_triggers: Mutex::new(HashMap::new()),
@@ -3408,9 +3416,19 @@ impl PyMotionEngine {
             };
             let limits = geometry::VelocityLimits::try_new(max_v, max_a, scv)
                 .map_err(PyRuntimeError::new_err)?;
-            let m =
-                classify::build_move(pos, dx, dy, dz, extruder_axis, e_delta, limits, feedrate, 0)
-                    .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
+            let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
+            let m = classify::build_move(
+                pos,
+                dx,
+                dy,
+                dz,
+                extruder_axis,
+                e_delta,
+                limits,
+                feedrate,
+                line_no,
+            )
+            .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
 
             {
                 let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());

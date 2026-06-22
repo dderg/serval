@@ -114,18 +114,33 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
 
     let mut prev = [99.158, 99.158, 0.2];
     let mut line_no = 1u32;
+    let mut submitted = 0usize;
     for _loop_idx in 0..12 {
         for (x, y, e) in VORON_PERIMETER {
             let end = [x, y, 0.2];
             h.submit_move(line_e(line_no, 50.0, prev, end, e)).unwrap();
             prev = end;
             line_no += 1;
+            submitted += 1;
         }
     }
     h.flush().unwrap();
 
     let segs = cap.snapshot();
     assert!(!segs.is_empty(), "flood dispatched nothing");
+    // The look-ahead buffer must DRAIN: each move yields a bounded number of
+    // output segments (line body plus at most its two blend halves), so total
+    // dispatch is O(moves). A buffer that fails to drain re-dispatches the whole
+    // accumulated path every commit, exploding to O(moves * commits). This is the
+    // regression guard for the line-number drain key: a constant
+    // `source.start_line` makes `front.start_line < keep_line` a no-op, so the
+    // buffer never empties and a real print replays from the start, a bit further
+    // each pass.
+    assert!(
+        segs.len() <= submitted * 6,
+        "buffer did not drain: {} segments from {submitted} moves (re-dispatch explosion)",
+        segs.len()
+    );
     for w in segs.windows(2) {
         assert!(
             (w[1].0 - w[0].1).abs() < 1e-6,
