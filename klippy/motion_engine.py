@@ -355,6 +355,8 @@ class MotionEngineWrapper:
         window_capacity=32,
         beta_max_iters=10,
         arc_fit=None,
+        max_extrude_only_velocity=None,
+        max_extrude_only_accel=None,
     ):
         return self._engine.init_planner(
             axes,
@@ -366,6 +368,8 @@ class MotionEngineWrapper:
             window_capacity,
             beta_max_iters,
             arc_fit,
+            max_extrude_only_velocity,
+            max_extrude_only_accel,
         )
 
     def submit_move(self, dx, dy, dz, de, feedrate):
