@@ -3370,7 +3370,7 @@ impl PyMotionEngine {
         de: f64,
         feedrate: f64,
     ) -> PyResult<()> {
-        tracing::debug!(
+        tracing::info!(
             subsystem = "motion",
             event = "submit_move_enter",
             dx,

@@ -234,6 +234,7 @@ fn dispatch_committed(
         "[dispatch-committed]"
     );
     for s in segs {
+        let n_ax = s.axes.len();
         tracing::info!(
             subsystem = "motion",
             event = "pipe_dispatch",
@@ -241,6 +242,26 @@ fn dispatch_committed(
             t_us = crate::timing::mono_us(),
             seg_t_start = s.t_start,
             seg_t_end = s.t_end,
+            x_end = if n_ax > 0 {
+                nurbs::eval::eval(&s.axes[0], s.t_end)
+            } else {
+                0.0
+            },
+            y_end = if n_ax > 1 {
+                nurbs::eval::eval(&s.axes[1], s.t_end)
+            } else {
+                0.0
+            },
+            z_start = if n_ax > 2 {
+                nurbs::eval::eval(&s.axes[2], s.t_start)
+            } else {
+                0.0
+            },
+            z_end = if n_ax > 2 {
+                nurbs::eval::eval(&s.axes[2], s.t_end)
+            } else {
+                0.0
+            },
             "[pipe] dispatch"
         );
         if let Err(e) = dispatch(s) {
