@@ -566,8 +566,7 @@ class Motion:
         if self.mcu is None or self._drip_active:
             return
         now = self._yield_to_reactor_if_due(self.reactor.monotonic())
-        est = self.mcu.estimated_print_time(now)
-        buffer_time = self.engine.queued_motion_secs(est)
+        buffer_time = self.engine.queued_motion_secs()
         if buffer_time <= self.buffer_time_high:
             return
         wait_start = now
@@ -575,7 +574,7 @@ class Motion:
             "motion",
             "feed_throttle_enter",
             buffer_time=round(buffer_time, 4),
-            est=round(est, 4),
+            est=round(self.mcu.estimated_print_time(now), 4),
             engine_frontier=round(self.engine.get_last_move_time(), 4),
         )
         deadline = now + DRAIN_TIMEOUT
@@ -589,14 +588,15 @@ class Motion:
                 )
             self.reactor.pause(now + 0.010)
             self._last_reactor_yield = self.reactor.monotonic()
-            est = self.mcu.estimated_print_time(self._last_reactor_yield)
-            buffer_time = self.engine.queued_motion_secs(est)
+            buffer_time = self.engine.queued_motion_secs()
         structured_log.event(
             "motion",
             "feed_throttle_exit",
             waited_s=round(self.reactor.monotonic() - wait_start, 4),
             buffer_time=round(buffer_time, 4),
-            est=round(est, 4),
+            est=round(
+                self.mcu.estimated_print_time(self.reactor.monotonic()), 4
+            ),
             engine_frontier=round(self.engine.get_last_move_time(), 4),
         )
 
@@ -811,8 +811,7 @@ class Motion:
         buffer_time = 0.0
         pump_backlog = 0
         if self.mcu is not None:
-            est = self.mcu.estimated_print_time(eventtime)
-            buffer_time = self.engine.queued_motion_secs(est)
+            buffer_time = self.engine.queued_motion_secs()
             pump_backlog = self.engine.pump_backlog()
         return (
             False,

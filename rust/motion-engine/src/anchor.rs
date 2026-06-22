@@ -65,6 +65,10 @@ impl Anchor {
         self.last_t_end = seg_t_end;
         (self.t0.unwrap(), reanchor)
     }
+
+    pub fn t0(&self) -> Option<f64> {
+        self.t0
+    }
 }
 
 #[cfg(test)]

@@ -106,7 +106,7 @@ class _StubEngine:
     def pump_backlog(self):
         return 0
 
-    def queued_motion_secs(self, est_anchor):
+    def queued_motion_secs(self):
         return 0.0
 
     def __getattr__(self, name):
@@ -473,8 +473,8 @@ class MotionEngineWrapper:
     def get_last_move_time(self):
         return self._engine.get_last_move_time()
 
-    def queued_motion_secs(self, est_anchor):
-        return self._engine.queued_motion_secs(est_anchor) or 0.0
+    def queued_motion_secs(self):
+        return self._engine.queued_motion_secs() or 0.0
 
     def pump_backlog(self):
         return self._engine.pump_backlog() or 0

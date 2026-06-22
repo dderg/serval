@@ -634,6 +634,7 @@ pub struct PyMotionEngine {
     mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
     dispatched_segments: Arc<AtomicU64>,
     pump_backlog: Arc<AtomicU64>,
+    dispatch_anchor: Arc<Mutex<crate::anchor::Anchor>>,
     fallback_clock_conversions: Arc<AtomicU64>,
     clock_freqs: Arc<Mutex<HashMap<u32, f64>>>,
     nominal_clock_freqs: Arc<Mutex<HashMap<u32, u32>>>,
@@ -898,6 +899,7 @@ impl PyMotionEngine {
             mcu_axis_configs: Arc::new(Mutex::new(Vec::new())),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
             pump_backlog: Arc::new(AtomicU64::new(0)),
+            dispatch_anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),
             clock_freqs: Arc::new(Mutex::new(HashMap::new())),
             nominal_clock_freqs: Arc::new(Mutex::new(HashMap::new())),
@@ -3122,7 +3124,8 @@ impl PyMotionEngine {
         let mcu_configs_for_cb = mcu_configs;
         let router_for_cb = Arc::clone(&router_arc);
 
-        let anchor_mutex = Arc::new(std::sync::Mutex::new(crate::anchor::Anchor::new()));
+        let anchor_mutex = Arc::clone(&self.dispatch_anchor);
+        *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
         let pump_tx_for_cb = pump_tx_init.clone();
         let drain_disp = self.drain.clone();
         let counter_for_cb = Arc::clone(&counter);
@@ -3820,16 +3823,29 @@ impl PyMotionEngine {
         }
     }
 
-    fn queued_motion_secs(&self, est_anchor: f64) -> f64 {
-        match self
-            .planner
+    fn queued_motion_secs(&self) -> f64 {
+        let Some((last_move_time, uncommitted)) = ({
+            let planner = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            planner
+                .as_ref()
+                .map(|p| (p.last_move_time(), p.uncommitted_intake_secs()))
+        }) else {
+            return 0.0;
+        };
+        let anchored = self
+            .dispatch_anchor
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-        {
-            Some(p) => ((p.last_move_time() - est_anchor) + p.uncommitted_intake_secs()).max(0.0),
-            None => 0.0,
-        }
+            .t0();
+        let Some(t0) = anchored else {
+            return uncommitted.max(0.0);
+        };
+        let host_now = self
+            .router
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .host_now_secs();
+        ((t0 + last_move_time - host_now) + uncommitted).max(0.0)
     }
 
     fn pump_backlog(&self) -> u64 {
