@@ -5,7 +5,7 @@ import signal
 import struct
 from collections import defaultdict
 
-from . import motion_kinematics, stepper
+from . import motion_kinematics, stepper, structured_log
 from .arc_fit_config import arc_fit_from_config
 from .extras import servo_axis
 from .kinematics import extruder
@@ -591,6 +591,19 @@ class Motion:
             and backlog <= self.pump_backlog_high
         ):
             return
+        wait_start = now
+        structured_log.event(
+            "motion",
+            "feed_throttle_enter",
+            buffer_time=round(buffer_time, 4),
+            backlog=backlog,
+            est=round(est, 4),
+            pending_end=round(self._mcu_pending_end_time, 4),
+            engine_frontier=round(self.engine.get_last_move_time(), 4),
+            trigger="buffer"
+            if buffer_time > self.buffer_time_high
+            else "backlog",
+        )
         deadline = now + DRAIN_TIMEOUT
         while (
             buffer_time > self.buffer_time_low
@@ -608,6 +621,19 @@ class Motion:
             est = self.mcu.estimated_print_time(now)
             buffer_time = self._mcu_pending_end_time - est
             backlog = self.engine.pump_backlog()
+        structured_log.event(
+            "motion",
+            "feed_throttle_exit",
+            waited_s=round(self.reactor.monotonic() - wait_start, 4),
+            buffer_time=round(buffer_time, 4),
+            backlog=backlog,
+            est=round(est, 4),
+            pending_end=round(self._mcu_pending_end_time, 4),
+            engine_frontier=round(self.engine.get_last_move_time(), 4),
+            release="buffer"
+            if buffer_time <= self.buffer_time_low
+            else "backlog",
+        )
 
     def check_busy(self, eventtime):
         est_print_time = self.mcu.estimated_print_time(eventtime)
