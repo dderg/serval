@@ -5,7 +5,7 @@ use geometry::path::lowering::PositionProfile;
 use geometry::path::{Line, Segment};
 use geometry::{
     ChainFitConfig, FitError, GeometryError, Move, VelocityConfig, VelocityError, VelocityLimits,
-    fit_chain, plan_velocity_warm_start,
+    fit_chain_with_head_restore, plan_velocity_warm_start,
 };
 use trajectory::ShapedSegment;
 
@@ -97,6 +97,12 @@ pub struct StreamState {
     odometer: Vec<f64>,
     /// Absolute planner time of the committed seam.
     t_committed: f64,
+    /// Spatial length consumed from the current front move's head by the blend
+    /// committed at the last seam. Fed back into the next fit so the leading
+    /// corner re-fits to the curvature it had before the head was trimmed; 0.0
+    /// when the front move is untrimmed (fresh, force-drained, or commit at a
+    /// plain seam). See docs/rewrite/windowed-fit-ceiling-jitter.md.
+    committed_head_len: f64,
     config: StreamConfig,
 }
 
@@ -108,6 +114,7 @@ impl StreamState {
             entry_v: 0.0,
             odometer: home_pos.to_vec(),
             t_committed: t_start,
+            committed_head_len: 0.0,
             config,
         }
     }
@@ -117,6 +124,7 @@ impl StreamState {
         self.entry_v = 0.0;
         self.odometer = home_pos.to_vec();
         self.t_committed = t_start;
+        self.committed_head_len = 0.0;
     }
 
     pub fn push(&mut self, m: Move) {
@@ -218,7 +226,8 @@ impl StreamState {
         let line_hi = moves.last().map_or(0, |m| m.source.start_line);
 
         let fit_clock = Instant::now();
-        let outcome = fit_chain(&moves, self.config.chain)?;
+        let outcome =
+            fit_chain_with_head_restore(&moves, self.config.chain, self.committed_head_len)?;
         let fit_us = fit_clock.elapsed().as_micros();
         tracing::info!(
             subsystem = "motion",
@@ -332,6 +341,7 @@ impl StreamState {
 
         if commit_count == n {
             self.buffer.clear();
+            self.committed_head_len = 0.0;
         } else {
             let keep_line = outcome.moves[commit_count].source.start_line;
             let head_consumed = blend_consumed_head(&outcome.moves, commit_count);
@@ -342,9 +352,11 @@ impl StreamState {
             {
                 self.buffer.pop_front();
             }
-            if head_consumed {
-                self.trim_front_to_seam()?;
-            }
+            self.committed_head_len = if head_consumed {
+                self.trim_front_to_seam()?
+            } else {
+                0.0
+            };
         }
 
         Ok(committed)
@@ -413,7 +425,7 @@ impl StreamState {
     /// so the per-mm follower ratios carry over unchanged. Selection has already
     /// proven this is a `Line` with a non-degenerate remainder
     /// ([`Self::head_trim_feasible`]).
-    fn trim_front_to_seam(&mut self) -> Result<(), StreamError> {
+    fn trim_front_to_seam(&mut self) -> Result<f64, StreamError> {
         let front = self
             .buffer
             .front()
@@ -422,6 +434,7 @@ impl StreamState {
             return Err(StreamError::Geometry(GeometryError::ZeroMotion));
         };
         let new_start = [self.odometer[0], self.odometer[1], self.odometer[2]];
+        let head_consumed = dist3(line.start, new_start);
         let trimmed = Line::try_new(new_start, line.end)?;
         let segment = geometry::path::PathSegment::try_new(
             Segment::Line(trimmed),
@@ -434,7 +447,7 @@ impl StreamState {
             source: front.source,
         };
         *self.buffer.front_mut().expect("front checked above") = replacement;
-        Ok(())
+        Ok(head_consumed)
     }
 }
 

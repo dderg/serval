@@ -118,7 +118,7 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
 
     let mut plans = Vec::with_capacity(moves.len() - 1);
     for pair in moves.windows(2) {
-        plans.push(classify_junction(&pair[0], &pair[1], config)?);
+        plans.push(classify_junction(&pair[0], &pair[1], config, 0.0)?);
     }
 
     let mut out = Vec::new();
@@ -182,6 +182,22 @@ fn junction_internal(runs: &[chain::ChainRun], k: usize) -> bool {
 }
 
 pub fn fit_chain(moves: &[Move], config: ChainFitConfig) -> Result<FitOutcome, FitError> {
+    fit_chain_with_head_restore(moves, config, 0.0)
+}
+
+/// Streaming variant of [`fit_chain`]. `head_len_restore` is the spatial length
+/// already consumed from the head move's front by the blend committed at the
+/// previous seam. It is added back into the leading junction's blend budget so a
+/// corner re-fits to the same curvature it had before that commit trimmed the
+/// head — otherwise the shorter head move yields a smaller budget, a sharper
+/// apex, and a corner cap below the already-committed entry velocity (an abort).
+/// A fresh fit passes `0.0` and is byte-identical to [`fit_chain`]. See
+/// docs/rewrite/windowed-fit-ceiling-jitter.md.
+pub fn fit_chain_with_head_restore(
+    moves: &[Move],
+    config: ChainFitConfig,
+    head_len_restore: f64,
+) -> Result<FitOutcome, FitError> {
     if moves.len() <= 1 {
         return Ok(FitOutcome {
             moves: moves.to_vec(),
@@ -190,8 +206,14 @@ pub fn fit_chain(moves: &[Move], config: ChainFitConfig) -> Result<FitOutcome, F
     }
 
     let mut plans = Vec::with_capacity(moves.len() - 1);
-    for pair in moves.windows(2) {
-        plans.push(classify_junction(&pair[0], &pair[1], config.corner)?);
+    for (i, pair) in moves.windows(2).enumerate() {
+        let restore = if i == 0 { head_len_restore } else { 0.0 };
+        plans.push(classify_junction(
+            &pair[0],
+            &pair[1],
+            config.corner,
+            restore,
+        )?);
     }
 
     let runs: Vec<chain::ChainRun> = chain::detect_runs(moves, config)?
@@ -295,6 +317,7 @@ fn classify_junction(
     m_in: &Move,
     m_out: &Move,
     config: CornerFitConfig,
+    head_len_restore: f64,
 ) -> Result<JunctionPlan, FitError> {
     let (line_in, line_out) = match (line_of(m_in), line_of(m_out)) {
         (Some(a), Some(b)) => (a, b),
@@ -329,7 +352,7 @@ fn classify_junction(
     };
 
     let vertex = line_in.point_at(line_in.s_len());
-    let budget = 0.5 * line_in.s_len().min(line_out.s_len());
+    let budget = 0.5 * (line_in.s_len() + head_len_restore).min(line_out.s_len());
     let line_no = m_out.source.start_line;
 
     match biclothoid::solve(vertex, t_in, v, theta, delta, budget)

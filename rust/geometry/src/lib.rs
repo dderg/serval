@@ -18,7 +18,7 @@ pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, S
 pub use execution::lower_profile;
 pub use fitter::{
     ArcFitConfig, ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, UnblendReason,
-    UnblendedJunction, fit_chain, fit_corners,
+    UnblendedJunction, fit_chain, fit_chain_with_head_restore, fit_corners,
 };
 pub use frontend::{FrontendError, Move, MoveContext, VelocityLimits, arc_move, line_move};
 pub use params::FitterParams;

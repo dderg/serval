@@ -48,7 +48,7 @@ fn cfg_bench(keep_secs: f64) -> StreamConfig {
 fn line_bench(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
     let ctx = MoveContext {
         extruder_axis: 3,
-        feedrate_mm_s: 100.0,
+        feedrate_mm_s: 60.0,
         limits: VelocityLimits::try_new(100.0, 1000.0, 5.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
@@ -98,9 +98,6 @@ fn voron_cube_perimeter_streams_without_degenerate_trim() {
     assert!(s.is_empty());
 }
 
-// TODO: un-ignore once the streaming-commit-granularity fix lands. Currently
-// reproduces the bug: `commit at move 87 errored: OverCommitted { line_no: 53 }`.
-#[ignore = "reproduces the streamed-commit OverCommit; un-ignore with the fix"]
 #[test]
 fn cold_run_infill_streams_without_overcommit() {
     // Real infill prefix from cold_run.gcode (Neptune bench) — the path that
@@ -108,9 +105,9 @@ fn cold_run_infill_streams_without_overcommit() {
     // is purely about commit granularity: committing one move per commit (as the
     // run_loop does under a fast SD-stream burst) pins an over-optimistic seam
     // velocity that the re-fit of the following moves cannot honor. Committing
-    // the identical path in one batch plans cleanly (see the offline replay at
-    // --cap 64+), so this asserts the streamed result matches the batched one:
-    // no commit may error. Bench limits: 100 mm/s, 1000 mm/s^2, jerk 1e6.
+    // the identical path in one batch plans cleanly, so this asserts the
+    // streamed result matches the batched one: no commit may error. Bench
+    // limits: max 100 mm/s, 1000 mm/s^2, jerk 1e6; infill feed 60 mm/s.
     let start = [99.158, 99.158, 0.0];
     let mut s = StreamState::new(cfg_bench(0.5), &[start[0], start[1], start[2], 0.0], 0.0);
     let pts: [(f64, f64); 91] = [
