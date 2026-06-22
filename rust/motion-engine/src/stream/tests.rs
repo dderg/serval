@@ -30,6 +30,34 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> geometry::Move 
     line_move(start, end, e, ctx(line_no, 80.0)).unwrap()
 }
 
+fn cfg_bench(keep_secs: f64) -> StreamConfig {
+    StreamConfig {
+        chain: ChainFitConfig::default(),
+        velocity: VelocityConfig {
+            max_jerk_mm_s3: 1_000_000.0,
+            integration_tol: 1e-4,
+            ..VelocityConfig::default()
+        },
+        fit_tol_mm: 0.005,
+        keep_secs,
+        max_buffer_moves: 512,
+        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0).unwrap(),
+    }
+}
+
+fn line_bench(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
+    let ctx = MoveContext {
+        extruder_axis: 3,
+        feedrate_mm_s: 100.0,
+        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0).unwrap(),
+        source: SourceRange {
+            start_line: line_no,
+            end_line: line_no,
+        },
+    };
+    line_move(start, end, 0.0, ctx).unwrap()
+}
+
 #[test]
 fn voron_cube_perimeter_streams_without_degenerate_trim() {
     // Real first perimeter from a Voron cube print (Neptune bench) — the print
@@ -62,6 +90,126 @@ fn voron_cube_perimeter_streams_without_degenerate_trim() {
     for (i, (x, y, e)) in pts.into_iter().enumerate() {
         let end = [x, y, 0.2];
         s.push(line(i as u32 + 1, prev, end, e));
+        prev = end;
+        s.commit(false)
+            .unwrap_or_else(|err| panic!("commit at move {i} errored: {err}"));
+    }
+    s.commit(true).expect("final flush must not error");
+    assert!(s.is_empty());
+}
+
+// TODO: un-ignore once the streaming-commit-granularity fix lands. Currently
+// reproduces the bug: `commit at move 87 errored: OverCommitted { line_no: 53 }`.
+#[ignore = "reproduces the streamed-commit OverCommit; un-ignore with the fix"]
+#[test]
+fn cold_run_infill_streams_without_overcommit() {
+    // Real infill prefix from cold_run.gcode (Neptune bench) — the path that
+    // aborted klippy mid-print with `velocity plan: OverCommitted`. The hazard
+    // is purely about commit granularity: committing one move per commit (as the
+    // run_loop does under a fast SD-stream burst) pins an over-optimistic seam
+    // velocity that the re-fit of the following moves cannot honor. Committing
+    // the identical path in one batch plans cleanly (see the offline replay at
+    // --cap 64+), so this asserts the streamed result matches the batched one:
+    // no commit may error. Bench limits: 100 mm/s, 1000 mm/s^2, jerk 1e6.
+    let start = [99.158, 99.158, 0.0];
+    let mut s = StreamState::new(cfg_bench(0.5), &[start[0], start[1], start[2], 0.0], 0.0);
+    let pts: [(f64, f64); 91] = [
+        (99.158, 99.158),
+        (102.008, 96.308),
+        (103.2, 95.814),
+        (121.8, 95.814),
+        (122.992, 96.308),
+        (128.692, 102.008),
+        (129.186, 103.2),
+        (129.186, 121.8),
+        (128.692, 122.992),
+        (122.992, 128.692),
+        (121.8, 129.186),
+        (103.2, 129.186),
+        (102.008, 128.692),
+        (96.308, 122.992),
+        (95.814, 121.8),
+        (95.814, 103.2),
+        (96.308, 102.008),
+        (99.13, 99.186),
+        (99.453, 99.51),
+        (102.331, 96.631),
+        (103.2, 96.271),
+        (121.8, 96.271),
+        (122.669, 96.631),
+        (128.369, 102.331),
+        (128.729, 103.2),
+        (128.729, 121.8),
+        (128.369, 122.669),
+        (122.669, 128.369),
+        (121.8, 128.729),
+        (103.2, 128.729),
+        (102.331, 128.369),
+        (96.631, 122.669),
+        (96.271, 121.8),
+        (96.271, 103.2),
+        (96.631, 102.331),
+        (99.425, 99.538),
+        (121.445, 127.05),
+        (103.555, 127.05),
+        (97.95, 121.445),
+        (97.95, 103.555),
+        (103.555, 97.95),
+        (121.445, 97.95),
+        (127.05, 103.555),
+        (127.05, 121.445),
+        (121.474, 127.022),
+        (108.669, 105.367),
+        (108.715, 105.339),
+        (109.475, 104.986),
+        (110.267, 104.714),
+        (111.083, 104.525),
+        (111.913, 104.422),
+        (112.751, 104.404),
+        (113.598, 104.474),
+        (114.808, 104.736),
+        (115.602, 105.018),
+        (116.357, 105.378),
+        (117.072, 105.814),
+        (117.748, 106.33),
+        (118.626, 107.202),
+        (119.143, 107.866),
+        (119.586, 108.577),
+        (119.953, 109.33),
+        (120.24, 110.116),
+        (120.445, 110.928),
+        (120.565, 111.756),
+        (120.599, 112.593),
+        (120.567, 113.226),
+        (120.449, 114.051),
+        (120.247, 114.864),
+        (119.961, 115.651),
+        (119.596, 116.404),
+        (119.148, 117.127),
+        (118.365, 118.085),
+        (117.754, 118.664),
+        (117.089, 119.174),
+        (116.376, 119.612),
+        (115.621, 119.974),
+        (114.833, 120.256),
+        (114.019, 120.456),
+        (113.19, 120.57),
+        (112.353, 120.598),
+        (111.518, 120.54),
+        (110.68, 120.393),
+        (109.499, 120.023),
+        (108.734, 119.671),
+        (108.014, 119.244),
+        (107.342, 118.745),
+        (106.725, 118.179),
+        (106.169, 117.553),
+        (105.85, 117.108),
+        (105.267, 116.145),
+    ];
+    let mut prev = start;
+    for (i, (x, y)) in pts.into_iter().enumerate() {
+        let end = [x, y, 0.2];
+        s.push(line_bench(i as u32 + 1, prev, end));
         prev = end;
         s.commit(false)
             .unwrap_or_else(|err| panic!("commit at move {i} errored: {err}"));
