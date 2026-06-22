@@ -43,6 +43,7 @@ fn seg_x_move() -> ShapedSegment {
         t_start: 0.0,
         t_end: 1.0,
         motor_mask: 0,
+        source_line: 0,
     }
 }
 
@@ -114,6 +115,7 @@ fn corexy_x_slot_is_x_plus_y() {
         t_start: 0.0,
         t_end: 1.0,
         motor_mask: 0,
+        source_line: 0,
     };
 
     let msgs = enqueue_segment(
@@ -213,6 +215,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         t_start: 0.0,
         t_end: 0.2,
         motor_mask: 0,
+        source_line: 0,
     };
 
     let msgs = enqueue_segment(
@@ -281,6 +284,7 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
         t_start: 0.0,
         t_end: total,
         motor_mask: 0,
+        source_line: 0,
     };
 
     let msgs = enqueue_segment(
@@ -340,6 +344,7 @@ fn motion_constant_motion_merges_only_the_constant_run() {
         t_start: 0.0,
         t_end: 5.0 * dur,
         motor_mask: 0,
+        source_line: 0,
     };
 
     let msgs = enqueue_segment(
@@ -409,6 +414,7 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
         t_start: 0.0,
         t_end: 4.0 * dur,
         motor_mask: 0,
+        source_line: 0,
     };
 
     let msgs = enqueue_segment(
@@ -484,6 +490,7 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
         t_start: 0.0,
         t_end: total,
         motor_mask: 0,
+        source_line: 0,
     };
 
     let max_piece = 0.025_f64;
@@ -559,6 +566,7 @@ fn nonzero_curve_base_preserves_host_times() {
         t_start: U_BASE,
         t_end: U_BASE + total,
         motor_mask: 0,
+        source_line: 0,
     };
 
     let t0 = 100.0;
@@ -685,6 +693,7 @@ fn test_shaped_segment_single_axis(axis: usize, motor_mask: u8) -> ShapedSegment
         t_start: 0.0,
         t_end: 1.0,
         motor_mask,
+        source_line: 0,
     }
 }
 
@@ -721,6 +730,7 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
         t_start: 0.0,
         t_end: 0.5,
         motor_mask,
+        source_line: 0,
     };
 
     let cfg = axis_cfg_single(0);
@@ -809,6 +819,7 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
         t_start: 0.0,
         t_end: 0.4,
         motor_mask: 0b0000_0001,
+        source_line: 0,
     };
 
     let cfg = axis_cfg_single(0);

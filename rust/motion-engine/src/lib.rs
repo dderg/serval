@@ -41,6 +41,7 @@ pub mod servo_sdo;
 pub mod servo_torque;
 pub mod stream;
 pub mod stream_planner;
+pub mod timing;
 mod types;
 pub mod viz;
 

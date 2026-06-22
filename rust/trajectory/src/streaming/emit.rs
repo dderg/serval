@@ -445,5 +445,6 @@ fn restrict_segment_lo_hi(
         t_start: t_lo,
         t_end: t_hi,
         motor_mask: seg.motor_mask,
+        source_line: seg.source_line,
     })
 }

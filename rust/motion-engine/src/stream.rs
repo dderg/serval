@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::time::Instant;
 
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Line, Segment};
@@ -212,8 +213,39 @@ impl StreamState {
         }
 
         let moves: Vec<Move> = self.buffer.iter().cloned().collect();
+        let batch = crate::timing::next_batch_seq();
+        let line_lo = moves.first().map_or(0, |m| m.source.start_line);
+        let line_hi = moves.last().map_or(0, |m| m.source.start_line);
+
+        let fit_clock = Instant::now();
         let outcome = fit_chain(&moves, self.config.chain)?;
+        let fit_us = fit_clock.elapsed().as_micros();
+        tracing::info!(
+            subsystem = "motion",
+            event = "pipe_fit",
+            batch,
+            line_lo,
+            line_hi,
+            n_in = moves.len(),
+            n_out = outcome.moves.len(),
+            fit_us,
+            t_us = crate::timing::mono_us(),
+            "[pipe] fit"
+        );
+
+        let plan_clock = Instant::now();
         let profile = plan_velocity_warm_start(&outcome, self.config.velocity, self.entry_v)?;
+        let plan_us = plan_clock.elapsed().as_micros();
+        tracing::info!(
+            subsystem = "motion",
+            event = "pipe_plan",
+            batch,
+            line_lo,
+            line_hi,
+            plan_us,
+            t_us = crate::timing::mono_us(),
+            "[pipe] plan"
+        );
 
         let n = outcome.moves.len();
         let mut pos = self.odometer.clone();
@@ -221,14 +253,28 @@ impl StreamState {
         let mut segs: Vec<ShapedSegment> = Vec::with_capacity(n);
         let mut start_times: Vec<f64> = Vec::with_capacity(n);
         let mut seam_xyz: Vec<[f64; 3]> = Vec::with_capacity(n);
+        let lower_clock = Instant::now();
         for (gm, vm) in outcome.moves.iter().zip(&profile.moves) {
             start_times.push(t);
             seam_xyz.push([pos[0], pos[1], pos[2]]);
-            let seg = lower_move(gm, vm, t, &pos, self.config.fit_tol_mm)?;
+            let mut seg = lower_move(gm, vm, t, &pos, self.config.fit_tol_mm)?;
+            seg.source_line = gm.source.start_line;
             t = seg.t_end;
             advance_odometer(&mut pos, gm);
             segs.push(seg);
         }
+        let lower_us = lower_clock.elapsed().as_micros();
+        tracing::info!(
+            subsystem = "motion",
+            event = "pipe_lower",
+            batch,
+            line_lo,
+            line_hi,
+            n,
+            lower_us,
+            t_us = crate::timing::mono_us(),
+            "[pipe] lower"
+        );
         let total_t = t - self.t_committed;
 
         let commit_count = if force {
@@ -254,6 +300,7 @@ impl StreamState {
         tracing::info!(
             subsystem = "motion",
             event = "commit_decision",
+            batch,
             force,
             n,
             unblended = outcome.report.unblended.len(),

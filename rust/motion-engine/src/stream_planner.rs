@@ -224,6 +224,15 @@ fn dispatch_committed(
         "[dispatch-committed]"
     );
     for s in segs {
+        tracing::info!(
+            subsystem = "motion",
+            event = "pipe_dispatch",
+            line = s.source_line,
+            t_us = crate::timing::mono_us(),
+            seg_t_start = s.t_start,
+            seg_t_end = s.t_end,
+            "[pipe] dispatch"
+        );
         if let Err(e) = dispatch(s) {
             fatal(&format!("dispatch failed: {e}"));
         }
@@ -342,6 +351,14 @@ fn handle_move_arrival(
     m: geometry::Move,
     sync_instant: &mut Option<Instant>,
 ) {
+    tracing::info!(
+        subsystem = "motion",
+        event = "pipe_ingress",
+        line = m.source.start_line,
+        t_us = crate::timing::mono_us(),
+        buffered = state.buffered(),
+        "[pipe] ingress"
+    );
     let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
     let reanchor = state.is_empty() && esc > state.t_committed() + 1e-6;
     if reanchor {

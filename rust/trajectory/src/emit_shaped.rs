@@ -192,6 +192,7 @@ pub fn emit_shaped_with_left_bc(
             t_start: fitted.t_start,
             t_end: fitted.t_end,
             motor_mask: 0,
+            source_line: 0,
         })
         .collect();
 

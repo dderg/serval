@@ -3207,6 +3207,14 @@ impl PyMotionEngine {
                         .map_err(|_| DispatchError::PumpGone)?;
                 }
 
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "pipe_pump_in",
+                    line = seg.source_line,
+                    t_us = crate::timing::mono_us(),
+                    "[pipe] handed to pump"
+                );
+
                 counter_for_cb.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             },
