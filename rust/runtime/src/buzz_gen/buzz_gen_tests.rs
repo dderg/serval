@@ -149,6 +149,44 @@ fn analytic_sequence(p: &ToneParams) -> Vec<ToneCrossing> {
 }
 
 #[test]
+fn accel_matches_negative_omega_squared_position_for_pure_tone() {
+    let freq = 40.0;
+    let p = make_params(freq, NM_PER_MM, 1.0, 0.0, 64_000_000.0);
+    let omega = f64::from(p.omega);
+    for &t in &[0.03_f32, 0.05, 0.07] {
+        let (pos, _vel, acc) = sample_rel(&p, t);
+        let expected = -(omega * omega) * f64::from(pos);
+        let tol = (omega * omega) * f64::from(p.amplitude_mm) * 1.0e-3;
+        assert!(
+            (f64::from(acc) - expected).abs() <= tol,
+            "t={t} acc={acc} expected={expected}"
+        );
+    }
+}
+
+#[test]
+fn accel_and_velocity_match_finite_difference_for_chirp() {
+    let p = make_chirp(5.0, 300.0, NM_PER_MM, 1.0, 0.5, 0.05);
+    let h = 5.0e-5_f32;
+    for &t in &[0.15_f32, 0.25, 0.35] {
+        let (pos_lo, vel_lo, _) = sample_rel(&p, t - h);
+        let (pos_hi, vel_hi, _) = sample_rel(&p, t + h);
+        let (_pos, vel, acc) = sample_rel(&p, t);
+        let fd_vel = f64::from(pos_hi - pos_lo) / f64::from(2.0 * h);
+        let fd_acc = f64::from(vel_hi - vel_lo) / f64::from(2.0 * h);
+        let rel = |got: f64, want: f64| (got - want).abs() / want.abs().max(1.0e-9);
+        assert!(
+            rel(f64::from(vel), fd_vel) < 0.01,
+            "vel t={t} {vel} vs {fd_vel}"
+        );
+        assert!(
+            rel(f64::from(acc), fd_acc) < 0.01,
+            "acc t={t} {acc} vs {fd_acc}"
+        );
+    }
+}
+
+#[test]
 fn matches_brute_force_across_sweep() {
     let grid_hz = 2.0e6;
     let grid_dt = 1.0 / grid_hz;

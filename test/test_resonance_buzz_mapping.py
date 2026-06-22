@@ -1,6 +1,6 @@
 import pytest
 
-from klippy.extras.resonance_tester import buzz_axis_to_motor_mask
+from klippy.extras.resonance_buzz import buzz_axis_to_motor_mask
 
 
 def test_corexy_x_drives_both_motors_in_phase():
