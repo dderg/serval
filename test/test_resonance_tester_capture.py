@@ -219,6 +219,25 @@ def test_run_test_skips_chip_that_does_not_match_axis():
     assert x_chip.clients == []
 
 
+def test_run_test_writes_raw_data_when_named():
+    tester, printer, buzz, toolhead = make_tester()
+    chip = FakeChip("adxl345")
+    tester.accel_chips = [("xy", chip)]
+    gcmd = FakeGcmd()
+    sweep = tester._parse_sweep(gcmd)
+
+    tester._run_test(
+        gcmd,
+        [resonance_tester.TestAxis("x")],
+        None,
+        sweep,
+        raw_name_suffix="probe1",
+    )
+
+    assert chip.clients[0].written
+    assert chip.clients[0].written[0].endswith("probe1.csv")
+
+
 def test_run_test_moves_to_probe_point():
     tester, printer, buzz, toolhead = make_tester()
     tester.accel_chips = [("xy", FakeChip("adxl345"))]
