@@ -48,8 +48,14 @@ fn each_mcu_chains_independently() {
     let f1 = 72_000_000.0; // a different crystal — chains at its own rate
     c.advance(0, 0.005, f0);
     c.advance(1, 0.005, f1);
-    assert_eq!(c.piece_tick(0, 0.0, f0), Some(1_000_000 + (0.005 * f0) as u64));
-    assert_eq!(c.piece_tick(1, 0.0, f1), Some(5_000_000 + (0.005 * f1) as u64));
+    assert_eq!(
+        c.piece_tick(0, 0.0, f0),
+        Some(1_000_000 + (0.005 * f0) as u64)
+    );
+    assert_eq!(
+        c.piece_tick(1, 0.0, f1),
+        Some(5_000_000 + (0.005 * f1) as u64)
+    );
 }
 
 #[test]

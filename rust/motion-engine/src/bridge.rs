@@ -3888,7 +3888,7 @@ impl PyMotionEngine {
     }
 
     fn motion_lead_secs(&self) -> f64 {
-        crate::anchor::DEFAULT_LEAD_SECS
+        crate::pump::HOST_FEED_LEAD_SECS
     }
 
     fn dispatched_segment_count(&self) -> u64 {
