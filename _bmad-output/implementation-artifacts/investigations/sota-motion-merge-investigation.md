@@ -84,4 +84,4 @@ Order: small→core→tests, building incrementally so the compiler pins the `ke
 
 **Confidence: Medium-High.** The merge is a hand-integration, not a rewrite war: ours (commit/seam/backpressure + wire) and theirs (shaper/PA post-pass + axis-chains) are orthogonal layers colliding at ~3 well-identified points. rerere already resolved `bridge.rs` correctly. The compiler + the `motion-engine` suite catch the mechanical 90%; the 3 silent-correctness spots are enumerated. A bench print is the final gate.
 
-**Status:** Active — plan ready, awaiting go to execute.
+**Status:** Concluded — merge executed (commit `a3a446bfd`, two-parent). All 7 conflicted files resolved per plan; `keep_secs` confirmed dead and dropped; the trap hunk (shared `}` closing `dist3` vs `impl`) reconstructed correctly; all 37 tests from both sides kept. One extra silent breakage found and fixed (`cruise_onset.rs` `VelocityConfig` literal). Gates: `ci.sh quick` 5/5, `ci.sh py` 422 passed, `cargo test --doc` green. `rerere` recorded all five resolutions. Remaining: push to update PR #100, then bench-print verification (the only untested surface).
