@@ -356,10 +356,6 @@ fn check_junction_position_continuity(
     next_source_line: u32,
 ) {
     let jump = (next_start_pos - prev_end_pos).abs();
-    // INSTRUMENTED: the >=FATAL panic is suppressed so one crash_short run
-    // collects every seam discontinuity (the panic was the flaky tail of a
-    // reliably-reproducible seam overlap). Both colliding gcode lines are named
-    // so the dispatch provenance is unambiguous.
     if jump >= JUNCTION_POSITION_LOG_MM {
         tracing::error!(
             subsystem = "motion",
@@ -374,6 +370,18 @@ fn check_junction_position_continuity(
             prev_source_line,
             next_source_line,
             "[junction-pos] position discontinuity"
+        );
+    }
+    // Comment out this panic to batch-collect every seam over a whole run; the
+    // discontinuity still logs above with both colliding gcode lines.
+    if jump >= JUNCTION_POSITION_FATAL_MM {
+        panic!(
+            "junction position discontinuity on mcu{} axis{}: prev piece ends at \
+             {prev_end_pos} (host t={prev_end_host:.6}, line {prev_source_line}), \
+             next starts at {next_start_pos} (host t={next_start_host:.6}, line \
+             {next_source_line}), |Δ|={jump}mm — this becomes a one-sample step \
+             burst on the MCU (fault -300/-310)",
+            key.mcu_id, key.axis
         );
     }
 }

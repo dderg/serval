@@ -177,8 +177,6 @@ fn continuous_junction_position_passes() {
 }
 
 #[test]
-#[ignore = "instrumentation: junction-discontinuity panic suppressed to collect \
-            every seam discontinuity in one run; restore with the instrumentation revert"]
 fn junction_position_discontinuity_is_fatal() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = mpsc::channel();
