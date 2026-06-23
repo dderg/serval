@@ -3062,6 +3062,11 @@ impl PyMotionEngine {
 
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
         *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
+        // Chains each piece's start tick to the previous piece's end (per MCU)
+        // instead of re-projecting host→tick per piece, so the clock estimate's
+        // absolute-offset jitter never lands on a seam. ~1 µs slew budget bounds
+        // the residual drift. Self-heals on the Anchor's `fresh` re-anchor.
+        let tick_chain_for_cb = Arc::new(Mutex::new(crate::tick_chain::TickChain::new(1e-6)));
         let pump_tx_for_cb = pump_tx_init.clone();
         let drain_disp = self.drain.clone();
         let counter_for_cb = Arc::clone(&counter);
@@ -3109,10 +3114,47 @@ impl PyMotionEngine {
                     }
                 }
 
-                let project = |mcu_id: u32, host_secs: f64| -> u64 {
+                let seg_start_host = t0 + seg.t_start;
+                let mcu_anchors: HashMap<u32, (u64, f64)> = {
                     let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
-                    r.host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(mcu_id), host_secs)
-                        .unwrap_or(0)
+                    let mut chain = tick_chain_for_cb.lock().unwrap_or_else(|p| p.into_inner());
+                    mcu_configs_for_cb
+                        .iter()
+                        .map(|cfg| {
+                            let h = crate::types::mcu_handle_from_raw(cfg.mcu_id);
+                            let abs = r.host_time_to_mcu_clock(h, seg_start_host).unwrap_or(0);
+                            let freq = r.ack_clock_and_freq(h).map_or(0.0, |(_, f)| f);
+                            if fresh || !chain.is_anchored(cfg.mcu_id) {
+                                chain.anchor(cfg.mcu_id, abs);
+                            } else {
+                                chain.slew(cfg.mcu_id, abs, freq);
+                            }
+                            (
+                                cfg.mcu_id,
+                                (chain.anchor_tick(cfg.mcu_id).unwrap_or(abs), freq),
+                            )
+                        })
+                        .collect()
+                };
+
+                // Chained projection: start each piece at the chained per-MCU
+                // cursor + its in-segment offset at the live freq (slope only),
+                // never the jittery absolute offset. Unanchored MCUs (should not
+                // happen post-anchor) fall back to a direct projection.
+                let project = |mcu_id: u32, host_secs: f64| -> u64 {
+                    match mcu_anchors.get(&mcu_id) {
+                        Some(&(base, freq)) => {
+                            base + ((host_secs - seg_start_host) * freq).max(0.0) as u64
+                        }
+                        None => {
+                            let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
+                            r.host_time_to_mcu_clock(
+                                crate::types::mcu_handle_from_raw(mcu_id),
+                                host_secs,
+                            )
+                            .unwrap_or(0)
+                        }
+                    }
                 };
 
                 let active_cohort: Option<u64> = *active_drip_cohort_for_cb
@@ -3161,6 +3203,16 @@ impl PyMotionEngine {
                     pump_tx_for_cb
                         .send(crate::pump::PumpMsg::Enqueue(m))
                         .map_err(|_| DispatchError::PumpGone)?;
+                }
+
+                // Advance each MCU's chain past this segment so the next
+                // segment's first piece continues exactly where this one ended.
+                {
+                    let mut chain = tick_chain_for_cb.lock().unwrap_or_else(|p| p.into_inner());
+                    let seg_dur = seg.t_end - seg.t_start;
+                    for (&mcu_id, &(_, freq)) in mcu_anchors.iter() {
+                        chain.advance(mcu_id, seg_dur, freq);
+                    }
                 }
 
                 tracing::info!(
