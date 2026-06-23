@@ -1532,7 +1532,11 @@ class MCU:
         self._flush_callbacks.append(callback)
 
     def flush_moves(self, print_time, clear_history_time):
-        return
+        clock = self.print_time_to_clock(print_time)
+        if clock < 0:
+            return
+        for cb in self._flush_callbacks:
+            cb(print_time, clock)
 
     def check_active(self, print_time, eventtime):
         self._clocksync.calibrate_clock(print_time, eventtime)

@@ -119,6 +119,9 @@ class Motion:
         self._motor_bindings = {}
         self.all_mcus = [m for n, m in printer.lookup_objects(module="mcu")]
         self.mcu = self.all_mcus[0]
+        self.need_flush_time = 0.0
+        self.do_kick_flush_timer = True
+        self.flush_timer = self.reactor.register_timer(self._flush_handler)
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
         self._planner_ready = False
         self._read_limits(config)
@@ -575,6 +578,28 @@ class Motion:
             self._cached_engine_mcus = list(mcus) if mcus else [self.mcu]
         return self._cached_engine_mcus
 
+    def advance_flush_time(self, mq_time):
+        self.need_flush_time = max(self.need_flush_time, mq_time)
+        if self.do_kick_flush_timer:
+            self.do_kick_flush_timer = False
+            self.reactor.update_timer(self.flush_timer, self.reactor.NOW)
+
+    def _flush_handler(self, eventtime):
+        try:
+            self.do_kick_flush_timer = False
+            while True:
+                flush_time = self.need_flush_time
+                for mcu in self.all_mcus:
+                    mcu.flush_moves(flush_time, flush_time)
+                if self.need_flush_time <= flush_time:
+                    break
+            self.do_kick_flush_timer = True
+            return self.reactor.NEVER
+        except Exception:
+            logging.exception("Exception in flush_handler")
+            self.printer.invoke_shutdown("Exception in flush_handler")
+            return self.reactor.NEVER
+
     def flush_step_generation(self):
         self._drain_to_mcu_execution()
 
@@ -600,6 +625,11 @@ class Motion:
         if self._mcu_pending_end_time > est:
             return max(self._mcu_pending_end_time, floor)
         return floor
+
+    def lookahead_end_print_time(self):
+        est = self.mcu.estimated_print_time(self.reactor.monotonic())
+        floor = est + self.motion_lead
+        return max(est + self.engine.queued_motion_secs(), floor)
 
     def _ground_pending_end_time_after_engine_drain(self):
         if self.mcu is None:
@@ -1426,7 +1456,7 @@ class ToolheadShim:
         self.motion = motion
 
     def register_lookahead_callback(self, callback):
-        callback(self.motion.get_last_move_time())
+        callback(self.motion.lookahead_end_print_time())
 
     def note_step_generation_scan_time(self, delay, old_delay=0.0):
         self.motion.flush_step_generation()
@@ -1435,7 +1465,7 @@ class ToolheadShim:
         return None
 
     def note_mcu_movequeue_activity(self, mq_time, set_step_gen_time=False):
-        pass
+        self.motion.advance_flush_time(mq_time)
 
     def limit_next_junction_speed(self, speed):
         pass
