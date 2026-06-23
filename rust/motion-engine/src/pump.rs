@@ -323,7 +323,7 @@ pub fn junction_jumps(
 // before this horizon, so raising it only deepens the buffer for sparse (long,
 // slow) moves where stalls are otherwise most likely to slip a piece into the
 // past.
-pub const MAX_LEAD_SECS: f64 = 1.0;
+pub const MAX_LEAD_SECS: f64 = 2.0;
 
 #[derive(Clone, Copy)]
 struct JunctionEnd {
