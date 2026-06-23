@@ -958,8 +958,9 @@ fn main() {
             };
             eprintln!(
                 "ec-rt: wkc={wkc} sw=0x{sw:04x} err=0x{drive_err:04x} pos={pos} ferr={ferr} toff={toff} \
-                 ring_len={} retired={} tq_act={tq_act} ff_sat={ff_saturation} framed={framed}",
-                ring.is_empty() as u8 ^ 1,
+                 ring_len={}/{} retired={} tq_act={tq_act} ff_sat={ff_saturation} framed={framed}",
+                ring.len(),
+                ring.capacity(),
                 current_retired,
             );
             if gate.state() == TorqueState::Faulted {

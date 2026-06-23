@@ -143,6 +143,14 @@ impl AxisRing {
         self.desc.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.desc.len()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.desc.ring_depth
+    }
+
     pub fn reset(&mut self) {
         self.desc.drain();
         self.armed = None;
