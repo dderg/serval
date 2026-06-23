@@ -44,7 +44,6 @@ pub struct WindowOperator {
 #[derive(Debug, Clone, Default)]
 pub struct WindowHistory {
     pub dt: f64,
-    /// Pre-chain signal values; sample `m` sits at `t = -(m + 0.5) * dt`.
     pub samples: Vec<f64>,
 }
 
@@ -86,9 +85,6 @@ impl WindowOperator {
         Self::from_kernel_with_terminal(kernel, t_map, history, &WindowHistory::empty())
     }
 
-    /// `terminal` holds post-chain signal samples; sample `m` sits at
-    /// `t_end + (m + 0.5) * dt`. Kernel mass beyond the supplied samples
-    /// falls back to holding the final chain sample.
     pub fn from_kernel_with_terminal(
         kernel: &PiecewisePolynomialKernel<f64>,
         t_map: &[f64],

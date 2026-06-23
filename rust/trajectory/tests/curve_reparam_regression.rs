@@ -1,7 +1,3 @@
-//! Regression: smooth curved segments plan successfully and track the exact
-//! curve; genuine cusps still fail loud. Guards the fix for the planner_fatal
-//! abort on curved (G5) segments.
-
 use nurbs::VectorNurbs;
 use temporal::multi::{GridStrategy, SegmentInput};
 use trajectory::{AxisChainSet, ShapeBatchInput, ShapeError, ShapeSegmentInput};

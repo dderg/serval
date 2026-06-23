@@ -127,10 +127,6 @@ fn max_kernel_half_support(chain: &ChainGrid) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// The shaper window spans chain junctions (full stops): the neighbor chain's
-/// ramp contributes to shaped speed near the boundary. After joining has
-/// converged, re-solve each windowed chain with its neighbors' boundary-window
-/// velocity samples as constants, iterated until total times settle.
 pub(crate) fn exchange_follower_tails(
     chain_grids: &mut [ChainGrid],
     states: &mut [ChainState],

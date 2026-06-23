@@ -54,6 +54,15 @@ int32_t runtime_configure_axis(nurbs_Runtime *rt,
 
 int32_t runtime_discard_pending(nurbs_Runtime *rt);
 
+/**
+ * Step-output consumer entry for a phase-mode buzz: drive `axis_idx`'s coils
+ * to base + `offset_steps` via XDIRECT. Called from `step_output_event` (TIM3
+ * ISR), which forwards the runtime handle. Safe against the motion tick: TIM3
+ * and TIM5 share NVIC priority (cannot interleave) and the tick skips its
+ * phase dispatch for an XDIRECT-buzzing axis, so this is the sole coil writer.
+ */
+void runtime_emit_xdirect(nurbs_Runtime *rt, uint8_t axis_idx, int32_t offset_steps);
+
 uint32_t runtime_enqueue_success_lo(nurbs_Runtime *rt);
 
 int32_t runtime_gate_pieces(nurbs_Runtime *rt);
@@ -146,6 +155,15 @@ int32_t runtime_query_motor_state(nurbs_Runtime *rt,
                                   uintptr_t max);
 
 int32_t runtime_reset(nurbs_Runtime *rt);
+
+int32_t runtime_resonance_buzz(nurbs_Runtime *rt,
+                               uint8_t axis_mask,
+                               uint8_t sign_mask,
+                               uint32_t freq_start_millihz,
+                               uint32_t freq_end_millihz,
+                               uint32_t amplitude_nm,
+                               uint32_t duration_ms,
+                               uint32_t ramp_ms);
 
 int32_t runtime_seed_position(nurbs_Runtime *rt, int32_t x_q16, int32_t y_q16, int32_t z_q16);
 

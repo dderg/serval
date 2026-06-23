@@ -6,6 +6,7 @@
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ethercat_rt::buzz::BuzzOsc;
 use ethercat_rt::capture::{
     Capture, CaptureConfig, CaptureRecord, DriveSample, PendingStart, PendingStop,
     FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED,
@@ -29,11 +30,11 @@ use ethercat_rt::torque::{
 };
 use ethercat_rt::wire::{
     claim_handshake_reply_frame, identify_response_frame, motor_state_empty_frame,
-    motor_state_response_frame, push_pieces_response_frame, restore_drive_limits_response_frame,
-    resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
-    sdo_write_response_frame, seed_servo_home_response_frame, set_drive_limits_response_frame,
-    set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
-    stop_capture_response_frame, stop_response_frame, Command,
+    motor_state_response_frame, push_pieces_response_frame, resonance_buzz_response_frame,
+    restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
+    sdo_read_response_frame, sdo_write_response_frame, seed_servo_home_response_frame,
+    set_drive_limits_response_frame, set_torque_response_frame, start_capture_response_frame,
+    status_heartbeat_frame, stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
     SlaveState, StopCaptureResponse, ERR_SDO_TRANSPORT, ERR_SDO_UNSUPPORTED_SIZE,
@@ -163,6 +164,7 @@ fn main() {
         .unwrap_or(500);
 
     let mut ring = AxisRing::new();
+    let mut buzz = BuzzOsc::new();
     let mut cmap: Option<CountMap> = None;
     let mut framed = false;
     let mut seed_home_inflight: Option<u32> = None;
@@ -493,6 +495,52 @@ fn main() {
                         });
                     }
                 }
+                Command::ResonanceBuzz {
+                    correlation_id,
+                    msg,
+                } => {
+                    let rc = if gate.state() != TorqueState::Enabled {
+                        eprintln!("ec-rt: ResonanceBuzz rejected — drive not operation-enabled");
+                        ethercat_rt::buzz::ERR_BUZZ_NOT_ENABLED
+                    } else if !ring.is_empty() || buzz.active() {
+                        eprintln!("ec-rt: ResonanceBuzz rejected — motion in progress");
+                        if buzz.active() {
+                            ethercat_rt::buzz::ERR_BUZZ_BUSY
+                        } else {
+                            ethercat_rt::buzz::ERR_BUZZ_STREAMING
+                        }
+                    } else {
+                        let base_counts = if framed {
+                            unsafe { ffi::ec_rt_get_position_actual() }
+                        } else {
+                            0
+                        };
+                        let rc = buzz.arm(
+                            msg.axis_mask,
+                            msg.sign_mask,
+                            msg.freq_start_millihz,
+                            msg.freq_end_millihz,
+                            msg.amplitude_nm,
+                            msg.duration_ms,
+                            msg.ramp_ms,
+                            base_counts,
+                        );
+                        eprintln!(
+                            "ec-rt: ResonanceBuzz axis_mask=0x{:02x} sign_mask=0x{:02x} \
+                             freq={}->{} mHz amplitude={} nm duration={} ms ramp={} ms \
+                             base_counts={base_counts} rc={rc}",
+                            msg.axis_mask,
+                            msg.sign_mask,
+                            msg.freq_start_millihz,
+                            msg.freq_end_millihz,
+                            msg.amplitude_nm,
+                            msg.duration_ms,
+                            msg.ramp_ms,
+                        );
+                        rc
+                    };
+                    server.respond(&resonance_buzz_response_frame(correlation_id, rc));
+                }
                 Command::SdoRead {
                     correlation_id,
                     msg,
@@ -704,7 +752,14 @@ fn main() {
 
         let mut motion_active = false;
         if gate.state() == TorqueState::Enabled {
-            if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ring.sample(now) {
+            let setpoint = if buzz.active() {
+                buzz.eval(now).map(|(rel_mm, vel_mm_s, acc_mm_s2)| {
+                    let counts = buzz
+                        .base_counts()
+                        .wrapping_add(mm_to_counts(f64::from(rel_mm), counts_per_mm));
+                    (counts, vel_mm_s, acc_mm_s2)
+                })
+            } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ring.sample(now) {
                 let counts = if framed {
                     mm_to_counts(f64::from(pos_mm), counts_per_mm)
                 } else {
@@ -714,6 +769,12 @@ fn main() {
                     });
                     map.target_counts(f64::from(pos_mm))
                 };
+                Some((counts, vel_mm_s, acc_mm_s2))
+            } else {
+                None
+            };
+
+            if let Some((counts, vel_mm_s, acc_mm_s2)) = setpoint {
                 let vel_offset = if velocity_ff {
                     (f64::from(vel_mm_s) * counts_per_mm).round() as i32
                 } else {
@@ -749,7 +810,9 @@ fn main() {
                 }
                 motion_active = true;
             } else {
-                cmap = None;
+                if !buzz.active() {
+                    cmap = None;
+                }
                 unsafe {
                     ffi::ec_rt_set_velocity_offset(0);
                     ffi::ec_rt_set_torque_offset(0);

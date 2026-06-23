@@ -30,7 +30,6 @@ fn partition_single_segment_no_junctions() {
 
 #[test]
 fn slice_duplicates_junction_sample_and_splits_time() {
-    // 2-segment chain profile: ranges (0,2) and (2,4), 5 samples, uniform v=10.
     let ranges = vec![(0usize, 2usize), (2, 4)];
     let samples: Vec<GridSample> = (0..5)
         .map(|i| GridSample {

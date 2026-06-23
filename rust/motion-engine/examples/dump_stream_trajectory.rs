@@ -15,7 +15,7 @@ use _motion_engine::classify::build_move;
 use _motion_engine::stream::{StreamConfig, StreamState};
 use geometry::{ChainFitConfig, VelocityConfig, VelocityLimits};
 use nurbs::eval::eval;
-use trajectory::ShapedSegment;
+use trajectory::{AxisChainSet, ShapedSegment};
 
 const COALESCE_BATCH_MOVES: usize = 64;
 
@@ -119,7 +119,7 @@ fn main() {
         limits,
     };
 
-    let mut state = StreamState::new(cfg, &[0.0, 0.0, 0.0], 0.0);
+    let mut state = StreamState::new(cfg, AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     let mut all: Vec<ShapedSegment> = Vec::new();
     let mut p = Pos::new();
     let mut submitted = 0u64;

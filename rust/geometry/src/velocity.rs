@@ -18,15 +18,18 @@ pub struct VelocityConfig {
     pub consistency_tol: f64,
     pub max_jerk_mm_s3: f64,
     pub integration_tol: f64,
+    pub max_extrude_only_velocity_mm_s: f64,
+    pub max_extrude_only_accel_mm_s2: f64,
 }
 
 impl Default for VelocityConfig {
     fn default() -> Self {
         Self {
             consistency_tol: 1e-6,
-            // TODO: jerk-limit floor is an open tuning question (spec-motion-6).
-            max_jerk_mm_s3: 100_000.0,
+            max_jerk_mm_s3: 100_000.0, // TODO: jerk-limit floor is an open tuning question (spec-motion-6)
             integration_tol: 1e-7,
+            max_extrude_only_velocity_mm_s: f64::INFINITY,
+            max_extrude_only_accel_mm_s2: f64::INFINITY,
         }
     }
 }
@@ -118,14 +121,6 @@ pub fn plan_velocity(
     plan_velocity_warm_start(outcome, config, 0.0)
 }
 
-/// Streaming variant: the trajectory enters the first move at `entry_v`
-/// (the velocity already dispatched to the MCU at the commit boundary) rather
-/// than from rest. The terminal velocity stays pinned to zero (worst-case
-/// future), so a partially-known look-ahead window is always plannable to a
-/// stop. Fails loudly with [`VelocityError::OverCommitted`] when the pinned
-/// entry cannot brake to rest within the window — that is an over-commit
-/// (the planner emitted faster than the remaining look-ahead can absorb), not
-/// something to silently clamp. `entry_v == 0.0` reproduces [`plan_velocity`].
 pub fn plan_velocity_warm_start(
     outcome: &FitOutcome,
     config: VelocityConfig,
@@ -140,6 +135,9 @@ pub fn plan_velocity_warm_start(
         return Err(VelocityError::InvalidConfig);
     }
     if !(entry_v.is_finite() && entry_v >= 0.0) {
+        return Err(VelocityError::InvalidConfig);
+    }
+    if !(config.max_extrude_only_velocity_mm_s > 0.0 && config.max_extrude_only_accel_mm_s2 > 0.0) {
         return Err(VelocityError::InvalidConfig);
     }
 
@@ -166,7 +164,8 @@ pub fn plan_velocity_warm_start(
     let mut caps = Vec::with_capacity(n);
     for m in moves {
         let line_no = m.source.start_line;
-        let accel = m.limits.accel_mm_s2;
+        let mut accel = m.limits.accel_mm_s2;
+        let mut extrude_only_velocity_cap = f64::INFINITY;
         let (length, kappa0, sigma, kappa_peak) = match &m.segment.spatial {
             Some(seg) => {
                 let length = seg.s_len();
@@ -184,11 +183,16 @@ pub fn plan_velocity_warm_start(
                 if !(length.is_finite() && length > LENGTH_EPS_MM) {
                     return Err(VelocityError::NonFinite { line_no });
                 }
+                accel = accel.min(config.max_extrude_only_accel_mm_s2);
+                extrude_only_velocity_cap = config.max_extrude_only_velocity_mm_s;
                 (length, 0.0, 0.0, 0.0)
             }
         };
 
-        let flat_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
+        let flat_ceiling = m
+            .feedrate_mm_s
+            .min(m.limits.max_velocity_mm_s)
+            .min(extrude_only_velocity_cap);
         if disk::limit_speed(kappa_peak, accel) < flat_ceiling {
             report.curvature_bound += 1;
         } else {

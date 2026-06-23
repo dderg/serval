@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
@@ -260,7 +262,6 @@ fn message_for_claim_error(label: &str, interface: &str, e: &EndpointClaimError)
                  (bringup rc=-{fault_code}) — grant CAP_SYS_NICE + CAP_IPC_LOCK to \
                  klipper.service and isolate a CPU core, then FIRMWARE_RESTART"
             ),
-            // 0 = no bringup rc (e.g. the stub's simulated failure) — omit the suffix.
             0 => format!(
                 "ethercat {label}: drive (slave {slave_idx}) offline \
                  — check drive power, then FIRMWARE_RESTART"
@@ -390,12 +391,6 @@ mod claim_error_message_tests {
     }
 }
 
-/// The caller (`claim_ethercat_node`) removes any stale socket file at
-/// `socket_path` before calling this function. That pre-spawn removal is
-/// necessary: `FrameServer::bind` unlinks-and-rebinds on the path, but that
-/// happens *after* the process starts — between spawn and bind, a pre-existing
-/// file would let `poll_socket_ready` return immediately on existence, racing
-/// `handshake_ethercat_endpoint`'s connect ahead of the actual listener.
 fn spawn_ethercat_endpoint(
     binary: &str,
     interface: &str,
@@ -470,10 +465,6 @@ fn handshake_ethercat_endpoint(
     use mcu_protocol::codec::{Cursor, Decode};
     use mcu_protocol::messages::ClaimHandshakeReply;
 
-    // Retry connect until the endpoint's listener is up. ConnectionRefused and
-    // NotFound both mean the endpoint hasn't bound yet (bind latency, or the
-    // endpoint is mid-unlink-and-rebind of a stale path). Every other error is
-    // immediately fatal as a Protocol error — we don't mask real failures.
     let conn = loop {
         match McuSerialConn::connect(socket_path) {
             Ok(c) => break c,
@@ -619,10 +610,6 @@ pub struct PyMotionEngine {
     events: Arc<Mutex<VecDeque<EngineEvent>>>,
     #[allow(dead_code)]
     handlers: Mutex<HashMap<(u32, String, u32), Py<PyAny>>>,
-    // `Mutex<Option<..>>` (not `OnceLock`) so `shutdown()` can *take* the handle
-    // and join the `kalico-planner` thread. A `OnceLock` cannot be drained, so
-    // the planner thread would only be joined when the whole engine dropped —
-    // which never happens on klippy's in-process FIRMWARE_RESTART loop.
     planner: Mutex<Option<StreamPlannerHandle>>,
     planner_config: Mutex<PlannerConfig>,
     commanded_pos: Mutex<[f64; 3]>,
@@ -663,9 +650,6 @@ pub struct PyMotionEngine {
         Mutex<Option<crossbeam_channel::Receiver<Result<([f64; 3], [f64; 3], u64), String>>>>,
     latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
     remote_triggers: Mutex<HashMap<u8, (u32, host_rt::host_io::InterceptorId)>>,
-    // Latched once `shutdown()` has run a full teardown. Subsequent calls (the
-    // Drop backstop, a second `klippy:disconnect`, the failed-connect path) see
-    // this and no-op, so double-teardown is provably safe and observable.
     shut_down: AtomicBool,
 }
 
@@ -1344,44 +1328,71 @@ impl PyMotionEngine {
         Ok((r.readback_size, u32::from_le_bytes(r.readback_data)))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn resonance_buzz(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        axis_mask: u8,
+        sign_mask: u8,
+        freq_start_millihz: u32,
+        freq_end_millihz: u32,
+        amplitude_nm: u32,
+        duration_ms: u32,
+        ramp_ms: u32,
+    ) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "resonance_buzz")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "servo_resonance_buzz",
+            mcu_handle,
+            axis_mask,
+            sign_mask,
+            freq_start_millihz,
+            freq_end_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+            "servo resonance buzz"
+        );
+        let result = py
+            .detach(|| {
+                crate::servo_torque::send_resonance_buzz(
+                    &conn,
+                    axis_mask,
+                    sign_mask,
+                    freq_start_millihz,
+                    freq_end_millihz,
+                    amplitude_nm,
+                    duration_ms,
+                    ramp_ms,
+                )
+            })
+            .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "resonance_buzz: endpoint rejected (result {result})"
+            )));
+        }
+        Ok(())
+    }
+
     fn release_mcu(&self, handle: u32) -> PyResult<()> {
-        // Pull the whole McuConnection out of the map but keep it alive (it owns
-        // `host_io`) until *after* the endpoint child is reaped. Teardown order
-        // matters: the endpoint must see session-end (socket close + SIGTERM)
-        // before we close the host_io pts fd, which is the EBUSY-relevant step.
-        //
-        // Removing from the map BEFORE closing the endpoint socket (below) is
-        // also the ec-heartbeat-poll race guard: the supervision thread confirms
-        // every EOF/child-exit fault against `mcus.get(&mcu_id)` under the lock,
-        // so by the time the socket close it observes as peer_closed() has
-        // happened, the entry is already gone and the fault is read as a clean
-        // release rather than fired into std::process::abort().
         let Some(mut conn) = ({
             let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             mcus.remove(&handle)
         }) else {
-            // Already released — idempotent no-op (shutdown may call twice, the
-            // failed-connect path may call before any attach).
             return Ok(());
         };
 
         let mut endpoint_process = conn.endpoint_process.take();
         let endpoint_conn = conn.endpoint_conn.take();
 
-        // Drop our Arc on the endpoint connection so the socket closes (signals
-        // session end to the endpoint). Router/pump Arcs may still be live;
-        // SIGTERM is the authoritative termination signal below.
         drop(endpoint_conn);
 
         if let Some(ref mut child) = endpoint_process {
-            // Capture PID before any wait so it is valid in diagnostic messages
-            // (after wait() the OS may reuse the pid_t value).
             let pid = libc::pid_t::try_from(child.id()).expect("child PID exceeds pid_t range");
 
-            // SIGTERM: ask the endpoint to exit gracefully.
-            // `libc::kill` is the only stable way to send a specific signal to
-            // a child process on Unix; there is no safe std API for this.
-            // ESRCH (no such process) = already exited = fine; discard the return value.
             #[allow(unsafe_code)]
             let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
 
@@ -1407,11 +1418,6 @@ impl PyMotionEngine {
             }
         }
 
-        // Endpoint is dead; now close the host_io. Dropping the McuConnection
-        // drops its `Arc<McuHostIo>` — the last strong ref (pump/heartbeat
-        // hold `Weak` only), so `McuHostIo::Drop` runs here: it sends the
-        // reactor Shutdown and joins the reactor thread, which closes the pts
-        // fd and releases TIOCEXCL — clearing the EBUSY for the next process.
         drop(conn);
 
         let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
@@ -1423,37 +1429,6 @@ impl PyMotionEngine {
         Ok(())
     }
 
-    /// The single, complete, ordered, idempotent teardown primitive.
-    ///
-    /// It is the authoritative release path on every klippy exit that can leave
-    /// state behind (`klippy:disconnect`, the failed-connect arms, and the Drop
-    /// backstop). Calling it more than once is a clean no-op — the second call
-    /// finds empty maps / `None` handles and the latched `shut_down` flag.
-    ///
-    /// Ordering — two hazards drive the order, one in each direction:
-    ///
-    ///   Hazard A (planner → pump): while the planner holds an uncommitted decel
-    ///   tail (`t_dispatched < t_appended`, true after essentially any motion),
-    ///   its `recv_timeout` fires `run_commit_and_dispatch`, whose dispatch closure
-    ///   does `pump_tx.send(..)`. If the pump's `Receiver` were already gone that
-    ///   send yields `DispatchError::PumpGone` → the planner calls `fatal()` →
-    ///   `std::process::abort()`, which skips every `Drop` — leaking the pts fd.
-    ///   Fix: join the planner BEFORE sending `PumpMsg::Shutdown`; once the
-    ///   planner thread is joined no further dispatch can fire.
-    ///
-    ///   Hazard B (pump → EtherCAT conn): the pump may still be draining
-    ///   already-queued pieces for an EtherCAT MCU after `release_mcu` drops the
-    ///   last strong `Arc<McuSerialConn>`. In `call_push_pieces` the
-    ///   `Weak::upgrade()` then returns `None` → `SendError::Fatal` →
-    ///   `on_fatal_transport` → `std::process::abort()` — the same pts-fd leak.
-    ///   Fix: join the pump BEFORE calling `release_mcu`; once the pump thread is
-    ///   joined no send can be in flight.
-    ///
-    ///   Together: planner join → pump Shutdown + join → per-MCU release_mcu.
-    ///
-    ///   Post-join heartbeat sends: the ec-heartbeat-poll thread holds a clone of
-    ///   `pump_tx`. After the pump's `Receiver` is dropped (pump joined), those
-    ///   sends silently return `Err` and are discarded by the callback — harmless.
     fn shutdown(&self) {
         if self.shut_down.swap(true, Ordering::SeqCst) {
             tracing::debug!(
@@ -1464,8 +1439,6 @@ impl PyMotionEngine {
             return;
         }
 
-        // Step 1 — planner: join before the pump receives Shutdown so the planner
-        // can never dispatch into a dead pump Receiver (Hazard A).
         let planner = self
             .planner
             .lock()
@@ -1475,11 +1448,6 @@ impl PyMotionEngine {
             p.shutdown();
         }
 
-        // Step 2 — pump: join before releasing MCU transports so no queued piece
-        // can hit a dead EtherCAT Weak after release_mcu drops the strong Arc
-        // (Hazard B). run_pump exits immediately on Shutdown, abandoning queued
-        // pieces — safe because the planner is already joined and no new pieces
-        // will arrive.
         let pump_join = {
             let tx = self
                 .pump_tx
@@ -1518,16 +1486,12 @@ impl PyMotionEngine {
             }
         }
 
-        // Step 3 — per-MCU release_mcu: endpoint socket/child first, then
-        // host_io fd (the EBUSY-relevant close), then router prune. The pump is
-        // already joined so no send is in flight when the strong Arc drops.
         let handles: Vec<u32> = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             mcus.keys().copied().collect()
         };
         for h in handles {
             if let Err(e) = self.release_mcu(h) {
-                // Fail loud: a release error means an fd / child may be leaked.
                 tracing::error!(
                     subsystem = "engine",
                     event = "shutdown_release_mcu_failed",
@@ -1715,11 +1679,6 @@ impl PyMotionEngine {
         Ok(())
     }
 
-    // Narrow fd-release hook for the serial arduino-reset path (MCU._disconnect
-    // → serial.disconnect()). It only nils host_io/runtime_rx for one MCU; it
-    // does NOT touch endpoint_conn/endpoint_process, so it cannot tear an
-    // EtherCAT MCU down on its own. The authoritative full teardown is
-    // `shutdown()`; detach_serial is harmless before it (shutdown is idempotent).
     fn detach_serial(&self, mcu_handle: u32) -> PyResult<()> {
         let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(conn) = mcus.get_mut(&mcu_handle) {
@@ -2552,6 +2511,8 @@ impl PyMotionEngine {
         window_capacity = 32,
         beta_max_iters = 10,
         arc_fit = None,
+        max_extrude_only_velocity = None,
+        max_extrude_only_accel = None,
     ))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn init_planner(
@@ -2565,6 +2526,8 @@ impl PyMotionEngine {
         window_capacity: usize,
         beta_max_iters: u8,
         arc_fit: Option<(f64, f64)>,
+        max_extrude_only_velocity: Option<f64>,
+        max_extrude_only_accel: Option<f64>,
     ) -> PyResult<()> {
         if self
             .planner
@@ -2636,14 +2599,26 @@ impl PyMotionEngine {
         };
         cartesian.validate().map_err(PyValueError::new_err)?;
 
+        for (label, value) in [
+            ("max_extrude_only_velocity", max_extrude_only_velocity),
+            ("max_extrude_only_accel", max_extrude_only_accel),
+        ] {
+            if let Some(v) = value {
+                if !(v.is_finite() && v > 0.0) {
+                    return Err(PyValueError::new_err(format!(
+                        "[extruder] {label} must be finite and positive, got {v}"
+                    )));
+                }
+            }
+        }
+
         let mut cfg = config::PlannerConfig::default();
         cfg.axis_registry = axis_registry;
         cfg.limit_sections = limit_sections;
         cfg.cartesian = cartesian;
-        // [limit <name>] sections are parsed so existing configs load, but they
-        // are no longer the motion-limit source ([printer] is) and the live
-        // stream pipeline never consults them — so they are left unvalidated.
         cfg.post_processors = post_processor_set;
+        cfg.max_extrude_only_velocity = max_extrude_only_velocity;
+        cfg.max_extrude_only_accel = max_extrude_only_accel;
         cfg.window_capacity = window_capacity;
         cfg.beta_max_iters = beta_max_iters;
         cfg.chain = match arc_fit {
@@ -2669,8 +2644,6 @@ impl PyMotionEngine {
             .unwrap_or_else(|p| p.into_inner()) = cfg.clone();
 
         let ec_conns: HashMap<u32, Arc<McuSerialConn>> = {
-            // Collect (handle, conn, socket_path) in one lock acquisition to
-            // close the release_mcu race window between separate lookups.
             let ethercat_handles: Vec<(u32, Arc<McuSerialConn>, String)> = {
                 let mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
                 mcus.iter()
@@ -3017,13 +2990,6 @@ impl PyMotionEngine {
                     },
                 ));
 
-                // Weak so the supervision thread never keeps the conn (and its
-                // reader thread / socket) alive past release_mcu: when the last
-                // strong Arc drops, upgrade() fails and the thread exits quietly,
-                // letting Drop run shutdown(Both)+join. A strong Arc here would
-                // pin the reader thread until this loop happened to notice the
-                // release, leaking finished-but-unjoined readers across repeated
-                // standalone claim/release.
                 let conn_for_poll = Arc::downgrade(&conn);
                 let mcus_for_supervision = Arc::clone(&self.mcus);
                 let label_for_supervision = mcu_label.clone();
@@ -3043,37 +3009,18 @@ impl PyMotionEngine {
                     .name(format!("ec-heartbeat-poll-{mcu_id}"))
                     .spawn(move || {
                         loop {
-                            // Released conn -> exit quietly. This is the common
-                            // case: release_mcu drops the last strong Arc, the
-                            // upgrade fails, and the thread exits before probing.
-                            // The residual race — upgrading the Weak while the conn
-                            // is still strong but the MCU was already removed from
-                            // the map — is closed by the mcus-map re-check below,
-                            // which confirms every fault under the lock.
                             let Some(conn) = conn_for_poll.upgrade() else {
                                 return;
                             };
 
-                            // The reader thread sets peer_closed on EOF/IO; no poll here.
                             let peer_eof = conn.peer_closed();
                             drop(conn);
 
-                            // Both fault probes (EOF and child-exit) are confirmed
-                            // against the mcus map under one lock acquisition, so a
-                            // deliberate release can never be misread as a fault.
-                            // release_mcu removes the McuConnection from the map
-                            // BEFORE it closes the endpoint socket; that socket
-                            // close is exactly what sets peer_closed(). So if we
-                            // upgraded the Weak in the race window where the conn
-                            // was still strong but the MCU was already removed,
-                            // `mcus.get(&mcu_id)` is None here and we exit quietly
-                            // instead of firing EXIT_ON_FAULT.
                             let fault_reason = {
                                 let mut mcus = mcus_for_supervision
                                     .lock()
                                     .unwrap_or_else(|p| p.into_inner());
                                 let Some(c) = mcus.get_mut(&mcu_id) else {
-                                    // MCU was released — normal shutdown, exit quietly.
                                     return;
                                 };
                                 if peer_eof {
@@ -3343,6 +3290,12 @@ impl PyMotionEngine {
                 chain: cfg.chain,
                 velocity: geometry::VelocityConfig {
                     max_jerk_mm_s3: cart.max_jerk,
+                    max_extrude_only_velocity_mm_s: cfg
+                        .max_extrude_only_velocity
+                        .unwrap_or(f64::INFINITY),
+                    max_extrude_only_accel_mm_s2: cfg
+                        .max_extrude_only_accel
+                        .unwrap_or(f64::INFINITY),
                     integration_tol: STREAM_INTEGRATION_TOL,
                     ..geometry::VelocityConfig::default()
                 },
@@ -3355,9 +3308,14 @@ impl PyMotionEngine {
                 )
                 .map_err(PyRuntimeError::new_err)?,
             };
+            let axis_chains = cfg
+                .post_processors
+                .compile(&cfg.axis_registry)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
             let home = vec![0.0; cfg.axis_registry.n_axes()];
             *guard = Some(StreamPlannerHandle::spawn(
                 stream_cfg,
+                axis_chains,
                 home,
                 dispatch,
                 nudge_dispatch,
@@ -3794,15 +3752,28 @@ impl PyMotionEngine {
     }
 
     fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
-        // Input shaping is not applied by the V1 streaming pipeline; record the
-        // parameter on the config so it round-trips, but there is no planner
-        // kernel to update yet.
-        self.planner_config
+        let axis_chains = {
+            let mut cfg = self
+                .planner_config
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            cfg.post_processors
+                .set_param(name, key, value)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cfg.post_processors
+                .compile(&cfg.axis_registry)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+        };
+        if let Some(handle) = self
+            .planner
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .post_processors
-            .set_param(name, key, value)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            .as_ref()
+        {
+            handle
+                .update_axis_chains(axis_chains)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
         Ok(())
     }
 
@@ -4190,9 +4161,6 @@ impl PyMotionEngine {
             Some(io) => io.unregister_frame_interceptor(id).map_err(|e| {
                 PyRuntimeError::new_err(format!("disarm_remote_trigger: unregister failed: {e:?}"))
             }),
-            // MCU detached: its reactor (and the interceptor with it) is
-            // already gone. Disarm runs on cleanup paths — don't mask the
-            // original error.
             None => Ok(()),
         }
     }
@@ -4397,11 +4365,6 @@ impl PyMotionEngine {
 }
 
 impl Drop for PyMotionEngine {
-    // Backstop for the true-process-exit path: SIGTERM → request_exit → the
-    // klippy loop breaks → Py_Finalize → pyo3 drops the engine (if collected).
-    // The primary release stays the explicit `klippy:disconnect` → `shutdown()`
-    // call so it runs even under `gc.disable()` on the in-process restart loop.
-    // `shutdown()` is idempotent, so this never double-tears-down.
     fn drop(&mut self) {
         self.shutdown();
     }
@@ -4864,9 +4827,6 @@ mod ethercat_endpoint_tests {
             .spawn()
             .expect("sh must be available");
 
-        // Give the process time to exit so try_wait will see it on the first
-        // poll iteration (poll_socket_ready already does this internally, but
-        // a brief spin here makes the test deterministic on loaded CI runners).
         let waited = {
             let start = Instant::now();
             loop {
@@ -4943,7 +4903,6 @@ mod ethercat_endpoint_tests {
     fn handshake_retries_past_stale_socket_file() {
         use std::os::unix::net::UnixListener;
 
-        // Use pid + thread-id to avoid collisions when tests run in parallel.
         let path = format!(
             "/tmp/kalico_test_stale_{}_handshake.sock",
             std::process::id()
@@ -4972,15 +4931,7 @@ mod ethercat_endpoint_tests {
                     let cid = extract_correlation_id(&buf[..n]);
                     let reply = encode_claim_handshake_reply(cid);
                     let _ = stream.write_all(&reply);
-                    // Shutdown the write half — sends a clean FIN so the
-                    // foreground's mcu_call read loop exits on EOF (Closed)
-                    // *after* it has already matched the correlated reply frame
-                    // and returned Ok.  Without this, dropping the stream under
-                    // parallel load can race with the foreground's read.
                     let _ = stream.shutdown(std::net::Shutdown::Write);
-                    // Block on a final drain read so we don't release the fd
-                    // (and any kernel-buffered data) until the foreground has
-                    // consumed everything.
                     let _ = stream.read(&mut buf);
                 }
             }
@@ -4994,8 +4945,6 @@ mod ethercat_endpoint_tests {
         let _ = std::fs::remove_file(&path);
 
         let succeeded = result.is_ok();
-        // Drop the McuSerialConn before joining so the foreground side closes,
-        // unblocking the background thread's drain read.
         drop(result);
         let _ = bg.join();
 
@@ -5061,10 +5010,6 @@ mod ethercat_endpoint_tests {
             Err(e) => Some(format!("{e:?}")),
         };
 
-        // Drop the McuSerialConn first so the listener thread's drain read
-        // sees EOF and exits. If the handshake never connected at all, the
-        // listener is still parked in accept() — unblock it with a throwaway
-        // connection so lt.join() cannot hang the test harness.
         let _ = stop_tx.send(());
         drop(result);
         let _ = std::os::unix::net::UnixStream::connect(&path);

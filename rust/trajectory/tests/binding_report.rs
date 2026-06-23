@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use geometry::segment::{CubicSegment, FollowerDemand, SourceRange};
 use nurbs::VectorNurbs;
 use trajectory::plan_velocity::SafetyMode;
@@ -7,6 +9,7 @@ use trajectory::{AxisChainSet, CompiledChain};
 fn extruder_chains() -> AxisChainSet {
     let mut chains = AxisChainSet::passthrough_spatial();
     chains.chains.push(CompiledChain {
+        stages: Vec::new(),
         kernel: None,
         gain: 0.0,
     });

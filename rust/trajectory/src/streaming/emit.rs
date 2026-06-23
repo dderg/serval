@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use nurbs::bezier::BezierPiece;
 
 use super::{EmitContext, ShaperState};
@@ -8,24 +10,6 @@ use crate::ShapedSegment;
 const T_EPSILON: f64 = 1e-12;
 
 impl ShaperState {
-    /// Produce shaped output for the dispatch-eligible region `[t_dispatched,
-    /// t_decel_start − max_h]`, advance `t_dispatched`, and trim old per-axis history.
-    ///
-    /// The method maintains a `pending_freeze` buffer: after each successful emission,
-    /// the shaped output for the kernel-support window immediately after the new
-    /// `t_dispatched` is stored.  On the next call (whether or not a replan occurred),
-    /// this buffer is dispatched first so the MCU receives a bit-identical signal for
-    /// the overlap region — preventing the velocity seam that would otherwise arise from
-    /// re-fitting the frozen zone over a shorter domain.
-    ///
-    /// Returns an empty vector when `target ≤ t_dispatched` (nothing newly
-    /// eligible, including fresh state before any `append_and_replan`).
-    ///
-    /// On error the state is left unchanged so the caller can re-attempt.
-    ///
-    /// # Errors
-    ///
-    /// Forwards any [`ShapeError`] from [`emit_shaped`].
     pub fn emit_committed(
         &mut self,
         ctx: &EmitContext<'_>,
@@ -223,16 +207,6 @@ impl ShaperState {
         Ok(dispatched)
     }
 
-    /// Commit and dispatch the held-back trailing region `[t_dispatched, t_appended]`
-    /// including the terminal decel-to-zero ramp.
-    ///
-    /// Idempotent: returns `Ok(Vec::new())` if `t_dispatched >= t_appended − ε`.
-    ///
-    /// On error the state is left unchanged.
-    ///
-    /// # Errors
-    ///
-    /// Forwards [`ShapeError`]s from [`emit_shaped`].
     pub fn commit_decel_to_zero(
         &mut self,
         ctx: &EmitContext<'_>,
@@ -338,11 +312,6 @@ impl ShaperState {
         Ok(dispatched)
     }
 
-    /// Committed ledger value per follower at the emit window start: the lane
-    /// value where prior emissions wrote it. When `anchor_t` falls past the
-    /// lane's committed coverage (e.g. across an idle gap), the follower holds
-    /// its realized endpoint — the ledger never snaps back to the at-rest
-    /// fallback while pieces exist.
     fn follower_anchor_values(&self, ctx: &EmitContext<'_>, emit_start: f64) -> Vec<f64> {
         let anchor_t = emit_start.max(
             self.planned_fitted
@@ -366,9 +335,6 @@ impl ShaperState {
             .collect()
     }
 
-    /// Replace each follower lane's ledger pieces from the new emission's
-    /// input tracks. Pieces from older emissions are trimmed back to the new
-    /// coverage start so overlap regions always read the freshest plan.
     fn store_follower_ledgers(
         &mut self,
         ctx: &EmitContext<'_>,

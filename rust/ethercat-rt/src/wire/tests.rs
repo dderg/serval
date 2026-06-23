@@ -1,9 +1,9 @@
 use super::*;
 use mcu_protocol::messages::{
-    MotorStateResponse, RestoreDriveLimitsResponse, ResumeStreamResponse, SdoRead, SdoReadResponse,
-    SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse, SetDriveLimits,
-    SetDriveLimitsResponse, SlaveState, SlaveStatus, StartCapture, StartCaptureResponse,
-    StopCaptureResponse, StopResponse,
+    MotorStateResponse, ResonanceBuzz, RestoreDriveLimitsResponse, ResumeStreamResponse, SdoRead,
+    SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SlaveState, SlaveStatus, StartCapture,
+    StartCaptureResponse, StopCaptureResponse, StopResponse,
 };
 use mcu_transport::demux::{Demuxer, Frame};
 use mcu_transport::frame::decode_frame;
@@ -123,6 +123,46 @@ fn decodes_set_torque_command() {
         }
         other => panic!("expected SetTorque, got {other:?}"),
     }
+}
+
+#[test]
+fn decodes_resonance_buzz_command() {
+    let msg = ResonanceBuzz {
+        axis_mask: 0b001,
+        sign_mask: 0b000,
+        freq_start_millihz: 5_000,
+        freq_end_millihz: 300_000,
+        amplitude_nm: 4_200,
+        duration_ms: 3_000,
+        ramp_ms: 300,
+    };
+    let payload = frame_payload(MessageKind::ResonanceBuzz, 42, &msg.encoded_to_vec());
+    match decode_command(0, &payload).expect("decode") {
+        Command::ResonanceBuzz {
+            correlation_id,
+            msg: m,
+        } => {
+            assert_eq!(correlation_id, 42);
+            assert_eq!(m, msg);
+        }
+        other => panic!("expected ResonanceBuzz, got {other:?}"),
+    }
+}
+
+#[test]
+fn resonance_buzz_response_frame_round_trips() {
+    let frame = resonance_buzz_response_frame(42, 0);
+    let mut demux = Demuxer::new();
+    let (frames, errs) = demux.feed_slice(&frame);
+    assert!(errs.is_empty());
+    let Frame::Kalico { payload, .. } = &frames[0] else {
+        panic!("expected kalico frame");
+    };
+    let (hdr, _body) = decode_message_header(payload).expect("header");
+    assert_eq!(
+        MessageKind::from_u16(hdr.kind_raw),
+        Some(MessageKind::ResonanceBuzzResponse)
+    );
 }
 
 #[test]

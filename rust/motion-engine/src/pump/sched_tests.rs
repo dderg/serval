@@ -146,16 +146,6 @@ fn no_horizon_none_uses_count_only_gate() {
     }
 }
 
-/// Regression: bench shape from 2026-06-04.
-///
-/// mcu1 (F446, 180 MHz) has a far-future piece whose tick value is numerically
-/// small (~4.8e12) but whose host time is large (beyond mcu1's horizon).
-/// mcu0 (H7, 520 MHz) has past-due pieces whose tick value is numerically large
-/// (~13.8e12) but whose host time is now-ish (within mcu0's horizon, room available).
-///
-/// Old code: `min_by` on raw ticks → mcu1's small ticks win → StallAhead(mcu1),
-/// H7 starved for up to 2+ seconds.
-/// New code: `min_by` on host time → mcu0's smaller host time wins → Send(mcu0).
 #[test]
 fn cross_mcu_host_time_ordering_bench_regression() {
     let f446_tick: u64 = 4_790_000_000_000;

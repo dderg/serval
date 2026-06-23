@@ -66,9 +66,6 @@ pub const MAX_DEGREE: usize = 20;
 
 pub const WORKSPACE_SIZE: usize = MAX_DEGREE + 1;
 
-/// Numerical floor for parametric speed |dP/du|, weight denominators, and
-/// curvature-divisor cubed-norms. Exposed as f64 so callers and `Float::from_f64`
-/// see a single source of truth.
 pub const MIN_PARAMETRIC_SPEED: f64 = 1e-9;
 
 const _: () = assert!(WORKSPACE_SIZE == MAX_DEGREE + 1);

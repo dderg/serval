@@ -56,6 +56,7 @@ pub struct Engine {
     pub(crate) last_motors: [f32; MAX_AXES],
     pub tick_caches: crate::stepping_state::TickCaches,
     pieces_gated: bool,
+    pub(crate) buzz: crate::buzz::Buzz,
     #[cfg(any(test, feature = "host"))]
     test_queue_ptrs: [*mut crate::step_queue::StepQueue; MAX_AXES],
 }
@@ -76,6 +77,7 @@ impl Engine {
             last_motors: [0.0; MAX_AXES],
             tick_caches: crate::stepping_state::TickCaches::new(),
             pieces_gated: false,
+            buzz: crate::buzz::Buzz::new(),
             #[cfg(any(test, feature = "host"))]
             test_queue_ptrs: [core::ptr::null_mut(); MAX_AXES],
         }
@@ -116,6 +118,7 @@ impl Engine {
             addr_of_mut!((*ptr).last_motors).write([0.0; MAX_AXES]);
             addr_of_mut!((*ptr).tick_caches).write(crate::stepping_state::TickCaches::new());
             addr_of_mut!((*ptr).pieces_gated).write(false);
+            addr_of_mut!((*ptr).buzz).write(crate::buzz::Buzz::new());
             #[cfg(any(test, feature = "host"))]
             addr_of_mut!((*ptr).test_queue_ptrs).write([core::ptr::null_mut(); MAX_AXES]);
         }
@@ -256,6 +259,9 @@ impl Engine {
         pieces: &[PieceEntry],
         storage: &mut [PieceEntry],
     ) -> i32 {
+        if crate::buzz_stream::axis_active(axis_idx as usize) {
+            return RUNTIME_ERR_INVALID_ARG;
+        }
         let Some(axis) = self
             .stepping_axes
             .get_mut(axis_idx as usize)
@@ -272,6 +278,11 @@ impl Engine {
     }
 
     pub fn tick(&mut self, now: u64, shared: &SharedState, storage: &mut [PieceEntry]) -> bool {
+        let refill_fault = crate::buzz_stream::take_refill_fault();
+        if refill_fault != 0 {
+            shared.last_error.store(refill_fault, Ordering::Release);
+        }
+
         #[cfg(feature = "motion-module-stepper")]
         use crate::dispatch_stepper::dispatch_axis;
 
@@ -527,6 +538,97 @@ impl Engine {
         }
         crate::fault_helpers::raise_jog_parameters_invalid(shared);
         -1
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn resonance_buzz(
+        &mut self,
+        shared: &SharedState,
+        axis_mask: u8,
+        sign_mask: u8,
+        freq_start_millihz: u32,
+        freq_end_millihz: u32,
+        amplitude_nm: u32,
+        duration_ms: u32,
+        ramp_ms: u32,
+        now_cycle: u32,
+    ) -> i32 {
+        let rc = self.buzz.arm(
+            self.num_axes,
+            axis_mask,
+            sign_mask,
+            freq_start_millihz,
+            freq_end_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+        );
+        if rc != 0 {
+            return rc;
+        }
+        if !self.buzz.has_pending() {
+            return 0;
+        }
+        let excitations = self.buzz.take_excitations();
+        if excitations.is_empty() {
+            for i in 0..crate::step_queue::N_AXIS_STEP_QUEUES {
+                crate::buzz_stream::clear_axis(i);
+            }
+            return 0;
+        }
+        for ex in &excitations {
+            if ex.axis_idx >= crate::step_queue::N_AXIS_STEP_QUEUES {
+                crate::fault_helpers::raise_jog_parameters_invalid(shared);
+                return -1;
+            }
+            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
+                continue;
+            };
+            let axis_idle = axis.armed.is_none() && axis.ring.is_empty();
+            if !axis_idle {
+                crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
+                return -1;
+            }
+        }
+        let cps = f64::from(self.cycles_per_second);
+        for ex in &excitations {
+            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
+                continue;
+            };
+            let params = ex.into_params(
+                f64::from(axis.p_prev),
+                f64::from(axis.microstep_distance),
+                cps,
+                now_cycle,
+            );
+            if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
+                let cfg = crate::buzz_xdirect::XdirectConfig::new(
+                    axis.microstep_distance,
+                    crate::buzz_xdirect::DEFAULT_XDIRECT_UPDATE_HZ,
+                );
+                crate::buzz_stream::arm_axis_xdirect(ex.axis_idx, params, cfg);
+            } else if params.mu != 0.0 {
+                crate::buzz_stream::arm_axis_sweep(ex.axis_idx, params);
+            } else {
+                crate::buzz_stream::arm_axis(ex.axis_idx, params);
+            }
+        }
+        #[cfg(not(any(test, feature = "host")))]
+        #[allow(unsafe_code)]
+        unsafe {
+            crate::buzz_stream::refill_foreground_all(
+                now_cycle,
+                crate::step_queue::queue_for_axis,
+                crate::dispatch_stepper::kick_per_axis_timer_foreground,
+            );
+        }
+        0
+    }
+
+    pub fn emit_xdirect_buzz(&self, axis_idx: usize, offset_steps: i32, shared: &SharedState) {
+        if let Some(Some(axis)) = self.stepping_axes.get(axis_idx) {
+            crate::dispatch_stepper::write_phase_coils(axis_idx, axis, shared, offset_steps);
+        }
     }
 
     pub fn phase_jog_to(

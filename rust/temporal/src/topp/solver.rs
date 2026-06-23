@@ -1,46 +1,3 @@
-//! Clarabel SOCP construction + solve. INTERNAL — Clarabel types do not
-//! escape this module.
-//!
-//! Clarabel solves: `Ax + s = b`, `s ∈ K`
-//!
-//! The kalico `ConstraintBundle` uses: `A_k * x + b_rhs ∈ K`.
-//! These are equal when `A_clarabel = -A_k` and `b_clarabel = b_rhs`:
-//!   `s = b_rhs - (-A_k)*x = A_k*x + b_rhs` ∈ K  ✓
-//!
-//! This negation is applied uniformly to every row of A regardless of cone type.
-//!
-//! # Cone mapping (kalico → Clarabel 0.11)
-//!
-//! | kalico `Cone`            | Clarabel `SupportedConeT`  |
-//! |--------------------------|---------------------------|
-//! | `Zero`                   | `ZeroConeT(dim)`           |
-//! | `Nonneg`                 | `NonnegativeConeT(dim)`    |
-//! | `SecondOrder`            | `SecondOrderConeT(dim)`    |
-//! | `RotatedSecondOrder`     | (not emitted by `build()`) |
-//!
-//! `RotatedSecondOrderConeT` does not exist in Clarabel 0.11. `constraints::build_chain()`
-//! never emits `Cone::RotatedSecondOrder`; jerk constraints use the norm-form
-//! identity `z² ≤ u·v ↔ ||(2z, u-v)|| ≤ u+v` (standard SOC). The variant exists
-//! for exhaustiveness but `solve()` returns `SolverSetupError` if a bundle contains it.
-//!
-//! # Clarabel `SolverStatus` → kalico `SolverStatus`
-//!
-//! | Clarabel                         | kalico                             |
-//! |----------------------------------|------------------------------------|
-//! | `Solved`                         | `SolverStatus::Solved`             |
-//! | `AlmostSolved`                   | `SolverStatus::SolvedInexact{..}`  |
-//! | `PrimalInfeasible`               | `SolverStatus::Infeasible`         |
-//! | `DualInfeasible`                 | `SolverStatus::Infeasible`         |
-//! | `AlmostPrimalInfeasible`         | `SolverStatus::Infeasible`         |
-//! | `AlmostDualInfeasible`           | `SolverStatus::Infeasible`         |
-//! | `MaxIterations`                  | `SolverStatus::MaxIter{..}`        |
-//! | `MaxTime`                        | `SolverStatus::MaxIter{..}`        |
-//! | `NumericalError`                 | `SolverStatus::Infeasible`         |
-//! | `InsufficientProgress`           | `SolverStatus::MaxIter{..}`        |
-//! | `CallbackTerminated`             | `SolverStatus::Infeasible`         |
-//! | `Unsolved`                       | `SolverStatus::Infeasible`         |
-
-// clippy::doc_markdown fires on unicode-math and CamelCase names in docs here.
 #![allow(clippy::doc_markdown)]
 
 use clarabel::algebra::CscMatrix;
@@ -52,37 +9,18 @@ use clarabel::solver::{
 use crate::topp::constraints::{Cone, ConstraintBundle};
 use crate::topp::scaling::SolverScale;
 
-// ---------------------------------------------------------------------------
-// Per-thread Clarabel call counters — always compiled, near-zero overhead.
-// One Cell<u32> increment per Clarabel call (~1 ns); negligible versus the
-// SOCP solve time (~1-50 ms).  Integration tests read these via the public
-// `counters` module; production code ignores the counts.
-// ---------------------------------------------------------------------------
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-/// Snapshot of Clarabel invocation counts for one top-level schedule call.
-/// Reset with `counters::reset()` before a solve; read with
-/// `counters::snapshot()` after.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SolveCounters {
-    /// Total `DefaultSolver::new` + `.solve()` invocations.
     pub clarabel_calls_total: u32,
-    /// Calls with no trust region: base SOCP solve + path-jerk SLP outer iters.
     pub clarabel_calls_path_jerk: u32,
-    /// SLP9 calls with a trust region box (inner backtrack probes).
     pub clarabel_calls_slp9_tr: u32,
-    /// SLP9 calls without a trust region (no-TR fallback after failed backtrack).
     pub clarabel_calls_slp9_no_tr: u32,
-    /// 1 when `run_slp9_loop` triggers the uniform-damp restoration path.
     pub slp9_restoration_fired: u32,
-    /// 1 when `ToleranceMode::Auto` fires the tight (1e-8) second pass.
     pub auto_second_pass_fired: u32,
-    /// Number of `schedule_chain_*` invocations (one per chain solve, including
-    /// the velocity-clamp re-solves inside the parallel joining loop).
     pub chains_scheduled: u32,
-    /// Sum of `ChainGrid::n_points()` over every `schedule_chain_*` invocation.
-    /// This is the total number of discretization nodes the solver touched.
     pub grid_points_scheduled: u64,
 }
 
@@ -99,8 +37,6 @@ thread_local! {
     })};
 }
 
-/// Public counter accessors.  Integration tests and benchmarks call
-/// `counters::reset()` before a solve and `counters::snapshot()` after.
 pub mod counters {
     use super::{
         COUNTERS, Cell, G_CHAINS_SCHEDULED, G_CLARABEL_PATH_JERK, G_CLARABEL_SLP9_NO_TR,
@@ -121,9 +57,6 @@ pub mod counters {
         COUNTERS.with(Cell::get)
     }
 
-    /// Process-global aggregate across every worker thread that ran a chain
-    /// since the last [`reset`]. Use this — not [`snapshot`] — when the solve
-    /// fans out across threads (it always does via `multi::parallel`).
     pub fn snapshot_global() -> SolveCounters {
         let thread_local = COUNTERS.with(Cell::get);
         SolveCounters {
@@ -188,13 +121,6 @@ pub mod counters {
     }
 }
 
-// Sentinel: true while execution is inside an SLP9 outer loop.
-// Process-global mirror of the per-call counters. The schedule fans out across
-// worker threads (`thread::scope` in `multi::parallel`), so the thread-local
-// `COUNTERS` only ever see the work done on the thread that happened to run a
-// given chain. The globals aggregate across all worker threads so a caller on
-// the orchestrating thread can read total per-append solver WORK. Reset before
-// a top-level solve, snapshot after; cross-thread visibility is the point.
 static G_CLARABEL_TOTAL: AtomicU32 = AtomicU32::new(0);
 static G_CLARABEL_PATH_JERK: AtomicU32 = AtomicU32::new(0);
 static G_CLARABEL_SLP9_TR: AtomicU32 = AtomicU32::new(0);
@@ -206,8 +132,6 @@ thread_local! {
     static IN_SLP9_PHASE: Cell<bool> = const { Cell::new(false) };
 }
 
-// RAII guard that sets `IN_SLP9_PHASE = true` on construction and restores
-// the previous value on drop — safe even if `run_slp9_loop` nests.
 struct Slp9PhaseGuard {
     prev: bool,
 }
@@ -228,7 +152,6 @@ impl Drop for Slp9PhaseGuard {
 
 #[derive(Debug, Clone)]
 pub(crate) enum SlpCut {
-    /// Weight-based path-jerk cut. Rows scaled by `h̄²` to stay O(1).
     PathJerkWeights {
         i: usize,
         b_bar: f64,
@@ -244,15 +167,11 @@ pub(crate) enum SlpCut {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AxisJerkCut {
-    /// Grid index this cut is anchored at. The anchor is `idx[anchor_pos]`.
     pub i: usize,
     #[allow(dead_code)]
     pub axis: usize,
-    /// Column indices for the three stencil b-variables (from `stencil::stencil_at`).
     pub idx: [usize; 3],
-    /// b″ weights matching `idx` order (from `stencil::b_dd_weights(hl, hr)`).
     pub w: [f64; 3],
-    /// Iterate `b̄` values in stencil order `[b̄_{idx[0]}, b̄_{idx[1]}, b̄_{idx[2]}]`.
     pub b_bars: [f64; 3],
     pub a_bar_i: f64,
     pub cp: f64,
@@ -261,18 +180,11 @@ pub(crate) struct AxisJerkCut {
     pub j_lim_inflated: f64,
 }
 
-/// Gradient of `j_axis` at iterate `(b̄, ā)` w.r.t. stencil b-values and `a_i`.
-/// Used by the cut appender and exposed for numerical identity tests.
 pub struct AxisJerkGradient {
-    /// Gradient w.r.t. `b̄` in stencil order `[∂/∂b̄_{idx[0]}, ..., ∂/∂b̄_{idx[2]}]`.
     pub b: [f64; 3],
-    /// Gradient w.r.t. `ā_i`.
     pub a: f64,
 }
 
-/// Test-support export: computes the linearization coefficients (= gradient of
-/// `j_axis`) for an interior (anchor_pos=1) stencil with the given non-uniform
-/// spacings and `b_floor = 0`.
 pub fn axis_jerk_gradient_for_test(
     b_bars: &[f64; 3],
     a_bar: f64,
@@ -347,7 +259,6 @@ fn map_clarabel_cones(
     Ok(out)
 }
 
-/// Exhaustive match against Clarabel 0.11.1; a new variant will fail to compile.
 fn map_status(status: ClarabelStatus, residual: f64) -> SolverStatus {
     match status {
         ClarabelStatus::Solved => SolverStatus::Solved,
@@ -365,8 +276,6 @@ fn map_status(status: ClarabelStatus, residual: f64) -> SolverStatus {
     }
 }
 
-/// Variable layout (pinned in `constraints.rs`): `x[0..n_grid]` → `b_i`,
-/// `x[n_grid..2*n_grid]` → `a_i`.
 fn extract_solution(x: &[f64], n_grid: usize, status: SolverStatus) -> SolverResult {
     let b: Vec<f64> = x[..n_grid].to_vec();
     let a: Vec<f64> = x[n_grid..2 * n_grid].to_vec();
@@ -378,21 +287,6 @@ pub(crate) fn solve(bundle: &ConstraintBundle) -> Result<SolverResult, SolverSet
     solve_with_cuts(bundle, &[], 1e-8, &SolverScale::identity())
 }
 
-/// Append one per-axis Cartesian jerk SLP cut as two `Nonneg` rows.
-///
-/// Unified first-order Taylor linearization of `j_axis = c'''·b^(3/2) + 3·c''·a·√b + c'·s⃛`
-/// at iterate `(b̄, ā)`. Uses weight-based formula (3b): `b̄″ = w·b̄` (dot over stencil triple),
-/// `S = √(max(b̄_anchor, b_floor))`, `anchor_pos = idx.iter().position(|&x| x == i)`.
-///
-/// ```text
-///   coeff on b at idx[k], k ≠ anchor_pos:   c'·S·w[k]/2
-///   coeff on b at anchor:  (3/2)·c'''·S + 3·c''·ā/(2S) + c'·(w[anchor]·S/2 + b̄″/(4S))
-///   coeff on a_i:          3·c''·S
-///   K:  −(1/2)·c'''·S3 − (3/2)·c''·ā·S − c'·b̄″·S/4
-/// ```
-///
-/// Identity verified (uniform w reproduces legacy 3-case formulas exactly) by
-/// `tests/step9_cut_identity.rs`.
 #[allow(clippy::too_many_arguments)]
 fn append_axis_jerk_cut_to_clarabel(
     cut: &AxisJerkCut,
@@ -409,7 +303,6 @@ fn append_axis_jerk_cut_to_clarabel(
     let cppp = cut.cppp;
     let j = cut.j_lim_inflated;
 
-    // Variable layout (pinned in constraints.rs): b at 0..n_grid, a at n_grid..2*n_grid.
     let off_b = 0usize;
     let off_a = n_grid;
 
@@ -450,19 +343,12 @@ fn append_axis_jerk_cut_to_clarabel(
 
     let anchor_b_col = off_b + i;
 
-    // Row-∞-norm scaling: cp·√b/h² grows as O(N²) with grid refinement,
-    // reaching 1.9e6 on fixture_4 (146-cut case) vs a-column coefficients ~10.
-    // A 40 000:1 in-row spread causes QDLDL to return infeasible/maxiter on
-    // every trust-region subproblem and stalls the SLP. Dividing every
-    // coefficient and both RHS values by row_scale is a feasible-set-exact
-    // transformation for Nonneg rows (positive scalar on a ≥ 0 constraint).
     let row_scale = entries_extra
         .iter()
         .map(|&(_, a)| a.abs())
         .fold(alpha_b_anchor.abs(), f64::max);
 
     if row_scale == 0.0 {
-        // All coefficients are zero: vacuous constraint, skip both rows.
         return;
     }
 
@@ -500,25 +386,14 @@ fn push_nz(rowval: &mut [Vec<usize>], nzval: &mut [Vec<f64>], col: usize, row: u
     }
 }
 
-/// L∞ trust region on `(b, a)` around iterate `(b̄, ā)`.
-///
-/// Box rows enforce
-/// `b̄_i·(1−ρ_b) ≤ b_i ≤ b̄_i·(1+ρ_b)` and
-/// `ā_i ± ρ_a·max(|ā_i|, A_TR_FLOOR)` for all interior grid points.
-/// Boundary `b` rows are skipped — block (a) pins them exactly.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TrustRegion {
     pub rho_b: f64,
     pub rho_a: f64,
 }
 
-/// Floor on |ā_i| for the a-trust-region radius: prevents near-zero iterates
-/// from producing a zero-width TR that pins `a` in place. ≈ a_max.
 const A_TR_FLOOR: f64 = 5_000.0;
 
-/// Floor on `b̄_i` for the b-trust-region radius. Prevents near-zero iterates
-/// from producing a near-zero TR Clarabel can't satisfy against centripetal
-/// caps. (50 mm/s)² = 2500.
 const B_TR_FLOOR: f64 = 2_500.0;
 
 fn solve_with_cuts(
@@ -554,8 +429,6 @@ fn solve_with_cuts_and_trust_region(
     if cut_rows > 0 {
         cones_clarabel.push(NonnegativeConeT(cut_rows));
     }
-    // Trust-region rows: 2 per interior b_i (boundary b pinned by block (a)),
-    // 2 per a_i.
     let tr_rows = if trust_region.is_some() {
         if n_grid >= 2 {
             2 * (n_grid - 2) + 2 * n_grid
@@ -733,20 +606,6 @@ fn solve_with_cuts_and_trust_region(
     let p_zero = build_p_zero(n_vars);
     let q: &[f64] = &bundle.objective;
 
-    // verbose=false: diagnostics via kalico telemetry.
-    // max_iter=1000: SLP-cut SOCPs condition more tightly than the base SOCP;
-    //   200 iters produces InsufficientProgress on the CL-2024 counterexample
-    //   (a no-TR / path-jerk SLP case).
-    // max_iter=200 for trust-region subproblems: TR boxes strictly shrink the
-    //   feasible set so feasible TR solves converge faster; a TR subproblem
-    //   hitting MaxIter is discarded by run_slp9_loop's cand_ratio check and
-    //   the no-TR fallback provides an unconditional escape path. This caps
-    //   wasted IPM iterations on infeasible TR probes without affecting the
-    //   CL-2024 case (which is a no-TR solve).
-    // reduced_tol_*=1e-3: lets Clarabel report AlmostSolved; dropping these
-    //   restores Clarabel defaults and silently changes AlmostSolved semantics.
-    // direct_solve_method="qdldl", max_threads=1: determinism pin — single-
-    //   threaded QDLDL keeps the joining-loop early-bail deterministic.
     let max_iter: u32 = if trust_region.is_some() { 200 } else { 1000 };
     #[allow(clippy::similar_names)]
     let settings = DefaultSettings::<f64> {
@@ -776,24 +635,14 @@ fn solve_with_cuts_and_trust_region(
     Ok(extract_solution(&soln.x, n_grid, status))
 }
 
-/// Hard cap; Lee 2024 reports ~5–30 iterations in practice.
 const SLP_MAX_OUTER_ITERS: u32 = 50;
 
-/// Looser than `verify::EPS_FEAS`: the SLP predicate uses a raw FD estimate
-/// of `b''(s)`, which is noisy near constraint-switch kinks (~1–2% spurious
-/// violations). Real violations are ~143% on the CL-2024 counterexample.
 const SLP_EPS_FEAS: f64 = 5e-2;
 
-/// Avoids `1/√0` in the path-jerk linearization.
 const SLP_B_FLOOR: f64 = 1.0;
 
-/// Below this `b̄` a violator does not receive a cut. `α = J·h²/b̄^{3/2}`
-/// diverges as b̄ → 0, producing steep rows that wreck the inner SOCP's
-/// conditioning. ≈ (10 mm/s)².
 const SLP_B_CUT_FLOOR: f64 = 100.0;
 
-/// Warm-up before divergence rule fires; iterates routinely bounce for several
-/// iterations before settling (Lee 2024: 5–30 typical).
 const SLP_WARMUP_ITERS: u32 = 8;
 
 const SLP_MIN_IMPROVEMENT: f64 = 0.01;
@@ -801,8 +650,6 @@ const SLP_NO_IMPROVEMENT_WINDOW: usize = 10;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SlpOutcome {
-    /// No violators within `SLP_EPS_FEAS`. `outer_iters = 0` means the
-    /// base SOCP was already feasible.
     Converged {
         outer_iters: u32,
     },
@@ -828,17 +675,6 @@ fn max_ratio(vs: &[JerkViolator]) -> f64 {
     vs.iter().map(|v| v.ratio).fold(0.0_f64, f64::max)
 }
 
-/// Append one path-jerk SLP cut using weight-based b″ for non-uniform grids.
-///
-/// Row (sign-paired) scaled by `h̄²` so row magnitudes match the legacy uniform
-/// row and remain O(1) regardless of grid refinement:
-///   `3J·h̄²/√b̄ − α·h̄²·b_i − h̄²·Σ_k w_k·b_{idx[k]} ≥ 0`
-/// where `α = J/b̄^{3/2}`.
-///
-/// For uniform spacing h̄=h the weights `w_k = b_dd_weights(h,h)` give
-/// `h²·w_k = [1, -2, 1]`, reproducing the legacy `append_path_jerk_cut_to_clarabel`
-/// row exactly. For non-uniform junctions this is a feasible-set-identical
-/// positive scaling (`h̄² > 0`).
 #[allow(clippy::too_many_arguments)]
 fn append_path_jerk_cut_weights(
     i: usize,
@@ -861,19 +697,11 @@ fn append_path_jerk_cut_weights(
     let alpha = j_path * h2 / (b_bar * sqrt_b);
     let rhs = 3.0 * j_path * h2 / sqrt_b;
 
-    // anchor_pos: which element of idx is i (for adding alpha to the right column).
     let anchor_pos = idx
         .iter()
         .position(|&x| x == i)
         .expect("i must appear in idx");
 
-    // Sign-convention: A_clarabel = -A_k.
-    // The two Nonneg rows are:
-    //   (+): rhs - alpha·b_i - h²·b_dd ≥ 0
-    //   (−): rhs - alpha·b_i + h²·b_dd ≥ 0
-    // In Clarabel form A_clarabel·x + rhs ≥ 0:
-    //   non-anchor k: A_clarabel[idx[k]] = ∓h²·w[k]  (- for Row+, + for Row-)
-    //   anchor:       A_clarabel[idx[anchor]] = ∓h²·w[anchor] − alpha
     for &neg_b_dd in &[true, false] {
         let row = *n_rows;
         let sign_b_dd: f64 = if neg_b_dd { -1.0 } else { 1.0 };
@@ -891,7 +719,6 @@ fn append_path_jerk_cut_weights(
     let _ = n_grid;
 }
 
-/// Path-jerk violators using per-point `b_dd_weights` for non-uniform spacing.
 pub(crate) fn find_jerk_violators_chain(
     b: &[f64],
     h_intervals: &[f64],
@@ -918,8 +745,6 @@ pub(crate) fn find_jerk_violators_chain(
     out
 }
 
-/// Per-axis ratio scan for a chain grid. Includes a second pass over junction
-/// duals so both geometries at shared junction points are evaluated.
 pub(crate) fn max_axis_ratio_chain(
     result: &SolverResult,
     chain: &crate::topp::chain::ChainGrid,
@@ -1027,10 +852,6 @@ const SLP9_TARGET_MARGIN: f64 = 1e-3;
 const SLP9_CUT_PLACEMENT_FRACTION: f64 = 0.9;
 const SLP9_DAMP_TARGET_RATIO: f64 = 0.9;
 
-/// Cut builder for a chain grid. Uses per-point stencil weights from
-/// `chain.h_intervals`. Junction dual points receive extra cuts (dual geometry
-/// and limits evaluated at the same stencil triple). Cuts are placed for all
-/// violators above `target_floor` and tightened to `target_ratio`.
 pub(crate) fn build_axis_jerk_cuts_chain(
     result: &SolverResult,
     chain: &crate::topp::chain::ChainGrid,
@@ -1078,7 +899,6 @@ pub(crate) fn build_axis_jerk_cuts_chain(
                 j_lim_inflated: j_lim,
             }));
         }
-        // Junction dual: same stencil triple, right-side geometry and limits.
         for jct in chain.junctions.iter().filter(|jct| jct.idx == i) {
             let jlim = &chain.limits[jct.limits_idx];
             let jgeom = &jct.geom;
@@ -1116,11 +936,6 @@ pub(crate) fn build_axis_jerk_cuts_chain(
     cuts
 }
 
-/// Path-jerk SLP outer loop for chain grids (non-uniform spacing).
-///
-/// Clone of `slp_solve` control flow; calls `find_jerk_violators_chain` and
-/// emits weight-based path-jerk cuts via `append_path_jerk_cut_weights`.
-/// Wired into the schedule entry in Task 8.
 pub(crate) fn slp_solve_chain(
     bundle: &ConstraintBundle,
     tol: f64,
@@ -1421,9 +1236,6 @@ fn run_slp9_loop(
     ))
 }
 
-/// Uniform time dilation of the iterate: `b ← λ²·b`, `a ← λ²·a`. Every
-/// constraint-family ratio decreases monotonically as λ → 0, so this can always
-/// restore a feasible point while staying on the `b' = 2a` motion manifold.
 fn damp_profile_uniform(result: &SolverResult, lambda: f64) -> SolverResult {
     let l2 = lambda * lambda;
     SolverResult {
@@ -1453,12 +1265,6 @@ fn uniform_damp_for_feasibility(
     (damped, ratio)
 }
 
-/// Cheap O(N) feasible seed for the recovery descent when the direct
-/// feasibility descent stalled. Uniform time dilation (`b ← λ²b, a ← λ²a`)
-/// reduces every constraint ratio monotonically and stays on the `b' = 2a`
-/// motion manifold (zero Clarabel calls). Returns `None` when even full
-/// dilation cannot reach `ratio ≤ 1.0` — the curve is genuinely infeasible and
-/// must not be laundered into success.
 fn seed_feasible_point(
     result: &SolverResult,
     chain: &crate::topp::chain::ChainGrid,
@@ -1470,21 +1276,6 @@ fn seed_feasible_point(
     (uniform_ratio <= 1.0).then_some(uniform)
 }
 
-/// Always-available feasibility floor for the anytime path. Uniformly
-/// time-dilates an MVC-respecting base iterate until every constraint-family
-/// ratio sits at or below the kinematic limit, with zero Clarabel solves.
-///
-/// `base` must already satisfy the velocity / accel / centripetal cones (the
-/// path-jerk SLP iterate does — it only ever adds jerk cuts, never relaxing the
-/// SOCP cones), so `damp_profile_uniform` lowers `b,a` monotonically and drives
-/// jerk down as `λ³`, the fastest-shrinking family. Returns `None` only when
-/// even full dilation cannot reach `ratio ≤ 1` — a genuine infeasibility that
-/// must never be laundered into a feasible-looking profile.
-///
-/// The damped seed starts slower than the committed boundary (`b[0]` is scaled),
-/// which is strictly safe: slower start, lower accel/jerk demand. The streaming
-/// boundary logic clamps the dispatched front downward only, so a slower floor
-/// start never violates the committed past.
 fn feasibility_floor(
     base: &SolverResult,
     chain: &crate::topp::chain::ChainGrid,
@@ -1518,10 +1309,6 @@ fn profile_time(result: &SolverResult, h_intervals: &[f64]) -> f64 {
         .sum()
 }
 
-/// The SLP9 loop only ever reduces constraint violation; descending from the
-/// follower-free iterate it stops at first feasibility, which can sit a few
-/// percent below the local optimum. Re-maximize speed under full-cap cuts
-/// rebuilt at each accepted iterate while staying feasible.
 fn build_polish_cuts(
     current: &SolverResult,
     chain: &crate::topp::chain::ChainGrid,
@@ -1603,16 +1390,6 @@ fn polish_axis_jerk(
     Ok(current)
 }
 
-/// Recovers a feasible, manifold-consistent profile from a uniformly-damped
-/// seed when the direct feasibility descent stalled. The uniform-damp seed is
-/// feasible but off the `b' = 2a` motion manifold and carries a scaled entry
-/// `b[0]`; a short trust-region-boxed cutting-plane projection re-pins
-/// `b[0] = v_start²` and lands on a feasible on-manifold profile (the only kind
-/// valid as an output trajectory) in a handful of Clarabel solves — not a full
-/// `run_slp9_loop` re-descent, which would re-stall and burn the whole budget.
-/// A final time-maximizing polish nudges the projected profile toward the local
-/// time-optimum while staying feasible. Returns the recovered profile and its
-/// axis-jerk ratio; the seed is the feasibility floor.
 fn recover_speed_from_seed(
     bundle: &ConstraintBundle,
     chain: &crate::topp::chain::ChainGrid,
@@ -1663,17 +1440,6 @@ fn recover_speed_from_seed(
     Ok((polished, polished_ratio))
 }
 
-/// Anytime exit reconciliation. When the SLP stopped early on a deadline and
-/// the best iterate it holds is not yet feasible, substitute the feasibility
-/// floor (feasible by construction). Leaves a genuine, non-time-budget failure
-/// untouched so it still maps to a non-success status and fails loud:
-///
-/// - already feasible → unchanged (the ample-deadline / normal path is bit-identical).
-/// - infeasible, deadline NOT expired → unchanged (genuine SLP failure, fail loud).
-/// - infeasible, deadline expired, floor exists → ship the floor as `Diverged`,
-///   which `map_status` maps to a feasible `SolvedInexact` success.
-/// - infeasible, deadline expired, floor `None` → unchanged (genuine
-///   infeasibility — never laundered into a feasible-looking profile).
 fn ship_feasible_or_floor(
     result: SolverResult,
     outcome: SlpOutcome,

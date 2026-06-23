@@ -310,6 +310,77 @@ fn invalid_config_is_rejected() {
 }
 
 #[test]
+fn invalid_extrude_only_limits_are_rejected() {
+    let out = outcome(vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)], Vec::new());
+    for bad in [0.0, -1.0, f64::NAN] {
+        let cfg = VelocityConfig {
+            max_extrude_only_velocity_mm_s: bad,
+            ..VelocityConfig::default()
+        };
+        assert_eq!(plan_velocity(&out, cfg), Err(VelocityError::InvalidConfig));
+        let cfg = VelocityConfig {
+            max_extrude_only_accel_mm_s2: bad,
+            ..VelocityConfig::default()
+        };
+        assert_eq!(plan_velocity(&out, cfg), Err(VelocityError::InvalidConfig));
+    }
+}
+
+#[test]
+fn extrude_only_velocity_caps_pure_e_move() {
+    let out = outcome(
+        vec![virtual_move(10.0, 100.0, 200.0, 1000.0, 1)],
+        Vec::new(),
+    );
+    let cfg = VelocityConfig {
+        max_extrude_only_velocity_mm_s: 5.0,
+        ..VelocityConfig::default()
+    };
+    let plan = plan_velocity(&out, cfg).unwrap();
+    let peak = plan.moves[0].peak_v;
+    assert!(
+        peak <= 5.0 + 1e-9,
+        "pure-E peak {peak} exceeds extrude-only cap"
+    );
+    assert!(
+        peak > 4.9,
+        "pure-E move should ride the 5.0 cap, got {peak}"
+    );
+}
+
+#[test]
+fn extrude_only_accel_caps_pure_e_move() {
+    let out = outcome(vec![virtual_move(0.5, 100.0, 100.0, 1000.0, 1)], Vec::new());
+    let cfg = VelocityConfig {
+        max_jerk_mm_s3: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: 10.0,
+        ..VelocityConfig::default()
+    };
+    let plan = plan_velocity(&out, cfg).unwrap();
+    let apex = (10.0_f64 * 0.5).sqrt();
+    assert!((plan.moves[0].peak_v - apex).abs() < 1e-6);
+}
+
+#[test]
+fn extrude_only_limits_do_not_affect_spatial_move() {
+    let out = outcome(vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)], Vec::new());
+    let base = plan_velocity(&out, VelocityConfig::default())
+        .unwrap()
+        .moves[0]
+        .peak_v;
+    let cfg = VelocityConfig {
+        max_extrude_only_velocity_mm_s: 1.0,
+        max_extrude_only_accel_mm_s2: 1.0,
+        ..VelocityConfig::default()
+    };
+    let capped = plan_velocity(&out, cfg).unwrap().moves[0].peak_v;
+    assert!(
+        (base - capped).abs() < 1e-9,
+        "extrude-only limits leaked into a spatial move: {base} vs {capped}"
+    );
+}
+
+#[test]
 fn empty_and_single_move() {
     let empty = plan_velocity(&outcome(Vec::new(), Vec::new()), VelocityConfig::default()).unwrap();
     assert!(empty.moves.is_empty());
@@ -573,12 +644,22 @@ fn warm_start_is_faster_than_starting_from_rest() {
 
 #[test]
 fn warm_start_over_commit_cannot_brake_in_window() {
-    // 1 mm at a_max 1000 brakes from at most sqrt(2*1000*1) ≈ 44.7 mm/s; the
-    // feed ceiling (200) admits the 100 mm/s entry, so this exercises the
-    // can't-stop guard, not the ceiling guard.
-    let out = outcome(vec![line_move(1.0, 200.0, 200.0, 1000.0, 5)], Vec::new());
+    let (length, accel, feed_ceiling, entry_v) = (1.0_f64, 1000.0_f64, 200.0_f64, 100.0_f64);
+    let max_brakeable_entry_v = (2.0 * accel * length).sqrt();
+    assert!(
+        entry_v <= feed_ceiling,
+        "entry must clear the feed ceiling so this exercises the can't-stop guard, not the ceiling guard"
+    );
+    assert!(
+        entry_v > max_brakeable_entry_v,
+        "entry must exceed the braking-distance budget so the can't-stop guard trips"
+    );
+    let out = outcome(
+        vec![line_move(length, feed_ceiling, feed_ceiling, accel, 5)],
+        Vec::new(),
+    );
     assert_eq!(
-        plan_velocity_warm_start(&out, VelocityConfig::default(), 100.0),
+        plan_velocity_warm_start(&out, VelocityConfig::default(), entry_v),
         Err(VelocityError::OverCommitted { line_no: 5 })
     );
 }

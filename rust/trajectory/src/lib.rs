@@ -1,4 +1,8 @@
+#![allow(deprecated)]
+
+#[deprecated(note = "legacy planner stack only; live path must not depend on beta")]
 mod beta;
+#[deprecated(note = "legacy planner stack only; live path must not depend on emit_shaped")]
 pub mod emit_shaped;
 pub mod fit;
 mod kernel;
@@ -11,6 +15,7 @@ pub mod post_processor;
 mod reparam;
 mod shaper;
 mod smooth_fit;
+#[deprecated(note = "legacy planner stack only; live path must not depend on streaming")]
 pub mod streaming;
 pub mod utilization;
 
@@ -18,19 +23,17 @@ pub use beta::{ReplanBindingSummary, ReplanWorstBinding};
 pub use emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory, ShapeEmission};
 pub use plan_velocity::{plan_velocity, PlanInput, PlanOutput, PlanSegment, PlanStats, SafetyMode};
 pub use post_processor::{
-    AxisChainSet, CompiledChain, PostProcessorError, PostProcessorInstance, PostProcessorType,
+    apply_derivative_gain, AxisChainSet, ChainStage, CompiledChain, PostProcessorError,
+    PostProcessorInstance, PostProcessorType,
 };
+pub use shaper::ShapedSignal;
 pub use streaming::ReplanReport;
 
 #[derive(Debug)]
 pub struct ShapeBatchInput<'a> {
     pub segments: &'a [ShapeSegmentInput<'a>],
-    /// Per-axis post-processor chains — the single source for solver shaping,
-    /// PA gains, and emission.
     pub chains: &'a AxisChainSet,
-    /// Physical start position per follower, parallel to `chains.followers`.
     pub follower_start: &'a [f64],
-    /// Realized pre-batch per-axis velocity for the shaper window's left edge.
     pub follower_history: Option<&'a temporal::FollowerHistory>,
     pub grid_strategy: temporal::multi::GridStrategy,
     pub worker_threads: usize,
@@ -40,11 +43,6 @@ pub struct ShapeBatchInput<'a> {
     pub initial_v: f64,
     pub initial_a: f64,
     pub terminal_v: f64,
-    /// Axis-wise second derivatives `[d²x/dt², d²y/dt², d²z/dt²]` to pin at the
-    /// very first sample of the very first fitted segment. `None` uses the composed
-    /// polynomial's own boundary curvature. Set by the streaming state to the
-    /// old plan's derivatives at `t_dispatched` so the new plan achieves exact C2
-    /// continuity at the replan boundary.
     pub start_d2_override: Option<[f64; 3]>,
 }
 
@@ -71,7 +69,6 @@ pub struct BetaWarning {
 
 #[derive(Debug, Clone)]
 pub struct ShapedSegment {
-    /// Index = axis registry index: 0..3 spatial, 3.. followers. Always ≥ 3.
     pub axes: Vec<nurbs::ScalarNurbs<f64>>,
     pub followers: Vec<geometry::segment::FollowerDemand>,
     pub t_start: f64,

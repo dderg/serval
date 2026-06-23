@@ -126,12 +126,6 @@ pub(super) fn disk_reach_v_rev(kin: &Kinematics, v_in: f64, s: f64, tol: f64) ->
     disk_reach_v(&kin.reversed(), v_in, s, tol)
 }
 
-/// Run-anchored tangential-jerk context for one move's profile reconstruction.
-/// The forward jerk ramp is measured from the run's start anchor velocity
-/// `fwd_v` over cumulative arc `fwd_s + s`; the backward ramp from the run's
-/// end anchor velocity `bwd_v` over `bwd_s + (length - s)`. The jerk magnitude
-/// therefore only relaxes to zero at the run's rest anchors (stops / chain
-/// ends), not at internal clothoid seams.
 pub(super) struct JerkAnchors {
     pub fwd_v: f64,
     pub fwd_s: f64,
@@ -174,11 +168,6 @@ fn disk_rail_accel(accel: f64, kappa_abs: f64, v: f64) -> f64 {
     (accel * accel - a_n * a_n).max(0.0).sqrt()
 }
 
-/// Tangential acceleration cannot exceed the acceleration disk's remaining
-/// budget once centripetal `a_n = kappa*v^2` is spent: `a_t^2 + a_n^2 <= a^2`.
-/// At a biclothoid apex `a_n` saturates the disk, so the budget collapses to
-/// ~0 and the curvature-rate kink in `a_t` is pinned out instead of poking the
-/// reported acceleration past `a_max`.
 fn clamp_to_disk(a_t: f64, accel: f64, kappa_abs: f64, v: f64) -> f64 {
     let budget = disk_rail_accel(accel, kappa_abs, v);
     a_t.clamp(-budget, budget)

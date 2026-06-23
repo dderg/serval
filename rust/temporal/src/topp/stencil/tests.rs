@@ -2,13 +2,13 @@ use super::*;
 
 #[test]
 fn b_dd_weights_exact_on_quadratic_nonuniform() {
-    // b(s) = 3s² − 2s + 1 → b″ = 6 everywhere, any spacing.
     let b = |s: f64| 3.0 * s * s - 2.0 * s + 1.0;
+    let second_derivative = 6.0;
     let (hl, hr) = (0.3, 0.7);
     let s_i = 1.0;
     let w = b_dd_weights(hl, hr);
     let approx = w[0] * b(s_i - hl) + w[1] * b(s_i) + w[2] * b(s_i + hr);
-    assert!((approx - 6.0).abs() < 1e-10, "got {approx}");
+    assert!((approx - second_derivative).abs() < 1e-10, "got {approx}");
 }
 
 #[test]
@@ -61,7 +61,6 @@ fn b_ddd_weights_exact_on_cubics() {
 
 #[test]
 fn s_snap_on_quartic_b_profile() {
-    // b(s) = (1+s)^4 ⇒ ṡ = (1+s)², s̈ = 2(1+s)³, s⃛ = 6(1+s)⁴, s⁗ = 24(1+s)⁵
     let n = 401;
     let h = 0.5 / (n - 1) as f64;
     let s: Vec<f64> = (0..n).map(|i| i as f64 * h).collect();

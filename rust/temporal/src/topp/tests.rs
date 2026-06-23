@@ -2,9 +2,6 @@ use super::*;
 use crate::Limits;
 use constraints::EndpointConditions;
 
-/// Straight 600 mm collinear cubic at machine-limit speed: v_max = 1000 mm/s,
-/// a_max = 50 km/s². κ = 0 on a straight line, so no curvature row is active;
-/// the solver must produce a usable profile, not MaxIter.
 #[test]
 fn schedule_segment_straight_line_at_1000mms_solves() {
     let cps = vec![
@@ -81,9 +78,6 @@ fn schedule_segment_straight_line_returns_profile() {
 
 #[test]
 fn pinned_nonzero_a_start_converges() {
-    // Reproduction case: v_start=575, a_start=2000, 100mm straight, N=100
-    // previously produced DivergedSlp{ratio≈2.0} with the hard-pin approach.
-    // The tube must make this converge.
     let curve = VectorNurbs::<f64, 3>::try_new(
         1,
         vec![0.0, 0.0, 1.0, 1.0],

@@ -210,8 +210,8 @@ impl<'a> ScalarNurbsRef<'a, f32> {
             });
         }
 
-        // SAFETY: alignment checked above; lengths checked above; T = f32 has
-        // no invalid bit patterns for any 4-byte sequence.
+        debug_assert!((buf.as_ptr() as usize) % core::mem::align_of::<f32>() == 0);
+        debug_assert!(buf.len() >= total);
         #[allow(unsafe_code)]
         let (knots, cps) = unsafe {
             let knots_ptr = buf.as_ptr().add(SCALAR_HEADER_BYTES).cast::<f32>();

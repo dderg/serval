@@ -265,8 +265,8 @@ TIM3_IRQHandler(void)
 
     TIM3->SR = (uint16_t)~TIM_SR_CC1IF;
 
-    extern uint32_t step_output_event(void);
-    uint32_t next = step_output_event();
+    extern uint32_t step_output_event(void *rt);
+    uint32_t next = step_output_event(runtime_handle);
     step_output_timer_arm(next);
 
     diag_stepout_account(diag_enter, DWT->CYCCNT);

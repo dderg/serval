@@ -21,6 +21,8 @@ fn message_kind_round_trips_via_u16() {
         MessageKind::SdoReadResponse,
         MessageKind::SdoWrite,
         MessageKind::SdoWriteResponse,
+        MessageKind::ResonanceBuzz,
+        MessageKind::ResonanceBuzzResponse,
     ] {
         assert_eq!(MessageKind::from_u16(k.as_u16()), Some(k));
     }
@@ -51,6 +53,30 @@ fn configure_axes_roundtrip() {
     let r = ConfigureAxesResponse { result: -7 };
     assert_eq!(roundtrip(&r), r);
     assert_eq!(r.encoded_to_vec().len(), 4);
+}
+
+#[test]
+fn resonance_buzz_roundtrip() {
+    let v = ResonanceBuzz {
+        axis_mask: 0b001,
+        sign_mask: 0b010,
+        freq_start_millihz: 5_000,
+        freq_end_millihz: 300_000,
+        amplitude_nm: 4_200,
+        duration_ms: 3_000,
+        ramp_ms: 300,
+    };
+    assert_eq!(roundtrip(&v), v);
+    assert_eq!(v.encoded_to_vec().len(), 22);
+    let r = ResonanceBuzzResponse { result: -1 };
+    assert_eq!(roundtrip(&r), r);
+    assert_eq!(r.encoded_to_vec().len(), 4);
+}
+
+#[test]
+fn resonance_buzz_kind_is_not_event() {
+    assert!(!MessageKind::ResonanceBuzz.is_event());
+    assert!(!MessageKind::ResonanceBuzzResponse.is_event());
 }
 
 #[test]

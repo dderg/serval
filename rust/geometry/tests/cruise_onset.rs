@@ -68,6 +68,7 @@ fn run_samples(max_v: f64, accel: f64, jerk: f64, waypoints: &[[f64; 3]]) -> Vec
         consistency_tol: 1e-6,
         max_jerk_mm_s3: jerk,
         integration_tol: 1e-7,
+        ..VelocityConfig::default()
     };
     let profile = plan_velocity(&outcome, config).unwrap();
     let mut out = Vec::new();

@@ -1,3 +1,4 @@
+pub mod buzz;
 pub mod capture;
 pub mod claim;
 pub mod clock;

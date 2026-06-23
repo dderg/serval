@@ -1,11 +1,3 @@
-/// Regression: a segment where all interior b values fall below `SLP_B_CUT_FLOOR`
-/// must not produce `MaxIterSlp`.
-///
-/// `j_max = [1,1,1]` makes the FD path-jerk ratio fire on the initial SOCP
-/// solution while the 0.03 mm move keeps every b below the cut floor.
-/// Before the fix, `slp_solve_chain` returned `MaxIters` (→ `MaxIterSlp` from
-/// `output::map_status` when the verifier also reported infeasible), stalling
-/// the joining loop with `StalledOnInfeasibleSegment`.
 use nurbs::VectorNurbs;
 use temporal::{GridConfig, GridScheme, Limits, SolveStatus, schedule_segment};
 

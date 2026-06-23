@@ -1,7 +1,5 @@
 use crate::{AlgebraError, Float, ScalarNurbs};
 
-/// One Bézier piece as a polynomial in the Pascal-shifted monomial basis:
-/// `p(u) = Σ_{k=0..d} coeffs[k] * (u - u_start)^k`
 #[derive(Debug, Clone, PartialEq)]
 pub struct BezierPiece<T: Float> {
     pub u_start: T,
@@ -187,7 +185,6 @@ impl BezierPiece<f64> {
             let x = -b / (2.0 * a);
             return if x.is_finite() { vec![x] } else { Vec::new() };
         }
-        // Numerically stable form — avoids catastrophic cancellation.
         let sqrt_disc = disc.sqrt();
         let q = -0.5 * (b + b.signum() * sqrt_disc);
         let x1 = q / a;
@@ -504,8 +501,11 @@ pub fn split_piece_at<T: Float>(
     (left, right)
 }
 
-// Safe for n ≤ 50; crate MAX_DEGREE = 20, convolve worst case n = 40.
 pub(crate) fn binomial(n: usize, k: usize) -> u64 {
+    debug_assert!(
+        n <= 50,
+        "binomial intermediate products overflow u64 above n = 50"
+    );
     if k > n {
         return 0;
     }

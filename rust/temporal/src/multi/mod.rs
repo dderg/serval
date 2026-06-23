@@ -18,23 +18,16 @@ pub struct SegmentInput<'a> {
     pub curve: &'a VectorNurbs<f64, 3>,
     pub limits: Limits,
     pub followers: &'a [crate::FollowerDemand],
-    /// `Some(length)` marks a follower-only move planned on a virtual path of
-    /// this arclength; `curve` has zero displacement and the follower rows do
-    /// all the limiting.
     pub virtual_path: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct BatchInput<'a> {
     pub segments: &'a [SegmentInput<'a>],
-    /// Input-shaper kernels + pre-batch follower history; `None` = no shaper
-    /// folding anywhere in the batch.
     pub shaping: Option<&'a BatchShaping>,
     pub grid_strategy: GridStrategy,
     pub worker_threads: usize,
     pub initial_velocity: f64,
-    /// Path accel at the batch start. Pinned in the SOCP only when `initial_velocity > 0`;
-    /// at a rest start it MUST be 0.0 (asserted) and the rest envelope governs.
     pub initial_accel: f64,
     pub terminal_velocity: f64,
 }
@@ -238,7 +231,6 @@ pub fn plan_batch(input: BatchInput<'_>) -> Result<BatchOutput, BatchError> {
 
     joining::exchange_follower_tails(&mut chain_grids, &mut states, input.worker_threads)?;
 
-    // Slice each chain profile into per-segment profiles and flatten.
     let profiles: Vec<TopProfile> = states
         .into_iter()
         .zip(chain_grids.iter())

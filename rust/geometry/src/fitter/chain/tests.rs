@@ -32,8 +32,6 @@ fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
-/// Quarter-circle vertices, radius `r`, centre `(0, r)`, starting at the origin heading +x,
-/// curving toward +y (a left turn), faceted into `n` equal-angle chords.
 fn arc_vertices(r: f64, n: usize, span: f64) -> Vec<[f64; 3]> {
     (0..=n)
         .map(|k| {
@@ -124,7 +122,6 @@ fn faceted_arc_reconstructs_to_clothoid_arc_clothoid() {
     );
     let (_, up, arc, down) = find_recon(&out.moves);
     assert!(arc.radius > 0.0 && arc.radius.is_finite());
-    // The transition spirals ramp curvature 0 -> kappa_arc -> 0.
     assert!(up.kappa(0.0).abs() < 1e-9);
     assert!(down.kappa(down.s_len()).abs() < 1e-9);
 }
@@ -141,8 +138,6 @@ fn no_arc_fit_config_never_chains() {
 
 #[test]
 fn sharp_corners_rejected_by_angle_gate() {
-    // 0.5 mm sides are within the length gate, but the 90 deg turns exceed the
-    // default angle gate, so a square stays sharp.
     let config = ChainFitConfig::with_arc_fit(1.0, 12f64.to_radians());
     let moves = vec![
         seg(1, 3000.0, 5.0, 200.0, [0.0, 0.0, 0.0], [0.5, 0.0, 0.0], 0.0),
@@ -155,8 +150,6 @@ fn sharp_corners_rejected_by_angle_gate() {
 
 #[test]
 fn faceted_arc_within_default_gates_reconstructs() {
-    // r=3, 12 facets over 90 deg: ~0.39 mm chords turning ~7.5 deg each, inside
-    // the default 1.0 mm / 12 deg gates.
     let config = ChainFitConfig::with_arc_fit(1.0, 12f64.to_radians());
     let moves = faceted_arc(3.0, 12, PI / 2.0, 3000.0, 20.0, 200.0, 0.0);
     let out = fit_chain(&moves, config).unwrap();
@@ -165,8 +158,6 @@ fn faceted_arc_within_default_gates_reconstructs() {
 
 #[test]
 fn long_facets_rejected_by_length_gate() {
-    // Shallow turns (~5.7 deg, within a generous angle gate) but ~10 mm chords:
-    // the length gate alone keeps the run from collapsing into an arc.
     let config = ChainFitConfig::with_arc_fit(1.0, 60f64.to_radians());
     let moves = faceted_arc(100.0, 4, 0.4, 3000.0, 20.0, 200.0, 0.0);
     let out = fit_chain(&moves, config).unwrap();
@@ -180,11 +171,9 @@ fn reconstruction_is_g2_and_seam_exact() {
     let (i, up, arc, down) = find_recon(&out.moves);
     let kappa_arc = arc.kappa(0.0);
 
-    // Curvature continuity (G2) across both transition seams.
     assert!((up.kappa(up.s_len()) - kappa_arc).abs() < 1e-9);
     assert!((down.kappa(0.0) - kappa_arc).abs() < 1e-9);
 
-    // Position + heading continuity (G1) through the whole reconstruction, via the oracle.
     let line_in = as_line(&out.moves[i - 2]);
     let line_out = as_line(&out.moves[i + 2]);
     assert!(dist(line_in.point_at(line_in.s_len()), up.point_at(0.0)) < 1e-6);
@@ -206,7 +195,6 @@ fn reconstructed_arc_passes_near_interior_vertices() {
     let out = fit_chain(&moves, cfg()).unwrap();
     let (_, _, arc, _) = find_recon(&out.moves);
 
-    // Interior vertices lie within the un-faceting tube of the reconstructed circle.
     let verts = arc_vertices(r, n, span);
     for v in &verts[2..n - 1] {
         let radial = dist(*v, arc.origin);
@@ -220,8 +208,6 @@ fn reconstructed_arc_passes_near_interior_vertices() {
 
 #[test]
 fn chain_fit_beats_the_per_corner_sawtooth() {
-    // Short facets + a generous square-corner velocity make every per-corner blend
-    // budget-bound (high kappa_peak), so the per-corner profile throttles at each apex.
     let moves = faceted_arc(3.0, 20, PI / 2.0, 3000.0, 45.0, 200.0, 0.3);
 
     let chain = fit_chain(&moves, cfg()).unwrap();
@@ -254,12 +240,11 @@ fn extrusion_is_conserved_across_the_run() {
 
 #[test]
 fn non_cocircular_run_falls_through_to_per_corner() {
-    // Same turn direction but curvature increases facet-to-facet: not one circle.
     let mut p = [0.0, 0.0, 0.0];
     let mut heading = 0.0_f64;
     let mut moves = Vec::new();
     for k in 0..8u32 {
-        heading += 0.12 + 0.04 * k as f64; // growing deflection => varying kappa
+        heading += 0.12 + 0.04 * k as f64;
         let next = [p[0] + heading.cos(), p[1] + heading.sin(), 0.0];
         moves.push(seg(k + 1, 3000.0, 20.0, 200.0, p, next, 0.0));
         p = next;
@@ -275,20 +260,16 @@ fn non_cocircular_run_falls_through_to_per_corner() {
 
 #[test]
 fn turn_reversal_splits_the_run() {
-    // A polyline that turns left for a while, then right: a single absolute-heading
-    // walk whose turn sign flips halfway. Detection must never merge across the flip.
     let mut p = [0.0, 0.0, 0.0];
     let mut ang = 0.0_f64;
     let mut moves = Vec::new();
     for k in 0..12u32 {
-        ang += if k < 6 { 0.2 } else { -0.2 }; // left, then right
+        ang += if k < 6 { 0.2 } else { -0.2 };
         let next = [p[0] + ang.cos(), p[1] + ang.sin(), 0.0];
         moves.push(seg(k + 1, 3000.0, 20.0, 200.0, p, next, 0.0));
         p = next;
     }
     let out = fit_chain(&moves, cfg()).unwrap();
-    // The left and right same-turn arcs are each co-circular and reconstruct independently;
-    // detection breaks at the sign flip, so it never forms one run spanning the reversal.
     assert!(out.report.chains <= 2);
 }
 
@@ -296,14 +277,11 @@ fn turn_reversal_splits_the_run() {
 fn arc_move_breaks_the_run() {
     let mut moves = faceted_arc(3.0, 6, PI / 3.0, 3000.0, 20.0, 200.0, 0.0);
     let split = moves.len() / 2;
-    // Inject a non-Line (virtual) move mid-chain.
     let mut virt = moves[split].clone();
     virt.segment.spatial = None;
     virt.segment.virtual_path_mm = Some(0.5);
     moves.insert(split, virt);
     let out = fit_chain(&moves, cfg()).unwrap();
-    // Each side may reconstruct independently, but the non-spatial move is never merged
-    // across — it survives verbatim in the output.
     assert!(out.report.chains <= 2);
     assert!(
         out.moves.iter().any(|m| m.segment.spatial.is_none()),
@@ -358,7 +336,6 @@ fn short_chain_passes_through() {
 
 #[test]
 fn run_velocity_profile_plans_without_error() {
-    // End-to-end: a reconstructed run is consumed by the velocity planner unchanged.
     let moves = faceted_arc(3.0, 12, PI / 2.0, 3000.0, 20.0, 200.0, 0.3);
     let out = fit_chain(&moves, cfg()).unwrap();
     let profile = plan_velocity(&out, VelocityConfig::default()).unwrap();
@@ -367,9 +344,6 @@ fn run_velocity_profile_plans_without_error() {
 
 #[test]
 fn coarse_facets_still_reconstruct_landing_on_the_last_chord() {
-    // ~12 deg per facet — the down-spiral exits along the LAST CHORD heading (the net
-    // turn equals the chord-to-chord total by construction), not the circle tangent, so
-    // the G1 tail-seam gate is satisfied even for coarse faceting.
     let moves = faceted_arc(4.0, 5, PI / 3.0, 3000.0, 20.0, 200.0, 0.0);
     let out = fit_chain(&moves, cfg()).unwrap();
     assert_eq!(out.report.chains, 1);
@@ -382,9 +356,6 @@ fn coarse_facets_still_reconstruct_landing_on_the_last_chord() {
 
 #[test]
 fn non_cocircular_triple_is_rejected_by_the_vertex_tube() {
-    // Three facets (the minimum run) whose incircle solve is exactly determined, so the
-    // residual is vacuously zero — but the chords sample no single circle. The vertex
-    // tube gate rejects it; without it the triangle incircle would gross-cut the corner.
     let mut p = [0.0, 0.0, 0.0];
     let mut moves = Vec::new();
     for (k, ang) in [0.0_f64, 0.25, 0.95].iter().enumerate() {
@@ -407,7 +378,6 @@ fn transition_shift_stays_within_delta() {
     let moves = faceted_arc(3.0, 12, PI / 2.0, accel, scv, 200.0, 0.0);
     let out = fit_chain(&moves, cfg()).unwrap();
     let (_, up, arc, _) = find_recon(&out.moves);
-    // p = L_t^2 / (24 R) is the inward shift of the spiral from the tangent; bounded by δ.
     let shift = up.s_len() * up.s_len() / (24.0 * arc.radius);
     assert!(
         shift <= delta * 1.001,

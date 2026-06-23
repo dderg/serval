@@ -1,13 +1,5 @@
-/// Piece-stream comparison harness for diagnosing the "grindy motion" regression
-/// introduced by commit 6ca2d685a ("fix(trajectory): emit constant axes as cubic").
-///
-/// Run this on the current branch (6ca2d685a) and on the parent commit (387534eec)
-/// worktree to compare the dispatched PieceEntry streams.
-///
-/// Usage (from rust/):
-///   cargo run --example piece_stream_diff 2>/dev/null
-///   # in /tmp/kalico-387534eec/rust/:
-///   cargo run --example piece_stream_diff 2>/dev/null
+#![allow(deprecated)]
+
 use std::sync::{Arc, Mutex};
 
 use _motion_engine::classify::classify_and_build;

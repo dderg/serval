@@ -367,26 +367,26 @@ fn lower_with_samples(length: f64, samples: &[(f64, f64)]) -> Result<(), Geometr
 
 #[test]
 fn malformed_profile_samples_fail_loud() {
-    // Does not span the segment end.
-    assert!(lower_with_samples(100.0, &[(0.0, 0.0), (50.0, 30.0)]).is_err());
-    // Does not start at s=0.
-    assert!(lower_with_samples(100.0, &[(1.0, 0.0), (100.0, 30.0)]).is_err());
-    // Non-monotone arc length (Δs = 0).
-    assert!(
-        lower_with_samples(
-            100.0,
-            &[(0.0, 0.0), (50.0, 30.0), (50.0, 30.0), (100.0, 10.0)]
-        )
-        .is_err()
-    );
-    // Negative velocity.
-    assert!(lower_with_samples(100.0, &[(0.0, 0.0), (100.0, -5.0)]).is_err());
-    // Non-finite velocity.
-    assert!(lower_with_samples(100.0, &[(0.0, 0.0), (100.0, f64::NAN)]).is_err());
-    // Stalled at zero velocity over a positive interval.
-    assert!(lower_with_samples(100.0, &[(0.0, 0.0), (100.0, 0.0)]).is_err());
-    // Single sample (cannot form an interval).
-    assert!(lower_with_samples(100.0, &[(0.0, 0.0)]).is_err());
+    let does_not_span_segment_end = &[(0.0, 0.0), (50.0, 30.0)];
+    assert!(lower_with_samples(100.0, does_not_span_segment_end).is_err());
+
+    let does_not_start_at_s_zero = &[(1.0, 0.0), (100.0, 30.0)];
+    assert!(lower_with_samples(100.0, does_not_start_at_s_zero).is_err());
+
+    let non_monotone_arc_length = &[(0.0, 0.0), (50.0, 30.0), (50.0, 30.0), (100.0, 10.0)];
+    assert!(lower_with_samples(100.0, non_monotone_arc_length).is_err());
+
+    let negative_velocity = &[(0.0, 0.0), (100.0, -5.0)];
+    assert!(lower_with_samples(100.0, negative_velocity).is_err());
+
+    let non_finite_velocity = &[(0.0, 0.0), (100.0, f64::NAN)];
+    assert!(lower_with_samples(100.0, non_finite_velocity).is_err());
+
+    let stalled_at_zero_velocity = &[(0.0, 0.0), (100.0, 0.0)];
+    assert!(lower_with_samples(100.0, stalled_at_zero_velocity).is_err());
+
+    let single_sample_cannot_form_interval = &[(0.0, 0.0)];
+    assert!(lower_with_samples(100.0, single_sample_cannot_form_interval).is_err());
 }
 
 #[test]

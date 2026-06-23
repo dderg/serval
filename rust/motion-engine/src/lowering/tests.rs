@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use super::*;
 use geometry::segment::SourceRange;
 use geometry::{
@@ -7,12 +9,6 @@ use geometry::{
 use nurbs::bezier::extract_bezier_pieces;
 use nurbs::eval::eval;
 
-/// Regression for the Neptune steps-per-sample fault: the velocity profile can
-/// carry thousands of samples per move, but the MCU consumes pieces against a
-/// fixed ~tens-of-µs step clock. A piece shorter than several samples makes the
-/// MCU extrapolate one cubic across a sample boundary and blow up the step rate.
-/// Lowering must emit *coarse* pieces (bounded count, every piece ≥ the floor),
-/// not one per velocity sample.
 #[test]
 fn lowering_emits_coarse_pieces_above_the_sample_floor() {
     for (start, end) in [
@@ -29,6 +25,7 @@ fn lowering_emits_coarse_pieces_above_the_sample_floor() {
             0.0,
             &[0.0; 4],
             FIT_TOL_MM,
+            &[],
         )
         .unwrap();
         for axis in 0..3 {
@@ -39,9 +36,8 @@ fn lowering_emits_coarse_pieces_above_the_sample_floor() {
                 pieces.len()
             );
             for p in &pieces {
-                // A single whole-move piece may be shorter than the floor; only
-                // multi-piece fits must respect it (no sub-sample subdivision).
-                if pieces.len() > 1 {
+                let fit_was_subdivided = pieces.len() > 1;
+                if fit_was_subdivided {
                     assert!(
                         p.u_end - p.u_start >= MIN_FIT_PIECE_S - 1e-9,
                         "axis {axis}: piece {:.6}us below the floor",
@@ -76,6 +72,7 @@ fn lower_single(m: geometry::Move, t_start: f64, start_pos: &[f64]) -> ShapedSeg
         t_start,
         start_pos,
         FIT_TOL_MM,
+        &[],
     )
     .expect("lower")
 }
@@ -202,8 +199,119 @@ fn source_mismatch_is_rejected() {
             &profile.moves[0],
             0.0,
             &[0.0, 0.0, 0.0],
-            FIT_TOL_MM
+            FIT_TOL_MM,
+            &[]
         ),
         Err(LoweringError::SourceMismatch)
     ));
+}
+
+fn linear_pa_chains(extruder_axis: usize, k: f64) -> Vec<CompiledChain> {
+    let mut chains = vec![CompiledChain::default(); extruder_axis + 1];
+    chains[extruder_axis] = CompiledChain {
+        stages: (k != 0.0)
+            .then_some(trajectory::ChainStage::LinearPressureAdvance { k })
+            .into_iter()
+            .collect(),
+        kernel: None,
+        gain: k,
+    };
+    chains
+}
+
+#[test]
+fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
+    let m = line_move([0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0, ctx(1, 100.0)).unwrap();
+    let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).unwrap();
+    let profile = plan_velocity(&outcome, VelocityConfig::default()).unwrap();
+    let start = [0.0; 4];
+
+    let base = lower_move(
+        &outcome.moves[0],
+        &profile.moves[0],
+        0.0,
+        &start,
+        FIT_TOL_MM,
+        &[],
+    )
+    .unwrap();
+
+    let k = 0.05;
+    let pa = lower_move(
+        &outcome.moves[0],
+        &profile.moves[0],
+        0.0,
+        &start,
+        FIT_TOL_MM,
+        &linear_pa_chains(3, k),
+    )
+    .unwrap();
+
+    for axis in 0..3 {
+        let bp = extract_bezier_pieces(&base.axes[axis]);
+        let pp = extract_bezier_pieces(&pa.axes[axis]);
+        assert_eq!(
+            bp.len(),
+            pp.len(),
+            "axis {axis} piece count changed under PA"
+        );
+        for (b, p) in bp.iter().zip(&pp) {
+            assert_eq!(b.u_start, p.u_start, "axis {axis} grid moved under PA");
+            assert_eq!(b.u_end, p.u_end, "axis {axis} grid moved under PA");
+            assert_eq!(
+                b.coeffs, p.coeffs,
+                "axis {axis} XYZ coeffs changed under PA"
+            );
+        }
+    }
+
+    let (t0, t1) = (base.t_start, base.t_end);
+    let h = 1e-6 * (t1 - t0);
+    for frac in [0.1_f64, 0.3, 0.5, 0.7, 0.9] {
+        let t = frac.mul_add(t1 - t0, t0);
+        let e_base = eval(&base.axes[3], t);
+        let e_pa = eval(&pa.axes[3], t);
+        let e_dot = (eval(&base.axes[3], t + h) - eval(&base.axes[3], t - h)) / (2.0 * h);
+        let want = k * e_dot;
+        assert!(
+            ((e_pa - e_base) - want).abs() < 5e-3,
+            "PA shift at t={t}: got {}, want k*e_dot={want}",
+            e_pa - e_base
+        );
+    }
+}
+
+#[test]
+fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
+    let m = line_move([0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0, ctx(1, 100.0)).unwrap();
+    let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).unwrap();
+    let profile = plan_velocity(&outcome, VelocityConfig::default()).unwrap();
+    let start = [0.0; 4];
+
+    let none = lower_move(
+        &outcome.moves[0],
+        &profile.moves[0],
+        0.0,
+        &start,
+        FIT_TOL_MM,
+        &[],
+    )
+    .unwrap();
+    let zero = lower_move(
+        &outcome.moves[0],
+        &profile.moves[0],
+        0.0,
+        &start,
+        FIT_TOL_MM,
+        &linear_pa_chains(3, 0.0),
+    )
+    .unwrap();
+
+    for axis in 0..4 {
+        assert_eq!(
+            extract_bezier_pieces(&none.axes[axis]),
+            extract_bezier_pieces(&zero.axes[axis]),
+            "axis {axis} differs between no-PP and k=0"
+        );
+    }
 }

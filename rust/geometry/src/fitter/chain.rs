@@ -289,25 +289,22 @@ fn incircle(
     })
 }
 
-/// Solve for the arc radius `ρ_arc < ρ` whose transition spiral lands **exactly** on the
-/// facet lines: the spiral's perpendicular offset from its arc centre (`c_in`, evaluated
-/// from the real Fresnel figure) must equal the incircle radius `ρ`. The small-angle
-/// `p = L²/24R` form is only the seed; the exact value is found by bisection so the seam
-/// closes to machine precision at any faceting angle. `c_in` is monotone increasing in the
-/// radius over `[ρ/2, ρ]` for `l_t ≤ ρ/2`, bracketing the root.
 fn solve_rho_arc(rho: f64, l_t: f64, line_no: u32) -> Result<Option<f64>, FitError> {
-    let c_in = |r: f64| -> Result<f64, FitError> {
+    let spiral_offset_from_arc_centre = |r: f64| -> Result<f64, FitError> {
         let (_, c_in) = spiral_anchor_offset(1.0 / (r * l_t), l_t, r, line_no)?;
         Ok(c_in)
     };
     let mut lo = 0.5 * rho;
     let mut hi = rho;
-    if !(c_in(lo)? < rho && c_in(hi)? >= rho) {
+    let bracket_below = spiral_offset_from_arc_centre(lo)?;
+    let bracket_above = spiral_offset_from_arc_centre(hi)?;
+    let root_is_bracketed = bracket_below < rho && bracket_above >= rho;
+    if !root_is_bracketed {
         return Ok(None);
     }
     for _ in 0..RHO_ARC_BISECTIONS {
         let mid = 0.5 * (lo + hi);
-        if c_in(mid)? < rho {
+        if spiral_offset_from_arc_centre(mid)? < rho {
             lo = mid;
         } else {
             hi = mid;
@@ -392,18 +389,14 @@ fn seam_ok(p: [f64; 3], s: f64, line: &Line) -> bool {
     norm(sub(p, foot)) <= SEAM_TOL_MM
 }
 
-/// Every interior facet vertex must sit within the un-faceting tube of the reconstructed
-/// circle — its radial deviation bounded by the local chord sagitta. This is the real
-/// co-circularity guard at the minimum run length, where the incircle solve is exactly
-/// determined (zero residual by construction) and a non-circular chord triple would
-/// otherwise reconstruct as the triangle incircle and gross-cut the corner.
 fn vertices_within_tube(lines: &[&Line], origin: [f64; 3], radius: f64, tol: f64) -> bool {
     for k in 0..lines.len() - 1 {
         let vertex = lines[k].point_at(lines[k].s_len());
         let chord = lines[k].s_len().max(lines[k + 1].s_len());
         let sagitta = chord * chord / (8.0 * radius);
-        let deviation = (norm(sub(vertex, origin)) - radius).abs();
-        if deviation > 2.0 * sagitta + tol {
+        let radial_deviation = (norm(sub(vertex, origin)) - radius).abs();
+        let unfaceting_tube_halfwidth = 2.0 * sagitta + tol;
+        if radial_deviation > unfaceting_tube_halfwidth {
             return false;
         }
     }

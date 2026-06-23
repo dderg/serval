@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use nurbs::bezier::{bezier_pieces_to_nurbs, extract_bezier_pieces, BezierPiece};
 use nurbs::eval::eval as nurbs_eval;
 use nurbs::ScalarNurbs;
@@ -16,7 +18,6 @@ const CONSTANT_AXIS_EPS: f64 = 1e-12;
 
 #[derive(Debug, Clone, Default)]
 pub struct PerAxisHistory<'a> {
-    /// Index = axis registry index; missing trailing axes mean no history.
     pub axes: Vec<&'a [BezierPiece<f64>]>,
 }
 
@@ -31,9 +32,6 @@ impl PerAxisHistory<'_> {
     }
 }
 
-/// Emission output: shaped per-segment tracks plus, per follower (parallel to
-/// `chains.followers`), the pre-gain input-track pieces — the follower's
-/// nominal position ledger over the batch.
 #[derive(Debug)]
 pub struct ShapeEmission {
     pub segments: Vec<ShapedSegment>,
@@ -66,14 +64,9 @@ pub fn emit_shaped(
     )
 }
 
-/// Pins each follower's nominal ledger to a committed value at time `t`:
-/// emitted follower tracks are shifted so the pre-gain ledger passes through
-/// `values[i]` at `t`. Regions before `t` are never re-dispatched, so drift
-/// from re-fitting them must not leak into the committed stream.
 #[derive(Debug, Clone, Copy)]
 pub struct FollowerAnchor<'a> {
     pub t: f64,
-    /// Parallel to `chains.followers`.
     pub values: &'a [f64],
 }
 
@@ -87,12 +80,6 @@ impl FollowerAnchor<'_> {
     }
 }
 
-/// Like [`emit_shaped`] but overrides the left-boundary slope for the FIRST
-/// segment's per-axis `fit_c2_cubic` call.  Passing the previous emission's
-/// right-boundary slope enforces C1 continuity across the dispatch seam.
-///
-/// `first_seg_left_bc` is indexed by axis registry index;
-/// missing trailing entries mean no override.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_shaped_with_left_bc(
     planned: &[FittedSegment],

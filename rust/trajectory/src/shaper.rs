@@ -40,15 +40,31 @@ impl<'a> ShapedSignal<'a> {
         t_start: f64,
         t_end: f64,
     ) -> Self {
+        Self::new_from_evaluator(kernel, t_start, t_end, |t| eval_clamped(padded, t))
+    }
+
+    pub fn new_from_evaluator<F>(
+        kernel: &'a PiecewisePolynomialKernel<f64>,
+        t_start: f64,
+        t_end: f64,
+        eval: F,
+    ) -> Self
+    where
+        F: Fn(f64) -> f64,
+    {
         let (k_lo, k_hi) = kernel.support();
         let kernel_width = k_hi - k_lo;
+        assert!(
+            kernel_width.is_finite() && kernel_width > 0.0,
+            "shaper kernel support width must be finite and positive"
+        );
         let dt_in = kernel_width / (INPUT_SAMPLES_PER_KERNEL_WIDTH as f64);
         let input_lo = t_start + k_lo;
         let input_hi = t_end + k_hi;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let n_input = ((input_hi - input_lo) / dt_in).ceil() as usize + 1;
         let input_samples = (0..n_input)
-            .map(|i| eval_clamped(padded, input_lo + (i as f64) * dt_in))
+            .map(|i| eval(input_lo + (i as f64) * dt_in))
             .collect();
         Self {
             input_samples,

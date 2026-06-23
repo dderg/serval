@@ -3,7 +3,7 @@ use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
 use nurbs::eval::eval;
 use proptest::prelude::*;
-use trajectory::ShapedSegment;
+use trajectory::{AxisChainSet, PostProcessorType, ShapedSegment};
 
 fn cfg() -> StreamConfig {
     StreamConfig {
@@ -88,7 +88,12 @@ fn voron_cube_perimeter_streams_without_degenerate_trim() {
     // Replays the moves through incremental commits like the planner loop and
     // asserts no commit ever errors.
     let start = [99.158, 99.158, 0.2];
-    let mut s = StreamState::new(cfg(), &[start[0], start[1], start[2], 0.0], 0.0);
+    let mut s = StreamState::new(
+        cfg(),
+        AxisChainSet::default(),
+        &[start[0], start[1], start[2], 0.0],
+        0.0,
+    );
     let mut prev = start;
     for (i, (x, y, e)) in VORON_PERIMETER.into_iter().enumerate() {
         let end = [x, y, 0.2];
@@ -112,7 +117,12 @@ fn cold_run_infill_streams_without_overcommit() {
     // streamed result matches the batched one: no commit may error. Bench
     // limits: max 100 mm/s, 1000 mm/s^2, jerk 1e6; infill feed 60 mm/s.
     let start = [99.158, 99.158, 0.0];
-    let mut s = StreamState::new(cfg_bench(), &[start[0], start[1], start[2], 0.0], 0.0);
+    let mut s = StreamState::new(
+        cfg_bench(),
+        AxisChainSet::default(),
+        &[start[0], start[1], start[2], 0.0],
+        0.0,
+    );
     let pts: [(f64, f64); 91] = [
         (99.158, 99.158),
         (102.008, 96.308),
@@ -220,28 +230,25 @@ fn cold_run_infill_streams_without_overcommit() {
 
 #[test]
 fn collinear_jogs_commit_at_the_seam_without_stopping() {
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.0));
 
     let committed = s.commit(false).unwrap();
-    // The collinear junction is a clean seam: the first jog commits, the second is kept.
     assert!(!committed.is_empty());
     assert_eq!(s.buffered(), 1);
-    // No stop between the jogs: the carried seam velocity is well above rest.
     assert!(
         s.entry_velocity() > 1.0,
         "seam velocity {} should be cruising, not stopped",
         s.entry_velocity()
     );
-    // Committed boundary position is the seam (x = 50).
     let last = committed.last().unwrap();
     assert!((eval(&last.axes[0], last.t_end) - 50.0).abs() < 1e-6);
 }
 
 #[test]
 fn flush_commits_everything_to_rest() {
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.0));
 
@@ -261,7 +268,7 @@ fn blended_corner_commits_through_the_blend_without_stopping() {
     // outgoing line at zero curvature, so the commit runs through the whole
     // blend and keeps the outgoing move as a head-trimmed remainder — never
     // splitting the blend itself, and never stopping at the corner.
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 0.0));
 
@@ -292,7 +299,7 @@ fn continuous_blended_chain_drains_without_a_single_stop() {
     // unblended seam anywhere. The continuity commit must still drain it (the
     // old clean-seam-only commit would hang here forever), and no interior seam
     // may drop to rest — that would be the stutter we are eliminating.
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     let pts = [
         [0.0, 0.0, 0.0],
         [20.0, 0.0, 0.0],
@@ -354,7 +361,7 @@ fn head_trim_preserves_position_and_extrusion_continuity() {
     // Commit through a blend with extrusion, then verify the kept remainder
     // resumes exactly where the committed trajectory ended (no gap, no overlap)
     // in both the spatial axes and the extruder.
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 5.0));
     s.push(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 5.0));
     s.push(line(3, [50.0, 50.0, 0.0], [100.0, 50.0, 0.0], 5.0));
@@ -379,20 +386,19 @@ fn head_trim_preserves_position_and_extrusion_continuity() {
 
 #[test]
 fn odometer_accumulates_extrusion_across_commits() {
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0));
     s.push(line(2, [40.0, 0.0, 0.0], [80.0, 0.0, 0.0], 4.0));
 
     let committed = s.commit(true).unwrap();
     assert!(s.is_empty());
     let last = committed.last().unwrap();
-    // Extruder (axis 3) reached the cumulative delta 8.0 at the final boundary.
     assert!((eval(&last.axes[3], last.t_end) - 8.0).abs() < 1e-3);
 }
 
 #[test]
 fn committed_trajectory_is_time_contiguous() {
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 2.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 2.0);
     s.push(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0));
     s.push(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 0.0));
     s.push(line(3, [60.0, 0.0, 0.0], [90.0, 0.0, 0.0], 0.0));
@@ -409,27 +415,26 @@ fn committed_trajectory_is_time_contiguous() {
 
 #[test]
 fn advance_idle_reanchors_committed_time_after_a_gap() {
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0));
     let first = s.commit(true).unwrap();
     let after_first = first.last().unwrap().t_end;
 
-    // Long idle gap: the machine has caught up well past the committed horizon.
-    s.advance_idle(after_first + 50.0);
+    let idle_gap_past_horizon_secs = 50.0;
+    s.advance_idle(after_first + idle_gap_past_horizon_secs);
     s.push(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 0.0));
     let second = s.commit(true).unwrap();
     assert!(
-        second[0].t_start >= after_first + 50.0 - 1e-9,
+        second[0].t_start >= after_first + idle_gap_past_horizon_secs - 1e-9,
         "second move must start at the re-anchored time, got {}",
         second[0].t_start
     );
-    // never rewinds:
     s.advance_idle(0.0);
     assert!(s.t_committed() >= second.last().unwrap().t_end - 1e-9);
 }
 
 fn full_replan(moves: &[geometry::Move], home: &[f64]) -> Vec<ShapedSegment> {
-    let mut s = StreamState::new(cfg(), home, 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), home, 0.0);
     for m in moves {
         s.push(m.clone());
     }
@@ -440,7 +445,7 @@ fn committed_prefix(moves: &[geometry::Move], home: &[f64]) -> Vec<ShapedSegment
     // Realistic deep-buffer streaming: the driver coalesces a burst of moves so
     // the planner has full look-ahead, then commits every move up to the finality
     // barrier in one shot. Those are the segments actually dispatched mid-print.
-    let mut s = StreamState::new(cfg(), home, 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), home, 0.0);
     for m in moves {
         s.push(m.clone());
     }
@@ -529,7 +534,7 @@ fn open_tail_stays_bounded_as_buffer_depth_grows() {
     // 217 ms.
     let mut tails = Vec::new();
     for &depth in &[50usize, 100, 200, 500] {
-        let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+        let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
         let mut prev = [0.0, 0.0, 0.0];
         let mut max_tail = 0usize;
         for i in 0..depth {
@@ -553,7 +558,7 @@ fn open_tail_stays_bounded_as_buffer_depth_grows() {
 
 #[test]
 fn stall_brake_shortfall_is_attributable_and_fails_loud() {
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     let solve_const = 0.05;
     match s.commit_stall_brake(0.01, solve_const) {
@@ -576,7 +581,7 @@ fn stall_brake_shortfall_is_attributable_and_fails_loud() {
 }
 
 fn commit_prefix_signature(ys: &[f64], n: usize) -> Option<Vec<(f64, f64, f64, f64)>> {
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     let mut prev = [0.0, 0.0, 0.0];
     for i in 0..n {
         let end = [(i as f64 + 1.0) * 20.0, ys[i], 0.0];
@@ -637,6 +642,66 @@ proptest! {
     }
 }
 
+fn smooth_x_chains(frequency_hz: f64) -> AxisChainSet {
+    AxisChainSet::spatial(
+        PostProcessorType::SmoothZv { frequency_hz }.into_chain(),
+        trajectory::CompiledChain::default(),
+        trajectory::CompiledChain::default(),
+    )
+}
+
+#[test]
+fn smooth_shaper_live_path_matches_shaped_signal_oracle() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [80.0, 0.0, 0.0], 0.0),
+        line(2, [80.0, 0.0, 0.0], [160.0, 0.0, 0.0], 0.0),
+    ];
+    let mut base = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
+    let mut shaped = StreamState::new(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 0.0);
+    for m in moves {
+        base.push(m.clone());
+        shaped.push(m);
+    }
+
+    let base_out = base.commit(true).unwrap();
+    let shaped_out = shaped.commit(true).unwrap();
+    assert_eq!(base_out.len(), shaped_out.len());
+
+    let oracle_chains = smooth_x_chains(18.0);
+    let trajectory::ChainStage::SmoothKernel(kernel) = &oracle_chains.chains[0].stages[0] else {
+        panic!("expected smooth kernel");
+    };
+    let first = base_out.first().unwrap().t_start;
+    let last = base_out.last().unwrap().t_end;
+
+    for (base_seg, shaped_seg) in base_out.iter().zip(&shaped_out) {
+        let sig = trajectory::ShapedSignal::new_from_evaluator(
+            kernel,
+            base_seg.t_start,
+            base_seg.t_end,
+            |t| {
+                let clamped = t.clamp(first, last);
+                base_out
+                    .iter()
+                    .find(|seg| clamped >= seg.t_start && clamped <= seg.t_end)
+                    .map_or_else(
+                        || eval(&base_out.last().unwrap().axes[0], clamped),
+                        |seg| eval(&seg.axes[0], clamped),
+                    )
+            },
+        );
+        for frac in [0.1_f64, 0.3, 0.5, 0.7, 0.9] {
+            let t = frac.mul_add(base_seg.t_end - base_seg.t_start, base_seg.t_start);
+            let got = eval(&shaped_seg.axes[0], t);
+            let want = sig.eval(t);
+            assert!(
+                (got - want).abs() < 5e-2,
+                "shaped x at t={t}: got {got}, want {want}"
+            );
+        }
+    }
+}
+
 fn short_collinear(n: u32, seg_mm: f64) -> Vec<geometry::Move> {
     (0..n)
         .map(|i| {
@@ -652,7 +717,7 @@ fn small_buffer_within_setback_yields_empty_commit() {
     // sits within one brake-to-rest setback has no seam that leaves a setback of
     // open tail behind it, so the non-forced commit selects nothing and the
     // dispatched frontier would freeze (investigation batch 33: n=4 commit_count=0).
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.2, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.2, 0.0], 0.0);
     for m in short_collinear(4, 0.3) {
         s.push(m);
     }
@@ -669,11 +734,27 @@ fn small_buffer_within_setback_yields_empty_commit() {
 }
 
 #[test]
+fn smooth_shaper_holds_back_live_edge_inside_future_support() {
+    let mut s = StreamState::new(cfg(), smooth_x_chains(0.5), &[0.0, 0.0, 0.0], 0.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0));
+    s.push(line(2, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 0.0));
+
+    assert!(
+        s.commit(false).unwrap().is_empty(),
+        "future support should hold back live-edge shaped samples"
+    );
+    assert!(
+        !s.commit(true).unwrap().is_empty(),
+        "force flush must release held shaped samples"
+    );
+}
+
+#[test]
 fn stall_brake_advances_a_frozen_frontier() {
     // The thin-lead force-advance building block: the same uncommittable buffer
     // drains to rest under `commit_stall_brake`, advancing the frontier instead
     // of freezing it.
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.2, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.2, 0.0], 0.0);
     for m in short_collinear(4, 0.3) {
         s.push(m);
     }
@@ -691,10 +772,70 @@ fn stall_brake_fails_loud_when_lead_already_collapsed() {
     // Fail-loud (CLAUDE.md): if the lead is already below the solve budget the
     // ramp cannot be dispatched before its first piece must play, so the planner
     // raises rather than scheduling a piece into the MCU's past.
-    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.2, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.2, 0.0], 0.0);
     for m in short_collinear(4, 0.3) {
         s.push(m);
     }
     let err = s.commit_stall_brake(0.01, 0.05).unwrap_err();
     assert!(matches!(err, StreamError::BrakeToRestShortfall { .. }));
+}
+
+#[test]
+fn smooth_shaper_first_commit_after_nonzero_start_time_is_valid() {
+    let mut s = StreamState::new(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 5.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0));
+
+    let committed = s.commit(true).unwrap();
+    assert_eq!(committed[0].t_start, 5.0);
+}
+
+#[test]
+fn smooth_shaper_after_idle_gap_resumes_from_rest_edge() {
+    let mut s = StreamState::new(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 0.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0));
+    let first = s.commit(true).unwrap();
+    let idle_end = first.last().unwrap().t_end + 5.0;
+
+    s.advance_idle(idle_end);
+    s.push(line(2, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 0.0));
+    let second = s.commit(true).unwrap();
+
+    assert!(second[0].t_start >= idle_end - 1e-9);
+}
+
+#[test]
+fn smooth_shaper_two_batch_output_matches_one_batch() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0),
+        line(2, [50.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.0),
+    ];
+    let chains = smooth_x_chains(18.0);
+    let mut one = StreamState::new(cfg(), chains.clone(), &[0.0, 0.0, 0.0], 0.0);
+    let mut two = StreamState::new(cfg(), chains, &[0.0, 0.0, 0.0], 0.0);
+    for m in moves {
+        one.push(m.clone());
+        two.push(m);
+    }
+
+    let one_batch = one.commit(true).unwrap();
+    let mut two_batch = two.commit(false).unwrap();
+    two_batch.extend(two.commit(true).unwrap());
+
+    assert_eq!(one_batch.len(), two_batch.len());
+    for (one_seg, two_seg) in one_batch.iter().zip(&two_batch) {
+        for frac in [0.1_f64, 0.3, 0.5, 0.7, 0.9] {
+            let t = frac.mul_add(one_seg.t_end - one_seg.t_start, one_seg.t_start);
+            let dx = (eval(&one_seg.axes[0], t) - eval(&two_seg.axes[0], t)).abs();
+            let dv = {
+                let h = 1e-5 * (one_seg.t_end - one_seg.t_start);
+                let v_one =
+                    (eval(&one_seg.axes[0], t + h) - eval(&one_seg.axes[0], t - h)) / (2.0 * h);
+                let v_two =
+                    (eval(&two_seg.axes[0], t + h) - eval(&two_seg.axes[0], t - h)) / (2.0 * h);
+                (v_one - v_two).abs()
+            };
+            assert!(dx < 5e-2, "position mismatch at t={t}: {dx}");
+            assert!(dv < 5e-2, "velocity mismatch at t={t}: {dv}");
+        }
+    }
 }

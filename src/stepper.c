@@ -337,6 +337,29 @@ DECL_COMMAND(command_kalico_set_stepper_offset,
              " max_microsteps_per_sample=%hu");
 
 void
+command_kalico_resonance_buzz(uint32_t *args)
+{
+    if (!runtime_handle)
+        shutdown("kalico_resonance_buzz before runtime init");
+    uint8_t axis_mask = args[0];
+    uint8_t sign_mask = args[1];
+    uint32_t freq_start_millihz = args[2];
+    uint32_t freq_end_millihz = args[3];
+    uint32_t amplitude_nm = args[4];
+    uint32_t duration_ms = args[5];
+    uint32_t ramp_ms = args[6];
+    int32_t rc = runtime_resonance_buzz(
+        runtime_handle, axis_mask, sign_mask, freq_start_millihz,
+        freq_end_millihz, amplitude_nm, duration_ms, ramp_ms);
+    if (rc != 0)
+        shutdown("kalico_resonance_buzz rejected (bad parameters)");
+}
+DECL_COMMAND(command_kalico_resonance_buzz,
+             "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
+             " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
+             " duration_ms=%u ramp_ms=%u");
+
+void
 command_kalico_phase_jog_to(uint32_t *args)
 {
     if (!runtime_handle)

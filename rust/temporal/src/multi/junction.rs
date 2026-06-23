@@ -1,21 +1,8 @@
 use nurbs::VectorNurbs;
 use nurbs::eval::{vector_derivative, vector_eval};
 
-/// Two adjacent curves count as collinear when the forward unit tangent at the
-/// left curve's end and at the right curve's start disagree by at most this
-/// angle. Purely a numerical collinearity epsilon — anything sharper is a
-/// full-stop junction the blender did not round away.
 const THETA_COLLINEAR_RAD: f64 = 1e-3;
 
-/// `true` when the path is tangent-continuous (G1) across the junction between
-/// two adjacent curves, within `THETA_COLLINEAR_RAD`. A degenerate (zero)
-/// tangent on either side is never collinear — an undefined direction cannot be
-/// parallel to anything — which is also what isolates zero-displacement
-/// (virtual-path) segments into their own chains.
-///
-/// This is the sole junction predicate: a non-collinear junction is exactly a
-/// chain boundary / full stop. The batch solver partitions chains on it and the
-/// streaming planner snaps its re-solve window to it.
 #[must_use]
 pub fn are_collinear(left: &VectorNurbs<f64, 3>, right: &VectorNurbs<f64, 3>) -> bool {
     let t_left = forward_unit_tangent_at_end(left);

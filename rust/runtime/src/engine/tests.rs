@@ -379,6 +379,246 @@ fn symmetric_buzz_nets_position_count_to_zero() {
     assert_eq!(h.p_prev(), 0.0);
 }
 
+fn configure_pulse_axis(engine: &mut Engine, axis: usize, mstep: f32) {
+    let bindings = [StepperBindingRust {
+        stepper_oid: 10,
+        tmc_cs_oid: TMC_CS_OID_NONE,
+        _pad: [0; 2],
+    }];
+    assert_eq!(
+        engine.configure_axis(
+            axis as u8,
+            StepMode::Pulse,
+            mstep,
+            64,
+            &bindings,
+            TEST_TOTAL_RING_PIECES
+        ),
+        RUNTIME_OK
+    );
+}
+
+#[test]
+fn resonance_buzz_arm_activates_per_axis_stream() {
+    crate::buzz_stream::reset_for_test();
+    let axis = 2usize;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let shared = SharedState::new();
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        0
+    );
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0);
+    assert!(crate::buzz_stream::axis_active(axis));
+    assert!(!crate::buzz_stream::axis_active(0));
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_disarm_form_clears_streams() {
+    crate::buzz_stream::reset_for_test();
+    let axis = 2usize;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let shared = SharedState::new();
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        0
+    );
+    assert!(crate::buzz_stream::axis_active(axis));
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 0, 20, 2, 0),
+        0
+    );
+    assert!(!crate::buzz_stream::axis_active(axis));
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_conflicts_with_armed_piece_on_same_axis() {
+    use crate::error::FaultCode;
+    crate::buzz_stream::reset_for_test();
+    let axis = 2usize;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let shared = SharedState::new();
+
+    engine.stepping_axes[axis].as_mut().unwrap().armed = Some(crate::motion_core::ArmedPiece {
+        mono_coeffs: [0.0; 4],
+        vel_coeffs: [0.0; 3],
+        piece_start_cycles: 0,
+        piece_end_cycles: 0,
+    });
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        -1
+    );
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        FaultCode::BuzzAxisConflict.as_i32()
+    );
+    assert!(!crate::buzz_stream::axis_active(axis));
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_conflicts_with_queued_piece_on_same_axis() {
+    use crate::error::FaultCode;
+    crate::buzz_stream::reset_for_test();
+    let axis = 2usize;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let mut storage = vec![moving_piece(0, 0.0, 0); TEST_TOTAL_RING_PIECES];
+    let shared = SharedState::new();
+
+    assert_eq!(
+        engine.push_pieces(axis as u8, &[moving_piece(1_000, 0.0125, 0)], &mut storage),
+        RUNTIME_OK
+    );
+    assert!(engine.stepping_axes[axis].as_ref().unwrap().armed.is_none());
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        -1
+    );
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        FaultCode::BuzzAxisConflict.as_i32()
+    );
+    assert!(!crate::buzz_stream::axis_active(axis));
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn push_pieces_rejected_while_buzz_active_on_axis() {
+    crate::buzz_stream::reset_for_test();
+    let axis = 2usize;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let mut storage = vec![moving_piece(0, 0.0, 0); TEST_TOTAL_RING_PIECES];
+    let shared = SharedState::new();
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        0
+    );
+    assert!(crate::buzz_stream::axis_active(axis));
+    assert_eq!(
+        engine.push_pieces(axis as u8, &[moving_piece(1_000, 0.0125, 0)], &mut storage),
+        crate::error::RUNTIME_ERR_INVALID_ARG
+    );
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_rejects_axis_without_step_queue() {
+    crate::buzz_stream::reset_for_test();
+    let first_axis_without_queue = crate::step_queue::N_AXIS_STEP_QUEUES;
+    let axis = first_axis_without_queue;
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, axis, 0.01);
+    let shared = SharedState::new();
+
+    assert_eq!(
+        engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        -1
+    );
+    assert!(!crate::buzz_stream::axis_active(0));
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_skips_axis_unconfigured_on_this_mcu() {
+    crate::buzz_stream::reset_for_test();
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, 2, 0.01);
+    let shared = SharedState::new();
+    assert_eq!(
+        engine.resonance_buzz(&shared, 0b001, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        0,
+        "an unconfigured-here axis must be ignored, not rejected"
+    );
+    assert!(!crate::buzz_stream::axis_active(0));
+    assert_eq!(
+        shared.last_error.load(Ordering::Acquire),
+        0,
+        "no fault latched"
+    );
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_routes_phase_mode_axis_to_xdirect() {
+    crate::buzz_stream::reset_for_test();
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, 0, 0.01);
+    engine.stepping_axes[0]
+        .as_ref()
+        .unwrap()
+        .mode
+        .store(StepMode::Phase as u8, Ordering::Release);
+    let shared = SharedState::new();
+    assert_eq!(
+        engine.resonance_buzz(&shared, 0b001, 0, 100_000, 100_000, 100_000, 20, 2, 0),
+        0,
+        "buzz on a Phase-mode axis must arm via XDIRECT, not fault"
+    );
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0, "no fault");
+    assert!(crate::buzz_stream::axis_active(0));
+    assert!(
+        crate::buzz_stream::is_xdirect(0),
+        "phase-mode axis must be marked an XDIRECT buzz stream"
+    );
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_routes_swept_pulse_axis_to_staircase() {
+    crate::buzz_stream::reset_for_test();
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, 0, 0.01);
+    let shared = SharedState::new();
+    assert_eq!(
+        engine.resonance_buzz(&shared, 0b001, 0, 5_000, 60_000, 300_000, 200, 20, 0),
+        0,
+        "swept buzz on a Pulse axis must arm, not fault"
+    );
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0, "no fault");
+    assert!(crate::buzz_stream::axis_active(0));
+    assert!(
+        !crate::buzz_stream::is_xdirect(0),
+        "pulse axis is not XDIRECT"
+    );
+    assert!(
+        crate::buzz_stream::is_sweep(0),
+        "swept pulse axis must run the staircase generator"
+    );
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_routes_fixed_tone_pulse_axis_to_plain_tone() {
+    crate::buzz_stream::reset_for_test();
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, 0, 0.01);
+    let shared = SharedState::new();
+    assert_eq!(
+        engine.resonance_buzz(&shared, 0b001, 0, 50_000, 50_000, 100_000, 100, 10, 0),
+        0
+    );
+    assert!(crate::buzz_stream::axis_active(0));
+    assert!(
+        !crate::buzz_stream::is_sweep(0),
+        "fixed tone is not a sweep"
+    );
+    assert!(!crate::buzz_stream::is_xdirect(0));
+    crate::buzz_stream::reset_for_test();
+}
+
 #[test]
 fn overlay_multi_piece_no_sample_exceeds_max_steps() {
     use crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE;

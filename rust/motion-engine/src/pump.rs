@@ -97,27 +97,6 @@ pub enum Schedule {
     Idle,
 }
 
-/// Select the globally earliest-host-time piece across all queues, then emit
-/// the same-MCU prefix as one frame batch.
-///
-/// ## Invariants preserved
-///
-/// 1. **StallFull gates all MCUs.** When the globally-earliest piece belongs to
-///    a ring-full queue, no other queue may advance — cross-MCU issue-side
-///    coherence requires that a hardware-blocked MCU is never overtaken.
-///
-/// 2. **Cap-gated queues are skipped, not globally-gating.** When the
-///    globally-earliest piece has `releasable_cap_of == 0`, that queue is
-///    excluded from this round and the search continues among remaining
-///    queues in host-time order. A horizon-blocked head, by contrast,
-///    returns `StallAhead` immediately.
-///
-/// 3. **Ordering must use host time.** `start_time` values are raw MCU clock
-///    ticks in per-MCU clock domains (H7: ~520 MHz / own epoch; F446: ~180 MHz /
-///    own epoch). Comparing ticks across MCUs is meaningless; F446 values are
-///    numerically smaller and would always win, starving the H7.  The `f64`
-///    sidecar in each `(PieceEntry, f64)` pair carries the minting host time
-///    (`t0 + u_start`, seconds) and is the only valid cross-queue ordering key.
 #[must_use]
 pub fn schedule(
     queues: &BTreeMap<AxisKey, AxisQueue>,
@@ -133,9 +112,9 @@ pub fn schedule(
             .iter()
             .filter(|(k, q)| !q.pieces.is_empty() && !cap_skipped.contains(*k))
             .min_by(|(ka, qa), (kb, qb)| {
-                let ha = qa.pieces.front().unwrap().1;
-                let hb = qb.pieces.front().unwrap().1;
-                ha.total_cmp(&hb).then(ka.cmp(kb))
+                let host_a = qa.pieces.front().unwrap().1;
+                let host_b = qb.pieces.front().unwrap().1;
+                host_a.total_cmp(&host_b).then(ka.cmp(kb))
             });
         let (&k, q) = match candidate {
             None => {
@@ -250,9 +229,6 @@ pub struct DripArm {
 
 pub struct EnqueueMsg {
     pub key: AxisKey,
-    /// Each entry pairs the `PieceEntry` with its minting host time (`t0 + u_start`, seconds).
-    /// The host time is the ordering key used by `schedule()`; the raw `start_time` tick is
-    /// MCU-clock-domain-specific and incomparable across MCUs.
     pub pieces: Vec<(PieceEntry, f64)>,
     pub fresh_stream: bool,
     pub lead_secs: f64,
@@ -273,20 +249,9 @@ pub enum PumpMsg {
     Shutdown,
 }
 
-/// Error from [`PieceSink::send_frame`].
-///
-/// `Fatal` means the transport is permanently broken and the caller must not
-/// retry — the process should abort or restart.  `Transient` means the frame
-/// was not delivered but the transport may recover; the caller can back off and
-/// retry.
 #[derive(Debug)]
 pub enum SendError {
-    /// Unrecoverable transport failure (broken pipe, connection reset, peer
-    /// closed).  Callers that receive this must invoke their fatal-fault action
-    /// immediately; retrying will not help.
     Fatal(String),
-    /// Recoverable or non-transport error (MCU rejected the frame, ring full,
-    /// etc.).
     Transient(String),
 }
 
@@ -342,10 +307,6 @@ pub trait PieceSink: Send {
     }
 }
 
-/// Compute the tick-domain and host-domain gaps at a batch boundary.
-///
-/// Returns `(tick_jump_us, host_jump_us)` where negative values indicate overlap.
-/// The difference between the two isolates clock-projection error from planner-intent gaps.
 pub fn junction_jumps(
     first_start_ticks: u64,
     first_host: f64,
@@ -379,11 +340,6 @@ struct JunctionEnd {
 pub const JUNCTION_POSITION_LOG_MM: f32 = 0.0125;
 pub const JUNCTION_POSITION_FATAL_MM: f32 = 0.1;
 
-/// A position jump between the last dispatched piece and the next one is the
-/// host-side image of MCU fault -300/-310 (the step burst that killed the
-/// Trident two-jog test, 2026-06-10): the MCU will emit |Δpos|·steps_per_mm
-/// steps in one 25µs sample into a 32-deep queue. Dying here, before the push,
-/// preserves both endpoint values; the MCU fault preserves neither.
 fn check_junction_position_continuity(
     key: AxisKey,
     prev_end_pos: f32,
@@ -442,13 +398,6 @@ impl DripCohort {
     }
 }
 
-/// Run the piece pump loop.
-///
-/// `on_fatal_transport` is called (at most once) when [`SendError::Fatal`] is
-/// returned by the sink, indicating an unrecoverable transport failure.  The
-/// production call site passes an `abort()`-based action; tests inject a
-/// channel-send or a flag-set so they can assert detection without terminating
-/// the process.  After the callback returns the pump loop exits.
 #[allow(clippy::too_many_lines)]
 pub fn run_pump<S, F, C, A, O, D>(
     rx: Receiver<PumpMsg>,
@@ -514,8 +463,6 @@ pub fn run_pump<S, F, C, A, O, D>(
                     junction_ends.remove(&key);
                 }
                 if !pieces.is_empty() {
-                    // Clock not yet synced — skip junction bookkeeping; µs math is
-                    // meaningless without a real frequency and end_time needs it too.
                     if let Some((_ack_now, freq)) = mcu_clock_of(key.mcu_id) {
                         let (first_entry, first_host) = &pieces[0];
                         if first_entry.motor_mask == 0 {
@@ -594,7 +541,6 @@ pub fn run_pump<S, F, C, A, O, D>(
                 mcu_id,
                 retired_counts,
             }) => {
-                // retired_counts[i] is axis index i; same numbering as PushPieces.axis_idx in runtime_ffi.rs — do not reorder either side.
                 for (axis, &c) in retired_counts.iter().enumerate() {
                     let key = AxisKey {
                         mcu_id,
@@ -838,22 +784,10 @@ impl std::fmt::Debug for McuTransport {
 pub struct WireSink {
     pub transports: HashMap<u32, McuTransport>,
     pub timeout: Duration,
-    /// Live per-MCU clock frequency (Hz), queried from the router per frame.
-    /// `None` while the MCU clock is not yet synced. Single source of truth for
-    /// the `[transit-diag]` µs conversion — no second freq table.
     pub freq_of: Arc<dyn Fn(u32) -> Option<f64> + Send + Sync>,
 }
 
 impl WireSink {
-    /// Call `PushPieces` on the transport for the given axis.
-    ///
-    /// Returns `Err(SendError::Fatal(...))` for EtherCAT transport errors that
-    /// represent permanent connection loss (`Closed` or `Io`); all other
-    /// failures map to `Err(SendError::Transient(...))`.
-    ///
-    /// The reader thread owns all socket reads; `WouldBlock`/`TimedOut` never
-    /// surface here.  `TransportError::Timeout` (deadline exhausted on the
-    /// caller's `recv_timeout`) is transient — the session may still be alive.
     fn call_push_pieces(
         &self,
         mcu_id: u32,
@@ -907,9 +841,6 @@ impl WireSink {
             }
             McuTransport::EtherCat(weak) => {
                 let conn = weak.upgrade().ok_or_else(|| {
-                    // The endpoint conn was released (last strong Arc dropped):
-                    // session is gone, treat as fatal so the pump exits rather
-                    // than spinning on a dead axis.
                     SendError::Fatal(format!(
                         "ethercat conn for mcu {mcu_id} detached (released)"
                     ))

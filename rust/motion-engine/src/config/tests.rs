@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use super::*;
 
 #[test]
@@ -79,6 +81,31 @@ fn default_config_chains_are_passthrough() {
             .all(|ch| ch.kernel.is_none() && ch.gain == 0.0)
     );
     assert!(chains.followers.is_empty());
+}
+
+#[test]
+fn linear_pressure_advance_rejects_negative_or_non_finite_k() {
+    let reg = AxisRegistry::default();
+    for bad in [-0.01, f64::NAN, f64::INFINITY] {
+        let decls = vec![PostProcessorDecl {
+            name: "pa".into(),
+            ty: "linear_pressure_advance".into(),
+            params: vec![("k".into(), bad)],
+        }];
+        assert!(
+            PostProcessorSet::try_new(&reg, &decls).is_err(),
+            "k={bad} should be rejected at config build"
+        );
+    }
+    let ok = vec![PostProcessorDecl {
+        name: "pa".into(),
+        ty: "linear_pressure_advance".into(),
+        params: vec![("k".into(), 0.0)],
+    }];
+    assert!(
+        PostProcessorSet::try_new(&reg, &ok).is_ok(),
+        "k=0 is a valid no-op gain"
+    );
 }
 
 #[test]
@@ -518,6 +545,8 @@ fn limit_set_names_follow_section_order() {
         runtime_square_corner_velocity: None,
         chain: geometry::ChainFitConfig::default(),
         post_processors,
+        max_extrude_only_velocity: None,
+        max_extrude_only_accel: None,
         window_capacity: 32,
         beta_max_iters: 10,
         beta_convergence_ratio: 0.05,

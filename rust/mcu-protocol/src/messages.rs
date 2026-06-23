@@ -22,6 +22,8 @@ pub enum MessageKind {
     StartCaptureResponse = 0x0069,
     StopCapture = 0x006A,
     StopCaptureResponse = 0x006B,
+    ResonanceBuzz = 0x006C,
+    ResonanceBuzzResponse = 0x006D,
     SetTorque = 0x0070,
     SetTorqueResponse = 0x0071,
     Stop = 0x0072,
@@ -63,6 +65,8 @@ impl MessageKind {
             0x0069 => Self::StartCaptureResponse,
             0x006A => Self::StopCapture,
             0x006B => Self::StopCaptureResponse,
+            0x006C => Self::ResonanceBuzz,
+            0x006D => Self::ResonanceBuzzResponse,
             0x0070 => Self::SetTorque,
             0x0071 => Self::SetTorqueResponse,
             0x0072 => Self::Stop,
@@ -735,6 +739,62 @@ impl Encode for SeedServoHomeResponse {
 }
 
 impl Decode for SeedServoHomeResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResonanceBuzz {
+    pub axis_mask: u8,
+    pub sign_mask: u8,
+    pub freq_start_millihz: u32,
+    pub freq_end_millihz: u32,
+    pub amplitude_nm: u32,
+    pub duration_ms: u32,
+    pub ramp_ms: u32,
+}
+
+impl Encode for ResonanceBuzz {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.axis_mask);
+        put_u8(out, self.sign_mask);
+        put_u32(out, self.freq_start_millihz);
+        put_u32(out, self.freq_end_millihz);
+        put_u32(out, self.amplitude_nm);
+        put_u32(out, self.duration_ms);
+        put_u32(out, self.ramp_ms);
+    }
+}
+
+impl Decode for ResonanceBuzz {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            axis_mask: get_u8(c)?,
+            sign_mask: get_u8(c)?,
+            freq_start_millihz: get_u32(c)?,
+            freq_end_millihz: get_u32(c)?,
+            amplitude_nm: get_u32(c)?,
+            duration_ms: get_u32(c)?,
+            ramp_ms: get_u32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResonanceBuzzResponse {
+    pub result: i32,
+}
+
+impl Encode for ResonanceBuzzResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+    }
+}
+
+impl Decode for ResonanceBuzzResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
             result: get_i32(c)?,

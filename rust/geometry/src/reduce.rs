@@ -82,7 +82,6 @@ pub(crate) enum ParseErrorKind {
     EmptyCommand,
     DuplicateParam,
     G5MissingTangent,
-    // active_plane G-code number is encoded in `text`; pipeline parses it back to populate Recovery.
     G5PlaneMismatch,
     G5MalformedTangent,
     UnsupportedGcode { kind: &'static str },

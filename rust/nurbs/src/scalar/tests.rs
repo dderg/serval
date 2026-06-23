@@ -84,9 +84,6 @@ fn ref_try_new_accepts_valid_data() {
 
 #[test]
 fn try_from_wire_parses_unweighted_linear() {
-    // Layout: u8 version, u8 degree, u8 has_weights, u8 reserved,
-    //         u16 knot_count, u16 cp_count, then knots + cps (both as f32).
-    // Linear curve: degree=1, knots=[0,0,1,1], cps=[0.0, 1.0]
     let mut buf = Vec::new();
     buf.extend_from_slice(&[1, 1, 0, 0]); // version, degree, has_weights, reserved
     buf.extend_from_slice(&4u16.to_ne_bytes()); // knot_count
@@ -108,11 +105,10 @@ fn try_from_wire_parses_unweighted_linear() {
 fn try_from_wire_rejects_misaligned_buffer() {
     let mut data = [0u8; 32 + 1];
     data[0] = 1;
-    // Stack-array layout in release can land on an address where `&buf[1..]`
-    // happens to be 4-aligned. Anchor on a 4-aligned base via align_buf, then
-    // slice from offset 1 so misalignment for f32 is guaranteed.
     let aligned = align_buf(&data, 4);
-    let result = ScalarNurbsRef::<f32>::try_from_wire(&aligned.as_slice()[1..]);
+    let guaranteed_misaligned = &aligned.as_slice()[1..];
+    debug_assert_ne!(guaranteed_misaligned.as_ptr().align_offset(4), 0);
+    let result = ScalarNurbsRef::<f32>::try_from_wire(guaranteed_misaligned);
     assert!(matches!(result, Err(crate::WireError::Misaligned)));
 }
 
@@ -153,11 +149,6 @@ fn try_from_wire_rejects_has_weights_flag() {
     assert!(matches!(result, Err(crate::WireError::WeightsUnsupported)));
 }
 
-/// Owns a 4-byte-aligned byte buffer for wire-format tests. The backing
-/// storage is a `Vec<u32>` (alignment 4); we expose its bytes via `as_slice`.
-/// Using a wrapper avoids the layout-mismatch UB that would arise from
-/// transmuting `Vec<u32>` → `Vec<u8>` and letting the latter free with the
-/// wrong alignment.
 struct AlignedBytes {
     backing: Vec<u32>,
     len: usize,
@@ -165,8 +156,8 @@ struct AlignedBytes {
 
 impl AlignedBytes {
     fn as_slice(&self) -> &[u8] {
-        // SAFETY: `Vec<u32>` is 4-byte aligned and `len <= backing.len() * 4`.
-        // `u32` has no padding and any bit pattern is a valid `u8` byte.
+        debug_assert!(self.len <= self.backing.len() * 4);
+        debug_assert_eq!(self.backing.as_ptr().align_offset(4), 0);
         #[allow(unsafe_code)]
         unsafe {
             core::slice::from_raw_parts(self.backing.as_ptr().cast::<u8>(), self.len)
@@ -179,9 +170,7 @@ fn align_buf(data: &[u8], align: usize) -> AlignedBytes {
         4 => {
             let n = data.len().div_ceil(4);
             let mut backing: Vec<u32> = vec![0; n];
-            // SAFETY: `backing` owns `n * 4` bytes with 4-byte alignment;
-            // we write exactly `data.len() <= n * 4` bytes via the
-            // `&mut [u8]` view, then release it before returning.
+            debug_assert!(data.len() <= n * 4);
             #[allow(unsafe_code)]
             let bytes: &mut [u8] = unsafe {
                 core::slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), n * 4)

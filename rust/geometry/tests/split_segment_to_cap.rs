@@ -1,7 +1,3 @@
-// `metadata_propagates` asserts byte-equal pass-through of the f64 fields the
-// splitter copies verbatim (no arithmetic, no conversion). Comparing those with
-// `assert_eq!` is the precise check for that contract — `float_cmp` does not
-// apply to "this field is unchanged".
 #![allow(clippy::float_cmp)]
 
 use geometry::{CubicSegment, FollowerDemand, SourceRange, split_segment_to_cap};
@@ -80,10 +76,6 @@ fn metadata_propagates() {
 
 #[test]
 fn boundary_continuity_within_round_off() {
-    // Round-1-review fix: split_piece_at re-shifts coefficients, and
-    // to_bernstein/from_bernstein adds another floating-point pass on the
-    // way through vector_nurbs_from_pieces. Use a tolerance bound, not
-    // assert_eq!.
     const BOUNDARY_TOL: f64 = 1e-12;
     use nurbs::eval::vector_eval;
     let seg = straight_cubic(50.0);

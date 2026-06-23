@@ -309,20 +309,12 @@ fn hermite_fit_degree6_input_reduces_to_degree4() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests for fit_hermite_c1_clamped (C2 boundary pins)
-// ---------------------------------------------------------------------------
-
-/// Evaluate the 2nd derivative of a BezierPiece at a point.
 fn d2_at(piece: &BezierPiece<f64>, u: f64) -> f64 {
     piece.differentiate().differentiate().evaluate(u)
 }
 
 #[test]
 fn clamped_fit_pins_both_boundary_second_derivatives() {
-    // Source: f(t) = t³ on [0, 2]. Pascal-shifted at 0: coeffs = [0,0,0,1].
-    // We pin d2_start=6 and d2_end=10 (deliberately not the analytic values).
-    // The fitted polynomial must honour exactly these pins at its outer endpoints.
     let pieces: Vec<[BezierPiece<f64>; 1]> = vec![[BezierPiece {
         u_start: 0.0,
         u_end: 2.0,
@@ -332,8 +324,6 @@ fn clamped_fit_pins_both_boundary_second_derivatives() {
     let d2_start_pin = 6.0_f64;
     let d2_end_pin = 10.0_f64;
 
-    // Tolerance is 2.0: with deliberately non-analytic pins the residual will be
-    // significant, but we only need to assert the pins are honoured exactly.
     let result =
         fit_hermite_c1_clamped::<1>(&pieces, 2.0, 5, Some([d2_start_pin]), Some([d2_end_pin]))
             .unwrap();
@@ -356,8 +346,6 @@ fn clamped_fit_pins_both_boundary_second_derivatives() {
 
 #[test]
 fn clamped_fit_position_residual_within_tolerance() {
-    // Source: f(t) = t² + 0.5*t on [0, 3], split into 3 unit pieces.
-    // f''(0) = 2, f''(3) = 2.
     let pieces: Vec<[BezierPiece<f64>; 1]> = (0..3)
         .map(|i| {
             let s = i as f64;
@@ -397,8 +385,6 @@ fn clamped_fit_position_residual_within_tolerance() {
 
 #[test]
 fn clamped_fit_preserves_c1_at_interior_knots() {
-    // 4 quadratic pieces; pin d2_start and d2_end.
-    // Interior piece joints must remain C1.
     let pieces: Vec<[BezierPiece<f64>; 1]> = (0..4)
         .map(|i| {
             let s = i as f64;
@@ -410,8 +396,6 @@ fn clamped_fit_preserves_c1_at_interior_knots() {
         })
         .collect();
 
-    // Tolerance 0.5: pin d2_end=10 is far from the analytic 2, introducing
-    // inherent position deviation that a tight tolerance would reject.
     let result =
         fit_hermite_c1_clamped::<1>(&pieces, 0.5, 5, Some([2.0_f64]), Some([10.0_f64])).unwrap();
 
@@ -437,7 +421,6 @@ fn clamped_fit_preserves_c1_at_interior_knots() {
 
 #[test]
 fn clamped_fit_none_pins_matches_c1() {
-    // With both pins = None, clamped fit must reproduce fit_hermite_c1 values.
     let pieces: Vec<[BezierPiece<f64>; 1]> = (0..4)
         .map(|i| {
             let s = i as f64;
@@ -466,8 +449,6 @@ fn clamped_fit_none_pins_matches_c1() {
 
 #[test]
 fn clamped_fit_2d_pins_both_axes() {
-    // 2D: x(t) = t², y(t) = 2t on [0, 2].
-    // x''(0) = 2, x''(2) = 2; y''(0) = 0, y''(2) = 0.
     let pieces: Vec<[BezierPiece<f64>; 2]> = vec![[
         BezierPiece {
             u_start: 0.0,
@@ -517,47 +498,23 @@ fn clamped_fit_2d_pins_both_axes() {
     );
 }
 
-/// Adversarial: non-polynomial input (sine approximation as degree-6 pieces)
-/// with ASYMMETRIC d2_start != d2_end.
-///
-/// Verifies:
-/// 1. The pinned 2nd derivatives are exact to 1e-6 (not approximate).
-/// 2. C0 and C1 are preserved at interior knots.
-/// 3. Position residual stays within tolerance everywhere.
-/// 4. The test does NOT use a polynomial input — the sine Taylor approximation
-///    has non-trivial residual, so the fitter has genuine work to do.
 #[test]
 fn adversarial_nonpolynomial_asymmetric_pins() {
-    // Use the degree-6 Taylor approximation of sin(t) on [0, 2*pi] split into
-    // 8 equal pieces. The approximation is NOT exact (truncation error grows
-    // near pi/2), so the fitter must actually subdivide and cannot trivially
-    // reproduce the source. The 2nd derivative pins are chosen to be the analytic
-    // sin''(t) = -sin(t) at the global endpoints but rounded to produce a
-    // genuinely asymmetric pair.
     let n = 8;
     let two_pi = std::f64::consts::TAU;
-    // sin Taylor at 0: [0, 1, 0, -1/6, 0, 1/120, 0, -1/5040]
-    // degree-6 Taylor (drop t^7 term):
-    let _sin_abs = [0.0_f64, 1.0, 0.0, -1.0 / 6.0, 0.0, 1.0 / 120.0, 0.0];
 
     let pieces: Vec<[BezierPiece<f64>; 1]> = (0..n)
         .map(|i| {
             let u0 = i as f64 * two_pi / n as f64;
             let u1 = (i + 1) as f64 * two_pi / n as f64;
-            // Re-expand sin Taylor around u0 using shift. For each piece we use
-            // a cubic Hermite interpolant matching sin/cos at both endpoints — this
-            // is C1-continuous across pieces and NOT a polynomial of sin, so the
-            // fitter has nontrivial residual to deal with.
             let h = u1 - u0;
             let f0 = u0.sin();
             let df0 = u0.cos();
             let f1 = u1.sin();
             let df1 = u1.cos();
-            // cubic Hermite: c0=f0, c1=df0, solve 2x2 for c2,c3
-            let det = h * h * h * h; // h^4
+            let det = h * h * h * h;
             let c2 = (3.0 * h * h * (f1 - f0 - df0 * h) - h * h * h * (df1 - df0)) / det;
             let c3 = (h * h * (df1 - df0) - 2.0 * h * (f1 - f0 - df0 * h)) / det;
-            // Pad to degree-6 with zeros so degree is uniform across pieces.
             [BezierPiece {
                 u_start: u0,
                 u_end: u1,
@@ -566,19 +523,14 @@ fn adversarial_nonpolynomial_asymmetric_pins() {
         })
         .collect();
 
-    // Analytic: sin''(0) = -sin(0) = 0; sin''(2*pi) = -sin(2*pi) ≈ 0.
-    // Use deliberately different-from-analytic values to make d2_start != d2_end.
-    // Pins are deliberately non-analytic but small enough that the resulting
-    // polynomial stays within position tolerance on short pieces.
-    let d2_start_pin = 0.5_f64; // not the analytic 0 at t=0
-    let d2_end_pin = -0.8_f64; // different sign and magnitude, also not analytic 0
+    let d2_start_pin = 0.5_f64;
+    let d2_end_pin = -0.8_f64;
 
-    let tol = 0.15; // generous: residual from non-polynomial input + pin deviation
+    let tol = 0.15;
     let result =
         fit_hermite_c1_clamped::<1>(&pieces, tol, 5, Some([d2_start_pin]), Some([d2_end_pin]))
             .expect("adversarial clamped fit must succeed");
 
-    // 1. Pins are exact at outer endpoints.
     let first = &result[0][0];
     let last = result[0].last().unwrap();
     let got_start = d2_at(first, first.u_start);
@@ -592,7 +544,6 @@ fn adversarial_nonpolynomial_asymmetric_pins() {
         "ADVERSARIAL: d2 at global end: expected {d2_end_pin}, got {got_end}"
     );
 
-    // 2. C0 and C1 at all interior knots.
     for window in result[0].windows(2) {
         let left = &window[0];
         let right = &window[1];
@@ -616,7 +567,6 @@ fn adversarial_nonpolynomial_asymmetric_pins() {
         );
     }
 
-    // 3. Position residual within tolerance at dense sample points.
     for fitted_piece in &result[0] {
         let n_samples = 40;
         let step = (fitted_piece.u_end - fitted_piece.u_start) / n_samples as f64;
@@ -638,7 +588,6 @@ fn adversarial_nonpolynomial_asymmetric_pins() {
         }
     }
 
-    // 4. Confirm that pins are genuinely asymmetric (not both zero or equal).
     assert!(
         d2_start_pin.abs() > 0.1 && d2_end_pin.abs() > 0.1,
         "pins are non-trivial by construction"
@@ -648,7 +597,6 @@ fn adversarial_nonpolynomial_asymmetric_pins() {
         "pins are asymmetric by construction"
     );
 
-    // 5. Degree check: first and last pieces must be degree-5 (the pinned boundary pieces).
     assert_eq!(
         first.coeffs.len(),
         6,
@@ -662,10 +610,7 @@ fn adversarial_nonpolynomial_asymmetric_pins() {
         last.coeffs.len()
     );
 
-    // Bonus: the start-pin check should NOT hold for the NON-pinned fit (proving we're testing something real).
     let unpinned = fit_hermite_c1_clamped::<1>(&pieces, tol, 4, None, None).unwrap();
     let unpinned_start_d2 = d2_at(&unpinned[0][0], unpinned[0][0].u_start);
-    // The unpinned fit is free to choose its own c2; it's unlikely to land at 3.0.
-    // We don't assert a strict divergence, but print it for visibility.
-    let _ = unpinned_start_d2; // used as proof-of-concept
+    let _ = unpinned_start_d2;
 }

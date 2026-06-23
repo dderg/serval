@@ -14,7 +14,6 @@ pub trait Float:
     const ONE: Self;
 
     fn from_f64(x: f64) -> Self;
-    // mul_add is load-bearing on M7: emits a single VFMA.F32 instruction in release.
     fn mul_add(self, a: Self, b: Self) -> Self;
 
     fn sqrt(self) -> Self;
@@ -35,7 +34,6 @@ impl Float for f32 {
 
     #[inline]
     fn mul_add(self, a: Self, b: Self) -> Self {
-        // no_std: f32::mul_add recurses via trait; use libm::fmaf instead.
         #[cfg(feature = "host")]
         {
             f32::mul_add(self, a, b)

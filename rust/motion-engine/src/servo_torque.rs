@@ -4,12 +4,14 @@ use host_rt::mcu_call::McuCall as _;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::{Decode as _, Encode as _};
 use mcu_protocol::messages::{
-    MessageKind, RestoreDriveLimitsResponse, SeedServoHome, SeedServoHomeResponse, SetDriveLimits,
-    SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
+    MessageKind, ResonanceBuzz, ResonanceBuzzResponse, RestoreDriveLimitsResponse, SeedServoHome,
+    SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
 };
 
-/// Worst-case enable: 3000 DC cycles of ladder (~3 s) plus margin.
-const SET_TORQUE_TIMEOUT: Duration = Duration::from_secs(8);
+const WORST_CASE_LADDER_ENABLE: Duration = Duration::from_secs(3);
+const SET_TORQUE_TIMEOUT_MARGIN: Duration = Duration::from_secs(5);
+const SET_TORQUE_TIMEOUT: Duration =
+    WORST_CASE_LADDER_ENABLE.saturating_add(SET_TORQUE_TIMEOUT_MARGIN);
 
 pub fn send_set_torque(
     conn: &McuSerialConn,
@@ -97,6 +99,43 @@ pub fn send_seed_servo_home(
     }
     let r = SeedServoHomeResponse::decode(&resp)
         .map_err(|e| format!("SeedServoHomeResponse decode: {e:?}"))?;
+    Ok(r.result)
+}
+
+const RESONANCE_BUZZ_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[allow(clippy::too_many_arguments)]
+pub fn send_resonance_buzz(
+    conn: &McuSerialConn,
+    axis_mask: u8,
+    sign_mask: u8,
+    freq_start_millihz: u32,
+    freq_end_millihz: u32,
+    amplitude_nm: u32,
+    duration_ms: u32,
+    ramp_ms: u32,
+) -> Result<i32, String> {
+    let body = ResonanceBuzz {
+        axis_mask,
+        sign_mask,
+        freq_start_millihz,
+        freq_end_millihz,
+        amplitude_nm,
+        duration_ms,
+        ramp_ms,
+    }
+    .encoded_to_vec();
+    let (kind, resp) = conn
+        .mcu_call(MessageKind::ResonanceBuzz, body, RESONANCE_BUZZ_TIMEOUT)
+        .map_err(|e| format!("ResonanceBuzz transport: {e:?}"))?;
+    if kind != MessageKind::ResonanceBuzzResponse {
+        return Err(format!(
+            "ResonanceBuzz: unexpected response kind 0x{:04x}",
+            kind.as_u16()
+        ));
+    }
+    let r = ResonanceBuzzResponse::decode(&resp)
+        .map_err(|e| format!("ResonanceBuzzResponse decode: {e:?}"))?;
     Ok(r.result)
 }
 

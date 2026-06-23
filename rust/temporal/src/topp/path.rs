@@ -26,23 +26,13 @@ impl InterSample {
 
 #[derive(Debug, Clone)]
 pub struct ArclengthGrid {
-    /// `s_i ∈ [0, L]`, length N.
     pub s: Vec<f64>,
-    /// `u_i = u(s_i)`, length N.
     pub u: Vec<f64>,
-    /// `C(u_i)`, length N.
     pub c: Vec<[f64; 3]>,
-    /// `dC/ds` at `s_i`, length N. Unit-magnitude up to numerical floor.
     pub c_prime: Vec<[f64; 3]>,
-    /// `d²C/ds²` at `s_i`, length N.
     pub c_double_prime: Vec<[f64; 3]>,
-    /// `d³C/ds³` at `s_i`, length N.
     pub c_triple_prime: Vec<[f64; 3]>,
-    /// Total arclength, mm.
     pub total_length: f64,
-    /// Interior geometry samples for each interval `[i, i+1]`, length N−1.
-    /// Each sample's θ ∈ (0,1) is the fractional position within the
-    /// interval (`s = s_i + θ·h`).
     pub inter_geom: Vec<Vec<InterSample>>,
 }
 

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use temporal::BindingConstraint;

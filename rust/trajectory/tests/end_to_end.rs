@@ -1,13 +1,3 @@
-//! End-to-end integration tests for `shape_batch`.
-//!
-//! These tests exercise the full pipeline: partition -> TOPP-RA -> time-reparam ->
-//! composition -> convolution -> peak-accel -> beta loop -> output assembly.
-//!
-//! Low shaper frequencies (10 Hz) are used for numerical stability: the kernel
-//! normalization constant c = 15/(16*h^5) scales as f^5, so narrow kernels
-//! (high f) produce large polynomial coefficients that amplify floating-point
-//! error in the convolution + double-differentiation pipeline.
-
 use geometry::segment::FollowerDemand;
 
 const E_FOLLOWER_04: &[FollowerDemand] = &[FollowerDemand {
@@ -149,18 +139,9 @@ fn shape_batch_short_low_velocity_line_refits_at_five_microns() {
     assert!(seg.t_end.is_finite());
 }
 
-// TOPP-RA joining produces platform-dependent results at 10 Hz shaper with
-// multi-segment batches (passes macOS, stalls on Linux CI). The same code
-// paths are covered by the beta unit tests at 120/180 Hz which pass on all
-// platforms. Tracked for investigation.
 #[test]
 #[cfg_attr(target_os = "linux", ignore)]
 fn shape_batch_two_segments() {
-    // Two collinear CoupledToXy segments (same direction, no sharp corner).
-    // Collinear segments avoid the joining-loop oscillation that occurs with
-    // sharp corners at low grid density. The L-shape case is a known limitation
-    // of Fixed(20) grid strategy — the temporal multi-segment tests use Adaptive
-    // grids for sharp corners.
     let curve1 = make_straight_line([0.0, 0.0, 0.0], [50.0, 0.0, 0.0]);
     let curve2 = make_straight_line([50.0, 0.0, 0.0], [100.0, 0.0, 0.0]);
 

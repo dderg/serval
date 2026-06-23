@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -5,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
-use trajectory::ShapedSegment;
+use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
 use crate::stream::{StreamConfig, StreamState};
@@ -46,6 +48,7 @@ pub enum StreamMsg {
     Dwell { duration_s: f64, notify: Sender<()> },
     StreamOpen { home_pos: Vec<f64> },
     Reset { recovered_pos: Vec<f64> },
+    SetAxisChains(AxisChainSet),
     HomeDrip(HomeDripParams),
     Nudge(NudgeParams),
     Shutdown,
@@ -84,6 +87,7 @@ impl std::error::Error for StreamPlannerError {}
 impl StreamPlannerHandle {
     pub fn spawn(
         config: StreamConfig,
+        axis_chains: AxisChainSet,
         home_pos: Vec<f64>,
         dispatch: DispatchFn,
         nudge_dispatch: NudgeDispatchFn,
@@ -99,7 +103,7 @@ impl StreamPlannerHandle {
         let join = thread::Builder::new()
             .name("kalico-stream-planner".to_string())
             .spawn(move || {
-                let state = StreamState::new(config, &home_pos, 0.0);
+                let state = StreamState::new(config, axis_chains, &home_pos, 0.0);
                 run_loop(
                     rx,
                     dispatch,
@@ -144,9 +148,6 @@ impl StreamPlannerHandle {
         }
     }
 
-    /// Non-blocking flush: returns a receiver that yields the play-out
-    /// completion deadline (`None` if the stream was idle). Mirrors the old
-    /// planner's `flush_start`/`wait_moves_poll` protocol.
     pub fn flush_start(
         &self,
     ) -> Result<crossbeam_channel::Receiver<Option<Instant>>, StreamPlannerError> {
@@ -177,6 +178,12 @@ impl StreamPlannerHandle {
     pub fn reset(&self, recovered_pos: Vec<f64>) -> Result<(), StreamPlannerError> {
         self.sender
             .send(StreamMsg::Reset { recovered_pos })
+            .map_err(|_| StreamPlannerError::ChannelClosed)
+    }
+
+    pub fn update_axis_chains(&self, chains: AxisChainSet) -> Result<(), StreamPlannerError> {
+        self.sender
+            .send(StreamMsg::SetAxisChains(chains))
             .map_err(|_| StreamPlannerError::ChannelClosed)
     }
 
@@ -553,6 +560,9 @@ fn handle_control(
             *sync_instant = None;
             state.reset(&recovered_pos, 0.0);
             tally.reset();
+        }
+        StreamMsg::SetAxisChains(chains) => {
+            state.set_axis_chains(chains);
         }
         StreamMsg::HomeDrip(p) => {
             *sync_instant = None;

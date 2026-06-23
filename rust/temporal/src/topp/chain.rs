@@ -34,8 +34,6 @@ pub struct PointGeom {
     pub c_triple_prime: [f64; 3],
 }
 
-/// Right-side geometry/limits of a shared junction point. The primary
-/// per-point arrays carry the left side.
 #[derive(Debug, Clone, Copy)]
 pub struct JunctionDual {
     pub idx: usize,
@@ -45,31 +43,17 @@ pub struct JunctionDual {
 
 #[derive(Debug, Clone)]
 pub struct ChainGrid {
-    /// Cumulative arclength along the chain, len M.
     pub s: Vec<f64>,
     pub geom: Vec<PointGeom>,
-    /// Per-interval spacing, len M−1. Uniform within a segment, changes at
-    /// junction indices.
     pub h_intervals: Vec<f64>,
-    /// Index into `limits` per point (junction points → left segment).
     pub limits_idx: Vec<usize>,
     pub limits: Vec<Limits>,
     pub junctions: Vec<JunctionDual>,
-    /// Inclusive (start, end) point-index range per segment; consecutive
-    /// ranges share their boundary index.
     pub segment_ranges: Vec<(usize, usize)>,
-    /// Interior geometry samples for each chain interval `[i, i+1]`, len M−1.
-    /// Each sample's θ ∈ (0,1).
     pub inter_geom: Vec<Vec<InterSample>>,
-    /// Follower demands per segment, indexed like `limits`.
     pub followers: Vec<Vec<FollowerDemand>>,
-    /// Input-shaper kernels per spatial axis; `None` = passthrough.
     pub axis_kernels: [Option<PiecewisePolynomialKernel<f64>>; 3],
-    /// Realized per-axis velocity immediately before this chain, for the
-    /// shaper window's left edge.
     pub follower_history: Option<FollowerHistory>,
-    /// Per-axis velocity immediately after this chain (the right neighbor's
-    /// ramp), for the shaper window's right edge.
     pub follower_terminal: Option<FollowerHistory>,
 }
 
@@ -126,12 +110,6 @@ impl ChainGrid {
         Ok(())
     }
 
-    /// Concatenate per-segment grids into one chain. Adjacent grids must be
-    /// geometrically continuous (the caller guarantees tangent continuity —
-    /// that's what made them one chain). Segments marked in `absorbed` have
-    /// their arclength folded into a single degenerate interval shared with
-    /// the preceding segment; they contribute no interior grid nodes. Panics
-    /// on empty input: an empty chain is a caller bug.
     pub fn from_segment_grids_with_absorbed(
         grids: Vec<ArclengthGrid>,
         limits: Vec<Limits>,
@@ -221,9 +199,6 @@ impl ChainGrid {
         }
     }
 
-    /// Chain for a follower-only move: zero spatial geometry, arclength =
-    /// the largest follower displacement, follower rows + feedrate cap do
-    /// all the limiting (spec §2's fallback line).
     pub fn virtual_path(
         length: f64,
         n: usize,
