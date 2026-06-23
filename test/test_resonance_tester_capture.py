@@ -140,6 +140,25 @@ def test_registers_commands():
     assert "MEASURE_AXES_NOISE" in gcode.commands
 
 
+def test_shaketune_compat_generator_surface():
+    tester, _, _, _ = make_tester(
+        {
+            "min_freq": 70.0,
+            "max_freq": 133.0,
+            "accel_per_hz": 75.0,
+            "hz_per_sec": 1.0,
+        }
+    )
+    vg = tester.generator.vibration_generator
+    assert vg.min_freq == 70.0
+    assert vg.max_freq == 133.0
+    assert vg.accel_per_hz == 75.0
+    assert vg.hz_per_sec == 1.0
+    assert tester.generator.sweeping_period == 0.0
+    assert tester.generator.sweeping_accel == 0.0
+    assert not hasattr(tester, "test")
+
+
 def test_parse_axis_cardinal():
     gcmd = FakeGcmd()
     for name in ("x", "y", "z", "X", "Z"):
