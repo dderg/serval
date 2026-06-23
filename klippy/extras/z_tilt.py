@@ -53,7 +53,7 @@ class ZAdjustHelper:
             if delta < 1e-6:
                 continue
             force_move.manual_move(stepper, delta, speed, accel)
-        toolhead.wait_moves()
+        toolhead.wait_moves_and_mcu()
 
 
 class ZAdjustStatus:

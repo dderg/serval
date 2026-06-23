@@ -29,13 +29,13 @@ class FakeForceMoveRecorder:
 class FakeToolhead:
     def __init__(self, max_accel=500.0):
         self._max_accel = max_accel
-        self.wait_moves_called = 0
+        self.wait_moves_and_mcu_called = 0
 
     def get_max_axis_accel(self, axis_idx):
         return self._max_accel
 
-    def wait_moves(self):
-        self.wait_moves_called += 1
+    def wait_moves_and_mcu(self):
+        self.wait_moves_and_mcu_called += 1
 
 
 class FakeConfig:
@@ -106,7 +106,7 @@ def test_z_tilt_adjust_steppers_skips_all_equal():
 def test_z_tilt_adjust_steppers_wait_moves_called_once():
     helper, fm, toolhead = make_z_tilt_helper(z_names=["z", "z1", "z2"])
     helper.adjust_steppers([5.0, 5.001, 5.002], speed=10.0)
-    assert toolhead.wait_moves_called == 1
+    assert toolhead.wait_moves_and_mcu_called == 1
 
 
 def test_z_tilt_ng_adjust_steppers_calls_force_move_per_nonzero_delta():
@@ -128,4 +128,4 @@ def test_z_tilt_ng_adjust_steppers_skips_all_equal():
 def test_z_tilt_ng_adjust_steppers_wait_moves_called_once():
     helper, fm, toolhead = make_z_tilt_ng_helper(z_names=["z", "z1", "z2"])
     helper.adjust_steppers([5.0, 5.001, 5.002], speed=10.0)
-    assert toolhead.wait_moves_called == 1
+    assert toolhead.wait_moves_and_mcu_called == 1
