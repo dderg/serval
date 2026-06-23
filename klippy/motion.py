@@ -834,15 +834,12 @@ class Motion:
     cmd_SET_VELOCITY_LIMIT_help = "Set printer velocity limits"
 
     def cmd_SET_VELOCITY_LIMIT(self, gcmd):
-        for unsupported in (
+        accepted_legacy_noops = (
             "MINIMUM_CRUISE_RATIO",
             "ACCEL_TO_DECEL",
-        ):
-            if gcmd.get_float(unsupported, None) is not None:
-                raise gcmd.error(
-                    "%s is not supported: declare limits in [limit] config "
-                    "sections" % unsupported
-                )
+        )
+        for legacy in accepted_legacy_noops:
+            gcmd.get_float(legacy, None)
         v = gcmd.get_float("VELOCITY", None, above=0.0)
         a = gcmd.get_float("ACCEL", None, above=0.0)
         scv = gcmd.get_float("SQUARE_CORNER_VELOCITY", None, minval=0.0)
