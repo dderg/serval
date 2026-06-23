@@ -82,11 +82,10 @@ impl FrameServer {
                     }
                 }
             }
-            Err(ref e)
-                if matches!(
-                    e.kind(),
-                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
-                ) => {}
+            Err(ref e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => {
+                eprintln!("ec-rt: piece-socket read interrupted (EINTR) — retrying, session kept");
+            }
             Err(e) => {
                 eprintln!("ec-rt: read error: {e}");
                 self.conn = None;
