@@ -156,11 +156,11 @@ pub fn next_crossing_sweep(
         return Err(ToneError::Done);
     }
     loop {
+        let tp = lobe_params(p, &cursor);
         // A lobe whose tapered amplitude cannot reach the first half-microstep
         // never crosses a gridline; skip it without invoking the solver so a long
         // low-amplitude ramp tail cannot spin the segment loop.
-        let amp = lobe_params(p, &cursor).amplitude_mm;
-        if amp < 0.5 * p.microstep_distance {
+        if tp.amplitude_mm < 0.5 * p.microstep_distance {
             let advanced = next_lobe(p, cursor);
             if advanced.done {
                 return Err(ToneError::Done);
@@ -168,7 +168,6 @@ pub fn next_crossing_sweep(
             cursor = advanced;
             continue;
         }
-        let tp = lobe_params(p, &cursor);
         match next_crossing(&tp, cursor.inner) {
             Ok(c) => {
                 let next = SweepCursor {

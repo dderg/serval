@@ -576,12 +576,6 @@ impl Engine {
             }
             return 0;
         }
-        // The buzz command is broadcast to every engine MCU; act only on axes
-        // configured HERE and silently ignore excitations whose motors live on
-        // another MCU (their axis index is valid but unconfigured here). An axis
-        // index past the serviceable step queues can never be refilled — that is
-        // a genuine bug, so fault loud. Only a real producer conflict on a
-        // configured axis is otherwise fatal.
         for ex in &excitations {
             if ex.axis_idx >= crate::step_queue::N_AXIS_STEP_QUEUES {
                 crate::fault_helpers::raise_jog_parameters_invalid(shared);
@@ -590,15 +584,6 @@ impl Engine {
             let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
                 continue;
             };
-            // Mode selects the buzz delivery: Pulse drives STEP/DIR edges through
-            // the StepQueue; Phase stays in phase stepping and drives XDIRECT coil
-            // updates from the same queue (the `arm` loop below routes on mode).
-            // A buzz stream is the sole producer for the axis StepQueue. Reject a
-            // non-idle axis — not just an armed one: pieces merely QUEUED in the
-            // ring (not yet pulled into `armed` by the motion ISR) would arm on
-            // the next motion tick and have dispatch_pulse push motion edges into
-            // the same SPSC ring the buzz refill produces into, violating the
-            // single-producer invariant. Fail loud rather than interleave.
             let axis_idle = axis.armed.is_none() && axis.ring.is_empty();
             if !axis_idle {
                 crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
@@ -617,30 +602,17 @@ impl Engine {
                 now_cycle,
             );
             if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
-                // Phase axes keep the continuous chirp: XDIRECT picks times and
-                // evaluates the carrier, so a chirp is already closed-form cost
-                // here — no scan, no freeze.
                 let cfg = crate::buzz_xdirect::XdirectConfig::new(
                     axis.microstep_distance,
                     crate::buzz_xdirect::DEFAULT_XDIRECT_UPDATE_HZ,
                 );
                 crate::buzz_stream::arm_axis_xdirect(ex.axis_idx, params, cfg);
             } else if params.mu != 0.0 {
-                // A swept STEP/DIR axis would root-solve a chirp at every microstep
-                // crossing and starve the foreground; deliver the band as a
-                // staircase of fixed-frequency lobes (all `mu = 0`, closed-form).
                 crate::buzz_stream::arm_axis_sweep(ex.axis_idx, params);
             } else {
                 crate::buzz_stream::arm_axis(ex.axis_idx, params);
             }
         }
-        // Initial fill in the FOREGROUND (command context): top each armed axis
-        // to HIGH_WATER and arm its step-output compare to the front crossing
-        // under the IRQ guard. The solver cost here is harmless — it is not in
-        // any ISR. Thereafter the `runtime_buzz_refill_foreground` task keeps the
-        // rings topped up; the step-output ISR only pops + fires + re-arms.
-        // SAFETY: `queue_for_axis` returns null or a live `step_queues` entry,
-        // the foreground is the sole producer, and the kick is IRQ-guarded.
         #[cfg(not(any(test, feature = "host")))]
         #[allow(unsafe_code)]
         unsafe {
@@ -653,10 +625,6 @@ impl Engine {
         0
     }
 
-    /// Write one XDIRECT buzz update: drive every motor on `axis_idx` to the
-    /// parked base plus `offset_steps` (LUT microsteps) via the coil LUT. Called
-    /// from the step-output consumer for a phase-mode buzz; reuses the coil-write
-    /// core directly (NOT `dispatch_phase`, whose per-sample slew is tick-tied).
     pub fn emit_xdirect_buzz(&self, axis_idx: usize, offset_steps: i32, shared: &SharedState) {
         if let Some(Some(axis)) = self.stepping_axes.get(axis_idx) {
             crate::dispatch_stepper::write_phase_coils(axis_idx, axis, shared, offset_steps);
