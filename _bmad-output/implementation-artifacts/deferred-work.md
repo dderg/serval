@@ -98,3 +98,7 @@ Pre-existing / hardening items surfaced while adding the opt-in `[arc_fit]` gate
 ## 2026-06-22 — from piece-start-in-past-clock-rebase review (spec-piece-start-in-past-clock-rebase)
 
 - **C `serialqueue_set_clock_est` is now fully dead from Python.** After severing the contaminating clock-anchor writer in `clocksync._handle_clock`, nothing in `klippy/` reaches the C `serialqueue_set_clock_est` (cdef at `chelper/__init__.py:63`, body at `chelper/serialqueue.c:913`, header `serialqueue.h:47`). In this fork `serialhdl.set_clock_est` only feeds the motion engine and never touches the serialqueue, so this C entry point was already unwired before this change — the change merely confirms it. Pre-existing, out of scope here. Candidate for a separate cleanup pass (drop the cdef + C function if no other consumer exists), or leave as vestigial mainline-compat surface.
+
+## 2026-06-23 — from delivery-accurate-pacing review (spec-delivery-accurate-pacing)
+
+- **Stale `anchor.rs` docstring vs the host-monotonic lead wiring.** `rust/motion-engine/src/anchor.rs:21` still describes `host_now`/`t0` as "MCU est_print_time projected," but the dispatched lead (`dispatched_lead_secs`) now reconciles entirely through `router.host_now_secs()` (host-monotonic seconds), not MCU print time. The math is correct (both terms share one clock via the live `dispatch_anchor`); only the wording is stale. Cosmetic, non-blocking — fix the docstring in a cleanup pass.

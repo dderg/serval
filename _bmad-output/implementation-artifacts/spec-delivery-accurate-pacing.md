@@ -2,7 +2,7 @@
 title: 'Delivery-accurate backpressure pacing: gate on the dispatched-to-pump frontier'
 type: 'bugfix'
 created: '2026-06-23'
-status: 'in-progress'
+status: 'in-review'
 baseline_commit: '623a07c0b10c9b42ee6cc26b504b11f3a78b0dc9'
 context:
   - '{project-root}/CLAUDE.md'
