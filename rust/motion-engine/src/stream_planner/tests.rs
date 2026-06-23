@@ -1,9 +1,6 @@
-#![allow(deprecated)]
-
 use std::sync::{Arc, Mutex};
 
 use super::*;
-use crate::planner::{HomeDripParams, NudgeParams};
 use crate::stream::StreamConfig;
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
@@ -539,8 +536,6 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
     let mut chains = vec![trajectory::CompiledChain::default(); 4];
     chains[3] = trajectory::CompiledChain {
         stages: vec![trajectory::ChainStage::LinearPressureAdvance { k: 0.2 }],
-        kernel: None,
-        gain: 0.2,
     };
     h.update_axis_chains(AxisChainSet {
         chains,

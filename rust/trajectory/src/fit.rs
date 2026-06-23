@@ -15,15 +15,29 @@ pub struct FittedSegment {
     pub virtual_s_of_t: Option<ScalarNurbs<f64>>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum FitError {
+    #[error("fit failure: {0:?}")]
+    Nurbs(nurbs::algebra::FitError),
+    #[error("empty segment buffer")]
+    EmptySegments,
+}
+
+impl From<nurbs::algebra::FitError> for FitError {
+    fn from(value: nurbs::algebra::FitError) -> Self {
+        Self::Nurbs(value)
+    }
+}
+
 pub fn fit_and_split(
     composed: &[[BezierPiece<f64>; 3]],
     tolerance: f64,
     start_d2_override: Option<[f64; 3]>,
-) -> Result<FittedSegment, crate::ShapeError> {
+) -> Result<FittedSegment, FitError> {
     use nurbs::bezier::bezier_pieces_to_nurbs;
 
     if composed.is_empty() {
-        return Err(crate::ShapeError::EmptySegments);
+        return Err(FitError::EmptySegments);
     }
 
     let t_start = composed[0][0].u_start;
@@ -35,13 +49,7 @@ pub fn fit_and_split(
         start_d2_override.unwrap_or_else(|| boundary_second_derivative_start(&fit_input));
     let d2_end = boundary_second_derivative_end(&fit_input);
 
-    let mut fitted =
-        fit_hermite_c2_adaptive(&fit_input, tolerance, d2_start, d2_end).map_err(|e| {
-            crate::ShapeError::FitFailure {
-                index: 0,
-                detail: e,
-            }
-        })?;
+    let mut fitted = fit_hermite_c2_adaptive(&fit_input, tolerance, d2_start, d2_end)?;
 
     let uniform_degree_required_by_bezier_pieces_to_nurbs = fitted
         .iter()
@@ -89,7 +97,7 @@ fn boundary_second_derivative_end(composed: &[[BezierPiece<f64>; 3]]) -> [f64; 3
 
 fn nondegenerate_composed_pieces(
     composed: &[[BezierPiece<f64>; 3]],
-) -> Result<Vec<[BezierPiece<f64>; 3]>, crate::ShapeError> {
+) -> Result<Vec<[BezierPiece<f64>; 3]>, FitError> {
     let filtered: Vec<[BezierPiece<f64>; 3]> = composed
         .iter()
         .filter(|piece_set| {
@@ -100,12 +108,9 @@ fn nondegenerate_composed_pieces(
         .collect();
 
     if filtered.is_empty() {
-        return Err(crate::ShapeError::FitFailure {
-            index: 0,
-            detail: nurbs::algebra::FitError::DegenerateInput {
-                reason: "fit_and_split: no non-degenerate Hermite input pieces",
-            },
-        });
+        return Err(FitError::Nurbs(nurbs::algebra::FitError::DegenerateInput {
+            reason: "fit_and_split: no non-degenerate Hermite input pieces",
+        }));
     }
 
     Ok(filtered)
@@ -260,13 +265,11 @@ fn split_composed_midpoints(
     Ok(refined)
 }
 
-pub fn split_without_refit(
-    composed: &[[BezierPiece<f64>; 3]],
-) -> Result<FittedSegment, crate::ShapeError> {
+pub fn split_without_refit(composed: &[[BezierPiece<f64>; 3]]) -> Result<FittedSegment, FitError> {
     use nurbs::bezier::bezier_pieces_to_nurbs;
 
     if composed.is_empty() {
-        return Err(crate::ShapeError::EmptySegments);
+        return Err(FitError::EmptySegments);
     }
 
     let t_start = composed[0][0].u_start;

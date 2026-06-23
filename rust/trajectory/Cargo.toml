@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 nurbs = { path = "../nurbs" }
-temporal = { path = "../temporal" }
 geometry = { path = "../geometry" }
 thiserror.workspace = true
 

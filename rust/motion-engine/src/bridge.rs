@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
@@ -21,8 +19,9 @@ use crate::classify;
 use crate::config::{self, PlannerConfig};
 use crate::dispatch::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
-use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
-use crate::stream_planner::{StreamPlannerError, StreamPlannerHandle};
+use crate::stream_planner::{
+    DispatchError, HomeDripParams, NudgeParams, StreamPlannerError, StreamPlannerHandle,
+};
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
 
 struct HomingRun {
@@ -2159,7 +2158,7 @@ impl PyMotionEngine {
                 PyRuntimeError::new_err("planner not initialized — call init_planner first")
             })?;
             planner
-                .submit_nudge(crate::planner::NudgeParams {
+                .submit_nudge(crate::stream_planner::NudgeParams {
                     mcu_id,
                     axis: axis_idx,
                     motor_mask,
@@ -2508,8 +2507,6 @@ impl PyMotionEngine {
         mcus,
         kinematics_axes,
         cartesian_limits,
-        window_capacity = 32,
-        beta_max_iters = 10,
         arc_fit = None,
         max_extrude_only_velocity = None,
         max_extrude_only_accel = None,
@@ -2523,8 +2520,6 @@ impl PyMotionEngine {
         mcus: Vec<(u32, Vec<u8>, u8)>,
         kinematics_axes: Vec<String>,
         cartesian_limits: (f64, f64, f64, f64, f64, f64),
-        window_capacity: usize,
-        beta_max_iters: u8,
         arc_fit: Option<(f64, f64)>,
         max_extrude_only_velocity: Option<f64>,
         max_extrude_only_accel: Option<f64>,
@@ -2619,8 +2614,6 @@ impl PyMotionEngine {
         cfg.post_processors = post_processor_set;
         cfg.max_extrude_only_velocity = max_extrude_only_velocity;
         cfg.max_extrude_only_accel = max_extrude_only_accel;
-        cfg.window_capacity = window_capacity;
-        cfg.beta_max_iters = beta_max_iters;
         cfg.chain = match arc_fit {
             Some((facet_length_mm, max_angle_deg)) => {
                 if !(facet_length_mm.is_finite() && facet_length_mm > 0.0) {
@@ -3919,7 +3912,7 @@ impl PyMotionEngine {
         endstop_id: u8,
         endstop_mcu: u32,
     ) -> PyResult<()> {
-        use crate::planner::HomeDripParams;
+        use crate::stream_planner::HomeDripParams;
 
         if axis > 2 {
             return Err(PyRuntimeError::new_err(format!(

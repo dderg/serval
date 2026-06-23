@@ -1,8 +1,5 @@
-#![allow(deprecated)]
-
 use crate::kernel::{build_smooth_mzv_kernel, build_smooth_zv_kernel};
 use nurbs::algebra::PiecewisePolynomialKernel;
-use nurbs::ScalarNurbs;
 
 pub const SMOOTH_ZV_T_SM_PER_HZ: f64 = 0.8025;
 pub const SMOOTH_MZV_T_SM_PER_HZ: f64 = 0.95625;
@@ -29,13 +26,6 @@ pub struct PostProcessorInstance {
 }
 
 #[derive(Debug, Clone)]
-#[deprecated(note = "legacy emit stack only; live path must use ordered ChainStage values")]
-pub enum PlanAction {
-    Kernel(PiecewisePolynomialKernel<f64>),
-    DerivativeGain { k: f64 },
-}
-
-#[derive(Debug, Clone)]
 pub enum ChainStage {
     SmoothKernel(PiecewisePolynomialKernel<f64>),
     LinearPressureAdvance { k: f64 },
@@ -54,10 +44,6 @@ impl ChainStage {
 #[derive(Debug, Clone, Default)]
 pub struct CompiledChain {
     pub stages: Vec<ChainStage>,
-    #[deprecated(note = "legacy emit stack only; live path must use ordered stages")]
-    pub kernel: Option<PiecewisePolynomialKernel<f64>>,
-    #[deprecated(note = "legacy emit stack only; live path must use ordered stages")]
-    pub gain: f64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,19 +109,6 @@ impl PostProcessorInstance {
         }
     }
 
-    #[must_use]
-    pub fn action(&self) -> PlanAction {
-        match self.ty {
-            PostProcessorType::SmoothZv { frequency_hz } => {
-                PlanAction::Kernel(build_smooth_zv_kernel(SMOOTH_ZV_T_SM_PER_HZ / frequency_hz))
-            }
-            PostProcessorType::SmoothMzv { frequency_hz } => PlanAction::Kernel(
-                build_smooth_mzv_kernel(SMOOTH_MZV_T_SM_PER_HZ / frequency_hz),
-            ),
-            PostProcessorType::LinearPressureAdvance { k } => PlanAction::DerivativeGain { k },
-        }
-    }
-
     pub fn set_param(&mut self, key: &str, value: f64) -> Result<(), PostProcessorError> {
         let unknown = || PostProcessorError::UnknownParam {
             name: self.name.clone(),
@@ -184,8 +157,8 @@ impl CompiledChain {
         let mut gain_source: Option<&str> = None;
         for inst in chain {
             inst.validate()?;
-            match inst.action() {
-                PlanAction::Kernel(kernel) => {
+            match inst.ty() {
+                PostProcessorType::SmoothZv { frequency_hz } => {
                     if let Some(prev) = kernel_source {
                         return Err(PostProcessorError::UnsupportedComposition {
                             detail: format!(
@@ -195,16 +168,29 @@ impl CompiledChain {
                         });
                     }
                     kernel_source = Some(inst.name());
-                    compiled.kernel = Some(kernel);
-                    compiled.stages.push(ChainStage::SmoothKernel(
-                        compiled
-                            .kernel
-                            .as_ref()
-                            .expect("kernel was just stored")
-                            .clone(),
-                    ));
+                    compiled
+                        .stages
+                        .push(ChainStage::SmoothKernel(build_smooth_zv_kernel(
+                            SMOOTH_ZV_T_SM_PER_HZ / *frequency_hz,
+                        )));
                 }
-                PlanAction::DerivativeGain { k } => {
+                PostProcessorType::SmoothMzv { frequency_hz } => {
+                    if let Some(prev) = kernel_source {
+                        return Err(PostProcessorError::UnsupportedComposition {
+                            detail: format!(
+                                "second kernel post-processor '{}' after '{prev}'",
+                                inst.name()
+                            ),
+                        });
+                    }
+                    kernel_source = Some(inst.name());
+                    compiled
+                        .stages
+                        .push(ChainStage::SmoothKernel(build_smooth_mzv_kernel(
+                            SMOOTH_MZV_T_SM_PER_HZ / *frequency_hz,
+                        )));
+                }
+                PostProcessorType::LinearPressureAdvance { k } => {
                     if let Some(prev) = gain_source {
                         return Err(PostProcessorError::UnsupportedComposition {
                             detail: format!(
@@ -214,10 +200,9 @@ impl CompiledChain {
                         });
                     }
                     gain_source = Some(inst.name());
-                    compiled.gain = k;
                     compiled
                         .stages
-                        .push(ChainStage::LinearPressureAdvance { k });
+                        .push(ChainStage::LinearPressureAdvance { k: *k });
                 }
             }
         }
@@ -273,8 +258,6 @@ impl AxisChainSet {
                 .iter()
                 .map(|k| CompiledChain {
                     stages: k.iter().cloned().map(ChainStage::SmoothKernel).collect(),
-                    kernel: k.clone(),
-                    gain: 0.0,
                 })
                 .collect(),
             followers: Vec::new(),
@@ -290,30 +273,6 @@ impl AxisChainSet {
     pub fn is_follower_axis(&self, axis: usize) -> bool {
         self.followers.iter().any(|(f, _)| *f == axis)
     }
-}
-
-#[must_use]
-#[deprecated(note = "legacy emit stack only; live path must use ordered stage evaluation")]
-pub fn apply_derivative_gain(track: &ScalarNurbs<f64>, k: f64) -> ScalarNurbs<f64> {
-    let pieces = nurbs::bezier::extract_bezier_pieces(track);
-    let out_pieces: Vec<nurbs::bezier::BezierPiece<f64>> = pieces
-        .iter()
-        .map(|piece| {
-            let derivative = piece.differentiate();
-            let coeffs: Vec<f64> = piece
-                .coeffs
-                .iter()
-                .enumerate()
-                .map(|(i, c)| c + k * derivative.coeffs.get(i).copied().unwrap_or(0.0))
-                .collect();
-            nurbs::bezier::BezierPiece {
-                u_start: piece.u_start,
-                u_end: piece.u_end,
-                coeffs,
-            }
-        })
-        .collect();
-    nurbs::bezier::bezier_pieces_to_nurbs(&out_pieces)
 }
 
 #[cfg(test)]
