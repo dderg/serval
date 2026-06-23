@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use super::*;
 use geometry::segment::SourceRange;
 use geometry::{
@@ -207,6 +209,10 @@ fn source_mismatch_is_rejected() {
 fn linear_pa_chains(extruder_axis: usize, k: f64) -> Vec<CompiledChain> {
     let mut chains = vec![CompiledChain::default(); extruder_axis + 1];
     chains[extruder_axis] = CompiledChain {
+        stages: (k != 0.0)
+            .then_some(trajectory::ChainStage::LinearPressureAdvance { k })
+            .into_iter()
+            .collect(),
         kernel: None,
         gain: k,
     };

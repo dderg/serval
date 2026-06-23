@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::sync::{Arc, Mutex};
 
 use super::*;
@@ -314,63 +316,6 @@ fn nudge_dispatches_pieces_and_advances_time() {
     h.shutdown();
 }
 
-fn co_move(line_no: u32, start: [f64; 3], end: [f64; 3], e_delta: f64) -> geometry::Move {
-    line_move(start, end, e_delta, ctx(line_no)).unwrap()
-}
-
-#[test]
-fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
-    let deltas: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
-    let cap = Arc::clone(&deltas);
-    let dispatch: DispatchFn = Arc::new(move |seg: &ShapedSegment| {
-        let t_mid = 0.5 * (seg.t_start + seg.t_end);
-        let de = eval(&seg.axes[3], t_mid) - eval(&seg.axes[3], seg.t_start);
-        cap.lock().unwrap().push(de);
-        Ok(())
-    });
-    let noop_nudge: NudgeDispatchFn = Arc::new(|_, _| Ok(()));
-
-    let mut h = StreamPlannerHandle::spawn(
-        cfg(),
-        AxisChainSet::default(),
-        vec![0.0, 0.0, 0.0, 0.0],
-        dispatch,
-        noop_nudge,
-    );
-
-    h.submit_move(co_move(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0))
-        .unwrap();
-    h.flush().unwrap();
-    let before = deltas.lock().unwrap().clone();
-    assert_eq!(before.len(), 1, "first move should emit one segment");
-
-    let mut chains = vec![trajectory::CompiledChain::default(); 4];
-    chains[3] = trajectory::CompiledChain {
-        kernel: None,
-        gain: 0.2,
-    };
-    h.update_axis_chains(AxisChainSet {
-        chains,
-        followers: Vec::new(),
-    })
-    .unwrap();
-
-    h.submit_move(co_move(2, [40.0, 0.0, 0.0], [80.0, 0.0, 0.0], 4.0))
-        .unwrap();
-    h.flush().unwrap();
-    let after = deltas.lock().unwrap().clone();
-    assert_eq!(after.len(), 2, "second move should emit one more segment");
-
-    let pre_swap = after[0];
-    let post_swap = after[1];
-    assert!((pre_swap - before[0]).abs() < 1e-12, "held output mutated");
-    assert!(
-        post_swap > pre_swap + 1e-2,
-        "post-swap PA should push the extruder ahead at mid-move: {post_swap} vs {pre_swap}"
-    );
-    h.shutdown();
-}
-
 fn nominal_secs(m: &geometry::Move) -> f64 {
     nominal_t(m).unwrap()
 }
@@ -558,5 +503,63 @@ fn continuous_blend_run_dispatches_continuously_without_flush() {
     for w in segs.windows(2) {
         assert!((w[1].0 - w[0].1).abs() < 1e-9, "time gap between segments");
     }
+    h.shutdown();
+}
+
+fn co_move(line_no: u32, start: [f64; 3], end: [f64; 3], e_delta: f64) -> geometry::Move {
+    line_move(start, end, e_delta, ctx(line_no)).unwrap()
+}
+
+#[test]
+fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
+    let deltas: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = Arc::clone(&deltas);
+    let dispatch: DispatchFn = Arc::new(move |seg: &ShapedSegment| {
+        let t_mid = 0.5 * (seg.t_start + seg.t_end);
+        let de = eval(&seg.axes[3], t_mid) - eval(&seg.axes[3], seg.t_start);
+        cap.lock().unwrap().push(de);
+        Ok(())
+    });
+    let noop_nudge: NudgeDispatchFn = Arc::new(|_, _| Ok(()));
+
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0, 0.0],
+        dispatch,
+        noop_nudge,
+    );
+
+    h.submit_move(co_move(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0))
+        .unwrap();
+    h.flush().unwrap();
+    let before = deltas.lock().unwrap().clone();
+    assert_eq!(before.len(), 1, "first move should emit one segment");
+
+    let mut chains = vec![trajectory::CompiledChain::default(); 4];
+    chains[3] = trajectory::CompiledChain {
+        stages: vec![trajectory::ChainStage::LinearPressureAdvance { k: 0.2 }],
+        kernel: None,
+        gain: 0.2,
+    };
+    h.update_axis_chains(AxisChainSet {
+        chains,
+        followers: Vec::new(),
+    })
+    .unwrap();
+
+    h.submit_move(co_move(2, [40.0, 0.0, 0.0], [80.0, 0.0, 0.0], 4.0))
+        .unwrap();
+    h.flush().unwrap();
+    let after = deltas.lock().unwrap().clone();
+    assert_eq!(after.len(), 2, "second move should emit one more segment");
+
+    let pre_swap = after[0];
+    let post_swap = after[1];
+    assert!((pre_swap - before[0]).abs() < 1e-12, "held output mutated");
+    assert!(
+        post_swap > pre_swap + 1e-2,
+        "post-swap PA should push the extruder ahead at mid-move: {post_swap} vs {pre_swap}"
+    );
     h.shutdown();
 }

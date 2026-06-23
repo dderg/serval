@@ -2,9 +2,11 @@
 
 use core::sync::atomic::Ordering;
 
-use portable_atomic::AtomicI32;
+use portable_atomic::{AtomicI32, AtomicU8};
 
 use crate::buzz_gen::{ToneCursor, ToneError, ToneParams, next_crossing};
+use crate::buzz_sweep::{SweepCursor, next_crossing_sweep};
+use crate::buzz_xdirect::{XdirectConfig, XdirectCursor, next_update};
 use crate::error::FaultCode;
 use crate::step_queue::{
     N_AXIS_STEP_QUEUES, STEPPER_SEL_ALL, StepEntry, StepQueue, len as queue_len,
@@ -26,14 +28,51 @@ pub fn take_refill_fault() -> i32 {
     REFILL_FAULT.swap(0, Ordering::AcqRel)
 }
 
+static XDIRECT_MASK: AtomicU8 = AtomicU8::new(0);
+
+fn set_xdirect_bit(axis_idx: usize, on: bool) {
+    if axis_idx >= N_AXIS_STEP_QUEUES {
+        return;
+    }
+    let bit = 1u8 << axis_idx;
+    if on {
+        XDIRECT_MASK.fetch_or(bit, Ordering::Release);
+    } else {
+        XDIRECT_MASK.fetch_and(!bit, Ordering::Release);
+    }
+}
+
+#[cfg(any(test, feature = "host"))]
+pub fn set_xdirect_for_test(axis_idx: usize, on: bool) {
+    set_xdirect_bit(axis_idx, on);
+}
+
+#[must_use]
+pub fn is_xdirect(axis_idx: usize) -> bool {
+    if axis_idx >= N_AXIS_STEP_QUEUES {
+        return false;
+    }
+    XDIRECT_MASK.load(Ordering::Acquire) & (1u8 << axis_idx) != 0
+}
+
 const HIGH_WATER: u16 = 24;
 
 const REFILL_BATCH: u16 = 16;
 
 #[derive(Clone, Copy, Debug)]
+enum StreamGen {
+    Pulse(ToneCursor),
+    Sweep(SweepCursor),
+    Xdirect {
+        cfg: XdirectConfig,
+        cursor: XdirectCursor,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
 struct AxisStream {
     params: ToneParams,
-    cursor: ToneCursor,
+    generator: StreamGen,
     anchored: bool,
     closed: bool,
 }
@@ -102,21 +141,68 @@ pub fn arm_axis(axis_idx: usize, params: ToneParams) {
     if axis_idx >= N_AXIS_STEP_QUEUES {
         return;
     }
+    set_xdirect_bit(axis_idx, false);
     store::with_slot(axis_idx, |slot| {
         *slot = Some(AxisStream {
             params,
-            cursor: ToneCursor::start(),
+            generator: StreamGen::Pulse(ToneCursor::start()),
             anchored: false,
             closed: false,
         });
     });
 }
 
+pub fn arm_axis_sweep(axis_idx: usize, params: ToneParams) {
+    if axis_idx >= N_AXIS_STEP_QUEUES {
+        return;
+    }
+    set_xdirect_bit(axis_idx, false);
+    store::with_slot(axis_idx, |slot| {
+        *slot = Some(AxisStream {
+            params,
+            generator: StreamGen::Sweep(SweepCursor::start(&params)),
+            anchored: false,
+            closed: false,
+        });
+    });
+}
+
+pub fn arm_axis_xdirect(axis_idx: usize, params: ToneParams, cfg: XdirectConfig) {
+    if axis_idx >= N_AXIS_STEP_QUEUES {
+        return;
+    }
+    store::with_slot(axis_idx, |slot| {
+        *slot = Some(AxisStream {
+            params,
+            generator: StreamGen::Xdirect {
+                cfg,
+                cursor: XdirectCursor::start(&params, &cfg),
+            },
+            anchored: false,
+            closed: false,
+        });
+    });
+    set_xdirect_bit(axis_idx, true);
+}
+
 pub fn clear_axis(axis_idx: usize) {
     if axis_idx >= N_AXIS_STEP_QUEUES {
         return;
     }
+    set_xdirect_bit(axis_idx, false);
     store::with_slot(axis_idx, |slot| *slot = None);
+}
+
+#[cfg(any(test, feature = "host"))]
+#[must_use]
+pub fn is_sweep(axis_idx: usize) -> bool {
+    if axis_idx >= N_AXIS_STEP_QUEUES {
+        return false;
+    }
+    store::with_slot(axis_idx, |slot| {
+        slot.as_ref()
+            .is_some_and(|s| matches!(s.generator, StreamGen::Sweep(_)))
+    })
 }
 
 #[must_use]
@@ -152,24 +238,48 @@ pub unsafe fn refill_step_axis(
             if occupancy >= HIGH_WATER || pushed >= REFILL_BATCH {
                 return Ok(pushed > 0);
             }
-            match next_crossing(&stream.params, stream.cursor) {
-                Ok(crossing) => {
-                    let entry = StepEntry {
-                        cycle_abs: crossing.cycle_abs,
-                        dir: crossing.dir,
-                        stepper_sel: STEPPER_SEL_ALL,
-                        _pad: [0; 2],
-                    };
+            let params = stream.params;
+            let next = match &stream.generator {
+                StreamGen::Pulse(cursor) => match next_crossing(&params, *cursor) {
+                    Ok(c) => Ok(Some((
+                        StepEntry::pulse(c.cycle_abs, c.dir, STEPPER_SEL_ALL),
+                        StreamGen::Pulse(ToneCursor {
+                            level: c.level,
+                            t_cursor: c.t,
+                        }),
+                    ))),
+                    Err(ToneError::Done) => Ok(None),
+                    Err(e) => Err(e),
+                },
+                StreamGen::Sweep(cursor) => match next_crossing_sweep(&params, *cursor) {
+                    Ok((c, advanced)) => Ok(Some((
+                        StepEntry::pulse(c.cycle_abs, c.dir, STEPPER_SEL_ALL),
+                        StreamGen::Sweep(advanced),
+                    ))),
+                    Err(ToneError::Done) => Ok(None),
+                    Err(e) => Err(e),
+                },
+                StreamGen::Xdirect { cfg, cursor } => match next_update(&params, cfg, *cursor) {
+                    Ok((u, advanced)) => Ok(Some((
+                        StepEntry::xdirect(u.cycle_abs, u.offset_steps),
+                        StreamGen::Xdirect {
+                            cfg: *cfg,
+                            cursor: advanced,
+                        },
+                    ))),
+                    Err(ToneError::Done) => Ok(None),
+                    Err(e) => Err(e),
+                },
+            };
+            match next {
+                Ok(Some((entry, advanced))) => {
                     if unsafe { queue_push(queue_ptr, entry) }.is_err() {
                         return Err(RefillError::QueueFull);
                     }
-                    stream.cursor = ToneCursor {
-                        level: crossing.level,
-                        t_cursor: crossing.t,
-                    };
+                    stream.generator = advanced;
                     pushed += 1;
                 }
-                Err(ToneError::Done) => {
+                Ok(None) => {
                     stream.closed = true;
                     return Ok(pushed > 0);
                 }

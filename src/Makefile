@@ -3,7 +3,7 @@
 src-y += sched.c command.c basecmd.c debugcmds.c
 # Kalico-native transport — stream-level demuxer + Layer 4 dispatcher.
 # Spec: docs/superpowers/specs/2026-05-04-mcu-transport-design.md.
-src-y += mcu_demux.c mcu_transport_dispatch.c \
+src-y += mcu_demux.c mcu_transport_dispatch.c piece_sink.c \
     runtime_storage.c runtime_panic.c step_queue.c \
     spi_queue.c event_log.c
 src-$(CONFIG_HAVE_GPIO) += initial_pins.c gpiocmds.c stepper.c trsync.c endstop.c

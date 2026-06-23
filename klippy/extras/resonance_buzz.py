@@ -150,8 +150,9 @@ class ResonanceBuzz:
         )
 
     cmd_RESONANCE_BUZZ_SWEEP_help = (
-        "Sweep a frequency band on one axis via the engine-resident chirp "
-        "generator (one fade-in/out for the whole sweep)"
+        "Sweep a frequency band on one axis via the engine-resident sweep "
+        "generator (one fade-in/out for the whole sweep). Phase-stepping axes "
+        "run a continuous chirp; STEP/DIR axes run a fixed-frequency staircase."
     )
 
     def cmd_RESONANCE_BUZZ_SWEEP(self, gcmd):

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use nurbs::bezier::{bezier_pieces_to_nurbs, extract_bezier_pieces, BezierPiece};
 use nurbs::eval::eval as nurbs_eval;
 use nurbs::ScalarNurbs;

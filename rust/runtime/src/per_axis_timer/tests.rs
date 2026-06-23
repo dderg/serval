@@ -7,12 +7,7 @@ use super::{MAX_STEPS_PER_EVENT, STEP_OUTPUT_DISABLE, step_output_event};
 use crate::step_queue::{StepEntry, push};
 
 fn entry(cycle_abs: u32, dir: i8) -> StepEntry {
-    StepEntry {
-        cycle_abs,
-        dir,
-        stepper_sel: 0,
-        _pad: [0; 2],
-    }
+    StepEntry::pulse(cycle_abs, dir, 0)
 }
 
 fn enqueue(axis: usize, cycle_abs: u32, dir: i8) {
@@ -30,18 +25,9 @@ fn stepper_sel_passed_through_to_emitter() {
     let q = queue_for_axis(0);
     // SAFETY: host test queue, sole producer here.
     unsafe {
-        push(
-            q,
-            StepEntry {
-                cycle_abs: 1500,
-                dir: 1,
-                stepper_sel: 2,
-                _pad: [0; 2],
-            },
-        )
-        .expect("queue not full");
+        push(q, StepEntry::pulse(1500, 1, 2)).expect("queue not full");
     }
-    step_output_event();
+    step_output_event(core::ptr::null_mut());
     assert_eq!(take_emits(), vec![(0u8, 1i32, 2u8)]);
 }
 
@@ -50,7 +36,10 @@ fn all_empty_returns_disable() {
     reset();
     set_now(1000);
     set_owned_mask(0b0001);
-    assert_eq!(step_output_event(), STEP_OUTPUT_DISABLE);
+    assert_eq!(
+        step_output_event(core::ptr::null_mut()),
+        STEP_OUTPUT_DISABLE
+    );
     assert!(take_emits().is_empty());
 }
 
@@ -60,7 +49,7 @@ fn far_future_head_not_emitted_returned_as_wake() {
     set_now(1000);
     set_owned_mask(0b0001);
     enqueue(0, 5000, 1);
-    assert_eq!(step_output_event(), 5000);
+    assert_eq!(step_output_event(core::ptr::null_mut()), 5000);
     assert!(take_emits().is_empty());
 }
 
@@ -70,7 +59,7 @@ fn arrived_head_emitted() {
     set_now(2000);
     set_owned_mask(0b0001);
     enqueue(0, 1500, 1);
-    let next = step_output_event();
+    let next = step_output_event(core::ptr::null_mut());
     let emits = take_emits();
     assert_eq!(emits, vec![(0u8, 1i32, 0u8)]);
     assert_eq!(next, STEP_OUTPUT_DISABLE);
@@ -82,7 +71,7 @@ fn exactly_now_is_due() {
     set_now(2000);
     set_owned_mask(0b0001);
     enqueue(0, 2000, -1);
-    let next = step_output_event();
+    let next = step_output_event(core::ptr::null_mut());
     assert_eq!(take_emits(), vec![(0u8, -1i32, 0u8)]);
     assert_eq!(next, STEP_OUTPUT_DISABLE);
 }
@@ -94,7 +83,7 @@ fn soonest_across_owned_axes_selected() {
     set_owned_mask(0b0011);
     enqueue(0, 4000, 1);
     enqueue(1, 3000, 1);
-    assert_eq!(step_output_event(), 3000);
+    assert_eq!(step_output_event(core::ptr::null_mut()), 3000);
     assert!(take_emits().is_empty());
 }
 
@@ -108,7 +97,7 @@ fn soonest_is_wrap_safe_across_u32_boundary() {
     let far = now.wrapping_add(200);
     enqueue(0, near, 1);
     enqueue(1, far, 1);
-    assert_eq!(step_output_event(), near);
+    assert_eq!(step_output_event(core::ptr::null_mut()), near);
     assert!(take_emits().is_empty());
 
     reset();
@@ -116,7 +105,7 @@ fn soonest_is_wrap_safe_across_u32_boundary() {
     set_owned_mask(0b0011);
     enqueue(0, far, 1);
     enqueue(1, near, 1);
-    assert_eq!(step_output_event(), near);
+    assert_eq!(step_output_event(core::ptr::null_mut()), near);
 }
 
 #[test]
@@ -125,7 +114,10 @@ fn unowned_axis_with_due_head_is_ignored() {
     set_now(2000);
     set_owned_mask(0b0001);
     enqueue(1, 1000, 1);
-    assert_eq!(step_output_event(), STEP_OUTPUT_DISABLE);
+    assert_eq!(
+        step_output_event(core::ptr::null_mut()),
+        STEP_OUTPUT_DISABLE
+    );
     assert!(take_emits().is_empty());
 }
 
@@ -138,7 +130,7 @@ fn single_axis_ordering_emits_all_due_then_returns_future() {
     enqueue(0, 2000, 1);
     enqueue(0, 3000, 1);
     enqueue(0, 9000, 1);
-    let next = step_output_event();
+    let next = step_output_event(core::ptr::null_mut());
     assert_eq!(take_emits(), vec![(0, 1, 0), (0, 1, 0), (0, 1, 0)]);
     assert_eq!(next, 9000);
 }
@@ -154,7 +146,7 @@ fn per_dispatch_cap_returns_now_with_work_remaining() {
         enqueue(0, 1000 + i, 1);
         enqueue(1, 1000 + i, 1);
     }
-    let next = step_output_event();
+    let next = step_output_event(core::ptr::null_mut());
     let emits = take_emits();
     assert_eq!(emits.len() as u32, MAX_STEPS_PER_EVENT);
     assert_eq!(next, now);
@@ -186,7 +178,7 @@ fn mixed_due_and_future_across_axes() {
     enqueue(2, 1500, -1);
     enqueue(0, 8000, 1);
     enqueue(2, 6000, 1);
-    let next = step_output_event();
+    let next = step_output_event(core::ptr::null_mut());
     let emits = take_emits();
     assert_eq!(emits.len(), 2);
     assert!(emits.contains(&(0u8, 1i32, 0u8)));
@@ -201,7 +193,7 @@ fn on_time_emission_produces_zero_late_stats() {
     set_owned_mask(0b0001);
     set_late_threshold(500);
     enqueue(0, 1000, 1);
-    step_output_event();
+    step_output_event(core::ptr::null_mut());
     let (max_late, late_count, max_drained) = take_late_stats();
     assert_eq!(max_late, 0, "on-time emission must not bump max_late");
     assert_eq!(late_count, 0, "on-time emission must not bump late_count");
@@ -215,7 +207,7 @@ fn late_emission_exceeding_threshold_increments_stats() {
     set_owned_mask(0b0001);
     set_late_threshold(500);
     enqueue(0, 1000, 1);
-    step_output_event();
+    step_output_event(core::ptr::null_mut());
     let _ = take_emits();
     let (max_late, late_count, _) = take_late_stats();
     assert_eq!(late_count, 1);
@@ -229,7 +221,7 @@ fn late_by_exactly_threshold_not_counted() {
     set_owned_mask(0b0001);
     set_late_threshold(500);
     enqueue(0, 1000, 1);
-    step_output_event();
+    step_output_event(core::ptr::null_mut());
     let _ = take_emits();
     let (max_late, late_count, _) = take_late_stats();
     assert_eq!(late_count, 0, "lateness == threshold is not > threshold");
@@ -244,12 +236,12 @@ fn max_late_tracks_worst_across_multiple_events() {
 
     set_now(2000);
     enqueue(0, 1500, 1);
-    step_output_event();
+    step_output_event(core::ptr::null_mut());
     let _ = take_emits();
 
     set_now(3000);
     enqueue(0, 1000, 1);
-    step_output_event();
+    step_output_event(core::ptr::null_mut());
     let _ = take_emits();
 
     let (max_late, late_count, _) = take_late_stats();
@@ -267,7 +259,7 @@ fn max_drained_tracks_largest_batch() {
     enqueue(0, 2000, 1);
     enqueue(0, 3000, 1);
     enqueue(0, 4000, 1);
-    step_output_event();
+    step_output_event(core::ptr::null_mut());
     let _ = take_emits();
     let (_, _, max_drained) = take_late_stats();
     assert_eq!(max_drained, 4, "all four entries drain in one event");
@@ -280,10 +272,34 @@ fn future_only_entry_produces_zero_late_and_zero_drained() {
     set_owned_mask(0b0001);
     set_late_threshold(500);
     enqueue(0, 5000, 1);
-    step_output_event();
+    step_output_event(core::ptr::null_mut());
     assert!(take_emits().is_empty());
     let (max_late, late_count, max_drained) = take_late_stats();
     assert_eq!(max_late, 0);
     assert_eq!(late_count, 0);
     assert_eq!(max_drained, 0, "nothing was drained so max_drained stays 0");
+}
+
+#[test]
+fn xdirect_axis_routes_to_coil_emit_not_steps() {
+    use super::test_hooks::take_xdirect_emits;
+    use crate::step_queue::StepEntry;
+    reset();
+    crate::buzz_stream::set_xdirect_for_test(0, true);
+    set_now(2000);
+    set_owned_mask(0b0001);
+    let q = queue_for_axis(0);
+    // SAFETY: host test queue, sole producer here.
+    unsafe { push(q, StepEntry::xdirect(1500, -7)).expect("queue not full") };
+    step_output_event(core::ptr::null_mut());
+    assert!(
+        take_emits().is_empty(),
+        "an XDIRECT axis must not emit STEP/DIR pulses"
+    );
+    assert_eq!(
+        take_xdirect_emits(),
+        vec![(0u8, -7i32)],
+        "the entry payload must route to the coil-write emit as an offset"
+    );
+    crate::buzz_stream::set_xdirect_for_test(0, false);
 }

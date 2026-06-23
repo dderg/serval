@@ -77,7 +77,7 @@ fn dispatch_pulse_honors_motor_mask() {
         assert_eq!(enq, 4, "expected 4 step entries, got {enq}");
         for i in q.head..q.tail {
             let entry = q.buf[(i % crate::step_queue::STEP_QUEUE_DEPTH as u16) as usize];
-            assert_eq!(entry.stepper_sel, 2, "single-bit mask 0b10 => sel 2");
+            assert_eq!(entry.stepper_sel(), 2, "single-bit mask 0b10 => sel 2");
         }
         assert_eq!(
             axis.steppers[0].position_count.load(Ordering::Acquire),

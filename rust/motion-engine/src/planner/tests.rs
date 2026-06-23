@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use super::*;
 use crate::classify::classify_and_build;
 use std::sync::atomic::AtomicUsize;

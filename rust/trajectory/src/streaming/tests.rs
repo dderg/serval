@@ -4,7 +4,8 @@
     clippy::too_many_lines,
     clippy::items_after_statements,
     clippy::float_cmp,
-    clippy::unreadable_literal
+    clippy::unreadable_literal,
+    deprecated
 )]
 
 use geometry::segment::CubicSegment;
@@ -1559,6 +1560,10 @@ fn follower_chains(kernel_hz: Option<f64>, pa_gain: f64) -> AxisChainSet {
         None => AxisChainSet::passthrough_spatial(),
     };
     chains.chains.push(crate::CompiledChain {
+        stages: (pa_gain != 0.0)
+            .then_some(crate::ChainStage::LinearPressureAdvance { k: pa_gain })
+            .into_iter()
+            .collect(),
         kernel: None,
         gain: pa_gain,
     });

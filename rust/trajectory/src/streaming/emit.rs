@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use nurbs::bezier::BezierPiece;
 
 use super::{EmitContext, ShaperState};

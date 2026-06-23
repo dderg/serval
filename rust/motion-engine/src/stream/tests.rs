@@ -3,7 +3,7 @@ use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
 use nurbs::eval::eval;
 use proptest::prelude::*;
-use trajectory::ShapedSegment;
+use trajectory::{AxisChainSet, PostProcessorType, ShapedSegment};
 
 fn cfg() -> StreamConfig {
     StreamConfig {
@@ -642,6 +642,66 @@ proptest! {
     }
 }
 
+fn smooth_x_chains(frequency_hz: f64) -> AxisChainSet {
+    AxisChainSet::spatial(
+        PostProcessorType::SmoothZv { frequency_hz }.into_chain(),
+        trajectory::CompiledChain::default(),
+        trajectory::CompiledChain::default(),
+    )
+}
+
+#[test]
+fn smooth_shaper_live_path_matches_shaped_signal_oracle() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [80.0, 0.0, 0.0], 0.0),
+        line(2, [80.0, 0.0, 0.0], [160.0, 0.0, 0.0], 0.0),
+    ];
+    let mut base = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
+    let mut shaped = StreamState::new(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 0.0);
+    for m in moves {
+        base.push(m.clone());
+        shaped.push(m);
+    }
+
+    let base_out = base.commit(true).unwrap();
+    let shaped_out = shaped.commit(true).unwrap();
+    assert_eq!(base_out.len(), shaped_out.len());
+
+    let oracle_chains = smooth_x_chains(18.0);
+    let trajectory::ChainStage::SmoothKernel(kernel) = &oracle_chains.chains[0].stages[0] else {
+        panic!("expected smooth kernel");
+    };
+    let first = base_out.first().unwrap().t_start;
+    let last = base_out.last().unwrap().t_end;
+
+    for (base_seg, shaped_seg) in base_out.iter().zip(&shaped_out) {
+        let sig = trajectory::ShapedSignal::new_from_evaluator(
+            kernel,
+            base_seg.t_start,
+            base_seg.t_end,
+            |t| {
+                let clamped = t.clamp(first, last);
+                base_out
+                    .iter()
+                    .find(|seg| clamped >= seg.t_start && clamped <= seg.t_end)
+                    .map_or_else(
+                        || eval(&base_out.last().unwrap().axes[0], clamped),
+                        |seg| eval(&seg.axes[0], clamped),
+                    )
+            },
+        );
+        for frac in [0.1_f64, 0.3, 0.5, 0.7, 0.9] {
+            let t = frac.mul_add(base_seg.t_end - base_seg.t_start, base_seg.t_start);
+            let got = eval(&shaped_seg.axes[0], t);
+            let want = sig.eval(t);
+            assert!(
+                (got - want).abs() < 5e-2,
+                "shaped x at t={t}: got {got}, want {want}"
+            );
+        }
+    }
+}
+
 fn short_collinear(n: u32, seg_mm: f64) -> Vec<geometry::Move> {
     (0..n)
         .map(|i| {
@@ -674,6 +734,22 @@ fn small_buffer_within_setback_yields_empty_commit() {
 }
 
 #[test]
+fn smooth_shaper_holds_back_live_edge_inside_future_support() {
+    let mut s = StreamState::new(cfg(), smooth_x_chains(0.5), &[0.0, 0.0, 0.0], 0.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0));
+    s.push(line(2, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 0.0));
+
+    assert!(
+        s.commit(false).unwrap().is_empty(),
+        "future support should hold back live-edge shaped samples"
+    );
+    assert!(
+        !s.commit(true).unwrap().is_empty(),
+        "force flush must release held shaped samples"
+    );
+}
+
+#[test]
 fn stall_brake_advances_a_frozen_frontier() {
     // The thin-lead force-advance building block: the same uncommittable buffer
     // drains to rest under `commit_stall_brake`, advancing the frontier instead
@@ -702,4 +778,64 @@ fn stall_brake_fails_loud_when_lead_already_collapsed() {
     }
     let err = s.commit_stall_brake(0.01, 0.05).unwrap_err();
     assert!(matches!(err, StreamError::BrakeToRestShortfall { .. }));
+}
+
+#[test]
+fn smooth_shaper_first_commit_after_nonzero_start_time_is_valid() {
+    let mut s = StreamState::new(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 5.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0));
+
+    let committed = s.commit(true).unwrap();
+    assert_eq!(committed[0].t_start, 5.0);
+}
+
+#[test]
+fn smooth_shaper_after_idle_gap_resumes_from_rest_edge() {
+    let mut s = StreamState::new(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 0.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0));
+    let first = s.commit(true).unwrap();
+    let idle_end = first.last().unwrap().t_end + 5.0;
+
+    s.advance_idle(idle_end);
+    s.push(line(2, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 0.0));
+    let second = s.commit(true).unwrap();
+
+    assert!(second[0].t_start >= idle_end - 1e-9);
+}
+
+#[test]
+fn smooth_shaper_two_batch_output_matches_one_batch() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0),
+        line(2, [50.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.0),
+    ];
+    let chains = smooth_x_chains(18.0);
+    let mut one = StreamState::new(cfg(), chains.clone(), &[0.0, 0.0, 0.0], 0.0);
+    let mut two = StreamState::new(cfg(), chains, &[0.0, 0.0, 0.0], 0.0);
+    for m in moves {
+        one.push(m.clone());
+        two.push(m);
+    }
+
+    let one_batch = one.commit(true).unwrap();
+    let mut two_batch = two.commit(false).unwrap();
+    two_batch.extend(two.commit(true).unwrap());
+
+    assert_eq!(one_batch.len(), two_batch.len());
+    for (one_seg, two_seg) in one_batch.iter().zip(&two_batch) {
+        for frac in [0.1_f64, 0.3, 0.5, 0.7, 0.9] {
+            let t = frac.mul_add(one_seg.t_end - one_seg.t_start, one_seg.t_start);
+            let dx = (eval(&one_seg.axes[0], t) - eval(&two_seg.axes[0], t)).abs();
+            let dv = {
+                let h = 1e-5 * (one_seg.t_end - one_seg.t_start);
+                let v_one =
+                    (eval(&one_seg.axes[0], t + h) - eval(&one_seg.axes[0], t - h)) / (2.0 * h);
+                let v_two =
+                    (eval(&two_seg.axes[0], t + h) - eval(&two_seg.axes[0], t - h)) / (2.0 * h);
+                (v_one - v_two).abs()
+            };
+            assert!(dx < 5e-2, "position mismatch at t={t}: {dx}");
+            assert!(dv < 5e-2, "velocity mismatch at t={t}: {dv}");
+        }
+    }
 }

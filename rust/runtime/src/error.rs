@@ -192,6 +192,7 @@ pub enum FaultCode {
     PhaseMotorUnmapped = -313,
     OverlayUnsupported = -314,
     BuzzAxisConflict = -315,
+    BuzzInPhaseMode = -316,
 }
 
 impl FaultCode {
@@ -293,6 +294,7 @@ impl FaultCode {
             -313 => Self::PhaseMotorUnmapped,
             -314 => Self::OverlayUnsupported,
             -315 => Self::BuzzAxisConflict,
+            -316 => Self::BuzzInPhaseMode,
             _ => return None,
         })
     }
@@ -376,6 +378,7 @@ impl FaultCode {
             Self::PhaseMotorUnmapped => "PhaseMotorUnmapped",
             Self::OverlayUnsupported => "OverlayUnsupported",
             Self::BuzzAxisConflict => "BuzzAxisConflict",
+            Self::BuzzInPhaseMode => "BuzzInPhaseMode",
         }
     }
 }
