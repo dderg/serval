@@ -48,11 +48,20 @@ class SyncReactor:
             self._timers[handle] = when
 
 
-def _make_motion(mcus, reactor):
+class FakeEngine:
+    def __init__(self, queued_secs=0.0):
+        self.queued_secs = queued_secs
+
+    def queued_motion_secs(self):
+        return self.queued_secs
+
+
+def _make_motion(mcus, reactor, queued_secs=0.0):
     motion = Motion.__new__(Motion)
     motion.reactor = reactor
     motion.all_mcus = mcus
     motion.mcu = mcus[0]
+    motion.engine = FakeEngine(queued_secs)
     motion.motion_lead = 0.25
     motion._mcu_pending_end_time = 0.0
     motion.need_flush_time = 0.0
@@ -175,4 +184,21 @@ def test_m106_queued_request_drains_on_idle_printer():
     assert len(applied) == 1
     print_time, value = applied[0]
     assert value == 1.0
-    assert print_time == pytest.approx(motion.get_last_move_time())
+    assert print_time == pytest.approx(motion.lookahead_end_print_time())
+
+
+def test_lookahead_callback_schedules_at_engine_queued_end_while_printing():
+    reactor = SyncReactor()
+    mcu = RecordingMcu()
+    # 1.5s of motion queued ahead; the host min_move_t counter lags at 0.
+    motion = _make_motion([mcu], reactor, queued_secs=1.5)
+    shim = ToolheadShim(motion)
+
+    est = mcu.estimated_print_time(reactor.monotonic())
+    seen = []
+    shim.register_lookahead_callback(seen.append)
+
+    # Scheduled at the engine's true queue end (est + 1.5), not the stale
+    # _mcu_pending_end_time / motion_lead floor that fired the fan early.
+    assert seen == [pytest.approx(est + 1.5)]
+    assert seen[0] > motion.get_last_move_time()

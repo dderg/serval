@@ -623,6 +623,11 @@ class Motion:
             return max(self._mcu_pending_end_time, floor)
         return floor
 
+    def lookahead_end_print_time(self):
+        est = self.mcu.estimated_print_time(self.reactor.monotonic())
+        floor = est + self.motion_lead
+        return max(est + self.engine.queued_motion_secs(), floor)
+
     def _ground_pending_end_time_after_engine_drain(self):
         if self.mcu is None:
             return
@@ -1448,7 +1453,7 @@ class ToolheadShim:
         self.motion = motion
 
     def register_lookahead_callback(self, callback):
-        callback(self.motion.get_last_move_time())
+        callback(self.motion.lookahead_end_print_time())
 
     def note_step_generation_scan_time(self, delay, old_delay=0.0):
         self.motion.flush_step_generation()
