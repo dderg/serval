@@ -334,15 +334,6 @@ pub fn junction_jumps(
 // past.
 pub const MAX_LEAD_SECS: f64 = 2.0;
 
-// How far ahead of the playhead the host (klippy) fills its move buffer, reported
-// to klippy via `motion_lead_secs()`. It IS the pump's ship horizon: feeding
-// shallower leaves the per-axis rings near-empty, so any producer hiccup lands a
-// piece in the past (PieceStartInPast); feeding deeper only parks pieces in the
-// pump queue. Distinct from the anchor's start offset
-// (`crate::anchor::DEFAULT_LEAD_SECS`), which sets only where re-anchored motion
-// resumes and stays small for snappy start/recovery.
-pub const HOST_FEED_LEAD_SECS: f64 = MAX_LEAD_SECS;
-
 #[derive(Clone, Copy)]
 struct JunctionEnd {
     end_ticks: u64,
