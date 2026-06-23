@@ -97,6 +97,7 @@ where
                     pieces,
                     fresh_stream,
                     lead_secs,
+                    source_line: seg.source_line,
                 });
             }
         }

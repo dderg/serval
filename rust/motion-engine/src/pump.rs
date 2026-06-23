@@ -232,6 +232,10 @@ pub struct EnqueueMsg {
     pub pieces: Vec<(PieceEntry, f64)>,
     pub fresh_stream: bool,
     pub lead_secs: f64,
+    /// Source gcode line of the segment this enqueue lowered from. `u32::MAX`
+    /// for synthetic enqueues (nudge). Instrumentation only — lets the junction
+    /// continuity log name both colliding lines.
+    pub source_line: u32,
 }
 
 pub struct HeartbeatMsg {
@@ -335,38 +339,40 @@ struct JunctionEnd {
     end_ticks: u64,
     end_host: f64,
     end_pos: f32,
+    source_line: u32,
 }
 
 pub const JUNCTION_POSITION_LOG_MM: f32 = 0.0125;
 pub const JUNCTION_POSITION_FATAL_MM: f32 = 0.1;
 
+#[allow(clippy::too_many_arguments)]
 fn check_junction_position_continuity(
     key: AxisKey,
     prev_end_pos: f32,
     next_start_pos: f32,
     prev_end_host: f64,
     next_start_host: f64,
+    prev_source_line: u32,
+    next_source_line: u32,
 ) {
     let jump = (next_start_pos - prev_end_pos).abs();
-    if jump >= JUNCTION_POSITION_FATAL_MM {
-        panic!(
-            "junction position discontinuity on mcu{} axis{}: prev piece ends at \
-             {prev_end_pos} (host t={prev_end_host:.6}), next starts at \
-             {next_start_pos} (host t={next_start_host:.6}), |Δ|={jump}mm — \
-             this becomes a one-sample step burst on the MCU (fault -300/-310)",
-            key.mcu_id, key.axis
-        );
-    }
+    // INSTRUMENTED: the >=FATAL panic is suppressed so one crash_short run
+    // collects every seam discontinuity (the panic was the flaky tail of a
+    // reliably-reproducible seam overlap). Both colliding gcode lines are named
+    // so the dispatch provenance is unambiguous.
     if jump >= JUNCTION_POSITION_LOG_MM {
         tracing::error!(
             subsystem = "motion",
             event = "junction_position_discontinuity",
             key = ?key,
+            fatal = jump >= JUNCTION_POSITION_FATAL_MM,
             prev_end = prev_end_pos,
             next_start = next_start_pos,
             jump_mm = jump,
             prev_end_host = prev_end_host,
             next_start_host = next_start_host,
+            prev_source_line,
+            next_source_line,
             "[junction-pos] position discontinuity"
         );
     }
@@ -445,6 +451,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                 pieces,
                 fresh_stream,
                 lead_secs,
+                source_line,
             }) => {
                 if let Some(co) = cohort.as_ref() {
                     if !co.participants.contains(&key) {
@@ -470,6 +477,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                                 end_ticks: prev_end_ticks,
                                 end_host: prev_end_host,
                                 end_pos: prev_end_pos,
+                                source_line: prev_source_line,
                             }) = junction_ends.get(&key)
                             {
                                 check_junction_position_continuity(
@@ -478,6 +486,8 @@ pub fn run_pump<S, F, C, A, O, D>(
                                     first_entry.coeffs[0],
                                     prev_end_host,
                                     *first_host,
+                                    prev_source_line,
+                                    source_line,
                                 );
                                 let (tick_jump_us, host_jump_us) = junction_jumps(
                                     first_entry.start_time,
@@ -512,6 +522,8 @@ pub fn run_pump<S, F, C, A, O, D>(
                                         host_jump_us,
                                         fresh = fresh_stream,
                                         reason,
+                                        prev_source_line,
+                                        next_source_line = source_line,
                                         "[junction] anomalous jump"
                                     );
                                 }
@@ -526,6 +538,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                                     end_ticks: last_end_ticks,
                                     end_host: last_end_host,
                                     end_pos: last_entry.coeffs[3],
+                                    source_line,
                                 },
                             );
                         }

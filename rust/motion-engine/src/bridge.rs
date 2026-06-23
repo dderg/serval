@@ -3269,6 +3269,7 @@ impl PyMotionEngine {
                             pieces,
                             fresh_stream: fresh,
                             lead_secs,
+                            source_line: u32::MAX,
                         }))
                         .map_err(|_| DispatchError::PumpGone)?;
                 }

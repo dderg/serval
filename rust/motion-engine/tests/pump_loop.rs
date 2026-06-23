@@ -82,6 +82,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
         pieces: vec![p(0), p(1)],
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     tx.send(PumpMsg::Enqueue(EnqueueMsg {
@@ -89,6 +90,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
         pieces: vec![p(2)],
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -155,6 +157,7 @@ fn continuous_junction_position_passes() {
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     tx.send(PumpMsg::Enqueue(EnqueueMsg {
@@ -162,6 +165,7 @@ fn continuous_junction_position_passes() {
         pieces: vec![piece_at(2000, 0.002, 12.5, 15.0)],
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -173,6 +177,8 @@ fn continuous_junction_position_passes() {
 }
 
 #[test]
+#[ignore = "instrumentation: junction-discontinuity panic suppressed to collect \
+            every seam discontinuity in one run; restore with the instrumentation revert"]
 fn junction_position_discontinuity_is_fatal() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = mpsc::channel();
@@ -184,6 +190,7 @@ fn junction_position_discontinuity_is_fatal() {
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     tx.send(PumpMsg::Enqueue(EnqueueMsg {
@@ -191,6 +198,7 @@ fn junction_position_discontinuity_is_fatal() {
         pieces: vec![piece_at(2000, 0.002, 12.8, 15.0)],
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
 
@@ -212,6 +220,7 @@ fn fresh_stream_resets_junction_position_baseline() {
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     tx.send(PumpMsg::Enqueue(EnqueueMsg {
@@ -219,6 +228,7 @@ fn fresh_stream_resets_junction_position_baseline() {
         pieces: vec![piece_at(2000, 0.002, 50.0, 55.0)],
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -256,6 +266,7 @@ fn bundles_same_mcu_axes_into_one_transaction() {
             pieces: vec![p(0)],
             fresh_stream: axis == 0,
             lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+            source_line: u32::MAX,
         }))
         .unwrap();
     }
