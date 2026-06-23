@@ -119,6 +119,9 @@ class Motion:
         self._motor_bindings = {}
         self.all_mcus = [m for n, m in printer.lookup_objects(module="mcu")]
         self.mcu = self.all_mcus[0]
+        self.need_flush_time = 0.0
+        self.do_kick_flush_timer = True
+        self.flush_timer = self.reactor.register_timer(self._flush_handler)
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
         self._planner_ready = False
         self._read_limits(config)
@@ -571,6 +574,28 @@ class Motion:
                     mcus.add(s.get_mcu())
             self._cached_engine_mcus = list(mcus) if mcus else [self.mcu]
         return self._cached_engine_mcus
+
+    def advance_flush_time(self, mq_time):
+        self.need_flush_time = max(self.need_flush_time, mq_time)
+        if self.do_kick_flush_timer:
+            self.do_kick_flush_timer = False
+            self.reactor.update_timer(self.flush_timer, self.reactor.NOW)
+
+    def _flush_handler(self, eventtime):
+        try:
+            self.do_kick_flush_timer = False
+            while True:
+                flush_time = self.need_flush_time
+                for mcu in self.all_mcus:
+                    mcu.flush_moves(flush_time, flush_time)
+                if self.need_flush_time <= flush_time:
+                    break
+            self.do_kick_flush_timer = True
+            return self.reactor.NEVER
+        except Exception:
+            logging.exception("Exception in flush_handler")
+            self.printer.invoke_shutdown("Exception in flush_handler")
+            return self.reactor.NEVER
 
     def flush_step_generation(self):
         self._drain_to_mcu_execution()
@@ -1432,7 +1457,7 @@ class ToolheadShim:
         return None
 
     def note_mcu_movequeue_activity(self, mq_time, set_step_gen_time=False):
-        pass
+        self.motion.advance_flush_time(mq_time)
 
     def limit_next_junction_speed(self, speed):
         pass
