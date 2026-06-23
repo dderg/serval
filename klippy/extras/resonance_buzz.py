@@ -53,7 +53,7 @@ class ResonanceBuzz:
             desc=self.cmd_RESONANCE_BUZZ_SWEEP_help,
         )
 
-    def _submit_buzz(
+    def run_sweep(
         self,
         gcmd,
         axis_name,
@@ -123,6 +123,7 @@ class ResonanceBuzz:
         )
         reactor = self.printer.get_reactor()
         reactor.pause(reactor.monotonic() + duration + 0.1)
+        return duration
 
     cmd_RESONANCE_BUZZ_help = (
         "Excite a single resonance frequency on one axis via the engine-"
@@ -138,7 +139,7 @@ class ResonanceBuzz:
         ramp = gcmd.get_float(
             "RAMP", min(duration * 0.25, 3.0 / freq), above=0.0
         )
-        self._submit_buzz(
+        self.run_sweep(
             gcmd,
             axis_name,
             freq,
@@ -173,7 +174,7 @@ class ResonanceBuzz:
             min(tenth_of_sweep, three_periods_of_lowest),
             above=0.0,
         )
-        self._submit_buzz(
+        self.run_sweep(
             gcmd,
             axis_name,
             freq_start,
