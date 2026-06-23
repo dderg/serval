@@ -145,6 +145,12 @@ pub(super) fn reach_velocity_with_accel(
     }
 }
 
+pub(super) fn reach_v(v0: f64, ds: f64, accel: f64, jerk: f64) -> Option<f64> {
+    reach_velocity_with_accel(v0, 0.0, ds, accel, jerk)
+        .ok()
+        .map(|(v, _)| v)
+}
+
 pub(super) fn breakpoints(
     v0: f64,
     a0: f64,

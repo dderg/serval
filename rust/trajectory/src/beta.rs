@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::emit_shaped::{emit_shaped, EmitSegmentMeta, PerAxisHistory};
 use crate::fit::FittedSegment;
 use crate::plan_velocity::SafetyMode;
@@ -122,10 +124,6 @@ pub struct ReplanWorstBinding {
 pub struct ReplanBindingSummary {
     pub histogram: Vec<(temporal::BindingConstraint, u32)>,
     pub worst: Option<ReplanWorstBinding>,
-    /// True when any segment in the window shipped a deadline-truncated profile,
-    /// i.e. the real-time budget — not convergence — ended refinement. This is
-    /// the authoritative `deadline_limited` signal, replacing the wall-clock
-    /// heuristic that misfired on slow-but-converged solves under host load.
     pub deadline_truncated: bool,
     pub peak_utilization: f64,
     pub peak_util_family: Option<crate::utilization::UtilFamily>,
@@ -325,16 +323,14 @@ fn beta_iterate_inner(
     })
 }
 
-/// In `WorstCaseFuture` mode the last XY segment's limit is halved: for a
-/// symmetric unit-DC kernel the past-only term must be ≤ 0.5·a_machine for
-/// the convolution bound to stay ≤ a_machine. Applied to the whole segment
-/// for simplicity; only the trailing-h region actually bites.
+const WORST_CASE_FUTURE_SYMMETRIC_KERNEL_DERATE: f64 = 0.5;
+
 fn effective_machine_a_max(machine_a_max: &[[f64; 3]], safety_mode: SafetyMode) -> Vec<[f64; 3]> {
     let mut effective = machine_a_max.to_vec();
     if matches!(safety_mode, SafetyMode::WorstCaseFuture) {
-        if let Some(last) = effective.last_mut() {
-            for axis in last.iter_mut() {
-                *axis *= 0.5;
+        if let Some(last_segment) = effective.last_mut() {
+            for axis in last_segment.iter_mut() {
+                *axis *= WORST_CASE_FUTURE_SYMMETRIC_KERNEL_DERATE;
             }
         }
     }

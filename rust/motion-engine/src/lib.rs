@@ -26,6 +26,10 @@ pub mod motion_node;
 #[doc(hidden)]
 pub mod nudge;
 #[doc(hidden)]
+#[cfg_attr(
+    not(test),
+    deprecated(note = "legacy planner stack only; live path uses stream_planner")
+)]
 pub mod planner;
 #[doc(hidden)]
 pub mod position_query;
@@ -50,8 +54,6 @@ use pyo3::prelude::*;
 
 use bridge::PyMotionEngine;
 
-// Underscore-prefixed so the compiled extension (_motion_engine) does not
-// shadow the pure-Python wrapper klippy/motion_engine.py that imports it.
 #[pymodule]
 fn _motion_engine(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMotionEngine>()?;

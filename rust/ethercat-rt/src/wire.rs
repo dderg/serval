@@ -2,10 +2,11 @@ use mcu_protocol::bootstrap::{IdentifyResponse, IDENTIFY_RESPONSE_BODY_LEN};
 use mcu_protocol::codec::{Decode, Encode};
 use mcu_protocol::messages::{
     ClaimHandshakeReply, MessageKind, MotorSample, MotorStateResponse, PushPieces,
-    PushPiecesResponse, RestoreDriveLimitsResponse, ResumeStreamResponse, RuntimeCapsResponse,
-    SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse,
-    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StartCapture,
-    StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse,
+    PushPiecesResponse, ResonanceBuzz, ResonanceBuzzResponse, RestoreDriveLimitsResponse,
+    ResumeStreamResponse, RuntimeCapsResponse, SdoRead, SdoReadResponse, SdoWrite,
+    SdoWriteResponse, SeedServoHome, SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse,
+    SetTorque, SetTorqueResponse, StartCapture, StartCaptureResponse, StatusHeartbeat,
+    StopCaptureResponse, StopResponse,
 };
 use mcu_protocol::MCU_CHANNEL_PIECES;
 use mcu_transport::frame::{encode_frame, CHANNEL_CONTROL, CHANNEL_EVENTS};
@@ -59,6 +60,10 @@ pub enum Command {
     SeedServoHome {
         correlation_id: u32,
         home_q16: i32,
+    },
+    ResonanceBuzz {
+        correlation_id: u32,
+        msg: ResonanceBuzz,
     },
     SdoRead {
         correlation_id: u32,
@@ -147,6 +152,13 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
             Ok(Command::SeedServoHome {
                 correlation_id: cid,
                 home_q16: msg.home_q16,
+            })
+        }
+        Some(MessageKind::ResonanceBuzz) => {
+            let msg = ResonanceBuzz::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::ResonanceBuzz {
+                correlation_id: cid,
+                msg,
             })
         }
         Some(MessageKind::SdoRead) => {
@@ -260,6 +272,11 @@ pub fn restore_drive_limits_response_frame(cid: u32, result: i32) -> Vec<u8> {
 pub fn seed_servo_home_response_frame(cid: u32, result: i32) -> Vec<u8> {
     let body = SeedServoHomeResponse { result }.encoded_to_vec();
     control_frame(MessageKind::SeedServoHomeResponse, cid, &body)
+}
+
+pub fn resonance_buzz_response_frame(cid: u32, result: i32) -> Vec<u8> {
+    let body = ResonanceBuzzResponse { result }.encoded_to_vec();
+    control_frame(MessageKind::ResonanceBuzzResponse, cid, &body)
 }
 
 pub fn status_heartbeat_frame(

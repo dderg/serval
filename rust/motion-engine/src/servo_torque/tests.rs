@@ -71,12 +71,9 @@ fn surfaces_nonzero_result() {
 
 #[test]
 fn transport_error_is_an_err() {
-    let (client, server) = UnixStream::pair().unwrap();
-    // Construct before killing the peer: from_stream's socket setup needs a
-    // live peer (setsockopt EINVAL on Darwin otherwise). Death-after-construction
-    // is also the real failure mode this guards.
-    let conn = McuSerialConn::from_stream(client).expect("from_stream");
-    drop(server);
+    let (client, live_peer) = UnixStream::pair().unwrap();
+    let conn = McuSerialConn::from_stream(client).expect("from_stream needs the peer alive");
+    drop(live_peer);
     assert!(send_set_torque(&conn, true, 1).is_err());
 }
 
@@ -87,4 +84,70 @@ fn wrong_kind_response_is_rejected() {
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     let err = send_set_torque(&conn, true, 42_000).expect_err("should error on wrong kind");
     assert!(err.contains("unexpected response kind"));
+}
+
+fn spawn_buzz_endpoint(
+    mut peer: UnixStream,
+    result: i32,
+) -> std::sync::mpsc::Receiver<ResonanceBuzz> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut demux = Demuxer::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = match peer.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            let (frames, _e) = demux.feed_slice(&buf[..n]);
+            for f in frames {
+                if let Frame::Kalico { payload, .. } = f {
+                    let (hdr, body) =
+                        decode_message_header(&payload).expect("valid message header");
+                    let msg = ResonanceBuzz::decode(body).expect("valid ResonanceBuzz body");
+                    let _ = tx.send(msg);
+                    let mut out = encode_message_header(
+                        MessageKind::ResonanceBuzzResponse,
+                        MESSAGE_VERSION_DEFAULT,
+                        hdr.correlation_id,
+                    )
+                    .to_vec();
+                    out.extend_from_slice(&ResonanceBuzzResponse { result }.encoded_to_vec());
+                    peer.write_all(&encode_frame(CHANNEL_CONTROL, &out))
+                        .unwrap();
+                    return;
+                }
+            }
+        }
+    });
+    rx
+}
+
+#[test]
+fn resonance_buzz_round_trips_args_and_result() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let rx = spawn_buzz_endpoint(server, 0);
+    let conn = McuSerialConn::from_stream(client).expect("from_stream");
+    let result =
+        send_resonance_buzz(&conn, 0b001, 0b010, 5_000, 300_000, 4_200, 3_000, 300).expect("call");
+    assert_eq!(result, 0);
+    let seen = rx.recv().expect("endpoint saw the command");
+    assert_eq!(seen.axis_mask, 0b001);
+    assert_eq!(seen.sign_mask, 0b010);
+    assert_eq!(seen.freq_start_millihz, 5_000);
+    assert_eq!(seen.freq_end_millihz, 300_000);
+    assert_eq!(seen.amplitude_nm, 4_200);
+    assert_eq!(seen.duration_ms, 3_000);
+    assert_eq!(seen.ramp_ms, 300);
+}
+
+#[test]
+fn resonance_buzz_surfaces_nonzero_result() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let _rx = spawn_buzz_endpoint(server, -1);
+    let conn = McuSerialConn::from_stream(client).expect("from_stream");
+    assert_eq!(
+        send_resonance_buzz(&conn, 0b001, 0, 5_000, 5_000, 100, 1_000, 100).expect("call"),
+        -1
+    );
 }

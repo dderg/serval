@@ -2,10 +2,6 @@ use crate::Limits;
 use crate::topp::path::ArclengthGrid;
 use crate::topp::solver::SolverResult;
 
-/// Clarabel's QDLDL factorization loses enough precision to stall
-/// (InsufficientProgress, false certificates) when b = v² reaches ~1e6 in raw
-/// mm units; mapping the dominant v_max to ~10 units/s puts every machine
-/// config in the empirically best-conditioned regime (b ≈ 1e2).
 const V_TARGET_UNITS_PER_S: f64 = 10.0;
 
 pub struct SolverScale {
@@ -109,14 +105,6 @@ impl SolverScale {
             return Self::identity();
         }
 
-        // Scale to the path velocity the trajectory can actually *reach*, not the
-        // raw velocity ceiling. The reachable peak is the high point of the MVC
-        // envelope (velocity ∧ centripetal caps) capped by acceleration-from-rest
-        // reachability over the path length. Scaling by v_ceiling alone over-scales
-        // accel/jerk/centripetal-bound moves by many orders of magnitude — a 1e9
-        // velocity cap with 1e-2 accel collapses b = v² to ~1e-17 scaled units,
-        // far below Clarabel's precision, surfacing as garbage residuals or false
-        // infeasibility.
         let mut peak_mvc_b = 0.0_f64;
         let mut a_tan_max = 0.0_f64;
         for (i, g) in chain.geom.iter().enumerate() {
@@ -207,9 +195,6 @@ impl SolverScale {
     }
 }
 
-/// Accumulate the reachable-velocity envelope at one path point into the
-/// running peak `b = v²` (velocity ∧ centripetal caps) and the running max
-/// tangential-acceleration cap used for accel-from-rest reachability.
 fn scan_reachable_b(
     limits: &Limits,
     geom: &crate::topp::chain::PointGeom,

@@ -34,6 +34,7 @@ pub fn pipeline_snapshot(
         consistency_tol: VELOCITY_CONSISTENCY_TOL,
         max_jerk_mm_s3: max_jerk,
         integration_tol: VELOCITY_INTEGRATION_TOL,
+        ..geometry::VelocityConfig::default()
     };
     let profile = geometry::plan_velocity(&outcome, velocity_config)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
@@ -229,6 +230,7 @@ fn sample_kinematics(
                 let heading = spatial.heading_at(s_local);
                 kin.s.push(s_offset + sample.s);
                 kin.v.push(sample.v);
+                kin.a_t.push(sample.a);
                 kin.heading_x.push(heading[0]);
                 kin.heading_y.push(heading[1]);
                 kin.kappa.push(spatial.kappa(s_local));
@@ -238,7 +240,6 @@ fn sample_kinematics(
         s_offset += vel_move.length;
     }
 
-    kin.a_t = tangential_accel(&kin.s, &kin.v);
     kin.j_t = tangential_jerk(&kin.s, &kin.v, &kin.a_t);
 
     for i in 0..kin.s.len() {
@@ -255,34 +256,6 @@ fn sample_kinematics(
     }
 
     kin
-}
-
-fn tangential_accel(s: &[f64], v: &[f64]) -> Vec<f64> {
-    let n = s.len();
-    let mut a = vec![0.0; n];
-    if n < 2 {
-        return a;
-    }
-    let pair_dt = |i: usize, k: usize| -> f64 {
-        let ds = (s[k] - s[i]).abs();
-        let v_sum = v[i] + v[k];
-        if v_sum > 0.0 { 2.0 * ds / v_sum } else { 0.0 }
-    };
-    for i in 0..n {
-        let (lo, hi, span) = if i == 0 {
-            (0, 1, pair_dt(0, 1))
-        } else if i == n - 1 {
-            (n - 2, n - 1, pair_dt(n - 2, n - 1))
-        } else {
-            (i - 1, i + 1, pair_dt(i - 1, i) + pair_dt(i, i + 1))
-        };
-        a[i] = if span > 0.0 {
-            (v[hi] - v[lo]) / span
-        } else {
-            0.0
-        };
-    }
-    a
 }
 
 fn tangential_jerk(s: &[f64], v: &[f64], a: &[f64]) -> Vec<f64> {

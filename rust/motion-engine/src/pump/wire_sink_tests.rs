@@ -5,10 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn closed_conn() -> Arc<host_rt::mcu_serial_conn::McuSerialConn> {
-    let (client, _server) = UnixStream::pair().unwrap();
-    // `_server` (not `_`) is load-bearing: the peer must outlive from_stream
-    // (setsockopt EINVAL on Darwin against a dead peer). It drops at return,
-    // so every subsequent call observes Closed / broken-pipe.
+    let (client, _peer_kept_alive_for_from_stream) = UnixStream::pair().unwrap();
     Arc::new(host_rt::mcu_serial_conn::McuSerialConn::from_stream(client).expect("from_stream"))
 }
 
@@ -28,8 +25,6 @@ fn one_piece() -> Vec<runtime::piece_ring::PieceEntry> {
 
 #[test]
 fn closed_peer_yields_fatal_send_error() {
-    // Hold the strong Arc for the whole test so upgrade() succeeds and we
-    // exercise the real Closed/Io path, not the detached-conn Fatal arm.
     let conn = closed_conn();
     let sink = WireSink {
         transports: {
@@ -49,13 +44,11 @@ fn closed_peer_yields_fatal_send_error() {
 
 #[test]
 fn detached_ethercat_conn_yields_fatal_send_error() {
-    // The strong Arc is dropped before the call, so upgrade() fails and the
-    // released-conn path must classify as Fatal (pump exits, no spin).
-    let weak = Arc::downgrade(&closed_conn());
+    let weak_to_already_dropped_conn = Arc::downgrade(&closed_conn());
     let sink = WireSink {
         transports: {
             let mut m = HashMap::new();
-            m.insert(0, McuTransport::EtherCat(weak));
+            m.insert(0, McuTransport::EtherCat(weak_to_already_dropped_conn));
             m
         },
         timeout: Duration::from_millis(50),

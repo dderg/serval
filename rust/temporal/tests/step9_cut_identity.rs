@@ -164,9 +164,7 @@ fn row_sum_identity_pathological_paths() {
 
 #[test]
 fn row_sum_identity_holds_at_slp_b_floor() {
-    // The cut helper floors b̄[i] at SLP_B_FLOOR=1.0 before computing coefficients.
-    // The identity must hold at the FLOORED value — compute ground-truth with the
-    // same floor applied.
+    const SLP_B_FLOOR: f64 = 1.0;
     let mut b = synthetic_iterate().0;
     let a = synthetic_iterate().1;
     b[5] = 0.5;
@@ -176,7 +174,7 @@ fn row_sum_identity_holds_at_slp_b_floor() {
     let cppp = 0.2;
 
     let mut b_floored = b.clone();
-    b_floored[i] = b[i].max(1.0);
+    b_floored[i] = b[i].max(SLP_B_FLOOR);
     check_identity_at(&b_floored, &a, i, cp, cpp, cppp, "slp_b_floor");
 }
 

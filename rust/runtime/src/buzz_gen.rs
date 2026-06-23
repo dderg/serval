@@ -46,6 +46,12 @@ const MAX_REFINE_ITERS: u32 = 100;
 /// it within `MAX_REFINE_ITERS` is genuinely malformed and faults loud.
 const REFINE_TIME_TOL: f32 = 1.0e-6;
 
+/// Half-width of the apex tangent guard band near `|target_norm| -> 1`, where the
+/// two asin branches collapse to a double root and the closed form cannot separate
+/// the up- and down-crossings straddling the carrier apex; inside it, defer to the
+/// adaptive scan. The f32 noise floor near the apex is far wider than f64's.
+const APEX_TANGENT_GUARD: f32 = 1e-4;
+
 /// Latched, immutable parameters for one tone. All distances in mm, all times
 /// in absolute seconds from the anchor. `sign` folds the per-axis sign of the
 /// excitation; `base` is the parked axis position (the curve oscillates about
@@ -194,6 +200,21 @@ fn amp_eff_rate(p: &ToneParams, t: f32) -> f32 {
     }
 }
 
+/// d^2/dt^2 of `amp_eff`: `2 * A * omega * mu^2 / omega_inst(t)^3`. Zero for a tone.
+#[inline]
+#[must_use]
+fn amp_eff_accel(p: &ToneParams, t: f32) -> f32 {
+    if p.mu == 0.0 {
+        return 0.0;
+    }
+    let w = omega_inst(p, t);
+    if w.abs() <= f32::MIN_POSITIVE {
+        0.0
+    } else {
+        2.0 * p.amplitude_mm * p.omega * p.mu * p.mu / (w * w * w)
+    }
+}
+
 #[inline]
 #[must_use]
 pub(crate) fn position_rel(p: &ToneParams, t: f32) -> f32 {
@@ -226,6 +247,42 @@ pub(crate) fn velocity_rel(p: &ToneParams, t: f32) -> f32 {
     let s = libm::sinf(phi);
     let c = libm::cosf(phi);
     p.sign * (denv * a * s + env * da * s + env * a * omega_inst(p, t) * c)
+}
+
+/// d/dt of `velocity_rel`: the signed carrier acceleration. Folds the envelope's
+/// second difference, the chirp amplitude taper and its rate/curvature, and the
+/// carrier `-omega^2` term plus the `mu` frequency slew.
+#[inline]
+#[must_use]
+fn accel_rel(p: &ToneParams, t: f32) -> f32 {
+    let total = p.total_seconds;
+    let ramp = p.ramp_seconds.max(f32::MIN_POSITIVE);
+    let env = envelope(t, total, ramp);
+    let denv = if t <= 0.0 || t >= total {
+        0.0
+    } else if t < ramp {
+        1.0 / ramp
+    } else if t > total - ramp {
+        -1.0 / ramp
+    } else {
+        0.0
+    };
+    let a = amp_eff(p, t);
+    let da = amp_eff_rate(p, t);
+    let dda = amp_eff_accel(p, t);
+    let w = omega_inst(p, t);
+    let phi = phase(p, t);
+    let s = libm::sinf(phi);
+    let c = libm::cosf(phi);
+    let s_coeff = 2.0 * denv * da + env * dda - env * a * w * w;
+    let c_coeff = 2.0 * denv * a * w + 2.0 * env * da * w + env * a * p.mu;
+    p.sign * (s_coeff * s + c_coeff * c)
+}
+
+/// Position, velocity, and acceleration of the excitation at `t`, in one pass.
+#[must_use]
+pub fn sample_rel(p: &ToneParams, t: f32) -> (f32, f32, f32) {
+    (position_rel(p, t), velocity_rel(p, t), accel_rel(p, t))
 }
 
 #[inline]
@@ -291,7 +348,7 @@ fn flat_top_root_after(
     // straddle the apex. Defer to the adaptive scan, which resolves grazing
     // touches via its carrier-extremum checkpoint. The f32 noise floor near the
     // apex is far wider than f64's, so the tangent guard widens to ~1e-4.
-    if target_norm.abs() >= 1.0 - 1e-4 {
+    if target_norm.abs() >= 1.0 - APEX_TANGENT_GUARD {
         return None;
     }
     let base = libm::asinf(target_norm.clamp(-1.0, 1.0));

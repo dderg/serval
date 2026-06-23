@@ -1,17 +1,3 @@
-// Offline reproduction harness for the Pi5 planning-latency pathology:
-// "high entry velocity → many cold Clarabel invocations → SegmentLate".
-//
-// Algorithmic signature we are chasing (hardware-independent):
-//   - Clarabel call COUNT grows with entry velocity.
-//   - High-entry cases trigger SLP9 restoration and/or the Auto 1e-8 second pass.
-//   - trajectory total_time must NOT regress (NON-NEGOTIABLE).
-//   - Mac wall-clock numbers are for relative before/after only (~8-10x faster
-//     than Pi5; do not compare to the 867ms Pi5 number).
-//
-// The counter infrastructure lives in temporal::topp::solver::counters and is
-// gated on cfg(test) so it compiles only here.  Each test resets counters,
-// schedules one segment, then prints the table row.
-
 use std::time::Instant;
 
 use nurbs::VectorNurbs;
@@ -19,22 +5,7 @@ use temporal::{
     GridConfig, GridScheme, Limits, ToleranceMode, counters, schedule_segment_with_tolerance,
 };
 
-// ---------------------------------------------------------------------------
-// Shared fixture geometry and limits
-// ---------------------------------------------------------------------------
-
-/// A smooth ~46mm cubic Bézier with pronounced curvature — a deep S-bend that
-/// forces large c'' and c''' at all interior points, creating substantial
-/// axis-jerk violations that require many SLP9 outer iterations to linearize.
-///
-/// The "46mm G5 cubic at cruise velocity" from the Pi5 SegmentLate failure is
-/// reproduced by: significant curvature (non-zero c'', c'''), moderate v_max
-/// (so the trajectory actually runs near v_max), and tight axis-jerk limits
-/// (so SLP9 fires and back-tracks many times at high entry velocities).
 fn repro_curve() -> VectorNurbs<f64, 3> {
-    // An S-curve: P0 → P1 pulls hard in +Y, P2 pulls hard in −Y, ending at P3.
-    // This gives non-zero c'' throughout and a sign-change in c''' (the jerk
-    // projection changes sign), which is exactly what stresses SLP9 cuts.
     VectorNurbs::<f64, 3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
@@ -48,13 +19,6 @@ fn repro_curve() -> VectorNurbs<f64, 3> {
     .unwrap()
 }
 
-/// Limits that reproduce the pathology: moderate v_max (binding at cruise),
-/// high a_max (not binding), TIGHT j_max (binding — forces many SLP9 iters).
-///
-/// j_max = 50_000 mm/s³: tight enough that axis-jerk violations are substantial
-/// at cruise speed (v=300 mm/s, |j_axis| ≈ c''' * v³ ≈ large on an S-curve).
-/// The asymmetric Y jerk (tighter than X) mimics a Trident-class machine where
-/// Y has lower jerk budget due to heavier carriage.
 fn velocity_bound_limits() -> Limits {
     Limits::axis_boxes(
         [300.0, 300.0, 300.0],
@@ -63,8 +27,6 @@ fn velocity_bound_limits() -> Limits {
     )
 }
 
-/// Grid: 92 points ≈ 0.5mm spacing on a ~46mm arc; matches the adaptive grid
-/// that a real Pi5 run would produce for this segment length.
 fn repro_grid() -> GridConfig {
     GridConfig {
         scheme: GridScheme::UniformArclength,
@@ -73,10 +35,6 @@ fn repro_grid() -> GridConfig {
 }
 
 const V_MAX: f64 = 300.0;
-
-// ---------------------------------------------------------------------------
-// Single-segment velocity sweep
-// ---------------------------------------------------------------------------
 
 struct Row {
     v_entry_frac: f64,
@@ -97,10 +55,8 @@ fn schedule_one(v_start_frac: f64) -> Row {
     let limits = velocity_bound_limits();
     let grid = repro_grid();
     let v_start = v_start_frac * V_MAX;
-    // v_end = 0: forces full decel regardless of entry velocity.  This is the
-    // max-stress scenario — the solver must push speed as high as possible in
-    // the middle while respecting all jerk caps and decelerating to rest.
-    let v_end = 0.0;
+    let v_end_full_decel_to_rest = 0.0;
+    let v_end = v_end_full_decel_to_rest;
 
     counters::reset();
     let t0 = Instant::now();
@@ -176,14 +132,6 @@ fn velocity_sweep_single_segment() {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Algorithmic-signature assertions (hardware-independent)
-    // -----------------------------------------------------------------------
-
-    // 1. The high-entry cases (0.75 and 0.95 * v_max) must produce more
-    //    Clarabel calls than the rest-to-rest case — the call count must grow
-    //    overall, even if it does not grow strictly monotone at each step
-    //    (some intermediate velocities may hit easier sub-problems).
     let counts: Vec<u32> = rows.iter().map(|r| r.clarabel_total).collect();
     let max_high_entry = counts[3].max(counts[4]);
     assert!(
@@ -193,8 +141,6 @@ fn velocity_sweep_single_segment() {
         counts[0],
     );
 
-    // 2. At least one of the high-entry cases must hit the pathology signature:
-    //    substantial Clarabel calls (≥ 10), or restoration, or auto second pass.
     let pathology_at_high_entry = rows[3..]
         .iter()
         .any(|r| r.clarabel_total >= 10 || r.restoration_fired || r.auto_second_pass);
@@ -210,7 +156,6 @@ fn velocity_sweep_single_segment() {
         rows[4].auto_second_pass,
     );
 
-    // 3. Trajectory total_time must be finite and positive for all entries.
     for r in &rows {
         assert!(
             r.total_time_ms.is_finite() && r.total_time_ms > 0.0,
@@ -220,14 +165,11 @@ fn velocity_sweep_single_segment() {
         );
     }
 
-    // 4. At the rest-to-rest entry (v_frac=0), the solver must produce a clean
-    //    solution (SolvedSlp, Solved, or SolvedInexact) — the easy case.
     assert!(
         rows[0].status_ok,
         "rest-to-rest (v_frac=0) must produce a solved status",
     );
 
-    // 5. Per-phase accounting must be consistent across all cases.
     for r in &rows {
         let accounted = r.path_jerk_calls + r.slp9_tr_calls + r.slp9_no_tr_calls;
         assert_eq!(
@@ -237,16 +179,6 @@ fn velocity_sweep_single_segment() {
         );
     }
 
-    // 6. NON-REGRESSION HARD GATE (Lever 3).
-    // CLAUDE.md non-negotiable: the planner never ships a measurably slower
-    // trajectory than the best we can compute. So the gate is one-sided — for
-    // EVERY entry velocity, the post-Lever-3 trajectory time must be ≤ the
-    // pre-Lever-3 baseline (within a tiny relative tolerance). No case may get
-    // slower. The 0.75 crawl must get strictly faster.
-    //
-    // PRE_LEVER3_BASELINE: committed Mac dev-build reference, captured before the
-    // seeding + speed-polish + fail-loud work. These are the numbers Lever 3 is
-    // measured against; they are NOT a both-sided target.
     const PRE_LEVER3_BASELINE_MS: [f64; 5] = [445.426, 406.920, 388.272, 998.769, 317.078];
     for (r, &base_ms) in rows.iter().zip(PRE_LEVER3_BASELINE_MS.iter()) {
         assert!(
@@ -259,11 +191,6 @@ fn velocity_sweep_single_segment() {
         );
     }
 
-    // 6a. Cases that never trigger seeding (0, 0.25, 0.50) converge without
-    // restoration and must stay byte-stable in trajectory time. They may take
-    // FEWER Clarabel calls (a free win from the wider initial trust region), but
-    // the converged time-optimal trajectory is a property of the problem, not the
-    // iteration path, so it is unchanged to within solver tolerance.
     for i in 0..3 {
         let rel =
             (rows[i].total_time_ms - PRE_LEVER3_BASELINE_MS[i]).abs() / PRE_LEVER3_BASELINE_MS[i];
@@ -283,21 +210,6 @@ fn velocity_sweep_single_segment() {
         );
     }
 
-    // 6b. The 0.75 crawl: seeding + recovery must make it strictly faster than
-    // the 998.8ms baseline (the throughput win), and it must land in the solved
-    // set (feasible). The fail-loud rule means the recovered, not-provably-SLP-
-    // optimal profile wears SolvedInexact rather than the SolvedSlp optimal
-    // badge — it must NOT be SolvedSlp.
-    //
-    // NOTE (honest): the aspirational target was ~360-450ms (in line with the
-    // 0.66-0.70 neighbors, which converge directly to ~370-440ms). The in-scope
-    // SLP linearization hits a hard descent cliff just above v_frac≈0.71: from
-    // the high-entry start it cannot reduce the entry-region axis-jerk ratio at
-    // all (accepted=0), and the feasible recovery seed only reaches the
-    // uniform-dilation feasible point at ~749ms. Closing that gap needs a
-    // warm-start / better SLP, which is explicitly out of scope here. So the
-    // gate we ENFORCE is the non-negotiable one (strictly faster than baseline,
-    // no regression, fail-loud), not the aspirational ~600ms number.
     assert!(
         rows[3].total_time_ms < PRE_LEVER3_BASELINE_MS[3],
         "v_frac=0.75 must be strictly faster than the 998.8ms crawl; got {:.3}ms",
@@ -315,9 +227,6 @@ fn velocity_sweep_single_segment() {
         rows[3].status_label,
     );
 
-    // 6c. FAIL-LOUD: the genuinely-infeasible 0.95 case (v_start=285mm/s on the
-    // tight-Y-jerk S-curve) must remain a NON-success. Seeding must not launder
-    // it into a fake Converged/SolvedSlp.
     assert!(
         !rows[4].status_ok,
         "v_frac=0.95 is geometrically infeasible and must stay a non-success; \
@@ -325,7 +234,6 @@ fn velocity_sweep_single_segment() {
         rows[4].status_label,
     );
 
-    // 8. Report pathology reproduction status (informational).
     let worst = rows.iter().max_by_key(|r| r.clarabel_total).unwrap();
     let pathology_reproduced = worst.clarabel_total >= 50
         || rows.iter().any(|r| r.restoration_fired)
@@ -351,10 +259,6 @@ fn velocity_sweep_single_segment() {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// Per-phase breakdown at cruise entry (worst case)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn cruise_entry_phase_breakdown() {
@@ -402,7 +306,6 @@ fn cruise_entry_phase_breakdown() {
     );
     eprintln!("  Mac wall_us          : {}", wall_us);
 
-    // Structural sanity: call totals must be consistent.
     let total_accounted = snap.clarabel_calls_path_jerk
         + snap.clarabel_calls_slp9_tr
         + snap.clarabel_calls_slp9_no_tr;
@@ -417,18 +320,10 @@ fn cruise_entry_phase_breakdown() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Chained plan_batch case: 5 smooth tangent-continuous cubics
-// ---------------------------------------------------------------------------
-
 #[test]
 fn chained_five_cubics_plan_batch() {
     use temporal::{BatchInput, GridStrategy, JoiningStatus, SegmentInput, plan_batch};
 
-    // Six S-curve cubics chained end-to-end (tangent-continuous at junctions).
-    // Each has the same shape as `repro_curve()` (alternating S/Z sign), so
-    // inner segments are solved at junction velocity near cruise — reproducing
-    // the "mid-stream segment at cruise velocity" Pi5 scenario.
     let segments_curves: Vec<VectorNurbs<f64, 3>> = (0..6)
         .map(|i| {
             let x0 = i as f64 * 46.0;
@@ -483,9 +378,6 @@ fn chained_five_cubics_plan_batch() {
     let wall_us = t0.elapsed().as_micros() as u64;
     let snap = counters::snapshot();
 
-    // NOTE: plan_batch always spawns worker threads (even with worker_threads=1).
-    // Thread-local counters on the test thread therefore show 0 — that is expected.
-    // The wall_us and per-profile status are the meaningful outputs here.
     eprintln!("\n=== throughput_repro: 6-cubic chain plan_batch ===");
     eprintln!(
         "  Total Clarabel calls : {} (0 = thread-local; spawned workers)",

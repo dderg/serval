@@ -1,12 +1,3 @@
-//! Deterministic gates for the anytime / graceful-degradation temporal solve.
-//!
-//! These gates are load-independent: they force the deadline (already-expired vs
-//! far-future) rather than racing wall-clock against a busy CPU. A shipped
-//! `Solved*` status is itself proof that `verify::check_chain` passed, because
-//! `output::map_status` only emits a success status when `verify.feasible` is
-//! true — so feasibility (G1) is asserted via the public status + the binding
-//! ratio surfaced from `check_chain`.
-
 use std::time::{Duration, Instant};
 
 use nurbs::VectorNurbs;
@@ -16,7 +7,6 @@ use temporal::{
 
 const V_MAX: f64 = 300.0;
 
-/// The sharp ~46mm S-bend that took 568ms to solve optimally on the Pi5 bench.
 fn repro_curve() -> VectorNurbs<f64, 3> {
     VectorNurbs::<f64, 3>::try_new(
         3,
@@ -46,7 +36,6 @@ fn repro_grid() -> GridConfig {
     }
 }
 
-/// A representative straight 50mm move, rest-to-rest.
 fn straight_50mm() -> VectorNurbs<f64, 3> {
     VectorNurbs::<f64, 3>::try_new(
         1,
@@ -56,10 +45,6 @@ fn straight_50mm() -> VectorNurbs<f64, 3> {
     .unwrap()
 }
 
-/// A short 4mm rest-to-rest straight move. Too short to reach v_max=300 under
-/// the accel/jerk caps, so velocity tops out well below its limit and the move
-/// is accel/jerk-limited — the exact shape that exposed the velocity-only worst-
-/// binding report on the bench.
 fn short_straight_4mm() -> VectorNurbs<f64, 3> {
     VectorNurbs::<f64, 3>::try_new(
         1,
@@ -76,17 +61,6 @@ fn is_success(status: SolveStatus) -> bool {
     )
 }
 
-/// Regression — the reported worst binding spans all families. A short rest-to-
-/// rest move is jerk-limited: velocity peaks far below its cap (~0.4-0.5) while
-/// jerk is the highest-ratio family. The old report considered only velocity/
-/// accel, so it surfaced the velocity ratio and a gap inflated by the unseen
-/// jerk. The fix surfaces jerk as the worst — the gap is computed against the
-/// genuinely-tightest constraint, not a blind-spot family.
-///
-/// Note this move does NOT ride jerk at ratio 1.0 (it converges near 0.6); that
-/// residual gap is a real property of the relaxed solve on a short isolated
-/// rest-to-rest segment, tracked separately. This test only locks that the
-/// report no longer hides the tighter family behind velocity.
 #[test]
 fn converged_short_move_worst_spans_all_families() {
     let curve = short_straight_4mm();
@@ -111,10 +85,6 @@ fn converged_short_move_worst_spans_all_families() {
         .worst
         .expect("a converged move must report a worst binding");
 
-    // The peak velocity ratio on this short move is well below 1; if the report
-    // still keyed on velocity it would sit near that. Jerk is the tighter family,
-    // so the reported worst must be jerk (or accel) at a ratio above the velocity
-    // peak — proving the all-family worst, not the velocity-only blind spot.
     assert!(
         matches!(
             worst.constraint,
@@ -134,10 +104,6 @@ fn converged_short_move_worst_spans_all_families() {
     );
 }
 
-/// G1 + G2 — forcing an already-expired deadline on the 46mm@50 sharp curve
-/// (which optimally takes 568ms) ships a FEASIBLE floor with a success status
-/// (success ⇒ `check_chain.feasible`), reports a positive gap, names a limiter,
-/// and does not error or panic.
 #[test]
 fn g1_g2_expired_deadline_ships_feasible_floor() {
     let curve = repro_curve();
@@ -205,8 +171,6 @@ fn g1_g2_expired_deadline_ships_feasible_floor() {
     );
 }
 
-/// G1 — the floor is feasible for a representative rest-to-rest straight move
-/// under an expired deadline (success ⇒ `check_chain.feasible`). Slower-but-safe.
 #[test]
 fn g1_floor_feasible_representative() {
     let curve = straight_50mm();
@@ -231,9 +195,6 @@ fn g1_floor_feasible_representative() {
     assert!(profile.total_time.is_finite() && profile.total_time > 0.0);
 }
 
-/// G3 — an ample (far-future) deadline must converge to today's optimum: the
-/// committed trajectory equals the unbounded (deadline = None) full solve within
-/// solver tolerance. Trajectory-neutral when time is ample.
 #[test]
 fn g3_ample_deadline_converges_to_optimum() {
     let curve = repro_curve();
@@ -301,13 +262,6 @@ fn g3_ample_deadline_converges_to_optimum() {
     }
 }
 
-/// G4 — a genuinely infeasible curve must still fail loud: an expired deadline
-/// must NOT launder it into a success. Here the start velocity is pinned far
-/// above the maximum velocity the limits permit (5000 mm/s vs v_max=300), so the
-/// boundary sits above the MVC: NO feasible profile exists at the pinned
-/// boundary at any interior speed. This is the hard boundary — the floor only
-/// dilates interior speed; it cannot lower a pinned boundary, so the solve must
-/// report `Infeasible`, not a feasible-looking floor.
 #[test]
 fn g4_genuine_infeasibility_still_fails_loud() {
     let curve = repro_curve();

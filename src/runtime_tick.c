@@ -279,12 +279,7 @@ runtime_drain(void)
 }
 DECL_TASK(runtime_drain);
 
-// Foreground producer for the resonance-buzz step streams. The solver +
-// StepQueue refill run HERE, never in the step-output ISR (which is now a pure
-// pop+fire+re-arm consumer). Polled every main-loop pass: the sub-ms loop tops
-// the depth-32 rings up to HIGH_WATER far faster than they drain at audio-rate
-// crossings, so they never underrun. The Rust entry IRQ-guards only its compare
-// re-arm; the solver compute runs fully preemptible.
+#if !CONFIG_MACH_LINUX
 extern void runtime_buzz_refill_foreground(void);
 
 void
@@ -294,6 +289,7 @@ runtime_buzz_refill(void)
     runtime_buzz_refill_foreground();
 }
 DECL_TASK(runtime_buzz_refill);
+#endif
 
 void
 runtime_tick_shutdown(void)

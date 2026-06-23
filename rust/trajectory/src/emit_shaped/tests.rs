@@ -262,12 +262,12 @@ fn pad_segment_axis_with_history_seam_reads_history_tail() {
         .find(|p| 0.8 >= p.u_start - 1e-12 && 0.8 <= p.u_end + 1e-12)
         .expect("padded curve should cover t = 0.8")
         .evaluate(0.8);
-    // With no history the left pad continues at the segment's entry velocity (slope 20 through
-    // position 10 at the t=1.0 seam) rather than holding the start position: at t=0.8 that is
-    // 10 + 20*(0.8 - 1.0) = 6.0.
+    let seam_position = 10.0;
+    let entry_velocity = 20.0;
+    let vel_extrapolated_at_08 = seam_position + entry_velocity * (0.8 - 1.0);
     assert!(
-        (val_08_no_history - 6.0).abs() < 1e-9,
-        "no-history path should extrapolate at entry velocity to 6.0 at t=0.8, got {val_08_no_history}",
+        (val_08_no_history - vel_extrapolated_at_08).abs() < 1e-9,
+        "no-history path should extrapolate at entry velocity to {vel_extrapolated_at_08} at t=0.8, got {val_08_no_history}",
     );
     assert!(
         (val_08 - val_08_no_history).abs() > 1.0,
@@ -310,15 +310,6 @@ fn empty_history_pad_matches_legacy() {
 
 #[test]
 fn constant_y_axis_emits_cubic_matching_moving_x_corexy_degree_invariant() {
-    // Regression: when the fitter produces a degree-5 FittedSegment and Y is
-    // bitwise-constant, emit_shaped returned the fitter's native degree-5 curve
-    // for Y while fitting X to degree-3 via fit_c2_cubic. The degree mismatch
-    // caused add_with_knot_union to return KnotMismatch and panicked at
-    // motion-engine/src/enqueue.rs:30 on any CoreXY dispatch.
-    //
-    // Trigger condition: pure-X jogs queued back-to-back while the first is
-    // in flight; the terminal-decel splice rebuilds Y as bitwise-constant.
-
     let x_composed: Vec<[BezierPiece<f64>; 3]> = (0..4)
         .map(|i| {
             let s = f64::from(i);
@@ -545,9 +536,14 @@ fn e_follower_chains(
     kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4],
 ) -> AxisChainSet {
     let mut chains = AxisChainSet::spatial_from_kernels(kernels);
-    chains
-        .chains
-        .push(crate::CompiledChain { kernel: None, gain });
+    chains.chains.push(crate::CompiledChain {
+        stages: (gain != 0.0)
+            .then_some(crate::ChainStage::LinearPressureAdvance { k: gain })
+            .into_iter()
+            .collect(),
+        kernel: None,
+        gain,
+    });
     chains.followers.push((3, vec![0, 1, 2]));
     chains
 }

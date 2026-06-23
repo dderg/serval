@@ -4,13 +4,6 @@ use crate::topp::chain::ChainGrid;
 use crate::topp::constraints::{BuildOutcome, EndpointConditions, build_chain};
 use crate::topp::path::{ArclengthGrid, InterSample};
 
-/// Verify that `append_axis_jerk_cut_to_clarabel` emits ∞-norm-normalized rows.
-///
-/// With cp=1.0, b_bars=[6.0; 3], h=1e-3 the stencil coefficients include
-/// cp·√b/h² ≈ 2.449e6 — a scale that historically wrecked QDLDL conditioning.
-/// After the fix every pushed coefficient must be ≤ 1.0 in absolute value (the
-/// row has been divided through by its ∞-norm), and the RHS values must equal
-/// the unscaled values divided by that same scale.
 #[test]
 fn axis_jerk_cut_row_norm_is_one() {
     let n_grid = 5_usize;
@@ -20,8 +13,6 @@ fn axis_jerk_cut_row_norm_is_one() {
     let h = 1e-3_f64;
     let b_val = 6.0_f64;
     let cp = 1.0_f64;
-    // cpp and cppp set to zero so the dominant term is cp·√b/h², which is
-    // the O(N²) coefficient that caused conditioning failures.
     let h_uniform = h;
     let w = crate::topp::stencil::b_dd_weights(h_uniform, h_uniform);
     let cut = AxisJerkCut {
@@ -37,14 +28,6 @@ fn axis_jerk_cut_row_norm_is_one() {
         j_lim_inflated: 1_000.0,
     };
 
-    // Compute the expected unscaled row_scale.  Interior stencil with cpp=cppp=0,
-    // a_bar=0, d2=0:
-    //   alpha_b_im1 = cp·√b / (2h²)
-    //   alpha_b_ip1 = cp·√b / (2h²)
-    //   alpha_b_i   = -cp·√b / h² + 0  (d2 = 0)
-    //   alpha_a_i   = 0
-    // So |alpha_b_i| = cp·√b/h² and the two side coefficients are half that.
-    // row_scale = cp·√b/h².
     let s = b_val.sqrt();
     let expected_scale = cp * s / (h * h);
     assert!(
@@ -71,7 +54,6 @@ fn axis_jerk_cut_row_norm_is_one() {
     assert_eq!(n_rows, 2, "expected two rows (± pair)");
     assert_eq!(b_rhs.len(), 2);
 
-    // Collect all non-zero coefficient magnitudes across both rows.
     let max_coeff: f64 = nzval
         .iter()
         .flat_map(|col| col.iter().copied())
@@ -83,8 +65,6 @@ fn axis_jerk_cut_row_norm_is_one() {
         "∞-norm of emitted rows should be 1.0, got {max_coeff}"
     );
 
-    // RHS pair: the cut has k_const = 0 (cpp=cppp=0, d2=0, a_bar=0), so
-    // rhs_pos = j / row_scale and rhs_neg = j / row_scale — both equal.
     let j = cut.j_lim_inflated;
     let expected_rhs = j / expected_scale;
     assert!(
@@ -98,7 +78,6 @@ fn axis_jerk_cut_row_norm_is_one() {
         b_rhs[1]
     );
 
-    // The ± rows must have identical coefficient magnitudes (symmetry preserved).
     let coeff_pos: Vec<f64> = nzval
         .iter()
         .enumerate()
@@ -133,7 +112,6 @@ fn axis_jerk_cut_row_norm_is_one() {
         );
     }
 
-    // off_a column (alpha_a_i = 0) must not appear in the output.
     assert!(
         rowval[off_a + cut.i].is_empty(),
         "a_i column should be absent when cpp = 0"
@@ -142,18 +120,13 @@ fn axis_jerk_cut_row_norm_is_one() {
 
 #[test]
 fn find_jerk_violators_chain_ratio_has_no_spurious_h_factor() {
-    // Uniform grid with h=0.5. b_dd_weights returns [1/h², -2/h², 1/h²], so
-    // b_dd = (b0 - 2*b1 + b2) / h² directly — no extra h² should appear in
-    // the ratio denominator.
-    //
-    // Construction: target ratio = 1.10 (safely above the 1+SLP_EPS_FEAS=1.05 gate).
-    //   ratio = |b_dd| * sqrt(b1) / (2*J)
-    //   want 1.10 = |b_dd| * sqrt(400) / (2*100) → |b_dd| = 1.10*200/20 = 11.0
-    //   b_dd = (b0 - 2*400 + b2)/h² with h=0.5 → (b0-800+b2)/0.25 = 11.0
-    //   symmetric: b0=b2=400 + 11.0*0.25/2 = 400 + 1.375 = 401.375
     let h = 0.5_f64;
     let j_path = 100.0_f64;
-    let b = vec![401.375_f64, 400.0, 401.375];
+    let target_ratio = 1.10_f64;
+    let b_mid = 400.0_f64;
+    let b_dd = target_ratio * 2.0 * j_path / b_mid.sqrt();
+    let b_side = b_mid + b_dd * (h * h) / 2.0;
+    let b = vec![b_side, b_mid, b_side];
     let h_intervals = vec![h, h];
     let violators = find_jerk_violators_chain(&b, &h_intervals, &[j_path; 3]);
     assert_eq!(
@@ -163,8 +136,8 @@ fn find_jerk_violators_chain_ratio_has_no_spurious_h_factor() {
     );
     let got_ratio = violators[0].ratio;
     assert!(
-        (got_ratio - 1.10).abs() < 1e-3,
-        "ratio {got_ratio} should be ≈1.10; a spurious h² divisor would give {:.4} instead",
+        (got_ratio - target_ratio).abs() < 1e-3,
+        "ratio {got_ratio} should be ≈{target_ratio}; a spurious h² divisor would give {:.4} instead",
         got_ratio / (h * h),
     );
 }
@@ -274,9 +247,6 @@ fn straight_line_solves_to_nontrivial_profile() {
     );
 }
 
-/// `uniform_damp_for_feasibility` must return a uniform time dilation that
-/// brings the axis-jerk ratio of the damped result to ≤ `SLP9_DAMP_TARGET_RATIO`,
-/// staying on the `b' = 2a` motion manifold (both `b` and `a` scaled by λ²).
 #[test]
 fn uniform_damp_achieves_target_on_manifold() {
     let n = 7_usize;
@@ -358,16 +328,6 @@ fn uniform_damp_achieves_target_on_manifold() {
     }
 }
 
-/// `build_axis_jerk_cuts_chain` must place maintenance cuts (j_lim = j_max) for
-/// non-violating points whose jerk ratio is above `SLP9_EPS_FEAS`, and tightening
-/// cuts (j_lim < j_max) only for points above the tightening threshold.
-///
-/// Two X-axis points are constructed:
-///   - i=1 (maintenance): ratio ≈ 0.20 — above SLP9_EPS_FEAS(0.05) but below
-///     `SLP9_CUT_PLACEMENT_FRACTION * target_ratio` — must get j_lim = j_max.
-///   - i=2 (tightening): ratio ≈ 1.30 — above the tightening threshold — must
-///     get j_lim = j_max * target_ratio.
-///   - i=3 (no cut): ratio ≈ 0.01 — below SLP9_EPS_FEAS — must produce no cut.
 #[test]
 fn build_axis_jerk_cuts_chain_places_maintenance_cuts() {
     let n = 5_usize;
@@ -477,13 +437,6 @@ fn build_axis_jerk_cuts_chain_places_maintenance_cuts() {
     );
 }
 
-/// Regression: `slp_solve_chain` must return `Converged`, not `MaxIters`, when
-/// all interior b values are below `SLP_B_CUT_FLOOR` (no cuts placeable).
-///
-/// `j_max = [1,1,1]` ensures the FD-estimated path-jerk ratio exceeds 1.05 on
-/// the initial SOCP solution while the 0.03 mm move keeps peak b far below
-/// `SLP_B_CUT_FLOOR = 100.0`, making `added == 0` guaranteed. The old code
-/// returned `MaxIters`; the fix returns `Converged`.
 #[test]
 fn slp_solve_chain_zero_cuts_placeable_is_converged_not_max_iters() {
     let grid = dummy_straight_grid(20, 0.03_f64);

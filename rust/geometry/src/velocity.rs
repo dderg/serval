@@ -18,15 +18,18 @@ pub struct VelocityConfig {
     pub consistency_tol: f64,
     pub max_jerk_mm_s3: f64,
     pub integration_tol: f64,
+    pub max_extrude_only_velocity_mm_s: f64,
+    pub max_extrude_only_accel_mm_s2: f64,
 }
 
 impl Default for VelocityConfig {
     fn default() -> Self {
         Self {
             consistency_tol: 1e-6,
-            // TODO: jerk-limit floor is an open tuning question (spec-motion-6).
-            max_jerk_mm_s3: 100_000.0,
+            max_jerk_mm_s3: 100_000.0, // TODO: jerk-limit floor is an open tuning question (spec-motion-6)
             integration_tol: 1e-7,
+            max_extrude_only_velocity_mm_s: f64::INFINITY,
+            max_extrude_only_accel_mm_s2: f64::INFINITY,
         }
     }
 }
@@ -35,6 +38,7 @@ impl Default for VelocityConfig {
 pub struct VelSample {
     pub s: f64,
     pub v: f64,
+    pub a: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,7 +76,24 @@ pub enum VelocityError {
     NonFinite { line_no: u32 },
     Diverged { line_no: u32 },
     OverCommitted { line_no: u32 },
+    RestAnchorAccel { line_no: u32 },
     InvalidConfig,
+}
+
+const REST_ANCHOR_ACCEL_EPS: f64 = 1e-3;
+
+fn pin_rest_anchor(
+    sample: Option<&mut VelSample>,
+    line_no: u32,
+    jerk: f64,
+) -> Result<(), VelocityError> {
+    if let Some(s) = sample {
+        if jerk.is_finite() && s.a.abs() > REST_ANCHOR_ACCEL_EPS {
+            return Err(VelocityError::RestAnchorAccel { line_no });
+        }
+        s.a = 0.0;
+    }
+    Ok(())
 }
 
 struct MoveCaps {
@@ -87,14 +108,6 @@ pub fn plan_velocity(
     plan_velocity_warm_start(outcome, config, 0.0)
 }
 
-/// Streaming variant: the trajectory enters the first move at `entry_v`
-/// (the velocity already dispatched to the MCU at the commit boundary) rather
-/// than from rest. The terminal velocity stays pinned to zero (worst-case
-/// future), so a partially-known look-ahead window is always plannable to a
-/// stop. Fails loudly with [`VelocityError::OverCommitted`] when the pinned
-/// entry cannot brake to rest within the window — that is an over-commit
-/// (the planner emitted faster than the remaining look-ahead can absorb), not
-/// something to silently clamp. `entry_v == 0.0` reproduces [`plan_velocity`].
 pub fn plan_velocity_warm_start(
     outcome: &FitOutcome,
     config: VelocityConfig,
@@ -109,6 +122,9 @@ pub fn plan_velocity_warm_start(
         return Err(VelocityError::InvalidConfig);
     }
     if !(entry_v.is_finite() && entry_v >= 0.0) {
+        return Err(VelocityError::InvalidConfig);
+    }
+    if !(config.max_extrude_only_velocity_mm_s > 0.0 && config.max_extrude_only_accel_mm_s2 > 0.0) {
         return Err(VelocityError::InvalidConfig);
     }
 
@@ -133,7 +149,8 @@ pub fn plan_velocity_warm_start(
     let mut caps = Vec::with_capacity(n);
     for m in moves {
         let line_no = m.source.start_line;
-        let accel = m.limits.accel_mm_s2;
+        let mut accel = m.limits.accel_mm_s2;
+        let mut extrude_only_velocity_cap = f64::INFINITY;
         let (length, kappa0, sigma, kappa_peak) = match &m.segment.spatial {
             Some(seg) => {
                 let length = seg.s_len();
@@ -151,11 +168,16 @@ pub fn plan_velocity_warm_start(
                 if !(length.is_finite() && length > LENGTH_EPS_MM) {
                     return Err(VelocityError::NonFinite { line_no });
                 }
+                accel = accel.min(config.max_extrude_only_accel_mm_s2);
+                extrude_only_velocity_cap = config.max_extrude_only_velocity_mm_s;
                 (length, 0.0, 0.0, 0.0)
             }
         };
 
-        let flat_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
+        let flat_ceiling = m
+            .feedrate_mm_s
+            .min(m.limits.max_velocity_mm_s)
+            .min(extrude_only_velocity_cap);
         if disk::limit_speed(kappa_peak, accel) < flat_ceiling {
             report.curvature_bound += 1;
         } else {
@@ -240,12 +262,13 @@ pub fn plan_velocity_warm_start(
         let kin = &caps[j].kin;
         let disk = disk::disk_reach_v(kin, v[j], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
-        let jerk = scurve::max_reachable_velocity(
+        let jerk = scurve::reach_v(
             run_start_v[j],
             arc_from_run_start[j] + kin.length,
             kin.accel,
             kin.jerk,
-        );
+        )
+        .ok_or(VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(disk).min(jerk);
     }
     for k in (1..n).rev() {
@@ -254,12 +277,8 @@ pub fn plan_velocity_warm_start(
         let kin = &caps[j].kin;
         let disk = disk::disk_reach_v_rev(kin, v[k + 1], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
-        let jerk = scurve::max_reachable_velocity(
-            0.0,
-            arc_to_run_end[j] + kin.length,
-            kin.accel,
-            kin.jerk,
-        );
+        let jerk = scurve::reach_v(0.0, arc_to_run_end[j] + kin.length, kin.accel, kin.jerk)
+            .ok_or(VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(disk).min(jerk);
     }
     let entry_line_no = moves[0].source.start_line;
@@ -269,12 +288,10 @@ pub fn plan_velocity_warm_start(
             disk::disk_reach_v_rev(kin, v[1], kin.length, tol).ok_or(VelocityError::Diverged {
                 line_no: entry_line_no,
             })?;
-        let jerk = scurve::max_reachable_velocity(
-            0.0,
-            arc_to_run_end[0] + kin.length,
-            kin.accel,
-            kin.jerk,
-        );
+        let jerk = scurve::reach_v(0.0, arc_to_run_end[0] + kin.length, kin.accel, kin.jerk)
+            .ok_or(VelocityError::Diverged {
+                line_no: entry_line_no,
+            })?;
         disk.min(jerk)
     };
     if entry_v > entry_brake + VELOCITY_EPS_MM_S {
@@ -283,48 +300,72 @@ pub fn plan_velocity_warm_start(
         });
     }
 
-    let mut out = Vec::with_capacity(n);
-    for (j, m) in moves.iter().enumerate() {
-        let kin = &caps[j].kin;
-        let line_no = m.source.start_line;
-        let entry_v = v[j];
-        let exit_v = v[j + 1];
-        let jerk_anchors = disk::JerkAnchors {
-            fwd_v: run_start_v[j],
-            fwd_s: arc_from_run_start[j],
-            bwd_v: 0.0,
-            bwd_s: arc_to_run_end[j],
-        };
-        let samples: Vec<VelSample> =
-            disk::sample_profile(kin, entry_v, exit_v, &jerk_anchors, tol)
-                .ok_or(VelocityError::Diverged { line_no })?
-                .into_iter()
-                .map(|(s, v)| VelSample { s, v })
+    let mut out: Vec<MoveVelocity> = Vec::with_capacity(n);
+    let mut run_start = 0;
+    while run_start < n {
+        let mut run_end = run_start + 1;
+        while run_end < n && !is_anchor[run_end] {
+            run_end += 1;
+        }
+        let members: Vec<disk::RunMember> = (run_start..run_end)
+            .map(|j| disk::RunMember {
+                kin: &caps[j].kin,
+                entry_v: v[j],
+                exit_v: v[j + 1],
+                fwd_s: arc_from_run_start[j],
+                bwd_s: arc_to_run_end[j],
+            })
+            .collect();
+        let run_start_line = moves[run_start].source.start_line;
+        let reconstructed = disk::reconstruct_run(&members, run_start_v[run_start], tol).ok_or(
+            VelocityError::Diverged {
+                line_no: run_start_line,
+            },
+        )?;
+
+        for (idx, j) in (run_start..run_end).enumerate() {
+            let kin = &caps[j].kin;
+            let m = &moves[j];
+            let line_no = m.source.start_line;
+            let entry_v = v[j];
+            let exit_v = v[j + 1];
+            let mut samples: Vec<VelSample> = reconstructed[idx]
+                .iter()
+                .map(|&(s, v, a)| VelSample { s, v, a })
                 .collect();
-        let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
-        report.traversal_time_s += traversal_time(&samples);
+            if is_anchor[j] {
+                pin_rest_anchor(samples.first_mut(), line_no, kin.jerk)?;
+            }
+            if is_anchor[j + 1] {
+                pin_rest_anchor(samples.last_mut(), line_no, kin.jerk)?;
+            }
+            let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
+            report.traversal_time_s += traversal_time(&samples);
 
-        let disk_only = disk::disk_reach_v(kin, entry_v, kin.length, tol)
-            .ok_or(VelocityError::Diverged { line_no })?;
-        let jerk_only = scurve::max_reachable_velocity(entry_v, kin.length, kin.accel, kin.jerk);
-        if jerk_only + VELOCITY_EPS_MM_S < disk_only {
-            report.jerk_bound += 1;
-        }
-        let curvature_ceiling = disk::limit_speed(caps[j].kappa_peak, kin.accel);
-        if caps[j].kappa_peak > 0.0 && peak_v > curvature_ceiling + VELOCITY_EPS_MM_S {
-            report.limit_ride += 1;
-        }
+            let disk_only = disk::disk_reach_v(kin, entry_v, kin.length, tol)
+                .ok_or(VelocityError::Diverged { line_no })?;
+            let jerk_only = scurve::reach_v(entry_v, kin.length, kin.accel, kin.jerk)
+                .ok_or(VelocityError::Diverged { line_no })?;
+            if jerk_only + VELOCITY_EPS_MM_S < disk_only {
+                report.jerk_bound += 1;
+            }
+            let curvature_ceiling = disk::limit_speed(caps[j].kappa_peak, kin.accel);
+            if caps[j].kappa_peak > 0.0 && peak_v > curvature_ceiling + VELOCITY_EPS_MM_S {
+                report.limit_ride += 1;
+            }
 
-        out.push(MoveVelocity {
-            entry_v,
-            exit_v,
-            peak_v,
-            samples,
-            accel: kin.accel,
-            jerk: kin.jerk,
-            length: kin.length,
-            source: m.source,
-        });
+            out.push(MoveVelocity {
+                entry_v,
+                exit_v,
+                peak_v,
+                samples,
+                accel: kin.accel,
+                jerk: kin.jerk,
+                length: kin.length,
+                source: m.source,
+            });
+        }
+        run_start = run_end;
     }
 
     Ok(VelocityProfile { moves: out, report })

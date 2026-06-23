@@ -42,7 +42,6 @@ fn arm_rejects_out_of_range_arguments() {
         buzz.arm(4, 0b1, 0, 100_000, 100_000, 9_000_000, 1000, 100),
         -1
     );
-    // axis bit beyond num_axes (axis 4 set, only 0..3 valid)
     assert_eq!(
         buzz.arm(4, 0b1_0000, 0, 100_000, 100_000, 10_000, 1000, 100),
         -1
@@ -52,7 +51,6 @@ fn arm_rejects_out_of_range_arguments() {
 #[test]
 fn disarm_form_yields_no_excitations() {
     let mut buzz = Buzz::new();
-    // amplitude 0 == disarm; accepted (returns 0), resolves to an empty set.
     assert_eq!(buzz.arm(4, 0b11, 0, 100_000, 100_000, 0, 100, 10), 0);
     assert!(buzz.has_pending());
     assert!(buzz.take_excitations().is_empty());
@@ -67,17 +65,14 @@ fn tone_resolves_to_one_excitation_per_set_axis() {
     assert_eq!(ex.len(), 2);
     assert_eq!(ex[0].axis_idx, 0);
     assert_eq!(ex[1].axis_idx, 2);
-    // Tone: zero chirp rate, omega = 2*pi*100 Hz.
     assert_eq!(ex[0].mu, 0.0);
     assert!((ex[0].omega - TWO_PI_F64 * 100.0).abs() < 1e-6);
-    // 50_000 nm displacement = 0.05 mm.
     assert!((ex[0].amplitude_mm - 0.05).abs() < 1e-12);
     assert!((ex[0].total_seconds - 0.2).abs() < 1e-12);
 }
 
 #[test]
 fn corexy_pair_is_anti_phase_via_sign_mask() {
-    // axis 0 (+) and axis 1 (-): cartesian-Y excitation on CoreXY.
     let mut buzz = Buzz::new();
     assert_eq!(
         buzz.arm(4, 0b11, 0b10, 100_000, 100_000, 50_000, 200, 20),
@@ -87,7 +82,6 @@ fn corexy_pair_is_anti_phase_via_sign_mask() {
     assert_eq!(ex.len(), 2);
     assert_eq!(ex[0].sign, 1.0);
     assert_eq!(ex[1].sign, -1.0);
-    // Same carrier (phase-coherent), opposite sign.
     assert_eq!(ex[0].omega, ex[1].omega);
     assert_eq!(ex[0].amplitude_mm, ex[1].amplitude_mm);
 }
@@ -95,13 +89,11 @@ fn corexy_pair_is_anti_phase_via_sign_mask() {
 #[test]
 fn chirp_sets_nonzero_slope_matching_band_edges() {
     let mut buzz = Buzz::new();
-    // 20 -> 120 Hz over 200 ms.
     assert_eq!(buzz.arm(4, 0b01, 0, 20_000, 120_000, 100_000, 200, 20), 0);
     let ex = buzz.take_excitations();
     assert_eq!(ex.len(), 1);
     let e = ex[0];
     assert!((e.omega - TWO_PI_F64 * 20.0).abs() < 1e-6);
-    // omega_inst(total) must land on 2*pi*120.
     let omega_end = e.omega + e.mu * e.total_seconds;
     assert!((omega_end - TWO_PI_F64 * 120.0).abs() < 1e-6);
 }
@@ -109,7 +101,6 @@ fn chirp_sets_nonzero_slope_matching_band_edges() {
 #[test]
 fn ramp_is_clamped_to_half_total() {
     let mut buzz = Buzz::new();
-    // 50 ms ramp on a 60 ms tone would overlap; clamp to 30 ms.
     assert_eq!(buzz.arm(4, 0b01, 0, 100_000, 100_000, 50_000, 60, 50), 0);
     let ex = buzz.take_excitations();
     assert_eq!(ex.len(), 1);

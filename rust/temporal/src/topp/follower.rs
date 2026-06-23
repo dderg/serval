@@ -390,9 +390,6 @@ pub(crate) fn build_follower_windows(chain: &ChainGrid, b_bar: &[f64]) -> Follow
     }
 }
 
-/// Window weights depend only on pairwise time differences within one kernel
-/// support, so drift is measured on those differences, not on accumulated
-/// absolute time.
 pub(crate) fn refreeze_drift(windows: &FollowerWindows, b_new: &[f64], chain: &ChainGrid) -> f64 {
     let t_new = frozen_time_map(b_new, &chain.h_intervals);
     let t_old = &windows.t_map;

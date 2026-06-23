@@ -599,7 +599,8 @@ impl Engine {
             // the next motion tick and have dispatch_pulse push motion edges into
             // the same SPSC ring the buzz refill produces into, violating the
             // single-producer invariant. Fail loud rather than interleave.
-            if axis.armed.is_some() || !axis.ring.is_empty() {
+            let axis_idle = axis.armed.is_none() && axis.ring.is_empty();
+            if !axis_idle {
                 crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
                 return -1;
             }

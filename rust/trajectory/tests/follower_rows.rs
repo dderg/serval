@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use geometry::segment::FollowerDemand;
 use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::VectorNurbs;
@@ -51,6 +53,10 @@ fn solve(pa_k: f64) -> ShapeBatchOutput {
         trajectory::CompiledChain::default(),
     );
     chains.chains.push(trajectory::CompiledChain {
+        stages: (pa_k != 0.0)
+            .then_some(trajectory::ChainStage::LinearPressureAdvance { k: pa_k })
+            .into_iter()
+            .collect(),
         kernel: None,
         gain: pa_k,
     });

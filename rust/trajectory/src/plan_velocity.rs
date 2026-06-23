@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::fit::FittedSegment;
 use crate::post_processor::AxisChainSet;
 use crate::{ShapeBatchInput, ShapeError, ShapeSegmentInput};
@@ -7,9 +9,6 @@ pub use crate::beta::{PlanOutput, PlanStats};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SafetyMode {
     TerminalKnown,
-    /// Streaming case: the terminal velocity is speculative (decel-to-zero default).
-    /// β-medium derates against the worst-case-future bound by tightening the
-    /// effective machine accel limit on the trailing region.
     WorstCaseFuture,
 }
 
@@ -25,7 +24,6 @@ pub struct PlanInput<'a> {
     pub segments: &'a [PlanSegment<'a>],
     pub grid_strategy: temporal::multi::GridStrategy,
     pub worker_threads: usize,
-    /// Per-axis post-processor chains — single source for solver shaping and PA.
     pub chains: &'a AxisChainSet,
     pub fit_tolerance_mm: f64,
     pub beta_max_iters: u8,
@@ -35,18 +33,9 @@ pub struct PlanInput<'a> {
     pub terminal_v: f64,
     pub safety_mode: SafetyMode,
     pub follower_history: Option<&'a temporal::FollowerHistory>,
-    /// Axis-wise second derivatives to pin at the first sample of the first fitted
-    /// segment. Forwarded verbatim to [`ShapeBatchInput::start_d2_override`].
     pub start_d2_override: Option<[f64; 3]>,
 }
 
-///
-/// # Errors
-///
-/// - [`ShapeError::EmptySegments`] — `input.segments` is empty.
-/// - [`ShapeError::UnsupportedBoundaryVelocity`] — `initial_v` or `terminal_v` is non-finite or negative.
-/// - [`ShapeError::UnsupportedBoundaryAccel`] — `initial_a` is non-finite, or non-zero when `initial_v` is 0.0.
-/// - Any error from the underlying β-medium loop.
 pub fn plan_velocity(input: &PlanInput<'_>) -> Result<PlanOutput, ShapeError> {
     if input.segments.is_empty() {
         return Err(ShapeError::EmptySegments);

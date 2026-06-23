@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::path::PathBuf;
 
 use _motion_engine::binding_report::BindingAccumulator;

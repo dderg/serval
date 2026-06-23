@@ -12,6 +12,7 @@ fn compile_empty_chain_is_identity() {
     let c = CompiledChain::compile(&[]).unwrap();
     assert!(c.kernel.is_none());
     assert_eq!(c.gain, 0.0);
+    assert!(c.stages.is_empty());
 }
 
 #[test]
@@ -19,14 +20,29 @@ fn compile_kernel_plus_gain() {
     let c = CompiledChain::compile(&[zv(50.0), pa(0.04)]).unwrap();
     assert!(c.kernel.is_some());
     assert_eq!(c.gain, 0.04);
+    assert!(matches!(c.stages[0], ChainStage::SmoothKernel(_)));
+    assert!(matches!(
+        c.stages[1],
+        ChainStage::LinearPressureAdvance { k } if k == 0.04
+    ));
 }
 
 #[test]
-fn compile_order_irrelevant_for_linear_ops() {
+fn compile_preserves_declaration_order() {
     let a = CompiledChain::compile(&[zv(50.0), pa(0.04)]).unwrap();
     let b = CompiledChain::compile(&[pa(0.04), zv(50.0)]).unwrap();
     assert_eq!(a.gain, b.gain);
     assert_eq!(a.kernel.is_some(), b.kernel.is_some());
+    assert!(matches!(a.stages[0], ChainStage::SmoothKernel(_)));
+    assert!(matches!(
+        a.stages[1],
+        ChainStage::LinearPressureAdvance { .. }
+    ));
+    assert!(matches!(
+        b.stages[0],
+        ChainStage::LinearPressureAdvance { .. }
+    ));
+    assert!(matches!(b.stages[1], ChainStage::SmoothKernel(_)));
 }
 
 #[test]
@@ -59,6 +75,57 @@ fn set_param_updates_gain() {
 fn set_param_unknown_key_fails() {
     let mut inst = zv(50.0);
     assert!(inst.set_param("k", 1.0).is_err());
+}
+
+#[test]
+fn set_param_rejects_negative_and_non_finite_gain() {
+    let mut inst = pa(0.04);
+    for bad in [-0.01, f64::NAN, f64::INFINITY] {
+        assert!(
+            matches!(
+                inst.set_param("k", bad),
+                Err(PostProcessorError::BadParam { .. })
+            ),
+            "k={bad} should be rejected"
+        );
+    }
+    let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
+    assert_eq!(c.gain, 0.04, "rejected updates must not mutate the gain");
+    inst.set_param("k", 0.0).expect("k=0 is a valid no-op gain");
+}
+
+#[test]
+fn set_param_rejects_non_positive_and_non_finite_shaper_frequency() {
+    let mut inst = zv(50.0);
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            matches!(
+                inst.set_param("frequency_hz", bad),
+                Err(PostProcessorError::BadParam { .. })
+            ),
+            "frequency_hz={bad} should be rejected"
+        );
+    }
+    let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
+    let ChainStage::SmoothKernel(kernel) = &c.stages[0] else {
+        panic!("expected smooth kernel stage");
+    };
+    assert_eq!(
+        kernel.support(),
+        build_smooth_zv_kernel(SMOOTH_ZV_T_SM_PER_HZ / 50.0).support()
+    );
+}
+
+#[test]
+fn compile_rejects_directly_constructed_bad_params() {
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let err = CompiledChain::compile(&[zv(bad)]).unwrap_err();
+        assert!(matches!(err, PostProcessorError::BadParam { .. }));
+    }
+    for bad in [-0.01, f64::NAN, f64::INFINITY] {
+        let err = CompiledChain::compile(&[pa(bad)]).unwrap_err();
+        assert!(matches!(err, PostProcessorError::BadParam { .. }));
+    }
 }
 
 fn t_squared_cubic() -> nurbs::ScalarNurbs<f64> {

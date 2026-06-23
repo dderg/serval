@@ -67,8 +67,6 @@ class RemoteMotionEndstop:
     provider's job, via trip_move_begin/trip_move_end."""
 
     def __init__(self, printer, mcu, trsync_oid):
-        # Constructed at provider config-load time, possibly before
-        # motion_engine exists — look the engine up lazily at arm time.
         self._printer = printer
         self.mcu = mcu
         self.trsync_oid = trsync_oid

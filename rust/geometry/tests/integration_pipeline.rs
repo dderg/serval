@@ -1,11 +1,3 @@
-//! End-to-end integration of the new `Move` trajectory pipeline:
-//! `fit_chain` -> `plan_velocity` -> `lower_profile`.
-//!
-//! Each stage has its own unit tests; this exercises the seams between them on
-//! representative multi-move paths. Moves are built through the public
-//! `line_move`/`arc_move` API — the same shape the Python -> PyO3 bridge feeds —
-//! so no gcode parsing is involved.
-
 use geometry::path::Segment;
 use geometry::path::lowering::LoweredSample;
 use geometry::{
@@ -105,10 +97,6 @@ fn assert_trajectory_invariants(p: &Planned) {
         "total trajectory time must be positive"
     );
 
-    // lower_profile emits at a fixed rate: every interval but the final clamped
-    // one spans exactly 1/RATE_HZ. This also rules out a truncated or degenerate
-    // trajectory passing the endpoint check with too few samples.
-    // chord <= arc traversed <= v_max * dt, so per-step speed is bounded by v_max.
     let step = 1.0 / RATE_HZ;
     let cap = MAX_V * (1.0 + SPEED_REL_TOL);
     for (i, w) in s.windows(2).enumerate() {
@@ -130,7 +118,6 @@ fn assert_trajectory_invariants(p: &Planned) {
         }
     }
 
-    // Adjacent moves share a velocity node: a move's exit velocity is the next's entry.
     for w in p.profile.moves.windows(2) {
         let diff = (w[0].exit_v - w[1].entry_v).abs();
         assert!(
@@ -157,16 +144,14 @@ fn assert_reaches(p: &Planned, terminal: [f64; 3]) {
 
 #[test]
 fn cornered_polyline_blends_and_slows_through_corners() {
-    // Irregular vertices: no run of consecutive corners is co-circular, so each
-    // corner falls back to a per-corner clothoid blend (rather than a chain).
-    let verts = [
+    let non_cocircular_verts = [
         [0.0, 0.0, 0.0],
         [50.0, 0.0, 0.0],
         [80.0, 35.0, 0.0],
         [30.0, 55.0, 0.0],
         [5.0, 20.0, 0.0],
     ];
-    let p = plan(&polyline(200.0, &verts));
+    let p = plan(&polyline(200.0, &non_cocircular_verts));
 
     assert!(
         p.geometry.report.blended > 0,
@@ -201,17 +186,14 @@ fn cornered_polyline_blends_and_slows_through_corners() {
 
 #[test]
 fn square_stays_sharp_without_arc_fit() {
-    // A square's four corners are co-circular, but arc fitting is off by
-    // default, so the chain fitter must not collapse the square into a circle:
-    // the corners stay per-corner rather than reconstructing as a chain.
-    let verts = [
+    let cocircular_square_verts = [
         [0.0, 0.0, 0.0],
         [50.0, 0.0, 0.0],
         [50.0, 50.0, 0.0],
         [0.0, 50.0, 0.0],
         [0.0, 0.0, 0.0],
     ];
-    let p = plan(&polyline(200.0, &verts));
+    let p = plan(&polyline(200.0, &cocircular_square_verts));
 
     assert_eq!(
         p.geometry.report.chains, 0,
@@ -221,8 +203,6 @@ fn square_stays_sharp_without_arc_fit() {
     assert_trajectory_invariants(&p);
     assert_reaches(&p, [0.0, 0.0, 0.0]);
 
-    // Start and terminal coincide on a closed loop, so confirm the trajectory
-    // actually rounded the far side rather than barely moving.
     let excursion = p
         .samples
         .iter()
@@ -238,13 +218,17 @@ fn square_stays_sharp_without_arc_fit() {
 #[test]
 fn arc_path_is_curvature_bounded() {
     let feed = 250.0;
-    // Tight (r=5) arc: curvature cap sqrt(accel/kappa)=sqrt(5000*5)~158 mm/s,
-    // below the 250 mm/s feed, so the arc is curvature-bounded.
+    let arc_radius = 5.0;
+    let curvature_speed_cap = (ACCEL * arc_radius).sqrt();
+    assert!(
+        curvature_speed_cap < feed,
+        "test only exercises curvature binding when the cap {curvature_speed_cap} is below feed {feed}"
+    );
     let arc = arc_move(
         [20.0, 0.0, 0.0],
         [25.0, 5.0, 0.0],
         0.0,
-        5.0,
+        arc_radius,
         true,
         0.0,
         ctx(2, feed),
@@ -268,8 +252,6 @@ fn arc_path_is_curvature_bounded() {
 
 #[test]
 fn extruding_move_lowers_monotone_followers() {
-    // Single extruding move: followers are per-segment-local (ratio*s), so a
-    // lone segment yields a clean monotone 0 -> e_delta follower ramp.
     let e_delta = 2.0;
     let moves = vec![line(1, 60.0, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], e_delta)];
     let p = plan(&moves);

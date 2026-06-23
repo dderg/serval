@@ -68,7 +68,6 @@ class Move:
         self.axes_d = axes_d = [end_pos[i] - start_pos[i] for i in (0, 1, 2, 3)]
         self.move_d = move_d = math.sqrt(sum([d * d for d in axes_d[:3]]))
         if move_d < 0.000000001:
-            # Extrude only move
             self.end_pos = (
                 start_pos[0],
                 start_pos[1],
@@ -199,6 +198,7 @@ class Motion:
             "manual_probe",
             "tuning_tower",
             "garbage_collection",
+            "resonance_buzz",
         ):
             printer.load_object(config, module_name)
 
@@ -257,35 +257,72 @@ class Motion:
         duration_ms,
         ramp_ms,
     ):
-        # Direct MCU command (not routed through the host engine): the firmware
-        # synthesizes the per-tick sinusoid (or linear chirp) itself. Sent to
-        # every engine MCU; one that lacks the target axes simply no-ops them.
+        from .extras.resonance_buzz import buzz_axis_to_motor_mask
+
+        stepper_mask = axis_mask
         sent = False
-        for mcu_obj in self._engine_mcus():
-            try:
-                cmd = mcu_obj.lookup_command(
-                    "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
-                    " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
-                    " duration_ms=%u ramp_ms=%u"
+        if self.kin is not None:
+            for lane_idx, _axis_name, _motors in self.kin.lanes():
+                rail = self.kin.rails[lane_idx]
+                if not isinstance(rail, servo_axis.ServoRail):
+                    continue
+                rail_mask, _ = buzz_axis_to_motor_mask(rail.axis, False)
+                if not (axis_mask & rail_mask):
+                    continue
+                stepper_mask &= ~rail_mask
+                node = self.printer.lookup_object(
+                    "ethercat_node " + rail.get_node_name(), None
                 )
-            except Exception:
-                continue
-            cmd.send(
-                [
-                    axis_mask,
-                    sign_mask,
+                handle = node.get_engine_handle() if node is not None else None
+                if handle is None:
+                    raise self.printer.command_error(
+                        "RESONANCE_BUZZ: servo axis %s has no live EtherCAT "
+                        "engine handle" % rail.axis
+                    )
+                self.engine.resonance_buzz(
+                    handle,
+                    1,
+                    1 if (sign_mask & rail_mask) else 0,
                     freq_start_millihz,
                     freq_end_millihz,
                     amplitude_nm,
                     duration_ms,
                     ramp_ms,
-                ]
-            )
+                )
+                sent = True
+        if stepper_mask:
+            stepper_sent = False
+            for mcu_obj in self._engine_mcus():
+                try:
+                    cmd = mcu_obj.lookup_command(
+                        "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
+                        " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
+                        " duration_ms=%u ramp_ms=%u"
+                    )
+                except Exception:
+                    continue
+                cmd.send(
+                    [
+                        stepper_mask,
+                        sign_mask,
+                        freq_start_millihz,
+                        freq_end_millihz,
+                        amplitude_nm,
+                        duration_ms,
+                        ramp_ms,
+                    ]
+                )
+                stepper_sent = True
+            if not stepper_sent:
+                raise self.printer.command_error(
+                    "No engine MCU advertises kalico_resonance_buzz; rebuild and "
+                    "reflash MCU firmware with CONFIG_RUNTIME=y"
+                )
             sent = True
         if not sent:
             raise self.printer.command_error(
-                "No engine MCU advertises kalico_resonance_buzz; rebuild and "
-                "reflash MCU firmware with CONFIG_RUNTIME=y"
+                "RESONANCE_BUZZ: no target engine for axis_mask=0x%02x"
+                % axis_mask
             )
 
     def set_extruder(self, extruder, extrude_pos):
@@ -369,10 +406,8 @@ class Motion:
         self.dwell(delay)
 
     def cmd_M204(self, gcmd):
-        # Use S for accel
         accel = gcmd.get_float("S", None, above=0.0)
         if accel is None:
-            # Use minimum of P and T for accel
             p = gcmd.get_float("P", None, above=0.0)
             t = gcmd.get_float("T", None, above=0.0)
             if p is None or t is None:
@@ -395,8 +430,6 @@ class Motion:
         self.kin.clear_parked_dirty(dirty)
 
     def move(self, newpos, speed):
-        # The engine replaces the lookahead, but Move/kin/extruder validation
-        # (unhomed, range checks) must still run before the move is issued.
         self.resync_parked_servos()
         move = Move(self, self.commanded_pos, newpos, speed)
         if not move.move_d:
@@ -430,33 +463,23 @@ class Motion:
         self._sync_print_time()
 
     def move_curve(self, newpos, interior_control_points, submit, speed):
-        # newpos: [x, y, z, e] absolute endpoint (already coordinate-resolved).
-        # interior_control_points: list of [x, y, z] interior CPs to range-check
-        #   (P0=start and the endpoint are covered by the endpoint check below).
-        # submit(dx, dy, dz, de, feedrate): engine call carrying the curve params.
         self.resync_parked_servos()
         move = Move(self, self.commanded_pos, newpos, speed)
         if move.is_kinematic_move:
             self.kin.check_move(move)
         if move.axes_d[3]:
             self.extruder.check_move(move)
-        # Convex-hull range guard: a Bézier can bulge outside the endpoint box.
         for cp in interior_control_points:
             cp_target = [cp[0], cp[1], cp[2], self.commanded_pos[3]]
             cp_move = Move(self, self.commanded_pos, cp_target, speed)
             if cp_move.move_d and cp_move.is_kinematic_move:
                 self.kin.check_move(cp_move)
-        # Deltas come straight from the endpoint, NOT move.axes_d: for a
-        # closed-loop curve (chord ~ 0) Move zeroes axes_d, which would drop the
-        # curve's endpoint delta. The engine rejects a genuinely zero curve
-        # (arc length 0 -> ZeroDisplacement), so no early-return here.
-        dx = newpos[0] - self.commanded_pos[0]
-        dy = newpos[1] - self.commanded_pos[1]
-        dz = newpos[2] - self.commanded_pos[2]
-        de = newpos[3] - self.commanded_pos[3]
-        # Feedrate is the path-speed cap; the chord length is meaningless for a
-        # curve, so cap directly. The Rust optimizer re-derives per-axis limits.
-        feedrate = min(speed, self.max_velocity)
+        endpoint_delta = [
+            newpos[i] - self.commanded_pos[i] for i in (0, 1, 2, 3)
+        ]
+        dx, dy, dz, de = endpoint_delta
+        path_speed_cap = min(speed, self.max_velocity)
+        feedrate = path_speed_cap
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
             feedrate = min(feedrate, self.max_z_velocity)
         self._fire_active_callbacks([dx, dy, dz, de])
@@ -480,9 +503,6 @@ class Motion:
                 owners.extend(rail.get_steppers())
         if abs(de) > 1e-9:
             owners.extend(self.follower_steppers)
-        # Motion pieces stream to every queue, including servo axes that hold
-        # still — so every servo must be powered the moment any motion starts,
-        # or the ec-rt torque gate faults on pieces-while-parked.
         owners.extend(
             rail
             for rail in getattr(self.kin, "rails", ())
@@ -568,9 +588,6 @@ class Motion:
         return floor
 
     def _ground_pending_end_time_after_engine_drain(self):
-        # wait_moves() means dispatched, not executed; ground subsequent
-        # cross-MCU scheduling in the live MCU clock rather than a stale,
-        # possibly-seconds-ahead projected motion end.
         if self.mcu is None:
             return
         est = self.mcu.estimated_print_time(self.reactor.monotonic())
@@ -695,8 +712,6 @@ class Motion:
         self.max_z_accel = config.getfloat(
             "max_z_accel", self._max_accel, above=0.0, maxval=self._max_accel
         )
-        # [limit <name>] sections are still parsed so existing configs load,
-        # but the planner now reads its motion limits from [printer] above.
         self.limit_sections = []
         for sc in config.get_prefix_sections("limit "):
             name = sc.get_name().split(None, 1)[1]
@@ -707,20 +722,6 @@ class Motion:
             self.limit_sections.append((name, axes, v, a, j))
         self.min_cruise_ratio = 0.0
         self.orig_cfg = {}
-
-    def _axis_limit(self, axis, kind):
-        kind_idx = {"max_velocity": 2, "max_accel": 3, "max_jerk": 4}[kind]
-        caps = [
-            section[kind_idx]
-            for section in self.limit_sections
-            if axis in section[1] and section[kind_idx] is not None
-        ]
-        if not caps:
-            raise self.printer.config_error(
-                "no [limit] section declares %s covering axis '%s'"
-                % (kind, axis)
-            )
-        return min(caps)
 
     def _sync_print_time(self):
         if self.mcu is None:
@@ -880,6 +881,14 @@ class Motion:
             )
             return
 
+        extruder = self.printer.lookup_object("extruder", None)
+        max_extrude_only_velocity = getattr(
+            extruder, "max_extrude_only_velocity", None
+        )
+        max_extrude_only_accel = getattr(
+            extruder, "max_extrude_only_accel", None
+        )
+
         try:
             self.engine.init_planner(
                 list(self.axis_sections),
@@ -896,6 +905,8 @@ class Motion:
                     self._square_corner_velocity,
                 ),
                 arc_fit=self.arc_fit,
+                max_extrude_only_velocity=max_extrude_only_velocity,
+                max_extrude_only_accel=max_extrude_only_accel,
             )
             self._configure_axes_per_mcu(engine_mcus)
             self._planner_ready = True
@@ -905,13 +916,6 @@ class Motion:
             raise
 
     def _follower_slots(self):
-        # Unclaimed follower axes ([axis <name>] with motors, not bound to a
-        # kinematics lane) occupy the motion slots NOT owned by a lane, in
-        # declared order. The slot is the free-slot position, NOT the raw
-        # declared-section index: an [include] that declares the follower before
-        # the spatial axes must not let it overwrite a lane slot (e.g. corexy
-        # motor A on slot 0). One source of truth so the stepper binding and the
-        # MCU-topology handle map cannot disagree.
         claimed = set(self.kin.claimed_axes())
         lane_slots = {
             lane_idx for lane_idx, _axis_name, _motor_names in self.kin.lanes()
@@ -955,14 +959,15 @@ class Motion:
 
         slot_steppers = self._build_slot_steppers()
 
-        PHASE_STEPPING_BIT = 0x1  # bit 0 of the IdentifyResponse caps bitmap
+        PHASE_STEPPING_CAPABILITY_BIT = 0x1
+        STEP_MODE_MODULATED = 0
+        STEP_MODE_STEP_TIME = 1
 
         for name, mcu_obj, mcu_handle in engine_mcus:
             present_mask = 0
             invert_mask = 0
             steps_per_mm = [0.0, 0.0, 0.0, 0.0]
-            # 0=Modulated (phase stepping), 1=StepTime; overridden per slot below.
-            step_modes = [1, 1, 1, 1]
+            step_modes = [STEP_MODE_STEP_TIME] * 4
             bind_list = []
             for i in range(4):
                 on_this_mcu = []
@@ -986,26 +991,16 @@ class Motion:
                 if getattr(primary, "_invert_dir", False):
                     invert_mask |= 1 << i
                 if getattr(primary, "phase_stepping", False):
-                    step_modes[i] = 0  # Modulated
+                    step_modes[i] = STEP_MODE_MODULATED
                 for sname, s in on_this_mcu:
                     inv = 1 if getattr(s, "_invert_dir", False) else 0
                     bind_list.append((i, sname, s.get_oid(), inv))
-            # One (bus_id, cs_pin_id, slot_idx) per physical phase-stepped motor;
-            # AWD partners share slot_idx but get their own entry so each
-            # TMC5160's XDIRECT register is written. Empty = no phase stepping.
             phase_configs = []
             any_phase_stepping = False
-            # On corexy kinematics the A and B motors (slots 0 and 1) move
-            # together for any X or Y motion, so a homing trip on either
-            # axis must switch ALL of them out of phase mode — one merged
-            # handover group. Cartesian axes move independently: one group
-            # per slot.
             xy_coupled = coupled
             phase_groups = {}
             for i, slot in enumerate(slot_steppers):
-                # step_modes[i] != 0 is the load-bearing guard (set to 0 only in
-                # the on_this_mcu branch, so cross-MCU slots stay != 0).
-                if step_modes[i] != 0 or not slot:
+                if step_modes[i] != STEP_MODE_MODULATED or not slot:
                     continue
                 group_key = "xy" if (xy_coupled and i in (0, 1)) else i
                 slot_tmcs = phase_groups.setdefault(group_key, [])
@@ -1035,15 +1030,12 @@ class Motion:
             for group in phase_groups.values():
                 for tmc in group:
                     tmc.set_phase_group(group)
-            # Soft cap mirrors firmware-side MAX_STEPPER_OIDS=16 (see
-            # rust/runtime/src/state.rs). Reject early with an
-            # operator-friendly message rather than letting the engine
-            # call return PyRuntimeError.
-            if len(phase_configs) > 16:
+            FIRMWARE_MAX_PHASE_STEPPED_MOTORS = 16
+            if len(phase_configs) > FIRMWARE_MAX_PHASE_STEPPED_MOTORS:
                 raise self.printer.config_error(
                     "phase_stepping enabled on %d motors but the firmware "
-                    "supports up to 16 phase-stepped motors total per MCU."
-                    % len(phase_configs)
+                    "supports up to %d phase-stepped motors total per MCU."
+                    % (len(phase_configs), FIRMWARE_MAX_PHASE_STEPPED_MOTORS)
                 )
             awd_mask = awd_default & present_mask
             if present_mask == 0:
@@ -1053,14 +1045,11 @@ class Motion:
                     name,
                 )
                 continue
-            # Capability check: any stepper requesting phase_stepping=True on
-            # an MCU that does not advertise PHASE_STEPPING_CAPABLE is a
-            # config error. The check happens here (connect time) because MCU
-            # capabilities are only known after attach_serial / identify, which
-            # runs after config-parse time.
             mcu_caps = self.engine.get_mcu_capabilities(mcu_handle)
             for i in range(4):
-                if step_modes[i] == 0 and not (mcu_caps & PHASE_STEPPING_BIT):
+                if step_modes[i] == STEP_MODE_MODULATED and not (
+                    mcu_caps & PHASE_STEPPING_CAPABILITY_BIT
+                ):
                     slot_name = (
                         slot_steppers[i][0][0]
                         if slot_steppers[i]
@@ -1077,11 +1066,6 @@ class Motion:
                         "large runtime profile for the chip family) and "
                         "reflash." % (slot_name, name, mcu_caps)
                     )
-            # One kalico_configure_axis per axis carries a 4-byte-per-stepper
-            # blob { stepper_oid: u8, dir_invert: u8, tmc_cs_oid: u8, flags: u8 }.
-            # dir_invert (from `dir_pin: !PIN`) is forwarded because engine mode
-            # bypasses stepcompress's step-count sign flip; without it motors run
-            # reversed. MCUs lacking the command skip silently.
             try:
                 configure_axis_cmd = mcu_obj.lookup_command(
                     "kalico_configure_axis axis_idx=%c mode=%c"
@@ -1097,10 +1081,6 @@ class Motion:
                 )
                 continue
 
-            # Reset before (re)configuring: the engine's ring allocator never
-            # frees and configure_axis re-runs every klippy:connect, so a
-            # reconnect without an MCU reboot would overflow the pool. Idempotent
-            # on a fresh MCU; same queue, so it runs before configure_axis.
             try:
                 reset_cmd = mcu_obj.lookup_command("runtime_reset")
             except Exception:
@@ -1113,9 +1093,6 @@ class Motion:
                 )
 
             if any_phase_stepping:
-                # Two-stage registration: shared SPI cfg once per bus_id, then a
-                # CS GPIO per motor (multiple drivers on one bus each need their
-                # own CS). motor_idx MUST match the phase_configs list position.
                 seen_buses = set()
                 for bus_id, _cs_pin_id, _slot_idx in phase_configs:
                     if bus_id == 0xFF:
@@ -1156,8 +1133,8 @@ class Motion:
             for slot_idx, sname, oid, inv in bind_list:
                 axis_bindings[slot_idx].append((sname, oid, inv))
 
-            MODE_PULSE = 0  # wire encoding: 0=Pulse, 1=Phase
-            MODE_PHASE = 1  # (host step_modes list: 0=Modulated, 1=StepTime)
+            MODE_PULSE = 0
+            MODE_PHASE = 1
             TMC_CS_OID_NONE = 0xFF
             FLAGS_DEFAULT = 0
 
@@ -1170,12 +1147,11 @@ class Motion:
                 if spm <= 0:
                     continue
                 microstep_distance = 1.0 / spm
-                # f32 packed as u32 bits for the wire.
                 microstep_bits = struct.unpack(
                     "<I", struct.pack("<f", microstep_distance)
                 )[0]
-                # extrusion_per_xy_mm unused by firmware; sent 0 for ABI compat.
-                extrusion_bits = 0
+                UNUSED_EXTRUSION_PER_XY_BITS = 0
+                extrusion_bits = UNUSED_EXTRUSION_PER_XY_BITS
                 blob = bytearray()
                 for motor_idx, (sname, oid, inv) in enumerate(bindings):
                     self._motor_bindings[sname] = (
@@ -1186,7 +1162,7 @@ class Motion:
                     blob.append(oid)
                     blob.append(inv & 0x01)
                     tmc_oid = TMC_CS_OID_NONE
-                    if step_modes[axis_idx] == 0:
+                    if step_modes[axis_idx] == STEP_MODE_MODULATED:
                         tmc_name = "tmc5160 " + sname
                         try:
                             tmc = self.printer.lookup_object(tmc_name)
@@ -1199,7 +1175,9 @@ class Motion:
                     mcu_handle, axis_idx
                 )
                 axis_mode = (
-                    MODE_PHASE if step_modes[axis_idx] == 0 else MODE_PULSE
+                    MODE_PHASE
+                    if step_modes[axis_idx] == STEP_MODE_MODULATED
+                    else MODE_PULSE
                 )
                 configure_axis_cmd.send(
                     [
@@ -1231,8 +1209,6 @@ class Motion:
                 any_phase_stepping,
                 len(phase_configs),
             )
-            # phase_stepping_enable_spi is sent later from
-            # TMC5160._xdirect_preload, after TMC register init.
 
     def cmd_DIAG_DUMP(self, gcmd):
         sent = []

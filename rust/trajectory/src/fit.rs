@@ -3,15 +3,15 @@ use nurbs::ScalarNurbs;
 
 const HERMITE_REFIT_MAX_SUBDIVISIONS: usize = 8;
 const MIN_HERMITE_PIECE_DURATION: f64 = 1e-12;
+const PHASE1_HERMITE_DEGREE: u8 = 4;
+const PHASE2_BOTH_ENDS_PINNED_HERMITE_DEGREE: u8 = 5;
+const LAST_PIECE_TIME_MATCH_EPSILON: f64 = 1e-12;
 
 #[derive(Debug, Clone)]
 pub struct FittedSegment {
     pub axes: [ScalarNurbs<f64>; 3],
     pub t_start: f64,
     pub t_end: f64,
-    /// Planned path progress `s(t)` for a follower-only (virtual-path)
-    /// segment. The spatial axes are zero-displacement constants; followers
-    /// pay out `start + ratio·s(t)` from this track instead of the odometer.
     pub virtual_s_of_t: Option<ScalarNurbs<f64>>,
 }
 
@@ -43,18 +43,14 @@ pub fn fit_and_split(
             }
         })?;
 
-    // Normalize all axes to a uniform degree (the max across all pieces on any
-    // axis).  Phase-2 re-fitting produces degree-5 pieces for the last output
-    // piece while Phase-1 produces degree-4 for the others; `bezier_pieces_to_nurbs`
-    // requires a uniform degree throughout.
-    let max_degree = fitted
+    let uniform_degree_required_by_bezier_pieces_to_nurbs = fitted
         .iter()
         .flat_map(|axis_pieces| axis_pieces.iter().map(|p| p.coeffs.len().saturating_sub(1)))
         .max()
-        .unwrap_or(4);
+        .unwrap_or(usize::from(PHASE1_HERMITE_DEGREE));
     for axis_pieces in fitted.iter_mut() {
         for piece in axis_pieces.iter_mut() {
-            while piece.coeffs.len() <= max_degree {
+            while piece.coeffs.len() <= uniform_degree_required_by_bezier_pieces_to_nurbs {
                 piece.coeffs.push(0.0);
             }
         }
@@ -123,14 +119,18 @@ fn fit_hermite_c2_adaptive(
 ) -> Result<[Vec<BezierPiece<f64>>; 3], nurbs::algebra::FitError> {
     use nurbs::algebra::{fit_hermite_c1_clamped, FitError};
 
-    // Phase 1: run the original start-pin-only fit (degree-4) to get a
-    // well-behaved velocity profile.  This is unchanged from the prior
-    // single-pin implementation.
     let mut refined = composed.to_vec();
     let mut fitted: [Vec<BezierPiece<f64>>; 3] = std::array::from_fn(|_| Vec::new());
 
     for depth in 0..=HERMITE_REFIT_MAX_SUBDIVISIONS {
-        match fit_hermite_c1_clamped::<3>(&refined, tolerance, 4, Some(d2_start), None) {
+        let phase1_start_pin_only = None;
+        match fit_hermite_c1_clamped::<3>(
+            &refined,
+            tolerance,
+            PHASE1_HERMITE_DEGREE,
+            Some(d2_start),
+            phase1_start_pin_only,
+        ) {
             Ok(f) => {
                 fitted = f;
                 break;
@@ -145,9 +145,6 @@ fn fit_hermite_c2_adaptive(
         }
     }
 
-    // Phase 2: re-fit the last output piece with the end-accel pin added.
-    // We operate on the same `refined` array used by Phase 1 and locate the
-    // composed pieces that were merged into the last output piece.
     refit_last_piece_with_end_pin(&mut fitted, &refined, tolerance, d2_end)?;
 
     Ok(fitted)
@@ -161,18 +158,15 @@ fn refit_last_piece_with_end_pin(
 ) -> Result<(), nurbs::algebra::FitError> {
     use nurbs::algebra::{fit_hermite_c1_clamped, FitError};
 
-    // Find the time range of the last Phase-1 output piece (axis 0 is
-    // representative; all axes have pieces over the same time domain).
-    let last_out_start = match fitted[0].last() {
+    let representative_axis = 0;
+    let last_out_start = match fitted[representative_axis].last() {
         Some(p) => p.u_start,
         None => return Ok(()),
     };
 
-    // Collect the refined composed pieces that were folded into the last output
-    // piece: those whose time range falls within [last_out_start, global_end].
     let last_refined: Vec<[BezierPiece<f64>; 3]> = refined
         .iter()
-        .filter(|ps| ps[0].u_start >= last_out_start - 1e-12)
+        .filter(|ps| ps[0].u_start >= last_out_start - LAST_PIECE_TIME_MATCH_EPSILON)
         .cloned()
         .collect();
 
@@ -180,9 +174,6 @@ fn refit_last_piece_with_end_pin(
         return Ok(());
     }
 
-    // The start accel pin for Phase 2 is the composed accel at last_out_start
-    // (read from the first last-range composed piece) so that the new last
-    // piece is C2 with the preceding Phase-1 piece on its left side as well.
     let last_d2_start: [f64; 3] = std::array::from_fn(|axis| {
         let piece = &last_refined[0][axis];
         piece
@@ -191,11 +182,6 @@ fn refit_last_piece_with_end_pin(
             .evaluate(piece.u_start)
     });
 
-    // Re-fit the last piece range with BOTH accel pins at degree-5. degree-5
-    // is required because the both-ends pin (start + end accel) imposes 6
-    // constraints that exactly determine a degree-5 polynomial; a single
-    // both-pinned piece is numerically well-behaved for the short time span
-    // covered by the last output piece.
     let mut refined_last = last_refined;
     let mut last_fitted: Option<[Vec<BezierPiece<f64>>; 3]> = None;
 
@@ -203,7 +189,7 @@ fn refit_last_piece_with_end_pin(
         match fit_hermite_c1_clamped::<3>(
             &refined_last,
             tolerance,
-            5,
+            PHASE2_BOTH_ENDS_PINNED_HERMITE_DEGREE,
             Some(last_d2_start),
             Some(d2_end),
         ) {
@@ -223,9 +209,8 @@ fn refit_last_piece_with_end_pin(
 
     if let Some(new_last) = last_fitted {
         for axis in 0..3 {
-            // Remove the Phase-1 last piece (degree-4, end-free).
-            fitted[axis].pop();
-            // Append the re-fitted last piece(s) (degree-5, end pinned).
+            let phase1_last_piece_end_free = fitted[axis].pop();
+            debug_assert!(phase1_last_piece_end_free.is_some());
             fitted[axis].extend(new_last[axis].iter().cloned());
         }
     }

@@ -1,7 +1,3 @@
-//! `retired` is the MCU's raw cumulative counter (monotonic per boot); `sent`
-//! is per-stream. `reset()` snapshots `retired` into `baseline` so drained
-//! comparisons (`retired - baseline == sent`) survive multi-stream sessions.
-
 use std::collections::HashMap;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -52,9 +48,10 @@ impl DrainSync {
     pub fn reset(&self) {
         let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
         c.sent.clear();
-        let snapshot: Vec<(AxisKey, u32)> = c.retired.iter().map(|(&k, &v)| (k, v)).collect();
-        for (k, v) in snapshot {
-            c.baseline.insert(k, v);
+        let retired_snapshot: Vec<(AxisKey, u32)> =
+            c.retired.iter().map(|(&k, &v)| (k, v)).collect();
+        for (key, retired_at_reset) in retired_snapshot {
+            c.baseline.insert(key, retired_at_reset);
         }
         drop(c);
         self.cv.notify_all();

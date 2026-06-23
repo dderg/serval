@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use super::*;
 use crate::classify::classify_and_build;
 use std::sync::atomic::AtomicUsize;
@@ -626,11 +628,10 @@ fn move_after_idle_resumes_with_dispatch_lead() {
         "move 2 produced no dispatched segments"
     );
 
-    // flush() returns at wall time sync + m1_end + LEAD, then we idle a bit
-    // more; the resume must anchor at elapsed-since-sync at receipt PLUS a
-    // full dispatch lead, or the replan solve eats the cushion and seg0
-    // reaches the MCU already in the past (-308 PieceStartInPast on jog).
-    let min_expected = m1_max_t_end + LEAD + idle_extra + LEAD - 0.1;
+    let flush_anchor = m1_max_t_end + LEAD;
+    let resume_dispatch_lead = LEAD;
+    let solve_slack = 0.1;
+    let min_expected = flush_anchor + idle_extra + resume_dispatch_lead - solve_slack;
     assert!(
         m2_min_t_start >= min_expected,
         "move after idle anchored too early: started {m2_min_t_start:.3}, \

@@ -24,12 +24,8 @@ pub struct ConstraintBundle {
     pub h_intervals: Vec<f64>,
     pub j_path_at: Vec<f64>,
 
-    /// Precomputed column-sparse form of the base constraint matrix.
-    /// Sign convention: `A_clarabel = -A_k`, so `base_csc_nzval[col][k] = -a_rows[row][col]`.
-    /// Length of both outer vecs equals `n_vars`.
     pub base_csc_rowval: Vec<Vec<usize>>,
     pub base_csc_nzval: Vec<Vec<f64>>,
-    /// Number of base (non-cut, non-TR) constraint rows; equals `a_rows.len()`.
     pub base_n_rows: usize,
 }
 
@@ -60,14 +56,6 @@ pub const KAPPA_FLOOR: f64 = 1e-12;
 
 pub const B_MAX_CENT_CAP: f64 = 1e8;
 
-/// Ceiling on the *scaled* `b = v²` cap (`b_cap`) used to bound the centripetal
-/// and velocity constraint rows. `B_MAX_CENT_CAP` is a fixed mm-unit stand-in
-/// for the unbounded centripetal cap on straight segments; dividing it by σ²
-/// inflates it to 1e10+ scaled units on slow machines (tiny σ), and that huge
-/// constraint RHS wrecks Clarabel's equilibration into false infeasibility. The
-/// solver scale normalizes the peak reachable b to ≈`V_TARGET_UNITS_PER_S`², so
-/// clamping `b_cap` here bounds the cap-row dynamic range to a constant
-/// independent of machine speed. A no-op at identity and normal-machine scales.
 pub(crate) const B_CAP_SCALED_CEILING: f64 = 1e8;
 
 pub(crate) const COMP_FLOOR: f64 = 1e-12;
