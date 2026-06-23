@@ -96,6 +96,7 @@ def toolhead_fixture():
     toolhead.Coord = gcode.Coord
     toolhead.commanded_pos = [0.0, 0.0, 0.0, 0.0]
     toolhead.print_time = 0.0
+    toolhead._mcu_pending_end_time = 0.0
     toolhead.print_stall = 0
     toolhead.extruder = extruder_mod.DummyExtruder(printer)
     toolhead._max_velocity = 300.0
@@ -195,3 +196,20 @@ def test_submit_nudge_builds_single_bit_mask_and_forwards():
     assert call["delta_mm"] == pytest.approx(0.3)
     assert dur == pytest.approx(0.6)
     assert th.engine.waits == 0 and th.engine.dwells == []
+
+
+def test_submit_nudge_reserves_pending_end_time():
+    # The nudge must advance _mcu_pending_end_time by its own duration so a
+    # following wait_moves() blocks until the nudge executes — without it the
+    # probe/adjust path proceeds before the motors move. FakeMcu projects
+    # estimated_print_time(100.0) = 101.0; a 0.6s nudge lands the frontier at
+    # 101.6.
+    th = _make_correction_toolhead(0.6)
+    th.submit_nudge(7, 1, 2, 0.3, 80.0, 5000.0)
+    assert th._mcu_pending_end_time == pytest.approx(101.6)
+
+
+def test_submit_nudge_zero_duration_leaves_frontier():
+    th = _make_correction_toolhead(0.0)
+    th.submit_nudge(7, 1, 2, 0.0, 80.0, 5000.0)
+    assert th._mcu_pending_end_time == pytest.approx(0.0)
