@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -9,10 +7,101 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use trajectory::{AxisChainSet, ShapedSegment};
 
-use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
+use crate::pump::AxisKey;
 use crate::stream::{StreamConfig, StreamState};
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
+
+#[cfg(test)]
+pub(crate) fn lead_secs() -> f64 {
+    LEAD
+}
+
+pub struct HomeDripParams {
+    pub home_pos: [f64; 4],
+    pub start: [f64; 3],
+    pub axis: u8,
+    pub direction: f64,
+    pub speed_mm_s: f64,
+    pub max_travel_mm: f64,
+    pub cohort: u64,
+    pub participants: Vec<AxisKey>,
+    pub notify: crossbeam_channel::Sender<Result<(), String>>,
+}
+
+pub struct NudgeParams {
+    pub mcu_id: u32,
+    pub axis: u8,
+    pub motor_mask: u8,
+    pub delta_mm: f64,
+    pub speed: f64,
+    pub accel: f64,
+    pub notify: crossbeam_channel::Sender<Result<(), String>>,
+}
+
+impl std::fmt::Debug for NudgeParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NudgeParams")
+            .field("mcu_id", &self.mcu_id)
+            .field("axis", &self.axis)
+            .field("motor_mask", &self.motor_mask)
+            .field("delta_mm", &self.delta_mm)
+            .field("speed", &self.speed)
+            .field("accel", &self.accel)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for HomeDripParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HomeDripParams")
+            .field("home_pos", &self.home_pos)
+            .field("start", &self.start)
+            .field("axis", &self.axis)
+            .field("direction", &self.direction)
+            .field("speed_mm_s", &self.speed_mm_s)
+            .field("max_travel_mm", &self.max_travel_mm)
+            .field("cohort", &self.cohort)
+            .field("participants", &self.participants)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DispatchError {
+    #[error(
+        "motion-engine: curve for mcu {mcu_id} exceeds caps \
+         (pieces {pieces} > {max_pieces}); \
+         logical-move splitting not yet implemented (Task 13 follow-up)."
+    )]
+    CapsExceeded {
+        mcu_id: u32,
+        pieces: usize,
+        max_pieces: usize,
+    },
+    #[error("compute_ack_clock: {0}")]
+    ComputeAckClock(String),
+    #[error(
+        "compute_ack_clock returned 0 after 5s — \
+         clock-sync didn't establish for mcu {mcu_id} (mcu_h={mcu_handle:?})"
+    )]
+    ClockSyncTimeout {
+        mcu_id: u32,
+        mcu_handle: host_rt::passthrough_queue::McuHandle,
+    },
+    #[error("MCU {0}: connection dropped during dispatch")]
+    ConnectionDropped(u32),
+    #[error("piece pump thread is gone; cannot dispatch")]
+    PumpGone,
+    #[error(
+        "no nominal clock frequency registered for mcu {0} \
+         — set_nominal_clock_freq was not called"
+    )]
+    MissingNominalFreq(u32),
+    #[error("nudge target mcu_id={mcu_id} axis={axis} not present in mcu_configs")]
+    NudgeTargetMissing { mcu_id: u32, axis: u8 },
+}
+
 // Producer-stall watermark budget. When the input goes quiet, materialize the
 // brake-to-rest tail this long before the committed frontier would run dry. The
 // total watermark is sized per the last barrier velocity at runtime —

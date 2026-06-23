@@ -392,11 +392,7 @@ pub struct PlannerConfig {
     pub post_processors: PostProcessorSet,
     pub max_extrude_only_velocity: Option<f64>,
     pub max_extrude_only_accel: Option<f64>,
-    pub window_capacity: usize,
-    pub beta_max_iters: u8,
-    pub beta_convergence_ratio: f64,
     pub fit_tolerance_mm: f64,
-    pub worker_threads: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -468,49 +464,11 @@ impl CartesianLimits {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum LimitConfigError {
-    #[error("[limit {section}]: declare at least one of max_velocity, max_accel, max_jerk")]
-    EmptySection { section: String },
-    #[error("[limit {section}]: mixing spatial and follower axes in one set is not yet supported")]
-    MixedSpatialFollower { section: String },
-    #[error(
-        "follower axis '{axis}': no [limit] section declares max_velocity and max_accel covering it"
-    )]
-    NoFollowerCoverage { axis: String },
-    #[error("invalid limit configuration: {0}")]
-    Invalid(#[from] temporal::LimitsError),
-}
-
 pub const JERK_DEFAULT_ACCEL_MULTIPLE: f64 = 2.0;
-
-impl LimitSection {
-    fn to_set(&self) -> Result<temporal::LimitSet, LimitConfigError> {
-        if self.max_velocity.is_none() && self.max_accel.is_none() && self.max_jerk.is_none() {
-            return Err(LimitConfigError::EmptySection {
-                section: self.name.clone(),
-            });
-        }
-        let j_max = self
-            .max_jerk
-            .or(self.max_accel.map(|a| a * JERK_DEFAULT_ACCEL_MULTIPLE))
-            .unwrap_or(f64::INFINITY);
-        Ok(temporal::LimitSet {
-            axes: temporal::AxisSet::from_indices(&self.axes),
-            v_max: self.max_velocity.unwrap_or(f64::INFINITY),
-            a_max: self.max_accel.unwrap_or(f64::INFINITY),
-            j_max,
-        })
-    }
-}
 
 pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
 
 impl PlannerConfig {
-    pub fn limit_set_names(&self) -> Vec<String> {
-        self.limit_sections.iter().map(|s| s.name.clone()).collect()
-    }
-
     #[must_use]
     pub fn square_corner_velocity(&self) -> f64 {
         self.runtime_square_corner_velocity
@@ -582,70 +540,6 @@ impl PlannerConfig {
             ..default
         }
     }
-
-    pub fn to_temporal_limits(&self) -> Result<temporal::Limits, LimitConfigError> {
-        let mut sets = Vec::with_capacity(self.limit_sections.len() + 1);
-        let n_axes = self.axis_registry.n_axes();
-        let mut follower_velocity_covered = vec![false; n_axes];
-        let mut follower_accel_covered = vec![false; n_axes];
-
-        for section in &self.limit_sections {
-            let all_spatial = section
-                .axes
-                .iter()
-                .all(|&i| self.axis_registry.is_spatial(i));
-            let all_follower = section
-                .axes
-                .iter()
-                .all(|&i| !self.axis_registry.is_spatial(i));
-            if all_spatial {
-                sets.push(section.to_set()?);
-            } else if all_follower {
-                sets.push(section.to_set()?);
-                for &i in &section.axes {
-                    if section.max_velocity.is_some_and(f64::is_finite) {
-                        follower_velocity_covered[i] = true;
-                    }
-                    if section.max_accel.is_some_and(f64::is_finite) {
-                        follower_accel_covered[i] = true;
-                    }
-                }
-            } else {
-                return Err(LimitConfigError::MixedSpatialFollower {
-                    section: section.name.clone(),
-                });
-            }
-        }
-
-        for i in 0..n_axes {
-            if self.axis_registry.is_spatial(i) {
-                continue;
-            }
-            if !follower_velocity_covered[i] || !follower_accel_covered[i] {
-                return Err(LimitConfigError::NoFollowerCoverage {
-                    axis: self.axis_registry.axis_name(i).to_string(),
-                });
-            }
-        }
-
-        let limits = temporal::Limits::try_new(&sets, n_axes.max(temporal::N_SPATIAL))?;
-        if self.runtime_caps.velocity.is_some() || self.runtime_caps.accel.is_some() {
-            let a = self.runtime_caps.accel.unwrap_or(f64::INFINITY);
-            let runtime_set = temporal::LimitSet {
-                axes: temporal::AxisSet::spatial(),
-                v_max: self.runtime_caps.velocity.unwrap_or(f64::INFINITY),
-                a_max: a,
-                j_max: if a.is_finite() {
-                    a * JERK_DEFAULT_ACCEL_MULTIPLE
-                } else {
-                    f64::INFINITY
-                },
-            };
-            Ok(limits.with_extra_sets_of_kind(&[runtime_set], temporal::LimitKind::RuntimeCap))
-        } else {
-            Ok(limits)
-        }
-    }
 }
 
 impl Default for PlannerConfig {
@@ -678,11 +572,7 @@ impl Default for PlannerConfig {
             post_processors,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
-            window_capacity: 32,
-            beta_max_iters: 10,
-            beta_convergence_ratio: 0.05,
             fit_tolerance_mm: 0.005,
-            worker_threads: 3,
         }
     }
 }

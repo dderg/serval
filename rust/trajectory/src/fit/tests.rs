@@ -44,7 +44,7 @@ fn fit_and_split_linear_pieces() {
 #[test]
 fn fit_and_split_empty_returns_error() {
     let result = fit_and_split(&[], 0.005, None);
-    assert!(matches!(result, Err(crate::ShapeError::EmptySegments)));
+    assert!(matches!(result, Err(FitError::EmptySegments)));
 }
 
 #[test]

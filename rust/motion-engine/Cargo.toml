@@ -18,7 +18,6 @@ pyo3 = { version = "0.29", features = ["abi3-py39"] }
 host-rt = { path = "../host-rt", features = ["python-engine"] }
 mcu-protocol = { path = "../mcu-protocol" }
 trajectory = { path = "../trajectory" }
-temporal = { path = "../temporal" }
 geometry = { path = "../geometry" }
 gcode = { path = "../gcode" }
 nurbs = { path = "../nurbs", features = ["host"] }
