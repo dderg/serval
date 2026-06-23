@@ -63,6 +63,7 @@ impl PieceSink for RecordingSink {
         _pieces: &[PieceEntry],
         start_slot: u16,
         new_head: u32,
+        _room: u32,
     ) -> Result<i32, SendError> {
         self.calls.lock().unwrap().push((start_slot, new_head));
         Ok(mcu_protocol::result_codes::OK)
@@ -255,6 +256,7 @@ impl PieceSink for NullSink {
         _pieces: &[PieceEntry],
         _start_slot: u16,
         _new_head: u32,
+        _room: u32,
     ) -> Result<i32, SendError> {
         Ok(mcu_protocol::result_codes::OK)
     }

@@ -15,6 +15,7 @@ impl PieceSink for RecordingSink {
         pieces: &[PieceEntry],
         _start_slot: u16,
         _new_head: u32,
+        _room: u32,
     ) -> Result<i32, SendError> {
         self.0.lock().unwrap().push((key, pieces.len()));
         Ok(0)

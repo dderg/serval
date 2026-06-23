@@ -295,6 +295,7 @@ pub trait PieceSink: Send {
         pieces: &[PieceEntry],
         start_slot: u16,
         new_head: u32,
+        room: u32,
     ) -> Result<i32, SendError>;
 }
 
@@ -709,7 +710,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                     }
                     for mut f in frames {
                         let n = f.pieces.len() as u32;
-                        let new_head = {
+                        let (new_head, room) = {
                             let q = queues.get(&f.key).expect("planned key exists");
                             debug_assert!(
                                 q.ring_depth <= u32::from(u16::MAX),
@@ -717,9 +718,9 @@ pub fn run_pump<S, F, C, A, O, D>(
                                 q.ring_depth
                             );
                             f.start_slot = q.physical_write_cursor as u16;
-                            q.pushed.wrapping_add(n)
+                            (q.pushed.wrapping_add(n), q.room())
                         };
-                        match sink.send_frame(f.key, &f.pieces, f.start_slot, new_head) {
+                        match sink.send_frame(f.key, &f.pieces, f.start_slot, new_head, room) {
                             Ok(_) => {
                                 let q = queues.get_mut(&f.key).expect("planned key exists");
                                 for _ in 0..f.pieces.len() {
@@ -894,12 +895,14 @@ impl PieceSink for WireSink {
         pieces: &[PieceEntry],
         start_slot: u16,
         new_head: u32,
+        room: u32,
     ) -> Result<i32, SendError> {
         debug_assert!(
             pieces.len() <= 255,
             "PushPieces frame exceeds u8 piece_count; schedule() must cap at MAX_PER_FRAME"
         );
 
+        let piece_count = pieces.len();
         let host_front_start_time: u64 = pieces.first().map(|p| p.start_time).unwrap_or(0);
 
         let send_started_at = Instant::now();
@@ -1005,6 +1008,8 @@ impl PieceSink for WireSink {
                         schedule_advance_us = %schedule_advance_us,
                         mcu_clock_advance_us = %mcu_clock_advance_us,
                         delta_arrival_lead_us = %delta_arrival_lead_us,
+                        piece_count,
+                        room,
                         alert,
                         "[transit-diag] alert"
                     );
@@ -1025,6 +1030,8 @@ impl PieceSink for WireSink {
                         schedule_advance_us = %schedule_advance_us,
                         mcu_clock_advance_us = %mcu_clock_advance_us,
                         delta_arrival_lead_us = %delta_arrival_lead_us,
+                        piece_count,
+                        room,
                         "[transit-diag]"
                     );
                 }

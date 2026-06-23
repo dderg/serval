@@ -40,6 +40,7 @@ fn wire_sink_missing_transport_is_hard_error() {
         &[p],
         0,
         1,
+        8,
     );
     assert!(
         result.is_err(),
@@ -82,6 +83,7 @@ impl PieceSink for PerMcuCountSink {
         _pieces: &[PieceEntry],
         _start_slot: u16,
         _new_head: u32,
+        _room: u32,
     ) -> Result<i32, SendError> {
         *self.calls.lock().unwrap().entry(key.mcu_id).or_insert(0) += 1;
         Ok(0)
