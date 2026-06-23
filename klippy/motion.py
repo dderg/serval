@@ -545,15 +545,18 @@ class Motion:
         self._check_pause()
 
     def wait_moves(self):
-        self._drain_to_mcu_execution()
+        self._wait_mcu_drained()
 
     def wait_moves_and_mcu(self):
+        self._wait_mcu_drained()
+
+    def _wait_mcu_drained(self):
         deadline = self.reactor.monotonic() + DRAIN_TIMEOUT
         while not self.engine.motion_drain_poll():
             now = self.reactor.monotonic()
             if now >= deadline:
                 raise self.printer.command_error(
-                    "wait_moves_and_mcu: motion drain timed out after %.0fs"
+                    "wait_moves: motion drain timed out after %.0fs"
                     % (DRAIN_TIMEOUT,)
                 )
             self.reactor.pause(now + 0.010)
