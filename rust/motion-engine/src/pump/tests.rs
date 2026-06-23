@@ -630,3 +630,14 @@ fn pump_backlog_drains_to_zero_when_pushed() {
     tx.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
+
+// Regression guard for the thin-buffer starvation (PieceStartInPast): klippy
+// fills its buffer to `motion_lead_secs()` = HOST_FEED_LEAD_SECS, which must
+// reach the pump's ship horizon (so the rings actually fill) and stay deeper
+// than the anchor's start offset. The original bug fed only the anchor offset
+// (0.25s), leaving the rings near-empty.
+#[test]
+fn host_feed_lead_reaches_pump_horizon_and_covers_anchor_offset() {
+    assert_eq!(HOST_FEED_LEAD_SECS, MAX_LEAD_SECS);
+    assert!(HOST_FEED_LEAD_SECS > crate::anchor::DEFAULT_LEAD_SECS);
+}
