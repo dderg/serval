@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use _motion_engine::pump::{
-    AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpMsg, SendError, run_pump,
+    AxisFrame, AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpMsg, SendError, run_pump,
 };
 use runtime::piece_ring::PieceEntry;
 
@@ -19,6 +19,29 @@ impl PieceSink for RecordingSink {
     ) -> Result<i32, SendError> {
         self.0.lock().unwrap().push((key, pieces.len()));
         Ok(0)
+    }
+}
+
+/// Records each bundled MCU transaction as `(mcu_id, axes-in-the-bundle)` so a
+/// test can assert that same-MCU axes go out together rather than one
+/// round-trip per axis.
+struct BundleSink(Arc<Mutex<Vec<(u32, Vec<u8>)>>>);
+impl PieceSink for BundleSink {
+    fn send_frame(
+        &self,
+        _key: AxisKey,
+        _pieces: &[PieceEntry],
+        _start_slot: u16,
+        _new_head: u32,
+        _room: u32,
+    ) -> Result<i32, SendError> {
+        unreachable!("BundleSink delivers via send_mcu_frames, not per-axis send_frame")
+    }
+
+    fn send_mcu_frames(&self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
+        let axes = frames.iter().map(|f| f.axis).collect();
+        self.0.lock().unwrap().push((mcu_id, axes));
+        Ok(())
     }
 }
 
@@ -201,6 +224,57 @@ fn fresh_stream_resets_junction_position_baseline() {
     std::thread::sleep(std::time::Duration::from_millis(50));
     let sent_pieces: usize = rec.lock().unwrap().iter().map(|(_, n)| n).sum();
     assert_eq!(sent_pieces, 2);
+
+    tx.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn bundles_same_mcu_axes_into_one_transaction() {
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let (tx, rx) = mpsc::channel();
+    let depth = |_k: AxisKey| 8u32;
+    let sink = BundleSink(rec.clone());
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            rx,
+            sink,
+            depth,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        )
+    });
+
+    // Three axes on the same MCU, each with a piece eligible to ship now
+    // (mcu_clock_of returns None => no horizon gate).
+    for axis in 0..3u8 {
+        tx.send(PumpMsg::Enqueue(EnqueueMsg {
+            key: AxisKey { mcu_id: 1, axis },
+            pieces: vec![p(0)],
+            fresh_stream: axis == 0,
+            lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        }))
+        .unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        calls.len(),
+        1,
+        "all three same-MCU axes must ship in one bundled transaction, not one per axis; got {calls:?}"
+    );
+    let (mcu, mut axes) = calls.into_iter().next().unwrap();
+    axes.sort_unstable();
+    assert_eq!(mcu, 1);
+    assert_eq!(
+        axes,
+        vec![0, 1, 2],
+        "the bundle must carry every axis of the MCU"
+    );
 
     tx.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();

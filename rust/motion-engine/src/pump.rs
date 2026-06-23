@@ -78,6 +78,17 @@ pub struct FramePlan {
     pub start_slot: u16,
 }
 
+/// One axis' pieces within a single-MCU bundle, carrying the ring bookkeeping
+/// the transport needs. `schedule()` only ever groups axes of one MCU into a
+/// `Send`, so a slice of these is exactly the work for one MCU transaction.
+pub struct AxisFrame {
+    pub axis: u8,
+    pub pieces: Vec<PieceEntry>,
+    pub start_slot: u16,
+    pub new_head: u32,
+    pub room: u32,
+}
+
 #[derive(Debug)]
 pub enum Schedule {
     Send(Vec<FramePlan>),
@@ -297,6 +308,30 @@ pub trait PieceSink: Send {
         new_head: u32,
         room: u32,
     ) -> Result<i32, SendError>;
+
+    /// Deliver every axis frame destined for `mcu_id` as one bundled
+    /// transaction. A whole bundle either lands or it doesn't — the caller
+    /// commits the ring bookkeeping for all axes only on `Ok`, so a failed
+    /// bundle re-sends byte-identical frames to the same ring slots.
+    ///
+    /// The default fans out to per-axis `send_frame`; a transport that can
+    /// pack multiple axes into one round-trip overrides this to collapse the
+    /// per-frame overhead that dominates dense-stream delivery.
+    fn send_mcu_frames(&self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
+        for f in frames {
+            self.send_frame(
+                AxisKey {
+                    mcu_id,
+                    axis: f.axis,
+                },
+                &f.pieces,
+                f.start_slot,
+                f.new_head,
+                f.room,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Compute the tick-domain and host-domain gaps at a batch boundary.
@@ -708,48 +743,65 @@ pub fn run_pump<S, F, C, A, O, D>(
                     if frames.is_empty() {
                         break 'send;
                     }
-                    for mut f in frames {
-                        let n = f.pieces.len() as u32;
-                        let (new_head, room) = {
+                    let mcu_id = frames[0].key.mcu_id;
+                    let bundle: Vec<AxisFrame> = frames
+                        .into_iter()
+                        .map(|f| {
+                            let n = f.pieces.len() as u32;
                             let q = queues.get(&f.key).expect("planned key exists");
                             debug_assert!(
                                 q.ring_depth <= u32::from(u16::MAX),
                                 "ring_depth {} exceeds u16::MAX; start_slot cast is lossy",
                                 q.ring_depth
                             );
-                            f.start_slot = q.physical_write_cursor as u16;
-                            (q.pushed.wrapping_add(n), q.room())
-                        };
-                        match sink.send_frame(f.key, &f.pieces, f.start_slot, new_head, room) {
-                            Ok(_) => {
-                                let q = queues.get_mut(&f.key).expect("planned key exists");
-                                for _ in 0..f.pieces.len() {
+                            AxisFrame {
+                                axis: f.key.axis,
+                                start_slot: q.physical_write_cursor as u16,
+                                new_head: q.pushed.wrapping_add(n),
+                                room: q.room(),
+                                pieces: f.pieces,
+                            }
+                        })
+                        .collect();
+                    match sink.send_mcu_frames(mcu_id, &bundle) {
+                        Ok(()) => {
+                            for af in &bundle {
+                                let key = AxisKey {
+                                    mcu_id,
+                                    axis: af.axis,
+                                };
+                                let n = af.pieces.len() as u32;
+                                let q = queues.get_mut(&key).expect("planned key exists");
+                                for _ in 0..af.pieces.len() {
                                     q.pieces.pop_front();
                                 }
                                 q.pushed = q.pushed.wrapping_add(n);
                                 q.advance_write_cursor(n);
                             }
-                            Err(SendError::Fatal(ref e)) => {
-                                tracing::error!(
-                                    subsystem = "motion",
-                                    event = "send_frame_fatal",
-                                    key = ?f.key,
-                                    error = %e,
-                                    "pump send_frame FATAL transport error — invoking fatal-transport action"
-                                );
-                                on_fatal_transport(f.key);
-                                return;
-                            }
-                            Err(SendError::Transient(ref e)) => {
-                                tracing::error!(
-                                    subsystem = "motion",
-                                    event = "send_frame_transient",
-                                    key = ?f.key,
-                                    error = %e,
-                                    "pump send_frame failed"
-                                );
-                                break 'send;
-                            }
+                        }
+                        Err(SendError::Fatal(ref e)) => {
+                            tracing::error!(
+                                subsystem = "motion",
+                                event = "send_frame_fatal",
+                                mcu = mcu_id,
+                                error = %e,
+                                "pump send_mcu_frames FATAL transport error — invoking fatal-transport action"
+                            );
+                            on_fatal_transport(AxisKey {
+                                mcu_id,
+                                axis: bundle.first().map_or(0, |f| f.axis),
+                            });
+                            return;
+                        }
+                        Err(SendError::Transient(ref e)) => {
+                            tracing::error!(
+                                subsystem = "motion",
+                                event = "send_frame_transient",
+                                mcu = mcu_id,
+                                error = %e,
+                                "pump send_mcu_frames failed"
+                            );
+                            break 'send;
                         }
                     }
                 }
