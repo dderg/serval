@@ -22,13 +22,7 @@ fn decodes_identify_on_control_channel() {
 
 #[test]
 fn decodes_push_pieces_on_pieces_channel() {
-    let msg = PushPieces {
-        axis_idx: 0,
-        piece_count: 0,
-        start_slot: 0,
-        new_head: 1,
-        pieces_bytes: vec![],
-    };
+    let msg = PushPieces::single(0, 0, 0, 1, vec![]);
     let payload = frame_payload(MessageKind::PushPieces, 7, &msg.encoded_to_vec());
     match decode_command(MCU_CHANNEL_PIECES, &payload).unwrap() {
         Command::PushPieces {
@@ -36,9 +30,9 @@ fn decodes_push_pieces_on_pieces_channel() {
             msg: m,
         } => {
             assert_eq!(correlation_id, 7);
-            assert_eq!(m.axis_idx, 0);
-            assert_eq!(m.piece_count, 0);
-            assert_eq!(m.new_head, 1);
+            assert_eq!(m.axes[0].axis_idx, 0);
+            assert_eq!(m.axes[0].piece_count, 0);
+            assert_eq!(m.axes[0].new_head, 1);
         }
         other => panic!("wrong variant: {other:?}"),
     }
@@ -46,7 +40,7 @@ fn decodes_push_pieces_on_pieces_channel() {
 
 #[test]
 fn push_pieces_response_decodes_back() {
-    let frame = push_pieces_response_frame(42, 0, 0, 1_000_000_000);
+    let frame = push_pieces_response_frame(42, 0, 0, 0, 1_000_000_000);
     let (chan, payload) = decode_frame(&frame).unwrap();
     assert_eq!(chan, CHANNEL_CONTROL);
     let (hdr, body) = decode_message_header(payload).unwrap();
@@ -57,7 +51,10 @@ fn push_pieces_response_decodes_back() {
     );
     let r = PushPiecesResponse::decode(body).unwrap();
     assert_eq!(r.result, 0);
-    assert_eq!(r.front_start_time, 1_000_000_000);
+    assert_eq!(
+        r.axes.first().map(|a| a.front_start_time).unwrap_or(0),
+        1_000_000_000
+    );
 }
 
 #[test]

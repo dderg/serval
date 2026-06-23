@@ -848,41 +848,42 @@ impl WireSink {
     /// caller's `recv_timeout`) is transient — the session may still be alive.
     fn call_push_pieces(
         &self,
-        key: AxisKey,
-        pieces: &[PieceEntry],
-        start_slot: u16,
-        new_head: u32,
+        mcu_id: u32,
+        frames: &[AxisFrame],
     ) -> Result<mcu_protocol::messages::PushPiecesResponse, SendError> {
         use host_rt::transport::TransportError;
 
-        let mut pieces_bytes = Vec::with_capacity(std::mem::size_of_val(pieces));
-        for p in pieces {
-            pieces_bytes.extend_from_slice(&p.to_le_bytes());
-        }
+        let axes: Vec<mcu_protocol::messages::AxisPieces> = frames
+            .iter()
+            .map(|f| {
+                let mut pieces_bytes = Vec::with_capacity(f.pieces.len() * 32);
+                for p in &f.pieces {
+                    pieces_bytes.extend_from_slice(&p.to_le_bytes());
+                }
+                mcu_protocol::messages::AxisPieces {
+                    axis_idx: f.axis,
+                    piece_count: f.pieces.len() as u8,
+                    start_slot: f.start_slot,
+                    new_head: f.new_head,
+                    pieces_bytes,
+                }
+            })
+            .collect();
+        let msg = mcu_protocol::messages::PushPieces { axes };
+        let body = mcu_protocol::codec::Encode::encoded_to_vec(&msg);
 
-        let msg = mcu_protocol::messages::PushPieces {
-            axis_idx: key.axis,
-            piece_count: pieces.len() as u8,
-            start_slot,
-            new_head,
-            pieces_bytes,
-        };
-        let mut body = Vec::with_capacity(8 + std::mem::size_of_val(pieces));
-        mcu_protocol::codec::Encode::encode(&msg, &mut body);
-
-        let transport = self.transports.get(&key.mcu_id).ok_or_else(|| {
+        let transport = self.transports.get(&mcu_id).ok_or_else(|| {
             SendError::Transient(format!(
-                "WireSink: no transport for mcu_id {} (axis {}); \
-                     this is a logic bug in init_planner — the axis was enqueued \
-                     without registering its transport",
-                key.mcu_id, key.axis
+                "WireSink: no transport for mcu_id {mcu_id}; \
+                     this is a logic bug in init_planner — the MCU was enqueued \
+                     without registering its transport"
             ))
         })?;
 
         let resp_body = match transport {
             McuTransport::Serial(weak) => {
                 let io = weak.upgrade().ok_or_else(|| {
-                    SendError::Transient(format!("McuHostIo for mcu {} detached", key.mcu_id))
+                    SendError::Transient(format!("McuHostIo for mcu {mcu_id} detached"))
                 })?;
                 let (_kind, b) = io
                     .kalico_call_on_channel(
@@ -892,7 +893,7 @@ impl WireSink {
                         self.timeout,
                     )
                     .map_err(|e| {
-                        SendError::Transient(format!("serial PushPieces mcu {}: {e:?}", key.mcu_id))
+                        SendError::Transient(format!("serial PushPieces mcu {mcu_id}: {e:?}"))
                     })?;
                 b
             }
@@ -902,8 +903,7 @@ impl WireSink {
                     // session is gone, treat as fatal so the pump exits rather
                     // than spinning on a dead axis.
                     SendError::Fatal(format!(
-                        "ethercat conn for mcu {} detached (released)",
-                        key.mcu_id
+                        "ethercat conn for mcu {mcu_id} detached (released)"
                     ))
                 })?;
                 let (_kind, b) = conn
@@ -915,15 +915,9 @@ impl WireSink {
                     )
                     .map_err(|e| {
                         if matches!(&e, TransportError::Closed | TransportError::Io(_)) {
-                            SendError::Fatal(format!(
-                                "ethercat PushPieces mcu {}: {e:?}",
-                                key.mcu_id
-                            ))
+                            SendError::Fatal(format!("ethercat PushPieces mcu {mcu_id}: {e:?}"))
                         } else {
-                            SendError::Transient(format!(
-                                "ethercat PushPieces mcu {}: {e:?}",
-                                key.mcu_id
-                            ))
+                            SendError::Transient(format!("ethercat PushPieces mcu {mcu_id}: {e:?}"))
                         }
                     })?;
                 b
@@ -932,15 +926,148 @@ impl WireSink {
 
         use mcu_protocol::codec::Decode as _;
         mcu_protocol::messages::PushPiecesResponse::decode(&resp_body).map_err(|e| {
-            SendError::Transient(format!(
-                "decode PushPiecesResponse mcu {}: {e:?}",
-                key.mcu_id
-            ))
+            SendError::Transient(format!("decode PushPiecesResponse mcu {mcu_id}: {e:?}"))
         })
+    }
+
+    /// Emit the per-axis transit diagnostic for one axis of a just-completed
+    /// frame. `front_start_time` is this axis' echo from the response;
+    /// `arrival_clock` is the frame-global MCU clock; `send_started_at` /
+    /// `send_elapsed_us` belong to the whole MCU round-trip.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_transit_diag(
+        &self,
+        key: AxisKey,
+        host_front_start_time: u64,
+        piece_count: usize,
+        room: u32,
+        send_started_at: Instant,
+        send_elapsed_us: f64,
+        front_start_time: u64,
+        arrival_clock: u64,
+    ) {
+        let arrival_lead_ticks = front_start_time as i64 - arrival_clock as i64;
+        let zero_st = host_front_start_time == 0;
+        let past_arrival = arrival_lead_ticks < 0;
+        let frame_seq = TRANSIT_DIAG_FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
+        let healthy_sample = frame_seq % TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE == 0;
+
+        let prev = {
+            let mut map = TRANSIT_PREV_FRAME.lock().expect("transit prev-frame map");
+            map.insert(
+                key,
+                PrevTransitFrame {
+                    send_instant: send_started_at,
+                    front_start_time,
+                    arrival_clock,
+                    arrival_lead_ticks,
+                },
+            )
+        };
+
+        if !(zero_st || past_arrival || healthy_sample) {
+            return;
+        }
+        let approx_freq_hz = (self.freq_of)(key.mcu_id);
+        let host_send_secs = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0)
+        };
+        // Clock not yet synced -> the µs conversion is meaningless; render N/A.
+        // Alert gating uses arrival_lead_ticks (tick domain), so the ALERT still
+        // fires without a frequency.
+        let arrival_lead_us = approx_freq_hz
+            .map(|f| format!("{:.1}", (arrival_lead_ticks as f64 / f) * 1e6))
+            .unwrap_or_else(|| "N/A".to_owned());
+
+        let ticks_to_us = |ticks: i64| {
+            approx_freq_hz
+                .map(|f| format!("{:.1}", (ticks as f64 / f) * 1e6))
+                .unwrap_or_else(|| "N/A".to_owned())
+        };
+        // Where did the lead go since this axis' previous frame?
+        //   Δarrival_lead = schedule_advance − mcu_clock_advance
+        // schedule_advance: how much further ahead the host planned.
+        // mcu_clock_advance: how much the MCU clock (real time) moved.
+        // send_gap: wall time between our two sends to this axis.
+        let (send_gap_us, schedule_advance_us, mcu_clock_advance_us, delta_arrival_lead_us) =
+            match &prev {
+                Some(p) => (
+                    format!(
+                        "{:.1}",
+                        send_started_at.duration_since(p.send_instant).as_secs_f64() * 1e6
+                    ),
+                    ticks_to_us(front_start_time as i64 - p.front_start_time as i64),
+                    ticks_to_us(arrival_clock as i64 - p.arrival_clock as i64),
+                    ticks_to_us(arrival_lead_ticks - p.arrival_lead_ticks),
+                ),
+                None => (
+                    "N/A".to_owned(),
+                    "N/A".to_owned(),
+                    "N/A".to_owned(),
+                    "N/A".to_owned(),
+                ),
+            };
+        if zero_st || past_arrival {
+            let alert = if zero_st && past_arrival {
+                "host_start_time=0 (clock-sync gap) AND piece in MCU past"
+            } else if zero_st {
+                "host_start_time=0 (router clock_freq=0 at dispatch — clock-sync gap)"
+            } else {
+                "piece arrived in MCU past (arrival_lead<0) — PieceStartInPast risk"
+            };
+            tracing::warn!(
+                subsystem = "motion",
+                event = "transit_diag_alert",
+                mcu = key.mcu_id,
+                axis = key.axis,
+                host_front_start_time,
+                mcu_front_start_time = front_start_time,
+                arrival_clock,
+                arrival_lead_ticks,
+                arrival_lead_us = %arrival_lead_us,
+                host_send_unix_secs = host_send_secs,
+                send_elapsed_us,
+                send_gap_us = %send_gap_us,
+                schedule_advance_us = %schedule_advance_us,
+                mcu_clock_advance_us = %mcu_clock_advance_us,
+                delta_arrival_lead_us = %delta_arrival_lead_us,
+                piece_count,
+                room,
+                alert,
+                "[transit-diag] alert"
+            );
+        } else {
+            tracing::info!(
+                subsystem = "motion",
+                event = "transit_diag",
+                mcu = key.mcu_id,
+                axis = key.axis,
+                host_front_start_time,
+                mcu_front_start_time = front_start_time,
+                arrival_clock,
+                arrival_lead_ticks,
+                arrival_lead_us = %arrival_lead_us,
+                host_send_unix_secs = host_send_secs,
+                send_elapsed_us,
+                send_gap_us = %send_gap_us,
+                schedule_advance_us = %schedule_advance_us,
+                mcu_clock_advance_us = %mcu_clock_advance_us,
+                delta_arrival_lead_us = %delta_arrival_lead_us,
+                piece_count,
+                room,
+                "[transit-diag]"
+            );
+        }
     }
 }
 
 impl PieceSink for WireSink {
+    /// Single-axis convenience — the pump drives WireSink via `send_mcu_frames`;
+    /// this exists only to satisfy the trait and routes through the same path.
     fn send_frame(
         &self,
         key: AxisKey,
@@ -949,154 +1076,62 @@ impl PieceSink for WireSink {
         new_head: u32,
         room: u32,
     ) -> Result<i32, SendError> {
+        let frame = AxisFrame {
+            axis: key.axis,
+            pieces: pieces.to_vec(),
+            start_slot,
+            new_head,
+            room,
+        };
+        self.send_mcu_frames(key.mcu_id, std::slice::from_ref(&frame))
+            .map(|()| mcu_protocol::result_codes::OK)
+    }
+
+    fn send_mcu_frames(&self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
         debug_assert!(
-            pieces.len() <= 255,
-            "PushPieces frame exceeds u8 piece_count; schedule() must cap at MAX_PER_FRAME"
+            frames.iter().all(|f| f.pieces.len() <= 255),
+            "PushPieces axis block exceeds u8 piece_count; schedule() must cap at MAX_PER_FRAME"
         );
 
-        let piece_count = pieces.len();
-        let host_front_start_time: u64 = pieces.first().map(|p| p.start_time).unwrap_or(0);
-
         let send_started_at = Instant::now();
-        let r = self.call_push_pieces(key, pieces, start_slot, new_head)?;
+        let resp = self.call_push_pieces(mcu_id, frames)?;
         let send_elapsed_us = send_started_at.elapsed().as_secs_f64() * 1e6;
 
-        {
-            let arrival_lead_ticks = r.front_start_time as i64 - r.arrival_clock as i64;
-            let zero_st = host_front_start_time == 0;
-            let past_arrival = arrival_lead_ticks < 0;
-            let frame_seq = TRANSIT_DIAG_FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
-            let healthy_sample = frame_seq % TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE == 0;
-
-            let prev = {
-                let mut map = TRANSIT_PREV_FRAME.lock().expect("transit prev-frame map");
-                let prev = map.insert(
-                    key,
-                    PrevTransitFrame {
-                        send_instant: send_started_at,
-                        front_start_time: r.front_start_time,
-                        arrival_clock: r.arrival_clock,
-                        arrival_lead_ticks,
-                    },
-                );
-                prev
+        // Per-axis transit-diag from the response's per-axis echo against the
+        // frame-global arrival clock. Emitted even on a fatal frame — a negative
+        // arrival_lead is exactly the PieceStartInPast signature we want logged.
+        for f in frames {
+            let Some(diag) = resp.axes.iter().find(|a| a.axis_idx == f.axis) else {
+                continue;
             };
-
-            if zero_st || past_arrival || healthy_sample {
-                let approx_freq_hz = (self.freq_of)(key.mcu_id);
-                let host_send_secs = {
-                    use std::time::{SystemTime, UNIX_EPOCH};
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_secs_f64())
-                        .unwrap_or(0.0)
-                };
-                // Clock not yet synced -> the µs conversion is meaningless; render
-                // N/A. Alert gating uses arrival_lead_ticks (tick domain), so the
-                // ALERT still fires without a frequency.
-                let arrival_lead_us = approx_freq_hz
-                    .map(|f| format!("{:.1}", (arrival_lead_ticks as f64 / f) * 1e6))
-                    .unwrap_or_else(|| "N/A".to_owned());
-
-                let ticks_to_us = |ticks: i64| {
-                    approx_freq_hz
-                        .map(|f| format!("{:.1}", (ticks as f64 / f) * 1e6))
-                        .unwrap_or_else(|| "N/A".to_owned())
-                };
-                // Where did the lead go since this axis' previous frame?
-                //   Δarrival_lead = schedule_advance − mcu_clock_advance
-                // schedule_advance: how much further ahead the host planned.
-                // mcu_clock_advance: how much the MCU clock (real time) moved.
-                // send_gap: wall time between our two sends to this axis.
-                // A host-pacing starvation burns lead via schedule_advance <
-                // send_gap; a transport stall shows in send_elapsed_us; an MCU
-                // burst shows mcu_clock_advance ≫ send_gap.
-                let (
-                    send_gap_us,
-                    schedule_advance_us,
-                    mcu_clock_advance_us,
-                    delta_arrival_lead_us,
-                ) = match &prev {
-                    Some(p) => (
-                        format!(
-                            "{:.1}",
-                            send_started_at
-                                .duration_since(p.send_instant)
-                                .as_secs_f64()
-                                * 1e6
-                        ),
-                        ticks_to_us(r.front_start_time as i64 - p.front_start_time as i64),
-                        ticks_to_us(r.arrival_clock as i64 - p.arrival_clock as i64),
-                        ticks_to_us(arrival_lead_ticks - p.arrival_lead_ticks),
-                    ),
-                    None => (
-                        "N/A".to_owned(),
-                        "N/A".to_owned(),
-                        "N/A".to_owned(),
-                        "N/A".to_owned(),
-                    ),
-                };
-                if zero_st || past_arrival {
-                    let alert = if zero_st && past_arrival {
-                        "host_start_time=0 (clock-sync gap) AND piece in MCU past"
-                    } else if zero_st {
-                        "host_start_time=0 (router clock_freq=0 at dispatch — clock-sync gap)"
-                    } else {
-                        "piece arrived in MCU past (arrival_lead<0) — PieceStartInPast risk"
-                    };
-                    tracing::warn!(
-                        subsystem = "motion",
-                        event = "transit_diag_alert",
-                        mcu = key.mcu_id,
-                        axis = key.axis,
-                        host_front_start_time,
-                        mcu_front_start_time = r.front_start_time,
-                        arrival_clock = r.arrival_clock,
-                        arrival_lead_ticks,
-                        arrival_lead_us = %arrival_lead_us,
-                        host_send_unix_secs = host_send_secs,
-                        send_elapsed_us,
-                        send_gap_us = %send_gap_us,
-                        schedule_advance_us = %schedule_advance_us,
-                        mcu_clock_advance_us = %mcu_clock_advance_us,
-                        delta_arrival_lead_us = %delta_arrival_lead_us,
-                        piece_count,
-                        room,
-                        alert,
-                        "[transit-diag] alert"
-                    );
-                } else {
-                    tracing::info!(
-                        subsystem = "motion",
-                        event = "transit_diag",
-                        mcu = key.mcu_id,
-                        axis = key.axis,
-                        host_front_start_time,
-                        mcu_front_start_time = r.front_start_time,
-                        arrival_clock = r.arrival_clock,
-                        arrival_lead_ticks,
-                        arrival_lead_us = %arrival_lead_us,
-                        host_send_unix_secs = host_send_secs,
-                        send_elapsed_us,
-                        send_gap_us = %send_gap_us,
-                        schedule_advance_us = %schedule_advance_us,
-                        mcu_clock_advance_us = %mcu_clock_advance_us,
-                        delta_arrival_lead_us = %delta_arrival_lead_us,
-                        piece_count,
-                        room,
-                        "[transit-diag]"
-                    );
-                }
-            }
+            let key = AxisKey {
+                mcu_id,
+                axis: f.axis,
+            };
+            let host_front_start_time = f.pieces.first().map(|p| p.start_time).unwrap_or(0);
+            self.emit_transit_diag(
+                key,
+                host_front_start_time,
+                f.pieces.len(),
+                f.room,
+                send_started_at,
+                send_elapsed_us,
+                diag.front_start_time,
+                resp.arrival_clock,
+            );
         }
 
-        if r.result != mcu_protocol::result_codes::OK {
-            return Err(SendError::Transient(format!(
-                "MCU rejected PushPieces (mcu {} axis {}): {}",
-                key.mcu_id, key.axis, r.result
+        if resp.result != mcu_protocol::result_codes::OK {
+            // Frame-level fatal: ring overflow / logic error. Fail loud and halt —
+            // a retry cannot fix an overflow or a host↔MCU desync. (Transport
+            // failures surface earlier as Err from call_push_pieces and stay
+            // retryable; only a parsed frame the MCU rejected reaches here.)
+            return Err(SendError::Fatal(format!(
+                "MCU rejected PushPieces frame (mcu {mcu_id}): result {}",
+                resp.result
             )));
         }
-        Ok(r.result)
+        Ok(())
     }
 }
 

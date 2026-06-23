@@ -53,13 +53,14 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                     correlation_id,
                     msg,
                 } => {
-                    let front_start_time = if msg.piece_count > 0 && msg.pieces_bytes.len() >= 8 {
-                        u64::from_le_bytes(msg.pieces_bytes[0..8].try_into().unwrap_or([0u8; 8]))
+                    let axis = &msg.axes[0];
+                    let front_start_time = if axis.piece_count > 0 && axis.pieces_bytes.len() >= 8 {
+                        u64::from_le_bytes(axis.pieces_bytes[0..8].try_into().unwrap_or([0u8; 8]))
                     } else {
                         0
                     };
-                    let pushed = ring.push_from_bytes(msg.piece_count, &msg.pieces_bytes);
-                    let result = if pushed == msg.piece_count {
+                    let pushed = ring.push_from_bytes(axis.piece_count, &axis.pieces_bytes);
+                    let result = if pushed == axis.piece_count {
                         0i32
                     } else {
                         -309i32
@@ -68,6 +69,7 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                         correlation_id,
                         result,
                         BASE_NS,
+                        axis.axis_idx,
                         front_start_time,
                     ));
                     total_pushed += pushed as usize;
@@ -135,13 +137,7 @@ fn push_pieces_body(pieces: &[PieceEntry], start: usize, end: usize) -> Vec<u8> 
     for p in batch {
         bytes.extend_from_slice(&p.to_le_bytes());
     }
-    let msg = PushPieces {
-        axis_idx: 0,
-        piece_count: batch.len() as u8,
-        start_slot: 0,
-        new_head: end as u32,
-        pieces_bytes: bytes,
-    };
+    let msg = PushPieces::single(0, batch.len() as u8, 0, end as u32, bytes);
     let mut body = Vec::new();
     msg.encode(&mut body);
     body

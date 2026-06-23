@@ -29,13 +29,7 @@ fn push_pieces_frame(cid: u32, pieces_bytes: Vec<u8>, piece_count: u8, new_head:
     use mcu_transport::frame::encode_frame;
     use mcu_transport::wire_helpers::{encode_message_header, MESSAGE_VERSION_DEFAULT};
 
-    let msg = PushPieces {
-        axis_idx: 0,
-        piece_count,
-        start_slot: 0,
-        new_head,
-        pieces_bytes,
-    };
+    let msg = PushPieces::single(0, piece_count, 0, new_head, pieces_bytes);
     let mut body = Vec::new();
     msg.encode(&mut body);
     let mut payload =
@@ -81,7 +75,9 @@ fn read_push_pieces_response(
                                     eprintln!(
                                         "client: PushPiecesResponse result={} \
                                          arrival_clock={} front_start_time={}",
-                                        resp.result, resp.arrival_clock, resp.front_start_time
+                                        resp.result,
+                                        resp.arrival_clock,
+                                        resp.axes.first().map(|a| a.front_start_time).unwrap_or(0)
                                     );
                                     return Some(resp);
                                 }

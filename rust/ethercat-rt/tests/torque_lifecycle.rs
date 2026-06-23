@@ -138,13 +138,7 @@ fn push_one_piece(conn: &McuSerialConn, start_time: u64) -> i32 {
     };
     let mut pieces_bytes = Vec::with_capacity(32);
     pieces_bytes.extend_from_slice(&entry.to_le_bytes());
-    let msg = PushPieces {
-        axis_idx: 0,
-        piece_count: 1,
-        start_slot: 0,
-        new_head: 1,
-        pieces_bytes,
-    };
+    let msg = PushPieces::single(0, 1, 0, 1, pieces_bytes);
     let body = msg.encoded_to_vec();
     let (_, resp) = conn
         .mcu_call(MessageKind::PushPieces, body, Duration::from_secs(5))

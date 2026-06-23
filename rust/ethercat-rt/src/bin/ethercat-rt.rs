@@ -320,17 +320,20 @@ fn main() {
                             ERR_PIECES_WHILE_FAULTED,
                             now_ns,
                             0,
+                            0,
                         ));
                     } else {
-                        let front_start_time = if msg.piece_count > 0 && msg.pieces_bytes.len() >= 8
+                        let axis = &msg.axes[0];
+                        let front_start_time = if axis.piece_count > 0
+                            && axis.pieces_bytes.len() >= 8
                         {
-                            u64::from_le_bytes(msg.pieces_bytes[0..8].try_into().unwrap_or([0; 8]))
+                            u64::from_le_bytes(axis.pieces_bytes[0..8].try_into().unwrap_or([0; 8]))
                         } else {
                             0
                         };
-                        let pushed = ring.push_from_bytes(msg.piece_count, &msg.pieces_bytes);
+                        let pushed = ring.push_from_bytes(axis.piece_count, &axis.pieces_bytes);
                         let arrival_clock = now_ns;
-                        let result = if pushed == msg.piece_count {
+                        let result = if pushed == axis.piece_count {
                             0i32
                         } else {
                             -309
@@ -339,6 +342,7 @@ fn main() {
                             correlation_id,
                             result,
                             arrival_clock,
+                            axis.axis_idx,
                             front_start_time,
                         ));
                     }
