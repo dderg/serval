@@ -96,6 +96,9 @@ class FakePrinter:
     def register_event_handler(self, event, cb):
         self.event_handlers[event] = cb
 
+    def load_object(self, config, name, default="__raise__"):
+        return self.lookup_object(name, default)
+
 
 class FakeConfig:
     error = RuntimeError

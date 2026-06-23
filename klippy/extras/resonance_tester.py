@@ -73,6 +73,7 @@ class _ResonanceGeneratorCompat:
 class ResonanceTester:
     def __init__(self, config):
         self.printer = config.get_printer()
+        self.printer.load_object(config, "resonance_buzz")
         self.move_speed = config.getfloat("move_speed", 50.0, above=0.0)
         self.min_freq = config.getfloat("min_freq", 5.0, minval=1.0)
         self.max_freq = config.getfloat(
