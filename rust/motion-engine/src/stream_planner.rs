@@ -686,6 +686,39 @@ fn run_loop(
                     last_move_time_bits,
                     commit_fire_count,
                 );
+                if segs.is_empty() && !state.is_empty() {
+                    // No committable seam this batch (small buffer wholly within
+                    // the brake setback). The idle-drain timeout never fires while
+                    // moves keep arriving — each `recv` resets it — so a throttled
+                    // trickle would freeze the frontier into MCU starvation. When
+                    // the delivered lead has drained below the stall watermark,
+                    // force the brake-to-rest now instead of waiting for silence.
+                    let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                    let lead_remaining = (state.t_committed() + LEAD) - esc;
+                    if lead_remaining < watermark {
+                        tracing::info!(
+                            subsystem = "motion",
+                            event = "thin_lead_drain",
+                            buffered = state.buffered(),
+                            t_committed = state.t_committed(),
+                            lead_remaining,
+                            watermark,
+                            v_barrier = state.last_v_barrier(),
+                            "[thin-lead-drain] uncommittable buffer, lead draining — brake-to-rest"
+                        );
+                        let segs = state
+                            .commit_stall_brake(lead_remaining, STALL_SOLVE_CONST)
+                            .unwrap_or_else(|e| fatal(&format!("thin-lead drain: {e}")));
+                        dispatch_committed(
+                            &segs,
+                            &dispatch,
+                            &mut sync_instant,
+                            last_move_time_bits,
+                            commit_fire_count,
+                        );
+                        tally.reset();
+                    }
+                }
                 if state.buffered() >= state.max_buffer_moves() {
                     // Backstop only: no committable seam within reach (e.g. one
                     // move longer than the whole look-ahead window). Drain to

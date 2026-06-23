@@ -3843,6 +3843,30 @@ impl PyMotionEngine {
         ((t0 + last_move_time - host_now) + uncommitted).max(0.0)
     }
 
+    fn dispatched_lead_secs(&self) -> f64 {
+        let last_move_time = {
+            let planner = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(p) = planner.as_ref() else {
+                return 0.0;
+            };
+            p.last_move_time()
+        };
+        let anchored = self
+            .dispatch_anchor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .t0();
+        let Some(t0) = anchored else {
+            return 0.0;
+        };
+        let host_now = self
+            .router
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .host_now_secs();
+        (t0 + last_move_time - host_now).max(0.0)
+    }
+
     fn pump_backlog(&self) -> u64 {
         self.pump_backlog.load(Ordering::Acquire)
     }

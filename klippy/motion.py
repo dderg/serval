@@ -567,7 +567,7 @@ class Motion:
             return
         now = self._yield_to_reactor_if_due(self.reactor.monotonic())
         est = self.mcu.estimated_print_time(now)
-        buffer_time = self._mcu_pending_end_time - est
+        buffer_time = self.engine.dispatched_lead_secs()
         if buffer_time <= self.buffer_time_high:
             return
         wait_start = now
@@ -589,8 +589,8 @@ class Motion:
                 )
             self.reactor.pause(now + 0.010)
             self._last_reactor_yield = self.reactor.monotonic()
-            est = self.mcu.estimated_print_time(self._last_reactor_yield)
-            buffer_time = self._mcu_pending_end_time - est
+            buffer_time = self.engine.dispatched_lead_secs()
+        est = self.mcu.estimated_print_time(self.reactor.monotonic())
         structured_log.event(
             "motion",
             "feed_throttle_exit",

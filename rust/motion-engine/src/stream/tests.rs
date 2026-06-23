@@ -636,3 +636,65 @@ proptest! {
         }
     }
 }
+
+fn short_collinear(n: u32, seg_mm: f64) -> Vec<geometry::Move> {
+    (0..n)
+        .map(|i| {
+            let x0 = f64::from(i) * seg_mm;
+            line(i + 1, [x0, 0.0, 0.2], [x0 + seg_mm, 0.0, 0.2], 0.0)
+        })
+        .collect()
+}
+
+#[test]
+fn small_buffer_within_setback_yields_empty_commit() {
+    // The incremental-commit regression precondition: a buffer whose whole arc
+    // sits within one brake-to-rest setback has no seam that leaves a setback of
+    // open tail behind it, so the non-forced commit selects nothing and the
+    // dispatched frontier would freeze (investigation batch 33: n=4 commit_count=0).
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.2, 0.0], 0.0);
+    for m in short_collinear(4, 0.3) {
+        s.push(m);
+    }
+    let segs = s.commit(false).expect("commit must not error");
+    assert!(
+        segs.is_empty(),
+        "expected commit_count=0 on a sub-setback buffer"
+    );
+    assert_eq!(s.t_committed(), 0.0, "frontier must not have advanced");
+    assert!(
+        !s.is_empty(),
+        "buffer must still hold the uncommitted moves"
+    );
+}
+
+#[test]
+fn stall_brake_advances_a_frozen_frontier() {
+    // The thin-lead force-advance building block: the same uncommittable buffer
+    // drains to rest under `commit_stall_brake`, advancing the frontier instead
+    // of freezing it.
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.2, 0.0], 0.0);
+    for m in short_collinear(4, 0.3) {
+        s.push(m);
+    }
+    assert!(s.commit(false).expect("commit must not error").is_empty());
+    let segs = s
+        .commit_stall_brake(1.0, 0.05)
+        .expect("stall brake with ample lead must succeed");
+    assert!(!segs.is_empty(), "stall brake dispatched nothing");
+    assert!(s.t_committed() > 0.0, "frontier did not advance");
+    assert!(s.is_empty(), "stall brake must drain the buffer to rest");
+}
+
+#[test]
+fn stall_brake_fails_loud_when_lead_already_collapsed() {
+    // Fail-loud (CLAUDE.md): if the lead is already below the solve budget the
+    // ramp cannot be dispatched before its first piece must play, so the planner
+    // raises rather than scheduling a piece into the MCU's past.
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.2, 0.0], 0.0);
+    for m in short_collinear(4, 0.3) {
+        s.push(m);
+    }
+    let err = s.commit_stall_brake(0.01, 0.05).unwrap_err();
+    assert!(matches!(err, StreamError::BrakeToRestShortfall { .. }));
+}

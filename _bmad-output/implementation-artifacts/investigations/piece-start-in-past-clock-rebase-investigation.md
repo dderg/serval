@@ -257,3 +257,105 @@ not the proximate trigger.
 
 **Status: Active** — H9 Confirmed (delivery latency); H10/H11 open; deferred-work assessed as
 contributing-not-proximate.
+
+## Follow-up: 2026-06-23 — incremental planning shipped, crash persists; backpressure signal is the proximate root cause
+
+Incremental stream planning (spec `_bmad-output/specs/spec-incremental-planning/`, impl
+`spec-incremental-stream-planning.md`) was implemented and run on the EtherCAT bench. **Print still
+crashes with the same -308 PieceStartInPast.** Session `k-1782180588-39437`, print
+`print-1782180628`, fault 02:10:38.884, `fault_detail=202722` = `0x317A2` → **axis 3, ~6.1 ms
+deficit** (larger than the prior ~3.6 ms). MCU watchdog-reset (`iwdg_resets=1`). This refutes the
+H10 framing (plan compute cost) as the proximate cause and confirms the pre-implementation caveat:
+the link "plan stall → late delivery" was Deduced, never measured, and was wrong as the *primary*
+mechanism.
+
+### Confirmed — the incremental planning fix works, and it does not matter
+
+- **Incremental commit is functioning.** `pipe_plan` now carries `line_lo`/`line_hi`/`batch`; the
+  spans **advance** (`L113→121→125→127→133`) in small ~8-line increments, not the old overlapping
+  60-line re-plans. `commit_decision` shows `barrier`/`commit_count`/eviction live. Buffer shrinks.
+- **Plan compute is not the bottleneck.** `pipe_plan` still spikes to 142 ms (avg 29 ms) — *per ~8
+  moves*, and the planner is **idle ~90% of the time** (bursts of 2 batches then ~930 ms gaps). The
+  217 ms→142 ms change is noise; planning was never saturating a core.
+
+### Confirmed — the actual crash mechanism: a ~1 s frontier freeze starves both MCUs
+
+- **Cascade across all axes / both MCUs** from the same frozen `host_front_start_time`
+  (transit_diag_alert): `02:10:38.880 axis2 mcu0 −0.27 ms → 38.884 axis0 mcu1 −7.7 ms (EtherCAT) →
+  38.884 axis3 mcu0 −5.2 ms → 38.954 axis1 −67.6 → 38.960 axis2 −73.1 → 39.025 axis3 −139.3 ms` →
+  fault + reset. Lateness **grows** — a starvation cascade, not a one-off slip.
+- **Frontier frozen ~1.07 s.** `dispatch_committed` t_end jumps 13.13 (wall 37.752) → 14.72 (wall
+  38.825) with **nothing in between**. The committed/dispatched trajectory frontier did not advance
+  for 1.07 s; that exceeds the ~1 s pump lead → MCU starves.
+- **Two interlocking causes of the freeze:**
+  1. **New barrier-commit regression — `commit_count=0` on a small buffer.** Batch 33 (wall
+     38.767): `n=4, barrier=3, commit_count=0` — 4 moves in buffer, *none* committed (no clean seam
+     at-or-before the barrier). The barrier logic held the whole small buffer uncommitted, freezing
+     the frontier. New failure mode introduced by the incremental change (previously it committed at
+     clean seams under `keep_secs`).
+  2. **Backpressure gate had the feeder throttled across the freeze.** `feed_throttle` oscillates
+     2.0↔1.0 with ~1 s period; the fatal cycle `enter 37.695 → exit 38.758` paused the feeder for
+     the entire freeze, starving the planner of the moves that would advance the barrier and unstick
+     the commit.
+
+### Confirmed — the lying signal (exact composition, was the last Deduced link)
+
+`feed_throttle_enter` carries the breakdown: **`buffer_time = pending_end − est`** (verified
+`50.616 − 48.308 = 2.308`). `pending_end` = host `_mcu_pending_end_time`, advanced **on move
+submission**, not on commit/dispatch. Three frontiers at the freeze (wall 38.759, stream-time;
+print↔stream offset ≈ 35.896):
+
+| Level | Frontier | stream-t | in gate math |
+|---|---|---|---|
+| A. **Submitted** to planner (`pending_end`) | 14.72 | top of subtraction (**wrong**) |
+| B. **Dispatched to pump** (`dispatch_committed` t_end, frozen) | 13.13 | should be the top |
+| C. **Executed by MCU** (`est`) | 12.41 | subtracted (correct) |
+
+- Gate computed `A − C = 14.72 − 12.41 = ` **2.31 s** → throttle, keep feeder paused.
+- Reality `B − C = 13.13 − 12.41 = ` **0.72 s** delivered lead → starving.
+- The 1.59 s gap is the planner's submitted-but-uncommitted backlog. The over-read **grew** as the
+  freeze accumulated uncommitted moves (0.27 s @ 37.695 → 1.59 s @ 38.759): the gate became *more*
+  confident exactly as the MCU got *more* starved.
+- **`pump_backlog=886` is not a confounder** — it equals the 0.72 s delivered lead counted in
+  finely-discretized pieces (~0.8 ms each) and plateaus during the freeze; the pump is faithfully
+  holding the thin lead, not stalling.
+
+### Hypotheses (this follow-up)
+
+| # | Hypothesis | Status | Confirm/Refute |
+|---|---|---|---|
+| 12 | Incremental planning works but is irrelevant to the crash (plan compute never the bottleneck) | **Confirmed** | line ranges advance; planner idle ~90%; crash persists, deficit larger |
+| 13 | Crash is a ~1 s committed-frontier freeze starving both MCUs (cascade) | **Confirmed** | dispatch_committed gap 13.13→14.72 over 1.07 s; transit_diag cascade −0.27→−139 ms |
+| 14 | Barrier-commit `commit_count=0` on a small no-clean-seam buffer freezes the frontier | **Confirmed** | batch 33 `n=4 barrier=3 commit_count=0`; new regression vs `keep_secs` |
+| 15 | Gate paces on submitted frontier (A) not dispatched-to-pump (B); over-reads delivered lead | **Confirmed** | `buffer_time = pending_end − est`; A−C=2.31 vs B−C=0.72; over-read = uncommitted backlog |
+
+H10 (plan-compute starves pump) **Refuted** as proximate cause. H9 (delivery latency) remains the
+symptom; H15 is its proximate root cause. H11 (host MCU motion stream) still open but secondary —
+the freeze starves it via the same shared frozen frontier.
+
+### deferred-work.md relevance
+
+H15 is exactly the deferred **"submission-aware backpressure / `queued_motion_secs` does not reflect
+real delivery"** item (deferred-work.md 2026-06-22, submission-aware-backpressure review) — now
+Confirmed as load-bearing for the crash, not a theoretical hazard. The incremental-planning change
+*widened* the A−B gap (bigger uncommitted hold-back, `commit_count=0` extreme), making the
+pre-existing signal inaccuracy fatal.
+
+### Fix direction (this follow-up) — a new change, separate from the incremental-planning work
+
+Two faces, one root (delivery-accurate pacing):
+- **Gate paces on the dispatched-to-pump frontier (B), not the submitted `pending_end` (A).** Use
+  the engine's committed/dispatched `last_move_time` for lead. Then during a freeze the gate sees
+  the real 0.72 s draining, does **not** throttle, and keeps feeding — which also advances the
+  barrier and unsticks the commit. (`klippy/motion.py` `_check_pause` /
+  `rust/motion-engine/src/bridge.rs` `queued_motion_secs`.)
+- **Barrier-commit must not freeze the frontier when delivered lead is thin.** On a would-be
+  `commit_count=0` with draining lead, make progress (best available seam / force-advance) rather
+  than holding a small buffer wholly uncommitted. (`rust/motion-engine/src/stream.rs` commit
+  selection.) This is the specific regression the incremental change introduced.
+- Do **not** re-raise `lead_secs`/`MAX_LEAD_SECS`/ring (band-aids, masks the signal bug).
+
+**Status: Active** — H12–H15 Confirmed; proximate root cause = backpressure gate pacing on the
+submitted frontier (A) instead of the dispatched-to-pump frontier (B), with the barrier-commit
+`commit_count=0` freeze as the trigger. Incremental planning works as specified but is orthogonal to
+the crash.

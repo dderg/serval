@@ -35,13 +35,27 @@ class FakeMcu:
         return eventtime * self.rate
 
 
+class FakeEngine:
+    # Models the dispatched-to-pump lead: the committed frontier minus what the
+    # MCU has executed. The lead drains as the executed time advances; a stalled
+    # MCU (rate=0) freezes the executed time, so the lead never drains.
+    def __init__(self, mcu, reactor, committed_end=0.0):
+        self.mcu = mcu
+        self.reactor = reactor
+        self.committed_end = committed_end
+
+    def dispatched_lead_secs(self):
+        executed = self.mcu.estimated_print_time(self.reactor.now)
+        return max(0.0, self.committed_end - executed)
+
+
 class FakeMotion:
     _check_pause = motion.Motion._check_pause
     _yield_to_reactor_if_due = motion.Motion._yield_to_reactor_if_due
 
     def __init__(
         self,
-        pending_end=0.0,
+        committed_end=0.0,
         rate=1.0,
         mcu=True,
         drip=False,
@@ -51,7 +65,8 @@ class FakeMotion:
         self.reactor = FakeReactor()
         self.printer = FakePrinter()
         self.mcu = FakeMcu(rate) if mcu else None
-        self._mcu_pending_end_time = pending_end
+        self.engine = FakeEngine(self.mcu, self.reactor, committed_end)
+        self._mcu_pending_end_time = committed_end
         self._drip_active = drip
         self.buffer_time_high = buffer_time_high
         self.buffer_time_low = buffer_time_low
@@ -59,42 +74,52 @@ class FakeMotion:
 
 
 def test_no_pause_when_within_buffer():
-    m = FakeMotion(pending_end=1.0)
+    m = FakeMotion(committed_end=1.0)
     m._check_pause()
     assert m.reactor.pauses == 0
 
 
 def test_periodic_reactor_yield_even_when_within_buffer():
-    m = FakeMotion(pending_end=1.0)
+    m = FakeMotion(committed_end=1.0)
     m._last_reactor_yield = -1.0  # last yield long ago => due for a yield
     m._check_pause()
     assert m.reactor.pauses == 1
 
 
-def test_pauses_until_buffer_drains_to_low():
-    # pending_end fixed; est advances with each reactor pause, draining buffer.
-    m = FakeMotion(pending_end=5.0)
+def test_pauses_until_dispatched_lead_drains_to_low():
+    # committed frontier fixed; executed time advances with each reactor pause,
+    # draining the dispatched lead.
+    m = FakeMotion(committed_end=5.0)
     m._check_pause()
     assert m.reactor.pauses > 0
-    est = m.mcu.estimated_print_time(m.reactor.now)
-    assert m._mcu_pending_end_time - est <= m.buffer_time_low
+    assert m.engine.dispatched_lead_secs() <= m.buffer_time_low
+
+
+def test_no_pause_when_uncommitted_backlog_inflates_submitted_frontier():
+    # The crash this fix targets: the submitted frontier runs far ahead of the
+    # delivered lead. The gate must pace on the draining dispatched lead, never
+    # the submitted backlog, so it does not throttle a starving MCU.
+    m = FakeMotion(committed_end=0.7)
+    m._mcu_pending_end_time = 14.7  # submitted frontier (A) — must not gate
+    m._check_pause()
+    assert m.reactor.pauses == 0
 
 
 def test_timeout_when_mcu_not_advancing():
-    # rate=0 => est frozen => buffer never drains => DRAIN_TIMEOUT raises.
-    m = FakeMotion(pending_end=5.0, rate=0.0)
+    # rate=0 => executed time frozen => lead never drains => DRAIN_TIMEOUT raises.
+    m = FakeMotion(committed_end=5.0, rate=0.0)
     m.reactor.step = 10.0
     with pytest.raises(FakeCommandError):
         m._check_pause()
 
 
 def test_skips_during_drip():
-    m = FakeMotion(pending_end=5.0, drip=True)
+    m = FakeMotion(committed_end=5.0, drip=True)
     m._check_pause()
     assert m.reactor.pauses == 0
 
 
 def test_skips_when_no_mcu():
-    m = FakeMotion(pending_end=5.0, mcu=False)
+    m = FakeMotion(committed_end=5.0, mcu=False)
     m._check_pause()
     assert m.reactor.pauses == 0
