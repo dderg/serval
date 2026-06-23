@@ -69,6 +69,10 @@ impl TickChain {
     pub fn is_anchored(&self, mcu: u32) -> bool {
         self.next_start.contains_key(&mcu)
     }
+
+    pub fn anchor_tick(&self, mcu: u32) -> Option<u64> {
+        self.next_start.get(&mcu).copied()
+    }
 }
 
 #[cfg(test)]
