@@ -341,12 +341,7 @@ class ResonanceTester:
         sweep = self._parse_sweep(gcmd)
 
         calibration_data = self._run_test(
-            gcmd,
-            calibrate_axes,
-            helper,
-            sweep,
-            raw_name_suffix=name_suffix,
-            accel_chips=accel_chips,
+            gcmd, calibrate_axes, helper, sweep, accel_chips=accel_chips
         )
 
         configfile = self.printer.lookup_object("configfile")
