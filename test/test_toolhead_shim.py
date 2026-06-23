@@ -199,10 +199,6 @@ def test_submit_nudge_builds_single_bit_mask_and_forwards():
 
 
 def test_submit_nudge_does_not_bump_host_frontier():
-    # The engine's flush already waits for the nudge (run_nudge advances the
-    # committed timeline); the host must NOT add a second pending-end-time
-    # frontier, or a long nudge desyncs the two clock frames and the next
-    # move anchors out of order on the MCU ring.
     th = _make_correction_toolhead(0.6)
     th.submit_nudge(7, 1, 2, 0.3, 80.0, 5000.0)
     assert th._mcu_pending_end_time == pytest.approx(0.0)
