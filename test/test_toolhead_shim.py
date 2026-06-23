@@ -96,6 +96,7 @@ def toolhead_fixture():
     toolhead.Coord = gcode.Coord
     toolhead.commanded_pos = [0.0, 0.0, 0.0, 0.0]
     toolhead.print_time = 0.0
+    toolhead._mcu_pending_end_time = 0.0
     toolhead.print_stall = 0
     toolhead.extruder = extruder_mod.DummyExtruder(printer)
     toolhead._max_velocity = 300.0

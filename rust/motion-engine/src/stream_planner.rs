@@ -1,19 +1,41 @@
 #![allow(deprecated)]
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
 use crate::stream::{StreamConfig, StreamState};
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
-const SAFETY_MARGIN: f64 = 0.05;
+// Producer-stall watermark budget. When the input goes quiet, materialize the
+// brake-to-rest tail this long before the committed frontier would run dry. The
+// total watermark is sized per the last barrier velocity at runtime —
+// `t_brake(v_barrier)` (the jerk-limited decel ramp) plus this fixed solve-time
+// budget for the final fit+plan+lower over the open tail plus `STALL_MARGIN` —
+// so the decel always finishes before dispatch (no PieceStartInPast). If the
+// locked lead at trigger time is already below the solve budget, the commit
+// fails loud (BrakeToRestShortfall): the constant was sized too short.
+const STALL_SOLVE_CONST: f64 = 0.05;
+const STALL_MARGIN: f64 = 0.1;
 const T_IDLE: Duration = Duration::from_secs(3600);
+// Cap the moves coalesced into one commit. fit+plan+lower cost is ~linear in
+// segments, so a single commit's wall-clock latency scales with the batch size.
+// Draining all the way to `max_buffer_moves` builds 500+-move batches whose plan
+// alone runs multiple seconds — longer than the MCU's buffered lead — so the
+// ring drains to a fault (PieceStartInPast) while the planner is blocked in that
+// one commit. A bounded batch keeps each commit well under the lead, so dispatch
+// stays frequent, the pump backlog reflects reality, and the host's backlog
+// throttle engages instead of flooding the channel. `max_buffer_moves` remains
+// the memory backstop for the rare no-clean-seam case.
+const COALESCE_BATCH_MOVES: usize = 64;
+
+const INPUT_CHANNEL_CAP: usize = 8192;
 
 type DispatchFn = Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>;
 type NudgeDispatchFn =
@@ -38,17 +60,24 @@ pub struct StreamPlannerHandle {
     join_handle: Option<JoinHandle<()>>,
     last_move_time_bits: Arc<AtomicU64>,
     commit_fire_count: Arc<AtomicU32>,
+    uncommitted_intake_secs: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
 pub enum StreamPlannerError {
     ChannelClosed,
+    ChannelFull,
 }
 
 impl std::fmt::Display for StreamPlannerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ChannelClosed => write!(f, "stream planner channel closed"),
+            Self::ChannelFull => write!(
+                f,
+                "stream planner input channel full ({INPUT_CHANNEL_CAP} \
+                 moves) — host backpressure gate bypassed"
+            ),
         }
     }
 }
@@ -63,12 +92,14 @@ impl StreamPlannerHandle {
         dispatch: DispatchFn,
         nudge_dispatch: NudgeDispatchFn,
     ) -> Self {
-        let (tx, rx) = unbounded();
+        let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let last_move_time_bits = Arc::new(AtomicU64::new(0));
         let commit_fire_count = Arc::new(AtomicU32::new(0));
+        let uncommitted_intake_secs = Arc::new(AtomicU64::new(0));
 
         let last_thread = Arc::clone(&last_move_time_bits);
         let commit_thread = Arc::clone(&commit_fire_count);
+        let intake_thread = Arc::clone(&uncommitted_intake_secs);
         let join = thread::Builder::new()
             .name("kalico-stream-planner".to_string())
             .spawn(move || {
@@ -80,6 +111,7 @@ impl StreamPlannerHandle {
                     state,
                     &last_thread,
                     &commit_thread,
+                    &intake_thread,
                 );
             })
             .expect("spawn stream planner thread");
@@ -89,13 +121,12 @@ impl StreamPlannerHandle {
             join_handle: Some(join),
             last_move_time_bits,
             commit_fire_count,
+            uncommitted_intake_secs,
         }
     }
 
     pub fn submit_move(&self, m: geometry::Move) -> Result<(), StreamPlannerError> {
-        self.sender
-            .send(StreamMsg::Move(m))
-            .map_err(|_| StreamPlannerError::ChannelClosed)
+        try_submit_move(&self.sender, m)
     }
 
     pub fn flush(&self) -> Result<(), StreamPlannerError> {
@@ -178,6 +209,11 @@ impl StreamPlannerHandle {
         self.commit_fire_count.load(Ordering::Acquire)
     }
 
+    #[must_use]
+    pub fn uncommitted_intake_secs(&self) -> f64 {
+        f64::from_bits(self.uncommitted_intake_secs.load(Ordering::Acquire))
+    }
+
     pub fn shutdown(&mut self) {
         let _ = self.sender.send(StreamMsg::Shutdown);
         if let Some(h) = self.join_handle.take() {
@@ -191,6 +227,75 @@ impl Drop for StreamPlannerHandle {
         if self.join_handle.is_some() {
             self.shutdown();
         }
+    }
+}
+
+fn try_submit_move(
+    sender: &Sender<StreamMsg>,
+    m: geometry::Move,
+) -> Result<(), StreamPlannerError> {
+    sender.try_send(StreamMsg::Move(m)).map_err(|e| match e {
+        TrySendError::Full(_) => StreamPlannerError::ChannelFull,
+        TrySendError::Disconnected(_) => StreamPlannerError::ChannelClosed,
+    })
+}
+
+fn nominal_t(m: &geometry::Move) -> Option<f64> {
+    if m.feedrate_mm_s > 0.0 {
+        Some(m.segment.s_len() / m.feedrate_mm_s)
+    } else {
+        None
+    }
+}
+
+struct IntakeTally<'a> {
+    per_move: VecDeque<f64>,
+    secs: f64,
+    atomic: &'a AtomicU64,
+}
+
+impl<'a> IntakeTally<'a> {
+    fn new(atomic: &'a AtomicU64) -> Self {
+        Self {
+            per_move: VecDeque::new(),
+            secs: 0.0,
+            atomic,
+        }
+    }
+
+    fn publish(&self) {
+        self.atomic.store(self.secs.to_bits(), Ordering::Release);
+    }
+
+    fn record_intake(&mut self, m: &geometry::Move) {
+        let Some(dt) = nominal_t(m) else {
+            fatal(&format!(
+                "intake tally: non-positive feedrate {} on line {}",
+                m.feedrate_mm_s, m.source.start_line
+            ));
+        };
+        self.per_move.push_back(dt);
+        self.secs += dt;
+        self.publish();
+    }
+
+    fn subtract_committed(&mut self, popped: usize) {
+        for _ in 0..popped {
+            match self.per_move.pop_front() {
+                Some(dt) => self.secs -= dt,
+                None => fatal("intake tally underflow: committed more moves than recorded"),
+            }
+        }
+        if self.per_move.is_empty() {
+            self.secs = 0.0;
+        }
+        self.publish();
+    }
+
+    fn reset(&mut self) {
+        self.per_move.clear();
+        self.secs = 0.0;
+        self.publish();
     }
 }
 
@@ -216,7 +321,45 @@ fn dispatch_committed(
     if segs.is_empty() {
         return;
     }
+    tracing::info!(
+        subsystem = "motion",
+        event = "dispatch_committed",
+        n = segs.len(),
+        t_start = segs[0].t_start,
+        t_end = segs[segs.len() - 1].t_end,
+        "[dispatch-committed]"
+    );
     for s in segs {
+        let n_ax = s.axes.len();
+        tracing::info!(
+            subsystem = "motion",
+            event = "pipe_dispatch",
+            line = s.source_line,
+            t_us = crate::timing::mono_us(),
+            seg_t_start = s.t_start,
+            seg_t_end = s.t_end,
+            x_end = if n_ax > 0 {
+                nurbs::eval::eval(&s.axes[0], s.t_end)
+            } else {
+                0.0
+            },
+            y_end = if n_ax > 1 {
+                nurbs::eval::eval(&s.axes[1], s.t_end)
+            } else {
+                0.0
+            },
+            z_start = if n_ax > 2 {
+                nurbs::eval::eval(&s.axes[2], s.t_start)
+            } else {
+                0.0
+            },
+            z_end = if n_ax > 2 {
+                nurbs::eval::eval(&s.axes[2], s.t_end)
+            } else {
+                0.0
+            },
+            "[pipe] dispatch"
+        );
         if let Err(e) = dispatch(s) {
             fatal(&format!("dispatch failed: {e}"));
         }
@@ -326,6 +469,146 @@ fn run_nudge(
     Ok(())
 }
 
+/// Re-anchor the stream timeline if the buffer drained and the machine caught
+/// up (an idle gap), then buffer the move. Re-anchoring only fires on the first
+/// move of a batch — once the buffer is non-empty, subsequent coalesced moves
+/// just push.
+fn handle_move_arrival(
+    state: &mut StreamState,
+    m: geometry::Move,
+    sync_instant: &mut Option<Instant>,
+    tally: &mut IntakeTally,
+) {
+    tracing::info!(
+        subsystem = "motion",
+        event = "pipe_ingress",
+        line = m.source.start_line,
+        t_us = crate::timing::mono_us(),
+        buffered = state.buffered(),
+        "[pipe] ingress"
+    );
+    let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+    let reanchor = state.is_empty() && esc > state.t_committed() + 1e-6;
+    if reanchor {
+        tracing::info!(
+            subsystem = "motion",
+            event = "reanchor_decision",
+            esc,
+            t_committed = state.t_committed(),
+            "[reanchor-decision]"
+        );
+        *sync_instant = None;
+        state.restart_idle_timeline();
+    }
+    tally.record_intake(&m);
+    state.push(m);
+}
+
+/// Handle one non-move control message. Returns `true` when the loop should
+/// exit (shutdown).
+fn handle_control(
+    msg: StreamMsg,
+    state: &mut StreamState,
+    dispatch: &DispatchFn,
+    nudge_dispatch: &NudgeDispatchFn,
+    sync_instant: &mut Option<Instant>,
+    last_move_time_bits: &AtomicU64,
+    commit_fire_count: &AtomicU32,
+    tally: &mut IntakeTally,
+) -> bool {
+    match msg {
+        StreamMsg::Move(_) => unreachable!("moves handled by the coalescing path"),
+        StreamMsg::Flush { notify } => {
+            let segs = state
+                .commit(true)
+                .unwrap_or_else(|e| fatal(&format!("flush: {e}")));
+            dispatch_committed(
+                &segs,
+                dispatch,
+                sync_instant,
+                last_move_time_bits,
+                commit_fire_count,
+            );
+            tally.reset();
+            let finish = sync_instant.map(|t| {
+                t + Duration::try_from_secs_f64((state.t_committed() + LEAD).max(0.0))
+                    .unwrap_or(Duration::ZERO)
+            });
+            let _ = notify.send(finish);
+        }
+        StreamMsg::Dwell { duration_s, notify } => {
+            let segs = state
+                .commit(true)
+                .unwrap_or_else(|e| fatal(&format!("dwell drain: {e}")));
+            dispatch_committed(
+                &segs,
+                dispatch,
+                sync_instant,
+                last_move_time_bits,
+                commit_fire_count,
+            );
+            tally.reset();
+            state.advance_time(duration_s);
+            let _ = notify.send(());
+        }
+        StreamMsg::StreamOpen { home_pos } => {
+            *sync_instant = None;
+            state.reset(&home_pos, 0.0);
+            tally.reset();
+        }
+        StreamMsg::Reset { recovered_pos } => {
+            *sync_instant = None;
+            state.reset(&recovered_pos, 0.0);
+            tally.reset();
+        }
+        StreamMsg::SetAxisChains(chains) => {
+            state.set_axis_chains(chains);
+        }
+        StreamMsg::HomeDrip(p) => {
+            *sync_instant = None;
+            state.reset(&p.home_pos, 0.0);
+            tally.reset();
+            let result = run_home_drip(
+                state,
+                &p,
+                dispatch,
+                sync_instant,
+                last_move_time_bits,
+                commit_fire_count,
+            );
+            let _ = p.notify.send(result);
+        }
+        StreamMsg::Nudge(p) => {
+            let result = run_nudge(
+                state,
+                &p,
+                dispatch,
+                nudge_dispatch,
+                sync_instant,
+                last_move_time_bits,
+                commit_fire_count,
+            );
+            tally.reset();
+            let _ = p.notify.send(result);
+        }
+        StreamMsg::Shutdown => {
+            let segs = state
+                .commit(true)
+                .unwrap_or_else(|e| fatal(&format!("shutdown drain: {e}")));
+            dispatch_committed(
+                &segs,
+                dispatch,
+                sync_instant,
+                last_move_time_bits,
+                commit_fire_count,
+            );
+            tally.reset();
+            return true;
+        }
+    }
+    false
+}
+
 fn run_loop(
     rx: Receiver<StreamMsg>,
     dispatch: DispatchFn,
@@ -333,32 +616,39 @@ fn run_loop(
     mut state: StreamState,
     last_move_time_bits: &AtomicU64,
     commit_fire_count: &AtomicU32,
+    uncommitted_intake_secs: &AtomicU64,
 ) {
     let mut sync_instant: Option<Instant> = None;
+    let mut tally = IntakeTally::new(uncommitted_intake_secs);
 
     loop {
+        let watermark = state.stall_brake_time() + STALL_SOLVE_CONST + STALL_MARGIN;
         let next_timeout = if state.is_empty() {
             T_IDLE
         } else {
             let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
-            let remaining = (state.t_committed() + LEAD - SAFETY_MARGIN) - esc;
+            let remaining = (state.t_committed() + LEAD - watermark) - esc;
             Duration::try_from_secs_f64(remaining.max(0.0)).unwrap_or(Duration::ZERO)
         };
 
         let msg = match rx.recv_timeout(next_timeout) {
             Ok(m) => m,
             Err(RecvTimeoutError::Timeout) => {
+                let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                let lead_remaining = (state.t_committed() + LEAD) - esc;
                 tracing::info!(
                     subsystem = "motion",
                     event = "idle_drain",
                     buffered = state.buffered(),
                     t_committed = state.t_committed(),
+                    lead_remaining,
+                    v_barrier = state.last_v_barrier(),
                     sync_set = sync_instant.is_some(),
-                    "[idle-drain]"
+                    "[idle-drain] producer-stall brake-to-rest"
                 );
                 let segs = state
-                    .commit(true)
-                    .unwrap_or_else(|e| fatal(&format!("idle drain: {e}")));
+                    .commit_stall_brake(lead_remaining, STALL_SOLVE_CONST)
+                    .unwrap_or_else(|e| fatal(&format!("stall brake-to-rest: {e}")));
                 dispatch_committed(
                     &segs,
                     &dispatch,
@@ -366,6 +656,7 @@ fn run_loop(
                     last_move_time_bits,
                     commit_fire_count,
                 );
+                tally.reset();
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => return,
@@ -373,27 +664,31 @@ fn run_loop(
 
         match msg {
             StreamMsg::Move(m) => {
-                let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
-                let reanchor = state.is_empty() && esc > state.t_committed() + 1e-6;
-                tracing::info!(
-                    subsystem = "motion",
-                    event = "reanchor_decision",
-                    esc,
-                    sync_set = sync_instant.is_some(),
-                    is_empty = state.is_empty(),
-                    buffered = state.buffered(),
-                    t_committed = state.t_committed(),
-                    reanchor,
-                    "[reanchor-decision]"
-                );
-                if reanchor {
-                    sync_instant = None;
-                    state.restart_idle_timeline();
+                handle_move_arrival(&mut state, m, &mut sync_instant, &mut tally);
+                // Coalesce the burst up to COALESCE_BATCH_MOVES, then fit that
+                // batch ONCE. Committing per move re-fits the growing buffer each
+                // time (O(n²)); one fit per bounded batch is O(n) and keeps each
+                // commit's latency under the MCU's buffered lead so dispatch stays
+                // continuous instead of stalling in one multi-second mega-commit.
+                let mut deferred: Option<StreamMsg> = None;
+                let coalesce_cap = COALESCE_BATCH_MOVES.min(state.max_buffer_moves());
+                while state.buffered() < coalesce_cap {
+                    match rx.try_recv() {
+                        Ok(StreamMsg::Move(m2)) => {
+                            handle_move_arrival(&mut state, m2, &mut sync_instant, &mut tally);
+                        }
+                        Ok(other) => {
+                            deferred = Some(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
                 }
-                state.push(m);
+                let buffered_before = state.buffered();
                 let segs = state
                     .commit(false)
                     .unwrap_or_else(|e| fatal(&format!("commit: {e}")));
+                tally.subtract_committed(buffered_before - state.buffered());
                 dispatch_committed(
                     &segs,
                     &dispatch,
@@ -401,86 +696,90 @@ fn run_loop(
                     last_move_time_bits,
                     commit_fire_count,
                 );
+                if segs.is_empty() && !state.is_empty() {
+                    // No committable seam this batch (small buffer wholly within
+                    // the brake setback). The idle-drain timeout never fires while
+                    // moves keep arriving — each `recv` resets it — so a throttled
+                    // trickle would freeze the frontier into MCU starvation. When
+                    // the delivered lead has drained below the stall watermark,
+                    // force the brake-to-rest now instead of waiting for silence.
+                    let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                    let lead_remaining = (state.t_committed() + LEAD) - esc;
+                    if lead_remaining < watermark {
+                        tracing::info!(
+                            subsystem = "motion",
+                            event = "thin_lead_drain",
+                            buffered = state.buffered(),
+                            t_committed = state.t_committed(),
+                            lead_remaining,
+                            watermark,
+                            v_barrier = state.last_v_barrier(),
+                            "[thin-lead-drain] uncommittable buffer, lead draining — brake-to-rest"
+                        );
+                        let segs = state
+                            .commit_stall_brake(lead_remaining, STALL_SOLVE_CONST)
+                            .unwrap_or_else(|e| fatal(&format!("thin-lead drain: {e}")));
+                        dispatch_committed(
+                            &segs,
+                            &dispatch,
+                            &mut sync_instant,
+                            last_move_time_bits,
+                            commit_fire_count,
+                        );
+                        tally.reset();
+                    }
+                }
+                if state.buffered() >= state.max_buffer_moves() {
+                    // Backstop only: no committable seam within reach (e.g. one
+                    // move longer than the whole look-ahead window). Drain to
+                    // rest so motion keeps flowing and memory stays bounded.
+                    tracing::info!(
+                        subsystem = "motion",
+                        event = "buffer_cap_drain",
+                        buffered = state.buffered(),
+                        t_committed = state.t_committed(),
+                        "[buffer-cap-drain] no committable seam — draining to rest"
+                    );
+                    let segs = state
+                        .commit(true)
+                        .unwrap_or_else(|e| fatal(&format!("buffer-cap drain: {e}")));
+                    dispatch_committed(
+                        &segs,
+                        &dispatch,
+                        &mut sync_instant,
+                        last_move_time_bits,
+                        commit_fire_count,
+                    );
+                    tally.reset();
+                }
+                if let Some(other) = deferred {
+                    if handle_control(
+                        other,
+                        &mut state,
+                        &dispatch,
+                        &nudge_dispatch,
+                        &mut sync_instant,
+                        last_move_time_bits,
+                        commit_fire_count,
+                        &mut tally,
+                    ) {
+                        return;
+                    }
+                }
             }
-            StreamMsg::Flush { notify } => {
-                let segs = state
-                    .commit(true)
-                    .unwrap_or_else(|e| fatal(&format!("flush: {e}")));
-                dispatch_committed(
-                    &segs,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
-                let finish = sync_instant.map(|t| {
-                    t + Duration::try_from_secs_f64((state.t_committed() + LEAD).max(0.0))
-                        .unwrap_or(Duration::ZERO)
-                });
-                let _ = notify.send(finish);
-            }
-            StreamMsg::Dwell { duration_s, notify } => {
-                let segs = state
-                    .commit(true)
-                    .unwrap_or_else(|e| fatal(&format!("dwell drain: {e}")));
-                dispatch_committed(
-                    &segs,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
-                state.advance_time(duration_s);
-                let _ = notify.send(());
-            }
-            StreamMsg::StreamOpen { home_pos } => {
-                sync_instant = None;
-                state.reset(&home_pos, 0.0);
-            }
-            StreamMsg::Reset { recovered_pos } => {
-                sync_instant = None;
-                state.reset(&recovered_pos, 0.0);
-            }
-            StreamMsg::SetAxisChains(chains) => {
-                state.set_axis_chains(chains);
-            }
-            StreamMsg::HomeDrip(p) => {
-                sync_instant = None;
-                state.reset(&p.home_pos, 0.0);
-                let result = run_home_drip(
+            other => {
+                if handle_control(
+                    other,
                     &mut state,
-                    &p,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
-                let _ = p.notify.send(result);
-            }
-            StreamMsg::Nudge(p) => {
-                let result = run_nudge(
-                    &mut state,
-                    &p,
                     &dispatch,
                     &nudge_dispatch,
                     &mut sync_instant,
                     last_move_time_bits,
                     commit_fire_count,
-                );
-                let _ = p.notify.send(result);
-            }
-            StreamMsg::Shutdown => {
-                let segs = state
-                    .commit(true)
-                    .unwrap_or_else(|e| fatal(&format!("shutdown drain: {e}")));
-                dispatch_committed(
-                    &segs,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
-                return;
+                    &mut tally,
+                ) {
+                    return;
+                }
             }
         }
     }

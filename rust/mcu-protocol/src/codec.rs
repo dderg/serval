@@ -34,6 +34,11 @@ pub enum DecodeError {
     EmptyArray {
         field: &'static str,
     },
+    /// A field that must be unique across a frame appeared twice (e.g. two
+    /// blocks for the same `axis_idx` in one `PushPieces`).
+    DuplicateField {
+        field: &'static str,
+    },
     BadUtf8,
 }
 
@@ -53,6 +58,9 @@ impl core::fmt::Display for DecodeError {
             }
             Self::EmptyArray { field } => {
                 write!(f, "required array {field} is empty")
+            }
+            Self::DuplicateField { field } => {
+                write!(f, "duplicate {field} in one frame")
             }
             Self::BadUtf8 => f.write_str("string bytes are not valid UTF-8"),
         }

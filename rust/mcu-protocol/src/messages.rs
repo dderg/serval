@@ -183,8 +183,31 @@ impl Decode for RuntimeCapsResponse {
     }
 }
 
+/// Usable `PushPieces` payload budget — mirrors `MCU_TX_BUF_SIZE` (256) in
+/// `src/mcu_transport_dispatch.c` minus the sync/len/channel/CRC framing. A
+/// single shared constant compiled into every chip's firmware; keep in sync.
+pub const PIECE_FRAME_PAYLOAD_MAX: usize = 250;
+
+/// Bytes of one axis block header (`axis_idx + piece_count + start_slot + new_head`).
+pub const AXIS_BLOCK_HEADER_LEN: usize = 8;
+
+/// Bytes of one encoded `PieceEntry`.
+pub const PIECE_ENTRY_LEN: usize = 32;
+
+/// Largest `piece_count` per axis that still lets an `axis_count`-axis frame fit
+/// `PIECE_FRAME_PAYLOAD_MAX`, assuming an even split. Parameterized off the
+/// shared budget — never a per-chip number. Returns 0 when even one piece per
+/// axis cannot fit (too many axes for the buffer).
+pub fn max_pieces_per_axis(axis_count: u8) -> usize {
+    let n = axis_count.max(1) as usize;
+    let avail = PIECE_FRAME_PAYLOAD_MAX.saturating_sub(1 + n * AXIS_BLOCK_HEADER_LEN);
+    (avail / PIECE_ENTRY_LEN) / n
+}
+
+/// One axis' pieces within a single-MCU `PushPieces` frame. Byte-identical to
+/// the pre-bundling single-axis layout, now repeated under `axis_count`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PushPieces {
+pub struct AxisPieces {
     pub axis_idx: u8,
     pub piece_count: u8,
     pub start_slot: u16,
@@ -192,69 +215,154 @@ pub struct PushPieces {
     pub pieces_bytes: Vec<u8>,
 }
 
+/// All of one MCU's axis blocks delivered in a single transaction. `axis_count`
+/// is the leading byte; `axis_count == 1` is the EtherCAT/single-axis case.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PushPieces {
+    pub axes: Vec<AxisPieces>,
+}
+
+impl PushPieces {
+    /// Build a single-axis frame — the common shape for single-axis MCUs.
+    pub fn single(
+        axis_idx: u8,
+        piece_count: u8,
+        start_slot: u16,
+        new_head: u32,
+        pieces_bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            axes: vec![AxisPieces {
+                axis_idx,
+                piece_count,
+                start_slot,
+                new_head,
+                pieces_bytes,
+            }],
+        }
+    }
+}
+
 impl Encode for PushPieces {
     fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.axis_idx);
-        put_u8(out, self.piece_count);
-        put_u16(out, self.start_slot);
-        put_u32(out, self.new_head);
-        out.extend_from_slice(&self.pieces_bytes);
+        put_u8(out, self.axes.len() as u8);
+        for a in &self.axes {
+            put_u8(out, a.axis_idx);
+            put_u8(out, a.piece_count);
+            put_u16(out, a.start_slot);
+            put_u32(out, a.new_head);
+            out.extend_from_slice(&a.pieces_bytes);
+        }
     }
 }
 
 impl Decode for PushPieces {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        let axis_idx = get_u8(c)?;
-        let piece_count = get_u8(c)?;
-        let start_slot = get_u16(c)?;
-        let new_head = get_u32(c)?;
-        let pieces_len = (piece_count as usize).checked_mul(32).ok_or(
-            DecodeError::ArrayLengthExceedsBuffer {
-                claimed: u32::from(piece_count),
-                available: c.remaining(),
-            },
-        )?;
-        if pieces_len > c.remaining() {
-            return Err(DecodeError::ArrayLengthExceedsBuffer {
-                claimed: u32::from(piece_count),
-                available: c.remaining(),
+        let axis_count = get_u8(c)?;
+        if axis_count == 0 {
+            return Err(DecodeError::EmptyArray {
+                field: "PushPieces.axes",
             });
         }
-        let mut pieces_bytes = vec![0u8; pieces_len];
-        for b in &mut pieces_bytes {
-            *b = get_u8(c)?;
+        let mut axes: Vec<AxisPieces> = Vec::with_capacity(axis_count as usize);
+        for _ in 0..axis_count {
+            let axis_idx = get_u8(c)?;
+            let piece_count = get_u8(c)?;
+            let start_slot = get_u16(c)?;
+            let new_head = get_u32(c)?;
+            let pieces_len = (piece_count as usize).checked_mul(PIECE_ENTRY_LEN).ok_or(
+                DecodeError::ArrayLengthExceedsBuffer {
+                    claimed: u32::from(piece_count),
+                    available: c.remaining(),
+                },
+            )?;
+            if pieces_len > c.remaining() {
+                return Err(DecodeError::ArrayLengthExceedsBuffer {
+                    claimed: u32::from(piece_count),
+                    available: c.remaining(),
+                });
+            }
+            if axes.iter().any(|a| a.axis_idx == axis_idx) {
+                return Err(DecodeError::DuplicateField {
+                    field: "PushPieces.axis_idx",
+                });
+            }
+            let mut pieces_bytes = vec![0u8; pieces_len];
+            for b in &mut pieces_bytes {
+                *b = get_u8(c)?;
+            }
+            axes.push(AxisPieces {
+                axis_idx,
+                piece_count,
+                start_slot,
+                new_head,
+                pieces_bytes,
+            });
         }
-        Ok(Self {
-            axis_idx,
-            piece_count,
-            start_slot,
-            new_head,
-            pieces_bytes,
-        })
+        Ok(Self { axes })
     }
 }
 
+/// Per-axis diagnostic echo in a `PushPiecesResponse` — the front piece's start
+/// time, used only for the host's transit-diag `arrival_lead`, never control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AxisDiag {
+    pub axis_idx: u8,
+    pub front_start_time: u64,
+}
+
+/// Frame-level response: one `result` verdict for the whole MCU transaction (a
+/// partial frame is desync, not partial success), one `arrival_clock` sampled at
+/// frame-receive-complete, and a per-axis diagnostic echo.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushPiecesResponse {
     pub result: i32,
     pub arrival_clock: u64,
-    pub front_start_time: u64,
+    pub axes: Vec<AxisDiag>,
+}
+
+impl PushPiecesResponse {
+    /// Build a single-axis response — the common shape for single-axis MCUs.
+    pub fn single(result: i32, arrival_clock: u64, axis_idx: u8, front_start_time: u64) -> Self {
+        Self {
+            result,
+            arrival_clock,
+            axes: vec![AxisDiag {
+                axis_idx,
+                front_start_time,
+            }],
+        }
+    }
 }
 
 impl Encode for PushPiecesResponse {
     fn encode(&self, out: &mut Vec<u8>) {
         put_i32(out, self.result);
         put_u64(out, self.arrival_clock);
-        put_u64(out, self.front_start_time);
+        put_u8(out, self.axes.len() as u8);
+        for a in &self.axes {
+            put_u8(out, a.axis_idx);
+            put_u64(out, a.front_start_time);
+        }
     }
 }
 
 impl Decode for PushPiecesResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let result = get_i32(c)?;
+        let arrival_clock = get_u64(c)?;
+        let axis_count = get_u8(c)?;
+        let mut axes: Vec<AxisDiag> = Vec::with_capacity(axis_count as usize);
+        for _ in 0..axis_count {
+            axes.push(AxisDiag {
+                axis_idx: get_u8(c)?,
+                front_start_time: get_u64(c)?,
+            });
+        }
         Ok(Self {
-            result: get_i32(c)?,
-            arrival_clock: get_u64(c)?,
-            front_start_time: get_u64(c)?,
+            result,
+            arrival_clock,
+            axes,
         })
     }
 }

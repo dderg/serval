@@ -156,105 +156,168 @@ fn status_heartbeat_short_frame_missing_ff_saturation_is_decode_error() {
 }
 
 #[test]
-fn push_pieces_roundtrip_single() {
+fn push_pieces_single_axis_round_trips() {
+    // axis_count(1) + block header(8) + 1 piece(32) = 41 bytes.
+    let msg = PushPieces::single(2, 1, 41, 5000, vec![0xAB; 32]);
+    let buf = msg.encoded_to_vec();
+    assert_eq!(buf.len(), 1 + 8 + 32);
+    assert_eq!(buf[0], 1, "leading axis_count byte");
+    let decoded = PushPieces::decode(&buf).expect("decode ok");
+    assert_eq!(decoded, msg);
+    let a = &decoded.axes[0];
+    assert_eq!(
+        (a.axis_idx, a.piece_count, a.start_slot, a.new_head),
+        (2, 1, 41, 5000)
+    );
+    assert_eq!(a.pieces_bytes, vec![0xAB; 32]);
+}
+
+#[test]
+fn push_pieces_three_axes_round_trip() {
     let msg = PushPieces {
-        axis_idx: 2,
+        axes: vec![
+            AxisPieces {
+                axis_idx: 0,
+                piece_count: 1,
+                start_slot: 0,
+                new_head: 1,
+                pieces_bytes: vec![0x10; 32],
+            },
+            AxisPieces {
+                axis_idx: 1,
+                piece_count: 2,
+                start_slot: 4,
+                new_head: 6,
+                pieces_bytes: vec![0x20; 64],
+            },
+            AxisPieces {
+                axis_idx: 2,
+                piece_count: 1,
+                start_slot: 7,
+                new_head: 8,
+                pieces_bytes: vec![0x30; 32],
+            },
+        ],
+    };
+    let buf = msg.encoded_to_vec();
+    // 1 + (8+32) + (8+64) + (8+32) = 153 bytes.
+    assert_eq!(buf.len(), 1 + (8 + 32) + (8 + 64) + (8 + 32));
+    assert_eq!(buf[0], 3);
+    assert_eq!(PushPieces::decode(&buf).expect("decode ok"), msg);
+}
+
+#[test]
+fn push_pieces_three_axes_one_piece_fits_frame_budget() {
+    let block = |axis| AxisPieces {
+        axis_idx: axis,
         piece_count: 1,
         start_slot: 0,
-        new_head: 0,
-        pieces_bytes: vec![0xAB; 32],
+        new_head: 1,
+        pieces_bytes: vec![0; 32],
     };
-    let mut buf = Vec::new();
-    msg.encode(&mut buf);
-    assert_eq!(buf.len(), 40);
-    let mut cursor = Cursor::new(&buf);
-    let decoded = PushPieces::decode_from(&mut cursor).unwrap();
-    assert_eq!(decoded.axis_idx, 2);
-    assert_eq!(decoded.piece_count, 1);
-    assert_eq!(decoded.start_slot, 0);
-    assert_eq!(decoded.new_head, 0);
-    assert_eq!(decoded.pieces_bytes.len(), 32);
-    assert_eq!(decoded.pieces_bytes[0], 0xAB);
-}
-
-#[test]
-fn push_pieces_v2_roundtrip_carries_slot_and_head() {
     let msg = PushPieces {
-        axis_idx: 2,
-        piece_count: 1,
-        start_slot: 41,
-        new_head: 5000,
-        pieces_bytes: vec![0xAB; 32],
+        axes: vec![block(0), block(1), block(2)],
     };
-    let mut buf = Vec::new();
-    msg.encode(&mut buf);
-    assert_eq!(buf.len(), 40);
-    let mut cursor = Cursor::new(&buf);
-    let decoded = PushPieces::decode_from(&mut cursor).unwrap();
-    assert_eq!(decoded.axis_idx, 2);
-    assert_eq!(decoded.piece_count, 1);
-    assert_eq!(decoded.start_slot, 41);
-    assert_eq!(decoded.new_head, 5000);
-    assert_eq!(decoded.pieces_bytes, vec![0xAB; 32]);
+    assert!(
+        msg.encoded_to_vec().len() <= PIECE_FRAME_PAYLOAD_MAX,
+        "3 axes x 1 piece must fit the shared MCU frame budget"
+    );
 }
 
 #[test]
-fn push_pieces_roundtrip_multiple() {
-    let msg = PushPieces {
-        axis_idx: 0,
-        piece_count: 3,
-        start_slot: 0,
-        new_head: 0,
-        pieces_bytes: vec![0x42; 96],
-    };
-    let mut buf = Vec::new();
-    msg.encode(&mut buf);
-    assert_eq!(buf.len(), 8 + 3 * 32);
-    let mut cursor = Cursor::new(&buf);
-    let decoded = PushPieces::decode_from(&mut cursor).unwrap();
-    assert_eq!(decoded.piece_count, 3);
-    assert_eq!(decoded.start_slot, 0);
-    assert_eq!(decoded.new_head, 0);
-    assert_eq!(decoded.pieces_bytes.len(), 96);
+fn max_pieces_per_axis_is_at_least_one_for_realistic_axis_counts() {
+    for n in 1..=6u8 {
+        assert!(
+            max_pieces_per_axis(n) >= 1,
+            "axis_count {n} must admit at least one piece per axis within the frame budget"
+        );
+        // And a frame built to that cap must actually fit.
+        let pc = max_pieces_per_axis(n) as u8;
+        let axes = (0..n)
+            .map(|axis| AxisPieces {
+                axis_idx: axis,
+                piece_count: pc,
+                start_slot: 0,
+                new_head: u32::from(pc),
+                pieces_bytes: vec![0; 32 * pc as usize],
+            })
+            .collect();
+        assert!(PushPieces { axes }.encoded_to_vec().len() <= PIECE_FRAME_PAYLOAD_MAX);
+    }
 }
 
 #[test]
-fn push_pieces_response_roundtrip() {
-    // Wire layout: result(i32 LE, 4 bytes) | arrival_clock(u64 LE, 8 bytes) |
-    //              front_start_time(u64 LE, 8 bytes) = 20 bytes total.
+fn push_pieces_decode_axis_count_zero_is_err() {
+    assert_eq!(
+        PushPieces::decode(&[0u8]).unwrap_err(),
+        DecodeError::EmptyArray {
+            field: "PushPieces.axes"
+        }
+    );
+}
+
+#[test]
+fn push_pieces_decode_duplicate_axis_idx_is_err() {
+    // axis_count=2; two complete blocks both axis_idx=1, piece_count=0.
+    let mut buf = vec![2u8];
+    for _ in 0..2 {
+        buf.extend_from_slice(&[1, 0]); // axis_idx=1, piece_count=0
+        buf.extend_from_slice(&0u16.to_le_bytes()); // start_slot
+        buf.extend_from_slice(&0u32.to_le_bytes()); // new_head
+    }
+    assert_eq!(
+        PushPieces::decode(&buf).unwrap_err(),
+        DecodeError::DuplicateField {
+            field: "PushPieces.axis_idx"
+        }
+    );
+}
+
+#[test]
+fn push_pieces_decode_truncated_is_err() {
+    let full = PushPieces::single(0, 1, 0, 0, vec![0xCD; 32]).encoded_to_vec();
+    assert!(
+        PushPieces::decode(&full[..full.len() - 5]).is_err(),
+        "a frame missing piece bytes must fail to decode, not read garbage"
+    );
+}
+
+#[test]
+fn push_pieces_response_frame_level_round_trips() {
+    // result(i32) | arrival_clock(u64) | axis_count(u8) | per-axis(axis_idx u8 + front_start_time u64).
     let msg = PushPiecesResponse {
         result: -2,
         arrival_clock: 0x0102_0304_0506_0708_u64,
-        front_start_time: 0xDEAD_BEEF_CAFE_1234_u64,
+        axes: vec![
+            AxisDiag {
+                axis_idx: 0,
+                front_start_time: 0xDEAD_BEEF_CAFE_1234,
+            },
+            AxisDiag {
+                axis_idx: 2,
+                front_start_time: 0x1111_2222_3333_4444,
+            },
+        ],
     };
     let buf = msg.encoded_to_vec();
-    assert_eq!(
-        buf.len(),
-        20,
-        "PushPiecesResponse body must be exactly 20 bytes"
-    );
+    assert_eq!(buf.len(), 4 + 8 + 1 + 2 * (1 + 8));
     assert_eq!(&buf[0..4], &0xFFFF_FFFE_u32.to_le_bytes());
-    assert_eq!(&buf[4..12], &0x0102_0304_0506_0708_u64.to_le_bytes());
-    assert_eq!(&buf[12..20], &0xDEAD_BEEF_CAFE_1234_u64.to_le_bytes());
-    let decoded = PushPiecesResponse::decode(&buf).expect("decode ok");
-    assert_eq!(decoded.result, -2);
-    assert_eq!(decoded.arrival_clock, 0x0102_0304_0506_0708_u64);
-    assert_eq!(decoded.front_start_time, 0xDEAD_BEEF_CAFE_1234_u64);
+    assert_eq!(buf[12], 2, "axis_count byte");
+    assert_eq!(PushPiecesResponse::decode(&buf).expect("decode ok"), msg);
 }
 
 #[test]
-fn push_pieces_response_error_path_zeros() {
-    let msg = PushPiecesResponse {
-        result: -7,
-        arrival_clock: 0,
-        front_start_time: 0,
-    };
-    let buf = msg.encoded_to_vec();
-    assert_eq!(buf.len(), 20);
-    let decoded = PushPiecesResponse::decode(&buf).expect("decode ok");
-    assert_eq!(decoded.result, -7);
-    assert_eq!(decoded.arrival_clock, 0);
-    assert_eq!(decoded.front_start_time, 0);
+fn push_pieces_response_single_helper_round_trips() {
+    let msg = PushPiecesResponse::single(0, 7, 1, 9000);
+    let decoded = PushPiecesResponse::decode(&msg.encoded_to_vec()).expect("decode ok");
+    assert_eq!(decoded, msg);
+    assert_eq!(
+        decoded.axes[0],
+        AxisDiag {
+            axis_idx: 1,
+            front_start_time: 9000
+        }
+    );
 }
 
 #[test]

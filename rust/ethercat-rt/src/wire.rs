@@ -248,14 +248,11 @@ pub fn push_pieces_response_frame(
     cid: u32,
     result: i32,
     arrival_clock: u64,
+    axis_idx: u8,
     front_start_time: u64,
 ) -> Vec<u8> {
-    let body = PushPiecesResponse {
-        result,
-        arrival_clock,
-        front_start_time,
-    }
-    .encoded_to_vec();
+    let body = PushPiecesResponse::single(result, arrival_clock, axis_idx, front_start_time)
+        .encoded_to_vec();
     control_frame(MessageKind::PushPiecesResponse, cid, &body)
 }
 

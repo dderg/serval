@@ -1,5 +1,5 @@
 use std::os::unix::io::FromRawFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use host_rt::host_io::{McuHostIo, McuHostIoConfig};
@@ -277,7 +277,7 @@ fn stream_config_from(cfg: &PlannerConfig) -> (crate::stream::StreamConfig, Vec<
         chain: geometry::ChainFitConfig::default(),
         velocity: geometry::VelocityConfig::default(),
         fit_tol_mm: cfg.fit_tolerance_mm,
-        keep_secs: 0.5,
+        max_buffer_moves: 64,
         limits: test_limits(),
     };
     (sc, vec![0.0; cfg.axis_registry.n_axes().max(3)])
@@ -477,6 +477,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                 },
                 |_key: AxisKey, _n: u32| {},
                 |_msg: String| {},
+                Arc::new(AtomicU64::new(0)),
             );
         })
         .expect("spawn test pump thread");

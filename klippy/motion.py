@@ -5,12 +5,13 @@ import signal
 import struct
 from collections import defaultdict
 
-from . import motion_kinematics, stepper
+from . import motion_kinematics, stepper, structured_log
 from .arc_fit_config import arc_fit_from_config
 from .extras import servo_axis
 from .kinematics import extruder
 
 DRAIN_TIMEOUT = 60.0
+REACTOR_YIELD_INTERVAL = 0.020
 _LEGACY_STEPPER_AXES = frozenset("xyzab")
 _LEGACY_SERVO_SECTIONS = ("servo_x", "servo_y", "servo_z")
 
@@ -124,8 +125,15 @@ class Motion:
         self._read_axes(config)
         self._read_post_processors(config)
         self._read_arc_fit(config)
-        self.print_time = 0.0
         self.print_stall = 0
+        self.buffer_time_high = config.getfloat(
+            "buffer_time_high", 2.0, above=0.0
+        )
+        self.buffer_time_low = config.getfloat(
+            "buffer_time_low", 1.0, minval=0.0, maxval=self.buffer_time_high
+        )
+        self._drip_active = False
+        self._last_reactor_yield = 0.0
         gcode = printer.lookup_object("gcode")
         self.Coord = gcode.Coord
         self.extruder = extruder.DummyExtruder(printer)
@@ -382,7 +390,9 @@ class Motion:
         return velocity, accel
 
     def get_status(self, eventtime):
-        print_time = self.print_time
+        # print_time is the MCU-clock end of the last queued move (the frontier),
+        # like mainline's toolhead.print_time — not a constant.
+        print_time = self._mcu_pending_end_time
         estimated_print_time = self.mcu.estimated_print_time(eventtime)
         velocity, accel, scv = self._effective_limits()
         res = dict(self.kin.get_status(eventtime))
@@ -454,13 +464,11 @@ class Motion:
             feedrate,
         )
         self._fire_active_callbacks(move.axes_d)
-        engine_lmt_before = self.engine.get_last_move_time()
         self.engine.submit_move(dx, dy, dz, de, feedrate)
-        self._bump_pending_end_time(
-            self.engine.get_last_move_time() - engine_lmt_before
-        )
+        self._bump_pending_end_time(move.min_move_t)
         self.commanded_pos[:] = move.end_pos
         self._sync_print_time()
+        self._check_pause()
 
     def move_curve(self, newpos, interior_control_points, submit, speed):
         self.resync_parked_servos()
@@ -483,13 +491,11 @@ class Motion:
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
             feedrate = min(feedrate, self.max_z_velocity)
         self._fire_active_callbacks([dx, dy, dz, de])
-        engine_lmt_before = self.engine.get_last_move_time()
         submit(dx, dy, dz, de, feedrate)
-        self._bump_pending_end_time(
-            self.engine.get_last_move_time() - engine_lmt_before
-        )
+        self._bump_pending_end_time(move.min_move_t)
         self.commanded_pos[:] = list(newpos)
         self._sync_print_time()
+        self._check_pause()
 
     def _fire_active_callbacks(self, axes_d):
         if self.kin is None:
@@ -525,13 +531,18 @@ class Motion:
     def drip_move(self, newpos, speed, drip_completion):
         if drip_completion is not None and drip_completion.test():
             return
-        self.move(newpos, speed)
+        self._drip_active = True
+        try:
+            self.move(newpos, speed)
+        finally:
+            self._drip_active = False
 
     def dwell(self, delay):
         self.engine.submit_dwell(delay)
         if delay > 0.0:
             self._bump_pending_end_time(delay)
             self._sync_print_time()
+        self._check_pause()
 
     def wait_moves(self):
         self._drain_to_mcu_execution()
@@ -601,6 +612,51 @@ class Motion:
         est = self.mcu.estimated_print_time(self.reactor.monotonic())
         base = max(self._mcu_pending_end_time, est)
         self._mcu_pending_end_time = base + duration_added
+
+    def _yield_to_reactor_if_due(self, now):
+        if now - self._last_reactor_yield > REACTOR_YIELD_INTERVAL:
+            self.reactor.pause(self.reactor.NOW)
+            now = self.reactor.monotonic()
+            self._last_reactor_yield = now
+        return now
+
+    def _check_pause(self):
+        if self.mcu is None or self._drip_active:
+            return
+        now = self._yield_to_reactor_if_due(self.reactor.monotonic())
+        est = self.mcu.estimated_print_time(now)
+        buffer_time = self._mcu_pending_end_time - est
+        if buffer_time <= self.buffer_time_high:
+            return
+        wait_start = now
+        structured_log.event(
+            "motion",
+            "feed_throttle_enter",
+            buffer_time=round(buffer_time, 4),
+            est=round(est, 4),
+            pending_end=round(self._mcu_pending_end_time, 4),
+        )
+        deadline = now + DRAIN_TIMEOUT
+        while buffer_time > self.buffer_time_low:
+            now = self.reactor.monotonic()
+            if now >= deadline:
+                raise self.printer.command_error(
+                    "motion backpressure: buffer_time=%.3fs did not drain "
+                    "within %.0fs (MCU not retiring moves)"
+                    % (buffer_time, DRAIN_TIMEOUT)
+                )
+            self.reactor.pause(now + 0.010)
+            self._last_reactor_yield = self.reactor.monotonic()
+            est = self.mcu.estimated_print_time(self._last_reactor_yield)
+            buffer_time = self._mcu_pending_end_time - est
+        structured_log.event(
+            "motion",
+            "feed_throttle_exit",
+            waited_s=round(self.reactor.monotonic() - wait_start, 4),
+            buffer_time=round(buffer_time, 4),
+            est=round(est, 4),
+            pending_end=round(self._mcu_pending_end_time, 4),
+        )
 
     def check_busy(self, eventtime):
         est_print_time = self.mcu.estimated_print_time(eventtime)
@@ -803,14 +859,26 @@ class Motion:
         self.engine.set_square_corner_velocity(None)
 
     def stats(self, eventtime):
-        max_queue_time = max(self.print_time, self._mcu_pending_end_time)
+        max_queue_time = self._mcu_pending_end_time
         for m in self.all_mcus:
             if getattr(m, "non_critical_disconnected", False):
                 continue
             m.check_active(max_queue_time, eventtime)
-        return False, "print_time=%.3f buffer_time=0.000 print_stall=%d" % (
-            self.print_time,
-            self.print_stall,
+        buffer_time = 0.0
+        pump_backlog = 0
+        if self.mcu is not None:
+            est = self.mcu.estimated_print_time(eventtime)
+            buffer_time = self._mcu_pending_end_time - est
+            pump_backlog = self.engine.pump_backlog()
+        return (
+            False,
+            "print_time=%.3f buffer_time=%.3f pump_backlog=%d print_stall=%d"
+            % (
+                self._mcu_pending_end_time,
+                buffer_time,
+                pump_backlog,
+                self.print_stall,
+            ),
         )
 
     def _declared_axis_order(self):

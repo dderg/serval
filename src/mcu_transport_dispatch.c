@@ -15,17 +15,11 @@ extern void *runtime_handle;
 extern int kalico_console_write_raw(const uint8_t *buf, uint16_t len);
 
 #define MCU_FRAME_SYNC 0x55
-#define MESSAGE_VERSION_DEFAULT 0x01
-
-#define RUNTIME_ERR_INVALID_CURVE -2
-#define RUNTIME_ERR_NOT_INIT      -7
-
-// type:u16_le | version:u8 | corr_id:u32_le.
-#define PER_MESSAGE_HEADER_LEN 7
 
 #define IDENTIFY_RESPONSE_BODY_LEN 81
 
-#define MCU_TX_BUF_SIZE 256
+// MCU_TX_BUF_SIZE, PER_MESSAGE_HEADER_LEN, MESSAGE_VERSION_DEFAULT and the
+// RUNTIME_ERR_* codes live in mcu_transport_dispatch.h (shared with piece_sink).
 static uint8_t tx_buf[MCU_TX_BUF_SIZE];
 
 static uint32_t reset_epoch;
@@ -103,7 +97,7 @@ mcu_transport_send_frame(uint8_t channel, const uint8_t *payload,
     return kalico_console_write_raw(tx_buf, (uint16_t)total);
 }
 
-static void
+void
 encode_message_header(uint8_t *out, uint16_t kind, uint8_t version,
                       uint32_t correlation_id)
 {
@@ -266,171 +260,9 @@ handle_query_motor_state(uint32_t correlation_id, const uint8_t *body,
     mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, used);
 }
 
-// Pieces wire layout streamed through piece_sink_feed (the sink sees only the
-// CRC-covered payload; envelope + CRC are the demuxer's):
-//   per-message header (7): type u16_le | version u8 | corr_id u32_le
-//   piece header       (8): axis_idx u8 | piece_count u8 | start_slot u16_le
-//                           | new_head u32_le
-//   then piece_count entries of 32 bytes each.
-// Combined header offsets: corr_id [3..7), axis_idx [7], piece_count [8],
-// start_slot [9..11), new_head [11..15). Each piece lands at
-// (start_slot + index) % ring_depth; frontier advances only in commit.
-#define PIECE_SINK_HEADER_LEN (PER_MESSAGE_HEADER_LEN + 8u)
-#define PIECE_ENTRY_LEN       32u
-// Bounds the write index against a malformed over-long frame; such a frame is
-// rejected anyway by the piece_count self-check in piece_sink_commit.
-#define PIECE_SINK_MAX_PIECES 0xFFu
-
-// PushPiecesResponse body (must match Rust decode):
-//   result i32_le | arrival_clock u64_le | front_start_time u64_le = 20 bytes.
-static void
-send_push_pieces_response(uint32_t correlation_id, int32_t result,
-                          uint64_t arrival_clock, uint64_t front_start_time)
-{
-    uint8_t payload[PER_MESSAGE_HEADER_LEN + 4 + 16];
-    encode_message_header(payload, MCU_MSG_PUSH_PIECES_RESPONSE,
-                          MESSAGE_VERSION_DEFAULT, correlation_id);
-    uint8_t *b = &payload[PER_MESSAGE_HEADER_LEN];
-    b[0] = (uint8_t)(result & 0xFF);
-    b[1] = (uint8_t)((result >> 8) & 0xFF);
-    b[2] = (uint8_t)((result >> 16) & 0xFF);
-    b[3] = (uint8_t)((result >> 24) & 0xFF);
-    b[4]  = (uint8_t)(arrival_clock & 0xFF);
-    b[5]  = (uint8_t)((arrival_clock >> 8) & 0xFF);
-    b[6]  = (uint8_t)((arrival_clock >> 16) & 0xFF);
-    b[7]  = (uint8_t)((arrival_clock >> 24) & 0xFF);
-    b[8]  = (uint8_t)((arrival_clock >> 32) & 0xFF);
-    b[9]  = (uint8_t)((arrival_clock >> 40) & 0xFF);
-    b[10] = (uint8_t)((arrival_clock >> 48) & 0xFF);
-    b[11] = (uint8_t)((arrival_clock >> 56) & 0xFF);
-    b[12] = (uint8_t)(front_start_time & 0xFF);
-    b[13] = (uint8_t)((front_start_time >> 8) & 0xFF);
-    b[14] = (uint8_t)((front_start_time >> 16) & 0xFF);
-    b[15] = (uint8_t)((front_start_time >> 24) & 0xFF);
-    b[16] = (uint8_t)((front_start_time >> 32) & 0xFF);
-    b[17] = (uint8_t)((front_start_time >> 40) & 0xFF);
-    b[18] = (uint8_t)((front_start_time >> 48) & 0xFF);
-    b[19] = (uint8_t)((front_start_time >> 56) & 0xFF);
-    mcu_transport_send_frame(MCU_CHANNEL_CONTROL,
-                                payload, sizeof(payload));
-}
-
-// Single-threaded foreground (same context as mcu_demux_pump); no locking.
-static struct {
-    uint8_t  header[PIECE_SINK_HEADER_LEN];
-    uint8_t  scratch[PIECE_ENTRY_LEN];
-    uint32_t bytes_seen;
-    uint32_t pieces_seen;
-    uint32_t correlation_id;
-    uint32_t new_head;
-    uint16_t start_slot;
-    uint8_t  axis_idx;
-    uint8_t  piece_count;
-    uint8_t  header_parsed;
-    int32_t  write_rc;
-    uint64_t first_start_time;
-} piece_sink;
-
-void
-piece_sink_begin(void)
-{
-    piece_sink.bytes_seen = 0;
-    piece_sink.pieces_seen = 0;
-    piece_sink.header_parsed = 0;
-    piece_sink.write_rc = 0;
-    piece_sink.correlation_id = 0;
-    piece_sink.new_head = 0;
-    piece_sink.start_slot = 0;
-    piece_sink.axis_idx = 0;
-    piece_sink.piece_count = 0;
-    piece_sink.first_start_time = 0;
-}
-
-void
-piece_sink_feed(uint8_t b)
-{
-    uint32_t i = piece_sink.bytes_seen;
-    if (i < PIECE_SINK_HEADER_LEN) {
-        piece_sink.header[i] = b;
-        piece_sink.bytes_seen = i + 1;
-        if (piece_sink.bytes_seen == PIECE_SINK_HEADER_LEN) {
-            const uint8_t *h = piece_sink.header;
-            piece_sink.correlation_id = (uint32_t)h[3]
-                                      | ((uint32_t)h[4] << 8)
-                                      | ((uint32_t)h[5] << 16)
-                                      | ((uint32_t)h[6] << 24);
-            piece_sink.axis_idx    = h[7];
-            piece_sink.piece_count = h[8];
-            piece_sink.start_slot  = (uint16_t)h[9]
-                                   | ((uint16_t)h[10] << 8);
-            piece_sink.new_head    = (uint32_t)h[11]
-                                   | ((uint32_t)h[12] << 8)
-                                   | ((uint32_t)h[13] << 16)
-                                   | ((uint32_t)h[14] << 24);
-            piece_sink.header_parsed = 1;
-        }
-        return;
-    }
-    uint32_t piece_off = (i - PIECE_SINK_HEADER_LEN) % PIECE_ENTRY_LEN;
-    piece_sink.scratch[piece_off] = b;
-    piece_sink.bytes_seen = i + 1;
-    if (piece_off == PIECE_ENTRY_LEN - 1) {
-        if (piece_sink.pieces_seen == 0) {
-            piece_sink.first_start_time =
-                (uint64_t)piece_sink.scratch[0]
-                | ((uint64_t)piece_sink.scratch[1] << 8)
-                | ((uint64_t)piece_sink.scratch[2] << 16)
-                | ((uint64_t)piece_sink.scratch[3] << 24)
-                | ((uint64_t)piece_sink.scratch[4] << 32)
-                | ((uint64_t)piece_sink.scratch[5] << 40)
-                | ((uint64_t)piece_sink.scratch[6] << 48)
-                | ((uint64_t)piece_sink.scratch[7] << 56);
-        }
-        // Written pre-CRC; the slot stays invisible to the ISR until commit
-        // advances the frontier.
-        if (runtime_handle && piece_sink.pieces_seen < PIECE_SINK_MAX_PIECES) {
-            int32_t r = runtime_write_piece(
-                runtime_handle, piece_sink.axis_idx, piece_sink.start_slot,
-                (uint8_t)piece_sink.pieces_seen, piece_sink.scratch);
-            if (r != 0 && piece_sink.write_rc == 0)
-                piece_sink.write_rc = r;
-        }
-        piece_sink.pieces_seen++;
-    }
-}
-
-void
-piece_sink_commit(void)
-{
-    uint32_t clk_lo = timer_read_time();
-    uint32_t clk_hi = stats_send_time_high + (clk_lo < stats_send_time);
-    uint64_t arrival_clock = ((uint64_t)clk_hi << 32) | (uint64_t)clk_lo;
-
-    if (!runtime_handle) {
-        send_push_pieces_response(piece_sink.correlation_id,
-                                  RUNTIME_ERR_NOT_INIT, 0, 0);
-        return;
-    }
-    if (!piece_sink.header_parsed) {
-        send_push_pieces_response(0, RUNTIME_ERR_INVALID_CURVE, 0, 0);
-        return;
-    }
-    // CRC catches bit-corruption but not a count/length logic mismatch; if the
-    // streamed piece count disagrees with the declared piece_count, refuse to
-    // advance the frontier (partial slots stay below the head, ISR-invisible).
-    if (piece_sink.pieces_seen != (uint32_t)piece_sink.piece_count) {
-        send_push_pieces_response(piece_sink.correlation_id,
-                                  RUNTIME_ERR_INVALID_CURVE, 0, 0);
-        return;
-    }
-    int32_t rc = piece_sink.write_rc;
-    if (rc == 0) {
-        rc = runtime_commit_head(
-            runtime_handle, piece_sink.axis_idx, piece_sink.new_head);
-    }
-    send_push_pieces_response(piece_sink.correlation_id, rc,
-                              arrival_clock, piece_sink.first_start_time);
-}
+// The PushPieces piece_sink (multi-axis streaming parser + frame-level response)
+// lives in src/piece_sink.c so it is host-fuzzable in isolation; it builds on
+// the transport seam declared in mcu_transport_dispatch.h.
 
 void
 send_status_heartbeat(void)

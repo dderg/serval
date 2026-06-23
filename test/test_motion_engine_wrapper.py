@@ -1,6 +1,7 @@
 from klippy.motion_engine import (
     _STUB_MOTION_METHODS,
     MotionEngineWrapper,
+    _StubEngine,
 )
 
 
@@ -23,6 +24,10 @@ class FakeNativeHandle:
                 accel,
             )
         )
+        return self.return_value
+
+    def dispatched_lead_secs(self):
+        self.calls.append(("dispatched_lead_secs",))
         return self.return_value
 
 
@@ -52,3 +57,24 @@ def test_stub_motion_methods_updated():
     assert "submit_nudge" in _STUB_MOTION_METHODS
     assert "adjust_motor" not in _STUB_MOTION_METHODS
     assert "submit_correction_sequence" not in _STUB_MOTION_METHODS
+
+
+def test_dispatched_lead_secs_forwards_and_coerces_none():
+    # The host backpressure gate (motion._check_pause) calls this on the wrapper.
+    # A missing forwarder raises AttributeError on real hardware — the wrapper
+    # only forwards native calls it explicitly defines (no __getattr__).
+    handle = FakeNativeHandle(return_value=0.72)
+    wrapper = make_wrapper(handle)
+    assert wrapper.dispatched_lead_secs() == 0.72
+    assert handle.calls == [("dispatched_lead_secs",)]
+
+    none_handle = FakeNativeHandle(return_value=None)
+    assert make_wrapper(none_handle).dispatched_lead_secs() == 0.0
+
+
+def test_stub_engine_answers_gate_accessors():
+    # The gate must not crash under the config-only stub: every accessor it reads
+    # returns a number, never None (which would TypeError the watermark compare).
+    stub = _StubEngine()
+    assert stub.dispatched_lead_secs() == 0.0
+    assert stub.queued_motion_secs() == 0.0

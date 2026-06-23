@@ -84,25 +84,29 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x0060,
         name: "PushPieces",
-        version: 2,
+        version: 3,
         channel: "pieces",
         fields: &[
-            SchemaField { name: "axis_idx", ty: "u8" },
-            SchemaField { name: "piece_count", ty: "u8" },
-            SchemaField { name: "start_slot", ty: "u16" },
-            SchemaField { name: "new_head", ty: "u32" },
-            SchemaField { name: "pieces_bytes", ty: "array<u8>" },
+            SchemaField { name: "axis_count", ty: "u8" },
+            SchemaField {
+                name: "axes",
+                ty: "array<axis_pieces{axis_idx:u8,piece_count:u8,start_slot:u16,new_head:u32,pieces:array<u8>}>",
+            },
         ],
     },
     SchemaMessage {
         type_tag: 0x0061,
         name: "PushPiecesResponse",
-        version: 2,
+        version: 3,
         channel: "control",
         fields: &[
             SchemaField { name: "result", ty: "i32" },
             SchemaField { name: "arrival_clock", ty: "u64" },
-            SchemaField { name: "front_start_time", ty: "u64" },
+            SchemaField { name: "axis_count", ty: "u8" },
+            SchemaField {
+                name: "axes",
+                ty: "array<axis_diag{axis_idx:u8,front_start_time:u64}>",
+            },
         ],
     },
     SchemaMessage {

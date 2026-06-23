@@ -31,13 +31,7 @@ fn push_pieces_wire_frame(cid: u32, axis: u8, pieces: &[PieceEntry], new_head: u
     for p in pieces {
         pieces_bytes.extend_from_slice(&p.to_le_bytes());
     }
-    let msg = PushPieces {
-        axis_idx: axis,
-        piece_count: pieces.len() as u8,
-        start_slot: 0,
-        new_head,
-        pieces_bytes,
-    };
+    let msg = PushPieces::single(axis, pieces.len() as u8, 0, new_head, pieces_bytes);
     let mut body = Vec::new();
     msg.encode(&mut body);
     let mut payload =
@@ -138,14 +132,16 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                         correlation_id,
                         msg,
                     } => {
-                        let front_start_time = if msg.piece_count > 0 && msg.pieces_bytes.len() >= 8
+                        let axis = &msg.axes[0];
+                        let front_start_time = if axis.piece_count > 0
+                            && axis.pieces_bytes.len() >= 8
                         {
-                            u64::from_le_bytes(msg.pieces_bytes[0..8].try_into().unwrap_or([0; 8]))
+                            u64::from_le_bytes(axis.pieces_bytes[0..8].try_into().unwrap_or([0; 8]))
                         } else {
                             0
                         };
-                        let pushed = ring.push_from_bytes(msg.piece_count, &msg.pieces_bytes);
-                        let result = if pushed == msg.piece_count {
+                        let pushed = ring.push_from_bytes(axis.piece_count, &axis.pieces_bytes);
+                        let result = if pushed == axis.piece_count {
                             0i32
                         } else {
                             -309
@@ -154,6 +150,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                             correlation_id,
                             result,
                             BASE_NS,
+                            axis.axis_idx,
                             front_start_time,
                         ));
                         push_received = true;
