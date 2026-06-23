@@ -564,14 +564,10 @@ fn planner_err(e: StreamPlannerError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
-/// Look-ahead horizon the streaming planner holds back from each non-forced
-/// commit, so newly-arriving moves are planned with their predecessors still
-/// buffered. Drained to rest on flush/dwell/idle.
-const STREAM_KEEP_SECS: f64 = 0.5;
 /// Backstop only. The continuity commit drains at every blend, so the buffer
-/// normally hovers near the `keep_secs` look-ahead tail; this force-drain to
-/// rest fires solely when no clean seam exists within reach. Set well above a
-/// realistic look-ahead tail so a dense (but normal) stream never trips it.
+/// normally hovers near the open-tail length past the finality barrier; this
+/// force-drain to rest fires solely when no clean seam exists within reach. Set
+/// well above a realistic open tail so a dense (but normal) stream never trips it.
 const STREAM_MAX_BUFFER_MOVES: usize = 512;
 /// Velocity-profile ODE/sampling tolerance for the streaming planner, in v²
 /// units. The offline default (1e-7) drives the adaptive RK4 to a precision far
@@ -3351,7 +3347,6 @@ impl PyMotionEngine {
                     ..geometry::VelocityConfig::default()
                 },
                 fit_tol_mm: cfg.fit_tolerance_mm,
-                keep_secs: STREAM_KEEP_SECS,
                 max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
                 limits: geometry::VelocityLimits::try_new(
                     cart.max_velocity,

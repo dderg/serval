@@ -4,7 +4,7 @@
 // thread / wall-clock), so it isolates the planner geometry from timing.
 //
 //   cargo run --release -p motion-engine --example dump_stream_trajectory -- \
-//       <file.gcode> <out.csv> [--cap N] [--keep-secs S] [--dt S]
+//       <file.gcode> <out.csv> [--cap N] [--dt S]
 
 use std::env;
 use std::fs;
@@ -76,15 +76,12 @@ impl Pos {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        eprintln!(
-            "usage: dump_stream_trajectory <in.gcode> <out.csv> [--cap N] [--keep-secs S] [--dt S]"
-        );
+        eprintln!("usage: dump_stream_trajectory <in.gcode> <out.csv> [--cap N] [--dt S]");
         process::exit(1);
     }
     let in_path = &args[1];
     let out_path = &args[2];
     let mut cap = COALESCE_BATCH_MOVES;
-    let mut keep_secs = 0.5;
     let mut dt = 0.005;
     let mut i = 3;
     while i < args.len() {
@@ -92,10 +89,6 @@ fn main() {
             "--cap" => {
                 i += 1;
                 cap = args[i].parse().unwrap();
-            }
-            "--keep-secs" => {
-                i += 1;
-                keep_secs = args[i].parse().unwrap();
             }
             "--dt" => {
                 i += 1;
@@ -122,7 +115,6 @@ fn main() {
             ..VelocityConfig::default()
         },
         fit_tol_mm: 1e-3,
-        keep_secs,
         max_buffer_moves: 512,
         limits,
     };

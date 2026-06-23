@@ -606,6 +606,44 @@ fn warm_start_negative_or_nan_entry_is_invalid_config() {
 }
 
 #[test]
+fn barrier_is_the_last_cruise_seam_not_the_terminal_rest() {
+    // Four collinear cruise edges. Each reaches the 100 mm/s feed and the final
+    // brake to the buffer's tentative terminal rest fits inside the last edge, so
+    // the entry of the last move (seam n-1) is still at cruise — that is the
+    // barrier. The terminal seam (n, v=0) must never be selected.
+    let out = outcome(
+        vec![
+            line_move(60.0, 100.0, 300.0, 1500.0, 1),
+            line_move(60.0, 100.0, 300.0, 1500.0, 2),
+            line_move(60.0, 100.0, 300.0, 1500.0, 3),
+            line_move(60.0, 100.0, 300.0, 1500.0, 4),
+        ],
+        Vec::new(),
+    );
+    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let n = plan.moves.len();
+    assert!(plan.barrier < n, "terminal rest must never be the barrier");
+    assert_eq!(plan.barrier, n - 1);
+    assert!(
+        (plan.v_barrier - 100.0).abs() < 1e-6,
+        "barrier pinned to cruise, got v_barrier {}",
+        plan.v_barrier
+    );
+}
+
+#[test]
+fn warm_start_steep_decel_entry_is_not_rejected_as_a_rest_anchor() {
+    // A short window entered fast: braking 57 -> 0 needs 57^2/(2*1000) = 1.62 mm,
+    // which fits in 2 mm (feasible, passes the OverCommitted guard) but is steep.
+    // The warm-start entry (v>0) must keep its real decel; it must NOT be
+    // force-rested and rejected with RestAnchorAccel the way a true v=0 anchor is.
+    let out = outcome(vec![line_move(2.0, 60.0, 100.0, 1000.0, 89)], Vec::new());
+    let plan = plan_velocity_warm_start(&out, VelocityConfig::default(), 57.0)
+        .expect("feasible steep brake-to-rest must not be rejected as a corrupt rest anchor");
+    assert_eq!(plan.moves[0].entry_v, 57.0);
+}
+
+#[test]
 fn pin_rest_anchor_raises_on_nonzero_entry_accel() {
     let mut s = VelSample {
         s: 0.0,

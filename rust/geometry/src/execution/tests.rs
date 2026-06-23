@@ -64,6 +64,8 @@ fn profile(moves: Vec<MoveVelocity>) -> VelocityProfile {
     VelocityProfile {
         moves,
         report: VelocityReport::default(),
+        barrier: 0,
+        v_barrier: 0.0,
     }
 }
 

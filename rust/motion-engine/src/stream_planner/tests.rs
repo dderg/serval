@@ -37,16 +37,15 @@ impl Capture {
     }
 }
 
-fn cfg(keep_secs: f64) -> StreamConfig {
-    cfg_cap(keep_secs, 64)
+fn cfg() -> StreamConfig {
+    cfg_cap(64)
 }
 
-fn cfg_cap(keep_secs: f64, max_buffer_moves: usize) -> StreamConfig {
+fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
     StreamConfig {
         chain: ChainFitConfig::default(),
         velocity: VelocityConfig::default(),
         fit_tol_mm: 1e-3,
-        keep_secs,
         max_buffer_moves,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
     }
@@ -106,7 +105,7 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
     // contiguous, complete trajectory is the pass condition.
     let cap = Capture::default();
     let mut h = StreamPlannerHandle::spawn(
-        cfg(0.5),
+        cfg(),
         vec![99.158, 99.158, 0.2, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
@@ -156,7 +155,7 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
 fn streams_collinear_moves_to_a_contiguous_trajectory() {
     let cap = Capture::default();
     let mut h = StreamPlannerHandle::spawn(
-        cfg(1.0),
+        cfg(),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
@@ -192,7 +191,7 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
 fn dwell_inserts_a_time_gap_then_resumes() {
     let cap = Capture::default();
     let mut h = StreamPlannerHandle::spawn(
-        cfg(1.0),
+        cfg(),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
@@ -222,7 +221,7 @@ fn dwell_inserts_a_time_gap_then_resumes() {
 fn stream_open_restarts_the_timeline_at_zero() {
     let cap = Capture::default();
     let mut h = StreamPlannerHandle::spawn(
-        cfg(1.0),
+        cfg(),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
@@ -252,7 +251,7 @@ fn stream_open_restarts_the_timeline_at_zero() {
 fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
     let cap = Capture::default();
     let mut h = StreamPlannerHandle::spawn(
-        cfg(1.0),
+        cfg(),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
@@ -284,7 +283,7 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
 fn nudge_dispatches_pieces_and_advances_time() {
     let cap = Capture::default();
     let mut h = StreamPlannerHandle::spawn(
-        cfg(1.0),
+        cfg(),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
@@ -372,7 +371,7 @@ fn intake_tally_reset_zeroes_the_signal() {
 fn flushed_stream_reads_zero_uncommitted_intake() {
     let cap = Capture::default();
     let mut h = StreamPlannerHandle::spawn(
-        cfg(0.5),
+        cfg(),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
@@ -391,7 +390,7 @@ fn flushed_stream_reads_zero_uncommitted_intake() {
 fn partial_commit_head_trim_keeps_intake_tally_bounded() {
     let cap = Capture::default();
     let mut h = StreamPlannerHandle::spawn(
-        cfg_cap(0.5, 256),
+        cfg_cap(256),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
@@ -455,7 +454,7 @@ fn continuous_blend_run_dispatches_continuously_without_flush() {
     // Generous cap so the buffer-cap backstop never fires: the continuity commit
     // alone must drain the run.
     let mut h = StreamPlannerHandle::spawn(
-        cfg_cap(0.5, 256),
+        cfg_cap(256),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),

@@ -191,3 +191,69 @@ Run any multi-minute print on the Neptune bench on curvature-profile; -308 appea
 of seconds once a clocksync sample's offset excursion exceeds 200 µs. Larger files crash sooner
 (more dispatches → more chances to land on a bad sample), matching the user's "bigger file
 crashes right away."
+
+---
+
+## Follow-up: 2026-06-22 #2 — double-writer fix landed, -308 persists (DIFFERENT root cause)
+
+The double-writer fix was implemented and is **confirmed working**, but the print still crashes
+-308. The new crash is a **delivery-latency** fault, not a projection fault.
+
+### Confirmed (session k-1782159613-36385, fault 20:21:53.190, detail 200254 = axis 3, ~3.6 ms)
+
+- **Double-writer fix works.** Now **one** `set_clock_est_rebased` record per timestamp (was
+  two); `set_clock_est` / Path A fires **0** times; `junction_jump_anomalous` divergence dropped
+  from ~2 ms to **~70 µs** (`tick_jump_us=69.7`, `host_jump≈0`). The clock anchor is clean.
+- **The -308 is now late delivery, not bad projection.** `transit_diag_alert` at the fault:
+  `"piece arrived in MCU past (arrival_lead<0)"` — `arrival_clock − host_front_start_time < 0`.
+  The pump *sent* the front piece **after** its scheduled start: mcu0 axis3 `arrival_lead =
+  −2905 µs` (trigger), cascading to −2024, −34503, −39900 µs across axes. The projection is
+  correct; the piece reached the MCU too late.
+- **Nominal pipeline is healthy.** `feed_throttle` oscillates cleanly 1.0↔2.0; `dispatch_committed`
+  t_end advances ~1 s/s; no dispatch gap. The host keeps up in *nominal* time, but the *just-in-time*
+  pump delivery (lead `MAX_LEAD_SECS = 1.0 s`, `pump.rs:300`) slipped ~1 s, draining the MCU
+  buffer until the playhead overran the front piece. Commit `48ad66dd4` had temporarily widened
+  this to 2.0 s (a "thin-buffer" band-aid) and was reverted — re-exposing the thin margin.
+- **`freq` instability was startup-only** (84041652 @ 20:17 → settled ~84002200 by 20:37, stable
+  through the fault). Not a factor.
+- **Second anomaly — the host MCU is being given motion it can't keep on time.** `McuHandle(1)`
+  is the Pi Linux/process MCU (`freq = 1e9` ns-ticks; `mcu_at_send ≈ 90109 s`; seeded once via
+  `set_clock_est_from_sample`, **never** regression-synced — correct for a host MCU). Only one
+  physical board exists (`mcu`, CH340 USB, handle 0). Yet the engine dispatches an **axis-0 motion
+  stream** to McuHandle(1) (`seg0_deficit` ×16, transit_diag axis 0 `arrival_lead = −6568 µs`).
+  Whether the host MCU should receive a motion stream at all is an open config/engine question.
+
+### Hypotheses (this follow-up)
+
+| # | Hypothesis | Status | Confirm/Refute |
+|---|---|---|---|
+| 9 | -308 is now caused by pump delivering pieces later than the 1.0 s just-in-time lead | **Confirmed** | transit_diag `arrival_lead<0`; nominal pipeline healthy; reverted 2.0 s band-aid |
+| 10 | A host compute spike (per-move re-lowering) starves the pump thread → late send | Open | Burst of all pipe stages at one timestamp (21:52.077) is suggestive; need per-stage durations / CPU evidence |
+| 11 | Host MCU (McuHandle(1)) receiving an unsynced motion stream aggravates shared pump/serial | Open | mcu1 axis0 late by 6.5 ms; shared transport contention plausible but not isolated |
+
+### deferred-work.md relevance (user's question)
+
+**Partial / contributing, not the whole story.** The throughput items match the
+"host falls behind real-time → late delivery" mechanism:
+- *"Redundant re-lowering of the held-back tail"* (continuity-commit follow-up): O(tail) per-move
+  CPU, "dominant per-move cost for very dense streams." A CPU spike starving the pump fits H10.
+- *"ChannelFull + gate blindness to in-channel depth"* (backpressure follow-up): explicitly
+  "a CPU-bound planner that falls behind a fast feeder."
+
+NOT covered by deferred-work, and more proximate per the logs: (a) the thin pump delivery lead
+(`MAX_LEAD_SECS` reverted from the 2.0 band-aid) — H9, Confirmed; (b) the host MCU receiving an
+unsynced motion stream — H11. So deferred-work explains a *contributing* throughput pressure but
+not the proximate trigger.
+
+### Fix direction (this follow-up)
+
+- The principled fix is **not** simply re-raising `MAX_LEAD_SECS` (that's the band-aid). It is to
+  guarantee the pump never *sends* a piece whose start is already in the MCU's past: detect
+  `arrival_lead < 0` at the pump and re-anchor-forward (stutter), and/or make the delivery lead
+  robust to host scheduling jitter. Pair with eliminating the host-side stall source (H10).
+- Resolve the host-MCU-gets-motion question (H11): if McuHandle(1) shouldn't carry steppers,
+  the engine must not enroll it as a motion target; if it should, it needs a real time base.
+- Keep all three safety layers; do not widen the MCU 200 µs budget.
+
+**Status: Active** — H9 Confirmed (delivery latency); H10/H11 open; deferred-work assessed as
+contributing-not-proximate.

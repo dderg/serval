@@ -64,6 +64,19 @@ pub struct VelocityReport {
 pub struct VelocityProfile {
     pub moves: Vec<MoveVelocity>,
     pub report: VelocityReport,
+    /// Seam index of the last finality barrier: the highest seam whose velocity
+    /// meets the forward/ceiling-feasible profile (`min(v_forward, ceiling)` —
+    /// acceleration pinned by the past, full cruise, or a curvature-limited corner
+    /// peak) rather than being dragged below it by the buffer's tentative terminal
+    /// rest. It is the reconvergence point of the backward sweep: appended moves
+    /// are downstream and append-only streaming cannot lower an already-ceiling
+    /// seam, so every seam at-or-before `barrier` is final and the suffix past it
+    /// is the deferrable brake-to-rest. Seam index == committable move count, so
+    /// the caller commits the latest clean seam `<= barrier`. `0` means nothing
+    /// past the entry is final.
+    pub barrier: usize,
+    /// Velocity at `barrier`, used to size the flush-trigger watermark.
+    pub v_barrier: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +149,8 @@ pub fn plan_velocity_warm_start(
         return Ok(VelocityProfile {
             moves: Vec::new(),
             report: VelocityReport::default(),
+            barrier: 0,
+            v_barrier: 0.0,
         });
     }
 
@@ -267,6 +282,7 @@ pub fn plan_velocity_warm_start(
         .ok_or(VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(disk).min(jerk);
     }
+    let v_forward_ceiling = v.clone();
     for k in (1..n).rev() {
         let j = k;
         let line_no = moves[j].source.start_line;
@@ -277,6 +293,13 @@ pub fn plan_velocity_warm_start(
             .ok_or(VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(disk).min(jerk);
     }
+    let mut barrier = 0usize;
+    for k in 1..n {
+        if !(v[k] < v_forward_ceiling[k]) {
+            barrier = k;
+        }
+    }
+    let v_barrier = v[barrier];
     let entry_line_no = moves[0].source.start_line;
     let entry_brake = {
         let kin = &caps[0].kin;
@@ -329,10 +352,10 @@ pub fn plan_velocity_warm_start(
                 .iter()
                 .map(|&(s, v, a)| VelSample { s, v, a })
                 .collect();
-            if is_anchor[j] {
+            if is_anchor[j] && entry_v <= VELOCITY_EPS_MM_S {
                 pin_rest_anchor(samples.first_mut(), line_no, kin.jerk)?;
             }
-            if is_anchor[j + 1] {
+            if is_anchor[j + 1] && exit_v <= VELOCITY_EPS_MM_S {
                 pin_rest_anchor(samples.last_mut(), line_no, kin.jerk)?;
             }
             let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
@@ -364,7 +387,12 @@ pub fn plan_velocity_warm_start(
         run_start = run_end;
     }
 
-    Ok(VelocityProfile { moves: out, report })
+    Ok(VelocityProfile {
+        moves: out,
+        report,
+        barrier,
+        v_barrier,
+    })
 }
 
 fn traversal_time(samples: &[VelSample]) -> f64 {

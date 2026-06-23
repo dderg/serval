@@ -11,13 +11,16 @@ use crate::planner::{DispatchError, HomeDripParams, NudgeParams};
 use crate::stream::{StreamConfig, StreamState};
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
-// When the input goes quiet, drain the uncommitted look-ahead tail to rest this
-// long before the committed frontier would run dry. It must exceed the cost of
-// that final fit+plan+lower (only the `keep_secs` tail now, since moves commit
-// continuously — not a whole chunk) so the idle drain never lands in the MCU's
-// past (PieceStartInPast). Kept small so a brief input stall does not trip a
-// premature drain-to-rest mid-stream.
-const SAFETY_MARGIN: f64 = 0.25;
+// Producer-stall watermark budget. When the input goes quiet, materialize the
+// brake-to-rest tail this long before the committed frontier would run dry. The
+// total watermark is sized per the last barrier velocity at runtime —
+// `t_brake(v_barrier)` (the jerk-limited decel ramp) plus this fixed solve-time
+// budget for the final fit+plan+lower over the open tail plus `STALL_MARGIN` —
+// so the decel always finishes before dispatch (no PieceStartInPast). If the
+// locked lead at trigger time is already below the solve budget, the commit
+// fails loud (BrakeToRestShortfall): the constant was sized too short.
+const STALL_SOLVE_CONST: f64 = 0.05;
+const STALL_MARGIN: f64 = 0.1;
 const T_IDLE: Duration = Duration::from_secs(3600);
 // Cap the moves coalesced into one commit. fit+plan+lower cost is ~linear in
 // segments, so a single commit's wall-clock latency scales with the batch size.
@@ -609,28 +612,33 @@ fn run_loop(
     let mut tally = IntakeTally::new(uncommitted_intake_secs);
 
     loop {
+        let watermark = state.stall_brake_time() + STALL_SOLVE_CONST + STALL_MARGIN;
         let next_timeout = if state.is_empty() {
             T_IDLE
         } else {
             let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
-            let remaining = (state.t_committed() + LEAD - SAFETY_MARGIN) - esc;
+            let remaining = (state.t_committed() + LEAD - watermark) - esc;
             Duration::try_from_secs_f64(remaining.max(0.0)).unwrap_or(Duration::ZERO)
         };
 
         let msg = match rx.recv_timeout(next_timeout) {
             Ok(m) => m,
             Err(RecvTimeoutError::Timeout) => {
+                let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                let lead_remaining = (state.t_committed() + LEAD) - esc;
                 tracing::info!(
                     subsystem = "motion",
                     event = "idle_drain",
                     buffered = state.buffered(),
                     t_committed = state.t_committed(),
+                    lead_remaining,
+                    v_barrier = state.last_v_barrier(),
                     sync_set = sync_instant.is_some(),
-                    "[idle-drain]"
+                    "[idle-drain] producer-stall brake-to-rest"
                 );
                 let segs = state
-                    .commit(true)
-                    .unwrap_or_else(|e| fatal(&format!("idle drain: {e}")));
+                    .commit_stall_brake(lead_remaining, STALL_SOLVE_CONST)
+                    .unwrap_or_else(|e| fatal(&format!("stall brake-to-rest: {e}")));
                 dispatch_committed(
                     &segs,
                     &dispatch,

@@ -44,6 +44,7 @@ test-support = []
 extension-module = ["pyo3/extension-module"]
 
 [dev-dependencies]
+proptest = "1"
 rustfft = "6"
 heapless = { workspace = true }
 mcu-transport = { path = "../mcu-transport" }

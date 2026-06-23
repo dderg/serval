@@ -16,11 +16,6 @@ pub struct StreamConfig {
     pub chain: ChainFitConfig,
     pub velocity: VelocityConfig,
     pub fit_tol_mm: f64,
-    /// Look-ahead margin held back from each non-forced commit. The trailing
-    /// `keep_secs` of planned trajectory stays uncommitted so committed
-    /// junction velocities were planned with enough downstream context and are
-    /// not pulled down by the buffer's pessimistic terminal-`v=0`.
-    pub keep_secs: f64,
     /// Backstop cap. The continuity commit drains at every blend (each
     /// biclothoid rejoins the outgoing line at zero curvature, a clean seam), so
     /// a normal continuous path commits without ever stopping. This force-drain
@@ -41,6 +36,16 @@ pub enum StreamError {
     Velocity(VelocityError),
     Lowering(LoweringError),
     Geometry(GeometryError),
+    /// A producer-stall watermark fired the brake-to-rest solve too late: the
+    /// locked lead remaining ahead of the playhead is already below the
+    /// solve-time budget, so the deceleration ramp cannot be planned and
+    /// dispatched before its first piece must play. Self-identifying on purpose
+    /// — a downstream late dispatch traced here means the fixed solve-time
+    /// constant was sized too short, not a generic clock fault. Never padded over.
+    BrakeToRestShortfall {
+        lead_remaining: f64,
+        solve_const: f64,
+    },
 }
 
 impl std::fmt::Display for StreamError {
@@ -50,6 +55,14 @@ impl std::fmt::Display for StreamError {
             Self::Velocity(e) => write!(f, "velocity plan: {e:?}"),
             Self::Lowering(e) => write!(f, "lowering: {e}"),
             Self::Geometry(e) => write!(f, "head-trim geometry: {e:?}"),
+            Self::BrakeToRestShortfall {
+                lead_remaining,
+                solve_const,
+            } => write!(
+                f,
+                "brake-to-rest shortfall: locked lead {lead_remaining:.6}s below \
+                 solve-time budget {solve_const:.6}s — solve-time constant too short"
+            ),
         }
     }
 }
@@ -103,6 +116,11 @@ pub struct StreamState {
     /// when the front move is untrimmed (fresh, force-drained, or commit at a
     /// plain seam). See docs/rewrite/windowed-fit-ceiling-jitter.md.
     committed_head_len: f64,
+    /// Velocity at the most recent plan's finality barrier, carried so the
+    /// streaming driver can size the producer-stall brake-to-rest watermark from
+    /// `t_brake(v_barrier)` without re-planning — the speed the planner is riding,
+    /// whether or not that plan advanced the commit. `0.0` before the first plan.
+    last_v_barrier: f64,
     config: StreamConfig,
 }
 
@@ -115,6 +133,7 @@ impl StreamState {
             odometer: home_pos.to_vec(),
             t_committed: t_start,
             committed_head_len: 0.0,
+            last_v_barrier: 0.0,
             config,
         }
     }
@@ -125,6 +144,7 @@ impl StreamState {
         self.odometer = home_pos.to_vec();
         self.t_committed = t_start;
         self.committed_head_len = 0.0;
+        self.last_v_barrier = 0.0;
     }
 
     pub fn push(&mut self, m: Move) {
@@ -201,6 +221,24 @@ impl StreamState {
         self.entry_v
     }
 
+    /// Velocity at the most recent plan's finality barrier (`0.0` before any plan).
+    #[must_use]
+    pub fn last_v_barrier(&self) -> f64 {
+        self.last_v_barrier
+    }
+
+    /// Jerk-limited time to brake from the last barrier velocity to rest, sizing
+    /// the producer-stall flush watermark. A safe over-estimate for curved
+    /// geometry, so the watermark fires slightly early — never late.
+    #[must_use]
+    pub fn stall_brake_time(&self) -> f64 {
+        jerk_limited_brake_time(
+            self.last_v_barrier,
+            self.config.limits.accel_mm_s2,
+            self.config.velocity.max_jerk_mm_s3,
+        )
+    }
+
     #[must_use]
     pub fn limits(&self) -> VelocityLimits {
         self.config.limits
@@ -260,11 +298,9 @@ impl StreamState {
         let mut pos = self.odometer.clone();
         let mut t = self.t_committed;
         let mut segs: Vec<ShapedSegment> = Vec::with_capacity(n);
-        let mut start_times: Vec<f64> = Vec::with_capacity(n);
         let mut seam_xyz: Vec<[f64; 3]> = Vec::with_capacity(n);
         let lower_clock = Instant::now();
         for (gm, vm) in outcome.moves.iter().zip(&profile.moves) {
-            start_times.push(t);
             seam_xyz.push([pos[0], pos[1], pos[2]]);
             let mut seg = lower_move(gm, vm, t, &pos, self.config.fit_tol_mm)?;
             seg.source_line = gm.source.start_line;
@@ -291,10 +327,14 @@ impl StreamState {
         } else {
             let unblended: HashSet<u32> =
                 outcome.report.unblended.iter().map(|u| u.line_no).collect();
-            let limit_t = self.t_committed + (total_t - self.config.keep_secs);
+            let setback =
+                brake_to_rest_setback(&outcome.moves, self.config.velocity.max_jerk_mm_s3);
+            let total_arc: f64 = outcome.moves.iter().map(|m| m.segment.s_len()).sum();
+            let mut arc_to_seam = 0.0_f64;
             let mut chosen = 0usize;
-            for i in 1..n {
-                if start_times[i] > limit_t {
+            for i in 1..=profile.barrier {
+                arc_to_seam += outcome.moves[i - 1].segment.s_len();
+                if total_arc - arc_to_seam < setback {
                     break;
                 }
                 if is_clean_seam(&outcome.moves, i, &unblended)
@@ -305,6 +345,13 @@ impl StreamState {
             }
             chosen
         };
+        debug_assert!(
+            force || commit_count <= profile.barrier,
+            "commit boundary {commit_count} past finality barrier {} — \
+             a seam still open to a future append would be committed",
+            profile.barrier
+        );
+        self.last_v_barrier = profile.v_barrier;
 
         tracing::info!(
             subsystem = "motion",
@@ -315,7 +362,8 @@ impl StreamState {
             unblended = outcome.report.unblended.len(),
             commit_count,
             total_t,
-            keep_secs = self.config.keep_secs,
+            barrier = profile.barrier,
+            v_barrier = profile.v_barrier,
             entry_v = self.entry_v,
             t_committed = self.t_committed,
             "[commit-decision]"
@@ -360,6 +408,31 @@ impl StreamState {
         }
 
         Ok(committed)
+    }
+
+    /// Materialize the deferred brake-to-rest on a producer-stall watermark.
+    /// `lead_remaining` is the locked lead still ahead of the playhead at trigger
+    /// time. If it is already below the fixed solve-time budget the ramp cannot
+    /// be planned and dispatched before its first piece must play, so we fail
+    /// loud with [`StreamError::BrakeToRestShortfall`] instead of sending a piece
+    /// into the MCU's past. Otherwise it is the ordinary forced drain-to-rest —
+    /// and if a move arrives after this returns, the next `commit` simply resumes
+    /// locked commits from the new entry velocity.
+    pub fn commit_stall_brake(
+        &mut self,
+        lead_remaining: f64,
+        solve_const: f64,
+    ) -> Result<Vec<ShapedSegment>, StreamError> {
+        if self.buffer.is_empty() {
+            return Ok(Vec::new());
+        }
+        if lead_remaining <= solve_const {
+            return Err(StreamError::BrakeToRestShortfall {
+                lead_remaining,
+                solve_const,
+            });
+        }
+        self.commit(true)
     }
 
     /// Whether committing through the blend at output index `i` would leave a
@@ -473,6 +546,50 @@ fn blend_consumed_head(moves: &[Move], i: usize) -> bool {
 /// Minimum surviving spatial length of a head-trimmed move. Below this the
 /// remainder is degenerate and the commit boundary is refused.
 const TRIM_EPS_MM: f64 = 1e-6;
+
+/// Jerk-limited time to decelerate from `v` to rest under accel limit `a` and
+/// jerk limit `j`: `v/a + a/j` once the ramp reaches `a` (`v > a²/j`), else the
+/// triangular `2·√(v/j)`. Used only to size the producer-stall flush watermark,
+/// never to locate the finality barrier — the backward velocity sweep does that
+/// exactly. Curvature only slows a real stop, so this straight-line time is a
+/// safe over-estimate and the watermark fires slightly early.
+#[must_use]
+pub fn jerk_limited_brake_time(v: f64, a: f64, j: f64) -> f64 {
+    if v <= 0.0 {
+        return 0.0;
+    }
+    if a <= 0.0 || j <= 0.0 {
+        return f64::INFINITY;
+    }
+    if v > a * a / j {
+        v / a + a / j
+    } else {
+        2.0 * (v / j).sqrt()
+    }
+}
+
+/// Arc length the commit boundary is held back from the buffer's tentative
+/// terminal. The lowering reconstructs each move's velocity body against its run
+/// terminal, so a move within one braking distance of the buffer's fictional
+/// rest has its body shaped by that fiction — it is not yet terminal-independent
+/// and an appended move would change it. Holding the boundary this far back makes
+/// every committed body a function of geometry alone, so the committed trajectory
+/// is final under append and output-equivalent to a full re-plan — positions
+/// exactly, seam timing within the iterative velocity stage's tolerance. The
+/// brake-to-rest tail this defers is the flush-only artifact. A safe over-estimate of the
+/// jerk-limited stopping distance from the buffer's peak feedrate (`v · t_brake`
+/// over-bounds the true `∫v dt`), so the held-back open tail stays bounded.
+fn brake_to_rest_setback(moves: &[Move], max_jerk_mm_s3: f64) -> f64 {
+    let v_peak = moves
+        .iter()
+        .map(|m| m.feedrate_mm_s.min(m.limits.max_velocity_mm_s))
+        .fold(0.0_f64, f64::max);
+    let a_min = moves
+        .iter()
+        .map(|m| m.limits.accel_mm_s2)
+        .fold(f64::INFINITY, f64::min);
+    v_peak * jerk_limited_brake_time(v_peak, a_min, max_jerk_mm_s3)
+}
 
 fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
     let dx = a[0] - b[0];

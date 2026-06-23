@@ -340,7 +340,6 @@ fn stream_config_from(cfg: &PlannerConfig) -> (crate::stream::StreamConfig, Vec<
         chain: geometry::ChainFitConfig::default(),
         velocity: geometry::VelocityConfig::default(),
         fit_tol_mm: cfg.fit_tolerance_mm,
-        keep_secs: 0.5,
         max_buffer_moves: 64,
         limits: test_limits(),
     };

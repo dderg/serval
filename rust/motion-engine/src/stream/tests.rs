@@ -2,13 +2,14 @@ use super::*;
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
 use nurbs::eval::eval;
+use proptest::prelude::*;
+use trajectory::ShapedSegment;
 
-fn cfg(keep_secs: f64) -> StreamConfig {
+fn cfg() -> StreamConfig {
     StreamConfig {
         chain: ChainFitConfig::default(),
         velocity: VelocityConfig::default(),
         fit_tol_mm: 1e-3,
-        keep_secs,
         max_buffer_moves: 64,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
     }
@@ -30,7 +31,7 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> geometry::Move 
     line_move(start, end, e, ctx(line_no, 80.0)).unwrap()
 }
 
-fn cfg_bench(keep_secs: f64) -> StreamConfig {
+fn cfg_bench() -> StreamConfig {
     StreamConfig {
         chain: ChainFitConfig::default(),
         velocity: VelocityConfig {
@@ -39,7 +40,6 @@ fn cfg_bench(keep_secs: f64) -> StreamConfig {
             ..VelocityConfig::default()
         },
         fit_tol_mm: 0.005,
-        keep_secs,
         max_buffer_moves: 512,
         limits: VelocityLimits::try_new(100.0, 1000.0, 5.0).unwrap(),
     }
@@ -58,6 +58,28 @@ fn line_bench(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
     line_move(start, end, 0.0, ctx).unwrap()
 }
 
+// Real first perimeter from a Voron cube print (Neptune bench), as (x, y, e).
+// 135° chamfer corners blend; short ~1.3mm chamfers sit between long ~18.6mm edges.
+const VORON_PERIMETER: [(f64, f64, f64); 17] = [
+    (102.008, 96.308, 0.14859),
+    (103.2, 95.814, 0.04756),
+    (121.8, 95.814, 0.68571),
+    (122.992, 96.308, 0.04756),
+    (128.692, 102.008, 0.29718),
+    (129.186, 103.2, 0.04756),
+    (129.186, 121.8, 0.68571),
+    (128.692, 122.992, 0.04756),
+    (122.992, 128.692, 0.29718),
+    (121.8, 129.186, 0.04756),
+    (103.2, 129.186, 0.68571),
+    (102.008, 128.692, 0.04756),
+    (96.308, 122.992, 0.29718),
+    (95.814, 121.8, 0.04756),
+    (95.814, 103.2, 0.68571),
+    (96.308, 102.008, 0.04756),
+    (99.13, 99.186, 0.14711),
+];
+
 #[test]
 fn voron_cube_perimeter_streams_without_degenerate_trim() {
     // Real first perimeter from a Voron cube print (Neptune bench) — the print
@@ -66,28 +88,9 @@ fn voron_cube_perimeter_streams_without_degenerate_trim() {
     // Replays the moves through incremental commits like the planner loop and
     // asserts no commit ever errors.
     let start = [99.158, 99.158, 0.2];
-    let mut s = StreamState::new(cfg(0.5), &[start[0], start[1], start[2], 0.0], 0.0);
-    let pts: [(f64, f64, f64); 17] = [
-        (102.008, 96.308, 0.14859),
-        (103.2, 95.814, 0.04756),
-        (121.8, 95.814, 0.68571),
-        (122.992, 96.308, 0.04756),
-        (128.692, 102.008, 0.29718),
-        (129.186, 103.2, 0.04756),
-        (129.186, 121.8, 0.68571),
-        (128.692, 122.992, 0.04756),
-        (122.992, 128.692, 0.29718),
-        (121.8, 129.186, 0.04756),
-        (103.2, 129.186, 0.68571),
-        (102.008, 128.692, 0.04756),
-        (96.308, 122.992, 0.29718),
-        (95.814, 121.8, 0.04756),
-        (95.814, 103.2, 0.68571),
-        (96.308, 102.008, 0.04756),
-        (99.13, 99.186, 0.14711),
-    ];
+    let mut s = StreamState::new(cfg(), &[start[0], start[1], start[2], 0.0], 0.0);
     let mut prev = start;
-    for (i, (x, y, e)) in pts.into_iter().enumerate() {
+    for (i, (x, y, e)) in VORON_PERIMETER.into_iter().enumerate() {
         let end = [x, y, 0.2];
         s.push(line(i as u32 + 1, prev, end, e));
         prev = end;
@@ -109,7 +112,7 @@ fn cold_run_infill_streams_without_overcommit() {
     // streamed result matches the batched one: no commit may error. Bench
     // limits: max 100 mm/s, 1000 mm/s^2, jerk 1e6; infill feed 60 mm/s.
     let start = [99.158, 99.158, 0.0];
-    let mut s = StreamState::new(cfg_bench(0.5), &[start[0], start[1], start[2], 0.0], 0.0);
+    let mut s = StreamState::new(cfg_bench(), &[start[0], start[1], start[2], 0.0], 0.0);
     let pts: [(f64, f64); 91] = [
         (99.158, 99.158),
         (102.008, 96.308),
@@ -217,7 +220,7 @@ fn cold_run_infill_streams_without_overcommit() {
 
 #[test]
 fn collinear_jogs_commit_at_the_seam_without_stopping() {
-    let mut s = StreamState::new(cfg(0.0), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.0));
 
@@ -238,13 +241,12 @@ fn collinear_jogs_commit_at_the_seam_without_stopping() {
 
 #[test]
 fn flush_commits_everything_to_rest() {
-    let mut s = StreamState::new(cfg(1.0), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.0));
 
-    // keep_secs large => nothing commits without force.
-    assert!(s.commit(false).unwrap().is_empty());
-
+    // A forced flush drains the whole buffer to rest regardless of where the
+    // finality barrier sits — it materializes the brake-to-rest tail.
     let committed = s.commit(true).unwrap();
     assert!(!committed.is_empty());
     assert!(s.is_empty());
@@ -259,7 +261,7 @@ fn blended_corner_commits_through_the_blend_without_stopping() {
     // outgoing line at zero curvature, so the commit runs through the whole
     // blend and keeps the outgoing move as a head-trimmed remainder — never
     // splitting the blend itself, and never stopping at the corner.
-    let mut s = StreamState::new(cfg(0.0), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 0.0));
 
@@ -290,7 +292,7 @@ fn continuous_blended_chain_drains_without_a_single_stop() {
     // unblended seam anywhere. The continuity commit must still drain it (the
     // old clean-seam-only commit would hang here forever), and no interior seam
     // may drop to rest — that would be the stutter we are eliminating.
-    let mut s = StreamState::new(cfg(0.05), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
     let pts = [
         [0.0, 0.0, 0.0],
         [20.0, 0.0, 0.0],
@@ -352,7 +354,7 @@ fn head_trim_preserves_position_and_extrusion_continuity() {
     // Commit through a blend with extrusion, then verify the kept remainder
     // resumes exactly where the committed trajectory ended (no gap, no overlap)
     // in both the spatial axes and the extruder.
-    let mut s = StreamState::new(cfg(0.05), &[0.0, 0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 5.0));
     s.push(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 5.0));
     s.push(line(3, [50.0, 50.0, 0.0], [100.0, 50.0, 0.0], 5.0));
@@ -377,7 +379,7 @@ fn head_trim_preserves_position_and_extrusion_continuity() {
 
 #[test]
 fn odometer_accumulates_extrusion_across_commits() {
-    let mut s = StreamState::new(cfg(1.0), &[0.0, 0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0));
     s.push(line(2, [40.0, 0.0, 0.0], [80.0, 0.0, 0.0], 4.0));
 
@@ -390,7 +392,7 @@ fn odometer_accumulates_extrusion_across_commits() {
 
 #[test]
 fn committed_trajectory_is_time_contiguous() {
-    let mut s = StreamState::new(cfg(1.0), &[0.0, 0.0, 0.0], 2.0);
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 2.0);
     s.push(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0));
     s.push(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0], 0.0));
     s.push(line(3, [60.0, 0.0, 0.0], [90.0, 0.0, 0.0], 0.0));
@@ -407,7 +409,7 @@ fn committed_trajectory_is_time_contiguous() {
 
 #[test]
 fn advance_idle_reanchors_committed_time_after_a_gap() {
-    let mut s = StreamState::new(cfg(1.0), &[0.0, 0.0, 0.0], 0.0);
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0));
     let first = s.commit(true).unwrap();
     let after_first = first.last().unwrap().t_end;
@@ -424,4 +426,213 @@ fn advance_idle_reanchors_committed_time_after_a_gap() {
     // never rewinds:
     s.advance_idle(0.0);
     assert!(s.t_committed() >= second.last().unwrap().t_end - 1e-9);
+}
+
+fn full_replan(moves: &[geometry::Move], home: &[f64]) -> Vec<ShapedSegment> {
+    let mut s = StreamState::new(cfg(), home, 0.0);
+    for m in moves {
+        s.push(m.clone());
+    }
+    s.commit(true).expect("full re-plan flush")
+}
+
+fn committed_prefix(moves: &[geometry::Move], home: &[f64]) -> Vec<ShapedSegment> {
+    // Realistic deep-buffer streaming: the driver coalesces a burst of moves so
+    // the planner has full look-ahead, then commits every move up to the finality
+    // barrier in one shot. Those are the segments actually dispatched mid-print.
+    let mut s = StreamState::new(cfg(), home, 0.0);
+    for m in moves {
+        s.push(m.clone());
+    }
+    s.commit(false).expect("incremental commit")
+}
+
+fn voron_moves() -> (Vec<geometry::Move>, Vec<f64>) {
+    let start = [99.158, 99.158, 0.2];
+    let mut prev = start;
+    let mut moves = Vec::new();
+    for (i, (x, y, e)) in VORON_PERIMETER.into_iter().enumerate() {
+        let end = [x, y, 0.2];
+        moves.push(line(i as u32 + 1, prev, end, e));
+        prev = end;
+    }
+    (moves, vec![start[0], start[1], start[2], 0.0])
+}
+
+fn dense_arc_moves() -> (Vec<geometry::Move>, Vec<f64>) {
+    // A dense polygonal circle: short, continuously-turning segments — the
+    // infill-arc character of cold_run.gcode that the streamed re-plan stressed.
+    let (r, n, c) = (20.0_f64, 60u32, [50.0, 50.0, 0.0]);
+    let start = [c[0] + r, c[1], 0.0];
+    let mut prev = start;
+    let mut moves = Vec::new();
+    for i in 1..=n {
+        let a = std::f64::consts::TAU * f64::from(i) / f64::from(n);
+        let end = [c[0] + r * a.cos(), c[1] + r * a.sin(), 0.0];
+        moves.push(line(i, prev, end, 0.0));
+        prev = end;
+    }
+    (moves, vec![start[0], start[1], start[2], 0.0])
+}
+
+#[test]
+fn committed_segments_match_a_full_replan() {
+    // Output-equivalence: every segment committed incrementally up to the finality
+    // barrier is byte-for-byte identical to the leading segments a single full
+    // re-plan to rest produces. The non-negotiable throughput constraint forbids
+    // trading trajectory quality for cheaper planning; the structural proof
+    // guarantees it, and this checks the proof was implemented faithfully. (The
+    // brake-to-rest tail past the barrier is a separate flush-only artifact,
+    // rebuilt at end-of-stream, and is intentionally not part of this comparison.)
+    for (label, (moves, home)) in [
+        ("voron_perimeter", voron_moves()),
+        ("dense_infill_arc", dense_arc_moves()),
+    ] {
+        let full = full_replan(&moves, &home);
+        let committed = committed_prefix(&moves, &home);
+        assert!(!committed.is_empty(), "{label}: nothing committed");
+        assert!(
+            committed.len() < full.len(),
+            "{label}: the barrier must defer the brake-to-rest tail"
+        );
+        for (i, (a, b)) in committed.iter().zip(&full).enumerate() {
+            assert!(
+                (a.t_start - b.t_start).abs() < 1e-9,
+                "{label} seg {i}: t_start {} vs {}",
+                a.t_start,
+                b.t_start
+            );
+            assert!(
+                (a.t_end - b.t_end).abs() < 1e-9,
+                "{label} seg {i}: t_end {} vs {}",
+                a.t_end,
+                b.t_end
+            );
+            for axis in 0..2 {
+                let da = eval(&a.axes[axis], a.t_end);
+                let db = eval(&b.axes[axis], b.t_end);
+                assert!(
+                    (da - db).abs() < 1e-9,
+                    "{label} seg {i} axis {axis}: {da} vs {db}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn open_tail_stays_bounded_as_buffer_depth_grows() {
+    // Collinear cruise edges: each commit advances to the finality barrier, so the
+    // retained buffer (the open tail / brake-to-rest region) stays a small constant
+    // regardless of total depth — the structural guarantee behind flat-in-depth
+    // pipe_plan cost, replacing the old O(buffer-depth) re-plan that spiked to
+    // 217 ms.
+    let mut tails = Vec::new();
+    for &depth in &[50usize, 100, 200, 500] {
+        let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+        let mut prev = [0.0, 0.0, 0.0];
+        let mut max_tail = 0usize;
+        for i in 0..depth {
+            let end = [(i as f64 + 1.0) * 20.0, 0.0, 0.0];
+            s.push(line(i as u32 + 1, prev, end, 0.0));
+            prev = end;
+            s.commit(false).expect("commit");
+            max_tail = max_tail.max(s.buffered());
+        }
+        tails.push((depth, max_tail));
+    }
+    let baseline = tails[0].1;
+    for &(depth, tail) in &tails {
+        assert!(
+            tail <= baseline + 2,
+            "open tail grew with depth (depth={depth} tail={tail} baseline={baseline}): \
+             per-commit work is not flat in buffer depth"
+        );
+    }
+}
+
+#[test]
+fn stall_brake_shortfall_is_attributable_and_fails_loud() {
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
+    let solve_const = 0.05;
+    match s.commit_stall_brake(0.01, solve_const) {
+        Err(StreamError::BrakeToRestShortfall {
+            lead_remaining,
+            solve_const: sc,
+        }) => {
+            assert!((lead_remaining - 0.01).abs() < 1e-12);
+            assert!((sc - solve_const).abs() < 1e-12);
+        }
+        other => panic!("expected BrakeToRestShortfall, got {other:?}"),
+    }
+    // The failed shortfall left the buffer intact; an adequate lead drains it.
+    let segs = s
+        .commit_stall_brake(1.0, solve_const)
+        .expect("adequate lead drains to rest");
+    assert!(!segs.is_empty());
+    assert!(s.is_empty());
+    assert_eq!(s.entry_velocity(), 0.0);
+}
+
+fn commit_prefix_signature(ys: &[f64], n: usize) -> Option<Vec<(f64, f64, f64, f64)>> {
+    let mut s = StreamState::new(cfg(), &[0.0, 0.0, 0.0], 0.0);
+    let mut prev = [0.0, 0.0, 0.0];
+    for i in 0..n {
+        let end = [(i as f64 + 1.0) * 20.0, ys[i], 0.0];
+        s.push(line(i as u32 + 1, prev, end, 0.0));
+        prev = end;
+    }
+    // Some random shapes lower to a degenerate phase; those inputs are out of
+    // scope for the append-invariance property and are skipped by the caller.
+    let segs = s.commit(false).ok()?;
+    // A non-forced commit never commits the buffer's tentative terminal rest, so
+    // the open tail stays buffered.
+    assert!(s.buffered() >= 1);
+    Some(
+        segs.iter()
+            .map(|seg| {
+                (
+                    seg.t_start,
+                    seg.t_end,
+                    eval(&seg.axes[0], seg.t_end),
+                    eval(&seg.axes[1], seg.t_end),
+                )
+            })
+            .collect(),
+    )
+}
+
+proptest! {
+    #[test]
+    fn locked_prefix_is_invariant_under_append(
+        ys in prop::collection::vec(-1.5f64..1.5, 30..50),
+        cut in 8usize..20,
+        extra in 1usize..10,
+    ) {
+        let n_short = cut.min(ys.len() - 1);
+        let n_long = (cut + extra).min(ys.len() - 1);
+        let (Some(short), Some(long)) =
+            (commit_prefix_signature(&ys, n_short), commit_prefix_signature(&ys, n_long))
+        else {
+            return Ok(());
+        };
+        // Appending moves can only EXTEND the locked prefix, never retract it.
+        prop_assert!(
+            long.len() >= short.len(),
+            "append shrank the locked prefix: {} -> {}",
+            short.len(),
+            long.len()
+        );
+        // Every already-committed seam is unchanged by the append. Positions are
+        // exact (deterministic geometry); seam times match within the iterative
+        // velocity stage's tolerance — the single segment ending at the barrier
+        // carries a negligible terminal-dependent body timing (tens of µs).
+        for (i, (a, b)) in short.iter().zip(&long).enumerate() {
+            prop_assert!((a.2 - b.2).abs() < 1e-9, "seam {i} x changed: {} vs {}", a.2, b.2);
+            prop_assert!((a.3 - b.3).abs() < 1e-9, "seam {i} y changed: {} vs {}", a.3, b.3);
+            prop_assert!((a.0 - b.0).abs() < 1e-3, "seam {i} t_start changed: {} vs {}", a.0, b.0);
+            prop_assert!((a.1 - b.1).abs() < 1e-3, "seam {i} t_end changed: {} vs {}", a.1, b.1);
+        }
+    }
 }
