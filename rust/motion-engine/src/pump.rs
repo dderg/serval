@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 /// Per-frame `[transit-diag]` healthy-path logging on the pump send thread
@@ -13,6 +14,23 @@ use std::time::{Duration, Instant};
 /// this many frames to keep coarse delivery-lead telemetry at negligible cost.
 const TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE: u64 = 64;
 static TRANSIT_DIAG_FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Previous `PushPieces` frame on one axis, kept solely so the per-frame
+/// transit diagnostic can decompose where dispatch lead is being spent:
+/// `Δarrival_lead = schedule_advance − mcu_clock_advance`. Separating the
+/// host's planned advance (`front_start_time` delta) from the MCU clock's
+/// real-time advance (`arrival_clock` delta), and bracketing both with the
+/// wall-clock send gap and the blocking-call duration, tells late-arrival
+/// apart from host-pacing starvation, transport stall, and MCU clock burn.
+struct PrevTransitFrame {
+    send_instant: Instant,
+    front_start_time: u64,
+    arrival_clock: u64,
+    arrival_lead_ticks: i64,
+}
+
+static TRANSIT_PREV_FRAME: LazyLock<Mutex<HashMap<AxisKey, PrevTransitFrame>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct AxisKey {
@@ -884,7 +902,9 @@ impl PieceSink for WireSink {
 
         let host_front_start_time: u64 = pieces.first().map(|p| p.start_time).unwrap_or(0);
 
+        let send_started_at = Instant::now();
         let r = self.call_push_pieces(key, pieces, start_slot, new_head)?;
+        let send_elapsed_us = send_started_at.elapsed().as_secs_f64() * 1e6;
 
         {
             let arrival_lead_ticks = r.front_start_time as i64 - r.arrival_clock as i64;
@@ -892,6 +912,21 @@ impl PieceSink for WireSink {
             let past_arrival = arrival_lead_ticks < 0;
             let frame_seq = TRANSIT_DIAG_FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
             let healthy_sample = frame_seq % TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE == 0;
+
+            let prev = {
+                let mut map = TRANSIT_PREV_FRAME.lock().expect("transit prev-frame map");
+                let prev = map.insert(
+                    key,
+                    PrevTransitFrame {
+                        send_instant: send_started_at,
+                        front_start_time: r.front_start_time,
+                        arrival_clock: r.arrival_clock,
+                        arrival_lead_ticks,
+                    },
+                );
+                prev
+            };
+
             if zero_st || past_arrival || healthy_sample {
                 let approx_freq_hz = (self.freq_of)(key.mcu_id);
                 let host_send_secs = {
@@ -907,6 +942,45 @@ impl PieceSink for WireSink {
                 let arrival_lead_us = approx_freq_hz
                     .map(|f| format!("{:.1}", (arrival_lead_ticks as f64 / f) * 1e6))
                     .unwrap_or_else(|| "N/A".to_owned());
+
+                let ticks_to_us = |ticks: i64| {
+                    approx_freq_hz
+                        .map(|f| format!("{:.1}", (ticks as f64 / f) * 1e6))
+                        .unwrap_or_else(|| "N/A".to_owned())
+                };
+                // Where did the lead go since this axis' previous frame?
+                //   Δarrival_lead = schedule_advance − mcu_clock_advance
+                // schedule_advance: how much further ahead the host planned.
+                // mcu_clock_advance: how much the MCU clock (real time) moved.
+                // send_gap: wall time between our two sends to this axis.
+                // A host-pacing starvation burns lead via schedule_advance <
+                // send_gap; a transport stall shows in send_elapsed_us; an MCU
+                // burst shows mcu_clock_advance ≫ send_gap.
+                let (
+                    send_gap_us,
+                    schedule_advance_us,
+                    mcu_clock_advance_us,
+                    delta_arrival_lead_us,
+                ) = match &prev {
+                    Some(p) => (
+                        format!(
+                            "{:.1}",
+                            send_started_at
+                                .duration_since(p.send_instant)
+                                .as_secs_f64()
+                                * 1e6
+                        ),
+                        ticks_to_us(r.front_start_time as i64 - p.front_start_time as i64),
+                        ticks_to_us(r.arrival_clock as i64 - p.arrival_clock as i64),
+                        ticks_to_us(arrival_lead_ticks - p.arrival_lead_ticks),
+                    ),
+                    None => (
+                        "N/A".to_owned(),
+                        "N/A".to_owned(),
+                        "N/A".to_owned(),
+                        "N/A".to_owned(),
+                    ),
+                };
                 if zero_st || past_arrival {
                     let alert = if zero_st && past_arrival {
                         "host_start_time=0 (clock-sync gap) AND piece in MCU past"
@@ -926,6 +1000,11 @@ impl PieceSink for WireSink {
                         arrival_lead_ticks,
                         arrival_lead_us = %arrival_lead_us,
                         host_send_unix_secs = host_send_secs,
+                        send_elapsed_us,
+                        send_gap_us = %send_gap_us,
+                        schedule_advance_us = %schedule_advance_us,
+                        mcu_clock_advance_us = %mcu_clock_advance_us,
+                        delta_arrival_lead_us = %delta_arrival_lead_us,
                         alert,
                         "[transit-diag] alert"
                     );
@@ -941,6 +1020,11 @@ impl PieceSink for WireSink {
                         arrival_lead_ticks,
                         arrival_lead_us = %arrival_lead_us,
                         host_send_unix_secs = host_send_secs,
+                        send_elapsed_us,
+                        send_gap_us = %send_gap_us,
+                        schedule_advance_us = %schedule_advance_us,
+                        mcu_clock_advance_us = %mcu_clock_advance_us,
+                        delta_arrival_lead_us = %delta_arrival_lead_us,
                         "[transit-diag]"
                     );
                 }
