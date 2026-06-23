@@ -262,3 +262,72 @@ fn fuzz_arbitrary_bytes_never_panics_or_runs_away() {
         );
     }
 }
+
+#[test]
+fn differential_random_valid_frames() {
+    // Generate random *valid* multi-axis frames, compute exactly what the parser
+    // must do, feed the bytes to the real C, and assert an exact match — writes,
+    // commits, and the per-axis response echo. This is the semantic-coverage that
+    // the two hand-picked differential cases don't give.
+    let mut s: u64 = 0xC0FF_EE12_3456_789A;
+    let mut next = || {
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (s >> 32) as u32
+    };
+    for _ in 0..20_000 {
+        let n_axes = 1 + (next() % 4) as usize; // 1..=4
+        let mut used: Vec<u8> = Vec::new();
+        let mut axes = Vec::new();
+        let mut exp_writes: Vec<(u8, u16, u8)> = Vec::new();
+        let mut exp_commits: Vec<(u8, u32)> = Vec::new();
+        let mut exp_diag: Vec<AxisDiag> = Vec::new();
+        for _ in 0..n_axes {
+            let mut ai = (next() % 8) as u8;
+            while used.contains(&ai) {
+                ai = (next() % 8) as u8;
+            }
+            used.push(ai);
+            let pc = (next() % 4) as u8; // 0..=3
+            let slot = (next() % 500) as u16;
+            let head = next() % 100_000;
+            let mut pb = Vec::new();
+            let mut first_st = 0u64;
+            for k in 0..pc {
+                let st = (u64::from(next()) << 32) | u64::from(next());
+                if k == 0 {
+                    first_st = st;
+                }
+                let mut p = vec![0u8; 32];
+                p[..8].copy_from_slice(&st.to_le_bytes());
+                for b in p[8..].iter_mut() {
+                    *b = (next() & 0xFF) as u8;
+                }
+                pb.extend_from_slice(&p);
+                exp_writes.push((ai, slot, k));
+            }
+            exp_commits.push((ai, head));
+            exp_diag.push(AxisDiag {
+                axis_idx: ai,
+                front_start_time: if pc == 0 { 0 } else { first_st },
+            });
+            axes.push(AxisPieces {
+                axis_idx: ai,
+                piece_count: pc,
+                start_slot: slot,
+                new_head: head,
+                pieces_bytes: pb,
+            });
+        }
+        let body = PushPieces { axes }.encoded_to_vec();
+        let out = run(&frame_for(next(), &body));
+
+        assert_eq!(out.writes, exp_writes, "writes mismatch");
+        assert_eq!(out.commits, exp_commits, "commits mismatch");
+        let r = PushPiecesResponse::decode(&out.resp[7..]).unwrap();
+        assert_eq!(r.result, OK);
+        assert_eq!(r.arrival_clock, 0x1234_5678);
+        assert_eq!(r.axes, exp_diag, "response echo mismatch");
+    }
+}
