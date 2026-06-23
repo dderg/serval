@@ -616,11 +616,19 @@ impl Engine {
                 now_cycle,
             );
             if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
+                // Phase axes keep the continuous chirp: XDIRECT picks times and
+                // evaluates the carrier, so a chirp is already closed-form cost
+                // here — no scan, no freeze.
                 let cfg = crate::buzz_xdirect::XdirectConfig::new(
                     axis.microstep_distance,
                     crate::buzz_xdirect::DEFAULT_XDIRECT_UPDATE_HZ,
                 );
                 crate::buzz_stream::arm_axis_xdirect(ex.axis_idx, params, cfg);
+            } else if params.mu != 0.0 {
+                // A swept STEP/DIR axis would root-solve a chirp at every microstep
+                // crossing and starve the foreground; deliver the band as a
+                // staircase of fixed-frequency lobes (all `mu = 0`, closed-form).
+                crate::buzz_stream::arm_axis_sweep(ex.axis_idx, params);
             } else {
                 crate::buzz_stream::arm_axis(ex.axis_idx, params);
             }

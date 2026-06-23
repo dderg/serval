@@ -603,6 +603,54 @@ fn resonance_buzz_routes_phase_mode_axis_to_xdirect() {
 }
 
 #[test]
+fn resonance_buzz_routes_swept_pulse_axis_to_staircase() {
+    // A swept (freq_start != freq_end) STEP/DIR axis must arm the fixed-frequency
+    // staircase generator, never the chirp — that is the whole point: the chirp
+    // root-solves every crossing and freezes, the staircase stays closed-form.
+    crate::buzz_stream::reset_for_test();
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, 0, 0.01);
+    let shared = SharedState::new();
+    assert_eq!(
+        engine.resonance_buzz(&shared, 0b001, 0, 5_000, 60_000, 300_000, 200, 20, 0),
+        0,
+        "swept buzz on a Pulse axis must arm, not fault"
+    );
+    assert_eq!(shared.last_error.load(Ordering::Acquire), 0, "no fault");
+    assert!(crate::buzz_stream::axis_active(0));
+    assert!(
+        !crate::buzz_stream::is_xdirect(0),
+        "pulse axis is not XDIRECT"
+    );
+    assert!(
+        crate::buzz_stream::is_sweep(0),
+        "swept pulse axis must run the staircase generator"
+    );
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
+fn resonance_buzz_routes_fixed_tone_pulse_axis_to_plain_tone() {
+    // A fixed-frequency (freq_start == freq_end) pulse buzz keeps the existing
+    // single-tone path — the staircase is only for sweeps.
+    crate::buzz_stream::reset_for_test();
+    let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
+    configure_pulse_axis(&mut engine, 0, 0.01);
+    let shared = SharedState::new();
+    assert_eq!(
+        engine.resonance_buzz(&shared, 0b001, 0, 50_000, 50_000, 100_000, 100, 10, 0),
+        0
+    );
+    assert!(crate::buzz_stream::axis_active(0));
+    assert!(
+        !crate::buzz_stream::is_sweep(0),
+        "fixed tone is not a sweep"
+    );
+    assert!(!crate::buzz_stream::is_xdirect(0));
+    crate::buzz_stream::reset_for_test();
+}
+
+#[test]
 fn overlay_multi_piece_no_sample_exceeds_max_steps() {
     use crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE;
 

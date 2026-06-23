@@ -25,6 +25,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 use crate::buzz_gen::{ToneCursor, ToneError, ToneParams, next_crossing};
+use crate::buzz_sweep::{SweepCursor, next_crossing_sweep};
 use crate::buzz_xdirect::{XdirectConfig, XdirectCursor, next_update};
 use crate::error::FaultCode;
 use crate::step_queue::{
@@ -109,6 +110,10 @@ const REFILL_BATCH: u16 = 16;
 #[derive(Clone, Copy, Debug)]
 enum StreamGen {
     Pulse(ToneCursor),
+    /// STEP/DIR stepped-frequency sweep: a staircase of fixed-frequency lobes
+    /// (`buzz_sweep`), each one closed-form, so a swept pulse axis never touches
+    /// the chirp scan that freezes the foreground.
+    Sweep(SweepCursor),
     Xdirect {
         cfg: XdirectConfig,
         cursor: XdirectCursor,
@@ -225,6 +230,24 @@ pub fn arm_axis(axis_idx: usize, params: ToneParams) {
     });
 }
 
+/// Latch one axis's stepped-frequency sweep and arm its STEP/DIR stream. Same
+/// anchor / net-zero discipline as `arm_axis`; the generator emits a staircase of
+/// fixed-frequency lobes instead of one chirp, so every crossing is closed-form.
+pub fn arm_axis_sweep(axis_idx: usize, params: ToneParams) {
+    if axis_idx >= N_AXIS_STEP_QUEUES {
+        return;
+    }
+    set_xdirect_bit(axis_idx, false);
+    store::with_slot(axis_idx, |slot| {
+        *slot = Some(AxisStream {
+            params,
+            generator: StreamGen::Sweep(SweepCursor::start(&params)),
+            anchored: false,
+            closed: false,
+        });
+    });
+}
+
 /// Arm an axis for the phase-stepping (XDIRECT) buzz: absolute coil-position
 /// updates on the `cfg` displacement grid plus carrier extrema. Same anchor /
 /// net-zero discipline as `arm_axis`; only the generator differs.
@@ -253,6 +276,21 @@ pub fn clear_axis(axis_idx: usize) {
     }
     set_xdirect_bit(axis_idx, false);
     store::with_slot(axis_idx, |slot| *slot = None);
+}
+
+/// True while `axis_idx` runs the stepped-frequency sweep generator (STEP/DIR
+/// staircase). For routing tests that assert a swept pulse axis took the staircase
+/// path rather than the chirp.
+#[cfg(any(test, feature = "host"))]
+#[must_use]
+pub fn is_sweep(axis_idx: usize) -> bool {
+    if axis_idx >= N_AXIS_STEP_QUEUES {
+        return false;
+    }
+    store::with_slot(axis_idx, |slot| {
+        slot.as_ref()
+            .is_some_and(|s| matches!(s.generator, StreamGen::Sweep(_)))
+    })
 }
 
 #[must_use]
@@ -312,6 +350,14 @@ pub unsafe fn refill_step_axis(
                             level: c.level,
                             t_cursor: c.t,
                         }),
+                    ))),
+                    Err(ToneError::Done) => Ok(None),
+                    Err(e) => Err(e),
+                },
+                StreamGen::Sweep(cursor) => match next_crossing_sweep(&params, *cursor) {
+                    Ok((c, advanced)) => Ok(Some((
+                        StepEntry::pulse(c.cycle_abs, c.dir, STEPPER_SEL_ALL),
+                        StreamGen::Sweep(advanced),
                     ))),
                     Err(ToneError::Done) => Ok(None),
                     Err(e) => Err(e),
