@@ -29,6 +29,8 @@ pub use sizing::RT_STORAGE_SIZE;
 pub mod buzz;
 pub mod buzz_gen;
 pub mod buzz_stream;
+pub mod buzz_sweep;
+pub mod buzz_xdirect;
 pub mod clock;
 pub mod dispatch_stepper;
 pub mod engine;

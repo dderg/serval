@@ -22,17 +22,54 @@ pub const N_AXIS_STEP_QUEUES: usize = 4;
 /// Layout must match the C struct exactly — `#[repr(C)]` + the same field
 /// order + the explicit 2-byte tail pad gives an 8-byte entry on every
 /// target we care about (ABI-stable across H7 / F4 / host).
+/// One scheduled action at `cycle_abs`. The trailing `payload` is interpreted by
+/// the consumer per the axis `StepMode`, which is authoritative at both produce
+/// and consume: in Pulse mode it packs `(dir, stepper_sel)` for a STEP/DIR pulse;
+/// in Phase mode it is the signed `offset_steps` for an XDIRECT coil write. The
+/// two never alias on one axis — a Phase-mode axis routes normal motion straight
+/// to XDIRECT from TIM5 and only ever queues buzz updates here.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct StepEntry {
     pub cycle_abs: u32,
-    pub dir: i8,
-    pub stepper_sel: u8,
-    #[allow(clippy::pub_underscore_fields)]
-    pub _pad: [u8; 2],
+    payload: i32,
 }
 
 pub const STEPPER_SEL_ALL: u8 = 0;
+
+impl StepEntry {
+    #[must_use]
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn pulse(cycle_abs: u32, dir: i8, stepper_sel: u8) -> Self {
+        let payload = (u32::from(dir as u8) | (u32::from(stepper_sel) << 8)) as i32;
+        Self { cycle_abs, payload }
+    }
+
+    #[must_use]
+    pub fn xdirect(cycle_abs: u32, offset_steps: i32) -> Self {
+        Self {
+            cycle_abs,
+            payload: offset_steps,
+        }
+    }
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn dir(self) -> i8 {
+        (self.payload & 0xFF) as i8
+    }
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn stepper_sel(self) -> u8 {
+        ((self.payload >> 8) & 0xFF) as u8
+    }
+
+    #[must_use]
+    pub fn offset_steps(self) -> i32 {
+        self.payload
+    }
+}
 
 #[repr(C)]
 #[derive(Debug)]
@@ -53,9 +90,7 @@ impl StepQueue {
             _pad: [0; 4],
             buf: [StepEntry {
                 cycle_abs: 0,
-                dir: 0,
-                stepper_sel: STEPPER_SEL_ALL,
-                _pad: [0; 2],
+                payload: 0,
             }; STEP_QUEUE_DEPTH],
         }
     }

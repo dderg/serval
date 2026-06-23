@@ -71,6 +71,7 @@ unsafe extern "C" {
     static runtime_clock_freq: u32;
     fn timer_read_time() -> u32;
     fn runtime_emit_step_pulses(axis_idx: u8, n_steps: i32, stepper_sel: u8);
+    fn runtime_emit_xdirect(rt: *mut core::ffi::c_void, axis_idx: u8, offset_steps: i32);
     fn kalico_step_output_owned_mask() -> u8;
 }
 
@@ -86,12 +87,19 @@ unsafe fn runtime_emit_step_pulses(axis_idx: u8, n_steps: i32, stepper_sel: u8) 
     test_hooks::record_emit(axis_idx, n_steps, stepper_sel);
 }
 #[cfg(any(test, feature = "host"))]
+unsafe fn runtime_emit_xdirect(_rt: *mut core::ffi::c_void, axis_idx: u8, offset_steps: i32) {
+    test_hooks::record_xdirect(axis_idx, offset_steps);
+}
+#[cfg(any(test, feature = "host"))]
 unsafe fn kalico_step_output_owned_mask() -> u8 {
     test_hooks::owned_mask()
 }
 
+// `rt` is an opaque runtime handle forwarded verbatim to `runtime_emit_xdirect`,
+// which null-checks and projects it; this trampoline never dereferences it.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
-pub extern "C" fn step_output_event() -> u32 {
+pub extern "C" fn step_output_event(rt: *mut core::ffi::c_void) -> u32 {
     // SAFETY: `timer_read_time` is a single u32 MMIO read (host: a test hook).
     let now = unsafe { timer_read_time() };
     // SAFETY: side-effect-free C getter (host: a test hook).
@@ -124,15 +132,22 @@ pub extern "C" fn step_output_event() -> u32 {
                 record_lateness(now, entry.cycle_abs, threshold);
                 // SAFETY: sole-consumer discipline as above.
                 let _ = unsafe { queue_pop(q) };
-                // SAFETY: C step emitter guards out-of-range motor indices.
                 crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_STEPOUT_EMIT);
-                unsafe {
-                    runtime_emit_step_pulses(
-                        axis_idx as u8,
-                        i32::from(entry.dir),
-                        entry.stepper_sel,
-                    )
-                };
+                if crate::buzz_stream::is_xdirect(axis_idx) {
+                    // Phase-mode buzz: the payload is an absolute coil offset. The
+                    // c-api projects the engine from the forwarded handle.
+                    // SAFETY: sole coil writer for this axis (tick skips it).
+                    unsafe { runtime_emit_xdirect(rt, axis_idx as u8, entry.offset_steps()) };
+                } else {
+                    // SAFETY: C step emitter guards out-of-range motor indices.
+                    unsafe {
+                        runtime_emit_step_pulses(
+                            axis_idx as u8,
+                            i32::from(entry.dir()),
+                            entry.stepper_sel(),
+                        )
+                    };
+                }
                 emitted += 1;
                 emitted_this_pass = true;
             }
@@ -199,6 +214,7 @@ pub mod test_hooks {
         static QUEUES: RefCell<[StepQueue; N_QUEUES]> =
             RefCell::new(core::array::from_fn(|_| StepQueue::new()));
         static EMITS: RefCell<Vec<(u8, i32, u8)>> = const { RefCell::new(Vec::new()) };
+        static XDIRECT_EMITS: RefCell<Vec<(u8, i32)>> = const { RefCell::new(Vec::new()) };
         static LATE_THRESHOLD: RefCell<u32> = const { RefCell::new(500) };
     }
 
@@ -226,6 +242,12 @@ pub mod test_hooks {
     pub fn take_emits() -> Vec<(u8, i32, u8)> {
         EMITS.with(|c| core::mem::take(&mut *c.borrow_mut()))
     }
+    pub fn record_xdirect(axis: u8, offset_steps: i32) {
+        XDIRECT_EMITS.with(|c| c.borrow_mut().push((axis, offset_steps)));
+    }
+    pub fn take_xdirect_emits() -> Vec<(u8, i32)> {
+        XDIRECT_EMITS.with(|c| core::mem::take(&mut *c.borrow_mut()))
+    }
     pub fn take_late_stats() -> (u32, u32, u32) {
         use core::sync::atomic::Ordering;
         let max_late = super::STEPOUT_MAX_LATE_CYCLES.swap(0, Ordering::Relaxed);
@@ -237,6 +259,7 @@ pub mod test_hooks {
         set_now(0);
         set_owned_mask(0);
         let _ = take_emits();
+        let _ = take_xdirect_emits();
         let _ = take_late_stats();
         QUEUES.with(|c| {
             for q in c.borrow_mut().iter_mut() {

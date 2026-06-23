@@ -601,7 +601,17 @@ impl Engine {
                 cps,
                 now_cycle,
             );
-            crate::buzz_stream::arm_axis(ex.axis_idx, params);
+            if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
+                let cfg = crate::buzz_xdirect::XdirectConfig::new(
+                    axis.microstep_distance,
+                    crate::buzz_xdirect::DEFAULT_XDIRECT_UPDATE_HZ,
+                );
+                crate::buzz_stream::arm_axis_xdirect(ex.axis_idx, params, cfg);
+            } else if params.mu != 0.0 {
+                crate::buzz_stream::arm_axis_sweep(ex.axis_idx, params);
+            } else {
+                crate::buzz_stream::arm_axis(ex.axis_idx, params);
+            }
         }
         #[cfg(not(any(test, feature = "host")))]
         #[allow(unsafe_code)]
@@ -613,6 +623,12 @@ impl Engine {
             );
         }
         0
+    }
+
+    pub fn emit_xdirect_buzz(&self, axis_idx: usize, offset_steps: i32, shared: &SharedState) {
+        if let Some(Some(axis)) = self.stepping_axes.get(axis_idx) {
+            crate::dispatch_stepper::write_phase_coils(axis_idx, axis, shared, offset_steps);
+        }
     }
 
     pub fn phase_jog_to(

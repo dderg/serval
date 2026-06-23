@@ -1,10 +1,13 @@
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::panic
+    clippy::panic,
+    clippy::expect_used,
+    clippy::match_wild_err_arm
 )]
 
 use crate::buzz_gen::*;
+use crate::error::FaultCode;
 
 const NM_PER_MM: f64 = 1.0e6;
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
@@ -610,4 +613,148 @@ fn bench_params_stream_is_bounded_and_sane() {
         (1000..50_000).contains(&n) && max_gap < 0.05,
         "crossings={n} max_gap={max_gap}s (Done early or scan traverses a big gap)"
     );
+}
+
+#[test]
+fn bench_param_sets_terminate_without_stall() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn bench(
+        omega: f32,
+        mu: f32,
+        amplitude_mm: f32,
+        sign: f32,
+        total: f32,
+        ramp: f32,
+    ) -> ToneParams {
+        ToneParams {
+            omega,
+            mu,
+            amplitude_mm,
+            sign,
+            base_mm: 0.0,
+            microstep_distance: 0.00625,
+            anchor_cycle: 0,
+            cycles_per_second: 520_000_000.0,
+            total_seconds: total,
+            ramp_seconds: ramp,
+        }
+    }
+
+    let mut cases: Vec<ToneParams> = Vec::new();
+    for &sign in &[1.0_f32, -1.0] {
+        for &damp in &[-0.0004_f32, -0.0002, 0.0, 0.0002, 0.0004] {
+            for &dramp in &[-0.005_f32, 0.0, 0.005] {
+                for &domega in &[-1.0_f32, -0.5, 0.0, 0.5, 1.0] {
+                    cases.push(bench(
+                        341.24 + domega,
+                        0.0,
+                        0.0350 + damp,
+                        sign,
+                        3.0,
+                        0.055 + dramp,
+                    ));
+                    cases.push(bench(
+                        188.50 + domega,
+                        141.37,
+                        0.06332 + damp,
+                        sign,
+                        4.0,
+                        0.10 + dramp,
+                    ));
+                }
+            }
+        }
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        for p in cases {
+            let mut cursor = ToneCursor::start();
+            let mut n: u64 = 0;
+            let mut last_t = 0.0_f32;
+            loop {
+                match next_crossing(&p, cursor) {
+                    Ok(c) => {
+                        cursor = ToneCursor {
+                            level: c.level,
+                            t_cursor: c.t,
+                        };
+                        last_t = c.t;
+                        n += 1;
+                        if n > 1_000_000 {
+                            let _ = tx.send(Err(format!(
+                                "runaway: >1M crossings (omega={}, mu={}, amp={}, t={last_t})",
+                                p.omega, p.mu, p.amplitude_mm
+                            )));
+                            return;
+                        }
+                    }
+                    Err(ToneError::Done) => break,
+                    Err(e) => {
+                        let _ = tx.send(Err(format!(
+                            "solver faulted {e:?} (omega={}, mu={}, amp={}, t={last_t})",
+                            p.omega, p.mu, p.amplitude_mm
+                        )));
+                        return;
+                    }
+                }
+            }
+            assert!(n > 0, "empty stream for omega={} mu={}", p.omega, p.mu);
+        }
+        let _ = tx.send(Ok(()));
+    });
+
+    match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(())) => {
+            worker.join().expect("worker panicked");
+        }
+        Ok(Err(msg)) => panic!("{msg}"),
+        Err(_) => panic!("bench stream stalled: a next_crossing call did not return (scan pinned)"),
+    }
+}
+
+#[test]
+fn scan_stall_guard_faults_instead_of_hanging() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let p = ToneParams {
+        omega: 188.50,
+        mu: 141.37,
+        amplitude_mm: 0.06332,
+        sign: 1.0,
+        base_mm: 0.0,
+        microstep_distance: 0.00625,
+        anchor_cycle: 0,
+        cycles_per_second: 520_000_000.0,
+        total_seconds: 4.0,
+        ramp_seconds: 0.10,
+    };
+    let degenerate = ToneCursor {
+        level: 100_000,
+        t_cursor: 3.999,
+    };
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(next_crossing(&p, degenerate));
+    });
+
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(result) => {
+            assert_eq!(
+                result,
+                Err(ToneError::ScanStalled),
+                "degenerate resume must hit the budget and fault ScanStalled, got {result:?}"
+            );
+            assert_eq!(
+                ToneError::ScanStalled.fault_code(),
+                Some(FaultCode::InternalInvariant),
+                "ScanStalled must map to a latchable fault code"
+            );
+        }
+        Err(_) => panic!("scan did not return for a degenerate cursor — stall guard missing"),
+    }
 }

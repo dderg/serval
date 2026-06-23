@@ -57,6 +57,15 @@ extern uint32_t runtime_cyccnt_read(void);
 
 int32_t runtime_discard_pending(struct Runtime *rt);
 
+/**
+ * Step-output consumer entry for a phase-mode buzz: drive `axis_idx`'s coils
+ * to base + `offset_steps` via XDIRECT. Called from `step_output_event` (TIM3
+ * ISR), which forwards the runtime handle. Safe against the motion tick: TIM3
+ * and TIM5 share NVIC priority (cannot interleave) and the tick skips its
+ * phase dispatch for an XDIRECT-buzzing axis, so this is the sole coil writer.
+ */
+void runtime_emit_xdirect(struct Runtime *rt, uint8_t axis_idx, int32_t offset_steps);
+
 uint32_t runtime_enqueue_success_lo(struct Runtime *rt);
 
 int32_t runtime_gate_pieces(struct Runtime *rt);

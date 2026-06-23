@@ -48,13 +48,14 @@ pub enum ToneError {
     Done,
     RefineDiverged,
     NonMonotonic,
+    ScanStalled,
 }
 
 impl ToneError {
     pub fn fault_code(self) -> Option<FaultCode> {
         match self {
             ToneError::Done => None,
-            ToneError::RefineDiverged | ToneError::NonMonotonic => {
+            ToneError::RefineDiverged | ToneError::NonMonotonic | ToneError::ScanStalled => {
                 Some(FaultCode::InternalInvariant)
             }
         }
@@ -80,13 +81,13 @@ fn phase(p: &ToneParams, t: f32) -> f32 {
 
 #[inline]
 #[must_use]
-fn omega_inst(p: &ToneParams, t: f32) -> f32 {
+pub(crate) fn omega_inst(p: &ToneParams, t: f32) -> f32 {
     p.omega + p.mu * t
 }
 
 #[inline]
 #[must_use]
-fn amp_eff(p: &ToneParams, t: f32) -> f32 {
+pub(crate) fn amp_eff(p: &ToneParams, t: f32) -> f32 {
     if p.mu == 0.0 {
         return p.amplitude_mm;
     }
@@ -128,7 +129,7 @@ fn amp_eff_accel(p: &ToneParams, t: f32) -> f32 {
 
 #[inline]
 #[must_use]
-fn position_rel(p: &ToneParams, t: f32) -> f32 {
+pub(crate) fn position_rel(p: &ToneParams, t: f32) -> f32 {
     p.sign * envelope(t, p.total_seconds, p.ramp_seconds) * amp_eff(p, t) * libm::sinf(phase(p, t))
 }
 
@@ -197,7 +198,7 @@ const U32_MODULUS: f64 = 4_294_967_296.0;
 
 #[inline]
 #[must_use]
-fn cycle_at(p: &ToneParams, t: f32) -> u32 {
+pub(crate) fn cycle_at(p: &ToneParams, t: f32) -> u32 {
     let offset = libm::fmod(f64::from(t) * p.cycles_per_second, U32_MODULUS);
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     let cycles = offset as u32;
@@ -365,8 +366,11 @@ fn emit_level_change(
     }
 }
 
-#[must_use]
-fn scan_next_change(p: &ToneParams, level: i32, after: f32) -> Option<(f32, i32)> {
+fn scan_next_change(
+    p: &ToneParams,
+    level: i32,
+    after: f32,
+) -> Result<Option<(f32, i32)>, ToneError> {
     let omega_hi = omega_inst(p, 0.0)
         .abs()
         .max(omega_inst(p, p.total_seconds).abs())
@@ -384,27 +388,38 @@ fn scan_next_change(p: &ToneParams, level: i32, after: f32) -> Option<(f32, i32)
         .min(p.total_seconds / 4.0)
         .min(traverse_cap)
         .max(REFINE_TIME_TOL);
+
+    let grid_steps = (remaining / dt) + 1.0;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let scan_budget = (grid_steps as u64).saturating_mul(64).saturating_add(1_000);
+
     let mut t_prev = after;
     let mut level_prev = level;
     let mut v_prev = velocity_rel(p, after);
     let mut t = after + dt;
+    let mut iters: u64 = 0;
     loop {
+        iters += 1;
+        if iters > scan_budget {
+            return Err(ToneError::ScanStalled);
+        }
         let sample = t.min(p.total_seconds);
         let v_sample = velocity_rel(p, sample);
 
         if v_prev != 0.0 && v_sample != 0.0 && v_prev * v_sample < 0.0 {
-            let ext = refine_extremum(p, t_prev, sample).ok()?;
-            let ext_level = microstep_level(p, ext);
-            if ext_level != level_prev {
-                if let Some(found) = emit_level_change(p, level_prev, after, t_prev, ext, ext_level)
-                {
-                    return Some(found);
+            let Ok(ext) = refine_extremum(p, t_prev, sample) else {
+                return Ok(None);
+            };
+            if ext > t_prev && ext < sample {
+                let ext_level = microstep_level(p, ext);
+                if ext_level != level_prev {
+                    if let Some(found) =
+                        emit_level_change(p, level_prev, after, t_prev, ext, ext_level)
+                    {
+                        return Ok(Some(found));
+                    }
+                    level_prev += (ext_level - level_prev).signum();
                 }
-                level_prev = if ext_level > level_prev {
-                    level_prev + 1
-                } else {
-                    level_prev - 1
-                };
                 t_prev = ext;
                 v_prev = velocity_rel(p, ext);
                 continue;
@@ -415,20 +430,16 @@ fn scan_next_change(p: &ToneParams, level: i32, after: f32) -> Option<(f32, i32)
         if cur_level != level_prev {
             if let Some(found) = emit_level_change(p, level_prev, after, t_prev, sample, cur_level)
             {
-                return Some(found);
+                return Ok(Some(found));
             }
-            level_prev = if cur_level > level_prev {
-                level_prev + 1
-            } else {
-                level_prev - 1
-            };
+            level_prev += (cur_level - level_prev).signum();
             t_prev = sample;
             v_prev = v_sample;
             continue;
         }
 
         if sample >= p.total_seconds {
-            return None;
+            return Ok(None);
         }
         t_prev = sample;
         v_prev = v_sample;
@@ -447,7 +458,11 @@ pub fn next_crossing(p: &ToneParams, cursor: ToneCursor) -> Result<ToneCrossing,
     } else {
         None
     };
-    let (t, next_level) = match candidate.or_else(|| scan_next_change(p, cursor.level, after)) {
+    let resolved = match candidate {
+        Some(v) => Some(v),
+        None => scan_next_change(p, cursor.level, after)?,
+    };
+    let (t, next_level) = match resolved {
         Some(v) => v,
         None => return Err(ToneError::Done),
     };
