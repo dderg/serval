@@ -1,8 +1,8 @@
 #![allow(unsafe_code)]
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::Ordering;
 
-use portable_atomic::AtomicI32;
+use portable_atomic::{AtomicI32, AtomicU8};
 
 use crate::buzz_gen::{ToneCursor, ToneError, ToneParams, next_crossing};
 use crate::buzz_sweep::{SweepCursor, next_crossing_sweep};
