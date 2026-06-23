@@ -55,21 +55,6 @@ def _parse_axis(gcmd, raw_axis):
     raise gcmd.error("diagonal buzz is not implemented yet")
 
 
-class _VibrationGeneratorCompat:
-    def __init__(self, tester):
-        self.min_freq = tester.min_freq
-        self.max_freq = tester.max_freq
-        self.accel_per_hz = tester.accel_per_hz
-        self.hz_per_sec = tester.hz_per_sec
-
-
-class _ResonanceGeneratorCompat:
-    def __init__(self, tester):
-        self.vibration_generator = _VibrationGeneratorCompat(tester)
-        self.sweeping_period = 0.0
-        self.sweeping_accel = 0.0
-
-
 class ResonanceTester:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -87,7 +72,6 @@ class ResonanceTester:
         self.probe_points = config.getlists(
             "probe_points", None, seps=(",", "\n"), parser=float, count=3
         )
-        self.generator = _ResonanceGeneratorCompat(self)
 
         accel_chips = config.get("accel_chips", None)
         accel_chip = config.get("accel_chip", None)
