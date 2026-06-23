@@ -6,6 +6,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+/// Per-frame `[transit-diag]` healthy-path logging on the pump send thread
+/// throttled delivery below real-time on dense streams (the structured write +
+/// `SystemTime` + format ran synchronously between transport pushes). The alert
+/// path still fires every frame; the healthy lead sample is emitted once per
+/// this many frames to keep coarse delivery-lead telemetry at negligible cost.
+const TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE: u64 = 64;
+static TRANSIT_DIAG_FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct AxisKey {
     pub mcu_id: u32,
@@ -880,58 +888,62 @@ impl PieceSink for WireSink {
 
         {
             let arrival_lead_ticks = r.front_start_time as i64 - r.arrival_clock as i64;
-            let approx_freq_hz = (self.freq_of)(key.mcu_id);
-            let host_send_secs = {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0)
-            };
             let zero_st = host_front_start_time == 0;
             let past_arrival = arrival_lead_ticks < 0;
-            // Clock not yet synced -> the µs conversion is meaningless; render
-            // N/A. Alert gating uses arrival_lead_ticks (tick domain), so the
-            // ALERT still fires without a frequency.
-            let arrival_lead_us = approx_freq_hz
-                .map(|f| format!("{:.1}", (arrival_lead_ticks as f64 / f) * 1e6))
-                .unwrap_or_else(|| "N/A".to_owned());
-            if zero_st || past_arrival {
-                let alert = if zero_st && past_arrival {
-                    "host_start_time=0 (clock-sync gap) AND piece in MCU past"
-                } else if zero_st {
-                    "host_start_time=0 (router clock_freq=0 at dispatch — clock-sync gap)"
-                } else {
-                    "piece arrived in MCU past (arrival_lead<0) — PieceStartInPast risk"
+            let frame_seq = TRANSIT_DIAG_FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
+            let healthy_sample = frame_seq % TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE == 0;
+            if zero_st || past_arrival || healthy_sample {
+                let approx_freq_hz = (self.freq_of)(key.mcu_id);
+                let host_send_secs = {
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0)
                 };
-                tracing::warn!(
-                    subsystem = "motion",
-                    event = "transit_diag_alert",
-                    mcu = key.mcu_id,
-                    axis = key.axis,
-                    host_front_start_time,
-                    mcu_front_start_time = r.front_start_time,
-                    arrival_clock = r.arrival_clock,
-                    arrival_lead_ticks,
-                    arrival_lead_us = %arrival_lead_us,
-                    host_send_unix_secs = host_send_secs,
-                    alert,
-                    "[transit-diag] alert"
-                );
-            } else {
-                tracing::info!(
-                    subsystem = "motion",
-                    event = "transit_diag",
-                    mcu = key.mcu_id,
-                    axis = key.axis,
-                    host_front_start_time,
-                    mcu_front_start_time = r.front_start_time,
-                    arrival_clock = r.arrival_clock,
-                    arrival_lead_ticks,
-                    arrival_lead_us = %arrival_lead_us,
-                    host_send_unix_secs = host_send_secs,
-                    "[transit-diag]"
-                );
+                // Clock not yet synced -> the µs conversion is meaningless; render
+                // N/A. Alert gating uses arrival_lead_ticks (tick domain), so the
+                // ALERT still fires without a frequency.
+                let arrival_lead_us = approx_freq_hz
+                    .map(|f| format!("{:.1}", (arrival_lead_ticks as f64 / f) * 1e6))
+                    .unwrap_or_else(|| "N/A".to_owned());
+                if zero_st || past_arrival {
+                    let alert = if zero_st && past_arrival {
+                        "host_start_time=0 (clock-sync gap) AND piece in MCU past"
+                    } else if zero_st {
+                        "host_start_time=0 (router clock_freq=0 at dispatch — clock-sync gap)"
+                    } else {
+                        "piece arrived in MCU past (arrival_lead<0) — PieceStartInPast risk"
+                    };
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "transit_diag_alert",
+                        mcu = key.mcu_id,
+                        axis = key.axis,
+                        host_front_start_time,
+                        mcu_front_start_time = r.front_start_time,
+                        arrival_clock = r.arrival_clock,
+                        arrival_lead_ticks,
+                        arrival_lead_us = %arrival_lead_us,
+                        host_send_unix_secs = host_send_secs,
+                        alert,
+                        "[transit-diag] alert"
+                    );
+                } else {
+                    tracing::info!(
+                        subsystem = "motion",
+                        event = "transit_diag",
+                        mcu = key.mcu_id,
+                        axis = key.axis,
+                        host_front_start_time,
+                        mcu_front_start_time = r.front_start_time,
+                        arrival_clock = r.arrival_clock,
+                        arrival_lead_ticks,
+                        arrival_lead_us = %arrival_lead_us,
+                        host_send_unix_secs = host_send_secs,
+                        "[transit-diag]"
+                    );
+                }
             }
         }
 
