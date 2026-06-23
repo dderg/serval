@@ -28,11 +28,29 @@ class FakeReactor:
 
 
 class FakeMcu:
-    def __init__(self, rate=1.0):
-        self.rate = rate
-
     def estimated_print_time(self, eventtime):
-        return eventtime * self.rate
+        return eventtime
+
+
+# Mirrors bridge.queued_motion_secs: (frontier - host_now) clamped at 0, where
+# host_now is the wall clock (reactor). `stalled` models the frontier racing
+# the host clock so the signal never drains -- the DRAIN_TIMEOUT guard case.
+class FakeEngine:
+    def __init__(self, reactor, queued=0.0, frontier=0.0, stalled=False):
+        self.reactor = reactor
+        self._queued0 = queued
+        self._t0 = reactor.now
+        self._frontier = frontier
+        self.stalled = stalled
+
+    def queued_motion_secs(self):
+        if self.stalled:
+            return self._queued0
+        drained = self.reactor.now - self._t0
+        return max(0.0, self._queued0 - drained)
+
+    def get_last_move_time(self):
+        return self._frontier
 
 
 class FakeMotion:
@@ -41,17 +59,17 @@ class FakeMotion:
 
     def __init__(
         self,
-        pending_end=0.0,
-        rate=1.0,
+        queued=0.0,
         mcu=True,
         drip=False,
+        stalled=False,
         buffer_time_high=2.0,
         buffer_time_low=1.0,
     ):
         self.reactor = FakeReactor()
         self.printer = FakePrinter()
-        self.mcu = FakeMcu(rate) if mcu else None
-        self._mcu_pending_end_time = pending_end
+        self.mcu = FakeMcu() if mcu else None
+        self.engine = FakeEngine(self.reactor, queued=queued, stalled=stalled)
         self._drip_active = drip
         self.buffer_time_high = buffer_time_high
         self.buffer_time_low = buffer_time_low
@@ -59,42 +77,42 @@ class FakeMotion:
 
 
 def test_no_pause_when_within_buffer():
-    m = FakeMotion(pending_end=1.0)
+    m = FakeMotion(queued=1.0)
     m._check_pause()
     assert m.reactor.pauses == 0
 
 
 def test_periodic_reactor_yield_even_when_within_buffer():
-    m = FakeMotion(pending_end=1.0)
+    m = FakeMotion(queued=1.0)
     m._last_reactor_yield = -1.0  # last yield long ago => due for a yield
     m._check_pause()
     assert m.reactor.pauses == 1
 
 
 def test_pauses_until_buffer_drains_to_low():
-    # pending_end fixed; est advances with each reactor pause, draining buffer.
-    m = FakeMotion(pending_end=5.0)
+    # queued starts above the high watermark; it drains as the wall clock
+    # advances with each reactor pause until it reaches the low watermark.
+    m = FakeMotion(queued=5.0)
     m._check_pause()
     assert m.reactor.pauses > 0
-    est = m.mcu.estimated_print_time(m.reactor.now)
-    assert m._mcu_pending_end_time - est <= m.buffer_time_low
+    assert m.engine.queued_motion_secs() <= m.buffer_time_low
 
 
-def test_timeout_when_mcu_not_advancing():
-    # rate=0 => est frozen => buffer never drains => DRAIN_TIMEOUT raises.
-    m = FakeMotion(pending_end=5.0, rate=0.0)
+def test_timeout_when_signal_never_drains():
+    # frontier races the host clock => queued pinned above low => DRAIN_TIMEOUT.
+    m = FakeMotion(queued=5.0, stalled=True)
     m.reactor.step = 10.0
     with pytest.raises(FakeCommandError):
         m._check_pause()
 
 
 def test_skips_during_drip():
-    m = FakeMotion(pending_end=5.0, drip=True)
+    m = FakeMotion(queued=5.0, drip=True)
     m._check_pause()
     assert m.reactor.pauses == 0
 
 
 def test_skips_when_no_mcu():
-    m = FakeMotion(pending_end=5.0, mcu=False)
+    m = FakeMotion(queued=5.0, mcu=False)
     m._check_pause()
     assert m.reactor.pauses == 0
