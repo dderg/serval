@@ -3,6 +3,7 @@ name = "piece-sink-harness"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license.workspace = true
 description = "Host harness that compiles src/piece_sink.c and exercises it (invariants, differential vs the Rust codec, byte-stream fuzz) so the MCU parser is verifiable off-hardware."
 
 [lib]
