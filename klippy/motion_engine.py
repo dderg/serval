@@ -109,6 +109,9 @@ class _StubEngine:
     def queued_motion_secs(self):
         return 0.0
 
+    def dispatched_lead_secs(self):
+        return 0.0
+
     def __getattr__(self, name):
         if name in _STUB_MOTION_METHODS:
 
@@ -475,6 +478,9 @@ class MotionEngineWrapper:
 
     def queued_motion_secs(self):
         return self._engine.queued_motion_secs() or 0.0
+
+    def dispatched_lead_secs(self):
+        return self._engine.dispatched_lead_secs() or 0.0
 
     def pump_backlog(self):
         return self._engine.pump_backlog() or 0
