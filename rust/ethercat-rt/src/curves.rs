@@ -6,7 +6,7 @@ use runtime::piece_ring::{PieceEntry, RingDescriptor};
 
 pub const CLOCK_FREQ_HZ: f32 = 1_000_000_000.0;
 
-pub const AXIS_RING_CAPACITY: usize = 256;
+pub const AXIS_RING_CAPACITY: usize = 1024;
 
 pub const NUM_AXES: usize = 1;
 

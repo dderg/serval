@@ -2,8 +2,35 @@ use runtime::piece_ring::PieceEntry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Weak;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
+
+/// Per-frame `[transit-diag]` healthy-path logging on the pump send thread
+/// throttled delivery below real-time on dense streams (the structured write +
+/// `SystemTime` + format ran synchronously between transport pushes). The alert
+/// path still fires every frame; the healthy lead sample is emitted once per
+/// this many frames to keep coarse delivery-lead telemetry at negligible cost.
+const TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE: u64 = 64;
+static TRANSIT_DIAG_FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Previous `PushPieces` frame on one axis, kept solely so the per-frame
+/// transit diagnostic can decompose where dispatch lead is being spent:
+/// `Δarrival_lead = schedule_advance − mcu_clock_advance`. Separating the
+/// host's planned advance (`front_start_time` delta) from the MCU clock's
+/// real-time advance (`arrival_clock` delta), and bracketing both with the
+/// wall-clock send gap and the blocking-call duration, tells late-arrival
+/// apart from host-pacing starvation, transport stall, and MCU clock burn.
+struct PrevTransitFrame {
+    send_instant: Instant,
+    front_start_time: u64,
+    arrival_clock: u64,
+    arrival_lead_ticks: i64,
+}
+
+static TRANSIT_PREV_FRAME: LazyLock<Mutex<HashMap<AxisKey, PrevTransitFrame>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct AxisKey {
@@ -49,6 +76,17 @@ pub struct FramePlan {
     pub key: AxisKey,
     pub pieces: Vec<PieceEntry>,
     pub start_slot: u16,
+}
+
+/// One axis' pieces within a single-MCU bundle, carrying the ring bookkeeping
+/// the transport needs. `schedule()` only ever groups axes of one MCU into a
+/// `Send`, so a slice of these is exactly the work for one MCU transaction.
+pub struct AxisFrame {
+    pub axis: u8,
+    pub pieces: Vec<PieceEntry>,
+    pub start_slot: u16,
+    pub new_head: u32,
+    pub room: u32,
 }
 
 #[derive(Debug)]
@@ -233,7 +271,32 @@ pub trait PieceSink: Send {
         pieces: &[PieceEntry],
         start_slot: u16,
         new_head: u32,
+        room: u32,
     ) -> Result<i32, SendError>;
+
+    /// Deliver every axis frame destined for `mcu_id` as one bundled
+    /// transaction. A whole bundle either lands or it doesn't — the caller
+    /// commits the ring bookkeeping for all axes only on `Ok`, so a failed
+    /// bundle re-sends byte-identical frames to the same ring slots.
+    ///
+    /// The default fans out to per-axis `send_frame`; a transport that can
+    /// pack multiple axes into one round-trip overrides this to collapse the
+    /// per-frame overhead that dominates dense-stream delivery.
+    fn send_mcu_frames(&self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
+        for f in frames {
+            self.send_frame(
+                AxisKey {
+                    mcu_id,
+                    axis: f.axis,
+                },
+                &f.pieces,
+                f.start_slot,
+                f.new_head,
+                f.room,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 pub fn junction_jumps(
@@ -249,7 +312,15 @@ pub fn junction_jumps(
     (tick_jump_us, host_jump_us)
 }
 
-pub const MAX_LEAD_SECS: f64 = 1.0;
+// How far ahead of the MCU playhead the pump pushes pieces — the depth of the
+// MCU-side buffer that absorbs host-side scheduling hiccups. A piece that lands
+// past the playhead faults (PieceStartInPast → stream halt), so this must exceed
+// the worst-case host stall between pump pushes. The per-axis ring (≈496 pieces)
+// is the hard cap; for dense piece streams the pump stalls on a full ring well
+// before this horizon, so raising it only deepens the buffer for sparse (long,
+// slow) moves where stalls are otherwise most likely to slip a piece into the
+// past.
+pub const MAX_LEAD_SECS: f64 = 2.0;
 
 #[derive(Clone, Copy)]
 struct JunctionEnd {
@@ -328,6 +399,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     on_fatal_transport: A,
     on_abandon: O,
     on_drip_stall: D,
+    backlog: Arc<AtomicU64>,
 ) where
     S: PieceSink,
     F: Fn(AxisKey) -> u32,
@@ -617,53 +689,73 @@ pub fn run_pump<S, F, C, A, O, D>(
                     if frames.is_empty() {
                         break 'send;
                     }
-                    for mut f in frames {
-                        let n = f.pieces.len() as u32;
-                        let new_head = {
+                    let mcu_id = frames[0].key.mcu_id;
+                    let bundle: Vec<AxisFrame> = frames
+                        .into_iter()
+                        .map(|f| {
+                            let n = f.pieces.len() as u32;
                             let q = queues.get(&f.key).expect("planned key exists");
                             debug_assert!(
                                 q.ring_depth <= u32::from(u16::MAX),
                                 "ring_depth {} exceeds u16::MAX; start_slot cast is lossy",
                                 q.ring_depth
                             );
-                            f.start_slot = q.physical_write_cursor as u16;
-                            q.pushed.wrapping_add(n)
-                        };
-                        match sink.send_frame(f.key, &f.pieces, f.start_slot, new_head) {
-                            Ok(_) => {
-                                let q = queues.get_mut(&f.key).expect("planned key exists");
-                                for _ in 0..f.pieces.len() {
+                            AxisFrame {
+                                axis: f.key.axis,
+                                start_slot: q.physical_write_cursor as u16,
+                                new_head: q.pushed.wrapping_add(n),
+                                room: q.room(),
+                                pieces: f.pieces,
+                            }
+                        })
+                        .collect();
+                    match sink.send_mcu_frames(mcu_id, &bundle) {
+                        Ok(()) => {
+                            for af in &bundle {
+                                let key = AxisKey {
+                                    mcu_id,
+                                    axis: af.axis,
+                                };
+                                let n = af.pieces.len() as u32;
+                                let q = queues.get_mut(&key).expect("planned key exists");
+                                for _ in 0..af.pieces.len() {
                                     q.pieces.pop_front();
                                 }
                                 q.pushed = q.pushed.wrapping_add(n);
                                 q.advance_write_cursor(n);
                             }
-                            Err(SendError::Fatal(ref e)) => {
-                                tracing::error!(
-                                    subsystem = "motion",
-                                    event = "send_frame_fatal",
-                                    key = ?f.key,
-                                    error = %e,
-                                    "pump send_frame FATAL transport error — invoking fatal-transport action"
-                                );
-                                on_fatal_transport(f.key);
-                                return;
-                            }
-                            Err(SendError::Transient(ref e)) => {
-                                tracing::error!(
-                                    subsystem = "motion",
-                                    event = "send_frame_transient",
-                                    key = ?f.key,
-                                    error = %e,
-                                    "pump send_frame failed"
-                                );
-                                break 'send;
-                            }
+                        }
+                        Err(SendError::Fatal(ref e)) => {
+                            tracing::error!(
+                                subsystem = "motion",
+                                event = "send_frame_fatal",
+                                mcu = mcu_id,
+                                error = %e,
+                                "pump send_mcu_frames FATAL transport error — invoking fatal-transport action"
+                            );
+                            on_fatal_transport(AxisKey {
+                                mcu_id,
+                                axis: bundle.first().map_or(0, |f| f.axis),
+                            });
+                            return;
+                        }
+                        Err(SendError::Transient(ref e)) => {
+                            tracing::error!(
+                                subsystem = "motion",
+                                event = "send_frame_transient",
+                                mcu = mcu_id,
+                                error = %e,
+                                "pump send_mcu_frames failed"
+                            );
+                            break 'send;
                         }
                     }
                 }
             }
         }
+
+        let unpushed: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
+        backlog.store(unpushed, Ordering::Release);
     }
 }
 
@@ -786,67 +878,139 @@ impl PieceSink for WireSink {
         pieces: &[PieceEntry],
         start_slot: u16,
         new_head: u32,
+        room: u32,
     ) -> Result<i32, SendError> {
         debug_assert!(
             pieces.len() <= 255,
             "PushPieces frame exceeds u8 piece_count; schedule() must cap at MAX_PER_FRAME"
         );
 
+        let piece_count = pieces.len();
         let host_front_start_time: u64 = pieces.first().map(|p| p.start_time).unwrap_or(0);
 
+        let send_started_at = Instant::now();
         let r = self.call_push_pieces(key, pieces, start_slot, new_head)?;
+        let send_elapsed_us = send_started_at.elapsed().as_secs_f64() * 1e6;
 
         {
             let arrival_lead_ticks = r.front_start_time as i64 - r.arrival_clock as i64;
-            let approx_freq_hz = (self.freq_of)(key.mcu_id);
-            let host_send_secs = {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0)
-            };
             let zero_st = host_front_start_time == 0;
             let past_arrival = arrival_lead_ticks < 0;
-            let arrival_lead_us = approx_freq_hz
-                .map(|f| format!("{:.1}", (arrival_lead_ticks as f64 / f) * 1e6))
-                .unwrap_or_else(|| "N/A".to_owned());
-            if zero_st || past_arrival {
-                let alert = if zero_st && past_arrival {
-                    "host_start_time=0 (clock-sync gap) AND piece in MCU past"
-                } else if zero_st {
-                    "host_start_time=0 (router clock_freq=0 at dispatch — clock-sync gap)"
-                } else {
-                    "piece arrived in MCU past (arrival_lead<0) — PieceStartInPast risk"
+            let frame_seq = TRANSIT_DIAG_FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
+            let healthy_sample = frame_seq % TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE == 0;
+
+            let prev = {
+                let mut map = TRANSIT_PREV_FRAME.lock().expect("transit prev-frame map");
+                let prev = map.insert(
+                    key,
+                    PrevTransitFrame {
+                        send_instant: send_started_at,
+                        front_start_time: r.front_start_time,
+                        arrival_clock: r.arrival_clock,
+                        arrival_lead_ticks,
+                    },
+                );
+                prev
+            };
+
+            if zero_st || past_arrival || healthy_sample {
+                let approx_freq_hz = (self.freq_of)(key.mcu_id);
+                let host_send_secs = {
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0)
                 };
-                tracing::warn!(
-                    subsystem = "motion",
-                    event = "transit_diag_alert",
-                    mcu = key.mcu_id,
-                    axis = key.axis,
-                    host_front_start_time,
-                    mcu_front_start_time = r.front_start_time,
-                    arrival_clock = r.arrival_clock,
-                    arrival_lead_ticks,
-                    arrival_lead_us = %arrival_lead_us,
-                    host_send_unix_secs = host_send_secs,
-                    alert,
-                    "[transit-diag] alert"
-                );
-            } else {
-                tracing::info!(
-                    subsystem = "motion",
-                    event = "transit_diag",
-                    mcu = key.mcu_id,
-                    axis = key.axis,
-                    host_front_start_time,
-                    mcu_front_start_time = r.front_start_time,
-                    arrival_clock = r.arrival_clock,
-                    arrival_lead_ticks,
-                    arrival_lead_us = %arrival_lead_us,
-                    host_send_unix_secs = host_send_secs,
-                    "[transit-diag]"
-                );
+                // Clock not yet synced -> the µs conversion is meaningless; render
+                // N/A. Alert gating uses arrival_lead_ticks (tick domain), so the
+                // ALERT still fires without a frequency.
+                let arrival_lead_us = approx_freq_hz
+                    .map(|f| format!("{:.1}", (arrival_lead_ticks as f64 / f) * 1e6))
+                    .unwrap_or_else(|| "N/A".to_owned());
+
+                let ticks_to_us = |ticks: i64| {
+                    approx_freq_hz
+                        .map(|f| format!("{:.1}", (ticks as f64 / f) * 1e6))
+                        .unwrap_or_else(|| "N/A".to_owned())
+                };
+                // Where did the lead go since this axis' previous frame?
+                //   Δarrival_lead = schedule_advance − mcu_clock_advance
+                // schedule_advance: how much further ahead the host planned.
+                // mcu_clock_advance: how much the MCU clock (real time) moved.
+                // send_gap: wall time between our two sends to this axis.
+                // A host-pacing starvation burns lead via schedule_advance <
+                // send_gap; a transport stall shows in send_elapsed_us; an MCU
+                // burst shows mcu_clock_advance ≫ send_gap.
+                let (send_gap_us, schedule_advance_us, mcu_clock_advance_us, delta_arrival_lead_us) =
+                    match &prev {
+                        Some(p) => (
+                            format!(
+                                "{:.1}",
+                                send_started_at.duration_since(p.send_instant).as_secs_f64() * 1e6
+                            ),
+                            ticks_to_us(r.front_start_time as i64 - p.front_start_time as i64),
+                            ticks_to_us(r.arrival_clock as i64 - p.arrival_clock as i64),
+                            ticks_to_us(arrival_lead_ticks - p.arrival_lead_ticks),
+                        ),
+                        None => (
+                            "N/A".to_owned(),
+                            "N/A".to_owned(),
+                            "N/A".to_owned(),
+                            "N/A".to_owned(),
+                        ),
+                    };
+                if zero_st || past_arrival {
+                    let alert = if zero_st && past_arrival {
+                        "host_start_time=0 (clock-sync gap) AND piece in MCU past"
+                    } else if zero_st {
+                        "host_start_time=0 (router clock_freq=0 at dispatch — clock-sync gap)"
+                    } else {
+                        "piece arrived in MCU past (arrival_lead<0) — PieceStartInPast risk"
+                    };
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "transit_diag_alert",
+                        mcu = key.mcu_id,
+                        axis = key.axis,
+                        host_front_start_time,
+                        mcu_front_start_time = r.front_start_time,
+                        arrival_clock = r.arrival_clock,
+                        arrival_lead_ticks,
+                        arrival_lead_us = %arrival_lead_us,
+                        host_send_unix_secs = host_send_secs,
+                        send_elapsed_us,
+                        send_gap_us = %send_gap_us,
+                        schedule_advance_us = %schedule_advance_us,
+                        mcu_clock_advance_us = %mcu_clock_advance_us,
+                        delta_arrival_lead_us = %delta_arrival_lead_us,
+                        piece_count,
+                        room,
+                        alert,
+                        "[transit-diag] alert"
+                    );
+                } else {
+                    tracing::info!(
+                        subsystem = "motion",
+                        event = "transit_diag",
+                        mcu = key.mcu_id,
+                        axis = key.axis,
+                        host_front_start_time,
+                        mcu_front_start_time = r.front_start_time,
+                        arrival_clock = r.arrival_clock,
+                        arrival_lead_ticks,
+                        arrival_lead_us = %arrival_lead_us,
+                        host_send_unix_secs = host_send_secs,
+                        send_elapsed_us,
+                        send_gap_us = %send_gap_us,
+                        schedule_advance_us = %schedule_advance_us,
+                        mcu_clock_advance_us = %mcu_clock_advance_us,
+                        delta_arrival_lead_us = %delta_arrival_lead_us,
+                        piece_count,
+                        room,
+                        "[transit-diag]"
+                    );
+                }
             }
         }
 

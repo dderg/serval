@@ -48,6 +48,10 @@ class PrinterMotionReport:
         self.engine = self.printer.lookup_object("motion_engine", None)
 
     def get_status(self, eventtime):
+        # live_position reports the ACTUAL motor positions (encoder/step counts)
+        # polled from hardware — essential on the EtherCAT servo bench to see
+        # real position and following error. Do not replace with the commanded
+        # trajectory.
         engine = getattr(self, "engine", None)
         if engine is None:
             return self.last_status

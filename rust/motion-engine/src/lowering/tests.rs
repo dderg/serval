@@ -102,8 +102,11 @@ fn line_position_is_monotone_and_speed_capped() {
         let x = eval(&seg.axes[0], t);
         assert!(x + 1e-9 >= prev_x, "x regressed at t={t}: {x} < {prev_x}");
         let speed = (x - prev_x).abs() / dt;
+        // The planned profile is strictly capped at the feed; this finite
+        // difference of the position fit carries the lowering's `FIT_TOL_MM`
+        // slop (non-shape-preserving coarse Bezier), so allow 0.1% over the cap.
         assert!(
-            speed <= 50.0 + 1e-3,
+            speed <= 50.0 * (1.0 + 1e-3),
             "speed {speed} exceeds feed cap at t={t}"
         );
         prev_x = x;

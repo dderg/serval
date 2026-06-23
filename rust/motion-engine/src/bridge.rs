@@ -553,7 +553,20 @@ fn planner_err(e: StreamPlannerError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
-const STREAM_KEEP_SECS: f64 = 0.5;
+/// Backstop only. The continuity commit drains at every blend, so the buffer
+/// normally hovers near the open-tail length past the finality barrier; this
+/// force-drain to rest fires solely when no clean seam exists within reach. Set
+/// well above a realistic open tail so a dense (but normal) stream never trips it.
+const STREAM_MAX_BUFFER_MOVES: usize = 512;
+/// Velocity-profile ODE/sampling tolerance for the streaming planner, in v²
+/// units. The offline default (1e-7) drives the adaptive RK4 to a precision far
+/// below the physical noise floor — ~0.015 mm/s velocity error at this value on
+/// a 300 mm/s move — at ~9× the host cost. Streaming runs on the Pi against a
+/// real-time playhead, so it is tuned to the hardware budget: at 1e-4 a 40-move
+/// burst plans in ~0.4 s instead of ~3.8 s, with trajectory time unchanged to
+/// five significant figures (the residual is non-monotonic integration noise,
+/// not a slower path).
+const STREAM_INTEGRATION_TOL: f64 = 1e-4;
 
 fn resolve_motion_caps(
     caps: Option<mcu_protocol::messages::RuntimeCapsResponse>,
@@ -601,6 +614,8 @@ pub struct PyMotionEngine {
     last_g5_pq: Mutex<Option<(f64, f64)>>,
     mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
     dispatched_segments: Arc<AtomicU64>,
+    pump_backlog: Arc<AtomicU64>,
+    dispatch_anchor: Arc<Mutex<crate::anchor::Anchor>>,
     fallback_clock_conversions: Arc<AtomicU64>,
     clock_freqs: Arc<Mutex<HashMap<u32, f64>>>,
     nominal_clock_freqs: Arc<Mutex<HashMap<u32, u32>>>,
@@ -622,6 +637,13 @@ pub struct PyMotionEngine {
     pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
     pending_flushes: Mutex<HashMap<u64, FlushWait>>,
     next_flush_id: std::sync::atomic::AtomicU64,
+    // Monotonic id stamped on every streamed move as its `source.start_line`.
+    // The continuity-commit drains the look-ahead buffer by line number
+    // (`front.start_line < keep_line`) and detects consumed blend heads by line
+    // equality, so each move MUST carry a distinct increasing id. Passing a
+    // constant (0) makes the drain a no-op — the buffer never empties and every
+    // commit re-dispatches the whole accumulated path from the start.
+    move_seq: std::sync::atomic::AtomicU64,
     homing_result:
         Mutex<Option<crossbeam_channel::Receiver<Result<([f64; 3], [f64; 3], u64), String>>>>,
     latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
@@ -854,6 +876,8 @@ impl PyMotionEngine {
             last_g5_pq: Mutex::new(None),
             mcu_axis_configs: Arc::new(Mutex::new(Vec::new())),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
+            pump_backlog: Arc::new(AtomicU64::new(0)),
+            dispatch_anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),
             clock_freqs: Arc::new(Mutex::new(HashMap::new())),
             nominal_clock_freqs: Arc::new(Mutex::new(HashMap::new())),
@@ -873,6 +897,7 @@ impl PyMotionEngine {
             pending_trip: Arc::new(Mutex::new(None)),
             pending_flushes: Mutex::new(HashMap::new()),
             next_flush_id: std::sync::atomic::AtomicU64::new(1),
+            move_seq: std::sync::atomic::AtomicU64::new(0),
             homing_result: Mutex::new(None),
             latched_drive_fault: Arc::new(Mutex::new(HashMap::new())),
             remote_triggers: Mutex::new(HashMap::new()),
@@ -2771,6 +2796,7 @@ impl PyMotionEngine {
         let ring_depth_table_for_pump = ring_depth_table.clone();
         let router_for_pump = Arc::clone(&self.router);
         let drain_for_pump = self.drain.clone();
+        let pump_backlog_for_pump = Arc::clone(&self.pump_backlog);
         let router_for_freq = Arc::clone(&self.router);
         let pump_thread_handle = std::thread::Builder::new()
             .name("push-pieces-pump".into())
@@ -2825,6 +2851,7 @@ impl PyMotionEngine {
                         );
                         abort_after_tracing_appender_drains();
                     },
+                    pump_backlog_for_pump,
                 );
             })
             .expect("spawn push-pieces-pump thread");
@@ -3038,7 +3065,8 @@ impl PyMotionEngine {
         let mcu_configs_for_cb = mcu_configs;
         let router_for_cb = Arc::clone(&router_arc);
 
-        let anchor_mutex = Arc::new(std::sync::Mutex::new(crate::anchor::Anchor::new()));
+        let anchor_mutex = Arc::clone(&self.dispatch_anchor);
+        *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
         let pump_tx_for_cb = pump_tx_init.clone();
         let drain_disp = self.drain.clone();
         let counter_for_cb = Arc::clone(&counter);
@@ -3076,11 +3104,7 @@ impl PyMotionEngine {
                 let (t0, fresh) = anchor_mutex
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .anchor_segment(seg.t_start, seg.t_end, host_now)
-                    .map_err(|late| DispatchError::SegmentLate {
-                        gap_s: late.gap_s,
-                        seg_t_start: late.seg_t_start,
-                    })?;
+                    .anchor_segment(seg.t_start, seg.t_end, host_now);
 
                 if fresh {
                     let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
@@ -3144,6 +3168,14 @@ impl PyMotionEngine {
                         .map_err(|_| DispatchError::PumpGone)?;
                 }
 
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "pipe_pump_in",
+                    line = seg.source_line,
+                    t_us = crate::timing::mono_us(),
+                    "[pipe] handed to pump"
+                );
+
                 counter_for_cb.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             },
@@ -3176,11 +3208,7 @@ impl PyMotionEngine {
                 let (t0, fresh) = nudge_anchor_arc
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .anchor_segment(np.piece.u_start, np.piece.u_end, host_now)
-                    .map_err(|late| DispatchError::SegmentLate {
-                        gap_s: late.gap_s,
-                        seg_t_start: late.seg_t_start,
-                    })?;
+                    .anchor_segment(np.piece.u_start, np.piece.u_end, host_now);
 
                 if fresh {
                     let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
@@ -3266,10 +3294,11 @@ impl PyMotionEngine {
                     max_extrude_only_accel_mm_s2: cfg
                         .max_extrude_only_accel
                         .unwrap_or(f64::INFINITY),
+                    integration_tol: STREAM_INTEGRATION_TOL,
                     ..geometry::VelocityConfig::default()
                 },
                 fit_tol_mm: cfg.fit_tolerance_mm,
-                keep_secs: STREAM_KEEP_SECS,
+                max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
                 limits: geometry::VelocityLimits::try_new(
                     cart.max_velocity,
                     cart.max_accel,
@@ -3303,7 +3332,7 @@ impl PyMotionEngine {
         de: f64,
         feedrate: f64,
     ) -> PyResult<()> {
-        tracing::debug!(
+        tracing::info!(
             subsystem = "motion",
             event = "submit_move_enter",
             dx,
@@ -3341,9 +3370,19 @@ impl PyMotionEngine {
             };
             let limits = geometry::VelocityLimits::try_new(max_v, max_a, scv)
                 .map_err(PyRuntimeError::new_err)?;
-            let m =
-                classify::build_move(pos, dx, dy, dz, extruder_axis, e_delta, limits, feedrate, 0)
-                    .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
+            let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
+            let m = classify::build_move(
+                pos,
+                dx,
+                dy,
+                dz,
+                extruder_axis,
+                e_delta,
+                limits,
+                feedrate,
+                line_no,
+            )
+            .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
 
             {
                 let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
@@ -3746,6 +3785,59 @@ impl PyMotionEngine {
             Some(p) => p.last_move_time(),
             None => 0.0,
         }
+    }
+
+    fn queued_motion_secs(&self) -> f64 {
+        let Some((last_move_time, uncommitted)) = ({
+            let planner = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            planner
+                .as_ref()
+                .map(|p| (p.last_move_time(), p.uncommitted_intake_secs()))
+        }) else {
+            return 0.0;
+        };
+        let anchored = self
+            .dispatch_anchor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .t0();
+        let Some(t0) = anchored else {
+            return uncommitted.max(0.0);
+        };
+        let host_now = self
+            .router
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .host_now_secs();
+        ((t0 + last_move_time - host_now) + uncommitted).max(0.0)
+    }
+
+    fn dispatched_lead_secs(&self) -> f64 {
+        let last_move_time = {
+            let planner = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(p) = planner.as_ref() else {
+                return 0.0;
+            };
+            p.last_move_time()
+        };
+        let anchored = self
+            .dispatch_anchor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .t0();
+        let Some(t0) = anchored else {
+            return 0.0;
+        };
+        let host_now = self
+            .router
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .host_now_secs();
+        (t0 + last_move_time - host_now).max(0.0)
+    }
+
+    fn pump_backlog(&self) -> u64 {
+        self.pump_backlog.load(Ordering::Acquire)
     }
 
     fn motion_lead_secs(&self) -> f64 {

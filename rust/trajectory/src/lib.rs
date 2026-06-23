@@ -67,6 +67,11 @@ pub struct ShapedSegment {
     pub t_start: f64,
     pub t_end: f64,
     pub motor_mask: u8,
+    /// Gcode line of the move that produced this segment. Carried through
+    /// lowering so the pipeline-stage (`pipe_*`) logs can trace one gcode line
+    /// from fit to the pump hand-off. Zero when the producing path has no source
+    /// line (batch shaping / synthetic segments).
+    pub source_line: u32,
 }
 
 #[derive(Debug, thiserror::Error)]

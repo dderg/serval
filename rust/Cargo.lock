@@ -826,6 +826,7 @@ dependencies = [
  "mcu-transport",
  "motion-engine",
  "nurbs",
+ "proptest",
  "pyo3",
  "runtime",
  "rustfft",

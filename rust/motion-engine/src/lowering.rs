@@ -265,6 +265,7 @@ pub fn lower_move(
         t_start,
         t_end: t_start + total_t,
         motor_mask: 0,
+        source_line: 0,
     })
 }
 

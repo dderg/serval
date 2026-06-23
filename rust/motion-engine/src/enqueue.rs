@@ -65,6 +65,17 @@ where
 
             let curve = lane_curve(&module, &seg.axes, axis_idx);
 
+            tracing::info!(
+                subsystem = "motion",
+                event = "pipe_axis",
+                line = seg.source_line,
+                mcu = cfg.mcu_id,
+                axis = axis_idx,
+                pos_start = nurbs::eval::eval(&curve, seg.t_start),
+                pos_end = nurbs::eval::eval(&curve, seg.t_end),
+                "[pipe] axis lane (post-kinematics motor command)"
+            );
+
             let key = AxisKey {
                 mcu_id: cfg.mcu_id,
                 axis: axis_idx as u8,

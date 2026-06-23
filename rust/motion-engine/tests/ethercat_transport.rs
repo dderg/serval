@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -39,6 +40,7 @@ fn wire_sink_missing_transport_is_hard_error() {
         &[p],
         0,
         1,
+        8,
     );
     assert!(
         result.is_err(),
@@ -81,6 +83,7 @@ impl PieceSink for PerMcuCountSink {
         _pieces: &[PieceEntry],
         _start_slot: u16,
         _new_head: u32,
+        _room: u32,
     ) -> Result<i32, SendError> {
         *self.calls.lock().unwrap().entry(key.mcu_id).or_insert(0) += 1;
         Ok(0)
@@ -94,7 +97,16 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
 
     let (tx, rx) = mpsc::channel::<PumpMsg>();
     let handle = std::thread::spawn(move || {
-        run_pump(rx, sink, |_k| 8u32, |_| None, |_| {}, |_, _| {}, |_| {});
+        run_pump(
+            rx,
+            sink,
+            |_k| 8u32,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        );
     });
 
     tx.send(PumpMsg::Enqueue(EnqueueMsg {
