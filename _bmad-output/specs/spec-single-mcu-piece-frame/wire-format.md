@@ -54,16 +54,21 @@ arrival_clock` from the diagnostic echo.
 
 | Class | When | Host action |
 | --- | --- | --- |
-| Transport (CRC fail, truncation, timeout) | before any commit — CRC gates the parse | **retry** the whole frame (idempotent: zero committed) |
+| Transport (CRC fail, truncation, timeout) | the call itself errored | **retry** the whole frame (idempotent: zero committed) |
 | Frame OK | all axes committed | advance ring bookkeeping (all-or-nothing) |
-| Fatal (ring overflow / logic) | a commit failed mid-frame | **halt the print loud — do NOT retry** |
+| Non-OK result (RING_FULL / logic) | the MCU declined the frame | **retry** — it is backpressure, not a halt |
 
-Today the host maps *any* MCU "not OK" to a transient retry; the new design splits
-it: overflow/logic → fatal halt (retry can't help), transport → retry. This
-**designs out** the partial-commit-then-retry hazard rather than relying on
-slot-overwrite idempotency to survive it — when a commit fails mid-frame the MCU
-fail-loud halts the whole engine, so the half-committed rings never execute
-(`runtime_tick` is stopped) and nothing re-sends them.
+**Correction (2026-06-23, regression fix).** An earlier draft halted on any non-OK
+result. That was wrong: `RING_FULL` (`-309`) is **routine backpressure** — the MCU's
+ring is momentarily full (the host's `pushed − retired` view lags the MCU's retire),
+and it is the dominant non-OK during the homing drip. Halting on it crashed homing.
+A non-OK result is therefore retried: nothing is popped, so the next pass re-sends
+byte-identical frames to the same slot-addressed rings (any axis the MCU already
+committed returns `Stale`, so the retry is idempotent even across a partial commit).
+The genuine fail-loud — a piece arriving in the MCU's past — is the runtime
+`PieceStartInPast` fault, a **separate** path (the ISR faults the engine), not this
+commit-result code. Runaway retries are bounded by the host's `feed_throttle`
+`DRAIN_TIMEOUT`.
 
 ## Frame budget (the binding constraint)
 

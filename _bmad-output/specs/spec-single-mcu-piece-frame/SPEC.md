@@ -36,8 +36,8 @@ to layer 3; the throughput floor is unchanged until the frame addresses an **MCU
   success: Round-trip encode/decode unit tests pass for the multi-axis `PushPieces` and the frame-level `PushPiecesResponse` (per `wire-format.md`); `axis_count = 1` reproduces today's behavior beyond the count byte; the host advances ring bookkeeping only on `result == OK` via a single `all_ok` gate.
 
 - id: CAP-3
-  intent: Every non-OK outcome fails loud with the correct disposition — transport errors retry a zero-committed frame, ring-overflow/logic errors halt the print, and corrupt/oversized/version-mismatched frames are rejected before the MCU touches a ring.
-  success: CRC is verified before any `runtime_write_piece`/`runtime_commit_head`; decode rejects out-of-range `axis_count`/`axis_idx`/`piece_count` and duplicate `axis_idx` with a static assert pinning the worst-case block count; a mid-frame commit failure halts the engine (no retry); a bumped version byte refuses a mismatched flash; an ASan fuzz of the C parser over all frame lengths/counts reads nothing past the buffer.
+  intent: Every outcome has the correct disposition — transport errors and non-OK commit results (RING_FULL backpressure) retry a frame that re-sends idempotently, while corrupt/oversized/version-mismatched frames are rejected before the MCU touches a ring.
+  success: CRC is verified before any `runtime_write_piece`/`runtime_commit_head`; decode rejects out-of-range `axis_count`/`axis_idx`/`piece_count` and duplicate `axis_idx` with a static assert pinning the worst-case block count; a non-OK commit result retries (idempotent re-send), not halts — homing runs through routine RING_FULL; a bumped version byte refuses a mismatched flash; an ASan fuzz of the C parser over all frame lengths/counts reads nothing past the buffer.
 
 ## Constraints
 
@@ -46,7 +46,7 @@ to layer 3; the throughput floor is unchanged until the frame addresses an **MCU
 - Framing change only, within the C/Rust MCU boundary (`docs/rewrite/mcu-c-rust-boundary.md`): no new shared state. Per-axis ring, `RingDescriptor`, `PieceEntry` (32 B), and the `runtime_write_piece`/`runtime_commit_head` FFI seam are unchanged — C parses N blocks and calls the existing per-axis FFI in a loop.
 - **Three** endpoints speak this protocol, all migrate to the one format (clean break): the host pump (`WireSink`), the shared C `piece_sink` (compiled for every chip — F401/F446/H7; carries however many axes that MCU configures), and `ethercat-rt` — the host-side runtime for the EtherCAT servo node, a second decoder/responder. The EtherCAT node is permanently single-axis, so it always sends `axis_count = 1`; it gains nothing from batching but must understand the format. The C change is chip-agnostic (one `mcu_transport_dispatch.c` built for all targets), so it lands on every MCU at once.
 - `result` is one frame-level verdict (no per-axis success on a hard-real-time path — a partial frame is desync, not partial success); `arrival_clock` is one value per frame sampled at receive-complete; `front_start_time` stays per-axis but is diagnostic-only (the transit-diag echo), not control.
-- CRC is verified before the parse loop, so transport failures are always pre-commit and retryable on a zero-committed frame; a mid-frame commit failure fail-loud halts the whole engine and is never retried.
+- CRC is verified before the parse loop, so transport failures are always pre-commit and retryable on a zero-committed frame. A non-OK commit result (RING_FULL backpressure) is **retried**, not halted — the retry re-sends byte-identical frames (already-committed axes return Stale), and the genuine fail-loud is the runtime `PieceStartInPast` fault, a separate path.
 - `PieceStartInPast` stays fail-loud per axis — late start times are never padded or advanced.
 
 ## Non-goals

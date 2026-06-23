@@ -1122,12 +1122,15 @@ impl PieceSink for WireSink {
         }
 
         if resp.result != mcu_protocol::result_codes::OK {
-            // Frame-level fatal: ring overflow / logic error. Fail loud and halt —
-            // a retry cannot fix an overflow or a host↔MCU desync. (Transport
-            // failures surface earlier as Err from call_push_pieces and stay
-            // retryable; only a parsed frame the MCU rejected reaches here.)
-            return Err(SendError::Fatal(format!(
-                "MCU rejected PushPieces frame (mcu {mcu_id}): result {}",
+            // A non-OK result is transient backpressure (RING_FULL when the MCU's
+            // ring is momentarily full — routine during the homing drip), not a
+            // halt condition. Retry: nothing is popped, so the next pass re-sends
+            // byte-identical frames to the same slot-addressed rings (any axis the
+            // MCU already committed returns Stale). The real fail-loud — a piece
+            // arriving in the MCU past — is the runtime PieceStartInPast fault, a
+            // separate path, not this commit-result code.
+            return Err(SendError::Transient(format!(
+                "MCU rejected PushPieces frame (mcu {mcu_id}): result {} — retrying",
                 resp.result
             )));
         }
