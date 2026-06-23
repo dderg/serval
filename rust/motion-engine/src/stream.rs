@@ -887,7 +887,7 @@ fn apply_trailing_zero_support(
         match stage {
             ChainStage::SmoothKernel(_) => seen_kernel = true,
             ChainStage::LinearPressureAdvance { k } if seen_kernel => {
-                track = apply_derivative_gain_to_track(&track, *k);
+                track = apply_pressure_advance_to_track(&track, *k);
             }
             ChainStage::LinearPressureAdvance { .. } => {}
         }
@@ -895,7 +895,7 @@ fn apply_trailing_zero_support(
     track
 }
 
-fn apply_derivative_gain_to_track(
+fn apply_pressure_advance_to_track(
     track: &nurbs::ScalarNurbs<f64>,
     k: f64,
 ) -> nurbs::ScalarNurbs<f64> {

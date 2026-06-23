@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use super::*;
 
 #[test]
@@ -62,5 +60,5 @@ fn backward_jump_takes_priority_over_underrun() {
 #[test]
 fn default_lead_is_quarter_second_and_shared_with_planner() {
     assert_eq!(super::DEFAULT_LEAD_SECS, 0.25);
-    assert_eq!(crate::planner::lead_secs(), super::DEFAULT_LEAD_SECS);
+    assert_eq!(crate::stream_planner::lead_secs(), super::DEFAULT_LEAD_SECS);
 }

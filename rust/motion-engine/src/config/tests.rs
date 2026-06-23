@@ -1,12 +1,9 @@
-#![allow(deprecated)]
-
 use super::*;
 
 #[test]
 fn default_config_has_sensible_values() {
     let c = PlannerConfig::default();
-    assert_eq!(c.window_capacity, 32);
-    assert_eq!(c.beta_max_iters, 10);
+    assert_eq!(c.fit_tolerance_mm, 0.005);
 }
 
 #[test]
@@ -74,12 +71,7 @@ fn default_config_chains_are_passthrough() {
     let c = PlannerConfig::default();
     let chains = c.post_processors.compile(&c.axis_registry).unwrap();
     assert_eq!(chains.n_axes(), 3);
-    assert!(
-        chains
-            .chains
-            .iter()
-            .all(|ch| ch.kernel.is_none() && ch.gain == 0.0)
-    );
+    assert!(chains.chains.iter().all(|ch| ch.stages.is_empty()));
     assert!(chains.followers.is_empty());
 }
 
@@ -106,95 +98,6 @@ fn linear_pressure_advance_rejects_negative_or_non_finite_k() {
         PostProcessorSet::try_new(&reg, &ok).is_ok(),
         "k=0 is a valid no-op gain"
     );
-}
-
-#[test]
-fn sections_convert_to_temporal_sets() {
-    let cfg = PlannerConfig::default();
-    let lims = cfg.to_temporal_limits().unwrap();
-    assert_eq!(lims.sets().len(), 2);
-    assert_eq!(lims.sets()[0].v_max, 300.0);
-    assert_eq!(lims.sets()[1].a_max, 100.0);
-}
-
-#[test]
-fn jerk_defaults_to_twice_accel_per_section() {
-    let cfg = PlannerConfig::default();
-    let lims = cfg.to_temporal_limits().unwrap();
-    assert_eq!(lims.sets()[0].j_max, 6000.0);
-}
-
-#[test]
-fn missing_axis_coverage_is_an_error() {
-    let mut cfg = PlannerConfig::default();
-    cfg.limit_sections.retain(|s| s.name != "z");
-    assert!(cfg.to_temporal_limits().is_err());
-}
-
-#[test]
-fn runtime_caps_append_an_all_axis_overlay() {
-    let mut cfg = PlannerConfig::default();
-    cfg.runtime_caps = RuntimeCaps {
-        velocity: Some(100.0),
-        accel: Some(1000.0),
-    };
-    let lims = cfg.to_temporal_limits().unwrap();
-    let overlay = lims.sets().last().unwrap();
-    assert_eq!(overlay.v_max, 100.0);
-    assert_eq!(overlay.a_max, 1000.0);
-    assert_eq!(overlay.axes, temporal::AxisSet::spatial());
-}
-
-#[test]
-fn section_with_no_caps_is_an_error() {
-    let mut cfg = PlannerConfig::default();
-    cfg.limit_sections.push(LimitSection {
-        name: "empty".into(),
-        axes: vec![0],
-        max_velocity: None,
-        max_accel: None,
-        max_jerk: None,
-    });
-    assert!(cfg.to_temporal_limits().is_err());
-}
-
-#[test]
-fn overlay_above_config_cannot_raise_limits() {
-    let mut cfg = PlannerConfig::default();
-    cfg.runtime_caps = RuntimeCaps {
-        velocity: Some(10_000.0),
-        accel: Some(1_000_000.0),
-    };
-    let lims = cfg.to_temporal_limits().unwrap();
-    let x_tangent = [1.0, 0.0, 0.0];
-    assert_eq!(lims.mvc_b(&x_tangent, 1e-12), 300.0 * 300.0);
-    assert_eq!(lims.a_tan_cap(&x_tangent, 1e-12), 3000.0);
-}
-
-#[test]
-fn overlay_below_config_tightens() {
-    let mut cfg = PlannerConfig::default();
-    cfg.runtime_caps = RuntimeCaps {
-        velocity: Some(50.0),
-        accel: Some(500.0),
-    };
-    let lims = cfg.to_temporal_limits().unwrap();
-    let x_tangent = [1.0, 0.0, 0.0];
-    assert_eq!(lims.mvc_b(&x_tangent, 1e-12), 50.0 * 50.0);
-    assert_eq!(lims.a_tan_cap(&x_tangent, 1e-12), 500.0);
-}
-
-#[test]
-fn clearing_runtime_caps_restores_config_limits() {
-    let mut cfg = PlannerConfig::default();
-    cfg.runtime_caps = RuntimeCaps {
-        velocity: Some(50.0),
-        accel: Some(500.0),
-    };
-    cfg.runtime_caps = RuntimeCaps::default();
-    let lims = cfg.to_temporal_limits().unwrap();
-    assert_eq!(lims.sets().len(), 2);
-    assert_eq!(lims.mvc_b(&[1.0, 0.0, 0.0], 1e-12), 300.0 * 300.0);
 }
 
 fn decl(name: &str, follows: &[&str]) -> AxisDecl {
@@ -261,84 +164,6 @@ fn follows_must_reference_declared_axes_and_spatial_cannot_follow() {
         AxisRegistry::try_new(decls).unwrap_err(),
         AxisConfigError::SpatialAxisCannotFollow { .. }
     ));
-}
-
-#[test]
-fn limit_sections_partition_spatial_follower_mixed() {
-    let reg = AxisRegistry::try_new(vec![
-        decl("x", &[]),
-        decl("y", &[]),
-        decl("z", &[]),
-        decl("e", &["x", "y", "z"]),
-    ])
-    .unwrap();
-    let mut cfg = PlannerConfig::default();
-    cfg.axis_registry = reg;
-    cfg.limit_sections.push(LimitSection {
-        name: "extruder".into(),
-        axes: vec![3],
-        max_velocity: Some(75.0),
-        max_accel: Some(1500.0),
-        max_jerk: None,
-    });
-    cfg.to_temporal_limits().unwrap();
-    cfg.limit_sections.push(LimitSection {
-        name: "mixed".into(),
-        axes: vec![0, 3],
-        max_velocity: Some(10.0),
-        max_accel: None,
-        max_jerk: None,
-    });
-    assert!(matches!(
-        cfg.to_temporal_limits().unwrap_err(),
-        LimitConfigError::MixedSpatialFollower { .. }
-    ));
-}
-
-#[test]
-fn follower_axis_without_limit_coverage_is_an_error() {
-    let reg = AxisRegistry::try_new(vec![
-        decl("x", &[]),
-        decl("y", &[]),
-        decl("z", &[]),
-        decl("e", &["x", "y", "z"]),
-    ])
-    .unwrap();
-    let mut cfg = PlannerConfig::default();
-    cfg.axis_registry = reg;
-    assert!(matches!(
-        cfg.to_temporal_limits().unwrap_err(),
-        LimitConfigError::NoFollowerCoverage { .. }
-    ));
-}
-
-#[test]
-fn follower_sections_become_temporal_sets() {
-    let reg = AxisRegistry::try_new(vec![
-        decl("x", &[]),
-        decl("y", &[]),
-        decl("z", &[]),
-        decl("e", &["x", "y", "z"]),
-    ])
-    .unwrap();
-    let mut cfg = PlannerConfig::default();
-    cfg.axis_registry = reg;
-    cfg.limit_sections.push(LimitSection {
-        name: "extruder".into(),
-        axes: vec![3],
-        max_velocity: Some(75.0),
-        max_accel: Some(1500.0),
-        max_jerk: None,
-    });
-    let lims = cfg.to_temporal_limits().unwrap();
-    assert_eq!(lims.n_axes(), 4);
-    let followers: Vec<_> = lims.follower_sets().collect();
-    assert_eq!(followers.len(), 1);
-    let (_, set) = followers[0];
-    assert!(set.axes.contains(3));
-    assert_eq!(set.v_max, 75.0);
-    assert_eq!(set.a_max, 1500.0);
-    assert_eq!(set.j_max, 3000.0);
 }
 
 fn decl_with_motors(name: &str, follows: &[&str], motors: &[&str]) -> AxisDecl {
@@ -485,8 +310,13 @@ fn happy_path_compiles_kernel_and_pa_on_e() {
     .unwrap();
     let chains = set.compile(&registry).unwrap();
     assert_eq!(chains.n_axes(), 4);
-    assert!(chains.chains[3].kernel.is_some());
-    assert_eq!(chains.chains[3].gain, 0.04);
+    assert!(matches!(
+        chains.chains[3].stages[0],
+        trajectory::ChainStage::SmoothKernel(_)
+    ));
+    assert!(
+        matches!(chains.chains[3].stages[1], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.04)
+    );
     assert_eq!(chains.followers, vec![(3, vec![0, 1, 2])]);
 }
 
@@ -500,7 +330,9 @@ fn set_param_updates_named_instance_and_recompile_reflects_it() {
     .unwrap();
     set.set_param("pa", "k", 0.07).unwrap();
     let chains = set.compile(&registry).unwrap();
-    assert_eq!(chains.chains[3].gain, 0.07);
+    assert!(
+        matches!(chains.chains[3].stages[0], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.07)
+    );
     assert!(set.set_param("nope", "k", 1.0).is_err());
     assert!(set.set_param("pa", "frequency_hz", 1.0).is_err());
 }
@@ -510,51 +342,4 @@ fn post_processor_missing_required_param_rejected() {
     let registry = registry_with_e(&[]);
     let err = PostProcessorSet::try_new(&registry, &[pp("is", "smooth_zv", &[])]).unwrap_err();
     assert!(err.to_string().contains("frequency_hz"), "got: {err}");
-}
-
-#[test]
-fn limit_set_names_follow_section_order() {
-    let reg = AxisRegistry::try_new(vec![
-        decl("x", &[]),
-        decl("y", &[]),
-        decl("z", &[]),
-        decl("e", &["x", "y", "z"]),
-    ])
-    .unwrap();
-    let post_processors = PostProcessorSet::try_new(&reg, &[]).unwrap();
-    let cfg = PlannerConfig {
-        axis_registry: reg,
-        limit_sections: vec![
-            LimitSection {
-                name: "gantry".into(),
-                axes: vec![0, 1],
-                max_velocity: Some(300.0),
-                max_accel: Some(3000.0),
-                max_jerk: None,
-            },
-            LimitSection {
-                name: "extruder".into(),
-                axes: vec![3],
-                max_velocity: Some(75.0),
-                max_accel: Some(1500.0),
-                max_jerk: None,
-            },
-        ],
-        cartesian: CartesianLimits::default(),
-        runtime_caps: RuntimeCaps::default(),
-        runtime_square_corner_velocity: None,
-        chain: geometry::ChainFitConfig::default(),
-        post_processors,
-        max_extrude_only_velocity: None,
-        max_extrude_only_accel: None,
-        window_capacity: 32,
-        beta_max_iters: 10,
-        beta_convergence_ratio: 0.05,
-        fit_tolerance_mm: 0.005,
-        worker_threads: 3,
-    };
-    assert_eq!(
-        cfg.limit_set_names(),
-        vec!["gantry".to_string(), "extruder".to_string()]
-    );
 }

@@ -95,10 +95,10 @@ fn kernel_peak_at_center() {
 #[test]
 fn smooth_zv_support_width() {
     let f = 150.0;
-    let kernel = crate::PostProcessorType::SmoothZv { frequency_hz: f }
-        .into_chain()
-        .kernel
-        .unwrap();
+    let chain = crate::PostProcessorType::SmoothZv { frequency_hz: f }.into_chain();
+    let crate::ChainStage::SmoothKernel(kernel) = &chain.stages[0] else {
+        panic!("expected smooth kernel stage");
+    };
     let (lo, hi) = kernel.support();
     let expected_t_sm = 0.8025 / f;
     assert!((hi - lo - expected_t_sm).abs() < 1e-12);
@@ -107,10 +107,10 @@ fn smooth_zv_support_width() {
 #[test]
 fn smooth_mzv_support_width() {
     let f = 120.0;
-    let kernel = crate::PostProcessorType::SmoothMzv { frequency_hz: f }
-        .into_chain()
-        .kernel
-        .unwrap();
+    let chain = crate::PostProcessorType::SmoothMzv { frequency_hz: f }.into_chain();
+    let crate::ChainStage::SmoothKernel(kernel) = &chain.stages[0] else {
+        panic!("expected smooth kernel stage");
+    };
     let (lo, hi) = kernel.support();
     let expected_t_sm = 0.95625 / f;
     assert!((hi - lo - expected_t_sm).abs() < 1e-12);

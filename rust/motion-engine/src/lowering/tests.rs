@@ -213,8 +213,6 @@ fn linear_pa_chains(extruder_axis: usize, k: f64) -> Vec<CompiledChain> {
             .then_some(trajectory::ChainStage::LinearPressureAdvance { k })
             .into_iter()
             .collect(),
-        kernel: None,
-        gain: k,
     };
     chains
 }

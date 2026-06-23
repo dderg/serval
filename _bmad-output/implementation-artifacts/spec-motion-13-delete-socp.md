@@ -2,7 +2,7 @@
 title: 'Motion-13: delete the dead SOCP — temporal crate, trajectory SOCP modules, old planner.rs'
 type: 'chore'
 created: '2026-06-20'
-status: 'draft'
+status: 'done'
 baseline_commit: '9ebf70d7afb9cc54f82195b539fba7535f94125f'
 context:
   - '{project-root}/CLAUDE.md'
@@ -16,13 +16,13 @@ context:
 
 ## Intent
 
-**Problem:** The sampled Consolini-Locatelli coupled-jerk SOCP (TOPP) and the old `PlannerHandle` are **dead on the `curvature-profile` branch** — the live geometry/stream path (`stream_planner.rs` / `bridge.rs`) never calls them — but they still sit in the tree: the whole `rust/temporal/` crate, `trajectory/src/{beta,plan_velocity,reparam,utilization}.rs`, the old `trajectory::streaming` `ShaperState`, and `motion-engine/src/planner.rs`. They carry maintenance weight, compile time, and the standing risk that someone re-wires them.
+**Problem:** The sampled Consolini-Locatelli coupled-jerk SOCP (TOPP), the old `PlannerHandle`, and the deprecated legacy post-processor fields/actions are **dead on the `curvature-profile` branch** — the live geometry/stream path (`stream_planner.rs` / `bridge.rs`) never calls them — but they still sit in the tree: the whole `rust/temporal/` crate, `trajectory/src/{beta,plan_velocity,reparam,utilization}.rs`, the old `trajectory::streaming` `ShaperState`, `motion-engine/src/planner.rs`, and `CompiledChain::{kernel,gain}` / `PlanAction` / `apply_derivative_gain`. They carry maintenance weight, compile time, and the standing risk that someone re-wires them.
 
 **Approach:** Delete them, and **use the compiler as the source of truth.** Remove `temporal` from the workspace, then fix every breakage by **deleting the now-orphaned consumer** (the old planner + its tests, the SOCP-era binding-report / limit-config surface) rather than migrating it. Only genuinely-live *shared* types get migrated. "Rip it out and see what screams" is the method on purpose: it **proves** nothing live depended on it — which prose review cannot. A symbol that turns out to have a live (`stream_planner`/`bridge`) consumer means it was *not* dead — HALT and surface that, do not migrate it on a whim.
 
 ## Boundaries & Constraints
 
-**Always:** Keep the live-path tests green (`pump_loop`, `runtime_caps`, follower-row emit, logging/MCU; `binding_report_e2e` **only if** its types survive — see the binding-report decision below). Keep `trajectory::ShapedSegment` + the emit/shaping modules the live path needs (`emit_shaped`, `fit`, `kernel`, `shaper`, `smooth_fit`, `pad`, `odometer`, `post_processor`, `parallel`). Migrate genuinely-shared dispatch types out of `planner.rs` **before** deleting it. `./scripts/ci.sh quick` green (clippy `-D warnings`, fmt) is the gate.
+**Always:** Keep the live-path tests green (`pump_loop`, `runtime_caps`, follower-row emit, logging/MCU; `binding_report_e2e` **only if** its types survive — see the binding-report decision below). Keep `trajectory::ShapedSegment` + the emit/shaping modules the live path needs (`fit`, `kernel`, `shaper`, `smooth_fit`, `pad`, `odometer`, `post_processor`, `parallel`). Keep the active post-processor stage model (`AxisChainSet`, `CompiledChain::stages`, `ChainStage`, `PostProcessorInstance`, `PostProcessorType`) and remove only the deprecated legacy emit-stack compatibility surface. Migrate genuinely-shared dispatch types out of `planner.rs` **before** deleting it. `./scripts/ci.sh quick` green (clippy `-D warnings`, fmt) is the gate.
 
 **Ask First:** If any symbol slated for deletion has a **live** `stream_planner.rs`/`bridge.rs` consumer, HALT — it isn't dead; surface it rather than deleting or migrating reflexively.
 
@@ -55,7 +55,8 @@ Either way: the KEEP list now lives **here**, not in Motion-12 (the split moved 
 
 **TD2 — delete trajectory SOCP modules**
 - [ ] Delete `trajectory/src/{beta,plan_velocity,reparam,utilization}.rs` (+ their `*/tests.rs`) and the old `trajectory::streaming` `ShaperState` + temporal-typed `shape_batch`/`ShapeError` surface in `trajectory/src/lib.rs`.
-- [ ] Keep `trajectory::ShapedSegment` + the emit/shaping modules the live path needs.
+- [ ] Delete `trajectory/src/emit_shaped.rs` and the deprecated post-processor compatibility surface: `PlanAction`, `CompiledChain::{kernel,gain}`, `PostProcessorInstance::action`, and `apply_derivative_gain`.
+- [ ] Keep `trajectory::ShapedSegment` + the active post-processor stage modules the live path needs.
 
 **TD3 — delete the temporal crate**
 - [ ] Delete the whole `rust/temporal/` crate; remove it from the workspace members and from `trajectory`/`motion-engine` `Cargo.toml`.
@@ -68,7 +69,7 @@ Either way: the KEEP list now lives **here**, not in Motion-12 (the split moved 
 **Acceptance Criteria (spec-level):**
 - AC-D1: workspace builds with `temporal` gone; `./scripts/ci.sh quick` green (clippy `-D warnings`, fmt). `cargo nextest run` green.
 - AC-D2: live-path behavior unchanged — existing live-path tests green; if Motion-12's T4 feasibility gate is merged, it stays green (deletion changed nothing observable on the live path).
-- AC-D3: `grep -rn "temporal\|PlannerHandle\|plan_velocity_inner" rust/*/src` shows zero references. This is now **honest** — the limit/binding symbols were deleted or migrated to a surviving crate, not whitelisted to satisfy the grep.
+- AC-D3: `grep -rn "temporal\|PlannerHandle\|plan_velocity_inner\|PlanAction\|apply_derivative_gain" rust/*/src` shows zero references. This is now **honest** — the limit/binding symbols were deleted or migrated to a surviving crate, not whitelisted to satisfy the grep.
 - AC-D4: as in TD1.
 
 ## Relationship to Motion-12
@@ -81,5 +82,5 @@ Either way: the KEEP list now lives **here**, not in Motion-12 (the split moved 
 **Commands:**
 - `./scripts/ci.sh quick` — ruff/clippy `-D warnings`/fmt/rust tests green.
 - `cargo nextest run` — full Rust suite green with `temporal` gone.
-- `grep -rn "temporal\|PlannerHandle\|plan_velocity_inner" rust/*/src` — zero references (AC-D3).
+- `grep -rn "temporal\|PlannerHandle\|plan_velocity_inner\|PlanAction\|apply_derivative_gain" rust/*/src` — zero references (AC-D3).
 - `grep -rn "DispatchError\|HomeDripParams\|NudgeParams" rust/motion-engine/src/planner.rs` — empty (AC-D4).
