@@ -553,9 +553,6 @@ fn resonance_buzz_skips_axis_unconfigured_on_this_mcu() {
 
 #[test]
 fn resonance_buzz_routes_phase_mode_axis_to_xdirect() {
-    // A Phase-mode axis stays in phase stepping and buzzes via XDIRECT coil
-    // updates — not STEP/DIR. The buzz must arm (not fault) and mark the axis as
-    // an XDIRECT stream so the consumer routes its entries to the coil write.
     crate::buzz_stream::reset_for_test();
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
     configure_pulse_axis(&mut engine, 0, 0.01);
@@ -581,9 +578,6 @@ fn resonance_buzz_routes_phase_mode_axis_to_xdirect() {
 
 #[test]
 fn resonance_buzz_routes_swept_pulse_axis_to_staircase() {
-    // A swept (freq_start != freq_end) STEP/DIR axis must arm the fixed-frequency
-    // staircase generator, never the chirp — that is the whole point: the chirp
-    // root-solves every crossing and freezes, the staircase stays closed-form.
     crate::buzz_stream::reset_for_test();
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
     configure_pulse_axis(&mut engine, 0, 0.01);
@@ -608,8 +602,6 @@ fn resonance_buzz_routes_swept_pulse_axis_to_staircase() {
 
 #[test]
 fn resonance_buzz_routes_fixed_tone_pulse_axis_to_plain_tone() {
-    // A fixed-frequency (freq_start == freq_end) pulse buzz keeps the existing
-    // single-tone path — the staircase is only for sweeps.
     crate::buzz_stream::reset_for_test();
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
     configure_pulse_axis(&mut engine, 0, 0.01);

@@ -9,7 +9,7 @@
 use super::*;
 use std::vec::Vec;
 
-const MICROSTEP_MM: f32 = 40.0 / (200.0 * 32.0); // 6.25 um — 32 microsteps
+const MICROSTEP_MM: f32 = 40.0 / (200.0 * 32.0);
 
 fn sweep(f0: f32, f1: f32, amplitude_mm: f32, total: f32, ramp: f32) -> ToneParams {
     ToneParams {
@@ -45,8 +45,6 @@ fn collect(p: &ToneParams) -> Vec<ToneCrossing> {
 
 #[test]
 fn completes_with_monotonic_times_in_window() {
-    // Amplitude is the displacement at f_start; the 1/f taper shrinks it toward
-    // f_end, so pick a start amplitude that keeps the band end above a microstep.
     let p = sweep(5.0, 50.0, 0.3, 0.2, 0.02);
     let xs = collect(&p);
     assert!(xs.len() > 50, "expected a dense stream, got {}", xs.len());
@@ -71,8 +69,6 @@ fn completes_with_monotonic_times_in_window() {
 
 #[test]
 fn parks_on_base_net_zero() {
-    // Every lobe is a half-arch that leaves and returns to the parked base, so the
-    // step edges net to zero over the whole sweep and the final edge lands on base.
     let p = sweep(5.0, 60.0, 0.06, 0.25, 0.02);
     let xs = collect(&p);
     let net: i32 = xs.iter().map(|c| i32::from(c.dir)).sum();
@@ -82,8 +78,6 @@ fn parks_on_base_net_zero() {
 
 #[test]
 fn steep_band_does_not_fault() {
-    // The case the chirp could not serve on STEP/DIR without starving: a wide band.
-    // As a staircase every lobe is closed-form, so it must run clean to Done.
     let p = sweep(5.0, 135.0, 0.4, 0.15, 0.015);
     let xs = collect(&p);
     assert!(xs.len() > 100, "expected a dense stream, got {}", xs.len());
@@ -91,8 +85,6 @@ fn steep_band_does_not_fault() {
 
 #[test]
 fn finer_microstepping_stays_clean() {
-    // CAP-2: a finer grid only multiplies the closed-form crossings; it must still
-    // complete with no fault and still net to base.
     let mut p = sweep(8.0, 48.0, 0.05, 0.2, 0.02);
     p.microstep_distance = 40.0 / (200.0 * 256.0);
     let xs = collect(&p);
@@ -107,8 +99,6 @@ fn finer_microstepping_stays_clean() {
 
 #[test]
 fn lobe_count_and_durations_track_the_frequency_staircase() {
-    // A lobe ends each time the carrier returns to base (level 0). Early lobes sit
-    // near f_start (long), late lobes near f_end (short): the staircase climbs.
     let p = sweep(10.0, 40.0, 0.06, 0.4, 0.02);
     let xs = collect(&p);
     let lobe_ends: Vec<f32> = xs.iter().filter(|c| c.level == 0).map(|c| c.t).collect();
@@ -119,7 +109,6 @@ fn lobe_count_and_durations_track_the_frequency_staircase() {
         last < first,
         "lobes did not shorten across the sweep: first {first}, last {last}"
     );
-    // Lobe durations bracket the half-periods of the band ends.
     assert!(first <= 0.5 / 10.0 + 5e-3, "first lobe too long: {first}");
     assert!(last >= 0.5 / 40.0 - 5e-3, "last lobe too short: {last}");
 }
@@ -141,7 +130,6 @@ fn step_freq_climbs_and_clamps_to_band_end() {
         (f - end_hz(&p)).abs() < 1.0,
         "did not converge to band end: {f}"
     );
-    // Already at the end, it stays put (the tail runs at f_end).
     assert!((step_freq(&p, end_hz(&p)) - end_hz(&p)).abs() < 1e-3);
 }
 
@@ -154,7 +142,6 @@ fn downward_sweep_clamps_to_lower_end() {
         next < 50.0 && next >= end_hz(&p),
         "bad downward step {next}"
     );
-    // Clamps at the low end rather than overshooting below it.
     assert!((step_freq(&p, end_hz(&p)) - end_hz(&p)).abs() < 1e-3);
     let xs = collect(&p);
     let net: i32 = xs.iter().map(|c| i32::from(c.dir)).sum();

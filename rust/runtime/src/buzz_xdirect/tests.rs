@@ -10,7 +10,7 @@ use super::*;
 use crate::buzz_gen::{ToneParams, position_rel};
 use std::vec::Vec;
 
-const LUT_STEP_MM: f32 = 40.0 / (200.0 * 256.0); // 0.78125 um — XDIRECT native res
+const LUT_STEP_MM: f32 = 40.0 / (200.0 * 256.0);
 
 fn cfg() -> XdirectConfig {
     XdirectConfig::new(LUT_STEP_MM, 10_000.0)
@@ -65,8 +65,6 @@ fn collect(p: &ToneParams, cfg: &XdirectConfig) -> Vec<XdirectUpdate> {
 
 #[test]
 fn tone_pins_peak_amplitude_exactly() {
-    // CAP-3: the carrier extrema are grid points, so the commanded peak equals the
-    // analytic peak exactly — never clipped below it.
     let amp = 0.0461_f32;
     let p = tone(55.0, amp, 0.2, 0.02);
     let ups = collect(&p, &cfg());
@@ -82,7 +80,6 @@ fn tone_pins_peak_amplitude_exactly() {
         max_seen, peak_steps,
         "peak offset {max_seen} must equal the analytic peak {peak_steps}"
     );
-    // Both turning points are sampled: +peak and -peak both appear.
     let min_seen = ups.iter().map(|u| u.offset_steps).min().unwrap();
     assert_eq!(
         min_seen, -peak_steps,
@@ -92,15 +89,10 @@ fn tone_pins_peak_amplitude_exactly() {
 
 #[test]
 fn tone_update_rate_is_exact_integer_multiple_of_frequency() {
-    // CAP-2: a fixed tone has constant N, so the grid is uniform in time and the
-    // realized rate is N*f with zero remainder. We recover N from the spacing and
-    // confirm it is an integer multiple of 4 whose product with f sits at/under the
-    // budget — not pinned to 10 kHz (which does not divide the period).
     let f = 55.0_f32;
     let p = tone(f, 0.0461, 0.3, 0.02);
     let ups = collect(&p, &cfg());
 
-    // Interior gaps (drop the first transient and the net-zero close) are uniform.
     let gaps: Vec<f32> = ups
         .windows(2)
         .map(|w| w[1].t - w[0].t)
@@ -121,15 +113,11 @@ fn tone_update_rate_is_exact_integer_multiple_of_frequency() {
         rate <= 10_000.0 * 1.02,
         "realized rate {rate:.0} must sit at/under the budget"
     );
-    // Exactness: the recovered N reproduces the spacing to f32 precision.
     assert!((gmin - 1.0 / (n as f32 * f)).abs() < gmin * 1e-3);
 }
 
 #[test]
 fn tone_zero_crossings_are_grid_points() {
-    // CAP-3: with N divisible by 4 and the grid anchored at a zero crossing, every
-    // quarter-phase lands on a sample — so an update sits at zero around each
-    // crossing.
     let p = tone(55.0, 0.0461, 0.2, 0.02);
     let ups = collect(&p, &cfg());
     let at_zero = ups.iter().filter(|u| u.offset_steps == 0).count();
@@ -167,8 +155,6 @@ fn emitted_offsets_reconstruct_the_analytic_sine() {
 
 #[test]
 fn offset_jump_per_update_is_bounded() {
-    // Capping N at the LUT-resolution rate keeps the per-update displacement near
-    // one LUT step even at the fast zero crossings, so no offset leaps a big gap.
     let p = tone(55.0, 0.0461, 0.2, 0.02);
     for w in collect(&p, &cfg()).windows(2) {
         let d = (w[1].offset_steps - w[0].offset_steps).abs();
@@ -181,7 +167,6 @@ fn offset_jump_per_update_is_bounded() {
 
 #[test]
 fn tone_parks_on_base_at_the_end() {
-    // CAP-6: the final update is the net-zero close at exactly `total`, offset 0.
     let p = tone(55.0, 0.0461, 0.2, 0.02);
     let ups = collect(&p, &cfg());
     let last = ups.last().unwrap();
@@ -195,9 +180,6 @@ fn tone_parks_on_base_at_the_end() {
 
 #[test]
 fn sweep_holds_a_flat_update_rate_not_a_rising_one() {
-    // 5 -> 135 Hz: N steps down (~round(target/f)) as f rises, so N*f stays pinned
-    // near the budget — a flat realized rate, exactly locked to the buzz frequency
-    // at every point rather than a fixed 10 kHz.
     let p = chirp(5.0, 135.0, 0.507, 1.0, 0.05);
     let ups = collect(&p, &cfg());
 
@@ -239,16 +221,10 @@ fn sweep_peak_offsets_taper_with_amplitude() {
 
 #[test]
 fn sweep_changes_n_only_at_turning_points() {
-    // CAP-7: N (hence the phase spacing Δφ) changes only at a carrier turning point.
-    // Work in the phase domain, which is envelope-independent: map each update time
-    // back to carrier phase φ(t), and where the phase step Δφ changes, the phase
-    // there must sit on a turning point (π/2 + nπ). Offsets would confound this on
-    // the ramps, where the displacement peak drifts off φ = π/2; phase does not.
     let p = chirp(5.0, 135.0, 0.507, 1.0, 0.05);
     let ups = collect(&p, &cfg());
 
     let phi_of = |t: f32| (p.omega + 0.5 * p.mu * t) * t;
-    // Drop the net-zero close (last point is off-grid).
     let phis: Vec<f32> = ups[..ups.len() - 1].iter().map(|u| phi_of(u.t)).collect();
     let dphi: Vec<f32> = phis.windows(2).map(|w| w[1] - w[0]).collect();
 
@@ -256,9 +232,8 @@ fn sweep_changes_n_only_at_turning_points() {
     let pi = core::f32::consts::PI;
     let mut seams = 0;
     for i in 1..dphi.len() {
-        // A real Δφ step (N change) dwarfs the f32 round-trip noise within a segment.
         if (dphi[i] - dphi[i - 1]).abs() > dphi[i - 1] * 0.02 {
-            let phi = phis[i]; // the boundary update — must be a turning point
+            let phi = phis[i];
             let nearest = (((phi - half_pi) / pi).round()) * pi + half_pi;
             assert!(
                 (phi - nearest).abs() < 0.05,

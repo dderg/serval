@@ -615,17 +615,6 @@ fn bench_params_stream_is_bounded_and_sane() {
     );
 }
 
-/// Bench parameter sets that drove the MCU's foreground feeder into an IWDG reset:
-/// `scan_next_change` lacked a forward-progress guarantee, so an f32 boundary
-/// coincidence could pin the scan and spin a single `next_crossing` call forever.
-/// The full stream must reach `Done` for every set (and a small surrounding grid)
-/// without faulting and within a sane crossing budget.
-///
-/// The drive runs in a worker thread with a wall-clock deadline so a real pin
-/// surfaces as a FAILED test (the harness reports the timeout) instead of a frozen
-/// run: pre-fix the `loop` is unbounded and a pinned input never returns;
-/// post-fix every iteration strictly advances `t_prev` by `dt` or steps the
-/// tracked level toward a bounded target, so the stream terminates.
 #[test]
 fn bench_param_sets_terminate_without_stall() {
     use std::sync::mpsc;
@@ -653,9 +642,6 @@ fn bench_param_sets_terminate_without_stall() {
         }
     }
 
-    // STATIC: omega=341.24, mu=0; SWEEP: omega=188.50, mu=141.37. Both bench sets,
-    // both signs, plus a small grid of nearby amplitudes / ramps / frequencies so
-    // the progress guarantee is robust rather than point-tuned.
     let mut cases: Vec<ToneParams> = Vec::new();
     for &sign in &[1.0_f32, -1.0] {
         for &damp in &[-0.0004_f32, -0.0002, 0.0, 0.0002, 0.0004] {
@@ -697,9 +683,6 @@ fn bench_param_sets_terminate_without_stall() {
                         };
                         last_t = c.t;
                         n += 1;
-                        // A correct stream over a few-second buzz is far under this;
-                        // exceeding it without `Done` is a runaway the harness must
-                        // see as a failure, not a freeze.
                         if n > 1_000_000 {
                             let _ = tx.send(Err(format!(
                                 "runaway: >1M crossings (omega={}, mu={}, amp={}, t={last_t})",
@@ -732,15 +715,6 @@ fn bench_param_sets_terminate_without_stall() {
     }
 }
 
-/// Defense-in-depth stall guard: a deliberately degenerate resume — the tracked
-/// level parked thousands of microsteps away from the curve near the end of the
-/// window — forces the scan past its iteration budget. The guard must return a
-/// clean `ScanStalled` fault rather than spinning. Pre-fix `scan_next_change`
-/// returned `Option` and had no budget, so this state could only ever hang; the
-/// fault variant itself is the post-fix guarantee.
-///
-/// Runs in a worker thread with a deadline so a regression that removes the guard
-/// (restoring the unbounded loop) fails as a timeout instead of freezing CI.
 #[test]
 fn scan_stall_guard_faults_instead_of_hanging() {
     use std::sync::mpsc;
@@ -758,9 +732,6 @@ fn scan_stall_guard_faults_instead_of_hanging() {
         total_seconds: 4.0,
         ramp_seconds: 0.10,
     };
-    // Resume close to total_seconds (tiny remaining window -> small grid budget)
-    // with a level offset far larger than any reachable microstep gap, so level
-    // reconciliation alone would exceed the budget.
     let degenerate = ToneCursor {
         level: 100_000,
         t_cursor: 3.999,

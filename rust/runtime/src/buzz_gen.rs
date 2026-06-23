@@ -48,9 +48,6 @@ pub enum ToneError {
     Done,
     RefineDiverged,
     NonMonotonic,
-    /// A forward scan exceeded its iteration budget without resolving the next
-    /// crossing — an f32 boundary coincidence pinned it. Fault rather than loop so
-    /// the refill latches a clean fault instead of starving the IWDG feeder.
     ScanStalled,
 }
 
@@ -392,9 +389,6 @@ fn scan_next_change(
         .min(traverse_cap)
         .max(REFINE_TIME_TOL);
 
-    // Forward progress is structural (`t_prev` advances by `dt` or to an interior
-    // extremum every iteration); this budget is defense in depth so an f32 boundary
-    // coincidence faults loud rather than starving the IWDG feeder.
     let grid_steps = (remaining / dt) + 1.0;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let scan_budget = (grid_steps as u64).saturating_mul(64).saturating_add(1_000);
@@ -413,9 +407,6 @@ fn scan_next_change(
         let v_sample = velocity_rel(p, sample);
 
         if v_prev != 0.0 && v_sample != 0.0 && v_prev * v_sample < 0.0 {
-            // The split point must lie STRICTLY inside (t_prev, sample) to make
-            // progress; an f32 refine pinned to a bracket end falls through to the
-            // grid step instead of re-splitting in place.
             let Ok(ext) = refine_extremum(p, t_prev, sample) else {
                 return Ok(None);
             };

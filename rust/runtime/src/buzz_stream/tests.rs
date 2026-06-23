@@ -292,8 +292,6 @@ fn xdirect_refill_produces_offset_entries_matching_the_generator() {
     const START: u32 = 1_000_000;
     let cfg = XdirectConfig::new(0.01, 10_000.0);
 
-    // Ground truth: thread next_update directly with the anchor the first refill
-    // will bind (= START).
     let p = tone_params(START);
     let mut truth: Vec<(u32, i32)> = Vec::new();
     let mut cursor = XdirectCursor::start(&p, &cfg);
@@ -307,15 +305,12 @@ fn xdirect_refill_produces_offset_entries_matching_the_generator() {
         truth.len()
     );
 
-    // Drive the stream: arm (anchor provisional), refill at now=START (binds the
-    // anchor), drain the queue each pass until the stream closes.
     reset_for_test();
     arm_axis_xdirect(AXIS, tone_params(0), cfg);
     let mut got: Vec<(u32, i32)> = Vec::new();
     loop {
         refill_foreground(START);
         let q = test_hooks::queue_for_axis(AXIS);
-        // SAFETY: host thread-local queue, sole consumer here.
         while let Some(e) = unsafe { crate::step_queue::pop(q) } {
             got.push((e.cycle_abs, e.offset_steps()));
         }
@@ -329,7 +324,6 @@ fn xdirect_refill_produces_offset_entries_matching_the_generator() {
         got, truth,
         "queued xdirect entries must match the generator"
     );
-    // The stream returns to base (net-zero) at the close.
     assert_eq!(
         got.last().map(|&(_, o)| o),
         Some(0),
