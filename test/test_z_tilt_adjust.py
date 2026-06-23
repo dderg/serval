@@ -25,14 +25,14 @@ class _FakeForceMoveRecorder:
 
 class _FakeToolhead:
     def __init__(self):
-        self.wait_moves_and_mcu_called = 0
+        self.wait_moves_called = 0
 
     def get_max_axis_accel(self, axis_idx):
         assert axis_idx == 2
         return 100.0
 
-    def wait_moves_and_mcu(self):
-        self.wait_moves_and_mcu_called += 1
+    def wait_moves(self):
+        self.wait_moves_called += 1
 
 
 class _FakePrinter:
@@ -80,7 +80,7 @@ def test_adjust_steppers_applies_min_relative_deltas():
         ("stepper_z2", 7.69 - -7.80, 5.0, 100.0),
     ]
     assert any("stepper_z1 = 0.0" in m for m in printer.gcode.messages)
-    assert printer.toolhead.wait_moves_and_mcu_called == 1
+    assert printer.toolhead.wait_moves_called == 1
 
 
 def test_adjust_steppers_skips_all_when_level():
@@ -91,4 +91,4 @@ def test_adjust_steppers_skips_all_when_level():
     helper.z_steppers = [_FakeStepper("stepper_z"), _FakeStepper("stepper_z1")]
     helper.adjust_steppers([3.0, 3.0], 5.0)
     assert printer.force_move.calls == []
-    assert printer.toolhead.wait_moves_and_mcu_called == 1
+    assert printer.toolhead.wait_moves_called == 1
