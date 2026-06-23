@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use _motion_engine::drain::DrainSync;
 use _motion_engine::pump::{
-    AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpMsg, SendError, WireSink, run_pump,
+    AxisKey, EnqueueMsg, FrameQueueDiag, HeartbeatMsg, PieceSink, PumpMsg, SendError, WireSink,
+    run_pump,
 };
 use runtime::piece_ring::PieceEntry;
 
@@ -20,6 +21,18 @@ fn piece(t: u64) -> (PieceEntry, f64) {
         },
         t as f64,
     )
+}
+
+fn frame_diag() -> FrameQueueDiag {
+    FrameQueueDiag {
+        mcu_id: 99,
+        axis: 0,
+        queue_depth: 1,
+        piece_count: 1,
+        front_start_time: 0,
+        front_host_secs: 0.0,
+        front_queue_age_us: 0,
+    }
 }
 
 #[test]
@@ -40,6 +53,7 @@ fn wire_sink_missing_transport_is_hard_error() {
         &[p],
         0,
         1,
+        frame_diag(),
     );
     assert!(
         result.is_err(),
@@ -82,6 +96,7 @@ impl PieceSink for PerMcuCountSink {
         _pieces: &[PieceEntry],
         _start_slot: u16,
         _new_head: u32,
+        _frame_diag: FrameQueueDiag,
     ) -> Result<i32, SendError> {
         *self.calls.lock().unwrap().entry(key.mcu_id).or_insert(0) += 1;
         Ok(0)

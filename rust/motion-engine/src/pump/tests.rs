@@ -63,6 +63,7 @@ impl PieceSink for RecordingSink {
         _pieces: &[PieceEntry],
         start_slot: u16,
         new_head: u32,
+        _frame_diag: FrameQueueDiag,
     ) -> Result<i32, SendError> {
         self.calls.lock().unwrap().push((start_slot, new_head));
         Ok(mcu_protocol::result_codes::OK)
@@ -80,6 +81,33 @@ fn make_piece(t: u64) -> (PieceEntry, f64) {
         },
         t as f64,
     )
+}
+
+#[test]
+fn frame_queue_diag_reports_front_age_and_depth() {
+    let key = AxisKey { mcu_id: 2, axis: 3 };
+    let mut q = AxisQueue::new(8);
+    q.pieces.push_back(QueuedPiece::new(make_piece(42), 1_000));
+    q.pieces.push_back(QueuedPiece::new(make_piece(43), 1_100));
+
+    let diag = FrameQueueDiag::from_queue(key, &q, 1, 1_250).expect("front exists");
+
+    assert_eq!(diag.mcu_id, 2);
+    assert_eq!(diag.axis, 3);
+    assert_eq!(diag.queue_depth, 2);
+    assert_eq!(diag.piece_count, 1);
+    assert_eq!(diag.front_start_time, 42);
+    assert_eq!(diag.front_host_secs, 42.0);
+    assert_eq!(diag.front_queue_age_us, 250);
+}
+
+#[test]
+fn send_diag_converts_duration_and_arrival_lead() {
+    let diag = SendFrameDiag::new(2_000, 1_750, 1_000_000.0, 10, 260);
+
+    assert_eq!(diag.call_duration_us, 250);
+    assert_eq!(diag.arrival_lead_ticks, 250);
+    assert_eq!(diag.arrival_lead_us, Some(250.0));
 }
 
 #[test]
@@ -255,6 +283,7 @@ impl PieceSink for NullSink {
         _pieces: &[PieceEntry],
         _start_slot: u16,
         _new_head: u32,
+        _frame_diag: FrameQueueDiag,
     ) -> Result<i32, SendError> {
         Ok(mcu_protocol::result_codes::OK)
     }

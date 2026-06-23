@@ -30,6 +30,7 @@ impl PieceSink for NullSink {
         _pieces: &[PieceEntry],
         _start_slot: u16,
         _new_head: u32,
+        _frame_diag: FrameQueueDiag,
     ) -> Result<i32, SendError> {
         Ok(mcu_protocol::result_codes::OK)
     }
@@ -58,6 +59,7 @@ impl PieceSink for CountingSink {
         pieces: &[PieceEntry],
         _start_slot: u16,
         _new_head: u32,
+        _frame_diag: FrameQueueDiag,
     ) -> Result<i32, SendError> {
         let mut sent = self.sent.lock().unwrap();
         for p in pieces {

@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use _motion_engine::pump::{
-    AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpMsg, SendError, run_pump,
+    AxisKey, EnqueueMsg, FrameQueueDiag, HeartbeatMsg, PieceSink, PumpMsg, SendError, run_pump,
 };
 use runtime::piece_ring::PieceEntry;
 
@@ -15,6 +15,7 @@ impl PieceSink for RecordingSink {
         pieces: &[PieceEntry],
         _start_slot: u16,
         _new_head: u32,
+        _frame_diag: FrameQueueDiag,
     ) -> Result<i32, SendError> {
         self.0.lock().unwrap().push((key, pieces.len()));
         Ok(0)

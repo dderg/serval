@@ -3,15 +3,18 @@ use super::*;
 fn q_with_host(ring_depth: u32, starts: &[(u64, f64)]) -> AxisQueue {
     let mut q = AxisQueue::new(ring_depth);
     for &(s, h) in starts {
-        q.pieces.push_back((
-            PieceEntry {
-                start_time: s,
-                coeffs: [0.0; 4],
-                duration: 0.001,
-                motor_mask: 0,
-                _reserved: [0; 3],
-            },
-            h,
+        q.pieces.push_back(QueuedPiece::new(
+            (
+                PieceEntry {
+                    start_time: s,
+                    coeffs: [0.0; 4],
+                    duration: 0.001,
+                    motor_mask: 0,
+                    _reserved: [0; 3],
+                },
+                h,
+            ),
+            0,
         ));
     }
     q

@@ -22,12 +22,85 @@ pub struct AxisKey {
 
 #[derive(Debug)]
 pub struct AxisQueue {
-    pub pieces: VecDeque<(PieceEntry, f64)>,
+    pub pieces: VecDeque<QueuedPiece>,
     pub pushed: u32,
     pub retired: u32,
     pub ring_depth: u32,
     pub physical_write_cursor: u32,
     pub lead_secs: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QueuedPiece {
+    pub entry: PieceEntry,
+    pub host_secs: f64,
+    pub enqueued_mono_us: u64,
+}
+
+impl QueuedPiece {
+    pub fn new(piece: (PieceEntry, f64), enqueued_mono_us: u64) -> Self {
+        Self {
+            entry: piece.0,
+            host_secs: piece.1,
+            enqueued_mono_us,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameQueueDiag {
+    pub mcu_id: u32,
+    pub axis: u8,
+    pub queue_depth: usize,
+    pub piece_count: usize,
+    pub front_start_time: u64,
+    pub front_host_secs: f64,
+    pub front_queue_age_us: u64,
+}
+
+impl FrameQueueDiag {
+    pub fn from_queue(
+        key: AxisKey,
+        queue: &AxisQueue,
+        piece_count: usize,
+        now_mono_us: u64,
+    ) -> Option<Self> {
+        let front = queue.pieces.front()?;
+        Some(Self {
+            mcu_id: key.mcu_id,
+            axis: key.axis,
+            queue_depth: queue.pieces.len(),
+            piece_count,
+            front_start_time: front.entry.start_time,
+            front_host_secs: front.host_secs,
+            front_queue_age_us: now_mono_us.saturating_sub(front.enqueued_mono_us),
+        })
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct SendFrameDiag {
+    pub call_duration_us: u64,
+    pub arrival_lead_ticks: i64,
+    pub arrival_lead_us: Option<f64>,
+}
+
+impl SendFrameDiag {
+    pub fn new(
+        front_start_time: u64,
+        arrival_clock: u64,
+        approx_freq_hz: f64,
+        call_begin_us: u64,
+        call_end_us: u64,
+    ) -> Self {
+        let arrival_lead_ticks = front_start_time as i64 - arrival_clock as i64;
+        Self {
+            call_duration_us: call_end_us.saturating_sub(call_begin_us),
+            arrival_lead_ticks,
+            arrival_lead_us: (approx_freq_hz > 0.0)
+                .then_some((arrival_lead_ticks as f64 / approx_freq_hz) * 1e6),
+        }
+    }
 }
 
 impl AxisQueue {
@@ -104,8 +177,8 @@ pub fn schedule(
             .iter()
             .filter(|(k, q)| !q.pieces.is_empty() && !cap_skipped.contains(*k))
             .min_by(|(ka, qa), (kb, qb)| {
-                let ha = qa.pieces.front().unwrap().1;
-                let hb = qb.pieces.front().unwrap().1;
+                let ha = qa.pieces.front().unwrap().host_secs;
+                let hb = qb.pieces.front().unwrap().host_secs;
                 ha.total_cmp(&hb).then(ka.cmp(kb))
             });
         let (&k, q) = match candidate {
@@ -130,7 +203,7 @@ pub fn schedule(
             continue;
         }
 
-        let head_start_ticks = q.pieces.front().unwrap().0.start_time;
+        let head_start_ticks = q.pieces.front().unwrap().entry.start_time;
         if let Some(horizon) = horizon_of(&k, q) {
             if head_start_ticks > horizon {
                 return Schedule::StallAhead(k);
@@ -152,7 +225,7 @@ pub fn schedule(
                 let already = taken.get(k).copied().unwrap_or(0);
                 q.pieces
                     .get(already)
-                    .map(|&(ref p, host)| (*k, p.start_time, host))
+                    .map(|p| (*k, p.entry.start_time, p.host_secs))
             })
             .min_by(|(ka, _, ha), (kb, _, hb)| ha.total_cmp(hb).then(ka.cmp(kb)));
         let (k, start_ticks, _host) = match next {
@@ -194,7 +267,7 @@ pub fn schedule(
         .filter(|(_, n)| *n > 0)
         .map(|(k, n)| FramePlan {
             key: k,
-            pieces: queues[&k].pieces.iter().take(n).map(|(p, _)| *p).collect(),
+            pieces: queues[&k].pieces.iter().take(n).map(|p| p.entry).collect(),
             start_slot: 0,
         })
         .collect();
@@ -277,6 +350,7 @@ pub trait PieceSink: Send {
         pieces: &[PieceEntry],
         start_slot: u16,
         new_head: u32,
+        frame_diag: FrameQueueDiag,
     ) -> Result<i32, SendError>;
 }
 
@@ -526,7 +600,12 @@ pub fn run_pump<S, F, C, A, O, D>(
                     .entry(key)
                     .or_insert_with(|| AxisQueue::new(ring_depth_of(key)));
                 q.lead_secs = lead_secs;
-                q.pieces.extend(pieces);
+                let enqueued_mono_us = crate::timing::mono_us();
+                q.pieces.extend(
+                    pieces
+                        .into_iter()
+                        .map(|p| QueuedPiece::new(p, enqueued_mono_us)),
+                );
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
@@ -701,7 +780,18 @@ pub fn run_pump<S, F, C, A, O, D>(
                             f.start_slot = q.physical_write_cursor as u16;
                             q.pushed.wrapping_add(n)
                         };
-                        match sink.send_frame(f.key, &f.pieces, f.start_slot, new_head) {
+                        let frame_diag = {
+                            let q = queues.get(&f.key).expect("planned key exists");
+                            FrameQueueDiag::from_queue(
+                                f.key,
+                                q,
+                                f.pieces.len(),
+                                crate::timing::mono_us(),
+                            )
+                            .expect("planned frame has front piece")
+                        };
+                        match sink.send_frame(f.key, &f.pieces, f.start_slot, new_head, frame_diag)
+                        {
                             Ok(_) => {
                                 let q = queues.get_mut(&f.key).expect("planned key exists");
                                 for _ in 0..f.pieces.len() {
@@ -716,6 +806,13 @@ pub fn run_pump<S, F, C, A, O, D>(
                                     event = "send_frame_fatal",
                                     key = ?f.key,
                                     error = %e,
+                                    queue_depth = frame_diag.queue_depth,
+                                    piece_count = frame_diag.piece_count,
+                                    front_start_time = frame_diag.front_start_time,
+                                    front_queue_age_us = frame_diag.front_queue_age_us,
+                                    front_host_secs = frame_diag.front_host_secs,
+                                    start_slot = f.start_slot,
+                                    new_head,
                                     "pump send_frame FATAL transport error — invoking fatal-transport action"
                                 );
                                 on_fatal_transport(f.key);
@@ -727,6 +824,13 @@ pub fn run_pump<S, F, C, A, O, D>(
                                     event = "send_frame_transient",
                                     key = ?f.key,
                                     error = %e,
+                                    queue_depth = frame_diag.queue_depth,
+                                    piece_count = frame_diag.piece_count,
+                                    front_start_time = frame_diag.front_start_time,
+                                    front_queue_age_us = frame_diag.front_queue_age_us,
+                                    front_host_secs = frame_diag.front_host_secs,
+                                    start_slot = f.start_slot,
+                                    new_head,
                                     "pump send_frame failed"
                                 );
                                 break 'send;
@@ -876,6 +980,7 @@ impl PieceSink for WireSink {
         pieces: &[PieceEntry],
         start_slot: u16,
         new_head: u32,
+        frame_diag: FrameQueueDiag,
     ) -> Result<i32, SendError> {
         debug_assert!(
             pieces.len() <= 255,
@@ -884,16 +989,25 @@ impl PieceSink for WireSink {
 
         let host_front_start_time: u64 = pieces.first().map(|p| p.start_time).unwrap_or(0);
 
+        let call_begin_us = crate::timing::mono_us();
         let r = self.call_push_pieces(key, pieces, start_slot, new_head)?;
+        let call_end_us = crate::timing::mono_us();
 
         {
-            let arrival_lead_ticks = r.front_start_time as i64 - r.arrival_clock as i64;
+            let approx_freq_hz = (self.freq_of)(key.mcu_id);
+            let send_diag = SendFrameDiag::new(
+                r.front_start_time,
+                r.arrival_clock,
+                approx_freq_hz.unwrap_or(0.0),
+                call_begin_us,
+                call_end_us,
+            );
+            let arrival_lead_ticks = send_diag.arrival_lead_ticks;
             let zero_st = host_front_start_time == 0;
             let past_arrival = arrival_lead_ticks < 0;
             let frame_seq = TRANSIT_DIAG_FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
             let healthy_sample = frame_seq % TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE == 0;
             if zero_st || past_arrival || healthy_sample {
-                let approx_freq_hz = (self.freq_of)(key.mcu_id);
                 let host_send_secs = {
                     use std::time::{SystemTime, UNIX_EPOCH};
                     SystemTime::now()
@@ -901,11 +1015,9 @@ impl PieceSink for WireSink {
                         .map(|d| d.as_secs_f64())
                         .unwrap_or(0.0)
                 };
-                // Clock not yet synced -> the µs conversion is meaningless; render
-                // N/A. Alert gating uses arrival_lead_ticks (tick domain), so the
-                // ALERT still fires without a frequency.
-                let arrival_lead_us = approx_freq_hz
-                    .map(|f| format!("{:.1}", (arrival_lead_ticks as f64 / f) * 1e6))
+                let arrival_lead_us = send_diag
+                    .arrival_lead_us
+                    .map(|v| format!("{v:.1}"))
                     .unwrap_or_else(|| "N/A".to_owned());
                 if zero_st || past_arrival {
                     let alert = if zero_st && past_arrival {
@@ -925,6 +1037,13 @@ impl PieceSink for WireSink {
                         arrival_clock = r.arrival_clock,
                         arrival_lead_ticks,
                         arrival_lead_us = %arrival_lead_us,
+                        call_duration_us = send_diag.call_duration_us,
+                        queue_depth = frame_diag.queue_depth,
+                        piece_count = frame_diag.piece_count,
+                        front_queue_age_us = frame_diag.front_queue_age_us,
+                        front_host_secs = frame_diag.front_host_secs,
+                        start_slot,
+                        new_head,
                         host_send_unix_secs = host_send_secs,
                         alert,
                         "[transit-diag] alert"
@@ -940,6 +1059,13 @@ impl PieceSink for WireSink {
                         arrival_clock = r.arrival_clock,
                         arrival_lead_ticks,
                         arrival_lead_us = %arrival_lead_us,
+                        call_duration_us = send_diag.call_duration_us,
+                        queue_depth = frame_diag.queue_depth,
+                        piece_count = frame_diag.piece_count,
+                        front_queue_age_us = frame_diag.front_queue_age_us,
+                        front_host_secs = frame_diag.front_host_secs,
+                        start_slot,
+                        new_head,
                         host_send_unix_secs = host_send_secs,
                         "[transit-diag]"
                     );

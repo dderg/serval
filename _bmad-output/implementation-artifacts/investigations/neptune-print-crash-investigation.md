@@ -216,3 +216,25 @@ Use either of the two failing print files. Capture the `print_id`, then query `s
 ## Side Findings
 
 - The repeated `seg0_deficit` message says "negative deficit_us => in past" even while the numeric `deficit_us≈250000` represents intended fresh-start lead; this wording was already called out in the prior Neptune investigation and remains misleading.
+
+## Follow-up: 2026-06-23
+
+### New Evidence
+
+- Added structured pump instrumentation on the existing `transit_diag` / `transit_diag_alert` path. Late-arrival records now carry `call_duration_us`, `queue_depth`, `piece_count`, `front_queue_age_us`, `front_host_secs`, `start_slot`, and `new_head`.
+- Added the same queue/front fields to `send_frame_transient` and `send_frame_fatal`, so broken-pipe / rejected-frame records can be correlated even when no `PushPiecesResponse` is decoded.
+- The instrumentation stores `enqueued_mono_us` per pump-queued piece and computes queue age at the moment the frame is selected for send. Healthy-path `transit_diag` remains sampled; alert-path records still emit every late/zero-start frame.
+
+### Updated Diagnostic Plan
+
+On the next Neptune reproduction, query `transit_diag_alert` with the new fields:
+
+```text
+event:=transit_diag_alert _time:1h | fields _time,print_id,mcu,axis,arrival_lead_us,call_duration_us,queue_depth,piece_count,front_queue_age_us,front_host_secs,start_slot,new_head,_msg
+```
+
+Interpretation:
+
+- Large `front_queue_age_us` before negative `arrival_lead_us` supports pump backlog / scheduling delay.
+- Large `call_duration_us` with modest queue age supports transport latency.
+- Small `front_queue_age_us` and small `call_duration_us` with negative `arrival_lead_us` refutes pump/transport as the primary cause and points back to upstream scheduling/projection or MCU-side consumption.
