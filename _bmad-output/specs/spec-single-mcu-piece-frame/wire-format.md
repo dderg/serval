@@ -56,18 +56,18 @@ arrival_clock` from the diagnostic echo.
 | --- | --- | --- |
 | Transport (CRC fail, truncation, timeout) | the call itself errored | **retry** the whole frame (idempotent: zero committed) |
 | Frame OK | all axes committed | advance ring bookkeeping (all-or-nothing) |
-| Non-OK result (RING_FULL / logic) | the MCU declined the frame | **retry** — it is backpressure, not a halt |
+| Non-OK result | the MCU declined the frame | **retry** — recoverable, not a halt |
 
 **Correction (2026-06-23, regression fix).** An earlier draft halted on any non-OK
-result. That was wrong: `RING_FULL` (`-309`) is **routine backpressure** — the MCU's
-ring is momentarily full (the host's `pushed − retired` view lags the MCU's retire),
-and it is the dominant non-OK during the homing drip. Halting on it crashed homing.
-A non-OK result is therefore retried: nothing is popped, so the next pass re-sends
-byte-identical frames to the same slot-addressed rings (any axis the MCU already
-committed returns `Stale`, so the retry is idempotent even across a partial commit).
-The genuine fail-loud — a piece arriving in the MCU's past — is the runtime
-`PieceStartInPast` fault, a **separate** path (the ISR faults the engine), not this
-commit-result code. Runaway retries are bounded by the host's `feed_throttle`
+result. That was wrong, and it crashed homing. The bench fault was `STREAM_HALTED`
+(`-142`) on the serial MCU: when an endstop trips, the engine gates the stream, and
+the next in-flight commit is declined — a **routine** part of homing, not a fault.
+(`RING_FULL` (`-309`) backpressure is the same story.) A non-OK result is therefore
+retried: nothing is popped, so the next pass re-sends byte-identical frames to the
+same slot-addressed rings (already-committed axes return `Stale`), and homing's
+stream-reset clears the stale pieces. The genuine fail-loud — a piece arriving in
+the MCU's past — is the runtime `PieceStartInPast` fault, a **separate** path, not
+this commit-result code. Runaway retries are bounded by `feed_throttle`'s
 `DRAIN_TIMEOUT`.
 
 ## Frame budget (the binding constraint)

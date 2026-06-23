@@ -290,6 +290,14 @@ pub enum SendError {
     Transient(String),
 }
 
+impl SendError {
+    fn retryable_mcu_reject(mcu_id: u32, result: i32) -> Self {
+        Self::Transient(format!(
+            "mcu {mcu_id} rejected PushPieces frame: result {result}"
+        ))
+    }
+}
+
 impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1122,17 +1130,7 @@ impl PieceSink for WireSink {
         }
 
         if resp.result != mcu_protocol::result_codes::OK {
-            // A non-OK result is transient backpressure (RING_FULL when the MCU's
-            // ring is momentarily full — routine during the homing drip), not a
-            // halt condition. Retry: nothing is popped, so the next pass re-sends
-            // byte-identical frames to the same slot-addressed rings (any axis the
-            // MCU already committed returns Stale). The real fail-loud — a piece
-            // arriving in the MCU past — is the runtime PieceStartInPast fault, a
-            // separate path, not this commit-result code.
-            return Err(SendError::Transient(format!(
-                "MCU rejected PushPieces frame (mcu {mcu_id}): result {} — retrying",
-                resp.result
-            )));
+            return Err(SendError::retryable_mcu_reject(mcu_id, resp.result));
         }
         Ok(())
     }
