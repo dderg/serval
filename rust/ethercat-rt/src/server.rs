@@ -82,7 +82,11 @@ impl FrameServer {
                     }
                 }
             }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
+            Err(ref e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) => {}
             Err(e) => {
                 eprintln!("ec-rt: read error: {e}");
                 self.conn = None;
