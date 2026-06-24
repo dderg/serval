@@ -327,7 +327,8 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let mut accepted = 0u32;
     let mut hit_full = false;
-    for i in 0..6000u64 {
+    let flood = 24000u64; // comfortably above PUMP_INTAKE_BACKLOG_CAP
+    for i in 0..flood {
         match data.try_send(EnqueueMsg {
             key,
             pieces: vec![p(i)],
@@ -342,7 +343,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
             }
             Err(TrySendError::Disconnected(_)) => break,
         }
-        if i % 16 == 0 {
+        if i % 64 == 0 {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
@@ -351,7 +352,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
         "pump must stop pulling at the backlog cap so the data channel backpressures; accepted={accepted}"
     );
     assert!(
-        accepted < 6000,
+        (accepted as u64) < flood,
         "intake must be bounded, not drain everything; accepted={accepted}"
     );
 
