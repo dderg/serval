@@ -1,4 +1,4 @@
-# Failure analysis — why arc detection doesn't fire, and the curvature-profile fix
+# Failure analysis — why arc detection doesn't fire, and the uniformity fix
 
 Companion to `SPEC.md`. Instrumented findings from the real `geometry/src/fitter/chain.rs` on `motion-engine/tests/gcode/neptune_crash_short.gcode` (310 moves; a short `COLD_Voron_Design_Cube` slice with a ~13 mm circle, rounded corners, and straight edges).
 
@@ -41,37 +41,42 @@ Runs that *are* genuinely circular — the isolated fillets, **4–11 facets** �
 
 Root: the clothoid length `l_t = min(√(24·ρ·δ), len_first, len_last, 0.5·ρ)` and the `spiral_anchor_offset` placement overshoot the short bounding facets of a real fillet. So even a correctly-identified arc is thrown away.
 
-## The fix — curvature-profile segmentation
+## Attempt 1 (built, superseded): least-squares circle segmentation
 
-Replace the detection primitive:
+Replaced greedy `grow_run` with a bounded turning-band + co-circular (least-squares `incircle`, residual ≤ `deviation_tol`) segmentation, config reshaped to `{deviation_tol, min_run}`. This killed the unbounded growth (no more 138-facet / 4654° runaway) but **hit its make-or-break**: arc count stays ~4, max 2 mm, the center circle never fit, at *any* `deviation_tol` from 0.005–4 mm. Measured per-facet on the fixture, here is why least-squares circle-fitting is the wrong gate:
 
-1. Estimate curvature κ at each interior vertex (e.g. circumscribed circle of the facet triplet), producing a 1-D κ(s) profile along the polyline.
-2. Segment that profile into spans: κ ≈ 0 → `Line`; κ ≈ const ≠ 0 → `Arc` (ρ = 1/κ); κ ramping ≈ linearly → `Clothoid` transition.
-3. Fit each span once; emit `line → clothoid → arc → clothoid → line`.
+- **Bands fuse non-circular geometry.** The half-circle band `[162..173]` contains a 9.86 mm straight wall (`FACET 167 len=9.861 turn=1.78°`) wedged between 0.3–0.4 mm curve facets. One circle fit through curve + straight → 3 mm residual → reject. The real arc is never isolated.
+- **Real arc chords are not uniform.** The big curving runs turn consistently (~7°) but chord length swings **±~23%** (alternating ~1.13 / ~0.77 mm). A tight residual gate rejects them; a loose one admits junk.
+- **A single `deviation_tol` inverts.** It did double duty (circle gate ↑arcs vs a chord-deviation line-exclusion ↓arcs), so *looser* tol gave *fewer* arcs. The line-exclusion was removed (knob is now a clean upper bound), but the count stays capped by reconstruct seating regardless.
+- **Loose tol → false positives.** A few mis-angled straights satisfy "within tol of *some* big circle" and get fit as arcs that aren't.
 
-Why this addresses both defects and the streaming needs:
+## The fix — facet uniformity
 
-- **Defect 1:** segmentation cuts at curvature *changes*, so a perimeter splits into its constituent arcs/lines automatically — the circle and each fillet become their own span. No "one circle per maximal run."
-- **Defect 2:** the transition span where κ ramps **is** the clothoid, by measurement — no trial seating of a spiral onto facets, so the `seam_ok`/consumption rejections disappear.
-- **Window-stable (CAP-3):** κ is a *local* measurement, so the classification of a span is independent of where a streaming window starts — unlike greedy left-to-right growth.
-- **Cost:** a single near-linear forward pass — removes the O(n²) re-grow that is itself part of the stall.
-- **Output vocabulary:** line/arc/clothoid with G2 continuity is exactly what κ-segmentation produces; biarc (G1) would not.
+A printed circular arc is a run of facets with constant chord **length**, constant turn **angle**, and constant **extrusion-per-mm**, each within a tolerance. Constant length + constant angle is the chord form of a circle (`R = L/(2·sin(Δθ/2))`) — not a heuristic, the circle's definition in chord space. Constant E/mm keeps the run inside one printed feature.
 
-### Acceptance guards (must hold, beyond the neptune reds)
+Segment by walking facets and breaking the run wherever length, angle, or E/mm departs from the run's **running average** beyond its tolerance. This cleanly cuts the fused 9.86 mm straight (length jump 20×), corners (angle jump to ~90°), and feature boundaries (E/mm change, incl. travels at E/mm = 0). Then fit/emit the arc over each clean run. Compare against the running average (not the neighbor) so the ±23% chord swing of a genuine arc holds together.
 
-- **Deviation bound:** every fitted arc/clothoid stays within a tight band of the original chords — the part is not distorted.
-- **No corner absorption:** a genuine sharp corner is never classified as arc/clothoid; it still goes through the biclothoid corner blend.
-- **Idempotence:** re-fitting the output reproduces it.
+Why it beats least-squares:
+
+- **Isolates** the real arc from fused straights/corners — the segmentation LS got wrong → catches the center circle.
+- **Rejects** mis-angled-straight false positives that LS accepts at loose tol.
+- **Window-stable (CAP-3):** a local measurement; single forward pass; no O(n²).
+
+### Harness gap (blocks CAP-5)
+The offline harness zeroes extrusion: `parse_gcode_to_moves` calls `build_move(..., 0.0, ...)`, so every facet reads E/mm = 0 offline. Carry per-facet extrusion through before the E/mm signal can be tested offline.
+
+### Acceptance guards (beyond the neptune reds)
+- No straight wall edge mistaken for an arc (uniformity rejects it).
+- A genuine sharp corner never absorbed (angle jump breaks the run).
+- Idempotence: re-fitting reproduces.
 
 ### Risk
-
-κ from short, coordinate-quantized slicer facets is noisy; naive thresholding can hallucinate an arc across a corner or shatter one circle. Denoising κ robustly is the make-or-break and the first thing to prototype.
+The three tolerances are the make-or-break: too tight under-segments (shatters the ±23% arc), too loose over-segments / admits non-arcs. Tune on the fixture; the visualizer is the primary check.
 
 ## Code map
 
-- `geometry/src/fitter/chain.rs` — `detect_runs` (32), `grow_run` (64), `reconstruct` (124), `incircle` (254): the detection/reconstruction to rework.
-- `geometry/src/fitter.rs` — `ArcFitConfig` (35: `facet_len_max_mm`, `max_turn_rad`), `ChainFitConfig` (`arc_fit: None` default 54; `min_run_junctions` 2; `cocircular_tol` 5 µm), `with_arc_fit` (60). CAP-4 reshapes this: `ArcFitConfig`/`with_arc_fit`/the host knob (`bridge.rs` `arc_fit: Option<(f64, f64)>`) become `(deviation_tol, min_run_facets)` — `facet_len_max_mm` and `max_turn_rad` are removed (curvature subsumes them); `cocircular_tol` becomes the exposed `deviation_tol`; `min_run_junctions` becomes the exposed `min_run_facets`.
-- `motion-engine/tests/arc_fit_neptune.rs` — the red acceptance tests (`max_arc ≥ 8mm`, `blended ≤ 40`).
-- `motion-engine/tests/gcode/neptune_crash_short.gcode` — the fixture.
-- `motion-engine/examples/analyze_arc_fit.rs` — segment-type census across configs.
-- `motion-engine/examples/repro_plan_stall.rs` — times the real commit path; measures the O(n²) blowup the fix must remove.
+- `geometry/src/fitter/chain.rs` — `detect_runs` + `grow_turning_band` + `grow_cocircular_span` (the Attempt-1 segmenter to replace with the uniformity walk), `reconstruct` (reused once fed clean runs), `circle_fit` / `incircle` (radius extraction).
+- `geometry/src/fitter.rs` — `ArcFitConfig { deviation_tol_mm, min_run_facets }`, `with_arc_fit` → CAP-4 reshapes to `(length_tol, angle_tol, epmm_tol, min_run)`; host knob `bridge.rs` / `viz.rs` `arc_fit: Option<(...)>` and `klippy/arc_fit_config.py` `[arc_fit]` parser carry the same tuple.
+- `motion-engine/src/seam_harness.rs` — `parse_gcode_to_moves` zeroes E (the harness gap above); must carry per-facet extrusion.
+- `motion-engine/tests/arc_fit_neptune.rs` — red acceptance (`max_arc ≥ 8mm`, `blended ≤ 40`); `…/gcode/neptune_crash_short.gcode` fixture.
+- `motion-engine/examples/analyze_arc_fit.rs` — segment census + per-facet `len/turn/epmm` dump (`DUMP_FACETS=1`); `repro_plan_stall.rs` — times the real commit path.

@@ -38,7 +38,7 @@ pub fn default_stream_config() -> StreamConfig {
 fn harness_mcu_configs() -> Vec<McuAxisConfig> {
     vec![McuAxisConfig {
         mcu_id: HARNESS_MCU_ID,
-        axes: vec![0, 1, 2],
+        axes: vec![0, 1, 2, EXTRUDER_AXIS],
         kinematics: 1,
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
@@ -132,10 +132,20 @@ impl SeamReport {
     }
 }
 
+struct MoveDeltas {
+    start: [f64; 3],
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    de: f64,
+}
+
 struct PosTracker {
     pos: [f64; 3],
+    e: f64,
     feed: f64,
     absolute: bool,
+    e_absolute: bool,
     established: bool,
 }
 
@@ -143,8 +153,10 @@ impl PosTracker {
     fn new() -> Self {
         Self {
             pos: [0.0; 3],
+            e: 0.0,
             feed: 80.0,
             absolute: true,
+            e_absolute: true,
             established: false,
         }
     }
@@ -154,8 +166,9 @@ impl PosTracker {
         x: Option<f64>,
         y: Option<f64>,
         z: Option<f64>,
+        e: Option<f64>,
         f: Option<f64>,
-    ) -> Option<([f64; 3], f64, f64, f64)> {
+    ) -> Option<MoveDeltas> {
         if let Some(fv) = f {
             self.feed = fv / 60.0;
         }
@@ -172,6 +185,18 @@ impl PosTracker {
                 self.pos[2] + z.unwrap_or(0.0),
             ]
         };
+        let de = match e {
+            Some(ev) if self.e_absolute => {
+                let d = ev - self.e;
+                self.e = ev;
+                d
+            }
+            Some(ev) => {
+                self.e += ev;
+                ev
+            }
+            None => 0.0,
+        };
         let d = [
             target[0] - self.pos[0],
             target[1] - self.pos[1],
@@ -183,7 +208,13 @@ impl PosTracker {
             self.established = true;
             return None;
         }
-        Some((start, d[0], d[1], d[2]))
+        Some(MoveDeltas {
+            start,
+            dx: d[0],
+            dy: d[1],
+            dz: d[2],
+            de,
+        })
     }
 }
 
@@ -203,32 +234,39 @@ pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
         else {
             continue;
         };
+        if letter == b'M' {
+            match major {
+                82 => p.e_absolute = true,
+                83 => p.e_absolute = false,
+                _ => {}
+            }
+            continue;
+        }
         if letter != b'G' {
             continue;
         }
         match major {
             0 | 1 => {
-                let Some((start, dx, dy, dz)) =
-                    p.apply(params.x(), params.y(), params.z(), params.f())
+                let Some(m) = p.apply(params.x(), params.y(), params.z(), params.e(), params.f())
                 else {
                     continue;
                 };
-                if dx.abs() < 1e-9 && dy.abs() < 1e-9 && dz.abs() < 1e-9 {
+                if m.dx.abs() < 1e-9 && m.dy.abs() < 1e-9 && m.dz.abs() < 1e-9 {
                     continue;
                 }
                 match build_move(
-                    start,
-                    dx,
-                    dy,
-                    dz,
+                    m.start,
+                    m.dx,
+                    m.dy,
+                    m.dz,
                     EXTRUDER_AXIS,
-                    0.0,
+                    m.de,
                     limits,
                     p.feed,
                     submitted,
                 ) {
-                    Ok(m) => {
-                        moves.push(m);
+                    Ok(mv) => {
+                        moves.push(mv);
                         submitted += 1;
                     }
                     Err(_) => continue,
@@ -347,7 +385,10 @@ pub fn run_moves(
     let home = moves
         .first()
         .and_then(|m| m.segment.spatial.as_ref())
-        .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
+        .map_or([0.0, 0.0, 0.0, 0.0], |seg| {
+            let p = seg.point_at(0.0);
+            [p[0], p[1], p[2], 0.0]
+        });
     let mut state = StreamState::new(config, AxisChainSet::default(), &home, 0.0);
     let mut ingestor = Ingestor::new();
     let force_after_move: std::collections::BTreeSet<usize> =
