@@ -85,7 +85,7 @@ fn mcus_is_empty(engine: &PyMotionEngine) -> bool {
 }
 
 fn seed_pump_thread(engine: &PyMotionEngine) -> Arc<std::sync::atomic::AtomicBool> {
-    let (tx, rx) = std::sync::mpsc::channel::<crate::pump::PumpMsg>();
+    let (tx, rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
     let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let exited_thread = Arc::clone(&exited);
     let handle = std::thread::Builder::new()
@@ -321,7 +321,7 @@ fn shutdown_takes_and_joins_planner() {
 fn shutdown_joins_planner_before_dropping_pump_receiver() {
     let engine = PyMotionEngine::new();
 
-    let (pump_tx, pump_rx) = std::sync::mpsc::channel::<crate::pump::PumpMsg>();
+    let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
     let pump_tx_for_engine = pump_tx.clone();
 
     let saw_pump_gone = Arc::new(AtomicBool::new(false));
@@ -461,13 +461,15 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
 
     let mcu_clock_of = |_mcu_id: u32| -> Option<(u64, f64)> { Some((1, 1.0)) };
 
-    let (pump_tx, pump_rx) = std::sync::mpsc::channel::<PumpMsg>();
+    let (pump_tx, control_rx) = crossbeam_channel::unbounded::<PumpMsg>();
+    let (data_tx, data_rx) = crossbeam_channel::unbounded::<EnqueueMsg>();
 
     let pump_handle = std::thread::Builder::new()
         .name("push-pieces-pump".into())
         .spawn(move || {
             run_pump(
-                pump_rx,
+                control_rx,
+                data_rx,
                 sink,
                 |_key| 256_u32,
                 mcu_clock_of,
@@ -491,8 +493,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
         },
         1.0_f64,
     )];
-    pump_tx
-        .send(PumpMsg::Enqueue(EnqueueMsg {
+    data_tx
+        .send(EnqueueMsg {
             key: AxisKey {
                 mcu_id: EC_MCU_ID,
                 axis: 0,
@@ -500,7 +502,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
             pieces: pieces_to_enqueue,
             fresh_stream: false,
             lead_secs: 0.0,
-        }))
+            source_line: u32::MAX,
+        })
         .expect("enqueue must succeed before shutdown");
 
     std::thread::sleep(Duration::from_millis(30));

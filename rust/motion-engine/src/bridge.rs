@@ -621,7 +621,7 @@ pub struct PyMotionEngine {
     clock_freqs: Arc<Mutex<HashMap<u32, f64>>>,
     nominal_clock_freqs: Arc<Mutex<HashMap<u32, u32>>>,
     events_dir: Mutex<Option<std::path::PathBuf>>,
-    pump_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<crate::pump::PumpMsg>>>>,
+    pump_tx: Arc<Mutex<Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>>>,
     pump_thread: Mutex<Option<JoinHandle<()>>>,
     live_position_cache: Arc<
         Mutex<(
@@ -2771,7 +2771,10 @@ impl PyMotionEngine {
             }
         }
 
-        let (pump_tx_init, pump_rx) = std::sync::mpsc::channel::<crate::pump::PumpMsg>();
+        let (control_tx_init, control_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
+        let (data_tx_init, data_rx) = crossbeam_channel::bounded::<crate::pump::EnqueueMsg>(
+            crate::pump::PUMP_DATA_CHANNEL_CAP,
+        );
 
         let wire_transports: HashMap<u32, crate::pump::McuTransport> = {
             let mut t = HashMap::new();
@@ -2806,7 +2809,8 @@ impl PyMotionEngine {
                     }),
                 };
                 crate::pump::run_pump(
-                    pump_rx,
+                    control_rx,
+                    data_rx,
                     sink,
                     move |k| {
                         ring_depth_table_for_pump
@@ -2851,7 +2855,7 @@ impl PyMotionEngine {
             })
             .expect("spawn push-pieces-pump thread");
 
-        *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_tx_init.clone());
+        *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(control_tx_init.clone());
         *self.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_thread_handle);
 
         {
@@ -2895,7 +2899,7 @@ impl PyMotionEngine {
 
         for cfg_mcu in &mcu_configs {
             let mcu_id = cfg_mcu.mcu_id;
-            let pump_tx_hb = pump_tx_init.clone();
+            let pump_tx_hb = control_tx_init.clone();
             let drain_hb = self.drain.clone();
 
             if ethercat_mcu_ids.contains(&mcu_id) {
@@ -2914,7 +2918,7 @@ impl PyMotionEngine {
 
                 let homing_run_hb = Arc::clone(&self.homing_run);
                 let active_cohort_hb = Arc::clone(&self.active_drip_cohort);
-                let pump_tx_fault = pump_tx_init.clone();
+                let pump_tx_fault = control_tx_init.clone();
                 let latched_fault_hb = Arc::clone(&self.latched_drive_fault);
                 let mcu_label_hb = mcu_label.clone();
                 conn.attach_heartbeat_callback(Arc::new(
@@ -3067,7 +3071,7 @@ impl PyMotionEngine {
         // absolute-offset jitter never lands on a seam. ~1 µs slew budget bounds
         // the residual drift. Self-heals on the Anchor's `fresh` re-anchor.
         let tick_chain_for_cb = Arc::new(Mutex::new(crate::tick_chain::TickChain::new(1e-6)));
-        let pump_tx_for_cb = pump_tx_init.clone();
+        let pump_tx_for_cb = data_tx_init.clone();
         let drain_disp = self.drain.clone();
         let counter_for_cb = Arc::clone(&counter);
         let active_drip_cohort_for_cb = Arc::clone(&self.active_drip_cohort);
@@ -3201,7 +3205,7 @@ impl PyMotionEngine {
                     }
                     drain_disp.add_sent(m.key.mcu_id, m.key.axis, m.pieces.len() as u32);
                     pump_tx_for_cb
-                        .send(crate::pump::PumpMsg::Enqueue(m))
+                        .send(m)
                         .map_err(|_| DispatchError::PumpGone)?;
                 }
 
@@ -3309,12 +3313,13 @@ impl PyMotionEngine {
                     }
                     nudge_drain.add_sent(mcu_id, axis, pieces.len() as u32);
                     nudge_pump_tx
-                        .send(crate::pump::PumpMsg::Enqueue(crate::pump::EnqueueMsg {
+                        .send(crate::pump::EnqueueMsg {
                             key,
                             pieces,
                             fresh_stream: fresh,
                             lead_secs,
-                        }))
+                            source_line: u32::MAX,
+                        })
                         .map_err(|_| DispatchError::PumpGone)?;
                 }
 
@@ -4453,7 +4458,7 @@ pub(crate) struct TripDeps {
     homing_run: Arc<Mutex<Option<HomingRun>>>,
     pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
     active_drip_cohort: Arc<Mutex<Option<u64>>>,
-    pump_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<crate::pump::PumpMsg>>>>,
+    pump_tx: Arc<Mutex<Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>>>,
     mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
     router: Arc<Mutex<PassthroughRouter>>,
     motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,

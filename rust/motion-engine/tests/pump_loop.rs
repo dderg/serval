@@ -1,10 +1,10 @@
 use std::sync::atomic::AtomicU64;
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use _motion_engine::pump::{
     AxisFrame, AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpMsg, SendError, run_pump,
 };
+use crossbeam_channel::{Receiver, TrySendError, unbounded};
 use runtime::piece_ring::PieceEntry;
 
 struct RecordingSink(Arc<Mutex<Vec<(AxisKey, usize)>>>);
@@ -61,12 +61,14 @@ fn p(start: u64) -> (PieceEntry, f64) {
 #[test]
 fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     let rec = Arc::new(Mutex::new(Vec::new()));
-    let (tx, rx) = mpsc::channel();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
     let depth = |_k: AxisKey| 2u32;
     let sink = RecordingSink(rec.clone());
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             sink,
             depth,
             |_| None,
@@ -77,19 +79,21 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
         )
     });
 
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![p(0), p(1)],
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-    }))
+        source_line: u32::MAX,
+    })
     .unwrap();
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![p(2)],
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-    }))
+        source_line: u32::MAX,
+    })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert_eq!(
@@ -99,7 +103,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     );
     assert_eq!(rec.lock().unwrap()[0], (AxisKey { mcu_id: 1, axis: 0 }, 2));
 
-    tx.send(PumpMsg::Heartbeat(HeartbeatMsg {
+    ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
         retired_counts: vec![2],
     }))
@@ -108,7 +112,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     assert_eq!(rec.lock().unwrap().len(), 2);
     assert_eq!(rec.lock().unwrap()[1], (AxisKey { mcu_id: 1, axis: 0 }, 1));
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
@@ -126,12 +130,14 @@ fn piece_at(start: u64, host: f64, start_pos: f32, end_pos: f32) -> (PieceEntry,
 }
 
 fn run_pump_with_clock(
-    rx: mpsc::Receiver<PumpMsg>,
+    control_rx: Receiver<PumpMsg>,
+    data_rx: Receiver<EnqueueMsg>,
     rec: Arc<Mutex<Vec<(AxisKey, usize)>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             RecordingSink(rec),
             |_k| 64u32,
             |_mcu| Some((0u64, 1e6_f64)),
@@ -146,52 +152,58 @@ fn run_pump_with_clock(
 #[test]
 fn continuous_junction_position_passes() {
     let rec = Arc::new(Mutex::new(Vec::new()));
-    let (tx, rx) = mpsc::channel();
-    let handle = run_pump_with_clock(rx, rec.clone());
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-    }))
+        source_line: u32::MAX,
+    })
     .unwrap();
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(2000, 0.002, 12.5, 15.0)],
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-    }))
+        source_line: u32::MAX,
+    })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
     let sent_pieces: usize = rec.lock().unwrap().iter().map(|(_, n)| n).sum();
     assert_eq!(sent_pieces, 2);
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
 #[test]
 fn junction_position_discontinuity_is_fatal() {
     let rec = Arc::new(Mutex::new(Vec::new()));
-    let (tx, rx) = mpsc::channel();
-    let handle = run_pump_with_clock(rx, rec.clone());
+    let (_ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-    }))
+        source_line: u32::MAX,
+    })
     .unwrap();
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(2000, 0.002, 12.8, 15.0)],
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-    }))
+        source_line: u32::MAX,
+    })
     .unwrap();
 
     assert!(
@@ -203,41 +215,46 @@ fn junction_position_discontinuity_is_fatal() {
 #[test]
 fn fresh_stream_resets_junction_position_baseline() {
     let rec = Arc::new(Mutex::new(Vec::new()));
-    let (tx, rx) = mpsc::channel();
-    let handle = run_pump_with_clock(rx, rec.clone());
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
 
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-    }))
+        source_line: u32::MAX,
+    })
     .unwrap();
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(2000, 0.002, 50.0, 55.0)],
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-    }))
+        source_line: u32::MAX,
+    })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
     let sent_pieces: usize = rec.lock().unwrap().iter().map(|(_, n)| n).sum();
     assert_eq!(sent_pieces, 2);
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
 #[test]
 fn bundles_same_mcu_axes_into_one_transaction() {
     let rec = Arc::new(Mutex::new(Vec::new()));
-    let (tx, rx) = mpsc::channel();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
     let depth = |_k: AxisKey| 8u32;
     let sink = BundleSink(rec.clone());
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             sink,
             depth,
             |_| None,
@@ -251,12 +268,13 @@ fn bundles_same_mcu_axes_into_one_transaction() {
     // Three axes on the same MCU, each with a piece eligible to ship now
     // (mcu_clock_of returns None => no horizon gate).
     for axis in 0..3u8 {
-        tx.send(PumpMsg::Enqueue(EnqueueMsg {
+        data.send(EnqueueMsg {
             key: AxisKey { mcu_id: 1, axis },
             pieces: vec![p(0)],
             fresh_stream: axis == 0,
             lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-        }))
+            source_line: u32::MAX,
+        })
         .unwrap();
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -276,6 +294,87 @@ fn bundles_same_mcu_axes_into_one_transaction() {
         "the bundle must carry every axis of the MCU"
     );
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn intake_backpressures_when_ring_full_and_resumes_on_retirement() {
+    // Ring-flow-controlled intake: with the ring full and no retirement, the
+    // pump stops pulling piece-data, so a bounded data channel fills and the
+    // producer's send is refused (backpressure). Retirement frees ring room and
+    // the pump resumes pulling, releasing the channel.
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = crossbeam_channel::bounded::<EnqueueMsg>(8);
+    let depth = |_k: AxisKey| 4u32;
+    let sink = RecordingSink(rec.clone());
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink,
+            depth,
+            |_| None, // no clock => intake gated purely by ring room
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        )
+    });
+
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let mut accepted = 0u32;
+    let mut hit_full = false;
+    for i in 0..2000u64 {
+        match data.try_send(EnqueueMsg {
+            key,
+            pieces: vec![p(i)],
+            fresh_stream: i == 0,
+            lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+            source_line: u32::MAX,
+        }) {
+            Ok(()) => accepted += 1,
+            Err(TrySendError::Full(_)) => {
+                hit_full = true;
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => break,
+        }
+        if i % 8 == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    assert!(
+        hit_full,
+        "pump must stop pulling when the ring is full so the data channel backpressures; accepted={accepted}"
+    );
+    assert!(
+        accepted < 2000,
+        "intake must be bounded, not drain everything"
+    );
+
+    // Retire the full ring (depth 4 was the most the pump could push without
+    // retirement). retired must stay <= pushed: a larger value wraps room() to
+    // zero. Freeing the ring lets the pump pull again and drain the channel.
+    ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 1,
+        retired_counts: vec![4],
+    }))
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert!(
+        data.try_send(EnqueueMsg {
+            key,
+            pieces: vec![p(9999)],
+            fresh_stream: false,
+            lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+            source_line: u32::MAX,
+        })
+        .is_ok(),
+        "after retirement frees ring room the pump resumes pulling and the channel drains"
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }

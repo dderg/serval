@@ -1,5 +1,5 @@
+use crossbeam_channel::unbounded;
 use std::sync::atomic::AtomicU64;
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -95,10 +95,12 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
     let sink = PerMcuCountSink::new();
     let counts = Arc::clone(&sink.calls);
 
-    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             sink,
             |_k| 8u32,
             |_| None,
@@ -109,19 +111,21 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
         );
     });
 
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![piece(0)],
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-    }))
+        source_line: u32::MAX,
+    })
     .unwrap();
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key: AxisKey { mcu_id: 2, axis: 0 },
         pieces: vec![piece(1)],
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
-    }))
+        source_line: u32::MAX,
+    })
     .unwrap();
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -138,7 +142,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
         std::thread::yield_now();
     }
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 
     let final_c1 = counts.lock().unwrap().get(&1).copied().unwrap_or(0);
@@ -156,7 +160,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
 #[test]
 fn ethercat_heartbeat_callback_advances_drain_and_pump() {
     let drain = Arc::new(DrainSync::new());
-    let (pump_tx, pump_rx) = mpsc::channel::<PumpMsg>();
+    let (pump_tx, pump_rx) = unbounded::<PumpMsg>();
 
     drain.add_sent(42, 0, 3);
 
@@ -196,7 +200,7 @@ fn ethercat_heartbeat_callback_advances_drain_and_pump() {
 #[test]
 fn ethercat_heartbeat_partial_then_full_retirement() {
     let drain = Arc::new(DrainSync::new());
-    let (pump_tx, _pump_rx) = mpsc::channel::<PumpMsg>();
+    let (pump_tx, _pump_rx) = unbounded::<PumpMsg>();
 
     drain.add_sent(7, 0, 5);
 
