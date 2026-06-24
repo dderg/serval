@@ -421,8 +421,12 @@ class BeaconMcuStub:
         return
 
     def _sample_loop(self) -> None:
-        period = 1.0 / self.SAMPLE_RATE_HZ
+        samples_per_batch = 8
+        batch_hz = self.SAMPLE_RATE_HZ / samples_per_batch
+        period = 1.0 / batch_hz
+        status_period = 0.1
         next_tick = time.monotonic()
+        next_status = next_tick + status_period
         while not self._stop.is_set() and self._stream_en:
             now = time.monotonic()
             sleep_for = next_tick - now
@@ -430,15 +434,39 @@ class BeaconMcuStub:
                 time.sleep(min(sleep_for, period))
                 continue
             next_tick += period
-            self._sample_index = (self._sample_index + 1) & 0x7FFFFFFF
-            self._send_msg(
-                "beacon_status clock=%u sample=%i frequency=%u temp=%hi",
-                clock=self._now_clock(),
-                sample=self._sample_index,
-                frequency=DEFAULT_FREQUENCY_HZ,
-                temp=DEFAULT_TEMP_RAW,
+            self._sample_index = (
+                self._sample_index + samples_per_batch
+            ) & 0x7FFFFFFF
+            start_clock = self._now_clock()
+            sample_count = int(DEFAULT_FREQUENCY_HZ * (2**28) / CLOCK_FREQ)
+            first_sample = bytes(
+                [
+                    0x80 | ((sample_count >> 24) & 0x7F),
+                    (sample_count >> 16) & 0xFF,
+                    (sample_count >> 8) & 0xFF,
+                    sample_count & 0xFF,
+                ]
             )
-            self.tx_sample_count += 1
+            repeat_delta = b"\x00\x00"
+            data = first_sample + repeat_delta * (samples_per_batch - 1)
+            self._send_msg(
+                "beacon_data data=%*s samples=%c start_clock=%u delta_clock=%u",
+                data=list(data),
+                samples=samples_per_batch,
+                start_clock=start_clock,
+                delta_clock=int(CLOCK_FREQ / self.SAMPLE_RATE_HZ)
+                * samples_per_batch,
+            )
+            self.tx_sample_count += samples_per_batch
+            if now >= next_status:
+                next_status += status_period
+                self._send_msg(
+                    "beacon_status mcu_temp=%u supply_voltage=%u coil_temp=%u status=%u",
+                    mcu_temp=DEFAULT_TEMP_RAW,
+                    supply_voltage=3300,
+                    coil_temp=DEFAULT_TEMP_RAW,
+                    status=0,
+                )
 
     def _log(
         self,

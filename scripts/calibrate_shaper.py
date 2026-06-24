@@ -61,6 +61,34 @@ def parse_accel_per_hz(logname):
     return data[0][5].item()
 
 
+def calc_specgram(data, axis):
+    N = data.shape[0]
+    Fs = N / (data[-1, 0] - data[0, 0])
+    M = 1 << int(0.5 * Fs - 1).bit_length()
+    window = np.kaiser(M, 6.0)
+
+    def _specgram(x):
+        return matplotlib.mlab.specgram(
+            x,
+            Fs=Fs,
+            NFFT=M,
+            noverlap=M // 2,
+            window=window,
+            mode="psd",
+            detrend="mean",
+            scale_by_freq=False,
+        )
+
+    d = {"x": data[:, 1], "y": data[:, 2], "z": data[:, 3]}
+    if axis != "all":
+        pdata, bins, t = _specgram(d[axis])
+    else:
+        pdata, bins, t = _specgram(d["x"])
+        for ax in "yz":
+            pdata += _specgram(d[ax])[0]
+    return pdata, bins, t
+
+
 ######################################################################
 # Shaper calibration
 ######################################################################
@@ -126,6 +154,7 @@ def plot_freq_response(
     selected_shaper,
     max_freq,
     accels_per_hz,
+    raw_data=None,
 ):
     freqs = calibration_data.freq_bins
     psd = calibration_data.psd_sum[freqs <= max_freq]
@@ -137,10 +166,19 @@ def plot_freq_response(
     fontP = matplotlib.font_manager.FontProperties()
     fontP.set_size("x-small")
 
-    fig, ax = matplotlib.pyplot.subplots()
-    ax.set_xlabel("Frequency, Hz")
+    if raw_data is not None:
+        fig, (ax, ax_spec) = matplotlib.pyplot.subplots(
+            nrows=2,
+            sharex=True,
+            gridspec_kw={"height_ratios": [3, 1]},
+        )
+    else:
+        fig, ax = matplotlib.pyplot.subplots()
+        ax_spec = None
     ax.set_xlim([0, max_freq])
     ax.set_ylabel("Power spectral density")
+    if ax_spec is None:
+        ax.set_xlabel("Frequency, Hz")
 
     ax.plot(freqs, psd, label="X+Y+Z", color="purple")
     ax.plot(freqs, px, label="X", color="red")
@@ -187,6 +225,20 @@ def plot_freq_response(
     ax.legend(loc="upper left", prop=fontP)
     ax2.legend(loc="upper right", prop=fontP)
 
+    if ax_spec is not None:
+        pdata, bins, t = calc_specgram(raw_data, "all")
+        ax_spec.pcolormesh(
+            bins,
+            t,
+            pdata.T,
+            norm=matplotlib.colors.LogNorm(),
+            cmap="inferno",
+            shading="auto",
+        )
+        ax_spec.set_xlim([0, max_freq])
+        ax_spec.set_ylabel("Time, s")
+        ax_spec.set_xlabel("Frequency, Hz")
+
     fig.tight_layout()
     return fig
 
@@ -201,8 +253,10 @@ def setup_matplotlib(output_to_file):
     if output_to_file:
         matplotlib.rcParams.update({"figure.autolayout": True})
         matplotlib.use("Agg")
+    import matplotlib.colors
     import matplotlib.dates
     import matplotlib.font_manager
+    import matplotlib.mlab
     import matplotlib.pyplot
     import matplotlib.ticker
 
@@ -362,6 +416,11 @@ def main():
         # Draw graph
         setup_matplotlib(options.output is not None)
 
+        raw_data = (
+            datas[0]
+            if not isinstance(datas[0], shaper_calibrate.CalibrationData)
+            else None
+        )
         fig = plot_freq_response(
             args,
             calibration_data,
@@ -369,13 +428,14 @@ def main():
             selected_shaper,
             max_freq,
             accels_per_hz,
+            raw_data=raw_data,
         )
 
         # Show graph
         if options.output is None:
             matplotlib.pyplot.show()
         else:
-            fig.set_size_inches(8, 6)
+            fig.set_size_inches(8, 8 if raw_data is not None else 6)
             fig.savefig(options.output)
 
 
