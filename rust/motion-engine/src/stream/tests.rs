@@ -839,3 +839,35 @@ fn smooth_shaper_two_batch_output_matches_one_batch() {
         }
     }
 }
+
+#[test]
+fn is_clean_seam_accepts_line_seam() {
+    let moves = vec![line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0)];
+    assert!(is_clean_seam(&moves, 0));
+}
+
+#[test]
+fn is_clean_seam_rejects_blend_entry_clothoid() {
+    let corner = vec![
+        line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0),
+        line(2, [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], 0.0),
+    ];
+    let outcome = fit_chain_with_head_restore(&corner, cfg().chain, 0.0).unwrap();
+
+    let clothoid_idx = outcome
+        .moves
+        .iter()
+        .position(|m| matches!(m.segment.spatial, Some(Segment::Clothoid(_))))
+        .expect("a right-angle corner fits to a biclothoid blend");
+    assert!(
+        !is_clean_seam(&outcome.moves, clothoid_idx),
+        "a blend clothoid is never a clean seam, whatever source line it carries"
+    );
+
+    let line_idx = outcome
+        .moves
+        .iter()
+        .position(|m| matches!(m.segment.spatial, Some(Segment::Line(_))))
+        .expect("the corner retains straight line bodies");
+    assert!(is_clean_seam(&outcome.moves, line_idx));
+}

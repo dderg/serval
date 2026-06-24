@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use geometry::path::lowering::PositionProfile;
@@ -354,8 +354,6 @@ impl StreamState {
         let commit_count = if force {
             n
         } else {
-            let unblended: HashSet<u32> =
-                outcome.report.unblended.iter().map(|u| u.line_no).collect();
             let setback =
                 brake_to_rest_setback(&outcome.moves, self.config.velocity.max_jerk_mm_s3);
             let total_arc: f64 = outcome.moves.iter().map(|m| m.segment.s_len()).sum();
@@ -366,7 +364,7 @@ impl StreamState {
                 if total_arc - arc_to_seam < setback {
                     break;
                 }
-                if is_clean_seam(&outcome.moves, i, &unblended)
+                if is_clean_seam(&outcome.moves, i)
                     && self.head_trim_feasible(&outcome.moves, i, seam_xyz[i])
                 {
                     chosen = i;
@@ -606,13 +604,8 @@ impl StreamState {
     }
 }
 
-/// A non-forced commit may cut wherever the fit output resumes a straight line
-/// body (zero curvature: an unblended seam or the exit of a blend) — never
-/// inside a blend, where curvature is nonzero and the velocity warm-start, which
-/// carries only a scalar entry speed, would be invalid.
-fn is_clean_seam(moves: &[Move], i: usize, unblended: &HashSet<u32>) -> bool {
-    unblended.contains(&moves[i].source.start_line)
-        || matches!(moves[i].segment.spatial, Some(Segment::Line(_)))
+fn is_clean_seam(moves: &[Move], i: usize) -> bool {
+    matches!(moves[i].segment.spatial, Some(Segment::Line(_)))
 }
 
 /// Whether the seam before output index `i` is the exit of a blend, i.e. the
