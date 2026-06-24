@@ -57,11 +57,13 @@ context:
 - [x] `klippy/motion.py` (`_check_pause`) + `motion_engine.py` -- add a channel-count gate beside the time gate: throttle when `pending_channel_moves >= channel_high` (= 3/4 cap), drain to `channel_low` (= 1/2 cap), with a shutdown break and the existing `DRAIN_TIMEOUT` fail-loud. Single-producer reader makes the post-submit gate overflow-safe; no `submit_move` contract change.
 - [x] `test/test_motion_backpressure.py` + `rust/motion-engine/src/stream_planner/tests.rs` -- offline: count-gate throttle/drain/deadline/shutdown-break (Python); channel depth tracks occupancy and refuses overflow at capacity (Rust).
 
-*Steps 2–4 — bounded planner→pump hop + retire the gate (pending bench-verify of step 1):*
-- [ ] `rust/motion-engine/src/bridge.rs` -- split `PumpMsg` into a control channel (unbounded, never blocks) and a piece-data (`Enqueue`) channel.
-- [ ] `rust/motion-engine/src/bridge.rs` + `pump.rs` -- bound the piece-data channel; planner dispatch blocks as a yield-to-shutdown loop; pump stops draining at `MAX_LEAD_SECS` so the bound backpressures the planner.
-- [ ] `rust/motion-engine/src/pump/tests.rs` -- offline: slow mock pump → planner blocks → input fills → reader pauses; shutdown unblocks; delivered lead bounded ~`MAX_LEAD_SECS`.
-- [ ] `klippy/motion.py` -- retire the `_check_pause` time loop once end-to-end backpressure is verified (Ask-First); preserve the `_drip_active`/homing exemption.
+*Steps 2–3 — bounded planner→pump hop (done):*
+- [x] `rust/motion-engine/src/{pump,bridge}.rs` -- split `PumpMsg` into a control channel (unbounded crossbeam: Heartbeat/Flush/DripArm/DripDisarm/Barrier/Shutdown) and a bounded piece-data channel carrying bare `EnqueueMsg`.
+- [x] `rust/motion-engine/src/{pump,bridge}.rs` -- pump intake is **ring-flow-controlled**: it pulls piece-data only while there is free ring room (`wants_pieces` = staged < free `room()` + `STAGING_MARGIN`), draining control always. With the ring full it stops pulling, the bounded data channel backs up, and the planner's dispatch send blocks (`Err → DispatchError::PumpGone` on shutdown = yield-to-shutdown). `Select` waits on both channels without busy-spin.
+- [x] `rust/motion-engine/tests/pump_loop.rs` -- offline: `intake_backpressures_when_ring_full_and_resumes_on_retirement` (data channel refuses sends when ring full, drains on retirement); all migrated pump/drip/bridge tests green.
+
+*Step 4 — retire the gate (pending bench-verify of steps 1–3):*
+- [ ] `klippy/motion.py` -- retire the `_check_pause` time loop once end-to-end backpressure is verified (Ask-First); preserve the `_drip_active`/homing exemption. Needs the per-axis time bound to move into the pump (the ring is too shallow for `StallAhead` on dense facets).
 
 **Acceptance Criteria:**
 - Given a file whose move count exceeds the input-channel cap, when streamed, then it completes with no "input channel full" `RuntimeError` and motion stays ~`MAX_LEAD_SECS` ahead (progress advances gradually, not an instant jump).
@@ -70,6 +72,8 @@ context:
 - Given the full motion suite, when run, then committed trajectory output is unchanged versus baseline.
 
 ## Spec Change Log
+
+- **2026-06-24 — Step 3 intake gate is ring-room-based, not a backlog count cap.** Investigation showed the send path already checks free ring room (`schedule()` → `room()` → `StallFull`), but intake greedily drained the channel into unbounded per-axis `AxisQueue`s, and `StallAhead` (the 2s `MAX_LEAD_SECS` horizon) never fires for dense facets because the ring fills first. Per the insight that host-side buffering does not extend MCU lead (the ring bounds it), the gate became "pull only while free ring room exists + a thin `STAGING_MARGIN`" rather than a deep count cap. This keeps the host buffer minimal and makes ring retirement the backpressure clock. The per-axis *time* bound (for step 4, once `_check_pause` is gone) is explicitly deferred.
 
 - **2026-06-24 — Step 1 approach refined during implementation.** Original task text put the cooperative wait in the `motion_engine.py submit_move` wrapper as a `try_send`-return loop. Implementation instead added a **channel-count gate inside `motion.py:_check_pause`** (beside the existing time gate), because: (a) the move is built and `move_seq` consumed *before* the send, so retrying the whole `submit_move` would skip a line number; (b) the gcode reader is the single producer (reactor thread + `gcode_mutex`) and the planner only drains, so a post-submit `pending < cap` gate is race-free and overflow-safe; (c) `_check_pause` already owns the reactor, `DRAIN_TIMEOUT`, `self.printer` (shutdown), and the `feed_throttle`/`backpressure_view` logging. Frozen Intent/Boundaries/I/O matrix unchanged. Also fixed a pre-existing breakage: the instrumentation commit added `pending_channel_moves()`/`dispatched_lead_secs()`/`uncommitted_intake_secs()` calls to `_check_pause` without updating `FakeEngine`, leaving 4 backpressure tests red.
 
