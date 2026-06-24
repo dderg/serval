@@ -124,7 +124,7 @@ const T_IDLE: Duration = Duration::from_secs(3600);
 // the memory backstop for the rare no-clean-seam case.
 const COALESCE_BATCH_MOVES: usize = 64;
 
-const INPUT_CHANNEL_CAP: usize = 8192;
+pub const INPUT_CHANNEL_CAP: usize = 8192;
 
 type DispatchFn = Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>;
 type NudgeDispatchFn =

@@ -135,6 +135,9 @@ class Motion:
         self.buffer_time_low = config.getfloat(
             "buffer_time_low", 1.0, minval=0.0, maxval=self.buffer_time_high
         )
+        channel_cap = self.engine.input_channel_capacity()
+        self._channel_high = channel_cap * 3 // 4
+        self._channel_low = channel_cap // 2
         self._drip_active = False
         self._last_reactor_yield = 0.0
         gcode = printer.lookup_object("gcode")
@@ -657,6 +660,9 @@ class Motion:
             return
         now = self._yield_to_reactor_if_due(self.reactor.monotonic())
         buffer_time = self.engine.queued_motion_secs()
+        channel_pending = self.engine.pending_channel_moves()
+        over_time = buffer_time > self.buffer_time_high
+        over_channel = channel_pending >= self._channel_high
         structured_log.event(
             "motion",
             "backpressure_view",
@@ -665,35 +671,50 @@ class Motion:
             buffer_time_low=self.buffer_time_low,
             dispatched_lead=round(self.engine.dispatched_lead_secs(), 4),
             uncommitted_intake=round(self.engine.uncommitted_intake_secs(), 4),
-            channel_pending=self.engine.pending_channel_moves(),
-            throttling=buffer_time > self.buffer_time_high,
+            channel_pending=channel_pending,
+            channel_high=self._channel_high,
+            channel_low=self._channel_low,
+            throttling=over_time or over_channel,
         )
-        if buffer_time <= self.buffer_time_high:
+        if not over_time and not over_channel:
             return
         wait_start = now
         structured_log.event(
             "motion",
             "feed_throttle_enter",
             buffer_time=round(buffer_time, 4),
+            channel_pending=channel_pending,
             engine_frontier=round(self.engine.get_last_move_time(), 4),
         )
         deadline = now + DRAIN_TIMEOUT
-        while buffer_time > self.buffer_time_low:
+        while (
+            buffer_time > self.buffer_time_low
+            or channel_pending > self._channel_low
+        ):
+            if self.printer.is_shutdown():
+                raise self.printer.command_error(
+                    "motion backpressure: shutdown while draining "
+                    "(buffer_time=%.3fs channel_pending=%d)"
+                    % (buffer_time, channel_pending)
+                )
             now = self.reactor.monotonic()
             if now >= deadline:
                 raise self.printer.command_error(
-                    "motion backpressure: buffer_time=%.3fs did not drain "
-                    "within %.0fs (MCU not retiring moves)"
-                    % (buffer_time, DRAIN_TIMEOUT)
+                    "motion backpressure: buffer_time=%.3fs "
+                    "channel_pending=%d did not drain within %.0fs "
+                    "(planner/MCU not retiring moves)"
+                    % (buffer_time, channel_pending, DRAIN_TIMEOUT)
                 )
             self.reactor.pause(now + 0.010)
             self._last_reactor_yield = self.reactor.monotonic()
             buffer_time = self.engine.queued_motion_secs()
+            channel_pending = self.engine.pending_channel_moves()
         structured_log.event(
             "motion",
             "feed_throttle_exit",
             waited_s=round(self.reactor.monotonic() - wait_start, 4),
             buffer_time=round(buffer_time, 4),
+            channel_pending=channel_pending,
             engine_frontier=round(self.engine.get_last_move_time(), 4),
         )
 

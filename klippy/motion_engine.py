@@ -100,6 +100,12 @@ class _StubEngine:
     def dispatched_lead_secs(self):
         return 0.0
 
+    def pending_channel_moves(self):
+        return 0
+
+    def input_channel_capacity(self):
+        return 8192
+
     def __getattr__(self, name):
         if name in _STUB_MOTION_METHODS:
 
@@ -491,6 +497,9 @@ class MotionEngineWrapper:
 
     def pending_channel_moves(self):
         return self._engine.pending_channel_moves() or 0
+
+    def input_channel_capacity(self):
+        return self._engine.input_channel_capacity()
 
     def uncommitted_intake_secs(self):
         return self._engine.uncommitted_intake_secs() or 0.0
