@@ -112,52 +112,24 @@ fn grow_turning_band(moves: &[Move], start: usize, corner: CornerFitConfig) -> u
 }
 
 fn grow_cocircular_span(moves: &[Move], start: usize, band_end: usize, tol: f64) -> usize {
-    let seed_end = start + 2;
-    if seed_end > band_end {
-        return start;
-    }
-    let Some(seed) = circle_fit(&moves[start..=seed_end]) else {
-        return start;
-    };
-    if !(seed.residual <= tol && seed.radius.is_finite() && seed.radius > BUDGET_EPS_MM) {
-        return start;
-    }
-    if chord_deviation(&moves[start..=seed_end]).is_none_or(|d| d <= tol) {
-        return start;
-    }
-    let mut end = seed_end;
-    while end < band_end {
-        let Some(line) = line_of(&moves[end]) else {
-            break;
-        };
-        let vertex = line.point_at(line.s_len());
-        if (norm(sub(vertex, seed.origin)) - seed.radius).abs() > tol {
+    let mut best = start;
+    let mut end = start + 2;
+    while end <= band_end {
+        if cocircular(&moves[start..=end], tol) {
+            best = end;
+            end += 1;
+        } else {
             break;
         }
-        end += 1;
     }
-    end
+    best
 }
 
-fn chord_deviation(facets: &[Move]) -> Option<f64> {
-    let lines: Vec<&Line> = facets.iter().map(line_of).collect::<Option<Vec<_>>>()?;
-    let a = lines[0].start;
-    let last = lines[lines.len() - 1];
-    let b = last.point_at(last.s_len());
-    let ab = sub(b, a);
-    let len = norm(ab);
-    if len < BUDGET_EPS_MM {
-        return Some(f64::INFINITY);
+fn cocircular(facets: &[Move], tol: f64) -> bool {
+    match circle_fit(facets) {
+        Some(fit) => fit.residual <= tol && fit.radius.is_finite() && fit.radius > BUDGET_EPS_MM,
+        None => false,
     }
-    let dir = scale(ab, 1.0 / len);
-    let mut max_dev = 0.0_f64;
-    for l in &lines[..lines.len() - 1] {
-        let p = l.point_at(l.s_len());
-        let proj = dot(sub(p, a), dir);
-        let foot = madd(a, proj, dir);
-        max_dev = max_dev.max(norm(sub(p, foot)));
-    }
-    Some(max_dev)
 }
 
 fn circle_fit(facets: &[Move]) -> Option<CircleFit> {

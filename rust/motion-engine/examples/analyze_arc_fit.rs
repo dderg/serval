@@ -44,7 +44,7 @@ fn main() {
     let moves = parse_gcode_to_moves(&source, limits);
 
     census("default (off)", &moves, ChainFitConfig::default());
-    for tol in [0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5] {
+    for tol in [0.005, 0.05, 0.2, 0.5, 1.0, 2.0, 4.0] {
         census(
             &format!("deviation_tol={tol}mm min_run=3"),
             &moves,
