@@ -274,28 +274,18 @@ def test_trsync_trigger_emits_state_with_can_trigger_zero(stub):
         os.close(fd)
 
 
-@pytest.mark.xfail(
-    reason="beacon_serial_stub._sample_loop emits beacon_status with "
-    "clock/sample/frequency/temp, but the identify dict declares "
-    "beacon_status mcu_temp/supply_voltage/coil_temp/status (the real "
-    "thermal-telemetry schema beacon.py parses). The frequency-sample "
-    "stream should use beacon_data; this is a sim beacon-emulator schema "
-    "bug — tracked, not masked. Remove this xfail when the emulator "
-    "channels are fixed.",
-    strict=False,
-)
-def test_beacon_stream_starts_emitting_status_frames(stub):
+def test_beacon_stream_starts_emitting_data_frames(stub):
     s, pty_path = stub
     parser = msgproto.MessageParser()
     parser.process_identify(IDENTIFY_BLOB, decompress=True)
     fd = _open_pty_writer(pty_path)
     try:
         os.write(fd, _frame(parser, 1, "beacon_stream en=%u", en=1))
-        params = _read_frames(fd, parser, "beacon_status", 2.0)
-        assert params["frequency"] > 0
-        assert params["temp"] != 0
-        params2 = _read_frames(fd, parser, "beacon_status", 2.0)
-        assert params2["sample"] != params["sample"]
+        params = _read_frames(fd, parser, "beacon_data", 2.0)
+        assert params["samples"] > 0
+        assert len(params["data"]) > 0
+        params2 = _read_frames(fd, parser, "beacon_data", 2.0)
+        assert params2["start_clock"] != params["start_clock"]
     finally:
         os.close(fd)
 
