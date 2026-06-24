@@ -145,6 +145,11 @@ pub struct StreamState {
     config: StreamConfig,
     axis_chains: AxisChainSet,
     post_history: VecDeque<ShapedSegment>,
+    full_plan_count: u64,
+    /// When set, `commit(false)` skips the velocity plan once the cheap fit
+    /// proves no committable line seam exists. Always on in production; tests
+    /// flip it off to prove the skip is byte-identical to a full re-plan.
+    replan_short_circuit: bool,
 }
 
 impl StreamState {
@@ -165,6 +170,8 @@ impl StreamState {
             config,
             axis_chains,
             post_history: VecDeque::new(),
+            full_plan_count: 0,
+            replan_short_circuit: true,
         }
     }
 
@@ -249,6 +256,19 @@ impl StreamState {
         self.last_v_barrier
     }
 
+    /// Number of velocity plans actually executed — re-plans skipped by the
+    /// short-circuit are not counted. A stalled, all-clothoid region holds this
+    /// flat instead of incrementing it on every push.
+    #[must_use]
+    pub fn full_plan_count(&self) -> u64 {
+        self.full_plan_count
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_replan_short_circuit(&mut self, on: bool) {
+        self.replan_short_circuit = on;
+    }
+
     /// Jerk-limited time to brake from the last barrier velocity to rest, sizing
     /// the producer-stall flush watermark. A safe over-estimate for curved
     /// geometry, so the watermark fires slightly early — never late.
@@ -302,6 +322,35 @@ impl StreamState {
             "[pipe] fit"
         );
 
+        let n = outcome.moves.len();
+        let mut seam_xyz: Vec<[f64; 3]> = Vec::with_capacity(n);
+        {
+            let mut pos = self.odometer.clone();
+            for gm in &outcome.moves {
+                seam_xyz.push([pos[0], pos[1], pos[2]]);
+                advance_odometer(&mut pos, gm);
+            }
+        }
+
+        if !force
+            && self.replan_short_circuit
+            && self.select_commit_seam(&outcome.moves, &seam_xyz, n.saturating_sub(1)) == 0
+        {
+            self.last_v_barrier = self.config.limits.max_velocity_mm_s;
+            tracing::info!(
+                subsystem = "motion",
+                event = "stall_skip",
+                batch,
+                line_lo,
+                line_hi,
+                n_in = moves.len(),
+                t_us = crate::timing::mono_us(),
+                "[pipe] stall-skip: no committable seam, velocity plan skipped"
+            );
+            return Ok(Vec::new());
+        }
+
+        self.full_plan_count += 1;
         let plan_clock = Instant::now();
         let profile = plan_velocity_warm_start(&outcome, self.config.velocity, self.entry_v)?;
         let plan_us = plan_clock.elapsed().as_micros();
@@ -316,14 +365,11 @@ impl StreamState {
             "[pipe] plan"
         );
 
-        let n = outcome.moves.len();
         let mut pos = self.odometer.clone();
         let mut t = self.t_committed;
         let mut segs: Vec<ShapedSegment> = Vec::with_capacity(n);
-        let mut seam_xyz: Vec<[f64; 3]> = Vec::with_capacity(n);
         let lower_clock = Instant::now();
         for (gm, vm) in outcome.moves.iter().zip(&profile.moves) {
-            seam_xyz.push([pos[0], pos[1], pos[2]]);
             let mut seg = lower_move(
                 gm,
                 vm,
@@ -354,23 +400,7 @@ impl StreamState {
         let commit_count = if force {
             n
         } else {
-            let setback =
-                brake_to_rest_setback(&outcome.moves, self.config.velocity.max_jerk_mm_s3);
-            let total_arc: f64 = outcome.moves.iter().map(|m| m.segment.s_len()).sum();
-            let mut arc_to_seam = 0.0_f64;
-            let mut chosen = 0usize;
-            for i in 1..=profile.barrier {
-                arc_to_seam += outcome.moves[i - 1].segment.s_len();
-                if total_arc - arc_to_seam < setback {
-                    break;
-                }
-                if is_clean_seam(&outcome.moves, i)
-                    && self.head_trim_feasible(&outcome.moves, i, seam_xyz[i])
-                {
-                    chosen = i;
-                }
-            }
-            chosen
+            self.select_commit_seam(&outcome.moves, &seam_xyz, profile.barrier)
         };
         debug_assert!(
             force || commit_count <= profile.barrier,
@@ -476,6 +506,28 @@ impl StreamState {
             });
         }
         self.commit(true)
+    }
+
+    /// The latest output index that is a clean, head-trim-feasible seam within
+    /// `barrier`, leaving the brake-to-rest setback intact; `0` when none is
+    /// committable. Depends only on the fit output, so calling it with the
+    /// generous `n-1` barrier before the velocity plan proves whether any plan
+    /// could commit — the real call passes the plan's tighter `profile.barrier`.
+    fn select_commit_seam(&self, moves: &[Move], seam_xyz: &[[f64; 3]], barrier: usize) -> usize {
+        let setback = brake_to_rest_setback(moves, self.config.velocity.max_jerk_mm_s3);
+        let total_arc: f64 = moves.iter().map(|m| m.segment.s_len()).sum();
+        let mut arc_to_seam = 0.0_f64;
+        let mut chosen = 0usize;
+        for i in 1..=barrier {
+            arc_to_seam += moves[i - 1].segment.s_len();
+            if total_arc - arc_to_seam < setback {
+                break;
+            }
+            if is_clean_seam(moves, i) && self.head_trim_feasible(moves, i, seam_xyz[i]) {
+                chosen = i;
+            }
+        }
+        chosen
     }
 
     /// Whether committing through the blend at output index `i` would leave a

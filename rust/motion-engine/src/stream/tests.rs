@@ -1,4 +1,5 @@
 use super::*;
+use geometry::path::lowering::PositionProfile;
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
 use nurbs::eval::eval;
@@ -870,4 +871,89 @@ fn is_clean_seam_rejects_blend_entry_clothoid() {
         .position(|m| matches!(m.segment.spatial, Some(Segment::Line(_))))
         .expect("the corner retains straight line bodies");
     assert!(is_clean_seam(&outcome.moves, line_idx));
+}
+
+const NEPTUNE_CRASH: &str = include_str!("../../tests/gcode/neptune_crash_short.gcode");
+
+fn drive_neptune(replan_short_circuit: bool) -> (Vec<ShapedSegment>, Vec<bool>) {
+    let config = crate::seam_harness::default_stream_config();
+    let moves = crate::seam_harness::parse_gcode_to_moves(NEPTUNE_CRASH, config.limits);
+    let home = moves
+        .first()
+        .and_then(|m| m.segment.spatial.as_ref())
+        .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
+    let mut s = StreamState::new(config, AxisChainSet::default(), &home, 0.0);
+    s.set_replan_short_circuit(replan_short_circuit);
+
+    let mut committed = Vec::new();
+    let mut plan_ran = Vec::new();
+    for m in moves {
+        s.push(m);
+        let before = s.full_plan_count();
+        committed.extend(s.commit(false).unwrap());
+        plan_ran.push(s.full_plan_count() > before);
+    }
+    committed.extend(s.commit(true).unwrap());
+    (committed, plan_ran)
+}
+
+fn committed_fingerprint(segs: &[ShapedSegment]) -> Vec<(u32, u8, u64, u64, Vec<u64>, Vec<u64>)> {
+    segs.iter()
+        .map(|s| {
+            let sample = |t: f64| {
+                s.axes
+                    .iter()
+                    .map(|ax| eval(ax, t).to_bits())
+                    .collect::<Vec<_>>()
+            };
+            (
+                s.source_line,
+                s.motor_mask,
+                s.t_start.to_bits(),
+                s.t_end.to_bits(),
+                sample(s.t_start),
+                sample(s.t_end),
+            )
+        })
+        .collect()
+}
+
+fn longest_skip_run(plan_ran: &[bool]) -> usize {
+    let mut longest = 0;
+    let mut run = 0;
+    for ran in plan_ran {
+        if *ran {
+            run = 0;
+        } else {
+            run += 1;
+            longest = longest.max(run);
+        }
+    }
+    longest
+}
+
+#[test]
+fn replan_short_circuit_yields_identical_committed_trajectory() {
+    let (on, on_plan_ran) = drive_neptune(true);
+    let (off, _) = drive_neptune(false);
+    assert!(
+        on_plan_ran.iter().any(|ran| !ran),
+        "fixture must exercise at least one skip, else equivalence is vacuous"
+    );
+    assert_eq!(
+        committed_fingerprint(&on),
+        committed_fingerprint(&off),
+        "skipping the plan must commit a byte-identical trajectory to a full re-plan"
+    );
+}
+
+#[test]
+fn all_clothoid_region_skips_the_velocity_plan() {
+    let (committed, plan_ran) = drive_neptune(true);
+    assert!(!committed.is_empty(), "the cube must still commit segments");
+    assert!(
+        longest_skip_run(&plan_ran) >= 10,
+        "an all-clothoid stall must skip the plan on a long run of consecutive pushes, got {}",
+        longest_skip_run(&plan_ran)
+    );
 }
