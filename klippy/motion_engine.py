@@ -489,6 +489,12 @@ class MotionEngineWrapper:
     def dispatched_lead_secs(self):
         return self._engine.dispatched_lead_secs() or 0.0
 
+    def pending_channel_moves(self):
+        return self._engine.pending_channel_moves() or 0
+
+    def uncommitted_intake_secs(self):
+        return self._engine.uncommitted_intake_secs() or 0.0
+
     def pump_backlog(self):
         return self._engine.pump_backlog() or 0
 

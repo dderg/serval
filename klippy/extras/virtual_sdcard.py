@@ -8,6 +8,8 @@ import logging
 import os
 import sys
 
+from .. import structured_log
+
 VALID_GCODE_EXTS = ["gcode", "g", "gco"]
 
 
@@ -288,6 +290,13 @@ class VirtualSD:
         partial_input = ""
         lines = []
         error_message = None
+        dispatched_lines = 0
+        structured_log.event(
+            "virtual_sdcard",
+            "work_handler_start",
+            file_position=self.file_position,
+            file_size=self.file_size,
+        )
         while not self.must_pause_work:
             if not lines:
                 # Read more data
@@ -295,13 +304,37 @@ class VirtualSD:
                     data = self.current_file.read(8192)
                 except:
                     logging.exception("virtual_sdcard read")
+                    structured_log.event(
+                        "virtual_sdcard",
+                        "work_handler_exit",
+                        reason="read_exception",
+                        file_position=self.file_position,
+                        file_size=self.file_size,
+                        dispatched_lines=dispatched_lines,
+                    )
                     break
+                structured_log.event(
+                    "virtual_sdcard",
+                    "sdcard_read",
+                    file_position=self.file_position,
+                    file_size=self.file_size,
+                    chunk_len=len(data),
+                    dispatched_lines=dispatched_lines,
+                )
                 if not data:
                     # End of file
                     self.current_file.close()
                     self.current_file = None
                     logging.info("Finished SD card print")
                     self.gcode.respond_raw("Done printing file")
+                    structured_log.event(
+                        "virtual_sdcard",
+                        "work_handler_exit",
+                        reason="eof",
+                        file_position=self.file_position,
+                        file_size=self.file_size,
+                        dispatched_lines=dispatched_lines,
+                    )
                     break
                 lines = data.split("\n")
                 lines[0] = partial_input + lines[0]
@@ -325,14 +358,33 @@ class VirtualSD:
                 self.gcode.run_script(line)
             except self.gcode.error as e:
                 error_message = str(e)
+                structured_log.event(
+                    "virtual_sdcard",
+                    "work_handler_exit",
+                    reason="gcode_error",
+                    error=error_message,
+                    file_position=self.file_position,
+                    file_size=self.file_size,
+                    dispatched_lines=dispatched_lines,
+                )
                 try:
                     self.gcode.run_script(self.on_error_gcode.render())
                 except:
                     logging.exception("virtual_sdcard on_error")
                 break
-            except:
+            except Exception as e:
                 logging.exception("virtual_sdcard dispatch")
+                structured_log.event(
+                    "virtual_sdcard",
+                    "work_handler_exit",
+                    reason="dispatch_exception",
+                    error=repr(e),
+                    file_position=self.file_position,
+                    file_size=self.file_size,
+                    dispatched_lines=dispatched_lines,
+                )
                 break
+            dispatched_lines += 1
             self.cmd_from_sd = False
             self.file_position = self.next_file_position
             # Do we need to skip around?
@@ -349,11 +401,22 @@ class VirtualSD:
         self.work_timer = None
         self.cmd_from_sd = False
         if error_message is not None:
+            outcome = "error"
             self.print_stats.note_error(error_message)
         elif self.current_file is not None:
+            outcome = "pause"
             self.print_stats.note_pause()
         else:
+            outcome = "complete"
             self.print_stats.note_complete()
+        structured_log.event(
+            "virtual_sdcard",
+            "work_handler_done",
+            outcome=outcome,
+            file_position=self.file_position,
+            file_size=self.file_size,
+            dispatched_lines=dispatched_lines,
+        )
         return self.reactor.NEVER
 
 
