@@ -2520,7 +2520,7 @@ impl PyMotionEngine {
         mcus: Vec<(u32, Vec<u8>, u8)>,
         kinematics_axes: Vec<String>,
         cartesian_limits: (f64, f64, f64, f64, f64, f64),
-        arc_fit: Option<(f64, f64)>,
+        arc_fit: Option<(f64, u32)>,
         max_extrude_only_velocity: Option<f64>,
         max_extrude_only_accel: Option<f64>,
     ) -> PyResult<()> {
@@ -2615,18 +2615,18 @@ impl PyMotionEngine {
         cfg.max_extrude_only_velocity = max_extrude_only_velocity;
         cfg.max_extrude_only_accel = max_extrude_only_accel;
         cfg.chain = match arc_fit {
-            Some((facet_length_mm, max_angle_deg)) => {
-                if !(facet_length_mm.is_finite() && facet_length_mm > 0.0) {
+            Some((deviation_tol_mm, min_run_facets)) => {
+                if !(deviation_tol_mm.is_finite() && deviation_tol_mm > 0.0) {
                     return Err(PyValueError::new_err(
-                        "[arc_fit] facet_length_mm must be finite and positive",
+                        "[arc_fit] deviation_tol_mm must be finite and positive",
                     ));
                 }
-                if !(max_angle_deg.is_finite() && max_angle_deg > 0.0 && max_angle_deg < 180.0) {
+                if min_run_facets < 3 {
                     return Err(PyValueError::new_err(
-                        "[arc_fit] max_angle_deg must be finite and in (0, 180)",
+                        "[arc_fit] min_run_facets must be at least 3",
                     ));
                 }
-                geometry::ChainFitConfig::with_arc_fit(facet_length_mm, max_angle_deg.to_radians())
+                geometry::ChainFitConfig::with_arc_fit(deviation_tol_mm, min_run_facets)
             }
             None => geometry::ChainFitConfig::default(),
         };

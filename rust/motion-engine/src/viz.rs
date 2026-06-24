@@ -12,7 +12,7 @@ pub fn pipeline_snapshot(
     max_accel: f64,
     square_corner_velocity: f64,
     max_jerk: f64,
-    arc_fit: Option<(f64, f64)>,
+    arc_fit: Option<(f64, u32)>,
 ) -> PyResult<Py<PyDict>> {
     if waypoints.len() < 2 {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -115,23 +115,23 @@ fn segment_to_pydict<'py>(
     Ok(d)
 }
 
-fn arc_fit_config(arc_fit: Option<(f64, f64)>) -> PyResult<geometry::ChainFitConfig> {
-    let Some((facet_length_mm, max_angle_deg)) = arc_fit else {
+fn arc_fit_config(arc_fit: Option<(f64, u32)>) -> PyResult<geometry::ChainFitConfig> {
+    let Some((deviation_tol_mm, min_run_facets)) = arc_fit else {
         return Ok(geometry::ChainFitConfig::default());
     };
-    if !(facet_length_mm.is_finite() && facet_length_mm > 0.0) {
+    if !(deviation_tol_mm.is_finite() && deviation_tol_mm > 0.0) {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "[arc_fit] facet_length_mm must be finite and positive",
+            "[arc_fit] deviation_tol_mm must be finite and positive",
         ));
     }
-    if !(max_angle_deg.is_finite() && max_angle_deg > 0.0 && max_angle_deg < 180.0) {
+    if min_run_facets < 3 {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "[arc_fit] max_angle_deg must be finite and in (0, 180)",
+            "[arc_fit] min_run_facets must be at least 3",
         ));
     }
     Ok(geometry::ChainFitConfig::with_arc_fit(
-        facet_length_mm,
-        max_angle_deg.to_radians(),
+        deviation_tol_mm,
+        min_run_facets,
     ))
 }
 

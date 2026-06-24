@@ -23,7 +23,7 @@ fn main() {
     }
     let in_path = &args[1];
     let mut cap = 1usize;
-    let mut arc: Option<(f64, f64)> = None;
+    let mut arc: Option<(f64, u32)> = None;
     let mut i = 2;
     while i < args.len() {
         if args[i] == "--cap" {
@@ -31,8 +31,8 @@ fn main() {
             cap = args[i].parse().unwrap();
         } else if args[i] == "--arc" {
             i += 1;
-            let (f, d) = args[i].split_once(',').expect("--arc FACET,DEG");
-            arc = Some((f.parse().unwrap(), d.parse::<f64>().unwrap().to_radians()));
+            let (tol, min_run) = args[i].split_once(',').expect("--arc TOL,MINRUN");
+            arc = Some((tol.parse().unwrap(), min_run.parse().unwrap()));
         }
         i += 1;
     }
@@ -43,8 +43,8 @@ fn main() {
     });
 
     let mut config = default_stream_config();
-    if let Some((facet, turn)) = arc {
-        config.chain = geometry::ChainFitConfig::with_arc_fit(facet, turn);
+    if let Some((tol, min_run)) = arc {
+        config.chain = geometry::ChainFitConfig::with_arc_fit(tol, min_run);
     }
     let moves = parse_gcode_to_moves(&source, config.limits);
     let home = moves

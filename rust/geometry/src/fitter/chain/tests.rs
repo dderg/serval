@@ -9,7 +9,7 @@ use std::f64::consts::PI;
 const E_AXIS: usize = 3;
 
 fn cfg() -> ChainFitConfig {
-    ChainFitConfig::with_arc_fit(f64::INFINITY, PI)
+    ChainFitConfig::with_arc_fit(0.02, 3)
 }
 
 fn ctx(line_no: u32, accel: f64, scv: f64, feed: f64) -> MoveContext {
@@ -138,7 +138,7 @@ fn no_arc_fit_config_never_chains() {
 
 #[test]
 fn sharp_corners_rejected_by_angle_gate() {
-    let config = ChainFitConfig::with_arc_fit(1.0, 12f64.to_radians());
+    let config = ChainFitConfig::with_arc_fit(0.02, 3);
     let moves = vec![
         seg(1, 3000.0, 5.0, 200.0, [0.0, 0.0, 0.0], [0.5, 0.0, 0.0], 0.0),
         seg(2, 3000.0, 5.0, 200.0, [0.5, 0.0, 0.0], [0.5, 0.5, 0.0], 0.0),
@@ -150,7 +150,7 @@ fn sharp_corners_rejected_by_angle_gate() {
 
 #[test]
 fn faceted_arc_within_default_gates_reconstructs() {
-    let config = ChainFitConfig::with_arc_fit(1.0, 12f64.to_radians());
+    let config = ChainFitConfig::with_arc_fit(0.02, 3);
     let moves = faceted_arc(3.0, 12, PI / 2.0, 3000.0, 20.0, 200.0, 0.0);
     let out = fit_chain(&moves, config).unwrap();
     assert_eq!(out.report.chains, 1, "genuine faceting reconstructs");
@@ -158,7 +158,7 @@ fn faceted_arc_within_default_gates_reconstructs() {
 
 #[test]
 fn long_facets_rejected_by_length_gate() {
-    let config = ChainFitConfig::with_arc_fit(1.0, 60f64.to_radians());
+    let config = ChainFitConfig::with_arc_fit(0.02, 3);
     let moves = faceted_arc(100.0, 4, 0.4, 3000.0, 20.0, 200.0, 0.0);
     let out = fit_chain(&moves, config).unwrap();
     assert_eq!(out.report.chains, 0, "long facets must not chain");

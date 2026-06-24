@@ -15,11 +15,8 @@ struct ArcCensus {
 fn census_with_arc_fit() -> ArcCensus {
     let limits = default_stream_config().limits;
     let moves = parse_gcode_to_moves(NEPTUNE, limits);
-    let outcome = fit_chain(
-        &moves,
-        ChainFitConfig::with_arc_fit(3.0, 90f64.to_radians()),
-    )
-    .expect("neptune fixture fits without a geometry error");
+    let outcome = fit_chain(&moves, ChainFitConfig::with_arc_fit(0.05, 3))
+        .expect("neptune fixture fits without a geometry error");
 
     let mut total_arc_mm = 0.0;
     let mut max_arc_mm = 0.0;

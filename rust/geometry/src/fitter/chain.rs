@@ -5,7 +5,7 @@ use crate::path::{Arc, Clothoid, CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 
 use super::{
-    ArcFitConfig, BUDGET_EPS_MM, ChainFitConfig, FitError, dot, internal, junction_deviation,
+    BUDGET_EPS_MM, ChainFitConfig, CornerFitConfig, FitError, dot, internal, junction_deviation,
     line_of, madd, norm, turn_normal,
 };
 
@@ -36,6 +36,8 @@ pub(super) fn detect_runs(
     let Some(arc) = config.arc_fit else {
         return Ok(Vec::new());
     };
+    let min_run = (arc.min_run_facets.max(3)) as usize;
+    let tol = arc.deviation_tol_mm;
     let mut runs = Vec::new();
     let n = moves.len();
     let mut i = 0;
@@ -44,32 +46,31 @@ pub(super) fn detect_runs(
             i += 1;
             continue;
         }
-        let (end, turning) = grow_run(moves, i, config, arc);
-        if turning >= config.min_run_junctions {
-            if let Some(recon) = reconstruct(&moves[i..=end], config)? {
-                runs.push(ChainRun {
-                    start: i,
-                    end,
-                    recon,
-                });
-                i = end + 1;
-                continue;
+        let band_end = grow_turning_band(moves, i, config.corner);
+        let mut span_start = i;
+        while span_start + min_run <= band_end + 1 {
+            let span_end = grow_cocircular_span(moves, span_start, band_end, tol);
+            if span_end + 1 - span_start >= min_run {
+                if let Some(recon) = reconstruct(&moves[span_start..=span_end], tol)? {
+                    runs.push(ChainRun {
+                        start: span_start,
+                        end: span_end,
+                        recon,
+                    });
+                    span_start = span_end + 1;
+                    continue;
+                }
             }
+            span_start += 1;
         }
-        i += 1;
+        i = band_end + 1;
     }
     Ok(runs)
 }
 
-fn grow_run(
-    moves: &[Move],
-    start: usize,
-    config: ChainFitConfig,
-    arc: ArcFitConfig,
-) -> (usize, u32) {
+fn grow_turning_band(moves: &[Move], start: usize, corner: CornerFitConfig) -> usize {
     let n = moves.len();
     let mut end = start;
-    let mut turning = 0u32;
     let mut plane: Option<[f64; 3]> = None;
     let mut turn_sign: Option<f64> = None;
     while end + 1 < n {
@@ -77,21 +78,11 @@ fn grow_run(
             (Some(a), Some(b)) => (a, b),
             _ => break,
         };
-        if la.s_len() > arc.facet_len_max_mm || lb.s_len() > arc.facet_len_max_mm {
-            break;
-        }
         let t_in = la.heading_at(la.s_len());
         let t_out = lb.heading_at(0.0);
         let theta = dot(t_in, t_out).clamp(-1.0, 1.0).acos();
-        if theta >= config.corner.theta_max_rad {
+        if theta <= corner.theta_min_rad || theta >= corner.theta_max_rad {
             break;
-        }
-        if theta > arc.max_turn_rad {
-            break;
-        }
-        if theta <= config.corner.theta_min_rad {
-            end += 1;
-            continue;
         }
         let v = match turn_normal(t_in, t_out) {
             Some(v) => v,
@@ -115,15 +106,75 @@ fn grow_run(
                 }
             }
         }
-        turning += 1;
         end += 1;
     }
-    (end, turning)
+    end
+}
+
+fn grow_cocircular_span(moves: &[Move], start: usize, band_end: usize, tol: f64) -> usize {
+    let seed_end = start + 2;
+    if seed_end > band_end {
+        return start;
+    }
+    let Some(seed) = circle_fit(&moves[start..=seed_end]) else {
+        return start;
+    };
+    if !(seed.residual <= tol && seed.radius.is_finite() && seed.radius > BUDGET_EPS_MM) {
+        return start;
+    }
+    if chord_deviation(&moves[start..=seed_end]).is_none_or(|d| d <= tol) {
+        return start;
+    }
+    let mut end = seed_end;
+    while end < band_end {
+        let Some(line) = line_of(&moves[end]) else {
+            break;
+        };
+        let vertex = line.point_at(line.s_len());
+        if (norm(sub(vertex, seed.origin)) - seed.radius).abs() > tol {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+fn chord_deviation(facets: &[Move]) -> Option<f64> {
+    let lines: Vec<&Line> = facets.iter().map(line_of).collect::<Option<Vec<_>>>()?;
+    let a = lines[0].start;
+    let last = lines[lines.len() - 1];
+    let b = last.point_at(last.s_len());
+    let ab = sub(b, a);
+    let len = norm(ab);
+    if len < BUDGET_EPS_MM {
+        return Some(f64::INFINITY);
+    }
+    let dir = scale(ab, 1.0 / len);
+    let mut max_dev = 0.0_f64;
+    for l in &lines[..lines.len() - 1] {
+        let p = l.point_at(l.s_len());
+        let proj = dot(sub(p, a), dir);
+        let foot = madd(a, proj, dir);
+        max_dev = max_dev.max(norm(sub(p, foot)));
+    }
+    Some(max_dev)
+}
+
+fn circle_fit(facets: &[Move]) -> Option<CircleFit> {
+    let lines: Vec<&Line> = facets.iter().map(line_of).collect::<Option<Vec<_>>>()?;
+    if lines.len() < 3 {
+        return None;
+    }
+    let t0 = lines[0].heading_at(0.0);
+    let v0 = turn_normal(t0, lines[1].heading_at(0.0))?;
+    let plane_normal = normalize(cross(t0, v0));
+    let inward = |t: [f64; 3]| normalize(cross(plane_normal, t));
+    incircle(&lines, t0, v0, &inward)
 }
 
 pub(super) fn reconstruct(
     facets: &[Move],
-    config: ChainFitConfig,
+    deviation_tol: f64,
 ) -> Result<Option<Reconstruction>, FitError> {
     let line_no = facets[0].source.start_line;
     let lines: Vec<&Line> = match facets.iter().map(line_of).collect::<Option<Vec<_>>>() {
@@ -144,7 +195,7 @@ pub(super) fn reconstruct(
         Some(f) => f,
         None => return Ok(None),
     };
-    if fit.residual > config.cocircular_tol {
+    if fit.residual > deviation_tol {
         return Ok(None);
     }
     let (origin, rho) = (fit.origin, fit.radius);
@@ -222,7 +273,7 @@ pub(super) fn reconstruct(
     {
         return Ok(None);
     }
-    if !vertices_within_tube(&lines, origin_arc, rho_arc, config.cocircular_tol) {
+    if !vertices_within_tube(&lines, origin_arc, rho_arc, deviation_tol) {
         return Ok(None);
     }
 
