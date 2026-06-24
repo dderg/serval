@@ -1762,7 +1762,7 @@ impl PyMotionEngine {
                     let runtime_caps = if mcu_transport_supported {
                         match query_runtime_caps(&io, std::time::Duration::from_secs(2)) {
                             Ok(caps) => {
-                                tracing::debug!(
+                                tracing::info!(
                                     subsystem = "mcu-comms",
                                     event = "attach_runtime_caps_reuse",
                                     serial_path,
@@ -1905,7 +1905,7 @@ impl PyMotionEngine {
         let runtime_caps = if mcu_transport_supported {
             match query_runtime_caps(&host_io, std::time::Duration::from_secs(2)) {
                 Ok(caps) => {
-                    tracing::debug!(
+                    tracing::info!(
                         subsystem = "mcu-comms",
                         event = "attach_runtime_caps",
                         serial_path,
@@ -2659,7 +2659,7 @@ impl PyMotionEngine {
                                  RuntimeCapsResponse; is ethercat-rt running?"
                         ))
                     })?;
-                tracing::debug!(
+                tracing::info!(
                     subsystem = "engine",
                     event = "init_planner_ethercat_caps",
                     mcu_id,
