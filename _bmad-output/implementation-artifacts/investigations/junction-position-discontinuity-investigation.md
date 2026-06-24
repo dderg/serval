@@ -215,3 +215,27 @@ Pin **C0 position** at the committed seam, the way `entry_v`/`committed_head_len
 `cargo run --release -p motion-engine --example repro_junction -- crash_short_cube.gcode --cap 8` → `FATAL 1=Y |Δ|=0.15450mm`. Fixed when FATAL=0 at every cap.
 
 **Status:** Position root cause Confirmed (cadence-dependent seam re-fit; seam position not pinned). Fix not yet implemented. Deterministic offline repro in hand.
+
+## Follow-up: 2026-06-24 — true root cause is the `is_clean_seam` blend-entry over-admission (supersedes the "pin C0 position" fix direction)
+
+The **Fix Direction** above (pin C0 position via a `SeamBoundary` / head-restore extension) is **superseded**. Offline bisection of the commit path located the real cause.
+
+### Finding 8: `is_clean_seam` admitted a blend-entry clothoid as a commit point
+
+`is_clean_seam` (`stream.rs`) accepted a seam at output index `i` when `unblended.contains(moves[i].source.start_line) || moves[i] is Segment::Line`. `emit_blend` stamps a blend's **entry** clothoid (half1) with the *incoming* move's source line (`fitter.rs:412`); when an unrelated collinear junction put that line in the `unblended` set, the entry clothoid was admitted as "clean."
+
+Trace at cap=8: commit 103 selected `chosen=6`, a Clothoid half1 with `source_line=177` (line 177 was collinear-tagged by the 176→177 junction). The odometer advanced to the blend entry (Y=125.3025), but `blend_consumed_head` was false there (head-trim fires only when the *preceding* committed output is the blend's trailing half), so the buffer kept line 177 untrimmed with `committed_head_len=0`. Commit 104 re-fit the full line 177, re-solving the 177→178 blend from a different start (Y=125.148) → C0 seam |Δ|=0.1545 mm.
+
+### H-A refined
+
+H-A (seam re-fit re-anchors the continuation) is the proximate **mechanism**, but its **trigger** is the bad commit point (a blend entry), not a `head_len_restore` mismatch. So the fix is to not commit there — not to pin position. The `SeamBoundary`/head-restore direction (Findings 6–7) was solving a symptom of committing mid-blend.
+
+### Fix (shipped)
+
+Narrow `is_clean_seam` to `Segment::Line` only — the function's own documented intent ("never inside a blend"). The dropped `unblended` clause was redundant for genuine collinear seams (already Lines) and the sole over-admission. No solver / fit-signature / struct change.
+
+Validated offline: cube `worst=0.0` at every cap 1..256; full `motion-engine` suite green (deterministic cap tests + windowed schedule fuzzer, the latter still red on the buggy planner, shrinking to `window [163..200) cap=1`). Spec: `spec-seam-boundary-pin.md`. Commit `651330894`.
+
+**Deferred:** Line-only also drops a future *arc rest-seam* commit point (unreachable until native G2/G3 arc-input streaming) — `deferred-work.md`.
+
+**Status:** Root cause Confirmed and fixed (`is_clean_seam` blend-entry over-admission). The Findings 6–7 "position not pinned" framing is correct about the symptom but was not the root cause; B-full (`SeamBoundary`/boundary-condition solver) remains valid future work, not required here.
