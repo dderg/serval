@@ -85,16 +85,20 @@ fn segment_to_pydict<'py>(
             d.set_item("x1", line.end[0])?;
             d.set_item("y1", line.end[1])?;
         }
-        geometry::path::Segment::Arc(arc) => {
+        geometry::path::Segment::Arc(_) => {
             d.set_item("type", "arc")?;
-            d.set_item("cx", arc.origin[0])?;
-            d.set_item("cy", arc.origin[1])?;
-            d.set_item("radius", arc.radius)?;
-            let basis_angle_deg = arc.u[1].atan2(arc.u[0]).to_degrees();
-            d.set_item("angle_deg", basis_angle_deg)?;
-            d.set_item("theta1_deg", arc.start_angle.to_degrees())?;
-            let theta2 = arc.start_angle + arc.sweep;
-            d.set_item("theta2_deg", theta2.to_degrees())?;
+            let len = spatial.s_len();
+            let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(20);
+            let mut xs = Vec::with_capacity(n);
+            let mut ys = Vec::with_capacity(n);
+            for k in 0..n {
+                let s = len * (k as f64) / ((n - 1) as f64);
+                let pt = spatial.point_at(s);
+                xs.push(pt[0]);
+                ys.push(pt[1]);
+            }
+            d.set_item("x", xs)?;
+            d.set_item("y", ys)?;
         }
         geometry::path::Segment::Clothoid(_) => {
             d.set_item("type", "clothoid")?;

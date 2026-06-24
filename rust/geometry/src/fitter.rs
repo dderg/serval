@@ -176,6 +176,11 @@ fn junction_internal(runs: &[chain::ChainRun], k: usize) -> bool {
     runs.iter().any(|r| r.start <= k && k < r.end)
 }
 
+fn run_boundary(runs: &[chain::ChainRun], k: usize) -> bool {
+    runs.iter()
+        .any(|r| k == r.end || (r.start > 0 && k == r.start - 1))
+}
+
 pub fn fit_chain(moves: &[Move], config: ChainFitConfig) -> Result<FitOutcome, FitError> {
     fit_chain_with_head_restore(moves, config, 0.0)
 }
@@ -211,18 +216,7 @@ pub fn fit_chain_with_head_restore(
         )?);
     }
 
-    let runs: Vec<chain::ChainRun> = chain::detect_runs(moves, config)?
-        .into_iter()
-        .filter(|r| {
-            let head_reserve = moves[r.start].segment.s_len() - r.recon.head_consumption;
-            let tail_reserve = moves[r.end].segment.s_len() - r.recon.tail_consumption;
-            let in_ok =
-                r.start == 0 || blend_trim(&plans[r.start - 1]) <= head_reserve + BUDGET_EPS_MM;
-            let out_ok =
-                r.end >= plans.len() || blend_trim(&plans[r.end]) <= tail_reserve + BUDGET_EPS_MM;
-            in_ok && out_ok
-        })
-        .collect();
+    let runs: Vec<chain::ChainRun> = chain::detect_runs(moves, config)?;
 
     let mut out = Vec::new();
     let mut report = FitReport::default();
@@ -268,7 +262,7 @@ pub fn fit_chain_with_head_restore(
             }
         }
 
-        if i < plans.len() && !junction_internal(&runs, i) {
+        if i < plans.len() && !junction_internal(&runs, i) && !run_boundary(&runs, i) {
             match &plans[i] {
                 JunctionPlan::Blend(bi) => {
                     report.blended += 1;
@@ -302,9 +296,13 @@ fn emit_reconstruction(
         });
         Ok(())
     };
-    push(Segment::Clothoid(recon.up.clone()), m_in)?;
+    if let Some(up) = &recon.up {
+        push(Segment::Clothoid(up.clone()), m_in)?;
+    }
     push(Segment::Arc(recon.arc.clone()), m_in)?;
-    push(Segment::Clothoid(recon.down.clone()), m_out)?;
+    if let Some(down) = &recon.down {
+        push(Segment::Clothoid(down.clone()), m_out)?;
+    }
     Ok(())
 }
 
