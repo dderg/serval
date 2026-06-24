@@ -2,7 +2,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use _motion_engine::pump::{
-    AxisFrame, AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpMsg, SendError, run_pump,
+    AxisFrame, AxisKey, DripArm, EnqueueMsg, HeartbeatMsg, PieceSink, PumpMsg, SendError, run_pump,
 };
 use crossbeam_channel::{Receiver, TrySendError, unbounded};
 use runtime::piece_ring::PieceEntry;
@@ -441,6 +441,80 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
     assert!(
         b_sent > 0,
         "axis B must be fed even though axis A's ring is full (no starvation behind a full axis)"
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
+    // Regression (homing Z stall): during a drip cohort a homing axis lowers a
+    // burst larger than the intake cap. The pump must keep draining so the other
+    // participants — queued behind it on the shared channel — still get fed;
+    // otherwise the cohort floor (min executed) never leaves 0 and homing stalls.
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let key_a = AxisKey { mcu_id: 1, axis: 0 };
+    let key_b = AxisKey { mcu_id: 1, axis: 1 };
+    let depth = move |k: AxisKey| if k == key_a { 4u32 } else { 64u32 };
+    let sink = RecordingSink(rec.clone());
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink,
+            depth,
+            |_mcu| Some((0u64, 1e6_f64)),
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        )
+    });
+
+    ctl.send(PumpMsg::DripArm(DripArm {
+        cohort: 1,
+        participants: vec![key_a, key_b],
+        timeout: std::time::Duration::from_secs(5),
+    }))
+    .unwrap();
+
+    // Axis A lowers a burst far larger than PUMP_INTAKE_BACKLOG_CAP, with a
+    // depth-4 ring and no retirement so its backlog piles up over the cap.
+    for i in 0..2500u64 {
+        data.send(EnqueueMsg {
+            key: key_a,
+            pieces: vec![piece_at(i, i as f64, 0.0, 0.0)],
+            fresh_stream: i == 0,
+            lead_secs: _motion_engine::pump::DRIP_WINDOW_SECS,
+            source_line: u32::MAX,
+        })
+        .unwrap();
+    }
+    for i in 0..4u64 {
+        data.send(EnqueueMsg {
+            key: key_b,
+            pieces: vec![piece_at(i, i as f64, 0.0, 0.0)],
+            fresh_stream: i == 0,
+            lead_secs: _motion_engine::pump::DRIP_WINDOW_SECS,
+            source_line: u32::MAX,
+        })
+        .unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(80));
+
+    let b_sent: usize = rec
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(k, _)| *k == key_b)
+        .map(|(_, n)| n)
+        .sum();
+    assert!(
+        b_sent > 0,
+        "cohort participant B must be fed despite A's over-cap burst (drip bypasses the intake cap)"
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();

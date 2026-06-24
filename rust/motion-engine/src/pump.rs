@@ -341,12 +341,13 @@ pub const MAX_LEAD_SECS: f64 = 2.0;
 pub const PUMP_DATA_CHANNEL_CAP: usize = 1024;
 
 // Bound on total host-side staged pieces across all axes. Intake stops here so
-// the data channel backpressures the planner. It is a TOTAL, not per-axis: the
-// pieces of all axes interleave on one channel, so a per-axis ring-room gate
-// would stall behind a single full axis and starve the axes queued after it
-// (a Z-only drip would never feed the idle axes, hanging the homing cohort).
-// Sized well above the worst axis imbalance and the deepest ring so every ring
-// can still fill; host depth buys no MCU lead (the ring bounds that).
+// the data channel backpressures the planner during streaming. It is a TOTAL,
+// not per-axis (all axes interleave on one channel). A drip cohort BYPASSES it:
+// a homing axis can lower into a burst larger than the cap, and stopping intake
+// there would leave the other participants' messages unpulled behind it on the
+// shared channel — starving the cohort floor and freezing the planner on the
+// full channel. Drip is finite, so greedy draining is safe there. Host depth
+// buys no MCU lead (the ring bounds that).
 const PUMP_INTAKE_BACKLOG_CAP: u64 = 2048;
 
 #[derive(Clone, Copy)]
@@ -721,7 +722,7 @@ pub fn run_pump<S, F, C, A, O, D>(
             }
         }
 
-        while data_open && wants_pieces(&queues) {
+        while data_open && (cohort.is_some() || wants_pieces(&queues)) {
             match data_rx.try_recv() {
                 Ok(e) => {
                     activity = true;
@@ -859,7 +860,7 @@ pub fn run_pump<S, F, C, A, O, D>(
 
         let mut sel = Select::new();
         let ctrl_op = sel.recv(&control_rx);
-        let want_data = data_open && wants_pieces(&queues);
+        let want_data = data_open && (cohort.is_some() || wants_pieces(&queues));
         let data_op = if want_data {
             sel.recv(&data_rx)
         } else {
