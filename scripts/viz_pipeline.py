@@ -125,12 +125,11 @@ def parse_gcode(
         m = motion_cmd.match(line)
         if not m:
             continue
-        if not waypoints:
-            waypoints.append((x, y, z, max_velocity))
         cmd = int(m.group(1))
         params = {
             c.group(1).upper(): float(c.group(2)) for c in coord.finditer(line)
         }
+        has_position = any(axis in params for axis in ("X", "Y", "Z"))
 
         if relative:
             nx = x + params.get("X", 0.0)
@@ -142,16 +141,22 @@ def parse_gcode(
             nz = params.get("Z", z)
 
         if cmd == 0:
+            if not has_position:
+                continue
             x, y, z = nx, ny, nz
             waypoints.append((x, y, z, max_velocity))
         elif cmd == 1:
-            x, y, z = nx, ny, nz
             feedrate = params.get("F", feedrate * 60.0) / 60.0
+            if not has_position:
+                continue
+            x, y, z = nx, ny, nz
             waypoints.append((x, y, z, feedrate))
         elif cmd in (2, 3):
+            feedrate = params.get("F", feedrate * 60.0) / 60.0
+            if not has_position:
+                continue
             i_off = params.get("I", 0.0)
             j_off = params.get("J", 0.0)
-            feedrate = params.get("F", feedrate * 60.0) / 60.0
             arc_pts = _linearize_arc(
                 x,
                 y,
