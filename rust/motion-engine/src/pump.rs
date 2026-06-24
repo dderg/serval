@@ -346,9 +346,13 @@ pub const PUMP_DATA_CHANNEL_CAP: usize = 1024;
 // a homing axis can lower into a burst larger than the cap, and stopping intake
 // there would leave the other participants' messages unpulled behind it on the
 // shared channel — starving the cohort floor and freezing the planner on the
-// full channel. Drip is finite, so greedy draining is safe there. Host depth
-// buys no MCU lead (the ring bounds that).
-const PUMP_INTAKE_BACKLOG_CAP: u64 = 2048;
+// full channel. Drip is finite, so greedy draining is safe there.
+//
+// Sized several times the total MCU ring cache (≈1024 pieces/MCU): the host
+// staging buffer must be DEEPER than the MCU rings, or the pump throttles the
+// planner before the frontier is deep enough to absorb host scheduling gaps —
+// the playhead then overruns the committed end (anchor_underrun → drive fault).
+const PUMP_INTAKE_BACKLOG_CAP: u64 = 16384;
 
 #[derive(Clone, Copy)]
 struct JunctionEnd {
