@@ -340,10 +340,14 @@ pub const MAX_LEAD_SECS: f64 = 2.0;
 // is the ring's job), so this only decouples planner bursts from pump intake.
 pub const PUMP_DATA_CHANNEL_CAP: usize = 1024;
 
-// Pieces the pump stages host-side beyond free ring room, so a freed ring slot
-// is refilled from memory rather than a channel round-trip. Kept thin: deeper
-// staging buys no MCU lead.
-const STAGING_MARGIN: u32 = 64;
+// Bound on total host-side staged pieces across all axes. Intake stops here so
+// the data channel backpressures the planner. It is a TOTAL, not per-axis: the
+// pieces of all axes interleave on one channel, so a per-axis ring-room gate
+// would stall behind a single full axis and starve the axes queued after it
+// (a Z-only drip would never feed the idle axes, hanging the homing cohort).
+// Sized well above the worst axis imbalance and the deepest ring so every ring
+// can still fill; host depth buys no MCU lead (the ring bounds that).
+const PUMP_INTAKE_BACKLOG_CAP: u64 = 2048;
 
 #[derive(Clone, Copy)]
 struct JunctionEnd {
@@ -717,7 +721,7 @@ pub fn run_pump<S, F, C, A, O, D>(
             }
         }
 
-        while data_open && wants_pieces(&queues, holding_ahead) {
+        while data_open && wants_pieces(&queues) {
             match data_rx.try_recv() {
                 Ok(e) => {
                     activity = true;
@@ -855,7 +859,7 @@ pub fn run_pump<S, F, C, A, O, D>(
 
         let mut sel = Select::new();
         let ctrl_op = sel.recv(&control_rx);
-        let want_data = data_open && wants_pieces(&queues, holding_ahead);
+        let want_data = data_open && wants_pieces(&queues);
         let data_op = if want_data {
             sel.recv(&data_rx)
         } else {
@@ -887,16 +891,9 @@ pub fn run_pump<S, F, C, A, O, D>(
     }
 }
 
-fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>, holding_ahead: bool) -> bool {
-    if holding_ahead {
-        return false;
-    }
-    if queues.is_empty() {
-        return true;
-    }
-    let staged: u32 = queues.values().map(|q| q.pieces.len() as u32).sum();
-    let free_room: u32 = queues.values().map(|q| q.room()).sum();
-    staged < free_room + STAGING_MARGIN
+fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
+    let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
+    staged < PUMP_INTAKE_BACKLOG_CAP
 }
 
 pub enum McuTransport {

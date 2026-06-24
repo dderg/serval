@@ -299,11 +299,12 @@ fn bundles_same_mcu_axes_into_one_transaction() {
 }
 
 #[test]
-fn intake_backpressures_when_ring_full_and_resumes_on_retirement() {
-    // Ring-flow-controlled intake: with the ring full and no retirement, the
-    // pump stops pulling piece-data, so a bounded data channel fills and the
-    // producer's send is refused (backpressure). Retirement frees ring room and
-    // the pump resumes pulling, releasing the channel.
+fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
+    // With the ring full and no retirement, the pump stops pulling once its
+    // total host backlog reaches the cap, so a bounded data channel fills and
+    // the producer's send is refused (backpressure). Retirement lets it push and
+    // pull again, releasing the channel. The flood far exceeds the cap so the
+    // refusal is the cap, not a transient.
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
     let (data, data_rx) = crossbeam_channel::bounded::<EnqueueMsg>(8);
@@ -315,7 +316,7 @@ fn intake_backpressures_when_ring_full_and_resumes_on_retirement() {
             data_rx,
             sink,
             depth,
-            |_| None, // no clock => intake gated purely by ring room
+            |_| None,
             |_| {},
             |_, _| {},
             |_| {},
@@ -326,7 +327,7 @@ fn intake_backpressures_when_ring_full_and_resumes_on_retirement() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let mut accepted = 0u32;
     let mut hit_full = false;
-    for i in 0..2000u64 {
+    for i in 0..6000u64 {
         match data.try_send(EnqueueMsg {
             key,
             pieces: vec![p(i)],
@@ -341,22 +342,21 @@ fn intake_backpressures_when_ring_full_and_resumes_on_retirement() {
             }
             Err(TrySendError::Disconnected(_)) => break,
         }
-        if i % 8 == 0 {
+        if i % 16 == 0 {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
     assert!(
         hit_full,
-        "pump must stop pulling when the ring is full so the data channel backpressures; accepted={accepted}"
+        "pump must stop pulling at the backlog cap so the data channel backpressures; accepted={accepted}"
     );
     assert!(
-        accepted < 2000,
-        "intake must be bounded, not drain everything"
+        accepted < 6000,
+        "intake must be bounded, not drain everything; accepted={accepted}"
     );
 
-    // Retire the full ring (depth 4 was the most the pump could push without
-    // retirement). retired must stay <= pushed: a larger value wraps room() to
-    // zero. Freeing the ring lets the pump pull again and drain the channel.
+    // Retirement (<= pushed; a larger value wraps room() to zero) lets the pump
+    // push from its backlog and pull again, draining the channel.
     ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
         mcu_id: 1,
         retired_counts: vec![4],
@@ -372,7 +372,75 @@ fn intake_backpressures_when_ring_full_and_resumes_on_retirement() {
             source_line: u32::MAX,
         })
         .is_ok(),
-        "after retirement frees ring room the pump resumes pulling and the channel drains"
+        "after retirement the pump resumes pulling and the channel drains"
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
+    // Regression: a per-axis ring-room intake gate stalls behind a full axis and
+    // starves axes whose pieces arrive after it on the shared channel — this hung
+    // the homing drip cohort (idle axes got zero pieces, floor pinned at 0).
+    // Intake is bounded by TOTAL backlog, so a full axis A must not stop the pump
+    // from feeding axis B.
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let key_a = AxisKey { mcu_id: 1, axis: 0 };
+    let key_b = AxisKey { mcu_id: 1, axis: 1 };
+    let depth = move |k: AxisKey| if k == key_a { 2u32 } else { 64u32 };
+    let sink = RecordingSink(rec.clone());
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink,
+            depth,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        )
+    });
+
+    // Axis A overruns its depth-2 ring with no retirement (stays full), then
+    // axis B's pieces arrive behind A's on the same channel.
+    for i in 0..8u64 {
+        data.send(EnqueueMsg {
+            key: key_a,
+            pieces: vec![p(i)],
+            fresh_stream: i == 0,
+            lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+            source_line: u32::MAX,
+        })
+        .unwrap();
+    }
+    for i in 0..4u64 {
+        data.send(EnqueueMsg {
+            key: key_b,
+            pieces: vec![p(100 + i)],
+            fresh_stream: i == 0,
+            lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+            source_line: u32::MAX,
+        })
+        .unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let b_sent: usize = rec
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(k, _)| *k == key_b)
+        .map(|(_, n)| n)
+        .sum();
+    assert!(
+        b_sent > 0,
+        "axis B must be fed even though axis A's ring is full (no starvation behind a full axis)"
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
