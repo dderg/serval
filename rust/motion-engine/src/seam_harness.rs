@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use geometry::{ChainFitConfig, Move, VelocityConfig, VelocityLimits};
+pub use geometry::Move;
+use geometry::path::lowering::PositionProfile;
+use geometry::{ChainFitConfig, VelocityConfig, VelocityLimits};
 use runtime::piece_ring::PieceEntry;
 use trajectory::{AxisChainSet, ShapedSegment};
 
@@ -333,8 +335,20 @@ pub fn run_schedule(
     schedule: &CommitSchedule,
 ) -> Result<SeamReport, StreamError> {
     let moves = parse_gcode_to_moves(source, config.limits);
+    run_moves(&moves, config, schedule)
+}
+
+pub fn run_moves(
+    moves: &[Move],
+    config: StreamConfig,
+    schedule: &CommitSchedule,
+) -> Result<SeamReport, StreamError> {
     let n_moves = moves.len();
-    let mut state = StreamState::new(config, AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
+    let home = moves
+        .first()
+        .and_then(|m| m.segment.spatial.as_ref())
+        .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
+    let mut state = StreamState::new(config, AxisChainSet::default(), &home, 0.0);
     let mut ingestor = Ingestor::new();
     let force_after_move: std::collections::BTreeSet<usize> =
         schedule.force_after_move.iter().copied().collect();
@@ -342,7 +356,7 @@ pub fn run_schedule(
     let mut commit_index = 0usize;
     let mut cadence_step = 0usize;
 
-    for (i, m) in moves.into_iter().enumerate() {
+    for (i, m) in moves.iter().cloned().enumerate() {
         state.push(m);
         if state.buffered() >= schedule.cadence.cap_for(cadence_step) {
             let segs = state.commit(false)?;
