@@ -1,5 +1,5 @@
 pub(crate) const CONTIGUITY_EPS: f64 = 1e-6;
-pub const DEFAULT_LEAD_SECS: f64 = crate::pump::MAX_LEAD_SECS;
+pub const DEFAULT_LEAD_SECS: f64 = 0.25; // This is the lead time for first piece that we emit
 
 pub struct Anchor {
     t0: Option<f64>,
