@@ -875,7 +875,12 @@ fn is_clean_seam_rejects_blend_entry_clothoid() {
 
 const NEPTUNE_CRASH: &str = include_str!("../../tests/gcode/neptune_crash_short.gcode");
 
-fn drive_neptune(replan_short_circuit: bool) -> (Vec<ShapedSegment>, Vec<bool>) {
+struct PushStep {
+    planned: bool,
+    committed_now: usize,
+}
+
+fn drive_neptune(replan_short_circuit: bool) -> (Vec<ShapedSegment>, Vec<PushStep>) {
     let config = crate::seam_harness::default_stream_config();
     let moves = crate::seam_harness::parse_gcode_to_moves(NEPTUNE_CRASH, config.limits);
     let home = moves
@@ -886,15 +891,19 @@ fn drive_neptune(replan_short_circuit: bool) -> (Vec<ShapedSegment>, Vec<bool>) 
     s.set_replan_short_circuit(replan_short_circuit);
 
     let mut committed = Vec::new();
-    let mut plan_ran = Vec::new();
+    let mut steps = Vec::new();
     for m in moves {
         s.push(m);
         let before = s.full_plan_count();
-        committed.extend(s.commit(false).unwrap());
-        plan_ran.push(s.full_plan_count() > before);
+        let now = s.commit(false).unwrap();
+        steps.push(PushStep {
+            planned: s.full_plan_count() > before,
+            committed_now: now.len(),
+        });
+        committed.extend(now);
     }
     committed.extend(s.commit(true).unwrap());
-    (committed, plan_ran)
+    (committed, steps)
 }
 
 fn committed_fingerprint(segs: &[ShapedSegment]) -> Vec<(u32, u8, u64, u64, Vec<u64>, Vec<u64>)> {
@@ -918,11 +927,11 @@ fn committed_fingerprint(segs: &[ShapedSegment]) -> Vec<(u32, u8, u64, u64, Vec<
         .collect()
 }
 
-fn longest_skip_run(plan_ran: &[bool]) -> usize {
+fn longest_skip_run(steps: &[PushStep]) -> usize {
     let mut longest = 0;
     let mut run = 0;
-    for ran in plan_ran {
-        if *ran {
+    for step in steps {
+        if step.planned {
             run = 0;
         } else {
             run += 1;
@@ -934,10 +943,10 @@ fn longest_skip_run(plan_ran: &[bool]) -> usize {
 
 #[test]
 fn replan_short_circuit_yields_identical_committed_trajectory() {
-    let (on, on_plan_ran) = drive_neptune(true);
+    let (on, on_steps) = drive_neptune(true);
     let (off, _) = drive_neptune(false);
     assert!(
-        on_plan_ran.iter().any(|ran| !ran),
+        on_steps.iter().any(|s| !s.planned),
         "fixture must exercise at least one skip, else equivalence is vacuous"
     );
     assert_eq!(
@@ -949,11 +958,15 @@ fn replan_short_circuit_yields_identical_committed_trajectory() {
 
 #[test]
 fn all_clothoid_region_skips_the_velocity_plan() {
-    let (committed, plan_ran) = drive_neptune(true);
+    let (committed, steps) = drive_neptune(true);
     assert!(!committed.is_empty(), "the cube must still commit segments");
     assert!(
-        longest_skip_run(&plan_ran) >= 10,
+        steps.iter().all(|s| s.planned || s.committed_now == 0),
+        "a skipped push must commit nothing — the skip only fires when commit_count is 0"
+    );
+    assert!(
+        longest_skip_run(&steps) >= 10,
         "an all-clothoid stall must skip the plan on a long run of consecutive pushes, got {}",
-        longest_skip_run(&plan_ran)
+        longest_skip_run(&steps)
     );
 }

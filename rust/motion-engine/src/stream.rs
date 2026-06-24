@@ -397,6 +397,13 @@ impl StreamState {
         );
         let total_t = t - self.t_committed;
 
+        debug_assert!(
+            profile.barrier < n,
+            "finality barrier {} must stay below n {n} — the skip's generous n-1 \
+             seam search assumes it dominates profile.barrier; a barrier reaching n \
+             would let the skip miss a commit the plan would make",
+            profile.barrier
+        );
         let commit_count = if force {
             n
         } else {

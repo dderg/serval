@@ -123,3 +123,20 @@ Real items surfaced by the 3-reviewer pass on the PA implementation; none are ca
 **Not reachable today:** native G2/G3 arc *input* is rejected at the bridge (`bridge.rs:3481`); arcs enter the committable window only via chain reconstruction, where they are bracketed by clothoids inside a run whose internal junctions are NOT recorded as unblended — so the old predicate did not admit reconstructed-arc seams either. No current path regresses; no unbounded-growth/force-drain risk (Line bodies persist around every run).
 
 **Activates when** native arc-input streaming (G2/G3 without faceting) lands → `ArcIncident` unblended rest seams appear and are silently skipped. **Fix when that lands:** gate the dropped clause on a *true rest seam* (entry velocity 0 / `stop_lines` membership from `velocity.rs`, which already excludes `Collinear`) rather than any unblended line — re-admits the arc rest seam while still rejecting the collinear-tagged blend-entry clothoid (not a stop line). Add an arc-input test then. Flagged so the Line-only narrowing is a conscious choice, not a silent loss.
+
+## Bench throughput: large successful-commit re-plan cost (740ms floor + overlapping windows)
+
+**Surfaced by:** adversarial review of spec-replan-amplification-short-circuit (2026-06-24), confirmed against neptune bench logs.
+
+The re-plan amplification short-circuit only skips `commit(false)` when nothing is
+committable (commit_count==0). The bench's *fatal* `PieceStartInPast` plans are on
+**successful** commits — a single 740ms plan on a 175-segment batch (09:57), and a
+0.4s burst of 8 plans (50-74ms each) re-planning overlapping ~60-move windows as the
+commit frontier slides (10:27). The short-circuit does not touch these.
+
+Remaining work to close the bench crash with arc-fit disabled:
+- Cross-commit plan reuse: successive `commit(false)` re-plan the overlapping uncommitted
+  tail every slide; reuse the prior plan for the unchanged tail instead of re-solving.
+- And/or smaller lookahead window so each successful plan is bounded.
+- The arc-fitter (separate track) attacks the same floor by collapsing short segments into
+  arcs (fewer segments per plan).

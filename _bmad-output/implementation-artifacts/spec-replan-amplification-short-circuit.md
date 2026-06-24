@@ -2,7 +2,7 @@
 title: 'Re-plan amplification short-circuit: skip the velocity plan when no seam can commit'
 type: 'bugfix'
 created: '2026-06-24'
-status: 'in-progress'
+status: 'done'
 baseline_commit: 'e995c80718b20cacd8b4e0e780470e4d3b054189'
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/investigations/junction-position-discontinuity-investigation.md'
@@ -56,6 +56,8 @@ context:
 
 - **Predicate corrected (implementation):** The frozen intent's predicate "no `Segment::Line` body in the fit output" was based on a wrong mechanism model — the red `all_clothoid_region` test proved the neptune stall *does* have `Line` bodies (short remnants between blends) that are simply not committable. The sound predicate is instead: run the real seam-selection loop (`select_commit_seam`) with the most generous barrier (`n-1`); if it selects nothing, the plan's tighter `profile.barrier` selects nothing too → `commit_count` is provably 0 → skip. All inputs (`setback`, `is_clean_seam`, `head_trim_feasible`, arc lengths, `seam_xyz`) are plan-independent. KEEP: the intent's spirit ("the fit proves `commit_count` would be 0, so skipping is trajectory-neutral") is exactly realized.
 - **Bench-efficacy caveat (must verify before claiming closure):** Bench logs show the *fatal* plans (740 ms on `n=175 commit_count=144`; the 50–74 ms burst with `line_lo` advancing 5→34→87→…) are on **successful** commits, which this short-circuit does **not** skip. The bench had only 36 empty (`commit_count=0`) commits vs 183 under the local cap=1 cadence. So this fix removes empty-commit amplification (locally: plans 310→127, drive wall 11.0 s→5.2 s) but the bench's dominant cost is large successful-commit re-planning. PieceStartInPast on the bench is **not** proven closed by this change alone; the residual is the 740 ms floor + redundant overlapping-window re-plan, which needs the arc-fitter and/or cross-commit plan reuse (out of scope).
+
+- **Adversarial review (2026-06-24):** no `intent_gap`/`bad_spec`; no loopback. Blind hunter's HIGH finding (skip soundness rests on `profile.barrier < n`) was verified by the edge-case hunter as a guaranteed invariant (`velocity.rs` computes `barrier` in `1..n`); applied two patches anyway: (1) a `debug_assert!(profile.barrier < n)` making that load-bearing invariant fail-loud against future planner changes; (2) the work-bound test now asserts skipped pushes commit nothing (matches AC(b)'s text, not just a run-length count). Bench successful-commit re-plan cost deferred to `deferred-work.md`. Acceptance auditor confirmed all 3 ACs + boundaries met and the spec honest about bench efficacy.
 
 ## Design Notes
 
