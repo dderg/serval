@@ -218,6 +218,10 @@ impl StreamPlannerHandle {
         try_submit_move(&self.sender, m)
     }
 
+    pub fn pending_channel_moves(&self) -> usize {
+        self.sender.len()
+    }
+
     pub fn flush(&self) -> Result<(), StreamPlannerError> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.sender
@@ -774,6 +778,16 @@ fn run_loop(
                     }
                 }
                 let buffered_before = state.buffered();
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "coalesce_done",
+                    channel_pending = rx.len(),
+                    buffered = buffered_before,
+                    uncommitted_secs = tally.secs,
+                    coalesce_cap,
+                    t_us = crate::timing::mono_us(),
+                    "[intake] coalesced batch ready to commit; channel_pending = moves submitted but not yet pulled (invisible to backpressure)"
+                );
                 let segs = state
                     .commit(false)
                     .unwrap_or_else(|e| fatal(&format!("commit: {e}")));

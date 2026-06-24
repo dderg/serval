@@ -658,6 +658,17 @@ class Motion:
             return
         now = self._yield_to_reactor_if_due(self.reactor.monotonic())
         buffer_time = self.engine.queued_motion_secs()
+        structured_log.event(
+            "motion",
+            "backpressure_view",
+            buffer_time=round(buffer_time, 4),
+            buffer_time_high=self.buffer_time_high,
+            buffer_time_low=self.buffer_time_low,
+            dispatched_lead=round(self.engine.dispatched_lead_secs(), 4),
+            uncommitted_intake=round(self.engine.uncommitted_intake_secs(), 4),
+            channel_pending=self.engine.pending_channel_moves(),
+            throttling=buffer_time > self.buffer_time_high,
+        )
         if buffer_time <= self.buffer_time_high:
             return
         wait_start = now

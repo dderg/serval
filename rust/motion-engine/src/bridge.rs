@@ -3438,6 +3438,14 @@ impl PyMotionEngine {
                     PyRuntimeError::new_err("planner not initialized — call init_planner first")
                 })?;
                 planner.submit_move(m).map_err(planner_err)?;
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "intake_submit",
+                    line_no,
+                    channel_pending = planner.pending_channel_moves(),
+                    uncommitted_secs = planner.uncommitted_intake_secs(),
+                    "[intake] move pushed to channel; channel_pending grows when the planner thread can't pull (backpressure blind spot)"
+                );
             }
 
             let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
@@ -3821,6 +3829,22 @@ impl PyMotionEngine {
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         }
         Ok(())
+    }
+
+    fn pending_channel_moves(&self) -> u64 {
+        self.planner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(0, |p| p.pending_channel_moves() as u64)
+    }
+
+    fn uncommitted_intake_secs(&self) -> f64 {
+        self.planner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(0.0, |p| p.uncommitted_intake_secs())
     }
 
     fn get_last_move_time(&self) -> f64 {
