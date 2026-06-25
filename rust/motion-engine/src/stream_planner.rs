@@ -799,13 +799,13 @@ fn run_loop(
                     last_move_time_bits,
                     commit_fire_count,
                 );
-                if segs.is_empty() && !state.is_empty() {
-                    // No committable seam this batch (small buffer wholly within
-                    // the brake setback). The idle-drain timeout never fires while
-                    // moves keep arriving — each `recv` resets it — so a throttled
-                    // trickle would freeze the frontier into MCU starvation. When
-                    // the delivered lead has drained below the stall watermark,
-                    // force the brake-to-rest now instead of waiting for silence.
+                if !state.is_empty() {
+                    // Brake to rest whenever the committed lead drains below the
+                    // stall watermark — whether or not this batch found a seam.
+                    // Otherwise a planner that falls behind dribbles slivers into an
+                    // underrun (playhead overruns the committed end → drive fault);
+                    // a clean decel-to-rest is a stutter the drive accepts, and the
+                    // next move re-anchors from rest.
                     let esc = sync_instant.map_or(0.0, |t| t.elapsed().as_secs_f64());
                     let lead_remaining = (state.t_committed() + LEAD) - esc;
                     if lead_remaining < watermark {
