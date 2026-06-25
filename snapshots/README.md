@@ -7,8 +7,8 @@ Each **case** is a single `.gcode` file under `cases/`. A folder under `cases/`
 is a **group**: every `.gcode` in it shares that folder's one `printer.cfg`, so
 a case's name is `<group>/<gcode stem>`. Running a case drives the real planner
 (`_motion_engine.pipeline_snapshot`) and compares the full raw trajectory to a
-committed `<stem>.baseline.json.gz` (deterministic gzip, Git LFS) sitting next to
-the G-code. A deviation fails; you review before/after in the browser and
+committed `baselines/<group>/<stem>.baseline.json.gz` (deterministic gzip). A
+deviation fails; you review before/after in the browser and
 re-baseline on an explicit accept. UI-snapshot testing for trajectories.
 
 ## Run
@@ -42,8 +42,8 @@ snapshots/
   test_harness.py   unit tests for harness (a python-unit test, run by pytest)
   snapshot-tests.sh entry point: run.py, and the review server on a change
   web/              the review server + static front end
-  cases/<group>/    printer.cfg shared by every *.gcode in the folder,
-                    plus a <stem>.baseline.json.gz per case (LFS)
+  cases/<group>/    printer.cfg shared by every *.gcode in the folder
+  baselines/<group>/ <stem>.baseline.json.gz per case
 ```
 
 To add a case, drop a `.gcode` into the group whose `printer.cfg` it should run

@@ -2,9 +2,9 @@
 
 A *case* is a directory holding ``case.gcode`` + ``printer.cfg``. Running it
 drives the real ``_motion_engine.pipeline_snapshot`` and records the full raw
-trajectory dict as a checked-in ``baseline.json.gz`` (deterministic gzip, Git
-LFS). ``run.py`` flags a re-run that deviates; the web review re-baselines only
-on an explicit accept.
+trajectory dict as a checked-in ``baseline.json.gz`` under ``baselines/``
+(deterministic gzip). ``run.py`` flags a re-run that deviates; the web review
+re-baselines only on an explicit accept.
 
 Comparison is exact equality on a canonical JSON serialization. The planner is
 deterministic, so this is stable run-to-run on one machine. Bit-reproducibility
@@ -32,6 +32,7 @@ for _p in (_REPO_ROOT / "scripts", _REPO_ROOT / "klippy", _REPO_ROOT):
 import viz_pipeline  # noqa: E402
 
 CASES_DIR = Path(__file__).resolve().parent / "cases"
+BASELINES_DIR = Path(__file__).resolve().parent / "baselines"
 CONFIG_NAME = "printer.cfg"
 BASELINE_SUFFIX = ".baseline.json.gz"
 
@@ -53,7 +54,9 @@ class Case:
     baseline_path: Path
 
 
-def discover_cases(cases_dir: Path = CASES_DIR) -> list[Case]:
+def discover_cases(
+    cases_dir: Path = CASES_DIR, baselines_dir: Path = BASELINES_DIR
+) -> list[Case]:
     if not cases_dir.is_dir():
         return []
     cases = []
@@ -66,7 +69,9 @@ def discover_cases(cases_dir: Path = CASES_DIR) -> list[Case]:
                     name=f"{group.name}/{stem}",
                     gcode_path=gcode,
                     config_path=config,
-                    baseline_path=group / f"{stem}{BASELINE_SUFFIX}",
+                    baseline_path=(
+                        baselines_dir / group.name / f"{stem}{BASELINE_SUFFIX}"
+                    ),
                 )
             )
     return cases
@@ -129,9 +134,8 @@ def read_baseline(case: Case) -> str | None:
 
 
 def write_baseline(case: Case, snapshot: dict) -> None:
-    # mtime=0 keeps the gzip bytes deterministic — an unchanged trajectory
-    # re-compresses identically, so re-accepting produces no spurious churn.
     data = (canonical_json(snapshot) + "\n").encode()
+    case.baseline_path.parent.mkdir(parents=True, exist_ok=True)
     case.baseline_path.write_bytes(
         gzip.compress(data, compresslevel=9, mtime=0)
     )
