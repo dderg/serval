@@ -7,10 +7,12 @@ Runs on the printer host where _motion_engine.so and printer.cfg live.
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import os
 import re
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -42,6 +44,30 @@ SEGMENT_COLORS = {
     "arc": "C2",
     "clothoid": "C1",
 }
+
+MIN_PATH_VIEW_MM = 10.0
+
+
+def _equal_scale_with_min_extent(ax, xs, ys, min_span=MIN_PATH_VIEW_MM):
+    if xs and ys:
+        center_x = 0.5 * (min(xs) + max(xs))
+        center_y = 0.5 * (min(ys) + max(ys))
+        half_x = max(0.5 * (max(xs) - min(xs)), 0.5 * min_span)
+        half_y = max(0.5 * (max(ys) - min(ys)), 0.5 * min_span)
+        ax.set_xlim(center_x - half_x, center_x + half_x)
+        ax.set_ylim(center_y - half_y, center_y + half_y)
+    ax.set_aspect("equal", adjustable="datalim")
+
+
+@contextmanager
+def _matplotlib_logging_silenced():
+    log = logging.getLogger("matplotlib")
+    previous_level = log.level
+    log.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        log.setLevel(previous_level)
 
 
 def read_printer_config(cfg_path: Path):
@@ -307,7 +333,7 @@ def render(snapshot, out_path, stem, ts):
         ax_path.plot(
             first_pt[0], first_pt[1], "o", color="C3", markersize=5, zorder=3
         )
-    ax_path.set_aspect("equal")
+    _equal_scale_with_min_extent(ax_path, list(raw_x), list(raw_y))
     ax_path.set_xlabel("X (mm)")
     ax_path.set_ylabel("Y (mm)")
     ax_path.legend(fontsize=8, loc="upper right")
@@ -335,9 +361,10 @@ def render(snapshot, out_path, stem, ts):
     _plot_derivative(ax_acc, t, ax_d, ay, a_sc, "mm/s²", "Acceleration")
     _plot_derivative(ax_jrk, t, jx, jy, j_sc, "mm/s³", "Jerk")
 
-    fig.tight_layout()
     out_file = out_path / f"{stem}_{ts}.png"
-    fig.savefig(out_file, dpi=150)
+    with _matplotlib_logging_silenced():
+        fig.tight_layout()
+        fig.savefig(out_file, dpi=150)
     plt.close(fig)
     return out_file
 
