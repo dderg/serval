@@ -46,6 +46,18 @@ pub struct AxisQueue {
     pub ring_depth: u32,
     pub physical_write_cursor: u32,
     pub lead_secs: f64,
+    /// Provisional brake-to-rest pieces held in reserve: the on-path stop staged
+    /// behind the final frontier, replaced by every forward commit, promoted into
+    /// `pieces` only when the final frontier drains toward the playhead
+    /// (starvation). Never sent to the MCU while forward motion keeps arriving.
+    pub brake_tail: VecDeque<(PieceEntry, f64)>,
+    /// Brake generation this axis is on. Bumped when its brake tail is promoted,
+    /// so post-brake stale forward dispatches (older generation) are fenced.
+    pub generation: u64,
+    /// MCU-tick start of the deepest final piece ever staged (monotonic; not
+    /// decremented as pieces are sent). The committed frontier the brake-flush
+    /// lead is measured against. `None` before the first final piece.
+    pub final_frontier_ticks: Option<u64>,
 }
 
 impl AxisQueue {
@@ -57,6 +69,9 @@ impl AxisQueue {
             ring_depth,
             physical_write_cursor: 0,
             lead_secs: MAX_LEAD_SECS,
+            brake_tail: VecDeque::new(),
+            generation: 0,
+            final_frontier_ticks: None,
         }
     }
     pub fn room(&self) -> u32 {
@@ -208,6 +223,67 @@ pub fn schedule(
         .collect();
     debug_assert!(!frames.is_empty());
     Schedule::Send(frames)
+}
+
+/// MCU-tick lead the flush watermark allows before promoting the held brake.
+/// Sized by transport latency (host→MCU round-trip + one frame), NOT plan latency
+/// — the brake's first piece must reach the ring ahead of the playhead, and that
+/// bound is stable whereas plan latency is not. The pump-owned brake's one
+/// safety-critical constant; tune against measured single-frame send latency.
+pub const BRAKE_FLUSH_LEAD_SECS: f64 = 0.05;
+
+/// Per-MCU starvation check (toolhead-atomic — edge A): is it time to promote the
+/// held brake tails? True when a tail is staged on some axis of `mcu_id` and the
+/// combined committed (final) frontier is within `flush_lead_ticks` of the
+/// playhead, i.e. forward motion is about to run dry. False with no tail (nothing
+/// to stop on) — that path keeps the pump byte-identical until a brake is staged.
+fn brake_flush_due(
+    queues: &BTreeMap<AxisKey, AxisQueue>,
+    mcu_id: u32,
+    playhead_ticks: u64,
+    flush_lead_ticks: u64,
+) -> bool {
+    let mut has_tail = false;
+    let mut frontier: Option<u64> = None;
+    for q in queues
+        .iter()
+        .filter(|(k, _)| k.mcu_id == mcu_id)
+        .map(|(_, q)| q)
+    {
+        has_tail |= !q.brake_tail.is_empty();
+        if let Some(f) = q.final_frontier_ticks {
+            frontier = Some(frontier.map_or(f, |cur| cur.max(f)));
+        }
+    }
+    if !has_tail {
+        return false;
+    }
+    match frontier {
+        Some(f) => f.saturating_sub(playhead_ticks) < flush_lead_ticks,
+        None => true,
+    }
+}
+
+/// Promote every held brake tail for `mcu_id` into its live send queue — all the
+/// MCU's axes together, so the toolhead stops as one (edge A) — bump each axis'
+/// generation so stale forward dispatches are fenced, and return the new
+/// generation. The promoted pieces are contiguous after the final frontier, so
+/// the ring plays `[remaining finals][brake to rest]` with no discontinuity.
+fn promote_brake(queues: &mut BTreeMap<AxisKey, AxisQueue>, mcu_id: u32) -> u64 {
+    let mut generation = 0;
+    for q in queues
+        .iter_mut()
+        .filter(|(k, _)| k.mcu_id == mcu_id)
+        .map(|(_, q)| q)
+    {
+        if let Some(last) = q.brake_tail.back().map(|(p, _)| p.start_time) {
+            q.final_frontier_ticks = Some(last);
+        }
+        q.pieces.extend(q.brake_tail.drain(..));
+        q.generation += 1;
+        generation = q.generation;
+    }
+    generation
 }
 
 #[cfg(test)]
@@ -681,6 +757,10 @@ pub fn run_pump<S, F, C, A, O, D>(
             .or_insert_with(|| AxisQueue::new(ring_depth_of(key)));
         q.lead_secs = lead_secs;
         q.pieces.extend(pieces);
+        if let Some(deepest) = q.pieces.back().map(|(p, _)| p.start_time) {
+            q.final_frontier_ticks =
+                Some(q.final_frontier_ticks.map_or(deepest, |f| f.max(deepest)));
+        }
     };
 
     let horizon_of = |k: &AxisKey, q: &AxisQueue, cohort: &Option<DripCohort>| -> Option<u64> {
@@ -770,6 +850,26 @@ pub fn run_pump<S, F, C, A, O, D>(
                     lagging.join(", ")
                 ));
                 cohort = None;
+            }
+        }
+
+        // Pump-owned brake-to-rest: when a held brake tail exists and the
+        // committed frontier is draining toward the playhead, promote the brake
+        // (toolhead-atomic) so the machine stops on-path instead of underrunning
+        // the ring. Guarded by an any()-tail scan so it is byte-identical to the
+        // prior pump until the planner stages brake tails (stage-3b).
+        if queues.values().any(|q| !q.brake_tail.is_empty()) {
+            let mcu_ids: BTreeSet<u32> = queues.keys().map(|k| k.mcu_id).collect();
+            for mcu_id in mcu_ids {
+                if let Some((playhead, freq)) = mcu_clock_of(mcu_id) {
+                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                    let flush_lead_ticks = (BRAKE_FLUSH_LEAD_SECS * freq) as u64;
+                    if brake_flush_due(&queues, mcu_id, playhead, flush_lead_ticks) {
+                        let _generation = promote_brake(&mut queues, mcu_id);
+                        // TODO(stage-3b): signal the planner with `_generation`
+                        // to re-anchor from rest and fence stale dispatches.
+                    }
+                }
             }
         }
 

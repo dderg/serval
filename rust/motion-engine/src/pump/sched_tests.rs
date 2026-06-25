@@ -317,3 +317,111 @@ fn stall_full_on_globally_earliest_gates_all() {
         "StallFull on the globally host-earliest queue must gate all issuance"
     );
 }
+
+fn piece(start: u64) -> PieceEntry {
+    PieceEntry {
+        start_time: start,
+        coeffs: [0.0; 4],
+        duration: 0.001,
+        motor_mask: 0,
+        _reserved: [0; 3],
+    }
+}
+
+/// An axis queue with no live finals, a recorded committed frontier, and a held
+/// brake tail — the state the pump-owned brake decisions operate on.
+fn q_tail(ring_depth: u32, frontier: Option<u64>, tail: &[u64]) -> AxisQueue {
+    let mut q = AxisQueue::new(ring_depth);
+    q.final_frontier_ticks = frontier;
+    for &s in tail {
+        q.brake_tail.push_back((piece(s), s as f64));
+    }
+    q
+}
+
+#[test]
+fn brake_flush_not_due_with_deep_lead() {
+    // Frontier far ahead of the playhead → forward motion is healthy; hold the brake.
+    let mut queues = BTreeMap::new();
+    queues.insert(
+        AxisKey { mcu_id: 1, axis: 0 },
+        q_tail(64, Some(10_000), &[10_000, 11_000]),
+    );
+    assert!(!brake_flush_due(&queues, 1, 0, 1_000));
+}
+
+#[test]
+fn brake_flush_due_when_frontier_drains_to_watermark() {
+    let mut queues = BTreeMap::new();
+    queues.insert(
+        AxisKey { mcu_id: 1, axis: 0 },
+        q_tail(64, Some(500), &[500, 600]),
+    );
+    assert!(brake_flush_due(&queues, 1, 0, 1_000));
+}
+
+#[test]
+fn brake_flush_requires_a_held_tail() {
+    // Frontier drained but no brake staged → nothing to stop on, not due.
+    let mut queues = BTreeMap::new();
+    queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_tail(64, Some(100), &[]));
+    assert!(!brake_flush_due(&queues, 1, 0, 1_000));
+}
+
+#[test]
+fn brake_flush_due_when_no_finals_left() {
+    // A tail held but the frontier is unset (all finals consumed) → already starved.
+    let mut queues = BTreeMap::new();
+    queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_tail(64, None, &[700]));
+    assert!(brake_flush_due(&queues, 1, 0, 1_000));
+}
+
+#[test]
+fn brake_flush_uses_the_deepest_axis_frontier() {
+    // Toolhead-atomic (edge A): a sibling axis still has a deep frontier, so the
+    // head is not starving even though one axis drained — do not brake.
+    let mut queues = BTreeMap::new();
+    queues.insert(
+        AxisKey { mcu_id: 1, axis: 0 },
+        q_tail(64, Some(200), &[200]),
+    );
+    queues.insert(
+        AxisKey { mcu_id: 1, axis: 1 },
+        q_tail(64, Some(9_000), &[9_000]),
+    );
+    assert!(!brake_flush_due(&queues, 1, 0, 1_000));
+}
+
+#[test]
+fn promote_brake_is_atomic_across_axes_and_bumps_generation() {
+    let mut queues = BTreeMap::new();
+    queues.insert(
+        AxisKey { mcu_id: 1, axis: 0 },
+        q_tail(64, Some(500), &[500, 600]),
+    );
+    queues.insert(
+        AxisKey { mcu_id: 1, axis: 1 },
+        q_tail(64, Some(500), &[500, 600]),
+    );
+    queues.insert(
+        AxisKey { mcu_id: 2, axis: 0 },
+        q_tail(64, Some(500), &[500]),
+    );
+
+    let generation = promote_brake(&mut queues, 1);
+    assert_eq!(generation, 1, "first promotion -> generation 1");
+    for axis in 0..2 {
+        let q = &queues[&AxisKey { mcu_id: 1, axis }];
+        assert_eq!(q.pieces.len(), 2, "tail moved into the live send queue");
+        assert!(q.brake_tail.is_empty(), "tail drained");
+        assert_eq!(q.generation, 1, "generation bumped on every axis together");
+        assert_eq!(
+            q.final_frontier_ticks,
+            Some(600),
+            "frontier advanced to the brake end"
+        );
+    }
+    let other = &queues[&AxisKey { mcu_id: 2, axis: 0 }];
+    assert_eq!(other.generation, 0, "other MCU untouched by the promotion");
+    assert!(!other.brake_tail.is_empty(), "other MCU's tail still held");
+}
