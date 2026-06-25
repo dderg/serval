@@ -58,12 +58,6 @@ pub fn pipeline_snapshot(
     dict.set_item("kin_heading_x", &kinematics.heading_x)?;
     dict.set_item("kin_heading_y", &kinematics.heading_y)?;
     dict.set_item("kin_kappa", &kinematics.kappa)?;
-    dict.set_item("kin_dkappa_ds", &kinematics.dkappa_ds)?;
-    dict.set_item("kin_a_t", &kinematics.a_t)?;
-    dict.set_item("kin_j_t", &kinematics.j_t)?;
-    dict.set_item("kin_j_n", &kinematics.j_n)?;
-    dict.set_item("kin_j_n_geom", &kinematics.j_n_geom)?;
-    dict.set_item("kin_j_n_couple", &kinematics.j_n_couple)?;
 
     dict.set_item("blended_corners", outcome.report.blended)?;
     dict.set_item("unblended_corners", outcome.report.unblended.len())?;
@@ -197,12 +191,6 @@ struct KinematicSamples {
     heading_x: Vec<f64>,
     heading_y: Vec<f64>,
     kappa: Vec<f64>,
-    dkappa_ds: Vec<f64>,
-    a_t: Vec<f64>,
-    j_t: Vec<f64>,
-    j_n: Vec<f64>,
-    j_n_geom: Vec<f64>,
-    j_n_couple: Vec<f64>,
 }
 
 fn sample_kinematics(
@@ -215,12 +203,6 @@ fn sample_kinematics(
         heading_x: Vec::new(),
         heading_y: Vec::new(),
         kappa: Vec::new(),
-        dkappa_ds: Vec::new(),
-        a_t: Vec::new(),
-        j_t: Vec::new(),
-        j_n: Vec::new(),
-        j_n_geom: Vec::new(),
-        j_n_couple: Vec::new(),
     };
     let mut s_offset = 0.0;
     for (geo_move, vel_move) in outcome.moves.iter().zip(profile.moves.iter()) {
@@ -230,60 +212,15 @@ fn sample_kinematics(
                 let heading = spatial.heading_at(s_local);
                 kin.s.push(s_offset + sample.s);
                 kin.v.push(sample.v);
-                kin.a_t.push(sample.a);
                 kin.heading_x.push(heading[0]);
                 kin.heading_y.push(heading[1]);
                 kin.kappa.push(spatial.kappa(s_local));
-                kin.dkappa_ds.push(spatial.dkappa_ds(s_local));
             }
         }
         s_offset += vel_move.length;
     }
 
-    kin.j_t = tangential_jerk(&kin.s, &kin.v, &kin.a_t);
-
-    for i in 0..kin.s.len() {
-        let probe = crate::jerk_probe::jerk_at(
-            kin.kappa[i],
-            kin.dkappa_ds[i],
-            kin.v[i],
-            kin.a_t[i],
-            kin.j_t[i],
-        );
-        kin.j_n.push(probe.j_n);
-        kin.j_n_geom.push(probe.j_n_geom);
-        kin.j_n_couple.push(probe.j_n_couple);
-    }
-
     kin
-}
-
-fn tangential_jerk(s: &[f64], v: &[f64], a: &[f64]) -> Vec<f64> {
-    let n = s.len();
-    let mut j = vec![0.0; n];
-    if n < 2 {
-        return j;
-    }
-    let pair_dt = |i: usize, k: usize| -> f64 {
-        let ds = (s[k] - s[i]).abs();
-        let v_sum = v[i] + v[k];
-        if v_sum > 0.0 { 2.0 * ds / v_sum } else { 0.0 }
-    };
-    for i in 0..n {
-        let (lo, hi, span) = if i == 0 {
-            (0, 1, pair_dt(0, 1))
-        } else if i == n - 1 {
-            (n - 2, n - 1, pair_dt(n - 2, n - 1))
-        } else {
-            (i - 1, i + 1, pair_dt(i - 1, i) + pair_dt(i, i + 1))
-        };
-        j[i] = if span > 0.0 {
-            (a[hi] - a[lo]) / span
-        } else {
-            0.0
-        };
-    }
-    j
 }
 
 #[cfg(test)]
