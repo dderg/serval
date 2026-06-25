@@ -9,13 +9,16 @@ license.workspace = true
 name = "ethercat_rt"
 crate-type = ["rlib"]
 
-# `hw` gates the EtherCAT FFI (`ffi` module), the build.rs compile of
-# csrc/libecrt.c, and the SOEM link. OFF by default so the pure scale/wire/curves
-# unit tests build and run on any machine (and in CI) without the Pi's SOEM
-# install. Build with `--features hw` on the target host for the hardware endpoint.
+# `hw` gates the EtherCAT FFI (`ffi` module) and the build.rs compile + link of a
+# master backend over the shared ec_rt_* surface. OFF by default so the pure
+# scale/wire/curves unit tests build and run on any machine (and in CI) without a
+# master library installed. `--features hw` builds the SOEM backend (csrc/libecrt.c,
+# -lsoem); `--features igh` (implies hw) builds the IgH backend (csrc/libecrt_igh.c,
+# -lethercat) — the migration target. igh wins when both are present.
 [features]
 default = []
 hw = []
+igh = ["hw"]
 
 # The endpoint binary drives real hardware via the FFI; it only exists with `hw`.
 [[bin]]
