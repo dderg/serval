@@ -8,7 +8,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounde
 use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::pump::AxisKey;
-use crate::stream::{StreamConfig, StreamState};
+use crate::stream::{BrakeAnchor, StreamConfig, StreamState};
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
 
@@ -129,6 +129,12 @@ pub const INPUT_CHANNEL_CAP: usize = 8192;
 type DispatchFn = Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>;
 type NudgeDispatchFn =
     Arc<dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync>;
+/// Project a staged brake-to-rest tail per-axis and hand it to the pump as a
+/// provisional starvation stop, stamped with the planner's current brake
+/// generation. The pump holds it without playing it; forward motion at the same
+/// frontier supersedes it before it is ever flushed in the common case.
+type DispatchBrakeFn =
+    Arc<dyn Fn(&[ShapedSegment], u64) -> Result<(), DispatchError> + Send + Sync>;
 
 #[derive(Debug)]
 pub enum StreamMsg {
@@ -180,6 +186,8 @@ impl StreamPlannerHandle {
         home_pos: Vec<f64>,
         dispatch: DispatchFn,
         nudge_dispatch: NudgeDispatchFn,
+        dispatch_brake: DispatchBrakeFn,
+        brake_generation: Arc<AtomicU64>,
     ) -> Self {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let last_move_time_bits = Arc::new(AtomicU64::new(0));
@@ -197,6 +205,8 @@ impl StreamPlannerHandle {
                     rx,
                     dispatch,
                     nudge_dispatch,
+                    dispatch_brake,
+                    brake_generation,
                     state,
                     &last_thread,
                     &commit_thread,
@@ -706,6 +716,8 @@ fn run_loop(
     rx: Receiver<StreamMsg>,
     dispatch: DispatchFn,
     nudge_dispatch: NudgeDispatchFn,
+    dispatch_brake: DispatchBrakeFn,
+    brake_generation: Arc<AtomicU64>,
     mut state: StreamState,
     last_move_time_bits: &AtomicU64,
     commit_fire_count: &AtomicU32,
@@ -713,6 +725,14 @@ fn run_loop(
 ) {
     let mut sync_instant: Option<Instant> = None;
     let mut tally = IntakeTally::new(uncommitted_intake_secs);
+    // The generation the planner is currently stamping on dispatches. The pump
+    // bumps `brake_generation` once when it fires a held brake tail; the next
+    // observation here is the planner's cue to re-anchor from the braked rest.
+    let mut last_seen_generation = brake_generation.load(Ordering::Acquire);
+    // The rest state the tail the pump currently holds would brake to, kept so a
+    // fired brake re-anchors there. Cleared whenever forward motion supersedes
+    // that tail (the pump invalidates it on the same finals).
+    let mut held_anchor: Option<BrakeAnchor> = None;
 
     loop {
         let watermark = state.stall_brake_time() + STALL_SOLVE_CONST + STALL_MARGIN;
@@ -750,6 +770,7 @@ fn run_loop(
                     commit_fire_count,
                 );
                 tally.reset();
+                held_anchor = None;
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => return,
@@ -788,17 +809,52 @@ fn run_loop(
                     t_us = crate::timing::mono_us(),
                     "[intake] coalesced batch ready to commit; channel_pending = moves submitted but not yet pulled (invisible to backpressure)"
                 );
-                let segs = state
-                    .commit(false)
-                    .unwrap_or_else(|e| fatal(&format!("commit: {e}")));
-                tally.subtract_committed(buffered_before - state.buffered());
-                dispatch_committed(
-                    &segs,
-                    &dispatch,
-                    &mut sync_instant,
-                    last_move_time_bits,
-                    commit_fire_count,
-                );
+                // Plan without mutating committed state, then read the pump's
+                // brake verdict before applying. The pump only brakes on a static
+                // committed frontier — exactly the window the planner is blocked
+                // in the (expensive) plan above — so a fired brake is observable
+                // here before any forward dispatch trims the buffer. On a brake,
+                // the forward plan is discarded with the buffer intact (no moves
+                // lost) and the planner re-anchors from the braked rest.
+                let plan = state
+                    .plan_commit(false)
+                    .unwrap_or_else(|e| fatal(&format!("plan_commit: {e}")));
+                let generation = brake_generation.load(Ordering::Acquire);
+                if generation != last_seen_generation {
+                    if let Some(anchor) = held_anchor.take() {
+                        state.reanchor_after_brake(anchor);
+                    }
+                    last_seen_generation = generation;
+                    tally.reset();
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "brake_reconcile",
+                        generation,
+                        buffered = state.buffered(),
+                        t_committed = state.t_committed(),
+                        "[brake-reconcile] pump flushed brake-to-rest; re-anchored from rest, remainder will replan"
+                    );
+                } else if let Some(delta) = plan {
+                    let (segs, brake_tail) = state
+                        .apply_commit(delta)
+                        .unwrap_or_else(|e| fatal(&format!("apply_commit: {e}")));
+                    tally.subtract_committed(buffered_before - state.buffered());
+                    dispatch_committed(
+                        &segs,
+                        &dispatch,
+                        &mut sync_instant,
+                        last_move_time_bits,
+                        commit_fire_count,
+                    );
+                    if brake_tail.is_empty() {
+                        held_anchor = None;
+                    } else {
+                        let anchor = state.brake_anchor(&brake_tail);
+                        dispatch_brake(&brake_tail, last_seen_generation)
+                            .unwrap_or_else(|e| fatal(&format!("dispatch_brake: {e}")));
+                        held_anchor = Some(anchor);
+                    }
+                }
                 if !state.is_empty() {
                     // Brake to rest whenever the committed lead drains below the
                     // stall watermark — whether or not this batch found a seam.
@@ -830,6 +886,7 @@ fn run_loop(
                             commit_fire_count,
                         );
                         tally.reset();
+                        held_anchor = None;
                     }
                 }
                 if state.buffered() >= state.max_buffer_moves() {
@@ -854,6 +911,7 @@ fn run_loop(
                         commit_fire_count,
                     );
                     tally.reset();
+                    held_anchor = None;
                 }
                 if let Some(other) = deferred {
                     if handle_control(
@@ -868,6 +926,7 @@ fn run_loop(
                     ) {
                         return;
                     }
+                    held_anchor = None;
                 }
             }
             other => {
@@ -883,6 +942,7 @@ fn run_loop(
                 ) {
                     return;
                 }
+                held_anchor = None;
             }
         }
     }

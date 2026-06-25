@@ -10,6 +10,8 @@ use nurbs::eval::eval;
 struct Capture {
     segs: Arc<Mutex<Vec<(f64, f64, f64)>>>, // (t_start, t_end, x_at_end)
     nudges: Arc<Mutex<usize>>,
+    brake_tails: Arc<Mutex<Vec<(usize, u64)>>>, // (tail_len, generation) per staged tail
+    brake_generation: Arc<AtomicU64>,
 }
 
 impl Capture {
@@ -28,8 +30,21 @@ impl Capture {
             Ok(())
         })
     }
+    fn brake_dispatch(&self) -> DispatchBrakeFn {
+        let tails = Arc::clone(&self.brake_tails);
+        Arc::new(move |tail: &[ShapedSegment], generation: u64| {
+            tails.lock().unwrap().push((tail.len(), generation));
+            Ok(())
+        })
+    }
+    fn brake_generation(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.brake_generation)
+    }
     fn snapshot(&self) -> Vec<(f64, f64, f64)> {
         self.segs.lock().unwrap().clone()
+    }
+    fn brake_tails(&self) -> Vec<(usize, u64)> {
+        self.brake_tails.lock().unwrap().clone()
     }
     fn nudge_count(&self) -> usize {
         *self.nudges.lock().unwrap()
@@ -109,6 +124,8 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
         vec![99.158, 99.158, 0.2, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        cap.brake_dispatch(),
+        cap.brake_generation(),
     );
 
     let mut prev = [99.158, 99.158, 0.2];
@@ -152,6 +169,70 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
 }
 
 #[test]
+fn streaming_stages_brake_tails_and_survives_a_pump_brake() {
+    // End-to-end through the real planner thread: a perimeter flood must stage
+    // brake tails (the pump's provisional stop) stamped with the current brake
+    // generation, and a generation bump — the pump signalling it fired a brake —
+    // must be observed and reconciled without aborting the planner. After the
+    // bump the planner keeps streaming and stamps the advanced generation on
+    // later tails, proving the re-anchor path is live, not just compiled.
+    let cap = Capture::default();
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![99.158, 99.158, 0.2, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        cap.brake_dispatch(),
+        cap.brake_generation(),
+    );
+
+    let mut prev = [99.158, 99.158, 0.2];
+    let mut line_no = 1u32;
+    let feed_batch = |h: &mut StreamPlannerHandle, prev: &mut [f64; 3], line_no: &mut u32| {
+        for _ in 0..6 {
+            for (x, y, e) in VORON_PERIMETER {
+                let end = [x, y, 0.2];
+                h.submit_move(line_e(*line_no, 50.0, *prev, end, e))
+                    .unwrap();
+                *prev = end;
+                *line_no += 1;
+            }
+        }
+        h.flush().unwrap();
+    };
+
+    feed_batch(&mut h, &mut prev, &mut line_no);
+    let staged = cap.brake_tails();
+    assert!(
+        !staged.is_empty(),
+        "streaming partial commits must stage brake-to-rest tails"
+    );
+    assert!(
+        staged.iter().all(|&(len, g)| len > 0 && g == 0),
+        "tails staged before any brake carry the initial generation 0: {staged:?}"
+    );
+    let dispatched_before = cap.snapshot().len();
+
+    // The pump fires the held brake: bump the shared generation once. The next
+    // plan must observe the bump, reconcile without aborting, and resume.
+    cap.brake_generation().fetch_add(1, Ordering::AcqRel);
+
+    feed_batch(&mut h, &mut prev, &mut line_no);
+
+    let after = cap.brake_tails();
+    assert!(
+        after.iter().any(|&(_, g)| g == 1),
+        "after observing the brake the planner stamps the advanced generation: {after:?}"
+    );
+    assert!(
+        cap.snapshot().len() > dispatched_before,
+        "the planner keeps streaming motion after reconciling the brake"
+    );
+    h.shutdown();
+}
+
+#[test]
 fn streams_collinear_moves_to_a_contiguous_trajectory() {
     let cap = Capture::default();
     let mut h = StreamPlannerHandle::spawn(
@@ -160,6 +241,8 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        cap.brake_dispatch(),
+        cap.brake_generation(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -197,6 +280,8 @@ fn dwell_inserts_a_time_gap_then_resumes() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        cap.brake_dispatch(),
+        cap.brake_generation(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -228,6 +313,8 @@ fn stream_open_restarts_the_timeline_at_zero() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        cap.brake_dispatch(),
+        cap.brake_generation(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -259,6 +346,8 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        cap.brake_dispatch(),
+        cap.brake_generation(),
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
     h.home_drip(HomeDripParams {
@@ -292,6 +381,8 @@ fn nudge_dispatches_pieces_and_advances_time() {
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        cap.brake_dispatch(),
+        cap.brake_generation(),
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
     h.submit_nudge(NudgeParams {
@@ -381,6 +472,8 @@ fn flushed_stream_reads_zero_uncommitted_intake() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        cap.brake_dispatch(),
+        cap.brake_generation(),
     );
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();
@@ -401,6 +494,8 @@ fn partial_commit_head_trim_keeps_intake_tally_bounded() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        cap.brake_dispatch(),
+        cap.brake_generation(),
     );
 
     let n: u32 = 16;
@@ -482,6 +577,8 @@ fn continuous_blend_run_dispatches_continuously_without_flush() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        cap.brake_dispatch(),
+        cap.brake_generation(),
     );
 
     // A gentle zig-zag: every vertex blends (no unblended seam). The old
@@ -534,6 +631,7 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
         Ok(())
     });
     let noop_nudge: NudgeDispatchFn = Arc::new(|_, _| Ok(()));
+    let noop_brake: DispatchBrakeFn = Arc::new(|_, _| Ok(()));
 
     let mut h = StreamPlannerHandle::spawn(
         cfg(),
@@ -541,6 +639,8 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
         vec![0.0, 0.0, 0.0, 0.0],
         dispatch,
         noop_nudge,
+        noop_brake,
+        Arc::new(AtomicU64::new(0)),
     );
 
     h.submit_move(co_move(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0))

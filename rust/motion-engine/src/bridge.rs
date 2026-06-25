@@ -2801,6 +2801,7 @@ impl PyMotionEngine {
         let drain_for_pump = self.drain.clone();
         let pump_backlog_for_pump = Arc::clone(&self.pump_backlog);
         let brake_generation_for_pump = Arc::clone(&self.brake_generation);
+        let brake_generation_for_planner = Arc::clone(&self.brake_generation);
         let router_for_freq = Arc::clone(&self.router);
         let pump_thread_handle = std::thread::Builder::new()
             .name("push-pieces-pump".into())
@@ -3372,12 +3373,24 @@ impl PyMotionEngine {
                 .compile(&cfg.axis_registry)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             let home = vec![0.0; cfg.axis_registry.n_axes()];
+            // TODO(stage-4b): project the tail per-axis through the anchor/tick
+            // chain (side-effect-free) and enqueue it as the pump's provisional
+            // brake. Until then the planner stages and tracks brake tails but
+            // none reaches the pump, so the existing planner-side stall brakes
+            // remain the active protection and production behaviour is unchanged.
+            let dispatch_brake: Arc<
+                dyn Fn(&[trajectory::ShapedSegment], u64) -> Result<(), DispatchError>
+                    + Send
+                    + Sync,
+            > = Arc::new(|_tail, _generation| Ok(()));
             *guard = Some(StreamPlannerHandle::spawn(
                 stream_cfg,
                 axis_chains,
                 home,
                 dispatch,
                 nudge_dispatch,
+                dispatch_brake,
+                brake_generation_for_planner,
             ));
         }
         Ok(())

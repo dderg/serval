@@ -261,6 +261,11 @@ fn noop_nudge_dispatch()
     Arc::new(|_mcu_id: u32, _np: &crate::nudge::NudgePiece| Ok(()))
 }
 
+fn noop_brake_dispatch()
+-> Arc<dyn Fn(&[trajectory::ShapedSegment], u64) -> Result<(), DispatchError> + Send + Sync> {
+    Arc::new(|_tail: &[trajectory::ShapedSegment], _generation: u64| Ok(()))
+}
+
 fn relaxed_planner_config() -> PlannerConfig {
     let mut c = PlannerConfig::default();
     c.fit_tolerance_mm = 0.05;
@@ -293,6 +298,8 @@ fn shutdown_takes_and_joins_planner() {
         home,
         dispatch,
         noop_nudge_dispatch(),
+        noop_brake_dispatch(),
+        Arc::new(AtomicU64::new(0)),
     ));
 
     assert!(
@@ -348,6 +355,8 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
         home,
         dispatch,
         noop_nudge_dispatch(),
+        noop_brake_dispatch(),
+        Arc::new(AtomicU64::new(0)),
     );
     planner
         .submit_move(
@@ -523,6 +532,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
         home,
         dispatch,
         noop_nudge_dispatch(),
+        noop_brake_dispatch(),
+        Arc::new(AtomicU64::new(0)),
     ));
 
     engine.shutdown();
