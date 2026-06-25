@@ -294,13 +294,15 @@ impl Ingestor {
             );
             for msg in msgs {
                 if msg.fresh_stream {
-                    self.tracker.forget(msg.key);
                     self.prev_last.remove(&msg.key);
                 }
-                if let Some(seam) =
-                    self.tracker
-                        .observe(msg.key, &msg.pieces, msg.source_line, HARNESS_MCU_FREQ_HZ)
-                {
+                if let Some(seam) = self.tracker.observe_msg(
+                    msg.key,
+                    &msg.pieces,
+                    msg.fresh_stream,
+                    msg.source_line,
+                    Some(HARNESS_MCU_FREQ_HZ),
+                ) {
                     if seam.jump() >= JUNCTION_POSITION_LOG_MM {
                         let first_piece = &msg.pieces.first().unwrap().0;
                         let vel_jump = self.prev_last.get(&msg.key).map(|prev| {

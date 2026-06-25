@@ -414,6 +414,20 @@ impl JunctionTracker {
         );
         seam
     }
+
+    pub fn observe_msg(
+        &mut self,
+        key: AxisKey,
+        pieces: &[(PieceEntry, f64)],
+        fresh_stream: bool,
+        source_line: u32,
+        freq: Option<f64>,
+    ) -> Option<JunctionSeam> {
+        if fresh_stream {
+            self.forget(key);
+        }
+        self.observe(key, pieces, source_line, freq?)
+    }
 }
 
 fn check_junction_position_continuity(seam: &JunctionSeam) {
@@ -540,52 +554,49 @@ pub fn run_pump<S, F, C, A, O, D>(
                         return true;
                     }
                 }
-                if fresh_stream {
-                    junctions.forget(key);
-                }
-                if !pieces.is_empty() {
-                    if let Some((_ack_now, freq)) = mcu_clock_of(key.mcu_id) {
-                        if let Some(seam) = junctions.observe(key, &pieces, source_line, freq) {
-                            check_junction_position_continuity(&seam);
-                            let (tick_jump_us, host_jump_us) = junction_jumps(
-                                seam.first_start_ticks,
-                                seam.next_start_host,
-                                seam.prev_end_ticks,
-                                seam.prev_end_host,
-                                freq,
-                            );
-                            let anomalous =
-                                tick_jump_us < -50.0 || (tick_jump_us - host_jump_us).abs() > 50.0;
-                            if fresh_stream || !anomalous {
-                                tracing::debug!(
-                                    subsystem = "motion",
-                                    event = "junction_jump",
-                                    key = ?seam.key,
-                                    tick_jump_us,
-                                    host_jump_us,
-                                    fresh = fresh_stream,
-                                    "[junction] jump"
-                                );
-                            } else {
-                                let reason = if tick_jump_us < -50.0 {
-                                    "overlap_risk"
-                                } else {
-                                    "projection_divergence"
-                                };
-                                tracing::warn!(
-                                    subsystem = "motion",
-                                    event = "junction_jump_anomalous",
-                                    key = ?seam.key,
-                                    tick_jump_us,
-                                    host_jump_us,
-                                    fresh = fresh_stream,
-                                    reason,
-                                    prev_source_line = seam.prev_source_line,
-                                    next_source_line = source_line,
-                                    "[junction] anomalous jump"
-                                );
-                            }
-                        }
+                let freq = mcu_clock_of(key.mcu_id).map(|(_ack_now, freq)| freq);
+                if let Some(seam) =
+                    junctions.observe_msg(key, &pieces, fresh_stream, source_line, freq)
+                {
+                    let freq = freq.expect("observe_msg yields a seam only when freq is present");
+                    check_junction_position_continuity(&seam);
+                    let (tick_jump_us, host_jump_us) = junction_jumps(
+                        seam.first_start_ticks,
+                        seam.next_start_host,
+                        seam.prev_end_ticks,
+                        seam.prev_end_host,
+                        freq,
+                    );
+                    let anomalous =
+                        tick_jump_us < -50.0 || (tick_jump_us - host_jump_us).abs() > 50.0;
+                    if fresh_stream || !anomalous {
+                        tracing::debug!(
+                            subsystem = "motion",
+                            event = "junction_jump",
+                            key = ?seam.key,
+                            tick_jump_us,
+                            host_jump_us,
+                            fresh = fresh_stream,
+                            "[junction] jump"
+                        );
+                    } else {
+                        let reason = if tick_jump_us < -50.0 {
+                            "overlap_risk"
+                        } else {
+                            "projection_divergence"
+                        };
+                        tracing::warn!(
+                            subsystem = "motion",
+                            event = "junction_jump_anomalous",
+                            key = ?seam.key,
+                            tick_jump_us,
+                            host_jump_us,
+                            fresh = fresh_stream,
+                            reason,
+                            prev_source_line = seam.prev_source_line,
+                            next_source_line = source_line,
+                            "[junction] anomalous jump"
+                        );
                     }
                 }
                 let q = queues
