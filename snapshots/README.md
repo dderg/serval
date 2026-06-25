@@ -22,6 +22,7 @@ python3 -m pip install matplotlib        # for the web review only
 
 snapshots/snapshot-tests.sh              # local
 snapshots/snapshot-tests.sh --ci         # CI: fail like a plain test, no server
+snapshots/snapshot-tests.sh --view       # read-only baseline gallery
 ```
 
 - All cases match → exits 0, nothing else.
@@ -32,6 +33,8 @@ snapshots/snapshot-tests.sh --ci         # CI: fail like a plain test, no server
   the baselines and, with nothing left to review, the server stops itself; the
   script re-checks and exits with the final status. Nothing is left listening.
 - `--ci` skips the server and just fails, so CI gets a plain red.
+- `--view` starts the browser UI in read-only mode and renders the
+  committed baselines without running the planner or offering accept actions.
 
 ## Layout
 

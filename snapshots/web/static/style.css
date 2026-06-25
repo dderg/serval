@@ -126,6 +126,10 @@ main {
   color: var(--changed);
 }
 
+.badge.baseline {
+  color: var(--muted);
+}
+
 .empty {
   color: var(--muted);
   text-align: center;

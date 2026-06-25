@@ -6,10 +6,26 @@ PORT="${SNAPSHOT_PORT:-8765}"
 PYTHON="${PYTHON:-python3}"
 
 ci=0
+view_baselines=0
 run_args=()
 for arg in "$@"; do
-  if [ "$arg" = "--ci" ]; then ci=1; else run_args+=("$arg"); fi
+  if [ "$arg" = "--ci" ]; then
+    ci=1
+  elif [ "$arg" = "--view" ]; then
+    view_baselines=1
+  else
+    run_args+=("$arg")
+  fi
 done
+
+if [ "$ci" = 1 ] && [ "$view_baselines" = 1 ]; then
+  echo "--ci and --view cannot be used together" >&2
+  exit 2
+fi
+
+if [ "$view_baselines" = 1 ]; then
+  exec "$PYTHON" "$SCRIPT_DIR/web/server.py" --mode baselines --port "$PORT"
+fi
 
 if [ "$ci" = 1 ]; then
   exec "$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"
