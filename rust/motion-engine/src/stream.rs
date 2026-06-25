@@ -152,6 +152,31 @@ pub struct StreamState {
     replan_short_circuit: bool,
 }
 
+/// A committable prefix staged by [`StreamState::plan_commit`] without touching
+/// committed state, applied by [`StreamState::apply_commit`]. Splitting the
+/// expensive fit+plan+lower (which produces this) from the cheap state advance
+/// lets the caller stage a forward commit and a brake-to-rest from the same
+/// frontier and apply only the one the pump's verdict selects.
+struct CommitDelta {
+    /// Post-axis-chain segments to dispatch; their last `t_end` is the new
+    /// committed frontier.
+    committed: Vec<ShapedSegment>,
+    /// Pre-axis-chain committed segments, appended to `post_history`.
+    raw_committed: Vec<ShapedSegment>,
+    /// Whole buffer committed to rest (`commit_count == n`).
+    is_full: bool,
+    /// New odometer at the committed seam.
+    seam_pos: Vec<f64>,
+    /// Velocity carried into the next plan (`0.0` at a full drain to rest).
+    new_entry_v: f64,
+    /// Source line of the first uncommitted move; buffer front is popped below
+    /// it on a partial commit. Unused when `is_full`.
+    keep_line: u32,
+    /// The committed seam consumed the kept front move's head, so it needs
+    /// trimming. Unused when `is_full`.
+    head_consumed: bool,
+}
+
 impl StreamState {
     #[must_use]
     pub fn new(
@@ -291,13 +316,16 @@ impl StreamState {
         self.config.max_buffer_moves
     }
 
-    /// Plan the buffer and commit a prefix at the latest zero-curvature seam.
-    /// `force` (flush / dwell / idle drain / shutdown) commits the entire buffer
-    /// to rest. Returns the `ShapedSegment`s to dispatch, in order; empty when
-    /// nothing is committable yet.
-    pub fn commit(&mut self, force: bool) -> Result<Vec<ShapedSegment>, StreamError> {
+    /// Plan the buffer and stage a committable prefix at the latest
+    /// zero-curvature seam **without** mutating committed state. `force` (flush /
+    /// dwell / idle drain / shutdown) stages the entire buffer to rest. Returns
+    /// `None` when nothing is committable yet. Running the full fit+plan+lower
+    /// here but deferring the state advance to [`Self::apply_commit`] lets the
+    /// caller stage a forward commit and a brake-to-rest from the same frontier
+    /// and apply only the one the pump's verdict selects.
+    fn plan_commit(&mut self, force: bool) -> Result<Option<CommitDelta>, StreamError> {
         if self.buffer.is_empty() {
-            return Ok(Vec::new());
+            return Ok(None);
         }
 
         let moves: Vec<Move> = self.buffer.iter().cloned().collect();
@@ -347,7 +375,7 @@ impl StreamState {
                 t_us = crate::timing::mono_us(),
                 "[pipe] stall-skip: no committable seam, velocity plan skipped"
             );
-            return Ok(Vec::new());
+            return Ok(None);
         }
 
         self.full_plan_count += 1;
@@ -434,13 +462,13 @@ impl StreamState {
         );
 
         if commit_count == 0 {
-            return Ok(Vec::new());
+            return Ok(None);
         }
 
         let commit_count = self.post_commit_count(commit_count, force, &segs);
 
         if commit_count == 0 {
-            return Ok(Vec::new());
+            return Ok(None);
         }
 
         let committed = apply_axis_chains(
@@ -455,39 +483,71 @@ impl StreamState {
         for gm in outcome.moves.iter().take(commit_count) {
             advance_odometer(&mut seam_pos, gm);
         }
-        self.odometer = seam_pos;
-        self.t_committed = committed.last().expect("commit_count > 0").t_end;
-        self.entry_v = if commit_count == n {
+        let new_entry_v = if commit_count == n {
             0.0
         } else {
             profile.moves[commit_count - 1].exit_v
         };
+        let (keep_line, head_consumed) = if commit_count == n {
+            (0, false)
+        } else {
+            (
+                outcome.moves[commit_count].source.start_line,
+                blend_consumed_head(&outcome.moves, commit_count),
+            )
+        };
+        let raw_committed: Vec<ShapedSegment> = segs.into_iter().take(commit_count).collect();
 
-        if commit_count == n {
+        Ok(Some(CommitDelta {
+            committed,
+            raw_committed,
+            is_full: commit_count == n,
+            seam_pos,
+            new_entry_v,
+            keep_line,
+            head_consumed,
+        }))
+    }
+
+    /// Advance committed state by a [`CommitDelta`] staged by [`Self::plan_commit`]
+    /// and return the segments to dispatch. The only place committed-trajectory
+    /// state moves forward on a normal commit.
+    fn apply_commit(&mut self, delta: CommitDelta) -> Result<Vec<ShapedSegment>, StreamError> {
+        let new_t_committed = delta.committed.last().expect("commit_count > 0").t_end;
+        self.odometer = delta.seam_pos;
+        self.t_committed = new_t_committed;
+        self.entry_v = delta.new_entry_v;
+        if delta.is_full {
             self.buffer.clear();
             self.committed_head_len = 0.0;
         } else {
-            let keep_line = outcome.moves[commit_count].source.start_line;
-            let head_consumed = blend_consumed_head(&outcome.moves, commit_count);
             while self
                 .buffer
                 .front()
-                .is_some_and(|m| m.source.start_line < keep_line)
+                .is_some_and(|m| m.source.start_line < delta.keep_line)
             {
                 self.buffer.pop_front();
             }
-            self.committed_head_len = if head_consumed {
+            self.committed_head_len = if delta.head_consumed {
                 self.trim_front_to_seam()?
             } else {
                 0.0
             };
         }
-
-        self.post_history
-            .extend(segs.into_iter().take(commit_count));
+        self.post_history.extend(delta.raw_committed);
         self.trim_post_history();
+        Ok(delta.committed)
+    }
 
-        Ok(committed)
+    /// Plan the buffer and commit a prefix at the latest zero-curvature seam.
+    /// `force` (flush / dwell / idle drain / shutdown) commits the entire buffer
+    /// to rest. Returns the `ShapedSegment`s to dispatch, in order; empty when
+    /// nothing is committable yet.
+    pub fn commit(&mut self, force: bool) -> Result<Vec<ShapedSegment>, StreamError> {
+        match self.plan_commit(force)? {
+            None => Ok(Vec::new()),
+            Some(delta) => self.apply_commit(delta),
+        }
     }
 
     /// Materialize the deferred brake-to-rest on a producer-stall watermark.
