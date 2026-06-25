@@ -108,6 +108,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -117,6 +118,8 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -125,6 +128,8 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
 

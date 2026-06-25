@@ -329,13 +329,14 @@ fn piece(start: u64) -> PieceEntry {
 }
 
 /// An axis queue with no live finals, a recorded committed frontier, and a held
-/// brake tail — the state the pump-owned brake decisions operate on.
+/// (valid) brake tail — the state the pump-owned brake decisions operate on.
 fn q_tail(ring_depth: u32, frontier: Option<u64>, tail: &[u64]) -> AxisQueue {
     let mut q = AxisQueue::new(ring_depth);
     q.final_frontier_ticks = frontier;
     for &s in tail {
         q.brake_tail.push_back((piece(s), s as f64));
     }
+    q.brake_tail_valid = !tail.is_empty();
     q
 }
 
@@ -393,7 +394,7 @@ fn brake_flush_uses_the_deepest_axis_frontier() {
 }
 
 #[test]
-fn promote_brake_is_atomic_across_axes_and_bumps_generation() {
+fn promote_brake_is_atomic_across_axes_of_one_mcu() {
     let mut queues = BTreeMap::new();
     queues.insert(
         AxisKey { mcu_id: 1, axis: 0 },
@@ -408,13 +409,12 @@ fn promote_brake_is_atomic_across_axes_and_bumps_generation() {
         q_tail(64, Some(500), &[500]),
     );
 
-    let generation = promote_brake(&mut queues, 1);
-    assert_eq!(generation, 1, "first promotion -> generation 1");
+    promote_brake(&mut queues, 1);
     for axis in 0..2 {
         let q = &queues[&AxisKey { mcu_id: 1, axis }];
         assert_eq!(q.pieces.len(), 2, "tail moved into the live send queue");
         assert!(q.brake_tail.is_empty(), "tail drained");
-        assert_eq!(q.generation, 1, "generation bumped on every axis together");
+        assert!(!q.brake_tail_valid, "consumed tail is no longer valid");
         assert_eq!(
             q.final_frontier_ticks,
             Some(600),
@@ -422,6 +422,20 @@ fn promote_brake_is_atomic_across_axes_and_bumps_generation() {
         );
     }
     let other = &queues[&AxisKey { mcu_id: 2, axis: 0 }];
-    assert_eq!(other.generation, 0, "other MCU untouched by the promotion");
+    assert!(other.brake_tail_valid, "other MCU's tail still valid");
     assert!(!other.brake_tail.is_empty(), "other MCU's tail still held");
+}
+
+#[test]
+fn promote_brake_skips_an_invalid_tail() {
+    // A tail not yet matching the frontier (mid-splice) must not be promoted.
+    let mut queues = BTreeMap::new();
+    let mut q = q_tail(64, Some(500), &[500, 600]);
+    q.brake_tail_valid = false;
+    queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q);
+
+    promote_brake(&mut queues, 1);
+    let q = &queues[&AxisKey { mcu_id: 1, axis: 0 }];
+    assert_eq!(q.brake_tail.len(), 2, "invalid tail left in reserve");
+    assert!(q.pieces.is_empty(), "nothing promoted to the send queue");
 }

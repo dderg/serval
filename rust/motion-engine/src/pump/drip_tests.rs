@@ -92,6 +92,7 @@ fn stall_detection_fires_when_floor_stuck() {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -108,6 +109,8 @@ fn stall_detection_fires_when_floor_stuck() {
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -116,6 +119,8 @@ fn stall_detection_fires_when_floor_stuck() {
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
 
@@ -157,6 +162,7 @@ fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -172,6 +178,8 @@ fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
         fresh_stream: false,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
 
@@ -222,6 +230,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -237,6 +246,8 @@ fn participant_release_tracks_mcu_clock_horizon() {
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
 
@@ -286,6 +297,8 @@ fn unsynced_clock_releases_nothing_for_participants() {
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
 
@@ -300,6 +313,7 @@ fn unsynced_clock_releases_nothing_for_participants() {
             |_| {},
             |_, _| {},
             |_| {},
+            Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -334,6 +348,7 @@ fn retired_regression_triggers_on_drip_stall() {
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
+            Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -391,6 +406,7 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -400,6 +416,8 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(30));
@@ -457,6 +475,7 @@ fn drip_disarm_clears_cohort() {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -473,6 +492,8 @@ fn drip_disarm_clears_cohort() {
         fresh_stream: false,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
 
@@ -513,6 +534,7 @@ fn drip_disarm_wrong_cohort_id_is_noop() {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -529,6 +551,8 @@ fn drip_disarm_wrong_cohort_id_is_noop() {
         fresh_stream: false,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
 

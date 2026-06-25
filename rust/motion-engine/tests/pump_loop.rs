@@ -76,6 +76,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         )
     });
 
@@ -85,6 +86,8 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -93,6 +96,8 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -145,6 +150,7 @@ fn run_pump_with_clock(
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         )
     })
 }
@@ -163,6 +169,8 @@ fn continuous_junction_position_passes() {
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -171,6 +179,8 @@ fn continuous_junction_position_passes() {
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -195,6 +205,8 @@ fn junction_position_discontinuity_is_fatal() {
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -203,6 +215,8 @@ fn junction_position_discontinuity_is_fatal() {
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
 
@@ -226,6 +240,8 @@ fn fresh_stream_resets_junction_position_baseline() {
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     data.send(EnqueueMsg {
@@ -234,6 +250,8 @@ fn fresh_stream_resets_junction_position_baseline() {
         fresh_stream: true,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -262,6 +280,7 @@ fn bundles_same_mcu_axes_into_one_transaction() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         )
     });
 
@@ -274,6 +293,8 @@ fn bundles_same_mcu_axes_into_one_transaction() {
             fresh_stream: axis == 0,
             lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
+            generation: 0,
+            brake_tail: vec![],
         })
         .unwrap();
     }
@@ -321,6 +342,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         )
     });
 
@@ -335,6 +357,8 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
             fresh_stream: i == 0,
             lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
+            generation: 0,
+            brake_tail: vec![],
         }) {
             Ok(()) => accepted += 1,
             Err(TrySendError::Full(_)) => {
@@ -371,6 +395,8 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
             fresh_stream: false,
             lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
+            generation: 0,
+            brake_tail: vec![],
         })
         .is_ok(),
         "after retirement the pump resumes pulling and the channel drains"
@@ -405,6 +431,7 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         )
     });
 
@@ -417,6 +444,8 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
             fresh_stream: i == 0,
             lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
+            generation: 0,
+            brake_tail: vec![],
         })
         .unwrap();
     }
@@ -427,6 +456,8 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
             fresh_stream: i == 0,
             lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
+            generation: 0,
+            brake_tail: vec![],
         })
         .unwrap();
     }
@@ -472,6 +503,7 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         )
     });
 
@@ -491,6 +523,8 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
             fresh_stream: i == 0,
             lead_secs: _motion_engine::pump::DRIP_WINDOW_SECS,
             source_line: u32::MAX,
+            generation: 0,
+            brake_tail: vec![],
         })
         .unwrap();
     }
@@ -501,6 +535,8 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
             fresh_stream: i == 0,
             lead_secs: _motion_engine::pump::DRIP_WINDOW_SECS,
             source_line: u32::MAX,
+            generation: 0,
+            brake_tail: vec![],
         })
         .unwrap();
     }
@@ -516,6 +552,194 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
     assert!(
         b_sent > 0,
         "cohort participant B must be fed despite A's over-cap burst (drip bypasses the intake cap)"
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+/// End-to-end: a held brake tail is promoted and dispatched to the MCU when the
+/// committed frontier drains toward the playhead, and the brake generation is
+/// bumped so the planner can re-anchor. The realtime path, not the pure decision.
+#[test]
+fn pump_brakes_to_rest_when_finals_starve() {
+    use std::sync::atomic::Ordering;
+
+    struct StartSink(Arc<Mutex<Vec<u64>>>);
+    impl PieceSink for StartSink {
+        fn send_frame(
+            &self,
+            _k: AxisKey,
+            pieces: &[PieceEntry],
+            _s: u16,
+            _n: u32,
+            _r: u32,
+        ) -> Result<i32, SendError> {
+            let mut g = self.0.lock().unwrap();
+            g.extend(pieces.iter().map(|p| p.start_time));
+            Ok(0)
+        }
+    }
+
+    let sent = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let playhead = Arc::new(AtomicU64::new(0));
+    let brake_gen = Arc::new(AtomicU64::new(0));
+    let freq = 1_000_000.0_f64; // 1 MHz: ticks == microseconds; watermark = 50_000 ticks.
+
+    let sink = StartSink(sent.clone());
+    let playhead_clk = Arc::clone(&playhead);
+    let brake_gen_pump = Arc::clone(&brake_gen);
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink,
+            |_k| 256u32,
+            move |_mcu| Some((playhead_clk.load(Ordering::Acquire), freq)),
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+            brake_gen_pump,
+        )
+    });
+
+    // Final at t=1.0s; provisional brake-to-rest at 1.05s and 1.10s (ticks @ 1 MHz).
+    data.send(EnqueueMsg {
+        key: AxisKey { mcu_id: 1, axis: 0 },
+        pieces: vec![p(1_000_000)],
+        fresh_stream: true,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![p(1_050_000), p(1_100_000)],
+    })
+    .unwrap();
+
+    // Frontier (1e6) is far ahead of the playhead (0): the final flushes, the
+    // brake stays held in reserve, no brake event.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec![1_000_000],
+        "only the final piece sent; brake held in reserve"
+    );
+    assert_eq!(
+        brake_gen.load(Ordering::Acquire),
+        0,
+        "no brake while lead is healthy"
+    );
+
+    // Starve: advance the playhead to within the flush watermark (40k < 50k ticks)
+    // of the frontier, then wake the pump with a heartbeat.
+    playhead.store(960_000, Ordering::Release);
+    ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 1,
+        retired_counts: vec![1],
+    }))
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
+    assert_eq!(
+        brake_gen.load(Ordering::Acquire),
+        1,
+        "toolhead starved -> brake generation bumped once"
+    );
+    let got = sent.lock().unwrap().clone();
+    assert!(
+        got.contains(&1_050_000) && got.contains(&1_100_000),
+        "brake-to-rest pieces dispatched on starvation: {got:?}"
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+/// Edge D: once the pump has braked (generation 1), a forward dispatch tagged with
+/// the pre-brake generation 0 is dropped — it continues past a frontier the
+/// machine has left — while a dispatch at the current generation is accepted.
+#[test]
+fn pump_fences_stale_forward_dispatch_after_brake() {
+    use std::sync::atomic::Ordering;
+
+    struct RecSink(Arc<Mutex<Vec<u64>>>);
+    impl PieceSink for RecSink {
+        fn send_frame(
+            &self,
+            _k: AxisKey,
+            pieces: &[PieceEntry],
+            _s: u16,
+            _n: u32,
+            _r: u32,
+        ) -> Result<i32, SendError> {
+            self.0
+                .lock()
+                .unwrap()
+                .extend(pieces.iter().map(|p| p.start_time));
+            Ok(0)
+        }
+    }
+
+    let sent = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let brake_gen = Arc::new(AtomicU64::new(0));
+    let brake_gen_pump = Arc::clone(&brake_gen);
+    let sink = RecSink(sent.clone());
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink,
+            |_k| 256u32,
+            |_mcu| Some((0u64, 1_000_000.0_f64)),
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+            brake_gen_pump,
+        )
+    });
+
+    // The pump has braked: it is now on generation 1.
+    brake_gen.store(1, Ordering::Release);
+
+    // A stale forward dispatch from before the brake (generation 0) must be dropped.
+    data.send(EnqueueMsg {
+        key: AxisKey { mcu_id: 1, axis: 0 },
+        pieces: vec![p(500_000)],
+        fresh_stream: false,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
+    })
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert!(
+        sent.lock().unwrap().is_empty(),
+        "stale generation-0 dispatch must be fenced, not sent: {:?}",
+        sent.lock().unwrap()
+    );
+
+    // A current dispatch (generation 1) is accepted and reaches the MCU.
+    data.send(EnqueueMsg {
+        key: AxisKey { mcu_id: 1, axis: 0 },
+        pieces: vec![p(600_000)],
+        fresh_stream: true,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+        generation: 1,
+        brake_tail: vec![],
+    })
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec![600_000],
+        "current-generation dispatch accepted after the fence"
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();

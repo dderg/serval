@@ -98,6 +98,10 @@ where
                     fresh_stream,
                     lead_secs,
                     source_line: seg.source_line,
+                    // stage-3b dispatch wiring threads the planner's brake
+                    // generation and provisional tail through here.
+                    generation: 0,
+                    brake_tail: Vec::new(),
                 });
             }
         }

@@ -616,6 +616,10 @@ pub struct PyMotionEngine {
     mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
     dispatched_segments: Arc<AtomicU64>,
     pump_backlog: Arc<AtomicU64>,
+    /// Bumped by the pump each time it flushes a brake-to-rest (toolhead
+    /// starvation). The planner polls it to re-anchor from rest and tag its
+    /// dispatches so the pump fences stale forward motion (stage-4 wiring).
+    brake_generation: Arc<AtomicU64>,
     dispatch_anchor: Arc<Mutex<crate::anchor::Anchor>>,
     fallback_clock_conversions: Arc<AtomicU64>,
     clock_freqs: Arc<Mutex<HashMap<u32, f64>>>,
@@ -878,6 +882,7 @@ impl PyMotionEngine {
             mcu_axis_configs: Arc::new(Mutex::new(Vec::new())),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
             pump_backlog: Arc::new(AtomicU64::new(0)),
+            brake_generation: Arc::new(AtomicU64::new(0)),
             dispatch_anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),
             clock_freqs: Arc::new(Mutex::new(HashMap::new())),
@@ -2795,6 +2800,7 @@ impl PyMotionEngine {
         let router_for_pump = Arc::clone(&self.router);
         let drain_for_pump = self.drain.clone();
         let pump_backlog_for_pump = Arc::clone(&self.pump_backlog);
+        let brake_generation_for_pump = Arc::clone(&self.brake_generation);
         let router_for_freq = Arc::clone(&self.router);
         let pump_thread_handle = std::thread::Builder::new()
             .name("push-pieces-pump".into())
@@ -2851,6 +2857,7 @@ impl PyMotionEngine {
                         abort_after_tracing_appender_drains();
                     },
                     pump_backlog_for_pump,
+                    brake_generation_for_pump,
                 );
             })
             .expect("spawn push-pieces-pump thread");
@@ -3319,6 +3326,8 @@ impl PyMotionEngine {
                             fresh_stream: fresh,
                             lead_secs,
                             source_line: u32::MAX,
+                            generation: 0,
+                            brake_tail: Vec::new(),
                         })
                         .map_err(|_| DispatchError::PumpGone)?;
                 }

@@ -479,6 +479,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                 |_key: AxisKey, _n: u32| {},
                 |_msg: String| {},
                 Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
             );
         })
         .expect("spawn test pump thread");
@@ -503,6 +504,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
             fresh_stream: false,
             lead_secs: 0.0,
             source_line: u32::MAX,
+            generation: 0,
+            brake_tail: vec![],
         })
         .expect("enqueue must succeed before shutdown");
 

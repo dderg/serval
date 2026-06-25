@@ -11,6 +11,8 @@ fn make_enqueue(key: AxisKey, pieces: Vec<(PieceEntry, f64)>, fresh_stream: bool
         fresh_stream,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     }
 }
 
@@ -105,6 +107,7 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -193,6 +196,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
             |_| {},
             |_, _| {},
             |_| {},
+            Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -294,6 +298,7 @@ fn flush_clears_queued_pieces_and_junctions() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -316,6 +321,8 @@ fn flush_clears_queued_pieces_and_junctions() {
         fresh_stream: true,
         lead_secs,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
 
@@ -341,6 +348,8 @@ fn flush_clears_queued_pieces_and_junctions() {
         fresh_stream: false,
         lead_secs,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     {
@@ -398,6 +407,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
             },
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -420,6 +430,8 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         fresh_stream: true,
         lead_secs,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
 
@@ -443,6 +455,8 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         fresh_stream: false,
         lead_secs,
         source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
     })
     .unwrap();
     {
@@ -481,6 +495,7 @@ fn flush_unknown_key_is_noop() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -515,6 +530,7 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
             |_, _| {},
             |_| {},
             backlog_pump,
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -567,6 +583,7 @@ fn barrier_acks_on_idle_pump() {
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
     });
     let (ack_tx, ack_rx) = mpsc::sync_channel(1);
@@ -603,6 +620,7 @@ fn pump_backlog_reflects_unpushed_pieces() {
             |_, _| {},
             |_| {},
             backlog_thread,
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
@@ -641,6 +659,7 @@ fn pump_backlog_drains_to_zero_when_pushed() {
             |_, _| {},
             |_| {},
             backlog_thread,
+            Arc::new(AtomicU64::new(0)),
         );
     });
 
