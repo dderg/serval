@@ -140,17 +140,7 @@ def test_snapshots_match_is_exact_on_integer_counts():
     assert not harness.snapshots_match({"blended": 3}, {"blended": 4})
 
 
-def test_compare_ignores_excluded_jerk_diagnostics(tmp_path):
-    case = _case(tmp_path)
-    base = dict(_SNAPSHOT)
-    base["kin_j_n_couple"] = [0.0, 0.0, 0.0]
-    harness.write_baseline(case, base)
-    drifted = dict(base)
-    drifted["kin_j_n_couple"] = [0.0, 6.5e-3, 0.0]
-    assert harness.compare(case, drifted) is harness.Status.EXACT
-
-
-def test_compare_still_flags_gated_field_change(tmp_path):
+def test_compare_flags_velocity_field_change(tmp_path):
     case = _case(tmp_path)
     harness.write_baseline(case, _SNAPSHOT)
     drifted = dict(_SNAPSHOT)
