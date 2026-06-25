@@ -199,43 +199,70 @@ def _build_time_series(snapshot):
 
     s = np.array(snapshot["kin_s"])
     v = np.array(snapshot["kin_v"])
-    hx = np.array(snapshot["kin_heading_x"])
-    hy = np.array(snapshot["kin_heading_y"])
+    tangent_x = np.array(snapshot["kin_heading_x"])
+    tangent_y = np.array(snapshot["kin_heading_y"])
     kappa = np.array(snapshot["kin_kappa"])
 
-    mask = np.concatenate([[True], np.diff(s) > 1e-9])
-    s, v, hx, hy, kappa = s[mask], v[mask], hx[mask], hy[mask], kappa[mask]
+    distinct = np.concatenate([[True], np.diff(s) > 1e-9])
+    s, v, tangent_x, tangent_y, kappa = (
+        arr[distinct] for arr in (s, v, tangent_x, tangent_y, kappa)
+    )
 
     v_safe = np.maximum(v, 1e-6)
     ds = np.diff(s)
     v_avg = 0.5 * (v_safe[:-1] + v_safe[1:])
     t = np.concatenate([[0.0], np.cumsum(ds / v_avg)])
 
-    vx = v * hx
-    vy = v * hy
-    v_scalar = v
+    normal_x, normal_y = -tangent_y, tangent_x
 
-    dv_ds = np.gradient(v, s)
-    a_tangential = v * dv_ds
-    a_centripetal = v**2 * kappa
-    nx, ny = -hy, hx
-    a_x = a_tangential * hx + a_centripetal * nx
-    a_y = a_tangential * hy + a_centripetal * ny
-    a_scalar = np.sqrt(a_x**2 + a_y**2)
+    vx = v * tangent_x
+    vy = v * tangent_y
 
-    jx = np.gradient(a_x, t)
-    jy = np.gradient(a_y, t)
-    j_scalar = np.sqrt(jx**2 + jy**2)
+    accel_tangential = np.gradient(v, t)
+    accel_normal = v**2 * kappa
+    ax = accel_tangential * tangent_x + accel_normal * normal_x
+    ay = accel_tangential * tangent_y + accel_normal * normal_y
+    a_scalar = np.hypot(accel_tangential, accel_normal)
 
-    return t, vx, vy, v_scalar, a_x, a_y, a_scalar, jx, jy, j_scalar
+    dt = np.diff(t)
+    jx = np.diff(ax) / dt
+    jy = np.diff(ay) / dt
+    j_scalar = np.hypot(jx, jy)
+    _hold_jerk_through_rest_endpoints(v, jx, jy, j_scalar)
+    jx, jy, j_scalar = (np.append(j, j[-1]) for j in (jx, jy, j_scalar))
+
+    return t, vx, vy, v, ax, ay, a_scalar, jx, jy, j_scalar
 
 
-def _plot_derivative(ax, t, comp_x, comp_y, scalar, ylabel, title):
+def _hold_jerk_through_rest_endpoints(v, jx, jy, j_scalar):
+    # A finite difference cannot resolve jerk through a zero-velocity endpoint;
+    # hold each resting end's monotonic under-shoot at the level it climbs to.
+    n = len(j_scalar)
+    if v[0] <= 1e-9:
+        i = 0
+        while i + 1 < n and j_scalar[i + 1] > j_scalar[i]:
+            i += 1
+        for arr in (jx, jy, j_scalar):
+            arr[:i] = arr[i]
+    if v[-1] <= 1e-9:
+        k = n - 1
+        while k > 0 and j_scalar[k - 1] > j_scalar[k]:
+            k -= 1
+        for arr in (jx, jy, j_scalar):
+            arr[k + 1 :] = arr[k]
+
+
+def _plot_derivative(
+    ax, t, comp_x, comp_y, scalar, ylabel, title, drawstyle="default"
+):
     import numpy as np
 
-    ax.plot(t, np.abs(comp_x), "-", linewidth=0.6, color="C0", label="|X|")
-    ax.plot(t, np.abs(comp_y), "-", linewidth=0.6, color="C1", label="|Y|")
-    ax.plot(t, scalar, "-", linewidth=0.8, color="C3", label="scalar")
+    def plot(y, **kw):
+        ax.plot(t, y, drawstyle=drawstyle, **kw)
+
+    plot(np.abs(comp_x), linewidth=0.6, color="C0", label="|X|")
+    plot(np.abs(comp_y), linewidth=0.6, color="C1", label="|Y|")
+    plot(scalar, linewidth=0.8, color="C3", label="scalar")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(ylabel)
     ax.set_title(title, fontsize=9)
@@ -359,7 +386,9 @@ def render(snapshot, out_path, stem, ts):
         f"Velocity  (t={snapshot['traversal_time_s']:.3f}s)",
     )
     _plot_derivative(ax_acc, t, ax_d, ay, a_sc, "mm/s²", "Acceleration")
-    _plot_derivative(ax_jrk, t, jx, jy, j_sc, "mm/s³", "Jerk")
+    _plot_derivative(
+        ax_jrk, t, jx, jy, j_sc, "mm/s³", "Jerk", drawstyle="steps-post"
+    )
 
     out_file = out_path / f"{stem}_{ts}.png"
     with _matplotlib_logging_silenced():

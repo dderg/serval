@@ -2,8 +2,10 @@
 """Local web review for motion-planner snapshots.
 
 Serves a before/after comparison for every changed or pending case and an
-accept action that rewrites baselines. Stdlib only; run under an interpreter
-with the built `_motion_engine` and matplotlib:
+accept action that rewrites baselines. It can also serve the committed
+baselines as a read-only gallery. Stdlib only; run under an interpreter with
+the built `_motion_engine` and matplotlib for review mode, or just matplotlib
+for baseline mode:
 
     python snapshots/web/server.py            # then visit the printed URL
 
@@ -38,11 +40,11 @@ _RENDER_LOCK = threading.Lock()
 
 
 class ReviewState:
-    """Holds the latest scan: each case's current snapshot, status, and the
-    rendered before/after PNG bytes (rendered lazily, cached until re-scan)."""
+    """Holds the latest scan and cached rendered PNG bytes."""
 
-    def __init__(self):
+    def __init__(self, mode: str):
         self._lock = threading.Lock()
+        self.mode = mode
         self.cases: dict[str, dict] = {}
         self.error: str | None = None
         self.scan()
@@ -55,6 +57,35 @@ class ReviewState:
                 discovered = harness.discover_cases()
             except Exception as exc:
                 self.error = f"discover failed: {exc}"
+                return
+            if self.mode == "baselines":
+                expected = {case.baseline_path.resolve() for case in discovered}
+                found = {
+                    path.resolve()
+                    for path in harness.BASELINES_DIR.glob(
+                        f"**/*{harness.BASELINE_SUFFIX}"
+                    )
+                }
+                orphaned = sorted(found - expected)
+                if orphaned:
+                    details = "\n".join(
+                        str(path.relative_to(harness.BASELINES_DIR))
+                        for path in orphaned
+                    )
+                    self.error = (
+                        f"orphaned baselines without matching cases:\n{details}"
+                    )
+                    return
+                for case in discovered:
+                    snapshot = harness.baseline_snapshot(case)
+                    if snapshot is None:
+                        continue
+                    self.cases[case.name] = {
+                        "case": case,
+                        "snapshot": snapshot,
+                        "status": "baseline",
+                        "png": {},
+                    }
                 return
             for case in discovered:
                 try:
@@ -73,6 +104,24 @@ class ReviewState:
 
     def summary(self) -> dict:
         with self._lock:
+            if self.mode == "baselines":
+                baselines = [
+                    {
+                        "name": name,
+                        "status": entry["status"],
+                        "has_before": False,
+                    }
+                    for name, entry in self.cases.items()
+                ]
+                return {
+                    "mode": self.mode,
+                    "title": "Motion snapshot baselines",
+                    "review": baselines,
+                    "exact": 0,
+                    "baseline_count": len(baselines),
+                    "read_only": True,
+                    "error": self.error,
+                }
             review = [
                 {
                     "name": name,
@@ -87,7 +136,14 @@ class ReviewState:
                 for e in self.cases.values()
                 if e["status"] is harness.Status.EXACT
             )
-            return {"review": review, "exact": exact, "error": self.error}
+            return {
+                "mode": self.mode,
+                "title": "Motion snapshot review",
+                "review": review,
+                "exact": exact,
+                "read_only": False,
+                "error": self.error,
+            }
 
     def png(self, name: str, which: str) -> bytes | None:
         with self._lock:
@@ -110,6 +166,8 @@ class ReviewState:
         return data
 
     def accept(self, names: list[str]) -> list[str]:
+        if self.mode == "baselines":
+            raise RuntimeError("baseline viewer is read-only")
         with self._lock:
             targets = [
                 n
@@ -173,6 +231,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/api/accept":
             self._json({"error": "not found"}, 404)
             return
+        if STATE.mode == "baselines":
+            self._json({"error": "baseline viewer is read-only"}, 405)
+            return
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length) or b"{}")
         names = body.get("names", [])
@@ -220,6 +281,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--mode", choices=("review", "baselines"), default="review"
+    )
     args = parser.parse_args()
 
     global STATE, _RENDER_DIR
@@ -227,12 +291,17 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="snapshot-review-") as tmp:
         _RENDER_DIR = Path(tmp)
-        STATE = ReviewState()
+        STATE = ReviewState(args.mode)
         if STATE.error:
             print(f"warning: {STATE.error}", file=sys.stderr)
         server = ThreadingHTTPServer((args.host, args.port), Handler)
         url = f"http://{args.host}:{args.port}"
-        print(f"snapshot review — visit {url}  (Ctrl-C to stop)")
+        label = (
+            "snapshot baselines"
+            if args.mode == "baselines"
+            else "snapshot review"
+        )
+        print(f"{label} — visit {url}  (Ctrl-C to stop)")
         try:
             server.serve_forever()
         except KeyboardInterrupt:

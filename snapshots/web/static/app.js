@@ -4,6 +4,7 @@ const casesEl = document.getElementById("cases");
 const summaryEl = document.getElementById("summary");
 const bannerEl = document.getElementById("banner");
 const acceptAllBtn = document.getElementById("accept-all");
+const titleEl = document.getElementById("title");
 
 // Bump on every (re)load so accepted/changed images are re-fetched, not cached.
 let cacheBust = Date.now();
@@ -15,32 +16,41 @@ async function load() {
 }
 
 function render(data) {
+  const readOnly = Boolean(data.read_only);
+  titleEl.textContent = data.title || "Motion snapshot review";
+  acceptAllBtn.hidden = readOnly;
   bannerEl.hidden = !data.error;
   if (data.error) bannerEl.textContent = data.error;
 
   const review = data.review || [];
   const bits = [];
-  if (data.exact) bits.push(`${data.exact} match baseline`);
-  bits.push(`${review.length} to review`);
+  if (readOnly) {
+    bits.push(`${data.baseline_count || review.length} baselines`);
+  } else {
+    if (data.exact) bits.push(`${data.exact} match baseline`);
+    bits.push(`${review.length} to review`);
+  }
   summaryEl.textContent = bits.join(" · ");
-  acceptAllBtn.disabled = review.length === 0;
+  acceptAllBtn.disabled = readOnly || review.length === 0;
 
   casesEl.innerHTML = "";
   if (review.length === 0 && !data.error) {
     const div = document.createElement("div");
     div.className = "empty";
-    div.textContent = "Nothing to review — every case matches its baseline.";
+    div.textContent = readOnly
+      ? "No baselines found."
+      : "Nothing to review — every case matches its baseline.";
     casesEl.appendChild(div);
     return;
   }
-  for (const c of review) casesEl.appendChild(card(c));
+  for (const c of review) casesEl.appendChild(card(c, readOnly));
 }
 
 function imgUrl(name, which) {
   return `/img/${encodeURIComponent(name)}/${which}.png?t=${cacheBust}`;
 }
 
-function card(c) {
+function card(c, readOnly) {
   const el = document.createElement("section");
   el.className = "card";
 
@@ -58,7 +68,9 @@ function card(c) {
   if (c.has_before) {
     foot.appendChild(link("open before", imgUrl(c.name, "before")));
   }
-  foot.appendChild(link("open after", imgUrl(c.name, "after")));
+  foot.appendChild(
+    link(readOnly ? "open baseline" : "open after", imgUrl(c.name, "after")),
+  );
   el.appendChild(foot);
   return el;
 }
