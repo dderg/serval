@@ -1,5 +1,7 @@
 #[doc(hidden)]
 pub mod anchor;
+#[doc(hidden)]
+pub mod tick_chain;
 mod bridge;
 #[doc(hidden)]
 pub mod classify;
@@ -37,8 +39,6 @@ pub mod servo_sdo;
 pub mod servo_torque;
 pub mod stream;
 pub mod stream_planner;
-#[doc(hidden)]
-pub mod tick_chain;
 pub mod timing;
 mod types;
 pub mod viz;
