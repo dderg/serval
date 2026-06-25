@@ -3598,7 +3598,12 @@ impl PyMotionEngine {
         Ok(self.drain.is_drained_now())
     }
 
-    fn motion_drain_finalize(&self) {}
+    fn motion_drain_finalize(&self) {
+        *self
+            .dispatch_anchor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
+    }
 
     fn submit_dwell(&self, duration_s: f64) -> PyResult<()> {
         let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
