@@ -12,6 +12,7 @@ use disk::Kinematics;
 const LENGTH_EPS_MM: f64 = 1e-9;
 const VELOCITY_EPS_MM_S: f64 = 1e-9;
 const MIN_INTEGRATION_TOL: f64 = 1e-9;
+const NEGATIVE_VELOCITY_TOL_MM_S: f64 = 1e-6;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelocityConfig {
@@ -82,7 +83,7 @@ pub struct VelocityProfile {
     pub v_barrier: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VelocityError {
     Inconsistent { line_no: u32 },
     NonAlphabet { line_no: u32 },
@@ -90,6 +91,7 @@ pub enum VelocityError {
     Diverged { line_no: u32 },
     OverCommitted { line_no: u32 },
     RestAnchorAccel { line_no: u32 },
+    NegativeVelocity { line_no: u32, v: f64 },
     InvalidConfig,
 }
 
@@ -362,6 +364,9 @@ pub fn plan_velocity_warm_start(
             if is_anchor[j + 1] && exit_v <= VELOCITY_EPS_MM_S {
                 pin_rest_anchor(samples.last_mut(), line_no, kin.jerk)?;
             }
+            if let Some(v) = first_negative_velocity(&samples) {
+                return Err(VelocityError::NegativeVelocity { line_no, v });
+            }
             let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
             report.traversal_time_s += traversal_time(&samples);
 
@@ -397,6 +402,13 @@ pub fn plan_velocity_warm_start(
         barrier,
         v_barrier,
     })
+}
+
+fn first_negative_velocity(samples: &[VelSample]) -> Option<f64> {
+    samples
+        .iter()
+        .map(|p| p.v)
+        .find(|&v| v < -NEGATIVE_VELOCITY_TOL_MM_S)
 }
 
 fn traversal_time(samples: &[VelSample]) -> f64 {
