@@ -500,6 +500,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
             pieces: pieces_to_enqueue,
             fresh_stream: false,
             lead_secs: 0.0,
+            source_line: u32::MAX,
         }))
         .expect("enqueue must succeed before shutdown");
 

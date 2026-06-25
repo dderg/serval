@@ -114,6 +114,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
         pieces: vec![piece(0)],
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     tx.send(PumpMsg::Enqueue(EnqueueMsg {
@@ -121,6 +122,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
         pieces: vec![piece(1)],
         fresh_stream: false,
         lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
 
