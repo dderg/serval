@@ -635,6 +635,17 @@ pub fn run_pump<S, F, C, A, O, D>(
                 for key in keys {
                     if let Some(q) = queues.get_mut(&key) {
                         let dropped = q.pieces.len() as u32;
+                        if dropped > 0 {
+                            tracing::warn!(
+                                subsystem = "motion",
+                                event = "pump_flush_clear",
+                                mcu = key.mcu_id,
+                                axis = key.axis,
+                                dropped,
+                                final_frontier = ?q.final_frontier_ticks,
+                                "[pump] Flush cleared staged pieces — abandoning committed motion"
+                            );
+                        }
                         q.pieces.clear();
                         if dropped > 0 {
                             on_abandon(key, dropped);
@@ -868,6 +879,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     let mut data_open = true;
     let mut last_brake_diag = Instant::now();
     let mut last_state_dump = Instant::now();
+    let mut prev_dump: HashMap<AxisKey, (usize, u32)> = HashMap::new();
 
     loop {
         let cohort_active = cohort.is_some();
@@ -958,6 +970,35 @@ pub fn run_pump<S, F, C, A, O, D>(
                 let tail_starts: Vec<u64> =
                     q.brake_tail.iter().map(|(p, _)| p.start_time).collect();
                 let backsteps = starts.windows(2).filter(|w| w[1] < w[0]).count();
+                let in_flight = q.pushed.wrapping_sub(q.retired);
+
+                // Decisive sent-vs-cleared probe: between dumps, did pieces leave
+                // the queue WITHOUT a matching push to the ring? A drop in n_pieces
+                // not accounted for by Δpushed means the queue was cleared/flushed
+                // (motion abandoned), not drained into the MCU. That orphans
+                // final_frontier_ticks at the abandoned batch's deep value.
+                let (prev_n, prev_pushed) = prev_dump
+                    .get(k)
+                    .copied()
+                    .unwrap_or((starts.len(), q.pushed));
+                let n_drop = prev_n.saturating_sub(starts.len()) as u32;
+                let pushed_delta = q.pushed.wrapping_sub(prev_pushed);
+                if n_drop > pushed_delta.saturating_add(4) {
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "pump_pieces_vanished",
+                        mcu = k.mcu_id,
+                        axis = k.axis,
+                        n_drop,
+                        pushed_delta,
+                        unexplained = n_drop - pushed_delta,
+                        final_frontier = ?q.final_frontier_ticks,
+                        back = ?starts.last(),
+                        "[pump] pieces left the queue without being pushed — cleared/abandoned"
+                    );
+                }
+                prev_dump.insert(*k, (starts.len(), q.pushed));
+
                 tracing::warn!(
                     subsystem = "motion",
                     event = "pump_state_dump",
@@ -967,6 +1008,11 @@ pub fn run_pump<S, F, C, A, O, D>(
                     front = ?starts.first(),
                     back = ?starts.last(),
                     backsteps,
+                    pushed = q.pushed,
+                    retired = q.retired,
+                    in_flight,
+                    room = q.room(),
+                    lead_secs = q.lead_secs,
                     playhead = ?mcu_clock_of(k.mcu_id).map(|(p, _)| p),
                     final_frontier = ?q.final_frontier_ticks,
                     brake_tail_valid = q.brake_tail_valid,
