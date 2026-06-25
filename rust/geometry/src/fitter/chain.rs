@@ -1,18 +1,19 @@
+use std::f64::consts::{FRAC_PI_6, PI};
+
 use crate::GeometryError;
-use crate::frontend::Move;
+use crate::frontend::{Move, VelocityLimits};
 use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, Clothoid, CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 
 use super::{
-    ArcFitConfig, BUDGET_EPS_MM, ChainFitConfig, FitError, dot, internal, junction_deviation,
-    line_of, madd, norm, turn_normal,
+    BUDGET_EPS_MM, ChainFitConfig, CornerFitConfig, FitError, dot, internal, junction_deviation,
+    line_of, norm, turn_normal,
 };
 
 const COPLANAR_TOL: f64 = 1e-6;
-const SEAM_TOL_MM: f64 = 1e-6;
 const ANGLE_EPS_RAD: f64 = 1e-9;
-const RHO_ARC_BISECTIONS: u32 = 60;
+const EASE_LEAD_MAX_RAD: f64 = FRAC_PI_6;
 
 pub(super) struct ChainRun {
     pub start: usize,
@@ -21,12 +22,16 @@ pub(super) struct ChainRun {
 }
 
 pub(super) struct Reconstruction {
-    pub up: Clothoid,
+    pub up: Vec<Clothoid>,
+    pub up_followers: Vec<FollowerDemand>,
     pub arc: Arc,
-    pub down: Clothoid,
+    pub down: Vec<Clothoid>,
+    pub down_followers: Vec<FollowerDemand>,
     pub followers: Vec<FollowerDemand>,
     pub head_consumption: f64,
     pub tail_consumption: f64,
+    pub head_line_trim: f64,
+    pub tail_line_trim: f64,
 }
 
 pub(super) fn detect_runs(
@@ -36,62 +41,583 @@ pub(super) fn detect_runs(
     let Some(arc) = config.arc_fit else {
         return Ok(Vec::new());
     };
+    let min_run = (arc.min_run_facets.max(3)) as usize;
+    let scv_delta = moves
+        .iter()
+        .map(|m| junction_deviation(m.limits))
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    // The arc may bulge off the sliced facets by at most the printer's junction
+    // deviation, scv^2*(sqrt2-1)/accel — the same corner-rounding budget the
+    // velocity planner already lives by — so the tolerance scales with the
+    // machine instead of being a hand-set literal. deviation_tol_mm is only a
+    // fallback for moves that carry no usable limits.
+    let tol = if scv_delta.is_finite() {
+        scv_delta
+    } else {
+        arc.deviation_tol_mm
+    };
+    let gate_epmm = moves.iter().any(|m| epmm(m) > EPMM_MIN);
     let mut runs = Vec::new();
     let n = moves.len();
     let mut i = 0;
     while i + 1 < n {
-        if line_of(&moves[i]).is_none() {
+        if line_of(&moves[i]).is_none() || (gate_epmm && epmm(&moves[i]) < EPMM_MIN) {
             i += 1;
             continue;
         }
-        let (end, turning) = grow_run(moves, i, config, arc);
-        if turning >= config.min_run_junctions {
-            if let Some(recon) = reconstruct(&moves[i..=end], config)? {
-                runs.push(ChainRun {
-                    start: i,
-                    end,
-                    recon,
-                });
-                i = end + 1;
-                continue;
+        let band_end = grow_turning_band(moves, i, config.corner, gate_epmm);
+        let mut span_start = i;
+        while span_start + min_run <= band_end + 1 {
+            let span_end = grow_cocircular_span(moves, span_start, band_end, tol);
+            if span_end + 1 - span_start >= min_run {
+                if let Some(recon) = reconstruct(&moves[span_start..=span_end], tol)? {
+                    runs.push(ChainRun {
+                        start: span_start,
+                        end: span_end,
+                        recon,
+                    });
+                    span_start = span_end + 1;
+                    continue;
+                }
             }
+            span_start += 1;
         }
-        i += 1;
+        i = band_end + 1;
     }
+    attach_boundary_blends(&mut runs, moves, tol)?;
     Ok(runs)
 }
 
-fn grow_run(
+/// A straight facet adjacent to a run that the run can be eased into.
+struct Neighbor {
+    dir: [f64; 3],
+    vertex: [f64; 3],
+    length: f64,
+    epmm: f64,
+    followers: Vec<FollowerDemand>,
+}
+
+fn boundary_neighbor(
+    moves: &[Move],
+    occupied: &[bool],
+    idx: usize,
+    head: bool,
+) -> Option<Neighbor> {
+    let nbr = if head {
+        if idx == 0 || occupied[idx - 1] {
+            return None;
+        }
+        idx - 1
+    } else {
+        if idx + 1 >= moves.len() || occupied[idx + 1] {
+            return None;
+        }
+        idx + 1
+    };
+    let l = line_of(&moves[nbr])?;
+    let (vertex, dir) = if head {
+        (l.point_at(l.s_len()), l.heading_at(l.s_len()))
+    } else {
+        (l.point_at(0.0), l.heading_at(0.0))
+    };
+    Some(Neighbor {
+        dir,
+        vertex,
+        length: l.s_len(),
+        epmm: epmm(&moves[nbr]),
+        followers: moves[nbr].segment.followers.clone(),
+    })
+}
+
+/// Re-fit each run's circle so the neighbouring straight lines flow into it
+/// through curvature-continuous transition spirals. A spiral that starts on the
+/// line (kappa = 0) and ends curvature-matched to the circle (kappa = 1/R) cannot
+/// also land on a *fixed* circle — the geometry is over-constrained — so the
+/// circle is nudged (its centre, and radius, re-fit jointly across both ends)
+/// onto the spiral. The nudge stays within the same junction-deviation budget the
+/// bare arc already honours; runs whose leads are too sharp to absorb within
+/// budget keep the plain arc.
+fn attach_boundary_blends(runs: &mut [ChainRun], moves: &[Move], tol: f64) -> Result<(), FitError> {
+    let mut occupied = vec![false; moves.len()];
+    for r in runs.iter() {
+        for k in r.start..=r.end {
+            occupied[k] = true;
+        }
+    }
+    for ri in 0..runs.len() {
+        let (start, end) = (runs[ri].start, runs[ri].end);
+        let head = boundary_neighbor(moves, &occupied, start, true);
+        let tail = boundary_neighbor(moves, &occupied, end, false);
+        let run_epmm = epmm(&moves[start]);
+        let line_no = moves[start].source.start_line;
+        let verts = run_vertices(&moves[start..=end]);
+
+        let Some(fit) = joint_refit(
+            &runs[ri].recon.arc,
+            head.as_ref(),
+            tail.as_ref(),
+            &verts,
+            run_epmm,
+            tol,
+            line_no,
+        )?
+        else {
+            continue;
+        };
+
+        let recon = &mut runs[ri].recon;
+        recon.arc = fit.arc;
+        recon.up = fit.head.into_iter().collect();
+        recon.down = fit.tail.into_iter().collect();
+        recon.head_line_trim = fit.head_line_trim;
+        recon.tail_line_trim = fit.tail_line_trim;
+        let lines: Vec<&Line> = moves[start..=end]
+            .iter()
+            .map(line_of)
+            .collect::<Option<Vec<_>>>()
+            .expect("run facets are lines");
+        // The arc carries the run's filament; each spiral carries exactly the
+        // filament of the neighbour-line length it consumed, so total extrusion
+        // is conserved across the trim.
+        recon.followers = run_followers(
+            &moves[start..=end],
+            &lines,
+            recon.head_consumption,
+            recon.tail_consumption,
+            arc_len(&recon.arc),
+        );
+        recon.up_followers = match (recon.up.first(), &head) {
+            (Some(clo), Some(nbr)) => {
+                scale_followers(&nbr.followers, recon.head_line_trim / clo.s_len())
+            }
+            _ => Vec::new(),
+        };
+        recon.down_followers = match (recon.down.first(), &tail) {
+            (Some(clo), Some(nbr)) => {
+                scale_followers(&nbr.followers, recon.tail_line_trim / clo.s_len())
+            }
+            _ => Vec::new(),
+        };
+    }
+    Ok(())
+}
+
+fn scale_followers(f: &[FollowerDemand], s: f64) -> Vec<FollowerDemand> {
+    f.iter()
+        .map(|x| FollowerDemand {
+            axis_index: x.axis_index,
+            ratio: x.ratio * s,
+        })
+        .collect()
+}
+
+struct JointFit {
+    arc: Arc,
+    head: Option<Clothoid>,
+    tail: Option<Clothoid>,
+    head_line_trim: f64,
+    tail_line_trim: f64,
+}
+
+/// One end's transition-spiral data, solved against a placed circle.
+struct EndPlan {
+    /// Curve-side unit normal of the line (points toward the circle centre).
+    normal: [f64; 3],
+    /// Line travel direction fed to [`build_spiral`] (reversed for the tail).
+    spiral_dir: [f64; 3],
+    /// Curving sign fed to [`build_spiral`].
+    curve_sgn: f64,
+    turn: f64,
+    vertex: [f64; 3],
+    neighbor_dir: [f64; 3],
+    neighbor_len: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn joint_refit(
+    arc: &Arc,
+    head: Option<&Neighbor>,
+    tail: Option<&Neighbor>,
+    verts: &[[f64; 3]],
+    run_epmm: f64,
+    tol: f64,
+    line_no: u32,
+) -> Result<Option<JointFit>, FitError> {
+    let pn = normalize(cross(arc.u, arc.v));
+    let sgn = arc.sweep.signum();
+    let (o0, r0) = (arc.origin, arc.radius);
+    let t_start = arc.heading_at(0.0);
+    let t_end = arc.heading_at(arc.s_len());
+
+    let head_plan = head.and_then(|n| {
+        let turn = signed_angle(n.dir, t_start, pn);
+        end_plan(n, turn, sgn, n.dir, sgn, run_epmm, pn, o0)
+    });
+    let tail_plan = tail.and_then(|n| {
+        let turn = signed_angle(t_end, n.dir, pn);
+        end_plan(n, turn, sgn, scale(n.dir, -1.0), -sgn, run_epmm, pn, o0)
+    });
+    if head_plan.is_none() && tail_plan.is_none() {
+        return Ok(None);
+    }
+
+    let Some((origin, radius)) = choose_circle(
+        head_plan.as_ref(),
+        tail_plan.as_ref(),
+        o0,
+        r0,
+        arc.u,
+        arc.v,
+        verts,
+    ) else {
+        return Ok(None);
+    };
+
+    let mut head_clo = None;
+    let mut tail_clo = None;
+    let mut head_trim = 0.0;
+    let mut tail_trim = 0.0;
+    let b_head = match &head_plan {
+        Some(p) => {
+            let (clo, b, trim) = build_spiral(origin, radius, p, pn)
+                .map_err(internal(line_no))?
+                .ok_or(())
+                .map_err(|_| FitError::Internal {
+                    line_no,
+                    source: GeometryError::DegenerateClothoid {
+                        reason: "head transition spiral did not close",
+                    },
+                })?;
+            if !within_line(trim, p.neighbor_len) || spiral_dev(&clo, p, o0, r0, pn) > tol {
+                return Ok(None);
+            }
+            head_clo = Some(clo);
+            head_trim = trim;
+            b
+        }
+        None => project_to_circle(origin, radius, verts[0]),
+    };
+    let b_tail = match &tail_plan {
+        Some(p) => {
+            let (clo, b, trim) = build_spiral(origin, radius, p, pn)
+                .map_err(internal(line_no))?
+                .ok_or(())
+                .map_err(|_| FitError::Internal {
+                    line_no,
+                    source: GeometryError::DegenerateClothoid {
+                        reason: "tail transition spiral did not close",
+                    },
+                })?;
+            if !within_line(trim, p.neighbor_len) || spiral_dev(&clo, p, o0, r0, pn) > tol {
+                return Ok(None);
+            }
+            tail_clo = Some(
+                reverse_clothoid(&clo)
+                    .ok_or(())
+                    .map_err(|_| FitError::Internal {
+                        line_no,
+                        source: GeometryError::DegenerateClothoid {
+                            reason: "tail spiral reverse failed",
+                        },
+                    })?,
+            );
+            tail_trim = trim;
+            b
+        }
+        None => project_to_circle(origin, radius, verts[verts.len() - 1]),
+    };
+
+    if interior_residual(&origin, radius, verts) > tol {
+        return Ok(None);
+    }
+
+    let arc = build_arc(origin, radius, b_head, b_tail, pn, sgn).map_err(internal(line_no))?;
+    Ok(Some(JointFit {
+        arc,
+        head: head_clo,
+        tail: tail_clo,
+        head_line_trim: head_trim,
+        tail_line_trim: tail_trim,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn end_plan(
+    n: &Neighbor,
+    turn: f64,
+    sweep_sign: f64,
+    spiral_dir: [f64; 3],
+    curve_sgn: f64,
+    run_epmm: f64,
+    pn: [f64; 3],
+    o0: [f64; 3],
+) -> Option<EndPlan> {
+    if run_epmm > EPMM_MIN && (n.epmm - run_epmm).abs() > EPMM_REL_TOL * run_epmm {
+        return None;
+    }
+    // The lead must carry curvature the arc's way; an opposite turn would inflect.
+    if turn.signum() != sweep_sign {
+        return None;
+    }
+    let phi = turn.abs();
+    if !(ANGLE_EPS_RAD..EASE_LEAD_MAX_RAD).contains(&phi) {
+        return None;
+    }
+    let normal = scale(normalize(cross(pn, spiral_dir)), curve_sgn);
+    if dot(normal, sub(o0, n.vertex)) <= 0.0 {
+        return None;
+    }
+    Some(EndPlan {
+        normal,
+        spiral_dir,
+        curve_sgn,
+        turn: phi,
+        vertex: n.vertex,
+        neighbor_dir: n.dir,
+        neighbor_len: n.length,
+    })
+}
+
+/// Centre-to-line perpendicular distance of the circle that a spiral of turn
+/// `phi` (curvature ramping 0 -> 1/R) lands on tangentially, measured from the
+/// line the spiral departs from.
+fn spiral_center_dist(
+    radius: f64,
+    line_dir: [f64; 3],
+    curve_sgn: f64,
+    phi: f64,
+    pn: [f64; 3],
+) -> Option<f64> {
+    let length = 2.0 * radius * phi;
+    if !(length.is_finite() && length > BUDGET_EPS_MM) {
+        return None;
+    }
+    let sigma = curve_sgn / (radius * length);
+    let v = scale(normalize(cross(pn, line_dir)), curve_sgn);
+    let probe = Clothoid::try_new([0.0; 3], line_dir, v, 0.0, sigma, length).ok()?;
+    let end = probe.point_at(length);
+    let t_end = probe.heading_at(length);
+    let center = add(end, scale(cross(pn, t_end), radius * curve_sgn));
+    Some(dot(center, v))
+}
+
+/// Build the line->arc transition spiral once the circle is placed. Returns the
+/// clothoid (traversed line->arc), the arc-side junction point on the circle, and
+/// how much of the neighbour line it consumes.
+fn build_spiral(
+    origin: [f64; 3],
+    radius: f64,
+    p: &EndPlan,
+    pn: [f64; 3],
+) -> Result<Option<(Clothoid, [f64; 3], f64)>, GeometryError> {
+    let length = 2.0 * radius * p.turn;
+    if !(length.is_finite() && length > BUDGET_EPS_MM) {
+        return Ok(None);
+    }
+    let sigma = p.curve_sgn / (radius * length);
+    let v = scale(normalize(cross(pn, p.spiral_dir)), p.curve_sgn);
+    let probe = Clothoid::try_new([0.0; 3], p.spiral_dir, v, 0.0, sigma, length)?;
+    let end_off = probe.point_at(length);
+    let t_end = probe.heading_at(length);
+    // Circle point whose tangent matches the spiral end: B = O - R*sgn*(pn x t_end).
+    let b = sub(origin, scale(cross(pn, t_end), radius * p.curve_sgn));
+    let a = sub(b, end_off);
+    let line_trim = dot(sub(p.vertex, a), p.spiral_dir);
+    let clo = Clothoid::try_new(a, p.spiral_dir, v, 0.0, sigma, length)?;
+    Ok(Some((clo, b, line_trim)))
+}
+
+fn within_line(trim: f64, length: f64) -> bool {
+    trim > -BUDGET_EPS_MM && trim < 0.9 * length
+}
+
+fn project_to_circle(origin: [f64; 3], radius: f64, p: [f64; 3]) -> [f64; 3] {
+    add(origin, scale(normalize(sub(p, origin)), radius))
+}
+
+/// Largest deviation of the spiral from the corner it replaces (the neighbour
+/// line on the line side, the original circle on the arc side).
+fn spiral_dev(clo: &Clothoid, p: &EndPlan, o0: [f64; 3], r0: f64, pn: [f64; 3]) -> f64 {
+    let n_line = normalize(cross(pn, p.neighbor_dir));
+    let mut m = 0.0_f64;
+    let samples = 16usize;
+    for k in 0..=samples {
+        let q = clo.point_at(clo.s_len() * k as f64 / samples as f64);
+        let off_line = dot(sub(q, p.vertex), n_line).abs();
+        let off_arc = (norm(sub(q, o0)) - r0).abs();
+        m = m.max(off_line.min(off_arc));
+    }
+    m
+}
+
+fn interior_residual(origin: &[f64; 3], radius: f64, verts: &[[f64; 3]]) -> f64 {
+    if verts.len() <= 2 {
+        return 0.0;
+    }
+    verts[1..verts.len() - 1]
+        .iter()
+        .map(|v| (norm(sub(*v, *origin)) - radius).abs())
+        .fold(0.0, f64::max)
+}
+
+/// Place the circle (centre, radius) so every eased end's spiral closes exactly.
+/// The radius is the **balanced** one — halfway between threading the vertices
+/// (the bulge-out circumscribed circle) and hugging the facet chords — so the
+/// reconstructed arc deviates from the sliced path by only half the sagitta
+/// instead of the full bulge. The centre is then the unique placement that lands
+/// the spiral(s) on that circle: two ends pin it via offset-line intersection,
+/// one end leaves a perpendicular freedom resolved by projecting the bare centre.
+fn choose_circle(
+    head: Option<&EndPlan>,
+    tail: Option<&EndPlan>,
+    o0: [f64; 3],
+    r0: f64,
+    u: [f64; 3],
+    v: [f64; 3],
+    verts: &[[f64; 3]],
+) -> Option<([f64; 3], f64)> {
+    let pn = normalize(cross(u, v));
+    let radius = balanced_radius(r0, verts);
+    match (head, tail) {
+        (Some(h), Some(t)) => {
+            let dh = spiral_center_dist(radius, h.spiral_dir, h.curve_sgn, h.turn, pn)?;
+            let dt = spiral_center_dist(radius, t.spiral_dir, t.curve_sgn, t.turn, pn)?;
+            let origin = solve_center(h.normal, h.vertex, dh, t.normal, t.vertex, dt, o0, u, v)?;
+            Some((origin, radius))
+        }
+        (Some(e), None) | (None, Some(e)) => {
+            let d = spiral_center_dist(radius, e.spiral_dir, e.curve_sgn, e.turn, pn)?;
+            let origin = add(o0, scale(e.normal, d - dot(sub(o0, e.vertex), e.normal)));
+            Some((origin, radius))
+        }
+        (None, None) => None,
+    }
+}
+
+/// The minimax radius for the run's faceting: the circumscribed circle threads
+/// the vertices and bulges past each chord by its sagitta; pulling the radius in
+/// by half the worst sagitta splits that error evenly (inside the vertices,
+/// outside the chords) and halves the peak path deviation.
+fn balanced_radius(r0: f64, verts: &[[f64; 3]]) -> f64 {
+    let mut max_sag = 0.0_f64;
+    for w in verts.windows(2) {
+        let half = 0.5 * norm(sub(w[1], w[0]));
+        if half < r0 {
+            max_sag = max_sag.max(r0 - (r0 * r0 - half * half).sqrt());
+        }
+    }
+    r0 - 0.5 * max_sag
+}
+
+/// Solve the in-plane centre satisfying both perpendicular-distance constraints.
+#[allow(clippy::too_many_arguments)]
+fn solve_center(
+    nh: [f64; 3],
+    ph: [f64; 3],
+    dh: f64,
+    nt: [f64; 3],
+    pt: [f64; 3],
+    dt: f64,
+    o0: [f64; 3],
+    u: [f64; 3],
+    v: [f64; 3],
+) -> Option<[f64; 3]> {
+    let a = [[dot(nh, u), dot(nh, v)], [dot(nt, u), dot(nt, v)]];
+    let b = [dot(nh, sub(ph, o0)) + dh, dot(nt, sub(pt, o0)) + dt];
+    let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let x = (b[0] * a[1][1] - b[1] * a[0][1]) / det;
+    let y = (a[0][0] * b[1] - a[1][0] * b[0]) / det;
+    Some(add(o0, add(scale(u, x), scale(v, y))))
+}
+
+fn build_arc(
+    origin: [f64; 3],
+    radius: f64,
+    b_head: [f64; 3],
+    b_tail: [f64; 3],
+    pn: [f64; 3],
+    sgn: f64,
+) -> Result<Arc, GeometryError> {
+    let u = normalize(sub(b_head, origin));
+    let v = cross(pn, u);
+    let mut sweep = signed_angle(u, normalize(sub(b_tail, origin)), pn);
+    if sgn > 0.0 && sweep < 0.0 {
+        sweep += 2.0 * PI;
+    }
+    if sgn < 0.0 && sweep > 0.0 {
+        sweep -= 2.0 * PI;
+    }
+    Arc::try_new(origin, u, v, radius, 0.0, sweep)
+}
+
+fn signed_angle(from: [f64; 3], to: [f64; 3], pn: [f64; 3]) -> f64 {
+    dot(cross(from, to), pn).atan2(dot(from, to))
+}
+
+fn run_vertices(facets: &[Move]) -> Vec<[f64; 3]> {
+    let lines: Vec<&Line> = facets
+        .iter()
+        .map(line_of)
+        .collect::<Option<Vec<_>>>()
+        .expect("run facets are lines");
+    let mut verts = Vec::with_capacity(lines.len() + 1);
+    verts.push(lines[0].start);
+    for l in &lines {
+        verts.push(l.point_at(l.s_len()));
+    }
+    verts
+}
+
+/// The same clothoid traversed end-to-start, expressed as a forward [`Clothoid`]:
+/// `out.point_at(s) == c.point_at(L - s)` and the heading negates.
+fn reverse_clothoid(c: &Clothoid) -> Option<Clothoid> {
+    let l = c.s_len();
+    let pn = normalize(cross(c.u, c.v));
+    let start = c.point_at(l);
+    let u = scale(c.heading_at(l), -1.0);
+    let v = cross(pn, u);
+    let kappa_0 = -(c.kappa_0 + c.sigma * l);
+    Clothoid::try_new(start, u, v, kappa_0, c.sigma, l).ok()
+}
+
+const EPMM_MIN: f64 = 1e-9;
+const EPMM_REL_TOL: f64 = 0.25;
+
+fn epmm(m: &Move) -> f64 {
+    m.segment.followers.iter().map(|f| f.ratio.abs()).sum()
+}
+
+fn grow_turning_band(
     moves: &[Move],
     start: usize,
-    config: ChainFitConfig,
-    arc: ArcFitConfig,
-) -> (usize, u32) {
+    corner: CornerFitConfig,
+    gate_epmm: bool,
+) -> usize {
     let n = moves.len();
     let mut end = start;
-    let mut turning = 0u32;
     let mut plane: Option<[f64; 3]> = None;
     let mut turn_sign: Option<f64> = None;
+    let e0 = epmm(&moves[start]);
     while end + 1 < n {
+        if gate_epmm {
+            let e_next = epmm(&moves[end + 1]);
+            if e_next < EPMM_MIN || (e_next - e0).abs() > EPMM_REL_TOL * e0 {
+                break;
+            }
+        }
         let (la, lb) = match (line_of(&moves[end]), line_of(&moves[end + 1])) {
             (Some(a), Some(b)) => (a, b),
             _ => break,
         };
-        if la.s_len() > arc.facet_len_max_mm || lb.s_len() > arc.facet_len_max_mm {
-            break;
-        }
         let t_in = la.heading_at(la.s_len());
         let t_out = lb.heading_at(0.0);
         let theta = dot(t_in, t_out).clamp(-1.0, 1.0).acos();
-        if theta >= config.corner.theta_max_rad {
+        if theta <= corner.theta_min_rad || theta >= corner.theta_max_rad {
             break;
-        }
-        if theta > arc.max_turn_rad {
-            break;
-        }
-        if theta <= config.corner.theta_min_rad {
-            end += 1;
-            continue;
         }
         let v = match turn_normal(t_in, t_out) {
             Some(v) => v,
@@ -115,118 +641,169 @@ fn grow_run(
                 }
             }
         }
-        turning += 1;
         end += 1;
     }
-    (end, turning)
+    end
 }
 
-pub(super) fn reconstruct(
-    facets: &[Move],
-    config: ChainFitConfig,
-) -> Result<Option<Reconstruction>, FitError> {
+fn grow_cocircular_span(moves: &[Move], start: usize, band_end: usize, tol: f64) -> usize {
+    let mut best = start;
+    let mut end = start + 2;
+    while end <= band_end {
+        if cocircular(&moves[start..=end], tol) {
+            best = end;
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    best
+}
+
+fn cocircular(facets: &[Move], tol: f64) -> bool {
+    let Some(fit) = circle_fit(facets) else {
+        return false;
+    };
+    if !(fit.residual <= tol && fit.radius.is_finite() && fit.radius > BUDGET_EPS_MM) {
+        return false;
+    }
+    let Some(lines) = facets.iter().map(line_of).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    max_sagitta(&lines, fit.radius) <= tol
+}
+
+/// Largest bulge between the fitted arc and a straight facet chord. This is the
+/// path error the unfaceting introduces; bounding it is what tells a genuine
+/// faceted arc (many small chords, tiny bulge) from a coarse polyline whose
+/// vertices merely happen to lie on a circle (e.g. three sides of a square).
+fn max_sagitta(lines: &[&Line], radius: f64) -> f64 {
+    lines
+        .iter()
+        .map(|l| {
+            let half = 0.5 * l.s_len();
+            if half >= radius {
+                f64::INFINITY
+            } else {
+                radius - (radius * radius - half * half).sqrt()
+            }
+        })
+        .fold(0.0, f64::max)
+}
+
+fn circle_fit(facets: &[Move]) -> Option<CircleFit> {
+    let lines: Vec<&Line> = facets.iter().map(line_of).collect::<Option<Vec<_>>>()?;
+    if lines.len() < 2 {
+        return None;
+    }
+    let t0 = lines[0].heading_at(0.0);
+    let v0 = turn_normal(t0, lines[1].heading_at(0.0))?;
+    let plane_normal = normalize(cross(t0, v0));
+    fit_circle_through_vertices(&lines, plane_normal)
+}
+
+fn fit_circle_through_vertices(lines: &[&Line], plane_normal: [f64; 3]) -> Option<CircleFit> {
+    let mut verts: Vec<[f64; 3]> = Vec::with_capacity(lines.len() + 1);
+    verts.push(lines[0].start);
+    for l in lines {
+        verts.push(l.point_at(l.s_len()));
+    }
+    let q0 = verts[0];
+    let d1 = sub(verts[1], q0);
+    if norm(d1) < BUDGET_EPS_MM {
+        return None;
+    }
+    let e1 = normalize(d1);
+    let e2 = cross(plane_normal, e1);
+    let pts: Vec<(f64, f64)> = verts
+        .iter()
+        .map(|v| {
+            let d = sub(*v, q0);
+            (dot(d, e1), dot(d, e2))
+        })
+        .collect();
+    let n = pts.len() as f64;
+    let (mut sx, mut sy, mut sxx, mut syy, mut sxy, mut sxz, mut syz, mut sz) =
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for &(x, y) in &pts {
+        let z = x * x + y * y;
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        syy += y * y;
+        sxy += x * y;
+        sxz += x * z;
+        syz += y * z;
+        sz += z;
+    }
+    let m = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]];
+    let sol = solve3(m, [-sxz, -syz, -sz])?;
+    let (cx, cy) = (-0.5 * sol[0], -0.5 * sol[1]);
+    let r2 = cx * cx + cy * cy - sol[2];
+    if !(r2 > 0.0) {
+        return None;
+    }
+    let radius = r2.sqrt();
+    let mut residual = 0.0_f64;
+    for &(x, y) in &pts {
+        residual = residual.max((((x - cx).powi(2) + (y - cy).powi(2)).sqrt() - radius).abs());
+    }
+    let origin = add(q0, add(scale(e1, cx), scale(e2, cy)));
+    Some(CircleFit {
+        origin,
+        radius,
+        residual,
+    })
+}
+
+pub(super) fn reconstruct(facets: &[Move], tol: f64) -> Result<Option<Reconstruction>, FitError> {
     let line_no = facets[0].source.start_line;
     let lines: Vec<&Line> = match facets.iter().map(line_of).collect::<Option<Vec<_>>>() {
         Some(l) => l,
         None => return Ok(None),
     };
+    if lines.len() < 2 {
+        return Ok(None);
+    }
 
     let t0 = lines[0].heading_at(0.0);
-    let tm = lines[lines.len() - 1].heading_at(0.0);
     let v0 = match turn_normal(t0, lines[1].heading_at(0.0)) {
         Some(v) => v,
         None => return Ok(None),
     };
     let plane_normal = normalize(cross(t0, v0));
-
-    let inward = |t: [f64; 3]| normalize(cross(plane_normal, t));
-    let fit = match incircle(&lines, t0, v0, &inward) {
+    let fit = match fit_circle_through_vertices(&lines, plane_normal) {
         Some(f) => f,
         None => return Ok(None),
     };
-    if fit.residual > config.cocircular_tol {
+    if fit.residual > tol {
         return Ok(None);
     }
     let (origin, rho) = (fit.origin, fit.radius);
     if !(rho.is_finite() && rho > BUDGET_EPS_MM) {
         return Ok(None);
     }
-
-    let theta_run = total_turn(&lines);
-    let delta = facets
-        .iter()
-        .map(|m| junction_deviation(m.limits))
-        .fold(f64::INFINITY, f64::min);
-    if !(delta.is_finite() && delta > 0.0) {
+    if max_sagitta(&lines, rho) > tol {
         return Ok(None);
     }
 
-    let len_first = lines[0].s_len();
-    let len_last = lines[lines.len() - 1].s_len();
-    let l_t = (24.0 * rho * delta)
-        .sqrt()
-        .min(len_first)
-        .min(len_last)
-        .min(0.5 * rho);
-    if l_t <= BUDGET_EPS_MM {
+    let u = normalize(sub(lines[0].start, origin));
+    let v = cross(plane_normal, u);
+    let mut sweep = 0.0_f64;
+    let mut prev = sub(lines[0].start, origin);
+    for l in &lines {
+        let cur = sub(l.point_at(l.s_len()), origin);
+        sweep += dot(cross(prev, cur), plane_normal).atan2(dot(prev, cur));
+        prev = cur;
+    }
+    if !(sweep.is_finite() && sweep.abs() > ANGLE_EPS_RAD) {
         return Ok(None);
     }
-    let rho_arc = match solve_rho_arc(rho, l_t, line_no)? {
-        Some(r) => r,
-        None => return Ok(None),
-    };
-    let kappa_arc = 1.0 / rho_arc;
-    let delta_sweep = theta_run - l_t / rho_arc;
-    if delta_sweep <= ANGLE_EPS_RAD {
-        return Ok(None);
-    }
+    let arc = Arc::try_new(origin, u, v, rho, 0.0, sweep).map_err(internal(line_no))?;
 
-    let sigma = kappa_arc / l_t;
-    let n0 = inward(t0);
-    let (c_rel_along, c_rel_in) = spiral_anchor_offset(sigma, l_t, rho_arc, line_no)?;
-    let s0 = sub(origin, add(scale(t0, c_rel_along), scale(n0, c_rel_in)));
-
-    let up = Clothoid::try_new(s0, t0, n0, 0.0, sigma, l_t).map_err(internal(line_no))?;
-    let a0 = up.point_at(l_t);
-    let v_arc = up.heading_at(l_t);
-    let origin_arc = add(a0, scale(inward(v_arc), rho_arc));
-    let u_arc = normalize(sub(a0, origin_arc));
-    let arc = Arc::try_new(origin_arc, u_arc, v_arc, rho_arc, 0.0, delta_sweep)
-        .map_err(internal(line_no))?;
-    let a1 = arc.point_at(arc_len(&arc));
-    let h1 = arc.heading_at(arc_len(&arc));
-    let n_exit = normalize(sub(origin_arc, a1));
-    let down =
-        Clothoid::try_new(a1, h1, n_exit, kappa_arc, -sigma, l_t).map_err(internal(line_no))?;
-
-    let head_len = match foot_on_line(s0, lines[0]) {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    let tail_pt = down.point_at(l_t);
-    let last = lines[lines.len() - 1];
-    let tail_len = match foot_on_line(tail_pt, last) {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    if !seam_ok(s0, head_len, lines[0])
-        || !seam_ok(tail_pt, tail_len, last)
-        || dot(down.heading_at(l_t), tm) < 1.0 - SEAM_TOL_MM
-    {
-        return Ok(None);
-    }
-    let head_consumption = len_first - head_len;
-    let tail_consumption = tail_len;
-    if !(-SEAM_TOL_MM..=len_first + SEAM_TOL_MM).contains(&head_consumption)
-        || !(-SEAM_TOL_MM..=len_last + SEAM_TOL_MM).contains(&tail_consumption)
-    {
-        return Ok(None);
-    }
-    if !vertices_within_tube(&lines, origin_arc, rho_arc, config.cocircular_tol) {
-        return Ok(None);
-    }
-
-    let recon_len = up.s_len() + arc_len(&arc) + down.s_len();
+    let head_consumption = lines[0].s_len();
+    let tail_consumption = lines[lines.len() - 1].s_len();
+    let recon_len = arc_len(&arc);
     let followers = run_followers(
         facets,
         &lines,
@@ -236,12 +813,16 @@ pub(super) fn reconstruct(
     );
 
     Ok(Some(Reconstruction {
-        up,
+        up: Vec::new(),
+        up_followers: Vec::new(),
         arc,
-        down,
+        down: Vec::new(),
+        down_followers: Vec::new(),
         followers,
         head_consumption,
         tail_consumption,
+        head_line_trim: 0.0,
+        tail_line_trim: 0.0,
     }))
 }
 
@@ -249,86 +830,6 @@ struct CircleFit {
     origin: [f64; 3],
     radius: f64,
     residual: f64,
-}
-
-fn incircle(
-    lines: &[&Line],
-    e1: [f64; 3],
-    e2: [f64; 3],
-    inward: &impl Fn([f64; 3]) -> [f64; 3],
-) -> Option<CircleFit> {
-    let q0 = lines[0].start;
-    let mut ata = [[0.0_f64; 3]; 3];
-    let mut atb = [0.0_f64; 3];
-    for line in lines {
-        let t = line.heading_at(0.0);
-        let n = inward(t);
-        let row = [dot(n, e1), dot(n, e2), -1.0];
-        let rhs = dot(n, sub(line.start, q0));
-        for r in 0..3 {
-            for c in 0..3 {
-                ata[r][c] += row[r] * row[c];
-            }
-            atb[r] += row[r] * rhs;
-        }
-    }
-    let x = solve3(ata, atb)?;
-    let origin = add(q0, add(scale(e1, x[0]), scale(e2, x[1])));
-    let radius = x[2];
-    let mut residual = 0.0_f64;
-    for line in lines {
-        let t = line.heading_at(0.0);
-        let n = inward(t);
-        let d = dot(n, sub(origin, line.start));
-        residual = residual.max((d - radius).abs());
-    }
-    Some(CircleFit {
-        origin,
-        radius,
-        residual,
-    })
-}
-
-fn solve_rho_arc(rho: f64, l_t: f64, line_no: u32) -> Result<Option<f64>, FitError> {
-    let spiral_offset_from_arc_centre = |r: f64| -> Result<f64, FitError> {
-        let (_, c_in) = spiral_anchor_offset(1.0 / (r * l_t), l_t, r, line_no)?;
-        Ok(c_in)
-    };
-    let mut lo = 0.5 * rho;
-    let mut hi = rho;
-    let bracket_below = spiral_offset_from_arc_centre(lo)?;
-    let bracket_above = spiral_offset_from_arc_centre(hi)?;
-    let root_is_bracketed = bracket_below < rho && bracket_above >= rho;
-    if !root_is_bracketed {
-        return Ok(None);
-    }
-    for _ in 0..RHO_ARC_BISECTIONS {
-        let mid = 0.5 * (lo + hi);
-        if spiral_offset_from_arc_centre(mid)? < rho {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    let r = 0.5 * (lo + hi);
-    if r.is_finite() && r > BUDGET_EPS_MM {
-        Ok(Some(r))
-    } else {
-        Ok(None)
-    }
-}
-
-fn spiral_anchor_offset(
-    sigma: f64,
-    l_t: f64,
-    rho_arc: f64,
-    line_no: u32,
-) -> Result<(f64, f64), FitError> {
-    let canon = Clothoid::try_new([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 0.0, sigma, l_t)
-        .map_err(internal(line_no))?;
-    let end = canon.point_at(l_t);
-    let phi = 0.5 * sigma * l_t * l_t;
-    Ok((end[0] - rho_arc * phi.sin(), end[1] + rho_arc * phi.cos()))
 }
 
 fn run_followers(
@@ -364,43 +865,6 @@ fn run_followers(
             ratio: e / recon_len,
         })
         .collect()
-}
-
-fn total_turn(lines: &[&Line]) -> f64 {
-    lines
-        .windows(2)
-        .map(|w| {
-            let t_in = w[0].heading_at(0.0);
-            let t_out = w[1].heading_at(0.0);
-            dot(t_in, t_out).clamp(-1.0, 1.0).acos()
-        })
-        .sum()
-}
-
-fn foot_on_line(p: [f64; 3], line: &Line) -> Option<f64> {
-    let t = line.heading_at(0.0);
-    let s = dot(sub(p, line.start), t);
-    if s.is_finite() { Some(s) } else { None }
-}
-
-fn seam_ok(p: [f64; 3], s: f64, line: &Line) -> bool {
-    let t = line.heading_at(0.0);
-    let foot = madd(line.start, s, t);
-    norm(sub(p, foot)) <= SEAM_TOL_MM
-}
-
-fn vertices_within_tube(lines: &[&Line], origin: [f64; 3], radius: f64, tol: f64) -> bool {
-    for k in 0..lines.len() - 1 {
-        let vertex = lines[k].point_at(lines[k].s_len());
-        let chord = lines[k].s_len().max(lines[k + 1].s_len());
-        let sagitta = chord * chord / (8.0 * radius);
-        let radial_deviation = (norm(sub(vertex, origin)) - radius).abs();
-        let unfaceting_tube_halfwidth = 2.0 * sagitta + tol;
-        if radial_deviation > unfaceting_tube_halfwidth {
-            return false;
-        }
-    }
-    true
 }
 
 fn arc_len(arc: &Arc) -> f64 {

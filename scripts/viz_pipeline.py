@@ -290,8 +290,6 @@ def render(snapshot, out_path, stem, ts):
     )
     ax_path, ax_vel, ax_acc, ax_jrk = axes
 
-    from matplotlib.patches import Arc as ArcPatch
-
     ax_path.plot(
         raw_x,
         raw_y,
@@ -317,33 +315,17 @@ def render(snapshot, out_path, stem, ts):
             if first_pt is None:
                 first_pt = (seg["x0"], seg["y0"])
         elif kind == "arc":
-            r = seg["radius"]
-            t1 = seg["theta1_deg"] + seg["angle_deg"]
-            t2 = seg["theta2_deg"] + seg["angle_deg"]
-            if t2 < t1:
-                t1, t2 = t2, t1
-            patch = ArcPatch(
-                (seg["cx"], seg["cy"]),
-                2 * r,
-                2 * r,
-                angle=0,
-                theta1=t1,
-                theta2=t2,
+            ax_path.plot(
+                seg["x"],
+                seg["y"],
+                "-",
                 linewidth=1.0,
                 color=color,
-                fill=False,
                 label=label,
                 zorder=2,
             )
-            ax_path.add_patch(patch)
             if first_pt is None:
-                import math
-
-                a = math.radians(seg["theta1_deg"] + seg["angle_deg"])
-                first_pt = (
-                    seg["cx"] + r * math.cos(a),
-                    seg["cy"] + r * math.sin(a),
-                )
+                first_pt = (seg["x"][0], seg["y"][0])
         elif kind == "clothoid":
             ax_path.plot(
                 seg["x"],
