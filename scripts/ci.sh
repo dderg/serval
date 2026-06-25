@@ -191,7 +191,11 @@ job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
 
 job_snapshot() {
     make -f "$ROOT/Makefile.rust" motion-engine >/dev/null
-    "$ROOT/snapshots/snapshot-tests.sh" --ci
+    if command -v uv >/dev/null 2>&1; then
+        cd "$ROOT" && uv run snapshots/snapshot-tests.sh --ci
+    else
+        "$ROOT/snapshots/snapshot-tests.sh" --ci
+    fi
 }
 
 PASS=0; FAIL=0
