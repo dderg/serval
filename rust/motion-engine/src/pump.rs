@@ -798,6 +798,29 @@ pub fn run_pump<S, F, C, A, O, D>(
             .or_insert_with(|| AxisQueue::new(ring_depth_of(key)));
         q.lead_secs = lead_secs;
         if !pieces.is_empty() {
+            // Overlap probe: do the just-arrived pieces start BEFORE the deepest
+            // piece already queued? That is the non-monotonic collision a re-anchor
+            // produces when it lays fresh pieces over motion still in flight.
+            let new_first = pieces.first().map(|(p, _)| p.start_time);
+            let prev_back = q.pieces.back().map(|(p, _)| p.start_time);
+            if let (Some(nf), Some(pb)) = (new_first, prev_back) {
+                if nf < pb {
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "pump_pieces_overlap",
+                        mcu = key.mcu_id,
+                        axis = key.axis,
+                        prev_back = pb,
+                        new_first = nf,
+                        backstep_ticks = pb - nf,
+                        queued = q.pieces.len(),
+                        source_line,
+                        fresh_stream,
+                        generation,
+                        "[pump] appended pieces start before the queued tail — non-monotonic overlap"
+                    );
+                }
+            }
             q.pieces.extend(pieces);
             if let Some(deepest) = q.pieces.back().map(|(p, _)| p.start_time) {
                 q.final_frontier_ticks =
@@ -844,6 +867,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     let mut holding_ahead = false;
     let mut data_open = true;
     let mut last_brake_diag = Instant::now();
+    let mut last_state_dump = Instant::now();
 
     loop {
         let cohort_active = cohort.is_some();
@@ -912,6 +936,45 @@ pub fn run_pump<S, F, C, A, O, D>(
                     lagging.join(", ")
                 ));
                 cohort = None;
+            }
+        }
+
+        // Full pump-state dump: every staged piece start-tick per axis, plus the
+        // held brake tail and the live playhead, so overlaps/non-monotonicity in
+        // the committed stream are visible directly. Throttled; durable via the
+        // events JSONL. Diagnostic — remove once the start-time collision is
+        // understood.
+        if last_state_dump.elapsed() >= Duration::from_millis(200)
+            && queues
+                .values()
+                .any(|q| !q.pieces.is_empty() || !q.brake_tail.is_empty())
+        {
+            last_state_dump = Instant::now();
+            for (k, q) in &queues {
+                if q.pieces.is_empty() && q.brake_tail.is_empty() {
+                    continue;
+                }
+                let starts: Vec<u64> = q.pieces.iter().map(|(p, _)| p.start_time).collect();
+                let tail_starts: Vec<u64> =
+                    q.brake_tail.iter().map(|(p, _)| p.start_time).collect();
+                let backsteps = starts.windows(2).filter(|w| w[1] < w[0]).count();
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "pump_state_dump",
+                    mcu = k.mcu_id,
+                    axis = k.axis,
+                    n_pieces = starts.len(),
+                    front = ?starts.first(),
+                    back = ?starts.last(),
+                    backsteps,
+                    playhead = ?mcu_clock_of(k.mcu_id).map(|(p, _)| p),
+                    final_frontier = ?q.final_frontier_ticks,
+                    brake_tail_valid = q.brake_tail_valid,
+                    n_tail = tail_starts.len(),
+                    starts = ?starts,
+                    tail_starts = ?tail_starts,
+                    "[pump] full state dump"
+                );
             }
         }
 
