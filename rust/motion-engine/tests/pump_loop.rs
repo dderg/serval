@@ -633,13 +633,12 @@ fn pump_brakes_to_rest_when_finals_starve() {
     );
 
     // Starve: advance the playhead to within the flush watermark (40k < 50k ticks)
-    // of the frontier, then wake the pump with a heartbeat.
+    // of the frontier — and send NOTHING. The starvation case is exactly the one
+    // where the planner is blocked in a long plan and the pump receives no
+    // messages, so the pump must wake on its own timer to flush the held brake.
+    // (A heartbeat here would mask that: it forces a loop iteration the real
+    // starvation never gets.)
     playhead.store(960_000, Ordering::Release);
-    ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
-        mcu_id: 1,
-        retired_counts: vec![1],
-    }))
-    .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(60));
 
     assert_eq!(

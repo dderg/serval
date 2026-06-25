@@ -235,6 +235,14 @@ pub fn schedule(
 /// safety-critical constant; tune against measured single-frame send latency.
 pub const BRAKE_FLUSH_LEAD_SECS: f64 = 0.05;
 
+/// Pump wake cadence while a valid brake tail is held. The planner can be blocked
+/// in a multi-hundred-ms velocity plan — sending the pump nothing — precisely
+/// while the playhead drains toward the frontier, so the pump must wake on its
+/// own to evaluate the flush; an idle `select()` would sleep through the
+/// starvation the brake exists to catch. Polled well under `BRAKE_FLUSH_LEAD_SECS`
+/// so the watermark is never stepped over between wakes.
+const BRAKE_POLL_MS: u64 = 10;
+
 /// Per-MCU starvation check (toolhead-atomic — edge A): is it time to brake? True
 /// when a **valid** tail is staged on some axis of `mcu_id` and the combined
 /// committed (final) frontier is within `flush_lead_ticks` of the playhead, i.e.
@@ -1019,6 +1027,15 @@ pub fn run_pump<S, F, C, A, O, D>(
             continue;
         }
 
+        // A held, valid brake tail forces a timed wait: the planner may be blocked
+        // in a long plan, sending nothing, while the playhead drains toward the
+        // frontier — an idle `select()` would sleep through the very starvation
+        // the brake exists to catch, so the flush at the top of the loop must keep
+        // getting a chance to run.
+        let any_valid_brake = queues
+            .values()
+            .any(|q| !q.brake_tail.is_empty() && q.brake_tail_valid);
+
         let mut sel = Select::new();
         let ctrl_op = sel.recv(&control_rx);
         let want_data = data_open && (cohort.is_some() || wants_pieces(&queues));
@@ -1027,8 +1044,13 @@ pub fn run_pump<S, F, C, A, O, D>(
         } else {
             usize::MAX
         };
-        let selected = if holding_ahead || cohort.is_some() {
-            sel.select_timeout(Duration::from_millis(poll_ms))
+        let selected = if holding_ahead || cohort.is_some() || any_valid_brake {
+            let wait_ms = if any_valid_brake {
+                BRAKE_POLL_MS.min(poll_ms)
+            } else {
+                poll_ms
+            };
+            sel.select_timeout(Duration::from_millis(wait_ms))
         } else {
             Ok(sel.select())
         };
