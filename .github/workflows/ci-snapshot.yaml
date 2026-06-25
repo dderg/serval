@@ -1,0 +1,47 @@
+name: Snapshot tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      snapshot: ${{ steps.filter.outputs.snapshot }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            snapshot:
+              - 'rust/**'
+              - 'snapshots/**'
+              - 'klippy/arc_fit_config.py'
+              - 'klippy/configfile.py'
+              - 'scripts/viz_pipeline.py'
+              - 'scripts/ci.sh'
+              - 'Makefile.rust'
+              - '.github/workflows/ci-snapshot.yaml'
+
+  snapshot:
+    needs: changes
+    if: needs.changes.outputs.snapshot == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev lld
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: snapshot
+      - name: snapshot tests
+        run: ./scripts/ci.sh snapshot
