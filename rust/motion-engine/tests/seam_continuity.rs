@@ -2,15 +2,15 @@ use _motion_engine::seam_harness::{
     CommitSchedule, SeamReport, default_stream_config, run_schedule,
 };
 
-const CUBE: &str = include_str!("gcode/crash_short_cube.gcode");
+const NEPTUNE: &str = include_str!("gcode/neptune_crash_short.gcode");
 
 fn report_at_cap(cap: usize) -> SeamReport {
     run_schedule(
-        CUBE,
+        NEPTUNE,
         default_stream_config(),
         &CommitSchedule::fixed_cap(cap),
     )
-    .expect("cube drives the real stream commit path without a planner error")
+    .expect("neptune fixture drives the real stream commit path without a planner error")
 }
 
 fn assert_continuous(cap: usize) {
@@ -77,7 +77,7 @@ fn forced_commit_then_replan_is_continuous() {
         cadence: _motion_engine::seam_harness::Cadence::FixedCap(64),
         force_after_move: vec![40, 120, 200],
     };
-    let report = run_schedule(CUBE, default_stream_config(), &schedule)
+    let report = run_schedule(NEPTUNE, default_stream_config(), &schedule)
         .expect("forced commits drive the replan path without a planner error");
     assert_eq!(
         report.fatal(),
@@ -92,5 +92,5 @@ fn forced_commit_then_replan_is_continuous() {
 fn report_is_deterministic_across_repeats() {
     let a = report_at_cap(8);
     let b = report_at_cap(8);
-    assert_eq!(a, b, "the cube report must replay byte-identically");
+    assert_eq!(a, b, "the report must replay byte-identically");
 }

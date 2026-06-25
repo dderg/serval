@@ -6,14 +6,14 @@ use _motion_engine::seam_harness::{
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
-const CUBE: &str = include_str!("gcode/crash_short_cube.gcode");
+const NEPTUNE: &str = include_str!("gcode/neptune_crash_short.gcode");
 
 const MIN_WINDOW: usize = 4;
 const MAX_WINDOW: usize = 40;
 
 fn corpus() -> &'static [Move] {
     static CORPUS: OnceLock<Vec<Move>> = OnceLock::new();
-    CORPUS.get_or_init(|| parse_gcode_to_moves(CUBE, default_stream_config().limits))
+    CORPUS.get_or_init(|| parse_gcode_to_moves(NEPTUNE, default_stream_config().limits))
 }
 
 proptest! {
