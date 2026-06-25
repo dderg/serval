@@ -232,6 +232,7 @@ pub struct EnqueueMsg {
     pub pieces: Vec<(PieceEntry, f64)>,
     pub fresh_stream: bool,
     pub lead_secs: f64,
+    pub source_line: u32,
 }
 
 pub struct HeartbeatMsg {
@@ -335,39 +336,132 @@ struct JunctionEnd {
     end_ticks: u64,
     end_host: f64,
     end_pos: f32,
+    source_line: u32,
 }
 
 pub const JUNCTION_POSITION_LOG_MM: f32 = 0.0125;
 pub const JUNCTION_POSITION_FATAL_MM: f32 = 0.1;
 
-fn check_junction_position_continuity(
-    key: AxisKey,
-    prev_end_pos: f32,
-    next_start_pos: f32,
-    prev_end_host: f64,
-    next_start_host: f64,
-) {
-    let jump = (next_start_pos - prev_end_pos).abs();
-    if jump >= JUNCTION_POSITION_FATAL_MM {
-        panic!(
-            "junction position discontinuity on mcu{} axis{}: prev piece ends at \
-             {prev_end_pos} (host t={prev_end_host:.6}), next starts at \
-             {next_start_pos} (host t={next_start_host:.6}), |Δ|={jump}mm — \
-             this becomes a one-sample step burst on the MCU (fault -300/-310)",
-            key.mcu_id, key.axis
-        );
+#[derive(Clone, Copy, Debug)]
+pub struct JunctionSeam {
+    pub key: AxisKey,
+    pub prev_end_pos: f32,
+    pub next_start_pos: f32,
+    pub prev_end_host: f64,
+    pub next_start_host: f64,
+    pub prev_source_line: u32,
+    pub next_source_line: u32,
+    pub prev_end_ticks: u64,
+    pub first_start_ticks: u64,
+}
+
+impl JunctionSeam {
+    #[must_use]
+    pub fn jump(&self) -> f32 {
+        (self.next_start_pos - self.prev_end_pos).abs()
     }
+
+    #[must_use]
+    pub fn is_fatal(&self) -> bool {
+        self.jump() >= JUNCTION_POSITION_FATAL_MM
+    }
+}
+
+#[derive(Default)]
+pub struct JunctionTracker {
+    ends: BTreeMap<AxisKey, JunctionEnd>,
+}
+
+impl JunctionTracker {
+    pub fn forget(&mut self, key: AxisKey) {
+        self.ends.remove(&key);
+    }
+
+    pub fn observe(
+        &mut self,
+        key: AxisKey,
+        pieces: &[(PieceEntry, f64)],
+        source_line: u32,
+        freq: f64,
+    ) -> Option<JunctionSeam> {
+        let (first_entry, first_host) = pieces.first()?;
+        if first_entry.motor_mask != 0 {
+            return None;
+        }
+        let seam = self.ends.get(&key).map(|prev| JunctionSeam {
+            key,
+            prev_end_pos: prev.end_pos,
+            next_start_pos: first_entry.coeffs[0],
+            prev_end_host: prev.end_host,
+            next_start_host: *first_host,
+            prev_source_line: prev.source_line,
+            next_source_line: source_line,
+            prev_end_ticks: prev.end_ticks,
+            first_start_ticks: first_entry.start_time,
+        });
+        let (last_entry, last_host) = pieces.last().unwrap();
+        #[allow(clippy::cast_possible_truncation)]
+        let last_end_ticks = last_entry.end_time(freq as f32);
+        let last_end_host = last_host + last_entry.duration as f64;
+        self.ends.insert(
+            key,
+            JunctionEnd {
+                end_ticks: last_end_ticks,
+                end_host: last_end_host,
+                end_pos: last_entry.coeffs[3],
+                source_line,
+            },
+        );
+        seam
+    }
+
+    pub fn observe_msg(
+        &mut self,
+        key: AxisKey,
+        pieces: &[(PieceEntry, f64)],
+        fresh_stream: bool,
+        source_line: u32,
+        freq: Option<f64>,
+    ) -> Option<JunctionSeam> {
+        if fresh_stream {
+            self.forget(key);
+        }
+        self.observe(key, pieces, source_line, freq?)
+    }
+}
+
+fn check_junction_position_continuity(seam: &JunctionSeam) {
+    let jump = seam.jump();
     if jump >= JUNCTION_POSITION_LOG_MM {
         tracing::error!(
             subsystem = "motion",
             event = "junction_position_discontinuity",
-            key = ?key,
-            prev_end = prev_end_pos,
-            next_start = next_start_pos,
+            key = ?seam.key,
+            fatal = jump >= JUNCTION_POSITION_FATAL_MM,
+            prev_end = seam.prev_end_pos,
+            next_start = seam.next_start_pos,
             jump_mm = jump,
-            prev_end_host = prev_end_host,
-            next_start_host = next_start_host,
+            prev_end_host = seam.prev_end_host,
+            next_start_host = seam.next_start_host,
+            prev_source_line = seam.prev_source_line,
+            next_source_line = seam.next_source_line,
             "[junction-pos] position discontinuity"
+        );
+    }
+    if jump >= JUNCTION_POSITION_FATAL_MM {
+        panic!(
+            "junction position discontinuity on mcu{} axis{}: prev piece ends at \
+             {} (host t={:.6}, line {}), next starts at {} (host t={:.6}, line \
+             {}), |Δ|={jump}mm — this becomes a one-sample step burst on the MCU \
+             (fault -300/-310)",
+            seam.key.mcu_id,
+            seam.key.axis,
+            seam.prev_end_pos,
+            seam.prev_end_host,
+            seam.prev_source_line,
+            seam.next_start_pos,
+            seam.next_start_host,
+            seam.next_source_line,
         );
     }
 }
@@ -417,13 +511,13 @@ pub fn run_pump<S, F, C, A, O, D>(
     D: Fn(String) + Send,
 {
     let mut queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
-    let mut junction_ends: BTreeMap<AxisKey, JunctionEnd> = BTreeMap::new();
+    let mut junctions = JunctionTracker::default();
     let mut cohort: Option<DripCohort> = None;
     const MAX_PER_FRAME: usize = 32;
 
     let apply = |msg: PumpMsg,
                  queues: &mut BTreeMap<AxisKey, AxisQueue>,
-                 junction_ends: &mut BTreeMap<AxisKey, JunctionEnd>,
+                 junctions: &mut JunctionTracker,
                  cohort: &mut Option<DripCohort>|
      -> bool {
         match msg {
@@ -437,7 +531,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                             on_abandon(key, dropped);
                         }
                     }
-                    junction_ends.remove(&key);
+                    junctions.forget(key);
                 }
             }
             PumpMsg::Enqueue(EnqueueMsg {
@@ -445,6 +539,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                 pieces,
                 fresh_stream,
                 lead_secs,
+                source_line,
             }) => {
                 if let Some(co) = cohort.as_ref() {
                     if !co.participants.contains(&key) {
@@ -459,76 +554,49 @@ pub fn run_pump<S, F, C, A, O, D>(
                         return true;
                     }
                 }
-                if fresh_stream {
-                    junction_ends.remove(&key);
-                }
-                if !pieces.is_empty() {
-                    if let Some((_ack_now, freq)) = mcu_clock_of(key.mcu_id) {
-                        let (first_entry, first_host) = &pieces[0];
-                        if first_entry.motor_mask == 0 {
-                            if let Some(&JunctionEnd {
-                                end_ticks: prev_end_ticks,
-                                end_host: prev_end_host,
-                                end_pos: prev_end_pos,
-                            }) = junction_ends.get(&key)
-                            {
-                                check_junction_position_continuity(
-                                    key,
-                                    prev_end_pos,
-                                    first_entry.coeffs[0],
-                                    prev_end_host,
-                                    *first_host,
-                                );
-                                let (tick_jump_us, host_jump_us) = junction_jumps(
-                                    first_entry.start_time,
-                                    *first_host,
-                                    prev_end_ticks,
-                                    prev_end_host,
-                                    freq,
-                                );
-                                let anomalous = tick_jump_us < -50.0
-                                    || (tick_jump_us - host_jump_us).abs() > 50.0;
-                                if fresh_stream || !anomalous {
-                                    tracing::debug!(
-                                        subsystem = "motion",
-                                        event = "junction_jump",
-                                        key = ?key,
-                                        tick_jump_us,
-                                        host_jump_us,
-                                        fresh = fresh_stream,
-                                        "[junction] jump"
-                                    );
-                                } else {
-                                    let reason = if tick_jump_us < -50.0 {
-                                        "overlap_risk"
-                                    } else {
-                                        "projection_divergence"
-                                    };
-                                    tracing::warn!(
-                                        subsystem = "motion",
-                                        event = "junction_jump_anomalous",
-                                        key = ?key,
-                                        tick_jump_us,
-                                        host_jump_us,
-                                        fresh = fresh_stream,
-                                        reason,
-                                        "[junction] anomalous jump"
-                                    );
-                                }
-                            }
-                            let (last_entry, last_host) = pieces.last().unwrap();
-                            #[allow(clippy::cast_possible_truncation)]
-                            let last_end_ticks = last_entry.end_time(freq as f32);
-                            let last_end_host = last_host + last_entry.duration as f64;
-                            junction_ends.insert(
-                                key,
-                                JunctionEnd {
-                                    end_ticks: last_end_ticks,
-                                    end_host: last_end_host,
-                                    end_pos: last_entry.coeffs[3],
-                                },
-                            );
-                        }
+                let freq = mcu_clock_of(key.mcu_id).map(|(_ack_now, freq)| freq);
+                if let Some(seam) =
+                    junctions.observe_msg(key, &pieces, fresh_stream, source_line, freq)
+                {
+                    let freq = freq.expect("observe_msg yields a seam only when freq is present");
+                    check_junction_position_continuity(&seam);
+                    let (tick_jump_us, host_jump_us) = junction_jumps(
+                        seam.first_start_ticks,
+                        seam.next_start_host,
+                        seam.prev_end_ticks,
+                        seam.prev_end_host,
+                        freq,
+                    );
+                    let anomalous =
+                        tick_jump_us < -50.0 || (tick_jump_us - host_jump_us).abs() > 50.0;
+                    if fresh_stream || !anomalous {
+                        tracing::debug!(
+                            subsystem = "motion",
+                            event = "junction_jump",
+                            key = ?seam.key,
+                            tick_jump_us,
+                            host_jump_us,
+                            fresh = fresh_stream,
+                            "[junction] jump"
+                        );
+                    } else {
+                        let reason = if tick_jump_us < -50.0 {
+                            "overlap_risk"
+                        } else {
+                            "projection_divergence"
+                        };
+                        tracing::warn!(
+                            subsystem = "motion",
+                            event = "junction_jump_anomalous",
+                            key = ?seam.key,
+                            tick_jump_us,
+                            host_jump_us,
+                            fresh = fresh_stream,
+                            reason,
+                            prev_source_line = seam.prev_source_line,
+                            next_source_line = source_line,
+                            "[junction] anomalous jump"
+                        );
                     }
                 }
                 let q = queues
@@ -638,11 +706,11 @@ pub fn run_pump<S, F, C, A, O, D>(
         };
 
         if let Some(msg) = first {
-            if !apply(msg, &mut queues, &mut junction_ends, &mut cohort) {
+            if !apply(msg, &mut queues, &mut junctions, &mut cohort) {
                 return;
             }
             while let Ok(m) = rx.try_recv() {
-                if !apply(m, &mut queues, &mut junction_ends, &mut cohort) {
+                if !apply(m, &mut queues, &mut junctions, &mut cohort) {
                     return;
                 }
             }
