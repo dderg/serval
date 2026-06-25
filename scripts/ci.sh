@@ -5,10 +5,6 @@
 #   ./scripts/ci.sh install-hooks   # enable the pre-push hook (runs `quick` per push)
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #
-# Jobs: ruff rust-host rust-build rust-test rust-clippy rust-fmt rust-loom
-#       rust-mcu-h7 rust-mcu-f4 rust-mcu-g0 rust-no-stepper cbindgen-drift
-#       c-smoke deny miri panic-grep watchdog-canary py docs sim snapshot
-#
 # Prerequisites (one-time, for the full local run):
 #   rustup target add thumbv7em-none-eabi
 #   rustup component add --toolchain nightly miri
@@ -187,7 +183,7 @@ job_sim() {
     else
         echo "docker unavailable — running mcu-sim unit tests on the local interpreter"
         make -C "$ROOT/tools/sim_klippy/preload" >/dev/null 2>&1 || true
-        cd "$ROOT" && python -m pytest -n auto $paths -m "$sel"
+        cd "$ROOT" && python -m pytest -n auto "$paths" -m "$sel"
     fi
 }
 
