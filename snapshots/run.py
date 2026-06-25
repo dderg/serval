@@ -26,9 +26,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    cases = harness.discover_cases()
+    all_cases = harness.discover_cases()
+    for baseline in harness.prune_orphan_baselines(all_cases):
+        print(f"  PRUNED   {baseline.relative_to(harness.BASELINES_DIR)}")
+
+    cases = all_cases
     if args.filter:
-        cases = [c for c in cases if args.filter in c.name]
+        cases = [c for c in all_cases if args.filter in c.name]
     if not cases:
         print("no snapshot cases found under cases/")
         return 1
@@ -50,6 +54,11 @@ def main() -> int:
             "PENDING" if status is harness.Status.NEW else status.value.upper()
         )
         print(f"  {label:8} {case.name}")
+        if status is harness.Status.CHANGED:
+            baseline = harness.baseline_snapshot(case)
+            d = harness.drift_envelope(baseline, snapshot)
+            print(f"             worst rel {d['rel']:.2e} at {d['rel_at']}")
+            print(f"             worst abs {d['abs']:.2e} at {d['abs_at']}")
 
     ok = buckets[harness.Status.EXACT]
     changed = buckets[harness.Status.CHANGED]

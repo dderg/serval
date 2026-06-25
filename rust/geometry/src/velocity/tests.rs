@@ -758,3 +758,47 @@ fn pin_rest_anchor_tolerates_infinite_jerk_step() {
     assert_eq!(pin_rest_anchor(Some(&mut s), 7, f64::INFINITY), Ok(()));
     assert_eq!(s.a, 0.0);
 }
+
+#[test]
+fn first_negative_velocity_flags_sub_zero_sample() {
+    let samples = vec![
+        VelSample {
+            s: 0.0,
+            v: 10.0,
+            a: 0.0,
+        },
+        VelSample {
+            s: 1.0,
+            v: -13.5,
+            a: 0.0,
+        },
+        VelSample {
+            s: 2.0,
+            v: 5.0,
+            a: 0.0,
+        },
+    ];
+    assert_eq!(first_negative_velocity(&samples), Some(-13.5));
+}
+
+#[test]
+fn first_negative_velocity_ignores_float_noise_and_zero() {
+    let samples = vec![
+        VelSample {
+            s: 0.0,
+            v: 0.0,
+            a: 0.0,
+        },
+        VelSample {
+            s: 1.0,
+            v: -1e-9,
+            a: 0.0,
+        },
+        VelSample {
+            s: 2.0,
+            v: 42.0,
+            a: 0.0,
+        },
+    ];
+    assert_eq!(first_negative_velocity(&samples), None);
+}
