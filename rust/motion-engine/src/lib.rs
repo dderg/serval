@@ -1,7 +1,5 @@
 #[doc(hidden)]
 pub mod anchor;
-#[doc(hidden)]
-pub mod tick_chain;
 mod bridge;
 #[doc(hidden)]
 pub mod classify;
