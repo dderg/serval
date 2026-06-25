@@ -55,6 +55,7 @@ pub fn pipeline_snapshot(
 
     dict.set_item("kin_s", &kinematics.s)?;
     dict.set_item("kin_v", &kinematics.v)?;
+    dict.set_item("kin_a_t", &kinematics.a_t)?;
     dict.set_item("kin_heading_x", &kinematics.heading_x)?;
     dict.set_item("kin_heading_y", &kinematics.heading_y)?;
     dict.set_item("kin_kappa", &kinematics.kappa)?;
@@ -184,6 +185,7 @@ const VELOCITY_INTEGRATION_TOL: f64 = 1e-7;
 struct KinematicSamples {
     s: Vec<f64>,
     v: Vec<f64>,
+    a_t: Vec<f64>,
     heading_x: Vec<f64>,
     heading_y: Vec<f64>,
     kappa: Vec<f64>,
@@ -196,6 +198,7 @@ fn sample_kinematics(
     let mut kin = KinematicSamples {
         s: Vec::new(),
         v: Vec::new(),
+        a_t: Vec::new(),
         heading_x: Vec::new(),
         heading_y: Vec::new(),
         kappa: Vec::new(),
@@ -208,6 +211,7 @@ fn sample_kinematics(
                 let heading = spatial.heading_at(s_local);
                 kin.s.push(s_offset + sample.s);
                 kin.v.push(sample.v);
+                kin.a_t.push(sample.a);
                 kin.heading_x.push(heading[0]);
                 kin.heading_y.push(heading[1]);
                 kin.kappa.push(spatial.kappa(s_local));
