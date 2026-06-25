@@ -3457,10 +3457,29 @@ impl PyMotionEngine {
                 }
 
                 let source_line = tail.last().map_or(0, |s| s.source_line);
+                if per_axis.values().all(Vec::is_empty) {
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "brake_project_empty",
+                        n_segs = tail.len(),
+                        cursor_axes = cursor.len(),
+                        generation,
+                        "[brake] tail projected to zero pieces; nothing handed to pump"
+                    );
+                }
                 for (key, pieces) in per_axis {
                     if pieces.is_empty() {
                         continue;
                     }
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "brake_sent",
+                        mcu = key.mcu_id,
+                        axis = key.axis,
+                        n_pieces = pieces.len(),
+                        generation,
+                        "[brake] handed provisional tail to pump"
+                    );
                     brake_pump_tx
                         .send(crate::pump::EnqueueMsg {
                             key,

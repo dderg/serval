@@ -656,6 +656,107 @@ fn pump_brakes_to_rest_when_finals_starve() {
     handle.join().unwrap();
 }
 
+#[test]
+fn pump_brakes_when_finals_and_tail_arrive_in_separate_messages() {
+    // Production faithfulness: the planner dispatches the forward finals
+    // (pieces, empty brake_tail) and the brake tail (empty pieces, brake_tail)
+    // as TWO separate messages on the data channel — not bundled. This is the
+    // path the on-bench crash exercised; the bundled-message test missed it.
+    use std::sync::atomic::Ordering;
+
+    struct StartSink(Arc<Mutex<Vec<u64>>>);
+    impl PieceSink for StartSink {
+        fn send_frame(
+            &self,
+            _k: AxisKey,
+            pieces: &[PieceEntry],
+            _s: u16,
+            _n: u32,
+            _r: u32,
+        ) -> Result<i32, SendError> {
+            self.0
+                .lock()
+                .unwrap()
+                .extend(pieces.iter().map(|p| p.start_time));
+            Ok(0)
+        }
+    }
+
+    let sent = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let playhead = Arc::new(AtomicU64::new(0));
+    let brake_gen = Arc::new(AtomicU64::new(0));
+    let freq = 1_000_000.0_f64;
+
+    let sink = StartSink(sent.clone());
+    let playhead_clk = Arc::clone(&playhead);
+    let brake_gen_pump = Arc::clone(&brake_gen);
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink,
+            |_k| 256u32,
+            move |_mcu| Some((playhead_clk.load(Ordering::Acquire), freq)),
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+            brake_gen_pump,
+        )
+    });
+
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    // Message 1: the forward finals (frontier at 1e6), no brake tail.
+    data.send(EnqueueMsg {
+        key,
+        pieces: vec![p(1_000_000)],
+        fresh_stream: true,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![],
+    })
+    .unwrap();
+    // Message 2: the brake tail, empty pieces — exactly what dispatch_brake sends.
+    data.send(EnqueueMsg {
+        key,
+        pieces: vec![],
+        fresh_stream: false,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![p(1_050_000), p(1_100_000)],
+    })
+    .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec![1_000_000],
+        "only the final sent; brake held from the separate message"
+    );
+
+    // Starve, send nothing — the pump must self-wake and flush the held tail.
+    playhead.store(960_000, Ordering::Release);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
+    assert_eq!(
+        brake_gen.load(Ordering::Acquire),
+        1,
+        "separate-message brake tail must still flush on starvation"
+    );
+    let got = sent.lock().unwrap().clone();
+    assert!(
+        got.contains(&1_050_000) && got.contains(&1_100_000),
+        "brake-to-rest pieces dispatched: {got:?}"
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
 /// Edge D: once the pump has braked (generation 1), a forward dispatch tagged with
 /// the pre-brake generation 0 is dropped — it continues past a frontier the
 /// machine has left — while a dispatch at the current generation is accepted.

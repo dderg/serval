@@ -808,8 +808,19 @@ pub fn run_pump<S, F, C, A, O, D>(
             q.brake_tail_valid = false;
         }
         if !brake_tail.is_empty() {
+            let n = brake_tail.len();
             q.brake_tail = brake_tail.into();
             q.brake_tail_valid = true;
+            tracing::warn!(
+                subsystem = "motion",
+                event = "brake_held",
+                mcu = key.mcu_id,
+                axis = key.axis,
+                n,
+                generation,
+                frontier = ?q.final_frontier_ticks,
+                "[brake] held provisional tail"
+            );
         }
     };
 
@@ -832,6 +843,7 @@ pub fn run_pump<S, F, C, A, O, D>(
 
     let mut holding_ahead = false;
     let mut data_open = true;
+    let mut last_brake_diag = Instant::now();
 
     loop {
         let cohort_active = cohort.is_some();
@@ -924,6 +936,33 @@ pub fn run_pump<S, F, C, A, O, D>(
                     brake_flush_due(&queues, mcu_id, playhead, flush_lead_ticks)
                 })
             });
+            if last_brake_diag.elapsed() >= Duration::from_millis(200) {
+                last_brake_diag = Instant::now();
+                for &mcu_id in &mcu_ids {
+                    let clock = mcu_clock_of(mcu_id);
+                    let frontier = queues
+                        .iter()
+                        .filter(|(k, _)| k.mcu_id == mcu_id)
+                        .filter_map(|(_, q)| q.final_frontier_ticks)
+                        .max();
+                    let playhead = clock.map(|(p, _)| p);
+                    let gap = match (frontier, playhead) {
+                        (Some(f), Some(p)) => Some(f as i64 - p as i64),
+                        _ => None,
+                    };
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "brake_hold_status",
+                        mcu = mcu_id,
+                        clock_some = clock.is_some(),
+                        frontier = ?frontier,
+                        playhead = ?playhead,
+                        gap_ticks = ?gap,
+                        any_due,
+                        "[brake] holding tail, waiting on watermark"
+                    );
+                }
+            }
             if any_due {
                 for &mcu_id in &mcu_ids {
                     promote_brake(&mut queues, mcu_id);
