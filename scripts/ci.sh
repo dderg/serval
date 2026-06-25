@@ -236,6 +236,7 @@ run_all() {
         run_check "docs"            job_docs
         run_check "py"              job_py
         run_check "sim"             job_sim
+        run_check "snapshot"        job_snapshot
     fi
     echo "────────────────────────────────────────"
     printf '  %s   %s\n' "$(green "$PASS pass")" "$([ "$FAIL" -gt 0 ] && red "$FAIL fail" || echo "0 fail")"
