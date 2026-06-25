@@ -199,35 +199,42 @@ def _build_time_series(snapshot):
 
     s = np.array(snapshot["kin_s"])
     v = np.array(snapshot["kin_v"])
-    hx = np.array(snapshot["kin_heading_x"])
-    hy = np.array(snapshot["kin_heading_y"])
+    tangent_x = np.array(snapshot["kin_heading_x"])
+    tangent_y = np.array(snapshot["kin_heading_y"])
     kappa = np.array(snapshot["kin_kappa"])
+    dkappa_ds = np.array(snapshot["kin_dkappa_ds"])
 
-    mask = np.concatenate([[True], np.diff(s) > 1e-9])
-    s, v, hx, hy, kappa = s[mask], v[mask], hx[mask], hy[mask], kappa[mask]
+    distinct = np.concatenate([[True], np.diff(s) > 1e-9])
+    s, v, tangent_x, tangent_y, kappa, dkappa_ds = (
+        arr[distinct] for arr in (s, v, tangent_x, tangent_y, kappa, dkappa_ds)
+    )
 
     v_safe = np.maximum(v, 1e-6)
     ds = np.diff(s)
     v_avg = 0.5 * (v_safe[:-1] + v_safe[1:])
     t = np.concatenate([[0.0], np.cumsum(ds / v_avg)])
 
-    vx = v * hx
-    vy = v * hy
-    v_scalar = v
+    def d_dt(f):
+        return np.gradient(f, t)
 
-    dv_ds = np.gradient(v, s)
-    a_tangential = v * dv_ds
-    a_centripetal = v**2 * kappa
-    nx, ny = -hy, hx
-    a_x = a_tangential * hx + a_centripetal * nx
-    a_y = a_tangential * hy + a_centripetal * ny
-    a_scalar = np.sqrt(a_x**2 + a_y**2)
+    normal_x, normal_y = -tangent_y, tangent_x
 
-    jx = np.gradient(a_x, t)
-    jy = np.gradient(a_y, t)
-    j_scalar = np.sqrt(jx**2 + jy**2)
+    vx = v * tangent_x
+    vy = v * tangent_y
 
-    return t, vx, vy, v_scalar, a_x, a_y, a_scalar, jx, jy, j_scalar
+    accel_tangential = d_dt(v)
+    accel_normal = v**2 * kappa
+    ax = accel_tangential * tangent_x + accel_normal * normal_x
+    ay = accel_tangential * tangent_y + accel_normal * normal_y
+    a_scalar = np.hypot(accel_tangential, accel_normal)
+
+    jerk_tangential = d_dt(accel_tangential) - v**3 * kappa**2
+    jerk_normal = 3.0 * v * accel_tangential * kappa + v**3 * dkappa_ds
+    jx = jerk_tangential * tangent_x + jerk_normal * normal_x
+    jy = jerk_tangential * tangent_y + jerk_normal * normal_y
+    j_scalar = np.hypot(jerk_tangential, jerk_normal)
+
+    return t, vx, vy, v, ax, ay, a_scalar, jx, jy, j_scalar
 
 
 def _plot_derivative(ax, t, comp_x, comp_y, scalar, ylabel, title):
