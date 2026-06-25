@@ -1,6 +1,5 @@
 G1 X0 Y0
 G1 X10 Y0
-; some segments that produce an arc with 10mm radius
 G1 X10.872 Y0.038
 G1 X11.736 Y0.152
 G1 X12.588 Y0.341
