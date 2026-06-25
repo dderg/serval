@@ -73,8 +73,7 @@ class ReviewState:
                         for path in orphaned
                     )
                     self.error = (
-                        "orphaned baselines without matching cases:\n"
-                        f"{details}"
+                        f"orphaned baselines without matching cases:\n{details}"
                     )
                     return
                 for case in discovered:
@@ -297,7 +296,11 @@ def main():
             print(f"warning: {STATE.error}", file=sys.stderr)
         server = ThreadingHTTPServer((args.host, args.port), Handler)
         url = f"http://{args.host}:{args.port}"
-        label = "snapshot baselines" if args.mode == "baselines" else "snapshot review"
+        label = (
+            "snapshot baselines"
+            if args.mode == "baselines"
+            else "snapshot review"
+        )
         print(f"{label} — visit {url}  (Ctrl-C to stop)")
         try:
             server.serve_forever()
