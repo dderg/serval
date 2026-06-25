@@ -75,6 +75,18 @@ def test_discover_cases_keeps_baselines_separate(tmp_path):
     ]
 
 
+def test_discover_cases_ignores_empty_gcode(tmp_path):
+    group = tmp_path / "cases" / "grp"
+    group.mkdir(parents=True)
+    (group / "printer.cfg").write_text("[printer]\n")
+    (group / "empty.gcode").write_text("\n  \t\n")
+    (group / "unit.gcode").write_text("G1 X1\n")
+
+    cases = harness.discover_cases(tmp_path / "cases", tmp_path / "baselines")
+
+    assert [case.name for case in cases] == ["grp/unit"]
+
+
 def test_compare_exact_after_write(tmp_path):
     case = _case(tmp_path)
     harness.write_baseline(case, _SNAPSHOT)

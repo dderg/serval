@@ -63,6 +63,8 @@ def discover_cases(
     for group in sorted(p for p in cases_dir.iterdir() if p.is_dir()):
         config = group / CONFIG_NAME
         for gcode in sorted(group.glob("*.gcode")):
+            if not gcode.read_text().strip():
+                continue
             stem = gcode.stem
             cases.append(
                 Case(
