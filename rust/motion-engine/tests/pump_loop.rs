@@ -656,6 +656,113 @@ fn pump_brakes_to_rest_when_finals_starve() {
     handle.join().unwrap();
 }
 
+/// Regression for the on-bench underrun: a `Flush` (homing/probe abort) abandons
+/// the committed stream and MUST reset the frontier the brake measures lead
+/// against. Before the fix, `final_frontier_ticks` was a monotonic max left
+/// latched at the abandoned batch's deep tick; after the stream resumed shallow,
+/// the brake saw phantom lead and never flushed on the real starvation.
+#[test]
+fn flush_resets_the_frontier_so_the_brake_is_not_blinded_after_an_abort() {
+    use std::sync::atomic::Ordering;
+
+    struct StartSink(Arc<Mutex<Vec<u64>>>);
+    impl PieceSink for StartSink {
+        fn send_frame(
+            &self,
+            _k: AxisKey,
+            pieces: &[PieceEntry],
+            _s: u16,
+            _n: u32,
+            _r: u32,
+        ) -> Result<i32, SendError> {
+            self.0
+                .lock()
+                .unwrap()
+                .extend(pieces.iter().map(|p| p.start_time));
+            Ok(0)
+        }
+    }
+
+    let sent = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let playhead = Arc::new(AtomicU64::new(0));
+    let brake_gen = Arc::new(AtomicU64::new(0));
+    let freq = 1_000_000.0_f64; // 1 MHz: ticks == microseconds; watermark = 50_000 ticks.
+
+    let sink = StartSink(sent.clone());
+    let playhead_clk = Arc::clone(&playhead);
+    let brake_gen_pump = Arc::clone(&brake_gen);
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink,
+            |_k| 256u32,
+            move |_mcu| Some((playhead_clk.load(Ordering::Acquire), freq)),
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+            brake_gen_pump,
+        )
+    });
+
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+
+    // A DEEP committed stream: final at 5.0s latches the frontier far ahead, with
+    // its own brake-to-rest staged behind it.
+    data.send(EnqueueMsg {
+        key,
+        pieces: vec![p(5_000_000)],
+        fresh_stream: true,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![p(5_050_000), p(5_100_000)],
+    })
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    // Abort: Flush the axis. This abandons the deep batch — and must drop the
+    // frontier and the stale brake tail staged behind it.
+    ctl.send(PumpMsg::Flush(vec![key])).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    // Stream resumes SHALLOW: final at 1.0s, brake-to-rest at 1.05/1.10s.
+    data.send(EnqueueMsg {
+        key,
+        pieces: vec![p(1_000_000)],
+        fresh_stream: true,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+        generation: 0,
+        brake_tail: vec![p(1_050_000), p(1_100_000)],
+    })
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    // Starve within the watermark of the SHALLOW frontier (1.0s), far below the
+    // abandoned deep one (5.0s). A frontier left latched at 5.0s keeps the brake
+    // blind; the reset lets it see the real starvation and flush.
+    playhead.store(960_000, Ordering::Release);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
+    assert_eq!(
+        brake_gen.load(Ordering::Acquire),
+        1,
+        "post-flush starvation must brake; a latched frontier would blind it"
+    );
+    let got = sent.lock().unwrap().clone();
+    assert!(
+        got.contains(&1_050_000) && got.contains(&1_100_000),
+        "shallow brake-to-rest dispatched after the flush: {got:?}"
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
 #[test]
 fn pump_brakes_when_finals_and_tail_arrive_in_separate_messages() {
     // Production faithfulness: the planner dispatches the forward finals

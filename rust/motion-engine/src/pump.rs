@@ -647,6 +647,16 @@ pub fn run_pump<S, F, C, A, O, D>(
                             );
                         }
                         q.pieces.clear();
+                        // A Flush abandons this axis' committed stream. The
+                        // frontier the brake measures lead against, and the
+                        // provisional brake staged behind it, both belong to the
+                        // abandoned stream — leaving them set latches a phantom
+                        // lead (the deepest abandoned tick) that blinds the brake
+                        // to the next starvation. The resumed stream re-establishes
+                        // both from its own commits.
+                        q.final_frontier_ticks = None;
+                        q.brake_tail.clear();
+                        q.brake_tail_valid = false;
                         if dropped > 0 {
                             on_abandon(key, dropped);
                         }
