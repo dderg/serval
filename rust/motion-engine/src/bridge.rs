@@ -3096,6 +3096,13 @@ impl PyMotionEngine {
         let nudge_nominal_freqs = Arc::clone(&nominal_freqs_for_cb);
         let nudge_anchor_arc = Arc::clone(&anchor_mutex);
 
+        let brake_mcu_configs = mcu_configs_for_cb.clone();
+        let brake_router = Arc::clone(&router_for_cb);
+        let brake_anchor = Arc::clone(&anchor_mutex);
+        let brake_tick_chain = Arc::clone(&tick_chain_for_cb);
+        let brake_pump_tx = pump_tx_for_cb.clone();
+        let brake_active_drip_cohort = Arc::clone(&active_drip_cohort_for_cb);
+
         let dispatch: Arc<
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
         > = Arc::new(
@@ -3338,6 +3345,138 @@ impl PyMotionEngine {
             },
         );
 
+        // Project a staged brake-to-rest tail per-axis and hand it to the pump as
+        // a provisional starvation stop — WITHOUT touching the anchor, tick chain,
+        // motion history or drain counters the forward path owns. The tail rides
+        // a LOCAL copy of the committed frontier's per-MCU chain cursors, so
+        // forward motion still advances the real chain and replaces this tail
+        // before it is ever flushed in the common case.
+        let dispatch_brake: Arc<
+            dyn Fn(&[trajectory::ShapedSegment], u64) -> Result<(), DispatchError> + Send + Sync,
+        > = Arc::new(
+            move |tail: &[trajectory::ShapedSegment],
+                  generation: u64|
+                  -> Result<(), DispatchError> {
+                if tail.is_empty() {
+                    return Ok(());
+                }
+                let t0 = match brake_anchor.lock().unwrap_or_else(|p| p.into_inner()).t0() {
+                    Some(t0) => t0,
+                    None => {
+                        tracing::warn!(
+                            subsystem = "motion",
+                            event = "brake_tail_no_anchor",
+                            generation,
+                            "[brake] staged tail with no committed anchor; dropped"
+                        );
+                        return Ok(());
+                    }
+                };
+                let host_now = {
+                    let r = brake_router.lock().unwrap_or_else(|p| p.into_inner());
+                    r.host_now_secs()
+                };
+
+                let active_cohort: Option<u64> = *brake_active_drip_cohort
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                let max_piece_secs = if active_cohort.is_some() {
+                    Some(0.025_f64)
+                } else {
+                    None::<f64>
+                };
+                let lead_secs = if active_cohort.is_some() {
+                    crate::pump::DRIP_WINDOW_SECS
+                } else {
+                    crate::pump::MAX_LEAD_SECS
+                };
+
+                let mcu_freq: Vec<(u32, f64)> = {
+                    let r = brake_router.lock().unwrap_or_else(|p| p.into_inner());
+                    brake_mcu_configs
+                        .iter()
+                        .map(|cfg| {
+                            let h = crate::types::mcu_handle_from_raw(cfg.mcu_id);
+                            (cfg.mcu_id, r.ack_clock_and_freq(h).map_or(0.0, |(_, f)| f))
+                        })
+                        .collect()
+                };
+                let mut cursor: HashMap<u32, u64> = {
+                    let chain = brake_tick_chain.lock().unwrap_or_else(|p| p.into_inner());
+                    brake_mcu_configs
+                        .iter()
+                        .filter_map(|cfg| chain.anchor_tick(cfg.mcu_id).map(|t| (cfg.mcu_id, t)))
+                        .collect()
+                };
+
+                let mut per_axis: HashMap<
+                    crate::pump::AxisKey,
+                    Vec<(runtime::piece_ring::PieceEntry, f64)>,
+                > = HashMap::new();
+
+                for seg in tail {
+                    let seg_start_host = t0 + seg.t_start;
+                    let project = |mcu_id: u32, host_secs: f64| -> u64 {
+                        match cursor.get(&mcu_id) {
+                            Some(&base) => {
+                                let freq = mcu_freq
+                                    .iter()
+                                    .find(|(m, _)| *m == mcu_id)
+                                    .map_or(0.0, |(_, f)| *f);
+                                base + ((host_secs - seg_start_host) * freq).max(0.0) as u64
+                            }
+                            None => {
+                                let r = brake_router.lock().unwrap_or_else(|p| p.into_inner());
+                                r.host_time_to_mcu_clock(
+                                    crate::types::mcu_handle_from_raw(mcu_id),
+                                    host_secs,
+                                )
+                                .unwrap_or(0)
+                            }
+                        }
+                    };
+                    let msgs = crate::enqueue::enqueue_segment(
+                        seg,
+                        &brake_mcu_configs,
+                        t0,
+                        false,
+                        host_now,
+                        lead_secs,
+                        project,
+                        max_piece_secs,
+                    );
+                    for m in msgs {
+                        per_axis.entry(m.key).or_default().extend(m.pieces);
+                    }
+                    let seg_dur = seg.t_end - seg.t_start;
+                    for (mcu_id, freq) in &mcu_freq {
+                        if let Some(c) = cursor.get_mut(mcu_id) {
+                            *c += (seg_dur * freq).max(0.0) as u64;
+                        }
+                    }
+                }
+
+                let source_line = tail.last().map_or(0, |s| s.source_line);
+                for (key, pieces) in per_axis {
+                    if pieces.is_empty() {
+                        continue;
+                    }
+                    brake_pump_tx
+                        .send(crate::pump::EnqueueMsg {
+                            key,
+                            pieces: Vec::new(),
+                            fresh_stream: false,
+                            lead_secs,
+                            source_line,
+                            generation,
+                            brake_tail: pieces,
+                        })
+                        .map_err(|_| DispatchError::PumpGone)?;
+                }
+                Ok(())
+            },
+        );
+
         {
             let mut guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
             if guard.is_some() {
@@ -3373,16 +3512,6 @@ impl PyMotionEngine {
                 .compile(&cfg.axis_registry)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             let home = vec![0.0; cfg.axis_registry.n_axes()];
-            // TODO(stage-4b): project the tail per-axis through the anchor/tick
-            // chain (side-effect-free) and enqueue it as the pump's provisional
-            // brake. Until then the planner stages and tracks brake tails but
-            // none reaches the pump, so the existing planner-side stall brakes
-            // remain the active protection and production behaviour is unchanged.
-            let dispatch_brake: Arc<
-                dyn Fn(&[trajectory::ShapedSegment], u64) -> Result<(), DispatchError>
-                    + Send
-                    + Sync,
-            > = Arc::new(|_tail, _generation| Ok(()));
             *guard = Some(StreamPlannerHandle::spawn(
                 stream_cfg,
                 axis_chains,
