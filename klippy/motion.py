@@ -629,7 +629,18 @@ class Motion:
     def lookahead_end_print_time(self):
         est = self.mcu.estimated_print_time(self.reactor.monotonic())
         floor = est + self.motion_lead
-        return max(est + self.engine.queued_motion_secs(), floor)
+        qms = self.engine.queued_motion_secs()
+        result = max(est + qms, floor)
+        structured_log.event(
+            "motion",
+            "lookahead_end_diag",
+            level=logging.WARNING,
+            est=est,
+            queued_motion_secs=qms,
+            motion_lead=self.motion_lead,
+            result=result,
+        )
+        return result
 
     def _ground_pending_end_time_after_engine_drain(self):
         if self.mcu is None:

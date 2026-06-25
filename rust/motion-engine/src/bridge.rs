@@ -3599,6 +3599,32 @@ impl PyMotionEngine {
     }
 
     fn motion_drain_finalize(&self) {
+        let (last_move_time, uncommitted) = {
+            let planner = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            planner
+                .as_ref()
+                .map(|p| (p.last_move_time(), p.uncommitted_intake_secs()))
+                .unwrap_or((0.0, 0.0))
+        };
+        let t0 = self
+            .dispatch_anchor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .t0();
+        let host_now = self
+            .router
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .host_now_secs();
+        tracing::warn!(
+            subsystem = "motion",
+            event = "drain_finalize_diag",
+            t0 = t0.unwrap_or(f64::NAN),
+            last_move_time,
+            host_now,
+            uncommitted,
+            "[drain-finalize] frontier before settle"
+        );
         *self
             .dispatch_anchor
             .lock()

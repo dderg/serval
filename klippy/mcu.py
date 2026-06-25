@@ -9,7 +9,7 @@ import os
 import time
 import zlib
 
-from . import chelper, clocksync, msgproto, pins, serialhdl
+from . import chelper, clocksync, msgproto, pins, serialhdl, structured_log
 from .extras.danger_options import get_danger_options
 
 
@@ -618,6 +618,21 @@ class MCU_pwm:
         if self._invert:
             value = 1.0 - value
         v = int(max(0.0, min(1.0, value)) * self._pwm_max + 0.5)
+        est = self._mcu.estimated_print_time(
+            self._mcu.get_printer().get_reactor().monotonic()
+        )
+        if print_time < est + MIN_SCHEDULE_LEAD:
+            structured_log.event(
+                "mcu",
+                "pwm_stale_print_time",
+                level=logging.WARNING,
+                pin=self._pin,
+                mcu=self._mcu.get_name(),
+                print_time=print_time,
+                est=est,
+                lead_ms=(print_time - est) * 1000.0,
+                value=value,
+            )
         clock = self._mcu.print_time_to_clock(print_time)
         self._set_cmd.send(
             [self._oid, clock, v], minclock=self._last_clock, reqclock=clock
