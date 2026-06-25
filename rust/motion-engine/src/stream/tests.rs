@@ -1,4 +1,5 @@
 use super::*;
+use geometry::path::lowering::PositionProfile;
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
 use nurbs::eval::eval;
@@ -838,4 +839,134 @@ fn smooth_shaper_two_batch_output_matches_one_batch() {
             assert!(dv < 5e-2, "velocity mismatch at t={t}: {dv}");
         }
     }
+}
+
+#[test]
+fn is_clean_seam_accepts_line_seam() {
+    let moves = vec![line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0)];
+    assert!(is_clean_seam(&moves, 0));
+}
+
+#[test]
+fn is_clean_seam_rejects_blend_entry_clothoid() {
+    let corner = vec![
+        line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0),
+        line(2, [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], 0.0),
+    ];
+    let outcome = fit_chain_with_head_restore(&corner, cfg().chain, 0.0).unwrap();
+
+    let clothoid_idx = outcome
+        .moves
+        .iter()
+        .position(|m| matches!(m.segment.spatial, Some(Segment::Clothoid(_))))
+        .expect("a right-angle corner fits to a biclothoid blend");
+    assert!(
+        !is_clean_seam(&outcome.moves, clothoid_idx),
+        "a blend clothoid is never a clean seam, whatever source line it carries"
+    );
+
+    let line_idx = outcome
+        .moves
+        .iter()
+        .position(|m| matches!(m.segment.spatial, Some(Segment::Line(_))))
+        .expect("the corner retains straight line bodies");
+    assert!(is_clean_seam(&outcome.moves, line_idx));
+}
+
+const NEPTUNE_CRASH: &str = include_str!("../../tests/gcode/neptune_crash_short.gcode");
+
+struct PushStep {
+    planned: bool,
+    committed_now: usize,
+}
+
+fn drive_neptune(replan_short_circuit: bool) -> (Vec<ShapedSegment>, Vec<PushStep>) {
+    let config = crate::seam_harness::default_stream_config();
+    let moves = crate::seam_harness::parse_gcode_to_moves(NEPTUNE_CRASH, config.limits);
+    let home = moves
+        .first()
+        .and_then(|m| m.segment.spatial.as_ref())
+        .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
+    let mut s = StreamState::new(config, AxisChainSet::default(), &home, 0.0);
+    s.set_replan_short_circuit(replan_short_circuit);
+
+    let mut committed = Vec::new();
+    let mut steps = Vec::new();
+    for m in moves {
+        s.push(m);
+        let before = s.full_plan_count();
+        let now = s.commit(false).unwrap();
+        steps.push(PushStep {
+            planned: s.full_plan_count() > before,
+            committed_now: now.len(),
+        });
+        committed.extend(now);
+    }
+    committed.extend(s.commit(true).unwrap());
+    (committed, steps)
+}
+
+fn committed_fingerprint(segs: &[ShapedSegment]) -> Vec<(u32, u8, u64, u64, Vec<u64>, Vec<u64>)> {
+    segs.iter()
+        .map(|s| {
+            let sample = |t: f64| {
+                s.axes
+                    .iter()
+                    .map(|ax| eval(ax, t).to_bits())
+                    .collect::<Vec<_>>()
+            };
+            (
+                s.source_line,
+                s.motor_mask,
+                s.t_start.to_bits(),
+                s.t_end.to_bits(),
+                sample(s.t_start),
+                sample(s.t_end),
+            )
+        })
+        .collect()
+}
+
+fn longest_skip_run(steps: &[PushStep]) -> usize {
+    let mut longest = 0;
+    let mut run = 0;
+    for step in steps {
+        if step.planned {
+            run = 0;
+        } else {
+            run += 1;
+            longest = longest.max(run);
+        }
+    }
+    longest
+}
+
+#[test]
+fn replan_short_circuit_yields_identical_committed_trajectory() {
+    let (on, on_steps) = drive_neptune(true);
+    let (off, _) = drive_neptune(false);
+    assert!(
+        on_steps.iter().any(|s| !s.planned),
+        "fixture must exercise at least one skip, else equivalence is vacuous"
+    );
+    assert_eq!(
+        committed_fingerprint(&on),
+        committed_fingerprint(&off),
+        "skipping the plan must commit a byte-identical trajectory to a full re-plan"
+    );
+}
+
+#[test]
+fn all_clothoid_region_skips_the_velocity_plan() {
+    let (committed, steps) = drive_neptune(true);
+    assert!(!committed.is_empty(), "the cube must still commit segments");
+    assert!(
+        steps.iter().all(|s| s.planned || s.committed_now == 0),
+        "a skipped push must commit nothing — the skip only fires when commit_count is 0"
+    );
+    assert!(
+        longest_skip_run(&steps) >= 10,
+        "an all-clothoid stall must skip the plan on a long run of consecutive pushes, got {}",
+        longest_skip_run(&steps)
+    );
 }
