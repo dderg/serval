@@ -49,14 +49,12 @@ pub(super) fn detect_runs(
         .fold(f64::INFINITY, f64::min);
     // The arc may bulge off the sliced facets by at most the printer's junction
     // deviation, scv^2*(sqrt2-1)/accel — the same corner-rounding budget the
-    // velocity planner already lives by — so the tolerance scales with the
-    // machine instead of being a hand-set literal. deviation_tol_mm is only a
-    // fallback for moves that carry no usable limits.
-    let tol = if scv_delta.is_finite() {
-        scv_delta
-    } else {
-        arc.deviation_tol_mm
-    };
+    // velocity planner lives by — so the tolerance scales with the machine. With
+    // no move carrying usable limits there is no such budget, so fit no arcs.
+    if !scv_delta.is_finite() {
+        return Ok(Vec::new());
+    }
+    let tol = scv_delta;
     let gate_epmm = moves.iter().any(|m| epmm(m) > EPMM_MIN);
     let mut runs = Vec::new();
     let n = moves.len();

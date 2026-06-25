@@ -32,7 +32,6 @@ const ARC_MIN_RUN_FACETS: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArcFitConfig {
-    pub deviation_tol_mm: f64,
     pub min_run_facets: u32,
 }
 
@@ -52,12 +51,9 @@ impl Default for ChainFitConfig {
 }
 
 impl ChainFitConfig {
-    pub fn with_arc_fit(deviation_tol_mm: f64, min_run_facets: u32) -> Self {
+    pub fn with_arc_fit(min_run_facets: u32) -> Self {
         Self {
-            arc_fit: Some(ArcFitConfig {
-                deviation_tol_mm,
-                min_run_facets,
-            }),
+            arc_fit: Some(ArcFitConfig { min_run_facets }),
             ..Self::default()
         }
     }
