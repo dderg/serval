@@ -5,10 +5,6 @@
 #   ./scripts/ci.sh install-hooks   # enable the pre-push hook (runs `quick` per push)
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #
-# Jobs: ruff rust-host rust-build rust-test rust-clippy rust-fmt rust-loom
-#       rust-mcu-h7 rust-mcu-f4 rust-mcu-g0 rust-no-stepper cbindgen-drift
-#       c-smoke deny miri panic-grep watchdog-canary py docs sim
-#
 # Prerequisites (one-time, for the full local run):
 #   rustup target add thumbv7em-none-eabi
 #   rustup component add --toolchain nightly miri
@@ -187,11 +183,16 @@ job_sim() {
     else
         echo "docker unavailable — running mcu-sim unit tests on the local interpreter"
         make -C "$ROOT/tools/sim_klippy/preload" >/dev/null 2>&1 || true
-        cd "$ROOT" && python -m pytest -n auto $paths -m "$sel"
+        cd "$ROOT" && python -m pytest -n auto "$paths" -m "$sel"
     fi
 }
 
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
+
+job_snapshot() {
+    make -f "$ROOT/Makefile.rust" motion-engine >/dev/null
+    "$ROOT/snapshots/snapshot-tests.sh" --ci
+}
 
 PASS=0; FAIL=0
 FAILED_JOBS=()
@@ -235,6 +236,7 @@ run_all() {
         run_check "docs"            job_docs
         run_check "py"              job_py
         run_check "sim"             job_sim
+        run_check "snapshot"        job_snapshot
     fi
     echo "────────────────────────────────────────"
     printf '  %s   %s\n' "$(green "$PASS pass")" "$([ "$FAIL" -gt 0 ] && red "$FAIL fail" || echo "0 fail")"
@@ -281,6 +283,7 @@ case "${1:-all}" in
     py)               shift; job_py "${1:-3.13}" ;;
     docs)             job_docs ;;
     sim)              job_sim ;;
+    snapshot)         job_snapshot ;;
     all)              run_all false ;;
     quick|--quick)    run_all true ;;
     install-hooks|hooks) job_install_hooks ;;
