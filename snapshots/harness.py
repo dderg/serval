@@ -238,6 +238,57 @@ def snapshots_match(
     return a == b
 
 
+def describe_mismatches(
+    a: object,
+    b: object,
+    atol: float = FLOAT_ATOL,
+    rtol: float = FLOAT_RTOL,
+    path: str = "",
+    out: list[str] | None = None,
+    limit: int = 12,
+) -> list[str]:
+    if out is None:
+        out = []
+    if len(out) >= limit:
+        return out
+    numeric = (int, float)
+    if isinstance(a, float) or isinstance(b, float):
+        ok = (
+            isinstance(a, numeric)
+            and isinstance(b, numeric)
+            and not (isinstance(a, bool) or isinstance(b, bool))
+        )
+        if not ok:
+            out.append(f"{path}: {a!r} != {b!r} (type/NaN)")
+        elif not _floats_match(float(a), float(b), atol, rtol):
+            d = abs(float(a) - float(b))
+            rel = d / max(abs(a), abs(b), 1e-300)
+            out.append(f"{path}: {a!r} != {b!r} (abs={d:.3e} rel={rel:.3e})")
+        return out
+    if isinstance(a, dict):
+        if not isinstance(b, dict) or a.keys() != b.keys():
+            out.append(f"{path}: keys differ")
+            return out
+        for k in a:
+            sub = f"{path}.{k}" if path else str(k)
+            describe_mismatches(a[k], b[k], atol, rtol, sub, out, limit)
+        return out
+    if isinstance(a, list):
+        if not isinstance(b, list):
+            out.append(f"{path}: list vs {type(b).__name__}")
+        elif len(a) != len(b):
+            out.append(f"{path}: length {len(a)} != {len(b)}")
+        else:
+            for i, (x, y) in enumerate(zip(a, b)):
+                describe_mismatches(
+                    x, y, atol, rtol, f"{path}[{i}]", out, limit
+                )
+        return out
+    if a != b:
+        out.append(f"{path}: {a!r} != {b!r}")
+    return out
+
+
 def compare(case: Case, snapshot: dict) -> Status:
     baseline = baseline_snapshot(case)
     if baseline is None:

@@ -54,6 +54,10 @@ def main() -> int:
             "PENDING" if status is harness.Status.NEW else status.value.upper()
         )
         print(f"  {label:8} {case.name}")
+        if status is harness.Status.CHANGED:
+            baseline = harness.baseline_snapshot(case)
+            for line in harness.describe_mismatches(baseline, snapshot):
+                print(f"             {line}")
 
     ok = buckets[harness.Status.EXACT]
     changed = buckets[harness.Status.CHANGED]
