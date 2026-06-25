@@ -56,13 +56,9 @@ def main() -> int:
         print(f"  {label:8} {case.name}")
         if status is harness.Status.CHANGED:
             baseline = harness.baseline_snapshot(case)
-            rel, abs_tiny = harness.drift_envelope(baseline, snapshot)
-            print(
-                f"             drift envelope: rel(|v|>1e-3)={rel:.2e} "
-                f"abs(|v|<=1e-3)={abs_tiny:.2e}"
-            )
-            for line in harness.describe_mismatches(baseline, snapshot):
-                print(f"             {line}")
+            d = harness.drift_envelope(baseline, snapshot)
+            print(f"             worst rel {d['rel']:.2e} at {d['rel_at']}")
+            print(f"             worst abs {d['abs']:.2e} at {d['abs_at']}")
 
     ok = buckets[harness.Status.EXACT]
     changed = buckets[harness.Status.CHANGED]
