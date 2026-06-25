@@ -199,14 +199,11 @@ def _build_time_series(snapshot):
 
     s = np.array(snapshot["kin_s"])
     v = np.array(snapshot["kin_v"])
-    a = np.array(snapshot["kin_a_t"]) if "kin_a_t" in snapshot else None
     tangent_x = np.array(snapshot["kin_heading_x"])
     tangent_y = np.array(snapshot["kin_heading_y"])
     kappa = np.array(snapshot["kin_kappa"])
 
     distinct = np.concatenate([[True], np.diff(s) > 1e-9])
-    if a is not None:
-        a = a[distinct]
     s, v, tangent_x, tangent_y, kappa = (
         arr[distinct] for arr in (s, v, tangent_x, tangent_y, kappa)
     )
@@ -221,7 +218,7 @@ def _build_time_series(snapshot):
     vx = v * tangent_x
     vy = v * tangent_y
 
-    accel_tangential = a if a is not None else np.gradient(v, t)
+    accel_tangential = np.gradient(v, t)
     accel_normal = v**2 * kappa
     ax = accel_tangential * tangent_x + accel_normal * normal_x
     ay = accel_tangential * tangent_y + accel_normal * normal_y

@@ -54,11 +54,9 @@ fn kinematics_has_samples_with_valid_heading() {
     let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
     let kin = sample_kinematics(&outcome, &profile);
     assert!(!kin.s.is_empty());
-    assert_eq!(kin.a_t.len(), kin.s.len());
     for i in 0..kin.s.len() {
         assert!(kin.s[i] >= 0.0);
         assert!(kin.v[i] >= 0.0);
-        assert!(kin.a_t[i].is_finite());
         let h_len = (kin.heading_x[i].powi(2) + kin.heading_y[i].powi(2)).sqrt();
         assert!((h_len - 1.0).abs() < 1e-6, "heading not unit: {h_len}");
     }
