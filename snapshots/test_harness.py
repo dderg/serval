@@ -29,7 +29,7 @@ def _case(tmp_path, name="grp/unit") -> harness.Case:
         name=name,
         gcode_path=tmp_path / "unit.gcode",
         config_path=tmp_path / "printer.cfg",
-        baseline_path=tmp_path / "unit.baseline.json.gz",
+        baseline_path=tmp_path / "baselines" / "grp" / "unit.baseline.json.gz",
     )
     case.gcode_path.write_text("G1 X1\n")
     case.config_path.write_text("[printer]\n")
@@ -54,9 +54,31 @@ def test_compare_new_when_no_baseline(tmp_path):
     assert harness.compare(case, _SNAPSHOT) is harness.Status.NEW
 
 
+def test_discover_cases_keeps_baselines_separate(tmp_path):
+    group = tmp_path / "cases" / "grp"
+    group.mkdir(parents=True)
+    (group / "printer.cfg").write_text("[printer]\n")
+    (group / "unit.gcode").write_text("G1 X1\n")
+
+    cases = harness.discover_cases(tmp_path / "cases", tmp_path / "baselines")
+
+    assert cases == [
+        harness.Case(
+            name="grp/unit",
+            gcode_path=group / "unit.gcode",
+            config_path=group / "printer.cfg",
+            baseline_path=tmp_path
+            / "baselines"
+            / "grp"
+            / "unit.baseline.json.gz",
+        )
+    ]
+
+
 def test_compare_exact_after_write(tmp_path):
     case = _case(tmp_path)
     harness.write_baseline(case, _SNAPSHOT)
+    assert case.baseline_path.exists()
     assert harness.compare(case, _SNAPSHOT) is harness.Status.EXACT
 
 

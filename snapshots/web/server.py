@@ -11,7 +11,7 @@ Normally you don't run this directly — snapshot-tests.sh starts it for you whe
 a case needs review. It never opens a browser; it prints a URL to visit.
 
 The planner runs on the host; "after" is the current trajectory, "before" is
-the committed baseline. Accept writes the current snapshot to baseline.json.gz.
+the committed baseline. Accept writes the current snapshot under baselines/.
 """
 
 from __future__ import annotations

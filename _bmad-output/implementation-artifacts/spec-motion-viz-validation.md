@@ -85,7 +85,7 @@ Baseline is the raw `pipeline_snapshot` dict; `a_scalar`/`j_scalar` are render-t
 
 `review.py accept` is the human-in-the-loop gate (CAP-3). The web UI for highlighting changed path regions is explicitly later — v1 is PNG-first per CAP-4.
 
-Baselines are the full raw trajectory stored as deterministic gzip (`baseline.json.gz`, `mtime=0`) tracked in Git LFS (`tests/motion_engine/snapshots/.gitattributes`) — ~3× smaller than raw text, byte-stable so an unchanged trajectory never churns, and still the complete raw artifact (LFS keeps the large blobs out of pack history). `git lfs install` is required wherever the suite's baselines are committed.
+Baselines are the full raw trajectory stored as deterministic gzip (`baseline.json.gz`, `mtime=0`) under `snapshots/baselines/` — ~3× smaller than raw text, byte-stable so an unchanged trajectory never churns, and still the complete raw artifact without cluttering G-code case folders.
 
 ## Verification
 
@@ -101,7 +101,7 @@ Baselines are the full raw trajectory stored as deterministic gzip (`baseline.js
 
 - The whole-trajectory contract: run a case, compare raw dict to baseline, fail on deviation.
   [`harness.py:143`](../../tests/motion_engine/snapshots/harness.py#L143)
-- Canonical serialization — sorted keys, round-trip floats, `allow_nan=False` fails loud on a poisoned sample; baselines stored as deterministic gzip in LFS.
+- Canonical serialization — sorted keys, round-trip floats, `allow_nan=False` fails loud on a poisoned sample; baselines stored as deterministic gzip.
   [`harness.py:111`](../../tests/motion_engine/snapshots/harness.py#L111)
 - Drives the real engine; raises loudly on a malformed case or absent cdylib.
   [`harness.py:85`](../../tests/motion_engine/snapshots/harness.py#L85)
