@@ -550,6 +550,33 @@ impl StreamState {
         }
     }
 
+    /// The on-path brake-to-rest from the current committed frontier, computed
+    /// **without** advancing committed state: the segments that decelerate the
+    /// buffered tail to rest, contiguous with the last committed piece (the first
+    /// starts at `t_committed`, from the committed seam). Empty at rest or with an
+    /// empty buffer.
+    ///
+    /// The same trajectory `commit(true)` would dispatch, but *staged* rather than
+    /// committed — so the pump can hold it as a provisional tail, flush it only on
+    /// starvation, and the planner keeps streaming forward from the same frontier.
+    /// Bookkeeping (`last_v_barrier`, `full_plan_count`) is preserved, so staging
+    /// the tail is side-effect-free.
+    ///
+    /// TODO(stage-4): the to-rest tail is already the suffix of the forward
+    /// commit's own velocity solve (the profile's deferred brake-to-rest past
+    /// `barrier`, velocity.rs). Share that profile instead of re-running the solve
+    /// here, so staging the tail costs only the lower, not a second plan.
+    pub fn compute_brake_tail(&mut self) -> Result<Vec<ShapedSegment>, StreamError> {
+        let saved_v_barrier = self.last_v_barrier;
+        let saved_plan_count = self.full_plan_count;
+        let tail = self
+            .plan_commit(true)?
+            .map_or_else(Vec::new, |delta| delta.committed);
+        self.last_v_barrier = saved_v_barrier;
+        self.full_plan_count = saved_plan_count;
+        Ok(tail)
+    }
+
     /// Materialize the deferred brake-to-rest on a producer-stall watermark.
     /// `lead_remaining` is the locked lead still ahead of the playhead at trigger
     /// time. If it is already below the fixed solve-time budget the ramp cannot

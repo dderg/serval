@@ -970,3 +970,136 @@ fn all_clothoid_region_skips_the_velocity_plan() {
         longest_skip_run(&steps)
     );
 }
+
+/// Structural equality for two segment streams (`ShapedSegment` is not `PartialEq`):
+/// same count, contiguous times, and matching evaluated endpoint positions per axis.
+fn segs_endpoint_match(a: &[ShapedSegment], b: &[ShapedSegment]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.source_line == y.source_line
+                && (x.t_start - y.t_start).abs() < 1e-9
+                && (x.t_end - y.t_end).abs() < 1e-9
+                && x.axes.len() == y.axes.len()
+                && (0..x.axes.len()).all(|ax| {
+                    (eval(&x.axes[ax], x.t_start) - eval(&y.axes[ax], y.t_start)).abs() < 1e-6
+                        && (eval(&x.axes[ax], x.t_end) - eval(&y.axes[ax], y.t_end)).abs() < 1e-6
+                })
+        })
+}
+
+#[test]
+fn brake_tail_matches_a_forced_drain_without_committing() {
+    // compute_brake_tail() must yield the exact trajectory commit(true) would
+    // dispatch — the on-path decel-to-rest — but *stage* it: committed state stays
+    // untouched, so the planner keeps streaming forward from the same frontier
+    // while the pump holds the tail as a provisional stop.
+    let home = [0.0, 0.0, 0.2, 0.0];
+    let build = || {
+        let mut s = StreamState::new(cfg(), AxisChainSet::default(), &home, 0.0);
+        let mut prev = [home[0], home[1], home[2]];
+        for i in 0..8u32 {
+            let end = [prev[0] + 10.0, 0.0, 0.2];
+            s.push(line(i + 1, prev, end, 0.0));
+            prev = end;
+        }
+        s
+    };
+    let mut staged = build();
+    let mut drained = build();
+
+    // Advance the frontier on both with a forward commit, leaving a tail buffered.
+    let _ = staged.commit(false).expect("forward commit");
+    let _ = drained.commit(false).expect("forward commit");
+
+    let t_before = staged.t_committed();
+    let v_before = staged.entry_velocity();
+    let buffered_before = staged.buffered();
+    assert!(
+        buffered_before > 0,
+        "test needs an uncommitted tail to brake"
+    );
+
+    let tail = staged.compute_brake_tail().expect("brake tail");
+    let drain = drained.commit(true).expect("forced drain");
+
+    assert!(
+        !tail.is_empty(),
+        "a moving frontier must produce a brake tail"
+    );
+    assert!(
+        segs_endpoint_match(&tail, &drain),
+        "brake tail must equal the trajectory commit(true) dispatches"
+    );
+    assert!(
+        (tail[0].t_start - t_before).abs() < 1e-9,
+        "tail must start at the committed frontier time"
+    );
+    assert_eq!(
+        staged.t_committed(),
+        t_before,
+        "staging must not move t_committed"
+    );
+    assert_eq!(
+        staged.entry_velocity(),
+        v_before,
+        "staging must not change entry_v"
+    );
+    assert_eq!(
+        staged.buffered(),
+        buffered_before,
+        "staging must not touch the buffer"
+    );
+    assert!(drained.is_empty(), "commit(true) drains its buffer to rest");
+}
+
+#[test]
+fn brake_tail_is_empty_at_rest() {
+    let home = [0.0, 0.0, 0.2, 0.0];
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &home, 0.0);
+    assert!(
+        s.compute_brake_tail().expect("empty buffer").is_empty(),
+        "no buffer -> no tail"
+    );
+
+    let mut prev = [0.0, 0.0, 0.2];
+    for i in 0..4u32 {
+        let end = [prev[0] + 10.0, 0.0, 0.2];
+        s.push(line(i + 1, prev, end, 0.0));
+        prev = end;
+    }
+    let _ = s.commit(true).expect("drain to rest");
+    assert!(s.is_empty(), "buffer drained");
+    assert!(
+        s.compute_brake_tail().expect("at rest").is_empty(),
+        "at rest with an empty buffer -> no tail"
+    );
+}
+
+#[test]
+fn brake_tail_handles_a_single_short_move() {
+    // Edge F: a one-move reserved region must still stage a valid to-rest tail.
+    let home = [0.0, 0.0, 0.2, 0.0];
+    let build = || {
+        let mut s = StreamState::new(cfg(), AxisChainSet::default(), &home, 0.0);
+        s.push(line(1, [0.0, 0.0, 0.2], [2.0, 0.0, 0.2], 0.0));
+        s
+    };
+    let mut staged = build();
+    let mut drained = build();
+    let tail = staged.compute_brake_tail().expect("single-move tail");
+    let drain = drained.commit(true).expect("single-move drain");
+    assert!(
+        !tail.is_empty(),
+        "a single buffered move must brake to rest"
+    );
+    assert!(
+        segs_endpoint_match(&tail, &drain),
+        "single-move tail matches the forced drain"
+    );
+    assert!(
+        (tail[0].t_start).abs() < 1e-9,
+        "tail starts at the frontier (t=0)"
+    );
+    assert_eq!(staged.t_committed(), 0.0, "staging mutated nothing");
+    assert_eq!(staged.buffered(), 1, "the single move stays buffered");
+}
