@@ -26,9 +26,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    cases = harness.discover_cases()
+    all_cases = harness.discover_cases()
+    for baseline in harness.prune_orphan_baselines(all_cases):
+        print(f"  PRUNED   {baseline.relative_to(harness.BASELINES_DIR)}")
+
+    cases = all_cases
     if args.filter:
-        cases = [c for c in cases if args.filter in c.name]
+        cases = [c for c in all_cases if args.filter in c.name]
     if not cases:
         print("no snapshot cases found under cases/")
         return 1

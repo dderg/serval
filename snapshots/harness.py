@@ -79,6 +79,44 @@ def discover_cases(
     return cases
 
 
+def discover_baselines(baselines_dir: Path = BASELINES_DIR) -> list[Path]:
+    if not baselines_dir.is_dir():
+        return []
+    return sorted(baselines_dir.rglob(f"*{BASELINE_SUFFIX}"))
+
+
+def orphan_baselines(
+    cases: list[Case], baselines_dir: Path = BASELINES_DIR
+) -> list[Path]:
+    live = {case.baseline_path.resolve() for case in cases}
+    return [
+        b for b in discover_baselines(baselines_dir) if b.resolve() not in live
+    ]
+
+
+def prune_orphan_baselines(
+    cases: list[Case], baselines_dir: Path = BASELINES_DIR
+) -> list[Path]:
+    """Delete baselines whose case is gone (gcode deleted, renamed, or skipped).
+
+    `cases` must be the full discovered set, never a -k-filtered subset, or a
+    filtered run would delete the excluded cases' still-live baselines.
+    """
+    orphans = orphan_baselines(cases, baselines_dir)
+    for baseline in orphans:
+        baseline.unlink()
+    _remove_empty_dirs(baselines_dir)
+    return orphans
+
+
+def _remove_empty_dirs(root: Path) -> None:
+    if not root.is_dir():
+        return
+    for sub in sorted(root.rglob("*"), reverse=True):
+        if sub.is_dir() and not any(sub.iterdir()):
+            sub.rmdir()
+
+
 def _import_engine():
     try:
         import _motion_engine
