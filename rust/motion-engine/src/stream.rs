@@ -157,10 +157,16 @@ pub struct StreamState {
 /// expensive fit+plan+lower (which produces this) from the cheap state advance
 /// lets the caller stage a forward commit and a brake-to-rest from the same
 /// frontier and apply only the one the pump's verdict selects.
-struct CommitDelta {
+pub(crate) struct CommitDelta {
     /// Post-axis-chain segments to dispatch; their last `t_end` is the new
     /// committed frontier.
     committed: Vec<ShapedSegment>,
+    /// The on-path brake-to-rest staged from this same plan's already-solved
+    /// suffix (`segs[commit_count..n]`, which the backward sweep drives to rest),
+    /// shaped to ring down — no second plan. Contiguous with `committed`: its
+    /// first segment starts at the new committed frontier. Empty on a full drain
+    /// to rest (`is_full`) or when `force`.
+    brake_tail: Vec<ShapedSegment>,
     /// Pre-axis-chain committed segments, appended to `post_history`.
     raw_committed: Vec<ShapedSegment>,
     /// Whole buffer committed to rest (`commit_count == n`).
@@ -175,6 +181,19 @@ struct CommitDelta {
     /// The committed seam consumed the kept front move's head, so it needs
     /// trimming. Unused when `is_full`.
     head_consumed: bool,
+}
+
+/// The rest state a staged brake tail ends at, captured when the tail is handed
+/// to the pump so the planner can re-anchor there if the pump fires it. The
+/// machine brakes to rest over `covered_moves` buffered moves — the buffer as it
+/// stood when the tail was staged — ending at `seam_pos` (the geometric buffer
+/// end) at host time `t_rest`. Moves appended after staging are untouched: a
+/// fired brake drops the covered prefix and re-plans the rest from rest, so no
+/// move is lost.
+pub(crate) struct BrakeAnchor {
+    seam_pos: Vec<f64>,
+    t_rest: f64,
+    covered_moves: usize,
 }
 
 impl StreamState {
@@ -323,7 +342,7 @@ impl StreamState {
     /// here but deferring the state advance to [`Self::apply_commit`] lets the
     /// caller stage a forward commit and a brake-to-rest from the same frontier
     /// and apply only the one the pump's verdict selects.
-    fn plan_commit(&mut self, force: bool) -> Result<Option<CommitDelta>, StreamError> {
+    pub(crate) fn plan_commit(&mut self, force: bool) -> Result<Option<CommitDelta>, StreamError> {
         if self.buffer.is_empty() {
             return Ok(None);
         }
@@ -479,6 +498,20 @@ impl StreamState {
             &self.axis_chains.chains,
         )?;
 
+        let brake_tail = if !force && commit_count < n {
+            let mut tail_history = self.post_history.clone();
+            tail_history.extend(segs.iter().take(commit_count).cloned());
+            apply_axis_chains(
+                &tail_history,
+                &segs[commit_count..],
+                n - commit_count,
+                true,
+                &self.axis_chains.chains,
+            )?
+        } else {
+            Vec::new()
+        };
+
         let mut seam_pos = self.odometer.clone();
         for gm in outcome.moves.iter().take(commit_count) {
             advance_odometer(&mut seam_pos, gm);
@@ -500,6 +533,7 @@ impl StreamState {
 
         Ok(Some(CommitDelta {
             committed,
+            brake_tail,
             raw_committed,
             is_full: commit_count == n,
             seam_pos,
@@ -512,7 +546,10 @@ impl StreamState {
     /// Advance committed state by a [`CommitDelta`] staged by [`Self::plan_commit`]
     /// and return the segments to dispatch. The only place committed-trajectory
     /// state moves forward on a normal commit.
-    fn apply_commit(&mut self, delta: CommitDelta) -> Result<Vec<ShapedSegment>, StreamError> {
+    pub(crate) fn apply_commit(
+        &mut self,
+        delta: CommitDelta,
+    ) -> Result<(Vec<ShapedSegment>, Vec<ShapedSegment>), StreamError> {
         let new_t_committed = delta.committed.last().expect("commit_count > 0").t_end;
         self.odometer = delta.seam_pos;
         self.t_committed = new_t_committed;
@@ -536,7 +573,7 @@ impl StreamState {
         }
         self.post_history.extend(delta.raw_committed);
         self.trim_post_history();
-        Ok(delta.committed)
+        Ok((delta.committed, delta.brake_tail))
     }
 
     /// Plan the buffer and commit a prefix at the latest zero-curvature seam.
@@ -546,8 +583,58 @@ impl StreamState {
     pub fn commit(&mut self, force: bool) -> Result<Vec<ShapedSegment>, StreamError> {
         match self.plan_commit(force)? {
             None => Ok(Vec::new()),
+            Some(delta) => Ok(self.apply_commit(delta)?.0),
+        }
+    }
+
+    /// Streaming forward commit that also stages the on-path brake-to-rest from
+    /// the same plan. Returns `(committed, brake_tail)`: the segments to dispatch
+    /// and the provisional decel-to-rest the pump holds as a starvation stop. The
+    /// tail costs only the suffix's axis-chain shaping — the velocity solve that
+    /// produced it is the forward commit's own. Empty tail when the buffer drains
+    /// to rest or nothing is committable.
+    pub fn commit_with_brake_tail(
+        &mut self,
+    ) -> Result<(Vec<ShapedSegment>, Vec<ShapedSegment>), StreamError> {
+        match self.plan_commit(false)? {
+            None => Ok((Vec::new(), Vec::new())),
             Some(delta) => self.apply_commit(delta),
         }
+    }
+
+    /// Capture the rest state a just-staged `brake_tail` would brake to. Read
+    /// after the forward commit that produced the tail: the buffer then holds
+    /// exactly the moves the tail drains, and the odometer sits at the committed
+    /// frontier the tail continues from.
+    pub(crate) fn brake_anchor(&self, brake_tail: &[ShapedSegment]) -> BrakeAnchor {
+        let mut seam_pos = self.odometer.clone();
+        for gm in &self.buffer {
+            advance_odometer(&mut seam_pos, gm);
+        }
+        BrakeAnchor {
+            seam_pos,
+            t_rest: brake_tail.last().map_or(self.t_committed, |s| s.t_end),
+            covered_moves: self.buffer.len(),
+        }
+    }
+
+    /// Re-anchor committed state to the rest point a fired brake reached. The
+    /// pump flushed the held tail and the machine is decelerating to rest at
+    /// `anchor.seam_pos`; drop the `covered_moves` the brake drained, keep the
+    /// moves appended since (to be re-planned from rest), and reset to rest so
+    /// the next commit re-anchors there. Mirrors a `reset` to the braked seam
+    /// without clearing the un-executed remainder.
+    pub(crate) fn reanchor_after_brake(&mut self, anchor: BrakeAnchor) {
+        let drop = anchor.covered_moves.min(self.buffer.len());
+        for _ in 0..drop {
+            self.buffer.pop_front();
+        }
+        self.odometer = anchor.seam_pos;
+        self.t_committed = anchor.t_rest;
+        self.entry_v = 0.0;
+        self.committed_head_len = 0.0;
+        self.last_v_barrier = 0.0;
+        self.post_history.clear();
     }
 
     /// The on-path brake-to-rest from the current committed frontier, computed

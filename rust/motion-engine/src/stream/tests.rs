@@ -1103,3 +1103,105 @@ fn brake_tail_handles_a_single_short_move() {
     assert_eq!(staged.t_committed(), 0.0, "staging mutated nothing");
     assert_eq!(staged.buffered(), 1, "the single move stays buffered");
 }
+
+fn final_pos(segs: &[ShapedSegment]) -> [f64; 3] {
+    let last = segs.last().expect("non-empty segment list");
+    [
+        eval(&last.axes[0], last.t_end),
+        eval(&last.axes[1], last.t_end),
+        eval(&last.axes[2], last.t_end),
+    ]
+}
+
+#[test]
+fn cheap_brake_tail_reaches_the_same_rest_as_a_forced_drain() {
+    // The streaming commit stages its brake-to-rest from the forward plan's own
+    // already-solved suffix (no second plan). That cheap tail must stop at the
+    // same place the expensive whole-remaining-buffer drain does: the geometric
+    // buffer end, at rest. Equal stopping point is what makes the planner's
+    // re-anchor consistent with where the machine actually halts.
+    let home = [0.0, 0.0, 0.2, 0.0];
+    let build = || {
+        let mut s = StreamState::new(cfg(), AxisChainSet::default(), &home, 0.0);
+        let mut prev = [0.0, 0.0, 0.2];
+        for i in 0..8u32 {
+            let end = [prev[0] + 10.0, 0.0, 0.2];
+            s.push(line(i + 1, prev, end, 0.0));
+            prev = end;
+        }
+        s
+    };
+    let mut cheap = build();
+    let mut reference = build();
+
+    let (committed, tail) = cheap.commit_with_brake_tail().expect("streaming commit");
+    assert!(!committed.is_empty(), "the batch commits a forward prefix");
+    assert!(!tail.is_empty(), "a moving frontier stages a brake tail");
+    assert!(
+        (tail[0].t_start - committed.last().expect("committed").t_end).abs() < 1e-9,
+        "brake tail is contiguous with the committed frontier"
+    );
+
+    let _ = reference.commit(false).expect("forward commit");
+    let drain = reference.compute_brake_tail().expect("reference drain");
+    assert!(
+        !drain.is_empty(),
+        "the reference drains the same tail to rest"
+    );
+
+    let c = final_pos(&tail);
+    let d = final_pos(&drain);
+    assert!(
+        (c[0] - d[0]).abs() < 1e-6 && (c[1] - d[1]).abs() < 1e-6 && (c[2] - d[2]).abs() < 1e-6,
+        "cheap suffix tail and forced drain stop at the same point ({c:?} vs {d:?})"
+    );
+}
+
+#[test]
+fn reanchor_after_brake_drops_the_drained_prefix_and_keeps_late_arrivals() {
+    // When the pump fires the held tail, the machine brakes to rest over exactly
+    // the moves buffered when the tail was staged. Re-anchoring drops those,
+    // keeps moves that arrived afterwards (un-executed — must not be lost), and
+    // resets to rest at the braked frontier.
+    let home = [0.0, 0.0, 0.2, 0.0];
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &home, 0.0);
+    let mut prev = [0.0, 0.0, 0.2];
+    for i in 0..8u32 {
+        let end = [prev[0] + 10.0, 0.0, 0.2];
+        s.push(line(i + 1, prev, end, 0.0));
+        prev = end;
+    }
+
+    let (_committed, tail) = s.commit_with_brake_tail().expect("streaming commit");
+    assert!(!tail.is_empty(), "a moving frontier stages a brake tail");
+    let covered = s.buffered();
+    assert!(covered > 0, "the tail drains the uncommitted remainder");
+    let anchor = s.brake_anchor(&tail);
+
+    // Two moves arrive after the tail was handed to the pump.
+    s.push(line(9, [80.0, 0.0, 0.2], [90.0, 0.0, 0.2], 0.0));
+    s.push(line(10, [90.0, 0.0, 0.2], [100.0, 0.0, 0.2], 0.0));
+    assert_eq!(
+        s.buffered(),
+        covered + 2,
+        "late arrivals append to the buffer"
+    );
+
+    s.reanchor_after_brake(anchor);
+
+    assert_eq!(
+        s.buffered(),
+        2,
+        "the brake drained the staged remainder; only late arrivals survive"
+    );
+    assert_eq!(s.entry_velocity(), 0.0, "re-anchored at rest");
+    assert!(
+        (s.t_committed() - tail.last().expect("tail").t_end).abs() < 1e-9,
+        "committed clock advances to the braked rest time"
+    );
+    assert_eq!(
+        s.last_v_barrier(),
+        0.0,
+        "the watermark resets — nothing is riding a barrier velocity at rest"
+    );
+}
