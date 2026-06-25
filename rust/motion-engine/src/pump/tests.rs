@@ -9,6 +9,7 @@ fn make_enqueue(key: AxisKey, pieces: Vec<(PieceEntry, f64)>, fresh_stream: bool
         pieces,
         fresh_stream,
         lead_secs: MAX_LEAD_SECS,
+        source_line: u32::MAX,
     })
 }
 
@@ -307,6 +308,7 @@ fn flush_clears_queued_pieces_and_junctions() {
             .collect(),
         fresh_stream: true,
         lead_secs,
+        source_line: u32::MAX,
     }))
     .unwrap();
 
@@ -331,6 +333,7 @@ fn flush_clears_queued_pieces_and_junctions() {
         )],
         fresh_stream: false,
         lead_secs,
+        source_line: u32::MAX,
     }))
     .unwrap();
     {
@@ -407,6 +410,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
             .collect(),
         fresh_stream: true,
         lead_secs,
+        source_line: u32::MAX,
     }))
     .unwrap();
 
@@ -429,6 +433,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         )],
         fresh_stream: false,
         lead_secs,
+        source_line: u32::MAX,
     }))
     .unwrap();
     {

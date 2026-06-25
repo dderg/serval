@@ -104,6 +104,7 @@ fn stall_detection_fires_when_floor_stuck() {
         pieces: (0..20).map(|i| make_piece_dur(i as u64, 0.003)).collect(),
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     tx.send(PumpMsg::Enqueue(EnqueueMsg {
@@ -111,6 +112,7 @@ fn stall_detection_fires_when_floor_stuck() {
         pieces: (0..20).map(|i| make_piece_dur(i as u64, 0.003)).collect(),
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
 
@@ -148,6 +150,7 @@ fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
         pieces: (0..3).map(|i| make_piece(i as u64)).collect(),
         fresh_stream: false,
         lead_secs: MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     tx.send(PumpMsg::Shutdown).unwrap();
@@ -216,6 +219,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
         pieces: vec![make_piece(50), make_piece(500)],
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
 
@@ -263,6 +267,7 @@ fn unsynced_clock_releases_nothing_for_participants() {
         pieces: (10..14).map(|i| make_piece(i as u64)).collect(),
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
 
@@ -371,6 +376,7 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
         pieces: vec![make_piece(10)],
         fresh_stream: false,
         lead_secs: DRIP_WINDOW_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     tx.send(PumpMsg::Heartbeat(HeartbeatMsg {
@@ -440,6 +446,7 @@ fn drip_disarm_clears_cohort() {
         pieces: vec![make_piece(1)],
         fresh_stream: false,
         lead_secs: MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
 
@@ -478,6 +485,7 @@ fn drip_disarm_wrong_cohort_id_is_noop() {
         pieces: vec![make_piece(1)],
         fresh_stream: false,
         lead_secs: MAX_LEAD_SECS,
+        source_line: u32::MAX,
     }))
     .unwrap();
     tx.send(PumpMsg::Shutdown).unwrap();
