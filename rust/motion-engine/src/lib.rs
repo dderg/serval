@@ -41,7 +41,7 @@ pub mod timing;
 mod types;
 pub mod viz;
 
-pub mod seam_harness;
+pub mod seam_test_harness;
 
 pub mod test_support;
 

@@ -1,4 +1,4 @@
-use _motion_engine::seam_harness::{
+use _motion_engine::seam_test_harness::{
     CommitSchedule, SeamReport, default_stream_config, run_schedule,
 };
 
@@ -74,7 +74,7 @@ fn seam_continuity_cap_256() {
 #[test]
 fn forced_commit_then_replan_is_continuous() {
     let schedule = CommitSchedule {
-        cadence: _motion_engine::seam_harness::Cadence::FixedCap(64),
+        cadence: _motion_engine::seam_test_harness::Cadence::FixedCap(64),
         force_after_move: vec![40, 120, 200],
     };
     let report = run_schedule(NEPTUNE, default_stream_config(), &schedule)

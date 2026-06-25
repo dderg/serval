@@ -881,8 +881,8 @@ struct PushStep {
 }
 
 fn drive_neptune(replan_short_circuit: bool) -> (Vec<ShapedSegment>, Vec<PushStep>) {
-    let config = crate::seam_harness::default_stream_config();
-    let moves = crate::seam_harness::parse_gcode_to_moves(NEPTUNE_CRASH, config.limits);
+    let config = crate::seam_test_harness::default_stream_config();
+    let moves = crate::seam_test_harness::parse_gcode_to_moves(NEPTUNE_CRASH, config.limits);
     let home = moves
         .first()
         .and_then(|m| m.segment.spatial.as_ref())

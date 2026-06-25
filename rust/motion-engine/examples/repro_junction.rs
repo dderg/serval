@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::process;
 
-use _motion_engine::seam_harness::{CommitSchedule, default_stream_config, run_schedule};
+use _motion_engine::seam_test_harness::{CommitSchedule, default_stream_config, run_schedule};
 
 fn axis_name(axis: u8) -> &'static str {
     match axis {
