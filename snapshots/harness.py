@@ -289,6 +289,44 @@ def describe_mismatches(
     return out
 
 
+def drift_envelope(
+    a: object,
+    b: object,
+    tiny: float = 1e-3,
+    out: list[float] | None = None,
+) -> list[float]:
+    """[max relative drift on |value|>tiny, max absolute drift on |value|<=tiny].
+
+    Splits the two regimes so a single changed run names both the rtol the large
+    values need and the atol the near-zero values (where rtol is useless) need.
+    """
+    if out is None:
+        out = [0.0, 0.0]
+    numeric = (int, float)
+    if isinstance(a, float) or isinstance(b, float):
+        if (
+            isinstance(a, numeric)
+            and isinstance(b, numeric)
+            and not (isinstance(a, bool) or isinstance(b, bool))
+            and math.isfinite(a)
+            and math.isfinite(b)
+        ):
+            d = abs(float(a) - float(b))
+            m = max(abs(a), abs(b))
+            if m > tiny:
+                out[0] = max(out[0], d / m)
+            else:
+                out[1] = max(out[1], d)
+        return out
+    if isinstance(a, dict) and isinstance(b, dict) and a.keys() == b.keys():
+        for k in a:
+            drift_envelope(a[k], b[k], tiny, out)
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for x, y in zip(a, b):
+            drift_envelope(x, y, tiny, out)
+    return out
+
+
 def compare(case: Case, snapshot: dict) -> Status:
     baseline = baseline_snapshot(case)
     if baseline is None:
