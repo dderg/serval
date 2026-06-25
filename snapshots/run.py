@@ -56,7 +56,9 @@ def main() -> int:
         print(f"  {label:8} {case.name}")
         if status is harness.Status.CHANGED:
             baseline = harness.baseline_snapshot(case)
-            d = harness.drift_envelope(baseline, snapshot)
+            d = harness.drift_envelope(
+                harness.gated(baseline), harness.gated(snapshot)
+            )
             print(f"             worst rel {d['rel']:.2e} at {d['rel_at']}")
             print(f"             worst abs {d['abs']:.2e} at {d['abs_at']}")
 

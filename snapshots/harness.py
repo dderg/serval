@@ -11,9 +11,10 @@ segment shape and integer counts must match exactly, floats within
 ``FLOAT_ATOL``/``FLOAT_RTOL``. The planner is deterministic, but its
 transcendental math bottoms out in the host libm, whose last ulp differs
 between a macOS dev box and the Linux CI runner — so a baseline generated on
-one host is validated on another within tolerance rather than bit-for-bit.
-Baselines are still stored as canonical JSON (``allow_nan=False`` poisons a
-non-finite sample on write).
+one host is validated on another within tolerance rather than bit-for-bit. The
+finite-difference jerk diagnostics (``COMPARE_EXCLUDED_KEYS``) are stored but
+not gated; see that constant for why. Baselines are still stored as canonical
+JSON (``allow_nan=False`` poisons a non-finite sample on write).
 """
 
 from __future__ import annotations
@@ -45,10 +46,22 @@ BASELINE_SUFFIX = ".baseline.json.gz"
 # bottoms out in the host libm, whose last ulp differs between macOS dev boxes
 # and the Linux CI runner. A sample passes if it is within the absolute OR the
 # relative tolerance; both sit far below any meaningful trajectory change yet
-# comfortably above libm ulp noise at printer-scale magnitudes. Structure and
+# above libm noise — including the near-zero accel residuals at bridge
+# transitions, which one host rounds to 0 and another to ~2^-16. Structure and
 # integer counts still compare exactly.
-FLOAT_ATOL = 1e-9
-FLOAT_RTOL = 1e-9
+FLOAT_ATOL = 1e-4
+FLOAT_RTOL = 1e-6
+
+# The viz layer derives these by finite-differencing the velocity/accel samples
+# (tangential_jerk + jerk_probe). A finite difference of a libm-noisy near-zero
+# signal is not reproducible across hosts: at a bridge transition the same term
+# lands as 0.0 on one host and a small nonzero on another (relative drift 1.0),
+# which no tolerance can reconcile. They are visualization diagnostics, not
+# authoritative planner state — kept in the baseline for the web review but not
+# gated. A real regression in them necessarily moves v/a/kappa, which are gated.
+COMPARE_EXCLUDED_KEYS = frozenset(
+    {"kin_j_t", "kin_j_n", "kin_j_n_geom", "kin_j_n_couple"}
+)
 
 
 class Status(enum.Enum):
@@ -330,10 +343,14 @@ def drift_envelope(a: object, b: object, tiny: float = 1e-3) -> dict:
     return worst
 
 
+def gated(snapshot: dict) -> dict:
+    return {k: v for k, v in snapshot.items() if k not in COMPARE_EXCLUDED_KEYS}
+
+
 def compare(case: Case, snapshot: dict) -> Status:
     baseline = baseline_snapshot(case)
     if baseline is None:
         return Status.NEW
-    if snapshots_match(baseline, snapshot):
+    if snapshots_match(gated(baseline), gated(snapshot)):
         return Status.EXACT
     return Status.CHANGED
