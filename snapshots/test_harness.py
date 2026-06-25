@@ -1,0 +1,86 @@
+"""Unit tests for the snapshot harness comparison machinery.
+
+Pure logic — no planner, no _motion_engine — so these are ordinary python-unit
+tests, collected by the `py` job. The snapshot cases themselves run under the
+standalone `run.py`, not pytest.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import harness  # noqa: E402
+
+_SNAPSHOT = {
+    "kin_s": [0.0, 1.0, 2.0],
+    "kin_v": [0.0, 50.0, 0.0],
+    "kin_kappa": [0.0, 0.1, 0.0],
+    "traversal_time_s": 0.123456789,
+    "fitted_segments": [{"type": "line", "x0": 0.0, "y0": 0.0}],
+}
+
+
+def _case(tmp_path, name="grp/unit") -> harness.Case:
+    case = harness.Case(
+        name=name,
+        gcode_path=tmp_path / "unit.gcode",
+        config_path=tmp_path / "printer.cfg",
+        baseline_path=tmp_path / "unit.baseline.json.gz",
+    )
+    case.gcode_path.write_text("G1 X1\n")
+    case.config_path.write_text("[printer]\n")
+    return case
+
+
+def test_canonical_json_is_order_independent():
+    a = harness.canonical_json({"b": 1, "a": 2})
+    b = harness.canonical_json({"a": 2, "b": 1})
+    assert a == b
+
+
+def test_canonical_json_round_trips_floats():
+    text = harness.canonical_json(_SNAPSHOT)
+    import json
+
+    assert json.loads(text)["traversal_time_s"] == 0.123456789
+
+
+def test_compare_new_when_no_baseline(tmp_path):
+    case = _case(tmp_path)
+    assert harness.compare(case, _SNAPSHOT) is harness.Status.NEW
+
+
+def test_compare_exact_after_write(tmp_path):
+    case = _case(tmp_path)
+    harness.write_baseline(case, _SNAPSHOT)
+    assert harness.compare(case, _SNAPSHOT) is harness.Status.EXACT
+
+
+def test_compare_changed_on_deviation(tmp_path):
+    case = _case(tmp_path)
+    harness.write_baseline(case, _SNAPSHOT)
+    perturbed = dict(_SNAPSHOT)
+    perturbed["kin_v"] = [0.0, 50.0001, 0.0]
+    assert harness.compare(case, perturbed) is harness.Status.CHANGED
+
+
+def test_baseline_snapshot_round_trips(tmp_path):
+    case = _case(tmp_path)
+    harness.write_baseline(case, _SNAPSHOT)
+    assert harness.baseline_snapshot(case) == _SNAPSHOT
+
+
+def test_run_case_missing_gcode_raises(tmp_path):
+    case = harness.Case(
+        name="grp/bad",
+        gcode_path=tmp_path / "bad.gcode",
+        config_path=tmp_path / "printer.cfg",
+        baseline_path=tmp_path / "bad.baseline.json.gz",
+    )
+    case.config_path.write_text("[printer]\n")
+    with pytest.raises(ValueError, match="missing bad.gcode"):
+        harness.run_case(case)

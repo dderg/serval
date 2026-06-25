@@ -32,13 +32,6 @@ def _reexec_in_printer_env():
         )
 
 
-_reexec_in_printer_env()
-
-import matplotlib  # noqa: E402
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-
 PRINTER_DATA = Path.home() / "printer_data"
 DEFAULT_CONFIG = PRINTER_DATA / "config" / "printer.cfg"
 DEFAULT_GCODES = PRINTER_DATA / "gcodes"
@@ -224,6 +217,11 @@ def _plot_derivative(ax, t, comp_x, comp_y, scalar, ylabel, title):
 
 
 def render(snapshot, out_path, stem, ts):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     raw_x, raw_y = snapshot["raw_x"], snapshot["raw_y"]
     segments = list(snapshot["fitted_segments"])
 
@@ -421,4 +419,5 @@ def main():
 
 
 if __name__ == "__main__":
+    _reexec_in_printer_env()
     main()

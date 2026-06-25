@@ -7,7 +7,7 @@
 #
 # Jobs: ruff rust-host rust-build rust-test rust-clippy rust-fmt rust-loom
 #       rust-mcu-h7 rust-mcu-f4 rust-mcu-g0 rust-no-stepper cbindgen-drift
-#       c-smoke deny miri panic-grep watchdog-canary py docs sim
+#       c-smoke deny miri panic-grep watchdog-canary py docs sim snapshot
 #
 # Prerequisites (one-time, for the full local run):
 #   rustup target add thumbv7em-none-eabi
@@ -193,6 +193,11 @@ job_sim() {
 
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
 
+job_snapshot() {
+    make -f "$ROOT/Makefile.rust" motion-engine >/dev/null
+    "$ROOT/snapshots/snapshot-tests.sh" --ci
+}
+
 PASS=0; FAIL=0
 FAILED_JOBS=()
 
@@ -281,6 +286,7 @@ case "${1:-all}" in
     py)               shift; job_py "${1:-3.13}" ;;
     docs)             job_docs ;;
     sim)              job_sim ;;
+    snapshot)         job_snapshot ;;
     all)              run_all false ;;
     quick|--quick)    run_all true ;;
     install-hooks|hooks) job_install_hooks ;;
