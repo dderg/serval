@@ -201,11 +201,10 @@ def _build_time_series(snapshot):
     v = np.array(snapshot["kin_v"])
     tangent_x = np.array(snapshot["kin_heading_x"])
     tangent_y = np.array(snapshot["kin_heading_y"])
-    kappa = np.array(snapshot["kin_kappa"])
 
     distinct = np.concatenate([[True], np.diff(s) > 1e-9])
-    s, v, tangent_x, tangent_y, kappa = (
-        arr[distinct] for arr in (s, v, tangent_x, tangent_y, kappa)
+    s, v, tangent_x, tangent_y = (
+        arr[distinct] for arr in (s, v, tangent_x, tangent_y)
     )
 
     v_safe = np.maximum(v, 1e-6)
@@ -213,18 +212,15 @@ def _build_time_series(snapshot):
     v_avg = 0.5 * (v_safe[:-1] + v_safe[1:])
     t = np.concatenate([[0.0], np.cumsum(ds / v_avg)])
 
-    normal_x, normal_y = -tangent_y, tangent_x
-
     vx = v * tangent_x
     vy = v * tangent_y
 
-    accel_tangential = np.gradient(v, t)
-    accel_normal = v**2 * kappa
-    ax = accel_tangential * tangent_x + accel_normal * normal_x
-    ay = accel_tangential * tangent_y + accel_normal * normal_y
-    a_scalar = np.hypot(accel_tangential, accel_normal)
-
     dt = np.diff(t)
+    ax = np.diff(vx) / dt
+    ay = np.diff(vy) / dt
+    a_scalar = np.hypot(ax, ay)
+    ax, ay, a_scalar = (np.append(a, a[-1]) for a in (ax, ay, a_scalar))
+
     jx = np.diff(ax) / dt
     jy = np.diff(ay) / dt
     j_scalar = np.hypot(jx, jy)
