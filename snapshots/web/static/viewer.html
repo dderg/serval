@@ -28,7 +28,11 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 .readout .p{color:#4ecb71}
 .readout .r{color:#ef5350}
 .readout .g{color:#888}
-.panels{display:grid;grid-template-rows:3fr 1fr 1fr 1fr;gap:1px;background:#2a2d35;overflow:hidden}
+.panels{display:grid;grid-template-columns:3fr 2fr;grid-template-rows:1fr 1fr 1fr;gap:1px;background:#2a2d35;overflow:hidden}
+#panel-path{grid-column:1;grid-row:1 / span 3}
+#panel-vel{grid-column:2;grid-row:1}
+#panel-acc{grid-column:2;grid-row:2}
+#panel-jrk{grid-column:2;grid-row:3}
 .panel{position:relative;background:#1a1c22;overflow:hidden}
 .panel canvas{display:block;width:100%;height:100%}
 .panel-label{position:absolute;top:4px;left:8px;font-size:11px;color:#888;pointer-events:none;z-index:2}
