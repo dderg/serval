@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use mcu_protocol::codec::Decode;
-use mcu_protocol::messages::{MessageKind, StatusHeartbeat};
+use mcu_protocol::messages::{EndstopTrip, MessageKind, StatusHeartbeat};
 use mcu_transport::demux::{Demuxer, Frame};
 use mcu_transport::frame::CHANNEL_EVENTS;
 use mcu_transport::wire_helpers::decode_message_header;
@@ -20,6 +20,7 @@ use crate::transport::TransportError;
 
 type CallResult = Result<(MessageKind, Vec<u8>), TransportError>;
 type HeartbeatCallback = Arc<dyn Fn(&StatusHeartbeat) + Send + Sync>;
+type EndstopTripCallback = Arc<dyn Fn(u8, u64) + Send + Sync>;
 
 struct Pending {
     waiters: HashMap<u32, SyncSender<CallResult>>,
@@ -29,6 +30,7 @@ struct Pending {
 struct Shared {
     pending: Mutex<Pending>,
     heartbeat_callback: Mutex<Option<HeartbeatCallback>>,
+    endstop_trip_callback: Mutex<Option<EndstopTripCallback>>,
     peer_closed: AtomicBool,
     write_stream: Mutex<UnixStream>,
 }
@@ -102,6 +104,7 @@ impl McuSerialConn {
                 closed: None,
             }),
             heartbeat_callback: Mutex::new(None),
+            endstop_trip_callback: Mutex::new(None),
             peer_closed: AtomicBool::new(false),
             write_stream: Mutex::new(stream),
         });
@@ -131,6 +134,15 @@ impl McuSerialConn {
         let mut guard = self
             .shared
             .heartbeat_callback
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *guard = Some(cb);
+    }
+
+    pub fn attach_endstop_trip_callback(&self, cb: EndstopTripCallback) {
+        let mut guard = self
+            .shared
+            .endstop_trip_callback
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         *guard = Some(cb);
@@ -243,16 +255,23 @@ fn run_reader(shared: Arc<Shared>, mut stream: UnixStream) {
                 // taken before parking in read() would latch the value at
                 // park-time, dropping any heartbeat that arrives in the window
                 // between attach_heartbeat_callback and the next read wakeup.
-                let cb = {
+                let hb_cb = {
                     let g = shared
                         .heartbeat_callback
                         .lock()
                         .unwrap_or_else(|p| p.into_inner());
                     g.clone()
                 };
+                let trip_cb = {
+                    let g = shared
+                        .endstop_trip_callback
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    g.clone()
+                };
                 let (frames, _errs) = demux.feed_slice(&buf[..n]);
                 for f in frames {
-                    route_frame(&shared, f, cb.as_deref());
+                    route_frame(&shared, f, hb_cb.as_deref(), trip_cb.as_deref());
                 }
             }
             Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
@@ -267,13 +286,14 @@ fn run_reader(shared: Arc<Shared>, mut stream: UnixStream) {
 fn route_frame(
     shared: &Shared,
     frame: Frame,
-    cb: Option<&(dyn Fn(&StatusHeartbeat) + Send + Sync)>,
+    hb_cb: Option<&(dyn Fn(&StatusHeartbeat) + Send + Sync)>,
+    trip_cb: Option<&(dyn Fn(u8, u64) + Send + Sync)>,
 ) {
     let Frame::Kalico { channel, payload } = &frame else {
         return;
     };
     if *channel == CHANNEL_EVENTS {
-        dispatch_frame(frame, cb);
+        dispatch_frame(frame, hb_cb, trip_cb);
         return;
     }
     let Some((hdr, resp_body)) = decode_message_header(payload) else {
@@ -303,7 +323,11 @@ fn route_frame(
     let _ = tx.send(result);
 }
 
-fn dispatch_frame(frame: Frame, cb: Option<&(dyn Fn(&StatusHeartbeat) + Send + Sync)>) -> usize {
+fn dispatch_frame(
+    frame: Frame,
+    hb_cb: Option<&(dyn Fn(&StatusHeartbeat) + Send + Sync)>,
+    trip_cb: Option<&(dyn Fn(u8, u64) + Send + Sync)>,
+) -> usize {
     let Frame::Kalico { channel, payload } = frame else {
         return 0;
     };
@@ -313,16 +337,27 @@ fn dispatch_frame(frame: Frame, cb: Option<&(dyn Fn(&StatusHeartbeat) + Send + S
     let Some((hdr, body)) = decode_message_header(&payload) else {
         return 0;
     };
-    if MessageKind::from_u16(hdr.kind_raw) != Some(MessageKind::StatusHeartbeat) {
-        return 0;
+    match MessageKind::from_u16(hdr.kind_raw) {
+        Some(MessageKind::StatusHeartbeat) => {
+            let Ok(hb) = StatusHeartbeat::decode(body) else {
+                return 0;
+            };
+            if let Some(cb) = hb_cb {
+                cb(&hb);
+            }
+            1
+        }
+        Some(MessageKind::EndstopTrip) => {
+            let Ok(trip) = EndstopTrip::decode(body) else {
+                return 0;
+            };
+            if let Some(cb) = trip_cb {
+                cb(trip.endstop_id, trip.trip_clock);
+            }
+            1
+        }
+        _ => 0,
     }
-    let Ok(hb) = StatusHeartbeat::decode(body) else {
-        return 0;
-    };
-    if let Some(cb) = cb {
-        cb(&hb);
-    }
-    1
 }
 
 #[cfg(test)]

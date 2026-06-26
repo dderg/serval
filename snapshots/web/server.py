@@ -24,7 +24,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SNAPSHOTS = _REPO_ROOT / "snapshots"
@@ -217,6 +217,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/":
             self._serve_static("index.html", "text/html; charset=utf-8")
+        elif path == "/viewer.html":
+            self._serve_static("viewer.html", "text/html; charset=utf-8")
         elif path.startswith("/static/"):
             self._serve_static(path[len("/static/") :], None)
         elif path == "/api/cases":
@@ -224,6 +226,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(STATE.summary())
         elif path.startswith("/img/"):
             self._serve_img(path)
+        elif path.startswith("/snapshot-data/"):
+            self._serve_snapshot_data(path)
         else:
             self._json({"error": "not found"}, 404)
 
@@ -263,6 +267,33 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(200, data, "image/png")
 
+    def _serve_snapshot_data(self, path):
+        parts = path.strip("/").split("/")
+        if len(parts) != 2:
+            self._json({"error": "bad path"}, 404)
+            return
+        _, name = parts
+        name = unquote(name)
+        which = parse_qs(urlsplit(self.path).query).get("which", ["after"])[0]
+        if which not in ("before", "after"):
+            self._json({"error": "bad which"}, 404)
+            return
+        with STATE._lock:
+            entry = STATE.cases.get(name)
+            if entry is None:
+                self._json({"error": "not found"}, 404)
+                return
+            if which == "after":
+                snapshot = entry["snapshot"]
+            elif STATE.mode == "baselines":
+                snapshot = None  # gallery shows committed baselines; no prior
+            else:
+                snapshot = harness.baseline_snapshot(entry["case"])
+        if snapshot is None:
+            self._json({"error": "no baseline"}, 404)
+            return
+        self._json(snapshot)
+
     def _serve_static(self, rel, content_type):
         target = (_STATIC / rel).resolve()
         if _STATIC not in target.parents or not target.is_file():
@@ -273,6 +304,9 @@ class Handler(BaseHTTPRequestHandler):
                 ".js": "text/javascript",
                 ".css": "text/css",
                 ".html": "text/html; charset=utf-8",
+                ".wasm": "application/wasm",
+                ".d.ts": "text/plain",
+                ".json": "application/json",
             }.get(target.suffix, "application/octet-stream")
         self._send(200, target.read_bytes(), content_type)
 

@@ -621,7 +621,7 @@ pub struct PyMotionEngine {
     clock_freqs: Arc<Mutex<HashMap<u32, f64>>>,
     nominal_clock_freqs: Arc<Mutex<HashMap<u32, u32>>>,
     events_dir: Mutex<Option<std::path::PathBuf>>,
-    pump_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<crate::pump::PumpMsg>>>>,
+    pump_tx: Arc<Mutex<Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>>>,
     pump_thread: Mutex<Option<JoinHandle<()>>>,
     live_position_cache: Arc<
         Mutex<(
@@ -1198,6 +1198,38 @@ impl PyMotionEngine {
         if result != 0 {
             return Err(PyRuntimeError::new_err(format!(
                 "restore_drive_limits: SDO write failed: endpoint result {result}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn arm_sensorless_endstop(
+        &self,
+        mcu_handle: u32,
+        endstop_id: u8,
+        torque_trip_tenth_pct: u16,
+        enable: bool,
+    ) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "arm_sensorless_endstop")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "sensorless_endstop_arm",
+            mcu_handle,
+            endstop_id,
+            torque_trip_tenth_pct,
+            enable,
+            "servo sensorless endstop arm/disarm"
+        );
+        let result = crate::servo_torque::send_arm_sensorless_endstop(
+            &conn,
+            endstop_id,
+            torque_trip_tenth_pct,
+            enable,
+        )
+        .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "arm_sensorless_endstop: endpoint rejected arm (result {result})"
             )));
         }
         Ok(())
@@ -2769,7 +2801,10 @@ impl PyMotionEngine {
             }
         }
 
-        let (pump_tx_init, pump_rx) = std::sync::mpsc::channel::<crate::pump::PumpMsg>();
+        let (control_tx_init, control_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
+        let (data_tx_init, data_rx) = crossbeam_channel::bounded::<crate::pump::EnqueueMsg>(
+            crate::pump::PUMP_DATA_CHANNEL_CAP,
+        );
 
         let wire_transports: HashMap<u32, crate::pump::McuTransport> = {
             let mut t = HashMap::new();
@@ -2804,7 +2839,8 @@ impl PyMotionEngine {
                     }),
                 };
                 crate::pump::run_pump(
-                    pump_rx,
+                    control_rx,
+                    data_rx,
                     sink,
                     move |k| {
                         ring_depth_table_for_pump
@@ -2849,7 +2885,7 @@ impl PyMotionEngine {
             })
             .expect("spawn push-pieces-pump thread");
 
-        *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_tx_init.clone());
+        *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(control_tx_init.clone());
         *self.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_thread_handle);
 
         {
@@ -2893,7 +2929,7 @@ impl PyMotionEngine {
 
         for cfg_mcu in &mcu_configs {
             let mcu_id = cfg_mcu.mcu_id;
-            let pump_tx_hb = pump_tx_init.clone();
+            let pump_tx_hb = control_tx_init.clone();
             let drain_hb = self.drain.clone();
 
             if ethercat_mcu_ids.contains(&mcu_id) {
@@ -2912,7 +2948,7 @@ impl PyMotionEngine {
 
                 let homing_run_hb = Arc::clone(&self.homing_run);
                 let active_cohort_hb = Arc::clone(&self.active_drip_cohort);
-                let pump_tx_fault = pump_tx_init.clone();
+                let pump_tx_fault = control_tx_init.clone();
                 let latched_fault_hb = Arc::clone(&self.latched_drive_fault);
                 let mcu_label_hb = mcu_label.clone();
                 conn.attach_heartbeat_callback(Arc::new(
@@ -2978,6 +3014,13 @@ impl PyMotionEngine {
                         for (axis, &r) in hb.retired_counts.iter().enumerate() {
                             drain_hb.set_retired(mcu_id, axis as u8, r);
                         }
+                    },
+                ));
+
+                let trip_deps = self.trip_deps();
+                conn.attach_endstop_trip_callback(Arc::new(
+                    move |endstop_id: u8, trip_clock: u64| {
+                        dispatch_endstop_trip(&trip_deps, mcu_id, endstop_id, trip_clock);
                     },
                 ));
 
@@ -3060,7 +3103,7 @@ impl PyMotionEngine {
 
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
         *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
-        let pump_tx_for_cb = pump_tx_init.clone();
+        let pump_tx_for_cb = data_tx_init.clone();
         let drain_disp = self.drain.clone();
         let counter_for_cb = Arc::clone(&counter);
         let active_drip_cohort_for_cb = Arc::clone(&self.active_drip_cohort);
@@ -3157,7 +3200,7 @@ impl PyMotionEngine {
                     }
                     drain_disp.add_sent(m.key.mcu_id, m.key.axis, m.pieces.len() as u32);
                     pump_tx_for_cb
-                        .send(crate::pump::PumpMsg::Enqueue(m))
+                        .send(m)
                         .map_err(|_| DispatchError::PumpGone)?;
                 }
 
@@ -3255,13 +3298,13 @@ impl PyMotionEngine {
                     }
                     nudge_drain.add_sent(mcu_id, axis, pieces.len() as u32);
                     nudge_pump_tx
-                        .send(crate::pump::PumpMsg::Enqueue(crate::pump::EnqueueMsg {
+                        .send(crate::pump::EnqueueMsg {
                             key,
                             pieces,
                             fresh_stream: fresh,
                             lead_secs,
                             source_line: u32::MAX,
-                        }))
+                        })
                         .map_err(|_| DispatchError::PumpGone)?;
                 }
 
@@ -3384,6 +3427,14 @@ impl PyMotionEngine {
                     PyRuntimeError::new_err("planner not initialized — call init_planner first")
                 })?;
                 planner.submit_move(m).map_err(planner_err)?;
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "intake_submit",
+                    line_no,
+                    channel_pending = planner.pending_channel_moves(),
+                    uncommitted_secs = planner.uncommitted_intake_secs(),
+                    "[intake] move pushed to channel; channel_pending grows when the planner thread can't pull (backpressure blind spot)"
+                );
             }
 
             let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
@@ -3767,6 +3818,26 @@ impl PyMotionEngine {
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         }
         Ok(())
+    }
+
+    fn pending_channel_moves(&self) -> u64 {
+        self.planner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(0, |p| p.pending_channel_moves() as u64)
+    }
+
+    fn input_channel_capacity(&self) -> u64 {
+        crate::stream_planner::INPUT_CHANNEL_CAP as u64
+    }
+
+    fn uncommitted_intake_secs(&self) -> f64 {
+        self.planner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(0.0, |p| p.uncommitted_intake_secs())
     }
 
     fn get_last_move_time(&self) -> f64 {
@@ -4372,7 +4443,7 @@ pub(crate) struct TripDeps {
     homing_run: Arc<Mutex<Option<HomingRun>>>,
     pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
     active_drip_cohort: Arc<Mutex<Option<u64>>>,
-    pump_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<crate::pump::PumpMsg>>>>,
+    pump_tx: Arc<Mutex<Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>>>,
     mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
     router: Arc<Mutex<PassthroughRouter>>,
     motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,

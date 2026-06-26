@@ -290,3 +290,70 @@ motion — the host runs a lot of gcode upfront and fills the buffer.
 ### Conclusion (Follow-up #3)
 
 **Confidence: High.** The requested position and completion track unthrottled bursty submission; the host fills ~an MCU ring ahead because `_check_pause` gates on pump-queue depth, not motion-time-ahead. Fix = real `buffer_time` flow control: gate the host feed on the engine's TRUE motion frontier `engine.get_last_move_time() - mcu.estimated_print_time()` against `buffer_time_high/low` (already in config; currently only logged) — NOT the host's projected `_mcu_pending_end_time` (the earlier "phantom buffer" that caused under-feed). This paces submission so `gcode_position`/`commanded_pos` track motion within ~2 s, `note_complete` fires near the real end, and the over-fill (hence −142/crash) is prevented. Keep `pump_backlog` only as a secondary piece-count safety if desired.
+
+## Follow-up: 2026-06-23
+
+### Thread
+
+Symptom is BACK on branch `ethercat-ipc-hardening` despite the spec (`spec-submission-aware-backpressure.md`, status `done`): bench user reports the requested position/current layer in Mainsail races **minutes / ~20 layers** ahead of physical motion, the gap grows monotonically, and prints intermittently crash with PieceStartInPast (`-308`). Question driving this follow-up: "can we advance the bookkeeping when the queue is actually CONSUMED, and what does the pipeline + inter-stage queueing look like now?"
+
+### New Evidence
+
+**The spec's host gate was reverted in three post-spec commits — the throttle now gates on exactly the signal the spec's `Never` list forbids.**
+
+| Commit | Gate signal it installed | Stated reason it moved |
+| ------ | ------------------------ | ---------------------- |
+| `cb75014f0` (spec impl) | `queued_motion_secs` (engine: optimized frontier + uncommitted) | — (the spec) |
+| `917b8b29f` | same, grounded to host clock | re-anchor produced two-clock mismatch |
+| `ab538756d` | **`_mcu_pending_end_time - est`** (host, Σ `min_move_t`) | claimed engine signal "collapsed to 0 after re-anchor" (two clocks) |
+| `d437ce8a0` | `dispatched_lead_secs` (committed frontier only) | `_mcu_pending_end_time` over-read lead (2.31s) vs delivered (0.72s) → starved MCU |
+| `a46fea2db` (**current HEAD**) | **`_mcu_pending_end_time - est`** restored | `dispatched_lead_secs` blind to the 8192-deep input-channel backlog → flood → `-308` |
+
+**Confirmed — current gate (the regression):** `klippy/motion.py:661` `buffer_time = self._mcu_pending_end_time - est`; `_check_pause` (motion.py:656) throttles on it. `_mcu_pending_end_time` accumulates `move.min_move_t` (motion.py:471/498 → `_bump_pending_end_time` 642-647). `min_move_t = move_d / feedrate` (motion.py:455) = cruise time at top speed, **no accel ramps, no junction slowdowns**. The spec's `Never` (spec line 34): *"Gate on … host-side all-nominal `_mcu_pending_end_time`."*
+
+**Confirmed — the correct engine signal still exists but is unused by the gate.** `queued_motion_secs()` (`bridge.rs:3838-3860`) = `(t0 + last_move_time − host_now) + uncommitted`. `last_move_time` = `last.t_end` (`stream_planner.rs:460/482/557`) = the **optimized** segment end (real planned time, post junction/jerk/biclothoid), NOT nominal. It is wired only into `lookahead_end_print_time()` (motion.py:632), not into `_check_pause`.
+
+### Confirmed Findings
+
+- **Finding 11: all three gate signals tried so far structurally UNDER-report the real-time motion buffer — each for a different reason.** (1) `_mcu_pending_end_time` counts `min_move_t`-seconds; motion executes in real-planned-seconds (≥ min). The gate holds far more real motion than `buffer_time` claims → requested position runs ahead. (2) `dispatched_lead_secs` excludes the up-to-8192-move input-channel backlog → blind → flood. (3) `queued_motion_secs` (the one with the right *content* — optimized frontier, consumption-anchored via `est`) was abandoned over a re-anchor clock-grounding concern. Net: every shipped gate has read LOW, so the feeder over-runs.
+- **Finding 12: the gate signal and the execution clock use different time units.** `min_move_t` (cruise lower bound) vs `t_end` (optimized). For a thin/fast cube where a layer is ~1-2 s of real motion, even a bounded `real/min` over-buffer of tens of seconds reads as ~20 layers — matching "20 layers / minutes ahead." Whether it is strictly unbounded or a large bounded ratio is not yet separated (needs the per-move `real_t / min_move_t` distribution on the cube).
+
+### Pipeline Map (stages and the queue between each)
+
+```
+gcode reader (virtual_sdcard work_handler)
+  │  motion.move() → engine.submit_move()  [SYNC FFI; + _bump_pending_end_time(min_move_t); + _check_pause()  ← GATE HERE]
+  ▼
+[Q1] planner input channel — bounded(INPUT_CHANNEL_CAP=8192), try_send fail-loud   (stream_planner.rs:184,326)
+  ▼
+stream planner thread (run_loop): junction-v / jerk-SLP / biclothoid fit → optimized segments
+        frontier = last.t_end (stream time) ; uncommitted_intake_secs += nominal_t on intake, −= on commit
+  ▼
+[Q2] dispatch: coalesce ≤64 moves, lower to per-axis pieces → PumpMsg
+  ▼
+[Q3] pump channel — std mpsc (unbounded)   (bridge.rs)
+  ▼
+pump: per-axis held-queue q.pieces (the deep backlog); ship to MCU/ec-rt up to horizon (MAX_LEAD_SECS) & room
+        pump_backlog = Σ q.pieces.len()  (unpushed only)
+  ▼
+[Q4] ec-rt AxisRing — capacity 1024 (ethercat); MCU piece_ring (serial). plays at DC cycle, retires pieces
+  ▼  heartbeat: retired_count (+ now real ring_len=len/capacity, fixed 2026-06-23) → pump frees room
+physical axis
+```
+
+The "advance on consumption" the user asks for already has a home: **`est = mcu.estimated_print_time(now)` rises as `[Q4]` retires pieces** (real execution). A gate of the form `frontier − est` therefore *automatically* advances as the queue is consumed — provided `frontier` is the real optimized motion end and is on the same clock as `est`. That is exactly `queued_motion_secs`; it is the only candidate whose numerator is real (not `min_move_t`) and whose anchor is consumption (not submission count).
+
+### Updated Hypotheses
+
+- **H7: the correct fix is to gate on a consumption-anchored, real-duration frontier (`queued_motion_secs`), and the blocker is solely its re-anchor clock grounding.** Status: **Confirmed — grounding holds; abandonment was premature.** `last_move_time` is stream-relative; `queued_motion_secs` adds `t0` to ground it to host time. **Confirming evidence:** new tests `rust/motion-engine/src/anchor/tests.rs::grounded_frontier_reports_real_queued_seconds_after_reanchor` and `::grounding_cancels_the_stream_time_baseline` drive an idle-gap underrun re-anchor at a 500 s stream baseline and show the grounded frontier `t0 + last_move_time − host_now` reports REAL queued seconds (`lead + committed_span − playhead_advance`), independent of the baseline — it does NOT collapse to 0. `Anchor::anchor_segment` (anchor.rs:61) recomputes `t0 = host_now + lead − seg_t_start` on every re-anchor, cancelling the stream-time offset that `ab538756d` blamed for the collapse. That commit's "two different clocks → collapsed to 0" describes the *ungrounded* form; `917b8b29f`'s `t0` grounding (still live in `queued_motion_secs`, bridge.rs:3860) already fixed it. **Residual (bounded, not a collapse):** the host reads `t0` (dispatch_anchor) and `last_move_time` (planner) as two atomics updated per-segment in the dispatch path; a read mid-commit sees ≤1 segment of skew (~ms), not a collapse. **Net: the engine signal is safe to gate on.**
+- **H8: `min_move_t` is the wrong duration unit for backpressure regardless of clock.** Status: **Confirmed (mechanism).** Even with a perfect clock, `Σ min_move_t` ≠ real motion seconds; only the optimized `t_end` reflects what the MCU will actually take. Any host-side nominal accumulator repeats this error.
+
+### Fix Direction
+
+Gate `_check_pause` on the engine's optimized, consumption-anchored frontier (`queued_motion_secs`-style: `(frontier − est) + bounded_uncommitted`) instead of `_mcu_pending_end_time`. Prerequisite: settle H7 — verify (and if needed repair) the re-anchor clock grounding so the signal cannot collapse. Bound the uncommitted tail by keeping the input channel shallow enough that, with a working gate, `[Q1]` never deep-fills (the 8192 cap is a fail-loud backstop, not a working depth) — this is what makes the nominal `uncommitted_intake_secs` term negligible, closing the `dispatched_lead_secs`-was-blind complaint (`a46fea2db`) without reverting to `min_move_t`.
+
+### Status
+
+**Fix implemented (2026-06-24).** H7 confirmed (grounding holds; new anchor tests). `klippy/motion.py:_check_pause` now gates on `self.engine.queued_motion_secs()` (the real optimized frontier minus host clock, `+ uncommitted_intake_secs`), replacing `_mcu_pending_end_time − est` (the `min_move_t` phantom buffer). The signal includes the input-channel backlog (via `uncommitted_intake_secs`), so it is not blind like `dispatched_lead_secs` (closes `a46fea2db`); the 8192 channel stays as the fail-loud backstop (unchanged). Test `test/test_motion_backpressure.py` rewritten to drive the gate through a `FakeEngine` exposing the new signal; 6/6 green, ruff clean. A genuine MCU stall is caught fail-loud by the bounded channel (the wall-clock signal drains, then `submit_move` errors at cap) rather than by `DRAIN_TIMEOUT`.
+
+**Residual (out of scope, latent):** `_mcu_pending_end_time` is still accumulated from `move.min_move_t` (motion.py:471/498) and still feeds non-gate logic — `get_last_move_time()` / `check_busy` idle detection and any per-commit command scheduling (e.g. fan/pin at queued-motion end, `9fbb8b803`). Those under-estimate the real motion end by the same `real − min` gap, so e.g. a fan keyed off `get_last_move_time()` fires slightly early. The spec's `Always`/`Ask First` deliberately left this plumbing; worth a follow-up to point those consumers at the engine frontier too. Needs bench validation that requested position now tracks motion within ~1-2 s.

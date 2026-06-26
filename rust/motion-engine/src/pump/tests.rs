@@ -1,16 +1,17 @@
 use super::*;
+use crossbeam_channel::unbounded;
 use std::sync::atomic::AtomicU64;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-fn make_enqueue(key: AxisKey, pieces: Vec<(PieceEntry, f64)>, fresh_stream: bool) -> PumpMsg {
-    PumpMsg::Enqueue(EnqueueMsg {
+fn make_enqueue(key: AxisKey, pieces: Vec<(PieceEntry, f64)>, fresh_stream: bool) -> EnqueueMsg {
+    EnqueueMsg {
         key,
         pieces,
         fresh_stream,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
-    })
+    }
 }
 
 #[test]
@@ -90,11 +91,13 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
     const N: u32 = 3;
 
     let sink = RecordingSink::new();
-    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             sink_clone,
             |_key| RING_DEPTH,
             |_mcu| None,
@@ -105,7 +108,7 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
         );
     });
 
-    tx.send(make_enqueue(
+    data.send(make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
         (0..N).map(|i| make_piece(i as u64)).collect(),
         false,
@@ -122,7 +125,7 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
         }
     }
 
-    tx.send(make_enqueue(
+    data.send(make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
         (N..N * 2).map(|i| make_piece(i as u64)).collect(),
         false,
@@ -139,7 +142,7 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
         }
     }
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 
     let recorded = sink.recorded();
@@ -177,11 +180,13 @@ fn make_piece_pos(t: u64, mask: u8, c0: f32, c3: f32) -> (PieceEntry, f64) {
 #[test]
 fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
     let sink = RecordingSink::new();
-    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
     let sink_clone = sink.clone();
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             sink_clone,
             |_key| 8,
             |_mcu| Some((0u64, 180_000_000.0)),
@@ -193,7 +198,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
     });
     let key = AxisKey { mcu_id: 1, axis: 2 };
 
-    tx.send(make_enqueue(
+    data.send(make_enqueue(
         key,
         vec![make_piece_pos(0, 0, 0.0, 11.0)],
         false,
@@ -208,7 +213,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
         std::thread::yield_now();
     }
 
-    tx.send(make_enqueue(
+    data.send(make_enqueue(
         key,
         vec![make_piece_pos(10_000, 0b10, 0.0, 0.5)],
         false,
@@ -223,7 +228,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
         std::thread::yield_now();
     }
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
     assert_eq!(sink.recorded().len(), 2, "both pieces dispatched, no panic");
 }
@@ -266,7 +271,8 @@ impl PieceSink for NullSink {
 #[test]
 fn flush_clears_queued_pieces_and_junctions() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
 
     let freq: f64 = 1_000.0;
     let lead_secs: f64 = 0.001;
@@ -279,7 +285,8 @@ fn flush_clears_queued_pieces_and_junctions() {
 
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             sink_pump,
             |_key| 64,
             move |_mcu| *clock_pump.lock().unwrap(),
@@ -290,7 +297,7 @@ fn flush_clears_queued_pieces_and_junctions() {
         );
     });
 
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key,
         pieces: (0u64..4)
             .map(|i| {
@@ -309,17 +316,17 @@ fn flush_clears_queued_pieces_and_junctions() {
         fresh_stream: true,
         lead_secs,
         source_line: u32::MAX,
-    }))
+    })
     .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(30));
 
-    tx.send(PumpMsg::Flush(vec![key])).unwrap();
+    ctl.send(PumpMsg::Flush(vec![key])).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
 
     *clock.lock().unwrap() = Some((gated_tick + 1_000, freq));
 
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key,
         pieces: vec![(
             PieceEntry {
@@ -334,7 +341,7 @@ fn flush_clears_queued_pieces_and_junctions() {
         fresh_stream: false,
         lead_secs,
         source_line: u32::MAX,
-    }))
+    })
     .unwrap();
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -347,7 +354,7 @@ fn flush_clears_queued_pieces_and_junctions() {
         }
     }
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 
     let recorded = sink.recorded();
@@ -364,7 +371,8 @@ fn flush_clears_queued_pieces_and_junctions() {
 #[test]
 fn on_abandon_reports_flushed_not_pushed_pieces() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
-    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
 
     let freq: f64 = 1_000.0;
     let lead_secs: f64 = 0.001;
@@ -379,7 +387,8 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
 
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             sink_pump,
             |_key| 64,
             move |_mcu| *clock_pump.lock().unwrap(),
@@ -392,7 +401,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         );
     });
 
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key,
         pieces: (0u64..4)
             .map(|i| {
@@ -411,15 +420,15 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         fresh_stream: true,
         lead_secs,
         source_line: u32::MAX,
-    }))
+    })
     .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(30));
-    tx.send(PumpMsg::Flush(vec![key])).unwrap();
+    ctl.send(PumpMsg::Flush(vec![key])).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
     *clock.lock().unwrap() = Some((gated_tick + 1_000, freq));
 
-    tx.send(PumpMsg::Enqueue(EnqueueMsg {
+    data.send(EnqueueMsg {
         key,
         pieces: vec![(
             PieceEntry {
@@ -434,7 +443,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         fresh_stream: false,
         lead_secs,
         source_line: u32::MAX,
-    }))
+    })
     .unwrap();
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -447,7 +456,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         }
     }
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 
     assert_eq!(
@@ -459,10 +468,12 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
 
 #[test]
 fn flush_unknown_key_is_noop() {
-    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (_data, data_rx) = unbounded::<EnqueueMsg>();
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             NullSink,
             |_key| 64,
             |_mcu| None,
@@ -477,9 +488,9 @@ fn flush_unknown_key_is_noop() {
         mcu_id: 99,
         axis: 7,
     };
-    tx.send(PumpMsg::Flush(vec![never_enqueued])).unwrap();
+    ctl.send(PumpMsg::Flush(vec![never_enqueued])).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
@@ -487,38 +498,51 @@ fn flush_unknown_key_is_noop() {
 fn barrier_ack_means_flushed_axes_emit_nothing() {
     let key = AxisKey { mcu_id: 1, axis: 0 };
     let sink = RecordingSink::new();
-    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let backlog = Arc::new(AtomicU64::new(0));
+    let backlog_pump = Arc::clone(&backlog);
 
-    tx.send(make_enqueue(
+    let sink_clone = sink.clone();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink_clone,
+            |_| 0,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            backlog_pump,
+        );
+    });
+
+    data.send(make_enqueue(
         key,
         (0..3).map(|i| make_piece(i as u64)).collect(),
         false,
     ))
     .unwrap();
-    tx.send(PumpMsg::Flush(vec![key])).unwrap();
-    let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-    tx.send(PumpMsg::Barrier(ack_tx)).unwrap();
+    poll_until(
+        || backlog.load(Ordering::Acquire) == 3,
+        "ring-full pump never staged the 3 un-pushed pieces",
+    );
 
-    let sink_clone = sink.clone();
-    let handle = std::thread::spawn(move || {
-        run_pump(
-            rx,
-            sink_clone,
-            |_| 8,
-            |_| None,
-            |_| {},
-            |_, _| {},
-            |_| {},
-            Arc::new(AtomicU64::new(0)),
-        );
-    });
+    ctl.send(PumpMsg::Flush(vec![key])).unwrap();
+    let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+    ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
 
     ack_rx
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("barrier must be acknowledged");
-    std::thread::sleep(std::time::Duration::from_millis(20));
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    poll_until(
+        || backlog.load(Ordering::Acquire) == 0,
+        "Flush must clear the staged backlog",
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 
     assert!(
@@ -530,10 +554,12 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
 
 #[test]
 fn barrier_acks_on_idle_pump() {
-    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (_data, data_rx) = unbounded::<EnqueueMsg>();
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             RecordingSink::new(),
             |_| 8,
             |_| None,
@@ -544,11 +570,11 @@ fn barrier_acks_on_idle_pump() {
         );
     });
     let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-    tx.send(PumpMsg::Barrier(ack_tx)).unwrap();
+    ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
     ack_rx
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("barrier on an idle pump must ack promptly");
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
@@ -564,10 +590,12 @@ fn poll_until<F: Fn() -> bool>(pred: F, what: &str) {
 fn pump_backlog_reflects_unpushed_pieces() {
     let backlog = Arc::new(AtomicU64::new(0));
     let backlog_thread = Arc::clone(&backlog);
-    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             RecordingSink::new(),
             |_key| 0,
             |_mcu| None,
@@ -578,7 +606,7 @@ fn pump_backlog_reflects_unpushed_pieces() {
         );
     });
 
-    tx.send(make_enqueue(
+    data.send(make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
         (0..3).map(|i| make_piece(i as u64)).collect(),
         false,
@@ -590,7 +618,7 @@ fn pump_backlog_reflects_unpushed_pieces() {
         "ring-full pump never reported the 3 unpushed pieces",
     );
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
 
@@ -600,10 +628,12 @@ fn pump_backlog_drains_to_zero_when_pushed() {
     let backlog_thread = Arc::clone(&backlog);
     let sink = RecordingSink::new();
     let sink_clone = sink.clone();
-    let (tx, rx) = mpsc::channel::<PumpMsg>();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
     let handle = std::thread::spawn(move || {
         run_pump(
-            rx,
+            control_rx,
+            data_rx,
             sink_clone,
             |_key| 8,
             |_mcu| None,
@@ -614,7 +644,7 @@ fn pump_backlog_drains_to_zero_when_pushed() {
         );
     });
 
-    tx.send(make_enqueue(
+    data.send(make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
         (0..3).map(|i| make_piece(i as u64)).collect(),
         false,
@@ -627,6 +657,6 @@ fn pump_backlog_drains_to_zero_when_pushed() {
         "backlog never returned to zero after the ring accepted the pieces",
     );
 
-    tx.send(PumpMsg::Shutdown).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }

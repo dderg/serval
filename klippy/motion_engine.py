@@ -100,6 +100,12 @@ class _StubEngine:
     def dispatched_lead_secs(self):
         return 0.0
 
+    def pending_channel_moves(self):
+        return 0
+
+    def input_channel_capacity(self):
+        return 8192
+
     def __getattr__(self, name):
         if name in _STUB_MOTION_METHODS:
 
@@ -173,6 +179,18 @@ class MotionEngineWrapper:
 
     def restore_drive_limits(self, mcu_handle):
         return self._engine.restore_drive_limits(mcu_handle)
+
+    def arm_sensorless_endstop(
+        self, mcu_handle, endstop_id, torque_trip_tenth_pct, enable
+    ):
+        return self._engine.arm_sensorless_endstop(
+            mcu_handle, endstop_id, torque_trip_tenth_pct, bool(enable)
+        )
+
+    def disarm_sensorless_endstop(self, mcu_handle, endstop_id):
+        return self._engine.arm_sensorless_endstop(
+            mcu_handle, endstop_id, 0, False
+        )
 
     def take_drive_fault(self, mcu_handle):
         return self._engine.take_drive_fault(mcu_handle)
@@ -488,6 +506,15 @@ class MotionEngineWrapper:
 
     def dispatched_lead_secs(self):
         return self._engine.dispatched_lead_secs() or 0.0
+
+    def pending_channel_moves(self):
+        return self._engine.pending_channel_moves() or 0
+
+    def input_channel_capacity(self):
+        return self._engine.input_channel_capacity()
+
+    def uncommitted_intake_secs(self):
+        return self._engine.uncommitted_intake_secs() or 0.0
 
     def pump_backlog(self):
         return self._engine.pump_backlog() or 0

@@ -11,17 +11,18 @@ use ethercat_rt::claim::{parse_fail_bringup, single_slave_reply, wait_for_claim}
 use ethercat_rt::clock::monotonic_ns;
 use ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAULT, NUM_AXES};
 use ethercat_rt::sdo::{execute_sdo_read, execute_sdo_write, DictObject, DictSdoBus};
+use ethercat_rt::sensorless::{SensorlessArm, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
 use ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
 };
 use ethercat_rt::wire::{
-    claim_handshake_reply_frame, identify_response_frame, push_pieces_response_frame,
-    resonance_buzz_response_frame, restore_drive_limits_response_frame,
-    resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
-    sdo_write_response_frame, seed_servo_home_response_frame, set_drive_limits_response_frame,
-    set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
-    stop_capture_response_frame, stop_response_frame, Command,
+    arm_sensorless_endstop_response_frame, claim_handshake_reply_frame, endstop_trip_frame,
+    identify_response_frame, push_pieces_response_frame, resonance_buzz_response_frame,
+    restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
+    sdo_read_response_frame, sdo_write_response_frame, seed_servo_home_response_frame,
+    set_drive_limits_response_frame, set_torque_response_frame, start_capture_response_frame,
+    status_heartbeat_frame, stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{SdoReadResponse, SlaveState, StopCaptureResponse};
 
@@ -41,6 +42,7 @@ fn arg_val(args: &[String], key: &str) -> Option<String> {
 }
 
 const STUB_PROBE_COUNTER_INDEX: u16 = 0x5FFF;
+const TXPDO_TORQUE_ACTUAL_INDEX: u16 = 0x6077;
 
 fn stub_object_dictionary() -> DictSdoBus {
     DictSdoBus::new([
@@ -80,6 +82,15 @@ fn stub_object_dictionary() -> DictSdoBus {
                 unsigned_clamp_max: None,
             },
         ),
+        (
+            (0x6077, 0),
+            DictObject {
+                size: 2,
+                value: [0, 0, 0, 0],
+                read_only: false,
+                unsigned_clamp_max: None,
+            },
+        ),
     ])
 }
 
@@ -110,6 +121,8 @@ fn main() {
     let mut sampled_pieces: u32 = 0;
     let mut drive_fault_fired = false;
     let mut stored_limits: Option<(u32, u16)> = None;
+    let mut sensorless_arm: Option<SensorlessArm> = None;
+    let mut sim_torque: i16 = 0;
 
     let mut server = FrameServer::bind(&socket).expect("bind socket");
     eprintln!("ec-rt-stub: socket {socket} (NO HARDWARE)");
@@ -284,6 +297,34 @@ fn main() {
                     eprintln!("ec-rt-stub: RestoreDriveLimits stored={stored_limits:?}");
                     server.respond(&restore_drive_limits_response_frame(correlation_id, 0));
                 }
+                Command::ArmSensorlessEndstop {
+                    correlation_id,
+                    msg,
+                } => {
+                    let result = if msg.enable != 0 {
+                        if msg.torque_trip_tenth_pct == 0 {
+                            ERR_ARM_SENSORLESS_BAD_THRESHOLD
+                        } else {
+                            sensorless_arm = Some(SensorlessArm::new(
+                                msg.endstop_id,
+                                msg.torque_trip_tenth_pct,
+                            ));
+                            eprintln!(
+                                "ec-rt-stub: sensorless endstop {} armed (torque_trip={} 0.1%)",
+                                msg.endstop_id, msg.torque_trip_tenth_pct
+                            );
+                            0
+                        }
+                    } else {
+                        sensorless_arm = None;
+                        eprintln!("ec-rt-stub: sensorless endstop {} disarmed", msg.endstop_id);
+                        0
+                    };
+                    server.respond(&arm_sensorless_endstop_response_frame(
+                        correlation_id,
+                        result,
+                    ));
+                }
                 Command::SeedServoHome {
                     correlation_id,
                     home_q16,
@@ -327,6 +368,12 @@ fn main() {
                     msg,
                 } => {
                     let resp = execute_sdo_write(&mut sdo_bus, &msg);
+                    if msg.index == TXPDO_TORQUE_ACTUAL_INDEX && resp.result == 0 {
+                        sim_torque = i16::try_from(
+                            msg.value.clamp(i64::from(i16::MIN), i64::from(i16::MAX)),
+                        )
+                        .unwrap_or(0);
+                    }
                     eprintln!(
                         "ec-rt-stub: SdoWrite 0x{:04x}.{} value={} size={} -> result={}",
                         msg.index, msg.subindex, msg.value, msg.size, resp.result
@@ -386,6 +433,15 @@ fn main() {
                 ));
                 std::process::exit(1);
             }
+        }
+
+        if let Some(endstop_id) = sensorless_arm.as_mut().and_then(|arm| arm.poll(sim_torque)) {
+            ring.reset();
+            eprintln!(
+                "ec-rt-stub: sensorless endstop {endstop_id} tripped torque={sim_torque} \
+                 — local stop, trip_clock={now}"
+            );
+            server.respond(&endstop_trip_frame(endstop_id, now));
         }
 
         let sampled_pos = if gate.state() == TorqueState::Enabled {

@@ -457,6 +457,22 @@ fn submit_move_errors_when_channel_full_instead_of_blocking() {
 }
 
 #[test]
+fn channel_depth_tracks_occupancy_and_refuses_overflow_at_capacity() {
+    let cap = 4;
+    let (tx, _rx) = crossbeam_channel::bounded::<StreamMsg>(cap);
+    for i in 0..cap {
+        assert_eq!(tx.len(), i);
+        try_submit_move(&tx, line(i as u32, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]))
+            .expect("submit below capacity must succeed");
+    }
+    assert_eq!(tx.len(), cap);
+    let err = try_submit_move(&tx, line(cap as u32, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]))
+        .expect_err("submit at capacity must refuse, not block or grow");
+    assert!(matches!(err, StreamPlannerError::ChannelFull));
+    assert_eq!(tx.len(), cap, "a refused submit must not grow the queue");
+}
+
+#[test]
 fn continuous_blend_run_dispatches_continuously_without_flush() {
     let cap = Capture::default();
     // Generous cap so the buffer-cap backstop never fires: the continuity commit

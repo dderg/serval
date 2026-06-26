@@ -15,7 +15,7 @@ members = [
     "servo-ident",
     "piece-sink-harness",
 ]
-exclude = ["gcode/fuzz"]
+exclude = ["gcode/fuzz", "snapshot-viewer"]
 resolver = "2"
 
 [workspace.package]

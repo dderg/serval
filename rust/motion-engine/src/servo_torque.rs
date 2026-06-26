@@ -4,8 +4,9 @@ use host_rt::mcu_call::McuCall as _;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::{Decode as _, Encode as _};
 use mcu_protocol::messages::{
-    MessageKind, ResonanceBuzz, ResonanceBuzzResponse, RestoreDriveLimitsResponse, SeedServoHome,
-    SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
+    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
+    ResonanceBuzzResponse, RestoreDriveLimitsResponse, SeedServoHome, SeedServoHomeResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
 };
 
 const WORST_CASE_LADDER_ENABLE: Duration = Duration::from_secs(3);
@@ -60,6 +61,36 @@ pub fn send_drive_limits(
     }
     let r = SetDriveLimitsResponse::decode(&resp)
         .map_err(|e| format!("SetDriveLimitsResponse decode: {e:?}"))?;
+    Ok(r.result)
+}
+
+pub fn send_arm_sensorless_endstop(
+    conn: &McuSerialConn,
+    endstop_id: u8,
+    torque_trip_tenth_pct: u16,
+    enable: bool,
+) -> Result<i32, String> {
+    let body = ArmSensorlessEndstop {
+        endstop_id,
+        torque_trip_tenth_pct,
+        enable: u8::from(enable),
+    }
+    .encoded_to_vec();
+    let (kind, resp) = conn
+        .mcu_call(
+            MessageKind::ArmSensorlessEndstop,
+            body,
+            DRIVE_LIMITS_TIMEOUT,
+        )
+        .map_err(|e| format!("ArmSensorlessEndstop transport: {e:?}"))?;
+    if kind != MessageKind::ArmSensorlessEndstopResponse {
+        return Err(format!(
+            "ArmSensorlessEndstop: unexpected response kind 0x{:04x}",
+            kind.as_u16()
+        ));
+    }
+    let r = ArmSensorlessEndstopResponse::decode(&resp)
+        .map_err(|e| format!("ArmSensorlessEndstopResponse decode: {e:?}"))?;
     Ok(r.result)
 }
 

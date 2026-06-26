@@ -24,17 +24,19 @@ use ethercat_rt::sdo::SdoBus;
 use ethercat_rt::seed_home::{
     ERR_SEED_HOME_BUSY, ERR_SEED_HOME_NOT_ENABLED, ERR_SEED_HOME_RESTORE, ERR_SEED_HOME_STREAMING,
 };
+use ethercat_rt::sensorless::{SensorlessArm, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
 use ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
 };
 use ethercat_rt::wire::{
-    claim_handshake_reply_frame, identify_response_frame, motor_state_empty_frame,
-    motor_state_response_frame, push_pieces_response_frame, resonance_buzz_response_frame,
-    restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
-    sdo_read_response_frame, sdo_write_response_frame, seed_servo_home_response_frame,
-    set_drive_limits_response_frame, set_torque_response_frame, start_capture_response_frame,
-    status_heartbeat_frame, stop_capture_response_frame, stop_response_frame, Command,
+    arm_sensorless_endstop_response_frame, claim_handshake_reply_frame, endstop_trip_frame,
+    identify_response_frame, motor_state_empty_frame, motor_state_response_frame,
+    push_pieces_response_frame, resonance_buzz_response_frame, restore_drive_limits_response_frame,
+    resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
+    sdo_write_response_frame, seed_servo_home_response_frame, set_drive_limits_response_frame,
+    set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
+    stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
     SlaveState, StopCaptureResponse, ERR_SDO_TRANSPORT, ERR_SDO_UNSUPPORTED_SIZE,
@@ -44,7 +46,7 @@ static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 /// Below the DC thread (default 80) so the cycle always preempts mailbox
 /// work, and below Linux threaded-IRQ handlers (50) so NIC frame delivery
-/// preempts SOEM's receive busy-poll.
+/// preempts the master's receive busy-poll.
 const MAILBOX_RT_PRIO: i32 = 40;
 
 extern "C" fn on_sigterm(_: libc::c_int) {
@@ -293,6 +295,7 @@ fn main() {
     let mut ff_saturation = 0u32;
     let mut wkc_consecutive = 0u8;
     let mut latched_drive_err: u16 = 0;
+    let mut sensorless_arm: Option<SensorlessArm> = None;
     'dc: loop {
         if SIGTERM_RECEIVED.load(Ordering::Acquire) {
             eprintln!("ec-rt: SIGTERM received — disabling drive and exiting");
@@ -494,6 +497,37 @@ fn main() {
                             offset_counts,
                         });
                     }
+                }
+                Command::ArmSensorlessEndstop {
+                    correlation_id,
+                    msg,
+                } => {
+                    let result = if msg.enable != 0 {
+                        if msg.torque_trip_tenth_pct == 0 {
+                            eprintln!(
+                                "ec-rt: ArmSensorlessEndstop rejected — zero torque trip threshold"
+                            );
+                            ERR_ARM_SENSORLESS_BAD_THRESHOLD
+                        } else {
+                            sensorless_arm = Some(SensorlessArm::new(
+                                msg.endstop_id,
+                                msg.torque_trip_tenth_pct,
+                            ));
+                            eprintln!(
+                                "ec-rt: sensorless endstop {} armed (torque_trip={} 0.1%)",
+                                msg.endstop_id, msg.torque_trip_tenth_pct
+                            );
+                            0
+                        }
+                    } else {
+                        sensorless_arm = None;
+                        eprintln!("ec-rt: sensorless endstop {} disarmed", msg.endstop_id);
+                        0
+                    };
+                    server.respond(&arm_sensorless_endstop_response_frame(
+                        correlation_id,
+                        result,
+                    ));
                 }
                 Command::ResonanceBuzz {
                     correlation_id,
@@ -747,6 +781,22 @@ fn main() {
                     ffi::ec_rt_shutdown();
                 }
                 std::process::exit(1);
+            }
+        }
+
+        if sensorless_arm.is_some() {
+            let torque_actual = unsafe { ffi::ec_rt_get_torque_actual() };
+            if let Some(endstop_id) = sensorless_arm
+                .as_mut()
+                .and_then(|arm| arm.poll(torque_actual))
+            {
+                ring.reset();
+                cmap = None;
+                eprintln!(
+                    "ec-rt: sensorless endstop {endstop_id} tripped torque={torque_actual} \
+                     — local stop, trip_clock={now}"
+                );
+                server.respond(&endstop_trip_frame(endstop_id, now));
             }
         }
 
