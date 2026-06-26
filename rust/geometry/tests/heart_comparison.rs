@@ -155,7 +155,7 @@ fn max_kappa_jump(out: &FitOutcome) -> f64 {
     for w in segs.windows(2) {
         let (_, prev_end) = w[0].kappa_endpoints();
         let (next_start, _) = w[1].kappa_endpoints();
-        worst = worst.max((prev_end.abs() - next_start.abs()).abs());
+        worst = worst.max((prev_end - next_start).abs());
     }
     worst
 }

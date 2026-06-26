@@ -175,7 +175,7 @@ fn worst_kappa_jump(moves: &[Move]) -> f64 {
     for w in spatial.windows(2) {
         let (_, prev_end) = w[0].kappa_endpoints();
         let (next_start, _) = w[1].kappa_endpoints();
-        worst = worst.max((prev_end.abs() - next_start.abs()).abs());
+        worst = worst.max((prev_end - next_start).abs());
     }
     worst
 }
@@ -372,7 +372,7 @@ fn virtual_move_breaks_the_chain() {
 }
 
 #[test]
-fn arc_line_corner_pins_velocity_to_rest() {
+fn arc_line_corner_blends_g2() {
     let n = 12;
     let verts = arc_vertices(3.0, n, PI / 2.0);
     for heart in HEARTS {
@@ -399,13 +399,18 @@ fn arc_line_corner_pins_velocity_to_rest() {
         ));
         let out = fit_chain(&moves, cfg(heart)).unwrap();
         assert_eq!(out.report.chains, 1, "{heart:?}");
-        assert!(!has_clothoid(&out.moves), "{heart:?}");
+        assert!(has_clothoid(&out.moves), "{heart:?}");
         let reasons: Vec<UnblendReason> = out.report.unblended.iter().map(|u| u.reason).collect();
         assert!(
-            reasons.iter().all(|r| *r == UnblendReason::ArcIncident),
-            "{heart:?}: {reasons:?}"
+            !reasons.contains(&UnblendReason::ArcIncident),
+            "{heart:?}: arc-line corner must blend, not rest: {reasons:?}"
         );
-        assert_eq!(reasons.len(), 2, "{heart:?}");
+        assert!(out.report.blended >= 2, "{heart:?}: {}", out.report.blended);
+        assert!(
+            worst_kappa_jump(&out.moves) <= 1e-9,
+            "{heart:?}: g2 violated {}",
+            worst_kappa_jump(&out.moves)
+        );
     }
 }
 

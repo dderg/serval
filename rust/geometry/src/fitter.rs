@@ -2,6 +2,7 @@ mod biclothoid;
 mod causal;
 mod heart;
 mod kernels;
+mod overlap;
 mod vec3;
 
 pub use heart::HeartKind;

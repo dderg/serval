@@ -1,21 +1,25 @@
 use crate::frontend::Move;
 use crate::path::lowering::PositionProfile;
-use crate::path::{Arc, CurvatureProfile, PathSegment, Segment};
+use crate::path::{Arc, CurvatureProfile, Line, PathSegment, Segment};
 use crate::segment::FollowerDemand;
 
+use super::biclothoid::GeneralBlend;
 use super::heart::Heart;
 use super::kernels::{self, Reconstruction};
+use super::overlap;
 use super::vec3::dot;
 use super::{
     ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, JunctionPlan, UnblendReason,
     UnblendedJunction, blend_trim, classify_junction, emit_blend, emit_move, internal,
-    junction_deviation, line_of,
+    junction_deviation, line_of, scaled_followers,
 };
 
 struct Run {
     start: usize,
     end: usize,
     recon: Reconstruction,
+    head_blend_trim: f64,
+    tail_blend_trim: f64,
 }
 
 pub(super) fn fit(
@@ -42,7 +46,8 @@ pub(super) fn fit(
     }
 
     let heart = config.heart.build();
-    let runs = detect_runs(moves, config, heart.as_ref())?;
+    let mut runs = detect_runs(moves, config, heart.as_ref())?;
+    let (arc_blends, line_blend_trims) = resolve_run_boundaries(&mut runs, moves, config.corner);
 
     let mut out = Vec::new();
     let mut report = FitReport::default();
@@ -51,19 +56,26 @@ pub(super) fn fit(
             RunRole::Interior => report.consumed_legs += 1,
             RunRole::Start(r) => {
                 let trim_start = if i > 0 {
-                    junction_trim(&runs, &plans, i - 1)
+                    junction_trim(&runs, &plans, &line_blend_trims, i - 1)
                 } else {
                     0.0
                 };
                 if emit_move(&mut out, m, trim_start, r.recon.head_consumption)? {
                     report.consumed_legs += 1;
                 }
-                emit_reconstruction(&mut out, &r.recon, m, &moves[r.end])?;
+                emit_reconstruction(
+                    &mut out,
+                    &r.recon,
+                    m,
+                    &moves[r.end],
+                    r.head_blend_trim,
+                    r.tail_blend_trim,
+                )?;
                 report.chains += 1;
             }
             RunRole::End(r) => {
                 let trim_end = if i < plans.len() {
-                    junction_trim(&runs, &plans, i)
+                    junction_trim(&runs, &plans, &line_blend_trims, i)
                 } else {
                     0.0
                 };
@@ -73,12 +85,12 @@ pub(super) fn fit(
             }
             RunRole::None => {
                 let trim_start = if i > 0 {
-                    junction_trim(&runs, &plans, i - 1)
+                    junction_trim(&runs, &plans, &line_blend_trims, i - 1)
                 } else {
                     0.0
                 };
                 let trim_end = if i < plans.len() {
-                    junction_trim(&runs, &plans, i)
+                    junction_trim(&runs, &plans, &line_blend_trims, i)
                 } else {
                     0.0
                 };
@@ -89,7 +101,27 @@ pub(super) fn fit(
         }
 
         if i < plans.len() && !junction_internal(&runs, i) {
-            if let Some(reason) = run_boundary_unblend(&runs, moves, i, config.corner) {
+            if let Some(blend) = &arc_blends[i] {
+                let in_followers = runs
+                    .iter()
+                    .find(|r| r.end == i)
+                    .map(|r| &r.recon.followers)
+                    .unwrap_or(&m.segment.followers);
+                let out_followers = runs
+                    .iter()
+                    .find(|r| r.start == i + 1)
+                    .map(|r| &r.recon.followers)
+                    .unwrap_or(&moves[i + 1].segment.followers);
+                report.blended += 1;
+                emit_general_blend(
+                    &mut out,
+                    blend,
+                    in_followers,
+                    out_followers,
+                    m,
+                    &moves[i + 1],
+                )?;
+            } else if let Some(reason) = run_boundary_unblend(&runs, moves, i, config.corner) {
                 report.unblended.push(UnblendedJunction {
                     line_no: moves[i + 1].source.start_line,
                     reason,
@@ -187,6 +219,8 @@ fn chain_runs(
             start: gs,
             end: ge,
             recon,
+            head_blend_trim: 0.0,
+            tail_blend_trim: 0.0,
         });
     }
     Ok(runs)
@@ -223,16 +257,16 @@ fn run_boundary(runs: &[Run], k: usize) -> bool {
         .any(|r| k == r.end || (r.start > 0 && k == r.start - 1))
 }
 
-fn junction_trim(runs: &[Run], plans: &[JunctionPlan], j: usize) -> f64 {
+fn junction_trim(runs: &[Run], plans: &[JunctionPlan], line_blend_trims: &[f64], j: usize) -> f64 {
     if junction_internal(runs, j) {
         return 0.0;
     }
     for r in runs {
         if r.start > 0 && j == r.start - 1 {
-            return r.recon.head_line_trim;
+            return r.recon.head_line_trim + line_blend_trims[j];
         }
         if j == r.end {
-            return r.recon.tail_line_trim;
+            return r.recon.tail_line_trim + line_blend_trims[j];
         }
     }
     blend_trim(&plans[j])
@@ -291,11 +325,130 @@ fn arc_boundary_unblend(
     (theta > config.theta_min_rad).then_some(UnblendReason::ArcIncident)
 }
 
+fn boundary_delta(moves: &[Move]) -> f64 {
+    moves
+        .iter()
+        .map(|m| junction_deviation(m.limits))
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .fold(f64::INFINITY, f64::min)
+}
+
+fn bare_line<'a>(moves: &'a [Move], runs: &[Run], idx: usize) -> Option<&'a Line> {
+    if idx >= moves.len() || runs.iter().any(|r| r.start <= idx && idx <= r.end) {
+        return None;
+    }
+    match &moves[idx].segment.spatial {
+        Some(Segment::Line(line)) => Some(line),
+        _ => None,
+    }
+}
+
+fn resolve_run_boundaries(
+    runs: &mut [Run],
+    moves: &[Move],
+    corner: CornerFitConfig,
+) -> (Vec<Option<GeneralBlend>>, Vec<f64>) {
+    let n = moves.len().saturating_sub(1);
+    let mut blends: Vec<Option<GeneralBlend>> = (0..n).map(|_| None).collect();
+    let mut line_trims = vec![0.0; n];
+    let delta = boundary_delta(moves);
+    if !(delta.is_finite() && delta > 0.0) {
+        return (blends, line_trims);
+    }
+
+    for k in 0..runs.len() {
+        let j = runs[k].end;
+        if j < n && runs[k].recon.down.is_empty() {
+            if k + 1 < runs.len() && runs[k + 1].start == j + 1 {
+                if runs[k + 1].recon.up.is_empty() {
+                    if let Some(blend) = overlap::resolve_arc_arc(
+                        &runs[k].recon.arc,
+                        &runs[k + 1].recon.arc,
+                        corner,
+                        delta,
+                    ) {
+                        runs[k].tail_blend_trim = blend.trim_in;
+                        runs[k + 1].head_blend_trim = blend.trim_out;
+                        blends[j] = Some(blend);
+                    }
+                }
+            } else if let Some(line) = bare_line(moves, runs, j + 1) {
+                if let Some(blend) =
+                    overlap::resolve_arc_line(&runs[k].recon.arc, line, true, corner, delta)
+                {
+                    runs[k].tail_blend_trim = blend.trim_in;
+                    line_trims[j] = blend.trim_out;
+                    blends[j] = Some(blend);
+                }
+            }
+        }
+
+        if runs[k].start > 0 && runs[k].recon.up.is_empty() {
+            let jh = runs[k].start - 1;
+            if let Some(line) = bare_line(moves, runs, jh) {
+                if let Some(blend) =
+                    overlap::resolve_arc_line(&runs[k].recon.arc, line, false, corner, delta)
+                {
+                    line_trims[jh] = blend.trim_in;
+                    runs[k].head_blend_trim = blend.trim_out;
+                    blends[jh] = Some(blend);
+                }
+            }
+        }
+    }
+    (blends, line_trims)
+}
+
+fn trim_arc(arc: &Arc, head: f64, tail: f64) -> Result<Arc, crate::GeometryError> {
+    if head <= 0.0 && tail <= 0.0 {
+        return Ok(arc.clone());
+    }
+    let sign = arc.sweep.signum();
+    let start_angle = arc.start_angle + sign * head / arc.radius;
+    let sweep = arc.sweep - sign * (head + tail) / arc.radius;
+    Arc::try_new(arc.origin, arc.u, arc.v, arc.radius, start_angle, sweep)
+}
+
+fn emit_general_blend(
+    out: &mut Vec<Move>,
+    blend: &GeneralBlend,
+    in_followers: &[FollowerDemand],
+    out_followers: &[FollowerDemand],
+    m_in: &Move,
+    m_out: &Move,
+) -> Result<(), FitError> {
+    let len1 = blend.half1.s_len();
+    let len2 = blend.half2.s_len();
+    let f_in = scaled_followers(in_followers, blend.trim_in / len1);
+    let f_out = scaled_followers(out_followers, blend.trim_out / len2);
+
+    let seg_in = PathSegment::try_new(Segment::Clothoid(blend.half1.clone()), f_in)
+        .map_err(internal(m_in.source.start_line))?;
+    out.push(Move {
+        segment: seg_in,
+        feedrate_mm_s: m_in.feedrate_mm_s,
+        limits: m_in.limits,
+        source: m_in.source,
+    });
+
+    let seg_out = PathSegment::try_new(Segment::Clothoid(blend.half2.clone()), f_out)
+        .map_err(internal(m_out.source.start_line))?;
+    out.push(Move {
+        segment: seg_out,
+        feedrate_mm_s: m_out.feedrate_mm_s,
+        limits: m_out.limits,
+        source: m_out.source,
+    });
+    Ok(())
+}
+
 fn emit_reconstruction(
     out: &mut Vec<Move>,
     recon: &Reconstruction,
     m_in: &Move,
     m_out: &Move,
+    head_blend_trim: f64,
+    tail_blend_trim: f64,
 ) -> Result<(), FitError> {
     let mut push =
         |spatial: Segment, src: &Move, followers: Vec<FollowerDemand>| -> Result<(), FitError> {
@@ -316,11 +469,9 @@ fn emit_reconstruction(
             recon.up_followers.clone(),
         )?;
     }
-    push(
-        Segment::Arc(recon.arc.clone()),
-        m_in,
-        recon.followers.clone(),
-    )?;
+    let arc = trim_arc(&recon.arc, head_blend_trim, tail_blend_trim)
+        .map_err(internal(m_in.source.start_line))?;
+    push(Segment::Arc(arc), m_in, recon.followers.clone())?;
     for down in &recon.down {
         push(
             Segment::Clothoid(down.clone()),

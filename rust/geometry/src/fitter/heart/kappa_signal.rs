@@ -8,8 +8,6 @@ use super::super::line_of;
 use super::super::vec3::{cross, normalize, turn_normal};
 use super::{Heart, turning_signal};
 
-const KAPPA_REL_TOL: f64 = 0.25;
-
 pub(super) struct KappaSignal;
 
 impl Heart for KappaSignal {
@@ -41,7 +39,7 @@ impl Heart for KappaSignal {
             let band_end = grow_turning_band(chain, i, corner, gate_epmm);
             let mut span_start = i;
             while span_start + min_run <= band_end + 1 {
-                let span_end = grow_kappa_span(&s, &theta, span_start, band_end);
+                let span_end = grow_slope_span(&s, &theta, span_start, band_end, min_run);
                 match in_band_prefix(chain, span_start, span_end, min_run, tol) {
                     Some(end) => {
                         spans.push((span_start, end));
@@ -85,27 +83,58 @@ fn in_band_prefix(
     None
 }
 
-fn leg_kappa(s: &[f64], theta: &[f64], vertex: usize) -> f64 {
-    let turn = theta[vertex + 1] - theta[vertex];
-    let span = 0.5 * (s[vertex + 1] - s[vertex - 1]);
-    debug_assert!(span > 0.0, "leg span must be positive (legs are nonzero)");
-    turn / span
+#[derive(Default, Clone, Copy)]
+struct SlopeFit {
+    n: f64,
+    sx: f64,
+    sy: f64,
+    sxx: f64,
+    sxy: f64,
 }
 
-fn grow_kappa_span(s: &[f64], theta: &[f64], start: usize, band_end: usize) -> usize {
-    let mut end = start + 1;
-    let mut mean = leg_kappa(s, theta, start + 1);
-    let mut count = 1.0_f64;
+impl SlopeFit {
+    fn push(&mut self, x: f64, y: f64) {
+        self.n += 1.0;
+        self.sx += x;
+        self.sy += y;
+        self.sxx += x * x;
+        self.sxy += x * y;
+    }
+
+    fn slope(&self) -> f64 {
+        let denom = self.n * self.sxx - self.sx * self.sx;
+        debug_assert!(
+            denom > 0.0,
+            "slope fit needs >=2 distinct arc-length samples"
+        );
+        (self.n * self.sxy - self.sx * self.sy) / denom
+    }
+}
+
+fn grow_slope_span(
+    s: &[f64],
+    theta: &[f64],
+    start: usize,
+    band_end: usize,
+    min_run: usize,
+) -> usize {
+    let lo = start + 1;
+    let mut end = (start + min_run - 1).min(band_end);
+    let mut fit = SlopeFit::default();
+    for v in lo..=end + 1 {
+        fit.push(s[v], theta[v]);
+    }
+    let mut slope = fit.slope();
     while end < band_end {
-        let next = leg_kappa(s, theta, end + 1);
-        if mean == 0.0
-            || next.signum() != mean.signum()
-            || (next - mean).abs() > KAPPA_REL_TOL * mean.abs()
-        {
+        let cand = end + 2;
+        let mut trial = fit;
+        trial.push(s[cand], theta[cand]);
+        let next = trial.slope();
+        if slope == 0.0 || next.signum() != slope.signum() {
             break;
         }
-        mean = (mean * count + next) / (count + 1.0);
-        count += 1.0;
+        fit = trial;
+        slope = next;
         end += 1;
     }
     end
