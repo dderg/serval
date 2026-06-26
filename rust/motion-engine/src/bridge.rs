@@ -71,9 +71,16 @@ struct McuConnection {
     ethercat_socket: Option<String>,
     endpoint_process: Option<std::process::Child>,
     endpoint_conn: Option<Arc<McuSerialConn>>,
+    ethercat_slot_axes: Vec<usize>,
 }
 
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// One EtherCAT servo drive as handed to `claim_ethercat_node` from the host:
+/// `(chain_index, global_axis, counts_per_mm, rotation_distance,
+/// following_error_counts, max_torque_tenth_pct)`. `chain_index` is the 1-based
+/// cable position; the endpoint slave position is `chain_index - 1`.
+type EthercatDrive = (i32, usize, f64, f64, Option<u32>, Option<u16>);
 
 const ETHERCAT_CLOCK_FREQ_HZ: u32 = 1_000_000_000;
 
@@ -132,6 +139,15 @@ impl MotorQuery {
     }
 }
 
+/// Resolve a global axis to its endpoint slot via the claim-time slot map
+/// (`slot_axes[slot] == global_axis`). `None` if the axis is not on this node.
+fn slot_for_axis(slot_axes: &[usize], axis: usize) -> Option<u8> {
+    slot_axes
+        .iter()
+        .position(|&a| a == axis)
+        .and_then(|s| u8::try_from(s).ok())
+}
+
 fn place_motor_response(
     resp: &mcu_protocol::messages::MotorStateResponse,
     cfg_axes: &[usize],
@@ -146,8 +162,12 @@ fn place_motor_response(
         }
     };
     if is_ethercat {
-        for (m, &slot) in resp.motors.iter().zip(cfg_axes.iter()) {
-            put(slot, m);
+        // The endpoint tags each sample with its slot; map slot → global axis
+        // via cfg_axes (slot order) rather than trusting positional order.
+        for m in &resp.motors {
+            if let Some(&axis) = cfg_axes.get(m.slot as usize) {
+                put(axis, m);
+            }
         }
     } else {
         for m in &resp.motors {
@@ -390,41 +410,86 @@ mod claim_error_message_tests {
     }
 }
 
+/// Append the per-drive flags shared by the legacy and `--slave` forms.
+fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
+    let (_chain_index, _axis, counts_per_mm, rotation_distance, ferr, max_torque) = d;
+    args.push("--counts-per-mm".into());
+    args.push(counts_per_mm.to_string());
+    args.push("--rotation-distance".into());
+    args.push(rotation_distance.to_string());
+    if let Some(ferr) = ferr {
+        args.push("--following-error-counts".into());
+        args.push(ferr.to_string());
+    }
+    if let Some(tq) = max_torque {
+        args.push("--max-torque-tenth-pct".into());
+        args.push(tq.to_string());
+    }
+}
+
+/// Build the endpoint CLI args. N=1 keeps the legacy single-drive form (no
+/// `--slave`) — behaviorally identical to Phase 1 (the endpoint parser is
+/// order-independent): slave position 0, axis routing via the endpoint's N==1
+/// shim. N>1 emits one `--slave <pos> --axis <global>` group per drive (in the
+/// caller's slot order), position = `chain_index - 1`.
+fn endpoint_args(
+    interface: &str,
+    socket_path: &str,
+    velocity_ff: bool,
+    dynamics_profile: Option<&str>,
+    torque_clamp_pct: f64,
+    drives: &[EthercatDrive],
+) -> Vec<String> {
+    let mut args = vec![
+        interface.to_string(),
+        "--socket".into(),
+        socket_path.to_string(),
+        "--torque-clamp-pct".into(),
+        torque_clamp_pct.to_string(),
+    ];
+    if velocity_ff {
+        args.push("--velocity-ff".into());
+    }
+    if let Some(p) = dynamics_profile {
+        args.push("--dynamics-profile".into());
+        args.push(p.to_string());
+    }
+    if drives.len() == 1 {
+        push_drive_flags(&mut args, &drives[0]);
+    } else {
+        for d in drives {
+            let (chain_index, axis, ..) = d;
+            args.push("--slave".into());
+            args.push((chain_index - 1).to_string());
+            args.push("--axis".into());
+            args.push(axis.to_string());
+            push_drive_flags(&mut args, d);
+        }
+    }
+    args
+}
+
 fn spawn_ethercat_endpoint(
     binary: &str,
     interface: &str,
     socket_path: &str,
-    counts_per_mm: f64,
-    rotation_distance: f64,
     velocity_ff: bool,
     dynamics_profile: Option<&str>,
     torque_clamp_pct: f64,
-    following_error_counts: Option<u32>,
-    max_torque_tenth_pct: Option<u16>,
+    drives: &[EthercatDrive],
 ) -> Result<std::process::Child, String> {
-    let mut cmd = std::process::Command::new(binary);
-    cmd.arg(interface)
-        .arg("--socket")
-        .arg(socket_path)
-        .arg("--counts-per-mm")
-        .arg(counts_per_mm.to_string())
-        .arg("--rotation-distance")
-        .arg(rotation_distance.to_string())
-        .arg("--torque-clamp-pct")
-        .arg(torque_clamp_pct.to_string());
-    if velocity_ff {
-        cmd.arg("--velocity-ff");
-    }
-    if let Some(p) = dynamics_profile {
-        cmd.arg("--dynamics-profile").arg(p);
-    }
-    if let Some(ferr) = following_error_counts {
-        cmd.arg("--following-error-counts").arg(ferr.to_string());
-    }
-    if let Some(tq) = max_torque_tenth_pct {
-        cmd.arg("--max-torque-tenth-pct").arg(tq.to_string());
-    }
-    cmd.spawn().map_err(|e| format!("spawn {binary}: {e}"))
+    let args = endpoint_args(
+        interface,
+        socket_path,
+        velocity_ff,
+        dynamics_profile,
+        torque_clamp_pct,
+        drives,
+    );
+    std::process::Command::new(binary)
+        .args(&args)
+        .spawn()
+        .map_err(|e| format!("spawn {binary}: {e}"))
 }
 
 fn poll_socket_ready(
@@ -945,26 +1010,33 @@ impl PyMotionEngine {
                 ethercat_socket: None,
                 endpoint_process: None,
                 endpoint_conn: None,
+                ethercat_slot_axes: Vec::new(),
             },
         );
         Ok(raw)
     }
 
-    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, counts_per_mm, rotation_distance, velocity_ff, dynamics_profile, torque_clamp_pct, following_error_counts=None, max_torque_tenth_pct=None))]
+    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, velocity_ff, dynamics_profile, torque_clamp_pct, drives))]
     fn claim_ethercat_node(
         &self,
         label: &str,
         socket_path: &str,
         interface: &str,
         endpoint_binary: &str,
-        counts_per_mm: f64,
-        rotation_distance: f64,
         velocity_ff: bool,
         dynamics_profile: Option<String>,
         torque_clamp_pct: f64,
-        following_error_counts: Option<u32>,
-        max_torque_tenth_pct: Option<u16>,
+        drives: Vec<EthercatDrive>,
     ) -> PyResult<u32> {
+        if drives.is_empty() {
+            return Err(PyRuntimeError::new_err(format!(
+                "ethercat {label}: claim received no drives"
+            )));
+        }
+        let mut drives = drives;
+        drives.sort_by_key(|d| d.1);
+        let slot_axes: Vec<usize> = drives.iter().map(|d| d.1).collect();
+
         if let Err(e) = std::fs::remove_file(socket_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 return Err(PyRuntimeError::new_err(format!(
@@ -977,13 +1049,10 @@ impl PyMotionEngine {
             endpoint_binary,
             interface,
             socket_path,
-            counts_per_mm,
-            rotation_distance,
             velocity_ff,
             dynamics_profile.as_deref(),
             torque_clamp_pct,
-            following_error_counts,
-            max_torque_tenth_pct,
+            &drives,
         )
         .map_err(|e| {
             PyRuntimeError::new_err(format!("ethercat {label}: endpoint failed to start — {e}"))
@@ -1009,7 +1078,7 @@ impl PyMotionEngine {
         let handle = router.claim_mcu(label);
         let raw = handle.raw();
         drop(router);
-        self.register_ethercat_mcu(raw, label, socket_path, child, conn);
+        self.register_ethercat_mcu(raw, label, socket_path, child, conn, slot_axes);
         Ok(raw)
     }
 
@@ -1133,6 +1202,7 @@ impl PyMotionEngine {
     fn set_drive_limits(
         &self,
         mcu_handle: u32,
+        slot: u8,
         following_error_counts: u32,
         max_torque_tenth_pct: u16,
     ) -> PyResult<()> {
@@ -1160,6 +1230,7 @@ impl PyMotionEngine {
         );
         let result = crate::servo_torque::send_drive_limits(
             &conn,
+            slot,
             following_error_counts,
             max_torque_tenth_pct,
         )
@@ -1172,7 +1243,7 @@ impl PyMotionEngine {
         Ok(())
     }
 
-    fn restore_drive_limits(&self, mcu_handle: u32) -> PyResult<()> {
+    fn restore_drive_limits(&self, mcu_handle: u32, slot: u8) -> PyResult<()> {
         let conn = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             let mc = mcus.get(&mcu_handle).ok_or_else(|| {
@@ -1193,7 +1264,7 @@ impl PyMotionEngine {
             mcu_handle,
             "servo drive limits restored"
         );
-        let result = crate::servo_torque::send_restore_drive_limits(&conn)
+        let result = crate::servo_torque::send_restore_drive_limits(&conn, slot)
             .map_err(PyRuntimeError::new_err)?;
         if result != 0 {
             return Err(PyRuntimeError::new_err(format!(
@@ -1206,6 +1277,7 @@ impl PyMotionEngine {
     fn arm_sensorless_endstop(
         &self,
         mcu_handle: u32,
+        slot: u8,
         endstop_id: u8,
         torque_trip_tenth_pct: u16,
         enable: bool,
@@ -1222,6 +1294,7 @@ impl PyMotionEngine {
         );
         let result = crate::servo_torque::send_arm_sensorless_endstop(
             &conn,
+            slot,
             endstop_id,
             torque_trip_tenth_pct,
             enable,
@@ -1244,18 +1317,25 @@ impl PyMotionEngine {
         pos_mm: f64,
         timeout_s: f64,
     ) -> PyResult<()> {
-        let _ = axis;
-        let conn = {
+        let (conn, slot) = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             let mc = mcus.get(&mcu_handle).ok_or_else(|| {
                 PyRuntimeError::new_err(format!(
                     "finalize_homed_axis: unknown mcu_handle {mcu_handle}"
                 ))
             })?;
-            match mc.endpoint_conn.clone() {
+            let conn = match mc.endpoint_conn.clone() {
                 Some(conn) => conn,
                 None => return Ok(()),
-            }
+            };
+            let slot = slot_for_axis(&mc.ethercat_slot_axes, axis).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "finalize_homed_axis: axis {axis} not driven by mcu {mcu_handle} \
+                     (slot map {:?})",
+                    mc.ethercat_slot_axes
+                ))
+            })?;
+            (conn, slot)
         };
         let home_q16 = crate::dispatch::encode_q16(pos_mm);
         tracing::info!(
@@ -1268,7 +1348,7 @@ impl PyMotionEngine {
         );
         let timeout = std::time::Duration::from_secs_f64(timeout_s);
         let result = py
-            .detach(|| crate::servo_torque::send_seed_servo_home(&conn, home_q16, timeout))
+            .detach(|| crate::servo_torque::send_seed_servo_home(&conn, slot, home_q16, timeout))
             .map_err(PyRuntimeError::new_err)?;
         if result != 0 {
             return Err(PyRuntimeError::new_err(format!(
@@ -1286,17 +1366,18 @@ impl PyMotionEngine {
             .remove(&mcu_handle))
     }
 
-    fn sdo_read(&self, mcu_handle: u32, index: u16, subindex: u8) -> PyResult<(u8, u32)> {
+    fn sdo_read(&self, mcu_handle: u32, slot: u8, index: u16, subindex: u8) -> PyResult<(u8, u32)> {
         let conn = self.ethercat_conn(mcu_handle, "sdo_read")?;
         tracing::info!(
             subsystem = "engine",
             event = "servo_sdo_read",
             mcu_handle,
+            slot,
             index,
             subindex,
             "servo SDO read"
         );
-        let r = crate::servo_sdo::send_sdo_read(&conn, index, subindex)
+        let r = crate::servo_sdo::send_sdo_read(&conn, slot, index, subindex)
             .map_err(PyRuntimeError::new_err)?;
         if r.result != 0 {
             tracing::error!(
@@ -1319,6 +1400,7 @@ impl PyMotionEngine {
     fn sdo_write(
         &self,
         mcu_handle: u32,
+        slot: u8,
         index: u16,
         subindex: u8,
         size: u8,
@@ -1329,13 +1411,14 @@ impl PyMotionEngine {
             subsystem = "engine",
             event = "servo_sdo_write",
             mcu_handle,
+            slot,
             index,
             subindex,
             size,
             value,
             "servo SDO write"
         );
-        let r = crate::servo_sdo::send_sdo_write(&conn, index, subindex, size, value)
+        let r = crate::servo_sdo::send_sdo_write(&conn, slot, index, subindex, size, value)
             .map_err(PyRuntimeError::new_err)?;
         if r.result != 0 {
             tracing::error!(
@@ -2948,6 +3031,7 @@ impl PyMotionEngine {
                 let pump_tx_fault = control_tx_init.clone();
                 let latched_fault_hb = Arc::clone(&self.latched_drive_fault);
                 let mcu_label_hb = mcu_label.clone();
+                let slot_axes_hb = cfg_mcu.axes.clone();
                 conn.attach_heartbeat_callback(Arc::new(
                     move |hb: &mcu_protocol::messages::StatusHeartbeat| {
                         if hb.fault_code != 0 {
@@ -3008,8 +3092,10 @@ impl PyMotionEngine {
                                 retired_counts: hb.retired_counts.clone(),
                             },
                         ));
-                        for (axis, &r) in hb.retired_counts.iter().enumerate() {
-                            drain_hb.set_retired(mcu_id, axis as u8, r);
+                        for (slot, &r) in hb.retired_counts.iter().enumerate() {
+                            if let Some(&axis) = slot_axes_hb.get(slot) {
+                                drain_hb.set_retired(mcu_id, axis as u8, r);
+                            }
                         }
                     },
                 ));
@@ -4693,6 +4779,7 @@ impl PyMotionEngine {
         socket_path: &str,
         child: std::process::Child,
         conn: McuSerialConn,
+        slot_axes: Vec<usize>,
     ) {
         self.mcus.lock().unwrap_or_else(|p| p.into_inner()).insert(
             raw,
@@ -4709,6 +4796,7 @@ impl PyMotionEngine {
                 ethercat_socket: Some(socket_path.to_owned()),
                 endpoint_process: Some(child),
                 endpoint_conn: Some(Arc::new(conn)),
+                ethercat_slot_axes: slot_axes,
             },
         );
         self.nominal_clock_freqs
@@ -4850,9 +4938,72 @@ mod resolve_motion_caps_tests {
 
 #[cfg(test)]
 mod ethercat_endpoint_tests {
-    use super::{handshake_ethercat_endpoint, poll_socket_ready, spawn_ethercat_endpoint};
+    use super::{
+        endpoint_args, handshake_ethercat_endpoint, poll_socket_ready, slot_for_axis,
+        spawn_ethercat_endpoint,
+    };
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn slot_for_axis_maps_hits_and_misses() {
+        // slot_axes[slot] == global axis; resolve global axis -> slot.
+        let slot_axes = [2usize, 5, 7];
+        assert_eq!(slot_for_axis(&slot_axes, 2), Some(0));
+        assert_eq!(slot_for_axis(&slot_axes, 5), Some(1));
+        assert_eq!(slot_for_axis(&slot_axes, 7), Some(2));
+        assert_eq!(slot_for_axis(&slot_axes, 0), None);
+        assert_eq!(slot_for_axis(&slot_axes, 3), None);
+        assert_eq!(slot_for_axis(&[], 0), None);
+    }
+
+    #[test]
+    fn endpoint_args_single_drive_uses_legacy_form() {
+        // N=1 must stay byte-identical to Phase 1: no --slave/--axis groups.
+        let args = endpoint_args(
+            "eth0",
+            "/tmp/x.sock",
+            false,
+            None,
+            30.0,
+            &[(1, 0, 3276.8, 40.0, Some(8192), Some(500))],
+        );
+        assert!(!args.iter().any(|a| a == "--slave"));
+        assert!(!args.iter().any(|a| a == "--axis"));
+        assert!(args.iter().any(|a| a == "--counts-per-mm"));
+        assert!(args.iter().any(|a| a == "--following-error-counts"));
+    }
+
+    #[test]
+    fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
+        // Two drives, chain_index 1 & 2 on global axes 0 & 2. Positions are
+        // chain_index - 1 (0-based IgH), in slot order.
+        let args = endpoint_args(
+            "eth0",
+            "/tmp/x.sock",
+            false,
+            None,
+            30.0,
+            &[
+                (1, 0, 1000.0, 50.0, None, None),
+                (2, 2, 2000.0, 40.0, Some(4096), None),
+            ],
+        );
+        let slave_positions: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| *a == "--slave" && args.get(i + 1).is_some())
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert_eq!(slave_positions, vec!["0", "1"]);
+        let axes: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| *a == "--axis" && args.get(i + 1).is_some())
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert_eq!(axes, vec!["0", "2"]);
+    }
 
     #[test]
     fn spawn_nonexistent_binary_errors_with_binary_path() {
@@ -4860,13 +5011,10 @@ mod ethercat_endpoint_tests {
             "/nonexistent/binary/kalico-ec",
             "eth0",
             "/tmp/test.sock",
-            1.0,
-            40.0,
             false,
             None,
             30.0,
-            None,
-            None,
+            &[],
         );
         assert!(result.is_err(), "expected Err for nonexistent binary");
         let msg = result.unwrap_err();

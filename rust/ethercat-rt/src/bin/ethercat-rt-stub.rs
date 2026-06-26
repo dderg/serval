@@ -293,8 +293,13 @@ fn main() {
                     );
                     server.respond(&set_drive_limits_response_frame(correlation_id, 0));
                 }
-                Command::RestoreDriveLimits { correlation_id } => {
-                    eprintln!("ec-rt-stub: RestoreDriveLimits stored={stored_limits:?}");
+                Command::RestoreDriveLimits {
+                    correlation_id,
+                    slot,
+                } => {
+                    eprintln!(
+                        "ec-rt-stub: RestoreDriveLimits slot={slot} stored={stored_limits:?}"
+                    );
                     server.respond(&restore_drive_limits_response_frame(correlation_id, 0));
                 }
                 Command::ArmSensorlessEndstop {
@@ -306,6 +311,7 @@ fn main() {
                             ERR_ARM_SENSORLESS_BAD_THRESHOLD
                         } else {
                             sensorless_arm = Some(SensorlessArm::new(
+                                msg.slot,
                                 msg.endstop_id,
                                 msg.torque_trip_tenth_pct,
                             ));
@@ -327,9 +333,10 @@ fn main() {
                 }
                 Command::SeedServoHome {
                     correlation_id,
+                    slot,
                     home_q16,
                 } => {
-                    eprintln!("ec-rt-stub: SeedServoHome home_q16={home_q16}");
+                    eprintln!("ec-rt-stub: SeedServoHome slot={slot} home_q16={home_q16}");
                     server.respond(&seed_servo_home_response_frame(correlation_id, 0));
                 }
                 Command::ResonanceBuzz {

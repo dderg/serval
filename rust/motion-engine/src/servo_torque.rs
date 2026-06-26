@@ -5,8 +5,8 @@ use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::{Decode as _, Encode as _};
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
-    ResonanceBuzzResponse, RestoreDriveLimitsResponse, SeedServoHome, SeedServoHomeResponse,
-    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
+    ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
+    SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
 };
 
 const WORST_CASE_LADDER_ENABLE: Duration = Duration::from_secs(3);
@@ -42,10 +42,12 @@ const DRIVE_LIMITS_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn send_drive_limits(
     conn: &McuSerialConn,
+    slot: u8,
     following_error_counts: u32,
     max_torque_tenth_pct: u16,
 ) -> Result<i32, String> {
     let body = SetDriveLimits {
+        slot,
         following_error_counts,
         max_torque_tenth_pct,
     }
@@ -66,11 +68,13 @@ pub fn send_drive_limits(
 
 pub fn send_arm_sensorless_endstop(
     conn: &McuSerialConn,
+    slot: u8,
     endstop_id: u8,
     torque_trip_tenth_pct: u16,
     enable: bool,
 ) -> Result<i32, String> {
     let body = ArmSensorlessEndstop {
+        slot,
         endstop_id,
         torque_trip_tenth_pct,
         enable: u8::from(enable),
@@ -94,13 +98,10 @@ pub fn send_arm_sensorless_endstop(
     Ok(r.result)
 }
 
-pub fn send_restore_drive_limits(conn: &McuSerialConn) -> Result<i32, String> {
+pub fn send_restore_drive_limits(conn: &McuSerialConn, slot: u8) -> Result<i32, String> {
+    let body = RestoreDriveLimits { slot }.encoded_to_vec();
     let (kind, resp) = conn
-        .mcu_call(
-            MessageKind::RestoreDriveLimits,
-            Vec::new(),
-            DRIVE_LIMITS_TIMEOUT,
-        )
+        .mcu_call(MessageKind::RestoreDriveLimits, body, DRIVE_LIMITS_TIMEOUT)
         .map_err(|e| format!("RestoreDriveLimits transport: {e:?}"))?;
     if kind != MessageKind::RestoreDriveLimitsResponse {
         return Err(format!(
@@ -115,10 +116,11 @@ pub fn send_restore_drive_limits(conn: &McuSerialConn) -> Result<i32, String> {
 
 pub fn send_seed_servo_home(
     conn: &McuSerialConn,
+    slot: u8,
     home_q16: i32,
     timeout: Duration,
 ) -> Result<i32, String> {
-    let body = SeedServoHome { home_q16 }.encoded_to_vec();
+    let body = SeedServoHome { slot, home_q16 }.encoded_to_vec();
     let (kind, resp) = conn
         .mcu_call(MessageKind::SeedServoHome, body, timeout)
         .map_err(|e| format!("SeedServoHome transport: {e:?}"))?;

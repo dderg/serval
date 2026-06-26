@@ -82,6 +82,9 @@ class ServoRail(BaseRail):
                 "(got %r)" % (motor_config.get_name(), protocol)
             )
         self.node_name = motor_config.get("node")
+        self.chain_index = motor_config.getint(
+            "ethercat_chain_index", 1, minval=1
+        )
         self.motor_name = motor_config.get_name().split(None, 1)[1]
         self.rotation_distance = motor_config.getfloat(
             "rotation_distance", above=0.0
@@ -171,6 +174,9 @@ class ServoRail(BaseRail):
     def get_node_name(self):
         return self.node_name
 
+    def get_chain_index(self):
+        return self.chain_index
+
     def get_motor_name(self):
         return self.motor_name
 
@@ -212,20 +218,26 @@ class ServoRail(BaseRail):
         return self._virtual_endstop
 
     def _engine_handle(self):
+        return self._engine_node().get_engine_handle()
+
+    def _engine_node(self):
         node = self.printer.lookup_object("ethercat_node " + self.node_name)
-        handle = node.get_engine_handle()
-        if handle is None:
+        if node.get_engine_handle() is None:
             raise self.printer.command_error(
                 "servo sensorless homing: ethercat_node %s has no engine handle"
                 % (self.node_name,)
             )
-        return handle
+        return node
+
+    def _engine_slot(self):
+        return self._engine_node().get_slot_for_motor(self.motor_name)
 
     def trip_move_begin(self, entry):
         _, torque_trip_tenth_pct = self.get_homing_drive_limits()
         engine = self.printer.lookup_object("motion_engine")
         engine.arm_sensorless_endstop(
             self._engine_handle(),
+            self._engine_slot(),
             entry["endstop"].endstop_id,
             torque_trip_tenth_pct,
             True,
@@ -234,7 +246,9 @@ class ServoRail(BaseRail):
     def trip_move_end(self, entry):
         engine = self.printer.lookup_object("motion_engine")
         engine.disarm_sensorless_endstop(
-            self._engine_handle(), entry["endstop"].endstop_id
+            self._engine_handle(),
+            self._engine_slot(),
+            entry["endstop"].endstop_id,
         )
 
     def get_session_drive_limits(self):

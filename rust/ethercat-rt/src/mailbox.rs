@@ -41,16 +41,19 @@ pub enum MailboxRequest {
     },
     WriteLimits {
         correlation_id: u32,
+        slot: u8,
         ferr_counts: u32,
         torque_tenth_pct: u16,
         restore: bool,
     },
     SeedHomeSetup {
         correlation_id: u32,
+        slot: u8,
         offset_counts: i32,
     },
     SeedHomeRestore {
         correlation_id: u32,
+        slot: u8,
     },
 }
 
@@ -93,7 +96,7 @@ impl MailboxWorker {
     pub fn spawn<B, L>(mut bus: B, mut write_limits: L, scheduling: WorkerScheduling) -> Self
     where
         B: SdoBus + Send + 'static,
-        L: FnMut(u32, u16) -> i32 + Send + 'static,
+        L: FnMut(u8, u32, u16) -> i32 + Send + 'static,
     {
         let (req_tx, req_rx) = channel::<MailboxRequest>();
         let (rep_tx, rep_rx) = channel::<MailboxReply>();
@@ -126,30 +129,33 @@ impl MailboxWorker {
                         },
                         MailboxRequest::WriteLimits {
                             correlation_id,
+                            slot,
                             ferr_counts,
                             torque_tenth_pct,
                             restore,
                         } => MailboxReply::WriteLimits {
                             correlation_id,
-                            rc: write_limits(ferr_counts, torque_tenth_pct),
+                            rc: write_limits(slot, ferr_counts, torque_tenth_pct),
                             ferr_counts,
                             torque_tenth_pct,
                             restore,
                         },
                         MailboxRequest::SeedHomeSetup {
                             correlation_id,
+                            slot,
                             offset_counts,
                         } => MailboxReply::SeedHomeSetup {
                             correlation_id,
-                            rc: crate::seed_home::seed_home_setup(&mut bus, offset_counts),
+                            rc: crate::seed_home::seed_home_setup(&mut bus, slot, offset_counts),
                             offset_counts,
                         },
-                        MailboxRequest::SeedHomeRestore { correlation_id } => {
-                            MailboxReply::SeedHomeRestore {
-                                correlation_id,
-                                rc: crate::seed_home::seed_home_restore(&mut bus),
-                            }
-                        }
+                        MailboxRequest::SeedHomeRestore {
+                            correlation_id,
+                            slot,
+                        } => MailboxReply::SeedHomeRestore {
+                            correlation_id,
+                            rc: crate::seed_home::seed_home_restore(&mut bus, slot),
+                        },
                     };
                     if rep_tx.send(reply).is_err() {
                         return;

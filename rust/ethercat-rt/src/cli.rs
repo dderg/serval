@@ -5,10 +5,15 @@
 /// backend sizes its per-slave arrays to. Keep the two in sync.
 pub const EC_RT_MAX_SLAVES: usize = 8;
 
-/// Per-drive config parsed from one `--slave <pos> ...` CLI group.
+/// Per-drive config parsed from one `--slave <pos> ...` CLI group. `axis` is the
+/// host's global axis this slave drives; the endpoint routes incoming PushPieces
+/// (tagged with the global axis) to this slave's ring through it. It is only
+/// meaningful with multiple slaves — the single-drive form leaves it at 0 and
+/// routes everything to slot 0.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlaveCfg {
     pub pos: i32,
+    pub axis: u8,
     pub counts_per_mm: f64,
     pub rotation_distance: f64,
     pub following_error_counts: Option<u32>,
@@ -18,6 +23,7 @@ pub struct SlaveCfg {
 fn default_cfg(pos: i32) -> SlaveCfg {
     SlaveCfg {
         pos,
+        axis: 0,
         counts_per_mm: 3276.8,
         rotation_distance: 40.0,
         following_error_counts: None,
@@ -62,7 +68,8 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
                 slaves.push(default_cfg(pos));
                 i += 2;
             }
-            f @ ("--counts-per-mm"
+            f @ ("--axis"
+            | "--counts-per-mm"
             | "--rotation-distance"
             | "--following-error-counts"
             | "--max-torque-tenth-pct") => {
@@ -73,6 +80,9 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
                     .last_mut()
                     .ok_or_else(|| format!("{f} appeared before any --slave group"))?;
                 match f {
+                    "--axis" => {
+                        cur.axis = v.parse().map_err(|_| "--axis not a u8".to_string())?;
+                    }
                     "--counts-per-mm" => {
                         cur.counts_per_mm = v
                             .parse()

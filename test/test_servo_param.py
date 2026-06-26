@@ -110,12 +110,12 @@ class FakeEngine:
         self.read_result = (2, 100)
         self.write_result = (2, 100)
 
-    def sdo_read(self, handle, index, subindex):
-        self.reads.append((handle, index, subindex))
+    def sdo_read(self, handle, slot, index, subindex):
+        self.reads.append((handle, slot, index, subindex))
         return self.read_result
 
-    def sdo_write(self, handle, index, subindex, size, value):
-        self.writes.append((handle, index, subindex, size, value))
+    def sdo_write(self, handle, slot, index, subindex, size, value):
+        self.writes.append((handle, slot, index, subindex, size, value))
         return self.write_result
 
 
@@ -127,6 +127,9 @@ class FakeNode:
 
     def get_engine_handle(self):
         return self._h
+
+    def get_slot_for_motor(self, motor_name):
+        return 0
 
 
 class FakeKin:
@@ -174,7 +177,7 @@ def test_cmd_get_reads_and_formats():
     sp = make_servo_param(engine, FakeNode(7))
     gcmd = FakeGcmd({"SERVO": "motor_x", "GET": "0x2002.0"})
     sp.cmd_SERVO_PARAM(gcmd)
-    assert engine.reads == [(7, 0x2002, 0)]
+    assert engine.reads == [(7, 0, 0x2002, 0)]
     assert gcmd.responses == ["0x2002.0 = 0x0064 (u16: 100, i16: 100)"]
 
 
@@ -186,7 +189,7 @@ def test_cmd_set_typed_passes_size():
         {"SERVO": "motor_x", "SET": "0x2002.0", "VALUE": "250", "TYPE": "u16"}
     )
     sp.cmd_SERVO_PARAM(gcmd)
-    assert engine.writes == [(7, 0x2002, 0, 2, 250)]
+    assert engine.writes == [(7, 0, 0x2002, 0, 2, 250)]
     assert gcmd.responses == ["set 0x2002.0 = 0x00fa (u16: 250)"]
 
 
@@ -195,7 +198,7 @@ def test_cmd_set_untyped_passes_size_zero():
     sp = make_servo_param(engine, FakeNode(7))
     gcmd = FakeGcmd({"SERVO": "motor_x", "SET": "0x2002.0", "VALUE": "100"})
     sp.cmd_SERVO_PARAM(gcmd)
-    assert engine.writes == [(7, 0x2002, 0, 0, 100)]
+    assert engine.writes == [(7, 0, 0x2002, 0, 0, 100)]
 
 
 def test_cmd_requires_exactly_one_of_get_set():
@@ -232,7 +235,7 @@ def test_cmd_resolves_by_motor_axis_or_short_name(servo):
     engine = FakeEngine()
     sp = make_servo_param(engine, FakeNode(7))
     sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": servo, "GET": "0x2002.0"}))
-    assert engine.reads == [(7, 0x2002, 0)]
+    assert engine.reads == [(7, 0, 0x2002, 0)]
 
 
 def test_cmd_propagates_engine_failure():
@@ -278,8 +281,11 @@ def test_claim_push_writes_params_in_order():
     engine = FakeEngine()
     rail = make_rail_with_params([(0x2002, 0, 0, 100), (0x2003, 0, 2, 250)])
     node = make_node_for_claim(engine, rail)
-    node._push_drive_params(rail)
-    assert engine.writes == [(5, 0x2002, 0, 0, 100), (5, 0x2003, 0, 2, 250)]
+    node._push_drive_params(rail, 0)
+    assert engine.writes == [
+        (5, 0, 0x2002, 0, 0, 100),
+        (5, 0, 0x2003, 0, 2, 250),
+    ]
 
 
 def test_claim_push_failure_is_config_error_with_address():
@@ -290,14 +296,14 @@ def test_claim_push_failure_is_config_error_with_address():
     rail = make_rail_with_params([(0x2003, 0, 2, 600)])
     node = make_node_for_claim(FailingEngine(), rail)
     with pytest.raises(FakeConfigError, match="0x2003.0"):
-        node._push_drive_params(rail)
+        node._push_drive_params(rail, 0)
 
 
 def test_claim_push_no_params_is_noop():
     engine = FakeEngine()
     rail = make_rail_with_params([])
     node = make_node_for_claim(engine, rail)
-    node._push_drive_params(rail)
+    node._push_drive_params(rail, 0)
     assert engine.writes == []
 
 

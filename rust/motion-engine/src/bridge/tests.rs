@@ -63,6 +63,7 @@ fn serial_mcu_conn(label: &str, slave_path: &str, host_io: Arc<McuHostIo>) -> Mc
         identify_caps: 0,
         mcu_transport_supported: false,
         ethercat_socket: None,
+        ethercat_slot_axes: Vec::new(),
         endpoint_process: None,
         endpoint_conn: None,
     }
@@ -179,6 +180,7 @@ fn shutdown_releases_ethercat_socket_and_child() {
         identify_caps: 0,
         mcu_transport_supported: true,
         ethercat_socket: Some("/tmp/kalico_test_ec.sock".to_owned()),
+        ethercat_slot_axes: Vec::new(),
         endpoint_process: Some(child),
         endpoint_conn: Some(Arc::new(native)),
     };
@@ -564,7 +566,7 @@ fn register_ethercat_mcu_seeds_nominal_clock_freq() {
         .spawn()
         .expect("spawn true");
 
-    engine.register_ethercat_mcu(RAW, "servo", "/tmp/test.sock", child, conn);
+    engine.register_ethercat_mcu(RAW, "servo", "/tmp/test.sock", child, conn, vec![0]);
 
     assert!(
         engine

@@ -420,12 +420,14 @@ pub const SDO_SIZE_PROBE: u8 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SdoRead {
+    pub slot: u8,
     pub index: u16,
     pub subindex: u8,
 }
 
 impl Encode for SdoRead {
     fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.slot);
         put_u16(out, self.index);
         put_u8(out, self.subindex);
     }
@@ -434,6 +436,7 @@ impl Encode for SdoRead {
 impl Decode for SdoRead {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
+            slot: get_u8(c)?,
             index: get_u16(c)?,
             subindex: get_u8(c)?,
         })
@@ -467,6 +470,7 @@ impl Decode for SdoReadResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SdoWrite {
+    pub slot: u8,
     pub index: u16,
     pub subindex: u8,
     pub size: u8,
@@ -475,6 +479,7 @@ pub struct SdoWrite {
 
 impl Encode for SdoWrite {
     fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.slot);
         put_u16(out, self.index);
         put_u8(out, self.subindex);
         put_u8(out, self.size);
@@ -485,6 +490,7 @@ impl Encode for SdoWrite {
 impl Decode for SdoWrite {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
+            slot: get_u8(c)?,
             index: get_u16(c)?,
             subindex: get_u8(c)?,
             size: get_u8(c)?,
@@ -641,6 +647,7 @@ impl Decode for StopCaptureResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArmSensorlessEndstop {
+    pub slot: u8,
     pub endstop_id: u8,
     pub torque_trip_tenth_pct: u16,
     pub enable: u8,
@@ -648,6 +655,7 @@ pub struct ArmSensorlessEndstop {
 
 impl Encode for ArmSensorlessEndstop {
     fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.slot);
         put_u8(out, self.endstop_id);
         put_u16(out, self.torque_trip_tenth_pct);
         put_u8(out, self.enable);
@@ -657,6 +665,7 @@ impl Encode for ArmSensorlessEndstop {
 impl Decode for ArmSensorlessEndstop {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
+            slot: get_u8(c)?,
             endstop_id: get_u8(c)?,
             torque_trip_tenth_pct: get_u16(c)?,
             enable: get_u8(c)?,
@@ -685,12 +694,14 @@ impl Decode for ArmSensorlessEndstopResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetDriveLimits {
+    pub slot: u8,
     pub following_error_counts: u32,
     pub max_torque_tenth_pct: u16,
 }
 
 impl Encode for SetDriveLimits {
     fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.slot);
         put_u32(out, self.following_error_counts);
         put_u16(out, self.max_torque_tenth_pct);
     }
@@ -699,6 +710,7 @@ impl Encode for SetDriveLimits {
 impl Decode for SetDriveLimits {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
+            slot: get_u8(c)?,
             following_error_counts: get_u32(c)?,
             max_torque_tenth_pct: get_u16(c)?,
         })
@@ -725,15 +737,19 @@ impl Decode for SetDriveLimitsResponse {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RestoreDriveLimits;
+pub struct RestoreDriveLimits {
+    pub slot: u8,
+}
 
 impl Encode for RestoreDriveLimits {
-    fn encode(&self, _out: &mut Vec<u8>) {}
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.slot);
+    }
 }
 
 impl Decode for RestoreDriveLimits {
-    fn decode_from(_c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self)
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self { slot: get_u8(c)? })
     }
 }
 
@@ -758,11 +774,13 @@ impl Decode for RestoreDriveLimitsResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeedServoHome {
+    pub slot: u8,
     pub home_q16: i32,
 }
 
 impl Encode for SeedServoHome {
     fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.slot);
         put_i32(out, self.home_q16);
     }
 }
@@ -770,6 +788,7 @@ impl Encode for SeedServoHome {
 impl Decode for SeedServoHome {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
+            slot: get_u8(c)?,
             home_q16: get_i32(c)?,
         })
     }

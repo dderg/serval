@@ -99,6 +99,33 @@ fn per_drive_flag_before_any_slave_is_rejected() {
 }
 
 #[test]
+fn axis_flag_binds_to_the_current_slave_group() {
+    let a = args(&[
+        "ethercat-rt",
+        "eth0",
+        "--slave",
+        "0",
+        "--axis",
+        "0",
+        "--slave",
+        "1",
+        "--axis",
+        "2",
+    ]);
+    let slaves = parse_slaves(&a).expect("parse axes");
+    assert_eq!(slaves.len(), 2);
+    assert_eq!((slaves[0].pos, slaves[0].axis), (0, 0));
+    assert_eq!((slaves[1].pos, slaves[1].axis), (1, 2));
+}
+
+#[test]
+fn axis_before_any_slave_is_rejected() {
+    let a = args(&["ethercat-rt", "eth0", "--axis", "1", "--slave", "0"]);
+    let err = parse_slaves(&a).expect_err("orphan --axis must fail");
+    assert!(err.contains("before any --slave"), "got: {err}");
+}
+
+#[test]
 fn slave_without_value_is_rejected() {
     let a = args(&["ethercat-rt", "eth0", "--slave"]);
     let err = parse_slaves(&a).expect_err("missing position must fail");

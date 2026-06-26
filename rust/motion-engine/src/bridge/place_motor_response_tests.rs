@@ -41,9 +41,25 @@ fn ethercat_maps_reply_onto_cfg_axes_ignoring_local_slot() {
 }
 
 #[test]
-fn ethercat_zips_multiple_motors_to_axes_in_order() {
+fn ethercat_maps_multiple_motors_to_axes_by_slot() {
     let resp = MotorStateResponse {
-        motors: vec![sample(0, 65536, 0), sample(0, 2 * 65536, 0)],
+        motors: vec![sample(0, 65536, 0), sample(1, 2 * 65536, 0)],
+    };
+    let mut motors = [None; MAX_AXES];
+    let mut vmotors = [None; MAX_AXES];
+
+    // cfg_axes is slot-ordered: slot 0 -> axis 3, slot 1 -> axis 5.
+    place_motor_response(&resp, &[3, 5], true, &mut motors, &mut vmotors);
+
+    assert_eq!(motors[3], Some(1.0));
+    assert_eq!(motors[5], Some(2.0));
+}
+
+#[test]
+fn ethercat_maps_by_slot_field_not_arrival_order() {
+    // Samples arrive out of slot order; each still lands on cfg_axes[slot].
+    let resp = MotorStateResponse {
+        motors: vec![sample(1, 2 * 65536, 0), sample(0, 65536, 0)],
     };
     let mut motors = [None; MAX_AXES];
     let mut vmotors = [None; MAX_AXES];
