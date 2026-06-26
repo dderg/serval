@@ -1,9 +1,9 @@
+use crossbeam_channel::{Receiver, Select, TryRecvError};
 use runtime::piece_ring::PieceEntry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -241,7 +241,6 @@ pub struct HeartbeatMsg {
 }
 
 pub enum PumpMsg {
-    Enqueue(EnqueueMsg),
     Heartbeat(HeartbeatMsg),
     Flush(Vec<AxisKey>),
     DripArm(DripArm),
@@ -330,6 +329,27 @@ pub fn junction_jumps(
 // slow) moves where stalls are otherwise most likely to slip a piece into the
 // past.
 pub const MAX_LEAD_SECS: f64 = 2.0;
+
+// Bound on the planner→pump piece-data channel. When the pump stops pulling
+// (ring full or at the lead horizon), the planner's dispatch send blocks once
+// this many segment messages are queued — propagating backpressure to the input
+// channel and the gcode reader. Host-side depth does not extend MCU lead (that
+// is the ring's job), so this only decouples planner bursts from pump intake.
+pub const PUMP_DATA_CHANNEL_CAP: usize = 1024;
+
+// Bound on total host-side staged pieces across all axes. Intake stops here so
+// the data channel backpressures the planner during streaming. It is a TOTAL,
+// not per-axis (all axes interleave on one channel). A drip cohort BYPASSES it:
+// a homing axis can lower into a burst larger than the cap, and stopping intake
+// there would leave the other participants' messages unpulled behind it on the
+// shared channel — starving the cohort floor and freezing the planner on the
+// full channel. Drip is finite, so greedy draining is safe there.
+//
+// Sized several times the total MCU ring cache (≈1024 pieces/MCU): the host
+// staging buffer must be DEEPER than the MCU rings, or the pump throttles the
+// planner before the frontier is deep enough to absorb host scheduling gaps —
+// the playhead then overruns the committed end (anchor_underrun → drive fault).
+const PUMP_INTAKE_BACKLOG_CAP: u64 = 16384;
 
 #[derive(Clone, Copy)]
 struct JunctionEnd {
@@ -494,7 +514,8 @@ impl DripCohort {
 
 #[allow(clippy::too_many_lines)]
 pub fn run_pump<S, F, C, A, O, D>(
-    rx: Receiver<PumpMsg>,
+    control_rx: Receiver<PumpMsg>,
+    data_rx: Receiver<EnqueueMsg>,
     sink: S,
     ring_depth_of: F,
     mcu_clock_of: C,
@@ -533,77 +554,6 @@ pub fn run_pump<S, F, C, A, O, D>(
                     }
                     junctions.forget(key);
                 }
-            }
-            PumpMsg::Enqueue(EnqueueMsg {
-                key,
-                pieces,
-                fresh_stream,
-                lead_secs,
-                source_line,
-            }) => {
-                if let Some(co) = cohort.as_ref() {
-                    if !co.participants.contains(&key) {
-                        let id = co.id;
-                        on_drip_stall(format!(
-                            "drip cohort {id}: enqueue for non-participant \
-                             mcu{} axis{} during active cohort — homing must \
-                             drip every axis",
-                            key.mcu_id, key.axis
-                        ));
-                        *cohort = None;
-                        return true;
-                    }
-                }
-                let freq = mcu_clock_of(key.mcu_id).map(|(_ack_now, freq)| freq);
-                if let Some(seam) =
-                    junctions.observe_msg(key, &pieces, fresh_stream, source_line, freq)
-                {
-                    let freq = freq.expect("observe_msg yields a seam only when freq is present");
-                    check_junction_position_continuity(&seam);
-                    let (tick_jump_us, host_jump_us) = junction_jumps(
-                        seam.first_start_ticks,
-                        seam.next_start_host,
-                        seam.prev_end_ticks,
-                        seam.prev_end_host,
-                        freq,
-                    );
-                    let anomalous =
-                        tick_jump_us < -50.0 || (tick_jump_us - host_jump_us).abs() > 50.0;
-                    if fresh_stream || !anomalous {
-                        tracing::debug!(
-                            subsystem = "motion",
-                            event = "junction_jump",
-                            key = ?seam.key,
-                            tick_jump_us,
-                            host_jump_us,
-                            fresh = fresh_stream,
-                            "[junction] jump"
-                        );
-                    } else {
-                        let reason = if tick_jump_us < -50.0 {
-                            "overlap_risk"
-                        } else {
-                            "projection_divergence"
-                        };
-                        tracing::warn!(
-                            subsystem = "motion",
-                            event = "junction_jump_anomalous",
-                            key = ?seam.key,
-                            tick_jump_us,
-                            host_jump_us,
-                            fresh = fresh_stream,
-                            reason,
-                            prev_source_line = seam.prev_source_line,
-                            next_source_line = source_line,
-                            "[junction] anomalous jump"
-                        );
-                    }
-                }
-                let q = queues
-                    .entry(key)
-                    .or_insert_with(|| AxisQueue::new(ring_depth_of(key)));
-                q.lead_secs = lead_secs;
-                q.pieces.extend(pieces);
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
                 mcu_id,
@@ -665,6 +615,85 @@ pub fn run_pump<S, F, C, A, O, D>(
         true
     };
 
+    let apply_enqueue = |msg: EnqueueMsg,
+                         queues: &mut BTreeMap<AxisKey, AxisQueue>,
+                         junctions: &mut JunctionTracker,
+                         cohort: &mut Option<DripCohort>| {
+        let EnqueueMsg {
+            key,
+            pieces,
+            fresh_stream,
+            lead_secs,
+            source_line,
+        } = msg;
+        if let Some(co) = cohort.as_ref() {
+            if !co.participants.contains(&key) {
+                let id = co.id;
+                on_drip_stall(format!(
+                    "drip cohort {id}: enqueue for non-participant \
+                     mcu{} axis{} during active cohort — homing must \
+                     drip every axis",
+                    key.mcu_id, key.axis
+                ));
+                *cohort = None;
+                return;
+            }
+        }
+        if fresh_stream {
+            junctions.forget(key);
+        }
+        if !pieces.is_empty() {
+            if let Some((_ack_now, freq)) = mcu_clock_of(key.mcu_id) {
+                if let Some(seam) = junctions.observe(key, &pieces, source_line, freq) {
+                    check_junction_position_continuity(&seam);
+                    let (tick_jump_us, host_jump_us) = junction_jumps(
+                        seam.first_start_ticks,
+                        seam.next_start_host,
+                        seam.prev_end_ticks,
+                        seam.prev_end_host,
+                        freq,
+                    );
+                    let anomalous =
+                        tick_jump_us < -50.0 || (tick_jump_us - host_jump_us).abs() > 50.0;
+                    if fresh_stream || !anomalous {
+                        tracing::debug!(
+                            subsystem = "motion",
+                            event = "junction_jump",
+                            key = ?seam.key,
+                            tick_jump_us,
+                            host_jump_us,
+                            fresh = fresh_stream,
+                            "[junction] jump"
+                        );
+                    } else {
+                        let reason = if tick_jump_us < -50.0 {
+                            "overlap_risk"
+                        } else {
+                            "projection_divergence"
+                        };
+                        tracing::warn!(
+                            subsystem = "motion",
+                            event = "junction_jump_anomalous",
+                            key = ?seam.key,
+                            tick_jump_us,
+                            host_jump_us,
+                            fresh = fresh_stream,
+                            reason,
+                            prev_source_line = seam.prev_source_line,
+                            next_source_line = source_line,
+                            "[junction] anomalous jump"
+                        );
+                    }
+                }
+            }
+        }
+        let q = queues
+            .entry(key)
+            .or_insert_with(|| AxisQueue::new(ring_depth_of(key)));
+        q.lead_secs = lead_secs;
+        q.pieces.extend(pieces);
+    };
+
     let horizon_of = |k: &AxisKey, q: &AxisQueue, cohort: &Option<DripCohort>| -> Option<u64> {
         match mcu_clock_of(k.mcu_id) {
             Some((ack_now, freq)) =>
@@ -683,6 +712,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     };
 
     let mut holding_ahead = false;
+    let mut data_open = true;
 
     loop {
         let cohort_active = cohort.is_some();
@@ -692,26 +722,31 @@ pub fn run_pump<S, F, C, A, O, D>(
                 .any(|q| q.lead_secs < 0.1 && !q.pieces.is_empty());
         let poll_ms: u64 = if short_lead || cohort_active { 10 } else { 50 };
 
-        let first = if holding_ahead || cohort_active {
-            match rx.recv_timeout(Duration::from_millis(poll_ms)) {
-                Ok(m) => Some(m),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => return,
-            }
-        } else {
-            match rx.recv() {
-                Ok(m) => Some(m),
-                Err(RecvError) => return,
-            }
-        };
+        let mut activity = false;
 
-        if let Some(msg) = first {
-            if !apply(msg, &mut queues, &mut junctions, &mut cohort) {
-                return;
+        loop {
+            match control_rx.try_recv() {
+                Ok(m) => {
+                    activity = true;
+                    if !apply(m, &mut queues, &mut junctions, &mut cohort) {
+                        return;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return,
             }
-            while let Ok(m) = rx.try_recv() {
-                if !apply(m, &mut queues, &mut junctions, &mut cohort) {
-                    return;
+        }
+
+        while data_open && (cohort.is_some() || wants_pieces(&queues)) {
+            match data_rx.try_recv() {
+                Ok(e) => {
+                    activity = true;
+                    apply_enqueue(e, &mut queues, &mut junctions, &mut cohort);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    data_open = false;
+                    break;
                 }
             }
         }
@@ -765,6 +800,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                     if frames.is_empty() {
                         break 'send;
                     }
+                    activity = true;
                     let mcu_id = frames[0].key.mcu_id;
                     let bundle: Vec<AxisFrame> = frames
                         .into_iter()
@@ -832,7 +868,48 @@ pub fn run_pump<S, F, C, A, O, D>(
 
         let unpushed: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
         backlog.store(unpushed, Ordering::Release);
+
+        if activity {
+            continue;
+        }
+
+        let mut sel = Select::new();
+        let ctrl_op = sel.recv(&control_rx);
+        let want_data = data_open && (cohort.is_some() || wants_pieces(&queues));
+        let data_op = if want_data {
+            sel.recv(&data_rx)
+        } else {
+            usize::MAX
+        };
+        let selected = if holding_ahead || cohort.is_some() {
+            sel.select_timeout(Duration::from_millis(poll_ms))
+        } else {
+            Ok(sel.select())
+        };
+        if let Ok(op) = selected {
+            let idx = op.index();
+            if idx == ctrl_op {
+                match op.recv(&control_rx) {
+                    Ok(m) => {
+                        if !apply(m, &mut queues, &mut junctions, &mut cohort) {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                }
+            } else if idx == data_op {
+                match op.recv(&data_rx) {
+                    Ok(e) => apply_enqueue(e, &mut queues, &mut junctions, &mut cohort),
+                    Err(_) => data_open = false,
+                }
+            }
+        }
     }
+}
+
+fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
+    let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
+    staged < PUMP_INTAKE_BACKLOG_CAP
 }
 
 pub enum McuTransport {
