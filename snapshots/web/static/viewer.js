@@ -38,6 +38,7 @@ let renderers = [];
 let lastBoundsKey = "";
 let hoverIdx = null;
 let showPeaks = false;
+let wheelTimer = null; // suppresses mousemove during trackpad gestures
 const tooltipEl = document.getElementById("tooltip");
 
 // -- Nice tick spacing -------------------------------------------------------
@@ -54,6 +55,12 @@ function niceStep(range, targetTicks) {
 }
 
 // -- Helpers -----------------------------------------------------------------
+// Suppress mousemove during trackpad wheel gestures (macOS collision)
+function suppressMousemove() {
+  clearTimeout(wheelTimer);
+  wheelTimer = setTimeout(() => { wheelTimer = null; }, 80);
+}
+
 function formatNum(v) {
   if (Math.abs(v) >= 1000) return v.toFixed(0);
   if (Math.abs(v) >= 1) return v.toFixed(1);
@@ -564,6 +571,7 @@ function setupTimeInteraction(panelIdx) {
   let dragStartX = 0, dragStartTMin = 0, dragStartTMax = 0;
 
   canvas.addEventListener("mousemove", (e) => {
+    if (wheelTimer) return;
     const r = renderers[panelIdx];
     const rect = r.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -615,6 +623,7 @@ function setupTimeInteraction(panelIdx) {
 
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
+    suppressMousemove();
     const r = renderers[panelIdx];
     const rect = r.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -622,7 +631,7 @@ function setupTimeInteraction(panelIdx) {
 
     if (e.ctrlKey || e.metaKey) {
       // Pinch zoom
-      const factor = 1 - e.deltaY * 0.01;
+      const factor = 1 + e.deltaY * 0.01;
       timeView.tMin = tAtCursor - (tAtCursor - timeView.tMin) * factor;
       timeView.tMax = tAtCursor + (timeView.tMax - tAtCursor) * factor;
     } else if (e.deltaX !== 0) {
@@ -649,6 +658,7 @@ function setupPathInteraction() {
   let dragStartX = 0, dragStartY = 0, dragStartPV = null;
 
   canvas.addEventListener("mousemove", (e) => {
+    if (wheelTimer) return;
     const r = renderers[0];
     const rect = r.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -693,6 +703,7 @@ function setupPathInteraction() {
 
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
+    suppressMousemove();
     const r = renderers[0];
     const pb = r._eqPathBounds || pathView;
     const rect = r.canvas.getBoundingClientRect();
@@ -700,23 +711,21 @@ function setupPathInteraction() {
     const my = e.clientY - rect.top;
     const dataX = r.toDataX(mx, pb.xMin, pb.xMax);
     const dataY = r.toDataY(my, pb.yMin, pb.yMax);
-
     if (e.ctrlKey || e.metaKey) {
-      const factor = 1 - e.deltaY * 0.01;
+      // Pinch zoom
+      const factor = 1 + e.deltaY * 0.01;
       pathView.xMin = dataX - (dataX - pb.xMin) * factor;
       pathView.xMax = dataX + (pb.xMax - dataX) * factor;
       pathView.yMin = dataY - (dataY - pb.yMin) * factor;
       pathView.yMax = dataY + (pb.yMax - dataY) * factor;
-    } else if (e.deltaX !== 0) {
+    } else {
+      // Two-finger scroll → pan (X and Y)
       const dppx = (pb.xMax - pb.xMin) / r.plotW;
+      const dppy = (pb.yMax - pb.yMin) / r.plotH;
       pathView.xMin -= e.deltaX * dppx;
       pathView.xMax -= e.deltaX * dppx;
-    } else {
-      const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
-      pathView.xMin = dataX - (dataX - pb.xMin) * factor;
-      pathView.xMax = dataX + (pb.xMax - dataX) * factor;
-      pathView.yMin = dataY - (dataY - pb.yMin) * factor;
-      pathView.yMax = dataY + (pb.yMax - dataY) * factor;
+      pathView.yMin += e.deltaY * dppy;
+      pathView.yMax += e.deltaY * dppy;
     }
     lastBoundsKey = "";
     renderAll();
