@@ -28,20 +28,16 @@ impl Default for CornerFitConfig {
     }
 }
 
-const COCIRCULAR_TOL_MM: f64 = 5e-3;
-const MIN_RUN_JUNCTIONS: u32 = 2;
+const ARC_MIN_RUN_FACETS: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArcFitConfig {
-    pub facet_len_max_mm: f64,
-    pub max_turn_rad: f64,
+    pub min_run_facets: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChainFitConfig {
     pub corner: CornerFitConfig,
-    pub min_run_junctions: u32,
-    pub cocircular_tol: f64,
     pub arc_fit: Option<ArcFitConfig>,
 }
 
@@ -49,20 +45,15 @@ impl Default for ChainFitConfig {
     fn default() -> Self {
         Self {
             corner: CornerFitConfig::default(),
-            min_run_junctions: MIN_RUN_JUNCTIONS,
-            cocircular_tol: COCIRCULAR_TOL_MM,
             arc_fit: None,
         }
     }
 }
 
 impl ChainFitConfig {
-    pub fn with_arc_fit(facet_len_max_mm: f64, max_turn_rad: f64) -> Self {
+    pub fn with_arc_fit(min_run_facets: u32) -> Self {
         Self {
-            arc_fit: Some(ArcFitConfig {
-                facet_len_max_mm,
-                max_turn_rad,
-            }),
+            arc_fit: Some(ArcFitConfig { min_run_facets }),
             ..Self::default()
         }
     }
@@ -181,6 +172,26 @@ fn junction_internal(runs: &[chain::ChainRun], k: usize) -> bool {
     runs.iter().any(|r| r.start <= k && k < r.end)
 }
 
+fn run_boundary(runs: &[chain::ChainRun], k: usize) -> bool {
+    runs.iter()
+        .any(|r| k == r.end || (r.start > 0 && k == r.start - 1))
+}
+
+fn junction_trim(runs: &[chain::ChainRun], plans: &[JunctionPlan], j: usize) -> f64 {
+    if junction_internal(runs, j) {
+        return 0.0;
+    }
+    for r in runs {
+        if r.start > 0 && j == r.start - 1 {
+            return r.recon.head_line_trim;
+        }
+        if j == r.end {
+            return r.recon.tail_line_trim;
+        }
+    }
+    blend_trim(&plans[j])
+}
+
 pub fn fit_chain(moves: &[Move], config: ChainFitConfig) -> Result<FitOutcome, FitError> {
     fit_chain_with_head_restore(moves, config, 0.0)
 }
@@ -216,18 +227,7 @@ pub fn fit_chain_with_head_restore(
         )?);
     }
 
-    let runs: Vec<chain::ChainRun> = chain::detect_runs(moves, config)?
-        .into_iter()
-        .filter(|r| {
-            let head_reserve = moves[r.start].segment.s_len() - r.recon.head_consumption;
-            let tail_reserve = moves[r.end].segment.s_len() - r.recon.tail_consumption;
-            let in_ok =
-                r.start == 0 || blend_trim(&plans[r.start - 1]) <= head_reserve + BUDGET_EPS_MM;
-            let out_ok =
-                r.end >= plans.len() || blend_trim(&plans[r.end]) <= tail_reserve + BUDGET_EPS_MM;
-            in_ok && out_ok
-        })
-        .collect();
+    let runs: Vec<chain::ChainRun> = chain::detect_runs(moves, config)?;
 
     let mut out = Vec::new();
     let mut report = FitReport::default();
@@ -236,7 +236,7 @@ pub fn fit_chain_with_head_restore(
             RunRole::Interior => report.consumed_legs += 1,
             RunRole::Start(r) => {
                 let trim_start = if i > 0 {
-                    blend_trim(&plans[i - 1])
+                    junction_trim(&runs, &plans, i - 1)
                 } else {
                     0.0
                 };
@@ -248,7 +248,7 @@ pub fn fit_chain_with_head_restore(
             }
             RunRole::End(r) => {
                 let trim_end = if i < plans.len() {
-                    blend_trim(&plans[i])
+                    junction_trim(&runs, &plans, i)
                 } else {
                     0.0
                 };
@@ -258,12 +258,12 @@ pub fn fit_chain_with_head_restore(
             }
             RunRole::None => {
                 let trim_start = if i > 0 {
-                    blend_trim(&plans[i - 1])
+                    junction_trim(&runs, &plans, i - 1)
                 } else {
                     0.0
                 };
                 let trim_end = if i < plans.len() {
-                    blend_trim(&plans[i])
+                    junction_trim(&runs, &plans, i)
                 } else {
                     0.0
                 };
@@ -273,7 +273,7 @@ pub fn fit_chain_with_head_restore(
             }
         }
 
-        if i < plans.len() && !junction_internal(&runs, i) {
+        if i < plans.len() && !junction_internal(&runs, i) && !run_boundary(&runs, i) {
             match &plans[i] {
                 JunctionPlan::Blend(bi) => {
                     report.blended += 1;
@@ -296,20 +296,37 @@ fn emit_reconstruction(
     m_in: &Move,
     m_out: &Move,
 ) -> Result<(), FitError> {
-    let mut push = |spatial: Segment, src: &Move| -> Result<(), FitError> {
-        let segment = PathSegment::try_new(spatial, recon.followers.clone())
-            .map_err(internal(src.source.start_line))?;
-        out.push(Move {
-            segment,
-            feedrate_mm_s: src.feedrate_mm_s,
-            limits: src.limits,
-            source: src.source,
-        });
-        Ok(())
-    };
-    push(Segment::Clothoid(recon.up.clone()), m_in)?;
-    push(Segment::Arc(recon.arc.clone()), m_in)?;
-    push(Segment::Clothoid(recon.down.clone()), m_out)?;
+    let mut push =
+        |spatial: Segment, src: &Move, followers: Vec<FollowerDemand>| -> Result<(), FitError> {
+            let segment = PathSegment::try_new(spatial, followers)
+                .map_err(internal(src.source.start_line))?;
+            out.push(Move {
+                segment,
+                feedrate_mm_s: src.feedrate_mm_s,
+                limits: src.limits,
+                source: src.source,
+            });
+            Ok(())
+        };
+    for up in &recon.up {
+        push(
+            Segment::Clothoid(up.clone()),
+            m_in,
+            recon.up_followers.clone(),
+        )?;
+    }
+    push(
+        Segment::Arc(recon.arc.clone()),
+        m_in,
+        recon.followers.clone(),
+    )?;
+    for down in &recon.down {
+        push(
+            Segment::Clothoid(down.clone()),
+            m_out,
+            recon.down_followers.clone(),
+        )?;
+    }
     Ok(())
 }
 

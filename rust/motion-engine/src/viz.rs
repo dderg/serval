@@ -12,7 +12,7 @@ pub fn pipeline_snapshot(
     max_accel: f64,
     square_corner_velocity: f64,
     max_jerk: f64,
-    arc_fit: Option<(f64, f64)>,
+    arc_fit: Option<u32>,
 ) -> PyResult<Py<PyDict>> {
     if waypoints.len() < 2 {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -53,11 +53,9 @@ pub fn pipeline_snapshot(
     }
     dict.set_item("fitted_segments", seg_list)?;
 
-    dict.set_item("kin_s", &kinematics.s)?;
+    dict.set_item("kin_x", &kinematics.x)?;
+    dict.set_item("kin_y", &kinematics.y)?;
     dict.set_item("kin_v", &kinematics.v)?;
-    dict.set_item("kin_heading_x", &kinematics.heading_x)?;
-    dict.set_item("kin_heading_y", &kinematics.heading_y)?;
-    dict.set_item("kin_kappa", &kinematics.kappa)?;
 
     dict.set_item("blended_corners", outcome.report.blended)?;
     dict.set_item("unblended_corners", outcome.report.unblended.len())?;
@@ -79,16 +77,20 @@ fn segment_to_pydict<'py>(
             d.set_item("x1", line.end[0])?;
             d.set_item("y1", line.end[1])?;
         }
-        geometry::path::Segment::Arc(arc) => {
+        geometry::path::Segment::Arc(_) => {
             d.set_item("type", "arc")?;
-            d.set_item("cx", arc.origin[0])?;
-            d.set_item("cy", arc.origin[1])?;
-            d.set_item("radius", arc.radius)?;
-            let basis_angle_deg = arc.u[1].atan2(arc.u[0]).to_degrees();
-            d.set_item("angle_deg", basis_angle_deg)?;
-            d.set_item("theta1_deg", arc.start_angle.to_degrees())?;
-            let theta2 = arc.start_angle + arc.sweep;
-            d.set_item("theta2_deg", theta2.to_degrees())?;
+            let len = spatial.s_len();
+            let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(20);
+            let mut xs = Vec::with_capacity(n);
+            let mut ys = Vec::with_capacity(n);
+            for k in 0..n {
+                let s = len * (k as f64) / ((n - 1) as f64);
+                let pt = spatial.point_at(s);
+                xs.push(pt[0]);
+                ys.push(pt[1]);
+            }
+            d.set_item("x", xs)?;
+            d.set_item("y", ys)?;
         }
         geometry::path::Segment::Clothoid(_) => {
             d.set_item("type", "clothoid")?;
@@ -109,24 +111,16 @@ fn segment_to_pydict<'py>(
     Ok(d)
 }
 
-fn arc_fit_config(arc_fit: Option<(f64, f64)>) -> PyResult<geometry::ChainFitConfig> {
-    let Some((facet_length_mm, max_angle_deg)) = arc_fit else {
+fn arc_fit_config(arc_fit: Option<u32>) -> PyResult<geometry::ChainFitConfig> {
+    let Some(min_run_facets) = arc_fit else {
         return Ok(geometry::ChainFitConfig::default());
     };
-    if !(facet_length_mm.is_finite() && facet_length_mm > 0.0) {
+    if min_run_facets < 3 {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "[arc_fit] facet_length_mm must be finite and positive",
+            "[arc_fit] min_run_facets must be at least 3",
         ));
     }
-    if !(max_angle_deg.is_finite() && max_angle_deg > 0.0 && max_angle_deg < 180.0) {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "[arc_fit] max_angle_deg must be finite and in (0, 180)",
-        ));
-    }
-    Ok(geometry::ChainFitConfig::with_arc_fit(
-        facet_length_mm,
-        max_angle_deg.to_radians(),
-    ))
+    Ok(geometry::ChainFitConfig::with_arc_fit(min_run_facets))
 }
 
 fn build_moves(
@@ -182,15 +176,17 @@ fn extract_raw_path(moves: &[geometry::Move]) -> Vec<(f64, f64)> {
 }
 
 const SAMPLES_PER_MM: f64 = 2.0;
+const TRAJECTORY_SAMPLES_PER_MM: f64 = 8.0;
 const VELOCITY_CONSISTENCY_TOL: f64 = 1e-6;
 const VELOCITY_INTEGRATION_TOL: f64 = 1e-7;
 
+// Only the raw trajectory: where the toolhead is and how fast it travels there.
+// The visualizer differentiates position itself, so it stays an independent
+// check on the planner rather than a mirror of the planner's own derivatives.
 struct KinematicSamples {
-    s: Vec<f64>,
+    x: Vec<f64>,
+    y: Vec<f64>,
     v: Vec<f64>,
-    heading_x: Vec<f64>,
-    heading_y: Vec<f64>,
-    kappa: Vec<f64>,
 }
 
 fn sample_kinematics(
@@ -198,29 +194,52 @@ fn sample_kinematics(
     profile: &geometry::VelocityProfile,
 ) -> KinematicSamples {
     let mut kin = KinematicSamples {
-        s: Vec::new(),
+        x: Vec::new(),
+        y: Vec::new(),
         v: Vec::new(),
-        heading_x: Vec::new(),
-        heading_y: Vec::new(),
-        kappa: Vec::new(),
     };
-    let mut s_offset = 0.0;
+    let mut started = false;
     for (geo_move, vel_move) in outcome.moves.iter().zip(profile.moves.iter()) {
         if let Some(spatial) = &geo_move.segment.spatial {
-            for sample in &vel_move.samples {
-                let s_local = sample.s.clamp(0.0, spatial.s_len());
-                let heading = spatial.heading_at(s_local);
-                kin.s.push(s_offset + sample.s);
-                kin.v.push(sample.v);
-                kin.heading_x.push(heading[0]);
-                kin.heading_y.push(heading[1]);
-                kin.kappa.push(spatial.kappa(s_local));
+            let len = spatial.s_len();
+            let n = ((len * TRAJECTORY_SAMPLES_PER_MM).ceil() as usize).max(1);
+            // Each segment starts where the previous ended; emitting both would
+            // leave a near-zero-length step that explodes the time derivative.
+            let first_k = usize::from(started);
+            for k in first_k..=n {
+                let s = len * (k as f64) / (n as f64);
+                let pt = spatial.point_at(s);
+                kin.x.push(pt[0]);
+                kin.y.push(pt[1]);
+                kin.v.push(speed_at(&vel_move.samples, s));
             }
+            started = true;
         }
-        s_offset += vel_move.length;
     }
 
     kin
+}
+
+fn speed_at(samples: &[geometry::VelSample], s: f64) -> f64 {
+    // The velocity profile is sampled densely along arc length; read the speed
+    // at an arbitrary s by linear interpolation between the bracketing knots.
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let i = samples.partition_point(|sm| sm.s < s);
+    if i == 0 {
+        return samples[0].v;
+    }
+    if i >= samples.len() {
+        return samples[samples.len() - 1].v;
+    }
+    let lo = &samples[i - 1];
+    let hi = &samples[i];
+    let span = hi.s - lo.s;
+    if span <= 0.0 {
+        return hi.v;
+    }
+    lo.v + (hi.v - lo.v) * (s - lo.s) / span
 }
 
 #[cfg(test)]
