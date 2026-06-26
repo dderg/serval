@@ -6,13 +6,8 @@ const bannerEl = document.getElementById("banner");
 const acceptAllBtn = document.getElementById("accept-all");
 const titleEl = document.getElementById("title");
 
-let cacheBust = Date.now();
-let allCases = [];
-let modalIdx = -1;
-
 async function load() {
   const data = await fetch("/api/cases").then((r) => r.json());
-  cacheBust = Date.now();
   render(data);
 }
 
@@ -24,7 +19,6 @@ function render(data) {
   if (data.error) bannerEl.textContent = data.error;
 
   const review = data.review || [];
-  allCases = review;
   const bits = [];
   if (readOnly) {
     bits.push(`${data.baseline_count || review.length} baselines`);
@@ -47,12 +41,11 @@ function render(data) {
   }
   // Group by prefix (part before /)
   const groups = new Map();
-  for (let i = 0; i < review.length; i++) {
-    const c = review[i];
+  for (const c of review) {
     const slash = c.name.indexOf("/");
     const group = slash > 0 ? c.name.substring(0, slash).replace(/_/g, " ") : "Other";
     if (!groups.has(group)) groups.set(group, []);
-    groups.get(group).push({ c, i });
+    groups.get(group).push(c);
   }
   for (const [group, items] of groups) {
     const section = document.createElement("div");
@@ -63,20 +56,20 @@ function render(data) {
     section.appendChild(header);
     const grid = document.createElement("div");
     grid.className = "section-grid";
-    for (const { c, i } of items) grid.appendChild(card(c, i));
+    for (const c of items) grid.appendChild(card(c));
     section.appendChild(grid);
     casesEl.appendChild(section);
   }
 }
 
-function imgUrl(name, which) {
-  return `/img/${encodeURIComponent(name)}/${which}.png?t=${cacheBust}`;
+function viewerUrl(name) {
+  return `/viewer.html?case=${encodeURIComponent(name)}`;
 }
 
-function card(c, idx) {
+function card(c) {
   const el = document.createElement("section");
   el.className = "card";
-  el.onclick = () => openModal(idx);
+  el.onclick = () => { window.location.href = viewerUrl(c.name); };
 
   const imgWrap = document.createElement("div");
   imgWrap.className = "card-img";
@@ -185,225 +178,6 @@ async function renderPathPreview(canvas, name) {
     ctx.fill();
   } catch (e) { /* ignore fetch errors */ }
 }
-
-// -- Modal -------------------------------------------------------------------
-let modalZoom = 1;
-let modalPanX = 0, modalPanY = 0;
-let modalDragging = false, modalDragStartX = 0, modalDragStartY = 0;
-let modalImgEl = null; // cached reference
-
-function openModal(idx) {
-  modalIdx = idx;
-  modalZoom = 1;
-  modalPanX = 0;
-  modalPanY = 0;
-  const c = allCases[idx];
-  if (!c) return;
-
-  let overlay = document.getElementById("modal-overlay");
-  if (!overlay) {
-    overlay = document.createElement("div");
-    overlay.id = "modal-overlay";
-    overlay.innerHTML = `
-      <div class="modal-backdrop" id="modal-backdrop"></div>
-      <div class="modal">
-        <div class="modal-topbar">
-          <span class="modal-name" id="modal-name"></span>
-          <span class="modal-status" id="modal-status"></span>
-          <div class="modal-zoom-btns">
-            <button id="modal-zoom-out" title="Zoom out">−</button>
-            <span id="modal-zoom-level">100%</span>
-            <button id="modal-zoom-in" title="Zoom in">+</button>
-            <button id="modal-zoom-reset" title="Reset zoom">Reset</button>
-          </div>
-          <a class="modal-interactive-btn" id="modal-interactive" target="_blank" rel="noreferrer">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
-            Interactive Viewer
-          </a>
-          <button class="modal-close" id="modal-close">&times;</button>
-        </div>
-        <button class="modal-arrow modal-prev" id="modal-prev">&#8249;</button>
-        <button class="modal-arrow modal-next" id="modal-next">&#8250;</button>
-        <div class="modal-img-wrap" id="modal-img-wrap"></div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-
-    document.getElementById("modal-backdrop").onclick = closeModal;
-    document.getElementById("modal-close").onclick = closeModal;
-    document.getElementById("modal-prev").onclick = () => navigateModal(-1);
-    document.getElementById("modal-next").onclick = () => navigateModal(1);
-    document.getElementById("modal-zoom-in").onclick = () => modalZoomBy(1.25);
-    document.getElementById("modal-zoom-out").onclick = () => modalZoomBy(0.8);
-    document.getElementById("modal-zoom-reset").onclick = modalZoomReset;
-
-    // Wheel: pinch zoom, two-finger pan, scroll zoom
-    let modalWheelTimer = null;
-    const imgWrap = document.getElementById("modal-img-wrap");
-    imgWrap.addEventListener("wheel", (e) => {
-      e.preventDefault();
-      // Suppress mousemove during gesture
-      clearTimeout(modalWheelTimer);
-      modalWheelTimer = setTimeout(() => { modalWheelTimer = null; }, 80);
-
-      if (e.ctrlKey || e.metaKey) {
-        // Pinch zoom: pinch in = zoom in, pinch out = zoom out
-        const factor = Math.exp(-e.deltaY * 0.01);
-        modalZoomBy(factor);
-      } else if (e.deltaX !== 0) {
-        // Two-finger scroll → pan (content follows fingers)
-        modalPanX -= e.deltaX;
-        modalApplyTransform();
-      } else {
-        // Scroll wheel → zoom
-        const factor = e.deltaY > 0 ? 0.92 : 1 / 0.92;
-        modalZoomBy(factor);
-      }
-    }, { passive: false });
-
-    // Drag to pan (mouse or single-finger touch)
-    imgWrap.addEventListener("mousedown", (e) => {
-      modalDragging = true;
-      modalDragStartX = e.clientX - modalPanX;
-      modalDragStartY = e.clientY - modalPanY;
-      imgWrap.style.cursor = "grabbing";
-    });
-    window.addEventListener("mousemove", (e) => {
-      if (!modalDragging) return;
-      modalPanX = e.clientX - modalDragStartX;
-      modalPanY = e.clientY - modalDragStartY;
-      modalApplyTransform();
-    });
-    window.addEventListener("mouseup", () => {
-      modalDragging = false;
-      const w = document.getElementById("modal-img-wrap");
-      if (w) w.style.cursor = "";
-    });
-  }
-
-  renderModalContent(c);
-  overlay.classList.add("open");
-  document.body.style.overflow = "hidden";
-}
-
-function modalZoomBy(factor) {
-  modalZoom = Math.max(0.25, Math.min(5, modalZoom * factor));
-  if (modalZoom <= 1) { modalPanX = 0; modalPanY = 0; }
-  document.getElementById("modal-zoom-level").textContent = Math.round(modalZoom * 100) + "%";
-  modalApplyTransform();
-}
-
-function modalZoomReset() {
-  modalZoom = 1;
-  modalPanX = 0;
-  modalPanY = 0;
-  document.getElementById("modal-zoom-level").textContent = "100%";
-  modalApplyTransform();
-}
-
-function modalApplyTransform() {
-  if (modalImgEl) modalImgEl.style.transform = `translate(${modalPanX}px, ${modalPanY}px) scale(${modalZoom})`;
-}
-
-function renderModalContent(c) {
-  const wrap = document.getElementById("modal-img-wrap");
-  wrap.innerHTML = "";
-  modalZoom = 1;
-  modalPanX = 0;
-  modalPanY = 0;
-  modalImgEl = null;
-  document.getElementById("modal-zoom-level").textContent = "100%";
-
-  if (c.has_before) {
-    wrap.appendChild(buildCompare(c.name));
-    modalImgEl = wrap.querySelector(".modal-compare");
-  } else {
-    const img = new Image();
-    img.src = imgUrl(c.name, "after");
-    img.className = "modal-img";
-    wrap.appendChild(img);
-    modalImgEl = img;
-  }
-
-  document.getElementById("modal-name").textContent = c.name;
-  const badge = document.getElementById("modal-status");
-  badge.textContent = c.status;
-  badge.className = `modal-status badge ${c.status}`;
-
-  const viewerUrl = `/viewer.html?case=${encodeURIComponent(c.name)}`;
-  document.getElementById("modal-interactive").href = viewerUrl;
-
-  document.getElementById("modal-prev").style.display = modalIdx > 0 ? "" : "none";
-  document.getElementById("modal-next").style.display = modalIdx < allCases.length - 1 ? "" : "none";
-}
-
-function navigateModal(dir) {
-  const newIdx = modalIdx + dir;
-  if (newIdx < 0 || newIdx >= allCases.length) return;
-  modalIdx = newIdx;
-  renderModalContent(allCases[modalIdx]);
-}
-
-function closeModal() {
-  const overlay = document.getElementById("modal-overlay");
-  if (overlay) overlay.classList.remove("open");
-  document.body.style.overflow = "";
-  modalIdx = -1;
-}
-
-function buildCompare(name) {
-  const wrap = document.createElement("div");
-  wrap.className = "modal-compare";
-
-  const before = new Image();
-  before.src = imgUrl(name, "before");
-  before.className = "modal-img";
-
-  const afterWrap = document.createElement("div");
-  afterWrap.className = "modal-after-wrap";
-  const after = new Image();
-  after.src = imgUrl(name, "after");
-  after.className = "modal-img";
-  afterWrap.appendChild(after);
-
-  const range = document.createElement("input");
-  range.type = "range";
-  range.className = "modal-range";
-  range.min = 0;
-  range.max = 100;
-  range.value = 50;
-
-  const setPos = () => {
-    afterWrap.style.width = range.value + "%";
-    after.style.setProperty("--cw", wrap.clientWidth + "px");
-    after.style.width = wrap.clientWidth + "px";
-  };
-  range.addEventListener("input", setPos);
-  before.addEventListener("load", setPos);
-  after.addEventListener("load", setPos);
-  window.addEventListener("resize", setPos);
-
-  const tagL = document.createElement("span");
-  tagL.className = "modal-tag left";
-  tagL.textContent = "before";
-  const tagR = document.createElement("span");
-  tagR.className = "modal-tag right";
-  tagR.textContent = "after";
-
-  wrap.append(before, afterWrap, range, tagL, tagR);
-  return wrap;
-}
-
-// Keyboard
-document.addEventListener("keydown", (e) => {
-  if (modalIdx < 0) return;
-  if (e.key === "ArrowLeft") navigateModal(-1);
-  else if (e.key === "ArrowRight") navigateModal(1);
-  else if (e.key === "Escape") closeModal();
-  else if (e.key === "+" || e.key === "=") modalZoomBy(1.25);
-  else if (e.key === "-") modalZoomBy(0.8);
-  else if (e.key === "0") modalZoomReset();
-});
 
 async function postAccept(payload) {
   const data = await fetch("/api/accept", {

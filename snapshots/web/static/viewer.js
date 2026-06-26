@@ -1,7 +1,8 @@
 import init, { TrajectoryData } from "/static/wasm/snapshot_viewer.js";
 
 const params = new URLSearchParams(window.location.search);
-const caseName = params.get("case");
+let currentCase = params.get("case");
+let caseList = []; // [{ name, ... }] — the switchable set, from /api/cases
 
 // -- Colors ------------------------------------------------------------------
 const COLORS = {
@@ -724,31 +725,75 @@ function setupPathInteraction() {
   }, { passive: false });
 }
 
-// -- Init --------------------------------------------------------------------
-async function main() {
-  if (!caseName) {
-    document.getElementById("case-name").textContent = "No case specified — add ?case=name to URL";
-    return;
+// -- Case switching ----------------------------------------------------------
+function caseIndex() {
+  return caseList.findIndex(c => c.name === currentCase);
+}
+
+function syncCaseControls() {
+  const sel = document.getElementById("case-select");
+  if (sel.value !== currentCase) sel.value = currentCase;
+  const i = caseIndex();
+  document.getElementById("case-prev").disabled = i <= 0;
+  document.getElementById("case-next").disabled = i < 0 || i >= caseList.length - 1;
+}
+
+function stepCase(dir) {
+  const i = caseIndex();
+  if (i < 0) return;
+  const next = i + dir;
+  if (next < 0 || next >= caseList.length) return;
+  loadCase(caseList[next].name);
+}
+
+async function loadCaseList() {
+  let review = [];
+  try {
+    const data = await fetch("/api/cases").then(r => r.json());
+    review = data.review || [];
+  } catch (e) { /* offline / no server scan — fall back to single case */ }
+  caseList = review;
+  if (currentCase && !caseList.some(c => c.name === currentCase)) {
+    caseList.push({ name: currentCase });
   }
+  if (!currentCase && caseList.length > 0) currentCase = caseList[0].name;
 
-  await init();
+  const sel = document.getElementById("case-select");
+  sel.innerHTML = "";
+  for (const c of caseList) {
+    const opt = document.createElement("option");
+    opt.value = c.name;
+    opt.textContent = c.name;
+    sel.appendChild(opt);
+  }
+  sel.addEventListener("change", () => loadCase(sel.value));
+  document.getElementById("case-prev").addEventListener("click", () => stepCase(-1));
+  document.getElementById("case-next").addEventListener("click", () => stepCase(1));
+}
 
-  const resp = await fetch(`/snapshot-data/${encodeURIComponent(caseName)}`);
+// -- Load a single case into the graphs --------------------------------------
+async function loadCase(name) {
+  currentCase = name;
+  const url = new URL(window.location);
+  url.searchParams.set("case", name);
+  history.replaceState(null, "", url);
+  syncCaseControls();
+  document.title = `Snapshot — ${name}`;
+
+  const meta = document.getElementById("meta");
+  const resp = await fetch(`/snapshot-data/${encodeURIComponent(name)}`);
   if (!resp.ok) {
-    document.getElementById("case-name").textContent = `Error: ${resp.statusText}`;
+    meta.textContent = `Error: ${resp.statusText}`;
     return;
   }
   const snapshot = await resp.json();
+  if (DATA && typeof DATA.free === "function") DATA.free();
   DATA = new TrajectoryData(JSON.stringify(snapshot));
 
-  document.getElementById("case-name").textContent = caseName;
-  document.getElementById("meta").textContent =
+  meta.textContent =
     `t=${DATA.traversal_time().toFixed(3)}s  ` +
     `${DATA.blended_corners()} blended, ${DATA.chain_fits()} chains, ` +
     `${DATA.point_count()} pts`;
-
-  renderers = PANELS.map(p => new PanelRenderer(p.canvasId, p.type));
-  renderers.forEach(r => r.initObserver());
 
   const pb = computeDataBounds(DATA);
   Object.assign(defaultPathView, pb);
@@ -757,6 +802,44 @@ async function main() {
   const tb = computeTimeBounds(DATA);
   Object.assign(defaultTimeView, tb);
   Object.assign(timeView, tb);
+
+  hoverIdx = null;
+  lastBoundsKey = "";
+  renderAll();
+}
+
+// -- PNG popup ---------------------------------------------------------------
+function openPng() {
+  if (!currentCase) return;
+  const scroll = document.getElementById("png-scroll");
+  scroll.innerHTML = "";
+  const img = new Image();
+  img.src = `/img/${encodeURIComponent(currentCase)}/after.png?t=${Date.now()}`;
+  scroll.appendChild(img);
+  scroll.scrollTop = 0;
+  document.getElementById("png-overlay").classList.add("open");
+}
+
+function closePng() {
+  document.getElementById("png-overlay").classList.remove("open");
+}
+
+function pngOpen() {
+  return document.getElementById("png-overlay").classList.contains("open");
+}
+
+// -- Init --------------------------------------------------------------------
+async function main() {
+  await init();
+  await loadCaseList();
+
+  if (!currentCase) {
+    document.getElementById("meta").textContent = "No case specified — add ?case=name to URL";
+    return;
+  }
+
+  renderers = PANELS.map(p => new PanelRenderer(p.canvasId, p.type));
+  renderers.forEach(r => r.initObserver());
 
   setupPathInteraction();
   for (let i = 1; i < renderers.length; i++) {
@@ -778,7 +861,19 @@ async function main() {
     renderAll();
   });
 
-  renderAll();
+  document.getElementById("open-png").addEventListener("click", openPng);
+  document.getElementById("png-overlay").addEventListener("click", closePng);
+
+  document.addEventListener("keydown", (e) => {
+    if (pngOpen()) {
+      if (e.key === "Escape") closePng();
+      return;
+    }
+    if (e.key === "ArrowLeft") stepCase(-1);
+    else if (e.key === "ArrowRight") stepCase(1);
+  });
+
+  await loadCase(currentCase);
 }
 
 main();

@@ -13,6 +13,14 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 .toolbar button{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px}
 .toolbar button:hover{background:#3a3d45}
 .toolbar button.active{background:rgba(224,81,138,0.2);border-color:#e0518a;color:#e0518a}
+.toolbar button:disabled{opacity:0.4;cursor:default}
+.toolbar .nav{display:flex;align-items:center;gap:4px}
+.toolbar .nav button{padding:4px 8px;font-size:14px;line-height:1}
+.toolbar select{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 8px;font-size:12px;font-family:'Courier Prime',monospace;max-width:340px}
+.png-overlay{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.92)}
+.png-overlay.open{display:block}
+.png-scroll{position:absolute;inset:0;overflow:auto}
+.png-scroll img{display:block;width:100%;height:auto}
 .readout{font-family:'Courier Prime',monospace;font-size:12px;color:#9aa3b2;padding:4px 16px;background:#1d2026;border-bottom:1px solid #2a2d35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:22px;display:flex;align-items:center;gap:14px}
 .readout .v{color:#4a9eff}
 .readout .p{color:#4ecb71}
@@ -28,10 +36,15 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 <body>
 <div class="container">
   <div class="toolbar">
-    <span class="title" id="case-name">Loading…</span>
+    <div class="nav">
+      <button id="case-prev" title="Previous test (←)">‹</button>
+      <select id="case-select" title="Switch test"></select>
+      <button id="case-next" title="Next test (→)">›</button>
+    </div>
     <span class="meta" id="meta"></span>
     <button id="reset-zoom">Reset Zoom</button>
     <button id="toggle-peaks" class="active">Peaks</button>
+    <button id="open-png" title="Open the rendered PNG">PNG</button>
     <a id="back-link" href="/" style="color:#888;text-decoration:none;font-size:12px">← back</a>
   </div>
   <div class="readout" id="readout"><span class="g">hover a panel to scrub</span></div>
@@ -55,6 +68,7 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
   </div>
 </div>
 <div class="tooltip" id="tooltip"></div>
+<div class="png-overlay" id="png-overlay"><div class="png-scroll" id="png-scroll"></div></div>
 <script type="module" src="/static/viewer.js"></script>
 </body>
 </html>
