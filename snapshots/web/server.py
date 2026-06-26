@@ -24,7 +24,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SNAPSHOTS = _REPO_ROOT / "snapshots"
@@ -274,14 +274,25 @@ class Handler(BaseHTTPRequestHandler):
             return
         _, name = parts
         name = unquote(name)
+        which = parse_qs(urlsplit(self.path).query).get("which", ["after"])[0]
+        if which not in ("before", "after"):
+            self._json({"error": "bad which"}, 404)
+            return
         with STATE._lock:
             entry = STATE.cases.get(name)
             if entry is None:
                 self._json({"error": "not found"}, 404)
                 return
-            snapshot = entry["snapshot"]
+            if which == "after":
+                snapshot = entry["snapshot"]
+            elif STATE.mode == "baselines":
+                snapshot = None  # gallery shows committed baselines; no prior
+            else:
+                snapshot = harness.baseline_snapshot(entry["case"])
+        if snapshot is None:
+            self._json({"error": "no baseline"}, 404)
+            return
         self._json(snapshot)
-
 
     def _serve_static(self, rel, content_type):
         target = (_STATIC / rel).resolve()

@@ -13,6 +13,9 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 .toolbar button{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px}
 .toolbar button:hover{background:#3a3d45}
 .toolbar button.active{background:rgba(224,81,138,0.2);border-color:#e0518a;color:#e0518a}
+#toggle-variant{min-width:128px}
+#toggle-variant.after{background:rgba(78,203,113,0.18);border-color:#4ecb71;color:#4ecb71}
+#toggle-variant.before{background:rgba(245,166,35,0.22);border-color:#f5a623;color:#f5a623}
 .toolbar button:disabled{opacity:0.4;cursor:default}
 .toolbar #back-link{color:#888;text-decoration:none;font-size:12px}
 .toolbar #back-link:hover{color:#e0e0e0}
@@ -51,6 +54,7 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
       <button id="case-next" title="Next test (→)">›</button>
     </div>
     <span class="meta" id="meta"></span>
+    <button id="toggle-variant" title="Compare before/after (space)">After</button>
     <button id="reset-zoom">Reset Zoom</button>
     <button id="toggle-peaks" class="active">Peaks</button>
     <button id="open-png" title="Open the rendered PNG">PNG</button>

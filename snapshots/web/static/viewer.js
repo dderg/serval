@@ -35,9 +35,18 @@ const defaultPathView = { xMin: 0, xMax: 0, yMin: 0, yMax: 0 };
 
 // -- Data refs ---------------------------------------------------------------
 let DATA = null;
+let dataAfter = null; // current trajectory
+let dataBefore = null; // committed baseline, null when there is nothing to compare
+let variant = "after"; // which of the two DATA currently points at
 let renderers = [];
 let lastBoundsKey = "";
 let hoverIdx = null;
+let hoverTime = null; // time the marker sits at; drives the graph crosshair
+// What the cursor is anchored to, so a before/after flip keeps it under the
+// pointer. "time": graphs own the cursor (fixed time, path marker re-derives).
+// "path": the path owns it (fixed xy, the time it is reached re-derives).
+let hoverMode = null; // "time" | "path" | null
+let hoverXY = null; // { x, y } cursor position when hoverMode === "path"
 let showPeaks = false;
 let wheelTimer = null; // suppresses mousemove during trackpad gestures
 const tooltipEl = document.getElementById("tooltip");
@@ -518,7 +527,7 @@ function updateReadout(idx) {
 function syncHover(idx) {
   hoverIdx = idx;
   const t = DATA.t();
-  const dataT = idx != null ? t[idx] : null;
+  const dataT = hoverTime != null ? hoverTime : idx != null ? t[idx] : null;
   const { tMin, tMax } = timeView;
 
   // Composite all time panels (fast — just blit + cursor)
@@ -538,21 +547,29 @@ function renderAll() {
   const { tMin, tMax } = timeView;
   const { xMin, xMax, yMin, yMax } = pathView;
 
-  const t = DATA.t();
   const vScalar = DATA.v_scalar();
   const aScalar = DATA.a_scalar();
   const jScalar = DATA.j_scalar();
 
-  function visibleMax(arr) {
+  // Scale across both variants so blinking before/after keeps a fixed axis —
+  // a peak that shrinks must visibly drop, not get renormalized to the top.
+  function visibleMaxOf(data, scalarKey) {
+    const dt = data.t();
+    const arr = data[scalarKey]();
     let m = 0;
-    for (let i = 0; i < t.length; i++) {
-      if (t[i] >= tMin && t[i] <= tMax && arr[i] > m) m = arr[i];
+    for (let i = 0; i < dt.length; i++) {
+      if (dt[i] >= tMin && dt[i] <= tMax && arr[i] > m) m = arr[i];
     }
+    return m;
+  }
+  function visibleMax(scalarKey) {
+    let m = visibleMaxOf(dataAfter, scalarKey);
+    if (dataBefore) m = Math.max(m, visibleMaxOf(dataBefore, scalarKey));
     return m * 1.15 || 1;
   }
-  const vYMax = visibleMax(vScalar);
-  const aYMax = visibleMax(aScalar);
-  const jYMax = visibleMax(jScalar);
+  const vYMax = visibleMax("v_scalar");
+  const aYMax = visibleMax("a_scalar");
+  const jYMax = visibleMax("j_scalar");
 
   const key = `${tMin},${tMax},${xMin},${xMax},${yMin},${yMax},${vYMax},${aYMax},${jYMax}`;
   if (key !== lastBoundsKey) {
@@ -598,6 +615,8 @@ function setupTimeInteraction(panelIdx) {
       renderAll();
     } else {
       const dataT = r.toDataX(mx, timeView.tMin, timeView.tMax);
+      hoverMode = "time";
+      hoverTime = dataT;
       const idx = closestIndex(DATA.t(), dataT);
       syncHover(idx);
 
@@ -616,6 +635,9 @@ function setupTimeInteraction(panelIdx) {
 
   canvas.addEventListener("mouseleave", () => {
     hoverIdx = null;
+    hoverTime = null;
+    hoverMode = null;
+    hoverXY = null;
     tooltipEl.style.display = "none";
     renderAll();
   });
@@ -685,12 +707,18 @@ function setupPathInteraction() {
       const dataX = r.toDataX(mx, pb.xMin, pb.xMax);
       const dataY = r.toDataY(my, pb.yMin, pb.yMax);
       const idx = nearestPathPoint(dataX, dataY);
+      hoverMode = "path";
+      hoverXY = { x: dataX, y: dataY };
+      hoverTime = DATA.t()[idx];
       syncHover(idx);
     }
   });
 
   canvas.addEventListener("mouseleave", () => {
     hoverIdx = null;
+    hoverTime = null;
+    hoverMode = null;
+    hoverXY = null;
     renderAll();
   });
 
@@ -781,6 +809,71 @@ async function loadCaseList() {
   document.getElementById("case-next").addEventListener("click", () => stepCase(1));
 }
 
+// -- Variant (before/after) --------------------------------------------------
+function updateMeta() {
+  document.getElementById("meta").textContent =
+    `t=${DATA.traversal_time().toFixed(3)}s  ` +
+    `[${segmentSummary()}]  ` +
+    `${DATA.blended_corners()} blended, ${DATA.chain_fits()} chains, ` +
+    `${DATA.point_count()} pts`;
+}
+
+function syncVariantControls() {
+  const btn = document.getElementById("toggle-variant");
+  const hasBefore = dataBefore != null;
+  btn.disabled = !hasBefore;
+  btn.classList.toggle("after", hasBefore && variant === "after");
+  btn.classList.toggle("before", hasBefore && variant === "before");
+  if (!hasBefore) {
+    btn.textContent = "After";
+    btn.title = "No baseline to compare against";
+  } else {
+    btn.textContent = variant === "before" ? "Before" : "After";
+    btn.title = "Compare before/after (space)";
+  }
+}
+
+// Swap the active dataset without touching pathView/timeView, so the user's
+// zoom and pan are preserved across the flip, and whatever the cursor is
+// anchored to (a time on the graphs, a point on the path) stays under it.
+function setVariant(which) {
+  if (which === variant) return;
+  const next = which === "before" ? dataBefore : dataAfter;
+  if (next == null) return;
+
+  variant = which;
+  DATA = next;
+  if (hoverMode === "path" && hoverXY != null) {
+    // Keep the marker on the same spot of the path; the time it is reached
+    // there differs between variants, so re-derive it (and the crosshair).
+    hoverIdx = nearestPathPoint(hoverXY.x, hoverXY.y);
+    hoverTime = DATA.t()[hoverIdx];
+  } else if (hoverMode === "time" && hoverTime != null) {
+    // Keep the crosshair at the same time; the path marker re-derives.
+    hoverIdx = closestIndex(DATA.t(), hoverTime);
+  } else {
+    hoverIdx = null;
+  }
+
+  updateMeta();
+  syncVariantControls();
+  lastBoundsKey = "";
+  renderAll();
+}
+
+function toggleVariant() {
+  if (dataBefore == null) return;
+  setVariant(variant === "after" ? "before" : "after");
+}
+
+async function fetchSnapshot(name, which) {
+  const resp = await fetch(
+    `/snapshot-data/${encodeURIComponent(name)}?which=${which}`
+  );
+  if (!resp.ok) return null;
+  return resp.json();
+}
+
 // -- Load a single case into the graphs --------------------------------------
 async function loadCase(name) {
   currentCase = name;
@@ -790,21 +883,22 @@ async function loadCase(name) {
   syncCaseControls();
   document.title = `Snapshot — ${name}`;
 
-  const meta = document.getElementById("meta");
-  const resp = await fetch(`/snapshot-data/${encodeURIComponent(name)}`);
-  if (!resp.ok) {
-    meta.textContent = `Error: ${resp.statusText}`;
+  const after = await fetchSnapshot(name, "after");
+  if (after == null) {
+    document.getElementById("meta").textContent = "Error: failed to load case";
     return;
   }
-  const snapshot = await resp.json();
-  if (DATA && typeof DATA.free === "function") DATA.free();
-  DATA = new TrajectoryData(JSON.stringify(snapshot));
+  const before = await fetchSnapshot(name, "before");
 
-  meta.textContent =
-    `t=${DATA.traversal_time().toFixed(3)}s  ` +
-    `[${segmentSummary()}]  ` +
-    `${DATA.blended_corners()} blended, ${DATA.chain_fits()} chains, ` +
-    `${DATA.point_count()} pts`;
+  if (dataAfter && typeof dataAfter.free === "function") dataAfter.free();
+  if (dataBefore && typeof dataBefore.free === "function") dataBefore.free();
+  dataAfter = new TrajectoryData(JSON.stringify(after));
+  dataBefore = before ? new TrajectoryData(JSON.stringify(before)) : null;
+  variant = "after";
+  DATA = dataAfter;
+
+  updateMeta();
+  syncVariantControls();
 
   const pb = computeDataBounds(DATA);
   Object.assign(defaultPathView, pb);
@@ -815,6 +909,9 @@ async function loadCase(name) {
   Object.assign(timeView, tb);
 
   hoverIdx = null;
+  hoverTime = null;
+  hoverMode = null;
+  hoverXY = null;
   lastBoundsKey = "";
   renderAll();
 }
@@ -898,6 +995,9 @@ async function main() {
     Object.assign(timeView, defaultTimeView);
     lastBoundsKey = "";
     hoverIdx = null;
+    hoverTime = null;
+    hoverMode = null;
+    hoverXY = null;
     renderAll();
   });
 
@@ -908,6 +1008,7 @@ async function main() {
     renderAll();
   });
 
+  document.getElementById("toggle-variant").addEventListener("click", toggleVariant);
   document.getElementById("open-png").addEventListener("click", openPng);
   document.getElementById("png-overlay").addEventListener("click", closePng);
 
@@ -918,6 +1019,10 @@ async function main() {
     }
     if (e.key === "ArrowLeft") stepCase(-1);
     else if (e.key === "ArrowRight") stepCase(1);
+    else if (e.key === " " || e.key === "b" || e.key === "B") {
+      e.preventDefault();
+      toggleVariant();
+    }
   });
 
   await loadCase(currentCase);
