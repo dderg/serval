@@ -6,6 +6,11 @@ make -f Makefile.rust motion-engine
 # Ensure cargo/rustup are on PATH (macOS Homebrew or manual installs may not add ~/.cargo/bin)
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# Force wasm-pack to use the rustup-managed toolchain (avoids macOS Homebrew/system Rust conflicts)
+if command -v rustup &>/dev/null; then
+  export RUSTUP_TOOLCHAIN="$(rustup show active-toolchain | awk '{print $1}')"
+fi
+
 # Install wasm-pack and wasm32 target if not present
 if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
   if command -v rustup &>/dev/null; then
