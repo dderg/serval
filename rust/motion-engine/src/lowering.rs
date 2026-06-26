@@ -231,6 +231,34 @@ pub fn lower_move(
     fit_tol_mm: f64,
     axis_chains: &[CompiledChain],
 ) -> Result<ShapedSegment, LoweringError> {
+    let (axes_pieces, total_t) =
+        lower_move_pieces(gm, vm, t_start, start_pos, fit_tol_mm, axis_chains)?;
+    let axes: Vec<ScalarNurbs<f64>> = axes_pieces
+        .iter()
+        .map(|p| bezier_pieces_to_nurbs(p))
+        .collect();
+    Ok(ShapedSegment {
+        axes,
+        followers: gm.segment.followers.clone(),
+        t_start,
+        t_end: t_start + total_t,
+        motor_mask: 0,
+        source_line: 0,
+    })
+}
+
+/// Lower a move to per-axis cubic Bézier pieces in monomial form
+/// (`pos = c0 + c1·τ + c2·τ² + c3·τ³`, `τ = t − u_start`) — the trajectory the
+/// firmware executes, before it is packed into NURBS. Returns the per-axis pieces
+/// and the move duration.
+pub fn lower_move_pieces(
+    gm: &Move,
+    vm: &MoveVelocity,
+    t_start: f64,
+    start_pos: &[f64],
+    fit_tol_mm: f64,
+    axis_chains: &[CompiledChain],
+) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
     if gm.source != vm.source {
         return Err(LoweringError::SourceMismatch);
     }
@@ -282,19 +310,7 @@ pub fn lower_move(
         }
     }
 
-    let axes: Vec<ScalarNurbs<f64>> = axes_pieces
-        .iter()
-        .map(|p| bezier_pieces_to_nurbs(p))
-        .collect();
-
-    Ok(ShapedSegment {
-        axes,
-        followers: gm.segment.followers.clone(),
-        t_start,
-        t_end: t_start + total_t,
-        motor_mask: 0,
-        source_line: 0,
-    })
+    Ok((axes_pieces, total_t))
 }
 
 #[cfg(test)]
