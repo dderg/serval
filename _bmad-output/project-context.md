@@ -167,10 +167,6 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **If the change touches `rust/runtime`/`c-api`/`nurbs` MCU code, all three MCU targets must pass** (`rust-mcu-h7`/`-f4`/`-g0`); CI runs them, run locally with `rustup target add` if you have the targets.
 - **Before creating a PR:** inspect `git status`, `git diff`, `remote tracking`, `recent commits`, and the diff from the base branch. Review all commits in the PR, not just the latest. Use `gh` for GitHub tasks and return the PR URL.
 
-#### Knowledge graph
-- **`graphify-out/` holds the project knowledge graph** (god nodes, community structure, cross-file relationships). For codebase questions, first run `graphify query "<question>"` when `graphify-out/graph.json` exists — use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. If `graphify-out/wiki/index.md` exists, use it for broad navigation.
-- **After modifying code, run `graphify update .`** to keep the graph current (AST-only, no API cost).
-
 #### Skills (project-specific)
 - **`mcu-sim`** — Docker-based simulator for end-to-end firmware/host tests without a physical printer.
 - **`renode-simulation`** — dual-board Renode sim (inter-board comms, GPIO/UART inspection).
@@ -219,8 +215,6 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - Read this file before implementing any code in this project.
 - Follow ALL rules exactly as documented. When in doubt, prefer the more restrictive option.
 - The Critical Don't-Miss Rules section is a quick-reference for the most common mistakes — but the canonical rules live in the earlier sections; when a "do not" bullet and a detailed rule conflict, the detailed rule wins.
-- Run `graphify update .` after modifying code to keep the knowledge graph current.
-
 **For Humans:**
 - Keep this file lean and focused on agent needs — remove rules that become obvious over time.
 - Update when the technology stack, CI jobs, or conventions change.
