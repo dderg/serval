@@ -4,8 +4,8 @@ use std::time::Instant;
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Line, Segment};
 use geometry::{
-    ChainFitConfig, FitError, GeometryError, Move, VelocityConfig, VelocityError, VelocityLimits,
-    fit_chain_with_head_restore, plan_velocity_warm_start,
+    ChainFitConfig, FitError, FitOutcome, GeometryError, Move, VelocityConfig, VelocityError,
+    VelocityLimits, fit_chain_with_head_restore, plan_velocity_warm_start,
 };
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
@@ -13,6 +13,26 @@ use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedS
 use crate::lowering::{LoweringError, lower_move};
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
+
+/// Tolerance for matching the stored frontier position to a re-fit sub-piece
+/// boundary. The frontier's move is re-fit at full length and reproduces
+/// deterministically, so the match is exact up to float noise.
+const FRONTIER_POS_EPS_MM: f64 = 1e-6;
+
+fn move_start_spatial(m: &Move) -> [f64; 3] {
+    m.segment.spatial.as_ref().map_or([0.0; 3], |seg| {
+        let p = seg.point_at(0.0);
+        [p[0], p[1], p[2]]
+    })
+}
+
+fn move_end_spatial(m: &Move) -> Option<[f64; 3]> {
+    let s_len = m.segment.s_len();
+    m.segment.spatial.as_ref().map(|seg| {
+        let p = seg.point_at(s_len);
+        [p[0], p[1], p[2]]
+    })
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamConfig {
@@ -115,37 +135,30 @@ pub enum PostProcessError {
     NonFiniteSample { axis: usize, t: f64 },
 }
 
-/// Streaming look-ahead planner over the new geometry pipeline. Buffers
-/// submitted moves, re-plans the uncommitted window warm-started from the
-/// dispatched velocity, and commits prefixes at zero-curvature seams so the
-/// trajectory stays velocity-continuous across consecutive moves without
-/// re-emitting committed pieces. A seam is committable wherever the fit output
-/// resumes a straight line body: that holds at unblended junctions and equally
-/// at the exit of every blend, since a biclothoid rejoins the outgoing line at
-/// zero curvature. Committing through a blend consumes the next move's head, so
-/// that move is replaced in the buffer by its head-trimmed remainder before the
-/// next re-fit. Commit timing (real-time cadence) is the caller's; this type
-/// owns the geometry/velocity state.
+/// Streaming look-ahead planner over the new geometry pipeline. Buffers submitted
+/// moves, and on each commit re-fits the buffered moves at full length, plans the
+/// velocity warm-started from the committed frontier, lowers only the sub-pieces
+/// from the frontier forward, and emits up to the finality barrier. The frontier
+/// advances *through* blend sub-pieces (mid-blend), so a continuous curve drains
+/// just like a cornered perimeter and a blend longer than the MCU ring drains
+/// incrementally. Re-fitting at full length keeps blends stable (a move's head and
+/// tail blends never overlap, 0.5 budget cap); lowering from the exact carried
+/// frontier keeps emitted clocks monotonic without re-deriving committed pieces.
+/// Commit timing (real-time cadence) is the caller's; this type owns the
+/// geometry/velocity state.
 pub struct StreamState {
     buffer: VecDeque<Move>,
     entry_v: f64,
-    /// Fit anchor: position at the front buffer move's start — always the last
-    /// *fully* committed move boundary, which is an unblended (zero-curvature)
-    /// seam. The buffer holds full, untrimmed moves from here, so re-fitting from
-    /// the anchor is a pure function of the moves and reproduces the
-    /// committed-adjacent geometry bit-for-bit (no head-restore reach-back). C0
-    /// continuity across commits falls out of that determinism.
+    /// Committed frontier position (all axes). The buffer holds full, untrimmed raw
+    /// moves; each commit re-fits them (a pure function of the moves, so the
+    /// committed-adjacent geometry reproduces bit-for-bit) and lowers only the
+    /// sub-pieces from this frontier on — which may sit mid-blend. C0/C1 continuity
+    /// across commits falls out of that determinism plus the exact carried frontier.
     odometer: Vec<f64>,
+    /// Trajectory time at the frontier (`odometer`). The next commit lowers from
+    /// this exact value, so the first emitted clock continues the last one without
+    /// re-deriving — and thus never drifts backward past the dispatch's guard.
     t_committed: f64,
-    /// Emission watermark: how many fitted moves ahead of the anchor have already
-    /// been sent. Decoupled from the anchor so a commit can emit *past* a clean
-    /// seam, mid-blend — that is what lets a blend longer than the MCU ring drain
-    /// incrementally instead of starving it. The re-fit re-derives those moves
-    /// deterministically (committed-adjacent geometry is a pure function of the
-    /// moves); the first `emitted_ahead` of them are skipped, not re-sent. An
-    /// index, not a time, so the velocity re-plan's sub-epsilon `t` drift can never
-    /// misalign the boundary.
-    emitted_ahead: usize,
     /// Velocity at the most recent plan's finality barrier, carried so the
     /// streaming driver can size the producer-stall brake-to-rest watermark from
     /// `t_brake(v_barrier)` without re-planning — the speed the planner is riding,
@@ -169,7 +182,6 @@ impl StreamState {
             entry_v: 0.0,
             odometer: home_pos.to_vec(),
             t_committed: t_start,
-            emitted_ahead: 0,
             last_v_barrier: 0.0,
             config,
             axis_chains,
@@ -194,7 +206,6 @@ impl StreamState {
         self.entry_v = 0.0;
         self.odometer = home_pos.to_vec();
         self.t_committed = t_start;
-        self.emitted_ahead = 0;
         self.last_v_barrier = 0.0;
         self.post_history.clear();
     }
@@ -211,7 +222,6 @@ impl StreamState {
         debug_assert_eq!(self.entry_v, 0.0, "advance_time requires rest at the seam");
         if dt > 0.0 {
             self.t_committed += dt;
-            self.emitted_ahead = 0;
             self.post_history.clear();
         }
     }
@@ -224,7 +234,6 @@ impl StreamState {
         debug_assert_eq!(self.entry_v, 0.0, "advance_idle requires rest at the seam");
         if target_t > self.t_committed {
             self.t_committed = target_t;
-            self.emitted_ahead = 0;
             self.post_history.clear();
         }
     }
@@ -239,7 +248,6 @@ impl StreamState {
             "restart_idle_timeline requires rest at the seam"
         );
         self.t_committed = 0.0;
-        self.emitted_ahead = 0;
         self.post_history.clear();
     }
 
@@ -321,8 +329,42 @@ impl StreamState {
             "[pipe] fit"
         );
 
+        // Locate the committed frontier among the re-fit's sub-pieces. The first
+        // buffered move is re-fit at full length (i=0), so its sub-pieces reproduce
+        // deterministically and the frontier lands exactly on a sub-piece boundary.
+        // Sub-pieces before the frontier were already emitted and must NOT be
+        // re-lowered: re-deriving a committed clock drifts it and trips the
+        // dispatch's monotonic-clock guard. Plan and lower only from the frontier on.
+        let frontier = [self.odometer[0], self.odometer[1], self.odometer[2]];
+        let mut emit_lo = outcome.moves.len();
+        {
+            let mut acc = move_start_spatial(&outcome.moves[0]);
+            for (i, gm) in outcome.moves.iter().enumerate() {
+                if dist3(acc, frontier) <= FRONTIER_POS_EPS_MM {
+                    emit_lo = i;
+                    break;
+                }
+                if let Some(end) = move_end_spatial(gm) {
+                    acc = end;
+                }
+            }
+        }
+        if emit_lo >= outcome.moves.len() {
+            if force {
+                self.buffer.clear();
+                self.entry_v = 0.0;
+            }
+            return Ok(Vec::new());
+        }
+
+        let plan_outcome = FitOutcome {
+            moves: outcome.moves[emit_lo..].to_vec(),
+            report: outcome.report.clone(),
+        };
+        let n = plan_outcome.moves.len();
+
         let plan_clock = Instant::now();
-        let profile = plan_velocity_warm_start(&outcome, self.config.velocity, self.entry_v)?;
+        let profile = plan_velocity_warm_start(&plan_outcome, self.config.velocity, self.entry_v)?;
         let plan_us = plan_clock.elapsed().as_micros();
         tracing::info!(
             subsystem = "motion",
@@ -335,12 +377,11 @@ impl StreamState {
             "[pipe] plan"
         );
 
-        let n = outcome.moves.len();
         let mut pos = self.odometer.clone();
         let mut t = self.t_committed;
         let mut segs: Vec<ShapedSegment> = Vec::with_capacity(n);
         let lower_clock = Instant::now();
-        for (gm, vm) in outcome.moves.iter().zip(&profile.moves) {
+        for (gm, vm) in plan_outcome.moves.iter().zip(&profile.moves) {
             let mut seg = lower_move(
                 gm,
                 vm,
@@ -369,37 +410,30 @@ impl StreamState {
         let total_t = t - self.t_committed;
         self.last_v_barrier = profile.v_barrier;
 
-        // Emission boundary for this round. Relaxed from the old clean-seam rule:
-        // any fitted move up to the finality barrier may be emitted, so a commit
-        // can land mid-blend. The brake-to-rest setback still holds back enough
-        // tail to stop on a producer stall; `post_commit_count` still holds back
-        // for axis-chain forward support.
+        // Emission boundary: emit up to the finality barrier (velocity no future
+        // append can change), so a commit can land mid-blend and drain a blend
+        // longer than the MCU ring. The brake-to-rest setback holds back enough tail
+        // to stop on a producer stall; `post_commit_count` holds back for axis-chain
+        // forward support; the geometry-final cap never emits the last raw move,
+        // whose trailing biclothoid is still open and would reshape on the next push.
         let emit_hi = if force {
             n
         } else {
-            // A move's geometry is only final once its successor is present — the
-            // trailing biclothoid trims its tail. Never emit fitted moves derived
-            // from the last raw move in the buffer (its trailing junction is still
-            // open); a later append would reshape them after they were sent.
-            let geom_final_hi = self
-                .buffer
-                .back()
-                .map(|m| m.source.start_line)
-                .and_then(|last_line| {
-                    outcome
-                        .moves
-                        .iter()
-                        .position(|m| m.source.start_line == last_line)
-                })
-                .unwrap_or(n);
+            // Hold back the larger of the brake-to-rest setback and the last raw
+            // move's arc length. Holding back a full last-move arc keeps its
+            // sub-pieces unemitted until a successor arrives and fixes its trailing
+            // blend — by arc, not source line, since an arc-fit move stream can
+            // share one gcode line across many raw moves.
+            let last_raw_arc = self.buffer.back().map_or(0.0, |m| m.segment.s_len());
             let setback =
-                brake_to_rest_setback(&outcome.moves, self.config.velocity.max_jerk_mm_s3);
-            let total_arc: f64 = outcome.moves.iter().map(|m| m.segment.s_len()).sum();
+                brake_to_rest_setback(&plan_outcome.moves, self.config.velocity.max_jerk_mm_s3);
+            let hold_back = setback.max(last_raw_arc);
+            let total_arc: f64 = plan_outcome.moves.iter().map(|m| m.segment.s_len()).sum();
             let mut arc_to_seam = 0.0_f64;
             let mut chosen = 0usize;
-            for i in 1..=profile.barrier.min(geom_final_hi) {
-                arc_to_seam += outcome.moves[i - 1].segment.s_len();
-                if total_arc - arc_to_seam < setback {
+            for i in 1..=profile.barrier {
+                arc_to_seam += plan_outcome.moves[i - 1].segment.s_len();
+                if total_arc - arc_to_seam < hold_back {
                     break;
                 }
                 chosen = i;
@@ -407,12 +441,6 @@ impl StreamState {
             chosen
         };
         let emit_hi = self.post_commit_count(emit_hi, force, &segs);
-
-        // Pieces ahead of the anchor that a prior round already sent. The
-        // committed-adjacent geometry is deterministic, so the count of fitted
-        // moves is stable across re-fits — tracking the boundary by index is exact
-        // where a time watermark drifts by the velocity re-plan's epsilon.
-        let emit_lo = self.emitted_ahead.min(emit_hi);
 
         tracing::info!(
             subsystem = "motion",
@@ -431,12 +459,10 @@ impl StreamState {
             "[commit-decision]"
         );
 
-        if emit_hi <= emit_lo {
+        if emit_hi == 0 {
             return Ok(Vec::new());
         }
 
-        // Apply axis chains over the whole [0, emit_hi) prefix so the kernel sees
-        // full support, then hand back only the freshly emitted [emit_lo, emit_hi).
         let committed = apply_axis_chains(
             &self.post_history,
             &segs,
@@ -444,67 +470,51 @@ impl StreamState {
             force,
             &self.axis_chains.chains,
         )?;
-        let to_send: Vec<ShapedSegment> = committed[emit_lo..emit_hi].to_vec();
 
-        // Advance the fit anchor to the latest unblended (zero-curvature, no head
-        // consumed) seam in the emitted span. Only such a seam lets the next re-fit
-        // start from a raw-move vertex and reproduce the committed geometry; a blend
-        // exit would leave the kept move starting mid-blend. Until one is reached (a
-        // long blend), the anchor holds and emission keeps draining the blend.
-        let mut anchor = if force { n } else { 0 };
-        if !force {
-            for i in 1..=emit_hi {
-                // A valid re-fit anchor is a true line→line seam: zero curvature on
-                // both sides and a raw-move vertex. `is_clean_seam` only checks the
-                // source line's blend status, so it also accepts mid-blend pieces of
-                // a line whose *other* junction is unblended — re-fitting from there
-                // reshapes the blend and opens a seam. Require both sides to be Lines.
-                let prev_line =
-                    matches!(outcome.moves[i - 1].segment.spatial, Some(Segment::Line(_)));
-                let next_line = matches!(outcome.moves[i].segment.spatial, Some(Segment::Line(_)));
-                if prev_line && next_line {
-                    anchor = i;
+        // Advance the frontier to the exact end of the last emitted sub-piece. The
+        // geometric position (odometer) anchors the next re-fit's trim; the stored t
+        // keeps the next commit's first clock continuous; the planned exit velocity
+        // warm-starts the next plan. None of these is re-derived next round.
+        let mut frontier_pos = self.odometer.clone();
+        for gm in plan_outcome.moves.iter().take(emit_hi) {
+            advance_odometer(&mut frontier_pos, gm);
+        }
+        self.odometer = frontier_pos;
+        self.t_committed = segs[emit_hi - 1].t_end;
+        self.entry_v = if force {
+            0.0
+        } else {
+            profile.moves[emit_hi - 1].exit_v
+        };
+
+        // Retire raw moves the frontier has fully passed, but never one still needed
+        // to rebuild an un-emitted blend. A blend straddles two raw moves, so keep a
+        // move until its junction with the next is fully behind the frontier. The
+        // first buffered move is done once the frontier is strictly past the second
+        // move (`sf > second`), or sits on the second move's straight body — a Line
+        // at that source, which only happens at an unblended seam (`sf == second`).
+        // A blend entry is a Clothoid at that source, so the move is kept. The last
+        // buffered move is always kept (its trailing junction is still open).
+        if force {
+            self.buffer.clear();
+            self.entry_v = 0.0;
+        } else if let Some(next) = plan_outcome.moves.get(emit_hi) {
+            let sf = next.source.start_line;
+            let next_is_line = matches!(next.segment.spatial, Some(Segment::Line(_)));
+            while let Some(second) = self.buffer.get(1) {
+                let second_src = second.source.start_line;
+                if sf > second_src || (sf == second_src && next_is_line) {
+                    self.buffer.pop_front();
+                } else {
+                    break;
                 }
             }
         }
 
-        if anchor == n {
-            let mut seam_pos = self.odometer.clone();
-            for gm in &outcome.moves {
-                advance_odometer(&mut seam_pos, gm);
-            }
-            self.odometer = seam_pos;
-            self.t_committed = segs.last().map_or(self.t_committed, |s| s.t_end);
-            self.entry_v = 0.0;
-            self.emitted_ahead = 0;
-            self.buffer.clear();
-        } else if anchor > 0 {
-            let mut seam_pos = self.odometer.clone();
-            for gm in outcome.moves.iter().take(anchor) {
-                advance_odometer(&mut seam_pos, gm);
-            }
-            self.odometer = seam_pos;
-            self.t_committed = segs[anchor - 1].t_end;
-            self.entry_v = profile.moves[anchor - 1].exit_v;
-            self.emitted_ahead = emit_hi - anchor;
-            let keep_line = outcome.moves[anchor].source.start_line;
-            while self
-                .buffer
-                .front()
-                .is_some_and(|m| m.source.start_line < keep_line)
-            {
-                self.buffer.pop_front();
-            }
-        } else {
-            self.emitted_ahead = emit_hi;
-        }
+        self.post_history.extend(committed.iter().cloned());
+        self.trim_post_history();
 
-        if anchor > 0 {
-            self.post_history.extend(committed.into_iter().take(anchor));
-            self.trim_post_history();
-        }
-
-        Ok(to_send)
+        Ok(committed)
     }
 
     /// Materialize the deferred brake-to-rest on a producer-stall watermark.
@@ -569,29 +579,6 @@ impl StreamState {
         }
     }
 }
-
-/// A non-forced commit may cut wherever the fit output resumes a straight line
-/// body (zero curvature: an unblended seam or the exit of a blend) — never
-/// inside a blend, where curvature is nonzero and the velocity warm-start, which
-/// carries only a scalar entry speed, would be invalid.
-fn is_clean_seam(moves: &[Move], i: usize, unblended: &HashSet<u32>) -> bool {
-    unblended.contains(&moves[i].source.start_line)
-        || matches!(moves[i].segment.spatial, Some(Segment::Line(_)))
-}
-
-/// Whether the seam before output index `i` is the exit of a blend, i.e. the
-/// blend consumed the head of the move resuming at `i`. The preceding output is
-/// then the blend's trailing clothoid half, which shares the resuming move's
-/// source line; an unblended seam is preceded by a different move's body.
-fn blend_consumed_head(moves: &[Move], i: usize) -> bool {
-    i > 0
-        && matches!(moves[i - 1].segment.spatial, Some(Segment::Clothoid(_)))
-        && moves[i - 1].source.start_line == moves[i].source.start_line
-}
-
-/// Minimum surviving spatial length of a head-trimmed move. Below this the
-/// remainder is degenerate and the commit boundary is refused.
-const TRIM_EPS_MM: f64 = 1e-6;
 
 /// Jerk-limited time to decelerate from `v` to rest under accel limit `a` and
 /// jerk limit `j`: `v/a + a/j` once the ramp reaches `a` (`v > a²/j`), else the
