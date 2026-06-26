@@ -3,7 +3,56 @@ set -o pipefail
 
 make -f Makefile.rust motion-engine
 
+# Ensure cargo/rustup are on PATH (macOS Homebrew or manual installs may not add ~/.cargo/bin)
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Force wasm-pack to use the rustup-managed toolchain (avoids macOS Homebrew/system Rust conflicts)
+if command -v rustup &>/dev/null; then
+  export RUSTUP_TOOLCHAIN="$(rustup show active-toolchain | awk '{print $1}')"
+fi
+
+# Install wasm-pack and wasm32 target if not present
+if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
+  if command -v rustup &>/dev/null; then
+    echo "installing wasm32 target..."
+    rustup target add wasm32-unknown-unknown 2>&1 || {
+      echo "error: failed to install wasm32-unknown-unknown target" >&2
+      echo "run manually: rustup target add wasm32-unknown-unknown" >&2
+      exit 1
+    }
+  else
+    echo "error: rustup not found — install Rust via https://rustup.rs" >&2
+    exit 1
+  fi
+fi
+# Double-check: rustc must actually know the target (guards against PATH mismatches)
+if ! rustc --print target-list 2>/dev/null | grep -q wasm32-unknown-unknown; then
+  echo "error: wasm32-unknown-unknown target not available to rustc" >&2
+  echo "ensure rustup manages your Rust install: https://rustup.rs" >&2
+  exit 1
+fi
+if ! command -v wasm-pack &>/dev/null && ! [ -x "$HOME/.cargo/bin/wasm-pack" ]; then
+  echo "installing wasm-pack..."
+  cargo install wasm-pack 2>&1 || {
+    echo "error: failed to install wasm-pack" >&2
+    echo "run manually: cargo install wasm-pack" >&2
+    exit 1
+  }
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SNAPSHOT_VIEWER="$SCRIPT_DIR/../rust/snapshot-viewer"
+WASM_OUT="$SCRIPT_DIR/web/static/wasm"
+
+WP="${WASM_PACK:-wasm-pack}"
+command -v "$WP" &>/dev/null || WP="$HOME/.cargo/bin/wasm-pack"
+
+# Build the WASM interactive viewer if output is missing or source is newer
+if [ ! -f "$WASM_OUT/snapshot_viewer_bg.wasm" ] || \
+   [ "$SNAPSHOT_VIEWER/src/lib.rs" -nt "$WASM_OUT/snapshot_viewer_bg.wasm" ]; then
+  echo "building snapshot-viewer WASM..."
+  "$WP" build --target web --release --out-dir "$WASM_OUT" "$SNAPSHOT_VIEWER" 2>&1
+fi
 PORT="${SNAPSHOT_PORT:-8765}"
 PYTHON="${PYTHON:-python3}"
 

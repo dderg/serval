@@ -6,12 +6,8 @@ const bannerEl = document.getElementById("banner");
 const acceptAllBtn = document.getElementById("accept-all");
 const titleEl = document.getElementById("title");
 
-// Bump on every (re)load so accepted/changed images are re-fetched, not cached.
-let cacheBust = Date.now();
-
 async function load() {
   const data = await fetch("/api/cases").then((r) => r.json());
-  cacheBust = Date.now();
   render(data);
 }
 
@@ -43,103 +39,144 @@ function render(data) {
     casesEl.appendChild(div);
     return;
   }
-  for (const c of review) casesEl.appendChild(card(c, readOnly));
+  // Group by prefix (part before /)
+  const groups = new Map();
+  for (const c of review) {
+    const slash = c.name.indexOf("/");
+    const group = slash > 0 ? c.name.substring(0, slash).replace(/_/g, " ") : "Other";
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(c);
+  }
+  for (const [group, items] of groups) {
+    const section = document.createElement("div");
+    section.className = "section";
+    const header = document.createElement("h2");
+    header.className = "section-title";
+    header.textContent = group.charAt(0).toUpperCase() + group.slice(1);
+    section.appendChild(header);
+    const grid = document.createElement("div");
+    grid.className = "section-grid";
+    for (const c of items) grid.appendChild(card(c));
+    section.appendChild(grid);
+    casesEl.appendChild(section);
+  }
 }
 
-function imgUrl(name, which) {
-  return `/img/${encodeURIComponent(name)}/${which}.png?t=${cacheBust}`;
+function viewerUrl(name) {
+  return `/viewer.html?case=${encodeURIComponent(name)}`;
 }
 
-function card(c, readOnly) {
+function card(c) {
   const el = document.createElement("section");
   el.className = "card";
+  el.onclick = () => { window.location.href = viewerUrl(c.name); };
 
-  const head = document.createElement("div");
-  head.className = "card-head";
-  head.innerHTML =
-    `<span class="case-name">${c.name}</span>` +
-    `<span class="badge ${c.status}">${c.status}</span>`;
-  el.appendChild(head);
+  const imgWrap = document.createElement("div");
+  imgWrap.className = "card-img";
+  const canvas = document.createElement("canvas");
+  canvas.width = 400;
+  canvas.height = 300;
+  canvas.className = "card-canvas";
+  imgWrap.appendChild(canvas);
+  renderPathPreview(canvas, c.name);
 
-  el.appendChild(c.has_before ? compare(c.name) : single(c.name));
+  if (c.has_before) {
+    const badge = document.createElement("span");
+    badge.className = "diff-badge";
+    badge.textContent = "DIFF";
+    imgWrap.appendChild(badge);
+  }
+
+  el.appendChild(imgWrap);
 
   const foot = document.createElement("div");
   foot.className = "card-foot";
-  if (c.has_before) {
-    foot.appendChild(link("open before", imgUrl(c.name, "before")));
-  }
-  foot.appendChild(
-    link(readOnly ? "open baseline" : "open after", imgUrl(c.name, "after")),
-  );
+  const slash = c.name.indexOf("/");
+  const shortName = slash > 0 ? c.name.substring(slash + 1) : c.name;
+  foot.innerHTML =
+    `<span class="case-name" title="${c.name}">${shortName}</span>` +
+    `<span class="badge ${c.status}">${c.status}</span>`;
   el.appendChild(foot);
+
   return el;
 }
 
-function single(name) {
-  const wrap = document.createElement("div");
-  wrap.className = "single";
-  const img = new Image();
-  img.src = imgUrl(name, "after");
-  wrap.appendChild(img);
-  return wrap;
-}
+// -- Path preview (dashboard thumbnails) ------------------------------------
+async function renderPathPreview(canvas, name) {
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#0d0f12";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-function compare(name) {
-  const wrap = document.createElement("div");
-  wrap.className = "compare";
+  try {
+    const resp = await fetch(`/snapshot-data/${encodeURIComponent(name)}`);
+    if (!resp.ok) return;
+    const snap = await resp.json();
 
-  const before = new Image();
-  before.src = imgUrl(name, "before");
+    const kx = snap.kin_x, ky = snap.kin_y;
+    if (!kx || !ky || kx.length < 2) return;
 
-  const afterWrap = document.createElement("div");
-  afterWrap.className = "after-wrap";
-  const after = new Image();
-  after.src = imgUrl(name, "after");
-  afterWrap.appendChild(after);
+    // Compute bounds
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+    for (let i = 0; i < kx.length; i++) {
+      if (kx[i] < xMin) xMin = kx[i]; if (kx[i] > xMax) xMax = kx[i];
+      if (ky[i] < yMin) yMin = ky[i]; if (ky[i] > yMax) yMax = ky[i];
+    }
+    // Equal aspect ratio — match canvas pixel aspect
+    const xR = xMax - xMin || 1, yR = yMax - yMin || 1;
+    const dataAspect = xR / yR;
+    const canvasAspect = canvas.width / canvas.height;
+    let xMid = (xMin + xMax) / 2, yMid = (yMin + yMax) / 2;
+    if (dataAspect < canvasAspect) {
+      const targetX = yR * canvasAspect;
+      xMin = xMid - targetX / 2; xMax = xMid + targetX / 2;
+    } else {
+      const targetY = xR / canvasAspect;
+      yMin = yMid - targetY / 2; yMax = yMid + targetY / 2;
+    }
+    const pad = Math.max(xMax - xMin, yMax - yMin) * 0.08;
+    xMin -= pad; xMax += pad; yMin -= pad; yMax += pad;
 
-  const range = document.createElement("input");
-  range.type = "range";
-  range.className = "range";
-  range.min = 0;
-  range.max = 100;
-  range.value = 50;
+    const W = canvas.width, H = canvas.height;
+    const toX = (v) => ((v - xMin) / (xMax - xMin)) * W;
+    const toY = (v) => H - ((v - yMin) / (yMax - yMin)) * H;
 
-  const setPos = () => {
-    const pct = range.value;
-    afterWrap.style.width = pct + "%";
-    // Keep the clipped "after" image the full card width so it lines up.
-    after.style.setProperty("--cw", wrap.clientWidth + "px");
-    after.style.width = wrap.clientWidth + "px";
-  };
-  range.addEventListener("input", setPos);
-  before.addEventListener("load", setPos);
-  after.addEventListener("load", setPos);
-  window.addEventListener("resize", setPos);
+    // Draw fitted segments
+    const colors = { line: "#4a9eff", arc: "#4ecb71", clothoid: "#f5a623" };
+    for (const seg of (snap.fitted_segments || [])) {
+      ctx.beginPath();
+      ctx.strokeStyle = colors[seg.type] || "#4a9eff";
+      ctx.lineWidth = 1.2;
+      if (seg.type === "line") {
+        ctx.moveTo(toX(seg.x0), toY(seg.y0));
+        ctx.lineTo(toX(seg.x1), toY(seg.y1));
+      } else if (seg.x && seg.y) {
+        for (let j = 0; j < seg.x.length; j++) {
+          j === 0 ? ctx.moveTo(toX(seg.x[j]), toY(seg.y[j]))
+                   : ctx.lineTo(toX(seg.x[j]), toY(seg.y[j]));
+        }
+      }
+      ctx.stroke();
+    }
 
-  wrap.append(
-    before,
-    afterWrap,
-    range,
-    tag("left", "before (baseline)"),
-    tag("right", "after (current)"),
-  );
-  return wrap;
-}
+    // Draw raw path (thin gray)
+    const rx = snap.raw_x, ry = snap.raw_y;
+    if (rx && ry) {
+      ctx.beginPath();
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 0.6;
+      for (let i = 0; i < rx.length; i++) {
+        i === 0 ? ctx.moveTo(toX(rx[i]), toY(ry[i]))
+                 : ctx.lineTo(toX(rx[i]), toY(ry[i]));
+      }
+      ctx.stroke();
+    }
 
-function tag(side, text) {
-  const t = document.createElement("span");
-  t.className = "tag " + side;
-  t.textContent = text;
-  return t;
-}
-
-function link(text, href) {
-  const a = document.createElement("a");
-  a.textContent = text;
-  a.href = href;
-  a.target = "_blank";
-  a.rel = "noreferrer";
-  return a;
+    // Start dot
+    ctx.beginPath();
+    ctx.fillStyle = "#ef5350";
+    ctx.arc(toX(kx[0]), toY(ky[0]), 3, 0, Math.PI * 2);
+    ctx.fill();
+  } catch (e) { /* ignore fetch errors */ }
 }
 
 async function postAccept(payload) {
@@ -148,8 +185,6 @@ async function postAccept(payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   }).then((r) => r.json());
-  // When nothing is left to review the server shuts itself down; show the
-  // completion note instead of re-rendering an empty list.
   if ((data.review || []).length === 0 && !data.error) {
     document.body.innerHTML =
       '<p class="empty">All snapshots accepted — review complete. ' +
