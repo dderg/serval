@@ -262,6 +262,9 @@ pub fn lower_move_pieces(
     if gm.source != vm.source {
         return Err(LoweringError::SourceMismatch);
     }
+    if !vm.phases.is_empty() {
+        return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains);
+    }
     let (phases, total_t) = build_phases(&vm.samples)?;
     let spatial = gm.segment.spatial.as_ref();
 
@@ -307,6 +310,101 @@ pub fn lower_move_pieces(
             let (pa, va) = sampler.axis_state(axis, ta, true);
             let (pb, vb) = sampler.axis_state(axis, tb, true);
             pieces.push(hermite_cubic(ua, ub, pa, va, pb, vb));
+        }
+    }
+
+    Ok((axes_pieces, total_t))
+}
+
+/// Linear pressure advance is `pos += k * vel`, exact on a cubic: it maps the
+/// monomial coefficients onto another cubic (`SmoothKernel` is a downstream
+/// convolution, so it stops the per-piece transform exactly as the sampled path
+/// does). Mirrors the `ChainStage` semantics in [`Sampler::axis_state`].
+fn apply_axis_chain(coeffs: &mut [f64; 4], chain: &CompiledChain) {
+    for stage in &chain.stages {
+        match stage {
+            ChainStage::LinearPressureAdvance { k } => {
+                let [c0, c1, c2, c3] = *coeffs;
+                *coeffs = [
+                    k.mul_add(c1, c0),
+                    k.mul_add(2.0 * c2, c1),
+                    k.mul_add(3.0 * c3, c2),
+                    c3,
+                ];
+            }
+            ChainStage::SmoothKernel(_) => break,
+        }
+    }
+}
+
+/// Lower a straight constant-ceiling move from its closed-form jerk phases: one
+/// exact cubic per phase. Each axis is the arc-length profile scaled by its fixed
+/// share of the motion (a spatial axis by the heading, a follower by its ratio),
+/// so position, velocity, acceleration, and jerk are all exact — no grid fitting,
+/// no acceleration overshoot, and the traversal time is the profile's own.
+fn lower_straight_from_phases(
+    gm: &Move,
+    vm: &MoveVelocity,
+    t_start: f64,
+    start_pos: &[f64],
+    axis_chains: &[CompiledChain],
+) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
+    let n_axes = start_pos.len().max(3);
+    for f in &gm.segment.followers {
+        if f.axis_index >= n_axes {
+            return Err(LoweringError::FollowerAxisOutOfRange {
+                axis_index: f.axis_index,
+            });
+        }
+    }
+    let spatial = gm
+        .segment
+        .spatial
+        .as_ref()
+        .map(|seg| (seg.point_at(0.0), seg.heading_at(0.0)));
+
+    let axis_scale_base = |axis: usize| -> (f64, f64) {
+        if axis < 3 {
+            match spatial {
+                Some((origin, heading)) => (heading[axis], origin[axis]),
+                None => (0.0, start_pos.get(axis).copied().unwrap_or(0.0)),
+            }
+        } else if let Some(f) = gm.segment.followers.iter().find(|f| f.axis_index == axis) {
+            (f.ratio, start_pos[axis])
+        } else {
+            (0.0, start_pos.get(axis).copied().unwrap_or(0.0))
+        }
+    };
+
+    // One shared cumulative-time bounds array, exactly as the grid path: every
+    // axis reads the same breakpoint float, so consecutive pieces are bit-exactly
+    // contiguous (`u_end == u_start`) and `t_start + total_t` is the final bound —
+    // the contiguity the NURBS assembler asserts, within a move and across seams.
+    let mut bounds = Vec::with_capacity(vm.phases.len() + 1);
+    bounds.push(0.0);
+    for p in &vm.phases {
+        bounds.push(bounds.last().unwrap() + p.dt);
+    }
+    let total_t = *bounds.last().unwrap();
+
+    let mut axes_pieces: Vec<Vec<BezierPiece<f64>>> = vec![Vec::new(); n_axes];
+    for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
+        let (scale, base) = axis_scale_base(axis);
+        for (i, p) in vm.phases.iter().enumerate() {
+            let mut coeffs = [
+                scale.mul_add(p.s0, base),
+                scale * p.v0,
+                scale * 0.5 * p.a0,
+                scale * p.j / 6.0,
+            ];
+            if let Some(chain) = axis_chains.get(axis) {
+                apply_axis_chain(&mut coeffs, chain);
+            }
+            pieces.push(BezierPiece {
+                u_start: t_start + bounds[i],
+                u_end: t_start + bounds[i + 1],
+                coeffs: coeffs.to_vec(),
+            });
         }
     }
 

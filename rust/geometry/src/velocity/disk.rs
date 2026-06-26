@@ -745,6 +745,23 @@ fn reconstruct_straight(
         .collect()
 }
 
+/// The per-move closed-form jerk phases of a straight constant-ceiling run, in
+/// each move's local time/arc-length, or `None` when the run is not such a run.
+/// Built from the same single analytic profile as [`reconstruct_straight`], so a
+/// straight move can lower one exact cubic per phase instead of fitting cubics to
+/// the resampled grid.
+pub(super) fn reconstruct_run_phases(
+    members: &[RunMember],
+    run_start_v: f64,
+) -> Option<Vec<Vec<super::profile::StraightPhase>>> {
+    let (ceiling, accel, jerk) = flat_ceiling_run(members)?;
+    let length: f64 = members.iter().map(|m| m.kin.length).sum();
+    let exit_v = members[members.len() - 1].exit_v;
+    let profile = super::profile::plan(run_start_v, exit_v, length, ceiling, accel, jerk);
+    let spans: Vec<(f64, f64)> = members.iter().map(|m| (m.fwd_s, m.kin.length)).collect();
+    Some(profile.phases_for_spans(&spans))
+}
+
 pub(super) fn reconstruct_run(
     members: &[RunMember],
     run_start_v: f64,

@@ -8,6 +8,8 @@ mod disk;
 mod profile;
 mod scurve;
 
+pub use profile::StraightPhase;
+
 use disk::Kinematics;
 
 const LENGTH_EPS_MM: f64 = 1e-9;
@@ -49,6 +51,10 @@ pub struct MoveVelocity {
     pub exit_v: f64,
     pub peak_v: f64,
     pub samples: Vec<VelSample>,
+    /// Closed-form jerk phases for a straight constant-ceiling move, in move-local
+    /// time/arc-length. Empty for curved moves; when present the lowering emits
+    /// one exact cubic per phase instead of fitting cubics to `samples`.
+    pub phases: Vec<StraightPhase>,
     pub accel: f64,
     pub jerk: f64,
     pub length: f64,
@@ -348,6 +354,7 @@ pub fn plan_velocity_warm_start(
                 line_no: run_start_line,
             },
         )?;
+        let reconstructed_phases = disk::reconstruct_run_phases(&members, run_start_v[run_start]);
 
         for (idx, j) in (run_start..run_end).enumerate() {
             let kin = &caps[j].kin;
@@ -369,7 +376,17 @@ pub fn plan_velocity_warm_start(
                 return Err(VelocityError::NegativeVelocity { line_no, v });
             }
             let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
-            report.traversal_time_s += traversal_time(&samples);
+            let phases = reconstructed_phases
+                .as_ref()
+                .map_or_else(Vec::new, |p| p[idx].clone());
+            // A straight move's phases give the exact traversal time; the sampled
+            // estimate mistimes the jerk-from-rest at v = 0 (the singularity the
+            // closed-form profile avoids), so prefer the phases when present.
+            report.traversal_time_s += if phases.is_empty() {
+                traversal_time(&samples)
+            } else {
+                phases.iter().map(|p| p.dt).sum()
+            };
 
             let disk_only = disk::disk_reach_v(kin, entry_v, kin.length, tol)
                 .ok_or(VelocityError::Diverged { line_no })?;
@@ -388,6 +405,7 @@ pub fn plan_velocity_warm_start(
                 exit_v,
                 peak_v,
                 samples,
+                phases,
                 accel: kin.accel,
                 jerk: kin.jerk,
                 length: kin.length,
