@@ -800,6 +800,9 @@ class Motion:
         self.max_z_accel = config.getfloat(
             "max_z_accel", self._max_accel, above=0.0, maxval=self._max_accel
         )
+        self.max_path_deviation = config.getfloat(
+            "max_path_deviation", 0.005, above=0.0, maxval=1.0
+        )
         self.limit_sections = []
         for sc in config.get_prefix_sections("limit "):
             name = sc.get_name().split(None, 1)[1]
@@ -1004,6 +1007,7 @@ class Motion:
                 arc_fit=self.arc_fit,
                 max_extrude_only_velocity=max_extrude_only_velocity,
                 max_extrude_only_accel=max_extrude_only_accel,
+                fit_tolerance_mm=self.max_path_deviation,
             )
             self._configure_axes_per_mcu(engine_mcus)
             self._planner_ready = True

@@ -2510,6 +2510,7 @@ impl PyMotionEngine {
         arc_fit = None,
         max_extrude_only_velocity = None,
         max_extrude_only_accel = None,
+        fit_tolerance_mm = None,
     ))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn init_planner(
@@ -2523,6 +2524,7 @@ impl PyMotionEngine {
         arc_fit: Option<u32>,
         max_extrude_only_velocity: Option<f64>,
         max_extrude_only_accel: Option<f64>,
+        fit_tolerance_mm: Option<f64>,
     ) -> PyResult<()> {
         if self
             .planner
@@ -2607,6 +2609,14 @@ impl PyMotionEngine {
             }
         }
 
+        if let Some(v) = fit_tolerance_mm {
+            if !(v.is_finite() && v > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "[printer] fit_tolerance must be finite and positive, got {v}"
+                )));
+            }
+        }
+
         let mut cfg = config::PlannerConfig::default();
         cfg.axis_registry = axis_registry;
         cfg.limit_sections = limit_sections;
@@ -2614,6 +2624,9 @@ impl PyMotionEngine {
         cfg.post_processors = post_processor_set;
         cfg.max_extrude_only_velocity = max_extrude_only_velocity;
         cfg.max_extrude_only_accel = max_extrude_only_accel;
+        if let Some(v) = fit_tolerance_mm {
+            cfg.fit_tolerance_mm = v;
+        }
         cfg.chain = match arc_fit {
             Some(min_run_facets) => {
                 if min_run_facets < 3 {
