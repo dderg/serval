@@ -3,7 +3,29 @@ set -o pipefail
 
 make -f Makefile.rust motion-engine
 
+# Install wasm-pack and wasm32 target if not present
+if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
+  echo "installing wasm32 target..."
+  rustup target add wasm32-unknown-unknown 2>&1
+fi
+if ! command -v wasm-pack &>/dev/null && ! [ -x "$HOME/.cargo/bin/wasm-pack" ]; then
+  echo "installing wasm-pack..."
+  cargo install wasm-pack 2>&1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SNAPSHOT_VIEWER="$SCRIPT_DIR/../rust/snapshot-viewer"
+WASM_OUT="$SCRIPT_DIR/web/static/wasm"
+
+WP="${WASM_PACK:-wasm-pack}"
+command -v "$WP" &>/dev/null || WP="$HOME/.cargo/bin/wasm-pack"
+
+# Build the WASM interactive viewer if output is missing or source is newer
+if [ ! -f "$WASM_OUT/snapshot_viewer_bg.wasm" ] || \
+   [ "$SNAPSHOT_VIEWER/src/lib.rs" -nt "$WASM_OUT/snapshot_viewer_bg.wasm" ]; then
+  echo "building snapshot-viewer WASM..."
+  "$WP" build --target web --release --out-dir "$WASM_OUT" "$SNAPSHOT_VIEWER" 2>&1
+fi
 PORT="${SNAPSHOT_PORT:-8765}"
 PYTHON="${PYTHON:-python3}"
 
