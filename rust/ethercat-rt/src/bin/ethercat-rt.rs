@@ -512,8 +512,8 @@ fn main() {
                 Command::RestoreDriveLimits { correlation_id } => {
                     mailbox.submit(MailboxRequest::WriteLimits {
                         correlation_id,
-                        ferr_counts: run_limits.0,
-                        torque_tenth_pct: run_limits.1,
+                        ferr_counts: run_limits[0].0,
+                        torque_tenth_pct: run_limits[0].1,
                         restore: true,
                     });
                 }
