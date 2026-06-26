@@ -14,6 +14,8 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 .toolbar button:hover{background:#3a3d45}
 .toolbar button.active{background:rgba(224,81,138,0.2);border-color:#e0518a;color:#e0518a}
 .toolbar button:disabled{opacity:0.4;cursor:default}
+.toolbar #back-link{color:#888;text-decoration:none;font-size:12px}
+.toolbar #back-link:hover{color:#e0e0e0}
 .toolbar .nav{display:flex;align-items:center;gap:4px}
 .toolbar .nav button{padding:4px 8px;font-size:14px;line-height:1}
 .toolbar select{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 8px;font-size:12px;font-family:'Courier Prime',monospace;max-width:340px}
@@ -36,6 +38,7 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 <body>
 <div class="container">
   <div class="toolbar">
+    <a id="back-link" href="/" title="Back to gallery">← back</a>
     <div class="nav">
       <button id="case-prev" title="Previous test (←)">‹</button>
       <select id="case-select" title="Switch test"></select>
@@ -45,7 +48,6 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
     <button id="reset-zoom">Reset Zoom</button>
     <button id="toggle-peaks" class="active">Peaks</button>
     <button id="open-png" title="Open the rendered PNG">PNG</button>
-    <a id="back-link" href="/" style="color:#888;text-decoration:none;font-size:12px">← back</a>
   </div>
   <div class="readout" id="readout"><span class="g">hover a panel to scrub</span></div>
   <div class="panels">
