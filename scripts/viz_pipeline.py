@@ -127,7 +127,7 @@ def parse_gcode(
 ) -> list[tuple[float, float, float, float]]:
     waypoints: list[tuple[float, float, float, float]] = []
     x, y, z = 0.0, 0.0, 0.0
-    feedrate = 100.0
+    feedrate = max_velocity
     relative = False
     motion_cmd = re.compile(r"^G0?([0-3])\b", re.IGNORECASE)
     mode_cmd = re.compile(r"^G(90|91)\b", re.IGNORECASE)
@@ -197,55 +197,54 @@ def parse_gcode(
 def _build_time_series(snapshot):
     import numpy as np
 
-    s = np.array(snapshot["kin_s"])
+    # The visualizer consumes only the raw trajectory the planner produced --
+    # where the toolhead is (position) and how fast it travels there (speed) --
+    # and differentiates position itself. It trusts none of the planner's own
+    # acceleration or curvature, so these curves are an independent check that
+    # the planned motion respects the machine limits.
+    x, y = _toolhead_position(snapshot)
     v = np.array(snapshot["kin_v"])
-    tangent_x = np.array(snapshot["kin_heading_x"])
-    tangent_y = np.array(snapshot["kin_heading_y"])
 
-    distinct = np.concatenate([[True], np.diff(s) > 1e-9])
-    s, v, tangent_x, tangent_y = (
-        arr[distinct] for arr in (s, v, tangent_x, tangent_y)
-    )
+    distinct = np.concatenate([[True], np.hypot(np.diff(x), np.diff(y)) > 1e-9])
+    x, y, v = x[distinct], y[distinct], v[distinct]
 
+    # Timing is the one thing position alone cannot give: convert the planner's
+    # speed profile to a time axis (dt = ds / v), then every derivative below is
+    # a numerical derivative of position with respect to that time.
     v_safe = np.maximum(v, 1e-6)
-    ds = np.diff(s)
+    ds = np.hypot(np.diff(x), np.diff(y))
     v_avg = 0.5 * (v_safe[:-1] + v_safe[1:])
     t = np.concatenate([[0.0], np.cumsum(ds / v_avg)])
 
-    vx = v * tangent_x
-    vy = v * tangent_y
+    vx = np.gradient(x, t)
+    vy = np.gradient(y, t)
+    v_scalar = np.hypot(vx, vy)
 
-    dt = np.diff(t)
-    ax = np.diff(vx) / dt
-    ay = np.diff(vy) / dt
+    ax = np.gradient(vx, t)
+    ay = np.gradient(vy, t)
     a_scalar = np.hypot(ax, ay)
-    ax, ay, a_scalar = (np.append(a, a[-1]) for a in (ax, ay, a_scalar))
 
-    jx = np.diff(ax) / dt
-    jy = np.diff(ay) / dt
+    jx = np.gradient(ax, t)
+    jy = np.gradient(ay, t)
     j_scalar = np.hypot(jx, jy)
-    _hold_jerk_through_rest_endpoints(v, jx, jy, j_scalar)
-    jx, jy, j_scalar = (np.append(j, j[-1]) for j in (jx, jy, j_scalar))
 
-    return t, vx, vy, v, ax, ay, a_scalar, jx, jy, j_scalar
+    return t, vx, vy, v_scalar, ax, ay, a_scalar, jx, jy, j_scalar
 
 
-def _hold_jerk_through_rest_endpoints(v, jx, jy, j_scalar):
-    # A finite difference cannot resolve jerk through a zero-velocity endpoint;
-    # hold each resting end's monotonic under-shoot at the level it climbs to.
-    n = len(j_scalar)
-    if v[0] <= 1e-9:
-        i = 0
-        while i + 1 < n and j_scalar[i + 1] > j_scalar[i]:
-            i += 1
-        for arr in (jx, jy, j_scalar):
-            arr[:i] = arr[i]
-    if v[-1] <= 1e-9:
-        k = n - 1
-        while k > 0 and j_scalar[k - 1] > j_scalar[k]:
-            k -= 1
-        for arr in (jx, jy, j_scalar):
-            arr[k + 1 :] = arr[k]
+def _toolhead_position(snapshot):
+    import numpy as np
+
+    if "kin_x" in snapshot:
+        return np.array(snapshot["kin_x"]), np.array(snapshot["kin_y"])
+    # Legacy baselines stored heading + arc length instead of position; integrate
+    # the unit heading along s to recover the path so they still preview.
+    s = np.array(snapshot["kin_s"])
+    hx = np.array(snapshot["kin_heading_x"])
+    hy = np.array(snapshot["kin_heading_y"])
+    ds = np.diff(s, prepend=s[0])
+    x = snapshot["raw_x"][0] + np.cumsum(hx * ds)
+    y = snapshot["raw_y"][0] + np.cumsum(hy * ds)
+    return x, y
 
 
 def _plot_derivative(
