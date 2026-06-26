@@ -429,39 +429,84 @@ fn reconstruct_flat(ctxs: &[MemberCtx], tol: f64) -> Option<Vec<(f64, f64, f64)>
 ///
 /// Infinite jerk leaves the envelope untouched (the sharp accel apex is intended).
 fn jerk_smooth(ctxs: &[MemberCtx], base: Vec<(f64, f64, f64)>) -> Vec<(f64, f64, f64)> {
-    let jerk = ctxs[0].m.kin.jerk;
-    if base.len() < 3 || !jerk.is_finite() {
+    if base.len() < 3 {
         return base;
     }
 
     let run_len = base[base.len() - 1].0;
     let s = integration_grid(ctxs, run_len);
+    let n = s.len();
     let vlc: Vec<f64> = s.iter().map(|&x| vlc_at(ctxs, x)).collect();
     let accel: Vec<f64> = s.iter().map(|&x| accel_cap(ctxs, x)).collect();
     let kappa: Vec<f64> = s.iter().map(|&x| kappa_abs_at(ctxs, x)).collect();
-    let n = s.len();
 
     let entry_v = base[0].1;
     let exit_v = base[base.len() - 1].1;
-    let entry_a = if entry_v <= VELOCITY_FLOOR {
-        0.0
-    } else {
-        base[0].2
-    };
 
+    // `planSpeed`: pure acceleration-budget (disk) forward–backward pass. The
+    // tangential budget is whatever the disk leaves after the centripetal share
+    // `sqrt(a_max^2 - (kappa v^2)^2)`, so the total acceleration vector rides the
+    // budget boundary and the scalar magnitude stays at `a_max` through the trade.
+    // This is the velocity *ceiling* — the corner trade is baked in here.
+    let mut ceil = vlc.clone();
+    ceil[0] = ceil[0].min(entry_v);
+    ceil[n - 1] = ceil[n - 1].min(exit_v);
+    for i in (0..n - 1).rev() {
+        let ds = s[i + 1] - s[i];
+        let budget = disk_rail_accel(accel[i + 1], kappa[i + 1], ceil[i + 1]);
+        let vm = (ceil[i + 1] * ceil[i + 1] + 2.0 * budget * ds).sqrt();
+        ceil[i] = ceil[i].min(vm);
+    }
+    for i in 1..n {
+        let ds = s[i] - s[i - 1];
+        let budget = disk_rail_accel(accel[i - 1], kappa[i - 1], ceil[i - 1]);
+        let vm = (ceil[i - 1] * ceil[i - 1] + 2.0 * budget * ds).sqrt();
+        ceil[i] = ceil[i].min(vm);
+    }
+    ceil[0] = entry_v;
+    ceil[n - 1] = exit_v;
+
+    let jerk = ctxs[0].m.kin.jerk;
+    if !jerk.is_finite() {
+        // Infinite jerk: the disk boundary itself is the answer (nothing to ramp).
+        let a: Vec<f64> = (0..n)
+            .map(|i| {
+                if (i == 0 && entry_v <= VELOCITY_FLOOR) || (i == n - 1 && exit_v <= VELOCITY_FLOOR)
+                {
+                    return 0.0;
+                }
+                let (lo, hi) = (i.saturating_sub(1), (i + 1).min(n - 1));
+                let dvds = (ceil[hi] - ceil[lo]) / (s[hi] - s[lo]).max(1e-12);
+                (ceil[i] * dvds).clamp(-disk_rail_accel(accel[i], kappa[i], ceil[i]), {
+                    disk_rail_accel(accel[i], kappa[i], ceil[i])
+                })
+            })
+            .collect();
+        return (0..n).map(|i| (s[i], ceil[i], a[i])).collect();
+    }
+
+    // Ride the disk boundary under a magnitude jerk limit: follow its tangential
+    // accel, but cap how fast the scalar magnitude `sqrt(a_t^2 + a_n^2)` changes to
+    // `j_max`. The centripetal trade (which preserves the magnitude) is free, so a
+    // corner stays flat; only a magnitude change — the flat-cruise on/off ramp on a
+    // straight — costs jerk and gets an S-curve.
     let bwd = {
-        let total = s[n - 1];
-        let s_rev: Vec<f64> = (0..n).map(|k| total - s[n - 1 - k]).collect();
-        let vlc_rev: Vec<f64> = (0..n).map(|k| vlc[n - 1 - k]).collect();
-        let accel_rev: Vec<f64> = (0..n).map(|k| accel[n - 1 - k]).collect();
-        let kappa_rev: Vec<f64> = (0..n).map(|k| kappa[n - 1 - k]).collect();
-        let (mut b, _) = ride(&s_rev, &vlc_rev, &accel_rev, &kappa_rev, jerk, exit_v, 0.0);
+        let s_rev: Vec<f64> = (0..n).map(|k| s[n - 1] - s[n - 1 - k]).collect();
+        let rev = |a: &[f64]| -> Vec<f64> { (0..n).map(|k| a[n - 1 - k]).collect() };
+        let (mut b, _) = mag_jerk_ride(
+            &s_rev,
+            &rev(&vlc),
+            &rev(&ceil),
+            &rev(&accel),
+            &rev(&kappa),
+            jerk,
+            exit_v,
+        );
         b.reverse();
         b
     };
-    let forward_cap: Vec<f64> = (0..n).map(|i| vlc[i].min(bwd[i])).collect();
-
-    let (mut v, mut a) = ride(&s, &forward_cap, &accel, &kappa, jerk, entry_v, entry_a);
+    let track: Vec<f64> = (0..n).map(|i| ceil[i].min(bwd[i])).collect();
+    let (mut v, mut a) = mag_jerk_ride(&s, &vlc, &track, &accel, &kappa, jerk, entry_v);
     v[0] = entry_v;
     v[n - 1] = exit_v;
     if entry_v <= VELOCITY_FLOOR {
@@ -472,6 +517,96 @@ fn jerk_smooth(ctxs: &[MemberCtx], base: Vec<(f64, f64, f64)>) -> Vec<(f64, f64,
     }
 
     (0..n).map(|i| (s[i], v[i], a[i])).collect()
+}
+
+/// March the disk-boundary `track` from below under a **magnitude** jerk limit:
+/// the scalar acceleration magnitude `sqrt(a_t^2 + a_n^2)` (with `a_n = kappa v^2`)
+/// changes no faster than `j_max`. Following the disk boundary in a corner keeps
+/// the magnitude pinned at `a_max` — the rate limit is inert, the centripetal trade
+/// is free, the corner stays flat. Only entering/leaving a flat-cruise plateau on a
+/// straight changes the magnitude, and there it lands as a jerk-limited S-curve.
+fn mag_jerk_ride(
+    s: &[f64],
+    vlc: &[f64],
+    track: &[f64],
+    accel: &[f64],
+    kappa: &[f64],
+    j_max: f64,
+    start_v: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    let n = s.len();
+    let mut v = vec![0.0_f64; n];
+    let mut acc = vec![0.0_f64; n];
+    v[0] = start_v.min(track[0]);
+    let mut a_prev = 0.0;
+    for i in 1..n {
+        let ds = s[i] - s[i - 1];
+        let v_pred = (v[i - 1] * v[i - 1] + 2.0 * a_prev * ds).max(0.0).sqrt();
+        let v_scale = 2.0 * ds / (6.0 * ds / j_max).cbrt();
+        let dt = 2.0 * ds / (v[i - 1] + v_pred).max(v_scale);
+        let budget = disk_rail_accel(accel[i], kappa[i], v_pred);
+        let a_n = kappa[i] * v_pred * v_pred;
+        let a_n_prev = kappa[i - 1] * v[i - 1] * v[i - 1];
+        let mag_prev = (a_prev * a_prev + a_n_prev * a_n_prev).sqrt();
+        // Disk-boundary target tangential accel: ride the cap's slope where the cap
+        // binds (cruise plateau / braking trade), roll to zero approaching the
+        // geometric ceiling, otherwise accelerate.
+        let coast_peak = v[i - 1] + a_prev.max(0.0) * a_prev.max(0.0) / (2.0 * j_max);
+        let a_track = (track[i] - track[i - 1]) / dt;
+        let below = v_pred < track[i] && a_track >= 0.0;
+        let a_target = if below {
+            // Genuinely below a rising/flat ceiling: accelerate, or roll to zero to
+            // land on the geometric ceiling.
+            if coast_peak >= vlc[i] { 0.0 } else { budget }
+        } else {
+            // At the cap, or the cap is descending into a brake: follow its slope.
+            a_track
+        };
+        // Rate-limit the acceleration MAGNITUDE, then back out the tangential accel.
+        // A tangential sign reversal on a *straight* (a velocity peak, low `a_n`)
+        // targets the centripetal floor `a_n`, forcing `a_t` down through zero before
+        // it builds the other way — otherwise the magnitude stays flat across
+        // `+a_max→−a_max` and the reversal escapes the jerk limit. At a curved apex
+        // (`a_n` near `a_max`) the sign flip is the centripetal trade, not a peak:
+        // the magnitude is already pinned and `v` must bottom at the apex speed, not
+        // dive to zero, so reversal handling is gated off there.
+        let reversing = a_target * a_prev < 0.0 && a_n < 0.5 * accel[i];
+        let mag_target = if reversing {
+            a_n
+        } else {
+            (a_target * a_target + a_n * a_n).sqrt()
+        };
+        let mag = mag_target
+            .clamp(mag_prev - j_max * dt, mag_prev + j_max * dt)
+            .max(a_n);
+        let dir = if reversing {
+            if a_prev >= 0.0 { 1.0 } else { -1.0 }
+        } else if a_target < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        let a = (dir * (mag * mag - a_n * a_n).max(0.0).sqrt()).clamp(-budget, budget);
+        // While ramping up to / down from the cap (accel onset, cruise landing, peak
+        // reversal) integrate the speed; once on the cap (cruise / braking trade)
+        // sit on it exactly, so a hard brake to a low corner speed can't overshoot
+        // the energy step into a false zero-velocity stall.
+        v[i] = if below || reversing {
+            (v[i - 1] * v[i - 1] + (a_prev + a) * ds)
+                .max(0.0)
+                .sqrt()
+                .min(track[i])
+        } else {
+            track[i]
+        };
+        // Re-clamp to the disk budget at the *settled* speed (the predictor used
+        // `v_pred`), so `sqrt(a_t^2 + a_n^2)` never tips past `a_max` near an apex.
+        let budget_v = disk_rail_accel(accel[i], kappa[i], v[i]);
+        let a = a.clamp(-budget_v, budget_v);
+        acc[i] = a;
+        a_prev = a;
+    }
+    (v, acc)
 }
 
 /// A dense uniform arc-length grid for the jerk-ride. Each member is sampled at a
@@ -492,64 +627,6 @@ fn integration_grid(ctxs: &[MemberCtx], _run_len: f64) -> Vec<f64> {
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     s.dedup_by(|a, b| (*a - *b).abs() <= 1e-12);
     s
-}
-
-/// March a jerk-limited speed profile that rides `track` from below (see
-/// `jerk_smooth`), emitting both speed and the exact tangential acceleration the
-/// march integrates. Reused forwards and (on a reversed grid) backwards.
-///
-/// Tangential acceleration is bounded by the disk budget `sqrt(a^2 - (kappa v^2)^2)`
-/// at every step, not the bare `a_max`: on a curve the centripetal share already
-/// spends part of the budget, so the available tangential accel shrinks to zero as
-/// `v` nears the curvature ceiling `sqrt(a/kappa)`. That makes the march ride the
-/// disk ODE rail where accel-bound and ease onto a curvature ceiling tangentially
-/// by construction — the same `(v, a)` the seam sweep's `disk_reach_v` assumes,
-/// rather than the bare-`a_max` ramp the old reconstruction over-accelerated on.
-fn ride(
-    s: &[f64],
-    track: &[f64],
-    accel: &[f64],
-    kappa: &[f64],
-    jerk: f64,
-    start_v: f64,
-    start_a: f64,
-) -> (Vec<f64>, Vec<f64>) {
-    let n = s.len();
-    let mut v = vec![0.0_f64; n];
-    let mut acc = vec![0.0_f64; n];
-    v[0] = start_v.min(track[0]);
-    acc[0] = start_a;
-    let mut a_prev = start_a;
-    for i in 1..n {
-        let ds = s[i] - s[i - 1];
-        // Time across `ds` from a constant-accel estimate of the step's exit speed
-        // — `track[i]` would under-time the step (the ceiling sits above the actual
-        // speed) and starve the velocity gain. Floored by the jerk-from-rest speed
-        // scale `(j*ds^2)^(1/3)` so the launch cusp (`v=a=0`) takes a bounded step
-        // instead of an unbounded `dt` that jumps `a` to `a_max` in one sample.
-        let v_pred = (v[i - 1] * v[i - 1] + 2.0 * a_prev * ds).max(0.0).sqrt();
-        let v_scale = 2.0 * ds / (6.0 * ds / jerk).cbrt();
-        let dt = 2.0 * ds / (v[i - 1] + v_pred).max(v_scale);
-        let a_track = (track[i] - track[i - 1]) / dt;
-        // Coast the current acceleration back to zero: the speed it would add is
-        // `a^2 / 2j`. If that peak would reach the track, peel off now so `v` lands
-        // on it with `a = 0`; `a_track` then holds `a` on a sloped track and lets it
-        // descend past zero into a brake. Keying off the track itself (not its local
-        // slope, ~0 until the last moment) makes the peel early enough — even where
-        // a descending track closes on a rising `v` at a sub-ceiling peak.
-        let coast_peak = v[i - 1] + a_prev.max(0.0) * a_prev.max(0.0) / (2.0 * jerk);
-        let budget = disk_rail_accel(accel[i], kappa[i], v_pred);
-        let a = if coast_peak >= track[i] {
-            (a_prev - jerk * dt).max(a_track)
-        } else {
-            (a_prev + jerk * dt).min(budget)
-        }
-        .clamp(-budget, budget);
-        v[i] = (v[i - 1] + 0.5 * (a_prev + a) * dt).clamp(0.0, track[i]);
-        acc[i] = a;
-        a_prev = a;
-    }
-    (v, acc)
 }
 
 /// Speed ceiling at run-arc `s_run`, the min over every member whose span covers
