@@ -86,25 +86,30 @@ function nearestPathPoint(dataX, dataY) {
 }
 
 function findPeaks(scalar, yMax) {
-  if (scalar.length < 5) return [];
+  if (scalar.length < 3) return [];
   let dataMax = 0;
   for (let i = 0; i < scalar.length; i++) {
     if (scalar[i] > dataMax) dataMax = scalar[i];
   }
   if (dataMax < 1e-9) return [];
   const threshold = dataMax * 0.3;
-  const minGap = 20;
-  const minProminence = dataMax * 0.05; // peak must be at least 5% above neighbors
+  const minGap = 10;
+  const minProminence = dataMax * 0.03;
   const peaks = [];
   let lastPeak = -minGap;
-  for (let i = 2; i < scalar.length - 2; i++) {
+  for (let i = 1; i < scalar.length - 1; i++) {
     if (scalar[i] < threshold) continue;
     if (i - lastPeak < minGap) continue;
-    // Must be strictly higher than both neighbors by a meaningful margin
-    const leftMin = Math.min(scalar[i-1], scalar[i-2]);
-    const rightMin = Math.min(scalar[i+1], scalar[i+2]);
-    const localMin = Math.min(leftMin, rightMin);
-    if (scalar[i] - localMin < minProminence) continue;
+    // Must be a local maximum: higher than both immediate neighbors
+    if (scalar[i] <= scalar[i-1] || scalar[i] <= scalar[i+1]) continue;
+    // Prominence: how much higher than the lowest point in nearby neighborhood
+    const lo = Math.max(0, i - 3);
+    const hi = Math.min(scalar.length - 1, i + 3);
+    let surroundMin = scalar[i];
+    for (let j = lo; j <= hi; j++) {
+      if (scalar[j] < surroundMin) surroundMin = scalar[j];
+    }
+    if (scalar[i] - surroundMin < minProminence) continue;
     peaks.push(i);
     lastPeak = i;
   }
