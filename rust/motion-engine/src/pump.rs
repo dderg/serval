@@ -232,9 +232,6 @@ pub struct EnqueueMsg {
     pub pieces: Vec<(PieceEntry, f64)>,
     pub fresh_stream: bool,
     pub lead_secs: f64,
-    /// Source gcode line of the segment this enqueue lowered from. `u32::MAX`
-    /// for synthetic enqueues (nudge). Instrumentation only — lets the junction
-    /// continuity log name both colliding lines.
     pub source_line: u32,
 }
 
@@ -436,6 +433,20 @@ impl JunctionTracker {
             },
         );
         seam
+    }
+
+    pub fn observe_msg(
+        &mut self,
+        key: AxisKey,
+        pieces: &[(PieceEntry, f64)],
+        fresh_stream: bool,
+        source_line: u32,
+        freq: Option<f64>,
+    ) -> Option<JunctionSeam> {
+        if fresh_stream {
+            self.forget(key);
+        }
+        self.observe(key, pieces, source_line, freq?)
     }
 }
 

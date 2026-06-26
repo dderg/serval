@@ -227,18 +227,9 @@ impl StreamPlannerHandle {
         self.sender
             .send(StreamMsg::Flush { notify: tx })
             .map_err(|_| StreamPlannerError::ChannelClosed)?;
-        match rx.recv() {
-            Ok(finish) => {
-                if let Some(deadline) = finish {
-                    let now = Instant::now();
-                    if deadline > now {
-                        std::thread::sleep(deadline - now);
-                    }
-                }
-                Ok(())
-            }
-            Err(_) => Err(StreamPlannerError::ChannelClosed),
-        }
+        rx.recv()
+            .map(|_committed_through| ())
+            .map_err(|_| StreamPlannerError::ChannelClosed)
     }
 
     pub fn flush_start(

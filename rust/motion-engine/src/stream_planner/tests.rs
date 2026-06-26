@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::*;
 use crate::stream::StreamConfig;
@@ -571,6 +572,36 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
     assert!(
         post_swap > pre_swap + 1e-2,
         "post-swap PA should push the extruder ahead at mid-move: {post_swap} vs {pre_swap}"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn flush_returns_after_commit_without_sleeping_until_playout() {
+    let cap = Capture::default();
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+    );
+    h.submit_move(line_e(1, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0))
+        .unwrap();
+
+    let started = Instant::now();
+    h.flush().unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        !cap.snapshot().is_empty(),
+        "flush committed nothing to dispatch"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "flush blocked {elapsed:?} on a ~2s move: it slept until the play-out \
+         deadline instead of returning after commit and letting the caller poll \
+         the drain counter"
     );
     h.shutdown();
 }

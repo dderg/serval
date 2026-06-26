@@ -12,7 +12,6 @@ pub mod drain;
 pub mod enqueue;
 #[doc(hidden)]
 pub mod homing;
-pub mod jerk_probe;
 #[doc(hidden)]
 pub mod kinematics;
 pub mod logging;
@@ -40,6 +39,8 @@ pub mod stream_planner;
 pub mod timing;
 mod types;
 pub mod viz;
+
+pub mod seam_test_harness;
 
 pub mod test_support;
 

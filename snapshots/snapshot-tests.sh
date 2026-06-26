@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -o pipefail
 
+make -f Makefile.rust motion-engine
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${SNAPSHOT_PORT:-8765}"
 PYTHON="${PYTHON:-python3}"

@@ -118,3 +118,93 @@ def test_run_case_missing_gcode_raises(tmp_path):
     case.config_path.write_text("[printer]\n")
     with pytest.raises(ValueError, match="missing bad.gcode"):
         harness.run_case(case)
+
+
+def test_compare_tolerates_sub_ulp_float_drift(tmp_path):
+    case = _case(tmp_path)
+    harness.write_baseline(case, _SNAPSHOT)
+    drifted = dict(_SNAPSHOT)
+    drifted["kin_v"] = [0.0, 50.0 + 1e-11, 0.0]
+    drifted["traversal_time_s"] = 0.123456789 + 1e-13
+    assert harness.compare(case, drifted) is harness.Status.EXACT
+
+
+def test_snapshots_match_flags_drift_above_tolerance():
+    a = {"kin_v": [50.0]}
+    b = {"kin_v": [50.0 + 1e-3]}
+    assert not harness.snapshots_match(a, b)
+
+
+def test_snapshots_match_is_exact_on_integer_counts():
+    assert harness.snapshots_match({"blended": 3}, {"blended": 3})
+    assert not harness.snapshots_match({"blended": 3}, {"blended": 4})
+
+
+def test_compare_flags_velocity_field_change(tmp_path):
+    case = _case(tmp_path)
+    harness.write_baseline(case, _SNAPSHOT)
+    drifted = dict(_SNAPSHOT)
+    drifted["kin_v"] = [0.0, 50.5, 0.0]
+    assert harness.compare(case, drifted) is harness.Status.CHANGED
+
+
+def test_snapshots_match_flags_structural_change():
+    a = {"fitted_segments": [{"type": "line"}, {"type": "arc"}]}
+    b = {"fitted_segments": [{"type": "line"}]}
+    assert not harness.snapshots_match(a, b)
+    assert not harness.snapshots_match(
+        {"fitted_segments": [{"type": "line"}]},
+        {"fitted_segments": [{"type": "arc"}]},
+    )
+
+
+def test_snapshots_match_rejects_type_mismatch_and_nan():
+    assert not harness.snapshots_match(1.0, "1.0")
+    assert not harness.snapshots_match(
+        {"v": [float("nan")]}, {"v": [float("nan")]}
+    )
+
+
+def _live_case_with_baseline(tmp_path, stem):
+    group = tmp_path / "cases" / "grp"
+    group.mkdir(parents=True, exist_ok=True)
+    (group / "printer.cfg").write_text("[printer]\n")
+    (group / f"{stem}.gcode").write_text("G1 X1\n")
+    cases = harness.discover_cases(tmp_path / "cases", tmp_path / "baselines")
+    for case in cases:
+        harness.write_baseline(case, _SNAPSHOT)
+    return cases
+
+
+def test_prune_removes_orphan_baseline(tmp_path):
+    cases = _live_case_with_baseline(tmp_path, "live")
+    orphan = tmp_path / "baselines" / "grp" / "gone.baseline.json.gz"
+    orphan.write_bytes(b"stale")
+
+    pruned = harness.prune_orphan_baselines(cases, tmp_path / "baselines")
+
+    assert pruned == [orphan]
+    assert not orphan.exists()
+    assert cases[0].baseline_path.exists()
+
+
+def test_prune_keeps_live_baselines(tmp_path):
+    cases = _live_case_with_baseline(tmp_path, "a")
+    cases = _live_case_with_baseline(tmp_path, "b")
+
+    pruned = harness.prune_orphan_baselines(cases, tmp_path / "baselines")
+
+    assert pruned == []
+    assert all(case.baseline_path.exists() for case in cases)
+
+
+def test_prune_removes_now_empty_group_dir(tmp_path):
+    baselines = tmp_path / "baselines"
+    dead = baselines / "dead"
+    dead.mkdir(parents=True)
+    (dead / "x.baseline.json.gz").write_bytes(b"stale")
+
+    pruned = harness.prune_orphan_baselines([], baselines)
+
+    assert len(pruned) == 1
+    assert not dead.exists()
