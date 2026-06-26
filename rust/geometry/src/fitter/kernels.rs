@@ -162,6 +162,7 @@ fn joint_refit(
         arc.u,
         arc.v,
         verts,
+        tol,
     ) else {
         return Ok(None);
     };
@@ -320,6 +321,39 @@ fn project_to_circle(origin: [f64; 3], radius: f64, p: [f64; 3]) -> [f64; 3] {
     add(origin, scale(normalize(sub(p, origin)), radius))
 }
 
+fn max_radial_dev(lines: &[&Line], origin: [f64; 3], radius: f64) -> f64 {
+    let mut worst = 0.0_f64;
+    for l in lines {
+        worst = worst.max((norm(sub(l.start, origin)) - radius).abs());
+    }
+    let last = lines[lines.len() - 1];
+    worst.max((norm(sub(last.point_at(last.s_len()), origin)) - radius).abs())
+}
+
+fn center_through_endpoints(
+    p0: [f64; 3],
+    p1: [f64; 3],
+    radius: f64,
+    ls_origin: [f64; 3],
+    plane_normal: [f64; 3],
+) -> Option<[f64; 3]> {
+    let chord = sub(p1, p0);
+    let c = norm(chord);
+    if c < BUDGET_EPS_MM || radius < 0.5 * c {
+        return None;
+    }
+    let mid = scale(add(p0, p1), 0.5);
+    let half = (radius * radius - 0.25 * c * c).sqrt();
+    let perp = normalize(cross(plane_normal, chord));
+    let a = madd(mid, half, perp);
+    let b = madd(mid, -half, perp);
+    Some(if norm(sub(a, ls_origin)) <= norm(sub(b, ls_origin)) {
+        a
+    } else {
+        b
+    })
+}
+
 fn spiral_dev(clo: &Clothoid, p: &EndPlan, o0: [f64; 3], r0: f64, pn: [f64; 3]) -> f64 {
     let n_line = normalize(cross(pn, p.neighbor_dir));
     let mut m = 0.0_f64;
@@ -343,6 +377,7 @@ fn interior_residual(origin: &[f64; 3], radius: f64, verts: &[[f64; 3]]) -> f64 
         .fold(0.0, f64::max)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn choose_circle(
     head: Option<&EndPlan>,
     tail: Option<&EndPlan>,
@@ -351,6 +386,7 @@ fn choose_circle(
     u: [f64; 3],
     v: [f64; 3],
     verts: &[[f64; 3]],
+    tol: f64,
 ) -> Option<([f64; 3], f64)> {
     let pn = normalize(cross(u, v));
     let radius = balanced_radius(r0, verts);
@@ -361,12 +397,45 @@ fn choose_circle(
             let origin = solve_center(h.normal, h.vertex, dh, t.normal, t.vertex, dt, o0, u, v)?;
             Some((origin, radius))
         }
-        (Some(e), None) | (None, Some(e)) => {
-            let d = spiral_center_dist(radius, e.spiral_dir, e.curve_sgn, e.turn, pn)?;
-            let origin = add(o0, scale(e.normal, d - dot(sub(o0, e.vertex), e.normal)));
-            Some((origin, radius))
-        }
+        (Some(e), None) => one_eased_center(e, verts[verts.len() - 1], radius, o0, pn, verts, tol),
+        (None, Some(e)) => one_eased_center(e, verts[0], radius, o0, pn, verts, tol),
         (None, None) => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn one_eased_center(
+    e: &EndPlan,
+    bare_vertex: [f64; 3],
+    radius: f64,
+    o0: [f64; 3],
+    pn: [f64; 3],
+    verts: &[[f64; 3]],
+    tol: f64,
+) -> Option<([f64; 3], f64)> {
+    let d = spiral_center_dist(radius, e.spiral_dir, e.curve_sgn, e.turn, pn)?;
+    let fallback = add(o0, scale(e.normal, d - dot(sub(o0, e.vertex), e.normal)));
+
+    let base = add(e.vertex, scale(e.normal, d));
+    let t = normalize(cross(pn, e.normal));
+    let w = sub(base, bare_vertex);
+    let wt = dot(w, t);
+    let disc = radius * radius - (dot(w, w) - wt * wt);
+    if disc < 0.0 {
+        return Some((fallback, radius));
+    }
+    let sq = disc.sqrt();
+    let c1 = madd(base, -wt + sq, t);
+    let c2 = madd(base, -wt - sq, t);
+    let anchored = if norm(sub(c1, o0)) <= norm(sub(c2, o0)) {
+        c1
+    } else {
+        c2
+    };
+    if interior_residual(&anchored, radius, verts) <= tol {
+        Some((anchored, radius))
+    } else {
+        Some((fallback, radius))
     }
 }
 
@@ -641,12 +710,21 @@ pub(super) fn reconstruct(facets: &[Move], tol: f64) -> Result<Option<Reconstruc
     if fit.residual > tol {
         return Ok(None);
     }
-    let (origin, rho) = (fit.origin, fit.radius);
+    let (mut origin, rho) = (fit.origin, fit.radius);
     if !(rho.is_finite() && rho > BUDGET_EPS_MM) {
         return Ok(None);
     }
     if max_sagitta(&lines, rho) > tol {
         return Ok(None);
+    }
+
+    let last = lines[lines.len() - 1];
+    let p1 = last.point_at(last.s_len());
+    if let Some(anchored) = center_through_endpoints(lines[0].start, p1, rho, origin, plane_normal)
+    {
+        if max_radial_dev(&lines, anchored, rho) <= tol {
+            origin = anchored;
+        }
     }
 
     let u = normalize(sub(lines[0].start, origin));

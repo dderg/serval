@@ -463,3 +463,117 @@ fn short_chain_passes_through() {
         assert_eq!(out.report.chains, 0, "{heart:?}");
     }
 }
+
+#[test]
+fn reconstructed_arc_endpoints_anchor_to_vertices() {
+    let r = 3.0;
+    let n = 12;
+    let mut verts = arc_vertices(r, n, PI / 2.0);
+    let center = [0.0, r, 0.0];
+    for k in 1..n {
+        let rad = sub(verts[k], center);
+        let len = (rad[0] * rad[0] + rad[1] * rad[1]).sqrt();
+        let push = 0.01 * if k % 2 == 0 { 1.0 } else { -1.0 } / len;
+        verts[k] = add(verts[k], scale(rad, push));
+    }
+    let moves: Vec<Move> = verts
+        .windows(2)
+        .enumerate()
+        .map(|(i, w)| seg((i + 1) as u32, 3000.0, 20.0, 200.0, w[0], w[1], 0.0))
+        .collect();
+    for heart in HEARTS {
+        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        assert_eq!(out.report.chains, 1, "{heart:?}");
+        let arc = arc_in(&out.moves);
+        assert!(
+            dist(arc.point_at(0.0), verts[0]) < 1e-9,
+            "{heart:?}: arc head must anchor to first vertex, gap {}",
+            dist(arc.point_at(0.0), verts[0])
+        );
+        assert!(
+            dist(arc.point_at(arc.s_len()), verts[n]) < 1e-9,
+            "{heart:?}: arc tail must anchor to last vertex, gap {}",
+            dist(arc.point_at(arc.s_len()), verts[n])
+        );
+    }
+}
+
+#[test]
+fn travel_endpoints_align_to_print() {
+    let p_in = seg(
+        1,
+        3000.0,
+        20.0,
+        200.0,
+        [0.0, 0.0, 0.0],
+        [10.0, 0.0, 0.0],
+        0.5,
+    );
+    let travel = seg(
+        2,
+        3000.0,
+        20.0,
+        200.0,
+        [10.0, 0.01, 0.0],
+        [20.0, 0.01, 0.0],
+        0.0,
+    );
+    let p_out = seg(
+        3,
+        3000.0,
+        20.0,
+        200.0,
+        [20.0, 0.0, 0.0],
+        [30.0, 0.0, 0.0],
+        0.5,
+    );
+    let aligned = super::align_travels(vec![p_in, travel, p_out]).unwrap();
+    assert_eq!(aligned.len(), 3, "no segments added");
+    let t = as_line(&aligned[1]);
+    assert!(
+        dist(t.start, [10.0, 0.0, 0.0]) < 1e-12,
+        "travel start snaps to previous print end: {:?}",
+        t.start
+    );
+    assert!(
+        dist(t.point_at(t.s_len()), [20.0, 0.0, 0.0]) < 1e-12,
+        "travel end snaps to next print start"
+    );
+    let worst = aligned
+        .windows(2)
+        .map(|w| {
+            let prev = w[0].segment.spatial.as_ref().unwrap();
+            let next = w[1].segment.spatial.as_ref().unwrap();
+            dist(prev.point_at(prev.s_len()), next.point_at(0.0))
+        })
+        .fold(0.0_f64, f64::max);
+    assert!(worst < 1e-12, "no C0 gaps after travel alignment: {worst}");
+}
+
+#[test]
+fn extruding_line_is_not_treated_as_travel() {
+    let p_in = seg(
+        1,
+        3000.0,
+        20.0,
+        200.0,
+        [0.0, 0.0, 0.0],
+        [10.0, 0.0, 0.0],
+        0.5,
+    );
+    let printing = seg(
+        2,
+        3000.0,
+        20.0,
+        200.0,
+        [10.0, 0.05, 0.0],
+        [20.0, 0.05, 0.0],
+        0.5,
+    );
+    let aligned = super::align_travels(vec![p_in, printing.clone()]).unwrap();
+    let kept = as_line(&aligned[1]);
+    assert!(
+        dist(kept.start, [10.0, 0.05, 0.0]) < 1e-12,
+        "an extruding line must not be repositioned"
+    );
+}

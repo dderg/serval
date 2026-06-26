@@ -3,11 +3,12 @@ use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, CurvatureProfile, Line, PathSegment, Segment};
 use crate::segment::FollowerDemand;
 
+use super::BUDGET_EPS_MM;
 use super::biclothoid::GeneralBlend;
 use super::heart::Heart;
 use super::kernels::{self, Reconstruction};
 use super::overlap;
-use super::vec3::dot;
+use super::vec3::{dist, dot};
 use super::{
     ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, JunctionPlan, UnblendReason,
     UnblendedJunction, blend_trim, classify_junction, emit_blend, emit_move, internal,
@@ -141,7 +142,47 @@ pub(super) fn fit(
         }
     }
 
+    let out = align_travels(out)?;
     Ok(FitOutcome { moves: out, report })
+}
+
+fn is_travel(m: &Move) -> bool {
+    matches!(m.segment.spatial, Some(Segment::Line(_)))
+        && !m.segment.followers.iter().any(|f| f.ratio.abs() > 1e-12)
+}
+
+fn align_travels(mut out: Vec<Move>) -> Result<Vec<Move>, FitError> {
+    let n = out.len();
+    for i in 0..n {
+        if !is_travel(&out[i]) {
+            continue;
+        }
+        let Some(Segment::Line(line)) = &out[i].segment.spatial else {
+            continue;
+        };
+        let line = line.clone();
+        let prev_end = (0..i).rev().find_map(|k| {
+            out[k]
+                .segment
+                .spatial
+                .as_ref()
+                .map(|s| s.point_at(s.s_len()))
+        });
+        let next_start =
+            (i + 1..n).find_map(|k| out[k].segment.spatial.as_ref().map(|s| s.point_at(0.0)));
+        let a = prev_end.unwrap_or(line.start);
+        let b = next_start.unwrap_or(line.point_at(line.s_len()));
+        if dist(a, line.start) <= BUDGET_EPS_MM
+            && dist(b, line.point_at(line.s_len())) <= BUDGET_EPS_MM
+        {
+            continue;
+        }
+        let new_line = Line::try_new(a, b).map_err(internal(out[i].source.start_line))?;
+        out[i].segment =
+            PathSegment::try_new(Segment::Line(new_line), out[i].segment.followers.clone())
+                .map_err(internal(out[i].source.start_line))?;
+    }
+    Ok(out)
 }
 
 fn detect_runs(
