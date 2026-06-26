@@ -41,7 +41,8 @@ use ethercat_rt::wire::{
     status_heartbeat_frame, stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
-    SlaveState, StopCaptureResponse, ERR_SDO_TRANSPORT, ERR_SDO_UNSUPPORTED_SIZE,
+    SdoReadResponse, SdoWriteResponse, SlaveState, StopCaptureResponse, ERR_SDO_TRANSPORT,
+    ERR_SDO_UNSUPPORTED_SIZE,
 };
 
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
