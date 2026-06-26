@@ -2508,6 +2508,7 @@ impl PyMotionEngine {
         kinematics_axes,
         cartesian_limits,
         arc_fit = None,
+        heart = None,
         max_extrude_only_velocity = None,
         max_extrude_only_accel = None,
     ))]
@@ -2521,6 +2522,7 @@ impl PyMotionEngine {
         kinematics_axes: Vec<String>,
         cartesian_limits: (f64, f64, f64, f64, f64, f64),
         arc_fit: Option<u32>,
+        heart: Option<String>,
         max_extrude_only_velocity: Option<f64>,
         max_extrude_only_accel: Option<f64>,
     ) -> PyResult<()> {
@@ -2625,6 +2627,7 @@ impl PyMotionEngine {
             }
             None => geometry::ChainFitConfig::default(),
         };
+        cfg.chain.heart = config::heart_kind(heart.as_deref()).map_err(PyValueError::new_err)?;
 
         *self
             .planner_config

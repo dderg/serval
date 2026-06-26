@@ -6,7 +6,7 @@ import struct
 from collections import defaultdict
 
 from . import motion_kinematics, stepper, structured_log
-from .arc_fit_config import arc_fit_from_config
+from .arc_fit_config import arc_fit_from_config, arc_fit_heart_from_config
 from .extras import servo_axis
 from .kinematics import extruder
 
@@ -778,6 +778,7 @@ class Motion:
 
     def _read_arc_fit(self, config):
         self.arc_fit = arc_fit_from_config(config)
+        self.arc_fit_heart = arc_fit_heart_from_config(config)
 
     def _read_limits(self, config):
         for key in self.UNSUPPORTED_LIMIT_KEYS:
@@ -1002,6 +1003,7 @@ class Motion:
                     self._square_corner_velocity,
                 ),
                 arc_fit=self.arc_fit,
+                heart=self.arc_fit_heart,
                 max_extrude_only_velocity=max_extrude_only_velocity,
                 max_extrude_only_accel=max_extrude_only_accel,
             )
