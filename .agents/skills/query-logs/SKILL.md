@@ -125,6 +125,20 @@ will backfill from Vector's checkpoint once it's healthy.
 `/select/logsql/query`. See `config/observability/vector.toml` and the design
 spec `docs/superpowers/specs/2026-05-31-observability-logging-pipeline-design.md`.
 
+## Not here: host-process coredumps
+
+This skill covers **structured logs** only; `mcu-diagnostics` covers **MCU**
+faults. Neither covers native **host-process coredumps**. When a host process
+crashes (Rust `motion-engine`/`ethercat-rt` threads, or the klippy `python`
+interpreter), the kernel writes a full ELF core to
+`~/printer_data/logs/coredumps/core.<exe>.<pid>.<time>` via `core_pattern` —
+**not** `systemd-coredump`, so `coredumpctl` and `/var/lib/systemd/coredump`
+are empty and LogsQL will not show them. Read one with
+`gdb <matching-binary> <core> -ex bt -ex 'thread apply all bt'` (the release
+build keeps symbols). These are large (~40–80 MB each) and accumulate
+unbounded, so a crash storm both fills the SD and shows up only as a gap in the
+structured stream around the crash `_time`.
+
 ## Optional: mcp-victorialogs
 
 If you prefer tool-calls over curl, `mcp-victorialogs` is a first-party MCP that
