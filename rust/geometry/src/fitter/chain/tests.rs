@@ -1,4 +1,4 @@
-use crate::fitter::{ChainFitConfig, fit_chain, fit_corners};
+use crate::fitter::{ChainFitConfig, UnblendReason, fit_chain, fit_corners};
 use crate::frontend::{Move, MoveContext, VelocityLimits, line_move};
 use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, Clothoid, CurvatureProfile, Line, Segment};
@@ -167,6 +167,32 @@ fn faceted_arc_with_leads(r: f64, n: usize, span: f64, lead: f64, e_per_mm: f64)
         .collect()
 }
 
+fn faceted_arc_with_sharp_leads(r: f64, n: usize, span: f64) -> Vec<Move> {
+    let verts = arc_vertices(r, n, span);
+    let mut moves = vec![seg(1, 3000.0, 20.0, 200.0, [0.0, -4.0, 0.0], verts[0], 0.0)];
+    moves.extend(verts.windows(2).enumerate().map(|(i, w)| {
+        seg(
+            (i + 2) as u32,
+            3000.0,
+            20.0,
+            200.0,
+            w[0],
+            w[1],
+            0.5 * dist(w[0], w[1]),
+        )
+    }));
+    moves.push(seg(
+        (n + 2) as u32,
+        3000.0,
+        20.0,
+        200.0,
+        verts[n],
+        add(verts[n], [4.0, 0.0, 0.0]),
+        0.0,
+    ));
+    moves
+}
+
 #[test]
 fn faceted_arc_reconstructs_to_bare_arc() {
     let moves = faceted_arc(3.0, 12, PI / 2.0, 3000.0, 20.0, 200.0, 0.5);
@@ -195,6 +221,7 @@ fn near_tangent_leads_get_a_curvature_easement() {
     let moves = faceted_arc_with_leads(3.0, 12, PI / 2.0, 4.0, 0.0);
     let out = fit_chain(&moves, cfg()).unwrap();
     assert_eq!(out.report.chains, 1);
+    assert!(out.report.unblended.is_empty());
 
     let i = out
         .moves
@@ -228,6 +255,38 @@ fn near_tangent_leads_get_a_curvature_easement() {
         (k_ratio - 1.0).abs() < 1e-3,
         "easement curvature matches the arc at the handoff, ratio {k_ratio}"
     );
+}
+
+#[test]
+fn uneased_arc_line_boundaries_pin_velocity_to_rest() {
+    let n = 12;
+    let moves = faceted_arc_with_sharp_leads(3.0, n, PI / 2.0);
+    let out = fit_chain(&moves, cfg()).unwrap();
+    assert_eq!(out.report.chains, 1);
+    assert!(!has_clothoid(&out.moves));
+    assert_eq!(
+        out.report
+            .unblended
+            .iter()
+            .map(|u| (u.line_no, u.reason))
+            .collect::<Vec<_>>(),
+        vec![
+            (2, UnblendReason::ArcIncident),
+            ((n + 2) as u32, UnblendReason::ArcIncident),
+        ]
+    );
+
+    let arc_idx = out
+        .moves
+        .iter()
+        .position(|m| matches!(m.segment.spatial, Some(Segment::Arc(_))))
+        .unwrap();
+    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    assert_eq!(plan.moves[arc_idx - 1].exit_v, 0.0);
+    assert_eq!(plan.moves[arc_idx].entry_v, 0.0);
+    assert_eq!(plan.moves[arc_idx].exit_v, 0.0);
+    assert_eq!(plan.moves[arc_idx + 1].entry_v, 0.0);
+    assert_eq!(plan.report.stops, 2);
 }
 
 #[test]

@@ -216,26 +216,23 @@ fn cruise_plateau_interior_not_bridged() {
 }
 
 #[test]
-fn short_overlap_move_falls_back_to_base_without_garbage() {
-    // A straight long enough for the base sweep to report reaching v_max, but
-    // shorter than 2x the jerk-limited accel distance (~31.6mm at j4000), is not
-    // jerk-feasible at the ceiling: the entry and exit roll-offs would overlap.
-    // We leave such a move on the base profile rather than splicing interleaved
-    // arcs. The base keeps its two cruise-touch steps (entry, exit) and nothing
-    // else — so a regression that re-enabled the overlapping arcs (many spurious
-    // steps) would trip this bound. (Real high-jerk configs never reach here.)
+fn short_would_overlap_move_is_one_smooth_sub_cruise_arc() {
+    // A straight long enough for the base sweep to *claim* it reaches v_max, yet
+    // shorter than the jerk-limited accel-up + brake-down distance (~31.6mm at
+    // j4000), cannot reach the ceiling and stop within its length — the entry and
+    // exit roll-offs would overlap. The analytic profile resolves this as a single
+    // sub-cruise S-curve: it peaks strictly below v_max with no tangential-accel
+    // steps. (The old planner instead touched the ceiling and kept two cruise-touch
+    // steps; that fallback is gone.)
     let samples = run_samples(MAX_V, ACCEL, JERK, &[[0.0, 0.0, 0.0], [25.0, 0.0, 0.0]]);
+    let peak = samples.iter().fold(0.0_f64, |m, p| m.max(p.v));
     assert!(
-        samples.iter().any(|p| p.v >= MAX_V - 1e-3),
-        "fixture must touch the ceiling"
+        peak < MAX_V - 1.0,
+        "25mm cannot reach v_max jerk-feasibly and brake to rest; must peak \
+         sub-cruise, got {peak}"
     );
-    let steps = accel_steps(&samples, EPS_A);
-    assert!(
-        steps.len() <= 2,
-        "short overlap move must fall back to the base profile (<=2 cruise-touch \
-         steps), not interleaved roll-off arcs; got {} steps: {steps:?}",
-        steps.len()
-    );
+    assert_no_step(&samples, EPS_A, "short would-overlap straight");
+    assert!(samples.iter().all(|p| p.a.abs() <= ACCEL + 1e-6));
 }
 
 #[test]

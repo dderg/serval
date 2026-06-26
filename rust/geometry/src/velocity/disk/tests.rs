@@ -83,6 +83,25 @@ fn clothoid_samples_respect_the_acceleration_disk() {
 }
 
 #[test]
+fn clothoid_total_acceleration_is_within_the_disk() {
+    // The emitted tangential accel `a` plus the centripetal `kappa v^2` must stay
+    // inside the acceleration disk — the jerk-ride bounds `a` by the disk budget,
+    // so feasibility holds without any post-hoc clamp masking it.
+    let accel = 1000.0;
+    let k = kin(0.0, 0.05, 4.0, accel, 80_000.0, 300.0);
+    let samples = sample_profile(&k, 250.0, 70.0, &single_move_anchors(250.0, 70.0), 1e-8).unwrap();
+    for &(s, v, a) in &samples {
+        let kappa = (k.kappa0 + k.sigma * s).abs();
+        let a_c = v * v * kappa;
+        let total = (a * a + a_c * a_c).sqrt();
+        assert!(
+            total <= accel + 1.0,
+            "total accel {total} exceeds a_max={accel} at s={s} (a_t={a}, a_c={a_c})"
+        );
+    }
+}
+
+#[test]
 fn sample_profile_is_deterministic() {
     let k = kin(0.0, 0.05, 4.0, 1000.0, 80_000.0, 300.0);
     let a = sample_profile(&k, 250.0, 70.0, &single_move_anchors(250.0, 70.0), 1e-8);

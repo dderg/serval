@@ -192,3 +192,70 @@ of silently shipping. This is the "fail loudly" half of the fix; the fitter trig
   as a case outcome — separate from this fix.
 - Root-cause **trigger** (biclothoid fit emitting sub-mm segments) remains open — the user's
   stated next thread.
+
+## Follow-up: 2026-06-25 #2
+
+### New Evidence
+
+- **Guard landed.** The bridge now fails loud: `RuntimeError: NegativeVelocity { line_no: 25, v: -0.03965… }`. `arc_fit/fillet.gcode` was renamed `…/fillet.gcode.skip` to keep the snapshot suite green. The aborting `v` (−0.03965) is bit-identical to the first negative sample found pre-guard (s≈187.835) — same defect.
+- **arc_fit threshold is NOT the lever (Confirmed).** Sweeping `arc_fit=(facet_len, max_angle)` over (2,12), (2,30), (2,45), (2,60), (5,60) yields the *identical* abort every time (`line_no 25`, `v=-0.03965…`). Widening arc_fit's per-junction angle cap does not capture the offending corner.
+- **Raw facet geometry (Confirmed).** 40 junctions; **35 of 40 turn >12°** (the configured arc_fit cap), mostly 15–30°, with 12 near-90° corners and one ~140° near-reversal. So arc_fit (≤12°/junction, co-circular run of ≥2) declines almost the whole fillet — but raising the cap still doesn't fix the failing corner, meaning that corner is rejected for a non-angle reason (isolated / not a co-circular run / long-line neighbour), and is blended by the **per-corner biclothoid**, not the chain path.
+
+### Additional Findings
+
+- **The clothoid length is sized by the junction-deviation budget**, `δ = scv²(√2−1)/accel = 5²·0.4142/1000 ≈ 0.0104 mm` (`fitter.rs:442-445`, consumed in `biclothoid::solve` `fitter/biclothoid.rs:32-40`). The biclothoid half-length scales with `δ`, producing 0.03–0.2 mm clothoids by design — small so the rounded corner stays within ~0.01 mm of the sharp vertex. This is correct corner geometry; it is simply far below the velocity bridge's jerk roll-off scale (`half_max ≈ v·2·accel/jerk ≈ 6 mm`, `disk.rs:617-620`).
+- **The defect reproduces on a single isolated tiny clothoid** — it does not require the dense chain. The chain (94/106 sub-mm segments) makes it pervasive, but `line_no 25` fails on its own.
+
+### Updated Hypotheses
+
+#### Hypothesis 2: arc_fit widening would consolidate the fillet and remove the bug — **Refuted**
+
+**Resolution:** Sweep above shows identical failure at every `max_angle`/`facet_len`. arc_fit tuning is a dead end for this corner.
+
+### Root-cause restatement (refined)
+
+Two layers, now sharply separated:
+
+1. **Fit layer (user's chosen fix site):** the per-corner biclothoid emits clothoids sized to the corner-deviation budget `δ ≈ 0.01 mm` → sub-mm arc-length segments. Correct geometry, but below the scale the velocity stage can resolve.
+2. **Velocity layer:** the jerk-bridge solver (`disk.rs build_run_bridge`) mis-solves across segments shorter than its roll-off scale and (pre-guard) emitted v<0; now aborts. A correct solver should never emit v<0 — at worst fall back to the base disk profile, which is provably ≥0.
+
+### Solution space (for discussion — not yet chosen)
+
+| # | Where | Idea | Trajectory impact | Cost | Verdict |
+|---|-------|------|-------------------|------|---------|
+| A | velocity | Bridge falls back to the base disk profile (provably ≥0) when no feasible jerk arc exists, instead of splicing a spurious arc; keep the abort only for truly non-finite. | None to path; one transition loses jerk-rounding (small jerk spike over a sub-mm/ sub-ms window). | Low–med | Strong: geometry-agnostic correctness fix. |
+| B | fit | Floor clothoid length at `L_min` tied to the roll-off scale, accepting >δ corner deviation. | Tighter corners cut more than δ → dimensional error. Stubs still tiny. | Low | Weak: violates deviation tolerance. |
+| C | fit | Coalesce a run of adjacent sub-threshold corners (+ sub-mm line stubs) into ONE blend spanning the cluster (generalised arc_fit / clothoid-arc-clothoid for non-co-circular runs). | Best: fewer, larger, smooth features; tightest motion; fewer MCU moves. | High | Strong for the chained case; doesn't help a truly isolated corner. |
+| D | fit | Below a feasible blend size, leave the corner unblended (sharp), velocity-capped by junction deviation. | Velocity dips to ~scv at every facet → throughput regression (violates the non-negotiable) unless combined with C. | Low | Weak alone. |
+| E | velocity | Treat a maximal run of sub-mm members as one bridging unit (coalesce members in `reconstruct_run`). | None to path. | Med | Overlaps A; A is simpler. |
+
+**Leaning:** **A** (correctness floor — the planner must never emit negative speed; base profile is the safe, non-negative, still-tight fallback) as the immediate fix, with **C** (corner coalescing) as the throughput/quality follow-up that removes the wasteful micro-segment chains. B and D trade trajectory quality for simplicity and conflict with the throughput non-negotiable.
+
+**Open question for A:** falling back to base reintroduces an accel step (jerk spike) at that transition. Need to confirm that's acceptable over a sub-mm/sub-ms window, or bound the fallback's jerk.
+
+### Backlog Changes
+
+- Quantify the failing clothoid's length/curvature (`kappa_peak`, `sigma`, half-length) vs the bridge roll-off scale, to set `L_min` (B) or confirm A's necessity. (Pipeline aborts before returning — needs a Rust-side probe or temporary guard bypass.)
+
+## Follow-up: 2026-06-25 #3
+
+### Architectural finding: the failure is isolated to the per-sample accel-smoothing layer
+
+Reading `velocity.rs::plan_velocity_warm_start`:
+
+- **Seam velocities `v[k]` are already jerk-limited and correct.** The forward (`velocity.rs:276-290`) and backward (`velocity.rs:292-301`) sweeps each take `min(disk_reach, scurve::reach_v(run_start_v, cum_arc+len, accel, jerk))` — i.e. jerk-limited reachability accumulated from the run anchor. So the junction speeds respect jerk and are non-negative.
+- **The failure lives only in `reconstruct_run` → `reconstruct_flat` → `build_run_bridge`** — the layer that fills the per-sample `(s, v, a)` *inside* a run and makes `a` continuous (jerk-limited) across the interior. Base samples are jerk-aware and ≥0; the **bridge arcs** (the accel-continuity patches) are the sole source of v<0 (`velocity.rs:367` now aborts).
+
+### Option A (base-profile fallback) is disqualified
+
+User principle: the planner never emits an instantaneous acceleration step ("we don't produce infinite acceleration jumps like mainline — it's rude"). The base (un-bridged) profile has accel steps where forward meets backward / ceiling; falling back to it reintroduces exactly that step = a jerk impulse. So A (and E, and D) all violate the no-accel-step invariant. **Retract A.** The velocity-layer fix must stay C¹-in-accel.
+
+### The residual gap C cannot close
+
+C (arc/clothoid-arc-clothoid consolidation) removes micro-segments where the facets approximate a smooth arc. It cannot help when the micro-segments are the *real* geometry (rapid direction changes that don't fit one arc). That residual must be handled in the velocity layer — and, per the no-accel-step invariant, by a method that is jerk-continuous and non-negative *by construction*, not by patching.
+
+### Refined recommendation
+
+- **C (fit):** consolidate faceted arcs → fewest, largest segments. Best for throughput / MCU-queue. (User already has a branch.)
+- **Velocity (residual):** replace the discrete per-transition bridge-patching in the sample reconstruction with a **continuous jerk-limited integration** (forward/backward in (v, a) phase space, control = ±jerk_max clamped to the disk/curvature ceiling and to v≥0). It is accel-continuous and non-negative by construction and degrades gracefully on dense curvature (v simply rides *below* a ceiling it cannot track within the jerk budget — which the discrete bridge model cannot express). Physically, rapid direction changes force low v anyway (a_n = κv² ceiling), so the integrated answer is "low and smooth," not exotic.
+- C and the velocity fix are **complementary**: C for the common faceted-arc case, the integration for the genuine non-arc micro case. Bridge-hardening (clamp v≥0 + merge overlapping arcs) is a fragile stopgap, not the SOTA answer.

@@ -6,7 +6,7 @@ use std::f64::consts::{PI, SQRT_2};
 use crate::GeometryError;
 use crate::frontend::{Move, VelocityLimits};
 use crate::path::lowering::PositionProfile;
-use crate::path::{CurvatureProfile, Line, PathSegment, Segment};
+use crate::path::{Arc, CurvatureProfile, Line, PathSegment, Segment};
 use crate::segment::FollowerDemand;
 
 const COLLINEAR_EPS_RAD: f64 = 1e-3;
@@ -273,21 +273,81 @@ pub fn fit_chain_with_head_restore(
             }
         }
 
-        if i < plans.len() && !junction_internal(&runs, i) && !run_boundary(&runs, i) {
-            match &plans[i] {
-                JunctionPlan::Blend(bi) => {
-                    report.blended += 1;
-                    emit_blend(&mut out, bi, m, &moves[i + 1])?;
-                }
-                JunctionPlan::Unblended(reason) => report.unblended.push(UnblendedJunction {
+        if i < plans.len() && !junction_internal(&runs, i) {
+            if let Some(reason) = run_boundary_unblend(&runs, moves, i, config.corner) {
+                report.unblended.push(UnblendedJunction {
                     line_no: moves[i + 1].source.start_line,
-                    reason: *reason,
-                }),
+                    reason,
+                });
+            } else if !run_boundary(&runs, i) {
+                match &plans[i] {
+                    JunctionPlan::Blend(bi) => {
+                        report.blended += 1;
+                        emit_blend(&mut out, bi, m, &moves[i + 1])?;
+                    }
+                    JunctionPlan::Unblended(reason) => report.unblended.push(UnblendedJunction {
+                        line_no: moves[i + 1].source.start_line,
+                        reason: *reason,
+                    }),
+                }
             }
         }
     }
 
     Ok(FitOutcome { moves: out, report })
+}
+
+fn run_boundary_unblend(
+    runs: &[chain::ChainRun],
+    moves: &[Move],
+    j: usize,
+    config: CornerFitConfig,
+) -> Option<UnblendReason> {
+    for r in runs {
+        if r.start > 0 && j == r.start - 1 {
+            return r
+                .recon
+                .up
+                .is_empty()
+                .then(|| arc_boundary_unblend(&moves[j], &r.recon.arc, true, config))
+                .flatten();
+        }
+        if j == r.end {
+            return r
+                .recon
+                .down
+                .is_empty()
+                .then(|| arc_boundary_unblend(&moves[j + 1], &r.recon.arc, false, config))
+                .flatten();
+        }
+    }
+    None
+}
+
+fn arc_boundary_unblend(
+    neighbor: &Move,
+    arc: &Arc,
+    head: bool,
+    config: CornerFitConfig,
+) -> Option<UnblendReason> {
+    let Some(spatial) = &neighbor.segment.spatial else {
+        return Some(UnblendReason::NonSpatial);
+    };
+    let Segment::Line(line) = spatial else {
+        return Some(UnblendReason::ArcIncident);
+    };
+    let line_t = if head {
+        line.heading_at(line.s_len())
+    } else {
+        line.heading_at(0.0)
+    };
+    let arc_t = if head {
+        arc.heading_at(0.0)
+    } else {
+        arc.heading_at(arc.s_len())
+    };
+    let theta = dot(line_t, arc_t).clamp(-1.0, 1.0).acos();
+    (theta > config.theta_min_rad).then_some(UnblendReason::ArcIncident)
 }
 
 fn emit_reconstruction(
