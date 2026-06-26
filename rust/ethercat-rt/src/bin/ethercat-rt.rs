@@ -46,7 +46,7 @@ static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 /// Below the DC thread (default 80) so the cycle always preempts mailbox
 /// work, and below Linux threaded-IRQ handlers (50) so NIC frame delivery
-/// preempts SOEM's receive busy-poll.
+/// preempts the master's receive busy-poll.
 const MAILBOX_RT_PRIO: i32 = 40;
 
 extern "C" fn on_sigterm(_: libc::c_int) {

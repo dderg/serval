@@ -81,8 +81,8 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **MCU boundary integration is NOT in CI.** The `sim` CI job explicitly excludes `needs_renode` and `needs_hardware` (`scripts/ci.sh:180`). Renode dual-board sim and bench flashing (Neptune/Trident) are **manual** verification — do not assume `cargo nextest` covers MCU integration.
 
 #### EtherCAT endpoint (`rust/ethercat-rt`)
-- **`--features hw` is opt-in** and builds against SOEM on the Pi (`SOEM_DIR`/`SOEM_LIB_DIR` default to `~/ethercat/SOEM`). Never built in CI. The stub binary `ethercat-rt-stub` (no `--features`) is the CI-able path and **must mirror the hw FFI surface** so a stub build failure catches drift.
-- **Missing SOEM → cargo link error** against `-lsoem` at build. **Missing `setcap` → runtime `EPERM`** on raw socket creation (not a build error). The hw binary must fail loudly at startup if caps are missing.
+- **`--features hw` is opt-in** and builds the IgH (EtherLab) backend on the Pi (`csrc/libecrt_igh.c`, links `-lethercat`; `IGH_DIR`/`IGH_LIB_DIR` default to `/opt/etherlab`). IgH is the only EtherCAT master backend — SOEM was removed. Never built in CI. The stub binary `ethercat-rt-stub` (no `--features`) is the CI-able path and **must mirror the hw FFI surface** so a stub build failure catches drift.
+- **Missing libethercat → cargo link error** against `-lethercat` at build. **Missing `setcap` → runtime `EPERM`** on raw socket creation (not a build error). The hw binary must fail loudly at startup if caps are missing.
 - **`make -f Makefile.rust setcap-ethercat`** (sudo, once per rebuild) grants `cap_net_raw,cap_sys_nice,cap_ipc_lock+ep` so the endpoint runs unprivileged (raw socket, RT sched, mlockall).
 
 ### Testing Rules
