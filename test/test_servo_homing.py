@@ -28,12 +28,13 @@ class FakeRailConfig:
     error = RuntimeError
     _UNSET = object()
 
-    def __init__(self, name, options):
+    def __init__(self, name, options, printer=None):
         self._name = name
         self._options = dict(options)
+        self._printer = printer
 
     def get_printer(self):
-        return None
+        return self._printer
 
     def get_name(self):
         return self._name
@@ -534,3 +535,136 @@ def test_guarded_trip_stepper_rail_failure_skips_servo_disable():
     with pytest.raises(RuntimeError, match="trip move failed"):
         run_guarded_trip(engine, se, None, None, trip)
     assert se.calls == []
+
+
+class FakePins:
+    def __init__(self):
+        self.chips = {}
+
+    def register_chip(self, name, obj):
+        self.chips[name] = obj
+
+
+class FakeArmEngine:
+    def __init__(self):
+        self.armed = []
+        self.disarmed = []
+
+    def arm_sensorless_endstop(
+        self, handle, endstop_id, torque_trip_tenth_pct, enable
+    ):
+        self.armed.append((handle, endstop_id, torque_trip_tenth_pct, enable))
+
+    def disarm_sensorless_endstop(self, handle, endstop_id):
+        self.disarmed.append((handle, endstop_id))
+
+
+class FakeNode:
+    def __init__(self, handle):
+        self._handle = handle
+
+    def get_engine_handle(self):
+        return self._handle
+
+
+class FakeProviderPrinter:
+    _RAISE = object()
+
+    def __init__(self, node_handle=7):
+        self._objects = {
+            "pins": FakePins(),
+            "motion_engine": FakeArmEngine(),
+            "ethercat_node z_drive": FakeNode(node_handle),
+        }
+
+    def lookup_object(self, name, default=_RAISE):
+        if name in self._objects:
+            return self._objects[name]
+        if default is not FakeProviderPrinter._RAISE:
+            return default
+        raise RuntimeError("no object %r" % (name,))
+
+    def add_object(self, name, obj):
+        self._objects[name] = obj
+
+    def command_error(self, msg):
+        return RuntimeError(msg)
+
+
+def make_servo_rail_with_printer(printer, extra=()):
+    axis_options = dict(AXIS_Z_OPTIONS)
+    axis_options["endstop_pin"] = "servo_z:" + servo_axis.VIRTUAL_ENDSTOP_PIN
+    motor_options = dict(MOTOR_Z_OPTIONS)
+    for key, value in dict(extra).items():
+        if key in AXIS_KEYS:
+            axis_options[key] = value
+        else:
+            motor_options[key] = value
+    return servo_axis.ServoRail(
+        FakeRailConfig("axis z", axis_options, printer=printer),
+        FakeRailConfig("motor z_drive", motor_options, printer=printer),
+    )
+
+
+def _virtual_pin_params():
+    return {
+        "pin": servo_axis.VIRTUAL_ENDSTOP_PIN,
+        "invert": False,
+        "pullup": False,
+    }
+
+
+def test_chip_registered_on_construction():
+    printer = FakeProviderPrinter()
+    make_servo_rail_with_printer(printer)
+    assert "servo_z" in printer.lookup_object("pins").chips
+
+
+def test_setup_motion_endstop_returns_virtual_endstop():
+    printer = FakeProviderPrinter(node_handle=7)
+    rail = make_servo_rail_with_printer(printer)
+    es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
+    assert es.endstop_id >= 3
+    assert es.engine_mcu_handle() == 7
+    assert es.query_endstop(0.0) is False
+
+
+def test_setup_motion_endstop_rejects_wrong_pin():
+    rail = make_servo_rail_with_printer(FakeProviderPrinter())
+    bad = {"pin": "z_virtual_endstop", "invert": False, "pullup": False}
+    with pytest.raises(Exception):
+        rail.setup_motion_endstop(bad, 2)
+
+
+def test_setup_motion_endstop_rejects_wrong_axis():
+    rail = make_servo_rail_with_printer(FakeProviderPrinter())
+    with pytest.raises(Exception):
+        rail.setup_motion_endstop(_virtual_pin_params(), 0)
+
+
+def test_trip_move_begin_arms_engine_with_homing_torque_cap():
+    printer = FakeProviderPrinter(node_handle=7)
+    rail = make_servo_rail_with_printer(
+        printer, extra={"homing_max_torque": 50.0}
+    )
+    es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
+    rail.trip_move_begin({"endstop": es})
+    engine = printer.lookup_object("motion_engine")
+    assert engine.armed == [(7, es.endstop_id, 500, True)]
+
+
+def test_trip_move_end_disarms_engine():
+    printer = FakeProviderPrinter(node_handle=7)
+    rail = make_servo_rail_with_printer(printer)
+    es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
+    rail.trip_move_end({"endstop": es})
+    engine = printer.lookup_object("motion_engine")
+    assert engine.disarmed == [(7, es.endstop_id)]
+
+
+def test_trip_move_begin_raises_when_no_engine_handle():
+    printer = FakeProviderPrinter(node_handle=None)
+    rail = make_servo_rail_with_printer(printer)
+    es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
+    with pytest.raises(Exception):
+        rail.trip_move_begin({"endstop": es})

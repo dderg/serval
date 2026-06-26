@@ -151,3 +151,67 @@ fn resonance_buzz_surfaces_nonzero_result() {
         -1
     );
 }
+
+fn spawn_arm_endpoint(
+    mut peer: UnixStream,
+    result: i32,
+) -> std::sync::mpsc::Receiver<ArmSensorlessEndstop> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut demux = Demuxer::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = match peer.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            let (frames, _e) = demux.feed_slice(&buf[..n]);
+            for f in frames {
+                if let Frame::Kalico { payload, .. } = f {
+                    let (hdr, body) =
+                        decode_message_header(&payload).expect("valid message header");
+                    let msg = ArmSensorlessEndstop::decode(body)
+                        .expect("valid ArmSensorlessEndstop body");
+                    let _ = tx.send(msg);
+                    let mut out = encode_message_header(
+                        MessageKind::ArmSensorlessEndstopResponse,
+                        MESSAGE_VERSION_DEFAULT,
+                        hdr.correlation_id,
+                    )
+                    .to_vec();
+                    out.extend_from_slice(
+                        &ArmSensorlessEndstopResponse { result }.encoded_to_vec(),
+                    );
+                    peer.write_all(&encode_frame(CHANNEL_CONTROL, &out))
+                        .unwrap();
+                    return;
+                }
+            }
+        }
+    });
+    rx
+}
+
+#[test]
+fn arm_sensorless_endstop_round_trips_args_and_result() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let rx = spawn_arm_endpoint(server, 0);
+    let conn = McuSerialConn::from_stream(client).expect("from_stream");
+    let result = send_arm_sensorless_endstop(&conn, 4, 500, true).expect("call");
+    assert_eq!(result, 0);
+    let seen = rx.recv().expect("endpoint saw the command");
+    assert_eq!(seen.endstop_id, 4);
+    assert_eq!(seen.torque_trip_tenth_pct, 500);
+    assert_eq!(seen.enable, 1);
+}
+
+#[test]
+fn arm_sensorless_endstop_surfaces_nonzero_result() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let _rx = spawn_arm_endpoint(server, -360);
+    let conn = McuSerialConn::from_stream(client).expect("from_stream");
+    assert_eq!(
+        send_arm_sensorless_endstop(&conn, 3, 0, true).expect("call"),
+        -360
+    );
+}

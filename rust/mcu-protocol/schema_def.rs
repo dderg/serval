@@ -148,6 +148,29 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         ],
     },
     SchemaMessage {
+        type_tag: 0x006E,
+        name: "ArmSensorlessEndstop",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "endstop_id", ty: "u8" },
+            SchemaField {
+                name: "torque_trip_tenth_pct",
+                ty: "u16",
+            },
+            SchemaField { name: "enable", ty: "u8" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x006F,
+        name: "ArmSensorlessEndstopResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+        ],
+    },
+    SchemaMessage {
         type_tag: 0x0070,
         name: "SetTorque",
         version: 1,

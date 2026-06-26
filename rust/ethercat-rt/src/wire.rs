@@ -1,12 +1,12 @@
 use mcu_protocol::bootstrap::{IdentifyResponse, IDENTIFY_RESPONSE_BODY_LEN};
 use mcu_protocol::codec::{Decode, Encode};
 use mcu_protocol::messages::{
-    ClaimHandshakeReply, MessageKind, MotorSample, MotorStateResponse, PushPieces,
-    PushPiecesResponse, ResonanceBuzz, ResonanceBuzzResponse, RestoreDriveLimitsResponse,
-    ResumeStreamResponse, RuntimeCapsResponse, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SeedServoHome, SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse,
-    SetTorque, SetTorqueResponse, StartCapture, StartCaptureResponse, StatusHeartbeat,
-    StopCaptureResponse, StopResponse,
+    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, ClaimHandshakeReply, EndstopTrip,
+    MessageKind, MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse, ResonanceBuzz,
+    ResonanceBuzzResponse, RestoreDriveLimitsResponse, ResumeStreamResponse, RuntimeCapsResponse,
+    SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StartCapture,
+    StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse,
 };
 use mcu_protocol::MCU_CHANNEL_PIECES;
 use mcu_transport::frame::{encode_frame, CHANNEL_CONTROL, CHANNEL_EVENTS};
@@ -60,6 +60,10 @@ pub enum Command {
     SeedServoHome {
         correlation_id: u32,
         home_q16: i32,
+    },
+    ArmSensorlessEndstop {
+        correlation_id: u32,
+        msg: ArmSensorlessEndstop,
     },
     ResonanceBuzz {
         correlation_id: u32,
@@ -152,6 +156,13 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
             Ok(Command::SeedServoHome {
                 correlation_id: cid,
                 home_q16: msg.home_q16,
+            })
+        }
+        Some(MessageKind::ArmSensorlessEndstop) => {
+            let msg = ArmSensorlessEndstop::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::ArmSensorlessEndstop {
+                correlation_id: cid,
+                msg,
             })
         }
         Some(MessageKind::ResonanceBuzz) => {
@@ -269,6 +280,23 @@ pub fn restore_drive_limits_response_frame(cid: u32, result: i32) -> Vec<u8> {
 pub fn seed_servo_home_response_frame(cid: u32, result: i32) -> Vec<u8> {
     let body = SeedServoHomeResponse { result }.encoded_to_vec();
     control_frame(MessageKind::SeedServoHomeResponse, cid, &body)
+}
+
+pub fn arm_sensorless_endstop_response_frame(cid: u32, result: i32) -> Vec<u8> {
+    let body = ArmSensorlessEndstopResponse { result }.encoded_to_vec();
+    control_frame(MessageKind::ArmSensorlessEndstopResponse, cid, &body)
+}
+
+pub fn endstop_trip_frame(endstop_id: u8, trip_clock: u64) -> Vec<u8> {
+    let body = EndstopTrip {
+        endstop_id,
+        trip_clock,
+    }
+    .encoded_to_vec();
+    let mut payload =
+        encode_message_header(MessageKind::EndstopTrip, MESSAGE_VERSION_DEFAULT, 0).to_vec();
+    payload.extend_from_slice(&body);
+    encode_frame(CHANNEL_EVENTS, &payload)
 }
 
 pub fn resonance_buzz_response_frame(cid: u32, result: i32) -> Vec<u8> {
