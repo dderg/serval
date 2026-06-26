@@ -30,13 +30,15 @@ extern "C" {
         cycle_ns: i64,
         rt_cpu: c_int,
         rt_prio: c_int,
+        slave_positions: *const i32,
+        num_slaves: c_int,
     ) -> c_int;
 
     pub fn ec_rt_bringup_finish() -> c_int;
 
-    pub fn ec_rt_enable() -> c_int;
+    pub fn ec_rt_enable(slave: c_int) -> c_int;
 
-    pub fn ec_rt_run_homing() -> c_int;
+    pub fn ec_rt_run_homing(slave: c_int) -> c_int;
 
     pub fn ec_rt_dump_al_state();
 
@@ -44,35 +46,37 @@ extern "C" {
 
     pub fn ec_rt_park_cycle(toff_ns: *mut i64) -> c_int;
 
-    pub fn ec_rt_al_status(state: *mut u16, alstatuscode: *mut u16);
+    pub fn ec_rt_al_status(slave: c_int, state: *mut u16, alstatuscode: *mut u16);
 
-    pub fn ec_rt_set_target_position(counts: i32);
+    pub fn ec_rt_set_target_position(slave: c_int, counts: i32);
 
-    pub fn ec_rt_get_position_actual() -> i32;
+    pub fn ec_rt_get_position_actual(slave: c_int) -> i32;
 
-    pub fn ec_rt_get_velocity_actual() -> i32;
+    pub fn ec_rt_get_velocity_actual(slave: c_int) -> i32;
 
-    pub fn ec_rt_get_statusword() -> u16;
+    pub fn ec_rt_get_statusword(slave: c_int) -> u16;
 
-    pub fn ec_rt_get_error_code() -> u16;
+    pub fn ec_rt_get_error_code(slave: c_int) -> u16;
 
-    pub fn ec_rt_get_following_error() -> i32;
+    pub fn ec_rt_get_following_error(slave: c_int) -> i32;
 
-    pub fn ec_rt_set_velocity_offset(counts_per_s: i32);
+    pub fn ec_rt_set_velocity_offset(slave: c_int, counts_per_s: i32);
 
-    pub fn ec_rt_set_torque_offset(tenths_pct: i16);
+    pub fn ec_rt_set_torque_offset(slave: c_int, tenths_pct: i16);
 
-    pub fn ec_rt_get_torque_actual() -> i16;
+    pub fn ec_rt_get_torque_actual(slave: c_int) -> i16;
 
     pub fn ec_rt_read_limits(
+        slave: c_int,
         ferr_counts: *mut u32,
         ferr_timeout_ms: *mut u16,
         torque_tenth_pct: *mut u16,
     ) -> c_int;
 
-    pub fn ec_rt_write_limits(ferr_counts: u32, torque_tenth_pct: u16) -> c_int;
+    pub fn ec_rt_write_limits(slave: c_int, ferr_counts: u32, torque_tenth_pct: u16) -> c_int;
 
     pub fn ec_rt_sdo_read(
+        slave: c_int,
         index: u16,
         sub: u8,
         buf: *mut u8,
@@ -81,6 +85,7 @@ extern "C" {
     ) -> c_int;
 
     pub fn ec_rt_sdo_write(
+        slave: c_int,
         index: u16,
         sub: u8,
         buf: *const u8,
@@ -88,9 +93,9 @@ extern "C" {
         abort_code: *mut u32,
     ) -> c_int;
 
-    pub fn ec_rt_disable();
+    pub fn ec_rt_disable(slave: c_int);
 
     pub fn ec_rt_shutdown();
 
-    pub fn ec_rt_get_telemetry(out: *mut EcTelemetry);
+    pub fn ec_rt_get_telemetry(slave: c_int, out: *mut EcTelemetry);
 }

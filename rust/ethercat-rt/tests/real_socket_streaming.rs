@@ -4,8 +4,10 @@ use std::thread;
 use std::time::Duration;
 
 use ethercat_rt::curves::AXIS_RING_CAPACITY;
-use ethercat_rt::curves::NUM_AXES;
 use ethercat_rt::server::FrameServer;
+
+/// The stub is single-drive; this test asserts its single-axis caps.
+const NUM_AXES: usize = 1;
 use ethercat_rt::wire::{
     identify_response_frame, push_pieces_response_frame, runtime_caps_response_frame,
     status_heartbeat_frame, Command,

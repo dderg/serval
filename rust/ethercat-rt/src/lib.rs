@@ -1,6 +1,7 @@
 pub mod buzz;
 pub mod capture;
 pub mod claim;
+pub mod cli;
 pub mod clock;
 pub mod curves;
 pub mod dynamics;
