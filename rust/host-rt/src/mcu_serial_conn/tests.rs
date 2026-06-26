@@ -226,6 +226,61 @@ fn dispatch_frame_passes_fault_code_to_callback() {
     stop.store(true, Ordering::Release);
 }
 
+fn make_endstop_trip_frame(endstop_id: u8, trip_clock: u64) -> Vec<u8> {
+    let body = EndstopTrip {
+        endstop_id,
+        trip_clock,
+    }
+    .encoded_to_vec();
+    let mut payload =
+        encode_message_header(MessageKind::EndstopTrip, MESSAGE_VERSION_DEFAULT, 0).to_vec();
+    payload.extend_from_slice(&body);
+    encode_frame(CHANNEL_EVENTS, &payload)
+}
+
+#[test]
+fn endstop_trip_event_reaches_trip_callback() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let trip_frame = make_endstop_trip_frame(4, 123_456_789);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_w = Arc::clone(&stop);
+    thread::spawn(move || {
+        let mut peer = server;
+        while !stop_w.load(Ordering::Acquire) {
+            if peer.write_all(&trip_frame).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+
+    let conn = McuSerialConn::from_stream(client).expect("from_stream");
+    let got = Arc::new(Mutex::new(None::<(u8, u64)>));
+    let got_w = Arc::clone(&got);
+    conn.attach_endstop_trip_callback(Arc::new(move |endstop_id: u8, trip_clock: u64| {
+        let mut g = got_w.lock().unwrap_or_else(|p| p.into_inner());
+        *g = Some((endstop_id, trip_clock));
+    }));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        {
+            let g = got.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some((endstop_id, trip_clock)) = *g {
+                assert_eq!(endstop_id, 4);
+                assert_eq!(trip_clock, 123_456_789);
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "endstop trip callback never fired"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    stop.store(true, Ordering::Release);
+}
+
 /// Streams a fixed heartbeat continuously (no reply path). Returns a stop
 /// flag the caller sets to terminate the writer + drop the socket.
 fn spawn_heartbeat_stream(peer: UnixStream, retired: &[u32]) -> Arc<AtomicBool> {

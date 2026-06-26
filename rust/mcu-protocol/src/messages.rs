@@ -24,6 +24,8 @@ pub enum MessageKind {
     StopCaptureResponse = 0x006B,
     ResonanceBuzz = 0x006C,
     ResonanceBuzzResponse = 0x006D,
+    ArmSensorlessEndstop = 0x006E,
+    ArmSensorlessEndstopResponse = 0x006F,
     SetTorque = 0x0070,
     SetTorqueResponse = 0x0071,
     Stop = 0x0072,
@@ -67,6 +69,8 @@ impl MessageKind {
             0x006B => Self::StopCaptureResponse,
             0x006C => Self::ResonanceBuzz,
             0x006D => Self::ResonanceBuzzResponse,
+            0x006E => Self::ArmSensorlessEndstop,
+            0x006F => Self::ArmSensorlessEndstopResponse,
             0x0070 => Self::SetTorque,
             0x0071 => Self::SetTorqueResponse,
             0x0072 => Self::Stop,
@@ -631,6 +635,50 @@ impl Decode for StopCaptureResponse {
             result: get_i32(c)?,
             samples: get_u64(c)?,
             overflow_cycle: get_u64(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArmSensorlessEndstop {
+    pub endstop_id: u8,
+    pub torque_trip_tenth_pct: u16,
+    pub enable: u8,
+}
+
+impl Encode for ArmSensorlessEndstop {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.endstop_id);
+        put_u16(out, self.torque_trip_tenth_pct);
+        put_u8(out, self.enable);
+    }
+}
+
+impl Decode for ArmSensorlessEndstop {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            endstop_id: get_u8(c)?,
+            torque_trip_tenth_pct: get_u16(c)?,
+            enable: get_u8(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArmSensorlessEndstopResponse {
+    pub result: i32,
+}
+
+impl Encode for ArmSensorlessEndstopResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+    }
+}
+
+impl Decode for ArmSensorlessEndstopResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
         })
     }
 }
