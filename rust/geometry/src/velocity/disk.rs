@@ -599,11 +599,75 @@ fn interp_flat(flat: &[(f64, f64, f64)], s: f64) -> Option<(f64, f64)> {
     Some((lo.1 + t * (hi.1 - lo.1), lo.2 + t * (hi.2 - lo.2)))
 }
 
+/// A run is straight under a single flat ceiling when every member has zero
+/// curvature and shares the same ceiling, acceleration, and jerk. Such a run is
+/// one analytic triple-limited profile from the entry anchor to the exit anchor,
+/// so it reconstructs in closed form (`profile::plan`) instead of on the grid.
+fn flat_ceiling_run(members: &[RunMember]) -> Option<(f64, f64, f64)> {
+    let head = members[0].kin;
+    let (ceiling, accel, jerk) = (head.flat_ceiling, head.accel, head.jerk);
+    for m in members {
+        let k = m.kin;
+        let straight = k.kappa0.abs() <= KAPPA_EPS && k.sigma.abs() <= KAPPA_EPS;
+        let uniform = k.flat_ceiling == ceiling && k.accel == accel && k.jerk == jerk;
+        if !(straight && uniform) {
+            return None;
+        }
+    }
+    Some((ceiling, accel, jerk))
+}
+
+/// Reconstruct a straight constant-ceiling run from its analytic profile. The
+/// profile is built once across the whole run from the entry anchor to the exit
+/// anchor; each member reads `(v, a)` from it at its own arc-length offset, so a
+/// collinear seam is C1-continuous by construction — both sides read the same
+/// profile, and the seam velocity is the profile's (the jerk-feasible speed that
+/// paces to land on a ceiling at `a = 0`), never the raw velocity-limit ceiling
+/// the seam sweep records as an upper bound.
+fn reconstruct_straight(
+    members: &[RunMember],
+    run_start_v: f64,
+    ceiling: f64,
+    accel: f64,
+    jerk: f64,
+) -> Vec<Vec<(f64, f64, f64)>> {
+    let length: f64 = members.iter().map(|m| m.kin.length).sum();
+    let exit_v = members[members.len() - 1].exit_v;
+    let profile = super::profile::plan(run_start_v, exit_v, length, ceiling, accel, jerk);
+    members
+        .iter()
+        .map(|m| {
+            let len = m.kin.length;
+            let steps =
+                ((len / GRID_STEP_MM).ceil() as usize).clamp(GRID_MIN_STEPS, SAMPLE_MAX_POINTS);
+            let mut local: Vec<(f64, f64, f64)> = (0..=steps)
+                .map(|k| {
+                    let sl = len * (k as f64) / (steps as f64);
+                    let (v, a) = profile.at(m.fwd_s + sl);
+                    (sl, v, a)
+                })
+                .collect();
+            let last = local.len() - 1;
+            local[last].0 = len;
+            local
+        })
+        .collect()
+}
+
 pub(super) fn reconstruct_run(
     members: &[RunMember],
     run_start_v: f64,
     tol: f64,
 ) -> Option<Vec<Vec<(f64, f64, f64)>>> {
+    if let Some((ceiling, accel, jerk)) = flat_ceiling_run(members) {
+        return Some(reconstruct_straight(
+            members,
+            run_start_v,
+            ceiling,
+            accel,
+            jerk,
+        ));
+    }
     let ctxs = build_ctxs(members, run_start_v)?;
     let flat = reconstruct_flat(&ctxs, tol)?;
 

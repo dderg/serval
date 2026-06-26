@@ -5,6 +5,7 @@ use crate::path::{CurvatureProfile, Segment};
 use crate::segment::SourceRange;
 
 mod disk;
+mod profile;
 mod scurve;
 
 use disk::Kinematics;
@@ -352,18 +353,18 @@ pub fn plan_velocity_warm_start(
             let kin = &caps[j].kin;
             let m = &moves[j];
             let line_no = m.source.start_line;
-            let entry_v = v[j];
-            let exit_v = v[j + 1];
             let mut samples: Vec<VelSample> = reconstructed[idx]
                 .iter()
                 .map(|&(s, v, a)| VelSample { s, v, a })
                 .collect();
-            if is_anchor[j] && entry_v <= VELOCITY_EPS_MM_S {
+            if is_anchor[j] && v[j] <= VELOCITY_EPS_MM_S {
                 pin_rest_anchor(samples.first_mut(), line_no, kin.jerk)?;
             }
-            if is_anchor[j + 1] && exit_v <= VELOCITY_EPS_MM_S {
+            if is_anchor[j + 1] && v[j + 1] <= VELOCITY_EPS_MM_S {
                 pin_rest_anchor(samples.last_mut(), line_no, kin.jerk)?;
             }
+            let entry_v = samples.first().map_or(v[j], |s| s.v);
+            let exit_v = samples.last().map_or(v[j + 1], |s| s.v);
             if let Some(v) = first_negative_velocity(&samples) {
                 return Err(VelocityError::NegativeVelocity { line_no, v });
             }
