@@ -6,7 +6,6 @@ const bannerEl = document.getElementById("banner");
 const acceptAllBtn = document.getElementById("accept-all");
 const titleEl = document.getElementById("title");
 
-// Bump on every (re)load so accepted/changed images are re-fetched, not cached.
 let cacheBust = Date.now();
 
 async function load() {
@@ -61,27 +60,53 @@ function card(c, readOnly) {
     `<span class="badge ${c.status}">${c.status}</span>`;
   el.appendChild(head);
 
-  el.appendChild(c.has_before ? compare(c.name) : single(c.name));
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
 
-  const foot = document.createElement("div");
-  foot.className = "card-foot";
-  if (c.has_before) {
-    foot.appendChild(link("open before", imgUrl(c.name, "before")));
-  }
-  foot.appendChild(
-    link(readOnly ? "open baseline" : "open after", imgUrl(c.name, "after")),
-  );
-  el.appendChild(foot);
+  const viewerUrl = `/viewer.html?case=${encodeURIComponent(c.name)}`;
+  const interactiveBtn = document.createElement("a");
+  interactiveBtn.className = "btn btn-primary";
+  interactiveBtn.href = viewerUrl;
+  interactiveBtn.target = "_blank";
+  interactiveBtn.rel = "noreferrer";
+  interactiveBtn.textContent = "Interactive Viewer";
+  actions.appendChild(interactiveBtn);
+
+  const pngBtn = document.createElement("button");
+  pngBtn.className = "btn";
+  pngBtn.textContent = "View PNG";
+  pngBtn.onclick = () => togglePng(el, c, readOnly, pngBtn);
+  actions.appendChild(pngBtn);
+
+  el.appendChild(actions);
+
+  const imgSlot = document.createElement("div");
+  imgSlot.className = "img-slot";
+  imgSlot.hidden = true;
+  el.appendChild(imgSlot);
+
   return el;
 }
 
-function single(name) {
-  const wrap = document.createElement("div");
-  wrap.className = "single";
-  const img = new Image();
-  img.src = imgUrl(name, "after");
-  wrap.appendChild(img);
-  return wrap;
+function togglePng(cardEl, c, readOnly, btn) {
+  const slot = cardEl.querySelector(".img-slot");
+  if (!slot.hidden) {
+    slot.hidden = true;
+    slot.innerHTML = "";
+    btn.textContent = "View PNG";
+    return;
+  }
+  slot.hidden = false;
+  btn.textContent = "Hide PNG";
+
+  if (c.has_before) {
+    slot.appendChild(compare(c.name));
+  } else {
+    const img = new Image();
+    img.src = imgUrl(c.name, readOnly ? "after" : "after");
+    img.className = "png-img";
+    slot.appendChild(img);
+  }
 }
 
 function compare(name) {
@@ -107,7 +132,6 @@ function compare(name) {
   const setPos = () => {
     const pct = range.value;
     afterWrap.style.width = pct + "%";
-    // Keep the clipped "after" image the full card width so it lines up.
     after.style.setProperty("--cw", wrap.clientWidth + "px");
     after.style.width = wrap.clientWidth + "px";
   };
@@ -133,23 +157,12 @@ function tag(side, text) {
   return t;
 }
 
-function link(text, href) {
-  const a = document.createElement("a");
-  a.textContent = text;
-  a.href = href;
-  a.target = "_blank";
-  a.rel = "noreferrer";
-  return a;
-}
-
 async function postAccept(payload) {
   const data = await fetch("/api/accept", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   }).then((r) => r.json());
-  // When nothing is left to review the server shuts itself down; show the
-  // completion note instead of re-rendering an empty list.
   if ((data.review || []).length === 0 && !data.error) {
     document.body.innerHTML =
       '<p class="empty">All snapshots accepted — review complete. ' +

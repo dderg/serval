@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Snapshot Viewer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,sans-serif;overflow:hidden}
+.container{display:grid;grid-template-rows:auto 1fr;height:100vh}
+.toolbar{display:flex;align-items:center;gap:16px;padding:8px 16px;background:#1d2026;border-bottom:1px solid #2a2d35;font-size:13px}
+.toolbar .title{font-weight:600;color:#fff}
+.toolbar .meta{color:#888}
+.toolbar button{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px}
+.toolbar button:hover{background:#3a3d45}
+.panels{display:grid;grid-template-rows:3fr 1fr 1fr 1fr;gap:1px;background:#2a2d35;overflow:hidden}
+.panel{position:relative;background:#1a1c22;overflow:hidden}
+.panel canvas{display:block;width:100%;height:100%}
+.panel-label{position:absolute;top:4px;left:8px;font-size:11px;color:#888;pointer-events:none;z-index:2}
+.tooltip{position:fixed;pointer-events:none;background:rgba(20,22,26,0.92);border:1px solid #3a3d45;border-radius:4px;padding:6px 10px;font-size:12px;font-family:'Courier Prime',monospace;color:#e0e0e0;z-index:100;white-space:pre-line;display:none}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="toolbar">
+    <span class="title" id="case-name">Loading…</span>
+    <span class="meta" id="meta"></span>
+    <button id="reset-zoom">Reset Zoom</button>
+    <a id="back-link" href="/" style="color:#888;text-decoration:none;font-size:12px">← back</a>
+  </div>
+  <div class="panels">
+    <div class="panel" id="panel-path">
+      <span class="panel-label">Path</span>
+      <canvas id="canvas-path"></canvas>
+    </div>
+    <div class="panel" id="panel-vel">
+      <span class="panel-label">Velocity</span>
+      <canvas id="canvas-vel"></canvas>
+    </div>
+    <div class="panel" id="panel-acc">
+      <span class="panel-label">Acceleration</span>
+      <canvas id="canvas-acc"></canvas>
+    </div>
+    <div class="panel" id="panel-jrk">
+      <span class="panel-label">Jerk</span>
+      <canvas id="canvas-jrk"></canvas>
+    </div>
+  </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+<script type="module" src="/static/viewer.js"></script>
+</body>
+</html>

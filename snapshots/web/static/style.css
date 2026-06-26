@@ -86,14 +86,19 @@ button:disabled {
 main {
   padding: 20px;
   display: grid;
-  gap: 20px;
+  gap: 12px;
 }
 
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
   overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.card:hover {
+  border-color: #3c4350;
 }
 
 .card-head {
@@ -102,15 +107,16 @@ main {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--line);
 }
 
 .case-name {
   font-weight: 600;
+  font-size: 13px;
+  font-family: "Courier Prime", "Courier New", monospace;
 }
 
 .badge {
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 2px 8px;
@@ -134,6 +140,53 @@ main {
   color: var(--muted);
   text-align: center;
   padding: 60px 20px;
+}
+
+.card-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 12px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: #22252b;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 5px 12px;
+  cursor: pointer;
+  text-decoration: none;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.btn:hover {
+  border-color: #4a4f5a;
+  color: var(--text);
+}
+
+.btn-primary {
+  color: var(--primary);
+  border-color: rgba(77, 141, 240, 0.3);
+}
+
+.btn-primary:hover {
+  border-color: var(--primary);
+  color: #fff;
+  background: rgba(77, 141, 240, 0.15);
+}
+
+.img-slot {
+  border-top: 1px solid var(--line);
+}
+
+.png-img {
+  display: block;
+  width: 100%;
 }
 
 /* before/after comparison slider */
@@ -188,22 +241,4 @@ main {
 
 .tag.right {
   right: 8px;
-}
-
-.single img {
-  display: block;
-  width: 100%;
-}
-
-.card-foot {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  padding: 10px 16px;
-  border-top: 1px solid var(--line);
-}
-
-.card-foot a {
-  color: var(--muted);
-  font-size: 12px;
 }
