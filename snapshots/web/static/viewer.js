@@ -37,7 +37,7 @@ let DATA = null;
 let renderers = [];
 let lastBoundsKey = "";
 let hoverIdx = null;
-let showPeaks = true;
+let showPeaks = false;
 const tooltipEl = document.getElementById("tooltip");
 
 // -- Nice tick spacing -------------------------------------------------------
@@ -619,9 +619,24 @@ function setupTimeInteraction(panelIdx) {
     const rect = r.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const tAtCursor = r.toDataX(mx, timeView.tMin, timeView.tMax);
-    const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
-    timeView.tMin = tAtCursor - (tAtCursor - timeView.tMin) * factor;
-    timeView.tMax = tAtCursor + (timeView.tMax - tAtCursor) * factor;
+
+    if (e.ctrlKey || e.metaKey) {
+      // Pinch zoom
+      const factor = 1 - e.deltaY * 0.01;
+      timeView.tMin = tAtCursor - (tAtCursor - timeView.tMin) * factor;
+      timeView.tMax = tAtCursor + (timeView.tMax - tAtCursor) * factor;
+    } else if (e.deltaX !== 0) {
+      // Two-finger horizontal scroll → pan
+      const dtPerPx = (timeView.tMax - timeView.tMin) / r.plotW;
+      const dt = e.deltaX * dtPerPx;
+      timeView.tMin += dt;
+      timeView.tMax += dt;
+    } else {
+      // Scroll wheel → zoom
+      const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+      timeView.tMin = tAtCursor - (tAtCursor - timeView.tMin) * factor;
+      timeView.tMax = tAtCursor + (timeView.tMax - tAtCursor) * factor;
+    }
     lastBoundsKey = "";
     renderAll();
   }, { passive: false });
@@ -685,11 +700,24 @@ function setupPathInteraction() {
     const my = e.clientY - rect.top;
     const dataX = r.toDataX(mx, pb.xMin, pb.xMax);
     const dataY = r.toDataY(my, pb.yMin, pb.yMax);
-    const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
-    pathView.xMin = dataX - (dataX - pb.xMin) * factor;
-    pathView.xMax = dataX + (pb.xMax - dataX) * factor;
-    pathView.yMin = dataY - (dataY - pb.yMin) * factor;
-    pathView.yMax = dataY + (pb.yMax - dataY) * factor;
+
+    if (e.ctrlKey || e.metaKey) {
+      const factor = 1 - e.deltaY * 0.01;
+      pathView.xMin = dataX - (dataX - pb.xMin) * factor;
+      pathView.xMax = dataX + (pb.xMax - dataX) * factor;
+      pathView.yMin = dataY - (dataY - pb.yMin) * factor;
+      pathView.yMax = dataY + (pb.yMax - dataY) * factor;
+    } else if (e.deltaX !== 0) {
+      const dppx = (pb.xMax - pb.xMin) / r.plotW;
+      pathView.xMin -= e.deltaX * dppx;
+      pathView.xMax -= e.deltaX * dppx;
+    } else {
+      const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+      pathView.xMin = dataX - (dataX - pb.xMin) * factor;
+      pathView.xMax = dataX + (pb.xMax - dataX) * factor;
+      pathView.yMin = dataY - (dataY - pb.yMin) * factor;
+      pathView.yMax = dataY + (pb.yMax - dataY) * factor;
+    }
     lastBoundsKey = "";
     renderAll();
   }, { passive: false });
