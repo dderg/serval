@@ -483,6 +483,17 @@ function computeTimeBounds(data) {
   return { tMin: 0, tMax: tMax * 1.02 };
 }
 
+// Per-type fitted-segment counts, e.g. "3 arc, 5 line" — mirrors the PNG title.
+function segmentSummary() {
+  const counts = {};
+  const n = DATA.segment_count();
+  for (let i = 0; i < n; i++) {
+    const typ = DATA.segment_type(i);
+    counts[typ] = (counts[typ] || 0) + 1;
+  }
+  return Object.keys(counts).sort().map(k => `${counts[k]} ${k}`).join(", ");
+}
+
 // -- Readout -----------------------------------------------------------------
 function updateReadout(idx) {
   const el = document.getElementById("readout");
@@ -792,6 +803,7 @@ async function loadCase(name) {
 
   meta.textContent =
     `t=${DATA.traversal_time().toFixed(3)}s  ` +
+    `[${segmentSummary()}]  ` +
     `${DATA.blended_corners()} blended, ${DATA.chain_fits()} chains, ` +
     `${DATA.point_count()} pts`;
 
@@ -806,6 +818,32 @@ async function loadCase(name) {
   hoverIdx = null;
   lastBoundsKey = "";
   renderAll();
+}
+
+// -- Resizable path/graphs split ---------------------------------------------
+function setupSplitter() {
+  const panels = document.querySelector(".panels");
+  const splitter = document.getElementById("splitter");
+  let dragging = false;
+
+  splitter.addEventListener("mousedown", (e) => {
+    dragging = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const rect = panels.getBoundingClientRect();
+    const w = Math.max(220, Math.min(rect.width - 260, e.clientX - rect.left));
+    panels.style.setProperty("--path-w", w + "px");
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  });
 }
 
 // -- PNG popup ---------------------------------------------------------------
@@ -845,6 +883,7 @@ async function main() {
   for (let i = 1; i < renderers.length; i++) {
     setupTimeInteraction(i);
   }
+  setupSplitter();
 
   document.getElementById("reset-zoom").addEventListener("click", () => {
     Object.assign(pathView, defaultPathView);
