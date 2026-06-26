@@ -9,16 +9,13 @@ license.workspace = true
 name = "ethercat_rt"
 crate-type = ["rlib"]
 
-# `hw` gates the EtherCAT FFI (`ffi` module) and the build.rs compile + link of a
-# master backend over the shared ec_rt_* surface. OFF by default so the pure
-# scale/wire/curves unit tests build and run on any machine (and in CI) without a
-# master library installed. `--features hw` builds the SOEM backend (csrc/libecrt.c,
-# -lsoem); `--features igh` (implies hw) builds the IgH backend (csrc/libecrt_igh.c,
-# -lethercat) — the migration target. igh wins when both are present.
+# `hw` gates the EtherCAT FFI (`ffi` module) and the build.rs compile + link of the
+# IgH master backend (csrc/libecrt_igh.c, -lethercat) over the ec_rt_* surface. OFF
+# by default so the pure scale/wire/curves unit tests build and run on any machine
+# (and in CI) without a master library installed.
 [features]
 default = []
 hw = []
-igh = ["hw"]
 
 # The endpoint binary drives real hardware via the FFI; it only exists with `hw`.
 [[bin]]
@@ -47,7 +44,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
 [build-dependencies]
-cc = "1"                                            # compiles csrc/libecrt.c under `hw`
+cc = "1"                                            # compiles csrc/libecrt_igh.c under `hw`
 
 [dev-dependencies]
 host-rt = { path = "../host-rt" }

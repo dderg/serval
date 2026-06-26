@@ -183,7 +183,7 @@ klippy.
 
 ### 2. Build the endpoint binaries (on the Pi)
 ```sh
-# hw endpoint — build.rs compiles csrc/libecrt.c + links SOEM. On the Pi (never CI):
+# hw endpoint — build.rs compiles csrc/libecrt_igh.c + links IgH (libethercat). On the Pi (never CI):
 make -f Makefile.rust ethercat-endpoint-hw
 # Grant capabilities so it runs unprivileged. sudo, ONCE PER REBUILD of the binary:
 make -f Makefile.rust setcap-ethercat   # cap_net_raw, cap_sys_nice, cap_ipc_lock
@@ -210,7 +210,7 @@ endpoint: rust/target/release/ethercat-rt-stub
 - Switch `endpoint:` back to the hw binary (or drop the key to use the default
   `rust/target/release/ethercat-rt`) and restart klippy.
 - **Dark drive (powered off / disconnected):** with the drive as the only slave on
-  the bus, a powered-off drive means SOEM finds no slaves at all (rc=-2); klippy
+  the bus, a powered-off drive means the master finds no slaves at all (rc=-2); klippy
   fails the claim loudly with:
 
   > `ethercat node_x: EtherCAT bus on eth0: no slaves responding (bringup rc=-2) — check cable and drive power, then FIRMWARE_RESTART`

@@ -1,24 +1,20 @@
 /*
  * IgH (EtherLab) EtherCAT master backend.
  *
- * Selected by `--features igh` (build.rs compiles this instead of the SOEM
- * libecrt.c and links -lethercat). Implements the full ec_rt_* contract from
- * libecrt.h against IgH's kernel master, matching the SOEM backend's behaviour
- * function-for-function so the Rust endpoint, FFI surface, and the A6-EC drive
- * bring-up sequence are identical regardless of which master is linked.
+ * Built under `--features hw` (build.rs compiles this file and links
+ * -lethercat). Implements the full ec_rt_* contract from libecrt.h against
+ * IgH's kernel master.
  *
- * Master selection differs from SOEM: SOEM opens the NIC by `ifname`; the IgH
- * master is bound to the NIC out-of-band (MASTER0_DEVICE in
+ * The master is bound to the NIC out-of-band (MASTER0_DEVICE in
  * /etc/ethercat.conf, served by the ec_master/ec_generic kernel modules) and
  * is requested here by index 0, so `ifname` is ignored.
  *
- * PDO mapping that SOEM writes at runtime via SDOs to 1C12h/1C13h/1600h/1A00h
- * is expressed declaratively here (ecrt_slave_config_pdos) and applied by the
- * master during its PRE-OP -> SAFE-OP configuration; the byte layout is
- * identical (out_t 18 bytes / in_t 32 bytes). Inputs are read from the domain
- * image with the EC_READ accessors at the offsets the master assigns; outputs
- * are staged in a shadow struct and flushed into the image each cycle (see
- * rt_exchange for why the staging is required).
+ * PDO mapping is expressed declaratively (ecrt_slave_config_pdos) and applied
+ * by the master during its PRE-OP -> SAFE-OP configuration; the byte layout is
+ * out_t 18 bytes / in_t 32 bytes. Inputs are read from the domain image with
+ * the EC_READ accessors at the offsets the master assigns; outputs are staged
+ * in a shadow struct and flushed into the image each cycle (see rt_exchange for
+ * why the staging is required).
  */
 #define _GNU_SOURCE
 #include "libecrt.h"
@@ -35,11 +31,11 @@
 #define VENDOR_ID    0x00400000u
 #define PRODUCT_CODE 0x00000715u
 #define SLAVE_ALIAS  0
-#define SLAVE_POS    0 /* ring position, 0-based (SOEM's ec_slave[] is 1-based) */
+#define SLAVE_POS    0 /* ring position, 0-based */
 
-/* DC AssignActivate for SYNC0-only operation; mirrors SOEM's
- * ec_dcsync0(1, TRUE, cycle, cycle/2) (SYNC0 at the cycle period, shifted half
- * a cycle). The A6-EC requires SYNC0 active before SAFE-OP (else AL 0x0030). */
+/* DC AssignActivate for SYNC0-only operation: SYNC0 at the cycle period,
+ * shifted half a cycle. The A6-EC requires SYNC0 active before SAFE-OP (else
+ * AL 0x0030). */
 #define DC_ASSIGN_ACTIVATE 0x0300
 
 #define OUT_BYTES 18
@@ -157,8 +153,8 @@ static void flush_outputs(void) {
  * the image AFTER receive, then queued and sent. DC drift is compensated by the
  * kernel master: application_time anchors the network clock to the
  * CLOCK_MONOTONIC wake grid and sync_reference_clock/sync_slave_clocks
- * distribute it — so, unlike the userspace SOEM master, no application-side
- * phase loop is needed and *toff stays 0. */
+ * distribute it — so no application-side phase loop is needed and *toff stays
+ * 0. */
 static int rt_exchange(int64_t *toff) {
     add_ts(&g_ts, g_cycle_ns);
     reanchor_if_stale();
@@ -243,7 +239,7 @@ static void clear_latched_alarm_in_preop(void) {
 
 /* Phase 1: request the master, configure the slave, declare the PDO map, stage
  * the static drive setup as config SDOs (applied by the master in PRE-OP before
- * OP, mirroring SOEM's PRE-OP SDO writes), and arm DC — but do not activate.
+ * OP), and arm DC — but do not activate.
  * The master's idle state machine brings the slave to PRE-OP, where the caller
  * does its session SDO work (drive limits) via ecrt_master_sdo_* before phase 2. */
 int ec_rt_bringup_preop(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt_prio) {
@@ -273,9 +269,9 @@ int ec_rt_bringup_preop(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt
 
     /* CSP mode and a disabled following-error timeout, then route both
      * feedforward sources (speed 60B1h, torque 60B2h) to "communication"
-     * (C01.13/C01.16 -> 5) with 0% additional FF (C01.14/C01.17 -> 0). Same
-     * objects and values the SOEM backend writes; the master applies them in
-     * PRE-OP. A rejected config SDO leaves the slave short of OP -> OP_TIMEOUT. */
+     * (C01.13/C01.16 -> 5) with 0% additional FF (C01.14/C01.17 -> 0). The
+     * master applies them in PRE-OP. A rejected config SDO leaves the slave
+     * short of OP -> OP_TIMEOUT. */
     ecrt_slave_config_sdo8(g_sc, 0x6060, 0x00, 8);
     ecrt_slave_config_sdo16(g_sc, 0x6066, 0x00, 0);
     ecrt_slave_config_sdo16(g_sc, 0x2001, 0x14, 5);

@@ -1,18 +1,17 @@
 //! Off-loop executor for CoE mailbox traffic.
 //!
 //! SDO transactions block for milliseconds to seconds (mailbox round trips,
-//! the drive's internal EEPROM save, SOEM's 700 ms per-attempt timeout). The
+//! the drive's internal EEPROM save, the master's per-attempt SDO timeout). The
 //! DC loop must keep process data flowing every cycle — a slave in OP drops
 //! to SAFE-OP (ErC1.1, emergency 0x8700) when cyclic frames pause past its
 //! sync watchdog. So mailbox work runs on this dedicated thread while the DC
-//! loop keeps cycling; SOEM's Linux port serializes socket access internally,
-//! which is exactly the concurrent PDO-thread + mailbox-thread split its own
-//! examples use.
+//! loop keeps cycling; the EtherCAT master serializes access between the DC
+//! loop and mailbox traffic, so the cyclic loop never blocks on an SDO.
 //!
 //! Requests execute strictly in submission order (single worker, FIFO
 //! channel), preserving write-then-readback semantics per client call.
 //!
-//! The worker shares SOEM's one raw socket with the DC loop, so its
+//! The worker shares the EtherCAT master with the DC loop, so its
 //! scheduling matters as much as its existence: see
 //! [`crate::thread_prio::assume_companion_rt_scheduling`] for why the
 //! hardware endpoint must run it as a pinned low-priority SCHED_FIFO
