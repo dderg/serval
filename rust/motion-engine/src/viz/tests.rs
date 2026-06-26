@@ -48,18 +48,44 @@ fn fitted_outcome_has_spatial_segments() {
 }
 
 #[test]
-fn kinematics_has_samples_with_valid_heading() {
+fn kinematics_emits_finite_position_and_nonnegative_speed() {
     let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
     let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
     let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
     let kin = sample_kinematics(&outcome, &profile);
-    assert!(!kin.s.is_empty());
-    for i in 0..kin.s.len() {
-        assert!(kin.s[i] >= 0.0);
+    assert!(!kin.x.is_empty());
+    assert_eq!(kin.x.len(), kin.y.len());
+    assert_eq!(kin.x.len(), kin.v.len());
+    for i in 0..kin.x.len() {
+        assert!(kin.x[i].is_finite());
+        assert!(kin.y[i].is_finite());
         assert!(kin.v[i] >= 0.0);
-        let h_len = (kin.heading_x[i].powi(2) + kin.heading_y[i].powi(2)).sqrt();
-        assert!((h_len - 1.0).abs() < 1e-6, "heading not unit: {h_len}");
     }
+}
+
+#[test]
+fn curved_corner_is_sampled_densely_enough_to_recover_curvature() {
+    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
+    let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
+    let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
+    let kin = sample_kinematics(&outcome, &profile);
+    // The viz recovers centripetal acceleration by differentiating position, so
+    // a turn must show up as many interior samples where the path direction
+    // rotates (successive position deltas not parallel), not a single jump.
+    let mut turning = 0;
+    for i in 1..kin.x.len() - 1 {
+        let (ax, ay) = (kin.x[i] - kin.x[i - 1], kin.y[i] - kin.y[i - 1]);
+        let (bx, by) = (kin.x[i + 1] - kin.x[i], kin.y[i + 1] - kin.y[i]);
+        let cross = ax * by - ay * bx;
+        if cross.abs() > 1e-9 {
+            turning += 1;
+        }
+    }
+    assert!(
+        turning > 8,
+        "corner collapsed to {turning} turning samples; centripetal \
+         acceleration cannot be reconstructed from position"
+    );
 }
 
 #[test]

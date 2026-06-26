@@ -175,6 +175,48 @@ fn seam_velocity_is_continuous_across_the_chain() {
 }
 
 #[test]
+fn clothoid_emitted_accel_is_disk_feasible_and_tracks_velocity() {
+    // The reconstructed tangential accel on a curved member must (a) fit inside the
+    // acceleration disk together with the centripetal share, and (b) be the real
+    // `dv/dt` of the speed profile — not a value bounded loose from it. Verified on
+    // the curved member of a chain, where the seam velocities are feasible.
+    let (kappa_peak, length, accel) = (0.2_f64, 4.0_f64, 1000.0_f64);
+    let out = outcome(
+        vec![
+            line_move(60.0, 300.0, 300.0, accel, 1),
+            clothoid_move(kappa_peak, length, 300.0, accel, 2),
+            line_move(60.0, 300.0, 300.0, accel, 3),
+        ],
+        Vec::new(),
+    );
+    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let sigma = kappa_peak / length;
+    let s = &plan.moves[1].samples;
+    let mut t = vec![0.0_f64];
+    for w in s.windows(2) {
+        t.push(t[t.len() - 1] + 2.0 * (w[1].s - w[0].s) / (w[0].v + w[1].v).max(1e-9));
+    }
+    for (i, p) in s.iter().enumerate() {
+        let a_c = p.v * p.v * (sigma * p.s);
+        let total = (p.a * p.a + a_c * a_c).sqrt();
+        assert!(
+            total <= accel + 1.0,
+            "total accel {total} exceeds a_max at s={}",
+            p.s
+        );
+        if i > 0 && i < s.len() - 1 {
+            let fd = (s[i + 1].v - s[i - 1].v) / (t[i + 1] - t[i - 1]).max(1e-9);
+            assert!(
+                (p.a - fd).abs() <= 0.02 * accel + 1.0,
+                "emitted a={} disagrees with dv/dt={fd} at s={}",
+                p.a,
+                p.s
+            );
+        }
+    }
+}
+
+#[test]
 fn decel_into_clothoid_holds_acceleration_across_the_seam() {
     let (kappa_peak, length, accel) = (0.8_f64, 4.0_f64, 2000.0_f64);
     let out = outcome(
