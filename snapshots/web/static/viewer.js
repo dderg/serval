@@ -724,8 +724,8 @@ function setupPathInteraction() {
       const dppy = (pb.yMax - pb.yMin) / r.plotH;
       pathView.xMin -= e.deltaX * dppx;
       pathView.xMax -= e.deltaX * dppx;
-      pathView.yMin += e.deltaY * dppy;
-      pathView.yMax += e.deltaY * dppy;
+      pathView.yMin -= e.deltaY * dppy;
+      pathView.yMax -= e.deltaY * dppy;
     }
     lastBoundsKey = "";
     renderAll();
