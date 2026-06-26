@@ -2,20 +2,19 @@
 //! pin — and go_realtime runs on the thread that later spawns every helper.
 //! Two placement rules follow:
 //!
-//! * Helpers that never touch the SOEM socket (file I/O, channel drains) call
-//!   [`demote_to_normal_scheduling`]: SCHED_OTHER on the housekeeping cores,
-//!   so the FIFO DC thread preempts them unconditionally and they stay off
-//!   the isolated (`isolcpus`/`nohz_full`) cores.
+//! * Helpers that never touch the EtherCAT master (file I/O, channel drains)
+//!   call [`demote_to_normal_scheduling`]: SCHED_OTHER on the housekeeping
+//!   cores, so the FIFO DC thread preempts them unconditionally and they stay
+//!   off the isolated (`isolcpus`/`nohz_full`) cores.
 //!
-//! * Helpers that share the SOEM socket with the DC loop (CoE mailbox
-//!   traffic) call [`assume_companion_rt_scheduling`]. SOEM stashes frames it
-//!   receives on behalf of another thread; a SCHED_OTHER helper descheduled
-//!   between the kernel read and that stash traps the DC thread's process
-//!   data frame for a whole scheduling latency, the cycle reads WKC -1, and
-//!   two such cycles halt the endpoint (bench 2026-06-11: every ErC1.1 that
-//!   evening had a mailbox SDO in flight). SCHED_FIFO below the DC priority
-//!   on an isolated companion core closes the window: nothing ordinary can
-//!   deschedule the helper, and it can never starve the DC core.
+//! * Helpers that share the EtherCAT master with the DC loop (CoE mailbox
+//!   traffic) call [`assume_companion_rt_scheduling`]. A SCHED_OTHER helper
+//!   descheduled mid-transaction can trap the DC thread's process-data frame
+//!   for a whole scheduling latency, the cycle reads WKC -1, and two such
+//!   cycles halt the endpoint (bench 2026-06-11: every ErC1.1 that evening had
+//!   a mailbox SDO in flight). SCHED_FIFO below the DC priority on an isolated
+//!   companion core closes the window: nothing ordinary can deschedule the
+//!   helper, and it can never starve the DC core.
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
@@ -45,7 +44,7 @@ pub fn demote_to_normal_scheduling() {
 }
 
 /// SCHED_FIFO at `priority` pinned to `cpu`. For helper threads that share
-/// the SOEM socket with the DC loop: `priority` must sit below the DC
+/// the EtherCAT master with the DC loop: `priority` must sit below the DC
 /// thread's (so it can never starve the cycle) and below the threaded NIC
 /// IRQ's (so frame delivery preempts the helper's busy-poll), and `cpu`
 /// should be an isolated core the DC thread does not own.
