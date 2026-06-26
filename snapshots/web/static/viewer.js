@@ -19,11 +19,7 @@ const COLORS = {
   axis: "#555",
   crosshair: "rgba(255,255,255,0.35)",
   marker: "#e0518a",
-  gap: "#ff2d55", // C0 break: segments do not meet — a defect
-  kink: "#ffd60a", // C1 break: tangent jumps — an un-smoothed corner
 };
-
-const GAP_THRESHOLD_MM = 1e-4; // matches viz.rs DISCONTINUITY_GAP_MM
 
 // -- Panel configuration -----------------------------------------------------
 const PANELS = [
@@ -54,7 +50,6 @@ let hoverTime = null; // time the marker sits at; drives the graph crosshair
 let hoverMode = null; // "time" | "path" | null
 let hoverXY = null; // { x, y } cursor position when hoverMode === "path"
 let showPeaks = false;
-let showDiscont = true; // path-break markers default on — they flag defects
 let wheelTimer = null; // suppresses mousemove during trackpad gestures
 const tooltipEl = document.getElementById("tooltip");
 
@@ -149,7 +144,6 @@ class PanelRenderer {
     this.margin = { top: 22, right: 14, bottom: 26, left: 56 };
     this._buf = null;
     this._peaks = [];
-    this._discMarkers = [];
     this._resize();
   }
 
@@ -325,61 +319,7 @@ class PanelRenderer {
       );
       bctx.fill();
     }
-
-    this._renderDiscontinuities(bctx, xMin, xMax, yMin, yMax);
     bctx.restore();
-  }
-
-  // Mark every seam where the fitted path breaks continuity: a red ✕ where the
-  // segments do not meet (C0), a yellow ◆ where the tangent jumps (C1).
-  _renderDiscontinuities(bctx, xMin, xMax, yMin, yMax) {
-    this._discMarkers = [];
-    if (!showDiscont) return;
-    const d = DATA.discontinuity_data();
-    for (let i = 0; i < d.length; i += 5) {
-      const px = this.toPixelX(d[i], xMin, xMax);
-      const py = this.toPixelY(d[i + 1], yMin, yMax);
-      const gap = d[i + 2];
-      const isGap = gap > GAP_THRESHOLD_MM;
-      const marker = {
-        px, py, isGap,
-        gap, heading: d[i + 3], kappa: d[i + 4],
-      };
-      this._discMarkers.push(marker);
-
-      bctx.save();
-      bctx.lineWidth = 2;
-      bctx.strokeStyle = "#14161a";
-      if (isGap) {
-        bctx.beginPath();
-        bctx.arc(px, py, 6, 0, Math.PI * 2);
-        bctx.stroke();
-        bctx.strokeStyle = COLORS.gap;
-        bctx.beginPath();
-        bctx.moveTo(px - 5, py - 5); bctx.lineTo(px + 5, py + 5);
-        bctx.moveTo(px + 5, py - 5); bctx.lineTo(px - 5, py + 5);
-        bctx.stroke();
-      } else {
-        bctx.beginPath();
-        bctx.moveTo(px, py - 6); bctx.lineTo(px + 6, py);
-        bctx.lineTo(px, py + 6); bctx.lineTo(px - 6, py);
-        bctx.closePath();
-        bctx.fillStyle = COLORS.kink;
-        bctx.fill();
-        bctx.stroke();
-      }
-      bctx.restore();
-    }
-  }
-
-  nearestDiscontinuity(mx, my, radius) {
-    let best = null, bestDist = radius * radius;
-    for (const m of this._discMarkers) {
-      const dx = m.px - mx, dy = m.py - my;
-      const dist = dx * dx + dy * dy;
-      if (dist < bestDist) { bestDist = dist; best = m; }
-    }
-    return best;
   }
 
   _strokeSeries(bctx, t, valueAt, tMin, tMax, yMin, yMax) {
@@ -758,20 +698,6 @@ function setupPathInteraction() {
       hoverXY = { x: dataX, y: dataY };
       hoverTime = DATA.t()[idx];
       syncHover(idx);
-
-      const disc = r.nearestDiscontinuity(mx, my, 10);
-      if (disc) {
-        const kind = disc.isGap ? "position gap (C0)" : "tangent kink (C1)";
-        tooltipEl.style.display = "block";
-        tooltipEl.style.left = (e.clientX + 14) + "px";
-        tooltipEl.style.top = (e.clientY - 10) + "px";
-        tooltipEl.textContent =
-          `${kind}\ngap=${formatNum(disc.gap)}mm\n` +
-          `Δheading=${formatNum(disc.heading)}°\n` +
-          `Δκ=${formatNum(disc.kappa)}/mm`;
-      } else {
-        tooltipEl.style.display = "none";
-      }
     }
   });
 
@@ -780,7 +706,6 @@ function setupPathInteraction() {
     hoverTime = null;
     hoverMode = null;
     hoverXY = null;
-    tooltipEl.style.display = "none";
     renderAll();
   });
 
@@ -897,15 +822,11 @@ async function loadCaseList() {
 
 // -- Variant (before/after) --------------------------------------------------
 function updateMeta() {
-  const el = document.getElementById("meta");
-  el.textContent =
+  document.getElementById("meta").textContent =
     `t=${DATA.traversal_time().toFixed(3)}s  ` +
     `[${segmentSummary()}]  ` +
     `${DATA.blended_corners()} blended, ${DATA.chain_fits()} chains, ` +
     `${DATA.point_count()} pts`;
-  const n = DATA.discontinuity_count();
-  const breaks = document.getElementById("meta-breaks");
-  breaks.textContent = n > 0 ? `⚠ ${n} discontinuit${n === 1 ? "y" : "ies"}` : "";
 }
 
 function syncVariantControls() {
@@ -1088,8 +1009,8 @@ async function acceptCurrent() {
   const entry = currentEntry();
   if (entry == null || !entry.status || entry.status === "exact") return;
   if (acceptedNames.has(currentCase)) return;
-
   const acceptedCase = currentCase;
+
   const btn = document.getElementById("accept");
   btn.disabled = true;
   btn.textContent = "Accepting…";
@@ -1153,13 +1074,6 @@ async function main() {
   document.getElementById("toggle-peaks").addEventListener("click", (e) => {
     showPeaks = !showPeaks;
     e.target.classList.toggle("active", showPeaks);
-    lastBoundsKey = "";
-    renderAll();
-  });
-
-  document.getElementById("toggle-discont").addEventListener("click", (e) => {
-    showDiscont = !showDiscont;
-    e.target.classList.toggle("active", showDiscont);
     lastBoundsKey = "";
     renderAll();
   });
