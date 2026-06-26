@@ -78,6 +78,7 @@ pub const EVENT_DIAG_TX_DROP_KAL: u16 = 5;
 pub const EVENT_DIAG_TX_DROP_KLP: u16 = 6;
 pub const EVENT_DIAG_ENGINE_XITION: u16 = 7;
 pub const EVENT_DIAG_RUST_FAULT: u16 = 8;
+pub const EVENT_DIAG_DYNMEM_FREE: u16 = 9;
 
 /// Resolve a `(subsystem, event)` pair to a `(name, template)` tuple.
 ///
@@ -185,6 +186,10 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_DIAG, EVENT_DIAG_RUST_FAULT) => {
             ("diag.rust_fault", "rust fault err={arg0} detail={arg1}")
         }
+        (SUBSYSTEM_DIAG, EVENT_DIAG_DYNMEM_FREE) => (
+            "diag.dynmem_free",
+            "dynmem free={arg0} B of total={arg1} B at finalize_config",
+        ),
         (SUBSYSTEM_MOTION, EVENT_MOTION_PIECE_START_PAST) => (
             "motion.piece_start_past",
             "piece start in past start_time={arg0} now={arg1}",

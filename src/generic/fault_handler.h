@@ -18,6 +18,9 @@ extern "C" {
 #define DIAG_EV_ENGINE_XITION 7
 // a = (uint32_t)last_error (i32 cast), b = fault_detail.
 #define DIAG_EV_RUST_FAULT    8
+// One-shot at finalize_config: a = free dynmem bytes (pool the move queue is
+// about to claim), b = total dynmem pool bytes.
+#define DIAG_EV_DYNMEM_FREE   9
 
 // ISR-phase breadcrumb; value at IWDG reset names the hung phase.
 // MUST match rust/runtime/src/isr_phase.rs.

@@ -10,6 +10,8 @@
 #include "board/misc.h" // alloc_maxsize
 #include "board/pgm.h" // READP
 #include "command.h" // DECL_COMMAND
+#include "event_log.h" // event_log_emit
+#include "generic/fault_handler.h" // DIAG_EV_DYNMEM_FREE
 #include "sched.h" // sched_clear_shutdown
 
 
@@ -171,6 +173,10 @@ move_finalize(void)
 {
     if (is_finalized())
         shutdown("Already finalized");
+    event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_DIAG,
+                   DIAG_EV_DYNMEM_FREE, 0,
+                   (uint32_t)((char *)dynmem_end() - (char *)alloc_end),
+                   (uint32_t)((char *)dynmem_end() - (char *)dynmem_start()));
     struct move_queue_head dummy;
     move_queue_setup(&dummy, sizeof(*move_free_list));
     move_list = alloc_chunks(move_item_size, 1024, &move_count);

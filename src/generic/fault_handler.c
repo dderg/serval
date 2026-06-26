@@ -101,6 +101,7 @@ enum {
     DIAG_EV_TX_DROP_KLP   = 6,
     DIAG_EV_ENGINE_XITION = 7,
     DIAG_EV_RUST_FAULT    = 8,
+    DIAG_EV_DYNMEM_FREE   = 9,
 };
 
 struct diag_event {
