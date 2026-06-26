@@ -23,6 +23,8 @@ fn message_kind_round_trips_via_u16() {
         MessageKind::SdoWriteResponse,
         MessageKind::ResonanceBuzz,
         MessageKind::ResonanceBuzzResponse,
+        MessageKind::ArmSensorlessEndstop,
+        MessageKind::ArmSensorlessEndstopResponse,
     ] {
         assert_eq!(MessageKind::from_u16(k.as_u16()), Some(k));
     }
@@ -77,6 +79,26 @@ fn resonance_buzz_roundtrip() {
 fn resonance_buzz_kind_is_not_event() {
     assert!(!MessageKind::ResonanceBuzz.is_event());
     assert!(!MessageKind::ResonanceBuzzResponse.is_event());
+}
+
+#[test]
+fn arm_sensorless_endstop_roundtrip() {
+    let v = ArmSensorlessEndstop {
+        endstop_id: 4,
+        torque_trip_tenth_pct: 500,
+        enable: 1,
+    };
+    assert_eq!(roundtrip(&v), v);
+    assert_eq!(v.encoded_to_vec().len(), 4);
+    let r = ArmSensorlessEndstopResponse { result: -7 };
+    assert_eq!(roundtrip(&r), r);
+    assert_eq!(r.encoded_to_vec().len(), 4);
+}
+
+#[test]
+fn arm_sensorless_endstop_kind_is_not_event() {
+    assert!(!MessageKind::ArmSensorlessEndstop.is_event());
+    assert!(!MessageKind::ArmSensorlessEndstopResponse.is_event());
 }
 
 #[test]

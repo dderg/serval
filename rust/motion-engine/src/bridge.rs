@@ -1203,6 +1203,38 @@ impl PyMotionEngine {
         Ok(())
     }
 
+    fn arm_sensorless_endstop(
+        &self,
+        mcu_handle: u32,
+        endstop_id: u8,
+        torque_trip_tenth_pct: u16,
+        enable: bool,
+    ) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "arm_sensorless_endstop")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "sensorless_endstop_arm",
+            mcu_handle,
+            endstop_id,
+            torque_trip_tenth_pct,
+            enable,
+            "servo sensorless endstop arm/disarm"
+        );
+        let result = crate::servo_torque::send_arm_sensorless_endstop(
+            &conn,
+            endstop_id,
+            torque_trip_tenth_pct,
+            enable,
+        )
+        .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "arm_sensorless_endstop: endpoint rejected arm (result {result})"
+            )));
+        }
+        Ok(())
+    }
+
     #[pyo3(signature = (mcu_handle, axis, pos_mm, timeout_s = 2.0))]
     fn finalize_homed_axis(
         &self,
@@ -2975,6 +3007,13 @@ impl PyMotionEngine {
                         for (axis, &r) in hb.retired_counts.iter().enumerate() {
                             drain_hb.set_retired(mcu_id, axis as u8, r);
                         }
+                    },
+                ));
+
+                let trip_deps = self.trip_deps();
+                conn.attach_endstop_trip_callback(Arc::new(
+                    move |endstop_id: u8, trip_clock: u64| {
+                        dispatch_endstop_trip(&trip_deps, mcu_id, endstop_id, trip_clock);
                     },
                 ));
 

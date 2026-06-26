@@ -174,6 +174,18 @@ class MotionEngineWrapper:
     def restore_drive_limits(self, mcu_handle):
         return self._engine.restore_drive_limits(mcu_handle)
 
+    def arm_sensorless_endstop(
+        self, mcu_handle, endstop_id, torque_trip_tenth_pct, enable
+    ):
+        return self._engine.arm_sensorless_endstop(
+            mcu_handle, endstop_id, torque_trip_tenth_pct, bool(enable)
+        )
+
+    def disarm_sensorless_endstop(self, mcu_handle, endstop_id):
+        return self._engine.arm_sensorless_endstop(
+            mcu_handle, endstop_id, 0, False
+        )
+
     def take_drive_fault(self, mcu_handle):
         return self._engine.take_drive_fault(mcu_handle)
 

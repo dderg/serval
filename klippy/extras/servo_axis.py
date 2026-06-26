@@ -1,7 +1,38 @@
 import collections
 
+from .. import pins
+from ..motion_endstop import allocate_provider_id
 from ..rail import BaseRail
 from . import servo_param
+
+VIRTUAL_ENDSTOP_PIN = "virtual_endstop"
+
+
+class ServoVirtualEndstop:
+    """Servo axis as a virtual endstop. arm/disarm are benign; the real
+    device-side arming is the provider's trip_move_begin/trip_move_end."""
+
+    def __init__(self, printer, node_name, endstop_id):
+        self._printer = printer
+        self._node_name = node_name
+        self.endstop_id = endstop_id
+
+    def engine_mcu_handle(self):
+        node = self._printer.lookup_object("ethercat_node " + self._node_name)
+        return node.get_engine_handle()
+
+    def is_triggered(self):
+        return False
+
+    def query_endstop(self, print_time):
+        return False
+
+    def arm(self, poll_period):
+        del poll_period
+
+    def disarm(self):
+        pass
+
 
 _homing_info = collections.namedtuple(
     "homing_info",
@@ -104,6 +135,10 @@ class ServoRail(BaseRail):
             raise motor_config.error(
                 "[%s] params: %s" % (motor_config.get_name(), e)
             )
+        self._virtual_endstop = None
+        if self.printer is not None:
+            ppins = self.printer.lookup_object("pins")
+            ppins.register_chip("servo_" + self.axis, self)
 
     def get_name(self, short=False):
         if short:
@@ -156,6 +191,50 @@ class ServoRail(BaseRail):
         return (
             int(round(self.homing_following_error * counts_per_mm)),
             int(round(self.homing_max_torque * 10.0)),
+        )
+
+    def setup_motion_endstop(self, pin_params, axis):
+        if pin_params["pin"] != VIRTUAL_ENDSTOP_PIN:
+            raise pins.error(
+                "servo_%s only provides the '%s' virtual pin, not '%s'"
+                % (self.axis, VIRTUAL_ENDSTOP_PIN, pin_params["pin"])
+            )
+        if axis != "xyz".index(self.axis):
+            raise pins.error(
+                "servo_%s:%s is only usable as the %s endstop"
+                % (self.axis, VIRTUAL_ENDSTOP_PIN, self.axis.upper())
+            )
+        if pin_params["invert"] or pin_params["pullup"]:
+            raise pins.error("Can not pullup/invert the servo virtual endstop")
+        self._virtual_endstop = ServoVirtualEndstop(
+            self.printer, self.node_name, allocate_provider_id(self.printer)
+        )
+        return self._virtual_endstop
+
+    def _engine_handle(self):
+        node = self.printer.lookup_object("ethercat_node " + self.node_name)
+        handle = node.get_engine_handle()
+        if handle is None:
+            raise self.printer.command_error(
+                "servo sensorless homing: ethercat_node %s has no engine handle"
+                % (self.node_name,)
+            )
+        return handle
+
+    def trip_move_begin(self, entry):
+        _, torque_trip_tenth_pct = self.get_homing_drive_limits()
+        engine = self.printer.lookup_object("motion_engine")
+        engine.arm_sensorless_endstop(
+            self._engine_handle(),
+            entry["endstop"].endstop_id,
+            torque_trip_tenth_pct,
+            True,
+        )
+
+    def trip_move_end(self, entry):
+        engine = self.printer.lookup_object("motion_engine")
+        engine.disarm_sensorless_endstop(
+            self._engine_handle(), entry["endstop"].endstop_id
         )
 
     def get_session_drive_limits(self):
