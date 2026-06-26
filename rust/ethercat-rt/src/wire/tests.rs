@@ -58,6 +58,35 @@ fn push_pieces_response_decodes_back() {
 }
 
 #[test]
+fn push_pieces_response_multi_echoes_every_axis() {
+    let frame = push_pieces_response_frame_multi(7, 0, 5_000, &[(0, 111), (1, 222)]);
+    let (_chan, payload) = decode_frame(&frame).unwrap();
+    let (hdr, body) = decode_message_header(payload).unwrap();
+    assert_eq!(hdr.correlation_id, 7);
+    let r = PushPiecesResponse::decode(body).unwrap();
+    assert_eq!(r.result, 0);
+    assert_eq!(r.arrival_clock, 5_000);
+    assert_eq!(r.axes.len(), 2);
+    assert_eq!((r.axes[0].axis_idx, r.axes[0].front_start_time), (0, 111));
+    assert_eq!((r.axes[1].axis_idx, r.axes[1].front_start_time), (1, 222));
+}
+
+#[test]
+fn motor_state_response_multi_carries_one_sample_per_slot() {
+    let frame = motor_state_response_frame_multi(9, &[(0, 1.0, 2.0), (1, -3.0, 4.0)]);
+    let (_chan, payload) = decode_frame(&frame).unwrap();
+    let (hdr, body) = decode_message_header(payload).unwrap();
+    assert_eq!(hdr.correlation_id, 9);
+    let r = MotorStateResponse::decode(body).unwrap();
+    assert_eq!(r.motors.len(), 2);
+    assert_eq!(r.motors[0].slot, 0);
+    assert_eq!(r.motors[1].slot, 1);
+    // q16 round-trip of the position fields.
+    assert_eq!(r.motors[0].pos_q16, (1.0_f64 * 65536.0) as i32);
+    assert_eq!(r.motors[1].pos_q16, (-3.0_f64 * 65536.0) as i32);
+}
+
+#[test]
 fn claim_handshake_reply_frame_decodes() {
     let reply = ClaimHandshakeReply {
         slave_statuses: vec![SlaveStatus {

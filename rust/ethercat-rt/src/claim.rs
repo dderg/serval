@@ -67,6 +67,21 @@ pub fn single_slave_reply(
     }
 }
 
+/// One `SlaveStatus` per slot (slave_idx 1..=n, 1-based to match the
+/// single-slave convention), all reporting the same state. At n=1 this is
+/// identical to `single_slave_reply(1, ..)`.
+pub fn all_slaves_reply(n: usize, state: SlaveState, fault_code: u16) -> ClaimHandshakeReply {
+    ClaimHandshakeReply {
+        slave_statuses: (0..n)
+            .map(|i| SlaveStatus {
+                slave_idx: (i + 1) as u8,
+                state,
+                fault_code,
+            })
+            .collect(),
+    }
+}
+
 /// Maximum number of consecutive bad working-counter cycles before the DC loop
 /// halts and exits.
 ///

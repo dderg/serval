@@ -143,3 +143,26 @@ Split out of the `multi-drive-ethercat` intent. Goal A (drop SOEM, make IgH the 
 - **Endpoint binary (`src/bin/ethercat-rt.rs`):** per-slave params (counts_per_mm, rotation_distance, limits, params) instead of the current global CLI args — likely delivered over the socket from host config at claim time.
 - **Host config (klippy):** `servo_axis.py` parses `ethercat_chain_index` and passes it through claim; `ethercat_node.py`/`motion.py` manage N drives on one node and validate (distinct indices, no duplicates, all on one node). `motion_kinematics.py:174` "exactly one servo motor per lane" stays for now (one motor per axis; N axes share the node) unless dual-motor-per-axis is needed.
 - **Sensorless homing:** per-drive torque-trip routing (the current single-node assumption in `spec-ecat-sensorless-homing` and its `design.md` must be revised — see the 2026-06-26 sensorless-homing defers above re: `NUM_AXES = 1`).
+
+## Multi-drive EtherCAT — Phase 2 & 3 (deferred from the endpoint-core split, 2026-06-26)
+
+The end-to-end multi-drive goal (Goal B) was split at the step-02 token check (full spec ~2.1–3k tokens, over the 1600 ceiling). Phase 1 (endpoint N-slave core) is being specced now as `spec-multi-drive-endpoint-core.md` — it is regression-safe at N=1 and testable via `ec-test-client` with no host changes. Phase 2 and Phase 3 build on it.
+
+**Phase 2 — Host config + claim (the user-facing end-to-end piece):**
+- `klippy/extras/servo_axis.py` -- new `[motor] drive:servo` field `ethercat_chain_index` (int, default 1, minval 1); `get_chain_index()`.
+- `klippy/extras/ethercat_node.py` -- `_find_rail` → `_find_rails` (all rails on the node); `_claim` builds the per-drive list sorted/validated by chain_index and calls a multi-drive `claim_ethercat_node`; per-drive `_push_drive_params`/`_poll_drive_fault`; fault message names the slave index.
+- `rust/motion-engine/src/bridge.rs` -- `claim_ethercat_node` (≈954) + `spawn_ethercat_endpoint` (≈393) take a per-drive list (spawn the endpoint with N repeated `--slave …` CLI groups); add a slot index to `set_drive_limits`/`restore_drive_limits`/`arm_sensorless_endstop`/`set_torque`/`sdo_read`/`sdo_write` (1133–1343).
+- `rust/motion-engine/src/{servo_sdo.rs,servo_torque.rs}` + `rust/ethercat-rt/src/{wire.rs,mailbox.rs}` -- add the slot index to the single-drive-targeting wire messages (SdoRead/Write, SetTorque, SetDriveLimits, SeedServoHome, arm) and the mailbox req/reply that carry them. (Phase 1 deliberately leaves these single-target so it stays CI-green without touching motion-engine.)
+- `klippy/motion_engine.py`, `klippy/extras/{servo_param.py,servo_capture.py}` -- mirror the slot-bearing signatures; resolve (node, slot) so `SERVO_PARAM`/`SERVO_CAPTURE` target a specific drive; lift the "multi-servo capture not implemented" guard.
+- Validation: duplicate/range checks for `ethercat_chain_index` per node (site: `ethercat_node._claim` after gathering rails).
+- Slot ↔ chain_index ↔ axis mapping: host sorts the node's drives by chain_index ascending, slot i = i-th drive; endpoint told `slot i → slave position p_i`; verify the slot order in `PushPieces.axes[]` matches the claim's slot order (`_build_axis_to_handle` + `McuAxisConfig.axes` already carry axis→handle).
+
+**Phase 3 — Sensorless per-drive trip routing + docs:**
+- Per-drive torque-trip routing in the endpoint (`sensorless.rs` singleton → per-slave) and the host trip dispatch; revise `spec-ecat-sensorless-homing.md` + its `design.md` (they assume one drive per node — see the 2026-06-26 sensorless defers above re `NUM_AXES = 1`).
+- `docs/rewrite/ethercat-bench-bringup.md` -- multi-drive bring-up + the `ethercat_chain_index` config surface.
+
+## Multi-drive endpoint-core review defer — retired-counts slot↔axis ordering (2026-06-26)
+
+Surfaced by the step-04 edge-case review of `spec-multi-drive-endpoint-core` (Phase 1). Pre-existing convention, not introduced by Phase 1, but it must be resolved in Phase 2 when the global-axis↔slot mapping is established by the host claim.
+
+- The endpoint emits `StatusHeartbeat.retired_counts` in **local slot order** (`rings.iter().map(retired_count)`), and the host bridge consumes it by **enumerate index = global axis** (`bridge.rs` ~3007/3087: `for (axis, &r) in retired.iter().enumerate() { set_retired(mcu_id, axis, r) }`). Likewise `place_motor_response` (`bridge.rs:148`) zips `MotorStateResponse.motors` positionally onto `cfg.axes`, ignoring the endpoint's `slot` field. For a single drive on a non-zero global axis (e.g. EtherCAT Z) the retired count is attributed to axis 0, not the real axis — harmless today (single-drive bench is X; per-mcu accounting), but wrong once a chain drives non-contiguous/non-zero global axes. Phase 2 must define one authoritative slot↔global-axis map (in the claim) and make both the PushPieces routing and the per-slot read-back/retired arrays use it, instead of the Phase-1 `num_slaves==1 → slot 0` / `axis_idx==slot` shims in `ethercat-rt.rs`.
