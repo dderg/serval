@@ -124,7 +124,7 @@ const T_IDLE: Duration = Duration::from_secs(3600);
 // the memory backstop for the rare no-clean-seam case.
 const COALESCE_BATCH_MOVES: usize = 64;
 
-const INPUT_CHANNEL_CAP: usize = 8192;
+pub const INPUT_CHANNEL_CAP: usize = 8192;
 
 type DispatchFn = Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>;
 type NudgeDispatchFn =
@@ -216,6 +216,10 @@ impl StreamPlannerHandle {
 
     pub fn submit_move(&self, m: geometry::Move) -> Result<(), StreamPlannerError> {
         try_submit_move(&self.sender, m)
+    }
+
+    pub fn pending_channel_moves(&self) -> usize {
+        self.sender.len()
     }
 
     pub fn flush(&self) -> Result<(), StreamPlannerError> {
@@ -765,6 +769,16 @@ fn run_loop(
                     }
                 }
                 let buffered_before = state.buffered();
+                tracing::info!(
+                    subsystem = "motion",
+                    event = "coalesce_done",
+                    channel_pending = rx.len(),
+                    buffered = buffered_before,
+                    uncommitted_secs = tally.secs,
+                    coalesce_cap,
+                    t_us = crate::timing::mono_us(),
+                    "[intake] coalesced batch ready to commit; channel_pending = moves submitted but not yet pulled (invisible to backpressure)"
+                );
                 let segs = state
                     .commit(false)
                     .unwrap_or_else(|e| fatal(&format!("commit: {e}")));
