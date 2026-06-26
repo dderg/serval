@@ -6,6 +6,10 @@ const RK_MIN_STEP_FRAC: f64 = 1e-6;
 const RK_MAX_STEPS: u32 = 100_000;
 const SAMPLE_MAX_DEPTH: u32 = 24;
 const SAMPLE_MAX_POINTS: usize = 16_384;
+const SAMPLE_MIN_STEP_DIV: f64 = 4096.0;
+const GRID_STEP_MM: f64 = 0.01;
+const GRID_MIN_STEPS: usize = 256;
+const VELOCITY_FLOOR: f64 = 1e-9;
 
 pub(super) struct Kinematics {
     pub length: f64,
@@ -133,30 +137,6 @@ pub(super) struct JerkAnchors {
     pub bwd_s: f64,
 }
 
-const BRIDGE_EPS_A: f64 = 1e-6;
-const BRIDGE_MIN_ARC_FRAC: f64 = 1e-4;
-const ROOT_ITERS: u32 = 80;
-const CEILING_V_EPS: f64 = 1e-6;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BridgeKind {
-    SignFlip,
-    CeilingEntry,
-    CeilingExit,
-}
-
-impl BridgeKind {
-    fn is_ceiling(self) -> bool {
-        matches!(self, BridgeKind::CeilingEntry | BridgeKind::CeilingExit)
-    }
-
-    // The entry roll-off departs the forward branch below the cruise rail (the
-    // rising accel ramp); the exit roll-off departs the rail itself.
-    fn departs_below_ceiling(self) -> bool {
-        matches!(self, BridgeKind::CeilingEntry)
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct ProfilePoint {
     pub v: f64,
@@ -166,11 +146,6 @@ pub(super) struct ProfilePoint {
 fn disk_rail_accel(accel: f64, kappa_abs: f64, v: f64) -> f64 {
     let a_n = kappa_abs * v * v;
     (accel * accel - a_n * a_n).max(0.0).sqrt()
-}
-
-fn clamp_to_disk(a_t: f64, accel: f64, kappa_abs: f64, v: f64) -> f64 {
-    let budget = disk_rail_accel(accel, kappa_abs, v);
-    a_t.clamp(-budget, budget)
 }
 
 fn forward_seg(kin: &Kinematics, jerk: &JerkAnchors) -> Option<scurve::SevenSeg> {
@@ -311,7 +286,12 @@ fn refine(
     let actual = profile_speed(kin, entry, exit, jerk, mid, tol)?;
     let interp = 0.5 * (v0 + v1);
     let needs_refine = (actual - interp).abs() > tol * (1.0 + actual.abs());
-    if needs_refine && depth < SAMPLE_MAX_DEPTH && out.len() < SAMPLE_MAX_POINTS {
+    // The rest cusp (`v ~ s^(2/3)`, infinite slope at `s = 0`) never satisfies the
+    // tolerance, so without a floor on the interval it subdivides until the point
+    // budget is spent at the cusp, starving the rest of the move. Stopping at a
+    // fraction of the member length keeps the grid dense everywhere it matters.
+    let above_floor = (s1 - s0) > kin.length / SAMPLE_MIN_STEP_DIV;
+    if needs_refine && above_floor && depth < SAMPLE_MAX_DEPTH && out.len() < SAMPLE_MAX_POINTS {
         refine(
             kin,
             entry,
@@ -381,46 +361,6 @@ fn build_ctxs<'a>(members: &'a [RunMember<'a>], run_start_v: f64) -> Option<Vec<
     Some(out)
 }
 
-fn locate(ctxs: &[MemberCtx], s_run: f64) -> (usize, f64) {
-    let mut i = 0;
-    for (k, c) in ctxs.iter().enumerate() {
-        if s_run + 1e-12 >= c.m.fwd_s {
-            i = k;
-        } else {
-            break;
-        }
-    }
-    let local = (s_run - ctxs[i].m.fwd_s).clamp(0.0, ctxs[i].m.kin.length);
-    (i, local)
-}
-
-fn run_forward(ctxs: &[MemberCtx], s_run: f64, tol: f64) -> Option<ProfilePoint> {
-    let (i, local) = locate(ctxs, s_run);
-    let c = &ctxs[i];
-    forward_branch(c.m.kin, c.m.entry_v, &c.fwd_seg, &c.jerk, local, tol)
-}
-
-fn run_backward(ctxs: &[MemberCtx], s_run: f64, tol: f64) -> Option<ProfilePoint> {
-    let (i, local) = locate(ctxs, s_run);
-    let c = &ctxs[i];
-    backward_branch(c.m.kin, c.m.exit_v, &c.bwd_seg, &c.jerk, local, tol)
-}
-
-fn run_eval(ctxs: &[MemberCtx], s_run: f64, tol: f64) -> Option<ProfilePoint> {
-    let (i, local) = locate(ctxs, s_run);
-    let c = &ctxs[i];
-    eval_profile(
-        c.m.kin,
-        c.m.entry_v,
-        c.m.exit_v,
-        &c.fwd_seg,
-        &c.bwd_seg,
-        &c.jerk,
-        local,
-        tol,
-    )
-}
-
 fn base_samples(ctxs: &[MemberCtx], tol: f64) -> Option<Vec<(f64, f64, f64)>> {
     let mut out: Vec<(f64, f64, f64)> = Vec::new();
     for c in ctxs {
@@ -461,325 +401,202 @@ fn base_samples(ctxs: &[MemberCtx], tol: f64) -> Option<Vec<(f64, f64, f64)>> {
     Some(out)
 }
 
-struct Shot {
-    s_end: f64,
-    v_end: f64,
-    a_end: f64,
+/// Reconstruct the run's `(s, v, a)` profile.
+///
+/// The envelope `base_samples` is the accel-limited optimum: correct velocity,
+/// but its acceleration steps at every point where the binding constraint
+/// switches (entry ramp → cruise → curve → brake). Those steps are infinite
+/// jerk. We make the profile jerk-feasible in one uniform pass — `jerk_smooth`
+/// — rather than detecting each step and splicing a hand-placed arc across it.
+fn reconstruct_flat(ctxs: &[MemberCtx], tol: f64) -> Option<Vec<(f64, f64, f64)>> {
+    let base = base_samples(ctxs, tol)?;
+    Some(jerk_smooth(ctxs, base))
 }
 
-fn shoot(
-    ctxs: &[MemberCtx],
-    tol: f64,
-    s_left: f64,
-    v0: f64,
-    a0: f64,
-    j: f64,
-    accel_bound: f64,
-    right_forward: bool,
-) -> Option<Shot> {
-    let arc_at = |tau: f64| -> (f64, f64, f64) {
-        let a = a0 + j * tau;
-        let v = v0 + a0 * tau + 0.5 * j * tau * tau;
-        let s = s_left + v0 * tau + 0.5 * a0 * tau * tau + (1.0 / 6.0) * j * tau * tau * tau;
-        (s, v, a)
+/// Build the jerk-limited `(s, v, a)` profile from the velocity-limit curve.
+///
+/// The velocity-limit curve `vlc(s)` is the purely geometric speed ceiling
+/// (feed and `sqrt(accel / kappa)`), sampled on a dense uniform grid. A backward
+/// jerk-ride of it gives `bwd(s)` — the fastest speed at each point that can
+/// still brake to every downstream ceiling and the exit. The forward jerk-ride
+/// then tracks `min(vlc, bwd)`: it accelerates at jerk-limited rate and peels off
+/// to *land* on that cap with `a = 0` (peel once coasting the current accel back
+/// to zero would already reach the cap, `v + a^2 / 2j >= cap`), riding it down
+/// where it descends into a brake. One continuous integration — so the
+/// acceleration is jerk-continuous, ceilings are reached tangentially, and `v`,
+/// clamped to the cap, is feasible and non-negative by construction; no
+/// per-corner arc, no root-finding.
+///
+/// Infinite jerk leaves the envelope untouched (the sharp accel apex is intended).
+fn jerk_smooth(ctxs: &[MemberCtx], base: Vec<(f64, f64, f64)>) -> Vec<(f64, f64, f64)> {
+    let jerk = ctxs[0].m.kin.jerk;
+    if base.len() < 3 || !jerk.is_finite() {
+        return base;
+    }
+
+    let run_len = base[base.len() - 1].0;
+    let s = integration_grid(ctxs, run_len);
+    let vlc: Vec<f64> = s.iter().map(|&x| vlc_at(ctxs, x)).collect();
+    let accel: Vec<f64> = s.iter().map(|&x| accel_cap(ctxs, x)).collect();
+    let kappa: Vec<f64> = s.iter().map(|&x| kappa_abs_at(ctxs, x)).collect();
+    let n = s.len();
+
+    let entry_v = base[0].1;
+    let exit_v = base[base.len() - 1].1;
+    let entry_a = if entry_v <= VELOCITY_FLOOR {
+        0.0
+    } else {
+        base[0].2
     };
-    let right_a = |s: f64| -> Option<f64> {
-        if right_forward {
-            run_forward(ctxs, s, tol)
-        } else {
-            run_backward(ctxs, s, tol)
+
+    let bwd = {
+        let total = s[n - 1];
+        let s_rev: Vec<f64> = (0..n).map(|k| total - s[n - 1 - k]).collect();
+        let vlc_rev: Vec<f64> = (0..n).map(|k| vlc[n - 1 - k]).collect();
+        let accel_rev: Vec<f64> = (0..n).map(|k| accel[n - 1 - k]).collect();
+        let kappa_rev: Vec<f64> = (0..n).map(|k| kappa[n - 1 - k]).collect();
+        let (mut b, _) = ride(&s_rev, &vlc_rev, &accel_rev, &kappa_rev, jerk, exit_v, 0.0);
+        b.reverse();
+        b
+    };
+    let forward_cap: Vec<f64> = (0..n).map(|i| vlc[i].min(bwd[i])).collect();
+
+    let (mut v, mut a) = ride(&s, &forward_cap, &accel, &kappa, jerk, entry_v, entry_a);
+    v[0] = entry_v;
+    v[n - 1] = exit_v;
+    if entry_v <= VELOCITY_FLOOR {
+        a[0] = 0.0;
+    }
+    if exit_v <= VELOCITY_FLOOR {
+        a[n - 1] = 0.0;
+    }
+
+    (0..n).map(|i| (s[i], v[i], a[i])).collect()
+}
+
+/// A dense uniform arc-length grid for the jerk-ride. Each member is sampled at a
+/// fixed step within its own span — uniform (not velocity-adaptive, since the
+/// roll-offs that must be resolved fall in flat-velocity cruise bands), and
+/// per-member rather than per-run so appending moves never reshuffles an earlier
+/// member's grid (the streaming locked prefix must be invariant under append).
+fn integration_grid(ctxs: &[MemberCtx], _run_len: f64) -> Vec<f64> {
+    let mut s: Vec<f64> = Vec::new();
+    for c in ctxs {
+        let len = c.m.kin.length;
+        let steps = ((len / GRID_STEP_MM).ceil() as usize).clamp(GRID_MIN_STEPS, SAMPLE_MAX_POINTS);
+        for k in 0..steps {
+            s.push(c.m.fwd_s + len * (k as f64) / (steps as f64));
         }
-        .map(|p| p.a)
-    };
-    let gap = |tau: f64| -> Option<f64> {
-        let (s, _, a) = arc_at(tau);
-        Some(a - right_a(s)?)
-    };
-    let tau_max = 1.05 * (a0.abs() + accel_bound) / j.abs();
-    let tau = scan_cross(&gap, 0.0, tau_max, 32, j < 0.0)?;
-    let (s_end, v_end, a_end) = arc_at(tau);
-    Some(Shot {
-        s_end,
-        v_end,
-        a_end,
+    }
+    s.push(ctxs[ctxs.len() - 1].m.fwd_s + ctxs[ctxs.len() - 1].m.kin.length);
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    s.dedup_by(|a, b| (*a - *b).abs() <= 1e-12);
+    s
+}
+
+/// March a jerk-limited speed profile that rides `track` from below (see
+/// `jerk_smooth`), emitting both speed and the exact tangential acceleration the
+/// march integrates. Reused forwards and (on a reversed grid) backwards.
+///
+/// Tangential acceleration is bounded by the disk budget `sqrt(a^2 - (kappa v^2)^2)`
+/// at every step, not the bare `a_max`: on a curve the centripetal share already
+/// spends part of the budget, so the available tangential accel shrinks to zero as
+/// `v` nears the curvature ceiling `sqrt(a/kappa)`. That makes the march ride the
+/// disk ODE rail where accel-bound and ease onto a curvature ceiling tangentially
+/// by construction — the same `(v, a)` the seam sweep's `disk_reach_v` assumes,
+/// rather than the bare-`a_max` ramp the old reconstruction over-accelerated on.
+fn ride(
+    s: &[f64],
+    track: &[f64],
+    accel: &[f64],
+    kappa: &[f64],
+    jerk: f64,
+    start_v: f64,
+    start_a: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    let n = s.len();
+    let mut v = vec![0.0_f64; n];
+    let mut acc = vec![0.0_f64; n];
+    v[0] = start_v.min(track[0]);
+    acc[0] = start_a;
+    let mut a_prev = start_a;
+    for i in 1..n {
+        let ds = s[i] - s[i - 1];
+        // Time across `ds` from a constant-accel estimate of the step's exit speed
+        // — `track[i]` would under-time the step (the ceiling sits above the actual
+        // speed) and starve the velocity gain. Floored by the jerk-from-rest speed
+        // scale `(j*ds^2)^(1/3)` so the launch cusp (`v=a=0`) takes a bounded step
+        // instead of an unbounded `dt` that jumps `a` to `a_max` in one sample.
+        let v_pred = (v[i - 1] * v[i - 1] + 2.0 * a_prev * ds).max(0.0).sqrt();
+        let v_scale = 2.0 * ds / (6.0 * ds / jerk).cbrt();
+        let dt = 2.0 * ds / (v[i - 1] + v_pred).max(v_scale);
+        let a_track = (track[i] - track[i - 1]) / dt;
+        // Coast the current acceleration back to zero: the speed it would add is
+        // `a^2 / 2j`. If that peak would reach the track, peel off now so `v` lands
+        // on it with `a = 0`; `a_track` then holds `a` on a sloped track and lets it
+        // descend past zero into a brake. Keying off the track itself (not its local
+        // slope, ~0 until the last moment) makes the peel early enough — even where
+        // a descending track closes on a rising `v` at a sub-ceiling peak.
+        let coast_peak = v[i - 1] + a_prev.max(0.0) * a_prev.max(0.0) / (2.0 * jerk);
+        let budget = disk_rail_accel(accel[i], kappa[i], v_pred);
+        let a = if coast_peak >= track[i] {
+            (a_prev - jerk * dt).max(a_track)
+        } else {
+            (a_prev + jerk * dt).min(budget)
+        }
+        .clamp(-budget, budget);
+        v[i] = (v[i - 1] + 0.5 * (a_prev + a) * dt).clamp(0.0, track[i]);
+        acc[i] = a;
+        a_prev = a;
+    }
+    (v, acc)
+}
+
+/// Speed ceiling at run-arc `s_run`, the min over every member whose span covers
+/// it. At a curvature-discontinuous seam two members abut, and the ceiling must
+/// honor the tighter side — otherwise the dip's own endpoint (read by the member
+/// that ends there) could overshoot its curvature limit.
+fn vlc_at(ctxs: &[MemberCtx], s_run: f64) -> f64 {
+    members_at(ctxs, s_run)
+        .map(|(c, local)| {
+            c.m.kin
+                .flat_ceiling
+                .min(limit_speed(c.m.kin.kappa_abs(local), c.m.kin.accel))
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Members whose span covers `s_run` (two at a seam, one in an interior).
+fn members_at<'a, 'b>(
+    ctxs: &'b [MemberCtx<'a>],
+    s_run: f64,
+) -> impl Iterator<Item = (&'b MemberCtx<'a>, f64)> {
+    ctxs.iter().filter_map(move |c| {
+        let lo = c.m.fwd_s;
+        let hi = lo + c.m.kin.length;
+        (s_run >= lo - 1e-9 && s_run <= hi + 1e-9)
+            .then(|| (c, (s_run - lo).clamp(0.0, c.m.kin.length)))
     })
 }
 
-/// Bracket the first zero of `f` crossed in a chosen direction: `descending`
-/// keeps the `+ -> -` crossing, otherwise the `- -> +` one. The `shoot` arc's
-/// accel moves monotonically with `sign(j)`, so its genuine landing on the
-/// target branch crosses in that direction; a discontinuity in the target
-/// (e.g. the backward branch's own cruise-exit step) throws an opposite-sign
-/// crossing that this rejects.
-fn scan_cross<F: Fn(f64) -> Option<f64>>(
-    f: &F,
-    x0: f64,
-    x1: f64,
-    k: usize,
-    descending: bool,
-) -> Option<f64> {
-    let mut prev_x = x0;
-    let mut prev = f(x0);
-    for i in 1..=k {
-        let x = x0 + (x1 - x0) * (i as f64) / (k as f64);
-        let cur = f(x);
-        if let (Some(p), Some(c)) = (prev, cur) {
-            let crosses = if descending {
-                p > 0.0 && c < 0.0
-            } else {
-                p < 0.0 && c > 0.0
-            };
-            if crosses {
-                let (mut lo, mut hi) = (prev_x, x);
-                for _ in 0..ROOT_ITERS {
-                    let mid = 0.5 * (lo + hi);
-                    match f(mid) {
-                        Some(m) if (m > 0.0) == descending => lo = mid,
-                        Some(_) => hi = mid,
-                        None => return None,
-                    }
-                }
-                return Some(0.5 * (lo + hi));
-            }
-        }
-        prev_x = x;
-        prev = cur;
-    }
-    None
+/// Acceleration budget inputs at `s_run`, tightest across abutting members: the
+/// smallest `a_max` and the largest curvature, so a seam between members of
+/// different curvature bounds the tangential accel by the more restrictive side.
+fn accel_cap(ctxs: &[MemberCtx], s_run: f64) -> f64 {
+    members_at(ctxs, s_run)
+        .map(|(c, _)| c.m.kin.accel)
+        .fold(ctxs[0].m.kin.accel, f64::min)
 }
 
-fn scan_root<F: Fn(f64) -> Option<f64>>(f: &F, x0: f64, x1: f64, k: usize) -> Option<f64> {
-    let mut prev_x = x0;
-    let mut prev = f(x0);
-    if matches!(prev, Some(v) if v == 0.0) {
-        return Some(x0);
-    }
-    for i in 1..=k {
-        let x = x0 + (x1 - x0) * (i as f64) / (k as f64);
-        let cur = f(x);
-        if let (Some(p), Some(c)) = (prev, cur) {
-            if c == 0.0 {
-                return Some(x);
-            }
-            if p * c < 0.0 {
-                let (mut lo, mut hi) = (prev_x, x);
-                let s_lo = p.signum();
-                for _ in 0..ROOT_ITERS {
-                    let mid = 0.5 * (lo + hi);
-                    match f(mid) {
-                        Some(m) if m.signum() == s_lo => lo = mid,
-                        Some(_) => hi = mid,
-                        None => return None,
-                    }
-                }
-                return Some(0.5 * (lo + hi));
-            }
-        }
-        prev_x = x;
-        prev = cur;
-    }
-    None
+fn kappa_abs_at(ctxs: &[MemberCtx], s_run: f64) -> f64 {
+    members_at(ctxs, s_run)
+        .map(|(c, local)| c.m.kin.kappa_abs(local))
+        .fold(0.0, f64::max)
 }
 
-fn build_run_bridge(
-    ctxs: &[MemberCtx],
-    tol: f64,
-    sa: f64,
-    sb: f64,
-    apex: f64,
-    kind: BridgeKind,
-) -> Option<(f64, f64, Vec<(f64, f64, f64)>)> {
-    let (mid_i, _) = locate(ctxs, 0.5 * (sa + sb));
-    let jerk_mag = ctxs[mid_i].m.kin.jerk;
-    let accel = ctxs[mid_i].m.kin.accel;
-    if !jerk_mag.is_finite() {
-        return None;
-    }
-    let j = if apex > 0.0 { -jerk_mag } else { jerk_mag };
-
-    let left = |s: f64| -> Option<ProfilePoint> {
-        if apex > 0.0 {
-            run_forward(ctxs, s, tol)
-        } else {
-            run_backward(ctxs, s, tol)
-        }
-    };
-    let right_v = |s: f64| -> Option<f64> {
-        if apex > 0.0 {
-            run_backward(ctxs, s, tol)
-        } else {
-            run_forward(ctxs, s, tol)
-        }
-        .map(|p| p.v)
-    };
-
-    let gap = |s: f64| -> Option<f64> { Some(left(s)?.v - right_v(s)?) };
-    let half_max = {
-        let l = left(0.5 * (sa + sb)).map_or(1.0, |p| p.v);
-        l.max(1.0) * (2.0 * accel / jerk_mag)
-    };
-    let fc = ctxs[mid_i].m.kin.flat_ceiling;
-    let s_star = match kind {
-        BridgeKind::SignFlip => scan_root(&gap, sa - half_max, sb + half_max, 16)?,
-        _ => 0.5 * (sa + sb),
-    };
-    let window = (3.0 * half_max).max(2.0 * (sb - sa));
-
-    // A ceiling roll-off departs the forward branch on a fixed side of the
-    // cruise rail: the entry leaves the rising accel ramp (`v < flat_ceiling`),
-    // the exit leaves the rail itself (`v >= flat_ceiling`). Pinning `s_left` to
-    // that side selects the single physical root and lands the arc past the
-    // transition `s_star`, never on the opposite edge of the plateau.
-    let on_departure_side = |v: f64| -> bool {
-        if !kind.is_ceiling() {
-            return true;
-        }
-        let below = v < fc - CEILING_V_EPS * (1.0 + fc);
-        below == kind.departs_below_ceiling()
-    };
-    let residual = |s_left: f64| -> Option<f64> {
-        let l = left(s_left)?;
-        if !on_departure_side(l.v) {
-            return None;
-        }
-        let shot = shoot(ctxs, tol, s_left, l.v, l.a, j, accel, apex <= 0.0)?;
-        if kind.is_ceiling() && shot.s_end < s_star {
-            return None;
-        }
-        Some(shot.v_end - right_v(shot.s_end)?)
-    };
-    let s_left = match kind {
-        BridgeKind::SignFlip => scan_root(&residual, (s_star - window).max(0.0), s_star, 48)?,
-        _ => scan_root(&residual, s_star, (s_star - window).max(0.0), 48)?,
-    };
-    let l = left(s_left)?;
-    let shot = shoot(ctxs, tol, s_left, l.v, l.a, j, accel, apex <= 0.0)?;
-    let s_right = shot.s_end;
-    if s_right <= s_left || s_right - s_left < BRIDGE_MIN_ARC_FRAC * (sb - sa).max(1e-6) {
-        return None;
-    }
-
-    let a0 = l.a;
-    let v0 = l.v;
-    let total_tau = (shot.a_end - a0) / j;
-    let n = 48usize;
-    let mut pts = Vec::with_capacity(n + 1);
-    for k in 0..=n {
-        let tau = total_tau * (k as f64) / (n as f64);
-        let a = a0 + j * tau;
-        let v = v0 + a0 * tau + 0.5 * j * tau * tau;
-        let s = s_left + v0 * tau + 0.5 * a0 * tau * tau + (1.0 / 6.0) * j * tau * tau * tau;
-        let env = {
-            let fv = run_forward(ctxs, s, tol)?.v;
-            let bv = run_backward(ctxs, s, tol)?.v;
-            fv.min(bv)
-        };
-        if v > env + 1e-6 * (1.0 + env) {
-            return None;
-        }
-        pts.push((s, v, a));
-    }
-    Some((s_left, s_right, pts))
-}
-
-fn at_flat_ceiling(ctxs: &[MemberCtx], s: f64, v: f64) -> bool {
-    let (i, _) = locate(ctxs, s);
-    let fc = ctxs[i].m.kin.flat_ceiling;
-    v >= fc - CEILING_V_EPS * (1.0 + fc)
-}
-
-struct Transition {
-    sa: f64,
-    sb: f64,
-    apex: f64,
-    kind: BridgeKind,
-}
-
-fn reconstruct_flat(ctxs: &[MemberCtx], tol: f64) -> Option<Vec<(f64, f64, f64)>> {
-    let base = base_samples(ctxs, tol)?;
-    let mut trans: Vec<Transition> = Vec::new();
-    for w in base.windows(2) {
-        let aa = w[0].2;
-        let ab = w[1].2;
-        if (aa - ab).abs() <= BRIDGE_EPS_A {
-            continue;
-        }
-        let (apex, kind) = if aa > 0.0 && ab < 0.0 {
-            (1.0, BridgeKind::SignFlip)
-        } else if aa < 0.0 && ab > 0.0 {
-            (-1.0, BridgeKind::SignFlip)
-        } else if aa > BRIDGE_EPS_A
-            && ab.abs() <= BRIDGE_EPS_A
-            && at_flat_ceiling(ctxs, w[1].0, w[1].1)
-        {
-            (1.0, BridgeKind::CeilingEntry)
-        } else if aa.abs() <= BRIDGE_EPS_A
-            && ab < -BRIDGE_EPS_A
-            && at_flat_ceiling(ctxs, w[0].0, w[0].1)
-        {
-            (1.0, BridgeKind::CeilingExit)
-        } else {
-            continue;
-        };
-        trans.push(Transition {
-            sa: w[0].0,
-            sb: w[1].0,
-            apex,
-            kind,
-        });
-    }
-
-    let mut bridges: Vec<(f64, f64, Vec<(f64, f64, f64)>)> = Vec::new();
-    let mut t = 0;
-    while t < trans.len() {
-        let cur = &trans[t];
-        // A cruise entry immediately followed by its exit on a plateau too short
-        // to hold both roll-offs is a move the base sweep reports as reaching
-        // `flat_ceiling` but which is not jerk-feasible there (it needs >2x the
-        // jerk-limited accel distance). No valid arc lands on that over-reported
-        // ceiling, so the roll-offs overlap; leaving both out keeps the base
-        // profile rather than emitting interleaved garbage. Realistic high-jerk
-        // configs never hit this (roll-offs are sub-millimetre); the real fix is
-        // jerk-aware peak estimation in the velocity sweep — tracked separately.
-        if cur.kind == BridgeKind::CeilingEntry
-            && trans
-                .get(t + 1)
-                .is_some_and(|n| n.kind == BridgeKind::CeilingExit)
-        {
-            let exit = &trans[t + 1];
-            let entry_arc =
-                build_run_bridge(ctxs, tol, cur.sa, cur.sb, 1.0, BridgeKind::CeilingEntry);
-            let exit_arc =
-                build_run_bridge(ctxs, tol, exit.sa, exit.sb, 1.0, BridgeKind::CeilingExit);
-            let overlaps = matches!((&entry_arc, &exit_arc), (Some(e), Some(x)) if e.1 > x.0);
-            if !overlaps {
-                bridges.extend(entry_arc);
-                bridges.extend(exit_arc);
-            }
-            t += 2;
-            continue;
-        }
-        if let Some(bridge) = build_run_bridge(ctxs, tol, cur.sa, cur.sb, cur.apex, cur.kind) {
-            bridges.push(bridge);
-        }
-        t += 1;
-    }
-
-    let mut out: Vec<(f64, f64, f64)> = base
-        .into_iter()
-        .filter(|p| !bridges.iter().any(|(lo, hi, _)| p.0 > *lo && p.0 < *hi))
-        .collect();
-    for (_, _, pts) in bridges {
-        out.extend(pts);
-    }
-    out.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
-    Some(out)
-}
-
-/// Linearly interpolate the reconstructed (bridged) flat profile at run-arc `s`.
-/// Member boundaries must read this, not the base `run_eval`: when a ceiling
-/// roll-off arc straddles a collinear junction, `run_eval` would return the
-/// un-bridged cruise rail (`a=0`) and splice that step back into the arc.
+/// Linearly interpolate the reconstructed flat profile at run-arc `s`. Member
+/// boundaries read this single smoothed profile so a roll-off straddling a
+/// collinear junction is sampled consistently on both sides of the seam.
 fn interp_flat(flat: &[(f64, f64, f64)], s: f64) -> Option<(f64, f64)> {
     let first = flat.first()?;
     let last = flat.last()?;
@@ -796,11 +613,75 @@ fn interp_flat(flat: &[(f64, f64, f64)], s: f64) -> Option<(f64, f64)> {
     Some((lo.1 + t * (hi.1 - lo.1), lo.2 + t * (hi.2 - lo.2)))
 }
 
+/// A run is straight under a single flat ceiling when every member has zero
+/// curvature and shares the same ceiling, acceleration, and jerk. Such a run is
+/// one analytic triple-limited profile from the entry anchor to the exit anchor,
+/// so it reconstructs in closed form (`profile::plan`) instead of on the grid.
+fn flat_ceiling_run(members: &[RunMember]) -> Option<(f64, f64, f64)> {
+    let head = members[0].kin;
+    let (ceiling, accel, jerk) = (head.flat_ceiling, head.accel, head.jerk);
+    for m in members {
+        let k = m.kin;
+        let straight = k.kappa0.abs() <= KAPPA_EPS && k.sigma.abs() <= KAPPA_EPS;
+        let uniform = k.flat_ceiling == ceiling && k.accel == accel && k.jerk == jerk;
+        if !(straight && uniform) {
+            return None;
+        }
+    }
+    Some((ceiling, accel, jerk))
+}
+
+/// Reconstruct a straight constant-ceiling run from its analytic profile. The
+/// profile is built once across the whole run from the entry anchor to the exit
+/// anchor; each member reads `(v, a)` from it at its own arc-length offset, so a
+/// collinear seam is C1-continuous by construction — both sides read the same
+/// profile, and the seam velocity is the profile's (the jerk-feasible speed that
+/// paces to land on a ceiling at `a = 0`), never the raw velocity-limit ceiling
+/// the seam sweep records as an upper bound.
+fn reconstruct_straight(
+    members: &[RunMember],
+    run_start_v: f64,
+    ceiling: f64,
+    accel: f64,
+    jerk: f64,
+) -> Vec<Vec<(f64, f64, f64)>> {
+    let length: f64 = members.iter().map(|m| m.kin.length).sum();
+    let exit_v = members[members.len() - 1].exit_v;
+    let profile = super::profile::plan(run_start_v, exit_v, length, ceiling, accel, jerk);
+    members
+        .iter()
+        .map(|m| {
+            let len = m.kin.length;
+            let steps =
+                ((len / GRID_STEP_MM).ceil() as usize).clamp(GRID_MIN_STEPS, SAMPLE_MAX_POINTS);
+            let mut local: Vec<(f64, f64, f64)> = (0..=steps)
+                .map(|k| {
+                    let sl = len * (k as f64) / (steps as f64);
+                    let (v, a) = profile.at(m.fwd_s + sl);
+                    (sl, v, a)
+                })
+                .collect();
+            let last = local.len() - 1;
+            local[last].0 = len;
+            local
+        })
+        .collect()
+}
+
 pub(super) fn reconstruct_run(
     members: &[RunMember],
     run_start_v: f64,
     tol: f64,
 ) -> Option<Vec<Vec<(f64, f64, f64)>>> {
+    if let Some((ceiling, accel, jerk)) = flat_ceiling_run(members) {
+        return Some(reconstruct_straight(
+            members,
+            run_start_v,
+            ceiling,
+            accel,
+            jerk,
+        ));
+    }
     let ctxs = build_ctxs(members, run_start_v)?;
     let flat = reconstruct_flat(&ctxs, tol)?;
 
@@ -808,12 +689,10 @@ pub(super) fn reconstruct_run(
     for c in &ctxs {
         let s0 = c.m.fwd_s;
         let s1 = c.m.fwd_s + c.m.kin.length;
-        // Boundary samples read the reconstructed (bridged) profile, not the
-        // nominal junction velocity `entry_v`/`exit_v`: a roll-off straddling a
-        // collinear junction dips below the cruise speed, so pinning the nominal
-        // there would spike `v` back to the ceiling. Off a bridge these agree.
-        let (v0, _) = interp_flat(&flat, s0)?;
-        let (v1, _) = interp_flat(&flat, s1)?;
+        // Member boundaries read the reconstructed profile, not the seam sweep's
+        // velocity-limit junction values: both sides of a seam read the same `flat`
+        // profile, so the speed and acceleration are continuous across it and the
+        // emitted `a` stays the true `dv/dt` rather than a step onto a pinned `v`.
         let mut local: Vec<(f64, f64, f64)> = flat
             .iter()
             .filter(|p| p.0 >= s0 - 1e-9 && p.0 <= s1 + 1e-9)
@@ -833,14 +712,9 @@ pub(super) fn reconstruct_run(
         }
         if let Some(first) = local.first_mut() {
             first.0 = 0.0;
-            first.1 = v0;
         }
         if let Some(last) = local.last_mut() {
             last.0 = c.m.kin.length;
-            last.1 = v1;
-        }
-        for p in &mut local {
-            p.2 = clamp_to_disk(p.2, c.m.kin.accel, c.m.kin.kappa_abs(p.0), p.1);
         }
         per_member.push(local);
     }
