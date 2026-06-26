@@ -2,7 +2,9 @@ import init, { TrajectoryData } from "/static/wasm/snapshot_viewer.js";
 
 const params = new URLSearchParams(window.location.search);
 let currentCase = params.get("case");
-let caseList = []; // [{ name, ... }] — the switchable set, from /api/cases
+let caseList = []; // [{ name, status, has_before }] — switchable set, from /api/cases
+let readOnly = false; // baselines mode serves a read-only gallery — no accept
+const acceptedNames = new Set(); // cases accepted this session, for button state
 
 // -- Colors ------------------------------------------------------------------
 const COLORS = {
@@ -320,6 +322,21 @@ class PanelRenderer {
     bctx.restore();
   }
 
+  _strokeSeries(bctx, t, valueAt, tMin, tMax, yMin, yMax) {
+    const inView = (i) => i >= 0 && i < t.length && t[i] >= tMin && t[i] <= tMax;
+    const touchesView = (i) => inView(i - 1) || inView(i) || inView(i + 1);
+    bctx.beginPath();
+    let started = false;
+    for (let i = 0; i < t.length; i++) {
+      if (!touchesView(i)) { started = false; continue; }
+      const px = this.toPixelX(t[i], tMin, tMax);
+      const py = this.toPixelY(valueAt(i), yMin, yMax);
+      if (!started) { bctx.moveTo(px, py); started = true; }
+      else bctx.lineTo(px, py);
+    }
+    bctx.stroke();
+  }
+
   // -- Render time-series panel to buffer ------------------------------------
   renderTimeBuffer(tMin, tMax, yMin, yMax, compX, compY, scalar, drawPeaks) {
     const bctx = this._ensureBuf();
@@ -332,47 +349,17 @@ class PanelRenderer {
     bctx.rect(this.plotX0, this.plotY0, this.plotW, this.plotH);
     bctx.clip();
 
-    // |X|
     bctx.strokeStyle = COLORS.vx;
     bctx.lineWidth = 0.6;
-    bctx.beginPath();
-    let started = false;
-    for (let i = 0; i < t.length; i++) {
-      if (t[i] < tMin || t[i] > tMax) continue;
-      const px = this.toPixelX(t[i], tMin, tMax);
-      const py = this.toPixelY(Math.abs(compX[i]), yMin, yMax);
-      if (!started) { bctx.moveTo(px, py); started = true; }
-      else bctx.lineTo(px, py);
-    }
-    bctx.stroke();
+    this._strokeSeries(bctx, t, (i) => Math.abs(compX[i]), tMin, tMax, yMin, yMax);
 
-    // |Y|
     bctx.strokeStyle = COLORS.vy;
     bctx.lineWidth = 0.6;
-    bctx.beginPath();
-    started = false;
-    for (let i = 0; i < t.length; i++) {
-      if (t[i] < tMin || t[i] > tMax) continue;
-      const px = this.toPixelX(t[i], tMin, tMax);
-      const py = this.toPixelY(Math.abs(compY[i]), yMin, yMax);
-      if (!started) { bctx.moveTo(px, py); started = true; }
-      else bctx.lineTo(px, py);
-    }
-    bctx.stroke();
+    this._strokeSeries(bctx, t, (i) => Math.abs(compY[i]), tMin, tMax, yMin, yMax);
 
-    // scalar
     bctx.strokeStyle = COLORS.scalar;
     bctx.lineWidth = 0.8;
-    bctx.beginPath();
-    started = false;
-    for (let i = 0; i < t.length; i++) {
-      if (t[i] < tMin || t[i] > tMax) continue;
-      const px = this.toPixelX(t[i], tMin, tMax);
-      const py = this.toPixelY(scalar[i], yMin, yMax);
-      if (!started) { bctx.moveTo(px, py); started = true; }
-      else bctx.lineTo(px, py);
-    }
-    bctx.stroke();
+    this._strokeSeries(bctx, t, (i) => scalar[i], tMin, tMax, yMin, yMax);
 
     // Peak markers
     this._peaks = [];
@@ -768,12 +755,31 @@ function caseIndex() {
   return caseList.findIndex(c => c.name === currentCase);
 }
 
+function currentEntry() {
+  return caseList.find(c => c.name === currentCase) || null;
+}
+
 function syncCaseControls() {
   const sel = document.getElementById("case-select");
   if (sel.value !== currentCase) sel.value = currentCase;
   const i = caseIndex();
   document.getElementById("case-prev").disabled = i <= 0;
   document.getElementById("case-next").disabled = i < 0 || i >= caseList.length - 1;
+  syncAcceptControl();
+}
+
+// The review list only ever holds changed/new cases, so an entry with a
+// non-exact status is exactly a case that can be written as the new baseline.
+function syncAcceptControl() {
+  const btn = document.getElementById("accept");
+  if (readOnly) { btn.hidden = true; return; }
+  btn.hidden = false;
+  const entry = currentEntry();
+  const accepted = acceptedNames.has(currentCase);
+  const reviewable = !accepted && entry != null
+    && entry.status && entry.status !== "exact";
+  btn.disabled = !reviewable;
+  btn.textContent = accepted ? "Accepted ✓" : "Accept";
 }
 
 function stepCase(dir) {
@@ -784,18 +790,7 @@ function stepCase(dir) {
   loadCase(caseList[next].name);
 }
 
-async function loadCaseList() {
-  let review = [];
-  try {
-    const data = await fetch("/api/cases").then(r => r.json());
-    review = data.review || [];
-  } catch (e) { /* offline / no server scan — fall back to single case */ }
-  caseList = review;
-  if (currentCase && !caseList.some(c => c.name === currentCase)) {
-    caseList.push({ name: currentCase });
-  }
-  if (!currentCase && caseList.length > 0) currentCase = caseList[0].name;
-
+function rebuildCaseSelect() {
   const sel = document.getElementById("case-select");
   sel.innerHTML = "";
   for (const c of caseList) {
@@ -804,7 +799,23 @@ async function loadCaseList() {
     opt.textContent = c.name;
     sel.appendChild(opt);
   }
-  sel.addEventListener("change", () => loadCase(sel.value));
+}
+
+async function loadCaseList() {
+  let review = [];
+  try {
+    const data = await fetch("/api/cases").then(r => r.json());
+    review = data.review || [];
+    readOnly = Boolean(data.read_only);
+  } catch (e) { /* offline / no server scan — fall back to single case */ }
+  caseList = review;
+  if (currentCase && !caseList.some(c => c.name === currentCase)) {
+    caseList.push({ name: currentCase });
+  }
+  if (!currentCase && caseList.length > 0) currentCase = caseList[0].name;
+
+  rebuildCaseSelect();
+  document.getElementById("case-select").addEventListener("change", (e) => loadCase(e.target.value));
   document.getElementById("case-prev").addEventListener("click", () => stepCase(-1));
   document.getElementById("case-next").addEventListener("click", () => stepCase(1));
 }
@@ -971,6 +982,63 @@ function pngOpen() {
   return document.getElementById("png-overlay").classList.contains("open");
 }
 
+// -- Accept ------------------------------------------------------------------
+function showAcceptDone() {
+  document.body.innerHTML =
+    '<p style="padding:40px;font-size:15px;color:#9aa3b2;' +
+    'font-family:system-ui,sans-serif">All snapshots accepted — review ' +
+    "complete. You can close this tab and return to the terminal.</p>";
+}
+
+// After accepting, jump to the next case still needing review, preferring the
+// one that followed the accepted case in the prior ordering.
+function pickNextReviewable(remaining) {
+  const names = new Set(remaining.map(c => c.name));
+  const i = caseIndex();
+  for (let k = i + 1; k < caseList.length; k++) {
+    if (names.has(caseList[k].name)) return caseList[k].name;
+  }
+  for (let k = i - 1; k >= 0; k--) {
+    if (names.has(caseList[k].name)) return caseList[k].name;
+  }
+  return remaining.length > 0 ? remaining[0].name : null;
+}
+
+async function acceptCurrent() {
+  if (readOnly || !currentCase) return;
+  const entry = currentEntry();
+  if (entry == null || !entry.status || entry.status === "exact") return;
+  if (acceptedNames.has(currentCase)) return;
+
+  const btn = document.getElementById("accept");
+  btn.disabled = true;
+  btn.textContent = "Accepting…";
+
+  let data;
+  try {
+    data = await fetch("/api/accept", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: [currentCase] }),
+    }).then(r => r.json());
+  } catch (e) {
+    btn.textContent = "Accept failed";
+    return;
+  }
+
+  acceptedNames.add(currentCase);
+  const remaining = data.review || [];
+  if (remaining.length === 0) {
+    showAcceptDone();
+    return;
+  }
+  const nextName = pickNextReviewable(remaining);
+  caseList = remaining.slice();
+  rebuildCaseSelect();
+  if (nextName) loadCase(nextName);
+  else syncCaseControls();
+}
+
 // -- Init --------------------------------------------------------------------
 async function main() {
   await init();
@@ -1011,6 +1079,7 @@ async function main() {
   document.getElementById("toggle-variant").addEventListener("click", toggleVariant);
   document.getElementById("open-png").addEventListener("click", openPng);
   document.getElementById("png-overlay").addEventListener("click", closePng);
+  document.getElementById("accept").addEventListener("click", acceptCurrent);
 
   document.addEventListener("keydown", (e) => {
     if (pngOpen()) {
@@ -1023,6 +1092,7 @@ async function main() {
       e.preventDefault();
       toggleVariant();
     }
+    else if (e.key === "a" || e.key === "A") acceptCurrent();
   });
 
   await loadCase(currentCase);

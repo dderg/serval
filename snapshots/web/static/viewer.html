@@ -17,6 +17,8 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 #toggle-variant.after{background:rgba(78,203,113,0.18);border-color:#4ecb71;color:#4ecb71}
 #toggle-variant.before{background:rgba(245,166,35,0.22);border-color:#f5a623;color:#f5a623}
 .toolbar button:disabled{opacity:0.4;cursor:default}
+.toolbar button#accept{background:rgba(78,203,113,0.18);border-color:#4ecb71;color:#4ecb71;font-weight:600;min-width:88px}
+.toolbar button#accept:hover:not(:disabled){background:rgba(78,203,113,0.30)}
 .toolbar #back-link{color:#888;text-decoration:none;font-size:12px}
 .toolbar #back-link:hover{color:#e0e0e0}
 .toolbar .nav{display:flex;align-items:center;gap:4px}
@@ -58,6 +60,7 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
     <button id="reset-zoom">Reset Zoom</button>
     <button id="toggle-peaks" class="active">Peaks</button>
     <button id="open-png" title="Open the rendered PNG">PNG</button>
+    <button id="accept" title="Accept this snapshot as the new baseline (a)">Accept</button>
   </div>
   <div class="readout" id="readout"><span class="g">hover a panel to scrub</span></div>
   <div class="panels">
