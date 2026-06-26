@@ -630,21 +630,15 @@ function setupTimeInteraction(panelIdx) {
     const tAtCursor = r.toDataX(mx, timeView.tMin, timeView.tMax);
 
     if (e.ctrlKey || e.metaKey) {
-      // Pinch zoom
-      const factor = 1 + e.deltaY * 0.01;
+      const factor = Math.max(0.1, Math.min(10, Math.exp(e.deltaY * 0.01)));
       timeView.tMin = tAtCursor - (tAtCursor - timeView.tMin) * factor;
       timeView.tMax = tAtCursor + (timeView.tMax - tAtCursor) * factor;
-    } else if (e.deltaX !== 0) {
-      // Two-finger horizontal scroll → pan
+    } else {
       const dtPerPx = (timeView.tMax - timeView.tMin) / r.plotW;
-      const dt = e.deltaX * dtPerPx;
+      const dx = e.deltaX !== 0 ? e.deltaX : e.deltaY;
+      const dt = dx * dtPerPx;
       timeView.tMin += dt;
       timeView.tMax += dt;
-    } else {
-      // Scroll wheel → zoom
-      const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
-      timeView.tMin = tAtCursor - (tAtCursor - timeView.tMin) * factor;
-      timeView.tMax = tAtCursor + (timeView.tMax - tAtCursor) * factor;
     }
     lastBoundsKey = "";
     renderAll();
@@ -712,20 +706,18 @@ function setupPathInteraction() {
     const dataX = r.toDataX(mx, pb.xMin, pb.xMax);
     const dataY = r.toDataY(my, pb.yMin, pb.yMax);
     if (e.ctrlKey || e.metaKey) {
-      // Pinch zoom
-      const factor = 1 + e.deltaY * 0.01;
+      const factor = Math.max(0.1, Math.min(10, Math.exp(e.deltaY * 0.01)));
       pathView.xMin = dataX - (dataX - pb.xMin) * factor;
       pathView.xMax = dataX + (pb.xMax - dataX) * factor;
       pathView.yMin = dataY - (dataY - pb.yMin) * factor;
       pathView.yMax = dataY + (pb.yMax - dataY) * factor;
     } else {
-      // Two-finger scroll → pan (X and Y)
       const dppx = (pb.xMax - pb.xMin) / r.plotW;
       const dppy = (pb.yMax - pb.yMin) / r.plotH;
-      pathView.xMin -= e.deltaX * dppx;
-      pathView.xMax -= e.deltaX * dppx;
-      pathView.yMin -= e.deltaY * dppy;
-      pathView.yMax -= e.deltaY * dppy;
+      pathView.xMin = pb.xMin + e.deltaX * dppx;
+      pathView.xMax = pb.xMax + e.deltaX * dppx;
+      pathView.yMin = pb.yMin - e.deltaY * dppy;
+      pathView.yMax = pb.yMax - e.deltaY * dppy;
     }
     lastBoundsKey = "";
     renderAll();
