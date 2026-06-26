@@ -132,7 +132,6 @@ class PanelRenderer {
     this.type = type;
     this.margin = { top: 22, right: 14, bottom: 26, left: 56 };
     this._buf = null;
-    this._bufKey = "";
     this._peaks = [];
     this._resize();
   }
@@ -140,7 +139,7 @@ class PanelRenderer {
   initObserver() {
     this._ro = new ResizeObserver(() => {
       this._resize();
-      this._bufKey = ""; // force re-render
+      lastBoundsKey = "";
       renderAll();
     });
     this._ro.observe(this.canvas.parentElement);
@@ -159,7 +158,6 @@ class PanelRenderer {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.plotW = this.w - this.margin.left - this.margin.right;
     this.plotH = this.h - this.margin.top - this.margin.bottom;
-    this._bufKey = ""; // force re-render
   }
 
   get plotX0() { return this.margin.left; }
@@ -536,6 +534,7 @@ function syncHover(idx) {
 
 // -- Render all buffers (only when bounds change) ----------------------------
 function renderAll() {
+  if (!DATA) return;
   const { tMin, tMax } = timeView;
   const { xMin, xMax, yMin, yMax } = pathView;
 
@@ -821,11 +820,18 @@ async function loadCase(name) {
 }
 
 // -- Resizable path/graphs split ---------------------------------------------
+const SPLIT_KEY = "snapshotViewer.pathSplit";
+
 function setupSplitter() {
   const panels = document.querySelector(".panels");
   const splitter = document.getElementById("splitter");
-  let dragging = false;
 
+  const saved = parseFloat(localStorage.getItem(SPLIT_KEY));
+  if (saved > 0 && saved < 1) {
+    panels.style.setProperty("--path-w", (saved * 100) + "%");
+  }
+
+  let dragging = false;
   splitter.addEventListener("mousedown", (e) => {
     dragging = true;
     document.body.style.cursor = "col-resize";
@@ -836,13 +842,15 @@ function setupSplitter() {
     if (!dragging) return;
     const rect = panels.getBoundingClientRect();
     const w = Math.max(220, Math.min(rect.width - 260, e.clientX - rect.left));
-    panels.style.setProperty("--path-w", w + "px");
+    panels.style.setProperty("--path-w", (w / rect.width * 100) + "%");
   });
   window.addEventListener("mouseup", () => {
     if (!dragging) return;
     dragging = false;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
+    const frac = parseFloat(panels.style.getPropertyValue("--path-w")) / 100;
+    if (frac > 0) localStorage.setItem(SPLIT_KEY, frac.toFixed(4));
   });
 }
 
