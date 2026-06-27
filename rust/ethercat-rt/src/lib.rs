@@ -8,6 +8,7 @@ pub mod dynamics;
 #[cfg(feature = "hw")]
 pub mod ffi;
 pub mod mailbox;
+pub mod push_plan;
 pub mod scale;
 pub mod sdo;
 pub mod seed_home;

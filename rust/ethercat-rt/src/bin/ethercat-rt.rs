@@ -21,6 +21,7 @@ use ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAULT};
 use ethercat_rt::dynamics::{clamp_torque, DynamicsModel};
 use ethercat_rt::ffi;
 use ethercat_rt::mailbox::{MailboxReply, MailboxRequest, MailboxWorker, WorkerScheduling};
+use ethercat_rt::push_plan::plan_bundle;
 use ethercat_rt::scale::{mm_to_counts, CountMap};
 use ethercat_rt::sdo::SdoBus;
 use ethercat_rt::seed_home::{
@@ -353,55 +354,41 @@ fn main() {
                     msg,
                 } => {
                     let now_ns = monotonic_ns();
-                    let diags: Vec<(u8, u64)> =
-                        msg.axes.iter().map(|a| (a.axis_idx, 0u64)).collect();
-                    if gate.state() == TorqueState::Faulted {
-                        server.respond(&push_pieces_response_frame_multi(
-                            correlation_id,
-                            ERR_PIECES_WHILE_FAULTED,
-                            now_ns,
-                            &diags,
-                        ));
-                    } else {
-                        let mut result = 0i32;
-                        let mut diags: Vec<(u8, u64)> = Vec::with_capacity(msg.axes.len());
-                        for axis in &msg.axes {
-                            let front_start_time =
-                                if axis.piece_count > 0 && axis.pieces_bytes.len() >= 8 {
-                                    u64::from_le_bytes(
-                                        axis.pieces_bytes[0..8].try_into().unwrap_or([0; 8]),
-                                    )
-                                } else {
-                                    0
-                                };
-                            diags.push((axis.axis_idx, front_start_time));
-                            let slot = if rings.len() == 1 {
-                                Some(0)
+                    let diags: Vec<(u8, u64)> = msg
+                        .axes
+                        .iter()
+                        .map(|a| {
+                            let front_start_time = if a.piece_count > 0 && a.pieces_bytes.len() >= 8
+                            {
+                                u64::from_le_bytes(
+                                    a.pieces_bytes[0..8].try_into().unwrap_or([0; 8]),
+                                )
                             } else {
-                                slave_axes.iter().position(|&a| a == axis.axis_idx)
+                                0
                             };
-                            let Some(slot) = slot.filter(|&s| s < rings.len()) else {
-                                eprintln!(
-                                    "ec-rt: PushPieces for axis {} not mapped to any of {} slave(s)",
-                                    axis.axis_idx,
-                                    rings.len()
-                                );
-                                result = -309;
-                                continue;
-                            };
-                            let pushed =
-                                rings[slot].push_from_bytes(axis.piece_count, &axis.pieces_bytes);
-                            if pushed != axis.piece_count {
-                                result = -309;
+                            (a.axis_idx, front_start_time)
+                        })
+                        .collect();
+                    let result = if gate.state() == TorqueState::Faulted {
+                        ERR_PIECES_WHILE_FAULTED
+                    } else {
+                        match plan_bundle(&msg.axes, &slave_axes, |slot| rings[slot].free()) {
+                            Ok(slots) => {
+                                for (axis, &slot) in msg.axes.iter().zip(slots.iter()) {
+                                    rings[slot]
+                                        .push_from_bytes(axis.piece_count, &axis.pieces_bytes);
+                                }
+                                0
                             }
+                            Err(code) => code,
                         }
-                        server.respond(&push_pieces_response_frame_multi(
-                            correlation_id,
-                            result,
-                            now_ns,
-                            &diags,
-                        ));
-                    }
+                    };
+                    server.respond(&push_pieces_response_frame_multi(
+                        correlation_id,
+                        result,
+                        now_ns,
+                        &diags,
+                    ));
                 }
                 Command::QueryRuntimeCaps { correlation_id } => {
                     let total: u32 = (AXIS_RING_CAPACITY * num_slaves * 32) as u32;
