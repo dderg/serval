@@ -76,10 +76,6 @@ struct McuConnection {
 
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// One EtherCAT servo drive as handed to `claim_ethercat_node` from the host:
-/// `(chain_index, global_axis, counts_per_mm, rotation_distance,
-/// following_error_counts, max_torque_tenth_pct)`. `chain_index` is the 1-based
-/// cable position; the endpoint slave position is `chain_index - 1`.
 type EthercatDrive = (i32, usize, f64, f64, Option<u32>, Option<u16>);
 
 const ETHERCAT_CLOCK_FREQ_HZ: u32 = 1_000_000_000;
@@ -139,8 +135,6 @@ impl MotorQuery {
     }
 }
 
-/// Resolve a global axis to its endpoint slot via the claim-time slot map
-/// (`slot_axes[slot] == global_axis`). `None` if the axis is not on this node.
 fn slot_for_axis(slot_axes: &[usize], axis: usize) -> Option<u8> {
     slot_axes
         .iter()
@@ -162,8 +156,6 @@ fn place_motor_response(
         }
     };
     if is_ethercat {
-        // The endpoint tags each sample with its slot; map slot → global axis
-        // via cfg_axes (slot order) rather than trusting positional order.
         for m in &resp.motors {
             if let Some(&axis) = cfg_axes.get(m.slot as usize) {
                 put(axis, m);
@@ -410,7 +402,6 @@ mod claim_error_message_tests {
     }
 }
 
-/// Append the per-drive flags shared by the legacy and `--slave` forms.
 fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
     let (_chain_index, _axis, counts_per_mm, rotation_distance, ferr, max_torque) = d;
     args.push("--counts-per-mm".into());
@@ -427,11 +418,6 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
     }
 }
 
-/// Build the endpoint CLI args. N=1 keeps the legacy single-drive form (no
-/// `--slave`) — behaviorally identical to Phase 1 (the endpoint parser is
-/// order-independent): slave position 0, axis routing via the endpoint's N==1
-/// shim. N>1 emits one `--slave <pos> --axis <global>` group per drive (in the
-/// caller's slot order), position = `chain_index - 1`.
 fn endpoint_args(
     interface: &str,
     socket_path: &str,
@@ -460,7 +446,7 @@ fn endpoint_args(
         for d in drives {
             let (chain_index, axis, ..) = d;
             args.push("--slave".into());
-            args.push((chain_index - 1).to_string());
+            args.push(chain_index.to_string());
             args.push("--axis".into());
             args.push(axis.to_string());
             push_drive_flags(&mut args, d);
@@ -4947,7 +4933,6 @@ mod ethercat_endpoint_tests {
 
     #[test]
     fn slot_for_axis_maps_hits_and_misses() {
-        // slot_axes[slot] == global axis; resolve global axis -> slot.
         let slot_axes = [2usize, 5, 7];
         assert_eq!(slot_for_axis(&slot_axes, 2), Some(0));
         assert_eq!(slot_for_axis(&slot_axes, 5), Some(1));
@@ -4959,7 +4944,6 @@ mod ethercat_endpoint_tests {
 
     #[test]
     fn endpoint_args_single_drive_uses_legacy_form() {
-        // N=1 must stay byte-identical to Phase 1: no --slave/--axis groups.
         let args = endpoint_args(
             "eth0",
             "/tmp/x.sock",
@@ -4976,8 +4960,6 @@ mod ethercat_endpoint_tests {
 
     #[test]
     fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
-        // Two drives, chain_index 1 & 2 on global axes 0 & 2. Positions are
-        // chain_index - 1 (0-based IgH), in slot order.
         let args = endpoint_args(
             "eth0",
             "/tmp/x.sock",
@@ -4985,8 +4967,8 @@ mod ethercat_endpoint_tests {
             None,
             30.0,
             &[
-                (1, 0, 1000.0, 50.0, None, None),
-                (2, 2, 2000.0, 40.0, Some(4096), None),
+                (0, 0, 1000.0, 50.0, None, None),
+                (1, 2, 2000.0, 40.0, Some(4096), None),
             ],
         );
         let slave_positions: Vec<&String> = args

@@ -26,28 +26,26 @@ class FakeRail:
 
 
 def _node(rails):
-    # rails: [(global_axis, FakeRail), ...] sorted by global axis (= slot order).
     printer = types.SimpleNamespace(config_error=FakeConfigError)
     node = types.SimpleNamespace(name="node_x", printer=printer)
     return node, sorted(rails, key=lambda pair: pair[0])
 
 
 def test_validate_chain_accepts_distinct_indices():
-    node, rails = _node([(0, FakeRail("x", 1)), (2, FakeRail("y", 2))])
-    # Should not raise.
+    node, rails = _node([(0, FakeRail("x", 0)), (2, FakeRail("y", 1))])
     ethercat_node.EtherCatNode._validate_chain(node, rails)
 
 
 def test_validate_chain_rejects_duplicate_index():
-    node, rails = _node([(0, FakeRail("x", 1)), (1, FakeRail("y", 1))])
+    node, rails = _node([(0, FakeRail("x", 0)), (1, FakeRail("y", 0))])
     with pytest.raises(FakeConfigError) as e:
         ethercat_node.EtherCatNode._validate_chain(node, rails)
-    assert "share ethercat_chain_index=1" in str(e.value)
+    assert "share ethercat_chain_index=0" in str(e.value)
     assert "x" in str(e.value) and "y" in str(e.value)
 
 
 def test_validate_chain_rejects_out_of_range_index():
-    bad = ethercat_node.MAX_CHAIN_INDEX + 1
+    bad = ethercat_node.EC_RT_MAX_SLAVES
     node, rails = _node([(0, FakeRail("x", bad))])
     with pytest.raises(FakeConfigError) as e:
         ethercat_node.EtherCatNode._validate_chain(node, rails)

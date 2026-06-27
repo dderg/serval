@@ -35,10 +35,10 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Single drive | one `[motor]` on node, `ethercat_chain_index: 1` (required) | legacy CLI form; slot 0; identical to Phase 1 | missing field → config error |
-| Two drives | two `[motor]` on node, chain_index 1 & 2 | two `--slave` groups; slot 0→axis(idx1), slot 1→axis(idx2); each SDO/torque targets its slot | N/A |
-| Duplicate index | two motors both chain_index 1 | claim aborts | config/claim error naming both motors |
-| Out-of-range index | chain_index 9 (> EC_RT_MAX_SLAVES) | claim aborts | config error |
+| Single drive | one `[motor]` on node, `ethercat_chain_index: 0` (required, 0-based) | legacy CLI form; slot 0; identical to Phase 1 | missing field → config error |
+| Two drives | two `[motor]` on node, chain_index 0 & 1 | two `--slave` groups; slot 0→axis(idx0), slot 1→axis(idx1); each SDO/torque targets its slot | N/A |
+| Duplicate index | two motors both chain_index 0 | claim aborts | config/claim error naming both motors |
+| Out-of-range index | chain_index 8 (≥ EC_RT_MAX_SLAVES) | claim aborts | config error |
 | SERVO_PARAM multi | `SERVO=<name>` on a multi-drive node | resolves (node, slot) for that motor; SDO targets its slot | error if name unknown/ambiguous |
 | Per-slot readback | endpoint sends `retired_counts`/motors in slot order | each lands on `cfg.axes[slot]` global axis | N/A |
 
@@ -83,6 +83,8 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 
 ## Spec Change Log
 
+- **2026-06-27 — `ethercat_chain_index` is 0-based + comments stripped (human feedback).** "Index" should start at 0, and 0-based maps directly to the IgH ring position (`SLAVE_POS`), removing the `chain_index - 1` conversion entirely. Range is now `0..EC_RT_MAX_SLAVES`. Also removed the narration comments added in this change per the project's no-comments rule (the stale-comment chase during the 0-based switch was the prompt) — the code (named destructures, function names, the `EC_RT_MAX_SLAVES` constant) carries the meaning.
+
 - **2026-06-27 — `ethercat_chain_index` is now REQUIRED (human renegotiation).** Dropped the `default=1`; `getint("ethercat_chain_index", minval=1)` with no default → every `[motor] drive:servo` must declare its chain position explicitly (a missing field is a loud config error at startup). No backwards-compat for the unspecified case. Existing single-drive bench config must add `ethercat_chain_index: 1`. (`servo_axis.py`; fake motor configs in `test_servo_homing.py`/`test_motion_kinematics.py` updated.)
 
 - **2026-06-27 — step-04 review patches (no loopback; all patch/defer/reject):**
@@ -102,7 +104,7 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 
 ## Design Notes
 
-**Slot↔global-axis map (the single source of truth).** At claim, the node lists its rails and sorts them ascending by **global (lane) axis**; slot `i` = the i-th rail in that order, its slave position = `chain_index - 1`. This sort matches `cfg.axes` (built sorted at `init_planner`), so the slot↔axis correspondence is identical on both the claim side (`ethercat_slot_axes`) and the dispatch side (`cfg.axes`). The endpoint keys everything by slot (Phase 1 `rings[slot]`); it routes incoming PushPieces (tagged with the global `axis_idx`) through a `--axis`-built global→slot map for N>1, and the bridge maps endpoint→host `retired_counts`/`MotorStateResponse` (slot-ordered) back via `cfg.axes[slot]`. This retires the Phase-1 `enumerate()==global-axis` retired shim (the 2026-06-26 defer); the `num_slaves==1→slot 0` shim is kept for the N=1 path.
+**Slot↔global-axis map (the single source of truth).** At claim, the node lists its rails and sorts them ascending by **global (lane) axis**; slot `i` = the i-th rail in that order, its slave position = `chain_index` (0-based, = IgH `SLAVE_POS`). This sort matches `cfg.axes` (built sorted at `init_planner`), so the slot↔axis correspondence is identical on both the claim side (`ethercat_slot_axes`) and the dispatch side (`cfg.axes`). The endpoint keys everything by slot (Phase 1 `rings[slot]`); it routes incoming PushPieces (tagged with the global `axis_idx`) through a `--axis`-built global→slot map for N>1, and the bridge maps endpoint→host `retired_counts`/`MotorStateResponse` (slot-ordered) back via `cfg.axes[slot]`. This retires the Phase-1 `enumerate()==global-axis` retired shim (the 2026-06-26 defer); the `num_slaves==1→slot 0` shim is kept for the N=1 path.
 
 **Slot default = 0** on every new wire field / Python param keeps single-drive callers (and any not-yet-updated path) on the existing drive, so the change is incremental and N=1-safe.
 
@@ -125,7 +127,7 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 - The host claim establishes the authoritative map: drives sorted by global axis → slot order, then spawn N groups.
   [`bridge.rs:1020`](../../rust/motion-engine/src/bridge.rs#L1020)
 
-- How the CLI args encode that order (N=1 legacy form vs N>1 `--slave`/`--axis`), position = chain_index-1.
+- How the CLI args encode that order (N=1 legacy form vs N>1 `--slave`/`--axis`); chain_index is the 0-based slave position.
   [`bridge.rs:435`](../../rust/motion-engine/src/bridge.rs#L435)
 
 **Wire protocol (slot on the 6 single-target messages)**
@@ -157,7 +159,7 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 
 **Host config + claim (user-facing)**
 
-- New `ethercat_chain_index` motor field (1-based).
+- New `ethercat_chain_index` motor field (0-based, required).
   [`servo_axis.py:86`](../../klippy/extras/servo_axis.py#L86)
 
 - Node gathers all rails, validates (distinct/range/FF), builds the per-drive list, claims, pushes per-slot params.

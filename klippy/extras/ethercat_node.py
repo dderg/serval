@@ -14,9 +14,7 @@ _DEFAULT_ENDPOINT = os.path.join(
 
 DRIVE_FAULT_POLL_PERIOD = 1.0
 
-# Mirror of EC_RT_MAX_SLAVES in rust/ethercat-rt/src/cli.rs — the endpoint sizes
-# its per-slave arrays to this bound.
-MAX_CHAIN_INDEX = 8
+EC_RT_MAX_SLAVES = 8
 
 
 class EtherCatNode:
@@ -57,9 +55,6 @@ class EtherCatNode:
         self.printer.load_object(config, "servo_param")
 
     def _find_rails(self):
-        # ServoRails are not printer objects (the toolhead builds them directly
-        # into kin.rails), so iterate the kinematics lanes — which also give us
-        # each rail's global axis (lane index) for the slot↔axis map.
         toolhead = self.printer.lookup_object("toolhead")
         kin = toolhead.get_kinematics()
         found = []
@@ -78,15 +73,20 @@ class EtherCatNode:
         return found
 
     def _validate_chain(self, rails):
-        # rails is [(global_axis, rail), ...] sorted by global axis (= slot).
         by_index = {}
         for _global_axis, rail in rails:
             idx = rail.get_chain_index()
-            if idx > MAX_CHAIN_INDEX:
+            if idx >= EC_RT_MAX_SLAVES:
                 raise self.printer.config_error(
                     "ethercat_node %s: motor %s ethercat_chain_index=%d "
-                    "exceeds the %d-drive endpoint limit"
-                    % (self.name, rail.get_motor_name(), idx, MAX_CHAIN_INDEX)
+                    "exceeds the %d-drive endpoint limit (valid 0..%d)"
+                    % (
+                        self.name,
+                        rail.get_motor_name(),
+                        idx,
+                        EC_RT_MAX_SLAVES,
+                        EC_RT_MAX_SLAVES - 1,
+                    )
                 )
             if idx in by_index:
                 raise self.printer.config_error(

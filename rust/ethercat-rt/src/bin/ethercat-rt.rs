@@ -372,11 +372,6 @@ fn main() {
                                     0
                                 };
                             diags.push((axis.axis_idx, front_start_time));
-                            // Single-drive: route to the one ring regardless of the
-                            // host's (global) axis_idx, matching pre-multi behaviour
-                            // where an EtherCAT node could serve any one axis (X/Y/Z).
-                            // Multi-drive: map the global axis_idx to its slave slot
-                            // via the per-slave --axis the host passed at claim.
                             let slot = if rings.len() == 1 {
                                 Some(0)
                             } else {

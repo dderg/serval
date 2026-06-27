@@ -5,11 +5,7 @@
 /// backend sizes its per-slave arrays to. Keep the two in sync.
 pub const EC_RT_MAX_SLAVES: usize = 8;
 
-/// Per-drive config parsed from one `--slave <pos> ...` CLI group. `axis` is the
-/// host's global axis this slave drives; the endpoint routes incoming PushPieces
-/// (tagged with the global axis) to this slave's ring through it. It is only
-/// meaningful with multiple slaves — the single-drive form leaves it at 0 and
-/// routes everything to slot 0.
+/// Per-drive config parsed from one `--slave <pos> ...` CLI group.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlaveCfg {
     pub pos: i32,
