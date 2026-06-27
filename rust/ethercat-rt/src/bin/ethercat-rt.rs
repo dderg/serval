@@ -133,6 +133,17 @@ fn main() {
     });
     let num_slaves = slaves.len();
     let counts_per_mm: Vec<f64> = slaves.iter().map(|s| s.counts_per_mm).collect();
+    let invert: Vec<bool> = slaves.iter().map(|s| s.invert).collect();
+    let cmd_counts_per_mm: Vec<f64> = slaves
+        .iter()
+        .map(|s| {
+            if s.invert {
+                -s.counts_per_mm
+            } else {
+                s.counts_per_mm
+            }
+        })
+        .collect();
     let rotation_distance: Vec<f64> = slaves.iter().map(|s| s.rotation_distance).collect();
     let slave_positions: Vec<i32> = slaves.iter().map(|s| s.pos).collect();
     let slave_axes: Vec<u8> = slaves.iter().map(|s| s.axis).collect();
@@ -183,7 +194,7 @@ fn main() {
         "ec-rt: socket {socket}, cycle {cycle_us}us, {num_slaves} slave(s) \
          positions={slave_positions:?} counts/mm={counts_per_mm:?} \
          rotation_distance={rotation_distance:?} velocity_ff={velocity_ff:?} \
-         dynamics={} clamp={torque_clamp_tenths:?}",
+         invert={invert:?} dynamics={} clamp={torque_clamp_tenths:?}",
         dynamics.is_some()
     );
 
@@ -571,7 +582,7 @@ fn main() {
                         ));
                     } else {
                         let offset_counts = ((f64::from(home_q16) / 65536.0)
-                            * counts_per_mm[slot as usize])
+                            * cmd_counts_per_mm[slot as usize])
                             .round() as i32;
                         eprintln!(
                             "ec-rt: SeedServoHome slot={slot} home_q16={home_q16} \
@@ -732,11 +743,12 @@ fn main() {
                                         ffi::ec_rt_get_velocity_actual(slot),
                                     )
                                 };
-                                let pos_mm = f64::from(pos_counts) / counts_per_mm[s];
-                                let vel_mm_s = ethercat_rt::scale::velocity_mm_s(
-                                    vel_rpm,
-                                    rotation_distance[s],
-                                );
+                                let pos_mm = f64::from(pos_counts) / cmd_counts_per_mm[s];
+                                let vel_mm_s = cmd_counts_per_mm[s].signum()
+                                    * ethercat_rt::scale::velocity_mm_s(
+                                        vel_rpm,
+                                        rotation_distance[s],
+                                    );
                                 (s as u8, pos_mm, vel_mm_s)
                             })
                             .collect();
@@ -959,9 +971,10 @@ fn main() {
                 let sampled = if buzz.active() {
                     if s == 0 {
                         buzz.eval(now).map(|(rel_mm, vel_mm_s, acc_mm_s2)| {
-                            let counts = buzz
-                                .base_counts()
-                                .wrapping_add(mm_to_counts(f64::from(rel_mm), counts_per_mm[0]));
+                            let counts = buzz.base_counts().wrapping_add(mm_to_counts(
+                                f64::from(rel_mm),
+                                cmd_counts_per_mm[0],
+                            ));
                             (counts, vel_mm_s, acc_mm_s2)
                         })
                     } else {
@@ -969,9 +982,9 @@ fn main() {
                     }
                 } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = rings[s].sample(now) {
                     let counts = if framed {
-                        mm_to_counts(f64::from(pos_mm), counts_per_mm[s])
+                        mm_to_counts(f64::from(pos_mm), cmd_counts_per_mm[s])
                     } else {
-                        let cpm = counts_per_mm[s];
+                        let cpm = cmd_counts_per_mm[s];
                         let map = cmaps[s].get_or_insert_with(|| {
                             let actual =
                                 unsafe { ffi::ec_rt_get_position_actual(s as std::os::raw::c_int) };
@@ -997,13 +1010,14 @@ fn main() {
                 let slot = s as std::os::raw::c_int;
                 if let Some(counts) = sp_counts[s] {
                     let vel_offset = if velocity_ff[s] {
-                        (f64::from(all_vel[s]) * counts_per_mm[s]).round() as i32
+                        (f64::from(all_vel[s]) * cmd_counts_per_mm[s]).round() as i32
                     } else {
                         0
                     };
                     let torque_offset = match &dynamics {
                         Some(model) => {
-                            let raw = model.torque_ff(s, &all_acc, &all_vel);
+                            let dir_sign = cmd_counts_per_mm[s].signum() as f32;
+                            let raw = dir_sign * model.torque_ff(s, &all_acc, &all_vel);
                             if !raw.is_finite() {
                                 eprintln!(
                                     "ec-rt: FAULT non-finite torque FF on slot {s} \

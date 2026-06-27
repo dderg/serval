@@ -120,6 +120,7 @@ class EtherCatNode:
                     max_torque_tenth_pct,
                     velocity_ff,
                     ff_torque_clamp,
+                    rail.get_invert_direction(),
                 )
             )
         self._counts_per_mm = rails[0][1].get_counts_per_mm()

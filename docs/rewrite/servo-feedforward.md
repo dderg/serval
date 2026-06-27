@@ -49,7 +49,16 @@ encoder_counts_per_rev: 131072  # A6-EC: 131072
 #velocity_ff: True              # stream 60B1h velocity feedforward (kinematic, no profile)
 #dynamics_profile: dynamics_x.toml  # path to profile TOML; enables 60B2h torque FF
 #ff_torque_clamp: 30.0          # torque-offset clamp, % of rated (0, 400], default 30.0
+#invert_direction: True         # reverse the drive (default False)
 ```
+
+`invert_direction` (bool, default `False`): reverses the drive's motion
+direction. The sign is applied coherently to the target position, the 60B1h
+velocity offset, and the 60B2h torque offset, so feedforward keeps pushing the
+right way after the flip — unlike the drive-side CiA-402 polarity object
+(`0x607E`), which leaves torque unflipped. The raw inertia capture is left in
+the drive's native frame; the fit is sign-invariant, so an inverted drive needs
+no special dynamics profile.
 
 `velocity_ff` (bool, default `False`): when set, the endpoint streams the
 computed motor velocity as a 60B1h velocity offset each DC cycle. Purely

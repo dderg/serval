@@ -94,6 +94,9 @@ class ServoRail(BaseRail):
         self.ff_torque_clamp = motor_config.getfloat(
             "ff_torque_clamp", 30.0, above=0.0, maxval=400.0
         )
+        self.invert_direction = motor_config.getboolean(
+            "invert_direction", False
+        )
         self._parse_position_range(axis_config)
         self.endstop_pin = axis_config.get("endstop_pin", None)
         if self.endstop_pin is None:
@@ -185,6 +188,9 @@ class ServoRail(BaseRail):
 
     def get_ff_config(self):
         return (self.velocity_ff, self.ff_torque_clamp)
+
+    def get_invert_direction(self):
+        return self.invert_direction
 
     def get_sdo_params(self):
         return self.sdo_params

@@ -76,7 +76,17 @@ struct McuConnection {
 
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
-type EthercatDrive = (i32, usize, f64, f64, Option<u32>, Option<u16>, bool, f64);
+type EthercatDrive = (
+    i32,
+    usize,
+    f64,
+    f64,
+    Option<u32>,
+    Option<u16>,
+    bool,
+    f64,
+    bool,
+);
 
 const ETHERCAT_CLOCK_FREQ_HZ: u32 = 1_000_000_000;
 
@@ -412,6 +422,7 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
         max_torque,
         velocity_ff,
         ff_torque_clamp,
+        invert_direction,
     ) = d;
     args.push("--counts-per-mm".into());
     args.push(counts_per_mm.to_string());
@@ -427,6 +438,9 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
     }
     if *velocity_ff {
         args.push("--velocity-ff".into());
+    }
+    if *invert_direction {
+        args.push("--invert".into());
     }
     args.push("--torque-clamp-pct".into());
     args.push(ff_torque_clamp.to_string());
@@ -4945,13 +4959,24 @@ mod ethercat_endpoint_tests {
             "eth0",
             "/tmp/x.sock",
             None,
-            &[(1, 0, 3276.8, 40.0, Some(8192), Some(500), false, 30.0)],
+            &[(
+                1,
+                0,
+                3276.8,
+                40.0,
+                Some(8192),
+                Some(500),
+                false,
+                30.0,
+                false,
+            )],
         );
         assert!(!args.iter().any(|a| a == "--slave"));
         assert!(!args.iter().any(|a| a == "--axis"));
         assert!(args.iter().any(|a| a == "--counts-per-mm"));
         assert!(args.iter().any(|a| a == "--following-error-counts"));
         assert!(!args.iter().any(|a| a == "--velocity-ff"));
+        assert!(!args.iter().any(|a| a == "--invert"));
         assert!(args.iter().any(|a| a == "--torque-clamp-pct"));
     }
 
@@ -4962,8 +4987,8 @@ mod ethercat_endpoint_tests {
             "/tmp/x.sock",
             None,
             &[
-                (0, 0, 1000.0, 50.0, None, None, true, 25.0),
-                (1, 2, 2000.0, 40.0, None, None, false, 60.0),
+                (0, 0, 1000.0, 50.0, None, None, true, 25.0, false),
+                (1, 2, 2000.0, 40.0, None, None, false, 60.0, true),
             ],
         );
         let clamps: Vec<&String> = args
@@ -4975,6 +5000,8 @@ mod ethercat_endpoint_tests {
         assert_eq!(clamps, vec!["25", "60"]);
         let velocity_ff_count = args.iter().filter(|a| *a == "--velocity-ff").count();
         assert_eq!(velocity_ff_count, 1);
+        let invert_count = args.iter().filter(|a| *a == "--invert").count();
+        assert_eq!(invert_count, 1);
     }
 
     #[test]
@@ -4984,8 +5011,8 @@ mod ethercat_endpoint_tests {
             "/tmp/x.sock",
             None,
             &[
-                (0, 0, 1000.0, 50.0, None, None, false, 30.0),
-                (1, 2, 2000.0, 40.0, Some(4096), None, false, 30.0),
+                (0, 0, 1000.0, 50.0, None, None, false, 30.0, false),
+                (1, 2, 2000.0, 40.0, Some(4096), None, false, 30.0, false),
             ],
         );
         let slave_positions: Vec<&String> = args

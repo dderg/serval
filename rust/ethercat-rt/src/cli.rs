@@ -12,6 +12,7 @@ pub struct SlaveCfg {
     pub max_torque_tenth_pct: Option<u16>,
     pub velocity_ff: bool,
     pub torque_clamp_tenths: i16,
+    pub invert: bool,
 }
 
 fn default_cfg(pos: i32) -> SlaveCfg {
@@ -24,6 +25,7 @@ fn default_cfg(pos: i32) -> SlaveCfg {
         max_torque_tenth_pct: None,
         velocity_ff: false,
         torque_clamp_tenths: 300,
+        invert: false,
     }
 }
 
@@ -51,6 +53,7 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
         cfg.max_torque_tenth_pct =
             arg_val(args, "--max-torque-tenth-pct").and_then(|s| s.parse().ok());
         cfg.velocity_ff = args.iter().any(|a| a == "--velocity-ff");
+        cfg.invert = args.iter().any(|a| a == "--invert");
         if let Some(v) = arg_val(args, "--torque-clamp-pct") {
             cfg.torque_clamp_tenths = parse_clamp_tenths(&v)?;
         }
@@ -76,6 +79,13 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
                     .last_mut()
                     .ok_or_else(|| "--velocity-ff appeared before any --slave group".to_string())?;
                 cur.velocity_ff = true;
+                i += 1;
+            }
+            "--invert" => {
+                let cur = slaves
+                    .last_mut()
+                    .ok_or_else(|| "--invert appeared before any --slave group".to_string())?;
+                cur.invert = true;
                 i += 1;
             }
             f @ ("--axis"

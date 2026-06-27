@@ -182,6 +182,43 @@ fn clamp_out_of_range_is_rejected() {
 }
 
 #[test]
+fn invert_binds_per_slave_group() {
+    let a = args(&[
+        "ethercat-rt",
+        "eth0",
+        "--slave",
+        "0",
+        "--invert",
+        "--slave",
+        "1",
+    ]);
+    let slaves = parse_slaves(&a).expect("parse invert");
+    assert_eq!(slaves.len(), 2);
+    assert!(slaves[0].invert);
+    assert!(!slaves[1].invert);
+}
+
+#[test]
+fn legacy_form_reads_invert_globally() {
+    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0", "--invert"])).expect("legacy invert");
+    assert_eq!(slaves.len(), 1);
+    assert!(slaves[0].invert);
+}
+
+#[test]
+fn invert_defaults_off() {
+    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0"])).expect("defaults");
+    assert!(!slaves[0].invert);
+}
+
+#[test]
+fn invert_before_any_slave_is_rejected() {
+    let a = args(&["ethercat-rt", "eth0", "--invert", "--slave", "0"]);
+    let err = parse_slaves(&a).expect_err("orphan --invert must fail");
+    assert!(err.contains("before any --slave"), "got: {err}");
+}
+
+#[test]
 fn velocity_ff_before_any_slave_is_rejected() {
     let a = args(&["ethercat-rt", "eth0", "--velocity-ff", "--slave", "0"]);
     let err = parse_slaves(&a).expect_err("orphan --velocity-ff must fail");

@@ -92,6 +92,7 @@ rotation_distance: 40         # mm of axis travel per motor revolution (your mec
 encoder_counts_per_rev: 131072  # required; drive encoder counts per motor rev (A6-EC: 131072)
 position_min: 0
 position_max: 300
+#invert_direction: True         # reverse motion AND feedforward (position, velocity_ff, torque)
 # Feedforward (optional; see servo-feedforward.md):
 #velocity_ff: True              # stream 60B1h velocity feedforward
 #dynamics_profile: dynamics_x.toml  # enables 60B2h torque feedforward
