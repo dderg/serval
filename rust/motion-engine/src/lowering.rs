@@ -90,6 +90,9 @@ fn build_phases(samples: &[VelSample]) -> Result<(Vec<Phase>, f64), LoweringErro
     Ok((phases, t_acc))
 }
 
+/// Cubic Hermite piece in monomial form matching position and velocity at both
+/// endpoints. Used by the input-shaping post-processor, where only the
+/// convolution-smoothed position and its derivative are available.
 pub(crate) fn hermite_cubic(
     u_start: f64,
     u_end: f64,
@@ -132,19 +135,12 @@ impl Sampler<'_> {
         if axis < 3 {
             match self.spatial {
                 Some(seg) => {
-                    let h = (phase.dt * 1e-4).clamp(1e-9, 1e-4);
-                    let t_lo = (t - h).max(phase.t0);
-                    let t_hi = (t + h).min(phase.t0 + phase.dt);
-                    let (s_lo, v_lo) = phase.s_v_at(t_lo);
-                    let (s_hi, v_hi) = phase.s_v_at(t_hi);
-                    let vel_lo = seg.heading_at(s_lo)[axis] * v_lo;
-                    let vel_hi = seg.heading_at(s_hi)[axis] * v_hi;
-                    let denom = t_hi - t_lo;
-                    let accel = if denom > 0.0 {
-                        (vel_hi - vel_lo) / denom
-                    } else {
-                        0.0
-                    };
+                    // Exact per-axis acceleration `a_t·ĥ + v²·(dĥ/ds)`: the planner's
+                    // tangential accel `a_t = phase.accel` along the heading, plus the
+                    // centripetal term from the path curving. No finite difference, so
+                    // it stays smooth where a difference of headings would jitter.
+                    let accel =
+                        phase.accel * seg.heading_at(s)[axis] + v * v * seg.dheading_ds(s)[axis];
                     (seg.point_at(s)[axis], seg.heading_at(s)[axis] * v, accel)
                 }
                 None => (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0, 0.0),
