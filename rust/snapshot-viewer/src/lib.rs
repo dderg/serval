@@ -13,11 +13,13 @@ struct Snapshot {
     blended_corners: usize,
     chain_fits: usize,
     unblended_corners: usize,
-    // The lowered cubic trajectory the firmware executes: per-axis pieces
-    // [t0, t1, c0, c1, c2, c3] of position vs time. Present in current baselines;
-    // the visualizer differentiates these analytically for exact derivatives.
-    traj_x_pieces: Option<Vec<[f64; 6]>>,
-    traj_y_pieces: Option<Vec<[f64; 6]>>,
+    // The lowered trajectory the firmware executes: per-axis pieces
+    // [t0, t1, c0, c1, …] of position vs time (cubic = 6 floats). Variable-length
+    // so any baseline degree loads — missing high coefficients read as zero — and
+    // the executed (post-lowering) path/derivatives never drop to the sampled
+    // planner fallback on a format mismatch. Differentiated analytically.
+    traj_x_pieces: Option<Vec<Vec<f64>>>,
+    traj_y_pieces: Option<Vec<Vec<f64>>>,
     traj_t_end: Option<f64>,
     // Legacy baselines stored sampled position + speed instead of the cubics.
     kin_x: Option<Vec<f64>>,
@@ -134,11 +136,12 @@ struct TimeSeries {
     j_scalar: Vec<f64>,
 }
 
-// Evaluate per-axis cubic pieces [t0, t1, c0, c1, c2, c3] -- the trajectory the
-// firmware runs -- and their analytic derivatives at times `t`. Within a piece,
-// pos = c0 + c1*tau + c2*tau^2 + c3*tau^3 (tau = t - t0), so velocity,
-// acceleration, and jerk are exact polynomial derivatives, no differencing.
-fn eval_pieces(pieces: &[[f64; 6]], t: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+// Evaluate per-axis monomial pieces [t0, t1, c0, c1, …] -- the lowered trajectory
+// the firmware runs -- and their analytic derivatives at times `t`. Within a piece,
+// pos = c0 + c1*tau + … (tau = t - t0), so velocity, acceleration, and jerk are
+// exact polynomial derivatives, no differencing. Length-tolerant: a 6-float cubic
+// reads c4 = c5 = 0, so it evaluates as the cubic it is.
+fn eval_pieces(pieces: &[Vec<f64>], t: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let n = pieces.len();
     let mut pos = Vec::with_capacity(t.len());
     let mut vel = Vec::with_capacity(t.len());
@@ -148,18 +151,20 @@ fn eval_pieces(pieces: &[[f64; 6]], t: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>,
         // Last piece whose start is <= ti, clamped into range (searchsorted-right - 1).
         let upper = pieces.partition_point(|p| p[0] <= ti);
         let idx = upper.saturating_sub(1).min(n - 1);
-        let p = pieces[idx];
+        let p = &pieces[idx];
+        let g = |i: usize| p.get(i).copied().unwrap_or(0.0);
         let tau = ti - p[0];
-        let (c0, c1, c2, c3) = (p[2], p[3], p[4], p[5]);
-        pos.push(c0 + c1 * tau + c2 * tau * tau + c3 * tau * tau * tau);
-        vel.push(c1 + 2.0 * c2 * tau + 3.0 * c3 * tau * tau);
-        acc.push(2.0 * c2 + 6.0 * c3 * tau);
-        jerk.push(6.0 * c3);
+        let (c0, c1, c2, c3, c4, c5) = (g(2), g(3), g(4), g(5), g(6), g(7));
+        let (t2, t3, t4, t5) = (tau * tau, tau.powi(3), tau.powi(4), tau.powi(5));
+        pos.push(c0 + c1 * tau + c2 * t2 + c3 * t3 + c4 * t4 + c5 * t5);
+        vel.push(c1 + 2.0 * c2 * tau + 3.0 * c3 * t2 + 4.0 * c4 * t3 + 5.0 * c5 * t4);
+        acc.push(2.0 * c2 + 6.0 * c3 * tau + 12.0 * c4 * t2 + 20.0 * c5 * t3);
+        jerk.push(6.0 * c3 + 24.0 * c4 * tau + 60.0 * c5 * t2);
     }
     (pos, vel, acc, jerk)
 }
 
-fn time_series_from_pieces(xp: &[[f64; 6]], yp: &[[f64; 6]], t_end: f64) -> TimeSeries {
+fn time_series_from_pieces(xp: &[Vec<f64>], yp: &[Vec<f64>], t_end: f64) -> TimeSeries {
     if xp.is_empty() || t_end <= 0.0 {
         let z = vec![0.0];
         return TimeSeries {
