@@ -114,6 +114,21 @@ fn faceted_arc_with_leads(r: f64, n: usize, span: f64, lead: f64, e_per_mm: f64)
         .collect()
 }
 
+fn tangent_lead_arc(r: f64, n: usize, span: f64, lead: f64) -> Vec<Move> {
+    let verts = arc_vertices(r, n, span);
+    let t0 = [1.0, 0.0, 0.0];
+    let tn = [span.cos(), span.sin(), 0.0];
+    let pre = sub(verts[0], scale(t0, lead));
+    let post = add(verts[n], scale(tn, lead));
+    let mut pts = vec![pre];
+    pts.extend(verts);
+    pts.push(post);
+    pts.windows(2)
+        .enumerate()
+        .map(|(i, w)| seg((i + 1) as u32, 3000.0, 20.0, 200.0, w[0], w[1], 0.0))
+        .collect()
+}
+
 fn as_clothoid(m: &Move) -> &Clothoid {
     match &m.segment.spatial {
         Some(Segment::Clothoid(c)) => c,
@@ -265,6 +280,61 @@ fn straight_to_curve_is_g2_and_in_band_for_both_hearts() {
         assert!(
             worst <= delta,
             "{heart:?}: easement bulge {worst} past {delta}"
+        );
+    }
+}
+
+#[test]
+fn exactly_tangent_lead_gets_g2_ramp_for_both_hearts() {
+    for heart in HEARTS {
+        let moves = tangent_lead_arc(5.0, 12, PI / 2.0, 8.0);
+        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        assert_eq!(out.report.chains, 1, "{heart:?}");
+        assert!(out.report.unblended.is_empty(), "{heart:?}");
+
+        let i = out
+            .moves
+            .iter()
+            .position(|m| matches!(m.segment.spatial, Some(Segment::Arc(_))))
+            .unwrap();
+        let up = as_clothoid(&out.moves[i - 1]);
+        let arc = as_arc(&out.moves[i]);
+        let down = as_clothoid(&out.moves[i + 1]);
+        as_line(&out.moves[i - 2]);
+        as_line(&out.moves[i + 2]);
+
+        assert!(
+            worst_kappa_jump(&out.moves) <= 1e-9,
+            "{heart:?}: kappa jump {}",
+            worst_kappa_jump(&out.moves)
+        );
+
+        let spatial: Vec<&Segment> = out
+            .moves
+            .iter()
+            .filter_map(|m| m.segment.spatial.as_ref())
+            .collect();
+        let mut worst_gap = 0.0_f64;
+        for w in spatial.windows(2) {
+            worst_gap = worst_gap.max(dist(w[0].point_at(w[0].s_len()), w[1].point_at(0.0)));
+        }
+        assert!(worst_gap < 1e-9, "{heart:?}: C0 gap {worst_gap}");
+
+        assert!(
+            up.kappa(0.0).abs() < 1e-9,
+            "{heart:?}: head ramp starts at line"
+        );
+        assert!(
+            (up.kappa(up.s_len()) - arc.kappa(0.0)).abs() < 1e-9,
+            "{heart:?}: head ramp meets arc curvature"
+        );
+        assert!(
+            (down.kappa(0.0) - arc.kappa(arc.s_len())).abs() < 1e-9,
+            "{heart:?}: tail ramp leaves arc curvature"
+        );
+        assert!(
+            down.kappa(down.s_len()).abs() < 1e-9,
+            "{heart:?}: tail ramp ends at line"
         );
     }
 }
