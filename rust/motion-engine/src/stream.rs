@@ -433,7 +433,6 @@ impl StreamState {
             self.committed_head_len = 0.0;
         } else {
             let keep_line = outcome.moves[commit_count].source.start_line;
-            let head_consumed = blend_consumed_head(&outcome.moves, commit_count);
             while self
                 .buffer
                 .front()
@@ -441,7 +440,24 @@ impl StreamState {
             {
                 self.buffer.pop_front();
             }
-            self.committed_head_len = if head_consumed {
+            // `keep_line` retires moves wholly before the seam, but a move can be
+            // fully committed yet still carry the seam's source line (a collinear
+            // split or coalesced run emits one move as several pieces). Drop any
+            // front whose geometry has already reached the committed odometer so the
+            // trim below never sees a degenerate (zero-length) remainder.
+            while self.front_reached_odometer() {
+                self.buffer.pop_front();
+            }
+            // The clean seam can fall at an internal sub-piece boundary of the kept
+            // raw move — a blend exit, or a collinear split that emits one move as
+            // several line pieces — leaving the raw move starting behind the
+            // committed odometer. Trim it to start exactly at the seam so the next
+            // re-fit's first piece is C0 with what was just emitted, and feed the
+            // consumed head length back as the next fit's blend-budget restore so the
+            // trailing corner re-fits to the curvature it had before the head was
+            // committed (else a shorter front yields a sharper apex and a corner cap
+            // below the already-committed entry velocity — an OverCommitted abort).
+            self.committed_head_len = if self.front_starts_behind_odometer() {
                 self.trim_front_to_seam()?
             } else {
                 0.0
@@ -535,6 +551,35 @@ impl StreamState {
                 false
             }
         }
+    }
+
+    /// Whether the kept front move's geometric start sits behind the committed
+    /// odometer — i.e. the seam landed inside this raw move and part of it was
+    /// already emitted. True at a blend exit and at a collinear split where one raw
+    /// move emitted as several line pieces.
+    fn front_starts_behind_odometer(&self) -> bool {
+        self.buffer
+            .front()
+            .and_then(|m| m.segment.spatial.as_ref())
+            .is_some_and(|seg| {
+                dist3(
+                    seg.point_at(0.0),
+                    [self.odometer[0], self.odometer[1], self.odometer[2]],
+                ) > TRIM_EPS_MM
+            })
+    }
+
+    /// Whether the front move's geometric end has reached the committed odometer —
+    /// the move is fully committed and must be retired rather than trimmed.
+    fn front_reached_odometer(&self) -> bool {
+        self.buffer.front().is_some_and(|m| {
+            m.segment.spatial.as_ref().is_some_and(|seg| {
+                dist3(
+                    seg.point_at(m.segment.s_len()),
+                    [self.odometer[0], self.odometer[1], self.odometer[2]],
+                ) <= TRIM_EPS_MM
+            })
+        })
     }
 
     /// Replace the front buffer move with the portion that survives the seam: a
