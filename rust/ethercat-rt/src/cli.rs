@@ -1,37 +1,42 @@
-//! Endpoint CLI parsing for the chain layout. Lives in the lib (not the
-//! hw-gated binary) so the per-slave group parsing is unit-tested in CI.
-
 /// Mirror of `EC_RT_MAX_SLAVES` in `csrc/libecrt.h` — the upper bound the C
 /// backend sizes its per-slave arrays to. Keep the two in sync.
 pub const EC_RT_MAX_SLAVES: usize = 8;
 
-/// Per-drive config parsed from one `--slave <pos> ...` CLI group.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlaveCfg {
     pub pos: i32,
+    pub axis: u8,
     pub counts_per_mm: f64,
     pub rotation_distance: f64,
     pub following_error_counts: Option<u32>,
     pub max_torque_tenth_pct: Option<u16>,
+    pub velocity_ff: bool,
+    pub torque_clamp_tenths: i16,
 }
 
 fn default_cfg(pos: i32) -> SlaveCfg {
     SlaveCfg {
         pos,
+        axis: 0,
         counts_per_mm: 3276.8,
         rotation_distance: 40.0,
         following_error_counts: None,
         max_torque_tenth_pct: None,
+        velocity_ff: false,
+        torque_clamp_tenths: 300,
     }
 }
 
-/// Parse the chain layout from repeated `--slave <pos>` groups. Each group's
-/// per-drive flags (`--counts-per-mm`, `--rotation-distance`,
-/// `--following-error-counts`, `--max-torque-tenth-pct`) apply to the most
-/// recent `--slave`. With no `--slave` at all, falls back to a single drive at
-/// position 0 reading those flags globally (the legacy single-drive form).
-/// Fails loudly on a missing value, a per-drive flag before any `--slave`, a
-/// duplicate position, or more than `EC_RT_MAX_SLAVES` drives.
+fn parse_clamp_tenths(v: &str) -> Result<i16, String> {
+    let pct: f64 = v
+        .parse()
+        .map_err(|_| "--torque-clamp-pct not a number".to_string())?;
+    if !(pct > 0.0 && pct <= 400.0) {
+        return Err(format!("--torque-clamp-pct {pct} outside (0, 400]"));
+    }
+    Ok((pct * 10.0) as i16)
+}
+
 pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
     if !args.iter().any(|a| a == "--slave") {
         let mut cfg = default_cfg(0);
@@ -45,6 +50,10 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
             arg_val(args, "--following-error-counts").and_then(|s| s.parse().ok());
         cfg.max_torque_tenth_pct =
             arg_val(args, "--max-torque-tenth-pct").and_then(|s| s.parse().ok());
+        cfg.velocity_ff = args.iter().any(|a| a == "--velocity-ff");
+        if let Some(v) = arg_val(args, "--torque-clamp-pct") {
+            cfg.torque_clamp_tenths = parse_clamp_tenths(&v)?;
+        }
         return Ok(vec![cfg]);
     }
 
@@ -62,10 +71,19 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
                 slaves.push(default_cfg(pos));
                 i += 2;
             }
-            f @ ("--counts-per-mm"
+            "--velocity-ff" => {
+                let cur = slaves
+                    .last_mut()
+                    .ok_or_else(|| "--velocity-ff appeared before any --slave group".to_string())?;
+                cur.velocity_ff = true;
+                i += 1;
+            }
+            f @ ("--axis"
+            | "--counts-per-mm"
             | "--rotation-distance"
             | "--following-error-counts"
-            | "--max-torque-tenth-pct") => {
+            | "--max-torque-tenth-pct"
+            | "--torque-clamp-pct") => {
                 let v = args
                     .get(i + 1)
                     .ok_or_else(|| format!("{f} requires a value"))?;
@@ -73,6 +91,9 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
                     .last_mut()
                     .ok_or_else(|| format!("{f} appeared before any --slave group"))?;
                 match f {
+                    "--axis" => {
+                        cur.axis = v.parse().map_err(|_| "--axis not a u8".to_string())?;
+                    }
                     "--counts-per-mm" => {
                         cur.counts_per_mm = v
                             .parse()
@@ -89,11 +110,14 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
                                 "--following-error-counts not a number".to_string()
                             })?);
                     }
-                    _ => {
+                    "--max-torque-tenth-pct" => {
                         cur.max_torque_tenth_pct = Some(
                             v.parse()
                                 .map_err(|_| "--max-torque-tenth-pct not a number".to_string())?,
                         );
+                    }
+                    _ => {
+                        cur.torque_clamp_tenths = parse_clamp_tenths(v)?;
                     }
                 }
                 i += 2;

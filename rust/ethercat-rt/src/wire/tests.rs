@@ -1,9 +1,9 @@
 use super::*;
 use mcu_protocol::messages::{
-    MotorStateResponse, ResonanceBuzz, RestoreDriveLimitsResponse, ResumeStreamResponse, SdoRead,
-    SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse,
-    SetDriveLimits, SetDriveLimitsResponse, SlaveState, SlaveStatus, StartCapture,
-    StartCaptureResponse, StopCaptureResponse, StopResponse,
+    MotorStateResponse, ResonanceBuzz, RestoreDriveLimits, RestoreDriveLimitsResponse,
+    ResumeStreamResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
+    SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SlaveState, SlaveStatus,
+    StartCapture, StartCaptureResponse, StopCaptureResponse, StopResponse,
 };
 use mcu_transport::demux::{Demuxer, Frame};
 use mcu_transport::frame::decode_frame;
@@ -319,6 +319,7 @@ fn resume_stream_response_frame_round_trips() {
 #[test]
 fn decodes_set_drive_limits_command() {
     let msg = SetDriveLimits {
+        slot: 0,
         following_error_counts: 8192,
         max_torque_tenth_pct: 500,
     };
@@ -337,9 +338,16 @@ fn decodes_set_drive_limits_command() {
 
 #[test]
 fn decodes_restore_drive_limits_command() {
-    let payload = frame_payload(MessageKind::RestoreDriveLimits, 4, &[]);
+    let payload = frame_payload(
+        MessageKind::RestoreDriveLimits,
+        4,
+        &RestoreDriveLimits { slot: 0 }.encoded_to_vec(),
+    );
     match decode_command(0, &payload).unwrap() {
-        Command::RestoreDriveLimits { correlation_id: 4 } => {}
+        Command::RestoreDriveLimits {
+            correlation_id: 4,
+            slot: 0,
+        } => {}
         other => panic!("expected RestoreDriveLimits, got {other:?}"),
     }
 }
@@ -370,11 +378,15 @@ fn drive_limits_response_frames_round_trip() {
 
 #[test]
 fn decodes_seed_servo_home_command() {
-    let msg = SeedServoHome { home_q16: -98_304 };
+    let msg = SeedServoHome {
+        slot: 0,
+        home_q16: -98_304,
+    };
     let payload = frame_payload(MessageKind::SeedServoHome, 8, &msg.encoded_to_vec());
     match decode_command(0, &payload).unwrap() {
         Command::SeedServoHome {
             correlation_id: 8,
+            slot: 0,
             home_q16,
         } => assert_eq!(home_q16, -98_304),
         other => panic!("expected SeedServoHome, got {other:?}"),
@@ -424,6 +436,7 @@ fn stop_response_frame_round_trips() {
 #[test]
 fn decodes_sdo_read_command() {
     let msg = SdoRead {
+        slot: 0,
         index: 0x2002,
         subindex: 1,
     };
@@ -440,6 +453,7 @@ fn decodes_sdo_read_command() {
 #[test]
 fn decodes_sdo_write_command() {
     let msg = SdoWrite {
+        slot: 0,
         index: 0x2003,
         subindex: 0,
         size: 0,

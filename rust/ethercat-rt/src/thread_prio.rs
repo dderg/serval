@@ -7,14 +7,17 @@
 //!   cores, so the FIFO DC thread preempts them unconditionally and they stay
 //!   off the isolated (`isolcpus`/`nohz_full`) cores.
 //!
-//! * Helpers that share the EtherCAT master with the DC loop (CoE mailbox
-//!   traffic) call [`assume_companion_rt_scheduling`]. A SCHED_OTHER helper
-//!   descheduled mid-transaction can trap the DC thread's process-data frame
-//!   for a whole scheduling latency, the cycle reads WKC -1, and two such
-//!   cycles halt the endpoint (bench 2026-06-11: every ErC1.1 that evening had
-//!   a mailbox SDO in flight). SCHED_FIFO below the DC priority on an isolated
-//!   companion core closes the window: nothing ordinary can deschedule the
-//!   helper, and it can never starve the DC core.
+//! * The CoE mailbox helper shares the EtherCAT master with the DC loop. With
+//!   the in-kernel IgH master that access is serialized in the kernel and the
+//!   SDO call sleeps, so the helper also uses [`demote_to_normal_scheduling`]
+//!   by default. [`assume_companion_rt_scheduling`] is the opt-in fallback (via
+//!   `--mailbox-cpu`) for a SOEM-style master, whose SDO busy-polls a raw
+//!   socket shared with the DC loop: there a SCHED_OTHER helper descheduled
+//!   mid-transaction traps the DC thread's process-data frame for a whole
+//!   scheduling latency, the cycle reads WKC -1, and two such cycles halt the
+//!   endpoint (bench 2026-06-11: every ErC1.1 that evening had a mailbox SDO in
+//!   flight). Pinned SCHED_FIFO below the DC priority on an isolated companion
+//!   core closes that window.
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]

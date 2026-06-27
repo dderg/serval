@@ -148,48 +148,38 @@ class MotionEngineWrapper:
         socket_path,
         interface,
         endpoint,
-        counts_per_mm,
-        rotation_distance,
-        velocity_ff,
         dynamics_profile,
-        torque_clamp_pct,
-        following_error_counts=None,
-        max_torque_tenth_pct=None,
+        drives,
     ):
         return self._engine.claim_ethercat_node(
             label,
             socket_path,
             interface,
             endpoint,
-            counts_per_mm,
-            rotation_distance,
-            velocity_ff,
             dynamics_profile,
-            torque_clamp_pct,
-            following_error_counts,
-            max_torque_tenth_pct,
+            drives,
         )
 
     def set_drive_limits(
-        self, mcu_handle, following_error_counts, max_torque_tenth_pct
+        self, mcu_handle, slot, following_error_counts, max_torque_tenth_pct
     ):
         return self._engine.set_drive_limits(
-            mcu_handle, following_error_counts, max_torque_tenth_pct
+            mcu_handle, slot, following_error_counts, max_torque_tenth_pct
         )
 
-    def restore_drive_limits(self, mcu_handle):
-        return self._engine.restore_drive_limits(mcu_handle)
+    def restore_drive_limits(self, mcu_handle, slot):
+        return self._engine.restore_drive_limits(mcu_handle, slot)
 
     def arm_sensorless_endstop(
-        self, mcu_handle, endstop_id, torque_trip_tenth_pct, enable
+        self, mcu_handle, slot, endstop_id, torque_trip_tenth_pct, enable
     ):
         return self._engine.arm_sensorless_endstop(
-            mcu_handle, endstop_id, torque_trip_tenth_pct, bool(enable)
+            mcu_handle, slot, endstop_id, torque_trip_tenth_pct, bool(enable)
         )
 
-    def disarm_sensorless_endstop(self, mcu_handle, endstop_id):
+    def disarm_sensorless_endstop(self, mcu_handle, slot, endstop_id):
         return self._engine.arm_sensorless_endstop(
-            mcu_handle, endstop_id, 0, False
+            mcu_handle, slot, endstop_id, 0, False
         )
 
     def take_drive_fault(self, mcu_handle):
@@ -209,11 +199,13 @@ class MotionEngineWrapper:
     def stop_servo_capture(self, mcu_handle):
         return self._engine.stop_servo_capture(mcu_handle)
 
-    def sdo_read(self, mcu_handle, index, subindex):
-        return self._engine.sdo_read(mcu_handle, index, subindex)
+    def sdo_read(self, mcu_handle, slot, index, subindex):
+        return self._engine.sdo_read(mcu_handle, slot, index, subindex)
 
-    def sdo_write(self, mcu_handle, index, subindex, size, value):
-        return self._engine.sdo_write(mcu_handle, index, subindex, size, value)
+    def sdo_write(self, mcu_handle, slot, index, subindex, size, value):
+        return self._engine.sdo_write(
+            mcu_handle, slot, index, subindex, size, value
+        )
 
     def resonance_buzz(
         self,

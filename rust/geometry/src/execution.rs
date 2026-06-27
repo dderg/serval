@@ -11,6 +11,7 @@ struct Phase<'a> {
     s_start: f64,
     v_start: f64,
     accel: f64,
+    jerk: f64,
     s_end: f64,
 }
 
@@ -55,6 +56,26 @@ pub fn lower_profile(
                 reason: "segment length is not finite and positive",
             });
         }
+        // A straight move carries its exact closed-form jerk phases: lower one
+        // per phase so the timing matches the planner and the v = 0 ends are not
+        // mistimed by the sampled `2ds/(v0+v1)` estimate.
+        if !pm.phases.is_empty() {
+            for (i, ph) in pm.phases.iter().enumerate() {
+                let s_end = pm.phases.get(i + 1).map_or(s_len, |next| next.s0);
+                phases.push(Phase {
+                    seg,
+                    t_start: t_acc + ph.t0,
+                    s_start: ph.s0,
+                    v_start: ph.v0,
+                    accel: ph.a0,
+                    jerk: ph.j,
+                    s_end,
+                });
+            }
+            t_acc += pm.phases.iter().map(|p| p.dt).sum::<f64>();
+            continue;
+        }
+
         let samples = &pm.samples;
         if samples.len() < 2
             || samples[0].s.abs() > LENGTH_EPS_MM
@@ -95,6 +116,7 @@ pub fn lower_profile(
                 s_start: s0,
                 v_start: v0,
                 accel: (v1 * v1 - v0 * v0) / (2.0 * ds),
+                jerk: 0.0,
                 s_end: s1,
             });
             t_acc += 2.0 * ds / v_sum;
@@ -120,7 +142,10 @@ pub fn lower_profile(
         }
         let p = &phases[phase];
         let dt_local = t - p.t_start;
-        let s = (p.s_start + p.v_start * dt_local + 0.5 * p.accel * dt_local * dt_local)
+        let s = (p.s_start
+            + p.v_start * dt_local
+            + 0.5 * p.accel * dt_local * dt_local
+            + p.jerk * dt_local * dt_local * dt_local / 6.0)
             .clamp(p.s_start, p.s_end);
         let position = p.seg.spatial.as_ref().map(|spatial| spatial.point_at(s));
         let followers = p.seg.followers.iter().map(|f| f.ratio * s).collect();

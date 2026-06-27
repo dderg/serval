@@ -13,11 +13,15 @@ class FakeGcode:
 
 
 class FakeNode:
-    def __init__(self, handle):
+    def __init__(self, handle, drive_count=1):
         self._h = handle
+        self._drive_count = drive_count
 
     def get_engine_handle(self):
         return self._h
+
+    def get_drive_count(self):
+        return self._drive_count
 
 
 class FakeEngine:
@@ -127,6 +131,15 @@ def test_double_start_rejected_in_klippy():
     gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
     with pytest.raises(RuntimeError):
         gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
+
+
+def test_start_rejected_on_multi_drive_node():
+    sc, gcode, engine = make_capture()
+    node = sc.printer.lookup_objects("ethercat_node")[0][1]
+    node._drive_count = 2
+    with pytest.raises(RuntimeError):
+        gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
+    assert engine.start_calls == []
 
 
 def assert_fresh_start_possible(gcode):

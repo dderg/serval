@@ -39,24 +39,14 @@ def test_enable_tracking_drives_torque_line_like_a_stepper():
 
 
 class FakeNode:
-    def __init__(self, handle):
-        self._h = handle
-
-    def get_engine_handle(self):
-        return self._h
-
-
-class FakeEngine:
     def __init__(self):
         self.calls = []
 
-    def set_torque(self, handle, value, print_time):
-        self.calls.append((handle, value, print_time))
+    def set_motor_torque(self, motor_name, value, print_time):
+        self.calls.append((motor_name, value, print_time))
 
 
 class FakePrinter:
-    command_error = RuntimeError
-
     def __init__(self, objs):
         self._objs = objs
 
@@ -64,37 +54,15 @@ class FakePrinter:
         return self._objs[name]
 
 
-def test_engine_torque_line_maps_set_digital_to_set_torque():
-    engine = FakeEngine()
-    printer = FakePrinter(
-        {"ethercat_node node_y": FakeNode(7), "motion_engine": engine}
-    )
-    line = servo_axis.MotionTorqueLine(printer, "node_y")
+def test_torque_line_delegates_to_node_with_motor_name():
+    node = FakeNode()
+    printer = FakePrinter({"ethercat_node node_y": node})
+    line = servo_axis.MotionTorqueLine(printer, "node_y", "servo_x")
     line.set_digital(20.0, 1)
     line.set_digital(21.0, 0)
-    assert engine.calls == [(7, True, 20.0), (7, False, 21.0)]
-
-
-def test_engine_torque_line_fails_loudly_without_handle():
-    printer = FakePrinter(
-        {"ethercat_node node_y": FakeNode(None), "motion_engine": FakeEngine()}
-    )
-    line = servo_axis.MotionTorqueLine(printer, "node_y")
-    try:
-        line.set_digital(20.0, 1)
-        raise AssertionError("expected command_error")
-    except RuntimeError as e:
-        assert "no engine handle" in str(e)
-
-
-def test_engine_torque_line_accepts_handle_zero():
-    engine = FakeEngine()
-    printer = FakePrinter(
-        {"ethercat_node node_y": FakeNode(0), "motion_engine": engine}
-    )
-    line = servo_axis.MotionTorqueLine(printer, "node_y")
-    line.set_digital(20.0, 1)
-    assert engine.calls == [(0, True, 20.0)]
+    # Per-motor enable/disable carries the motor name so the node can
+    # coalesce its node-wide gate across multiple motors.
+    assert node.calls == [("servo_x", True, 20.0), ("servo_x", False, 21.0)]
 
 
 def test_servo_rail_active_callback_contract():

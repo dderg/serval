@@ -39,7 +39,7 @@ pub fn pipeline_snapshot(
     };
     let profile = geometry::plan_velocity(&outcome, velocity_config)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
-    let kinematics = sample_kinematics(&outcome, &profile);
+    let traj = lower_trajectory(&outcome, &profile);
 
     let dict = PyDict::new(py);
     dict.set_item("raw_x", raw_points.iter().map(|p| p.0).collect::<Vec<_>>())?;
@@ -54,9 +54,10 @@ pub fn pipeline_snapshot(
     }
     dict.set_item("fitted_segments", seg_list)?;
 
-    dict.set_item("kin_x", &kinematics.x)?;
-    dict.set_item("kin_y", &kinematics.y)?;
-    dict.set_item("kin_v", &kinematics.v)?;
+    let pieces = |ps: &[[f64; 6]]| ps.iter().map(|p| p.to_vec()).collect::<Vec<_>>();
+    dict.set_item("traj_x_pieces", pieces(&traj.x))?;
+    dict.set_item("traj_y_pieces", pieces(&traj.y))?;
+    dict.set_item("traj_t_end", traj.t_end)?;
 
     dict.set_item("blended_corners", outcome.report.blended)?;
     dict.set_item("unblended_corners", outcome.report.unblended.len())?;
@@ -185,70 +186,64 @@ fn extract_raw_path(moves: &[geometry::Move]) -> Vec<(f64, f64)> {
 }
 
 const SAMPLES_PER_MM: f64 = 2.0;
-const TRAJECTORY_SAMPLES_PER_MM: f64 = 8.0;
+// Position tolerance for the cubic lowering — the same order the streamer ships.
+const TRAJECTORY_FIT_TOL_MM: f64 = 0.005;
 const VELOCITY_CONSISTENCY_TOL: f64 = 1e-6;
 const VELOCITY_INTEGRATION_TOL: f64 = 1e-7;
 
-// Only the raw trajectory: where the toolhead is and how fast it travels there.
-// The visualizer differentiates position itself, so it stays an independent
-// check on the planner rather than a mirror of the planner's own derivatives.
-struct KinematicSamples {
-    x: Vec<f64>,
-    y: Vec<f64>,
-    v: Vec<f64>,
+// The trajectory the firmware actually executes: the host lowering's own per-axis
+// cubic Bézier pieces of position-versus-time. Each piece is a cubic in local time
+// `tau = t - t0`, `pos = c0 + c1*tau + c2*tau^2 + c3*tau^3`, stored as
+// `[t0, t1, c0, c1, c2, c3]`. The visualizer differentiates these analytically
+// (velocity quadratic, acceleration linear, jerk constant per piece), so every
+// derivative is exact and continuous — no position sampling, and nothing copied
+// from the planner's own acceleration, so it stays an independent check while
+// storing only a handful of coefficients per piece.
+struct TrajectoryPieces {
+    x: Vec<[f64; 6]>,
+    y: Vec<[f64; 6]>,
+    t_end: f64,
 }
 
-fn sample_kinematics(
+fn lower_trajectory(
     outcome: &geometry::FitOutcome,
     profile: &geometry::VelocityProfile,
-) -> KinematicSamples {
-    let mut kin = KinematicSamples {
-        x: Vec::new(),
-        y: Vec::new(),
-        v: Vec::new(),
-    };
-    let mut started = false;
-    for (geo_move, vel_move) in outcome.moves.iter().zip(profile.moves.iter()) {
-        if let Some(spatial) = &geo_move.segment.spatial {
-            let len = spatial.s_len();
-            let n = ((len * TRAJECTORY_SAMPLES_PER_MM).ceil() as usize).max(1);
-            // Each segment starts where the previous ended; emitting both would
-            // leave a near-zero-length step that explodes the time derivative.
-            let first_k = usize::from(started);
-            for k in first_k..=n {
-                let s = len * (k as f64) / (n as f64);
-                let pt = spatial.point_at(s);
-                kin.x.push(pt[0]);
-                kin.y.push(pt[1]);
-                kin.v.push(speed_at(&vel_move.samples, s));
-            }
-            started = true;
+) -> TrajectoryPieces {
+    fn collect(dst: &mut Vec<[f64; 6]>, pieces: &[nurbs::bezier::BezierPiece<f64>]) {
+        for p in pieces {
+            let c = |i: usize| p.coeffs.get(i).copied().unwrap_or(0.0);
+            dst.push([p.u_start, p.u_end, c(0), c(1), c(2), c(3)]);
         }
     }
 
-    kin
-}
-
-fn speed_at(samples: &[geometry::VelSample], s: f64) -> f64 {
-    // The velocity profile is sampled densely along arc length; read the speed
-    // at an arbitrary s by linear interpolation between the bracketing knots.
-    if samples.is_empty() {
-        return 0.0;
+    let mut out = TrajectoryPieces {
+        x: Vec::new(),
+        y: Vec::new(),
+        t_end: 0.0,
+    };
+    let mut t_start = 0.0;
+    let mut pos = [0.0_f64; 3];
+    let mut started = false;
+    for (gm, vm) in outcome.moves.iter().zip(profile.moves.iter()) {
+        let Some(spatial) = &gm.segment.spatial else {
+            continue;
+        };
+        if !started {
+            pos = spatial.point_at(0.0);
+            started = true;
+        }
+        let Ok((axes, total_t)) =
+            crate::lowering::lower_move_pieces(gm, vm, t_start, &pos, TRAJECTORY_FIT_TOL_MM, &[])
+        else {
+            continue;
+        };
+        collect(&mut out.x, &axes[0]);
+        collect(&mut out.y, &axes[1]);
+        t_start += total_t;
+        out.t_end = t_start;
+        pos = spatial.point_at(spatial.s_len());
     }
-    let i = samples.partition_point(|sm| sm.s < s);
-    if i == 0 {
-        return samples[0].v;
-    }
-    if i >= samples.len() {
-        return samples[samples.len() - 1].v;
-    }
-    let lo = &samples[i - 1];
-    let hi = &samples[i];
-    let span = hi.s - lo.s;
-    if span <= 0.0 {
-        return hi.v;
-    }
-    lo.v + (hi.v - lo.v) * (s - lo.s) / span
+    out
 }
 
 #[cfg(test)]

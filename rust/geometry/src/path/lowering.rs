@@ -7,6 +7,11 @@ mod fresnel;
 pub trait PositionProfile {
     fn point_at(&self, s: f64) -> [f64; 3];
     fn heading_at(&self, s: f64) -> [f64; 3];
+    /// Derivative of the unit heading along arc length, `dĥ/ds = κ·n̂`. With the
+    /// tangential acceleration `a_t` and speed `v`, the exact per-axis acceleration
+    /// is `a_t·ĥ + v²·(dĥ/ds)` — the centripetal term the lowering needs without a
+    /// finite difference.
+    fn dheading_ds(&self, s: f64) -> [f64; 3];
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +112,10 @@ impl PositionProfile for Line {
             (self.end[2] - self.start[2]) / len,
         ]
     }
+
+    fn dheading_ds(&self, _s: f64) -> [f64; 3] {
+        [0.0, 0.0, 0.0]
+    }
 }
 
 impl Arc {
@@ -132,6 +141,14 @@ impl PositionProfile for Arc {
         let sign = self.sweep.signum();
         axpby(-sign * theta.sin(), self.u, sign * theta.cos(), self.v)
     }
+
+    fn dheading_ds(&self, s: f64) -> [f64; 3] {
+        // d/ds of the heading turns toward the centre at rate 1/radius, independent
+        // of sweep direction: `-(1/r)·(cosθ·u + sinθ·v)` (the inward radial).
+        let theta = self.angle_at(s);
+        let inv_r = 1.0 / self.radius;
+        axpby(-inv_r * theta.cos(), self.u, -inv_r * theta.sin(), self.v)
+    }
 }
 
 impl Clothoid {
@@ -150,6 +167,14 @@ impl PositionProfile for Clothoid {
         let phi = self.heading_angle_at(s);
         axpby(phi.cos(), self.u, phi.sin(), self.v)
     }
+
+    fn dheading_ds(&self, s: f64) -> [f64; 3] {
+        // `κ(s)·n̂`: the local curvature `κ_0 + σ·s` times the normal (heading
+        // rotated +90°), `-sinφ·u + cosφ·v`.
+        let phi = self.heading_angle_at(s);
+        let kappa = self.kappa_0 + self.sigma * s;
+        axpby(-kappa * phi.sin(), self.u, kappa * phi.cos(), self.v)
+    }
 }
 
 impl PositionProfile for Segment {
@@ -166,6 +191,14 @@ impl PositionProfile for Segment {
             Segment::Line(l) => l.heading_at(s),
             Segment::Arc(a) => a.heading_at(s),
             Segment::Clothoid(c) => c.heading_at(s),
+        }
+    }
+
+    fn dheading_ds(&self, s: f64) -> [f64; 3] {
+        match self {
+            Segment::Line(l) => l.dheading_ds(s),
+            Segment::Arc(a) => a.dheading_ds(s),
+            Segment::Clothoid(c) => c.dheading_ds(s),
         }
     }
 }

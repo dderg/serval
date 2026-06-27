@@ -16,11 +16,12 @@ fn sdo_kinds_map_to_u16_and_back() {
 #[test]
 fn sdo_read_roundtrip() {
     let msg = SdoRead {
+        slot: 2,
         index: 0x2002,
         subindex: 3,
     };
     assert_eq!(roundtrip(&msg), msg);
-    assert_eq!(msg.encoded_to_vec().len(), 3);
+    assert_eq!(msg.encoded_to_vec().len(), 4);
 }
 
 #[test]
@@ -37,13 +38,14 @@ fn sdo_read_response_roundtrip() {
 #[test]
 fn sdo_write_roundtrip_negative_value() {
     let msg = SdoWrite {
+        slot: 1,
         index: 0x2010,
         subindex: 1,
         size: 4,
         value: -4096,
     };
     assert_eq!(roundtrip(&msg), msg);
-    assert_eq!(msg.encoded_to_vec().len(), 12);
+    assert_eq!(msg.encoded_to_vec().len(), 13);
 }
 
 #[test]

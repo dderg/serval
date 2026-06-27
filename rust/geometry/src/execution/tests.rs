@@ -46,6 +46,7 @@ fn vmove(length: f64, samples: &[(f64, f64)], accel: f64, line_no: u32) -> MoveV
         exit_v: samples.last().map_or(0.0, |x| x.v),
         peak_v: samples.iter().fold(0.0_f64, |a, x| a.max(x.v)),
         samples,
+        phases: Vec::new(),
         accel,
         jerk: 1.0e6,
         length,

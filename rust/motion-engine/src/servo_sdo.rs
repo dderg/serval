@@ -12,10 +12,16 @@ const SDO_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn send_sdo_read(
     conn: &McuSerialConn,
+    slot: u8,
     index: u16,
     subindex: u8,
 ) -> Result<SdoReadResponse, String> {
-    let body = SdoRead { index, subindex }.encoded_to_vec();
+    let body = SdoRead {
+        slot,
+        index,
+        subindex,
+    }
+    .encoded_to_vec();
     let (kind, resp) = conn
         .mcu_call(MessageKind::SdoRead, body, SDO_TIMEOUT)
         .map_err(|e| format!("SdoRead transport: {e:?}"))?;
@@ -30,12 +36,14 @@ pub fn send_sdo_read(
 
 pub fn send_sdo_write(
     conn: &McuSerialConn,
+    slot: u8,
     index: u16,
     subindex: u8,
     size: u8,
     value: i64,
 ) -> Result<SdoWriteResponse, String> {
     let body = SdoWrite {
+        slot,
         index,
         subindex,
         size,

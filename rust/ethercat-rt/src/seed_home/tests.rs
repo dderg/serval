@@ -35,7 +35,7 @@ impl FakeDrive {
 }
 
 impl SdoBus for FakeDrive {
-    fn read(&mut self, index: u16, _sub: u8) -> Result<(u8, [u8; 4]), i32> {
+    fn read(&mut self, _slot: u8, index: u16, _sub: u8) -> Result<(u8, [u8; 4]), i32> {
         match index {
             OD_MODE_DISPLAY => Ok((1, [self.display as u8, 0, 0, 0])),
             OD_MODE_OF_OPERATION => Ok((1, [self.mode as u8, 0, 0, 0])),
@@ -45,7 +45,7 @@ impl SdoBus for FakeDrive {
         }
     }
 
-    fn write(&mut self, index: u16, _sub: u8, bytes: &[u8]) -> Result<(), i32> {
+    fn write(&mut self, _slot: u8, index: u16, _sub: u8, bytes: &[u8]) -> Result<(), i32> {
         match index {
             OD_HOMING_METHOD => self.method = bytes[0] as i8,
             OD_HOME_OFFSET => {
@@ -66,7 +66,7 @@ impl SdoBus for FakeDrive {
 #[test]
 fn setup_writes_method_offset_mode_and_confirms_display() {
     let mut bus = FakeDrive::new(false);
-    let rc = seed_home_setup(&mut bus, -98_304);
+    let rc = seed_home_setup(&mut bus, 0, -98_304);
     assert_eq!(rc, 0);
     assert_eq!(bus.method, HOMING_METHOD_CURRENT_POSITION);
     assert_eq!(bus.offset, -98_304);
@@ -76,16 +76,16 @@ fn setup_writes_method_offset_mode_and_confirms_display() {
 #[test]
 fn setup_fails_when_mode_display_never_reaches_homing() {
     let mut bus = FakeDrive::new(true);
-    let rc = seed_home_setup(&mut bus, 0);
+    let rc = seed_home_setup(&mut bus, 0, 0);
     assert_eq!(rc, ERR_SEED_HOME_MODE_NOT_ATTAINED);
 }
 
 #[test]
 fn restore_switches_back_to_csp() {
     let mut bus = FakeDrive::new(false);
-    assert_eq!(seed_home_setup(&mut bus, 0), 0);
+    assert_eq!(seed_home_setup(&mut bus, 0, 0), 0);
     assert_eq!(bus.mode, MODE_HOMING);
-    let rc = seed_home_restore(&mut bus);
+    let rc = seed_home_restore(&mut bus, 0);
     assert_eq!(rc, 0);
     assert_eq!(bus.mode, MODE_CSP);
 }
@@ -93,6 +93,6 @@ fn restore_switches_back_to_csp() {
 #[test]
 fn restore_fails_when_mode_display_stuck() {
     let mut bus = FakeDrive::stuck_in_homing();
-    let rc = seed_home_restore(&mut bus);
+    let rc = seed_home_restore(&mut bus, 0);
     assert_eq!(rc, ERR_SEED_HOME_MODE_NOT_ATTAINED);
 }

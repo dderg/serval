@@ -147,9 +147,10 @@ class ServoParam:
                 rail.get_name(),
                 rail.get_name(short=True),
             ):
-                return self.printer.lookup_object(
+                node = self.printer.lookup_object(
                     "ethercat_node " + rail.get_node_name()
                 )
+                return node, node.get_slot_for_motor(rail.get_motor_name())
         known = ", ".join(rail.get_motor_name() for rail in servo_rails)
         raise self.printer.command_error(
             "SERVO_PARAM: no servo motor named %r (known: %s)"
@@ -157,7 +158,7 @@ class ServoParam:
         )
 
     def cmd_SERVO_PARAM(self, gcmd):
-        node = self._resolve_node(gcmd.get("SERVO"))
+        node, slot = self._resolve_node(gcmd.get("SERVO"))
         handle = node.get_engine_handle()
         if handle is None:
             raise gcmd.error(
@@ -178,7 +179,7 @@ class ServoParam:
         try:
             if get_addr is not None:
                 index, subindex = parse_address(get_addr)
-                size, raw = engine.sdo_read(handle, index, subindex)
+                size, raw = engine.sdo_read(handle, slot, index, subindex)
                 gcmd.respond_info(
                     format_value(index, subindex, size, raw, type_token)
                 )
@@ -187,7 +188,7 @@ class ServoParam:
                 value = _parse_int(gcmd.get("VALUE"))
                 size = check_value(value, type_token)
                 rb_size, rb_raw = engine.sdo_write(
-                    handle, index, subindex, size, value
+                    handle, slot, index, subindex, size, value
                 )
                 settled = format_value(
                     index, subindex, rb_size, rb_raw, type_token

@@ -39,3 +39,47 @@ fn poll_never_trips_if_torque_starts_at_or_above_threshold() {
     assert_eq!(arm.poll(399), None);
     assert_eq!(arm.poll(450), Some(9));
 }
+
+fn drain(bank: &mut SensorlessBank, torque: &[i16]) -> Vec<(usize, u8, i16)> {
+    let mut fired = Vec::new();
+    bank.poll(
+        |slot| torque[slot],
+        |slot, endstop_id, t| fired.push((slot, endstop_id, t)),
+    );
+    fired
+}
+
+#[test]
+fn bank_arms_slots_independently_without_clobber() {
+    let mut bank = SensorlessBank::new(2);
+    bank.arm(0, 4, 500);
+    bank.arm(1, 7, 500);
+
+    assert!(drain(&mut bank, &[100, 100]).is_empty());
+    assert_eq!(drain(&mut bank, &[600, 100]), vec![(0, 4, 600)]);
+    assert_eq!(drain(&mut bank, &[100, 600]), vec![(1, 7, 600)]);
+}
+
+#[test]
+fn bank_disarm_targets_one_slot_only() {
+    let mut bank = SensorlessBank::new(2);
+    bank.arm(0, 4, 500);
+    bank.arm(1, 7, 500);
+    bank.disarm(0);
+
+    assert!(drain(&mut bank, &[100, 100]).is_empty());
+    assert_eq!(drain(&mut bank, &[600, 600]), vec![(1, 7, 600)]);
+}
+
+#[test]
+fn bank_reports_every_slot_that_crosses_in_one_cycle() {
+    let mut bank = SensorlessBank::new(2);
+    bank.arm(0, 4, 500);
+    bank.arm(1, 7, 500);
+
+    assert!(drain(&mut bank, &[100, 100]).is_empty());
+    assert_eq!(
+        drain(&mut bank, &[600, 600]),
+        vec![(0, 4, 600), (1, 7, 600)]
+    );
+}

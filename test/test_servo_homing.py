@@ -71,6 +71,7 @@ AXIS_Z_OPTIONS = {
 MOTOR_Z_OPTIONS = {
     "protocol": "ethercat",
     "node": "z_drive",
+    "ethercat_chain_index": 1,
     "rotation_distance": 40.0,
     "encoder_counts_per_rev": 131072,
 }
@@ -241,11 +242,11 @@ class FakeLimitsEngine:
     def __init__(self):
         self.calls = []
 
-    def set_drive_limits(self, handle, counts, tenth_pct):
-        self.calls.append(("set", handle, counts, tenth_pct))
+    def set_drive_limits(self, handle, slot, counts, tenth_pct):
+        self.calls.append(("set", handle, slot, counts, tenth_pct))
 
-    def restore_drive_limits(self, handle):
-        self.calls.append(("restore", handle))
+    def restore_drive_limits(self, handle, slot):
+        self.calls.append(("restore", handle, slot))
 
     def finalize_homed_axis(self, handle, axis, pos_mm):
         self.calls.append(("finalize", handle, axis, pos_mm))
@@ -253,44 +254,44 @@ class FakeLimitsEngine:
 
 def test_homing_limits_guard_sets_and_restores():
     engine = FakeLimitsEngine()
-    with homing_mod._servo_drive_limits(engine, 7, (8192, 500)):
-        assert engine.calls == [("set", 7, 8192, 500)]
-    assert engine.calls == [("set", 7, 8192, 500), ("restore", 7)]
+    with homing_mod._servo_drive_limits(engine, 7, 0, (8192, 500)):
+        assert engine.calls == [("set", 7, 0, 8192, 500)]
+    assert engine.calls == [("set", 7, 0, 8192, 500), ("restore", 7, 0)]
 
 
 def test_homing_limits_guard_restores_on_error():
     engine = FakeLimitsEngine()
     try:
-        with homing_mod._servo_drive_limits(engine, 7, (8192, 500)):
+        with homing_mod._servo_drive_limits(engine, 7, 0, (8192, 500)):
             raise RuntimeError("trip move failed")
     except RuntimeError:
         pass
-    assert engine.calls[-1] == ("restore", 7)
+    assert engine.calls[-1] == ("restore", 7, 0)
 
 
 def test_homing_limits_guard_noop_without_limits():
     engine = FakeLimitsEngine()
-    with homing_mod._servo_drive_limits(engine, None, None):
+    with homing_mod._servo_drive_limits(engine, None, 0, None):
         pass
     assert engine.calls == []
 
 
 class FailingRestoreEngine(FakeLimitsEngine):
-    def restore_drive_limits(self, handle):
+    def restore_drive_limits(self, handle, slot):
         raise OSError("endpoint gone")
 
 
 def test_homing_limits_guard_restore_failure_raises_on_success_path():
     engine = FailingRestoreEngine()
     with pytest.raises(OSError, match="endpoint gone"):
-        with homing_mod._servo_drive_limits(engine, 7, (8192, 500)):
+        with homing_mod._servo_drive_limits(engine, 7, 0, (8192, 500)):
             pass
 
 
 def test_homing_limits_guard_restore_failure_does_not_mask_body_error():
     engine = FailingRestoreEngine()
     with pytest.raises(RuntimeError, match="trip move failed"):
-        with homing_mod._servo_drive_limits(engine, 7, (8192, 500)):
+        with homing_mod._servo_drive_limits(engine, 7, 0, (8192, 500)):
             raise RuntimeError("trip move failed")
 
 
@@ -340,7 +341,7 @@ class FakeServoEngine(FakeLimitsEngine):
 def run_guarded_trip(engine, se, servo_handle, servo_limits, trip):
     rail = FakeRail([], "servo_x")
     return homing_mod._run_servo_guarded_trip(
-        FakeGcmd(), engine, 0, se, rail, servo_handle, servo_limits, trip
+        FakeGcmd(), engine, 0, se, rail, servo_handle, 0, servo_limits, trip
     )
 
 
@@ -551,12 +552,14 @@ class FakeArmEngine:
         self.disarmed = []
 
     def arm_sensorless_endstop(
-        self, handle, endstop_id, torque_trip_tenth_pct, enable
+        self, handle, slot, endstop_id, torque_trip_tenth_pct, enable
     ):
-        self.armed.append((handle, endstop_id, torque_trip_tenth_pct, enable))
+        self.armed.append(
+            (handle, slot, endstop_id, torque_trip_tenth_pct, enable)
+        )
 
-    def disarm_sensorless_endstop(self, handle, endstop_id):
-        self.disarmed.append((handle, endstop_id))
+    def disarm_sensorless_endstop(self, handle, slot, endstop_id):
+        self.disarmed.append((handle, slot, endstop_id))
 
 
 class FakeNode:
@@ -565,6 +568,9 @@ class FakeNode:
 
     def get_engine_handle(self):
         return self._handle
+
+    def get_slot_for_motor(self, motor_name):
+        return 0
 
 
 class FakeProviderPrinter:
@@ -650,7 +656,7 @@ def test_trip_move_begin_arms_engine_with_homing_torque_cap():
     es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
     rail.trip_move_begin({"endstop": es})
     engine = printer.lookup_object("motion_engine")
-    assert engine.armed == [(7, es.endstop_id, 500, True)]
+    assert engine.armed == [(7, 0, es.endstop_id, 500, True)]
 
 
 def test_trip_move_end_disarms_engine():
@@ -659,7 +665,7 @@ def test_trip_move_end_disarms_engine():
     es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
     rail.trip_move_end({"endstop": es})
     engine = printer.lookup_object("motion_engine")
-    assert engine.disarmed == [(7, es.endstop_id)]
+    assert engine.disarmed == [(7, 0, es.endstop_id)]
 
 
 def test_trip_move_begin_raises_when_no_engine_handle():
