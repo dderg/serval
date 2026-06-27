@@ -141,7 +141,7 @@ class ServoRail(BaseRail):
         self._virtual_endstop = None
         if self.printer is not None:
             ppins = self.printer.lookup_object("pins")
-            ppins.register_chip("servo_" + self.axis, self)
+            ppins.register_chip(self.motor_name, self)
 
     def get_name(self, short=False):
         if short:
@@ -205,13 +205,13 @@ class ServoRail(BaseRail):
     def setup_motion_endstop(self, pin_params, axis):
         if pin_params["pin"] != VIRTUAL_ENDSTOP_PIN:
             raise pins.error(
-                "servo_%s only provides the '%s' virtual pin, not '%s'"
-                % (self.axis, VIRTUAL_ENDSTOP_PIN, pin_params["pin"])
+                "%s only provides the '%s' virtual pin, not '%s'"
+                % (self.motor_name, VIRTUAL_ENDSTOP_PIN, pin_params["pin"])
             )
         if axis != "xyz".index(self.axis):
             raise pins.error(
-                "servo_%s:%s is only usable as the %s endstop"
-                % (self.axis, VIRTUAL_ENDSTOP_PIN, self.axis.upper())
+                "%s:%s is only usable as the %s endstop"
+                % (self.motor_name, VIRTUAL_ENDSTOP_PIN, self.axis.upper())
             )
         if pin_params["invert"] or pin_params["pullup"]:
             raise pins.error("Can not pullup/invert the servo virtual endstop")

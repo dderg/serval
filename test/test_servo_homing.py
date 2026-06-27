@@ -599,7 +599,7 @@ class FakeProviderPrinter:
 
 def make_servo_rail_with_printer(printer, extra=()):
     axis_options = dict(AXIS_Z_OPTIONS)
-    axis_options["endstop_pin"] = "servo_z:" + servo_axis.VIRTUAL_ENDSTOP_PIN
+    axis_options["endstop_pin"] = "z_drive:" + servo_axis.VIRTUAL_ENDSTOP_PIN
     motor_options = dict(MOTOR_Z_OPTIONS)
     for key, value in dict(extra).items():
         if key in AXIS_KEYS:
@@ -620,10 +620,10 @@ def _virtual_pin_params():
     }
 
 
-def test_chip_registered_on_construction():
+def test_chip_registered_under_motor_name():
     printer = FakeProviderPrinter()
     make_servo_rail_with_printer(printer)
-    assert "servo_z" in printer.lookup_object("pins").chips
+    assert "z_drive" in printer.lookup_object("pins").chips
 
 
 def test_setup_motion_endstop_returns_virtual_endstop():
