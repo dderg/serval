@@ -217,7 +217,12 @@ fn clothoid_emitted_accel_is_disk_feasible_and_tracks_velocity() {
 }
 
 #[test]
-fn decel_into_clothoid_holds_acceleration_across_the_seam() {
+fn jerk_ceiling_caps_the_clothoid_entry_speed() {
+    // A clothoid's curvature rate `sigma` makes the acceleration vector grow as the
+    // curve tightens, so even at the `kappa = 0` entry the vector jerk caps the
+    // speed at `(jerk / sigma)^(1/3)` — far below the disk's `sqrt(accel/kappa) = inf`
+    // there. The approach line decelerates into that ceiling (it no longer holds
+    // `-a_max` to a higher, jerk-infeasible entry speed).
     let (kappa_peak, length, accel) = (0.8_f64, 4.0_f64, 2000.0_f64);
     let out = outcome(
         vec![
@@ -229,17 +234,23 @@ fn decel_into_clothoid_holds_acceleration_across_the_seam() {
     );
     let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
     let line = &plan.moves[0];
+    let clothoid = &plan.moves[1];
+    let sigma = kappa_peak / length;
+    let v_jerk_entry = (VelocityConfig::default().max_jerk_mm_s3 / sigma).cbrt();
     assert!(
         line.exit_v < line.peak_v - 1.0,
         "the approach line must be decelerating into the clothoid"
     );
-    let s = &line.samples;
-    let n = s.len();
-    let a_t = s[n - 1].v * (s[n - 1].v - s[n - 2].v) / (s[n - 1].s - s[n - 2].s);
     assert!(
-        a_t < -0.5 * accel,
-        "tangential accel must ride near -a_max at the clothoid seam (jerk must not \
-         ramp it to zero before the curve); got a_t={a_t}"
+        clothoid.entry_v <= v_jerk_entry + 1.0,
+        "clothoid entry {} must respect the sigma jerk ceiling {v_jerk_entry}",
+        clothoid.entry_v
+    );
+    assert!(
+        clothoid.entry_v < 0.5 * line.peak_v,
+        "the jerk ceiling must bind well below the approach cruise; got entry {} vs cruise {}",
+        clothoid.entry_v,
+        line.peak_v
     );
 }
 
