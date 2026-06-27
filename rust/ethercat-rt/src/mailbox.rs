@@ -11,11 +11,15 @@
 //! Requests execute strictly in submission order (single worker, FIFO
 //! channel), preserving write-then-readback semantics per client call.
 //!
-//! The worker shares the EtherCAT master with the DC loop, so its
-//! scheduling matters as much as its existence: see
-//! [`crate::thread_prio::assume_companion_rt_scheduling`] for why the
-//! hardware endpoint must run it as a pinned low-priority SCHED_FIFO
-//! companion rather than SCHED_OTHER.
+//! Because the in-kernel IgH master does that serialization itself — the SDO is
+//! a blocking `ecrt_master_sdo_*` call that sleeps while the master FSM pumps
+//! the mailbox over its own cycles — the worker is safe to run as plain
+//! SCHED_OTHER on the housekeeping cores ([`WorkerScheduling::Normal`], the
+//! default). The pinned low-priority SCHED_FIFO companion
+//! ([`WorkerScheduling::RealtimeCompanion`], selected by `--mailbox-cpu`)
+//! exists for the SOEM-style master where the SDO busy-polls a raw socket
+//! shared with the DC loop, so a mid-transaction deschedule traps the cyclic
+//! frame; see [`crate::thread_prio::assume_companion_rt_scheduling`].
 
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;

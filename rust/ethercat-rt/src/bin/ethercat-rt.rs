@@ -144,9 +144,7 @@ fn main() {
     let rt_prio: i32 = arg_val(&args, "--rt-prio")
         .and_then(|s| s.parse().ok())
         .unwrap_or(80);
-    let mailbox_cpu: usize = arg_val(&args, "--mailbox-cpu")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2);
+    let mailbox_cpu: Option<usize> = arg_val(&args, "--mailbox-cpu").and_then(|s| s.parse().ok());
     let dynamics = arg_val(&args, "--dynamics-profile").map(|path| {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             eprintln!("ec-rt: dynamics profile {path}: {e}");
@@ -306,9 +304,12 @@ fn main() {
         |slot, ferr_counts, torque_tenth_pct| unsafe {
             ffi::ec_rt_write_limits(i32::from(slot), ferr_counts, torque_tenth_pct)
         },
-        WorkerScheduling::RealtimeCompanion {
-            cpu: mailbox_cpu,
-            priority: MAILBOX_RT_PRIO,
+        match mailbox_cpu {
+            Some(cpu) => WorkerScheduling::RealtimeCompanion {
+                cpu,
+                priority: MAILBOX_RT_PRIO,
+            },
+            None => WorkerScheduling::Normal,
         },
     );
     let mut pending_starts: Vec<(u32, String, PendingStart)> = Vec::new();
