@@ -197,7 +197,7 @@ fn arm_sensorless_endstop_round_trips_args_and_result() {
     let (client, server) = UnixStream::pair().unwrap();
     let rx = spawn_arm_endpoint(server, 0);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
-    let result = send_arm_sensorless_endstop(&conn, 4, 500, true).expect("call");
+    let result = send_arm_sensorless_endstop(&conn, 0, 4, 500, true).expect("call");
     assert_eq!(result, 0);
     let seen = rx.recv().expect("endpoint saw the command");
     assert_eq!(seen.endstop_id, 4);
@@ -211,7 +211,7 @@ fn arm_sensorless_endstop_surfaces_nonzero_result() {
     let _rx = spawn_arm_endpoint(server, -360);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     assert_eq!(
-        send_arm_sensorless_endstop(&conn, 3, 0, true).expect("call"),
+        send_arm_sensorless_endstop(&conn, 0, 3, 0, true).expect("call"),
         -360
     );
 }

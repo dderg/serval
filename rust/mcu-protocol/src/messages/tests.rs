@@ -84,12 +84,13 @@ fn resonance_buzz_kind_is_not_event() {
 #[test]
 fn arm_sensorless_endstop_roundtrip() {
     let v = ArmSensorlessEndstop {
+        slot: 1,
         endstop_id: 4,
         torque_trip_tenth_pct: 500,
         enable: 1,
     };
     assert_eq!(roundtrip(&v), v);
-    assert_eq!(v.encoded_to_vec().len(), 4);
+    assert_eq!(v.encoded_to_vec().len(), 5);
     let r = ArmSensorlessEndstopResponse { result: -7 };
     assert_eq!(roundtrip(&r), r);
     assert_eq!(r.encoded_to_vec().len(), 4);
@@ -466,12 +467,21 @@ fn stop_kinds_have_stable_tags() {
 #[test]
 fn set_drive_limits_round_trips() {
     let msg = SetDriveLimits {
+        slot: 2,
         following_error_counts: 8192,
         max_torque_tenth_pct: 500,
     };
     let bytes = msg.encoded_to_vec();
     let decoded = SetDriveLimits::decode(&bytes).unwrap();
     assert_eq!(decoded, msg);
+}
+
+#[test]
+fn restore_drive_limits_round_trips_with_slot() {
+    let msg = RestoreDriveLimits { slot: 2 };
+    let bytes = msg.encoded_to_vec();
+    assert_eq!(bytes.len(), 1);
+    assert_eq!(RestoreDriveLimits::decode(&bytes).unwrap(), msg);
 }
 
 #[test]
@@ -502,9 +512,12 @@ fn drive_limits_message_kinds_round_trip() {
 
 #[test]
 fn seed_servo_home_round_trips() {
-    let msg = SeedServoHome { home_q16: -123_456 };
+    let msg = SeedServoHome {
+        slot: 3,
+        home_q16: -123_456,
+    };
     let bytes = msg.encoded_to_vec();
-    assert_eq!(bytes.len(), 4);
+    assert_eq!(bytes.len(), 5);
     assert_eq!(SeedServoHome::decode(&bytes).unwrap(), msg);
 
     let r = SeedServoHomeResponse { result: -801 };

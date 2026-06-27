@@ -15,12 +15,12 @@ pub const COE_ABORT_LENGTH_MISMATCH: i32 = 0x0607_0010;
 /// (a larger reported size means the object is unsupported, not truncated data;
 /// bytes beyond the reported size are unspecified and ignored by the executor).
 pub trait SdoBus {
-    fn read(&mut self, index: u16, subindex: u8) -> Result<(u8, [u8; 4]), i32>;
-    fn write(&mut self, index: u16, subindex: u8, bytes: &[u8]) -> Result<(), i32>;
+    fn read(&mut self, slot: u8, index: u16, subindex: u8) -> Result<(u8, [u8; 4]), i32>;
+    fn write(&mut self, slot: u8, index: u16, subindex: u8, bytes: &[u8]) -> Result<(), i32>;
 }
 
 pub fn execute_sdo_read(bus: &mut dyn SdoBus, msg: &SdoRead) -> SdoReadResponse {
-    match bus.read(msg.index, msg.subindex) {
+    match bus.read(msg.slot, msg.index, msg.subindex) {
         Ok((size, data)) => SdoReadResponse {
             result: 0,
             size,
@@ -55,7 +55,7 @@ pub fn execute_sdo_write(bus: &mut dyn SdoBus, msg: &SdoWrite) -> SdoWriteRespon
         readback_data: [0; 4],
     };
     let size = if msg.size == SDO_SIZE_PROBE {
-        match bus.read(msg.index, msg.subindex) {
+        match bus.read(msg.slot, msg.index, msg.subindex) {
             Ok((probed, _)) => probed,
             Err(code) => return fail(code),
         }
@@ -69,10 +69,15 @@ pub fn execute_sdo_write(bus: &mut dyn SdoBus, msg: &SdoWrite) -> SdoWriteRespon
         return fail(ERR_SDO_VALUE_RANGE);
     }
     let bytes = encode_value(msg.value, size);
-    if let Err(code) = bus.write(msg.index, msg.subindex, &bytes[..usize::from(size)]) {
+    if let Err(code) = bus.write(
+        msg.slot,
+        msg.index,
+        msg.subindex,
+        &bytes[..usize::from(size)],
+    ) {
         return fail(code);
     }
-    match bus.read(msg.index, msg.subindex) {
+    match bus.read(msg.slot, msg.index, msg.subindex) {
         Ok((rb_size, rb_data)) => {
             if rb_size == size && rb_data[..usize::from(size)] == bytes[..usize::from(size)] {
                 SdoWriteResponse {
@@ -116,7 +121,7 @@ impl DictSdoBus {
 }
 
 impl SdoBus for DictSdoBus {
-    fn read(&mut self, index: u16, subindex: u8) -> Result<(u8, [u8; 4]), i32> {
+    fn read(&mut self, _slot: u8, index: u16, subindex: u8) -> Result<(u8, [u8; 4]), i32> {
         self.read_count = self.read_count.wrapping_add(1);
         match self.objects.get(&(index, subindex)) {
             Some(o) => Ok((o.size, o.value)),
@@ -124,7 +129,7 @@ impl SdoBus for DictSdoBus {
         }
     }
 
-    fn write(&mut self, index: u16, subindex: u8, bytes: &[u8]) -> Result<(), i32> {
+    fn write(&mut self, _slot: u8, index: u16, subindex: u8, bytes: &[u8]) -> Result<(), i32> {
         let o = self
             .objects
             .get_mut(&(index, subindex))

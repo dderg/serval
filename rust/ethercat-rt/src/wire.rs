@@ -3,10 +3,10 @@ use mcu_protocol::codec::{Decode, Encode};
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, AxisDiag, ClaimHandshakeReply, EndstopTrip,
     MessageKind, MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse, ResonanceBuzz,
-    ResonanceBuzzResponse, RestoreDriveLimitsResponse, ResumeStreamResponse, RuntimeCapsResponse,
-    SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse,
-    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StartCapture,
-    StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse,
+    ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse,
+    RuntimeCapsResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
+    SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
+    StartCapture, StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse,
 };
 use mcu_protocol::MCU_CHANNEL_PIECES;
 use mcu_transport::frame::{encode_frame, CHANNEL_CONTROL, CHANNEL_EVENTS};
@@ -56,9 +56,11 @@ pub enum Command {
     },
     RestoreDriveLimits {
         correlation_id: u32,
+        slot: u8,
     },
     SeedServoHome {
         correlation_id: u32,
+        slot: u8,
         home_q16: i32,
     },
     ArmSensorlessEndstop {
@@ -148,13 +150,18 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
                 msg,
             })
         }
-        Some(MessageKind::RestoreDriveLimits) => Ok(Command::RestoreDriveLimits {
-            correlation_id: cid,
-        }),
+        Some(MessageKind::RestoreDriveLimits) => {
+            let msg = RestoreDriveLimits::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::RestoreDriveLimits {
+                correlation_id: cid,
+                slot: msg.slot,
+            })
+        }
         Some(MessageKind::SeedServoHome) => {
             let msg = SeedServoHome::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
             Ok(Command::SeedServoHome {
                 correlation_id: cid,
+                slot: msg.slot,
                 home_q16: msg.home_q16,
             })
         }
