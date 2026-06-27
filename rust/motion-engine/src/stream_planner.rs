@@ -126,8 +126,6 @@ const COALESCE_BATCH_MOVES: usize = 64;
 
 pub const INPUT_CHANNEL_CAP: usize = 8192;
 
-static POST_NUDGE_LOG: AtomicU32 = AtomicU32::new(0);
-
 type DispatchFn = Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>;
 type NudgeDispatchFn =
     Arc<dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync>;
@@ -397,43 +395,6 @@ fn fatal(msg: &str) -> ! {
     std::process::abort();
 }
 
-fn log_post_nudge_segs(segs: &[ShapedSegment]) {
-    let mut remaining = POST_NUDGE_LOG.load(Ordering::Relaxed);
-    if remaining == 0 {
-        return;
-    }
-    for s in segs {
-        if remaining == 0 {
-            break;
-        }
-        let n_ax = s.axes.len();
-        let delta = |i: usize| {
-            if n_ax > i {
-                nurbs::eval::eval(&s.axes[i], s.t_end) - nurbs::eval::eval(&s.axes[i], s.t_start)
-            } else {
-                0.0
-            }
-        };
-        let (dx, dy, dz) = (delta(0), delta(1), delta(2));
-        let dist_mm = (dx * dx + dy * dy + dz * dz).sqrt();
-        let dur_s = s.t_end - s.t_start;
-        let v_mm_s = if dur_s > 0.0 { dist_mm / dur_s } else { 0.0 };
-        tracing::warn!(
-            subsystem = "motion",
-            event = "post_nudge_seg",
-            line = s.source_line,
-            seg_t_start = s.t_start,
-            seg_t_end = s.t_end,
-            dur_s,
-            dist_mm,
-            v_mm_s,
-            "[post-nudge] committed segment after a nudge"
-        );
-        remaining -= 1;
-    }
-    POST_NUDGE_LOG.store(remaining, Ordering::Relaxed);
-}
-
 fn dispatch_committed(
     segs: &[ShapedSegment],
     dispatch: &DispatchFn,
@@ -444,7 +405,6 @@ fn dispatch_committed(
     if segs.is_empty() {
         return;
     }
-    log_post_nudge_segs(segs);
     tracing::info!(
         subsystem = "motion",
         event = "dispatch_committed",
@@ -507,7 +467,6 @@ fn dispatch_or_err(
     if segs.is_empty() {
         return Ok(());
     }
-    log_post_nudge_segs(segs);
     for s in segs {
         dispatch(s).map_err(|e| format!("dispatch failed: {e}"))?;
     }
@@ -591,7 +550,6 @@ fn run_nudge(
     }
     state.advance_time(total_dur);
     last_move_time_bits.store(state.t_committed().to_bits(), Ordering::Release);
-    POST_NUDGE_LOG.store(8, Ordering::Relaxed);
     Ok(())
 }
 
