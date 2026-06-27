@@ -53,6 +53,12 @@ static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 /// preempts the master's receive busy-poll.
 const MAILBOX_RT_PRIO: i32 = 40;
 
+/// A commanded target stepping more than this many mm in one DC cycle is
+/// physically impossible for these axes (2 mm/cycle at 1 kHz is 2 m/s) — it is a
+/// trajectory discontinuity, the signature the drive latches as Er87.1. Log the
+/// offending command so the jump is visible the cycle it happens, not inferred.
+const TARGET_JUMP_LOG_MM: f64 = 2.0;
+
 extern "C" fn on_sigterm(_: libc::c_int) {
     SIGTERM_RECEIVED.store(true, Ordering::Release);
 }
@@ -125,6 +131,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ifname = args.get(1).cloned().unwrap_or_else(|| "eth0".into());
     let socket = arg_val(&args, "--socket").unwrap_or_else(|| "/tmp/kalico-ethercat.sock".into());
+    if let Some(events_dir) = arg_val(&args, "--events-dir") {
+        ethercat_rt::obs::init(
+            std::path::Path::new(&events_dir),
+            format!("ec-{}", std::process::id()),
+        );
+    }
     let cycle_us: i64 = arg_val(&args, "--cycle-us")
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000);
@@ -183,6 +195,11 @@ fn main() {
     let mut rings: Vec<AxisRing> = (0..num_slaves).map(AxisRing::with_slot).collect();
     let mut buzz = BuzzOsc::new();
     let mut cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
+    let mut last_counts: Vec<Option<i32>> = vec![None; num_slaves];
+    let jump_log_counts: Vec<i64> = cmd_counts_per_mm
+        .iter()
+        .map(|c| (c.abs() * TARGET_JUMP_LOG_MM).round() as i64)
+        .collect();
     let mut framed = false;
     let mut seed_home_inflight: Option<u32> = None;
     let mut seed_home_slot: u8 = 0;
@@ -1031,6 +1048,24 @@ fn main() {
                         }
                         None => 0,
                     };
+                    if let Some(prev) = last_counts[s] {
+                        let increment = i64::from(counts) - i64::from(prev);
+                        if increment.abs() > jump_log_counts[s] {
+                            tracing::warn!(
+                                subsystem = "ethercat",
+                                event = "target_jump",
+                                slot = s,
+                                prev_target = prev,
+                                new_target = counts,
+                                increment,
+                                vel_mm_s = f64::from(all_vel[s]),
+                                acc_mm_s2 = f64::from(all_acc[s]),
+                                invert = invert[s],
+                                "commanded target increment exceeds sane per-cycle bound"
+                            );
+                        }
+                    }
+                    last_counts[s] = Some(counts);
                     unsafe {
                         ffi::ec_rt_set_target_position(slot, counts);
                         ffi::ec_rt_set_velocity_offset(slot, vel_offset);
@@ -1038,11 +1073,16 @@ fn main() {
                     }
                     motion_active = true;
                 } else {
+                    last_counts[s] = None;
                     unsafe {
                         ffi::ec_rt_set_velocity_offset(slot, 0);
                         ffi::ec_rt_set_torque_offset(slot, 0);
                     }
                 }
+            }
+        } else {
+            for lc in &mut last_counts {
+                *lc = None;
             }
         }
 
@@ -1096,12 +1136,37 @@ fn main() {
                 None
             }
         });
-        let drive_err: u16 = drive_fault.map(|(_, e)| e).unwrap_or(0);
         if let Some((slot, err)) = drive_fault {
             if gate.state() != TorqueState::Faulted {
                 eprintln!(
                     "ec-rt: DRIVE FAULT slot {slot} err=0x{err:04x} — parking, reporting via heartbeat"
                 );
+                for d in 0..num_slaves {
+                    let mut t = ffi::EcTelemetry::default();
+                    unsafe { ffi::ec_rt_get_telemetry(d as std::os::raw::c_int, &mut t) };
+                    let last_cmd = last_counts[d].unwrap_or(t.target_position);
+                    tracing::error!(
+                        subsystem = "ethercat",
+                        event = "drive_fault",
+                        faulted_slot = slot,
+                        slot = d,
+                        axis = slave_axes[d],
+                        invert = invert[d],
+                        err = err,
+                        error_code = t.error_code,
+                        statusword = t.statusword,
+                        target = t.target_position,
+                        last_cmd_target = last_cmd,
+                        last_increment = i64::from(t.target_position) - i64::from(last_cmd),
+                        actual = t.position_actual,
+                        following_error = t.following_error,
+                        velocity_actual = t.velocity_actual,
+                        torque_actual = t.torque_actual,
+                        velocity_offset = t.velocity_offset,
+                        torque_offset = t.torque_offset,
+                        "drive fault — per-slot snapshot"
+                    );
+                }
                 gate.on_drive_fault();
                 for r in &mut rings {
                     r.reset();
@@ -1197,19 +1262,32 @@ fn main() {
         prdiv += 1;
         if prdiv >= telemetry_period {
             prdiv = 0;
-            let (sw, pos, ferr, tq_act) = unsafe {
-                (
-                    ffi::ec_rt_get_statusword(0),
-                    ffi::ec_rt_get_position_actual(0),
-                    ffi::ec_rt_get_following_error(0),
-                    ffi::ec_rt_get_torque_actual(0),
-                )
-            };
-            eprintln!(
-                "ec-rt: wkc={wkc} sw=0x{sw:04x} err=0x{drive_err:04x} pos={pos} ferr={ferr} toff={toff} \
-                 any_motion={} retired={retired:?} tq_act={tq_act} ff_sat={ff_saturation} framed={framed}",
-                !all_empty_now as u8,
-            );
+            for s in 0..num_slaves {
+                let mut t = ffi::EcTelemetry::default();
+                unsafe { ffi::ec_rt_get_telemetry(s as std::os::raw::c_int, &mut t) };
+                tracing::info!(
+                    subsystem = "ethercat",
+                    event = "telemetry",
+                    slot = s,
+                    axis = slave_axes[s],
+                    invert = invert[s],
+                    wkc,
+                    toff,
+                    statusword = t.statusword,
+                    error_code = t.error_code,
+                    target = t.target_position,
+                    actual = t.position_actual,
+                    following_error = t.following_error,
+                    velocity_actual = t.velocity_actual,
+                    torque_actual = t.torque_actual,
+                    velocity_offset = t.velocity_offset,
+                    torque_offset = t.torque_offset,
+                    motion = !all_empty_now,
+                    ff_sat = ff_saturation,
+                    framed,
+                    "per-slot drive telemetry"
+                );
+            }
             if gate.state() == TorqueState::Faulted {
                 server.respond(&status_heartbeat_frame(
                     0,

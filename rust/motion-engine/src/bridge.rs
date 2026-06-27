@@ -450,6 +450,7 @@ fn endpoint_args(
     interface: &str,
     socket_path: &str,
     dynamics_profile: Option<&str>,
+    events_dir: Option<&std::path::Path>,
     drives: &[EthercatDrive],
 ) -> Vec<String> {
     let mut args = vec![
@@ -460,6 +461,10 @@ fn endpoint_args(
     if let Some(p) = dynamics_profile {
         args.push("--dynamics-profile".into());
         args.push(p.to_string());
+    }
+    if let Some(dir) = events_dir {
+        args.push("--events-dir".into());
+        args.push(dir.to_string_lossy().into_owned());
     }
     if drives.len() == 1 {
         push_drive_flags(&mut args, &drives[0]);
@@ -481,9 +486,10 @@ fn spawn_ethercat_endpoint(
     interface: &str,
     socket_path: &str,
     dynamics_profile: Option<&str>,
+    events_dir: Option<&std::path::Path>,
     drives: &[EthercatDrive],
 ) -> Result<std::process::Child, String> {
-    let args = endpoint_args(interface, socket_path, dynamics_profile, drives);
+    let args = endpoint_args(interface, socket_path, dynamics_profile, events_dir, drives);
     std::process::Command::new(binary)
         .args(&args)
         .spawn()
@@ -1041,11 +1047,17 @@ impl PyMotionEngine {
             }
         }
 
+        let events_dir = self
+            .events_dir
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let mut child = spawn_ethercat_endpoint(
             endpoint_binary,
             interface,
             socket_path,
             dynamics_profile.as_deref(),
+            events_dir.as_deref(),
             &drives,
         )
         .map_err(|e| {
@@ -4959,6 +4971,7 @@ mod ethercat_endpoint_tests {
             "eth0",
             "/tmp/x.sock",
             None,
+            None,
             &[(
                 1,
                 0,
@@ -4986,6 +4999,7 @@ mod ethercat_endpoint_tests {
             "eth0",
             "/tmp/x.sock",
             None,
+            None,
             &[
                 (0, 0, 1000.0, 50.0, None, None, true, 25.0, false),
                 (1, 2, 2000.0, 40.0, None, None, false, 60.0, true),
@@ -5009,6 +5023,7 @@ mod ethercat_endpoint_tests {
         let args = endpoint_args(
             "eth0",
             "/tmp/x.sock",
+            None,
             None,
             &[
                 (0, 0, 1000.0, 50.0, None, None, false, 30.0, false),
@@ -5037,6 +5052,7 @@ mod ethercat_endpoint_tests {
             "/nonexistent/binary/kalico-ec",
             "eth0",
             "/tmp/test.sock",
+            None,
             None,
             &[],
         );
