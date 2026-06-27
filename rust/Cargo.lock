@@ -423,6 +423,7 @@ version = "0.1.0"
 dependencies = [
  "gcode",
  "nurbs",
+ "proptest",
  "thiserror",
 ]
 
