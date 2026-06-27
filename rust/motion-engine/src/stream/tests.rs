@@ -265,20 +265,19 @@ fn flush_commits_everything_to_rest() {
 #[test]
 fn blended_corner_commits_through_the_blend_without_stopping() {
     // A 90-degree corner is blended (a biclothoid). The blend rejoins the
-    // outgoing line at zero curvature, so the commit emits through the blend
-    // without stopping at the corner. Both raw moves stay buffered until the blend
-    // has fully drained — the incoming move is still needed to rebuild the blend's
-    // exit half on the next re-fit — and the frontier carries cruising velocity.
+    // outgoing line at zero curvature, so the commit runs through the whole
+    // blend and keeps the outgoing move as a head-trimmed remainder — never
+    // splitting the blend itself, and never stopping at the corner.
     let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
     s.push(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0));
     s.push(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 0.0));
 
     let committed = s.commit(false).unwrap();
     assert!(!committed.is_empty(), "the blend must commit");
-    assert!(
-        s.buffered() <= 2,
-        "buffer holds only the un-drained blend tail, not unbounded: {}",
-        s.buffered()
+    assert_eq!(
+        s.buffered(),
+        1,
+        "outgoing move kept as a head-trimmed remainder"
     );
     assert!(
         s.entry_velocity() > 1.0,

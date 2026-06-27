@@ -149,15 +149,6 @@ impl HistoryStore {
         ring.push_back(piece);
     }
 
-    /// Drop all recorded history. Called when the dispatch anchor re-anchors
-    /// (`fresh`): the clock baseline jumps, so prior pieces sit on a stale timeline
-    /// and a freshly-recorded piece would otherwise read as out-of-order against
-    /// them. The next pieces re-seed the rings from the new baseline.
-    pub fn clear(&mut self) {
-        self.rings.clear();
-        self.endpoints.clear();
-    }
-
     pub fn rebase_axis(&mut self, key: AxisKey, clock: u64, position: f64) {
         self.rings.entry(key).or_default().clear();
         self.endpoints.insert(key, AxisEndpoint { clock, position });
