@@ -35,7 +35,7 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Single drive | one `[motor]` on node, no/`=1` chain_index | one `--slave 1` group; slot 0; identical to Phase 1 | N/A |
+| Single drive | one `[motor]` on node, `ethercat_chain_index: 1` (required) | legacy CLI form; slot 0; identical to Phase 1 | missing field → config error |
 | Two drives | two `[motor]` on node, chain_index 1 & 2 | two `--slave` groups; slot 0→axis(idx1), slot 1→axis(idx2); each SDO/torque targets its slot | N/A |
 | Duplicate index | two motors both chain_index 1 | claim aborts | config/claim error naming both motors |
 | Out-of-range index | chain_index 9 (> EC_RT_MAX_SLAVES) | claim aborts | config error |
@@ -82,6 +82,8 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 - Given `./scripts/ci.sh quick` and `./scripts/ci.sh py`, when run, then green.
 
 ## Spec Change Log
+
+- **2026-06-27 — `ethercat_chain_index` is now REQUIRED (human renegotiation).** Dropped the `default=1`; `getint("ethercat_chain_index", minval=1)` with no default → every `[motor] drive:servo` must declare its chain position explicitly (a missing field is a loud config error at startup). No backwards-compat for the unspecified case. Existing single-drive bench config must add `ethercat_chain_index: 1`. (`servo_axis.py`; fake motor configs in `test_servo_homing.py`/`test_motion_kinematics.py` updated.)
 
 - **2026-06-27 — step-04 review patches (no loopback; all patch/defer/reject):**
   - Endpoint now fails loud with a clean `-309` response (instead of the C `abort()` that would kill all drives) on an out-of-range `slot` for `SetDriveLimits`, `ArmSensorlessEndstop`, `SdoRead`, `SdoWrite` — matching the existing `RestoreDriveLimits`/`SeedServoHome` guards. (`ethercat-rt.rs`)

@@ -71,6 +71,7 @@ AXIS_Z_OPTIONS = {
 MOTOR_Z_OPTIONS = {
     "protocol": "ethercat",
     "node": "z_drive",
+    "ethercat_chain_index": 1,
     "rotation_distance": 40.0,
     "encoder_counts_per_rev": 131072,
 }

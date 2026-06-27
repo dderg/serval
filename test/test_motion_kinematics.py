@@ -491,6 +491,7 @@ def _servo_rail():
     motor_opts = {
         "protocol": "ethercat",
         "node": "z_drive",
+        "ethercat_chain_index": 1,
         "rotation_distance": 40.0,
         "encoder_counts_per_rev": 131072,
     }
