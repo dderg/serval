@@ -37,18 +37,19 @@ pub const ERR_SEED_HOME_NOT_ENABLED: i32 = -825;
 pub const ERR_SEED_HOME_STREAMING: i32 = -826;
 pub const ERR_SEED_HOME_RESTORE: i32 = -827;
 
-fn write_i8(bus: &mut dyn SdoBus, index: u16, value: i8, err: i32) -> Result<(), i32> {
-    bus.write(index, 0x00, &[value as u8]).map_err(|_| err)
-}
-
-fn write_i32(bus: &mut dyn SdoBus, index: u16, value: i32, err: i32) -> Result<(), i32> {
-    bus.write(index, 0x00, &value.to_le_bytes())
+fn write_i8(bus: &mut dyn SdoBus, slot: u8, index: u16, value: i8, err: i32) -> Result<(), i32> {
+    bus.write(slot, index, 0x00, &[value as u8])
         .map_err(|_| err)
 }
 
-fn poll_mode_display(bus: &mut dyn SdoBus, wanted: i8) -> Result<(), i32> {
+fn write_i32(bus: &mut dyn SdoBus, slot: u8, index: u16, value: i32, err: i32) -> Result<(), i32> {
+    bus.write(slot, index, 0x00, &value.to_le_bytes())
+        .map_err(|_| err)
+}
+
+fn poll_mode_display(bus: &mut dyn SdoBus, slot: u8, wanted: i8) -> Result<(), i32> {
     for _ in 0..MODE_POLL_ATTEMPTS {
-        if let Ok((size, data)) = bus.read(OD_MODE_DISPLAY, 0x00) {
+        if let Ok((size, data)) = bus.read(slot, OD_MODE_DISPLAY, 0x00) {
             if size >= 1 && data[0] as i8 == wanted {
                 return Ok(());
             }
@@ -57,51 +58,55 @@ fn poll_mode_display(bus: &mut dyn SdoBus, wanted: i8) -> Result<(), i32> {
     Err(ERR_SEED_HOME_MODE_NOT_ATTAINED)
 }
 
-fn seed_home_setup_inner(bus: &mut dyn SdoBus, offset_counts: i32) -> Result<(), i32> {
+fn seed_home_setup_inner(bus: &mut dyn SdoBus, slot: u8, offset_counts: i32) -> Result<(), i32> {
     write_i8(
         bus,
+        slot,
         OD_HOMING_METHOD,
         HOMING_METHOD_CURRENT_POSITION,
         ERR_SEED_HOME_METHOD_WRITE,
     )?;
     write_i32(
         bus,
+        slot,
         OD_HOME_OFFSET,
         offset_counts,
         ERR_SEED_HOME_OFFSET_WRITE,
     )?;
     write_i8(
         bus,
+        slot,
         OD_MODE_OF_OPERATION,
         MODE_HOMING,
         ERR_SEED_HOME_MODE_WRITE,
     )?;
-    poll_mode_display(bus, MODE_HOMING)
+    poll_mode_display(bus, slot, MODE_HOMING)
 }
 
 /// Stage method=35 and the home offset, switch the drive to Homing mode, and
 /// confirm 6061h reads Homing. Returns 0 on success or a negative ERR_*.
-pub fn seed_home_setup(bus: &mut dyn SdoBus, offset_counts: i32) -> i32 {
-    match seed_home_setup_inner(bus, offset_counts) {
+pub fn seed_home_setup(bus: &mut dyn SdoBus, slot: u8, offset_counts: i32) -> i32 {
+    match seed_home_setup_inner(bus, slot, offset_counts) {
         Ok(()) => 0,
         Err(code) => code,
     }
 }
 
-fn seed_home_restore_inner(bus: &mut dyn SdoBus) -> Result<(), i32> {
+fn seed_home_restore_inner(bus: &mut dyn SdoBus, slot: u8) -> Result<(), i32> {
     write_i8(
         bus,
+        slot,
         OD_MODE_OF_OPERATION,
         MODE_CSP,
         ERR_SEED_HOME_MODE_WRITE,
     )?;
-    poll_mode_display(bus, MODE_CSP)
+    poll_mode_display(bus, slot, MODE_CSP)
 }
 
 /// Switch the drive back to CSP mode and confirm 6061h reads CSP. Returns 0 on
 /// success or a negative ERR_*.
-pub fn seed_home_restore(bus: &mut dyn SdoBus) -> i32 {
-    match seed_home_restore_inner(bus) {
+pub fn seed_home_restore(bus: &mut dyn SdoBus, slot: u8) -> i32 {
+    match seed_home_restore_inner(bus, slot) {
         Ok(()) => 0,
         Err(code) => code,
     }

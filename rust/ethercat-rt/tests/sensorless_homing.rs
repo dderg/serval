@@ -57,6 +57,7 @@ fn do_handshake(conn: &McuSerialConn) {
 
 fn arm_sensorless(conn: &McuSerialConn, endstop_id: u8, torque_trip_tenth_pct: u16, enable: bool) {
     let body = ArmSensorlessEndstop {
+        slot: 0,
         endstop_id,
         torque_trip_tenth_pct,
         enable: u8::from(enable),
@@ -76,6 +77,7 @@ fn arm_sensorless(conn: &McuSerialConn, endstop_id: u8, torque_trip_tenth_pct: u
 
 fn inject_torque(conn: &McuSerialConn, value: i64) {
     let body = SdoWrite {
+        slot: 0,
         index: TORQUE_ACTUAL_INDEX,
         subindex: 0,
         size: 2,

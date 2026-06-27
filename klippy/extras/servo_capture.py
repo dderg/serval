@@ -41,11 +41,6 @@ class ServoCapture:
                     "SERVO= is required" % (", ".join(sorted(nodes)),)
                 )
             return next(iter(nodes.items()))
-        if "," in servo:
-            raise gcmd.error(
-                "SERVO_CAPTURE: multi-servo capture requires all drives on "
-                "one endpoint and is not implemented yet"
-            )
         node = nodes.get(servo)
         if node is None:
             raise gcmd.error(
@@ -75,6 +70,12 @@ class ServoCapture:
             raise gcmd.error(
                 "SERVO_CAPTURE: servo %r has no engine handle (node not "
                 "claimed)" % (servo,)
+            )
+        if node.get_drive_count() > 1:
+            raise gcmd.error(
+                "SERVO_CAPTURE: node %r drives %d servos; capture records only "
+                "one drive's telemetry and is not yet per-drive (Phase 3)"
+                % (servo, node.get_drive_count())
             )
         path = os.path.join(
             self.capture_dir,

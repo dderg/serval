@@ -51,6 +51,7 @@ fn read_returns_size_and_bytes() {
     let resp = execute_sdo_read(
         &mut bus,
         &SdoRead {
+            slot: 0,
             index: 0x2002,
             subindex: 0,
         },
@@ -66,6 +67,7 @@ fn read_unknown_object_returns_abort_code() {
     let resp = execute_sdo_read(
         &mut bus,
         &SdoRead {
+            slot: 0,
             index: 0x7777,
             subindex: 0,
         },
@@ -79,6 +81,7 @@ fn probed_write_discovers_size_writes_and_verifies() {
     let resp = execute_sdo_write(
         &mut bus,
         &SdoWrite {
+            slot: 0,
             index: 0x2002,
             subindex: 0,
             size: SDO_SIZE_PROBE,
@@ -97,6 +100,7 @@ fn typed_write_skips_probe() {
     let resp = execute_sdo_write(
         &mut bus,
         &SdoWrite {
+            slot: 0,
             index: 0x2002,
             subindex: 0,
             size: 2,
@@ -113,6 +117,7 @@ fn negative_value_encodes_twos_complement() {
     let resp = execute_sdo_write(
         &mut bus,
         &SdoWrite {
+            slot: 0,
             index: 0x2010,
             subindex: 1,
             size: 4,
@@ -129,6 +134,7 @@ fn value_exceeding_discovered_width_is_rejected_before_writing() {
     let resp = execute_sdo_write(
         &mut bus,
         &SdoWrite {
+            slot: 0,
             index: 0x2002,
             subindex: 0,
             size: SDO_SIZE_PROBE,
@@ -139,6 +145,7 @@ fn value_exceeding_discovered_width_is_rejected_before_writing() {
     let after = execute_sdo_read(
         &mut bus,
         &SdoRead {
+            slot: 0,
             index: 0x2002,
             subindex: 0,
         },
@@ -152,6 +159,7 @@ fn clamped_write_reports_verify_mismatch_with_settled_bytes() {
     let resp = execute_sdo_write(
         &mut bus,
         &SdoWrite {
+            slot: 0,
             index: 0x2003,
             subindex: 0,
             size: 2,
@@ -173,6 +181,7 @@ fn read_only_object_write_surfaces_abort_code() {
     let resp = execute_sdo_write(
         &mut bus,
         &SdoWrite {
+            slot: 0,
             index: 0x6041,
             subindex: 0,
             size: 2,
@@ -186,16 +195,23 @@ fn read_only_object_write_surfaces_abort_code() {
 fn probe_reporting_oversized_object_is_rejected() {
     struct BigObjectBus;
     impl SdoBus for BigObjectBus {
-        fn read(&mut self, _index: u16, _subindex: u8) -> Result<(u8, [u8; 4]), i32> {
+        fn read(&mut self, _slot: u8, _index: u16, _subindex: u8) -> Result<(u8, [u8; 4]), i32> {
             Ok((8, [0; 4]))
         }
-        fn write(&mut self, _index: u16, _subindex: u8, _bytes: &[u8]) -> Result<(), i32> {
+        fn write(
+            &mut self,
+            _slot: u8,
+            _index: u16,
+            _subindex: u8,
+            _bytes: &[u8],
+        ) -> Result<(), i32> {
             panic!("must not write an unsupported-size object");
         }
     }
     let resp = execute_sdo_write(
         &mut BigObjectBus,
         &SdoWrite {
+            slot: 0,
             index: 0x1008,
             subindex: 0,
             size: SDO_SIZE_PROBE,
@@ -211,6 +227,7 @@ fn typed_write_to_unknown_object_surfaces_abort_code() {
     let resp = execute_sdo_write(
         &mut bus,
         &SdoWrite {
+            slot: 0,
             index: 0x7777,
             subindex: 0,
             size: 2,
@@ -226,16 +243,23 @@ fn typed_write_to_unknown_object_surfaces_abort_code() {
 fn verify_read_failure_surfaces_its_code() {
     struct WriteOkReadFailBus;
     impl SdoBus for WriteOkReadFailBus {
-        fn read(&mut self, _index: u16, _subindex: u8) -> Result<(u8, [u8; 4]), i32> {
+        fn read(&mut self, _slot: u8, _index: u16, _subindex: u8) -> Result<(u8, [u8; 4]), i32> {
             Err(-999)
         }
-        fn write(&mut self, _index: u16, _subindex: u8, _bytes: &[u8]) -> Result<(), i32> {
+        fn write(
+            &mut self,
+            _slot: u8,
+            _index: u16,
+            _subindex: u8,
+            _bytes: &[u8],
+        ) -> Result<(), i32> {
             Ok(())
         }
     }
     let resp = execute_sdo_write(
         &mut WriteOkReadFailBus,
         &SdoWrite {
+            slot: 0,
             index: 0x2002,
             subindex: 0,
             size: 2,

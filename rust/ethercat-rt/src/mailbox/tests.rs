@@ -36,14 +36,14 @@ struct SlowBus<B> {
 }
 
 impl<B: SdoBus> SdoBus for SlowBus<B> {
-    fn read(&mut self, index: u16, subindex: u8) -> Result<(u8, [u8; 4]), i32> {
+    fn read(&mut self, slot: u8, index: u16, subindex: u8) -> Result<(u8, [u8; 4]), i32> {
         std::thread::sleep(self.delay);
-        self.inner.read(index, subindex)
+        self.inner.read(slot, index, subindex)
     }
 
-    fn write(&mut self, index: u16, subindex: u8, bytes: &[u8]) -> Result<(), i32> {
+    fn write(&mut self, slot: u8, index: u16, subindex: u8, bytes: &[u8]) -> Result<(), i32> {
         std::thread::sleep(self.delay);
-        self.inner.write(index, subindex, bytes)
+        self.inner.write(slot, index, subindex, bytes)
     }
 }
 
@@ -65,13 +65,14 @@ fn submit_never_blocks_while_transaction_is_slow() {
             inner: dict(),
             delay: Duration::from_millis(50),
         },
-        |_, _| 0,
+        |_, _, _| 0,
         WorkerScheduling::Normal,
     );
     let start = Instant::now();
     worker.submit(MailboxRequest::SdoWrite {
         correlation_id: 1,
         msg: SdoWrite {
+            slot: 0,
             index: 0x2001,
             subindex: 0x02,
             size: 2,
@@ -81,6 +82,7 @@ fn submit_never_blocks_while_transaction_is_slow() {
     worker.submit(MailboxRequest::SdoRead {
         correlation_id: 2,
         msg: SdoRead {
+            slot: 0,
             index: 0x2001,
             subindex: 0x02,
         },
@@ -123,11 +125,12 @@ fn submit_never_blocks_while_transaction_is_slow() {
 
 #[test]
 fn replies_preserve_submission_order() {
-    let worker = MailboxWorker::spawn(dict(), |_, _| 0, WorkerScheduling::Normal);
+    let worker = MailboxWorker::spawn(dict(), |_, _, _| 0, WorkerScheduling::Normal);
     for cid in 0..16u32 {
         worker.submit(MailboxRequest::SdoRead {
             correlation_id: cid,
             msg: SdoRead {
+                slot: 0,
                 index: 0x2001,
                 subindex: 0x02,
             },
@@ -149,7 +152,7 @@ fn write_limits_routes_through_callback_with_restore_flag() {
     let seen = calls.clone();
     let worker = MailboxWorker::spawn(
         dict(),
-        move |ferr, tq| {
+        move |_slot, ferr, tq| {
             seen.store(ferr * 10 + u32::from(tq), Ordering::SeqCst);
             7
         },
@@ -157,6 +160,7 @@ fn write_limits_routes_through_callback_with_restore_flag() {
     );
     worker.submit(MailboxRequest::WriteLimits {
         correlation_id: 9,
+        slot: 0,
         ferr_counts: 4,
         torque_tenth_pct: 2,
         restore: true,
@@ -186,12 +190,13 @@ fn drop_joins_the_worker_cleanly() {
             inner: dict(),
             delay: Duration::from_millis(20),
         },
-        |_, _| 0,
+        |_, _, _| 0,
         WorkerScheduling::Normal,
     );
     worker.submit(MailboxRequest::SdoRead {
         correlation_id: 1,
         msg: SdoRead {
+            slot: 0,
             index: 0x2001,
             subindex: 0x02,
         },

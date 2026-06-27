@@ -26,7 +26,7 @@ use ethercat_rt::sdo::SdoBus;
 use ethercat_rt::seed_home::{
     ERR_SEED_HOME_BUSY, ERR_SEED_HOME_NOT_ENABLED, ERR_SEED_HOME_RESTORE, ERR_SEED_HOME_STREAMING,
 };
-use ethercat_rt::sensorless::{SensorlessArm, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
+use ethercat_rt::sensorless::{SensorlessBank, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
 use ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
@@ -41,7 +41,8 @@ use ethercat_rt::wire::{
     status_heartbeat_frame, stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
-    SlaveState, StopCaptureResponse, ERR_SDO_TRANSPORT, ERR_SDO_UNSUPPORTED_SIZE,
+    SdoReadResponse, SdoWriteResponse, SlaveState, StopCaptureResponse, ERR_SDO_TRANSPORT,
+    ERR_SDO_UNSUPPORTED_SIZE,
 };
 
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
@@ -75,12 +76,19 @@ fn ffi_sdo_error(abort: u32) -> i32 {
 }
 
 impl SdoBus for FfiSdoBus {
-    fn read(&mut self, index: u16, subindex: u8) -> Result<(u8, [u8; 4]), i32> {
+    fn read(&mut self, slot: u8, index: u16, subindex: u8) -> Result<(u8, [u8; 4]), i32> {
         let mut buf = [0u8; 8];
         let mut size: std::os::raw::c_int = buf.len() as std::os::raw::c_int;
         let mut abort: u32 = 0;
         let rc = unsafe {
-            ffi::ec_rt_sdo_read(0, index, subindex, buf.as_mut_ptr(), &mut size, &mut abort)
+            ffi::ec_rt_sdo_read(
+                i32::from(slot),
+                index,
+                subindex,
+                buf.as_mut_ptr(),
+                &mut size,
+                &mut abort,
+            )
         };
         if rc != 0 {
             return Err(ffi_sdo_error(abort));
@@ -93,11 +101,11 @@ impl SdoBus for FfiSdoBus {
         Ok((size as u8, data))
     }
 
-    fn write(&mut self, index: u16, subindex: u8, bytes: &[u8]) -> Result<(), i32> {
+    fn write(&mut self, slot: u8, index: u16, subindex: u8, bytes: &[u8]) -> Result<(), i32> {
         let mut abort: u32 = 0;
         let rc = unsafe {
             ffi::ec_rt_sdo_write(
-                0,
+                i32::from(slot),
                 index,
                 subindex,
                 bytes.as_ptr(),
@@ -127,26 +135,16 @@ fn main() {
     let counts_per_mm: Vec<f64> = slaves.iter().map(|s| s.counts_per_mm).collect();
     let rotation_distance: Vec<f64> = slaves.iter().map(|s| s.rotation_distance).collect();
     let slave_positions: Vec<i32> = slaves.iter().map(|s| s.pos).collect();
+    let slave_axes: Vec<u8> = slaves.iter().map(|s| s.axis).collect();
+    let velocity_ff: Vec<bool> = slaves.iter().map(|s| s.velocity_ff).collect();
+    let torque_clamp_tenths: Vec<i16> = slaves.iter().map(|s| s.torque_clamp_tenths).collect();
     let rt_cpu: i32 = arg_val(&args, "--rt-cpu")
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
     let rt_prio: i32 = arg_val(&args, "--rt-prio")
         .and_then(|s| s.parse().ok())
         .unwrap_or(80);
-    let mailbox_cpu: usize = arg_val(&args, "--mailbox-cpu")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2);
-    let velocity_ff = args.iter().any(|a| a == "--velocity-ff");
-    let torque_clamp_tenths: i16 = arg_val(&args, "--torque-clamp-pct")
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|pct| {
-            if !(pct > 0.0 && pct <= 400.0) {
-                eprintln!("ec-rt: --torque-clamp-pct {pct} outside (0, 400]");
-                std::process::exit(1);
-            }
-            (pct * 10.0) as i16
-        })
-        .unwrap_or(300);
+    let mailbox_cpu: Option<usize> = arg_val(&args, "--mailbox-cpu").and_then(|s| s.parse().ok());
     let dynamics = arg_val(&args, "--dynamics-profile").map(|path| {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             eprintln!("ec-rt: dynamics profile {path}: {e}");
@@ -175,6 +173,7 @@ fn main() {
     let mut cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
     let mut framed = false;
     let mut seed_home_inflight: Option<u32> = None;
+    let mut seed_home_slot: u8 = 0;
     let mut seed_home_homing_rc: i32 = 0;
     let mut last_sent_retired: u32 = 0;
     let mut heartbeat_sent = false;
@@ -183,8 +182,8 @@ fn main() {
     eprintln!(
         "ec-rt: socket {socket}, cycle {cycle_us}us, {num_slaves} slave(s) \
          positions={slave_positions:?} counts/mm={counts_per_mm:?} \
-         rotation_distance={rotation_distance:?} velocity_ff={velocity_ff} \
-         dynamics={} clamp={torque_clamp_tenths}",
+         rotation_distance={rotation_distance:?} velocity_ff={velocity_ff:?} \
+         dynamics={} clamp={torque_clamp_tenths:?}",
         dynamics.is_some()
     );
 
@@ -302,12 +301,15 @@ fn main() {
     let mut cycle_index: u64 = 0;
     let mailbox = MailboxWorker::spawn(
         FfiSdoBus,
-        |ferr_counts, torque_tenth_pct| unsafe {
-            ffi::ec_rt_write_limits(0, ferr_counts, torque_tenth_pct)
+        |slot, ferr_counts, torque_tenth_pct| unsafe {
+            ffi::ec_rt_write_limits(i32::from(slot), ferr_counts, torque_tenth_pct)
         },
-        WorkerScheduling::RealtimeCompanion {
-            cpu: mailbox_cpu,
-            priority: MAILBOX_RT_PRIO,
+        match mailbox_cpu {
+            Some(cpu) => WorkerScheduling::RealtimeCompanion {
+                cpu,
+                priority: MAILBOX_RT_PRIO,
+            },
+            None => WorkerScheduling::Normal,
         },
     );
     let mut pending_starts: Vec<(u32, String, PendingStart)> = Vec::new();
@@ -316,7 +318,7 @@ fn main() {
     let mut ff_saturation = 0u32;
     let mut wkc_consecutive = 0u8;
     let mut latched_drive_err: u16 = 0;
-    let mut sensorless_arm: Option<SensorlessArm> = None;
+    let mut sensorless = SensorlessBank::new(num_slaves);
     'dc: loop {
         if SIGTERM_RECEIVED.load(Ordering::Acquire) {
             eprintln!("ec-rt: SIGTERM received — disabling drive and exiting");
@@ -362,25 +364,20 @@ fn main() {
                                     0
                                 };
                             diags.push((axis.axis_idx, front_start_time));
-                            // Single-drive: route to the one ring regardless of the
-                            // host's (global) axis_idx, matching pre-multi behaviour
-                            // where an EtherCAT node could serve any one axis (X/Y/Z).
-                            // Multi-drive uses axis_idx as the 0-based slot (the
-                            // test-client convention until the host claim maps it).
                             let slot = if rings.len() == 1 {
-                                0
+                                Some(0)
                             } else {
-                                axis.axis_idx as usize
+                                slave_axes.iter().position(|&a| a == axis.axis_idx)
                             };
-                            if slot >= rings.len() {
+                            let Some(slot) = slot.filter(|&s| s < rings.len()) else {
                                 eprintln!(
-                                    "ec-rt: PushPieces for axis {} but only {} slave(s) configured",
+                                    "ec-rt: PushPieces for axis {} not mapped to any of {} slave(s)",
                                     axis.axis_idx,
                                     rings.len()
                                 );
                                 result = -309;
                                 continue;
-                            }
+                            };
                             let pushed =
                                 rings[slot].push_from_bytes(axis.piece_count, &axis.pieces_bytes);
                             if pushed != axis.piece_count {
@@ -502,26 +499,55 @@ fn main() {
                     correlation_id,
                     msg,
                 } => {
-                    mailbox.submit(MailboxRequest::WriteLimits {
-                        correlation_id,
-                        ferr_counts: msg.following_error_counts,
-                        torque_tenth_pct: msg.max_torque_tenth_pct,
-                        restore: false,
-                    });
+                    if msg.slot as usize >= num_slaves {
+                        eprintln!(
+                            "ec-rt: SetDriveLimits for slot {} but only {num_slaves} slave(s)",
+                            msg.slot
+                        );
+                        server.respond(&set_drive_limits_response_frame(correlation_id, -309));
+                    } else {
+                        mailbox.submit(MailboxRequest::WriteLimits {
+                            correlation_id,
+                            slot: msg.slot,
+                            ferr_counts: msg.following_error_counts,
+                            torque_tenth_pct: msg.max_torque_tenth_pct,
+                            restore: false,
+                        });
+                    }
                 }
-                Command::RestoreDriveLimits { correlation_id } => {
-                    mailbox.submit(MailboxRequest::WriteLimits {
-                        correlation_id,
-                        ferr_counts: run_limits[0].0,
-                        torque_tenth_pct: run_limits[0].1,
-                        restore: true,
-                    });
-                }
+                Command::RestoreDriveLimits {
+                    correlation_id,
+                    slot,
+                } => match run_limits.get(slot as usize) {
+                    Some(&(ferr_counts, torque_tenth_pct)) => {
+                        mailbox.submit(MailboxRequest::WriteLimits {
+                            correlation_id,
+                            slot,
+                            ferr_counts,
+                            torque_tenth_pct,
+                            restore: true,
+                        });
+                    }
+                    None => {
+                        eprintln!(
+                            "ec-rt: RestoreDriveLimits for slot {slot} but only {} slave(s)",
+                            run_limits.len()
+                        );
+                        server.respond(&restore_drive_limits_response_frame(correlation_id, -309));
+                    }
+                },
                 Command::SeedServoHome {
                     correlation_id,
+                    slot,
                     home_q16,
                 } => {
-                    if seed_home_inflight.is_some() {
+                    if slot as usize >= counts_per_mm.len() {
+                        eprintln!(
+                            "ec-rt: SeedServoHome for slot {slot} but only {} slave(s)",
+                            counts_per_mm.len()
+                        );
+                        server.respond(&seed_servo_home_response_frame(correlation_id, -309));
+                    } else if seed_home_inflight.is_some() {
                         eprintln!("ec-rt: SeedServoHome rejected — handshake already in flight");
                         server.respond(&seed_servo_home_response_frame(
                             correlation_id,
@@ -544,15 +570,18 @@ fn main() {
                             ERR_SEED_HOME_STREAMING,
                         ));
                     } else {
-                        let offset_counts =
-                            ((f64::from(home_q16) / 65536.0) * counts_per_mm[0]).round() as i32;
+                        let offset_counts = ((f64::from(home_q16) / 65536.0)
+                            * counts_per_mm[slot as usize])
+                            .round() as i32;
                         eprintln!(
-                            "ec-rt: SeedServoHome home_q16={home_q16} -> 607Ch={offset_counts} \
-                             counts; staging method-35 mode switch"
+                            "ec-rt: SeedServoHome slot={slot} home_q16={home_q16} \
+                             -> 607Ch={offset_counts} counts; staging method-35 mode switch"
                         );
                         seed_home_inflight = Some(correlation_id);
+                        seed_home_slot = slot;
                         mailbox.submit(MailboxRequest::SeedHomeSetup {
                             correlation_id,
+                            slot,
                             offset_counts,
                         });
                     }
@@ -561,26 +590,36 @@ fn main() {
                     correlation_id,
                     msg,
                 } => {
-                    let result = if msg.enable != 0 {
+                    let result = if msg.slot as usize >= num_slaves {
+                        eprintln!(
+                            "ec-rt: ArmSensorlessEndstop for slot {} but only {num_slaves} slave(s)",
+                            msg.slot
+                        );
+                        -309
+                    } else if msg.enable != 0 {
                         if msg.torque_trip_tenth_pct == 0 {
                             eprintln!(
                                 "ec-rt: ArmSensorlessEndstop rejected — zero torque trip threshold"
                             );
                             ERR_ARM_SENSORLESS_BAD_THRESHOLD
                         } else {
-                            sensorless_arm = Some(SensorlessArm::new(
+                            sensorless.arm(
+                                msg.slot as usize,
                                 msg.endstop_id,
                                 msg.torque_trip_tenth_pct,
-                            ));
+                            );
                             eprintln!(
-                                "ec-rt: sensorless endstop {} armed (torque_trip={} 0.1%)",
-                                msg.endstop_id, msg.torque_trip_tenth_pct
+                                "ec-rt: sensorless endstop {} armed on slot {} (torque_trip={} 0.1%)",
+                                msg.endstop_id, msg.slot, msg.torque_trip_tenth_pct
                             );
                             0
                         }
                     } else {
-                        sensorless_arm = None;
-                        eprintln!("ec-rt: sensorless endstop {} disarmed", msg.endstop_id);
+                        sensorless.disarm(msg.slot as usize);
+                        eprintln!(
+                            "ec-rt: sensorless endstop {} disarmed on slot {}",
+                            msg.endstop_id, msg.slot
+                        );
                         0
                     };
                     server.respond(&arm_sensorless_endstop_response_frame(
@@ -638,19 +677,49 @@ fn main() {
                     correlation_id,
                     msg,
                 } => {
-                    mailbox.submit(MailboxRequest::SdoRead {
-                        correlation_id,
-                        msg,
-                    });
+                    if msg.slot as usize >= num_slaves {
+                        eprintln!(
+                            "ec-rt: SdoRead for slot {} but only {num_slaves} slave(s)",
+                            msg.slot
+                        );
+                        server.respond(&sdo_read_response_frame(
+                            correlation_id,
+                            &SdoReadResponse {
+                                result: -309,
+                                size: 0,
+                                data: [0; 4],
+                            },
+                        ));
+                    } else {
+                        mailbox.submit(MailboxRequest::SdoRead {
+                            correlation_id,
+                            msg,
+                        });
+                    }
                 }
                 Command::SdoWrite {
                     correlation_id,
                     msg,
                 } => {
-                    mailbox.submit(MailboxRequest::SdoWrite {
-                        correlation_id,
-                        msg,
-                    });
+                    if msg.slot as usize >= num_slaves {
+                        eprintln!(
+                            "ec-rt: SdoWrite for slot {} but only {num_slaves} slave(s)",
+                            msg.slot
+                        );
+                        server.respond(&sdo_write_response_frame(
+                            correlation_id,
+                            &SdoWriteResponse {
+                                result: -309,
+                                readback_size: 0,
+                                readback_data: [0; 4],
+                            },
+                        ));
+                    } else {
+                        mailbox.submit(MailboxRequest::SdoWrite {
+                            correlation_id,
+                            msg,
+                        });
+                    }
                 }
                 Command::QueryMotorState { correlation_id } => {
                     if framed {
@@ -785,7 +854,7 @@ fn main() {
                         );
                         rc
                     } else {
-                        let hrc = unsafe { ffi::ec_rt_run_homing(0) };
+                        let hrc = unsafe { ffi::ec_rt_run_homing(i32::from(seed_home_slot)) };
                         if hrc != 0 {
                             eprintln!(
                                 "ec-rt: SeedServoHome controlword phase failed rc={hrc}; \
@@ -799,7 +868,10 @@ fn main() {
                         }
                         hrc
                     };
-                    mailbox.submit(MailboxRequest::SeedHomeRestore { correlation_id });
+                    mailbox.submit(MailboxRequest::SeedHomeRestore {
+                        correlation_id,
+                        slot: seed_home_slot,
+                    });
                 }
                 MailboxReply::SeedHomeRestore { correlation_id, rc } => {
                     seed_home_inflight = None;
@@ -857,23 +929,22 @@ fn main() {
             }
         }
 
-        if sensorless_arm.is_some() {
-            let torque_actual = unsafe { ffi::ec_rt_get_torque_actual(0) };
-            if let Some(endstop_id) = sensorless_arm
-                .as_mut()
-                .and_then(|arm| arm.poll(torque_actual))
-            {
-                for r in &mut rings {
-                    r.reset();
-                }
-                for c in &mut cmaps {
-                    *c = None;
-                }
+        let sensorless_tripped = sensorless.poll(
+            |slot| unsafe { ffi::ec_rt_get_torque_actual(slot as i32) },
+            |slot, endstop_id, torque| {
                 eprintln!(
-                    "ec-rt: sensorless endstop {endstop_id} tripped torque={torque_actual} \
-                     — local stop, trip_clock={now}"
+                    "ec-rt: sensorless endstop {endstop_id} tripped on slot {slot} \
+                     torque={torque} — local stop, trip_clock={now}"
                 );
                 server.respond(&endstop_trip_frame(endstop_id, now));
+            },
+        );
+        if sensorless_tripped {
+            for r in &mut rings {
+                r.reset();
+            }
+            for c in &mut cmaps {
+                *c = None;
             }
         }
 
@@ -925,7 +996,7 @@ fn main() {
             for s in 0..num_slaves {
                 let slot = s as std::os::raw::c_int;
                 if let Some(counts) = sp_counts[s] {
-                    let vel_offset = if velocity_ff {
+                    let vel_offset = if velocity_ff[s] {
                         (f64::from(all_vel[s]) * counts_per_mm[s]).round() as i32
                     } else {
                         0
@@ -955,7 +1026,7 @@ fn main() {
                                 }
                                 std::process::exit(1);
                             }
-                            clamp_torque(raw, torque_clamp_tenths, &mut ff_saturation)
+                            clamp_torque(raw, torque_clamp_tenths[s], &mut ff_saturation)
                         }
                         None => 0,
                     };

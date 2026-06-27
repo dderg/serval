@@ -25,16 +25,16 @@ def _homing_motor_names(rail):
 
 
 @contextlib.contextmanager
-def _servo_drive_limits(engine, handle, limits):
+def _servo_drive_limits(engine, handle, slot, limits):
     if handle is None or limits is None:
         yield
         return
-    engine.set_drive_limits(handle, limits[0], limits[1])
+    engine.set_drive_limits(handle, slot, limits[0], limits[1])
     try:
         yield
     except BaseException:
         try:
-            engine.restore_drive_limits(handle)
+            engine.restore_drive_limits(handle, slot)
         except Exception:
             logging.warning(
                 "homing: restore_drive_limits failed while handling a"
@@ -42,14 +42,24 @@ def _servo_drive_limits(engine, handle, limits):
                 exc_info=True,
             )
         raise
-    engine.restore_drive_limits(handle)
+    engine.restore_drive_limits(handle, slot)
 
 
 def _run_servo_guarded_trip(
-    gcmd, engine, axis, stepper_enable, rail, servo_handle, servo_limits, trip
+    gcmd,
+    engine,
+    axis,
+    stepper_enable,
+    rail,
+    servo_handle,
+    servo_slot,
+    servo_limits,
+    trip,
 ):
     try:
-        with _servo_drive_limits(engine, servo_handle, servo_limits):
+        with _servo_drive_limits(
+            engine, servo_handle, servo_slot, servo_limits
+        ):
             result = trip()
         _check_servo_drive_fault(gcmd, engine, axis, servo_handle)
     except BaseException:
@@ -354,6 +364,7 @@ class Homing:
         stepper_enable,
         rail,
         servo_handle,
+        servo_slot,
         servo_limits,
     ):
         return _run_servo_guarded_trip(
@@ -363,6 +374,7 @@ class Homing:
             stepper_enable,
             rail,
             servo_handle,
+            servo_slot,
             servo_limits,
             lambda: self.trip_move(
                 gcmd,
@@ -412,12 +424,14 @@ class Homing:
         stepper_enable.motor_enable_group(homing_names)
 
         servo_handle = None
+        servo_slot = None
         servo_limits = None
         if hasattr(rail, "get_node_name"):
             node = self.printer.lookup_object(
                 "ethercat_node " + rail.get_node_name()
             )
             servo_handle = node.get_engine_handle()
+            servo_slot = node.get_slot_for_motor(rail.get_motor_name())
             servo_limits = rail.get_homing_drive_limits()
 
         self._set_homing_current(toolhead, rail, pre_homing=True)
@@ -438,6 +452,7 @@ class Homing:
                     stepper_enable,
                     rail,
                     servo_handle,
+                    servo_slot,
                     servo_limits,
                 )
 

@@ -53,7 +53,12 @@ fn spawn_and_claim(tag: &str) -> (ChildGuard, McuSerialConn) {
 }
 
 fn sdo_read(conn: &McuSerialConn, index: u16, subindex: u8) -> SdoReadResponse {
-    let body = SdoRead { index, subindex }.encoded_to_vec();
+    let body = SdoRead {
+        slot: 0,
+        index,
+        subindex,
+    }
+    .encoded_to_vec();
     let (kind, resp) = conn
         .mcu_call(MessageKind::SdoRead, body, Duration::from_secs(5))
         .expect("SdoRead call must succeed");
@@ -69,6 +74,7 @@ fn sdo_write(
     value: i64,
 ) -> SdoWriteResponse {
     let body = SdoWrite {
+        slot: 0,
         index,
         subindex,
         size,
