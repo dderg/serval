@@ -42,6 +42,12 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 #panel-jrk{grid-column:3;grid-row:3}
 .panel{position:relative;background:#1a1c22;overflow:hidden}
 .panel canvas{display:block;width:100%;height:100%}
+.cursor{position:absolute;inset:0;pointer-events:none;z-index:1;display:none}
+.cursor.on{display:block}
+.cursor i{position:absolute;top:0;left:0;will-change:transform}
+.cursor .cv{width:1px;background:repeating-linear-gradient(to bottom,rgba(255,255,255,0.35) 0 4px,transparent 4px 7px)}
+.cursor .ch{height:1px;display:none;background:repeating-linear-gradient(to right,rgba(255,255,255,0.35) 0 3px,transparent 3px 6px)}
+.cursor .cdot{width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:#e0518a;border:2px solid #14161a;box-sizing:border-box;display:none}
 .panel-label{position:absolute;top:4px;left:8px;font-size:11px;color:#888;pointer-events:none;z-index:2}
 .tooltip{position:fixed;pointer-events:none;background:rgba(20,22,26,0.92);border:1px solid #3a3d45;border-radius:4px;padding:6px 10px;font-size:12px;font-family:'Courier Prime',monospace;color:#e0e0e0;z-index:100;white-space:pre-line;display:none}
 </style>
@@ -67,19 +73,23 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
     <div class="panel" id="panel-path">
       <span class="panel-label">Path</span>
       <canvas id="canvas-path"></canvas>
+      <div class="cursor" id="cursor-path"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
     </div>
     <div class="splitter" id="splitter" title="Drag to resize"></div>
     <div class="panel" id="panel-vel">
       <span class="panel-label">Velocity</span>
       <canvas id="canvas-vel"></canvas>
+      <div class="cursor" id="cursor-vel"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
     </div>
     <div class="panel" id="panel-acc">
       <span class="panel-label">Acceleration</span>
       <canvas id="canvas-acc"></canvas>
+      <div class="cursor" id="cursor-acc"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
     </div>
     <div class="panel" id="panel-jrk">
       <span class="panel-label">Jerk</span>
       <canvas id="canvas-jrk"></canvas>
+      <div class="cursor" id="cursor-jrk"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
     </div>
   </div>
 </div>
