@@ -1,5 +1,6 @@
 pub(crate) const CONTIGUITY_EPS: f64 = 1e-6;
 pub const DEFAULT_LEAD_SECS: f64 = 0.25;
+pub const PHANTOM_GROUND_WARN_SECS: f64 = 1.0;
 
 pub struct Anchor {
     t0: Option<f64>,
@@ -64,6 +65,16 @@ impl Anchor {
         }
         self.last_t_end = seg_t_end;
         (self.t0.unwrap(), reanchor)
+    }
+
+    /// Re-anchor the timeline so the committed frontier `frontier_u` maps to the
+    /// current playhead. Called once the stream has drained and the playhead has
+    /// caught up, collapsing the queued-motion lead (`t0 + frontier_u - host_now`)
+    /// to zero so a non-streaming frontier advance (nudge, homing) cannot leave a
+    /// phantom backlog behind.
+    pub fn reground(&mut self, host_now: f64, frontier_u: f64) {
+        self.t0 = Some(host_now - frontier_u);
+        self.last_t_end = frontier_u;
     }
 
     pub fn t0(&self) -> Option<f64> {

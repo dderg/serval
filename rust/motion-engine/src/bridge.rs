@@ -3661,7 +3661,39 @@ impl PyMotionEngine {
         Ok(self.drain.is_drained_now())
     }
 
-    fn motion_drain_finalize(&self) {}
+    fn motion_drain_finalize(&self) {
+        let Some(last_move_time) = ({
+            let planner = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            planner.as_ref().map(|p| p.last_move_time())
+        }) else {
+            return;
+        };
+        let host_now = self
+            .router
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .host_now_secs();
+        let mut anchor = self
+            .dispatch_anchor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let Some(t0) = anchor.t0() else {
+            return;
+        };
+        let phantom_lead = t0 + last_move_time - host_now;
+        if phantom_lead > crate::anchor::PHANTOM_GROUND_WARN_SECS {
+            tracing::warn!(
+                subsystem = "motion",
+                event = "anchor_phantom_grounded",
+                gap_s = phantom_lead,
+                last_move_time,
+                host_now,
+                "[anchor-phantom] drain left a stale queued-motion lead; \
+                 re-grounding the frontier to the playhead"
+            );
+        }
+        anchor.reground(host_now, last_move_time);
+    }
 
     fn submit_dwell(&self, duration_s: f64) -> PyResult<()> {
         let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());

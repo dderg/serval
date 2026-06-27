@@ -131,3 +131,39 @@ fn grounding_cancels_the_stream_time_baseline() {
     );
     assert!((near_zero - (DEFAULT_LEAD_SECS + 2.0)).abs() < 1e-9);
 }
+
+#[test]
+fn reground_collapses_post_nudge_phantom_lead() {
+    let mut a = Anchor::new();
+    // Deep into a print: t0 grounds a ~500 s stream baseline onto the host clock.
+    let _ = a.anchor_segment(500.0, 501.0, 100.0);
+
+    // A nudge advances the committed frontier ~26 s while the playhead barely
+    // moves: the grounded queued-motion signal now reports a phantom backlog.
+    let host_now = 101.0;
+    let frontier = 527.0;
+    let phantom = grounded_queued_secs(a.t0().unwrap(), frontier, host_now);
+    assert!(phantom > 25.0, "expected a phantom lead, got {phantom}");
+
+    // Draining re-grounds the frontier onto the playhead; the lead collapses.
+    a.reground(host_now, frontier);
+    let after = grounded_queued_secs(a.t0().unwrap(), frontier, host_now);
+    assert!(after.abs() < 1e-9, "reground left {after}");
+}
+
+#[test]
+fn reground_at_true_quiescence_is_idempotent() {
+    let mut a = Anchor::new();
+    let _ = a.anchor_segment(0.0, 5.0, 100.0);
+    let host_now = 110.0;
+    let frontier = 5.0;
+
+    a.reground(host_now, frontier);
+    let grounded = a.t0().unwrap();
+    assert!(grounded_queued_secs(grounded, frontier, host_now).abs() < 1e-9);
+
+    // Re-grounding at the same playhead and frontier changes nothing.
+    a.reground(host_now, frontier);
+    assert_eq!(grounded, a.t0().unwrap());
+    assert!(grounded_queued_secs(a.t0().unwrap(), frontier, host_now).abs() < 1e-9);
+}
