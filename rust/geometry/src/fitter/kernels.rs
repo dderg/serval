@@ -12,6 +12,7 @@ use super::{BUDGET_EPS_MM, CornerFitConfig, FitError, internal, line_of};
 const COPLANAR_TOL: f64 = 1e-6;
 const ANGLE_EPS_RAD: f64 = 1e-9;
 const EASE_LEAD_MAX_RAD: f64 = FRAC_PI_6;
+const SHIFT_BUDGET_FRACTION: f64 = 0.5;
 pub(super) const EPMM_MIN: f64 = 1e-9;
 const EPMM_REL_TOL: f64 = 0.25;
 
@@ -144,11 +145,22 @@ fn joint_refit(
 
     let head_plan = head.and_then(|n| {
         let turn = signed_angle(n.dir, t_start, pn);
-        end_plan(n, turn, sgn, n.dir, sgn, run_epmm, pn, o0)
+        end_plan(n, turn, sgn, n.dir, sgn, run_epmm, pn, o0, r0, tol)
     });
     let tail_plan = tail.and_then(|n| {
         let turn = signed_angle(t_end, n.dir, pn);
-        end_plan(n, turn, sgn, scale(n.dir, -1.0), -sgn, run_epmm, pn, o0)
+        end_plan(
+            n,
+            turn,
+            sgn,
+            scale(n.dir, -1.0),
+            -sgn,
+            run_epmm,
+            pn,
+            o0,
+            r0,
+            tol,
+        )
     });
     if head_plan.is_none() && tail_plan.is_none() {
         return Ok(None);
@@ -235,6 +247,12 @@ fn joint_refit(
     }))
 }
 
+fn tangent_ramp_angle(radius: f64, delta: f64, neighbor_len: f64) -> f64 {
+    let by_shift = (6.0 * SHIFT_BUDGET_FRACTION * delta / radius).sqrt();
+    let by_neighbor = 0.45 * neighbor_len / radius;
+    by_shift.min(by_neighbor).min(EASE_LEAD_MAX_RAD)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn end_plan(
     n: &Neighbor,
@@ -245,14 +263,21 @@ fn end_plan(
     run_epmm: f64,
     pn: [f64; 3],
     o0: [f64; 3],
+    radius: f64,
+    delta: f64,
 ) -> Option<EndPlan> {
     if run_epmm > EPMM_MIN && (n.epmm - run_epmm).abs() > EPMM_REL_TOL * run_epmm {
         return None;
     }
-    if turn.signum() != sweep_sign {
-        return None;
-    }
-    let phi = turn.abs();
+    let phi_budget = tangent_ramp_angle(radius, delta, n.length);
+    let phi = if turn.abs() >= phi_budget {
+        if turn.signum() != sweep_sign {
+            return None;
+        }
+        turn.abs()
+    } else {
+        phi_budget
+    };
     if !(ANGLE_EPS_RAD..EASE_LEAD_MAX_RAD).contains(&phi) {
         return None;
     }
@@ -271,6 +296,40 @@ fn end_plan(
     })
 }
 
+struct ProbeGeometry {
+    sigma: f64,
+    length: f64,
+    v: [f64; 3],
+    end: [f64; 3],
+    center: [f64; 3],
+}
+
+fn probe_geometry(
+    radius: f64,
+    line_dir: [f64; 3],
+    curve_sgn: f64,
+    phi: f64,
+    pn: [f64; 3],
+) -> Option<ProbeGeometry> {
+    let length = 2.0 * radius * phi;
+    if !(length.is_finite() && length > BUDGET_EPS_MM) {
+        return None;
+    }
+    let sigma = curve_sgn / (radius * length);
+    let v = normalize(cross(pn, line_dir));
+    let probe = Clothoid::try_new([0.0; 3], line_dir, v, 0.0, sigma, length).ok()?;
+    let end = probe.point_at(length);
+    let t_end = probe.heading_at(length);
+    let center = madd(end, 1.0 / (sigma * length), cross(pn, t_end));
+    Some(ProbeGeometry {
+        sigma,
+        length,
+        v,
+        end,
+        center,
+    })
+}
+
 fn spiral_center_dist(
     radius: f64,
     line_dir: [f64; 3],
@@ -278,17 +337,9 @@ fn spiral_center_dist(
     phi: f64,
     pn: [f64; 3],
 ) -> Option<f64> {
-    let length = 2.0 * radius * phi;
-    if !(length.is_finite() && length > BUDGET_EPS_MM) {
-        return None;
-    }
-    let sigma = curve_sgn / (radius * length);
-    let v = scale(normalize(cross(pn, line_dir)), curve_sgn);
-    let probe = Clothoid::try_new([0.0; 3], line_dir, v, 0.0, sigma, length).ok()?;
-    let end = probe.point_at(length);
-    let t_end = probe.heading_at(length);
-    let center = add(end, scale(cross(pn, t_end), radius * curve_sgn));
-    Some(dot(center, v))
+    let g = probe_geometry(radius, line_dir, curve_sgn, phi, pn)?;
+    let normal = scale(g.v, curve_sgn);
+    Some(dot(g.center, normal))
 }
 
 fn build_spiral(
@@ -297,19 +348,13 @@ fn build_spiral(
     p: &EndPlan,
     pn: [f64; 3],
 ) -> Result<Option<(Clothoid, [f64; 3], f64)>, GeometryError> {
-    let length = 2.0 * radius * p.turn;
-    if !(length.is_finite() && length > BUDGET_EPS_MM) {
+    let Some(g) = probe_geometry(radius, p.spiral_dir, p.curve_sgn, p.turn, pn) else {
         return Ok(None);
-    }
-    let sigma = p.curve_sgn / (radius * length);
-    let v = scale(normalize(cross(pn, p.spiral_dir)), p.curve_sgn);
-    let probe = Clothoid::try_new([0.0; 3], p.spiral_dir, v, 0.0, sigma, length)?;
-    let end_off = probe.point_at(length);
-    let t_end = probe.heading_at(length);
-    let b = sub(origin, scale(cross(pn, t_end), radius * p.curve_sgn));
-    let a = sub(b, end_off);
+    };
+    let a = sub(origin, g.center);
+    let b = add(a, g.end);
     let line_trim = dot(sub(p.vertex, a), p.spiral_dir);
-    let clo = Clothoid::try_new(a, p.spiral_dir, v, 0.0, sigma, length)?;
+    let clo = Clothoid::try_new(a, p.spiral_dir, g.v, 0.0, g.sigma, g.length)?;
     Ok(Some((clo, b, line_trim)))
 }
 
