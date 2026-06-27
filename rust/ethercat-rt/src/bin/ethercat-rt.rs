@@ -69,6 +69,28 @@ fn arg_val(args: &[String], key: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
+/// Emit each slave's EtherCAT AL state so a failed bringup shows which slave is
+/// stuck and where (al_state: 0x01=Init 0x02=PreOp 0x04=SafeOp 0x08=Op,
+/// +0x10=error bit; al_code carries the reason, e.g. 0x001b SM watchdog,
+/// 0x001a/0x002c/0x0030 DC sync). Routed through the structured pipeline so a
+/// flaky multi-restart connect is diagnosable instead of inferred.
+fn log_al_states(num_slaves: usize, stage: &str) {
+    for s in 0..num_slaves {
+        let mut al_state = 0u16;
+        let mut al_code = 0u16;
+        unsafe { ffi::ec_rt_al_status(s as std::os::raw::c_int, &mut al_state, &mut al_code) };
+        tracing::warn!(
+            subsystem = "ethercat",
+            event = "al_state",
+            stage,
+            slot = s,
+            al_state,
+            al_code,
+            "slave AL state at bringup stage"
+        );
+    }
+}
+
 struct FfiSdoBus;
 
 fn ffi_sdo_error(abort: u32) -> i32 {
@@ -208,12 +230,17 @@ fn main() {
     let mut heartbeat_sent = false;
 
     let mut server = FrameServer::bind(&socket).expect("bind socket");
-    eprintln!(
-        "ec-rt: socket {socket}, cycle {cycle_us}us, {num_slaves} slave(s) \
-         positions={slave_positions:?} counts/mm={counts_per_mm:?} \
-         rotation_distance={rotation_distance:?} velocity_ff={velocity_ff:?} \
-         invert={invert:?} dynamics={} clamp={torque_clamp_tenths:?}",
-        dynamics.is_some()
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "bringup_start",
+        num_slaves,
+        cycle_us,
+        positions = format!("{slave_positions:?}"),
+        counts_per_mm = format!("{counts_per_mm:?}"),
+        invert = format!("{invert:?}"),
+        velocity_ff = format!("{velocity_ff:?}"),
+        dynamics = dynamics.is_some(),
+        "endpoint starting bringup"
     );
 
     unsafe {
@@ -224,7 +251,12 @@ fn main() {
     }
 
     fn bringup_fail(server: &mut FrameServer, rc: i32) -> ! {
-        eprintln!("ec-rt: bringup failed rc={rc}, sending handshake-fail then exiting");
+        tracing::error!(
+            subsystem = "ethercat",
+            event = "bringup_fail",
+            rc,
+            "bringup failed; sending handshake-fail then exiting"
+        );
         let claim_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         if let Some(cid) = wait_for_claim(server, claim_deadline, &SIGTERM_RECEIVED, "ec-rt") {
             let reply = single_slave_reply(
@@ -233,9 +265,18 @@ fn main() {
                 u16::try_from(rc.unsigned_abs()).unwrap_or(u16::MAX),
             );
             server.respond_and_close(&claim_handshake_reply_frame(cid, &reply));
-            eprintln!("ec-rt: sent offline handshake reply, exiting");
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "bringup_fail_reported",
+                rc,
+                "sent offline handshake reply, exiting"
+            );
         } else {
-            eprintln!("ec-rt: bridge did not send ClaimHandshake within 5 s; aborting");
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "claim_handshake_timeout",
+                "bridge did not send ClaimHandshake within 5 s; aborting"
+            );
         }
         std::process::exit(1);
     }
@@ -251,7 +292,15 @@ fn main() {
             num_slaves as std::os::raw::c_int,
         )
     };
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "bringup_preop",
+        rc,
+        num_slaves,
+        "PREOP bringup result"
+    );
     if rc != 0 {
+        log_al_states(num_slaves, "preop_fail");
         bringup_fail(&mut server, rc);
     }
 
@@ -263,14 +312,24 @@ fn main() {
             let mut tq = 0u16;
             let rc = unsafe { ffi::ec_rt_read_limits(slot, &mut ferr, &mut tmo, &mut tq) };
             if rc != 0 {
-                eprintln!(
-                    "ec-rt: slot {s}: SDO read of protection limits failed rc={rc} — aborting bringup"
+                tracing::error!(
+                    subsystem = "ethercat",
+                    event = "drive_limits_read_fail",
+                    slot = s,
+                    rc,
+                    "SDO read of protection limits failed — aborting bringup"
                 );
                 unsafe { ffi::ec_rt_shutdown() };
                 std::process::exit(1);
             }
-            eprintln!(
-                "ec-rt: slot {s} drive limits at bringup: 6065h={ferr} counts, 6066h={tmo} ms, 6072h={tq} (0.1%)"
+            tracing::info!(
+                subsystem = "ethercat",
+                event = "drive_limits",
+                slot = s,
+                ferr_6065h = ferr,
+                timeout_6066h = tmo,
+                torque_6072h = tq,
+                "drive protection limits read at bringup"
             );
             let cli_ferr = slaves[s].following_error_counts;
             let cli_tq = slaves[s].max_torque_tenth_pct;
@@ -278,23 +337,46 @@ fn main() {
             if cli_ferr.is_some() || cli_tq.is_some() {
                 let rc = unsafe { ffi::ec_rt_write_limits(slot, run.0, run.1) };
                 if rc != 0 {
-                    eprintln!(
-                        "ec-rt: slot {s}: SDO write of session limits failed rc={rc} — aborting bringup"
+                    tracing::error!(
+                        subsystem = "ethercat",
+                        event = "drive_limits_write_fail",
+                        slot = s,
+                        rc,
+                        "SDO write of session limits failed — aborting bringup"
                     );
                     unsafe { ffi::ec_rt_shutdown() };
                     std::process::exit(1);
                 }
-                eprintln!("ec-rt: slot {s} session limits applied: 6065h={} 6072h={}", run.0, run.1);
+                tracing::info!(
+                    subsystem = "ethercat",
+                    event = "drive_limits_applied",
+                    slot = s,
+                    ferr_6065h = run.0,
+                    torque_6072h = run.1,
+                    "session protection limits applied"
+                );
             }
             run
         })
         .collect();
 
     let rc = unsafe { ffi::ec_rt_bringup_finish() };
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "bringup_finish",
+        rc,
+        "OP bringup result"
+    );
     if rc != 0 {
+        log_al_states(num_slaves, "finish_fail");
         bringup_fail(&mut server, rc);
     }
-    eprintln!("ec-rt: drives parked (Ready-to-Switch-On, no torque)");
+    log_al_states(num_slaves, "parked");
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "bringup_parked",
+        "drives parked (Ready-to-Switch-On, no torque)"
+    );
 
     match wait_for_claim_pumping(
         &mut server,
@@ -313,7 +395,11 @@ fn main() {
             ));
         }
         None => {
-            eprintln!("ec-rt: bridge did not send ClaimHandshake within 5 s; aborting");
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "claim_handshake_timeout",
+                "bridge did not send ClaimHandshake within 5 s; aborting"
+            );
             unsafe {
                 for s in 0..num_slaves {
                     ffi::ec_rt_disable(s as std::os::raw::c_int);
@@ -323,7 +409,11 @@ fn main() {
             std::process::exit(1);
         }
     }
-    eprintln!("ec-rt: handshake ok, entering DC loop");
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "bringup_handshake_ok",
+        "handshake ok, entering DC loop"
+    );
 
     let mut gate = TorqueGate::new();
     let mut capture = Capture::new();
@@ -1214,24 +1304,26 @@ fn main() {
         match eval_wkc(wkc, expected_wkc, &mut wkc_consecutive) {
             WkcDecision::Good => {}
             WkcDecision::Warn(n) => {
-                eprintln!(
-                    "ec-rt: WARNING — working counter {wkc} (expected {expected_wkc}), \
-                     consecutive_bad={n}; tolerating (USB-NIC frame loss); \
-                     halt threshold={}",
-                    ethercat_rt::claim::WKC_CONSECUTIVE_LOSS_LIMIT
+                tracing::warn!(
+                    subsystem = "ethercat",
+                    event = "wkc_warn",
+                    wkc,
+                    expected_wkc,
+                    consecutive_bad = n,
+                    halt_threshold = ethercat_rt::claim::WKC_CONSECUTIVE_LOSS_LIMIT,
+                    "working counter below expected; tolerating (USB-NIC frame loss)"
                 );
             }
             WkcDecision::Halt => {
-                let mut al_state = 0u16;
-                let mut al_code = 0u16;
-                unsafe { ffi::ec_rt_al_status(0, &mut al_state, &mut al_code) };
-                eprintln!(
-                    "ec-rt: working counter {wkc} (expected {expected_wkc}), \
-                     consecutive_bad={wkc_consecutive} — bus lost after \
-                     {} consecutive bad cycles, halting \
-                     (slot 0 AL state=0x{al_state:02x} status_code=0x{al_code:04x}; \
-                     0x001b=SM watchdog, 0x001a/0x002c/0x0030=DC sync)",
-                    ethercat_rt::claim::WKC_CONSECUTIVE_LOSS_LIMIT
+                log_al_states(num_slaves, "bus_lost");
+                tracing::error!(
+                    subsystem = "ethercat",
+                    event = "bus_lost",
+                    wkc,
+                    expected_wkc,
+                    consecutive_bad = wkc_consecutive,
+                    halt_threshold = ethercat_rt::claim::WKC_CONSECUTIVE_LOSS_LIMIT,
+                    "bus lost after consecutive bad cycles, halting"
                 );
                 unsafe { ffi::ec_rt_dump_al_state() };
                 break;
