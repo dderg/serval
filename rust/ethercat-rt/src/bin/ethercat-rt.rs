@@ -26,7 +26,7 @@ use ethercat_rt::sdo::SdoBus;
 use ethercat_rt::seed_home::{
     ERR_SEED_HOME_BUSY, ERR_SEED_HOME_NOT_ENABLED, ERR_SEED_HOME_RESTORE, ERR_SEED_HOME_STREAMING,
 };
-use ethercat_rt::sensorless::{SensorlessArm, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
+use ethercat_rt::sensorless::{SensorlessBank, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
 use ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
@@ -318,7 +318,7 @@ fn main() {
     let mut ff_saturation = 0u32;
     let mut wkc_consecutive = 0u8;
     let mut latched_drive_err: u16 = 0;
-    let mut sensorless_arm: Option<SensorlessArm> = None;
+    let mut sensorless = SensorlessBank::new(num_slaves);
     'dc: loop {
         if SIGTERM_RECEIVED.load(Ordering::Acquire) {
             eprintln!("ec-rt: SIGTERM received — disabling drive and exiting");
@@ -590,33 +590,36 @@ fn main() {
                     correlation_id,
                     msg,
                 } => {
-                    let result = if msg.enable != 0 {
-                        if msg.slot as usize >= num_slaves {
-                            eprintln!(
-                                "ec-rt: ArmSensorlessEndstop for slot {} but only {num_slaves} slave(s)",
-                                msg.slot
-                            );
-                            -309
-                        } else if msg.torque_trip_tenth_pct == 0 {
+                    let result = if msg.slot as usize >= num_slaves {
+                        eprintln!(
+                            "ec-rt: ArmSensorlessEndstop for slot {} but only {num_slaves} slave(s)",
+                            msg.slot
+                        );
+                        -309
+                    } else if msg.enable != 0 {
+                        if msg.torque_trip_tenth_pct == 0 {
                             eprintln!(
                                 "ec-rt: ArmSensorlessEndstop rejected — zero torque trip threshold"
                             );
                             ERR_ARM_SENSORLESS_BAD_THRESHOLD
                         } else {
-                            sensorless_arm = Some(SensorlessArm::new(
-                                msg.slot,
+                            sensorless.arm(
+                                msg.slot as usize,
                                 msg.endstop_id,
                                 msg.torque_trip_tenth_pct,
-                            ));
+                            );
                             eprintln!(
-                                "ec-rt: sensorless endstop {} armed (torque_trip={} 0.1%)",
-                                msg.endstop_id, msg.torque_trip_tenth_pct
+                                "ec-rt: sensorless endstop {} armed on slot {} (torque_trip={} 0.1%)",
+                                msg.endstop_id, msg.slot, msg.torque_trip_tenth_pct
                             );
                             0
                         }
                     } else {
-                        sensorless_arm = None;
-                        eprintln!("ec-rt: sensorless endstop {} disarmed", msg.endstop_id);
+                        sensorless.disarm(msg.slot as usize);
+                        eprintln!(
+                            "ec-rt: sensorless endstop {} disarmed on slot {}",
+                            msg.endstop_id, msg.slot
+                        );
                         0
                     };
                     server.respond(&arm_sensorless_endstop_response_frame(
@@ -926,23 +929,22 @@ fn main() {
             }
         }
 
-        if let Some(arm_slot) = sensorless_arm.as_ref().map(SensorlessArm::slot) {
-            let torque_actual = unsafe { ffi::ec_rt_get_torque_actual(i32::from(arm_slot)) };
-            if let Some(endstop_id) = sensorless_arm
-                .as_mut()
-                .and_then(|arm| arm.poll(torque_actual))
-            {
-                for r in &mut rings {
-                    r.reset();
-                }
-                for c in &mut cmaps {
-                    *c = None;
-                }
+        let sensorless_tripped = sensorless.poll(
+            |slot| unsafe { ffi::ec_rt_get_torque_actual(slot as i32) },
+            |slot, endstop_id, torque| {
                 eprintln!(
-                    "ec-rt: sensorless endstop {endstop_id} tripped torque={torque_actual} \
-                     — local stop, trip_clock={now}"
+                    "ec-rt: sensorless endstop {endstop_id} tripped on slot {slot} \
+                     torque={torque} — local stop, trip_clock={now}"
                 );
                 server.respond(&endstop_trip_frame(endstop_id, now));
+            },
+        );
+        if sensorless_tripped {
+            for r in &mut rings {
+                r.reset();
+            }
+            for c in &mut cmaps {
+                *c = None;
             }
         }
 
