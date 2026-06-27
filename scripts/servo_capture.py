@@ -25,6 +25,7 @@ DTYPE_MAP = {
 }
 FLAG_MOTION_ACTIVE = 1 << 1
 SETTLE_HOLD_MS = 50
+RECORD_PREFIX_SIZE = 9
 
 
 def resolve_newest_capture(captures_dir, name):
@@ -40,7 +41,19 @@ def resolve_newest_capture(captures_dir, name):
     return max(stamped)[1]
 
 
-def load_capture(path):
+def select_drive(header, drive_name):
+    names = [d["name"] for d in header["drives"]]
+    if drive_name is None:
+        return 0
+    if drive_name not in names:
+        raise SystemExit(
+            "drive %r not in capture (have: %s)"
+            % (drive_name, ", ".join(names))
+        )
+    return names.index(drive_name)
+
+
+def load_capture(path, drive=None):
     if path.endswith(".failed.scap"):
         raise SystemExit(
             "%s is a FAILED capture (ring overflow or writer error); its "
@@ -52,25 +65,44 @@ def load_capture(path):
             raise SystemExit(
                 "unsupported capture version %r" % (header.get("version"),)
             )
-        dtype = np.dtype(
-            [(c["name"], DTYPE_MAP[c["dtype"]]) for c in header["channels"]]
-        )
-        for c in header["channels"]:
-            actual = dtype.fields[c["name"]][1]
-            if actual != c["offset"]:
-                raise SystemExit(
-                    "channel %r declared offset %d but numpy computed %d"
-                    % (c["name"], c["offset"], actual)
-                )
-        if dtype.itemsize != header["record_size"]:
+        n_drives = len(header["drives"])
+        if n_drives == 0:
+            raise SystemExit("%s header lists no drives" % (path,))
+        record_size = header["record_size"]
+        body_size = record_size - RECORD_PREFIX_SIZE
+        if body_size <= 0 or body_size % n_drives:
             raise SystemExit(
-                "channel descriptor (%d bytes) disagrees with record_size %d"
-                % (dtype.itemsize, header["record_size"])
+                "record_size %d is not aligned to %d drive block(s)"
+                % (record_size, n_drives)
             )
+        block_size = body_size // n_drives
+        drive_idx = select_drive(header, drive)
+        names, formats, offsets = [], [], []
+        for c in header["channels"]:
+            off = c["offset"]
+            if off >= RECORD_PREFIX_SIZE:
+                off += drive_idx * block_size
+            fmt = DTYPE_MAP[c["dtype"]]
+            if off + np.dtype(fmt).itemsize > record_size:
+                raise SystemExit(
+                    "channel %r at offset %d overruns record_size %d"
+                    % (c["name"], off, record_size)
+                )
+            names.append(c["name"])
+            formats.append(fmt)
+            offsets.append(off)
+        dtype = np.dtype(
+            {
+                "names": names,
+                "formats": formats,
+                "offsets": offsets,
+                "itemsize": record_size,
+            }
+        )
         body = f.read()
-    whole = len(body) // header["record_size"] * header["record_size"]
+    whole = len(body) // record_size * record_size
     data = np.frombuffer(body[:whole], dtype=dtype)
-    return header, data
+    return header, data, drive_idx
 
 
 def motion_segments(flags):
@@ -238,12 +270,12 @@ def _print_metrics(m, counts_per_mm):
         )
 
 
-def export_ident_csv(path, header, data, counts_per_mm):
+def export_ident_csv(path, header, data, counts_per_mm, drive_idx=0):
     # The fitter regresses torque against the kinematics that produced it.
     # With a position loop between command and motor, torque follows actual
     # motion (6064h), not the commanded target — exporting target_counts
     # here yields a wrong (even negative) inertia on a soft loop.
-    axis = header["drives"][0]["name"]
+    axis = header["drives"][drive_idx]["name"]
     cycle_index = data["cycle_index"].astype(np.int64)
     t = (cycle_index - cycle_index[0]) * (header["cycle_ns"] * 1e-9)
     actual_mm = data["position_actual"].astype(np.float64) / counts_per_mm
@@ -268,6 +300,11 @@ def main(argv=None):
     )
     p.add_argument(
         "--captures-dir", default="~/printer_data/logs/servo_captures"
+    )
+    p.add_argument(
+        "--drive",
+        help="drive name to analyze in a multi-drive capture "
+        "(default: the first drive in the file)",
     )
     p.add_argument(
         "--settle-band",
@@ -304,12 +341,12 @@ def main(argv=None):
         args.captures_dir, args.name
     )
 
-    header, data = load_capture(capture_path)
+    header, data, drive_idx = load_capture(capture_path, args.drive)
     fs = 1e9 / header["cycle_ns"]
-    counts_per_mm = header["drives"][0]["counts_per_mm"]
+    counts_per_mm = header["drives"][drive_idx]["counts_per_mm"]
 
     if args.csv:
-        export_ident_csv(args.csv, header, data, counts_per_mm)
+        export_ident_csv(args.csv, header, data, counts_per_mm, drive_idx)
         return 0
 
     print("file: %s" % (capture_path,))
@@ -323,11 +360,11 @@ def main(argv=None):
             print("  %7.1f Hz  power %.3e" % (f_hz, power))
 
     if args.plot:
-        _plot(header, data, fs)
+        _plot(header, data, fs, drive_idx)
     return 0
 
 
-def _plot(header, data, fs):
+def _plot(header, data, fs, drive_idx=0):
     import matplotlib.pyplot as plt
 
     t = np.arange(len(data)) / fs
@@ -353,7 +390,9 @@ def _plot(header, data, fs):
         ax.fill_between(
             t, *ax.get_ylim(), where=moving, alpha=0.08, color="tab:blue"
         )
-    fig.suptitle(header["drives"][0]["name"] + " — " + header["started_utc"])
+    fig.suptitle(
+        header["drives"][drive_idx]["name"] + " — " + header["started_utc"]
+    )
     plt.show()
 
 

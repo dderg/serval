@@ -5,6 +5,7 @@ use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySe
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::cli::EC_RT_MAX_SLAVES;
 use crate::thread_prio::demote_to_normal_scheduling;
 
 pub const ERR_CAPTURE_ACTIVE: i32 = -320;
@@ -12,29 +13,41 @@ pub const ERR_CAPTURE_NOT_ACTIVE: i32 = -321;
 pub const ERR_CAPTURE_FILE: i32 = -322;
 pub const ERR_CAPTURE_OVERFLOW: i32 = -323;
 pub const ERR_CAPTURE_BAD_ARG: i32 = -324;
+pub const ERR_CAPTURE_BAD_DRIVE_LIST: i32 = -325;
 
 pub const CAPTURE_RING_CAPACITY: usize = 4096;
-pub const RECORD_SIZE: usize = 37;
+
+pub const MAX_DRIVES: usize = EC_RT_MAX_SLAVES;
+pub const RECORD_PREFIX_SIZE: usize = 9;
+pub const DRIVE_BLOCK_SIZE: usize = 28;
+pub const MAX_RECORD_SIZE: usize = RECORD_PREFIX_SIZE + MAX_DRIVES * DRIVE_BLOCK_SIZE;
+
+#[must_use]
+pub const fn record_size(drive_count: usize) -> usize {
+    RECORD_PREFIX_SIZE + drive_count * DRIVE_BLOCK_SIZE
+}
+
 pub const FLAG_TORQUE_ENABLED: u8 = 1 << 0;
 pub const FLAG_MOTION_ACTIVE: u8 = 1 << 1;
 
 const OFF_CYCLE_INDEX: usize = 0;
 const OFF_FLAGS: usize = 8;
-const OFF_TARGET_COUNTS: usize = 9;
-const OFF_POSITION_ACTUAL: usize = 13;
-const OFF_FOLLOWING_ERROR: usize = 17;
-const OFF_TORQUE_ACTUAL: usize = 21;
-const OFF_STATUSWORD: usize = 23;
-const OFF_ERROR_CODE: usize = 25;
-const OFF_VELOCITY_OFFSET: usize = 27;
-const OFF_TORQUE_OFFSET: usize = 31;
-const OFF_VELOCITY_ACTUAL: usize = 33;
+
+const DOFF_TARGET_COUNTS: usize = 0;
+const DOFF_POSITION_ACTUAL: usize = 4;
+const DOFF_FOLLOWING_ERROR: usize = 8;
+const DOFF_TORQUE_ACTUAL: usize = 12;
+const DOFF_STATUSWORD: usize = 14;
+const DOFF_ERROR_CODE: usize = 16;
+const DOFF_VELOCITY_OFFSET: usize = 18;
+const DOFF_TORQUE_OFFSET: usize = 22;
+const DOFF_VELOCITY_ACTUAL: usize = 24;
 
 const WRITER_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 const WRITER_RECV_TIMEOUT: Duration = Duration::from_millis(100);
 const IO_THREAD_STACK: usize = 512 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DriveSample {
     pub target_counts: i32,
     pub position_actual: i32,
@@ -51,16 +64,35 @@ pub struct DriveSample {
 pub struct CaptureRecord {
     pub cycle_index: u64,
     pub flags: u8,
-    pub drive: DriveSample,
+    pub drive_count: u8,
+    pub drives: [DriveSample; MAX_DRIVES],
+}
+
+impl CaptureRecord {
+    #[must_use]
+    pub fn new(cycle_index: u64, flags: u8) -> Self {
+        Self {
+            cycle_index,
+            flags,
+            drive_count: 0,
+            drives: [DriveSample::default(); MAX_DRIVES],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureDriveConfig {
+    pub slot: u8,
+    pub name: String,
+    pub counts_per_mm: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureConfig {
     pub path: String,
     pub started_utc: String,
-    pub drive_name: String,
+    pub drives: Vec<CaptureDriveConfig>,
     pub cycle_ns: i64,
-    pub counts_per_mm: f64,
     pub started_mono_ns: u64,
 }
 
@@ -71,27 +103,55 @@ pub struct StopOutcome {
     pub overflow_cycle: Option<u64>,
 }
 
-pub fn encode_record(r: &CaptureRecord) -> [u8; RECORD_SIZE] {
-    let mut b = [0u8; RECORD_SIZE];
+fn encode_drive(block: &mut [u8], d: &DriveSample) {
+    block[DOFF_TARGET_COUNTS..DOFF_TARGET_COUNTS + 4]
+        .copy_from_slice(&d.target_counts.to_le_bytes());
+    block[DOFF_POSITION_ACTUAL..DOFF_POSITION_ACTUAL + 4]
+        .copy_from_slice(&d.position_actual.to_le_bytes());
+    block[DOFF_FOLLOWING_ERROR..DOFF_FOLLOWING_ERROR + 4]
+        .copy_from_slice(&d.following_error.to_le_bytes());
+    block[DOFF_TORQUE_ACTUAL..DOFF_TORQUE_ACTUAL + 2]
+        .copy_from_slice(&d.torque_actual.to_le_bytes());
+    block[DOFF_STATUSWORD..DOFF_STATUSWORD + 2].copy_from_slice(&d.statusword.to_le_bytes());
+    block[DOFF_ERROR_CODE..DOFF_ERROR_CODE + 2].copy_from_slice(&d.error_code.to_le_bytes());
+    block[DOFF_VELOCITY_OFFSET..DOFF_VELOCITY_OFFSET + 4]
+        .copy_from_slice(&d.velocity_offset.to_le_bytes());
+    block[DOFF_TORQUE_OFFSET..DOFF_TORQUE_OFFSET + 2]
+        .copy_from_slice(&d.torque_offset.to_le_bytes());
+    block[DOFF_VELOCITY_ACTUAL..DOFF_VELOCITY_ACTUAL + 4]
+        .copy_from_slice(&d.velocity_actual.to_le_bytes());
+}
+
+pub fn encode_record(r: &CaptureRecord) -> ([u8; MAX_RECORD_SIZE], usize) {
+    let n = r.drive_count as usize;
+    let size = record_size(n);
+    let mut b = [0u8; MAX_RECORD_SIZE];
     b[OFF_CYCLE_INDEX..OFF_CYCLE_INDEX + 8].copy_from_slice(&r.cycle_index.to_le_bytes());
     b[OFF_FLAGS] = r.flags;
-    b[OFF_TARGET_COUNTS..OFF_TARGET_COUNTS + 4]
-        .copy_from_slice(&r.drive.target_counts.to_le_bytes());
-    b[OFF_POSITION_ACTUAL..OFF_POSITION_ACTUAL + 4]
-        .copy_from_slice(&r.drive.position_actual.to_le_bytes());
-    b[OFF_FOLLOWING_ERROR..OFF_FOLLOWING_ERROR + 4]
-        .copy_from_slice(&r.drive.following_error.to_le_bytes());
-    b[OFF_TORQUE_ACTUAL..OFF_TORQUE_ACTUAL + 2]
-        .copy_from_slice(&r.drive.torque_actual.to_le_bytes());
-    b[OFF_STATUSWORD..OFF_STATUSWORD + 2].copy_from_slice(&r.drive.statusword.to_le_bytes());
-    b[OFF_ERROR_CODE..OFF_ERROR_CODE + 2].copy_from_slice(&r.drive.error_code.to_le_bytes());
-    b[OFF_VELOCITY_OFFSET..OFF_VELOCITY_OFFSET + 4]
-        .copy_from_slice(&r.drive.velocity_offset.to_le_bytes());
-    b[OFF_TORQUE_OFFSET..OFF_TORQUE_OFFSET + 2]
-        .copy_from_slice(&r.drive.torque_offset.to_le_bytes());
-    b[OFF_VELOCITY_ACTUAL..OFF_VELOCITY_ACTUAL + 4]
-        .copy_from_slice(&r.drive.velocity_actual.to_le_bytes());
-    b
+    for (d, drive) in r.drives[..n].iter().enumerate() {
+        let base = RECORD_PREFIX_SIZE + d * DRIVE_BLOCK_SIZE;
+        encode_drive(&mut b[base..base + DRIVE_BLOCK_SIZE], drive);
+    }
+    (b, size)
+}
+
+/// Slot-agnostic drive-list checks the I/O thread can run without the slave
+/// count: non-empty, no more than `MAX_DRIVES`, no duplicate slot. The endpoint
+/// adds the range check (`slot < num_slaves`) where it knows the topology.
+pub fn validate_drive_list(drives: &[CaptureDriveConfig]) -> Result<(), i32> {
+    if drives.is_empty() || drives.len() > MAX_DRIVES {
+        return Err(ERR_CAPTURE_BAD_DRIVE_LIST);
+    }
+    for (i, d) in drives.iter().enumerate() {
+        if drives[..i].iter().any(|prev| prev.slot == d.slot) {
+            return Err(ERR_CAPTURE_BAD_DRIVE_LIST);
+        }
+    }
+    Ok(())
+}
+
+pub fn any_slot_out_of_range(slots: &[u8], num_slaves: usize) -> bool {
+    slots.iter().any(|&slot| usize::from(slot) >= num_slaves)
 }
 
 fn json_string_safe(s: &str) -> bool {
@@ -100,19 +160,20 @@ fn json_string_safe(s: &str) -> bool {
 }
 
 pub fn header_json(cfg: &CaptureConfig) -> String {
+    let p = RECORD_PREFIX_SIZE;
     let mut channels = String::new();
     for (name, dtype, offset) in [
         ("cycle_index", "u64", OFF_CYCLE_INDEX),
         ("flags", "u8", OFF_FLAGS),
-        ("target_counts", "i32", OFF_TARGET_COUNTS),
-        ("position_actual", "i32", OFF_POSITION_ACTUAL),
-        ("following_error", "i32", OFF_FOLLOWING_ERROR),
-        ("torque_actual", "i16", OFF_TORQUE_ACTUAL),
-        ("statusword", "u16", OFF_STATUSWORD),
-        ("error_code", "u16", OFF_ERROR_CODE),
-        ("velocity_offset", "i32", OFF_VELOCITY_OFFSET),
-        ("torque_offset", "i16", OFF_TORQUE_OFFSET),
-        ("velocity_actual", "i32", OFF_VELOCITY_ACTUAL),
+        ("target_counts", "i32", p + DOFF_TARGET_COUNTS),
+        ("position_actual", "i32", p + DOFF_POSITION_ACTUAL),
+        ("following_error", "i32", p + DOFF_FOLLOWING_ERROR),
+        ("torque_actual", "i16", p + DOFF_TORQUE_ACTUAL),
+        ("statusword", "u16", p + DOFF_STATUSWORD),
+        ("error_code", "u16", p + DOFF_ERROR_CODE),
+        ("velocity_offset", "i32", p + DOFF_VELOCITY_OFFSET),
+        ("torque_offset", "i16", p + DOFF_TORQUE_OFFSET),
+        ("velocity_actual", "i32", p + DOFF_VELOCITY_ACTUAL),
     ] {
         if !channels.is_empty() {
             channels.push(',');
@@ -121,19 +182,28 @@ pub fn header_json(cfg: &CaptureConfig) -> String {
             "{{\"name\":\"{name}\",\"dtype\":\"{dtype}\",\"offset\":{offset}}}"
         ));
     }
+    let mut drives = String::new();
+    for d in &cfg.drives {
+        if !drives.is_empty() {
+            drives.push(',');
+        }
+        drives.push_str(&format!(
+            "{{\"name\":\"{}\",\"counts_per_mm\":{}}}",
+            d.name, d.counts_per_mm
+        ));
+    }
     format!(
         concat!(
             "{{\"version\":1,\"cycle_ns\":{},\"record_size\":{},",
             "\"started_utc\":\"{}\",\"started_mono_ns\":{},",
-            "\"drives\":[{{\"name\":\"{}\",\"counts_per_mm\":{}}}],",
+            "\"drives\":[{}],",
             "\"channels\":[{}]}}\n",
         ),
         cfg.cycle_ns,
-        RECORD_SIZE,
+        record_size(cfg.drives.len()),
         cfg.started_utc,
         cfg.started_mono_ns,
-        cfg.drive_name,
-        cfg.counts_per_mm,
+        drives,
         channels,
     )
 }
@@ -259,8 +329,13 @@ impl Capture {
         if self.active.is_some() {
             return immediate(ERR_CAPTURE_ACTIVE);
         }
-        if !json_string_safe(&cfg.drive_name) || !json_string_safe(&cfg.started_utc) {
+        if !json_string_safe(&cfg.started_utc)
+            || cfg.drives.iter().any(|d| !json_string_safe(&d.name))
+        {
             return immediate(ERR_CAPTURE_BAD_ARG);
+        }
+        if let Err(rc) = validate_drive_list(&cfg.drives) {
+            return immediate(rc);
         }
         let (tx, records) = sync_channel(self.capacity);
         let (reply, reply_rx) = sync_channel(1);
@@ -457,7 +532,8 @@ fn run_session(
     loop {
         match rx.recv_timeout(WRITER_RECV_TIMEOUT) {
             Ok(r) => {
-                file.write_all(&encode_record(&r))
+                let (buf, size) = encode_record(&r);
+                file.write_all(&buf[..size])
                     .map_err(|e| (written, format!("capture record write: {e}")))?;
                 written += 1;
             }

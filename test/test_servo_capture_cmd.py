@@ -1,6 +1,6 @@
 import pytest
 
-from klippy.extras import servo_capture
+from klippy.extras import servo_axis, servo_capture
 
 
 class FakeGcode:
@@ -13,15 +13,15 @@ class FakeGcode:
 
 
 class FakeNode:
-    def __init__(self, handle, drive_count=1):
+    def __init__(self, handle, slots=None):
         self._h = handle
-        self._drive_count = drive_count
+        self._slots = slots if slots is not None else {}
 
     def get_engine_handle(self):
         return self._h
 
-    def get_drive_count(self):
-        return self._drive_count
+    def get_slot_for_motor(self, motor_name):
+        return self._slots.get(motor_name)
 
 
 class FakeEngine:
@@ -30,12 +30,25 @@ class FakeEngine:
         self.stop_calls = []
         self._stop_result = stop_result
 
-    def start_servo_capture(self, handle, path, started_utc, drive_name):
-        self.start_calls.append((handle, path, started_utc, drive_name))
+    def start_servo_capture(self, handle, path, started_utc, drives):
+        self.start_calls.append((handle, path, started_utc, drives))
 
     def stop_servo_capture(self, handle):
         self.stop_calls.append(handle)
         return self._stop_result
+
+
+class FakeKin:
+    def __init__(self, rails):
+        self.rails = rails
+
+
+class FakeToolhead:
+    def __init__(self, kin):
+        self.kin = kin
+
+    def get_kinematics(self):
+        return self.kin
 
 
 class FakePrinter:
@@ -46,14 +59,6 @@ class FakePrinter:
 
     def lookup_object(self, name):
         return self._objs[name]
-
-    def lookup_objects(self, module=None):
-        prefix = module + " "
-        return [
-            (name, obj)
-            for name, obj in self._objs.items()
-            if name == module or name.startswith(prefix)
-        ]
 
 
 class FakeConfig:
@@ -78,15 +83,40 @@ class FakeGcmd:
         self.responses.append(msg)
 
 
-def make_capture(nodes=None, engine=None):
+def make_servo_rail(motor_name, node_name, slot=0):
+    rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
+    rail.name = "servo " + motor_name
+    rail.axis = motor_name
+    rail.node_name = node_name
+    rail.motor_name = motor_name
+    return rail
+
+
+def make_capture(motors=None, engine=None):
     gcode = FakeGcode()
-    objs = {"gcode": gcode, "motion_engine": engine or FakeEngine()}
-    resolved_nodes = {"x": 7} if nodes is None else nodes
-    for name, handle in resolved_nodes.items():
-        objs["ethercat_node " + name] = FakeNode(handle)
+    engine = engine or FakeEngine()
+    if motors is None:
+        motors = {"x": ("node_x", 7, 0)}
+    rails = []
+    objs = {"gcode": gcode, "motion_engine": engine}
+    node_slots = {}
+    node_handles = {}
+    for motor_name, (node_name, handle, slot) in motors.items():
+        rails.append(make_servo_rail(motor_name, node_name))
+        node_slots.setdefault(node_name, {})[motor_name] = slot
+        node_handles[node_name] = handle
+    for node_name, slots in node_slots.items():
+        objs["ethercat_node " + node_name] = FakeNode(
+            node_handles[node_name], slots
+        )
+    objs["toolhead"] = FakeToolhead(FakeKin(rails))
     printer = FakePrinter(objs)
     sc = servo_capture.ServoCapture(FakeConfig(printer))
-    return sc, gcode, objs["motion_engine"]
+    return sc, gcode, engine
+
+
+def node_of(sc, node_name="node_x"):
+    return sc.printer.lookup_object("ethercat_node " + node_name)
 
 
 def test_registers_both_commands():
@@ -100,9 +130,9 @@ def test_start_defaults_to_sole_servo_and_builds_path():
     gcmd = FakeGcmd(NAME="xtune")
     gcode.commands["SERVO_CAPTURE_START"](gcmd)
     assert len(engine.start_calls) == 1
-    handle, path, started_utc, drive_name = engine.start_calls[0]
+    handle, path, started_utc, drives = engine.start_calls[0]
     assert handle == 7
-    assert drive_name == "x"
+    assert drives == [(0, "x")]
     assert "/servo_captures/" in path
     assert path.endswith(".scap")
     assert "xtune_" in path
@@ -133,23 +163,22 @@ def test_double_start_rejected_in_klippy():
         gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
 
 
-def test_start_rejected_on_multi_drive_node():
-    sc, gcode, engine = make_capture()
-    node = sc.printer.lookup_objects("ethercat_node")[0][1]
-    node._drive_count = 2
-    with pytest.raises(RuntimeError):
-        gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
-    assert engine.start_calls == []
+def test_start_on_multi_drive_node_resolves_each_motor_to_its_slot():
+    motors = {
+        "x": ("node_xy", 9, 0),
+        "y": ("node_xy", 9, 1),
+    }
+    for servo, expected in (("y", (1, "y")), ("x", (0, "x"))):
+        _, gcode, engine = make_capture(motors=motors)
+        gcode.commands["SERVO_CAPTURE_START"](FakeGcmd(SERVO=servo))
+        assert len(engine.start_calls) == 1
+        handle, _path, _utc, drives = engine.start_calls[0]
+        assert handle == 9
+        assert drives == [expected]
 
 
 def assert_fresh_start_possible(gcode):
     gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
-
-
-def vanish_node(sc):
-    fake_node = sc.printer.lookup_objects("ethercat_node")[0][1]
-    fake_node._h = None
-    return fake_node
 
 
 def test_stop_without_start_rejected():
@@ -178,7 +207,7 @@ def test_stop_overflow_raises_with_failed_filename():
 
 
 def test_start_without_engine_handle_fails_loudly():
-    sc, gcode, engine = make_capture(nodes={"x": None})
+    sc, gcode, engine = make_capture(motors={"x": ("node_x", None, 0)})
     with pytest.raises(RuntimeError, match="no engine handle"):
         gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
     assert engine.start_calls == []
@@ -187,7 +216,8 @@ def test_start_without_engine_handle_fails_loudly():
 def test_stop_after_node_vanished_clears_state_and_skips_engine():
     sc, gcode, engine = make_capture()
     gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
-    fake_node = vanish_node(sc)
+    fake_node = node_of(sc)
+    fake_node._h = None
     with pytest.raises(RuntimeError, match="vanished"):
         gcode.commands["SERVO_CAPTURE_STOP"](FakeGcmd())
     assert engine.stop_calls == []
@@ -197,19 +227,20 @@ def test_stop_after_node_vanished_clears_state_and_skips_engine():
 
 
 def test_multiple_servos_require_servo_param():
-    sc, gcode, engine = make_capture(nodes={"a": 1, "b": 2})
+    motors = {"a": ("node_a", 1, 0), "b": ("node_b", 2, 0)}
+    sc, gcode, engine = make_capture(motors=motors)
     with pytest.raises(RuntimeError, match="SERVO= is required"):
         gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
     assert engine.start_calls == []
     gcode.commands["SERVO_CAPTURE_START"](FakeGcmd(SERVO="b"))
     assert len(engine.start_calls) == 1
     assert engine.start_calls[0][0] == 2
-    assert engine.start_calls[0][3] == "b"
+    assert engine.start_calls[0][3] == [(0, "b")]
 
 
-def test_no_nodes_configured_errors():
-    sc, gcode, engine = make_capture(nodes={})
-    with pytest.raises(RuntimeError, match=r"no \[ethercat_node\]"):
+def test_no_servos_configured_errors():
+    sc, gcode, engine = make_capture(motors={})
+    with pytest.raises(RuntimeError, match="no servo motors configured"):
         gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
     assert engine.start_calls == []
 
@@ -237,7 +268,7 @@ def test_start_rejects_name_with_trailing_newline():
 
 def test_start_engine_failure_is_command_error_not_shutdown():
     class FailingEngine(FakeEngine):
-        def start_servo_capture(self, handle, path, started_utc, drive_name):
+        def start_servo_capture(self, handle, path, started_utc, drives):
             raise RuntimeError("endpoint result -322")
 
     sc, gcode, _ = make_capture(engine=FailingEngine())

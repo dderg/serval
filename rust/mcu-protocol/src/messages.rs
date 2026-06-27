@@ -559,27 +559,59 @@ impl Decode for StopResponse {
     }
 }
 
+/// One drive the host asks the endpoint to sample into a `.scap` record. The
+/// host owns the slot↔motor map; the endpoint samples `slot` and labels the
+/// header block with `name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureDrive {
+    pub slot: u8,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartCapture {
     pub path: String,
     pub started_utc: String,
-    pub drive_name: String,
+    pub drives: Vec<CaptureDrive>,
 }
 
 impl Encode for StartCapture {
     fn encode(&self, out: &mut Vec<u8>) {
         put_str(out, &self.path);
         put_str(out, &self.started_utc);
-        put_str(out, &self.drive_name);
+        put_u8(out, self.drives.len() as u8);
+        for d in &self.drives {
+            put_u8(out, d.slot);
+            put_str(out, &d.name);
+        }
     }
 }
 
 impl Decode for StartCapture {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let path = get_str(c)?;
+        let started_utc = get_str(c)?;
+        let drive_count = get_u8(c)?;
+        if drive_count == 0 {
+            return Err(DecodeError::EmptyArray {
+                field: "StartCapture.drives",
+            });
+        }
+        let mut drives: Vec<CaptureDrive> = Vec::with_capacity(drive_count as usize);
+        for _ in 0..drive_count {
+            let slot = get_u8(c)?;
+            let name = get_str(c)?;
+            if drives.iter().any(|d| d.slot == slot) {
+                return Err(DecodeError::DuplicateField {
+                    field: "StartCapture.slot",
+                });
+            }
+            drives.push(CaptureDrive { slot, name });
+        }
         Ok(Self {
-            path: get_str(c)?,
-            started_utc: get_str(c)?,
-            drive_name: get_str(c)?,
+            path,
+            started_utc,
+            drives,
         })
     }
 }

@@ -191,9 +191,9 @@ class MotionEngineWrapper:
     def set_torque(self, mcu_handle, value, print_time):
         self._engine.set_torque(mcu_handle, bool(value), print_time)
 
-    def start_servo_capture(self, mcu_handle, path, started_utc, drive_name):
+    def start_servo_capture(self, mcu_handle, path, started_utc, drives):
         return self._engine.start_servo_capture(
-            mcu_handle, path, started_utc, drive_name
+            mcu_handle, path, started_utc, drives
         )
 
     def stop_servo_capture(self, mcu_handle):

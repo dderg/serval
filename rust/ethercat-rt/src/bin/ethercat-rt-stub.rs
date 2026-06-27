@@ -5,7 +5,8 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use ethercat_rt::capture::{
-    Capture, CaptureConfig, CaptureRecord, DriveSample, FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED,
+    Capture, CaptureConfig, CaptureDriveConfig, CaptureRecord, DriveSample, FLAG_MOTION_ACTIVE,
+    FLAG_TORQUE_ENABLED,
 };
 use ethercat_rt::claim::{parse_fail_bringup, single_slave_reply, wait_for_claim};
 use ethercat_rt::clock::monotonic_ns;
@@ -114,6 +115,7 @@ fn main() {
     let mut ring = AxisRing::new();
     let mut gate = TorqueGate::new();
     let mut capture = Capture::new();
+    let mut capture_drive_count: usize = 0;
     let mut cycle_index: u64 = 0;
     let mut sdo_bus = stub_object_dictionary();
     let mut last_sent_retired: u32 = 0;
@@ -387,14 +389,26 @@ fn main() {
                     correlation_id,
                     msg,
                 } => {
+                    let drives: Vec<CaptureDriveConfig> = msg
+                        .drives
+                        .iter()
+                        .map(|d| CaptureDriveConfig {
+                            slot: d.slot,
+                            name: d.name.clone(),
+                            counts_per_mm: STUB_COUNTS_PER_MM,
+                        })
+                        .collect();
+                    let drive_count = drives.len();
                     let rc = capture.start(CaptureConfig {
                         path: msg.path.clone(),
                         started_utc: msg.started_utc.clone(),
-                        drive_name: msg.drive_name.clone(),
+                        drives,
                         cycle_ns: STUB_CYCLE_NS,
-                        counts_per_mm: STUB_COUNTS_PER_MM,
                         started_mono_ns: monotonic_ns(),
                     });
+                    if rc == 0 {
+                        capture_drive_count = drive_count;
+                    }
                     eprintln!("ec-rt-stub: StartCapture path={} rc={rc}", msg.path);
                     server.respond(&start_capture_response_frame(correlation_id, rc));
                 }
@@ -494,21 +508,24 @@ fn main() {
             if motion_active {
                 flags |= FLAG_MOTION_ACTIVE;
             }
-            capture.push(CaptureRecord {
-                cycle_index,
-                flags,
-                drive: DriveSample {
-                    target_counts: pos,
-                    position_actual: pos - 3,
-                    velocity_actual: 0,
-                    following_error: 3,
-                    torque_actual: 100,
-                    statusword: 0x0627,
-                    error_code: 0,
-                    velocity_offset: 0,
-                    torque_offset: 0,
-                },
-            });
+            let sim = DriveSample {
+                target_counts: pos,
+                position_actual: pos - 3,
+                velocity_actual: 0,
+                following_error: 3,
+                torque_actual: 100,
+                statusword: 0x0627,
+                error_code: 0,
+                velocity_offset: 0,
+                torque_offset: 0,
+            };
+            let mut record = CaptureRecord::new(cycle_index, flags);
+            record.drive_count = capture_drive_count as u8;
+            for (i, d) in record.drives[..capture_drive_count].iter_mut().enumerate() {
+                *d = sim;
+                d.position_actual += i32::try_from(i).expect("drive index fits i32");
+            }
+            capture.push(record);
         }
 
         if let Some(fault_val) = ring.take_fault() {

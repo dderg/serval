@@ -1160,7 +1160,7 @@ impl PyMotionEngine {
         mcu_handle: u32,
         path: String,
         started_utc: String,
-        drive_name: String,
+        drives: Vec<(u8, String)>,
     ) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "start_servo_capture")?;
         tracing::info!(
@@ -1170,9 +1170,8 @@ impl PyMotionEngine {
             path,
             "servo capture start"
         );
-        let result =
-            crate::servo_capture::send_start_capture(&conn, &path, &started_utc, &drive_name)
-                .map_err(PyRuntimeError::new_err)?;
+        let result = crate::servo_capture::send_start_capture(&conn, &path, &started_utc, &drives)
+            .map_err(PyRuntimeError::new_err)?;
         if result != 0 {
             return Err(PyRuntimeError::new_err(format!(
                 "servo capture start failed: endpoint result {result}"

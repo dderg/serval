@@ -87,7 +87,7 @@ def synth_capture(tmp_path, n=4000, move=(1000, 2000), freq_hz=80.0):
 
 def test_load_capture_reads_header_and_records(tmp_path):
     path, _ = synth_capture(tmp_path)
-    header, data = sc.load_capture(path)
+    header, data, _ = sc.load_capture(path)
     assert header["version"] == 1
     assert len(data) == 4000
     assert data["cycle_index"][0] == 0
@@ -107,20 +107,20 @@ def test_truncated_file_parses_to_last_whole_record(tmp_path):
     partial_last_record = os.path.getsize(path) - 17
     with open(path, "r+b") as f:
         f.truncate(partial_last_record)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     assert len(data) == 3999
 
 
 def test_motion_segments_found(tmp_path):
     path, _ = synth_capture(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     segs = sc.motion_segments(data["flags"])
     assert segs == [(1000, 2000)]
 
 
 def test_following_error_rms_matches_numpy(tmp_path):
     path, ferr = synth_capture(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
     expected_rms = float(np.sqrt(np.mean(np.round(ferr[1000:2000]) ** 2)))
     assert m["moves"][0]["ferr_rms"] == pytest.approx(expected_rms, rel=0.01)
@@ -129,7 +129,7 @@ def test_following_error_rms_matches_numpy(tmp_path):
 
 def test_resonance_peak_detected_at_80hz(tmp_path):
     path, _ = synth_capture(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     segs = sc.motion_segments(data["flags"])
     freqs, psd = sc.moving_psd(data, segs, fs=1000.0)
     peaks = sc.top_peaks(freqs, psd, count=3)
@@ -138,7 +138,7 @@ def test_resonance_peak_detected_at_80hz(tmp_path):
 
 def test_settling_time_in_expected_range(tmp_path):
     path, _ = synth_capture(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     settle_band = 10
     m = sc.compute_metrics(data, settle_band=settle_band, torque_limit=900)
     decay_crosses_band_ms = (
@@ -153,14 +153,14 @@ def test_settling_time_in_expected_range(tmp_path):
 
 def test_torque_saturation_fraction(tmp_path):
     path, _ = synth_capture(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
     assert m["torque_saturation_pct"] == pytest.approx(25.0, abs=1.0)
 
 
 def test_drive_vs_recomputed_error_consistent(tmp_path):
     path, _ = synth_capture(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
     assert m["ferr_crosscheck_max"] == 0, "synth file must be self-consistent"
 
@@ -183,15 +183,32 @@ def _write_header_only(tmp_path):
 
 def test_empty_capture_loads_zero_records(tmp_path):
     path = _write_header_only(tmp_path)
-    header, data = sc.load_capture(path)
+    header, data, _ = sc.load_capture(path)
     assert len(data) == 0
 
 
 def test_empty_capture_compute_metrics_raises(tmp_path):
     path = _write_header_only(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     with pytest.raises(SystemExit):
         sc.compute_metrics(data, settle_band=10, torque_limit=900)
+
+
+def test_load_capture_no_drives_raises(tmp_path):
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 31,
+        "started_utc": "2026-06-10T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [],
+        "channels": CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "nodrives.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+    with pytest.raises(SystemExit):
+        sc.load_capture(path)
 
 
 MOVE0_WITH_DECAYING_ERROR = slice(1000, 1500)
@@ -256,7 +273,7 @@ def synth_two_move_capture(tmp_path):
 
 def test_per_move_post_window_not_contaminated(tmp_path):
     path = synth_two_move_capture(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     m = sc.compute_metrics(data, settle_band=50, torque_limit=900)
     assert len(m["moves"]) == 2
     move0 = m["moves"][0]
@@ -321,7 +338,7 @@ def synth_500hz_capture(tmp_path):
 
 def test_fs_aware_ms_at_500hz(tmp_path):
     path = synth_500hz_capture(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     fs = 1e9 / 2_000_000
     m = sc.compute_metrics(data, settle_band=10, torque_limit=900, fs=fs)
     move = m["moves"][0]
@@ -335,7 +352,7 @@ def test_fs_aware_ms_at_500hz(tmp_path):
 def test_fs_1khz_values_unchanged(tmp_path):
     """At fs=1000 Hz, sample index == ms — existing numeric expectations unchanged."""
     path, _ = synth_capture(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     m_default = sc.compute_metrics(data, settle_band=10, torque_limit=900)
     m_explicit = sc.compute_metrics(
         data, settle_band=10, torque_limit=900, fs=1000.0
@@ -429,7 +446,7 @@ def test_ff_offset_metrics_cover_only_motion_samples(tmp_path):
         tq_offsets=[500, -120, 3, 0],
         moving_mask=[False, True, True, False],
     )
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     m = sc.compute_metrics(data, 50, 900)
     assert m["ff_velocity_offset_max"] == 327680
     assert m["ff_torque_offset_max"] == 120
@@ -437,6 +454,72 @@ def test_ff_offset_metrics_cover_only_motion_samples(tmp_path):
 
 def test_ff_offset_metrics_absent_for_legacy_captures(tmp_path):
     path, _ = synth_capture(tmp_path)
-    _, data = sc.load_capture(path)
+    _, data, _ = sc.load_capture(path)
     m = sc.compute_metrics(data, 50, 900)
     assert "ff_velocity_offset_max" not in m
+
+
+DRIVE_CHANNELS = [
+    {"name": "cycle_index", "dtype": "u64", "offset": 0},
+    {"name": "flags", "dtype": "u8", "offset": 8},
+    {"name": "target_counts", "dtype": "i32", "offset": 9},
+    {"name": "position_actual", "dtype": "i32", "offset": 13},
+    {"name": "following_error", "dtype": "i32", "offset": 17},
+    {"name": "torque_actual", "dtype": "i16", "offset": 21},
+    {"name": "statusword", "dtype": "u16", "offset": 23},
+    {"name": "error_code", "dtype": "u16", "offset": 25},
+    {"name": "velocity_offset", "dtype": "i32", "offset": 27},
+    {"name": "torque_offset", "dtype": "i16", "offset": 31},
+    {"name": "velocity_actual", "dtype": "i32", "offset": 33},
+]
+
+
+def synth_two_drive_capture(tmp_path, n=200):
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 9 + 2 * 28,
+        "started_utc": "2026-06-12T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": "motor_a", "counts_per_mm": 1000.0},
+            {"name": "motor_b", "counts_per_mm": 2000.0},
+        ],
+        "channels": DRIVE_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "two_drive.scap")
+
+    def block(target):
+        return struct.pack(
+            "<iiihHHihi", target, target, 0, 0, 0x0627, 0, 0, 0, 0
+        )
+
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            f.write(struct.pack("<QB", i, FLAG_TORQUE_ENABLED))
+            f.write(block(10 * i))
+            f.write(block(-10 * i))
+    return path
+
+
+def test_multi_drive_default_selects_first(tmp_path):
+    path = synth_two_drive_capture(tmp_path)
+    header, data, drive_idx = sc.load_capture(path)
+    assert drive_idx == 0
+    assert header["drives"][drive_idx]["name"] == "motor_a"
+    assert data["target_counts"][5] == 50
+
+
+def test_multi_drive_selects_named_drive(tmp_path):
+    path = synth_two_drive_capture(tmp_path)
+    header, data, drive_idx = sc.load_capture(path, "motor_b")
+    assert drive_idx == 1
+    assert header["drives"][drive_idx]["counts_per_mm"] == 2000.0
+    assert data["target_counts"][5] == -50
+
+
+def test_multi_drive_unknown_drive_raises(tmp_path):
+    path = synth_two_drive_capture(tmp_path)
+    with pytest.raises(SystemExit):
+        sc.load_capture(path, "motor_z")

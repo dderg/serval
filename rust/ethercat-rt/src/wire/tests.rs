@@ -218,7 +218,10 @@ fn decode_start_capture_command() {
     let msg = StartCapture {
         path: "/tmp/t.scap".into(),
         started_utc: "2026-06-10T12:00:00Z".into(),
-        drive_name: "x".into(),
+        drives: vec![mcu_protocol::messages::CaptureDrive {
+            slot: 0,
+            name: "x".into(),
+        }],
     };
     let payload = frame_payload(MessageKind::StartCapture, 77, &msg.encoded_to_vec());
     match decode_command(0, &payload).unwrap() {
@@ -229,7 +232,9 @@ fn decode_start_capture_command() {
             assert_eq!(correlation_id, 77);
             assert_eq!(m.path, "/tmp/t.scap");
             assert_eq!(m.started_utc, "2026-06-10T12:00:00Z");
-            assert_eq!(m.drive_name, "x");
+            assert_eq!(m.drives.len(), 1);
+            assert_eq!(m.drives[0].slot, 0);
+            assert_eq!(m.drives[0].name, "x");
         }
         other => panic!("expected StartCapture, got {other:?}"),
     }

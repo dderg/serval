@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ethercat_rt::buzz::BuzzOsc;
 use ethercat_rt::capture::{
-    Capture, CaptureConfig, CaptureRecord, DriveSample, PendingStart, PendingStop,
-    FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED,
+    any_slot_out_of_range, Capture, CaptureConfig, CaptureDriveConfig, CaptureRecord, DriveSample,
+    PendingStart, PendingStop, ERR_CAPTURE_BAD_DRIVE_LIST, FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED,
 };
 use ethercat_rt::claim::{
     all_slaves_reply, eval_wkc, single_slave_reply, wait_for_claim, wait_for_claim_pumping,
@@ -433,6 +433,7 @@ fn main() {
     );
     let mut pending_starts: Vec<(u32, String, PendingStart)> = Vec::new();
     let mut pending_stops: Vec<(u32, PendingStop)> = Vec::new();
+    let mut capture_slots: Vec<u8> = Vec::new();
     let mut prdiv = 0u64;
     let mut ff_saturation = 0u32;
     let mut wkc_consecutive = 0u8;
@@ -577,15 +578,38 @@ fn main() {
                     correlation_id,
                     msg,
                 } => {
-                    let pending = capture.start_async(CaptureConfig {
-                        path: msg.path.clone(),
-                        started_utc: msg.started_utc.clone(),
-                        drive_name: msg.drive_name.clone(),
-                        cycle_ns,
-                        counts_per_mm: counts_per_mm[0],
-                        started_mono_ns: monotonic_ns(),
-                    });
-                    pending_starts.push((correlation_id, msg.path, pending));
+                    let slots: Vec<u8> = msg.drives.iter().map(|d| d.slot).collect();
+                    if any_slot_out_of_range(&slots, num_slaves) {
+                        eprintln!(
+                            "ec-rt: StartCapture drive slot out of range \
+                             (num_slaves={num_slaves}) — rejecting"
+                        );
+                        server.respond(&start_capture_response_frame(
+                            correlation_id,
+                            ERR_CAPTURE_BAD_DRIVE_LIST,
+                        ));
+                    } else {
+                        let drives: Vec<CaptureDriveConfig> = msg
+                            .drives
+                            .iter()
+                            .map(|d| CaptureDriveConfig {
+                                slot: d.slot,
+                                name: d.name.clone(),
+                                counts_per_mm: counts_per_mm[d.slot as usize],
+                            })
+                            .collect();
+                        let pending = capture.start_async(CaptureConfig {
+                            path: msg.path.clone(),
+                            started_utc: msg.started_utc.clone(),
+                            drives,
+                            cycle_ns,
+                            started_mono_ns: monotonic_ns(),
+                        });
+                        if pending.claimed() {
+                            capture_slots = slots;
+                        }
+                        pending_starts.push((correlation_id, msg.path, pending));
+                    }
                 }
                 Command::StopCapture { correlation_id } => {
                     pending_stops.push((correlation_id, capture.stop_async()));
@@ -1274,8 +1298,6 @@ fn main() {
 
         cycle_index += 1;
         if capture.is_active() {
-            let mut t = ffi::EcTelemetry::default();
-            unsafe { ffi::ec_rt_get_telemetry(0, &mut t) };
             let mut flags = 0u8;
             if gate.state() == TorqueState::Enabled {
                 flags |= FLAG_TORQUE_ENABLED;
@@ -1283,10 +1305,12 @@ fn main() {
             if motion_active {
                 flags |= FLAG_MOTION_ACTIVE;
             }
-            capture.push(CaptureRecord {
-                cycle_index,
-                flags,
-                drive: DriveSample {
+            let mut record = CaptureRecord::new(cycle_index, flags);
+            record.drive_count = capture_slots.len() as u8;
+            for (i, &slot) in capture_slots.iter().enumerate() {
+                let mut t = ffi::EcTelemetry::default();
+                unsafe { ffi::ec_rt_get_telemetry(i32::from(slot), &mut t) };
+                record.drives[i] = DriveSample {
                     target_counts: t.target_position,
                     position_actual: t.position_actual,
                     velocity_actual: t.velocity_actual,
@@ -1296,8 +1320,9 @@ fn main() {
                     error_code: t.error_code,
                     velocity_offset: t.velocity_offset,
                     torque_offset: t.torque_offset,
-                },
-            });
+                };
+            }
+            capture.push(record);
         }
 
         let expected_wkc = 3 * num_slaves as i32;

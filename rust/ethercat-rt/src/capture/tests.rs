@@ -17,23 +17,37 @@ fn sample(n: i32) -> DriveSample {
     }
 }
 
+fn record_n(cycle: u64, samples: &[DriveSample]) -> CaptureRecord {
+    let mut r = CaptureRecord::new(cycle, FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE);
+    r.drive_count = samples.len() as u8;
+    r.drives[..samples.len()].copy_from_slice(samples);
+    r
+}
+
 fn record(cycle: u64) -> CaptureRecord {
-    CaptureRecord {
-        cycle_index: cycle,
-        flags: FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE,
-        drive: sample(1000),
+    record_n(cycle, &[sample(1000)])
+}
+
+fn drive_cfg(slot: u8, name: &str) -> CaptureDriveConfig {
+    CaptureDriveConfig {
+        slot,
+        name: name.to_owned(),
+        counts_per_mm: 3276.8,
+    }
+}
+
+fn cfg_drives(path: &Path, drives: Vec<CaptureDriveConfig>) -> CaptureConfig {
+    CaptureConfig {
+        path: path.to_str().unwrap().to_owned(),
+        started_utc: "2026-06-10T12:00:00Z".to_owned(),
+        drives,
+        cycle_ns: 1_000_000,
+        started_mono_ns: 7,
     }
 }
 
 fn cfg(path: &Path) -> CaptureConfig {
-    CaptureConfig {
-        path: path.to_str().unwrap().to_owned(),
-        started_utc: "2026-06-10T12:00:00Z".to_owned(),
-        drive_name: "x".to_owned(),
-        cycle_ns: 1_000_000,
-        counts_per_mm: 3276.8,
-        started_mono_ns: 7,
-    }
+    cfg_drives(path, vec![drive_cfg(0, "x")])
 }
 
 fn tmp_path(tag: &str) -> PathBuf {
@@ -44,36 +58,88 @@ fn tmp_path(tag: &str) -> PathBuf {
     ))
 }
 
+fn distinct_sample(seed: i32) -> DriveSample {
+    DriveSample {
+        target_counts: -2 + seed,
+        position_actual: -1 + seed,
+        velocity_actual: (0x55667788u32 as i32).wrapping_add(seed),
+        following_error: 5 + seed,
+        torque_actual: -300i16.wrapping_add(seed as i16),
+        statusword: 0x0627,
+        error_code: 0x7380,
+        velocity_offset: -654321 + seed,
+        torque_offset: 250i16.wrapping_add(seed as i16),
+    }
+}
+
+fn assert_drive_block(block: &[u8], d: &DriveSample) {
+    assert_eq!(&block[0..4], &d.target_counts.to_le_bytes());
+    assert_eq!(&block[4..8], &d.position_actual.to_le_bytes());
+    assert_eq!(&block[8..12], &d.following_error.to_le_bytes());
+    assert_eq!(&block[12..14], &d.torque_actual.to_le_bytes());
+    assert_eq!(&block[14..16], &d.statusword.to_le_bytes());
+    assert_eq!(&block[16..18], &d.error_code.to_le_bytes());
+    assert_eq!(&block[18..22], &d.velocity_offset.to_le_bytes());
+    assert_eq!(&block[22..24], &d.torque_offset.to_le_bytes());
+    assert_eq!(&block[24..28], &d.velocity_actual.to_le_bytes());
+}
+
 #[test]
 fn record_encodes_to_fixed_little_endian_layout() {
-    let r = CaptureRecord {
-        cycle_index: 0x0102030405060708,
-        flags: 0x03,
-        drive: DriveSample {
-            target_counts: -2,
-            position_actual: -1,
-            velocity_actual: 0x55667788u32 as i32,
-            following_error: 5,
-            torque_actual: -300,
-            statusword: 0x0627,
-            error_code: 0x7380,
-            velocity_offset: -654321,
-            torque_offset: 250,
-        },
-    };
-    let b = encode_record(&r);
-    assert_eq!(b.len(), RECORD_SIZE);
+    let d = distinct_sample(0);
+    let r = record_n(0x0102030405060708, &[d]);
+    let (b, size) = encode_record(&r);
+    assert_eq!(size, 37);
     assert_eq!(&b[0..8], &0x0102030405060708u64.to_le_bytes());
-    assert_eq!(b[8], 0x03);
-    assert_eq!(&b[9..13], &(-2i32).to_le_bytes());
-    assert_eq!(&b[13..17], &(-1i32).to_le_bytes());
-    assert_eq!(&b[17..21], &5i32.to_le_bytes());
-    assert_eq!(&b[21..23], &(-300i16).to_le_bytes());
-    assert_eq!(&b[23..25], &0x0627u16.to_le_bytes());
-    assert_eq!(&b[25..27], &0x7380u16.to_le_bytes());
-    assert_eq!(&b[27..31], &(-654321i32).to_le_bytes());
-    assert_eq!(&b[31..33], &250i16.to_le_bytes());
-    assert_eq!(&b[33..37], &(0x55667788u32 as i32).to_le_bytes());
+    assert_eq!(b[8], FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE);
+    assert_drive_block(&b[9..37], &d);
+}
+
+#[test]
+fn single_drive_record_is_byte_identical_to_pre_change_layout() {
+    let d = DriveSample {
+        target_counts: -2,
+        position_actual: -1,
+        velocity_actual: 0x55667788u32 as i32,
+        following_error: 5,
+        torque_actual: -300,
+        statusword: 0x0627,
+        error_code: 0x7380,
+        velocity_offset: -654321,
+        torque_offset: 250,
+    };
+    let mut r = CaptureRecord::new(0x0102030405060708, 0x03);
+    r.drive_count = 1;
+    r.drives[0] = d;
+
+    let mut expected = [0u8; 37];
+    expected[0..8].copy_from_slice(&0x0102030405060708u64.to_le_bytes());
+    expected[8] = 0x03;
+    expected[9..13].copy_from_slice(&(-2i32).to_le_bytes());
+    expected[13..17].copy_from_slice(&(-1i32).to_le_bytes());
+    expected[17..21].copy_from_slice(&5i32.to_le_bytes());
+    expected[21..23].copy_from_slice(&(-300i16).to_le_bytes());
+    expected[23..25].copy_from_slice(&0x0627u16.to_le_bytes());
+    expected[25..27].copy_from_slice(&0x7380u16.to_le_bytes());
+    expected[27..31].copy_from_slice(&(-654321i32).to_le_bytes());
+    expected[31..33].copy_from_slice(&250i16.to_le_bytes());
+    expected[33..37].copy_from_slice(&(0x55667788u32 as i32).to_le_bytes());
+
+    let (b, size) = encode_record(&r);
+    assert_eq!(size, 37);
+    assert_eq!(&b[..size], &expected[..]);
+}
+
+#[test]
+fn two_drive_record_packs_blocks_back_to_back() {
+    let d0 = distinct_sample(0);
+    let d1 = distinct_sample(11);
+    let r = record_n(7, &[d0, d1]);
+    let (b, size) = encode_record(&r);
+    assert_eq!(size, 9 + 2 * 28);
+    assert_eq!(&b[0..8], &7u64.to_le_bytes());
+    assert_drive_block(&b[9..37], &d0);
+    assert_drive_block(&b[37..65], &d1);
 }
 
 #[test]
@@ -128,9 +194,72 @@ fn lifecycle_start_push_stop_produces_parseable_file() {
     let header = std::str::from_utf8(&bytes[..nl]).unwrap();
     assert!(header.contains("\"version\":1"));
     let body = &bytes[nl + 1..];
-    assert_eq!(body.len(), 50 * RECORD_SIZE);
-    assert_eq!(&body[..RECORD_SIZE], &encode_record(&record(0)));
+    let rsize = record_size(1);
+    assert_eq!(body.len(), 50 * rsize);
+    let (buf0, size0) = encode_record(&record(0));
+    assert_eq!(&body[..rsize], &buf0[..size0]);
     std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn multi_drive_round_trip_writes_two_blocks_per_record() {
+    let path = tmp_path("multi");
+    let _ = std::fs::remove_file(&path);
+    let mut cap = Capture::new();
+    let cfg = cfg_drives(
+        &path,
+        vec![drive_cfg(0, "motor_a"), drive_cfg(3, "motor_b")],
+    );
+    assert_eq!(cap.start(cfg), 0);
+    let samples: Vec<(DriveSample, DriveSample)> = (0..20u64)
+        .map(|i| (distinct_sample(i as i32), distinct_sample(100 + i as i32)))
+        .collect();
+    for (i, (a, b)) in samples.iter().enumerate() {
+        cap.push(record_n(i as u64, &[*a, *b]));
+    }
+    let out = cap.stop();
+    assert_eq!(out.result, 0);
+    assert_eq!(out.samples, 20);
+
+    let bytes = std::fs::read(&path).unwrap();
+    let nl = bytes.iter().position(|&b| b == b'\n').unwrap();
+    let header = std::str::from_utf8(&bytes[..nl]).unwrap();
+    let rsize = record_size(2);
+    assert!(header.contains(&format!("\"record_size\":{rsize}")));
+    assert!(header.contains("\"name\":\"motor_a\""));
+    assert!(header.contains("\"name\":\"motor_b\""));
+
+    let body = &bytes[nl + 1..];
+    assert_eq!(body.len(), 20 * rsize);
+    for (i, (a, b)) in samples.iter().enumerate() {
+        let rec = &body[i * rsize..(i + 1) * rsize];
+        assert_eq!(&rec[0..8], &(i as u64).to_le_bytes());
+        assert_drive_block(&rec[9..37], a);
+        assert_drive_block(&rec[37..65], b);
+    }
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn empty_drive_list_rejected_before_touching_disk() {
+    let path = tmp_path("emptylist");
+    let _ = std::fs::remove_file(&path);
+    let mut cap = Capture::new();
+    let cfg = cfg_drives(&path, vec![]);
+    assert_eq!(cap.start(cfg), ERR_CAPTURE_BAD_DRIVE_LIST);
+    assert!(!cap.is_active());
+    assert!(!path.exists());
+}
+
+#[test]
+fn duplicate_slot_rejected_before_touching_disk() {
+    let path = tmp_path("duplist");
+    let _ = std::fs::remove_file(&path);
+    let mut cap = Capture::new();
+    let cfg = cfg_drives(&path, vec![drive_cfg(1, "a"), drive_cfg(1, "b")]);
+    assert_eq!(cap.start(cfg), ERR_CAPTURE_BAD_DRIVE_LIST);
+    assert!(!cap.is_active());
+    assert!(!path.exists());
 }
 
 #[test]
@@ -167,7 +296,7 @@ fn quote_in_drive_name_rejected_before_touching_disk() {
     let path = tmp_path("badname");
     let mut cap = Capture::new();
     let mut c = cfg(&path);
-    c.drive_name = "x\"evil".to_owned();
+    c.drives[0].name = "x\"evil".to_owned();
     assert_eq!(cap.start(c), ERR_CAPTURE_BAD_ARG);
     assert!(!path.exists());
 }
@@ -286,4 +415,12 @@ fn stop_async_without_start_resolves_not_active_immediately() {
     let mut cap = Capture::new();
     let out = cap.stop_async().try_take().expect("immediate outcome");
     assert_eq!(out.result, ERR_CAPTURE_NOT_ACTIVE);
+}
+
+#[test]
+fn any_slot_out_of_range_flags_only_slots_at_or_above_count() {
+    assert!(!any_slot_out_of_range(&[0, 1, 2], 3));
+    assert!(any_slot_out_of_range(&[0, 3], 3));
+    assert!(!any_slot_out_of_range(&[], 0));
+    assert!(any_slot_out_of_range(&[0], 0));
 }

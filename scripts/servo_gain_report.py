@@ -125,9 +125,9 @@ def resonance_protrusion(freqs, spectrum, lo, hi):
     return worst_ratio, worst_hz, worst_amp
 
 
-def step_metrics(path):
-    header, data = load_capture(path)
-    cpm = header["drives"][0]["counts_per_mm"]
+def step_metrics(path, drive=None):
+    header, data, drive_idx = load_capture(path, drive)
+    cpm = header["drives"][drive_idx]["counts_per_mm"]
     n = len(data)
     t = np.arange(n) / 1000.0
     target = data["target_counts"].astype(np.float64) / cpm
@@ -313,6 +313,11 @@ def main(argv=None):
         "--out-dir", default="~/printer_data/config/servo_calibrate_results"
     )
     p.add_argument("--out", help="explicit output PNG path")
+    p.add_argument(
+        "--drive",
+        help="drive name to analyze in a multi-drive capture "
+        "(default: the first drive in the file)",
+    )
     args = p.parse_args(argv)
 
     if args.captures and args.steps:
@@ -335,7 +340,7 @@ def main(argv=None):
     if not files:
         raise SystemExit("no sweep captures found (tag %r)" % (args.tag,))
 
-    steps = [(gains, step_metrics(path)) for gains, path in files]
+    steps = [(gains, step_metrics(path, args.drive)) for gains, path in files]
 
     if args.out:
         out_path = os.path.expanduser(args.out)
