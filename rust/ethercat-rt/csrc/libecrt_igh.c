@@ -346,6 +346,18 @@ int ec_rt_bringup_preop(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt
             return rc;
         }
     }
+
+    /* Pin slot 0 as the DC reference clock. Without an explicit selection IgH's
+     * auto-pick makes multi-slave clock distribution racy at startup: a
+     * non-reference slave's SYNC0 may not lock in time, and the A6-EC gates
+     * PRE-OP -> SAFE-OP on SYNC0, so it stalls at PRE-OP and the OP walk times
+     * out. Explicit selection lets the reference time distribute deterministically
+     * so every slave's SYNC0 is up before the OP transition. */
+    if (ecrt_master_select_reference_clock(g_master, g_slaves[0].sc) != 0) {
+        fprintf(stderr, "ec_rt: select_reference_clock(slot 0, position %d) failed\n",
+                (int)g_slaves[0].pos);
+        return EC_RT_ERR_EC_INIT;
+    }
     return 0;
 }
 
