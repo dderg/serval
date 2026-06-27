@@ -164,7 +164,10 @@ fn main() {
                             continue;
                         }
                     };
-                state.push(m);
+                if let Err(e) = state.push(m) {
+                    eprintln!("push line {submitted}: {e}");
+                    continue;
+                }
                 submitted += 1;
                 if state.buffered() >= cap {
                     commit_into(&mut state, &mut all, false);

@@ -380,6 +380,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
     let submitter = std::thread::Builder::new()
         .name("test-submitter".into())
         .spawn(move || {
+            let mut start = [50.0, 0.0, 0.0];
             while !stop_sub.load(Ordering::SeqCst) {
                 {
                     let guard = engine_sub.planner.lock().unwrap_or_else(|p| p.into_inner());
@@ -387,7 +388,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
                         break; // shutdown() took the planner; stop submitting.
                     };
                     let m = crate::classify::build_move(
-                        [0.0; 3],
+                        start,
                         50.0,
                         0.0,
                         0.0,
@@ -401,6 +402,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
                     if p.submit_move(m).is_err() {
                         break;
                     }
+                    start[0] += 50.0;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(3));
             }

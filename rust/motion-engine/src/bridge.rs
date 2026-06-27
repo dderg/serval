@@ -3278,6 +3278,16 @@ impl PyMotionEngine {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .clone();
+                // A re-anchor jumps the clock baseline; drop the now-stale history
+                // once, before recording this segment, so a resumed piece is not
+                // compared against pieces on the old timeline (which would read as
+                // out-of-order and abort the dispatch).
+                if fresh {
+                    motion_history_for_cb
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clear();
+                }
                 for m in msgs {
                     let nominal_freq = *nominal_freqs
                         .get(&m.key.mcu_id)

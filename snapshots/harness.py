@@ -45,11 +45,15 @@ BASELINE_SUFFIX = ".baseline.json.gz"
 # bottoms out in the host libm, whose last ulp differs between macOS dev boxes
 # and the Linux CI runner. A sample passes if it is within the absolute OR the
 # relative tolerance — far below any meaningful trajectory change, above libm
-# noise. Structure and integer counts still compare exactly. The snapshot stores
-# only primary planner state (geometry + s, v, heading, kappa); numerically
-# differentiated diagnostics are not stored, so there is no near-zero
-# finite-difference noise to absorb here.
-FLOAT_ATOL = 1e-7
+# noise. Structure and integer counts still compare exactly.
+#
+# The absolute floor also has to absorb a near-zero lowered-trajectory
+# coefficient: an all-but-constant-acceleration cubic piece has a jerk term (c3)
+# that is a catastrophic-cancellation difference of near-equal quantities, so it
+# lands a couple ulp either side of zero across platforms — sub-µm/s³, utterly
+# meaningless, but larger in absolute terms than the relative tolerance can reach
+# that close to zero.
+FLOAT_ATOL = 1e-6
 FLOAT_RTOL = 1e-7
 
 

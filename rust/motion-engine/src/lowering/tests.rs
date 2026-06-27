@@ -63,6 +63,155 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
     }
 }
 
+fn eval_piece(p: &BezierPiece<f64>, t: f64) -> f64 {
+    let z = t - p.u_start;
+    let c = |i: usize| p.coeffs.get(i).copied().unwrap_or(0.0);
+    c(0) + c(1) * z + c(2) * z * z + c(3) * z * z * z
+}
+
+fn vel_piece(p: &BezierPiece<f64>, t: f64) -> f64 {
+    let z = t - p.u_start;
+    let c = |i: usize| p.coeffs.get(i).copied().unwrap_or(0.0);
+    c(1) + 2.0 * c(2) * z + 3.0 * c(3) * z * z
+}
+
+fn peak_accel(axes: &[Vec<BezierPiece<f64>>]) -> f64 {
+    let accel = |p: &BezierPiece<f64>, t: f64| {
+        let z = t - p.u_start;
+        2.0 * p.coeffs[2] + 6.0 * p.coeffs[3] * z
+    };
+    let mut peak = 0.0_f64;
+    for (px, py) in axes[0].iter().zip(&axes[1]) {
+        for k in 0..=64 {
+            let t = px.u_start + (px.u_end - px.u_start) * f64::from(k) / 64.0;
+            peak = peak.max(accel(px, t).hypot(accel(py, t)));
+        }
+    }
+    peak
+}
+
+fn straight_ctx(line_no: u32) -> MoveContext {
+    MoveContext {
+        extruder_axis: 3,
+        feedrate_mm_s: 300.0,
+        limits: VelocityLimits::try_new(300.0, 1000.0, 0.0).unwrap(),
+        source: SourceRange {
+            start_line: line_no,
+            end_line: line_no,
+        },
+    }
+}
+
+fn straight_cfg() -> VelocityConfig {
+    VelocityConfig {
+        max_jerk_mm_s3: 100_000.0,
+        ..VelocityConfig::default()
+    }
+}
+
+#[test]
+fn straight_move_lowers_one_cubic_per_phase_without_accel_overshoot() {
+    let m = line_move([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0, straight_ctx(1)).unwrap();
+    let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).unwrap();
+    let profile = plan_velocity(&outcome, straight_cfg()).unwrap();
+    let vm = &profile.moves[0];
+    assert!(!vm.phases.is_empty(), "straight move should carry phases");
+
+    let (axes, total_t) =
+        lower_move_pieces(&outcome.moves[0], vm, 0.0, &[0.0; 4], FIT_TOL_MM, &[]).unwrap();
+
+    assert_eq!(axes[0].len(), vm.phases.len(), "one cubic per phase");
+    // The grid fit overshot the 1000 cap to ~1170 here; the phase fit is exact.
+    assert!(
+        peak_accel(&axes) <= 1000.0 + 1e-6,
+        "peak |a| = {} exceeds cap",
+        peak_accel(&axes)
+    );
+    let phase_t: f64 = vm.phases.iter().map(|p| p.dt).sum();
+    assert!(
+        (total_t - phase_t).abs() < 1e-12,
+        "total time is the phase sum"
+    );
+    assert!((eval_piece(&axes[0][0], 0.0)).abs() < 1e-9, "starts at 0");
+    let last = axes[0].last().unwrap();
+    assert!(
+        (eval_piece(last, last.u_end) - 10.0).abs() < 1e-9,
+        "ends at 10"
+    );
+}
+
+#[test]
+fn collinear_run_slices_phases_c1_continuous_at_the_seam() {
+    let m0 = line_move([0.0, 0.0, 0.0], [5.0, 0.0, 0.0], 0.0, straight_ctx(1)).unwrap();
+    let m1 = line_move([5.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0, straight_ctx(2)).unwrap();
+    let outcome = fit_chain(&[m0, m1], ChainFitConfig::default()).unwrap();
+    let profile = plan_velocity(&outcome, straight_cfg()).unwrap();
+    assert!(!profile.moves[0].phases.is_empty() && !profile.moves[1].phases.is_empty());
+
+    let (a0, t0) = lower_move_pieces(
+        &outcome.moves[0],
+        &profile.moves[0],
+        0.0,
+        &[0.0; 4],
+        FIT_TOL_MM,
+        &[],
+    )
+    .unwrap();
+    let (a1, t1) = lower_move_pieces(
+        &outcome.moves[1],
+        &profile.moves[1],
+        t0,
+        &[5.0, 0.0, 0.0, 0.0],
+        FIT_TOL_MM,
+        &[],
+    )
+    .unwrap();
+
+    let end0 = a0[0].last().unwrap();
+    let start1 = &a1[0][0];
+    assert!(
+        (eval_piece(end0, end0.u_end) - 5.0).abs() < 1e-7,
+        "seam at x=5"
+    );
+    assert!(
+        (eval_piece(end0, end0.u_end) - eval_piece(start1, start1.u_start)).abs() < 1e-7,
+        "position continuous across the seam"
+    );
+    assert!(
+        (vel_piece(end0, end0.u_end) - vel_piece(start1, start1.u_start)).abs() < 1e-6,
+        "velocity continuous across the seam"
+    );
+    assert!(peak_accel(&a0) <= 1000.0 + 1e-6 && peak_accel(&a1) <= 1000.0 + 1e-6);
+
+    // The two slices retime to the same total as a single 10 mm move.
+    let single = line_move([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0, straight_ctx(1)).unwrap();
+    let so = fit_chain(std::slice::from_ref(&single), ChainFitConfig::default()).unwrap();
+    let sp = plan_velocity(&so, straight_cfg()).unwrap();
+    let single_t: f64 = sp.moves[0].phases.iter().map(|p| p.dt).sum();
+    assert!(
+        (t0 + t1 - single_t).abs() < 1e-9,
+        "sliced time equals the whole move"
+    );
+}
+
+#[test]
+fn linear_pressure_advance_is_exact_cubic_transform() {
+    // pos = 1 + 2t + 3t^2 + 4t^3,  vel = 2 + 6t + 12t^2
+    let mut coeffs = [1.0, 2.0, 3.0, 4.0];
+    let k = 0.05;
+    apply_axis_chain(
+        &mut coeffs,
+        &CompiledChain {
+            stages: vec![ChainStage::LinearPressureAdvance { k }],
+        },
+    );
+    // smoothed = pos + k*vel -> c0+=k*2, c1+=k*6, c2+=k*12, c3 unchanged
+    assert!((coeffs[0] - (1.0 + k * 2.0)).abs() < 1e-12);
+    assert!((coeffs[1] - (2.0 + k * 6.0)).abs() < 1e-12);
+    assert!((coeffs[2] - (3.0 + k * 12.0)).abs() < 1e-12);
+    assert!((coeffs[3] - 4.0).abs() < 1e-12);
+}
+
 fn lower_single(m: geometry::Move, t_start: f64, start_pos: &[f64]) -> ShapedSegment {
     let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).expect("fit");
     let profile = plan_velocity(&outcome, VelocityConfig::default()).expect("plan");

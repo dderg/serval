@@ -312,25 +312,57 @@ class PanelRenderer {
     }
     bctx.stroke();
 
+    // The executed (post-lowered) toolhead path -- the same dense quintic samples the
+    // velocity/accel/jerk panels are derived from, so the path is the same stage as
+    // every graph beside it. The fitted segments (pre-lowering geometry) are used
+    // only to color each stretch by type, mapped onto the executed path by
+    // arc-length fraction so the line/arc/clothoid coloring is preserved.
     const segCount = DATA.segment_count();
-    for (let i = 0; i < segCount; i++) {
-      const typ = DATA.segment_type(i);
-      const d = DATA.segment_data(i);
-      const color = COLORS[typ] || COLORS.line;
-      bctx.beginPath();
-      bctx.strokeStyle = color;
-      bctx.lineWidth = 1.2;
-      if (typ === "line") {
-        bctx.moveTo(this.toPixelX(d[0], xMin, xMax), this.toPixelY(d[1], yMin, yMax));
-        bctx.lineTo(this.toPixelX(d[2], xMin, xMax), this.toPixelY(d[3], yMin, yMax));
-      } else {
-        for (let j = 0; j < d.length; j += 2) {
-          const px = this.toPixelX(d[j], xMin, xMax);
-          const py = this.toPixelY(d[j + 1], yMin, yMax);
-          j === 0 ? bctx.moveTo(px, py) : bctx.lineTo(px, py);
+    const kx = DATA.kin_x(), ky = DATA.kin_y();
+    if (kx.length > 1 && segCount > 0) {
+      const segFracEnd = [];
+      let fitTotal = 0;
+      for (let i = 0; i < segCount; i++) {
+        const typ = DATA.segment_type(i);
+        const d = DATA.segment_data(i);
+        let segLen = 0;
+        if (typ === "line") {
+          segLen = Math.hypot(d[2] - d[0], d[3] - d[1]);
+        } else {
+          for (let j = 2; j < d.length; j += 2) {
+            segLen += Math.hypot(d[j] - d[j - 2], d[j + 1] - d[j - 1]);
+          }
         }
+        fitTotal += segLen;
+        segFracEnd.push(fitTotal);
       }
-      bctx.stroke();
+      for (let i = 0; i < segCount; i++) {
+        segFracEnd[i] = fitTotal > 0 ? segFracEnd[i] / fitTotal : 1;
+      }
+
+      const kinCum = [0];
+      let kinTotal = 0;
+      for (let i = 1; i < kx.length; i++) {
+        kinTotal += Math.hypot(kx[i] - kx[i - 1], ky[i] - ky[i - 1]);
+        kinCum.push(kinTotal);
+      }
+
+      let segIdx = 0, curColor = null;
+      bctx.lineWidth = 1.2;
+      for (let i = 1; i < kx.length; i++) {
+        const midFrac = kinTotal > 0 ? 0.5 * (kinCum[i - 1] + kinCum[i]) / kinTotal : 1;
+        while (segIdx < segCount - 1 && midFrac > segFracEnd[segIdx]) segIdx++;
+        const color = COLORS[DATA.segment_type(segIdx)] || COLORS.line;
+        if (color !== curColor) {
+          if (curColor !== null) bctx.stroke();
+          bctx.beginPath();
+          bctx.strokeStyle = color;
+          bctx.moveTo(this.toPixelX(kx[i - 1], xMin, xMax), this.toPixelY(ky[i - 1], yMin, yMax));
+          curColor = color;
+        }
+        bctx.lineTo(this.toPixelX(kx[i], xMin, xMax), this.toPixelY(ky[i], yMin, yMax));
+      }
+      if (curColor !== null) bctx.stroke();
     }
 
     if (rawX.length > 0) {

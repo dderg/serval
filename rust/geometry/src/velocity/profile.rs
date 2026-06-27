@@ -187,6 +187,101 @@ impl Builder {
     }
 }
 
+/// One constant-jerk phase of a straight-line motion, rebased to its move's local
+/// time and arc-length. On `[t0, t0 + dt]` the arc-length advanced from the move
+/// start is exactly `s0 + v0*tau + a0*tau^2/2 + j*tau^3/6` (`tau = t - t0`), so a
+/// straight move lowers to one exact cubic per phase — no fitting, no overshoot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StraightPhase {
+    pub t0: f64,
+    pub dt: f64,
+    pub s0: f64,
+    pub v0: f64,
+    pub a0: f64,
+    pub j: f64,
+}
+
+impl Profile {
+    /// Per-span closed-form phases, each rebased to span-local time and
+    /// arc-length (`t0 = 0`, `s0 = 0` at the span start). `spans` are
+    /// `(s_start, len)` in the profile's own arc-length — one per move of a
+    /// straight run, so every move lowers from the run's single analytic profile
+    /// and collinear seams stay C1-continuous by construction.
+    pub(super) fn phases_for_spans(&self, spans: &[(f64, f64)]) -> Vec<Vec<StraightPhase>> {
+        let mut timed: Vec<(f64, &Break)> = Vec::with_capacity(self.breaks.len());
+        let mut t = 0.0;
+        for b in &self.breaks {
+            if b.dt <= 0.0 {
+                continue;
+            }
+            timed.push((t, b));
+            t += b.dt;
+        }
+        spans
+            .iter()
+            .map(|&(s0, len)| self.clip(s0, s0 + len, &timed))
+            .collect()
+    }
+
+    fn phase_end_s(&self, i: usize, timed: &[(f64, &Break)]) -> f64 {
+        if i + 1 < timed.len() {
+            timed[i + 1].1.s
+        } else {
+            self.length
+        }
+    }
+
+    fn time_at(&self, s: f64, timed: &[(f64, &Break)]) -> f64 {
+        for (i, &(t0, b)) in timed.iter().enumerate() {
+            if s <= self.phase_end_s(i, timed) + EPS {
+                return t0 + b.solve_tau((s - b.s).max(0.0));
+            }
+        }
+        timed.last().map_or(0.0, |&(t0, b)| t0 + b.dt)
+    }
+
+    fn clip(&self, s_lo: f64, s_hi: f64, timed: &[(f64, &Break)]) -> Vec<StraightPhase> {
+        let t_base = self.time_at(s_lo, timed);
+        let mut out = Vec::new();
+        for (i, &(t0, b)) in timed.iter().enumerate() {
+            let p_end = self.phase_end_s(i, timed);
+            if p_end <= s_lo + EPS || b.s >= s_hi - EPS {
+                continue;
+            }
+            // Use the phase's own exact `0` / `dt` at natural boundaries, so an
+            // interior phase chains bit-exactly (the arc-length `s_hi - b.s` loses
+            // precision against a large `b.s`); only solve for a genuine clip,
+            // which happens once per phase at a move seam.
+            let entry = if s_lo <= b.s + EPS {
+                0.0
+            } else {
+                b.solve_tau(s_lo - b.s)
+            };
+            let exit = if s_hi >= p_end - EPS {
+                b.dt
+            } else {
+                b.solve_tau(s_hi - b.s)
+            };
+            if exit <= entry + EPS {
+                continue;
+            }
+            out.push(StraightPhase {
+                t0: (t0 + entry) - t_base,
+                dt: exit - entry,
+                s0: b.s
+                    + b.v * entry
+                    + 0.5 * b.a * entry * entry
+                    + b.j * entry * entry * entry / 6.0
+                    - s_lo,
+                v0: b.v + b.a * entry + 0.5 * b.j * entry * entry,
+                a0: b.a + b.j * entry,
+                j: b.j,
+            });
+        }
+        out
+    }
+}
+
 /// Plan a triple-limited profile from `v0` to `v1` across `length` under a flat
 /// ceiling `v_max`. Entry and exit sit at zero acceleration (run anchors).
 pub(super) fn plan(v0: f64, v1: f64, length: f64, v_max: f64, a_max: f64, j_max: f64) -> Profile {

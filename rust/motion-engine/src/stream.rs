@@ -13,6 +13,7 @@ use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedS
 use crate::lowering::{LoweringError, lower_move};
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
+const CONTIGUITY_EPS_MM: f64 = 1e-6;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamConfig {
@@ -49,6 +50,17 @@ pub enum StreamError {
         lead_remaining: f64,
         solve_const: f64,
     },
+    /// A move entered the buffer whose spatial start does not meet the toolhead
+    /// where the previous move (or the committed odometer) left it. Real slicer
+    /// output is always position-contiguous; a gap means the move stream was
+    /// stitched wrong upstream. Caught here so the offending move is named at
+    /// ingress, not as a downstream `ZeroMotion` deep in the fitter.
+    Discontinuity {
+        line_no: u32,
+        expected: [f64; 3],
+        got: [f64; 3],
+        gap_mm: f64,
+    },
     PostProcess(PostProcessError),
 }
 
@@ -66,6 +78,17 @@ impl std::fmt::Display for StreamError {
                 f,
                 "brake-to-rest shortfall: locked lead {lead_remaining:.6}s below \
                  solve-time budget {solve_const:.6}s — solve-time constant too short"
+            ),
+            Self::Discontinuity {
+                line_no,
+                expected,
+                got,
+                gap_mm,
+            } => write!(
+                f,
+                "discontinuous move at line {line_no}: starts at {got:?} but the \
+                 toolhead is at {expected:?} ({gap_mm:.6}mm gap) — move stream is \
+                 not position-contiguous"
             ),
             Self::PostProcess(e) => write!(f, "post-processing: {e}"),
         }
@@ -182,8 +205,31 @@ impl StreamState {
         self.post_history.clear();
     }
 
-    pub fn push(&mut self, m: Move) {
+    pub fn push(&mut self, m: Move) -> Result<(), StreamError> {
+        if let Some(seg) = &m.segment.spatial {
+            let got = seg.point_at(0.0);
+            let expected = self.expected_spatial_end();
+            let gap_mm = dist3(expected, got);
+            if gap_mm > CONTIGUITY_EPS_MM {
+                return Err(StreamError::Discontinuity {
+                    line_no: m.source.start_line,
+                    expected,
+                    got,
+                    gap_mm,
+                });
+            }
+        }
         self.buffer.push_back(m);
+        Ok(())
+    }
+
+    fn expected_spatial_end(&self) -> [f64; 3] {
+        for m in self.buffer.iter().rev() {
+            if let Some(seg) = &m.segment.spatial {
+                return seg.point_at(m.segment.s_len());
+            }
+        }
+        [self.odometer[0], self.odometer[1], self.odometer[2]]
     }
 
     pub fn advance_time(&mut self, dt: f64) {
@@ -433,7 +479,6 @@ impl StreamState {
             self.committed_head_len = 0.0;
         } else {
             let keep_line = outcome.moves[commit_count].source.start_line;
-            let head_consumed = blend_consumed_head(&outcome.moves, commit_count);
             while self
                 .buffer
                 .front()
@@ -441,7 +486,24 @@ impl StreamState {
             {
                 self.buffer.pop_front();
             }
-            self.committed_head_len = if head_consumed {
+            // `keep_line` retires moves wholly before the seam, but a move can be
+            // fully committed yet still carry the seam's source line (a collinear
+            // split or coalesced run emits one move as several pieces). Drop any
+            // front whose geometry has already reached the committed odometer so the
+            // trim below never sees a degenerate (zero-length) remainder.
+            while self.front_reached_odometer() {
+                self.buffer.pop_front();
+            }
+            // The clean seam can fall at an internal sub-piece boundary of the kept
+            // raw move — a blend exit, or a collinear split that emits one move as
+            // several line pieces — leaving the raw move starting behind the
+            // committed odometer. Trim it to start exactly at the seam so the next
+            // re-fit's first piece is C0 with what was just emitted, and feed the
+            // consumed head length back as the next fit's blend-budget restore so the
+            // trailing corner re-fits to the curvature it had before the head was
+            // committed (else a shorter front yields a sharper apex and a corner cap
+            // below the already-committed entry velocity — an OverCommitted abort).
+            self.committed_head_len = if self.front_starts_behind_odometer() {
                 self.trim_front_to_seam()?
             } else {
                 0.0
@@ -535,6 +597,35 @@ impl StreamState {
                 false
             }
         }
+    }
+
+    /// Whether the kept front move's geometric start sits behind the committed
+    /// odometer — i.e. the seam landed inside this raw move and part of it was
+    /// already emitted. True at a blend exit and at a collinear split where one raw
+    /// move emitted as several line pieces.
+    fn front_starts_behind_odometer(&self) -> bool {
+        self.buffer
+            .front()
+            .and_then(|m| m.segment.spatial.as_ref())
+            .is_some_and(|seg| {
+                dist3(
+                    seg.point_at(0.0),
+                    [self.odometer[0], self.odometer[1], self.odometer[2]],
+                ) > TRIM_EPS_MM
+            })
+    }
+
+    /// Whether the front move's geometric end has reached the committed odometer —
+    /// the move is fully committed and must be retired rather than trimmed.
+    fn front_reached_odometer(&self) -> bool {
+        self.buffer.front().is_some_and(|m| {
+            m.segment.spatial.as_ref().is_some_and(|seg| {
+                dist3(
+                    seg.point_at(m.segment.s_len()),
+                    [self.odometer[0], self.odometer[1], self.odometer[2]],
+                ) <= TRIM_EPS_MM
+            })
+        })
     }
 
     /// Replace the front buffer move with the portion that survives the seam: a
@@ -835,19 +926,71 @@ fn fit_axis_from_signal(
     }
     let domain_lo = template_pieces.first().expect("checked non-empty").u_start;
     let domain_hi = template_pieces.last().expect("checked non-empty").u_end;
-    let pieces = template_pieces
-        .iter()
-        .map(|piece| {
-            let t0 = piece.u_start;
-            let t1 = piece.u_end;
-            let p0 = finite_sample(axis, sig, t0)?;
-            let p1 = finite_sample(axis, sig, t1)?;
-            let v0 = finite_derivative(axis, sig, t0, t1, domain_lo, domain_hi)?;
-            let v1 = finite_derivative(axis, sig, t1, t0, domain_lo, domain_hi)?;
-            Ok(super::lowering::hermite_cubic(t0, t1, p0, v0, p1, v1))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // The template's breakpoints seed the partition, but the convolved signal can
+    // need finer pieces than the unshaped trajectory had — so refine each span to
+    // the shaper's own tolerance rather than inheriting the template's resolution.
+    let mut pieces = Vec::with_capacity(template_pieces.len());
+    for piece in &template_pieces {
+        refine_shaped_span(
+            axis,
+            sig,
+            piece.u_start,
+            piece.u_end,
+            domain_lo,
+            domain_hi,
+            0,
+            &mut pieces,
+        )?;
+    }
     Ok(bezier_pieces_to_nurbs(&pieces))
+}
+
+const SHAPED_FIT_TOL_MM: f64 = 1e-3;
+const SHAPED_FIT_MAX_DEPTH: u32 = 16;
+const SHAPED_FIT_MIN_SPAN_S: f64 = 5e-5;
+
+fn shaped_hermite(
+    axis: usize,
+    sig: &ShapedSignal<'_>,
+    t0: f64,
+    t1: f64,
+    domain_lo: f64,
+    domain_hi: f64,
+) -> Result<BezierPiece<f64>, PostProcessError> {
+    let p0 = finite_sample(axis, sig, t0)?;
+    let p1 = finite_sample(axis, sig, t1)?;
+    let v0 = finite_derivative(axis, sig, t0, t1, domain_lo, domain_hi)?;
+    let v1 = finite_derivative(axis, sig, t1, t0, domain_lo, domain_hi)?;
+    Ok(super::lowering::hermite_cubic(t0, t1, p0, v0, p1, v1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refine_shaped_span(
+    axis: usize,
+    sig: &ShapedSignal<'_>,
+    t0: f64,
+    t1: f64,
+    domain_lo: f64,
+    domain_hi: f64,
+    depth: u32,
+    out: &mut Vec<BezierPiece<f64>>,
+) -> Result<(), PostProcessError> {
+    let piece = shaped_hermite(axis, sig, t0, t1, domain_lo, domain_hi)?;
+    let mut worst = 0.0_f64;
+    for frac in [0.25_f64, 0.5, 0.75] {
+        let tm = frac.mul_add(t1 - t0, t0);
+        worst = worst.max((piece.evaluate(tm) - finite_sample(axis, sig, tm)?).abs());
+    }
+    if depth >= SHAPED_FIT_MAX_DEPTH
+        || (t1 - t0) <= 2.0 * SHAPED_FIT_MIN_SPAN_S
+        || worst <= SHAPED_FIT_TOL_MM
+    {
+        out.push(piece);
+        return Ok(());
+    }
+    let tm = 0.5 * (t0 + t1);
+    refine_shaped_span(axis, sig, t0, tm, domain_lo, domain_hi, depth + 1, out)?;
+    refine_shaped_span(axis, sig, tm, t1, domain_lo, domain_hi, depth + 1, out)
 }
 
 fn finite_sample(axis: usize, sig: &ShapedSignal<'_>, t: f64) -> Result<f64, PostProcessError> {

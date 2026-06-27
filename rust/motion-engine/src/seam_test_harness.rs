@@ -359,7 +359,7 @@ pub fn run_moves(
     let mut cadence_step = 0usize;
 
     for (i, m) in moves.iter().cloned().enumerate() {
-        state.push(m);
+        state.push(m)?;
         if state.buffered() >= schedule.cadence.cap_for(cadence_step) {
             let segs = state.commit(false)?;
             if !segs.is_empty() {
