@@ -644,7 +644,6 @@ fn vlc_at(ctxs: &[MemberCtx], s_run: f64) -> f64 {
             c.m.kin
                 .flat_ceiling
                 .min(limit_speed(kappa_abs, c.m.kin.accel))
-                .min(jerk_limit_speed(kappa_abs, c.m.kin.sigma, c.m.kin.jerk))
         })
         .fold(f64::INFINITY, f64::min)
 }
@@ -789,10 +788,6 @@ pub(super) fn reconstruct_run(
     for c in &ctxs {
         let s0 = c.m.fwd_s;
         let s1 = c.m.fwd_s + c.m.kin.length;
-        // Member boundaries read the reconstructed profile, not the seam sweep's
-        // velocity-limit junction values: both sides of a seam read the same `flat`
-        // profile, so the speed and acceleration are continuous across it and the
-        // emitted `a` stays the true `dv/dt` rather than a step onto a pinned `v`.
         let mut local: Vec<(f64, f64, f64)> = flat
             .iter()
             .filter(|p| p.0 >= s0 - 1e-9 && p.0 <= s1 + 1e-9)
