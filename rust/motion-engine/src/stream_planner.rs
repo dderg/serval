@@ -8,7 +8,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounde
 use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::pump::AxisKey;
-use crate::stream::{StreamConfig, StreamState};
+use crate::stream::{StreamConfig, StreamError, StreamState};
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
 
@@ -498,7 +498,7 @@ fn run_home_drip(
     let m =
         crate::classify::build_move(p.start, dx, dy, dz, 0, 0.0, state.limits(), p.speed_mm_s, 0)
             .map_err(|e| format!("HomeDrip build_move: {e:?}"))?;
-    state.push(m);
+    state.push(m).map_err(|e| format!("HomeDrip push: {e}"))?;
     let segs = state
         .commit(true)
         .map_err(|e| format!("HomeDrip commit: {e}"))?;
@@ -562,7 +562,7 @@ fn handle_move_arrival(
     m: geometry::Move,
     sync_instant: &mut Option<Instant>,
     tally: &mut IntakeTally,
-) {
+) -> Result<(), StreamError> {
     tracing::info!(
         subsystem = "motion",
         event = "pipe_ingress",
@@ -585,7 +585,7 @@ fn handle_move_arrival(
         state.restart_idle_timeline();
     }
     tally.record_intake(&m);
-    state.push(m);
+    state.push(m)
 }
 
 /// Handle one non-move control message. Returns `true` when the loop should
@@ -748,7 +748,8 @@ fn run_loop(
 
         match msg {
             StreamMsg::Move(m) => {
-                handle_move_arrival(&mut state, m, &mut sync_instant, &mut tally);
+                handle_move_arrival(&mut state, m, &mut sync_instant, &mut tally)
+                    .unwrap_or_else(|e| fatal(&format!("ingress: {e}")));
                 // Coalesce the burst up to COALESCE_BATCH_MOVES, then fit that
                 // batch ONCE. Committing per move re-fits the growing buffer each
                 // time (O(n²)); one fit per bounded batch is O(n) and keeps each
@@ -759,7 +760,8 @@ fn run_loop(
                 while state.buffered() < coalesce_cap {
                     match rx.try_recv() {
                         Ok(StreamMsg::Move(m2)) => {
-                            handle_move_arrival(&mut state, m2, &mut sync_instant, &mut tally);
+                            handle_move_arrival(&mut state, m2, &mut sync_instant, &mut tally)
+                                .unwrap_or_else(|e| fatal(&format!("ingress: {e}")));
                         }
                         Ok(other) => {
                             deferred = Some(other);

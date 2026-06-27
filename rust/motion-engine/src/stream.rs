@@ -13,6 +13,7 @@ use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedS
 use crate::lowering::{LoweringError, lower_move};
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
+const CONTIGUITY_EPS_MM: f64 = 1e-6;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamConfig {
@@ -49,6 +50,17 @@ pub enum StreamError {
         lead_remaining: f64,
         solve_const: f64,
     },
+    /// A move entered the buffer whose spatial start does not meet the toolhead
+    /// where the previous move (or the committed odometer) left it. Real slicer
+    /// output is always position-contiguous; a gap means the move stream was
+    /// stitched wrong upstream. Caught here so the offending move is named at
+    /// ingress, not as a downstream `ZeroMotion` deep in the fitter.
+    Discontinuity {
+        line_no: u32,
+        expected: [f64; 3],
+        got: [f64; 3],
+        gap_mm: f64,
+    },
     PostProcess(PostProcessError),
 }
 
@@ -66,6 +78,17 @@ impl std::fmt::Display for StreamError {
                 f,
                 "brake-to-rest shortfall: locked lead {lead_remaining:.6}s below \
                  solve-time budget {solve_const:.6}s — solve-time constant too short"
+            ),
+            Self::Discontinuity {
+                line_no,
+                expected,
+                got,
+                gap_mm,
+            } => write!(
+                f,
+                "discontinuous move at line {line_no}: starts at {got:?} but the \
+                 toolhead is at {expected:?} ({gap_mm:.6}mm gap) — move stream is \
+                 not position-contiguous"
             ),
             Self::PostProcess(e) => write!(f, "post-processing: {e}"),
         }
@@ -182,8 +205,31 @@ impl StreamState {
         self.post_history.clear();
     }
 
-    pub fn push(&mut self, m: Move) {
+    pub fn push(&mut self, m: Move) -> Result<(), StreamError> {
+        if let Some(seg) = &m.segment.spatial {
+            let got = seg.point_at(0.0);
+            let expected = self.expected_spatial_end();
+            let gap_mm = dist3(expected, got);
+            if gap_mm > CONTIGUITY_EPS_MM {
+                return Err(StreamError::Discontinuity {
+                    line_no: m.source.start_line,
+                    expected,
+                    got,
+                    gap_mm,
+                });
+            }
+        }
         self.buffer.push_back(m);
+        Ok(())
+    }
+
+    fn expected_spatial_end(&self) -> [f64; 3] {
+        for m in self.buffer.iter().rev() {
+            if let Some(seg) = &m.segment.spatial {
+                return seg.point_at(m.segment.s_len());
+            }
+        }
+        [self.odometer[0], self.odometer[1], self.odometer[2]]
     }
 
     pub fn advance_time(&mut self, dt: f64) {
