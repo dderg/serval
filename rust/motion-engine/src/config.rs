@@ -1,6 +1,16 @@
 use thiserror::Error;
 use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, PostProcessorType};
 
+pub(crate) fn heart_kind(name: Option<&str>) -> Result<geometry::HeartKind, String> {
+    match name {
+        None | Some("position_greedy") => Ok(geometry::HeartKind::PositionGreedy),
+        Some("kappa_signal") => Ok(geometry::HeartKind::KappaSignal),
+        Some(other) => Err(format!(
+            "[arc_fit] unknown heart '{other}' (expected 'position_greedy' or 'kappa_signal')"
+        )),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PostProcessorDecl {
     pub name: String,

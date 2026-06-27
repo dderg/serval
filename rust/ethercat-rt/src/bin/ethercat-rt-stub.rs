@@ -9,7 +9,7 @@ use ethercat_rt::capture::{
 };
 use ethercat_rt::claim::{parse_fail_bringup, single_slave_reply, wait_for_claim};
 use ethercat_rt::clock::monotonic_ns;
-use ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAULT, NUM_AXES};
+use ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAULT};
 use ethercat_rt::sdo::{execute_sdo_read, execute_sdo_write, DictObject, DictSdoBus};
 use ethercat_rt::sensorless::{SensorlessArm, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
@@ -229,7 +229,7 @@ fn main() {
                     }
                 }
                 Command::QueryRuntimeCaps { correlation_id } => {
-                    let total: u32 = (AXIS_RING_CAPACITY * NUM_AXES * 32) as u32;
+                    let total: u32 = (AXIS_RING_CAPACITY * 32) as u32;
                     server.respond(&runtime_caps_response_frame(correlation_id, total));
                 }
                 Command::QueryMotorState { .. } => {}

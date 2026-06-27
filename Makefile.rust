@@ -27,20 +27,15 @@ clean-motion-engine:
 	rm -f $(MOTION_ENGINE_DEST)
 	cd rust && cargo clean -p motion-engine
 
-# Hardware EtherCAT endpoint — build.rs compiles csrc/libecrt.c and links SOEM
-# under --features hw; build on the Pi. Never built in CI (no --features hw).
-# SOEM_DIR (headers) and SOEM_LIB_DIR (libsoem.a) both default to ~/ethercat/SOEM
-# in build.rs, so no env is needed for the standard bench layout.
+# Hardware EtherCAT endpoint — build.rs compiles csrc/libecrt_igh.c and links the
+# IgH (EtherLab) kernel master via libethercat under --features hw; build on the
+# Pi. The full link runs only here (libethercat is bench-only), but CI
+# compile-checks this path via `scripts/ci.sh rust-ethercat-hw` (cargo check
+# against the csrc/ci-igh stub header). IGH_DIR (headers under include/) defaults
+# to /opt/etherlab and IGH_LIB_DIR to $IGH_DIR/lib in build.rs, so no env is
+# needed for the standard bench layout.
 ethercat-endpoint-hw:
 	cd rust && cargo build -p ethercat-rt --features hw --bin ethercat-rt --release
-
-# IgH (EtherLab) backend of the same endpoint — build.rs compiles csrc/libecrt_igh.c
-# and links libethercat under --features igh; build on the Pi. Never built in CI.
-# IGH_DIR (headers under include/) defaults to /opt/etherlab and IGH_LIB_DIR to
-# $IGH_DIR/lib in build.rs. The IgH master logic is a skeleton — the endpoint
-# links but exits with EC_RT_ERR_IGH_UNIMPLEMENTED until the port lands.
-ethercat-endpoint-igh:
-	cd rust && cargo build -p ethercat-rt --features igh --bin ethercat-rt --release
 
 # Capabilities so the endpoint runs unprivileged (raw socket, RT sched, mlockall).
 # sudo, once per rebuild of the binary. Not run in CI.
@@ -51,4 +46,4 @@ ethercat-stub:
 	cd rust && cargo build -p ethercat-rt --bin ethercat-rt-stub --release
 
 .PHONY: motion-engine clean-motion-engine \
-	ethercat-endpoint-hw ethercat-endpoint-igh setcap-ethercat ethercat-stub
+	ethercat-endpoint-hw setcap-ethercat ethercat-stub

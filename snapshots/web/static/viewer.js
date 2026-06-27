@@ -135,14 +135,48 @@ function findPeaks(scalar, yMax) {
   return peaks;
 }
 
+// -- WASM array memoization --------------------------------------------------
+// Every TrajectoryData getter copies its whole Vec into a fresh Float64Array
+// across the WASM boundary, so calling them inside per-pointer-event hot paths
+// re-marshalled the entire trajectory on every mouse move. Pull each array once
+// per loaded variant and hand back the cached copy; keep the cheap index/scalar
+// accessors as passthroughs so call sites stay `DATA.t()`.
+const ARRAY_KEYS = [
+  "raw_x", "raw_y", "kin_x", "kin_y", "t",
+  "vx", "vy", "v_scalar", "ax", "ay", "a_scalar", "jx", "jy", "j_scalar",
+];
+
+function memoizeTrajectory(td) {
+  const wrap = { free: () => td.free() };
+  for (const k of ARRAY_KEYS) {
+    const cached = td[k]();
+    wrap[k] = () => cached;
+  }
+  wrap.segment_count = () => td.segment_count();
+  wrap.segment_type = (i) => td.segment_type(i);
+  wrap.segment_data = (i) => td.segment_data(i);
+  wrap.traversal_time = () => td.traversal_time();
+  wrap.blended_corners = () => td.blended_corners();
+  wrap.chain_fits = () => td.chain_fits();
+  wrap.unblended_corners = () => td.unblended_corners();
+  wrap.point_count = () => td.point_count();
+  return wrap;
+}
+
 // -- PanelRenderer -----------------------------------------------------------
 class PanelRenderer {
   constructor(canvasId, type) {
     this.canvas = document.getElementById(canvasId);
     this.ctx = this.canvas.getContext("2d");
+    // Static plot lives on the base canvas (redrawn only on bounds change); the
+    // crosshair/marker are DOM elements moved by CSS transform, so a hover is a
+    // compositor-only reposition — no per-frame canvas raster or texture upload.
+    this.cursor = document.getElementById(`cursor-${type}`);
+    this.cv = this.cursor.querySelector(".cv");
+    this.ch = this.cursor.querySelector(".ch");
+    this.cdot = this.cursor.querySelector(".cdot");
     this.type = type;
     this.margin = { top: 22, right: 14, bottom: 26, left: 56 };
-    this._buf = null;
     this._peaks = [];
     this._resize();
   }
@@ -151,7 +185,7 @@ class PanelRenderer {
     this._ro = new ResizeObserver(() => {
       this._resize();
       lastBoundsKey = "";
-      renderAll();
+      scheduleFull();
     });
     this._ro.observe(this.canvas.parentElement);
   }
@@ -169,6 +203,8 @@ class PanelRenderer {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.plotW = this.w - this.margin.left - this.margin.right;
     this.plotH = this.h - this.margin.top - this.margin.bottom;
+    this.cv.style.height = this.plotH + "px";
+    this.ch.style.width = this.plotW + "px";
   }
 
   get plotX0() { return this.margin.left; }
@@ -185,18 +221,6 @@ class PanelRenderer {
   }
   toDataY(pixelY, dataMin, dataMax) {
     return dataMax - ((pixelY - this.plotY0) / this.plotH) * (dataMax - dataMin);
-  }
-
-  _ensureBuf() {
-    if (!this._buf) this._buf = document.createElement("canvas");
-    const dpr = window.devicePixelRatio || 1;
-    if (this._buf.width !== this.canvas.width || this._buf.height !== this.canvas.height) {
-      this._buf.width = this.canvas.width;
-      this._buf.height = this.canvas.height;
-    }
-    const bctx = this._buf.getContext("2d");
-    bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return bctx;
   }
 
   _drawGrid(ctx, xMin, xMax, yMin, yMax) {
@@ -272,7 +296,7 @@ class PanelRenderer {
     xMin = eq.xMin; xMax = eq.xMax; yMin = eq.yMin; yMax = eq.yMax;
     this._eqPathBounds = eq; // store for compositePath
 
-    const bctx = this._ensureBuf();
+    const bctx = this.ctx;
     bctx.clearRect(0, 0, this.w, this.h);
     this._drawGrid(bctx, xMin, xMax, yMin, yMax);
 
@@ -339,7 +363,7 @@ class PanelRenderer {
 
   // -- Render time-series panel to buffer ------------------------------------
   renderTimeBuffer(tMin, tMax, yMin, yMax, compX, compY, scalar, drawPeaks) {
-    const bctx = this._ensureBuf();
+    const bctx = this.ctx;
     bctx.clearRect(0, 0, this.w, this.h);
     this._drawGrid(bctx, tMin, tMax, yMin, yMax);
 
@@ -391,65 +415,33 @@ class PanelRenderer {
     return best;
   }
 
-  // -- Fast composite: blit buffer + cursor overlay --------------------------
+  // -- Move the DOM cursor; the base plot is never touched -------------------
   composite(tVal, tMin, tMax, showCursor) {
-    const ctx = this.ctx;
-    ctx.clearRect(0, 0, this.w, this.h);
-    if (this._buf) {
-      ctx.drawImage(this._buf, 0, 0, this.w, this.h);
-    }
     if (showCursor && tVal != null && this.type !== "path") {
       const px = this.toPixelX(tVal, tMin, tMax);
       if (px >= this.plotX0 && px <= this.plotX0 + this.plotW) {
-        ctx.save();
-        ctx.strokeStyle = COLORS.crosshair;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath();
-        ctx.moveTo(px, this.plotY0);
-        ctx.lineTo(px, this.plotY0 + this.plotH);
-        ctx.stroke();
-        ctx.restore();
+        this.cv.style.transform = `translate(${px}px,${this.plotY0}px)`;
+        this.cursor.classList.add("on");
+        return;
       }
     }
+    this.cursor.classList.remove("on");
   }
 
   compositePath(idx) {
-    const ctx = this.ctx;
-    ctx.clearRect(0, 0, this.w, this.h);
-    if (this._buf) {
-      ctx.drawImage(this._buf, 0, 0, this.w, this.h);
-    }
-    if (idx == null) return;
+    if (idx == null) { this.cursor.classList.remove("on"); return; }
     const kx = DATA.kin_x(), ky = DATA.kin_y();
-    if (idx >= kx.length) return;
+    if (idx >= kx.length) { this.cursor.classList.remove("on"); return; }
     const pb = this._eqPathBounds || pathView;
     const px = this.toPixelX(kx[idx], pb.xMin, pb.xMax);
     const py = this.toPixelY(ky[idx], pb.yMin, pb.yMax);
 
-    // Crosshair lines on path
-    ctx.save();
-    ctx.strokeStyle = COLORS.crosshair;
-    ctx.lineWidth = 0.7;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(px, this.plotY0);
-    ctx.lineTo(px, this.plotY0 + this.plotH);
-    ctx.moveTo(this.plotX0, py);
-    ctx.lineTo(this.plotX0 + this.plotW, py);
-    ctx.stroke();
-    ctx.restore();
-
-    // Marker dot
-    ctx.save();
-    ctx.beginPath();
-    ctx.fillStyle = COLORS.marker;
-    ctx.strokeStyle = "#14161a";
-    ctx.lineWidth = 2;
-    ctx.arc(px, py, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
+    this.cv.style.transform = `translate(${px}px,${this.plotY0}px)`;
+    this.ch.style.transform = `translate(${this.plotX0}px,${py}px)`;
+    this.cdot.style.transform = `translate(${px}px,${py}px)`;
+    this.ch.style.display = "block";
+    this.cdot.style.display = "block";
+    this.cursor.classList.add("on");
   }
 }
 
@@ -528,6 +520,46 @@ function syncHover(idx) {
   updateReadout(idx);
 }
 
+// -- Frame scheduling --------------------------------------------------------
+// Pointer, wheel and drag events fire faster than the display refreshes (high-
+// poll mice, streaming wheel deltas). Coalesce every redraw into a single
+// requestAnimationFrame so we draw at most once per displayed frame; the view
+// and hover state mutated by the handlers is read when the frame actually runs.
+let frameId = 0;
+let pendingFullRender = false;
+
+function scheduleFull() {
+  pendingFullRender = true;
+  if (!frameId) frameId = requestAnimationFrame(runFrame);
+}
+
+function scheduleHover() {
+  if (!frameId) frameId = requestAnimationFrame(runFrame);
+}
+
+function runFrame() {
+  frameId = 0;
+  if (pendingFullRender) {
+    pendingFullRender = false;
+    renderAll();
+  } else {
+    compositeHover();
+  }
+}
+
+// Blit buffers + cursor for the current hover state, without rebuilding buffers.
+function compositeHover() {
+  const { tMin, tMax } = timeView;
+  if (hoverIdx != null) {
+    syncHover(hoverIdx);
+  } else {
+    for (let i = 1; i < renderers.length; i++) {
+      renderers[i].composite(null, tMin, tMax, false);
+    }
+    renderers[0].compositePath(null);
+  }
+}
+
 // -- Render all buffers (only when bounds change) ----------------------------
 function renderAll() {
   if (!DATA) return;
@@ -569,14 +601,7 @@ function renderAll() {
   }
 
   // Composite all (always — cursor may have moved)
-  if (hoverIdx != null) {
-    syncHover(hoverIdx);
-  } else {
-    for (let i = 1; i < renderers.length; i++) {
-      renderers[i].composite(null, tMin, tMax, false);
-    }
-    renderers[0].compositePath(null);
-  }
+  compositeHover();
 }
 
 // -- Interaction (time panels) -----------------------------------------------
@@ -599,13 +624,13 @@ function setupTimeInteraction(panelIdx) {
       timeView.tMin = dragStartTMin + dt;
       timeView.tMax = dragStartTMax + dt;
       lastBoundsKey = "";
-      renderAll();
+      scheduleFull();
     } else {
       const dataT = r.toDataX(mx, timeView.tMin, timeView.tMax);
       hoverMode = "time";
       hoverTime = dataT;
-      const idx = closestIndex(DATA.t(), dataT);
-      syncHover(idx);
+      hoverIdx = closestIndex(DATA.t(), dataT);
+      scheduleHover();
 
       // Check for nearby peak
       const peak = r.nearestPeak(mx, my, 12);
@@ -626,7 +651,7 @@ function setupTimeInteraction(panelIdx) {
     hoverMode = null;
     hoverXY = null;
     tooltipEl.style.display = "none";
-    renderAll();
+    scheduleHover();
   });
 
   canvas.addEventListener("mousedown", (e) => {
@@ -661,7 +686,7 @@ function setupTimeInteraction(panelIdx) {
       timeView.tMax += dt;
     }
     lastBoundsKey = "";
-    renderAll();
+    scheduleFull();
   }, { passive: false });
 }
 
@@ -688,16 +713,16 @@ function setupPathInteraction() {
       pathView.yMin = dragStartPV.yMin + dy * dppy;
       pathView.yMax = dragStartPV.yMax + dy * dppy;
       lastBoundsKey = "";
-      renderAll();
+      scheduleFull();
     } else {
       const pb = r._eqPathBounds || pathView;
       const dataX = r.toDataX(mx, pb.xMin, pb.xMax);
       const dataY = r.toDataY(my, pb.yMin, pb.yMax);
-      const idx = nearestPathPoint(dataX, dataY);
+      hoverIdx = nearestPathPoint(dataX, dataY);
       hoverMode = "path";
       hoverXY = { x: dataX, y: dataY };
-      hoverTime = DATA.t()[idx];
-      syncHover(idx);
+      hoverTime = DATA.t()[hoverIdx];
+      scheduleHover();
     }
   });
 
@@ -706,7 +731,7 @@ function setupPathInteraction() {
     hoverTime = null;
     hoverMode = null;
     hoverXY = null;
-    renderAll();
+    scheduleHover();
   });
 
   canvas.addEventListener("mousedown", (e) => {
@@ -746,7 +771,7 @@ function setupPathInteraction() {
       pathView.yMax = pb.yMax - e.deltaY * dppy;
     }
     lastBoundsKey = "";
-    renderAll();
+    scheduleFull();
   }, { passive: false });
 }
 
@@ -903,8 +928,8 @@ async function loadCase(name) {
 
   if (dataAfter && typeof dataAfter.free === "function") dataAfter.free();
   if (dataBefore && typeof dataBefore.free === "function") dataBefore.free();
-  dataAfter = new TrajectoryData(JSON.stringify(after));
-  dataBefore = before ? new TrajectoryData(JSON.stringify(before)) : null;
+  dataAfter = memoizeTrajectory(new TrajectoryData(JSON.stringify(after)));
+  dataBefore = before ? memoizeTrajectory(new TrajectoryData(JSON.stringify(before))) : null;
   variant = "after";
   DATA = dataAfter;
 

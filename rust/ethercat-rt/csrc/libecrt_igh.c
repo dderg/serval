@@ -1,24 +1,21 @@
 /*
  * IgH (EtherLab) EtherCAT master backend.
  *
- * Selected by `--features igh` (build.rs compiles this instead of the SOEM
- * libecrt.c and links -lethercat). Implements the full ec_rt_* contract from
- * libecrt.h against IgH's kernel master, matching the SOEM backend's behaviour
- * function-for-function so the Rust endpoint, FFI surface, and the A6-EC drive
- * bring-up sequence are identical regardless of which master is linked.
+ * Built under `--features hw` (build.rs compiles this file and links
+ * -lethercat). Implements the full ec_rt_* contract from libecrt.h against
+ * IgH's kernel master.
  *
- * Master selection differs from SOEM: SOEM opens the NIC by `ifname`; the IgH
- * master is bound to the NIC out-of-band (MASTER0_DEVICE in
+ * The master is bound to the NIC out-of-band (MASTER0_DEVICE in
  * /etc/ethercat.conf, served by the ec_master/ec_generic kernel modules) and
  * is requested here by index 0, so `ifname` is ignored.
  *
- * PDO mapping that SOEM writes at runtime via SDOs to 1C12h/1C13h/1600h/1A00h
- * is expressed declaratively here (ecrt_slave_config_pdos) and applied by the
- * master during its PRE-OP -> SAFE-OP configuration; the byte layout is
- * identical (out_t 18 bytes / in_t 32 bytes). Inputs are read from the domain
- * image with the EC_READ accessors at the offsets the master assigns; outputs
- * are staged in a shadow struct and flushed into the image each cycle (see
- * rt_exchange for why the staging is required).
+ * One chain drives N slaves: one master, one domain, one DC grid. Each slave is
+ * a slot (0-based) configured at the topological ring position the caller passes
+ * in slave_positions[]. The static PDO map (out_t 18 bytes / in_t 32 bytes) is
+ * registered per slave into the single shared domain image; each slot's input
+ * offsets read from its partition with the EC_READ accessors, and its staged
+ * outputs are flushed into the image each cycle (see rt_exchange for why the
+ * staging is required).
  */
 #define _GNU_SOURCE
 #include "libecrt.h"
@@ -31,54 +28,71 @@
 #include <sys/mman.h>
 #include <ecrt.h>
 
-/* Drive identity (ethercat slaves -v): AS715N_sAxis A6-EC servo. */
+/* Drive identity (ethercat slaves -v): AS715N_sAxis A6-EC servo. Every slave on
+ * the chain must match. */
 #define VENDOR_ID    0x00400000u
 #define PRODUCT_CODE 0x00000715u
 #define SLAVE_ALIAS  0
-#define SLAVE_POS    0 /* ring position, 0-based (SOEM's ec_slave[] is 1-based) */
 
-/* DC AssignActivate for SYNC0-only operation; mirrors SOEM's
- * ec_dcsync0(1, TRUE, cycle, cycle/2) (SYNC0 at the cycle period, shifted half
- * a cycle). The A6-EC requires SYNC0 active before SAFE-OP (else AL 0x0030). */
+/* DC AssignActivate for SYNC0-only operation: SYNC0 at the cycle period,
+ * shifted half a cycle. The A6-EC requires SYNC0 active before SAFE-OP (else
+ * AL 0x0030). */
 #define DC_ASSIGN_ACTIVATE 0x0300
 
 #define OUT_BYTES 18
 #define IN_BYTES  32
 
-static ec_master_t       *g_master;
-static ec_domain_t       *g_domain;
-static ec_slave_config_t *g_sc;
-static ec_reg_request_t  *g_al_req; /* reads AL status register 0x0134 for diagnostics */
-static uint8_t           *g_pd;     /* domain process image (the LRW datagram buffer) */
+static ec_master_t *g_master;
+static ec_domain_t *g_domain;
+static uint8_t     *g_pd;     /* domain process image (the LRW datagram buffer) */
 
-/* Output field offsets in the domain image (SM2 / RxPDO 1600h = out_t). */
-static unsigned o_controlword, o_target, o_touch_probe, o_phys_outputs,
-    o_velocity_offset, o_torque_offset;
-/* Input field offsets (SM3 / TxPDO 1A00h = in_t). */
-static unsigned i_error_code, i_statusword, i_position_actual, i_velocity_actual,
-    i_torque_actual, i_following_error, i_tp_status, i_tp1_pos, i_tp2_pos,
-    i_digital_inputs;
+typedef struct {
+    ec_slave_config_t *sc;
+    ec_reg_request_t  *al_req; /* reads AL status register 0x0134 for diagnostics */
+    int32_t            pos;    /* topological ring position (0-based) */
 
-/* Staged outputs. ecrt_master_receive overwrites the domain image's output
- * region with the echo of the previously-sent frame, so a value written
- * directly into the image before the receive would be clobbered. Callers stage
- * here instead; rt_exchange flushes this into the image after receive, just
- * before queue/send. */
-static struct {
-    uint16_t controlword;
-    int32_t  target_position;
-    uint16_t touch_probe;
-    uint32_t phys_outputs;
-    int32_t  velocity_offset;
-    int16_t  torque_offset;
-} g_tx;
+    /* Output field offsets in the domain image (SM2 / RxPDO 1600h = out_t). */
+    unsigned o_controlword, o_target, o_touch_probe, o_phys_outputs,
+        o_velocity_offset, o_torque_offset;
+    /* Input field offsets (SM3 / TxPDO 1A00h = in_t). */
+    unsigned i_error_code, i_statusword, i_position_actual, i_velocity_actual,
+        i_torque_actual, i_following_error, i_tp_status, i_tp1_pos, i_tp2_pos,
+        i_digital_inputs;
+
+    /* Staged outputs. ecrt_master_receive overwrites the domain image's output
+     * region with the echo of the previously-sent frame, so a value written
+     * directly into the image before the receive would be clobbered. Callers
+     * stage here instead; rt_exchange flushes this into the image after receive,
+     * just before queue/send. */
+    struct {
+        uint16_t controlword;
+        int32_t  target_position;
+        uint16_t touch_probe;
+        uint32_t phys_outputs;
+        int32_t  velocity_offset;
+        int16_t  torque_offset;
+    } tx;
+
+    int enabled;
+} slave_t;
+
+static slave_t g_slaves[EC_RT_MAX_SLAVES];
+static int     g_num_slaves;
 
 static int64_t g_cycle_ns;
 static struct timespec g_ts;
-static int g_enabled;
 static int g_activated;
 
 #define TIMESPEC2NS(T) ((uint64_t)(T).tv_sec * 1000000000ULL + (uint64_t)(T).tv_nsec)
+
+/* A slave index out of [0, g_num_slaves) is a pure programming bug in the
+ * caller, never transient — abort loudly rather than read past the array. */
+static void check_idx(int s) {
+    if (s < 0 || s >= g_num_slaves) {
+        fprintf(stderr, "ec_rt: slave index %d out of range [0,%d)\n", s, g_num_slaves);
+        abort();
+    }
+}
 
 static ec_pdo_entry_info_t rx_entries[] = {
     {0x6040, 0x00, 16}, {0x607A, 0x00, 32}, {0x60B8, 0x00, 16},
@@ -142,23 +156,26 @@ static void reanchor_if_stale(void) {
 }
 
 static void flush_outputs(void) {
-    EC_WRITE_U16(g_pd + o_controlword, g_tx.controlword);
-    EC_WRITE_S32(g_pd + o_target, g_tx.target_position);
-    EC_WRITE_U16(g_pd + o_touch_probe, g_tx.touch_probe);
-    EC_WRITE_U32(g_pd + o_phys_outputs, g_tx.phys_outputs);
-    EC_WRITE_S32(g_pd + o_velocity_offset, g_tx.velocity_offset);
-    EC_WRITE_S16(g_pd + o_torque_offset, g_tx.torque_offset);
+    for (int s = 0; s < g_num_slaves; s++) {
+        slave_t *sl = &g_slaves[s];
+        EC_WRITE_U16(g_pd + sl->o_controlword, sl->tx.controlword);
+        EC_WRITE_S32(g_pd + sl->o_target, sl->tx.target_position);
+        EC_WRITE_U16(g_pd + sl->o_touch_probe, sl->tx.touch_probe);
+        EC_WRITE_U32(g_pd + sl->o_phys_outputs, sl->tx.phys_outputs);
+        EC_WRITE_S32(g_pd + sl->o_velocity_offset, sl->tx.velocity_offset);
+        EC_WRITE_S16(g_pd + sl->o_torque_offset, sl->tx.torque_offset);
+    }
 }
 
-/* One DC exchange at a fixed cycle period. The sleep lets the previous cycle's
- * frame round-trip, so the receive at the top refreshes the input image. That
- * same receive overwrites the image's output region with the echo of the
- * previously-sent frame, so the caller's staged outputs (g_tx) are flushed into
- * the image AFTER receive, then queued and sent. DC drift is compensated by the
- * kernel master: application_time anchors the network clock to the
- * CLOCK_MONOTONIC wake grid and sync_reference_clock/sync_slave_clocks
- * distribute it — so, unlike the userspace SOEM master, no application-side
- * phase loop is needed and *toff stays 0. */
+/* One DC exchange at a fixed cycle period covering every slave in the shared
+ * domain. The sleep lets the previous cycle's frame round-trip, so the receive
+ * at the top refreshes the input image. That same receive overwrites the
+ * image's output region with the echo of the previously-sent frame, so every
+ * slave's staged outputs (slave_t.tx) are flushed into the image AFTER receive,
+ * then queued and sent. DC drift is compensated by the kernel master:
+ * application_time anchors the network clock to the CLOCK_MONOTONIC wake grid
+ * and sync_reference_clock/sync_slave_clocks distribute it — so no
+ * application-side phase loop is needed and *toff stays 0. */
 static int rt_exchange(int64_t *toff) {
     add_ts(&g_ts, g_cycle_ns);
     reanchor_if_stale();
@@ -180,9 +197,9 @@ static int rt_exchange(int64_t *toff) {
     return (int)ds.working_counter;
 }
 
-static int reg_entry(uint16_t index, uint8_t sub, unsigned *off) {
+static int reg_entry(slave_t *sl, uint16_t index, uint8_t sub, unsigned *off) {
     unsigned bit = 0;
-    int byte = ecrt_slave_config_reg_pdo_entry(g_sc, index, sub, g_domain, &bit);
+    int byte = ecrt_slave_config_reg_pdo_entry(sl->sc, index, sub, g_domain, &bit);
     if (byte < 0 || bit != 0) {
         fprintf(stderr, "ec_rt: reg_pdo_entry %04X:%02X failed (byte=%d bit=%u)\n",
                 index, sub, byte, bit);
@@ -192,23 +209,39 @@ static int reg_entry(uint16_t index, uint8_t sub, unsigned *off) {
     return 0;
 }
 
-static int register_pdo_entries(void) {
-    return reg_entry(0x6040, 0x00, &o_controlword)
-        || reg_entry(0x607A, 0x00, &o_target)
-        || reg_entry(0x60B8, 0x00, &o_touch_probe)
-        || reg_entry(0x60FE, 0x01, &o_phys_outputs)
-        || reg_entry(0x60B1, 0x00, &o_velocity_offset)
-        || reg_entry(0x60B2, 0x00, &o_torque_offset)
-        || reg_entry(0x603F, 0x00, &i_error_code)
-        || reg_entry(0x6041, 0x00, &i_statusword)
-        || reg_entry(0x6064, 0x00, &i_position_actual)
-        || reg_entry(0x606C, 0x00, &i_velocity_actual)
-        || reg_entry(0x6077, 0x00, &i_torque_actual)
-        || reg_entry(0x60F4, 0x00, &i_following_error)
-        || reg_entry(0x60B9, 0x00, &i_tp_status)
-        || reg_entry(0x60BA, 0x00, &i_tp1_pos)
-        || reg_entry(0x60BC, 0x00, &i_tp2_pos)
-        || reg_entry(0x60FD, 0x00, &i_digital_inputs);
+static int register_pdo_entries(slave_t *sl) {
+    return reg_entry(sl, 0x6040, 0x00, &sl->o_controlword)
+        || reg_entry(sl, 0x607A, 0x00, &sl->o_target)
+        || reg_entry(sl, 0x60B8, 0x00, &sl->o_touch_probe)
+        || reg_entry(sl, 0x60FE, 0x01, &sl->o_phys_outputs)
+        || reg_entry(sl, 0x60B1, 0x00, &sl->o_velocity_offset)
+        || reg_entry(sl, 0x60B2, 0x00, &sl->o_torque_offset)
+        || reg_entry(sl, 0x603F, 0x00, &sl->i_error_code)
+        || reg_entry(sl, 0x6041, 0x00, &sl->i_statusword)
+        || reg_entry(sl, 0x6064, 0x00, &sl->i_position_actual)
+        || reg_entry(sl, 0x606C, 0x00, &sl->i_velocity_actual)
+        || reg_entry(sl, 0x6077, 0x00, &sl->i_torque_actual)
+        || reg_entry(sl, 0x60F4, 0x00, &sl->i_following_error)
+        || reg_entry(sl, 0x60B9, 0x00, &sl->i_tp_status)
+        || reg_entry(sl, 0x60BA, 0x00, &sl->i_tp1_pos)
+        || reg_entry(sl, 0x60BC, 0x00, &sl->i_tp2_pos)
+        || reg_entry(sl, 0x60FD, 0x00, &sl->i_digital_inputs);
+}
+
+/* Stage one slave at its current safe state (target tracks actual, no offsets):
+ * controlword 0x000F if it is already torque-enabled, else 0x0006. Used to hold
+ * the rest of the domain steady while a per-slave control loop walks one slave. */
+static void stage_hold(slave_t *sl) {
+    sl->tx.controlword     = sl->enabled ? 0x000F : 0x0006;
+    sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
+    sl->tx.velocity_offset = 0;
+    sl->tx.torque_offset   = 0;
+}
+
+static void stage_hold_others(int except) {
+    for (int s = 0; s < g_num_slaves; s++) {
+        if (s != except) stage_hold(&g_slaves[s]);
+    }
 }
 
 /* A session that dies mid-OP (an abrupt endpoint exit drops the cyclic frames
@@ -218,40 +251,83 @@ static int register_pdo_entries(void) {
  * cannot re-raise mid-clear the way it can during the post-OP park loop on a
  * still-settling DC clock. Runs in the master's idle phase (pre-activate),
  * where ecrt_master_sdo_* reach the slave's mailbox at PRE-OP. */
-static void clear_latched_alarm_in_preop(void) {
+static void clear_latched_alarm_in_preop(slave_t *sl) {
     uint8_t buf[2];
     size_t rs = 0;
     uint32_t abort = 0;
-    if (ecrt_master_sdo_upload(g_master, SLAVE_POS, 0x603F, 0x00, buf, 2, &rs, &abort) != 0)
+    if (ecrt_master_sdo_upload(g_master, sl->pos, 0x603F, 0x00, buf, 2, &rs, &abort) != 0)
         return;
     uint16_t err = (uint16_t)(buf[0] | (buf[1] << 8));
     if (err == 0) return;
-    fprintf(stderr, "ec_rt: clearing latched drive alarm 0x%04x in PRE-OP\n", err);
+    fprintf(stderr, "ec_rt: clearing latched drive alarm 0x%04x in PRE-OP (slave %d)\n",
+            err, (int)sl->pos);
     uint16_t cw = 0x0000;
-    ecrt_master_sdo_download(g_master, SLAVE_POS, 0x6040, 0x00, (uint8_t *)&cw, 2, &abort);
+    ecrt_master_sdo_download(g_master, sl->pos, 0x6040, 0x00, (uint8_t *)&cw, 2, &abort);
     cw = 0x0080;
-    ecrt_master_sdo_download(g_master, SLAVE_POS, 0x6040, 0x00, (uint8_t *)&cw, 2, &abort);
+    ecrt_master_sdo_download(g_master, sl->pos, 0x6040, 0x00, (uint8_t *)&cw, 2, &abort);
     cw = 0x0000;
-    ecrt_master_sdo_download(g_master, SLAVE_POS, 0x6040, 0x00, (uint8_t *)&cw, 2, &abort);
-    if (ecrt_master_sdo_upload(g_master, SLAVE_POS, 0x603F, 0x00, buf, 2, &rs, &abort) == 0) {
+    ecrt_master_sdo_download(g_master, sl->pos, 0x6040, 0x00, (uint8_t *)&cw, 2, &abort);
+    if (ecrt_master_sdo_upload(g_master, sl->pos, 0x603F, 0x00, buf, 2, &rs, &abort) == 0) {
         err = (uint16_t)(buf[0] | (buf[1] << 8));
         if (err != 0)
-            fprintf(stderr, "ec_rt: drive alarm 0x%04x survived PRE-OP fault reset; "
-                    "the post-OP park loop will keep pulsing\n", err);
+            fprintf(stderr, "ec_rt: drive alarm 0x%04x survived PRE-OP fault reset (slave %d); "
+                    "the post-OP park loop will keep pulsing\n", err, (int)sl->pos);
     }
 }
 
-/* Phase 1: request the master, configure the slave, declare the PDO map, stage
- * the static drive setup as config SDOs (applied by the master in PRE-OP before
- * OP, mirroring SOEM's PRE-OP SDO writes), and arm DC — but do not activate.
- * The master's idle state machine brings the slave to PRE-OP, where the caller
- * does its session SDO work (drive limits) via ecrt_master_sdo_* before phase 2. */
-int ec_rt_bringup_preop(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt_prio) {
+static int configure_slave(slave_t *sl) {
+    sl->sc = ecrt_master_slave_config(g_master, SLAVE_ALIAS, sl->pos,
+                                      VENDOR_ID, PRODUCT_CODE);
+    if (!sl->sc) {
+        fprintf(stderr, "ec_rt: no slave at position %d (vendor 0x%08x product 0x%08x)\n",
+                (int)sl->pos, VENDOR_ID, PRODUCT_CODE);
+        return EC_RT_ERR_NO_SLAVES;
+    }
+
+    if (ecrt_slave_config_pdos(sl->sc, EC_END, syncs) != 0)
+        return EC_RT_ERR_PDO_REMAP;
+    if (register_pdo_entries(sl) != 0)
+        return EC_RT_ERR_PDO_REMAP;
+
+    /* CSP mode and a disabled following-error timeout, then route both
+     * feedforward sources (speed 60B1h, torque 60B2h) to "communication"
+     * (C01.13/C01.16 -> 5) with 0% additional FF (C01.14/C01.17 -> 0). The
+     * master applies them in PRE-OP. A rejected config SDO leaves the slave
+     * short of OP -> OP_TIMEOUT. */
+    ecrt_slave_config_sdo8(sl->sc, 0x6060, 0x00, 8);
+    ecrt_slave_config_sdo16(sl->sc, 0x6066, 0x00, 0);
+    ecrt_slave_config_sdo16(sl->sc, 0x2001, 0x14, 5);
+    ecrt_slave_config_sdo16(sl->sc, 0x2001, 0x15, 0);
+    ecrt_slave_config_sdo16(sl->sc, 0x2001, 0x17, 5);
+    ecrt_slave_config_sdo16(sl->sc, 0x2001, 0x18, 0);
+
+    ecrt_slave_config_dc(sl->sc, DC_ASSIGN_ACTIVATE, (uint32_t)g_cycle_ns,
+                         (int32_t)(g_cycle_ns / 2), 0, 0);
+
+    sl->al_req = ecrt_slave_config_create_reg_request(sl->sc, 2);
+
+    clear_latched_alarm_in_preop(sl);
+    return 0;
+}
+
+/* Phase 1: request the master, configure every slave, declare the PDO maps,
+ * stage the static drive setup as config SDOs (applied by the master in PRE-OP
+ * before OP), and arm DC — but do not activate. The master's idle state machine
+ * brings each slave to PRE-OP, where the caller does its session SDO work (drive
+ * limits) via ecrt_master_sdo_* before phase 2. */
+int ec_rt_bringup_preop(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt_prio,
+                        const int32_t *slave_positions, int num_slaves) {
     (void)ifname; /* the IgH master is bound to the NIC via /etc/ethercat.conf */
+    if (num_slaves < 1 || num_slaves > EC_RT_MAX_SLAVES) {
+        fprintf(stderr, "ec_rt: num_slaves %d outside [1,%d]\n",
+                num_slaves, EC_RT_MAX_SLAVES);
+        return EC_RT_ERR_TOO_MANY_SLAVES;
+    }
     g_cycle_ns = cycle_ns < 250000 ? 250000 : cycle_ns;
-    g_enabled  = 0;
     g_activated = 0;
-    memset(&g_tx, 0, sizeof(g_tx));
+    g_num_slaves = num_slaves;
+    memset(g_slaves, 0, sizeof(g_slaves));
+    for (int s = 0; s < num_slaves; s++) g_slaves[s].pos = slave_positions[s];
 
     int rt_rc = go_realtime(rt_cpu, rt_prio);
     if (rt_rc != 0) return rt_rc;
@@ -262,33 +338,14 @@ int ec_rt_bringup_preop(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt
     g_domain = ecrt_master_create_domain(g_master);
     if (!g_domain) return EC_RT_ERR_EC_INIT;
 
-    g_sc = ecrt_master_slave_config(g_master, SLAVE_ALIAS, SLAVE_POS,
-                                    VENDOR_ID, PRODUCT_CODE);
-    if (!g_sc) return EC_RT_ERR_NO_SLAVES;
-
-    if (ecrt_slave_config_pdos(g_sc, EC_END, syncs) != 0)
-        return EC_RT_ERR_PDO_REMAP;
-    if (register_pdo_entries() != 0)
-        return EC_RT_ERR_PDO_REMAP;
-
-    /* CSP mode and a disabled following-error timeout, then route both
-     * feedforward sources (speed 60B1h, torque 60B2h) to "communication"
-     * (C01.13/C01.16 -> 5) with 0% additional FF (C01.14/C01.17 -> 0). Same
-     * objects and values the SOEM backend writes; the master applies them in
-     * PRE-OP. A rejected config SDO leaves the slave short of OP -> OP_TIMEOUT. */
-    ecrt_slave_config_sdo8(g_sc, 0x6060, 0x00, 8);
-    ecrt_slave_config_sdo16(g_sc, 0x6066, 0x00, 0);
-    ecrt_slave_config_sdo16(g_sc, 0x2001, 0x14, 5);
-    ecrt_slave_config_sdo16(g_sc, 0x2001, 0x15, 0);
-    ecrt_slave_config_sdo16(g_sc, 0x2001, 0x17, 5);
-    ecrt_slave_config_sdo16(g_sc, 0x2001, 0x18, 0);
-
-    ecrt_slave_config_dc(g_sc, DC_ASSIGN_ACTIVATE, (uint32_t)g_cycle_ns,
-                         (int32_t)(g_cycle_ns / 2), 0, 0);
-
-    g_al_req = ecrt_slave_config_create_reg_request(g_sc, 2);
-
-    clear_latched_alarm_in_preop();
+    for (int s = 0; s < num_slaves; s++) {
+        int rc = configure_slave(&g_slaves[s]);
+        if (rc != 0) {
+            fprintf(stderr, "ec_rt: slot %d (position %d) preop config failed rc=%d\n",
+                    s, (int)g_slaves[s].pos, rc);
+            return rc;
+        }
+    }
     return 0;
 }
 
@@ -298,75 +355,119 @@ static uint16_t fault_reset_pulse(int64_t cycle) {
     return ((cycle / 10) % 2) ? 0x0080 : 0x0000;
 }
 
-/* Phase 2: activate the master (it walks the slave PRE-OP -> SAFE-OP -> OP as we
- * cycle, applying the staged config SDOs and DC), stabilize the DC loop, confirm
- * OP, then park at CiA402 Ready-to-Switch-On (no torque). From the first cycle
- * here the caller must never pause process data — every wait goes through the
- * cycle/park helpers, else the SM watchdog drops the drive to SAFE-OP. */
+/* One CiA402 park step for a slave: drive toward Ready-to-Switch-On (0x0021) at
+ * controlword 0x0006, pulsing fault-reset if faulted. Returns 1 once parked. */
+static int park_step(slave_t *sl, int64_t pc) {
+    uint16_t sw = EC_READ_U16(g_pd + sl->i_statusword);
+    sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
+    if (sw & 0x0008) {
+        sl->tx.controlword = fault_reset_pulse(pc);
+        return 0;
+    }
+    if ((sw & 0x006F) == 0x0021) {
+        sl->tx.controlword = 0x0006;
+        sl->enabled = 0;
+        return 1;
+    }
+    sl->tx.controlword = 0x0006;
+    return 0;
+}
+
+/* Phase 2: activate the master (it walks every slave PRE-OP -> SAFE-OP -> OP as
+ * we cycle, applying the staged config SDOs and DC), stabilize the DC loop,
+ * confirm all OP, then park each at CiA402 Ready-to-Switch-On (no torque). From
+ * the first cycle here the caller must never pause process data — every wait
+ * goes through the cycle/park helpers, else the SM watchdog drops a drive to
+ * SAFE-OP. */
 int ec_rt_bringup_finish(void) {
     if (ecrt_master_activate(g_master) != 0) return EC_RT_ERR_EC_INIT;
     g_activated = 1;
 
     g_pd = ecrt_domain_data(g_domain);
     if (!g_pd) return EC_RT_ERR_PDO_SIZE;
-    if (ecrt_domain_size(g_domain) != (size_t)(OUT_BYTES + IN_BYTES)) {
-        fprintf(stderr, "ec_rt: domain size %zu, expected %d\n",
-                ecrt_domain_size(g_domain), OUT_BYTES + IN_BYTES);
+    size_t want = (size_t)(g_num_slaves * (OUT_BYTES + IN_BYTES));
+    if (ecrt_domain_size(g_domain) != want) {
+        fprintf(stderr, "ec_rt: domain size %zu, expected %zu (%d slaves)\n",
+                ecrt_domain_size(g_domain), want, g_num_slaves);
         return EC_RT_ERR_PDO_SIZE;
     }
 
-    memset(&g_tx, 0, sizeof(g_tx));
     int64_t toff = 0;
     clock_gettime(CLOCK_MONOTONIC, &g_ts);
 
-    /* Walk to OP: the master FSM advances the slave PRE-OP -> SAFE-OP -> OP at
-     * roughly one datagram per cycle while we hold controlword 0 / target =
-     * actual. Phase lock is not yet possible — the DC clock isn't running until
-     * OP. The budget is generous (8 s) — the walk applies every config SDO and
-     * the DC handshake, and a cold drive right after power-on is slower. */
-    ec_slave_config_state_t st;
-    int operational = 0;
+    /* Walk every slave to OP: the master FSM advances each PRE-OP -> SAFE-OP ->
+     * OP at roughly one datagram per cycle while we hold controlword 0 / target
+     * = actual. Phase lock is not yet possible — the DC clock isn't running
+     * until OP. The budget is generous (8 s) — the walk applies every config SDO
+     * and the DC handshake, and a cold drive right after power-on is slower. */
+    int all_op = 0;
     for (int64_t i = 0; i < (int64_t)(8.0e9 / g_cycle_ns); i++) {
-        g_tx.controlword = 0;
-        g_tx.target_position = EC_READ_S32(g_pd + i_position_actual);
+        for (int s = 0; s < g_num_slaves; s++) {
+            g_slaves[s].tx.controlword = 0;
+            g_slaves[s].tx.target_position = EC_READ_S32(g_pd + g_slaves[s].i_position_actual);
+        }
         rt_exchange(&toff);
-        ecrt_slave_config_state(g_sc, &st);
-        if (st.operational) { operational = 1; break; }
+        all_op = 1;
+        for (int s = 0; s < g_num_slaves; s++) {
+            ec_slave_config_state_t st;
+            ecrt_slave_config_state(g_slaves[s].sc, &st);
+            if (!st.operational) { all_op = 0; break; }
+        }
+        if (all_op) break;
     }
-    if (!operational) return EC_RT_ERR_OP_TIMEOUT;
+    if (!all_op) {
+        for (int s = 0; s < g_num_slaves; s++) {
+            ec_slave_config_state_t st;
+            ecrt_slave_config_state(g_slaves[s].sc, &st);
+            if (!st.operational)
+                fprintf(stderr, "ec_rt: slot %d (position %d) not OP (al_state=0x%02x)\n",
+                        s, (int)g_slaves[s].pos, st.al_state);
+        }
+        return EC_RT_ERR_OP_TIMEOUT;
+    }
 
     /* DC is running now: settle for 1.5 s with controlword 0 before walking
      * CiA-402, so the SYNC0 alignment is tight and any latched sync error
      * (0x8700) is steady enough for the park loop to reset. */
     for (int64_t i = 0; i < (int64_t)(1.5e9 / g_cycle_ns); i++) {
-        g_tx.controlword = 0;
-        g_tx.target_position = EC_READ_S32(g_pd + i_position_actual);
-        rt_exchange(&toff);
-    }
-    fprintf(stderr, "ec_rt: OP reached; park entry sw=0x%04x err=0x%04x\n",
-            EC_READ_U16(g_pd + i_statusword), EC_READ_U16(g_pd + i_error_code));
-
-    for (int64_t pc = 0; pc < 3000; pc++) {
-        uint16_t sw = EC_READ_U16(g_pd + i_statusword);
-        g_tx.target_position = EC_READ_S32(g_pd + i_position_actual);
-        if (sw & 0x0008) {
-            g_tx.controlword = fault_reset_pulse(pc);
-        } else if ((sw & 0x006F) == 0x0021) {
-            g_tx.controlword = 0x0006;
-            rt_exchange(&toff);
-            g_enabled = 0;
-            return 0;
-        } else {
-            g_tx.controlword = 0x0006;
+        for (int s = 0; s < g_num_slaves; s++) {
+            g_slaves[s].tx.controlword = 0;
+            g_slaves[s].tx.target_position = EC_READ_S32(g_pd + g_slaves[s].i_position_actual);
         }
         rt_exchange(&toff);
     }
-    fprintf(stderr, "ec_rt: CiA402 park timeout sw=0x%04x err=0x%04x\n",
-            EC_READ_U16(g_pd + i_statusword), EC_READ_U16(g_pd + i_error_code));
+    for (int s = 0; s < g_num_slaves; s++)
+        fprintf(stderr, "ec_rt: OP reached slot %d; park entry sw=0x%04x err=0x%04x\n",
+                s, EC_READ_U16(g_pd + g_slaves[s].i_statusword),
+                EC_READ_U16(g_pd + g_slaves[s].i_error_code));
+
+    int parked[EC_RT_MAX_SLAVES] = {0};
+    for (int64_t pc = 0; pc < 3000; pc++) {
+        int all_parked = 1;
+        for (int s = 0; s < g_num_slaves; s++) {
+            if (parked[s]) {
+                g_slaves[s].tx.controlword = 0x0006;
+                g_slaves[s].tx.target_position = EC_READ_S32(g_pd + g_slaves[s].i_position_actual);
+            } else if (park_step(&g_slaves[s], pc)) {
+                parked[s] = 1;
+            } else {
+                all_parked = 0;
+            }
+        }
+        rt_exchange(&toff);
+        if (all_parked) return 0;
+    }
+    for (int s = 0; s < g_num_slaves; s++)
+        if (!parked[s])
+            fprintf(stderr, "ec_rt: CiA402 park timeout slot %d sw=0x%04x err=0x%04x\n",
+                    s, EC_READ_U16(g_pd + g_slaves[s].i_statusword),
+                    EC_READ_U16(g_pd + g_slaves[s].i_error_code));
     return EC_RT_ERR_CIA402_TIMEOUT;
 }
 
-int ec_rt_enable(void) {
+int ec_rt_enable(int slave) {
+    check_idx(slave);
+    slave_t *sl = &g_slaves[slave];
     /*
      * CiA402 enable state machine — masks/values match the CiA402 table:
      *   sw & 0x004F == 0x0040 => Switch-On Disabled: issue 0x0006
@@ -377,23 +478,24 @@ int ec_rt_enable(void) {
      */
     int64_t toff = 0;
     for (int64_t pc = 0; pc < 3000; pc++) {
-        uint16_t sw = EC_READ_U16(g_pd + i_statusword);
-        g_tx.target_position = EC_READ_S32(g_pd + i_position_actual);
+        stage_hold_others(slave);
+        uint16_t sw = EC_READ_U16(g_pd + sl->i_statusword);
+        sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
         if (sw & 0x0008) {
-            g_tx.controlword = fault_reset_pulse(pc);
+            sl->tx.controlword = fault_reset_pulse(pc);
         } else if ((sw & 0x004F) == 0x0040) {
-            g_tx.controlword = 0x0006;
+            sl->tx.controlword = 0x0006;
         } else if ((sw & 0x006F) == 0x0021) {
-            g_tx.controlword = 0x0007;
+            sl->tx.controlword = 0x0007;
         } else if ((sw & 0x006F) == 0x0023) {
-            g_tx.controlword = 0x000F;
+            sl->tx.controlword = 0x000F;
         } else if ((sw & 0x006F) == 0x0027) {
-            g_tx.controlword = 0x000F;
+            sl->tx.controlword = 0x000F;
             rt_exchange(&toff);
-            g_enabled = 1;
+            sl->enabled = 1;
             return 0;
         } else {
-            g_tx.controlword = 0x0000;
+            sl->tx.controlword = 0x0000;
         }
         rt_exchange(&toff);
     }
@@ -401,72 +503,109 @@ int ec_rt_enable(void) {
 }
 
 int ec_rt_cycle(int64_t *toff_ns) {
-    if (g_enabled) {
-        g_tx.controlword = 0x000F;
-    } else {
-        g_tx.controlword = 0x0006;
-        g_tx.target_position = EC_READ_S32(g_pd + i_position_actual);
+    for (int s = 0; s < g_num_slaves; s++) {
+        slave_t *sl = &g_slaves[s];
+        if (sl->enabled) {
+            sl->tx.controlword = 0x000F;
+        } else {
+            sl->tx.controlword = 0x0006;
+            sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
+        }
     }
     return rt_exchange(toff_ns);
 }
 
-void ec_rt_set_target_position(int32_t counts) { g_tx.target_position = counts; }
-int32_t  ec_rt_get_position_actual(void) { return EC_READ_S32(g_pd + i_position_actual); }
-int32_t  ec_rt_get_velocity_actual(void) { return EC_READ_S32(g_pd + i_velocity_actual); }
-uint16_t ec_rt_get_statusword(void)      { return EC_READ_U16(g_pd + i_statusword); }
-uint16_t ec_rt_get_error_code(void)      { return EC_READ_U16(g_pd + i_error_code); }
-int32_t  ec_rt_get_following_error(void) { return EC_READ_S32(g_pd + i_following_error); }
-void ec_rt_set_velocity_offset(int32_t counts_per_s) { g_tx.velocity_offset = counts_per_s; }
-void ec_rt_set_torque_offset(int16_t tenths_pct)     { g_tx.torque_offset = tenths_pct; }
-int16_t  ec_rt_get_torque_actual(void)   { return EC_READ_S16(g_pd + i_torque_actual); }
-
-void ec_rt_get_telemetry(ec_telemetry_t *out) {
-    out->error_code      = EC_READ_U16(g_pd + i_error_code);
-    out->statusword      = EC_READ_U16(g_pd + i_statusword);
-    out->position_actual = EC_READ_S32(g_pd + i_position_actual);
-    out->velocity_actual = EC_READ_S32(g_pd + i_velocity_actual);
-    out->torque_actual   = EC_READ_S16(g_pd + i_torque_actual);
-    out->following_error = EC_READ_S32(g_pd + i_following_error);
-    out->target_position = g_tx.target_position;
-    out->velocity_offset = g_tx.velocity_offset;
-    out->torque_offset   = g_tx.torque_offset;
+void ec_rt_set_target_position(int slave, int32_t counts) {
+    check_idx(slave);
+    g_slaves[slave].tx.target_position = counts;
+}
+int32_t ec_rt_get_position_actual(int slave) {
+    check_idx(slave);
+    return EC_READ_S32(g_pd + g_slaves[slave].i_position_actual);
+}
+int32_t ec_rt_get_velocity_actual(int slave) {
+    check_idx(slave);
+    return EC_READ_S32(g_pd + g_slaves[slave].i_velocity_actual);
+}
+uint16_t ec_rt_get_statusword(int slave) {
+    check_idx(slave);
+    return EC_READ_U16(g_pd + g_slaves[slave].i_statusword);
+}
+uint16_t ec_rt_get_error_code(int slave) {
+    check_idx(slave);
+    return EC_READ_U16(g_pd + g_slaves[slave].i_error_code);
+}
+int32_t ec_rt_get_following_error(int slave) {
+    check_idx(slave);
+    return EC_READ_S32(g_pd + g_slaves[slave].i_following_error);
+}
+void ec_rt_set_velocity_offset(int slave, int32_t counts_per_s) {
+    check_idx(slave);
+    g_slaves[slave].tx.velocity_offset = counts_per_s;
+}
+void ec_rt_set_torque_offset(int slave, int16_t tenths_pct) {
+    check_idx(slave);
+    g_slaves[slave].tx.torque_offset = tenths_pct;
+}
+int16_t ec_rt_get_torque_actual(int slave) {
+    check_idx(slave);
+    return EC_READ_S16(g_pd + g_slaves[slave].i_torque_actual);
 }
 
-int ec_rt_read_limits(uint32_t *ferr_counts, uint16_t *ferr_timeout_ms,
+void ec_rt_get_telemetry(int slave, ec_telemetry_t *out) {
+    check_idx(slave);
+    slave_t *sl = &g_slaves[slave];
+    out->error_code      = EC_READ_U16(g_pd + sl->i_error_code);
+    out->statusword      = EC_READ_U16(g_pd + sl->i_statusword);
+    out->position_actual = EC_READ_S32(g_pd + sl->i_position_actual);
+    out->velocity_actual = EC_READ_S32(g_pd + sl->i_velocity_actual);
+    out->torque_actual   = EC_READ_S16(g_pd + sl->i_torque_actual);
+    out->following_error = EC_READ_S32(g_pd + sl->i_following_error);
+    out->target_position = sl->tx.target_position;
+    out->velocity_offset = sl->tx.velocity_offset;
+    out->torque_offset   = sl->tx.torque_offset;
+}
+
+int ec_rt_read_limits(int slave, uint32_t *ferr_counts, uint16_t *ferr_timeout_ms,
                       uint16_t *torque_tenth_pct) {
+    check_idx(slave);
+    int32_t pos = g_slaves[slave].pos;
     uint8_t buf[4];
     size_t rs = 0;
     uint32_t abort = 0;
-    if (ecrt_master_sdo_upload(g_master, SLAVE_POS, 0x6065, 0x00, buf, 4, &rs, &abort) != 0)
+    if (ecrt_master_sdo_upload(g_master, pos, 0x6065, 0x00, buf, 4, &rs, &abort) != 0)
         return -1;
     memcpy(ferr_counts, buf, 4);
-    if (ecrt_master_sdo_upload(g_master, SLAVE_POS, 0x6066, 0x00, buf, 2, &rs, &abort) != 0)
+    if (ecrt_master_sdo_upload(g_master, pos, 0x6066, 0x00, buf, 2, &rs, &abort) != 0)
         return -2;
     memcpy(ferr_timeout_ms, buf, 2);
-    if (ecrt_master_sdo_upload(g_master, SLAVE_POS, 0x6072, 0x00, buf, 2, &rs, &abort) != 0)
+    if (ecrt_master_sdo_upload(g_master, pos, 0x6072, 0x00, buf, 2, &rs, &abort) != 0)
         return -3;
     memcpy(torque_tenth_pct, buf, 2);
     return 0;
 }
 
-int ec_rt_write_limits(uint32_t ferr_counts, uint16_t torque_tenth_pct) {
+int ec_rt_write_limits(int slave, uint32_t ferr_counts, uint16_t torque_tenth_pct) {
+    check_idx(slave);
+    int32_t pos = g_slaves[slave].pos;
     uint32_t abort = 0;
     uint8_t b4[4];
     memcpy(b4, &ferr_counts, 4);
-    if (ecrt_master_sdo_download(g_master, SLAVE_POS, 0x6065, 0x00, b4, 4, &abort) != 0)
+    if (ecrt_master_sdo_download(g_master, pos, 0x6065, 0x00, b4, 4, &abort) != 0)
         return -1;
     uint8_t b2[2];
     memcpy(b2, &torque_tenth_pct, 2);
-    if (ecrt_master_sdo_download(g_master, SLAVE_POS, 0x6072, 0x00, b2, 2, &abort) != 0)
+    if (ecrt_master_sdo_download(g_master, pos, 0x6072, 0x00, b2, 2, &abort) != 0)
         return -2;
     return 0;
 }
 
-int ec_rt_sdo_read(uint16_t index, uint8_t sub, uint8_t *buf, int *size,
+int ec_rt_sdo_read(int slave, uint16_t index, uint8_t sub, uint8_t *buf, int *size,
                    uint32_t *abort_code) {
+    check_idx(slave);
     size_t rs = 0;
     uint32_t abort = 0;
-    if (ecrt_master_sdo_upload(g_master, SLAVE_POS, index, sub, buf,
+    if (ecrt_master_sdo_upload(g_master, g_slaves[slave].pos, index, sub, buf,
                                (size_t)*size, &rs, &abort) != 0) {
         *abort_code = abort;
         return -1;
@@ -476,10 +615,11 @@ int ec_rt_sdo_read(uint16_t index, uint8_t sub, uint8_t *buf, int *size,
     return 0;
 }
 
-int ec_rt_sdo_write(uint16_t index, uint8_t sub, const uint8_t *buf, int size,
+int ec_rt_sdo_write(int slave, uint16_t index, uint8_t sub, const uint8_t *buf, int size,
                     uint32_t *abort_code) {
+    check_idx(slave);
     uint32_t abort = 0;
-    if (ecrt_master_sdo_download(g_master, SLAVE_POS, index, sub, buf,
+    if (ecrt_master_sdo_download(g_master, g_slaves[slave].pos, index, sub, buf,
                                  (size_t)size, &abort) != 0) {
         *abort_code = abort;
         return -1;
@@ -489,37 +629,42 @@ int ec_rt_sdo_write(uint16_t index, uint8_t sub, const uint8_t *buf, int size,
 }
 
 /*
- * CiA-402 homing-method-35 ("current position is home") drive-frame, run as a
- * self-contained DC loop the way ec_rt_enable() runs its enable loop: every wait
- * goes through rt_exchange so process data never pauses. Preconditions (staged
- * off-loop by the caller): mode = Homing (6061h reads 6), 6098h = 35,
- * 607Ch = offset, drive operation-enabled. 6040h bit 4 (0x10) rising edge starts
- * homing and stays set; 6041h bit 12 = attained, bit 13 = error.
+ * CiA-402 homing-method-35 ("current position is home") drive-frame on one
+ * slave, run as a self-contained DC loop the way ec_rt_enable() runs its enable
+ * loop: every wait goes through rt_exchange so process data never pauses, and
+ * the other slaves are held steady. Preconditions (staged off-loop by the
+ * caller): mode = Homing (6061h reads 6), 6098h = 35, 607Ch = offset, drive
+ * operation-enabled. 6040h bit 4 (0x10) rising edge starts homing and stays set;
+ * 6041h bit 12 = attained, bit 13 = error.
  */
-int ec_rt_run_homing(void) {
+int ec_rt_run_homing(int slave) {
+    check_idx(slave);
+    slave_t *sl = &g_slaves[slave];
     int64_t toff = 0;
     for (int i = 0; i < 8; i++) {
-        g_tx.controlword = 0x000F;
-        g_tx.target_position = EC_READ_S32(g_pd + i_position_actual);
+        stage_hold_others(slave);
+        sl->tx.controlword = 0x000F;
+        sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
         rt_exchange(&toff);
     }
     for (int64_t pc = 0; pc < 3000; pc++) {
-        uint16_t sw = EC_READ_U16(g_pd + i_statusword);
-        g_tx.controlword = 0x001F;
-        g_tx.target_position = EC_READ_S32(g_pd + i_position_actual);
+        stage_hold_others(slave);
+        uint16_t sw = EC_READ_U16(g_pd + sl->i_statusword);
+        sl->tx.controlword = 0x001F;
+        sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
         if (sw & 0x2000) {
-            g_tx.controlword = 0x000F;
+            sl->tx.controlword = 0x000F;
             rt_exchange(&toff);
             return EC_RT_ERR_HOMING_ERROR;
         }
         if (sw & 0x1000) {
-            g_tx.controlword = 0x000F;
+            sl->tx.controlword = 0x000F;
             rt_exchange(&toff);
             return 0;
         }
         rt_exchange(&toff);
     }
-    g_tx.controlword = 0x000F;
+    sl->tx.controlword = 0x000F;
     rt_exchange(&toff);
     return EC_RT_ERR_HOMING_ATTAIN;
 }
@@ -529,52 +674,62 @@ int ec_rt_park_cycle(int64_t *toff_ns) {
         fprintf(stderr, "ec_rt: park_cycle before bringup_finish — PDO map not bound\n");
         abort();
     }
-    g_tx.controlword = 0;
-    g_tx.target_position = EC_READ_S32(g_pd + i_position_actual);
+    for (int s = 0; s < g_num_slaves; s++) {
+        g_slaves[s].tx.controlword = 0;
+        g_slaves[s].tx.target_position = EC_READ_S32(g_pd + g_slaves[s].i_position_actual);
+    }
     return rt_exchange(toff_ns);
 }
 
 /* AL status register 0x0134 via a register request, pumped on the DC grid until
  * the master FSM completes it. Diagnostic-only; called after the DC loop halts. */
-static uint16_t read_al_status_code(void) {
-    if (!g_al_req) return 0;
-    ecrt_reg_request_read(g_al_req, 0x0134, 2);
+static uint16_t read_al_status_code(slave_t *sl) {
+    if (!sl->al_req) return 0;
+    ecrt_reg_request_read(sl->al_req, 0x0134, 2);
     for (int i = 0; i < 50; i++) {
         int64_t t = 0;
         rt_exchange(&t);
-        ec_request_state_t rs = ecrt_reg_request_state(g_al_req);
-        if (rs == EC_REQUEST_SUCCESS) return EC_READ_U16(ecrt_reg_request_data(g_al_req));
+        ec_request_state_t rs = ecrt_reg_request_state(sl->al_req);
+        if (rs == EC_REQUEST_SUCCESS) return EC_READ_U16(ecrt_reg_request_data(sl->al_req));
         if (rs == EC_REQUEST_ERROR) return 0;
     }
     return 0;
 }
 
-void ec_rt_al_status(uint16_t *state, uint16_t *alstatuscode) {
+void ec_rt_al_status(int slave, uint16_t *state, uint16_t *alstatuscode) {
+    check_idx(slave);
+    slave_t *sl = &g_slaves[slave];
     ec_slave_config_state_t st;
-    ecrt_slave_config_state(g_sc, &st);
+    ecrt_slave_config_state(sl->sc, &st);
     *state = (uint16_t)st.al_state;
-    *alstatuscode = read_al_status_code();
+    *alstatuscode = read_al_status_code(sl);
 }
 
-void ec_rt_disable(void) {
-    g_enabled = 0;
+void ec_rt_disable(int slave) {
+    check_idx(slave);
+    slave_t *sl = &g_slaves[slave];
+    sl->enabled = 0;
     for (int i = 0; i < 100; i++) {
-        g_tx.controlword = 0x0006;
-        g_tx.target_position = EC_READ_S32(g_pd + i_position_actual);
-        g_tx.velocity_offset = 0;
-        g_tx.torque_offset = 0;
+        stage_hold_others(slave);
+        sl->tx.controlword = 0x0006;
+        sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
+        sl->tx.velocity_offset = 0;
+        sl->tx.torque_offset = 0;
         int64_t t = 0;
         rt_exchange(&t);
     }
 }
 
 void ec_rt_dump_al_state(void) {
-    ec_slave_config_state_t st;
-    ecrt_slave_config_state(g_sc, &st);
-    uint16_t code = read_al_status_code();
-    fprintf(stderr,
-            "ec_rt: slave al_state=0x%02x online=%u operational=%u al_status=0x%04x\n",
-            st.al_state, st.online, st.operational, code);
+    for (int s = 0; s < g_num_slaves; s++) {
+        slave_t *sl = &g_slaves[s];
+        ec_slave_config_state_t st;
+        ecrt_slave_config_state(sl->sc, &st);
+        uint16_t code = read_al_status_code(sl);
+        fprintf(stderr,
+                "ec_rt: slot %d (position %d) al_state=0x%02x online=%u operational=%u al_status=0x%04x\n",
+                s, (int)sl->pos, st.al_state, st.online, st.operational, code);
+    }
 }
 
 void ec_rt_shutdown(void) {

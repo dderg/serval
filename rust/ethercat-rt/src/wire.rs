@@ -1,7 +1,7 @@
 use mcu_protocol::bootstrap::{IdentifyResponse, IDENTIFY_RESPONSE_BODY_LEN};
 use mcu_protocol::codec::{Decode, Encode};
 use mcu_protocol::messages::{
-    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, ClaimHandshakeReply, EndstopTrip,
+    ArmSensorlessEndstop, ArmSensorlessEndstopResponse, AxisDiag, ClaimHandshakeReply, EndstopTrip,
     MessageKind, MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimitsResponse, ResumeStreamResponse, RuntimeCapsResponse,
     SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome, SeedServoHomeResponse,
@@ -267,6 +267,30 @@ pub fn push_pieces_response_frame(
     control_frame(MessageKind::PushPiecesResponse, cid, &body)
 }
 
+/// One `AxisDiag` per axis the endpoint pushed, in `(axis_idx, front_start_time)`
+/// order. The bridge matches each axis' transit diag by `axis_idx`, so a
+/// multi-axis PushPieces needs every axis echoed back in one response.
+pub fn push_pieces_response_frame_multi(
+    cid: u32,
+    result: i32,
+    arrival_clock: u64,
+    axes: &[(u8, u64)],
+) -> Vec<u8> {
+    let body = PushPiecesResponse {
+        result,
+        arrival_clock,
+        axes: axes
+            .iter()
+            .map(|&(axis_idx, front_start_time)| AxisDiag {
+                axis_idx,
+                front_start_time,
+            })
+            .collect(),
+    }
+    .encoded_to_vec();
+    control_frame(MessageKind::PushPiecesResponse, cid, &body)
+}
+
 pub fn set_drive_limits_response_frame(cid: u32, result: i32) -> Vec<u8> {
     let body = SetDriveLimitsResponse { result }.encoded_to_vec();
     control_frame(MessageKind::SetDriveLimitsResponse, cid, &body)
@@ -337,12 +361,24 @@ fn mm_to_q16(mm: f64) -> i32 {
 }
 
 pub fn motor_state_response_frame(correlation_id: u32, pos_mm: f64, vel_mm_s: f64) -> Vec<u8> {
+    motor_state_response_frame_multi(correlation_id, &[(0, pos_mm, vel_mm_s)])
+}
+
+/// One `MotorSample` per slot, in `(slot, pos_mm, vel_mm_s)` order, so the host
+/// receives the full chain's state in a single query.
+pub fn motor_state_response_frame_multi(
+    correlation_id: u32,
+    samples: &[(u8, f64, f64)],
+) -> Vec<u8> {
     let resp = MotorStateResponse {
-        motors: vec![MotorSample {
-            slot: 0,
-            pos_q16: mm_to_q16(pos_mm),
-            vel_q16: mm_to_q16(vel_mm_s),
-        }],
+        motors: samples
+            .iter()
+            .map(|&(slot, pos_mm, vel_mm_s)| MotorSample {
+                slot,
+                pos_q16: mm_to_q16(pos_mm),
+                vel_q16: mm_to_q16(vel_mm_s),
+            })
+            .collect(),
     };
     control_frame(
         MessageKind::MotorStateResponse,

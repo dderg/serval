@@ -223,6 +223,21 @@ jobs:
       - name: Build release staticlib + run c_smoke_build test
         run: ./scripts/ci.sh c-smoke
 
+  rust-ethercat-hw:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: ethercat-hw
+      - name: Compile-check the IgH hw endpoint against the CI ecrt.h stub
+        run: ./scripts/ci.sh rust-ethercat-hw
+
   rust-deny:
     needs: changes
     if: needs.changes.outputs.rust == 'true'

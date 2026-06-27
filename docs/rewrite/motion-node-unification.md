@@ -185,7 +185,7 @@ drive being off (the stepper MCU is USB-powered).
 - **Protocol** (`PushPieces` 0x0060, `PushPiecesResponse` 0x0061, `StatusHeartbeat`
   0x0083, `retired_counts`) is **sota-native** — byte-identical on both branches,
   zero porting.
-- **Endpoint driver-comms:** the SOEM/ecrt DC loop + PDO mapping (`wkc != 3` fault
+- **Endpoint driver-comms:** the IgH/ecrt DC loop + PDO mapping (`wkc != 3` fault
   halt), `server.rs` non-blocking discipline, `wire`/`scale`/`clock`/`ffi`,
   `csrc/libecrt.h`, stub binary, `ec-test-client`, `stub_loop` test.
 - **Host bridge:** `mcu_serial_conn.rs` (UDS McuCall + heartbeat callback),

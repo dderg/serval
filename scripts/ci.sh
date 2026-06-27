@@ -95,6 +95,22 @@ job_c_smoke() {
         --test c_smoke_build
 }
 
+# The hw EtherCAT endpoint (`--features hw`) links libethercat, present only on
+# the bench Pi, so it is built nowhere else — its compile errors otherwise only
+# surface on a flash. `cargo check` runs build.rs (compiling csrc/libecrt_igh.c
+# via cc against the committed CI stub of ecrt.h) and typechecks the binary,
+# catching both the C and Rust compile errors without linking libethercat.
+# Linux-only: libecrt_igh.c uses Linux sched/clock APIs absent on macOS.
+job_rust_ethercat_hw() {
+    if [ "$(uname -s)" != Linux ]; then
+        echo "rust-ethercat-hw: skipped on $(uname -s) (libecrt_igh.c needs Linux sched/clock APIs)"
+        return 0
+    fi
+    cd "$RUST"
+    IGH_DIR="$RUST/ethercat-rt/csrc/ci-igh" \
+        cargo check -p ethercat-rt --features hw --bin ethercat-rt
+}
+
 job_deny() {
     if command -v cargo-deny >/dev/null 2>&1; then
         cargo deny --manifest-path "$RUST/Cargo.toml" check
@@ -229,6 +245,7 @@ run_all() {
     if [ "$quick" != "true" ]; then
         run_check "cbindgen-drift"  job_cbindgen_drift
         run_check "c-smoke"         job_c_smoke
+        run_check "rust-ethercat-hw" job_rust_ethercat_hw
         run_check "rust-mcu-h7"     job_rust_mcu_h7
         run_check "rust-mcu-f4"     job_rust_mcu_f4
         run_check "rust-mcu-g0"     job_rust_mcu_g0
@@ -279,6 +296,7 @@ case "${1:-all}" in
     rust-no-stepper)  job_rust_no_stepper ;;
     cbindgen-drift)   job_cbindgen_drift ;;
     c-smoke)          job_c_smoke ;;
+    rust-ethercat-hw) job_rust_ethercat_hw ;;
     deny)             job_deny ;;
     miri)             job_miri ;;
     panic-grep)       job_panic_grep ;;
