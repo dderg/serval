@@ -200,7 +200,7 @@ fn main() {
         .iter()
         .map(|c| (c.abs() * TARGET_JUMP_LOG_MM).round() as i64)
         .collect();
-    let mut framed = false;
+    let mut framed = vec![false; num_slaves];
     let mut seed_home_inflight: Option<u32> = None;
     let mut seed_home_slot: u8 = 0;
     let mut seed_home_homing_rc: i32 = 0;
@@ -657,7 +657,7 @@ fn main() {
                             ethercat_rt::buzz::ERR_BUZZ_STREAMING
                         }
                     } else {
-                        let base_counts = if framed {
+                        let base_counts = if framed[0] {
                             unsafe { ffi::ec_rt_get_position_actual(0) }
                         } else {
                             0
@@ -737,28 +737,26 @@ fn main() {
                     }
                 }
                 Command::QueryMotorState { correlation_id } => {
-                    if framed {
-                        let samples: Vec<(u8, f64, f64)> = (0..num_slaves)
-                            .map(|s| {
-                                let slot = s as std::os::raw::c_int;
-                                let (pos_counts, vel_rpm) = unsafe {
-                                    (
-                                        ffi::ec_rt_get_position_actual(slot),
-                                        ffi::ec_rt_get_velocity_actual(slot),
-                                    )
-                                };
-                                let pos_mm = f64::from(pos_counts) / cmd_counts_per_mm[s];
-                                let vel_mm_s = cmd_counts_per_mm[s].signum()
-                                    * ethercat_rt::scale::velocity_mm_s(
-                                        vel_rpm,
-                                        rotation_distance[s],
-                                    );
-                                (s as u8, pos_mm, vel_mm_s)
-                            })
-                            .collect();
-                        server.respond(&motor_state_response_frame_multi(correlation_id, &samples));
-                    } else {
+                    let samples: Vec<(u8, f64, f64)> = (0..num_slaves)
+                        .filter(|&s| framed[s])
+                        .map(|s| {
+                            let slot = s as std::os::raw::c_int;
+                            let (pos_counts, vel_rpm) = unsafe {
+                                (
+                                    ffi::ec_rt_get_position_actual(slot),
+                                    ffi::ec_rt_get_velocity_actual(slot),
+                                )
+                            };
+                            let pos_mm = f64::from(pos_counts) / cmd_counts_per_mm[s];
+                            let vel_mm_s = cmd_counts_per_mm[s].signum()
+                                * ethercat_rt::scale::velocity_mm_s(vel_rpm, rotation_distance[s]);
+                            (s as u8, pos_mm, vel_mm_s)
+                        })
+                        .collect();
+                    if samples.is_empty() {
                         server.respond(&motor_state_empty_frame(correlation_id));
+                    } else {
+                        server.respond(&motor_state_response_frame_multi(correlation_id, &samples));
                     }
                 }
                 Command::Unknown { kind_raw, .. } => {
@@ -897,8 +895,10 @@ fn main() {
                         eprintln!("ec-rt: SeedServoHome CSP restore failed rc={rc}");
                         ERR_SEED_HOME_RESTORE
                     } else {
-                        framed = true;
-                        eprintln!("ec-rt: SeedServoHome complete — framed=true");
+                        framed[seed_home_slot as usize] = true;
+                        eprintln!(
+                            "ec-rt: SeedServoHome complete — slot {seed_home_slot} framed=true"
+                        );
                         0
                     };
                     seed_home_homing_rc = 0;
@@ -985,7 +985,7 @@ fn main() {
                         None
                     }
                 } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = rings[s].sample(now) {
-                    let counts = if framed {
+                    let counts = if framed[s] {
                         mm_to_counts(f64::from(pos_mm), cmd_counts_per_mm[s])
                     } else {
                         let cpm = cmd_counts_per_mm[s];
@@ -1284,7 +1284,7 @@ fn main() {
                     torque_offset = t.torque_offset,
                     motion = !all_empty_now,
                     ff_sat = ff_saturation,
-                    framed,
+                    framed = framed[s],
                     "per-slot drive telemetry"
                 );
             }
