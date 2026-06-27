@@ -26,7 +26,6 @@ class ServoCapture:
     def _resolve_node(self, gcmd):
         from . import servo_axis
 
-        servo = gcmd.get("SERVO", None)
         toolhead = self.printer.lookup_object("toolhead")
         servo_rails = [
             rail
@@ -35,15 +34,36 @@ class ServoCapture:
         ]
         if not servo_rails:
             raise gcmd.error("SERVO_CAPTURE: no servo motors configured")
+        rail = self._select_rail(gcmd, servo_rails)
+        motor_name = rail.get_motor_name()
+        node = self.printer.lookup_object(
+            "ethercat_node " + rail.get_node_name()
+        )
+        return node, node.get_slot_for_motor(motor_name), motor_name
+
+    def _select_rail(self, gcmd, servo_rails):
+        axis = gcmd.get("AXIS", None)
+        servo = gcmd.get("SERVO", None)
+        if axis is not None and servo is not None:
+            raise gcmd.error("SERVO_CAPTURE: pass AXIS= or SERVO=, not both")
         known = ", ".join(rail.get_motor_name() for rail in servo_rails)
-        if servo is None:
-            if len(servo_rails) != 1:
+        if axis is not None:
+            on_axis = [
+                r for r in servo_rails if r.get_name(short=True) == axis.lower()
+            ]
+            if not on_axis:
+                axes = ", ".join(r.get_name(short=True) for r in servo_rails)
                 raise gcmd.error(
-                    "SERVO_CAPTURE: multiple servo motors configured (%s); "
-                    "SERVO= is required" % (known,)
+                    "SERVO_CAPTURE: no servo on axis %r (have: %s)"
+                    % (axis, axes)
                 )
-            rail = servo_rails[0]
-        else:
+            if len(on_axis) > 1:
+                raise gcmd.error(
+                    "SERVO_CAPTURE: axis %r drives multiple servos (%s); "
+                    "SERVO= is required" % (axis, known)
+                )
+            return on_axis[0]
+        if servo is not None:
             rail = next(
                 (
                     r
@@ -62,15 +82,18 @@ class ServoCapture:
                     "SERVO_CAPTURE: no servo motor named %r (known: %s)"
                     % (servo, known)
                 )
-        motor_name = rail.get_motor_name()
-        node = self.printer.lookup_object(
-            "ethercat_node " + rail.get_node_name()
-        )
-        return node, node.get_slot_for_motor(motor_name), motor_name
+            return rail
+        if len(servo_rails) != 1:
+            raise gcmd.error(
+                "SERVO_CAPTURE: multiple servo motors configured (%s); "
+                "AXIS= or SERVO= is required" % (known,)
+            )
+        return servo_rails[0]
 
     cmd_SERVO_CAPTURE_START_help = (
-        "Start a servo telemetry capture (1 kHz). Wrap test moves and finish "
-        "with M400 before SERVO_CAPTURE_STOP."
+        "Start a servo telemetry capture (1 kHz). Target the drive with AXIS= "
+        "or SERVO= (motor name). Wrap test moves and finish with M400 before "
+        "SERVO_CAPTURE_STOP."
     )
 
     def cmd_SERVO_CAPTURE_START(self, gcmd):

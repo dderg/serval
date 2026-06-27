@@ -251,12 +251,12 @@ endpoint: rust/target/release/ethercat-rt-stub
 
 ## Servo telemetry capture (multi-drive)
 
-`SERVO_CAPTURE_START SERVO=<servo>` records that servo's drive on its
-`[ethercat_node]`, even when the node carries several drives — the host resolves
-`SERVO=` to a `(node, slot)` exactly like `SERVO_PARAM` and tells the endpoint
-which slot to sample. `SERVO=` accepts the axis letter (`x`/`y`/`z`) or the
-`[motor <name>]` name, so nothing depends on the motor being named `motor_<axis>`;
-the calibration macros pass the axis. The `.scap` file holds one drive block per captured drive;
+`SERVO_CAPTURE_START AXIS=<axis>` records the servo on that axis on its
+`[ethercat_node]`, even when the node carries several drives — the host resolves the
+target to a `(node, slot)` and tells the endpoint which slot to sample.
+`SERVO=<motor name>` also works for a direct by-name capture. The calibration macros
+already know their axis, so they pass `AXIS=` — nothing depends on the motor being
+named `motor_<axis>`. The `.scap` file holds one drive block per captured drive;
 today the host lists a single slot, but the format and wire message already carry
 N drives time-aligned on the shared 1 kHz DC cycle (a future CoreXY axis expands
 to multiple slots with no format change). A single-drive capture is byte-identical

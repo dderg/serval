@@ -83,10 +83,10 @@ class FakeGcmd:
         self.responses.append(msg)
 
 
-def make_servo_rail(motor_name, node_name, slot=0):
+def make_servo_rail(motor_name, node_name, slot=0, axis=None):
     rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
     rail.name = "servo " + motor_name
-    rail.axis = motor_name
+    rail.axis = axis if axis is not None else motor_name
     rail.node_name = node_name
     rail.motor_name = motor_name
     return rail
@@ -175,6 +175,31 @@ def test_start_on_multi_drive_node_resolves_each_motor_to_its_slot():
         handle, _path, _utc, drives = engine.start_calls[0]
         assert handle == 9
         assert drives == [expected]
+
+
+def test_start_resolves_by_axis_regardless_of_motor_name():
+    rail_x = make_servo_rail("baz", "node_xy", axis="x")
+    rail_y = make_servo_rail("foobar", "node_xy", axis="y")
+    gcode = FakeGcode()
+    engine = FakeEngine()
+    objs = {
+        "gcode": gcode,
+        "motion_engine": engine,
+        "toolhead": FakeToolhead(FakeKin([rail_x, rail_y])),
+        "ethercat_node node_xy": FakeNode(9, {"baz": 0, "foobar": 1}),
+    }
+    servo_capture.ServoCapture(FakeConfig(FakePrinter(objs)))
+    gcode.commands["SERVO_CAPTURE_START"](FakeGcmd(AXIS="Y"))
+    handle, _path, _utc, drives = engine.start_calls[0]
+    assert handle == 9
+    assert drives == [(1, "foobar")]
+
+
+def test_start_rejects_axis_and_servo_together():
+    _, gcode, engine = make_capture()
+    with pytest.raises(RuntimeError):
+        gcode.commands["SERVO_CAPTURE_START"](FakeGcmd(AXIS="x", SERVO="x"))
+    assert engine.start_calls == []
 
 
 def assert_fresh_start_possible(gcode):
