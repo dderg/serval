@@ -84,6 +84,26 @@ def test_ident_cmd_without_physical_params():
     ]
 
 
+def _header_with(rotation=None):
+    drive = {"name": "x", "counts_per_mm": 3276.8}
+    if rotation is not None:
+        drive["rotation_distance"] = rotation
+    return {"drives": [drive]}
+
+
+def test_rotation_distance_taken_from_header_when_not_overridden():
+    assert sfd.resolve_rotation_distance(_args(), _header_with(40.0), 0) == 40.0
+
+
+def test_rotation_distance_cli_overrides_header():
+    args = _args(rotation_distance_mm=18.0)
+    assert sfd.resolve_rotation_distance(args, _header_with(40.0), 0) == 18.0
+
+
+def test_rotation_distance_missing_from_old_header_is_none():
+    assert sfd.resolve_rotation_distance(_args(), _header_with(None), 0) is None
+
+
 def test_ident_cmd_appends_physical_params():
     cmd = sfd.ident_cmd(
         "/bin/servo-ident",

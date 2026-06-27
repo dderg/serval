@@ -33,6 +33,7 @@ fn drive_cfg(slot: u8, name: &str) -> CaptureDriveConfig {
         slot,
         name: name.to_owned(),
         counts_per_mm: 3276.8,
+        rotation_distance: 40.0,
     }
 }
 
@@ -156,6 +157,7 @@ fn header_is_one_json_line_describing_the_record() {
         "\"started_mono_ns\":7",
         "\"name\":\"x\"",
         "\"counts_per_mm\":3276.8",
+        "\"rotation_distance\":40",
         "{\"name\":\"cycle_index\",\"dtype\":\"u64\",\"offset\":0}",
         "{\"name\":\"flags\",\"dtype\":\"u8\",\"offset\":8}",
         "{\"name\":\"target_counts\",\"dtype\":\"i32\",\"offset\":9}",

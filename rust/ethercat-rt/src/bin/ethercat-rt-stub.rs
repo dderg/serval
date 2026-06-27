@@ -31,6 +31,7 @@ static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 const STUB_CYCLE_NS: i64 = 1_000_000;
 const STUB_COUNTS_PER_MM: f64 = 3_276.8;
+const STUB_ROTATION_DISTANCE: f64 = 40.0;
 
 extern "C" fn on_sigterm(_: libc::c_int) {
     SIGTERM_RECEIVED.store(true, Ordering::Release);
@@ -396,6 +397,7 @@ fn main() {
                             slot: d.slot,
                             name: d.name.clone(),
                             counts_per_mm: STUB_COUNTS_PER_MM,
+                            rotation_distance: STUB_ROTATION_DISTANCE,
                         })
                         .collect();
                     let drive_count = drives.len();

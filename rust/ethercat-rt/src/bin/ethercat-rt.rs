@@ -596,6 +596,7 @@ fn main() {
                                 slot: d.slot,
                                 name: d.name.clone(),
                                 counts_per_mm: counts_per_mm[d.slot as usize],
+                                rotation_distance: rotation_distance[d.slot as usize],
                             })
                             .collect();
                         let pending = capture.start_async(CaptureConfig {

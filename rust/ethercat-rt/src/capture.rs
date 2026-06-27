@@ -85,6 +85,7 @@ pub struct CaptureDriveConfig {
     pub slot: u8,
     pub name: String,
     pub counts_per_mm: f64,
+    pub rotation_distance: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,8 +189,8 @@ pub fn header_json(cfg: &CaptureConfig) -> String {
             drives.push(',');
         }
         drives.push_str(&format!(
-            "{{\"name\":\"{}\",\"counts_per_mm\":{}}}",
-            d.name, d.counts_per_mm
+            "{{\"name\":\"{}\",\"counts_per_mm\":{},\"rotation_distance\":{}}}",
+            d.name, d.counts_per_mm, d.rotation_distance
         ));
     }
     format!(
