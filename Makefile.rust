@@ -29,9 +29,11 @@ clean-motion-engine:
 
 # Hardware EtherCAT endpoint — build.rs compiles csrc/libecrt_igh.c and links the
 # IgH (EtherLab) kernel master via libethercat under --features hw; build on the
-# Pi. Never built in CI (no --features hw). IGH_DIR (headers under include/)
-# defaults to /opt/etherlab and IGH_LIB_DIR to $IGH_DIR/lib in build.rs, so no env
-# is needed for the standard bench layout.
+# Pi. The full link runs only here (libethercat is bench-only), but CI
+# compile-checks this path via `scripts/ci.sh rust-ethercat-hw` (cargo check
+# against the csrc/ci-igh stub header). IGH_DIR (headers under include/) defaults
+# to /opt/etherlab and IGH_LIB_DIR to $IGH_DIR/lib in build.rs, so no env is
+# needed for the standard bench layout.
 ethercat-endpoint-hw:
 	cd rust && cargo build -p ethercat-rt --features hw --bin ethercat-rt --release
 

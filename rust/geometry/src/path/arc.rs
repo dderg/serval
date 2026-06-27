@@ -59,7 +59,7 @@ impl CurvatureProfile for Arc {
     }
 
     fn kappa(&self, _s: f64) -> f64 {
-        1.0 / self.radius
+        self.sweep.signum() / self.radius
     }
 
     fn dkappa_ds(&self, _s: f64) -> f64 {
@@ -67,12 +67,11 @@ impl CurvatureProfile for Arc {
     }
 
     fn kappa_peak(&self) -> (f64, f64) {
-        let kappa = 1.0 / self.radius;
-        (0.0, kappa)
+        (0.0, 1.0 / self.radius)
     }
 
     fn kappa_endpoints(&self) -> (f64, f64) {
-        let kappa = 1.0 / self.radius;
+        let kappa = self.sweep.signum() / self.radius;
         (kappa, kappa)
     }
 }

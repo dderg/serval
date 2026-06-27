@@ -8,11 +8,7 @@ pub const CLOCK_FREQ_HZ: f32 = 1_000_000_000.0;
 
 pub const AXIS_RING_CAPACITY: usize = 1024;
 
-pub const NUM_AXES: usize = 1;
-
 pub const EC_DC_PERIOD_NS: u32 = 1_000_000;
-
-pub const EC_AXIS_IDX: usize = 0;
 
 pub const FAULT_REG_NONE: u32 = 0;
 
@@ -48,10 +44,15 @@ pub struct AxisRing {
     desc: RingDescriptor,
     armed: Option<ArmedPiece>,
     fault: AtomicU32,
+    slot: usize,
 }
 
 impl AxisRing {
     pub fn new() -> Self {
+        Self::with_slot(0)
+    }
+
+    pub fn with_slot(slot: usize) -> Self {
         Self {
             storage: [PieceEntry {
                 start_time: 0,
@@ -63,6 +64,7 @@ impl AxisRing {
             desc: RingDescriptor::new(0, AXIS_RING_CAPACITY),
             armed: None,
             fault: AtomicU32::new(FAULT_REG_NONE),
+            slot,
         }
     }
 
@@ -101,6 +103,7 @@ impl AxisRing {
     }
 
     pub fn sample(&mut self, now_ns: u64) -> Option<(f32, f32, f32)> {
+        let slot = self.slot;
         let AxisRing {
             ref mut armed,
             ref mut desc,
@@ -116,7 +119,7 @@ impl AxisRing {
             now_ns,
             EC_DC_PERIOD_NS,
             CLOCK_FREQ_HZ,
-            EC_AXIS_IDX,
+            slot,
             &sink,
         )?;
         let p = armed

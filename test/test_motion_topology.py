@@ -173,6 +173,7 @@ class CaptureEngine:
         kin_axes,
         cartesian_limits,
         arc_fit=None,
+        heart=None,
         max_extrude_only_velocity=None,
         max_extrude_only_accel=None,
     ):
@@ -181,6 +182,7 @@ class CaptureEngine:
             "kinematics_axes": kin_axes,
             "cartesian_limits": cartesian_limits,
             "arc_fit": arc_fit,
+            "heart": heart,
             "max_extrude_only_velocity": max_extrude_only_velocity,
             "max_extrude_only_accel": max_extrude_only_accel,
         }
@@ -197,6 +199,7 @@ def test_init_planner_passes_claimed_axes():
     motion.max_z_accel = 100.0
     motion._square_corner_velocity = 8.0
     motion.arc_fit = None
+    motion.arc_fit_heart = None
     motion._planner_ready = False
     engine = CaptureEngine()
     motion.engine = engine
@@ -218,3 +221,4 @@ def test_init_planner_passes_claimed_axes():
     cartesian_limits = engine.init_planner_args["cartesian_limits"]
     assert cartesian_limits == (300.0, 3000.0, 6000.0, 15.0, 100.0, 8.0)
     assert engine.init_planner_args["arc_fit"] is None
+    assert engine.init_planner_args["heart"] is None

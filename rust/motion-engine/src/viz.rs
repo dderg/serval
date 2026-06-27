@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 #[pyfunction]
-#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None))]
+#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, heart = None))]
 pub fn pipeline_snapshot(
     py: Python<'_>,
     waypoints: Vec<(f64, f64, f64, f64)>,
@@ -13,6 +13,7 @@ pub fn pipeline_snapshot(
     square_corner_velocity: f64,
     max_jerk: f64,
     arc_fit: Option<u32>,
+    heart: Option<String>,
 ) -> PyResult<Py<PyDict>> {
     if waypoints.len() < 2 {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -22,7 +23,7 @@ pub fn pipeline_snapshot(
 
     let limits = geometry::VelocityLimits::try_new(max_velocity, max_accel, square_corner_velocity)
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    let chain_cfg = arc_fit_config(arc_fit)?;
+    let chain_cfg = arc_fit_config(arc_fit, heart.as_deref())?;
 
     let moves = build_moves(&waypoints, limits)?;
     let raw_points = extract_raw_path(&moves);
@@ -112,16 +113,24 @@ fn segment_to_pydict<'py>(
     Ok(d)
 }
 
-fn arc_fit_config(arc_fit: Option<u32>) -> PyResult<geometry::ChainFitConfig> {
+fn arc_fit_config(arc_fit: Option<u32>, heart: Option<&str>) -> PyResult<geometry::ChainFitConfig> {
+    let heart =
+        crate::config::heart_kind(heart).map_err(pyo3::exceptions::PyValueError::new_err)?;
     let Some(min_run_facets) = arc_fit else {
-        return Ok(geometry::ChainFitConfig::default());
+        return Ok(geometry::ChainFitConfig {
+            heart,
+            ..geometry::ChainFitConfig::default()
+        });
     };
     if min_run_facets < 3 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "[arc_fit] min_run_facets must be at least 3",
         ));
     }
-    Ok(geometry::ChainFitConfig::with_arc_fit(min_run_facets))
+    Ok(geometry::ChainFitConfig {
+        heart,
+        ..geometry::ChainFitConfig::with_arc_fit(min_run_facets)
+    })
 }
 
 fn build_moves(
