@@ -21,6 +21,7 @@ use ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAULT};
 use ethercat_rt::dynamics::{clamp_torque, DynamicsModel};
 use ethercat_rt::ffi;
 use ethercat_rt::mailbox::{MailboxReply, MailboxRequest, MailboxWorker, WorkerScheduling};
+use ethercat_rt::push_plan::plan_bundle;
 use ethercat_rt::scale::{mm_to_counts, CountMap};
 use ethercat_rt::sdo::SdoBus;
 use ethercat_rt::seed_home::{
@@ -52,6 +53,12 @@ static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 /// preempts the master's receive busy-poll.
 const MAILBOX_RT_PRIO: i32 = 40;
 
+/// A commanded target stepping more than this many mm in one DC cycle is
+/// physically impossible for these axes (2 mm/cycle at 1 kHz is 2 m/s) — it is a
+/// trajectory discontinuity, the signature the drive latches as Er87.1. Log the
+/// offending command so the jump is visible the cycle it happens, not inferred.
+const TARGET_JUMP_LOG_MM: f64 = 2.0;
+
 extern "C" fn on_sigterm(_: libc::c_int) {
     SIGTERM_RECEIVED.store(true, Ordering::Release);
 }
@@ -60,6 +67,28 @@ fn arg_val(args: &[String], key: &str) -> Option<String> {
     args.iter()
         .position(|a| a == key)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+/// Emit each slave's EtherCAT AL state so a failed bringup shows which slave is
+/// stuck and where (al_state: 0x01=Init 0x02=PreOp 0x04=SafeOp 0x08=Op,
+/// +0x10=error bit; al_code carries the reason, e.g. 0x001b SM watchdog,
+/// 0x001a/0x002c/0x0030 DC sync). Routed through the structured pipeline so a
+/// flaky multi-restart connect is diagnosable instead of inferred.
+fn log_al_states(num_slaves: usize, stage: &str) {
+    for s in 0..num_slaves {
+        let mut al_state = 0u16;
+        let mut al_code = 0u16;
+        unsafe { ffi::ec_rt_al_status(s as std::os::raw::c_int, &mut al_state, &mut al_code) };
+        tracing::warn!(
+            subsystem = "ethercat",
+            event = "al_state",
+            stage,
+            slot = s,
+            al_state,
+            al_code,
+            "slave AL state at bringup stage"
+        );
+    }
 }
 
 struct FfiSdoBus;
@@ -124,6 +153,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ifname = args.get(1).cloned().unwrap_or_else(|| "eth0".into());
     let socket = arg_val(&args, "--socket").unwrap_or_else(|| "/tmp/kalico-ethercat.sock".into());
+    if let Some(events_dir) = arg_val(&args, "--events-dir") {
+        ethercat_rt::obs::init(
+            std::path::Path::new(&events_dir),
+            format!("ec-{}", std::process::id()),
+        );
+    }
     let cycle_us: i64 = arg_val(&args, "--cycle-us")
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000);
@@ -133,6 +168,17 @@ fn main() {
     });
     let num_slaves = slaves.len();
     let counts_per_mm: Vec<f64> = slaves.iter().map(|s| s.counts_per_mm).collect();
+    let invert: Vec<bool> = slaves.iter().map(|s| s.invert).collect();
+    let cmd_counts_per_mm: Vec<f64> = slaves
+        .iter()
+        .map(|s| {
+            if s.invert {
+                -s.counts_per_mm
+            } else {
+                s.counts_per_mm
+            }
+        })
+        .collect();
     let rotation_distance: Vec<f64> = slaves.iter().map(|s| s.rotation_distance).collect();
     let slave_positions: Vec<i32> = slaves.iter().map(|s| s.pos).collect();
     let slave_axes: Vec<u8> = slaves.iter().map(|s| s.axis).collect();
@@ -171,7 +217,12 @@ fn main() {
     let mut rings: Vec<AxisRing> = (0..num_slaves).map(AxisRing::with_slot).collect();
     let mut buzz = BuzzOsc::new();
     let mut cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
-    let mut framed = false;
+    let mut last_counts: Vec<Option<i32>> = vec![None; num_slaves];
+    let jump_log_counts: Vec<i64> = cmd_counts_per_mm
+        .iter()
+        .map(|c| (c.abs() * TARGET_JUMP_LOG_MM).round() as i64)
+        .collect();
+    let mut framed = vec![false; num_slaves];
     let mut seed_home_inflight: Option<u32> = None;
     let mut seed_home_slot: u8 = 0;
     let mut seed_home_homing_rc: i32 = 0;
@@ -179,12 +230,17 @@ fn main() {
     let mut heartbeat_sent = false;
 
     let mut server = FrameServer::bind(&socket).expect("bind socket");
-    eprintln!(
-        "ec-rt: socket {socket}, cycle {cycle_us}us, {num_slaves} slave(s) \
-         positions={slave_positions:?} counts/mm={counts_per_mm:?} \
-         rotation_distance={rotation_distance:?} velocity_ff={velocity_ff:?} \
-         dynamics={} clamp={torque_clamp_tenths:?}",
-        dynamics.is_some()
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "bringup_start",
+        num_slaves,
+        cycle_us,
+        positions = format!("{slave_positions:?}"),
+        counts_per_mm = format!("{counts_per_mm:?}"),
+        invert = format!("{invert:?}"),
+        velocity_ff = format!("{velocity_ff:?}"),
+        dynamics = dynamics.is_some(),
+        "endpoint starting bringup"
     );
 
     unsafe {
@@ -195,7 +251,12 @@ fn main() {
     }
 
     fn bringup_fail(server: &mut FrameServer, rc: i32) -> ! {
-        eprintln!("ec-rt: bringup failed rc={rc}, sending handshake-fail then exiting");
+        tracing::error!(
+            subsystem = "ethercat",
+            event = "bringup_fail",
+            rc,
+            "bringup failed; sending handshake-fail then exiting"
+        );
         let claim_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         if let Some(cid) = wait_for_claim(server, claim_deadline, &SIGTERM_RECEIVED, "ec-rt") {
             let reply = single_slave_reply(
@@ -204,9 +265,18 @@ fn main() {
                 u16::try_from(rc.unsigned_abs()).unwrap_or(u16::MAX),
             );
             server.respond_and_close(&claim_handshake_reply_frame(cid, &reply));
-            eprintln!("ec-rt: sent offline handshake reply, exiting");
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "bringup_fail_reported",
+                rc,
+                "sent offline handshake reply, exiting"
+            );
         } else {
-            eprintln!("ec-rt: bridge did not send ClaimHandshake within 5 s; aborting");
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "claim_handshake_timeout",
+                "bridge did not send ClaimHandshake within 5 s; aborting"
+            );
         }
         std::process::exit(1);
     }
@@ -222,7 +292,15 @@ fn main() {
             num_slaves as std::os::raw::c_int,
         )
     };
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "bringup_preop",
+        rc,
+        num_slaves,
+        "PREOP bringup result"
+    );
     if rc != 0 {
+        log_al_states(num_slaves, "preop_fail");
         bringup_fail(&mut server, rc);
     }
 
@@ -234,14 +312,24 @@ fn main() {
             let mut tq = 0u16;
             let rc = unsafe { ffi::ec_rt_read_limits(slot, &mut ferr, &mut tmo, &mut tq) };
             if rc != 0 {
-                eprintln!(
-                    "ec-rt: slot {s}: SDO read of protection limits failed rc={rc} — aborting bringup"
+                tracing::error!(
+                    subsystem = "ethercat",
+                    event = "drive_limits_read_fail",
+                    slot = s,
+                    rc,
+                    "SDO read of protection limits failed — aborting bringup"
                 );
                 unsafe { ffi::ec_rt_shutdown() };
                 std::process::exit(1);
             }
-            eprintln!(
-                "ec-rt: slot {s} drive limits at bringup: 6065h={ferr} counts, 6066h={tmo} ms, 6072h={tq} (0.1%)"
+            tracing::info!(
+                subsystem = "ethercat",
+                event = "drive_limits",
+                slot = s,
+                ferr_6065h = ferr,
+                timeout_6066h = tmo,
+                torque_6072h = tq,
+                "drive protection limits read at bringup"
             );
             let cli_ferr = slaves[s].following_error_counts;
             let cli_tq = slaves[s].max_torque_tenth_pct;
@@ -249,23 +337,46 @@ fn main() {
             if cli_ferr.is_some() || cli_tq.is_some() {
                 let rc = unsafe { ffi::ec_rt_write_limits(slot, run.0, run.1) };
                 if rc != 0 {
-                    eprintln!(
-                        "ec-rt: slot {s}: SDO write of session limits failed rc={rc} — aborting bringup"
+                    tracing::error!(
+                        subsystem = "ethercat",
+                        event = "drive_limits_write_fail",
+                        slot = s,
+                        rc,
+                        "SDO write of session limits failed — aborting bringup"
                     );
                     unsafe { ffi::ec_rt_shutdown() };
                     std::process::exit(1);
                 }
-                eprintln!("ec-rt: slot {s} session limits applied: 6065h={} 6072h={}", run.0, run.1);
+                tracing::info!(
+                    subsystem = "ethercat",
+                    event = "drive_limits_applied",
+                    slot = s,
+                    ferr_6065h = run.0,
+                    torque_6072h = run.1,
+                    "session protection limits applied"
+                );
             }
             run
         })
         .collect();
 
     let rc = unsafe { ffi::ec_rt_bringup_finish() };
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "bringup_finish",
+        rc,
+        "OP bringup result"
+    );
     if rc != 0 {
+        log_al_states(num_slaves, "finish_fail");
         bringup_fail(&mut server, rc);
     }
-    eprintln!("ec-rt: drives parked (Ready-to-Switch-On, no torque)");
+    log_al_states(num_slaves, "parked");
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "bringup_parked",
+        "drives parked (Ready-to-Switch-On, no torque)"
+    );
 
     match wait_for_claim_pumping(
         &mut server,
@@ -284,7 +395,11 @@ fn main() {
             ));
         }
         None => {
-            eprintln!("ec-rt: bridge did not send ClaimHandshake within 5 s; aborting");
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "claim_handshake_timeout",
+                "bridge did not send ClaimHandshake within 5 s; aborting"
+            );
             unsafe {
                 for s in 0..num_slaves {
                     ffi::ec_rt_disable(s as std::os::raw::c_int);
@@ -294,7 +409,11 @@ fn main() {
             std::process::exit(1);
         }
     }
-    eprintln!("ec-rt: handshake ok, entering DC loop");
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "bringup_handshake_ok",
+        "handshake ok, entering DC loop"
+    );
 
     let mut gate = TorqueGate::new();
     let mut capture = Capture::new();
@@ -342,55 +461,41 @@ fn main() {
                     msg,
                 } => {
                     let now_ns = monotonic_ns();
-                    let diags: Vec<(u8, u64)> =
-                        msg.axes.iter().map(|a| (a.axis_idx, 0u64)).collect();
-                    if gate.state() == TorqueState::Faulted {
-                        server.respond(&push_pieces_response_frame_multi(
-                            correlation_id,
-                            ERR_PIECES_WHILE_FAULTED,
-                            now_ns,
-                            &diags,
-                        ));
-                    } else {
-                        let mut result = 0i32;
-                        let mut diags: Vec<(u8, u64)> = Vec::with_capacity(msg.axes.len());
-                        for axis in &msg.axes {
-                            let front_start_time =
-                                if axis.piece_count > 0 && axis.pieces_bytes.len() >= 8 {
-                                    u64::from_le_bytes(
-                                        axis.pieces_bytes[0..8].try_into().unwrap_or([0; 8]),
-                                    )
-                                } else {
-                                    0
-                                };
-                            diags.push((axis.axis_idx, front_start_time));
-                            let slot = if rings.len() == 1 {
-                                Some(0)
+                    let diags: Vec<(u8, u64)> = msg
+                        .axes
+                        .iter()
+                        .map(|a| {
+                            let front_start_time = if a.piece_count > 0 && a.pieces_bytes.len() >= 8
+                            {
+                                u64::from_le_bytes(
+                                    a.pieces_bytes[0..8].try_into().unwrap_or([0; 8]),
+                                )
                             } else {
-                                slave_axes.iter().position(|&a| a == axis.axis_idx)
+                                0
                             };
-                            let Some(slot) = slot.filter(|&s| s < rings.len()) else {
-                                eprintln!(
-                                    "ec-rt: PushPieces for axis {} not mapped to any of {} slave(s)",
-                                    axis.axis_idx,
-                                    rings.len()
-                                );
-                                result = -309;
-                                continue;
-                            };
-                            let pushed =
-                                rings[slot].push_from_bytes(axis.piece_count, &axis.pieces_bytes);
-                            if pushed != axis.piece_count {
-                                result = -309;
+                            (a.axis_idx, front_start_time)
+                        })
+                        .collect();
+                    let result = if gate.state() == TorqueState::Faulted {
+                        ERR_PIECES_WHILE_FAULTED
+                    } else {
+                        match plan_bundle(&msg.axes, &slave_axes, |slot| rings[slot].free()) {
+                            Ok(slots) => {
+                                for (axis, &slot) in msg.axes.iter().zip(slots.iter()) {
+                                    rings[slot]
+                                        .push_from_bytes(axis.piece_count, &axis.pieces_bytes);
+                                }
+                                0
                             }
+                            Err(code) => code,
                         }
-                        server.respond(&push_pieces_response_frame_multi(
-                            correlation_id,
-                            result,
-                            now_ns,
-                            &diags,
-                        ));
-                    }
+                    };
+                    server.respond(&push_pieces_response_frame_multi(
+                        correlation_id,
+                        result,
+                        now_ns,
+                        &diags,
+                    ));
                 }
                 Command::QueryRuntimeCaps { correlation_id } => {
                     let total: u32 = (AXIS_RING_CAPACITY * num_slaves * 32) as u32;
@@ -571,7 +676,7 @@ fn main() {
                         ));
                     } else {
                         let offset_counts = ((f64::from(home_q16) / 65536.0)
-                            * counts_per_mm[slot as usize])
+                            * cmd_counts_per_mm[slot as usize])
                             .round() as i32;
                         eprintln!(
                             "ec-rt: SeedServoHome slot={slot} home_q16={home_q16} \
@@ -642,7 +747,7 @@ fn main() {
                             ethercat_rt::buzz::ERR_BUZZ_STREAMING
                         }
                     } else {
-                        let base_counts = if framed {
+                        let base_counts = if framed[0] {
                             unsafe { ffi::ec_rt_get_position_actual(0) }
                         } else {
                             0
@@ -722,27 +827,26 @@ fn main() {
                     }
                 }
                 Command::QueryMotorState { correlation_id } => {
-                    if framed {
-                        let samples: Vec<(u8, f64, f64)> = (0..num_slaves)
-                            .map(|s| {
-                                let slot = s as std::os::raw::c_int;
-                                let (pos_counts, vel_rpm) = unsafe {
-                                    (
-                                        ffi::ec_rt_get_position_actual(slot),
-                                        ffi::ec_rt_get_velocity_actual(slot),
-                                    )
-                                };
-                                let pos_mm = f64::from(pos_counts) / counts_per_mm[s];
-                                let vel_mm_s = ethercat_rt::scale::velocity_mm_s(
-                                    vel_rpm,
-                                    rotation_distance[s],
-                                );
-                                (s as u8, pos_mm, vel_mm_s)
-                            })
-                            .collect();
-                        server.respond(&motor_state_response_frame_multi(correlation_id, &samples));
-                    } else {
+                    let samples: Vec<(u8, f64, f64)> = (0..num_slaves)
+                        .filter(|&s| framed[s])
+                        .map(|s| {
+                            let slot = s as std::os::raw::c_int;
+                            let (pos_counts, vel_rpm) = unsafe {
+                                (
+                                    ffi::ec_rt_get_position_actual(slot),
+                                    ffi::ec_rt_get_velocity_actual(slot),
+                                )
+                            };
+                            let pos_mm = f64::from(pos_counts) / cmd_counts_per_mm[s];
+                            let vel_mm_s = cmd_counts_per_mm[s].signum()
+                                * ethercat_rt::scale::velocity_mm_s(vel_rpm, rotation_distance[s]);
+                            (s as u8, pos_mm, vel_mm_s)
+                        })
+                        .collect();
+                    if samples.is_empty() {
                         server.respond(&motor_state_empty_frame(correlation_id));
+                    } else {
+                        server.respond(&motor_state_response_frame_multi(correlation_id, &samples));
                     }
                 }
                 Command::Unknown { kind_raw, .. } => {
@@ -881,8 +985,10 @@ fn main() {
                         eprintln!("ec-rt: SeedServoHome CSP restore failed rc={rc}");
                         ERR_SEED_HOME_RESTORE
                     } else {
-                        framed = true;
-                        eprintln!("ec-rt: SeedServoHome complete — framed=true");
+                        framed[seed_home_slot as usize] = true;
+                        eprintln!(
+                            "ec-rt: SeedServoHome complete — slot {seed_home_slot} framed=true"
+                        );
                         0
                     };
                     seed_home_homing_rc = 0;
@@ -959,19 +1065,20 @@ fn main() {
                 let sampled = if buzz.active() {
                     if s == 0 {
                         buzz.eval(now).map(|(rel_mm, vel_mm_s, acc_mm_s2)| {
-                            let counts = buzz
-                                .base_counts()
-                                .wrapping_add(mm_to_counts(f64::from(rel_mm), counts_per_mm[0]));
+                            let counts = buzz.base_counts().wrapping_add(mm_to_counts(
+                                f64::from(rel_mm),
+                                cmd_counts_per_mm[0],
+                            ));
                             (counts, vel_mm_s, acc_mm_s2)
                         })
                     } else {
                         None
                     }
                 } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = rings[s].sample(now) {
-                    let counts = if framed {
-                        mm_to_counts(f64::from(pos_mm), counts_per_mm[s])
+                    let counts = if framed[s] {
+                        mm_to_counts(f64::from(pos_mm), cmd_counts_per_mm[s])
                     } else {
-                        let cpm = counts_per_mm[s];
+                        let cpm = cmd_counts_per_mm[s];
                         let map = cmaps[s].get_or_insert_with(|| {
                             let actual =
                                 unsafe { ffi::ec_rt_get_position_actual(s as std::os::raw::c_int) };
@@ -997,13 +1104,14 @@ fn main() {
                 let slot = s as std::os::raw::c_int;
                 if let Some(counts) = sp_counts[s] {
                     let vel_offset = if velocity_ff[s] {
-                        (f64::from(all_vel[s]) * counts_per_mm[s]).round() as i32
+                        (f64::from(all_vel[s]) * cmd_counts_per_mm[s]).round() as i32
                     } else {
                         0
                     };
                     let torque_offset = match &dynamics {
                         Some(model) => {
-                            let raw = model.torque_ff(s, &all_acc, &all_vel);
+                            let dir_sign = cmd_counts_per_mm[s].signum() as f32;
+                            let raw = dir_sign * model.torque_ff(s, &all_acc, &all_vel);
                             if !raw.is_finite() {
                                 eprintln!(
                                     "ec-rt: FAULT non-finite torque FF on slot {s} \
@@ -1030,6 +1138,24 @@ fn main() {
                         }
                         None => 0,
                     };
+                    if let Some(prev) = last_counts[s] {
+                        let increment = i64::from(counts) - i64::from(prev);
+                        if increment.abs() > jump_log_counts[s] {
+                            tracing::warn!(
+                                subsystem = "ethercat",
+                                event = "target_jump",
+                                slot = s,
+                                prev_target = prev,
+                                new_target = counts,
+                                increment,
+                                vel_mm_s = f64::from(all_vel[s]),
+                                acc_mm_s2 = f64::from(all_acc[s]),
+                                invert = invert[s],
+                                "commanded target increment exceeds sane per-cycle bound"
+                            );
+                        }
+                    }
+                    last_counts[s] = Some(counts);
                     unsafe {
                         ffi::ec_rt_set_target_position(slot, counts);
                         ffi::ec_rt_set_velocity_offset(slot, vel_offset);
@@ -1037,11 +1163,16 @@ fn main() {
                     }
                     motion_active = true;
                 } else {
+                    last_counts[s] = None;
                     unsafe {
                         ffi::ec_rt_set_velocity_offset(slot, 0);
                         ffi::ec_rt_set_torque_offset(slot, 0);
                     }
                 }
+            }
+        } else {
+            for lc in &mut last_counts {
+                *lc = None;
             }
         }
 
@@ -1095,12 +1226,37 @@ fn main() {
                 None
             }
         });
-        let drive_err: u16 = drive_fault.map(|(_, e)| e).unwrap_or(0);
         if let Some((slot, err)) = drive_fault {
             if gate.state() != TorqueState::Faulted {
                 eprintln!(
                     "ec-rt: DRIVE FAULT slot {slot} err=0x{err:04x} — parking, reporting via heartbeat"
                 );
+                for d in 0..num_slaves {
+                    let mut t = ffi::EcTelemetry::default();
+                    unsafe { ffi::ec_rt_get_telemetry(d as std::os::raw::c_int, &mut t) };
+                    let last_cmd = last_counts[d].unwrap_or(t.target_position);
+                    tracing::error!(
+                        subsystem = "ethercat",
+                        event = "drive_fault",
+                        faulted_slot = slot,
+                        slot = d,
+                        axis = slave_axes[d],
+                        invert = invert[d],
+                        err = err,
+                        error_code = t.error_code,
+                        statusword = t.statusword,
+                        target_counts = t.target_position,
+                        last_cmd_target = last_cmd,
+                        last_increment = i64::from(t.target_position) - i64::from(last_cmd),
+                        actual = t.position_actual,
+                        following_error = t.following_error,
+                        velocity_actual = t.velocity_actual,
+                        torque_actual = t.torque_actual,
+                        velocity_offset = t.velocity_offset,
+                        torque_offset = t.torque_offset,
+                        "drive fault — per-slot snapshot"
+                    );
+                }
                 gate.on_drive_fault();
                 for r in &mut rings {
                     r.reset();
@@ -1148,24 +1304,26 @@ fn main() {
         match eval_wkc(wkc, expected_wkc, &mut wkc_consecutive) {
             WkcDecision::Good => {}
             WkcDecision::Warn(n) => {
-                eprintln!(
-                    "ec-rt: WARNING — working counter {wkc} (expected {expected_wkc}), \
-                     consecutive_bad={n}; tolerating (USB-NIC frame loss); \
-                     halt threshold={}",
-                    ethercat_rt::claim::WKC_CONSECUTIVE_LOSS_LIMIT
+                tracing::warn!(
+                    subsystem = "ethercat",
+                    event = "wkc_warn",
+                    wkc,
+                    expected_wkc,
+                    consecutive_bad = n,
+                    halt_threshold = ethercat_rt::claim::WKC_CONSECUTIVE_LOSS_LIMIT,
+                    "working counter below expected; tolerating (USB-NIC frame loss)"
                 );
             }
             WkcDecision::Halt => {
-                let mut al_state = 0u16;
-                let mut al_code = 0u16;
-                unsafe { ffi::ec_rt_al_status(0, &mut al_state, &mut al_code) };
-                eprintln!(
-                    "ec-rt: working counter {wkc} (expected {expected_wkc}), \
-                     consecutive_bad={wkc_consecutive} — bus lost after \
-                     {} consecutive bad cycles, halting \
-                     (slot 0 AL state=0x{al_state:02x} status_code=0x{al_code:04x}; \
-                     0x001b=SM watchdog, 0x001a/0x002c/0x0030=DC sync)",
-                    ethercat_rt::claim::WKC_CONSECUTIVE_LOSS_LIMIT
+                log_al_states(num_slaves, "bus_lost");
+                tracing::error!(
+                    subsystem = "ethercat",
+                    event = "bus_lost",
+                    wkc,
+                    expected_wkc,
+                    consecutive_bad = wkc_consecutive,
+                    halt_threshold = ethercat_rt::claim::WKC_CONSECUTIVE_LOSS_LIMIT,
+                    "bus lost after consecutive bad cycles, halting"
                 );
                 unsafe { ffi::ec_rt_dump_al_state() };
                 break;
@@ -1196,19 +1354,32 @@ fn main() {
         prdiv += 1;
         if prdiv >= telemetry_period {
             prdiv = 0;
-            let (sw, pos, ferr, tq_act) = unsafe {
-                (
-                    ffi::ec_rt_get_statusword(0),
-                    ffi::ec_rt_get_position_actual(0),
-                    ffi::ec_rt_get_following_error(0),
-                    ffi::ec_rt_get_torque_actual(0),
-                )
-            };
-            eprintln!(
-                "ec-rt: wkc={wkc} sw=0x{sw:04x} err=0x{drive_err:04x} pos={pos} ferr={ferr} toff={toff} \
-                 any_motion={} retired={retired:?} tq_act={tq_act} ff_sat={ff_saturation} framed={framed}",
-                !all_empty_now as u8,
-            );
+            for s in 0..num_slaves {
+                let mut t = ffi::EcTelemetry::default();
+                unsafe { ffi::ec_rt_get_telemetry(s as std::os::raw::c_int, &mut t) };
+                tracing::info!(
+                    subsystem = "ethercat",
+                    event = "telemetry",
+                    slot = s,
+                    axis = slave_axes[s],
+                    invert = invert[s],
+                    wkc,
+                    toff,
+                    statusword = t.statusword,
+                    error_code = t.error_code,
+                    target_counts = t.target_position,
+                    actual = t.position_actual,
+                    following_error = t.following_error,
+                    velocity_actual = t.velocity_actual,
+                    torque_actual = t.torque_actual,
+                    velocity_offset = t.velocity_offset,
+                    torque_offset = t.torque_offset,
+                    motion = !all_empty_now,
+                    ff_sat = ff_saturation,
+                    framed = framed[s],
+                    "per-slot drive telemetry"
+                );
+            }
             if gate.state() == TorqueState::Faulted {
                 server.respond(&status_heartbeat_frame(
                     0,

@@ -72,6 +72,10 @@ impl AxisRing {
         self.desc.push(&mut self.storage, entry)
     }
 
+    pub fn free(&self) -> usize {
+        self.desc.ring_depth - self.desc.len()
+    }
+
     pub fn push_from_bytes(&mut self, piece_count: u8, bytes: &[u8]) -> u8 {
         let n = piece_count as usize;
         if bytes.len() < n * 32 {

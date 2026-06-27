@@ -346,6 +346,18 @@ int ec_rt_bringup_preop(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt
             return rc;
         }
     }
+
+    /* Pin slot 0 as the DC reference clock. Without an explicit selection IgH's
+     * auto-pick makes multi-slave clock distribution racy at startup: a
+     * non-reference slave's SYNC0 may not lock in time, and the A6-EC gates
+     * PRE-OP -> SAFE-OP on SYNC0, so it stalls at PRE-OP and the OP walk times
+     * out. Explicit selection lets the reference time distribute deterministically
+     * so every slave's SYNC0 is up before the OP transition. */
+    if (ecrt_master_select_reference_clock(g_master, g_slaves[0].sc) != 0) {
+        fprintf(stderr, "ec_rt: select_reference_clock(slot 0, position %d) failed\n",
+                (int)g_slaves[0].pos);
+        return EC_RT_ERR_EC_INIT;
+    }
     return 0;
 }
 
@@ -465,6 +477,15 @@ int ec_rt_bringup_finish(void) {
     return EC_RT_ERR_CIA402_TIMEOUT;
 }
 
+/* Cycles to dwell in Switched-On (target tracking actual) before commanding
+ * Operation-Enabled. A non-reference DC drive can lose its CSP interpolation
+ * base across a warm endpoint restart; without re-baselining, its first enabled
+ * cycle reads target-vs-stale-reference as a huge one-cycle jump and trips
+ * Er87.1 the instant torque comes on. Holding Switched-On with target=actual
+ * for this many cycles lets the drive adopt the present position as its base,
+ * which a power cycle would otherwise do for free. */
+#define ENABLE_SWITCHED_ON_DWELL 200
+
 int ec_rt_enable(int slave) {
     check_idx(slave);
     slave_t *sl = &g_slaves[slave];
@@ -472,11 +493,12 @@ int ec_rt_enable(int slave) {
      * CiA402 enable state machine — masks/values match the CiA402 table:
      *   sw & 0x004F == 0x0040 => Switch-On Disabled: issue 0x0006
      *   sw & 0x006F == 0x0021 => Ready-to-Switch-On: issue 0x0007
-     *   sw & 0x006F == 0x0023 => Switched-On:        issue 0x000F
+     *   sw & 0x006F == 0x0023 => Switched-On:        dwell, then issue 0x000F
      *   sw & 0x006F == 0x0027 => Operation Enabled:  done
      *   sw & 0x0008           => Fault: pulse fault-reset on bit 7
      */
     int64_t toff = 0;
+    int64_t switched_on_dwell = 0;
     for (int64_t pc = 0; pc < 3000; pc++) {
         stage_hold_others(slave);
         uint16_t sw = EC_READ_U16(g_pd + sl->i_statusword);
@@ -488,11 +510,20 @@ int ec_rt_enable(int slave) {
         } else if ((sw & 0x006F) == 0x0021) {
             sl->tx.controlword = 0x0007;
         } else if ((sw & 0x006F) == 0x0023) {
-            sl->tx.controlword = 0x000F;
+            if (switched_on_dwell < ENABLE_SWITCHED_ON_DWELL) {
+                sl->tx.controlword = 0x0007;
+                switched_on_dwell++;
+            } else {
+                sl->tx.controlword = 0x000F;
+            }
         } else if ((sw & 0x006F) == 0x0027) {
             sl->tx.controlword = 0x000F;
             rt_exchange(&toff);
             sl->enabled = 1;
+            fprintf(stderr,
+                    "ec_rt: slot %d operation-enabled (switched-on dwell=%lld, sw=0x%04x err=0x%04x)\n",
+                    slave, (long long)switched_on_dwell, sw,
+                    EC_READ_U16(g_pd + sl->i_error_code));
             return 0;
         } else {
             sl->tx.controlword = 0x0000;
