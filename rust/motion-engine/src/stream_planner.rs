@@ -397,19 +397,13 @@ fn fatal(msg: &str) -> ! {
     std::process::abort();
 }
 
-fn dispatch_committed(
-    segs: &[ShapedSegment],
-    dispatch: &DispatchFn,
-    sync_instant: &mut Option<Instant>,
-    last_move_time_bits: &AtomicU64,
-    commit_fire_count: &AtomicU32,
-) {
-    if segs.is_empty() {
+fn log_post_nudge_segs(segs: &[ShapedSegment]) {
+    let mut remaining = POST_NUDGE_LOG.load(Ordering::Relaxed);
+    if remaining == 0 {
         return;
     }
-    let mut post_nudge_remaining = POST_NUDGE_LOG.load(Ordering::Relaxed);
     for s in segs {
-        if post_nudge_remaining == 0 {
+        if remaining == 0 {
             break;
         }
         let n_ax = s.axes.len();
@@ -424,7 +418,7 @@ fn dispatch_committed(
         let dist_mm = (dx * dx + dy * dy + dz * dz).sqrt();
         let dur_s = s.t_end - s.t_start;
         let v_mm_s = if dur_s > 0.0 { dist_mm / dur_s } else { 0.0 };
-        tracing::info!(
+        tracing::warn!(
             subsystem = "motion",
             event = "post_nudge_seg",
             line = s.source_line,
@@ -435,9 +429,22 @@ fn dispatch_committed(
             v_mm_s,
             "[post-nudge] committed segment after a nudge"
         );
-        post_nudge_remaining -= 1;
+        remaining -= 1;
     }
-    POST_NUDGE_LOG.store(post_nudge_remaining, Ordering::Relaxed);
+    POST_NUDGE_LOG.store(remaining, Ordering::Relaxed);
+}
+
+fn dispatch_committed(
+    segs: &[ShapedSegment],
+    dispatch: &DispatchFn,
+    sync_instant: &mut Option<Instant>,
+    last_move_time_bits: &AtomicU64,
+    commit_fire_count: &AtomicU32,
+) {
+    if segs.is_empty() {
+        return;
+    }
+    log_post_nudge_segs(segs);
     tracing::info!(
         subsystem = "motion",
         event = "dispatch_committed",
@@ -500,6 +507,7 @@ fn dispatch_or_err(
     if segs.is_empty() {
         return Ok(());
     }
+    log_post_nudge_segs(segs);
     for s in segs {
         dispatch(s).map_err(|e| format!("dispatch failed: {e}"))?;
     }
