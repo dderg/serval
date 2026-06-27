@@ -667,7 +667,7 @@ fn members_at<'a, 'b>(
 fn accel_cap(ctxs: &[MemberCtx], s_run: f64) -> f64 {
     members_at(ctxs, s_run)
         .map(|(c, _)| c.m.kin.accel)
-        .fold(ctxs[0].m.kin.accel, f64::min)
+        .fold(f64::INFINITY, f64::min)
 }
 
 fn kappa_abs_at(ctxs: &[MemberCtx], s_run: f64) -> f64 {

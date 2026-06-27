@@ -29,6 +29,57 @@ fn line(line_no: u32, feed: f64, start: [f64; 3], end: [f64; 3], e: f64) -> Move
     line_move(start, end, e, ctx(line_no, feed)).expect("line_move")
 }
 
+fn line_lim(
+    line_no: u32,
+    feed: f64,
+    start: [f64; 3],
+    end: [f64; 3],
+    max_v: f64,
+    accel: f64,
+    scv: f64,
+) -> Move {
+    let ctx = MoveContext {
+        extruder_axis: 3,
+        feedrate_mm_s: feed,
+        limits: VelocityLimits::try_new(max_v, accel, scv).unwrap(),
+        source: SourceRange {
+            start_line: line_no,
+            end_line: line_no,
+        },
+    };
+    line_move(start, end, 0.0, ctx).expect("line_move")
+}
+
+#[test]
+fn slow_zhop_does_not_cap_following_fast_travel() {
+    // A slow Z-hop (max_z_velocity=5, max_z_accel=100) chained with a long fast
+    // XY travel (max_v=500, accel=30000). The travel must plan against its OWN
+    // X-axis acceleration — not inherit the Z-hop's, which would cap a 240 mm move
+    // to ~155 mm/s peak (~78 mm/s average). This is the z_tilt post-nudge slowdown.
+    let z = line_lim(1, 5.0, [0.0, 0.0, 0.0], [0.0, 0.0, 1.8], 5.0, 100.0, 1.0);
+    let xy = line_lim(
+        2,
+        500.0,
+        [0.0, 0.0, 1.8],
+        [-240.0, 0.0, 1.8],
+        500.0,
+        30000.0,
+        1.0,
+    );
+    let p = plan(&[z, xy]);
+    let mut line_peak = 0.0_f64;
+    for (gm, pm) in p.geometry.moves.iter().zip(&p.profile.moves) {
+        if !is_clothoid(gm) {
+            line_peak = line_peak.max(pm.peak_v);
+        }
+    }
+    assert!(
+        line_peak > 400.0,
+        "fast XY travel after a slow Z-hop capped at peak {line_peak} mm/s; \
+         it should approach its own 500 mm/s feed (Z-hop accel must not bleed in)"
+    );
+}
+
 fn polyline(feed: f64, verts: &[[f64; 3]]) -> Vec<Move> {
     verts
         .windows(2)
