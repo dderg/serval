@@ -107,10 +107,6 @@ pub struct SeamReport {
     pub moves: usize,
     pub segments: usize,
     pub commits: usize,
-    /// Analytical resume vertex (`StreamState::odometer`) captured right after each
-    /// non-empty commit, indexed by `commit_index`. Lets a test compare the resume
-    /// vertex of commit N against the emitted seam positions at the N→N+1 boundary.
-    pub commit_odometers: Vec<[f64; 3]>,
 }
 
 impl SeamReport {
@@ -361,11 +357,6 @@ pub fn run_moves(
 
     let mut commit_index = 0usize;
     let mut cadence_step = 0usize;
-    let mut commit_odometers: Vec<[f64; 3]> = Vec::new();
-    let mut capture_odometer = |state: &StreamState| {
-        let od = state.odometer();
-        commit_odometers.push([od[0], od[1], od[2]]);
-    };
 
     for (i, m) in moves.iter().cloned().enumerate() {
         state.push(m);
@@ -373,7 +364,6 @@ pub fn run_moves(
             let segs = state.commit(false)?;
             if !segs.is_empty() {
                 ingestor.ingest(&segs, commit_index);
-                capture_odometer(&state);
                 commit_index += 1;
             }
             cadence_step += 1;
@@ -382,7 +372,6 @@ pub fn run_moves(
             let segs = state.commit(true)?;
             if !segs.is_empty() {
                 ingestor.ingest(&segs, commit_index);
-                capture_odometer(&state);
                 commit_index += 1;
             }
         }
@@ -392,7 +381,6 @@ pub fn run_moves(
         let segs = state.commit(true)?;
         if !segs.is_empty() {
             ingestor.ingest(&segs, commit_index);
-            capture_odometer(&state);
             commit_index += 1;
         }
     }
@@ -400,7 +388,6 @@ pub fn run_moves(
     let mut report = ingestor.report;
     report.moves = n_moves;
     report.commits = commit_index;
-    report.commit_odometers = commit_odometers;
     Ok(report)
 }
 
