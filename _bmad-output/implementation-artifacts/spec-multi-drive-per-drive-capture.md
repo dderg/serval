@@ -80,6 +80,10 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 - Given a multi-drive `.scap`, when `servo_gain_report.py`/`servo_fit_dynamics.py` run, then they select the correct drive by name.
 - Given `./scripts/ci.sh quick` and `./scripts/ci.sh py`, then both green.
 
+## Spec Change Log
+
+- **2026-06-27 (post-merge fix, follow-up to commit `c1e94ffe7`):** The Code Map missed `config/servo_calibration.cfg`. Its calibration macros (`SERVO_MEASURE_TRACKING`/`_INERTIA`/`_FRICTION`, `SERVO_FIT_DYNAMICS`, `SERVO_CALIBRATE_GAINS`) called `SERVO_CAPTURE_START` with no `SERVO=`, so once two servo motors are configured the new resolver fails with "multiple servo motors configured … SERVO= is required". Fixed by deriving `servo = SERVO|default('motor_' ~ (axis|lower))` in each macro and passing `SERVO={servo}` to capture (`SERVO_FIT_DYNAMICS` forwards it to `SERVO_MEASURE_INERTIA`). KEEP: this assumes single-motor-per-axis with `motor_<axis>` naming; a CoreXY axis needing both motors captured together would pass an explicit multi-motor list — out of scope here.
+
 ## Design Notes
 
 Record layout, N drives (drive block = 28 bytes, unchanged internally):
