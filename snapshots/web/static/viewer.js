@@ -374,15 +374,15 @@ class PanelRenderer {
     bctx.clip();
 
     bctx.strokeStyle = COLORS.vx;
-    bctx.lineWidth = 0.6;
+    bctx.lineWidth = 1.0;
     this._strokeSeries(bctx, t, (i) => Math.abs(compX[i]), tMin, tMax, yMin, yMax);
 
     bctx.strokeStyle = COLORS.vy;
-    bctx.lineWidth = 0.6;
+    bctx.lineWidth = 1.0;
     this._strokeSeries(bctx, t, (i) => Math.abs(compY[i]), tMin, tMax, yMin, yMax);
 
     bctx.strokeStyle = COLORS.scalar;
-    bctx.lineWidth = 0.8;
+    bctx.lineWidth = 1.2;
     this._strokeSeries(bctx, t, (i) => scalar[i], tMin, tMax, yMin, yMax);
 
     // Peak markers
