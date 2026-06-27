@@ -42,6 +42,7 @@ class EtherCatNode:
         self.engine_handle = None
         self._counts_per_mm = None
         self._slot_by_motor = {}
+        self._torque_motors = set()
         self.printer.register_event_handler("klippy:mcu_identify", self._claim)
         self.printer.load_object(config, "servo_capture")
         self.printer.load_object(config, "servo_param")
@@ -200,6 +201,23 @@ class EtherCatNode:
 
     def get_drive_count(self):
         return len(self._slot_by_motor)
+
+    def set_motor_torque(self, motor_name, value, print_time):
+        if self.engine_handle is None:
+            raise self.printer.command_error(
+                "servo torque: ethercat_node %s has no engine handle"
+                % (self.name,)
+            )
+        engine = self.printer.lookup_object("motion_engine")
+        if value:
+            first = not self._torque_motors
+            self._torque_motors.add(motor_name)
+            if first:
+                engine.set_torque(self.engine_handle, True, print_time)
+        else:
+            self._torque_motors.discard(motor_name)
+            if not self._torque_motors:
+                engine.set_torque(self.engine_handle, False, print_time)
 
 
 def load_config_prefix(config):

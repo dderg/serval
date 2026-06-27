@@ -260,26 +260,20 @@ class ServoRail(BaseRail):
 
 
 class MotionTorqueLine:
-    def __init__(self, printer, node_name):
+    def __init__(self, printer, node_name, motor_name):
         self._printer = printer
         self._node_name = node_name
+        self._motor_name = motor_name
 
     def set_digital(self, print_time, value):
         node = self._printer.lookup_object("ethercat_node " + self._node_name)
-        handle = node.get_engine_handle()
-        if handle is None:
-            raise self._printer.command_error(
-                "servo torque: ethercat_node %s has no engine handle"
-                % (self._node_name,)
-            )
-        engine = self._printer.lookup_object("motion_engine")
-        engine.set_torque(handle, bool(value), print_time)
+        node.set_motor_torque(self._motor_name, bool(value), print_time)
 
 
 def register_torque_enable(printer, config, rail):
     from . import stepper_enable
 
-    line = MotionTorqueLine(printer, rail.get_node_name())
+    line = MotionTorqueLine(printer, rail.get_node_name(), rail.get_name())
     enable = stepper_enable.StepperEnablePin(line, 0)
     printer.load_object(config, "stepper_enable").register_motor(
         rail.get_name(), rail, enable
