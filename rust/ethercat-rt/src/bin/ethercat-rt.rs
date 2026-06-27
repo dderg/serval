@@ -136,6 +136,8 @@ fn main() {
     let rotation_distance: Vec<f64> = slaves.iter().map(|s| s.rotation_distance).collect();
     let slave_positions: Vec<i32> = slaves.iter().map(|s| s.pos).collect();
     let slave_axes: Vec<u8> = slaves.iter().map(|s| s.axis).collect();
+    let velocity_ff: Vec<bool> = slaves.iter().map(|s| s.velocity_ff).collect();
+    let torque_clamp_tenths: Vec<i16> = slaves.iter().map(|s| s.torque_clamp_tenths).collect();
     let rt_cpu: i32 = arg_val(&args, "--rt-cpu")
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
@@ -145,17 +147,6 @@ fn main() {
     let mailbox_cpu: usize = arg_val(&args, "--mailbox-cpu")
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
-    let velocity_ff = args.iter().any(|a| a == "--velocity-ff");
-    let torque_clamp_tenths: i16 = arg_val(&args, "--torque-clamp-pct")
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|pct| {
-            if !(pct > 0.0 && pct <= 400.0) {
-                eprintln!("ec-rt: --torque-clamp-pct {pct} outside (0, 400]");
-                std::process::exit(1);
-            }
-            (pct * 10.0) as i16
-        })
-        .unwrap_or(300);
     let dynamics = arg_val(&args, "--dynamics-profile").map(|path| {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             eprintln!("ec-rt: dynamics profile {path}: {e}");
@@ -193,8 +184,8 @@ fn main() {
     eprintln!(
         "ec-rt: socket {socket}, cycle {cycle_us}us, {num_slaves} slave(s) \
          positions={slave_positions:?} counts/mm={counts_per_mm:?} \
-         rotation_distance={rotation_distance:?} velocity_ff={velocity_ff} \
-         dynamics={} clamp={torque_clamp_tenths}",
+         rotation_distance={rotation_distance:?} velocity_ff={velocity_ff:?} \
+         dynamics={} clamp={torque_clamp_tenths:?}",
         dynamics.is_some()
     );
 
@@ -1002,7 +993,7 @@ fn main() {
             for s in 0..num_slaves {
                 let slot = s as std::os::raw::c_int;
                 if let Some(counts) = sp_counts[s] {
-                    let vel_offset = if velocity_ff {
+                    let vel_offset = if velocity_ff[s] {
                         (f64::from(all_vel[s]) * counts_per_mm[s]).round() as i32
                     } else {
                         0
@@ -1032,7 +1023,7 @@ fn main() {
                                 }
                                 std::process::exit(1);
                             }
-                            clamp_torque(raw, torque_clamp_tenths, &mut ff_saturation)
+                            clamp_torque(raw, torque_clamp_tenths[s], &mut ff_saturation)
                         }
                         None => 0,
                     };

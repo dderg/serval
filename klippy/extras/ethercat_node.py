@@ -38,18 +38,10 @@ class EtherCatNode:
         self.endpoint = os.path.abspath(
             config.get("endpoint", _DEFAULT_ENDPOINT)
         )
+        self.dynamics_profile = config.get("dynamics_profile", None)
         self.engine_handle = None
-        # Derived at claim time, not __init__: the [servo_*] sections are parsed
-        # by the toolhead AFTER [ethercat_node] sections (printer._read_config
-        # loads prefix sections before motion), so the matching
-        # ServoRail does not exist yet here.
         self._counts_per_mm = None
         self._slot_by_motor = {}
-        # Claim during mcu-identify. printer._connect sends
-        # "klippy:mcu_identify" before invoking the "klippy:connect"
-        # handlers (klippy/printer.py), and motion._init_planner
-        # runs on "klippy:connect" — so the handle is populated before the
-        # planner is built. This mirrors MCU._mcu_identify's claim_mcu call.
         self.printer.register_event_handler("klippy:mcu_identify", self._claim)
         self.printer.load_object(config, "servo_capture")
         self.printer.load_object(config, "servo_param")
@@ -101,13 +93,6 @@ class EtherCatNode:
                     )
                 )
             by_index[idx] = rail.get_motor_name()
-        ff_configs = {rail.get_ff_config() for _global_axis, rail in rails}
-        if len(ff_configs) != 1:
-            raise self.printer.config_error(
-                "ethercat_node %s: drives disagree on velocity_ff / "
-                "dynamics_profile / ff_torque_clamp — these are node-wide and "
-                "must match across all motors on the chain" % (self.name,)
-            )
 
     def _claim(self):
         if self.engine_handle is not None:
@@ -123,6 +108,7 @@ class EtherCatNode:
             following_error_counts, max_torque_tenth_pct = (
                 rail.get_session_drive_limits()
             )
+            velocity_ff, ff_torque_clamp = rail.get_ff_config()
             drives.append(
                 (
                     rail.get_chain_index(),
@@ -131,11 +117,10 @@ class EtherCatNode:
                     rail.get_rotation_distance(),
                     following_error_counts,
                     max_torque_tenth_pct,
+                    velocity_ff,
+                    ff_torque_clamp,
                 )
             )
-        velocity_ff, dynamics_profile, ff_torque_clamp = rails[0][
-            1
-        ].get_ff_config()
         self._counts_per_mm = rails[0][1].get_counts_per_mm()
         engine = self.printer.lookup_object("motion_engine")
         try:
@@ -144,26 +129,21 @@ class EtherCatNode:
                 self.socket_path,
                 self.interface,
                 self.endpoint,
-                velocity_ff,
-                dynamics_profile,
-                ff_torque_clamp,
+                self.dynamics_profile,
                 drives,
             )
         except RuntimeError as e:
             raise self.printer.config_error(str(e))
         logging.info(
             "ethercat_node %s: claimed handle=%s socket=%s interface=%s "
-            "endpoint=%s drives=%s velocity_ff=%s dynamics_profile=%s "
-            "ff_torque_clamp=%s",
+            "endpoint=%s drives=%s dynamics_profile=%s",
             self.name,
             self.engine_handle,
             self.socket_path,
             self.interface,
             self.endpoint,
             drives,
-            velocity_ff,
-            dynamics_profile,
-            ff_torque_clamp,
+            self.dynamics_profile,
         )
         for slot, (_global_axis, rail) in enumerate(rails):
             self._push_drive_params(rail, slot)

@@ -148,9 +148,7 @@ class MotionEngineWrapper:
         socket_path,
         interface,
         endpoint,
-        velocity_ff,
         dynamics_profile,
-        torque_clamp_pct,
         drives,
     ):
         return self._engine.claim_ethercat_node(
@@ -158,9 +156,7 @@ class MotionEngineWrapper:
             socket_path,
             interface,
             endpoint,
-            velocity_ff,
             dynamics_profile,
-            torque_clamp_pct,
             drives,
         )
 

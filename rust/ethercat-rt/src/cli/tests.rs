@@ -119,6 +119,76 @@ fn axis_flag_binds_to_the_current_slave_group() {
 }
 
 #[test]
+fn velocity_ff_and_clamp_bind_per_slave_group() {
+    let a = args(&[
+        "ethercat-rt",
+        "eth0",
+        "--slave",
+        "0",
+        "--velocity-ff",
+        "--torque-clamp-pct",
+        "25",
+        "--slave",
+        "1",
+        "--torque-clamp-pct",
+        "60",
+    ]);
+    let slaves = parse_slaves(&a).expect("parse ff flags");
+    assert_eq!(slaves.len(), 2);
+    assert_eq!(
+        (slaves[0].velocity_ff, slaves[0].torque_clamp_tenths),
+        (true, 250)
+    );
+    assert_eq!(
+        (slaves[1].velocity_ff, slaves[1].torque_clamp_tenths),
+        (false, 600)
+    );
+}
+
+#[test]
+fn legacy_form_reads_velocity_ff_and_clamp_globally() {
+    let a = args(&[
+        "ethercat-rt",
+        "eth0",
+        "--velocity-ff",
+        "--torque-clamp-pct",
+        "45",
+    ]);
+    let slaves = parse_slaves(&a).expect("legacy ff");
+    assert_eq!(slaves.len(), 1);
+    assert!(slaves[0].velocity_ff);
+    assert_eq!(slaves[0].torque_clamp_tenths, 450);
+}
+
+#[test]
+fn clamp_default_is_thirty_percent() {
+    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0"])).expect("defaults");
+    assert!(!slaves[0].velocity_ff);
+    assert_eq!(slaves[0].torque_clamp_tenths, 300);
+}
+
+#[test]
+fn clamp_out_of_range_is_rejected() {
+    let a = args(&[
+        "ethercat-rt",
+        "eth0",
+        "--slave",
+        "0",
+        "--torque-clamp-pct",
+        "500",
+    ]);
+    let err = parse_slaves(&a).expect_err("over-range clamp must fail");
+    assert!(err.contains("outside (0, 400]"), "got: {err}");
+}
+
+#[test]
+fn velocity_ff_before_any_slave_is_rejected() {
+    let a = args(&["ethercat-rt", "eth0", "--velocity-ff", "--slave", "0"]);
+    let err = parse_slaves(&a).expect_err("orphan --velocity-ff must fail");
+    assert!(err.contains("before any --slave"), "got: {err}");
+}
+
+#[test]
 fn axis_before_any_slave_is_rejected() {
     let a = args(&["ethercat-rt", "eth0", "--axis", "1", "--slave", "0"]);
     let err = parse_slaves(&a).expect_err("orphan --axis must fail");

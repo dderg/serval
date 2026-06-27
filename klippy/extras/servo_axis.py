@@ -91,7 +91,6 @@ class ServoRail(BaseRail):
             "encoder_counts_per_rev", minval=1
         )
         self.velocity_ff = motor_config.getboolean("velocity_ff", False)
-        self.dynamics_profile = motor_config.get("dynamics_profile", None)
         self.ff_torque_clamp = motor_config.getfloat(
             "ff_torque_clamp", 30.0, above=0.0, maxval=400.0
         )
@@ -185,7 +184,7 @@ class ServoRail(BaseRail):
         return self.rotation_distance
 
     def get_ff_config(self):
-        return (self.velocity_ff, self.dynamics_profile, self.ff_torque_clamp)
+        return (self.velocity_ff, self.ff_torque_clamp)
 
     def get_sdo_params(self):
         return self.sdo_params

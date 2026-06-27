@@ -76,7 +76,7 @@ struct McuConnection {
 
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
-type EthercatDrive = (i32, usize, f64, f64, Option<u32>, Option<u16>);
+type EthercatDrive = (i32, usize, f64, f64, Option<u32>, Option<u16>, bool, f64);
 
 const ETHERCAT_CLOCK_FREQ_HZ: u32 = 1_000_000_000;
 
@@ -403,7 +403,16 @@ mod claim_error_message_tests {
 }
 
 fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
-    let (_chain_index, _axis, counts_per_mm, rotation_distance, ferr, max_torque) = d;
+    let (
+        _chain_index,
+        _axis,
+        counts_per_mm,
+        rotation_distance,
+        ferr,
+        max_torque,
+        velocity_ff,
+        ff_torque_clamp,
+    ) = d;
     args.push("--counts-per-mm".into());
     args.push(counts_per_mm.to_string());
     args.push("--rotation-distance".into());
@@ -416,26 +425,24 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
         args.push("--max-torque-tenth-pct".into());
         args.push(tq.to_string());
     }
+    if *velocity_ff {
+        args.push("--velocity-ff".into());
+    }
+    args.push("--torque-clamp-pct".into());
+    args.push(ff_torque_clamp.to_string());
 }
 
 fn endpoint_args(
     interface: &str,
     socket_path: &str,
-    velocity_ff: bool,
     dynamics_profile: Option<&str>,
-    torque_clamp_pct: f64,
     drives: &[EthercatDrive],
 ) -> Vec<String> {
     let mut args = vec![
         interface.to_string(),
         "--socket".into(),
         socket_path.to_string(),
-        "--torque-clamp-pct".into(),
-        torque_clamp_pct.to_string(),
     ];
-    if velocity_ff {
-        args.push("--velocity-ff".into());
-    }
     if let Some(p) = dynamics_profile {
         args.push("--dynamics-profile".into());
         args.push(p.to_string());
@@ -459,19 +466,10 @@ fn spawn_ethercat_endpoint(
     binary: &str,
     interface: &str,
     socket_path: &str,
-    velocity_ff: bool,
     dynamics_profile: Option<&str>,
-    torque_clamp_pct: f64,
     drives: &[EthercatDrive],
 ) -> Result<std::process::Child, String> {
-    let args = endpoint_args(
-        interface,
-        socket_path,
-        velocity_ff,
-        dynamics_profile,
-        torque_clamp_pct,
-        drives,
-    );
+    let args = endpoint_args(interface, socket_path, dynamics_profile, drives);
     std::process::Command::new(binary)
         .args(&args)
         .spawn()
@@ -1002,16 +1000,14 @@ impl PyMotionEngine {
         Ok(raw)
     }
 
-    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, velocity_ff, dynamics_profile, torque_clamp_pct, drives))]
+    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, dynamics_profile, drives))]
     fn claim_ethercat_node(
         &self,
         label: &str,
         socket_path: &str,
         interface: &str,
         endpoint_binary: &str,
-        velocity_ff: bool,
         dynamics_profile: Option<String>,
-        torque_clamp_pct: f64,
         drives: Vec<EthercatDrive>,
     ) -> PyResult<u32> {
         if drives.is_empty() {
@@ -1035,9 +1031,7 @@ impl PyMotionEngine {
             endpoint_binary,
             interface,
             socket_path,
-            velocity_ff,
             dynamics_profile.as_deref(),
-            torque_clamp_pct,
             &drives,
         )
         .map_err(|e| {
@@ -4947,15 +4941,37 @@ mod ethercat_endpoint_tests {
         let args = endpoint_args(
             "eth0",
             "/tmp/x.sock",
-            false,
             None,
-            30.0,
-            &[(1, 0, 3276.8, 40.0, Some(8192), Some(500))],
+            &[(1, 0, 3276.8, 40.0, Some(8192), Some(500), false, 30.0)],
         );
         assert!(!args.iter().any(|a| a == "--slave"));
         assert!(!args.iter().any(|a| a == "--axis"));
         assert!(args.iter().any(|a| a == "--counts-per-mm"));
         assert!(args.iter().any(|a| a == "--following-error-counts"));
+        assert!(!args.iter().any(|a| a == "--velocity-ff"));
+        assert!(args.iter().any(|a| a == "--torque-clamp-pct"));
+    }
+
+    #[test]
+    fn endpoint_args_per_drive_ff_flags() {
+        let args = endpoint_args(
+            "eth0",
+            "/tmp/x.sock",
+            None,
+            &[
+                (0, 0, 1000.0, 50.0, None, None, true, 25.0),
+                (1, 2, 2000.0, 40.0, None, None, false, 60.0),
+            ],
+        );
+        let clamps: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| *a == "--torque-clamp-pct" && args.get(i + 1).is_some())
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert_eq!(clamps, vec!["25", "60"]);
+        let velocity_ff_count = args.iter().filter(|a| *a == "--velocity-ff").count();
+        assert_eq!(velocity_ff_count, 1);
     }
 
     #[test]
@@ -4963,12 +4979,10 @@ mod ethercat_endpoint_tests {
         let args = endpoint_args(
             "eth0",
             "/tmp/x.sock",
-            false,
             None,
-            30.0,
             &[
-                (0, 0, 1000.0, 50.0, None, None),
-                (1, 2, 2000.0, 40.0, Some(4096), None),
+                (0, 0, 1000.0, 50.0, None, None, false, 30.0),
+                (1, 2, 2000.0, 40.0, Some(4096), None, false, 30.0),
             ],
         );
         let slave_positions: Vec<&String> = args
@@ -4993,9 +5007,7 @@ mod ethercat_endpoint_tests {
             "/nonexistent/binary/kalico-ec",
             "eth0",
             "/tmp/test.sock",
-            false,
             None,
-            30.0,
             &[],
         );
         assert!(result.is_err(), "expected Err for nonexistent binary");

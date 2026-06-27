@@ -83,6 +83,8 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 
 ## Spec Change Log
 
+- **2026-06-27 — `velocity_ff` + `ff_torque_clamp` are per-motor; `dynamics_profile` moves to `[ethercat_node]` (human feedback).** The earlier "node-wide, must-match" bundling (see 2026-06-27 entry below) was wrong for the feedforward gain and the torque clamp — drives on one chain run different axes with different mechanical properties, so each motor sets its own `velocity_ff`/`ff_torque_clamp`. Both are now threaded per-drive (8-tuple `EthercatDrive`), parsed per `--slave` group (`--velocity-ff` flag + `--torque-clamp-pct`), and indexed per-slot in the endpoint control loop. The bundled `_validate_chain` FF-equality check is deleted. `dynamics_profile` is the exception: it is a coupled `n×n` mass matrix (torque FF on one motor depends on **all** motors' accelerations via the off-diagonals), so it is genuinely node-level and cannot be split per-motor without dropping cross-axis coupling — it moved off the motor sections onto `[ethercat_node]` (optional; independent-drive nodes omit it). `claim_ethercat_node` drops the node-wide `velocity_ff`/`torque_clamp_pct` params, keeps `dynamics_profile`. **Config break:** a CoreXY node moves its `dynamics_profile` line from a motor section to `[ethercat_node]`.
+
 - **2026-06-27 — `ethercat_chain_index` is 0-based + comments stripped (human feedback).** "Index" should start at 0, and 0-based maps directly to the IgH ring position (`SLAVE_POS`), removing the `chain_index - 1` conversion entirely. Range is now `0..EC_RT_MAX_SLAVES`. Also removed the narration comments added in this change per the project's no-comments rule (the stale-comment chase during the 0-based switch was the prompt) — the code (named destructures, function names, the `EC_RT_MAX_SLAVES` constant) carries the meaning.
 
 - **2026-06-27 — `ethercat_chain_index` is now REQUIRED (human renegotiation).** Dropped the `default=1`; `getint("ethercat_chain_index", minval=1)` with no default → every `[motor] drive:servo` must declare its chain position explicitly (a missing field is a loud config error at startup). No backwards-compat for the unspecified case. Existing single-drive bench config must add `ethercat_chain_index: 1`. (`servo_axis.py`; fake motor configs in `test_servo_homing.py`/`test_motion_kinematics.py` updated.)
@@ -162,7 +164,7 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 - New `ethercat_chain_index` motor field (0-based, required).
   [`servo_axis.py:86`](../../klippy/extras/servo_axis.py#L86)
 
-- Node gathers all rails, validates (distinct/range/FF), builds the per-drive list, claims, pushes per-slot params.
+- Node gathers all rails, validates (distinct/range), builds the per-drive list (incl. per-motor `velocity_ff`/`ff_torque_clamp`), claims with node-level `dynamics_profile`, pushes per-slot params.
   [`ethercat_node.py:112`](../../klippy/extras/ethercat_node.py#L112)
 
 - Fail-loud chain validation.
@@ -173,7 +175,7 @@ context: ['{project-root}/CLAUDE.md', '{project-root}/_bmad-output/project-conte
 
 **Tests (peripherals)**
 
-- Chain validation unit tests (duplicate/range/FF mismatch).
+- Chain validation unit tests (duplicate/range; per-motor FF differences accepted).
   [`test_ethercat_node.py:1`](../../test/test_ethercat_node.py#L1)
 
 - Endpoint-arg + slot_for_axis unit tests.

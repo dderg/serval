@@ -10,7 +10,7 @@ class FakeConfigError(Exception):
 
 
 class FakeRail:
-    def __init__(self, motor_name, chain_index, ff_config=(False, None, 30.0)):
+    def __init__(self, motor_name, chain_index, ff_config=(False, 30.0)):
         self._motor_name = motor_name
         self._chain_index = chain_index
         self._ff_config = ff_config
@@ -52,13 +52,11 @@ def test_validate_chain_rejects_out_of_range_index():
     assert "exceeds" in str(e.value)
 
 
-def test_validate_chain_rejects_ff_mismatch():
+def test_validate_chain_accepts_per_motor_ff_differences():
     node, rails = _node(
         [
-            (0, FakeRail("x", 1, ff_config=(False, None, 30.0))),
-            (1, FakeRail("y", 2, ff_config=(True, None, 30.0))),
+            (0, FakeRail("x", 0, ff_config=(False, 30.0))),
+            (1, FakeRail("y", 1, ff_config=(True, 60.0))),
         ]
     )
-    with pytest.raises(FakeConfigError) as e:
-        ethercat_node.EtherCatNode._validate_chain(node, rails)
-    assert "node-wide" in str(e.value)
+    ethercat_node.EtherCatNode._validate_chain(node, rails)
