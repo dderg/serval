@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import os
 import re
 import sys
@@ -90,38 +89,6 @@ def read_printer_config(cfg_path: Path):
     )
 
 
-def _linearize_arc(x0, y0, z0, x1, y1, z1, i, j, ccw, feedrate):
-    cx, cy = x0 + i, y0 + j
-    r = math.hypot(i, j)
-    if r < 1e-9:
-        return [(x1, y1, z1, feedrate)]
-
-    a_start = math.atan2(y0 - cy, x0 - cx)
-    a_end = math.atan2(y1 - cy, x1 - cx)
-
-    if ccw:
-        if a_end <= a_start:
-            a_end += 2 * math.pi
-    else:
-        if a_end >= a_start:
-            a_end -= 2 * math.pi
-
-    sweep = a_end - a_start
-    arc_len = abs(sweep) * r
-    n = max(int(arc_len / 0.5), 4)
-
-    points = []
-    z_step = (z1 - z0) / n
-    for k in range(1, n + 1):
-        t = k / n
-        angle = a_start + sweep * t
-        px = cx + r * math.cos(angle)
-        py = cy + r * math.sin(angle)
-        pz = z0 + z_step * k
-        points.append((px, py, pz, feedrate))
-    return points
-
-
 def parse_gcode(
     path: Path, max_velocity: float
 ) -> list[tuple[float, float, float, float]]:
@@ -171,25 +138,12 @@ def parse_gcode(
             x, y, z = nx, ny, nz
             waypoints.append((x, y, z, feedrate))
         elif cmd in (2, 3):
-            feedrate = params.get("F", feedrate * 60.0) / 60.0
-            if not has_position:
-                continue
-            i_off = params.get("I", 0.0)
-            j_off = params.get("J", 0.0)
-            arc_pts = _linearize_arc(
-                x,
-                y,
-                z,
-                nx,
-                ny,
-                nz,
-                i_off,
-                j_off,
-                ccw=(cmd == 3),
-                feedrate=feedrate,
+            raise ValueError(
+                f"G{cmd} arc command is not supported: the motion engine has no "
+                "native arc ingestion yet, and silently linearizing it here would "
+                "let a snapshot claim to exercise an arc while feeding the engine "
+                "straight segments"
             )
-            waypoints.extend(arc_pts)
-            x, y, z = nx, ny, nz
 
     return waypoints
 
