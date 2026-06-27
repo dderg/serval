@@ -90,6 +90,9 @@ fn build_phases(samples: &[VelSample]) -> Result<(Vec<Phase>, f64), LoweringErro
     Ok((phases, t_acc))
 }
 
+/// Cubic Hermite piece in monomial form matching position and velocity at both
+/// endpoints. Used by the input-shaping post-processor, where only the
+/// convolution-smoothed position and its derivative are available.
 pub(crate) fn hermite_cubic(
     u_start: f64,
     u_end: f64,
@@ -132,19 +135,12 @@ impl Sampler<'_> {
         if axis < 3 {
             match self.spatial {
                 Some(seg) => {
-                    let h = (phase.dt * 1e-4).clamp(1e-9, 1e-4);
-                    let t_lo = (t - h).max(phase.t0);
-                    let t_hi = (t + h).min(phase.t0 + phase.dt);
-                    let (s_lo, v_lo) = phase.s_v_at(t_lo);
-                    let (s_hi, v_hi) = phase.s_v_at(t_hi);
-                    let vel_lo = seg.heading_at(s_lo)[axis] * v_lo;
-                    let vel_hi = seg.heading_at(s_hi)[axis] * v_hi;
-                    let denom = t_hi - t_lo;
-                    let accel = if denom > 0.0 {
-                        (vel_hi - vel_lo) / denom
-                    } else {
-                        0.0
-                    };
+                    // Exact per-axis acceleration `a_t·ĥ + v²·(dĥ/ds)`: the planner's
+                    // tangential accel `a_t = phase.accel` along the heading, plus the
+                    // centripetal term from the path curving. No finite difference, so
+                    // it stays smooth where a difference of headings would jitter.
+                    let accel =
+                        phase.accel * seg.heading_at(s)[axis] + v * v * seg.dheading_ds(s)[axis];
                     (seg.point_at(s)[axis], seg.heading_at(s)[axis] * v, accel)
                 }
                 None => (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0, 0.0),
@@ -231,8 +227,39 @@ pub fn lower_move(
     fit_tol_mm: f64,
     axis_chains: &[CompiledChain],
 ) -> Result<ShapedSegment, LoweringError> {
+    let (axes_pieces, total_t) =
+        lower_move_pieces(gm, vm, t_start, start_pos, fit_tol_mm, axis_chains)?;
+    let axes: Vec<ScalarNurbs<f64>> = axes_pieces
+        .iter()
+        .map(|p| bezier_pieces_to_nurbs(p))
+        .collect();
+    Ok(ShapedSegment {
+        axes,
+        followers: gm.segment.followers.clone(),
+        t_start,
+        t_end: t_start + total_t,
+        motor_mask: 0,
+        source_line: 0,
+    })
+}
+
+/// Lower a move to per-axis cubic Bézier pieces in monomial form
+/// (`pos = c0 + c1·τ + c2·τ² + c3·τ³`, `τ = t − u_start`) — the trajectory the
+/// firmware executes, before it is packed into NURBS. Returns the per-axis pieces
+/// and the move duration.
+pub fn lower_move_pieces(
+    gm: &Move,
+    vm: &MoveVelocity,
+    t_start: f64,
+    start_pos: &[f64],
+    fit_tol_mm: f64,
+    axis_chains: &[CompiledChain],
+) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
     if gm.source != vm.source {
         return Err(LoweringError::SourceMismatch);
+    }
+    if !vm.phases.is_empty() {
+        return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains);
     }
     let (phases, total_t) = build_phases(&vm.samples)?;
     let spatial = gm.segment.spatial.as_ref();
@@ -282,19 +309,102 @@ pub fn lower_move(
         }
     }
 
-    let axes: Vec<ScalarNurbs<f64>> = axes_pieces
-        .iter()
-        .map(|p| bezier_pieces_to_nurbs(p))
-        .collect();
+    Ok((axes_pieces, total_t))
+}
 
-    Ok(ShapedSegment {
-        axes,
-        followers: gm.segment.followers.clone(),
-        t_start,
-        t_end: t_start + total_t,
-        motor_mask: 0,
-        source_line: 0,
-    })
+/// Linear pressure advance is `pos += k * vel`, exact on a cubic: it maps the
+/// monomial coefficients onto another cubic (`SmoothKernel` is a downstream
+/// convolution, so it stops the per-piece transform exactly as the sampled path
+/// does). Mirrors the `ChainStage` semantics in [`Sampler::axis_state`].
+fn apply_axis_chain(coeffs: &mut [f64; 4], chain: &CompiledChain) {
+    for stage in &chain.stages {
+        match stage {
+            ChainStage::LinearPressureAdvance { k } => {
+                let [c0, c1, c2, c3] = *coeffs;
+                *coeffs = [
+                    k.mul_add(c1, c0),
+                    k.mul_add(2.0 * c2, c1),
+                    k.mul_add(3.0 * c3, c2),
+                    c3,
+                ];
+            }
+            ChainStage::SmoothKernel(_) => break,
+        }
+    }
+}
+
+/// Lower a straight constant-ceiling move from its closed-form jerk phases: one
+/// exact cubic per phase. Each axis is the arc-length profile scaled by its fixed
+/// share of the motion (a spatial axis by the heading, a follower by its ratio),
+/// so position, velocity, acceleration, and jerk are all exact — no grid fitting,
+/// no acceleration overshoot, and the traversal time is the profile's own.
+fn lower_straight_from_phases(
+    gm: &Move,
+    vm: &MoveVelocity,
+    t_start: f64,
+    start_pos: &[f64],
+    axis_chains: &[CompiledChain],
+) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
+    let n_axes = start_pos.len().max(3);
+    for f in &gm.segment.followers {
+        if f.axis_index >= n_axes {
+            return Err(LoweringError::FollowerAxisOutOfRange {
+                axis_index: f.axis_index,
+            });
+        }
+    }
+    let spatial = gm
+        .segment
+        .spatial
+        .as_ref()
+        .map(|seg| (seg.point_at(0.0), seg.heading_at(0.0)));
+
+    let axis_scale_base = |axis: usize| -> (f64, f64) {
+        if axis < 3 {
+            match spatial {
+                Some((origin, heading)) => (heading[axis], origin[axis]),
+                None => (0.0, start_pos.get(axis).copied().unwrap_or(0.0)),
+            }
+        } else if let Some(f) = gm.segment.followers.iter().find(|f| f.axis_index == axis) {
+            (f.ratio, start_pos[axis])
+        } else {
+            (0.0, start_pos.get(axis).copied().unwrap_or(0.0))
+        }
+    };
+
+    // One shared cumulative-time bounds array, exactly as the grid path: every
+    // axis reads the same breakpoint float, so consecutive pieces are bit-exactly
+    // contiguous (`u_end == u_start`) and `t_start + total_t` is the final bound —
+    // the contiguity the NURBS assembler asserts, within a move and across seams.
+    let mut bounds = Vec::with_capacity(vm.phases.len() + 1);
+    bounds.push(0.0);
+    for p in &vm.phases {
+        bounds.push(bounds.last().unwrap() + p.dt);
+    }
+    let total_t = *bounds.last().unwrap();
+
+    let mut axes_pieces: Vec<Vec<BezierPiece<f64>>> = vec![Vec::new(); n_axes];
+    for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
+        let (scale, base) = axis_scale_base(axis);
+        for (i, p) in vm.phases.iter().enumerate() {
+            let mut coeffs = [
+                scale.mul_add(p.s0, base),
+                scale * p.v0,
+                scale * 0.5 * p.a0,
+                scale * p.j / 6.0,
+            ];
+            if let Some(chain) = axis_chains.get(axis) {
+                apply_axis_chain(&mut coeffs, chain);
+            }
+            pieces.push(BezierPiece {
+                u_start: t_start + bounds[i],
+                u_end: t_start + bounds[i + 1],
+                coeffs: coeffs.to_vec(),
+            });
+        }
+    }
+
+    Ok((axes_pieces, total_t))
 }
 
 #[cfg(test)]

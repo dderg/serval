@@ -1,81 +1,60 @@
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import viz_pipeline  # noqa: E402
 
 
-def _straight(n, speed, step):
-    # Toolhead marching along +x at constant speed: position is all the
-    # visualizer is given; velocity/accel/jerk are its own to compute.
-    xs = [i * step for i in range(n)]
+def _one_piece(c0, c1, c2, c3, t_end, axis="x"):
+    # A single cubic piece pos(t) = c0 + c1*t + c2*t^2 + c3*t^3 on one axis; the
+    # other axis is held at rest. The visualizer reads these directly -- the
+    # trajectory the firmware runs -- and differentiates them analytically.
+    moving = [[0.0, t_end, c0, c1, c2, c3]]
+    still = [[0.0, t_end, 0.0, 0.0, 0.0, 0.0]]
     return {
-        "kin_x": xs,
-        "kin_y": [0.0] * n,
-        "kin_v": [speed] * n,
+        "traj_x_pieces": moving if axis == "x" else still,
+        "traj_y_pieces": moving if axis == "y" else still,
+        "traj_t_end": t_end,
     }
 
 
-def test_velocity_is_recovered_from_position_alone():
-    snap = _straight(n=10, speed=20.0, step=1.0)
+def test_constant_velocity_gives_flat_speed_and_zero_higher_orders():
+    # x(t) = v*t  ->  velocity v, acceleration 0, jerk 0.
+    snap = _one_piece(0.0, 20.0, 0.0, 0.0, t_end=1.0)
 
-    _, vx, vy, v_scalar, *_ = viz_pipeline._build_time_series(snap)
-
-    assert vx.tolist() == pytest.approx([20.0] * 10)
-    assert vy.tolist() == pytest.approx([0.0] * 10)
-    assert v_scalar.tolist() == pytest.approx([20.0] * 10)
-
-
-def test_constant_velocity_has_zero_acceleration_and_jerk():
-    snap = _straight(n=10, speed=20.0, step=1.0)
-
-    *_, ax, ay, a_scalar, jx, jy, j_scalar = viz_pipeline._build_time_series(
-        snap
+    _, vx, vy, v_scalar, ax, ay, a_scalar, _, _, j_scalar = (
+        viz_pipeline._build_time_series(snap)
     )
 
-    assert ax.tolist() == pytest.approx([0.0] * 10, abs=1e-6)
-    assert a_scalar.tolist() == pytest.approx([0.0] * 10, abs=1e-6)
-    assert j_scalar.tolist() == pytest.approx([0.0] * 10, abs=1e-6)
+    assert np.allclose(vx, 20.0)
+    assert np.allclose(vy, 0.0)
+    assert np.allclose(v_scalar, 20.0)
+    assert np.allclose(a_scalar, 0.0)
+    assert np.allclose(j_scalar, 0.0)
 
 
-def test_circular_arc_at_constant_speed_shows_centripetal_acceleration():
-    # A quarter circle of radius r traversed at constant speed v must show a
-    # constant acceleration magnitude v**2 / r, computed purely from position.
-    r, v, n = 10.0, 50.0, 400
-    xs = [r * math.sin(k / (n - 1) * (math.pi / 2)) for k in range(n)]
-    ys = [r * (1.0 - math.cos(k / (n - 1) * (math.pi / 2))) for k in range(n)]
-    snap = {"kin_x": xs, "kin_y": ys, "kin_v": [v] * n}
+def test_constant_acceleration_piece_is_exact():
+    # x(t) = 0.5*a*t^2  ->  c2 = a/2, acceleration a (constant), jerk 0.
+    a = 1000.0
+    snap = _one_piece(0.0, 0.0, 0.5 * a, 0.0, t_end=0.1)
 
-    _, _, _, v_scalar, _, _, a_scalar, *_ = viz_pipeline._build_time_series(
-        snap
-    )
+    *_, ax, ay, a_scalar, _, _, j_scalar = viz_pipeline._build_time_series(snap)
 
-    assert v_scalar[5:-5].tolist() == pytest.approx([v] * (n - 10), rel=1e-3)
-    expected = v**2 / r
-    assert a_scalar[5:-5].tolist() == pytest.approx(
-        [expected] * (n - 10), rel=1e-2
-    )
+    assert np.allclose(ax, a)
+    assert np.allclose(a_scalar, a)
+    assert np.allclose(j_scalar, 0.0)
 
 
-def test_legacy_heading_snapshot_reconstructs_position():
-    # Old baselines lack kin_x/kin_y; position is integrated from heading so the
-    # review UI can still preview them.
-    snap = {
-        "kin_s": [0.0, 1.0, 2.0, 3.0],
-        "kin_v": [10.0, 10.0, 10.0, 10.0],
-        "kin_heading_x": [1.0, 1.0, 1.0, 1.0],
-        "kin_heading_y": [0.0, 0.0, 0.0, 0.0],
-        "raw_x": [5.0, 8.0],
-        "raw_y": [2.0, 2.0],
-    }
+def test_constant_jerk_piece_is_exact():
+    # x(t) = j/6 * t^3  ->  c3 = j/6, jerk j (constant).
+    j = 50000.0
+    snap = _one_piece(0.0, 0.0, 0.0, j / 6.0, t_end=0.05)
 
-    x, y = viz_pipeline._toolhead_position(snap)
+    *_, jx, _, j_scalar = viz_pipeline._build_time_series(snap)
 
-    assert x.tolist() == pytest.approx([5.0, 6.0, 7.0, 8.0])
-    assert np.all(y == 2.0)
+    assert np.allclose(jx, j)
+    assert np.allclose(j_scalar, j)

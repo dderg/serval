@@ -835,19 +835,71 @@ fn fit_axis_from_signal(
     }
     let domain_lo = template_pieces.first().expect("checked non-empty").u_start;
     let domain_hi = template_pieces.last().expect("checked non-empty").u_end;
-    let pieces = template_pieces
-        .iter()
-        .map(|piece| {
-            let t0 = piece.u_start;
-            let t1 = piece.u_end;
-            let p0 = finite_sample(axis, sig, t0)?;
-            let p1 = finite_sample(axis, sig, t1)?;
-            let v0 = finite_derivative(axis, sig, t0, t1, domain_lo, domain_hi)?;
-            let v1 = finite_derivative(axis, sig, t1, t0, domain_lo, domain_hi)?;
-            Ok(super::lowering::hermite_cubic(t0, t1, p0, v0, p1, v1))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // The template's breakpoints seed the partition, but the convolved signal can
+    // need finer pieces than the unshaped trajectory had — so refine each span to
+    // the shaper's own tolerance rather than inheriting the template's resolution.
+    let mut pieces = Vec::with_capacity(template_pieces.len());
+    for piece in &template_pieces {
+        refine_shaped_span(
+            axis,
+            sig,
+            piece.u_start,
+            piece.u_end,
+            domain_lo,
+            domain_hi,
+            0,
+            &mut pieces,
+        )?;
+    }
     Ok(bezier_pieces_to_nurbs(&pieces))
+}
+
+const SHAPED_FIT_TOL_MM: f64 = 1e-3;
+const SHAPED_FIT_MAX_DEPTH: u32 = 16;
+const SHAPED_FIT_MIN_SPAN_S: f64 = 5e-5;
+
+fn shaped_hermite(
+    axis: usize,
+    sig: &ShapedSignal<'_>,
+    t0: f64,
+    t1: f64,
+    domain_lo: f64,
+    domain_hi: f64,
+) -> Result<BezierPiece<f64>, PostProcessError> {
+    let p0 = finite_sample(axis, sig, t0)?;
+    let p1 = finite_sample(axis, sig, t1)?;
+    let v0 = finite_derivative(axis, sig, t0, t1, domain_lo, domain_hi)?;
+    let v1 = finite_derivative(axis, sig, t1, t0, domain_lo, domain_hi)?;
+    Ok(super::lowering::hermite_cubic(t0, t1, p0, v0, p1, v1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refine_shaped_span(
+    axis: usize,
+    sig: &ShapedSignal<'_>,
+    t0: f64,
+    t1: f64,
+    domain_lo: f64,
+    domain_hi: f64,
+    depth: u32,
+    out: &mut Vec<BezierPiece<f64>>,
+) -> Result<(), PostProcessError> {
+    let piece = shaped_hermite(axis, sig, t0, t1, domain_lo, domain_hi)?;
+    let mut worst = 0.0_f64;
+    for frac in [0.25_f64, 0.5, 0.75] {
+        let tm = frac.mul_add(t1 - t0, t0);
+        worst = worst.max((piece.evaluate(tm) - finite_sample(axis, sig, tm)?).abs());
+    }
+    if depth >= SHAPED_FIT_MAX_DEPTH
+        || (t1 - t0) <= 2.0 * SHAPED_FIT_MIN_SPAN_S
+        || worst <= SHAPED_FIT_TOL_MM
+    {
+        out.push(piece);
+        return Ok(());
+    }
+    let tm = 0.5 * (t0 + t1);
+    refine_shaped_span(axis, sig, t0, tm, domain_lo, domain_hi, depth + 1, out)?;
+    refine_shaped_span(axis, sig, tm, t1, domain_lo, domain_hi, depth + 1, out)
 }
 
 fn finite_sample(axis: usize, sig: &ShapedSignal<'_>, t: f64) -> Result<f64, PostProcessError> {

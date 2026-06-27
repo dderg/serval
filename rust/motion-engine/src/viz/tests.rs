@@ -47,45 +47,49 @@ fn fitted_outcome_has_spatial_segments() {
     assert!(spatial_count > 0);
 }
 
-#[test]
-fn kinematics_emits_finite_position_and_nonnegative_speed() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
-    let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
-    let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
-    let kin = sample_kinematics(&outcome, &profile);
-    assert!(!kin.x.is_empty());
-    assert_eq!(kin.x.len(), kin.y.len());
-    assert_eq!(kin.x.len(), kin.v.len());
-    for i in 0..kin.x.len() {
-        assert!(kin.x[i].is_finite());
-        assert!(kin.y[i].is_finite());
-        assert!(kin.v[i] >= 0.0);
-    }
+fn eval_piece(p: &[f64; 6], t: f64) -> f64 {
+    let z = t - p[0];
+    p[2] + p[3] * z + p[4] * z * z + p[5] * z * z * z
 }
 
 #[test]
-fn curved_corner_is_sampled_densely_enough_to_recover_curvature() {
+fn trajectory_lowers_to_contiguous_finite_cubics() {
     let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
     let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
     let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
-    let kin = sample_kinematics(&outcome, &profile);
-    // The viz recovers centripetal acceleration by differentiating position, so
-    // a turn must show up as many interior samples where the path direction
-    // rotates (successive position deltas not parallel), not a single jump.
-    let mut turning = 0;
-    for i in 1..kin.x.len() - 1 {
-        let (ax, ay) = (kin.x[i] - kin.x[i - 1], kin.y[i] - kin.y[i - 1]);
-        let (bx, by) = (kin.x[i + 1] - kin.x[i], kin.y[i + 1] - kin.y[i]);
-        let cross = ax * by - ay * bx;
-        if cross.abs() > 1e-9 {
-            turning += 1;
+    let traj = lower_trajectory(&outcome, &profile);
+    assert!(!traj.x.is_empty());
+    assert_eq!(traj.x.len(), traj.y.len());
+    for (i, p) in traj.x.iter().enumerate() {
+        assert!(p.iter().all(|c| c.is_finite()));
+        assert!(p[1] > p[0], "piece must span a positive time interval");
+        if i + 1 < traj.x.len() {
+            assert!(
+                (traj.x[i + 1][0] - p[1]).abs() < 1e-9,
+                "pieces must be contiguous in time"
+            );
         }
     }
-    assert!(
-        turning > 8,
-        "corner collapsed to {turning} turning samples; centripetal \
-         acceleration cannot be reconstructed from position"
-    );
+    assert!((traj.x.last().unwrap()[1] - traj.t_end).abs() < 1e-9);
+}
+
+#[test]
+fn cubic_pieces_are_position_continuous_at_joins() {
+    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
+    let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
+    let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
+    let traj = lower_trajectory(&outcome, &profile);
+    // Hermite lowering matches position at every join, on both axes.
+    for axis in [&traj.x, &traj.y] {
+        for w in axis.windows(2) {
+            let end = eval_piece(&w[0], w[0][1]);
+            let start = eval_piece(&w[1], w[1][0]);
+            assert!(
+                (end - start).abs() < 1e-6,
+                "position jump at piece join: {end} vs {start}"
+            );
+        }
+    }
 }
 
 #[test]

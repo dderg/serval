@@ -217,7 +217,11 @@ fn clothoid_emitted_accel_is_disk_feasible_and_tracks_velocity() {
 }
 
 #[test]
-fn decel_into_clothoid_holds_acceleration_across_the_seam() {
+fn clothoid_rides_the_disk_above_the_old_cruise_ceiling() {
+    // The vector-jerk *cruise* ceiling `(jerk / sigma)^(1/3)` is gone: it only bound
+    // at `a_t = 0`, so it flattened the clothoid instead of letting it ride the
+    // acceleration disk. The clothoid now enters well above that old value — pacing
+    // to the disk, not the cruise ceiling — while every sample stays disk-feasible.
     let (kappa_peak, length, accel) = (0.8_f64, 4.0_f64, 2000.0_f64);
     let out = outcome(
         vec![
@@ -229,18 +233,19 @@ fn decel_into_clothoid_holds_acceleration_across_the_seam() {
     );
     let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
     let line = &plan.moves[0];
+    let clothoid = &plan.moves[1];
+    let sigma = kappa_peak / length;
+    let old_cruise = (VelocityConfig::default().max_jerk_mm_s3 / sigma).cbrt();
     assert!(
         line.exit_v < line.peak_v - 1.0,
-        "the approach line must be decelerating into the clothoid"
+        "the approach line must still decelerate into the clothoid"
     );
-    let s = &line.samples;
-    let n = s.len();
-    let a_t = s[n - 1].v * (s[n - 1].v - s[n - 2].v) / (s[n - 1].s - s[n - 2].s);
     assert!(
-        a_t < -0.5 * accel,
-        "tangential accel must ride near -a_max at the clothoid seam (jerk must not \
-         ramp it to zero before the curve); got a_t={a_t}"
+        clothoid.peak_v > old_cruise + 1.0,
+        "clothoid peak {} must ride above the removed cruise ceiling {old_cruise}",
+        clothoid.peak_v
     );
+    assert_disk_feasible(clothoid, 0.0, sigma);
 }
 
 #[test]
