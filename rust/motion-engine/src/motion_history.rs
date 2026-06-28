@@ -135,12 +135,22 @@ impl HistoryStore {
         let piece = HistoryPiece::from_entry(entry, nominal_freq_hz);
         let ring = self.rings.entry(key).or_default();
         if let Some(last) = ring.back() {
-            assert!(
-                piece.start_clock >= last.start_clock,
-                "out-of-order piece for {key:?}: {} < {}",
-                piece.start_clock,
-                last.start_clock
-            );
+            if piece.start_clock < last.start_clock {
+                let regress_ticks = last.start_clock - piece.start_clock;
+                let regress_us = regress_ticks as f64 * 1.0e6 / f64::from(nominal_freq_hz);
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "history_order_jitter",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    start_clock = piece.start_clock,
+                    last_start_clock = last.start_clock,
+                    regress_ticks,
+                    regress_us,
+                    nominal_freq_hz,
+                    "[history-jitter] projected MCU tick regressed vs previous piece"
+                );
+            }
         }
         if ring.len() == HISTORY_CAPACITY {
             ring.pop_front();
