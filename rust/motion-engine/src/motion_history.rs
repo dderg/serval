@@ -176,11 +176,12 @@ impl HistoryStore {
         }
         let piece = HistoryPiece::from_entry(entry, nominal_freq_hz, host_secs);
         let ring = self.rings.entry(key).or_default();
-        if let Some(last) = ring.back() {
-            if piece.start_clock < last.start_clock {
-                let regress_ticks = last.start_clock - piece.start_clock;
+        let prev = ring.back().map(|p| (p.start_clock, p.start_host));
+        if let Some((last_clock, last_host)) = prev {
+            if piece.start_clock < last_clock {
+                let regress_ticks = last_clock - piece.start_clock;
                 let regress_us = regress_ticks as f64 * 1.0e6 / f64::from(nominal_freq_hz);
-                let host_delta_us = (piece.start_host - last.start_host) * 1.0e6;
+                let host_delta_us = (piece.start_host - last_host) * 1.0e6;
                 tracing::warn!(
                     subsystem = "motion",
                     event = "history_order_jitter",
@@ -192,16 +193,19 @@ impl HistoryStore {
                     "[history-jitter] projected MCU tick regressed; host schedule time delta"
                 );
             }
-            if piece.start_host < last.start_host {
+            if piece.start_host < last_host {
                 tracing::warn!(
                     subsystem = "motion",
                     event = "history_host_out_of_order",
                     mcu = key.mcu_id,
                     axis = key.axis,
                     start_host = piece.start_host,
-                    last_start_host = last.start_host,
-                    "[history] host schedule time regressed vs previous piece — late segment / ordering bug"
+                    last_start_host = last_host,
+                    "[history] host schedule time regressed vs previous piece — superseding stale tail"
                 );
+                while ring.back().is_some_and(|p| p.start_host > piece.start_host) {
+                    ring.pop_back();
+                }
             }
         }
         if ring.len() == HISTORY_CAPACITY {

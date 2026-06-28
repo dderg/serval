@@ -268,3 +268,33 @@ fn legacy_clock_shadow_none_when_empty() {
             .is_none()
     );
 }
+
+#[test]
+fn backward_host_supersedes_stale_tail() {
+    let mut store = HistoryStore::default();
+    store.record(key(), &linear(0, 0.5, 0.0, 10.0), FREQ, 1.0);
+    store.record(key(), &linear(0, 0.5, 50.0, 60.0), FREQ, 0.2);
+    let st = store
+        .state_at_host(key(), 0.4, Some(f64::INFINITY))
+        .unwrap();
+    assert!((st.position - 54.0).abs() < 1e-6);
+    let held = store
+        .state_at_host(key(), 1.2, Some(f64::INFINITY))
+        .unwrap();
+    assert!((held.position - 60.0).abs() < 1e-6);
+}
+
+#[test]
+fn host_clock_round_trip_is_identity() {
+    let router = stub_router_two_mcus();
+    let h = crate::types::mcu_handle_from_raw(1);
+    let clock = 12_345_678_u64;
+    let host = router.clock_to_host_secs(h, clock).expect("synced mcu");
+    let back = router
+        .host_time_to_mcu_clock(h, host)
+        .expect("synced mcu inverse");
+    assert!(
+        (back as i64 - clock as i64).abs() <= 1,
+        "T then T^-1 must return the original clock (got {back}, want {clock})"
+    );
+}
