@@ -45,5 +45,11 @@ setcap-ethercat:
 ethercat-stub:
 	cd rust && cargo build -p ethercat-rt --bin ethercat-rt-stub --release
 
+# Offline dynamics fitter, run on the host at SERVO_FIT_DYNAMICS time (not part
+# of the runtime). Built here so a capture-format change can't leave a stale
+# binary behind a cryptic MissingColumn error.
+servo-ident:
+	cd rust && cargo build -p servo-ident --release
+
 .PHONY: motion-engine clean-motion-engine \
-	ethercat-endpoint-hw setcap-ethercat ethercat-stub
+	ethercat-endpoint-hw setcap-ethercat ethercat-stub servo-ident
