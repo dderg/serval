@@ -86,6 +86,7 @@ type EthercatDrive = (
     bool,
     f64,
     bool,
+    Option<String>,
 );
 
 const ETHERCAT_CLOCK_FREQ_HZ: u32 = 1_000_000_000;
@@ -423,6 +424,7 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
         velocity_ff,
         ff_torque_clamp,
         invert_direction,
+        dynamics_profile,
     ) = d;
     args.push("--counts-per-mm".into());
     args.push(counts_per_mm.to_string());
@@ -444,6 +446,10 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
     }
     args.push("--torque-clamp-pct".into());
     args.push(ff_torque_clamp.to_string());
+    if let Some(profile) = dynamics_profile {
+        args.push("--slave-dynamics-profile".into());
+        args.push(profile.to_string());
+    }
 }
 
 fn endpoint_args(
@@ -1160,7 +1166,7 @@ impl PyMotionEngine {
         mcu_handle: u32,
         path: String,
         started_utc: String,
-        drive_name: String,
+        drives: Vec<(u8, String)>,
     ) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "start_servo_capture")?;
         tracing::info!(
@@ -1170,9 +1176,8 @@ impl PyMotionEngine {
             path,
             "servo capture start"
         );
-        let result =
-            crate::servo_capture::send_start_capture(&conn, &path, &started_utc, &drive_name)
-                .map_err(PyRuntimeError::new_err)?;
+        let result = crate::servo_capture::send_start_capture(&conn, &path, &started_utc, &drives)
+            .map_err(PyRuntimeError::new_err)?;
         if result != 0 {
             return Err(PyRuntimeError::new_err(format!(
                 "servo capture start failed: endpoint result {result}"
@@ -4970,6 +4975,7 @@ mod ethercat_endpoint_tests {
                 false,
                 30.0,
                 false,
+                None,
             )],
         );
         assert!(!args.iter().any(|a| a == "--slave"));
@@ -4989,8 +4995,8 @@ mod ethercat_endpoint_tests {
             None,
             None,
             &[
-                (0, 0, 1000.0, 50.0, None, None, true, 25.0, false),
-                (1, 2, 2000.0, 40.0, None, None, false, 60.0, true),
+                (0, 0, 1000.0, 50.0, None, None, true, 25.0, false, None),
+                (1, 2, 2000.0, 40.0, None, None, false, 60.0, true, None),
             ],
         );
         let clamps: Vec<&String> = args
@@ -5014,8 +5020,19 @@ mod ethercat_endpoint_tests {
             None,
             None,
             &[
-                (0, 0, 1000.0, 50.0, None, None, false, 30.0, false),
-                (1, 2, 2000.0, 40.0, Some(4096), None, false, 30.0, false),
+                (0, 0, 1000.0, 50.0, None, None, false, 30.0, false, None),
+                (
+                    1,
+                    2,
+                    2000.0,
+                    40.0,
+                    Some(4096),
+                    None,
+                    false,
+                    30.0,
+                    false,
+                    None,
+                ),
             ],
         );
         let slave_positions: Vec<&String> = args
@@ -5032,6 +5049,50 @@ mod ethercat_endpoint_tests {
             .map(|(i, _)| &args[i + 1])
             .collect();
         assert_eq!(axes, vec!["0", "2"]);
+    }
+
+    #[test]
+    fn endpoint_args_emits_per_slave_dynamics_profile() {
+        let args = endpoint_args(
+            "eth0",
+            "/tmp/x.sock",
+            None,
+            None,
+            &[
+                (
+                    0,
+                    0,
+                    1000.0,
+                    50.0,
+                    None,
+                    None,
+                    false,
+                    30.0,
+                    false,
+                    Some("/cfg/x.toml".into()),
+                ),
+                (
+                    1,
+                    2,
+                    2000.0,
+                    40.0,
+                    None,
+                    None,
+                    false,
+                    30.0,
+                    false,
+                    Some("/cfg/y.toml".into()),
+                ),
+            ],
+        );
+        let profiles: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| *a == "--slave-dynamics-profile" && args.get(i + 1).is_some())
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert_eq!(profiles, vec!["/cfg/x.toml", "/cfg/y.toml"]);
+        assert!(!args.iter().any(|a| a == "--dynamics-profile"));
     }
 
     #[test]

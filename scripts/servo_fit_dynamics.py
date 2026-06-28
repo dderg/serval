@@ -48,6 +48,12 @@ def ident_binary():
     return path
 
 
+def resolve_rotation_distance(args, header, drive_idx):
+    if args.rotation_distance_mm is not None:
+        return args.rotation_distance_mm
+    return header["drives"][drive_idx].get("rotation_distance")
+
+
 def ident_cmd(binary, csv_path, axis, out_path, args):
     cmd = [
         binary,
@@ -81,12 +87,25 @@ def main(argv=None):
     p.add_argument("--rated-torque-nm", type=float)
     p.add_argument("--rotor-inertia-kgm2", type=float)
     p.add_argument("--rotation-distance-mm", type=float)
+    p.add_argument(
+        "--drive",
+        help="drive name to fit in a multi-drive capture "
+        "(default: the first drive in the file)",
+    )
     args = p.parse_args(argv)
 
     capture_path = resolve_newest_capture(args.captures_dir, args.name)
-    header, data = load_capture(capture_path)
-    axis = header["drives"][0]["name"]
-    counts_per_mm = header["drives"][0]["counts_per_mm"]
+    header, data, drive_idx = load_capture(capture_path, args.drive)
+    axis = header["drives"][drive_idx]["name"]
+    args.rotation_distance_mm = resolve_rotation_distance(
+        args, header, drive_idx
+    )
+    if args.rotation_distance_mm is None and args.rated_torque_nm is not None:
+        print(
+            "note: capture predates rotation_distance in the header; pass "
+            "--rotation-distance-mm or re-capture to get the C00.06 "
+            "recommendation"
+        )
 
     out_dir = os.path.expanduser(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
@@ -98,7 +117,7 @@ def main(argv=None):
     ) as tmp:
         csv_path = tmp.name
     try:
-        export_ident_csv(csv_path, header, data, counts_per_mm)
+        export_ident_csv(csv_path, header, data, drive_idx)
         proc = subprocess.run(
             ident_cmd(binary, csv_path, axis, out_path, args),
             stdout=subprocess.PIPE,

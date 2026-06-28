@@ -95,6 +95,30 @@ class EtherCatNode:
                 )
             by_index[idx] = rail.get_motor_name()
 
+    def _validate_dynamics_profiles(self, rails):
+        per_servo = [
+            (rail.get_motor_name(), rail.get_dynamics_profile())
+            for _global_axis, rail in rails
+        ]
+        configured = [
+            name for name, profile in per_servo if profile is not None
+        ]
+        if not configured:
+            return
+        if self.dynamics_profile is not None:
+            raise self.printer.config_error(
+                "ethercat_node %s: dynamics_profile is set on [ethercat_node] "
+                "and on [motor %s]; a node is either coupled (one node-level "
+                "profile) or independent (one profile per motor), not both"
+                % (self.name, configured[0])
+            )
+        missing = [name for name, profile in per_servo if profile is None]
+        if missing:
+            raise self.printer.config_error(
+                "ethercat_node %s: dynamics_profile must be set on every motor "
+                "or none — missing on: %s" % (self.name, ", ".join(missing))
+            )
+
     def _claim(self):
         if self.engine_handle is not None:
             return
@@ -104,6 +128,7 @@ class EtherCatNode:
             rail.get_motor_name(): slot
             for slot, (_global_axis, rail) in enumerate(rails)
         }
+        self._validate_dynamics_profiles(rails)
         drives = []
         for global_axis, rail in rails:
             following_error_counts, max_torque_tenth_pct = (
@@ -121,6 +146,7 @@ class EtherCatNode:
                     velocity_ff,
                     ff_torque_clamp,
                     rail.get_invert_direction(),
+                    rail.get_dynamics_profile(),
                 )
             )
         self._counts_per_mm = rails[0][1].get_counts_per_mm()

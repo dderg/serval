@@ -249,6 +249,29 @@ endpoint: rust/target/release/ethercat-rt-stub
   **power-cycle the drive** to clear it, then fix the root cause (almost always
   RT scheduling; see that section) so it does not re-latch on the next boot.
 
+## Servo telemetry capture (multi-drive)
+
+`SERVO_CAPTURE_START AXIS=<axis>` records the servo on that axis on its
+`[ethercat_node]`, even when the node carries several drives — the host resolves the
+target to a `(node, slot)` and tells the endpoint which slot to sample.
+`SERVO=<motor name>` also works for a direct by-name capture. The calibration macros
+already know their axis, so they pass `AXIS=` — nothing depends on the motor being
+named `motor_<axis>`. The `.scap` file holds one drive block per captured drive;
+today the host lists a single slot, but the format and wire message already carry
+N drives time-aligned on the shared 1 kHz DC cycle (a future CoreXY axis expands
+to multiple slots with no format change). A single-drive capture is byte-identical
+to the pre-multi-drive layout.
+
+The analysis tools select a drive by name with `--drive <motor>` (defaulting to
+the first drive in the file): `scripts/servo_capture.py --drive <motor>`,
+`servo_gain_report.py --drive <motor>`, and `servo_fit_dynamics.py --drive
+<motor>`. `SERVO_FIT_DYNAMICS AXIS=<axis>` works unchanged on a multi-drive node.
+
+Each `.scap` header drive entry records the drive's `counts_per_mm` and
+`rotation_distance`, so `servo_fit_dynamics` derives the rotation distance the
+C00.06 recommendation needs from the capture itself — no `ROT_DIST` to pass
+(a wrong/default one silently scales the inertia-ratio recommendation).
+
 ## Real-time scheduling — mandatory (the ErC1.1 / "ErC11" trap)
 
 The endpoint's 1 kHz DC loop **must** run `SCHED_FIFO` on an isolated CPU. This

@@ -3,7 +3,7 @@
 //!   [--rated-torque-nm T --rotor-inertia-kgm2 J --rotation-distance-mm D]
 #![allow(clippy::exit)]
 
-use servo_ident::capture::parse_capture_csv;
+use servo_ident::capture::{parse_capture_csv, restrict_to_steady_accel, PlateauOptions};
 use servo_ident::fit::{fit, FitInput, FitOptions};
 use servo_ident::model::Structure;
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
@@ -83,6 +83,17 @@ fn main() {
         eprintln!("servo-ident: capture invalid: {e:?}");
         std::process::exit(1);
     });
+    let total = cap.t.len();
+    let cap = restrict_to_steady_accel(&cap, &PlateauOptions::default());
+    let kept = cap.t.len();
+    eprintln!("plateau mask: kept {kept}/{total} samples on steady-accel plateaus");
+    if kept == 0 {
+        eprintln!(
+            "servo-ident: no steady-accel plateaus in capture — strokes too short \
+             or jerk-limited accel never holds; lengthen strokes or lower accel"
+        );
+        std::process::exit(2);
+    }
     let input = FitInput {
         structure,
         acc: cap.acc,
