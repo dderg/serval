@@ -188,6 +188,25 @@ fn eviction_keeps_capacity_and_reports_true_window() {
 }
 
 #[test]
+fn drop_pieces_on_reanchor_keeps_unrecorded_axis_answerable() {
+    let mut store = HistoryStore::default();
+    let moving = AxisKey { mcu_id: 7, axis: 2 };
+    let stationary = AxisKey { mcu_id: 7, axis: 0 };
+    store.record(moving, &linear(0, 1.0, 0.0, 10.0), FREQ);
+    store.record(stationary, &linear(0, 1.0, 3.0, 3.0), FREQ);
+
+    store.drop_pieces_on_reanchor();
+
+    let held = store
+        .state_at_clock(stationary, 5_000_000, Some(10_000_000))
+        .unwrap();
+    assert!((held.position - 3.0).abs() < 1e-6);
+
+    store.record(moving, &linear(2_000_000_000, 1.0, 10.0, 20.0), FREQ);
+    assert_eq!(store.final_position(moving), Some(20.0));
+}
+
+#[test]
 fn rebase_to_earlier_clock_accepts_post_rewind_pieces() {
     let mut store = HistoryStore::default();
     store.record(key(), &linear(3_000_000, 1.0, 0.0, 5.0), FREQ);

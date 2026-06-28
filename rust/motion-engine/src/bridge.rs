@@ -3238,7 +3238,7 @@ impl PyMotionEngine {
                     let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
                     for cfg in mcu_configs_for_cb.iter() {
                         let h = crate::types::mcu_handle_from_raw(cfg.mcu_id);
-                        r.log_seg0_deficit(h, t0 + seg.t_start, t0);
+                        r.log_seg0_lead(h, t0 + seg.t_start, t0);
                     }
                 }
 
@@ -3278,15 +3278,11 @@ impl PyMotionEngine {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .clone();
-                // A re-anchor jumps the clock baseline; drop the now-stale history
-                // once, before recording this segment, so a resumed piece is not
-                // compared against pieces on the old timeline (which would read as
-                // out-of-order and abort the dispatch).
                 if fresh {
                     motion_history_for_cb
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
-                        .clear();
+                        .drop_pieces_on_reanchor();
                 }
                 for m in msgs {
                     let nominal_freq = *nominal_freqs
@@ -3351,7 +3347,7 @@ impl PyMotionEngine {
                 if fresh {
                     let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
                     let h = crate::types::mcu_handle_from_raw(mcu_id);
-                    r.log_seg0_deficit(h, t0 + np.piece.u_start, t0);
+                    r.log_seg0_lead(h, t0 + np.piece.u_start, t0);
                 }
 
                 let project = |proj_mcu_id: u32, host_secs: f64| -> u64 {

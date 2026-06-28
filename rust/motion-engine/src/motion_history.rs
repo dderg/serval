@@ -149,13 +149,16 @@ impl HistoryStore {
         ring.push_back(piece);
     }
 
-    /// Drop all recorded history. Called when the dispatch anchor re-anchors
-    /// (`fresh`): the clock baseline jumps, so prior pieces sit on a stale timeline
-    /// and a freshly-recorded piece would otherwise read as out-of-order against
-    /// them. The next pieces re-seed the rings from the new baseline.
-    pub fn clear(&mut self) {
-        self.rings.clear();
-        self.endpoints.clear();
+    /// Drop the stale ring pieces on a dispatch re-anchor (`fresh`): the clock
+    /// baseline jumps, so a freshly-recorded piece would otherwise read as
+    /// out-of-order against pieces on the old timeline. Endpoints are kept, so an
+    /// axis the re-anchored segment does not re-record (e.g. X/Y during a Z-only
+    /// probe move) still answers `state_at_clock` with its held position instead
+    /// of `NoHistoryForAxis` — which the beacon probe `pos` lookup depends on.
+    pub fn drop_pieces_on_reanchor(&mut self) {
+        for ring in self.rings.values_mut() {
+            ring.clear();
+        }
     }
 
     pub fn rebase_axis(&mut self, key: AxisKey, clock: u64, position: f64) {
