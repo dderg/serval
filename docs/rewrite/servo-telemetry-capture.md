@@ -152,7 +152,10 @@ feedforward path samples off the Bézier trajectory. They are exact and
 independent of any drive gain or inertia-ratio setting, which is what makes
 them the right regressors for dynamics identification (differentiating the
 measured encoder trajectory instead couples the fit to C00.06 via the
-closed-loop response).
+closed-loop response). They are logged in the **drive frame** — sign-flipped to
+match the target when `invert_direction` is set — so they stay sign-consistent
+with `position_actual`/`velocity_actual`/`torque_actual`; without that flip an
+inverted axis fits negative inertia.
 
 Records are fixed-size and the writer fsyncs every second, so a file truncated
 by endpoint death is valid up to the last whole record — the analysis script

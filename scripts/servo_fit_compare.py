@@ -116,9 +116,17 @@ def main(argv=None):
         "drive %r, counts_per_mm %.3f, dt %.6fs"
         % (header["drives"][drive_idx]["name"], cpm, dt)
     )
+    vcorr = np.corrcoef(vel_cmd[moving], vel_act[moving])[0, 1]
     print(
-        "velocity check: mean |vel_actual| %.1f vs |vel_cmd| %.1f mm/s (should match)"
-        % (np.mean(np.abs(vel_act[moving])), np.mean(np.abs(vel_cmd[moving])))
+        "velocity check: |vel_actual| %.1f vs |vel_cmd| %.1f mm/s, corr %+.2f%s"
+        % (
+            np.mean(np.abs(vel_act[moving])),
+            np.mean(np.abs(vel_cmd[moving])),
+            vcorr,
+            "  <-- INVERTED FRAME: accel_cmd sign is wrong for this axis"
+            if vcorr < 0
+            else "",
+        )
     )
     print("steady-plateau samples: %d/%d\n" % (kept, int(moving.sum())))
 

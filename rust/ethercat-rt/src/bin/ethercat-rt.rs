@@ -1348,6 +1348,12 @@ fn main() {
             for (i, &slot) in capture_slots.iter().enumerate() {
                 let mut t = ffi::EcTelemetry::default();
                 unsafe { ffi::ec_rt_get_telemetry(i32::from(slot), &mut t) };
+                // The commanded kinematics are sampled in planner-stream frame;
+                // flip them into the drive frame (as cmd_counts_per_mm's sign
+                // does for the target) so they are sign-consistent with the
+                // drive-frame position/velocity/torque channels — otherwise an
+                // inverted axis fits negative inertia.
+                let dir = cmd_counts_per_mm[usize::from(slot)].signum() as f32;
                 record.drives[i] = DriveSample {
                     target_counts: t.target_position,
                     position_actual: t.position_actual,
@@ -1358,8 +1364,8 @@ fn main() {
                     error_code: t.error_code,
                     velocity_offset: t.velocity_offset,
                     torque_offset: t.torque_offset,
-                    accel_cmd: all_acc[usize::from(slot)],
-                    vel_cmd: all_vel[usize::from(slot)],
+                    accel_cmd: dir * all_acc[usize::from(slot)],
+                    vel_cmd: dir * all_vel[usize::from(slot)],
                 };
             }
             capture.push(record);
