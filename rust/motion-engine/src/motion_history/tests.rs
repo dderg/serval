@@ -244,3 +244,27 @@ fn rebase_to_earlier_clock_accepts_post_rewind_pieces() {
     rec(&mut store, key(), linear(2_500_000, 1.0, 5.0, 6.0));
     assert_eq!(store.final_position(key()), Some(6.0));
 }
+
+#[test]
+fn legacy_clock_shadow_matches_host_lookup() {
+    let mut store = HistoryStore::default();
+    rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
+    let mid_clock = FREQ as u64 / 2;
+    let host = store
+        .state_at_host(key(), h(mid_clock), Some(f64::INFINITY))
+        .unwrap();
+    let shadow = store
+        .state_at_clock_legacy(key(), mid_clock, u64::MAX)
+        .expect("legacy lookup resolves inside a recorded piece");
+    assert!((host.position - shadow.position).abs() < 1e-9);
+}
+
+#[test]
+fn legacy_clock_shadow_none_when_empty() {
+    let store = HistoryStore::default();
+    assert!(
+        store
+            .state_at_clock_legacy(key(), 1_000, u64::MAX)
+            .is_none()
+    );
+}

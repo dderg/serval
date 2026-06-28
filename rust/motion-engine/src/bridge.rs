@@ -4438,26 +4438,44 @@ impl PyMotionEngine {
             )
             .map_err(PyRuntimeError::new_err)?
         };
-        let keys: Vec<crate::pump::AxisKey> = configs
-            .iter()
-            .flat_map(|cfg| {
-                cfg.axes.iter().map(move |&axis| crate::pump::AxisKey {
-                    mcu_id: cfg.mcu_id,
-                    axis: axis as u8,
-                })
-            })
-            .collect();
+        let resolved: Vec<(crate::pump::AxisKey, u64, u64)> = {
+            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            let mut acc = Vec::new();
+            for cfg in &configs {
+                let target = crate::types::mcu_handle_from_raw(cfg.mcu_id);
+                let shadow_clock = router
+                    .host_time_to_mcu_clock(target, query_host)
+                    .unwrap_or(0);
+                let now_clock = router.host_time_to_mcu_clock(target, host_now).unwrap_or(0);
+                for &axis in &cfg.axes {
+                    acc.push((
+                        crate::pump::AxisKey {
+                            mcu_id: cfg.mcu_id,
+                            axis: axis as u8,
+                        },
+                        shadow_clock,
+                        now_clock,
+                    ));
+                }
+            }
+            acc
+        };
         let store = self
             .motion_history
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let mut out = std::collections::HashMap::new();
-        for key in keys {
+        for (key, shadow_clock, now_clock) in resolved {
             let st = match store.state_at_host(key, query_host, Some(host_now)) {
                 Ok(st) => st,
                 Err(crate::motion_history::HistoryError::NoHistoryForAxis(_)) => continue,
                 Err(e) => return Err(PyRuntimeError::new_err(e.to_string())),
             };
+            crate::motion_history::check_shadow_divergence(
+                key,
+                st.position,
+                store.state_at_clock_legacy(key, shadow_clock, now_clock),
+            );
             let name = AXIS_NAMES.get(key.axis as usize).ok_or_else(|| {
                 PyRuntimeError::new_err(format!("motion_state_at: unnamed axis {}", key.axis))
             })?;

@@ -54,11 +54,24 @@ pub fn reconstruct_axis_position(
         ));
     }
 
+    let shadow_clock = {
+        let router_guard = router.lock().unwrap_or_else(|p| p.into_inner());
+        router_guard
+            .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(axis_mcu), trip_host)
+            .ok()
+    };
     let store = history.lock().unwrap_or_else(|p| p.into_inner());
-    store
+    let st = store
         .state_at_host(axis_key, trip_host, None)
-        .map(|st| st.position)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if let Some(shadow_clock) = shadow_clock {
+        crate::motion_history::check_shadow_divergence(
+            axis_key,
+            st.position,
+            store.state_at_clock_legacy(axis_key, shadow_clock, u64::MAX),
+        );
+    }
+    Ok(st.position)
 }
 
 pub fn trajectory_final_position(
