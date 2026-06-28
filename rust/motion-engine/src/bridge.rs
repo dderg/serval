@@ -31,7 +31,7 @@ struct HomingRun {
     axis: u8,
     axis_key: crate::pump::AxisKey,
     all_axis_keys: Vec<crate::pump::AxisKey>,
-    window_start_clock: u64,
+    window_start_host: f64,
     notify: crossbeam_channel::Sender<Result<([f64; 3], [f64; 3], u64), String>>,
 }
 
@@ -3292,8 +3292,8 @@ impl PyMotionEngine {
                         let mut store = motion_history_for_cb
                             .lock()
                             .unwrap_or_else(|p| p.into_inner());
-                        for (piece, _host_t) in &m.pieces {
-                            store.record(m.key, piece, nominal_freq);
+                        for (piece, host_t) in &m.pieces {
+                            store.record(m.key, piece, nominal_freq, *host_t);
                         }
                     }
                     drain_disp.add_sent(m.key.mcu_id, m.key.axis, m.pieces.len() as u32);
@@ -3390,8 +3390,8 @@ impl PyMotionEngine {
                         let mut store = nudge_motion_history
                             .lock()
                             .unwrap_or_else(|p| p.into_inner());
-                        for (piece, _host_t) in &pieces {
-                            store.record(key, piece, nominal_freq);
+                        for (piece, host_t) in &pieces {
+                            store.record(key, piece, nominal_freq, *host_t);
                         }
                     }
                     nudge_drain.add_sent(mcu_id, axis, pieces.len() as u32);
@@ -3783,63 +3783,48 @@ impl PyMotionEngine {
                 .unwrap_or_else(|p| p.into_inner())
                 .clone();
             let positions = [x, y, z];
-            let rebases: Vec<(crate::pump::AxisKey, u64, f64)> = {
-                let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-                configs
-                    .iter()
-                    .flat_map(|cfg| {
-                        let handle = crate::types::mcu_handle_from_raw(cfg.mcu_id);
-                        let now_clock =
-                            router.host_time_to_mcu_clock(handle, host_now).unwrap_or(0);
-                        cfg.axes
-                            .iter()
-                            .filter(|&&a| a < SPATIAL_AXES)
-                            .map(move |&axis| {
-                                let key = crate::pump::AxisKey {
+            let rebases: Vec<(crate::pump::AxisKey, f64)> = configs
+                .iter()
+                .flat_map(|cfg| {
+                    cfg.axes
+                        .iter()
+                        .filter(|&&a| a < SPATIAL_AXES)
+                        .map(move |&axis| {
+                            (
+                                crate::pump::AxisKey {
                                     mcu_id: cfg.mcu_id,
                                     axis: axis as u8,
-                                };
-                                (key, now_clock, positions[axis])
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect()
-            };
-            let follower_rebases: Vec<(crate::pump::AxisKey, u64)> = {
-                let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-                configs
-                    .iter()
-                    .flat_map(|cfg| {
-                        let handle = crate::types::mcu_handle_from_raw(cfg.mcu_id);
-                        let now_clock =
-                            router.host_time_to_mcu_clock(handle, host_now).unwrap_or(0);
-                        cfg.axes
-                            .iter()
-                            .filter(|&&a| a >= 3)
-                            .map(move |&axis| {
-                                (
-                                    crate::pump::AxisKey {
-                                        mcu_id: cfg.mcu_id,
-                                        axis: axis as u8,
-                                    },
-                                    now_clock,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect()
-            };
+                                },
+                                positions[axis],
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let follower_keys: Vec<crate::pump::AxisKey> = configs
+                .iter()
+                .flat_map(|cfg| {
+                    cfg.axes
+                        .iter()
+                        .filter(|&&a| a >= 3)
+                        .map(move |&axis| crate::pump::AxisKey {
+                            mcu_id: cfg.mcu_id,
+                            axis: axis as u8,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
             {
                 let mut store = self
                     .motion_history
                     .lock()
                     .unwrap_or_else(|p| p.into_inner());
-                for (key, now_clock, pos) in rebases {
-                    store.rebase_axis(key, now_clock, pos);
+                for (key, pos) in rebases {
+                    store.rebase_axis(key, host_now, pos);
                 }
-                for (key, now_clock) in follower_rebases {
+                for key in follower_keys {
                     let held_position = store.final_position(key).unwrap_or(0.0);
-                    store.rebase_axis(key, now_clock, held_position);
+                    store.rebase_axis(key, host_now, held_position);
                 }
             }
         }
@@ -4084,17 +4069,9 @@ impl PyMotionEngine {
                 .map_err(PyRuntimeError::new_err)?;
         }
 
-        let window_start_clock_in_drip_piece_era = {
+        let window_start_host = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            let host_now = router.host_now_secs();
-            router
-                .host_time_to_mcu_clock(mcu_handle_from_raw(axis_key.mcu_id), host_now)
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!(
-                        "home_axis: cannot project arm-time clock for axis mcu {}: {e:?}",
-                        axis_key.mcu_id
-                    ))
-                })?
+            router.host_now_secs()
         };
 
         {
@@ -4132,7 +4109,7 @@ impl PyMotionEngine {
                 axis,
                 axis_key,
                 all_axis_keys: all_axis_keys.clone(),
-                window_start_clock: window_start_clock_in_drip_piece_era,
+                window_start_host,
                 notify: result_tx,
             });
         }
@@ -4452,44 +4429,31 @@ impl PyMotionEngine {
                 "motion_state_at: no axes configured on the engine",
             ));
         }
-        let resolved: Vec<(crate::pump::AxisKey, u64, u64)> = {
+        let query_host = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            let source_handle = crate::types::mcu_handle_from_raw(source_mcu);
-            let mut acc = Vec::new();
-            for cfg in &configs {
-                let target_handle = crate::types::mcu_handle_from_raw(cfg.mcu_id);
-                let axis_clock = crate::motion_history::clock_between_mcus(
-                    &router,
-                    source_handle,
-                    target_handle,
-                    clock,
-                )
-                .map_err(PyRuntimeError::new_err)?;
-                let now_clock = router
-                    .host_time_to_mcu_clock(target_handle, host_now)
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!(
-                            "motion_state_at: clock unsynced for mcu {}: {e:?}",
-                            cfg.mcu_id
-                        ))
-                    })?;
-                for &axis in &cfg.axes {
-                    let key = crate::pump::AxisKey {
-                        mcu_id: cfg.mcu_id,
-                        axis: axis as u8,
-                    };
-                    acc.push((key, axis_clock, now_clock));
-                }
-            }
-            acc
+            crate::motion_history::clock_to_host(
+                &router,
+                crate::types::mcu_handle_from_raw(source_mcu),
+                clock,
+            )
+            .map_err(PyRuntimeError::new_err)?
         };
+        let keys: Vec<crate::pump::AxisKey> = configs
+            .iter()
+            .flat_map(|cfg| {
+                cfg.axes.iter().map(move |&axis| crate::pump::AxisKey {
+                    mcu_id: cfg.mcu_id,
+                    axis: axis as u8,
+                })
+            })
+            .collect();
         let store = self
             .motion_history
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let mut out = std::collections::HashMap::new();
-        for (key, axis_clock, now_clock) in resolved {
-            let st = match store.state_at_clock(key, axis_clock, Some(now_clock)) {
+        for key in keys {
+            let st = match store.state_at_host(key, query_host, Some(host_now)) {
                 Ok(st) => st,
                 Err(crate::motion_history::HistoryError::NoHistoryForAxis(_)) => continue,
                 Err(e) => return Err(PyRuntimeError::new_err(e.to_string())),
@@ -4733,7 +4697,7 @@ pub(crate) fn dispatch_endstop_trip(
                     axis_key,
                     &router_arc,
                     &history_arc,
-                    run.window_start_clock,
+                    run.window_start_host,
                 )?;
                 let motor_frame =
                     trip_position_to_motor_frame(axis, motor_pos, &configs, axis_key.mcu_id);

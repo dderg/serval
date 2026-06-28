@@ -47,6 +47,25 @@ fn shared(store: HistoryStore) -> Arc<Mutex<HistoryStore>> {
     Arc::new(Mutex::new(store))
 }
 
+fn host_of(router: &Arc<Mutex<PassthroughRouter>>, mcu_id: u32, clock: u64) -> f64 {
+    router
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clock_to_host_secs(crate::types::mcu_handle_from_raw(mcu_id), clock)
+        .expect("test router must resolve clock_to_host_secs")
+}
+
+fn record_synced(
+    store: &mut HistoryStore,
+    router: &Arc<Mutex<PassthroughRouter>>,
+    key: AxisKey,
+    e: &PieceEntry,
+    freq: u32,
+) {
+    let host = host_of(router, key.mcu_id, e.start_time);
+    store.record(key, e, freq, host);
+}
+
 #[test]
 fn eval_bernstein_cubic_linear_piece_endpoints() {
     let coeffs = [0.0f32, 0.0, 1.0, 1.0];
@@ -103,11 +122,18 @@ fn same_mcu_trip_clock_exact_reconstruction() {
         axis: AXIS_X as u8,
     };
     let mut store = HistoryStore::default();
-    store.record(key, &piece, FREQ);
+    record_synced(&mut store, &router, key, &piece, FREQ);
 
     let trip_clock = piece_start + duration_ticks / 2;
 
-    let result = reconstruct_axis_position(MCU_ID, trip_clock, key, &router, &shared(store), 0);
+    let result = reconstruct_axis_position(
+        MCU_ID,
+        trip_clock,
+        key,
+        &router,
+        &shared(store),
+        f64::NEG_INFINITY,
+    );
     let pos = result.expect("same-MCU reconstruction must succeed");
 
     assert!(
@@ -131,9 +157,16 @@ fn trip_at_piece_start_returns_start_position() {
         axis: AXIS_Z as u8,
     };
     let mut store = HistoryStore::default();
-    store.record(key, &piece, 520_000_000_u32);
+    record_synced(&mut store, &router, key, &piece, 520_000_000_u32);
 
-    let result = reconstruct_axis_position(MCU_ID, piece_start, key, &router, &shared(store), 0);
+    let result = reconstruct_axis_position(
+        MCU_ID,
+        piece_start,
+        key,
+        &router,
+        &shared(store),
+        f64::NEG_INFINITY,
+    );
     let pos = result.expect("trip at piece start must succeed");
     assert!(
         (pos - 10.0).abs() < 0.5,
@@ -157,11 +190,18 @@ fn trip_outside_trajectory_window_holds_last_position() {
         axis: AXIS_X as u8,
     };
     let mut store = HistoryStore::default();
-    store.record(key, &piece, FREQ);
+    record_synced(&mut store, &router, key, &piece, FREQ);
 
     #[allow(clippy::cast_possible_truncation)]
     let way_after = piece_start + (duration_secs as f64 * FREQ_F64) as u64 + 9_999_999;
-    let result = reconstruct_axis_position(MCU_ID, way_after, key, &router, &shared(store), 0);
+    let result = reconstruct_axis_position(
+        MCU_ID,
+        way_after,
+        key,
+        &router,
+        &shared(store),
+        f64::NEG_INFINITY,
+    );
     let pos = result.expect("trip after last piece holds endpoint position");
     assert!(
         (pos - 10.0).abs() < 0.5,
@@ -184,11 +224,18 @@ fn trip_before_trajectory_window_errors() {
         axis: AXIS_X as u8,
     };
     let mut store = HistoryStore::default();
-    store.record(key, &piece, FREQ);
+    record_synced(&mut store, &router, key, &piece, FREQ);
 
     let before = piece_start - 1;
-    let err =
-        reconstruct_axis_position(MCU_ID, before, key, &router, &shared(store), 0).unwrap_err();
+    let err = reconstruct_axis_position(
+        MCU_ID,
+        before,
+        key,
+        &router,
+        &shared(store),
+        f64::NEG_INFINITY,
+    )
+    .unwrap_err();
     assert!(
         err.contains("precedes retained"),
         "expected 'precedes retained' in error, got: {err}"
@@ -208,8 +255,15 @@ fn no_history_for_axis_errors() {
     };
     let store = HistoryStore::default();
 
-    let err =
-        reconstruct_axis_position(MCU_ID, 12_345_678, key, &router, &shared(store), 0).unwrap_err();
+    let err = reconstruct_axis_position(
+        MCU_ID,
+        12_345_678,
+        key,
+        &router,
+        &shared(store),
+        f64::NEG_INFINITY,
+    )
+    .unwrap_err();
     assert!(
         err.contains("no motion history"),
         "expected 'no motion history' in error, got: {err}"
@@ -238,11 +292,18 @@ fn multiple_pieces_trip_in_second_piece() {
         axis: AXIS_X as u8,
     };
     let mut store = HistoryStore::default();
-    store.record(key, &piece1, FREQ);
-    store.record(key, &piece2, FREQ);
+    record_synced(&mut store, &router, key, &piece1, FREQ);
+    record_synced(&mut store, &router, key, &piece2, FREQ);
 
     let trip_clock = piece2_start + duration_ticks / 2;
-    let result = reconstruct_axis_position(MCU_ID, trip_clock, key, &router, &shared(store), 0);
+    let result = reconstruct_axis_position(
+        MCU_ID,
+        trip_clock,
+        key,
+        &router,
+        &shared(store),
+        f64::NEG_INFINITY,
+    );
     let pos = result.expect("trip in second piece must succeed");
     assert!(
         (pos - 75.0).abs() < 1.0,
@@ -262,16 +323,22 @@ fn trip_before_homing_window_is_rejected() {
         axis: AXIS_X as u8,
     };
     let mut store = HistoryStore::default();
-    store.record(key, &make_linear_piece(1_000_000, 0.01, 0.0, 5.0), FREQ);
+    record_synced(
+        &mut store,
+        &router,
+        key,
+        &make_linear_piece(1_000_000, 0.01, 0.0, 5.0),
+        FREQ,
+    );
 
-    let window_start = 2_000_000_u64;
+    let window_start_host = host_of(&router, MCU_ID, 2_000_000);
     let err = reconstruct_axis_position(
         MCU_ID,
         1_500_000,
         key,
         &router,
         &shared(store),
-        window_start,
+        window_start_host,
     )
     .unwrap_err();
     assert!(
@@ -288,7 +355,7 @@ fn trajectory_final_position_single_piece() {
     };
     let piece = make_linear_piece(1_000_000, 0.025, 5.0, 45.0);
     let mut store = HistoryStore::default();
-    store.record(key, &piece, FREQ);
+    store.record(key, &piece, FREQ, 0.0);
 
     let pos =
         trajectory_final_position(key, &shared(store)).expect("single-piece store must succeed");
@@ -307,8 +374,8 @@ fn trajectory_final_position_multi_piece_takes_last() {
     let piece1 = make_linear_piece(1_000_000, 0.025, 0.0, 50.0);
     let piece2 = make_linear_piece(5_500_000, 0.025, 50.0, 82.5);
     let mut store = HistoryStore::default();
-    store.record(key, &piece1, FREQ);
-    store.record(key, &piece2, FREQ);
+    store.record(key, &piece1, FREQ, 0.0);
+    store.record(key, &piece2, FREQ, 1.0);
 
     let pos =
         trajectory_final_position(key, &shared(store)).expect("multi-piece store must succeed");
@@ -352,7 +419,7 @@ fn trajectory_final_position_constant_piece() {
         _reserved: [0; 3],
     };
     let mut store = HistoryStore::default();
-    store.record(key, &piece, FREQ);
+    store.record(key, &piece, FREQ, 0.0);
 
     let pos =
         trajectory_final_position(key, &shared(store)).expect("constant-piece store must succeed");
