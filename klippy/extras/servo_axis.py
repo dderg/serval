@@ -130,6 +130,7 @@ class ServoRail(BaseRail):
             "max_torque", None, above=0.0, maxval=400.0
         )
         self._active_callbacks = []
+        self.dynamics_profile = motor_config.get("dynamics_profile", None)
         try:
             self.sdo_params = servo_param.parse_params_block(
                 motor_config.get("params", "")
@@ -191,6 +192,9 @@ class ServoRail(BaseRail):
 
     def get_invert_direction(self):
         return self.invert_direction
+
+    def get_dynamics_profile(self):
+        return self.dynamics_profile
 
     def get_sdo_params(self):
         return self.sdo_params

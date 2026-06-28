@@ -256,3 +256,45 @@ fn too_many_slaves_is_rejected() {
     let err = parse_slaves(&parts).expect_err("over cap must fail");
     assert!(err.contains("at most"), "got: {err}");
 }
+
+#[test]
+fn slave_dynamics_profile_binds_per_slave_group() {
+    let a = args(&[
+        "ethercat-rt",
+        "eth0",
+        "--slave",
+        "0",
+        "--slave-dynamics-profile",
+        "/cfg/x.toml",
+        "--slave",
+        "1",
+        "--slave-dynamics-profile",
+        "/cfg/y.toml",
+    ]);
+    let slaves = parse_slaves(&a).expect("parse profiles");
+    assert_eq!(slaves.len(), 2);
+    assert_eq!(slaves[0].dynamics_profile.as_deref(), Some("/cfg/x.toml"));
+    assert_eq!(slaves[1].dynamics_profile.as_deref(), Some("/cfg/y.toml"));
+}
+
+#[test]
+fn legacy_form_reads_slave_dynamics_profile() {
+    let a = args(&[
+        "ethercat-rt",
+        "eth0",
+        "--slave-dynamics-profile",
+        "/cfg/only.toml",
+    ]);
+    let slaves = parse_slaves(&a).expect("legacy profile");
+    assert_eq!(slaves.len(), 1);
+    assert_eq!(
+        slaves[0].dynamics_profile.as_deref(),
+        Some("/cfg/only.toml")
+    );
+}
+
+#[test]
+fn slave_dynamics_profile_defaults_none() {
+    let slaves = parse_slaves(&args(&["ethercat-rt", "eth0"])).expect("defaults");
+    assert_eq!(slaves[0].dynamics_profile, None);
+}

@@ -10,10 +10,17 @@ class FakeConfigError(Exception):
 
 
 class FakeRail:
-    def __init__(self, motor_name, chain_index, ff_config=(False, 30.0)):
+    def __init__(
+        self,
+        motor_name,
+        chain_index,
+        ff_config=(False, 30.0),
+        dynamics_profile=None,
+    ):
         self._motor_name = motor_name
         self._chain_index = chain_index
         self._ff_config = ff_config
+        self._dynamics_profile = dynamics_profile
 
     def get_motor_name(self):
         return self._motor_name
@@ -23,6 +30,9 @@ class FakeRail:
 
     def get_ff_config(self):
         return self._ff_config
+
+    def get_dynamics_profile(self):
+        return self._dynamics_profile
 
 
 def _node(rails):
@@ -60,6 +70,54 @@ def test_validate_chain_accepts_per_motor_ff_differences():
         ]
     )
     ethercat_node.EtherCatNode._validate_chain(node, rails)
+
+
+def _dyn_node(rails, node_profile=None):
+    printer = types.SimpleNamespace(config_error=FakeConfigError)
+    node = types.SimpleNamespace(
+        name="node_x", printer=printer, dynamics_profile=node_profile
+    )
+    return node, sorted(rails, key=lambda pair: pair[0])
+
+
+def test_validate_dynamics_none_configured_is_ok():
+    node, rails = _dyn_node([(0, FakeRail("x", 0)), (1, FakeRail("y", 1))])
+    ethercat_node.EtherCatNode._validate_dynamics_profiles(node, rails)
+
+
+def test_validate_dynamics_per_servo_all_set_is_ok():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, dynamics_profile="/cfg/x.toml")),
+            (1, FakeRail("y", 1, dynamics_profile="/cfg/y.toml")),
+        ]
+    )
+    ethercat_node.EtherCatNode._validate_dynamics_profiles(node, rails)
+
+
+def test_validate_dynamics_rejects_node_and_per_servo_mix():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, dynamics_profile="/cfg/x.toml")),
+            (1, FakeRail("y", 1)),
+        ],
+        node_profile="/cfg/node.toml",
+    )
+    with pytest.raises(FakeConfigError) as e:
+        ethercat_node.EtherCatNode._validate_dynamics_profiles(node, rails)
+    assert "not both" in str(e.value)
+
+
+def test_validate_dynamics_rejects_partial_per_servo():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, dynamics_profile="/cfg/x.toml")),
+            (1, FakeRail("y", 1)),
+        ]
+    )
+    with pytest.raises(FakeConfigError) as e:
+        ethercat_node.EtherCatNode._validate_dynamics_profiles(node, rails)
+    assert "missing on: y" in str(e.value)
 
 
 class FakeEngine:

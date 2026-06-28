@@ -72,6 +72,19 @@ A6-EC applies communication FF at (100% + C01.14/C01.17); see
 below). When present, enables 60B2h torque feedforward. Without it the torque
 offset is always 0, bit-identical to pre-FF behavior.
 
+The option can sit in two places, and they are mutually exclusive per node:
+
+- On each motor — every motor on the node points at its own single-axis
+  profile (the file `servo-ident` emits). The host stacks them into a
+  block-diagonal node model: each axis's torque feedforward depends only on its
+  own acceleration. This is the cartesian case, where the axes are independent.
+  All motors on the node must carry one, or none — a partial set fails the claim.
+- On `[ethercat_node]` — one combined `n×n` profile for the whole node, whose
+  off-diagonal mass terms express cross-axis coupling (CoreXY, where moving one
+  logical axis needs feedforward on both motors).
+
+Setting it in both places at once is a config error.
+
 `ff_torque_clamp` (float, default `30.0`, range (0, 400]): clamp applied to
 the raw computed torque offset before it is written to 60B2h, in % of rated
 torque. The endpoint counts every clamped cycle and reports the cumulative

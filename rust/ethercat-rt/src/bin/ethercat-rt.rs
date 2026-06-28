@@ -191,24 +191,58 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(80);
     let mailbox_cpu: Option<usize> = arg_val(&args, "--mailbox-cpu").and_then(|s| s.parse().ok());
-    let dynamics = arg_val(&args, "--dynamics-profile").map(|path| {
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+    let load_profile = |path: &str| -> DynamicsModel {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("ec-rt: dynamics profile {path}: {e}");
             std::process::exit(1);
         });
-        let model = DynamicsModel::from_toml_str(&text).unwrap_or_else(|e| {
+        DynamicsModel::from_toml_str(&text).unwrap_or_else(|e| {
             eprintln!("ec-rt: dynamics profile {path} invalid: {e:?}");
+            std::process::exit(1);
+        })
+    };
+    let per_slot: Vec<Option<String>> = slaves.iter().map(|s| s.dynamics_profile.clone()).collect();
+    let node_profile = arg_val(&args, "--dynamics-profile");
+    let dynamics = if per_slot.iter().any(Option::is_some) {
+        if node_profile.is_some() {
+            eprintln!(
+                "ec-rt: --dynamics-profile and --slave-dynamics-profile are mutually exclusive"
+            );
+            std::process::exit(1);
+        }
+        if !per_slot.iter().all(Option::is_some) {
+            eprintln!("ec-rt: per-slave dynamics profiles must cover every drive or none");
+            std::process::exit(1);
+        }
+        let parts: Vec<DynamicsModel> = per_slot
+            .iter()
+            .map(|p| load_profile(p.as_ref().unwrap()))
+            .collect();
+        let model = DynamicsModel::block_diagonal(parts).unwrap_or_else(|e| {
+            eprintln!("ec-rt: per-slave dynamics profiles invalid: {e:?}");
             std::process::exit(1);
         });
         if model.n != num_slaves {
             eprintln!(
-                "ec-rt: dynamics profile {path} has {} axes, endpoint drives {num_slaves}",
+                "ec-rt: per-slave dynamics profiles cover {} axes, endpoint drives {num_slaves}",
                 model.n
             );
             std::process::exit(1);
         }
-        model
-    });
+        Some(model)
+    } else {
+        node_profile.map(|path| {
+            let model = load_profile(&path);
+            if model.n != num_slaves {
+                eprintln!(
+                    "ec-rt: dynamics profile {path} has {} axes, endpoint drives {num_slaves}",
+                    model.n
+                );
+                std::process::exit(1);
+            }
+            model
+        })
+    };
     let cycle_ns = cycle_us * 1000;
     let telemetry_period = u64::try_from(cycle_us)
         .map(|u| (500_000u64 / u).max(1))

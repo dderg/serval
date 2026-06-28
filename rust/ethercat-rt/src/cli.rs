@@ -13,6 +13,7 @@ pub struct SlaveCfg {
     pub velocity_ff: bool,
     pub torque_clamp_tenths: i16,
     pub invert: bool,
+    pub dynamics_profile: Option<String>,
 }
 
 fn default_cfg(pos: i32) -> SlaveCfg {
@@ -26,6 +27,7 @@ fn default_cfg(pos: i32) -> SlaveCfg {
         velocity_ff: false,
         torque_clamp_tenths: 300,
         invert: false,
+        dynamics_profile: None,
     }
 }
 
@@ -57,6 +59,7 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
         if let Some(v) = arg_val(args, "--torque-clamp-pct") {
             cfg.torque_clamp_tenths = parse_clamp_tenths(&v)?;
         }
+        cfg.dynamics_profile = arg_val(args, "--slave-dynamics-profile");
         return Ok(vec![cfg]);
     }
 
@@ -93,7 +96,8 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
             | "--rotation-distance"
             | "--following-error-counts"
             | "--max-torque-tenth-pct"
-            | "--torque-clamp-pct") => {
+            | "--torque-clamp-pct"
+            | "--slave-dynamics-profile") => {
                 let v = args
                     .get(i + 1)
                     .ok_or_else(|| format!("{f} requires a value"))?;
@@ -101,6 +105,9 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
                     .last_mut()
                     .ok_or_else(|| format!("{f} appeared before any --slave group"))?;
                 match f {
+                    "--slave-dynamics-profile" => {
+                        cur.dynamics_profile = Some(v.clone());
+                    }
                     "--axis" => {
                         cur.axis = v.parse().map_err(|_| "--axis not a u8".to_string())?;
                     }
