@@ -40,7 +40,7 @@ def test_applies_to_every_helper_and_dwells_for_the_slowest():
     toolhead = _FakeToolhead()
 
     _homing()._set_homing_current(
-        toolhead, _FakeRail([fast, slow]), pre_homing=True
+        toolhead, [_FakeRail([fast, slow])], pre_homing=True
     )
 
     assert fast.calls == [(7.5, True)]
@@ -53,7 +53,7 @@ def test_skips_steppers_without_tmc_drivers():
     toolhead = _FakeToolhead()
 
     _homing()._set_homing_current(
-        toolhead, _FakeRail([None, helper]), pre_homing=False
+        toolhead, [_FakeRail([None, helper])], pre_homing=False
     )
 
     assert helper.calls == [(7.5, False)]
@@ -64,7 +64,37 @@ def test_no_dwell_when_no_current_change_needed():
     toolhead = _FakeToolhead()
 
     _homing()._set_homing_current(
-        toolhead, _FakeRail([_FakeCurrentHelper(0.0)]), pre_homing=True
+        toolhead, [_FakeRail([_FakeCurrentHelper(0.0)])], pre_homing=True
     )
 
     assert toolhead.dwells == []
+
+
+def test_applies_across_every_coupled_rail():
+    homed = _FakeCurrentHelper(0.3)
+    partner = _FakeCurrentHelper(0.8)
+    toolhead = _FakeToolhead()
+
+    _homing()._set_homing_current(
+        toolhead,
+        [_FakeRail([homed]), _FakeRail([partner])],
+        pre_homing=True,
+    )
+
+    assert homed.calls == [(7.5, True)]
+    assert partner.calls == [(7.5, True)]
+    assert toolhead.dwells == [0.8]
+
+
+def test_helper_shared_between_rails_is_switched_once():
+    shared = _FakeCurrentHelper(0.5)
+    toolhead = _FakeToolhead()
+
+    _homing()._set_homing_current(
+        toolhead,
+        [_FakeRail([shared]), _FakeRail([shared])],
+        pre_homing=False,
+    )
+
+    assert shared.calls == [(7.5, False)]
+    assert toolhead.dwells == [0.5]

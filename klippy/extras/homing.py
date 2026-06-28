@@ -418,8 +418,9 @@ class Homing:
         stepper_enable = self.printer.lookup_object("stepper_enable")
         homing_deltas = [0.0, 0.0, 0.0]
         homing_deltas[axis] = 1.0
+        active_rails = list(kin.active_rails(*homing_deltas))
         homing_names = []
-        for active_rail in kin.active_rails(*homing_deltas):
+        for active_rail in active_rails:
             homing_names.extend(_homing_motor_names(active_rail))
         stepper_enable.motor_enable_group(homing_names)
 
@@ -434,7 +435,7 @@ class Homing:
             servo_slot = node.get_slot_for_motor(rail.get_motor_name())
             servo_limits = rail.get_homing_drive_limits()
 
-        self._set_homing_current(toolhead, rail, pre_homing=True)
+        self._set_homing_current(toolhead, active_rails, pre_homing=True)
         try:
             provider = entry["provider"]
             tolerance = get_danger_options().homing_elapsed_distance_tolerance
@@ -483,25 +484,32 @@ class Homing:
             _check_servo_drive_fault(gcmd, engine, axis, servo_handle)
         except BaseException:
             try:
-                self._set_homing_current(toolhead, rail, pre_homing=False)
+                self._set_homing_current(
+                    toolhead, active_rails, pre_homing=False
+                )
             except Exception:
                 logging.exception(
                     "homing: current restore failed during error unwind"
                 )
             raise
         else:
-            self._set_homing_current(toolhead, rail, pre_homing=False)
+            self._set_homing_current(toolhead, active_rails, pre_homing=False)
 
-    def _set_homing_current(self, toolhead, rail, pre_homing):
+    def _set_homing_current(self, toolhead, rails, pre_homing):
         print_time = toolhead.get_last_move_time()
         dwell_time = 0.0
-        for current_helper in rail.get_tmc_current_helpers():
-            if current_helper is None:
-                continue
-            dwell_time = max(
-                dwell_time,
-                current_helper.set_current_for_homing(print_time, pre_homing),
-            )
+        seen = set()
+        for rail in rails:
+            for current_helper in rail.get_tmc_current_helpers():
+                if current_helper is None or id(current_helper) in seen:
+                    continue
+                seen.add(id(current_helper))
+                dwell_time = max(
+                    dwell_time,
+                    current_helper.set_current_for_homing(
+                        print_time, pre_homing
+                    ),
+                )
         if dwell_time:
             toolhead.dwell(dwell_time)
 
