@@ -850,11 +850,28 @@ function stepCase(dir) {
 function rebuildCaseSelect() {
   const sel = document.getElementById("case-select");
   sel.innerHTML = "";
+  // <group>/<cfg>/<gcode>: one <optgroup> per leading path (the config), option
+  // per gcode leaf. Keyed by label so entries group correctly whatever order
+  // caseList arrives in.
+  const optgroups = new Map();
   for (const c of caseList) {
+    const slash = c.name.lastIndexOf("/");
+    const group = slash > 0 ? c.name.substring(0, slash) : "";
+    const leaf = slash >= 0 ? c.name.substring(slash + 1) : c.name;
+    let parent = sel;
+    if (group) {
+      parent = optgroups.get(group);
+      if (!parent) {
+        parent = document.createElement("optgroup");
+        parent.label = group;
+        sel.appendChild(parent);
+        optgroups.set(group, parent);
+      }
+    }
     const opt = document.createElement("option");
     opt.value = c.name;
-    opt.textContent = c.name;
-    sel.appendChild(opt);
+    opt.textContent = leaf;
+    parent.appendChild(opt);
   }
 }
 
