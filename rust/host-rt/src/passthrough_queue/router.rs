@@ -501,15 +501,15 @@ impl PassthroughRouter {
         Ok(projected)
     }
 
-    pub fn log_seg0_deficit(&self, mcu: McuHandle, seg0_host_secs: f64, t0: f64) {
+    pub fn log_seg0_lead(&self, mcu: McuHandle, seg0_host_secs: f64, t0: f64) {
         let rec = match self.mcus.get(&mcu) {
             Some(r) => r,
             None => {
                 tracing::warn!(
                     subsystem = "motion",
-                    event = "seg0_deficit_unknown_mcu",
+                    event = "seg0_lead_unknown_mcu",
                     mcu = ?mcu,
-                    "[seg0-deficit] UNKNOWN mcu"
+                    "[seg0-lead] UNKNOWN mcu"
                 );
                 return;
             }
@@ -517,11 +517,11 @@ impl PassthroughRouter {
         if rec.clock_freq == 0.0 {
             tracing::warn!(
                 subsystem = "motion",
-                event = "seg0_deficit_not_synced",
+                event = "seg0_lead_not_synced",
                 mcu = ?mcu,
                 t0,
                 seg0_host_secs,
-                "[seg0-deficit] clock_freq=0 (not yet synced)"
+                "[seg0-lead] clock_freq=0 (not yet synced)"
             );
             return;
         }
@@ -529,23 +529,41 @@ impl PassthroughRouter {
             .host_time_to_mcu_clock(mcu, seg0_host_secs)
             .unwrap_or(0);
         let ack_now = self.compute_ack_clock(mcu).unwrap_or(0);
-        let deficit_ticks = start_time as i64 - ack_now as i64;
-        let deficit_us = (deficit_ticks as f64 / rec.clock_freq) * 1e6;
-        tracing::warn!(
-            subsystem = "motion",
-            event = "seg0_deficit",
-            mcu = ?mcu,
-            freq = rec.clock_freq,
-            offset = rec.clock_offset,
-            last_clock = rec.last_clock,
-            t0,
-            seg0_host_secs,
-            start_time,
-            ack_now,
-            deficit_ticks,
-            deficit_us,
-            "[seg0-deficit] (negative deficit_us => in past)"
-        );
+        let lead_ticks = start_time as i64 - ack_now as i64;
+        let lead_us = (lead_ticks as f64 / rec.clock_freq) * 1e6;
+        if lead_ticks < 0 {
+            tracing::warn!(
+                subsystem = "motion",
+                event = "seg0_start_in_past",
+                mcu = ?mcu,
+                freq = rec.clock_freq,
+                offset = rec.clock_offset,
+                last_clock = rec.last_clock,
+                t0,
+                seg0_host_secs,
+                start_time,
+                ack_now,
+                lead_ticks,
+                lead_us,
+                "[seg0-lead] segment 0 starts behind the MCU ack clock (in the past)"
+            );
+        } else {
+            tracing::debug!(
+                subsystem = "motion",
+                event = "seg0_lead",
+                mcu = ?mcu,
+                freq = rec.clock_freq,
+                offset = rec.clock_offset,
+                last_clock = rec.last_clock,
+                t0,
+                seg0_host_secs,
+                start_time,
+                ack_now,
+                lead_ticks,
+                lead_us,
+                "[seg0-lead] segment 0 lead over the MCU ack clock"
+            );
+        }
     }
 
     pub fn get_stats(&self, mcu: McuHandle) -> Result<PassthroughStats, RouterError> {

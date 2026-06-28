@@ -23,58 +23,55 @@ pub fn reconstruct_axis_position(
     axis_key: AxisKey,
     router: &Arc<Mutex<PassthroughRouter>>,
     history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
-    window_start_clock: u64,
+    window_start_host: f64,
 ) -> Result<f64, String> {
     let axis_mcu = axis_key.mcu_id;
 
-    let (axis_clock, trip_host_secs, host_now_secs) = if endstop_mcu == axis_mcu {
-        (trip_clock, 0.0, 0.0)
-    } else {
+    let trip_host = {
         let router_guard = router.lock().unwrap_or_else(|p| p.into_inner());
-        let host_secs = router_guard
-            .clock_to_host_secs(crate::types::mcu_handle_from_raw(endstop_mcu), trip_clock)
-            .ok_or_else(|| {
-                ReconstructError::ClockUnsynced {
-                    description: format!(
-                        "clock_to_host_secs returned None for endstop mcu {endstop_mcu}"
-                    ),
-                    endstop_mcu,
-                    axis_mcu,
-                    trip_clock,
-                }
-                .to_string()
-            })?;
-        let axis_clock = router_guard
-            .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(axis_mcu), host_secs)
-            .map_err(|e| {
-                ReconstructError::ClockUnsynced {
-                    description: format!(
-                        "host_time_to_mcu_clock failed for axis mcu {axis_mcu}: {e:?}"
-                    ),
-                    endstop_mcu,
-                    axis_mcu,
-                    trip_clock,
-                }
-                .to_string()
-            })?;
-        (axis_clock, host_secs, router_guard.host_now_secs())
+        crate::motion_history::clock_to_host(
+            &router_guard,
+            crate::types::mcu_handle_from_raw(endstop_mcu),
+            trip_clock,
+        )
+        .map_err(|description| {
+            ReconstructError::ClockUnsynced {
+                description,
+                endstop_mcu,
+                axis_mcu,
+                trip_clock,
+            }
+            .to_string()
+        })?
     };
 
-    if axis_clock <= window_start_clock {
+    if trip_host <= window_start_host {
         return Err(format!(
-            "endstop trip clock {axis_clock} predates this homing move \
-             (window starts at {window_start_clock}) — stale trip or \
+            "endstop trip host time {trip_host:.6}s predates this homing move \
+             (window starts at {window_start_host:.6}s) — stale trip or \
              mis-synced clock (endstop_mcu={endstop_mcu} trip_clock={trip_clock} \
-             trip_host_secs={trip_host_secs:.6} host_now={host_now_secs:.6} \
              axis_mcu={axis_mcu})"
         ));
     }
 
+    let shadow_clock = {
+        let router_guard = router.lock().unwrap_or_else(|p| p.into_inner());
+        router_guard
+            .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(axis_mcu), trip_host)
+            .ok()
+    };
     let store = history.lock().unwrap_or_else(|p| p.into_inner());
-    store
-        .state_at_clock(axis_key, axis_clock, None)
-        .map(|st| st.position)
-        .map_err(|e| e.to_string())
+    let st = store
+        .state_at_host(axis_key, trip_host, None)
+        .map_err(|e| e.to_string())?;
+    if let Some(shadow_clock) = shadow_clock {
+        crate::motion_history::check_shadow_divergence(
+            axis_key,
+            st.position,
+            store.state_at_clock_legacy(axis_key, shadow_clock, u64::MAX),
+        );
+    }
+    Ok(st.position)
 }
 
 pub fn trajectory_final_position(
