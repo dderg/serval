@@ -523,3 +523,110 @@ def test_multi_drive_unknown_drive_raises(tmp_path):
     path = synth_two_drive_capture(tmp_path)
     with pytest.raises(SystemExit):
         sc.load_capture(path, "motor_z")
+
+
+V2_CHANNELS = [
+    {"name": "cycle_index", "dtype": "u64", "offset": 0},
+    {"name": "flags", "dtype": "u8", "offset": 8},
+    {"name": "target_counts", "dtype": "i32", "offset": 9},
+    {"name": "position_actual", "dtype": "i32", "offset": 13},
+    {"name": "following_error", "dtype": "i32", "offset": 17},
+    {"name": "torque_actual", "dtype": "i16", "offset": 21},
+    {"name": "statusword", "dtype": "u16", "offset": 23},
+    {"name": "error_code", "dtype": "u16", "offset": 25},
+    {"name": "velocity_offset", "dtype": "i32", "offset": 27},
+    {"name": "torque_offset", "dtype": "i16", "offset": 31},
+    {"name": "velocity_actual", "dtype": "i32", "offset": 33},
+    {"name": "accel_cmd", "dtype": "f32", "offset": 37},
+    {"name": "vel_cmd", "dtype": "f32", "offset": 41},
+]
+
+
+def synth_v2_capture(tmp_path, n=64):
+    """Minimal version-2 capture carrying the f32 commanded-kinematics channels."""
+    header = {
+        "version": 2,
+        "cycle_ns": 1_000_000,
+        "record_size": 45,
+        "started_utc": "2026-06-28T10:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": "x", "counts_per_mm": 3276.8, "rotation_distance": 40}
+        ],
+        "channels": V2_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "v2.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            f.write(
+                struct.pack(
+                    "<QBiiihHHihiff",
+                    i,
+                    FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE,
+                    100 * i,
+                    100 * i - 3,
+                    3,
+                    50,
+                    0x0627,
+                    0,
+                    7,
+                    -2,
+                    100 * i - 3,
+                    1234.5 + i,
+                    -67.25 + i,
+                )
+            )
+    return path
+
+
+def test_v2_capture_reads_f32_commanded_channels(tmp_path):
+    path = synth_v2_capture(tmp_path)
+    header, data, _ = sc.load_capture(path)
+    assert header["version"] == 2
+    assert data["accel_cmd"].dtype == np.float32
+    assert data["vel_cmd"].dtype == np.float32
+    assert data["accel_cmd"][0] == pytest.approx(1234.5)
+    assert data["vel_cmd"][10] == pytest.approx(-57.25)
+    assert data["velocity_actual"][5] == 100 * 5 - 3
+
+
+def test_unsupported_version_still_rejected(tmp_path):
+    path = synth_v2_capture(tmp_path)
+    with open(path, "rb") as f:
+        body = f.read()
+    bad = body.replace(b'"version":2', b'"version":3', 1).replace(
+        b'"version": 2', b'"version": 3', 1
+    )
+    bad_path = os.path.join(str(tmp_path), "v3.scap")
+    with open(bad_path, "wb") as f:
+        f.write(bad)
+    with pytest.raises(SystemExit):
+        sc.load_capture(bad_path)
+
+
+def test_export_ident_csv_writes_commanded_kinematics(tmp_path):
+    path = synth_v2_capture(tmp_path, n=20)
+    header, data, _ = sc.load_capture(path)
+    out = os.path.join(str(tmp_path), "ident.csv")
+    sc.export_ident_csv(out, header, data)
+    with open(out) as f:
+        lines = f.read().splitlines()
+    assert lines[0] == "t,accel_x,vel_x,torque_x"
+    # all 20 cycles are motion-active in the synthetic capture
+    assert len(lines) == 1 + 20
+    first = lines[1].split(",")
+    assert float(first[1]) == pytest.approx(1234.5)
+    assert float(first[2]) == pytest.approx(-67.25)
+
+
+def test_export_ident_csv_rejects_pre_v2_capture(tmp_path):
+    # The legacy v1 synthetic capture has no accel_cmd channel.
+    path, _ = synth_capture(tmp_path)
+    header, data, _ = sc.load_capture(path)
+    with pytest.raises(SystemExit):
+        sc.export_ident_csv(
+            os.path.join(str(tmp_path), "x.csv"),
+            header,
+            data,
+        )

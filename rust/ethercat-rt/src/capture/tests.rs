@@ -14,6 +14,8 @@ fn sample(n: i32) -> DriveSample {
         error_code: 0,
         velocity_offset: n + 3,
         torque_offset: -7,
+        accel_cmd: n as f32 + 0.5,
+        vel_cmd: n as f32 - 0.25,
     }
 }
 
@@ -70,6 +72,8 @@ fn distinct_sample(seed: i32) -> DriveSample {
         error_code: 0x7380,
         velocity_offset: -654321 + seed,
         torque_offset: 250i16.wrapping_add(seed as i16),
+        accel_cmd: 1234.5 + seed as f32,
+        vel_cmd: -67.25 + seed as f32,
     }
 }
 
@@ -83,6 +87,8 @@ fn assert_drive_block(block: &[u8], d: &DriveSample) {
     assert_eq!(&block[18..22], &d.velocity_offset.to_le_bytes());
     assert_eq!(&block[22..24], &d.torque_offset.to_le_bytes());
     assert_eq!(&block[24..28], &d.velocity_actual.to_le_bytes());
+    assert_eq!(&block[28..32], &d.accel_cmd.to_le_bytes());
+    assert_eq!(&block[32..36], &d.vel_cmd.to_le_bytes());
 }
 
 #[test]
@@ -90,10 +96,10 @@ fn record_encodes_to_fixed_little_endian_layout() {
     let d = distinct_sample(0);
     let r = record_n(0x0102030405060708, &[d]);
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 37);
+    assert_eq!(size, 45);
     assert_eq!(&b[0..8], &0x0102030405060708u64.to_le_bytes());
     assert_eq!(b[8], FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE);
-    assert_drive_block(&b[9..37], &d);
+    assert_drive_block(&b[9..45], &d);
 }
 
 #[test]
@@ -108,12 +114,14 @@ fn single_drive_record_is_byte_identical_to_pre_change_layout() {
         error_code: 0x7380,
         velocity_offset: -654321,
         torque_offset: 250,
+        accel_cmd: 1234.5,
+        vel_cmd: -67.25,
     };
     let mut r = CaptureRecord::new(0x0102030405060708, 0x03);
     r.drive_count = 1;
     r.drives[0] = d;
 
-    let mut expected = [0u8; 37];
+    let mut expected = [0u8; 45];
     expected[0..8].copy_from_slice(&0x0102030405060708u64.to_le_bytes());
     expected[8] = 0x03;
     expected[9..13].copy_from_slice(&(-2i32).to_le_bytes());
@@ -125,9 +133,11 @@ fn single_drive_record_is_byte_identical_to_pre_change_layout() {
     expected[27..31].copy_from_slice(&(-654321i32).to_le_bytes());
     expected[31..33].copy_from_slice(&250i16.to_le_bytes());
     expected[33..37].copy_from_slice(&(0x55667788u32 as i32).to_le_bytes());
+    expected[37..41].copy_from_slice(&1234.5f32.to_le_bytes());
+    expected[41..45].copy_from_slice(&(-67.25f32).to_le_bytes());
 
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 37);
+    assert_eq!(size, 45);
     assert_eq!(&b[..size], &expected[..]);
 }
 
@@ -137,10 +147,10 @@ fn two_drive_record_packs_blocks_back_to_back() {
     let d1 = distinct_sample(11);
     let r = record_n(7, &[d0, d1]);
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 9 + 2 * 28);
+    assert_eq!(size, 9 + 2 * 36);
     assert_eq!(&b[0..8], &7u64.to_le_bytes());
-    assert_drive_block(&b[9..37], &d0);
-    assert_drive_block(&b[37..65], &d1);
+    assert_drive_block(&b[9..45], &d0);
+    assert_drive_block(&b[45..81], &d1);
 }
 
 #[test]
@@ -150,9 +160,9 @@ fn header_is_one_json_line_describing_the_record() {
     assert!(h.ends_with('\n'));
     assert_eq!(h.lines().count(), 1);
     for needle in [
-        "\"version\":1",
+        "\"version\":2",
         "\"cycle_ns\":1000000",
-        "\"record_size\":37",
+        "\"record_size\":45",
         "\"started_utc\":\"2026-06-10T12:00:00Z\"",
         "\"started_mono_ns\":7",
         "\"name\":\"x\"",
@@ -169,6 +179,8 @@ fn header_is_one_json_line_describing_the_record() {
         "{\"name\":\"velocity_offset\",\"dtype\":\"i32\",\"offset\":27}",
         "{\"name\":\"torque_offset\",\"dtype\":\"i16\",\"offset\":31}",
         "{\"name\":\"velocity_actual\",\"dtype\":\"i32\",\"offset\":33}",
+        "{\"name\":\"accel_cmd\",\"dtype\":\"f32\",\"offset\":37}",
+        "{\"name\":\"vel_cmd\",\"dtype\":\"f32\",\"offset\":41}",
     ] {
         assert!(h.contains(needle), "header missing {needle}: {h}");
     }
@@ -194,7 +206,7 @@ fn lifecycle_start_push_stop_produces_parseable_file() {
     let bytes = std::fs::read(&path).unwrap();
     let nl = bytes.iter().position(|&b| b == b'\n').unwrap();
     let header = std::str::from_utf8(&bytes[..nl]).unwrap();
-    assert!(header.contains("\"version\":1"));
+    assert!(header.contains("\"version\":2"));
     let body = &bytes[nl + 1..];
     let rsize = record_size(1);
     assert_eq!(body.len(), 50 * rsize);
@@ -236,8 +248,8 @@ fn multi_drive_round_trip_writes_two_blocks_per_record() {
     for (i, (a, b)) in samples.iter().enumerate() {
         let rec = &body[i * rsize..(i + 1) * rsize];
         assert_eq!(&rec[0..8], &(i as u64).to_le_bytes());
-        assert_drive_block(&rec[9..37], a);
-        assert_drive_block(&rec[37..65], b);
+        assert_drive_block(&rec[9..45], a);
+        assert_drive_block(&rec[45..81], b);
     }
     std::fs::remove_file(&path).unwrap();
 }

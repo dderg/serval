@@ -1114,12 +1114,15 @@ fn main() {
         }
 
         let mut motion_active = false;
+        // The commanded analytic accel/vel the feedforward path samples are the
+        // noise-free, C00.06-independent regressors the identification fit wants,
+        // so they outlive the feedforward block to reach the capture record.
+        let mut all_acc = vec![0f32; num_slaves];
+        let mut all_vel = vec![0f32; num_slaves];
         if gate.state() == TorqueState::Enabled {
             // The coupled torque model needs every axis' accel/vel before any
             // one slot's feedforward can be computed, so sample all slots first.
             let mut sp_counts: Vec<Option<i32>> = vec![None; num_slaves];
-            let mut all_acc = vec![0f32; num_slaves];
-            let mut all_vel = vec![0f32; num_slaves];
             for s in 0..num_slaves {
                 let sampled = if buzz.active() {
                     if s == 0 {
@@ -1355,6 +1358,8 @@ fn main() {
                     error_code: t.error_code,
                     velocity_offset: t.velocity_offset,
                     torque_offset: t.torque_offset,
+                    accel_cmd: all_acc[usize::from(slot)],
+                    vel_cmd: all_vel[usize::from(slot)],
                 };
             }
             capture.push(record);

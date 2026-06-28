@@ -97,7 +97,6 @@ def main(argv=None):
     capture_path = resolve_newest_capture(args.captures_dir, args.name)
     header, data, drive_idx = load_capture(capture_path, args.drive)
     axis = header["drives"][drive_idx]["name"]
-    counts_per_mm = header["drives"][drive_idx]["counts_per_mm"]
     args.rotation_distance_mm = resolve_rotation_distance(
         args, header, drive_idx
     )
@@ -118,7 +117,7 @@ def main(argv=None):
     ) as tmp:
         csv_path = tmp.name
     try:
-        export_ident_csv(csv_path, header, data, counts_per_mm, drive_idx)
+        export_ident_csv(csv_path, header, data, drive_idx)
         proc = subprocess.run(
             ident_cmd(binary, csv_path, axis, out_path, args),
             stdout=subprocess.PIPE,

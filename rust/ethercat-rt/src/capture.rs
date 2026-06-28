@@ -19,7 +19,7 @@ pub const CAPTURE_RING_CAPACITY: usize = 4096;
 
 pub const MAX_DRIVES: usize = EC_RT_MAX_SLAVES;
 pub const RECORD_PREFIX_SIZE: usize = 9;
-pub const DRIVE_BLOCK_SIZE: usize = 28;
+pub const DRIVE_BLOCK_SIZE: usize = 36;
 pub const MAX_RECORD_SIZE: usize = RECORD_PREFIX_SIZE + MAX_DRIVES * DRIVE_BLOCK_SIZE;
 
 #[must_use]
@@ -42,12 +42,14 @@ const DOFF_ERROR_CODE: usize = 16;
 const DOFF_VELOCITY_OFFSET: usize = 18;
 const DOFF_TORQUE_OFFSET: usize = 22;
 const DOFF_VELOCITY_ACTUAL: usize = 24;
+const DOFF_ACCEL_CMD: usize = 28;
+const DOFF_VEL_CMD: usize = 32;
 
 const WRITER_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 const WRITER_RECV_TIMEOUT: Duration = Duration::from_millis(100);
 const IO_THREAD_STACK: usize = 512 * 1024;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct DriveSample {
     pub target_counts: i32,
     pub position_actual: i32,
@@ -58,9 +60,11 @@ pub struct DriveSample {
     pub error_code: u16,
     pub velocity_offset: i32,
     pub torque_offset: i16,
+    pub accel_cmd: f32,
+    pub vel_cmd: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CaptureRecord {
     pub cycle_index: u64,
     pub flags: u8,
@@ -121,6 +125,8 @@ fn encode_drive(block: &mut [u8], d: &DriveSample) {
         .copy_from_slice(&d.torque_offset.to_le_bytes());
     block[DOFF_VELOCITY_ACTUAL..DOFF_VELOCITY_ACTUAL + 4]
         .copy_from_slice(&d.velocity_actual.to_le_bytes());
+    block[DOFF_ACCEL_CMD..DOFF_ACCEL_CMD + 4].copy_from_slice(&d.accel_cmd.to_le_bytes());
+    block[DOFF_VEL_CMD..DOFF_VEL_CMD + 4].copy_from_slice(&d.vel_cmd.to_le_bytes());
 }
 
 pub fn encode_record(r: &CaptureRecord) -> ([u8; MAX_RECORD_SIZE], usize) {
@@ -175,6 +181,8 @@ pub fn header_json(cfg: &CaptureConfig) -> String {
         ("velocity_offset", "i32", p + DOFF_VELOCITY_OFFSET),
         ("torque_offset", "i16", p + DOFF_TORQUE_OFFSET),
         ("velocity_actual", "i32", p + DOFF_VELOCITY_ACTUAL),
+        ("accel_cmd", "f32", p + DOFF_ACCEL_CMD),
+        ("vel_cmd", "f32", p + DOFF_VEL_CMD),
     ] {
         if !channels.is_empty() {
             channels.push(',');
@@ -195,7 +203,7 @@ pub fn header_json(cfg: &CaptureConfig) -> String {
     }
     format!(
         concat!(
-            "{{\"version\":1,\"cycle_ns\":{},\"record_size\":{},",
+            "{{\"version\":2,\"cycle_ns\":{},\"record_size\":{},",
             "\"started_utc\":\"{}\",\"started_mono_ns\":{},",
             "\"drives\":[{}],",
             "\"channels\":[{}]}}\n",

@@ -184,17 +184,24 @@ servo-ident \
     --rotation-distance-mm 40
 ```
 
-The CSV export derives `t` from the cycle index and `cycle_ns`, converts
-`target_counts` to mm with the header's `counts_per_mm`, and emits
-`torque_actual` as-is (already 0.1% rated).
+The CSV export derives `t` from the cycle index and `cycle_ns`, emits the
+`accel_cmd`/`vel_cmd` capture channels as the kinematics columns, and
+`torque_actual` as-is (already 0.1% rated). Only motion-active cycles are
+written.
 
 **Capture CSV contract.** The fitter reads a CSV with header columns:
 - `t` — time in seconds
-- `target_<axis>` — commanded position in mm (one column per axis)
+- `accel_<axis>` — commanded acceleration in mm/s² (one column per axis)
+- `vel_<axis>` — commanded velocity in mm/s (one column per axis)
 - `torque_<axis>` — measured torque from 6077h in 0.1% rated (one column per axis)
 
-Velocity and acceleration are derived internally by central differences of the
-target position columns; no ω/α column is needed in the CSV.
+`accel_<axis>`/`vel_<axis>` are the planner's exact analytic kinematics for each
+cycle (the `accel_cmd`/`vel_cmd` channels), not derivatives of the measured
+trajectory — noise-free and independent of the drive's gains and inertia ratio.
+The fitter restricts the regression to steady constant-acceleration plateaus,
+where the closed loop has caught up to the command, so the jerk transitions —
+where actual motion lags command and the soft-loop "negative inertia" artifact
+lives — never bias the fit.
 
 `--structure scalar` for a single Cartesian servo; `--structure corexy` for a
 coupled A/B pair (requires `--axes a,b` and both motors' columns in the CSV).
@@ -205,9 +212,10 @@ fit:
   acceleration or check drive current limits)
 - `InsufficientExcitation` — condition number of the regression matrix is too
   high (need more acceleration range; check that strokes actually ran)
-- `ResidualTooLarge` — fit residual exceeds the sanity bound (tracking error
-  may be polluting the regression; lower gains or slow the excitation, then
-  re-capture)
+- `ResidualTooLarge` — fit residual exceeds the sanity bound (slow the
+  excitation, then re-capture)
+- no steady-accel plateaus — every stroke's constant-acceleration phase was
+  shorter than the settle window; lengthen strokes or lower acceleration
 
 On success it prints fit diagnostics and, when the three physical parameters
 are given, the recommended **drive load-inertia ratio C00.06** (light-direction

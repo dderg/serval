@@ -190,8 +190,8 @@ fn capture_start_records_stop_produces_consistent_file() {
         .expect("capture file must contain a header newline");
     let header = std::str::from_utf8(&contents[..newline_pos]).expect("header must be valid UTF-8");
     assert!(
-        header.contains("\"version\":1"),
-        "header must contain \"version\":1; header={header:?}"
+        header.contains("\"version\":2"),
+        "header must contain \"version\":2; header={header:?}"
     );
     let rsize = record_size(1);
     assert!(
