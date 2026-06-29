@@ -274,7 +274,8 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     st->CR &= ~DMA_SxCR_EN;
     while (st->CR & DMA_SxCR_EN)
         ;
-    st->FCR = 0; // direct mode, no FIFO-error interrupt — not the reset 0x21
+    st->FCR = DMA_SxFCR_DMDIS; // FIFO mode buffers the D1<->D2 bridge latency
+                               // so the TX feed can't FIFO-error under load
     *bus->ifcr_reg = bus->flag_clear;
     st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
     st->M0AR = (uint32_t)(uintptr_t)&bus->txbuf[bus->commit_half][midx * XDIRECT_LEN];
@@ -548,8 +549,13 @@ phase_stepping_commit_tick(void)
                     continue;
                 }
             } else {
+                // Foreground holds the bus (a TMC/sensor read). A read on the
+                // shared bus legitimately spans several ticks under preemption,
+                // so only flag a genuinely stuck holder. The phase batch waits
+                // (it does not drop ticks), then resumes; eliminate the wait
+                // entirely by moving foreground devices off the phase bus.
                 phase_defer_count++;
-                if (++bus->fg_defer_count >= 2 && result == 0)
+                if (++bus->fg_defer_count >= 64 && result == 0)
                     result = ((uint32_t)b << 8) | PHASE_DMA_KIND_OVERRUN
                         | PHASE_DIAG_FGSTUCK_BIT
                         | phase_overrun_diag(bus, *bus->isr_reg);
