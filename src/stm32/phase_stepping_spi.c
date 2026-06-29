@@ -515,7 +515,7 @@ phase_stepping_commit_tick(void)
                 if (++bus->fg_defer_count >= 2 && result == 0)
                     result = ((uint32_t)b << 8) | PHASE_DMA_KIND_OVERRUN
                         | PHASE_DIAG_FGSTUCK_BIT
-                        | (phase_tc_count ? PHASE_DIAG_TCRAN_BIT : 0u);
+                        | phase_overrun_diag(bus, *bus->isr_reg);
                 irq_restore(flag);
                 continue;
             }
