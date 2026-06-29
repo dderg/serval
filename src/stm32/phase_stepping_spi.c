@@ -90,18 +90,6 @@ static volatile uint32_t phase_defer_count = 0;
 static volatile uint32_t phase_write_count = 0;
 static volatile uint8_t  phase_spi_writes_enabled = 0;
 
-// Forensic snapshot of the most recent phase arm, read back with debug_read
-// after a fault (the faulting arm is the last one written). entry_* is the
-// state inherited before the arm touches a register; post_sr is right after
-// CSTART; fault_sr is captured when the overrun is detected at commit.
-volatile uint32_t kalico_phase_entry_sr   __attribute__((used, externally_visible));
-volatile uint32_t kalico_phase_entry_dmacr __attribute__((used, externally_visible));
-volatile uint32_t kalico_phase_entry_ndtr __attribute__((used, externally_visible));
-volatile uint32_t kalico_phase_post_sr    __attribute__((used, externally_visible));
-volatile uint32_t kalico_phase_fault_sr   __attribute__((used, externally_visible));
-volatile uint32_t kalico_phase_fault_dmaisr __attribute__((used, externally_visible));
-volatile uint32_t kalico_phase_fault_ndtr __attribute__((used, externally_visible));
-
 __attribute__((used, externally_visible))
 uint32_t
 phase_spi_get_skip_count(void)
@@ -255,22 +243,16 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     struct spi_config fast = bus->fast_cfg;
     SPI_TypeDef *spi = fast.spi;
 
-    kalico_phase_entry_sr = spi->SR;
-    kalico_phase_entry_dmacr = bus->stream->CR;
-    kalico_phase_entry_ndtr = bus->stream->NDTR;
-
     spi->CR1 = SPI_CR1_SSI; // CFG1/CFG2 are write-protected while SPE=1
     spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
               | (7u << SPI_CFG1_DSIZE_Pos) | SPI_CFG1_TXDMAEN;
     // COMM_0 = simplex transmitter: XDIRECT is write-only, so suppress RX. In
     // full-duplex the master also gates its clock on RX-fifo space and every
     // frame loads an undrained RX fifo — the source of the TX/DMA desync.
-    // No SSOE: CS is a software GPIO, so driving the hardware NSS output serves
-    // nothing and is the suspected mode-fault (MODF) trigger that demoted the
-    // master to slave mid-batch. SSM + SSI hold the internal SS high instead.
     spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
               | SPI_CFG2_COMM_0
-              | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR;
+              | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
+              | SPI_CFG2_SSOE;
 
     DMA_Stream_TypeDef *st = bus->stream;
     st->CR &= ~DMA_SxCR_EN;
@@ -281,11 +263,7 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
     st->M0AR = (uint32_t)(uintptr_t)&bus->txbuf[bus->commit_half][midx * XDIRECT_LEN];
     st->NDTR = XDIRECT_LEN;
-    // PL=11 (highest): the TX feed must win AXI/AHB arbitration against the CPU
-    // and other masters, or it starves under extrusion load and the stream
-    // FIFO-errors (FEIF) before the batch drains.
-    st->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC | DMA_SxCR_TCIE | DMA_SxCR_TEIE
-           | DMA_SxCR_PL_1 | DMA_SxCR_PL_0;
+    st->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC | DMA_SxCR_TCIE | DMA_SxCR_TEIE;
     st->CR |= DMA_SxCR_EN;
 
     gpio_out_write(phase_motors[midx].cs, 0);
@@ -298,8 +276,6 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     // no TX-DMA request, freezing NDTR at full.
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
-
-    kalico_phase_post_sr = spi->SR;
 }
 
 static void
@@ -346,12 +322,6 @@ phase_dma_tc_isr(uint8_t bus_id)
                 break;
             }
         }
-    }
-
-    if (err) {
-        kalico_phase_fault_dmaisr = isr;
-        kalico_phase_fault_ndtr = bus->stream->NDTR;
-        kalico_phase_fault_sr = spi->SR;
     }
 
     spi->IFCR = 0xFFFFFFFF;
@@ -422,14 +392,18 @@ phase_spi_fg_end(int bus_token)
 static uint32_t
 phase_overrun_diag(struct phase_bus_state *bus, uint32_t isr)
 {
-    (void)isr;
     SPI_TypeDef *spi = bus->fast_cfg.spi;
     uint32_t sr = spi->SR;
-    kalico_phase_fault_sr = sr;
-    // Pack the full SPI SR[15:0] into the free upper half of fault_detail. The
-    // flag set (MODF/OVR/UDR/TIFRE/SUSP/EOT/...) names the condition that stalled
-    // the arm; entry_*/post_sr globals (debug_read) give the before/after.
-    return (sr & 0xFFFFu) << 16;
+    DMA_Stream_TypeDef *st = bus->stream;
+    return ((uint32_t)(bus->cursor & 0xF) << PHASE_DIAG_CURSOR_SHIFT)
+         | ((st->NDTR & 0xF) << PHASE_DIAG_NDTR_SHIFT)
+         | ((isr & bus->tcif) ? PHASE_DIAG_TCIF_BIT : 0u)
+         | (phase_tc_count ? PHASE_DIAG_TCRAN_BIT : 0u)
+         | ((spi->CR1 & SPI_CR1_SPE) ? PHASE_DIAG_SPE_BIT : 0u)
+         | ((sr & SPI_SR_TXP) ? PHASE_DIAG_TXP_BIT : 0u)
+         | ((st->CR & DMA_SxCR_EN) ? PHASE_DIAG_DMAEN_BIT : 0u)
+         | ((sr & SPI_SR_SUSP) ? PHASE_DIAG_SUSP_BIT : 0u)
+         | ((sr & SPI_SR_EOT) ? PHASE_DIAG_EOT_BIT : 0u);
 }
 
 #endif // CONFIG_MACH_STM32H7
@@ -563,11 +537,10 @@ phase_stepping_commit_tick(void)
         uint8_t sticky = bus->sticky_fault;
         if (sticky) {
             if (result == 0) {
-                uint32_t fault_sr = (kalico_phase_fault_sr & 0xFFFFu) << 16;
                 if (sticky & (PHASE_FAULT_TEIF | PHASE_FAULT_EOT))
-                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_TEIF | fault_sr;
+                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_TEIF;
                 else if (sticky & PHASE_FAULT_FEIF)
-                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_FEIF | fault_sr;
+                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_FEIF;
                 bus->sticky_fault = 0;
             }
             irq_restore(flag);
