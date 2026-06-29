@@ -1,8 +1,20 @@
 use super::*;
 use crossbeam_channel::unbounded;
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+
+fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for: {what}"
+        );
+        std::thread::yield_now();
+    }
+}
 
 fn make_enqueue(key: AxisKey, pieces: Vec<(PieceEntry, f64)>, fresh_stream: bool) -> EnqueueMsg {
     EnqueueMsg {
@@ -53,6 +65,82 @@ fn room_recovers_when_retired_overtakes_pushed() {
          wedge. An inversion (in_flight > ring_depth) must reconcile to a \
          drained ring, not zero room."
     );
+}
+
+#[test]
+fn schedule_resends_orphan_when_retired_overtook_pushed() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let mut q = AxisQueue::new(8);
+    q.pushed = 100;
+    q.retired = 101;
+    q.pieces.push_back(make_piece(101));
+    let mut queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
+    queues.insert(key, q);
+
+    const MAX_PER_FRAME: usize = 32;
+    match schedule(&queues, MAX_PER_FRAME, |_, _| None, |_| usize::MAX) {
+        Schedule::Send(frames) => {
+            assert_eq!(frames.len(), 1, "exactly the inverted axis is scheduled");
+            assert_eq!(frames[0].key, key);
+        }
+        other => {
+            panic!("retired>pushed inversion must schedule a re-send, not wedge; got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
+    const RING_DEPTH: u32 = 8;
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+
+    let sink = RecordingSink::new();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let sink_clone = sink.clone();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink_clone,
+            |_key| RING_DEPTH,
+            |_mcu| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        );
+    });
+
+    data.send(make_enqueue(key, vec![make_piece(0)], false))
+        .unwrap();
+    wait_until(
+        || sink.recorded().len() == 1,
+        "first piece delivered, creating the axis queue with pushed=1 (a heartbeat \
+         for an axis with no queue yet is dropped)",
+    );
+
+    ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 1,
+        retired_counts: vec![2],
+    }))
+    .unwrap();
+    let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
+    ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
+    ack_rx
+        .recv()
+        .expect("barrier acks only after the retired=2 heartbeat ahead of it applies");
+
+    data.send(make_enqueue(key, vec![make_piece(1)], false))
+        .unwrap();
+    wait_until(
+        || sink.recorded().len() == 2,
+        "second piece delivered despite retired(2) > pushed(1): buggy room() \
+         underflows to 0 and wedges here; the fix reopens room",
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
 }
 
 #[test]
