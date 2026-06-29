@@ -149,6 +149,12 @@ clock_setup(void)
         }
     }
 
+    // D2 AHB SRAM1/2 (0x30000000) hosts DMA-fed buffers (.d2_bss). Its clock is
+    // off at reset; enable it before the D-cache so a speculative cacheable
+    // access to that region cannot fault on an unclocked slave.
+    RCC->AHB2ENR |= RCC_AHB2ENR_SRAM1EN | RCC_AHB2ENR_SRAM2EN;
+    (void)RCC->AHB2ENR;
+
     SCB_EnableICache();
     SCB_EnableDCache();
 
