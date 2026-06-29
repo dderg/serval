@@ -265,10 +265,12 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     // COMM_0 = simplex transmitter: XDIRECT is write-only, so suppress RX. In
     // full-duplex the master also gates its clock on RX-fifo space and every
     // frame loads an undrained RX fifo — the source of the TX/DMA desync.
+    // No SSOE: CS is a software GPIO, so driving the hardware NSS output serves
+    // nothing and is the suspected mode-fault (MODF) trigger that demoted the
+    // master to slave mid-batch. SSM + SSI hold the internal SS high instead.
     spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
               | SPI_CFG2_COMM_0
-              | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
-              | SPI_CFG2_SSOE;
+              | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR;
 
     DMA_Stream_TypeDef *st = bus->stream;
     st->CR &= ~DMA_SxCR_EN;
@@ -279,7 +281,11 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
     st->M0AR = (uint32_t)(uintptr_t)&bus->txbuf[bus->commit_half][midx * XDIRECT_LEN];
     st->NDTR = XDIRECT_LEN;
-    st->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC | DMA_SxCR_TCIE | DMA_SxCR_TEIE;
+    // PL=11 (highest): the TX feed must win AXI/AHB arbitration against the CPU
+    // and other masters, or it starves under extrusion load and the stream
+    // FIFO-errors (FEIF) before the batch drains.
+    st->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC | DMA_SxCR_TCIE | DMA_SxCR_TEIE
+           | DMA_SxCR_PL_1 | DMA_SxCR_PL_0;
     st->CR |= DMA_SxCR_EN;
 
     gpio_out_write(phase_motors[midx].cs, 0);
