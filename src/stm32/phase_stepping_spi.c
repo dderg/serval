@@ -244,13 +244,15 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     SPI_TypeDef *spi = fast.spi;
 
     spi->CR1 = SPI_CR1_SSI; // CFG1/CFG2 are write-protected while SPE=1
+    // Only TXDMAEN toggles per transfer; CFG2 is byte-identical to spi_prepare's
+    // (full-duplex). Keeping ONE COMM mode for both the DMA writes and the
+    // foreground reads is what stops the peripheral scrambling (MODF/overrun)
+    // on the mode flip a simplex-transmitter write would force. The 5-byte
+    // XDIRECT response just lands in the RX fifo (well under its 16-byte depth)
+    // and is flushed by the SPE toggle between motors — no RX-DMA needed.
     spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
               | (7u << SPI_CFG1_DSIZE_Pos) | SPI_CFG1_TXDMAEN;
-    // COMM_0 = simplex transmitter: XDIRECT is write-only, so suppress RX. In
-    // full-duplex the master also gates its clock on RX-fifo space and every
-    // frame loads an undrained RX fifo — the source of the TX/DMA desync.
     spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
-              | SPI_CFG2_COMM_0
               | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
               | SPI_CFG2_SSOE;
 
