@@ -26,14 +26,15 @@ _Static_assert(PHASE_TXBUF_STRIDE >= MAX_PHASE_MOTORS * XDIRECT_LEN,
 
 // Packed into the free upper bits [31:16] of the commit status word; Rust
 // decodes only [15:0] (bus<<8|kind), so these reach the logged fault_detail.
-#define PHASE_DIAG_CURSOR_SHIFT 16          // bits 23:16 = cursor at fault
+#define PHASE_DIAG_CURSOR_SHIFT 16          // bits 19:16 = cursor at fault
+#define PHASE_DIAG_NDTR_SHIFT   20          // bits 23:20 = DMA bytes still pending
 #define PHASE_DIAG_TCIF_BIT     (1u << 24)  // DMA TCIF latched (transfer done)
 #define PHASE_DIAG_TCRAN_BIT    (1u << 25)  // TC ISR has executed at least once
 #define PHASE_DIAG_FGSTUCK_BIT  (1u << 26)  // overrun source = foreground holder
 #define PHASE_DIAG_SPE_BIT      (1u << 27)  // SPI SPE set (peripheral enabled)
 #define PHASE_DIAG_TXP_BIT      (1u << 28)  // SPI TXP (tx fifo has space)
 #define PHASE_DIAG_DMAEN_BIT    (1u << 29)  // DMA stream still enabled
-#define PHASE_DIAG_NDTR_BIT     (1u << 30)  // DMA NDTR != 0 (transfer incomplete)
+#define PHASE_DIAG_SUSP_BIT     (1u << 30)  // SPI master suspended (clock stalled)
 #define PHASE_DIAG_EOT_BIT      (1u << 31)  // SPI EOT set (transfer ended)
 
 enum { PHASE_OWNER_NONE = 0, PHASE_OWNER_PHASE = 1, PHASE_OWNER_FG = 2 };
@@ -245,7 +246,11 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     spi->CR1 = SPI_CR1_SSI; // CFG1/CFG2 are write-protected while SPE=1
     spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
               | (7u << SPI_CFG1_DSIZE_Pos) | SPI_CFG1_TXDMAEN;
+    // COMM_0 = simplex transmitter: XDIRECT is write-only, so suppress RX. In
+    // full-duplex the master also gates its clock on RX-fifo space and every
+    // frame loads an undrained RX fifo — the source of the TX/DMA desync.
     spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
+              | SPI_CFG2_COMM_0
               | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
               | SPI_CFG2_SSOE;
 
@@ -253,6 +258,7 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     st->CR &= ~DMA_SxCR_EN;
     while (st->CR & DMA_SxCR_EN)
         ;
+    st->FCR = 0; // direct mode, no FIFO-error interrupt — not the reset 0x21
     *bus->ifcr_reg = bus->flag_clear;
     st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
     st->M0AR = (uint32_t)(uintptr_t)&bus->txbuf[bus->commit_half][midx * XDIRECT_LEN];
@@ -384,13 +390,14 @@ phase_overrun_diag(struct phase_bus_state *bus, uint32_t isr)
     SPI_TypeDef *spi = bus->fast_cfg.spi;
     uint32_t sr = spi->SR;
     DMA_Stream_TypeDef *st = bus->stream;
-    return ((uint32_t)bus->cursor << PHASE_DIAG_CURSOR_SHIFT)
+    return ((uint32_t)(bus->cursor & 0xF) << PHASE_DIAG_CURSOR_SHIFT)
+         | ((st->NDTR & 0xF) << PHASE_DIAG_NDTR_SHIFT)
          | ((isr & bus->tcif) ? PHASE_DIAG_TCIF_BIT : 0u)
          | (phase_tc_count ? PHASE_DIAG_TCRAN_BIT : 0u)
          | ((spi->CR1 & SPI_CR1_SPE) ? PHASE_DIAG_SPE_BIT : 0u)
          | ((sr & SPI_SR_TXP) ? PHASE_DIAG_TXP_BIT : 0u)
          | ((st->CR & DMA_SxCR_EN) ? PHASE_DIAG_DMAEN_BIT : 0u)
-         | (st->NDTR ? PHASE_DIAG_NDTR_BIT : 0u)
+         | ((sr & SPI_SR_SUSP) ? PHASE_DIAG_SUSP_BIT : 0u)
          | ((sr & SPI_SR_EOT) ? PHASE_DIAG_EOT_BIT : 0u);
 }
 
