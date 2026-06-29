@@ -60,12 +60,6 @@ void phase_stepping_disable_writes(void);
 int  phase_spi_fg_begin(struct spi_config config);
 void phase_spi_fg_end(int bus_token);
 
-/* Foreground TMC access on a phase bus, via full-duplex DMA (no PIO on the
- * shared bus). Synchronous. Returns 0 on success, or -1 when the SPI is not a
- * phase bus or the length exceeds the bounce — caller then uses the PIO path. */
-int  phase_spi_fg_dma_transfer(struct spi_config config, uint8_t receive_data,
-                               uint8_t len, uint8_t *data);
-
 void spi_transfer_locked(struct spi_config config, uint8_t receive_data,
                          uint8_t len, uint8_t *data);
 #else
