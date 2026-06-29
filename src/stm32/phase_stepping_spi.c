@@ -14,6 +14,9 @@
 #define MAX_PHASE_MOTORS  16   // must match Rust state::MAX_STEPPER_OIDS
 #define XDIRECT_LEN       5
 #define PHASE_TXBUF_STRIDE 96
+#define PHASE_FG_BOUNCE   32   // foreground DMA scratch; one cache line, holds a
+                               // 5-byte TMC datagram. Longer transfers fall back
+                               // to PIO (never issued during phase stepping).
 _Static_assert(PHASE_TXBUF_STRIDE % 32 == 0,
                "half-buffer must be 32-byte (cache-line) aligned: "
                "SCB_CleanDCache_by_Addr granularity is one 32-byte line");
@@ -49,6 +52,8 @@ struct phase_bus_state {
 
 #if CONFIG_MACH_STM32H7
     __attribute__((aligned(32))) uint8_t txbuf[2][PHASE_TXBUF_STRIDE];
+    __attribute__((aligned(32))) uint8_t fg_txbuf[PHASE_FG_BOUNCE];
+    __attribute__((aligned(32))) uint8_t fg_rxbuf[PHASE_FG_BOUNCE];
     volatile uint8_t busy;
     volatile uint8_t owner;
     volatile uint8_t sticky_fault;
@@ -63,6 +68,12 @@ struct phase_bus_state {
     volatile uint32_t *ifcr_reg;
     uint32_t tcif, teif, feif, flag_clear;
     IRQn_Type irqn;
+
+    DMA_Stream_TypeDef *rx_stream;
+    DMAMUX_Channel_TypeDef *rx_mux;
+    volatile uint32_t *rx_isr_reg;
+    volatile uint32_t *rx_ifcr_reg;
+    uint32_t rx_tcif, rx_teif, rx_feif, rx_flag_clear;
 #endif
 };
 
@@ -140,6 +151,13 @@ phase_pack_datagram(uint8_t *dst, int16_t coil_a, int16_t coil_b)
 #define SPI4_TX_DMAMUX_REQ 84
 #define SPI5_TX_DMAMUX_REQ 86
 
+// Each SPI's RX request line sits one below its TX line in the DMAMUX1 table.
+#define SPI1_RX_DMAMUX_REQ 37
+#define SPI2_RX_DMAMUX_REQ 39
+#define SPI3_RX_DMAMUX_REQ 61
+#define SPI4_RX_DMAMUX_REQ 83
+#define SPI5_RX_DMAMUX_REQ 85
+
 struct dma_assign {
     DMA_Stream_TypeDef *stream;
     DMAMUX_Channel_TypeDef *mux;
@@ -162,6 +180,24 @@ static const struct dma_assign dma_table[MAX_PHASE_BUSES] = {
       | DMA_LIFCR_CTEIF3 | DMA_LIFCR_CDMEIF3 | DMA_LIFCR_CFEIF3 },
 };
 
+// RX streams for foreground full-duplex reads. Foreground polls completion, so
+// these carry no IRQ wiring. Streams 4-7 report status in the high half (HISR/
+// HIFCR); the phase TX streams 0-3 use the low half.
+static const struct dma_assign rx_dma_table[MAX_PHASE_BUSES] = {
+    { DMA1_Stream4, DMAMUX1_Channel4, DMA1_Stream4_IRQn, DMA_HISR_TCIF4,
+      DMA_HISR_TEIF4, DMA_HISR_FEIF4, DMA_HIFCR_CTCIF4 | DMA_HIFCR_CHTIF4
+      | DMA_HIFCR_CTEIF4 | DMA_HIFCR_CDMEIF4 | DMA_HIFCR_CFEIF4 },
+    { DMA1_Stream5, DMAMUX1_Channel5, DMA1_Stream5_IRQn, DMA_HISR_TCIF5,
+      DMA_HISR_TEIF5, DMA_HISR_FEIF5, DMA_HIFCR_CTCIF5 | DMA_HIFCR_CHTIF5
+      | DMA_HIFCR_CTEIF5 | DMA_HIFCR_CDMEIF5 | DMA_HIFCR_CFEIF5 },
+    { DMA1_Stream6, DMAMUX1_Channel6, DMA1_Stream6_IRQn, DMA_HISR_TCIF6,
+      DMA_HISR_TEIF6, DMA_HISR_FEIF6, DMA_HIFCR_CTCIF6 | DMA_HIFCR_CHTIF6
+      | DMA_HIFCR_CTEIF6 | DMA_HIFCR_CDMEIF6 | DMA_HIFCR_CFEIF6 },
+    { DMA1_Stream7, DMAMUX1_Channel7, DMA1_Stream7_IRQn, DMA_HISR_TCIF7,
+      DMA_HISR_TEIF7, DMA_HISR_FEIF7, DMA_HIFCR_CTCIF7 | DMA_HIFCR_CHTIF7
+      | DMA_HIFCR_CTEIF7 | DMA_HIFCR_CDMEIF7 | DMA_HIFCR_CFEIF7 },
+};
+
 static uint8_t
 phase_spi_tx_request(SPI_TypeDef *spi)
 {
@@ -180,6 +216,28 @@ phase_spi_tx_request(SPI_TypeDef *spi)
 #ifdef SPI5
     if (spi == SPI5)
         return SPI5_TX_DMAMUX_REQ;
+#endif
+    shutdown("phase DMA: SPI peripheral not on DMAMUX1 (use spi1..5)");
+}
+
+static uint8_t
+phase_spi_rx_request(SPI_TypeDef *spi)
+{
+    if (spi == SPI1)
+        return SPI1_RX_DMAMUX_REQ;
+    if (spi == SPI2)
+        return SPI2_RX_DMAMUX_REQ;
+#ifdef SPI3
+    if (spi == SPI3)
+        return SPI3_RX_DMAMUX_REQ;
+#endif
+#ifdef SPI4
+    if (spi == SPI4)
+        return SPI4_RX_DMAMUX_REQ;
+#endif
+#ifdef SPI5
+    if (spi == SPI5)
+        return SPI5_RX_DMAMUX_REQ;
 #endif
     shutdown("phase DMA: SPI peripheral not on DMAMUX1 (use spi1..5)");
 }
@@ -217,6 +275,22 @@ phase_dma_init_bus(uint8_t bus_id)
         ;
     *bus->ifcr_reg = bus->flag_clear;
     bus->mux->CCR = phase_spi_tx_request(bus->cfg.spi);
+
+    const struct dma_assign *r = &rx_dma_table[bus_id];
+    bus->rx_stream = r->stream;
+    bus->rx_mux = r->mux;
+    bus->rx_isr_reg = &DMA1->HISR;
+    bus->rx_ifcr_reg = &DMA1->HIFCR;
+    bus->rx_tcif = r->tcif;
+    bus->rx_teif = r->teif;
+    bus->rx_feif = r->feif;
+    bus->rx_flag_clear = r->clear;
+
+    bus->rx_stream->CR = 0;
+    while (bus->rx_stream->CR & DMA_SxCR_EN)
+        ;
+    *bus->rx_ifcr_reg = bus->rx_flag_clear;
+    bus->rx_mux->CCR = phase_spi_rx_request(bus->cfg.spi);
 
     switch (bus_id) {
     case 0:
@@ -387,6 +461,113 @@ phase_spi_fg_end(int bus_token)
         return;
     phase_buses[bus_token].busy = 0;
     phase_buses[bus_token].owner = PHASE_OWNER_NONE;
+}
+
+// Foreground TMC register access on a phase-managed bus, driven by full-duplex
+// DMA instead of PIO so no programmed-IO transfer ever shares the spi1 bus with
+// the phase batch. Synchronous: claims the bus (phase commit defers while held),
+// runs one transfer, and blocks on RX-DMA completion — RX-TC fires only once
+// every frame is fully shifted in, so it doubles as the true end-of-transfer.
+// Returns 0 on success, -1 when the SPI is not a phase bus or the length
+// exceeds the bounce (caller then falls back to the PIO path).
+int
+phase_spi_fg_dma_transfer(struct spi_config config, uint8_t receive_data,
+                          uint8_t len, uint8_t *data)
+{
+    int b = phase_bus_for_spi(config.spi);
+    if (b < 0 || len > PHASE_FG_BOUNCE)
+        return -1;
+    struct phase_bus_state *bus = &phase_buses[b];
+    SPI_TypeDef *spi = config.spi;
+
+    uint32_t claim_deadline = timer_read_time() + timer_from_us(500);
+    for (;;) {
+        while (bus->busy) {
+            if (!timer_is_before(timer_read_time(), claim_deadline))
+                shutdown("phase bus stuck: foreground DMA could not claim the "
+                         "bus (phase batch never drained)");
+        }
+        irqstatus_t flag = irq_save();
+        if (!bus->busy) {
+            bus->busy = 1;
+            bus->owner = PHASE_OWNER_FG;
+            irq_restore(flag);
+            break;
+        }
+        irq_restore(flag);
+    }
+
+    for (uint8_t i = 0; i < len; i++)
+        bus->fg_txbuf[i] = data[i];
+    SCB_CleanDCache_by_Addr((void *)bus->fg_txbuf, (int32_t)PHASE_FG_BOUNCE);
+    SCB_InvalidateDCache_by_Addr((void *)bus->fg_rxbuf, (int32_t)PHASE_FG_BOUNCE);
+
+    spi->CR1 = SPI_CR1_SSI;
+    spi->CFG1 = ((uint32_t)config.div << SPI_CFG1_MBR_Pos)
+              | (7u << SPI_CFG1_DSIZE_Pos)
+              | SPI_CFG1_TXDMAEN | SPI_CFG1_RXDMAEN;
+    spi->CFG2 = ((uint32_t)config.mode << SPI_CFG2_CPHA_Pos)
+              | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR | SPI_CFG2_SSOE;
+
+    DMA_Stream_TypeDef *tx = bus->stream;
+    DMA_Stream_TypeDef *rx = bus->rx_stream;
+    tx->CR &= ~DMA_SxCR_EN;
+    while (tx->CR & DMA_SxCR_EN)
+        ;
+    rx->CR &= ~DMA_SxCR_EN;
+    while (rx->CR & DMA_SxCR_EN)
+        ;
+    tx->FCR = 0;
+    rx->FCR = 0;
+    *bus->ifcr_reg = bus->flag_clear;
+    *bus->rx_ifcr_reg = bus->rx_flag_clear;
+
+    // No TCIE/TEIE: the phase TX stream (0-3) has the phase TC ISR wired, so an
+    // enabled interrupt here would fire it with owner==FG. Foreground polls.
+    rx->PAR = (uint32_t)(uintptr_t)&spi->RXDR;
+    rx->M0AR = (uint32_t)(uintptr_t)bus->fg_rxbuf;
+    rx->NDTR = len;
+    rx->CR = DMA_SxCR_MINC;
+    tx->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
+    tx->M0AR = (uint32_t)(uintptr_t)bus->fg_txbuf;
+    tx->NDTR = len;
+    tx->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC;
+    rx->CR |= DMA_SxCR_EN;
+    tx->CR |= DMA_SxCR_EN;
+
+    spi->CR2 = (uint32_t)len << SPI_CR2_TSIZE_Pos;
+    spi->CR1 = SPI_CR1_SSI | SPI_CR1_SPE;
+    spi->IFCR = 0xFFFFFFFF;
+    spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
+
+    uint32_t deadline = timer_read_time() + timer_from_us(100 * (uint32_t)len + 100);
+    for (;;) {
+        uint32_t rx_isr = *bus->rx_isr_reg;
+        if (rx_isr & bus->rx_tcif)
+            break;
+        if ((rx_isr & (bus->rx_teif | bus->rx_feif))
+            || (*bus->isr_reg & bus->teif)) {
+            shutdown("phase foreground DMA: SPI bus transfer error");
+        }
+        if (!timer_is_before(timer_read_time(), deadline))
+            shutdown("phase foreground DMA: SPI rx timeout");
+    }
+
+    tx->CR &= ~DMA_SxCR_EN;
+    rx->CR &= ~DMA_SxCR_EN;
+    *bus->ifcr_reg = bus->flag_clear;
+    *bus->rx_ifcr_reg = bus->rx_flag_clear;
+    spi->IFCR = 0xFFFFFFFF;
+    spi->CR1 = SPI_CR1_SSI;
+
+    SCB_InvalidateDCache_by_Addr((void *)bus->fg_rxbuf, PHASE_FG_BOUNCE);
+    if (receive_data)
+        for (uint8_t i = 0; i < len; i++)
+            data[i] = bus->fg_rxbuf[i];
+
+    bus->busy = 0;
+    bus->owner = PHASE_OWNER_NONE;
+    return 0;
 }
 
 static uint32_t

@@ -197,9 +197,15 @@ void
 spi_transfer(struct spi_config config, uint8_t receive_data,
              uint8_t len, uint8_t *data)
 {
-    // Claim the owning phase bus before prepare: while held, a phase commit
-    // sees the bus busy and defers its DMA arm, so no XDIRECT batch reprograms
-    // CFG1 (different MBR divisor) between this prepare and transfer.
+    // On a phase-managed bus, run the access through full-duplex DMA so no
+    // programmed-IO transfer ever shares spi1 with the phase batch — a PIO
+    // teardown left the peripheral suspended for the next DMA arm to inherit.
+    if (phase_spi_fg_dma_transfer(config, receive_data, len, data) == 0)
+        return;
+
+    // Off the phase bus (or an oversized transfer): claim the owning phase bus
+    // before prepare so a concurrent DMA arm cannot reprogram CFG1 (different
+    // MBR divisor) between this prepare and the PIO transfer.
     int bus_token = phase_spi_fg_begin(config);
     spi_prepare(config);
     spi_transfer_locked(config, receive_data, len, data);
