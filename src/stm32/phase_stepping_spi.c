@@ -300,6 +300,8 @@ phase_dma_release_current(struct phase_bus_state *bus)
     bus->stream->CR &= ~DMA_SxCR_EN;
     *bus->ifcr_reg = bus->flag_clear;
     SPI_TypeDef *spi = bus->fast_cfg.spi;
+    while (spi->SR & (SPI_SR_RXP | SPI_SR_RXWNE)) // empty full-duplex response
+        (void)*(volatile uint8_t *)&spi->RXDR;
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI;
     gpio_out_write(phase_motors[bus->seq[bus->cursor]].cs, 1);
@@ -339,6 +341,13 @@ phase_dma_tc_isr(uint8_t bus_id)
             }
         }
     }
+
+    // Empty the full-duplex response before handing the bus off (to the next
+    // motor's arm or a foreground read claiming the gap): a leftover RX byte
+    // desyncs the next user, which reads stale data and busy-waits — that is
+    // what showed up as the foreground holding the bus (FGSTUCK).
+    while (spi->SR & (SPI_SR_RXP | SPI_SR_RXWNE))
+        (void)*(volatile uint8_t *)&spi->RXDR;
 
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI;
