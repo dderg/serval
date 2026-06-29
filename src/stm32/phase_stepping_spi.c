@@ -99,6 +99,8 @@ volatile uint32_t kalico_phase_entry_dmacr __attribute__((used, externally_visib
 volatile uint32_t kalico_phase_entry_ndtr __attribute__((used, externally_visible));
 volatile uint32_t kalico_phase_post_sr    __attribute__((used, externally_visible));
 volatile uint32_t kalico_phase_fault_sr   __attribute__((used, externally_visible));
+volatile uint32_t kalico_phase_fault_dmaisr __attribute__((used, externally_visible));
+volatile uint32_t kalico_phase_fault_ndtr __attribute__((used, externally_visible));
 
 __attribute__((used, externally_visible))
 uint32_t
@@ -340,6 +342,12 @@ phase_dma_tc_isr(uint8_t bus_id)
         }
     }
 
+    if (err) {
+        kalico_phase_fault_dmaisr = isr;
+        kalico_phase_fault_ndtr = bus->stream->NDTR;
+        kalico_phase_fault_sr = spi->SR;
+    }
+
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI;
     gpio_out_write(phase_motors[bus->seq[bus->cursor]].cs, 1);
@@ -549,10 +557,11 @@ phase_stepping_commit_tick(void)
         uint8_t sticky = bus->sticky_fault;
         if (sticky) {
             if (result == 0) {
+                uint32_t fault_sr = (kalico_phase_fault_sr & 0xFFFFu) << 16;
                 if (sticky & (PHASE_FAULT_TEIF | PHASE_FAULT_EOT))
-                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_TEIF;
+                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_TEIF | fault_sr;
                 else if (sticky & PHASE_FAULT_FEIF)
-                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_FEIF;
+                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_FEIF | fault_sr;
                 bus->sticky_fault = 0;
             }
             irq_restore(flag);
