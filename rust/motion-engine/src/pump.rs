@@ -713,6 +713,7 @@ pub fn run_pump<S, F, C, A, O, D>(
 
     let mut holding_ahead = false;
     let mut data_open = true;
+    let mut last_stallfull_log: Option<std::time::Instant> = None;
 
     loop {
         let cohort_active = cohort.is_some();
@@ -789,7 +790,29 @@ pub fn run_pump<S, F, C, A, O, D>(
             let hz_of = |k: &AxisKey, q: &AxisQueue| horizon_of(k, q, &cohort);
             match schedule(&queues, MAX_PER_FRAME, hz_of, |_| usize::MAX) {
                 Schedule::Idle => break 'send,
-                Schedule::StallFull(_stall_key) => {
+                Schedule::StallFull(stall_key) => {
+                    let now = std::time::Instant::now();
+                    let due = last_stallfull_log
+                        .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1));
+                    if due {
+                        last_stallfull_log = Some(now);
+                        if let Some(q) = queues.get(&stall_key) {
+                            let in_flight = q.pushed.wrapping_sub(q.retired);
+                            tracing::warn!(
+                                subsystem = "motion",
+                                event = "pump_stall_full",
+                                mcu = stall_key.mcu_id,
+                                axis = stall_key.axis,
+                                pushed = q.pushed,
+                                retired = q.retired,
+                                in_flight,
+                                ring_depth = q.ring_depth,
+                                room = q.room(),
+                                pending = q.pieces.len(),
+                                "pump StallFull (room==0); in_flight near u32::MAX means retired>pushed underflow"
+                            );
+                        }
+                    }
                     break 'send;
                 }
                 Schedule::StallAhead(_stall_key) => {
