@@ -207,6 +207,7 @@ impl Demuxer {
                     match parse_klipper_frame(&frame) {
                         Ok(f) => Ok(Some(f)),
                         Err(e) => {
+                            log_corruption_frame("klipper", &frame, &e);
                             self.replay.extend(frame.iter().copied().skip(1));
                             Err(e)
                         }
@@ -230,13 +231,42 @@ impl Demuxer {
                 if *total_len > 0 && buf.len() == *total_len {
                     let frame = std::mem::take(buf);
                     self.state = State::WaitingForFrame;
-                    parse_kalico_frame(&frame).map(Some)
+                    match parse_kalico_frame(&frame) {
+                        Ok(f) => Ok(Some(f)),
+                        Err(e) => {
+                            log_corruption_frame("kalico", &frame, &e);
+                            Err(e)
+                        }
+                    }
                 } else {
                     Ok(None)
                 }
             }
         }
     }
+}
+
+struct HexBytes<'a>(&'a [u8]);
+
+impl std::fmt::Display for HexBytes<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+fn log_corruption_frame(proto: &'static str, frame: &[u8], err: &StreamError) {
+    tracing::warn!(
+        subsystem = "mcu-comms",
+        event = "stream_corruption_frame",
+        proto,
+        len = frame.len(),
+        frame_hex = %HexBytes(frame),
+        error = %err,
+        "[corruption] raw frame bytes at parse error"
+    );
 }
 
 fn parse_klipper_frame(frame: &[u8]) -> Result<Frame, StreamError> {

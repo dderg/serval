@@ -887,12 +887,18 @@ impl Reactor {
                 let now = self.clock.now();
                 let silence_ms = now.duration_since(self.last_recv_time).as_millis();
                 let since_write_ms = now.duration_since(self.last_write_time).as_millis();
+                let (os_errno, io_kind) = match &e {
+                    TransportError::Io(io) => (io.raw_os_error(), Some(io.kind())),
+                    _ => (None, None),
+                };
                 tracing::warn!(
                     subsystem = "mcu-comms",
                     event = "usb_drop_poll_error",
                     silence_ms = %silence_ms,
                     since_write_ms = %since_write_ms,
                     consec_zero = self.zero_byte_consec,
+                    os_errno = ?os_errno,
+                    io_kind = ?io_kind,
                     error = ?e,
                     "[usb-drop] poll error"
                 );
