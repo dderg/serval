@@ -30,6 +30,11 @@ _Static_assert(PHASE_TXBUF_STRIDE >= MAX_PHASE_MOTORS * XDIRECT_LEN,
 #define PHASE_DIAG_TCIF_BIT     (1u << 24)  // DMA TCIF latched (transfer done)
 #define PHASE_DIAG_TCRAN_BIT    (1u << 25)  // TC ISR has executed at least once
 #define PHASE_DIAG_FGSTUCK_BIT  (1u << 26)  // overrun source = foreground holder
+#define PHASE_DIAG_SPE_BIT      (1u << 27)  // SPI SPE set (peripheral enabled)
+#define PHASE_DIAG_TXP_BIT      (1u << 28)  // SPI TXP (tx fifo has space)
+#define PHASE_DIAG_DMAEN_BIT    (1u << 29)  // DMA stream still enabled
+#define PHASE_DIAG_NDTR_BIT     (1u << 30)  // DMA NDTR != 0 (transfer incomplete)
+#define PHASE_DIAG_EOT_BIT      (1u << 31)  // SPI EOT set (transfer ended)
 
 enum { PHASE_OWNER_NONE = 0, PHASE_OWNER_PHASE = 1, PHASE_OWNER_FG = 2 };
 
@@ -373,6 +378,22 @@ phase_spi_fg_end(int bus_token)
     phase_buses[bus_token].owner = PHASE_OWNER_NONE;
 }
 
+static uint32_t
+phase_overrun_diag(struct phase_bus_state *bus, uint32_t isr)
+{
+    SPI_TypeDef *spi = bus->fast_cfg.spi;
+    uint32_t sr = spi->SR;
+    DMA_Stream_TypeDef *st = bus->stream;
+    return ((uint32_t)bus->cursor << PHASE_DIAG_CURSOR_SHIFT)
+         | ((isr & bus->tcif) ? PHASE_DIAG_TCIF_BIT : 0u)
+         | (phase_tc_count ? PHASE_DIAG_TCRAN_BIT : 0u)
+         | ((spi->CR1 & SPI_CR1_SPE) ? PHASE_DIAG_SPE_BIT : 0u)
+         | ((sr & SPI_SR_TXP) ? PHASE_DIAG_TXP_BIT : 0u)
+         | ((st->CR & DMA_SxCR_EN) ? PHASE_DIAG_DMAEN_BIT : 0u)
+         | (st->NDTR ? PHASE_DIAG_NDTR_BIT : 0u)
+         | ((sr & SPI_SR_EOT) ? PHASE_DIAG_EOT_BIT : 0u);
+}
+
 #endif // CONFIG_MACH_STM32H7
 
 // used,externally_visible: called only from Rust via FFI; without this,
@@ -485,9 +506,7 @@ phase_stepping_commit_tick(void)
                 } else {
                     if (result == 0)
                         result = ((uint32_t)b << 8) | PHASE_DMA_KIND_OVERRUN
-                            | ((uint32_t)bus->cursor << PHASE_DIAG_CURSOR_SHIFT)
-                            | ((isr & bus->tcif) ? PHASE_DIAG_TCIF_BIT : 0u)
-                            | (phase_tc_count ? PHASE_DIAG_TCRAN_BIT : 0u);
+                            | phase_overrun_diag(bus, isr);
                     irq_restore(flag);
                     continue;
                 }
