@@ -61,7 +61,11 @@ impl AxisQueue {
     }
     pub fn room(&self) -> u32 {
         let in_flight = self.pushed.wrapping_sub(self.retired);
-        self.ring_depth.saturating_sub(in_flight)
+        if in_flight > self.ring_depth {
+            self.ring_depth
+        } else {
+            self.ring_depth - in_flight
+        }
     }
     pub fn advance_write_cursor(&mut self, n: u32) {
         if self.ring_depth == 0 {

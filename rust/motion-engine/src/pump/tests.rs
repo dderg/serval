@@ -29,7 +29,30 @@ fn room_correct_across_u32_wrap() {
     let mut q = AxisQueue::new(8);
     q.pushed = 2;
     q.retired = u32::MAX;
-    assert_eq!(q.room(), 5);
+    assert_eq!(
+        q.room(),
+        5,
+        "legitimate counter rollover: retired is numerically larger than pushed \
+         only because the u32 odometer wrapped, so 3 pieces are genuinely in \
+         flight. wrapping_sub recovers 3; a saturating_sub / max(0, ..) would \
+         collapse this to 0 in_flight and wrongly report a full ring."
+    );
+}
+
+#[test]
+fn room_recovers_when_retired_overtakes_pushed() {
+    let mut q = AxisQueue::new(4);
+    q.pushed = 100;
+    q.retired = 101;
+    assert_eq!(
+        q.room(),
+        4,
+        "retired overtook pushed by 1 (a PushPieces the MCU applied but whose \
+         response was lost): in_flight = pushed.wrapping_sub(retired) underflows \
+         to u32::MAX and saturating_sub pins room at 0 forever — the mid-print \
+         wedge. An inversion (in_flight > ring_depth) must reconcile to a \
+         drained ring, not zero room."
+    );
 }
 
 #[test]
