@@ -316,44 +316,36 @@ class PanelRenderer {
 
     // The executed (post-lowered) toolhead path -- the same dense quintic samples the
     // velocity/accel/jerk panels are derived from, so the path is the same stage as
-    // every graph beside it. The fitted segments (pre-lowering geometry) are used
-    // only to color each stretch by type, mapped onto the executed path by
-    // arc-length fraction so the line/arc/clothoid coloring is preserved.
+    // every graph beside it. The line/arc/clothoid label exists only in the fitted
+    // (pre-lowering) geometry; the executed samples are all cubics. Borrow each
+    // segment's label but place the color seam at the executed sample nearest that
+    // segment's geometric endpoint -- exact, not an arc-length-fraction guess.
     const segCount = DATA.segment_count();
     const kx = DATA.kin_x(), ky = DATA.kin_y();
     if (kx.length > 1 && segCount > 0) {
-      const segFracEnd = [];
-      let fitTotal = 0;
-      for (let i = 0; i < segCount; i++) {
-        const typ = DATA.segment_type(i);
-        const d = DATA.segment_data(i);
-        let segLen = 0;
-        if (typ === "line") {
-          segLen = Math.hypot(d[2] - d[0], d[3] - d[1]);
-        } else {
-          for (let j = 2; j < d.length; j += 2) {
-            segLen += Math.hypot(d[j] - d[j - 2], d[j + 1] - d[j - 1]);
-          }
+      // Search forward only, so a self-crossing path can't snap a later seam back.
+      const segEndIdx = new Array(segCount);
+      let from = 0;
+      for (let s = 0; s < segCount; s++) {
+        const d = DATA.segment_data(s);
+        const line = DATA.segment_type(s) === "line";
+        const ex = line ? d[2] : d[d.length - 2];
+        const ey = line ? d[3] : d[d.length - 1];
+        let best = from, bd = Infinity;
+        for (let i = from; i < kx.length; i++) {
+          const dx = kx[i] - ex, dy = ky[i] - ey;
+          const dd = dx * dx + dy * dy;
+          if (dd < bd) { bd = dd; best = i; }
         }
-        fitTotal += segLen;
-        segFracEnd.push(fitTotal);
+        segEndIdx[s] = best;
+        from = best;
       }
-      for (let i = 0; i < segCount; i++) {
-        segFracEnd[i] = fitTotal > 0 ? segFracEnd[i] / fitTotal : 1;
-      }
-
-      const kinCum = [0];
-      let kinTotal = 0;
-      for (let i = 1; i < kx.length; i++) {
-        kinTotal += Math.hypot(kx[i] - kx[i - 1], ky[i] - ky[i - 1]);
-        kinCum.push(kinTotal);
-      }
+      segEndIdx[segCount - 1] = kx.length - 1;
 
       let segIdx = 0, curColor = null;
       bctx.lineWidth = 1.2;
       for (let i = 1; i < kx.length; i++) {
-        const midFrac = kinTotal > 0 ? 0.5 * (kinCum[i - 1] + kinCum[i]) / kinTotal : 1;
-        while (segIdx < segCount - 1 && midFrac > segFracEnd[segIdx]) segIdx++;
+        while (segIdx < segCount - 1 && i > segEndIdx[segIdx]) segIdx++;
         const color = COLORS[DATA.segment_type(segIdx)] || COLORS.line;
         if (color !== curColor) {
           if (curColor !== null) bctx.stroke();
