@@ -42,6 +42,17 @@ dfu_reboot(void)
     NVIC_SystemReset();
 }
 
+// Request the ROM DFU bootloader without resetting: dfu_reboot_check() later in
+// this same boot performs the jump. The boot-loop guard uses this to divert a
+// repeatedly-failing image to USB-recoverable DFU.
+void
+dfu_reboot_set_flag(void)
+{
+    if (!CONFIG_STM32_DFU_ROM_ADDRESS || !CONFIG_HAVE_BOOTLOADER_REQUEST)
+        return;
+    *(uint64_t*)USB_BOOT_FLAG_ADDR = USB_BOOT_FLAG;
+}
+
 // Check if rebooting into system DFU Bootloader
 void
 dfu_reboot_check(void)

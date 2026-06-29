@@ -149,12 +149,6 @@ clock_setup(void)
         }
     }
 
-    // D2 AHB SRAM1/2 (0x30000000) hosts DMA-fed buffers (.d2_bss). Its clock is
-    // off at reset; enable it before the D-cache so a speculative cacheable
-    // access to that region cannot fault on an unclocked slave.
-    RCC->AHB2ENR |= RCC_AHB2ENR_SRAM1EN | RCC_AHB2ENR_SRAM2EN;
-    (void)RCC->AHB2ENR;
-
     SCB_EnableICache();
     SCB_EnableDCache();
 
@@ -211,6 +205,68 @@ bootloader_request(void)
 
 
 /****************************************************************
+ * Boot-loop guard
+ ****************************************************************/
+
+// A boot that hard-faults or hangs before the runtime goes live (e.g. a bad
+// firmware image) is otherwise unrecoverable without physical BOOT0: USB never
+// enumerates, so the host can't ask the app to reboot into DFU. The guard makes
+// it self-heal — an early watchdog turns a hang into a reset, a reset counter in
+// AXI SRAM (survives reset, outside any zeroed segment) tallies consecutive
+// failures, and after a few it diverts to the ROM DFU bootloader so the board is
+// reflashable over USB. A boot that reaches the live runtime clears the counter,
+// so only genuine boot loops — never runtime faults — accumulate.
+// Own a cache line of its own (clear of the USB_BOOT_FLAG line at 0x8000), so the
+// clean/flush below can't disturb that flag.
+#define BOOT_GUARD_ADDR  (0x24000000u + 0x8020u) // AXI SRAM, 32-byte aligned
+#define BOOT_GUARD_MAGIC 0x424f4f47u             // 'BOOG'
+#define BOOT_GUARD_LIMIT 3u
+
+static void
+boot_guard(void)
+{
+    volatile uint32_t *magic = (volatile uint32_t *)BOOT_GUARD_ADDR;
+    volatile uint32_t *count = (volatile uint32_t *)(BOOT_GUARD_ADDR + 4);
+    if (*magic != BOOT_GUARD_MAGIC) { // cold boot: random SRAM, (re)initialise
+        *magic = BOOT_GUARD_MAGIC;
+        *count = 0;
+    }
+    if (*count >= BOOT_GUARD_LIMIT) {
+        *count = 0;
+        dfu_reboot_set_flag(); // dfu_reboot_check() (next in armcm_main) jumps
+    } else {
+        *count = *count + 1;
+    }
+    // Flush to SRAM so the count survives the reset a boot hang triggers: the
+    // bootloader may hand off with the D-cache on, and a cached-only write would
+    // be lost at reset, leaving the loop undetected.
+    SCB_CleanDCache_by_Addr((void *)BOOT_GUARD_ADDR, 32);
+
+    // Arm the IWDG so a hang anywhere in boot resets and re-enters this guard.
+    // PR=5 (/128), RLR=0xFFF over the ~32 kHz LSI is ~16 s — vastly longer than a
+    // healthy boot, so it never trips a slow-but-working start; watchdog_init()
+    // retunes it once the runtime is up. Starting the IWDG also forces LSI on.
+    IWDG1->KR = 0x5555;
+    IWDG1->PR = 5;
+    IWDG1->RLR = 0x0FFF;
+    IWDG1->KR = 0xCCCC;
+}
+
+// Called from watchdog_reset() once the runtime is live: this boot reached a
+// healthy state, so reset the consecutive-failure tally (and flush it, so a
+// later runtime fault doesn't get miscounted as a boot failure).
+void
+boot_guard_clear(void)
+{
+    volatile uint32_t *count = (volatile uint32_t *)(BOOT_GUARD_ADDR + 4);
+    if (*count) {
+        *count = 0;
+        SCB_CleanDCache_by_Addr((void *)BOOT_GUARD_ADDR, 32);
+    }
+}
+
+
+/****************************************************************
  * Startup
  ****************************************************************/
 
@@ -218,6 +274,19 @@ bootloader_request(void)
 void
 armcm_main(void)
 {
+    // D2 AHB SRAM1/2 (0x30000000) hosts DMA-fed buffers (.d2_bss). Its clock is
+    // off at reset, but the bootloader may hand off with the D-cache enabled, so
+    // the M7 can speculatively touch that region during the very first init.
+    // Clock it before anything else runs so no access — speculative or real —
+    // faults on an unclocked slave. (RCC is reachable on the reset HSI clock.)
+    RCC->AHB2ENR |= RCC_AHB2ENR_SRAM1EN | RCC_AHB2ENR_SRAM2EN;
+    (void)RCC->AHB2ENR;
+
+    // Boot-loop safety net: arm an early watchdog and, after repeated failed
+    // boots, divert to the ROM DFU bootloader so a bad image is recoverable
+    // over USB without physical BOOT0. Must precede the risky clock/init below.
+    boot_guard();
+
     // Run SystemInit() and then restore VTOR
     SystemInit();
     RCC->D1CCIPR = 0x00000000;

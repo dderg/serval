@@ -46,6 +46,11 @@ int is_enabled_pclock(uint32_t periph_base);
 // dfu_reboot.c
 void dfu_reboot(void);
 void dfu_reboot_check(void);
+void dfu_reboot_set_flag(void);
+
+// stm32h7.c boot-loop guard — clears the boot-attempt counter once the runtime
+// is live. No-op on non-H7 (the counter is H7-only).
+void boot_guard_clear(void);
 
 // stm32??.c
 struct cline { volatile uint32_t *en, *rst; uint32_t bit; };
