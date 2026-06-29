@@ -319,21 +319,39 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
 
     spi->CR1 = SPI_CR1_SSI; // CFG1/CFG2 are write-protected while SPE=1
     spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
-              | (7u << SPI_CFG1_DSIZE_Pos) | SPI_CFG1_TXDMAEN;
-    // COMM_0 = simplex transmitter: XDIRECT is write-only, so suppress RX. In
-    // full-duplex the master also gates its clock on RX-fifo space and every
-    // frame loads an undrained RX fifo — the source of the TX/DMA desync.
+              | (7u << SPI_CFG1_DSIZE_Pos)
+              | SPI_CFG1_TXDMAEN | SPI_CFG1_RXDMAEN;
+    // Full-duplex on every bus access: phase writes and foreground reads run the
+    // identical COMM mode, so the peripheral never flips between simplex
+    // transmitter and full-duplex — a flip left the master suspended for the
+    // next arm to inherit (CSTART onto a leftover suspend moves no bytes). The
+    // RX-DMA drains the inbound fifo each frame, which is what the earlier
+    // simplex switch was avoiding: undrained RX gated the master clock.
     spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
-              | SPI_CFG2_COMM_0
               | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
               | SPI_CFG2_SSOE;
 
     DMA_Stream_TypeDef *st = bus->stream;
+    DMA_Stream_TypeDef *rx = bus->rx_stream;
     st->CR &= ~DMA_SxCR_EN;
     while (st->CR & DMA_SxCR_EN)
         ;
+    rx->CR &= ~DMA_SxCR_EN;
+    while (rx->CR & DMA_SxCR_EN)
+        ;
     st->FCR = 0; // direct mode, no FIFO-error interrupt — not the reset 0x21
+    rx->FCR = 0;
     *bus->ifcr_reg = bus->flag_clear;
+    *bus->rx_ifcr_reg = bus->rx_flag_clear;
+
+    // RX drains the inbound fifo to one scratch byte (XDIRECT is write-only, its
+    // response is discarded); no MINC, no completion IRQ — TX-TC stays the
+    // trigger and the EOT gate below times CS-high.
+    rx->PAR = (uint32_t)(uintptr_t)&spi->RXDR;
+    rx->M0AR = (uint32_t)(uintptr_t)&bus->fg_rxbuf[0];
+    rx->NDTR = XDIRECT_LEN;
+    rx->CR = DMA_SxCR_EN;
+
     st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
     st->M0AR = (uint32_t)(uintptr_t)&bus->txbuf[bus->commit_half][midx * XDIRECT_LEN];
     st->NDTR = XDIRECT_LEN;
@@ -356,7 +374,9 @@ static void
 phase_dma_release_current(struct phase_bus_state *bus)
 {
     bus->stream->CR &= ~DMA_SxCR_EN;
+    bus->rx_stream->CR &= ~DMA_SxCR_EN;
     *bus->ifcr_reg = bus->flag_clear;
+    *bus->rx_ifcr_reg = bus->rx_flag_clear;
     SPI_TypeDef *spi = bus->fast_cfg.spi;
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI;
@@ -384,6 +404,8 @@ phase_dma_tc_isr(uint8_t bus_id)
     }
 
     bus->stream->CR &= ~DMA_SxCR_EN;
+    bus->rx_stream->CR &= ~DMA_SxCR_EN;
+    *bus->rx_ifcr_reg = bus->rx_flag_clear;
 
     // TC = TX FIFO fed, not last byte shifted out; gate CS-high on EOT.
     SPI_TypeDef *spi = bus->fast_cfg.spi;
