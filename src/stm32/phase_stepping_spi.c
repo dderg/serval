@@ -24,6 +24,13 @@ _Static_assert(PHASE_TXBUF_STRIDE >= MAX_PHASE_MOTORS * XDIRECT_LEN,
 #define PHASE_FAULT_FEIF 0x02u
 #define PHASE_FAULT_EOT  0x04u
 
+// Packed into the free upper bits [31:16] of the commit status word; Rust
+// decodes only [15:0] (bus<<8|kind), so these reach the logged fault_detail.
+#define PHASE_DIAG_CURSOR_SHIFT 16          // bits 23:16 = cursor at fault
+#define PHASE_DIAG_TCIF_BIT     (1u << 24)  // DMA TCIF latched (transfer done)
+#define PHASE_DIAG_TCRAN_BIT    (1u << 25)  // TC ISR has executed at least once
+#define PHASE_DIAG_FGSTUCK_BIT  (1u << 26)  // overrun source = foreground holder
+
 enum { PHASE_OWNER_NONE = 0, PHASE_OWNER_PHASE = 1, PHASE_OWNER_FG = 2 };
 
 struct phase_bus_state {
@@ -171,6 +178,8 @@ phase_spi_tx_request(SPI_TypeDef *spi)
     shutdown("phase DMA: SPI peripheral not on DMAMUX1 (use spi1..5)");
 }
 
+static volatile uint32_t phase_tc_count;
+
 static void phase_dma_tc_isr(uint8_t bus_id);
 
 void phase_dma_s0_irq(void) { phase_dma_tc_isr(0); }
@@ -269,6 +278,7 @@ phase_dma_release_current(struct phase_bus_state *bus)
 static void
 phase_dma_tc_isr(uint8_t bus_id)
 {
+    phase_tc_count++;
     struct phase_bus_state *bus = &phase_buses[bus_id];
     uint32_t isr = *bus->isr_reg;
     *bus->ifcr_reg = bus->flag_clear;
@@ -336,9 +346,13 @@ phase_spi_fg_begin(struct spi_config config)
     if (b < 0)
         return -1;
     struct phase_bus_state *bus = &phase_buses[b];
+    uint32_t deadline = timer_read_time() + timer_from_us(500);
     for (;;) {
-        while (bus->busy)
-            ;
+        while (bus->busy) {
+            if (!timer_is_before(timer_read_time(), deadline))
+                shutdown("phase bus stuck: foreground SPI could not claim the "
+                         "bus (phase DMA batch never drained)");
+        }
         irqstatus_t flag = irq_save();
         if (!bus->busy) {
             bus->busy = 1;
@@ -470,14 +484,19 @@ phase_stepping_commit_tick(void)
                     NVIC_ClearPendingIRQ(bus->irqn);
                 } else {
                     if (result == 0)
-                        result = ((uint32_t)b << 8) | PHASE_DMA_KIND_OVERRUN;
+                        result = ((uint32_t)b << 8) | PHASE_DMA_KIND_OVERRUN
+                            | ((uint32_t)bus->cursor << PHASE_DIAG_CURSOR_SHIFT)
+                            | ((isr & bus->tcif) ? PHASE_DIAG_TCIF_BIT : 0u)
+                            | (phase_tc_count ? PHASE_DIAG_TCRAN_BIT : 0u);
                     irq_restore(flag);
                     continue;
                 }
             } else {
                 phase_defer_count++;
                 if (++bus->fg_defer_count >= 2 && result == 0)
-                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_OVERRUN;
+                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_OVERRUN
+                        | PHASE_DIAG_FGSTUCK_BIT
+                        | (phase_tc_count ? PHASE_DIAG_TCRAN_BIT : 0u);
                 irq_restore(flag);
                 continue;
             }
