@@ -49,6 +49,7 @@ struct phase_bus_state {
 
 #if CONFIG_MACH_STM32H7
     __attribute__((aligned(32))) uint8_t txbuf[2][PHASE_TXBUF_STRIDE];
+    __attribute__((aligned(32))) uint8_t rxdiscard[XDIRECT_LEN];
     volatile uint8_t busy;
     volatile uint8_t owner;
     volatile uint8_t sticky_fault;
@@ -63,6 +64,12 @@ struct phase_bus_state {
     volatile uint32_t *ifcr_reg;
     uint32_t tcif, teif, feif, flag_clear;
     IRQn_Type irqn;
+
+    DMA_Stream_TypeDef *rx_stream;
+    DMAMUX_Channel_TypeDef *rx_mux;
+    volatile uint32_t *rx_isr_reg;
+    volatile uint32_t *rx_ifcr_reg;
+    uint32_t rx_tcif, rx_teif, rx_feif, rx_flag_clear;
 #endif
 };
 
@@ -152,6 +159,13 @@ phase_pack_datagram(uint8_t *dst, int16_t coil_a, int16_t coil_b)
 #define SPI4_TX_DMAMUX_REQ 84
 #define SPI5_TX_DMAMUX_REQ 86
 
+// Each SPI's RX request line is one below its TX line.
+#define SPI1_RX_DMAMUX_REQ 37
+#define SPI2_RX_DMAMUX_REQ 39
+#define SPI3_RX_DMAMUX_REQ 61
+#define SPI4_RX_DMAMUX_REQ 83
+#define SPI5_RX_DMAMUX_REQ 85
+
 struct dma_assign {
     DMA_Stream_TypeDef *stream;
     DMAMUX_Channel_TypeDef *mux;
@@ -173,6 +187,45 @@ static const struct dma_assign dma_table[MAX_PHASE_BUSES] = {
       DMA_LISR_TEIF3, DMA_LISR_FEIF3, DMA_LIFCR_CTCIF3 | DMA_LIFCR_CHTIF3
       | DMA_LIFCR_CTEIF3 | DMA_LIFCR_CDMEIF3 | DMA_LIFCR_CFEIF3 },
 };
+
+// RX streams (4-7, high status half) — the inbound half of the full-duplex
+// transfer. No IRQ: the TX stream's TC drives completion; RX just drains.
+static const struct dma_assign rx_dma_table[MAX_PHASE_BUSES] = {
+    { DMA1_Stream4, DMAMUX1_Channel4, DMA1_Stream4_IRQn, DMA_HISR_TCIF4,
+      DMA_HISR_TEIF4, DMA_HISR_FEIF4, DMA_HIFCR_CTCIF4 | DMA_HIFCR_CHTIF4
+      | DMA_HIFCR_CTEIF4 | DMA_HIFCR_CDMEIF4 | DMA_HIFCR_CFEIF4 },
+    { DMA1_Stream5, DMAMUX1_Channel5, DMA1_Stream5_IRQn, DMA_HISR_TCIF5,
+      DMA_HISR_TEIF5, DMA_HISR_FEIF5, DMA_HIFCR_CTCIF5 | DMA_HIFCR_CHTIF5
+      | DMA_HIFCR_CTEIF5 | DMA_HIFCR_CDMEIF5 | DMA_HIFCR_CFEIF5 },
+    { DMA1_Stream6, DMAMUX1_Channel6, DMA1_Stream6_IRQn, DMA_HISR_TCIF6,
+      DMA_HISR_TEIF6, DMA_HISR_FEIF6, DMA_HIFCR_CTCIF6 | DMA_HIFCR_CHTIF6
+      | DMA_HIFCR_CTEIF6 | DMA_HIFCR_CDMEIF6 | DMA_HIFCR_CFEIF6 },
+    { DMA1_Stream7, DMAMUX1_Channel7, DMA1_Stream7_IRQn, DMA_HISR_TCIF7,
+      DMA_HISR_TEIF7, DMA_HISR_FEIF7, DMA_HIFCR_CTCIF7 | DMA_HIFCR_CHTIF7
+      | DMA_HIFCR_CTEIF7 | DMA_HIFCR_CDMEIF7 | DMA_HIFCR_CFEIF7 },
+};
+
+static uint8_t
+phase_spi_rx_request(SPI_TypeDef *spi)
+{
+    if (spi == SPI1)
+        return SPI1_RX_DMAMUX_REQ;
+    if (spi == SPI2)
+        return SPI2_RX_DMAMUX_REQ;
+#ifdef SPI3
+    if (spi == SPI3)
+        return SPI3_RX_DMAMUX_REQ;
+#endif
+#ifdef SPI4
+    if (spi == SPI4)
+        return SPI4_RX_DMAMUX_REQ;
+#endif
+#ifdef SPI5
+    if (spi == SPI5)
+        return SPI5_RX_DMAMUX_REQ;
+#endif
+    shutdown("phase DMA: SPI peripheral not on DMAMUX1 (use spi1..5)");
+}
 
 static uint8_t
 phase_spi_tx_request(SPI_TypeDef *spi)
@@ -230,6 +283,21 @@ phase_dma_init_bus(uint8_t bus_id)
     *bus->ifcr_reg = bus->flag_clear;
     bus->mux->CCR = phase_spi_tx_request(bus->cfg.spi);
 
+    const struct dma_assign *r = &rx_dma_table[bus_id];
+    bus->rx_stream = r->stream;
+    bus->rx_mux = r->mux;
+    bus->rx_isr_reg = &DMA1->HISR;
+    bus->rx_ifcr_reg = &DMA1->HIFCR;
+    bus->rx_tcif = r->tcif;
+    bus->rx_teif = r->teif;
+    bus->rx_feif = r->feif;
+    bus->rx_flag_clear = r->clear;
+    bus->rx_stream->CR = 0;
+    while (bus->rx_stream->CR & DMA_SxCR_EN)
+        ;
+    *bus->rx_ifcr_reg = bus->rx_flag_clear;
+    bus->rx_mux->CCR = phase_spi_rx_request(bus->cfg.spi);
+
     switch (bus_id) {
     case 0:
         armcm_enable_irq(phase_dma_s0_irq, DMA1_Stream0_IRQn, MOTION_NVIC_PRIO);
@@ -261,29 +329,40 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
 
     spi->CR1 = SPI_CR1_SSI; // CFG1/CFG2 are write-protected while SPE=1
     spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
-              | (7u << SPI_CFG1_DSIZE_Pos) | SPI_CFG1_TXDMAEN;
-    // COMM_0 = simplex transmitter: XDIRECT is write-only, so suppress RX. In
-    // full-duplex the master also gates its clock on RX-fifo space and every
-    // frame loads an undrained RX fifo — the source of the TX/DMA desync.
-    // No SSOE: CS is a software GPIO, so driving the hardware NSS output serves
-    // nothing and is the suspected mode-fault (MODF) trigger that demoted the
-    // master to slave mid-batch. SSM + SSI hold the internal SS high instead.
+              | (7u << SPI_CFG1_DSIZE_Pos)
+              | SPI_CFG1_TXDMAEN | SPI_CFG1_RXDMAEN;
+    // Full-duplex, like every foreground read on this bus: the peripheral keeps
+    // ONE COMM mode, so phase writes and sensor/DRV_STATUS reads never flip it
+    // on each other (the flip scrambled the SPI into the MODF state). The RX-DMA
+    // drains the inbound fifo. No SSOE: CS is a software GPIO.
     spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
-              | SPI_CFG2_COMM_0
               | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR;
 
     DMA_Stream_TypeDef *st = bus->stream;
+    DMA_Stream_TypeDef *rx = bus->rx_stream;
     st->CR &= ~DMA_SxCR_EN;
     while (st->CR & DMA_SxCR_EN)
         ;
-    st->FCR = 0; // direct mode, no FIFO-error interrupt — not the reset 0x21
+    rx->CR &= ~DMA_SxCR_EN;
+    while (rx->CR & DMA_SxCR_EN)
+        ;
+    // FIFO mode (DMDIS=1) buffers the D1<->D2 bridge latency so the feed cannot
+    // FIFO-error (FEIF) mid-transfer the way direct mode does under load.
+    st->FCR = DMA_SxFCR_DMDIS;
+    rx->FCR = DMA_SxFCR_DMDIS;
     *bus->ifcr_reg = bus->flag_clear;
+    *bus->rx_ifcr_reg = bus->rx_flag_clear;
+
+    // RX drains the write-only XDIRECT response to a scratch byte (no MINC).
+    rx->PAR = (uint32_t)(uintptr_t)&spi->RXDR;
+    rx->M0AR = (uint32_t)(uintptr_t)&bus->rxdiscard[0];
+    rx->NDTR = XDIRECT_LEN;
+    rx->CR = DMA_SxCR_PL_1 | DMA_SxCR_PL_0; // P2M, no MINC, highest priority
+    rx->CR |= DMA_SxCR_EN;
+
     st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
     st->M0AR = (uint32_t)(uintptr_t)&bus->txbuf[bus->commit_half][midx * XDIRECT_LEN];
     st->NDTR = XDIRECT_LEN;
-    // PL=11 (highest): the TX feed must win AXI/AHB arbitration against the CPU
-    // and other masters, or it starves under extrusion load and the stream
-    // FIFO-errors (FEIF) before the batch drains.
     st->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC | DMA_SxCR_TCIE | DMA_SxCR_TEIE
            | DMA_SxCR_PL_1 | DMA_SxCR_PL_0;
     st->CR |= DMA_SxCR_EN;
@@ -306,7 +385,9 @@ static void
 phase_dma_release_current(struct phase_bus_state *bus)
 {
     bus->stream->CR &= ~DMA_SxCR_EN;
+    bus->rx_stream->CR &= ~DMA_SxCR_EN;
     *bus->ifcr_reg = bus->flag_clear;
+    *bus->rx_ifcr_reg = bus->rx_flag_clear;
     SPI_TypeDef *spi = bus->fast_cfg.spi;
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI;
@@ -334,6 +415,8 @@ phase_dma_tc_isr(uint8_t bus_id)
     }
 
     bus->stream->CR &= ~DMA_SxCR_EN;
+    bus->rx_stream->CR &= ~DMA_SxCR_EN;
+    *bus->rx_ifcr_reg = bus->rx_flag_clear;
 
     // TC = TX FIFO fed, not last byte shifted out; gate CS-high on EOT.
     SPI_TypeDef *spi = bus->fast_cfg.spi;
