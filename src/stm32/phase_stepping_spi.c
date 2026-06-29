@@ -73,17 +73,19 @@ struct phase_motor_state {
 };
 
 #if CONFIG_MACH_STM32H7
-// DMA1/2 cannot reach DTCM (0x20000000); the TX double-buffer must live in
-// DMA-reachable AXI SRAM. Budget is asserted here and summed in runtime_storage.c.
-__attribute__((section(".axi_bss")))
+// The DMA-fed TX double-buffer lives here, so the whole struct sits in D2 AHB
+// SRAM (0x30000000): DMA1 is a D2 master and fetches it without crossing the
+// D1<->D2 bridge, whose latency FIFO-errors a direct-mode stream under load.
+// D2 SRAM is clocked off at reset — phase_stepping_register_bus enables it
+// before the first access. Budget asserted below.
+__attribute__((section(".d2_bss")))
 #endif
 static struct phase_bus_state  phase_buses[MAX_PHASE_BUSES];
 static struct phase_motor_state phase_motors[MAX_PHASE_MOTORS];
 
 #if CONFIG_MACH_STM32H7
-_Static_assert(sizeof(phase_buses) <= 2048,
-               "phase_buses exceeds its .axi_bss budget — raise "
-               "AXI_BSS_PHASE_BUSES_BYTES in runtime_storage.c to match");
+_Static_assert(sizeof(phase_buses) <= 32768,
+               "phase_buses exceeds the 32 KB d2_ram region (SRAM1+SRAM2)");
 #endif
 
 static volatile uint32_t phase_defer_count = 0;
@@ -442,6 +444,12 @@ phase_stepping_register_bus(uint8_t bus_id, struct spi_config cfg)
 {
     if (bus_id >= MAX_PHASE_BUSES)
         return;
+#if CONFIG_MACH_STM32H7
+    // phase_buses lives in D2 SRAM (.d2_bss); its clock is off at reset and the
+    // very next line writes into it, so enable SRAM1+SRAM2 first.
+    RCC->AHB2ENR |= RCC_AHB2ENR_SRAM1EN | RCC_AHB2ENR_SRAM2EN;
+    (void)RCC->AHB2ENR;
+#endif
     phase_buses[bus_id].cfg = cfg;
     struct spi_config fast = cfg;
     uint32_t pclk = get_pclock_frequency((uint32_t)(uintptr_t)cfg.spi);

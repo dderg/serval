@@ -18,6 +18,11 @@ MEMORY
   // reset. Used to host large statics (notably the kalico Rust runtime's
   // RT_CELL curve pool) that don't fit in the 128 KB DTCM `ram` region.
   axi_ram (rwx) : ORIGIN = 0x24000000 , LENGTH = 320K
+  // D2-domain AHB SRAM1+SRAM2 (32 KB at 0x30000000). On the D2 AHB matrix,
+  // so DMA1/DMA2 reach it without crossing the D1<->D2 bridge that stalls a
+  // direct-mode stream into a FIFO error under load. Clock is OFF at reset —
+  // enabled in phase_dma_init_bus via RCC->AHB2ENR (SRAM1EN|SRAM2EN).
+  d2_ram (rwx) : ORIGIN = 0x30000000 , LENGTH = 32K
   // Backup SRAM (D3 domain). 4 KB at 0x38800000. Survives any system
   // reset (IWDG, software, NRST) and even VBAT-only — the only thing
   // that wipes it is full power loss / POR with VBAT disconnected.
@@ -118,6 +123,17 @@ SECTIONS
         . = ALIGN(8);
         _axi_bss_end = .;
     } > axi_ram
+
+    // D2-SRAM-resident statics tagged `.d2_bss` — DMA-fed buffers that must sit
+    // on the D2 AHB matrix so a DMA1/2 stream fetches them without the D1<->D2
+    // bridge latency. NOLOAD: BSS-style, zeroed at boot, never in flash.
+    .d2_bss (NOLOAD) : {
+        . = ALIGN(32);
+        _d2_bss_start = .;
+        *(.d2_bss .d2_bss.*)
+        . = ALIGN(32);
+        _d2_bss_end = .;
+    } > d2_ram
 
     // Backup-SRAM-resident statics. NOLOAD because the bootloader
     // doesn't initialize this region; we rely on prior contents
