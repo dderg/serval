@@ -268,12 +268,13 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
 
     gpio_out_write(phase_motors[midx].cs, 0);
 
-    // Clear stale EOT/SUSP before CSTART: a transfer left over-suspended (e.g.
-    // torn down on overrun) makes the next CSTART start already-ended, so the
-    // SPI raises no TX-DMA request and NDTR never moves.
-    spi->IFCR = 0xFFFFFFFF;
     spi->CR2 = (uint32_t)XDIRECT_LEN << SPI_CR2_TSIZE_Pos;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_SPE;
+    // Clear stale EOT/SUSP only after SPE=1 — while the peripheral is disabled
+    // the clear does not take, so a CSTART onto a leftover suspend (from a
+    // foreground transfer or a torn-down batch) starts already-ended and raises
+    // no TX-DMA request, freezing NDTR at full.
+    spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
 }
 
