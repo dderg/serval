@@ -581,6 +581,7 @@ function runFrame() {
 
 // Blit buffers + cursor for the current hover state, without rebuilding buffers.
 function compositeHover() {
+  if (!DATA) return;
   const { tMin, tMax } = timeView;
   if (hoverIdx != null) {
     syncHover(hoverIdx);
@@ -643,7 +644,7 @@ function setupTimeInteraction(panelIdx) {
   let dragStartX = 0, dragStartTMin = 0, dragStartTMax = 0;
 
   canvas.addEventListener("mousemove", (e) => {
-    if (wheelTimer) return;
+    if (wheelTimer || !DATA) return;
     const r = renderers[panelIdx];
     const rect = r.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -729,7 +730,7 @@ function setupPathInteraction() {
   let dragStartX = 0, dragStartY = 0, dragStartPV = null;
 
   canvas.addEventListener("mousemove", (e) => {
-    if (wheelTimer) return;
+    if (wheelTimer || !DATA) return;
     const r = renderers[0];
     const rect = r.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -850,14 +851,15 @@ function stepCase(dir) {
 function rebuildCaseSelect() {
   const sel = document.getElementById("case-select");
   sel.innerHTML = "";
-  // <group>/<cfg>/<gcode>: one <optgroup> per leading path (the config), option
-  // per gcode leaf. Keyed by label so entries group correctly whatever order
+  // <group>/<cfg>/<gcode>: one <optgroup> per test group, option text
+  // "<cfg>/<gcode>" so the collapsed select still shows which config the case
+  // ran under. Keyed by group so entries group correctly whatever order
   // caseList arrives in.
   const optgroups = new Map();
   for (const c of caseList) {
-    const slash = c.name.lastIndexOf("/");
-    const group = slash > 0 ? c.name.substring(0, slash) : "";
-    const leaf = slash >= 0 ? c.name.substring(slash + 1) : c.name;
+    const first = c.name.indexOf("/");
+    const group = first > 0 ? c.name.substring(0, first) : "";
+    const label = first >= 0 ? c.name.substring(first + 1) : c.name;
     let parent = sel;
     if (group) {
       parent = optgroups.get(group);
@@ -870,7 +872,7 @@ function rebuildCaseSelect() {
     }
     const opt = document.createElement("option");
     opt.value = c.name;
-    opt.textContent = leaf;
+    opt.textContent = label;
     parent.appendChild(opt);
   }
 }
@@ -892,6 +894,7 @@ async function loadCaseList() {
   document.getElementById("case-select").addEventListener("change", (e) => loadCase(e.target.value));
   document.getElementById("case-prev").addEventListener("click", () => stepCase(-1));
   document.getElementById("case-next").addEventListener("click", () => stepCase(1));
+  syncCaseControls();
 }
 
 // -- Variant (before/after) --------------------------------------------------
@@ -967,6 +970,7 @@ async function loadCase(name) {
   history.replaceState(null, "", url);
   syncCaseControls();
   document.title = `Snapshot — ${name}`;
+  document.getElementById("case-path").textContent = name.replace(/\//g, " / ");
 
   const after = await fetchSnapshot(name, "after");
   if (after == null) {
@@ -1118,12 +1122,6 @@ async function acceptCurrent() {
 // -- Init --------------------------------------------------------------------
 async function main() {
   await init();
-  await loadCaseList();
-
-  if (!currentCase) {
-    document.getElementById("meta").textContent = "No case specified — add ?case=name to URL";
-    return;
-  }
 
   renderers = PANELS.map(p => new PanelRenderer(p.canvasId, p.type));
   renderers.forEach(r => r.initObserver());
@@ -1171,7 +1169,20 @@ async function main() {
     else if (e.key === "a" || e.key === "A") acceptCurrent();
   });
 
-  await loadCase(currentCase);
+  // Paint the requested case before the /api/cases scan (which re-runs the
+  // planner over every case) so the graphs come up immediately; the dropdown
+  // fills in once the list arrives. With no ?case, the list picks the first.
+  if (currentCase) {
+    await loadCase(currentCase);
+    await loadCaseList();
+  } else {
+    await loadCaseList();
+    if (!currentCase) {
+      document.getElementById("meta").textContent = "No case specified — add ?case=name to URL";
+      return;
+    }
+    await loadCase(currentCase);
+  }
 }
 
 main();
