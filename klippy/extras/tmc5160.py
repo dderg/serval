@@ -562,6 +562,12 @@ class TMC5160:
         enable_spi, disable_spi, set_axis_mode, _jog, align = (
             self._lookup_phase_commands()
         )
+        structured_log.event(
+            "phase_stepping",
+            "enter_start",
+            msg="phase mode enter: sequence start",
+            stepper=self.name,
+        )
         # Suppress ISR XDIRECT writes during our foreground SPI traffic
         # (the disable command is idempotent; harmless if already disabled).
         disable_spi.send([])
@@ -646,6 +652,12 @@ class TMC5160:
                     "phase mode bookkeeping desync on %s: host=phase mcu=%d"
                     % (t.name, state["mode"])
                 )
+        structured_log.event(
+            "phase_stepping",
+            "exit_start",
+            msg="phase mode exit: jog+settle start",
+            stepper=self.name,
+        )
         # All jogs are issued while the axis is still in Phase mode — the
         # mode flips to Pulse only once, after every motor in the group sits
         # on its cached MSCNT.
