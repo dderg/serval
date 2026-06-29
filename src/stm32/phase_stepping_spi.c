@@ -252,6 +252,12 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     SPI_TypeDef *spi = fast.spi;
 
     spi->CR1 = SPI_CR1_SSI; // CFG1/CFG2 are write-protected while SPE=1
+    // Full-duplex clocks a response byte in for every byte out; with no RX-DMA
+    // those bytes pile up in the RX fifo. Drain whatever the prior motor left so
+    // a full fifo cannot gate this transfer's clock (the master stalls on RX-fifo
+    // space — NDTR stays at full, SUSP latches, and the batch overruns).
+    while (spi->SR & (SPI_SR_RXP | SPI_SR_RXWNE))
+        (void)*(volatile uint8_t *)&spi->RXDR;
     // Only TXDMAEN toggles per transfer; CFG2 is byte-identical to spi_prepare's
     // (full-duplex). Keeping ONE COMM mode for both the DMA writes and the
     // foreground reads is what stops the peripheral scrambling (MODF/overrun)
