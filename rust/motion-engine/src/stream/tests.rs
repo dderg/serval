@@ -892,3 +892,111 @@ fn smooth_shaper_two_batch_output_matches_one_batch() {
         }
     }
 }
+
+#[test]
+fn emit_dwell_holds_position_and_advances_committed_frontier() {
+    let home = [5.0, 7.0, 0.2, 0.0];
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &home, 0.0);
+    s.push(line(1, [5.0, 7.0, 0.2], [35.0, 7.0, 0.2], 0.0))
+        .unwrap();
+    let motion = s.commit(true).unwrap();
+    let t_after_motion = motion.last().unwrap().t_end;
+
+    let idle = s.emit_dwell(0.5).expect("positive dwell emits a segment");
+
+    assert_eq!(idle.motor_mask, 0, "idle is a normal full-axis hold");
+    assert!(
+        (idle.t_start - t_after_motion).abs() < 1e-9,
+        "idle abuts the committed frontier: {} vs {t_after_motion}",
+        idle.t_start
+    );
+    assert!(
+        (idle.t_end - (t_after_motion + 0.5)).abs() < 1e-9,
+        "idle spans exactly N: {} vs {}",
+        idle.t_end,
+        t_after_motion + 0.5
+    );
+    for (axis, expect) in [(0usize, 35.0), (1, 7.0), (2, 0.2), (3, 0.0)] {
+        let p0 = eval(&idle.axes[axis], idle.t_start);
+        let p1 = eval(&idle.axes[axis], idle.t_end);
+        assert!(
+            (p0 - expect).abs() < 1e-9 && (p1 - expect).abs() < 1e-9,
+            "axis {axis} must hold {expect} across the idle, got {p0}..{p1}"
+        );
+    }
+    assert!(
+        (s.t_committed() - (t_after_motion + 0.5)).abs() < 1e-9,
+        "committed frontier advances by N so the successor starts at T+N"
+    );
+}
+
+#[test]
+fn emit_dwell_zero_or_negative_is_a_noop() {
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0))
+        .unwrap();
+    let _ = s.commit(true).unwrap();
+    let frontier = s.t_committed();
+
+    assert!(s.emit_dwell(0.0).is_none(), "zero dwell is a defined no-op");
+    assert!(
+        s.emit_dwell(-1.0).is_none(),
+        "negative dwell is a defined no-op, never a negative interval"
+    );
+    assert!(
+        (s.t_committed() - frontier).abs() < 1e-12,
+        "a no-op dwell must not move the committed frontier"
+    );
+}
+
+#[test]
+fn back_to_back_emit_dwell_covers_a_single_contiguous_interval() {
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[1.0, 2.0, 3.0], 0.0);
+    s.push(line(1, [1.0, 2.0, 3.0], [11.0, 2.0, 3.0], 0.0))
+        .unwrap();
+    let motion = s.commit(true).unwrap();
+    let t0 = motion.last().unwrap().t_end;
+
+    let a = s.emit_dwell(0.3).expect("first dwell");
+    let b = s.emit_dwell(0.7).expect("second dwell");
+
+    assert!(
+        (a.t_start - t0).abs() < 1e-9,
+        "first dwell abuts the motion"
+    );
+    assert!(
+        (b.t_start - a.t_end).abs() < 1e-12,
+        "second dwell is contiguous with the first — no gap, no overlap"
+    );
+    assert!(
+        (b.t_end - (t0 + 1.0)).abs() < 1e-9,
+        "back-to-back dwell covers [T, T+N1+N2)"
+    );
+    assert!((s.t_committed() - (t0 + 1.0)).abs() < 1e-9);
+}
+
+#[test]
+fn emit_dwell_subtick_positive_emits_an_exact_duration_segment() {
+    let mut s = StreamState::new(cfg(), AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
+    s.push(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0))
+        .unwrap();
+    let t0 = s.commit(true).unwrap().last().unwrap().t_end;
+
+    let n = 1e-9;
+    let idle = s
+        .emit_dwell(n)
+        .expect("any positive dwell, even sub-tick, emits a segment — never a no-op");
+    assert!(
+        idle.t_end > idle.t_start,
+        "sub-tick dwell is a real positive interval, never collapsed"
+    );
+    assert!(
+        ((idle.t_end - idle.t_start) - n).abs() < 1e-12,
+        "sub-tick idle spans exactly N: {}",
+        idle.t_end - idle.t_start
+    );
+    assert!(
+        (s.t_committed() - (t0 + n)).abs() < 1e-12,
+        "frontier advances by exactly N"
+    );
+}

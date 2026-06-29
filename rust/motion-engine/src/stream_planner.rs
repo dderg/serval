@@ -621,9 +621,12 @@ fn handle_control(
             let _ = notify.send(finish);
         }
         StreamMsg::Dwell { duration_s, notify } => {
-            let segs = state
+            let mut segs = state
                 .commit(true)
                 .unwrap_or_else(|e| fatal(&format!("dwell drain: {e}")));
+            if let Some(idle) = state.emit_dwell(duration_s) {
+                segs.push(idle);
+            }
             dispatch_committed(
                 &segs,
                 dispatch,
@@ -632,7 +635,6 @@ fn handle_control(
                 commit_fire_count,
             );
             tally.reset();
-            state.advance_time(duration_s);
             let _ = notify.send(());
         }
         StreamMsg::StreamOpen { home_pos } => {

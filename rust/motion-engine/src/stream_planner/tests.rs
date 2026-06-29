@@ -190,7 +190,53 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
 }
 
 #[test]
-fn dwell_inserts_a_time_gap_then_resumes() {
+fn dwell_dispatches_a_durable_idle_segment_then_resumes() {
+    let cap = Capture::default();
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+    );
+
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    let pre = cap.snapshot();
+    let (_, pre_end, pre_x) = *pre.last().unwrap();
+
+    h.dwell(1.0).unwrap();
+    h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+
+    let post = cap.snapshot();
+    let (idle_start, idle_end, idle_x) = post[pre.len()];
+    assert!(
+        (idle_start - pre_end).abs() < 1e-6,
+        "idle abuts prior motion: {idle_start} vs {pre_end}"
+    );
+    assert!(
+        (idle_end - (pre_end + 1.0)).abs() < 1e-6,
+        "idle spans the dwell: {idle_end} vs {}",
+        pre_end + 1.0
+    );
+    assert!(
+        (idle_x - pre_x).abs() < 1e-6,
+        "idle holds the pre-dwell position: {idle_x} vs {pre_x}"
+    );
+    let resume_start = post[pre.len() + 1].0;
+    assert!(
+        (resume_start - (pre_end + 1.0)).abs() < 1e-6,
+        "successor resumes at exactly T+N: {resume_start} vs {}",
+        pre_end + 1.0
+    );
+    h.shutdown();
+}
+
+#[test]
+fn back_to_back_dwell_dispatches_contiguous_idle_segments() {
     let cap = Capture::default();
     let mut h = StreamPlannerHandle::spawn(
         cfg(),
@@ -206,16 +252,70 @@ fn dwell_inserts_a_time_gap_then_resumes() {
     let pre = cap.snapshot();
     let pre_end = pre.last().unwrap().1;
 
-    h.dwell(1.0).unwrap();
+    h.dwell(0.4).unwrap();
+    h.dwell(0.6).unwrap();
+    h.flush().unwrap();
+
+    let post = cap.snapshot();
+    let (a_start, a_end, _) = post[pre.len()];
+    let (b_start, b_end, _) = post[pre.len() + 1];
+    assert!(
+        (a_start - pre_end).abs() < 1e-6,
+        "first dwell abuts the motion"
+    );
+    assert!((a_end - (pre_end + 0.4)).abs() < 1e-6);
+    assert!(
+        (b_start - a_end).abs() < 1e-9,
+        "second dwell is contiguous with the first"
+    );
+    assert!(
+        (b_end - (pre_end + 1.0)).abs() < 1e-6,
+        "back-to-back dwell covers [T, T+N1+N2)"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn dwell_idle_survives_a_subsequent_reanchor() {
+    let cap = Capture::default();
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+    );
+
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    let pre = cap.snapshot();
+    let (_, pre_end, pre_x) = *pre.last().unwrap();
+
+    h.dwell(0.05).unwrap();
+    // Let real time run past the committed frontier so the next move re-anchors
+    // the idle timeline (restart_idle_timeline) — the exact reset that erased the
+    // old scalar dwell bump. The idle segment was already dispatched, so it must
+    // survive byte-identical in the dispatch stream.
+    thread::sleep(Duration::from_millis(700));
     h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
         .unwrap();
     h.flush().unwrap();
 
     let post = cap.snapshot();
-    let resume_start = post[pre.len()].0;
+    let (idle_start, idle_end, idle_x) = post[pre.len()];
     assert!(
-        (resume_start - (pre_end + 1.0)).abs() < 1e-6,
-        "expected a 1.0s dwell gap: resume {resume_start} vs pre_end {pre_end}"
+        (idle_start - pre_end).abs() < 1e-6
+            && (idle_end - (pre_end + 0.05)).abs() < 1e-6
+            && (idle_x - pre_x).abs() < 1e-6,
+        "committed idle must survive the reanchor unchanged: \
+         [{idle_start}, {idle_end}] x={idle_x}"
+    );
+    let resume_start = post[pre.len() + 1].0;
+    assert!(
+        resume_start < idle_start,
+        "successor re-anchored to a fresh timeline (the reanchor fired): \
+         resume {resume_start} vs idle {idle_start}"
     );
     h.shutdown();
 }
@@ -280,6 +380,65 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
     assert!(
         (segs.last().unwrap().2 - 20.0).abs() < 1e-6,
         "homing reaches the travel endpoint"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn dwell_idle_survives_a_home_drip() {
+    let cap = Capture::default();
+    let mut h = StreamPlannerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+    );
+
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    let pre = cap.snapshot();
+    let (_, pre_end, pre_x) = *pre.last().unwrap();
+
+    h.dwell(0.05).unwrap();
+    let after_dwell = cap.snapshot();
+    let idle = after_dwell[pre.len()];
+    assert!(
+        (idle.0 - pre_end).abs() < 1e-6
+            && (idle.1 - (pre_end + 0.05)).abs() < 1e-6
+            && (idle.2 - pre_x).abs() < 1e-6,
+        "dwell dispatched a committed idle [{}, {}] x={}",
+        idle.0,
+        idle.1,
+        idle.2
+    );
+
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    h.home_drip(HomeDripParams {
+        home_pos: [30.0, 0.0, 0.0, 0.0],
+        start: [30.0, 0.0, 0.0],
+        axis: 0,
+        direction: 1.0,
+        speed_mm_s: 50.0,
+        max_travel_mm: 20.0,
+        cohort: 0,
+        participants: Vec::new(),
+        notify: tx,
+    })
+    .unwrap();
+    assert!(rx.recv().unwrap().is_ok());
+
+    let post = cap.snapshot();
+    assert_eq!(
+        post[pre.len()],
+        idle,
+        "home_drip must not erase the committed dwell idle — the current-change \
+         settle stays ahead of the homing move"
+    );
+    assert!(
+        post.len() > after_dwell.len(),
+        "home_drip dispatched the homing move after the committed idle"
     );
     h.shutdown();
 }

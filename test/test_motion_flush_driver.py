@@ -151,6 +151,41 @@ def test_raising_flush_callback_invokes_shutdown_not_reactor_crash():
     assert len(shutdowns) == 1
 
 
+class _GroundingError(Exception):
+    pass
+
+
+class _GroundingPrinter:
+    command_error = _GroundingError
+
+
+def test_grounding_lowers_pending_end_time_when_engine_is_drained():
+    reactor = SyncReactor()
+    mcu = RecordingMcu()
+    motion = _make_motion([mcu], reactor, queued_secs=0.0)
+    motion.printer = _GroundingPrinter()
+    # est = monotonic + 1.0 = 101.0; the floating frontier sits well ahead.
+    motion._mcu_pending_end_time = 200.0
+
+    motion._ground_pending_end_time_after_engine_drain()
+
+    assert motion._mcu_pending_end_time == pytest.approx(101.0 + 0.25)
+
+
+def test_grounding_does_not_lower_below_a_committed_dwell_frontier():
+    # A durable dwell keeps the engine's committed frontier ahead of the
+    # playhead; grounding must refuse to drop that coverage rather than silently
+    # advance the clock past the idle (the old advance_time swallow).
+    reactor = SyncReactor()
+    mcu = RecordingMcu()
+    motion = _make_motion([mcu], reactor, queued_secs=1.0)
+    motion.printer = _GroundingPrinter()
+    motion._mcu_pending_end_time = 200.0
+
+    with pytest.raises(_GroundingError):
+        motion._ground_pending_end_time_after_engine_drain()
+
+
 def test_m106_queued_request_drains_on_idle_printer():
     reactor = SyncReactor()
     mcu = RecordingMcu()

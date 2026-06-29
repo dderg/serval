@@ -244,6 +244,34 @@ impl StreamState {
         }
     }
 
+    pub fn emit_dwell(&mut self, duration_s: f64) -> Option<ShapedSegment> {
+        debug_assert!(
+            self.buffer.is_empty(),
+            "emit_dwell requires a drained buffer"
+        );
+        debug_assert_eq!(self.entry_v, 0.0, "emit_dwell requires rest at the seam");
+        if duration_s <= 0.0 {
+            return None;
+        }
+        let t_start = self.t_committed;
+        let t_end = t_start + duration_s;
+        let axes: Vec<nurbs::ScalarNurbs<f64>> = self
+            .odometer
+            .iter()
+            .map(|&pos| constant_hold_curve(pos, t_start, t_end))
+            .collect();
+        self.t_committed = t_end;
+        self.post_history.clear();
+        Some(ShapedSegment {
+            axes,
+            followers: Vec::new(),
+            t_start,
+            t_end,
+            motor_mask: 0,
+            source_line: 0,
+        })
+    }
+
     pub fn advance_idle(&mut self, target_t: f64) {
         debug_assert!(
             self.buffer.is_empty(),
@@ -762,6 +790,15 @@ fn brake_to_rest_setback(moves: &[Move], max_jerk_mm_s3: f64) -> f64 {
         .map(|m| m.limits.accel_mm_s2)
         .fold(f64::INFINITY, f64::min);
     v_peak * jerk_limited_brake_time(v_peak, a_min, max_jerk_mm_s3)
+}
+
+fn constant_hold_curve(pos: f64, t_start: f64, t_end: f64) -> nurbs::ScalarNurbs<f64> {
+    let piece = BezierPiece {
+        u_start: t_start,
+        u_end: t_end,
+        coeffs: vec![pos, 0.0, 0.0, 0.0],
+    };
+    bezier_pieces_to_nurbs(std::slice::from_ref(&piece))
 }
 
 fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
