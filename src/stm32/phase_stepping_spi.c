@@ -73,19 +73,17 @@ struct phase_motor_state {
 };
 
 #if CONFIG_MACH_STM32H7
-// The DMA-fed TX double-buffer lives here, so the whole struct sits in D2 AHB
-// SRAM (0x30000000): DMA1 is a D2 master and fetches it without crossing the
-// D1<->D2 bridge, whose latency FIFO-errors a direct-mode stream under load.
-// D2 SRAM is clocked off at reset — stm32h7.c clock_setup() enables it before
-// the D-cache comes up. Budget asserted below.
-__attribute__((section(".d2_bss")))
+// DMA1/2 cannot reach DTCM (0x20000000); the TX double-buffer must live in
+// DMA-reachable AXI SRAM. Budget is asserted here and summed in runtime_storage.c.
+__attribute__((section(".axi_bss")))
 #endif
 static struct phase_bus_state  phase_buses[MAX_PHASE_BUSES];
 static struct phase_motor_state phase_motors[MAX_PHASE_MOTORS];
 
 #if CONFIG_MACH_STM32H7
-_Static_assert(sizeof(phase_buses) <= 32768,
-               "phase_buses exceeds the 32 KB d2_ram region (SRAM1+SRAM2)");
+_Static_assert(sizeof(phase_buses) <= 2048,
+               "phase_buses exceeds its .axi_bss budget — raise "
+               "AXI_BSS_PHASE_BUSES_BYTES in runtime_storage.c to match");
 #endif
 
 static volatile uint32_t phase_defer_count = 0;

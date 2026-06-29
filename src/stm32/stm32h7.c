@@ -274,14 +274,6 @@ boot_guard_clear(void)
 void
 armcm_main(void)
 {
-    // D2 AHB SRAM1/2 (0x30000000) hosts DMA-fed buffers (.d2_bss). Its clock is
-    // off at reset, but the bootloader may hand off with the D-cache enabled, so
-    // the M7 can speculatively touch that region during the very first init.
-    // Clock it before anything else runs so no access — speculative or real —
-    // faults on an unclocked slave. (RCC is reachable on the reset HSI clock.)
-    RCC->AHB2ENR |= RCC_AHB2ENR_SRAM1EN | RCC_AHB2ENR_SRAM2EN;
-    (void)RCC->AHB2ENR;
-
     // Boot-loop safety net: arm an early watchdog and, after repeated failed
     // boots, divert to the ROM DFU bootloader so a bad image is recoverable
     // over USB without physical BOOT0. Must precede the risky clock/init below.
