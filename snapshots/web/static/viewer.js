@@ -19,6 +19,7 @@ const COLORS = {
   axis: "#555",
   crosshair: "rgba(255,255,255,0.35)",
   marker: "#e0518a",
+  impulse: "#ffd54a",
 };
 
 // -- Panel configuration -----------------------------------------------------
@@ -144,6 +145,7 @@ function findPeaks(scalar, yMax) {
 const ARRAY_KEYS = [
   "raw_x", "raw_y", "kin_x", "kin_y", "t",
   "vx", "vy", "v_scalar", "ax", "ay", "a_scalar", "jx", "jy", "j_scalar",
+  "jerk_impulse_t", "jerk_impulse_mag",
 ];
 
 function memoizeTrajectory(td) {
@@ -447,6 +449,52 @@ class PanelRenderer {
     return best;
   }
 
+  // -- Jerk impulses (accel discontinuities) ---------------------------------
+  // A step in acceleration is an infinite, zero-width jerk spike the analytic
+  // per-piece jerk can't plot. Draw each as a stem whose height encodes |Δa|
+  // relative to the largest impulse; the exact value shows on hover.
+  drawImpulses(times, mags, tMin, tMax, maxMag) {
+    this._impulses = [];
+    const bctx = this.ctx;
+    bctx.save();
+    bctx.beginPath();
+    bctx.rect(this.plotX0, this.plotY0, this.plotW, this.plotH);
+    bctx.clip();
+    bctx.strokeStyle = COLORS.impulse;
+    bctx.fillStyle = COLORS.impulse;
+    bctx.lineWidth = 1.5;
+    const base = this.plotY0 + this.plotH;
+    for (let i = 0; i < times.length; i++) {
+      const tb = times[i];
+      if (tb < tMin || tb > tMax) continue;
+      const px = this.toPixelX(tb, tMin, tMax);
+      const frac = maxMag > 0 ? Math.min(1, mags[i] / maxMag) : 1;
+      const top = this.plotY0 + this.plotH * (1 - 0.92 * frac);
+      bctx.beginPath();
+      bctx.moveTo(px, base);
+      bctx.lineTo(px, top);
+      bctx.stroke();
+      bctx.beginPath();
+      bctx.moveTo(px, top);
+      bctx.lineTo(px - 4, top + 8);
+      bctx.lineTo(px + 4, top + 8);
+      bctx.closePath();
+      bctx.fill();
+      this._impulses.push({ px, tVal: tb, mag: mags[i] });
+    }
+    bctx.restore();
+  }
+
+  nearestImpulse(mx, radius) {
+    if (!this._impulses) return null;
+    let best = null, bd = radius;
+    for (const im of this._impulses) {
+      const d = Math.abs(im.px - mx);
+      if (d < bd) { bd = d; best = im; }
+    }
+    return best;
+  }
+
   // -- Move the DOM cursor; the base plot is never touched -------------------
   composite(tVal, tMin, tMax, showCursor) {
     if (showCursor && tVal != null && this.type !== "path") {
@@ -631,6 +679,11 @@ function renderAll() {
     renderers[1].renderTimeBuffer(tMin, tMax, 0, vYMax, DATA.vx(), DATA.vy(), vScalar, showPeaks);
     renderers[2].renderTimeBuffer(tMin, tMax, 0, aYMax, DATA.ax(), DATA.ay(), aScalar, showPeaks);
     renderers[3].renderTimeBuffer(tMin, tMax, 0, jYMax, DATA.jx(), DATA.jy(), jScalar, showPeaks);
+
+    const impT = DATA.jerk_impulse_t(), impMag = DATA.jerk_impulse_mag();
+    let impMax = 0;
+    for (let i = 0; i < impMag.length; i++) if (impMag[i] > impMax) impMax = impMag[i];
+    renderers[3].drawImpulses(impT, impMag, tMin, tMax, impMax);
   }
 
   // Composite all (always — cursor may have moved)
@@ -665,9 +718,17 @@ function setupTimeInteraction(panelIdx) {
       hoverIdx = closestIndex(DATA.t(), dataT);
       scheduleHover();
 
-      // Check for nearby peak
+      // A jerk impulse (accel discontinuity) takes precedence over a peak.
+      const impulse = r.nearestImpulse(mx, 6);
       const peak = r.nearestPeak(mx, my, 12);
-      if (peak) {
+      if (impulse) {
+        tooltipEl.style.display = "block";
+        tooltipEl.style.left = (e.clientX + 14) + "px";
+        tooltipEl.style.top = (e.clientY - 10) + "px";
+        tooltipEl.textContent =
+          `jerk impulse at t=${formatNum(impulse.tVal)}s\n` +
+          `Δaccel=${formatNum(impulse.mag)} mm/s² (∞ jerk)`;
+      } else if (peak) {
         tooltipEl.style.display = "block";
         tooltipEl.style.left = (e.clientX + 14) + "px";
         tooltipEl.style.top = (e.clientY - 10) + "px";

@@ -247,6 +247,53 @@ fn time_series_from_pieces(xp: &[Vec<f64>], yp: &[Vec<f64>], t_end: f64) -> Time
     }
 }
 
+// Acceleration steps at a piece boundary are jerk impulses: a true Dirac --
+// infinite height, zero width -- so the per-piece analytic jerk can never plot
+// them and the jerk panel looks deceptively smooth across the step. Surface
+// them honestly. The finite, physical strength of each impulse is the
+// acceleration jump |Δa| across the boundary (∫ jerk dt over the impulse). The
+// C1 Hermite lowering matches position and velocity at joints but not
+// acceleration, so most joints step a little; a relative floor keeps float
+// noise and trivial joints off the panel.
+fn jerk_impulses(
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+    t_end: f64,
+    a_peak: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    if xp.is_empty() || yp.is_empty() || t_end <= 0.0 {
+        return (Vec::new(), Vec::new());
+    }
+    let mut bounds: Vec<f64> = vec![0.0, t_end];
+    for p in xp.iter().chain(yp.iter()) {
+        for edge in [p[0], p[1]] {
+            if edge > 0.0 && edge < t_end {
+                bounds.push(edge);
+            }
+        }
+    }
+    bounds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    bounds.dedup();
+
+    let floor = (a_peak * 1e-3).max(1e-9);
+    let (mut times, mut mags) = (Vec::new(), Vec::new());
+    for i in 1..bounds.len().saturating_sub(1) {
+        let b = bounds[i];
+        let lo = 0.5 * (bounds[i - 1] + b);
+        let hi = 0.5 * (b + bounds[i + 1]);
+        let axl = eval_piece(&xp[piece_at(xp, lo)], b).2;
+        let axr = eval_piece(&xp[piece_at(xp, hi)], b).2;
+        let ayl = eval_piece(&yp[piece_at(yp, lo)], b).2;
+        let ayr = eval_piece(&yp[piece_at(yp, hi)], b).2;
+        let da = (axr - axl).hypot(ayr - ayl);
+        if da > floor {
+            times.push(b);
+            mags.push(da);
+        }
+    }
+    (times, mags)
+}
+
 fn build_time_series(snap: &Snapshot) -> TimeSeries {
     if let (Some(xp), Some(yp)) = (&snap.traj_x_pieces, &snap.traj_y_pieces) {
         let t_end = snap.traj_t_end.unwrap_or(0.0);
@@ -437,6 +484,8 @@ pub struct TrajectoryData {
     jx: Vec<f64>,
     jy: Vec<f64>,
     j_scalar: Vec<f64>,
+    jerk_impulse_t: Vec<f64>,
+    jerk_impulse_mag: Vec<f64>,
     traversal_time_s: f64,
     blended_corners: usize,
     chain_fits: usize,
@@ -452,6 +501,15 @@ impl TrajectoryData {
 
         let ts = build_time_series(&snap);
         let segments = parse_segments(&snap.fitted_segments);
+
+        let a_peak = ts.a_scalar.iter().copied().fold(0.0_f64, f64::max);
+        let (jerk_impulse_t, jerk_impulse_mag) =
+            match (&snap.traj_x_pieces, &snap.traj_y_pieces) {
+                (Some(xp), Some(yp)) => {
+                    jerk_impulses(xp, yp, snap.traj_t_end.unwrap_or(0.0), a_peak)
+                }
+                _ => (Vec::new(), Vec::new()),
+            };
 
         Ok(TrajectoryData {
             raw_x: snap.raw_x,
@@ -469,6 +527,8 @@ impl TrajectoryData {
             jx: ts.jx,
             jy: ts.jy,
             j_scalar: ts.j_scalar,
+            jerk_impulse_t,
+            jerk_impulse_mag,
             traversal_time_s: snap.traversal_time_s,
             blended_corners: snap.blended_corners,
             chain_fits: snap.chain_fits,
@@ -520,6 +580,14 @@ impl TrajectoryData {
     }
     pub fn j_scalar(&self) -> Float64Array {
         Float64Array::from(&self.j_scalar[..])
+    }
+
+    // Times and |Δaccel| of the jerk impulses at acceleration discontinuities.
+    pub fn jerk_impulse_t(&self) -> Float64Array {
+        Float64Array::from(&self.jerk_impulse_t[..])
+    }
+    pub fn jerk_impulse_mag(&self) -> Float64Array {
+        Float64Array::from(&self.jerk_impulse_mag[..])
     }
 
     // Metadata
