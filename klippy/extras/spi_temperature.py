@@ -25,6 +25,13 @@ class SensorBase:
         self._callback = None
         self.min_sample_value = self.max_sample_value = 0
         self._report_clock = 0
+        # The chip's natural SPI mode is the default, but it can be overridden
+        # from config. MAX31855/6675 are CPHA=0; MAX31865 and friends are CPHA=1
+        # and tolerate either CPOL (mode 1 or 3). On a bus shared with the
+        # phase-stepping drivers (CPOL=1), forcing the sensor to the drivers'
+        # CPOL keeps the idle SCK level constant so the DMA batches and the
+        # sensor reads never flip the clock line on each other.
+        spi_mode = config.getint("spi_mode", spi_mode, minval=0, maxval=3)
         self.spi = bus.MCU_SPI_from_config(
             config, spi_mode, pin_option="sensor_pin", default_speed=4000000
         )
