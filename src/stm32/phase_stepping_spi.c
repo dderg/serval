@@ -10,6 +10,14 @@
 #include "generic/motion_nvic_prio.h"
 #endif
 
+// The phase DMA transfer-complete IRQ runs one tier ABOVE motion (USB/CAN
+// level), not at MOTION_NVIC_PRIO: it must preempt the motion ISR and the
+// bit-bang extruder UART sampler to finalize each motor's transfer and arm the
+// next on time, or the batch overruns its tick under foreground load. It never
+// touches the step_queue SPSC, so it does not affect that equal-priority
+// invariant. (Matches the mass3d/kalico phase-stepping DMA implementation.)
+#define PHASE_DMA_TC_PRIO 1
+
 #define MAX_PHASE_BUSES   4
 #define MAX_PHASE_MOTORS  16   // must match Rust state::MAX_STEPPER_OIDS
 #define XDIRECT_LEN       5
@@ -220,16 +228,16 @@ phase_dma_init_bus(uint8_t bus_id)
 
     switch (bus_id) {
     case 0:
-        armcm_enable_irq(phase_dma_s0_irq, DMA1_Stream0_IRQn, MOTION_NVIC_PRIO);
+        armcm_enable_irq(phase_dma_s0_irq, DMA1_Stream0_IRQn, PHASE_DMA_TC_PRIO);
         break;
     case 1:
-        armcm_enable_irq(phase_dma_s1_irq, DMA1_Stream1_IRQn, MOTION_NVIC_PRIO);
+        armcm_enable_irq(phase_dma_s1_irq, DMA1_Stream1_IRQn, PHASE_DMA_TC_PRIO);
         break;
     case 2:
-        armcm_enable_irq(phase_dma_s2_irq, DMA1_Stream2_IRQn, MOTION_NVIC_PRIO);
+        armcm_enable_irq(phase_dma_s2_irq, DMA1_Stream2_IRQn, PHASE_DMA_TC_PRIO);
         break;
     case 3:
-        armcm_enable_irq(phase_dma_s3_irq, DMA1_Stream3_IRQn, MOTION_NVIC_PRIO);
+        armcm_enable_irq(phase_dma_s3_irq, DMA1_Stream3_IRQn, PHASE_DMA_TC_PRIO);
         break;
     default:
         break;
