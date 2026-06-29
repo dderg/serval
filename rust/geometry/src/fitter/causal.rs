@@ -35,6 +35,20 @@ pub(super) fn fit(
         });
     }
 
+    let heart = config.heart.build();
+    let mut runs = detect_runs(moves, config, heart.as_ref())?;
+
+    let mut in_reductions = vec![0.0_f64; moves.len().saturating_sub(1)];
+    let mut out_reductions = vec![0.0_f64; moves.len().saturating_sub(1)];
+    for r in &runs {
+        if r.start >= 2 {
+            out_reductions[r.start - 2] = r.recon.head_line_trim;
+        }
+        if r.end + 1 < in_reductions.len() {
+            in_reductions[r.end + 1] = r.recon.tail_line_trim;
+        }
+    }
+
     let mut plans = Vec::with_capacity(moves.len() - 1);
     for (i, pair) in moves.windows(2).enumerate() {
         let restore = if i == 0 { head_len_restore } else { 0.0 };
@@ -43,11 +57,11 @@ pub(super) fn fit(
             &pair[1],
             config.corner,
             restore,
+            in_reductions[i],
+            out_reductions[i],
         )?);
     }
 
-    let heart = config.heart.build();
-    let mut runs = detect_runs(moves, config, heart.as_ref())?;
     let (arc_blends, line_blend_trims) = resolve_run_boundaries(&mut runs, moves, config.corner);
 
     let mut out = Vec::new();

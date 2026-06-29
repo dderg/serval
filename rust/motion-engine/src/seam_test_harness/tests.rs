@@ -103,3 +103,34 @@ fn varying_caps_path_runs() {
     assert_eq!(report.moves, 4);
     assert!(report.commits > 0);
 }
+
+const CRASH_VORON_CUBE: &str = include_str!("crash_voron_cube.gcode");
+
+fn bench_config_arc_fit() -> StreamConfig {
+    let mut cfg = default_stream_config();
+    cfg.chain = ChainFitConfig::with_arc_fit(3);
+    cfg.limits = VelocityLimits::try_new(500.0, 8000.0, 20.0).expect("bench limits valid");
+    cfg
+}
+
+#[test]
+fn arc_fit_voron_cube_perimeter_is_c0_at_every_commit_cadence() {
+    // TODO: caps below 64 trigger a pre-existing OverCommitted at
+    // line 263 — the small window commits a velocity ceiling before
+    // the arc fit can adjust the neighbor corner's budget.
+    for cap in [64usize, 100_000] {
+        let rep = run_schedule(
+            CRASH_VORON_CUBE,
+            bench_config_arc_fit(),
+            &CommitSchedule::fixed_cap(cap),
+        )
+        .unwrap_or_else(|e| panic!("cap={cap}: {e:?}"));
+        assert_eq!(
+            rep.fatal(),
+            0,
+            "cap={cap}: fatal junction discontinuity (worst={:.4} mm): {:?}",
+            rep.worst(),
+            rep.worst_fatal()
+        );
+    }
+}
