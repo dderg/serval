@@ -57,7 +57,6 @@ struct phase_bus_state {
     volatile uint8_t busy;
     volatile uint8_t owner;
     volatile uint8_t sticky_fault;
-    volatile uint8_t fg_dirty;
     uint8_t active_half;
     uint8_t commit_half;
     uint8_t cursor;
@@ -460,7 +459,6 @@ phase_spi_fg_end(int bus_token)
 {
     if (bus_token < 0)
         return;
-    phase_buses[bus_token].fg_dirty = 1;
     phase_buses[bus_token].busy = 0;
     phase_buses[bus_token].owner = PHASE_OWNER_NONE;
 }
@@ -567,10 +565,6 @@ phase_spi_fg_dma_transfer(struct spi_config config, uint8_t receive_data,
         for (uint8_t i = 0; i < len; i++)
             data[i] = bus->fg_rxbuf[i];
 
-    // The full-duplex read leaves the peripheral in a mode the simplex-transmit
-    // phase arm cannot always restart from cleanly; flag the bus so the next
-    // batch resets the SPI core before arming.
-    bus->fg_dirty = 1;
     bus->busy = 0;
     bus->owner = PHASE_OWNER_NONE;
     return 0;
@@ -619,7 +613,6 @@ phase_stepping_register_bus(uint8_t bus_id, struct spi_config cfg)
     phase_buses[bus_id].busy = 0;
     phase_buses[bus_id].owner = PHASE_OWNER_NONE;
     phase_buses[bus_id].sticky_fault = 0;
-    phase_buses[bus_id].fg_dirty = 0;
     phase_buses[bus_id].fg_defer_count = 0;
     phase_dma_init_bus(bus_id);
 #endif
@@ -742,20 +735,6 @@ phase_stepping_commit_tick(void)
 
         bus->busy = 1;
         bus->owner = PHASE_OWNER_PHASE;
-
-        if (bus->fg_dirty) {
-            // A foreground full-duplex read left the SPI core in a mode the
-            // simplex-transmit arm cannot reliably restart from. Pulse the
-            // peripheral reset so the batch begins from register defaults; the
-            // arm reprograms CFG1/CFG2/CR fully. Only fires after foreground
-            // touched the bus, so the phase-only path is untouched.
-            struct cline cl =
-                lookup_clock_line((uint32_t)(uintptr_t)bus->fast_cfg.spi);
-            *cl.rst |= cl.bit;
-            (void)*cl.rst;
-            *cl.rst &= ~cl.bit;
-            bus->fg_dirty = 0;
-        }
 
         uint8_t half = bus->active_half;
         bus->active_half ^= 1;
