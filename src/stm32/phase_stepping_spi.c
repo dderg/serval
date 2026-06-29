@@ -346,10 +346,12 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     rx->CR &= ~DMA_SxCR_EN;
     while (rx->CR & DMA_SxCR_EN)
         ;
-    // FIFO mode (DMDIS=1) buffers the D1<->D2 bridge latency so the feed cannot
-    // FIFO-error (FEIF) mid-transfer the way direct mode does under load.
+    // TX in FIFO mode (DMDIS=1): buffers the D1<->D2 bridge latency so the feed
+    // cannot FIFO-error mid-transfer the way direct mode does under load. RX in
+    // DIRECT mode: it must drain RXDR every frame or the inbound fifo fills and
+    // gates the master clock (overrun) — no threshold wait.
     st->FCR = DMA_SxFCR_DMDIS;
-    rx->FCR = DMA_SxFCR_DMDIS;
+    rx->FCR = 0;
     *bus->ifcr_reg = bus->flag_clear;
     *bus->rx_ifcr_reg = bus->rx_flag_clear;
 
