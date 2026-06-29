@@ -54,6 +54,11 @@ pub const EVENT_RUNTIME_TIM5_IA: u16 = 13;
 pub const EVENT_RUNTIME_DIAG_DUMP: u16 = 14;
 pub const EVENT_RUNTIME_STEPOUT_LATE: u16 = 15;
 pub const EVENT_RUNTIME_RING_STATE: u16 = 16;
+pub const EVENT_RUNTIME_PHASE_DMA_OVERRUN: u16 = 17;
+pub const EVENT_RUNTIME_PHASE_DMA_TEIF: u16 = 18;
+pub const EVENT_RUNTIME_PHASE_DMA_FEIF: u16 = 19;
+pub const EVENT_RUNTIME_PHASE_DMA_UNDERRUN: u16 = 20;
+pub const EVENT_RUNTIME_PHASE_DMA_INVALID_KIND: u16 = 21;
 
 pub const EVENT_MOTION_PIECE_START_PAST: u16 = 1;
 pub const EVENT_MOTION_RING_FULL: u16 = 2;
@@ -156,6 +161,25 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_RING_STATE) => (
             "runtime.ring_state",
             "ring axis=code&0xff gated=code>>8 head={arg0} retired={arg1}",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PHASE_DMA_OVERRUN) => (
+            "runtime.phase_dma_overrun",
+            "phase DMA overrun: bus={arg0} still busy at commit",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PHASE_DMA_TEIF) => (
+            "runtime.phase_dma_teif",
+            "phase DMA transfer error: bus={arg0}",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PHASE_DMA_FEIF) => {
+            ("runtime.phase_dma_feif", "phase DMA fifo error: bus={arg0}")
+        }
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PHASE_DMA_UNDERRUN) => (
+            "runtime.phase_dma_underrun",
+            "phase DMA underrun: bus={arg0}",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_PHASE_DMA_INVALID_KIND) => (
+            "runtime.phase_dma_invalid_kind",
+            "phase DMA commit status with invalid kind: bus={arg0}",
         ),
         (SUBSYSTEM_DIAG, EVENT_DIAG_TIM5_LONG) => {
             ("diag.tim5_long", "TIM5 ISR long {arg0} cyc at t={arg1}")

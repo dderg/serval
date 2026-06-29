@@ -139,3 +139,10 @@ phase_stepping_write_xdirect(uint8_t motor_idx,
     phase_spi_write_count++;
     phase_spi_release();
 }
+
+__attribute__((used, externally_visible))
+uint32_t
+phase_stepping_commit_tick(void)
+{
+    return 0;
+}

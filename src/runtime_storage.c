@@ -22,9 +22,12 @@ _Static_assert(RT_STORAGE_SIZE >= 1024,
 // .axi_bss static. Current occupants:
 //   - kalico_buf       (src/mcu_demux.c, MCU_DEMUX_MCU_BUF_SIZE)
 //   - receive_buf      (src/generic/serial_irq.c, RX_BUFFER_SIZE)
+//   - phase_buses      (src/stm32/phase_stepping_spi.c, sizeof(phase_buses))
 #if CONFIG_MACH_STM32H7
 #define AXI_BSS_MCU_BUF_BYTES        512   /* matches MCU_DEMUX_MCU_BUF_SIZE */
 #define AXI_BSS_SERIAL_IRQ_RX_BYTES     2048  /* RX_BUFFER_SIZE in serial_irq.c */
+#define AXI_BSS_PHASE_BUSES_BYTES       2048  /* sizeof(phase_buses) budget,
+                                                 asserted in phase_stepping_spi.c */
 #define AXI_BSS_HEADROOM                2048  /* 2 KB margin */
 #define AXI_SRAM_SIZE                   (320 * 1024)
 
@@ -32,6 +35,7 @@ _Static_assert(
     RT_STORAGE_SIZE
         + AXI_BSS_MCU_BUF_BYTES
         + AXI_BSS_SERIAL_IRQ_RX_BYTES
+        + AXI_BSS_PHASE_BUSES_BYTES
         + AXI_BSS_HEADROOM
         <= AXI_SRAM_SIZE,
     "AXI SRAM overflow: RT_STORAGE_SIZE too large for AXI region "

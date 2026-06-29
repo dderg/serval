@@ -186,6 +186,74 @@ pub fn raise_buzz_in_phase_mode(shared: &SharedState, axis_idx: usize) {
     emit_fault_log(FaultCode::BuzzInPhaseMode, detail);
 }
 
+#[cfg(feature = "motion-module-stepper")]
+pub(crate) const PHASE_DMA_KIND_OVERRUN: u32 = 1;
+#[cfg(feature = "motion-module-stepper")]
+pub(crate) const PHASE_DMA_KIND_TEIF: u32 = 2;
+#[cfg(feature = "motion-module-stepper")]
+pub(crate) const PHASE_DMA_KIND_FEIF: u32 = 3;
+#[cfg(feature = "motion-module-stepper")]
+pub(crate) const PHASE_DMA_KIND_UNDERRUN: u32 = 4;
+
+#[cfg(feature = "motion-module-stepper")]
+#[inline]
+fn emit_phase_dma_log(event: u16, fault: FaultCode, bus_id: u32) {
+    if LOG_LEVEL_ERROR < MIN_LEVEL.load(Ordering::Relaxed) {
+        return;
+    }
+    #[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
+    // SAFETY: event_log_emit is a pure C logging sink; no aliasing or
+    // ownership constraints on its arguments.
+    unsafe {
+        event_log_emit(
+            LOG_LEVEL_ERROR,
+            SUBSYSTEM_RUNTIME,
+            event,
+            fault.as_u16(),
+            bus_id,
+            0,
+        );
+    }
+    #[cfg(not(any(not(any(test, feature = "host")), feature = "mcu-linux")))]
+    {
+        let _ = (event, fault, bus_id);
+    }
+}
+
+/// Raise the matching `PhaseDma*` fault from the packed status word returned by
+/// the C `phase_stepping_commit_tick()` seam. Status `0` means no fault; a
+/// nonzero word is `(bus_id << 8) | kind` for the first faulting bus.
+#[cfg(feature = "motion-module-stepper")]
+#[inline]
+pub fn raise_phase_dma(shared: &SharedState, status: u32) {
+    if status == 0 {
+        return;
+    }
+    let kind = status & 0xFF;
+    let bus_id = (status >> 8) & 0xFF;
+    use crate::log_codes::{
+        EVENT_RUNTIME_PHASE_DMA_FEIF, EVENT_RUNTIME_PHASE_DMA_INVALID_KIND,
+        EVENT_RUNTIME_PHASE_DMA_OVERRUN, EVENT_RUNTIME_PHASE_DMA_TEIF,
+        EVENT_RUNTIME_PHASE_DMA_UNDERRUN,
+    };
+    let (fault, event) = match kind {
+        PHASE_DMA_KIND_OVERRUN => (FaultCode::PhaseDmaOverrun, EVENT_RUNTIME_PHASE_DMA_OVERRUN),
+        PHASE_DMA_KIND_TEIF => (FaultCode::PhaseDmaTransferErr, EVENT_RUNTIME_PHASE_DMA_TEIF),
+        PHASE_DMA_KIND_FEIF => (FaultCode::PhaseDmaFifoErr, EVENT_RUNTIME_PHASE_DMA_FEIF),
+        PHASE_DMA_KIND_UNDERRUN => (
+            FaultCode::PhaseDmaUnderrun,
+            EVENT_RUNTIME_PHASE_DMA_UNDERRUN,
+        ),
+        _ => (
+            FaultCode::InternalInvariant,
+            EVENT_RUNTIME_PHASE_DMA_INVALID_KIND,
+        ),
+    };
+    shared.fault_detail.store(status, Ordering::Release);
+    shared.last_error.store(fault.as_i32(), Ordering::Release);
+    emit_phase_dma_log(event, fault, bus_id);
+}
+
 #[inline]
 pub fn raise_overlay_unsupported(shared: &SharedState, axis_idx: usize, mask: u8) {
     let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mask);
