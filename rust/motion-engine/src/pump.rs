@@ -802,7 +802,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                         last_stallfull_log = Some(now);
                         if let Some(q) = queues.get(&stall_key) {
                             let in_flight = q.pushed.wrapping_sub(q.retired);
-                            tracing::warn!(
+                            tracing::debug!(
                                 subsystem = "motion",
                                 event = "pump_stall_full",
                                 mcu = stall_key.mcu_id,
@@ -813,7 +813,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                                 ring_depth = q.ring_depth,
                                 room = q.room(),
                                 pending = q.pieces.len(),
-                                "pump StallFull (room==0); in_flight near u32::MAX means retired>pushed underflow"
+                                "pump StallFull (room==0): ring full, awaiting MCU retirement"
                             );
                         }
                     }
