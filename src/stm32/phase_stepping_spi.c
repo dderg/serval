@@ -135,14 +135,24 @@ static volatile uint32_t phase_dma_timeout_count;
 static void
 phase_dma_finish(void)
 {
+    if (!phase_dma_pending)
+        return;
+    SPI_TypeDef *spi = phase_dma_pending_spi;
+    uint32_t eot_deadline = timer_read_time() + timer_from_us(50);
+    while (phase_dma_pending && !(spi->SR & SPI_SR_EOT)) {
+        if (!timer_is_before(timer_read_time(), eot_deadline)) {
+            phase_dma_timeout_count++;
+            break;
+        }
+    }
     irqstatus_t flag = irq_save();
     if (phase_dma_pending) {
         gpio_out_write(phase_dma_pending_cs, 1);
         PHASE_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
         PHASE_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
         DMA1->LIFCR = PHASE_DMA_CLEAR01;
-        phase_dma_pending_spi->IFCR = 0xFFFFFFFF;
-        phase_dma_pending_spi->CR1 = SPI_CR1_SSI;
+        spi->IFCR = 0xFFFFFFFF;
+        spi->CR1 = SPI_CR1_SSI;
         phase_dma_pending = 0;
         phase_spi_write_count++;
         phase_spi_release();
