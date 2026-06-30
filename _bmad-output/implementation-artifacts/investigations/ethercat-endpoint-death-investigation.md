@@ -154,3 +154,51 @@ The EtherCAT endpoint is **exonerated as the cause**. The crash is a single **~1
 - **Endpoint eprintln → structured** (`rust/ethercat-rt/src/bin/ethercat-rt.rs`): the FAULT-latched site now also emits `event=ring_fault_latched{slot,fault_val,fault_code}`, and both exit paths emit `event=endpoint_exit{reason=sigterm|bridge_disconnected}` — so VL carries the endpoint's fault + exit reason (previously journal-only via `eprintln!`).
 - **Validation:** `cargo nextest -p motion-engine -p ethercat-rt` = 579 passed; `ci.sh rust-clippy` clean.
 - **Coordination:** the in-past guard overlaps Part A's fail-fast intent (`spec-ethercat-endpoint-death-failfast.md`); reconcile so the host-side `-308` pre-emption isn't duplicated. Not committed (shared worktree with Part A's in-progress edits).
+
+## Follow-up: 2026-06-30 #3 — locus CONFIRMED on the MCU serial; EtherCAT fully exonerated
+
+New crash 13:29:22 with the instrumentation (`a1e049083`) flashed. Decisive evidence:
+
+- **Host guard pre-empted the crash (user's fix works).** `pump_piece_in_past{mcu=0, axis=2, deficit_us=3_009_537 (~3.0 s), mcu_now=43682219819, start_time=43429412953}` fired and aborted the host. **No MCU `-308`, no servo `FAULT latched`** in the window — the cryptic dual-`-308` was replaced by one clear host fault. (Confirmed, VL.)
+- **The stall is the MCU serial, not EtherCAT.** The blocking send was `mcu=0` = `McuHandle(0)` = the stepper MCU (USB serial @ 500000); `pump_send_blocked{mcu=0, elapsed_ms=5000, ok=false}` — a **5 s blocking send that timed out**. The error is generic `send_frame_transient "pump send_mcu_frames failed"` (not "ethercat PushPieces"). (Confirmed.)
+- **EtherCAT was healthy throughout.** `host-ec` telemetry kept its 0.5 s cadence across 13:29:20.3 → 21.8 — the servo endpoint never stalled. H1/H2 fully refuted; **H3 (MCU serial) CONFIRMED**.
+- **`pump_send_blocked` distribution:** all slow sends are `mcu=0` (n=19996/10m, avg 5.85 ms, max 5000 ms). The MCU serial send routinely runs ~5–6 ms (so the 5 ms threshold is noisy — raise to ~50 ms); the catastrophic outlier is the 5 s timeout.
+- **MCU-side correlates:** host `kalico_stream_error ×3` at 13:29:17 (serial framing/CRC errors) ~5 s before the timeout; the MCU emitted **no** structured events during the stall (silent — logs ride the dead serial). Recurring background faults: `runtime.mcu_reset (cause bits=335544322=0x14000002, iwdg_resets=0)` + `runtime.fg_freeze (pc=134252664, stall_ticks=5)` at 13:21:08 (also seen 10:48). The MCU **firmware foreground-freezes / resets**.
+
+### Updated conclusion (High confidence on locus)
+The crash is an **MCU serial stall** (`McuHandle(0)`, USB serial): the link hangs ~5 s with host-side stream errors while the MCU goes silent; the single-threaded pump blocks on that send and then tries to submit a ~3 s-stale piece. The EtherCAT servo endpoint is **not involved** (healthy telemetry throughout) — it was a red herring; in earlier crashes both the servo ring and the MCU latched `-308` only because the *same pump stall* fed both stale pieces. The host guard now converts this into one clear `pump_piece_in_past` fault instead of dual `-308`s.
+
+### Next root-cause layer (new investigation, MCU-side)
+Why does the MCU serial stall / the MCU firmware freeze? Decode with the `mcu-diagnostics` skill:
+- `runtime.fg_freeze pc=134252664` (=0x80056F8) → addr2line against the flashed MCU ELF: what code holds the foreground loop for 5 ticks.
+- `runtime.mcu_reset cause bits=0x14000002, iwdg_resets=0` → decode the reset-cause flags (not IWDG).
+- `kalico_stream_error` framing/CRC errors → USB-serial link integrity (CH340 `1a86 USB Serial`, cable, USB host on Pi 5) vs MCU-side TX stall.
+- Distinguish **H3a** (MCU firmware freeze → stops servicing serial → host send blocks) from **H3b** (USB serial link glitch, MCU otherwise fine).
+
+## Follow-up: 2026-06-30 #4 — link vs MCU vs our-recovery; key clue "Klipper worked on this port"
+
+- **USB link IS independently flaky:** kernel log shows the CH341 (`1a86:7523`) physically disconnect+re-enumerate at 13:20:27 and 11:54:41 UTC (device# 5→6→7). The 13:21:08 "mcu_reset" was caused by that disconnect (klippy reconnect-reset, SFTRST), not an MCU crash. (Confirmed, `journalctl -k`.)
+- **But the main recurring stall (12:22, 13:29) had NO disconnect**, no `fg_freeze`, `iwdg_resets=0`, no `hard_fault` — MCU shows no sign of freezing. The `fg_freeze pc=0x8008878` (`readb` in `run_tasks`, 250 µs) is a minor, separate hiccup.
+- **User clue:** stock Klipper ran fine over this exact cable/port → the link glitches are likely *tolerable*; the suspect is **our recovery**.
+- **We DO have retransmission** (`host_io/reactor.rs` `UnackedWindow`/seq/ACK/NAK + `host_io/rtt.rs` `RttEstimator`). So it's not "no retries." Prime suspect: **`MIN_RTO = 500 ms` → `MAX_RTO = 5 s`** (`rtt.rs:7-9`, floor raised for Renode). Klipper retransmits in ~tens of ms; our 500 ms first-retransmit + exponential backoff matches the observed 5 s stall on a brief glitch. Secondary: frame-parser **desync without resync** (`kalico_stream_error`, `reactor.rs:836-843`, logged with no detail).
+- Hardware change this session: cable moved from USB2.0 (beside an ST-Link v2 — EMI) to USB3 on the Pi 5. Single cable (good, ferrited).
+
+### Instrumentation to add (confirm the theory; distinguishes link-dead vs our-recovery)
+1. **RX byte liveness during an in-flight stall** (decisive) — in the read path (`reactor.rs poll_serial` / `SerialFrameIo`), track bytes-read + last-byte instant; when an unacked frame is overdue, emit `rx_liveness{bytes_since_send, gap_ms}`. **Bytes flowing but no ACK ⇒ our parser/RTO is the problem (link alive); RX silent ⇒ link/MCU dead.**
+2. **Retransmit/ACK trace** — at the retransmit scheduler emit `retransmit{seq, attempt, rto_ms, unacked_depth}`; at ACK/NAK receipt emit `mcu_ack{seq}`/`mcu_nak{seq}`. Reveals whether retransmits fire, the RTO ladder (500 ms→1→2→4 s?), and when the MCU finally ACKs — directly tests the slow-RTO hypothesis.
+3. **Stream-error detail + resync** — upgrade `kalico_stream_error` to carry the error *kind* (framing/CRC/length/desync) + bytes discarded, and emit `stream_resync{bytes_skipped}` when a valid frame is regained. Shows desync→resync latency vs Klipper.
+
+Decision matrix on next crash: (1) RX silent → link/MCU dead; (1) RX alive + (2) retransmits firing, ACK lands after multi-hundred-ms RTO → slow-RTO is the cause (fix: lower MIN_RTO / faster retransmit like Klipper); (1) RX alive + (3) desync never resyncs → parser-resync bug.
+
+## Follow-up: 2026-06-30 #5 — stream-error detail = genuine wire corruption; retransmit probe added
+
+- **`kalico_stream_error` already carries the kind, and it's wire corruption:** `kalico crc mismatch ch=0 expected=0x0512 actual=0x1412`, `klipper bad trailer 0x01/0x18` (VL `error` field). So during the stalls the MCU **is** sending bytes (RX alive) but they arrive **CRC-corrupted / mis-framed** — the link mangles data (classic CH340-under-motion-EMI). Our CRC correctly rejects them → no valid ACK → RTO retransmit → corruption persists → 5 s `pump_timeout` → host guard fires.
+- **This is not "no retries" and not "slow RTO":** retransmit is timeout-driven (`reactor.rs:1349`), and hitting the full 5 s = ~4 resends all met with corruption. Lowering `MIN_RTO` won't help (confirmed reasoning).
+- **Leading conclusion (updated): physical USB-serial link corruption** (CH340 `1a86:7523` under stepper/servo EMI). Independent kernel evidence of full disconnects (#4) + CRC corruption here. "Klipper worked" is consistent with a lower corruption rate then (different port/EMI) or Klipper tolerating it; not yet A/B-proven.
+- **Probe added** (`reactor.rs`, RTO-fire site): `retransmit_timeout{front_seq, unacked_n, rto_ms, gap_since_recv_ms}`. `gap_since_recv_ms` counts corrupt frames as inbound, so on the next stall: small/steady gap = link alive-but-corrupt (link layer); large/growing = truly silent (MCU/link dead). Plus the RTO ladder confirms sustained vs brief.
+- **Mitigation in flight (user):** cable moved USB2.0 (next to ST-Link v2) → USB3 on the Pi 5; single ferrited cable. Next print tests whether the corruption rate drops.
+
+### Practical next steps
+1. Reproduce post-USB3-move; compare `kalico_stream_error` rate + `retransmit_timeout` `gap_since_recv_ms` vs before.
+2. If corruption persists: it's the link — better cable routing away from motor/servo wiring, ferrites, a different USB-serial bridge, or shielding. (Software can't un-corrupt the wire; the guard + fail-loud already prevent the cryptic -308.)
+3. Only if `gap_since_recv_ms` shows the link recovers mid-window would faster/different retransmit be worth it.
