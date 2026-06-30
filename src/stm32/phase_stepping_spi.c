@@ -274,8 +274,9 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     st->CR &= ~DMA_SxCR_EN;
     while (st->CR & DMA_SxCR_EN)
         ;
-    st->FCR = DMA_SxFCR_DMDIS; // FIFO mode buffers the D1<->D2 bridge latency
-                               // so the TX feed can't FIFO-error under load
+    st->FCR = 0; // direct mode: send exactly 5 bytes per datagram, no FIFO
+                 // buffering/misalignment that would malform the TMC's 40-bit
+                 // XDIRECT word and make it silently ignore the write
     *bus->ifcr_reg = bus->flag_clear;
     st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
     st->M0AR = (uint32_t)(uintptr_t)&bus->txbuf[bus->commit_half][midx * XDIRECT_LEN];
