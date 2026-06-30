@@ -60,6 +60,7 @@ struct phase_bus_state {
     volatile uint8_t busy;
     volatile uint8_t owner;
     volatile uint8_t sticky_fault;
+    volatile uint32_t fault_diag;
     uint8_t active_half;
     uint8_t commit_half;
     uint8_t cursor;
@@ -195,6 +196,7 @@ phase_spi_tx_request(SPI_TypeDef *spi)
 static volatile uint32_t phase_tc_count;
 
 static void phase_dma_tc_isr(uint8_t bus_id);
+static uint32_t phase_overrun_diag(struct phase_bus_state *bus, uint32_t isr);
 
 void phase_dma_s0_irq(void) { phase_dma_tc_isr(0); }
 void phase_dma_s1_irq(void) { phase_dma_tc_isr(1); }
@@ -293,6 +295,11 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
 
     spi->CR2 = (uint32_t)XDIRECT_LEN << SPI_CR2_TSIZE_Pos;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_SPE;
+    // Clear stale EOT/SUSP only after SPE=1 (the clear is ignored while disabled).
+    // Without it a CSTART onto a leftover suspend starts already-ended, raises no
+    // TX-DMA request, and NDTR freezes full — EOT never asserts, the wait times
+    // out, and the batch faults as KIND_TEIF.
+    spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
 }
 
@@ -328,6 +335,8 @@ phase_dma_tc_isr(uint8_t bus_id)
         bus->sticky_fault |= PHASE_FAULT_FEIF;
         err = 1;
     }
+    if (err)
+        bus->fault_diag = phase_overrun_diag(bus, isr);
 
     bus->stream->CR &= ~DMA_SxCR_EN;
 
@@ -338,6 +347,7 @@ phase_dma_tc_isr(uint8_t bus_id)
         while (!(spi->SR & SPI_SR_EOT)) {
             if (!timer_is_before(timer_read_time(), deadline)) {
                 bus->sticky_fault |= PHASE_FAULT_EOT;
+                bus->fault_diag = phase_overrun_diag(bus, isr);
                 err = 1;
                 break;
             }
@@ -570,9 +580,11 @@ phase_stepping_commit_tick(void)
         if (sticky) {
             if (result == 0) {
                 if (sticky & (PHASE_FAULT_TEIF | PHASE_FAULT_EOT))
-                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_TEIF;
+                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_TEIF
+                        | bus->fault_diag;
                 else if (sticky & PHASE_FAULT_FEIF)
-                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_FEIF;
+                    result = ((uint32_t)b << 8) | PHASE_DMA_KIND_FEIF
+                        | bus->fault_diag;
                 bus->sticky_fault = 0;
             }
             irq_restore(flag);
