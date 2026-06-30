@@ -3,6 +3,8 @@
 #include "gpio.h"
 #include "board/irq.h"
 #include "board/misc.h"
+#include "board/armcm_boot.h"
+#include "generic/motion_nvic_prio.h"
 #include "internal.h"
 
 #define MAX_PHASE_BUSES  4
@@ -125,6 +127,53 @@ static uint8_t __attribute__((section(".axi_bss"), aligned(32))) phase_dma_txbuf
 static uint8_t __attribute__((section(".axi_bss"), aligned(32))) phase_dma_rxbuf[32];
 static uint8_t phase_dma_inited;
 
+static volatile uint8_t phase_dma_pending;
+static struct gpio_out phase_dma_pending_cs;
+static SPI_TypeDef *phase_dma_pending_spi;
+static volatile uint32_t phase_dma_timeout_count;
+
+static void
+phase_dma_finish(void)
+{
+    irqstatus_t flag = irq_save();
+    if (phase_dma_pending) {
+        gpio_out_write(phase_dma_pending_cs, 1);
+        PHASE_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
+        PHASE_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
+        DMA1->LIFCR = PHASE_DMA_CLEAR01;
+        phase_dma_pending_spi->IFCR = 0xFFFFFFFF;
+        phase_dma_pending_spi->CR1 = SPI_CR1_SSI;
+        phase_dma_pending = 0;
+        phase_spi_write_count++;
+        phase_spi_release();
+    }
+    irq_restore(flag);
+}
+
+static void
+phase_dma_drain_prior(void)
+{
+    if (!phase_dma_pending)
+        return;
+    uint32_t deadline = timer_read_time() + timer_from_us(50);
+    while (phase_dma_pending && !(DMA1->LISR & DMA_LISR_TCIF1)) {
+        if (!timer_is_before(timer_read_time(), deadline)) {
+            phase_dma_timeout_count++;
+            break;
+        }
+    }
+    phase_dma_finish();
+}
+
+void
+phase_dma_rx_isr(void)
+{
+    if (DMA1->LISR & DMA_LISR_TCIF1) {
+        DMA1->LIFCR = DMA_LIFCR_CTCIF1;
+        phase_dma_finish();
+    }
+}
+
 static void
 phase_dma_init_once(void)
 {
@@ -134,6 +183,7 @@ phase_dma_init_once(void)
     (void)RCC->AHB1ENR;
     DMAMUX1_Channel0->CCR = PHASE_DMA_SPI1_TX_REQ;
     DMAMUX1_Channel1->CCR = PHASE_DMA_SPI1_RX_REQ;
+    armcm_enable_irq(phase_dma_rx_isr, DMA1_Stream1_IRQn, MOTION_NVIC_PRIO + 1);
     phase_dma_inited = 1;
 }
 #endif
@@ -150,11 +200,6 @@ phase_stepping_write_xdirect(uint8_t motor_idx,
     uint8_t bus_id = phase_motors[motor_idx].bus_id;
     if (bus_id >= MAX_PHASE_BUSES || !phase_buses[bus_id].configured)
         return;
-
-    if (!phase_spi_try_acquire()) {
-        phase_spi_skip_count++;
-        return;
-    }
 
     // signed >> is implementation-defined; cast through uint16_t for logical shift.
     uint16_t ua = (uint16_t)coil_a;
@@ -173,6 +218,12 @@ phase_stepping_write_xdirect(uint8_t motor_idx,
     SPI_TypeDef *spi = fast.spi;
 
     phase_dma_init_once();
+    phase_dma_drain_prior();
+
+    if (!phase_spi_try_acquire()) {
+        phase_spi_skip_count++;
+        return;
+    }
 
     for (int i = 0; i < 5; i++)
         phase_dma_txbuf[i] = datagram[i];
@@ -196,7 +247,7 @@ phase_stepping_write_xdirect(uint8_t motor_idx,
     PHASE_DMA_RX_STREAM->PAR = (uint32_t)(uintptr_t)&spi->RXDR;
     PHASE_DMA_RX_STREAM->M0AR = (uint32_t)(uintptr_t)phase_dma_rxbuf;
     PHASE_DMA_RX_STREAM->NDTR = 5;
-    PHASE_DMA_RX_STREAM->CR = DMA_SxCR_MINC;
+    PHASE_DMA_RX_STREAM->CR = DMA_SxCR_MINC | DMA_SxCR_TCIE;
 
     PHASE_DMA_TX_STREAM->FCR = 0;
     PHASE_DMA_TX_STREAM->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
@@ -214,25 +265,20 @@ phase_stepping_write_xdirect(uint8_t motor_idx,
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
 
-    uint32_t deadline = timer_read_time() + timer_from_us(200);
-    while (!(DMA1->LISR & DMA_LISR_TCIF1)) {
-        if (!timer_is_before(timer_read_time(), deadline))
-            break;
-    }
-
-    PHASE_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
-    PHASE_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
-    DMA1->LIFCR = PHASE_DMA_CLEAR01;
-    spi->IFCR = 0xFFFFFFFF;
-    spi->CR1 = SPI_CR1_SSI;
+    phase_dma_pending_cs = phase_motors[motor_idx].cs;
+    phase_dma_pending_spi = spi;
+    phase_dma_pending = 1;
 #else
+    if (!phase_spi_try_acquire()) {
+        phase_spi_skip_count++;
+        return;
+    }
     spi_prepare(phase_buses[bus_id].fast_cfg);
     gpio_out_write(phase_motors[motor_idx].cs, 0);
     spi_transfer(phase_buses[bus_id].fast_cfg, 0,
                  sizeof(datagram), datagram);
-#endif
     gpio_out_write(phase_motors[motor_idx].cs, 1);
-
     phase_spi_write_count++;
     phase_spi_release();
+#endif
 }
