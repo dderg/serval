@@ -335,6 +335,7 @@ fn from_u16_round_trip_all_variants() {
         FaultCode::HostDisconnect,
         FaultCode::HostRetransmitExhausted,
         FaultCode::HostDispatcherTimeout,
+        FaultCode::EthercatEndpointDied,
         FaultCode::StepQueueOverflow,
         FaultCode::SpiQueueOverflow,
         FaultCode::MathNonFinite,

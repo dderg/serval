@@ -183,6 +183,13 @@ class EtherCatNode:
 
     def _poll_drive_fault(self, eventtime):
         engine = self.printer.lookup_object("motion_engine")
+        death = engine.take_endpoint_death(self.engine_handle)
+        if death is not None:
+            self.printer.invoke_shutdown(
+                "EtherCAT endpoint died mid-session on node %s: %s"
+                % (self.name, death)
+            )
+            return self.printer.get_reactor().NEVER
         fault = engine.take_drive_fault(self.engine_handle)
         if fault is None:
             return eventtime + DRIVE_FAULT_POLL_PERIOD
