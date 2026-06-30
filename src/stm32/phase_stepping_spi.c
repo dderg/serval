@@ -123,56 +123,99 @@ phase_stepping_disable_writes(void)
     | DMA_LIFCR_CTCIF1 | DMA_LIFCR_CHTIF1 | DMA_LIFCR_CTEIF1 \
     | DMA_LIFCR_CDMEIF1 | DMA_LIFCR_CFEIF1)
 
-static uint8_t __attribute__((section(".axi_bss"), aligned(32))) phase_dma_txbuf[32];
+#define PHASE_Q_SIZE 16
+#define PHASE_Q_MASK (PHASE_Q_SIZE - 1)
+
+static uint8_t __attribute__((section(".axi_bss"), aligned(32)))
+    phase_dma_txbuf[MAX_PHASE_MOTORS][32];
 static uint8_t __attribute__((section(".axi_bss"), aligned(32))) phase_dma_rxbuf[32];
 static uint8_t phase_dma_inited;
 
-static volatile uint8_t phase_dma_pending;
-static struct gpio_out phase_dma_pending_cs;
-static SPI_TypeDef *phase_dma_pending_spi;
+static volatile uint8_t phase_q[PHASE_Q_SIZE];
+static volatile uint8_t phase_q_head;
+static volatile uint8_t phase_q_tail;
+static volatile uint8_t phase_dma_active;
+static struct gpio_out phase_dma_cur_cs;
+static SPI_TypeDef *phase_dma_cur_spi;
 static volatile uint32_t phase_dma_timeout_count;
 
 static void
-phase_dma_finish(void)
+phase_dma_arm(uint8_t motor)
 {
-    if (!phase_dma_pending)
+    uint8_t bus_id = phase_motors[motor].bus_id;
+    struct spi_config fast = phase_buses[bus_id].fast_cfg;
+    SPI_TypeDef *spi = fast.spi;
+
+    spi->CR1 = SPI_CR1_SSI;
+    spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
+              | (7 << SPI_CFG1_DSIZE_Pos)
+              | SPI_CFG1_TXDMAEN | SPI_CFG1_RXDMAEN;
+    spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
+              | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR | SPI_CFG2_SSOE;
+
+    PHASE_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
+    PHASE_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
+    while ((PHASE_DMA_TX_STREAM->CR | PHASE_DMA_RX_STREAM->CR) & DMA_SxCR_EN)
+        ;
+    DMA1->LIFCR = PHASE_DMA_CLEAR01;
+
+    PHASE_DMA_RX_STREAM->FCR = 0;
+    PHASE_DMA_RX_STREAM->PAR = (uint32_t)(uintptr_t)&spi->RXDR;
+    PHASE_DMA_RX_STREAM->M0AR = (uint32_t)(uintptr_t)phase_dma_rxbuf;
+    PHASE_DMA_RX_STREAM->NDTR = 5;
+    PHASE_DMA_RX_STREAM->CR = DMA_SxCR_MINC | DMA_SxCR_TCIE;
+
+    PHASE_DMA_TX_STREAM->FCR = 0;
+    PHASE_DMA_TX_STREAM->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
+    PHASE_DMA_TX_STREAM->M0AR = (uint32_t)(uintptr_t)phase_dma_txbuf[motor];
+    PHASE_DMA_TX_STREAM->NDTR = 5;
+    PHASE_DMA_TX_STREAM->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC;
+
+    gpio_out_write(phase_motors[motor].cs, 0);
+
+    PHASE_DMA_RX_STREAM->CR |= DMA_SxCR_EN;
+    PHASE_DMA_TX_STREAM->CR |= DMA_SxCR_EN;
+
+    spi->CR2 = 5u << SPI_CR2_TSIZE_Pos;
+    spi->CR1 = SPI_CR1_SSI | SPI_CR1_SPE;
+    spi->IFCR = 0xFFFFFFFF;
+    spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
+
+    phase_dma_cur_cs = phase_motors[motor].cs;
+    phase_dma_cur_spi = spi;
+}
+
+static void
+phase_dma_advance(void)
+{
+    if (phase_q_head == phase_q_tail) {
+        phase_dma_active = 0;
+        phase_spi_release();
         return;
-    SPI_TypeDef *spi = phase_dma_pending_spi;
+    }
+    uint8_t motor = phase_q[phase_q_head];
+    phase_q_head = (phase_q_head + 1) & PHASE_Q_MASK;
+    phase_dma_arm(motor);
+}
+
+static void
+phase_dma_complete_current(void)
+{
+    SPI_TypeDef *spi = phase_dma_cur_spi;
     uint32_t eot_deadline = timer_read_time() + timer_from_us(50);
-    while (phase_dma_pending && !(spi->SR & SPI_SR_EOT)) {
+    while (!(spi->SR & SPI_SR_EOT)) {
         if (!timer_is_before(timer_read_time(), eot_deadline)) {
             phase_dma_timeout_count++;
             break;
         }
     }
-    irqstatus_t flag = irq_save();
-    if (phase_dma_pending) {
-        gpio_out_write(phase_dma_pending_cs, 1);
-        PHASE_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
-        PHASE_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
-        DMA1->LIFCR = PHASE_DMA_CLEAR01;
-        spi->IFCR = 0xFFFFFFFF;
-        spi->CR1 = SPI_CR1_SSI;
-        phase_dma_pending = 0;
-        phase_spi_write_count++;
-        phase_spi_release();
-    }
-    irq_restore(flag);
-}
-
-static void
-phase_dma_drain_prior(void)
-{
-    if (!phase_dma_pending)
-        return;
-    uint32_t deadline = timer_read_time() + timer_from_us(50);
-    while (phase_dma_pending && !(DMA1->LISR & DMA_LISR_TCIF1)) {
-        if (!timer_is_before(timer_read_time(), deadline)) {
-            phase_dma_timeout_count++;
-            break;
-        }
-    }
-    phase_dma_finish();
+    gpio_out_write(phase_dma_cur_cs, 1);
+    PHASE_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
+    PHASE_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
+    DMA1->LIFCR = PHASE_DMA_CLEAR01;
+    spi->IFCR = 0xFFFFFFFF;
+    spi->CR1 = SPI_CR1_SSI;
+    phase_spi_write_count++;
 }
 
 void
@@ -180,7 +223,10 @@ phase_dma_rx_isr(void)
 {
     if (DMA1->LISR & DMA_LISR_TCIF1) {
         DMA1->LIFCR = DMA_LIFCR_CTCIF1;
-        phase_dma_finish();
+        phase_dma_complete_current();
+        irqstatus_t flag = irq_save();
+        phase_dma_advance();
+        irq_restore(flag);
     }
 }
 
@@ -224,60 +270,30 @@ phase_stepping_write_xdirect(uint8_t motor_idx,
     };
 
 #if CONFIG_MACH_STM32H7
-    struct spi_config fast = phase_buses[bus_id].fast_cfg;
-    SPI_TypeDef *spi = fast.spi;
-
     phase_dma_init_once();
-    phase_dma_drain_prior();
-
-    if (!phase_spi_try_acquire()) {
-        phase_spi_skip_count++;
-        return;
-    }
 
     for (int i = 0; i < 5; i++)
-        phase_dma_txbuf[i] = datagram[i];
-    SCB_CleanDCache_by_Addr((uint32_t *)phase_dma_txbuf, sizeof(phase_dma_txbuf));
+        phase_dma_txbuf[motor_idx][i] = datagram[i];
+    SCB_CleanDCache_by_Addr((uint32_t *)phase_dma_txbuf[motor_idx], 32);
 
-    spi->CR1 = SPI_CR1_SSI;
-    spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
-              | (7 << SPI_CFG1_DSIZE_Pos)
-              | SPI_CFG1_TXDMAEN | SPI_CFG1_RXDMAEN;
-    spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
-              | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
-              | SPI_CFG2_SSOE;
-
-    PHASE_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
-    PHASE_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
-    while ((PHASE_DMA_TX_STREAM->CR | PHASE_DMA_RX_STREAM->CR) & DMA_SxCR_EN)
-        ;
-    DMA1->LIFCR = PHASE_DMA_CLEAR01;
-
-    PHASE_DMA_RX_STREAM->FCR = 0;
-    PHASE_DMA_RX_STREAM->PAR = (uint32_t)(uintptr_t)&spi->RXDR;
-    PHASE_DMA_RX_STREAM->M0AR = (uint32_t)(uintptr_t)phase_dma_rxbuf;
-    PHASE_DMA_RX_STREAM->NDTR = 5;
-    PHASE_DMA_RX_STREAM->CR = DMA_SxCR_MINC | DMA_SxCR_TCIE;
-
-    PHASE_DMA_TX_STREAM->FCR = 0;
-    PHASE_DMA_TX_STREAM->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
-    PHASE_DMA_TX_STREAM->M0AR = (uint32_t)(uintptr_t)phase_dma_txbuf;
-    PHASE_DMA_TX_STREAM->NDTR = 5;
-    PHASE_DMA_TX_STREAM->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC;
-
-    gpio_out_write(phase_motors[motor_idx].cs, 0);
-
-    PHASE_DMA_RX_STREAM->CR |= DMA_SxCR_EN;
-    PHASE_DMA_TX_STREAM->CR |= DMA_SxCR_EN;
-
-    spi->CR2 = 5u << SPI_CR2_TSIZE_Pos;
-    spi->CR1 = SPI_CR1_SSI | SPI_CR1_SPE;
-    spi->IFCR = 0xFFFFFFFF;
-    spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
-
-    phase_dma_pending_cs = phase_motors[motor_idx].cs;
-    phase_dma_pending_spi = spi;
-    phase_dma_pending = 1;
+    irqstatus_t flag = irq_save();
+    if (phase_dma_active) {
+        uint8_t next = (phase_q_tail + 1) & PHASE_Q_MASK;
+        if (next == phase_q_head) {
+            phase_spi_skip_count++;
+        } else {
+            phase_q[phase_q_tail] = motor_idx;
+            phase_q_tail = next;
+        }
+    } else if (phase_spi_try_acquire()) {
+        phase_q[phase_q_tail] = motor_idx;
+        phase_q_tail = (phase_q_tail + 1) & PHASE_Q_MASK;
+        phase_dma_active = 1;
+        phase_dma_advance();
+    } else {
+        phase_spi_skip_count++;
+    }
+    irq_restore(flag);
 #else
     if (!phase_spi_try_acquire()) {
         phase_spi_skip_count++;
