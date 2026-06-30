@@ -245,54 +245,51 @@ phase_dma_init_bus(uint8_t bus_id)
 }
 
 static void
-phase_dma_arm_motor(struct phase_bus_state *bus)
+phase_dma_configure_bus(struct phase_bus_state *bus)
 {
-    uint8_t midx = bus->seq[bus->cursor];
     struct spi_config fast = bus->fast_cfg;
     SPI_TypeDef *spi = fast.spi;
+    DMA_Stream_TypeDef *st = bus->stream;
 
     spi->CR1 = SPI_CR1_SSI; // CFG1/CFG2 are write-protected while SPE=1
-    // Full-duplex clocks a response byte in for every byte out; with no RX-DMA
-    // those bytes pile up in the RX fifo. Drain whatever the prior motor left so
-    // a full fifo cannot gate this transfer's clock (the master stalls on RX-fifo
-    // space — NDTR stays at full, SUSP latches, and the batch overruns).
-    while (spi->SR & (SPI_SR_RXP | SPI_SR_RXWNE))
-        (void)*(volatile uint8_t *)&spi->RXDR;
-    // Only TXDMAEN toggles per transfer; CFG2 is byte-identical to spi_prepare's
-    // (full-duplex). Keeping ONE COMM mode for both the DMA writes and the
-    // foreground reads is what stops the peripheral scrambling (MODF/overrun)
-    // on the mode flip a simplex-transmitter write would force. The 5-byte
-    // XDIRECT response just lands in the RX fifo (well under its 16-byte depth)
-    // and is flushed by the SPE toggle between motors — no RX-DMA needed.
     spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
               | (7u << SPI_CFG1_DSIZE_Pos) | SPI_CFG1_TXDMAEN;
     spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
               | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
               | SPI_CFG2_SSOE;
+    st->FCR = 0; // direct mode: exactly 5 bytes, no FIFO misalignment
+    st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
+    st->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC | DMA_SxCR_TCIE | DMA_SxCR_TEIE;
+}
 
+static void
+phase_dma_arm_motor(struct phase_bus_state *bus)
+{
+    uint8_t midx = bus->seq[bus->cursor];
+    SPI_TypeDef *spi = bus->fast_cfg.spi;
     DMA_Stream_TypeDef *st = bus->stream;
+
+    // The bus is reconfigured exactly once per batch, with SPE off. Foreground
+    // reads block on bus->busy, so none reconfigures CFG between these motors;
+    // re-pointing the stream and re-issuing CSTART is all each motor needs. The
+    // full-duplex response lands in the RX fifo and is flushed by the SPE toggle
+    // in the TC handler. Rewriting CFG per motor was a reconfigure glitch that
+    // stalled the SPI mid-walk (EOT never asserted, no steps, eventual fault).
+    if (bus->cursor == 0)
+        phase_dma_configure_bus(bus);
+
     st->CR &= ~DMA_SxCR_EN;
     while (st->CR & DMA_SxCR_EN)
         ;
-    st->FCR = 0; // direct mode: send exactly 5 bytes per datagram, no FIFO
-                 // buffering/misalignment that would malform the TMC's 40-bit
-                 // XDIRECT word and make it silently ignore the write
     *bus->ifcr_reg = bus->flag_clear;
-    st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
     st->M0AR = (uint32_t)(uintptr_t)&bus->txbuf[bus->commit_half][midx * XDIRECT_LEN];
     st->NDTR = XDIRECT_LEN;
-    st->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC | DMA_SxCR_TCIE | DMA_SxCR_TEIE;
     st->CR |= DMA_SxCR_EN;
 
     gpio_out_write(phase_motors[midx].cs, 0);
 
     spi->CR2 = (uint32_t)XDIRECT_LEN << SPI_CR2_TSIZE_Pos;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_SPE;
-    // Clear stale EOT/SUSP only after SPE=1 — while the peripheral is disabled
-    // the clear does not take, so a CSTART onto a leftover suspend (from a
-    // foreground transfer or a torn-down batch) starts already-ended and raises
-    // no TX-DMA request, freezing NDTR at full.
-    spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
 }
 
