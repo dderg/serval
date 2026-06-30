@@ -295,10 +295,14 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
 
     spi->CR2 = (uint32_t)XDIRECT_LEN << SPI_CR2_TSIZE_Pos;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_SPE;
+    // Drain leftover RX with SPE on (reads pop the fifo only while enabled). A
+    // full-duplex master gates its clock when the RX fifo has no space; a fifo
+    // left full by a foreground read freezes this transfer mid-flight — DMA feeds
+    // TX (NDTR->0) but nothing shifts, EOT never asserts, no SUSP is raised. No
+    // CSTART yet, so only the prior leftover is present.
+    while (spi->SR & (SPI_SR_RXP | SPI_SR_RXWNE))
+        (void)*(volatile uint8_t *)&spi->RXDR;
     // Clear stale EOT/SUSP only after SPE=1 (the clear is ignored while disabled).
-    // Without it a CSTART onto a leftover suspend starts already-ended, raises no
-    // TX-DMA request, and NDTR freezes full — EOT never asserts, the wait times
-    // out, and the batch faults as KIND_TEIF.
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
 }
