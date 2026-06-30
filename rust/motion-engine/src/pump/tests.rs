@@ -441,13 +441,15 @@ fn flush_clears_queued_pieces_and_junctions() {
         key,
         pieces: vec![(
             PieceEntry {
-                start_time: 1,
+                // A deliverable "now" probe (== the advanced clock), not a stale
+                // past piece — the pump's in-past guard aborts on past start_times.
+                start_time: gated_tick + 1_000,
                 coeffs: [0.0; 4],
                 duration: 0.001,
                 motor_mask: 0,
                 _reserved: [0; 3],
             },
-            1.0,
+            (gated_tick + 1_000) as f64,
         )],
         fresh_stream: false,
         lead_secs,
@@ -543,13 +545,15 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         key,
         pieces: vec![(
             PieceEntry {
-                start_time: 1,
+                // A deliverable "now" probe (== the advanced clock), not a stale
+                // past piece — the pump's in-past guard aborts on past start_times.
+                start_time: gated_tick + 1_000,
                 coeffs: [0.0; 4],
                 duration: 0.001,
                 motor_mask: 0,
                 _reserved: [0; 3],
             },
-            1.0,
+            (gated_tick + 1_000) as f64,
         )],
         fresh_stream: false,
         lead_secs,

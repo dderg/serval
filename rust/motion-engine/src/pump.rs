@@ -848,7 +848,59 @@ pub fn run_pump<S, F, C, A, O, D>(
                             }
                         })
                         .collect();
-                    match sink.send_mcu_frames(mcu_id, &bundle) {
+                    // Host-side guard: refuse to submit a piece whose start_time is
+                    // already in the MCU's past. Catching it here fails loud on the
+                    // host with the offending mcu/axis/deficit instead of letting the
+                    // MCU (or the EtherCAT endpoint ring) trip a cryptic -308
+                    // PieceStartInPast after the fact. Mirrors the MCU's
+                    // MAX_START_IN_PAST_SECS=200us threshold with a margin above
+                    // host-projection jitter so a healthy print never false-aborts.
+                    if let Some((mcu_now, freq)) = mcu_clock_of(mcu_id) {
+                        if freq > 0.0 {
+                            const PUMP_PAST_GUARD_SECS: f64 = 500e-6;
+                            let guard_ticks = (PUMP_PAST_GUARD_SECS * freq) as u64;
+                            for af in &bundle {
+                                for piece in &af.pieces {
+                                    if piece.start_time + guard_ticks < mcu_now {
+                                        let deficit_us =
+                                            ((mcu_now - piece.start_time) as f64 / freq * 1e6)
+                                                as u64;
+                                        tracing::error!(
+                                            subsystem = "motion",
+                                            event = "pump_piece_in_past",
+                                            mcu = mcu_id,
+                                            axis = af.axis,
+                                            start_time = piece.start_time,
+                                            mcu_now,
+                                            deficit_us,
+                                            "[pump-guard] piece already in the MCU's past at send time — failing loud on host before the MCU/endpoint trips -308"
+                                        );
+                                        eprintln!(
+                                            "pump: piece in past at send — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} — aborting host before MCU -308",
+                                            af.axis, piece.start_time
+                                        );
+                                        let _ = std::io::Write::flush(&mut std::io::stderr());
+                                        std::process::abort();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let send_started = Instant::now();
+                    let send_result = sink.send_mcu_frames(mcu_id, &bundle);
+                    let send_elapsed = send_started.elapsed();
+                    if send_elapsed >= Duration::from_millis(5) {
+                        tracing::warn!(
+                            subsystem = "motion",
+                            event = "pump_send_blocked",
+                            mcu = mcu_id,
+                            elapsed_ms = send_elapsed.as_millis() as u64,
+                            frames = bundle.len(),
+                            ok = send_result.is_ok(),
+                            "[pump-send] send_mcu_frames blocked — which transport (mcu serial vs ethercat socket) ate the wall-clock"
+                        );
+                    }
+                    match send_result {
                         Ok(()) => {
                             for af in &bundle {
                                 let key = AxisKey {
