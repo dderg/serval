@@ -855,6 +855,29 @@ pub fn run_pump<S, F, C, A, O, D>(
                                     mcu_id,
                                     axis: af.axis,
                                 };
+                                let freq = mcu_clock_of(mcu_id).map(|(_, f)| f as f32);
+                                let mut prev_end: Option<u64> = None;
+                                for piece in &af.pieces {
+                                    let end_ticks: u64 = freq.map_or(0, |f| piece.end_time(f));
+                                    let gap_ticks_in_frame: i64 = prev_end
+                                        .map_or(0, |pe| piece.start_time as i64 - pe as i64);
+                                    tracing::info!(
+                                        subsystem = "motion",
+                                        event = "pump_piece_submit",
+                                        mcu = mcu_id,
+                                        axis = af.axis,
+                                        start_time = piece.start_time,
+                                        duration_s = piece.duration,
+                                        end_ticks,
+                                        gap_ticks_in_frame,
+                                        motor_mask = piece.motor_mask,
+                                        "[pump-submit] piece submitted to MCU \
+                                         (gap_ticks_in_frame: 0=contiguous, <0=overlap, >0=gap)"
+                                    );
+                                    if freq.is_some() {
+                                        prev_end = Some(end_ticks);
+                                    }
+                                }
                                 let n = af.pieces.len() as u32;
                                 let q = queues.get_mut(&key).expect("planned key exists");
                                 for _ in 0..af.pieces.len() {
