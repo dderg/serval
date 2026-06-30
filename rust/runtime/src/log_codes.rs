@@ -55,6 +55,8 @@ pub const EVENT_RUNTIME_DIAG_DUMP: u16 = 14;
 pub const EVENT_RUNTIME_STEPOUT_LATE: u16 = 15;
 pub const EVENT_RUNTIME_RING_STATE: u16 = 16;
 pub const EVENT_RUNTIME_FG_TASK: u16 = 17;
+pub const EVENT_RUNTIME_FG_MSG: u16 = 18;
+pub const EVENT_RUNTIME_FG_DEMUX: u16 = 19;
 
 pub const EVENT_MOTION_PIECE_START_PAST: u16 = 1;
 pub const EVENT_MOTION_RING_FULL: u16 = 2;
@@ -161,6 +163,14 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_FG_TASK) => (
             "runtime.fg_task",
             "foreground worst task func={arg0} dur_cyc={arg1}",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_FG_MSG) => (
+            "runtime.fg_msg",
+            "foreground worst msg kind={arg0} dur_cyc={arg1}",
+        ),
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_FG_DEMUX) => (
+            "runtime.fg_demux",
+            "demux backlog_max={arg0} msgs_max={arg1}",
         ),
         (SUBSYSTEM_DIAG, EVENT_DIAG_TIM5_LONG) => {
             ("diag.tim5_long", "TIM5 ISR long {arg0} cyc at t={arg1}")
