@@ -49,6 +49,10 @@ struct live_snapshot {
     uint32_t last_dispatch_func;
     uint32_t last_dispatch_addr;
     uint32_t this_run_froze;
+    uint32_t cur_task_func;
+    uint32_t cur_task_start;
+    uint32_t worst_task_func;
+    uint32_t worst_task_cyc;
 };
 
 // .persistent_diag must stay a NOLOAD section outside [_bss_start.._bss_end] or
@@ -369,6 +373,18 @@ diag_tim5_account(uint32_t enter_cycles, uint32_t exit_cycles)
             live_snap.worst_fg_stall_exc   = runtime_tim5_stacked_exc();
         }
     }
+
+    // A task that never returns is invisible to diag_note_task_enter (it only
+    // closes completed tasks), so promote the in-progress task's growing
+    // duration into worst_task here each tick. Read func before start.
+    uint32_t cur_func = live_snap.cur_task_func;
+    if (cur_func) {
+        uint32_t dur = timer_read_time() - live_snap.cur_task_start;
+        if (dur > live_snap.worst_task_cyc) {
+            live_snap.worst_task_cyc = dur;
+            live_snap.worst_task_func = cur_func;
+        }
+    }
 }
 
 __attribute__((used, externally_visible))
@@ -632,6 +648,41 @@ diag_note_dispatch(uint32_t func, uint32_t addr)
     live_snap.last_dispatch_addr = addr;
 }
 
+static void
+diag_close_task(uint32_t now)
+{
+    uint32_t prev = live_snap.cur_task_func;
+    if (prev) {
+        uint32_t dur = now - live_snap.cur_task_start;
+        if (dur > live_snap.worst_task_cyc) {
+            live_snap.worst_task_cyc = dur;
+            live_snap.worst_task_func = prev;
+        }
+    }
+}
+
+// Called by the generated ctr_run_taskfuncs before each DECL_TASK. Times the
+// previous task and publishes the one about to run, so a foreground stall names
+// the offending task. start is stored before func: the TIM5-ISR monitor reads
+// func first, so seeing a published func guarantees a matching start.
+__attribute__((used, externally_visible))
+void
+diag_note_task_enter(uint32_t func)
+{
+    uint32_t now = timer_read_time();
+    diag_close_task(now);
+    live_snap.cur_task_start = now;
+    live_snap.cur_task_func = func;
+}
+
+__attribute__((used, externally_visible))
+void
+diag_note_task_loop_end(void)
+{
+    diag_close_task(timer_read_time());
+    live_snap.cur_task_func = 0;
+}
+
 uint32_t diag_get_otg_rxflvl(void)        { return diag.otg_rxflvl_fires; }
 uint32_t diag_get_otg_iepint(void)        { return diag.otg_iepint_fires; }
 uint32_t diag_get_otg_other(void)         { return diag.otg_otherflag_fires; }
@@ -847,6 +898,10 @@ fault_handler_report_task(void)
             live_snap.last_dispatch_func   = 0;
             live_snap.last_dispatch_addr   = 0;
             live_snap.this_run_froze       = 0;
+            live_snap.cur_task_func        = 0;
+            live_snap.cur_task_start       = 0;
+            live_snap.worst_task_func      = 0;
+            live_snap.worst_task_cyc       = 0;
         }
 #if CONFIG_MACH_STM32H7
         if (reset_cause_raw & RCC_RSR_IWDG1RSTF)
@@ -1014,6 +1069,10 @@ fault_handler_report_task(void)
            live_snap.iwdg_reset_count,
            live_snap.last_dispatch_func,
            live_snap.last_dispatch_addr);
+    output("fg_task worst_func %u worst_cyc %u cur_func %u",
+           live_snap.worst_task_func,
+           live_snap.worst_task_cyc,
+           live_snap.cur_task_func);
     if (fault_rec.magic == FAULT_MAGIC) {
         output("prior_fault kind %u count %u pc %u lr %u psr %u"
                " r0 %u r1 %u r2 %u r3 %u r12 %u",
@@ -1212,6 +1271,13 @@ kalico_diag_emit_prior_crash(void)
                         live_snap.worst_fg_stall_ticks);
     }
 
+    if (live_snap.worst_task_cyc) {
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_TASK, 0,
+                        live_snap.worst_task_func,
+                        live_snap.worst_task_cyc);
+    }
+
     if (abnormal) {
         extern volatile uint32_t runtime_diag_prior_packed_raw;
         uint32_t fc = had_fault ? fault_rec.fault_count : 0u;
@@ -1309,6 +1375,13 @@ kalico_diag_emit_live(void)
                         EVENT_LOG_EVENT_RUNTIME_FG_FREEZE, 0,
                         live_snap.worst_fg_stall_pc,
                         live_snap.worst_fg_stall_ticks);
+    }
+
+    if (live_snap.worst_task_cyc) {
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_TASK, 0,
+                        live_snap.worst_task_func,
+                        live_snap.worst_task_cyc);
     }
 
     for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {
