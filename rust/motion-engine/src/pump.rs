@@ -1034,6 +1034,79 @@ pub struct WireSink {
     pub freq_of: Arc<dyn Fn(u32) -> Option<f64> + Send + Sync>,
 }
 
+/// Per-attempt response wait for a serial `PushPieces` re-request. A few × the
+/// normal ~6 ms RTT, so a healthy response still returns on arrival while a lost
+/// one is re-requested fast.
+const PUSHPIECES_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(30);
+
+/// Total serial `PushPieces` re-requests. The whole burst blocks the
+/// single-threaded pump, so the budget (`* PUSHPIECES_ATTEMPT_TIMEOUT` ≈ 90 ms)
+/// must stay under the smallest lead (`DRIP_WINDOW_SECS` = 100 ms) — otherwise
+/// the retry itself starves the MCU of later pieces and recreates the very
+/// `-308` it prevents. Recovers isolated corruption; sustained corruption gives
+/// up fast to the loud in-past-guard backstop.
+const PUSHPIECES_MAX_ATTEMPTS: u32 = 3;
+
+/// Bounded re-request policy for serial `PushPieces` (the frame is idempotent on
+/// the real MCU: slot-addressed write + absolute `commit_head`, stale = no-op).
+/// `attempt_call` performs one request/response with the short per-attempt
+/// timeout. Returns `Ok` on the first success; `Fatal` (no further attempts) on a
+/// genuine MCU failure (`Closed`/`Io` dead transport, `McuShutdown`) so it surfaces
+/// loud instead of being buried under the retry budget; `Transient` once the budget
+/// is spent on recoverable corruption so the existing pump path + in-past guard
+/// remain the backstop. Pure (no I/O of its own) so the policy is unit-testable
+/// with a scripted `attempt_call`.
+fn pushpieces_retransmit_serial<F>(
+    mcu_id: u32,
+    max_attempts: u32,
+    mut attempt_call: F,
+) -> Result<Vec<u8>, SendError>
+where
+    F: FnMut() -> Result<Vec<u8>, host_rt::transport::TransportError>,
+{
+    use host_rt::transport::TransportError;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match attempt_call() {
+            Ok(b) => return Ok(b),
+            Err(
+                e @ (TransportError::Closed
+                | TransportError::Io(_)
+                | TransportError::McuShutdown(_)),
+            ) => {
+                return Err(SendError::Fatal(format!(
+                    "serial PushPieces mcu {mcu_id}: {e:?}"
+                )));
+            }
+            Err(e) => {
+                if attempt >= max_attempts {
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "pushpieces_giveup",
+                        mcu = mcu_id,
+                        attempts = attempt,
+                        error = ?e,
+                        "[pushpieces] budget exhausted — giving up (serial); in-past guard is the backstop"
+                    );
+                    return Err(SendError::Transient(format!(
+                        "serial PushPieces mcu {mcu_id}: no response after {attempt} attempts ({e:?})"
+                    )));
+                }
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "pushpieces_retry",
+                    mcu = mcu_id,
+                    attempt,
+                    max_attempts,
+                    error = ?e,
+                    "[pushpieces] no/lost response — re-requesting idempotent frame (serial)"
+                );
+            }
+        }
+    }
+}
+
 impl WireSink {
     fn call_push_pieces(
         &self,
@@ -1074,17 +1147,15 @@ impl WireSink {
                 let io = weak.upgrade().ok_or_else(|| {
                     SendError::Transient(format!("McuHostIo for mcu {mcu_id} detached"))
                 })?;
-                let (_kind, b) = io
-                    .kalico_call_on_channel(
+                pushpieces_retransmit_serial(mcu_id, PUSHPIECES_MAX_ATTEMPTS, || {
+                    io.kalico_call_on_channel(
                         mcu_protocol::MCU_CHANNEL_PIECES,
                         mcu_protocol::MessageKind::PushPieces,
-                        body,
-                        self.timeout,
+                        body.clone(),
+                        PUSHPIECES_ATTEMPT_TIMEOUT,
                     )
-                    .map_err(|e| {
-                        SendError::Transient(format!("serial PushPieces mcu {mcu_id}: {e:?}"))
-                    })?;
-                b
+                    .map(|(_kind, b)| b)
+                })?
             }
             McuTransport::EtherCat(weak) => {
                 let conn = weak.upgrade().ok_or_else(|| {

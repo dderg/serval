@@ -775,3 +775,101 @@ fn pump_backlog_drains_to_zero_when_pushed() {
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
 }
+
+mod pushpieces_retransmit_tests {
+    use super::super::{SendError, pushpieces_retransmit_serial};
+    use host_rt::transport::TransportError;
+
+    #[test]
+    fn recovers_after_transient_failures_within_budget() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, || {
+            calls += 1;
+            if calls < 3 {
+                Err(TransportError::Timeout)
+            } else {
+                Ok(vec![0xAB, 0xCD])
+            }
+        });
+        assert_eq!(res.expect("should recover"), vec![0xAB, 0xCD]);
+        assert_eq!(
+            calls, 3,
+            "succeeds on the 3rd attempt after 2 transient losses"
+        );
+    }
+
+    #[test]
+    fn first_attempt_success_does_not_retry() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, || {
+            calls += 1;
+            Ok(vec![1, 2, 3])
+        });
+        assert_eq!(res.expect("ok"), vec![1, 2, 3]);
+        assert_eq!(
+            calls, 1,
+            "healthy link: exactly one attempt, no extra latency"
+        );
+    }
+
+    #[test]
+    fn persistent_corruption_gives_up_as_transient_after_budget() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 4, || {
+            calls += 1;
+            Err(TransportError::Timeout)
+        });
+        assert!(
+            matches!(res, Err(SendError::Transient(_))),
+            "budget exhaustion returns Transient (backstop handles it), not Fatal"
+        );
+        assert_eq!(
+            calls, 4,
+            "exactly max_attempts attempts — no infinite retry"
+        );
+    }
+
+    #[test]
+    fn dead_transport_closed_fails_fast_no_retry() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, || {
+            calls += 1;
+            Err(TransportError::Closed)
+        });
+        assert!(
+            matches!(res, Err(SendError::Fatal(_))),
+            "Closed = dead transport → Fatal"
+        );
+        assert_eq!(calls, 1, "no retry on a dead transport");
+    }
+
+    #[test]
+    fn dead_transport_io_fails_fast_no_retry() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, || {
+            calls += 1;
+            Err(TransportError::Io(std::io::Error::from(
+                std::io::ErrorKind::BrokenPipe,
+            )))
+        });
+        assert!(
+            matches!(res, Err(SendError::Fatal(_))),
+            "Io = dead transport → Fatal"
+        );
+        assert_eq!(calls, 1, "no retry on a dead transport");
+    }
+
+    #[test]
+    fn mcu_shutdown_fails_fast_no_retry() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, || {
+            calls += 1;
+            Err(TransportError::McuShutdown("fault -112".into()))
+        });
+        assert!(
+            matches!(res, Err(SendError::Fatal(_))),
+            "McuShutdown is a genuine MCU failure → fail loud, not retry"
+        );
+        assert_eq!(calls, 1, "no retry once the MCU has shut down");
+    }
+}
