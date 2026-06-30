@@ -429,6 +429,73 @@ fn trajectory_final_position_constant_piece() {
     );
 }
 
+#[test]
+fn reconstruction_against_locked_reference_matches_live_baseline() {
+    // Endstop reconstruction must give the same triggered position whether the
+    // router is projecting on the live clock (no reference) or on a captured
+    // locked reference — the trip-time inversion uses the same base both record
+    // and reconstruct go through, so homing is never desynced by the reference.
+    const MCU_ID: u32 = 8;
+    const FREQ_F64: f64 = 180_000_000.0;
+
+    let duration_secs: f32 = 0.025;
+    #[allow(clippy::cast_possible_truncation)]
+    let duration_ticks = (duration_secs as f64 * FREQ_F64) as u64;
+    let piece_start: u64 = 1_000_000;
+    let piece = make_linear_piece(piece_start, duration_secs, 0.0, 50.0);
+    let key = AxisKey {
+        mcu_id: MCU_ID,
+        axis: AXIS_X as u8,
+    };
+    let trip_clock = piece_start + duration_ticks / 2;
+
+    let router_live = router_with_clock(MCU_ID, FREQ_F64);
+    let mut store_live = HistoryStore::default();
+    record_synced(&mut store_live, &router_live, key, &piece, FREQ);
+    let baseline = reconstruct_axis_position(
+        MCU_ID,
+        trip_clock,
+        key,
+        &router_live,
+        &shared(store_live),
+        f64::NEG_INFINITY,
+    )
+    .expect("live-clock reconstruction must succeed");
+
+    let router_ref = router_with_clock(MCU_ID, FREQ_F64);
+    {
+        let mut r = router_ref.lock().unwrap_or_else(|p| p.into_inner());
+        let h = crate::types::mcu_handle_from_raw(MCU_ID);
+        assert!(r.capture_reference(h).expect("synced clock must capture"));
+        // Re-sync the live clock to a different rate/anchor AFTER capture. If the
+        // endstop path followed the live clock, reconstruction would now diverge
+        // from the baseline; it must follow the locked reference and still match.
+        let _ = r.set_clock_est_from_sample(
+            h,
+            FREQ_F64 * (1.0 + 90e-6),
+            std::time::Instant::now(),
+            2_000_000_000,
+        );
+    }
+    let mut store_ref = HistoryStore::default();
+    record_synced(&mut store_ref, &router_ref, key, &piece, FREQ);
+    let with_ref = reconstruct_axis_position(
+        MCU_ID,
+        trip_clock,
+        key,
+        &router_ref,
+        &shared(store_ref),
+        f64::NEG_INFINITY,
+    )
+    .expect("locked-reference reconstruction must succeed");
+
+    assert!(
+        (with_ref - baseline).abs() < 1e-3,
+        "endstop trip-time must round-trip identically through the locked reference: \
+         baseline={baseline:.6}mm with_ref={with_ref:.6}mm"
+    );
+}
+
 mod drive_fault_routing_tests {
     use crate::homing::{DriveFaultRoute, route_drive_fault};
 

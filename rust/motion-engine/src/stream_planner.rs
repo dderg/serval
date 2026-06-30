@@ -100,6 +100,8 @@ pub enum DispatchError {
     MissingNominalFreq(u32),
     #[error("nudge target mcu_id={mcu_id} axis={axis} not present in mcu_configs")]
     NudgeTargetMissing { mcu_id: u32, axis: u8 },
+    #[error("motion-engine: failed to freeze reference clock for mcu {mcu_id}: {reason}")]
+    ReferenceCaptureFailed { mcu_id: u32, reason: String },
 }
 
 // Producer-stall watermark budget. When the input goes quiet, materialize the

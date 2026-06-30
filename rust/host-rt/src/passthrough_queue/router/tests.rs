@@ -514,6 +514,194 @@ fn clock_to_host_secs_round_trips() {
 }
 
 #[test]
+fn capture_reference_requires_a_synced_clock() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    assert!(
+        !router.capture_reference(mcu).unwrap(),
+        "no reference can be frozen before the live clock is synced"
+    );
+    assert_eq!(router.reference_freq(mcu), None);
+}
+
+#[test]
+fn capture_reference_is_one_shot() {
+    let (mut router, clock) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    let base_host = instant_to_f64(clock.now());
+
+    router
+        .set_clock_est(mcu, 1_000_000.0, base_host, 10_000_000)
+        .unwrap();
+    assert!(router.capture_reference(mcu).unwrap());
+    assert_eq!(router.reference_freq(mcu), Some(1_000_000.0));
+
+    // A second capture after the live clock moved must NOT re-freeze the
+    // reference — it is locked once and never moves under in-flight pieces.
+    router
+        .set_clock_est(mcu, 2_000_000.0, base_host + 5.0, 99_000_000)
+        .unwrap();
+    assert!(router.capture_reference(mcu).unwrap());
+    assert_eq!(router.reference_freq(mcu), Some(1_000_000.0));
+}
+
+#[test]
+fn frozen_reference_keeps_piece_projection_stable_across_resync() {
+    // The whole point of the locked reference: once pieces are queued against
+    // it, a subsequent re-sync of the live clock must NOT move where a given
+    // host time projects — otherwise consecutive pieces gap/overlap.
+    let (mut router, clock) = make_router();
+    let mcu = router.claim_mcu("mcu");
+
+    let base_host = instant_to_f64(clock.now());
+    router
+        .set_clock_est(mcu, 1_000_000.0, base_host, 10_000_000)
+        .unwrap();
+    assert!(router.capture_reference(mcu).unwrap());
+
+    let trip_host = base_host + 1.5;
+    // An independent probe tick for the inverse path (not derived from the
+    // forward projection), so the inverse assertion can't be trivially equal.
+    let probe_tick: u64 = 10_750_000;
+    let fwd_before = router.host_time_to_mcu_clock(mcu, trip_host).unwrap();
+    let inv_before = router.clock_to_host_secs(mcu, probe_tick).unwrap();
+
+    // Live clock re-synced to a different rate/offset/anchor (a rebase) — if either
+    // projection followed the live clock, these would move.
+    router
+        .set_clock_est(mcu, 1_000_050.0, base_host + 0.3, 9_000_000)
+        .unwrap();
+    let fwd_after = router.host_time_to_mcu_clock(mcu, trip_host).unwrap();
+    let inv_after = router.clock_to_host_secs(mcu, probe_tick).unwrap();
+
+    assert_eq!(
+        fwd_before, fwd_after,
+        "forward projection must follow the locked reference, not the re-synced live clock"
+    );
+    assert_eq!(
+        inv_before, inv_after,
+        "endstop inverse must also follow the locked reference across a re-sync"
+    );
+}
+
+#[test]
+fn note_drift_sample_streaks_and_resets() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    assert_eq!(router.note_drift_sample(mcu, false).unwrap(), 1);
+    assert_eq!(router.note_drift_sample(mcu, false).unwrap(), 2);
+    assert_eq!(
+        router.note_drift_sample(mcu, true).unwrap(),
+        0,
+        "an in-bound sample resets the streak"
+    );
+    assert_eq!(router.note_drift_sample(mcu, false).unwrap(), 1);
+}
+
+#[test]
+fn check_drift_faults_only_after_three_consecutive_out_of_bound() {
+    let (mut router, clock) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    let base_host = instant_to_f64(clock.now());
+
+    let ref_freq = 180_000_000.0;
+    router.set_clock_est(mcu, ref_freq, base_host, 0).unwrap();
+    assert!(router.capture_reference(mcu).unwrap());
+
+    let out_of_bound = ref_freq * (1.0 + 150e-6); // 150 ppm > 100 ppm bound
+
+    assert_eq!(
+        router.check_drift(mcu, out_of_bound).unwrap(),
+        DriftCheck::Ok
+    );
+    assert_eq!(
+        router.check_drift(mcu, out_of_bound).unwrap(),
+        DriftCheck::Ok
+    );
+    match router.check_drift(mcu, out_of_bound).unwrap() {
+        DriftCheck::Fault { drift_ppm } => assert!(
+            (drift_ppm - 150.0).abs() < 1.0,
+            "fault must carry the offending drift, got {drift_ppm}"
+        ),
+        DriftCheck::Ok => panic!("3rd consecutive out-of-bound sample must fault"),
+    }
+}
+
+#[test]
+fn check_drift_in_bound_sample_breaks_the_streak() {
+    let (mut router, clock) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    let base_host = instant_to_f64(clock.now());
+
+    let ref_freq = 180_000_000.0;
+    router.set_clock_est(mcu, ref_freq, base_host, 0).unwrap();
+    assert!(router.capture_reference(mcu).unwrap());
+
+    let out_of_bound = ref_freq * (1.0 + 150e-6);
+    let within = ref_freq * (1.0 + 10e-6);
+
+    assert_eq!(
+        router.check_drift(mcu, out_of_bound).unwrap(),
+        DriftCheck::Ok
+    );
+    assert_eq!(
+        router.check_drift(mcu, out_of_bound).unwrap(),
+        DriftCheck::Ok
+    );
+    assert_eq!(
+        router.check_drift(mcu, within).unwrap(),
+        DriftCheck::Ok,
+        "an in-bound sample resets the consecutive streak"
+    );
+    // Two more out-of-bound must NOT fault (streak restarted from the reset).
+    assert_eq!(
+        router.check_drift(mcu, out_of_bound).unwrap(),
+        DriftCheck::Ok
+    );
+    assert_eq!(
+        router.check_drift(mcu, out_of_bound).unwrap(),
+        DriftCheck::Ok
+    );
+}
+
+#[test]
+fn check_drift_indeterminate_sample_resets_streak() {
+    let (mut router, clock) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    let base_host = instant_to_f64(clock.now());
+
+    let ref_freq = 180_000_000.0;
+    router.set_clock_est(mcu, ref_freq, base_host, 0).unwrap();
+    assert!(router.capture_reference(mcu).unwrap());
+
+    let out_of_bound = ref_freq * (1.0 + 150e-6);
+    assert_eq!(
+        router.check_drift(mcu, out_of_bound).unwrap(),
+        DriftCheck::Ok
+    );
+    assert_eq!(
+        router.check_drift(mcu, out_of_bound).unwrap(),
+        DriftCheck::Ok
+    );
+    // A non-synced (freq <= 0) sample must reset, not bridge the streak.
+    assert_eq!(router.check_drift(mcu, 0.0).unwrap(), DriftCheck::Ok);
+    assert_eq!(
+        router.check_drift(mcu, out_of_bound).unwrap(),
+        DriftCheck::Ok
+    );
+}
+
+#[test]
+fn check_drift_without_reference_is_ok() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    // No reference captured: nothing to compare against, never faults.
+    for _ in 0..5 {
+        assert_eq!(router.check_drift(mcu, 999.0).unwrap(), DriftCheck::Ok);
+    }
+}
+
+#[test]
 fn clock_to_host_secs_no_record_returns_none() {
     let (mut router, _) = make_router();
     let mcu = router.claim_mcu("mcu");

@@ -16,6 +16,19 @@ pub const MAX_DRIFT_PPM_DEFAULT: f64 = 100.0;
 pub const MAX_SAMPLE_AGE_MS_DEFAULT: u64 = 2000;
 pub const MAX_RTT_AGE_MS_DEFAULT: u64 = 500;
 
+pub const MAX_CONSECUTIVE_OUT_OF_BOUND: u32 = 3;
+
+pub fn drift_ppm_between(live_freq: f64, reference_freq: f64) -> f64 {
+    if reference_freq.abs() < 1e-12 {
+        return 0.0;
+    }
+    ((live_freq - reference_freq) / reference_freq) * 1e6
+}
+
+pub fn drift_within_authority(live_freq: f64, reference_freq: f64) -> bool {
+    drift_ppm_between(live_freq, reference_freq).abs() <= MAX_DRIFT_PPM_DEFAULT
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum SampleSource {
     Dedicated,
@@ -308,10 +321,7 @@ impl ClockSyncEstimator {
     }
 
     pub fn drift_ppm(&self, baseline_freq: f64) -> f64 {
-        if baseline_freq.abs() < 1e-12 {
-            return 0.0;
-        }
-        ((self.clock_freq_estimate - baseline_freq) / baseline_freq) * 1e6
+        drift_ppm_between(self.clock_freq_estimate, baseline_freq)
     }
 
     pub fn last_sample_age(&self) -> Option<Duration> {
@@ -416,3 +426,6 @@ impl std::fmt::Display for QualityGateFailure {
 
 #[cfg(test)]
 mod clock_seam_tests;
+
+#[cfg(test)]
+mod ratio_tests;

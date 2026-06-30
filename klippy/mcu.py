@@ -1275,9 +1275,18 @@ class MCU:
             )
 
             reactor = self._reactor
+            clock_est_shutdown = []
 
             def _engine_clock_est_cb(
-                freq, offset, last_clock, b=engine, h=handle, r=reactor
+                freq,
+                offset,
+                last_clock,
+                b=engine,
+                h=handle,
+                r=reactor,
+                p=self._printer,
+                name=self._name,
+                latched=clock_est_shutdown,
             ):
                 host_now_raw = r.monotonic()
                 try:
@@ -1288,8 +1297,17 @@ class MCU:
                         int(last_clock),
                         host_now_raw,
                     )
-                except Exception:
+                except Exception as e:
+                    if latched:
+                        return
+                    latched.append(True)
                     logging.exception("motion_engine: set_clock_est failed")
+                    # Runs on the serial-reader thread, so marshal the shutdown
+                    # onto the reactor; latched so it fires once, not every sync.
+                    p.invoke_async_shutdown(
+                        "motion_engine clock sync failed for MCU '%s': %s"
+                        % (name, e)
+                    )
 
             self._clocksync.set_clock_est_callback(_engine_clock_est_cb)
         return True

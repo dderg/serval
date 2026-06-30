@@ -45,6 +45,17 @@ impl std::fmt::Display for RouterError {
 
 impl std::error::Error for RouterError {}
 
+/// Result of one drift sample of the live clock against the locked reference.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DriftCheck {
+    /// No reference captured yet, or the live clock drift is within authority.
+    Ok,
+    /// Live clock has diverged beyond the bound for `MAX_CONSECUTIVE_OUT_OF_BOUND`
+    /// samples in a row; the caller must fail loud. `drift_ppm` is the offending
+    /// magnitude (live vs reference).
+    Fault { drift_ppm: f64 },
+}
+
 struct McuRecord {
     #[allow(dead_code)]
     label: String,
@@ -53,13 +64,34 @@ struct McuRecord {
     window: ReceiveWindow,
     sent_times: HashMap<NotifyId, f64>,
     config_stage: ConfigStage,
+    // Live re-synced clock: host<->MCU mapping rebased on every clock-sync sample.
+    // Used for ack-clock projection, 32->64-bit tick widening, and drift
+    // monitoring against the reference. Never used to schedule motion pieces.
     clock_freq: f64,
     clock_offset: f64,
     last_clock: u64,
+    // Locked reference clock: a one-shot snapshot of the live clock taken when the
+    // first piece is about to be sent, then frozen. Motion-piece projection and the
+    // endstop trip-time inversion use ONLY this, so consecutive pieces stay
+    // contiguous regardless of how the live clock is later re-synced.
+    ref_freq: f64,
+    ref_offset: f64,
+    ref_anchor: u64,
+    out_of_bound_streak: u32,
     flush_callbacks: Vec<Box<dyn Fn() + Send>>,
     was_non_empty: bool,
     stats: StatsCounters,
     debug_log: DebugLog,
+}
+
+impl McuRecord {
+    fn projection_base(&self) -> (f64, f64, u64) {
+        if self.ref_freq > 0.0 {
+            (self.ref_freq, self.ref_offset, self.ref_anchor)
+        } else {
+            (self.clock_freq, self.clock_offset, self.last_clock)
+        }
+    }
 }
 
 impl std::fmt::Debug for McuRecord {
@@ -73,6 +105,9 @@ impl std::fmt::Debug for McuRecord {
             .field("config_stage", &self.config_stage)
             .field("clock_freq", &self.clock_freq)
             .field("last_clock", &self.last_clock)
+            .field("ref_freq", &self.ref_freq)
+            .field("ref_anchor", &self.ref_anchor)
+            .field("out_of_bound_streak", &self.out_of_bound_streak)
             .field("flush_callbacks_count", &self.flush_callbacks.len())
             .field("was_non_empty", &self.was_non_empty)
             .field("stats", &self.stats)
@@ -124,6 +159,10 @@ impl PassthroughRouter {
                 clock_freq: 0.0,
                 clock_offset: 0.0,
                 last_clock: 0,
+                ref_freq: 0.0,
+                ref_offset: 0.0,
+                ref_anchor: 0,
+                out_of_bound_streak: 0,
                 flush_callbacks: Vec::new(),
                 was_non_empty: false,
                 stats: StatsCounters::new(),
@@ -389,6 +428,92 @@ impl PassthroughRouter {
         Ok(())
     }
 
+    pub fn reference_freq(&self, mcu: McuHandle) -> Option<f64> {
+        self.mcus
+            .get(&mcu)
+            .map(|rec| rec.ref_freq)
+            .filter(|f| *f > 0.0)
+    }
+
+    /// Freeze the locked reference clock from the current live synced clock, once.
+    /// Returns `Ok(true)` if a reference is in place afterward (already captured or
+    /// captured now), `Ok(false)` if the live clock is not synced yet so nothing
+    /// could be frozen. Idempotent: a reference is captured exactly once and never
+    /// moved, so in-flight pieces never see the base shift underneath them.
+    pub fn capture_reference(&mut self, mcu: McuHandle) -> Result<bool, RouterError> {
+        let rec = self
+            .mcus
+            .get_mut(&mcu)
+            .ok_or(RouterError::UnknownMcu(mcu))?;
+        if rec.ref_freq > 0.0 {
+            return Ok(true);
+        }
+        if rec.clock_freq == 0.0 {
+            return Ok(false);
+        }
+        rec.ref_freq = rec.clock_freq;
+        rec.ref_offset = rec.clock_offset;
+        rec.ref_anchor = rec.last_clock;
+        tracing::info!(
+            subsystem = "clocksync",
+            event = "capture_reference",
+            mcu = ?mcu,
+            ref_freq = rec.ref_freq,
+            ref_offset = rec.ref_offset,
+            ref_anchor = rec.ref_anchor,
+            "[clock-ref] froze locked reference from live synced clock"
+        );
+        Ok(true)
+    }
+
+    /// Record one drift sample of the live clock against the locked reference.
+    /// `within_bound` resets the streak to 0; otherwise it increments. Returns the
+    /// resulting consecutive out-of-bound count.
+    pub fn note_drift_sample(
+        &mut self,
+        mcu: McuHandle,
+        within_bound: bool,
+    ) -> Result<u32, RouterError> {
+        let rec = self
+            .mcus
+            .get_mut(&mcu)
+            .ok_or(RouterError::UnknownMcu(mcu))?;
+        rec.out_of_bound_streak = if within_bound {
+            0
+        } else {
+            rec.out_of_bound_streak + 1
+        };
+        Ok(rec.out_of_bound_streak)
+    }
+
+    /// Compare a live-clock `freq` sample against the locked reference and advance
+    /// the out-of-bound streak. Returns `Fault` once the drift has stayed beyond
+    /// `MAX_DRIFT_PPM_DEFAULT` for `MAX_CONSECUTIVE_OUT_OF_BOUND` samples in a row.
+    /// Before a reference is captured there is nothing to compare, so it is `Ok`.
+    /// An indeterminate sample (`freq <= 0`, i.e. not synced) resets the streak so
+    /// a transient gap never bridges two out-of-bound runs into a false fault.
+    pub fn check_drift(
+        &mut self,
+        mcu: McuHandle,
+        live_freq: f64,
+    ) -> Result<DriftCheck, RouterError> {
+        let Some(reference_freq) = self.reference_freq(mcu) else {
+            return Ok(DriftCheck::Ok);
+        };
+        if live_freq <= 0.0 {
+            self.note_drift_sample(mcu, true)?;
+            return Ok(DriftCheck::Ok);
+        }
+        let within = crate::clock_sync::drift_within_authority(live_freq, reference_freq);
+        let streak = self.note_drift_sample(mcu, within)?;
+        if !within && streak >= crate::clock_sync::MAX_CONSECUTIVE_OUT_OF_BOUND {
+            return Ok(DriftCheck::Fault {
+                drift_ppm: crate::clock_sync::drift_ppm_between(live_freq, reference_freq),
+            });
+        }
+        Ok(DriftCheck::Ok)
+    }
+
     /// Convert an MCU tick count to a wall-clock `OffsetDateTime`.
     ///
     /// Returns `None` when no clock record has been set for this MCU
@@ -454,12 +579,13 @@ impl PassthroughRouter {
 
     pub fn clock_to_host_secs(&self, mcu: McuHandle, mcu_clock: u64) -> Option<f64> {
         let rec = self.mcus.get(&mcu)?;
-        if rec.clock_freq == 0.0 {
+        let (base_freq, base_offset, base_anchor) = rec.projection_base();
+        if base_freq == 0.0 {
             return None;
         }
         #[allow(clippy::cast_precision_loss)]
-        let delta_ticks = (mcu_clock as f64) - (rec.last_clock as f64);
-        Some(rec.clock_offset + delta_ticks / rec.clock_freq)
+        let delta_ticks = (mcu_clock as f64) - (base_anchor as f64);
+        Some(base_offset + delta_ticks / base_freq)
     }
 
     pub fn print_time_to_host_secs(
@@ -468,11 +594,12 @@ impl PassthroughRouter {
         print_time: f64,
     ) -> Option<f64> {
         let rec = self.mcus.get(&reference_mcu)?;
-        if rec.clock_freq == 0.0 {
+        let (base_freq, base_offset, base_anchor) = rec.projection_base();
+        if base_freq == 0.0 {
             return None;
         }
         #[allow(clippy::cast_precision_loss)]
-        Some(rec.clock_offset + print_time - (rec.last_clock as f64) / rec.clock_freq)
+        Some(base_offset + print_time - (base_anchor as f64) / base_freq)
     }
 
     pub fn host_time_to_mcu_clock(
@@ -481,20 +608,22 @@ impl PassthroughRouter {
         host_time_secs: f64,
     ) -> Result<u64, RouterError> {
         let rec = self.mcus.get(&mcu).ok_or(RouterError::UnknownMcu(mcu))?;
-        if rec.clock_freq == 0.0 {
+        let (base_freq, base_offset, base_anchor) = rec.projection_base();
+        if base_freq == 0.0 {
             return Ok(0);
         }
-        let delta = (host_time_secs - rec.clock_offset) * rec.clock_freq;
+        let delta = (host_time_secs - base_offset) * base_freq;
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let projected = rec.last_clock.wrapping_add(delta.max(0.0) as u64);
+        let projected = base_anchor.wrapping_add(delta.max(0.0) as u64);
         tracing::trace!(
             subsystem = "motion",
             event = "host_time_to_mcu_clock",
             mcu = ?mcu,
             host_time_secs,
-            clock_offset = rec.clock_offset,
-            last_clock = rec.last_clock,
-            clock_freq = rec.clock_freq,
+            base_offset,
+            base_anchor,
+            base_freq,
+            ref_active = rec.ref_freq > 0.0,
             result_ns = projected,
             "[project] host_time_to_mcu_clock"
         );
