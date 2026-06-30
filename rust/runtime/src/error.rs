@@ -131,7 +131,6 @@ pub enum FaultCode {
 
     ClockSyncQuality = -110,
     ClockSyncTimeout = -111,
-    ClockDivergenceUnsyncable = -112,
 
     ArmTimeout = -120,
     ArmRejected = -121,
@@ -257,7 +256,6 @@ impl FaultCode {
             -103 => Self::ProtocolVersionUnsupported,
             -110 => Self::ClockSyncQuality,
             -111 => Self::ClockSyncTimeout,
-            -112 => Self::ClockDivergenceUnsyncable,
             -120 => Self::ArmTimeout,
             -121 => Self::ArmRejected,
             -122 => Self::CrossMcuDesync,
@@ -343,7 +341,6 @@ impl FaultCode {
             Self::ProtocolVersionUnsupported => "ProtocolVersionUnsupported",
             Self::ClockSyncQuality => "ClockSyncQuality",
             Self::ClockSyncTimeout => "ClockSyncTimeout",
-            Self::ClockDivergenceUnsyncable => "ClockDivergenceUnsyncable",
             Self::ArmTimeout => "ArmTimeout",
             Self::ArmRejected => "ArmRejected",
             Self::CrossMcuDesync => "CrossMcuDesync",

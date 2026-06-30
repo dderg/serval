@@ -312,7 +312,6 @@ fn from_u16_round_trip_all_variants() {
         FaultCode::ProtocolVersionUnsupported,
         FaultCode::ClockSyncQuality,
         FaultCode::ClockSyncTimeout,
-        FaultCode::ClockDivergenceUnsyncable,
         FaultCode::ArmTimeout,
         FaultCode::ArmRejected,
         FaultCode::CrossMcuDesync,

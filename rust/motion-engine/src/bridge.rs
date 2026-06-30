@@ -696,26 +696,6 @@ fn planner_err(e: StreamPlannerError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
-fn clock_divergence_unsyncable_err(mcu: u32, drift_ppm: f64) -> PyErr {
-    let code = runtime::error::FaultCode::ClockDivergenceUnsyncable.as_i32();
-    let max_ppm = host_rt::clock_sync::MAX_DRIFT_PPM_DEFAULT;
-    tracing::error!(
-        subsystem = "clocksync",
-        event = "clock_divergence_unsyncable",
-        mcu,
-        drift_ppm,
-        max_drift_ppm = max_ppm,
-        fault_code = code,
-        "live clock diverged from the locked reference beyond bound for \
-         3 consecutive samples — reference is locked, no rate correction; shutting down"
-    );
-    PyRuntimeError::new_err(format!(
-        "clock divergence unsyncable (fault {code}): mcu {mcu} live clock drifted \
-         {drift_ppm:.1} ppm from the locked reference (bound {max_ppm:.1} ppm) \
-         for 3 consecutive samples"
-    ))
-}
-
 /// Backstop only. The continuity commit drains at every blend, so the buffer
 /// normally hovers near the open-tail length past the finality barrier; this
 /// force-drain to rest fires solely when no clean seam exists within reach. Set
@@ -2659,23 +2639,15 @@ impl PyMotionEngine {
                 "[engine-trace] set_clock_est"
             );
         }
-        if !freq.is_finite() || freq < 0.0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_clock_est: invalid clock frequency {freq} for mcu {mcu}"
-            )));
-        }
-
-        let handle = mcu_handle_from_raw(mcu);
         let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-
-        if let host_rt::passthrough_queue::DriftCheck::Fault { drift_ppm } =
-            router.check_drift(handle, freq).map_err(router_err)?
-        {
-            return Err(clock_divergence_unsyncable_err(mcu, drift_ppm));
-        }
-
         router
-            .set_clock_est_rebased(handle, freq, offset, last_clock, host_now_raw)
+            .set_clock_est_rebased(
+                mcu_handle_from_raw(mcu),
+                freq,
+                offset,
+                last_clock,
+                host_now_raw,
+            )
             .map_err(router_err)?;
         Ok(())
     }
@@ -3351,31 +3323,6 @@ impl PyMotionEngine {
                     .unwrap_or_else(|p| p.into_inner())
                     .anchor_segment(seg.t_start, seg.t_end, host_now);
 
-                {
-                    let mut r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
-                    for cfg in mcu_configs_for_cb.iter() {
-                        let h = crate::types::mcu_handle_from_raw(cfg.mcu_id);
-                        if r.reference_freq(h).is_none() {
-                            match r.capture_reference(h) {
-                                Ok(true) => {}
-                                Ok(false) => {
-                                    return Err(DispatchError::ReferenceCaptureFailed {
-                                        mcu_id: cfg.mcu_id,
-                                        reason: "live clock not synced at first piece dispatch"
-                                            .to_string(),
-                                    });
-                                }
-                                Err(e) => {
-                                    return Err(DispatchError::ReferenceCaptureFailed {
-                                        mcu_id: cfg.mcu_id,
-                                        reason: e.to_string(),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-
                 if fresh {
                     let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
                     for cfg in mcu_configs_for_cb.iter() {
@@ -3486,31 +3433,9 @@ impl PyMotionEngine {
                     .unwrap_or_else(|p| p.into_inner())
                     .anchor_segment(np.piece.u_start, np.piece.u_end, host_now);
 
-                let h = crate::types::mcu_handle_from_raw(mcu_id);
-                {
-                    let mut r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
-                    if r.reference_freq(h).is_none() {
-                        match r.capture_reference(h) {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                return Err(DispatchError::ReferenceCaptureFailed {
-                                    mcu_id,
-                                    reason: "live clock not synced at first nudge dispatch"
-                                        .to_string(),
-                                });
-                            }
-                            Err(e) => {
-                                return Err(DispatchError::ReferenceCaptureFailed {
-                                    mcu_id,
-                                    reason: e.to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
-
                 if fresh {
                     let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
+                    let h = crate::types::mcu_handle_from_raw(mcu_id);
                     r.log_seg0_lead(h, t0 + np.piece.u_start, t0);
                 }
 
