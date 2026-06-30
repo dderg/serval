@@ -202,3 +202,23 @@ Decision matrix on next crash: (1) RX silent → link/MCU dead; (1) RX alive + (
 1. Reproduce post-USB3-move; compare `kalico_stream_error` rate + `retransmit_timeout` `gap_since_recv_ms` vs before.
 2. If corruption persists: it's the link — better cable routing away from motor/servo wiring, ferrites, a different USB-serial bridge, or shielding. (Software can't un-corrupt the wire; the guard + fail-loud already prevent the cryptic -308.)
 3. Only if `gap_since_recv_ms` shows the link recovers mid-window would faster/different retransmit be worth it.
+
+## Follow-up: 2026-06-30 #6 — ROOT CAUSE confirmed (High): link corruption + no-retransmit PushPieces
+
+Post-USB3-move reproduction (bench on 661f59373):
+- **Corruption persists on USB3** (`crc mismatch`, `bad trailer 0x00/0x41` at 15:04:18) and a CH341 disconnect also occurred on the USB3 port — so it's the **CH340 adapter / EMI itself, port-independent**, not the specific port.
+- Crash at 15:04:23: `pump_send_blocked elapsed_ms=5000, ok=false` then `pump_piece_in_past deficit_us=3,001,719`. Normal sends right before were 5–7 ms.
+- **`retransmit_timeout` = 0 over 1h** — `PushPieces` does NOT use the reactor's RTO/unacked-window retransmit.
+
+**Root cause (two layers):**
+1. **Trigger (hardware):** the CH340 USB-serial bridge corrupts bytes under stepper/servo EMI (CRC mismatch / bad trailer). Physical; survives the USB3 move.
+2. **Amplifier (software bug, the real fix):** the rewrite's motion path sends `PushPieces` via `WireSink::call_push_pieces → kalico_call_on_channel(..., timeout=5s)` (pump.rs:1038-1086) — a **one-shot request/response with NO retransmission**. A single corrupted response has no valid reply → the call waits the full 5 s `pump_timeout` → fails → the next piece is ~3 s stale → the host guard fires. The Klipper-protocol command stream *does* auto-retransmit (reactor `UnackedWindow` + RTO), which is why **stock Klipper rode through the same flaky link** — its motion commands retransmit; ours don't.
+
+**Why earlier theories were wrong:** not MCU freeze (MCU is transmitting, just corrupt), not EtherCAT (healthy throughout), not slow-RTO (PushPieces bypasses RTO entirely), not "no retries in general" (the Klipper stream retransmits — but the *kalico PushPieces channel* doesn't).
+
+**Fixes:**
+- **Software (primary, matches Klipper):** give the `kalico_call_on_channel` PushPieces path retransmission — resend on corrupt/timeout with a short RTO and a bounded retry count (or route motion frames through the seq/ACK/retransmit window the Klipper protocol already has). Turns a transient corruption into a few-ms recovery instead of a 5 s crash.
+- **Hardware (reduce trigger rate):** the CH340 corrupts under motion EMI regardless of port — better cable routing away from motor/servo leads, ferrites, shielding, or a more robust USB-serial bridge.
+- **Already shipped:** the host in-past guard converts the failure into a clean `pump_piece_in_past` fault instead of a cryptic MCU `-308`.
+
+**Status: Concluded (High confidence).** Remaining work is the PushPieces-retransmit fix (software) + EMI mitigation (hardware), tracked separately.
