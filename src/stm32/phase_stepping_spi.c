@@ -257,6 +257,9 @@ phase_dma_configure_bus(struct phase_bus_state *bus)
     spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
               | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
               | SPI_CFG2_SSOE;
+    st->CR &= ~DMA_SxCR_EN; // FCR/CR are writable only while the stream is off;
+    while (st->CR & DMA_SxCR_EN) // a leftover EN from the prior batch raises TEIF
+        ;
     st->FCR = 0; // direct mode: exactly 5 bytes, no FIFO misalignment
     st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
     st->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC | DMA_SxCR_TCIE | DMA_SxCR_TEIE;
