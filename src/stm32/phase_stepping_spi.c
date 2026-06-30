@@ -10,6 +10,14 @@
 #include "generic/motion_nvic_prio.h"
 #endif
 
+// The phase DMA transfer-complete IRQ runs one tier ABOVE motion (USB/CAN
+// level), not at MOTION_NVIC_PRIO: it must preempt the motion ISR and the
+// bit-bang extruder UART sampler to finalize each motor's transfer and arm the
+// next on time, or the batch overruns its tick under foreground load. It never
+// touches the step_queue SPSC, so it does not affect that equal-priority
+// invariant. (Matches the mass3d/kalico phase-stepping DMA implementation.)
+#define PHASE_DMA_TC_PRIO 1
+
 #define MAX_PHASE_BUSES   4
 #define MAX_PHASE_MOTORS  16   // must match Rust state::MAX_STEPPER_OIDS
 #define XDIRECT_LEN       5
@@ -220,16 +228,16 @@ phase_dma_init_bus(uint8_t bus_id)
 
     switch (bus_id) {
     case 0:
-        armcm_enable_irq(phase_dma_s0_irq, DMA1_Stream0_IRQn, MOTION_NVIC_PRIO);
+        armcm_enable_irq(phase_dma_s0_irq, DMA1_Stream0_IRQn, PHASE_DMA_TC_PRIO);
         break;
     case 1:
-        armcm_enable_irq(phase_dma_s1_irq, DMA1_Stream1_IRQn, MOTION_NVIC_PRIO);
+        armcm_enable_irq(phase_dma_s1_irq, DMA1_Stream1_IRQn, PHASE_DMA_TC_PRIO);
         break;
     case 2:
-        armcm_enable_irq(phase_dma_s2_irq, DMA1_Stream2_IRQn, MOTION_NVIC_PRIO);
+        armcm_enable_irq(phase_dma_s2_irq, DMA1_Stream2_IRQn, PHASE_DMA_TC_PRIO);
         break;
     case 3:
-        armcm_enable_irq(phase_dma_s3_irq, DMA1_Stream3_IRQn, MOTION_NVIC_PRIO);
+        armcm_enable_irq(phase_dma_s3_irq, DMA1_Stream3_IRQn, PHASE_DMA_TC_PRIO);
         break;
     default:
         break;
@@ -244,13 +252,21 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     SPI_TypeDef *spi = fast.spi;
 
     spi->CR1 = SPI_CR1_SSI; // CFG1/CFG2 are write-protected while SPE=1
+    // Full-duplex clocks a response byte in for every byte out; with no RX-DMA
+    // those bytes pile up in the RX fifo. Drain whatever the prior motor left so
+    // a full fifo cannot gate this transfer's clock (the master stalls on RX-fifo
+    // space — NDTR stays at full, SUSP latches, and the batch overruns).
+    while (spi->SR & (SPI_SR_RXP | SPI_SR_RXWNE))
+        (void)*(volatile uint8_t *)&spi->RXDR;
+    // Only TXDMAEN toggles per transfer; CFG2 is byte-identical to spi_prepare's
+    // (full-duplex). Keeping ONE COMM mode for both the DMA writes and the
+    // foreground reads is what stops the peripheral scrambling (MODF/overrun)
+    // on the mode flip a simplex-transmitter write would force. The 5-byte
+    // XDIRECT response just lands in the RX fifo (well under its 16-byte depth)
+    // and is flushed by the SPE toggle between motors — no RX-DMA needed.
     spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
               | (7u << SPI_CFG1_DSIZE_Pos) | SPI_CFG1_TXDMAEN;
-    // COMM_0 = simplex transmitter: XDIRECT is write-only, so suppress RX. In
-    // full-duplex the master also gates its clock on RX-fifo space and every
-    // frame loads an undrained RX fifo — the source of the TX/DMA desync.
     spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
-              | SPI_CFG2_COMM_0
               | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
               | SPI_CFG2_SSOE;
 
@@ -258,7 +274,8 @@ phase_dma_arm_motor(struct phase_bus_state *bus)
     st->CR &= ~DMA_SxCR_EN;
     while (st->CR & DMA_SxCR_EN)
         ;
-    st->FCR = 0; // direct mode, no FIFO-error interrupt — not the reset 0x21
+    st->FCR = DMA_SxFCR_DMDIS; // FIFO mode buffers the D1<->D2 bridge latency
+                               // so the TX feed can't FIFO-error under load
     *bus->ifcr_reg = bus->flag_clear;
     st->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
     st->M0AR = (uint32_t)(uintptr_t)&bus->txbuf[bus->commit_half][midx * XDIRECT_LEN];
@@ -284,6 +301,8 @@ phase_dma_release_current(struct phase_bus_state *bus)
     bus->stream->CR &= ~DMA_SxCR_EN;
     *bus->ifcr_reg = bus->flag_clear;
     SPI_TypeDef *spi = bus->fast_cfg.spi;
+    while (spi->SR & (SPI_SR_RXP | SPI_SR_RXWNE)) // empty full-duplex response
+        (void)*(volatile uint8_t *)&spi->RXDR;
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI;
     gpio_out_write(phase_motors[bus->seq[bus->cursor]].cs, 1);
@@ -323,6 +342,13 @@ phase_dma_tc_isr(uint8_t bus_id)
             }
         }
     }
+
+    // Empty the full-duplex response before handing the bus off (to the next
+    // motor's arm or a foreground read claiming the gap): a leftover RX byte
+    // desyncs the next user, which reads stale data and busy-waits — that is
+    // what showed up as the foreground holding the bus (FGSTUCK).
+    while (spi->SR & (SPI_SR_RXP | SPI_SR_RXWNE))
+        (void)*(volatile uint8_t *)&spi->RXDR;
 
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI;
@@ -523,8 +549,13 @@ phase_stepping_commit_tick(void)
                     continue;
                 }
             } else {
+                // Foreground holds the bus (a TMC/sensor read). A read on the
+                // shared bus legitimately spans several ticks under preemption,
+                // so only flag a genuinely stuck holder. The phase batch waits
+                // (it does not drop ticks), then resumes; eliminate the wait
+                // entirely by moving foreground devices off the phase bus.
                 phase_defer_count++;
-                if (++bus->fg_defer_count >= 2 && result == 0)
+                if (++bus->fg_defer_count >= 64 && result == 0)
                     result = ((uint32_t)b << 8) | PHASE_DMA_KIND_OVERRUN
                         | PHASE_DIAG_FGSTUCK_BIT
                         | phase_overrun_diag(bus, *bus->isr_reg);
