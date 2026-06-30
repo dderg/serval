@@ -110,6 +110,34 @@ phase_stepping_disable_writes(void)
     phase_spi_writes_enabled = 0;
 }
 
+#if CONFIG_MACH_STM32H7
+#define PHASE_DMA_SPI1_TX_REQ 38u
+#define PHASE_DMA_SPI1_RX_REQ 37u
+#define PHASE_DMA_TX_STREAM   DMA1_Stream0
+#define PHASE_DMA_RX_STREAM   DMA1_Stream1
+#define PHASE_DMA_CLEAR01 ( \
+      DMA_LIFCR_CTCIF0 | DMA_LIFCR_CHTIF0 | DMA_LIFCR_CTEIF0 \
+    | DMA_LIFCR_CDMEIF0 | DMA_LIFCR_CFEIF0 \
+    | DMA_LIFCR_CTCIF1 | DMA_LIFCR_CHTIF1 | DMA_LIFCR_CTEIF1 \
+    | DMA_LIFCR_CDMEIF1 | DMA_LIFCR_CFEIF1)
+
+static uint8_t __attribute__((section(".axi_bss"), aligned(32))) phase_dma_txbuf[32];
+static uint8_t __attribute__((section(".axi_bss"), aligned(32))) phase_dma_rxbuf[32];
+static uint8_t phase_dma_inited;
+
+static void
+phase_dma_init_once(void)
+{
+    if (phase_dma_inited)
+        return;
+    RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN;
+    (void)RCC->AHB1ENR;
+    DMAMUX1_Channel0->CCR = PHASE_DMA_SPI1_TX_REQ;
+    DMAMUX1_Channel1->CCR = PHASE_DMA_SPI1_RX_REQ;
+    phase_dma_inited = 1;
+}
+#endif
+
 __attribute__((used, externally_visible))
 void
 phase_stepping_write_xdirect(uint8_t motor_idx,
@@ -144,43 +172,57 @@ phase_stepping_write_xdirect(uint8_t motor_idx,
     struct spi_config fast = phase_buses[bus_id].fast_cfg;
     SPI_TypeDef *spi = fast.spi;
 
+    phase_dma_init_once();
+
+    for (int i = 0; i < 5; i++)
+        phase_dma_txbuf[i] = datagram[i];
+    SCB_CleanDCache_by_Addr((uint32_t *)phase_dma_txbuf, sizeof(phase_dma_txbuf));
+
+    spi->CR1 = SPI_CR1_SSI;
     spi->CFG1 = ((uint32_t)fast.div << SPI_CFG1_MBR_Pos)
-              | (7 << SPI_CFG1_DSIZE_Pos);
+              | (7 << SPI_CFG1_DSIZE_Pos)
+              | SPI_CFG1_TXDMAEN | SPI_CFG1_RXDMAEN;
     spi->CFG2 = ((uint32_t)fast.mode << SPI_CFG2_CPHA_Pos)
               | SPI_CFG2_MASTER | SPI_CFG2_SSM | SPI_CFG2_AFCNTR
               | SPI_CFG2_SSOE;
 
+    PHASE_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
+    PHASE_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
+    while ((PHASE_DMA_TX_STREAM->CR | PHASE_DMA_RX_STREAM->CR) & DMA_SxCR_EN)
+        ;
+    DMA1->LIFCR = PHASE_DMA_CLEAR01;
+
+    PHASE_DMA_RX_STREAM->FCR = 0;
+    PHASE_DMA_RX_STREAM->PAR = (uint32_t)(uintptr_t)&spi->RXDR;
+    PHASE_DMA_RX_STREAM->M0AR = (uint32_t)(uintptr_t)phase_dma_rxbuf;
+    PHASE_DMA_RX_STREAM->NDTR = 5;
+    PHASE_DMA_RX_STREAM->CR = DMA_SxCR_MINC;
+
+    PHASE_DMA_TX_STREAM->FCR = 0;
+    PHASE_DMA_TX_STREAM->PAR = (uint32_t)(uintptr_t)&spi->TXDR;
+    PHASE_DMA_TX_STREAM->M0AR = (uint32_t)(uintptr_t)phase_dma_txbuf;
+    PHASE_DMA_TX_STREAM->NDTR = 5;
+    PHASE_DMA_TX_STREAM->CR = DMA_SxCR_DIR_0 | DMA_SxCR_MINC;
+
     gpio_out_write(phase_motors[motor_idx].cs, 0);
+
+    PHASE_DMA_RX_STREAM->CR |= DMA_SxCR_EN;
+    PHASE_DMA_TX_STREAM->CR |= DMA_SxCR_EN;
 
     spi->CR2 = 5u << SPI_CR2_TSIZE_Pos;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_SPE;
+    spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI | SPI_CR1_CSTART | SPI_CR1_SPE;
 
-    for (int i = 0; i < 5; i++) {
-        uint32_t deadline = timer_read_time() + timer_from_us(50);
-        while (!(spi->SR & SPI_SR_TXP)) {
-            if (!timer_is_before(timer_read_time(), deadline))
-                goto bail;
-        }
-        *(volatile uint8_t *)&spi->TXDR = datagram[i];
-    }
-    for (int i = 0; i < 5; i++) {
-        uint32_t deadline = timer_read_time() + timer_from_us(50);
-        while (!(spi->SR & SPI_SR_RXP)) {
-            if (!timer_is_before(timer_read_time(), deadline))
-                goto bail;
-        }
-        (void)*(volatile uint8_t *)&spi->RXDR;
-    }
-    {
-        uint32_t deadline = timer_read_time() + timer_from_us(100);
-        while (!(spi->SR & SPI_SR_EOT)) {
-            if (!timer_is_before(timer_read_time(), deadline))
-                goto bail;
-        }
+    uint32_t deadline = timer_read_time() + timer_from_us(200);
+    while (!(DMA1->LISR & DMA_LISR_TCIF1)) {
+        if (!timer_is_before(timer_read_time(), deadline))
+            break;
     }
 
-bail:
+    PHASE_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
+    PHASE_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
+    DMA1->LIFCR = PHASE_DMA_CLEAR01;
     spi->IFCR = 0xFFFFFFFF;
     spi->CR1 = SPI_CR1_SSI;
 #else
