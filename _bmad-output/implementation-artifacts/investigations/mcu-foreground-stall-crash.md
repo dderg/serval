@@ -3,8 +3,33 @@
 **Slug:** mcu-foreground-stall-crash
 **Session:** k-1782843288-1946 (Neptune bench, `dderg@ethercatpi5.local`)
 **Flashed commit:** `cf2ca03ad` (PushPieces retransmit + clock-sync revert)
-**Status:** Active — root mechanism High; stalling task NOT yet pinned (instrumentation gap)
+**Status:** Root cause CONFIRMED (High) — the stalling task is `console_task` (MCU command processing)
 **Date:** 2026-06-30
+
+## Follow-up 2026-06-30 #2 — stalling task named via the new instrumentation
+
+Flashed the per-task-timing build (`45ef61988`). `runtime.fg_task` fired on **three**
+crashes (19:14, 19:47, 20:32 UTC), every time naming the same func:
+`worst_task_func = 134286529 = 0x8010CC0` → **`console_task`** (`src/generic/serial_irq.c:79`).
+Durations: clean **423 µs** (first crash); multi-second (later crashes; the `dur_cyc` field
+wraps past ~51 s — cosmetic counter bug, func is solid).
+
+`console_task` calls **`mcu_demux_pump(receive_buf, rpos)`** — it parses and dispatches the
+received command stream (PushPieces et al.) in the **foreground**. So the foreground stall is
+**command processing**, almost certainly the Rust-side piece application invoked synchronously
+from the PushPieces handler. This ties together: the RAM-at-100% pressure (pre-existing on the
+64 KB F401), the worsening-over-print pattern, and the user's "slow chip" intuition.
+
+**Leading hypothesis (Medium):** the F401 (84 MHz, 64 KB) cannot process the piece/command
+stream as fast as the host sends it → the RX backlog grows → `console_task` spends longer each
+pass until it exceeds the host comms deadline → reset. I.e. a command-processing *throughput*
+problem of the rewrite on this low-end MCU, not a discrete bug. Alternative: a single
+PushPieces hits a pathological/long path in the Rust piece-apply.
+
+**Next instrumentation:** record inside `mcu_demux_pump` the message-kind currently being
+dispatched + the RX-buffer backlog depth, so the next crash shows whether it's PushPieces and
+whether the buffer is backed up (throughput) vs one slow command.
+Also: guard `worst_task_cyc` against the 32-bit wrap on multi-second stalls.
 
 ## Hand-off Brief (15s read)
 
