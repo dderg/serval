@@ -14,10 +14,6 @@ void phase_stepping_register_motor(uint8_t motor_idx,
 void phase_stepping_write_xdirect(uint8_t motor_idx,
                                   int16_t coil_a, int16_t coil_b);
 
-// Sim has no DMA: write_xdirect transfers immediately, so the per-tick commit
-// has nothing to drain and always reports clean. Mirrors the bare-metal seam.
-uint32_t phase_stepping_commit_tick(void);
-
 // Every SPI3 writer MUST acquire before a transfer and release after: the
 // TIM5 ISR (phase_stepping_write_xdirect) and task-context TMC register
 // access share the bus, and an unguarded transfer corrupts an in-flight one.

@@ -361,18 +361,3 @@ fn from_u16_round_trip_all_variants() {
         assert!(!name.is_empty(), "code_name empty for {code:?}");
     }
 }
-
-#[test]
-fn fault_code_phase_dma_round_trips() {
-    for fc in [
-        FaultCode::PhaseDmaOverrun,
-        FaultCode::PhaseDmaTransferErr,
-        FaultCode::PhaseDmaFifoErr,
-        FaultCode::PhaseDmaUnderrun,
-    ] {
-        assert_eq!(FaultCode::from_u16(fc.as_u16()), Some(fc));
-        assert!(!fc.code_name().is_empty());
-    }
-    assert_eq!(FaultCode::PhaseDmaOverrun.as_i32(), -317);
-    assert_eq!(FaultCode::PhaseDmaUnderrun.as_i32(), -320);
-}

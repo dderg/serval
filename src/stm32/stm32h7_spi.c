@@ -10,7 +10,7 @@
 #include "internal.h" // gpio_peripheral
 #include "sched.h" // sched_shutdown
 #include "board/misc.h" // timer_is_before
-#include "phase_stepping_spi.h" // phase_spi_fg_begin / phase_spi_fg_end
+#include "phase_stepping_spi.h" // phase_spi_try_acquire / phase_spi_release
 
 volatile uint32_t kalico_spi_hang_addr __attribute__((used, externally_visible));
 volatile uint32_t kalico_spi_hang_sr   __attribute__((used, externally_visible));
@@ -197,11 +197,13 @@ void
 spi_transfer(struct spi_config config, uint8_t receive_data,
              uint8_t len, uint8_t *data)
 {
-    // Claim the owning phase bus before prepare: while held, a phase commit
-    // sees the bus busy and defers its DMA arm, so no XDIRECT batch reprograms
-    // CFG1 (different MBR divisor) between this prepare and transfer.
-    int bus_token = phase_spi_fg_begin(config);
+    while (!phase_spi_try_acquire())
+        ;
+    // spi_prepare MUST stay inside the lock: the ISR's
+    // phase_stepping_write_xdirect calls spi_prepare(fast_cfg) with a
+    // different MBR divisor; hoisting this out lets the ISR fire between
+    // prepare and transfer, clocking the foreground transfer at the wrong rate.
     spi_prepare(config);
     spi_transfer_locked(config, receive_data, len, data);
-    phase_spi_fg_end(bus_token);
+    phase_spi_release();
 }

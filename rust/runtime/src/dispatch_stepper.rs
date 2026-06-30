@@ -30,28 +30,6 @@ unsafe extern "C" {
     fn phase_stepping_write_xdirect(motor_idx: u8, coil_a: i16, coil_b: i16);
 }
 
-#[cfg(feature = "motion-module-stepper")]
-#[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
-unsafe extern "C" {
-    fn phase_stepping_commit_tick() -> u32;
-}
-
-/// Drive the per-bus phase DMA batch for this tick and return the packed
-/// per-bus fault status. On host/test builds (no C seam) this is a no-op `0`.
-#[cfg(feature = "motion-module-stepper")]
-pub(crate) fn commit_phase_tick() -> u32 {
-    #[cfg(any(not(any(test, feature = "host")), feature = "mcu-linux"))]
-    {
-        // SAFETY: `phase_stepping_commit_tick` takes no arguments and returns a
-        // packed status word; it carries no Rust-side aliasing constraints.
-        unsafe { phase_stepping_commit_tick() }
-    }
-    #[cfg(not(any(not(any(test, feature = "host")), feature = "mcu-linux")))]
-    {
-        0
-    }
-}
-
 #[cfg(not(any(test, feature = "host")))]
 unsafe extern "C" {
     fn kalico_kick_step_output(axis_idx: u8, cycle_abs: u32);

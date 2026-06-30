@@ -108,15 +108,6 @@ pub const RUNTIME_ERR_UNKNOWN_STEP_MODE: i32 = -312;
 /// SPI motor. Detail: `((axis_idx & 0xFF) << 16) | stepper_oid`.
 pub const RUNTIME_ERR_PHASE_MOTOR_UNMAPPED: i32 = -313;
 pub const RUNTIME_ERR_OVERLAY_UNSUPPORTED: i32 = -314;
-/// Per-bus phase DMA transfer did not drain before the next commit tick — the
-/// bus was still BUSY. Detail: `(bus_id << 8) | kind`. Hard fault.
-pub const RUNTIME_ERR_PHASE_DMA_OVERRUN: i32 = -317;
-/// Phase DMA stream latched a transfer error (TEIF). Detail: `(bus_id << 8) | kind`.
-pub const RUNTIME_ERR_PHASE_DMA_TRANSFER_ERR: i32 = -318;
-/// Phase DMA stream latched a FIFO error (FEIF). Detail: `(bus_id << 8) | kind`.
-pub const RUNTIME_ERR_PHASE_DMA_FIFO_ERR: i32 = -319;
-/// Reserved for the v-next phase DMA RX path (UNDERRUN). Detail: `(bus_id << 8) | kind`.
-pub const RUNTIME_ERR_PHASE_DMA_UNDERRUN: i32 = -320;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,10 +193,6 @@ pub enum FaultCode {
     OverlayUnsupported = -314,
     BuzzAxisConflict = -315,
     BuzzInPhaseMode = -316,
-    PhaseDmaOverrun = -317,
-    PhaseDmaTransferErr = -318,
-    PhaseDmaFifoErr = -319,
-    PhaseDmaUnderrun = -320,
 }
 
 impl FaultCode {
@@ -308,10 +295,6 @@ impl FaultCode {
             -314 => Self::OverlayUnsupported,
             -315 => Self::BuzzAxisConflict,
             -316 => Self::BuzzInPhaseMode,
-            -317 => Self::PhaseDmaOverrun,
-            -318 => Self::PhaseDmaTransferErr,
-            -319 => Self::PhaseDmaFifoErr,
-            -320 => Self::PhaseDmaUnderrun,
             _ => return None,
         })
     }
@@ -396,10 +379,6 @@ impl FaultCode {
             Self::OverlayUnsupported => "OverlayUnsupported",
             Self::BuzzAxisConflict => "BuzzAxisConflict",
             Self::BuzzInPhaseMode => "BuzzInPhaseMode",
-            Self::PhaseDmaOverrun => "PhaseDmaOverrun",
-            Self::PhaseDmaTransferErr => "PhaseDmaTransferErr",
-            Self::PhaseDmaFifoErr => "PhaseDmaFifoErr",
-            Self::PhaseDmaUnderrun => "PhaseDmaUnderrun",
         }
     }
 }

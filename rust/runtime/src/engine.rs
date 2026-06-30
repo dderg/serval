@@ -386,14 +386,6 @@ impl Engine {
             }
         }
 
-        #[cfg(feature = "motion-module-stepper")]
-        {
-            let phase_status = crate::dispatch_stepper::commit_phase_tick();
-            if phase_status != 0 {
-                crate::fault_helpers::raise_phase_dma(shared, phase_status);
-            }
-        }
-
         active
     }
 
