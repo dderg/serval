@@ -7,6 +7,7 @@
 #include "sched.h"
 #include "event_log.h"
 
+extern uint32_t timer_read_time(void);
 extern volatile uint8_t runtime_liveness_ok;
 extern void *runtime_handle;
 extern uint32_t runtime_handle_tick_counter(void *handle);
