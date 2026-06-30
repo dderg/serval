@@ -137,7 +137,6 @@ static volatile uint8_t phase_q_tail;
 static volatile uint8_t phase_dma_active;
 static struct gpio_out phase_dma_cur_cs;
 static SPI_TypeDef *phase_dma_cur_spi;
-static volatile uint32_t phase_dma_timeout_count;
 
 static void
 phase_dma_arm(uint8_t motor)
@@ -202,13 +201,6 @@ static void
 phase_dma_complete_current(void)
 {
     SPI_TypeDef *spi = phase_dma_cur_spi;
-    uint32_t eot_deadline = timer_read_time() + timer_from_us(50);
-    while (!(spi->SR & SPI_SR_EOT)) {
-        if (!timer_is_before(timer_read_time(), eot_deadline)) {
-            phase_dma_timeout_count++;
-            break;
-        }
-    }
     gpio_out_write(phase_dma_cur_cs, 1);
     PHASE_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
     PHASE_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
@@ -239,7 +231,7 @@ phase_dma_init_once(void)
     (void)RCC->AHB1ENR;
     DMAMUX1_Channel0->CCR = PHASE_DMA_SPI1_TX_REQ;
     DMAMUX1_Channel1->CCR = PHASE_DMA_SPI1_RX_REQ;
-    armcm_enable_irq(phase_dma_rx_isr, DMA1_Stream1_IRQn, MOTION_NVIC_PRIO + 1);
+    armcm_enable_irq(phase_dma_rx_isr, DMA1_Stream1_IRQn, MOTION_NVIC_PRIO - 1);
     phase_dma_inited = 1;
 }
 #endif
