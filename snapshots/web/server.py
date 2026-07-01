@@ -222,7 +222,6 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/static/"):
             self._serve_static(path[len("/static/") :], None)
         elif path == "/api/cases":
-            STATE.scan()
             self._json(STATE.summary())
         elif path.startswith("/img/"):
             self._serve_img(path)

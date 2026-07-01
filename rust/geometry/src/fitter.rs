@@ -117,7 +117,9 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
 
     let mut plans = Vec::with_capacity(moves.len() - 1);
     for pair in moves.windows(2) {
-        plans.push(classify_junction(&pair[0], &pair[1], config, 0.0)?);
+        plans.push(classify_junction(
+            &pair[0], &pair[1], config, 0.0, 0.0, 0.0,
+        )?);
     }
 
     let mut out = Vec::new();
@@ -179,6 +181,8 @@ fn classify_junction(
     m_out: &Move,
     config: CornerFitConfig,
     head_len_restore: f64,
+    in_reduction: f64,
+    out_reduction: f64,
 ) -> Result<JunctionPlan, FitError> {
     let (line_in, line_out) = match (line_of(m_in), line_of(m_out)) {
         (Some(a), Some(b)) => (a, b),
@@ -213,7 +217,9 @@ fn classify_junction(
     };
 
     let vertex = line_in.point_at(line_in.s_len());
-    let budget = 0.5 * (line_in.s_len() + head_len_restore).min(line_out.s_len());
+    let in_len = line_in.s_len() + head_len_restore - in_reduction;
+    let out_len = line_out.s_len() - out_reduction;
+    let budget = 0.5 * in_len.min(out_len);
     let line_no = m_out.source.start_line;
 
     match biclothoid::solve(vertex, t_in, v, theta, delta, budget)
