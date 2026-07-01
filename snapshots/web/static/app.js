@@ -39,10 +39,11 @@ function render(data) {
     casesEl.appendChild(div);
     return;
   }
-  // Group by prefix (part before /)
+  // Group by leading path (everything before the last /), so a
+  // <group>/<cfg>/<gcode> name sections under its <group>/<cfg> config.
   const groups = new Map();
   for (const c of review) {
-    const slash = c.name.indexOf("/");
+    const slash = c.name.lastIndexOf("/");
     const group = slash > 0 ? c.name.substring(0, slash).replace(/_/g, " ") : "Other";
     if (!groups.has(group)) groups.set(group, []);
     groups.get(group).push(c);
@@ -91,8 +92,8 @@ function card(c) {
 
   const foot = document.createElement("div");
   foot.className = "card-foot";
-  const slash = c.name.indexOf("/");
-  const shortName = slash > 0 ? c.name.substring(slash + 1) : c.name;
+  const slash = c.name.lastIndexOf("/");
+  const shortName = slash >= 0 ? c.name.substring(slash + 1) : c.name;
   foot.innerHTML =
     `<span class="case-name" title="${c.name}">${shortName}</span>` +
     `<span class="badge ${c.status}">${c.status}</span>`;

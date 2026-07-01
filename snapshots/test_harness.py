@@ -24,12 +24,16 @@ _SNAPSHOT = {
 }
 
 
-def _case(tmp_path, name="grp/unit") -> harness.Case:
+def _case(tmp_path, name="grp/printer/unit") -> harness.Case:
     case = harness.Case(
         name=name,
         gcode_path=tmp_path / "unit.gcode",
         config_path=tmp_path / "printer.cfg",
-        baseline_path=tmp_path / "baselines" / "grp" / "unit.baseline.json.gz",
+        baseline_path=tmp_path
+        / "baselines"
+        / "grp"
+        / "printer"
+        / "unit.baseline.json.gz",
     )
     case.gcode_path.write_text("G1 X1\n")
     case.config_path.write_text("[printer]\n")
@@ -64,12 +68,13 @@ def test_discover_cases_keeps_baselines_separate(tmp_path):
 
     assert cases == [
         harness.Case(
-            name="grp/unit",
+            name="grp/printer/unit",
             gcode_path=group / "unit.gcode",
             config_path=group / "printer.cfg",
             baseline_path=tmp_path
             / "baselines"
             / "grp"
+            / "printer"
             / "unit.baseline.json.gz",
         )
     ]
@@ -84,7 +89,41 @@ def test_discover_cases_ignores_empty_gcode(tmp_path):
 
     cases = harness.discover_cases(tmp_path / "cases", tmp_path / "baselines")
 
-    assert [case.name for case in cases] == ["grp/unit"]
+    assert [case.name for case in cases] == ["grp/printer/unit"]
+
+
+def test_discover_cases_matrix_cross_product(tmp_path):
+    group = tmp_path / "cases" / "grp"
+    group.mkdir(parents=True)
+    (group / "a.cfg").write_text("[printer]\n")
+    (group / "b.cfg").write_text("[printer]\n")
+    (group / "x.gcode").write_text("G1 X1\n")
+    (group / "y.gcode").write_text("G1 Y1\n")
+
+    cases = harness.discover_cases(tmp_path / "cases", tmp_path / "baselines")
+
+    assert [case.name for case in cases] == [
+        "grp/a/x",
+        "grp/a/y",
+        "grp/b/x",
+        "grp/b/y",
+    ]
+    bx = next(case for case in cases if case.name == "grp/b/x")
+    assert bx.config_path == group / "b.cfg"
+    assert bx.gcode_path == group / "x.gcode"
+    assert (
+        bx.baseline_path
+        == tmp_path / "baselines" / "grp" / "b" / "x.baseline.json.gz"
+    )
+
+
+def test_discover_cases_raises_when_gcode_without_config(tmp_path):
+    group = tmp_path / "cases" / "grp"
+    group.mkdir(parents=True)
+    (group / "x.gcode").write_text("G1 X1\n")
+
+    with pytest.raises(ValueError, match="grp.*no .cfg"):
+        harness.discover_cases(tmp_path / "cases", tmp_path / "baselines")
 
 
 def test_compare_exact_after_write(tmp_path):

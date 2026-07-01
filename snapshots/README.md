@@ -3,13 +3,14 @@
 A standalone test pillar for the motion planner, alongside the rust unit tests
 (`cargo nextest`), the python unit tests (`pytest`), and the simulator tests.
 
-Each **case** is a single `.gcode` file under `cases/`. A folder under `cases/`
-is a **group**: every `.gcode` in it shares that folder's one `printer.cfg`, so
-a case's name is `<group>/<gcode stem>`. Running a case drives the real planner
+A folder under `cases/` is a **group**. Every `*.cfg` in it (any `<name>.cfg`,
+not a magic `printer.cfg`) runs against every `*.gcode` in it — a config × gcode
+matrix — so a **case** is one (config, gcode) pair and its name is
+`<group>/<cfg stem>/<gcode stem>`. Running a case drives the real planner
 (`_motion_engine.pipeline_snapshot`) and compares the full raw trajectory to a
-committed `baselines/<group>/<stem>.baseline.json.gz` (deterministic gzip). A
-deviation fails; you review before/after in the browser and
-re-baseline on an explicit accept. UI-snapshot testing for trajectories.
+committed `baselines/<group>/<cfg>/<stem>.baseline.json.gz` (deterministic gzip).
+A deviation fails; you review before/after in the browser and re-baseline on an
+explicit accept. UI-snapshot testing for trajectories.
 
 ## Run
 
@@ -45,13 +46,14 @@ snapshots/
   test_harness.py   unit tests for harness (a python-unit test, run by pytest)
   snapshot-tests.sh entry point: run.py, and the review server on a change
   web/              the review server + static front end
-  cases/<group>/    printer.cfg shared by every *.gcode in the folder
-  baselines/<group>/ <stem>.baseline.json.gz per case
+  cases/<group>/    one or more <name>.cfg × every *.gcode (a matrix)
+  baselines/<group>/<cfg>/ <stem>.baseline.json.gz per (config, gcode) pair
 ```
 
-To add a case, drop a `.gcode` into the group whose `printer.cfg` it should run
-under (or make a new group folder with its own `printer.cfg`), run the tests,
-and accept the baseline.
+To add a case, drop a `.gcode` into a group (it runs under every `.cfg` there),
+add another `<name>.cfg` to a group to fan its G-code across more configs, or
+make a new group folder with at least one `.cfg`. Then run the tests and accept
+the baselines.
 
 `run.py` and the cases are **not** pytest — they are this pillar. `test_harness.py`
 is a normal python-unit test (the `py` job collects it). The G-code parsing,

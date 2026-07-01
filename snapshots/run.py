@@ -26,7 +26,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    all_cases = harness.discover_cases()
+    try:
+        all_cases = harness.discover_cases()
+    except ValueError as exc:
+        print(f"  ERROR   {exc}")
+        return 2
     for baseline in harness.prune_orphan_baselines(all_cases):
         print(f"  PRUNED   {baseline.relative_to(harness.BASELINES_DIR)}")
 
