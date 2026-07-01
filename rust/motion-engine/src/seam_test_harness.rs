@@ -38,7 +38,7 @@ pub fn default_stream_config() -> StreamConfig {
 fn harness_mcu_configs() -> Vec<McuAxisConfig> {
     vec![McuAxisConfig {
         mcu_id: HARNESS_MCU_ID,
-        axes: vec![0, 1, 2],
+        axes: vec![0, 1, 2, EXTRUDER_AXIS],
         kinematics: 1,
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
@@ -136,6 +136,8 @@ struct PosTracker {
     pos: [f64; 3],
     feed: f64,
     absolute: bool,
+    e_relative: bool,
+    e_pos: f64,
     established: bool,
 }
 
@@ -145,7 +147,23 @@ impl PosTracker {
             pos: [0.0; 3],
             feed: 80.0,
             absolute: true,
+            e_relative: false,
+            e_pos: 0.0,
             established: false,
+        }
+    }
+
+    /// Extrusion length for this move: the E value directly under relative mode
+    /// (M83), the delta from the running position under absolute mode (M82/default).
+    fn extrude(&mut self, e: Option<f64>) -> f64 {
+        match e {
+            None => 0.0,
+            Some(ev) if self.e_relative => ev,
+            Some(ev) => {
+                let de = ev - self.e_pos;
+                self.e_pos = ev;
+                de
+            }
         }
     }
 
@@ -203,11 +221,11 @@ pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
         else {
             continue;
         };
-        if letter != b'G' {
-            continue;
-        }
-        match major {
-            0 | 1 => {
+        match (letter, major) {
+            (b'M', 82) => p.e_relative = false,
+            (b'M', 83) => p.e_relative = true,
+            (b'G', 0 | 1) => {
+                let de = p.extrude(params.e());
                 let Some((start, dx, dy, dz)) =
                     p.apply(params.x(), params.y(), params.z(), params.f())
                 else {
@@ -222,7 +240,7 @@ pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
                     dy,
                     dz,
                     EXTRUDER_AXIS,
-                    0.0,
+                    de,
                     limits,
                     p.feed,
                     submitted,
@@ -234,8 +252,8 @@ pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
                     Err(_) => continue,
                 }
             }
-            90 => p.absolute = true,
-            91 => p.absolute = false,
+            (b'G', 90) => p.absolute = true,
+            (b'G', 91) => p.absolute = false,
             _ => {}
         }
     }
@@ -346,10 +364,12 @@ pub fn run_moves(
     schedule: &CommitSchedule,
 ) -> Result<SeamReport, StreamError> {
     let n_moves = moves.len();
-    let home = moves
+    let xyz = moves
         .first()
         .and_then(|m| m.segment.spatial.as_ref())
         .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
+    // Four-element home so the odometer carries the extruder axis (index 3).
+    let home = [xyz[0], xyz[1], xyz[2], 0.0];
     let mut state = StreamState::new(config, AxisChainSet::default(), &home, 0.0);
     let mut ingestor = Ingestor::new();
     let force_after_move: std::collections::BTreeSet<usize> =

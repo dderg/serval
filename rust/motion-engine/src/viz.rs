@@ -7,7 +7,7 @@ use pyo3::types::{PyDict, PyList};
 #[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, heart = None))]
 pub fn pipeline_snapshot(
     py: Python<'_>,
-    waypoints: Vec<(f64, f64, f64, f64)>,
+    waypoints: Vec<(f64, f64, f64, f64, f64)>,
     max_velocity: f64,
     max_accel: f64,
     square_corner_velocity: f64,
@@ -39,7 +39,8 @@ pub fn pipeline_snapshot(
     };
     let profile = geometry::plan_velocity(&outcome, velocity_config)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
-    let traj = lower_trajectory(&outcome, &profile);
+    let traj = lower_trajectory(&outcome, &profile)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
 
     let dict = PyDict::new(py);
     dict.set_item("raw_x", raw_points.iter().map(|p| p.0).collect::<Vec<_>>())?;
@@ -134,17 +135,17 @@ fn arc_fit_config(arc_fit: Option<u32>, heart: Option<&str>) -> PyResult<geometr
 }
 
 fn build_moves(
-    waypoints: &[(f64, f64, f64, f64)],
+    waypoints: &[(f64, f64, f64, f64, f64)],
     limits: geometry::VelocityLimits,
 ) -> PyResult<Vec<geometry::Move>> {
     let mut moves = Vec::with_capacity(waypoints.len() - 1);
     for (i, pair) in waypoints.windows(2).enumerate() {
-        let (x0, y0, z0, _) = pair[0];
-        let (x1, y1, z1, feedrate) = pair[1];
+        let (x0, y0, z0, _, _) = pair[0];
+        let (x1, y1, z1, feedrate, e_delta) = pair[1];
         let start = [x0, y0, z0];
         let end = [x1, y1, z1];
         let ctx = geometry::MoveContext {
-            extruder_axis: 0,
+            extruder_axis: 3,
             feedrate_mm_s: feedrate,
             limits,
             source: geometry::SourceRange {
@@ -152,7 +153,7 @@ fn build_moves(
                 end_line: i as u32,
             },
         };
-        match geometry::line_move(start, end, 0.0, ctx) {
+        match geometry::line_move(start, end, e_delta, ctx) {
             Ok(m) => moves.push(m),
             Err(geometry::FrontendError::ZeroMotion { .. }) => {}
             Err(e) => {
@@ -208,7 +209,7 @@ struct TrajectoryPieces {
 fn lower_trajectory(
     outcome: &geometry::FitOutcome,
     profile: &geometry::VelocityProfile,
-) -> TrajectoryPieces {
+) -> Result<TrajectoryPieces, crate::lowering::LoweringError> {
     fn collect(dst: &mut Vec<[f64; 6]>, pieces: &[nurbs::bezier::BezierPiece<f64>]) {
         for p in pieces {
             let c = |i: usize| p.coeffs.get(i).copied().unwrap_or(0.0);
@@ -222,28 +223,34 @@ fn lower_trajectory(
         t_end: 0.0,
     };
     let mut t_start = 0.0;
-    let mut pos = [0.0_f64; 3];
+    // Four axes: the extruder rides index 3, so lowering must see a start vector
+    // long enough to place its follower -- a three-element start would reject every
+    // extruding move as FollowerAxisOutOfRange and silently drop it.
+    let mut pos = [0.0_f64; 4];
     let mut started = false;
     for (gm, vm) in outcome.moves.iter().zip(profile.moves.iter()) {
         let Some(spatial) = &gm.segment.spatial else {
             continue;
         };
         if !started {
-            pos = spatial.point_at(0.0);
+            pos[..3].copy_from_slice(&spatial.point_at(0.0));
             started = true;
         }
-        let Ok((axes, total_t)) =
-            crate::lowering::lower_move_pieces(gm, vm, t_start, &pos, TRAJECTORY_FIT_TOL_MM, &[])
-        else {
-            continue;
-        };
+        let (axes, total_t) =
+            crate::lowering::lower_move_pieces(gm, vm, t_start, &pos, TRAJECTORY_FIT_TOL_MM, &[])?;
         collect(&mut out.x, &axes[0]);
         collect(&mut out.y, &axes[1]);
         t_start += total_t;
         out.t_end = t_start;
-        pos = spatial.point_at(spatial.s_len());
+        pos[..3].copy_from_slice(&spatial.point_at(spatial.s_len()));
+        pos[3] += gm
+            .segment
+            .followers
+            .iter()
+            .map(|f| f.ratio * spatial.s_len())
+            .sum::<f64>();
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]

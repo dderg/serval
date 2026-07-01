@@ -15,6 +15,7 @@ fn midpoint(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     scale(add(a, b), 0.5)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve(
     anchor_in: Anchor,
     anchor_out: Anchor,
@@ -24,6 +25,7 @@ fn resolve(
     delta: f64,
     budget_in: f64,
     budget_out: f64,
+    best_effort: bool,
 ) -> Option<GeneralBlend> {
     let theta = dot(anchor_in.tangent, anchor_out.tangent)
         .clamp(-1.0, 1.0)
@@ -32,7 +34,14 @@ fn resolve(
         return None;
     }
     biclothoid::solve_general(
-        anchor_in, anchor_out, apex, plane_n, delta, budget_in, budget_out,
+        anchor_in,
+        anchor_out,
+        apex,
+        plane_n,
+        delta,
+        budget_in,
+        budget_out,
+        best_effort,
     )
 }
 
@@ -62,6 +71,7 @@ pub(super) fn resolve_arc_arc(
         delta,
         0.5 * arc_len(arc_in),
         0.5 * arc_len(arc_out),
+        false,
     )
 }
 
@@ -96,6 +106,7 @@ pub(super) fn resolve_arc_line(
             delta,
             arc_budget,
             line_budget,
+            true,
         )
     } else {
         let a_in = Anchor {
@@ -118,6 +129,7 @@ pub(super) fn resolve_arc_line(
             delta,
             line_budget,
             arc_budget,
+            true,
         )
     }
 }

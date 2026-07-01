@@ -2,10 +2,10 @@ use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 
 use geometry::path::lowering::PositionProfile;
-use geometry::path::{Line, Segment};
+use geometry::path::{CurvatureProfile, Line, Segment};
 use geometry::{
-    ChainFitConfig, FitError, GeometryError, Move, VelocityConfig, VelocityError, VelocityLimits,
-    fit_chain_with_head_restore, plan_velocity_warm_start,
+    ChainFitConfig, FitError, GeometryError, Move, ResumeState, VelocityConfig, VelocityError,
+    VelocityLimits, fit_chain_with_resume, plan_velocity_warm_start,
 };
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
@@ -14,6 +14,8 @@ use crate::lowering::{LoweringError, lower_move};
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 const CONTIGUITY_EPS_MM: f64 = 1e-6;
+/// Curvature below this (1/mm) resumes as a straight seam (no carried circle).
+const RESUME_KAPPA_EPS: f64 = 1e-6;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamConfig {
@@ -160,6 +162,10 @@ pub struct StreamState {
     /// when the front move is untrimmed (fresh, force-drained, or commit at a
     /// plain seam). See docs/rewrite/windowed-fit-ceiling-jitter.md.
     committed_head_len: f64,
+    /// G2 endpoint the last commit ended at — the next fit resumes from it so
+    /// curvature is continuous across the seam. `None`, or curvature ~0, means a
+    /// straight (zero-curvature) resume, which is every commit at a clean seam.
+    resume: Option<ResumeState>,
     /// Velocity at the most recent plan's finality barrier, carried so the
     /// streaming driver can size the producer-stall brake-to-rest watermark from
     /// `t_brake(v_barrier)` without re-planning — the speed the planner is riding,
@@ -184,6 +190,7 @@ impl StreamState {
             odometer: home_pos.to_vec(),
             t_committed: t_start,
             committed_head_len: 0.0,
+            resume: None,
             last_v_barrier: 0.0,
             config,
             axis_chains,
@@ -201,6 +208,7 @@ impl StreamState {
         self.odometer = home_pos.to_vec();
         self.t_committed = t_start;
         self.committed_head_len = 0.0;
+        self.resume = None;
         self.last_v_barrier = 0.0;
         self.post_history.clear();
     }
@@ -332,8 +340,12 @@ impl StreamState {
         let line_hi = moves.last().map_or(0, |m| m.source.start_line);
 
         let fit_clock = Instant::now();
-        let outcome =
-            fit_chain_with_head_restore(&moves, self.config.chain, self.committed_head_len)?;
+        let outcome = fit_chain_with_resume(
+            &moves,
+            self.config.chain,
+            self.committed_head_len,
+            self.resume,
+        )?;
         let fit_us = fit_clock.elapsed().as_micros();
         tracing::info!(
             subsystem = "motion",
@@ -472,6 +484,15 @@ impl StreamState {
             0.0
         } else {
             profile.moves[commit_count - 1].exit_v
+        };
+
+        self.resume = if commit_count == n {
+            None
+        } else {
+            resume_endpoint(
+                outcome.moves[commit_count].segment.spatial.as_ref(),
+                &self.odometer,
+            )
         };
 
         if commit_count == n {
@@ -703,7 +724,10 @@ impl StreamState {
 /// carries only a scalar entry speed, would be invalid.
 fn is_clean_seam(moves: &[Move], i: usize, unblended: &HashSet<u32>) -> bool {
     unblended.contains(&moves[i].source.start_line)
-        || matches!(moves[i].segment.spatial, Some(Segment::Line(_)))
+        || matches!(
+            moves[i].segment.spatial,
+            Some(Segment::Line(_)) | Some(Segment::Arc(_))
+        )
 }
 
 /// Whether the seam before output index `i` is the exit of a blend, i.e. the
@@ -769,6 +793,38 @@ fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
     let dy = a[1] - b[1];
     let dz = a[2] - b[2];
     (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// The G2 state the resuming (first uncommitted) segment starts at: seam
+/// position, start tangent, and curvature vector (`dT/ds`, toward the osculating
+/// centre, magnitude `|kappa|`). The next window's fit must reproduce this so
+/// curvature is continuous across the seam. A straight resume (start curvature
+/// ~0, i.e. every commit at a clean line seam) returns `None` — a no-op.
+fn resume_endpoint(spatial: Option<&Segment>, pos: &[f64]) -> Option<ResumeState> {
+    let seg = spatial?;
+    let kappa_start = seg.kappa_endpoints().0;
+    if kappa_start.abs() < RESUME_KAPPA_EPS {
+        return None;
+    }
+    let l = seg.s_len();
+    let t0 = seg.heading_at(0.0);
+    let ds = (l * 1e-4).clamp(1e-7, l);
+    let t1 = seg.heading_at(ds);
+    let dt = [t1[0] - t0[0], t1[1] - t0[1], t1[2] - t0[2]];
+    let dn = (dt[0] * dt[0] + dt[1] * dt[1] + dt[2] * dt[2]).sqrt();
+    if dn < 1e-12 {
+        return None;
+    }
+    let k = kappa_start.abs() / dn;
+    let mut p = [0.0; 3];
+    for (slot, &v) in p.iter_mut().zip(pos.iter()) {
+        *slot = v;
+    }
+    Some(ResumeState {
+        pos: p,
+        tangent: t0,
+        kappa: [dt[0] * k, dt[1] * k, dt[2] * k],
+    })
 }
 
 fn advance_odometer(pos: &mut [f64], gm: &Move) {

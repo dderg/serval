@@ -75,6 +75,7 @@ pub enum UnblendReason {
     NoBudget,
     ArcIncident,
     NonSpatial,
+    FlowChange,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +118,9 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
 
     let mut plans = Vec::with_capacity(moves.len() - 1);
     for pair in moves.windows(2) {
-        plans.push(classify_junction(&pair[0], &pair[1], config, 0.0)?);
+        plans.push(classify_junction(
+            &pair[0], &pair[1], config, 0.0, 0.0, 0.0,
+        )?);
     }
 
     let mut out = Vec::new();
@@ -154,8 +157,24 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
     Ok(FitOutcome { moves: out, report })
 }
 
+/// G2 endpoint carried across a streaming commit seam: the position, unit
+/// tangent, and signed curvature vector (`kappa` points toward the centre of the
+/// osculating circle, magnitude `|kappa|`) the committed trajectory ended at. The
+/// next window resumes its fit from exactly this state so curvature is continuous
+/// across the seam. `kappa` near zero means a straight resume (the default).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResumeState {
+    pub pos: [f64; 3],
+    pub tangent: [f64; 3],
+    pub kappa: [f64; 3],
+}
+
+/// Whole-buffer fit (no streaming window). Bare arc→line runs the ease cannot
+/// close are pruned to G2 corner-blended lines, so the output has no curvature
+/// discontinuities. The streaming variants keep those runs — that prune is not
+/// yet window-invariant across commits.
 pub fn fit_chain(moves: &[Move], config: ChainFitConfig) -> Result<FitOutcome, FitError> {
-    fit_chain_with_head_restore(moves, config, 0.0)
+    causal::fit(moves, config, 0.0, None, true)
 }
 
 /// Streaming variant of [`fit_chain`]. `head_len_restore` is the spatial length
@@ -171,7 +190,20 @@ pub fn fit_chain_with_head_restore(
     config: ChainFitConfig,
     head_len_restore: f64,
 ) -> Result<FitOutcome, FitError> {
-    causal::fit(moves, config, head_len_restore)
+    causal::fit(moves, config, head_len_restore, None, false)
+}
+
+/// Streaming fit that resumes from a carried G2 endpoint (see [`ResumeState`]).
+/// When `resume` carries nonzero curvature, the leading run continues the
+/// committed osculating circle instead of fitting a fresh one, so the first
+/// emitted segment starts at exactly the committed curvature.
+pub fn fit_chain_with_resume(
+    moves: &[Move],
+    config: ChainFitConfig,
+    head_len_restore: f64,
+    resume: Option<ResumeState>,
+) -> Result<FitOutcome, FitError> {
+    causal::fit(moves, config, head_len_restore, resume, false)
 }
 
 fn classify_junction(
@@ -179,6 +211,8 @@ fn classify_junction(
     m_out: &Move,
     config: CornerFitConfig,
     head_len_restore: f64,
+    in_reduction: f64,
+    out_reduction: f64,
 ) -> Result<JunctionPlan, FitError> {
     let (line_in, line_out) = match (line_of(m_in), line_of(m_out)) {
         (Some(a), Some(b)) => (a, b),
@@ -191,6 +225,10 @@ fn classify_junction(
             return Ok(JunctionPlan::Unblended(reason));
         }
     };
+
+    if !kernels::flow_blendable(kernels::epmm(m_in), kernels::epmm(m_out)) {
+        return Ok(JunctionPlan::Unblended(UnblendReason::FlowChange));
+    }
 
     let t_in = line_in.heading_at(line_in.s_len());
     let t_out = line_out.heading_at(0.0);
@@ -213,7 +251,9 @@ fn classify_junction(
     };
 
     let vertex = line_in.point_at(line_in.s_len());
-    let budget = 0.5 * (line_in.s_len() + head_len_restore).min(line_out.s_len());
+    let in_len = line_in.s_len() + head_len_restore - in_reduction;
+    let out_len = line_out.s_len() - out_reduction;
+    let budget = 0.5 * in_len.min(out_len);
     let line_no = m_out.source.start_line;
 
     match biclothoid::solve(vertex, t_in, v, theta, delta, budget)

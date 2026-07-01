@@ -12,9 +12,29 @@ use super::{BUDGET_EPS_MM, CornerFitConfig, FitError, internal, line_of};
 const COPLANAR_TOL: f64 = 1e-6;
 const ANGLE_EPS_RAD: f64 = 1e-9;
 const EASE_LEAD_MAX_RAD: f64 = FRAC_PI_6;
-const SHIFT_BUDGET_FRACTION: f64 = 0.5;
+const SHIFT_BUDGET_FRACTION: f64 = 0.25;
 pub(super) const EPMM_MIN: f64 = 1e-9;
 const EPMM_REL_TOL: f64 = 0.25;
+const EPMM_ARC_REL_TOL: f64 = 0.02;
+
+/// Whether two adjacent moves may be joined by a curvature blend, judged by
+/// their extrusion-per-mm. A travel (epmm ~ 0) abutting an extruding move is a
+/// hard feature boundary: full stop, never blended, in either direction. Two
+/// travels blend freely; two extruding moves blend only while their flow rate
+/// matches within `EPMM_REL_TOL` (the gradual-rate clothoid is a separate,
+/// outstanding improvement — today a permitted blend just rescales the rate to
+/// conserve volume over the new length).
+pub(super) fn flow_blendable(a: f64, b: f64) -> bool {
+    let a_travel = a < EPMM_MIN;
+    let b_travel = b < EPMM_MIN;
+    if a_travel != b_travel {
+        return false;
+    }
+    if a_travel {
+        return true;
+    }
+    (a - b).abs() <= EPMM_REL_TOL * a.max(b)
+}
 
 pub(super) struct Reconstruction {
     pub up: Vec<Clothoid>,
@@ -37,7 +57,11 @@ pub(super) struct Neighbor {
     followers: Vec<FollowerDemand>,
 }
 
-pub(super) fn neighbor(m: &Move, head: bool) -> Option<Neighbor> {
+/// `restore` adds back the spatial length a previous commit trimmed from this
+/// move's front, so a leading run's head ease re-fits to the curvature it had
+/// before the trim (the arc analogue of the corner `head_len_restore`). It feeds
+/// the ease budget only; the geometry (vertex, direction) is unchanged.
+pub(super) fn neighbor(m: &Move, head: bool, restore: f64) -> Option<Neighbor> {
     let l = line_of(m)?;
     let (vertex, dir) = if head {
         (l.point_at(l.s_len()), l.heading_at(l.s_len()))
@@ -47,7 +71,7 @@ pub(super) fn neighbor(m: &Move, head: bool) -> Option<Neighbor> {
     Some(Neighbor {
         dir,
         vertex,
-        length: l.s_len(),
+        length: l.s_len() + restore,
         epmm: epmm(m),
         followers: m.segment.followers.clone(),
     })
@@ -59,12 +83,23 @@ pub(super) fn ease_run(
     head: Option<&Neighbor>,
     tail: Option<&Neighbor>,
     tol: f64,
+    fixed_circle: bool,
 ) -> Result<(), FitError> {
     let run_epmm = epmm(&facets[0]);
     let line_no = facets[0].source.start_line;
     let verts = run_vertices(facets);
 
-    let Some(fit) = joint_refit(&recon.arc, head, tail, &verts, run_epmm, tol, line_no)? else {
+    let Some(fit) = joint_refit(
+        &recon.arc,
+        head,
+        tail,
+        &verts,
+        run_epmm,
+        tol,
+        line_no,
+        fixed_circle,
+    )?
+    else {
         return Ok(());
     };
 
@@ -136,6 +171,7 @@ fn joint_refit(
     run_epmm: f64,
     tol: f64,
     line_no: u32,
+    fixed_circle: bool,
 ) -> Result<Option<JointFit>, FitError> {
     let pn = normalize(cross(arc.u, arc.v));
     let sgn = arc.sweep.signum();
@@ -166,16 +202,21 @@ fn joint_refit(
         return Ok(None);
     }
 
-    let Some((origin, radius)) = choose_circle(
-        head_plan.as_ref(),
-        tail_plan.as_ref(),
-        o0,
-        r0,
-        arc.u,
-        arc.v,
-        verts,
-        tol,
-    ) else {
+    let circle = if fixed_circle {
+        Some((o0, r0))
+    } else {
+        choose_circle(
+            head_plan.as_ref(),
+            tail_plan.as_ref(),
+            o0,
+            r0,
+            arc.u,
+            arc.v,
+            verts,
+            tol,
+        )
+    };
+    let Some((origin, radius)) = circle else {
         return Ok(None);
     };
 
@@ -184,52 +225,31 @@ fn joint_refit(
     let mut head_trim = 0.0;
     let mut tail_trim = 0.0;
     let b_head = match &head_plan {
-        Some(p) => {
-            let (clo, b, trim) = build_spiral(origin, radius, p, pn)
-                .map_err(internal(line_no))?
-                .ok_or(())
-                .map_err(|()| FitError::Internal {
-                    line_no,
-                    source: GeometryError::DegenerateClothoid {
-                        reason: "head transition spiral did not close",
-                    },
-                })?;
-            if !within_line(trim, p.neighbor_len) || spiral_dev(&clo, p, o0, r0, pn) > tol {
-                return Ok(None);
+        Some(p) => match build_spiral(origin, radius, p, pn).map_err(internal(line_no))? {
+            Some((clo, b, trim))
+                if within_line(trim, p.neighbor_len) && spiral_dev(&clo, p, o0, r0, pn) <= tol =>
+            {
+                head_clo = Some(clo);
+                head_trim = trim;
+                b
             }
-            head_clo = Some(clo);
-            head_trim = trim;
-            b
-        }
+            _ => project_to_circle(origin, radius, verts[0]),
+        },
         None => project_to_circle(origin, radius, verts[0]),
     };
     let b_tail = match &tail_plan {
-        Some(p) => {
-            let (clo, b, trim) = build_spiral(origin, radius, p, pn)
-                .map_err(internal(line_no))?
-                .ok_or(())
-                .map_err(|()| FitError::Internal {
-                    line_no,
-                    source: GeometryError::DegenerateClothoid {
-                        reason: "tail transition spiral did not close",
-                    },
-                })?;
-            if !within_line(trim, p.neighbor_len) || spiral_dev(&clo, p, o0, r0, pn) > tol {
-                return Ok(None);
+        Some(p) => match build_spiral(origin, radius, p, pn).map_err(internal(line_no))? {
+            Some((clo, b, trim))
+                if within_line(trim, p.neighbor_len)
+                    && spiral_dev(&clo, p, o0, r0, pn) <= tol
+                    && reverse_clothoid(&clo).is_some() =>
+            {
+                tail_clo = reverse_clothoid(&clo);
+                tail_trim = trim;
+                b
             }
-            tail_clo = Some(
-                reverse_clothoid(&clo)
-                    .ok_or(())
-                    .map_err(|()| FitError::Internal {
-                        line_no,
-                        source: GeometryError::DegenerateClothoid {
-                            reason: "tail spiral reverse failed",
-                        },
-                    })?,
-            );
-            tail_trim = trim;
-            b
-        }
+            _ => project_to_circle(origin, radius, verts[verts.len() - 1]),
+        },
         None => project_to_circle(origin, radius, verts[verts.len() - 1]),
     };
 
@@ -266,7 +286,7 @@ fn end_plan(
     radius: f64,
     delta: f64,
 ) -> Option<EndPlan> {
-    if run_epmm > EPMM_MIN && (n.epmm - run_epmm).abs() > EPMM_REL_TOL * run_epmm {
+    if !flow_blendable(run_epmm, n.epmm) {
         return None;
     }
     let phi_budget = tangent_ramp_angle(radius, delta, n.length);
@@ -580,7 +600,7 @@ pub(super) fn grow_turning_band(
     while end + 1 < n {
         if gate_epmm {
             let e_next = epmm(&moves[end + 1]);
-            if e_next < EPMM_MIN || (e_next - e0).abs() > EPMM_REL_TOL * e0 {
+            if e_next < EPMM_MIN || (e_next - e0).abs() > EPMM_ARC_REL_TOL * e0 {
                 break;
             }
         }
@@ -809,6 +829,71 @@ pub(super) fn reconstruct(facets: &[Move], tol: f64) -> Result<Option<Reconstruc
         head_line_trim: 0.0,
         tail_line_trim: 0.0,
     }))
+}
+
+/// Reconstruct a run's arc on a circle carried across a commit seam rather than
+/// fitting a fresh one, so the resumed arc starts at exactly the committed
+/// curvature. The run's facets must already lie on the carried circle (they are
+/// the continuation of the committed arc); a facet off it by more than `tol` is a
+/// resume-state inconsistency and fails loud.
+pub(super) fn reconstruct_on_circle(
+    facets: &[Move],
+    origin: [f64; 3],
+    radius: f64,
+    pn: [f64; 3],
+    tol: f64,
+) -> Result<Reconstruction, FitError> {
+    let line_no = facets[0].source.start_line;
+    let lines: Vec<&Line> = facets
+        .iter()
+        .map(line_of)
+        .collect::<Option<Vec<_>>>()
+        .ok_or(FitError::Internal {
+            line_no,
+            source: GeometryError::DegenerateArc {
+                reason: "resume run facet is not a line",
+            },
+        })?;
+    if max_radial_dev(&lines, origin, radius) > tol {
+        return Err(FitError::Internal {
+            line_no,
+            source: GeometryError::DegenerateArc {
+                reason: "resume facets do not lie on the carried circle",
+            },
+        });
+    }
+    let u = normalize(sub(lines[0].start, origin));
+    let v = cross(pn, u);
+    let mut sweep = 0.0_f64;
+    let mut prev = sub(lines[0].start, origin);
+    for l in &lines {
+        let cur = sub(l.point_at(l.s_len()), origin);
+        sweep += dot(cross(prev, cur), pn).atan2(dot(prev, cur));
+        prev = cur;
+    }
+    let arc = Arc::try_new(origin, u, v, radius, 0.0, sweep).map_err(internal(line_no))?;
+    let head_consumption = lines[0].s_len();
+    let tail_consumption = lines[lines.len() - 1].s_len();
+    let recon_len = arc_len(&arc);
+    let followers = run_followers(
+        facets,
+        &lines,
+        head_consumption,
+        tail_consumption,
+        recon_len,
+    );
+    Ok(Reconstruction {
+        up: Vec::new(),
+        up_followers: Vec::new(),
+        arc,
+        down: Vec::new(),
+        down_followers: Vec::new(),
+        followers,
+        head_consumption,
+        tail_consumption,
+        head_line_trim: 0.0,
+        tail_line_trim: 0.0,
+    })
 }
 
 pub(super) struct CircleFit {

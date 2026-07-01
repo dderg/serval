@@ -1,3 +1,4 @@
+use crate::GeometryError;
 use crate::frontend::Move;
 use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, CurvatureProfile, Line, PathSegment, Segment};
@@ -8,12 +9,14 @@ use super::biclothoid::GeneralBlend;
 use super::heart::Heart;
 use super::kernels::{self, Reconstruction};
 use super::overlap;
-use super::vec3::{dist, dot};
+use super::vec3::{cross, dist, dot, madd, norm, normalize};
 use super::{
-    ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, JunctionPlan, UnblendReason,
-    UnblendedJunction, blend_trim, classify_junction, emit_blend, emit_move, internal,
-    junction_deviation, line_of, scaled_followers,
+    ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, JunctionPlan, ResumeState,
+    UnblendReason, UnblendedJunction, blend_trim, classify_junction, emit_blend, emit_move,
+    internal, junction_deviation, line_of, scaled_followers,
 };
+
+const RESUME_KAPPA_EPS: f64 = 1e-6;
 
 struct Run {
     start: usize,
@@ -27,6 +30,8 @@ pub(super) fn fit(
     moves: &[Move],
     config: ChainFitConfig,
     head_len_restore: f64,
+    resume: Option<ResumeState>,
+    prune_bare: bool,
 ) -> Result<FitOutcome, FitError> {
     if moves.len() <= 1 {
         return Ok(FitOutcome {
@@ -35,7 +40,28 @@ pub(super) fn fit(
         });
     }
 
-    let mut plans = Vec::with_capacity(moves.len() - 1);
+    let heart = config.heart.build();
+    let mut runs = detect_runs(moves, config, heart.as_ref(), head_len_restore)?;
+    resume_leading_run(&mut runs, moves, resume)?;
+    let (mut arc_blends, mut line_blend_trims) =
+        resolve_run_boundaries(&mut runs, moves, config.corner);
+    if prune_bare {
+        runs = prune_bare_runs(runs, moves, &mut arc_blends, &mut line_blend_trims);
+    }
+
+    let njunc = moves.len() - 1;
+    let mut in_reductions = vec![0.0_f64; njunc];
+    let mut out_reductions = vec![0.0_f64; njunc];
+    for r in &runs {
+        if r.start >= 2 {
+            out_reductions[r.start - 2] = r.recon.head_line_trim;
+        }
+        if r.end + 1 < njunc {
+            in_reductions[r.end + 1] = r.recon.tail_line_trim;
+        }
+    }
+
+    let mut plans = Vec::with_capacity(njunc);
     for (i, pair) in moves.windows(2).enumerate() {
         let restore = if i == 0 { head_len_restore } else { 0.0 };
         plans.push(classify_junction(
@@ -43,12 +69,10 @@ pub(super) fn fit(
             &pair[1],
             config.corner,
             restore,
+            in_reductions[i],
+            out_reductions[i],
         )?);
     }
-
-    let heart = config.heart.build();
-    let mut runs = detect_runs(moves, config, heart.as_ref())?;
-    let (arc_blends, line_blend_trims) = resolve_run_boundaries(&mut runs, moves, config.corner);
 
     let mut out = Vec::new();
     let mut report = FitReport::default();
@@ -146,6 +170,71 @@ pub(super) fn fit(
     Ok(FitOutcome { moves: out, report })
 }
 
+/// Re-fit the leading run on the circle carried across the commit seam so the
+/// resumed arc starts at exactly the committed curvature. The leading arc is
+/// grown over the facets that lie on the carried circle (any length, including
+/// below `min_run` — it is a continuation, not a fresh detection), replacing
+/// whatever `detect_runs` proposed there. No-op for a straight resume
+/// (`kappa` ~ 0); a nonzero resume whose leading move is not a line fails loud.
+fn resume_leading_run(
+    runs: &mut Vec<Run>,
+    moves: &[Move],
+    resume: Option<ResumeState>,
+) -> Result<(), FitError> {
+    let Some(rs) = resume else { return Ok(()) };
+    let kmag = norm(rs.kappa);
+    if kmag <= RESUME_KAPPA_EPS {
+        return Ok(());
+    }
+    let tol = boundary_delta(moves);
+    if !(tol.is_finite() && tol > 0.0) {
+        return Ok(());
+    }
+    let line_no = moves[0].source.start_line;
+    if line_of(&moves[0]).is_none() {
+        return Err(FitError::Internal {
+            line_no,
+            source: GeometryError::DegenerateArc {
+                reason: "resume curvature nonzero but leading move is not a line",
+            },
+        });
+    }
+    let radius = 1.0 / kmag;
+    let center = madd(rs.pos, 1.0 / (kmag * kmag), rs.kappa);
+    let pn = normalize(cross(rs.tangent, rs.kappa));
+    let on_circle = |p: [f64; 3]| (dist(p, center) - radius).abs() <= tol;
+
+    let mut end = 0;
+    while end + 1 < moves.len() {
+        match line_of(&moves[end + 1]) {
+            Some(l) if on_circle(l.point_at(l.s_len())) => end += 1,
+            _ => break,
+        }
+    }
+
+    let facets = &moves[0..=end];
+    let mut recon = kernels::reconstruct_on_circle(facets, center, radius, pn, tol)?;
+    let tail = (end + 1 < moves.len()
+        && !runs.iter().any(|r| r.start <= end + 1 && end < r.end)
+        && line_of(&moves[end + 1]).is_some())
+    .then(|| kernels::neighbor(&moves[end + 1], false, 0.0))
+    .flatten();
+    kernels::ease_run(&mut recon, facets, None, tail.as_ref(), tol, true)?;
+
+    runs.retain(|r| r.start > end);
+    runs.insert(
+        0,
+        Run {
+            start: 0,
+            end,
+            recon,
+            head_blend_trim: 0.0,
+            tail_blend_trim: 0.0,
+        },
+    );
+    Ok(())
+}
+
 fn is_travel(m: &Move) -> bool {
     matches!(m.segment.spatial, Some(Segment::Line(_)))
         && !m.segment.followers.iter().any(|f| f.ratio.abs() > 1e-12)
@@ -189,6 +278,7 @@ fn detect_runs(
     moves: &[Move],
     config: ChainFitConfig,
     heart: &dyn Heart,
+    head_len_restore: f64,
 ) -> Result<Vec<Run>, FitError> {
     let Some(arc) = config.arc_fit else {
         return Ok(Vec::new());
@@ -216,12 +306,22 @@ fn detect_runs(
         while j + 1 < n && line_of(&moves[j + 1]).is_some() {
             j += 1;
         }
-        runs.extend(chain_runs(moves, i, j, heart, tol, min_run, config.corner)?);
+        runs.extend(chain_runs(
+            moves,
+            i,
+            j,
+            heart,
+            tol,
+            min_run,
+            config.corner,
+            head_len_restore,
+        )?);
         i = j + 1;
     }
     Ok(runs)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn chain_runs(
     moves: &[Move],
     start: usize,
@@ -230,6 +330,7 @@ fn chain_runs(
     tol: f64,
     min_run: usize,
     corner: CornerFitConfig,
+    head_len_restore: f64,
 ) -> Result<Vec<Run>, FitError> {
     let chain = &moves[start..=end];
     let chain_len = chain.len();
@@ -250,12 +351,15 @@ fn chain_runs(
             continue;
         };
         let head = (a > 0 && !occupied[a - 1])
-            .then(|| kernels::neighbor(&chain[a - 1], true))
+            .then(|| {
+                let restore = if gs == 1 { head_len_restore } else { 0.0 };
+                kernels::neighbor(&chain[a - 1], true, restore)
+            })
             .flatten();
         let tail = (b + 1 < chain_len && !occupied[b + 1])
-            .then(|| kernels::neighbor(&chain[b + 1], false))
+            .then(|| kernels::neighbor(&chain[b + 1], false, 0.0))
             .flatten();
-        kernels::ease_run(&mut recon, facets, head.as_ref(), tail.as_ref(), tol)?;
+        kernels::ease_run(&mut recon, facets, head.as_ref(), tail.as_ref(), tol, false)?;
         runs.push(Run {
             start: gs,
             end: ge,
@@ -374,16 +478,6 @@ fn boundary_delta(moves: &[Move]) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-fn bare_line<'a>(moves: &'a [Move], runs: &[Run], idx: usize) -> Option<&'a Line> {
-    if idx >= moves.len() || runs.iter().any(|r| r.start <= idx && idx <= r.end) {
-        return None;
-    }
-    match &moves[idx].segment.spatial {
-        Some(Segment::Line(line)) => Some(line),
-        _ => None,
-    }
-}
-
 fn resolve_run_boundaries(
     runs: &mut [Run],
     moves: &[Move],
@@ -399,9 +493,12 @@ fn resolve_run_boundaries(
 
     for k in 0..runs.len() {
         let j = runs[k].end;
+        let run_epmm = kernels::epmm(&moves[runs[k].start]);
         if j < n && runs[k].recon.down.is_empty() {
             if k + 1 < runs.len() && runs[k + 1].start == j + 1 {
-                if runs[k + 1].recon.up.is_empty() {
+                if runs[k + 1].recon.up.is_empty()
+                    && kernels::flow_blendable(run_epmm, kernels::epmm(&moves[runs[k + 1].start]))
+                {
                     if let Some(blend) = overlap::resolve_arc_arc(
                         &runs[k].recon.arc,
                         &runs[k + 1].recon.arc,
@@ -414,12 +511,14 @@ fn resolve_run_boundaries(
                     }
                 }
             } else if let Some(line) = bare_line(moves, runs, j + 1) {
-                if let Some(blend) =
-                    overlap::resolve_arc_line(&runs[k].recon.arc, line, true, corner, delta)
-                {
-                    runs[k].tail_blend_trim = blend.trim_in;
-                    line_trims[j] = blend.trim_out;
-                    blends[j] = Some(blend);
+                if kernels::flow_blendable(run_epmm, kernels::epmm(&moves[j + 1])) {
+                    if let Some(blend) =
+                        overlap::resolve_arc_line(&runs[k].recon.arc, line, true, corner, delta)
+                    {
+                        runs[k].tail_blend_trim = blend.trim_in;
+                        line_trims[j] = blend.trim_out;
+                        blends[j] = Some(blend);
+                    }
                 }
             }
         }
@@ -427,17 +526,73 @@ fn resolve_run_boundaries(
         if runs[k].start > 0 && runs[k].recon.up.is_empty() {
             let jh = runs[k].start - 1;
             if let Some(line) = bare_line(moves, runs, jh) {
-                if let Some(blend) =
-                    overlap::resolve_arc_line(&runs[k].recon.arc, line, false, corner, delta)
-                {
-                    line_trims[jh] = blend.trim_in;
-                    runs[k].head_blend_trim = blend.trim_out;
-                    blends[jh] = Some(blend);
+                if kernels::flow_blendable(run_epmm, kernels::epmm(&moves[jh])) {
+                    if let Some(blend) =
+                        overlap::resolve_arc_line(&runs[k].recon.arc, line, false, corner, delta)
+                    {
+                        line_trims[jh] = blend.trim_in;
+                        runs[k].head_blend_trim = blend.trim_out;
+                        blends[jh] = Some(blend);
+                    }
                 }
             }
         }
     }
     (blends, line_trims)
+}
+
+fn bare_line<'a>(moves: &'a [Move], runs: &[Run], idx: usize) -> Option<&'a Line> {
+    if idx >= moves.len() || runs.iter().any(|r| r.start <= idx && idx <= r.end) {
+        return None;
+    }
+    match &moves[idx].segment.spatial {
+        Some(Segment::Line(line)) => Some(line),
+        _ => None,
+    }
+}
+
+/// Drop any run that would still emit a bare arc→line seam (a G2 curvature
+/// discontinuity) after the boundary resolver had its chance: the ease left an
+/// end without a clothoid and no fallback blend covered it. Its facets and both
+/// boundaries revert to G2 corner-blended lines. Applied to the whole-buffer fit
+/// (`fit_chain`); the windowed streaming fit keeps the run, since the arc/corner
+/// choice is not yet window-invariant across commits.
+fn prune_bare_runs(
+    mut runs: Vec<Run>,
+    moves: &[Move],
+    arc_blends: &mut [Option<GeneralBlend>],
+    line_blend_trims: &mut [f64],
+) -> Vec<Run> {
+    let n = moves.len().saturating_sub(1);
+    let drop: Vec<bool> = runs
+        .iter()
+        .map(|r| {
+            let head_bare = r.start > 0
+                && r.recon.up.is_empty()
+                && arc_blends.get(r.start - 1).is_some_and(|b| b.is_none())
+                && bare_line(moves, &runs, r.start - 1).is_some();
+            let tail_bare = r.end < n
+                && r.recon.down.is_empty()
+                && arc_blends.get(r.end).is_some_and(|b| b.is_none())
+                && bare_line(moves, &runs, r.end + 1).is_some();
+            head_bare || tail_bare
+        })
+        .collect();
+    for (r, &drop) in runs.iter().zip(&drop) {
+        if drop {
+            if r.start > 0 {
+                arc_blends[r.start - 1] = None;
+                line_blend_trims[r.start - 1] = 0.0;
+            }
+            if r.end < arc_blends.len() {
+                arc_blends[r.end] = None;
+                line_blend_trims[r.end] = 0.0;
+            }
+        }
+    }
+    let mut drop = drop.into_iter();
+    runs.retain(|_| !drop.next().unwrap_or(false));
+    runs
 }
 
 fn trim_arc(arc: &Arc, head: f64, tail: f64) -> Result<Arc, crate::GeometryError> {

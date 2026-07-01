@@ -1,12 +1,12 @@
 use super::*;
 
-fn square_waypoints() -> Vec<(f64, f64, f64, f64)> {
+fn square_waypoints() -> Vec<(f64, f64, f64, f64, f64)> {
     vec![
-        (0.0, 0.0, 0.0, 100.0),
-        (10.0, 0.0, 0.0, 100.0),
-        (10.0, 10.0, 0.0, 100.0),
-        (0.0, 10.0, 0.0, 100.0),
-        (0.0, 0.0, 0.0, 100.0),
+        (0.0, 0.0, 0.0, 100.0, 0.0),
+        (10.0, 0.0, 0.0, 100.0, 0.0),
+        (10.0, 10.0, 0.0, 100.0, 0.0),
+        (0.0, 10.0, 0.0, 100.0, 0.0),
+        (0.0, 0.0, 0.0, 100.0, 0.0),
     ]
 }
 
@@ -57,7 +57,7 @@ fn trajectory_lowers_to_contiguous_finite_cubics() {
     let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
     let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
     let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
-    let traj = lower_trajectory(&outcome, &profile);
+    let traj = lower_trajectory(&outcome, &profile).unwrap();
     assert!(!traj.x.is_empty());
     assert_eq!(traj.x.len(), traj.y.len());
     for (i, p) in traj.x.iter().enumerate() {
@@ -74,11 +74,39 @@ fn trajectory_lowers_to_contiguous_finite_cubics() {
 }
 
 #[test]
+fn extruding_moves_lower_across_the_full_trajectory() {
+    // Every extruding move carries a follower on the extruder axis (index 3). The
+    // lowering start vector must be long enough to place it; a three-element start
+    // rejects each extruding move as FollowerAxisOutOfRange, which once silently
+    // dropped the move and truncated the trajectory at the first bead.
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 100.0, 0.0),
+        (10.0, 0.0, 0.0, 100.0, 0.5),
+        (10.0, 10.0, 0.0, 100.0, 0.5),
+        (0.0, 10.0, 0.0, 100.0, 0.5),
+    ];
+    let moves = build_moves(&waypoints, default_limits()).unwrap();
+    assert!(
+        moves.iter().any(|m| !m.segment.followers.is_empty()),
+        "fixture must exercise the extruder-follower lowering path"
+    );
+    let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
+    let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
+    let traj = lower_trajectory(&outcome, &profile).unwrap();
+    assert!(
+        (traj.t_end - profile.report.traversal_time_s).abs() < 1e-9,
+        "lowered trajectory spans {} s but the plan runs {} s -- an extruding move was dropped",
+        traj.t_end,
+        profile.report.traversal_time_s,
+    );
+}
+
+#[test]
 fn cubic_pieces_are_position_continuous_at_joins() {
     let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
     let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
     let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
-    let traj = lower_trajectory(&outcome, &profile);
+    let traj = lower_trajectory(&outcome, &profile).unwrap();
     // Hermite lowering matches position at every join, on both axes.
     for axis in [&traj.x, &traj.y] {
         for w in axis.windows(2) {
@@ -94,7 +122,7 @@ fn cubic_pieces_are_position_continuous_at_joins() {
 
 #[test]
 fn single_move_skips_fitting() {
-    let waypoints = vec![(0.0, 0.0, 0.0, 100.0), (10.0, 0.0, 0.0, 100.0)];
+    let waypoints = vec![(0.0, 0.0, 0.0, 100.0, 0.0), (10.0, 0.0, 0.0, 100.0, 0.0)];
     let moves = build_moves(&waypoints, default_limits()).unwrap();
     let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
     assert_eq!(outcome.report.blended, 0);
@@ -103,9 +131,9 @@ fn single_move_skips_fitting() {
 #[test]
 fn zero_displacement_filtered() {
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 100.0),
-        (0.0, 0.0, 0.0, 100.0),
-        (10.0, 0.0, 0.0, 100.0),
+        (0.0, 0.0, 0.0, 100.0, 0.0),
+        (0.0, 0.0, 0.0, 100.0, 0.0),
+        (10.0, 0.0, 0.0, 100.0, 0.0),
     ];
     let moves = build_moves(&waypoints, default_limits()).unwrap();
     assert_eq!(moves.len(), 1);

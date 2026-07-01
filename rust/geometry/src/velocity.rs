@@ -1,6 +1,6 @@
-use std::collections::HashSet;
-
-use crate::fitter::{FitOutcome, UnblendReason};
+use crate::fitter::FitOutcome;
+use crate::frontend::Move;
+use crate::path::lowering::PositionProfile;
 use crate::path::{CurvatureProfile, Segment};
 use crate::segment::SourceRange;
 
@@ -16,6 +16,33 @@ const LENGTH_EPS_MM: f64 = 1e-9;
 const VELOCITY_EPS_MM_S: f64 = 1e-9;
 const MIN_INTEGRATION_TOL: f64 = 1e-9;
 const NEGATIVE_VELOCITY_TOL_MM_S: f64 = 1e-6;
+const EPMM_EPS: f64 = 1e-9;
+const CORNER_EPS_RAD: f64 = 1e-3;
+
+fn epmm(m: &Move) -> f64 {
+    m.segment.followers.iter().map(|f| f.ratio.abs()).sum()
+}
+
+/// A full-rest junction entering move `k`, decided from the geometry and
+/// extrusion the planner was handed — it owes nothing to the fitter's blend
+/// bookkeeping. Rest is forced where extrusion starts or stops (the extruder
+/// cannot accelerate across that seam), where either side has no spatial path
+/// (an extrude-only move), or at a bare tangent corner. A blend is
+/// tangent-continuous, so it registers as no corner and carries speed through.
+fn is_motion_stop(moves: &[Move], k: usize) -> bool {
+    let up = &moves[k - 1];
+    let dn = &moves[k];
+    if (epmm(up) < EPMM_EPS) != (epmm(dn) < EPMM_EPS) {
+        return true;
+    }
+    let (Some(su), Some(sd)) = (up.segment.spatial.as_ref(), dn.segment.spatial.as_ref()) else {
+        return true;
+    };
+    let a = su.heading_at(su.s_len());
+    let b = sd.heading_at(0.0);
+    let cos = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).clamp(-1.0, 1.0);
+    cos.acos() > CORNER_EPS_RAD
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelocityConfig {
@@ -161,14 +188,6 @@ pub fn plan_velocity_warm_start(
         });
     }
 
-    let stop_lines: HashSet<u32> = outcome
-        .report
-        .unblended
-        .iter()
-        .filter(|u| u.reason != UnblendReason::Collinear)
-        .map(|u| u.line_no)
-        .collect();
-
     let mut report = VelocityReport::default();
     let mut caps = Vec::with_capacity(n);
     for m in moves {
@@ -237,9 +256,7 @@ pub fn plan_velocity_warm_start(
     is_anchor[0] = true;
     is_anchor[n] = true;
     for k in 1..n {
-        let downstream = &moves[k];
-        let blend_half = matches!(downstream.segment.spatial, Some(Segment::Clothoid(_)));
-        if stop_lines.contains(&downstream.source.start_line) && !blend_half {
+        if is_motion_stop(moves, k) {
             report.stops += 1;
             is_anchor[k] = true;
         } else {

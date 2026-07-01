@@ -1,5 +1,5 @@
 use super::*;
-use crate::fitter::{FitReport, UnblendedJunction};
+use crate::fitter::{FitReport, UnblendReason, UnblendedJunction};
 use crate::frontend::{Move, VelocityLimits};
 use crate::path::{Arc, Clothoid, Line, PathSegment, Segment};
 use crate::segment::FollowerDemand;

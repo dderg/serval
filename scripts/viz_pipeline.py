@@ -91,17 +91,30 @@ def read_printer_config(cfg_path: Path):
 
 def parse_gcode(
     path: Path, max_velocity: float
-) -> list[tuple[float, float, float, float]]:
-    waypoints: list[tuple[float, float, float, float]] = []
+) -> list[tuple[float, float, float, float, float]]:
+    # Each waypoint is (x, y, z, feedrate, e_delta), where e_delta is the
+    # extrusion of the move that reaches it. Extrusion is load-bearing: it lets
+    # the fitter refuse to blend across an extrude<->travel seam, so the snapshot
+    # must carry it (build_moves used to drop it, blinding the snapshot to flow).
+    # E handling mirrors the Rust harness: absolute by default, M82/M83 toggles.
+    waypoints: list[tuple[float, float, float, float, float]] = []
     x, y, z = 0.0, 0.0, 0.0
     feedrate = max_velocity
     relative = False
+    e_pos = 0.0
+    e_relative = False
     motion_cmd = re.compile(r"^G0?([0-3])\b", re.IGNORECASE)
     mode_cmd = re.compile(r"^G(90|91)\b", re.IGNORECASE)
-    coord = re.compile(r"([XYZFIJ])([-+]?[0-9]*\.?[0-9]+)", re.IGNORECASE)
+    emode_cmd = re.compile(r"^M(82|83)\b", re.IGNORECASE)
+    coord = re.compile(r"([XYZEFIJ])([-+]?[0-9]*\.?[0-9]+)", re.IGNORECASE)
 
     for line in path.read_text().splitlines():
         line = line.split(";", 1)[0].strip()
+
+        em = emode_cmd.match(line)
+        if em:
+            e_relative = em.group(1) == "83"
+            continue
 
         mm = mode_cmd.match(line)
         if mm:
@@ -117,6 +130,14 @@ def parse_gcode(
         }
         has_position = any(axis in params for axis in ("X", "Y", "Z"))
 
+        e_delta = 0.0
+        if "E" in params:
+            if e_relative:
+                e_delta = params["E"]
+            else:
+                e_delta = params["E"] - e_pos
+                e_pos = params["E"]
+
         if relative:
             nx = x + params.get("X", 0.0)
             ny = y + params.get("Y", 0.0)
@@ -130,13 +151,13 @@ def parse_gcode(
             if not has_position:
                 continue
             x, y, z = nx, ny, nz
-            waypoints.append((x, y, z, max_velocity))
+            waypoints.append((x, y, z, max_velocity, e_delta))
         elif cmd == 1:
             feedrate = params.get("F", feedrate * 60.0) / 60.0
             if not has_position:
                 continue
             x, y, z = nx, ny, nz
-            waypoints.append((x, y, z, feedrate))
+            waypoints.append((x, y, z, feedrate, e_delta))
         elif cmd in (2, 3):
             raise ValueError(
                 f"G{cmd} arc command is not supported: the motion engine has no "

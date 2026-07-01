@@ -144,6 +144,7 @@ fn general_blend_rounds_opposite_sign_apex() {
         delta,
         5.0,
         5.0,
+        false,
     )
     .expect("apex must blend");
     assert_blend_g2(&blend, 0.46, -0.42);
@@ -173,6 +174,7 @@ fn general_blend_bridges_gapped_arc_endpoints() {
         delta,
         4.0,
         4.0,
+        false,
     )
     .expect("gapped apex must blend");
     assert_blend_g2(&blend, 0.5, -0.45);
@@ -192,6 +194,7 @@ fn general_blend_handles_line_to_arc_corner() {
         delta,
         4.0,
         4.0,
+        false,
     )
     .expect("must blend");
     assert_blend_g2(&blend, 0.0, 0.6);
@@ -213,6 +216,7 @@ fn general_blend_clamps_to_runway_budget() {
         delta,
         budget,
         budget,
+        false,
     )
     .expect("must blend");
     assert_blend_g2(&blend, 0.3, -0.3);

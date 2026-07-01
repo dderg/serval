@@ -406,3 +406,58 @@ fn leading_corner_curvature_invariant_to_head_trim() {
          naive {naive} vs full {full}"
     );
 }
+
+#[test]
+fn resume_continues_carried_circle() {
+    use crate::ResumeState;
+    let r = 10.0_f64;
+    let center = [0.0, 0.0, 0.0];
+    let angles: Vec<f64> = (0..=6)
+        .map(|k| (-30.0 + 10.0 * k as f64).to_radians())
+        .collect();
+    let pts: Vec<[f64; 3]> = angles
+        .iter()
+        .map(|&a| [r * a.cos(), r * a.sin(), 0.0])
+        .collect();
+    let moves: Vec<Move> = pts
+        .windows(2)
+        .enumerate()
+        .map(|(i, w)| seg(i as u32 + 1, 1000.0, 10.0, w[0], w[1], 0.1))
+        .collect();
+    let a0 = angles[0];
+    let tangent = [-a0.sin(), a0.cos(), 0.0];
+    // curvature vector points toward the centre (origin), magnitude 1/r
+    let kappa = [-pts[0][0] / (r * r), -pts[0][1] / (r * r), 0.0];
+    let resume = ResumeState {
+        pos: pts[0],
+        tangent,
+        kappa,
+    };
+
+    let out = fit_chain_with_resume(&moves, ChainFitConfig::with_arc_fit(3), 0.0, Some(resume))
+        .expect("resume fit");
+    let first = out
+        .moves
+        .iter()
+        .find_map(|m| m.segment.spatial.as_ref())
+        .expect("a spatial segment");
+    match first {
+        Segment::Arc(arc) => {
+            assert!(
+                approx3(arc.point_at(0.0), pts[0], 1e-9),
+                "arc starts at the resume position"
+            );
+            assert!(
+                (arc.kappa(0.0).abs() - 1.0 / r).abs() < 1e-9,
+                "arc curvature equals carried 1/r"
+            );
+            assert!(
+                approx3(arc.origin, center, 1e-9),
+                "arc origin is the carried centre"
+            );
+        }
+        other => {
+            panic!("expected the leading segment to be an Arc on the carried circle, got {other:?}")
+        }
+    }
+}

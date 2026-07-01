@@ -339,6 +339,7 @@ pub(super) fn solve_general(
     delta: f64,
     budget_in: f64,
     budget_out: f64,
+    best_effort: bool,
 ) -> Option<GeneralBlend> {
     if delta <= 0.0 {
         return None;
@@ -363,23 +364,46 @@ pub(super) fn solve_general(
             rho,
             plane_n,
         );
-        let pair = hermite_g2(a, ta, anchor_in.kappa, b, tb, anchor_out.kappa, plane_n)?;
+        let pair =
+            hermite_g2(a, ta, anchor_in.kappa, b, tb, anchor_out.kappa, plane_n).or_else(|| {
+                // The same blend solved from the other end: the Newton converges
+                // into a tight arc from the high-curvature side where it stalls
+                // from the line side. Flip the result back to in→out.
+                let rev = hermite_g2(b, tb, anchor_out.kappa, a, ta, anchor_in.kappa, plane_n)?;
+                Some(ClothoidPair {
+                    half1: super::kernels::reverse_clothoid(&rev.half2)?,
+                    half2: super::kernels::reverse_clothoid(&rev.half1)?,
+                })
+            })?;
         let dev = dist(apex, pair.half2.start_pose);
         Some((pair, dev))
     };
 
     let samples = 48;
     let mut best: Option<(ClothoidPair, f64)> = None;
+    let mut fallback: Option<(ClothoidPair, f64, f64)> = None;
     for s in 1..=samples {
         let rho = rho_max * (s as f64) / (samples as f64);
         if let Some((pair, dev)) = eval(rho) {
             if dev <= delta {
                 best = Some((pair, rho));
+            } else if best_effort && fallback.as_ref().is_none_or(|(_, _, d)| dev < *d) {
+                fallback = Some((pair, rho, dev));
             }
         }
     }
 
-    let (pair, rho) = best?;
+    // The largest within-budget blend that meets `delta` wins; with `best_effort`
+    // a tighter neighbour or arc may admit none, so the smallest-deviation blend
+    // is taken instead — it overshoots curvature but stays G2-continuous, never a
+    // bare arc→line seam.
+    let (pair, rho) = match best {
+        Some(b) => b,
+        None => {
+            let (pair, rho, _) = fallback?;
+            (pair, rho)
+        }
+    };
     Some(GeneralBlend {
         half1: pair.half1,
         half2: pair.half2,
