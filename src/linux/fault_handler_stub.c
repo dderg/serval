@@ -140,6 +140,29 @@ void diag_note_dispatch(uint32_t func, uint32_t addr)
     (void)func; (void)addr;
 }
 
+void diag_note_task_enter(uint32_t func)
+{
+    (void)func;
+}
+
+void diag_note_task_loop_end(void)
+{
+}
+
+void diag_note_msg_enter(uint32_t kind, uint32_t head)
+{
+    (void)kind; (void)head;
+}
+
+void diag_note_msg_exit(void)
+{
+}
+
+void diag_note_demux(uint32_t backlog, uint32_t msgs)
+{
+    (void)backlog; (void)msgs;
+}
+
 #define DIAG_GET_STUB(name) \
     uint32_t diag_get_##name(void) { return 0; }
 
