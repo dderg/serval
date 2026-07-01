@@ -24,6 +24,7 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 .toolbar .nav{display:flex;align-items:center;gap:4px}
 .toolbar .nav button{padding:4px 8px;font-size:14px;line-height:1}
 .toolbar select{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 8px;font-size:12px;font-family:'Courier Prime',monospace;max-width:340px}
+.toolbar .case-path{color:#9aa3b2;font-family:'Courier Prime',monospace;font-size:12px;white-space:nowrap}
 .png-overlay{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.92)}
 .png-overlay.open{display:block}
 .png-scroll{position:absolute;inset:0;overflow:auto}
@@ -61,6 +62,7 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
       <select id="case-select" title="Switch test"></select>
       <button id="case-next" title="Next test (→)">›</button>
     </div>
+    <span class="case-path" id="case-path" title="folder / config / gcode"></span>
     <span class="meta" id="meta"></span>
     <button id="toggle-variant" title="Compare before/after (space)">After</button>
     <button id="reset-zoom">Reset Zoom</button>

@@ -1,8 +1,20 @@
 use super::*;
 use crossbeam_channel::unbounded;
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+
+fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for: {what}"
+        );
+        std::thread::yield_now();
+    }
+}
 
 fn make_enqueue(key: AxisKey, pieces: Vec<(PieceEntry, f64)>, fresh_stream: bool) -> EnqueueMsg {
     EnqueueMsg {
@@ -29,7 +41,106 @@ fn room_correct_across_u32_wrap() {
     let mut q = AxisQueue::new(8);
     q.pushed = 2;
     q.retired = u32::MAX;
-    assert_eq!(q.room(), 5);
+    assert_eq!(
+        q.room(),
+        5,
+        "legitimate counter rollover: retired is numerically larger than pushed \
+         only because the u32 odometer wrapped, so 3 pieces are genuinely in \
+         flight. wrapping_sub recovers 3; a saturating_sub / max(0, ..) would \
+         collapse this to 0 in_flight and wrongly report a full ring."
+    );
+}
+
+#[test]
+fn room_recovers_when_retired_overtakes_pushed() {
+    let mut q = AxisQueue::new(4);
+    q.pushed = 100;
+    q.retired = 101;
+    assert_eq!(
+        q.room(),
+        4,
+        "retired overtook pushed by 1 (a PushPieces the MCU applied but whose \
+         response was lost): in_flight = pushed.wrapping_sub(retired) underflows \
+         to u32::MAX and saturating_sub pins room at 0 forever — the mid-print \
+         wedge. An inversion (in_flight > ring_depth) must reconcile to a \
+         drained ring, not zero room."
+    );
+}
+
+#[test]
+fn schedule_resends_orphan_when_retired_overtook_pushed() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let mut q = AxisQueue::new(8);
+    q.pushed = 100;
+    q.retired = 101;
+    q.pieces.push_back(make_piece(101));
+    let mut queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
+    queues.insert(key, q);
+
+    const MAX_PER_FRAME: usize = 32;
+    match schedule(&queues, MAX_PER_FRAME, |_, _| None, |_| usize::MAX) {
+        Schedule::Send(frames) => {
+            assert_eq!(frames.len(), 1, "exactly the inverted axis is scheduled");
+            assert_eq!(frames[0].key, key);
+        }
+        other => {
+            panic!("retired>pushed inversion must schedule a re-send, not wedge; got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
+    const RING_DEPTH: u32 = 8;
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+
+    let sink = RecordingSink::new();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let sink_clone = sink.clone();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink_clone,
+            |_key| RING_DEPTH,
+            |_mcu| None,
+            |_| {},
+            |_, _| {},
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        );
+    });
+
+    data.send(make_enqueue(key, vec![make_piece(0)], false))
+        .unwrap();
+    wait_until(
+        || sink.recorded().len() == 1,
+        "first piece delivered, creating the axis queue with pushed=1 (a heartbeat \
+         for an axis with no queue yet is dropped)",
+    );
+
+    ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 1,
+        retired_counts: vec![2],
+    }))
+    .unwrap();
+    let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
+    ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
+    ack_rx
+        .recv()
+        .expect("barrier acks only after the retired=2 heartbeat ahead of it applies");
+
+    data.send(make_enqueue(key, vec![make_piece(1)], false))
+        .unwrap();
+    wait_until(
+        || sink.recorded().len() == 2,
+        "second piece delivered despite retired(2) > pushed(1): buggy room() \
+         underflows to 0 and wedges here; the fix reopens room",
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
 }
 
 #[test]
@@ -330,13 +441,15 @@ fn flush_clears_queued_pieces_and_junctions() {
         key,
         pieces: vec![(
             PieceEntry {
-                start_time: 1,
+                // A deliverable "now" probe (== the advanced clock), not a stale
+                // past piece — the pump's in-past guard aborts on past start_times.
+                start_time: gated_tick + 1_000,
                 coeffs: [0.0; 4],
                 duration: 0.001,
                 motor_mask: 0,
                 _reserved: [0; 3],
             },
-            1.0,
+            (gated_tick + 1_000) as f64,
         )],
         fresh_stream: false,
         lead_secs,
@@ -432,13 +545,15 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         key,
         pieces: vec![(
             PieceEntry {
-                start_time: 1,
+                // A deliverable "now" probe (== the advanced clock), not a stale
+                // past piece — the pump's in-past guard aborts on past start_times.
+                start_time: gated_tick + 1_000,
                 coeffs: [0.0; 4],
                 duration: 0.001,
                 motor_mask: 0,
                 _reserved: [0; 3],
             },
-            1.0,
+            (gated_tick + 1_000) as f64,
         )],
         fresh_stream: false,
         lead_secs,
@@ -659,4 +774,102 @@ fn pump_backlog_drains_to_zero_when_pushed() {
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
+}
+
+mod pushpieces_retransmit_tests {
+    use super::super::{SendError, pushpieces_retransmit_serial};
+    use host_rt::transport::TransportError;
+
+    #[test]
+    fn recovers_after_transient_failures_within_budget() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, || {
+            calls += 1;
+            if calls < 3 {
+                Err(TransportError::Timeout)
+            } else {
+                Ok(vec![0xAB, 0xCD])
+            }
+        });
+        assert_eq!(res.expect("should recover"), vec![0xAB, 0xCD]);
+        assert_eq!(
+            calls, 3,
+            "succeeds on the 3rd attempt after 2 transient losses"
+        );
+    }
+
+    #[test]
+    fn first_attempt_success_does_not_retry() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, || {
+            calls += 1;
+            Ok(vec![1, 2, 3])
+        });
+        assert_eq!(res.expect("ok"), vec![1, 2, 3]);
+        assert_eq!(
+            calls, 1,
+            "healthy link: exactly one attempt, no extra latency"
+        );
+    }
+
+    #[test]
+    fn persistent_corruption_gives_up_as_transient_after_budget() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 4, || {
+            calls += 1;
+            Err(TransportError::Timeout)
+        });
+        assert!(
+            matches!(res, Err(SendError::Transient(_))),
+            "budget exhaustion returns Transient (backstop handles it), not Fatal"
+        );
+        assert_eq!(
+            calls, 4,
+            "exactly max_attempts attempts — no infinite retry"
+        );
+    }
+
+    #[test]
+    fn dead_transport_closed_fails_fast_no_retry() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, || {
+            calls += 1;
+            Err(TransportError::Closed)
+        });
+        assert!(
+            matches!(res, Err(SendError::Fatal(_))),
+            "Closed = dead transport → Fatal"
+        );
+        assert_eq!(calls, 1, "no retry on a dead transport");
+    }
+
+    #[test]
+    fn dead_transport_io_fails_fast_no_retry() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, || {
+            calls += 1;
+            Err(TransportError::Io(std::io::Error::from(
+                std::io::ErrorKind::BrokenPipe,
+            )))
+        });
+        assert!(
+            matches!(res, Err(SendError::Fatal(_))),
+            "Io = dead transport → Fatal"
+        );
+        assert_eq!(calls, 1, "no retry on a dead transport");
+    }
+
+    #[test]
+    fn mcu_shutdown_fails_fast_no_retry() {
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, || {
+            calls += 1;
+            Err(TransportError::McuShutdown("fault -112".into()))
+        });
+        assert!(
+            matches!(res, Err(SendError::Fatal(_))),
+            "McuShutdown is a genuine MCU failure → fail loud, not retry"
+        );
+        assert_eq!(calls, 1, "no retry once the MCU has shut down");
+    }
 }

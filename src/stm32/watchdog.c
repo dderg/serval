@@ -23,6 +23,9 @@ watchdog_reset(void)
     return;  // Renode's IWDG model misbehaves; sim build is silicon-unsafe
 #endif
     if (!runtime_liveness_ok) return;
+#if CONFIG_MACH_STM32H7
+    boot_guard_clear(); // reaching the task loop means this boot is healthy
+#endif
     IWDG->KR = 0xAAAA;
 }
 DECL_TASK(watchdog_reset);

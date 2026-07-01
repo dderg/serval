@@ -20,7 +20,8 @@ use crate::config::{self, PlannerConfig};
 use crate::dispatch::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
 use crate::stream_planner::{
-    DispatchError, HomeDripParams, NudgeParams, StreamPlannerError, StreamPlannerHandle,
+    DispatchError, HomeDripParams, NudgeParams, SegmentDispatchCtx, StreamPlannerError,
+    StreamPlannerHandle,
 };
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
 
@@ -41,6 +42,73 @@ fn abort_after_tracing_appender_drains() {
     if std::env::var_os("NO_EXIT_ON_FAULT").is_none() {
         std::process::abort();
     }
+}
+
+/// How long the host waits for klippy to consume the latched endpoint-death
+/// cause (clean shutdown) before the watchdog forces a last-resort abort. Sized
+/// well above the `DRIVE_FAULT_POLL_PERIOD` (1 s) so a healthy reactor always
+/// shuts down cleanly first; the abort only fires if the reactor is wedged.
+const ENDPOINT_DEATH_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Latch an EtherCAT-endpoint-death cause for klippy to surface as the shutdown
+/// reason (first cause wins), and log it. Deliberately does NOT abort here: the
+/// host shuts down cleanly via `ethercat_node._poll_drive_fault` →
+/// `invoke_shutdown` so the operator sees the real cause and runs
+/// `FIRMWARE_RESTART` (no silent auto-restart). Returns `true` when this call
+/// latched the first cause, so the caller arms the safety watchdog exactly once.
+fn report_ethercat_endpoint_death(
+    latch: &Arc<Mutex<HashMap<u32, String>>>,
+    mcu_id: u32,
+    reason: &str,
+) -> bool {
+    let code = runtime::error::FaultCode::EthercatEndpointDied.as_i32();
+    let message = format!("EtherCAT endpoint died mid-session (fault {code}): {reason}");
+    let mut guard = latch.lock().unwrap_or_else(|p| p.into_inner());
+    // First cause wins for BOTH the latched (operator-surfaced) message and the
+    // log: a later writer (e.g. the supervisor after the pump already latched)
+    // must not overwrite the original cause.
+    if let std::collections::hash_map::Entry::Vacant(slot) = guard.entry(mcu_id) {
+        slot.insert(message);
+        tracing::error!(
+            subsystem = "ethercat",
+            event = "endpoint_death",
+            mcu_id,
+            fault_code = code,
+            reason,
+            "EtherCAT endpoint died mid-session — latched for klippy; clean shutdown, no abort"
+        );
+        true
+    } else {
+        false
+    }
+}
+
+/// Safety backstop for the clean-shutdown path: if klippy has not consumed the
+/// latched endpoint-death cause within the grace (i.e. the reactor never ran the
+/// shutdown — wedged/CPU-starved), force a last-resort abort so the machine still
+/// stops. The normal path consumes the latch within one poll period, so this only
+/// fires on a double failure (endpoint dead AND reactor stuck).
+fn arm_endpoint_death_watchdog(latch: Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32) {
+    let _ = std::thread::Builder::new()
+        .name(format!("ec-death-watchdog-{mcu_id}"))
+        .spawn(move || {
+            std::thread::sleep(ENDPOINT_DEATH_SHUTDOWN_GRACE);
+            let unhandled = latch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains_key(&mcu_id);
+            if unhandled {
+                tracing::error!(
+                    subsystem = "ethercat",
+                    event = "endpoint_death_watchdog_abort",
+                    mcu_id,
+                    grace_secs = ENDPOINT_DEATH_SHUTDOWN_GRACE.as_secs(),
+                    "klippy did not act on the latched EtherCAT endpoint death within the grace \
+                     — aborting as a last-resort safety stop"
+                );
+                abort_after_tracing_appender_drains();
+            }
+        });
 }
 
 fn trip_position_to_motor_frame(
@@ -723,6 +791,7 @@ pub struct PyMotionEngine {
     homing_result:
         Mutex<Option<crossbeam_channel::Receiver<Result<([f64; 3], [f64; 3], u64), String>>>>,
     latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
+    latched_endpoint_death: Arc<Mutex<HashMap<u32, String>>>,
     remote_triggers: Mutex<HashMap<u8, (u32, host_rt::host_io::InterceptorId)>>,
     shut_down: AtomicBool,
 }
@@ -976,6 +1045,7 @@ impl PyMotionEngine {
             move_seq: std::sync::atomic::AtomicU64::new(0),
             homing_result: Mutex::new(None),
             latched_drive_fault: Arc::new(Mutex::new(HashMap::new())),
+            latched_endpoint_death: Arc::new(Mutex::new(HashMap::new())),
             remote_triggers: Mutex::new(HashMap::new()),
             shut_down: AtomicBool::new(false),
         }
@@ -1285,6 +1355,23 @@ impl PyMotionEngine {
         Ok(())
     }
 
+    fn stop_node(&self, mcu_handle: u32) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "stop_node")?;
+        tracing::warn!(
+            subsystem = "engine",
+            event = "servo_emergency_stop",
+            mcu_handle,
+            "servo motion discarded on shutdown"
+        );
+        let result = crate::servo_torque::send_stop(&conn).map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "stop_node: endpoint rejected Stop: result {result}"
+            )));
+        }
+        Ok(())
+    }
+
     fn arm_sensorless_endstop(
         &self,
         mcu_handle: u32,
@@ -1372,6 +1459,14 @@ impl PyMotionEngine {
     fn take_drive_fault(&self, mcu_handle: u32) -> PyResult<Option<u16>> {
         Ok(self
             .latched_drive_fault
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&mcu_handle))
+    }
+
+    fn take_endpoint_death(&self, mcu_handle: u32) -> PyResult<Option<String>> {
+        Ok(self
+            .latched_endpoint_death
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&mcu_handle))
@@ -2920,6 +3015,7 @@ impl PyMotionEngine {
         let drain_for_pump = self.drain.clone();
         let pump_backlog_for_pump = Arc::clone(&self.pump_backlog);
         let router_for_freq = Arc::clone(&self.router);
+        let endpoint_death_for_pump = Arc::clone(&self.latched_endpoint_death);
         let pump_thread_handle = std::thread::Builder::new()
             .name("push-pieces-pump".into())
             .spawn(move || {
@@ -2954,14 +3050,18 @@ impl PyMotionEngine {
                         let r = router_for_pump.lock().unwrap_or_else(|p| p.into_inner());
                         r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
                     },
-                    |key| {
-                        tracing::error!(
-                            mcu_id = key.mcu_id,
-                            axis = key.axis,
-                            "EXIT_ON_FAULT — EtherCAT transport broken-pipe in pump; \
-                             aborting klippy so systemd restarts it"
-                        );
-                        abort_after_tracing_appender_drains();
+                    move |key: crate::pump::AxisKey| {
+                        if report_ethercat_endpoint_death(
+                            &endpoint_death_for_pump,
+                            key.mcu_id,
+                            "pump transport went fatal (broken pipe / endpoint gone) \
+                             — see the send_frame_fatal log for the exact transport error",
+                        ) {
+                            arm_endpoint_death_watchdog(
+                                Arc::clone(&endpoint_death_for_pump),
+                                key.mcu_id,
+                            );
+                        }
                     },
                     move |key: crate::pump::AxisKey, n: u32| {
                         drain_for_pump.unsend(key.mcu_id, key.axis, n);
@@ -3123,17 +3223,19 @@ impl PyMotionEngine {
 
                 let conn_for_poll = Arc::downgrade(&conn);
                 let mcus_for_supervision = Arc::clone(&self.mcus);
-                let label_for_supervision = mcu_label.clone();
+                let endpoint_death_for_supervision = Arc::clone(&self.latched_endpoint_death);
                 let on_endpoint_death: Box<dyn Fn(&str) + Send + 'static> =
                     Box::new(move |reason: &str| {
-                        tracing::error!(
-                            mcu_label = label_for_supervision,
+                        if report_ethercat_endpoint_death(
+                            &endpoint_death_for_supervision,
                             mcu_id,
                             reason,
-                            "EXIT_ON_FAULT — ethercat endpoint died mid-session; \
-                             aborting klippy so systemd restarts it"
-                        );
-                        abort_after_tracing_appender_drains();
+                        ) {
+                            arm_endpoint_death_watchdog(
+                                Arc::clone(&endpoint_death_for_supervision),
+                                mcu_id,
+                            );
+                        }
                     });
 
                 let _ = std::thread::Builder::new()
@@ -3195,128 +3297,44 @@ impl PyMotionEngine {
             }
         }
 
-        let mcu_configs_for_cb = mcu_configs;
-        let router_for_cb = Arc::clone(&router_arc);
+        let mcu_configs_for_ctx = mcu_configs;
+        let router_for_ctx = Arc::clone(&router_arc);
 
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
         *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
-        let pump_tx_for_cb = data_tx_init.clone();
-        let drain_disp = self.drain.clone();
-        let counter_for_cb = Arc::clone(&counter);
-        let active_drip_cohort_for_cb = Arc::clone(&self.active_drip_cohort);
-        let motion_history_for_cb = Arc::clone(&self.motion_history);
-        let nominal_freqs_for_cb = Arc::clone(&self.nominal_clock_freqs);
+        let pump_tx_for_ctx = data_tx_init.clone();
+        let drain_for_ctx = self.drain.clone();
+        let counter_for_ctx = Arc::clone(&counter);
+        let active_drip_cohort_for_ctx = Arc::clone(&self.active_drip_cohort);
+        let motion_history_for_ctx = Arc::clone(&self.motion_history);
+        let nominal_freqs_for_ctx = Arc::clone(&self.nominal_clock_freqs);
 
-        let nudge_mcu_configs = mcu_configs_for_cb.clone();
-        let nudge_router = Arc::clone(&router_for_cb);
-        let nudge_pump_tx = pump_tx_for_cb.clone();
-        let nudge_drain = drain_disp.clone();
-        let nudge_counter = Arc::clone(&counter_for_cb);
-        let nudge_active_drip_cohort = Arc::clone(&active_drip_cohort_for_cb);
-        let nudge_motion_history = Arc::clone(&motion_history_for_cb);
-        let nudge_nominal_freqs = Arc::clone(&nominal_freqs_for_cb);
+        let nudge_mcu_configs = mcu_configs_for_ctx.clone();
+        let nudge_router = Arc::clone(&router_for_ctx);
+        let nudge_pump_tx = pump_tx_for_ctx.clone();
+        let nudge_drain = drain_for_ctx.clone();
+        let nudge_counter = Arc::clone(&counter_for_ctx);
+        let nudge_active_drip_cohort = Arc::clone(&active_drip_cohort_for_ctx);
+        let nudge_motion_history = Arc::clone(&motion_history_for_ctx);
+        let nudge_nominal_freqs = Arc::clone(&nominal_freqs_for_ctx);
         let nudge_anchor_arc = Arc::clone(&anchor_mutex);
 
+        let dispatch_ctx = Arc::new(SegmentDispatchCtx {
+            router: router_for_ctx,
+            anchor: anchor_mutex,
+            mcu_configs: mcu_configs_for_ctx,
+            pump_tx: pump_tx_for_ctx,
+            drain: drain_for_ctx,
+            counter: counter_for_ctx,
+            active_drip_cohort: active_drip_cohort_for_ctx,
+            motion_history: motion_history_for_ctx,
+            nominal_freqs: nominal_freqs_for_ctx,
+        });
         let dispatch: Arc<
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
         > = Arc::new(
             move |seg: &trajectory::ShapedSegment| -> Result<(), DispatchError> {
-                tracing::debug!(
-                    subsystem = "engine",
-                    event = "dispatch_entered",
-                    seg_t_start = seg.t_start,
-                    seg_t_end = seg.t_end,
-                    "[engine-trace] dispatch entered"
-                );
-
-                let host_now = {
-                    let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
-                    r.host_now_secs()
-                };
-
-                let (t0, fresh) = anchor_mutex
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .anchor_segment(seg.t_start, seg.t_end, host_now);
-
-                if fresh {
-                    let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
-                    for cfg in mcu_configs_for_cb.iter() {
-                        let h = crate::types::mcu_handle_from_raw(cfg.mcu_id);
-                        r.log_seg0_lead(h, t0 + seg.t_start, t0);
-                    }
-                }
-
-                let project = |mcu_id: u32, host_secs: f64| -> u64 {
-                    let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
-                    r.host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(mcu_id), host_secs)
-                        .unwrap_or(0)
-                };
-
-                let active_cohort: Option<u64> = *active_drip_cohort_for_cb
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-
-                let max_piece_secs = if active_cohort.is_some() {
-                    Some(0.025_f64)
-                } else {
-                    None::<f64>
-                };
-                let lead_secs = if active_cohort.is_some() {
-                    crate::pump::DRIP_WINDOW_SECS
-                } else {
-                    crate::pump::MAX_LEAD_SECS
-                };
-
-                let msgs = crate::enqueue::enqueue_segment(
-                    seg,
-                    &mcu_configs_for_cb,
-                    t0,
-                    fresh,
-                    host_now,
-                    lead_secs,
-                    project,
-                    max_piece_secs,
-                );
-
-                let nominal_freqs = nominal_freqs_for_cb
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .clone();
-                if fresh {
-                    motion_history_for_cb
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .drop_pieces_on_reanchor();
-                }
-                for m in msgs {
-                    let nominal_freq = *nominal_freqs
-                        .get(&m.key.mcu_id)
-                        .ok_or(DispatchError::MissingNominalFreq(m.key.mcu_id))?;
-                    {
-                        let mut store = motion_history_for_cb
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner());
-                        for (piece, host_t) in &m.pieces {
-                            store.record(m.key, piece, nominal_freq, *host_t);
-                        }
-                    }
-                    drain_disp.add_sent(m.key.mcu_id, m.key.axis, m.pieces.len() as u32);
-                    pump_tx_for_cb
-                        .send(m)
-                        .map_err(|_| DispatchError::PumpGone)?;
-                }
-
-                tracing::info!(
-                    subsystem = "motion",
-                    event = "pipe_pump_in",
-                    line = seg.source_line,
-                    t_us = crate::timing::mono_us(),
-                    "[pipe] handed to pump"
-                );
-
-                counter_for_cb.fetch_add(1, Ordering::Relaxed);
-                Ok(())
+                crate::stream_planner::dispatch_segment(&dispatch_ctx, seg)
             },
         );
 

@@ -12,7 +12,6 @@ use super::{BUDGET_EPS_MM, CornerFitConfig, FitError, internal, line_of};
 const COPLANAR_TOL: f64 = 1e-6;
 const ANGLE_EPS_RAD: f64 = 1e-9;
 const EASE_LEAD_MAX_RAD: f64 = FRAC_PI_6;
-const SHIFT_BUDGET_FRACTION: f64 = 0.5;
 pub(super) const EPMM_MIN: f64 = 1e-9;
 const EPMM_REL_TOL: f64 = 0.25;
 
@@ -63,16 +62,103 @@ pub(super) fn ease_run(
     let run_epmm = epmm(&facets[0]);
     let line_no = facets[0].source.start_line;
     let verts = run_vertices(facets);
+    let pn = normalize(cross(recon.arc.u, recon.arc.v));
+    let sgn = recon.arc.sweep.signum();
+    let o0 = recon.arc.origin;
+    let r0 = recon.arc.radius;
 
-    let Some(fit) = joint_refit(&recon.arc, head, tail, &verts, run_epmm, tol, line_no)? else {
+    let head_max = head.and_then(|n| ease_plan(n, n.dir, sgn, run_epmm, pn, o0, r0));
+    let tail_max = tail.and_then(|n| ease_plan(n, scale(n.dir, -1.0), -sgn, run_epmm, pn, o0, r0));
+    if head_max.is_none() && tail_max.is_none() {
+        return Ok(());
+    }
+
+    let mut fit = None;
+    for &shrink in &[1.0, 0.5, 0.25, 0.125] {
+        let hp = head_max.map(|p| EndPlan {
+            phi: p.phi * shrink,
+            ..p
+        });
+        let tp = tail_max.map(|p| EndPlan {
+            phi: p.phi * shrink,
+            ..p
+        });
+        if hp.map_or(true, |p| p.phi < ANGLE_EPS_RAD) && tp.map_or(true, |p| p.phi < ANGLE_EPS_RAD)
+        {
+            break;
+        }
+        if let Some((origin, radius)) = ease_circle(
+            hp.as_ref(),
+            tp.as_ref(),
+            o0,
+            r0,
+            recon.arc.u,
+            recon.arc.v,
+            &verts,
+            tol,
+        ) {
+            fit = Some((hp, tp, origin, radius));
+            break;
+        }
+    }
+
+    let Some((head_plan, tail_plan, origin, radius)) = fit else {
         return Ok(());
     };
 
-    recon.arc = fit.arc;
-    recon.up = fit.head.into_iter().collect();
-    recon.down = fit.tail.into_iter().collect();
-    recon.head_line_trim = fit.head_line_trim;
-    recon.tail_line_trim = fit.tail_line_trim;
+    let mut head_clo = None;
+    let mut tail_clo = None;
+    let mut head_trim = 0.0;
+    let mut tail_trim = 0.0;
+    let b_head = match &head_plan {
+        Some(p) => match build_spiral(origin, radius, p, pn).map_err(internal(line_no))? {
+            Some((clo, b, trim)) if within_line(trim, head.unwrap().length) => {
+                head_trim = trim;
+                head_clo = Some(clo);
+                b
+            }
+            _ => project_to_circle(origin, radius, verts[0]),
+        },
+        None => project_to_circle(origin, radius, verts[0]),
+    };
+    let b_tail = match &tail_plan {
+        Some(p) => match build_spiral(origin, radius, p, pn).map_err(internal(line_no))? {
+            Some((clo, b, trim)) if within_line(trim, tail.unwrap().length) => {
+                tail_clo = Some(reverse_clothoid(&clo).ok_or(FitError::Internal {
+                    line_no,
+                    source: GeometryError::DegenerateClothoid {
+                        reason: "tail spiral reverse failed",
+                    },
+                })?);
+                tail_trim = trim;
+                b
+            }
+            _ => project_to_circle(origin, radius, *verts.last().unwrap()),
+        },
+        None => project_to_circle(origin, radius, *verts.last().unwrap()),
+    };
+
+    if head_clo.is_none() && tail_clo.is_none() {
+        return Ok(());
+    }
+
+    recon.arc = build_arc(origin, radius, b_head, b_tail, pn, sgn).map_err(internal(line_no))?;
+
+    if let Some(clo) = head_clo {
+        recon.up_followers = head
+            .map(|n| scale_followers(&n.followers, head_trim / clo.s_len()))
+            .unwrap_or_default();
+        recon.head_line_trim = head_trim;
+        recon.up = vec![clo];
+    }
+    if let Some(clo) = tail_clo {
+        recon.down_followers = tail
+            .map(|n| scale_followers(&n.followers, tail_trim / clo.s_len()))
+            .unwrap_or_default();
+        recon.tail_line_trim = tail_trim;
+        recon.down = vec![clo];
+    }
+
     let lines: Vec<&Line> = facets
         .iter()
         .map(line_of)
@@ -85,18 +171,7 @@ pub(super) fn ease_run(
         recon.tail_consumption,
         arc_len(&recon.arc),
     );
-    recon.up_followers = match (recon.up.first(), head) {
-        (Some(clo), Some(nbr)) => {
-            scale_followers(&nbr.followers, recon.head_line_trim / clo.s_len())
-        }
-        _ => Vec::new(),
-    };
-    recon.down_followers = match (recon.down.first(), tail) {
-        (Some(clo), Some(nbr)) => {
-            scale_followers(&nbr.followers, recon.tail_line_trim / clo.s_len())
-        }
-        _ => Vec::new(),
-    };
+
     Ok(())
 }
 
@@ -109,191 +184,160 @@ fn scale_followers(f: &[FollowerDemand], s: f64) -> Vec<FollowerDemand> {
         .collect()
 }
 
-struct JointFit {
-    arc: Arc,
-    head: Option<Clothoid>,
-    tail: Option<Clothoid>,
-    head_line_trim: f64,
-    tail_line_trim: f64,
-}
-
+#[derive(Clone, Copy)]
 struct EndPlan {
-    normal: [f64; 3],
     spiral_dir: [f64; 3],
     curve_sgn: f64,
-    turn: f64,
+    phi: f64,
     vertex: [f64; 3],
-    neighbor_dir: [f64; 3],
-    neighbor_len: f64,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn joint_refit(
-    arc: &Arc,
-    head: Option<&Neighbor>,
-    tail: Option<&Neighbor>,
-    verts: &[[f64; 3]],
-    run_epmm: f64,
-    tol: f64,
-    line_no: u32,
-) -> Result<Option<JointFit>, FitError> {
-    let pn = normalize(cross(arc.u, arc.v));
-    let sgn = arc.sweep.signum();
-    let (o0, r0) = (arc.origin, arc.radius);
-    let t_start = arc.heading_at(0.0);
-    let t_end = arc.heading_at(arc.s_len());
-
-    let head_plan = head.and_then(|n| {
-        let turn = signed_angle(n.dir, t_start, pn);
-        end_plan(n, turn, sgn, n.dir, sgn, run_epmm, pn, o0, r0, tol)
-    });
-    let tail_plan = tail.and_then(|n| {
-        let turn = signed_angle(t_end, n.dir, pn);
-        end_plan(
-            n,
-            turn,
-            sgn,
-            scale(n.dir, -1.0),
-            -sgn,
-            run_epmm,
-            pn,
-            o0,
-            r0,
-            tol,
-        )
-    });
-    if head_plan.is_none() && tail_plan.is_none() {
-        return Ok(None);
-    }
-
-    let Some((origin, radius)) = choose_circle(
-        head_plan.as_ref(),
-        tail_plan.as_ref(),
-        o0,
-        r0,
-        arc.u,
-        arc.v,
-        verts,
-        tol,
-    ) else {
-        return Ok(None);
-    };
-
-    let mut head_clo = None;
-    let mut tail_clo = None;
-    let mut head_trim = 0.0;
-    let mut tail_trim = 0.0;
-    let b_head = match &head_plan {
-        Some(p) => {
-            let (clo, b, trim) = build_spiral(origin, radius, p, pn)
-                .map_err(internal(line_no))?
-                .ok_or(())
-                .map_err(|()| FitError::Internal {
-                    line_no,
-                    source: GeometryError::DegenerateClothoid {
-                        reason: "head transition spiral did not close",
-                    },
-                })?;
-            if !within_line(trim, p.neighbor_len) || spiral_dev(&clo, p, o0, r0, pn) > tol {
-                return Ok(None);
-            }
-            head_clo = Some(clo);
-            head_trim = trim;
-            b
-        }
-        None => project_to_circle(origin, radius, verts[0]),
-    };
-    let b_tail = match &tail_plan {
-        Some(p) => {
-            let (clo, b, trim) = build_spiral(origin, radius, p, pn)
-                .map_err(internal(line_no))?
-                .ok_or(())
-                .map_err(|()| FitError::Internal {
-                    line_no,
-                    source: GeometryError::DegenerateClothoid {
-                        reason: "tail transition spiral did not close",
-                    },
-                })?;
-            if !within_line(trim, p.neighbor_len) || spiral_dev(&clo, p, o0, r0, pn) > tol {
-                return Ok(None);
-            }
-            tail_clo = Some(
-                reverse_clothoid(&clo)
-                    .ok_or(())
-                    .map_err(|()| FitError::Internal {
-                        line_no,
-                        source: GeometryError::DegenerateClothoid {
-                            reason: "tail spiral reverse failed",
-                        },
-                    })?,
-            );
-            tail_trim = trim;
-            b
-        }
-        None => project_to_circle(origin, radius, verts[verts.len() - 1]),
-    };
-
-    if interior_residual(&origin, radius, verts) > tol {
-        return Ok(None);
-    }
-
-    let arc = build_arc(origin, radius, b_head, b_tail, pn, sgn).map_err(internal(line_no))?;
-    Ok(Some(JointFit {
-        arc,
-        head: head_clo,
-        tail: tail_clo,
-        head_line_trim: head_trim,
-        tail_line_trim: tail_trim,
-    }))
+fn max_ease_angle(radius: f64, neighbor_len: f64) -> f64 {
+    (0.45 * neighbor_len / radius).min(EASE_LEAD_MAX_RAD)
 }
 
-fn tangent_ramp_angle(radius: f64, delta: f64, neighbor_len: f64) -> f64 {
-    let by_shift = (6.0 * SHIFT_BUDGET_FRACTION * delta / radius).sqrt();
-    let by_neighbor = 0.45 * neighbor_len / radius;
-    by_shift.min(by_neighbor).min(EASE_LEAD_MAX_RAD)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn end_plan(
+fn ease_plan(
     n: &Neighbor,
-    turn: f64,
-    sweep_sign: f64,
     spiral_dir: [f64; 3],
     curve_sgn: f64,
     run_epmm: f64,
     pn: [f64; 3],
-    o0: [f64; 3],
+    origin: [f64; 3],
     radius: f64,
-    delta: f64,
 ) -> Option<EndPlan> {
     if run_epmm > EPMM_MIN && (n.epmm - run_epmm).abs() > EPMM_REL_TOL * run_epmm {
         return None;
     }
-    let phi_budget = tangent_ramp_angle(radius, delta, n.length);
-    let phi = if turn.abs() >= phi_budget {
-        if turn.signum() != sweep_sign {
-            return None;
-        }
-        turn.abs()
-    } else {
-        phi_budget
-    };
-    if !(ANGLE_EPS_RAD..EASE_LEAD_MAX_RAD).contains(&phi) {
+    let phi = max_ease_angle(radius, n.length);
+    if phi < ANGLE_EPS_RAD {
         return None;
     }
     let normal = scale(normalize(cross(pn, spiral_dir)), curve_sgn);
-    if dot(normal, sub(o0, n.vertex)) <= 0.0 {
+    if dot(normal, sub(origin, n.vertex)) <= 0.0 {
         return None;
     }
     Some(EndPlan {
-        normal,
         spiral_dir,
         curve_sgn,
-        turn: phi,
+        phi,
         vertex: n.vertex,
-        neighbor_dir: n.dir,
-        neighbor_len: n.length,
     })
+}
+
+fn spiral_center_dist(
+    radius: f64,
+    line_dir: [f64; 3],
+    curve_sgn: f64,
+    phi: f64,
+    pn: [f64; 3],
+) -> Option<f64> {
+    let g = probe_geometry(radius, line_dir, curve_sgn, phi, pn)?;
+    let normal = scale(g.v, curve_sgn);
+    Some(dot(g.center, normal))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ease_circle(
+    head: Option<&EndPlan>,
+    tail: Option<&EndPlan>,
+    o0: [f64; 3],
+    r0: f64,
+    u: [f64; 3],
+    v: [f64; 3],
+    verts: &[[f64; 3]],
+    tol: f64,
+) -> Option<([f64; 3], f64)> {
+    let pn = normalize(cross(u, v));
+    let radius = r0;
+    match (head, tail) {
+        (Some(h), Some(t)) => {
+            let dh = spiral_center_dist(radius, h.spiral_dir, h.curve_sgn, h.phi, pn)?;
+            let dt = spiral_center_dist(radius, t.spiral_dir, t.curve_sgn, t.phi, pn)?;
+            let nh = scale(normalize(cross(pn, h.spiral_dir)), h.curve_sgn);
+            let nt = scale(normalize(cross(pn, t.spiral_dir)), t.curve_sgn);
+            let origin = solve_center(nh, h.vertex, dh, nt, t.vertex, dt, o0, u, v)?;
+            if interior_residual(&origin, radius, verts) <= tol {
+                Some((origin, radius))
+            } else {
+                None
+            }
+        }
+        (Some(e), None) => one_end_center(e, *verts.last().unwrap(), radius, o0, pn, verts, tol),
+        (None, Some(e)) => one_end_center(e, verts[0], radius, o0, pn, verts, tol),
+        (None, None) => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn one_end_center(
+    e: &EndPlan,
+    bare_vertex: [f64; 3],
+    radius: f64,
+    o0: [f64; 3],
+    pn: [f64; 3],
+    verts: &[[f64; 3]],
+    tol: f64,
+) -> Option<([f64; 3], f64)> {
+    let d = spiral_center_dist(radius, e.spiral_dir, e.curve_sgn, e.phi, pn)?;
+    let normal = scale(normalize(cross(pn, e.spiral_dir)), e.curve_sgn);
+    let base = add(e.vertex, scale(normal, d));
+    let t = normalize(cross(pn, normal));
+    let w = sub(base, bare_vertex);
+    let wt = dot(w, t);
+    let disc = radius * radius - (dot(w, w) - wt * wt);
+    if disc >= 0.0 {
+        let sq = disc.sqrt();
+        let c1 = madd(base, -wt + sq, t);
+        let c2 = madd(base, -wt - sq, t);
+        let anchored = if norm(sub(c1, o0)) <= norm(sub(c2, o0)) {
+            c1
+        } else {
+            c2
+        };
+        if interior_residual(&anchored, radius, verts) <= tol {
+            return Some((anchored, radius));
+        }
+    }
+    let shift = d - dot(sub(o0, e.vertex), normal);
+    let fallback = add(o0, scale(normal, shift));
+    if interior_residual(&fallback, radius, verts) <= tol {
+        Some((fallback, radius))
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_center(
+    nh: [f64; 3],
+    ph: [f64; 3],
+    dh: f64,
+    nt: [f64; 3],
+    pt: [f64; 3],
+    dt: f64,
+    o0: [f64; 3],
+    u: [f64; 3],
+    v: [f64; 3],
+) -> Option<[f64; 3]> {
+    let a = [[dot(nh, u), dot(nh, v)], [dot(nt, u), dot(nt, v)]];
+    let b = [dot(nh, sub(ph, o0)) + dh, dot(nt, sub(pt, o0)) + dt];
+    let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let x = (b[0] * a[1][1] - b[1] * a[0][1]) / det;
+    let y = (a[0][0] * b[1] - a[1][0] * b[0]) / det;
+    Some(add(o0, add(scale(u, x), scale(v, y))))
+}
+
+fn interior_residual(origin: &[f64; 3], radius: f64, verts: &[[f64; 3]]) -> f64 {
+    if verts.len() <= 2 {
+        return 0.0;
+    }
+    verts[1..verts.len() - 1]
+        .iter()
+        .map(|v| (norm(sub(*v, *origin)) - radius).abs())
+        .fold(0.0, f64::max)
 }
 
 struct ProbeGeometry {
@@ -330,25 +374,13 @@ fn probe_geometry(
     })
 }
 
-fn spiral_center_dist(
-    radius: f64,
-    line_dir: [f64; 3],
-    curve_sgn: f64,
-    phi: f64,
-    pn: [f64; 3],
-) -> Option<f64> {
-    let g = probe_geometry(radius, line_dir, curve_sgn, phi, pn)?;
-    let normal = scale(g.v, curve_sgn);
-    Some(dot(g.center, normal))
-}
-
 fn build_spiral(
     origin: [f64; 3],
     radius: f64,
     p: &EndPlan,
     pn: [f64; 3],
 ) -> Result<Option<(Clothoid, [f64; 3], f64)>, GeometryError> {
-    let Some(g) = probe_geometry(radius, p.spiral_dir, p.curve_sgn, p.turn, pn) else {
+    let Some(g) = probe_geometry(radius, p.spiral_dir, p.curve_sgn, p.phi, pn) else {
         return Ok(None);
     };
     let a = sub(origin, g.center);
@@ -397,125 +429,6 @@ fn center_through_endpoints(
     } else {
         b
     })
-}
-
-fn spiral_dev(clo: &Clothoid, p: &EndPlan, o0: [f64; 3], r0: f64, pn: [f64; 3]) -> f64 {
-    let n_line = normalize(cross(pn, p.neighbor_dir));
-    let mut m = 0.0_f64;
-    let samples = 16usize;
-    for k in 0..=samples {
-        let q = clo.point_at(clo.s_len() * k as f64 / samples as f64);
-        let off_line = dot(sub(q, p.vertex), n_line).abs();
-        let off_arc = (norm(sub(q, o0)) - r0).abs();
-        m = m.max(off_line.min(off_arc));
-    }
-    m
-}
-
-fn interior_residual(origin: &[f64; 3], radius: f64, verts: &[[f64; 3]]) -> f64 {
-    if verts.len() <= 2 {
-        return 0.0;
-    }
-    verts[1..verts.len() - 1]
-        .iter()
-        .map(|v| (norm(sub(*v, *origin)) - radius).abs())
-        .fold(0.0, f64::max)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn choose_circle(
-    head: Option<&EndPlan>,
-    tail: Option<&EndPlan>,
-    o0: [f64; 3],
-    r0: f64,
-    u: [f64; 3],
-    v: [f64; 3],
-    verts: &[[f64; 3]],
-    tol: f64,
-) -> Option<([f64; 3], f64)> {
-    let pn = normalize(cross(u, v));
-    let radius = balanced_radius(r0, verts);
-    match (head, tail) {
-        (Some(h), Some(t)) => {
-            let dh = spiral_center_dist(radius, h.spiral_dir, h.curve_sgn, h.turn, pn)?;
-            let dt = spiral_center_dist(radius, t.spiral_dir, t.curve_sgn, t.turn, pn)?;
-            let origin = solve_center(h.normal, h.vertex, dh, t.normal, t.vertex, dt, o0, u, v)?;
-            Some((origin, radius))
-        }
-        (Some(e), None) => one_eased_center(e, verts[verts.len() - 1], radius, o0, pn, verts, tol),
-        (None, Some(e)) => one_eased_center(e, verts[0], radius, o0, pn, verts, tol),
-        (None, None) => None,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn one_eased_center(
-    e: &EndPlan,
-    bare_vertex: [f64; 3],
-    radius: f64,
-    o0: [f64; 3],
-    pn: [f64; 3],
-    verts: &[[f64; 3]],
-    tol: f64,
-) -> Option<([f64; 3], f64)> {
-    let d = spiral_center_dist(radius, e.spiral_dir, e.curve_sgn, e.turn, pn)?;
-    let fallback = add(o0, scale(e.normal, d - dot(sub(o0, e.vertex), e.normal)));
-
-    let base = add(e.vertex, scale(e.normal, d));
-    let t = normalize(cross(pn, e.normal));
-    let w = sub(base, bare_vertex);
-    let wt = dot(w, t);
-    let disc = radius * radius - (dot(w, w) - wt * wt);
-    if disc < 0.0 {
-        return Some((fallback, radius));
-    }
-    let sq = disc.sqrt();
-    let c1 = madd(base, -wt + sq, t);
-    let c2 = madd(base, -wt - sq, t);
-    let anchored = if norm(sub(c1, o0)) <= norm(sub(c2, o0)) {
-        c1
-    } else {
-        c2
-    };
-    if interior_residual(&anchored, radius, verts) <= tol {
-        Some((anchored, radius))
-    } else {
-        Some((fallback, radius))
-    }
-}
-
-fn balanced_radius(r0: f64, verts: &[[f64; 3]]) -> f64 {
-    let mut max_sag = 0.0_f64;
-    for w in verts.windows(2) {
-        let half = 0.5 * norm(sub(w[1], w[0]));
-        if half < r0 {
-            max_sag = max_sag.max(r0 - (r0 * r0 - half * half).sqrt());
-        }
-    }
-    r0 - 0.5 * max_sag
-}
-
-#[allow(clippy::too_many_arguments)]
-fn solve_center(
-    nh: [f64; 3],
-    ph: [f64; 3],
-    dh: f64,
-    nt: [f64; 3],
-    pt: [f64; 3],
-    dt: f64,
-    o0: [f64; 3],
-    u: [f64; 3],
-    v: [f64; 3],
-) -> Option<[f64; 3]> {
-    let a = [[dot(nh, u), dot(nh, v)], [dot(nt, u), dot(nt, v)]];
-    let b = [dot(nh, sub(ph, o0)) + dh, dot(nt, sub(pt, o0)) + dt];
-    let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
-    if det.abs() < 1e-12 {
-        return None;
-    }
-    let x = (b[0] * a[1][1] - b[1] * a[0][1]) / det;
-    let y = (a[0][0] * b[1] - a[1][0] * b[0]) / det;
-    Some(add(o0, add(scale(u, x), scale(v, y))))
 }
 
 fn build_arc(

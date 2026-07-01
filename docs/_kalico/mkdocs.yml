@@ -22,6 +22,7 @@ not_in_nav: |
   /rewrite/
   /research/
   /superpowers/
+  /human-spec/
 
 # Custom markdown dialect settings
 markdown_extensions:

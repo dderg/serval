@@ -175,6 +175,7 @@ pub enum FaultCode {
     HostDisconnect = -200,
     HostRetransmitExhausted = -201,
     HostDispatcherTimeout = -202,
+    EthercatEndpointDied = -203,
 
     StepQueueOverflow = -300,
     SpiQueueOverflow = -301,
@@ -278,6 +279,7 @@ impl FaultCode {
             -200 => Self::HostDisconnect,
             -201 => Self::HostRetransmitExhausted,
             -202 => Self::HostDispatcherTimeout,
+            -203 => Self::EthercatEndpointDied,
             -300 => Self::StepQueueOverflow,
             -301 => Self::SpiQueueOverflow,
             -302 => Self::MathNonFinite,
@@ -362,6 +364,7 @@ impl FaultCode {
             Self::HostDisconnect => "HostDisconnect",
             Self::HostRetransmitExhausted => "HostRetransmitExhausted",
             Self::HostDispatcherTimeout => "HostDispatcherTimeout",
+            Self::EthercatEndpointDied => "EthercatEndpointDied",
             Self::StepQueueOverflow => "StepQueueOverflow",
             Self::SpiQueueOverflow => "SpiQueueOverflow",
             Self::MathNonFinite => "MathNonFinite",
