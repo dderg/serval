@@ -7,6 +7,7 @@ use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
     SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
+    StopResponse,
 };
 
 const WORST_CASE_LADDER_ENABLE: Duration = Duration::from_secs(3);
@@ -132,6 +133,22 @@ pub fn send_seed_servo_home(
     }
     let r = SeedServoHomeResponse::decode(&resp)
         .map_err(|e| format!("SeedServoHomeResponse decode: {e:?}"))?;
+    Ok(r.result)
+}
+
+const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+
+pub fn send_stop(conn: &McuSerialConn) -> Result<i32, String> {
+    let (kind, resp) = conn
+        .mcu_call(MessageKind::Stop, Vec::new(), STOP_TIMEOUT)
+        .map_err(|e| format!("Stop transport: {e:?}"))?;
+    if kind != MessageKind::StopResponse {
+        return Err(format!(
+            "Stop: unexpected response kind 0x{:04x}",
+            kind.as_u16()
+        ));
+    }
+    let r = StopResponse::decode(&resp).map_err(|e| format!("StopResponse decode: {e:?}"))?;
     Ok(r.result)
 }
 

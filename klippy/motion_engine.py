@@ -185,6 +185,9 @@ class MotionEngineWrapper:
     def take_drive_fault(self, mcu_handle):
         return self._engine.take_drive_fault(mcu_handle)
 
+    def stop_node(self, mcu_handle):
+        return self._engine.stop_node(mcu_handle)
+
     def finalize_homed_axis(self, mcu_handle, axis, pos_mm):
         return self._engine.finalize_homed_axis(mcu_handle, axis, pos_mm)
 

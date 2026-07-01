@@ -86,6 +86,93 @@ fn wrong_kind_response_is_rejected() {
     assert!(err.contains("unexpected response kind"));
 }
 
+fn spawn_stop_endpoint(
+    mut peer: UnixStream,
+    reply_kind: MessageKind,
+    body: Vec<u8>,
+) -> std::sync::mpsc::Receiver<u16> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut demux = Demuxer::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = match peer.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            let (frames, _e) = demux.feed_slice(&buf[..n]);
+            for f in frames {
+                if let Frame::Kalico { payload, .. } = f {
+                    let (hdr, _body) =
+                        decode_message_header(&payload).expect("valid message header");
+                    let _ = tx.send(hdr.kind_raw);
+                    let mut out = encode_message_header(
+                        reply_kind,
+                        MESSAGE_VERSION_DEFAULT,
+                        hdr.correlation_id,
+                    )
+                    .to_vec();
+                    out.extend_from_slice(&body);
+                    peer.write_all(&encode_frame(CHANNEL_CONTROL, &out))
+                        .unwrap();
+                    return;
+                }
+            }
+        }
+    });
+    rx
+}
+
+fn stop_response_body(result: i32, discard_clock: u64) -> Vec<u8> {
+    StopResponse {
+        result,
+        discard_clock,
+    }
+    .encoded_to_vec()
+}
+
+#[test]
+fn stop_round_trips_kind_and_result() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let rx = spawn_stop_endpoint(
+        server,
+        MessageKind::StopResponse,
+        stop_response_body(0, 12_345),
+    );
+    let conn = McuSerialConn::from_stream(client).expect("from_stream");
+    let result = send_stop(&conn).expect("call");
+    assert_eq!(result, 0);
+    assert_eq!(
+        rx.recv().expect("endpoint saw the command"),
+        MessageKind::Stop.as_u16()
+    );
+}
+
+#[test]
+fn stop_surfaces_nonzero_result() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let _rx = spawn_stop_endpoint(server, MessageKind::StopResponse, stop_response_body(-5, 0));
+    let conn = McuSerialConn::from_stream(client).expect("from_stream");
+    assert_eq!(send_stop(&conn).expect("call"), -5);
+}
+
+#[test]
+fn stop_transport_error_is_an_err() {
+    let (client, live_peer) = UnixStream::pair().unwrap();
+    let conn = McuSerialConn::from_stream(client).expect("from_stream needs the peer alive");
+    drop(live_peer);
+    assert!(send_stop(&conn).is_err());
+}
+
+#[test]
+fn stop_wrong_kind_response_is_rejected() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let _rx = spawn_stop_endpoint(server, MessageKind::PushPiecesResponse, vec![0u8; 20]);
+    let conn = McuSerialConn::from_stream(client).expect("from_stream");
+    let err = send_stop(&conn).expect_err("should error on wrong kind");
+    assert!(err.contains("unexpected response kind"));
+}
+
 fn spawn_buzz_endpoint(
     mut peer: UnixStream,
     result: i32,
