@@ -1285,6 +1285,23 @@ impl PyMotionEngine {
         Ok(())
     }
 
+    fn stop_node(&self, mcu_handle: u32) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "stop_node")?;
+        tracing::warn!(
+            subsystem = "engine",
+            event = "servo_emergency_stop",
+            mcu_handle,
+            "servo motion discarded on shutdown"
+        );
+        let result = crate::servo_torque::send_stop(&conn).map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "stop_node: endpoint rejected Stop: result {result}"
+            )));
+        }
+        Ok(())
+    }
+
     fn arm_sensorless_endstop(
         &self,
         mcu_handle: u32,

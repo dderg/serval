@@ -44,6 +44,9 @@ class EtherCatNode:
         self._slot_by_motor = {}
         self._torque_motors = set()
         self.printer.register_event_handler("klippy:mcu_identify", self._claim)
+        self.printer.register_event_handler(
+            "klippy:shutdown", self._handle_shutdown
+        )
         self.printer.load_object(config, "servo_capture")
         self.printer.load_object(config, "servo_param")
 
@@ -179,6 +182,17 @@ class EtherCatNode:
         reactor.register_timer(
             self._poll_drive_fault,
             reactor.monotonic() + DRIVE_FAULT_POLL_PERIOD,
+        )
+
+    def _handle_shutdown(self):
+        if self.engine_handle is None:
+            return
+        engine = self.printer.lookup_object("motion_engine")
+        engine.stop_node(self.engine_handle)
+        logging.info(
+            "ethercat_node %s: servo motion discarded on shutdown (handle=%s)",
+            self.name,
+            self.engine_handle,
         )
 
     def _poll_drive_fault(self, eventtime):
