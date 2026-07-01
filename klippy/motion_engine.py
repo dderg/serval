@@ -189,6 +189,9 @@ class MotionEngineWrapper:
     def take_endpoint_death(self, mcu_handle):
         return self._engine.take_endpoint_death(mcu_handle)
 
+    def stop_node(self, mcu_handle):
+        return self._engine.stop_node(mcu_handle)
+
     def finalize_homed_axis(self, mcu_handle, axis, pos_mm):
         return self._engine.finalize_homed_axis(mcu_handle, axis, pos_mm)
 
