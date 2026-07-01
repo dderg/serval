@@ -1,0 +1,264 @@
+use std::time::Duration;
+
+use crossbeam_channel::{bounded, unbounded};
+use geometry::fitter::fit_chain;
+use geometry::segment::SourceRange;
+use geometry::{ChainFitConfig, Move, MoveContext, VelocityLimits, line_move};
+
+use super::fitter::Fitter;
+
+fn ctx(line_no: u32, feed: f64) -> MoveContext {
+    MoveContext {
+        extruder_axis: 3,
+        feedrate_mm_s: feed,
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
+        source: SourceRange {
+            start_line: line_no,
+            end_line: line_no,
+        },
+    }
+}
+
+fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> Move {
+    line_move(start, end, e, ctx(line_no, 80.0)).unwrap()
+}
+
+fn retract(line_no: u32, at: [f64; 3], e: f64) -> Move {
+    line_move(at, at, e, ctx(line_no, 40.0)).unwrap()
+}
+
+/// Pre-fills the input channel and closes it before the fitter runs, so the
+/// fitter never observes a transient-empty input: the output is the pure
+/// end-of-stream fit, directly comparable to the batch fit.
+fn run_fitter(moves: &[Move], config: ChainFitConfig) -> Vec<Move> {
+    let (tx, rx) = unbounded();
+    let (out_tx, out_rx) = unbounded();
+    for m in moves {
+        tx.send(m.clone()).unwrap();
+    }
+    drop(tx);
+    Fitter::new(config).run(rx, out_tx);
+    out_rx.into_iter().collect()
+}
+
+fn zigzag_with_blends() -> Vec<Move> {
+    let pts = [
+        [0.0, 0.0, 0.0],
+        [20.0, 0.0, 0.0],
+        [40.0, 3.0, 0.0],
+        [60.0, 0.0, 0.0],
+        [61.0, 0.05, 0.0],
+        [80.0, 3.0, 0.0],
+        [100.0, 0.0, 0.0],
+    ];
+    pts.windows(2)
+        .enumerate()
+        .map(|(i, w)| line(i as u32 + 1, w[0], w[1], 0.5))
+        .collect()
+}
+
+fn assert_matches_batch(moves: &[Move], config: ChainFitConfig) {
+    let streamed = run_fitter(moves, config);
+    let batch = fit_chain(moves, config).unwrap().moves;
+    assert_eq!(
+        streamed.len(),
+        batch.len(),
+        "piece count differs from batch"
+    );
+    for (i, (s, b)) in streamed.iter().zip(&batch).enumerate() {
+        assert_eq!(s, b, "piece {i} differs from batch fit");
+    }
+}
+
+#[test]
+fn pairwise_stream_matches_batch_fit() {
+    assert_matches_batch(&zigzag_with_blends(), ChainFitConfig::default());
+}
+
+#[test]
+fn stream_matches_batch_across_retract_and_travel() {
+    let mut moves = vec![
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.0),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.0),
+        retract(3, [30.0, 30.0, 0.0], -0.8),
+        line(4, [30.0, 30.0, 0.0], [60.0, 30.0, 0.0], 0.0),
+        retract(5, [60.0, 30.0, 0.0], 0.8),
+        line(6, [60.0, 30.0, 0.0], [60.0, 0.0, 0.0], 1.0),
+        line(7, [60.0, 0.0, 0.0], [90.0, 5.0, 0.0], 1.0),
+    ];
+    assert_matches_batch(&moves, ChainFitConfig::default());
+    moves.push(line(8, [90.0, 5.0, 0.0], [90.0, 40.0, 0.0], 0.0));
+    assert_matches_batch(&moves, ChainFitConfig::default());
+}
+
+#[test]
+fn arc_mode_chunks_match_batch_fit() {
+    // Two dense polygonal arcs separated by a retract (the chunk breaker), with
+    // a travel between chains that batch `align_travels` re-anchors onto the
+    // reconstructed arc endpoints. Streamed chunk-by-chunk output must equal
+    // the whole-buffer batch fit.
+    let (r, n, c) = (20.0_f64, 400u32, [50.0, 50.0, 0.0]);
+    let mut moves = Vec::new();
+    let mut prev = [c[0] + r, c[1], 0.0];
+    for i in 1..=n {
+        let a = std::f64::consts::PI * f64::from(i) / f64::from(n);
+        let end = [c[0] + r * a.cos(), c[1] + r * a.sin(), 0.0];
+        moves.push(line(i, prev, end, 0.3));
+        prev = end;
+    }
+    moves.push(retract(n + 1, prev, -0.8));
+    let travel_end = [prev[0], prev[1] - 15.0, 0.0];
+    moves.push(line(n + 2, prev, travel_end, 0.0));
+    moves.push(retract(n + 3, travel_end, 0.8));
+    prev = travel_end;
+    for i in 1..=n {
+        let a = -std::f64::consts::PI * f64::from(i) / f64::from(n);
+        let end = [
+            c[0] + (r - 15.0) * a.cos(),
+            c[1] + (r - 15.0) * a.sin(),
+            0.0,
+        ];
+        moves.push(line(n + 3 + i, prev, end, 0.3));
+        prev = end;
+    }
+    assert_matches_batch(&moves, ChainFitConfig::with_arc_fit(3));
+}
+
+fn half_circle(
+    first_line_no: u32,
+    start: [f64; 3],
+    c: [f64; 2],
+    r: f64,
+    n: u32,
+    a0: f64,
+    e_per_facet: f64,
+) -> Vec<Move> {
+    let mut prev = start;
+    (1..=n)
+        .map(|i| {
+            let a = a0 + std::f64::consts::PI * f64::from(i) / f64::from(n);
+            let end = [c[0] + r * a.cos(), c[1] + r * a.sin(), 0.0];
+            let m = line(first_line_no + i - 1, prev, end, e_per_facet);
+            prev = end;
+            m
+        })
+        .collect()
+}
+
+#[test]
+fn arc_mode_all_line_input_matches_batch_fit() {
+    // Production shape: no non-line moves at all. Straight collinear runs feed
+    // into a dense polygonal half-circle and back out; the run seals when the
+    // first straight facet breaks the arc fit, and eases into the tangent
+    // lines on both sides.
+    let mut moves = Vec::new();
+    let mut prev = [10.0, 50.0, 0.0];
+    for i in 0..4u32 {
+        let end = [15.0 + 5.0 * f64::from(i), 50.0, 0.0];
+        moves.push(line(i + 1, prev, end, 0.3));
+        prev = end;
+    }
+    let arc = half_circle(5, prev, [50.0, 50.0], 20.0, 400, std::f64::consts::PI, 0.3);
+    prev = *geometry::fitter::spatial_end(arc.last().unwrap())
+        .as_ref()
+        .unwrap();
+    moves.extend(arc);
+    for i in 0..4u32 {
+        let end = [prev[0] + 5.0 + 5.0 * f64::from(i), prev[1], 0.0];
+        moves.push(line(405 + i, prev, end, 0.3));
+        prev = end;
+    }
+    let streamed = run_fitter(&moves, ChainFitConfig::with_arc_fit(3));
+    assert!(
+        streamed
+            .iter()
+            .any(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_)))),
+        "expected the half-circle to reconstruct into an arc"
+    );
+    assert_matches_batch(&moves, ChainFitConfig::with_arc_fit(3));
+}
+
+#[test]
+fn arc_mode_straight_only_input_matches_batch_fit() {
+    let mut moves = Vec::new();
+    let mut prev = [0.0, 0.0, 0.0];
+    for i in 0..20u32 {
+        let end = [5.0 * f64::from(i + 1), 0.0, 0.0];
+        moves.push(line(i + 1, prev, end, 0.2));
+        prev = end;
+    }
+    assert_matches_batch(&moves, ChainFitConfig::with_arc_fit(3));
+}
+
+fn circle_facets(n: u32, e_of: impl Fn(u32) -> f64) -> Vec<Move> {
+    let (r, c) = (20.0_f64, [50.0, 50.0]);
+    let mut prev = [c[0] + r, c[1], 0.0];
+    (1..=n)
+        .map(|i| {
+            let a = 2.0 * std::f64::consts::PI * f64::from(i) / f64::from(n + 4);
+            let end = [c[0] + r * a.cos(), c[1] + r * a.sin(), 0.0];
+            let m = line(i, prev, end, e_of(i));
+            prev = end;
+            m
+        })
+        .collect()
+}
+
+#[test]
+fn extrusion_ratio_step_splits_the_arc() {
+    // Same circle, but extrusion per facet doubles halfway: one arc must not
+    // absorb both extrusion ratios, so two runs (two Arc pieces) come out.
+    let n = 400;
+    let moves = circle_facets(n, |i| if i <= n / 2 { 0.3 } else { 0.6 });
+    let streamed = run_fitter(&moves, ChainFitConfig::with_arc_fit(3));
+    let arcs = streamed
+        .iter()
+        .filter(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_))))
+        .count();
+    assert_eq!(arcs, 2, "expected the epmm step to split the run");
+    // The 100% step also exceeds the batch band tolerance (25%), so the batch
+    // fit splits at the same facet and the outputs still agree exactly.
+    assert_matches_batch(&moves, ChainFitConfig::with_arc_fit(3));
+}
+
+#[test]
+fn small_extrusion_drift_splits_stream_arc_but_not_batch() {
+    // A 10% epmm step is within the batch band tolerance (25%) but beyond the
+    // stream fitter's rounding tolerance: the stream emits two arcs where the
+    // batch fit would have kept one.
+    let n = 400;
+    let moves = circle_facets(n, |i| if i <= n / 2 { 0.30 } else { 0.33 });
+    let streamed = run_fitter(&moves, ChainFitConfig::with_arc_fit(3));
+    let arcs = streamed
+        .iter()
+        .filter(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_))))
+        .count();
+    assert_eq!(arcs, 2, "expected the epmm drift to split the run");
+}
+
+#[test]
+fn empty_input_flushes_buffered_moves_without_close() {
+    let (tx, rx) = bounded::<Move>(64);
+    let (out_tx, out_rx) = bounded::<Move>(64);
+    let fitter = Fitter::new(ChainFitConfig::default());
+    let handle = std::thread::spawn(move || fitter.run(rx, out_tx));
+
+    tx.send(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.5))
+        .unwrap();
+    tx.send(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 0.5))
+        .unwrap();
+
+    // Without closing the input, the fitter must still emit everything once
+    // the input runs empty: trimmed body, two blend halves, trimmed tail body.
+    let mut got = Vec::new();
+    for _ in 0..4 {
+        got.push(
+            out_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("fitter held moves on an empty input"),
+        );
+    }
+    assert_eq!(got.len(), 4);
+    drop(tx);
+    handle.join().unwrap();
+}

@@ -16,6 +16,8 @@ use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedS
 use crate::lowering::{LoweringError, lower_move};
 
 mod fitter;
+#[cfg(test)]
+mod fitter_tests;
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 const CONTIGUITY_EPS_MM: f64 = 1e-6;
@@ -180,7 +182,14 @@ pub fn setup_pipeline(
 
     let fit_tol = config.fit_tol_mm;
     thread::spawn(move || {
-        run_lowerer(planned_rx, segments_tx, fit_tol, axis_chains, home_pos, t_start);
+        run_lowerer(
+            planned_rx,
+            segments_tx,
+            fit_tol,
+            axis_chains,
+            home_pos,
+            t_start,
+        );
     });
 
     PipelineHandle {
