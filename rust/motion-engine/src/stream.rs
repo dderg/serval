@@ -1,16 +1,21 @@
 use std::collections::{HashSet, VecDeque};
+use std::thread;
 use std::time::Instant;
 
+use crossbeam_channel::{Receiver, Sender, bounded};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Line, Segment};
 use geometry::{
-    ChainFitConfig, FitError, FitOutcome, GeometryError, Move, VelocityConfig, VelocityError,
-    VelocityLimits, VelocityProfile, fit_chain_with_head_restore, plan_velocity_warm_start,
+    ChainFitConfig, FitError, FitOutcome, GeometryError, Move, MoveVelocity, VelocityConfig,
+    VelocityError, VelocityLimits, VelocityProfile, fit_chain_with_head_restore,
+    plan_velocity_warm_start,
 };
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
 use crate::lowering::{LoweringError, lower_move};
+
+mod fitter;
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 const CONTIGUITY_EPS_MM: f64 = 1e-6;
@@ -137,6 +142,100 @@ pub enum PostProcessError {
     #[error("axis {axis}: shaped sample is non-finite at t={t}")]
     NonFiniteSample { axis: usize, t: f64 },
 }
+
+// ---------------------------------------------------------------------------
+// Pipeline types — items that flow between stages
+// ---------------------------------------------------------------------------
+
+pub struct PlannedMove {
+    pub geometry: Move,
+    pub velocity: MoveVelocity,
+}
+
+pub struct PipelineHandle {
+    pub input: Sender<Move>,
+    pub output: Receiver<ShapedSegment>,
+}
+
+pub fn setup_pipeline(
+    config: StreamConfig,
+    axis_chains: AxisChainSet,
+    home_pos: Vec<f64>,
+    t_start: f64,
+) -> PipelineHandle {
+    let (raw_tx, raw_rx) = bounded::<Move>(64);
+    let (fitted_tx, fitted_rx) = bounded::<Move>(64);
+    let (planned_tx, planned_rx) = bounded::<PlannedMove>(64);
+    let (segments_tx, segments_rx) = bounded::<ShapedSegment>(64);
+
+    let fitter = fitter::Fitter::new(config.chain);
+    thread::spawn(move || {
+        fitter.run(raw_rx, fitted_tx);
+    });
+
+    let velocity_config = config.velocity;
+    thread::spawn(move || {
+        run_planner(fitted_rx, planned_tx, velocity_config);
+    });
+
+    let fit_tol = config.fit_tol_mm;
+    thread::spawn(move || {
+        run_lowerer(planned_rx, segments_tx, fit_tol, axis_chains, home_pos, t_start);
+    });
+
+    PipelineHandle {
+        input: raw_tx,
+        output: segments_rx,
+    }
+}
+
+fn run_planner(input: Receiver<Move>, output: Sender<PlannedMove>, config: VelocityConfig) {
+    let mut entry_v = 0.0;
+
+    // TODO: the planner needs a batch of moves to produce a velocity profile.
+    // It needs to accumulate fitted moves and decide when it has enough
+    // look-ahead to plan and emit.
+    while let Ok(m) = input.recv() {
+        let _ = (m, &mut entry_v, &config);
+        // TODO: accumulate, plan, zip geometry+velocity, send PlannedMoves
+        todo!("planner batch logic");
+    }
+}
+
+fn run_lowerer(
+    input: Receiver<PlannedMove>,
+    output: Sender<ShapedSegment>,
+    fit_tol_mm: f64,
+    axis_chains: AxisChainSet,
+    home_pos: Vec<f64>,
+    t_start: f64,
+) {
+    let mut odometer = home_pos;
+    let mut t = t_start;
+
+    while let Ok(planned) = input.recv() {
+        let seg = lower_move(
+            &planned.geometry,
+            &planned.velocity,
+            t,
+            &odometer,
+            fit_tol_mm,
+            &axis_chains.chains,
+        )
+        .unwrap_or_else(|e| panic!("lowerer: {e}"));
+
+        t = seg.t_end;
+        advance_odometer(&mut odometer, &planned.geometry);
+
+        // TODO: axis chain post-processing
+
+        if output.send(seg).is_err() {
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 /// Identity + tracing for one `commit()` call. Carries the batch sequence
 /// number and the buffer's line range through `fit`/`plan`/`lower`/
