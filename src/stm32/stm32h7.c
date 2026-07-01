@@ -216,31 +216,42 @@ bootloader_request(void)
 // failures, and after a few it diverts to the ROM DFU bootloader so the board is
 // reflashable over USB. A boot that reaches the live runtime clears the counter,
 // so only genuine boot loops — never runtime faults — accumulate.
-// Own a cache line of its own (clear of the USB_BOOT_FLAG line at 0x8000), so the
-// clean/flush below can't disturb that flag.
-#define BOOT_GUARD_ADDR  (0x24000000u + 0x8020u) // AXI SRAM, 32-byte aligned
+//
+// The counter MUST be a linker-reserved .axi_bss static, never a hardcoded AXI
+// SRAM address: rt_storage (the runtime engine's state) also lives in .axi_bss
+// and spans ~120 KB, so any fixed 0x2400xxxx address lands inside it and
+// silently corrupts runtime state. .axi_bss is NOLOAD and never cleared by
+// boot_memset, so the count survives the soft/IWDG resets a boot loop triggers;
+// the magic guards cold-boot garbage. aligned(32) gives it its own cache line
+// for the clean below.
 #define BOOT_GUARD_MAGIC 0x424f4f47u             // 'BOOG'
 #define BOOT_GUARD_LIMIT 3u
+
+struct boot_guard_state {
+    uint32_t magic;
+    uint32_t count;
+};
+static struct boot_guard_state boot_guard_state
+    __attribute__((section(".axi_bss"), aligned(32)));
 
 static void
 boot_guard(void)
 {
-    volatile uint32_t *magic = (volatile uint32_t *)BOOT_GUARD_ADDR;
-    volatile uint32_t *count = (volatile uint32_t *)(BOOT_GUARD_ADDR + 4);
-    if (*magic != BOOT_GUARD_MAGIC) { // cold boot: random SRAM, (re)initialise
-        *magic = BOOT_GUARD_MAGIC;
-        *count = 0;
+    struct boot_guard_state *bg = &boot_guard_state;
+    if (bg->magic != BOOT_GUARD_MAGIC) { // cold boot: random SRAM, (re)initialise
+        bg->magic = BOOT_GUARD_MAGIC;
+        bg->count = 0;
     }
-    if (*count >= BOOT_GUARD_LIMIT) {
-        *count = 0;
+    if (bg->count >= BOOT_GUARD_LIMIT) {
+        bg->count = 0;
         dfu_reboot_set_flag(); // dfu_reboot_check() (next in armcm_main) jumps
     } else {
-        *count = *count + 1;
+        bg->count = bg->count + 1;
     }
     // Flush to SRAM so the count survives the reset a boot hang triggers: the
     // bootloader may hand off with the D-cache on, and a cached-only write would
     // be lost at reset, leaving the loop undetected.
-    SCB_CleanDCache_by_Addr((void *)BOOT_GUARD_ADDR, 32);
+    SCB_CleanDCache_by_Addr(&boot_guard_state, sizeof(boot_guard_state));
 
     // Arm the IWDG so a hang anywhere in boot resets and re-enters this guard.
     // PR=5 (/128), RLR=0xFFF over the ~32 kHz LSI is ~16 s — vastly longer than a
@@ -258,10 +269,9 @@ boot_guard(void)
 void
 boot_guard_clear(void)
 {
-    volatile uint32_t *count = (volatile uint32_t *)(BOOT_GUARD_ADDR + 4);
-    if (*count) {
-        *count = 0;
-        SCB_CleanDCache_by_Addr((void *)BOOT_GUARD_ADDR, 32);
+    if (boot_guard_state.count) {
+        boot_guard_state.count = 0;
+        SCB_CleanDCache_by_Addr(&boot_guard_state, sizeof(boot_guard_state));
     }
 }
 
