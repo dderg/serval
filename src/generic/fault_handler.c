@@ -7,6 +7,7 @@
 #include "sched.h"
 #include "event_log.h"
 
+extern uint32_t timer_read_time(void);
 extern volatile uint8_t runtime_liveness_ok;
 extern void *runtime_handle;
 extern uint32_t runtime_handle_tick_counter(void *handle);
@@ -31,7 +32,10 @@ struct fault_record {
     uint32_t fault_count;
 };
 
-#define LIVE_MAGIC 0x4C495645u
+// Bump on any live_snapshot layout change so a reflash (RAM survives, old magic
+// still matches) can't seed the new fields with stale bytes — a mismatch forces
+// the cold-init zero pass.
+#define LIVE_MAGIC 0x4C495646u
 
 struct live_snapshot {
     uint32_t magic;
@@ -49,6 +53,18 @@ struct live_snapshot {
     uint32_t last_dispatch_func;
     uint32_t last_dispatch_addr;
     uint32_t this_run_froze;
+    uint32_t cur_task_func;
+    uint32_t cur_task_start;
+    uint32_t worst_task_func;
+    uint32_t worst_task_cyc;
+    uint32_t cur_msg_kind;
+    uint32_t cur_msg_start;
+    uint32_t cur_msg_head;
+    uint32_t worst_msg_kind;
+    uint32_t worst_msg_cyc;
+    uint32_t worst_msg_head;
+    uint32_t demux_backlog_max;
+    uint32_t demux_msgs_max;
 };
 
 // .persistent_diag must stay a NOLOAD section outside [_bss_start.._bss_end] or
@@ -83,6 +99,34 @@ diag_cache_clean(void)
 #else
 static inline void diag_cache_clean(void) { __DSB(); }
 #endif
+
+// Durations past ~2 s mean "stuck"; cap so the 32-bit cycle counter can't wrap
+// across a multi-second hang into a meaningless huge value.
+#define DIAG_STALL_CAP_CYC (CONFIG_CLOCK_FREQ * 2u)
+
+static void
+diag_update_worst(volatile uint32_t *worst_cyc, volatile uint32_t *worst_id,
+                  uint32_t dur, uint32_t id)
+{
+    if (dur > DIAG_STALL_CAP_CYC)
+        dur = DIAG_STALL_CAP_CYC;
+    if (dur > *worst_cyc) {
+        *worst_cyc = dur;
+        *worst_id = id;
+    }
+}
+
+static void
+diag_update_worst_msg(uint32_t dur, uint32_t kind, uint32_t head)
+{
+    if (dur > DIAG_STALL_CAP_CYC)
+        dur = DIAG_STALL_CAP_CYC;
+    if (dur > live_snap.worst_msg_cyc) {
+        live_snap.worst_msg_cyc = dur;
+        live_snap.worst_msg_kind = kind;
+        live_snap.worst_msg_head = head;
+    }
+}
 
 #define DIAG_MAGIC      0x4449414Eu
 #define DIAG_RING_LEN   32
@@ -369,6 +413,18 @@ diag_tim5_account(uint32_t enter_cycles, uint32_t exit_cycles)
             live_snap.worst_fg_stall_exc   = runtime_tim5_stacked_exc();
         }
     }
+
+    // A task/message that never returns is invisible to the foreground enter
+    // hooks (they only close completed work), so promote the in-progress task
+    // and message growing durations into their worst slots here each tick.
+    uint32_t mon_now = timer_read_time();
+    if (live_snap.cur_task_func)
+        diag_update_worst(&live_snap.worst_task_cyc, &live_snap.worst_task_func,
+                          mon_now - live_snap.cur_task_start,
+                          live_snap.cur_task_func);
+    if (live_snap.cur_msg_kind)
+        diag_update_worst_msg(mon_now - live_snap.cur_msg_start,
+                              live_snap.cur_msg_kind, live_snap.cur_msg_head);
 }
 
 __attribute__((used, externally_visible))
@@ -632,6 +688,74 @@ diag_note_dispatch(uint32_t func, uint32_t addr)
     live_snap.last_dispatch_addr = addr;
 }
 
+static void
+diag_close_task(uint32_t now)
+{
+    if (live_snap.cur_task_func)
+        diag_update_worst(&live_snap.worst_task_cyc, &live_snap.worst_task_func,
+                          now - live_snap.cur_task_start, live_snap.cur_task_func);
+}
+
+// Called by mcu_demux_pump around each dispatched command/frame. kind is a
+// nonzero tag (0 = no message in progress): 0x100|channel for a kalico frame,
+// 0x200|cmd for a Klipper command, 0x300 for a demux error. Pairs with the
+// per-task timing to split "one slow command" (worst_msg ~ worst_task) from
+// "backlog of many" (worst_task >> worst_msg).
+__attribute__((used, externally_visible))
+void
+diag_note_msg_enter(uint32_t kind, uint32_t head)
+{
+    uint32_t now = timer_read_time();
+    if (live_snap.cur_msg_kind)
+        diag_update_worst_msg(now - live_snap.cur_msg_start,
+                              live_snap.cur_msg_kind, live_snap.cur_msg_head);
+    live_snap.cur_msg_start = now;
+    live_snap.cur_msg_kind = kind;
+    live_snap.cur_msg_head = head;
+}
+
+__attribute__((used, externally_visible))
+void
+diag_note_msg_exit(void)
+{
+    if (live_snap.cur_msg_kind)
+        diag_update_worst_msg(timer_read_time() - live_snap.cur_msg_start,
+                              live_snap.cur_msg_kind, live_snap.cur_msg_head);
+    live_snap.cur_msg_kind = 0;
+}
+
+__attribute__((used, externally_visible))
+void
+diag_note_demux(uint32_t backlog, uint32_t msgs)
+{
+    if (backlog > live_snap.demux_backlog_max)
+        live_snap.demux_backlog_max = backlog;
+    if (msgs > live_snap.demux_msgs_max)
+        live_snap.demux_msgs_max = msgs;
+}
+
+// Called by the generated ctr_run_taskfuncs before each DECL_TASK. Times the
+// previous task and publishes the one about to run, so a foreground stall names
+// the offending task. start is stored before func: the TIM5-ISR monitor reads
+// func first, so seeing a published func guarantees a matching start.
+__attribute__((used, externally_visible))
+void
+diag_note_task_enter(uint32_t func)
+{
+    uint32_t now = timer_read_time();
+    diag_close_task(now);
+    live_snap.cur_task_start = now;
+    live_snap.cur_task_func = func;
+}
+
+__attribute__((used, externally_visible))
+void
+diag_note_task_loop_end(void)
+{
+    diag_close_task(timer_read_time());
+    live_snap.cur_task_func = 0;
+}
+
 uint32_t diag_get_otg_rxflvl(void)        { return diag.otg_rxflvl_fires; }
 uint32_t diag_get_otg_iepint(void)        { return diag.otg_iepint_fires; }
 uint32_t diag_get_otg_other(void)         { return diag.otg_otherflag_fires; }
@@ -847,6 +971,18 @@ fault_handler_report_task(void)
             live_snap.last_dispatch_func   = 0;
             live_snap.last_dispatch_addr   = 0;
             live_snap.this_run_froze       = 0;
+            live_snap.cur_task_func        = 0;
+            live_snap.cur_task_start       = 0;
+            live_snap.worst_task_func      = 0;
+            live_snap.worst_task_cyc       = 0;
+            live_snap.cur_msg_kind         = 0;
+            live_snap.cur_msg_start        = 0;
+            live_snap.cur_msg_head         = 0;
+            live_snap.worst_msg_kind       = 0;
+            live_snap.worst_msg_cyc        = 0;
+            live_snap.worst_msg_head       = 0;
+            live_snap.demux_backlog_max    = 0;
+            live_snap.demux_msgs_max       = 0;
         }
 #if CONFIG_MACH_STM32H7
         if (reset_cause_raw & RCC_RSR_IWDG1RSTF)
@@ -1014,6 +1150,19 @@ fault_handler_report_task(void)
            live_snap.iwdg_reset_count,
            live_snap.last_dispatch_func,
            live_snap.last_dispatch_addr);
+    output("fg_task worst_func %u worst_cyc %u cur_func %u",
+           live_snap.worst_task_func,
+           live_snap.worst_task_cyc,
+           live_snap.cur_task_func);
+    output("fg_msg worst_kind %u worst_cyc %u cur_kind %u backlog_max %u msgs_max %u",
+           live_snap.worst_msg_kind,
+           live_snap.worst_msg_cyc,
+           live_snap.cur_msg_kind,
+           live_snap.demux_backlog_max,
+           live_snap.demux_msgs_max);
+    output("fg_msg_head worst_head %u cur_head %u",
+           live_snap.worst_msg_head,
+           live_snap.cur_msg_head);
     if (fault_rec.magic == FAULT_MAGIC) {
         output("prior_fault kind %u count %u pc %u lr %u psr %u"
                " r0 %u r1 %u r2 %u r3 %u r12 %u",
@@ -1212,6 +1361,28 @@ kalico_diag_emit_prior_crash(void)
                         live_snap.worst_fg_stall_ticks);
     }
 
+    if (live_snap.worst_task_cyc) {
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_TASK, 0,
+                        live_snap.worst_task_func,
+                        live_snap.worst_task_cyc);
+    }
+
+    if (live_snap.worst_msg_cyc || live_snap.demux_msgs_max) {
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_MSG, 0,
+                        live_snap.worst_msg_kind,
+                        live_snap.worst_msg_cyc);
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_MSG_HEAD, 0,
+                        live_snap.worst_msg_head,
+                        live_snap.cur_msg_head);
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_DEMUX, 0,
+                        live_snap.demux_backlog_max,
+                        live_snap.demux_msgs_max);
+    }
+
     if (abnormal) {
         extern volatile uint32_t runtime_diag_prior_packed_raw;
         uint32_t fc = had_fault ? fault_rec.fault_count : 0u;
@@ -1309,6 +1480,28 @@ kalico_diag_emit_live(void)
                         EVENT_LOG_EVENT_RUNTIME_FG_FREEZE, 0,
                         live_snap.worst_fg_stall_pc,
                         live_snap.worst_fg_stall_ticks);
+    }
+
+    if (live_snap.worst_task_cyc) {
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_TASK, 0,
+                        live_snap.worst_task_func,
+                        live_snap.worst_task_cyc);
+    }
+
+    if (live_snap.worst_msg_cyc || live_snap.demux_msgs_max) {
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_MSG, 0,
+                        live_snap.worst_msg_kind,
+                        live_snap.worst_msg_cyc);
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_MSG_HEAD, 0,
+                        live_snap.worst_msg_head,
+                        live_snap.cur_msg_head);
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_DEMUX, 0,
+                        live_snap.demux_backlog_max,
+                        live_snap.demux_msgs_max);
     }
 
     for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {

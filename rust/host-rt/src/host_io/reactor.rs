@@ -1346,6 +1346,19 @@ impl Reactor {
             if now >= front.sent_at + self.rtt.current_rto() {
                 let unacked_n = self.unacked_window.len();
                 let front_seq = front.seq;
+                let rto_ms = self.rtt.current_rto().as_millis() as u64;
+                let gap_since_recv_ms = now.duration_since(self.last_recv_time).as_millis() as u64;
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "retransmit_timeout",
+                    front_seq,
+                    unacked_n,
+                    rto_ms,
+                    gap_since_recv_ms,
+                    "[retransmit] RTO fired, resending oldest unacked frame — \
+                     gap_since_recv_ms = time since any inbound (corrupt frames count as inbound): \
+                     large/growing = link silent; small = inbound alive but no valid ACK (corruption/desync)"
+                );
                 if let Err(e) = self.write_retransmit(RetransmitTrigger::TimeoutDriven) {
                     tracing::debug!(
                         subsystem = "mcu-comms",

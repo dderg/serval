@@ -848,13 +848,88 @@ pub fn run_pump<S, F, C, A, O, D>(
                             }
                         })
                         .collect();
-                    match sink.send_mcu_frames(mcu_id, &bundle) {
+                    // Host-side guard: refuse to submit a piece whose start_time is
+                    // already in the MCU's past. Catching it here fails loud on the
+                    // host with the offending mcu/axis/deficit instead of letting the
+                    // MCU (or the EtherCAT endpoint ring) trip a cryptic -308
+                    // PieceStartInPast after the fact. Mirrors the MCU's
+                    // MAX_START_IN_PAST_SECS=200us threshold with a margin above
+                    // host-projection jitter so a healthy print never false-aborts.
+                    if let Some((mcu_now, freq)) = mcu_clock_of(mcu_id) {
+                        if freq > 0.0 {
+                            const PUMP_PAST_GUARD_SECS: f64 = 500e-6;
+                            let guard_ticks = (PUMP_PAST_GUARD_SECS * freq) as u64;
+                            for af in &bundle {
+                                for piece in &af.pieces {
+                                    if piece.start_time + guard_ticks < mcu_now {
+                                        let deficit_us =
+                                            ((mcu_now - piece.start_time) as f64 / freq * 1e6)
+                                                as u64;
+                                        tracing::error!(
+                                            subsystem = "motion",
+                                            event = "pump_piece_in_past",
+                                            mcu = mcu_id,
+                                            axis = af.axis,
+                                            start_time = piece.start_time,
+                                            mcu_now,
+                                            deficit_us,
+                                            "[pump-guard] piece already in the MCU's past at send time — failing loud on host before the MCU/endpoint trips -308"
+                                        );
+                                        eprintln!(
+                                            "pump: piece in past at send — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} — aborting host before MCU -308",
+                                            af.axis, piece.start_time
+                                        );
+                                        let _ = std::io::Write::flush(&mut std::io::stderr());
+                                        std::process::abort();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let send_started = Instant::now();
+                    let send_result = sink.send_mcu_frames(mcu_id, &bundle);
+                    let send_elapsed = send_started.elapsed();
+                    if send_elapsed >= Duration::from_millis(5) {
+                        tracing::warn!(
+                            subsystem = "motion",
+                            event = "pump_send_blocked",
+                            mcu = mcu_id,
+                            elapsed_ms = send_elapsed.as_millis() as u64,
+                            frames = bundle.len(),
+                            ok = send_result.is_ok(),
+                            "[pump-send] send_mcu_frames blocked — which transport (mcu serial vs ethercat socket) ate the wall-clock"
+                        );
+                    }
+                    match send_result {
                         Ok(()) => {
                             for af in &bundle {
                                 let key = AxisKey {
                                     mcu_id,
                                     axis: af.axis,
                                 };
+                                let freq = mcu_clock_of(mcu_id).map(|(_, f)| f as f32);
+                                let mut prev_end: Option<u64> = None;
+                                for piece in &af.pieces {
+                                    let end_ticks: u64 = freq.map_or(0, |f| piece.end_time(f));
+                                    let gap_ticks_in_frame: i64 = prev_end
+                                        .map_or(0, |pe| piece.start_time as i64 - pe as i64);
+                                    tracing::info!(
+                                        subsystem = "motion",
+                                        event = "pump_piece_submit",
+                                        mcu = mcu_id,
+                                        axis = af.axis,
+                                        start_time = piece.start_time,
+                                        duration_s = piece.duration,
+                                        end_ticks,
+                                        gap_ticks_in_frame,
+                                        motor_mask = piece.motor_mask,
+                                        "[pump-submit] piece submitted to MCU \
+                                         (gap_ticks_in_frame: 0=contiguous, <0=overlap, >0=gap)"
+                                    );
+                                    if freq.is_some() {
+                                        prev_end = Some(end_ticks);
+                                    }
+                                }
                                 let n = af.pieces.len() as u32;
                                 let q = queues.get_mut(&key).expect("planned key exists");
                                 for _ in 0..af.pieces.len() {
@@ -959,6 +1034,79 @@ pub struct WireSink {
     pub freq_of: Arc<dyn Fn(u32) -> Option<f64> + Send + Sync>,
 }
 
+/// Per-attempt response wait for a serial `PushPieces` re-request. A few × the
+/// normal ~6 ms RTT, so a healthy response still returns on arrival while a lost
+/// one is re-requested fast.
+const PUSHPIECES_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(30);
+
+/// Total serial `PushPieces` re-requests. The whole burst blocks the
+/// single-threaded pump, so the budget (`* PUSHPIECES_ATTEMPT_TIMEOUT` ≈ 90 ms)
+/// must stay under the smallest lead (`DRIP_WINDOW_SECS` = 100 ms) — otherwise
+/// the retry itself starves the MCU of later pieces and recreates the very
+/// `-308` it prevents. Recovers isolated corruption; sustained corruption gives
+/// up fast to the loud in-past-guard backstop.
+const PUSHPIECES_MAX_ATTEMPTS: u32 = 3;
+
+/// Bounded re-request policy for serial `PushPieces` (the frame is idempotent on
+/// the real MCU: slot-addressed write + absolute `commit_head`, stale = no-op).
+/// `attempt_call` performs one request/response with the short per-attempt
+/// timeout. Returns `Ok` on the first success; `Fatal` (no further attempts) on a
+/// genuine MCU failure (`Closed`/`Io` dead transport, `McuShutdown`) so it surfaces
+/// loud instead of being buried under the retry budget; `Transient` once the budget
+/// is spent on recoverable corruption so the existing pump path + in-past guard
+/// remain the backstop. Pure (no I/O of its own) so the policy is unit-testable
+/// with a scripted `attempt_call`.
+fn pushpieces_retransmit_serial<F>(
+    mcu_id: u32,
+    max_attempts: u32,
+    mut attempt_call: F,
+) -> Result<Vec<u8>, SendError>
+where
+    F: FnMut() -> Result<Vec<u8>, host_rt::transport::TransportError>,
+{
+    use host_rt::transport::TransportError;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match attempt_call() {
+            Ok(b) => return Ok(b),
+            Err(
+                e @ (TransportError::Closed
+                | TransportError::Io(_)
+                | TransportError::McuShutdown(_)),
+            ) => {
+                return Err(SendError::Fatal(format!(
+                    "serial PushPieces mcu {mcu_id}: {e:?}"
+                )));
+            }
+            Err(e) => {
+                if attempt >= max_attempts {
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "pushpieces_giveup",
+                        mcu = mcu_id,
+                        attempts = attempt,
+                        error = ?e,
+                        "[pushpieces] budget exhausted — giving up (serial); in-past guard is the backstop"
+                    );
+                    return Err(SendError::Transient(format!(
+                        "serial PushPieces mcu {mcu_id}: no response after {attempt} attempts ({e:?})"
+                    )));
+                }
+                tracing::warn!(
+                    subsystem = "mcu-comms",
+                    event = "pushpieces_retry",
+                    mcu = mcu_id,
+                    attempt,
+                    max_attempts,
+                    error = ?e,
+                    "[pushpieces] no/lost response — re-requesting idempotent frame (serial)"
+                );
+            }
+        }
+    }
+}
+
 impl WireSink {
     fn call_push_pieces(
         &self,
@@ -999,17 +1147,15 @@ impl WireSink {
                 let io = weak.upgrade().ok_or_else(|| {
                     SendError::Transient(format!("McuHostIo for mcu {mcu_id} detached"))
                 })?;
-                let (_kind, b) = io
-                    .kalico_call_on_channel(
+                pushpieces_retransmit_serial(mcu_id, PUSHPIECES_MAX_ATTEMPTS, || {
+                    io.kalico_call_on_channel(
                         mcu_protocol::MCU_CHANNEL_PIECES,
                         mcu_protocol::MessageKind::PushPieces,
-                        body,
-                        self.timeout,
+                        body.clone(),
+                        PUSHPIECES_ATTEMPT_TIMEOUT,
                     )
-                    .map_err(|e| {
-                        SendError::Transient(format!("serial PushPieces mcu {mcu_id}: {e:?}"))
-                    })?;
-                b
+                    .map(|(_kind, b)| b)
+                })?
             }
             McuTransport::EtherCat(weak) => {
                 let conn = weak.upgrade().ok_or_else(|| {

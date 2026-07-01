@@ -43,6 +43,73 @@ fn abort_after_tracing_appender_drains() {
     }
 }
 
+/// How long the host waits for klippy to consume the latched endpoint-death
+/// cause (clean shutdown) before the watchdog forces a last-resort abort. Sized
+/// well above the `DRIVE_FAULT_POLL_PERIOD` (1 s) so a healthy reactor always
+/// shuts down cleanly first; the abort only fires if the reactor is wedged.
+const ENDPOINT_DEATH_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Latch an EtherCAT-endpoint-death cause for klippy to surface as the shutdown
+/// reason (first cause wins), and log it. Deliberately does NOT abort here: the
+/// host shuts down cleanly via `ethercat_node._poll_drive_fault` →
+/// `invoke_shutdown` so the operator sees the real cause and runs
+/// `FIRMWARE_RESTART` (no silent auto-restart). Returns `true` when this call
+/// latched the first cause, so the caller arms the safety watchdog exactly once.
+fn report_ethercat_endpoint_death(
+    latch: &Arc<Mutex<HashMap<u32, String>>>,
+    mcu_id: u32,
+    reason: &str,
+) -> bool {
+    let code = runtime::error::FaultCode::EthercatEndpointDied.as_i32();
+    let message = format!("EtherCAT endpoint died mid-session (fault {code}): {reason}");
+    let mut guard = latch.lock().unwrap_or_else(|p| p.into_inner());
+    // First cause wins for BOTH the latched (operator-surfaced) message and the
+    // log: a later writer (e.g. the supervisor after the pump already latched)
+    // must not overwrite the original cause.
+    if let std::collections::hash_map::Entry::Vacant(slot) = guard.entry(mcu_id) {
+        slot.insert(message);
+        tracing::error!(
+            subsystem = "ethercat",
+            event = "endpoint_death",
+            mcu_id,
+            fault_code = code,
+            reason,
+            "EtherCAT endpoint died mid-session — latched for klippy; clean shutdown, no abort"
+        );
+        true
+    } else {
+        false
+    }
+}
+
+/// Safety backstop for the clean-shutdown path: if klippy has not consumed the
+/// latched endpoint-death cause within the grace (i.e. the reactor never ran the
+/// shutdown — wedged/CPU-starved), force a last-resort abort so the machine still
+/// stops. The normal path consumes the latch within one poll period, so this only
+/// fires on a double failure (endpoint dead AND reactor stuck).
+fn arm_endpoint_death_watchdog(latch: Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32) {
+    let _ = std::thread::Builder::new()
+        .name(format!("ec-death-watchdog-{mcu_id}"))
+        .spawn(move || {
+            std::thread::sleep(ENDPOINT_DEATH_SHUTDOWN_GRACE);
+            let unhandled = latch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains_key(&mcu_id);
+            if unhandled {
+                tracing::error!(
+                    subsystem = "ethercat",
+                    event = "endpoint_death_watchdog_abort",
+                    mcu_id,
+                    grace_secs = ENDPOINT_DEATH_SHUTDOWN_GRACE.as_secs(),
+                    "klippy did not act on the latched EtherCAT endpoint death within the grace \
+                     — aborting as a last-resort safety stop"
+                );
+                abort_after_tracing_appender_drains();
+            }
+        });
+}
+
 fn trip_position_to_motor_frame(
     axis: u8,
     motor_pos: f64,
@@ -723,6 +790,7 @@ pub struct PyMotionEngine {
     homing_result:
         Mutex<Option<crossbeam_channel::Receiver<Result<([f64; 3], [f64; 3], u64), String>>>>,
     latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
+    latched_endpoint_death: Arc<Mutex<HashMap<u32, String>>>,
     remote_triggers: Mutex<HashMap<u8, (u32, host_rt::host_io::InterceptorId)>>,
     shut_down: AtomicBool,
 }
@@ -976,6 +1044,7 @@ impl PyMotionEngine {
             move_seq: std::sync::atomic::AtomicU64::new(0),
             homing_result: Mutex::new(None),
             latched_drive_fault: Arc::new(Mutex::new(HashMap::new())),
+            latched_endpoint_death: Arc::new(Mutex::new(HashMap::new())),
             remote_triggers: Mutex::new(HashMap::new()),
             shut_down: AtomicBool::new(false),
         }
@@ -1389,6 +1458,14 @@ impl PyMotionEngine {
     fn take_drive_fault(&self, mcu_handle: u32) -> PyResult<Option<u16>> {
         Ok(self
             .latched_drive_fault
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&mcu_handle))
+    }
+
+    fn take_endpoint_death(&self, mcu_handle: u32) -> PyResult<Option<String>> {
+        Ok(self
+            .latched_endpoint_death
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&mcu_handle))
@@ -2937,6 +3014,7 @@ impl PyMotionEngine {
         let drain_for_pump = self.drain.clone();
         let pump_backlog_for_pump = Arc::clone(&self.pump_backlog);
         let router_for_freq = Arc::clone(&self.router);
+        let endpoint_death_for_pump = Arc::clone(&self.latched_endpoint_death);
         let pump_thread_handle = std::thread::Builder::new()
             .name("push-pieces-pump".into())
             .spawn(move || {
@@ -2971,14 +3049,18 @@ impl PyMotionEngine {
                         let r = router_for_pump.lock().unwrap_or_else(|p| p.into_inner());
                         r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
                     },
-                    |key| {
-                        tracing::error!(
-                            mcu_id = key.mcu_id,
-                            axis = key.axis,
-                            "EXIT_ON_FAULT — EtherCAT transport broken-pipe in pump; \
-                             aborting klippy so systemd restarts it"
-                        );
-                        abort_after_tracing_appender_drains();
+                    move |key: crate::pump::AxisKey| {
+                        if report_ethercat_endpoint_death(
+                            &endpoint_death_for_pump,
+                            key.mcu_id,
+                            "pump transport went fatal (broken pipe / endpoint gone) \
+                             — see the send_frame_fatal log for the exact transport error",
+                        ) {
+                            arm_endpoint_death_watchdog(
+                                Arc::clone(&endpoint_death_for_pump),
+                                key.mcu_id,
+                            );
+                        }
                     },
                     move |key: crate::pump::AxisKey, n: u32| {
                         drain_for_pump.unsend(key.mcu_id, key.axis, n);
@@ -3140,17 +3222,19 @@ impl PyMotionEngine {
 
                 let conn_for_poll = Arc::downgrade(&conn);
                 let mcus_for_supervision = Arc::clone(&self.mcus);
-                let label_for_supervision = mcu_label.clone();
+                let endpoint_death_for_supervision = Arc::clone(&self.latched_endpoint_death);
                 let on_endpoint_death: Box<dyn Fn(&str) + Send + 'static> =
                     Box::new(move |reason: &str| {
-                        tracing::error!(
-                            mcu_label = label_for_supervision,
+                        if report_ethercat_endpoint_death(
+                            &endpoint_death_for_supervision,
                             mcu_id,
                             reason,
-                            "EXIT_ON_FAULT — ethercat endpoint died mid-session; \
-                             aborting klippy so systemd restarts it"
-                        );
-                        abort_after_tracing_appender_drains();
+                        ) {
+                            arm_endpoint_death_watchdog(
+                                Arc::clone(&endpoint_death_for_supervision),
+                                mcu_id,
+                            );
+                        }
                     });
 
                 let _ = std::thread::Builder::new()
