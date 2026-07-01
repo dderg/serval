@@ -205,6 +205,78 @@ bootloader_request(void)
 
 
 /****************************************************************
+ * Boot-loop guard
+ ****************************************************************/
+
+// A boot that hard-faults or hangs before the runtime goes live (e.g. a bad
+// firmware image) is otherwise unrecoverable without physical BOOT0: USB never
+// enumerates, so the host can't ask the app to reboot into DFU. The guard makes
+// it self-heal — an early watchdog turns a hang into a reset, a reset counter in
+// AXI SRAM (survives reset, outside any zeroed segment) tallies consecutive
+// failures, and after a few it diverts to the ROM DFU bootloader so the board is
+// reflashable over USB. A boot that reaches the live runtime clears the counter,
+// so only genuine boot loops — never runtime faults — accumulate.
+//
+// The counter MUST be a linker-reserved .axi_bss static, never a hardcoded AXI
+// SRAM address: rt_storage (the runtime engine's state) also lives in .axi_bss
+// and spans ~120 KB, so any fixed 0x2400xxxx address lands inside it and
+// silently corrupts runtime state. .axi_bss is NOLOAD and never cleared by
+// boot_memset, so the count survives the soft/IWDG resets a boot loop triggers;
+// the magic guards cold-boot garbage. aligned(32) gives it its own cache line
+// for the clean below.
+#define BOOT_GUARD_MAGIC 0x424f4f47u             // 'BOOG'
+#define BOOT_GUARD_LIMIT 3u
+
+struct boot_guard_state {
+    uint32_t magic;
+    uint32_t count;
+};
+static struct boot_guard_state boot_guard_state
+    __attribute__((section(".axi_bss"), aligned(32)));
+
+static void
+boot_guard(void)
+{
+    struct boot_guard_state *bg = &boot_guard_state;
+    if (bg->magic != BOOT_GUARD_MAGIC) { // cold boot: random SRAM, (re)initialise
+        bg->magic = BOOT_GUARD_MAGIC;
+        bg->count = 0;
+    }
+    if (bg->count >= BOOT_GUARD_LIMIT) {
+        bg->count = 0;
+        dfu_reboot_set_flag(); // dfu_reboot_check() (next in armcm_main) jumps
+    } else {
+        bg->count = bg->count + 1;
+    }
+    // Flush to SRAM so the count survives the reset a boot hang triggers: the
+    // bootloader may hand off with the D-cache on, and a cached-only write would
+    // be lost at reset, leaving the loop undetected.
+    SCB_CleanDCache_by_Addr(&boot_guard_state, sizeof(boot_guard_state));
+
+    // Arm the IWDG so a hang anywhere in boot resets and re-enters this guard.
+    // PR=5 (/128), RLR=0xFFF over the ~32 kHz LSI is ~16 s — vastly longer than a
+    // healthy boot, so it never trips a slow-but-working start; watchdog_init()
+    // retunes it once the runtime is up. Starting the IWDG also forces LSI on.
+    IWDG1->KR = 0x5555;
+    IWDG1->PR = 5;
+    IWDG1->RLR = 0x0FFF;
+    IWDG1->KR = 0xCCCC;
+}
+
+// Called from watchdog_reset() once the runtime is live: this boot reached a
+// healthy state, so reset the consecutive-failure tally (and flush it, so a
+// later runtime fault doesn't get miscounted as a boot failure).
+void
+boot_guard_clear(void)
+{
+    if (boot_guard_state.count) {
+        boot_guard_state.count = 0;
+        SCB_CleanDCache_by_Addr(&boot_guard_state, sizeof(boot_guard_state));
+    }
+}
+
+
+/****************************************************************
  * Startup
  ****************************************************************/
 
@@ -212,6 +284,11 @@ bootloader_request(void)
 void
 armcm_main(void)
 {
+    // Boot-loop safety net: arm an early watchdog and, after repeated failed
+    // boots, divert to the ROM DFU bootloader so a bad image is recoverable
+    // over USB without physical BOOT0. Must precede the risky clock/init below.
+    boot_guard();
+
     // Run SystemInit() and then restore VTOR
     SystemInit();
     RCC->D1CCIPR = 0x00000000;

@@ -219,6 +219,18 @@ class TMCErrorCheck:
             if self.adc_temp_reg is not None:
                 self._query_temperature()
         except self.printer.command_error as e:
+            # A CRC-checked UART read surfaces corruption as a failed read,
+            # never as a false fault, and the driver self-protects in hardware
+            # (thermal/short) in real time. An unreachable driver therefore
+            # tells us nothing actionable; keep monitoring rather than shut
+            # down. A validly-read fault still raises a non-uart error below.
+            if str(e).startswith("Unable to read tmc uart"):
+                logging.warning(
+                    "TMC %s: driver unreachable, skipping periodic check: %s",
+                    self.stepper_name,
+                    str(e),
+                )
+                return eventtime + 1.0
             self.printer.invoke_shutdown(str(e))
             return self.printer.get_reactor().NEVER
         return eventtime + 1.0
