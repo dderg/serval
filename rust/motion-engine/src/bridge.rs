@@ -20,7 +20,8 @@ use crate::config::{self, PlannerConfig};
 use crate::dispatch::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
 use crate::stream_planner::{
-    DispatchError, HomeDripParams, NudgeParams, StreamPlannerError, StreamPlannerHandle,
+    DispatchError, HomeDripParams, NudgeParams, SegmentDispatchCtx, StreamPlannerError,
+    StreamPlannerHandle,
 };
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
 
@@ -3296,128 +3297,44 @@ impl PyMotionEngine {
             }
         }
 
-        let mcu_configs_for_cb = mcu_configs;
-        let router_for_cb = Arc::clone(&router_arc);
+        let mcu_configs_for_ctx = mcu_configs;
+        let router_for_ctx = Arc::clone(&router_arc);
 
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
         *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
-        let pump_tx_for_cb = data_tx_init.clone();
-        let drain_disp = self.drain.clone();
-        let counter_for_cb = Arc::clone(&counter);
-        let active_drip_cohort_for_cb = Arc::clone(&self.active_drip_cohort);
-        let motion_history_for_cb = Arc::clone(&self.motion_history);
-        let nominal_freqs_for_cb = Arc::clone(&self.nominal_clock_freqs);
+        let pump_tx_for_ctx = data_tx_init.clone();
+        let drain_for_ctx = self.drain.clone();
+        let counter_for_ctx = Arc::clone(&counter);
+        let active_drip_cohort_for_ctx = Arc::clone(&self.active_drip_cohort);
+        let motion_history_for_ctx = Arc::clone(&self.motion_history);
+        let nominal_freqs_for_ctx = Arc::clone(&self.nominal_clock_freqs);
 
-        let nudge_mcu_configs = mcu_configs_for_cb.clone();
-        let nudge_router = Arc::clone(&router_for_cb);
-        let nudge_pump_tx = pump_tx_for_cb.clone();
-        let nudge_drain = drain_disp.clone();
-        let nudge_counter = Arc::clone(&counter_for_cb);
-        let nudge_active_drip_cohort = Arc::clone(&active_drip_cohort_for_cb);
-        let nudge_motion_history = Arc::clone(&motion_history_for_cb);
-        let nudge_nominal_freqs = Arc::clone(&nominal_freqs_for_cb);
+        let nudge_mcu_configs = mcu_configs_for_ctx.clone();
+        let nudge_router = Arc::clone(&router_for_ctx);
+        let nudge_pump_tx = pump_tx_for_ctx.clone();
+        let nudge_drain = drain_for_ctx.clone();
+        let nudge_counter = Arc::clone(&counter_for_ctx);
+        let nudge_active_drip_cohort = Arc::clone(&active_drip_cohort_for_ctx);
+        let nudge_motion_history = Arc::clone(&motion_history_for_ctx);
+        let nudge_nominal_freqs = Arc::clone(&nominal_freqs_for_ctx);
         let nudge_anchor_arc = Arc::clone(&anchor_mutex);
 
+        let dispatch_ctx = Arc::new(SegmentDispatchCtx {
+            router: router_for_ctx,
+            anchor: anchor_mutex,
+            mcu_configs: mcu_configs_for_ctx,
+            pump_tx: pump_tx_for_ctx,
+            drain: drain_for_ctx,
+            counter: counter_for_ctx,
+            active_drip_cohort: active_drip_cohort_for_ctx,
+            motion_history: motion_history_for_ctx,
+            nominal_freqs: nominal_freqs_for_ctx,
+        });
         let dispatch: Arc<
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
         > = Arc::new(
             move |seg: &trajectory::ShapedSegment| -> Result<(), DispatchError> {
-                tracing::debug!(
-                    subsystem = "engine",
-                    event = "dispatch_entered",
-                    seg_t_start = seg.t_start,
-                    seg_t_end = seg.t_end,
-                    "[engine-trace] dispatch entered"
-                );
-
-                let host_now = {
-                    let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
-                    r.host_now_secs()
-                };
-
-                let (t0, fresh) = anchor_mutex
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .anchor_segment(seg.t_start, seg.t_end, host_now);
-
-                if fresh {
-                    let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
-                    for cfg in mcu_configs_for_cb.iter() {
-                        let h = crate::types::mcu_handle_from_raw(cfg.mcu_id);
-                        r.log_seg0_lead(h, t0 + seg.t_start, t0);
-                    }
-                }
-
-                let project = |mcu_id: u32, host_secs: f64| -> u64 {
-                    let r = router_for_cb.lock().unwrap_or_else(|p| p.into_inner());
-                    r.host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(mcu_id), host_secs)
-                        .unwrap_or(0)
-                };
-
-                let active_cohort: Option<u64> = *active_drip_cohort_for_cb
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-
-                let max_piece_secs = if active_cohort.is_some() {
-                    Some(0.025_f64)
-                } else {
-                    None::<f64>
-                };
-                let lead_secs = if active_cohort.is_some() {
-                    crate::pump::DRIP_WINDOW_SECS
-                } else {
-                    crate::pump::MAX_LEAD_SECS
-                };
-
-                let msgs = crate::enqueue::enqueue_segment(
-                    seg,
-                    &mcu_configs_for_cb,
-                    t0,
-                    fresh,
-                    host_now,
-                    lead_secs,
-                    project,
-                    max_piece_secs,
-                );
-
-                let nominal_freqs = nominal_freqs_for_cb
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .clone();
-                if fresh {
-                    motion_history_for_cb
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .drop_pieces_on_reanchor();
-                }
-                for m in msgs {
-                    let nominal_freq = *nominal_freqs
-                        .get(&m.key.mcu_id)
-                        .ok_or(DispatchError::MissingNominalFreq(m.key.mcu_id))?;
-                    {
-                        let mut store = motion_history_for_cb
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner());
-                        for (piece, host_t) in &m.pieces {
-                            store.record(m.key, piece, nominal_freq, *host_t);
-                        }
-                    }
-                    drain_disp.add_sent(m.key.mcu_id, m.key.axis, m.pieces.len() as u32);
-                    pump_tx_for_cb
-                        .send(m)
-                        .map_err(|_| DispatchError::PumpGone)?;
-                }
-
-                tracing::info!(
-                    subsystem = "motion",
-                    event = "pipe_pump_in",
-                    line = seg.source_line,
-                    t_us = crate::timing::mono_us(),
-                    "[pipe] handed to pump"
-                );
-
-                counter_for_cb.fetch_add(1, Ordering::Relaxed);
-                Ok(())
+                crate::stream_planner::dispatch_segment(&dispatch_ctx, seg)
             },
         );
 
