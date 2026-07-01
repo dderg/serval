@@ -136,36 +136,33 @@ struct TimeSeries {
     j_scalar: Vec<f64>,
 }
 
-// Evaluate per-axis monomial pieces [t0, t1, c0, c1, …] -- the lowered trajectory
-// the firmware runs -- and their analytic derivatives at times `t`. Within a piece,
-// pos = c0 + c1*tau + … (tau = t - t0), so velocity, acceleration, and jerk are
-// exact polynomial derivatives, no differencing. Length-tolerant: a 6-float cubic
-// reads c4 = c5 = 0, so it evaluates as the cubic it is.
-fn eval_pieces(pieces: &[Vec<f64>], t: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    let n = pieces.len();
-    let mut pos = Vec::with_capacity(t.len());
-    let mut vel = Vec::with_capacity(t.len());
-    let mut acc = Vec::with_capacity(t.len());
-    let mut jerk = Vec::with_capacity(t.len());
-    for &ti in t {
-        // Last piece whose start is <= ti, clamped into range (searchsorted-right - 1).
-        let upper = pieces.partition_point(|p| p[0] <= ti);
-        let idx = upper.saturating_sub(1).min(n - 1);
-        let p = &pieces[idx];
-        let g = |i: usize| p.get(i).copied().unwrap_or(0.0);
-        let tau = ti - p[0];
-        let (c0, c1, c2, c3, c4, c5) = (g(2), g(3), g(4), g(5), g(6), g(7));
-        let (t2, t3, t4, t5) = (tau * tau, tau.powi(3), tau.powi(4), tau.powi(5));
-        pos.push(c0 + c1 * tau + c2 * t2 + c3 * t3 + c4 * t4 + c5 * t5);
-        vel.push(c1 + 2.0 * c2 * tau + 3.0 * c3 * t2 + 4.0 * c4 * t3 + 5.0 * c5 * t4);
-        acc.push(2.0 * c2 + 6.0 * c3 * tau + 12.0 * c4 * t2 + 20.0 * c5 * t3);
-        jerk.push(6.0 * c3 + 24.0 * c4 * tau + 60.0 * c5 * t2);
-    }
+// Evaluate one per-axis monomial piece [t0, t1, c0, c1, …] -- the lowered
+// trajectory the firmware runs -- and its analytic derivatives at time `ti`.
+// Within a piece pos = c0 + c1*tau + … (tau = ti - t0), so velocity,
+// acceleration, and jerk are exact polynomial derivatives, no differencing.
+// Length-tolerant: a 6-float cubic reads c4 = c5 = 0, evaluating as the cubic.
+fn eval_piece(p: &[f64], ti: f64) -> (f64, f64, f64, f64) {
+    let g = |i: usize| p.get(i).copied().unwrap_or(0.0);
+    let tau = ti - p[0];
+    let (c0, c1, c2, c3, c4, c5) = (g(2), g(3), g(4), g(5), g(6), g(7));
+    let (t2, t3, t4, t5) = (tau * tau, tau.powi(3), tau.powi(4), tau.powi(5));
+    let pos = c0 + c1 * tau + c2 * t2 + c3 * t3 + c4 * t4 + c5 * t5;
+    let vel = c1 + 2.0 * c2 * tau + 3.0 * c3 * t2 + 4.0 * c4 * t3 + 5.0 * c5 * t4;
+    let acc = 2.0 * c2 + 6.0 * c3 * tau + 12.0 * c4 * t2 + 20.0 * c5 * t3;
+    let jerk = 6.0 * c3 + 24.0 * c4 * tau + 60.0 * c5 * t2;
     (pos, vel, acc, jerk)
 }
 
+// Last piece whose start is <= ti, clamped into range (searchsorted-right - 1).
+fn piece_at(pieces: &[Vec<f64>], ti: f64) -> usize {
+    pieces
+        .partition_point(|p| p[0] <= ti)
+        .saturating_sub(1)
+        .min(pieces.len() - 1)
+}
+
 fn time_series_from_pieces(xp: &[Vec<f64>], yp: &[Vec<f64>], t_end: f64) -> TimeSeries {
-    if xp.is_empty() || t_end <= 0.0 {
+    if xp.is_empty() || yp.is_empty() || t_end <= 0.0 {
         let z = vec![0.0];
         return TimeSeries {
             t: z.clone(),
@@ -183,18 +180,53 @@ fn time_series_from_pieces(xp: &[Vec<f64>], yp: &[Vec<f64>], t_end: f64) -> Time
         };
     }
 
-    // Dense grid plus the exact piece boundaries, where the C1 Hermite lowering
-    // lets acceleration step -- so the piecewise structure draws faithfully.
-    let n_grid = (8 * xp.len()).max(2000);
-    let mut t: Vec<f64> = (0..n_grid)
-        .map(|i| t_end * (i as f64) / ((n_grid - 1) as f64))
-        .collect();
-    t.extend(xp.iter().map(|p| p[1]));
-    t.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    t.dedup();
+    // Acceleration is linear within a cubic piece and steps at a piece boundary,
+    // so every accel peak sits exactly on a boundary -- a uniform grid lands a
+    // hair off it and the peak wobbles as t_end shifts between before/after.
+    // Sample each interval between consecutive boundaries (of BOTH axes) on its
+    // own piece with both endpoints included: every step gets a sample on each
+    // side, so the plotted accel/jerk are exact and stable.
+    let mut bounds: Vec<f64> = vec![0.0, t_end];
+    for p in xp.iter().chain(yp.iter()) {
+        for edge in [p[0], p[1]] {
+            if edge > 0.0 && edge < t_end {
+                bounds.push(edge);
+            }
+        }
+    }
+    bounds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    bounds.dedup();
 
-    let (kin_x, vx, ax, jx) = eval_pieces(xp, &t);
-    let (kin_y, vy, ay, jy) = eval_pieces(yp, &t);
+    let n_intervals = bounds.len() - 1;
+    let per_interval = ((8 * xp.len()).max(2000) / n_intervals.max(1)).max(4);
+    let cap = per_interval * n_intervals;
+
+    let new = || Vec::with_capacity(cap);
+    let mut t = new();
+    let (mut kin_x, mut vx, mut ax, mut jx) = (new(), new(), new(), new());
+    let (mut kin_y, mut vy, mut ay, mut jy) = (new(), new(), new(), new());
+
+    for w in bounds.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let mid = 0.5 * (a + b);
+        let px = &xp[piece_at(xp, mid)];
+        let py = &yp[piece_at(yp, mid)];
+        for k in 0..per_interval {
+            let ti = a + (b - a) * (k as f64) / ((per_interval - 1) as f64);
+            let (x, vxk, axk, jxk) = eval_piece(px, ti);
+            let (y, vyk, ayk, jyk) = eval_piece(py, ti);
+            t.push(ti);
+            kin_x.push(x);
+            vx.push(vxk);
+            ax.push(axk);
+            jx.push(jxk);
+            kin_y.push(y);
+            vy.push(vyk);
+            ay.push(ayk);
+            jy.push(jyk);
+        }
+    }
+
     let v_scalar = scalar_derivative(&vx, &vy);
     let a_scalar = scalar_derivative(&ax, &ay);
     let j_scalar = scalar_derivative(&jx, &jy);
@@ -213,6 +245,53 @@ fn time_series_from_pieces(xp: &[Vec<f64>], yp: &[Vec<f64>], t_end: f64) -> Time
         jy,
         j_scalar,
     }
+}
+
+// Acceleration steps at a piece boundary are jerk impulses: a true Dirac --
+// infinite height, zero width -- so the per-piece analytic jerk can never plot
+// them and the jerk panel looks deceptively smooth across the step. Surface
+// them honestly. The finite, physical strength of each impulse is the
+// acceleration jump |Δa| across the boundary (∫ jerk dt over the impulse). The
+// C1 Hermite lowering matches position and velocity at joints but not
+// acceleration, so most joints step a little; a relative floor keeps float
+// noise and trivial joints off the panel.
+fn jerk_impulses(
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+    t_end: f64,
+    a_peak: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    if xp.is_empty() || yp.is_empty() || t_end <= 0.0 {
+        return (Vec::new(), Vec::new());
+    }
+    let mut bounds: Vec<f64> = vec![0.0, t_end];
+    for p in xp.iter().chain(yp.iter()) {
+        for edge in [p[0], p[1]] {
+            if edge > 0.0 && edge < t_end {
+                bounds.push(edge);
+            }
+        }
+    }
+    bounds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    bounds.dedup();
+
+    let floor = (a_peak * 1e-3).max(1e-9);
+    let (mut times, mut mags) = (Vec::new(), Vec::new());
+    for i in 1..bounds.len().saturating_sub(1) {
+        let b = bounds[i];
+        let lo = 0.5 * (bounds[i - 1] + b);
+        let hi = 0.5 * (b + bounds[i + 1]);
+        let axl = eval_piece(&xp[piece_at(xp, lo)], b).2;
+        let axr = eval_piece(&xp[piece_at(xp, hi)], b).2;
+        let ayl = eval_piece(&yp[piece_at(yp, lo)], b).2;
+        let ayr = eval_piece(&yp[piece_at(yp, hi)], b).2;
+        let da = (axr - axl).hypot(ayr - ayl);
+        if da > floor {
+            times.push(b);
+            mags.push(da);
+        }
+    }
+    (times, mags)
 }
 
 fn build_time_series(snap: &Snapshot) -> TimeSeries {
@@ -405,6 +484,8 @@ pub struct TrajectoryData {
     jx: Vec<f64>,
     jy: Vec<f64>,
     j_scalar: Vec<f64>,
+    jerk_impulse_t: Vec<f64>,
+    jerk_impulse_mag: Vec<f64>,
     traversal_time_s: f64,
     blended_corners: usize,
     chain_fits: usize,
@@ -420,6 +501,15 @@ impl TrajectoryData {
 
         let ts = build_time_series(&snap);
         let segments = parse_segments(&snap.fitted_segments);
+
+        let a_peak = ts.a_scalar.iter().copied().fold(0.0_f64, f64::max);
+        let (jerk_impulse_t, jerk_impulse_mag) =
+            match (&snap.traj_x_pieces, &snap.traj_y_pieces) {
+                (Some(xp), Some(yp)) => {
+                    jerk_impulses(xp, yp, snap.traj_t_end.unwrap_or(0.0), a_peak)
+                }
+                _ => (Vec::new(), Vec::new()),
+            };
 
         Ok(TrajectoryData {
             raw_x: snap.raw_x,
@@ -437,6 +527,8 @@ impl TrajectoryData {
             jx: ts.jx,
             jy: ts.jy,
             j_scalar: ts.j_scalar,
+            jerk_impulse_t,
+            jerk_impulse_mag,
             traversal_time_s: snap.traversal_time_s,
             blended_corners: snap.blended_corners,
             chain_fits: snap.chain_fits,
@@ -488,6 +580,14 @@ impl TrajectoryData {
     }
     pub fn j_scalar(&self) -> Float64Array {
         Float64Array::from(&self.j_scalar[..])
+    }
+
+    // Times and |Δaccel| of the jerk impulses at acceleration discontinuities.
+    pub fn jerk_impulse_t(&self) -> Float64Array {
+        Float64Array::from(&self.jerk_impulse_t[..])
+    }
+    pub fn jerk_impulse_mag(&self) -> Float64Array {
+        Float64Array::from(&self.jerk_impulse_mag[..])
     }
 
     // Metadata

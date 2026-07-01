@@ -19,6 +19,7 @@ const COLORS = {
   axis: "#555",
   crosshair: "rgba(255,255,255,0.35)",
   marker: "#e0518a",
+  impulse: "#ffd54a",
 };
 
 // -- Panel configuration -----------------------------------------------------
@@ -144,6 +145,7 @@ function findPeaks(scalar, yMax) {
 const ARRAY_KEYS = [
   "raw_x", "raw_y", "kin_x", "kin_y", "t",
   "vx", "vy", "v_scalar", "ax", "ay", "a_scalar", "jx", "jy", "j_scalar",
+  "jerk_impulse_t", "jerk_impulse_mag",
 ];
 
 function memoizeTrajectory(td) {
@@ -314,44 +316,36 @@ class PanelRenderer {
 
     // The executed (post-lowered) toolhead path -- the same dense quintic samples the
     // velocity/accel/jerk panels are derived from, so the path is the same stage as
-    // every graph beside it. The fitted segments (pre-lowering geometry) are used
-    // only to color each stretch by type, mapped onto the executed path by
-    // arc-length fraction so the line/arc/clothoid coloring is preserved.
+    // every graph beside it. The line/arc/clothoid label exists only in the fitted
+    // (pre-lowering) geometry; the executed samples are all cubics. Borrow each
+    // segment's label but place the color seam at the executed sample nearest that
+    // segment's geometric endpoint -- exact, not an arc-length-fraction guess.
     const segCount = DATA.segment_count();
     const kx = DATA.kin_x(), ky = DATA.kin_y();
     if (kx.length > 1 && segCount > 0) {
-      const segFracEnd = [];
-      let fitTotal = 0;
-      for (let i = 0; i < segCount; i++) {
-        const typ = DATA.segment_type(i);
-        const d = DATA.segment_data(i);
-        let segLen = 0;
-        if (typ === "line") {
-          segLen = Math.hypot(d[2] - d[0], d[3] - d[1]);
-        } else {
-          for (let j = 2; j < d.length; j += 2) {
-            segLen += Math.hypot(d[j] - d[j - 2], d[j + 1] - d[j - 1]);
-          }
+      // Search forward only, so a self-crossing path can't snap a later seam back.
+      const segEndIdx = new Array(segCount);
+      let from = 0;
+      for (let s = 0; s < segCount; s++) {
+        const d = DATA.segment_data(s);
+        const line = DATA.segment_type(s) === "line";
+        const ex = line ? d[2] : d[d.length - 2];
+        const ey = line ? d[3] : d[d.length - 1];
+        let best = from, bd = Infinity;
+        for (let i = from; i < kx.length; i++) {
+          const dx = kx[i] - ex, dy = ky[i] - ey;
+          const dd = dx * dx + dy * dy;
+          if (dd < bd) { bd = dd; best = i; }
         }
-        fitTotal += segLen;
-        segFracEnd.push(fitTotal);
+        segEndIdx[s] = best;
+        from = best;
       }
-      for (let i = 0; i < segCount; i++) {
-        segFracEnd[i] = fitTotal > 0 ? segFracEnd[i] / fitTotal : 1;
-      }
-
-      const kinCum = [0];
-      let kinTotal = 0;
-      for (let i = 1; i < kx.length; i++) {
-        kinTotal += Math.hypot(kx[i] - kx[i - 1], ky[i] - ky[i - 1]);
-        kinCum.push(kinTotal);
-      }
+      segEndIdx[segCount - 1] = kx.length - 1;
 
       let segIdx = 0, curColor = null;
       bctx.lineWidth = 1.2;
       for (let i = 1; i < kx.length; i++) {
-        const midFrac = kinTotal > 0 ? 0.5 * (kinCum[i - 1] + kinCum[i]) / kinTotal : 1;
-        while (segIdx < segCount - 1 && midFrac > segFracEnd[segIdx]) segIdx++;
+        while (segIdx < segCount - 1 && i > segEndIdx[segIdx]) segIdx++;
         const color = COLORS[DATA.segment_type(segIdx)] || COLORS.line;
         if (color !== curColor) {
           if (curColor !== null) bctx.stroke();
@@ -443,6 +437,52 @@ class PanelRenderer {
       const dx = p.px - mx, dy = p.py - my;
       const d = dx * dx + dy * dy;
       if (d < bestDist) { bestDist = d; best = p; }
+    }
+    return best;
+  }
+
+  // -- Jerk impulses (accel discontinuities) ---------------------------------
+  // A step in acceleration is an infinite, zero-width jerk spike the analytic
+  // per-piece jerk can't plot. Draw each as a stem whose height encodes |Δa|
+  // relative to the largest impulse; the exact value shows on hover.
+  drawImpulses(times, mags, tMin, tMax, maxMag) {
+    this._impulses = [];
+    const bctx = this.ctx;
+    bctx.save();
+    bctx.beginPath();
+    bctx.rect(this.plotX0, this.plotY0, this.plotW, this.plotH);
+    bctx.clip();
+    bctx.strokeStyle = COLORS.impulse;
+    bctx.fillStyle = COLORS.impulse;
+    bctx.lineWidth = 1.5;
+    const base = this.plotY0 + this.plotH;
+    for (let i = 0; i < times.length; i++) {
+      const tb = times[i];
+      if (tb < tMin || tb > tMax) continue;
+      const px = this.toPixelX(tb, tMin, tMax);
+      const frac = maxMag > 0 ? Math.min(1, mags[i] / maxMag) : 1;
+      const top = this.plotY0 + this.plotH * (1 - 0.92 * frac);
+      bctx.beginPath();
+      bctx.moveTo(px, base);
+      bctx.lineTo(px, top);
+      bctx.stroke();
+      bctx.beginPath();
+      bctx.moveTo(px, top);
+      bctx.lineTo(px - 4, top + 8);
+      bctx.lineTo(px + 4, top + 8);
+      bctx.closePath();
+      bctx.fill();
+      this._impulses.push({ px, tVal: tb, mag: mags[i] });
+    }
+    bctx.restore();
+  }
+
+  nearestImpulse(mx, radius) {
+    if (!this._impulses) return null;
+    let best = null, bd = radius;
+    for (const im of this._impulses) {
+      const d = Math.abs(im.px - mx);
+      if (d < bd) { bd = d; best = im; }
     }
     return best;
   }
@@ -581,6 +621,7 @@ function runFrame() {
 
 // Blit buffers + cursor for the current hover state, without rebuilding buffers.
 function compositeHover() {
+  if (!DATA) return;
   const { tMin, tMax } = timeView;
   if (hoverIdx != null) {
     syncHover(hoverIdx);
@@ -630,6 +671,11 @@ function renderAll() {
     renderers[1].renderTimeBuffer(tMin, tMax, 0, vYMax, DATA.vx(), DATA.vy(), vScalar, showPeaks);
     renderers[2].renderTimeBuffer(tMin, tMax, 0, aYMax, DATA.ax(), DATA.ay(), aScalar, showPeaks);
     renderers[3].renderTimeBuffer(tMin, tMax, 0, jYMax, DATA.jx(), DATA.jy(), jScalar, showPeaks);
+
+    const impT = DATA.jerk_impulse_t(), impMag = DATA.jerk_impulse_mag();
+    let impMax = 0;
+    for (let i = 0; i < impMag.length; i++) if (impMag[i] > impMax) impMax = impMag[i];
+    renderers[3].drawImpulses(impT, impMag, tMin, tMax, impMax);
   }
 
   // Composite all (always — cursor may have moved)
@@ -643,7 +689,7 @@ function setupTimeInteraction(panelIdx) {
   let dragStartX = 0, dragStartTMin = 0, dragStartTMax = 0;
 
   canvas.addEventListener("mousemove", (e) => {
-    if (wheelTimer) return;
+    if (wheelTimer || !DATA) return;
     const r = renderers[panelIdx];
     const rect = r.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -664,9 +710,17 @@ function setupTimeInteraction(panelIdx) {
       hoverIdx = closestIndex(DATA.t(), dataT);
       scheduleHover();
 
-      // Check for nearby peak
+      // A jerk impulse (accel discontinuity) takes precedence over a peak.
+      const impulse = r.nearestImpulse(mx, 6);
       const peak = r.nearestPeak(mx, my, 12);
-      if (peak) {
+      if (impulse) {
+        tooltipEl.style.display = "block";
+        tooltipEl.style.left = (e.clientX + 14) + "px";
+        tooltipEl.style.top = (e.clientY - 10) + "px";
+        tooltipEl.textContent =
+          `jerk impulse at t=${formatNum(impulse.tVal)}s\n` +
+          `Δaccel=${formatNum(impulse.mag)} mm/s² (∞ jerk)`;
+      } else if (peak) {
         tooltipEl.style.display = "block";
         tooltipEl.style.left = (e.clientX + 14) + "px";
         tooltipEl.style.top = (e.clientY - 10) + "px";
@@ -729,7 +783,7 @@ function setupPathInteraction() {
   let dragStartX = 0, dragStartY = 0, dragStartPV = null;
 
   canvas.addEventListener("mousemove", (e) => {
-    if (wheelTimer) return;
+    if (wheelTimer || !DATA) return;
     const r = renderers[0];
     const rect = r.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -850,11 +904,29 @@ function stepCase(dir) {
 function rebuildCaseSelect() {
   const sel = document.getElementById("case-select");
   sel.innerHTML = "";
+  // <group>/<cfg>/<gcode>: one <optgroup> per test group, option text
+  // "<cfg>/<gcode>" so the collapsed select still shows which config the case
+  // ran under. Keyed by group so entries group correctly whatever order
+  // caseList arrives in.
+  const optgroups = new Map();
   for (const c of caseList) {
+    const first = c.name.indexOf("/");
+    const group = first > 0 ? c.name.substring(0, first) : "";
+    const label = first >= 0 ? c.name.substring(first + 1) : c.name;
+    let parent = sel;
+    if (group) {
+      parent = optgroups.get(group);
+      if (!parent) {
+        parent = document.createElement("optgroup");
+        parent.label = group;
+        sel.appendChild(parent);
+        optgroups.set(group, parent);
+      }
+    }
     const opt = document.createElement("option");
     opt.value = c.name;
-    opt.textContent = c.name;
-    sel.appendChild(opt);
+    opt.textContent = label;
+    parent.appendChild(opt);
   }
 }
 
@@ -875,6 +947,7 @@ async function loadCaseList() {
   document.getElementById("case-select").addEventListener("change", (e) => loadCase(e.target.value));
   document.getElementById("case-prev").addEventListener("click", () => stepCase(-1));
   document.getElementById("case-next").addEventListener("click", () => stepCase(1));
+  syncCaseControls();
 }
 
 // -- Variant (before/after) --------------------------------------------------
@@ -950,6 +1023,7 @@ async function loadCase(name) {
   history.replaceState(null, "", url);
   syncCaseControls();
   document.title = `Snapshot — ${name}`;
+  document.getElementById("case-path").textContent = name.replace(/\//g, " / ");
 
   const after = await fetchSnapshot(name, "after");
   if (after == null) {
@@ -1101,12 +1175,6 @@ async function acceptCurrent() {
 // -- Init --------------------------------------------------------------------
 async function main() {
   await init();
-  await loadCaseList();
-
-  if (!currentCase) {
-    document.getElementById("meta").textContent = "No case specified — add ?case=name to URL";
-    return;
-  }
 
   renderers = PANELS.map(p => new PanelRenderer(p.canvasId, p.type));
   renderers.forEach(r => r.initObserver());
@@ -1154,7 +1222,20 @@ async function main() {
     else if (e.key === "a" || e.key === "A") acceptCurrent();
   });
 
-  await loadCase(currentCase);
+  // Paint the requested case before the /api/cases scan (which re-runs the
+  // planner over every case) so the graphs come up immediately; the dropdown
+  // fills in once the list arrives. With no ?case, the list picks the first.
+  if (currentCase) {
+    await loadCase(currentCase);
+    await loadCaseList();
+  } else {
+    await loadCaseList();
+    if (!currentCase) {
+      document.getElementById("meta").textContent = "No case specified — add ?case=name to URL";
+      return;
+    }
+    await loadCase(currentCase);
+  }
 }
 
 main();
