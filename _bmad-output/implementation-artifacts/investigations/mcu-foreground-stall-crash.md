@@ -31,6 +31,34 @@ dispatched + the RX-buffer backlog depth, so the next crash shows whether it's P
 whether the buffer is backed up (throughput) vs one slow command.
 Also: guard `worst_task_cyc` against the 32-bit wrap on multi-second stalls.
 
+## Follow-up 2026-07-01 #3 — per-command run: contaminated data + a refuted theory
+
+Flashed the per-command build (`1eb027456`). Two crashes (21:36, 22:04 UTC): `fg_task`
+= `console_task` again (rock solid). `fg_demux` = backlog 256 / 6 msgs (small). `fg_msg`
+= kind `0x275` (22:04) and `0x4200` (21:36).
+
+**The per-command data was CONTAMINATED — my instrumentation bug:** new fields were added
+to the persistent `live_snapshot` without bumping `LIVE_MAGIC`, so a reflash (RAM survives,
+magic unchanged) skipped the cold-init zero pass and seeded them with stale bytes. Proof:
+`0x4200` is impossible from the encoding; `0x275` decodes to Klipper msgid 117 which is in
+the unused gap 96–127 (valid ids: −32..95, 128..189).
+
+**Refuted — "malformed command infinite-loops dispatch":** `command_lookup_parser`
+(`command.c:259`) does `if (!cmdid || cmdid >= command_index_size) shutdown("Invalid command")`
+and `command_parsef` `shutdown("Command parser error")` — both **fail loud fast**, no hang.
+And `command_find_block` CRC- and sequence-checks before dispatch. So a bad-msgid block can't
+hang; the `0x275` reading was garbage, not a real malformed command.
+
+**Still confirmed:** `console_task` (command processing) stalls ≥2 s; small backlog → not
+throughput. The *which-command* answer needs clean data.
+
+**Fix (`2d0518677`):** bumped `LIVE_MAGIC` (forces clean init on any layout change) + added
+`runtime.fg_msg_head` capturing the worst/in-progress message's first 4 header bytes
+(len,seq,msgid0,msgid1 for Klipper; channel,payload0..2 for kalico) so one clean crash fully
+decodes the command, including 2-byte-VLQ msgids. Next run is decisive either way: `fg_msg ≈
+fg_task` → a specific dispatched command/frame blocks (head names it); `fg_msg << fg_task` →
+the stall is in `console_task` non-dispatch code (feed_byte / the rebase memmove / framing).
+
 ## Hand-off Brief (15s read)
 
 Mid-print the STM32F401 MCU's **foreground task loop stalled ~200 ms** (other boots: 4–8 s),
