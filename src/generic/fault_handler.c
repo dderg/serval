@@ -32,7 +32,10 @@ struct fault_record {
     uint32_t fault_count;
 };
 
-#define LIVE_MAGIC 0x4C495645u
+// Bump on any live_snapshot layout change so a reflash (RAM survives, old magic
+// still matches) can't seed the new fields with stale bytes — a mismatch forces
+// the cold-init zero pass.
+#define LIVE_MAGIC 0x4C495646u
 
 struct live_snapshot {
     uint32_t magic;
@@ -56,8 +59,10 @@ struct live_snapshot {
     uint32_t worst_task_cyc;
     uint32_t cur_msg_kind;
     uint32_t cur_msg_start;
+    uint32_t cur_msg_head;
     uint32_t worst_msg_kind;
     uint32_t worst_msg_cyc;
+    uint32_t worst_msg_head;
     uint32_t demux_backlog_max;
     uint32_t demux_msgs_max;
 };
@@ -108,6 +113,18 @@ diag_update_worst(volatile uint32_t *worst_cyc, volatile uint32_t *worst_id,
     if (dur > *worst_cyc) {
         *worst_cyc = dur;
         *worst_id = id;
+    }
+}
+
+static void
+diag_update_worst_msg(uint32_t dur, uint32_t kind, uint32_t head)
+{
+    if (dur > DIAG_STALL_CAP_CYC)
+        dur = DIAG_STALL_CAP_CYC;
+    if (dur > live_snap.worst_msg_cyc) {
+        live_snap.worst_msg_cyc = dur;
+        live_snap.worst_msg_kind = kind;
+        live_snap.worst_msg_head = head;
     }
 }
 
@@ -406,9 +423,8 @@ diag_tim5_account(uint32_t enter_cycles, uint32_t exit_cycles)
                           mon_now - live_snap.cur_task_start,
                           live_snap.cur_task_func);
     if (live_snap.cur_msg_kind)
-        diag_update_worst(&live_snap.worst_msg_cyc, &live_snap.worst_msg_kind,
-                          mon_now - live_snap.cur_msg_start,
-                          live_snap.cur_msg_kind);
+        diag_update_worst_msg(mon_now - live_snap.cur_msg_start,
+                              live_snap.cur_msg_kind, live_snap.cur_msg_head);
 }
 
 __attribute__((used, externally_visible))
@@ -687,14 +703,15 @@ diag_close_task(uint32_t now)
 // "backlog of many" (worst_task >> worst_msg).
 __attribute__((used, externally_visible))
 void
-diag_note_msg_enter(uint32_t kind)
+diag_note_msg_enter(uint32_t kind, uint32_t head)
 {
     uint32_t now = timer_read_time();
     if (live_snap.cur_msg_kind)
-        diag_update_worst(&live_snap.worst_msg_cyc, &live_snap.worst_msg_kind,
-                          now - live_snap.cur_msg_start, live_snap.cur_msg_kind);
+        diag_update_worst_msg(now - live_snap.cur_msg_start,
+                              live_snap.cur_msg_kind, live_snap.cur_msg_head);
     live_snap.cur_msg_start = now;
     live_snap.cur_msg_kind = kind;
+    live_snap.cur_msg_head = head;
 }
 
 __attribute__((used, externally_visible))
@@ -702,9 +719,8 @@ void
 diag_note_msg_exit(void)
 {
     if (live_snap.cur_msg_kind)
-        diag_update_worst(&live_snap.worst_msg_cyc, &live_snap.worst_msg_kind,
-                          timer_read_time() - live_snap.cur_msg_start,
-                          live_snap.cur_msg_kind);
+        diag_update_worst_msg(timer_read_time() - live_snap.cur_msg_start,
+                              live_snap.cur_msg_kind, live_snap.cur_msg_head);
     live_snap.cur_msg_kind = 0;
 }
 
@@ -961,8 +977,10 @@ fault_handler_report_task(void)
             live_snap.worst_task_cyc       = 0;
             live_snap.cur_msg_kind         = 0;
             live_snap.cur_msg_start        = 0;
+            live_snap.cur_msg_head         = 0;
             live_snap.worst_msg_kind       = 0;
             live_snap.worst_msg_cyc        = 0;
+            live_snap.worst_msg_head       = 0;
             live_snap.demux_backlog_max    = 0;
             live_snap.demux_msgs_max       = 0;
         }
@@ -1142,6 +1160,9 @@ fault_handler_report_task(void)
            live_snap.cur_msg_kind,
            live_snap.demux_backlog_max,
            live_snap.demux_msgs_max);
+    output("fg_msg_head worst_head %u cur_head %u",
+           live_snap.worst_msg_head,
+           live_snap.cur_msg_head);
     if (fault_rec.magic == FAULT_MAGIC) {
         output("prior_fault kind %u count %u pc %u lr %u psr %u"
                " r0 %u r1 %u r2 %u r3 %u r12 %u",
@@ -1353,6 +1374,10 @@ kalico_diag_emit_prior_crash(void)
                         live_snap.worst_msg_kind,
                         live_snap.worst_msg_cyc);
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_MSG_HEAD, 0,
+                        live_snap.worst_msg_head,
+                        live_snap.cur_msg_head);
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
                         EVENT_LOG_EVENT_RUNTIME_FG_DEMUX, 0,
                         live_snap.demux_backlog_max,
                         live_snap.demux_msgs_max);
@@ -1469,6 +1494,10 @@ kalico_diag_emit_live(void)
                         EVENT_LOG_EVENT_RUNTIME_FG_MSG, 0,
                         live_snap.worst_msg_kind,
                         live_snap.worst_msg_cyc);
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_FG_MSG_HEAD, 0,
+                        live_snap.worst_msg_head,
+                        live_snap.cur_msg_head);
         event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
                         EVENT_LOG_EVENT_RUNTIME_FG_DEMUX, 0,
                         live_snap.demux_backlog_max,
