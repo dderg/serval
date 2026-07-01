@@ -59,6 +59,57 @@ decodes the command, including 2-byte-VLQ msgids. Next run is decisive either wa
 fg_task` → a specific dispatched command/frame blocks (head names it); `fg_msg << fg_task` →
 the stall is in `console_task` non-dispatch code (feed_byte / the rebase memmove / framing).
 
+## Follow-up 2026-07-01 #4 — DIRECTION OVERTURNED: real cause is a host stream-planner abort
+
+Clean build a3719b05d flashed (magic bump confirmed present; ELF matches flash). The
+07:52 crash was traced end-to-end and the MCU-foreground-stall direction is a **red
+herring** for these mid-print crashes.
+
+**Confirmed root cause (High):** the host motion-engine stream planner aborted with
+`commit: velocity plan: OverCommitted { line_no: 15842 }`
+(`event=stream_planner_fatal`, `07:52:00.098Z`, session k-1782887034-7655,
+print-1782891567). `fatal()` (`rust/motion-engine/src/stream_planner.rs:386`) →
+`std::process::abort()` → coredump `core.kalico-stream-p.7655.1782892320`.
+
+**Downstream (all consequences, not causes):**
+- `07:52:00.282` host-ec: "endpoint exiting: bridge (klippy) disconnected — disabling
+  drive (**downstream of a host-side abort**)" — the EtherCAT endpoint did NOT self-crash.
+- klippy shuts down → sends `emergency_stop` → MCU logs shutdown reason **"Command
+  request"** (`src/basecmd.c:383`, `command_emergency_stop`). The MCU was *told* to stop;
+  it did not stall.
+- `07:52:15` klippy auto-restarts (session 8587), finds MCU "in shutdown state at config
+  time". Firmware never power-cycled → same prior-boot `fg_freeze`/`fg_msg`/`fg_task`
+  snapshot **replayed** on every reconnect (byte-identical across 06:33/06:43/07:33/
+  07:37/07:52). The msgid-117 / dur=cap snapshot is **stale**, not a live stall — it does
+  not describe these crashes. (User confirmed: "it didn't firmware restart… just
+  restarted the klippy process.")
+- No fresh `runtime.fault_latched`/`hard_fault` at the crash — consistent with a clean
+  host-requested shutdown, not a firmware fault.
+
+**Recurring (3 aborts in ~12 h, different prints/lines):**
+- `07-01 07:52` `OverCommitted { line_no: 15842 }`
+- `06-30 22:24` `OverCommitted { line_no: 26933 }`
+- `06-30 20:05` `RestAnchorAccel { line_no: 18499 }`
+
+**Mechanism (Confirmed via source):** `OverCommitted` fires when the entry velocity
+carried over from the *already-committed* previous look-ahead window exceeds what the
+next window's first move can accept — its curvature/accel-bounded entry ceiling
+(`rust/geometry/src/velocity.rs:228`) or brake-to-stop reachability (`velocity.rs:329`).
+The comment at `rust/motion-engine/src/stream.rs:497-505` names the exact failure: after
+a commit seam at an internal sub-piece boundary, the raw move is trimmed to the seam and
+the consumed head length is fed back as a blend-budget restore so the trailing corner
+re-fits to its pre-commit curvature — "else a shorter front yields a sharper apex and a
+corner cap below the already-committed entry velocity — an OverCommitted abort." So the
+trim-to-seam / blend-budget-restore does not perfectly reproduce the pre-commit
+curvature on some geometry, dropping the recomputed entry ceiling below the committed
+hand-off velocity → fail-loud abort (per the fail-loud doctrine, correct behavior; the
+bug is the re-fit continuity, not the guard).
+
+**Next:** investigate `trim_front_to_seam` / `committed_head_len` blend-budget restore in
+`rust/motion-engine/src/stream.rs`; reproduce offline with klipper-sim on the offending
+prints at the named lines (deterministic — same lines recur). MCU/EtherCAT instrumentation
+work is not needed for this failure mode.
+
 ## Hand-off Brief (15s read)
 
 Mid-print the STM32F401 MCU's **foreground task loop stalled ~200 ms** (other boots: 4–8 s),
