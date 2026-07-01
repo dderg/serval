@@ -67,8 +67,20 @@ class HandleCallList:
             ]
             if funcname == "ctr_run_taskfuncs":
                 add_poll = "    irq_poll();\n"
-                func_code = [add_poll + fc for fc in func_code]
-                func_code.append(add_poll)
+                # Time each task so a foreground stall names the offending one.
+                func_code = [
+                    add_poll
+                    + "    extern void %s(void);\n" % f
+                    + "    diag_note_task_enter((uint32_t)%s);\n" % f
+                    + "    %s();" % f
+                    for f in funcs
+                ]
+                func_code.insert(
+                    0,
+                    "    extern void diag_note_task_enter(uint32_t func);\n"
+                    "    extern void diag_note_task_loop_end(void);",
+                )
+                func_code.append(add_poll + "    diag_note_task_loop_end();")
             fmt = """
 void
 %s(void)

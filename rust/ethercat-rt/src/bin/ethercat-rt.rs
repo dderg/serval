@@ -476,10 +476,22 @@ fn main() {
     'dc: loop {
         if SIGTERM_RECEIVED.load(Ordering::Acquire) {
             eprintln!("ec-rt: SIGTERM received — disabling drive and exiting");
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "endpoint_exit",
+                reason = "sigterm",
+                "endpoint exiting: SIGTERM received — disabling drive"
+            );
             break;
         }
         if server.session_ended() {
             eprintln!("ec-rt: bridge disconnected — disabling drive and exiting");
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "endpoint_exit",
+                reason = "bridge_disconnected",
+                "endpoint exiting: bridge (klippy) disconnected — disabling drive (downstream of a host-side abort)"
+            );
             break;
         }
 
@@ -1247,6 +1259,14 @@ fn main() {
             eprintln!(
                 "ec-rt: FAULT latched on slot {slot} fault_val=0x{fault_val:08x} \
                  code=0x{fault_code_u16:04x} — notifying host via heartbeat"
+            );
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "ring_fault_latched",
+                slot,
+                fault_val,
+                fault_code = fault_val as i32,
+                "drive ring latched a runtime fault — notifying host via heartbeat"
             );
             let retired: Vec<u32> = rings.iter().map(|r| r.retired_count()).collect();
             #[cfg(not(feature = "hw"))]

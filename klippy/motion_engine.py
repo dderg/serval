@@ -55,6 +55,7 @@ _STUB_MOTION_METHODS = frozenset(
         "set_drive_limits",
         "restore_drive_limits",
         "take_drive_fault",
+        "take_endpoint_death",
         "finalize_homed_axis",
         "sdo_read",
         "sdo_write",
@@ -184,6 +185,12 @@ class MotionEngineWrapper:
 
     def take_drive_fault(self, mcu_handle):
         return self._engine.take_drive_fault(mcu_handle)
+
+    def take_endpoint_death(self, mcu_handle):
+        return self._engine.take_endpoint_death(mcu_handle)
+
+    def stop_node(self, mcu_handle):
+        return self._engine.stop_node(mcu_handle)
 
     def finalize_homed_axis(self, mcu_handle, axis, pos_mm):
         return self._engine.finalize_homed_axis(mcu_handle, axis, pos_mm)

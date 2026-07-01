@@ -612,3 +612,32 @@ fn partial_state_teardown_at_exit() {
         libc::close(master_fd);
     }
 }
+
+#[test]
+fn report_ethercat_endpoint_death_latches_203_and_first_cause_wins() {
+    let latch: Arc<std::sync::Mutex<std::collections::HashMap<u32, String>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let first = super::report_ethercat_endpoint_death(&latch, 5, "conn EOF");
+    // A later writer (e.g. the supervisor after the pump already latched) must
+    // not overwrite the first surfaced cause.
+    let second = super::report_ethercat_endpoint_death(&latch, 5, "later transport fatal");
+    assert!(
+        first,
+        "the first call latches the cause and arms the backstop"
+    );
+    assert!(!second, "a later writer does not re-latch (returns false)");
+    let msg = latch
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&5)
+        .expect("a cause must be latched");
+    assert!(
+        msg.contains("(fault -203)"),
+        "must carry the -203 code: {msg}"
+    );
+    assert!(msg.contains("conn EOF"), "first cause must win: {msg}");
+    assert!(
+        !msg.contains("later transport fatal"),
+        "a later writer must not overwrite the first cause: {msg}"
+    );
+}
