@@ -16,27 +16,7 @@ const LENGTH_EPS_MM: f64 = 1e-9;
 const VELOCITY_EPS_MM_S: f64 = 1e-9;
 const MIN_INTEGRATION_TOL: f64 = 1e-9;
 const NEGATIVE_VELOCITY_TOL_MM_S: f64 = 1e-6;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct VelocityConfig {
-    pub consistency_tol: f64,
-    pub max_jerk_mm_s3: f64,
-    pub integration_tol: f64,
-    pub max_extrude_only_velocity_mm_s: f64,
-    pub max_extrude_only_accel_mm_s2: f64,
-}
-
-impl Default for VelocityConfig {
-    fn default() -> Self {
-        Self {
-            consistency_tol: 1e-6,
-            max_jerk_mm_s3: 100_000.0, // TODO: jerk-limit floor is an open tuning question (spec-motion-6)
-            integration_tol: 1e-7,
-            max_extrude_only_velocity_mm_s: f64::INFINITY,
-            max_extrude_only_accel_mm_s2: f64::INFINITY,
-        }
-    }
-}
+const CONSISTENCY_TOL: f64 = 1e-6;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelSample {
@@ -125,28 +105,34 @@ struct MoveCaps {
 
 pub fn plan_velocity(
     outcome: &FitOutcome,
-    config: VelocityConfig,
+    integration_tol: f64,
+    max_extrude_only_velocity_mm_s: f64,
+    max_extrude_only_accel_mm_s2: f64,
 ) -> Result<VelocityProfile, VelocityError> {
-    plan_velocity_warm_start(outcome, config, 0.0)
+    plan_velocity_warm_start(
+        outcome,
+        integration_tol,
+        max_extrude_only_velocity_mm_s,
+        max_extrude_only_accel_mm_s2,
+        0.0,
+    )
 }
 
 pub fn plan_velocity_warm_start(
     outcome: &FitOutcome,
-    config: VelocityConfig,
+    integration_tol: f64,
+    max_extrude_only_velocity_mm_s: f64,
+    max_extrude_only_accel_mm_s2: f64,
     entry_v: f64,
 ) -> Result<VelocityProfile, VelocityError> {
-    let jerk = config.max_jerk_mm_s3;
-    if jerk.is_nan() || jerk <= 0.0 {
-        return Err(VelocityError::InvalidConfig);
-    }
-    let tol = config.integration_tol;
+    let tol = integration_tol;
     if !(tol.is_finite() && tol >= MIN_INTEGRATION_TOL) {
         return Err(VelocityError::InvalidConfig);
     }
     if !(entry_v.is_finite() && entry_v >= 0.0) {
         return Err(VelocityError::InvalidConfig);
     }
-    if !(config.max_extrude_only_velocity_mm_s > 0.0 && config.max_extrude_only_accel_mm_s2 > 0.0) {
+    if !(max_extrude_only_velocity_mm_s > 0.0 && max_extrude_only_accel_mm_s2 > 0.0) {
         return Err(VelocityError::InvalidConfig);
     }
 
@@ -178,7 +164,7 @@ pub fn plan_velocity_warm_start(
         let (length, kappa0, sigma, kappa_peak) = match &m.segment.spatial {
             Some(seg) => {
                 let length = seg.s_len();
-                validate_segment(seg, length, line_no, config.consistency_tol)?;
+                validate_segment(seg, length, line_no, CONSISTENCY_TOL)?;
                 let (kappa_start, _) = seg.kappa_endpoints();
                 let sigma = seg.dkappa_ds(0.0);
                 let (_, kappa_peak) = seg.kappa_peak();
@@ -192,8 +178,8 @@ pub fn plan_velocity_warm_start(
                 if !(length.is_finite() && length > LENGTH_EPS_MM) {
                     return Err(VelocityError::NonFinite { line_no });
                 }
-                accel = accel.min(config.max_extrude_only_accel_mm_s2);
-                extrude_only_velocity_cap = config.max_extrude_only_velocity_mm_s;
+                accel = accel.min(max_extrude_only_accel_mm_s2);
+                extrude_only_velocity_cap = max_extrude_only_velocity_mm_s;
                 (length, 0.0, 0.0, 0.0)
             }
         };
@@ -211,7 +197,7 @@ pub fn plan_velocity_warm_start(
             kin: Kinematics {
                 length,
                 accel,
-                jerk,
+                jerk: m.limits.max_jerk_mm_s3,
                 kappa0,
                 sigma,
                 flat_ceiling,

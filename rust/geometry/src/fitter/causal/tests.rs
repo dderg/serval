@@ -20,7 +20,7 @@ fn ctx(line_no: u32, accel: f64, scv: f64, feed: f64) -> MoveContext {
     MoveContext {
         extruder_axis: E_AXIS,
         feedrate_mm_s: feed,
-        limits: VelocityLimits::try_new(300.0, accel, scv).unwrap(),
+        limits: VelocityLimits::try_new(300.0, accel, scv, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,

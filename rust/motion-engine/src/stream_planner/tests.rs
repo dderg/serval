@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::stream::StreamConfig;
 use geometry::segment::SourceRange;
-use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
+use geometry::{ChainFitConfig, MoveContext, VelocityLimits, line_move};
 use nurbs::eval::eval;
 
 #[derive(Clone, Default)]
@@ -44,10 +44,12 @@ fn cfg() -> StreamConfig {
 fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
     StreamConfig {
         chain: ChainFitConfig::default(),
-        velocity: VelocityConfig::default(),
+        integration_tol: 1e-7,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 1e-3,
         max_buffer_moves,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
     }
 }
 
@@ -55,7 +57,7 @@ fn ctx(line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 80.0,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,

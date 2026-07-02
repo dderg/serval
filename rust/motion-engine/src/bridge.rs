@@ -3444,23 +3444,18 @@ impl PyMotionEngine {
             let cart = cfg.cartesian;
             let stream_cfg = crate::stream::StreamConfig {
                 chain: cfg.chain,
-                velocity: geometry::VelocityConfig {
-                    max_jerk_mm_s3: cart.max_jerk,
-                    max_extrude_only_velocity_mm_s: cfg
-                        .max_extrude_only_velocity
-                        .unwrap_or(f64::INFINITY),
-                    max_extrude_only_accel_mm_s2: cfg
-                        .max_extrude_only_accel
-                        .unwrap_or(f64::INFINITY),
-                    integration_tol: STREAM_INTEGRATION_TOL,
-                    ..geometry::VelocityConfig::default()
-                },
+                integration_tol: STREAM_INTEGRATION_TOL,
+                max_extrude_only_velocity_mm_s: cfg
+                    .max_extrude_only_velocity
+                    .unwrap_or(f64::INFINITY),
+                max_extrude_only_accel_mm_s2: cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY),
                 fit_tol_mm: cfg.fit_tolerance_mm,
                 max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
                 limits: geometry::VelocityLimits::try_new(
                     cart.max_velocity,
                     cart.max_accel,
                     cart.square_corner_velocity,
+                    cart.max_jerk,
                 )
                 .map_err(PyRuntimeError::new_err)?,
             };
@@ -3512,7 +3507,7 @@ impl PyMotionEngine {
                 }
             };
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            let (max_v, max_a, scv) = {
+            let (max_v, max_a, scv, jerk) = {
                 let cfg = self
                     .planner_config
                     .lock()
@@ -3524,9 +3519,14 @@ impl PyMotionEngine {
                 if let Some(ra) = cfg.runtime_caps.accel {
                     a = a.min(ra);
                 }
-                (v, a, cfg.square_corner_velocity())
+                // No runtime jerk cap exists yet (RuntimeCaps has no `jerk` field);
+                // this is the static [printer] max_jerk. A future
+                // `cfg.runtime_caps.jerk` would `.min()` in here exactly like
+                // velocity/accel above.
+                let j = cfg.cartesian.max_jerk;
+                (v, a, cfg.square_corner_velocity(), j)
             };
-            let limits = geometry::VelocityLimits::try_new(max_v, max_a, scv)
+            let limits = geometry::VelocityLimits::try_new(max_v, max_a, scv, jerk)
                 .map_err(PyRuntimeError::new_err)?;
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
             let m = classify::build_move(

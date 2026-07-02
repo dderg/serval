@@ -5,19 +5,20 @@
 use std::time::Instant;
 
 use geometry::{
-    ChainFitConfig, Move, MoveContext, SourceRange, VelocityConfig, VelocityLimits, fit_chain,
-    line_move, plan_velocity_warm_start,
+    ChainFitConfig, Move, MoveContext, SourceRange, VelocityLimits, fit_chain, line_move,
+    plan_velocity_warm_start,
 };
 
 const MAX_V: f64 = 300.0;
 const ACCEL: f64 = 5000.0;
 const SCV: f64 = 5.0;
+const JERK: f64 = 100_000.0;
 
 fn ctx(line_no: u32, feedrate_mm_s: f64) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s,
-        limits: VelocityLimits::try_new(MAX_V, ACCEL, SCV).unwrap(),
+        limits: VelocityLimits::try_new(MAX_V, ACCEL, SCV, JERK).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -60,16 +61,14 @@ fn plan_velocity_cost_vs_tol() {
     );
 
     for &tol in &[1e-7_f64, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2] {
-        let cfg = VelocityConfig {
-            integration_tol: tol,
-            ..VelocityConfig::default()
-        };
         // warm once, then time the median of a few runs
         let mut best = f64::INFINITY;
         let mut traversal = 0.0;
         for _ in 0..5 {
             let clock = Instant::now();
-            let profile = plan_velocity_warm_start(&outcome, cfg, 0.0).expect("plan");
+            let profile =
+                plan_velocity_warm_start(&outcome, tol, f64::INFINITY, f64::INFINITY, 0.0)
+                    .expect("plan");
             let us = clock.elapsed().as_secs_f64() * 1e6;
             best = best.min(us);
             traversal = profile.report.traversal_time_s;

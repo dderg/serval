@@ -11,7 +11,7 @@ fn ctx(line_no: u32, accel: f64, scv: f64) -> MoveContext {
     MoveContext {
         extruder_axis: E_AXIS,
         feedrate_mm_s: 100.0,
-        limits: VelocityLimits::try_new(200.0, accel, scv).unwrap(),
+        limits: VelocityLimits::try_new(200.0, accel, scv, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -324,7 +324,7 @@ fn non_finite_line_yields_fit_error_with_source_line() {
     let bad = Move {
         segment: bad_segment,
         feedrate_mm_s: 100.0,
-        limits: VelocityLimits::try_new(200.0, 3000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(200.0, 3000.0, 5.0, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: 2,
             end_line: 2,

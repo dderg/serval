@@ -3,8 +3,7 @@
 use super::*;
 use geometry::segment::SourceRange;
 use geometry::{
-    ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, arc_move, fit_chain, line_move,
-    plan_velocity,
+    ChainFitConfig, MoveContext, VelocityLimits, arc_move, fit_chain, line_move, plan_velocity,
 };
 use nurbs::bezier::extract_bezier_pieces;
 use nurbs::eval::eval;
@@ -18,7 +17,7 @@ fn lowering_emits_coarse_pieces_above_the_sample_floor() {
     ] {
         let m = line_move(start, end, 0.0, ctx(1, 100.0)).unwrap();
         let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).unwrap();
-        let profile = plan_velocity(&outcome, VelocityConfig::default()).unwrap();
+        let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
         let seg = lower_move(
             &outcome.moves[0],
             &profile.moves[0],
@@ -55,7 +54,7 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: feed,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -94,7 +93,7 @@ fn straight_ctx(line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 300.0,
-        limits: VelocityLimits::try_new(300.0, 1000.0, 0.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 1000.0, 0.0, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -102,18 +101,11 @@ fn straight_ctx(line_no: u32) -> MoveContext {
     }
 }
 
-fn straight_cfg() -> VelocityConfig {
-    VelocityConfig {
-        max_jerk_mm_s3: 100_000.0,
-        ..VelocityConfig::default()
-    }
-}
-
 #[test]
 fn straight_move_lowers_one_cubic_per_phase_without_accel_overshoot() {
     let m = line_move([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0, straight_ctx(1)).unwrap();
     let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).unwrap();
-    let profile = plan_velocity(&outcome, straight_cfg()).unwrap();
+    let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
     let vm = &profile.moves[0];
     assert!(!vm.phases.is_empty(), "straight move should carry phases");
 
@@ -145,7 +137,7 @@ fn collinear_run_slices_phases_c1_continuous_at_the_seam() {
     let m0 = line_move([0.0, 0.0, 0.0], [5.0, 0.0, 0.0], 0.0, straight_ctx(1)).unwrap();
     let m1 = line_move([5.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0, straight_ctx(2)).unwrap();
     let outcome = fit_chain(&[m0, m1], ChainFitConfig::default()).unwrap();
-    let profile = plan_velocity(&outcome, straight_cfg()).unwrap();
+    let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
     assert!(!profile.moves[0].phases.is_empty() && !profile.moves[1].phases.is_empty());
 
     let (a0, t0) = lower_move_pieces(
@@ -186,7 +178,7 @@ fn collinear_run_slices_phases_c1_continuous_at_the_seam() {
     // The two slices retime to the same total as a single 10 mm move.
     let single = line_move([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0, straight_ctx(1)).unwrap();
     let so = fit_chain(std::slice::from_ref(&single), ChainFitConfig::default()).unwrap();
-    let sp = plan_velocity(&so, straight_cfg()).unwrap();
+    let sp = plan_velocity(&so, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
     let single_t: f64 = sp.moves[0].phases.iter().map(|p| p.dt).sum();
     assert!(
         (t0 + t1 - single_t).abs() < 1e-9,
@@ -214,7 +206,7 @@ fn linear_pressure_advance_is_exact_cubic_transform() {
 
 fn lower_single(m: geometry::Move, t_start: f64, start_pos: &[f64]) -> ShapedSegment {
     let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).expect("fit");
-    let profile = plan_velocity(&outcome, VelocityConfig::default()).expect("plan");
+    let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).expect("plan");
     lower_move(
         &outcome.moves[0],
         &profile.moves[0],
@@ -339,7 +331,7 @@ fn virtual_extrude_holds_spatial_and_ramps_follower() {
 fn source_mismatch_is_rejected() {
     let m = line_move([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0, ctx(1, 50.0)).unwrap();
     let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).unwrap();
-    let profile = plan_velocity(&outcome, VelocityConfig::default()).unwrap();
+    let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
     let other = line_move([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0, ctx(99, 50.0)).unwrap();
     let other_out = fit_chain(std::slice::from_ref(&other), ChainFitConfig::default()).unwrap();
     assert!(matches!(
@@ -370,7 +362,7 @@ fn linear_pa_chains(extruder_axis: usize, k: f64) -> Vec<CompiledChain> {
 fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
     let m = line_move([0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0, ctx(1, 100.0)).unwrap();
     let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).unwrap();
-    let profile = plan_velocity(&outcome, VelocityConfig::default()).unwrap();
+    let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
     let start = [0.0; 4];
 
     let base = lower_move(
@@ -432,7 +424,7 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
 fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
     let m = line_move([0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0, ctx(1, 100.0)).unwrap();
     let outcome = fit_chain(std::slice::from_ref(&m), ChainFitConfig::default()).unwrap();
-    let profile = plan_velocity(&outcome, VelocityConfig::default()).unwrap();
+    let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
     let start = [0.0; 4];
 
     let none = lower_move(

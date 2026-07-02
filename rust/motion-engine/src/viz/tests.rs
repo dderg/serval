@@ -11,7 +11,7 @@ fn square_waypoints() -> Vec<(f64, f64, f64, f64)> {
 }
 
 fn default_limits() -> geometry::VelocityLimits {
-    geometry::VelocityLimits::try_new(300.0, 3000.0, 5.0).unwrap()
+    geometry::VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).unwrap()
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn eval_piece(p: &[f64; 6], t: f64) -> f64 {
 fn trajectory_lowers_to_contiguous_finite_cubics() {
     let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
     let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
-    let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
+    let profile = geometry::plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
     let traj = lower_trajectory(&outcome, &profile);
     assert!(!traj.x.is_empty());
     assert_eq!(traj.x.len(), traj.y.len());
@@ -77,7 +77,7 @@ fn trajectory_lowers_to_contiguous_finite_cubics() {
 fn cubic_pieces_are_position_continuous_at_joins() {
     let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
     let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
-    let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
+    let profile = geometry::plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
     let traj = lower_trajectory(&outcome, &profile);
     // Hermite lowering matches position at every join, on both axes.
     for axis in [&traj.x, &traj.y] {

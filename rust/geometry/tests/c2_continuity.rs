@@ -1,7 +1,7 @@
 use geometry::path::CurvatureProfile;
 use geometry::{
-    ChainFitConfig, Move, MoveContext, SourceRange, VelocityConfig, VelocityLimits, fit_chain,
-    line_move, plan_velocity,
+    ChainFitConfig, Move, MoveContext, SourceRange, VelocityLimits, fit_chain, line_move,
+    plan_velocity,
 };
 
 const MAX_V: f64 = 150.0;
@@ -13,7 +13,7 @@ fn ctx(line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: 0,
         feedrate_mm_s: MAX_V,
-        limits: VelocityLimits::try_new(MAX_V, ACCEL, SCV).unwrap(),
+        limits: VelocityLimits::try_new(MAX_V, ACCEL, SCV, JERK).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -44,13 +44,7 @@ struct Sample {
 fn plan_samples() -> Vec<Sample> {
     let moves = serpentine();
     let outcome = fit_chain(&moves, ChainFitConfig::default()).unwrap();
-    let config = VelocityConfig {
-        consistency_tol: 1e-6,
-        max_jerk_mm_s3: JERK,
-        integration_tol: 1e-7,
-        ..VelocityConfig::default()
-    };
-    let profile = plan_velocity(&outcome, config).unwrap();
+    let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
     let mut out = Vec::new();
     let mut s_off = 0.0;
     for m in &profile.moves {
@@ -116,16 +110,7 @@ fn c2_accel_within_envelope() {
 fn c2_tangential_within_acceleration_disk() {
     let moves = serpentine();
     let outcome = fit_chain(&moves, ChainFitConfig::default()).unwrap();
-    let profile = plan_velocity(
-        &outcome,
-        VelocityConfig {
-            consistency_tol: 1e-6,
-            max_jerk_mm_s3: JERK,
-            integration_tol: 1e-7,
-            ..VelocityConfig::default()
-        },
-    )
-    .unwrap();
+    let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
     for (gm, vm) in outcome.moves.iter().zip(profile.moves.iter()) {
         let seg = gm.segment.spatial.as_ref().unwrap();
         for smp in &vm.samples {

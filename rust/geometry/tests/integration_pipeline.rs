@@ -1,13 +1,14 @@
 use geometry::path::Segment;
 use geometry::path::lowering::LoweredSample;
 use geometry::{
-    ChainFitConfig, FitOutcome, Move, MoveContext, SourceRange, VelocityConfig, VelocityLimits,
-    VelocityProfile, arc_move, fit_chain, line_move, lower_profile, plan_velocity,
+    ChainFitConfig, FitOutcome, Move, MoveContext, SourceRange, VelocityLimits, VelocityProfile,
+    arc_move, fit_chain, line_move, lower_profile, plan_velocity,
 };
 
 const MAX_V: f64 = 300.0;
 const ACCEL: f64 = 5000.0;
 const SCV: f64 = 5.0;
+const JERK: f64 = 100_000.0;
 const RATE_HZ: f64 = 20_000.0;
 
 const POS_TOL: f64 = 1e-6;
@@ -17,7 +18,7 @@ fn ctx(line_no: u32, feedrate_mm_s: f64) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s,
-        limits: VelocityLimits::try_new(MAX_V, ACCEL, SCV).unwrap(),
+        limits: VelocityLimits::try_new(MAX_V, ACCEL, SCV, JERK).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -41,7 +42,7 @@ fn line_lim(
     let ctx = MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: feed,
-        limits: VelocityLimits::try_new(max_v, accel, scv).unwrap(),
+        limits: VelocityLimits::try_new(max_v, accel, scv, JERK).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -96,7 +97,8 @@ struct Planned {
 
 fn plan(moves: &[Move]) -> Planned {
     let geometry = fit_chain(moves, ChainFitConfig::default()).expect("fit_chain");
-    let profile = plan_velocity(&geometry, VelocityConfig::default()).expect("plan_velocity");
+    let profile =
+        plan_velocity(&geometry, 1e-7, f64::INFINITY, f64::INFINITY).expect("plan_velocity");
     let samples = lower_profile(&geometry, &profile, RATE_HZ).expect("lower_profile");
     Planned {
         geometry,
@@ -367,7 +369,8 @@ fn empty_input_yields_empty_trajectory() {
     let geometry = fit_chain(&moves, ChainFitConfig::default()).expect("fit_chain on empty");
     assert!(geometry.moves.is_empty());
 
-    let profile = plan_velocity(&geometry, VelocityConfig::default()).expect("plan_velocity empty");
+    let profile =
+        plan_velocity(&geometry, 1e-7, f64::INFINITY, f64::INFINITY).expect("plan_velocity empty");
     assert!(profile.moves.is_empty());
 
     let samples = lower_profile(&geometry, &profile, RATE_HZ).expect("lower_profile empty");

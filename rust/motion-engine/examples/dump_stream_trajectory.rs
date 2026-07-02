@@ -13,7 +13,7 @@ use std::process;
 
 use _motion_engine::classify::build_move;
 use _motion_engine::stream::{StreamConfig, StreamState};
-use geometry::{ChainFitConfig, VelocityConfig, VelocityLimits};
+use geometry::{ChainFitConfig, VelocityLimits};
 use nurbs::eval::eval;
 use trajectory::{AxisChainSet, ShapedSegment};
 
@@ -107,13 +107,12 @@ fn main() {
         process::exit(1);
     });
 
-    let limits = VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap();
+    let limits = VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap();
     let cfg = StreamConfig {
         chain: ChainFitConfig::default(),
-        velocity: VelocityConfig {
-            integration_tol: 1e-4,
-            ..VelocityConfig::default()
-        },
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 1e-3,
         max_buffer_moves: 512,
         limits,

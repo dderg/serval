@@ -109,7 +109,8 @@ const CRASH_VORON_CUBE: &str = include_str!("crash_voron_cube.gcode");
 fn bench_config_arc_fit() -> StreamConfig {
     let mut cfg = default_stream_config();
     cfg.chain = ChainFitConfig::with_arc_fit(3);
-    cfg.limits = VelocityLimits::try_new(500.0, 8000.0, 20.0).expect("bench limits valid");
+    cfg.limits =
+        VelocityLimits::try_new(500.0, 8000.0, 20.0, 100_000.0).expect("bench limits valid");
     cfg
 }
 

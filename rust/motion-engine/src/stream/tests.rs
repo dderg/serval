@@ -1,6 +1,6 @@
 use super::*;
 use geometry::segment::SourceRange;
-use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
+use geometry::{ChainFitConfig, MoveContext, VelocityLimits, line_move};
 use nurbs::eval::eval;
 use proptest::prelude::*;
 use trajectory::{AxisChainSet, PostProcessorType, ShapedSegment};
@@ -8,10 +8,12 @@ use trajectory::{AxisChainSet, PostProcessorType, ShapedSegment};
 fn cfg() -> StreamConfig {
     StreamConfig {
         chain: ChainFitConfig::default(),
-        velocity: VelocityConfig::default(),
+        integration_tol: 1e-7,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 1e-3,
         max_buffer_moves: 64,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
     }
 }
 
@@ -19,7 +21,7 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: feed,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -34,14 +36,12 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> geometry::Move 
 fn cfg_bench() -> StreamConfig {
     StreamConfig {
         chain: ChainFitConfig::default(),
-        velocity: VelocityConfig {
-            max_jerk_mm_s3: 1_000_000.0,
-            integration_tol: 1e-4,
-            ..VelocityConfig::default()
-        },
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 0.005,
         max_buffer_moves: 512,
-        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0, 1_000_000.0).unwrap(),
     }
 }
 
@@ -49,7 +49,7 @@ fn line_bench(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
     let ctx = MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 60.0,
-        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0, 1_000_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,

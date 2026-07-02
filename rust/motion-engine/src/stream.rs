@@ -6,9 +6,8 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Line, Segment};
 use geometry::{
-    ChainFitConfig, FitError, FitOutcome, GeometryError, Move, MoveVelocity, VelocityConfig,
-    VelocityError, VelocityLimits, VelocityProfile, fit_chain_with_head_restore,
-    plan_velocity_warm_start,
+    ChainFitConfig, FitError, FitOutcome, GeometryError, Move, MoveVelocity, VelocityError,
+    VelocityLimits, VelocityProfile, fit_chain_with_head_restore, plan_velocity_warm_start,
 };
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
@@ -25,7 +24,9 @@ const CONTIGUITY_EPS_MM: f64 = 1e-6;
 #[derive(Debug, Clone, Copy)]
 pub struct StreamConfig {
     pub chain: ChainFitConfig,
-    pub velocity: VelocityConfig,
+    pub integration_tol: f64,
+    pub max_extrude_only_velocity_mm_s: f64,
+    pub max_extrude_only_accel_mm_s2: f64,
     pub fit_tol_mm: f64,
     /// Backstop cap. The continuity commit drains at every blend (each
     /// biclothoid rejoins the outgoing line at zero curvature, a clean seam), so
@@ -175,9 +176,8 @@ pub fn setup_pipeline(
         fitter.run(raw_rx, fitted_tx);
     });
 
-    let velocity_config = config.velocity;
     thread::spawn(move || {
-        run_planner(fitted_rx, planned_tx, velocity_config);
+        run_planner(fitted_rx, planned_tx);
     });
 
     let fit_tol = config.fit_tol_mm;
@@ -198,14 +198,14 @@ pub fn setup_pipeline(
     }
 }
 
-fn run_planner(input: Receiver<Move>, output: Sender<PlannedMove>, config: VelocityConfig) {
+fn run_planner(input: Receiver<Move>, _output: Sender<PlannedMove>) {
     let mut entry_v = 0.0;
 
     // TODO: the planner needs a batch of moves to produce a velocity profile.
     // It needs to accumulate fitted moves and decide when it has enough
     // look-ahead to plan and emit.
     while let Ok(m) = input.recv() {
-        let _ = (m, &mut entry_v, &config);
+        let _ = (m, &mut entry_v);
         // TODO: accumulate, plan, zip geometry+velocity, send PlannedMoves
         todo!("planner batch logic");
     }
@@ -366,6 +366,12 @@ pub struct StreamState {
     /// `t_brake(v_barrier)` without re-planning — the speed the planner is riding,
     /// whether or not that plan advanced the commit. `0.0` before the first plan.
     last_v_barrier: f64,
+    /// Jerk of the move at the most recent plan's finality barrier, paired with
+    /// `last_v_barrier` for the same producer-stall sizing — jerk is now a
+    /// per-move `VelocityLimits` field rather than a single plan-wide config
+    /// value, so the watermark needs the barrier's own move jerk, not a global
+    /// one. `0.0` before the first plan.
+    last_barrier_jerk: f64,
     config: StreamConfig,
     axis_chains: AxisChainSet,
     post_history: VecDeque<ShapedSegment>,
@@ -386,6 +392,7 @@ impl StreamState {
             t_committed: t_start,
             committed_head_len: 0.0,
             last_v_barrier: 0.0,
+            last_barrier_jerk: 0.0,
             config,
             axis_chains,
             post_history: VecDeque::new(),
@@ -403,6 +410,7 @@ impl StreamState {
         self.t_committed = t_start;
         self.committed_head_len = 0.0;
         self.last_v_barrier = 0.0;
+        self.last_barrier_jerk = 0.0;
         self.post_history.clear();
     }
 
@@ -504,7 +512,7 @@ impl StreamState {
         jerk_limited_brake_time(
             self.last_v_barrier,
             self.config.limits.accel_mm_s2,
-            self.config.velocity.max_jerk_mm_s3,
+            self.last_barrier_jerk,
         )
     }
 
@@ -578,7 +586,13 @@ impl StreamState {
         batch: CommitBatch,
     ) -> Result<VelocityProfile, StreamError> {
         let plan_clock = Instant::now();
-        let profile = plan_velocity_warm_start(outcome, self.config.velocity, self.entry_v)?;
+        let profile = plan_velocity_warm_start(
+            outcome,
+            self.config.integration_tol,
+            self.config.max_extrude_only_velocity_mm_s,
+            self.config.max_extrude_only_accel_mm_s2,
+            self.entry_v,
+        )?;
         batch.trace_plan(plan_clock.elapsed());
         Ok(profile)
     }
@@ -636,8 +650,7 @@ impl StreamState {
         } else {
             let unblended: HashSet<u32> =
                 outcome.report.unblended.iter().map(|u| u.line_no).collect();
-            let setback =
-                brake_to_rest_setback(&outcome.moves, self.config.velocity.max_jerk_mm_s3);
+            let setback = brake_to_rest_setback(&outcome.moves);
             let total_arc: f64 = outcome.moves.iter().map(|m| m.segment.s_len()).sum();
             let mut arc_to_seam = 0.0_f64;
             let mut chosen = 0usize;
@@ -661,6 +674,11 @@ impl StreamState {
             profile.barrier
         );
         self.last_v_barrier = profile.v_barrier;
+        self.last_barrier_jerk = profile
+            .moves
+            .get(profile.barrier)
+            .or_else(|| profile.moves.last())
+            .map_or(0.0, |mv| mv.jerk);
         let total_t = segs.last().map_or(0.0, |s| s.t_end) - self.t_committed;
         batch.trace_commit_decision(
             force,
@@ -974,7 +992,7 @@ pub fn jerk_limited_brake_time(v: f64, a: f64, j: f64) -> f64 {
 /// brake-to-rest tail this defers is the flush-only artifact. A safe over-estimate of the
 /// jerk-limited stopping distance from the buffer's peak feedrate (`v · t_brake`
 /// over-bounds the true `∫v dt`), so the held-back open tail stays bounded.
-fn brake_to_rest_setback(moves: &[Move], max_jerk_mm_s3: f64) -> f64 {
+fn brake_to_rest_setback(moves: &[Move]) -> f64 {
     let v_peak = moves
         .iter()
         .map(|m| m.feedrate_mm_s.min(m.limits.max_velocity_mm_s))
@@ -983,7 +1001,11 @@ fn brake_to_rest_setback(moves: &[Move], max_jerk_mm_s3: f64) -> f64 {
         .iter()
         .map(|m| m.limits.accel_mm_s2)
         .fold(f64::INFINITY, f64::min);
-    v_peak * jerk_limited_brake_time(v_peak, a_min, max_jerk_mm_s3)
+    let j_min = moves
+        .iter()
+        .map(|m| m.limits.max_jerk_mm_s3)
+        .fold(f64::INFINITY, f64::min);
+    v_peak * jerk_limited_brake_time(v_peak, a_min, j_min)
 }
 
 fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {

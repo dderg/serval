@@ -21,8 +21,13 @@ pub fn pipeline_snapshot(
         ));
     }
 
-    let limits = geometry::VelocityLimits::try_new(max_velocity, max_accel, square_corner_velocity)
-        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let limits = geometry::VelocityLimits::try_new(
+        max_velocity,
+        max_accel,
+        square_corner_velocity,
+        max_jerk,
+    )
+    .map_err(pyo3::exceptions::PyValueError::new_err)?;
     let chain_cfg = arc_fit_config(arc_fit, heart.as_deref())?;
 
     let moves = build_moves(&waypoints, limits)?;
@@ -31,14 +36,13 @@ pub fn pipeline_snapshot(
     let outcome = geometry::fit_chain(&moves, chain_cfg)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
 
-    let velocity_config = geometry::VelocityConfig {
-        consistency_tol: VELOCITY_CONSISTENCY_TOL,
-        max_jerk_mm_s3: max_jerk,
-        integration_tol: VELOCITY_INTEGRATION_TOL,
-        ..geometry::VelocityConfig::default()
-    };
-    let profile = geometry::plan_velocity(&outcome, velocity_config)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
+    let profile = geometry::plan_velocity(
+        &outcome,
+        VELOCITY_INTEGRATION_TOL,
+        f64::INFINITY,
+        f64::INFINITY,
+    )
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
     let traj = lower_trajectory(&outcome, &profile);
 
     let dict = PyDict::new(py);
@@ -188,7 +192,6 @@ fn extract_raw_path(moves: &[geometry::Move]) -> Vec<(f64, f64)> {
 const SAMPLES_PER_MM: f64 = 2.0;
 // Position tolerance for the cubic lowering — the same order the streamer ships.
 const TRAJECTORY_FIT_TOL_MM: f64 = 0.005;
-const VELOCITY_CONSISTENCY_TOL: f64 = 1e-6;
 const VELOCITY_INTEGRATION_TOL: f64 = 1e-7;
 
 // The trajectory the firmware actually executes: the host lowering's own per-axis

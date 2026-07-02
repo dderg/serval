@@ -11,6 +11,7 @@ pub struct VelocityLimits {
     pub max_velocity_mm_s: f64,
     pub accel_mm_s2: f64,
     pub square_corner_velocity_mm_s: f64,
+    pub max_jerk_mm_s3: f64,
 }
 
 impl VelocityLimits {
@@ -18,11 +19,13 @@ impl VelocityLimits {
         max_velocity_mm_s: f64,
         accel_mm_s2: f64,
         square_corner_velocity_mm_s: f64,
+        max_jerk_mm_s3: f64,
     ) -> Result<Self, &'static str> {
         let limits = Self {
             max_velocity_mm_s,
             accel_mm_s2,
             square_corner_velocity_mm_s,
+            max_jerk_mm_s3,
         };
         limits.check()?;
         Ok(limits)
@@ -39,6 +42,9 @@ impl VelocityLimits {
             && self.square_corner_velocity_mm_s >= 0.0)
         {
             return Err("square_corner_velocity must be finite and non-negative");
+        }
+        if !(self.max_jerk_mm_s3.is_finite() && self.max_jerk_mm_s3 > 0.0) {
+            return Err("max_jerk must be finite and positive");
         }
         Ok(())
     }
