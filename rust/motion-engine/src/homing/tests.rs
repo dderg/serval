@@ -4,10 +4,10 @@ use runtime::piece_ring::PieceEntry;
 
 use host_rt::passthrough_queue::PassthroughRouter;
 
-use crate::dispatch::{AXIS_X, AXIS_Z};
+use crate::mcu_config::{AXIS_X, AXIS_Z};
 use crate::homing::{reconstruct_axis_position, trajectory_final_position};
 use crate::motion_history::{HistoryStore, eval_bernstein_cubic};
-use crate::pump::AxisKey;
+use crate::types::AxisKey;
 
 const FREQ: u32 = 180_000_000;
 

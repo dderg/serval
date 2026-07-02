@@ -1,4 +1,5 @@
 use super::*;
+use mcu_protocol::codec::Decode as _;
 use mcu_transport::demux::{Demuxer, Frame};
 use mcu_transport::frame::{CHANNEL_CONTROL, encode_frame};
 use mcu_transport::wire_helpers::{

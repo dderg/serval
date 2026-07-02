@@ -17,12 +17,9 @@ use host_rt::passthrough_queue::{NotifyId, PassthroughEntry, PassthroughRouter};
 
 use crate::classify;
 use crate::config::{self, PlannerConfig};
-use crate::dispatch::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
-use crate::stream_worker::{
-    DispatchError, HomeDripParams, NudgeParams, SegmentDispatchCtx, StreamWorkerError,
-    StreamWorkerHandle,
-};
+use crate::mcu_config::{McuAxisConfig, McuCaps, build_mcu_configs};
+use crate::stream_worker::{StreamWorkerError, StreamWorkerHandle};
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
 
 struct HomingRun {
@@ -30,8 +27,8 @@ struct HomingRun {
     endstop_id: u8,
     endstop_mcu: u32,
     axis: u8,
-    axis_key: crate::pump::AxisKey,
-    all_axis_keys: Vec<crate::pump::AxisKey>,
+    axis_key: crate::types::AxisKey,
+    all_axis_keys: Vec<crate::types::AxisKey>,
     window_start_host: f64,
     notify: crossbeam_channel::Sender<Result<([f64; 3], [f64; 3], u64), String>>,
 }
@@ -114,7 +111,7 @@ fn arm_endpoint_death_watchdog(latch: Arc<Mutex<HashMap<u32, String>>>, mcu_id: 
 fn trip_position_to_motor_frame(
     axis: u8,
     motor_pos: f64,
-    _configs: &[crate::dispatch::McuAxisConfig],
+    _configs: &[crate::mcu_config::McuAxisConfig],
     _axis_mcu: u32,
 ) -> [f64; SPATIAL_AXES] {
     assert!(
@@ -248,7 +245,7 @@ fn place_motor_response(
 }
 
 fn collect_motor_positions_inner(
-    mcu_axis_configs: &Mutex<Vec<crate::dispatch::McuAxisConfig>>,
+    mcu_axis_configs: &Mutex<Vec<crate::mcu_config::McuAxisConfig>>,
     mcus: &Mutex<HashMap<u32, McuConnection>>,
     timeout: std::time::Duration,
 ) -> Result<HashMap<String, (f64, f64)>, String> {
@@ -693,11 +690,11 @@ pub(crate) fn axis_ring_depth(total_pieces: u32, num_axes: u32) -> u32 {
     (total_pieces / num_axes.max(1)).max(1)
 }
 
-pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::pump::AxisKey> {
+pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::types::AxisKey> {
     configs
         .iter()
         .flat_map(|cfg| {
-            cfg.axes.iter().map(move |&a| crate::pump::AxisKey {
+            cfg.axes.iter().map(move |&a| crate::types::AxisKey {
                 mcu_id: cfg.mcu_id,
                 axis: a as u8,
             })
@@ -706,7 +703,7 @@ pub(crate) fn drip_cohort_participants(configs: &[McuAxisConfig]) -> Vec<crate::
 }
 
 pub(crate) fn ring_depth_for_axis_inner(
-    configs: &[crate::dispatch::McuAxisConfig],
+    configs: &[crate::mcu_config::McuAxisConfig],
     mcu_handle: u32,
     axis: u8,
 ) -> Result<u16, String> {
@@ -1170,7 +1167,7 @@ impl PyMotionEngine {
             })?;
             (conn, slot)
         };
-        let home_q16 = crate::dispatch::encode_q16(pos_mm);
+        let home_q16 = crate::mcu_config::encode_q16(pos_mm);
         tracing::info!(
             subsystem = "engine",
             event = "servo_finalize_home",
@@ -2212,7 +2209,6 @@ impl PyMotionEngine {
 
     fn take_runtime_event(&self, py: Python<'_>, mcu_handle: u32) -> PyResult<Option<Py<PyDict>>> {
         use host_rt::host_io::runtime_events::RuntimeEvent;
-        use std::sync::mpsc::TryRecvError;
 
         let event = {
             let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
@@ -2692,7 +2688,7 @@ impl PyMotionEngine {
             out
         };
 
-        let ring_depth_table: HashMap<crate::pump::AxisKey, u32> = {
+        let ring_depth_table: HashMap<crate::types::AxisKey, u32> = {
             let mut t = HashMap::new();
             for cfg_mcu in &mcu_configs {
                 let total = cfg_mcu.caps.total_pieces() as u32;
@@ -2700,7 +2696,7 @@ impl PyMotionEngine {
                 let depth = axis_ring_depth(total, n);
                 for &axis in &cfg_mcu.axes {
                     t.insert(
-                        crate::pump::AxisKey {
+                        crate::types::AxisKey {
                             mcu_id: cfg_mcu.mcu_id,
                             axis: axis as u8,
                         },
@@ -2713,7 +2709,7 @@ impl PyMotionEngine {
 
         {
             let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-            let now_ns = crate::motion_node::monotonic_ns();
+            let now_ns = crate::timing::monotonic_ns();
             for &mcu_id in &ethercat_mcu_ids {
                 let mcu_h = mcu_handle_from_raw(mcu_id);
                 let _ = router.set_clock_est_from_sample(
@@ -2772,7 +2768,7 @@ impl PyMotionEngine {
                 let r = router_for_pump.lock().unwrap_or_else(|p| p.into_inner());
                 r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
             }),
-            on_fatal_transport: Box::new(move |key: crate::pump::AxisKey| {
+            on_fatal_transport: Box::new(move |key: crate::types::AxisKey| {
                 if report_ethercat_endpoint_death(
                     &endpoint_death_for_pump,
                     key.mcu_id,
@@ -2782,7 +2778,7 @@ impl PyMotionEngine {
                     arm_endpoint_death_watchdog(Arc::clone(&endpoint_death_for_pump), key.mcu_id);
                 }
             }),
-            on_abandon: Box::new(move |key: crate::pump::AxisKey, n: u32| {
+            on_abandon: Box::new(move |key: crate::types::AxisKey, n: u32| {
                 drain_for_pump.unsend(key.mcu_id, key.axis, n);
             }),
             on_drip_stall: Box::new(|msg: String| {
@@ -3361,7 +3357,7 @@ impl PyMotionEngine {
                     })
                     .map(|c| c.mcu_id)
                     .collect();
-                crate::dispatch::build_serial_seed_sends(&configs, &ethercat_mcu_ids, x, y, z)
+                crate::mcu_config::build_serial_seed_sends(&configs, &ethercat_mcu_ids, x, y, z)
             };
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             for s in sends {
@@ -3397,13 +3393,13 @@ impl PyMotionEngine {
         }
 
         {
-            let configs: Vec<crate::dispatch::McuAxisConfig> = self
+            let configs: Vec<crate::mcu_config::McuAxisConfig> = self
                 .mcu_axis_configs
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .clone();
             let positions = [x, y, z];
-            let rebases: Vec<(crate::pump::AxisKey, f64)> = configs
+            let rebases: Vec<(crate::types::AxisKey, f64)> = configs
                 .iter()
                 .flat_map(|cfg| {
                     cfg.axes
@@ -3411,7 +3407,7 @@ impl PyMotionEngine {
                         .filter(|&&a| a < SPATIAL_AXES)
                         .map(move |&axis| {
                             (
-                                crate::pump::AxisKey {
+                                crate::types::AxisKey {
                                     mcu_id: cfg.mcu_id,
                                     axis: axis as u8,
                                 },
@@ -3421,13 +3417,13 @@ impl PyMotionEngine {
                         .collect::<Vec<_>>()
                 })
                 .collect();
-            let follower_keys: Vec<crate::pump::AxisKey> = configs
+            let follower_keys: Vec<crate::types::AxisKey> = configs
                 .iter()
                 .flat_map(|cfg| {
                     cfg.axes
                         .iter()
                         .filter(|&&a| a >= 3)
-                        .map(move |&axis| crate::pump::AxisKey {
+                        .map(move |&axis| crate::types::AxisKey {
                             mcu_id: cfg.mcu_id,
                             axis: axis as u8,
                         })
@@ -3663,7 +3659,7 @@ impl PyMotionEngine {
                      (init_planner not called?)"
                 ))
             })?;
-            let key = crate::pump::AxisKey { mcu_id: mcu, axis };
+            let key = crate::types::AxisKey { mcu_id: mcu, axis };
             (all_keys, mcu, key)
         };
 
@@ -3925,9 +3921,9 @@ impl PyMotionEngine {
 
     fn home_abort(&self, py: Python<'_>) {
         struct AbortContext {
-            all_axis_keys: Vec<crate::pump::AxisKey>,
+            all_axis_keys: Vec<crate::types::AxisKey>,
             cohort: u64,
-            axis_key: crate::pump::AxisKey,
+            axis_key: crate::types::AxisKey,
             axis: u8,
         }
 
@@ -4039,7 +4035,7 @@ impl PyMotionEngine {
         host_now: f64,
     ) -> PyResult<std::collections::HashMap<String, (f64, f64, f64)>> {
         const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
-        let configs: Vec<crate::dispatch::McuAxisConfig> = self
+        let configs: Vec<crate::mcu_config::McuAxisConfig> = self
             .mcu_axis_configs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -4058,7 +4054,7 @@ impl PyMotionEngine {
             )
             .map_err(PyRuntimeError::new_err)?
         };
-        let resolved: Vec<(crate::pump::AxisKey, u64, u64)> = {
+        let resolved: Vec<(crate::types::AxisKey, u64, u64)> = {
             let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
             let mut acc = Vec::new();
             for cfg in &configs {
@@ -4069,7 +4065,7 @@ impl PyMotionEngine {
                 let now_clock = router.host_time_to_mcu_clock(target, host_now).unwrap_or(0);
                 for &axis in &cfg.axes {
                     acc.push((
-                        crate::pump::AxisKey {
+                        crate::types::AxisKey {
                             mcu_id: cfg.mcu_id,
                             axis: axis as u8,
                         },
@@ -4297,7 +4293,6 @@ pub(crate) fn dispatch_endstop_trip(
                 let _ = tx.send(crate::pump::PumpMsg::DripDisarm(run.cohort));
             }
 
-            use host_rt::mcu_call::McuCall as _;
             use mcu_protocol::codec::Decode as _;
             let stop_call = |mcu_id: u32| -> Result<mcu_protocol::messages::StopResponse, String> {
                 let transport = transports

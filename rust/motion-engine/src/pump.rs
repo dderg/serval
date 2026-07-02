@@ -1,3 +1,4 @@
+pub use crate::types::AxisKey;
 use crossbeam_channel::{Receiver, Select, TryRecvError};
 use runtime::piece_ring::PieceEntry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -31,12 +32,6 @@ struct PrevTransitFrame {
 
 static TRANSIT_PREV_FRAME: LazyLock<Mutex<HashMap<AxisKey, PrevTransitFrame>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
-pub struct AxisKey {
-    pub mcu_id: u32,
-    pub axis: u8,
-}
 
 #[derive(Debug)]
 pub struct AxisQueue {

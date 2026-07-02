@@ -143,7 +143,7 @@ fn classify_curve(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn classify_bezier(
+pub(crate) fn classify_bezier(
     start: [f64; 3],
     i: f64,
     j: f64,
@@ -163,7 +163,7 @@ pub fn classify_bezier(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn classify_quadratic(
+pub(crate) fn classify_quadratic(
     start: [f64; 3],
     i: f64,
     j: f64,

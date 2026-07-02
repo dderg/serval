@@ -1,11 +1,12 @@
 use std::time::Duration;
 
-use host_rt::mcu_call::McuCall as _;
 use host_rt::mcu_serial_conn::McuSerialConn;
-use mcu_protocol::codec::{Decode as _, Encode as _};
+use mcu_protocol::codec::Encode as _;
 use mcu_protocol::messages::{
     CaptureDrive, MessageKind, StartCapture, StartCaptureResponse, StopCapture, StopCaptureResponse,
 };
+
+use crate::servo_call::mcu_typed_call;
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -27,35 +28,26 @@ pub fn send_start_capture(
             .collect(),
     }
     .encoded_to_vec();
-    let (kind, resp) = conn
-        .mcu_call(MessageKind::StartCapture, body, CAPTURE_TIMEOUT)
-        .map_err(|e| format!("StartCapture transport: {e:?}"))?;
-    if kind != MessageKind::StartCaptureResponse {
-        return Err(format!(
-            "StartCapture: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    let r = StartCaptureResponse::decode(&resp)
-        .map_err(|e| format!("StartCaptureResponse decode: {e:?}"))?;
+    let r: StartCaptureResponse = mcu_typed_call(
+        conn,
+        "StartCapture",
+        MessageKind::StartCapture,
+        MessageKind::StartCaptureResponse,
+        body,
+        CAPTURE_TIMEOUT,
+    )?;
     Ok(r.result)
 }
 
 pub fn send_stop_capture(conn: &McuSerialConn) -> Result<StopCaptureResponse, String> {
-    let (kind, resp) = conn
-        .mcu_call(
-            MessageKind::StopCapture,
-            StopCapture.encoded_to_vec(),
-            CAPTURE_TIMEOUT,
-        )
-        .map_err(|e| format!("StopCapture transport: {e:?}"))?;
-    if kind != MessageKind::StopCaptureResponse {
-        return Err(format!(
-            "StopCapture: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    StopCaptureResponse::decode(&resp).map_err(|e| format!("StopCaptureResponse decode: {e:?}"))
+    mcu_typed_call(
+        conn,
+        "StopCapture",
+        MessageKind::StopCapture,
+        MessageKind::StopCaptureResponse,
+        StopCapture.encoded_to_vec(),
+        CAPTURE_TIMEOUT,
+    )
 }
 
 #[cfg(test)]

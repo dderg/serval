@@ -2,8 +2,9 @@ mod biclothoid;
 mod causal;
 mod heart;
 mod kernels;
+mod linalg;
 mod overlap;
-mod vec3;
+use crate::vec3;
 
 pub use heart::HeartKind;
 
@@ -14,10 +15,11 @@ use crate::frontend::{Move, VelocityLimits};
 use crate::path::lowering::PositionProfile;
 use crate::path::{CurvatureProfile, Line, PathSegment, Segment};
 use crate::segment::FollowerDemand;
+use vec3::{dot, madd, turn_normal};
 
 const COLLINEAR_EPS_RAD: f64 = 1e-3;
 const BUDGET_EPS_MM: f64 = 1e-9;
-const TURN_NORMAL_EPS: f64 = 1e-9;
+pub(crate) const TURN_NORMAL_EPS: f64 = 1e-9;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CornerFitConfig {
@@ -583,21 +585,6 @@ fn junction_deviation(limits: VelocityLimits) -> f64 {
     scv * scv * (SQRT_2 - 1.0) / limits.accel_mm_s2
 }
 
-fn turn_normal(t_in: [f64; 3], t_out: [f64; 3]) -> Option<[f64; 3]> {
-    let d = dot(t_out, t_in);
-    let perp = [
-        t_out[0] - d * t_in[0],
-        t_out[1] - d * t_in[1],
-        t_out[2] - d * t_in[2],
-    ];
-    let n = norm(perp);
-    if n < TURN_NORMAL_EPS {
-        None
-    } else {
-        Some([perp[0] / n, perp[1] / n, perp[2] / n])
-    }
-}
-
 fn line_of(m: &Move) -> Option<&Line> {
     match &m.segment.spatial {
         Some(Segment::Line(line)) => Some(line),
@@ -614,25 +601,6 @@ fn blend_trim(plan: &JunctionPlan) -> f64 {
 
 fn internal(line_no: u32) -> impl Fn(GeometryError) -> FitError {
     move |source| FitError::Internal { line_no, source }
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn norm(a: [f64; 3]) -> f64 {
-    dot(a, a).sqrt()
-}
-
-fn madd(p: [f64; 3], s: f64, d: [f64; 3]) -> [f64; 3] {
-    [p[0] + s * d[0], p[1] + s * d[1], p[2] + s * d[2]]
-}
-
-fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
-    let dx = a[0] - b[0];
-    let dy = a[1] - b[1];
-    let dz = a[2] - b[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 #[cfg(test)]

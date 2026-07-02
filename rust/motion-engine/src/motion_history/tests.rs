@@ -4,7 +4,7 @@ use host_rt::passthrough_queue::PassthroughRouter;
 use runtime::piece_ring::PieceEntry;
 
 use crate::motion_history::{HISTORY_CAPACITY, HistoryError, HistoryPiece, HistoryStore};
-use crate::pump::AxisKey;
+use crate::types::AxisKey;
 
 fn stub_router_two_mcus() -> PassthroughRouter {
     let clock: Arc<dyn host_rt::clock::Clock + Send + Sync> = Arc::new(host_rt::clock::RealClock);

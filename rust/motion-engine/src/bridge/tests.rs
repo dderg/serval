@@ -447,7 +447,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use crate::pump::{AxisKey, EnqueueMsg, McuTransport, PumpMsg, WireSink, run_pump};
+    use crate::pump::{EnqueueMsg, McuTransport, PumpMsg, WireSink, run_pump};
+    use crate::types::AxisKey;
 
     const EC_MCU_ID: u32 = 42;
 

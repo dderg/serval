@@ -1,6 +1,6 @@
 use super::drip_cohort_participants;
-use crate::dispatch::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps};
-use crate::pump::AxisKey;
+use crate::mcu_config::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps};
+use crate::types::AxisKey;
 
 const FOLLOWER_E: usize = 3;
 

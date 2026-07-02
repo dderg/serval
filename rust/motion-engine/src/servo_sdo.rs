@@ -1,12 +1,13 @@
 use std::time::Duration;
 
-use host_rt::mcu_call::McuCall as _;
 use host_rt::mcu_serial_conn::McuSerialConn;
-use mcu_protocol::codec::{Decode as _, Encode as _};
+use mcu_protocol::codec::Encode as _;
 use mcu_protocol::messages::{
     ERR_SDO_TRANSPORT, ERR_SDO_UNSUPPORTED_SIZE, ERR_SDO_VALUE_RANGE, ERR_SDO_VERIFY_MISMATCH,
     MessageKind, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse,
 };
+
+use crate::servo_call::mcu_typed_call;
 
 const SDO_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -22,16 +23,14 @@ pub fn send_sdo_read(
         subindex,
     }
     .encoded_to_vec();
-    let (kind, resp) = conn
-        .mcu_call(MessageKind::SdoRead, body, SDO_TIMEOUT)
-        .map_err(|e| format!("SdoRead transport: {e:?}"))?;
-    if kind != MessageKind::SdoReadResponse {
-        return Err(format!(
-            "SdoRead: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    SdoReadResponse::decode(&resp).map_err(|e| format!("SdoReadResponse decode: {e:?}"))
+    mcu_typed_call(
+        conn,
+        "SdoRead",
+        MessageKind::SdoRead,
+        MessageKind::SdoReadResponse,
+        body,
+        SDO_TIMEOUT,
+    )
 }
 
 pub fn send_sdo_write(
@@ -50,16 +49,14 @@ pub fn send_sdo_write(
         value,
     }
     .encoded_to_vec();
-    let (kind, resp) = conn
-        .mcu_call(MessageKind::SdoWrite, body, SDO_TIMEOUT)
-        .map_err(|e| format!("SdoWrite transport: {e:?}"))?;
-    if kind != MessageKind::SdoWriteResponse {
-        return Err(format!(
-            "SdoWrite: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    SdoWriteResponse::decode(&resp).map_err(|e| format!("SdoWriteResponse decode: {e:?}"))
+    mcu_typed_call(
+        conn,
+        "SdoWrite",
+        MessageKind::SdoWrite,
+        MessageKind::SdoWriteResponse,
+        body,
+        SDO_TIMEOUT,
+    )
 }
 
 pub fn failure_text(result: i32) -> String {

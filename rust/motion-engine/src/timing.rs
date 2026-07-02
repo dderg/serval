@@ -1,5 +1,4 @@
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 fn epoch() -> Instant {
@@ -15,10 +14,18 @@ pub fn mono_us() -> u64 {
     u64::try_from(epoch().elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Monotonic id stamped on each commit batch so a gcode line can be traced from
-/// fit through plan, lower, dispatch, and the pump hand-off as one unit.
 #[must_use]
-pub fn next_batch_seq() -> u64 {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    SEQ.fetch_add(1, Ordering::Relaxed)
+pub fn monotonic_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut ts);
+    }
+    (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
+
+#[cfg(test)]
+mod tests;

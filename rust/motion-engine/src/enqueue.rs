@@ -1,6 +1,7 @@
-use crate::dispatch::McuAxisConfig;
+use crate::mcu_config::McuAxisConfig;
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
-use crate::pump::{AxisKey, EnqueueMsg};
+use crate::pump::EnqueueMsg;
+use crate::types::AxisKey;
 use nurbs::ScalarNurbs;
 use nurbs::bezier::BezierPiece;
 use runtime::piece_ring::PieceEntry;

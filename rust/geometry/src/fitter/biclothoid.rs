@@ -3,8 +3,8 @@ use crate::path::Clothoid;
 use crate::path::CurvatureProfile;
 use crate::path::lowering::PositionProfile;
 
-use super::vec3::{add, cross, normalize, scale, signed_angle, sub};
-use super::{dist, dot, madd};
+use super::linalg::solve3;
+use super::vec3::{add, cross, dist, dot, madd, normalize, scale, signed_angle, sub};
 
 pub(super) struct Biclothoid {
     pub half1: Clothoid,
@@ -148,32 +148,6 @@ fn converged(r: [f64; 3]) -> bool {
 
 fn residual_norm(r: [f64; 3]) -> f64 {
     r[0] * r[0] + r[1] * r[1] + r[2] * r[2]
-}
-
-fn solve3(j: [[f64; 3]; 3], r: [f64; 3]) -> Option<[f64; 3]> {
-    let det = j[0][0] * (j[1][1] * j[2][2] - j[1][2] * j[2][1])
-        - j[0][1] * (j[1][0] * j[2][2] - j[1][2] * j[2][0])
-        + j[0][2] * (j[1][0] * j[2][1] - j[1][1] * j[2][0]);
-    if det.abs() < 1e-18 {
-        return None;
-    }
-    let col = |c: usize| {
-        let mut m = j;
-        for (row, &rv) in m.iter_mut().zip(r.iter()) {
-            row[c] = rv;
-        }
-        m
-    };
-    let det_of = |m: [[f64; 3]; 3]| {
-        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
-    };
-    Some([
-        det_of(col(0)) / det,
-        det_of(col(1)) / det,
-        det_of(col(2)) / det,
-    ])
 }
 
 fn newton_pair(

@@ -133,7 +133,7 @@ fn fit_hermite_c2_adaptive(
             &refined,
             tolerance,
             PHASE1_HERMITE_DEGREE,
-            Some(d2_start),
+            d2_start,
             phase1_start_pin_only,
         ) {
             Ok(f) => {
@@ -195,7 +195,7 @@ fn refit_last_piece_with_end_pin(
             &refined_last,
             tolerance,
             PHASE2_BOTH_ENDS_PINNED_HERMITE_DEGREE,
-            Some(last_d2_start),
+            last_d2_start,
             Some(d2_end),
         ) {
             Ok(f) => {

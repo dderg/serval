@@ -1,12 +1,10 @@
-pub mod fit;
+#[cfg(test)]
+mod fit;
 mod kernel;
-pub mod odometer;
+#[cfg(test)]
 mod pad;
-mod parallel;
-pub mod peak;
 pub mod post_processor;
 mod shaper;
-mod smooth_fit;
 
 pub use post_processor::{
     AxisChainSet, ChainStage, CompiledChain, PostProcessorError, PostProcessorInstance,

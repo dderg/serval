@@ -227,7 +227,7 @@ fn linear_pressure_advance_is_exact_cubic_transform() {
     // pos = 1 + 2t + 3t^2 + 4t^3,  vel = 2 + 6t + 12t^2
     let mut coeffs = [1.0, 2.0, 3.0, 4.0];
     let k = 0.05;
-    apply_axis_chain(
+    apply_pressure_advance(
         &mut coeffs,
         &CompiledChain {
             stages: vec![ChainStage::LinearPressureAdvance { k }],

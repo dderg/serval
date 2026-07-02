@@ -1,5 +1,6 @@
 use super::*;
 use crate::frontend::{MoveContext, line_move};
+use crate::vec3::dist;
 use crate::path::lowering::PositionProfile;
 use crate::path::{Clothoid, CurvatureProfile};
 use crate::segment::SourceRange;

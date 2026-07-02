@@ -1,4 +1,4 @@
-use crate::dispatch::{AXIS_X, AXIS_Y, KINEMATICS_COREXY};
+use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY};
 use crate::kinematics::KinematicsModule;
 
 #[test]
