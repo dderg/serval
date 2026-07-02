@@ -25,9 +25,9 @@
 //! `c2_continuity` C1-crossover test cannot catch this — its `< a_max` bound is
 //! looser than the `894 < 1000` cruise step.
 
-use super::causal::fit;
+use super::fit_corners;
 use crate::velocity::plan_velocity_warm_start;
-use crate::{ChainFitConfig, Move, MoveContext, SourceRange, VelocityLimits, line_move};
+use crate::{CornerFitConfig, Move, MoveContext, SourceRange, VelocityLimits, line_move};
 
 const MAX_V: f64 = 100.0;
 const ACCEL: f64 = 1000.0;
@@ -62,7 +62,7 @@ fn run_samples(max_v: f64, accel: f64, jerk: f64, waypoints: &[[f64; 3]]) -> Vec
         .enumerate()
         .map(|(i, w)| line_move(w[0], w[1], 0.0, ctx(max_v, accel, jerk, i as u32)).unwrap())
         .collect();
-    let outcome = fit(&moves, ChainFitConfig::default()).unwrap();
+    let outcome = fit_corners(&moves, CornerFitConfig::default()).unwrap();
     let profile = plan_velocity_warm_start(
         &outcome,
         1e-7,

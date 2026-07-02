@@ -557,27 +557,6 @@ pub(super) fn arc_candidate(moves: &[Move], corner: CornerFitConfig, tol: f64) -
     moves.len() < 3 || cocircular(moves, tol)
 }
 
-// TODO: orphaned by the stream-planner rewire; heart config is still parsed but unread — pending decision
-#[allow(dead_code)]
-pub(super) fn grow_cocircular_span(
-    moves: &[Move],
-    start: usize,
-    band_end: usize,
-    tol: f64,
-) -> usize {
-    let mut best = start;
-    let mut end = start + 2;
-    while end <= band_end {
-        if cocircular(&moves[start..=end], tol) {
-            best = end;
-            end += 1;
-        } else {
-            break;
-        }
-    }
-    best
-}
-
 pub(super) fn cocircular(facets: &[Move], tol: f64) -> bool {
     let Some(fit) = circle_fit(facets) else {
         return false;

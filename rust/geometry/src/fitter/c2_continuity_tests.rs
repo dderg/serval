@@ -1,7 +1,7 @@
-use super::causal::fit;
+use super::fit_corners;
 use crate::path::CurvatureProfile;
 use crate::velocity::plan_velocity_warm_start;
-use crate::{ChainFitConfig, Move, MoveContext, SourceRange, VelocityLimits, line_move};
+use crate::{CornerFitConfig, Move, MoveContext, SourceRange, VelocityLimits, line_move};
 
 const MAX_V: f64 = 150.0;
 const ACCEL: f64 = 200.0;
@@ -42,7 +42,7 @@ struct Sample {
 
 fn plan_samples() -> Vec<Sample> {
     let moves = serpentine();
-    let outcome = fit(&moves, ChainFitConfig::default()).unwrap();
+    let outcome = fit_corners(&moves, CornerFitConfig::default()).unwrap();
     let profile = plan_velocity_warm_start(
         &outcome,
         1e-7,
@@ -115,7 +115,7 @@ fn c2_accel_within_envelope() {
 #[test]
 fn c2_tangential_within_acceleration_disk() {
     let moves = serpentine();
-    let outcome = fit(&moves, ChainFitConfig::default()).unwrap();
+    let outcome = fit_corners(&moves, CornerFitConfig::default()).unwrap();
     let profile = plan_velocity_warm_start(
         &outcome,
         1e-7,

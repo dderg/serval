@@ -1,12 +1,9 @@
 mod biclothoid;
 mod causal;
-mod heart;
 mod kernels;
 mod linalg;
 mod overlap;
 use crate::vec3;
-
-pub use heart::HeartKind;
 
 use std::f64::consts::{PI, SQRT_2};
 
@@ -36,10 +33,6 @@ impl Default for CornerFitConfig {
     }
 }
 
-// TODO: orphaned by the stream-planner rewire; heart config is still parsed but unread — pending decision
-#[allow(dead_code)]
-const ARC_MIN_RUN_FACETS: u32 = 3;
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArcFitConfig {
     pub min_run_facets: u32,
@@ -49,7 +42,6 @@ pub struct ArcFitConfig {
 pub struct ChainFitConfig {
     pub corner: CornerFitConfig,
     pub arc_fit: Option<ArcFitConfig>,
-    pub heart: HeartKind,
 }
 
 impl Default for ChainFitConfig {
@@ -57,7 +49,6 @@ impl Default for ChainFitConfig {
         Self {
             corner: CornerFitConfig::default(),
             arc_fit: None,
-            heart: HeartKind::default(),
         }
     }
 }
@@ -612,10 +603,6 @@ mod tests;
 mod c2_continuity_tests;
 #[cfg(test)]
 mod cruise_onset_tests;
-#[cfg(test)]
-mod fit_proptest;
-#[cfg(test)]
-mod heart_comparison_tests;
 #[cfg(test)]
 mod integration_pipeline_tests;
 #[cfg(test)]

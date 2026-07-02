@@ -401,7 +401,6 @@ class MotionEngineWrapper:
         kinematics_axes,
         cartesian_limits,
         arc_fit=None,
-        heart=None,
         max_extrude_only_velocity=None,
         max_extrude_only_accel=None,
     ):
@@ -413,7 +412,6 @@ class MotionEngineWrapper:
             kinematics_axes,
             cartesian_limits,
             arc_fit,
-            heart,
             max_extrude_only_velocity,
             max_extrude_only_accel,
         )
