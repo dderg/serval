@@ -638,14 +638,6 @@ class Motion:
             return
         est = self.mcu.estimated_print_time(self.reactor.monotonic())
         command_time = est + self.motion_lead
-        committed_frontier = est + self.engine.queued_motion_secs()
-        if committed_frontier > command_time:
-            raise self.printer.command_error(
-                "grounding would drop committed motion coverage: engine"
-                " frontier %.6f past grounding target %.6f"
-                " (durable dwell/idle swallow)"
-                % (committed_frontier, command_time)
-            )
         if self._mcu_pending_end_time > command_time:
             self._mcu_pending_end_time = command_time
 

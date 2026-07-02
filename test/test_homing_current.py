@@ -2,14 +2,27 @@ from klippy.extras.homing import Homing
 
 
 class _FakeToolhead:
-    def __init__(self):
-        self.dwells = []
-
     def get_last_move_time(self):
         return 7.5
 
-    def dwell(self, delay):
-        self.dwells.append(delay)
+
+class _FakeReactor:
+    def __init__(self):
+        self.pauses = []
+
+    def monotonic(self):
+        return 0.0
+
+    def pause(self, waketime):
+        self.pauses.append(waketime)
+
+
+class _FakePrinter:
+    def __init__(self, reactor):
+        self._reactor = reactor
+
+    def get_reactor(self):
+        return self._reactor
 
 
 class _FakeCurrentHelper:
@@ -30,71 +43,73 @@ class _FakeRail:
         return self._helpers
 
 
-def _homing():
-    return Homing.__new__(Homing)
+def _homing(reactor):
+    h = Homing.__new__(Homing)
+    h.printer = _FakePrinter(reactor)
+    return h
 
 
-def test_applies_to_every_helper_and_dwells_for_the_slowest():
+def test_applies_to_every_helper_and_waits_for_the_slowest():
     fast = _FakeCurrentHelper(0.5)
     slow = _FakeCurrentHelper(1.0)
-    toolhead = _FakeToolhead()
+    reactor = _FakeReactor()
 
-    _homing()._set_homing_current(
-        toolhead, [_FakeRail([fast, slow])], pre_homing=True
+    _homing(reactor)._set_homing_current(
+        _FakeToolhead(), [_FakeRail([fast, slow])], pre_homing=True
     )
 
     assert fast.calls == [(7.5, True)]
     assert slow.calls == [(7.5, True)]
-    assert toolhead.dwells == [1.0]
+    assert reactor.pauses == [1.0]
 
 
 def test_skips_steppers_without_tmc_drivers():
     helper = _FakeCurrentHelper(0.5)
-    toolhead = _FakeToolhead()
+    reactor = _FakeReactor()
 
-    _homing()._set_homing_current(
-        toolhead, [_FakeRail([None, helper])], pre_homing=False
+    _homing(reactor)._set_homing_current(
+        _FakeToolhead(), [_FakeRail([None, helper])], pre_homing=False
     )
 
     assert helper.calls == [(7.5, False)]
-    assert toolhead.dwells == [0.5]
+    assert reactor.pauses == [0.5]
 
 
-def test_no_dwell_when_no_current_change_needed():
-    toolhead = _FakeToolhead()
+def test_no_wait_when_no_current_change_needed():
+    reactor = _FakeReactor()
 
-    _homing()._set_homing_current(
-        toolhead, [_FakeRail([_FakeCurrentHelper(0.0)])], pre_homing=True
+    _homing(reactor)._set_homing_current(
+        _FakeToolhead(), [_FakeRail([_FakeCurrentHelper(0.0)])], pre_homing=True
     )
 
-    assert toolhead.dwells == []
+    assert reactor.pauses == []
 
 
 def test_applies_across_every_coupled_rail():
     homed = _FakeCurrentHelper(0.3)
     partner = _FakeCurrentHelper(0.8)
-    toolhead = _FakeToolhead()
+    reactor = _FakeReactor()
 
-    _homing()._set_homing_current(
-        toolhead,
+    _homing(reactor)._set_homing_current(
+        _FakeToolhead(),
         [_FakeRail([homed]), _FakeRail([partner])],
         pre_homing=True,
     )
 
     assert homed.calls == [(7.5, True)]
     assert partner.calls == [(7.5, True)]
-    assert toolhead.dwells == [0.8]
+    assert reactor.pauses == [0.8]
 
 
 def test_helper_shared_between_rails_is_switched_once():
     shared = _FakeCurrentHelper(0.5)
-    toolhead = _FakeToolhead()
+    reactor = _FakeReactor()
 
-    _homing()._set_homing_current(
-        toolhead,
+    _homing(reactor)._set_homing_current(
+        _FakeToolhead(),
         [_FakeRail([shared]), _FakeRail([shared])],
         pre_homing=False,
     )
 
     assert shared.calls == [(7.5, False)]
-    assert toolhead.dwells == [0.5]
+    assert reactor.pauses == [0.5]

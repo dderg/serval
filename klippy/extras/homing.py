@@ -511,7 +511,8 @@ class Homing:
                     ),
                 )
         if dwell_time:
-            toolhead.dwell(dwell_time)
+            reactor = self.printer.get_reactor()
+            reactor.pause(reactor.monotonic() + dwell_time)
 
     def _drain_motion_before_arming_device(self, gcmd, engine, axis):
         reactor = self.printer.get_reactor()
