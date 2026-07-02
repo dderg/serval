@@ -19,9 +19,9 @@ use crate::classify;
 use crate::config::{self, PlannerConfig};
 use crate::dispatch::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
-use crate::stream_planner::{
-    DispatchError, HomeDripParams, NudgeParams, SegmentDispatchCtx, StreamPlannerError,
-    StreamPlannerHandle,
+use crate::stream_worker::{
+    DispatchError, HomeDripParams, NudgeParams, SegmentDispatchCtx, StreamWorkerError,
+    StreamWorkerHandle,
 };
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
 
@@ -693,7 +693,7 @@ fn router_err(e: host_rt::passthrough_queue::RouterError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
-fn planner_err(e: StreamPlannerError) -> PyErr {
+fn planner_err(e: StreamWorkerError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
@@ -752,7 +752,7 @@ pub struct PyMotionEngine {
     events: Arc<Mutex<VecDeque<EngineEvent>>>,
     #[allow(dead_code)]
     handlers: Mutex<HashMap<(u32, String, u32), Py<PyAny>>>,
-    planner: Mutex<Option<StreamPlannerHandle>>,
+    planner: Mutex<Option<StreamWorkerHandle>>,
     planner_config: Mutex<PlannerConfig>,
     commanded_pos: Mutex<[f64; 3]>,
     last_g5_pq: Mutex<Option<(f64, f64)>>,
@@ -2379,7 +2379,7 @@ impl PyMotionEngine {
                 PyRuntimeError::new_err("planner not initialized — call init_planner first")
             })?;
             planner
-                .submit_nudge(crate::stream_planner::NudgeParams {
+                .submit_nudge(crate::stream_worker::NudgeParams {
                     mcu_id,
                     axis: axis_idx,
                     motor_mask,
@@ -2990,11 +2990,6 @@ impl PyMotionEngine {
             }
         }
 
-        let (control_tx_init, control_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
-        let (data_tx_init, data_rx) = crossbeam_channel::bounded::<crate::pump::EnqueueMsg>(
-            crate::pump::PUMP_DATA_CHANNEL_CAP,
-        );
-
         let wire_transports: HashMap<u32, crate::pump::McuTransport> = {
             let mut t = HashMap::new();
             for (&id, io) in &host_ios {
@@ -3009,78 +3004,120 @@ impl PyMotionEngine {
             t
         };
 
-        let pump_timeout = Duration::from_secs(5);
         let ring_depth_table_for_pump = ring_depth_table.clone();
         let router_for_pump = Arc::clone(&self.router);
         let drain_for_pump = self.drain.clone();
-        let pump_backlog_for_pump = Arc::clone(&self.pump_backlog);
         let router_for_freq = Arc::clone(&self.router);
         let endpoint_death_for_pump = Arc::clone(&self.latched_endpoint_death);
-        let pump_thread_handle = std::thread::Builder::new()
-            .name("push-pieces-pump".into())
-            .spawn(move || {
-                let sink = crate::pump::WireSink {
-                    transports: wire_transports,
-                    timeout: pump_timeout,
-                    freq_of: Arc::new(move |mcu_id: u32| {
-                        let r = router_for_freq.lock().unwrap_or_else(|p| p.into_inner());
-                        r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
-                            .map(|(_, f)| f)
-                    }),
-                };
-                crate::pump::run_pump(
-                    control_rx,
-                    data_rx,
-                    sink,
-                    move |k| {
-                        ring_depth_table_for_pump
-                            .get(&k)
-                            .copied()
-                            .unwrap_or_else(|| {
-                                tracing::error!(
-                                    subsystem = "engine",
-                                    event = "pump_missing_ring_depth",
-                                    axis_key = ?k,
-                                    "pump: no ring_depth for axis — absent from init_planner config; using sentinel depth 1 (expect PieceStartInPast fault)"
-                                );
-                                1
-                            })
-                    },
-                    move |mcu_id: u32| {
-                        let r = router_for_pump.lock().unwrap_or_else(|p| p.into_inner());
-                        r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
-                    },
-                    move |key: crate::pump::AxisKey| {
-                        if report_ethercat_endpoint_death(
-                            &endpoint_death_for_pump,
-                            key.mcu_id,
-                            "pump transport went fatal (broken pipe / endpoint gone) \
-                             — see the send_frame_fatal log for the exact transport error",
-                        ) {
-                            arm_endpoint_death_watchdog(
-                                Arc::clone(&endpoint_death_for_pump),
-                                key.mcu_id,
-                            );
-                        }
-                    },
-                    move |key: crate::pump::AxisKey, n: u32| {
-                        drain_for_pump.unsend(key.mcu_id, key.axis, n);
-                    },
-                    |msg: String| {
+        let pump_resources = crate::stream_worker::PumpResources {
+            sink: crate::pump::WireSink {
+                transports: wire_transports,
+                timeout: Duration::from_secs(5),
+                freq_of: Arc::new(move |mcu_id: u32| {
+                    let r = router_for_freq.lock().unwrap_or_else(|p| p.into_inner());
+                    r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
+                        .map(|(_, f)| f)
+                }),
+            },
+            ring_depth_of: Box::new(move |k| {
+                ring_depth_table_for_pump
+                    .get(&k)
+                    .copied()
+                    .unwrap_or_else(|| {
                         tracing::error!(
-                            msg,
-                            "EXIT_ON_FAULT — drip cohort stalled; \
-                             aborting klippy so systemd restarts it"
+                            subsystem = "engine",
+                            event = "pump_missing_ring_depth",
+                            axis_key = ?k,
+                            "pump: no ring_depth for axis — absent from init_planner config; using sentinel depth 1 (expect PieceStartInPast fault)"
                         );
-                        abort_after_tracing_appender_drains();
-                    },
-                    pump_backlog_for_pump,
+                        1
+                    })
+            }),
+            mcu_clock_of: Box::new(move |mcu_id: u32| {
+                let r = router_for_pump.lock().unwrap_or_else(|p| p.into_inner());
+                r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
+            }),
+            on_fatal_transport: Box::new(move |key: crate::pump::AxisKey| {
+                if report_ethercat_endpoint_death(
+                    &endpoint_death_for_pump,
+                    key.mcu_id,
+                    "pump transport went fatal (broken pipe / endpoint gone) \
+                     — see the send_frame_fatal log for the exact transport error",
+                ) {
+                    arm_endpoint_death_watchdog(Arc::clone(&endpoint_death_for_pump), key.mcu_id);
+                }
+            }),
+            on_abandon: Box::new(move |key: crate::pump::AxisKey, n: u32| {
+                drain_for_pump.unsend(key.mcu_id, key.axis, n);
+            }),
+            on_drip_stall: Box::new(|msg: String| {
+                tracing::error!(
+                    msg,
+                    "EXIT_ON_FAULT — drip cohort stalled; \
+                     aborting klippy so systemd restarts it"
                 );
-            })
-            .expect("spawn push-pieces-pump thread");
+                abort_after_tracing_appender_drains();
+            }),
+            backlog: Arc::clone(&self.pump_backlog),
+        };
 
-        *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(control_tx_init.clone());
-        *self.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_thread_handle);
+        let anchor_mutex = Arc::clone(&self.dispatch_anchor);
+        *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
+        let dispatch_resources = crate::stream_worker::DispatchResources {
+            router: Arc::clone(&router_arc),
+            anchor: anchor_mutex,
+            mcu_configs: mcu_configs.clone(),
+            drain: self.drain.clone(),
+            counter: Arc::clone(&counter),
+            active_drip_cohort: Arc::clone(&self.active_drip_cohort),
+            motion_history: Arc::clone(&self.motion_history),
+            nominal_freqs: Arc::clone(&self.nominal_clock_freqs),
+        };
+
+        let stream_cfg = {
+            let cart = cfg.cartesian;
+            crate::stream::StreamConfig {
+                chain: cfg.chain,
+                integration_tol: STREAM_INTEGRATION_TOL,
+                max_extrude_only_velocity_mm_s: cfg
+                    .max_extrude_only_velocity
+                    .unwrap_or(f64::INFINITY),
+                max_extrude_only_accel_mm_s2: cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY),
+                fit_tol_mm: cfg.fit_tolerance_mm,
+                max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
+                limits: geometry::VelocityLimits::try_new(
+                    cart.max_velocity,
+                    cart.max_accel,
+                    cart.square_corner_velocity,
+                    cart.max_jerk,
+                )
+                .map_err(PyRuntimeError::new_err)?,
+            }
+        };
+        let axis_chains = cfg
+            .post_processors
+            .compile(&cfg.axis_registry)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let home = vec![0.0; cfg.axis_registry.n_axes()];
+
+        let mut planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        if planner_guard.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "planner already initialized (raced)",
+            ));
+        }
+        let pipeline = crate::stream_worker::setup_pipeline(
+            stream_cfg,
+            axis_chains,
+            home,
+            dispatch_resources,
+            pump_resources,
+        );
+        let pump_control = pipeline.pump_control.clone();
+        *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pipeline.pump_control);
+        *self.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pipeline.pump_thread);
+        *planner_guard = Some(pipeline.worker);
+        drop(planner_guard);
 
         {
             let configs = Arc::clone(&self.mcu_axis_configs);
@@ -3123,7 +3160,7 @@ impl PyMotionEngine {
 
         for cfg_mcu in &mcu_configs {
             let mcu_id = cfg_mcu.mcu_id;
-            let pump_tx_hb = control_tx_init.clone();
+            let pump_tx_hb = pump_control.clone();
             let drain_hb = self.drain.clone();
 
             if ethercat_mcu_ids.contains(&mcu_id) {
@@ -3142,7 +3179,7 @@ impl PyMotionEngine {
 
                 let homing_run_hb = Arc::clone(&self.homing_run);
                 let active_cohort_hb = Arc::clone(&self.active_drip_cohort);
-                let pump_tx_fault = control_tx_init.clone();
+                let pump_tx_fault = pump_control.clone();
                 let latched_fault_hb = Arc::clone(&self.latched_drive_fault);
                 let mcu_label_hb = mcu_label.clone();
                 let slot_axes_hb = cfg_mcu.axes.clone();
@@ -3297,186 +3334,6 @@ impl PyMotionEngine {
             }
         }
 
-        let mcu_configs_for_ctx = mcu_configs;
-        let router_for_ctx = Arc::clone(&router_arc);
-
-        let anchor_mutex = Arc::clone(&self.dispatch_anchor);
-        *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
-        let pump_tx_for_ctx = data_tx_init.clone();
-        let drain_for_ctx = self.drain.clone();
-        let counter_for_ctx = Arc::clone(&counter);
-        let active_drip_cohort_for_ctx = Arc::clone(&self.active_drip_cohort);
-        let motion_history_for_ctx = Arc::clone(&self.motion_history);
-        let nominal_freqs_for_ctx = Arc::clone(&self.nominal_clock_freqs);
-
-        let nudge_mcu_configs = mcu_configs_for_ctx.clone();
-        let nudge_router = Arc::clone(&router_for_ctx);
-        let nudge_pump_tx = pump_tx_for_ctx.clone();
-        let nudge_drain = drain_for_ctx.clone();
-        let nudge_counter = Arc::clone(&counter_for_ctx);
-        let nudge_active_drip_cohort = Arc::clone(&active_drip_cohort_for_ctx);
-        let nudge_motion_history = Arc::clone(&motion_history_for_ctx);
-        let nudge_nominal_freqs = Arc::clone(&nominal_freqs_for_ctx);
-        let nudge_anchor_arc = Arc::clone(&anchor_mutex);
-
-        let dispatch_ctx = Arc::new(SegmentDispatchCtx {
-            router: router_for_ctx,
-            anchor: anchor_mutex,
-            mcu_configs: mcu_configs_for_ctx,
-            pump_tx: pump_tx_for_ctx,
-            drain: drain_for_ctx,
-            counter: counter_for_ctx,
-            active_drip_cohort: active_drip_cohort_for_ctx,
-            motion_history: motion_history_for_ctx,
-            nominal_freqs: nominal_freqs_for_ctx,
-        });
-        let dispatch: Arc<
-            dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
-        > = Arc::new(
-            move |seg: &trajectory::ShapedSegment| -> Result<(), DispatchError> {
-                crate::stream_planner::dispatch_segment(&dispatch_ctx, seg)
-            },
-        );
-
-        let nudge_dispatch: Arc<
-            dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync,
-        > = Arc::new(
-            move |mcu_id: u32, np: &crate::nudge::NudgePiece| -> Result<(), DispatchError> {
-                let axis = np.axis;
-                if !nudge_mcu_configs.iter().any(|c| c.mcu_id == mcu_id) {
-                    return Err(DispatchError::NudgeTargetMissing { mcu_id, axis });
-                }
-
-                let host_now = {
-                    let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
-                    r.host_now_secs()
-                };
-
-                let active_cohort: Option<u64> = *nudge_active_drip_cohort
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-
-                let lead_secs = if active_cohort.is_some() {
-                    crate::pump::DRIP_WINDOW_SECS
-                } else {
-                    crate::pump::MAX_LEAD_SECS
-                };
-
-                let (t0, fresh) = nudge_anchor_arc
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .anchor_segment(np.piece.u_start, np.piece.u_end, host_now);
-
-                if fresh {
-                    let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
-                    let h = crate::types::mcu_handle_from_raw(mcu_id);
-                    r.log_seg0_lead(h, t0 + np.piece.u_start, t0);
-                }
-
-                let project = |proj_mcu_id: u32, host_secs: f64| -> u64 {
-                    let r = nudge_router.lock().unwrap_or_else(|p| p.into_inner());
-                    r.host_time_to_mcu_clock(
-                        crate::types::mcu_handle_from_raw(proj_mcu_id),
-                        host_secs,
-                    )
-                    .unwrap_or(0)
-                };
-
-                let max_piece_secs = if active_cohort.is_some() {
-                    Some(0.025_f64)
-                } else {
-                    None::<f64>
-                };
-
-                let pieces = crate::enqueue::flatten_bezier_pieces(
-                    std::slice::from_ref(&np.piece),
-                    t0,
-                    mcu_id,
-                    axis as usize,
-                    host_now,
-                    &project,
-                    max_piece_secs,
-                    np.motor_mask,
-                );
-
-                if !pieces.is_empty() {
-                    let key = crate::pump::AxisKey { mcu_id, axis };
-                    let nominal_freq = {
-                        let freqs = nudge_nominal_freqs
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner());
-                        *freqs
-                            .get(&mcu_id)
-                            .ok_or(DispatchError::MissingNominalFreq(mcu_id))?
-                    };
-                    {
-                        let mut store = nudge_motion_history
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner());
-                        for (piece, host_t) in &pieces {
-                            store.record(key, piece, nominal_freq, *host_t);
-                        }
-                    }
-                    nudge_drain.add_sent(mcu_id, axis, pieces.len() as u32);
-                    nudge_pump_tx
-                        .send(crate::pump::EnqueueMsg {
-                            key,
-                            pieces,
-                            fresh_stream: fresh,
-                            lead_secs,
-                            source_line: u32::MAX,
-                        })
-                        .map_err(|_| DispatchError::PumpGone)?;
-                }
-
-                nudge_counter.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            },
-        );
-
-        {
-            let mut guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
-            if guard.is_some() {
-                return Err(PyRuntimeError::new_err(
-                    "planner already initialized (raced)",
-                ));
-            }
-            let cart = cfg.cartesian;
-            let stream_cfg = crate::stream::StreamConfig {
-                chain: cfg.chain,
-                velocity: geometry::VelocityConfig {
-                    max_jerk_mm_s3: cart.max_jerk,
-                    max_extrude_only_velocity_mm_s: cfg
-                        .max_extrude_only_velocity
-                        .unwrap_or(f64::INFINITY),
-                    max_extrude_only_accel_mm_s2: cfg
-                        .max_extrude_only_accel
-                        .unwrap_or(f64::INFINITY),
-                    integration_tol: STREAM_INTEGRATION_TOL,
-                    ..geometry::VelocityConfig::default()
-                },
-                fit_tol_mm: cfg.fit_tolerance_mm,
-                max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
-                limits: geometry::VelocityLimits::try_new(
-                    cart.max_velocity,
-                    cart.max_accel,
-                    cart.square_corner_velocity,
-                )
-                .map_err(PyRuntimeError::new_err)?,
-            };
-            let axis_chains = cfg
-                .post_processors
-                .compile(&cfg.axis_registry)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let home = vec![0.0; cfg.axis_registry.n_axes()];
-            *guard = Some(StreamPlannerHandle::spawn(
-                stream_cfg,
-                axis_chains,
-                home,
-                dispatch,
-                nudge_dispatch,
-            ));
-        }
         Ok(())
     }
 
@@ -3512,7 +3369,7 @@ impl PyMotionEngine {
                 }
             };
             let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-            let (max_v, max_a, scv) = {
+            let (max_v, max_a, scv, jerk) = {
                 let cfg = self
                     .planner_config
                     .lock()
@@ -3524,9 +3381,14 @@ impl PyMotionEngine {
                 if let Some(ra) = cfg.runtime_caps.accel {
                     a = a.min(ra);
                 }
-                (v, a, cfg.square_corner_velocity())
+                // No runtime jerk cap exists yet (RuntimeCaps has no `jerk` field);
+                // this is the static [printer] max_jerk. A future
+                // `cfg.runtime_caps.jerk` would `.min()` in here exactly like
+                // velocity/accel above.
+                let j = cfg.cartesian.max_jerk;
+                (v, a, cfg.square_corner_velocity(), j)
             };
-            let limits = geometry::VelocityLimits::try_new(max_v, max_a, scv)
+            let limits = geometry::VelocityLimits::try_new(max_v, max_a, scv, jerk)
                 .map_err(PyRuntimeError::new_err)?;
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
             let m = classify::build_move(
@@ -3935,7 +3797,7 @@ impl PyMotionEngine {
     }
 
     fn input_channel_capacity(&self) -> u64 {
-        crate::stream_planner::INPUT_CHANNEL_CAP as u64
+        crate::stream_worker::INPUT_CHANNEL_CAP as u64
     }
 
     fn uncommitted_intake_secs(&self) -> f64 {
@@ -4035,7 +3897,7 @@ impl PyMotionEngine {
         endstop_id: u8,
         endstop_mcu: u32,
     ) -> PyResult<()> {
-        use crate::stream_planner::HomeDripParams;
+        use crate::stream_worker::HomeDripParams;
 
         if axis > 2 {
             return Err(PyRuntimeError::new_err(format!(

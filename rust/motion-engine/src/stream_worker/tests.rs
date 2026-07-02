@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::stream::StreamConfig;
 use geometry::segment::SourceRange;
-use geometry::{ChainFitConfig, MoveContext, VelocityConfig, VelocityLimits, line_move};
+use geometry::{ChainFitConfig, MoveContext, VelocityLimits, line_move};
 use nurbs::eval::eval;
 
 #[derive(Clone, Default)]
@@ -44,10 +44,12 @@ fn cfg() -> StreamConfig {
 fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
     StreamConfig {
         chain: ChainFitConfig::default(),
-        velocity: VelocityConfig::default(),
+        integration_tol: 1e-7,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 1e-3,
         max_buffer_moves,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
     }
 }
 
@@ -55,7 +57,7 @@ fn ctx(line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 80.0,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -104,12 +106,13 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
     // the process on any commit error, so reaching the flush and seeing a
     // contiguous, complete trajectory is the pass condition.
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![99.158, 99.158, 0.2, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     let mut prev = [99.158, 99.158, 0.2];
@@ -155,12 +158,13 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
 #[test]
 fn streams_collinear_moves_to_a_contiguous_trajectory() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -192,12 +196,13 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
 #[test]
 fn dwell_inserts_a_time_gap_then_resumes() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -223,12 +228,13 @@ fn dwell_inserts_a_time_gap_then_resumes() {
 #[test]
 fn stream_open_restarts_the_timeline_at_zero() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -254,12 +260,13 @@ fn stream_open_restarts_the_timeline_at_zero() {
 #[test]
 fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
     h.home_drip(HomeDripParams {
@@ -287,12 +294,13 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
 #[test]
 fn nudge_dispatches_pieces_and_advances_time() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
     h.submit_nudge(NudgeParams {
@@ -320,8 +328,8 @@ fn nominal_secs(m: &geometry::Move) -> f64 {
 
 #[test]
 fn intake_tally_accrues_nominal_on_intake() {
-    let atomic = AtomicU64::new(0);
-    let mut tally = IntakeTally::new(&atomic);
+    let atomic = Arc::new(AtomicU64::new(0));
+    let mut tally = IntakeTally::new(Arc::clone(&atomic));
     let a = line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]);
     let b = line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]);
     let expected = nominal_secs(&a) + nominal_secs(&b);
@@ -335,8 +343,8 @@ fn intake_tally_accrues_nominal_on_intake() {
 
 #[test]
 fn intake_tally_subtracts_committed_nominal() {
-    let atomic = AtomicU64::new(0);
-    let mut tally = IntakeTally::new(&atomic);
+    let atomic = Arc::new(AtomicU64::new(0));
+    let mut tally = IntakeTally::new(Arc::clone(&atomic));
     let a = line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]);
     let b = line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]);
     let c = line(3, [60.0, 0.0, 0.0], [100.0, 0.0, 0.0]);
@@ -344,7 +352,7 @@ fn intake_tally_subtracts_committed_nominal() {
     tally.record_intake(&b);
     tally.record_intake(&c);
 
-    tally.subtract_committed(1);
+    tally.retire_dispatched(2);
 
     let remaining = nominal_secs(&b) + nominal_secs(&c);
     assert!((f64::from_bits(atomic.load(Ordering::Acquire)) - remaining).abs() < 1e-12);
@@ -352,20 +360,20 @@ fn intake_tally_subtracts_committed_nominal() {
 
 #[test]
 fn intake_tally_empties_to_exactly_zero_on_full_commit() {
-    let atomic = AtomicU64::new(0);
-    let mut tally = IntakeTally::new(&atomic);
+    let atomic = Arc::new(AtomicU64::new(0));
+    let mut tally = IntakeTally::new(Arc::clone(&atomic));
     tally.record_intake(&line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]));
     tally.record_intake(&line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]));
 
-    tally.subtract_committed(2);
+    tally.retire_dispatched(3);
 
     assert_eq!(f64::from_bits(atomic.load(Ordering::Acquire)), 0.0);
 }
 
 #[test]
 fn intake_tally_reset_zeroes_the_signal() {
-    let atomic = AtomicU64::new(0);
-    let mut tally = IntakeTally::new(&atomic);
+    let atomic = Arc::new(AtomicU64::new(0));
+    let mut tally = IntakeTally::new(Arc::clone(&atomic));
     tally.record_intake(&line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]));
 
     tally.reset();
@@ -376,12 +384,13 @@ fn intake_tally_reset_zeroes_the_signal() {
 #[test]
 fn flushed_stream_reads_zero_uncommitted_intake() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();
@@ -394,14 +403,15 @@ fn flushed_stream_reads_zero_uncommitted_intake() {
 }
 
 #[test]
-fn partial_commit_head_trim_keeps_intake_tally_bounded() {
+fn mid_stream_dispatch_keeps_intake_tally_bounded() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg_cap(256),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     let n: u32 = 16;
@@ -453,7 +463,7 @@ fn submit_move_errors_when_channel_full_instead_of_blocking() {
 
     let err = try_submit_move(&tx, line(2, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]))
         .expect_err("a full channel must error, not block");
-    assert!(matches!(err, StreamPlannerError::ChannelFull));
+    assert!(matches!(err, StreamWorkerError::ChannelFull));
 }
 
 #[test]
@@ -468,7 +478,7 @@ fn channel_depth_tracks_occupancy_and_refuses_overflow_at_capacity() {
     assert_eq!(tx.len(), cap);
     let err = try_submit_move(&tx, line(cap as u32, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]))
         .expect_err("submit at capacity must refuse, not block or grow");
-    assert!(matches!(err, StreamPlannerError::ChannelFull));
+    assert!(matches!(err, StreamWorkerError::ChannelFull));
     assert_eq!(tx.len(), cap, "a refused submit must not grow the queue");
 }
 
@@ -477,12 +487,13 @@ fn continuous_blend_run_dispatches_continuously_without_flush() {
     let cap = Capture::default();
     // Generous cap so the buffer-cap backstop never fires: the continuity commit
     // alone must drain the run.
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg_cap(256),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     // A gentle zig-zag: every vertex blends (no unblended seam). The old
@@ -536,12 +547,13 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
     });
     let noop_nudge: NudgeDispatchFn = Arc::new(|_, _| Ok(()));
 
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
         dispatch,
         noop_nudge,
+        Arc::default(),
     );
 
     h.submit_move(co_move(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0))
@@ -579,12 +591,13 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
 #[test]
 fn flush_returns_after_commit_without_sleeping_until_playout() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
     h.submit_move(line_e(1, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0))
         .unwrap();

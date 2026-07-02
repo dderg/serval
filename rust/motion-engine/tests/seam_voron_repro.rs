@@ -1,56 +1,43 @@
-// Offline reproduction of the intermittent live `OverCommitted` abort seen on the
-// Neptune bench (Voron cube print). The bug is timing-dependent live because it
-// only fires when a commit seam lands with a *short front* (an early, producer-
-// stall-forced commit) whose re-fit yields a sharper apex than the pre-commit
-// curvature, dropping the corner cap below the already-committed entry velocity.
-//
-// Small FixedCap = commit as soon as the buffer holds `cap` moves = short front,
-// so sweeping cap deterministically surfaces the seams live timing hits at random.
+// Offline reproduction harness for the intermittent live `OverCommitted` abort
+// seen on the Neptune bench (Voron cube print). The streaming pipeline replays
+// the whole file; repeated runs vary the stage interleaving (and so the
+// emission boundaries) where the batch harness used to sweep commit caps.
 //
 // Point VORON_GCODE at the exact print file, then:
 //   VORON_GCODE=/path/voron_cube.gcode cargo test -p _motion_engine \
 //       --release --test seam_voron_repro -- --ignored --nocapture
 
-use _motion_engine::seam_test_harness::{
-    Cadence, CommitSchedule, default_stream_config, parse_gcode_to_moves, run_moves,
-};
+use _motion_engine::seam_test_harness::{default_stream_config, parse_gcode_to_moves, run_moves};
 
 #[test]
 #[ignore = "needs VORON_GCODE env pointing at the bench print file"]
-fn voron_seam_cap_sweep() {
+fn voron_seam_repeat_sweep() {
     let path = std::env::var("VORON_GCODE").expect("set VORON_GCODE to the gcode path");
     let src = std::fs::read_to_string(&path).expect("read gcode");
 
-    // Faithful to the bench host StreamConfig (bridge.rs:3511): default harness
+    // Faithful to the bench host StreamConfig (bridge.rs): default harness
     // already matches integration_tol=1e-4, buffer=512, jerk=100k, arc_fit off;
     // the only deltas are the printer.cfg scv and the host fit_tolerance default.
     let mut cfg = default_stream_config();
-    cfg.limits.square_corner_velocity_mm_s = 8.0;
+    cfg.limits.square_corner_velocity_mm_s = std::env::var("VORON_SCV")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8.0);
     cfg.fit_tol_mm = 0.005;
     let moves = parse_gcode_to_moves(&src, cfg.limits);
     eprintln!("parsed {} moves from {path}", moves.len());
 
-    let mut fatals = 0usize;
-    for cap in 1usize..=40 {
-        let schedule = CommitSchedule {
-            cadence: Cadence::FixedCap(cap),
-            force_after_move: Vec::new(),
-        };
-        let mut cfg = default_stream_config();
-        cfg.limits.square_corner_velocity_mm_s = 8.0;
-        cfg.fit_tol_mm = 0.005;
-        match run_moves(&moves, cfg, &schedule) {
-            Ok(report) => eprintln!(
-                "cap={cap:2}: OK   commits={} fatal_c0_seams={}",
-                report.commits,
-                report.fatal()
-            ),
-            Err(e) => {
-                fatals += 1;
-                eprintln!("cap={cap:2}: ABORT {e}");
-            }
+    let mut fatal_runs = 0usize;
+    for run in 1usize..=10 {
+        let report = run_moves(&moves, cfg);
+        let fatal = report.fatal();
+        eprintln!(
+            "run={run:2}: segments={} fatal_c0_seams={fatal}",
+            report.segments
+        );
+        if fatal > 0 {
+            fatal_runs += 1;
         }
     }
-    eprintln!("caps that aborted: {fatals}/40");
-    assert_eq!(fatals, 0, "reproduced the live OverCommitted abort offline");
+    assert_eq!(fatal_runs, 0, "reproduced a fatal C0 seam offline");
 }

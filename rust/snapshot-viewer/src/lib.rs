@@ -10,9 +10,6 @@ struct Snapshot {
     raw_y: Vec<f64>,
     fitted_segments: Vec<serde_json::Value>,
     traversal_time_s: f64,
-    blended_corners: usize,
-    chain_fits: usize,
-    unblended_corners: usize,
     // The lowered trajectory the firmware executes: per-axis pieces
     // [t0, t1, c0, c1, …] of position vs time (cubic = 6 floats). Variable-length
     // so any baseline degree loads — missing high coefficients read as zero — and
@@ -261,6 +258,34 @@ fn jerk_impulses(
     t_end: f64,
     a_peak: f64,
 ) -> (Vec<f64>, Vec<f64>) {
+    discontinuities(xp, yp, t_end, a_peak, |p, t| eval_piece(p, t).2)
+}
+
+// A step in velocity at a piece boundary is an acceleration impulse: the same
+// Dirac-delta reasoning as `jerk_impulses`, one derivative order down. The C1
+// Hermite lowering is supposed to match velocity at every joint, so a nonzero
+// one here is a real discontinuity the position/velocity graphs render as a
+// sharp corner rather than a smooth curve -- surface it the same way.
+fn accel_impulses(
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+    t_end: f64,
+    v_peak: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    discontinuities(xp, yp, t_end, v_peak, |p, t| eval_piece(p, t).1)
+}
+
+// Shared boundary-step detector: samples `derivative_at` on both sides of
+// every piece boundary and reports the ones whose jump clears a relative
+// floor of `scale_peak` (the peak value of the derivative one order up, e.g.
+// the acceleration peak when comparing jerk steps).
+fn discontinuities(
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+    t_end: f64,
+    scale_peak: f64,
+    derivative_at: impl Fn(&[f64], f64) -> f64,
+) -> (Vec<f64>, Vec<f64>) {
     if xp.is_empty() || yp.is_empty() || t_end <= 0.0 {
         return (Vec::new(), Vec::new());
     }
@@ -275,20 +300,20 @@ fn jerk_impulses(
     bounds.sort_by(|a, b| a.partial_cmp(b).unwrap());
     bounds.dedup();
 
-    let floor = (a_peak * 1e-3).max(1e-9);
+    let floor = (scale_peak * 1e-3).max(1e-9);
     let (mut times, mut mags) = (Vec::new(), Vec::new());
     for i in 1..bounds.len().saturating_sub(1) {
         let b = bounds[i];
         let lo = 0.5 * (bounds[i - 1] + b);
         let hi = 0.5 * (b + bounds[i + 1]);
-        let axl = eval_piece(&xp[piece_at(xp, lo)], b).2;
-        let axr = eval_piece(&xp[piece_at(xp, hi)], b).2;
-        let ayl = eval_piece(&yp[piece_at(yp, lo)], b).2;
-        let ayr = eval_piece(&yp[piece_at(yp, hi)], b).2;
-        let da = (axr - axl).hypot(ayr - ayl);
-        if da > floor {
+        let dxl = derivative_at(&xp[piece_at(xp, lo)], b);
+        let dxr = derivative_at(&xp[piece_at(xp, hi)], b);
+        let dyl = derivative_at(&yp[piece_at(yp, lo)], b);
+        let dyr = derivative_at(&yp[piece_at(yp, hi)], b);
+        let d = (dxr - dxl).hypot(dyr - dyl);
+        if d > floor {
             times.push(b);
-            mags.push(da);
+            mags.push(d);
         }
     }
     (times, mags)
@@ -486,10 +511,9 @@ pub struct TrajectoryData {
     j_scalar: Vec<f64>,
     jerk_impulse_t: Vec<f64>,
     jerk_impulse_mag: Vec<f64>,
+    accel_impulse_t: Vec<f64>,
+    accel_impulse_mag: Vec<f64>,
     traversal_time_s: f64,
-    blended_corners: usize,
-    chain_fits: usize,
-    unblended_corners: usize,
 }
 
 #[wasm_bindgen]
@@ -503,12 +527,16 @@ impl TrajectoryData {
         let segments = parse_segments(&snap.fitted_segments);
 
         let a_peak = ts.a_scalar.iter().copied().fold(0.0_f64, f64::max);
-        let (jerk_impulse_t, jerk_impulse_mag) =
+        let v_peak = ts.v_scalar.iter().copied().fold(0.0_f64, f64::max);
+        let (jerk_impulse_t, jerk_impulse_mag, accel_impulse_t, accel_impulse_mag) =
             match (&snap.traj_x_pieces, &snap.traj_y_pieces) {
                 (Some(xp), Some(yp)) => {
-                    jerk_impulses(xp, yp, snap.traj_t_end.unwrap_or(0.0), a_peak)
+                    let t_end = snap.traj_t_end.unwrap_or(0.0);
+                    let (jt, jm) = jerk_impulses(xp, yp, t_end, a_peak);
+                    let (at, am) = accel_impulses(xp, yp, t_end, v_peak);
+                    (jt, jm, at, am)
                 }
-                _ => (Vec::new(), Vec::new()),
+                _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             };
 
         Ok(TrajectoryData {
@@ -529,10 +557,9 @@ impl TrajectoryData {
             j_scalar: ts.j_scalar,
             jerk_impulse_t,
             jerk_impulse_mag,
+            accel_impulse_t,
+            accel_impulse_mag,
             traversal_time_s: snap.traversal_time_s,
-            blended_corners: snap.blended_corners,
-            chain_fits: snap.chain_fits,
-            unblended_corners: snap.unblended_corners,
         })
     }
 
@@ -590,18 +617,17 @@ impl TrajectoryData {
         Float64Array::from(&self.jerk_impulse_mag[..])
     }
 
+    // Times and |Δvel| of the accel impulses at velocity discontinuities.
+    pub fn accel_impulse_t(&self) -> Float64Array {
+        Float64Array::from(&self.accel_impulse_t[..])
+    }
+    pub fn accel_impulse_mag(&self) -> Float64Array {
+        Float64Array::from(&self.accel_impulse_mag[..])
+    }
+
     // Metadata
     pub fn traversal_time(&self) -> f64 {
         self.traversal_time_s
-    }
-    pub fn blended_corners(&self) -> usize {
-        self.blended_corners
-    }
-    pub fn chain_fits(&self) -> usize {
-        self.chain_fits
-    }
-    pub fn unblended_corners(&self) -> usize {
-        self.unblended_corners
     }
     pub fn point_count(&self) -> usize {
         self.t.len()

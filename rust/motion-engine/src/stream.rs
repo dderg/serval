@@ -1,84 +1,62 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
+use std::thread;
 use std::time::Instant;
 
+use crossbeam_channel::{Receiver, Sender, bounded};
 use geometry::path::lowering::PositionProfile;
-use geometry::path::{Line, Segment};
-use geometry::{
-    ChainFitConfig, FitError, FitOutcome, GeometryError, Move, VelocityConfig, VelocityError,
-    VelocityLimits, VelocityProfile, fit_chain_with_head_restore, plan_velocity_warm_start,
-};
+use geometry::{ChainFitConfig, Move, MoveVelocity, VelocityLimits};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
-use crate::lowering::{LoweringError, lower_move};
+use crate::lowering::lower_move;
+
+pub(crate) mod fitter;
+#[cfg(test)]
+mod fitter_tests;
+pub(crate) mod planner;
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
-const CONTIGUITY_EPS_MM: f64 = 1e-6;
+pub(crate) const CONTIGUITY_EPS_MM: f64 = 1e-6;
+const REST_EPS_MM_S: f64 = 1e-9;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamConfig {
     pub chain: ChainFitConfig,
-    pub velocity: VelocityConfig,
+    pub integration_tol: f64,
+    pub max_extrude_only_velocity_mm_s: f64,
+    pub max_extrude_only_accel_mm_s2: f64,
     pub fit_tol_mm: f64,
-    /// Backstop cap. The continuity commit drains at every blend (each
-    /// biclothoid rejoins the outgoing line at zero curvature, a clean seam), so
-    /// a normal continuous path commits without ever stopping. This force-drain
-    /// to rest only fires for a pathological buffer that has no clean seam within
-    /// reach at all (e.g. a single move longer than the whole look-ahead window)
-    /// — without it such a buffer would grow unbounded while nothing reaches the
-    /// MCU. It is a safety net, not the steady-state path.
+    /// Backstop cap on the planner's look-ahead window. A normal continuous
+    /// path always offers a clean seam, so the window stays small; this only
+    /// fires for a pathological window with no clean seam within the finality
+    /// barrier at all (e.g. a single move longer than the whole look-ahead) —
+    /// without it such a window would grow unbounded. It is a safety net, not
+    /// the steady-state path.
     pub max_buffer_moves: usize,
     /// Path limits for planner-internal moves (homing). Stream moves submitted
     /// through the bridge carry their own per-move limits; this is the fallback
-    /// the planner uses when it constructs a move itself.
+    /// used when the engine constructs a move itself.
     pub limits: VelocityLimits,
 }
 
 #[derive(Debug)]
 pub enum StreamError {
-    Fit(FitError),
-    Velocity(VelocityError),
-    Lowering(LoweringError),
-    Geometry(GeometryError),
-    /// A producer-stall watermark fired the brake-to-rest solve too late: the
-    /// locked lead remaining ahead of the playhead is already below the
-    /// solve-time budget, so the deceleration ramp cannot be planned and
-    /// dispatched before its first piece must play. Self-identifying on purpose
-    /// — a downstream late dispatch traced here means the fixed solve-time
-    /// constant was sized too short, not a generic clock fault. Never padded over.
-    BrakeToRestShortfall {
-        lead_remaining: f64,
-        solve_const: f64,
-    },
-    /// A move entered the buffer whose spatial start does not meet the toolhead
-    /// where the previous move (or the committed odometer) left it. Real slicer
-    /// output is always position-contiguous; a gap means the move stream was
-    /// stitched wrong upstream. Caught here so the offending move is named at
-    /// ingress, not as a downstream `ZeroMotion` deep in the fitter.
+    /// A move entered the pipeline whose spatial start does not meet the
+    /// toolhead where the previous move left it. Real slicer output is always
+    /// position-contiguous; a gap means the move stream was stitched wrong
+    /// upstream. Caught at ingress so the offending move is named there, not
+    /// as a downstream `ZeroMotion` deep in the fitter.
     Discontinuity {
         line_no: u32,
         expected: [f64; 3],
         got: [f64; 3],
         gap_mm: f64,
     },
-    PostProcess(PostProcessError),
 }
 
 impl std::fmt::Display for StreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Fit(e) => write!(f, "chain fit: {e:?}"),
-            Self::Velocity(e) => write!(f, "velocity plan: {e:?}"),
-            Self::Lowering(e) => write!(f, "lowering: {e}"),
-            Self::Geometry(e) => write!(f, "head-trim geometry: {e:?}"),
-            Self::BrakeToRestShortfall {
-                lead_remaining,
-                solve_const,
-            } => write!(
-                f,
-                "brake-to-rest shortfall: locked lead {lead_remaining:.6}s below \
-                 solve-time budget {solve_const:.6}s — solve-time constant too short"
-            ),
             Self::Discontinuity {
                 line_no,
                 expected,
@@ -90,39 +68,11 @@ impl std::fmt::Display for StreamError {
                  toolhead is at {expected:?} ({gap_mm:.6}mm gap) — move stream is \
                  not position-contiguous"
             ),
-            Self::PostProcess(e) => write!(f, "post-processing: {e}"),
         }
     }
 }
 
-impl From<GeometryError> for StreamError {
-    fn from(e: GeometryError) -> Self {
-        Self::Geometry(e)
-    }
-}
-
 impl std::error::Error for StreamError {}
-
-impl From<FitError> for StreamError {
-    fn from(e: FitError) -> Self {
-        Self::Fit(e)
-    }
-}
-impl From<VelocityError> for StreamError {
-    fn from(e: VelocityError) -> Self {
-        Self::Velocity(e)
-    }
-}
-impl From<LoweringError> for StreamError {
-    fn from(e: LoweringError) -> Self {
-        Self::Lowering(e)
-    }
-}
-impl From<PostProcessError> for StreamError {
-    fn from(e: PostProcessError) -> Self {
-        Self::PostProcess(e)
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PostProcessError {
@@ -138,708 +88,369 @@ pub enum PostProcessError {
     NonFiniteSample { axis: usize, t: f64 },
 }
 
-/// Identity + tracing for one `commit()` call. Carries the batch sequence
-/// number and the buffer's line range through `fit`/`plan`/`lower`/
-/// `choose_commit_boundary` so each stage's `tracing` span stays keyed the
-/// same way it was before those stages were split out of `commit()`.
-#[derive(Clone, Copy)]
-struct CommitBatch {
-    seq: u64,
-    line_lo: u32,
-    line_hi: u32,
+// ---------------------------------------------------------------------------
+// Pipeline types — items that flow between stages
+// ---------------------------------------------------------------------------
+
+pub struct PlannedMove {
+    pub geometry: Move,
+    pub velocity: MoveVelocity,
 }
 
-impl CommitBatch {
-    fn new(moves: &[Move]) -> Self {
-        Self {
-            seq: crate::timing::next_batch_seq(),
-            line_lo: moves.first().map_or(0, |m| m.source.start_line),
-            line_hi: moves.last().map_or(0, |m| m.source.start_line),
-        }
-    }
+/// Lowerer output: a dispatchable segment plus whether the trajectory is at
+/// rest at its end — the shaper may clamp its convolution window past a rest
+/// point (the signal is constant there), never past a moving end.
+pub struct LoweredSegment {
+    pub seg: ShapedSegment,
+    pub rest_at_end: bool,
+}
 
-    fn trace_fit(&self, n_in: usize, n_out: usize, elapsed: std::time::Duration) {
-        tracing::info!(
-            subsystem = "motion",
-            event = "pipe_fit",
-            batch = self.seq,
-            line_lo = self.line_lo,
-            line_hi = self.line_hi,
-            n_in,
-            n_out,
-            fit_us = elapsed.as_micros(),
-            t_us = crate::timing::mono_us(),
-            "[pipe] fit"
+pub struct PipelineHandle {
+    pub input: Sender<StreamInput>,
+    pub output: Receiver<ShapedItem>,
+}
+
+/// What flows into the fitter and planner: geometry, the command to stop
+/// looking ahead, or an ordered control token. `Drain` makes each stage
+/// resolve and emit everything it is holding — the fitter finalizes runs and
+/// blends, the planner materializes the brake-to-rest — exactly what a closed
+/// input does, but without ending the stream. The stages themselves never
+/// consult a clock or peek at channel occupancy; whoever owns the notion of
+/// time decides when to send `Drain`.
+#[derive(Debug)]
+pub enum StreamInput {
+    Move(Move),
+    Drain,
+    Control(Control),
+}
+
+impl From<Move> for StreamInput {
+    fn from(m: Move) -> Self {
+        Self::Move(m)
+    }
+}
+
+/// Ordered control tokens that flow through every stage with the geometry.
+/// The pipeline is set up once and lives forever; these replace the old
+/// teardown-and-rebuild lifecycle. Tokens that require the trajectory to be
+/// at rest (`Dwell`, `SetAxisChains`, `Barrier` after a flush) must be
+/// preceded by a `Drain`; the stages assert emptiness rather than draining
+/// implicitly, so a violated protocol fails loudly instead of hiding a
+/// velocity discontinuity.
+#[derive(Debug)]
+pub enum Control {
+    /// Advance the trajectory clock without motion (lowerer applies it).
+    Dwell { secs: f64 },
+    /// Drop all buffered state and restart the timeline at rest at `pos`.
+    /// The sender is responsible for gating the dispatcher (discard) so
+    /// motion already lowered ahead of this token is dropped, not executed.
+    Reset { pos: Vec<f64> },
+    /// Swap the post-processing chains (lowerer and shaper apply it).
+    SetAxisChains(AxisChainSet),
+    /// Acknowledged by the dispatcher once everything ahead of it has been
+    /// dispatched (or discarded): the pipeline-wide "everything before this
+    /// point is done" fence.
+    Barrier(Sender<BarrierAck>),
+}
+
+/// The dispatcher's answer to a `Barrier`.
+#[derive(Debug)]
+pub struct BarrierAck {
+    /// Stream time the dispatched trajectory has reached; `None` when nothing
+    /// has been dispatched since the last reset.
+    pub dispatched_through: Option<f64>,
+    /// Host instant of the first dispatch since the last reset, for
+    /// projecting stream time onto the wall clock.
+    pub sync_instant: Option<Instant>,
+    /// Dispatch errors captured since the previous barrier (error capture is
+    /// enabled by the homing paths; otherwise a dispatch error is fatal).
+    pub result: Result<(), String>,
+}
+
+/// Planner → lowerer.
+pub enum PlannedItem {
+    Move(PlannedMove),
+    Control(Control),
+}
+
+/// Lowerer → shaper.
+pub enum LoweredItem {
+    Seg(LoweredSegment),
+    Control(Control),
+}
+
+/// Shaper → dispatcher.
+pub enum ShapedItem {
+    Seg(ShapedSegment),
+    Control(Control),
+}
+
+/// Wires the pure stream stages (fitter → planner → lowerer → shaper) into
+/// OS threads. Production goes through `stream_worker::setup_pipeline`, which
+/// wraps these stages with the dispatcher and pump; this stage-only wiring is
+/// also used standalone by offline consumers (seam harness, trajectory dump)
+/// that have no hardware behind them.
+pub fn setup_stages(
+    config: StreamConfig,
+    axis_chains: AxisChainSet,
+    home_pos: Vec<f64>,
+    t_start: f64,
+) -> PipelineHandle {
+    let (raw_tx, raw_rx) = bounded::<StreamInput>(64);
+    let (fitted_tx, fitted_rx) = bounded::<StreamInput>(64);
+    let (planned_tx, planned_rx) = bounded::<PlannedItem>(64);
+    let (lowered_tx, lowered_rx) = bounded::<LoweredItem>(64);
+    let (shaped_tx, shaped_rx) = bounded::<ShapedItem>(64);
+
+    let fitter = fitter::Fitter::new(config.chain);
+    spawn_stage("kalico-fit", move || fitter.run(raw_rx, fitted_tx));
+
+    let planner = planner::Planner::new(config);
+    spawn_stage("kalico-plan", move || planner.run(fitted_rx, planned_tx));
+
+    let fit_tol = config.fit_tol_mm;
+    let lower_chains = axis_chains.clone();
+    spawn_stage("kalico-lower", move || {
+        run_lowerer(
+            planned_rx,
+            lowered_tx,
+            fit_tol,
+            lower_chains,
+            home_pos,
+            t_start,
         );
-    }
+    });
 
-    fn trace_plan(&self, elapsed: std::time::Duration) {
-        tracing::info!(
-            subsystem = "motion",
-            event = "pipe_plan",
-            batch = self.seq,
-            line_lo = self.line_lo,
-            line_hi = self.line_hi,
-            plan_us = elapsed.as_micros(),
-            t_us = crate::timing::mono_us(),
-            "[pipe] plan"
-        );
-    }
+    let shaper = Shaper::new(axis_chains);
+    spawn_stage("kalico-shape", move || shaper.run(lowered_rx, shaped_tx));
 
-    fn trace_lower(&self, n: usize, elapsed: std::time::Duration) {
-        tracing::info!(
+    PipelineHandle {
+        input: raw_tx,
+        output: shaped_rx,
+    }
+}
+
+fn spawn_stage(name: &str, f: impl FnOnce() + Send + 'static) {
+    thread::Builder::new()
+        .name(name.to_string())
+        .spawn(f)
+        .unwrap_or_else(|e| panic!("spawn {name}: {e}"));
+}
+
+/// Third pipeline stage: lowers each planned move into a dispatchable
+/// `ShapedSegment`. It is the persistent owner of the trajectory clock and
+/// odometer: `Dwell` advances the clock without motion, `Reset` restarts the
+/// timeline at rest at the given position, `SetAxisChains` swaps the chain
+/// set future moves are lowered against.
+pub(crate) fn run_lowerer(
+    input: Receiver<PlannedItem>,
+    output: Sender<LoweredItem>,
+    fit_tol_mm: f64,
+    mut axis_chains: AxisChainSet,
+    home_pos: Vec<f64>,
+    t_start: f64,
+) {
+    let mut odometer = home_pos;
+    let mut t = t_start;
+
+    while let Ok(item) = input.recv() {
+        let planned = match item {
+            PlannedItem::Move(planned) => planned,
+            PlannedItem::Control(ctrl) => {
+                match &ctrl {
+                    Control::Dwell { secs } => {
+                        assert!(*secs >= 0.0, "lowerer: negative dwell {secs}");
+                        t += secs;
+                    }
+                    Control::Reset { pos } => {
+                        odometer.clone_from(pos);
+                        t = 0.0;
+                    }
+                    Control::SetAxisChains(chains) => axis_chains = chains.clone(),
+                    Control::Barrier(_) => {}
+                }
+                if output.send(LoweredItem::Control(ctrl)).is_err() {
+                    return;
+                }
+                continue;
+            }
+        };
+        let clock = Instant::now();
+        let mut seg = lower_move(
+            &planned.geometry,
+            &planned.velocity,
+            t,
+            &odometer,
+            fit_tol_mm,
+            &axis_chains.chains,
+        )
+        .unwrap_or_else(|e| panic!("lowerer: line {}: {e}", planned.geometry.source.start_line));
+        seg.source_line = planned.geometry.source.start_line;
+
+        t = seg.t_end;
+        advance_odometer(&mut odometer, &planned.geometry);
+        tracing::debug!(
             subsystem = "motion",
             event = "pipe_lower",
-            batch = self.seq,
-            line_lo = self.line_lo,
-            line_hi = self.line_hi,
-            n,
-            lower_us = elapsed.as_micros(),
+            line = seg.source_line,
+            lower_us = clock.elapsed().as_micros(),
             t_us = crate::timing::mono_us(),
             "[pipe] lower"
         );
-    }
 
-    #[allow(clippy::too_many_arguments)]
-    fn trace_commit_decision(
-        &self,
-        force: bool,
-        n: usize,
-        unblended: usize,
-        commit_count: usize,
-        total_t: f64,
-        barrier: usize,
-        v_barrier: f64,
-        entry_v: f64,
-        t_committed: f64,
-    ) {
-        tracing::info!(
-            subsystem = "motion",
-            event = "commit_decision",
-            batch = self.seq,
-            force,
-            n,
-            unblended,
-            commit_count,
-            total_t,
-            barrier,
-            v_barrier,
-            entry_v,
-            t_committed,
-            "[commit-decision]"
-        );
-    }
-}
-
-/// Streaming look-ahead planner over the new geometry pipeline. Buffers
-/// submitted moves, re-plans the uncommitted window warm-started from the
-/// dispatched velocity, and commits prefixes at zero-curvature seams so the
-/// trajectory stays velocity-continuous across consecutive moves without
-/// re-emitting committed pieces. A seam is committable wherever the fit output
-/// resumes a straight line body: that holds at unblended junctions and equally
-/// at the exit of every blend, since a biclothoid rejoins the outgoing line at
-/// zero curvature. Committing through a blend consumes the next move's head, so
-/// that move is replaced in the buffer by its head-trimmed remainder before the
-/// next re-fit. Commit timing (real-time cadence) is the caller's; this type
-/// owns the geometry/velocity state.
-pub struct StreamState {
-    buffer: VecDeque<Move>,
-    entry_v: f64,
-    odometer: Vec<f64>,
-    t_committed: f64,
-    /// Spatial length consumed from the current front move's head by the blend
-    /// committed at the last seam. Fed back into the next fit so the leading
-    /// corner re-fits to the curvature it had before the head was trimmed; 0.0
-    /// when the front move is untrimmed (fresh, force-drained, or commit at a
-    /// plain seam). See docs/rewrite/windowed-fit-ceiling-jitter.md.
-    committed_head_len: f64,
-    /// Velocity at the most recent plan's finality barrier, carried so the
-    /// streaming driver can size the producer-stall brake-to-rest watermark from
-    /// `t_brake(v_barrier)` without re-planning — the speed the planner is riding,
-    /// whether or not that plan advanced the commit. `0.0` before the first plan.
-    last_v_barrier: f64,
-    config: StreamConfig,
-    axis_chains: AxisChainSet,
-    post_history: VecDeque<ShapedSegment>,
-}
-
-impl StreamState {
-    #[must_use]
-    pub fn new(
-        config: StreamConfig,
-        axis_chains: AxisChainSet,
-        home_pos: &[f64],
-        t_start: f64,
-    ) -> Self {
-        Self {
-            buffer: VecDeque::new(),
-            entry_v: 0.0,
-            odometer: home_pos.to_vec(),
-            t_committed: t_start,
-            committed_head_len: 0.0,
-            last_v_barrier: 0.0,
-            config,
-            axis_chains,
-            post_history: VecDeque::new(),
-        }
-    }
-
-    pub fn set_axis_chains(&mut self, axis_chains: AxisChainSet) {
-        self.axis_chains = axis_chains;
-    }
-
-    pub fn reset(&mut self, home_pos: &[f64], t_start: f64) {
-        self.buffer.clear();
-        self.entry_v = 0.0;
-        self.odometer = home_pos.to_vec();
-        self.t_committed = t_start;
-        self.committed_head_len = 0.0;
-        self.last_v_barrier = 0.0;
-        self.post_history.clear();
-    }
-
-    pub fn push(&mut self, m: Move) -> Result<(), StreamError> {
-        if let Some(seg) = &m.segment.spatial {
-            let got = seg.point_at(0.0);
-            let expected = self.expected_spatial_end();
-            let gap_mm = dist3(expected, got);
-            if gap_mm > CONTIGUITY_EPS_MM {
-                return Err(StreamError::Discontinuity {
-                    line_no: m.source.start_line,
-                    expected,
-                    got,
-                    gap_mm,
-                });
-            }
-        }
-        self.buffer.push_back(m);
-        Ok(())
-    }
-
-    fn expected_spatial_end(&self) -> [f64; 3] {
-        for m in self.buffer.iter().rev() {
-            if let Some(seg) = &m.segment.spatial {
-                return seg.point_at(m.segment.s_len());
-            }
-        }
-        [self.odometer[0], self.odometer[1], self.odometer[2]]
-    }
-
-    pub fn advance_time(&mut self, dt: f64) {
-        debug_assert!(
-            self.buffer.is_empty(),
-            "advance_time requires a drained buffer"
-        );
-        debug_assert_eq!(self.entry_v, 0.0, "advance_time requires rest at the seam");
-        if dt > 0.0 {
-            self.t_committed += dt;
-            self.post_history.clear();
-        }
-    }
-
-    pub fn advance_idle(&mut self, target_t: f64) {
-        debug_assert!(
-            self.buffer.is_empty(),
-            "advance_idle requires a drained buffer"
-        );
-        debug_assert_eq!(self.entry_v, 0.0, "advance_idle requires rest at the seam");
-        if target_t > self.t_committed {
-            self.t_committed = target_t;
-            self.post_history.clear();
-        }
-    }
-
-    pub fn restart_idle_timeline(&mut self) {
-        debug_assert!(
-            self.buffer.is_empty(),
-            "restart_idle_timeline requires a drained buffer"
-        );
-        debug_assert_eq!(
-            self.entry_v, 0.0,
-            "restart_idle_timeline requires rest at the seam"
-        );
-        self.t_committed = 0.0;
-        self.post_history.clear();
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
-    }
-
-    #[must_use]
-    pub fn buffered(&self) -> usize {
-        self.buffer.len()
-    }
-
-    #[must_use]
-    pub fn t_committed(&self) -> f64 {
-        self.t_committed
-    }
-
-    #[must_use]
-    pub fn entry_velocity(&self) -> f64 {
-        self.entry_v
-    }
-
-    /// Velocity at the most recent plan's finality barrier (`0.0` before any plan).
-    #[must_use]
-    pub fn last_v_barrier(&self) -> f64 {
-        self.last_v_barrier
-    }
-
-    /// Jerk-limited time to brake from the last barrier velocity to rest, sizing
-    /// the producer-stall flush watermark. A safe over-estimate for curved
-    /// geometry, so the watermark fires slightly early — never late.
-    #[must_use]
-    pub fn stall_brake_time(&self) -> f64 {
-        jerk_limited_brake_time(
-            self.last_v_barrier,
-            self.config.limits.accel_mm_s2,
-            self.config.velocity.max_jerk_mm_s3,
-        )
-    }
-
-    #[must_use]
-    pub fn limits(&self) -> VelocityLimits {
-        self.config.limits
-    }
-
-    #[must_use]
-    pub fn max_buffer_moves(&self) -> usize {
-        self.config.max_buffer_moves
-    }
-
-    /// Plan the buffer and commit a prefix at the latest zero-curvature seam.
-    /// `force` (flush / dwell / idle drain / shutdown) commits the entire buffer
-    /// to rest. Returns the `ShapedSegment`s to dispatch, in order; empty when
-    /// nothing is committable yet.
-    pub fn commit(&mut self, force: bool) -> Result<Vec<ShapedSegment>, StreamError> {
-        if self.buffer.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let moves: Vec<Move> = self.buffer.iter().cloned().collect();
-        let batch = CommitBatch::new(&moves);
-
-        let outcome = self.fit(&moves, batch)?;
-        let profile = self.plan(&outcome, batch)?;
-        let (segs, seam_xyz) = self.lower(&outcome, &profile, batch)?;
-
-        let commit_count =
-            self.choose_commit_boundary(force, &outcome, &profile, &seam_xyz, &segs, batch);
-        if commit_count == 0 {
-            return Ok(Vec::new());
-        }
-        let commit_count = self.post_commit_count(commit_count, force, &segs);
-        if commit_count == 0 {
-            return Ok(Vec::new());
-        }
-
-        let committed = apply_axis_chains(
-            &self.post_history,
-            &segs,
-            commit_count,
-            force,
-            &self.axis_chains.chains,
-        )?;
-
-        self.advance_state(&outcome, &profile, &committed, commit_count)?;
-        self.post_history
-            .extend(segs.into_iter().take(commit_count));
-        self.trim_post_history();
-
-        Ok(committed)
-    }
-
-    /// Fit the buffered raw moves into G2-continuous geometry (biclothoid
-    /// corner blends). Purely geometric — never reasons about velocity.
-    fn fit(&self, moves: &[Move], batch: CommitBatch) -> Result<FitOutcome, StreamError> {
-        let fit_clock = Instant::now();
-        let outcome =
-            fit_chain_with_head_restore(moves, self.config.chain, self.committed_head_len)?;
-        batch.trace_fit(moves.len(), outcome.moves.len(), fit_clock.elapsed());
-        Ok(outcome)
-    }
-
-    /// Plan a jerk-limited S-curve speed profile over the fitted geometry,
-    /// warm-started from the velocity already committed at the last seam.
-    fn plan(
-        &self,
-        outcome: &FitOutcome,
-        batch: CommitBatch,
-    ) -> Result<VelocityProfile, StreamError> {
-        let plan_clock = Instant::now();
-        let profile = plan_velocity_warm_start(outcome, self.config.velocity, self.entry_v)?;
-        batch.trace_plan(plan_clock.elapsed());
-        Ok(profile)
-    }
-
-    /// Lower each fitted move + its velocity profile into a dispatchable
-    /// `ShapedSegment`, advancing a local odometer/clock as it goes. Returns
-    /// the segments alongside each seam's position (needed to judge whether a
-    /// commit boundary there is head-trim-feasible).
-    fn lower(
-        &self,
-        outcome: &FitOutcome,
-        profile: &VelocityProfile,
-        batch: CommitBatch,
-    ) -> Result<(Vec<ShapedSegment>, Vec<[f64; 3]>), StreamError> {
-        let n = outcome.moves.len();
-        let mut pos = self.odometer.clone();
-        let mut t = self.t_committed;
-        let mut segs: Vec<ShapedSegment> = Vec::with_capacity(n);
-        let mut seam_xyz: Vec<[f64; 3]> = Vec::with_capacity(n);
-        let lower_clock = Instant::now();
-        for (gm, vm) in outcome.moves.iter().zip(&profile.moves) {
-            seam_xyz.push([pos[0], pos[1], pos[2]]);
-            let mut seg = lower_move(
-                gm,
-                vm,
-                t,
-                &pos,
-                self.config.fit_tol_mm,
-                &self.axis_chains.chains,
-            )?;
-            seg.source_line = gm.source.start_line;
-            t = seg.t_end;
-            advance_odometer(&mut pos, gm);
-            segs.push(seg);
-        }
-        batch.trace_lower(n, lower_clock.elapsed());
-        Ok((segs, seam_xyz))
-    }
-
-    /// Pick the furthest-forward clean (zero-curvature) seam that's still
-    /// head-trim-feasible and inside the finality barrier — the boundary up
-    /// to which this batch commits. `force` commits everything.
-    fn choose_commit_boundary(
-        &mut self,
-        force: bool,
-        outcome: &FitOutcome,
-        profile: &VelocityProfile,
-        seam_xyz: &[[f64; 3]],
-        segs: &[ShapedSegment],
-        batch: CommitBatch,
-    ) -> usize {
-        let n = outcome.moves.len();
-        let commit_count = if force {
-            n
-        } else {
-            let unblended: HashSet<u32> =
-                outcome.report.unblended.iter().map(|u| u.line_no).collect();
-            let setback =
-                brake_to_rest_setback(&outcome.moves, self.config.velocity.max_jerk_mm_s3);
-            let total_arc: f64 = outcome.moves.iter().map(|m| m.segment.s_len()).sum();
-            let mut arc_to_seam = 0.0_f64;
-            let mut chosen = 0usize;
-            for i in 1..=profile.barrier {
-                arc_to_seam += outcome.moves[i - 1].segment.s_len();
-                if total_arc - arc_to_seam < setback {
-                    break;
-                }
-                if is_clean_seam(&outcome.moves, i, &unblended)
-                    && self.head_trim_feasible(&outcome.moves, i, seam_xyz[i])
-                {
-                    chosen = i;
-                }
-            }
-            chosen
-        };
-        debug_assert!(
-            force || commit_count <= profile.barrier,
-            "commit boundary {commit_count} past finality barrier {} — \
-             a seam still open to a future append would be committed",
-            profile.barrier
-        );
-        self.last_v_barrier = profile.v_barrier;
-        let total_t = segs.last().map_or(0.0, |s| s.t_end) - self.t_committed;
-        batch.trace_commit_decision(
-            force,
-            n,
-            outcome.report.unblended.len(),
-            commit_count,
-            total_t,
-            profile.barrier,
-            profile.v_barrier,
-            self.entry_v,
-            self.t_committed,
-        );
-        commit_count
-    }
-
-    /// Advance the odometer/clock/entry-velocity to the new commit boundary,
-    /// then retire committed moves from the buffer — trimming the front to
-    /// the seam and carrying the trimmed length into the next fit's
-    /// blend-budget restore (`committed_head_len`) so the trailing corner
-    /// re-fits to the curvature it had before the head was committed (else a
-    /// shorter front yields a sharper apex and a corner cap below the
-    /// already-committed entry velocity — an `OverCommitted` abort).
-    fn advance_state(
-        &mut self,
-        outcome: &FitOutcome,
-        profile: &VelocityProfile,
-        committed: &[ShapedSegment],
-        commit_count: usize,
-    ) -> Result<(), StreamError> {
-        let n = outcome.moves.len();
-
-        let mut seam_pos = self.odometer.clone();
-        for gm in outcome.moves.iter().take(commit_count) {
-            advance_odometer(&mut seam_pos, gm);
-        }
-        self.odometer = seam_pos;
-        self.t_committed = committed.last().expect("commit_count > 0").t_end;
-        self.entry_v = if commit_count == n {
-            0.0
-        } else {
-            profile.moves[commit_count - 1].exit_v
-        };
-
-        if commit_count == n {
-            self.buffer.clear();
-            self.committed_head_len = 0.0;
-            return Ok(());
-        }
-
-        let keep_line = outcome.moves[commit_count].source.start_line;
-        while self
-            .buffer
-            .front()
-            .is_some_and(|m| m.source.start_line < keep_line)
+        let rest_at_end = planned.velocity.exit_v <= REST_EPS_MM_S;
+        if output
+            .send(LoweredItem::Seg(LoweredSegment { seg, rest_at_end }))
+            .is_err()
         {
-            self.buffer.pop_front();
+            return;
         }
-        // `keep_line` retires moves wholly before the seam, but a move can be
-        // fully committed yet still carry the seam's source line (a collinear
-        // split or coalesced run emits one move as several pieces). Drop any
-        // front whose geometry has already reached the committed odometer so the
-        // trim below never sees a degenerate (zero-length) remainder.
-        while self.front_reached_odometer() {
-            self.buffer.pop_front();
+    }
+}
+
+/// Final pipeline stage: streaming axis-chain post-processing. Buffers lowered
+/// segments until each one's convolution window is covered by lookahead, then
+/// emits the shaped segment; keeps just-emitted raw segments as the history the
+/// next windows read. A rest ending lets the buffer flush with the window
+/// clamped (the signal is constant past a rest point), so the trajectory's
+/// tail is never held hostage to input that may not come.
+pub(crate) struct Shaper {
+    chains: AxisChainSet,
+    history: VecDeque<ShapedSegment>,
+    pending: VecDeque<ShapedSegment>,
+    pending_rest: VecDeque<bool>,
+    forward_support: f64,
+    back_support: f64,
+}
+
+impl Shaper {
+    pub(crate) fn new(chains: AxisChainSet) -> Self {
+        let (forward_support, back_support) = supports_of(&chains);
+        Self {
+            chains,
+            history: VecDeque::new(),
+            pending: VecDeque::new(),
+            pending_rest: VecDeque::new(),
+            forward_support,
+            back_support,
         }
-        // The clean seam can fall at an internal sub-piece boundary of the kept
-        // raw move — a blend exit, or a collinear split that emits one move as
-        // several line pieces — leaving the raw move starting behind the
-        // committed odometer. Trim it to start exactly at the seam so the next
-        // re-fit's first piece is C0 with what was just emitted.
-        self.committed_head_len = if self.front_starts_behind_odometer() {
-            self.trim_front_to_seam()?
-        } else {
-            0.0
-        };
-        Ok(())
     }
 
-    /// Materialize the deferred brake-to-rest on a producer-stall watermark.
-    /// `lead_remaining` is the locked lead still ahead of the playhead at trigger
-    /// time. If it is already below the fixed solve-time budget the ramp cannot
-    /// be planned and dispatched before its first piece must play, so we fail
-    /// loud with [`StreamError::BrakeToRestShortfall`] instead of sending a piece
-    /// into the MCU's past. Otherwise it is the ordinary forced drain-to-rest —
-    /// and if a move arrives after this returns, the next `commit` simply resumes
-    /// locked commits from the new entry velocity.
-    pub fn commit_stall_brake(
-        &mut self,
-        lead_remaining: f64,
-        solve_const: f64,
-    ) -> Result<Vec<ShapedSegment>, StreamError> {
-        if self.buffer.is_empty() {
-            return Ok(Vec::new());
-        }
-        if lead_remaining <= solve_const {
-            return Err(StreamError::BrakeToRestShortfall {
-                lead_remaining,
-                solve_const,
-            });
-        }
-        self.commit(true)
-    }
-
-    /// Whether committing through the blend at output index `i` would leave a
-    /// head-trimmable remainder. Committing through a blend consumes the kept
-    /// move's head, so that move must be a `Line` (line-line blend) with a
-    /// non-degenerate portion left past the seam. A boundary that fails this is
-    /// refused by selection so the planner never produces a zero-length or
-    /// non-line trim (which would otherwise abort the stream). The warn fires
-    /// only on the rare refusal and records the geometry that triggered it.
-    fn head_trim_feasible(&self, moves: &[Move], i: usize, seam_xyz: [f64; 3]) -> bool {
-        if !blend_consumed_head(moves, i) {
-            return true;
-        }
-        let keep_line = moves[i].source.start_line;
-        let Some(front) = self
-            .buffer
-            .iter()
-            .find(|m| m.source.start_line == keep_line)
-        else {
-            tracing::warn!(
-                subsystem = "motion",
-                event = "head_trim_refused",
-                keep_line,
-                reason = "no buffer move for kept line",
-                "[head-trim-refused]"
-            );
-            return false;
-        };
-        match &front.segment.spatial {
-            Some(Segment::Line(line)) => {
-                let remainder = dist3(seam_xyz, line.end);
-                if remainder <= TRIM_EPS_MM {
-                    tracing::warn!(
-                        subsystem = "motion",
-                        event = "head_trim_refused",
-                        keep_line,
-                        remainder,
-                        reason = "degenerate remainder",
-                        "[head-trim-refused]"
-                    );
-                    false
-                } else {
-                    true
+    pub(crate) fn run(mut self, input: Receiver<LoweredItem>, output: Sender<ShapedItem>) {
+        loop {
+            match input.recv() {
+                Ok(LoweredItem::Seg(item)) => {
+                    self.pending.push_back(item.seg);
+                    self.pending_rest.push_back(item.rest_at_end);
+                    if !self.emit(self.supported_count(), false, &output) {
+                        return;
+                    }
+                    let at_rest = self.pending_rest.back() == Some(&true);
+                    if at_rest && input.is_empty() && !self.emit(self.pending.len(), true, &output)
+                    {
+                        return;
+                    }
+                }
+                Ok(LoweredItem::Control(ctrl)) => {
+                    match &ctrl {
+                        Control::Reset { .. } => {
+                            self.pending.clear();
+                            self.pending_rest.clear();
+                            self.history.clear();
+                        }
+                        Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
+                            assert!(
+                                self.pending.is_empty() || self.pending_rest.back() == Some(&true),
+                                "shaper: control token arrived while the trajectory is not at \
+                                 rest — a Drain must precede it"
+                            );
+                            if !self.emit(self.pending.len(), true, &output) {
+                                return;
+                            }
+                            if let Control::SetAxisChains(chains) = &ctrl {
+                                (self.forward_support, self.back_support) = supports_of(chains);
+                                self.chains = chains.clone();
+                                self.history.clear();
+                            }
+                        }
+                    }
+                    if output.send(ShapedItem::Control(ctrl)).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    self.emit(self.pending.len(), true, &output);
+                    return;
                 }
             }
-            other => {
-                tracing::warn!(
-                    subsystem = "motion",
-                    event = "head_trim_refused",
-                    keep_line,
-                    spatial = ?other.as_ref().map(std::mem::discriminant),
-                    reason = "kept move is not a line",
-                    "[head-trim-refused]"
-                );
-                false
-            }
         }
     }
 
-    /// Whether the kept front move's geometric start sits behind the committed
-    /// odometer — i.e. the seam landed inside this raw move and part of it was
-    /// already emitted. True at a blend exit and at a collinear split where one raw
-    /// move emitted as several line pieces.
-    fn front_starts_behind_odometer(&self) -> bool {
-        self.buffer
-            .front()
-            .and_then(|m| m.segment.spatial.as_ref())
-            .is_some_and(|seg| {
-                dist3(
-                    seg.point_at(0.0),
-                    [self.odometer[0], self.odometer[1], self.odometer[2]],
-                ) > TRIM_EPS_MM
-            })
-    }
-
-    /// Whether the front move's geometric end has reached the committed odometer —
-    /// the move is fully committed and must be retired rather than trimmed.
-    fn front_reached_odometer(&self) -> bool {
-        self.buffer.front().is_some_and(|m| {
-            m.segment.spatial.as_ref().is_some_and(|seg| {
-                dist3(
-                    seg.point_at(m.segment.s_len()),
-                    [self.odometer[0], self.odometer[1], self.odometer[2]],
-                ) <= TRIM_EPS_MM
-            })
-        })
-    }
-
-    /// Replace the front buffer move with the portion that survives the seam: a
-    /// line from the committed position to the move's original end. The committed
-    /// blend already paid out the head (spatial and, proportionally, followers),
-    /// so the per-mm follower ratios carry over unchanged. Selection has already
-    /// proven this is a `Line` with a non-degenerate remainder
-    /// ([`Self::head_trim_feasible`]).
-    fn trim_front_to_seam(&mut self) -> Result<f64, StreamError> {
-        let front = self
-            .buffer
-            .front()
-            .expect("trim requires a kept front move");
-        let Some(Segment::Line(line)) = &front.segment.spatial else {
-            return Err(StreamError::Geometry(GeometryError::ZeroMotion));
+    /// How many front segments have their forward convolution window covered
+    /// by the buffered lookahead.
+    fn supported_count(&self) -> usize {
+        let Some(last) = self.pending.back() else {
+            return 0;
         };
-        let new_start = [self.odometer[0], self.odometer[1], self.odometer[2]];
-        let head_consumed = dist3(line.start, new_start);
-        let trimmed = Line::try_new(new_start, line.end)?;
-        let segment = geometry::path::PathSegment::try_new(
-            Segment::Line(trimmed),
-            front.segment.followers.clone(),
-        )?;
-        let replacement = Move {
-            segment,
-            feedrate_mm_s: front.feedrate_mm_s,
-            limits: front.limits,
-            source: front.source,
-        };
-        *self.buffer.front_mut().expect("front checked above") = replacement;
-        Ok(head_consumed)
-    }
-
-    fn post_commit_count(&self, commit_count: usize, force: bool, segs: &[ShapedSegment]) -> usize {
-        if force || commit_count == 0 {
-            return commit_count;
-        }
-        let forward_support = self
-            .axis_chains
-            .chains
+        let latest_safe_t = last.t_end - self.forward_support;
+        self.pending
             .iter()
-            .map(|chain| chain.max_half_support().1)
-            .fold(0.0, f64::max);
-        if forward_support <= 0.0 {
-            return commit_count;
-        }
-        let latest_safe_t = segs.last().map_or(0.0, |seg| seg.t_end - forward_support);
-        segs.iter()
-            .take(commit_count)
             .take_while(|seg| seg.t_end <= latest_safe_t + 1e-12)
             .count()
     }
 
-    fn trim_post_history(&mut self) {
-        let back_support = self
-            .axis_chains
-            .chains
-            .iter()
-            .map(|chain| chain.max_half_support().0.abs())
-            .fold(0.0, f64::max);
-        let keep_after = self.t_committed - back_support;
+    fn emit(&mut self, count: usize, force: bool, output: &Sender<ShapedItem>) -> bool {
+        if count == 0 {
+            return true;
+        }
+        let base = self.pending.make_contiguous();
+        let shaped = apply_axis_chains(&self.history, base, count, force, &self.chains.chains)
+            .unwrap_or_else(|e| panic!("shaper: {e}"));
+        for seg in shaped {
+            if output.send(ShapedItem::Seg(seg)).is_err() {
+                return false;
+            }
+        }
+        for _ in 0..count {
+            let raw = self.pending.pop_front().expect("count <= pending");
+            self.pending_rest.pop_front();
+            self.history.push_back(raw);
+        }
+        let emitted_through = self
+            .history
+            .back()
+            .expect("just pushed emitted segments")
+            .t_end;
+        let keep_after = emitted_through - self.back_support;
         while self
-            .post_history
+            .history
             .front()
             .is_some_and(|seg| seg.t_end < keep_after)
         {
-            self.post_history.pop_front();
+            self.history.pop_front();
         }
+        true
     }
 }
 
-/// A non-forced commit may cut wherever the fit output resumes a straight line
-/// body (zero curvature: an unblended seam or the exit of a blend) — never
-/// inside a blend, where curvature is nonzero and the velocity warm-start, which
-/// carries only a scalar entry speed, would be invalid.
-fn is_clean_seam(moves: &[Move], i: usize, unblended: &HashSet<u32>) -> bool {
-    unblended.contains(&moves[i].source.start_line)
-        || matches!(moves[i].segment.spatial, Some(Segment::Line(_)))
+fn supports_of(chains: &AxisChainSet) -> (f64, f64) {
+    let forward = chains
+        .chains
+        .iter()
+        .map(|chain| chain.max_half_support().1)
+        .fold(0.0, f64::max);
+    let back = chains
+        .chains
+        .iter()
+        .map(|chain| chain.max_half_support().0.abs())
+        .fold(0.0, f64::max);
+    (forward, back)
 }
-
-/// Whether the seam before output index `i` is the exit of a blend, i.e. the
-/// blend consumed the head of the move resuming at `i`. The preceding output is
-/// then the blend's trailing clothoid half, which shares the resuming move's
-/// source line; an unblended seam is preceded by a different move's body.
-fn blend_consumed_head(moves: &[Move], i: usize) -> bool {
-    i > 0
-        && matches!(moves[i - 1].segment.spatial, Some(Segment::Clothoid(_)))
-        && moves[i - 1].source.start_line == moves[i].source.start_line
-}
-
-/// Minimum surviving spatial length of a head-trimmed move. Below this the
-/// remainder is degenerate and the commit boundary is refused.
-const TRIM_EPS_MM: f64 = 1e-6;
 
 /// Jerk-limited time to decelerate from `v` to rest under accel limit `a` and
 /// jerk limit `j`: `v/a + a/j` once the ramp reaches `a` (`v > a²/j`), else the
-/// triangular `2·√(v/j)`. Used only to size the producer-stall flush watermark,
-/// never to locate the finality barrier — the backward velocity sweep does that
-/// exactly. Curvature only slows a real stop, so this straight-line time is a
-/// safe over-estimate and the watermark fires slightly early.
+/// triangular `2·√(v/j)`. Curvature only slows a real stop, so this
+/// straight-line time is a safe over-estimate.
 #[must_use]
 pub fn jerk_limited_brake_time(v: f64, a: f64, j: f64) -> f64 {
     if v <= 0.0 {
@@ -855,37 +466,14 @@ pub fn jerk_limited_brake_time(v: f64, a: f64, j: f64) -> f64 {
     }
 }
 
-/// Arc length the commit boundary is held back from the buffer's tentative
-/// terminal. The lowering reconstructs each move's velocity body against its run
-/// terminal, so a move within one braking distance of the buffer's fictional
-/// rest has its body shaped by that fiction — it is not yet terminal-independent
-/// and an appended move would change it. Holding the boundary this far back makes
-/// every committed body a function of geometry alone, so the committed trajectory
-/// is final under append and output-equivalent to a full re-plan — positions
-/// exactly, seam timing within the iterative velocity stage's tolerance. The
-/// brake-to-rest tail this defers is the flush-only artifact. A safe over-estimate of the
-/// jerk-limited stopping distance from the buffer's peak feedrate (`v · t_brake`
-/// over-bounds the true `∫v dt`), so the held-back open tail stays bounded.
-fn brake_to_rest_setback(moves: &[Move], max_jerk_mm_s3: f64) -> f64 {
-    let v_peak = moves
-        .iter()
-        .map(|m| m.feedrate_mm_s.min(m.limits.max_velocity_mm_s))
-        .fold(0.0_f64, f64::max);
-    let a_min = moves
-        .iter()
-        .map(|m| m.limits.accel_mm_s2)
-        .fold(f64::INFINITY, f64::min);
-    v_peak * jerk_limited_brake_time(v_peak, a_min, max_jerk_mm_s3)
-}
-
-fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
+pub(crate) fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
     let dz = a[2] - b[2];
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-fn advance_odometer(pos: &mut [f64], gm: &Move) {
+pub(crate) fn advance_odometer(pos: &mut [f64], gm: &Move) {
     let s_len = gm.segment.s_len();
     if let Some(seg) = &gm.segment.spatial {
         let end = seg.point_at(s_len);

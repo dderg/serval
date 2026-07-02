@@ -49,7 +49,7 @@ fn stalls_when_global_head_ring_full() {
 }
 
 #[test]
-fn batches_contiguous_same_mcu_prefix_only() {
+fn batches_head_mcu_past_other_mcu_interleave() {
     let mut queues = BTreeMap::new();
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[0, 3]));
     queues.insert(AxisKey { mcu_id: 1, axis: 1 }, q_with(8, &[1]));
@@ -58,9 +58,44 @@ fn batches_contiguous_same_mcu_prefix_only() {
     match s {
         Schedule::Send(frames) => {
             let ax: Vec<_> = frames.iter().map(|f| (f.key, f.pieces.len())).collect();
-            assert!(ax.contains(&(AxisKey { mcu_id: 1, axis: 0 }, 1)));
+            assert!(
+                ax.contains(&(AxisKey { mcu_id: 1, axis: 0 }, 2)),
+                "head-MCU batch must not stop at another MCU's interleaved piece: {ax:?}"
+            );
             assert!(ax.contains(&(AxisKey { mcu_id: 1, axis: 1 }, 1)));
             assert!(!ax.iter().any(|(k, _)| k.mcu_id == 2));
+        }
+        other => panic!("expected Send, got {other:?}"),
+    }
+}
+
+/// The Neptune 2026-07-02 in-past abort: one trajectory fanned out to two MCUs
+/// produces piece streams with identical host times, so a scheduler that stops
+/// batching at the first cross-MCU piece degenerates to one piece per frame —
+/// and one serial round trip per ~5 ms piece cannot keep up with real time.
+/// Each frame must instead carry the head MCU's whole eligible prefix.
+#[test]
+fn fanned_out_trajectory_still_batches_full_frames() {
+    let mut queues = BTreeMap::new();
+    let starts: Vec<u64> = (0..40u64).map(|i| i * 10).collect();
+    for mcu_id in [1u32, 2] {
+        for axis in [0u8, 1] {
+            queues.insert(AxisKey { mcu_id, axis }, q_with(64, &starts));
+        }
+    }
+    let s = schedule(&queues, 32, |_: &AxisKey, _: &AxisQueue| None, no_cap);
+    match s {
+        Schedule::Send(frames) => {
+            assert!(frames.iter().all(|f| f.key.mcu_id == 1));
+            assert_eq!(frames.len(), 2, "both axes of the head MCU ship together");
+            for f in &frames {
+                assert_eq!(
+                    f.pieces.len(),
+                    32,
+                    "frame for {:?} must batch to max_per_frame",
+                    f.key
+                );
+            }
         }
         other => panic!("expected Send, got {other:?}"),
     }

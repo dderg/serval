@@ -4,8 +4,38 @@ use crate::frontend::{Move, VelocityLimits};
 use crate::path::{Arc, Clothoid, Line, PathSegment, Segment};
 use crate::segment::FollowerDemand;
 
+const DEFAULT_JERK_MM_S3: f64 = 100_000.0;
+const DEFAULT_INTEGRATION_TOL: f64 = 1e-7;
+
 fn limits(max_v: f64, accel: f64) -> VelocityLimits {
-    VelocityLimits::try_new(max_v, accel, 5.0).unwrap()
+    VelocityLimits::try_new(max_v, accel, 5.0, DEFAULT_JERK_MM_S3).unwrap()
+}
+
+fn with_jerk(mut moves: Vec<Move>, jerk: f64) -> Vec<Move> {
+    for m in &mut moves {
+        m.limits.max_jerk_mm_s3 = jerk;
+    }
+    moves
+}
+
+fn plan(out: &FitOutcome) -> Result<VelocityProfile, VelocityError> {
+    plan_velocity_warm_start(
+        out,
+        DEFAULT_INTEGRATION_TOL,
+        f64::INFINITY,
+        f64::INFINITY,
+        BoundaryState::REST,
+    )
+}
+
+fn plan_warm(out: &FitOutcome, entry_v: f64) -> Result<VelocityProfile, VelocityError> {
+    plan_velocity_warm_start(
+        out,
+        DEFAULT_INTEGRATION_TOL,
+        f64::INFINITY,
+        f64::INFINITY,
+        BoundaryState { v: entry_v, a: 0.0 },
+    )
 }
 
 fn src(line_no: u32) -> SourceRange {
@@ -102,7 +132,7 @@ fn assert_disk_feasible(m: &MoveVelocity, kappa0: f64, sigma: f64) {
 #[test]
 fn straight_line_cruises_at_feed_limit() {
     let out = outcome(vec![line_move(100.0, 30.0, 200.0, 1000.0, 1)], Vec::new());
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     let m = &plan.moves[0];
     assert!((m.peak_v - 30.0).abs() < 1e-6);
     assert_eq!(m.entry_v, 0.0);
@@ -125,7 +155,7 @@ fn arc_cruise_capped_at_sqrt_a_r() {
         )],
         Vec::new(),
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     let expected = (accel * radius).sqrt();
     assert!((plan.moves[0].peak_v - expected).abs() < 1e-3);
     assert_eq!(plan.report.curvature_bound, 1);
@@ -143,7 +173,7 @@ fn clothoid_rides_above_the_constant_curvature_ceiling() {
         ],
         Vec::new(),
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     let clo = &plan.moves[1];
     assert!(clo.peak_v > constant_ceiling + 1.0);
     assert!(plan.report.limit_ride >= 1);
@@ -163,7 +193,7 @@ fn seam_velocity_is_continuous_across_the_chain() {
         ],
         Vec::new(),
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     for pair in plan.moves.windows(2) {
         assert!((pair[0].exit_v - pair[1].entry_v).abs() < 1e-9);
     }
@@ -189,7 +219,7 @@ fn clothoid_emitted_accel_is_disk_feasible_and_tracks_velocity() {
         ],
         Vec::new(),
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     let sigma = kappa_peak / length;
     let s = &plan.moves[1].samples;
     let mut t = vec![0.0_f64];
@@ -231,11 +261,11 @@ fn clothoid_rides_the_disk_above_the_old_cruise_ceiling() {
         ],
         Vec::new(),
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     let line = &plan.moves[0];
     let clothoid = &plan.moves[1];
     let sigma = kappa_peak / length;
-    let old_cruise = (VelocityConfig::default().max_jerk_mm_s3 / sigma).cbrt();
+    let old_cruise = (DEFAULT_JERK_MM_S3 / sigma).cbrt();
     assert!(
         line.exit_v < line.peak_v - 1.0,
         "the approach line must still decelerate into the clothoid"
@@ -260,7 +290,7 @@ fn sharp_corner_pins_zero() {
             reason: UnblendReason::NearReversal,
         }],
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     assert_eq!(plan.moves[0].exit_v, 0.0);
     assert_eq!(plan.moves[1].entry_v, 0.0);
     assert_eq!(plan.report.stops, 1);
@@ -281,7 +311,7 @@ fn stop_does_not_leak_into_adjacent_blend_entry() {
             reason: UnblendReason::NearReversal,
         }],
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     assert_eq!(plan.moves[0].exit_v, 0.0);
     assert_eq!(plan.moves[1].entry_v, 0.0);
     assert!(plan.moves[1].exit_v > 0.0);
@@ -301,7 +331,7 @@ fn collinear_junction_is_not_a_stop() {
             reason: UnblendReason::Collinear,
         }],
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     assert!(plan.moves[0].exit_v > 0.0);
     assert_eq!(plan.report.stops, 0);
 }
@@ -310,7 +340,7 @@ fn collinear_junction_is_not_a_stop() {
 fn short_move_peak_trimmed_by_jerk_below_accel_apex() {
     let (len, accel) = (0.5, 1000.0);
     let out = outcome(vec![line_move(len, 300.0, 300.0, accel, 1)], Vec::new());
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     let m = &plan.moves[0];
     let accel_apex = (accel * len).sqrt();
     assert!(m.peak_v < accel_apex);
@@ -320,12 +350,11 @@ fn short_move_peak_trimmed_by_jerk_below_accel_apex() {
 #[test]
 fn infinite_jerk_recovers_constant_accel_apex() {
     let (len, accel) = (0.5, 1000.0);
-    let out = outcome(vec![line_move(len, 300.0, 300.0, accel, 1)], Vec::new());
-    let cfg = VelocityConfig {
-        max_jerk_mm_s3: f64::INFINITY,
-        ..VelocityConfig::default()
-    };
-    let plan = plan_velocity(&out, cfg).unwrap();
+    let out = outcome(
+        with_jerk(vec![line_move(len, 300.0, 300.0, accel, 1)], f64::INFINITY),
+        Vec::new(),
+    );
+    let plan = plan(&out).unwrap();
     let m = &plan.moves[0];
     let accel_apex = (accel * len).sqrt();
     assert!((m.peak_v - accel_apex).abs() < 1e-6);
@@ -333,43 +362,41 @@ fn infinite_jerk_recovers_constant_accel_apex() {
 }
 
 #[test]
-fn invalid_config_is_rejected() {
+fn invalid_integration_tol_is_rejected() {
     let out = outcome(vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)], Vec::new());
-    for bad in [0.0, -1.0, f64::NAN] {
-        let cfg = VelocityConfig {
-            max_jerk_mm_s3: bad,
-            ..VelocityConfig::default()
-        };
-        assert_eq!(plan_velocity(&out, cfg), Err(VelocityError::InvalidConfig));
-    }
     for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e-12] {
-        let cfg = VelocityConfig {
-            integration_tol: bad,
-            ..VelocityConfig::default()
-        };
-        assert_eq!(plan_velocity(&out, cfg), Err(VelocityError::InvalidConfig));
+        assert_eq!(
+            plan_velocity_warm_start(&out, bad, f64::INFINITY, f64::INFINITY, BoundaryState::REST),
+            Err(VelocityError::InvalidConfig)
+        );
     }
-    let ok = VelocityConfig {
-        max_jerk_mm_s3: f64::INFINITY,
-        ..VelocityConfig::default()
-    };
-    assert!(plan_velocity(&out, ok).is_ok());
+    assert!(plan(&out).is_ok());
 }
 
 #[test]
 fn invalid_extrude_only_limits_are_rejected() {
     let out = outcome(vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)], Vec::new());
     for bad in [0.0, -1.0, f64::NAN] {
-        let cfg = VelocityConfig {
-            max_extrude_only_velocity_mm_s: bad,
-            ..VelocityConfig::default()
-        };
-        assert_eq!(plan_velocity(&out, cfg), Err(VelocityError::InvalidConfig));
-        let cfg = VelocityConfig {
-            max_extrude_only_accel_mm_s2: bad,
-            ..VelocityConfig::default()
-        };
-        assert_eq!(plan_velocity(&out, cfg), Err(VelocityError::InvalidConfig));
+        assert_eq!(
+            plan_velocity_warm_start(
+                &out,
+                DEFAULT_INTEGRATION_TOL,
+                bad,
+                f64::INFINITY,
+                BoundaryState::REST
+            ),
+            Err(VelocityError::InvalidConfig)
+        );
+        assert_eq!(
+            plan_velocity_warm_start(
+                &out,
+                DEFAULT_INTEGRATION_TOL,
+                f64::INFINITY,
+                bad,
+                BoundaryState::REST
+            ),
+            Err(VelocityError::InvalidConfig)
+        );
     }
 }
 
@@ -379,11 +406,14 @@ fn extrude_only_velocity_caps_pure_e_move() {
         vec![virtual_move(10.0, 100.0, 200.0, 1000.0, 1)],
         Vec::new(),
     );
-    let cfg = VelocityConfig {
-        max_extrude_only_velocity_mm_s: 5.0,
-        ..VelocityConfig::default()
-    };
-    let plan = plan_velocity(&out, cfg).unwrap();
+    let plan = plan_velocity_warm_start(
+        &out,
+        DEFAULT_INTEGRATION_TOL,
+        5.0,
+        f64::INFINITY,
+        BoundaryState::REST,
+    )
+    .unwrap();
     let peak = plan.moves[0].peak_v;
     assert!(
         peak <= 5.0 + 1e-9,
@@ -397,13 +427,21 @@ fn extrude_only_velocity_caps_pure_e_move() {
 
 #[test]
 fn extrude_only_accel_caps_pure_e_move() {
-    let out = outcome(vec![virtual_move(0.5, 100.0, 100.0, 1000.0, 1)], Vec::new());
-    let cfg = VelocityConfig {
-        max_jerk_mm_s3: f64::INFINITY,
-        max_extrude_only_accel_mm_s2: 10.0,
-        ..VelocityConfig::default()
-    };
-    let plan = plan_velocity(&out, cfg).unwrap();
+    let out = outcome(
+        with_jerk(
+            vec![virtual_move(0.5, 100.0, 100.0, 1000.0, 1)],
+            f64::INFINITY,
+        ),
+        Vec::new(),
+    );
+    let plan = plan_velocity_warm_start(
+        &out,
+        DEFAULT_INTEGRATION_TOL,
+        f64::INFINITY,
+        10.0,
+        BoundaryState::REST,
+    )
+    .unwrap();
     let apex = (10.0_f64 * 0.5).sqrt();
     assert!((plan.moves[0].peak_v - apex).abs() < 1e-6);
 }
@@ -411,16 +449,12 @@ fn extrude_only_accel_caps_pure_e_move() {
 #[test]
 fn extrude_only_limits_do_not_affect_spatial_move() {
     let out = outcome(vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)], Vec::new());
-    let base = plan_velocity(&out, VelocityConfig::default())
-        .unwrap()
-        .moves[0]
-        .peak_v;
-    let cfg = VelocityConfig {
-        max_extrude_only_velocity_mm_s: 1.0,
-        max_extrude_only_accel_mm_s2: 1.0,
-        ..VelocityConfig::default()
-    };
-    let capped = plan_velocity(&out, cfg).unwrap().moves[0].peak_v;
+    let base = plan(&out).unwrap().moves[0].peak_v;
+    let capped =
+        plan_velocity_warm_start(&out, DEFAULT_INTEGRATION_TOL, 1.0, 1.0, BoundaryState::REST)
+            .unwrap()
+            .moves[0]
+            .peak_v;
     assert!(
         (base - capped).abs() < 1e-9,
         "extrude-only limits leaked into a spatial move: {base} vs {capped}"
@@ -429,13 +463,13 @@ fn extrude_only_limits_do_not_affect_spatial_move() {
 
 #[test]
 fn empty_and_single_move() {
-    let empty = plan_velocity(&outcome(Vec::new(), Vec::new()), VelocityConfig::default()).unwrap();
+    let empty = plan(&outcome(Vec::new(), Vec::new())).unwrap();
     assert!(empty.moves.is_empty());
 
-    let single = plan_velocity(
-        &outcome(vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)], Vec::new()),
-        VelocityConfig::default(),
-    )
+    let single = plan(&outcome(
+        vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)],
+        Vec::new(),
+    ))
     .unwrap();
     assert_eq!(single.moves.len(), 1);
     assert_eq!(single.moves[0].entry_v, 0.0);
@@ -461,7 +495,7 @@ fn non_spatial_move_bracketed_by_stops() {
             },
         ],
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     let retract = &plan.moves[1];
     assert_eq!(retract.entry_v, 0.0);
     assert_eq!(retract.exit_v, 0.0);
@@ -494,7 +528,7 @@ fn forward_backward_feasibility_holds_chainwide() {
             reason: UnblendReason::NoBudget,
         }],
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
 
     assert_eq!(plan.moves.first().unwrap().entry_v, 0.0);
     assert_eq!(plan.moves.last().unwrap().exit_v, 0.0);
@@ -522,18 +556,17 @@ fn infinite_jerk_is_feasible_and_jerk_unbound() {
     )
     .unwrap();
     let out = outcome(
-        vec![
-            line_move(60.0, 250.0, 300.0, accel, 1),
-            spatial_move(Segment::Clothoid(clo), 250.0, 300.0, accel, 2),
-            line_move(60.0, 250.0, 300.0, accel, 3),
-        ],
+        with_jerk(
+            vec![
+                line_move(60.0, 250.0, 300.0, accel, 1),
+                spatial_move(Segment::Clothoid(clo), 250.0, 300.0, accel, 2),
+                line_move(60.0, 250.0, 300.0, accel, 3),
+            ],
+            f64::INFINITY,
+        ),
         Vec::new(),
     );
-    let cfg = VelocityConfig {
-        max_jerk_mm_s3: f64::INFINITY,
-        ..VelocityConfig::default()
-    };
-    let plan = plan_velocity(&out, cfg).unwrap();
+    let plan = plan(&out).unwrap();
     assert_eq!(plan.report.jerk_bound, 0);
     assert!(plan.report.limit_ride >= 1);
     assert_disk_feasible(&plan.moves[1], 0.0, sigma);
@@ -551,8 +584,8 @@ fn plan_is_deterministic() {
             Vec::new(),
         )
     };
-    let a = plan_velocity(&build(), VelocityConfig::default()).unwrap();
-    let b = plan_velocity(&build(), VelocityConfig::default()).unwrap();
+    let a = plan(&build()).unwrap();
+    let b = plan(&build()).unwrap();
     assert_eq!(a, b);
 }
 
@@ -568,7 +601,7 @@ fn limit_riding_beats_the_constant_ceiling_skeleton() {
         ],
         Vec::new(),
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     let skeleton =
         move_time(&plan.moves[0]) + clo_len / constant_ceiling + move_time(&plan.moves[2]);
     assert!(plan.report.traversal_time_s > 0.0);
@@ -664,8 +697,8 @@ fn warm_start_zero_matches_rest_to_rest() {
             Vec::new(),
         )
     };
-    let rest = plan_velocity(&build(), VelocityConfig::default()).unwrap();
-    let warm0 = plan_velocity_warm_start(&build(), VelocityConfig::default(), 0.0).unwrap();
+    let rest = plan(&build()).unwrap();
+    let warm0 = plan_warm(&build(), 0.0).unwrap();
     assert_eq!(rest, warm0);
 }
 
@@ -673,7 +706,7 @@ fn warm_start_zero_matches_rest_to_rest() {
 fn warm_start_enters_at_the_given_velocity() {
     let out = outcome(vec![line_move(100.0, 30.0, 200.0, 1000.0, 1)], Vec::new());
     let entry_v = 20.0;
-    let plan = plan_velocity_warm_start(&out, VelocityConfig::default(), entry_v).unwrap();
+    let plan = plan_warm(&out, entry_v).unwrap();
     let m = &plan.moves[0];
     assert_eq!(m.entry_v, entry_v);
     assert_eq!(m.samples.first().unwrap().v, entry_v);
@@ -684,8 +717,8 @@ fn warm_start_enters_at_the_given_velocity() {
 #[test]
 fn warm_start_is_faster_than_starting_from_rest() {
     let out = || outcome(vec![line_move(100.0, 30.0, 200.0, 1000.0, 1)], Vec::new());
-    let rest = plan_velocity(&out(), VelocityConfig::default()).unwrap();
-    let warm = plan_velocity_warm_start(&out(), VelocityConfig::default(), 20.0).unwrap();
+    let rest = plan(&out()).unwrap();
+    let warm = plan_warm(&out(), 20.0).unwrap();
     assert!(warm.report.traversal_time_s < rest.report.traversal_time_s);
 }
 
@@ -706,7 +739,7 @@ fn warm_start_over_commit_cannot_brake_in_window() {
         Vec::new(),
     );
     assert_eq!(
-        plan_velocity_warm_start(&out, VelocityConfig::default(), entry_v),
+        plan_warm(&out, entry_v),
         Err(VelocityError::OverCommitted { line_no: 5 })
     );
 }
@@ -715,7 +748,7 @@ fn warm_start_over_commit_cannot_brake_in_window() {
 fn warm_start_entry_above_move_ceiling_fails_loudly() {
     let out = outcome(vec![line_move(100.0, 30.0, 200.0, 1000.0, 7)], Vec::new());
     assert_eq!(
-        plan_velocity_warm_start(&out, VelocityConfig::default(), 50.0),
+        plan_warm(&out, 50.0),
         Err(VelocityError::OverCommitted { line_no: 7 })
     );
 }
@@ -723,14 +756,8 @@ fn warm_start_entry_above_move_ceiling_fails_loudly() {
 #[test]
 fn warm_start_negative_or_nan_entry_is_invalid_config() {
     let out = outcome(vec![line_move(100.0, 30.0, 200.0, 1000.0, 1)], Vec::new());
-    assert_eq!(
-        plan_velocity_warm_start(&out, VelocityConfig::default(), -1.0),
-        Err(VelocityError::InvalidConfig)
-    );
-    assert_eq!(
-        plan_velocity_warm_start(&out, VelocityConfig::default(), f64::NAN),
-        Err(VelocityError::InvalidConfig)
-    );
+    assert_eq!(plan_warm(&out, -1.0), Err(VelocityError::InvalidConfig));
+    assert_eq!(plan_warm(&out, f64::NAN), Err(VelocityError::InvalidConfig));
 }
 
 #[test]
@@ -748,7 +775,7 @@ fn barrier_is_the_last_cruise_seam_not_the_terminal_rest() {
         ],
         Vec::new(),
     );
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan(&out).unwrap();
     let n = plan.moves.len();
     assert!(plan.barrier < n, "terminal rest must never be the barrier");
     assert_eq!(plan.barrier, n - 1);
@@ -766,7 +793,7 @@ fn warm_start_steep_decel_entry_is_not_rejected_as_a_rest_anchor() {
     // The warm-start entry (v>0) must keep its real decel; it must NOT be
     // force-rested and rejected with RestAnchorAccel the way a true v=0 anchor is.
     let out = outcome(vec![line_move(2.0, 60.0, 100.0, 1000.0, 89)], Vec::new());
-    let plan = plan_velocity_warm_start(&out, VelocityConfig::default(), 57.0)
+    let plan = plan_warm(&out, 57.0)
         .expect("feasible steep brake-to-rest must not be rejected as a corrupt rest anchor");
     assert_eq!(plan.moves[0].entry_v, 57.0);
 }
@@ -848,4 +875,236 @@ fn first_negative_velocity_ignores_float_noise_and_zero() {
         },
     ];
     assert_eq!(first_negative_velocity(&samples), None);
+}
+
+fn decel_ramp_into_tight_arc() -> Vec<Move> {
+    let mut moves: Vec<Move> = (1..=3)
+        .map(|i| line_move(0.5, 60.0, 500.0, 1000.0, i))
+        .collect();
+    moves.push(arc_move(0.2, 1.2, 60.0, 500.0, 1000.0, 4));
+    moves.push(line_move(0.5, 60.0, 500.0, 1000.0, 5));
+    moves
+}
+
+/// The 2026-07-02 Neptune bench crash geometry, distilled: a wipe ends in a
+/// 0.062 mm line followed by an extrude-only retract (a rest anchor). The
+/// profile crosses the seam entering the short line braking at ~-700 mm/s²;
+/// a re-plan of the tail is feasible only if that in-flight deceleration is
+/// carried across the cut — anchored at zero acceleration, the jerk-limited
+/// stop needs more arc than the 0.062 mm move has.
+fn wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
+    let lims = VelocityLimits::try_new(100.0, 1000.0, 30.0, 100_000.0).unwrap();
+    let line = |len: f64, line_no: u32| {
+        let seg = Segment::Line(Line::try_new([0.0, 0.0, 0.0], [len, 0.0, 0.0]).unwrap());
+        Move {
+            segment: PathSegment::try_new(seg, Vec::new()).unwrap(),
+            feedrate_mm_s: 98.871,
+            limits: lims,
+            source: src(line_no),
+        }
+    };
+    let retract = Move {
+        segment: PathSegment::try_new_virtual(
+            vec![FollowerDemand {
+                axis_index: 3,
+                ratio: 1.0,
+            }],
+            0.8,
+        )
+        .unwrap(),
+        feedrate_mm_s: 25.0,
+        limits: lims,
+        source: src(3),
+    };
+    let moves = vec![line(1.0, 1), line(0.062, 2), retract, line(2.0, 4)];
+    let stop_before = vec![false, false, true, true];
+    (moves, stop_before)
+}
+
+fn plan_stops_full(
+    moves: &[Move],
+    stop_before: &[bool],
+    entry: BoundaryState,
+) -> Result<VelocityProfile, VelocityError> {
+    plan_velocity_stops(moves, stop_before, 1e-4, 25.0, 1000.0, entry)
+}
+
+#[test]
+fn mid_brake_seam_replans_from_the_carried_state() {
+    let (moves, stop_before) = wipe_into_retract();
+    let p = plan_stops_full(&moves, &stop_before, BoundaryState::REST).unwrap();
+    let k = 1;
+    assert!(k <= p.barrier, "the mid-brake seam sits inside the barrier");
+    let entry = p.boundaries[k];
+    assert!(
+        entry.a < -1.0,
+        "the profile must cross the seam decelerating (a = {})",
+        entry.a
+    );
+    let replan = plan_stops_full(&moves[k..], &stop_before[k..], entry).unwrap_or_else(|e| {
+        panic!(
+            "re-plan from carried state (v={}, a={}) failed: {e:?}",
+            entry.v, entry.a
+        )
+    });
+    assert_eq!(replan.boundaries.last().copied(), Some(BoundaryState::REST));
+}
+
+/// The invariant streaming emission relies on: every boundary state at or
+/// before the finality barrier warm-starts a re-plan of the remaining window
+/// without error.
+#[test]
+fn barrier_boundary_states_are_valid_warm_starts() {
+    let ramp = decel_ramp_into_tight_arc();
+    let ramp_stops = vec![false; ramp.len()];
+    let (wipe, wipe_stops) = wipe_into_retract();
+    for (moves, stops) in [(&ramp, &ramp_stops), (&wipe, &wipe_stops)] {
+        let p = plan_stops_full(moves, stops, BoundaryState::REST).unwrap();
+        assert!(p.barrier >= 1);
+        for k in 1..=p.barrier {
+            plan_stops_full(&moves[k..], &stops[k..], p.boundaries[k]).unwrap_or_else(|e| {
+                panic!(
+                    "re-plan from boundaries[{k}] = {:?} failed: {e:?}",
+                    p.boundaries[k]
+                )
+            });
+        }
+    }
+}
+
+/// A window cut must not bend the trajectory: the re-planned tail's samples
+/// lie on the same jerk-limited curve as the uncut plan — velocity and
+/// acceleration both continue across the seam.
+#[test]
+fn replanned_tail_continues_the_uncut_profile() {
+    let (moves, stop_before) = wipe_into_retract();
+    let p = plan_stops_full(&moves, &stop_before, BoundaryState::REST).unwrap();
+    let k = 1;
+    let replan = plan_stops_full(&moves[k..], &stop_before[k..], p.boundaries[k]).unwrap();
+    for (uncut, cut) in p.moves[k..].iter().zip(replan.moves.iter()) {
+        let entry_dv = (uncut.entry_v - cut.entry_v).abs();
+        assert!(
+            entry_dv < 1e-3,
+            "velocity discontinuity {entry_dv} at re-planned move {}",
+            uncut.source.start_line
+        );
+        let a_uncut = uncut.samples.first().unwrap().a;
+        let a_cut = cut.samples.first().unwrap().a;
+        assert!(
+            (a_uncut - a_cut).abs() < 2.0,
+            "acceleration discontinuity at move {}: uncut {a_uncut} vs re-planned {a_cut}",
+            uncut.source.start_line
+        );
+    }
+    let t_uncut: f64 = p.moves[k..]
+        .iter()
+        .map(|m| traversal_time(&m.samples))
+        .sum();
+    let t_cut: f64 = replan
+        .moves
+        .iter()
+        .map(|m| traversal_time(&m.samples))
+        .sum();
+    assert!(
+        (t_uncut - t_cut).abs() < 1e-3 * t_uncut.max(1.0),
+        "the cut costs trajectory time: uncut tail {t_uncut}s vs re-planned {t_cut}s"
+    );
+}
+
+/// The 2026-07-02 Neptune SCV-20 crash geometry: a wipe whose feedrate steps
+/// down move-to-move (so the run is not a uniform-ceiling straight run and
+/// reconstructs on the grid, not in closed form) ends in a 0.785 mm line
+/// followed by an extrude-only retract. The profile crosses the seam entering
+/// that last line already braking for the retract's rest anchor.
+fn graded_wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
+    let lims = VelocityLimits::try_new(400.0, 2000.0, 20.0, 100_000.0).unwrap();
+    let line = |len: f64, feed: f64, line_no: u32| {
+        let seg = Segment::Line(Line::try_new([0.0, 0.0, 0.0], [len, 0.0, 0.0]).unwrap());
+        Move {
+            segment: PathSegment::try_new(seg, Vec::new()).unwrap(),
+            feedrate_mm_s: feed,
+            limits: lims,
+            source: src(line_no),
+        }
+    };
+    let extrude_only = |line_no: u32| Move {
+        segment: PathSegment::try_new_virtual(
+            vec![FollowerDemand {
+                axis_index: 3,
+                ratio: 1.0,
+            }],
+            0.8,
+        )
+        .unwrap(),
+        feedrate_mm_s: 25.0,
+        limits: lims,
+        source: src(line_no),
+    };
+    let moves = vec![
+        line(1.2, 150.0, 1),
+        line(0.9, 110.0, 2),
+        line(0.785, 98.871_216_666_666_67, 3),
+        extrude_only(4),
+        line(2.766, 150.0, 5),
+        extrude_only(6),
+        line(0.224, 122.333_466_666_666_67, 7),
+    ];
+    let stop_before = vec![false, false, false, true, true, true, true];
+    (moves, stop_before)
+}
+
+/// A cut on a grid-reconstructed brake stretch must carry the profile's true
+/// state: the emitted curve is braking toward the retract's rest anchor, so
+/// the carried acceleration is negative — not the forward integrator's
+/// steering acceleration, which never brakes and reads a large positive value
+/// while the velocity rides the descending brake envelope.
+#[test]
+fn grid_path_cut_carries_the_true_brake_state() {
+    let (moves, stops) = graded_wipe_into_retract();
+    let p = plan_stops_full(&moves, &stops, BoundaryState::REST).unwrap();
+    let k = 2;
+    assert!(k <= p.barrier);
+    let entry = p.boundaries[k];
+    assert!(
+        entry.a < 0.0,
+        "the profile crosses the seam braking for the retract, carried a = {}",
+        entry.a
+    );
+    let replan = plan_stops_full(&moves[k..], &stops[k..], entry).unwrap_or_else(|e| {
+        panic!(
+            "re-plan from carried state (v={}, a={}) failed: {e:?}",
+            entry.v, entry.a
+        )
+    });
+    assert_eq!(replan.boundaries.last().copied(), Some(BoundaryState::REST));
+}
+
+/// The warm-start invariant on the grid-reconstruction path: the carried
+/// velocity is a grid-integrated sample, while the next window re-derives its
+/// entry bounds in closed form — every boundary at or before the barrier must
+/// still be accepted.
+#[test]
+fn grid_path_boundary_states_are_valid_warm_starts() {
+    let (moves, stops) = graded_wipe_into_retract();
+    let p = plan_stops_full(&moves, &stops, BoundaryState::REST).unwrap();
+    assert!(p.barrier >= 2);
+    for k in 1..=p.barrier {
+        plan_stops_full(&moves[k..], &stops[k..], p.boundaries[k]).unwrap_or_else(|e| {
+            panic!(
+                "re-plan from boundaries[{k}] = {:?} failed: {e:?}",
+                p.boundaries[k]
+            )
+        });
+    }
+}
+
+#[test]
+fn boundaries_span_the_window_and_anchor_entry() {
+    let moves = decel_ramp_into_tight_arc();
+    let entry = BoundaryState { v: 10.0, a: 0.0 };
+    let stops = vec![false; moves.len()];
+    let p = plan_stops_full(&moves, &stops, entry).unwrap();
+    assert_eq!(p.boundaries.len(), moves.len() + 1);
+    assert_eq!(p.boundaries[0], entry);
+    assert_eq!(p.boundaries.last().copied(), Some(BoundaryState::REST));
 }

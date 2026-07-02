@@ -11,7 +11,7 @@ fn ctx(line_no: u32, accel: f64, scv: f64) -> MoveContext {
     MoveContext {
         extruder_axis: E_AXIS,
         feedrate_mm_s: 100.0,
-        limits: VelocityLimits::try_new(200.0, accel, scv).unwrap(),
+        limits: VelocityLimits::try_new(200.0, accel, scv, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -324,7 +324,7 @@ fn non_finite_line_yields_fit_error_with_source_line() {
     let bad = Move {
         segment: bad_segment,
         feedrate_mm_s: 100.0,
-        limits: VelocityLimits::try_new(200.0, 3000.0, 5.0).unwrap(),
+        limits: VelocityLimits::try_new(200.0, 3000.0, 5.0, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: 2,
             end_line: 2,
@@ -360,49 +360,4 @@ fn empty_input_is_returned_unchanged() {
     let out = fit_corners(&[], CornerFitConfig::default()).unwrap();
     assert!(out.moves.is_empty());
     assert_eq!(out.report, FitReport::default());
-}
-
-#[test]
-fn leading_corner_curvature_invariant_to_head_trim() {
-    // A corner whose blend budget is bound by the leading move's length. Fitting
-    // it with the full leading move, versus with a head-trimmed leading move plus
-    // the consumed length restored, must yield the SAME apex curvature — that is
-    // the streaming invariant that keeps a committed entry velocity feasible
-    // across the re-fit. Without the restore the shorter move budgets a sharper
-    // apex. See docs/rewrite/windowed-fit-ceiling-jitter.md.
-    // Short leading move + long outgoing move + a large junction deviation so the
-    // leading move's length, not the corner's ideal trim, binds the blend budget.
-    let accel = 200.0;
-    let scv = 30.0;
-    let cfg = ChainFitConfig::default();
-    let c = seg(2, accel, scv, [10.0, 0.0, 0.0], [10.0, 20.0, 0.0], 0.0);
-    let b_full = seg(1, accel, scv, [8.5, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0);
-    let trim = 0.6;
-    let b_trim = seg(1, accel, scv, [8.5 + trim, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0);
-
-    let apex = |out: &FitOutcome| -> f64 {
-        out.moves
-            .iter()
-            .filter_map(|m| match &m.segment.spatial {
-                Some(Segment::Clothoid(cl)) => Some(cl.kappa_peak().1.abs()),
-                _ => None,
-            })
-            .fold(0.0_f64, f64::max)
-    };
-
-    let full = apex(&fit_chain(&[b_full, c.clone()], cfg).unwrap());
-    let restored =
-        apex(&fit_chain_with_head_restore(&[b_trim.clone(), c.clone()], cfg, trim).unwrap());
-    let naive = apex(&fit_chain(&[b_trim, c], cfg).unwrap());
-
-    assert!(full > 0.0, "the full-window corner must blend");
-    assert!(
-        (full - restored).abs() < 1e-9,
-        "head restore must reproduce the full-window apex curvature: {full} vs {restored}"
-    );
-    assert!(
-        naive > full + 1e-6,
-        "a head-trimmed leading move without restore must fit a sharper apex: \
-         naive {naive} vs full {full}"
-    );
 }

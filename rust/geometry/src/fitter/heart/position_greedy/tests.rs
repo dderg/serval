@@ -12,7 +12,7 @@ fn seg(line_no: u32, a: [f64; 3], b: [f64; 3]) -> Move {
         MoveContext {
             extruder_axis: 3,
             feedrate_mm_s: 200.0,
-            limits: VelocityLimits::try_new(300.0, 3000.0, 20.0).unwrap(),
+            limits: VelocityLimits::try_new(300.0, 3000.0, 20.0, 100_000.0).unwrap(),
             source: SourceRange {
                 start_line: line_no,
                 end_line: line_no,

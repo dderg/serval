@@ -6,11 +6,12 @@ use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, CurvatureProfile, Line, PathSegment, Segment};
 use crate::segment::{FollowerDemand, SourceRange};
 use crate::velocity::{
-    MoveVelocity, VelSample, VelocityConfig, VelocityProfile, VelocityReport, plan_velocity,
+    BoundaryState, MoveVelocity, VelSample, VelocityProfile, VelocityReport,
+    plan_velocity_warm_start,
 };
 
 fn limits(max_v: f64, accel: f64) -> VelocityLimits {
-    VelocityLimits::try_new(max_v, accel, 5.0).unwrap()
+    VelocityLimits::try_new(max_v, accel, 5.0, 100_000.0).unwrap()
 }
 
 fn src(line_no: u32) -> SourceRange {
@@ -32,7 +33,14 @@ fn line(start: [f64; 3], end: [f64; 3], feed: f64, max_v: f64, accel: f64, line_
 
 fn planned(moves: Vec<Move>) -> (FitOutcome, VelocityProfile) {
     let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
-    let plan = plan_velocity(&out, VelocityConfig::default()).unwrap();
+    let plan = plan_velocity_warm_start(
+        &out,
+        1e-7,
+        f64::INFINITY,
+        f64::INFINITY,
+        BoundaryState::REST,
+    )
+    .unwrap();
     (out, plan)
 }
 
@@ -62,11 +70,16 @@ fn outcome(moves: Vec<Move>) -> FitOutcome {
 }
 
 fn profile(moves: Vec<MoveVelocity>) -> VelocityProfile {
+    let boundaries = std::iter::once(0.0)
+        .chain(moves.iter().map(|m| m.exit_v))
+        .map(|v| BoundaryState { v, a: 0.0 })
+        .collect();
     VelocityProfile {
         moves,
         report: VelocityReport::default(),
         barrier: 0,
         v_barrier: 0.0,
+        boundaries,
     }
 }
 

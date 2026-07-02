@@ -6,7 +6,7 @@ use host_rt::host_io::{McuHostIo, McuHostIoConfig};
 use host_rt::mcu_serial_conn::McuSerialConn;
 
 use crate::config::PlannerConfig;
-use crate::stream_planner::{DispatchError, StreamPlannerHandle};
+use crate::stream_worker::{DispatchError, StreamWorkerHandle};
 use trajectory::ShapedSegment;
 
 use super::{McuConnection, PyMotionEngine};
@@ -270,13 +270,15 @@ fn relaxed_planner_config() -> PlannerConfig {
 }
 
 fn test_limits() -> geometry::VelocityLimits {
-    geometry::VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap()
+    geometry::VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap()
 }
 
 fn stream_config_from(cfg: &PlannerConfig) -> (crate::stream::StreamConfig, Vec<f64>) {
     let sc = crate::stream::StreamConfig {
         chain: geometry::ChainFitConfig::default(),
-        velocity: geometry::VelocityConfig::default(),
+        integration_tol: 1e-7,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: cfg.fit_tolerance_mm,
         max_buffer_moves: 64,
         limits: test_limits(),
@@ -289,12 +291,13 @@ fn shutdown_takes_and_joins_planner() {
     let engine = PyMotionEngine::new();
     let (dispatch, _counter) = counting_dispatch();
     let (sc, home) = stream_config_from(&PlannerConfig::default());
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamPlannerHandle::spawn(
+    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamWorkerHandle::spawn(
         sc,
         trajectory::AxisChainSet::default(),
         home,
         dispatch,
         noop_nudge_dispatch(),
+        Arc::default(),
     ));
 
     assert!(
@@ -344,12 +347,13 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
         });
 
     let (sc, home) = stream_config_from(&relaxed_planner_config());
-    let planner = StreamPlannerHandle::spawn(
+    let planner = StreamWorkerHandle::spawn(
         sc,
         trajectory::AxisChainSet::default(),
         home,
         dispatch,
         noop_nudge_dispatch(),
+        Arc::default(),
     );
     planner
         .submit_move(
@@ -518,12 +522,13 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
 
     let (dispatch, _counter) = counting_dispatch();
     let (sc, home) = stream_config_from(&relaxed_planner_config());
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamPlannerHandle::spawn(
+    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamWorkerHandle::spawn(
         sc,
         trajectory::AxisChainSet::default(),
         home,
         dispatch,
         noop_nudge_dispatch(),
+        Arc::default(),
     ));
 
     engine.shutdown();

@@ -14,6 +14,7 @@ const ANGLE_EPS_RAD: f64 = 1e-9;
 const EASE_LEAD_MAX_RAD: f64 = FRAC_PI_6;
 pub(super) const EPMM_MIN: f64 = 1e-9;
 const EPMM_REL_TOL: f64 = 0.25;
+const ARC_EPMM_REL_TOL: f64 = 0.02;
 
 pub(super) struct Reconstruction {
     pub up: Vec<Clothoid>,
@@ -532,6 +533,27 @@ pub(super) fn grow_turning_band(
         end += 1;
     }
     end
+}
+
+pub(super) fn arc_candidate(moves: &[Move], corner: CornerFitConfig, tol: f64) -> bool {
+    if moves.len() < 2 {
+        return true;
+    }
+    let e0 = epmm(&moves[0]);
+    let epmm_ok = |m: &Move| {
+        if e0 <= EPMM_MIN {
+            epmm(m) <= EPMM_MIN
+        } else {
+            (epmm(m) - e0).abs() <= ARC_EPMM_REL_TOL * e0
+        }
+    };
+    if !moves.iter().skip(1).all(epmm_ok) {
+        return false;
+    }
+    if grow_turning_band(moves, 0, corner, false) + 1 != moves.len() {
+        return false;
+    }
+    moves.len() < 3 || cocircular(moves, tol)
 }
 
 pub(super) fn grow_cocircular_span(

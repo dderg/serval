@@ -1,9 +1,8 @@
-use geometry::path::CurvatureProfile;
-use geometry::path::Segment;
-use geometry::path::lowering::PositionProfile;
-use geometry::{
-    ChainFitConfig, HeartKind, Move, MoveContext, SourceRange, VelocityLimits, fit_chain, line_move,
-};
+use super::causal::fit;
+use crate::path::CurvatureProfile;
+use crate::path::Segment;
+use crate::path::lowering::PositionProfile;
+use crate::{ChainFitConfig, HeartKind, Move, MoveContext, SourceRange, VelocityLimits, line_move};
 use proptest::prelude::*;
 
 const ACCEL: f64 = 3000.0;
@@ -17,7 +16,7 @@ fn ctx(line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 200.0,
-        limits: VelocityLimits::try_new(300.0, ACCEL, SCV).unwrap(),
+        limits: VelocityLimits::try_new(300.0, ACCEL, SCV, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -74,7 +73,7 @@ fn check_invariants(
         heart,
         ..ChainFitConfig::with_arc_fit(3)
     };
-    let out = fit_chain(moves, cfg).expect("fit_chain must succeed on finite polyline input");
+    let out = fit(moves, cfg).expect("fit must succeed on finite polyline input");
 
     let spatials: Vec<&Segment> = out
         .moves

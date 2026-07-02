@@ -1,9 +1,10 @@
-use geometry::path::CurvatureProfile;
-use geometry::path::Segment;
-use geometry::path::lowering::PositionProfile;
-use geometry::{
+use super::causal::fit;
+use crate::path::CurvatureProfile;
+use crate::path::Segment;
+use crate::path::lowering::PositionProfile;
+use crate::{
     ChainFitConfig, FitOutcome, HeartKind, Move, MoveContext, SourceRange, VelocityLimits,
-    fit_chain, line_move,
+    line_move,
 };
 use std::f64::consts::PI;
 
@@ -19,7 +20,7 @@ fn ctx(line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: E_AXIS,
         feedrate_mm_s: 200.0,
-        limits: VelocityLimits::try_new(300.0, ACCEL, SCV).unwrap(),
+        limits: VelocityLimits::try_new(300.0, ACCEL, SCV, 100_000.0).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -210,7 +211,7 @@ fn polyline(moves: &[Move]) -> Vec<[f64; 3]> {
 }
 
 fn measure(moves: &[Move], heart: HeartKind) -> Metrics {
-    let out = fit_chain(moves, cfg(heart)).unwrap();
+    let out = fit(moves, cfg(heart)).unwrap();
     let poly = polyline(moves);
     Metrics {
         max_kappa_jump: max_kappa_jump(&out),
@@ -229,7 +230,7 @@ fn kind(s: &Segment) -> &'static str {
 }
 
 fn trace(moves: &[Move], heart: HeartKind) -> String {
-    let out = fit_chain(moves, cfg(heart)).unwrap();
+    let out = fit(moves, cfg(heart)).unwrap();
     spatials(&out)
         .iter()
         .map(|s| {

@@ -11,6 +11,7 @@ fn limits() -> VelocityLimits {
         max_velocity_mm_s: 300.0,
         accel_mm_s2: 3000.0,
         square_corner_velocity_mm_s: 5.0,
+        max_jerk_mm_s3: 100_000.0,
     }
 }
 
@@ -296,17 +297,19 @@ fn invalid_feedrate_rejected_before_geometry() {
 
 #[test]
 fn invalid_limits_rejected() {
-    for (mv, ac, scv) in [
-        (0.0, 3000.0, 5.0),
-        (300.0, 0.0, 5.0),
-        (300.0, 3000.0, -1.0),
-        (f64::INFINITY, 3000.0, 5.0),
+    for (mv, ac, scv, jerk) in [
+        (0.0, 3000.0, 5.0, 100_000.0),
+        (300.0, 0.0, 5.0, 100_000.0),
+        (300.0, 3000.0, -1.0, 100_000.0),
+        (f64::INFINITY, 3000.0, 5.0, 100_000.0),
+        (300.0, 3000.0, 5.0, 0.0),
     ] {
         let mut bad = ctx();
         bad.limits = VelocityLimits {
             max_velocity_mm_s: mv,
             accel_mm_s2: ac,
             square_corner_velocity_mm_s: scv,
+            max_jerk_mm_s3: jerk,
         };
         let err = line_move([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.0, bad).unwrap_err();
         assert!(matches!(
@@ -318,9 +321,12 @@ fn invalid_limits_rejected() {
 
 #[test]
 fn velocity_limits_try_new_validates() {
-    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0).is_ok());
-    assert!(VelocityLimits::try_new(300.0, 3000.0, 0.0).is_ok());
-    assert!(VelocityLimits::try_new(0.0, 3000.0, 5.0).is_err());
-    assert!(VelocityLimits::try_new(300.0, -1.0, 5.0).is_err());
-    assert!(VelocityLimits::try_new(300.0, 3000.0, f64::NAN).is_err());
+    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).is_ok());
+    assert!(VelocityLimits::try_new(300.0, 3000.0, 0.0, 100_000.0).is_ok());
+    assert!(VelocityLimits::try_new(0.0, 3000.0, 5.0, 100_000.0).is_err());
+    assert!(VelocityLimits::try_new(300.0, -1.0, 5.0, 100_000.0).is_err());
+    assert!(VelocityLimits::try_new(300.0, 3000.0, f64::NAN, 100_000.0).is_err());
+    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, 0.0).is_err());
+    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, -1.0).is_err());
+    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, f64::NAN).is_err());
 }

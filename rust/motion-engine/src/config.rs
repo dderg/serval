@@ -474,8 +474,6 @@ impl CartesianLimits {
     }
 }
 
-pub const JERK_DEFAULT_ACCEL_MULTIPLE: f64 = 2.0;
-
 pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
 
 impl PlannerConfig {
@@ -493,62 +491,6 @@ impl PlannerConfig {
             clamp(self.runtime_caps.accel, self.cartesian.max_accel),
             self.square_corner_velocity(),
         )
-    }
-
-    pub fn path_velocity_limits(&self) -> Result<geometry::VelocityLimits, &'static str> {
-        let mut max_v = f64::INFINITY;
-        let mut max_a = f64::INFINITY;
-        for section in &self.limit_sections {
-            if !section
-                .axes
-                .iter()
-                .all(|&i| self.axis_registry.is_spatial(i))
-            {
-                continue;
-            }
-            if let Some(v) = section.max_velocity {
-                max_v = max_v.min(v);
-            }
-            if let Some(a) = section.max_accel {
-                max_a = max_a.min(a);
-            }
-        }
-        if let Some(v) = self.runtime_caps.velocity {
-            max_v = max_v.min(v);
-        }
-        if let Some(a) = self.runtime_caps.accel {
-            max_a = max_a.min(a);
-        }
-        geometry::VelocityLimits::try_new(max_v, max_a, DEFAULT_SQUARE_CORNER_VELOCITY_MM_S)
-    }
-
-    #[must_use]
-    pub fn path_velocity_config(&self) -> geometry::VelocityConfig {
-        let mut max_j = f64::INFINITY;
-        for section in &self.limit_sections {
-            if !section
-                .axes
-                .iter()
-                .all(|&i| self.axis_registry.is_spatial(i))
-            {
-                continue;
-            }
-            let j = section
-                .max_jerk
-                .or(section.max_accel.map(|a| a * JERK_DEFAULT_ACCEL_MULTIPLE));
-            if let Some(j) = j {
-                max_j = max_j.min(j);
-            }
-        }
-        let default = geometry::VelocityConfig::default();
-        geometry::VelocityConfig {
-            max_jerk_mm_s3: if max_j.is_finite() {
-                max_j
-            } else {
-                default.max_jerk_mm_s3
-            },
-            ..default
-        }
     }
 }
 

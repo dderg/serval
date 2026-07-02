@@ -158,7 +158,7 @@ pub fn schedule(
         let next = queues
             .iter()
             .filter_map(|(k, q)| {
-                if maxed.contains(k) {
+                if k.mcu_id != head_key.mcu_id || maxed.contains(k) {
                     return None;
                 }
                 let already = taken.get(k).copied().unwrap_or(0);
@@ -171,9 +171,6 @@ pub fn schedule(
             Some(n) => n,
             None => break,
         };
-        if k.mcu_id != head_key.mcu_id {
-            break;
-        }
         let already = taken.get(&k).copied().unwrap_or(0);
         let q = &queues[&k];
         let room = q.room() as usize;
@@ -1034,17 +1031,32 @@ pub struct WireSink {
     pub freq_of: Arc<dyn Fn(u32) -> Option<f64> + Send + Sync>,
 }
 
-/// Per-attempt response wait for a serial `PushPieces` re-request. A few × the
-/// normal ~6 ms RTT, so a healthy response still returns on arrival while a lost
-/// one is re-requested fast.
+/// Per-attempt response wait for a serial `PushPieces` re-request, before the
+/// frame's own wire time is added. A few × the small-frame ~6 ms RTT, so a
+/// healthy response still returns on arrival while a lost one is re-requested
+/// fast.
 const PUSHPIECES_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(30);
 
+/// Worst-case one-way serial cost per frame byte (250 kbaud, 10 bits/byte),
+/// doubled for the echo path. A batched frame (up to `MAX_PER_FRAME` pieces per
+/// axis, ~2 KiB) legitimately spends tens of milliseconds on the wire; the
+/// attempt timeout must grow with the frame or every large frame times out and
+/// retransmits.
+const SERIAL_ROUND_TRIP_PER_BYTE: Duration = Duration::from_micros(80);
+
+fn pushpieces_attempt_timeout(body_len: usize) -> Duration {
+    PUSHPIECES_ATTEMPT_TIMEOUT + SERIAL_ROUND_TRIP_PER_BYTE * body_len as u32
+}
+
 /// Total serial `PushPieces` re-requests. The whole burst blocks the
-/// single-threaded pump, so the budget (`* PUSHPIECES_ATTEMPT_TIMEOUT` ≈ 90 ms)
-/// must stay under the smallest lead (`DRIP_WINDOW_SECS` = 100 ms) — otherwise
-/// the retry itself starves the MCU of later pieces and recreates the very
-/// `-308` it prevents. Recovers isolated corruption; sustained corruption gives
-/// up fast to the loud in-past-guard backstop.
+/// single-threaded pump, so for drip-sized frames the budget
+/// (`* PUSHPIECES_ATTEMPT_TIMEOUT` ≈ 90 ms) must stay under the drip lead
+/// (`DRIP_WINDOW_SECS` = 100 ms) — otherwise the retry itself starves the MCU
+/// of later pieces and recreates the very `-308` it prevents. Batched print
+/// frames get a larger per-attempt timeout (wire time scales with frame size)
+/// but also run under the much deeper `MAX_LEAD_SECS` lead. Recovers isolated
+/// corruption; sustained corruption gives up fast to the loud in-past-guard
+/// backstop.
 const PUSHPIECES_MAX_ATTEMPTS: u32 = 3;
 
 /// Bounded re-request policy for serial `PushPieces` (the frame is idempotent on
@@ -1147,12 +1159,13 @@ impl WireSink {
                 let io = weak.upgrade().ok_or_else(|| {
                     SendError::Transient(format!("McuHostIo for mcu {mcu_id} detached"))
                 })?;
+                let attempt_timeout = pushpieces_attempt_timeout(body.len());
                 pushpieces_retransmit_serial(mcu_id, PUSHPIECES_MAX_ATTEMPTS, || {
                     io.kalico_call_on_channel(
                         mcu_protocol::MCU_CHANNEL_PIECES,
                         mcu_protocol::MessageKind::PushPieces,
                         body.clone(),
-                        PUSHPIECES_ATTEMPT_TIMEOUT,
+                        attempt_timeout,
                     )
                     .map(|(_kind, b)| b)
                 })?

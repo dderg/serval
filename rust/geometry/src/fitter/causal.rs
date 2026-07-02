@@ -11,7 +11,7 @@ use super::overlap;
 use super::vec3::{dist, dot};
 use super::{
     ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, JunctionPlan, UnblendReason,
-    UnblendedJunction, blend_trim, classify_junction, emit_blend, emit_move, internal,
+    UnblendedJunction, blend_trim, classify_junction, emit_blend, emit_move, internal, is_travel,
     junction_deviation, line_of, scaled_followers,
 };
 
@@ -23,11 +23,7 @@ struct Run {
     tail_blend_trim: f64,
 }
 
-pub(super) fn fit(
-    moves: &[Move],
-    config: ChainFitConfig,
-    head_len_restore: f64,
-) -> Result<FitOutcome, FitError> {
+pub(super) fn fit(moves: &[Move], config: ChainFitConfig) -> Result<FitOutcome, FitError> {
     if moves.len() <= 1 {
         return Ok(FitOutcome {
             moves: moves.to_vec(),
@@ -51,12 +47,10 @@ pub(super) fn fit(
 
     let mut plans = Vec::with_capacity(moves.len() - 1);
     for (i, pair) in moves.windows(2).enumerate() {
-        let restore = if i == 0 { head_len_restore } else { 0.0 };
         plans.push(classify_junction(
             &pair[0],
             &pair[1],
             config.corner,
-            restore,
             in_reductions[i],
             out_reductions[i],
         )?);
@@ -145,7 +139,7 @@ pub(super) fn fit(
                 match &plans[i] {
                     JunctionPlan::Blend(bi) => {
                         report.blended += 1;
-                        emit_blend(&mut out, bi, m, &moves[i + 1])?;
+                        emit_blend(&mut out, &bi.0, m, &moves[i + 1])?;
                     }
                     JunctionPlan::Unblended(reason) => report.unblended.push(UnblendedJunction {
                         line_no: moves[i + 1].source.start_line,
@@ -158,11 +152,6 @@ pub(super) fn fit(
 
     let out = align_travels(out)?;
     Ok(FitOutcome { moves: out, report })
-}
-
-fn is_travel(m: &Move) -> bool {
-    matches!(m.segment.spatial, Some(Segment::Line(_)))
-        && !m.segment.followers.iter().any(|f| f.ratio.abs() > 1e-12)
 }
 
 fn align_travels(mut out: Vec<Move>) -> Result<Vec<Move>, FitError> {
@@ -208,15 +197,10 @@ fn detect_runs(
         return Ok(Vec::new());
     };
     let min_run = (arc.min_run_facets.max(3)) as usize;
-    let scv_delta = moves
-        .iter()
-        .map(|m| junction_deviation(m.limits))
-        .filter(|d| d.is_finite() && *d > 0.0)
-        .fold(f64::INFINITY, f64::min);
-    if !scv_delta.is_finite() {
+    let tol = super::span_tolerance(moves);
+    if !tol.is_finite() {
         return Ok(Vec::new());
     }
-    let tol = scv_delta;
 
     let mut runs = Vec::new();
     let n = moves.len();
@@ -380,14 +364,6 @@ fn arc_boundary_unblend(
     (theta > config.theta_min_rad).then_some(UnblendReason::ArcIncident)
 }
 
-fn boundary_delta(moves: &[Move]) -> f64 {
-    moves
-        .iter()
-        .map(|m| junction_deviation(m.limits))
-        .filter(|d| d.is_finite() && *d > 0.0)
-        .fold(f64::INFINITY, f64::min)
-}
-
 fn bare_line<'a>(moves: &'a [Move], runs: &[Run], idx: usize) -> Option<&'a Line> {
     if idx >= moves.len() || runs.iter().any(|r| r.start <= idx && idx <= r.end) {
         return None;
@@ -406,7 +382,7 @@ fn resolve_run_boundaries(
     let n = moves.len().saturating_sub(1);
     let mut blends: Vec<Option<GeneralBlend>> = (0..n).map(|_| None).collect();
     let mut line_trims = vec![0.0; n];
-    let delta = boundary_delta(moves);
+    let delta = super::span_tolerance(moves);
     if !(delta.is_finite() && delta > 0.0) {
         return (blends, line_trims);
     }
@@ -454,7 +430,7 @@ fn resolve_run_boundaries(
     (blends, line_trims)
 }
 
-fn trim_arc(arc: &Arc, head: f64, tail: f64) -> Result<Arc, crate::GeometryError> {
+pub(super) fn trim_arc(arc: &Arc, head: f64, tail: f64) -> Result<Arc, crate::GeometryError> {
     if head <= 0.0 && tail <= 0.0 {
         return Ok(arc.clone());
     }
@@ -464,7 +440,7 @@ fn trim_arc(arc: &Arc, head: f64, tail: f64) -> Result<Arc, crate::GeometryError
     Arc::try_new(arc.origin, arc.u, arc.v, arc.radius, start_angle, sweep)
 }
 
-fn emit_general_blend(
+pub(super) fn emit_general_blend(
     out: &mut Vec<Move>,
     blend: &GeneralBlend,
     in_followers: &[FollowerDemand],
@@ -497,7 +473,7 @@ fn emit_general_blend(
     Ok(())
 }
 
-fn emit_reconstruction(
+pub(super) fn emit_reconstruction(
     out: &mut Vec<Move>,
     recon: &Reconstruction,
     m_in: &Move,

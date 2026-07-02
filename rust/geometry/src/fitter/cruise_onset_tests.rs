@@ -25,10 +25,9 @@
 //! `c2_continuity` C1-crossover test cannot catch this — its `< a_max` bound is
 //! looser than the `894 < 1000` cruise step.
 
-use geometry::{
-    ChainFitConfig, Move, MoveContext, SourceRange, VelocityConfig, VelocityLimits, fit_chain,
-    line_move, plan_velocity,
-};
+use super::causal::fit;
+use crate::velocity::plan_velocity_warm_start;
+use crate::{ChainFitConfig, Move, MoveContext, SourceRange, VelocityLimits, line_move};
 
 const MAX_V: f64 = 100.0;
 const ACCEL: f64 = 1000.0;
@@ -36,11 +35,11 @@ const JERK: f64 = 4000.0;
 const SCV: f64 = 5.0;
 const EPS_A: f64 = ACCEL / 10.0;
 
-fn ctx(max_v: f64, accel: f64, line_no: u32) -> MoveContext {
+fn ctx(max_v: f64, accel: f64, jerk: f64, line_no: u32) -> MoveContext {
     MoveContext {
         extruder_axis: 0,
         feedrate_mm_s: max_v,
-        limits: VelocityLimits::try_new(max_v, accel, SCV).unwrap(),
+        limits: VelocityLimits::try_new(max_v, accel, SCV, jerk).unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -61,16 +60,17 @@ fn run_samples(max_v: f64, accel: f64, jerk: f64, waypoints: &[[f64; 3]]) -> Vec
     let moves: Vec<Move> = waypoints
         .windows(2)
         .enumerate()
-        .map(|(i, w)| line_move(w[0], w[1], 0.0, ctx(max_v, accel, i as u32)).unwrap())
+        .map(|(i, w)| line_move(w[0], w[1], 0.0, ctx(max_v, accel, jerk, i as u32)).unwrap())
         .collect();
-    let outcome = fit_chain(&moves, ChainFitConfig::default()).unwrap();
-    let config = VelocityConfig {
-        consistency_tol: 1e-6,
-        max_jerk_mm_s3: jerk,
-        integration_tol: 1e-7,
-        ..VelocityConfig::default()
-    };
-    let profile = plan_velocity(&outcome, config).unwrap();
+    let outcome = fit(&moves, ChainFitConfig::default()).unwrap();
+    let profile = plan_velocity_warm_start(
+        &outcome,
+        1e-7,
+        f64::INFINITY,
+        f64::INFINITY,
+        crate::velocity::BoundaryState::REST,
+    )
+    .unwrap();
     let mut out = Vec::new();
     let mut s_off = 0.0;
     for m in &profile.moves {

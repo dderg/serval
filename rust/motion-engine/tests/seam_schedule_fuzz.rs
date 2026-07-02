@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use _motion_engine::seam_test_harness::{
-    Cadence, CommitSchedule, Move, default_stream_config, parse_gcode_to_moves, run_moves,
+    Move, default_stream_config, parse_gcode_to_moves, run_moves,
 };
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
@@ -26,11 +26,9 @@ proptest! {
     })]
 
     #[test]
-    fn seam_continuity_under_windowed_schedule(
+    fn seam_continuity_over_fuzzed_windows(
         start in 0usize..1024,
         len in MIN_WINDOW..=MAX_WINDOW,
-        cap in 1usize..24,
-        forced in proptest::collection::vec(0usize..MAX_WINDOW, 0..2),
     ) {
         let corpus = corpus();
         let n = corpus.len();
@@ -40,20 +38,13 @@ proptest! {
         let window = &corpus[start..end];
         prop_assume!(window.len() >= MIN_WINDOW);
 
-        let schedule = CommitSchedule {
-            cadence: Cadence::FixedCap(cap),
-            force_after_move: forced.clone(),
-        };
-        let report = run_moves(window, default_stream_config(), &schedule)
-            .expect("window drives the real stream commit path without a planner error");
+        let report = run_moves(window, default_stream_config());
         prop_assert_eq!(
             report.fatal(),
             0,
-            "window [{}..{}) cap={} forced={:?}: fatal C0 seam; worst {:?}",
+            "window [{}..{}): fatal C0 seam; worst {:?}",
             start,
             end,
-            cap,
-            forced,
             report.worst_fatal()
         );
     }

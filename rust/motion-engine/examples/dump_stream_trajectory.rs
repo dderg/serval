@@ -1,10 +1,8 @@
-// Replays a gcode file through the bench's streaming planner (StreamState +
-// continuity commit + the COALESCE_BATCH_MOVES cap) and dumps the lowered
-// trajectory as CSV: t,x,y,z,e. Deterministic (synchronous commit, no planner
-// thread / wall-clock), so it isolates the planner geometry from timing.
+// Replays a gcode file through the streaming pipeline and dumps the shaped
+// trajectory as CSV: t,x,y,z,e.
 //
 //   cargo run --release -p motion-engine --example dump_stream_trajectory -- \
-//       <file.gcode> <out.csv> [--cap N] [--dt S]
+//       <file.gcode> <out.csv> [--dt S]
 
 use std::env;
 use std::fs;
@@ -12,12 +10,10 @@ use std::io::Write;
 use std::process;
 
 use _motion_engine::classify::build_move;
-use _motion_engine::stream::{StreamConfig, StreamState};
-use geometry::{ChainFitConfig, VelocityConfig, VelocityLimits};
+use _motion_engine::stream::{StreamConfig, setup_stages};
+use geometry::{ChainFitConfig, VelocityLimits};
 use nurbs::eval::eval;
 use trajectory::{AxisChainSet, ShapedSegment};
-
-const COALESCE_BATCH_MOVES: usize = 64;
 
 struct Pos {
     pos: [f64; 3],
@@ -76,20 +72,15 @@ impl Pos {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: dump_stream_trajectory <in.gcode> <out.csv> [--cap N] [--dt S]");
+        eprintln!("usage: dump_stream_trajectory <in.gcode> <out.csv> [--dt S]");
         process::exit(1);
     }
     let in_path = &args[1];
     let out_path = &args[2];
-    let mut cap = COALESCE_BATCH_MOVES;
     let mut dt = 0.005;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
-            "--cap" => {
-                i += 1;
-                cap = args[i].parse().unwrap();
-            }
             "--dt" => {
                 i += 1;
                 dt = args[i].parse().unwrap();
@@ -107,30 +98,30 @@ fn main() {
         process::exit(1);
     });
 
-    let limits = VelocityLimits::try_new(300.0, 5000.0, 5.0).unwrap();
+    let limits = VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap();
     let cfg = StreamConfig {
         chain: ChainFitConfig::default(),
-        velocity: VelocityConfig {
-            integration_tol: 1e-4,
-            ..VelocityConfig::default()
-        },
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 1e-3,
         max_buffer_moves: 512,
         limits,
     };
 
-    let mut state = StreamState::new(cfg, AxisChainSet::default(), &[0.0, 0.0, 0.0], 0.0);
-    let mut all: Vec<ShapedSegment> = Vec::new();
+    let handle = setup_stages(cfg, AxisChainSet::default(), vec![0.0, 0.0, 0.0], 0.0);
+    let output = handle.output;
+    let collector = std::thread::spawn(move || {
+        let mut segs: Vec<ShapedSegment> = Vec::new();
+        while let Ok(item) = output.recv() {
+            if let _motion_engine::stream::ShapedItem::Seg(seg) = item {
+                segs.push(seg);
+            }
+        }
+        segs
+    });
     let mut p = Pos::new();
     let mut submitted = 0u64;
-
-    let commit_into = |state: &mut StreamState, all: &mut Vec<ShapedSegment>, force: bool| {
-        let segs = state.commit(force).unwrap_or_else(|e| {
-            eprintln!("commit failed: {e}");
-            process::exit(1);
-        });
-        all.extend(segs);
-    };
 
     for tok in gcode::lex(&source) {
         let Ok(t) = tok else { continue };
@@ -164,21 +155,19 @@ fn main() {
                             continue;
                         }
                     };
-                if let Err(e) = state.push(m) {
-                    eprintln!("push line {submitted}: {e}");
-                    continue;
+                if handle.input.send(m.into()).is_err() {
+                    eprintln!("pipeline input closed at line {submitted}");
+                    process::exit(1);
                 }
                 submitted += 1;
-                if state.buffered() >= cap {
-                    commit_into(&mut state, &mut all, false);
-                }
             }
             90 => p.absolute = true,
             91 => p.absolute = false,
             _ => {}
         }
     }
-    commit_into(&mut state, &mut all, true);
+    drop(handle.input);
+    let all = collector.join().expect("pipeline collector panicked");
 
     let mut out = fs::File::create(out_path).unwrap();
     writeln!(out, "seg,t,x,y,z").unwrap();

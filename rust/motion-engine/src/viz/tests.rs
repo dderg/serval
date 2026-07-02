@@ -11,7 +11,19 @@ fn square_waypoints() -> Vec<(f64, f64, f64, f64)> {
 }
 
 fn default_limits() -> geometry::VelocityLimits {
-    geometry::VelocityLimits::try_new(300.0, 3000.0, 5.0).unwrap()
+    geometry::VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).unwrap()
+}
+
+fn default_config(limits: geometry::VelocityLimits) -> StreamConfig {
+    StreamConfig {
+        chain: geometry::ChainFitConfig::default(),
+        integration_tol: VELOCITY_INTEGRATION_TOL,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: TRAJECTORY_FIT_TOL_MM,
+        max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
+        limits,
+    }
 }
 
 #[test]
@@ -37,12 +49,12 @@ fn raw_path_starts_at_origin() {
 
 #[test]
 fn fitted_outcome_has_spatial_segments() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
-    let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
-    let spatial_count = outcome
-        .moves
+    let limits = default_limits();
+    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let (fitted, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let spatial_count = fitted
         .iter()
-        .filter(|m| m.segment.spatial.is_some())
+        .filter(|fm| fm.segment.spatial.is_some())
         .count();
     assert!(spatial_count > 0);
 }
@@ -54,10 +66,10 @@ fn eval_piece(p: &[f64; 6], t: f64) -> f64 {
 
 #[test]
 fn trajectory_lowers_to_contiguous_finite_cubics() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
-    let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
-    let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
-    let traj = lower_trajectory(&outcome, &profile);
+    let limits = default_limits();
+    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let (_, shaped) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let traj = collect_trajectory_pieces(&shaped);
     assert!(!traj.x.is_empty());
     assert_eq!(traj.x.len(), traj.y.len());
     for (i, p) in traj.x.iter().enumerate() {
@@ -75,10 +87,10 @@ fn trajectory_lowers_to_contiguous_finite_cubics() {
 
 #[test]
 fn cubic_pieces_are_position_continuous_at_joins() {
-    let moves = build_moves(&square_waypoints(), default_limits()).unwrap();
-    let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
-    let profile = geometry::plan_velocity(&outcome, geometry::VelocityConfig::default()).unwrap();
-    let traj = lower_trajectory(&outcome, &profile);
+    let limits = default_limits();
+    let moves = build_moves(&square_waypoints(), limits).unwrap();
+    let (_, shaped) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let traj = collect_trajectory_pieces(&shaped);
     // Hermite lowering matches position at every join, on both axes.
     for axis in [&traj.x, &traj.y] {
         for w in axis.windows(2) {
@@ -94,10 +106,11 @@ fn cubic_pieces_are_position_continuous_at_joins() {
 
 #[test]
 fn single_move_skips_fitting() {
+    let limits = default_limits();
     let waypoints = vec![(0.0, 0.0, 0.0, 100.0), (10.0, 0.0, 0.0, 100.0)];
-    let moves = build_moves(&waypoints, default_limits()).unwrap();
-    let outcome = geometry::fit_chain(&moves, geometry::ChainFitConfig::default()).unwrap();
-    assert_eq!(outcome.report.blended, 0);
+    let moves = build_moves(&waypoints, limits).unwrap();
+    let (fitted, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    assert_eq!(fitted.len(), 1, "single move must pass through unchanged");
 }
 
 #[test]
