@@ -153,7 +153,7 @@ fn main() {
                             continue;
                         }
                     };
-                if handle.input.send(m).is_err() {
+                if handle.input.send(m.into()).is_err() {
                     eprintln!("pipeline input closed at line {submitted}");
                     process::exit(1);
                 }

@@ -28,7 +28,9 @@ fn stream_config() -> StreamConfig {
 fn fit_and_plan(moves: &[geometry::Move]) -> Vec<PlannedMove> {
     let (raw_tx, raw_rx) = unbounded();
     for m in moves.iter().cloned() {
-        raw_tx.send(m).expect("unbounded channel never blocks");
+        raw_tx
+            .send(m.into())
+            .expect("unbounded channel never blocks");
     }
     drop(raw_tx);
 

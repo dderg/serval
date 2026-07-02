@@ -72,7 +72,7 @@ fn replay(
 ) -> Vec<ShapedSegment> {
     let (raw_tx, raw_rx) = unbounded();
     for m in moves {
-        raw_tx.send(m.clone()).unwrap();
+        raw_tx.send(m.clone().into()).unwrap();
     }
     drop(raw_tx);
 

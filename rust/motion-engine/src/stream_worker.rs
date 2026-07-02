@@ -9,8 +9,51 @@ use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::pump::AxisKey;
 use crate::stream::{
-    CONTIGUITY_EPS_MM, PipelineHandle, StreamConfig, advance_odometer, dist3, setup_pipeline,
+    CONTIGUITY_EPS_MM, PipelineHandle, StreamConfig, StreamInput, advance_odometer, dist3,
+    setup_pipeline,
 };
+
+/// Host-monotonic end of the trajectory committed to the pump. The dispatcher
+/// advances it as each segment is anchored; the ingress pacer reads the
+/// remaining runway to decide whether a silent input warrants waiting for
+/// more moves before sending `Drain`. Expressed as an `Instant` deadline so
+/// readers never touch the MCU clock domain: the dispatcher, which holds `t0`
+/// and the projected playhead anyway, does the one conversion at dispatch
+/// time. Clearing is always safe — a falsely-zero runway only causes an
+/// unnecessarily early drain — so abort paths may clear it out-of-band.
+#[derive(Debug, Default)]
+pub struct CommittedFrontier {
+    deadline: Mutex<Option<Instant>>,
+}
+
+impl CommittedFrontier {
+    pub fn advance_to(&self, deadline: Instant) {
+        let mut guard = self.deadline.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = Some(guard.map_or(deadline, |d| d.max(deadline)));
+    }
+
+    pub fn clear(&self) {
+        *self.deadline.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    pub fn runway_secs(&self) -> f64 {
+        self.deadline
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .map_or(0.0, |d| {
+                d.saturating_duration_since(Instant::now()).as_secs_f64()
+            })
+    }
+}
+
+/// Runway kept in reserve when the pacer waits out a silent input instead of
+/// sending `Drain`. A drain fired at the reserve must still travel
+/// fit → plan → lower → shape → dispatch and reach the pump before the
+/// playhead overruns the committed frontier; those stages take milliseconds,
+/// so this covers them with a wide margin while staying under the anchor's
+/// 250 ms initial lead. Overrunning anyway is not fatal — the anchor
+/// re-anchors forward with a logged stutter.
+const RUNWAY_RESERVE_S: f64 = 0.1;
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
 
@@ -160,6 +203,7 @@ impl StreamWorkerHandle {
         home_pos: Vec<f64>,
         dispatch: DispatchFn,
         nudge_dispatch: NudgeDispatchFn,
+        frontier: Arc<CommittedFrontier>,
     ) -> Self {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let last_move_time_bits = Arc::new(AtomicU64::new(0));
@@ -189,6 +233,8 @@ impl StreamWorkerHandle {
                     active: None,
                     shared,
                     tally,
+                    frontier,
+                    undrained: false,
                 };
                 run_loop(rx, worker);
             })
@@ -399,6 +445,7 @@ pub(crate) struct SegmentDispatchCtx {
     pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
     pub(crate) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
     pub(crate) nominal_freqs: Arc<Mutex<HashMap<u32, u32>>>,
+    pub(crate) frontier: Arc<CommittedFrontier>,
 }
 
 /// Anchor a committed segment to the MCU clock, split it into per-axis
@@ -425,6 +472,12 @@ pub(crate) fn dispatch_segment(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .anchor_segment(seg.t_start, seg.t_end, host_now);
+
+    let runway_s = t0 + seg.t_end - host_now;
+    if runway_s > 0.0 {
+        ctx.frontier
+            .advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
+    }
 
     if fresh {
         let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
@@ -565,7 +618,7 @@ impl ConsumerShared {
 }
 
 struct ActivePipeline {
-    input: Sender<geometry::Move>,
+    input: Sender<StreamInput>,
     consumer: JoinHandle<Option<f64>>,
     discard: Arc<AtomicBool>,
 }
@@ -582,10 +635,14 @@ struct Worker {
     active: Option<ActivePipeline>,
     shared: ConsumerShared,
     tally: Arc<Mutex<IntakeTally>>,
+    frontier: Arc<CommittedFrontier>,
+    /// The active pipeline holds moves ingested since the last `Drain`; the
+    /// pacer only schedules a drain while this is set.
+    undrained: bool,
 }
 
 impl Worker {
-    fn input(&mut self) -> &Sender<geometry::Move> {
+    fn input(&mut self) -> &Sender<StreamInput> {
         if self.active.is_none() {
             let handle = setup_pipeline(
                 self.config,
@@ -623,6 +680,7 @@ impl Worker {
             self.t_next = t_end;
         }
         self.tally.lock().unwrap_or_else(|p| p.into_inner()).reset();
+        self.undrained = false;
     }
 
     fn handle_move(&mut self, m: geometry::Move) {
@@ -652,9 +710,34 @@ impl Worker {
             .unwrap_or_else(|p| p.into_inner())
             .record_intake(&m);
         advance_odometer(&mut self.odometer, &m);
-        if self.input().send(m).is_err() {
+        if self.input().send(m.into()).is_err() {
             fatal("pipeline input closed — a stage died");
         }
+        self.undrained = true;
+    }
+
+    /// The pacer's one decision. Called when the inbox is silent while the
+    /// pipeline holds undrained moves: with runway beyond the reserve there is
+    /// provably time to wait for more input, so report how long; at the
+    /// reserve, send `Drain` so the fitter and planner materialize the
+    /// brake-to-rest and the drained trajectory beats the playhead to the
+    /// pump.
+    fn drain_or_runway(&mut self) -> Option<Duration> {
+        let wait_s = self.frontier.runway_secs() - RUNWAY_RESERVE_S;
+        if wait_s > 0.0 {
+            return Some(Duration::from_secs_f64(wait_s));
+        }
+        tracing::info!(
+            subsystem = "motion",
+            event = "pipe_drain",
+            t_us = crate::timing::mono_us(),
+            "[pipe] runway exhausted — draining pipeline to rest"
+        );
+        if self.input().send(StreamInput::Drain).is_err() {
+            fatal("pipeline input closed — a stage died");
+        }
+        self.undrained = false;
+        None
     }
 
     /// Handle one non-move control message. Returns `true` when the loop
@@ -710,6 +793,7 @@ impl Worker {
 
     fn reset_to(&mut self, pos: Vec<f64>) {
         self.teardown(true);
+        self.frontier.clear();
         self.odometer = pos;
         self.t_next = 0.0;
         *self
@@ -752,7 +836,7 @@ impl Worker {
         );
         handle
             .input
-            .send(m)
+            .send(m.into())
             .map_err(|_| "HomeDrip: pipeline input closed".to_string())?;
         drop(handle.input);
         let mut result = Ok(());
@@ -830,7 +914,23 @@ fn spawn_consumer(
 
 fn run_loop(rx: Receiver<StreamMsg>, mut worker: Worker) {
     loop {
-        let Ok(msg) = rx.recv() else {
+        let received = if worker.undrained {
+            match rx.try_recv() {
+                Ok(msg) => Some(msg),
+                Err(crossbeam_channel::TryRecvError::Empty) => match worker.drain_or_runway() {
+                    None => continue,
+                    Some(wait) => match rx.recv_timeout(wait) {
+                        Ok(msg) => Some(msg),
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => None,
+                    },
+                },
+                Err(crossbeam_channel::TryRecvError::Disconnected) => None,
+            }
+        } else {
+            rx.recv().ok()
+        };
+        let Some(msg) = received else {
             worker.teardown(false);
             return;
         };

@@ -4,7 +4,17 @@ use crossbeam_channel::{bounded, unbounded};
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, Move, MoveContext, VelocityLimits, line_move};
 
+use super::StreamInput;
 use super::fitter::Fitter;
+
+fn moves_of(rx: crossbeam_channel::Receiver<StreamInput>) -> Vec<Move> {
+    rx.into_iter()
+        .filter_map(|item| match item {
+            StreamInput::Move(m) => Some(m),
+            StreamInput::Drain => None,
+        })
+        .collect()
+}
 
 fn ctx(line_no: u32, feed: f64) -> MoveContext {
     MoveContext {
@@ -29,11 +39,11 @@ fn run_fitter(moves: &[Move], config: ChainFitConfig) -> Vec<Move> {
     let (tx, rx) = unbounded();
     let (out_tx, out_rx) = unbounded();
     for m in moves {
-        tx.send(m.clone()).unwrap();
+        tx.send(m.clone().into()).unwrap();
     }
     drop(tx);
     Fitter::new(config).run(rx, out_tx);
-    out_rx.into_iter().collect()
+    moves_of(out_rx)
 }
 
 fn half_circle(
@@ -132,28 +142,33 @@ fn small_extrusion_drift_splits_the_stream_arc() {
 }
 
 #[test]
-fn empty_input_flushes_buffered_moves_without_close() {
-    let (tx, rx) = bounded::<Move>(64);
-    let (out_tx, out_rx) = bounded::<Move>(64);
+fn drain_flushes_buffered_moves_without_close() {
+    let (tx, rx) = bounded::<StreamInput>(64);
+    let (out_tx, out_rx) = bounded::<StreamInput>(64);
     let fitter = Fitter::new(ChainFitConfig::default());
     let handle = std::thread::spawn(move || fitter.run(rx, out_tx));
 
-    tx.send(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.5))
+    tx.send(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.5).into())
         .unwrap();
-    tx.send(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 0.5))
+    tx.send(line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 0.5).into())
         .unwrap();
+    tx.send(StreamInput::Drain).unwrap();
 
-    // Without closing the input, the fitter must still emit everything once
-    // the input runs empty: trimmed body, two blend halves, trimmed tail body.
+    // Without closing the input, `Drain` must flush everything: trimmed body,
+    // two blend halves, trimmed tail body, then the forwarded `Drain`.
     let mut got = Vec::new();
     for _ in 0..4 {
-        got.push(
-            out_rx
-                .recv_timeout(Duration::from_secs(10))
-                .expect("fitter held moves on an empty input"),
-        );
+        let item = out_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("fitter held moves across a drain");
+        assert!(matches!(item, StreamInput::Move(_)), "move expected");
+        got.push(item);
     }
     assert_eq!(got.len(), 4);
+    assert!(matches!(
+        out_rx.recv_timeout(Duration::from_secs(10)),
+        Ok(StreamInput::Drain)
+    ));
     drop(tx);
     handle.join().unwrap();
 }

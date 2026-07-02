@@ -325,7 +325,7 @@ pub fn run_moves(moves: &[Move], config: StreamConfig) -> SeamReport {
     for m in moves.iter().cloned() {
         handle
             .input
-            .send(m)
+            .send(m.into())
             .expect("pipeline input closed while feeding — a stage died");
     }
     drop(handle.input);

@@ -219,17 +219,27 @@ fn run_pipeline(
 
     let (raw_tx, raw_rx) = unbounded();
     for m in moves.iter().cloned() {
-        raw_tx.send(m).expect("unbounded channel never blocks");
+        raw_tx
+            .send(m.into())
+            .expect("unbounded channel never blocks");
     }
     drop(raw_tx);
 
     let (fitted_tx, fitted_rx) = unbounded();
     Fitter::new(config.chain).run(raw_rx, fitted_tx);
-    let fitted: Vec<geometry::Move> = fitted_rx.into_iter().collect();
+    let fitted: Vec<geometry::Move> = fitted_rx
+        .into_iter()
+        .filter_map(|item| match item {
+            crate::stream::StreamInput::Move(m) => Some(m),
+            crate::stream::StreamInput::Drain => None,
+        })
+        .collect();
 
     let (planner_tx, planner_rx) = unbounded();
     for fm in fitted.iter().cloned() {
-        planner_tx.send(fm).expect("unbounded channel never blocks");
+        planner_tx
+            .send(fm.into())
+            .expect("unbounded channel never blocks");
     }
     drop(planner_tx);
 

@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, Sender};
 use geometry::fitter::{
     JunctionPlan, RunFit, arc_candidate_fits, blend_moves, is_travel, plan_junction_reduced,
     spatial_end, spatial_start, trim_line_move,
@@ -6,7 +6,7 @@ use geometry::fitter::{
 use geometry::path::{Line, PathSegment, Segment};
 use geometry::{ChainFitConfig, Move};
 
-use super::dist3;
+use super::{StreamInput, dist3};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
 
@@ -15,8 +15,9 @@ const ALIGN_EPS_MM: f64 = 1e-9;
 ///
 /// It reads ahead only while the next move can still change how the buffered
 /// prefix fits, and commits (emits) as soon as a fitted piece is final under
-/// any future append — or unconditionally when the input runs empty, so moves
-/// are never held hoping for input that may not come.
+/// any future append. `Drain` (or the input closing) resolves and emits
+/// everything unconditionally and is forwarded downstream; the fitter never
+/// gives up its lookahead on its own.
 ///
 /// Structure is decided greedily at the undecided tail: the longest prefix
 /// through which one arc still fits keeps growing, and the first move that
@@ -87,37 +88,24 @@ impl Fitter {
         }
     }
 
-    pub(crate) fn run(mut self, input: Receiver<Move>, output: Sender<Move>) {
+    pub(crate) fn run(mut self, input: Receiver<StreamInput>, output: Sender<StreamInput>) {
         let mut out = TravelAligningSender::new(output);
-        loop {
-            let buffered = !(self.decided.is_empty() && self.tail.is_empty());
-            let received = if buffered {
-                match input.try_recv() {
-                    Ok(m) => Some(m),
-                    Err(TryRecvError::Empty) => {
-                        if !self.resolve(true, &mut out) || !out.release(None) {
-                            return;
-                        }
-                        continue;
-                    }
-                    Err(TryRecvError::Disconnected) => None,
+        while let Ok(item) = input.recv() {
+            let ok = match item {
+                StreamInput::Move(m) => {
+                    self.tail.push(m);
+                    self.resolve(false, &mut out)
                 }
-            } else {
-                if !out.release(None) {
-                    return;
+                StreamInput::Drain => {
+                    self.resolve(true, &mut out) && out.release(None) && out.forward_drain()
                 }
-                input.recv().ok()
             };
-            let Some(m) = received else {
-                self.resolve(true, &mut out);
-                out.release(None);
-                return;
-            };
-            self.tail.push(m);
-            if !self.resolve(false, &mut out) {
+            if !ok {
                 return;
             }
         }
+        self.resolve(true, &mut out);
+        out.release(None);
     }
 
     /// Advance every stage as far as the buffered input allows: decide the
@@ -460,14 +448,14 @@ impl Fitter {
 /// with no anchor keeps the travel's own end, exactly as the batch fit does at
 /// the end of its window.
 struct TravelAligningSender {
-    tx: Sender<Move>,
+    tx: Sender<StreamInput>,
     last_spatial_end: Option<[f64; 3]>,
     parked_travel: Option<Move>,
     parked_tail: Vec<Move>,
 }
 
 impl TravelAligningSender {
-    fn new(tx: Sender<Move>) -> Self {
+    fn new(tx: Sender<StreamInput>) -> Self {
         Self {
             tx,
             last_spatial_end: None,
@@ -482,7 +470,7 @@ impl TravelAligningSender {
                 self.parked_tail.push(m);
                 return true;
             }
-            return self.tx.send(m).is_ok();
+            return self.tx.send(m.into()).is_ok();
         };
         if !self.release(Some(start)) {
             return false;
@@ -492,7 +480,7 @@ impl TravelAligningSender {
             return true;
         }
         self.last_spatial_end = spatial_end(&m);
-        self.tx.send(m).is_ok()
+        self.tx.send(m.into()).is_ok()
     }
 
     fn release(&mut self, next_start: Option<[f64; 3]>) -> bool {
@@ -502,15 +490,20 @@ impl TravelAligningSender {
         };
         let travel = align_travel(travel, self.last_spatial_end, next_start);
         self.last_spatial_end = spatial_end(&travel);
-        if self.tx.send(travel).is_err() {
+        if self.tx.send(travel.into()).is_err() {
             return false;
         }
         for m in self.parked_tail.drain(..) {
-            if self.tx.send(m).is_err() {
+            if self.tx.send(m.into()).is_err() {
                 return false;
             }
         }
         true
+    }
+
+    fn forward_drain(&self) -> bool {
+        debug_assert!(self.parked_travel.is_none() && self.parked_tail.is_empty());
+        self.tx.send(StreamInput::Drain).is_ok()
     }
 }
 

@@ -1,9 +1,9 @@
-use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, Sender};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
 use geometry::{Move, VelocityProfile, plan_velocity_stops};
 
-use super::{PlannedMove, StreamConfig, jerk_limited_brake_time};
+use super::{PlannedMove, StreamConfig, StreamInput, jerk_limited_brake_time};
 
 /// Cost governor, not a lookahead bound: velocity planning is ~linear in the
 /// window, so re-planning on every arriving move would be quadratic. The window
@@ -26,9 +26,10 @@ const REPLAN_BATCH_MOVES: usize = 64;
 /// clean (zero-curvature) seam that is inside the plan's finality barrier and
 /// clear of the brake-to-rest setback — past that point a move's velocity
 /// body is still shaped by the window's tentative terminal rest, so it must
-/// wait. When the input runs empty the deferred brake-to-rest is
-/// materialized: the whole window is planned to rest and emitted, so moves
-/// are never held hoping for input that may not come.
+/// wait. `Drain` (or the input closing) materializes the deferred
+/// brake-to-rest: the whole window is planned to rest and emitted. The
+/// planner itself never decides when to stop looking ahead — that call
+/// belongs to whoever sends `Drain`.
 pub(crate) struct Planner {
     moves: Vec<Move>,
     entry_v: f64,
@@ -46,47 +47,40 @@ impl Planner {
         }
     }
 
-    pub(crate) fn run(mut self, input: Receiver<Move>, output: Sender<PlannedMove>) {
-        loop {
-            let received = if self.moves.is_empty() {
-                input.recv().ok()
-            } else {
-                match input.try_recv() {
-                    Ok(m) => Some(m),
-                    Err(TryRecvError::Empty) => {
-                        if !self.drain_to_rest(&output) {
-                            return;
-                        }
-                        continue;
-                    }
-                    Err(TryRecvError::Disconnected) => None,
-                }
+    pub(crate) fn run(mut self, input: Receiver<StreamInput>, output: Sender<PlannedMove>) {
+        while let Ok(item) = input.recv() {
+            let ok = match item {
+                StreamInput::Move(m) => self.absorb(m, &output),
+                StreamInput::Drain => self.drain_to_rest(&output),
             };
-            let Some(m) = received else {
-                self.drain_to_rest(&output);
+            if !ok {
                 return;
-            };
-            self.moves.push(m);
-            if self.moves.len() >= self.next_plan_len.min(self.config.max_buffer_moves) {
-                if !self.emit_committable(&output) {
-                    return;
-                }
-                if self.moves.len() >= self.config.max_buffer_moves {
-                    // Backstop only: a full window with no clean seam within the
-                    // finality barrier (e.g. one move longer than the whole
-                    // look-ahead). Drain to rest so memory stays bounded.
-                    tracing::info!(
-                        subsystem = "motion",
-                        event = "buffer_cap_drain",
-                        buffered = self.moves.len(),
-                        "[buffer-cap-drain] no committable seam — draining to rest"
-                    );
-                    if !self.drain_to_rest(&output) {
-                        return;
-                    }
-                }
             }
         }
+        self.drain_to_rest(&output);
+    }
+
+    fn absorb(&mut self, m: Move, output: &Sender<PlannedMove>) -> bool {
+        self.moves.push(m);
+        if self.moves.len() < self.next_plan_len.min(self.config.max_buffer_moves) {
+            return true;
+        }
+        if !self.emit_committable(output) {
+            return false;
+        }
+        if self.moves.len() >= self.config.max_buffer_moves {
+            // Backstop only: a full window with no clean seam within the
+            // finality barrier (e.g. one move longer than the whole
+            // look-ahead). Drain to rest so memory stays bounded.
+            tracing::info!(
+                subsystem = "motion",
+                event = "buffer_cap_drain",
+                buffered = self.moves.len(),
+                "[buffer-cap-drain] no committable seam — draining to rest"
+            );
+            return self.drain_to_rest(output);
+        }
+        true
     }
 
     fn plan(&self) -> VelocityProfile {

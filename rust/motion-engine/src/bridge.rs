@@ -3319,7 +3319,9 @@ impl PyMotionEngine {
         let nudge_nominal_freqs = Arc::clone(&nominal_freqs_for_ctx);
         let nudge_anchor_arc = Arc::clone(&anchor_mutex);
 
+        let frontier = Arc::new(crate::stream_worker::CommittedFrontier::default());
         let dispatch_ctx = Arc::new(SegmentDispatchCtx {
+            frontier: Arc::clone(&frontier),
             router: router_for_ctx,
             anchor: anchor_mutex,
             mcu_configs: mcu_configs_for_ctx,
@@ -3470,6 +3472,7 @@ impl PyMotionEngine {
                 home,
                 dispatch,
                 nudge_dispatch,
+                frontier,
             ));
         }
         Ok(())

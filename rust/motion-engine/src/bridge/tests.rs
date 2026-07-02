@@ -297,6 +297,7 @@ fn shutdown_takes_and_joins_planner() {
         home,
         dispatch,
         noop_nudge_dispatch(),
+        Arc::default(),
     ));
 
     assert!(
@@ -352,6 +353,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
         home,
         dispatch,
         noop_nudge_dispatch(),
+        Arc::default(),
     );
     planner
         .submit_move(
@@ -526,6 +528,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
         home,
         dispatch,
         noop_nudge_dispatch(),
+        Arc::default(),
     ));
 
     engine.shutdown();

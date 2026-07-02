@@ -106,8 +106,26 @@ pub struct LoweredSegment {
 }
 
 pub struct PipelineHandle {
-    pub input: Sender<Move>,
+    pub input: Sender<StreamInput>,
     pub output: Receiver<ShapedSegment>,
+}
+
+/// What flows into the fitter and planner: geometry, or the command to stop
+/// looking ahead. `Drain` makes each stage resolve and emit everything it is
+/// holding — the fitter finalizes runs and blends, the planner materializes
+/// the brake-to-rest — exactly what a closed input does, but without ending
+/// the stream. The stages themselves never consult a clock or peek at channel
+/// occupancy; whoever owns the notion of time decides when to send `Drain`.
+#[derive(Debug)]
+pub enum StreamInput {
+    Move(Move),
+    Drain,
+}
+
+impl From<Move> for StreamInput {
+    fn from(m: Move) -> Self {
+        Self::Move(m)
+    }
 }
 
 pub fn setup_pipeline(
@@ -116,8 +134,8 @@ pub fn setup_pipeline(
     home_pos: Vec<f64>,
     t_start: f64,
 ) -> PipelineHandle {
-    let (raw_tx, raw_rx) = bounded::<Move>(64);
-    let (fitted_tx, fitted_rx) = bounded::<Move>(64);
+    let (raw_tx, raw_rx) = bounded::<StreamInput>(64);
+    let (fitted_tx, fitted_rx) = bounded::<StreamInput>(64);
     let (planned_tx, planned_rx) = bounded::<PlannedMove>(64);
     let (lowered_tx, lowered_rx) = bounded::<LoweredSegment>(64);
     let (shaped_tx, shaped_rx) = bounded::<ShapedSegment>(64);

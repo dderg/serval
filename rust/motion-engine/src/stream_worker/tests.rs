@@ -112,6 +112,7 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
         vec![99.158, 99.158, 0.2, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     let mut prev = [99.158, 99.158, 0.2];
@@ -163,6 +164,7 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -200,6 +202,7 @@ fn dwell_inserts_a_time_gap_then_resumes() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -231,6 +234,7 @@ fn stream_open_restarts_the_timeline_at_zero() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -262,6 +266,7 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
     h.home_drip(HomeDripParams {
@@ -295,6 +300,7 @@ fn nudge_dispatches_pieces_and_advances_time() {
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
     h.submit_nudge(NudgeParams {
@@ -384,6 +390,7 @@ fn flushed_stream_reads_zero_uncommitted_intake() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();
@@ -404,6 +411,7 @@ fn mid_stream_dispatch_keeps_intake_tally_bounded() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     let n: u32 = 16;
@@ -485,6 +493,7 @@ fn continuous_blend_run_dispatches_continuously_without_flush() {
         vec![0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
 
     // A gentle zig-zag: every vertex blends (no unblended seam). The old
@@ -544,6 +553,7 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
         vec![0.0, 0.0, 0.0, 0.0],
         dispatch,
         noop_nudge,
+        Arc::default(),
     );
 
     h.submit_move(co_move(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0))
@@ -587,6 +597,7 @@ fn flush_returns_after_commit_without_sleeping_until_playout() {
         vec![0.0, 0.0, 0.0, 0.0],
         cap.dispatch(),
         cap.nudge_dispatch(),
+        Arc::default(),
     );
     h.submit_move(line_e(1, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0))
         .unwrap();
