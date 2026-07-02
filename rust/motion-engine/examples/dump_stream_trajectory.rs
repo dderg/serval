@@ -10,7 +10,7 @@ use std::io::Write;
 use std::process;
 
 use _motion_engine::classify::build_move;
-use _motion_engine::stream::{StreamConfig, setup_pipeline};
+use _motion_engine::stream::{StreamConfig, setup_stages};
 use geometry::{ChainFitConfig, VelocityLimits};
 use nurbs::eval::eval;
 use trajectory::{AxisChainSet, ShapedSegment};
@@ -109,12 +109,14 @@ fn main() {
         limits,
     };
 
-    let handle = setup_pipeline(cfg, AxisChainSet::default(), vec![0.0, 0.0, 0.0], 0.0);
+    let handle = setup_stages(cfg, AxisChainSet::default(), vec![0.0, 0.0, 0.0], 0.0);
     let output = handle.output;
     let collector = std::thread::spawn(move || {
         let mut segs: Vec<ShapedSegment> = Vec::new();
-        while let Ok(seg) = output.recv() {
-            segs.push(seg);
+        while let Ok(item) = output.recv() {
+            if let _motion_engine::stream::ShapedItem::Seg(seg) = item {
+                segs.push(seg);
+            }
         }
         segs
     });

@@ -202,7 +202,7 @@ const VELOCITY_INTEGRATION_TOL: f64 = 1e-7;
 const SNAPSHOT_MAX_BUFFER_MOVES: usize = 65_536;
 
 /// Drives the real pipeline stages — the same `Fitter`/`Planner`/
-/// `run_lowerer`/`Shaper` types `setup_pipeline` wires into OS threads for a
+/// `run_lowerer`/`Shaper` types `setup_stages` wires into OS threads for a
 /// live print — synchronously over unbounded channels on the calling thread.
 /// No stage is reimplemented: this is the production pipeline observed with
 /// its intermediate fitted-stage output (pre-axis-split spatial geometry)
@@ -231,7 +231,7 @@ fn run_pipeline(
         .into_iter()
         .filter_map(|item| match item {
             crate::stream::StreamInput::Move(m) => Some(m),
-            crate::stream::StreamInput::Drain => None,
+            crate::stream::StreamInput::Drain | crate::stream::StreamInput::Control(_) => None,
         })
         .collect();
 
@@ -251,14 +251,20 @@ fn run_pipeline(
         planned_rx,
         lowered_tx,
         config.fit_tol_mm,
-        &axis_chains,
+        axis_chains.clone(),
         home_pos.to_vec(),
         0.0,
     );
 
     let (shaped_tx, shaped_rx) = unbounded();
     crate::stream::Shaper::new(axis_chains).run(lowered_rx, shaped_tx);
-    let shaped: Vec<ShapedSegment> = shaped_rx.into_iter().collect();
+    let shaped: Vec<ShapedSegment> = shaped_rx
+        .into_iter()
+        .filter_map(|item| match item {
+            crate::stream::ShapedItem::Seg(seg) => Some(seg),
+            crate::stream::ShapedItem::Control(_) => None,
+        })
+        .collect();
 
     (fitted, shaped)
 }

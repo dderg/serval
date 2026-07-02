@@ -107,19 +107,21 @@ pub struct LoweredSegment {
 
 pub struct PipelineHandle {
     pub input: Sender<StreamInput>,
-    pub output: Receiver<ShapedSegment>,
+    pub output: Receiver<ShapedItem>,
 }
 
-/// What flows into the fitter and planner: geometry, or the command to stop
-/// looking ahead. `Drain` makes each stage resolve and emit everything it is
-/// holding — the fitter finalizes runs and blends, the planner materializes
-/// the brake-to-rest — exactly what a closed input does, but without ending
-/// the stream. The stages themselves never consult a clock or peek at channel
-/// occupancy; whoever owns the notion of time decides when to send `Drain`.
+/// What flows into the fitter and planner: geometry, the command to stop
+/// looking ahead, or an ordered control token. `Drain` makes each stage
+/// resolve and emit everything it is holding — the fitter finalizes runs and
+/// blends, the planner materializes the brake-to-rest — exactly what a closed
+/// input does, but without ending the stream. The stages themselves never
+/// consult a clock or peek at channel occupancy; whoever owns the notion of
+/// time decides when to send `Drain`.
 #[derive(Debug)]
 pub enum StreamInput {
     Move(Move),
     Drain,
+    Control(Control),
 }
 
 impl From<Move> for StreamInput {
@@ -128,7 +130,67 @@ impl From<Move> for StreamInput {
     }
 }
 
-pub fn setup_pipeline(
+/// Ordered control tokens that flow through every stage with the geometry.
+/// The pipeline is set up once and lives forever; these replace the old
+/// teardown-and-rebuild lifecycle. Tokens that require the trajectory to be
+/// at rest (`Dwell`, `SetAxisChains`, `Barrier` after a flush) must be
+/// preceded by a `Drain`; the stages assert emptiness rather than draining
+/// implicitly, so a violated protocol fails loudly instead of hiding a
+/// velocity discontinuity.
+#[derive(Debug)]
+pub enum Control {
+    /// Advance the trajectory clock without motion (lowerer applies it).
+    Dwell { secs: f64 },
+    /// Drop all buffered state and restart the timeline at rest at `pos`.
+    /// The sender is responsible for gating the dispatcher (discard) so
+    /// motion already lowered ahead of this token is dropped, not executed.
+    Reset { pos: Vec<f64> },
+    /// Swap the post-processing chains (lowerer and shaper apply it).
+    SetAxisChains(AxisChainSet),
+    /// Acknowledged by the dispatcher once everything ahead of it has been
+    /// dispatched (or discarded): the pipeline-wide "everything before this
+    /// point is done" fence.
+    Barrier(Sender<BarrierAck>),
+}
+
+/// The dispatcher's answer to a `Barrier`.
+#[derive(Debug)]
+pub struct BarrierAck {
+    /// Stream time the dispatched trajectory has reached; `None` when nothing
+    /// has been dispatched since the last reset.
+    pub dispatched_through: Option<f64>,
+    /// Host instant of the first dispatch since the last reset, for
+    /// projecting stream time onto the wall clock.
+    pub sync_instant: Option<Instant>,
+    /// Dispatch errors captured since the previous barrier (error capture is
+    /// enabled by the homing paths; otherwise a dispatch error is fatal).
+    pub result: Result<(), String>,
+}
+
+/// Planner → lowerer.
+pub enum PlannedItem {
+    Move(PlannedMove),
+    Control(Control),
+}
+
+/// Lowerer → shaper.
+pub enum LoweredItem {
+    Seg(LoweredSegment),
+    Control(Control),
+}
+
+/// Shaper → dispatcher.
+pub enum ShapedItem {
+    Seg(ShapedSegment),
+    Control(Control),
+}
+
+/// Wires the pure stream stages (fitter → planner → lowerer → shaper) into
+/// OS threads. Production goes through `stream_worker::setup_pipeline`, which
+/// wraps these stages with the dispatcher and pump; this stage-only wiring is
+/// also used standalone by offline consumers (seam harness, trajectory dump)
+/// that have no hardware behind them.
+pub fn setup_stages(
     config: StreamConfig,
     axis_chains: AxisChainSet,
     home_pos: Vec<f64>,
@@ -136,9 +198,9 @@ pub fn setup_pipeline(
 ) -> PipelineHandle {
     let (raw_tx, raw_rx) = bounded::<StreamInput>(64);
     let (fitted_tx, fitted_rx) = bounded::<StreamInput>(64);
-    let (planned_tx, planned_rx) = bounded::<PlannedMove>(64);
-    let (lowered_tx, lowered_rx) = bounded::<LoweredSegment>(64);
-    let (shaped_tx, shaped_rx) = bounded::<ShapedSegment>(64);
+    let (planned_tx, planned_rx) = bounded::<PlannedItem>(64);
+    let (lowered_tx, lowered_rx) = bounded::<LoweredItem>(64);
+    let (shaped_tx, shaped_rx) = bounded::<ShapedItem>(64);
 
     let fitter = fitter::Fitter::new(config.chain);
     spawn_stage("kalico-fit", move || fitter.run(raw_rx, fitted_tx));
@@ -153,7 +215,7 @@ pub fn setup_pipeline(
             planned_rx,
             lowered_tx,
             fit_tol,
-            &lower_chains,
+            lower_chains,
             home_pos,
             t_start,
         );
@@ -176,19 +238,43 @@ fn spawn_stage(name: &str, f: impl FnOnce() + Send + 'static) {
 }
 
 /// Third pipeline stage: lowers each planned move into a dispatchable
-/// `ShapedSegment`, advancing the trajectory clock and odometer as it goes.
+/// `ShapedSegment`. It is the persistent owner of the trajectory clock and
+/// odometer: `Dwell` advances the clock without motion, `Reset` restarts the
+/// timeline at rest at the given position, `SetAxisChains` swaps the chain
+/// set future moves are lowered against.
 pub(crate) fn run_lowerer(
-    input: Receiver<PlannedMove>,
-    output: Sender<LoweredSegment>,
+    input: Receiver<PlannedItem>,
+    output: Sender<LoweredItem>,
     fit_tol_mm: f64,
-    axis_chains: &AxisChainSet,
+    mut axis_chains: AxisChainSet,
     home_pos: Vec<f64>,
     t_start: f64,
 ) {
     let mut odometer = home_pos;
     let mut t = t_start;
 
-    while let Ok(planned) = input.recv() {
+    while let Ok(item) = input.recv() {
+        let planned = match item {
+            PlannedItem::Move(planned) => planned,
+            PlannedItem::Control(ctrl) => {
+                match &ctrl {
+                    Control::Dwell { secs } => {
+                        assert!(*secs >= 0.0, "lowerer: negative dwell {secs}");
+                        t += secs;
+                    }
+                    Control::Reset { pos } => {
+                        odometer.clone_from(pos);
+                        t = 0.0;
+                    }
+                    Control::SetAxisChains(chains) => axis_chains = chains.clone(),
+                    Control::Barrier(_) => {}
+                }
+                if output.send(LoweredItem::Control(ctrl)).is_err() {
+                    return;
+                }
+                continue;
+            }
+        };
         let clock = Instant::now();
         let mut seg = lower_move(
             &planned.geometry,
@@ -213,7 +299,10 @@ pub(crate) fn run_lowerer(
         );
 
         let rest_at_end = planned.velocity.exit_v <= REST_EPS_MM_S;
-        if output.send(LoweredSegment { seg, rest_at_end }).is_err() {
+        if output
+            .send(LoweredItem::Seg(LoweredSegment { seg, rest_at_end }))
+            .is_err()
+        {
             return;
         }
     }
@@ -236,16 +325,7 @@ pub(crate) struct Shaper {
 
 impl Shaper {
     pub(crate) fn new(chains: AxisChainSet) -> Self {
-        let forward_support = chains
-            .chains
-            .iter()
-            .map(|chain| chain.max_half_support().1)
-            .fold(0.0, f64::max);
-        let back_support = chains
-            .chains
-            .iter()
-            .map(|chain| chain.max_half_support().0.abs())
-            .fold(0.0, f64::max);
+        let (forward_support, back_support) = supports_of(&chains);
         Self {
             chains,
             history: VecDeque::new(),
@@ -256,10 +336,10 @@ impl Shaper {
         }
     }
 
-    pub(crate) fn run(mut self, input: Receiver<LoweredSegment>, output: Sender<ShapedSegment>) {
+    pub(crate) fn run(mut self, input: Receiver<LoweredItem>, output: Sender<ShapedItem>) {
         loop {
             match input.recv() {
-                Ok(item) => {
+                Ok(LoweredItem::Seg(item)) => {
                     self.pending.push_back(item.seg);
                     self.pending_rest.push_back(item.rest_at_end);
                     if !self.emit(self.supported_count(), false, &output) {
@@ -268,6 +348,33 @@ impl Shaper {
                     let at_rest = self.pending_rest.back() == Some(&true);
                     if at_rest && input.is_empty() && !self.emit(self.pending.len(), true, &output)
                     {
+                        return;
+                    }
+                }
+                Ok(LoweredItem::Control(ctrl)) => {
+                    match &ctrl {
+                        Control::Reset { .. } => {
+                            self.pending.clear();
+                            self.pending_rest.clear();
+                            self.history.clear();
+                        }
+                        Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
+                            assert!(
+                                self.pending.is_empty() || self.pending_rest.back() == Some(&true),
+                                "shaper: control token arrived while the trajectory is not at \
+                                 rest — a Drain must precede it"
+                            );
+                            if !self.emit(self.pending.len(), true, &output) {
+                                return;
+                            }
+                            if let Control::SetAxisChains(chains) = &ctrl {
+                                (self.forward_support, self.back_support) = supports_of(chains);
+                                self.chains = chains.clone();
+                                self.history.clear();
+                            }
+                        }
+                    }
+                    if output.send(ShapedItem::Control(ctrl)).is_err() {
                         return;
                     }
                 }
@@ -292,7 +399,7 @@ impl Shaper {
             .count()
     }
 
-    fn emit(&mut self, count: usize, force: bool, output: &Sender<ShapedSegment>) -> bool {
+    fn emit(&mut self, count: usize, force: bool, output: &Sender<ShapedItem>) -> bool {
         if count == 0 {
             return true;
         }
@@ -300,7 +407,7 @@ impl Shaper {
         let shaped = apply_axis_chains(&self.history, base, count, force, &self.chains.chains)
             .unwrap_or_else(|e| panic!("shaper: {e}"));
         for seg in shaped {
-            if output.send(seg).is_err() {
+            if output.send(ShapedItem::Seg(seg)).is_err() {
                 return false;
             }
         }
@@ -324,6 +431,20 @@ impl Shaper {
         }
         true
     }
+}
+
+fn supports_of(chains: &AxisChainSet) -> (f64, f64) {
+    let forward = chains
+        .chains
+        .iter()
+        .map(|chain| chain.max_half_support().1)
+        .fold(0.0, f64::max);
+    let back = chains
+        .chains
+        .iter()
+        .map(|chain| chain.max_half_support().0.abs())
+        .fold(0.0, f64::max);
+    (forward, back)
 }
 
 /// Jerk-limited time to decelerate from `v` to rest under accel limit `a` and

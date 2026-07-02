@@ -6,7 +6,7 @@ use geometry::fitter::{
 use geometry::path::{Line, PathSegment, Segment};
 use geometry::{ChainFitConfig, Move};
 
-use super::{StreamInput, dist3};
+use super::{Control, StreamInput, dist3};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
 
@@ -99,6 +99,7 @@ impl Fitter {
                 StreamInput::Drain => {
                     self.resolve(true, &mut out) && out.release(None) && out.forward_drain()
                 }
+                StreamInput::Control(ctrl) => self.forward_control(ctrl, &mut out),
             };
             if !ok {
                 return;
@@ -106,6 +107,29 @@ impl Fitter {
         }
         self.resolve(true, &mut out);
         out.release(None);
+    }
+
+    /// `Reset` drops all buffered fit state and forgets the emitted-geometry
+    /// anchor (the timeline restarts elsewhere); every other token requires
+    /// the fit buffers to have been drained first.
+    fn forward_control(&mut self, ctrl: Control, out: &mut TravelAligningSender) -> bool {
+        match &ctrl {
+            Control::Reset { .. } => {
+                self.decided.clear();
+                self.tail.clear();
+                self.tail_checked = 1;
+                self.seam_head_trim = 0.0;
+                self.seam_in_reduction = 0.0;
+                out.reset();
+            }
+            Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
+                assert!(
+                    self.decided.is_empty() && self.tail.is_empty(),
+                    "fitter: control token arrived with undrained moves — a Drain must precede it"
+                );
+            }
+        }
+        out.forward(StreamInput::Control(ctrl))
     }
 
     /// Advance every stage as far as the buffered input allows: decide the
@@ -504,6 +528,17 @@ impl TravelAligningSender {
     fn forward_drain(&self) -> bool {
         debug_assert!(self.parked_travel.is_none() && self.parked_tail.is_empty());
         self.tx.send(StreamInput::Drain).is_ok()
+    }
+
+    fn forward(&self, item: StreamInput) -> bool {
+        debug_assert!(self.parked_travel.is_none() && self.parked_tail.is_empty());
+        self.tx.send(item).is_ok()
+    }
+
+    fn reset(&mut self) {
+        self.last_spatial_end = None;
+        self.parked_travel = None;
+        self.parked_tail.clear();
     }
 }
 

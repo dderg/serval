@@ -14,7 +14,7 @@ use crate::enqueue::enqueue_segment;
 use crate::pump::{
     AxisKey, JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionTracker, MAX_LEAD_SECS,
 };
-use crate::stream::{StreamConfig, setup_pipeline};
+use crate::stream::{StreamConfig, setup_stages};
 
 const HARNESS_MCU_ID: u32 = 0;
 const HARNESS_MCU_FREQ_HZ: f64 = 1.0e6;
@@ -313,12 +313,14 @@ pub fn run_moves(moves: &[Move], config: StreamConfig) -> SeamReport {
         .first()
         .and_then(|m| m.segment.spatial.as_ref())
         .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
-    let handle = setup_pipeline(config, AxisChainSet::default(), home.to_vec(), 0.0);
+    let handle = setup_stages(config, AxisChainSet::default(), home.to_vec(), 0.0);
     let output = handle.output;
     let collector = std::thread::spawn(move || {
         let mut segs: Vec<ShapedSegment> = Vec::new();
-        while let Ok(seg) = output.recv() {
-            segs.push(seg);
+        while let Ok(item) = output.recv() {
+            if let crate::stream::ShapedItem::Seg(seg) = item {
+                segs.push(seg);
+            }
         }
         segs
     });

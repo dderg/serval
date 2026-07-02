@@ -39,7 +39,13 @@ fn fit_and_plan(moves: &[geometry::Move]) -> Vec<PlannedMove> {
 
     let (planned_tx, planned_rx) = unbounded();
     Planner::new(stream_config()).run(fitted_rx, planned_tx);
-    planned_rx.into_iter().collect()
+    planned_rx
+        .into_iter()
+        .filter_map(|item| match item {
+            crate::stream::PlannedItem::Move(m) => Some(m),
+            crate::stream::PlannedItem::Control(_) => None,
+        })
+        .collect()
 }
 
 #[test]

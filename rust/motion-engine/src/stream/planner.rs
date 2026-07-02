@@ -3,7 +3,9 @@ use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
 use geometry::{Move, VelocityProfile, plan_velocity_stops};
 
-use super::{PlannedMove, StreamConfig, StreamInput, jerk_limited_brake_time};
+use super::{
+    Control, PlannedItem, PlannedMove, StreamConfig, StreamInput, jerk_limited_brake_time,
+};
 
 /// Cost governor, not a lookahead bound: velocity planning is ~linear in the
 /// window, so re-planning on every arriving move would be quadratic. The window
@@ -47,11 +49,12 @@ impl Planner {
         }
     }
 
-    pub(crate) fn run(mut self, input: Receiver<StreamInput>, output: Sender<PlannedMove>) {
+    pub(crate) fn run(mut self, input: Receiver<StreamInput>, output: Sender<PlannedItem>) {
         while let Ok(item) = input.recv() {
             let ok = match item {
                 StreamInput::Move(m) => self.absorb(m, &output),
                 StreamInput::Drain => self.drain_to_rest(&output),
+                StreamInput::Control(ctrl) => self.forward_control(ctrl, &output),
             };
             if !ok {
                 return;
@@ -60,7 +63,30 @@ impl Planner {
         self.drain_to_rest(&output);
     }
 
-    fn absorb(&mut self, m: Move, output: &Sender<PlannedMove>) -> bool {
+    /// `Reset` discards the window (nothing ahead of it may dispatch — the
+    /// sender gates the dispatcher); every other token requires the window to
+    /// have been drained first, because it is meaningless (or hides a
+    /// velocity discontinuity) while moves are still being looked ahead.
+    fn forward_control(&mut self, ctrl: Control, output: &Sender<PlannedItem>) -> bool {
+        match &ctrl {
+            Control::Reset { .. } => {
+                self.moves.clear();
+                self.entry_v = 0.0;
+                self.next_plan_len = REPLAN_BATCH_MOVES;
+            }
+            Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
+                assert!(
+                    self.moves.is_empty(),
+                    "planner: control token arrived with {} undrained moves — a Drain must \
+                     precede it",
+                    self.moves.len()
+                );
+            }
+        }
+        output.send(PlannedItem::Control(ctrl)).is_ok()
+    }
+
+    fn absorb(&mut self, m: Move, output: &Sender<PlannedItem>) -> bool {
         self.moves.push(m);
         if self.moves.len() < self.next_plan_len.min(self.config.max_buffer_moves) {
             return true;
@@ -115,7 +141,7 @@ impl Planner {
 
     /// Materialize the brake-to-rest: plan the whole window to terminal rest
     /// and emit everything.
-    fn drain_to_rest(&mut self, output: &Sender<PlannedMove>) -> bool {
+    fn drain_to_rest(&mut self, output: &Sender<PlannedItem>) -> bool {
         if self.moves.is_empty() {
             return true;
         }
@@ -126,7 +152,7 @@ impl Planner {
 
     /// Emit the prefix up to the furthest-forward clean seam that is inside
     /// the finality barrier and clear of the brake-to-rest setback.
-    fn emit_committable(&mut self, output: &Sender<PlannedMove>) -> bool {
+    fn emit_committable(&mut self, output: &Sender<PlannedItem>) -> bool {
         let profile = self.plan();
         let setback = brake_to_rest_setback(&self.moves);
         let total_arc: f64 = self.moves.iter().map(|m| m.segment.s_len()).sum();
@@ -152,7 +178,7 @@ impl Planner {
         &mut self,
         count: usize,
         profile: &VelocityProfile,
-        output: &Sender<PlannedMove>,
+        output: &Sender<PlannedItem>,
     ) -> bool {
         debug_assert_eq!(profile.moves.len(), self.moves.len());
         self.entry_v = if count == self.moves.len() {
@@ -161,7 +187,10 @@ impl Planner {
             profile.moves[count - 1].exit_v
         };
         for (geometry, velocity) in self.moves.drain(..count).zip(profile.moves.iter().cloned()) {
-            if output.send(PlannedMove { geometry, velocity }).is_err() {
+            if output
+                .send(PlannedItem::Move(PlannedMove { geometry, velocity }))
+                .is_err()
+            {
                 return false;
             }
         }

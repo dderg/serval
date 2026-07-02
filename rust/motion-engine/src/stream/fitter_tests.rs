@@ -11,7 +11,7 @@ fn moves_of(rx: crossbeam_channel::Receiver<StreamInput>) -> Vec<Move> {
     rx.into_iter()
         .filter_map(|item| match item {
             StreamInput::Move(m) => Some(m),
-            StreamInput::Drain => None,
+            StreamInput::Drain | StreamInput::Control(_) => None,
         })
         .collect()
 }

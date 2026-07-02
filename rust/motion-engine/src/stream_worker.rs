@@ -9,8 +9,8 @@ use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::pump::AxisKey;
 use crate::stream::{
-    CONTIGUITY_EPS_MM, PipelineHandle, StreamConfig, StreamInput, advance_odometer, dist3,
-    setup_pipeline,
+    BarrierAck, CONTIGUITY_EPS_MM, Control, ShapedItem, StreamConfig, StreamInput,
+    advance_odometer, dist3, setup_stages,
 };
 
 /// Host-monotonic end of the trajectory committed to the pump. The dispatcher
@@ -196,8 +196,123 @@ impl std::fmt::Display for StreamWorkerError {
 
 impl std::error::Error for StreamWorkerError {}
 
+/// Connection-layer resources the pump needs: the wire sink over the live
+/// transports and the callbacks that reach back into the connection
+/// supervisor (ring depths, clock sync, endpoint-death and drip-stall
+/// escalation). The bridge assembles these; the pipeline owns the pump built
+/// from them.
+pub(crate) struct PumpResources {
+    pub(crate) sink: crate::pump::WireSink,
+    pub(crate) ring_depth_of: Box<dyn Fn(AxisKey) -> u32 + Send>,
+    pub(crate) mcu_clock_of: Box<dyn Fn(u32) -> Option<(u64, f64)> + Send>,
+    pub(crate) on_fatal_transport: Box<dyn Fn(AxisKey) + Send + 'static>,
+    pub(crate) on_abandon: Box<dyn Fn(AxisKey, u32) + Send>,
+    pub(crate) on_drip_stall: Box<dyn Fn(String) + Send>,
+    pub(crate) backlog: Arc<AtomicU64>,
+}
+
+/// Clock-domain and bookkeeping resources the dispatcher anchors segments
+/// against. The pump enqueue side is not here — it is created inside
+/// `setup_pipeline`, which owns both ends.
+pub(crate) struct DispatchResources {
+    pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
+    pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
+    pub(crate) mcu_configs: Vec<crate::dispatch::McuAxisConfig>,
+    pub(crate) drain: Arc<crate::drain::DrainSync>,
+    pub(crate) counter: Arc<AtomicU64>,
+    pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
+    pub(crate) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
+    pub(crate) nominal_freqs: Arc<Mutex<HashMap<u32, u32>>>,
+}
+
+pub(crate) struct MotionPipeline {
+    pub(crate) worker: StreamWorkerHandle,
+    /// Out-of-band pump control (drip arm/disarm, flush, heartbeats): the
+    /// paths that must act while the in-band stream is gated or stalled.
+    pub(crate) pump_control: Sender<crate::pump::PumpMsg>,
+    pub(crate) pump_thread: JoinHandle<()>,
+}
+
+/// Boot-time constructor of the entire motion pipeline:
+/// fitter → planner → lowerer → shaper → dispatcher → pump, wired once and
+/// never torn down. Everything downstream of the ingress — including the pump
+/// thread and the enqueue channel between dispatcher and pump — is owned
+/// here; the bridge only supplies the connection-layer resources.
+pub(crate) fn setup_pipeline(
+    config: StreamConfig,
+    axis_chains: AxisChainSet,
+    home_pos: Vec<f64>,
+    dispatch: DispatchResources,
+    pump: PumpResources,
+) -> MotionPipeline {
+    let (pump_control, control_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
+    let (pump_data, data_rx) =
+        bounded::<crate::pump::EnqueueMsg>(crate::pump::PUMP_DATA_CHANNEL_CAP);
+    let pump_thread = thread::Builder::new()
+        .name("push-pieces-pump".into())
+        .spawn(move || {
+            crate::pump::run_pump(
+                control_rx,
+                data_rx,
+                pump.sink,
+                pump.ring_depth_of,
+                pump.mcu_clock_of,
+                pump.on_fatal_transport,
+                pump.on_abandon,
+                pump.on_drip_stall,
+                pump.backlog,
+            );
+        })
+        .expect("spawn push-pieces-pump thread");
+    let ctx = Arc::new(SegmentDispatchCtx {
+        frontier: Arc::default(),
+        router: dispatch.router,
+        anchor: dispatch.anchor,
+        mcu_configs: dispatch.mcu_configs,
+        pump_tx: pump_data,
+        drain: dispatch.drain,
+        counter: dispatch.counter,
+        active_drip_cohort: dispatch.active_drip_cohort,
+        motion_history: dispatch.motion_history,
+        nominal_freqs: dispatch.nominal_freqs,
+    });
+    let worker = StreamWorkerHandle::spawn_with_ctx(config, axis_chains, home_pos, ctx);
+    MotionPipeline {
+        worker,
+        pump_control,
+        pump_thread,
+    }
+}
+
 impl StreamWorkerHandle {
-    pub fn spawn(
+    /// Builds the worker's dispatchers from the dispatch context. Use
+    /// `setup_pipeline` from production — it owns the pump this
+    /// context enqueues into.
+    fn spawn_with_ctx(
+        config: StreamConfig,
+        axis_chains: AxisChainSet,
+        home_pos: Vec<f64>,
+        ctx: Arc<SegmentDispatchCtx>,
+    ) -> Self {
+        let frontier = Arc::clone(&ctx.frontier);
+        let dispatch_ctx = Arc::clone(&ctx);
+        let dispatch: DispatchFn = Arc::new(move |seg| dispatch_segment(&dispatch_ctx, seg));
+        let nudge_dispatch: NudgeDispatchFn =
+            Arc::new(move |mcu_id, np| dispatch_nudge(&ctx, mcu_id, np));
+        Self::spawn(
+            config,
+            axis_chains,
+            home_pos,
+            dispatch,
+            nudge_dispatch,
+            frontier,
+        )
+    }
+
+    /// Test seam: `spawn_with_ctx` is the production entry; this variant
+    /// injects the dispatchers directly so tests can capture output without
+    /// a router or pump.
+    pub(crate) fn spawn(
         config: StreamConfig,
         axis_chains: AxisChainSet,
         home_pos: Vec<f64>,
@@ -215,7 +330,6 @@ impl StreamWorkerHandle {
         ))));
         let shared = ConsumerShared {
             dispatch,
-            discard: Arc::new(AtomicBool::new(false)),
             sync_instant: Arc::new(Mutex::new(None)),
             last_move_time_bits: Arc::clone(&last_move_time_bits),
             commit_fire_count: Arc::clone(&commit_fire_count),
@@ -224,13 +338,30 @@ impl StreamWorkerHandle {
         let join = thread::Builder::new()
             .name("kalico-stream-worker".to_string())
             .spawn(move || {
+                let pipeline = setup_stages(config, axis_chains, home_pos.clone(), 0.0);
+                let discard = Arc::new(AtomicBool::new(false));
+                let capture_errors = Arc::new(AtomicBool::new(false));
+                let consumer = Consumer {
+                    shared: shared.clone(),
+                    discard: Arc::clone(&discard),
+                    capture_errors: Arc::clone(&capture_errors),
+                    frontier: Arc::clone(&frontier),
+                    dispatched_through: None,
+                    pending_error: None,
+                };
+                let output = pipeline.output;
+                thread::Builder::new()
+                    .name("kalico-dispatch".to_string())
+                    .spawn(move || consumer.run(&output))
+                    .expect("spawn pipeline consumer thread");
                 let worker = Worker {
                     config,
-                    axis_chains,
                     nudge_dispatch,
                     odometer: home_pos,
                     t_next: 0.0,
-                    active: None,
+                    input: pipeline.input,
+                    discard,
+                    capture_errors,
                     shared,
                     tally,
                     frontier,
@@ -558,13 +689,103 @@ pub(crate) fn dispatch_segment(
     Ok(())
 }
 
+/// Anchor a nudge piece to the MCU clock and hand it to the pump — the
+/// single-axis, pipeline-bypassing sibling of `dispatch_segment`.
+pub(crate) fn dispatch_nudge(
+    ctx: &SegmentDispatchCtx,
+    mcu_id: u32,
+    np: &crate::nudge::NudgePiece,
+) -> Result<(), DispatchError> {
+    let axis = np.axis;
+    if !ctx.mcu_configs.iter().any(|c| c.mcu_id == mcu_id) {
+        return Err(DispatchError::NudgeTargetMissing { mcu_id, axis });
+    }
+
+    let host_now = {
+        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        r.host_now_secs()
+    };
+
+    let active_cohort: Option<u64> = *ctx
+        .active_drip_cohort
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+
+    let lead_secs = if active_cohort.is_some() {
+        crate::pump::DRIP_WINDOW_SECS
+    } else {
+        crate::pump::MAX_LEAD_SECS
+    };
+
+    let (t0, fresh) = ctx
+        .anchor
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .anchor_segment(np.piece.u_start, np.piece.u_end, host_now);
+
+    if fresh {
+        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        let h = crate::types::mcu_handle_from_raw(mcu_id);
+        r.log_seg0_lead(h, t0 + np.piece.u_start, t0);
+    }
+
+    let project = |proj_mcu_id: u32, host_secs: f64| -> u64 {
+        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        r.host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(proj_mcu_id), host_secs)
+            .unwrap_or(0)
+    };
+
+    let max_piece_secs = if active_cohort.is_some() {
+        Some(0.025_f64)
+    } else {
+        None::<f64>
+    };
+
+    let pieces = crate::enqueue::flatten_bezier_pieces(
+        std::slice::from_ref(&np.piece),
+        t0,
+        mcu_id,
+        axis as usize,
+        host_now,
+        &project,
+        max_piece_secs,
+        np.motor_mask,
+    );
+
+    if !pieces.is_empty() {
+        let key = crate::pump::AxisKey { mcu_id, axis };
+        let nominal_freq = {
+            let freqs = ctx.nominal_freqs.lock().unwrap_or_else(|p| p.into_inner());
+            *freqs
+                .get(&mcu_id)
+                .ok_or(DispatchError::MissingNominalFreq(mcu_id))?
+        };
+        {
+            let mut store = ctx.motion_history.lock().unwrap_or_else(|p| p.into_inner());
+            for (piece, host_t) in &pieces {
+                store.record(key, piece, nominal_freq, *host_t);
+            }
+        }
+        ctx.drain.add_sent(mcu_id, axis, pieces.len() as u32);
+        ctx.pump_tx
+            .send(crate::pump::EnqueueMsg {
+                key,
+                pieces,
+                fresh_stream: fresh,
+                lead_secs,
+                source_line: u32::MAX,
+            })
+            .map_err(|_| DispatchError::PumpGone)?;
+    }
+
+    ctx.counter.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
 /// State the pipeline-output consumer thread shares with the worker.
 #[derive(Clone)]
 struct ConsumerShared {
     dispatch: DispatchFn,
-    /// Set by a teardown that must drop in-flight motion (reset, stream open,
-    /// homing restart) instead of dispatching it.
-    discard: Arc<AtomicBool>,
     sync_instant: Arc<Mutex<Option<Instant>>>,
     last_move_time_bits: Arc<AtomicU64>,
     commit_fire_count: Arc<AtomicU32>,
@@ -573,7 +794,7 @@ struct ConsumerShared {
 }
 
 impl ConsumerShared {
-    fn dispatch_segment(&self, seg: &ShapedSegment) {
+    fn dispatch_segment(&self, seg: &ShapedSegment) -> Result<(), DispatchError> {
         let n_ax = seg.axes.len();
         tracing::info!(
             subsystem = "motion",
@@ -599,9 +820,7 @@ impl ConsumerShared {
             },
             "[pipe] dispatch"
         );
-        if let Err(e) = (self.dispatch)(seg) {
-            fatal(&format!("dispatch failed: {e}"));
-        }
+        (self.dispatch)(seg)?;
         let mut sync = self.sync_instant.lock().unwrap_or_else(|p| p.into_inner());
         if sync.is_none() {
             *sync = Some(Instant::now());
@@ -614,73 +833,127 @@ impl ConsumerShared {
             .unwrap_or_else(|p| p.into_inner())
             .retire_dispatched(seg.source_line);
         self.commit_fire_count.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 }
 
-struct ActivePipeline {
-    input: Sender<StreamInput>,
-    consumer: JoinHandle<Option<f64>>,
+/// Final pipeline consumer: dispatches shaped segments to the pump and
+/// services the control tokens that reach the end of the stream. `Barrier`
+/// is acknowledged here — everything ahead of it has been dispatched or
+/// discarded. The `discard` gate (set out-of-band by reset paths) drops
+/// segments until the in-band `Reset` token catches up and lifts it, which
+/// makes "clear everything queued, dispatch nothing" exact rather than racy.
+struct Consumer {
+    shared: ConsumerShared,
     discard: Arc<AtomicBool>,
+    /// While set (homing paths), a dispatch error is captured and reported at
+    /// the next `Barrier` instead of aborting the process; segments behind a
+    /// captured error are dropped.
+    capture_errors: Arc<AtomicBool>,
+    frontier: Arc<CommittedFrontier>,
+    dispatched_through: Option<f64>,
+    pending_error: Option<String>,
+}
+
+impl Consumer {
+    fn run(mut self, output: &Receiver<ShapedItem>) {
+        while let Ok(item) = output.recv() {
+            match item {
+                ShapedItem::Seg(seg) => {
+                    if self.discard.load(Ordering::Acquire) || self.pending_error.is_some() {
+                        continue;
+                    }
+                    match self.shared.dispatch_segment(&seg) {
+                        Ok(()) => self.dispatched_through = Some(seg.t_end),
+                        Err(e) if self.capture_errors.load(Ordering::Acquire) => {
+                            self.pending_error = Some(format!("dispatch failed: {e}"));
+                        }
+                        Err(e) => fatal(&format!("dispatch failed: {e}")),
+                    }
+                }
+                ShapedItem::Control(Control::Barrier(tx)) => {
+                    let ack = BarrierAck {
+                        dispatched_through: self.dispatched_through,
+                        sync_instant: *self
+                            .shared
+                            .sync_instant
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner()),
+                        result: self.pending_error.take().map_or(Ok(()), Err),
+                    };
+                    let _ = tx.send(ack);
+                }
+                ShapedItem::Control(Control::Reset { .. }) => {
+                    self.discard.store(false, Ordering::Release);
+                    self.frontier.clear();
+                    self.dispatched_through = None;
+                    *self
+                        .shared
+                        .sync_instant
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner()) = None;
+                }
+                ShapedItem::Control(Control::Dwell { secs }) => {
+                    if let Some(t) = &mut self.dispatched_through {
+                        *t += secs;
+                    }
+                }
+                ShapedItem::Control(Control::SetAxisChains(_)) => {}
+            }
+        }
+    }
 }
 
 struct Worker {
     config: StreamConfig,
-    axis_chains: AxisChainSet,
     nudge_dispatch: NudgeDispatchFn,
-    /// Expected toolhead position after every move ingested so far; the next
-    /// pipeline (and the ingress contiguity check) starts here.
+    /// Expected toolhead position after every move ingested so far; the
+    /// ingress contiguity check anchors here.
     odometer: Vec<f64>,
-    /// Stream time where the next pipeline's timeline resumes.
+    /// Stream time the dispatched timeline has reached, mirrored from barrier
+    /// acks; nudges (which bypass the pipeline) plan from it.
     t_next: f64,
-    active: Option<ActivePipeline>,
+    input: Sender<StreamInput>,
+    discard: Arc<AtomicBool>,
+    capture_errors: Arc<AtomicBool>,
     shared: ConsumerShared,
     tally: Arc<Mutex<IntakeTally>>,
     frontier: Arc<CommittedFrontier>,
-    /// The active pipeline holds moves ingested since the last `Drain`; the
-    /// pacer only schedules a drain while this is set.
+    /// The pipeline holds moves ingested since the last `Drain`; the pacer
+    /// only schedules a drain while this is set.
     undrained: bool,
 }
 
 impl Worker {
-    fn input(&mut self) -> &Sender<StreamInput> {
-        if self.active.is_none() {
-            let handle = setup_pipeline(
-                self.config,
-                self.axis_chains.clone(),
-                self.odometer.clone(),
-                self.t_next,
-            );
-            let discard = Arc::new(AtomicBool::new(false));
-            self.active = Some(ActivePipeline {
-                input: handle.input,
-                consumer: spawn_consumer(handle.output, self.shared.clone(), Arc::clone(&discard)),
-                discard,
-            });
+    fn send(&mut self, item: StreamInput) {
+        if self.input.send(item).is_err() {
+            fatal("pipeline input closed — a stage died");
         }
-        &self.active.as_ref().expect("just ensured").input
     }
 
-    /// Close the pipeline input and wait for every stage to drain through the
-    /// consumer. With `discard` the in-flight motion is dropped instead of
-    /// dispatched (reset paths); otherwise the timeline advances to the last
-    /// dispatched segment's end.
-    fn teardown(&mut self, discard: bool) {
-        let Some(active) = self.active.take() else {
-            return;
-        };
-        if discard {
-            active.discard.store(true, Ordering::Release);
+    /// Fence: everything sent before this has been dispatched (or discarded)
+    /// once it returns. Advances the worker's timeline mirror.
+    fn barrier(&mut self) -> BarrierAck {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.send(StreamInput::Control(Control::Barrier(tx)));
+        let ack = rx
+            .recv()
+            .unwrap_or_else(|_| fatal("pipeline dropped a barrier — a stage died"));
+        if let Some(t) = ack.dispatched_through {
+            self.t_next = t;
         }
-        drop(active.input);
-        let dispatched_through = active
-            .consumer
-            .join()
-            .unwrap_or_else(|_| fatal("pipeline consumer panicked"));
-        if let Some(t_end) = dispatched_through {
-            self.t_next = t_end;
-        }
-        self.tally.lock().unwrap_or_else(|p| p.into_inner()).reset();
+        ack
+    }
+
+    /// Drain the lookahead and fence: the pipeline is empty and the full
+    /// braked-to-rest trajectory is dispatched when this returns, so no
+    /// intake remains uncommitted.
+    fn drain_and_fence(&mut self) -> BarrierAck {
+        self.send(StreamInput::Drain);
         self.undrained = false;
+        let ack = self.barrier();
+        self.tally.lock().unwrap_or_else(|p| p.into_inner()).reset();
+        ack
     }
 
     fn handle_move(&mut self, m: geometry::Move) {
@@ -710,9 +983,7 @@ impl Worker {
             .unwrap_or_else(|p| p.into_inner())
             .record_intake(&m);
         advance_odometer(&mut self.odometer, &m);
-        if self.input().send(m.into()).is_err() {
-            fatal("pipeline input closed — a stage died");
-        }
+        self.send(m.into());
         self.undrained = true;
     }
 
@@ -733,9 +1004,7 @@ impl Worker {
             t_us = crate::timing::mono_us(),
             "[pipe] runway exhausted — draining pipeline to rest"
         );
-        if self.input().send(StreamInput::Drain).is_err() {
-            fatal("pipeline input closed — a stage died");
-        }
+        self.send(StreamInput::Drain);
         self.undrained = false;
         None
     }
@@ -746,22 +1015,21 @@ impl Worker {
         match msg {
             StreamMsg::Move(_) => unreachable!("moves handled by the ingress path"),
             StreamMsg::Flush { notify } => {
-                self.teardown(false);
-                let finish = self
-                    .shared
-                    .sync_instant
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .map(|t| {
-                        t + Duration::try_from_secs_f64((self.t_next + LEAD).max(0.0))
-                            .unwrap_or(Duration::ZERO)
-                    });
+                let ack = self.drain_and_fence();
+                let finish = ack.sync_instant.map(|t| {
+                    t + Duration::try_from_secs_f64((self.t_next + LEAD).max(0.0))
+                        .unwrap_or(Duration::ZERO)
+                });
                 let _ = notify.send(finish);
             }
             StreamMsg::Dwell { duration_s, notify } => {
-                self.teardown(false);
+                self.drain_and_fence();
                 if duration_s > 0.0 {
-                    self.t_next += duration_s;
+                    self.send(StreamInput::Control(Control::Dwell { secs: duration_s }));
+                    let before = self.t_next;
+                    if self.barrier().dispatched_through.is_none() {
+                        self.t_next = before + duration_s;
+                    }
                 }
                 let _ = notify.send(());
             }
@@ -772,8 +1040,9 @@ impl Worker {
                 self.reset_to(recovered_pos);
             }
             StreamMsg::SetAxisChains(chains) => {
-                self.teardown(false);
-                self.axis_chains = chains;
+                self.drain_and_fence();
+                self.send(StreamInput::Control(Control::SetAxisChains(chains)));
+                self.barrier();
             }
             StreamMsg::HomeDrip(p) => {
                 let result = self.run_home_drip(&p);
@@ -784,27 +1053,31 @@ impl Worker {
                 let _ = p.notify.send(result);
             }
             StreamMsg::Shutdown => {
-                self.teardown(false);
+                self.drain_and_fence();
                 return true;
             }
         }
         false
     }
 
+    /// Drop everything queued without dispatching it and restart the timeline
+    /// at rest at `pos`. The discard gate goes up out-of-band (segments
+    /// already past the shaper are dropped immediately) and the in-band
+    /// `Reset` lifts it when it catches up, so nothing sent before this call
+    /// reaches the pump and everything sent after does.
     fn reset_to(&mut self, pos: Vec<f64>) {
-        self.teardown(true);
+        self.discard.store(true, Ordering::Release);
         self.frontier.clear();
+        self.send(StreamInput::Control(Control::Reset { pos: pos.clone() }));
+        self.undrained = false;
+        self.barrier();
         self.odometer = pos;
         self.t_next = 0.0;
-        *self
-            .shared
-            .sync_instant
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = None;
+        self.tally.lock().unwrap_or_else(|p| p.into_inner()).reset();
     }
 
-    /// Run a homing drip as a one-shot pipeline dispatched synchronously, so a
-    /// dispatch failure surfaces to the homing caller instead of aborting.
+    /// Run a homing drip through the pipeline with dispatch errors captured,
+    /// so a failure surfaces to the homing caller instead of aborting.
     fn run_home_drip(&mut self, p: &HomeDripParams) -> Result<(), String> {
         self.reset_to(p.home_pos.to_vec());
         let travel = p.direction * p.max_travel_mm;
@@ -828,46 +1101,16 @@ impl Worker {
         .map_err(|e| format!("HomeDrip build_move: {e:?}"))?;
         advance_odometer(&mut self.odometer, &m);
 
-        let handle = setup_pipeline(
-            self.config,
-            self.axis_chains.clone(),
-            p.home_pos.to_vec(),
-            0.0,
-        );
-        handle
-            .input
-            .send(m.into())
-            .map_err(|_| "HomeDrip: pipeline input closed".to_string())?;
-        drop(handle.input);
-        let mut result = Ok(());
-        while let Ok(seg) = handle.output.recv() {
-            if result.is_err() {
-                continue;
-            }
-            if let Err(e) = (self.shared.dispatch)(&seg) {
-                result = Err(format!("HomeDrip dispatch failed: {e}"));
-                continue;
-            }
-            let mut sync = self
-                .shared
-                .sync_instant
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if sync.is_none() {
-                *sync = Some(Instant::now());
-            }
-            drop(sync);
-            self.shared
-                .last_move_time_bits
-                .store(seg.t_end.to_bits(), Ordering::Release);
-            self.shared.commit_fire_count.fetch_add(1, Ordering::AcqRel);
-            self.t_next = seg.t_end;
-        }
-        result
+        self.capture_errors.store(true, Ordering::Release);
+        self.send(m.into());
+        self.undrained = true;
+        let ack = self.drain_and_fence();
+        self.capture_errors.store(false, Ordering::Release);
+        ack.result
     }
 
     fn run_nudge(&mut self, p: &NudgeParams) -> Result<(), String> {
-        self.teardown(false);
+        self.drain_and_fence();
         let nudge_segs = crate::nudge::plan_nudge_profile(
             p.axis,
             p.delta_mm,
@@ -884,32 +1127,14 @@ impl Worker {
             (self.nudge_dispatch)(p.mcu_id, s).map_err(|e| format!("nudge dispatch: {e}"))?;
         }
         self.t_next += total_dur;
+        if total_dur > 0.0 {
+            self.send(StreamInput::Control(Control::Dwell { secs: total_dur }));
+        }
         self.shared
             .last_move_time_bits
             .store(self.t_next.to_bits(), Ordering::Release);
         Ok(())
     }
-}
-
-fn spawn_consumer(
-    output: Receiver<ShapedSegment>,
-    shared: ConsumerShared,
-    discard: Arc<AtomicBool>,
-) -> JoinHandle<Option<f64>> {
-    thread::Builder::new()
-        .name("kalico-dispatch".to_string())
-        .spawn(move || {
-            let mut dispatched_through = None;
-            while let Ok(seg) = output.recv() {
-                if discard.load(Ordering::Acquire) {
-                    continue;
-                }
-                shared.dispatch_segment(&seg);
-                dispatched_through = Some(seg.t_end);
-            }
-            dispatched_through
-        })
-        .expect("spawn pipeline consumer thread")
 }
 
 fn run_loop(rx: Receiver<StreamMsg>, mut worker: Worker) {
@@ -931,7 +1156,7 @@ fn run_loop(rx: Receiver<StreamMsg>, mut worker: Worker) {
             rx.recv().ok()
         };
         let Some(msg) = received else {
-            worker.teardown(false);
+            worker.drain_and_fence();
             return;
         };
         match msg {

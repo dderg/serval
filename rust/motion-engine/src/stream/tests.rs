@@ -87,7 +87,7 @@ fn replay(
         planned_rx,
         lowered_tx,
         config.fit_tol_mm,
-        &chains,
+        chains.clone(),
         home.to_vec(),
         t_start,
     );
@@ -95,7 +95,13 @@ fn replay(
     let (shaped_tx, shaped_rx) = unbounded();
     Shaper::new(chains).run(lowered_rx, shaped_tx);
 
-    shaped_rx.into_iter().collect()
+    shaped_rx
+        .into_iter()
+        .filter_map(|item| match item {
+            ShapedItem::Seg(seg) => Some(seg),
+            ShapedItem::Control(_) => None,
+        })
+        .collect()
 }
 
 fn boundary_speed(prev: &ShapedSegment, next: &ShapedSegment) -> f64 {
