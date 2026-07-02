@@ -71,11 +71,13 @@ pub struct VelocityProfile {
     /// Reconstructed profile state at every move boundary (`n + 1` entries,
     /// `boundaries[0]` mirrors the given entry). A streaming caller that cuts
     /// the window at seam `k` warm-starts the re-plan from `boundaries[k]`:
-    /// the carried `(v, a)` is the forward integrator's state at the seam, so
-    /// the next window continues the same jerk-limited curve instead of
-    /// re-anchoring at zero acceleration — which both bends the trajectory
-    /// (an acceleration discontinuity at the cut) and can be outright
-    /// infeasible when the profile crosses the seam mid-brake.
+    /// the carried `(v, a)` is the profile's state at the seam (velocity
+    /// clamped to the analytic node bound so a re-plan's entry checks accept
+    /// it by construction), so the next window continues the same
+    /// jerk-limited curve instead of re-anchoring at zero acceleration —
+    /// which both bends the trajectory (an acceleration discontinuity at the
+    /// cut) and can be outright infeasible when the profile crosses the seam
+    /// mid-brake.
     pub boundaries: Vec<BoundaryState>,
 }
 
@@ -438,7 +440,15 @@ pub fn plan_velocity_stops(
                 BoundaryState::REST
             } else {
                 let (bv, ba) = run_exit_states[idx];
-                BoundaryState { v: bv, a: ba }
+                // Grid integration can land the sample a hair above the
+                // analytic node bound; a re-plan re-derives that bound (or a
+                // looser one, by append monotonicity) as its entry check, so
+                // clamping here is what makes every boundary a valid warm
+                // start.
+                BoundaryState {
+                    v: bv.min(v[j + 1]),
+                    a: ba,
+                }
             });
             out.push(MoveVelocity {
                 entry_v,

@@ -1011,6 +1011,93 @@ fn replanned_tail_continues_the_uncut_profile() {
     );
 }
 
+/// The 2026-07-02 Neptune SCV-20 crash geometry: a wipe whose feedrate steps
+/// down move-to-move (so the run is not a uniform-ceiling straight run and
+/// reconstructs on the grid, not in closed form) ends in a 0.785 mm line
+/// followed by an extrude-only retract. The profile crosses the seam entering
+/// that last line already braking for the retract's rest anchor.
+fn graded_wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
+    let lims = VelocityLimits::try_new(400.0, 2000.0, 20.0, 100_000.0).unwrap();
+    let line = |len: f64, feed: f64, line_no: u32| {
+        let seg = Segment::Line(Line::try_new([0.0, 0.0, 0.0], [len, 0.0, 0.0]).unwrap());
+        Move {
+            segment: PathSegment::try_new(seg, Vec::new()).unwrap(),
+            feedrate_mm_s: feed,
+            limits: lims,
+            source: src(line_no),
+        }
+    };
+    let extrude_only = |line_no: u32| Move {
+        segment: PathSegment::try_new_virtual(
+            vec![FollowerDemand {
+                axis_index: 3,
+                ratio: 1.0,
+            }],
+            0.8,
+        )
+        .unwrap(),
+        feedrate_mm_s: 25.0,
+        limits: lims,
+        source: src(line_no),
+    };
+    let moves = vec![
+        line(1.2, 150.0, 1),
+        line(0.9, 110.0, 2),
+        line(0.785, 98.871_216_666_666_67, 3),
+        extrude_only(4),
+        line(2.766, 150.0, 5),
+        extrude_only(6),
+        line(0.224, 122.333_466_666_666_67, 7),
+    ];
+    let stop_before = vec![false, false, false, true, true, true, true];
+    (moves, stop_before)
+}
+
+/// A cut on a grid-reconstructed brake stretch must carry the profile's true
+/// state: the emitted curve is braking toward the retract's rest anchor, so
+/// the carried acceleration is negative — not the forward integrator's
+/// steering acceleration, which never brakes and reads a large positive value
+/// while the velocity rides the descending brake envelope.
+#[test]
+fn grid_path_cut_carries_the_true_brake_state() {
+    let (moves, stops) = graded_wipe_into_retract();
+    let p = plan_stops_full(&moves, &stops, BoundaryState::REST).unwrap();
+    let k = 2;
+    assert!(k <= p.barrier);
+    let entry = p.boundaries[k];
+    assert!(
+        entry.a < 0.0,
+        "the profile crosses the seam braking for the retract, carried a = {}",
+        entry.a
+    );
+    let replan = plan_stops_full(&moves[k..], &stops[k..], entry).unwrap_or_else(|e| {
+        panic!(
+            "re-plan from carried state (v={}, a={}) failed: {e:?}",
+            entry.v, entry.a
+        )
+    });
+    assert_eq!(replan.boundaries.last().copied(), Some(BoundaryState::REST));
+}
+
+/// The warm-start invariant on the grid-reconstruction path: the carried
+/// velocity is a grid-integrated sample, while the next window re-derives its
+/// entry bounds in closed form — every boundary at or before the barrier must
+/// still be accepted.
+#[test]
+fn grid_path_boundary_states_are_valid_warm_starts() {
+    let (moves, stops) = graded_wipe_into_retract();
+    let p = plan_stops_full(&moves, &stops, BoundaryState::REST).unwrap();
+    assert!(p.barrier >= 2);
+    for k in 1..=p.barrier {
+        plan_stops_full(&moves[k..], &stops[k..], p.boundaries[k]).unwrap_or_else(|e| {
+            panic!(
+                "re-plan from boundaries[{k}] = {:?} failed: {e:?}",
+                p.boundaries[k]
+            )
+        });
+    }
+}
+
 #[test]
 fn boundaries_span_the_window_and_anchor_entry() {
     let moves = decel_ramp_into_tight_arc();

@@ -465,8 +465,10 @@ fn reconstruct_flat(
 ///
 /// Returns the `(s, v, a)` samples (the emitted `a` is the central-difference
 /// derivative of the emitted `v`, so the pair is self-consistent) alongside the
-/// forward integrator's internal acceleration at every grid point — the state a
-/// streaming cut must carry to continue this exact curve in the next window.
+/// profile's acceleration state at every grid point — the free-flight steering
+/// accel where the integrator is below the cap, the realized cap-ride accel
+/// where it is clamped — the state a streaming cut must carry to continue this
+/// exact curve in the next window.
 fn jerk_smooth(
     ctxs: &[MemberCtx],
     base: Vec<(f64, f64, f64)>,
@@ -639,11 +641,19 @@ fn reach_pass(
         let a = a_target
             .clamp(center - tang, center + tang)
             .clamp(-rail, rail);
-        v[i] = (v[i - 1] * v[i - 1] + (a_prev + a) * ds)
-            .max(0.0)
-            .sqrt()
-            .min(cap[i]);
-        acc[i] = a;
+        let v_free = (v[i - 1] * v[i - 1] + (a_prev + a) * ds).max(0.0).sqrt();
+        if v_free > cap[i] {
+            // Riding the cap: the profile state is the accel the ride
+            // realizes (negative down a brake envelope), not the free-flight
+            // steering accel — that state was never on the emitted curve.
+            // The steering accel still drives the integration so the ride
+            // ends exactly as it always did.
+            v[i] = cap[i];
+            acc[i] = (cap[i] * cap[i] - v[i - 1] * v[i - 1]) / (2.0 * ds);
+        } else {
+            v[i] = v_free;
+            acc[i] = a;
+        }
         a_prev = a;
     }
     (v, acc)
@@ -813,9 +823,10 @@ pub(super) fn reconstruct_run_phases(
 }
 
 /// Reconstruct the run: per-member `(s, v, a)` samples, plus the profile
-/// state `(v, a)` at each member's exit seam — the `a` there is the forward
-/// integrator's internal state (analytic for straight runs), which is what a
-/// streaming cut carries into the next window to continue this exact curve.
+/// state `(v, a)` at each member's exit seam — the `a` there is the profile's
+/// true acceleration state (analytic for straight runs, steering-or-cap-ride
+/// on the grid), which is what a streaming cut carries into the next window
+/// to continue this exact curve.
 pub(super) fn reconstruct_run(
     members: &[RunMember],
     run_start_v: f64,
@@ -871,9 +882,9 @@ pub(super) fn reconstruct_run(
 }
 
 /// Profile state at run-arc `s`: velocity from the emitted samples, accel from
-/// the forward integrator (the grid contains every member boundary exactly, so
-/// a seam lookup hits a grid point; the nearest-point fallback covers the
-/// short-run path where the grid was not built).
+/// the jerk-ride's state track (the grid contains every member boundary
+/// exactly, so a seam lookup hits a grid point; the nearest-point fallback
+/// covers the short-run path where the grid was not built).
 fn exit_state_at(flat: &[(f64, f64, f64)], integrator_a: &[f64], s: f64) -> (f64, f64) {
     let i = flat.partition_point(|p| p.0 < s - 1e-9);
     let i = i.min(flat.len() - 1);
