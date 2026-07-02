@@ -192,7 +192,7 @@ impl PyMotionEngine {
             .map_or(0, |p| p.pending_channel_moves() as u64)
     }
     fn input_channel_capacity(&self) -> u64 {
-        crate::stream_worker::INPUT_CHANNEL_CAP as u64
+        crate::worker::INPUT_CHANNEL_CAP as u64
     }
     fn uncommitted_intake_secs(&self) -> f64 {
         self.planner

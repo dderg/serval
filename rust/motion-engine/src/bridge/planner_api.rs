@@ -135,7 +135,7 @@ impl PyMotionEngine {
                 PyRuntimeError::new_err("planner not initialized — call init_planner first")
             })?;
             planner
-                .submit_nudge(crate::stream_worker::NudgeParams {
+                .submit_nudge(crate::worker::NudgeParams {
                     mcu_id,
                     axis: axis_idx,
                     motor_mask,
@@ -764,7 +764,7 @@ impl PyMotionEngine {
         let drain_for_pump = self.drain.clone();
         let router_for_freq = Arc::clone(&self.router);
         let endpoint_death_for_pump = Arc::clone(&self.latched_endpoint_death);
-        let pump_resources = crate::stream_worker::PumpResources {
+        let pump_resources = crate::worker::PumpResources {
             sink: crate::pump::WireSink {
                 transports: wire_transports,
                 timeout: Duration::from_secs(5),
@@ -818,7 +818,7 @@ impl PyMotionEngine {
 
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
         *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
-        let dispatch_resources = crate::stream_worker::DispatchResources {
+        let dispatch_resources = crate::worker::DispatchResources {
             router: Arc::clone(&router_arc),
             anchor: anchor_mutex,
             mcu_configs: mcu_configs.to_vec(),
@@ -831,7 +831,7 @@ impl PyMotionEngine {
 
         let stream_cfg = {
             let cart = cfg.cartesian;
-            crate::stream::StreamConfig {
+            motion_pipeline::StreamConfig {
                 chain: cfg.chain,
                 integration_tol: STREAM_INTEGRATION_TOL,
                 max_extrude_only_velocity_mm_s: cfg
@@ -861,7 +861,7 @@ impl PyMotionEngine {
                 "planner already initialized (raced)",
             ));
         }
-        let pipeline = crate::stream_worker::setup_pipeline(
+        let pipeline = crate::worker::setup_pipeline(
             stream_cfg,
             axis_chains,
             home,

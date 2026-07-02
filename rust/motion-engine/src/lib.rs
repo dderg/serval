@@ -13,7 +13,6 @@ pub mod homing;
 #[doc(hidden)]
 pub mod kinematics;
 pub mod logging;
-pub mod lowering;
 #[doc(hidden)]
 pub mod mcu_config;
 pub mod mcu_log;
@@ -33,11 +32,11 @@ pub mod servo_capture;
 pub mod servo_sdo;
 #[doc(hidden)]
 pub mod servo_torque;
-pub mod stream;
-pub mod stream_worker;
-pub mod timing;
 mod types;
 pub mod viz;
+pub mod worker;
+
+pub use motion_pipeline::timing;
 
 pub mod seam_test_harness;
 

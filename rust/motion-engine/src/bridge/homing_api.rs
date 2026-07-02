@@ -18,7 +18,7 @@ impl PyMotionEngine {
         endstop_id: u8,
         endstop_mcu: u32,
     ) -> PyResult<()> {
-        use crate::stream_worker::HomeDripParams;
+        use crate::worker::HomeDripParams;
 
         if axis > 2 {
             return Err(PyRuntimeError::new_err(format!(

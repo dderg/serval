@@ -3,7 +3,7 @@ use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
 use geometry::{BoundaryState, Move, VelocityProfile, plan_velocity_stops};
 
-use super::{
+use crate::{
     Control, PlannedItem, PlannedMove, StreamConfig, StreamInput, jerk_limited_brake_time,
 };
 
@@ -34,7 +34,7 @@ const REPLAN_BATCH_MOVES: usize = 64;
 /// brake-to-rest: the whole window is planned to rest and emitted. The
 /// planner itself never decides when to stop looking ahead — that call
 /// belongs to whoever sends `Drain`.
-pub(crate) struct Planner {
+pub struct Planner {
     moves: Vec<Move>,
     entry: BoundaryState,
     next_plan_len: usize,
@@ -42,7 +42,7 @@ pub(crate) struct Planner {
 }
 
 impl Planner {
-    pub(crate) fn new(config: StreamConfig) -> Self {
+    pub fn new(config: StreamConfig) -> Self {
         Self {
             moves: Vec::new(),
             entry: BoundaryState::REST,
@@ -51,7 +51,7 @@ impl Planner {
         }
     }
 
-    pub(crate) fn run(mut self, input: Receiver<StreamInput>, output: Sender<PlannedItem>) {
+    pub fn run(mut self, input: Receiver<StreamInput>, output: Sender<PlannedItem>) {
         while let Ok(item) = input.recv() {
             let ok = match item {
                 StreamInput::Move(m) => self.absorb(m, &output),

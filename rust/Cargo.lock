@@ -695,6 +695,7 @@ dependencies = [
  "mcu-protocol",
  "mcu-transport",
  "motion-engine",
+ "motion-pipeline",
  "nurbs",
  "proptest",
  "pyo3",
@@ -708,6 +709,19 @@ dependencies = [
  "tracing-appender",
  "tracing-log",
  "tracing-subscriber",
+ "trajectory",
+]
+
+[[package]]
+name = "motion-pipeline"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "geometry",
+ "libc",
+ "nurbs",
+ "thiserror",
+ "tracing",
  "trajectory",
 ]
 

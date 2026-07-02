@@ -18,8 +18,8 @@ use crate::classify;
 use crate::config::{self, PlannerConfig};
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
 use crate::mcu_config::{McuAxisConfig, McuCaps, build_mcu_configs};
-use crate::stream_worker::{StreamWorkerError, StreamWorkerHandle};
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
+use crate::worker::{StreamWorkerError, StreamWorkerHandle};
 
 mod ethercat_endpoint;
 mod homing_api;
