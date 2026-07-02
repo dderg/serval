@@ -144,7 +144,7 @@ pub enum StreamMsg {
 }
 
 #[allow(missing_debug_implementations)]
-pub struct StreamPlannerHandle {
+pub struct StreamWorkerHandle {
     sender: Sender<StreamMsg>,
     join_handle: Option<JoinHandle<()>>,
     last_move_time_bits: Arc<AtomicU64>,
@@ -153,12 +153,12 @@ pub struct StreamPlannerHandle {
 }
 
 #[derive(Debug)]
-pub enum StreamPlannerError {
+pub enum StreamWorkerError {
     ChannelClosed,
     ChannelFull,
 }
 
-impl std::fmt::Display for StreamPlannerError {
+impl std::fmt::Display for StreamWorkerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ChannelClosed => write!(f, "stream worker channel closed"),
@@ -171,9 +171,9 @@ impl std::fmt::Display for StreamPlannerError {
     }
 }
 
-impl std::error::Error for StreamPlannerError {}
+impl std::error::Error for StreamWorkerError {}
 
-impl StreamPlannerHandle {
+impl StreamWorkerHandle {
     pub fn spawn(
         config: StreamConfig,
         axis_chains: AxisChainSet,
@@ -214,7 +214,7 @@ impl StreamPlannerHandle {
         }
     }
 
-    pub fn submit_move(&self, m: geometry::Move) -> Result<(), StreamPlannerError> {
+    pub fn submit_move(&self, m: geometry::Move) -> Result<(), StreamWorkerError> {
         try_submit_move(&self.sender, m)
     }
 
@@ -222,65 +222,65 @@ impl StreamPlannerHandle {
         self.sender.len()
     }
 
-    pub fn flush(&self) -> Result<(), StreamPlannerError> {
+    pub fn flush(&self) -> Result<(), StreamWorkerError> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.sender
             .send(StreamMsg::Flush { notify: tx })
-            .map_err(|_| StreamPlannerError::ChannelClosed)?;
+            .map_err(|_| StreamWorkerError::ChannelClosed)?;
         rx.recv()
             .map(|_committed_through| ())
-            .map_err(|_| StreamPlannerError::ChannelClosed)
+            .map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
     pub fn flush_start(
         &self,
-    ) -> Result<crossbeam_channel::Receiver<Option<Instant>>, StreamPlannerError> {
+    ) -> Result<crossbeam_channel::Receiver<Option<Instant>>, StreamWorkerError> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.sender
             .send(StreamMsg::Flush { notify: tx })
-            .map_err(|_| StreamPlannerError::ChannelClosed)?;
+            .map_err(|_| StreamWorkerError::ChannelClosed)?;
         Ok(rx)
     }
 
-    pub fn dwell(&self, duration_s: f64) -> Result<(), StreamPlannerError> {
+    pub fn dwell(&self, duration_s: f64) -> Result<(), StreamWorkerError> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.sender
             .send(StreamMsg::Dwell {
                 duration_s,
                 notify: tx,
             })
-            .map_err(|_| StreamPlannerError::ChannelClosed)?;
-        rx.recv().map_err(|_| StreamPlannerError::ChannelClosed)
+            .map_err(|_| StreamWorkerError::ChannelClosed)?;
+        rx.recv().map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
-    pub fn stream_open(&self, home_pos: Vec<f64>) -> Result<(), StreamPlannerError> {
+    pub fn stream_open(&self, home_pos: Vec<f64>) -> Result<(), StreamWorkerError> {
         self.sender
             .send(StreamMsg::StreamOpen { home_pos })
-            .map_err(|_| StreamPlannerError::ChannelClosed)
+            .map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
-    pub fn reset(&self, recovered_pos: Vec<f64>) -> Result<(), StreamPlannerError> {
+    pub fn reset(&self, recovered_pos: Vec<f64>) -> Result<(), StreamWorkerError> {
         self.sender
             .send(StreamMsg::Reset { recovered_pos })
-            .map_err(|_| StreamPlannerError::ChannelClosed)
+            .map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
-    pub fn update_axis_chains(&self, chains: AxisChainSet) -> Result<(), StreamPlannerError> {
+    pub fn update_axis_chains(&self, chains: AxisChainSet) -> Result<(), StreamWorkerError> {
         self.sender
             .send(StreamMsg::SetAxisChains(chains))
-            .map_err(|_| StreamPlannerError::ChannelClosed)
+            .map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
-    pub fn home_drip(&self, p: HomeDripParams) -> Result<(), StreamPlannerError> {
+    pub fn home_drip(&self, p: HomeDripParams) -> Result<(), StreamWorkerError> {
         self.sender
             .send(StreamMsg::HomeDrip(p))
-            .map_err(|_| StreamPlannerError::ChannelClosed)
+            .map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
-    pub fn submit_nudge(&self, p: NudgeParams) -> Result<(), StreamPlannerError> {
+    pub fn submit_nudge(&self, p: NudgeParams) -> Result<(), StreamWorkerError> {
         self.sender
             .send(StreamMsg::Nudge(p))
-            .map_err(|_| StreamPlannerError::ChannelClosed)
+            .map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
     #[must_use]
@@ -306,7 +306,7 @@ impl StreamPlannerHandle {
     }
 }
 
-impl Drop for StreamPlannerHandle {
+impl Drop for StreamWorkerHandle {
     fn drop(&mut self) {
         if self.join_handle.is_some() {
             self.shutdown();
@@ -317,10 +317,10 @@ impl Drop for StreamPlannerHandle {
 fn try_submit_move(
     sender: &Sender<StreamMsg>,
     m: geometry::Move,
-) -> Result<(), StreamPlannerError> {
+) -> Result<(), StreamWorkerError> {
     sender.try_send(StreamMsg::Move(m)).map_err(|e| match e {
-        TrySendError::Full(_) => StreamPlannerError::ChannelFull,
-        TrySendError::Disconnected(_) => StreamPlannerError::ChannelClosed,
+        TrySendError::Full(_) => StreamWorkerError::ChannelFull,
+        TrySendError::Disconnected(_) => StreamWorkerError::ChannelClosed,
     })
 }
 

@@ -106,7 +106,7 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
     // the process on any commit error, so reaching the flush and seeing a
     // contiguous, complete trajectory is the pass condition.
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![99.158, 99.158, 0.2, 0.0],
@@ -157,7 +157,7 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
 #[test]
 fn streams_collinear_moves_to_a_contiguous_trajectory() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
@@ -194,7 +194,7 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
 #[test]
 fn dwell_inserts_a_time_gap_then_resumes() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
@@ -225,7 +225,7 @@ fn dwell_inserts_a_time_gap_then_resumes() {
 #[test]
 fn stream_open_restarts_the_timeline_at_zero() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
@@ -256,7 +256,7 @@ fn stream_open_restarts_the_timeline_at_zero() {
 #[test]
 fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
@@ -289,7 +289,7 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
 #[test]
 fn nudge_dispatches_pieces_and_advances_time() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
@@ -378,7 +378,7 @@ fn intake_tally_reset_zeroes_the_signal() {
 #[test]
 fn flushed_stream_reads_zero_uncommitted_intake() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
@@ -398,7 +398,7 @@ fn flushed_stream_reads_zero_uncommitted_intake() {
 #[test]
 fn partial_commit_head_trim_keeps_intake_tally_bounded() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg_cap(256),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
@@ -455,7 +455,7 @@ fn submit_move_errors_when_channel_full_instead_of_blocking() {
 
     let err = try_submit_move(&tx, line(2, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]))
         .expect_err("a full channel must error, not block");
-    assert!(matches!(err, StreamPlannerError::ChannelFull));
+    assert!(matches!(err, StreamWorkerError::ChannelFull));
 }
 
 #[test]
@@ -470,7 +470,7 @@ fn channel_depth_tracks_occupancy_and_refuses_overflow_at_capacity() {
     assert_eq!(tx.len(), cap);
     let err = try_submit_move(&tx, line(cap as u32, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]))
         .expect_err("submit at capacity must refuse, not block or grow");
-    assert!(matches!(err, StreamPlannerError::ChannelFull));
+    assert!(matches!(err, StreamWorkerError::ChannelFull));
     assert_eq!(tx.len(), cap, "a refused submit must not grow the queue");
 }
 
@@ -479,7 +479,7 @@ fn continuous_blend_run_dispatches_continuously_without_flush() {
     let cap = Capture::default();
     // Generous cap so the buffer-cap backstop never fires: the continuity commit
     // alone must drain the run.
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg_cap(256),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
@@ -538,7 +538,7 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
     });
     let noop_nudge: NudgeDispatchFn = Arc::new(|_, _| Ok(()));
 
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
@@ -581,7 +581,7 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
 #[test]
 fn flush_returns_after_commit_without_sleeping_until_playout() {
     let cap = Capture::default();
-    let mut h = StreamPlannerHandle::spawn(
+    let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],

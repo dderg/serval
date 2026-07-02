@@ -6,7 +6,7 @@ use host_rt::host_io::{McuHostIo, McuHostIoConfig};
 use host_rt::mcu_serial_conn::McuSerialConn;
 
 use crate::config::PlannerConfig;
-use crate::stream_worker::{DispatchError, StreamPlannerHandle};
+use crate::stream_worker::{DispatchError, StreamWorkerHandle};
 use trajectory::ShapedSegment;
 
 use super::{McuConnection, PyMotionEngine};
@@ -291,7 +291,7 @@ fn shutdown_takes_and_joins_planner() {
     let engine = PyMotionEngine::new();
     let (dispatch, _counter) = counting_dispatch();
     let (sc, home) = stream_config_from(&PlannerConfig::default());
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamPlannerHandle::spawn(
+    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamWorkerHandle::spawn(
         sc,
         trajectory::AxisChainSet::default(),
         home,
@@ -346,7 +346,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
         });
 
     let (sc, home) = stream_config_from(&relaxed_planner_config());
-    let planner = StreamPlannerHandle::spawn(
+    let planner = StreamWorkerHandle::spawn(
         sc,
         trajectory::AxisChainSet::default(),
         home,
@@ -520,7 +520,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
 
     let (dispatch, _counter) = counting_dispatch();
     let (sc, home) = stream_config_from(&relaxed_planner_config());
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamPlannerHandle::spawn(
+    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamWorkerHandle::spawn(
         sc,
         trajectory::AxisChainSet::default(),
         home,

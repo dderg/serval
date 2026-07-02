@@ -20,8 +20,8 @@ use crate::config::{self, PlannerConfig};
 use crate::dispatch::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
 use crate::stream_worker::{
-    DispatchError, HomeDripParams, NudgeParams, SegmentDispatchCtx, StreamPlannerError,
-    StreamPlannerHandle,
+    DispatchError, HomeDripParams, NudgeParams, SegmentDispatchCtx, StreamWorkerError,
+    StreamWorkerHandle,
 };
 use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
 
@@ -693,7 +693,7 @@ fn router_err(e: host_rt::passthrough_queue::RouterError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
-fn planner_err(e: StreamPlannerError) -> PyErr {
+fn planner_err(e: StreamWorkerError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
@@ -752,7 +752,7 @@ pub struct PyMotionEngine {
     events: Arc<Mutex<VecDeque<EngineEvent>>>,
     #[allow(dead_code)]
     handlers: Mutex<HashMap<(u32, String, u32), Py<PyAny>>>,
-    planner: Mutex<Option<StreamPlannerHandle>>,
+    planner: Mutex<Option<StreamWorkerHandle>>,
     planner_config: Mutex<PlannerConfig>,
     commanded_pos: Mutex<[f64; 3]>,
     last_g5_pq: Mutex<Option<(f64, f64)>>,
@@ -3464,7 +3464,7 @@ impl PyMotionEngine {
                 .compile(&cfg.axis_registry)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             let home = vec![0.0; cfg.axis_registry.n_axes()];
-            *guard = Some(StreamPlannerHandle::spawn(
+            *guard = Some(StreamWorkerHandle::spawn(
                 stream_cfg,
                 axis_chains,
                 home,
