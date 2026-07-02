@@ -6,9 +6,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use trajectory::{AxisChainSet, ShapedSegment};
 
-use crate::stream::fitter::Fitter;
-use crate::stream::planner::Planner;
-use crate::stream::{StreamConfig, run_lowerer};
+use motion_pipeline::fitter::Fitter;
+use motion_pipeline::planner::Planner;
+use motion_pipeline::{StreamConfig, run_lowerer};
 
 #[pyfunction]
 #[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None))]
@@ -221,8 +221,8 @@ fn run_pipeline(
     let fitted: Vec<geometry::Move> = fitted_rx
         .into_iter()
         .filter_map(|item| match item {
-            crate::stream::StreamInput::Move(m) => Some(m),
-            crate::stream::StreamInput::Drain | crate::stream::StreamInput::Control(_) => None,
+            motion_pipeline::StreamInput::Move(m) => Some(m),
+            motion_pipeline::StreamInput::Drain | motion_pipeline::StreamInput::Control(_) => None,
         })
         .collect();
 
@@ -248,12 +248,12 @@ fn run_pipeline(
     );
 
     let (shaped_tx, shaped_rx) = unbounded();
-    crate::stream::Shaper::new(axis_chains).run(lowered_rx, shaped_tx);
+    motion_pipeline::Shaper::new(axis_chains).run(lowered_rx, shaped_tx);
     let shaped: Vec<ShapedSegment> = shaped_rx
         .into_iter()
         .filter_map(|item| match item {
-            crate::stream::ShapedItem::Seg(seg) => Some(seg),
-            crate::stream::ShapedItem::Control(_) => None,
+            motion_pipeline::ShapedItem::Seg(seg) => Some(seg),
+            motion_pipeline::ShapedItem::Control(_) => None,
         })
         .collect();
 

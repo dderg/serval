@@ -6,7 +6,7 @@ use host_rt::host_io::{McuHostIo, McuHostIoConfig};
 use host_rt::mcu_serial_conn::McuSerialConn;
 
 use crate::config::PlannerConfig;
-use crate::stream_worker::{DispatchError, StreamWorkerHandle};
+use crate::worker::{DispatchError, StreamWorkerHandle};
 use trajectory::ShapedSegment;
 
 use super::{McuConnection, PyMotionEngine};
@@ -269,8 +269,8 @@ fn test_limits() -> geometry::VelocityLimits {
     geometry::VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap()
 }
 
-fn stream_config_from(cfg: &PlannerConfig) -> (crate::stream::StreamConfig, Vec<f64>) {
-    let sc = crate::stream::StreamConfig {
+fn stream_config_from(cfg: &PlannerConfig) -> (motion_pipeline::StreamConfig, Vec<f64>) {
+    let sc = motion_pipeline::StreamConfig {
         chain: geometry::ChainFitConfig::default(),
         integration_tol: 1e-7,
         max_extrude_only_velocity_mm_s: f64::INFINITY,

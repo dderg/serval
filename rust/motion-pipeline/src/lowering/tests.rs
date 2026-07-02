@@ -1,9 +1,9 @@
 #![allow(deprecated)]
 
 use super::*;
-use crate::stream::fitter::Fitter;
-use crate::stream::planner::Planner;
-use crate::stream::{PlannedMove, StreamConfig};
+use crate::fitter::Fitter;
+use crate::planner::Planner;
+use crate::{PlannedMove, StreamConfig};
 use crossbeam_channel::unbounded;
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityLimits, arc_move, line_move};
@@ -42,8 +42,8 @@ fn fit_and_plan(moves: &[geometry::Move]) -> Vec<PlannedMove> {
     planned_rx
         .into_iter()
         .filter_map(|item| match item {
-            crate::stream::PlannedItem::Move(m) => Some(m),
-            crate::stream::PlannedItem::Control(_) => None,
+            crate::PlannedItem::Move(m) => Some(m),
+            crate::PlannedItem::Control(_) => None,
         })
         .collect()
 }

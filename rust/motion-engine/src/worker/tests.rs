@@ -2,10 +2,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::stream::StreamConfig;
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityLimits, line_move};
+use motion_pipeline::StreamConfig;
 use nurbs::eval::eval;
+use trajectory::ShapedSegment;
 
 #[derive(Clone, Default)]
 struct Capture {

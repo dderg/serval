@@ -1,0 +1,176 @@
+use super::{AxisKey, MAX_LEAD_SECS};
+use runtime::piece_ring::PieceEntry;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+#[derive(Debug)]
+pub struct AxisQueue {
+    pub pieces: VecDeque<(PieceEntry, f64)>,
+    pub pushed: u32,
+    pub retired: u32,
+    pub ring_depth: u32,
+    pub physical_write_cursor: u32,
+    pub lead_secs: f64,
+}
+
+impl AxisQueue {
+    pub fn new(ring_depth: u32) -> Self {
+        Self {
+            pieces: VecDeque::new(),
+            pushed: 0,
+            retired: 0,
+            ring_depth,
+            physical_write_cursor: 0,
+            lead_secs: MAX_LEAD_SECS,
+        }
+    }
+    pub fn room(&self) -> u32 {
+        let in_flight = self.pushed.wrapping_sub(self.retired);
+        if in_flight > self.ring_depth {
+            self.ring_depth
+        } else {
+            self.ring_depth - in_flight
+        }
+    }
+    pub fn advance_write_cursor(&mut self, n: u32) {
+        if self.ring_depth == 0 {
+            return;
+        }
+        self.physical_write_cursor = (self.physical_write_cursor + n) % self.ring_depth;
+    }
+}
+
+#[derive(Debug)]
+pub struct FramePlan {
+    pub key: AxisKey,
+    pub pieces: Vec<PieceEntry>,
+    pub start_slot: u16,
+}
+
+/// One axis' pieces within a single-MCU bundle, carrying the ring bookkeeping
+/// the transport needs. `schedule()` only ever groups axes of one MCU into a
+/// `Send`, so a slice of these is exactly the work for one MCU transaction.
+pub struct AxisFrame {
+    pub axis: u8,
+    pub pieces: Vec<PieceEntry>,
+    pub start_slot: u16,
+    pub new_head: u32,
+    pub room: u32,
+}
+
+#[derive(Debug)]
+pub enum Schedule {
+    Send(Vec<FramePlan>),
+    StallFull(AxisKey),
+    StallAhead(AxisKey),
+    Idle,
+}
+
+#[must_use]
+pub fn schedule(
+    queues: &BTreeMap<AxisKey, AxisQueue>,
+    max_per_frame: usize,
+    horizon_of: impl Fn(&AxisKey, &AxisQueue) -> Option<u64>,
+    releasable_cap_of: impl Fn(&AxisKey) -> usize,
+) -> Schedule {
+    let mut stall_ahead_candidate: Option<AxisKey> = None;
+    let mut cap_skipped: BTreeSet<AxisKey> = BTreeSet::new();
+
+    let head_key = loop {
+        let candidate = queues
+            .iter()
+            .filter(|(k, q)| !q.pieces.is_empty() && !cap_skipped.contains(*k))
+            .min_by(|(ka, qa), (kb, qb)| {
+                let host_a = qa.pieces.front().unwrap().1;
+                let host_b = qb.pieces.front().unwrap().1;
+                host_a.total_cmp(&host_b).then(ka.cmp(kb))
+            });
+        let (&k, q) = match candidate {
+            None => {
+                if let Some(k) = stall_ahead_candidate {
+                    return Schedule::StallAhead(k);
+                }
+                return Schedule::Idle;
+            }
+            Some(c) => c,
+        };
+
+        if q.room() == 0 {
+            return Schedule::StallFull(k);
+        }
+
+        if releasable_cap_of(&k) == 0 {
+            if stall_ahead_candidate.is_none() {
+                stall_ahead_candidate = Some(k);
+            }
+            cap_skipped.insert(k);
+            continue;
+        }
+
+        let head_start_ticks = q.pieces.front().unwrap().0.start_time;
+        if let Some(horizon) = horizon_of(&k, q) {
+            if head_start_ticks > horizon {
+                return Schedule::StallAhead(k);
+            }
+        }
+
+        break k;
+    };
+
+    let mut taken: BTreeMap<AxisKey, usize> = BTreeMap::new();
+    let mut maxed: BTreeSet<AxisKey> = cap_skipped;
+    loop {
+        let next = queues
+            .iter()
+            .filter_map(|(k, q)| {
+                if k.mcu_id != head_key.mcu_id || maxed.contains(k) {
+                    return None;
+                }
+                let already = taken.get(k).copied().unwrap_or(0);
+                q.pieces
+                    .get(already)
+                    .map(|&(ref p, host)| (*k, p.start_time, host))
+            })
+            .min_by(|(ka, _, ha), (kb, _, hb)| ha.total_cmp(hb).then(ka.cmp(kb)));
+        let (k, start_ticks, _host) = match next {
+            Some(n) => n,
+            None => break,
+        };
+        let already = taken.get(&k).copied().unwrap_or(0);
+        let q = &queues[&k];
+        let room = q.room() as usize;
+        let cap = releasable_cap_of(&k);
+        if already >= room || already >= max_per_frame || already >= cap {
+            maxed.insert(k);
+            continue;
+        }
+        if let Some(horizon) = horizon_of(&k, q) {
+            if start_ticks > horizon {
+                if stall_ahead_candidate.is_none() {
+                    stall_ahead_candidate = Some(k);
+                }
+                maxed.insert(k);
+                continue;
+            }
+        }
+        *taken.entry(k).or_insert(0) += 1;
+    }
+
+    if taken.is_empty() {
+        if let Some(k) = stall_ahead_candidate {
+            return Schedule::StallAhead(k);
+        }
+        return Schedule::StallFull(head_key);
+    }
+
+    let frames: Vec<FramePlan> = taken
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(k, n)| FramePlan {
+            key: k,
+            pieces: queues[&k].pieces.iter().take(n).map(|(p, _)| *p).collect(),
+            start_slot: 0,
+        })
+        .collect();
+    debug_assert!(!frames.is_empty());
+    Schedule::Send(frames)
+}

@@ -9,6 +9,7 @@ members = [
     "host-rt",
     "compat",
     "motion-engine",
+    "motion-pipeline",
     "mcu-transport",
     "mcu-protocol",
     "ethercat-rt",

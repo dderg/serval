@@ -4,8 +4,8 @@ use crossbeam_channel::{bounded, unbounded};
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, Move, MoveContext, VelocityLimits, line_move};
 
-use super::StreamInput;
-use super::fitter::Fitter;
+use super::Fitter;
+use crate::StreamInput;
 
 fn moves_of(rx: crossbeam_channel::Receiver<StreamInput>) -> Vec<Move> {
     rx.into_iter()

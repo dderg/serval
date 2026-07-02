@@ -1,312 +1,13 @@
 use std::collections::VecDeque;
-use std::thread;
-use std::time::Instant;
 
-use crossbeam_channel::{Receiver, Sender, bounded};
-use geometry::path::lowering::PositionProfile;
-use geometry::{ChainFitConfig, Move, MoveVelocity, VelocityLimits};
+use crossbeam_channel::{Receiver, Sender};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
-use crate::lowering::lower_move;
-
-pub(crate) mod fitter;
-#[cfg(test)]
-mod fitter_tests;
-pub(crate) mod planner;
+use crate::lowering::hermite_cubic;
+use crate::{Control, LoweredItem, PostProcessError, ShapedItem};
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
-pub(crate) const CONTIGUITY_EPS_MM: f64 = 1e-6;
-const REST_EPS_MM_S: f64 = 1e-9;
-
-#[derive(Debug, Clone, Copy)]
-pub struct StreamConfig {
-    pub chain: ChainFitConfig,
-    pub integration_tol: f64,
-    pub max_extrude_only_velocity_mm_s: f64,
-    pub max_extrude_only_accel_mm_s2: f64,
-    pub fit_tol_mm: f64,
-    /// Backstop cap on the planner's look-ahead window. A normal continuous
-    /// path always offers a clean seam, so the window stays small; this only
-    /// fires for a pathological window with no clean seam within the finality
-    /// barrier at all (e.g. a single move longer than the whole look-ahead) —
-    /// without it such a window would grow unbounded. It is a safety net, not
-    /// the steady-state path.
-    pub max_buffer_moves: usize,
-    /// Path limits for planner-internal moves (homing). Stream moves submitted
-    /// through the bridge carry their own per-move limits; this is the fallback
-    /// used when the engine constructs a move itself.
-    pub limits: VelocityLimits,
-}
-
-#[derive(Debug)]
-pub enum StreamError {
-    /// A move entered the pipeline whose spatial start does not meet the
-    /// toolhead where the previous move left it. Real slicer output is always
-    /// position-contiguous; a gap means the move stream was stitched wrong
-    /// upstream. Caught at ingress so the offending move is named there, not
-    /// as a downstream `ZeroMotion` deep in the fitter.
-    Discontinuity {
-        line_no: u32,
-        expected: [f64; 3],
-        got: [f64; 3],
-        gap_mm: f64,
-    },
-}
-
-impl std::fmt::Display for StreamError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Discontinuity {
-                line_no,
-                expected,
-                got,
-                gap_mm,
-            } => write!(
-                f,
-                "discontinuous move at line {line_no}: starts at {got:?} but the \
-                 toolhead is at {expected:?} ({gap_mm:.6}mm gap) — move stream is \
-                 not position-contiguous"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for StreamError {}
-
-#[derive(Debug, thiserror::Error)]
-pub enum PostProcessError {
-    #[error("segment axis count mismatch: expected {expected}, got {got}")]
-    AxisCountMismatch { expected: usize, got: usize },
-    #[error("axis {axis}: cannot fit shaped signal on an empty template track")]
-    DegenerateAxisTrack { axis: usize },
-    #[error("axis {axis}: shaping window needs unavailable history at t={t}")]
-    MissingHistory { axis: usize, t: f64 },
-    #[error("axis {axis}: shaping window needs unavailable lookahead at t={t}")]
-    MissingLookahead { axis: usize, t: f64 },
-    #[error("axis {axis}: shaped sample is non-finite at t={t}")]
-    NonFiniteSample { axis: usize, t: f64 },
-}
-
-// ---------------------------------------------------------------------------
-// Pipeline types — items that flow between stages
-// ---------------------------------------------------------------------------
-
-pub struct PlannedMove {
-    pub geometry: Move,
-    pub velocity: MoveVelocity,
-}
-
-/// Lowerer output: a dispatchable segment plus whether the trajectory is at
-/// rest at its end — the shaper may clamp its convolution window past a rest
-/// point (the signal is constant there), never past a moving end.
-pub struct LoweredSegment {
-    pub seg: ShapedSegment,
-    pub rest_at_end: bool,
-}
-
-pub struct PipelineHandle {
-    pub input: Sender<StreamInput>,
-    pub output: Receiver<ShapedItem>,
-}
-
-/// What flows into the fitter and planner: geometry, the command to stop
-/// looking ahead, or an ordered control token. `Drain` makes each stage
-/// resolve and emit everything it is holding — the fitter finalizes runs and
-/// blends, the planner materializes the brake-to-rest — exactly what a closed
-/// input does, but without ending the stream. The stages themselves never
-/// consult a clock or peek at channel occupancy; whoever owns the notion of
-/// time decides when to send `Drain`.
-#[derive(Debug)]
-pub enum StreamInput {
-    Move(Move),
-    Drain,
-    Control(Control),
-}
-
-impl From<Move> for StreamInput {
-    fn from(m: Move) -> Self {
-        Self::Move(m)
-    }
-}
-
-/// Ordered control tokens that flow through every stage with the geometry.
-/// The pipeline is set up once and lives forever; these replace the old
-/// teardown-and-rebuild lifecycle. Tokens that require the trajectory to be
-/// at rest (`Dwell`, `SetAxisChains`, `Barrier` after a flush) must be
-/// preceded by a `Drain`; the stages assert emptiness rather than draining
-/// implicitly, so a violated protocol fails loudly instead of hiding a
-/// velocity discontinuity.
-#[derive(Debug)]
-pub enum Control {
-    /// Advance the trajectory clock without motion (lowerer applies it).
-    Dwell { secs: f64 },
-    /// Drop all buffered state and restart the timeline at rest at `pos`.
-    /// The sender is responsible for gating the dispatcher (discard) so
-    /// motion already lowered ahead of this token is dropped, not executed.
-    Reset { pos: Vec<f64> },
-    /// Swap the post-processing chains (lowerer and shaper apply it).
-    SetAxisChains(AxisChainSet),
-    /// Acknowledged by the dispatcher once everything ahead of it has been
-    /// dispatched (or discarded): the pipeline-wide "everything before this
-    /// point is done" fence.
-    Barrier(Sender<BarrierAck>),
-}
-
-/// The dispatcher's answer to a `Barrier`.
-#[derive(Debug)]
-pub struct BarrierAck {
-    /// Stream time the dispatched trajectory has reached; `None` when nothing
-    /// has been dispatched since the last reset.
-    pub dispatched_through: Option<f64>,
-    /// Host instant of the first dispatch since the last reset, for
-    /// projecting stream time onto the wall clock.
-    pub sync_instant: Option<Instant>,
-    /// Dispatch errors captured since the previous barrier (error capture is
-    /// enabled by the homing paths; otherwise a dispatch error is fatal).
-    pub result: Result<(), String>,
-}
-
-/// Planner → lowerer.
-pub enum PlannedItem {
-    Move(PlannedMove),
-    Control(Control),
-}
-
-/// Lowerer → shaper.
-pub enum LoweredItem {
-    Seg(LoweredSegment),
-    Control(Control),
-}
-
-/// Shaper → dispatcher.
-pub enum ShapedItem {
-    Seg(ShapedSegment),
-    Control(Control),
-}
-
-/// Wires the pure stream stages (fitter → planner → lowerer → shaper) into
-/// OS threads. Production goes through `stream_worker::setup_pipeline`, which
-/// wraps these stages with the dispatcher and pump; this stage-only wiring is
-/// also used standalone by offline consumers (seam harness, trajectory dump)
-/// that have no hardware behind them.
-pub fn setup_stages(
-    config: StreamConfig,
-    axis_chains: AxisChainSet,
-    home_pos: Vec<f64>,
-    t_start: f64,
-) -> PipelineHandle {
-    let (raw_tx, raw_rx) = bounded::<StreamInput>(64);
-    let (fitted_tx, fitted_rx) = bounded::<StreamInput>(64);
-    let (planned_tx, planned_rx) = bounded::<PlannedItem>(64);
-    let (lowered_tx, lowered_rx) = bounded::<LoweredItem>(64);
-    let (shaped_tx, shaped_rx) = bounded::<ShapedItem>(64);
-
-    let fitter = fitter::Fitter::new(config.chain);
-    spawn_stage("kalico-fit", move || fitter.run(raw_rx, fitted_tx));
-
-    let planner = planner::Planner::new(config);
-    spawn_stage("kalico-plan", move || planner.run(fitted_rx, planned_tx));
-
-    let fit_tol = config.fit_tol_mm;
-    let lower_chains = axis_chains.clone();
-    spawn_stage("kalico-lower", move || {
-        run_lowerer(
-            planned_rx,
-            lowered_tx,
-            fit_tol,
-            lower_chains,
-            home_pos,
-            t_start,
-        );
-    });
-
-    let shaper = Shaper::new(axis_chains);
-    spawn_stage("kalico-shape", move || shaper.run(lowered_rx, shaped_tx));
-
-    PipelineHandle {
-        input: raw_tx,
-        output: shaped_rx,
-    }
-}
-
-fn spawn_stage(name: &str, f: impl FnOnce() + Send + 'static) {
-    thread::Builder::new()
-        .name(name.to_string())
-        .spawn(f)
-        .unwrap_or_else(|e| panic!("spawn {name}: {e}"));
-}
-
-/// Third pipeline stage: lowers each planned move into a dispatchable
-/// `ShapedSegment`. It is the persistent owner of the trajectory clock and
-/// odometer: `Dwell` advances the clock without motion, `Reset` restarts the
-/// timeline at rest at the given position, `SetAxisChains` swaps the chain
-/// set future moves are lowered against.
-pub(crate) fn run_lowerer(
-    input: Receiver<PlannedItem>,
-    output: Sender<LoweredItem>,
-    fit_tol_mm: f64,
-    mut axis_chains: AxisChainSet,
-    home_pos: Vec<f64>,
-    t_start: f64,
-) {
-    let mut odometer = home_pos;
-    let mut t = t_start;
-
-    while let Ok(item) = input.recv() {
-        let planned = match item {
-            PlannedItem::Move(planned) => planned,
-            PlannedItem::Control(ctrl) => {
-                match &ctrl {
-                    Control::Dwell { secs } => {
-                        assert!(*secs >= 0.0, "lowerer: negative dwell {secs}");
-                        t += secs;
-                    }
-                    Control::Reset { pos } => {
-                        odometer.clone_from(pos);
-                        t = 0.0;
-                    }
-                    Control::SetAxisChains(chains) => axis_chains = chains.clone(),
-                    Control::Barrier(_) => {}
-                }
-                if output.send(LoweredItem::Control(ctrl)).is_err() {
-                    return;
-                }
-                continue;
-            }
-        };
-        let clock = Instant::now();
-        let mut seg = lower_move(
-            &planned.geometry,
-            &planned.velocity,
-            t,
-            &odometer,
-            fit_tol_mm,
-            &axis_chains.chains,
-        )
-        .unwrap_or_else(|e| panic!("lowerer: line {}: {e}", planned.geometry.source.start_line));
-        seg.source_line = planned.geometry.source.start_line;
-
-        t = seg.t_end;
-        advance_odometer(&mut odometer, &planned.geometry);
-        tracing::debug!(
-            subsystem = "motion",
-            event = "pipe_lower",
-            line = seg.source_line,
-            lower_us = clock.elapsed().as_micros(),
-            t_us = crate::timing::mono_us(),
-            "[pipe] lower"
-        );
-
-        let rest_at_end = planned.velocity.exit_v <= REST_EPS_MM_S;
-        if output
-            .send(LoweredItem::Seg(LoweredSegment { seg, rest_at_end }))
-            .is_err()
-        {
-            return;
-        }
-    }
-}
 
 /// Final pipeline stage: streaming axis-chain post-processing. Buffers lowered
 /// segments until each one's convolution window is covered by lookahead, then
@@ -314,7 +15,7 @@ pub(crate) fn run_lowerer(
 /// next windows read. A rest ending lets the buffer flush with the window
 /// clamped (the signal is constant past a rest point), so the trajectory's
 /// tail is never held hostage to input that may not come.
-pub(crate) struct Shaper {
+pub struct Shaper {
     chains: AxisChainSet,
     history: VecDeque<ShapedSegment>,
     pending: VecDeque<ShapedSegment>,
@@ -324,7 +25,7 @@ pub(crate) struct Shaper {
 }
 
 impl Shaper {
-    pub(crate) fn new(chains: AxisChainSet) -> Self {
+    pub fn new(chains: AxisChainSet) -> Self {
         let (forward_support, back_support) = supports_of(&chains);
         Self {
             chains,
@@ -336,7 +37,7 @@ impl Shaper {
         }
     }
 
-    pub(crate) fn run(mut self, input: Receiver<LoweredItem>, output: Sender<ShapedItem>) {
+    pub fn run(mut self, input: Receiver<LoweredItem>, output: Sender<ShapedItem>) {
         loop {
             match input.recv() {
                 Ok(LoweredItem::Seg(item)) => {
@@ -445,47 +146,6 @@ fn supports_of(chains: &AxisChainSet) -> (f64, f64) {
         .map(|chain| chain.max_half_support().0.abs())
         .fold(0.0, f64::max);
     (forward, back)
-}
-
-/// Jerk-limited time to decelerate from `v` to rest under accel limit `a` and
-/// jerk limit `j`: `v/a + a/j` once the ramp reaches `a` (`v > a²/j`), else the
-/// triangular `2·√(v/j)`. Curvature only slows a real stop, so this
-/// straight-line time is a safe over-estimate.
-#[must_use]
-pub fn jerk_limited_brake_time(v: f64, a: f64, j: f64) -> f64 {
-    if v <= 0.0 {
-        return 0.0;
-    }
-    if a <= 0.0 || j <= 0.0 {
-        return f64::INFINITY;
-    }
-    if v > a * a / j {
-        v / a + a / j
-    } else {
-        2.0 * (v / j).sqrt()
-    }
-}
-
-pub(crate) fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
-    let dx = a[0] - b[0];
-    let dy = a[1] - b[1];
-    let dz = a[2] - b[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
-}
-
-pub(crate) fn advance_odometer(pos: &mut [f64], gm: &Move) {
-    let s_len = gm.segment.s_len();
-    if let Some(seg) = &gm.segment.spatial {
-        let end = seg.point_at(s_len);
-        for axis in 0..3.min(pos.len()) {
-            pos[axis] = end[axis];
-        }
-    }
-    for f in &gm.segment.followers {
-        if let Some(slot) = pos.get_mut(f.axis_index) {
-            *slot += f.ratio * s_len;
-        }
-    }
 }
 
 fn apply_axis_chains(
@@ -663,7 +323,7 @@ fn shaped_hermite(
     let p1 = finite_sample(axis, sig, t1)?;
     let v0 = finite_derivative(axis, sig, t0, t1, domain_lo, domain_hi)?;
     let v1 = finite_derivative(axis, sig, t1, t0, domain_lo, domain_hi)?;
-    Ok(super::lowering::hermite_cubic(t0, t1, p0, v0, p1, v1))
+    Ok(hermite_cubic(t0, t1, p0, v0, p1, v1))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -764,6 +424,3 @@ fn apply_pressure_advance_to_track(
         .collect();
     bezier_pieces_to_nurbs(&out_pieces)
 }
-
-#[cfg(test)]
-mod tests;

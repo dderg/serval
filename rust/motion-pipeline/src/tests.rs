@@ -1,4 +1,4 @@
-use super::*;
+use crate::*;
 use crossbeam_channel::unbounded;
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityLimits, line_move};
@@ -77,10 +77,10 @@ fn replay(
     drop(raw_tx);
 
     let (fitted_tx, fitted_rx) = unbounded();
-    fitter::Fitter::new(config.chain).run(raw_rx, fitted_tx);
+    Fitter::new(config.chain).run(raw_rx, fitted_tx);
 
     let (planned_tx, planned_rx) = unbounded();
-    planner::Planner::new(config).run(fitted_rx, planned_tx);
+    Planner::new(config).run(fitted_rx, planned_tx);
 
     let (lowered_tx, lowered_rx) = unbounded();
     run_lowerer(

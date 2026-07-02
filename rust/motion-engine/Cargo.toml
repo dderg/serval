@@ -19,6 +19,7 @@ host-rt = { path = "../host-rt", features = ["python-engine"] }
 mcu-protocol = { path = "../mcu-protocol" }
 trajectory = { path = "../trajectory" }
 geometry = { path = "../geometry" }
+motion-pipeline = { path = "../motion-pipeline" }
 gcode = { path = "../gcode" }
 nurbs = { path = "../nurbs", features = ["host"] }
 runtime = { path = "../runtime" }

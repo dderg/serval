@@ -6,7 +6,7 @@ use geometry::fitter::{
 use geometry::path::{Line, PathSegment, Segment};
 use geometry::{ChainFitConfig, Move};
 
-use super::{Control, StreamInput, dist3};
+use crate::{Control, StreamInput, dist3};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
 
@@ -32,7 +32,7 @@ const ALIGN_EPS_MM: f64 = 1e-9;
 /// junction classification uses full raw lengths (minus explicit easing
 /// reductions) exactly as the batch fit does — and length already paid out to
 /// an emitted blend or easing is applied only when a body is finally emitted.
-pub(crate) struct Fitter {
+pub struct Fitter {
     config: ChainFitConfig,
     min_run: usize,
     decided: Vec<Element>,
@@ -73,7 +73,7 @@ fn piece_of(e: &Element) -> Option<&Move> {
 }
 
 impl Fitter {
-    pub(crate) fn new(config: ChainFitConfig) -> Self {
+    pub fn new(config: ChainFitConfig) -> Self {
         let min_run = config
             .arc_fit
             .map_or(0, |arc| arc.min_run_facets.max(3) as usize);
@@ -88,7 +88,7 @@ impl Fitter {
         }
     }
 
-    pub(crate) fn run(mut self, input: Receiver<StreamInput>, output: Sender<StreamInput>) {
+    pub fn run(mut self, input: Receiver<StreamInput>, output: Sender<StreamInput>) {
         let mut out = TravelAligningSender::new(output);
         while let Ok(item) = input.recv() {
             let ok = match item {
@@ -563,3 +563,6 @@ fn align_travel(m: Move, prev_end: Option<[f64; 3]>, next_start: Option<[f64; 3]
         source: m.source,
     }
 }
+
+#[cfg(test)]
+mod tests;
