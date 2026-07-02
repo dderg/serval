@@ -17,6 +17,7 @@ use crate::lowering::{LoweringError, lower_move};
 mod fitter;
 #[cfg(test)]
 mod fitter_tests;
+mod planner;
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 const CONTIGUITY_EPS_MM: f64 = 1e-6;
@@ -176,8 +177,9 @@ pub fn setup_pipeline(
         fitter.run(raw_rx, fitted_tx);
     });
 
+    let planner = planner::Planner::new();
     thread::spawn(move || {
-        run_planner(fitted_rx, planned_tx);
+        planner.run(fitted_rx, planned_tx);
     });
 
     let fit_tol = config.fit_tol_mm;
@@ -195,19 +197,6 @@ pub fn setup_pipeline(
     PipelineHandle {
         input: raw_tx,
         output: segments_rx,
-    }
-}
-
-fn run_planner(input: Receiver<Move>, _output: Sender<PlannedMove>) {
-    let mut entry_v = 0.0;
-
-    // TODO: the planner needs a batch of moves to produce a velocity profile.
-    // It needs to accumulate fitted moves and decide when it has enough
-    // look-ahead to plan and emit.
-    while let Ok(m) = input.recv() {
-        let _ = (m, &mut entry_v);
-        // TODO: accumulate, plan, zip geometry+velocity, send PlannedMoves
-        todo!("planner batch logic");
     }
 }
 
