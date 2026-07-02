@@ -51,8 +51,7 @@ fn clamped_fit_position_residual_within_tolerance() {
         .collect();
 
     let tol = 0.01;
-    let result =
-        fit_hermite_c1_clamped::<1>(&pieces, tol, 5, [2.0_f64], Some([2.0_f64])).unwrap();
+    let result = fit_hermite_c1_clamped::<1>(&pieces, tol, 5, [2.0_f64], Some([2.0_f64])).unwrap();
 
     for fitted in &result[0] {
         let n = 40;
@@ -89,8 +88,7 @@ fn clamped_fit_preserves_c1_at_interior_knots() {
         })
         .collect();
 
-    let result =
-        fit_hermite_c1_clamped::<1>(&pieces, 0.5, 5, [2.0_f64], Some([10.0_f64])).unwrap();
+    let result = fit_hermite_c1_clamped::<1>(&pieces, 0.5, 5, [2.0_f64], Some([10.0_f64])).unwrap();
 
     for window in result[0].windows(2) {
         let left = &window[0];
@@ -192,9 +190,8 @@ fn adversarial_nonpolynomial_asymmetric_pins() {
     let d2_end_pin = -0.8_f64;
 
     let tol = 0.15;
-    let result =
-        fit_hermite_c1_clamped::<1>(&pieces, tol, 5, [d2_start_pin], Some([d2_end_pin]))
-            .expect("adversarial clamped fit must succeed");
+    let result = fit_hermite_c1_clamped::<1>(&pieces, tol, 5, [d2_start_pin], Some([d2_end_pin]))
+        .expect("adversarial clamped fit must succeed");
 
     let first = &result[0][0];
     let last = result[0].last().unwrap();

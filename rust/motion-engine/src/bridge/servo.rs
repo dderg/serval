@@ -1,7 +1,6 @@
 use super::{
     PyMotionEngine, PyResult, PyRuntimeError, Python, mcu_handle_from_raw, pymethods, slot_for_axis,
 };
-use pyo3::prelude::*;
 
 #[pymethods]
 impl PyMotionEngine {

@@ -1,3 +1,6 @@
+// TODO: orphaned by the stream-planner rewire; heart config is still parsed but unread — pending decision
+#![allow(dead_code)]
+
 use crate::frontend::Move;
 use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, CurvatureProfile, Line, PathSegment, Segment};
@@ -12,7 +15,7 @@ use super::vec3::{dist, dot};
 use super::{
     ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, JunctionPlan, UnblendReason,
     UnblendedJunction, blend_trim, classify_junction, emit_blend, emit_move, internal, is_travel,
-    junction_deviation, line_of, scaled_followers,
+    line_of, scaled_followers,
 };
 
 struct Run {

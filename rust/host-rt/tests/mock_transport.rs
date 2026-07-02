@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -94,6 +93,7 @@ impl MockTransport {
         self.state.lock().unwrap().pending_calls.len()
     }
 
+    #[allow(dead_code)]
     pub fn sent_count(&self) -> usize {
         self.state.lock().unwrap().sent_cmds.len()
     }
@@ -107,6 +107,7 @@ impl MockTransport {
             .any(|s| s.starts_with(prefix))
     }
 
+    #[allow(dead_code)]
     pub fn last_sent(&self) -> Option<String> {
         self.state.lock().unwrap().sent_cmds.last().cloned()
     }

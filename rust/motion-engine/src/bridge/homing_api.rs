@@ -3,7 +3,6 @@ use super::{
     PyRuntimeError, Python, TripDeps, dispatch_endstop_trip, drip_cohort_participants, planner_err,
     pymethods, trip_position_to_motor_frame,
 };
-use pyo3::prelude::*;
 
 #[pymethods]
 impl PyMotionEngine {

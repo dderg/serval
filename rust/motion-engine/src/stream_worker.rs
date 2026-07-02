@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use trajectory::{AxisChainSet, ShapedSegment};
 
-use crate::types::AxisKey;
 use crate::stream::{
     BarrierAck, CONTIGUITY_EPS_MM, Control, ShapedItem, StreamConfig, StreamInput,
     advance_odometer, dist3, setup_stages,
 };
+use crate::types::AxisKey;
 
 /// Host-monotonic end of the trajectory committed to the pump. The dispatcher
 /// advances it as each segment is anchored; the ingress pacer reads the

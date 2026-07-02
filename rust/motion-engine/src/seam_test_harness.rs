@@ -9,8 +9,8 @@ use runtime::piece_ring::PieceEntry;
 use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::classify::build_move;
-use crate::mcu_config::{McuAxisConfig, McuCaps};
 use crate::enqueue::enqueue_segment;
+use crate::mcu_config::{McuAxisConfig, McuCaps};
 use crate::pump::{
     JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionTracker, MAX_LEAD_SECS,
 };

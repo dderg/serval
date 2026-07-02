@@ -1,6 +1,8 @@
 #![allow(unsafe_code)]
 
-use crate::{Float, MAX_DEGREE, MIN_PARAMETRIC_SPEED, NurbsView, VectorNurbsView, WORKSPACE_SIZE};
+#[cfg(feature = "host")]
+use crate::MIN_PARAMETRIC_SPEED;
+use crate::{Float, MAX_DEGREE, NurbsView, VectorNurbsView, WORKSPACE_SIZE};
 
 #[cfg(feature = "host")]
 pub(crate) use crate::knot::find_knot_span;

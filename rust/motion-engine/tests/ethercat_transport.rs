@@ -65,15 +65,6 @@ impl PerMcuCountSink {
             calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
-
-    fn count_for(&self, mcu_id: u32) -> u32 {
-        self.calls
-            .lock()
-            .unwrap()
-            .get(&mcu_id)
-            .copied()
-            .unwrap_or(0)
-    }
 }
 
 impl PieceSink for PerMcuCountSink {

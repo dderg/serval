@@ -219,6 +219,7 @@ pub fn header_json(cfg: &CaptureConfig) -> String {
 
 enum WriterHook {
     None,
+    #[cfg(test)]
     Gate(Receiver<()>),
     #[cfg(test)]
     FailAfterHeader(SyncSender<()>),
@@ -527,6 +528,7 @@ fn run_session(
         .map_err(|e| (0u64, format!("capture header write: {e}")))?;
     match hook {
         WriterHook::None => {}
+        #[cfg(test)]
         WriterHook::Gate(g) => {
             let _ = g.recv();
         }

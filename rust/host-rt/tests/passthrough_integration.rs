@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use host_rt::clock::Clock;
 use host_rt::host_io::test_harness::ReactorHarness;
 use host_rt::host_io::wire;
 use host_rt::passthrough_queue::{

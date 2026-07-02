@@ -26,6 +26,7 @@ impl std::fmt::Debug for RouterTransport {
 }
 
 impl RouterTransport {
+    #[cfg(test)]
     pub fn new(
         router: Arc<Mutex<PassthroughRouter>>,
         mcu: McuHandle,

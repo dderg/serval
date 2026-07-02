@@ -4,8 +4,6 @@ use thiserror::Error;
 pub(super) enum ReachError {
     #[error("invalid input")]
     InvalidInput,
-    #[error("infeasible reach")]
-    InfeasibleReach,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +17,7 @@ pub(super) struct SevenSeg {
     pub(super) jerk_max: f64,
 }
 
+#[cfg(test)]
 pub(super) fn max_reachable_velocity(v_in: f64, length: f64, accel: f64, jerk: f64) -> f64 {
     let triangular_distance = (2.0 * accel / jerk) * (v_in + accel * accel / (2.0 * jerk));
     let delta = if length <= triangular_distance {

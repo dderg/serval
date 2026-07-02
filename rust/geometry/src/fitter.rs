@@ -36,6 +36,8 @@ impl Default for CornerFitConfig {
     }
 }
 
+// TODO: orphaned by the stream-planner rewire; heart config is still parsed but unread — pending decision
+#[allow(dead_code)]
 const ARC_MIN_RUN_FACETS: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]

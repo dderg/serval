@@ -8,7 +8,6 @@ use super::{
     query_ethercat_runtime_caps, report_ethercat_endpoint_death, require_positive,
     resolve_motion_caps,
 };
-use pyo3::prelude::*;
 
 #[allow(clippy::too_many_arguments)]
 fn build_planner_config(

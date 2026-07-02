@@ -1,3 +1,6 @@
+// TODO: orphaned by the stream-planner rewire; heart config is still parsed but unread — pending decision
+#![allow(dead_code)]
+
 use crate::frontend::Move;
 
 use super::super::CornerFitConfig;

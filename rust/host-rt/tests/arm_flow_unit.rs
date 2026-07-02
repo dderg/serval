@@ -10,7 +10,7 @@ use host_rt::stream::{
 };
 use host_rt::transport::{MessageValue, TransportError};
 
-use mock_transport::{MockTransport, SharedMock, mp_with};
+use mock_transport::{SharedMock, mp_with};
 
 const FREQ: f64 = 550_000_000.0;
 const EPOCH_OFFSET: u64 = 1_000_000_000;

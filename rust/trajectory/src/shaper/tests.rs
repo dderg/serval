@@ -17,7 +17,6 @@ fn constant_segment(x: f64, y: f64, z: f64, t_start: f64, t_end: f64) -> FittedS
         axes: [make_axis(x), make_axis(y), make_axis(z)],
         t_start,
         t_end,
-        virtual_s_of_t: None,
     }
 }
 
@@ -43,7 +42,6 @@ fn linear_segment(x_start: f64, x_end: f64, t_start: f64, t_end: f64) -> FittedS
         axes: [x_nurbs, y_nurbs, z_nurbs],
         t_start,
         t_end,
-        virtual_s_of_t: None,
     }
 }
 

@@ -288,64 +288,6 @@ fn hermite_construct_poly_both_clamped(
 
 #[cfg(feature = "host")]
 #[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
-fn hermite_construct_poly_start_clamped(
-    f_lo: f64,
-    df_lo: f64,
-    f_hi: f64,
-    df_hi: f64,
-    u_lo: f64,
-    h: f64,
-    d: usize,
-    d2_lo: f64,
-    c3_val: f64,
-) -> crate::bezier::BezierPiece<f64> {
-    let mut coeffs = vec![0.0f64; d + 1];
-    coeffs[0] = f_lo;
-    coeffs[1] = df_lo;
-    coeffs[2] = d2_lo * 0.5;
-    if d >= 5 {
-        coeffs[3] = c3_val;
-    }
-
-    let mut pos_residual = f_hi - coeffs[0] - coeffs[1] * h;
-    let mut vel_residual = df_hi - coeffs[1];
-
-    let mut h_pow = h * h;
-    let mut h_pow_deriv = h;
-    for k in 2..d.saturating_sub(1) {
-        pos_residual -= coeffs[k] * h_pow;
-        vel_residual -= (k as f64) * coeffs[k] * h_pow_deriv;
-        h_pow *= h;
-        h_pow_deriv *= h;
-    }
-
-    let h_dm2 = h.powi(d as i32 - 2);
-    let h_dm1 = h_dm2 * h;
-    let h_d = h_dm1 * h;
-    let det = h.powi(2 * d as i32 - 2);
-
-    if det.abs() < 1e-300 {
-        return crate::bezier::BezierPiece {
-            u_start: u_lo,
-            u_end: u_lo + h,
-            coeffs,
-        };
-    }
-
-    let d_f = d as f64;
-    let dm1_f = (d - 1) as f64;
-    coeffs[d - 1] = (pos_residual * d_f * h_dm1 - h_d * vel_residual) / det;
-    coeffs[d] = (h_dm1 * vel_residual - dm1_f * h_dm2 * pos_residual) / det;
-
-    crate::bezier::BezierPiece {
-        u_start: u_lo,
-        u_end: u_lo + h,
-        coeffs,
-    }
-}
-
-#[cfg(feature = "host")]
-#[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
 fn hermite_construct_poly_end_clamped(
     f_lo: f64,
     df_lo: f64,

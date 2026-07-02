@@ -37,8 +37,6 @@ pub(crate) fn trip_position_to_motor_frame(
 
 pub(crate) struct McuConnection {
     pub(crate) label: String,
-    pub(crate) serial_path: String,
-    pub(crate) baud: u32,
     pub(crate) host_io: Option<Arc<McuHostIo>>,
     pub(crate) runtime_rx_priority:
         Option<Receiver<host_rt::host_io::runtime_events::RuntimeEvent>>,

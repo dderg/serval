@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -32,18 +31,21 @@ mod servo;
 mod state;
 mod telemetry;
 
+#[cfg(test)]
+use ethercat_endpoint::{EndpointClaimError, endpoint_args};
 use ethercat_endpoint::{
-    EndpointClaimError, arm_endpoint_death_watchdog, endpoint_args, handshake_ethercat_endpoint,
-    message_for_claim_error, poll_socket_ready, report_ethercat_endpoint_death,
-    spawn_ethercat_endpoint,
+    arm_endpoint_death_watchdog, handshake_ethercat_endpoint, message_for_claim_error,
+    poll_socket_ready, report_ethercat_endpoint_death, spawn_ethercat_endpoint,
 };
 use motion_caps::{
     axis_ring_depth, drip_cohort_participants, require_events_dir_for_mcu_transport,
     resolve_motion_caps, ring_depth_for_axis_inner,
 };
+#[cfg(test)]
+use runtime_caps::place_motor_response;
 use runtime_caps::{
-    collect_motor_positions_inner, place_motor_response, query_ethercat_runtime_caps,
-    query_runtime_caps, require_positive, slot_for_axis,
+    collect_motor_positions_inner, query_ethercat_runtime_caps, query_runtime_caps,
+    require_positive, slot_for_axis,
 };
 use state::{
     EngineEvent, EthercatDrive, FlushWait, HomingRun, McuConnection, trip_position_to_motor_frame,
@@ -248,6 +250,7 @@ impl PyMotionEngine {
 
     #[pyo3(signature = (label, serial_path, baud))]
     fn claim_mcu(&self, label: &str, serial_path: &str, baud: u32) -> PyResult<u32> {
+        let _ = (serial_path, baud);
         let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
         let handle = router.claim_mcu(label);
         let raw = handle.raw();
@@ -255,8 +258,6 @@ impl PyMotionEngine {
             raw,
             McuConnection {
                 label: label.to_owned(),
-                serial_path: serial_path.to_owned(),
-                baud,
                 host_io: None,
                 runtime_rx_priority: None,
                 runtime_rx_bulk: None,
@@ -1075,8 +1076,6 @@ impl PyMotionEngine {
             raw,
             McuConnection {
                 label: label.to_owned(),
-                serial_path: String::new(),
-                baud: 0,
                 host_io: None,
                 runtime_rx_priority: None,
                 runtime_rx_bulk: None,

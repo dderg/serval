@@ -3,7 +3,7 @@ use crate::{AlgebraError, Float};
 
 mod hermite;
 #[cfg(feature = "host")]
-pub use hermite::{fit_hermite_c1_clamped, FitError};
+pub use hermite::{FitError, fit_hermite_c1_clamped};
 
 #[cfg(feature = "host")]
 pub fn scalar_multiply<T: Float>(

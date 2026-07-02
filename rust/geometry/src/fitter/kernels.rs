@@ -557,6 +557,8 @@ pub(super) fn arc_candidate(moves: &[Move], corner: CornerFitConfig, tol: f64) -
     moves.len() < 3 || cocircular(moves, tol)
 }
 
+// TODO: orphaned by the stream-planner rewire; heart config is still parsed but unread — pending decision
+#[allow(dead_code)]
 pub(super) fn grow_cocircular_span(
     moves: &[Move],
     start: usize,
@@ -791,4 +793,3 @@ fn run_followers(
 pub(super) fn arc_len(arc: &Arc) -> f64 {
     arc.radius * arc.sweep.abs()
 }
-

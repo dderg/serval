@@ -1,6 +1,5 @@
 use super::*;
 use crossbeam_channel::unbounded;
-use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

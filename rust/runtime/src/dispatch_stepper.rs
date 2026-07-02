@@ -43,8 +43,12 @@ unsafe extern "C" {
 }
 
 // Must match fault_handler.c's DIAG_EV_* tags.
+// TODO: only read on the cfg(not(test, host)) bare-metal path below; host/test builds see them as dead.
+#[allow(dead_code)]
 const DIAG_TAG_RUST_FAULT: u8 = 8;
+#[allow(dead_code)]
 const DIAG_TAG_FAULT_POSITIONS: u8 = 9;
+#[allow(dead_code)]
 const DIAG_TAG_FAULT_STEP_COUNTS: u8 = 10;
 
 #[inline]
@@ -101,16 +105,14 @@ pub(crate) fn kick_per_axis_timer(axis_idx: usize, cycle_abs: u32) {
 }
 
 #[inline]
+#[cfg(not(any(test, feature = "host")))]
 pub(crate) fn kick_per_axis_timer_foreground(axis_idx: usize, cycle_abs: u32) {
-    #[cfg(not(any(test, feature = "host")))]
+    // SAFETY: writes only a timer compare register and an owned-mask bit,
+    // guarded by the same runtime IRQ save/restore used by the ISR path.
     unsafe {
         let flags = crate::state::runtime_irq_save();
         kalico_kick_step_output(axis_idx as u8, cycle_abs);
         crate::state::runtime_irq_restore(flags);
-    }
-    #[cfg(any(test, feature = "host"))]
-    {
-        let _ = (axis_idx, cycle_abs);
     }
 }
 

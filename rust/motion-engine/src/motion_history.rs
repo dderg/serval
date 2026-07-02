@@ -344,6 +344,7 @@ pub fn clock_to_host(
         .ok_or_else(|| format!("clock_to_host_secs returned None for source mcu {source:?}"))
 }
 
+#[cfg(test)]
 pub(crate) fn clock_between_mcus(
     router: &PassthroughRouter,
     source: McuHandle,

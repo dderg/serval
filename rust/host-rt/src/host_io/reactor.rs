@@ -30,7 +30,6 @@ pub struct Reactor {
     pub(crate) unacked_window: UnackedWindow,
     pub(crate) awaiting_response: AwaitingResponse,
     pub(crate) rtt: RttEstimator,
-    pub(crate) status_snapshot: Arc<ArcSwap<StatusEvent>>,
     pub(crate) event_dispatcher: EventDispatcher,
 
     pub(crate) send_seq: u64,
@@ -133,7 +132,6 @@ impl Reactor {
             unacked_window: UnackedWindow::default(),
             awaiting_response: AwaitingResponse::default(),
             rtt: RttEstimator::default(),
-            status_snapshot,
             event_dispatcher,
             send_seq: seq.next_send_seq_abs,
             receive_seq: seq.mcu_receive_seq_abs,

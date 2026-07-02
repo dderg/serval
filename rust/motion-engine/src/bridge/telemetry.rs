@@ -2,7 +2,6 @@ use super::{
     DRAIN_TIMEOUT, FlushWait, HashMap, Ordering, PyMotionEngine, PyResult, PyRuntimeError, Python,
     collect_motor_positions_inner, planner_err, pymethods,
 };
-use pyo3::prelude::*;
 
 #[pymethods]
 impl PyMotionEngine {
