@@ -1,227 +1,35 @@
 pub use crate::types::AxisKey;
 use crossbeam_channel::{Receiver, Select, TryRecvError};
 use runtime::piece_ring::PieceEntry;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-/// Per-frame `[transit-diag]` healthy-path logging on the pump send thread
-/// throttled delivery below real-time on dense streams (the structured write +
-/// `SystemTime` + format ran synchronously between transport pushes). The alert
-/// path still fires every frame; the healthy lead sample is emitted once per
-/// this many frames to keep coarse delivery-lead telemetry at negligible cost.
-const TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE: u64 = 64;
-static TRANSIT_DIAG_FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
+mod drip;
+mod junction;
+mod sched;
+mod wire_sink;
 
-/// Previous `PushPieces` frame on one axis, kept solely so the per-frame
-/// transit diagnostic can decompose where dispatch lead is being spent:
-/// `Δarrival_lead = schedule_advance − mcu_clock_advance`. Separating the
-/// host's planned advance (`front_start_time` delta) from the MCU clock's
-/// real-time advance (`arrival_clock` delta), and bracketing both with the
-/// wall-clock send gap and the blocking-call duration, tells late-arrival
-/// apart from host-pacing starvation, transport stall, and MCU clock burn.
-struct PrevTransitFrame {
-    send_instant: Instant,
-    front_start_time: u64,
-    arrival_clock: u64,
-    arrival_lead_ticks: i64,
-}
+use drip::DripCohort;
+use junction::check_junction_position_continuity;
 
-static TRANSIT_PREV_FRAME: LazyLock<Mutex<HashMap<AxisKey, PrevTransitFrame>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[derive(Debug)]
-pub struct AxisQueue {
-    pub pieces: VecDeque<(PieceEntry, f64)>,
-    pub pushed: u32,
-    pub retired: u32,
-    pub ring_depth: u32,
-    pub physical_write_cursor: u32,
-    pub lead_secs: f64,
-}
-
-impl AxisQueue {
-    pub fn new(ring_depth: u32) -> Self {
-        Self {
-            pieces: VecDeque::new(),
-            pushed: 0,
-            retired: 0,
-            ring_depth,
-            physical_write_cursor: 0,
-            lead_secs: MAX_LEAD_SECS,
-        }
-    }
-    pub fn room(&self) -> u32 {
-        let in_flight = self.pushed.wrapping_sub(self.retired);
-        if in_flight > self.ring_depth {
-            self.ring_depth
-        } else {
-            self.ring_depth - in_flight
-        }
-    }
-    pub fn advance_write_cursor(&mut self, n: u32) {
-        if self.ring_depth == 0 {
-            return;
-        }
-        self.physical_write_cursor = (self.physical_write_cursor + n) % self.ring_depth;
-    }
-}
-
-#[derive(Debug)]
-pub struct FramePlan {
-    pub key: AxisKey,
-    pub pieces: Vec<PieceEntry>,
-    pub start_slot: u16,
-}
-
-/// One axis' pieces within a single-MCU bundle, carrying the ring bookkeeping
-/// the transport needs. `schedule()` only ever groups axes of one MCU into a
-/// `Send`, so a slice of these is exactly the work for one MCU transaction.
-pub struct AxisFrame {
-    pub axis: u8,
-    pub pieces: Vec<PieceEntry>,
-    pub start_slot: u16,
-    pub new_head: u32,
-    pub room: u32,
-}
-
-#[derive(Debug)]
-pub enum Schedule {
-    Send(Vec<FramePlan>),
-    StallFull(AxisKey),
-    StallAhead(AxisKey),
-    Idle,
-}
-
-#[must_use]
-pub fn schedule(
-    queues: &BTreeMap<AxisKey, AxisQueue>,
-    max_per_frame: usize,
-    horizon_of: impl Fn(&AxisKey, &AxisQueue) -> Option<u64>,
-    releasable_cap_of: impl Fn(&AxisKey) -> usize,
-) -> Schedule {
-    let mut stall_ahead_candidate: Option<AxisKey> = None;
-    let mut cap_skipped: BTreeSet<AxisKey> = BTreeSet::new();
-
-    let head_key = loop {
-        let candidate = queues
-            .iter()
-            .filter(|(k, q)| !q.pieces.is_empty() && !cap_skipped.contains(*k))
-            .min_by(|(ka, qa), (kb, qb)| {
-                let host_a = qa.pieces.front().unwrap().1;
-                let host_b = qb.pieces.front().unwrap().1;
-                host_a.total_cmp(&host_b).then(ka.cmp(kb))
-            });
-        let (&k, q) = match candidate {
-            None => {
-                if let Some(k) = stall_ahead_candidate {
-                    return Schedule::StallAhead(k);
-                }
-                return Schedule::Idle;
-            }
-            Some(c) => c,
-        };
-
-        if q.room() == 0 {
-            return Schedule::StallFull(k);
-        }
-
-        if releasable_cap_of(&k) == 0 {
-            if stall_ahead_candidate.is_none() {
-                stall_ahead_candidate = Some(k);
-            }
-            cap_skipped.insert(k);
-            continue;
-        }
-
-        let head_start_ticks = q.pieces.front().unwrap().0.start_time;
-        if let Some(horizon) = horizon_of(&k, q) {
-            if head_start_ticks > horizon {
-                return Schedule::StallAhead(k);
-            }
-        }
-
-        break k;
-    };
-
-    let mut taken: BTreeMap<AxisKey, usize> = BTreeMap::new();
-    let mut maxed: BTreeSet<AxisKey> = cap_skipped;
-    loop {
-        let next = queues
-            .iter()
-            .filter_map(|(k, q)| {
-                if k.mcu_id != head_key.mcu_id || maxed.contains(k) {
-                    return None;
-                }
-                let already = taken.get(k).copied().unwrap_or(0);
-                q.pieces
-                    .get(already)
-                    .map(|&(ref p, host)| (*k, p.start_time, host))
-            })
-            .min_by(|(ka, _, ha), (kb, _, hb)| ha.total_cmp(hb).then(ka.cmp(kb)));
-        let (k, start_ticks, _host) = match next {
-            Some(n) => n,
-            None => break,
-        };
-        let already = taken.get(&k).copied().unwrap_or(0);
-        let q = &queues[&k];
-        let room = q.room() as usize;
-        let cap = releasable_cap_of(&k);
-        if already >= room || already >= max_per_frame || already >= cap {
-            maxed.insert(k);
-            continue;
-        }
-        if let Some(horizon) = horizon_of(&k, q) {
-            if start_ticks > horizon {
-                if stall_ahead_candidate.is_none() {
-                    stall_ahead_candidate = Some(k);
-                }
-                maxed.insert(k);
-                continue;
-            }
-        }
-        *taken.entry(k).or_insert(0) += 1;
-    }
-
-    if taken.is_empty() {
-        if let Some(k) = stall_ahead_candidate {
-            return Schedule::StallAhead(k);
-        }
-        return Schedule::StallFull(head_key);
-    }
-
-    let frames: Vec<FramePlan> = taken
-        .into_iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(k, n)| FramePlan {
-            key: k,
-            pieces: queues[&k].pieces.iter().take(n).map(|(p, _)| *p).collect(),
-            start_slot: 0,
-        })
-        .collect();
-    debug_assert!(!frames.is_empty());
-    Schedule::Send(frames)
-}
-
+pub use drip::{DRIP_WINDOW_SECS, DripArm};
+pub use junction::{
+    JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionSeam, JunctionTracker,
+    junction_jumps,
+};
+pub use sched::{AxisFrame, AxisQueue, FramePlan, Schedule, schedule};
 #[cfg(test)]
-mod sched_tests;
-
-#[cfg(test)]
-mod tests;
+pub(crate) use wire_sink::pushpieces_retransmit_serial;
+pub use wire_sink::{McuTransport, WireSink};
 
 #[cfg(test)]
 mod drip_tests;
-
-pub const DRIP_WINDOW_SECS: f64 = 0.100;
-
-pub struct DripArm {
-    pub cohort: u64,
-    pub participants: Vec<AxisKey>,
-    pub timeout: Duration,
-}
+#[cfg(test)]
+mod sched_tests;
+#[cfg(test)]
+mod tests;
 
 pub struct EnqueueMsg {
     pub key: AxisKey,
@@ -303,19 +111,6 @@ pub trait PieceSink: Send {
     }
 }
 
-pub fn junction_jumps(
-    first_start_ticks: u64,
-    first_host: f64,
-    prev_end_ticks: u64,
-    prev_end_host: f64,
-    approx_freq_hz: f64,
-) -> (f64, f64) {
-    let tick_jump_us =
-        (first_start_ticks as i64 - prev_end_ticks as i64) as f64 / approx_freq_hz * 1e6;
-    let host_jump_us = (first_host - prev_end_host) * 1e6;
-    (tick_jump_us, host_jump_us)
-}
-
 // How far ahead of the MCU playhead the pump pushes pieces — the depth of the
 // MCU-side buffer that absorbs host-side scheduling hiccups. A piece that lands
 // past the playhead faults (PieceStartInPast → stream halt), so this must exceed
@@ -347,171 +142,17 @@ pub const PUMP_DATA_CHANNEL_CAP: usize = 1024;
 // the playhead then overruns the committed end (anchor_underrun → drive fault).
 const PUMP_INTAKE_BACKLOG_CAP: u64 = 16384;
 
-#[derive(Clone, Copy)]
-struct JunctionEnd {
-    end_ticks: u64,
-    end_host: f64,
-    end_pos: f32,
-    source_line: u32,
+const MAX_PER_FRAME: usize = 32;
+
+fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
+    let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
+    staged < PUMP_INTAKE_BACKLOG_CAP
 }
 
-pub const JUNCTION_POSITION_LOG_MM: f32 = 0.0125;
-pub const JUNCTION_POSITION_FATAL_MM: f32 = 0.1;
-
-#[derive(Clone, Copy, Debug)]
-pub struct JunctionSeam {
-    pub key: AxisKey,
-    pub prev_end_pos: f32,
-    pub next_start_pos: f32,
-    pub prev_end_host: f64,
-    pub next_start_host: f64,
-    pub prev_source_line: u32,
-    pub next_source_line: u32,
-    pub prev_end_ticks: u64,
-    pub first_start_ticks: u64,
-}
-
-impl JunctionSeam {
-    #[must_use]
-    pub fn jump(&self) -> f32 {
-        (self.next_start_pos - self.prev_end_pos).abs()
-    }
-
-    #[must_use]
-    pub fn is_fatal(&self) -> bool {
-        self.jump() >= JUNCTION_POSITION_FATAL_MM
-    }
-}
-
-#[derive(Default)]
-pub struct JunctionTracker {
-    ends: BTreeMap<AxisKey, JunctionEnd>,
-}
-
-impl JunctionTracker {
-    pub fn forget(&mut self, key: AxisKey) {
-        self.ends.remove(&key);
-    }
-
-    pub fn observe(
-        &mut self,
-        key: AxisKey,
-        pieces: &[(PieceEntry, f64)],
-        source_line: u32,
-        freq: f64,
-    ) -> Option<JunctionSeam> {
-        let (first_entry, first_host) = pieces.first()?;
-        if first_entry.motor_mask != 0 {
-            return None;
-        }
-        let seam = self.ends.get(&key).map(|prev| JunctionSeam {
-            key,
-            prev_end_pos: prev.end_pos,
-            next_start_pos: first_entry.coeffs[0],
-            prev_end_host: prev.end_host,
-            next_start_host: *first_host,
-            prev_source_line: prev.source_line,
-            next_source_line: source_line,
-            prev_end_ticks: prev.end_ticks,
-            first_start_ticks: first_entry.start_time,
-        });
-        let (last_entry, last_host) = pieces.last().unwrap();
-        #[allow(clippy::cast_possible_truncation)]
-        let last_end_ticks = last_entry.end_time(freq as f32);
-        let last_end_host = last_host + last_entry.duration as f64;
-        self.ends.insert(
-            key,
-            JunctionEnd {
-                end_ticks: last_end_ticks,
-                end_host: last_end_host,
-                end_pos: last_entry.coeffs[3],
-                source_line,
-            },
-        );
-        seam
-    }
-
-    pub fn observe_msg(
-        &mut self,
-        key: AxisKey,
-        pieces: &[(PieceEntry, f64)],
-        fresh_stream: bool,
-        source_line: u32,
-        freq: Option<f64>,
-    ) -> Option<JunctionSeam> {
-        if fresh_stream {
-            self.forget(key);
-        }
-        self.observe(key, pieces, source_line, freq?)
-    }
-}
-
-fn check_junction_position_continuity(seam: &JunctionSeam) {
-    let jump = seam.jump();
-    if jump >= JUNCTION_POSITION_LOG_MM {
-        tracing::error!(
-            subsystem = "motion",
-            event = "junction_position_discontinuity",
-            key = ?seam.key,
-            fatal = jump >= JUNCTION_POSITION_FATAL_MM,
-            prev_end = seam.prev_end_pos,
-            next_start = seam.next_start_pos,
-            jump_mm = jump,
-            prev_end_host = seam.prev_end_host,
-            next_start_host = seam.next_start_host,
-            prev_source_line = seam.prev_source_line,
-            next_source_line = seam.next_source_line,
-            "[junction-pos] position discontinuity"
-        );
-    }
-    if jump >= JUNCTION_POSITION_FATAL_MM {
-        panic!(
-            "junction position discontinuity on mcu{} axis{}: prev piece ends at \
-             {} (host t={:.6}, line {}), next starts at {} (host t={:.6}, line \
-             {}), |Δ|={jump}mm — this becomes a one-sample step burst on the MCU \
-             (fault -300/-310)",
-            seam.key.mcu_id,
-            seam.key.axis,
-            seam.prev_end_pos,
-            seam.prev_end_host,
-            seam.prev_source_line,
-            seam.next_start_pos,
-            seam.next_start_host,
-            seam.next_source_line,
-        );
-    }
-}
-
-struct DripCohort {
-    id: u64,
-    participants: BTreeSet<AxisKey>,
-    timeout: Duration,
-    baseline: BTreeMap<AxisKey, u32>,
-    last_retired: BTreeMap<AxisKey, u32>,
-    step_deadline: Instant,
-    deadline_floor: u32,
-}
-
-impl DripCohort {
-    fn executed(&self, k: &AxisKey, queues: &BTreeMap<AxisKey, AxisQueue>) -> u32 {
-        let retired = queues.get(k).map_or(0, |q| q.retired);
-        let baseline = self.baseline.get(k).copied().unwrap_or(0);
-        retired.wrapping_sub(baseline)
-    }
-
-    fn floor(&self, queues: &BTreeMap<AxisKey, AxisQueue>) -> u32 {
-        self.participants
-            .iter()
-            .map(|k| self.executed(k, queues))
-            .min()
-            .unwrap_or(0)
-    }
-}
-
-#[allow(clippy::too_many_lines)]
-pub fn run_pump<S, F, C, A, O, D>(
-    control_rx: Receiver<PumpMsg>,
-    data_rx: Receiver<EnqueueMsg>,
+struct Pump<S, F, C, A, O, D> {
+    queues: BTreeMap<AxisKey, AxisQueue>,
+    junctions: JunctionTracker,
+    cohort: Option<DripCohort>,
     sink: S,
     ring_depth_of: F,
     mcu_clock_of: C,
@@ -519,7 +160,13 @@ pub fn run_pump<S, F, C, A, O, D>(
     on_abandon: O,
     on_drip_stall: D,
     backlog: Arc<AtomicU64>,
-) where
+    holding_ahead: bool,
+    data_open: bool,
+    last_stallfull_log: Option<Instant>,
+}
+
+impl<S, F, C, A, O, D> Pump<S, F, C, A, O, D>
+where
     S: PieceSink,
     F: Fn(AxisKey) -> u32,
     C: Fn(u32) -> Option<(u64, f64)>,
@@ -527,28 +174,19 @@ pub fn run_pump<S, F, C, A, O, D>(
     O: Fn(AxisKey, u32),
     D: Fn(String) + Send,
 {
-    let mut queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
-    let mut junctions = JunctionTracker::default();
-    let mut cohort: Option<DripCohort> = None;
-    const MAX_PER_FRAME: usize = 32;
-
-    let apply = |msg: PumpMsg,
-                 queues: &mut BTreeMap<AxisKey, AxisQueue>,
-                 junctions: &mut JunctionTracker,
-                 cohort: &mut Option<DripCohort>|
-     -> bool {
+    fn handle_control_msg(&mut self, msg: PumpMsg) -> bool {
         match msg {
             PumpMsg::Shutdown => return false,
             PumpMsg::Flush(keys) => {
                 for key in keys {
-                    if let Some(q) = queues.get_mut(&key) {
+                    if let Some(q) = self.queues.get_mut(&key) {
                         let dropped = q.pieces.len() as u32;
                         q.pieces.clear();
                         if dropped > 0 {
-                            on_abandon(key, dropped);
+                            (self.on_abandon)(key, dropped);
                         }
                     }
-                    junctions.forget(key);
+                    self.junctions.forget(key);
                 }
             }
             PumpMsg::Heartbeat(HeartbeatMsg {
@@ -560,19 +198,19 @@ pub fn run_pump<S, F, C, A, O, D>(
                         mcu_id,
                         axis: axis as u8,
                     };
-                    if let Some(q) = queues.get_mut(&key) {
+                    if let Some(q) = self.queues.get_mut(&key) {
                         q.retired = c;
                     }
-                    if let Some(co) = cohort {
+                    if let Some(co) = &mut self.cohort {
                         if co.participants.contains(&key) {
                             let prev = co.last_retired.get(&key).copied().unwrap_or(0);
                             if c < prev {
-                                on_drip_stall(format!(
+                                (self.on_drip_stall)(format!(
                                     "drip cohort {}: retired regression on mcu{} axis{}: \
                                      was {prev} now {c} — MCU retired counter must not decrease",
                                     co.id, mcu_id, axis
                                 ));
-                                *cohort = None;
+                                self.cohort = None;
                                 break;
                             }
                             co.last_retired.insert(key, c);
@@ -584,12 +222,12 @@ pub fn run_pump<S, F, C, A, O, D>(
                 let mut baseline = BTreeMap::new();
                 let mut last_retired = BTreeMap::new();
                 for &k in &arm.participants {
-                    let retired = queues.get(&k).map_or(0, |q| q.retired);
+                    let retired = self.queues.get(&k).map_or(0, |q| q.retired);
                     baseline.insert(k, retired);
                     last_retired.insert(k, retired);
                 }
                 let step_deadline = Instant::now() + arm.timeout;
-                *cohort = Some(DripCohort {
+                self.cohort = Some(DripCohort {
                     id: arm.cohort,
                     participants: arm.participants.into_iter().collect(),
                     timeout: arm.timeout,
@@ -600,8 +238,8 @@ pub fn run_pump<S, F, C, A, O, D>(
                 });
             }
             PumpMsg::DripDisarm(c) => {
-                if cohort.as_ref().map_or(false, |co| co.id == c) {
-                    *cohort = None;
+                if self.cohort.as_ref().map_or(false, |co| co.id == c) {
+                    self.cohort = None;
                 }
             }
             PumpMsg::Barrier(ack) => {
@@ -609,12 +247,9 @@ pub fn run_pump<S, F, C, A, O, D>(
             }
         }
         true
-    };
+    }
 
-    let apply_enqueue = |msg: EnqueueMsg,
-                         queues: &mut BTreeMap<AxisKey, AxisQueue>,
-                         junctions: &mut JunctionTracker,
-                         cohort: &mut Option<DripCohort>| {
+    fn enqueue(&mut self, msg: EnqueueMsg) {
         let EnqueueMsg {
             key,
             pieces,
@@ -622,25 +257,25 @@ pub fn run_pump<S, F, C, A, O, D>(
             lead_secs,
             source_line,
         } = msg;
-        if let Some(co) = cohort.as_ref() {
+        if let Some(co) = self.cohort.as_ref() {
             if !co.participants.contains(&key) {
                 let id = co.id;
-                on_drip_stall(format!(
+                (self.on_drip_stall)(format!(
                     "drip cohort {id}: enqueue for non-participant \
                      mcu{} axis{} during active cohort — homing must \
                      drip every axis",
                     key.mcu_id, key.axis
                 ));
-                *cohort = None;
+                self.cohort = None;
                 return;
             }
         }
         if fresh_stream {
-            junctions.forget(key);
+            self.junctions.forget(key);
         }
         if !pieces.is_empty() {
-            if let Some((_ack_now, freq)) = mcu_clock_of(key.mcu_id) {
-                if let Some(seam) = junctions.observe(key, &pieces, source_line, freq) {
+            if let Some((_ack_now, freq)) = (self.mcu_clock_of)(key.mcu_id) {
+                if let Some(seam) = self.junctions.observe(key, &pieces, source_line, freq) {
                     check_junction_position_continuity(&seam);
                     let (tick_jump_us, host_jump_us) = junction_jumps(
                         seam.first_start_ticks,
@@ -683,21 +318,24 @@ pub fn run_pump<S, F, C, A, O, D>(
                 }
             }
         }
-        let q = queues
+        let ring_depth = (self.ring_depth_of)(key);
+        let q = self
+            .queues
             .entry(key)
-            .or_insert_with(|| AxisQueue::new(ring_depth_of(key)));
+            .or_insert_with(|| AxisQueue::new(ring_depth));
         q.lead_secs = lead_secs;
         q.pieces.extend(pieces);
-    };
+    }
 
-    let horizon_of = |k: &AxisKey, q: &AxisQueue, cohort: &Option<DripCohort>| -> Option<u64> {
-        match mcu_clock_of(k.mcu_id) {
+    fn horizon_of(&self, k: &AxisKey, q: &AxisQueue) -> Option<u64> {
+        match (self.mcu_clock_of)(k.mcu_id) {
             Some((ack_now, freq)) =>
             {
                 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
                 Some(ack_now + (q.lead_secs * freq) as u64)
             }
-            None if cohort
+            None if self
+                .cohort
                 .as_ref()
                 .map_or(false, |co| co.participants.contains(k)) =>
             {
@@ -705,58 +343,63 @@ pub fn run_pump<S, F, C, A, O, D>(
             }
             None => None,
         }
-    };
+    }
 
-    let mut holding_ahead = false;
-    let mut data_open = true;
-    let mut last_stallfull_log: Option<std::time::Instant> = None;
-
-    loop {
-        let cohort_active = cohort.is_some();
-        let short_lead = (holding_ahead || cohort_active)
-            && queues
+    fn poll_ms(&self) -> u64 {
+        let cohort_active = self.cohort.is_some();
+        let short_lead = (self.holding_ahead || cohort_active)
+            && self
+                .queues
                 .values()
                 .any(|q| q.lead_secs < 0.1 && !q.pieces.is_empty());
-        let poll_ms: u64 = if short_lead || cohort_active { 10 } else { 50 };
+        if short_lead || cohort_active { 10 } else { 50 }
+    }
 
+    fn drain_control(&mut self, control_rx: &Receiver<PumpMsg>) -> Result<bool, ()> {
         let mut activity = false;
-
         loop {
             match control_rx.try_recv() {
                 Ok(m) => {
                     activity = true;
-                    if !apply(m, &mut queues, &mut junctions, &mut cohort) {
-                        return;
+                    if !self.handle_control_msg(m) {
+                        return Err(());
                     }
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return,
+                Err(TryRecvError::Disconnected) => return Err(()),
             }
         }
+        Ok(activity)
+    }
 
-        while data_open && (cohort.is_some() || wants_pieces(&queues)) {
+    fn drain_data(&mut self, data_rx: &Receiver<EnqueueMsg>) -> bool {
+        let mut activity = false;
+        while self.data_open && (self.cohort.is_some() || wants_pieces(&self.queues)) {
             match data_rx.try_recv() {
                 Ok(e) => {
                     activity = true;
-                    apply_enqueue(e, &mut queues, &mut junctions, &mut cohort);
+                    self.enqueue(e);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    data_open = false;
+                    self.data_open = false;
                     break;
                 }
             }
         }
+        activity
+    }
 
-        if let Some(ref co) = cohort {
+    fn check_cohort_deadline(&mut self) {
+        if let Some(ref co) = self.cohort {
             let now = Instant::now();
-            let floor = co.floor(&queues);
+            let floor = co.floor(&self.queues);
             if floor > co.deadline_floor {
-                let co = cohort.as_mut().unwrap();
+                let co = self.cohort.as_mut().unwrap();
                 co.step_deadline = now + co.timeout;
                 co.deadline_floor = floor;
             } else if now >= co.step_deadline {
-                let co = cohort.as_ref().unwrap();
+                let co = self.cohort.as_ref().unwrap();
                 let lagging: Vec<String> = co
                     .participants
                     .iter()
@@ -765,34 +408,41 @@ pub fn run_pump<S, F, C, A, O, D>(
                             "mcu{} axis{}: executed {} queued {}",
                             k.mcu_id,
                             k.axis,
-                            co.executed(k, &queues),
-                            queues.get(k).map_or(0, |q| q.pieces.len()),
+                            co.executed(k, &self.queues),
+                            self.queues.get(k).map_or(0, |q| q.pieces.len()),
                         )
                     })
                     .collect();
                 let id = co.id;
-                on_drip_stall(format!(
+                (self.on_drip_stall)(format!(
                     "drip cohort {id}: floor stalled at {floor} for {:?}; \
                      participants: [{}]",
                     co.timeout,
                     lagging.join(", ")
                 ));
-                cohort = None;
+                self.cohort = None;
             }
         }
+    }
 
-        holding_ahead = false;
-        'send: loop {
-            let hz_of = |k: &AxisKey, q: &AxisQueue| horizon_of(k, q, &cohort);
-            match schedule(&queues, MAX_PER_FRAME, hz_of, |_| usize::MAX) {
-                Schedule::Idle => break 'send,
+    #[allow(clippy::too_many_lines)]
+    fn send_ready(&mut self) -> Result<bool, ()> {
+        let mut activity = false;
+        loop {
+            let sched = {
+                let hz_of = |k: &AxisKey, q: &AxisQueue| self.horizon_of(k, q);
+                schedule(&self.queues, MAX_PER_FRAME, hz_of, |_| usize::MAX)
+            };
+            match sched {
+                Schedule::Idle => break,
                 Schedule::StallFull(stall_key) => {
                     let now = std::time::Instant::now();
-                    let due = last_stallfull_log
+                    let due = self
+                        .last_stallfull_log
                         .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1));
                     if due {
-                        last_stallfull_log = Some(now);
-                        if let Some(q) = queues.get(&stall_key) {
+                        self.last_stallfull_log = Some(now);
+                        if let Some(q) = self.queues.get(&stall_key) {
                             let in_flight = q.pushed.wrapping_sub(q.retired);
                             tracing::debug!(
                                 subsystem = "motion",
@@ -809,15 +459,15 @@ pub fn run_pump<S, F, C, A, O, D>(
                             );
                         }
                     }
-                    break 'send;
+                    break;
                 }
                 Schedule::StallAhead(_stall_key) => {
-                    holding_ahead = true;
-                    break 'send;
+                    self.holding_ahead = true;
+                    break;
                 }
                 Schedule::Send(frames) => {
                     if frames.is_empty() {
-                        break 'send;
+                        break;
                     }
                     activity = true;
                     let mcu_id = frames[0].key.mcu_id;
@@ -825,7 +475,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                         .into_iter()
                         .map(|f| {
                             let n = f.pieces.len() as u32;
-                            let q = queues.get(&f.key).expect("planned key exists");
+                            let q = self.queues.get(&f.key).expect("planned key exists");
                             debug_assert!(
                                 q.ring_depth <= u32::from(u16::MAX),
                                 "ring_depth {} exceeds u16::MAX; start_slot cast is lossy",
@@ -847,7 +497,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                     // PieceStartInPast after the fact. Mirrors the MCU's
                     // MAX_START_IN_PAST_SECS=200us threshold with a margin above
                     // host-projection jitter so a healthy print never false-aborts.
-                    if let Some((mcu_now, freq)) = mcu_clock_of(mcu_id) {
+                    if let Some((mcu_now, freq)) = (self.mcu_clock_of)(mcu_id) {
                         if freq > 0.0 {
                             const PUMP_PAST_GUARD_SECS: f64 = 500e-6;
                             let guard_ticks = (PUMP_PAST_GUARD_SECS * freq) as u64;
@@ -879,7 +529,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                         }
                     }
                     let send_started = Instant::now();
-                    let send_result = sink.send_mcu_frames(mcu_id, &bundle);
+                    let send_result = self.sink.send_mcu_frames(mcu_id, &bundle);
                     let send_elapsed = send_started.elapsed();
                     if send_elapsed >= Duration::from_millis(5) {
                         tracing::warn!(
@@ -899,7 +549,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                                     mcu_id,
                                     axis: af.axis,
                                 };
-                                let freq = mcu_clock_of(mcu_id).map(|(_, f)| f as f32);
+                                let freq = (self.mcu_clock_of)(mcu_id).map(|(_, f)| f as f32);
                                 let mut prev_end: Option<u64> = None;
                                 for piece in &af.pieces {
                                     let end_ticks: u64 = freq.map_or(0, |f| piece.end_time(f));
@@ -923,7 +573,7 @@ pub fn run_pump<S, F, C, A, O, D>(
                                     }
                                 }
                                 let n = af.pieces.len() as u32;
-                                let q = queues.get_mut(&key).expect("planned key exists");
+                                let q = self.queues.get_mut(&key).expect("planned key exists");
                                 for _ in 0..af.pieces.len() {
                                     q.pieces.pop_front();
                                 }
@@ -939,11 +589,11 @@ pub fn run_pump<S, F, C, A, O, D>(
                                 error = %e,
                                 "pump send_mcu_frames FATAL transport error — invoking fatal-transport action"
                             );
-                            on_fatal_transport(AxisKey {
+                            (self.on_fatal_transport)(AxisKey {
                                 mcu_id,
                                 axis: bundle.first().map_or(0, |f| f.axis),
                             });
-                            return;
+                            return Err(());
                         }
                         Err(SendError::Transient(ref e)) => {
                             tracing::error!(
@@ -953,29 +603,30 @@ pub fn run_pump<S, F, C, A, O, D>(
                                 error = %e,
                                 "pump send_mcu_frames failed"
                             );
-                            break 'send;
+                            break;
                         }
                     }
                 }
             }
         }
+        Ok(activity)
+    }
 
-        let unpushed: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
-        backlog.store(unpushed, Ordering::Release);
-
-        if activity {
-            continue;
-        }
-
+    fn idle_wait(
+        &mut self,
+        control_rx: &Receiver<PumpMsg>,
+        data_rx: &Receiver<EnqueueMsg>,
+        poll_ms: u64,
+    ) -> Result<(), ()> {
         let mut sel = Select::new();
-        let ctrl_op = sel.recv(&control_rx);
-        let want_data = data_open && (cohort.is_some() || wants_pieces(&queues));
+        let ctrl_op = sel.recv(control_rx);
+        let want_data = self.data_open && (self.cohort.is_some() || wants_pieces(&self.queues));
         let data_op = if want_data {
-            sel.recv(&data_rx)
+            sel.recv(data_rx)
         } else {
             usize::MAX
         };
-        let selected = if holding_ahead || cohort.is_some() {
+        let selected = if self.holding_ahead || self.cohort.is_some() {
             sel.select_timeout(Duration::from_millis(poll_ms))
         } else {
             Ok(sel.select())
@@ -983,415 +634,90 @@ pub fn run_pump<S, F, C, A, O, D>(
         if let Ok(op) = selected {
             let idx = op.index();
             if idx == ctrl_op {
-                match op.recv(&control_rx) {
+                match op.recv(control_rx) {
                     Ok(m) => {
-                        if !apply(m, &mut queues, &mut junctions, &mut cohort) {
-                            return;
+                        if !self.handle_control_msg(m) {
+                            return Err(());
                         }
                     }
-                    Err(_) => return,
+                    Err(_) => return Err(()),
                 }
             } else if idx == data_op {
-                match op.recv(&data_rx) {
-                    Ok(e) => apply_enqueue(e, &mut queues, &mut junctions, &mut cohort),
-                    Err(_) => data_open = false,
+                match op.recv(data_rx) {
+                    Ok(e) => self.enqueue(e),
+                    Err(_) => self.data_open = false,
                 }
             }
-        }
-    }
-}
-
-fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
-    let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
-    staged < PUMP_INTAKE_BACKLOG_CAP
-}
-
-pub enum McuTransport {
-    Serial(Weak<host_rt::host_io::McuHostIo>),
-    EtherCat(Weak<host_rt::mcu_serial_conn::McuSerialConn>),
-}
-
-impl std::fmt::Debug for McuTransport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Serial(_) => write!(f, "McuTransport::Serial"),
-            Self::EtherCat(_) => write!(f, "McuTransport::EtherCat"),
-        }
-    }
-}
-
-pub struct WireSink {
-    pub transports: HashMap<u32, McuTransport>,
-    pub timeout: Duration,
-    pub freq_of: Arc<dyn Fn(u32) -> Option<f64> + Send + Sync>,
-}
-
-/// Per-attempt response wait for a serial `PushPieces` re-request, before the
-/// frame's own wire time is added. A few × the small-frame ~6 ms RTT, so a
-/// healthy response still returns on arrival while a lost one is re-requested
-/// fast.
-const PUSHPIECES_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(30);
-
-/// Worst-case one-way serial cost per frame byte (250 kbaud, 10 bits/byte),
-/// doubled for the echo path. A batched frame (up to `MAX_PER_FRAME` pieces per
-/// axis, ~2 KiB) legitimately spends tens of milliseconds on the wire; the
-/// attempt timeout must grow with the frame or every large frame times out and
-/// retransmits.
-const SERIAL_ROUND_TRIP_PER_BYTE: Duration = Duration::from_micros(80);
-
-fn pushpieces_attempt_timeout(body_len: usize) -> Duration {
-    PUSHPIECES_ATTEMPT_TIMEOUT + SERIAL_ROUND_TRIP_PER_BYTE * body_len as u32
-}
-
-/// Total serial `PushPieces` re-requests. The whole burst blocks the
-/// single-threaded pump, so for drip-sized frames the budget
-/// (`* PUSHPIECES_ATTEMPT_TIMEOUT` ≈ 90 ms) must stay under the drip lead
-/// (`DRIP_WINDOW_SECS` = 100 ms) — otherwise the retry itself starves the MCU
-/// of later pieces and recreates the very `-308` it prevents. Batched print
-/// frames get a larger per-attempt timeout (wire time scales with frame size)
-/// but also run under the much deeper `MAX_LEAD_SECS` lead. Recovers isolated
-/// corruption; sustained corruption gives up fast to the loud in-past-guard
-/// backstop.
-const PUSHPIECES_MAX_ATTEMPTS: u32 = 3;
-
-/// Bounded re-request policy for serial `PushPieces` (the frame is idempotent on
-/// the real MCU: slot-addressed write + absolute `commit_head`, stale = no-op).
-/// `attempt_call` performs one request/response with the short per-attempt
-/// timeout. Returns `Ok` on the first success; `Fatal` (no further attempts) on a
-/// genuine MCU failure (`Closed`/`Io` dead transport, `McuShutdown`) so it surfaces
-/// loud instead of being buried under the retry budget; `Transient` once the budget
-/// is spent on recoverable corruption so the existing pump path + in-past guard
-/// remain the backstop. Pure (no I/O of its own) so the policy is unit-testable
-/// with a scripted `attempt_call`.
-fn pushpieces_retransmit_serial<F>(
-    mcu_id: u32,
-    max_attempts: u32,
-    mut attempt_call: F,
-) -> Result<Vec<u8>, SendError>
-where
-    F: FnMut() -> Result<Vec<u8>, host_rt::transport::TransportError>,
-{
-    use host_rt::transport::TransportError;
-    let mut attempt: u32 = 0;
-    loop {
-        attempt += 1;
-        match attempt_call() {
-            Ok(b) => return Ok(b),
-            Err(
-                e @ (TransportError::Closed
-                | TransportError::Io(_)
-                | TransportError::McuShutdown(_)),
-            ) => {
-                return Err(SendError::Fatal(format!(
-                    "serial PushPieces mcu {mcu_id}: {e:?}"
-                )));
-            }
-            Err(e) => {
-                if attempt >= max_attempts {
-                    tracing::warn!(
-                        subsystem = "mcu-comms",
-                        event = "pushpieces_giveup",
-                        mcu = mcu_id,
-                        attempts = attempt,
-                        error = ?e,
-                        "[pushpieces] budget exhausted — giving up (serial); in-past guard is the backstop"
-                    );
-                    return Err(SendError::Transient(format!(
-                        "serial PushPieces mcu {mcu_id}: no response after {attempt} attempts ({e:?})"
-                    )));
-                }
-                tracing::warn!(
-                    subsystem = "mcu-comms",
-                    event = "pushpieces_retry",
-                    mcu = mcu_id,
-                    attempt,
-                    max_attempts,
-                    error = ?e,
-                    "[pushpieces] no/lost response — re-requesting idempotent frame (serial)"
-                );
-            }
-        }
-    }
-}
-
-impl WireSink {
-    fn call_push_pieces(
-        &self,
-        mcu_id: u32,
-        frames: &[AxisFrame],
-    ) -> Result<mcu_protocol::messages::PushPiecesResponse, SendError> {
-        use host_rt::transport::TransportError;
-
-        let axes: Vec<mcu_protocol::messages::AxisPieces> = frames
-            .iter()
-            .map(|f| {
-                let mut pieces_bytes = Vec::with_capacity(f.pieces.len() * 32);
-                for p in &f.pieces {
-                    pieces_bytes.extend_from_slice(&p.to_le_bytes());
-                }
-                mcu_protocol::messages::AxisPieces {
-                    axis_idx: f.axis,
-                    piece_count: f.pieces.len() as u8,
-                    start_slot: f.start_slot,
-                    new_head: f.new_head,
-                    pieces_bytes,
-                }
-            })
-            .collect();
-        let msg = mcu_protocol::messages::PushPieces { axes };
-        let body = mcu_protocol::codec::Encode::encoded_to_vec(&msg);
-
-        let transport = self.transports.get(&mcu_id).ok_or_else(|| {
-            SendError::Transient(format!(
-                "WireSink: no transport for mcu_id {mcu_id}; \
-                     this is a logic bug in init_planner — the MCU was enqueued \
-                     without registering its transport"
-            ))
-        })?;
-
-        let resp_body = match transport {
-            McuTransport::Serial(weak) => {
-                let io = weak.upgrade().ok_or_else(|| {
-                    SendError::Transient(format!("McuHostIo for mcu {mcu_id} detached"))
-                })?;
-                let attempt_timeout = pushpieces_attempt_timeout(body.len());
-                pushpieces_retransmit_serial(mcu_id, PUSHPIECES_MAX_ATTEMPTS, || {
-                    io.kalico_call_on_channel(
-                        mcu_protocol::MCU_CHANNEL_PIECES,
-                        mcu_protocol::MessageKind::PushPieces,
-                        body.clone(),
-                        attempt_timeout,
-                    )
-                    .map(|(_kind, b)| b)
-                })?
-            }
-            McuTransport::EtherCat(weak) => {
-                let conn = weak.upgrade().ok_or_else(|| {
-                    SendError::Fatal(format!(
-                        "ethercat conn for mcu {mcu_id} detached (released)"
-                    ))
-                })?;
-                let (_kind, b) = conn
-                    .kalico_call_on_channel(
-                        mcu_protocol::MCU_CHANNEL_PIECES,
-                        mcu_protocol::MessageKind::PushPieces,
-                        body,
-                        self.timeout,
-                    )
-                    .map_err(|e| {
-                        if matches!(&e, TransportError::Closed | TransportError::Io(_)) {
-                            SendError::Fatal(format!("ethercat PushPieces mcu {mcu_id}: {e:?}"))
-                        } else {
-                            SendError::Transient(format!("ethercat PushPieces mcu {mcu_id}: {e:?}"))
-                        }
-                    })?;
-                b
-            }
-        };
-
-        use mcu_protocol::codec::Decode as _;
-        mcu_protocol::messages::PushPiecesResponse::decode(&resp_body).map_err(|e| {
-            SendError::Transient(format!("decode PushPiecesResponse mcu {mcu_id}: {e:?}"))
-        })
-    }
-
-    /// Emit the per-axis transit diagnostic for one axis of a just-completed
-    /// frame. `front_start_time` is this axis' echo from the response;
-    /// `arrival_clock` is the frame-global MCU clock; `send_started_at` /
-    /// `send_elapsed_us` belong to the whole MCU round-trip.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_transit_diag(
-        &self,
-        key: AxisKey,
-        host_front_start_time: u64,
-        piece_count: usize,
-        room: u32,
-        send_started_at: Instant,
-        send_elapsed_us: f64,
-        front_start_time: u64,
-        arrival_clock: u64,
-    ) {
-        let arrival_lead_ticks = front_start_time as i64 - arrival_clock as i64;
-        let zero_st = host_front_start_time == 0;
-        let past_arrival = arrival_lead_ticks < 0;
-        let frame_seq = TRANSIT_DIAG_FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
-        let healthy_sample = frame_seq % TRANSIT_DIAG_HEALTHY_SAMPLE_STRIDE == 0;
-
-        let prev = {
-            let mut map = TRANSIT_PREV_FRAME.lock().expect("transit prev-frame map");
-            map.insert(
-                key,
-                PrevTransitFrame {
-                    send_instant: send_started_at,
-                    front_start_time,
-                    arrival_clock,
-                    arrival_lead_ticks,
-                },
-            )
-        };
-
-        if !(zero_st || past_arrival || healthy_sample) {
-            return;
-        }
-        let approx_freq_hz = (self.freq_of)(key.mcu_id);
-        let host_send_secs = {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0)
-        };
-        // Clock not yet synced -> the µs conversion is meaningless; render N/A.
-        // Alert gating uses arrival_lead_ticks (tick domain), so the ALERT still
-        // fires without a frequency.
-        let arrival_lead_us = approx_freq_hz
-            .map(|f| format!("{:.1}", (arrival_lead_ticks as f64 / f) * 1e6))
-            .unwrap_or_else(|| "N/A".to_owned());
-
-        let ticks_to_us = |ticks: i64| {
-            approx_freq_hz
-                .map(|f| format!("{:.1}", (ticks as f64 / f) * 1e6))
-                .unwrap_or_else(|| "N/A".to_owned())
-        };
-        // Where did the lead go since this axis' previous frame?
-        //   Δarrival_lead = schedule_advance − mcu_clock_advance
-        // schedule_advance: how much further ahead the host planned.
-        // mcu_clock_advance: how much the MCU clock (real time) moved.
-        // send_gap: wall time between our two sends to this axis.
-        let (send_gap_us, schedule_advance_us, mcu_clock_advance_us, delta_arrival_lead_us) =
-            match &prev {
-                Some(p) => (
-                    format!(
-                        "{:.1}",
-                        send_started_at.duration_since(p.send_instant).as_secs_f64() * 1e6
-                    ),
-                    ticks_to_us(front_start_time as i64 - p.front_start_time as i64),
-                    ticks_to_us(arrival_clock as i64 - p.arrival_clock as i64),
-                    ticks_to_us(arrival_lead_ticks - p.arrival_lead_ticks),
-                ),
-                None => (
-                    "N/A".to_owned(),
-                    "N/A".to_owned(),
-                    "N/A".to_owned(),
-                    "N/A".to_owned(),
-                ),
-            };
-        if zero_st || past_arrival {
-            let alert = if zero_st && past_arrival {
-                "host_start_time=0 (clock-sync gap) AND piece in MCU past"
-            } else if zero_st {
-                "host_start_time=0 (router clock_freq=0 at dispatch — clock-sync gap)"
-            } else {
-                "piece arrived in MCU past (arrival_lead<0) — PieceStartInPast risk"
-            };
-            tracing::warn!(
-                subsystem = "motion",
-                event = "transit_diag_alert",
-                mcu = key.mcu_id,
-                axis = key.axis,
-                host_front_start_time,
-                mcu_front_start_time = front_start_time,
-                arrival_clock,
-                arrival_lead_ticks,
-                arrival_lead_us = %arrival_lead_us,
-                host_send_unix_secs = host_send_secs,
-                send_elapsed_us,
-                send_gap_us = %send_gap_us,
-                schedule_advance_us = %schedule_advance_us,
-                mcu_clock_advance_us = %mcu_clock_advance_us,
-                delta_arrival_lead_us = %delta_arrival_lead_us,
-                piece_count,
-                room,
-                alert,
-                "[transit-diag] alert"
-            );
-        } else {
-            tracing::info!(
-                subsystem = "motion",
-                event = "transit_diag",
-                mcu = key.mcu_id,
-                axis = key.axis,
-                host_front_start_time,
-                mcu_front_start_time = front_start_time,
-                arrival_clock,
-                arrival_lead_ticks,
-                arrival_lead_us = %arrival_lead_us,
-                host_send_unix_secs = host_send_secs,
-                send_elapsed_us,
-                send_gap_us = %send_gap_us,
-                schedule_advance_us = %schedule_advance_us,
-                mcu_clock_advance_us = %mcu_clock_advance_us,
-                delta_arrival_lead_us = %delta_arrival_lead_us,
-                piece_count,
-                room,
-                "[transit-diag]"
-            );
-        }
-    }
-}
-
-impl PieceSink for WireSink {
-    /// Single-axis convenience — the pump drives WireSink via `send_mcu_frames`;
-    /// this exists only to satisfy the trait and routes through the same path.
-    fn send_frame(
-        &self,
-        key: AxisKey,
-        pieces: &[PieceEntry],
-        start_slot: u16,
-        new_head: u32,
-        room: u32,
-    ) -> Result<i32, SendError> {
-        let frame = AxisFrame {
-            axis: key.axis,
-            pieces: pieces.to_vec(),
-            start_slot,
-            new_head,
-            room,
-        };
-        self.send_mcu_frames(key.mcu_id, std::slice::from_ref(&frame))
-            .map(|()| mcu_protocol::result_codes::OK)
-    }
-
-    fn send_mcu_frames(&self, mcu_id: u32, frames: &[AxisFrame]) -> Result<(), SendError> {
-        debug_assert!(
-            frames.iter().all(|f| f.pieces.len() <= 255),
-            "PushPieces axis block exceeds u8 piece_count; schedule() must cap at MAX_PER_FRAME"
-        );
-
-        let send_started_at = Instant::now();
-        let resp = self.call_push_pieces(mcu_id, frames)?;
-        let send_elapsed_us = send_started_at.elapsed().as_secs_f64() * 1e6;
-
-        // Per-axis transit-diag from the response's per-axis echo against the
-        // frame-global arrival clock. Emitted even on a fatal frame — a negative
-        // arrival_lead is exactly the PieceStartInPast signature we want logged.
-        for f in frames {
-            let Some(diag) = resp.axes.iter().find(|a| a.axis_idx == f.axis) else {
-                continue;
-            };
-            let key = AxisKey {
-                mcu_id,
-                axis: f.axis,
-            };
-            let host_front_start_time = f.pieces.first().map(|p| p.start_time).unwrap_or(0);
-            self.emit_transit_diag(
-                key,
-                host_front_start_time,
-                f.pieces.len(),
-                f.room,
-                send_started_at,
-                send_elapsed_us,
-                diag.front_start_time,
-                resp.arrival_clock,
-            );
-        }
-
-        if resp.result != mcu_protocol::result_codes::OK {
-            return Err(SendError::retryable_mcu_reject(mcu_id, resp.result));
         }
         Ok(())
     }
+
+    fn run(&mut self, control_rx: Receiver<PumpMsg>, data_rx: Receiver<EnqueueMsg>) {
+        loop {
+            let poll_ms = self.poll_ms();
+            let mut activity = false;
+
+            match self.drain_control(&control_rx) {
+                Ok(a) => activity |= a,
+                Err(()) => return,
+            }
+
+            activity |= self.drain_data(&data_rx);
+
+            self.check_cohort_deadline();
+
+            self.holding_ahead = false;
+            match self.send_ready() {
+                Ok(a) => activity |= a,
+                Err(()) => return,
+            }
+
+            let unpushed: u64 = self.queues.values().map(|q| q.pieces.len() as u64).sum();
+            self.backlog.store(unpushed, Ordering::Release);
+
+            if activity {
+                continue;
+            }
+
+            if self.idle_wait(&control_rx, &data_rx, poll_ms).is_err() {
+                return;
+            }
+        }
+    }
 }
 
-#[cfg(test)]
-mod wire_sink_tests;
+pub fn run_pump<S, F, C, A, O, D>(
+    control_rx: Receiver<PumpMsg>,
+    data_rx: Receiver<EnqueueMsg>,
+    sink: S,
+    ring_depth_of: F,
+    mcu_clock_of: C,
+    on_fatal_transport: A,
+    on_abandon: O,
+    on_drip_stall: D,
+    backlog: Arc<AtomicU64>,
+) where
+    S: PieceSink,
+    F: Fn(AxisKey) -> u32,
+    C: Fn(u32) -> Option<(u64, f64)>,
+    A: Fn(AxisKey) + Send + 'static,
+    O: Fn(AxisKey, u32),
+    D: Fn(String) + Send,
+{
+    let mut pump = Pump {
+        queues: BTreeMap::new(),
+        junctions: JunctionTracker::default(),
+        cohort: None,
+        sink,
+        ring_depth_of,
+        mcu_clock_of,
+        on_fatal_transport,
+        on_abandon,
+        on_drip_stall,
+        backlog,
+        holding_ahead: false,
+        data_open: true,
+        last_stallfull_log: None,
+    };
+    pump.run(control_rx, data_rx);
+}

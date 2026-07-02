@@ -1,5 +1,7 @@
-use super::*;
+use super::{McuTransport, WireSink};
+use crate::pump::{AxisFrame, AxisKey, SendError};
 use host_rt::transport::TransportError;
+use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
