@@ -37,6 +37,6 @@ pub use splitter::{SplitError, split_segment_to_cap};
 
 pub use telemetry::TelemetryEvent;
 pub use velocity::{
-    MoveVelocity, StraightPhase, VelSample, VelocityError, VelocityProfile, VelocityReport,
-    plan_velocity_stops, plan_velocity_warm_start,
+    BoundaryState, MoveVelocity, StraightPhase, VelSample, VelocityError, VelocityProfile,
+    VelocityReport, plan_velocity_stops, plan_velocity_warm_start,
 };

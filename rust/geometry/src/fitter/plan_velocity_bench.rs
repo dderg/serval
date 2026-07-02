@@ -65,9 +65,14 @@ fn plan_velocity_cost_vs_tol() {
         let mut traversal = 0.0;
         for _ in 0..5 {
             let clock = Instant::now();
-            let profile =
-                plan_velocity_warm_start(&outcome, tol, f64::INFINITY, f64::INFINITY, 0.0)
-                    .expect("plan");
+            let profile = plan_velocity_warm_start(
+                &outcome,
+                tol,
+                f64::INFINITY,
+                f64::INFINITY,
+                crate::velocity::BoundaryState::REST,
+            )
+            .expect("plan");
             let us = clock.elapsed().as_secs_f64() * 1e6;
             best = best.min(us);
             traversal = profile.report.traversal_time_s;

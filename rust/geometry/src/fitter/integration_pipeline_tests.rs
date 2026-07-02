@@ -99,8 +99,14 @@ struct Planned {
 
 fn plan(moves: &[Move]) -> Planned {
     let geometry = fit(moves, ChainFitConfig::default()).expect("fit");
-    let profile = plan_velocity_warm_start(&geometry, 1e-7, f64::INFINITY, f64::INFINITY, 0.0)
-        .expect("plan_velocity_warm_start");
+    let profile = plan_velocity_warm_start(
+        &geometry,
+        1e-7,
+        f64::INFINITY,
+        f64::INFINITY,
+        crate::velocity::BoundaryState::REST,
+    )
+    .expect("plan_velocity_warm_start");
     let samples = lower_profile(&geometry, &profile, RATE_HZ).expect("lower_profile");
     Planned {
         geometry,
@@ -371,8 +377,14 @@ fn empty_input_yields_empty_trajectory() {
     let geometry = fit(&moves, ChainFitConfig::default()).expect("fit on empty");
     assert!(geometry.moves.is_empty());
 
-    let profile = plan_velocity_warm_start(&geometry, 1e-7, f64::INFINITY, f64::INFINITY, 0.0)
-        .expect("plan_velocity_warm_start empty");
+    let profile = plan_velocity_warm_start(
+        &geometry,
+        1e-7,
+        f64::INFINITY,
+        f64::INFINITY,
+        crate::velocity::BoundaryState::REST,
+    )
+    .expect("plan_velocity_warm_start empty");
     assert!(profile.moves.is_empty());
 
     let samples = lower_profile(&geometry, &profile, RATE_HZ).expect("lower_profile empty");

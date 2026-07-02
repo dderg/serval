@@ -13,6 +13,7 @@ fn kin(kappa0: f64, sigma: f64, length: f64, accel: f64, jerk: f64, flat: f64) -
 
 fn single_move_anchors(entry: f64, exit: f64) -> JerkAnchors {
     JerkAnchors {
+        fwd_a: 0.0,
         fwd_v: entry,
         fwd_s: 0.0,
         bwd_v: exit,

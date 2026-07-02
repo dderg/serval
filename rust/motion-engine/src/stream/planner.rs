@@ -1,7 +1,7 @@
 use crossbeam_channel::{Receiver, Sender};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
-use geometry::{Move, VelocityProfile, plan_velocity_stops};
+use geometry::{BoundaryState, Move, VelocityProfile, plan_velocity_stops};
 
 use super::{
     Control, PlannedItem, PlannedMove, StreamConfig, StreamInput, jerk_limited_brake_time,
@@ -23,8 +23,10 @@ const REPLAN_BATCH_MOVES: usize = 64;
 /// velocity to rest, so a velocity discontinuity is impossible by
 /// construction.
 ///
-/// The window of moves is re-planned warm-started from the velocity already
-/// emitted at the last seam. A prefix is emitted up to the furthest-forward
+/// The window of moves is re-planned warm-started from the profile state
+/// `(v, a)` already emitted at the last seam, so the next window continues
+/// the same jerk-limited curve — no velocity or acceleration discontinuity
+/// at the cut, and a seam crossed mid-brake stays re-plannable. A prefix is emitted up to the furthest-forward
 /// clean (zero-curvature) seam that is inside the plan's finality barrier and
 /// clear of the brake-to-rest setback — past that point a move's velocity
 /// body is still shaped by the window's tentative terminal rest, so it must
@@ -34,7 +36,7 @@ const REPLAN_BATCH_MOVES: usize = 64;
 /// belongs to whoever sends `Drain`.
 pub(crate) struct Planner {
     moves: Vec<Move>,
-    entry_v: f64,
+    entry: BoundaryState,
     next_plan_len: usize,
     config: StreamConfig,
 }
@@ -43,7 +45,7 @@ impl Planner {
     pub(crate) fn new(config: StreamConfig) -> Self {
         Self {
             moves: Vec::new(),
-            entry_v: 0.0,
+            entry: BoundaryState::REST,
             next_plan_len: REPLAN_BATCH_MOVES,
             config,
         }
@@ -71,7 +73,7 @@ impl Planner {
         match &ctrl {
             Control::Reset { .. } => {
                 self.moves.clear();
-                self.entry_v = 0.0;
+                self.entry = BoundaryState::REST;
                 self.next_plan_len = REPLAN_BATCH_MOVES;
             }
             Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
@@ -120,7 +122,7 @@ impl Planner {
             self.config.integration_tol,
             self.config.max_extrude_only_velocity_mm_s,
             self.config.max_extrude_only_accel_mm_s2,
-            self.entry_v,
+            self.entry,
         )
         .unwrap_or_else(|e| panic!("planner: velocity plan failed: {e:?}"));
         tracing::info!(
@@ -131,7 +133,8 @@ impl Planner {
             n = self.moves.len(),
             barrier = profile.barrier,
             v_barrier = profile.v_barrier,
-            entry_v = self.entry_v,
+            entry_v = self.entry.v,
+            entry_a = self.entry.a,
             plan_us = clock.elapsed().as_micros(),
             t_us = crate::timing::mono_us(),
             "[pipe] plan"
@@ -181,11 +184,7 @@ impl Planner {
         output: &Sender<PlannedItem>,
     ) -> bool {
         debug_assert_eq!(profile.moves.len(), self.moves.len());
-        self.entry_v = if count == self.moves.len() {
-            0.0
-        } else {
-            profile.moves[count - 1].exit_v
-        };
+        self.entry = profile.boundaries[count];
         for (geometry, velocity) in self.moves.drain(..count).zip(profile.moves.iter().cloned()) {
             if output
                 .send(PlannedItem::Move(PlannedMove { geometry, velocity }))
@@ -200,8 +199,8 @@ impl Planner {
 
     /// A non-forced emission may cut wherever the path resumes a straight line
     /// body (zero curvature) or comes to a full stop — never inside a curved
-    /// piece, where the velocity warm-start, which carries only a scalar entry
-    /// speed, would be invalid.
+    /// piece, where the warm-start's straight-line jerk anchor would misstate
+    /// the vector jerk state the curvature adds.
     fn is_clean_seam(&self, i: usize) -> bool {
         matches!(self.moves[i].segment.spatial, Some(Segment::Line(_))) || self.stop_at_seam(i)
     }

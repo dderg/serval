@@ -63,8 +63,14 @@ fn run_samples(max_v: f64, accel: f64, jerk: f64, waypoints: &[[f64; 3]]) -> Vec
         .map(|(i, w)| line_move(w[0], w[1], 0.0, ctx(max_v, accel, jerk, i as u32)).unwrap())
         .collect();
     let outcome = fit(&moves, ChainFitConfig::default()).unwrap();
-    let profile =
-        plan_velocity_warm_start(&outcome, 1e-7, f64::INFINITY, f64::INFINITY, 0.0).unwrap();
+    let profile = plan_velocity_warm_start(
+        &outcome,
+        1e-7,
+        f64::INFINITY,
+        f64::INFINITY,
+        crate::velocity::BoundaryState::REST,
+    )
+    .unwrap();
     let mut out = Vec::new();
     let mut s_off = 0.0;
     for m in &profile.moves {

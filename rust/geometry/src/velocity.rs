@@ -68,6 +68,28 @@ pub struct VelocityProfile {
     pub barrier: usize,
     /// Velocity at `barrier`, used to size the flush-trigger watermark.
     pub v_barrier: f64,
+    /// Reconstructed profile state at every move boundary (`n + 1` entries,
+    /// `boundaries[0]` mirrors the given entry). A streaming caller that cuts
+    /// the window at seam `k` warm-starts the re-plan from `boundaries[k]`:
+    /// the carried `(v, a)` is the forward integrator's state at the seam, so
+    /// the next window continues the same jerk-limited curve instead of
+    /// re-anchoring at zero acceleration — which both bends the trajectory
+    /// (an acceleration discontinuity at the cut) and can be outright
+    /// infeasible when the profile crosses the seam mid-brake.
+    pub boundaries: Vec<BoundaryState>,
+}
+
+/// The `(v, a)` state of a velocity profile at a move boundary: the full
+/// state of the jerk-limited forward reconstruction, and therefore everything
+/// a re-plan needs to continue the profile across a window cut.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoundaryState {
+    pub v: f64,
+    pub a: f64,
+}
+
+impl BoundaryState {
+    pub const REST: Self = Self { v: 0.0, a: 0.0 };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -108,7 +130,7 @@ pub fn plan_velocity_warm_start(
     integration_tol: f64,
     max_extrude_only_velocity_mm_s: f64,
     max_extrude_only_accel_mm_s2: f64,
-    entry_v: f64,
+    entry: BoundaryState,
 ) -> Result<VelocityProfile, VelocityError> {
     let stop_lines: HashSet<u32> = outcome
         .report
@@ -131,26 +153,27 @@ pub fn plan_velocity_warm_start(
         integration_tol,
         max_extrude_only_velocity_mm_s,
         max_extrude_only_accel_mm_s2,
-        entry_v,
+        entry,
     )
 }
 
 /// Plan over an already-fitted move sequence with explicit per-seam stop
 /// anchors: `stop_before[k]` forces rest at the seam entering `moves[k]`.
-/// `stop_before[0]` is ignored — the entry seam is anchored at `entry_v`.
+/// `stop_before[0]` is ignored — the entry seam is anchored at `entry`, the
+/// profile state a streaming cut carried out of the previous window.
 pub fn plan_velocity_stops(
     moves: &[crate::Move],
     stop_before: &[bool],
     integration_tol: f64,
     max_extrude_only_velocity_mm_s: f64,
     max_extrude_only_accel_mm_s2: f64,
-    entry_v: f64,
+    entry: BoundaryState,
 ) -> Result<VelocityProfile, VelocityError> {
     let tol = integration_tol;
     if !(tol.is_finite() && tol >= MIN_INTEGRATION_TOL) {
         return Err(VelocityError::InvalidConfig);
     }
-    if !(entry_v.is_finite() && entry_v >= 0.0) {
+    if !(entry.v.is_finite() && entry.v >= 0.0 && entry.a.is_finite()) {
         return Err(VelocityError::InvalidConfig);
     }
     if !(max_extrude_only_velocity_mm_s > 0.0 && max_extrude_only_accel_mm_s2 > 0.0) {
@@ -165,6 +188,7 @@ pub fn plan_velocity_stops(
             report: VelocityReport::default(),
             barrier: 0,
             v_barrier: 0.0,
+            boundaries: vec![entry],
         });
     }
 
@@ -224,14 +248,14 @@ pub fn plan_velocity_stops(
         kin0.flat_ceiling
             .min(disk::limit_speed(kin0.kappa0.abs(), kin0.accel))
     };
-    if entry_v > entry_ceiling + VELOCITY_EPS_MM_S {
+    if entry.v > entry_ceiling + tol * (1.0 + entry_ceiling) {
         return Err(VelocityError::OverCommitted {
             line_no: moves[0].source.start_line,
         });
     }
 
     let mut v = vec![0.0_f64; n + 1];
-    v[0] = entry_v;
+    v[0] = entry.v;
     let mut is_anchor = vec![false; n + 1];
     is_anchor[0] = true;
     is_anchor[n] = true;
@@ -251,16 +275,20 @@ pub fn plan_velocity_stops(
     }
 
     let mut run_start_v = vec![0.0_f64; n];
+    let mut run_start_a = vec![0.0_f64; n];
     let mut arc_from_run_start = vec![0.0_f64; n];
     {
         let mut anchor_v = v[0];
+        let mut anchor_a = entry.a;
         let mut cum = 0.0;
         for j in 0..n {
             if is_anchor[j] {
                 anchor_v = v[j];
+                anchor_a = if j == 0 { entry.a } else { 0.0 };
                 cum = 0.0;
             }
             run_start_v[j] = anchor_v;
+            run_start_a[j] = anchor_a;
             arc_from_run_start[j] = cum;
             cum += caps[j].kin.length;
         }
@@ -283,13 +311,15 @@ pub fn plan_velocity_stops(
         let kin = &caps[j].kin;
         let disk = disk::disk_reach_v(kin, v[j], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
-        let jerk = scurve::reach_v(
+        let jerk = scurve::reach_velocity_with_accel(
             run_start_v[j],
+            run_start_a[j].clamp(-kin.accel, kin.accel),
             arc_from_run_start[j] + kin.length,
             kin.accel,
             kin.jerk,
         )
-        .ok_or(VelocityError::Diverged { line_no })?;
+        .map(|(v, _)| v)
+        .map_err(|_| VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(disk).min(jerk);
     }
     let v_forward_ceiling = v.clone();
@@ -323,13 +353,15 @@ pub fn plan_velocity_stops(
             })?;
         disk.min(jerk)
     };
-    if entry_v > entry_brake + VELOCITY_EPS_MM_S {
+    if entry.v > entry_brake + tol * (1.0 + entry_brake) {
         return Err(VelocityError::OverCommitted {
             line_no: entry_line_no,
         });
     }
 
     let mut out: Vec<MoveVelocity> = Vec::with_capacity(n);
+    let mut boundaries: Vec<BoundaryState> = Vec::with_capacity(n + 1);
+    boundaries.push(entry);
     let mut run_start = 0;
     while run_start < n {
         let mut run_end = run_start + 1;
@@ -346,12 +378,17 @@ pub fn plan_velocity_stops(
             })
             .collect();
         let run_start_line = moves[run_start].source.start_line;
-        let reconstructed = disk::reconstruct_run(&members, run_start_v[run_start], tol).ok_or(
-            VelocityError::Diverged {
-                line_no: run_start_line,
-            },
-        )?;
-        let reconstructed_phases = disk::reconstruct_run_phases(&members, run_start_v[run_start]);
+        let (reconstructed, run_exit_states) = disk::reconstruct_run(
+            &members,
+            run_start_v[run_start],
+            run_start_a[run_start],
+            tol,
+        )
+        .ok_or(VelocityError::Diverged {
+            line_no: run_start_line,
+        })?;
+        let reconstructed_phases =
+            disk::reconstruct_run_phases(&members, run_start_v[run_start], run_start_a[run_start]);
 
         for (idx, j) in (run_start..run_end).enumerate() {
             let kin = &caps[j].kin;
@@ -397,6 +434,12 @@ pub fn plan_velocity_stops(
                 report.limit_ride += 1;
             }
 
+            boundaries.push(if is_anchor[j + 1] && v[j + 1] <= VELOCITY_EPS_MM_S {
+                BoundaryState::REST
+            } else {
+                let (bv, ba) = run_exit_states[idx];
+                BoundaryState { v: bv, a: ba }
+            });
             out.push(MoveVelocity {
                 entry_v,
                 exit_v,
@@ -417,6 +460,7 @@ pub fn plan_velocity_stops(
         report,
         barrier,
         v_barrier,
+        boundaries,
     })
 }
 
