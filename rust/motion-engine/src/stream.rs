@@ -4,8 +4,8 @@ use std::time::Instant;
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Line, Segment};
 use geometry::{
-    ChainFitConfig, FitError, GeometryError, Move, VelocityConfig, VelocityError, VelocityLimits,
-    fit_chain_with_head_restore, plan_velocity_warm_start,
+    ChainFitConfig, FitError, FitOutcome, GeometryError, Move, VelocityConfig, VelocityError,
+    VelocityLimits, VelocityProfile, fit_chain_with_head_restore, plan_velocity_warm_start,
 };
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
@@ -136,6 +136,99 @@ pub enum PostProcessError {
     MissingLookahead { axis: usize, t: f64 },
     #[error("axis {axis}: shaped sample is non-finite at t={t}")]
     NonFiniteSample { axis: usize, t: f64 },
+}
+
+/// Identity + tracing for one `commit()` call. Carries the batch sequence
+/// number and the buffer's line range through `fit`/`plan`/`lower`/
+/// `choose_commit_boundary` so each stage's `tracing` span stays keyed the
+/// same way it was before those stages were split out of `commit()`.
+#[derive(Clone, Copy)]
+struct CommitBatch {
+    seq: u64,
+    line_lo: u32,
+    line_hi: u32,
+}
+
+impl CommitBatch {
+    fn new(moves: &[Move]) -> Self {
+        Self {
+            seq: crate::timing::next_batch_seq(),
+            line_lo: moves.first().map_or(0, |m| m.source.start_line),
+            line_hi: moves.last().map_or(0, |m| m.source.start_line),
+        }
+    }
+
+    fn trace_fit(&self, n_in: usize, n_out: usize, elapsed: std::time::Duration) {
+        tracing::info!(
+            subsystem = "motion",
+            event = "pipe_fit",
+            batch = self.seq,
+            line_lo = self.line_lo,
+            line_hi = self.line_hi,
+            n_in,
+            n_out,
+            fit_us = elapsed.as_micros(),
+            t_us = crate::timing::mono_us(),
+            "[pipe] fit"
+        );
+    }
+
+    fn trace_plan(&self, elapsed: std::time::Duration) {
+        tracing::info!(
+            subsystem = "motion",
+            event = "pipe_plan",
+            batch = self.seq,
+            line_lo = self.line_lo,
+            line_hi = self.line_hi,
+            plan_us = elapsed.as_micros(),
+            t_us = crate::timing::mono_us(),
+            "[pipe] plan"
+        );
+    }
+
+    fn trace_lower(&self, n: usize, elapsed: std::time::Duration) {
+        tracing::info!(
+            subsystem = "motion",
+            event = "pipe_lower",
+            batch = self.seq,
+            line_lo = self.line_lo,
+            line_hi = self.line_hi,
+            n,
+            lower_us = elapsed.as_micros(),
+            t_us = crate::timing::mono_us(),
+            "[pipe] lower"
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace_commit_decision(
+        &self,
+        force: bool,
+        n: usize,
+        unblended: usize,
+        commit_count: usize,
+        total_t: f64,
+        barrier: usize,
+        v_barrier: f64,
+        entry_v: f64,
+        t_committed: f64,
+    ) {
+        tracing::info!(
+            subsystem = "motion",
+            event = "commit_decision",
+            batch = self.seq,
+            force,
+            n,
+            unblended,
+            commit_count,
+            total_t,
+            barrier,
+            v_barrier,
+            entry_v,
+            t_committed,
+            "[commit-decision]"
+        );
+    }
 }
 
 /// Streaming look-ahead planner over the new geometry pipeline. Buffers
@@ -355,41 +448,71 @@ impl StreamState {
         }
 
         let moves: Vec<Move> = self.buffer.iter().cloned().collect();
-        let batch = crate::timing::next_batch_seq();
-        let line_lo = moves.first().map_or(0, |m| m.source.start_line);
-        let line_hi = moves.last().map_or(0, |m| m.source.start_line);
+        let batch = CommitBatch::new(&moves);
 
+        let outcome = self.fit(&moves, batch)?;
+        let profile = self.plan(&outcome, batch)?;
+        let (segs, seam_xyz) = self.lower(&outcome, &profile, batch)?;
+
+        let commit_count =
+            self.choose_commit_boundary(force, &outcome, &profile, &seam_xyz, &segs, batch);
+        if commit_count == 0 {
+            return Ok(Vec::new());
+        }
+        let commit_count = self.post_commit_count(commit_count, force, &segs);
+        if commit_count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let committed = apply_axis_chains(
+            &self.post_history,
+            &segs,
+            commit_count,
+            force,
+            &self.axis_chains.chains,
+        )?;
+
+        self.advance_state(&outcome, &profile, &committed, commit_count)?;
+        self.post_history
+            .extend(segs.into_iter().take(commit_count));
+        self.trim_post_history();
+
+        Ok(committed)
+    }
+
+    /// Fit the buffered raw moves into G2-continuous geometry (biclothoid
+    /// corner blends). Purely geometric — never reasons about velocity.
+    fn fit(&self, moves: &[Move], batch: CommitBatch) -> Result<FitOutcome, StreamError> {
         let fit_clock = Instant::now();
         let outcome =
-            fit_chain_with_head_restore(&moves, self.config.chain, self.committed_head_len)?;
-        let fit_us = fit_clock.elapsed().as_micros();
-        tracing::info!(
-            subsystem = "motion",
-            event = "pipe_fit",
-            batch,
-            line_lo,
-            line_hi,
-            n_in = moves.len(),
-            n_out = outcome.moves.len(),
-            fit_us,
-            t_us = crate::timing::mono_us(),
-            "[pipe] fit"
-        );
+            fit_chain_with_head_restore(moves, self.config.chain, self.committed_head_len)?;
+        batch.trace_fit(moves.len(), outcome.moves.len(), fit_clock.elapsed());
+        Ok(outcome)
+    }
 
+    /// Plan a jerk-limited S-curve speed profile over the fitted geometry,
+    /// warm-started from the velocity already committed at the last seam.
+    fn plan(
+        &self,
+        outcome: &FitOutcome,
+        batch: CommitBatch,
+    ) -> Result<VelocityProfile, StreamError> {
         let plan_clock = Instant::now();
-        let profile = plan_velocity_warm_start(&outcome, self.config.velocity, self.entry_v)?;
-        let plan_us = plan_clock.elapsed().as_micros();
-        tracing::info!(
-            subsystem = "motion",
-            event = "pipe_plan",
-            batch,
-            line_lo,
-            line_hi,
-            plan_us,
-            t_us = crate::timing::mono_us(),
-            "[pipe] plan"
-        );
+        let profile = plan_velocity_warm_start(outcome, self.config.velocity, self.entry_v)?;
+        batch.trace_plan(plan_clock.elapsed());
+        Ok(profile)
+    }
 
+    /// Lower each fitted move + its velocity profile into a dispatchable
+    /// `ShapedSegment`, advancing a local odometer/clock as it goes. Returns
+    /// the segments alongside each seam's position (needed to judge whether a
+    /// commit boundary there is head-trim-feasible).
+    fn lower(
+        &self,
+        outcome: &FitOutcome,
+        profile: &VelocityProfile,
+        batch: CommitBatch,
+    ) -> Result<(Vec<ShapedSegment>, Vec<[f64; 3]>), StreamError> {
         let n = outcome.moves.len();
         let mut pos = self.odometer.clone();
         let mut t = self.t_committed;
@@ -411,20 +534,23 @@ impl StreamState {
             advance_odometer(&mut pos, gm);
             segs.push(seg);
         }
-        let lower_us = lower_clock.elapsed().as_micros();
-        tracing::info!(
-            subsystem = "motion",
-            event = "pipe_lower",
-            batch,
-            line_lo,
-            line_hi,
-            n,
-            lower_us,
-            t_us = crate::timing::mono_us(),
-            "[pipe] lower"
-        );
-        let total_t = t - self.t_committed;
+        batch.trace_lower(n, lower_clock.elapsed());
+        Ok((segs, seam_xyz))
+    }
 
+    /// Pick the furthest-forward clean (zero-curvature) seam that's still
+    /// head-trim-feasible and inside the finality barrier — the boundary up
+    /// to which this batch commits. `force` commits everything.
+    fn choose_commit_boundary(
+        &mut self,
+        force: bool,
+        outcome: &FitOutcome,
+        profile: &VelocityProfile,
+        seam_xyz: &[[f64; 3]],
+        segs: &[ShapedSegment],
+        batch: CommitBatch,
+    ) -> usize {
+        let n = outcome.moves.len();
         let commit_count = if force {
             n
         } else {
@@ -455,40 +581,36 @@ impl StreamState {
             profile.barrier
         );
         self.last_v_barrier = profile.v_barrier;
-
-        tracing::info!(
-            subsystem = "motion",
-            event = "commit_decision",
-            batch,
+        let total_t = segs.last().map_or(0.0, |s| s.t_end) - self.t_committed;
+        batch.trace_commit_decision(
             force,
             n,
-            unblended = outcome.report.unblended.len(),
+            outcome.report.unblended.len(),
             commit_count,
             total_t,
-            barrier = profile.barrier,
-            v_barrier = profile.v_barrier,
-            entry_v = self.entry_v,
-            t_committed = self.t_committed,
-            "[commit-decision]"
+            profile.barrier,
+            profile.v_barrier,
+            self.entry_v,
+            self.t_committed,
         );
+        commit_count
+    }
 
-        if commit_count == 0 {
-            return Ok(Vec::new());
-        }
-
-        let commit_count = self.post_commit_count(commit_count, force, &segs);
-
-        if commit_count == 0 {
-            return Ok(Vec::new());
-        }
-
-        let committed = apply_axis_chains(
-            &self.post_history,
-            &segs,
-            commit_count,
-            force,
-            &self.axis_chains.chains,
-        )?;
+    /// Advance the odometer/clock/entry-velocity to the new commit boundary,
+    /// then retire committed moves from the buffer — trimming the front to
+    /// the seam and carrying the trimmed length into the next fit's
+    /// blend-budget restore (`committed_head_len`) so the trailing corner
+    /// re-fits to the curvature it had before the head was committed (else a
+    /// shorter front yields a sharper apex and a corner cap below the
+    /// already-committed entry velocity — an `OverCommitted` abort).
+    fn advance_state(
+        &mut self,
+        outcome: &FitOutcome,
+        profile: &VelocityProfile,
+        committed: &[ShapedSegment],
+        commit_count: usize,
+    ) -> Result<(), StreamError> {
+        let n = outcome.moves.len();
 
         let mut seam_pos = self.odometer.clone();
         for gm in outcome.moves.iter().take(commit_count) {
@@ -505,44 +627,36 @@ impl StreamState {
         if commit_count == n {
             self.buffer.clear();
             self.committed_head_len = 0.0;
-        } else {
-            let keep_line = outcome.moves[commit_count].source.start_line;
-            while self
-                .buffer
-                .front()
-                .is_some_and(|m| m.source.start_line < keep_line)
-            {
-                self.buffer.pop_front();
-            }
-            // `keep_line` retires moves wholly before the seam, but a move can be
-            // fully committed yet still carry the seam's source line (a collinear
-            // split or coalesced run emits one move as several pieces). Drop any
-            // front whose geometry has already reached the committed odometer so the
-            // trim below never sees a degenerate (zero-length) remainder.
-            while self.front_reached_odometer() {
-                self.buffer.pop_front();
-            }
-            // The clean seam can fall at an internal sub-piece boundary of the kept
-            // raw move — a blend exit, or a collinear split that emits one move as
-            // several line pieces — leaving the raw move starting behind the
-            // committed odometer. Trim it to start exactly at the seam so the next
-            // re-fit's first piece is C0 with what was just emitted, and feed the
-            // consumed head length back as the next fit's blend-budget restore so the
-            // trailing corner re-fits to the curvature it had before the head was
-            // committed (else a shorter front yields a sharper apex and a corner cap
-            // below the already-committed entry velocity — an OverCommitted abort).
-            self.committed_head_len = if self.front_starts_behind_odometer() {
-                self.trim_front_to_seam()?
-            } else {
-                0.0
-            };
+            return Ok(());
         }
 
-        self.post_history
-            .extend(segs.into_iter().take(commit_count));
-        self.trim_post_history();
-
-        Ok(committed)
+        let keep_line = outcome.moves[commit_count].source.start_line;
+        while self
+            .buffer
+            .front()
+            .is_some_and(|m| m.source.start_line < keep_line)
+        {
+            self.buffer.pop_front();
+        }
+        // `keep_line` retires moves wholly before the seam, but a move can be
+        // fully committed yet still carry the seam's source line (a collinear
+        // split or coalesced run emits one move as several pieces). Drop any
+        // front whose geometry has already reached the committed odometer so the
+        // trim below never sees a degenerate (zero-length) remainder.
+        while self.front_reached_odometer() {
+            self.buffer.pop_front();
+        }
+        // The clean seam can fall at an internal sub-piece boundary of the kept
+        // raw move — a blend exit, or a collinear split that emits one move as
+        // several line pieces — leaving the raw move starting behind the
+        // committed odometer. Trim it to start exactly at the seam so the next
+        // re-fit's first piece is C0 with what was just emitted.
+        self.committed_head_len = if self.front_starts_behind_odometer() {
+            self.trim_front_to_seam()?
+        } else {
+            0.0
+        };
+        Ok(())
     }
 
     /// Materialize the deferred brake-to-rest on a producer-stall watermark.

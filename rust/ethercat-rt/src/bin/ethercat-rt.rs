@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ethercat_rt::buzz::BuzzOsc;
 use ethercat_rt::capture::{
-    Capture, CaptureConfig, CaptureRecord, DriveSample, PendingStart, PendingStop,
-    FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED,
+    any_slot_out_of_range, Capture, CaptureConfig, CaptureDriveConfig, CaptureRecord, DriveSample,
+    PendingStart, PendingStop, ERR_CAPTURE_BAD_DRIVE_LIST, FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED,
 };
 use ethercat_rt::claim::{
     all_slaves_reply, eval_wkc, single_slave_reply, wait_for_claim, wait_for_claim_pumping,
@@ -191,24 +191,58 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(80);
     let mailbox_cpu: Option<usize> = arg_val(&args, "--mailbox-cpu").and_then(|s| s.parse().ok());
-    let dynamics = arg_val(&args, "--dynamics-profile").map(|path| {
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+    let load_profile = |path: &str| -> DynamicsModel {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("ec-rt: dynamics profile {path}: {e}");
             std::process::exit(1);
         });
-        let model = DynamicsModel::from_toml_str(&text).unwrap_or_else(|e| {
+        DynamicsModel::from_toml_str(&text).unwrap_or_else(|e| {
             eprintln!("ec-rt: dynamics profile {path} invalid: {e:?}");
+            std::process::exit(1);
+        })
+    };
+    let per_slot: Vec<Option<String>> = slaves.iter().map(|s| s.dynamics_profile.clone()).collect();
+    let node_profile = arg_val(&args, "--dynamics-profile");
+    let dynamics = if per_slot.iter().any(Option::is_some) {
+        if node_profile.is_some() {
+            eprintln!(
+                "ec-rt: --dynamics-profile and --slave-dynamics-profile are mutually exclusive"
+            );
+            std::process::exit(1);
+        }
+        if !per_slot.iter().all(Option::is_some) {
+            eprintln!("ec-rt: per-slave dynamics profiles must cover every drive or none");
+            std::process::exit(1);
+        }
+        let parts: Vec<DynamicsModel> = per_slot
+            .iter()
+            .map(|p| load_profile(p.as_ref().unwrap()))
+            .collect();
+        let model = DynamicsModel::block_diagonal(parts).unwrap_or_else(|e| {
+            eprintln!("ec-rt: per-slave dynamics profiles invalid: {e:?}");
             std::process::exit(1);
         });
         if model.n != num_slaves {
             eprintln!(
-                "ec-rt: dynamics profile {path} has {} axes, endpoint drives {num_slaves}",
+                "ec-rt: per-slave dynamics profiles cover {} axes, endpoint drives {num_slaves}",
                 model.n
             );
             std::process::exit(1);
         }
-        model
-    });
+        Some(model)
+    } else {
+        node_profile.map(|path| {
+            let model = load_profile(&path);
+            if model.n != num_slaves {
+                eprintln!(
+                    "ec-rt: dynamics profile {path} has {} axes, endpoint drives {num_slaves}",
+                    model.n
+                );
+                std::process::exit(1);
+            }
+            model
+        })
+    };
     let cycle_ns = cycle_us * 1000;
     let telemetry_period = u64::try_from(cycle_us)
         .map(|u| (500_000u64 / u).max(1))
@@ -433,6 +467,7 @@ fn main() {
     );
     let mut pending_starts: Vec<(u32, String, PendingStart)> = Vec::new();
     let mut pending_stops: Vec<(u32, PendingStop)> = Vec::new();
+    let mut capture_slots: Vec<u8> = Vec::new();
     let mut prdiv = 0u64;
     let mut ff_saturation = 0u32;
     let mut wkc_consecutive = 0u8;
@@ -441,10 +476,22 @@ fn main() {
     'dc: loop {
         if SIGTERM_RECEIVED.load(Ordering::Acquire) {
             eprintln!("ec-rt: SIGTERM received — disabling drive and exiting");
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "endpoint_exit",
+                reason = "sigterm",
+                "endpoint exiting: SIGTERM received — disabling drive"
+            );
             break;
         }
         if server.session_ended() {
             eprintln!("ec-rt: bridge disconnected — disabling drive and exiting");
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "endpoint_exit",
+                reason = "bridge_disconnected",
+                "endpoint exiting: bridge (klippy) disconnected — disabling drive (downstream of a host-side abort)"
+            );
             break;
         }
 
@@ -577,15 +624,39 @@ fn main() {
                     correlation_id,
                     msg,
                 } => {
-                    let pending = capture.start_async(CaptureConfig {
-                        path: msg.path.clone(),
-                        started_utc: msg.started_utc.clone(),
-                        drive_name: msg.drive_name.clone(),
-                        cycle_ns,
-                        counts_per_mm: counts_per_mm[0],
-                        started_mono_ns: monotonic_ns(),
-                    });
-                    pending_starts.push((correlation_id, msg.path, pending));
+                    let slots: Vec<u8> = msg.drives.iter().map(|d| d.slot).collect();
+                    if any_slot_out_of_range(&slots, num_slaves) {
+                        eprintln!(
+                            "ec-rt: StartCapture drive slot out of range \
+                             (num_slaves={num_slaves}) — rejecting"
+                        );
+                        server.respond(&start_capture_response_frame(
+                            correlation_id,
+                            ERR_CAPTURE_BAD_DRIVE_LIST,
+                        ));
+                    } else {
+                        let drives: Vec<CaptureDriveConfig> = msg
+                            .drives
+                            .iter()
+                            .map(|d| CaptureDriveConfig {
+                                slot: d.slot,
+                                name: d.name.clone(),
+                                counts_per_mm: counts_per_mm[d.slot as usize],
+                                rotation_distance: rotation_distance[d.slot as usize],
+                            })
+                            .collect();
+                        let pending = capture.start_async(CaptureConfig {
+                            path: msg.path.clone(),
+                            started_utc: msg.started_utc.clone(),
+                            drives,
+                            cycle_ns,
+                            started_mono_ns: monotonic_ns(),
+                        });
+                        if pending.claimed() {
+                            capture_slots = slots;
+                        }
+                        pending_starts.push((correlation_id, msg.path, pending));
+                    }
                 }
                 Command::StopCapture { correlation_id } => {
                     pending_stops.push((correlation_id, capture.stop_async()));
@@ -1055,12 +1126,15 @@ fn main() {
         }
 
         let mut motion_active = false;
+        // The commanded analytic accel/vel the feedforward path samples are the
+        // noise-free, C00.06-independent regressors the identification fit wants,
+        // so they outlive the feedforward block to reach the capture record.
+        let mut all_acc = vec![0f32; num_slaves];
+        let mut all_vel = vec![0f32; num_slaves];
         if gate.state() == TorqueState::Enabled {
             // The coupled torque model needs every axis' accel/vel before any
             // one slot's feedforward can be computed, so sample all slots first.
             let mut sp_counts: Vec<Option<i32>> = vec![None; num_slaves];
-            let mut all_acc = vec![0f32; num_slaves];
-            let mut all_vel = vec![0f32; num_slaves];
             for s in 0..num_slaves {
                 let sampled = if buzz.active() {
                     if s == 0 {
@@ -1186,6 +1260,14 @@ fn main() {
                 "ec-rt: FAULT latched on slot {slot} fault_val=0x{fault_val:08x} \
                  code=0x{fault_code_u16:04x} — notifying host via heartbeat"
             );
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "ring_fault_latched",
+                slot,
+                fault_val,
+                fault_code = fault_val as i32,
+                "drive ring latched a runtime fault — notifying host via heartbeat"
+            );
             let retired: Vec<u32> = rings.iter().map(|r| r.retired_count()).collect();
             #[cfg(not(feature = "hw"))]
             let current_retired: u32 = retired.iter().sum();
@@ -1274,8 +1356,6 @@ fn main() {
 
         cycle_index += 1;
         if capture.is_active() {
-            let mut t = ffi::EcTelemetry::default();
-            unsafe { ffi::ec_rt_get_telemetry(0, &mut t) };
             let mut flags = 0u8;
             if gate.state() == TorqueState::Enabled {
                 flags |= FLAG_TORQUE_ENABLED;
@@ -1283,10 +1363,18 @@ fn main() {
             if motion_active {
                 flags |= FLAG_MOTION_ACTIVE;
             }
-            capture.push(CaptureRecord {
-                cycle_index,
-                flags,
-                drive: DriveSample {
+            let mut record = CaptureRecord::new(cycle_index, flags);
+            record.drive_count = capture_slots.len() as u8;
+            for (i, &slot) in capture_slots.iter().enumerate() {
+                let mut t = ffi::EcTelemetry::default();
+                unsafe { ffi::ec_rt_get_telemetry(i32::from(slot), &mut t) };
+                // The commanded kinematics are sampled in planner-stream frame;
+                // flip them into the drive frame (as cmd_counts_per_mm's sign
+                // does for the target) so they are sign-consistent with the
+                // drive-frame position/velocity/torque channels — otherwise an
+                // inverted axis fits negative inertia.
+                let dir = cmd_counts_per_mm[usize::from(slot)].signum() as f32;
+                record.drives[i] = DriveSample {
                     target_counts: t.target_position,
                     position_actual: t.position_actual,
                     velocity_actual: t.velocity_actual,
@@ -1296,8 +1384,11 @@ fn main() {
                     error_code: t.error_code,
                     velocity_offset: t.velocity_offset,
                     torque_offset: t.torque_offset,
-                },
-            });
+                    accel_cmd: dir * all_acc[usize::from(slot)],
+                    vel_cmd: dir * all_vel[usize::from(slot)],
+                };
+            }
+            capture.push(record);
         }
 
         let expected_wkc = 3 * num_slaves as i32;

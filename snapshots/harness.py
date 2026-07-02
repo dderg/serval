@@ -1,10 +1,11 @@
 """Snapshot-testing harness for the motion planner.
 
-A *case* is a directory holding ``case.gcode`` + ``printer.cfg``. Running it
-drives the real ``_motion_engine.pipeline_snapshot`` and records the full raw
-trajectory dict as a checked-in ``baseline.json.gz`` under ``baselines/``
-(deterministic gzip). ``run.py`` flags a re-run that deviates; the web review
-re-baselines only on an explicit accept.
+A *case* is one (config, G-code) pair: every ``*.cfg`` in a group folder runs
+against every ``*.gcode`` in it (a matrix). Running a case drives the real
+``_motion_engine.pipeline_snapshot`` and records the full raw trajectory dict as
+a checked-in ``baseline.json.gz`` under ``baselines/`` (deterministic gzip).
+``run.py`` flags a re-run that deviates; the web review re-baselines only on an
+explicit accept.
 
 Comparison is structural with a float tolerance (see ``snapshots_match``):
 segment shape and integer counts must match exactly, floats within
@@ -37,7 +38,6 @@ import viz_pipeline  # noqa: E402
 
 CASES_DIR = Path(__file__).resolve().parent / "cases"
 BASELINES_DIR = Path(__file__).resolve().parent / "baselines"
-CONFIG_NAME = "printer.cfg"
 BASELINE_SUFFIX = ".baseline.json.gz"
 
 # Floats are compared with a tolerance, not bit-exactly: the planner's
@@ -65,8 +65,9 @@ class Status(enum.Enum):
 
 @dataclass(frozen=True)
 class Case:
-    """One G-code file. The folder it lives in is a group sharing one
-    printer.cfg; `name` is `<group>/<gcode stem>`."""
+    """One (config, G-code) pair from a group folder. Every `*.cfg` in the
+    group runs against every `*.gcode`; `name` is
+    `<group>/<cfg stem>/<gcode stem>`."""
 
     name: str
     gcode_path: Path
@@ -81,21 +82,29 @@ def discover_cases(
         return []
     cases = []
     for group in sorted(p for p in cases_dir.iterdir() if p.is_dir()):
-        config = group / CONFIG_NAME
-        for gcode in sorted(group.glob("*.gcode")):
-            if not gcode.read_text().strip():
-                continue
-            stem = gcode.stem
-            cases.append(
-                Case(
-                    name=f"{group.name}/{stem}",
-                    gcode_path=gcode,
-                    config_path=config,
-                    baseline_path=(
-                        baselines_dir / group.name / f"{stem}{BASELINE_SUFFIX}"
-                    ),
-                )
+        gcodes = [
+            g for g in sorted(group.glob("*.gcode")) if g.read_text().strip()
+        ]
+        configs = sorted(group.glob("*.cfg"))
+        if gcodes and not configs:
+            raise ValueError(
+                f"group '{group.name}': has .gcode files but no .cfg"
             )
+        for config in configs:
+            for gcode in gcodes:
+                cases.append(
+                    Case(
+                        name=f"{group.name}/{config.stem}/{gcode.stem}",
+                        gcode_path=gcode,
+                        config_path=config,
+                        baseline_path=(
+                            baselines_dir
+                            / group.name
+                            / config.stem
+                            / f"{gcode.stem}{BASELINE_SUFFIX}"
+                        ),
+                    )
+                )
     return cases
 
 
@@ -153,7 +162,7 @@ def run_case(case: Case) -> dict:
         raise ValueError(f"case '{case.name}': missing {case.gcode_path.name}")
     if not case.config_path.exists():
         raise ValueError(
-            f"case '{case.name}': no {CONFIG_NAME} in its group folder"
+            f"case '{case.name}': missing config {case.config_path.name}"
         )
 
     max_velocity, max_accel, scv, max_jerk, arc_fit = (

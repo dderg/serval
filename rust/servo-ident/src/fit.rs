@@ -25,7 +25,7 @@ impl Default for FitOptions {
             max_condition: 1.0e8,
             saturation_abs: 3900.0,
             max_saturated_fraction: 0.001,
-            max_rms_residual: 50.0,
+            max_rms_residual: 100.0,
         }
     }
 }

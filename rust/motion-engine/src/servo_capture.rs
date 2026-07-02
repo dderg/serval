@@ -4,7 +4,7 @@ use host_rt::mcu_call::McuCall as _;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::{Decode as _, Encode as _};
 use mcu_protocol::messages::{
-    MessageKind, StartCapture, StartCaptureResponse, StopCapture, StopCaptureResponse,
+    CaptureDrive, MessageKind, StartCapture, StartCaptureResponse, StopCapture, StopCaptureResponse,
 };
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -13,12 +13,18 @@ pub fn send_start_capture(
     conn: &McuSerialConn,
     path: &str,
     started_utc: &str,
-    drive_name: &str,
+    drives: &[(u8, String)],
 ) -> Result<i32, String> {
     let body = StartCapture {
         path: path.to_owned(),
         started_utc: started_utc.to_owned(),
-        drive_name: drive_name.to_owned(),
+        drives: drives
+            .iter()
+            .map(|(slot, name)| CaptureDrive {
+                slot: *slot,
+                name: name.clone(),
+            })
+            .collect(),
     }
     .encoded_to_vec();
     let (kind, resp) = conn

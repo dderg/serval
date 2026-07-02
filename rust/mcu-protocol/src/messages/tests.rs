@@ -578,14 +578,64 @@ fn get_str_rejects_invalid_utf8() {
 
 #[test]
 fn start_capture_round_trip() {
-    use crate::messages::StartCapture;
+    use crate::messages::{CaptureDrive, StartCapture};
     let msg = StartCapture {
         path: "/home/pi/printer_data/logs/servo_captures/t.scap".into(),
         started_utc: "2026-06-10T12:00:00Z".into(),
-        drive_name: "x".into(),
+        drives: vec![
+            CaptureDrive {
+                slot: 0,
+                name: "x".into(),
+            },
+            CaptureDrive {
+                slot: 2,
+                name: "y".into(),
+            },
+        ],
     };
     let buf = msg.encoded_to_vec();
     assert_eq!(StartCapture::decode(&buf).unwrap(), msg);
+}
+
+#[test]
+fn start_capture_rejects_empty_drive_list() {
+    use crate::codec::DecodeError;
+    use crate::messages::StartCapture;
+    let msg = StartCapture {
+        path: "/tmp/t.scap".into(),
+        started_utc: "2026-06-10T12:00:00Z".into(),
+        drives: vec![],
+    };
+    let buf = msg.encoded_to_vec();
+    assert!(matches!(
+        StartCapture::decode(&buf),
+        Err(DecodeError::EmptyArray { .. })
+    ));
+}
+
+#[test]
+fn start_capture_rejects_duplicate_slot() {
+    use crate::codec::DecodeError;
+    use crate::messages::{CaptureDrive, StartCapture};
+    let msg = StartCapture {
+        path: "/tmp/t.scap".into(),
+        started_utc: "2026-06-10T12:00:00Z".into(),
+        drives: vec![
+            CaptureDrive {
+                slot: 1,
+                name: "a".into(),
+            },
+            CaptureDrive {
+                slot: 1,
+                name: "b".into(),
+            },
+        ],
+    };
+    let buf = msg.encoded_to_vec();
+    assert!(matches!(
+        StartCapture::decode(&buf),
+        Err(DecodeError::DuplicateField { .. })
+    ));
 }
 
 #[test]

@@ -271,6 +271,10 @@ mcu_demux_pump(const uint8_t *buf, uint16_t len)
         }
     }
     last_byte_time = now;
+    extern void diag_note_msg_enter(uint32_t kind, uint32_t head);
+    extern void diag_note_msg_exit(void);
+    extern void diag_note_demux(uint32_t backlog, uint32_t msgs);
+    uint32_t msg_count = 0;
     for (uint16_t i = 0; i < len; i++) {
         mcu_demux_output_t out = mcu_demux_feed_byte(buf[i]);
         switch (out) {
@@ -294,23 +298,42 @@ mcu_demux_pump(const uint8_t *buf, uint16_t len)
                            " \x1c Request Serial Bootloader!! ~", 32))
                 bootloader_request();
             uint_fast8_t pop_count;
+            uint32_t khead = (klen > 0 ? kbuf[0] : 0u)
+                             | (klen > 1 ? (uint32_t)kbuf[1] << 8 : 0u)
+                             | (klen > 2 ? (uint32_t)kbuf[2] << 16 : 0u)
+                             | (klen > 3 ? (uint32_t)kbuf[3] << 24 : 0u);
+            diag_note_msg_enter(0x200u | (klen > 2 ? kbuf[2] : 0u), khead);
+            msg_count++;
             command_find_and_dispatch(
                 (uint8_t *)kbuf, klen, &pop_count);
+            diag_note_msg_exit();
             mcu_demux_consume();
             break;
         }
-        case MCU_DEMUX_OUT_MCU:
+        case MCU_DEMUX_OUT_MCU: {
             mcu_demux_out_mcu_total++;
+            uint8_t channel = mcu_demux_mcu_channel();
+            const uint8_t *pl = mcu_demux_mcu_payload();
+            uint8_t plen = mcu_demux_mcu_payload_len();
+            uint32_t mhead = channel
+                             | (plen > 0 ? (uint32_t)pl[0] << 8 : 0u)
+                             | (plen > 1 ? (uint32_t)pl[1] << 16 : 0u)
+                             | (plen > 2 ? (uint32_t)pl[2] << 24 : 0u);
+            diag_note_msg_enter(0x100u | channel, mhead);
+            msg_count++;
             mcu_transport_dispatch_frame(
-                mcu_demux_mcu_channel(),
-                mcu_demux_mcu_payload(),
-                mcu_demux_mcu_payload_len());
+                channel,
+                pl,
+                plen);
+            diag_note_msg_exit();
             mcu_demux_consume();
             break;
+        }
         case MCU_DEMUX_OUT_ERROR:
             mcu_demux_out_error_total++;
             mcu_demux_consume();
             break;
         }
     }
+    diag_note_demux(len, msg_count);
 }

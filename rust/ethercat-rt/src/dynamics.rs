@@ -105,6 +105,51 @@ impl DynamicsModel {
         };
         inertial + self.viscous[axis] * v + coulomb
     }
+
+    /// Stack independent per-servo profiles into one node model whose mass
+    /// matrix is block-diagonal — the cartesian case, where no axis's torque
+    /// depends on another's acceleration. `parts` must be in slot order.
+    pub fn block_diagonal(parts: Vec<DynamicsModel>) -> Result<Self, ProfileError> {
+        if parts.is_empty() {
+            return Err(ProfileError::Dim(
+                "block_diagonal needs at least one profile",
+            ));
+        }
+        let n: usize = parts.iter().map(|p| p.n).sum();
+        let deadband = parts[0].deadband;
+        if parts.iter().any(|p| (p.deadband - deadband).abs() > 1e-6) {
+            return Err(ProfileError::Dim(
+                "per-servo profiles disagree on coulomb deadband",
+            ));
+        }
+        let mut mass = vec![0.0f32; n * n];
+        let mut viscous = Vec::with_capacity(n);
+        let mut coulomb_fwd = Vec::with_capacity(n);
+        let mut coulomb_rev = Vec::with_capacity(n);
+        let mut axes = Vec::with_capacity(n);
+        let mut base = 0usize;
+        for p in &parts {
+            for i in 0..p.n {
+                for j in 0..p.n {
+                    mass[(base + i) * n + (base + j)] = p.mass[i * p.n + j];
+                }
+                viscous.push(p.viscous[i]);
+                coulomb_fwd.push(p.coulomb_fwd[i]);
+                coulomb_rev.push(p.coulomb_rev[i]);
+                axes.push(p.axes[i].clone());
+            }
+            base += p.n;
+        }
+        Ok(Self {
+            n,
+            axes,
+            mass,
+            viscous,
+            coulomb_fwd,
+            coulomb_rev,
+            deadband,
+        })
+    }
 }
 
 fn cholesky_is_pd(m: &[f64], n: usize) -> bool {

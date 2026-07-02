@@ -117,7 +117,10 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         fields: &[
             SchemaField { name: "path", ty: "string" },
             SchemaField { name: "started_utc", ty: "string" },
-            SchemaField { name: "drive_name", ty: "string" },
+            SchemaField {
+                name: "drives",
+                ty: "array<capture_drive{slot:u8,name:string}>",
+            },
         ],
     },
     SchemaMessage {

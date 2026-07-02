@@ -99,13 +99,16 @@ fn start_capture_round_trips_fields_and_result() {
     let (client, server) = UnixStream::pair().unwrap();
     let rx = spawn_start_endpoint(server, 0);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
+    let drives = vec![(0u8, "axis_x".to_owned())];
     let result =
-        send_start_capture(&conn, "/tmp/cap.scap", "2026-06-10T00:00:00Z", "axis_x").expect("call");
+        send_start_capture(&conn, "/tmp/cap.scap", "2026-06-10T00:00:00Z", &drives).expect("call");
     assert_eq!(result, 0);
     let seen = rx.recv().expect("endpoint saw the command");
     assert_eq!(seen.path, "/tmp/cap.scap");
     assert_eq!(seen.started_utc, "2026-06-10T00:00:00Z");
-    assert_eq!(seen.drive_name, "axis_x");
+    assert_eq!(seen.drives.len(), 1);
+    assert_eq!(seen.drives[0].slot, 0);
+    assert_eq!(seen.drives[0].name, "axis_x");
 }
 
 #[test]
@@ -114,7 +117,13 @@ fn start_capture_surfaces_nonzero_result() {
     let _rx = spawn_start_endpoint(server, -324);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     assert_eq!(
-        send_start_capture(&conn, "/tmp/cap.scap", "2026-06-10T00:00:00Z", "axis_x").expect("call"),
+        send_start_capture(
+            &conn,
+            "/tmp/cap.scap",
+            "2026-06-10T00:00:00Z",
+            &[(0u8, "axis_x".to_owned())]
+        )
+        .expect("call"),
         -324
     );
 }
@@ -124,7 +133,15 @@ fn start_capture_transport_error_is_err() {
     let (client, server) = UnixStream::pair().unwrap();
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     drop(server);
-    assert!(send_start_capture(&conn, "/tmp/cap.scap", "2026-06-10T00:00:00Z", "axis_x").is_err());
+    assert!(
+        send_start_capture(
+            &conn,
+            "/tmp/cap.scap",
+            "2026-06-10T00:00:00Z",
+            &[(0u8, "axis_x".to_owned())]
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -133,8 +150,13 @@ fn start_capture_wrong_kind_response_is_rejected() {
     let _rx =
         spawn_start_endpoint_with_kind(server, MessageKind::PushPiecesResponse, vec![0u8; 20]);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
-    let err = send_start_capture(&conn, "/tmp/cap.scap", "2026-06-10T00:00:00Z", "axis_x")
-        .expect_err("should error on wrong kind");
+    let err = send_start_capture(
+        &conn,
+        "/tmp/cap.scap",
+        "2026-06-10T00:00:00Z",
+        &[(0u8, "axis_x".to_owned())],
+    )
+    .expect_err("should error on wrong kind");
     assert!(err.contains("unexpected response kind"));
 }
 

@@ -105,7 +105,7 @@ slings past the target and how long it wobbles before parking. Torque
 saturation is the motor saying "I'm already pushing as hard as I can" — no
 gain tuning fixes that, only asking for less.
 
-## File format (`.scap`, version 1)
+## File format (`.scap`, version 2)
 
 Line 1 is a newline-terminated JSON header; everything after it is raw
 little-endian fixed-size records to EOF.
@@ -114,30 +114,48 @@ Header fields:
 
 | field | meaning |
 |-------|---------|
-| `version` | format version, currently 1 |
+| `version` | format version, currently 2 |
 | `cycle_ns` | DC cycle period in ns (sample interval) |
-| `record_size` | bytes per record (31 in v1) |
+| `record_size` | bytes per record (9-byte prefix + 36 per drive; 45 for one drive) |
 | `started_utc` | wall-clock start, supplied by the host |
 | `started_mono_ns` | endpoint monotonic clock at start |
-| `drives` | `[{name, counts_per_mm}]` — one entry per captured drive |
+| `drives` | `[{name, counts_per_mm, rotation_distance}]` — one entry per captured drive |
 | `channels` | `[{name, dtype, offset}]` — the full record layout |
 
-v1 record layout (31 bytes):
+Each record is a 9-byte prefix followed by one 36-byte block per captured drive,
+back to back. Offsets below are for a single-drive record; for drive `d` the
+block fields shift by `d * 36`. The header's `channels` array carries the
+prefix-drive offsets — readers must derive the layout from it, never hardcode.
 
 | channel | dtype | offset |
 |---------|-------|--------|
 | cycle_index | u64 | 0 |
 | flags | u8 | 8 |
 | target_counts | i32 | 9 |
-| position_demand | i32 | 13 |
-| position_actual | i32 | 17 |
-| following_error | i32 | 21 |
-| torque_actual | i16 | 25 |
-| statusword | u16 | 27 |
-| error_code | u16 | 29 |
+| position_actual | i32 | 13 |
+| following_error | i32 | 17 |
+| torque_actual | i16 | 21 |
+| statusword | u16 | 23 |
+| error_code | u16 | 25 |
+| velocity_offset | i32 | 27 |
+| torque_offset | i16 | 31 |
+| velocity_actual | i32 | 33 |
+| accel_cmd | f32 | 37 |
+| vel_cmd | f32 | 41 |
 
 `flags` bit 0 is torque-enabled, bit 1 is motion-active. `torque_actual` is
 per-mille of rated torque (6077h); the position channels are encoder counts.
+`velocity_offset`/`torque_offset` are the FF offsets the host streamed that
+cycle (60B1h/60B2h). `accel_cmd`/`vel_cmd` are the planner's analytic commanded
+acceleration (mm/s²) and velocity (mm/s) for that cycle — the same values the
+feedforward path samples off the Bézier trajectory. They are exact and
+independent of any drive gain or inertia-ratio setting, which is what makes
+them the right regressors for dynamics identification (differentiating the
+measured encoder trajectory instead couples the fit to C00.06 via the
+closed-loop response). They are logged in the **drive frame** — sign-flipped to
+match the target when `invert_direction` is set — so they stay sign-consistent
+with `position_actual`/`velocity_actual`/`torque_actual`; without that flip an
+inverted axis fits negative inertia.
 
 Records are fixed-size and the writer fsyncs every second, so a file truncated
 by endpoint death is valid up to the last whole record — the analysis script

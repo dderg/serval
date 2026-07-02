@@ -1,6 +1,6 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -393,6 +393,125 @@ fn fatal(msg: &str) -> ! {
     eprintln!("kalico stream planner fatal: {msg}");
     std::thread::sleep(Duration::from_millis(100));
     std::process::abort();
+}
+
+/// State a committed `ShapedSegment` needs to reach the pump: per-MCU clock
+/// anchoring/projection, the axis-lane split, and the motion-history/drain
+/// bookkeeping that split feeds.
+pub(crate) struct SegmentDispatchCtx {
+    pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
+    pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
+    pub(crate) mcu_configs: Vec<crate::dispatch::McuAxisConfig>,
+    pub(crate) pump_tx: Sender<crate::pump::EnqueueMsg>,
+    pub(crate) drain: Arc<crate::drain::DrainSync>,
+    pub(crate) counter: Arc<AtomicU64>,
+    pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
+    pub(crate) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
+    pub(crate) nominal_freqs: Arc<Mutex<HashMap<u32, u32>>>,
+}
+
+/// Anchor a committed segment to the MCU clock, split it into per-axis
+/// pieces, and hand each piece to the pump.
+pub(crate) fn dispatch_segment(
+    ctx: &SegmentDispatchCtx,
+    seg: &ShapedSegment,
+) -> Result<(), DispatchError> {
+    tracing::debug!(
+        subsystem = "engine",
+        event = "dispatch_entered",
+        seg_t_start = seg.t_start,
+        seg_t_end = seg.t_end,
+        "[engine-trace] dispatch entered"
+    );
+
+    let host_now = {
+        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        r.host_now_secs()
+    };
+
+    let (t0, fresh) = ctx
+        .anchor
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .anchor_segment(seg.t_start, seg.t_end, host_now);
+
+    if fresh {
+        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        for cfg in ctx.mcu_configs.iter() {
+            let h = crate::types::mcu_handle_from_raw(cfg.mcu_id);
+            r.log_seg0_lead(h, t0 + seg.t_start, t0);
+        }
+    }
+
+    let project = |mcu_id: u32, host_secs: f64| -> u64 {
+        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        r.host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(mcu_id), host_secs)
+            .unwrap_or(0)
+    };
+
+    let active_cohort: Option<u64> = *ctx
+        .active_drip_cohort
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+
+    let max_piece_secs = if active_cohort.is_some() {
+        Some(0.025_f64)
+    } else {
+        None::<f64>
+    };
+    let lead_secs = if active_cohort.is_some() {
+        crate::pump::DRIP_WINDOW_SECS
+    } else {
+        crate::pump::MAX_LEAD_SECS
+    };
+
+    let msgs = crate::enqueue::enqueue_segment(
+        seg,
+        &ctx.mcu_configs,
+        t0,
+        fresh,
+        host_now,
+        lead_secs,
+        project,
+        max_piece_secs,
+    );
+
+    let nominal_freqs = ctx
+        .nominal_freqs
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if fresh {
+        ctx.motion_history
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drop_pieces_on_reanchor();
+    }
+    for m in msgs {
+        let nominal_freq = *nominal_freqs
+            .get(&m.key.mcu_id)
+            .ok_or(DispatchError::MissingNominalFreq(m.key.mcu_id))?;
+        {
+            let mut store = ctx.motion_history.lock().unwrap_or_else(|p| p.into_inner());
+            for (piece, host_t) in &m.pieces {
+                store.record(m.key, piece, nominal_freq, *host_t);
+            }
+        }
+        ctx.drain
+            .add_sent(m.key.mcu_id, m.key.axis, m.pieces.len() as u32);
+        ctx.pump_tx.send(m).map_err(|_| DispatchError::PumpGone)?;
+    }
+
+    tracing::info!(
+        subsystem = "motion",
+        event = "pipe_pump_in",
+        line = seg.source_line,
+        t_us = crate::timing::mono_us(),
+        "[pipe] handed to pump"
+    );
+
+    ctx.counter.fetch_add(1, Ordering::Relaxed);
+    Ok(())
 }
 
 fn dispatch_committed(
