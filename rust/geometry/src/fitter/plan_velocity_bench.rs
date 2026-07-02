@@ -4,9 +4,9 @@
 
 use std::time::Instant;
 
-use super::causal::fit;
+use super::fit_corners;
 use crate::velocity::plan_velocity_warm_start;
-use crate::{ChainFitConfig, Move, MoveContext, SourceRange, VelocityLimits, line_move};
+use crate::{CornerFitConfig, Move, MoveContext, SourceRange, VelocityLimits, line_move};
 
 const MAX_V: f64 = 300.0;
 const ACCEL: f64 = 5000.0;
@@ -52,7 +52,7 @@ fn serpentine(n_moves: usize, feed: f64) -> Vec<Move> {
 #[ignore]
 fn plan_velocity_cost_vs_tol() {
     let moves = serpentine(40, 100.0);
-    let outcome = fit(&moves, ChainFitConfig::default()).expect("fit");
+    let outcome = fit_corners(&moves, CornerFitConfig::default()).expect("fit");
     println!(
         "fit: in={} out={} segments",
         moves.len(),

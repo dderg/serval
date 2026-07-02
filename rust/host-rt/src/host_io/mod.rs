@@ -35,10 +35,6 @@ use crate::passthrough_queue::{CommandQueueId, McuHandle, PassthroughEntry, Pass
 use crate::transport::{MessageParams, SubscribeError, Transport, TransportError};
 use std::sync::mpsc::SyncSender;
 
-pub(super) fn sp_err(e: &serialport::Error) -> TransportError {
-    TransportError::Io(std::io::Error::other(format!("serialport: {e}")))
-}
-
 const DEFAULT_BAUD: u32 = 250_000;
 
 #[derive(Debug, Clone)]

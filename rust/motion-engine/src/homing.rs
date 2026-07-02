@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::pump::AxisKey;
+use crate::types::AxisKey;
 use host_rt::passthrough_queue::PassthroughRouter;
 
 #[derive(Debug, thiserror::Error)]

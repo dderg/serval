@@ -12,7 +12,6 @@ pub struct FittedSegment {
     pub axes: [ScalarNurbs<f64>; 3],
     pub t_start: f64,
     pub t_end: f64,
-    pub virtual_s_of_t: Option<ScalarNurbs<f64>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,7 +73,6 @@ pub fn fit_and_split(
         axes,
         t_start,
         t_end,
-        virtual_s_of_t: None,
     })
 }
 
@@ -133,7 +131,7 @@ fn fit_hermite_c2_adaptive(
             &refined,
             tolerance,
             PHASE1_HERMITE_DEGREE,
-            Some(d2_start),
+            d2_start,
             phase1_start_pin_only,
         ) {
             Ok(f) => {
@@ -195,7 +193,7 @@ fn refit_last_piece_with_end_pin(
             &refined_last,
             tolerance,
             PHASE2_BOTH_ENDS_PINNED_HERMITE_DEGREE,
-            Some(last_d2_start),
+            last_d2_start,
             Some(d2_end),
         ) {
             Ok(f) => {
@@ -263,39 +261,6 @@ fn split_composed_midpoints(
     }
 
     Ok(refined)
-}
-
-pub fn split_without_refit(composed: &[[BezierPiece<f64>; 3]]) -> Result<FittedSegment, FitError> {
-    use nurbs::bezier::bezier_pieces_to_nurbs;
-
-    if composed.is_empty() {
-        return Err(FitError::EmptySegments);
-    }
-
-    let t_start = composed[0][0].u_start;
-    let t_end = composed.last().unwrap()[0].u_end;
-
-    let mut x_pieces: Vec<BezierPiece<f64>> = Vec::with_capacity(composed.len());
-    let mut y_pieces: Vec<BezierPiece<f64>> = Vec::with_capacity(composed.len());
-    let mut z_pieces: Vec<BezierPiece<f64>> = Vec::with_capacity(composed.len());
-    for arr in composed {
-        x_pieces.push(arr[0].clone());
-        y_pieces.push(arr[1].clone());
-        z_pieces.push(arr[2].clone());
-    }
-
-    let axes = [
-        bezier_pieces_to_nurbs(&x_pieces),
-        bezier_pieces_to_nurbs(&y_pieces),
-        bezier_pieces_to_nurbs(&z_pieces),
-    ];
-
-    Ok(FittedSegment {
-        axes,
-        t_start,
-        t_end,
-        virtual_s_of_t: None,
-    })
 }
 
 #[cfg(test)]

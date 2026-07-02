@@ -1,5 +1,5 @@
 use super::ring_depth_for_axis_inner;
-use crate::dispatch::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps};
+use crate::mcu_config::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps};
 
 fn configs() -> Vec<McuAxisConfig> {
     vec![

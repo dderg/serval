@@ -55,27 +55,6 @@ pub(super) fn limit_speed(kappa_abs: f64, accel: f64) -> f64 {
     }
 }
 
-/// Cruise-speed ceiling from the path's vector jerk. Held at constant speed `v`,
-/// a path of curvature `kappa` and curvature rate `sigma` still has a turning,
-/// growing acceleration vector: the centripetal share `kappa v^2` rotates with
-/// the heading (rate `kappa v`) and grows as the curvature tightens (rate
-/// `sigma v`), so `|d a_vec / dt| = v^3 sqrt(kappa^4 + sigma^2)`. Capping that at
-/// `jerk` is the jerk analog of the centripetal `sqrt(accel / kappa)` ceiling —
-/// and the fixpoint that makes `a = 0` cruise jerk-feasible, which is what a
-/// reachability arc lands on when it rejoins the ceiling.
-pub(super) fn jerk_limit_speed(kappa_abs: f64, sigma: f64, jerk: f64) -> f64 {
-    if !jerk.is_finite() {
-        return f64::INFINITY;
-    }
-    let k2 = kappa_abs * kappa_abs;
-    let coeff = (k2 * k2 + sigma * sigma).sqrt();
-    if coeff > 0.0 {
-        (jerk / coeff).cbrt()
-    } else {
-        f64::INFINITY
-    }
-}
-
 pub(super) fn const_kappa_reach_w(w_in: f64, length: f64, accel: f64, kappa_abs: f64) -> f64 {
     if kappa_abs == 0.0 {
         return w_in + 2.0 * accel * length;

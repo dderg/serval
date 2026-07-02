@@ -58,10 +58,12 @@ impl DebugLog {
         (sent, received)
     }
 
+    #[cfg(test)]
     pub fn sent_count(&self) -> usize {
         self.sent.len()
     }
 
+    #[cfg(test)]
     pub fn received_count(&self) -> usize {
         self.received.len()
     }

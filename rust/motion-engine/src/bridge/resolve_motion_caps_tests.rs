@@ -1,5 +1,5 @@
 use super::resolve_motion_caps;
-use crate::dispatch::McuCaps;
+use crate::mcu_config::McuCaps;
 use mcu_protocol::messages::RuntimeCapsResponse;
 
 #[test]

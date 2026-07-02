@@ -1,5 +1,5 @@
 use super::*;
-use crate::dispatch::KINEMATICS_COREXY;
+use crate::mcu_config::KINEMATICS_COREXY;
 use runtime::segment::KinematicTag;
 use runtime::stepping_state::MAX_AXES;
 

@@ -1,0 +1,92 @@
+use std::sync::Arc;
+use std::sync::mpsc::Receiver;
+
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+
+use host_rt::host_io::McuHostIo;
+use host_rt::mcu_serial_conn::McuSerialConn;
+
+use crate::kinematics::SPATIAL_AXES;
+
+pub(crate) struct HomingRun {
+    pub(crate) cohort: u64,
+    pub(crate) endstop_id: u8,
+    pub(crate) endstop_mcu: u32,
+    pub(crate) axis: u8,
+    pub(crate) axis_key: crate::types::AxisKey,
+    pub(crate) all_axis_keys: Vec<crate::types::AxisKey>,
+    pub(crate) window_start_host: f64,
+    pub(crate) notify: crossbeam_channel::Sender<Result<([f64; 3], [f64; 3], u64), String>>,
+}
+
+pub(crate) fn trip_position_to_motor_frame(
+    axis: u8,
+    motor_pos: f64,
+    _configs: &[crate::mcu_config::McuAxisConfig],
+    _axis_mcu: u32,
+) -> [f64; SPATIAL_AXES] {
+    assert!(
+        (axis as usize) < SPATIAL_AXES,
+        "follower axis {axis} in homing trip is a bug — a follower axis must never reach homing recovery"
+    );
+    let mut frame = [0.0f64; SPATIAL_AXES];
+    frame[axis as usize] = motor_pos;
+    frame
+}
+
+pub(crate) struct McuConnection {
+    pub(crate) label: String,
+    pub(crate) host_io: Option<Arc<McuHostIo>>,
+    pub(crate) runtime_rx_priority:
+        Option<Receiver<host_rt::host_io::runtime_events::RuntimeEvent>>,
+    pub(crate) runtime_rx_bulk: Option<Receiver<host_rt::host_io::runtime_events::RuntimeEvent>>,
+    pub(crate) runtime_caps: Option<mcu_protocol::messages::RuntimeCapsResponse>,
+    pub(crate) identify_caps: u64,
+    pub(crate) mcu_transport_supported: bool,
+    pub(crate) ethercat_socket: Option<String>,
+    pub(crate) endpoint_process: Option<std::process::Child>,
+    pub(crate) endpoint_conn: Option<Arc<McuSerialConn>>,
+    pub(crate) ethercat_slot_axes: Vec<usize>,
+}
+
+pub(crate) type EthercatDrive = (
+    i32,
+    usize,
+    f64,
+    f64,
+    Option<u32>,
+    Option<u16>,
+    bool,
+    f64,
+    bool,
+    Option<String>,
+);
+
+#[derive(Debug, Clone)]
+pub(crate) struct EngineEvent {
+    pub(crate) kind: String,
+    pub(crate) mcu: u32,
+    pub(crate) notify_id: u64,
+    pub(crate) response_bytes: Vec<u8>,
+    pub(crate) sent_time: f64,
+    pub(crate) receive_time: f64,
+}
+
+impl EngineEvent {
+    pub(crate) fn to_pydict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("type", &self.kind)?;
+        d.set_item("mcu", self.mcu)?;
+        d.set_item("notify_id", self.notify_id)?;
+        d.set_item("data", pyo3::types::PyBytes::new(py, &self.response_bytes))?;
+        d.set_item("sent_time", self.sent_time)?;
+        d.set_item("receive_time", self.receive_time)?;
+        Ok(d.unbind())
+    }
+}
+
+pub(crate) struct FlushWait {
+    pub(crate) rx: crossbeam_channel::Receiver<Option<std::time::Instant>>,
+    pub(crate) deadline: Option<std::time::Instant>,
+}

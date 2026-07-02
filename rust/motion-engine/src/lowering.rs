@@ -316,7 +316,7 @@ pub fn lower_move_pieces(
 /// monomial coefficients onto another cubic (`SmoothKernel` is a downstream
 /// convolution, so it stops the per-piece transform exactly as the sampled path
 /// does). Mirrors the `ChainStage` semantics in [`Sampler::axis_state`].
-fn apply_axis_chain(coeffs: &mut [f64; 4], chain: &CompiledChain) {
+fn apply_pressure_advance(coeffs: &mut [f64; 4], chain: &CompiledChain) {
     for stage in &chain.stages {
         match stage {
             ChainStage::LinearPressureAdvance { k } => {
@@ -394,7 +394,7 @@ fn lower_straight_from_phases(
                 scale * p.j / 6.0,
             ];
             if let Some(chain) = axis_chains.get(axis) {
-                apply_axis_chain(&mut coeffs, chain);
+                apply_pressure_advance(&mut coeffs, chain);
             }
             pieces.push(BezierPiece {
                 u_start: t_start + bounds[i],

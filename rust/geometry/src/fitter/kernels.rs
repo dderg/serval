@@ -6,6 +6,7 @@ use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, Clothoid, CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 
+use super::linalg::solve3;
 use super::vec3::{add, cross, dot, madd, norm, normalize, scale, signed_angle, sub, turn_normal};
 use super::{BUDGET_EPS_MM, CornerFitConfig, FitError, internal, line_of};
 
@@ -556,25 +557,6 @@ pub(super) fn arc_candidate(moves: &[Move], corner: CornerFitConfig, tol: f64) -
     moves.len() < 3 || cocircular(moves, tol)
 }
 
-pub(super) fn grow_cocircular_span(
-    moves: &[Move],
-    start: usize,
-    band_end: usize,
-    tol: f64,
-) -> usize {
-    let mut best = start;
-    let mut end = start + 2;
-    while end <= band_end {
-        if cocircular(&moves[start..=end], tol) {
-            best = end;
-            end += 1;
-        } else {
-            break;
-        }
-    }
-    best
-}
-
 pub(super) fn cocircular(facets: &[Move], tol: f64) -> bool {
     let Some(fit) = circle_fit(facets) else {
         return false;
@@ -789,26 +771,4 @@ fn run_followers(
 
 pub(super) fn arc_len(arc: &Arc) -> f64 {
     arc.radius * arc.sweep.abs()
-}
-
-fn solve3(m: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
-    let det = det3(m);
-    if det.abs() < 1e-18 {
-        return None;
-    }
-    let mut out = [0.0_f64; 3];
-    for col in 0..3 {
-        let mut mc = m;
-        for row in 0..3 {
-            mc[row][col] = b[row];
-        }
-        out[col] = det3(mc) / det;
-    }
-    Some(out)
-}
-
-fn det3(m: [[f64; 3]; 3]) -> f64 {
-    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
 }

@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
 use runtime::piece_ring::PieceEntry;
 
-use crate::pump::AxisKey;
+use crate::types::AxisKey;
 
 pub const HISTORY_CAPACITY: usize = 4096;
 
@@ -344,7 +344,8 @@ pub fn clock_to_host(
         .ok_or_else(|| format!("clock_to_host_secs returned None for source mcu {source:?}"))
 }
 
-pub fn clock_between_mcus(
+#[cfg(test)]
+pub(crate) fn clock_between_mcus(
     router: &PassthroughRouter,
     source: McuHandle,
     target: McuHandle,

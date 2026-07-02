@@ -1,14 +1,15 @@
 use std::time::Duration;
 
-use host_rt::mcu_call::McuCall as _;
 use host_rt::mcu_serial_conn::McuSerialConn;
-use mcu_protocol::codec::{Decode as _, Encode as _};
+use mcu_protocol::codec::Encode as _;
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
     SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
     StopResponse,
 };
+
+use crate::servo_call::mcu_typed_call;
 
 const WORST_CASE_LADDER_ENABLE: Duration = Duration::from_secs(3);
 const SET_TORQUE_TIMEOUT_MARGIN: Duration = Duration::from_secs(5);
@@ -25,17 +26,14 @@ pub fn send_set_torque(
         execute_at_ns,
     }
     .encoded_to_vec();
-    let (kind, resp) = conn
-        .mcu_call(MessageKind::SetTorque, body, SET_TORQUE_TIMEOUT)
-        .map_err(|e| format!("SetTorque transport: {e:?}"))?;
-    if kind != MessageKind::SetTorqueResponse {
-        return Err(format!(
-            "SetTorque: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    let r =
-        SetTorqueResponse::decode(&resp).map_err(|e| format!("SetTorqueResponse decode: {e:?}"))?;
+    let r: SetTorqueResponse = mcu_typed_call(
+        conn,
+        "SetTorque",
+        MessageKind::SetTorque,
+        MessageKind::SetTorqueResponse,
+        body,
+        SET_TORQUE_TIMEOUT,
+    )?;
     Ok(r.result)
 }
 
@@ -53,17 +51,14 @@ pub fn send_drive_limits(
         max_torque_tenth_pct,
     }
     .encoded_to_vec();
-    let (kind, resp) = conn
-        .mcu_call(MessageKind::SetDriveLimits, body, DRIVE_LIMITS_TIMEOUT)
-        .map_err(|e| format!("SetDriveLimits transport: {e:?}"))?;
-    if kind != MessageKind::SetDriveLimitsResponse {
-        return Err(format!(
-            "SetDriveLimits: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    let r = SetDriveLimitsResponse::decode(&resp)
-        .map_err(|e| format!("SetDriveLimitsResponse decode: {e:?}"))?;
+    let r: SetDriveLimitsResponse = mcu_typed_call(
+        conn,
+        "SetDriveLimits",
+        MessageKind::SetDriveLimits,
+        MessageKind::SetDriveLimitsResponse,
+        body,
+        DRIVE_LIMITS_TIMEOUT,
+    )?;
     Ok(r.result)
 }
 
@@ -81,37 +76,27 @@ pub fn send_arm_sensorless_endstop(
         enable: u8::from(enable),
     }
     .encoded_to_vec();
-    let (kind, resp) = conn
-        .mcu_call(
-            MessageKind::ArmSensorlessEndstop,
-            body,
-            DRIVE_LIMITS_TIMEOUT,
-        )
-        .map_err(|e| format!("ArmSensorlessEndstop transport: {e:?}"))?;
-    if kind != MessageKind::ArmSensorlessEndstopResponse {
-        return Err(format!(
-            "ArmSensorlessEndstop: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    let r = ArmSensorlessEndstopResponse::decode(&resp)
-        .map_err(|e| format!("ArmSensorlessEndstopResponse decode: {e:?}"))?;
+    let r: ArmSensorlessEndstopResponse = mcu_typed_call(
+        conn,
+        "ArmSensorlessEndstop",
+        MessageKind::ArmSensorlessEndstop,
+        MessageKind::ArmSensorlessEndstopResponse,
+        body,
+        DRIVE_LIMITS_TIMEOUT,
+    )?;
     Ok(r.result)
 }
 
 pub fn send_restore_drive_limits(conn: &McuSerialConn, slot: u8) -> Result<i32, String> {
     let body = RestoreDriveLimits { slot }.encoded_to_vec();
-    let (kind, resp) = conn
-        .mcu_call(MessageKind::RestoreDriveLimits, body, DRIVE_LIMITS_TIMEOUT)
-        .map_err(|e| format!("RestoreDriveLimits transport: {e:?}"))?;
-    if kind != MessageKind::RestoreDriveLimitsResponse {
-        return Err(format!(
-            "RestoreDriveLimits: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    let r = RestoreDriveLimitsResponse::decode(&resp)
-        .map_err(|e| format!("RestoreDriveLimitsResponse decode: {e:?}"))?;
+    let r: RestoreDriveLimitsResponse = mcu_typed_call(
+        conn,
+        "RestoreDriveLimits",
+        MessageKind::RestoreDriveLimits,
+        MessageKind::RestoreDriveLimitsResponse,
+        body,
+        DRIVE_LIMITS_TIMEOUT,
+    )?;
     Ok(r.result)
 }
 
@@ -122,33 +107,28 @@ pub fn send_seed_servo_home(
     timeout: Duration,
 ) -> Result<i32, String> {
     let body = SeedServoHome { slot, home_q16 }.encoded_to_vec();
-    let (kind, resp) = conn
-        .mcu_call(MessageKind::SeedServoHome, body, timeout)
-        .map_err(|e| format!("SeedServoHome transport: {e:?}"))?;
-    if kind != MessageKind::SeedServoHomeResponse {
-        return Err(format!(
-            "SeedServoHome: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    let r = SeedServoHomeResponse::decode(&resp)
-        .map_err(|e| format!("SeedServoHomeResponse decode: {e:?}"))?;
+    let r: SeedServoHomeResponse = mcu_typed_call(
+        conn,
+        "SeedServoHome",
+        MessageKind::SeedServoHome,
+        MessageKind::SeedServoHomeResponse,
+        body,
+        timeout,
+    )?;
     Ok(r.result)
 }
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub fn send_stop(conn: &McuSerialConn) -> Result<i32, String> {
-    let (kind, resp) = conn
-        .mcu_call(MessageKind::Stop, Vec::new(), STOP_TIMEOUT)
-        .map_err(|e| format!("Stop transport: {e:?}"))?;
-    if kind != MessageKind::StopResponse {
-        return Err(format!(
-            "Stop: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    let r = StopResponse::decode(&resp).map_err(|e| format!("StopResponse decode: {e:?}"))?;
+    let r: StopResponse = mcu_typed_call(
+        conn,
+        "Stop",
+        MessageKind::Stop,
+        MessageKind::StopResponse,
+        Vec::new(),
+        STOP_TIMEOUT,
+    )?;
     Ok(r.result)
 }
 
@@ -175,17 +155,14 @@ pub fn send_resonance_buzz(
         ramp_ms,
     }
     .encoded_to_vec();
-    let (kind, resp) = conn
-        .mcu_call(MessageKind::ResonanceBuzz, body, RESONANCE_BUZZ_TIMEOUT)
-        .map_err(|e| format!("ResonanceBuzz transport: {e:?}"))?;
-    if kind != MessageKind::ResonanceBuzzResponse {
-        return Err(format!(
-            "ResonanceBuzz: unexpected response kind 0x{:04x}",
-            kind.as_u16()
-        ));
-    }
-    let r = ResonanceBuzzResponse::decode(&resp)
-        .map_err(|e| format!("ResonanceBuzzResponse decode: {e:?}"))?;
+    let r: ResonanceBuzzResponse = mcu_typed_call(
+        conn,
+        "ResonanceBuzz",
+        MessageKind::ResonanceBuzz,
+        MessageKind::ResonanceBuzzResponse,
+        body,
+        RESONANCE_BUZZ_TIMEOUT,
+    )?;
     Ok(r.result)
 }
 

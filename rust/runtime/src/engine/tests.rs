@@ -184,11 +184,6 @@ fn overlay_uses_own_step_frame_not_axis_frame() {
     );
 }
 
-struct LateArmResult {
-    first_sample_steps: i32,
-    cumulative_steps: i32,
-}
-
 struct OverlayHarness {
     engine: Engine,
     storage: Vec<PieceEntry>,
@@ -298,60 +293,6 @@ impl OverlayHarness {
             .as_ref()
             .unwrap()
             .p_prev
-    }
-
-    #[allow(unsafe_code)]
-    fn run_overlay_piece_armed_late(
-        &mut self,
-        motor_idx: usize,
-        delta_mm: f32,
-        late_by_fraction: f32,
-    ) -> LateArmResult {
-        let duration_sec: f32 = 0.01;
-        let duration_cycles = (duration_sec * TICK_CLOCK_FREQ as f32) as u64;
-        let late_cycles = (late_by_fraction * duration_cycles as f32) as u64;
-        let scheduled_start = self.next_start.saturating_sub(late_cycles);
-
-        let mask: u8 = 1u8 << motor_idx;
-        let piece = PieceEntry {
-            start_time: scheduled_start,
-            coeffs: [0.0, 0.0, delta_mm, delta_mm],
-            duration: duration_sec,
-            motor_mask: mask,
-            _reserved: [0; 3],
-        };
-        assert_eq!(
-            self.engine
-                .push_pieces(self.overlay_axis as u8, &[piece], &mut self.storage),
-            RUNTIME_OK
-        );
-        self.last_motor_idx = motor_idx;
-
-        let before = self.position_count(motor_idx);
-
-        self.engine
-            .tick(self.next_start, &self.shared, &mut self.storage);
-        let q_ptr: *mut StepQueue = self.q.as_mut();
-        while unsafe { queue_pop(q_ptr) }.is_some() {}
-        let first_sample_steps = self.position_count(motor_idx) - before;
-
-        let ticks = duration_cycles / TICK_CYCLES + 2;
-        for n in 1..=ticks {
-            self.engine.tick(
-                self.next_start + n * TICK_CYCLES,
-                &self.shared,
-                &mut self.storage,
-            );
-            while unsafe { queue_pop(q_ptr) }.is_some() {}
-        }
-        self.next_start += (ticks + 1) * TICK_CYCLES;
-
-        assert_eq!(self.shared.last_error.load(Ordering::Acquire), 0);
-        let cumulative_steps = self.position_count(motor_idx) - before;
-        LateArmResult {
-            first_sample_steps,
-            cumulative_steps,
-        }
     }
 }
 

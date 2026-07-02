@@ -4,7 +4,7 @@ use crate::clock::TickCounter;
 use crate::error::{RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_RING_FULL, RUNTIME_OK};
 use crate::fault_sink::FaultSink;
 use crate::piece_ring::PieceEntry;
-use crate::state::{MAX_STEPPER_OIDS, SharedState};
+use crate::state::SharedState;
 use crate::step::StepMotorState;
 use crate::stepping_state::{AxisState, MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
 

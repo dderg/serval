@@ -384,8 +384,7 @@ fn junction_accel_step_before_vs_after_both_pin() {
     };
 
     let before_fit =
-        fit_hermite_c1_clamped::<3>(&composed_seg0, 0.005, 4, Some(composed_d2_start), None)
-            .unwrap();
+        fit_hermite_c1_clamped::<3>(&composed_seg0, 0.005, 4, composed_d2_start, None).unwrap();
     let before_end_d2 = {
         let p = before_fit[0].last().unwrap();
         p.differentiate().differentiate().evaluate(p.u_end)

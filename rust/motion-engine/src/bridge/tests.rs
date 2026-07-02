@@ -51,11 +51,9 @@ fn host_io_on_pty(slave_path: &str) -> (Arc<McuHostIo>, Weak<McuHostIo>) {
     (arc, weak)
 }
 
-fn serial_mcu_conn(label: &str, slave_path: &str, host_io: Arc<McuHostIo>) -> McuConnection {
+fn serial_mcu_conn(label: &str, host_io: Arc<McuHostIo>) -> McuConnection {
     McuConnection {
         label: label.to_owned(),
-        serial_path: slave_path.to_owned(),
-        baud: 0,
         host_io: Some(host_io),
         runtime_rx_priority: None,
         runtime_rx_bulk: None,
@@ -111,7 +109,7 @@ fn shutdown_releases_pty_and_joins_threads() {
     let (master_fd, slave_path) = open_pty();
 
     let (io_arc, io_weak) = host_io_on_pty(&slave_path);
-    insert_mcu(&engine, 1, serial_mcu_conn("mcu", &slave_path, io_arc));
+    insert_mcu(&engine, 1, serial_mcu_conn("mcu", io_arc));
     assert!(
         io_weak.upgrade().is_some(),
         "host_io must be alive pre-shutdown"
@@ -171,8 +169,6 @@ fn shutdown_releases_ethercat_socket_and_child() {
 
     let conn = McuConnection {
         label: "ec".to_owned(),
-        serial_path: String::new(),
-        baud: 0,
         host_io: None,
         runtime_rx_priority: None,
         runtime_rx_bulk: None,
@@ -226,7 +222,7 @@ fn double_shutdown_is_safe() {
     let engine = PyMotionEngine::new();
     let (master_fd, slave_path) = open_pty();
     let (io_arc, io_weak) = host_io_on_pty(&slave_path);
-    insert_mcu(&engine, 1, serial_mcu_conn("mcu", &slave_path, io_arc));
+    insert_mcu(&engine, 1, serial_mcu_conn("mcu", io_arc));
 
     engine.shutdown();
     assert!(
@@ -447,7 +443,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use crate::pump::{AxisKey, EnqueueMsg, McuTransport, PumpMsg, WireSink, run_pump};
+    use crate::pump::{EnqueueMsg, McuTransport, PumpMsg, WireSink, run_pump};
+    use crate::types::AxisKey;
 
     const EC_MCU_ID: u32 = 42;
 
@@ -601,7 +598,7 @@ fn partial_state_teardown_at_exit() {
     let engine = PyMotionEngine::new();
     let (master_fd, slave_path) = open_pty();
     let (io_arc, io_weak) = host_io_on_pty(&slave_path);
-    insert_mcu(&engine, 1, serial_mcu_conn("mcu0", &slave_path, io_arc));
+    insert_mcu(&engine, 1, serial_mcu_conn("mcu0", io_arc));
 
     engine.shutdown();
 

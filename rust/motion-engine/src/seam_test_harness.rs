@@ -9,12 +9,13 @@ use runtime::piece_ring::PieceEntry;
 use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::classify::build_move;
-use crate::dispatch::{McuAxisConfig, McuCaps};
 use crate::enqueue::enqueue_segment;
+use crate::mcu_config::{McuAxisConfig, McuCaps};
 use crate::pump::{
-    AxisKey, JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionTracker, MAX_LEAD_SECS,
+    JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionTracker, MAX_LEAD_SECS,
 };
 use crate::stream::{StreamConfig, setup_stages};
+use crate::types::AxisKey;
 
 const HARNESS_MCU_ID: u32 = 0;
 const HARNESS_MCU_FREQ_HZ: f64 = 1.0e6;

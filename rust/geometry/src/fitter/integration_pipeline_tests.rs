@@ -1,9 +1,9 @@
-use super::causal::fit;
+use super::fit_corners;
 use crate::path::Segment;
 use crate::path::lowering::LoweredSample;
 use crate::velocity::plan_velocity_warm_start;
 use crate::{
-    ChainFitConfig, FitOutcome, Move, MoveContext, SourceRange, VelocityLimits, VelocityProfile,
+    CornerFitConfig, FitOutcome, Move, MoveContext, SourceRange, VelocityLimits, VelocityProfile,
     arc_move, line_move, lower_profile,
 };
 
@@ -98,7 +98,7 @@ struct Planned {
 }
 
 fn plan(moves: &[Move]) -> Planned {
-    let geometry = fit(moves, ChainFitConfig::default()).expect("fit");
+    let geometry = fit_corners(moves, CornerFitConfig::default()).expect("fit");
     let profile = plan_velocity_warm_start(
         &geometry,
         1e-7,
@@ -358,7 +358,7 @@ fn long_straight_cruises_at_feed_cap() {
 #[test]
 fn single_move_passthrough() {
     let moves = vec![line(1, 100.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0)];
-    let outcome = fit(&moves, ChainFitConfig::default()).expect("fit");
+    let outcome = fit_corners(&moves, CornerFitConfig::default()).expect("fit");
     assert_eq!(
         outcome.moves.len(),
         1,
@@ -374,7 +374,7 @@ fn single_move_passthrough() {
 #[test]
 fn empty_input_yields_empty_trajectory() {
     let moves: Vec<Move> = Vec::new();
-    let geometry = fit(&moves, ChainFitConfig::default()).expect("fit on empty");
+    let geometry = fit_corners(&moves, CornerFitConfig::default()).expect("fit on empty");
     assert!(geometry.moves.is_empty());
 
     let profile = plan_velocity_warm_start(

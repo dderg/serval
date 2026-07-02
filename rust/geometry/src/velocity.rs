@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::LENGTH_EPS_MM;
 use crate::fitter::{FitOutcome, UnblendReason};
 use crate::path::{CurvatureProfile, Segment};
 use crate::segment::SourceRange;
@@ -12,7 +13,6 @@ pub use profile::StraightPhase;
 
 use disk::Kinematics;
 
-const LENGTH_EPS_MM: f64 = 1e-9;
 const VELOCITY_EPS_MM_S: f64 = 1e-9;
 const MIN_INTEGRATION_TOL: f64 = 1e-9;
 const NEGATIVE_VELOCITY_TOL_MM_S: f64 = 1e-6;

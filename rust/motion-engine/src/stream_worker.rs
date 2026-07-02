@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use trajectory::{AxisChainSet, ShapedSegment};
 
-use crate::pump::AxisKey;
 use crate::stream::{
     BarrierAck, CONTIGUITY_EPS_MM, Control, ShapedItem, StreamConfig, StreamInput,
     advance_odometer, dist3, setup_stages,
 };
+use crate::types::AxisKey;
 
 /// Host-monotonic end of the trajectory committed to the pump. The dispatcher
 /// advances it as each segment is anchored; the ingress pacer reads the
@@ -217,7 +217,7 @@ pub(crate) struct PumpResources {
 pub(crate) struct DispatchResources {
     pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
     pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
-    pub(crate) mcu_configs: Vec<crate::dispatch::McuAxisConfig>,
+    pub(crate) mcu_configs: Vec<crate::mcu_config::McuAxisConfig>,
     pub(crate) drain: Arc<crate::drain::DrainSync>,
     pub(crate) counter: Arc<AtomicU64>,
     pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
@@ -569,7 +569,7 @@ fn fatal(msg: &str) -> ! {
 pub(crate) struct SegmentDispatchCtx {
     pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
     pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
-    pub(crate) mcu_configs: Vec<crate::dispatch::McuAxisConfig>,
+    pub(crate) mcu_configs: Vec<crate::mcu_config::McuAxisConfig>,
     pub(crate) pump_tx: Sender<crate::pump::EnqueueMsg>,
     pub(crate) drain: Arc<crate::drain::DrainSync>,
     pub(crate) counter: Arc<AtomicU64>,
@@ -753,7 +753,7 @@ pub(crate) fn dispatch_nudge(
     );
 
     if !pieces.is_empty() {
-        let key = crate::pump::AxisKey { mcu_id, axis };
+        let key = crate::types::AxisKey { mcu_id, axis };
         let nominal_freq = {
             let freqs = ctx.nominal_freqs.lock().unwrap_or_else(|p| p.into_inner());
             *freqs

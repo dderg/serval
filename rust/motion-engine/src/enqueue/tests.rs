@@ -1,6 +1,6 @@
 use super::*;
-use crate::dispatch::{AXIS_X, AXIS_Y, KINEMATICS_COREXY, McuCaps};
 use crate::kinematics::KinematicsModule;
+use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY, McuCaps};
 
 fn constant_axis(value: f64, n_pieces: usize, piece_dur: f64) -> ScalarNurbs<f64> {
     let bern = [value; 4];

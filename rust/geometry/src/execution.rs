@@ -1,9 +1,7 @@
 use crate::path::Segment;
 use crate::path::lowering::{LoweredSample, PositionProfile};
 use crate::path::{Arc, Clothoid, Line, PathSegment};
-use crate::{FitOutcome, GeometryError, VelocityProfile};
-
-const LENGTH_EPS_MM: f64 = 1e-9;
+use crate::{FitOutcome, GeometryError, LENGTH_EPS_MM, VelocityProfile};
 
 struct Phase<'a> {
     seg: &'a PathSegment,

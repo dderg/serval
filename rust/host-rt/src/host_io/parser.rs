@@ -250,7 +250,11 @@ pub struct MsgProtoParser {
     pub(crate) by_command_name: IndexMap<String, OutboundSpec>,
     pub(crate) enumerations: IndexMap<String, EnumTable>,
     pub(crate) static_strings: HashMap<i32, String>,
+    // TODO: mirrors the MCU identify dict's config/version wire fields; no
+    // consumer reads them yet — pending decision on whether to surface them.
+    #[allow(dead_code)]
     pub(crate) config: serde_json::Value,
+    #[allow(dead_code)]
     pub(crate) version: String,
 }
 
@@ -806,6 +810,7 @@ impl MsgProtoParser {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn decode_output_canonical(
         &self,
         packet: &[u8],

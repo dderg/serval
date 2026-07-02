@@ -1,4 +1,6 @@
-use geometry::curve::{g5_control_points, g51_control_points, to_collinear_bezier};
+use geometry::curve::to_collinear_bezier;
+#[cfg(test)]
+use geometry::curve::{g5_control_points, g51_control_points};
 use geometry::segment::{CubicSegment, FollowerDemand, SourceRange};
 use nurbs::VectorNurbs;
 
@@ -111,6 +113,7 @@ pub fn build_move(
     geometry::line_move(start, end, e_delta, ctx)
 }
 
+#[cfg(test)]
 fn classify_curve(
     cps: [[f64; 3]; 4],
     followers: &[(usize, f64)],
@@ -142,8 +145,9 @@ fn classify_curve(
     })
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub fn classify_bezier(
+pub(crate) fn classify_bezier(
     start: [f64; 3],
     i: f64,
     j: f64,
@@ -162,8 +166,9 @@ pub fn classify_bezier(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub fn classify_quadratic(
+pub(crate) fn classify_quadratic(
     start: [f64; 3],
     i: f64,
     j: f64,

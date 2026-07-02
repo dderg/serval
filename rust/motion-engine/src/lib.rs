@@ -5,8 +5,6 @@ mod bridge;
 pub mod classify;
 #[doc(hidden)]
 pub mod config;
-#[doc(hidden)]
-pub mod dispatch;
 pub mod drain;
 #[doc(hidden)]
 pub mod enqueue;
@@ -16,10 +14,10 @@ pub mod homing;
 pub mod kinematics;
 pub mod logging;
 pub mod lowering;
+#[doc(hidden)]
+pub mod mcu_config;
 pub mod mcu_log;
 pub mod motion_history;
-#[doc(hidden)]
-pub mod motion_node;
 #[doc(hidden)]
 pub mod nudge;
 #[doc(hidden)]
@@ -28,6 +26,7 @@ pub mod position_query;
 pub mod pump;
 pub mod remote_trigger;
 mod router_transport;
+mod servo_call;
 #[doc(hidden)]
 pub mod servo_capture;
 #[doc(hidden)]
