@@ -38,7 +38,7 @@ fn run_fitter(moves: &[Move], config: ChainFitConfig) -> Vec<Move> {
     }
     drop(tx);
     Fitter::new(config).run(rx, out_tx);
-    out_rx.into_iter().collect()
+    out_rx.into_iter().map(|fm| fm.piece).collect()
 }
 
 fn zigzag_with_blends() -> Vec<Move> {
@@ -239,7 +239,7 @@ fn small_extrusion_drift_splits_stream_arc_but_not_batch() {
 #[test]
 fn empty_input_flushes_buffered_moves_without_close() {
     let (tx, rx) = bounded::<Move>(64);
-    let (out_tx, out_rx) = bounded::<Move>(64);
+    let (out_tx, out_rx) = bounded::<super::FittedMove>(64);
     let fitter = Fitter::new(ChainFitConfig::default());
     let handle = std::thread::spawn(move || fitter.run(rx, out_tx));
 

@@ -75,6 +75,10 @@ pub enum UnblendReason {
     NoBudget,
     ArcIncident,
     NonSpatial,
+    /// The streaming fitter emitted the upstream move while its input was
+    /// empty, so this junction was cut without a blend: the toolhead must be
+    /// at rest across it regardless of what a blend could have achieved.
+    StreamCut,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +130,7 @@ pub fn plan_junction(
     m_out: &Move,
     config: CornerFitConfig,
 ) -> Result<JunctionPlan, FitError> {
-    classify_junction(m_in, m_out, config, 0.0, 0.0, 0.0)
+    classify_junction(m_in, m_out, config, 0.0, 0.0)
 }
 
 /// The two clothoid-half moves a blend contributes between `m_in` and `m_out`.
@@ -196,7 +200,7 @@ pub fn plan_junction_reduced(
     in_reduction: f64,
     out_reduction: f64,
 ) -> Result<JunctionPlan, FitError> {
-    classify_junction(m_in, m_out, config, 0.0, in_reduction, out_reduction)
+    classify_junction(m_in, m_out, config, in_reduction, out_reduction)
 }
 
 /// A sealed arc run's reconstruction: the arc, its easing clothoids into the
@@ -408,9 +412,7 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
 
     let mut plans = Vec::with_capacity(moves.len() - 1);
     for pair in moves.windows(2) {
-        plans.push(classify_junction(
-            &pair[0], &pair[1], config, 0.0, 0.0, 0.0,
-        )?);
+        plans.push(classify_junction(&pair[0], &pair[1], config, 0.0, 0.0)?);
     }
 
     let mut out = Vec::new();
@@ -448,30 +450,13 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
 }
 
 pub fn fit_chain(moves: &[Move], config: ChainFitConfig) -> Result<FitOutcome, FitError> {
-    fit_chain_with_head_restore(moves, config, 0.0)
-}
-
-/// Streaming variant of [`fit_chain`]. `head_len_restore` is the spatial length
-/// already consumed from the head move's front by the blend committed at the
-/// previous seam. It is added back into the leading junction's blend budget so a
-/// corner re-fits to the same curvature it had before that commit trimmed the
-/// head — otherwise the shorter head move yields a smaller budget, a sharper
-/// apex, and a corner cap below the already-committed entry velocity (an abort).
-/// A fresh fit passes `0.0` and is byte-identical to [`fit_chain`]. See
-/// docs/rewrite/windowed-fit-ceiling-jitter.md.
-pub fn fit_chain_with_head_restore(
-    moves: &[Move],
-    config: ChainFitConfig,
-    head_len_restore: f64,
-) -> Result<FitOutcome, FitError> {
-    causal::fit(moves, config, head_len_restore)
+    causal::fit(moves, config)
 }
 
 fn classify_junction(
     m_in: &Move,
     m_out: &Move,
     config: CornerFitConfig,
-    head_len_restore: f64,
     in_reduction: f64,
     out_reduction: f64,
 ) -> Result<JunctionPlan, FitError> {
@@ -508,7 +493,7 @@ fn classify_junction(
     };
 
     let vertex = line_in.point_at(line_in.s_len());
-    let in_len = line_in.s_len() + head_len_restore - in_reduction;
+    let in_len = line_in.s_len() - in_reduction;
     let out_len = line_out.s_len() - out_reduction;
     let budget = 0.5 * in_len.min(out_len);
     let line_no = m_out.source.start_line;

@@ -23,11 +23,7 @@ struct Run {
     tail_blend_trim: f64,
 }
 
-pub(super) fn fit(
-    moves: &[Move],
-    config: ChainFitConfig,
-    head_len_restore: f64,
-) -> Result<FitOutcome, FitError> {
+pub(super) fn fit(moves: &[Move], config: ChainFitConfig) -> Result<FitOutcome, FitError> {
     if moves.len() <= 1 {
         return Ok(FitOutcome {
             moves: moves.to_vec(),
@@ -51,12 +47,10 @@ pub(super) fn fit(
 
     let mut plans = Vec::with_capacity(moves.len() - 1);
     for (i, pair) in moves.windows(2).enumerate() {
-        let restore = if i == 0 { head_len_restore } else { 0.0 };
         plans.push(classify_junction(
             &pair[0],
             &pair[1],
             config.corner,
-            restore,
             in_reductions[i],
             out_reductions[i],
         )?);

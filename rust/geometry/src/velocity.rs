@@ -125,6 +125,42 @@ pub fn plan_velocity_warm_start(
     max_extrude_only_accel_mm_s2: f64,
     entry_v: f64,
 ) -> Result<VelocityProfile, VelocityError> {
+    let stop_lines: HashSet<u32> = outcome
+        .report
+        .unblended
+        .iter()
+        .filter(|u| u.reason != UnblendReason::Collinear)
+        .map(|u| u.line_no)
+        .collect();
+    let stop_before: Vec<bool> = outcome
+        .moves
+        .iter()
+        .map(|m| {
+            stop_lines.contains(&m.source.start_line)
+                && !matches!(m.segment.spatial, Some(Segment::Clothoid(_)))
+        })
+        .collect();
+    plan_velocity_stops(
+        &outcome.moves,
+        &stop_before,
+        integration_tol,
+        max_extrude_only_velocity_mm_s,
+        max_extrude_only_accel_mm_s2,
+        entry_v,
+    )
+}
+
+/// Plan over an already-fitted move sequence with explicit per-seam stop
+/// anchors: `stop_before[k]` forces rest at the seam entering `moves[k]`.
+/// `stop_before[0]` is ignored — the entry seam is anchored at `entry_v`.
+pub fn plan_velocity_stops(
+    moves: &[crate::Move],
+    stop_before: &[bool],
+    integration_tol: f64,
+    max_extrude_only_velocity_mm_s: f64,
+    max_extrude_only_accel_mm_s2: f64,
+    entry_v: f64,
+) -> Result<VelocityProfile, VelocityError> {
     let tol = integration_tol;
     if !(tol.is_finite() && tol >= MIN_INTEGRATION_TOL) {
         return Err(VelocityError::InvalidConfig);
@@ -136,8 +172,8 @@ pub fn plan_velocity_warm_start(
         return Err(VelocityError::InvalidConfig);
     }
 
-    let moves = &outcome.moves;
     let n = moves.len();
+    assert_eq!(stop_before.len(), n, "one stop flag per move");
     if n == 0 {
         return Ok(VelocityProfile {
             moves: Vec::new(),
@@ -146,14 +182,6 @@ pub fn plan_velocity_warm_start(
             v_barrier: 0.0,
         });
     }
-
-    let stop_lines: HashSet<u32> = outcome
-        .report
-        .unblended
-        .iter()
-        .filter(|u| u.reason != UnblendReason::Collinear)
-        .map(|u| u.line_no)
-        .collect();
 
     let mut report = VelocityReport::default();
     let mut caps = Vec::with_capacity(n);
@@ -223,9 +251,7 @@ pub fn plan_velocity_warm_start(
     is_anchor[0] = true;
     is_anchor[n] = true;
     for k in 1..n {
-        let downstream = &moves[k];
-        let blend_half = matches!(downstream.segment.spatial, Some(Segment::Clothoid(_)));
-        if stop_lines.contains(&downstream.source.start_line) && !blend_half {
+        if stop_before[k] {
             report.stops += 1;
             is_anchor[k] = true;
         } else {

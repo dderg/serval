@@ -48,7 +48,7 @@ and `query-logs` skills.
 
 - **MCU C/Rust boundary — architectural invariant:** [`docs/rewrite/mcu-c-rust-boundary.md`](docs/rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
 
-- **Motion planner entry point:** `StreamState::commit` in `rust/motion-engine/src/stream.rs` is the pipeline's main function — read it first when exploring the planner.
+- **Motion planner entry point:** `setup_pipeline` in `rust/motion-engine/src/stream.rs` wires the streaming stages (fitter → planner → lowerer → shaper) — read it first when exploring the planner.
 
 # Git
 

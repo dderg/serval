@@ -1,12 +1,12 @@
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use geometry::fitter::{
-    JunctionPlan, RunFit, arc_candidate_fits, blend_moves, is_travel, plan_junction_reduced,
-    spatial_end, spatial_start, trim_line_move,
+    CornerFitConfig, JunctionPlan, RunFit, UnblendReason, arc_candidate_fits, blend_moves,
+    is_travel, plan_junction, plan_junction_reduced, spatial_end, spatial_start, trim_line_move,
 };
 use geometry::path::{Line, PathSegment, Segment};
 use geometry::{ChainFitConfig, Move};
 
-use super::dist3;
+use super::{FittedMove, dist3};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
 
@@ -87,8 +87,8 @@ impl Fitter {
         }
     }
 
-    pub(crate) fn run(mut self, input: Receiver<Move>, output: Sender<Move>) {
-        let mut out = TravelAligningSender::new(output);
+    pub(crate) fn run(mut self, input: Receiver<Move>, output: Sender<FittedMove>) {
+        let mut out = TravelAligningSender::new(output, self.config.corner);
         loop {
             let buffered = !(self.decided.is_empty() && self.tail.is_empty());
             let received = if buffered {
@@ -98,6 +98,7 @@ impl Fitter {
                         if !self.resolve(true, &mut out) || !out.release(None) {
                             return;
                         }
+                        out.mark_stream_cut();
                         continue;
                     }
                     Err(TryRecvError::Disconnected) => None,
@@ -363,7 +364,10 @@ impl Fitter {
         .unwrap_or_else(|e| panic!("fitter: junction plan failed: {e:?}"));
         let (trim_end, blend) = match plan {
             JunctionPlan::Blend(b) => (b.trim(), Some(b)),
-            JunctionPlan::Unblended(_) => (0.0, None),
+            JunctionPlan::Unblended(reason) => {
+                out.mark_unblended(reason);
+                (0.0, None)
+            }
         };
         let Element::Piece(m) = self.decided.remove(0) else {
             unreachable!()
@@ -460,24 +464,77 @@ impl Fitter {
 /// with no anchor keeps the travel's own end, exactly as the batch fit does at
 /// the end of its window.
 struct TravelAligningSender {
-    tx: Sender<Move>,
+    tx: Sender<FittedMove>,
+    corner: CornerFitConfig,
     last_spatial_end: Option<[f64; 3]>,
-    parked_travel: Option<Move>,
-    parked_tail: Vec<Move>,
+    last_spatial: Option<Move>,
+    parked_travel: Option<FittedMove>,
+    parked_tail: Vec<FittedMove>,
+    /// Junction classification for the seam entering the next emitted piece.
+    /// Set by an unblended junction plan; consumed by the next `send` so a
+    /// body wholly consumed by trims hands the seam to whatever piece follows.
+    pending_unblend: Option<UnblendReason>,
+    /// The seam entering the next emitted piece was cut by an input-empty
+    /// drain: no junction was ever planned there. The next spatial piece
+    /// classifies it against the last emitted spatial piece.
+    stream_cut: bool,
 }
 
 impl TravelAligningSender {
-    fn new(tx: Sender<Move>) -> Self {
+    fn new(tx: Sender<FittedMove>, corner: CornerFitConfig) -> Self {
         Self {
             tx,
+            corner,
             last_spatial_end: None,
+            last_spatial: None,
             parked_travel: None,
             parked_tail: Vec::new(),
+            pending_unblend: None,
+            stream_cut: false,
+        }
+    }
+
+    /// A body wholly consumed by trims leaves its seam mark pending, so two
+    /// marks can meet before the next piece is sent; the stop-demanding one wins.
+    fn mark_unblended(&mut self, reason: UnblendReason) {
+        self.pending_unblend = Some(match self.pending_unblend {
+            Some(prev) if prev != UnblendReason::Collinear => prev,
+            _ => reason,
+        });
+    }
+
+    fn mark_stream_cut(&mut self) {
+        if self.last_spatial.is_some() {
+            self.stream_cut = true;
+        }
+    }
+
+    fn seam_classification(&mut self, m: &Move) -> Option<UnblendReason> {
+        if !self.stream_cut {
+            return self.pending_unblend.take();
+        }
+        self.stream_cut = false;
+        debug_assert!(self.pending_unblend.is_none());
+        let prev = self
+            .last_spatial
+            .as_ref()
+            .expect("stream_cut requires a prior spatial piece");
+        if m.segment.spatial.is_none() {
+            return Some(UnblendReason::NonSpatial);
+        }
+        match plan_junction(prev, m, self.corner) {
+            Ok(JunctionPlan::Unblended(reason)) => Some(reason),
+            Ok(JunctionPlan::Blend(_)) | Err(_) => Some(UnblendReason::StreamCut),
         }
     }
 
     fn send(&mut self, m: Move) -> bool {
-        let Some(start) = spatial_start(&m) else {
+        let unblended_before = self.seam_classification(&m);
+        let m = FittedMove {
+            piece: m,
+            unblended_before,
+        };
+        let Some(start) = spatial_start(&m.piece) else {
             if self.parked_travel.is_some() {
                 self.parked_tail.push(m);
                 return true;
@@ -487,21 +544,23 @@ impl TravelAligningSender {
         if !self.release(Some(start)) {
             return false;
         }
-        if is_travel(&m) {
+        if is_travel(&m.piece) {
             self.parked_travel = Some(m);
             return true;
         }
-        self.last_spatial_end = spatial_end(&m);
+        self.last_spatial_end = spatial_end(&m.piece);
+        self.last_spatial = Some(m.piece.clone());
         self.tx.send(m).is_ok()
     }
 
     fn release(&mut self, next_start: Option<[f64; 3]>) -> bool {
-        let Some(travel) = self.parked_travel.take() else {
+        let Some(mut travel) = self.parked_travel.take() else {
             debug_assert!(self.parked_tail.is_empty());
             return true;
         };
-        let travel = align_travel(travel, self.last_spatial_end, next_start);
-        self.last_spatial_end = spatial_end(&travel);
+        travel.piece = align_travel(travel.piece, self.last_spatial_end, next_start);
+        self.last_spatial_end = spatial_end(&travel.piece);
+        self.last_spatial = Some(travel.piece.clone());
         if self.tx.send(travel).is_err() {
             return false;
         }

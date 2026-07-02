@@ -14,7 +14,7 @@ use crate::enqueue::enqueue_segment;
 use crate::pump::{
     AxisKey, JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionTracker, MAX_LEAD_SECS,
 };
-use crate::stream::{StreamConfig, StreamError, StreamState};
+use crate::stream::{StreamConfig, setup_pipeline};
 
 const HARNESS_MCU_ID: u32 = 0;
 const HARNESS_MCU_FREQ_HZ: f64 = 1.0e6;
@@ -43,39 +43,6 @@ fn harness_mcu_configs() -> Vec<McuAxisConfig> {
             total_piece_memory: 62 * 1024,
         },
     }]
-}
-
-#[derive(Clone, Debug)]
-pub enum Cadence {
-    FixedCap(usize),
-    VaryingCaps(Vec<usize>),
-}
-
-impl Cadence {
-    fn cap_for(&self, step: usize) -> usize {
-        let raw = match self {
-            Self::FixedCap(c) => *c,
-            Self::VaryingCaps(v) if v.is_empty() => usize::MAX,
-            Self::VaryingCaps(v) => v[step % v.len()],
-        };
-        raw.max(1)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct CommitSchedule {
-    pub cadence: Cadence,
-    pub force_after_move: Vec<usize>,
-}
-
-impl CommitSchedule {
-    #[must_use]
-    pub fn fixed_cap(cap: usize) -> Self {
-        Self {
-            cadence: Cadence::FixedCap(cap),
-            force_after_move: Vec::new(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -330,64 +297,46 @@ impl Ingestor {
     }
 }
 
-pub fn run_schedule(
-    source: &str,
-    config: StreamConfig,
-    schedule: &CommitSchedule,
-) -> Result<SeamReport, StreamError> {
+pub fn run_schedule(source: &str, config: StreamConfig) -> SeamReport {
     let moves = parse_gcode_to_moves(source, config.limits);
-    run_moves(&moves, config, schedule)
+    run_moves(&moves, config)
 }
 
-pub fn run_moves(
-    moves: &[Move],
-    config: StreamConfig,
-    schedule: &CommitSchedule,
-) -> Result<SeamReport, StreamError> {
+/// Replay the moves through the full streaming pipeline and observe every
+/// emitted segment seam. Emission boundaries are the pipeline's own (finality
+/// barrier, input-empty drains); the thread interleaving between feeding and
+/// the stages varies them run to run, which is exactly the surface the seam
+/// checks guard.
+pub fn run_moves(moves: &[Move], config: StreamConfig) -> SeamReport {
     let n_moves = moves.len();
     let home = moves
         .first()
         .and_then(|m| m.segment.spatial.as_ref())
         .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
-    let mut state = StreamState::new(config, AxisChainSet::default(), &home, 0.0);
+    let handle = setup_pipeline(config, AxisChainSet::default(), home.to_vec(), 0.0);
+    let output = handle.output;
+    let collector = std::thread::spawn(move || {
+        let mut segs: Vec<ShapedSegment> = Vec::new();
+        while let Ok(seg) = output.recv() {
+            segs.push(seg);
+        }
+        segs
+    });
+    for m in moves.iter().cloned() {
+        handle
+            .input
+            .send(m)
+            .expect("pipeline input closed while feeding — a stage died");
+    }
+    drop(handle.input);
+    let segs = collector.join().expect("pipeline collector panicked");
+
     let mut ingestor = Ingestor::new();
-    let force_after_move: std::collections::BTreeSet<usize> =
-        schedule.force_after_move.iter().copied().collect();
-
-    let mut commit_index = 0usize;
-    let mut cadence_step = 0usize;
-
-    for (i, m) in moves.iter().cloned().enumerate() {
-        state.push(m)?;
-        if state.buffered() >= schedule.cadence.cap_for(cadence_step) {
-            let segs = state.commit(false)?;
-            if !segs.is_empty() {
-                ingestor.ingest(&segs, commit_index);
-                commit_index += 1;
-            }
-            cadence_step += 1;
-        }
-        if force_after_move.contains(&i) && state.buffered() > 0 {
-            let segs = state.commit(true)?;
-            if !segs.is_empty() {
-                ingestor.ingest(&segs, commit_index);
-                commit_index += 1;
-            }
-        }
-    }
-
-    if state.buffered() > 0 {
-        let segs = state.commit(true)?;
-        if !segs.is_empty() {
-            ingestor.ingest(&segs, commit_index);
-            commit_index += 1;
-        }
-    }
-
+    ingestor.ingest(&segs, 0);
     let mut report = ingestor.report;
     report.moves = n_moves;
-    report.commits = commit_index;
-    Ok(report)
+    report.commits = 1;
+    report
 }
 
 #[cfg(test)]

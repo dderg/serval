@@ -322,8 +322,8 @@ fn nominal_secs(m: &geometry::Move) -> f64 {
 
 #[test]
 fn intake_tally_accrues_nominal_on_intake() {
-    let atomic = AtomicU64::new(0);
-    let mut tally = IntakeTally::new(&atomic);
+    let atomic = Arc::new(AtomicU64::new(0));
+    let mut tally = IntakeTally::new(Arc::clone(&atomic));
     let a = line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]);
     let b = line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]);
     let expected = nominal_secs(&a) + nominal_secs(&b);
@@ -337,8 +337,8 @@ fn intake_tally_accrues_nominal_on_intake() {
 
 #[test]
 fn intake_tally_subtracts_committed_nominal() {
-    let atomic = AtomicU64::new(0);
-    let mut tally = IntakeTally::new(&atomic);
+    let atomic = Arc::new(AtomicU64::new(0));
+    let mut tally = IntakeTally::new(Arc::clone(&atomic));
     let a = line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]);
     let b = line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]);
     let c = line(3, [60.0, 0.0, 0.0], [100.0, 0.0, 0.0]);
@@ -346,7 +346,7 @@ fn intake_tally_subtracts_committed_nominal() {
     tally.record_intake(&b);
     tally.record_intake(&c);
 
-    tally.subtract_committed(1);
+    tally.retire_dispatched(2);
 
     let remaining = nominal_secs(&b) + nominal_secs(&c);
     assert!((f64::from_bits(atomic.load(Ordering::Acquire)) - remaining).abs() < 1e-12);
@@ -354,20 +354,20 @@ fn intake_tally_subtracts_committed_nominal() {
 
 #[test]
 fn intake_tally_empties_to_exactly_zero_on_full_commit() {
-    let atomic = AtomicU64::new(0);
-    let mut tally = IntakeTally::new(&atomic);
+    let atomic = Arc::new(AtomicU64::new(0));
+    let mut tally = IntakeTally::new(Arc::clone(&atomic));
     tally.record_intake(&line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]));
     tally.record_intake(&line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]));
 
-    tally.subtract_committed(2);
+    tally.retire_dispatched(3);
 
     assert_eq!(f64::from_bits(atomic.load(Ordering::Acquire)), 0.0);
 }
 
 #[test]
 fn intake_tally_reset_zeroes_the_signal() {
-    let atomic = AtomicU64::new(0);
-    let mut tally = IntakeTally::new(&atomic);
+    let atomic = Arc::new(AtomicU64::new(0));
+    let mut tally = IntakeTally::new(Arc::clone(&atomic));
     tally.record_intake(&line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]));
 
     tally.reset();
@@ -396,7 +396,7 @@ fn flushed_stream_reads_zero_uncommitted_intake() {
 }
 
 #[test]
-fn partial_commit_head_trim_keeps_intake_tally_bounded() {
+fn mid_stream_dispatch_keeps_intake_tally_bounded() {
     let cap = Capture::default();
     let mut h = StreamWorkerHandle::spawn(
         cfg_cap(256),
