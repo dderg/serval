@@ -1,9 +1,9 @@
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
-use geometry::fitter::UnblendReason;
-use geometry::path::Segment;
+use geometry::path::lowering::PositionProfile;
+use geometry::path::{CurvatureProfile, Segment};
 use geometry::{Move, VelocityProfile, plan_velocity_stops};
 
-use super::{FittedMove, PlannedMove, StreamConfig, jerk_limited_brake_time};
+use super::{PlannedMove, StreamConfig, jerk_limited_brake_time};
 
 /// Cost governor, not a lookahead bound: velocity planning is ~linear in the
 /// window, so re-planning on every arriving move would be quadratic. The window
@@ -11,21 +11,26 @@ use super::{FittedMove, PlannedMove, StreamConfig, jerk_limited_brake_time};
 /// since the last one (an input-empty drain still plans immediately).
 const REPLAN_BATCH_MOVES: usize = 64;
 
-/// Second pipeline stage: plans jerk-limited S-curve velocity over the fitted
-/// geometry and emits `PlannedMove`s whose velocity bodies are final under any
-/// future append.
+/// Second pipeline stage: plans jerk-limited S-curve velocity over the
+/// incoming geometry and emits `PlannedMove`s whose velocity bodies are final
+/// under any future append.
 ///
-/// The window of fitted moves is re-planned warm-started from the velocity
-/// already emitted at the last seam. A prefix is emitted up to the
-/// furthest-forward clean (zero-curvature) seam that is inside the plan's
-/// finality barrier and clear of the brake-to-rest setback — past that point a
-/// move's velocity body is still shaped by the window's tentative terminal
-/// rest, so it must wait. When the input runs empty the deferred brake-to-rest
-/// is materialized: the whole window is planned to rest and emitted, so moves
+/// The planner knows nothing about how the moves were produced: full stops
+/// are derived from the geometry itself — a seam where consecutive moves are
+/// not tangent-continuous (or where a move has no spatial body) anchors the
+/// velocity to rest, so a velocity discontinuity is impossible by
+/// construction.
+///
+/// The window of moves is re-planned warm-started from the velocity already
+/// emitted at the last seam. A prefix is emitted up to the furthest-forward
+/// clean (zero-curvature) seam that is inside the plan's finality barrier and
+/// clear of the brake-to-rest setback — past that point a move's velocity
+/// body is still shaped by the window's tentative terminal rest, so it must
+/// wait. When the input runs empty the deferred brake-to-rest is
+/// materialized: the whole window is planned to rest and emitted, so moves
 /// are never held hoping for input that may not come.
 pub(crate) struct Planner {
     moves: Vec<Move>,
-    unblended_before: Vec<Option<UnblendReason>>,
     entry_v: f64,
     next_plan_len: usize,
     config: StreamConfig,
@@ -35,14 +40,13 @@ impl Planner {
     pub(crate) fn new(config: StreamConfig) -> Self {
         Self {
             moves: Vec::new(),
-            unblended_before: Vec::new(),
             entry_v: 0.0,
             next_plan_len: REPLAN_BATCH_MOVES,
             config,
         }
     }
 
-    pub(crate) fn run(mut self, input: Receiver<FittedMove>, output: Sender<PlannedMove>) {
+    pub(crate) fn run(mut self, input: Receiver<Move>, output: Sender<PlannedMove>) {
         loop {
             let received = if self.moves.is_empty() {
                 input.recv().ok()
@@ -62,8 +66,7 @@ impl Planner {
                 self.drain_to_rest(&output);
                 return;
             };
-            self.moves.push(m.piece);
-            self.unblended_before.push(m.unblended_before);
+            self.moves.push(m);
             if self.moves.len() >= self.next_plan_len.min(self.config.max_buffer_moves) {
                 if !self.emit_committable(&output) {
                     return;
@@ -87,10 +90,8 @@ impl Planner {
     }
 
     fn plan(&self) -> VelocityProfile {
-        let stop_before: Vec<bool> = self
-            .unblended_before
-            .iter()
-            .map(|u| u.is_some_and(|r| r != UnblendReason::Collinear))
+        let stop_before: Vec<bool> = (0..self.moves.len())
+            .map(|i| i > 0 && self.stop_at_seam(i))
             .collect();
         let clock = std::time::Instant::now();
         let profile = plan_velocity_stops(
@@ -165,7 +166,6 @@ impl Planner {
         } else {
             profile.moves[count - 1].exit_v
         };
-        self.unblended_before.drain(..count);
         for (geometry, velocity) in self.moves.drain(..count).zip(profile.moves.iter().cloned()) {
             if output.send(PlannedMove { geometry, velocity }).is_err() {
                 return false;
@@ -175,13 +175,30 @@ impl Planner {
         true
     }
 
-    /// A non-forced emission may cut wherever the fit output resumes a straight
-    /// line body (zero curvature: an unblended seam or the exit of a blend) —
-    /// never inside a blend, where curvature is nonzero and the velocity
-    /// warm-start, which carries only a scalar entry speed, would be invalid.
+    /// A non-forced emission may cut wherever the path resumes a straight line
+    /// body (zero curvature) or comes to a full stop — never inside a curved
+    /// piece, where the velocity warm-start, which carries only a scalar entry
+    /// speed, would be invalid.
     fn is_clean_seam(&self, i: usize) -> bool {
-        self.unblended_before[i].is_some()
-            || matches!(self.moves[i].segment.spatial, Some(Segment::Line(_)))
+        matches!(self.moves[i].segment.spatial, Some(Segment::Line(_))) || self.stop_at_seam(i)
+    }
+
+    /// The toolhead must be at rest across the seam entering move `i` unless
+    /// the path is tangent-continuous there: both sides have spatial bodies
+    /// and the exit heading of one is the entry heading of the other (within
+    /// the same collinearity tolerance the fitter blends corners against).
+    /// Anchoring every non-tangent seam to rest makes a velocity
+    /// discontinuity impossible regardless of what produced the moves.
+    fn stop_at_seam(&self, i: usize) -> bool {
+        let prev = &self.moves[i - 1];
+        let next = &self.moves[i];
+        let (Some(a), Some(b)) = (&prev.segment.spatial, &next.segment.spatial) else {
+            return true;
+        };
+        let t_in = a.heading_at(a.s_len());
+        let t_out = b.heading_at(0.0);
+        let cos_theta = t_in[0] * t_out[0] + t_in[1] * t_out[1] + t_in[2] * t_out[2];
+        cos_theta.clamp(-1.0, 1.0).acos() > self.config.chain.corner.theta_min_rad
     }
 }
 

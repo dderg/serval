@@ -8,7 +8,7 @@ use trajectory::{AxisChainSet, ShapedSegment};
 
 use crate::stream::fitter::Fitter;
 use crate::stream::planner::Planner;
-use crate::stream::{FittedMove, StreamConfig, run_lowerer};
+use crate::stream::{StreamConfig, run_lowerer};
 
 #[pyfunction]
 #[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, heart = None))]
@@ -57,7 +57,7 @@ pub fn pipeline_snapshot(
 
     let seg_list = PyList::empty(py);
     for fm in &fitted {
-        if let Some(spatial) = &fm.piece.segment.spatial {
+        if let Some(spatial) = &fm.segment.spatial {
             let d = segment_to_pydict(py, spatial)?;
             seg_list.append(d)?;
         }
@@ -211,7 +211,7 @@ fn run_pipeline(
     moves: &[geometry::Move],
     config: StreamConfig,
     axis_chains: AxisChainSet,
-) -> (Vec<FittedMove>, Vec<ShapedSegment>) {
+) -> (Vec<geometry::Move>, Vec<ShapedSegment>) {
     let home_pos = moves
         .first()
         .and_then(|m| m.segment.spatial.as_ref())
@@ -225,7 +225,7 @@ fn run_pipeline(
 
     let (fitted_tx, fitted_rx) = unbounded();
     Fitter::new(config.chain).run(raw_rx, fitted_tx);
-    let fitted: Vec<FittedMove> = fitted_rx.into_iter().collect();
+    let fitted: Vec<geometry::Move> = fitted_rx.into_iter().collect();
 
     let (planner_tx, planner_rx) = unbounded();
     for fm in fitted.iter().cloned() {

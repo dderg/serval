@@ -30,6 +30,14 @@ const PANELS = [
   { canvasId: "canvas-jrk", type: "jrk", scalarKey: "j_scalar", compXKey: "jx", compYKey: "jy" },
 ];
 
+// Tooltip wording for the derivative-discontinuity impulses drawn on the
+// acc/jrk panels — a velocity step shows as an infinite accel spike, an
+// accel step shows as an infinite jerk spike.
+const IMPULSE_DESC = {
+  acc: { label: "accel impulse", delta: "Δvel", unit: "mm/s", infOf: "∞ accel" },
+  jrk: { label: "jerk impulse", delta: "Δaccel", unit: "mm/s²", infOf: "∞ jerk" },
+};
+
 // -- View state --------------------------------------------------------------
 let timeView = { tMin: 0, tMax: 0 };
 let pathView = { xMin: 0, xMax: 0, yMin: 0, yMax: 0 };
@@ -145,7 +153,7 @@ function findPeaks(scalar, yMax) {
 const ARRAY_KEYS = [
   "raw_x", "raw_y", "kin_x", "kin_y", "t",
   "vx", "vy", "v_scalar", "ax", "ay", "a_scalar", "jx", "jy", "j_scalar",
-  "jerk_impulse_t", "jerk_impulse_mag",
+  "jerk_impulse_t", "jerk_impulse_mag", "accel_impulse_t", "accel_impulse_mag",
 ];
 
 function memoizeTrajectory(td) {
@@ -438,10 +446,11 @@ class PanelRenderer {
     return best;
   }
 
-  // -- Jerk impulses (accel discontinuities) ---------------------------------
-  // A step in acceleration is an infinite, zero-width jerk spike the analytic
-  // per-piece jerk can't plot. Draw each as a stem whose height encodes |Δa|
-  // relative to the largest impulse; the exact value shows on hover.
+  // -- Derivative impulses (accel/velocity discontinuities) ------------------
+  // A step in acceleration (or velocity) is an infinite, zero-width jerk (or
+  // accel) spike the analytic per-piece derivative can't plot. Draw each as a
+  // stem whose height encodes |Δvalue| relative to the largest impulse on
+  // this panel; the exact value shows on hover.
   drawImpulses(times, mags, tMin, tMax, maxMag) {
     this._impulses = [];
     const bctx = this.ctx;
@@ -669,10 +678,13 @@ function renderAll() {
     renderers[2].renderTimeBuffer(tMin, tMax, 0, aYMax, DATA.ax(), DATA.ay(), aScalar, showPeaks);
     renderers[3].renderTimeBuffer(tMin, tMax, 0, jYMax, DATA.jx(), DATA.jy(), jScalar, showPeaks);
 
-    const impT = DATA.jerk_impulse_t(), impMag = DATA.jerk_impulse_mag();
-    let impMax = 0;
-    for (let i = 0; i < impMag.length; i++) if (impMag[i] > impMax) impMax = impMag[i];
-    renderers[3].drawImpulses(impT, impMag, tMin, tMax, impMax);
+    function drawImpulsesOn(renderer, times, mags) {
+      let max = 0;
+      for (let i = 0; i < mags.length; i++) if (mags[i] > max) max = mags[i];
+      renderer.drawImpulses(times, mags, tMin, tMax, max);
+    }
+    drawImpulsesOn(renderers[2], DATA.accel_impulse_t(), DATA.accel_impulse_mag());
+    drawImpulsesOn(renderers[3], DATA.jerk_impulse_t(), DATA.jerk_impulse_mag());
   }
 
   // Composite all (always — cursor may have moved)
@@ -707,16 +719,18 @@ function setupTimeInteraction(panelIdx) {
       hoverIdx = closestIndex(DATA.t(), dataT);
       scheduleHover();
 
-      // A jerk impulse (accel discontinuity) takes precedence over a peak.
+      // A derivative impulse (accel/velocity discontinuity) takes precedence
+      // over a peak.
       const impulse = r.nearestImpulse(mx, 6);
       const peak = r.nearestPeak(mx, my, 12);
       if (impulse) {
+        const desc = IMPULSE_DESC[r.type];
         tooltipEl.style.display = "block";
         tooltipEl.style.left = (e.clientX + 14) + "px";
         tooltipEl.style.top = (e.clientY - 10) + "px";
         tooltipEl.textContent =
-          `jerk impulse at t=${formatNum(impulse.tVal)}s\n` +
-          `Δaccel=${formatNum(impulse.mag)} mm/s² (∞ jerk)`;
+          `${desc.label} at t=${formatNum(impulse.tVal)}s\n` +
+          `${desc.delta}=${formatNum(impulse.mag)} ${desc.unit} (${desc.infOf})`;
       } else if (peak) {
         tooltipEl.style.display = "block";
         tooltipEl.style.left = (e.clientX + 14) + "px";

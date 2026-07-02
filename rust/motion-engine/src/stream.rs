@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use geometry::path::lowering::PositionProfile;
-use geometry::{ChainFitConfig, Move, MoveVelocity, UnblendReason, VelocityLimits};
+use geometry::{ChainFitConfig, Move, MoveVelocity, VelocityLimits};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
@@ -92,15 +92,6 @@ pub enum PostProcessError {
 // Pipeline types — items that flow between stages
 // ---------------------------------------------------------------------------
 
-/// Fitter output: one G2-continuous piece plus the classification of the seam
-/// entering it, when that seam was left unblended (the velocity planner turns
-/// non-collinear unblends into full-stop anchors).
-#[derive(Clone)]
-pub struct FittedMove {
-    pub piece: Move,
-    pub unblended_before: Option<UnblendReason>,
-}
-
 pub struct PlannedMove {
     pub geometry: Move,
     pub velocity: MoveVelocity,
@@ -126,7 +117,7 @@ pub fn setup_pipeline(
     t_start: f64,
 ) -> PipelineHandle {
     let (raw_tx, raw_rx) = bounded::<Move>(64);
-    let (fitted_tx, fitted_rx) = bounded::<FittedMove>(64);
+    let (fitted_tx, fitted_rx) = bounded::<Move>(64);
     let (planned_tx, planned_rx) = bounded::<PlannedMove>(64);
     let (lowered_tx, lowered_rx) = bounded::<LoweredSegment>(64);
     let (shaped_tx, shaped_rx) = bounded::<ShapedSegment>(64);

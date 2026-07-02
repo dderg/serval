@@ -54,7 +54,7 @@ fn fitted_outcome_has_spatial_segments() {
     let (fitted, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
     let spatial_count = fitted
         .iter()
-        .filter(|fm| fm.piece.segment.spatial.is_some())
+        .filter(|fm| fm.segment.spatial.is_some())
         .count();
     assert!(spatial_count > 0);
 }
