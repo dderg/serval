@@ -1,8 +1,7 @@
-use geometry::path::CurvatureProfile;
-use geometry::{
-    ChainFitConfig, Move, MoveContext, SourceRange, VelocityLimits, fit_chain, line_move,
-    plan_velocity,
-};
+use super::causal::fit;
+use crate::path::CurvatureProfile;
+use crate::velocity::plan_velocity_warm_start;
+use crate::{ChainFitConfig, Move, MoveContext, SourceRange, VelocityLimits, line_move};
 
 const MAX_V: f64 = 150.0;
 const ACCEL: f64 = 200.0;
@@ -43,8 +42,9 @@ struct Sample {
 
 fn plan_samples() -> Vec<Sample> {
     let moves = serpentine();
-    let outcome = fit_chain(&moves, ChainFitConfig::default()).unwrap();
-    let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
+    let outcome = fit(&moves, ChainFitConfig::default()).unwrap();
+    let profile =
+        plan_velocity_warm_start(&outcome, 1e-7, f64::INFINITY, f64::INFINITY, 0.0).unwrap();
     let mut out = Vec::new();
     let mut s_off = 0.0;
     for m in &profile.moves {
@@ -109,8 +109,9 @@ fn c2_accel_within_envelope() {
 #[test]
 fn c2_tangential_within_acceleration_disk() {
     let moves = serpentine();
-    let outcome = fit_chain(&moves, ChainFitConfig::default()).unwrap();
-    let profile = plan_velocity(&outcome, 1e-7, f64::INFINITY, f64::INFINITY).unwrap();
+    let outcome = fit(&moves, ChainFitConfig::default()).unwrap();
+    let profile =
+        plan_velocity_warm_start(&outcome, 1e-7, f64::INFINITY, f64::INFINITY, 0.0).unwrap();
     for (gm, vm) in outcome.moves.iter().zip(profile.moves.iter()) {
         let seg = gm.segment.spatial.as_ref().unwrap();
         for smp in &vm.samples {

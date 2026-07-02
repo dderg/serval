@@ -1,4 +1,5 @@
-use crate::fitter::{ChainFitConfig, HeartKind, UnblendReason, fit_chain};
+use super::fit;
+use crate::fitter::{ChainFitConfig, HeartKind, UnblendReason};
 use crate::frontend::{Move, MoveContext, VelocityLimits, line_move};
 use crate::path::lowering::PositionProfile;
 use crate::path::{Arc, Clothoid, CurvatureProfile, Line, Segment};
@@ -199,7 +200,7 @@ fn worst_kappa_jump(moves: &[Move]) -> f64 {
 fn faceted_arc_reconstructs_for_both_hearts() {
     for heart in HEARTS {
         let moves = faceted_arc(3.0, 12, PI / 2.0, 3000.0, 20.0, 200.0, 0.5);
-        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        let out = fit(&moves, cfg(heart)).unwrap();
         assert_eq!(out.report.chains, 1, "{heart:?}: one faceted-arc run");
         assert!(out.report.unblended.is_empty(), "{heart:?}");
         let arc = arc_in(&out.moves);
@@ -227,7 +228,7 @@ fn straight_to_curve_is_g2_and_in_band_for_both_hearts() {
     let delta = scv * scv * (2.0_f64.sqrt() - 1.0) / accel;
     for heart in HEARTS {
         let moves = faceted_arc_with_leads(3.0, 12, PI / 2.0, 4.0, 0.0);
-        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        let out = fit(&moves, cfg(heart)).unwrap();
         assert_eq!(out.report.chains, 1, "{heart:?}");
         assert!(out.report.unblended.is_empty(), "{heart:?}");
         assert!(
@@ -288,7 +289,7 @@ fn straight_to_curve_is_g2_and_in_band_for_both_hearts() {
 fn exactly_tangent_lead_gets_g2_ramp_for_both_hearts() {
     for heart in HEARTS {
         let moves = tangent_lead_arc(5.0, 12, PI / 2.0, 8.0);
-        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        let out = fit(&moves, cfg(heart)).unwrap();
         assert_eq!(out.report.chains, 1, "{heart:?}");
         assert!(out.report.unblended.is_empty(), "{heart:?}");
 
@@ -343,7 +344,7 @@ fn exactly_tangent_lead_gets_g2_ramp_for_both_hearts() {
 fn tail_easement_is_symmetric_for_both_hearts() {
     for heart in HEARTS {
         let moves = faceted_arc_with_leads(3.0, 12, PI / 2.0, 4.0, 0.0);
-        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        let out = fit(&moves, cfg(heart)).unwrap();
         let i = out
             .moves
             .iter()
@@ -377,7 +378,7 @@ fn extrusion_conserved_across_run_and_easement() {
     for heart in HEARTS {
         let moves = faceted_arc(3.0, 12, PI / 2.0, 3000.0, 20.0, 200.0, 0.42);
         let before = total_extrusion(&moves);
-        let after = total_extrusion(&fit_chain(&moves, cfg(heart)).unwrap().moves);
+        let after = total_extrusion(&fit(&moves, cfg(heart)).unwrap().moves);
         assert!(
             (before - after).abs() < 1e-9,
             "{heart:?} run before {before} after {after}"
@@ -385,7 +386,7 @@ fn extrusion_conserved_across_run_and_easement() {
 
         let leads = faceted_arc_with_leads(3.0, 12, PI / 2.0, 4.0, 0.42);
         let before = total_extrusion(&leads);
-        let after = total_extrusion(&fit_chain(&leads, cfg(heart)).unwrap().moves);
+        let after = total_extrusion(&fit(&leads, cfg(heart)).unwrap().moves);
         assert!(
             (before - after).abs() < 1e-9,
             "{heart:?} eased before {before} after {after}"
@@ -396,7 +397,7 @@ fn extrusion_conserved_across_run_and_easement() {
 #[test]
 fn no_arc_fit_config_never_chains() {
     let moves = faceted_arc(3.0, 12, PI / 2.0, 3000.0, 20.0, 200.0, 0.0);
-    let out = fit_chain(&moves, ChainFitConfig::default()).unwrap();
+    let out = fit(&moves, ChainFitConfig::default()).unwrap();
     assert_eq!(out.report.chains, 0);
     assert!(!has_clothoid(&out.moves) || out.report.blended > 0);
 }
@@ -409,7 +410,7 @@ fn sharp_corners_do_not_chain() {
             seg(2, 3000.0, 5.0, 200.0, [0.5, 0.0, 0.0], [0.5, 0.5, 0.0], 0.0),
             seg(3, 3000.0, 5.0, 200.0, [0.5, 0.5, 0.0], [0.0, 0.5, 0.0], 0.0),
         ];
-        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        let out = fit(&moves, cfg(heart)).unwrap();
         assert_eq!(out.report.chains, 0, "{heart:?}");
     }
 }
@@ -418,7 +419,7 @@ fn sharp_corners_do_not_chain() {
 fn long_facets_rejected_by_bulge() {
     for heart in HEARTS {
         let moves = faceted_arc(100.0, 4, 0.4, 3000.0, 20.0, 200.0, 0.0);
-        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        let out = fit(&moves, cfg(heart)).unwrap();
         assert_eq!(out.report.chains, 0, "{heart:?}");
     }
 }
@@ -432,7 +433,7 @@ fn virtual_move_breaks_the_chain() {
         virt.segment.spatial = None;
         virt.segment.virtual_path_mm = Some(0.5);
         moves.insert(split, virt);
-        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        let out = fit(&moves, cfg(heart)).unwrap();
         assert!(out.report.chains <= 2, "{heart:?}");
         assert!(
             out.moves.iter().any(|m| m.segment.spatial.is_none()),
@@ -467,7 +468,7 @@ fn arc_line_corner_blends_g2() {
             add(verts[n], [4.0, 0.0, 0.0]),
             0.0,
         ));
-        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        let out = fit(&moves, cfg(heart)).unwrap();
         assert_eq!(out.report.chains, 1, "{heart:?}");
         assert!(has_clothoid(&out.moves), "{heart:?}");
         let reasons: Vec<UnblendReason> = out.report.unblended.iter().map(|u| u.reason).collect();
@@ -508,7 +509,7 @@ fn isolated_corner_matches_per_corner() {
                 5.0,
             ),
         ];
-        let chain = fit_chain(&moves, cfg(heart)).unwrap();
+        let chain = fit(&moves, cfg(heart)).unwrap();
         let corners = fit_corners(&moves, Default::default()).unwrap();
         assert_eq!(chain.report.chains, 0, "{heart:?}");
         assert_eq!(chain.report.blended, corners.report.blended, "{heart:?}");
@@ -528,7 +529,7 @@ fn short_chain_passes_through() {
             [10.0, 0.0, 0.0],
             0.0,
         )];
-        let out = fit_chain(&one, cfg(heart)).unwrap();
+        let out = fit(&one, cfg(heart)).unwrap();
         assert_eq!(out.moves.len(), 1, "{heart:?}");
         assert_eq!(out.report.chains, 0, "{heart:?}");
     }
@@ -552,7 +553,7 @@ fn reconstructed_arc_endpoints_anchor_to_vertices() {
         .map(|(i, w)| seg((i + 1) as u32, 3000.0, 20.0, 200.0, w[0], w[1], 0.0))
         .collect();
     for heart in HEARTS {
-        let out = fit_chain(&moves, cfg(heart)).unwrap();
+        let out = fit(&moves, cfg(heart)).unwrap();
         assert_eq!(out.report.chains, 1, "{heart:?}");
         let arc = arc_in(&out.moves);
         assert!(

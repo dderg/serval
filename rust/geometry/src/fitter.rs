@@ -449,10 +449,6 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
     Ok(FitOutcome { moves: out, report })
 }
 
-pub fn fit_chain(moves: &[Move], config: ChainFitConfig) -> Result<FitOutcome, FitError> {
-    causal::fit(moves, config)
-}
-
 fn classify_junction(
     m_in: &Move,
     m_out: &Move,
@@ -641,3 +637,16 @@ fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod c2_continuity_tests;
+#[cfg(test)]
+mod cruise_onset_tests;
+#[cfg(test)]
+mod fit_proptest;
+#[cfg(test)]
+mod heart_comparison_tests;
+#[cfg(test)]
+mod integration_pipeline_tests;
+#[cfg(test)]
+mod plan_velocity_bench;

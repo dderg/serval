@@ -18,7 +18,7 @@ pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, S
 pub use execution::lower_profile;
 pub use fitter::{
     ArcFitConfig, ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, HeartKind,
-    UnblendReason, UnblendedJunction, fit_chain, fit_corners,
+    UnblendReason, UnblendedJunction, fit_corners,
 };
 pub use frontend::{FrontendError, Move, MoveContext, VelocityLimits, arc_move, line_move};
 pub use params::FitterParams;
@@ -38,5 +38,5 @@ pub use splitter::{SplitError, split_segment_to_cap};
 pub use telemetry::TelemetryEvent;
 pub use velocity::{
     MoveVelocity, StraightPhase, VelSample, VelocityError, VelocityProfile, VelocityReport,
-    plan_velocity, plan_velocity_stops, plan_velocity_warm_start,
+    plan_velocity_stops, plan_velocity_warm_start,
 };

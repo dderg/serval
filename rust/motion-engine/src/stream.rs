@@ -10,10 +10,10 @@ use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedS
 
 use crate::lowering::lower_move;
 
-mod fitter;
+pub(crate) mod fitter;
 #[cfg(test)]
 mod fitter_tests;
-mod planner;
+pub(crate) mod planner;
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 pub(crate) const CONTIGUITY_EPS_MM: f64 = 1e-6;
@@ -95,6 +95,7 @@ pub enum PostProcessError {
 /// Fitter output: one G2-continuous piece plus the classification of the seam
 /// entering it, when that seam was left unblended (the velocity planner turns
 /// non-collinear unblends into full-stop anchors).
+#[derive(Clone)]
 pub struct FittedMove {
     pub piece: Move,
     pub unblended_before: Option<UnblendReason>,
@@ -167,7 +168,7 @@ fn spawn_stage(name: &str, f: impl FnOnce() + Send + 'static) {
 
 /// Third pipeline stage: lowers each planned move into a dispatchable
 /// `ShapedSegment`, advancing the trajectory clock and odometer as it goes.
-fn run_lowerer(
+pub(crate) fn run_lowerer(
     input: Receiver<PlannedMove>,
     output: Sender<LoweredSegment>,
     fit_tol_mm: f64,
@@ -215,7 +216,7 @@ fn run_lowerer(
 /// next windows read. A rest ending lets the buffer flush with the window
 /// clamped (the signal is constant past a rest point), so the trajectory's
 /// tail is never held hostage to input that may not come.
-struct Shaper {
+pub(crate) struct Shaper {
     chains: AxisChainSet,
     history: VecDeque<ShapedSegment>,
     pending: VecDeque<ShapedSegment>,
@@ -225,7 +226,7 @@ struct Shaper {
 }
 
 impl Shaper {
-    fn new(chains: AxisChainSet) -> Self {
+    pub(crate) fn new(chains: AxisChainSet) -> Self {
         let forward_support = chains
             .chains
             .iter()
@@ -246,7 +247,7 @@ impl Shaper {
         }
     }
 
-    fn run(mut self, input: Receiver<LoweredSegment>, output: Sender<ShapedSegment>) {
+    pub(crate) fn run(mut self, input: Receiver<LoweredSegment>, output: Sender<ShapedSegment>) {
         loop {
             match input.recv() {
                 Ok(item) => {

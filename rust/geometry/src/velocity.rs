@@ -103,21 +103,6 @@ struct MoveCaps {
     kappa_peak: f64,
 }
 
-pub fn plan_velocity(
-    outcome: &FitOutcome,
-    integration_tol: f64,
-    max_extrude_only_velocity_mm_s: f64,
-    max_extrude_only_accel_mm_s2: f64,
-) -> Result<VelocityProfile, VelocityError> {
-    plan_velocity_warm_start(
-        outcome,
-        integration_tol,
-        max_extrude_only_velocity_mm_s,
-        max_extrude_only_accel_mm_s2,
-        0.0,
-    )
-}
-
 pub fn plan_velocity_warm_start(
     outcome: &FitOutcome,
     integration_tol: f64,

@@ -19,7 +19,13 @@ fn with_jerk(mut moves: Vec<Move>, jerk: f64) -> Vec<Move> {
 }
 
 fn plan(out: &FitOutcome) -> Result<VelocityProfile, VelocityError> {
-    plan_velocity(out, DEFAULT_INTEGRATION_TOL, f64::INFINITY, f64::INFINITY)
+    plan_velocity_warm_start(
+        out,
+        DEFAULT_INTEGRATION_TOL,
+        f64::INFINITY,
+        f64::INFINITY,
+        0.0,
+    )
 }
 
 fn plan_warm(out: &FitOutcome, entry_v: f64) -> Result<VelocityProfile, VelocityError> {
@@ -360,7 +366,7 @@ fn invalid_integration_tol_is_rejected() {
     let out = outcome(vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)], Vec::new());
     for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e-12] {
         assert_eq!(
-            plan_velocity(&out, bad, f64::INFINITY, f64::INFINITY),
+            plan_velocity_warm_start(&out, bad, f64::INFINITY, f64::INFINITY, 0.0),
             Err(VelocityError::InvalidConfig)
         );
     }
@@ -372,11 +378,11 @@ fn invalid_extrude_only_limits_are_rejected() {
     let out = outcome(vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)], Vec::new());
     for bad in [0.0, -1.0, f64::NAN] {
         assert_eq!(
-            plan_velocity(&out, DEFAULT_INTEGRATION_TOL, bad, f64::INFINITY),
+            plan_velocity_warm_start(&out, DEFAULT_INTEGRATION_TOL, bad, f64::INFINITY, 0.0),
             Err(VelocityError::InvalidConfig)
         );
         assert_eq!(
-            plan_velocity(&out, DEFAULT_INTEGRATION_TOL, f64::INFINITY, bad),
+            plan_velocity_warm_start(&out, DEFAULT_INTEGRATION_TOL, f64::INFINITY, bad, 0.0),
             Err(VelocityError::InvalidConfig)
         );
     }
@@ -388,7 +394,8 @@ fn extrude_only_velocity_caps_pure_e_move() {
         vec![virtual_move(10.0, 100.0, 200.0, 1000.0, 1)],
         Vec::new(),
     );
-    let plan = plan_velocity(&out, DEFAULT_INTEGRATION_TOL, 5.0, f64::INFINITY).unwrap();
+    let plan =
+        plan_velocity_warm_start(&out, DEFAULT_INTEGRATION_TOL, 5.0, f64::INFINITY, 0.0).unwrap();
     let peak = plan.moves[0].peak_v;
     assert!(
         peak <= 5.0 + 1e-9,
@@ -409,7 +416,8 @@ fn extrude_only_accel_caps_pure_e_move() {
         ),
         Vec::new(),
     );
-    let plan = plan_velocity(&out, DEFAULT_INTEGRATION_TOL, f64::INFINITY, 10.0).unwrap();
+    let plan =
+        plan_velocity_warm_start(&out, DEFAULT_INTEGRATION_TOL, f64::INFINITY, 10.0, 0.0).unwrap();
     let apex = (10.0_f64 * 0.5).sqrt();
     assert!((plan.moves[0].peak_v - apex).abs() < 1e-6);
 }
@@ -418,7 +426,7 @@ fn extrude_only_accel_caps_pure_e_move() {
 fn extrude_only_limits_do_not_affect_spatial_move() {
     let out = outcome(vec![line_move(10.0, 50.0, 100.0, 1000.0, 1)], Vec::new());
     let base = plan(&out).unwrap().moves[0].peak_v;
-    let capped = plan_velocity(&out, DEFAULT_INTEGRATION_TOL, 1.0, 1.0)
+    let capped = plan_velocity_warm_start(&out, DEFAULT_INTEGRATION_TOL, 1.0, 1.0, 0.0)
         .unwrap()
         .moves[0]
         .peak_v;

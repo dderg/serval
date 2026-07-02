@@ -158,9 +158,6 @@ function memoizeTrajectory(td) {
   wrap.segment_type = (i) => td.segment_type(i);
   wrap.segment_data = (i) => td.segment_data(i);
   wrap.traversal_time = () => td.traversal_time();
-  wrap.blended_corners = () => td.blended_corners();
-  wrap.chain_fits = () => td.chain_fits();
-  wrap.unblended_corners = () => td.unblended_corners();
   wrap.point_count = () => td.point_count();
   return wrap;
 }
@@ -955,7 +952,6 @@ function updateMeta() {
   document.getElementById("meta").textContent =
     `t=${DATA.traversal_time().toFixed(3)}s  ` +
     `[${segmentSummary()}]  ` +
-    `${DATA.blended_corners()} blended, ${DATA.chain_fits()} chains, ` +
     `${DATA.point_count()} pts`;
 }
 

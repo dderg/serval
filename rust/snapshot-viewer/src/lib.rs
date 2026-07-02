@@ -10,9 +10,6 @@ struct Snapshot {
     raw_y: Vec<f64>,
     fitted_segments: Vec<serde_json::Value>,
     traversal_time_s: f64,
-    blended_corners: usize,
-    chain_fits: usize,
-    unblended_corners: usize,
     // The lowered trajectory the firmware executes: per-axis pieces
     // [t0, t1, c0, c1, …] of position vs time (cubic = 6 floats). Variable-length
     // so any baseline degree loads — missing high coefficients read as zero — and
@@ -487,9 +484,6 @@ pub struct TrajectoryData {
     jerk_impulse_t: Vec<f64>,
     jerk_impulse_mag: Vec<f64>,
     traversal_time_s: f64,
-    blended_corners: usize,
-    chain_fits: usize,
-    unblended_corners: usize,
 }
 
 #[wasm_bindgen]
@@ -530,9 +524,6 @@ impl TrajectoryData {
             jerk_impulse_t,
             jerk_impulse_mag,
             traversal_time_s: snap.traversal_time_s,
-            blended_corners: snap.blended_corners,
-            chain_fits: snap.chain_fits,
-            unblended_corners: snap.unblended_corners,
         })
     }
 
@@ -593,15 +584,6 @@ impl TrajectoryData {
     // Metadata
     pub fn traversal_time(&self) -> f64 {
         self.traversal_time_s
-    }
-    pub fn blended_corners(&self) -> usize {
-        self.blended_corners
-    }
-    pub fn chain_fits(&self) -> usize {
-        self.chain_fits
-    }
-    pub fn unblended_corners(&self) -> usize {
-        self.unblended_corners
     }
     pub fn point_count(&self) -> usize {
         self.t.len()

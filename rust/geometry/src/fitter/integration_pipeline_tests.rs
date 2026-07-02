@@ -1,8 +1,10 @@
-use geometry::path::Segment;
-use geometry::path::lowering::LoweredSample;
-use geometry::{
+use super::causal::fit;
+use crate::path::Segment;
+use crate::path::lowering::LoweredSample;
+use crate::velocity::plan_velocity_warm_start;
+use crate::{
     ChainFitConfig, FitOutcome, Move, MoveContext, SourceRange, VelocityLimits, VelocityProfile,
-    arc_move, fit_chain, line_move, lower_profile, plan_velocity,
+    arc_move, line_move, lower_profile,
 };
 
 const MAX_V: f64 = 300.0;
@@ -96,9 +98,9 @@ struct Planned {
 }
 
 fn plan(moves: &[Move]) -> Planned {
-    let geometry = fit_chain(moves, ChainFitConfig::default()).expect("fit_chain");
-    let profile =
-        plan_velocity(&geometry, 1e-7, f64::INFINITY, f64::INFINITY).expect("plan_velocity");
+    let geometry = fit(moves, ChainFitConfig::default()).expect("fit");
+    let profile = plan_velocity_warm_start(&geometry, 1e-7, f64::INFINITY, f64::INFINITY, 0.0)
+        .expect("plan_velocity_warm_start");
     let samples = lower_profile(&geometry, &profile, RATE_HZ).expect("lower_profile");
     Planned {
         geometry,
@@ -350,7 +352,7 @@ fn long_straight_cruises_at_feed_cap() {
 #[test]
 fn single_move_passthrough() {
     let moves = vec![line(1, 100.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0)];
-    let outcome = fit_chain(&moves, ChainFitConfig::default()).expect("fit_chain");
+    let outcome = fit(&moves, ChainFitConfig::default()).expect("fit");
     assert_eq!(
         outcome.moves.len(),
         1,
@@ -366,11 +368,11 @@ fn single_move_passthrough() {
 #[test]
 fn empty_input_yields_empty_trajectory() {
     let moves: Vec<Move> = Vec::new();
-    let geometry = fit_chain(&moves, ChainFitConfig::default()).expect("fit_chain on empty");
+    let geometry = fit(&moves, ChainFitConfig::default()).expect("fit on empty");
     assert!(geometry.moves.is_empty());
 
-    let profile =
-        plan_velocity(&geometry, 1e-7, f64::INFINITY, f64::INFINITY).expect("plan_velocity empty");
+    let profile = plan_velocity_warm_start(&geometry, 1e-7, f64::INFINITY, f64::INFINITY, 0.0)
+        .expect("plan_velocity_warm_start empty");
     assert!(profile.moves.is_empty());
 
     let samples = lower_profile(&geometry, &profile, RATE_HZ).expect("lower_profile empty");
