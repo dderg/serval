@@ -161,10 +161,10 @@ pub enum StreamPlannerError {
 impl std::fmt::Display for StreamPlannerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ChannelClosed => write!(f, "stream planner channel closed"),
+            Self::ChannelClosed => write!(f, "stream worker channel closed"),
             Self::ChannelFull => write!(
                 f,
-                "stream planner input channel full ({INPUT_CHANNEL_CAP} \
+                "stream worker input channel full ({INPUT_CHANNEL_CAP} \
                  moves) — host backpressure gate bypassed"
             ),
         }
@@ -190,7 +190,7 @@ impl StreamPlannerHandle {
         let commit_thread = Arc::clone(&commit_fire_count);
         let intake_thread = Arc::clone(&uncommitted_intake_secs);
         let join = thread::Builder::new()
-            .name("kalico-stream-planner".to_string())
+            .name("kalico-stream-worker".to_string())
             .spawn(move || {
                 let state = StreamState::new(config, axis_chains, &home_pos, 0.0);
                 run_loop(
@@ -203,7 +203,7 @@ impl StreamPlannerHandle {
                     &intake_thread,
                 );
             })
-            .expect("spawn stream planner thread");
+            .expect("spawn stream worker thread");
 
         Self {
             sender: tx,
@@ -386,11 +386,11 @@ impl<'a> IntakeTally<'a> {
 fn fatal(msg: &str) -> ! {
     tracing::error!(
         subsystem = "motion",
-        event = "stream_planner_fatal",
+        event = "stream_worker_fatal",
         error = msg,
-        "stream planner encountered an unrecoverable error — aborting"
+        "stream worker encountered an unrecoverable error — aborting"
     );
-    eprintln!("kalico stream planner fatal: {msg}");
+    eprintln!("kalico stream worker fatal: {msg}");
     std::thread::sleep(Duration::from_millis(100));
     std::process::abort();
 }

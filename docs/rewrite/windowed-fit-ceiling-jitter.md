@@ -18,8 +18,8 @@ the strict `OverCommitted` guard aborts klippy.
 
 ## Symptom
 
-- `stream_planner_fatal: velocity plan: OverCommitted { line_no: N }` →
-  `std::process::abort()` (rust/motion-engine/src/stream_planner.rs `fatal`),
+- `stream_worker_fatal: velocity plan: OverCommitted { line_no: N }` →
+  `std::process::abort()` (rust/motion-engine/src/stream_worker.rs `fatal`),
   klippy dies mid-print; the MCU drains its ring so motion looks like it
   "completed early" in Mainsail.
 - Reproduces on `cold_run.gcode` (Neptune bench) every run once the buffer-drain
@@ -115,7 +115,7 @@ Candidate approaches (pick after answering the local-vs-global question above):
   through one-move-per-commit and asserts no commit errors.
 - Add an invariance assertion: the fitted curvature/ceiling of a move is equal
   (within a tight numeric tol) whether fit in a short window or a long one.
-- Bench: `cold_run.gcode` streams to completion with no `stream_planner_fatal`.
+- Bench: `cold_run.gcode` streams to completion with no `stream_worker_fatal`.
 
 ## Interim mitigation (shipping first, take-1)
 

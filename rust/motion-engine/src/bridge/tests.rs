@@ -6,7 +6,7 @@ use host_rt::host_io::{McuHostIo, McuHostIoConfig};
 use host_rt::mcu_serial_conn::McuSerialConn;
 
 use crate::config::PlannerConfig;
-use crate::stream_planner::{DispatchError, StreamPlannerHandle};
+use crate::stream_worker::{DispatchError, StreamPlannerHandle};
 use trajectory::ShapedSegment;
 
 use super::{McuConnection, PyMotionEngine};

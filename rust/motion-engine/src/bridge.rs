@@ -19,7 +19,7 @@ use crate::classify;
 use crate::config::{self, PlannerConfig};
 use crate::dispatch::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
-use crate::stream_planner::{
+use crate::stream_worker::{
     DispatchError, HomeDripParams, NudgeParams, SegmentDispatchCtx, StreamPlannerError,
     StreamPlannerHandle,
 };
@@ -2379,7 +2379,7 @@ impl PyMotionEngine {
                 PyRuntimeError::new_err("planner not initialized — call init_planner first")
             })?;
             planner
-                .submit_nudge(crate::stream_planner::NudgeParams {
+                .submit_nudge(crate::stream_worker::NudgeParams {
                     mcu_id,
                     axis: axis_idx,
                     motor_mask,
@@ -3334,7 +3334,7 @@ impl PyMotionEngine {
             dyn Fn(&trajectory::ShapedSegment) -> Result<(), DispatchError> + Send + Sync,
         > = Arc::new(
             move |seg: &trajectory::ShapedSegment| -> Result<(), DispatchError> {
-                crate::stream_planner::dispatch_segment(&dispatch_ctx, seg)
+                crate::stream_worker::dispatch_segment(&dispatch_ctx, seg)
             },
         );
 
@@ -3935,7 +3935,7 @@ impl PyMotionEngine {
     }
 
     fn input_channel_capacity(&self) -> u64 {
-        crate::stream_planner::INPUT_CHANNEL_CAP as u64
+        crate::stream_worker::INPUT_CHANNEL_CAP as u64
     }
 
     fn uncommitted_intake_secs(&self) -> f64 {
@@ -4035,7 +4035,7 @@ impl PyMotionEngine {
         endstop_id: u8,
         endstop_mcu: u32,
     ) -> PyResult<()> {
-        use crate::stream_planner::HomeDripParams;
+        use crate::stream_worker::HomeDripParams;
 
         if axis > 2 {
             return Err(PyRuntimeError::new_err(format!(
