@@ -293,10 +293,11 @@ fn infinite_jerk_profile(
 /// grid; the event-driven pass in [`ride`] integrates the brake envelope
 /// backward from the exit anchor and the profile forward against
 /// `min(vlc, brake)`, in time, as bang-bang constant-jerk phases with tangent
-/// landings. The emitted `a` is the pass's true acceleration state. On an
-/// all-straight run every event is closed-form and the phase chain is
-/// complete, so the run lowers to exact cubics; otherwise the chain is empty
-/// and callers fit the samples.
+/// landings. The emitted `a` is the pass's true acceleration state. Every step
+/// the pass takes is a constant-jerk cubic — curved substeps and cap-chord
+/// rides included — so the phase chain is normally complete for any run and
+/// the samples are re-derived from it exactly; only a stall or a rejected
+/// splice leaves the chain empty, falling back to the node states.
 fn reconstruct_flat(
     members: &[RunMember],
     run_start_v: f64,
@@ -320,9 +321,7 @@ fn reconstruct_flat(
             Vec::new(),
         );
     }
-    let straight = members.iter().all(|m| m.kin.is_straight());
-
-    let (bwd_v, brake_chain) = {
+    let (bwd_v, brake_chain, bwd_feasible) = {
         let s_rev: Vec<f64> = (0..n).map(|k| s[n - 1] - s[n - 1 - k]).collect();
         let rev = |a: &[f64]| -> Vec<f64> { (0..n).map(|k| a[n - 1 - k]).collect() };
         let (vlc_rev, accel_rev, kappa_rev) = (rev(&vlc), rev(&accel), rev(&kappa));
@@ -335,17 +334,20 @@ fn reconstruct_flat(
             kappa: &kappa_rev,
             j_max: jerk,
         };
-        let pass = ride::reach_pass(&track, exit_v, 0.0, straight, None);
-        let chain = if straight && pass.analytic {
+        let pass = ride::reach_pass(&track, exit_v, 0.0, None);
+        let chain = if pass.complete {
             ride::reverse_chain(&pass.phases, s[n - 1] - s[0])
         } else {
             Vec::new()
         };
-        (rev(&pass.v), chain)
+        let feasible: Vec<bool> = (0..n).map(|k| pass.feasible[n - 1 - k]).collect();
+        (rev(&pass.v), chain, feasible)
     };
 
     let cap_v: Vec<f64> = (0..n).map(|i| vlc[i].min(bwd_v[i])).collect();
-    let binding: Vec<bool> = (0..n).map(|i| bwd_v[i] <= vlc[i]).collect();
+    let binding: Vec<bool> = (0..n)
+        .map(|i| bwd_v[i] <= vlc[i] && bwd_feasible[i])
+        .collect();
     let cap_a = chord_slopes(&s, &cap_v);
     let track = ride::Track {
         s: &s,
@@ -360,11 +362,12 @@ fn reconstruct_flat(
         binding: &binding,
     };
     let start_v = entry_v.min(cap_v[0]);
-    let mut pass = ride::reach_pass(&track, start_v, run_start_a, straight, Some(&brake));
-    if pass.analytic && !pass.phases.is_empty() {
+    let mut pass = ride::reach_pass(&track, start_v, run_start_a, Some(&brake));
+    if pass.complete && !pass.phases.is_empty() {
         for (i, (v, a)) in ride::chain_states(&pass.phases, &s).into_iter().enumerate() {
             pass.v[i] = v.min(cap_v[i]);
-            pass.a[i] = a;
+            let rail = disk_rail_accel(accel[i], kappa[i], pass.v[i]);
+            pass.a[i] = a.clamp(-rail, rail);
         }
     }
 
@@ -377,7 +380,7 @@ fn reconstruct_flat(
         pass.a[n - 1] = 0.0;
     }
     let samples = (0..n).map(|i| (s[i], pass.v[i], pass.a[i])).collect();
-    let phases = if pass.analytic {
+    let phases = if pass.complete {
         pass.phases
     } else {
         Vec::new()
@@ -407,8 +410,9 @@ fn interp_flat(flat: &[(f64, f64, f64)], s: f64) -> Option<(f64, f64)> {
 /// Reconstruct the run: per-member `(s, v, a)` samples, the profile state
 /// `(v, a)` at each member's exit seam (what a streaming cut carries into the
 /// next window to continue this exact curve), and per-member closed-form jerk
-/// phases in move-local time/arc-length (complete for all-straight runs,
-/// empty otherwise).
+/// phases in move-local time/arc-length. Straight members get their clip of
+/// the run's chain — the exact-cubic lowering assumes each axis is a constant
+/// scale of arc-length, so curved members get none and lower by fitting.
 #[allow(clippy::type_complexity)]
 pub(super) fn reconstruct_run(
     members: &[RunMember],
@@ -453,10 +457,15 @@ pub(super) fn reconstruct_run(
         }
         per_member.push(local);
         exit_states.push(exit_state_at(&flat, s1));
-        per_member_phases.push(if chain.is_empty() {
+        per_member_phases.push(if chain.is_empty() || !m.kin.is_straight() {
             Vec::new()
         } else {
-            ride::clip_phases(&chain, s0, s1)
+            let clipped = ride::clip_phases(&chain, s0, s1);
+            if ride::chain_is_c1(&clipped) {
+                clipped
+            } else {
+                Vec::new()
+            }
         });
     }
     Some((per_member, exit_states, per_member_phases))

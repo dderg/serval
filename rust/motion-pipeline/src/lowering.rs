@@ -346,7 +346,8 @@ pub fn lower_move_pieces(
     // the arc-length profile; a ramped follower's ratio varies along the move, so
     // route those through the sampled fit instead. Constant followers (every
     // straight slicer move) keep the exact phase path.
-    if !vm.phases.is_empty() && !gm.segment.followers.iter().any(|f| f.is_ramped()) {
+    let ramped = gm.segment.followers.iter().any(|f| f.is_ramped());
+    if !vm.phases.is_empty() && !ramped {
         return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains);
     }
     let (profile, total_t) = build_profile(&vm.samples)?;

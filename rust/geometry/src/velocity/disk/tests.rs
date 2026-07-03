@@ -272,6 +272,52 @@ fn line_clothoid_line_from_rest_is_jerk_clean_on_the_straights() {
 }
 
 #[test]
+fn mixed_run_straight_members_emit_exact_phases() {
+    let (accel, jerk, flat) = (1000.0, 1e5, 60.0);
+    let l1 = kin(0.0, 0.0, 10.0, accel, jerk, flat);
+    let c1 = kin(0.0, 0.1, 2.0, accel, jerk, flat);
+    let c2 = kin(0.2, -0.1, 2.0, accel, jerk, flat);
+    let l2 = kin(0.0, 0.0, 10.0, accel, jerk, flat);
+    let members = run_members(&[&l1, &c1, &c2, &l2], 0.0);
+    let (per_member, _, phases) = reconstruct_run(&members, 0.0, 0.0, 1e-8).unwrap();
+    assert!(
+        !phases[0].is_empty() && !phases[3].is_empty(),
+        "straight members of a mixed run lower from exact phases"
+    );
+    assert!(
+        phases[1].is_empty() && phases[2].is_empty(),
+        "curved members lower by fitting"
+    );
+    for idx in [0usize, 3] {
+        let chain = &phases[idx];
+        let first = &chain[0];
+        assert!(
+            first.t0.abs() < 1e-9 && first.s0.abs() < 1e-9,
+            "member {idx} chain rebased: t0={} s0={}",
+            first.t0,
+            first.s0
+        );
+        let last = chain.last().unwrap();
+        let end_s = last.s0
+            + last.v0 * last.dt
+            + 0.5 * last.a0 * last.dt * last.dt
+            + last.j * last.dt.powi(3) / 6.0;
+        assert!(
+            (end_s - members[idx].kin.length).abs() < 1e-6,
+            "member {idx} phases span {end_s} of {}",
+            members[idx].kin.length
+        );
+        let s: Vec<f64> = per_member[idx].iter().map(|p| p.0).collect();
+        for (&(sx, v, _), (cv, _)) in per_member[idx].iter().zip(ride::chain_states(chain, &s)) {
+            assert!(
+                (v - cv).abs() <= 1e-6 * (1.0 + v),
+                "member {idx}: sample v={v} vs chain v={cv} at s={sx}"
+            );
+        }
+    }
+}
+
+#[test]
 fn mixed_run_entry_matches_straight_run_entry() {
     // The same rest-start on the same line must produce the same profile
     // whether or not a clothoid follows later in the chain.

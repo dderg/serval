@@ -66,9 +66,17 @@ pub(super) struct BrakeChain<'a> {
 pub(super) struct Pass {
     pub v: Vec<f64>,
     pub a: Vec<f64>,
-    /// Constant-jerk phase chain in run frame; complete only when `analytic`.
+    /// Per node: the emitted state respects the disk and jerk dynamics. False
+    /// where the pass rode a cap chord braking harder than the disk rail —
+    /// the backward pass does this descending a raw-vlc wall it has no brake
+    /// envelope to be caught by, and such nodes must not count as `binding`.
+    pub feasible: Vec<bool>,
+    /// Constant-jerk phase chain in run frame, tiling the whole pass when
+    /// `complete`. Curved-cell substeps and cap-chord rides are phases too —
+    /// each is a constant-jerk cubic — so mixed runs chain as well as straight
+    /// ones; only a stall or a rejected splice leaves the chain incomplete.
     pub phases: Vec<StraightPhase>,
-    pub analytic: bool,
+    pub complete: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -334,16 +342,26 @@ enum Mode {
 struct PhaseLog {
     phases: Vec<StraightPhase>,
     active: bool,
-    analytic: bool,
+    complete: bool,
     open: Option<(State, f64)>,
 }
 
+/// Whether `st` lies on the constant-jerk cubic from `p0` — i.e. the open
+/// phase still describes the motion. A rail clamp or a node snap mutates the
+/// state off the cubic; the phase must close there so the chain stays exact.
+fn on_cubic(p0: State, j: f64, st: State) -> bool {
+    let e = advance(p0, j, st.t - p0.t);
+    (e.s - st.s).abs() <= rel_eps(st.s)
+        && (e.v - st.v).abs() <= rel_eps(st.v)
+        && (e.a - st.a).abs() <= rel_eps(st.a)
+}
+
 impl PhaseLog {
-    fn new(active: bool) -> Self {
+    fn new() -> Self {
         Self {
             phases: Vec::new(),
-            active,
-            analytic: active,
+            active: true,
+            complete: true,
             open: None,
         }
     }
@@ -352,8 +370,8 @@ impl PhaseLog {
         if !self.active {
             return;
         }
-        if let Some((_, j0)) = self.open {
-            if j0 == j {
+        if let Some((p0, j0)) = self.open {
+            if j0 == j && on_cubic(p0, j0, st) {
                 return;
             }
         }
@@ -379,35 +397,64 @@ impl PhaseLog {
 
     fn opaque(&mut self, st: State) {
         self.close(st);
-        self.analytic = false;
+        self.complete = false;
         self.active = false;
         self.phases.clear();
     }
 
-    /// Replace everything from `st` on with the brake chain's tail.
-    fn splice(&mut self, st: State, chain: &[StraightPhase]) {
+    /// Adopt the brake chain over `[st.s, s_hi]`: append its clipped phases in
+    /// place of integrating the stretch, returning the state at `s_hi` for the
+    /// pass to resume from. `None` (no log mutation) if the chain does not
+    /// meet the pass's state at `st` — the pass then integrates the stretch
+    /// itself. Only the velocity is checked at the joint: the landing state
+    /// carries up to a cell of chord smear in `a`, which the chain absorbs.
+    fn splice(&mut self, st: State, chain: &[StraightPhase], s_hi: f64) -> Option<State> {
         if !self.active {
-            return;
+            return None;
         }
-        self.close(st);
-        let Some(tail) = clip_chain_from(chain, st.s) else {
-            self.opaque(st);
-            return;
-        };
-        // The chain is exact; the landing state carries up to a cell of chord
-        // smear, so only the velocity is checked — the samples are re-derived
-        // from the chain afterwards, which absorbs the accel mismatch.
+        let tail = clip_chain_from(chain, st.s)?;
         let head = &tail[0];
         if (head.v0 - st.v).abs() > 1e-5 * (1.0 + st.v) {
-            self.opaque(st);
-            return;
+            return None;
         }
-        let mut t = st.t;
-        for p in tail {
-            self.phases.push(StraightPhase { t0: t, ..p });
-            t += p.dt;
+        self.close(st);
+        let mut end = st;
+        for p in &tail {
+            if p.s0 >= s_hi - POS_EPS_MM {
+                break;
+            }
+            let p_state = State {
+                t: 0.0,
+                s: p.s0,
+                v: p.v0,
+                a: p.a0,
+            };
+            let dt = if phase_end_s(p) <= s_hi + POS_EPS_MM {
+                p.dt
+            } else {
+                match time_to_cross(p_state, p.j, s_hi - p.s0) {
+                    Some(tau) => tau,
+                    None => break,
+                }
+            };
+            if dt <= 0.0 {
+                break;
+            }
+            self.phases.push(StraightPhase {
+                t0: end.t,
+                dt,
+                ..*p
+            });
+            let e = advance(p_state, p.j, dt);
+            end = State {
+                t: end.t + dt,
+                s: e.s,
+                v: e.v,
+                a: e.a,
+            };
         }
-        self.active = false;
+        end.s = s_hi;
+        Some(end)
     }
 }
 
@@ -445,6 +492,30 @@ fn clip_chain_from(chain: &[StraightPhase], s_from: f64) -> Option<Vec<StraightP
 
 fn phase_end_s(p: &StraightPhase) -> f64 {
     p.s0 + p.v0 * p.dt + 0.5 * p.a0 * p.dt * p.dt + p.j * p.dt * p.dt * p.dt / 6.0
+}
+
+/// Whether every joint in the chain is state-continuous — each phase's end
+/// state is the next phase's start state. A chain with a kicked joint (a
+/// landing snap, a rail clamp, a splice contact) still serves as sampling
+/// truth, but must not lower to exact cubics: the kick would dispatch as a
+/// genuine trajectory discontinuity.
+pub(super) fn chain_is_c1(chain: &[StraightPhase]) -> bool {
+    chain.windows(2).all(|w| {
+        let (p, q) = (&w[0], &w[1]);
+        let e = advance(
+            State {
+                t: 0.0,
+                s: p.s0,
+                v: p.v0,
+                a: p.a0,
+            },
+            p.j,
+            p.dt,
+        );
+        (e.s - q.s0).abs() <= 1e-9 * (1.0 + q.s0.abs())
+            && (e.v - q.v0).abs() <= 1e-8 * (1.0 + q.v0)
+            && (e.a - q.a0).abs() <= 1e-4 * (1.0 + q.a0.abs())
+    })
 }
 
 /// The chain's phases clipped to `[s_lo, s_hi]`, rebased to span-local time
@@ -493,8 +564,8 @@ pub(super) fn clip_phases(chain: &[StraightPhase], s_lo: f64, s_hi: f64) -> Vec<
     out
 }
 
-/// Exact `(v, a)` at each grid arc-length from the phase chain, so an
-/// analytic run's samples come from the same closed-form phases the lowering
+/// Exact `(v, a)` at each grid arc-length from the phase chain, so a
+/// completed run's samples come from the same closed-form phases the lowering
 /// executes — never from ride chords, whose half-cell smear the sampled
 /// profile would otherwise carry.
 pub(super) fn chain_states(chain: &[StraightPhase], s: &[f64]) -> Vec<(f64, f64)> {
@@ -568,20 +639,19 @@ pub(super) fn reverse_chain(rev: &[StraightPhase], total_len: f64) -> Vec<Straig
 }
 
 /// Integrate the fastest feasible profile under the track's cap from
-/// `(start_v, start_a)`. `log_phases` enables the analytic phase log (callers
-/// pass it for all-straight runs); `brake` supplies the backward envelope's
-/// chain for splicing at contact.
+/// `(start_v, start_a)`, logging the constant-jerk phase chain as it goes;
+/// `brake` supplies the backward envelope's chain for splicing at contact.
 pub(super) fn reach_pass(
     track: &Track,
     start_v: f64,
     start_a: f64,
-    log_phases: bool,
     brake: Option<&BrakeChain>,
 ) -> Pass {
     let g = Grid::new(track);
     let n = g.n();
     let mut v_out = vec![0.0_f64; n];
     let mut a_out = vec![0.0_f64; n];
+    let mut feasible = vec![true; n];
 
     let mut st = State {
         t: 0.0,
@@ -594,14 +664,35 @@ pub(super) fn reach_pass(
     v_out[0] = st.v;
     a_out[0] = st.a;
 
-    let mut log = PhaseLog::new(log_phases);
+    let mut log = PhaseLog::new();
     let mut mode = initial_mode(&g, st);
-    let mut spliced = false;
+
+    let fast_forward = |st: &mut State,
+                        mode: &mut Mode,
+                        i: usize,
+                        k: usize,
+                        end: State,
+                        v_out: &mut [f64],
+                        a_out: &mut [f64]| {
+        for m in i..=k {
+            let v = track.cap_v[m];
+            let rail = g.rail_at(track.s[m], v);
+            v_out[m] = v;
+            a_out[m] = track.cap_a[m - 1].clamp(-rail, rail);
+        }
+        *st = end;
+        *mode = initial_mode(&g, *st);
+    };
+
+    let mut i = 1;
     if mode == Mode::Ride {
-        try_splice(st, brake, &mut log, &mut spliced, 1);
+        if let Some((k, end)) = try_splice(st, brake, &g, &mut log, i) {
+            fast_forward(&mut st, &mut mode, i, k, end, &mut v_out, &mut a_out);
+            i = k + 1;
+        }
     }
 
-    for i in 1..n {
+    'nodes: while i < n {
         let mut guard = 0;
         while st.s < track.s[i] - POS_EPS_MM {
             guard += 1;
@@ -616,9 +707,7 @@ pub(super) fn reach_pass(
             let was = mode;
             match mode {
                 Mode::Ride => {
-                    if spliced {
-                        ride_copy(track, &mut st, i);
-                    } else if !ride_step(&g, &mut st, &mut log, &mut mode, i) {
+                    if !ride_step(&g, &mut st, &mut log, &mut mode, i, &mut feasible) {
                         continue;
                     }
                 }
@@ -626,7 +715,11 @@ pub(super) fn reach_pass(
                 Mode::Peel => peel_step(&g, &mut st, &mut log, &mut mode, i),
             }
             if mode == Mode::Ride && was != Mode::Ride {
-                try_splice(st, brake, &mut log, &mut spliced, i);
+                if let Some((k, end)) = try_splice(st, brake, &g, &mut log, i) {
+                    fast_forward(&mut st, &mut mode, i, k, end, &mut v_out, &mut a_out);
+                    i = k + 1;
+                    continue 'nodes;
+                }
             }
         }
         st.s = track.s[i];
@@ -637,13 +730,15 @@ pub(super) fn reach_pass(
         }
         v_out[i] = st.v;
         a_out[i] = st.a.clamp(-rail, rail);
+        i += 1;
     }
     log.close(st);
 
     Pass {
         v: v_out,
         a: a_out,
-        analytic: log.analytic,
+        feasible,
+        complete: log.complete,
         phases: log.phases,
     }
 }
@@ -659,41 +754,46 @@ fn initial_mode(g: &Grid, st: State) -> Mode {
     }
 }
 
+/// Splice the brake chain over the contiguous binding stretch starting at the
+/// contact: the envelope *is* the profile there, and the backward pass already
+/// integrated it exactly, so adopting its phases replaces the cell-quantized
+/// ride (whose per-cell landings would kick the chain off C1). Returns the
+/// stretch's last node and the resume state there; `None` when the contact
+/// node is not binding, the stretch does not reach the target node, or the
+/// chain misses the pass's state at the joint.
 fn try_splice(
     st: State,
     brake: Option<&BrakeChain>,
+    g: &Grid,
     log: &mut PhaseLog,
-    spliced: &mut bool,
     i: usize,
-) {
-    if !log.active {
-        return;
+) -> Option<(usize, State)> {
+    let brake = brake?;
+    if brake.phases.is_empty() || !brake.binding[i - 1] {
+        return None;
     }
-    let Some(brake) = brake else {
-        return;
-    };
-    let from = i.saturating_sub(1);
-    if brake.binding[from..].iter().all(|&b| b) {
-        log.splice(st, brake.phases);
-        *spliced = true;
+    let n = g.n();
+    let mut k = i - 1;
+    while k + 1 < n && brake.binding[k + 1] {
+        k += 1;
     }
-}
-
-/// After a splice the samples simply copy the cap (the brake envelope binds
-/// through to the end and the emitted profile *is* the chain).
-fn ride_copy(track: &Track, st: &mut State, i: usize) {
-    let ds = track.s[i] - st.s;
-    let v1 = track.cap_v[i];
-    let dt = 2.0 * ds / (st.v + v1).max(1e-9);
-    st.t += dt;
-    st.s = track.s[i];
-    st.v = v1;
-    st.a = track.cap_a[i - 1];
+    if k < i {
+        return None;
+    }
+    let end = log.splice(st, brake.phases, g.t.s[k])?;
+    Some((k, end))
 }
 
 /// One cell of riding the cap. Returns `false` when the ride cannot continue
 /// (mode changed); the caller re-dispatches.
-fn ride_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: usize) -> bool {
+fn ride_step(
+    g: &Grid,
+    st: &mut State,
+    log: &mut PhaseLog,
+    mode: &mut Mode,
+    i: usize,
+    feasible: &mut [bool],
+) -> bool {
     let track = g.t;
     let cell = i - 1;
     let ds = track.s[i] - st.s;
@@ -715,6 +815,9 @@ fn ride_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
         *mode = Mode::Flight;
         return false;
     }
+    if track.cap_a[cell] < -(rail + rel_eps(rail)) {
+        feasible[i] = false;
+    }
     // Kink lookahead: leaving from the next node must still be feasible.
     if !peel_feasible(g, next_state) {
         // Departure point within this cell: latest cap state that can still
@@ -733,14 +836,16 @@ fn ride_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
         log.set_jerk(*st, -track.j_max);
         return false;
     }
-    let flat = track.cap_a[cell] == 0.0 && (v1 - st.v).abs() <= rel_eps(st.v);
-    let straight_ride = !g.curved_near(st.s) && flat;
-    if straight_ride {
-        log.set_jerk(*st, 0.0);
-    } else if log.active {
-        // A curved or sloped cap ride is not a constant-jerk cubic.
-        log.opaque(*st);
-    }
+    // Riding the cell's cap chord is constant-accel motion (v² linear in s),
+    // so the ride logs as a j = 0 phase at the chord's slope — the state's own
+    // `a` may carry the rail clamp, which the phase must not.
+    log.set_jerk(
+        State {
+            a: track.cap_a[cell],
+            ..*st
+        },
+        0.0,
+    );
     *st = next_state;
     true
 }
@@ -788,9 +893,6 @@ fn effective_jerk(g: &Grid, st: State, dt: f64) -> f64 {
 fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: usize) {
     let track = g.t;
     let curved = g.curved_near(st.s);
-    if curved && log.active {
-        log.opaque(*st);
-    }
     let rem = track.s[i] - st.s;
     let rail = g.rail_at(st.s, st.v);
     let dt_budget = if curved {
@@ -822,9 +924,7 @@ fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i:
         next.a = next.a.clamp(-r, r);
     }
     if peel_feasible(g, next) {
-        if !curved {
-            log.set_jerk(*st, j_cmd);
-        }
+        log.set_jerk(*st, j_cmd);
         // Landed on the cap from below (tangential arrival)?
         if next.v >= g.cap_at(next.s) - rel_eps(next.v) {
             next.v = g.cap_at(next.s);
@@ -845,7 +945,7 @@ fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i:
             hi = mid;
         }
     }
-    if lo > 0.0 && !curved {
+    if lo > 0.0 {
         log.set_jerk(*st, j_cmd);
     }
     *st = advance(*st, j_cmd, lo);
@@ -858,9 +958,6 @@ fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i:
 fn peel_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: usize) {
     let track = g.t;
     let curved = g.curved_near(st.s);
-    if curved && log.active {
-        log.opaque(*st);
-    }
     let dt_budget = if curved {
         substep_budget(g, *st, track.j_max)
     } else {
@@ -872,9 +969,7 @@ fn peel_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
         track.j_max
     };
     let j_cmd = -j_dn;
-    if !curved {
-        log.set_jerk(*st, j_cmd);
-    }
+    log.set_jerk(*st, j_cmd);
     let rail = g.rail_at(st.s, st.v);
     let slope = g.slope_at(st.s).max(-rail);
     let rem = track.s[i] - st.s;
@@ -905,6 +1000,28 @@ fn peel_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
                 }
             }
             touch = 0.5 * (lo + hi);
+        }
+        // Land at the moment the arc's acceleration meets the landing slope,
+        // not at the v-crossing: contact fires inside the epsilon band, where
+        // the arc still has `sqrt(2·j·eps)` of acceleration to shed (or has
+        // already shed past the slope) — snapping `a` there would kick the
+        // phase chain off C1. At the tangency time the acceleration snap is
+        // zero and the velocity snap is epsilon-sized. The tangency may fall
+        // slightly past the contact step (the slope is re-read at the probe,
+        // not at the step start); the apex-band check is what keeps the
+        // landing on the cap, so tolerate that drift rather than gate on it.
+        {
+            let probe = advance(*st, j_cmd, touch);
+            let rail_probe = g.rail_at(probe.s, probe.v);
+            let slope_probe = g.slope_at(probe.s).clamp(-rail_probe, rail_probe);
+            if st.a > slope_probe {
+                let t_tan = (st.a - slope_probe) / j_dn.max(1e-9);
+                let cand = advance(*st, j_cmd, t_tan);
+                let apex_band = 1e-8 * (1.0 + cand.v);
+                if t_tan <= dt * (1.0 + 1e-3) && cand.v <= g.cap_at(cand.s) + apex_band {
+                    touch = t_tan;
+                }
+            }
         }
         let mut landed = advance(*st, j_cmd, touch);
         landed.v = g.cap_at(landed.s);
