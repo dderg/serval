@@ -175,6 +175,7 @@ class CaptureEngine:
         arc_fit=None,
         max_extrude_only_velocity=None,
         max_extrude_only_accel=None,
+        fit_tolerance_mm=None,
     ):
         self.init_planner_args = {
             "topology": topology,
@@ -183,6 +184,7 @@ class CaptureEngine:
             "arc_fit": arc_fit,
             "max_extrude_only_velocity": max_extrude_only_velocity,
             "max_extrude_only_accel": max_extrude_only_accel,
+            "fit_tolerance_mm": fit_tolerance_mm,
         }
 
 
@@ -197,6 +199,7 @@ def test_init_planner_passes_claimed_axes():
     motion.max_z_accel = 100.0
     motion._square_corner_velocity = 8.0
     motion.arc_fit = None
+    motion.max_path_deviation = 0.02
     motion._planner_ready = False
     engine = CaptureEngine()
     motion.engine = engine

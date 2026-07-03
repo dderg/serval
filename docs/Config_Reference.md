@@ -241,6 +241,17 @@ max_accel:
 #   decelerate to zero at each corner. The value specified here may be
 #   changed at runtime using the SET_VELOCITY_LIMIT command. The
 #   default is 5mm/s.
+#max_path_deviation: 0.005
+#   Maximum distance (in mm) the executed motion may deviate from the
+#   commanded path. The planner represents each move as a series of
+#   polynomial pieces and subdivides a move until every piece tracks the
+#   path to within this value, so a smaller value yields more pieces
+#   (tighter path following) and a larger value yields fewer pieces.
+#   Loosening it reduces the per-move piece count, which lowers MCU
+#   piece-ring pressure and host-to-MCU serial bandwidth on
+#   memory-constrained boards at the cost of slightly coarser path
+#   following. This is unrelated to [arc_fit], which reconstructs arcs
+#   from faceted segments. The default is 0.005 (5 microns).
 #max_accel_to_decel:
 #   This parameter is deprecated and should no longer be used.
 ```
