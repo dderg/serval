@@ -36,6 +36,7 @@
   #define GPIO_AF_MODE 7
   #define USARTx USART2
   #define USARTx_IRQn USART2_IRQn
+  #define USARTx_RX_DMA_USART2 1
 #elif CONFIG_STM32_SERIAL_USART2_ALT_PD6_PD5
   DECL_CONSTANT_STR("RESERVE_PINS_serial", "PD6,PD5");
   #define GPIO_Rx GPIO('D', 6)
@@ -43,6 +44,7 @@
   #define GPIO_AF_MODE 7
   #define USARTx USART2
   #define USARTx_IRQn USART2_IRQn
+  #define USARTx_RX_DMA_USART2 1
 #elif CONFIG_STM32_SERIAL_USART3
   DECL_CONSTANT_STR("RESERVE_PINS_serial", "PB11,PB10");
   #define GPIO_Rx GPIO('B', 11)
@@ -77,19 +79,31 @@
 // whenever an equal-priority motion ISR is running (no time to read DR before
 // the next byte overruns it) -> corrupt frames -> retransmit stalls. DMA
 // captures every byte into a RAM ring with no per-byte interrupt, so the motion
-// ISRs and serial RX no longer compete. Scoped to F401/USART1 (the only
-// validated bench); every other config keeps the byte-interrupt path below.
-// USART1_RX is DMA2 Stream 2 Channel 4 on the STM32F4 request map.
+// ISRs and serial RX no longer compete. Scoped to the F401 USARTs validated on
+// a bench (USART1, and USART2 — the ZNP Robin Nano's CH340/UART port); every
+// other config keeps the byte-interrupt path below. On the STM32F4 request map
+// USART1_RX is DMA2 Stream 2 Channel 4 (flags in LISR/LIFCR) and USART2_RX is
+// DMA1 Stream 5 Channel 4 (flags in HISR/HIFCR — hence the IFCR indirection).
 #if USARTx_RX_DMA_USART1 && CONFIG_MACH_STM32F401
   #define SERIAL_RX_DMA          1
-  #define SERIAL_RX_DMA_CTRL     DMA2
   #define SERIAL_RX_DMA_STREAM   DMA2_Stream2
   #define SERIAL_RX_DMA_IRQn     DMA2_Stream2_IRQn
   #define SERIAL_RX_DMA_CHANNEL  4u
   #define SERIAL_RX_DMA_RCC_EN   RCC_AHB1ENR_DMA2EN
+  #define SERIAL_RX_DMA_IFCR     (DMA2->LIFCR)
   #define SERIAL_RX_DMA_CLEAR    (DMA_LIFCR_CTCIF2 | DMA_LIFCR_CHTIF2     \
                                   | DMA_LIFCR_CTEIF2 | DMA_LIFCR_CDMEIF2  \
                                   | DMA_LIFCR_CFEIF2)
+#elif USARTx_RX_DMA_USART2 && CONFIG_MACH_STM32F401
+  #define SERIAL_RX_DMA          1
+  #define SERIAL_RX_DMA_STREAM   DMA1_Stream5
+  #define SERIAL_RX_DMA_IRQn     DMA1_Stream5_IRQn
+  #define SERIAL_RX_DMA_CHANNEL  4u
+  #define SERIAL_RX_DMA_RCC_EN   RCC_AHB1ENR_DMA1EN
+  #define SERIAL_RX_DMA_IFCR     (DMA1->HIFCR)
+  #define SERIAL_RX_DMA_CLEAR    (DMA_HIFCR_CTCIF5 | DMA_HIFCR_CHTIF5     \
+                                  | DMA_HIFCR_CTEIF5 | DMA_HIFCR_CDMEIF5  \
+                                  | DMA_HIFCR_CFEIF5)
 #endif
 
 #if SERIAL_RX_DMA
@@ -128,7 +142,7 @@ serial_rx_dma_drain(void)
 void
 serial_rx_dma_irq(void)
 {
-    SERIAL_RX_DMA_CTRL->LIFCR = SERIAL_RX_DMA_CLEAR;
+    SERIAL_RX_DMA_IFCR = SERIAL_RX_DMA_CLEAR;
     serial_rx_dma_drain();
 }
 
@@ -140,7 +154,7 @@ serial_rx_dma_init(void)
     SERIAL_RX_DMA_STREAM->CR = 0;
     while (SERIAL_RX_DMA_STREAM->CR & DMA_SxCR_EN)
         ;
-    SERIAL_RX_DMA_CTRL->LIFCR = SERIAL_RX_DMA_CLEAR;
+    SERIAL_RX_DMA_IFCR = SERIAL_RX_DMA_CLEAR;
     SERIAL_RX_DMA_STREAM->PAR = (uint32_t)&USARTx->DR;
     SERIAL_RX_DMA_STREAM->M0AR = (uint32_t)dma_rx_buf;
     SERIAL_RX_DMA_STREAM->NDTR = SERIAL_RX_DMA_BUF_SIZE;
