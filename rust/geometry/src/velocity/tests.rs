@@ -1088,3 +1088,25 @@ fn boundaries_span_the_window_and_anchor_entry() {
     assert_eq!(p.boundaries[0], entry);
     assert_eq!(p.boundaries.last().copied(), Some(BoundaryState::REST));
 }
+
+#[test]
+fn infinite_jerk_disables_jerk_limiting_and_still_plans_to_rest() {
+    let moves = vec![
+        line_move(5.0, 100.0, 300.0, 3000.0, 1),
+        line_move(5.0, 100.0, 300.0, 3000.0, 2),
+    ];
+    let finite = plan(&outcome(with_jerk(moves.clone(), 30_000.0), Vec::new())).unwrap();
+    let inf = plan(&outcome(with_jerk(moves, f64::INFINITY), Vec::new())).unwrap();
+
+    assert!(
+        inf.moves.iter().all(|m| m.phases.is_empty()),
+        "no jerk phases exist without a jerk limit"
+    );
+    assert!(inf.report.traversal_time_s <= finite.report.traversal_time_s + 1e-9);
+    assert_eq!(inf.boundaries.last().copied(), Some(BoundaryState::REST));
+    let a_rail = 3000.0 * (1.0 + 1e-6);
+    for m in &inf.moves {
+        assert!(m.samples.iter().all(|s| s.a.abs() <= a_rail));
+        assert!(m.samples.iter().all(|s| s.v <= 100.0 * (1.0 + 1e-6)));
+    }
+}

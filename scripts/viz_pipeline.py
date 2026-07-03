@@ -90,11 +90,12 @@ def read_printer_config(cfg_path: Path):
         )
     else:
         extrude_only_velocity = extrude_only_accel = None
+    max_jerk = printer.getfloat("max_jerk", max_accel * 2.0, minval=0.0)
     return (
         printer.getfloat("max_velocity", above=0.0),
         max_accel,
         printer.getfloat("square_corner_velocity", 5.0, minval=0.0),
-        printer.getfloat("max_jerk", max_accel * 2.0, above=0.0),
+        max_jerk if max_jerk > 0.0 else float("inf"),
         arc_fit_from_config(config),
         extrude_only_velocity,
         extrude_only_accel,

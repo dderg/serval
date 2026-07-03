@@ -43,8 +43,8 @@ impl VelocityLimits {
         {
             return Err("square_corner_velocity must be finite and non-negative");
         }
-        if !(self.max_jerk_mm_s3.is_finite() && self.max_jerk_mm_s3 > 0.0) {
-            return Err("max_jerk must be finite and positive");
+        if !(self.max_jerk_mm_s3 > 0.0) {
+            return Err("max_jerk must be positive (infinity disables jerk limiting)");
         }
         Ok(())
     }

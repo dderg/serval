@@ -816,9 +816,10 @@ class Motion:
         self._square_corner_velocity = config.getfloat(
             "square_corner_velocity", 5.0, minval=0.0
         )
-        self.max_jerk = config.getfloat(
-            "max_jerk", self._max_accel * 2.0, above=0.0
+        max_jerk = config.getfloat(
+            "max_jerk", self._max_accel * 2.0, minval=0.0
         )
+        self.max_jerk = max_jerk if max_jerk > 0.0 else float("inf")
         self.max_z_velocity = config.getfloat(
             "max_z_velocity",
             self._max_velocity,
