@@ -194,11 +194,12 @@ impl Reactor {
             "klipper"
         };
         let bytes = frame.len();
-        let result: Result<(), TransportError> = (|| {
-            self.io.write_all(frame)?;
-            self.io.flush()?;
-            Ok(())
-        })();
+        // No drain here: waiting for the wire makes this single thread deaf to
+        // responses for the frame's whole line time (~20 ms/KiB at 500 kbaud),
+        // which times out unrelated transactions during heavy piece traffic.
+        // The kernel tty buffer queues the bytes; the pump's ring-room and
+        // arrival-lead pacing bound how far writes can run ahead of the wire.
+        let result = self.io.write_all(frame);
         if result.is_ok() {
             self.last_write_time = std::time::Instant::now();
         }
