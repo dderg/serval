@@ -1,8 +1,6 @@
-We are working on a complete rewrite of the motion planner and more:
-
 # Non-negotiable constraints
 
-- **Print throughput is non-negotiable.** The planner never knowingly chooses a cheaper algorithmic architecture that produces a measurably slower trajectory than the best one we can compute on the active hardware. "Best we can compute" is realistic — finite discretization N, local-optimum convergence (SLP for the non-convex jerk relaxation; the Consolini-Locatelli SOCP itself is convex but not a closed-form), tolerance settings tuned to the hardware budget. Within those engineering realities, the planner aims for the tightest trajectory it can; we do not give up trajectory time to make planning easier. Host compute is something we spend in service of trajectory optimality — not the other way around. If the Pi can't keep up, the answer is to optimize the implementation, parallelize across cores, or upgrade the host; the answer is never to ship a cheaper algorithm that produces a measurably slower trajectory on representative slicer output. State-of-the-art is the target, not safe-and-good-enough.
+- The goal of this repository is to expand the boundaries of ultra fast printing at good quality.
 
 - Fail loudly. When adding checks for unexpected things to the code, instead of trying
   to recover, unless it was discussed and agreed on explicitly, the default solution is
